@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { claimsAction, claimsReminder, claimText, CLAIM_MAX_CHARS } from "../servers/gateway/voice/action-claims.js";
+import { claimsAction, claimsReminder, claimText, changesSomething, CLAIM_MAX_CHARS } from "../servers/gateway/voice/action-claims.js";
 
 test("claimsAction: a reply that says an action was done, promised or offered is a claim (en + es)", () => {
   const claims = [
@@ -93,6 +93,22 @@ test("claimsAction: adversarial model output stays fast (patterns run on capped 
 });
 
 test("claimsAction: known trade-offs, pinned (only ever read on an action turn no tool backed)", () => {
-  assert.equal(claimsAction("I'll make it simple: Paris."), true, "make is a claim verb");
   assert.equal(claimsAction("You're all set."), true);
+  assert.equal(claimsAction("Got it."), true, "an acknowledgement on an unbacked action turn is read as a claim");
+});
+
+test("claimsAction (code review I6/I7): openers before a bare claim are claims; ordinary sentences are not", () => {
+  for (const s of ["Okay, added!", "Sure, done.", "Okay, got it.", "It's in your calendar.", "Your car appointment is in the calendar for Monday.",
+    "Ok, listo.", "Vale, apuntado.", "Moved it to 9.", "Sure, should I add it?", "Your car appointment is scheduled for Monday at 8:15 AM.", "Lisbon. And I've added it."]) assert.equal(claimsAction(s), true, s);
+  for (const s of ["The final is scheduled for July 19.", "What should I add?", "Sorry, I made a mistake.", "Let me put it this way.", "The game is set for 8pm.",
+    "I'd love to make you laugh.", "I'll make it simple: Paris."]) assert.equal(claimsAction(s), false, s);
+});
+
+test("claimsAction: a claim at the END of a very long reply is still read", () => {
+  assert.equal(claimsAction(`${"Lisbon is lovely. ".repeat(400)}I've added it to your calendar.`), true);
+});
+
+test("changesSomething: only a tool that changes something backs an action turn", () => {
+  for (const n of ["ws_cal_create_event", "gcal_create_event", "gmail_send_to_self", "crow_store_memory", "phone_plan_call", "ws_cal_delete_event"]) assert.equal(changesSomething(n), true, n);
+  for (const n of ["ws_cal_list_events", "gcal_get_event", "crow_search_memories", "tasks_list", "crow_discover", "gmail_search_threads", "", null]) assert.equal(changesSomething(n), false, String(n));
 });

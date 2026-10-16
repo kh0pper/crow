@@ -10,7 +10,7 @@ import { createClient } from "@libsql/client";
 import * as store from "../servers/shared/device-store.js";
 import { createKioskRuntime, KIOSK_DENY_TOOLS, KIOSK_MAX_TOOL_ROUNDS, KIOSK_FIRST_AUDIO_BUDGET_MS, kioskFallbackText, kioskTooLargeText, kioskDisplayMissedText, pairRequester, createSttWarmup, timerDoneSpeech } from "../bundles/kiosk/server/runtime.js";
 import { wantsMemory } from "../bundles/kiosk/server/memory-intent.js";
-import { wantsAction } from "../bundles/kiosk/server/action-intent.js";
+import { wantsAction, wantsActionFollowUp } from "../bundles/kiosk/server/action-intent.js";
 import { displayPromptSuffix } from "../bundles/kiosk/server/prompt.js";
 import { effectiveCaps } from "../bundles/kiosk/server/caps.js";
 import { TURN_CHECK, TURN_CHECK_DEVICE, TURN_CHECK_CARD_TRIES } from "../bundles/kiosk/server/runtime.js";
@@ -806,6 +806,9 @@ test("display truth (wired): every kiosk turn carries the must-run display tool,
   assert.equal(call.cantDoText, STRINGS.es.cant_do_say, "the could-not-do line is in the display's language");
   assert.equal(call.notDoneText, STRINGS.es.not_done_say);
   assert.equal(call.notReadyText, STRINGS.es.not_ready_say);
+  assert.equal(call.memoOnlyText, STRINGS.es.memo_only_say);
+  assert.equal(call.unsureText, STRINGS.es.unsure_say);
+  assert.equal(call.actionFollowWhen, wantsActionFollowUp);
   const wmTool = call.extraTools.find((x) => x.definition.name === "crow_show");
   assert.equal(wmTool.must("Show me a list of three fruits."), true);
   assert.equal(wmTool.must("Tell me a joke"), false);

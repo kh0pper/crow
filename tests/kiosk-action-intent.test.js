@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { wantsAction } from "../bundles/kiosk/server/action-intent.js";
+import { wantsAction, wantsActionFollowUp } from "../bundles/kiosk/server/action-intent.js";
 import { LATENCY_QUESTIONS } from "../bundles/kiosk/server/questions.js";
 
 test("wantsAction: a request to add, schedule, remind, send or delete is an action request (en + es)", () => {
@@ -32,6 +32,9 @@ test("wantsAction: a request to add, schedule, remind, send or delete is an acti
     "Borra la cita del lunes",
     "Pon una alarma a las seis",
     "¿Qué tengo en el calendario?",
+    "Agéndame una cita con el dentista el martes",
+    "Ok, schedule a call with the plumber",
+    "Text my sister that I'm late",
   ];
   for (const s of yes) assert.equal(wantsAction(s), true, s);
 });
@@ -57,6 +60,19 @@ test("wantsAction: plain questions, media and display requests are not action re
     "Add two minutes",
     "¿A qué hora es el programa?",
     "Dame una cita de Einstein",
+    // Code review I5.
+    "Remind me, what's the capital of Peru?",
+    "Can you remind me what a gerund is?",
+    "What is the Mayan calendar?",
+    "When was the Gregorian calendar adopted?",
+    "What's on the agenda for the G20?",
+    "La agenda política del gobierno",
+    "Recommend a book a teenager would like",
+    "What's a typical schedule a toddler follows?",
+    "Write a text about dolphins",
+    "What's the message the movie sends?",
+    "Do you remember to breathe when you sleep?",
+    "Hey, how do I set a reminder on my phone?",
     "¿Cuál es la capital de Portugal?",
     "Pon algo de jazz",
     "¿Qué hora es?",
@@ -68,4 +84,9 @@ test("wantsAction: plain questions, media and display requests are not action re
 
 test("wantsAction: none of the scripted latency questions is an action request (the fast path stays fast)", () => {
   for (const q of LATENCY_QUESTIONS) assert.equal(wantsAction(q), false, q);
+});
+
+test("wantsActionFollowUp: a change to the last request is a follow-up; a new question is not", () => {
+  for (const s of ["Move it to 9 instead", "Make it 10", "Also Tuesday", "Actually, cancel that", "Cámbiala a las nueve", "Mejor el martes"]) assert.equal(wantsActionFollowUp(s), true, s);
+  for (const s of ["When is the World Cup final?", "Thanks!", "What is the capital of Portugal?", "Gracias", ""]) assert.equal(wantsActionFollowUp(s), false, s);
 });

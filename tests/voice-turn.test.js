@@ -1911,11 +1911,15 @@ test("r7c (review re-check, L1 residuals): a pretty-printed JSON call split righ
 });
 
 // ── Queue item 29: an action request must never end on a claim no tool backs ───────────────────
-import { wantsAction } from "../bundles/kiosk/server/action-intent.js";
+import { wantsAction, wantsActionFollowUp } from "../bundles/kiosk/server/action-intent.js";
 const CANT = "Sorry, I can't do that from here: this assistant has no tool for it.";
 const NOT_DONE = "Sorry, I couldn't do that from here, so nothing was changed.";
 const INCIDENT = "Add a car appointment for 815am Monday to my calendar";
-const actTurn = (h, transcript, extra = {}) => famTurn(h, transcript, { actionWhen: wantsAction, cantDoText: CANT, notDoneText: NOT_DONE, ...extra });
+const actTurn = (h, transcript, extra = {}) => famTurn(h, transcript, { actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp, cantDoText: CANT, notDoneText: NOT_DONE, ...extra });
+// The real effectiveToolName: a crow_tools call is named by its action (the add-on tool it runs).
+const wrapperNames = (h) => { const base = h.deps.effectiveToolName; h.deps.effectiveToolName = (tc) => (tc.name === "crow_tools" && tc.arguments?.action ? tc.arguments.action : base(tc)); return h; };
+/** A display tool whose words-ask test (holdText) reads the transcript, as the kiosk's do. */
+const askedDisplay = (seen, re) => ({ ...displayTool(seen), when: () => true, holdText: (t) => re.test(t) });
 const routerSees = (h) => { const seen = []; h.deps.chooseVoiceRoute = (msgs, o) => { seen.push(o); return { route: "fast", reason: null, key: "crow-voice/qwen3.5-4b" }; }; return seen; };
 const calCall = [{ type: "tool_call", id: "c", name: "crow_tools", arguments: { action: "ws_cal_create_event", params: {} } }, { type: "done" }];
 
@@ -1978,8 +1982,13 @@ test("item 29: an action request whose tools were withheld from the quick model 
   const d = harness({ chatTools: ["crow_tools"], rounds: [says("Done. ")] });
   d.deps.toolFamilies = FAM();
   const seenD = routerSees(d);
-  await actTurn(d, "Add milk to my shopping list", { extraTools: [{ ...displayTool(), when: () => true }] });
-  assert.equal(seenD[0].actionIntent, false, "a display tool is on offer: it stays on the quick model");
+  await actTurn(d, "Add milk to my shopping list", { extraTools: [askedDisplay([], /shopping list/)] });
+  assert.equal(seenD[0].actionIntent, false, "the words ask for the display: it stays on the quick model");
+  const w = harness({ chatTools: ["crow_tools"], rounds: [says("Done. ")] });
+  w.deps.toolFamilies = FAM();
+  const seenW = routerSees(w);
+  await actTurn(w, INCIDENT, { extraTools: [askedDisplay([], /shopping list/)] });
+  assert.equal(seenW[0].actionIntent, true, "a display tool offered only because a window is open does not stop the escalation (code review I1)");
   const q = harness({ chatTools: ["crow_blog"], rounds: [says("Lisbon. ")] });
   q.deps.toolFamilies = FAM();
   const seenQ = routerSees(q);
@@ -1988,7 +1997,7 @@ test("item 29: an action request whose tools were withheld from the quick model 
 });
 
 test("item 29: an escalated action turn whose tool succeeds is heard as said", async () => {
-  const h = harness({ chatTools: ["crow_tools"], route: "escalate", probe: () => true, rounds: [calCall, says("I've added it to your calendar. ")] });
+  const h = wrapperNames(harness({ chatTools: ["crow_tools"], route: "escalate", probe: () => true, rounds: [calCall, says("I've added it to your calendar. ")] }));
   h.deps.toolFamilies = FAM();
   const r = await actTurn(h, INCIDENT);
   assert.equal(r.escalated, true);
@@ -1998,7 +2007,7 @@ test("item 29: an escalated action turn whose tool succeeds is heard as said", a
 });
 
 test("item 29: an escalated action turn whose tool fails (or is never called) cannot claim it was done", async () => {
-  const h = harness({ chatTools: ["crow_tools"], route: "escalate", probe: () => true, rounds: [calCall, says("All set, I've added it. ")] });
+  const h = wrapperNames(harness({ chatTools: ["crow_tools"], route: "escalate", probe: () => true, rounds: [calCall, says("All set, I've added it. ")] }));
   h.deps.toolFamilies = FAM();
   h.deps.createToolExecutor = () => ({ executeToolCalls: async (tcs) => tcs.map((t) => ({ id: t.id, name: t.name, result: "bad params", isError: true })), close: async () => {} });
   const r = await actTurn(h, INCIDENT);
@@ -2026,30 +2035,98 @@ test("item 29: an action-intent escalation that cannot get the larger model says
 });
 
 test("item 29: memory on + 'remind me' — a saved memory is not a reminder; 'I'll remind you' is replaced, 'I've saved that' is not", async () => {
-  const memCall = [{ type: "tool_call", id: "m", name: "crow_memory", arguments: { action: "search_memories", params: {} } }, { type: "done" }];
+  const memCall = [{ type: "tool_call", id: "m", name: "crow_memory", arguments: { action: "store_memory", params: {} } }, { type: "done" }];
   const mk = (reply) => {
     const h = harness({ chatTools: ["crow_memory"], rounds: [memCall, says(reply)] });
     h.deps.toolFamilies = FAM();
+    h.deps.isMemoryTool = (n) => n === "crow_memory" || n === "crow_store_memory" || n === "crow_search_memories";
     h.device.kiosk_settings.memory_integration = true;
     return h;
   };
   const a = mk("Saved. I'll remind you at 5. ");
   const ra = await actTurn(a, "Remember to call mom at 5", { memoryWhen: () => true });
   assert.deepEqual(a.calls.executed, ["crow_memory"]);
-  assert.deepEqual(a.calls.spoken, [NOT_DONE]);
+  assert.deepEqual(a.calls.spoken, ["I saved a note, but I can't set reminders from here."]);
   assert.equal(ra.timings.claim_blocked, true);
   const b = mk("I've saved that. ");
   await actTurn(b, "Remember to call mom at 5", { memoryWhen: () => true });
   assert.deepEqual(b.calls.spoken, ["I've saved that."]);
+  const c = mk("I've saved it and added it to your calendar. ");
+  await actTurn(c, "Remember to call mom at 5", { memoryWhen: () => true });
+  assert.deepEqual(c.calls.spoken, [NOT_DONE], "a claim beyond the save is still replaced");
 });
 
 test("item 29: a display call that did something backs the turn ('add two minutes' on an open timer)", async () => {
   const seen = [];
   const h = harness({ chatTools: [], rounds: [[{ type: "tool_call", id: "w", name: "crow_wm", arguments: { command: "timer add 2" } }, { type: "done" }], says("Added two minutes. ")] });
   h.deps.toolFamilies = FAM();
-  await actTurn(h, "Add two minutes to my reminder", { extraTools: [{ ...displayTool(seen), when: () => true }] });
+  await actTurn(h, "Add two minutes to my reminder", { extraTools: [askedDisplay(seen, /two minutes/)] });
   assert.equal(seen.length, 1);
   assert.deepEqual(h.calls.spoken, ["Added two minutes."]);
+});
+
+test("item 29 (code review I1): a display tool offered only because a window is open neither skips the no-tool line nor backs a calendar claim", async () => {
+  const h = harness({ chatTools: [], rounds: [[{ type: "tool_call", id: "w", name: "crow_wm", arguments: { command: "x" } }, { type: "done" }], says("I've added your car appointment to your calendar and I'll remind you. ")] });
+  h.deps.toolFamilies = FAM();
+  const r = await actTurn(h, INCIDENT, { extraTools: [askedDisplay([], /shopping list/)] });
+  assert.equal(h.log.length, 0, "no model call: the open window's tool is not a tool for this request");
+  assert.deepEqual(h.calls.spoken, [CANT]);
+  assert.equal(r.timings.action_no_tool, true);
+  const m = harness({ chatTools: ["crow_tools"], route: "escalate", probe: () => true, rounds: [[{ type: "tool_call", id: "w", name: "crow_wm", arguments: { command: "x" } }, { type: "done" }], says("I've added it to your calendar. ")] });
+  m.deps.toolFamilies = FAM();
+  await actTurn(m, INCIDENT, { extraTools: [askedDisplay([], /shopping list/)] });
+  assert.deepEqual(m.calls.spoken.slice(1), [NOT_DONE], "the display call's effect does not back a calendar claim");
+});
+
+test("item 29 (code review I2): a READ that returns ok does not back a create claim (and its text cannot switch the check off)", async () => {
+  const listCall = [{ type: "tool_call", id: "l", name: "crow_tools", arguments: { action: "ws_cal_list_events", params: {} } }, { type: "done" }];
+  const h = wrapperNames(harness({ chatTools: ["crow_tools"], route: "escalate", probe: () => true, rounds: [listCall, says("I've added it to your calendar. ")] }));
+  h.deps.toolFamilies = FAM();
+  const r = await actTurn(h, INCIDENT);
+  assert.deepEqual(h.calls.executed, ["crow_tools"]);
+  assert.deepEqual(h.calls.spoken.slice(1), [NOT_DONE]);
+  assert.equal(r.timings.claim_blocked, true);
+});
+
+test("item 29 (code review I3): a cut turn on an action turn ends on ONE line, and that line is what is saved", async () => {
+  const listCall = [{ type: "tool_call", id: "l", name: "crow_tools", arguments: { action: "ws_cal_list_events", params: {} } }, { type: "done" }];
+  const h = wrapperNames(harness({ chatTools: ["crow_tools"], route: "escalate", probe: () => true, rounds: [[{ type: "content_delta", text: "I'll add it. " }, ...listCall], [{ type: "content_delta", text: "Adding now. " }, ...listCall], [{ type: "content_delta", text: "Added! " }, ...listCall], says("Done, it's on your calendar. ")] }));
+  h.deps.toolFamilies = FAM();
+  const r = await actTurn(h, INCIDENT, { maxToolRounds: 2 });
+  assert.deepEqual(h.calls.spoken.slice(1), [NOT_DONE], `one closing line: ${JSON.stringify(h.calls.spoken)}`);
+  assert.equal(r.failed, null);
+  const saved = h.runner.convo.get(h.device.id);
+  assert.equal(saved.at(-1).content, NOT_DONE);
+  assert.ok(saved.every((m) => !/add it|Adding|Added|on your calendar/.test(String(m.content))));
+});
+
+test("item 29 (code review I4): the first-audio budget after a create was sent says it may have gone through, never 'try again'", async () => {
+  const h = wrapperNames(harness({ chatTools: ["crow_tools"], route: "escalate", probe: () => true, rounds: [calCall, says("Added. ")] }));
+  h.deps.toolFamilies = FAM();
+  let fire = null;
+  h.deps.setTimeout = (fn) => { fire = fn; return 1; };
+  h.deps.clearTimeout = () => {};
+  h.deps.createToolExecutor = () => ({ executeToolCalls: () => { setImmediate(() => fire()); return new Promise(() => {}); }, close: async () => {} });
+  const r = await actTurn(h, INCIDENT, { firstAudioBudgetMs: 12000, unsureText: "UNSURE" });
+  assert.equal(r.failed, "budget");
+  assert.equal(h.calls.spoken.at(-1), "UNSURE");
+});
+
+test("item 29 (code review I6): an ordinary question after an action turn is not guarded", async () => {
+  const h = harness({ chatTools: [], rounds: [says("The final is scheduled for July 19. ")] });
+  h.deps.toolFamilies = FAM();
+  await actTurn(h, INCIDENT);
+  const r = await actTurn(h, "When is the World Cup final?");
+  assert.deepEqual(h.calls.spoken.slice(1), ["The final is scheduled for July 19."]);
+  assert.equal(r.timings.action_guard, undefined);
+});
+
+test("item 29 (code review M2): a held preamble that was not heard is not saved", async () => {
+  const h = wrapperNames(harness({ chatTools: ["crow_tools"], route: "escalate", probe: () => true, rounds: [[{ type: "content_delta", text: "Let me add that for you. " }, ...calCall], says("It's on your calendar for Monday. ")] }));
+  h.deps.toolFamilies = FAM();
+  await actTurn(h, INCIDENT);
+  assert.deepEqual(h.calls.spoken.slice(1), ["It's on your calendar for Monday."]);
+  assert.ok(h.runner.convo.get(h.device.id).every((m) => !/Let me add/.test(String(m.content))));
 });
 
 test("item 29: a Spanish display hears its own line", async () => {
