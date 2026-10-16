@@ -3744,10 +3744,12 @@ export default function bundlesRouter() {
       const existing = parseEnvText(oldEnvText);
 
       // env_vars[].previous_key (tax's encryption key): a key change that does not fill the
-      // previous-key slot itself keeps the outgoing key there — when the slot is empty (or
-      // already holds the new key) — so returns saved with it stay readable. The outgoing
-      // key is read where the MCP child runs with it (its entry, the gateway env, this .env).
-      // A slot that holds some other key is left alone, with a warning naming the key only.
+      // previous-key slot itself keeps the outgoing key there, so returns saved with it stay
+      // readable. The outgoing key is the one the MCP child will start with (its entry, the
+      // gateway env, this .env). The slot always takes the key just replaced: the tax
+      // server moves every return to the current key when it starts, so an older key in
+      // the slot only still matters if it did not start since the last change — the
+      // warning (key names only) says so.
       const keyWarnings = [];
       {
         const entryEnv = readJsonSafe(MCP_ADDONS_PATH, {})?.[bundle_id]?.env || {};
@@ -3758,8 +3760,10 @@ export default function bundlesRouter() {
           const old = entryEnv[v.name] || process.env[v.name] || existing[v.name] || "";
           if (!old || old === next) continue;
           const kept = entryEnv[prev] || process.env[prev] || existing[prev] || "";
-          if (!kept || kept === next) env_vars[prev] = old;
-          else keyWarnings.push(`${prev} already holds an older key, so ${v.name}'s previous value was not kept; data saved with it opens only if you enter it in ${prev}.`);
+          env_vars[prev] = old;
+          if (kept && kept !== old && kept !== next) {
+            keyWarnings.push(`${prev} now holds the key you just replaced (it held an older one). Data still on that older key, only if the extension did not restart since the last change, opens only if you enter it in ${prev}.`);
+          }
         }
       }
 

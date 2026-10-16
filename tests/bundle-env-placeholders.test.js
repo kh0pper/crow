@@ -244,7 +244,7 @@ test("tax: at start, returns only the previous key opens are re-encrypted to the
   } finally { db.close?.(); }
 });
 
-test("Configure: a tax key change keeps the outgoing key in _PREVIOUS when that is empty; never overwrites another kept key", async () => {
+test("Configure: a tax key change always keeps the key just replaced in _PREVIOUS (and warns when an older one is dropped)", async () => {
   const express = (await import("express")).default;
   const id = "tax";
   const dir = join(CROW_HOME, "bundles", id);
@@ -259,12 +259,14 @@ test("Configure: a tax key change keeps the outgoing key in _PREVIOUS when that 
     let env = parseEnvText(readFileSync(join(dir, ".env"), "utf8"));
     assert.equal(env.CROW_TAX_ENCRYPTION_KEY, "new-pass-2");
     assert.equal(env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS, "old-pass-1");
+    // (The tax server moved every return to new-pass-2 when it started.) A second change
+    // keeps the key just replaced, so nothing on the current key is ever stranded.
     const r = await post({ CROW_TAX_ENCRYPTION_KEY: "newer-pass-3" });
     assert.equal(r.status, 200);
-    assert.ok((r.body.warnings || []).some((w) => /already holds an older key/.test(w)), "warns, naming keys only");
+    assert.ok((r.body.warnings || []).some((w) => /now holds the key you just replaced/.test(w)), "warns, naming keys only");
     assert.ok(!JSON.stringify(r.body).includes("old-pass-1") && !JSON.stringify(r.body).includes("new-pass-2"));
     env = parseEnvText(readFileSync(join(dir, ".env"), "utf8"));
-    assert.equal(env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS, "old-pass-1", "another kept key is never overwritten");
+    assert.equal(env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS, "new-pass-2", "the key just replaced is kept");
     assert.equal((await post({ CROW_TAX_ENCRYPTION_KEY: "k4", CROW_TAX_ENCRYPTION_KEY_PREVIOUS: "newer-pass-3" })).status, 200, "a typed previous key wins");
     assert.equal(parseEnvText(readFileSync(join(dir, ".env"), "utf8")).CROW_TAX_ENCRYPTION_KEY_PREVIOUS, "newer-pass-3");
   } finally { server.close(); }
