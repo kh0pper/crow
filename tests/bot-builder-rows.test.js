@@ -86,6 +86,7 @@ test("one .btb-row per bot, inside a role=list container, and no table in the li
   assert.equal((list.match(/class="btb-row"/g) || []).length, BOTS.length);
   assert.ok(!list.includes("<table"), "the list is rows, not a table");
   assert.equal((list.match(/role="listitem"/g) || []).length, BOTS.length);
+  assert.ok(html.includes("window.__btbRowMenu"), "the ⋯ menu script ships with the list");
 });
 
 test("the bot id is never visible text — only in title= and hrefs", async () => {
