@@ -1,0 +1,261 @@
+{
+  "anthropic_skills_commit": "dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+  "entries": [
+    {
+      "name": "font:lora",
+      "kind": "font",
+      "package": "@fontsource/lora",
+      "family": "Lora",
+      "fallback": "serif",
+      "weights": [
+        400,
+        700
+      ],
+      "license": "OFL-1.1",
+      "license_from": "LICENSE",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "version": "5.3.0"
+    },
+    {
+      "name": "font:crimson-pro",
+      "kind": "font",
+      "package": "@fontsource/crimson-pro",
+      "family": "Crimson Pro",
+      "fallback": "serif",
+      "weights": [
+        400,
+        700
+      ],
+      "license": "OFL-1.1",
+      "license_from": "LICENSE",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "version": "5.3.0"
+    },
+    {
+      "name": "font:young-serif",
+      "kind": "font",
+      "package": "@fontsource/young-serif",
+      "family": "Young Serif",
+      "fallback": "serif",
+      "weights": [
+        400
+      ],
+      "license": "OFL-1.1",
+      "license_from": "LICENSE",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "version": "5.3.0"
+    },
+    {
+      "name": "font:instrument-serif",
+      "kind": "font",
+      "package": "@fontsource/instrument-serif",
+      "family": "Instrument Serif",
+      "fallback": "serif",
+      "weights": [
+        400
+      ],
+      "license": "OFL-1.1",
+      "license_from": "LICENSE",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "version": "5.3.0"
+    },
+    {
+      "name": "font:work-sans",
+      "kind": "font",
+      "package": "@fontsource/work-sans",
+      "family": "Work Sans",
+      "fallback": "sans-serif",
+      "weights": [
+        400,
+        700
+      ],
+      "license": "OFL-1.1",
+      "license_from": "LICENSE",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "version": "5.3.0"
+    },
+    {
+      "name": "font:outfit",
+      "kind": "font",
+      "package": "@fontsource/outfit",
+      "family": "Outfit",
+      "fallback": "sans-serif",
+      "weights": [
+        400,
+        700
+      ],
+      "license": "OFL-1.1",
+      "license_from": "LICENSE",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "version": "5.3.0"
+    },
+    {
+      "name": "font:instrument-sans",
+      "kind": "font",
+      "package": "@fontsource/instrument-sans",
+      "family": "Instrument Sans",
+      "fallback": "sans-serif",
+      "weights": [
+        400,
+        700
+      ],
+      "license": "OFL-1.1",
+      "license_from": "LICENSE",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "version": "5.3.0"
+    },
+    {
+      "name": "font:bricolage-grotesque",
+      "kind": "font",
+      "package": "@fontsource/bricolage-grotesque",
+      "family": "Bricolage Grotesque",
+      "fallback": "sans-serif",
+      "weights": [
+        400,
+        700
+      ],
+      "license": "OFL-1.1",
+      "license_from": "LICENSE",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "version": "5.3.0"
+    },
+    {
+      "name": "font:jetbrains-mono",
+      "kind": "font",
+      "package": "@fontsource/jetbrains-mono",
+      "family": "JetBrains Mono",
+      "fallback": "monospace",
+      "weights": [
+        400,
+        700
+      ],
+      "license": "OFL-1.1",
+      "license_from": "LICENSE",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "version": "5.3.0"
+    },
+    {
+      "name": "font:ibm-plex-mono",
+      "kind": "font",
+      "package": "@fontsource/ibm-plex-mono",
+      "family": "IBM Plex Mono",
+      "fallback": "monospace",
+      "weights": [
+        400,
+        700
+      ],
+      "license": "OFL-1.1",
+      "license_from": "LICENSE",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "version": "5.3.0"
+    },
+    {
+      "name": "css:open-props",
+      "kind": "css",
+      "package": "open-props",
+      "license": "MIT",
+      "license_from": "LICENSE",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "from": "open-props.min.css",
+          "to": "css/open-props/open-props.min.css"
+        }
+      ],
+      "main": "css/open-props/open-props.min.css",
+      "version": "1.7.23"
+    },
+    {
+      "name": "css:pico",
+      "kind": "css",
+      "package": "@picocss/pico",
+      "license": "MIT",
+      "license_from": "LICENSE.md",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "from": "css/pico.min.css",
+          "to": "css/pico/pico.min.css"
+        }
+      ],
+      "main": "css/pico/pico.min.css",
+      "version": "2.1.1"
+    },
+    {
+      "name": "icons:lucide",
+      "kind": "icon-set",
+      "package": "lucide-static",
+      "icons_dir": "icons",
+      "license": "ISC",
+      "license_from": "LICENSE",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "version": "1.57.0"
+    },
+    {
+      "name": "icons:tabler",
+      "kind": "icon-set",
+      "package": "@tabler/icons",
+      "icons_dir": "icons/outline",
+      "license": "MIT",
+      "license_from": "LICENSE",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "version": "3.49.0"
+    }
+  ]
+}
