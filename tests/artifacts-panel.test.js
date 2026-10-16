@@ -195,6 +195,8 @@ before(async () => {
   app.use(artifactsRouter(dashAuth, {
     db: s.db, blobs: s.blobs, runtime, policy, csrf: csrfMiddleware, renderDeps: { markdownBlocks },
     notify: async () => {}, engine: s.engine, loadBotDef: async () => ({ tools: { crow_mcp: ["artifacts"] } }), createBoardCard: null,
+    // The Design kit's real theme list (house style); no renderer needed.
+    design: { kit: async () => ({ themes: new Map(Object.entries(JSON.parse(readFileSync(join(ROOT, "bundles/design-kit/lib/themes.json"), "utf8")).themes)) }), houseStyleFor: async () => null },
   }));
   app.get("/vendor/turbo-8.0.5.umd.js", (_req, res) => {
     res.setHeader("content-type", "application/javascript");
@@ -705,5 +707,49 @@ test("live S7: on a page and a diagram the Comment toggle sits in the header (no
     await f.run(`(() => { const n = document.querySelector('#x').firstChild; const r = document.createRange(); r.setStart(n, 0); r.setEnd(n, 9); getSelection().removeAllRanges(); getSelection().addRange(r); })()`);
     await sleep(900);
     assert.equal(await t.evalIn(`document.querySelector('.cv-selbar').hidden`), true, "toggle off: no 'Comment on …'");
+  } finally { await t.close(); }
+});
+
+test("live: House style — 'No house style' is the default, a pick lands by the project's uuid and shows its palette; phone and wide widths", async (ctx) => {
+  if (!chrome || !server) return ctx.skip("no headless Chrome");
+  await s.db.executeMultiple(`CREATE TABLE IF NOT EXISTS project_spaces (id INTEGER PRIMARY KEY, uuid TEXT NOT NULL UNIQUE, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, type TEXT NOT NULL DEFAULT 'general', status TEXT NOT NULL DEFAULT 'active', archived_at TEXT);
+    CREATE TABLE IF NOT EXISTS pi_bot_defs (bot_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, definition TEXT, enabled INTEGER NOT NULL DEFAULT 1);
+    INSERT OR IGNORE INTO project_spaces (id, uuid, slug, name) VALUES (41, 'u-hs-garden', 'hs-garden', 'A community garden plan with a deliberately long name to wrap');
+    INSERT OR IGNORE INTO project_spaces (id, uuid, slug, name, status) VALUES (42, 'u-hs-old', 'hs-old', 'Archived thing', 'archived');`);
+  await s.db.execute({ sql: "INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition) VALUES ('hsbot','Hs Bot',?)", args: [JSON.stringify({ tools: { crow_mcp: ["artifacts"] } })] });
+  const t = await tab();
+  const base = `http://${chrome.pageHost}:${port}`;
+  const shots = process.env.CROW_ARTIFACTS_SHOT_DIR || null;
+  const shot = async (name) => { if (!shots) return; const { writeFileSync } = await import("node:fs"); const r = await t.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true }); writeFileSync(join(shots, name), Buffer.from(r.data, "base64")); };
+  const row = `[...document.querySelectorAll('#crow-artifacts .ca-hs-row')].find((li) => li.textContent.includes('community garden'))`;
+  try {
+    await t.send("Emulation.setDeviceMetricsOverride", { width: 412, height: 730, deviceScaleFactor: 2, mobile: true });
+    await t.nav(`${base}/dashboard/artifacts`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('#crow-artifacts .ca-hs-open')`)) === true, 15000), `the button rendered (page errors: ${JSON.stringify(t.errors)})`);
+    assert.equal(await t.evalIn(`document.querySelector('.ca-hs').hidden`), true, "closed until asked");
+    await t.evalIn(`document.querySelector('.ca-hs-open').click()`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!(${row})`)) === true), `the project row rendered (page errors: ${JSON.stringify(t.errors)})`);
+    const names = JSON.parse(await t.evalIn(`JSON.stringify([...document.querySelectorAll('.ca-hs-name')].map((e) => e.textContent))`));
+    assert.ok(!names.includes("Archived thing"), "archived projects are not offered");
+    assert.ok(names.includes("Hs Bot"), "a bot with the Artifacts tools is offered");
+    const sel = `(${row}).querySelector('select')`;
+    assert.equal(await t.evalIn(`${sel}.value`), "", "off by default");
+    assert.equal(await t.evalIn(`${sel}.options[0].textContent`), "No house style");
+    assert.equal(await t.evalIn(`${sel}.getAttribute('aria-label')`), "House style for A community garden plan with a deliberately long name to wrap");
+    await t.evalIn(`(() => { const e = ${sel}; e.value = 'ocean-depths'; e.dispatchEvent(new Event('change')); })()`);
+    const stored = async () => (await s.db.execute({ sql: "SELECT theme FROM design_house_styles WHERE project_uuid='u-hs-garden'", args: [] })).rows[0]?.theme ?? null;
+    assert.ok(await waitFor(async () => (await stored()) === "ocean-depths"), "stored by the project's uuid");
+    assert.ok(await waitFor(async () => (await t.evalIn(`(${row}).querySelectorAll('.ca-hs-sw').length`)) === 4), "the palette shows");
+    const m = JSON.parse(await t.evalIn(`JSON.stringify({ sw: document.documentElement.scrollWidth, iw: innerWidth, sel: ${sel}.getBoundingClientRect().height, btn: document.querySelector('.ca-hs-open').getBoundingClientRect().height })`));
+    assert.ok(m.sw <= m.iw, `no horizontal page scroll at 412px: ${JSON.stringify(m)}`);
+    assert.ok(m.sel >= 44 && m.btn >= 44, `tappable: ${JSON.stringify(m)}`);
+    await shot("house-style-412.png");
+    await t.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    await sleep(200);
+    assert.ok(await t.evalIn(`document.documentElement.scrollWidth <= innerWidth`), "no horizontal scroll at 1280px");
+    await shot("house-style-1280.png");
+    await t.evalIn(`(() => { const e = ${sel}; e.value = ''; e.dispatchEvent(new Event('change')); })()`);
+    assert.ok(await waitFor(async () => (await stored()) === null), "'No house style' clears it");
+    assert.deepEqual(t.errors, []);
   } finally { await t.close(); }
 });

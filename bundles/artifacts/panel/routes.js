@@ -55,7 +55,11 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
         S.createBoardCard = ac.makeArtifactBoardCard({ db: S.db });
       } catch { S.createBoardCard = null; }
     }
-    if (!S.renderDeps) { const r = await appImport("servers/blog/renderer.js"); S.renderDeps = { markdownBlocks: r.markdownBlocks }; }
+    // The Design kit (spec §4): used only when installed on this instance.
+    // Panel-path renders get it too, like the MCP mount's renderDeps.
+    if (S.design === undefined) { const d = await bundleImport("server/design.js"); S.design = d.createDesign({ crowHome: process.env.CROW_HOME || join(homedir(), ".crow"), db: S.db }); }
+    if (!S.renderDeps) { const r = await appImport("servers/blog/renderer.js"); S.renderDeps = { markdownBlocks: r.markdownBlocks, design: S.design }; }
+    if (!S.designShared) S.designShared = await appImport("servers/shared/design-kit.js");
     if (!S.csrf) S.csrf = (await appImport("servers/gateway/dashboard/shared/csrf.js")).csrfMiddleware;
     if (!S.policy) S.policy = await appImport("servers/gateway/artifact-origin/policy.js");
     S.runtime.setContentResolver(store.contentResolver(S.db, S.blobs));
@@ -67,7 +71,7 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     try { await ensure(); await fn(req, res); }
     catch (e) {
       const map = { not_found: 404, forbidden: 403, round_running: 409, quota_full: 507, too_large: 413, bad_request: 400, bad_anchor: 400, too_long: 400, rate_limited: 429, too_many_threads: 429, bad_source: 400, flagged: 409, bad_origin: 403, comment_locked: 409,
-        target_unlinked: 400, target_other_bot: 400, target_no_access: 400, target_not_bots_chat: 400, bot_lacks_artifacts: 400, target_locked: 400, already_decided: 409 };
+        target_unlinked: 400, target_other_bot: 400, target_no_access: 400, target_not_bots_chat: 400, bot_lacks_artifacts: 400, target_locked: 400, already_decided: 409, stale: 409 };
       res.status(map[e.code] || 500).json({ error: e.code || "error", message: e.code ? e.message : "internal error", ...(e.holders ? { holders: e.holders } : {}) });
     }
   };
@@ -244,16 +248,90 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
    * artifact must not keep receiving its cards). Both audited.
    * /api/artifacts/bots is registered before /api/artifacts/:id.
    */
-  async function artifactBots() {
+  async function artifactBots({ withTheme = false } = {}) {
     let rows = [];
     try { rows = (await S.db.execute({ sql: "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE enabled=1 ORDER BY display_name", args: [] })).rows; } catch { rows = []; }
     const out = [];
     for (const r of rows) {
       let def = null; try { def = JSON.parse(r.definition || "{}"); } catch { def = null; }
-      if (M.delivery.botHasArtifactsTools(def)) out.push({ id: String(r.bot_id), name: String(r.display_name || r.bot_id) });
+      if (!M.delivery.botHasArtifactsTools(def)) continue;
+      const bot = { id: String(r.bot_id), name: String(r.display_name || r.bot_id) };
+      if (withTheme) bot.theme = S.designShared.botThemeOf(def);
+      out.push(bot);
     }
     return out;
   }
+
+  /**
+   * House style (design kit spec §4.4, D4/D5). Owner-only (dashboard auth +
+   * CSRF), never bot-callable: no MCP tool writes it. A project's theme lives
+   * in design_house_styles (by the project's uuid, exactly as stored); a
+   * bot's default in pi_bot_defs.definition.design.house_style. Off unless
+   * set. Archived projects and learner profiles are neither listed nor
+   * writable (review L8). Registered before /api/artifacts/:id.
+   */
+  const COLOR_ROLES = ["bg", "fg", "accent", "accent2"];
+  const HEX_RE = /^#[0-9a-fA-F]{3,8}$/;
+  async function kitThemes() {
+    const k = S.design ? await S.design.kit() : null;
+    if (!k) return null;
+    const out = [];
+    for (const [id, t] of k.themes.entries()) {
+      if (!S.designShared.THEME_ID_RE.test(id)) continue;
+      const c = (t && t.colors) || {};
+      // By role (ruling F9), never by the JSON's key order.
+      const colors = COLOR_ROLES.map((role) => c[role]).filter((v) => typeof v === "string" && HEX_RE.test(v));
+      out.push({ id, name: String((t && t.name) || id).slice(0, 60), colors });
+    }
+    return out;
+  }
+  const LIVE_PROJECT = "p.type<>'learner_profile' AND p.status<>'archived' AND p.archived_at IS NULL";
+  router.get("/api/artifacts/house-style", wrap(async (_req, res) => {
+    const themes = await kitThemes();
+    let projects = [];
+    try { projects = (await S.db.execute({ sql: `SELECT p.id, p.name, h.theme FROM project_spaces p LEFT JOIN design_house_styles h ON h.project_uuid=p.uuid WHERE ${LIVE_PROJECT} ORDER BY p.name`, args: [] })).rows; } catch { projects = []; }
+    res.json({ kit: !!themes, themes: themes || [], projects: projects.map((p) => ({ id: Number(p.id), name: String(p.name), theme: p.theme || null })), bots: await artifactBots({ withTheme: true }) });
+  }));
+  router.post("/api/artifacts/house-style", wrap(async (req, res) => {
+    const b = req.body || {};
+    const theme = b.theme == null || b.theme === "" ? null : String(b.theme);
+    const bad = (m) => Object.assign(new Error(m), { code: "bad_request" });
+    const notFound = (m) => Object.assign(new Error(m), { code: "not_found" });
+    if (b.scope !== "project" && b.scope !== "bot") throw bad("scope must be project or bot");
+    if (theme !== null) { const themes = await kitThemes(); if (!themes || !themes.some((t) => t.id === theme)) throw bad("unknown theme"); }
+    if (b.scope === "project") {
+      const id = typeof b.id === "number" ? b.id : (/^\d+$/.test(String(b.id ?? "")) ? Number(b.id) : NaN);
+      let p = null;
+      if (Number.isSafeInteger(id)) {
+        try { p = (await S.db.execute({ sql: `SELECT p.uuid FROM project_spaces p WHERE p.id=? AND ${LIVE_PROJECT}`, args: [id] })).rows[0] || null; } catch { p = null; }
+      }
+      if (!p || typeof p.uuid !== "string" || !p.uuid) throw notFound("no such project");
+      if (theme === null) await S.db.execute({ sql: "DELETE FROM design_house_styles WHERE project_uuid=?", args: [p.uuid] });
+      else await S.db.execute({ sql: "INSERT INTO design_house_styles (project_uuid, theme) VALUES (?,?) ON CONFLICT(project_uuid) DO UPDATE SET theme=excluded.theme, set_at=datetime('now')", args: [p.uuid, theme] });
+      await M.store.audit(S.db, { actor: OWNER, action: "house-style", target: `project:${id}`, detail: { theme } });
+      return res.json({ ok: true });
+    }
+    const id = String(b.id || "");
+    let row = null;
+    try { row = (await S.db.execute({ sql: "SELECT definition FROM pi_bot_defs WHERE bot_id=?", args: [id] })).rows[0] || null; } catch { row = null; }
+    if (!row) throw notFound("no such bot");
+    // Setting needs a bot that uses Artifacts (the listed ones); clearing a
+    // stale default works on any bot.
+    if (theme !== null && !(await artifactBots()).some((x) => x.id === id)) throw bad("that bot has no Artifacts tools");
+    let def; try { def = JSON.parse(row.definition || "{}"); } catch { def = null; }
+    if (!def || typeof def !== "object" || Array.isArray(def)) throw bad("the bot's definition could not be read; fix it in Bot Builder");
+    const design = { ...(def.design && typeof def.design === "object" && !Array.isArray(def.design) ? def.design : {}) };
+    if (theme === null) delete design.house_style; else design.house_style = theme;
+    const next = { ...def };
+    if (Object.keys(design).length) next.design = design; else delete next.design;
+    // Compare-and-swap on the definition read above (Bot Builder's rule): a
+    // concurrent Bot Builder save wins and this one asks for a reload.
+    const r = await S.db.execute({ sql: "UPDATE pi_bot_defs SET definition=?, updated_at=datetime('now') WHERE bot_id=? AND definition IS ?", args: [JSON.stringify(next), id, row.definition ?? null] });
+    if (!Number(r.rowsAffected)) throw Object.assign(new Error("the bot changed meanwhile; reload and try again"), { code: "stale" });
+    try { (await appImport("servers/gateway/dashboard/panels/bot-builder/defs-changed.js")).emitBotDefsChanged(id); } catch { /* no bot-builder bus here */ }
+    await M.store.audit(S.db, { actor: OWNER, action: "house-style", target: `bot:${id}`, detail: { theme } });
+    res.json({ ok: true });
+  }));
   router.get("/api/artifacts/bots", wrap(async (_req, res) => { res.json({ bots: await artifactBots() }); }));
   router.get("/api/artifacts/:id/access", wrap(async (req, res) => {
     const art = await M.store.requireAccess(S.db, OWNER, req.params.id);

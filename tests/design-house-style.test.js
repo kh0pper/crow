@@ -22,14 +22,17 @@ before(async () => {
   s.db = createDbClient(join(s.home, "crow.db"));
   await s.db.executeMultiple(`
     CREATE TABLE pi_bot_defs (bot_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, definition TEXT, enabled INTEGER NOT NULL DEFAULT 1, project_id INTEGER);
-    CREATE TABLE project_spaces (id INTEGER PRIMARY KEY, uuid TEXT NOT NULL UNIQUE, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL);
-    INSERT INTO project_spaces (id, uuid, slug, name) VALUES (7, 'u-seven', 'seven', 'Seven'), (8, 'u-eight', 'eight', 'Eight');`);
+    CREATE TABLE project_spaces (id INTEGER PRIMARY KEY, uuid TEXT NOT NULL UNIQUE, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, type TEXT NOT NULL DEFAULT 'general', status TEXT NOT NULL DEFAULT 'active', archived_at TEXT);
+    INSERT INTO project_spaces (id, uuid, slug, name) VALUES (7, 'u-seven', 'seven', 'Seven'), (8, 'u-eight', 'eight', 'Eight');
+    INSERT INTO project_spaces (id, uuid, slug, name, status) VALUES (9, 'u-nine', 'nine', 'Nine', 'archived');
+    INSERT INTO project_spaces (id, uuid, slug, name, archived_at) VALUES (11, 'u-eleven', 'eleven', 'Eleven', '2026-01-01');
+    INSERT INTO project_spaces (id, uuid, slug, name, type) VALUES (10, 'u-ten', 'ten', 'Ten', 'learner_profile');`);
   await s.db.execute({ sql: "CREATE TABLE IF NOT EXISTS design_house_styles (project_uuid TEXT PRIMARY KEY, theme TEXT NOT NULL, set_at TEXT NOT NULL DEFAULT (datetime('now')))", args: [] });
   await s.db.execute({ sql: "INSERT INTO design_house_styles (project_uuid, theme) VALUES ('u-gone', 'old-theme')", args: [] });
   await initArtifactsTables(s.db);   // prunes the orphan row above
-  const rows = [["solo", null, { design: { house_style: "bot-theme" } }], ["proj", 7, { design: { house_style: "bot-theme" } }], ["plain", 7, {}], ["none", null, {}], ["junk", 8, { design: { house_style: "../x" } }]];
+  const rows = [["solo", null, { design: { house_style: "bot-theme" } }], ["proj", 7, { design: { house_style: "bot-theme" } }], ["plain", 7, {}], ["none", null, {}], ["junk", 8, { design: { house_style: "../x" } }], ["shelf", 9, { design: { house_style: "bot-theme" } }], ["shelf2", 11, {}], ["kid", 10, {}]];
   for (const [id, p, def] of rows) await s.db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, project_id) VALUES (?,?,?,?)", args: [id, id, JSON.stringify(def), p] });
-  await s.db.execute({ sql: "INSERT INTO design_house_styles (project_uuid, theme) VALUES ('u-seven', 'proj-theme'), ('u-eight', 'ghost-theme')", args: [] });
+  await s.db.execute({ sql: "INSERT INTO design_house_styles (project_uuid, theme) VALUES ('u-seven', 'proj-theme'), ('u-eight', 'ghost-theme'), ('u-nine', 'proj-theme'), ('u-eleven', 'proj-theme'), ('u-ten', 'proj-theme')", args: [] });
 });
 after(() => { try { s.db.close(); } catch {} rmSync(s.home, { recursive: true, force: true }); });
 
@@ -52,7 +55,9 @@ test("sync and async readers agree on every fixture bot", async () => {
   const known = new Set(["proj-theme", "bot-theme"]);
   const conn = new Database(join(s.home, "crow.db"), { readonly: true });
   try {
-    const expected = { solo: "bot-theme", proj: "proj-theme", plain: "proj-theme", none: null, junk: null, missing: null };
+    // shelf/shelf2/kid: an archived project's (or a learner profile's) stale
+    // style never applies; the bot's own default does (review L8).
+    const expected = { solo: "bot-theme", proj: "proj-theme", plain: "proj-theme", none: null, junk: null, missing: null, shelf: "bot-theme", shelf2: null, kid: null };
     for (const [id, want] of Object.entries(expected)) {
       const row = conn.prepare("SELECT definition, project_id FROM pi_bot_defs WHERE bot_id=?").get(id);
       const sync = row ? readHouseStyleSync(conn, { projectId: row.project_id, def: JSON.parse(row.definition), known }) : null;
@@ -129,4 +134,22 @@ test("createDesign.houseStyleFor: the installed kit's theme for a bot default; n
     assert.equal(await d.houseStyleFor("solo"), null, "bot-theme is not a kit theme");
     assert.equal(await d.houseStyleFor(null), null);
   } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("init prunes nothing while project_spaces is empty (a half-restored database)", async () => {
+  const home = mkdtempSync(join(tmpdir(), "house-style-empty-"));
+  const db = createDbClient(join(home, "crow.db"));
+  try {
+    await db.execute({ sql: "CREATE TABLE project_spaces (id INTEGER PRIMARY KEY, uuid TEXT NOT NULL UNIQUE, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL)", args: [] });
+    await db.execute({ sql: "CREATE TABLE design_house_styles (project_uuid TEXT PRIMARY KEY, theme TEXT NOT NULL, set_at TEXT NOT NULL DEFAULT (datetime('now')))", args: [] });
+    await db.execute({ sql: "INSERT INTO design_house_styles (project_uuid, theme) VALUES ('u-later', 'kept')", args: [] });
+    await initArtifactsTables(db);
+    assert.equal((await db.execute({ sql: "SELECT COUNT(*) AS n FROM design_house_styles", args: [] })).rows[0].n, 1);
+  } finally { try { db.close(); } catch {} rmSync(home, { recursive: true, force: true }); }
+});
+
+test("houseStyleLinks names nothing for an id outside THEME_ID_RE", () => {
+  assert.deepEqual(houseStyleLinks("../x", { fonts: ["font:lora"] }), []);
+  assert.deepEqual(houseStyleLinks(null, null), []);
+  assert.deepEqual(houseStyleLinks("ok-id", null), ["__lib/themes/ok-id.css"]);
 });

@@ -189,7 +189,8 @@ export async function initArtifactsTables(db) {
   for (const [table, col, decl] of ADDED_COLUMNS) await addColumnIfMissing(db, table, col, decl);
   // A deleted project's house style goes with it (review L8). No project_spaces
   // table (tests, a fresh install mid-boot): nothing to prune.
-  try { await db.execute({ sql: "DELETE FROM design_house_styles WHERE project_uuid NOT IN (SELECT uuid FROM project_spaces WHERE uuid IS NOT NULL)", args: [] }); } catch { /* no project_spaces */ }
+  // An empty project_spaces (a half-restored or fresh database) prunes nothing.
+  try { await db.execute({ sql: "DELETE FROM design_house_styles WHERE EXISTS (SELECT 1 FROM project_spaces) AND project_uuid NOT IN (SELECT uuid FROM project_spaces WHERE uuid IS NOT NULL)", args: [] }); } catch { /* no project_spaces */ }
   await db.execute({ sql: "INSERT OR IGNORE INTO artifact_store_meta (key, value) VALUES ('store_id', ?)", args: [randomBytes(16).toString("hex")] });
   // D22 (R3-L1): Perch sessions that existed before D22 have no record of what
   // they read; mark them tainted once (they re-earn trust only as new sessions).

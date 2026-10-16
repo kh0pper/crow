@@ -52,15 +52,20 @@ export function readKitThemes(crowHome) {
  *  by the bot, so nothing is injected; documents and diagrams get these links
  *  in their head automatically. Paths follow the kit's layout convention. */
 export function houseStyleLinks(id, theme) {
+  if (typeof id !== "string" || !THEME_ID_RE.test(id)) return [];
   return [...(theme && theme.fonts ? theme.fonts : []).map((f) => `__lib/font/${f.slice(5)}/font.css`), `__lib/themes/${id}.css`];
 }
+
+// An archived project's (or a learner profile's) stale style does not apply
+// (review L8): the bot falls back to its own default.
+const PROJECT_THEME_SQL = "SELECT h.theme FROM design_house_styles h JOIN project_spaces p ON p.uuid=h.project_uuid WHERE p.id=? AND p.type<>'learner_profile' AND p.status<>'archived' AND p.archived_at IS NULL";
 
 /** Bot spawn (better-sqlite3, sync). Missing tables read as no theme. */
 export function readHouseStyleSync(conn, { projectId = null, def = null, known } = {}) {
   let projectTheme = null;
   if (projectId != null) {
     try {
-      const r = conn.prepare("SELECT h.theme FROM design_house_styles h JOIN project_spaces p ON p.uuid=h.project_uuid WHERE p.id=?").get(Number(projectId));
+      const r = conn.prepare(PROJECT_THEME_SQL).get(Number(projectId));
       projectTheme = r ? r.theme : null;
     } catch { projectTheme = null; }
   }
@@ -77,7 +82,7 @@ export async function readHouseStyle(db, botId, { known } = {}) {
   let projectTheme = null;
   if (row.project_id != null) {
     try {
-      projectTheme = (await db.execute({ sql: "SELECT h.theme FROM design_house_styles h JOIN project_spaces p ON p.uuid=h.project_uuid WHERE p.id=?", args: [Number(row.project_id)] })).rows[0]?.theme ?? null;
+      projectTheme = (await db.execute({ sql: PROJECT_THEME_SQL, args: [Number(row.project_id)] })).rows[0]?.theme ?? null;
     } catch { projectTheme = null; }
   }
   return pickHouseStyle({ projectTheme, botTheme: botThemeOf(def), known });
