@@ -256,6 +256,93 @@
         "diagram"
       ],
       "version": "3.49.0"
+    },
+    {
+      "name": "vega",
+      "kind": "script",
+      "package": "vega",
+      "version_range": "^6.4.0",
+      "license": "BSD-3-Clause",
+      "license_from": "LICENSE",
+      "allowed": [
+        "page"
+      ],
+      "files": [
+        {
+          "from": "build/vega.min.js",
+          "to": "js/vega/vega.min.js"
+        }
+      ],
+      "main": "js/vega/vega.min.js",
+      "global": "vega",
+      "version": "6.4.0"
+    },
+    {
+      "name": "vega-lite",
+      "kind": "script",
+      "package": "vega-lite",
+      "version": "6.5.0",
+      "license": "BSD-3-Clause",
+      "license_from": "LICENSE",
+      "allowed": [
+        "page"
+      ],
+      "requires": [
+        "vega"
+      ],
+      "files": [
+        {
+          "from": "build/vega-lite.min.js",
+          "to": "js/vega-lite/vega-lite.min.js"
+        }
+      ],
+      "main": "js/vega-lite/vega-lite.min.js",
+      "global": "vegaLite"
+    },
+    {
+      "name": "vega-embed",
+      "kind": "script",
+      "package": "vega-embed",
+      "license": "BSD-3-Clause",
+      "license_from": "LICENSE",
+      "allowed": [
+        "page"
+      ],
+      "requires": [
+        "vega",
+        "vega-lite"
+      ],
+      "files": [
+        {
+          "from": "build/vega-embed.min.js",
+          "to": "js/vega-embed/vega-embed.min.js"
+        }
+      ],
+      "main": "js/vega-embed/vega-embed.min.js",
+      "global": "vegaEmbed",
+      "version": "7.3.0"
+    },
+    {
+      "name": "mermaid",
+      "kind": "script",
+      "package": "mermaid",
+      "version": "11.17.2",
+      "license": "MIT",
+      "license_from": "LICENSE",
+      "allowed": [
+        "page"
+      ],
+      "files": [
+        {
+          "from": "dist/mermaid.min.js",
+          "to": "js/mermaid/mermaid.min.js"
+        }
+      ],
+      "main": "js/mermaid/mermaid.min.js",
+      "global": "mermaid",
+      "notes": [
+        "pinned to 11.x: 12.x bundles elkjs (EPL-2.0)"
+      ]
     }
   ]
 }

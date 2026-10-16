@@ -68,45 +68,182 @@ function put(rel, body) {
 }
 const licence = (pkgDir, pin) => put(`licenses/${fileStem(pin.name)}.txt`, need(pkgDir, pin.license_from, pin.package));
 
-/** Review M9: the licence texts of the third-party code a package bundles. A
- *  scratch production install (temp dir, no scripts, nothing installed on the
- *  system) of the pinned package; every dependency's name, version, licence id
- *  and licence/NOTICE files go into licenses/<entry>-third-party.txt. Over-
- *  inclusive on purpose (a dependency not in the minified build costs nothing). */
+/** Review M9: the licence texts of the third-party code a script bundle carries.
+ *
+ *  When every vendored file has a source map in the tarball, the notice lists
+ *  what is actually INSIDE the bundle: each map source under node_modules/ (or
+ *  in a sibling workspace package, e.g. mermaid's ../../parser/dist) is matched
+ *  byte-for-byte (sourcesContent) against a copy of that package, and a matched
+ *  file's own .map is followed in turn (code a dependency had already bundled,
+ *  e.g. langium inside @mermaid-js/parser). The version is the one the map's
+ *  pnpm path names, else the copy whose file content matched; packages are
+ *  fetched at that exact version with `npm pack` when the scratch install
+ *  resolved a different one. Without a map (vega ships none) the notice falls
+ *  back to the package's production dependency tree as npm resolves it today
+ *  and says so in its header. A scratch install (temp dir, no scripts, nothing
+ *  installed on the system) provides the copies. */
+const LICENCE_FILE = /^(licen[cs]e|copying|notice)/i;
+function licenceId(j, texts) {
+  if (typeof j.license === "string") return j.license;
+  if (j.license || j.licenses) return JSON.stringify(j.license || j.licenses);
+  // No licence field: take the id the shipped licence text states (khroma).
+  const t = texts.join("\n").trimStart();
+  if (/^(\(The MIT License\)|The MIT License|MIT License)/i.test(t)) return "MIT";
+  if (/^ISC License/i.test(t)) return "ISC";
+  return "UNKNOWN";
+}
+function scratchInstall(pin) {
+  const dir = mkdtempSync(join(tmpdir(), "dk-deps-"));
+  execFileSync("npm", ["install", "--prefix", dir, "--ignore-scripts", "--omit=dev", "--no-audit", "--no-fund", `${pin.package}@${pin.version}`], { stdio: "ignore" });
+  const found = [];
+  const walk = (d) => {
+    for (const n of readdirSync(d)) {
+      if (n.startsWith(".")) continue;
+      const at = join(d, n);
+      if (n.startsWith("@")) { walk(at); continue; }
+      if (!existsSync(join(at, "package.json"))) continue;
+      const j = JSON.parse(readFileSync(join(at, "package.json"), "utf8"));
+      if (j.name !== pin.package) found.push({ dir: at, name: j.name, version: j.version, json: j });
+      if (existsSync(join(at, "node_modules"))) walk(join(at, "node_modules"));
+    }
+  };
+  walk(join(dir, "node_modules"));
+  return { dir, copies: found.sort((a, b) => (a.dir < b.dir ? -1 : 1)) };
+}
+function copyText(c) { return readdirSync(c.dir).filter((f) => LICENCE_FILE.test(f)).sort().map((f) => readFileSync(join(c.dir, f), "utf8").trim()); }
+function noticeOut(header, list) {
+  let out = header;
+  const ids = new Set();
+  for (const c of list) {
+    const texts = copyText(c);
+    const lic = licenceId(c.json, texts);
+    ids.add(lic);
+    out += `\n==== ${c.name}@${c.version} (${lic})${c.how ? `\n[${c.how}]` : ""}\n${texts.length ? texts.join("\n\n") : "(the package ships no licence file)"}\n`;
+  }
+  return { out, ids };
+}
 function thirdParty(pin, pkgDir) {
   const deps = Object.keys(JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8")).dependencies || {});
   if (!deps.length) return null;
-  const dir = mkdtempSync(join(tmpdir(), "dk-deps-"));
+  const maps = pin.files.map((f) => join(pkgDir, `${f.from}.map`));
+  const inst = scratchInstall(pin);
+  const packed = [];
   try {
-    execFileSync("npm", ["install", "--prefix", dir, "--ignore-scripts", "--omit=dev", "--no-audit", "--no-fund", `${pin.package}@${pin.version}`], { stdio: "ignore" });
-    const found = [];
-    const walk = (d) => {
-      for (const n of readdirSync(d)) {
-        if (n.startsWith(".")) continue;
-        const at = join(d, n);
-        if (n.startsWith("@")) { walk(at); continue; }
-        if (!existsSync(join(at, "package.json"))) continue;
-        found.push(at);
-        if (existsSync(join(at, "node_modules"))) walk(join(at, "node_modules"));
+    let header, list;
+    if (!maps.every((m) => existsSync(m))) {
+      header = `Third-party code in ${pin.package}@${pin.version} (its production dependency tree at vendor time).\n` +
+        `The package ships no source map for ${pin.files.map((f) => f.from).join(", ")}, so the versions below are npm's resolution of its declared ranges on the vendor date, not necessarily the versions upstream built with.\n`;
+      const seen = new Set();
+      list = inst.copies.filter((c) => !seen.has(`${c.name}@${c.version}`) && seen.add(`${c.name}@${c.version}`));
+    } else {
+      // name@version -> { copy, files: matched count, sources }
+      const hits = new Map();
+      const unknown = new Set();
+      const exact = new Map();
+      const copyAt = (name, version) => {
+        const local = inst.copies.find((c) => c.name === name && c.version === version);
+        if (local) return local;
+        const key = `${name}@${version}`;
+        if (!exact.has(key)) {
+          let c = null;
+          try {
+            const pk = pack(name, version);
+            packed.push(pk);
+            c = { dir: pk.dir, name, version, json: JSON.parse(readFileSync(join(pk.dir, "package.json"), "utf8")) };
+          } catch { /* no such version */ }
+          exact.set(key, c);
+        }
+        return exact.get(key);
+      };
+      // The map names no version (plain node_modules/ path): try the releases
+      // published before this package, newest first, until one ships the file
+      // with the same content (vega-embed 7.3.0 bundles an older
+      // vega-interpreter than npm resolves today).
+      const published = JSON.parse(execFileSync("npm", ["view", `${pin.package}@${pin.version}`, "time", "--json"], { encoding: "utf8" }))[pin.version];
+      const candidates = new Map();
+      // One release for the whole package: the newest published before this
+      // package that ships every bundled file with the same content (several
+      // releases may be byte-identical for those files; the newest is named).
+      const releaseFor = (name, files) => {
+        if (!candidates.has(name)) {
+          const t = JSON.parse(execFileSync("npm", ["view", name, "time", "--json"], { encoding: "utf8" }));
+          candidates.set(name, Object.keys(t).filter((v) => /^\d+\.\d+\.\d+$/.test(v) && t[v] <= published).sort((a, b) => (t[a] < t[b] ? 1 : -1)).slice(0, 40));
+        }
+        const fits = (c) => c && files.every((f) => sameFile(c, f.rel, f.content));
+        for (const v of candidates.get(name)) { const c = copyAt(name, v); if (fits(c)) return c; }
+        return null;
+      };
+      const deferred = new Map();
+      const sameFile = (c, rel, content) => {
+        const abs = join(c.dir, rel);
+        return existsSync(abs) && (content == null || readFileSync(abs, "utf8") === content);
+      };
+      const record = (c, rel, reason, via) => {
+        const how = via ? `${reason}, via ${via}` : reason;
+        const key = `${c.name}@${c.version}`;
+        if (!hits.has(key)) hits.set(key, { ...c, hows: new Map() });
+        const h = hits.get(key).hows;
+        h.set(how, (h.get(how) || 0) + 1);
+        const sub = join(c.dir, `${rel}.map`);
+        if (existsSync(sub)) follow(sub, c.dir, `${c.name}@${c.version}'s own bundle`);
+      };
+      const visited = new Set();
+      const follow = (mapPath, ownRoot, via) => {
+        if (visited.has(mapPath)) return;
+        visited.add(mapPath);
+        const m = JSON.parse(readFileSync(mapPath, "utf8"));
+        const base = join(dirname(mapPath), m.sourceRoot || "");
+        m.sources.forEach((src, i) => {
+          const content = m.sourcesContent ? m.sourcesContent[i] : null;
+          const nm = src.lastIndexOf("node_modules/");
+          if (nm >= 0) {
+            const parts = src.slice(nm + 13).split("/");
+            const name = parts[0].startsWith("@") ? `${parts[0]}/${parts[1]}` : parts[0];
+            const rel = parts.slice(name.split("/").length).join("/");
+            const pn = src.match(/\.pnpm\/((?:@[^/+]+\+)?[^@/]+)@([^_/(]+)/);
+            if (pn) {
+              const c = copyAt(name, pn[2]);
+              if (c && sameFile(c, rel, content)) return record(c, rel, "version from the source map (pnpm path); file content matched", via);
+              // marked: upstream's map composed through marked's own map into
+              // src/*.ts, which the npm package does not ship. The pnpm path
+              // still names the exact version.
+              if (c && !existsSync(join(c.dir, rel))) return record(c, rel, "version from the source map (pnpm path); source file not in the npm package", via);
+              return unknown.add(`${name}@${pn[2]} ${rel}`);
+            }
+            // No version in the path: resolved per package once every map is read.
+            if (!deferred.has(name)) deferred.set(name, []);
+            return deferred.get(name).push({ rel, content, via });
+          }
+          const abs = resolve(base, src);
+          if (abs.startsWith(ownRoot + "/")) return; // the package's own source
+          // A sibling workspace package (../../parser/dist/x): find the
+          // dependency that ships the same path with the same content.
+          const rel = src.replace(/^(?:\.\.\/)+[^/]+\//, "");
+          const c = inst.copies.find((x) => sameFile(x, rel, content));
+          if (c) return record(c, rel, "a sibling workspace package's build, matched by file content", via);
+          unknown.add(src);
+        });
+      };
+      for (const m of maps) follow(m, pkgDir, null);
+      while (deferred.size) {
+        const [name, files] = deferred.entries().next().value;
+        deferred.delete(name);
+        const c = releaseFor(name, files);
+        if (!c) { unknown.add(`${name} (no release ships all ${files.length} bundled file(s))`); continue; }
+        for (const f of files) record(c, f.rel, "no version in the map; the newest earlier release whose files all matched", f.via);
       }
-    };
-    walk(join(dir, "node_modules"));
-    const seen = new Set();
-    const ids = new Set();
-    let out = `Third-party code in ${pin.package}@${pin.version} (its production dependency tree at vendor time).\n`;
-    for (const at of found.sort()) {
-      const j = JSON.parse(readFileSync(join(at, "package.json"), "utf8"));
-      const key = `${j.name}@${j.version}`;
-      if (j.name === pin.package || seen.has(key)) continue;
-      seen.add(key);
-      const lic = typeof j.license === "string" ? j.license : JSON.stringify(j.license || j.licenses || "UNKNOWN");
-      ids.add(lic);
-      const texts = readdirSync(at).filter((f) => /^(licen[cs]e|copying|notice)/i.test(f)).map((f) => readFileSync(join(at, f), "utf8").trim());
-      out += `\n==== ${key} (${lic})\n${texts.length ? texts.join("\n\n") : "(the package ships no licence file)"}\n`;
+      if (unknown.size) throw new Error(`${pin.name}: bundled sources not matched to a package:\n  ${[...unknown].slice(0, Number(process.env.DK_SHOW || 20)).join("\n  ")}`);
+      header = `Third-party code in ${pin.package}@${pin.version}: the packages inside ${pin.files.map((f) => f.from).join(", ")}, identified from the source map (each file matched byte-for-byte against the package at the version shown).\n`;
+      list = [...hits.values()].sort((a, b) => (`${a.name}@${a.version}` < `${b.name}@${b.version}` ? -1 : 1)).map((c) => ({ ...c, how: [...c.hows].map(([h, n]) => `${h}: ${n} file(s)`).join("; ") }));
     }
+    if (!list.length) { console.log(`${pin.name}: bundles no third-party code`); return null; }
+    const { out, ids } = noticeOut(header, list);
     console.log(`${pin.name}: third-party licence ids: ${[...ids].sort().join(", ")}`);
     return put(`licenses/${fileStem(pin.name)}-third-party.txt`, Buffer.from(out));
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    rmSync(inst.dir, { recursive: true, force: true });
+    for (const pk of packed) pk.cleanup();
+  }
 }
 
 const BUILD = {
@@ -168,7 +305,8 @@ for (const pin of PINS.entries) {
   if (old) for (const f of [...old.files, ...(old.notices || [])]) rmSync(join(LIB, f.path), { force: true });
   const p = pack(pin.package, pin.version);
   try {
-    const { notices: builtNotices = [], notes = [], ...built } = BUILD[pin.kind](pin, p);
+    const { notices: builtNotices = [], notes: builtNotes = [], ...built } = BUILD[pin.kind](pin, p);
+    const notes = [...(pin.notes || []), ...builtNotes];
     const lic = licence(p.dir, pin);
     const tp = thirdParty(pin, p.dir);
     const notices = [...builtNotices, ...(tp ? [tp] : [])].map((n) => ({ path: n.path, sha256: n.sha256 }));

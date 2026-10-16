@@ -578,6 +578,124 @@
       "notes": [
         "built from icons/outline/*.svg: licence comments removed, whitespace collapsed"
       ]
+    },
+    {
+      "name": "mermaid",
+      "kind": "script",
+      "version": "11.17.2",
+      "license": "MIT",
+      "license_file": "licenses/mermaid.txt",
+      "license_sha256": "ec9fb67dcb25eccc416ed56e1aab819222c805a2a4bfe4cb19e7556bf2ffde80",
+      "notices": [
+        {
+          "path": "licenses/mermaid-third-party.txt",
+          "sha256": "a4803abdd3c9e2119960641bf72a6bfee496f94b819167cb0f04ec301445c69f"
+        }
+      ],
+      "source": "npm:mermaid@11.17.2",
+      "npm_integrity": "sha512-V6K3C8EBdEsPFZXSKMJe6ppQOENxuHARr9GvHX4hh47lAbhMRD9qf4oEK7LoaRQxULMa80/qt5gHO73aCleBBg==",
+      "allowed": [
+        "page"
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "js/mermaid/mermaid.min.js",
+          "sha256": "581ed7d74bd9048d0e3a91363927d72ef22942d7722546b27f7cc29e35390eb8",
+          "type": "text/javascript"
+        }
+      ],
+      "main": "js/mermaid/mermaid.min.js",
+      "global": "mermaid",
+      "notes": [
+        "pinned to 11.x: 12.x bundles elkjs (EPL-2.0)"
+      ]
+    },
+    {
+      "name": "vega",
+      "kind": "script",
+      "version": "6.4.0",
+      "license": "BSD-3-Clause",
+      "license_file": "licenses/vega.txt",
+      "license_sha256": "63727832aaf62004a2b249c933e327f3c90caf49e41a72f4bf436edf632cbda8",
+      "notices": [
+        {
+          "path": "licenses/vega-third-party.txt",
+          "sha256": "dfa1239d82e21d335fa32e0b3f363f7ec74f32cdc87962bb90801d79f953884a"
+        }
+      ],
+      "source": "npm:vega@6.4.0",
+      "npm_integrity": "sha512-rHXCq2LpEWCLMjXBEj7hocY9G0/i5TGYRayGGSj06VTF4+l2IG2Z7oeZKCjWbUh/7hTE/mVhbaOPB72wCElh6g==",
+      "allowed": [
+        "page"
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "js/vega/vega.min.js",
+          "sha256": "8f6a3587cf8d4f42c7e08120e3eb05d067e746d554e39d2dcf52acc0bd5ba28f",
+          "type": "text/javascript"
+        }
+      ],
+      "main": "js/vega/vega.min.js",
+      "global": "vega"
+    },
+    {
+      "name": "vega-embed",
+      "kind": "script",
+      "version": "7.3.0",
+      "license": "BSD-3-Clause",
+      "license_file": "licenses/vega-embed.txt",
+      "license_sha256": "32df67148f0fc3db0eb9e263a7b75d07f1eb14c61955005a4a39c6918d10d137",
+      "notices": [
+        {
+          "path": "licenses/vega-embed-third-party.txt",
+          "sha256": "bfaf0a9e46de1c6bf44f0eea209fdeac57f60d479204fad06a13954b208c51b9"
+        }
+      ],
+      "source": "npm:vega-embed@7.3.0",
+      "npm_integrity": "sha512-wQ8s5GaSzqoKgmRfbRolgBrjE2CP7ZKHXqH7NijxMqPjpdWxSs4Dn8tvp9g0giQvh2cK+3p56sxjWWM0wNngGw==",
+      "allowed": [
+        "page"
+      ],
+      "requires": [
+        "vega",
+        "vega-lite"
+      ],
+      "files": [
+        {
+          "path": "js/vega-embed/vega-embed.min.js",
+          "sha256": "b1455caba2fb1a72fb46025ba0ba1316e2dbc7f0dd40a3f6040172bf9c08ba91",
+          "type": "text/javascript"
+        }
+      ],
+      "main": "js/vega-embed/vega-embed.min.js",
+      "global": "vegaEmbed"
+    },
+    {
+      "name": "vega-lite",
+      "kind": "script",
+      "version": "6.5.0",
+      "license": "BSD-3-Clause",
+      "license_file": "licenses/vega-lite.txt",
+      "license_sha256": "f618900fd0d64046963b29f40590cdd1e341a2f41449f99110d82fd81fea808c",
+      "source": "npm:vega-lite@6.5.0",
+      "npm_integrity": "sha512-fMXF6s0MrIg0UTWnLIfeFtgSLzVhyzSKobzGrh5rhS+mL6FOYFG3m7ouJ4U23gj65EK+gl9FIIT5w7wLNaAzkA==",
+      "allowed": [
+        "page"
+      ],
+      "requires": [
+        "vega"
+      ],
+      "files": [
+        {
+          "path": "js/vega-lite/vega-lite.min.js",
+          "sha256": "83e215e84e308ee8688fa6503ba0f1cf8a3c05c0d61df2841a0b92bf86809e00",
+          "type": "text/javascript"
+        }
+      ],
+      "main": "js/vega-lite/vega-lite.min.js",
+      "global": "vegaLite"
     }
   ],
   "meta_files": []
