@@ -51,8 +51,8 @@ Lemmy stack is up. Next steps:
 
   2. Open https://${LEMMY_HOSTNAME:-<your-domain>}/ and complete the setup
      wizard (admin username + password + site name). The compose
-     entrypoint writes a placeholder admin_pending account; the wizard
-     replaces it.
+     entrypoint creates a first admin, admin_pending, with the password
+     Crow generated at install (Settings -> Passwords).
 
   3. Obtain a JWT:
        curl -X POST https://${LEMMY_HOSTNAME:-<your-domain>}/api/v3/user/login \\

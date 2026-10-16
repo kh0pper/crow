@@ -2517,7 +2517,7 @@
     {
       "id": "lemmy",
       "name": "Lemmy",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Federated link aggregator and discussion platform over ActivityPub — Reddit-alternative on the fediverse. Posts, comments, communities, votes; remote Lemmy/Mastodon/Kbin users can follow your communities and comment cross-server.",
       "type": "bundle",
       "author": "Crow",
@@ -2590,6 +2590,16 @@
           "generate": "secret"
         },
         {
+          "name": "LEMMY_ADMIN_PASSWORD",
+          "description": "Password of the first Lemmy admin (username admin_pending). Crow generates it at install and saves it in Settings → Passwords (this machine only); Lemmy creates the admin with it on its first successful start. (This bundle's container does not start yet — see the notes.)",
+          "required": true,
+          "secret": true,
+          "generate": "secret",
+          "keychain": true,
+          "keychain_label": "admin password",
+          "keychain_username": "admin_pending"
+        },
+        {
           "name": "LEMMY_JWT",
           "description": "Admin login JWT (obtain via POST /api/v3/user/login after registering the admin via the web UI).",
           "required": false,
@@ -2616,7 +2626,7 @@
       ],
       "ports": [],
       "webUI": null,
-      "notes": "Four containers (lemmy + lemmy-ui + postgres + pict-rs). Expose via caddy_add_federation_site { domain: LEMMY_HOSTNAME, upstream: 'lemmy-ui:1234', profile: 'activitypub' }. The UI proxies /api/v3/ to lemmy:8536 internally. Initial admin registers via the /signup page during the first-boot setup wizard (no CLI bootstrap needed).",
+      "notes": "Four containers (lemmy + lemmy-ui + postgres + pict-rs). Expose via caddy_add_federation_site { domain: LEMMY_HOSTNAME, upstream: 'lemmy-ui:1234', profile: 'activitypub' }. The UI proxies /api/v3/ to lemmy:8536 internally. Initial admin registers via the /signup page during the first-boot setup wizard (no CLI bootstrap needed). Known issue: the entrypoint runs a path the pinned Lemmy image does not have, so the container does not start yet; a fix needs a live test.",
       "official": true
     },
     {

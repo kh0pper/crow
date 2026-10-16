@@ -58,6 +58,7 @@ const EXPECT = [
   { id: "miniflux", key: "MINIFLUX_ADMIN_PASSWORD", propagate: false, username: "${MINIFLUX_ADMIN_USER}" },
   { id: "maker-lab-advanced", key: "MLA_ADMIN_PASSWORD", propagate: false, username: "${MLA_ADMIN_USER}" },
   { id: "actual-budget", key: "ACTUAL_SERVER_PASSWORD", propagate: false },
+  { id: "lemmy", key: "LEMMY_ADMIN_PASSWORD", propagate: false, username: "admin_pending" },
 ];
 
 test("each key is generated, keychain-saved, and propagated only where an MCP child reads it", () => {
@@ -143,14 +144,20 @@ test("reinstall keeps the kept value (never regenerated)", async () => {
   assert.equal(afterVal, before);
 });
 
+test("lemmy: no literal credential in the compose file; secrets reach the script through the environment", () => {
+  const compose = readFileSync(join(REPO, "bundles", "lemmy", "docker-compose.yml"), "utf8");
+  assert.match(compose, /admin_password:\s*"\$\$\{CROW_LEMMY_ADMIN_PASSWORD\}"/);
+  assert.match(compose, /CROW_LEMMY_ADMIN_PASSWORD:\s*"\$\{LEMMY_ADMIN_PASSWORD\}"/);
+  const script = compose.slice(compose.indexOf("cat > /config"), compose.indexOf("HJSON\n        exec"));
+  assert.ok(script.length > 100, "found the entrypoint script");
+  assert.doesNotMatch(script, /(?<!\$)\$\{LEMMY_(DB_PASSWORD|PICTRS_API_KEY|ADMIN_PASSWORD)\}/, "no compose-interpolated secret in the script text (PID 1's command line)");
+});
+
 test("no tracked compose file hard-codes a password, secret or admin password literal", () => {
   const out = execFileSync("git", ["ls-files", "bundles/*/docker-compose.yml"], { cwd: REPO, encoding: "utf8" }).trim().split("\n");
   // Documented false positives: file → key, with the reason.
   const ALLOW = {
     "bundles/searxng/docker-compose.yml": { secret_key: "a sed command that rewrites secret_key from $SEARXNG_SECRET_KEY (no literal)" },
-    // The bundle cannot start at all today (its entrypoint execs a binary the pinned image
-    // doesn't have); the password fix waits for a working, live-verified Lemmy bundle.
-    "bundles/lemmy/docker-compose.yml": { admin_password: "known: setup admin password literal; follow-up with the Lemmy entrypoint fix" },
   };
   const bad = [];
   for (const rel of out) {
