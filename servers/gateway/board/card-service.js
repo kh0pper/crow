@@ -169,10 +169,13 @@ export async function createCard(tdb, fields, actor) {
     autonomy = String(f.autonomy);
     if (!AUTONOMY_VALUES.has(autonomy)) throw fail(`invalid autonomy: ${autonomy}`, "bad_autonomy", 400);
   }
+  // assigned_bot (queue item 20, "Give a task"): a card created straight onto
+  // a bot's board carries its bot from birth — one create row, not a create
+  // followed by an update.
   const r = await tdb.execute({
     sql: `INSERT INTO tasks_items
-            (title, description, status, priority, due_date, phase, owner, tags, project_id, parent_id, autonomy)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+            (title, description, status, priority, due_date, phase, owner, tags, project_id, parent_id, autonomy, assigned_bot)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
     args: [
       String(f.title ?? ""),
       f.description == null ? null : String(f.description),
@@ -185,6 +188,7 @@ export async function createCard(tdb, fields, actor) {
       projectId,
       parentId,
       autonomy,
+      f.assigned_bot == null || f.assigned_bot === "" ? null : String(f.assigned_bot),
     ],
   });
   const id = Number(r.lastInsertRowid);

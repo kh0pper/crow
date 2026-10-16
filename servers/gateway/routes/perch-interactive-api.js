@@ -52,7 +52,10 @@ import { perchAttached } from "../shared/perch-attached.js";
 import { getInteractiveEngine } from "../perch-interactive.js";
 import { cwdList, cwdRead } from "../perch-files.js";
 import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
-import { updateCard } from "../board/card-service.js";
+import { updateCard, createCard } from "../board/card-service.js";
+import { lockState } from "./board-lock.js";
+import { boardState } from "../dashboard/shared/bot-display.js";
+import { assertProjectExists, appendAudit } from "../../shared/project-acl.js";
 import { annotateAvailability } from "../model-availability.js";
 import { providerModelListWarm, pickerModels, loadPiProviderNames, referencedModelKeys } from "../perch-model-catalog.js";
 import { renderBotMarkdown } from "../../blog/renderer.js";
@@ -254,10 +257,109 @@ function parseDef(row) {
 
 async function loadBotRow(db, botId) {
   const { rows } = await db.execute({
-    sql: "SELECT bot_id, display_name, definition, enabled FROM pi_bot_defs WHERE bot_id=?",
+    sql: "SELECT bot_id, display_name, definition, enabled, project_id FROM pi_bot_defs WHERE bot_id=?",
     args: [botId],
   });
   return rows[0] || null;
+}
+
+/**
+ * The dispatch core — POST /bots/:id/dispatch and "Give to…" with start:true
+ * both run THIS, so the two can never gate differently. Checks, in order:
+ * engine ready (409 engine_required), the bot has a Perch channel (403
+ * perch_not_attached), the card is a live card (404/400/409), the card is
+ * free (checkCardFree), then spawns bound to the card, writes the
+ * assigned_bot provenance (unless the caller already wrote it — the give
+ * route does, and a second write would be a second board_mutations row for
+ * one action), and fires turn 1 without awaiting it. Every refusal is thrown
+ * in the {code, http} shape mapEngineError() maps.
+ *
+ * `ctx.tdb` is opened here on first need (so an engine/perch refusal never
+ * touches the tasks store) and left open for the CALLER to close.
+ */
+async function dispatchCard(ctx, { row, eng, botId, cardId, note, skipProvenance = false }) {
+  if (resolveEngineStatus().state !== "ready") throw routeFail("engine_required", "engine_required", 409);
+  const def = row ? parseDef(row) : {};
+  if (!perchAttached(def)) throw routeFail("perch_not_attached", "perch_not_attached", 403);
+
+  if (!ctx.tdb) ctx.tdb = createDbClient(TASKS_DB);
+  await loadDispatchableCard(ctx.tdb, cardId);
+
+  await eng.checkCardFree(cardId);
+  const result = await eng.spawn({ botId, cardId });
+
+  // Provenance: the assigned_bot write goes through the SAME service
+  // updateCard()/board_update_item's route uses (bot-board-api.js's own
+  // DASHBOARD_ACTOR idiom) — one code path, one recordMutation shape.
+  //
+  // I6 (final review): eng.spawn() above already claims the card. If this
+  // write throws, the OLD code let the error propagate past the spawned
+  // session — the route errored out while the session still existed,
+  // still held the claim, and never got its turn-1 message: an orphan
+  // child on a permanently occupied card, recoverable only by Recall.
+  // The session itself is more valuable than this provenance write
+  // (a cosmetic "assigned by" field on the card), so a failure here is
+  // logged and dispatch continues — the operator gets a working session,
+  // just without the card-side assignment note.
+  if (!skipProvenance) {
+    try {
+      await updateCard(ctx.tdb, cardId, { assigned_bot: botId }, DASHBOARD_ACTOR);
+    } catch (provenanceErr) {
+      console.error(
+        `[perch-interactive-api] dispatch: assigned_bot provenance write failed for card ${cardId}, session ${result.sessionId} (session still proceeds):`,
+        provenanceErr
+      );
+    }
+  }
+
+  // Fire-and-forget: dispatch STARTS the turn (spawn() already composed
+  // and stored s.dispatchBrief; THIS message() call is what triggers it
+  // to fire — see perch-interactive.js's own header note). Never awaited
+  // — the route responds as soon as the session exists, not once the
+  // agent turn finishes.
+  eng.message(result.sessionId, note).catch(() => {});
+  return result;
+}
+
+/** "Give to…" target check: the bot exists and is enabled (else 400
+ * bot_unavailable), and it has a board a card can go on — kanban/task-list
+ * with a linked, live project (boardState() "on", the SAME predicate the
+ * Bot Builder and the Bot Board render with, so the gate and the UI cannot
+ * drift). Anything else — type none, no project, a custom tracker (a card
+ * cannot go onto a tracker board), an archived or missing project — is 409
+ * no_board. */
+async function loadGiveTarget(db, botId) {
+  const row = await loadBotRow(db, botId);
+  if (!row || !Number(row.enabled)) throw routeFail("bot unavailable", "bot_unavailable", 400);
+  if (boardState(row).state !== "on") throw routeFail("bot has no board", "no_board", 409);
+  try {
+    await assertProjectExists(db, Number(row.project_id));
+  } catch {
+    throw routeFail("bot's board project is gone or archived", "no_board", 409);
+  }
+  return row;
+}
+
+/** After a give: the response, and — only on an explicit boolean
+ * start:true ("Start right away" defaults OFF) — the dispatch core. A start
+ * that fails does NOT undo the give: the card is visibly on the bot's board
+ * and can be started from there; the response says why it did not start. */
+async function startAfterGive(ctx, { row, eng, botId, cardId, start, note }) {
+  const out = { ok: true, assigned: true, started: false, cardId };
+  if (start !== true) return out;
+  try {
+    const r = await dispatchCard(ctx, { row, eng, botId, cardId, note, skipProvenance: true });
+    return { ...out, started: true, sessionId: r.sessionId };
+  } catch (err) {
+    return { ...out, code: String((err && err.code) || "start_failed") };
+  }
+}
+
+function giveAudit(db, row, cardId, extra) {
+  return appendAudit(db, {
+    project_id: Number(row.project_id), actor_type: "local", action: "card_given",
+    target: `card:${cardId}`, payload: { bot_id: String(row.bot_id), ...extra },
+  });
 }
 
 /**
@@ -626,55 +728,80 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     if (cardId == null) return jsonError(res, 400, "bad_request");
 
     const db = createDbClient();
-    let tdb;
+    const ctx = { tdb: null };
     try {
       const row = await loadBotRow(db, botId);
-      if (resolveEngineStatus().state !== "ready") return jsonError(res, 409, "engine_required");
-      const def = row ? parseDef(row) : {};
-      if (!perchAttached(def)) return jsonError(res, 403, "perch_not_attached");
-
-      tdb = createDbClient(TASKS_DB);
-      await loadDispatchableCard(tdb, cardId);
-
-      const eng = resolveEngine();
-      await eng.checkCardFree(cardId);
-      const result = await eng.spawn({ botId, cardId });
-
-      // Provenance: the assigned_bot write goes through the SAME service
-      // updateCard()/board_update_item's route uses (bot-board-api.js's own
-      // DASHBOARD_ACTOR idiom) — one code path, one recordMutation shape.
-      //
-      // I6 (final review): eng.spawn() above already claims the card. If this
-      // write throws, the OLD code let the error propagate past the spawned
-      // session — the route errored out while the session still existed,
-      // still held the claim, and never got its turn-1 message: an orphan
-      // child on a permanently occupied card, recoverable only by Recall.
-      // The session itself is more valuable than this provenance write
-      // (a cosmetic "assigned by" field on the card), so a failure here is
-      // logged and dispatch continues — the operator gets a working session,
-      // just without the card-side assignment note.
-      try {
-        await updateCard(tdb, cardId, { assigned_bot: botId }, DASHBOARD_ACTOR);
-      } catch (provenanceErr) {
-        console.error(
-          `[perch-interactive-api] dispatch: assigned_bot provenance write failed for card ${cardId}, session ${result.sessionId} (session still proceeds):`,
-          provenanceErr
-        );
-      }
-
-      // Fire-and-forget: dispatch STARTS the turn (spawn() already composed
-      // and stored s.dispatchBrief; THIS message() call is what triggers it
-      // to fire — see perch-interactive.js's own header note). Never awaited
-      // — the route responds as soon as the session exists, not once the
-      // agent turn finishes.
-      eng.message(result.sessionId, note).catch(() => {});
-
+      const result = await dispatchCard(ctx, { row, eng: resolveEngine(), botId, cardId, note });
       res.status(201).json(result);
     } catch (err) {
       mapEngineError(res, err);
     } finally {
       try { db.close(); } catch { /* already closed */ }
-      if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
+      if (ctx.tdb) { try { ctx.tdb.close(); } catch { /* already closed */ } }
+    }
+  });
+
+  // ---- POST /cards/:id/give — put a card on a bot's board ("Give to…") ----
+  // Queue item 20, PR 2. Body {bot_id, start?, note?}. CSRF-railed (this
+  // router mounts after csrfMiddleware), session-gated, never public. Steps:
+  // the card is a live card (404/400/409 archived), not locked by a session
+  // or job (409 locked), the bot can take it (loadGiveTarget: 400
+  // bot_unavailable / 409 no_board); then ONE updateCard write (project_id +
+  // assigned_bot, one board_mutations row, autonomy untouched so it stays
+  // gated) and one card_given audit row; then, only on start:true, the
+  // dispatch core. Single-operator dashboard: no project_members check, the
+  // session-authenticated operator owns the box (same as every route here).
+  router.post(P + "/cards/:id/give", async (req, res) => {
+    const cardId = /^\d+$/.test(String(req.params.id)) ? Number(req.params.id) : null;
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const botId = typeof body.bot_id === "string" && body.bot_id ? body.bot_id : null;
+    if (cardId == null || !botId) return jsonError(res, 400, "bad_request");
+    const note = body.note == null ? "" : String(body.note).slice(0, MESSAGE_CAP);
+
+    const db = createDbClient();
+    const ctx = { tdb: null };
+    try {
+      ctx.tdb = createDbClient(TASKS_DB);
+      await loadDispatchableCard(ctx.tdb, cardId);
+      const lock = await lockState(db, cardId);
+      if (lock.locked) return jsonError(res, 409, "locked", { rail: lock.rail });
+      const row = await loadGiveTarget(db, botId);
+      await updateCard(ctx.tdb, cardId, { project_id: Number(row.project_id), assigned_bot: botId }, DASHBOARD_ACTOR);
+      await giveAudit(db, row, cardId, { start: body.start === true });
+      res.json(await startAfterGive(ctx, { row, eng: resolveEngine(), botId, cardId, start: body.start, note }));
+    } catch (err) {
+      mapEngineError(res, err);
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+      if (ctx.tdb) { try { ctx.tdb.close(); } catch { /* already closed */ } }
+    }
+  });
+
+  // ---- POST /bots/:id/tasks — a NEW task straight onto a bot's board ----
+  // The "Give <Name> a task" dialog's textarea. Body {title, start?, note?}.
+  // Same bot gate and same start path as the give route above; the card is
+  // born on the bot's project with its assigned_bot (one create row) and
+  // the builtin gated autonomy.
+  router.post(P + "/bots/:id/tasks", async (req, res) => {
+    const botId = String(req.params.id);
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const title = typeof body.title === "string" ? body.title.trim().slice(0, 500) : "";
+    if (!title) return jsonError(res, 400, "bad_request");
+    const note = body.note == null ? "" : String(body.note).slice(0, MESSAGE_CAP);
+
+    const db = createDbClient();
+    const ctx = { tdb: null };
+    try {
+      const row = await loadGiveTarget(db, botId);
+      ctx.tdb = createDbClient(TASKS_DB);
+      const { id: cardId } = await createCard(ctx.tdb, { title, project_id: Number(row.project_id), assigned_bot: botId }, DASHBOARD_ACTOR);
+      await giveAudit(db, row, cardId, { start: body.start === true, created: true });
+      res.json(await startAfterGive(ctx, { row, eng: resolveEngine(), botId, cardId, start: body.start, note }));
+    } catch (err) {
+      mapEngineError(res, err);
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+      if (ctx.tdb) { try { ctx.tdb.close(); } catch { /* already closed */ } }
     }
   });
 
