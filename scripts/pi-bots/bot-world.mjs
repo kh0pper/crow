@@ -86,16 +86,6 @@ export function withArtifactsCompanions(crowMcp) {
 }
 
 /**
- * The skill names a spawn inlines, in order. F4 (Artifacts acceptance smoke):
- * a bot whose tools grant the Artifacts server ran WITHOUT the protocol skill
- * unless the operator had attached it by hand — it tried to `read` the skill
- * file itself, the sandbox refused, and the model improvised (write +
- * send_user_file instead of artifact_create). The skill text is inlined HERE,
- * gateway-side (the child never reads the file), so the grant itself now
- * attaches the skill: an explicit def selection wins, a missing skill file
- * (bundle not installed on this instance) adds nothing and stays quiet.
- */
-/**
  * Design kit (spec §3.1, §4.3, §4.4; review H2). The kit mode is THIS
  * instance's install state (installedKitDir), passed in as kitInstalled and
  * stated in the prompt by kitModeLine — never inferred from which skill files
@@ -106,8 +96,18 @@ export function withArtifactsCompanions(crowMcp) {
  */
 export const DESIGN_SKILLS = Object.freeze(["design-frontend"]);
 export const kitModeLine = (installed) => (installed ? "Design kit: installed" : "Design kit: not installed");
+/**
+ * The skill names a spawn inlines, in order. F4 (Artifacts acceptance smoke):
+ * a bot whose tools grant the Artifacts server ran WITHOUT the protocol skill
+ * unless the operator had attached it by hand — it tried to `read` the skill
+ * file itself, the sandbox refused, and the model improvised (write +
+ * send_user_file instead of artifact_create). The skill text is inlined HERE,
+ * gateway-side (the child never reads the file), so the grant itself now
+ * attaches the skill: an explicit def selection wins, a missing skill file
+ * (bundle not installed on this instance) adds nothing and stays quiet.
+ */
 export function skillNamesFor(def, { crowHome, kitInstalled = false, houseStyle = null } = {}) {
-  const names = [...(def.skills || [])];
+  const names = [...(def.skills || [])].filter((n) => kitInstalled || !String(n).startsWith("design-"));
   if (!botGrantsServer(def, "artifacts")) return names;
   if (!names.includes("artifacts") && resolveSkill("artifacts", { crowHome })) names.push("artifacts");
   if (!kitInstalled || !crowHome) return names;

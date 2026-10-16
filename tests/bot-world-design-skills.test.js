@@ -32,6 +32,7 @@ test("skill names: kit skills only when THIS instance has the kit; design-poster
   assert.deepEqual(skillNamesFor(def(["artifacts"]), { crowHome, kitInstalled: false, houseStyle: HS }), ["artifacts"], "kit not installed here: nothing extra, whatever skill files exist");
   assert.deepEqual(skillNamesFor(def(["memory"]), { crowHome, kitInstalled: true, houseStyle: HS }), [], "no Artifacts grant, no design skills");
   assert.deepEqual(skillNamesFor(def(["artifacts"], ["design-poster"]), { crowHome, kitInstalled: true }), ["design-poster", "artifacts", "design-frontend"], "selected by the operator; no duplicates");
+  assert.deepEqual(skillNamesFor(def(["artifacts"], ["design-poster", "memory-management"]), { crowHome, kitInstalled: false }), ["memory-management", "artifacts"], "an operator-selected design-* skill never leaks onto a kit-less instance (strict H2)");
   const other = join(dir, "other-instance"); put(other, "artifacts", "# Artifacts");
   assert.deepEqual(skillNamesFor(def(["artifacts"]), { crowHome: other, kitInstalled: true }), ["artifacts"], "kit skills present only in ~/.crow/skills (another instance) are never attached (review H2)");
 });
