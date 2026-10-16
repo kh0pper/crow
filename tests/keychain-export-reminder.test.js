@@ -43,33 +43,50 @@ test("no generated keys → no reminder at all (a manual entry never counts)", a
   assert.equal(s.card, null);
 });
 
-test("a generated key that was never exported → an info issue that links to Settings → Passwords", async () => {
+test("an extension key that was never exported → an info issue that links to Settings → Passwords", async () => {
   await K.saveExtensionSecret(db, key, { bundleId: "tax", envKey: "CROW_TAX_ENCRYPTION_KEY", label: "Tax — data encryption key", secret: "k1-" + "x".repeat(40), origin: "generated" });
   const s = await signal();
   assert.ok(s.issue, "the reminder is shown");
   assert.equal(s.issue.severity, "info", "info only: shown on the Nest strip, never pushed");
-  assert.match(s.issue.label, /1 .*not in a keychain Export/i);
+  assert.match(s.issue.label, /^1 .*not in a keychain Export/i);
   assert.equal(s.issue.actionHref, "/dashboard/settings?section=passwords");
-  assert.deepEqual(await R.unexportedGeneratedCount(db), 1);
 });
 
-test("after an export the reminder is gone; a key generated after the export brings it back", async () => {
-  await R.recordKeychainExport(db, new Date(Date.now() + 1000));
-  assert.equal((await signal()).issue, null, "everything generated is in an Export");
-  await new Promise((r) => setTimeout(r, 1100));
+test("a key KEPT from an older install (origin typed) counts too", async () => {
+  await K.saveExtensionSecret(db, key, { bundleId: "mastodon", envKey: "MASTODON_OTP_SECRET", label: "Mastodon — two-factor secret", secret: "kept-" + "z".repeat(40), origin: "typed" });
+  assert.equal(await R.unexportedCount(db, key.id), 2);
+});
+
+test("after an export the reminder is gone; a key saved or re-saved after the export brings it back", async () => {
+  await R.recordKeychainExport(db, key.id);
+  assert.equal((await signal()).issue, null, "everything is in an Export");
   await K.saveExtensionSecret(db, key, { bundleId: "campaigns", envKey: "CROW_CAMPAIGNS_ENCRYPTION_KEY", label: "Campaigns — data encryption key", secret: "k2-" + "y".repeat(40), origin: "generated" });
-  const s = await signal();
-  assert.ok(s.issue, "the newer key is in no Export");
-  assert.match(s.issue.label, /^1 /);
+  assert.match((await signal()).issue.label, /^1 /, "a new key is in no Export");
+  await R.recordKeychainExport(db, key.id);
+  // A re-mint over an existing row keeps its created_at but is a new secret: it counts again.
+  await K.saveExtensionSecret(db, key, { bundleId: "tax", envKey: "CROW_TAX_ENCRYPTION_KEY", label: "Tax — data encryption key", secret: "k3-" + "w".repeat(40), origin: "generated" });
+  assert.equal(await R.unexportedCount(db, key.id), 1);
 });
 
-test("the last-export time is local: it is not in the sync allowlist", () => {
+test("entries that came in through an Import are in that file: they do not count", async () => {
+  await R.recordKeychainExport(db, key.id);
+  const { ids } = await K.importEntries(db, key, [{ kind: "extension", bundle_id: "pixelfed", env_key: "PIXELFED_APP_KEY", label: "Pixelfed — data encryption key", secret: "base64:" + "q".repeat(44), origin: "generated" }]);
+  assert.equal(ids.length, 1);
+  assert.equal(await R.unexportedCount(db, key.id), 1, "before recording the import it would count");
+  await R.recordKeychainImport(db, key.id, ids);
+  assert.equal(await R.unexportedCount(db, key.id), 0);
+});
+
+test("the export fingerprints are local: not in the sync allowlist", () => {
   assert.equal(isSyncable(R.LAST_EXPORT_SETTING), false);
 });
 
-test("POST /api/keychain/export records the export time (route wiring)", async () => {
+test("the export and import routes record the reminder state and drop the health cache", async () => {
   const src = (await import("node:fs")).readFileSync(new URL("../servers/gateway/keychain/api.js", import.meta.url), "utf8");
   const exportRoute = src.slice(src.indexOf("/export`"), src.indexOf("/import`"));
-  assert.match(exportRoute, /recordKeychainExport\(db/);
+  assert.match(exportRoute, /recordKeychainExport\(db, key\.id\)/);
   assert.ok(exportRoute.indexOf("recordKeychainExport") > exportRoute.indexOf("sealExport"), "only after the file is sealed");
+  assert.match(exportRoute, /invalidateHealthCache\(\)/);
+  const importRoute = src.slice(src.indexOf("/import`"), src.indexOf("/vault-save`"));
+  assert.match(importRoute, /recordKeychainImport\(db, ikey\.id, ids\)/);
 });
