@@ -82,3 +82,16 @@ test("item 21: audioPolicy's mic_release_for_media follows mic_per_turn per disp
   assert.equal(audioPolicy({ profile: "phone", mic_settle_ms: 1200 }, android).mic_settle_ms, 1200);
   for (const bad of [-1, "x", null, 99999, 1.5]) assert.equal(audioPolicy({ mic_settle_ms: bad }, android).mic_settle_ms, 800, String(bad));
 });
+
+test("S7 bar only on a session display: caps.bar is true only for a session hello that sent bar:true with a tab owner nonce", () => {
+  const OWNER = "tab-owner-aaaaaaaaaaaa";
+  const bar = { ...V2, bar: true };
+  assert.equal(effectiveCaps(bar, "phone").bar, false, "a paired display can never claim the bar");
+  assert.equal(effectiveCaps(bar, "phone", { session: false, owner: OWNER }).bar, false);
+  assert.equal(effectiveCaps(V2, "phone", { session: true, owner: OWNER }).bar, false, "a session hello without bar:true (today's page)");
+  assert.equal(effectiveCaps({ ...V2, bar: "true" }, "phone", { session: true, owner: OWNER }).bar, false, "only the boolean true");
+  assert.equal(effectiveCaps(bar, "phone", { session: true }).bar, false, "no owner nonce");
+  for (const owner of ["short", "x".repeat(65), "has space aaaaaaaaaaaa", 123]) assert.equal(effectiveCaps(bar, "phone", { session: true, owner }).bar, false, String(owner));
+  assert.equal(effectiveCaps(bar, "phone", { session: true, owner: OWNER }).bar, true);
+  assert.equal(effectiveCaps(null, null).bar, false);
+});

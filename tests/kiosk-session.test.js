@@ -824,3 +824,45 @@ test("r7c N3 (source): the early transcript carries its hotwords flag into the t
   assert.match(src, /hotwords: r\?\.hotwords === true/);
   assert.match(src, /sttEarly = \{ used: true, ms: er\.ms, hotwords: er\.hotwords === true,/);
 });
+
+// ---- B3: the player-bar hello (dormant: no shipped page sends bar:true) ----
+
+test("B3 bar hello: only a session display that asks for the bar with an owner nonce gets caps.bar; its owner reaches the media session before the snapshot, and closing it starts no 30 s cut", async () => {
+  const OWNER = "tab-owner-aaaaaaaaaaaa";
+  const media = { ...fakeMedia(), setOwner(id, o) { this.calls.push(["setOwner", id, o]); return false; } };
+  const { h } = hub({ media });
+  const closed = [];
+  const ws = new FakeWs();
+  h.attach(ws, { authorize: async () => ({ device: { ...SDEV } }), onClose: (d, caps) => closed.push([d.id, caps.bar]) });
+  ws.text({ type: "hello", mode: "session", owner: OWNER, caps: { v: 2, bar: true, kinds: ["card"] } });
+  await tick();
+  assert.equal(h.capsOf(SDEV.id).bar, true);
+  assert.deepEqual(media.calls.slice(0, 2), [["setOwner", SDEV.id, OWNER], ["snapshot", SDEV.id]], "the owner is set first, so the snapshot carries the owner's ticket");
+  h.refreshDevice(SDEV.id, { kiosk_settings: { lang: "en", profile: "phone" } });
+  assert.equal(h.capsOf(SDEV.id).bar, true, "a recap keeps the bar");
+  ws.close(1000, "");
+  assert.ok(!media.calls.some((c) => c[0] === "sessionLost"), "the audio lives in the bar: no grace-period cut");
+  assert.deepEqual(closed, [[SDEV.id, true]]);
+});
+
+test("B3 dormancy: a session hello without bar (today's page) clears any owner and keeps the 30 s cut; a paired hello asking for the bar gets nothing and is never given an owner", async () => {
+  const OWNER = "tab-owner-aaaaaaaaaaaa";
+  const media = { ...fakeMedia(), setOwner(id, o) { this.calls.push(["setOwner", id, o]); return false; } };
+  const { h } = hub({ media });
+  const s = new FakeWs();
+  h.attach(s, { authorize: async () => ({ device: { ...SDEV } }) });
+  s.text({ type: "hello", mode: "session", caps: { v: 2, kinds: ["card"] } });
+  await tick();
+  assert.equal(h.capsOf(SDEV.id).bar, false);
+  assert.deepEqual(media.calls.filter((c) => c[0] === "setOwner"), [["setOwner", SDEV.id, null]]);
+  s.close(1006, "");
+  assert.deepEqual(media.calls.filter((c) => c[0] === "sessionLost"), [["sessionLost", SDEV.id]]);
+  media.calls.length = 0;
+  const p = new FakeWs(); h.attach(p);
+  p.text({ type: "hello", device_id: "kiosk-a", token: "good", owner: OWNER, caps: { v: 2, bar: true, kinds: ["card"] } });
+  await tick();
+  assert.equal(h.capsOf("kiosk-a").bar, false, "S7: a paired display can never claim the bar");
+  assert.ok(!media.calls.some((c) => c[0] === "setOwner"), "a paired display's media session never has an owner");
+  p.close(1006, "");
+  assert.deepEqual(media.calls.filter((c) => c[0] === "sessionLost"), [["sessionLost", "kiosk-a"]]);
+});

@@ -814,3 +814,37 @@ test("r8b (review L1): only a TRAILING 'thank you' / 'thanks' is filler — 'You
   }
   for (const q of ["Louder, thanks.", "Pause. Thank you."]) assert.ok(["t0", "t1"].includes((await s.say(q))?.tier), q);
 });
+
+// ─── B3: on a display whose audio is in the dashboard's player bar, now playing IS the bar ───
+
+test("B3 bar caps: no now-playing window opens by itself or from the chip; crow_open now_playing answers the bar line with no wm events (en + es)", async () => {
+  const s = setup();
+  const bar = { ...s.ctx, caps: { ...s.ctx.caps, screen: { w: 800, h: 600 }, bar: true } };
+  assert.deepEqual(autoNowPlaying({ store: s.store, deviceId: "d", caps: bar.caps, title: "Now playing" }), []);
+  assert.deepEqual(showNowPlaying({ store: s.store, deviceId: "d", caps: bar.caps, title: "Now playing" }), []);
+  await playMix(s);
+  assert.deepEqual(await s.tool("crow_open", bar)({ app: "now_playing" }), { ok: true, outcome: "done", say: "It's in the player bar.", final: true });
+  assert.deepEqual(await s.tool("crow_open", { ...bar, lang: "es" })({ app: "now_playing" }), { ok: true, outcome: "done", say: "Está en la barra del reproductor.", final: true });
+  assert.equal(s.store.list("d").length, 0);
+  assert.deepEqual(s.events.filter((e) => e.type === "wm"), []);
+  // "What's playing?" still names it (the answer is the title), and opens nothing.
+  assert.deepEqual(await s.say("What's playing?", bar), { say: "This is Morning Mix.", tier: "t0", events: [] });
+  assert.equal(s.store.list("d").length, 0);
+  // Nothing playing: unchanged.
+  const idle = setup();
+  assert.equal((await idle.tool("crow_open", { ...idle.ctx, caps: { ...idle.ctx.caps, bar: true } })({ app: "now_playing" })).say, "Nothing is playing.");
+});
+
+test("B3 dormancy: without bar (every display today) the now-playing window behaves exactly as before", async () => {
+  const s = setup();
+  const caps = { ...s.ctx.caps, screen: { w: 800, h: 600 }, bar: false };
+  assert.equal(autoNowPlaying({ store: s.store, deviceId: "d", caps, title: "Now playing" }).at(-1).action, "open");
+  assert.equal(showNowPlaying({ store: s.store, deviceId: "d", caps, title: "Now playing" })[0].action, "focus");
+  await playMix(s);
+  assert.equal((await s.tool("crow_open", { ...s.ctx, caps })({ app: "now_playing" })).outcome, "focused");
+});
+
+test("B3 strings: the player-bar line exists in both languages", () => {
+  assert.equal(STRINGS.en.say_in_player_bar, "It's in the player bar.");
+  assert.equal(STRINGS.es.say_in_player_bar, "Está en la barra del reproductor.");
+});

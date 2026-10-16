@@ -368,3 +368,161 @@ test("r8b (operator rulings M2 + volume range): a stored cap moves to the loudes
   assert.equal(migrateMaxVolume(undefined), undefined);
   assert.equal(migrateMaxVolume("x"), undefined);
 });
+
+// ─── B3: the player bar's one-item view, stale ids, the owner nonce (dormant until a bar hello) ───
+
+const OWNER = "tab-owner-aaaaaaaaaaaa";
+const OTHER = "tab-owner-bbbbbbbbbbbb";
+const ticketOf = (url) => url.split("/")[3];
+
+test("B3 view: an empty display; the current item as one item with its ticket path, has_next/has_previous across a 3-item queue", () => {
+  const s = setup();
+  assert.deepEqual(s.media.view("d"), { item: null, state: "none", has_next: false, has_previous: false, volume: DEFAULT_VOLUME, muted: false });
+  s.media.play("d", [track("One"), track("Two"), track("Three")]);
+  const v = s.media.view("d");
+  assert.deepEqual(Object.keys(v.item).sort(), ["form", "id", "live", "source", "subtitle", "title", "url"]);
+  assert.deepEqual([v.item.id, v.item.url, v.item.title, v.item.form, v.item.live, v.state, v.has_next, v.has_previous], [last(s).id, last(s).url, "One", "audio", false, "loading", true, false]);
+  assert.ok(!("retry_ms" in v));
+  s.media.next("d");
+  assert.deepEqual([s.media.view("d").has_next, s.media.view("d").has_previous], [true, true]);
+  s.media.next("d");
+  assert.deepEqual([s.media.view("d").has_next, s.media.view("d").has_previous], [false, true]);
+  assert.equal(s.media.itemId("d"), last(s).id);
+  assert.equal(s.media.itemId("nobody"), null);
+});
+
+test("B3 item kind: `live` is true for a station and false for a library track, on the load message and the view", () => {
+  const s = setup();
+  s.media.play("d", [station()]);
+  assert.equal(last(s).live, true);
+  assert.equal(s.media.view("d").item.live, true);
+  s.media.play("d", [track("One")]);
+  assert.equal(last(s).live, false);
+  assert.equal(s.media.view("d").item.live, false);
+});
+
+test("B3 owner: a display with no owner is never reachable through the endpoint (every paired display, every session display without bar)", () => {
+  const s = setup();
+  s.media.play("d", [track("One"), track("Two")]);
+  const id = last(s).id;
+  assert.deepEqual(s.media.endpoint("d", { do: "next", id, owner: OWNER }), { status: 409 });
+  assert.deepEqual(s.media.endpoint("d", { do: "stop", id, owner: undefined }), { status: 409 });
+  assert.equal(s.media.itemId("d"), id, "nothing moved");
+  assert.equal(s.media.barView("d", OWNER).item, null, "and its ticket is never handed out by GET");
+  assert.equal(s.media.setOwner("d", null), false, "no owner set and none asked: nothing changes");
+  assert.equal(s.media.setOwner("never-played", null), false);
+  assert.equal(s.tickets.size(), 1);
+});
+
+test("B3 endpoint: next returns the next ticket and revokes the old one; stop ends the session; a stale id or another owner → 409 and nothing moves", () => {
+  const s = setup();
+  s.media.setOwner("d", OWNER);
+  s.media.play("d", [track("One"), track("Two")]);
+  const first = last(s);
+  assert.deepEqual(s.media.endpoint("d", { do: "next", id: "m999", owner: OWNER }), { status: 409 });
+  assert.deepEqual(s.media.endpoint("d", { do: "next", id: first.id, owner: OTHER }), { status: 409 });
+  assert.deepEqual(s.media.endpoint("d", { do: "stop", id: first.id, owner: OTHER }), { status: 409 }, "a stop from a tab that is not the owner never ends what the owner plays");
+  assert.equal(s.media.itemId("d"), first.id);
+  assert.ok(s.tickets.get(ticketOf(first.url)), "and its ticket is untouched");
+  const r = s.media.endpoint("d", { do: "next", id: first.id, owner: OWNER });
+  assert.equal(r.status, 200);
+  assert.equal(r.view.item.title, "Two");
+  assert.notEqual(r.view.item.url, first.url);
+  assert.equal(s.tickets.get(ticketOf(first.url)), null, "the old ticket is gone");
+  assert.ok(s.tickets.get(ticketOf(r.view.item.url)));
+  const p = s.media.endpoint("d", { do: "pause", id: r.view.item.id, owner: OWNER });
+  assert.equal(p.view.state, "paused");
+  assert.equal(s.media.endpoint("d", { do: "resume", id: r.view.item.id, owner: OWNER }).view.state, "playing");
+  assert.equal(s.media.endpoint("d", { do: "previous", id: r.view.item.id, owner: OWNER }).view.item.title, "One");
+  const cur = s.media.itemId("d");
+  const st = s.media.endpoint("d", { do: "stop", id: cur, owner: OWNER });
+  assert.deepEqual([st.status, st.view.item, s.tickets.size()], [200, null, 0]);
+  assert.deepEqual(s.media.endpoint("d", { do: "stop", id: cur, owner: OWNER }), { status: 200, view: s.media.view("d") }, "stop with nothing playing is idempotent");
+});
+
+test("B3 endpoint: the bar's ended/error go through the server's own queue and retry rules", () => {
+  const s = setup();
+  s.media.setOwner("d", OWNER);
+  s.media.play("d", [track("One"), track("Two")]);
+  const one = last(s).id;
+  s.media.onEvent("d", { id: one, state: "playing" });
+  const r = s.media.endpoint("d", { do: "ended", id: one, owner: OWNER });
+  assert.equal(r.view.item.title, "Two", "ended → the next queued item");
+  const e = s.media.endpoint("d", { do: "error", id: r.view.item.id, owner: OWNER });
+  assert.equal(e.view.item, null, "an error on the last item ends the session");
+  assert.equal(s.failed.length, 1);
+});
+
+test("B3 radio reload with the bar detached: retry_ms is the time remaining (GET has no side effect); after the timer the view carries a new ticket path", () => {
+  const s = setup();
+  s.media.setOwner("d", OWNER);
+  s.media.play("d", [station()]);
+  const first = last(s);
+  s.media.onEvent("d", { id: first.id, state: "playing" });
+  const r = s.media.endpoint("d", { do: "error", id: first.id, owner: OWNER });
+  assert.deepEqual([r.view.retry_ms, r.view.item.id, r.view.item.url], [RADIO_BACKOFF_MS[0], first.id, null], "the station stays, its dead ticket is not offered");
+  s.clock.t += 400;
+  assert.equal(s.media.barView("d", OWNER).retry_ms, RADIO_BACKOFF_MS[0] - 400);
+  assert.equal(s.media.barView("d", OWNER).retry_ms, RADIO_BACKOFF_MS[0] - 400, "asking again changes nothing");
+  assert.equal(s.timers.filter((t) => t.on).length, 1);
+  assert.equal(s.media.holdsTicket("d"), true, "a pending reload still holds the session");
+  s.timers.find((t) => t.on).fn();
+  const v = s.media.barView("d", OWNER);
+  assert.ok(!("retry_ms" in v));
+  assert.match(v.item.url, /^\/display\/t\/[A-Za-z0-9_-]{22}\/stream$/);
+  assert.notEqual(v.item.url, first.url);
+});
+
+test("B3 owner change (a second tab of the same login): the same item gets a new ticket, the old one is revoked; the old owner is refused, and its error is never a radio retry", () => {
+  const s = setup();
+  s.media.setOwner("d", OWNER);
+  s.media.play("d", [station()]);
+  const first = last(s);
+  s.media.onEvent("d", { id: first.id, state: "playing" });
+  assert.equal(s.media.setOwner("d", OWNER), false, "the same tab again: nothing changes");
+  assert.equal(s.media.view("d").item.url, first.url);
+  assert.equal(s.media.setOwner("d", OTHER), true);
+  const v = s.media.view("d");
+  assert.equal(v.item.id, first.id, "the same item");
+  assert.notEqual(v.item.url, first.url);
+  assert.equal(s.tickets.get(ticketOf(first.url)), null, "the old tab's stream ticket is revoked");
+  assert.deepEqual(s.media.endpoint("d", { do: "error", id: first.id, owner: OWNER }), { status: 409 });
+  assert.equal(s.timers.filter((t) => t.on).length, 0, "no reload was started for the old owner");
+  assert.equal(s.media.endpoint("d", { do: "pause", id: first.id, owner: OTHER }).status, 200);
+});
+
+test("B3 GET: the ticket goes only to the owning tab; the old owner, another tab, or no owner sees nothing", () => {
+  const s = setup();
+  s.media.setOwner("d", OWNER);
+  s.media.play("d", [track("One")]);
+  assert.equal(s.media.barView("d", OWNER).item.url, last(s).url, "the owner gets its ticket");
+  s.media.setOwner("d", OTHER);
+  const v = s.media.barView("d", OTHER);
+  assert.equal(v.item.url, s.media.view("d").item.url, "the new owner gets the new ticket");
+  assert.deepEqual(s.media.barView("d", OWNER), s.media.view(null), "the old owner's GET is empty: two tabs never stream");
+  assert.deepEqual(s.media.barView("d"), s.media.view(null), "no owner given");
+  assert.deepEqual(s.media.barView("d", ""), s.media.view(null));
+  assert.deepEqual(s.media.barView("nobody", OTHER), s.media.view(null), "an unknown display");
+});
+
+test("B3 endpoint: the owner's stop with a stale item id (a station reload changed it) still ends the session; other verbs stay 409", () => {
+  const s = setup();
+  s.media.setOwner("d", OWNER);
+  s.media.play("d", [track("One"), track("Two")]);
+  const first = last(s);
+  assert.deepEqual(s.media.endpoint("d", { do: "next", id: "m999", owner: OWNER }), { status: 409 }, "a stale next still 409s");
+  const st = s.media.endpoint("d", { do: "stop", id: "m999", owner: OWNER });
+  assert.deepEqual([st.status, st.view.item], [200, null], "the view is empty");
+  assert.equal(s.tickets.get(ticketOf(first.url)), null, "the ticket is revoked");
+  assert.equal(s.tickets.size(), 0);
+  assert.equal(s.media.itemId("d"), null, "nothing replays on the next overlay open");
+});
+
+test("B3 holdsTicket: false once the item's ticket has expired or the session ended", () => {
+  const s = setup();
+  assert.equal(s.media.holdsTicket("d"), false);
+  s.media.play("d", [track("One")]);
+  assert.equal(s.media.holdsTicket("d"), true);
+  s.clock.t += 12 * 60 * 60 * 1000;
+  assert.equal(s.media.holdsTicket("d"), false, "the 12 h ticket has run out");
+});

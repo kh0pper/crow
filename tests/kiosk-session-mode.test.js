@@ -628,3 +628,369 @@ test("a session display gets the same turn rules as a paired one: display tool o
     c.ws.close();
   } finally { f.close(); }
 });
+
+// ─── B3: the player bar's endpoint and the bar display's lifetime (dormant until a bar hello) ───
+// A runtime on the same database and core auth, with a fake relay (a stream that answers 200, or holds
+// the request open until its ticket is cut), a settable clock, the minute sweep captured, and the
+// media session's timers in hand.
+
+const MEDIA = "/api/kiosk/session/media";
+const OWNER = "tab-owner-aaaaaaaaaaaa";
+const TICKET_IN = /\/display\/t\/([A-Za-z0-9_-]{22})\/stream/;
+
+async function barServe() {
+  const { sessionDisplayId } = await import("../bundles/kiosk/server/session-display.js");
+  const clock = { t: Date.now() };
+  const sweeps = [];
+  const mediaTimers = [];
+  const barLogs = [];
+  const held = [];
+  const relay = {
+    toResponse: async (resource, req, res, { signal }) => {
+      res.status(200).type("audio/mpeg");
+      if (!req.headers["x-test-hold"]) { res.end("ok"); return "ok"; }
+      res.write("x");
+      held.push(signal);
+      await new Promise((r) => (signal.aborted ? r() : signal.addEventListener("abort", r, { once: true })));
+      res.destroy();
+      return "aborted";
+    },
+  };
+  const k = kiosk.createKioskRuntime({
+    Router: express.Router, json: express.json, WebSocketServer,
+    isAllowedNetwork: auth.isAllowedNetwork, csrfMiddleware: csrf.csrfMiddleware, csrfTokenAccepted: csrf.csrfTokenAccepted,
+    sessionFromRequest: auth.sessionFromRequest, verifySession: auth.verifySession,
+    openDb: open, deviceStore: store,
+    settings: { readSetting: registry.readSetting, writeSetting: registry.writeSetting },
+    voice: { runVoiceTurn: async () => ({ route: "fast", timings: {} }), speakText: async () => true },
+    sttWarmup: async () => {},
+    resolveDisplayBird: async () => ({ species: "crow", seed: 0, mood: "happy", outfit: null, source: "default" }),
+    themeCss: () => "", files: { publicDir: join(REPO, "bundles", "kiosk", "public"), birdSvgPath: join(REPO, "bundles", "ramble", "server", "bird-svg.cjs") },
+    announceToken: { validate: async () => false }, helloTimeoutMs: 300, wrapPcmAsWav,
+    relay,
+    now: () => clock.t,
+    setInterval: (fn) => { sweeps.push(fn); return { unref() {} }; },
+    mediaTimers: { setTimer: (fn, ms) => { const t = { fn, ms, on: true }; mediaTimers.push(t); return t; }, clearTimer: (t) => { if (t) t.on = false; } },
+    log: (m) => barLogs.push(m),
+  });
+  const app = express();
+  app.use(k.router(auth.dashboardAuth));
+  const s = http.createServer(app);
+  const sconns = new Set();
+  s.on("connection", (c) => { sconns.add(c); c.on("close", () => sconns.delete(c)); });
+  k.attachUpgrade(s);
+  await new Promise((r) => s.listen(0, "127.0.0.1", r));
+  const b = `http://127.0.0.1:${s.address().port}`;
+  const H = (tok = sessionToken) => ({ ...SERVE, Cookie: cookie(tok) });
+  const rig = {
+    k, b, clock, mediaTimers, barLogs, held,
+    idOf: (tok = sessionToken) => sessionDisplayId(tok),
+    /** Open the overlay's socket with (or without) the bar; resolves once ready. */
+    async open({ tok = sessionToken, bar = true, owner = OWNER } = {}) {
+      const ws = new WebSocket(b.replace("http", "ws") + WS_PATH, { headers: { ...H(tok), Origin: b } });
+      const msgs = []; let closed = null;
+      ws.on("message", (d, bin) => { if (!bin) msgs.push(JSON.parse(d.toString())); });
+      ws.on("close", (code, reason) => { closed = { code, reason: reason.toString() }; });
+      ws.on("error", () => {});
+      await new Promise((r, j) => { ws.on("open", r); ws.on("unexpected-response", (q, res) => j(new Error("refused " + res.statusCode))); });
+      ws.send(JSON.stringify({ type: "hello", mode: "session", csrf: CSRF, ...(bar ? { owner } : {}), caps: { v: 2, kinds: ["card", "timer", "nowplaying"], screen: { w: 800, h: 600 }, ...(bar ? { bar: true } : {}) } }));
+      const until = async (fn, ms = 1500) => { for (let i = 0; i < ms / 10 && !fn(); i++) await new Promise((r) => setTimeout(r, 10)); return fn(); };
+      await until(() => msgs.some((m) => m.type === "ready") || closed);
+      const shut = async () => { ws.close(); await until(() => !k.hub.isConnected(rig.idOf(tok))); };
+      return { ws, msgs, until, shut, get closed() { return closed; } };
+    },
+    /** Play a queue on this login's display (as a voice "play" would), → the load message's ticket path. */
+    play(tok = sessionToken, titles = ["One", "Two"], source = "music") {
+      const item = k.media.play(rig.idOf(tok), titles.map((t) => ({ upstream: { url: `https://stream.example.invalid/${t}`, hop: { kind: "public" } }, title: t, subtitle: "", source })));
+      return k.media.view(rig.idOf(tok)).item.url ?? item;
+    },
+    get: (tok = sessionToken, headers = H(tok)) => fetch(b + MEDIA, { headers, redirect: "manual" }),
+    /** GET as the tab that sent `owner` in its bar hello (X-Crow-Owner): only the owning tab is handed the ticket. */
+    getOwned: (owner = OWNER, tok = sessionToken) => fetch(b + MEDIA, { headers: { ...H(tok), "X-Crow-Owner": owner }, redirect: "manual" }),
+    post: (body, { tok = sessionToken, headers } = {}) => fetch(b + MEDIA, { method: "POST", redirect: "manual", headers: headers || { ...H(tok), "Content-Type": "application/json", "X-Crow-Csrf": CSRF }, body: JSON.stringify(body) }),
+    stream: (path, hold = false) => fetch(b + path, { headers: { ...SERVE, ...(hold ? { "x-test-hold": "1" } : {}) } }),
+    /** One minute sweep, awaited. */
+    sweep: async () => { for (const fn of sweeps) await fn(); },
+    close: () => { k.stop(); for (const c of sconns) c.destroy(); s.close(); },
+  };
+  return rig;
+}
+
+test("B3 endpoint: auth matrix — session cookie (401), CSRF double-submit on POST (403), Funnel and off-network (403); GET needs no CSRF; never cached", async () => {
+  const r = await barServe();
+  try {
+    const c = await r.open();
+    const path = r.play();
+    const id = r.k.media.itemId(r.idOf());
+    const json = { "Content-Type": "application/json" };
+    // No session, a bogus session, a paired-device token: 401 (GET and POST alike).
+    assert.equal((await r.get(null, SERVE)).status, 401);
+    assert.equal((await r.get(null, { ...SERVE, Cookie: "crow_session=not-a-session; crow_csrf=" + CSRF })).status, 401);
+    assert.equal((await r.post({ do: "pause", id, owner: OWNER }, { headers: { ...SERVE, ...json, Cookie: "crow_csrf=" + CSRF, "X-Crow-Csrf": CSRF } })).status, 401);
+    // CSRF: none, wrong, or a header with no cookie to match.
+    assert.equal((await r.post({ do: "pause", id, owner: OWNER }, { headers: { ...SERVE, ...json, Cookie: cookie() } })).status, 403);
+    assert.equal((await r.post({ do: "pause", id, owner: OWNER }, { headers: { ...SERVE, ...json, Cookie: cookie(), "X-Crow-Csrf": "wrong" } })).status, 403);
+    assert.equal((await r.post({ do: "pause", id, owner: OWNER }, { headers: { ...SERVE, ...json, Cookie: `crow_session=${sessionToken}`, "X-Crow-Csrf": CSRF } })).status, 403);
+    // The network gate runs first: Funnel and off-network are refused even with a valid session + CSRF.
+    for (const headers of [{ ...SERVE, ...json, Cookie: cookie(), "X-Crow-Csrf": CSRF, "Tailscale-Funnel-Request": "?1" }, { ...json, Cookie: cookie(), "X-Crow-Csrf": CSRF }]) {
+      assert.equal((await r.post({ do: "pause", id, owner: OWNER }, { headers })).status, 403);
+      const { "X-Crow-Csrf": _x, ...g } = headers;
+      assert.equal((await r.get(null, g)).status, 403);
+    }
+    assert.equal(r.k.media.current(r.idOf()).state, "playing", "no refused request touched the media");
+    // A malformed body is 400.
+    for (const body of [{ do: "eval", id, owner: OWNER }, { do: "pause", owner: OWNER }, { do: "pause", id: "x", owner: OWNER }, { do: "pause", id }, { do: "pause", id, owner: "short" }]) assert.equal((await r.post(body)).status, 400, JSON.stringify(body));
+    // A valid GET (no CSRF needed) and POST.
+    const g = await r.getOwned();
+    assert.equal(g.status, 200);
+    assert.equal(g.headers.get("cache-control"), "no-store");
+    assert.deepEqual([(await g.json()).item.url], [path]);
+    const p = await r.post({ do: "pause", id, owner: OWNER });
+    assert.equal(p.status, 200);
+    assert.equal(p.headers.get("cache-control"), "no-store");
+    assert.equal((await p.json()).state, "paused");
+    c.ws.close();
+  } finally { r.close(); }
+});
+
+test("B3 endpoint: two logins cannot see or steer each other's media (the display is the caller's own login, never taken from the body)", async () => {
+  const r = await barServe();
+  const { token: other } = await auth.mintSsoSession("test");
+  try {
+    const a = await r.open();
+    r.play();
+    const id = r.k.media.itemId(r.idOf());
+    const b = await r.open({ tok: other, owner: "tab-owner-cccccccccccc" });
+    const seen = await (await r.getOwned(OWNER, other)).json();
+    assert.equal(seen.item, null, "B sees nothing of A's media, even sending A's tab nonce");
+    assert.ok(!JSON.stringify(seen).includes("/display/t/"));
+    // Even knowing A's item id and A's tab nonce, B's requests reach only B's own display.
+    for (const doIt of ["stop", "next", "pause"]) {
+      const res = await r.post({ do: doIt, id, owner: OWNER }, { tok: other });
+      assert.ok(res.status === 409 || (res.status === 200 && (await res.json()).item === null), `${doIt}: ${res.status}`);
+    }
+    assert.equal(r.k.media.itemId(r.idOf()), id, "A's item is untouched");
+    assert.equal(r.k.media.current(r.idOf()).state, "playing");
+    a.ws.close(); b.ws.close();
+  } finally { r.close(); await auth.destroySession(other); }
+});
+
+test("B3 endpoint: next returns the next ticket and the old one answers 404; stop ends the session (view empty, ticket 404); a stale id → 409 superseded", async () => {
+  const r = await barServe();
+  try {
+    const c = await r.open();
+    const first = r.play();
+    const id = r.k.media.itemId(r.idOf());
+    assert.equal((await r.stream(first)).status, 200);
+    const n = await r.post({ do: "next", id, owner: OWNER });
+    assert.equal(n.status, 200);
+    const v = await n.json();
+    assert.equal(v.item.title, "Two");
+    assert.match(v.item.url, TICKET_IN);
+    assert.notEqual(v.item.url, first);
+    assert.equal((await r.stream(first)).status, 404, "the old ticket is revoked");
+    assert.equal((await r.stream(v.item.url)).status, 200);
+    const stale = await r.post({ do: "pause", id, owner: OWNER });
+    assert.equal(stale.status, 409);
+    assert.deepEqual(await stale.json(), { error: "superseded" });
+    const s = await r.post({ do: "stop", id: v.item.id, owner: OWNER });
+    assert.equal((await s.json()).item, null);
+    assert.equal((await r.stream(v.item.url)).status, 404);
+    assert.equal((await (await r.getOwned()).json()).item, null);
+    c.ws.close();
+  } finally { r.close(); }
+});
+
+test("S8 GET hands the ticket only to the owning tab: after a second tab takes over, the old tab's GET (and one with no or a malformed X-Crow-Owner) gets item null", async () => {
+  const r = await barServe();
+  const NEW = "tab-owner-dddddddddddd";
+  try {
+    const a = await r.open();
+    r.play();
+    const b = await r.open({ owner: NEW });
+    const cur = r.k.media.view(r.idOf()).item.url;
+    const mine = await r.getOwned(NEW);
+    assert.equal(mine.status, 200);
+    assert.equal((await mine.json()).item.url, cur, "the new owner's GET gets the new ticket");
+    for (const [label, res] of [["old owner", await r.getOwned(OWNER)], ["no header", await r.get()], ["malformed header", await r.getOwned("short")], ["oversized header", await r.getOwned("x".repeat(65))]]) {
+      assert.equal(res.status, 200, label);
+      const v = await res.json();
+      assert.equal(v.item, null, label);
+      assert.ok(!JSON.stringify(v).includes("/display/t/"), label);
+    }
+    a.ws.close(); b.ws.close();
+  } finally { r.close(); }
+});
+
+test("B3 endpoint: the owner's stop with a stale item id (a station reload changed it) ends the session — view empty, ticket 404; a non-owner's stop is 409 and changes nothing", async () => {
+  const r = await barServe();
+  try {
+    const c = await r.open();
+    const path = r.play();
+    const id = r.k.media.itemId(r.idOf());
+    const foreign = await r.post({ do: "stop", id, owner: "tab-owner-eeeeeeeeeeee" });
+    assert.equal(foreign.status, 409);
+    assert.equal(r.k.media.itemId(r.idOf()), id, "the non-owner changed nothing");
+    assert.equal((await r.stream(path)).status, 200);
+    const st = await r.post({ do: "stop", id: "m999999", owner: OWNER });
+    assert.equal(st.status, 200);
+    assert.equal((await st.json()).item, null);
+    assert.equal((await r.stream(path)).status, 404, "the ticket is revoked");
+    assert.equal(r.k.media.itemId(r.idOf()), null, "nothing is left to replay");
+    c.ws.close();
+  } finally { r.close(); }
+});
+
+test("B3 dormancy: today's session page (no bar) — the endpoint never hands out its ticket nor steers it", async () => {
+  const r = await barServe();
+  try {
+    const c = await r.open({ bar: false });
+    const path = r.play();
+    const id = r.k.media.itemId(r.idOf());
+    assert.equal((await (await r.get()).json()).item, null, "GET shows nothing for a display whose page plays its own audio");
+    assert.equal((await r.post({ do: "stop", id, owner: OWNER })).status, 409);
+    assert.equal(r.k.media.itemId(r.idOf()), id);
+    assert.equal((await r.stream(path)).status, 200);
+    c.ws.close();
+  } finally { r.close(); }
+});
+
+test("B3 endpoint: absent without the core session helpers (an older gateway)", async () => {
+  const k = kiosk.createKioskRuntime({
+    Router: express.Router, json: express.json, WebSocketServer,
+    isAllowedNetwork: () => true, csrfMiddleware: (req, res, next) => next(),
+    openDb: open, deviceStore: store,
+    settings: { readSetting: registry.readSetting, writeSetting: registry.writeSetting },
+    voice: { runVoiceTurn: async () => ({}), speakText: async () => true },
+    sttWarmup: async () => {}, resolveDisplayBird: async () => ({}), themeCss: () => "",
+    files: { publicDir: join(REPO, "bundles", "kiosk", "public"), birdSvgPath: join(REPO, "bundles", "ramble", "server", "bird-svg.cjs") },
+    announceToken: { validate: async () => false }, wrapPcmAsWav, log: () => {},
+  });
+  const app = express();
+  app.use(k.router((req, res, next) => next()));
+  const s = http.createServer(app);
+  await new Promise((r) => s.listen(0, "127.0.0.1", r));
+  try {
+    const b = `http://127.0.0.1:${s.address().port}`;
+    assert.equal((await fetch(b + MEDIA, { headers: { Cookie: cookie() } })).status, 404);
+    assert.equal((await fetch(b + MEDIA, { method: "POST", headers: { Cookie: cookie(), "X-Crow-Csrf": CSRF, "Content-Type": "application/json" }, body: "{}" })).status, 404);
+  } finally { k.stop(); s.close(); }
+});
+
+test("B3 lifetime: overlay closed with bar:true — the ticket still answers 200 after 2 min and several sweeps; the display's windows still go", async () => {
+  const r = await barServe();
+  try {
+    const c = await r.open();
+    const path = r.play();
+    const id = r.idOf();
+    r.k.wm.open(id, { kind: "content", title: "Note", blocks: [] });
+    await c.shut();
+    for (let i = 0; i < 5; i++) { r.clock.t += 60_000; await r.sweep(); }
+    assert.equal(r.mediaTimers.filter((t) => t.on).length, 0, "no grace-period cut was armed");
+    assert.equal((await r.stream(path)).status, 200);
+    assert.equal((await (await r.getOwned()).json()).item.url, path, "a dashboard reload finds it (GET)");
+    assert.equal(r.k.wm.list(id).length, 0, "windows, timers and conversation still end with the grace period");
+  } finally { r.close(); }
+});
+
+test("B3 dormancy (regression guard): today's session page without bar — closing the overlay cuts the stream after 30 s, and the display is gone after the grace", async () => {
+  const r = await barServe();
+  try {
+    const c = await r.open({ bar: false });
+    const path = r.play();
+    await c.shut();
+    const cut = r.mediaTimers.filter((t) => t.on);
+    assert.deepEqual(cut.map((t) => t.ms), [30_000], "sessionLost armed as before");
+    cut[0].fn();
+    assert.equal((await r.stream(path)).status, 404);
+    // And had the cut not fired, the grace sweep still closes the media (unchanged).
+    const c2 = await r.open({ bar: false });
+    const p2 = r.play();
+    await c2.shut();
+    r.clock.t += 3 * 60_000;
+    await r.sweep();
+    assert.equal(r.k.media.active(r.idOf()), false);
+    assert.equal((await r.stream(p2)).status, 404);
+  } finally { r.close(); }
+});
+
+test("S5 logout ends bar media with the overlay closed: within one sweep the ticket 404s, the open stream is cut, the endpoint 401s", async () => {
+  const r = await barServe();
+  const { token } = await auth.mintSsoSession("test");
+  try {
+    const c = await r.open({ tok: token });
+    const path = r.play(token);
+    const open = await r.stream(path, true);
+    assert.equal(open.status, 200);
+    const body = open.body.getReader();
+    await c.shut();
+    r.clock.t += 60_000; await r.sweep();
+    assert.equal(r.k.media.active(r.idOf(token)), true, "still logged in: it plays on");
+    await auth.destroySession(token);
+    await r.sweep();
+    assert.equal(r.held.length, 1);
+    assert.equal(r.held[0].aborted, true, "the in-flight stream request was cut");
+    await body.cancel().catch(() => {});
+    assert.equal((await r.stream(path)).status, 404);
+    assert.equal(r.k.media.active(r.idOf(token)), false);
+    assert.equal((await r.get(token)).status, 401);
+    assert.equal((await r.post({ do: "resume", id: "m1", owner: OWNER }, { tok: token })).status, 401);
+  } finally { r.close(); await auth.destroySession(token).catch(() => {}); }
+});
+
+test("B3 lifetime: a closed bar display whose ticket has run out (12 h) is dropped by the sweep — no login check is kept for it", async () => {
+  const r = await barServe();
+  try {
+    const c = await r.open();
+    r.play();
+    await c.shut();
+    r.clock.t += 12 * 60 * 60 * 1000 + 1;
+    await r.sweep();
+    assert.equal(r.k.media.active(r.idOf()), false);
+    assert.equal(r.k.barDisplays(), 0);
+  } finally { r.close(); }
+});
+
+test("S6 no ticket in any log line: play, close the overlay, next, a stream that fails, error, logout", async () => {
+  const r = await barServe();
+  const { token } = await auth.mintSsoSession("test");
+  const seen = new Set();
+  const note = (v) => { for (const m of JSON.stringify(v).matchAll(new RegExp(TICKET_IN.source, "g"))) seen.add(m[1]); };
+  try {
+    const c = await r.open({ tok: token });
+    r.play(token, ["One", "Two", "Three"]);
+    note(c.msgs); note(r.k.media.view(r.idOf(token)));
+    await c.shut();
+    let v = await (await r.getOwned(OWNER, token)).json(); note(v);
+    v = await (await r.post({ do: "next", id: v.item.id, owner: OWNER }, { tok: token })).json(); note(v);
+    // A stream request on a revoked ticket and a malformed one, both answered without logging the path.
+    for (const t of seen) await r.stream(`/display/t/${t}/stream`);
+    await r.stream("/display/t/not-a-ticket/stream");
+    v = await (await r.post({ do: "error", id: v.item.id, owner: OWNER }, { tok: token })).json(); note(v);
+    await auth.destroySession(token);
+    await r.sweep();
+    assert.ok(seen.size >= 3, `tickets seen: ${seen.size}`);
+    for (const line of r.barLogs) {
+      assert.doesNotMatch(line, TICKET_IN, line);
+      for (const t of seen) assert.ok(!line.includes(t), line);
+    }
+  } finally { r.close(); await auth.destroySession(token).catch(() => {}); }
+});
+
+test("B3 now playing on a live session display: with the bar no window opens on play or on a chip tap and nothing toggles; without it (today) the window opens as before", async () => {
+  const r = await barServe();
+  try {
+    const c = await r.open();
+    r.play();
+    c.ws.send(JSON.stringify({ type: "wm_event", kind: "nowplaying" }));
+    await new Promise((res) => setTimeout(res, 50));
+    assert.ok(!c.msgs.some((m) => m.type === "wm" && m.action !== "snapshot"), JSON.stringify(c.msgs.filter((m) => m.type === "wm")));
+    assert.equal(r.k.media.current(r.idOf()).state, "playing", "the chip tap did not pause it");
+    await c.shut();
+    const plain = await r.open({ bar: false });
+    r.play(sessionToken, ["Three"]);
+    await plain.until(() => plain.msgs.some((m) => m.type === "wm" && m.action === "open"));
+    assert.equal(plain.msgs.find((m) => m.type === "wm" && m.action === "open").window.kind, "nowplaying", "today's page: F8 auto window unchanged");
+    plain.ws.close();
+  } finally { r.close(); }
+});

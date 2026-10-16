@@ -14,7 +14,7 @@ import { createWmStore, matchWmFastPath, contentBlocks, wantsNewDisplay } from "
 import { createDisplayTools, cardUpdate } from "./display-tools.js";
 import { matchSpoken } from "./tiers.js";
 import { displayPromptSuffix, displayTurnContext } from "./prompt.js";
-import { effectiveCaps, audioPolicy } from "./caps.js";
+import { effectiveCaps, audioPolicy, BAR_OWNER_RE } from "./caps.js";
 import { ensureKioskSttProfile, pickKioskTtsProfile, kioskSttModel } from "./profiles.js";
 import { resolveSessionBot, sameOriginUpgrade, sessionDisplayId, SESSION_BOT_SETTING } from "./session-display.js";
 import { STRINGS } from "./strings.js";
@@ -57,6 +57,15 @@ export const PAGE_CSP = [
  */
 export const SESSION_PAGE_PATH = "/display/session";
 export const SESSION_WS_PATH = "/api/kiosk/session/dashboard";
+/**
+ * B3: the dashboard player bar's view of, and buttons on, its login's session display while the Talk to Crow
+ * overlay is closed (GET with X-Crow-Owner: the current item, for the owning tab only; POST { do, id, owner }). Same gate as the session socket: network rule
+ * (never Funnel), the dashboard session cookie, and the CSRF double-submit on POST. The display is ALWAYS the
+ * caller's own login's (sessionDisplayId of the request's cookie), never named by the body.
+ */
+export const SESSION_MEDIA_PATH = "/api/kiosk/session/media";
+export const SESSION_MEDIA_VERBS = Object.freeze(["pause", "resume", "next", "previous", "stop", "ended", "error"]);
+const ITEM_ID = /^m\d{1,9}$/;
 export const SESSION_PAGE_CSP = PAGE_CSP.replace("frame-ancestors 'none'", "frame-ancestors 'self'");
 /** How long a closed session display keeps its windows/timers/conversation (a phone's network blip reconnects well inside it). */
 export const SESSION_DISPLAY_GRACE_MS = 2 * 60 * 1000;
@@ -275,6 +284,7 @@ export function createKioskRuntime(deps) {
     send: (id, msg) => hub?.sendTo(id, msg) === true,
     onFailed: (id, item) => { const S = STRINGS[langOf(id)]; hub?.speak(id, (item.started ? S.say_play_lost : S.say_play_failed).replace("{title}", item.title || "")); },
     onEnded: closeNowPlaying,
+    ...(deps.mediaTimers || {}),   // tests only: the grace-period and station-reload timers
     // F8: a display with a screen shows what is playing as soon as it starts (rules in play.js autoNowPlaying).
     onStarted: (id) => { for (const ev of autoNowPlaying({ store: wm, deviceId: id, caps: hub?.capsOf?.(id), title: STRINGS[langOf(id)].now_playing_title })) hub?.sendTo(id, ev); },
   });
@@ -398,7 +408,7 @@ export function createKioskRuntime(deps) {
     sweepWarmAt.set(d.id, t);
     warm(d);
   };
-  const sweep = (deps.setInterval || setInterval)(() => {
+  const sweep = (deps.setInterval || setInterval)(async () => {
     for (const id of hub.connectedIds()) {
       for (const w of wm.sweepIdle(id)) hub.sendTo(id, { type: "wm", action: "close", id: w.id });
       // Keep STT warm for an idle connected display (throttled to 10 min inside sttWarmup).
@@ -407,8 +417,10 @@ export function createKioskRuntime(deps) {
     }
     // Session displays: a login that ended closes its display within a minute even when idle,
     // and a display closed for longer than the grace period leaves nothing behind.
-    hub.revalidateSessions().catch((err) => log(`[kiosk] session sweep: ${err.message}`));
+    const open = hub.revalidateSessions().catch((err) => log(`[kiosk] session sweep: ${err.message}`));
     expireSessionDisplays();
+    // B3: audio handed to the player bar outlives the overlay, so its login is re-checked here with no socket open.
+    await Promise.all([open, revalidateBarDisplays().catch((err) => log(`[kiosk] session sweep: ${err.message}`))]);
   }, 60_000);
   sweep.unref?.();
 
@@ -416,13 +428,29 @@ export function createKioskRuntime(deps) {
   // Off entirely unless the gateway provides the core session helpers.
   const sessionMode = typeof deps.sessionFromRequest === "function" && typeof deps.verifySession === "function" && typeof deps.csrfTokenAccepted === "function";
   const closedSessionDisplays = new Map();   // device id → closed-at (ms)
+  /**
+   * B3: session displays whose overlay closed while their audio was in the player bar → their login's check
+   * (verifySession over the token held in this closure only, as the socket's own revalidate does). The minute
+   * sweep ends the media at logout; an entry whose stream is gone (stopped, or the 12 h ticket ran out) is dropped.
+   */
+  const barRevalidators = new Map();
+  async function revalidateBarDisplays() {
+    for (const [id, check] of [...barRevalidators]) {
+      if (hub.isConnected(id)) continue;            // an open overlay: the hub re-checks its socket
+      if (!media.holdsTicket(id)) { barRevalidators.delete(id); media.closeDevice(id); continue; }
+      let ok = false;
+      try { ok = (await check()) === true; }
+      catch (err) { log(`[kiosk] session check failed: ${err?.message}`); continue; }   // the store could not be read: try next minute
+      if (!ok) { barRevalidators.delete(id); media.closeDevice(id); }                     // logged out: tickets revoked, open streams cut
+    }
+  }
   function expireSessionDisplays(at = now()) {
     for (const [id, closedAt] of closedSessionDisplays) {
       if (hub.isConnected(id)) { closedSessionDisplays.delete(id); continue; }
       if (at - closedAt < SESSION_DISPLAY_GRACE_MS) continue;
       closedSessionDisplays.delete(id);
       wm.closeAll(id);
-      media.closeDevice(id);
+      if (!(barRevalidators.has(id) && media.active(id))) media.closeDevice(id);   // B3: the bar's audio lives to logout
       try { deps.voice.convo?.clear?.(id); } catch {}
       sweepWarmAt.delete(id);
     }
@@ -560,6 +588,7 @@ export function createKioskRuntime(deps) {
     r.use("/api/kiosk/pair", gate);
     r.use("/api/kiosk/admin", gate, dashboardAuth, deps.csrfMiddleware);
     r.use("/api/kiosk/internal", internal);
+    r.use(SESSION_MEDIA_PATH, gate);
 
     r.get("/display", (req, res) => {
       res.setHeader("Content-Security-Policy", PAGE_CSP);
@@ -578,6 +607,28 @@ export function createKioskRuntime(deps) {
       const html = readFileSync(join(deps.files.publicDir, "kiosk.html"), "utf8");
       res.type("html").send(html.replace("<html ", '<html data-mode="session" '));
     }));
+    // B3: the player bar (see SESSION_MEDIA_PATH). The answer carries a ticket path: never cached, never logged.
+    const sessionMedia = wrap(async (req, res) => {
+      res.setHeader("Cache-Control", "no-store");
+      if (!sessionMode) return res.status(404).json({ error: "not_found" });
+      const token = await deps.sessionFromRequest(req);
+      if (!token) return res.status(401).json({ error: "unauthorized" });
+      const id = sessionDisplayId(token);
+      if (req.method === "GET") {
+        // S8: only the tab that owns the audio is handed the ticket (its bar-hello nonce, sent as X-Crow-Owner).
+        const owner = req.headers["x-crow-owner"];
+        return res.json(media.barView(id, typeof owner === "string" && BAR_OWNER_RE.test(owner) ? owner : null));
+      }
+      if (!deps.csrfTokenAccepted(req, req.headers["x-crow-csrf"])) return res.status(403).json({ error: "csrf" });
+      const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+      if (!SESSION_MEDIA_VERBS.includes(b.do) || typeof b.id !== "string" || !ITEM_ID.test(b.id) || typeof b.owner !== "string" || !BAR_OWNER_RE.test(b.owner)) return res.status(400).json({ error: "bad_request" });
+      const out = media.endpoint(id, { do: b.do, id: b.id, owner: b.owner });
+      if (out.status === 409) return res.status(409).json({ error: "superseded" });
+      if (out.status !== 200) return res.status(400).json({ error: "bad_request" });
+      res.json(out.view);
+    });
+    r.get(SESSION_MEDIA_PATH, sessionMedia);
+    r.post(SESSION_MEDIA_PATH, json, sessionMedia);
     r.get("/display/assets/:file", (req, res) => {
       const f = req.params.file;
       res.setHeader("Cache-Control", "no-cache");
@@ -860,12 +911,15 @@ export function createKioskRuntime(deps) {
         accept(req, socket, head, {
           authorize: (msg) => authorizeSessionHello(req, token, msg),
           revalidate: () => deps.verifySession(token),
-          onClose: (d) => { closedSessionDisplays.set(d.id, now()); },
+          onClose: (d, caps) => {
+            closedSessionDisplays.set(d.id, now());
+            if (caps?.bar) barRevalidators.set(d.id, () => deps.verifySession(token)); else barRevalidators.delete(d.id);
+          },
         });
       }).catch((err) => { log(`[kiosk] session upgrade failed: ${err?.message}`); refuse(socket, 401, "Unauthorized"); });
     });
     return { openSessionCount: () => hub.connectedIds().length };
   }
 
-  return { router, attachUpgrade, hub, pairing, wm, metrics, tickets, media, stationsReady, musicReady, music, announce, show, bootWarmup, migrateVolumeCaps, expireSessionDisplays, stop: () => { clearInterval(sweep); music?.stop(); } };
+  return { router, attachUpgrade, hub, pairing, wm, metrics, tickets, media, stationsReady, musicReady, music, announce, show, bootWarmup, migrateVolumeCaps, expireSessionDisplays, barDisplays: () => barRevalidators.size, stop: () => { clearInterval(sweep); music?.stop(); } };
 }
