@@ -22,7 +22,7 @@ services:
       # WriteFreely reads its config from /go/keys/config.ini. The
       # entrypoint below seeds that file on first run using the env
       # vars below, then execs into writefreely.
-      WF_HOST: ${WF_HOST}
+      WF_HOST: ${WF_HOST:?Set WF_HOST to your public domain}
       WF_SINGLE_USER: ${WF_SINGLE_USER:-true}
       WF_DB_TYPE: sqlite3
       WF_DB_FILENAME: /go/keys/writefreely.db

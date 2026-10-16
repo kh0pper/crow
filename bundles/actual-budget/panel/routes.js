@@ -7,9 +7,33 @@
  */
 
 import { Router } from "express";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 
 const ACTUAL_URL = () => (process.env.ACTUAL_URL || "http://localhost:5006").replace(/\/+$/, "");
-const ACTUAL_PASSWORD = () => process.env.ACTUAL_PASSWORD || "";
+
+function isLoopbackUrl(url) {
+  try {
+    const host = new URL(url).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    return host === "localhost" || host === "::1" || /^127(?:\.\d{1,3}){3}$/.test(host);
+  } catch {
+    return false;
+  }
+}
+
+/** The generated password of the Actual server Crow installed here, from THIS instance's
+ * installed copy (co-hosted instances each have their own CROW_HOME). */
+function generatedServerPassword() {
+  try {
+    const envPath = join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "actual-budget", ".env");
+    const line = readFileSync(envPath, "utf8").split("\n").reverse().find((l) => l.startsWith("ACTUAL_SERVER_PASSWORD="));
+    return line ? line.slice("ACTUAL_SERVER_PASSWORD=".length).trim().replace(/^"(.*)"$/, "$1") : "";
+  } catch {
+    return "";
+  }
+}
+
 const ACTUAL_SYNC_ID = () => process.env.ACTUAL_SYNC_ID || "";
 
 let authToken = null;
@@ -25,18 +49,22 @@ async function getToken() {
   const timeout = setTimeout(() => controller.abort(), 10000);
 
   try {
-    const res = await fetch(`${ACTUAL_URL()}/account/login`, {
-      method: "POST",
-      signal: controller.signal,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: ACTUAL_PASSWORD() }),
-    });
-
-    if (!res.ok) throw new Error("Actual Budget login failed — check ACTUAL_PASSWORD");
-    const data = await res.json();
-    authToken = data.data?.token || data.token;
-    if (!authToken) throw new Error("No token returned from login");
-    return authToken;
+    // Typed password first, then (loopback only) the generated one: a stale typed value
+    // must not lock the panel out of the server Crow set up.
+    const candidates = [...new Set([process.env.ACTUAL_PASSWORD, isLoopbackUrl(ACTUAL_URL()) ? generatedServerPassword() : ""].filter(Boolean))];
+    for (const password of candidates) {
+      const res = await fetch(`${ACTUAL_URL()}/account/login`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (!res.ok && res.status !== 400 && res.status !== 401) throw new Error(`Actual Budget login error: ${res.status}`);
+      const data = res.ok ? await res.json().catch(() => ({})) : {};
+      authToken = data.data?.token || data.token || null;
+      if (authToken) return authToken;
+    }
+    throw new Error("Actual Budget login failed. The generated server password is in Settings → Passwords; if this server has another one, type it into ACTUAL_PASSWORD in Configure.");
   } catch (err) {
     if (err.name === "AbortError") throw new Error("Actual Budget login timed out");
     if (err.message.includes("fetch failed") || err.message.includes("ECONNREFUSED")) {

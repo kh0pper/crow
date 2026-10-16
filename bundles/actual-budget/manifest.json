@@ -1,7 +1,7 @@
 {
   "id": "actual-budget",
   "name": "Actual Budget",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Privacy-first personal finance — track spending, manage budgets, and view financial reports",
   "type": "bundle",
   "author": "Crow",
@@ -9,17 +9,19 @@
   "tags": ["budget", "finance", "money", "personal-finance", "self-hosted"],
   "icon": "dollar",
   "docker": { "composefile": "docker-compose.yml" },
-  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["ACTUAL_URL", "ACTUAL_PASSWORD"] },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["ACTUAL_URL", "ACTUAL_PASSWORD", "ACTUAL_SERVER_PASSWORD"] },
   "panel": "panel/actual-budget.js",
   "panelRoutes": "panel/routes.js",
   "skills": ["skills/actual-budget.md"],
-  "requires": { "env": ["ACTUAL_PASSWORD"], "min_ram_mb": 256, "min_disk_mb": 200 },
+  "requires": { "min_ram_mb": 256, "min_disk_mb": 200 },
+  "postInstall": { "script": "scripts/set-server-password.sh", "timeout_s": 180 },
   "env_vars": [
     { "name": "ACTUAL_URL", "description": "Actual Budget server URL", "default": "http://localhost:5006", "required": true },
-    { "name": "ACTUAL_PASSWORD", "description": "Actual server password", "required": true, "secret": true },
+    { "name": "ACTUAL_PASSWORD", "description": "Password of an Actual server you already run elsewhere. Leave it empty for the Actual server Crow installs on this machine: Crow generates that one's password.", "required": false, "secret": true },
+    { "name": "ACTUAL_SERVER_PASSWORD", "description": "Password of the Actual server Crow installs on this machine. Crow generates it, saves it in Settings → Passwords (this machine only) and sets it on the new server right after install. Log in to Actual with it.", "required": true, "secret": true, "generate": "secret", "keychain": true, "keychain_label": "server password", "keychain_url": "http://localhost:5006/" },
     { "name": "ACTUAL_SYNC_ID", "description": "Budget sync ID to auto-select budget", "required": false }
   ],
   "ports": [5006],
   "webUI": { "port": 5006, "path": "/", "label": "Actual Budget" },
-  "notes": "Privacy-first budgeting. Data stays local. Set ACTUAL_PASSWORD to match your Actual server password."
+  "notes": "Privacy-first budgeting. Data stays local. Crow sets a generated password on the Actual server it installs (Settings → Passwords). To use an Actual server you already run, set ACTUAL_URL and ACTUAL_PASSWORD instead."
 }

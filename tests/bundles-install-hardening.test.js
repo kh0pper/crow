@@ -84,13 +84,12 @@ test("installBlockingEnvKeys = required AND no default AND compose hard-fails on
   assert.deepEqual(installBlockingEnvKeys("no-such-bundle"), []);
 });
 
-test("real bundles: navidrome is blocked on its music path; phone's generated PHONE_RUNNER_SECRET and gitea's post-install GITEA_TOKEN are not", async () => {
+test("real bundles: navidrome's music path defaults inside CROW_HOME (not blocking); phone's generated PHONE_RUNNER_SECRET and gitea's post-install GITEA_TOKEN are not", async () => {
   _setAppBundlesForTest(new URL("../bundles", import.meta.url).pathname);
   try {
-    assert.deepEqual(installBlockingEnvKeys("navidrome"), ["NAVIDROME_MUSIC_PATH"]);
+    assert.deepEqual(installBlockingEnvKeys("navidrome"), []);
     const nav = await validateInstall("navidrome", { envVars: {}, requireEnv: true, forceInstall: true });
-    assert.equal(nav.code, "missing_required_env");
-    assert.deepEqual(nav.extra.missing_env, ["NAVIDROME_MUSIC_PATH"]);
+    assert.notEqual(nav.code, "missing_required_env", "a blank music path becomes a folder inside CROW_HOME");
 
     // Crow generates the runner secret at install (config-friction stage 1): never asked for.
     assert.deepEqual(installBlockingEnvKeys("phone"), []);
@@ -108,16 +107,15 @@ test("real bundles: navidrome is blocked on its music path; phone's generated PH
 });
 
 test("real bundles: media-path / admin-password compose hard-fail keys are required, so they block install (B1)", async () => {
-  // Found 2026-10-02: jellyfin/navidrome/plex/miniflux interpolate these as
+  // Found 2026-10-02: jellyfin/navidrome/plex(/miniflux, generated since) interpolate these as
   // ${KEY:?…} but marked them required:false, so a blank install reached
   // `docker compose up` and failed there.
   _setAppBundlesForTest(new URL("../bundles", import.meta.url).pathname);
   try {
     const expected = {
-      jellyfin: "JELLYFIN_MEDIA_PATH",
-      navidrome: "NAVIDROME_MUSIC_PATH",
+      // jellyfin/navidrome default to a library folder inside CROW_HOME now (default_in_crow_home).
       plex: "PLEX_MEDIA_PATH",
-      miniflux: "MINIFLUX_ADMIN_PASSWORD",
+      // miniflux's admin password is generated now (never install-blocking).
     };
     for (const [id, key] of Object.entries(expected)) {
       assert.deepEqual(installBlockingEnvKeys(id), [key], id + " blocks on " + key);
@@ -505,5 +503,16 @@ test("POST /bundles/api/env: a sync throw inside the handler (.env is a director
   } finally {
     process.off("unhandledRejection", onRejection);
     server.close();
+  }
+});
+
+test("miniflux: its admin password is generated, so a blank install is not blocked", async () => {
+  _setAppBundlesForTest(new URL("../bundles", import.meta.url).pathname);
+  try {
+    assert.deepEqual(installBlockingEnvKeys("miniflux"), []);
+    const r = await validateInstall("miniflux", { envVars: {}, requireEnv: true, forceInstall: true });
+    assert.notEqual(r.code, "missing_required_env", JSON.stringify(r));
+  } finally {
+    _setAppBundlesForTest(FIXTURES);
   }
 });

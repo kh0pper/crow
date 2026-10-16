@@ -98,6 +98,6 @@ tools:
 ## Error Handling
 
 - If Actual Budget is unreachable: "Can't connect to Actual Budget at the configured URL. Make sure the server is running."
-- If auth fails: "Actual Budget rejected the password. Check ACTUAL_PASSWORD in settings."
+- If auth fails: "Actual Budget rejected the password. The generated server password is in Settings → Passwords; if this server kept an older password (changed in Actual, or data from an earlier install), type it into ACTUAL_PASSWORD in Configure."
 - If no budgets found: "No budgets found. Create a budget in Actual Budget first, then set ACTUAL_SYNC_ID if you have multiple budgets."
 - If a query returns empty: the budget may not have data for that period yet

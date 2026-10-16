@@ -61,7 +61,8 @@ import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-prov
 import { checkComposeModel, loadComposeModel, usesHostNetwork } from "../compose-guard.js";
 import { resolveDataDir } from "../../db.js";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
-import { planGeneratedEnv, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedKeys, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
+import { isPlaceholderValue } from "../bundle-env-placeholders.js";
+import { planGeneratedEnv, retainedEnvPath, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedKeys, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
 
 /**
  * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
@@ -1283,6 +1284,16 @@ export function removePanelEnabled(panelId, path = PANELS_CONFIG_PATH) {
  * install (either branch) and the version refresh write. envKeys values come only from an
  * install request; every truthy env_vars default rides along (unchanged install behaviour).
  */
+// `reqEnv` may carry generated values (runInstallJob passes them): only keys the manifest
+// lists in server.envKeys reach the entry, so a generated secret reaches its own MCP child
+// through this instance's mcp-addons.json (mode 600) and never the shared gateway .env.
+/** Generated values an MCP child may get: never a stored hash (store_as), which is useless
+ * to the child and must not look like the secret. */
+function generatedPlainForMcp(manifest, generated) {
+  const hashed = new Set((manifest?.env_vars || []).filter((v) => v && v.store_as).map((v) => v.name));
+  return Object.fromEntries(Object.entries(generated || {}).filter(([k]) => !hashed.has(k)));
+}
+
 export function mcpAddonEntryFor(manifest, reqEnv = null, { bundleDir = null } = {}) {
   const env = {};
   for (const key of manifest?.server?.envKeys || []) if (reqEnv && reqEnv[key]) env[key] = reqEnv[key];
@@ -2041,7 +2052,7 @@ export function installBlockingEnvKeys(bundleId, manifest = getManifest(bundleId
   try { if (existsSync(composePath)) text = readFileSync(composePath, "utf8"); } catch { /* unreadable → only install_required can block */ }
   const hard = hardFailComposeKeys(text);
   return (manifest?.env_vars || [])
-    .filter((v) => v && typeof v.name === "string" && !v.generate && !nonBlankEnv(v.default)
+    .filter((v) => v && typeof v.name === "string" && !v.generate && !nonBlankEnv(v.default) && !crowHomeDefaultRel(v)
       && (v.install_required === true || (v.required && hard.has(v.name))))
     .map((v) => v.name);
 }
@@ -2312,7 +2323,7 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
  *
  * Every rung writes mode 600 — bundle .env files hold secrets.
  */
-export function writeInstallEnv(destDir, envVars, manifest, log = () => {}, { baseText = null } = {}) {
+export function writeInstallEnv(destDir, envVars, manifest, log = () => {}, { baseText = null, baseIsExample = false, crowHome = null, retained = null } = {}) {
   const envPath = join(destDir, ".env");
   const examplePath = join(destDir, ".env.example");
   const usable = {};
@@ -2321,28 +2332,79 @@ export function writeInstallEnv(destDir, envVars, manifest, log = () => {}, { ba
   }
   const count = Object.keys(usable).length;
   const pathKeys = pathEnvKeys(manifest);
+  // Keys with env_vars[].default_in_crow_home that would install blank or as an example
+  // value get a folder inside this instance's CROW_HOME, created now (by the gateway user,
+  // so Docker never creates it as root).
+  // An existing .env (reinstall) is never "fixed" behind the user's back: there only a
+  // blank or missing key gets the default; the checklist flags a placeholder instead.
+  const homeDefaults = (base, { replacePlaceholders = true } = {}) => {
+    const out = {};
+    if (!crowHome) return out;
+    const baseEnv = parseEnvText(base || "");
+    for (const v of manifest?.env_vars || []) {
+      const rel = crowHomeDefaultRel(v);
+      if (!rel) continue;
+      const cur = usable[v.name] ?? baseEnv[v.name];
+      if (cur !== undefined && cur !== "" && !(replacePlaceholders && isPlaceholderValue(cur))) continue;
+      // A reinstall over kept data: the path the earlier install used (retained at uninstall).
+      const kept = retained?.[v.name];
+      if (kept && !isPlaceholderValue(kept)) { out[v.name] = kept; continue; }
+      const dir = join(crowHome, rel);
+      try { mkdirSync(dir, { recursive: true, mode: 0o755 }); } catch { continue; }
+      out[v.name] = dir;
+    }
+    if (Object.keys(out).length) log(`Set ${Object.keys(out).join(", ")} (the earlier install's path, else a folder inside Crow's home; change it in Configure)`);
+    return out;
+  };
   if (typeof baseText === "string") {
     // Seeded from an existing .env / .env.example: line-preserving (C4) — the base's
     // own lines (comments, legacy values, ${VAR} references) stay byte-for-byte.
-    writePrivateFile(envPath, updateEnvText(baseText, usable, { pathKeys }));
+    writePrivateFile(envPath, updateEnvText(baseText, { ...homeDefaults(baseText, { replacePlaceholders: baseIsExample }), ...usable }, { pathKeys }));
     log(`Wrote ${count} env vars`);
     return;
   }
   if (count > 0) {
-    writePrivateFile(envPath, formatEnvLines(usable, { pathKeys }));
+    writePrivateFile(envPath, formatEnvLines({ ...homeDefaults(""), ...usable }, { pathKeys }));
     log(`Wrote ${count} env vars`);
     return;
   }
   if (existsSync(envPath)) { chmodSync(envPath, 0o600); return; }
   if (existsSync(examplePath)) {
-    writePrivateFile(envPath, readFileSync(examplePath, "utf8"));
-    log("Created .env from .env.example");
+    // Example values are documentation, never live config: placeholder lines become
+    // comments (the checklist then lists the key), the rest is kept.
+    const text = scrubPlaceholderLines(readFileSync(examplePath, "utf8"));
+    writePrivateFile(envPath, updateEnvText(text, homeDefaults(text), { pathKeys }));
+    log("Created .env from .env.example (example values left out)");
+    return;
+  }
+  const defaults = homeDefaults("");
+  if (Object.keys(defaults).length) {
+    writePrivateFile(envPath, formatEnvLines(defaults, { pathKeys }));
     return;
   }
   if ((manifest?.env_vars || []).length > 0) {
     writePrivateFile(envPath, "# Managed by Crow — no values provided at install; configure via the dashboard Extensions panel.\n");
     log("Wrote placeholder .env (no values provided — configure via Extensions)");
   }
+}
+
+/** env_vars[].default_in_crow_home as a safe relative path, or null. */
+export function crowHomeDefaultRel(v) {
+  const rel = v?.default_in_crow_home;
+  if (typeof rel !== "string" || rel === "" || isAbsolute(rel) || rel.includes("\\") || rel.includes("$")) return null;
+  const norm = relativePath(".", rel);
+  if (!norm || norm.startsWith("..") || isAbsolute(norm)) return null;
+  return norm;
+}
+
+/** .env text with every KEY=<placeholder> line turned into a comment naming only the key. */
+export function scrubPlaceholderLines(text) {
+  return String(text || "").split("\n").map((line) => {
+    const m = line.match(/^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (!m) return line;
+    const val = parseEnvText(`${m[2]}=${m[3]}`)[m[2]];
+    return isPlaceholderValue(val) ? `# ${m[2]}= (example value left out: set it in Extensions)` : line;
+  }).join("\n");
 }
 
 export async function runInstallJob(bundleId, envVars, { job, installedSnapshot, consentVerified, manifest, keychain = null }) {
@@ -2452,6 +2514,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     const writeEnv = { ...(reqEnv || {}), ...generated };
     let installEnv = writeEnv;
     let baseText = null;
+    let baseIsExample = false;
     if (Object.keys(generated).length > 0) {
       // Writing values bypasses the .env / .env.example rungs, so seed from them:
       // existing .env, else .env.example — LINE-PRESERVING (C4): the base's own lines are
@@ -2460,7 +2523,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       const exP = join(destDir, ".env.example");
       try {
         if (existsSync(envP)) baseText = readFileSync(envP, "utf8");
-        else if (existsSync(exP)) baseText = readFileSync(exP, "utf8");
+        else if (existsSync(exP)) { baseText = scrubPlaceholderLines(readFileSync(exP, "utf8")); baseIsExample = true; }
       } catch { /* unreadable base: fall back to provided values only */ }
       if (baseText !== null) installEnv = { ...parseEnvText(baseText), ...writeEnv };
     }
@@ -2475,7 +2538,9 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       return { ok: false, reason: "could not save the generated password to Crow keychain; nothing was written — retry the install" };
     }
     plan.persist();
-    writeInstallEnv(destDir, writeEnv, manifest, (msg) => appendLog(job, msg), { baseText });
+    let retainedForPaths = null;
+    try { retainedForPaths = parseEnvText(readFileSync(retainedEnvPath(CROW_HOME, bundleId), "utf8")); } catch { /* none kept */ }
+    writeInstallEnv(destDir, writeEnv, manifest, (msg) => appendLog(job, msg), { baseText, baseIsExample, crowHome: CROW_HOME, retained: retainedForPaths });
     if (Object.keys(generated).length > 0) {
       appendLog(job, `Generated ${Object.keys(generated).length} internal secret(s) — stored at mode 600, never shown`);
     }
@@ -2590,7 +2655,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         // locked". The MCP child instead inherits the SPAWNING gateway's
         // CROW_DB_PATH via process.env at launch (its own default otherwise),
         // so each gateway's children always use that gateway's DB.
-        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, reqEnv, { bundleDir: destDir });
+        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir });
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
         needsRestart = true;
@@ -2627,7 +2692,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       // MCP server — register in mcp-addons.json
       if (manifest?.server) {
         const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
-        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, reqEnv, { bundleDir: destDir });
+        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir });
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
       }
@@ -3459,7 +3524,7 @@ export default function bundlesRouter() {
         let composeTextForRetain = null;
         try { const cp = join(bundleDir, "docker-compose.yml"); if (existsSync(cp)) composeTextForRetain = readFileSync(cp, "utf8"); } catch {}
         const keptSecrets = retainGeneratedForReinstall(bundle_id, manifest, { destDir: bundleDir, crowHome: CROW_HOME, composeText: composeTextForRetain, includeFallbacks: !volumesRemoved });
-        if (keptSecrets) appendLog(job, `Kept ${keptSecrets} generated secret(s) for a later reinstall (mode 600)`);
+        if (keptSecrets) appendLog(job, `Kept ${keptSecrets} generated secret(s) / library path(s) for a later reinstall (mode 600)`);
         rmSync(bundleDir, { recursive: true, force: true });
         appendLog(job, "Bundle files removed");
 
@@ -3678,6 +3743,30 @@ export default function bundlesRouter() {
       const oldEnvText = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
       const existing = parseEnvText(oldEnvText);
 
+      // env_vars[].previous_key (tax's encryption key): a key change that does not fill the
+      // previous-key slot itself keeps the outgoing key there, so returns saved with it stay
+      // readable. The outgoing key is the one the MCP child will start with (its entry, the
+      // gateway env, this .env). The slot always takes the key just replaced: the tax
+      // server moves every return to the current key when it starts, so an older key in
+      // the slot only still matters if it did not start since the last change — the
+      // warning (key names only) says so.
+      const keyWarnings = [];
+      {
+        const entryEnv = readJsonSafe(MCP_ADDONS_PATH, {})?.[bundle_id]?.env || {};
+        for (const v of getInstalledFirstManifest(bundle_id)?.env_vars || []) {
+          const prev = v && typeof v.previous_key === "string" ? v.previous_key : null;
+          if (!prev || env_vars[v.name] === undefined || env_vars[v.name] === "" || env_vars[prev] !== undefined) continue;
+          const next = String(env_vars[v.name]);
+          const old = entryEnv[v.name] || process.env[v.name] || existing[v.name] || "";
+          if (!old || old === next) continue;
+          const kept = entryEnv[prev] || process.env[prev] || existing[prev] || "";
+          env_vars[prev] = old;
+          if (kept && kept !== old && kept !== next) {
+            keyWarnings.push(`${prev} now holds the key you just replaced (it held an older one). Data still on that older key, only if the extension did not restart since the last change, opens only if you enter it in ${prev}.`);
+          }
+        }
+      }
+
       // Keys whose value this save actually changes (names only, never values).
       const changedKeys = Object.keys(env_vars).filter((k) => {
         const next = env_vars[k];
@@ -3747,9 +3836,11 @@ export default function bundlesRouter() {
       } else if (appliesOnNextStart) {
         message += `. The bundle is not running; ${bundleRestartKeys.join(", ")} will apply on its next start`;
       }
+      if (keyWarnings.length) message += `. ${keyWarnings.join(" ")}`;
       res.json({
         ok: true,
         message,
+        ...(keyWarnings.length ? { warnings: keyWarnings } : {}),
         needs_restart: needsRestart,
         needs_bundle_restart: needsBundleRestart,
         applies_on_next_start: appliesOnNextStart,

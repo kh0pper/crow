@@ -9,7 +9,7 @@ services:
       - ./config/jupyterhub_config.py:/srv/jupyterhub/jupyterhub_config.py:ro
       - ./scripts/bootstrap-admin.py:/srv/jupyterhub/bootstrap-admin.py:ro
     environment:
-      - MLA_ADMIN_USER=${MLA_ADMIN_USER:?Set MLA_ADMIN_USER}
+      - MLA_ADMIN_USER=${MLA_ADMIN_USER:-admin}
       - MLA_ADMIN_PASSWORD=${MLA_ADMIN_PASSWORD:?Set MLA_ADMIN_PASSWORD}
     command:
       - "sh"

@@ -27,7 +27,7 @@ Instala Navidrome como un bundle de Crow. Esto ejecuta Navidrome en Docker junto
 
 O instálalo desde el panel de **Extensiones** en el Crow's Nest.
 
-Después de la instalación, configura la ruta a tu directorio de música:
+Si lo dejas vacío al instalar, Navidrome empieza con una biblioteca vacía en la carpeta de Crow (`media/music`). Para usar tu música, configura la ruta en Configurar (o en el `.env` del bundle):
 
 ```bash
 # En tu archivo .env

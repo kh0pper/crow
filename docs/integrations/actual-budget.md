@@ -27,16 +27,7 @@ Install Actual Budget as a Crow bundle. This runs Actual Budget in Docker alongs
 
 Or install from the **Extensions** panel in the Crow's Nest.
 
-After installation, Actual Budget will be available at `http://your-server:5006`. On your first visit to the web UI, you will be prompted to set a server password. Use the same password as `ACTUAL_PASSWORD` in your `.env` file:
-
-```bash
-# In your .env file
-ACTUAL_PASSWORD=your-server-password
-```
-
-Restart the bundle for changes to take effect:
-
-> "Crow, restart the Actual Budget bundle"
+After installation, Actual Budget will be available at `http://your-server:5006`. Crow generates the server password, sets it on the new server right after install, and saves it in **Settings** > **Passwords** (this machine only). Log in to Actual with it and create a budget.
 
 ### Option B: Connect to existing Actual Budget
 
@@ -89,7 +80,7 @@ Make sure the `ACTUAL_URL` is reachable from the machine running Crow. If Actual
 
 ### "Login failed" or authentication error
 
-The `ACTUAL_PASSWORD` must match the server password you set during initial setup in Actual's web UI. If you changed the password in the web UI, update your `.env` file to match.
+For the server Crow installs, Crow uses the generated password in **Settings** > **Passwords**. If you changed it in Actual's web UI, or the server kept its data (and password) from an earlier install, type the current password into `ACTUAL_PASSWORD` in Configure. For a server you run elsewhere, `ACTUAL_PASSWORD` must match its password.
 
 ### No budget data showing up
 

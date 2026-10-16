@@ -44,7 +44,7 @@ Gated by F.0's hardware check. Refused below **1 GB effective RAM after committe
      profile: "activitypub"
    }
    ```
-2. Open https://lemmy.example.com/ and complete the setup wizard (admin username + password + site name). The compose entrypoint writes a placeholder `admin_pending` account; the web wizard replaces it.
+2. Open https://lemmy.example.com/ and complete the setup wizard (admin username + password + site name). The compose entrypoint creates a first admin, `admin_pending`, with a password Crow generated at install (Settings → Passwords); log in with it if the wizard does not appear, and rename or replace the account.
 3. Obtain an auth JWT:
    ```bash
    curl -X POST https://lemmy.example.com/api/v3/user/login \

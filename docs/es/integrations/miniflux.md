@@ -27,16 +27,7 @@ Instala Miniflux como un bundle de Crow. Esto ejecuta Miniflux con PostgreSQL en
 
 O instálalo desde el panel de **Extensiones** en el Crow's Nest.
 
-Después de la instalación, configura tu contraseña de administrador:
-
-```bash
-# En tu archivo .env
-MINIFLUX_ADMIN_PASSWORD=tu-contraseña-segura
-```
-
-Reinicia el bundle para que los cambios surtan efecto:
-
-> "Crow, reinicia el bundle de Miniflux"
+Crow genera la contraseña de administrador al instalar y la guarda en **Ajustes** > **Contraseñas** (solo en esta máquina; usuario `admin` salvo que definas `MINIFLUX_ADMIN_USER`).
 
 Miniflux estará disponible en `http://tu-servidor:8085`. Inicia sesión con la cuenta de administrador y luego genera una clave de API desde **Settings** > **API Keys**.
 

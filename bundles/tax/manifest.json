@@ -1,7 +1,7 @@
 {
   "id": "tax",
   "name": "Tax Filing Assistant",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "Prepare federal income taxes — PDF document ingestion, calculation, form generation, and guided filing. Federal returns only (no state). Supports 1040, Schedules 1/C/D/SE, Form 8889, Form 8863, and common credits. 2024 + 2025 tax years.",
   "type": "mcp-server",
   "author": "Crow",
@@ -11,7 +11,7 @@
   "server": {
     "command": "node",
     "args": ["server/index.js"],
-    "envKeys": ["CROW_TAX_DB_PATH"]
+    "envKeys": ["CROW_TAX_DB_PATH", "CROW_TAX_ENCRYPTION_KEY", "CROW_TAX_ENCRYPTION_KEY_PREVIOUS"]
   },
   "panel": "panel/tax.js",
   "panelRoutes": "panel/routes.js",
@@ -28,8 +28,15 @@
     },
     {
       "name": "CROW_TAX_ENCRYPTION_KEY",
-      "description": "Passphrase for encrypting PII at rest (SSN, names). Set on first use.",
+      "description": "Passphrase that encrypts personal data at rest (SSN, names). Choose your own and keep a copy: without it saved returns can't be read. Changing it keeps the key it replaces in CROW_TAX_ENCRYPTION_KEY_PREVIOUS, and the tax server moves saved returns to the new key when it next starts. Restart it between two changes.",
       "required": true,
+      "secret": true,
+      "previous_key": "CROW_TAX_ENCRYPTION_KEY_PREVIOUS"
+    },
+    {
+      "name": "CROW_TAX_ENCRYPTION_KEY_PREVIOUS",
+      "description": "Only after changing the passphrase: the old one, so returns saved with it can still be opened. Each return moves to the new passphrase when the tax server next starts or the return is saved; then this can be cleared.",
+      "required": false,
       "secret": true
     }
   ],

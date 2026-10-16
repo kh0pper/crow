@@ -26,7 +26,7 @@ Instala Jellyfin como un bundle de Crow. Esto ejecuta Jellyfin en Docker junto a
 
 O instálalo desde el panel de **Extensiones** en el Crow's Nest.
 
-Después de la instalación, configura la ruta a tus archivos multimedia:
+Si lo dejas vacío al instalar, Jellyfin empieza con una biblioteca vacía en la carpeta de Crow (`media/jellyfin`). Para usar tus archivos, configura la ruta en Configurar (o en el `.env` del bundle):
 
 ```bash
 # En tu archivo .env

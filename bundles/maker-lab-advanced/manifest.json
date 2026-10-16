@@ -1,7 +1,7 @@
 {
   "id": "maker-lab-advanced",
   "name": "Maker Lab Advanced",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Self-hosted JupyterHub for older learners (ages 9+) — single-machine multi-user Python notebooks with kid-safe kernel defaults and an AI pair-programmer. Sibling bundle to maker-lab: Blockly is the 5-9 on-ramp, Scratch is the 8+ step-up, this is the 9+ landing zone with real Python.",
   "type": "bundle",
   "author": "Crow",
@@ -20,8 +20,8 @@
     "bundles": ["maker-lab"]
   },
   "env_vars": [
-    { "name": "MLA_ADMIN_USER", "description": "Initial JupyterHub admin username. Gets first login; add more admins from the UI after setup.", "required": true },
-    { "name": "MLA_ADMIN_PASSWORD", "description": "Initial admin password. Set via NativeAuthenticator on first boot; change via the JupyterHub UI afterward.", "required": true, "secret": true },
+    { "name": "MLA_ADMIN_USER", "description": "Initial JupyterHub admin username. Gets first login; add more admins from the UI after setup.", "required": true, "default": "admin" },
+    { "name": "MLA_ADMIN_PASSWORD", "description": "Initial admin password. Crow generates it at install and saves it in Settings → Passwords (this machine only); NativeAuthenticator sets it on first boot. Change it in the JupyterHub UI afterward if you like.", "required": true, "secret": true, "generate": "secret", "keychain": true, "keychain_label": "admin password", "keychain_username": "${MLA_ADMIN_USER}" },
     { "name": "MLA_HTTP_PORT", "description": "Host port for the JupyterHub UI. Default 8088.", "default": "8088", "required": false },
     { "name": "MLA_DATA_PATH", "description": "Host path for user home dirs + JupyterHub state (defaults to a named volume).", "required": false }
   ],

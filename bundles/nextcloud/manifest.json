@@ -1,7 +1,7 @@
 {
   "id": "nextcloud",
   "name": "Nextcloud (connect existing)",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Deprecated: connect Crow to a Nextcloud you already run, over WebDAV. To host your own files, documents and calendars, install Crow Workspace instead.",
   "type": "skill",
   "author": "Crow",
