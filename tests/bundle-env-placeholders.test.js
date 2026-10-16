@@ -242,12 +242,16 @@ test("tax: at start, returns only the previous key opens are re-encrypted to the
   } finally { db.close?.(); }
 });
 
-test("Configure: a tax key change always keeps the key just replaced in _PREVIOUS (and warns when an older one is dropped)", async () => {
+test("Configure: a typed key change always keeps the key just replaced in _PREVIOUS (and warns when an older one is dropped)", async () => {
   const express = (await import("express")).default;
   const id = "tax";
   const dir = join(CROW_HOME, "bundles", id);
   mkdirSync(dir, { recursive: true });
-  copyFileSync(join(REPO, "bundles", id, "manifest.json"), join(dir, "manifest.json"));
+  // tax's key is generated since 2.1.0 (Configure never takes it). The previous_key mechanism
+  // still serves any typed key: test it on the tax manifest as a typed field.
+  const typed = JSON.parse(readFileSync(join(REPO, "bundles", id, "manifest.json"), "utf8"));
+  for (const v of typed.env_vars) if (v.name === "CROW_TAX_ENCRYPTION_KEY") { delete v.generate; delete v.keychain; delete v.keychain_label; delete v.replace_values_sha256; }
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify(typed));
   writeFileSync(join(dir, ".env"), "CROW_TAX_ENCRYPTION_KEY=old-pass-1\n");
   const app = express(); app.use(express.json()); app.use(B.default());
   const server = app.listen(0, "127.0.0.1"); await new Promise((r) => server.once("listening", r));
@@ -267,5 +271,20 @@ test("Configure: a tax key change always keeps the key just replaced in _PREVIOU
     assert.equal(env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS, "new-pass-2", "the key just replaced is kept");
     assert.equal((await post({ CROW_TAX_ENCRYPTION_KEY: "k4", CROW_TAX_ENCRYPTION_KEY_PREVIOUS: "newer-pass-3" })).status, 200, "a typed previous key wins");
     assert.equal(parseEnvText(readFileSync(join(dir, ".env"), "utf8")).CROW_TAX_ENCRYPTION_KEY_PREVIOUS, "newer-pass-3");
+  } finally { server.close(); }
+});
+
+test("Configure never overwrites tax's generated key (it is not a form field)", async () => {
+  const express = (await import("express")).default;
+  const id = "tax";
+  const dir = join(CROW_HOME, "bundles", id);
+  mkdirSync(dir, { recursive: true });
+  copyFileSync(join(REPO, "bundles", id, "manifest.json"), join(dir, "manifest.json"));
+  writeFileSync(join(dir, ".env"), "CROW_TAX_ENCRYPTION_KEY=generated-key-0123456789\n");
+  const app = express(); app.use(express.json()); app.use(B.default());
+  const server = app.listen(0, "127.0.0.1"); await new Promise((r) => server.once("listening", r));
+  try {
+    await fetch(`http://127.0.0.1:${server.address().port}/bundles/api/env`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ bundle_id: id, env_vars: { CROW_TAX_ENCRYPTION_KEY: "typed-over-it" } }) });
+    assert.equal(parseEnvText(readFileSync(join(dir, ".env"), "utf8")).CROW_TAX_ENCRYPTION_KEY, "generated-key-0123456789");
   } finally { server.close(); }
 });
