@@ -19,6 +19,11 @@ import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposa
 import { t, fill, SUPPORTED_LANGS } from "../../shared/i18n.js";
 import { parseCookies } from "../../auth.js";
 import { emitBotDefsChanged } from "./defs-changed.js";
+import { boardState } from "../../shared/bot-display.js";
+import { createProjectSpace } from "../../../../shared/project-spaces.js";
+import { appendAudit } from "../../../../shared/project-acl.js";
+import { resolveCrowHome } from "../../../../../scripts/pi-bots/ext_registry.mjs";
+import { worldRootFor, planCarryOver, applyCarryOver } from "../../../../../scripts/pi-bots/world-root.mjs";
 import { rowRev } from "./def-adapter.js";
 import { changeTracker } from "./ui.js";
 import { saveBasics, saveAbilities, saveSafety, saveAdvanced } from "./save-handlers.js";
@@ -59,9 +64,116 @@ function reqLang(req) {
 import { buildCrowMessagesGatewayConfig } from "./gateway-fields.js";
 export { buildCrowMessagesGatewayConfig };
 
+/**
+ * The tracker write the Edit tab's tracker save makes, shared with board_on so
+ * the two cannot drift. Mutates and returns `def`: mirrors project_id into
+ * the JSON (the column stays authoritative, M3b) and sets tracker_config.
+ * tracker_config.project_id is always dropped — tracker.mjs prefers it over
+ * the column, so a stale copy would point the bot's context at another board.
+ */
+export function applyTrackerChoice(def, { projectId = null, type = "kanban", slug = "", contextFields = "", queueFilterKey = "", queueFilterValue = "" } = {}) {
+  def.project_id = projectId;
+  def.tracker_config = def.tracker_config || {};
+  def.tracker_config.type = type;
+  delete def.tracker_config.project_id;
+  if (type === "custom") {
+    def.tracker_config.tracker_slug = String(slug || "").trim();
+    def.tracker_config.context_fields = String(contextFields || "").split(",").map((x) => x.trim()).filter(Boolean);
+    const qf = String(queueFilterKey || "").trim();
+    const qv = String(queueFilterValue || "").trim();
+    if (qf && qv) { def.tracker_config.queue_filter = { [qf]: qv }; }
+    else { delete def.tracker_config.queue_filter; }
+  } else if (type === "kanban" || type === "task-list" || type === "none") {
+    delete def.tracker_config.tracker_slug;
+    delete def.tracker_config.context_fields;
+    delete def.tracker_config.queue_filter;
+  }
+  return def;
+}
+
+/**
+ * "Turn on a board" (queue item 20, option A). Gives a bot a kanban board:
+ * a bot with no project gets a new "<Name>'s board" project linked, one that
+ * has a project keeps it. Custom trackers are refused (never overwritten).
+ * Linking a project moves the bot's world root (bot-world.mjs), so the old
+ * root's sessions/outputs/.pi/.mcp.json are symlinked into the new one first
+ * — where the new path is free; anything in the way refuses the action and
+ * the just-made project row is removed again. `return` is an enum, never a
+ * URL. Single-operator dashboard: no project_members check (the session
+ * operator owns the box).
+ */
+async function handleBoardOn(req, res, { db }) {
+  const b = req.body || {};
+  const lang = reqLang(req);
+  const botId = String(b.bot_id || "");
+  const enc = encodeURIComponent(botId);
+  const done = () => res.redirectAfterPost(b.return === "board" ? `/dashboard/bot-board?bot=${enc}` : "/dashboard/bot-builder?saved=1");
+  const fail = (msg) => res.redirectAfterPost("/dashboard/bot-builder?error=" + encodeURIComponent(msg));
+  let row = null;
+  try {
+    row = (await db.execute({ sql: "SELECT bot_id, display_name, definition, project_id FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0] || null;
+  } catch { row = null; }
+  if (!row) return res.redirectAfterPost("/dashboard/bot-builder?error=unknown_bot");
+  let def;
+  try { def = JSON.parse(row.definition || "{}") || {}; } catch { def = {}; }
+  const tc = def.tracker_config || {};
+  if (tc.type === "custom") {
+    return res.redirectAfterPost(`/dashboard/bot-builder?bot=${enc}&tab=tracker&error=` + encodeURIComponent(t("botbuilder.boardOnCustom", lang)));
+  }
+  if (boardState(row).state === "on") return done();
+
+  let projectId = row.project_id == null ? null : Number(row.project_id);
+  let created = null, carried = [];
+  // Removes the project row THIS request made (nothing references it yet).
+  const undo = async () => {
+    if (!created) return;
+    try { await db.execute({ sql: "DELETE FROM project_members WHERE project_id=?", args: [created.id] }); } catch {}
+    try { await db.execute({ sql: "DELETE FROM project_spaces WHERE id=?", args: [created.id] }); } catch {}
+  };
+  if (projectId == null) {
+    const crowHome = resolveCrowHome();
+    const oldRoot = worldRootFor({ workspaceDir: null, def, crowHome, botId });
+    try {
+      created = await createProjectSpace(db, { name: fill(t("botbuilder.boardProjectName", lang), { name: row.display_name || botId }) });
+    } catch (e) { return fail(String(e.message || e)); }
+    const newRoot = worldRootFor({ workspaceDir: created.workspaceDir, def, crowHome, botId });
+    const plan = planCarryOver(oldRoot, newRoot);
+    if (plan.conflicts.length) {
+      await undo();
+      return fail(fill(t("botbuilder.boardOnConflict", lang), { path: plan.conflicts.map((c) => c.path).join(", ") }));
+    }
+    try { carried = applyCarryOver(plan, newRoot).concat(plan.already); }
+    catch (e) { await undo(); return fail(fill(t("botbuilder.boardOnConflict", lang), { path: String(e.path || e.message || e) })); }
+    projectId = created.id;
+  }
+
+  const type = tc.type === "task-list" ? "task-list" : "kanban";
+  const hadProjectKey = Object.prototype.hasOwnProperty.call(def, "project_id");
+  applyTrackerChoice(def, { projectId, type });
+  // The column is authoritative (M3b). Like the Edit tab's board save, add no
+  // JSON copy; an existing copy is kept in step with the column.
+  if (!hadProjectKey) delete def.project_id;
+  // The same compare-and-swap the tab saves use: refuse a stale row.
+  const r = await db.execute({
+    sql: "UPDATE pi_bot_defs SET definition=?, project_id=?, updated_at=datetime('now') WHERE bot_id=? AND definition IS ? AND project_id IS ?",
+    args: [JSON.stringify(def), projectId, botId, row.definition ?? null, row.project_id ?? null],
+  });
+  if (Number(r && r.rowsAffected) === 0) { await undo(); return fail(t("botbuilder.staleForm", lang)); }
+  if (created) {
+    await appendAudit(db, {
+      project_id: created.id, actor_type: "local", action: "project.create", target: `bot:${botId}`,
+      payload: { via: "board_on", bot_id: botId, carried },
+    });
+  }
+  emitBotDefsChanged(botId);
+  return done();
+}
+
 export async function handleBotBuilderPost(req, res, { db }) {
   const b = req.body || {};
   const action = b.action;
+
+  if (action === "board_on") return handleBoardOn(req, res, { db });
 
   if (action === "create") {
     const display = (b.display_name || "").trim();
@@ -431,28 +543,13 @@ export async function handleBotBuilderPost(req, res, { db }) {
     } else if (tab === "tracker") {
       // M3b: project_id is owned by the column now.
       const next = b.project_id ? Number(b.project_id) : null;
-      def.project_id = next;
       columnProjectIdUpdate = next;
-      // S3: tracker_config
-      const ttype = b.tracker_type || "kanban";
-      def.tracker_config = def.tracker_config || {};
-      def.tracker_config.type = ttype;
-      if (ttype === "custom") {
-        def.tracker_config.tracker_slug = (b.tracker_slug || "").trim();
-        def.tracker_config.context_fields = (b.context_fields || "").split(",").map((s) => s.trim()).filter(Boolean);
-        const qf = (b.queue_filter_key || "").trim();
-        const qv = (b.queue_filter_value || "").trim();
-        if (qf && qv) { def.tracker_config.queue_filter = { [qf]: qv }; }
-        else { delete def.tracker_config.queue_filter; }
-      } else if (ttype === "kanban" || ttype === "task-list") {
-        delete def.tracker_config.tracker_slug;
-        delete def.tracker_config.context_fields;
-        delete def.tracker_config.queue_filter;
-      } else if (ttype === "none") {
-        delete def.tracker_config.tracker_slug;
-        delete def.tracker_config.context_fields;
-        delete def.tracker_config.queue_filter;
-      }
+      // S3: tracker_config (shared with board_on via applyTrackerChoice)
+      applyTrackerChoice(def, {
+        projectId: next, type: b.tracker_type || "kanban",
+        slug: b.tracker_slug, contextFields: b.context_fields,
+        queueFilterKey: b.queue_filter_key, queueFilterValue: b.queue_filter_value,
+      });
     } else if (tab === "skills") {
       const rawSkills = [].concat(b.skills || []).filter(Boolean);
       def.skills = rawSkills.map((s) => normalizeSkillName(s)).filter(Boolean);

@@ -48,6 +48,7 @@ import { resolveSkills, resolveSkill, skillDirs } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { proposalsDir, selfAuthoringPromptBlock } from "./skill_proposals.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
+import { worldRootFor } from "./world-root.mjs";
 import { installedKitDir, readKitThemes, readHouseStyleSync, houseStyleLinks } from "../../servers/shared/design-kit.js";
 
 /** Lazy bridge handle — see the CYCLE NOTE above. */
@@ -169,9 +170,9 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
   // sessions mkdir). The old no_session_dir throw made an unconfigured bot
   // unspawnable on every rail; with the cwd/world-root split there is always
   // a sane storage root, and a perch operator can point the session anywhere.
-  const sessionDir = (projectSpace && projectSpace.workspace_dir)
-    ? (projectSpace.workspace_dir + "/bots/" + botId)
-    : (def.session_dir || join(crowHome, "pi-bots", botId));
+  // (One resolution, shared with the Bot Builder's "Turn on a board",
+  // which carries the old root's world over when a project moves it.)
+  const sessionDir = worldRootFor({ workspaceDir: projectSpace && projectSpace.workspace_dir, def, crowHome, botId });
   // The operator's chosen working directory (open-anywhere). Defaults to the
   // world root, which keeps every pre-existing caller byte-identical. It is
   // pi's process cwd, the directory added to write_paths at spawn, and where
