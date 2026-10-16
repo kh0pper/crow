@@ -50,16 +50,113 @@ export function kitError(code, extra = {}) {
 const ICON_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const ICON_PREFIX = "icons:";
 
+export const ENGINES = new Set(["vega-lite", "mermaid", "d2"]);
+export const FAIL_CATEGORIES = new Set(["parse error", "invalid spec", "unsupported diagram type", "timeout", "render error"]);
+const LOOPBACK = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d{1,5}$/;
+const MAX_DEPTH = 64;
+// Mermaid diagram types the kit renders with SVG labels (no foreignObject),
+// matched lower-cased against the first non-comment line's keyword and refused
+// up front otherwise (review M7). Task 8 removes any type whose live render
+// fails; the skill lists exactly these. Keep this the ONE place the list lives.
+export const MERMAID_TYPES = new Set(["flowchart", "graph", "sequencediagram", "classdiagram", "statediagram", "statediagram-v2", "erdiagram", "gantt", "pie", "timeline", "mindmap"]);
+// Inline data is data: a column named url/href is not a fetch (review L10).
+const DATA_KEYS = new Set(["values", "datasets"]);
+const VEGA_FETCH_KEYS = new Set(["url", "href"]);
+// Renderer statuses that mean "misconfigured" (Host check, content-type check,
+// wrong path), not "this spec is bad": the caller falls back, it does not refuse.
+const MISCONFIGURED = new Set([403, 404, 415]);
+
+/** Any object key in `keys`, at any depth; deeper than MAX_DEPTH is refused. Iterative. */
+function findKey(root, keys) {
+  const stack = [[root, 0]];
+  while (stack.length) {
+    const [v, d] = stack.pop();
+    if (d > MAX_DEPTH) return "too_deep";
+    if (Array.isArray(v)) { for (const x of v) stack.push([x, d + 1]); continue; }
+    if (v && typeof v === "object") {
+      for (const k of Object.keys(v)) {
+        if (keys.has(k)) return "external_data";
+        if (!DATA_KEYS.has(k)) stack.push([v[k], d + 1]);
+      }
+    }
+  }
+  return null;
+}
+
+const refuse = (reason) => kitError("bad_spec", { reason });
+
+/** Spec rules checked BEFORE any render (spec §4.2). Throws bad_spec {reason};
+ *  the error never carries spec text. */
+export function guardSpec(engine, source) {
+  if (!ENGINES.has(engine)) throw refuse("engine");
+  if (typeof source !== "string" || !source.trim()) throw refuse("empty");
+  if (Buffer.byteLength(source) > KIT_LIMITS.specBytes) throw refuse("too_large");
+  if (engine === "vega-lite") {
+    let spec;
+    try { spec = JSON.parse(source); } catch { throw refuse("not_json"); }
+    const hit = findKey(spec, VEGA_FETCH_KEYS);
+    if (hit) throw refuse(hit);
+    return;
+  }
+  const lines = source.split("\n");
+  if (engine === "mermaid") {
+    if (source.trimStart().startsWith("---")) throw refuse("directives");
+    let first = null;
+    for (const line of lines) {
+      const t = line.trim().toLowerCase();
+      if (t.startsWith("%%{")) throw refuse("directives");
+      if (t.startsWith("click ")) throw refuse("links");
+      if (first === null && t && !t.startsWith("%%")) first = t.split(/[\s:]/)[0];
+    }
+    if (!MERMAID_TYPES.has(first)) throw refuse("unsupported_type");
+    return;
+  }
+  for (const line of lines) {   // d2
+    const t = line.trim().toLowerCase();
+    if (t.includes("...@") || /(?:^|[:{\s])@[a-z0-9_./-]/.test(t)) throw refuse("imports");
+    // No icons at all: D2 fetches remote icons and reads local paths (review L4).
+    if (/\bicon\s*:/.test(t)) throw refuse("icons");
+    if (/\blink\s*:\s*["']?[a-z][a-z0-9+.-]*:/.test(t)) throw refuse("links");
+  }
+}
+
+/** The renderer's HTTP client. Loopback only; every answer becomes a fixed error:
+ *  render_unavailable {retryable} (network, timeout, 5xx, 403/404/415, non-JSON),
+ *  render_too_large, bad_spec {reason:"too_large"}, render_failed {category, line}. */
+export function makeRenderClient({ url = DEFAULT_RENDER_URL, fetchImpl = globalThis.fetch, timeoutMs = KIT_LIMITS.renderTimeoutMs } = {}) {
+  if (!LOOPBACK.test(String(url))) throw kitError("render_unavailable", { reason: "not_loopback" });
+  const unavailable = () => kitError("render_unavailable", { retryable: true });
+  return async (engine, source, { timeoutMs: callTimeout = timeoutMs } = {}) => {
+    const limit = Math.max(1, Math.min(timeoutMs, Number.isFinite(callTimeout) ? callTimeout : timeoutMs));
+    let res;
+    try {
+      res = await fetchImpl(url + "/render", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine, source }), signal: AbortSignal.timeout(limit) });
+    } catch { throw unavailable(); }
+    let j = null;
+    try { j = await res.json(); } catch { j = null; }
+    if (res.status === 200) {
+      if (!j || typeof j.svg !== "string") throw unavailable();
+      if (Buffer.byteLength(j.svg) > KIT_LIMITS.svgBytes) throw kitError("render_too_large");
+      return j.svg;
+    }
+    if (!j || res.status >= 500 || MISCONFIGURED.has(res.status)) throw unavailable();
+    const e = j.error && typeof j.error === "object" ? j.error : {};
+    if (e.code === "too_large") throw e.category === "output" ? kitError("render_too_large") : refuse("too_large");
+    const category = FAIL_CATEGORIES.has(e.category) ? e.category : "render error";
+    const line = Number.isInteger(e.line) && e.line > 0 && e.line < 1e6 ? e.line : null;
+    throw kitError("render_failed", { category, line });
+  };
+}
+
 /**
  * Open a kit directory (the bundle root, holding lib/manifest.json).
  * @returns {{ version: string|null, dir: string, entries: Map<string, object>, themes: Map<string, object>,
  *   resolve(names: string[], opts: { target: "page"|"document"|"diagram" }):
  *     { files: {path: string, body: Buffer, contentType: string}[], refs: string[],
  *       entries: {name: string, kind: string, main: string, family?: string, fallback?: string}[] } }}
- * `renderUrl` / `fetchImpl` are accepted now for the renderer (Task 6).
+ * render(engine, source, { timeoutMs? }) → svg: guardSpec, then the loopback render client.
  */
 export function openKit(kitDir, { renderUrl = DEFAULT_RENDER_URL, fetchImpl = globalThis.fetch } = {}) {
-  void renderUrl; void fetchImpl;
   const libDir = join(kitDir, "lib");
   const manifest = JSON.parse(readFileSync(join(libDir, "manifest.json"), "utf8"));
   const entries = new Map(manifest.entries.map((e) => [e.name, e]));
@@ -78,6 +175,10 @@ export function openKit(kitDir, { renderUrl = DEFAULT_RENDER_URL, fetchImpl = gl
   const themes = new Map(themesMeta ? Object.entries(JSON.parse(readVerified(themesMeta).toString("utf8")).themes || {}) : []);
 
   const iconSets = new Map();
+  let client;
+  try { client = makeRenderClient({ url: renderUrl, fetchImpl }); }
+  catch (e) { client = async () => { throw e; }; }
+  const render = async (engine, source, opts = {}) => { guardSpec(engine, source); return client(engine, source, opts); };
   const iconsOf = (set) => {
     if (!iconSets.has(set.name)) iconSets.set(set.name, JSON.parse(readVerified(set.files[0]).toString("utf8")));
     return iconSets.get(set.name);
@@ -149,5 +250,5 @@ export function openKit(kitDir, { renderUrl = DEFAULT_RENDER_URL, fetchImpl = gl
     };
   }
 
-  return { version: manifest.kit_version || null, dir: kitDir, entries, themes, resolve };
+  return { version: manifest.kit_version || null, dir: kitDir, entries, themes, resolve, render };
 }
