@@ -246,7 +246,9 @@ export async function approveVersion(db, { artifactId, n, actor }) {
 export async function addVersion(db, blobs, { artifactId, source, actor, baseVersion = null, roundId = null, madeBy = null, changeNote = null, untrusted = false, proposedReason = null }, deps = {}) {
   const art = await requireAccess(db, actor, artifactId);
   if (flagUntrusted(art.received)) throw err("forbidden", "a received artifact cannot be edited");
-  const rendered = await renderVersion(art.type, source, deps);
+  // Review M10: an unchanged spec reuses the base version's render.
+  const priorRenders = await priorRendersFor(db, blobs, artifactId, baseVersion != null ? Number(baseVersion) : Number(art.current_version));
+  const rendered = await renderVersion(art.type, source, { ...deps, priorRenders });
   const sourceJson = JSON.stringify(source);
   const bot = actor.kind === "bot" ? actor.id : null;
   return withWriteLock(async () => {
@@ -337,6 +339,28 @@ export async function prune(db, artifactId) {
     await db.execute({ sql: "DELETE FROM artifact_versions WHERE artifact_id=? AND n=?", args: [artifactId, n] });
   }
   return { victims, keys };
+}
+
+/** Review M10: the renders of version n (from its __render/index.json), so an
+ *  unchanged spec is never re-rendered. Map<key, svg>; empty on any problem.
+ *  Only Crow writes __render/ (cleanAssetPath refuses it for bot assets), and
+ *  render.js re-checks every cached SVG before it is used. */
+export async function priorRendersFor(db, blobs, artifactId, n) {
+  const out = new Map();
+  try {
+    const v = await getVersion(db, artifactId, n);
+    if (!v) return out;
+    const files = JSON.parse(v.files_json);
+    const idx = files.find((f) => f.path === "__render/index.json");
+    if (!idx) return out;
+    const items = JSON.parse((await blobs.get(idx.key)).toString("utf8")).items || [];
+    for (const it of items.slice(0, 64)) {
+      const f = it && typeof it.path === "string" && it.path.startsWith("__render/") && files.find((x) => x.path === it.path);
+      const body = f && await blobs.get(f.key);
+      if (body && typeof it.key === "string") out.set(it.key, body.toString("utf8"));
+    }
+  } catch { return new Map(); }
+  return out;
 }
 
 export async function getVersion(db, artifactId, n) {
