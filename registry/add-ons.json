@@ -202,7 +202,7 @@
     {
       "id": "audiobookshelf",
       "name": "Audiobookshelf",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Self-hosted audiobook and podcast server — search, browse, and track listening progress",
       "type": "bundle",
       "author": "Crow",
@@ -255,13 +255,15 @@
         },
         {
           "name": "AUDIOBOOKSHELF_AUDIOBOOK_PATH",
-          "description": "Host path for audiobook files (Docker mode)",
-          "required": false
+          "description": "Host path for audiobook files (Docker mode). Empty: a folder in Crow's folder (media/audiobooks).",
+          "required": false,
+          "default_in_crow_home": "media/audiobooks"
         },
         {
           "name": "AUDIOBOOKSHELF_PODCAST_PATH",
-          "description": "Host path for podcast files (Docker mode)",
-          "required": false
+          "description": "Host path for podcast files (Docker mode). Empty: a folder in Crow's folder (media/podcasts).",
+          "required": false,
+          "default_in_crow_home": "media/podcasts"
         }
       ],
       "ports": [
@@ -553,7 +555,7 @@
     {
       "id": "calibre-server",
       "name": "Calibre Server",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "OPDS content server for ebooks — search, browse, and download from your Calibre library",
       "type": "bundle",
       "author": "Crow",
@@ -630,7 +632,7 @@
     {
       "id": "calibre-web",
       "name": "Calibre-Web",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Web-based ebook reader and library manager for Calibre",
       "type": "bundle",
       "author": "Crow",
@@ -1755,7 +1757,7 @@
     {
       "id": "gotosocial",
       "name": "GoToSocial",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Lightweight ActivityPub microblog server (fediverse). Pi-friendly single-binary alternative to Mastodon — joins the public fediverse with a sub-500 MB footprint.",
       "type": "bundle",
       "author": "Crow",
@@ -2073,7 +2075,7 @@
     {
       "id": "jellyfin",
       "name": "Jellyfin",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Self-hosted media server — stream movies, TV shows, and music with AI-powered library management",
       "type": "bundle",
       "author": "Crow",
@@ -2133,8 +2135,9 @@
         },
         {
           "name": "JELLYFIN_MEDIA_PATH",
-          "description": "Host path for media files (Docker mode)",
-          "required": true
+          "description": "Host path for media files (Docker mode). Leave it empty to start with an empty library in Crow's folder (media/jellyfin); point it at your media later in Configure.",
+          "required": true,
+          "default_in_crow_home": "media/jellyfin"
         },
         {
           "name": "JELLYFIN_CONFIG_PATH",
@@ -2156,7 +2159,7 @@
     {
       "id": "kavita",
       "name": "Kavita",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Self-hosted manga, comics, and ebook reader — browse series, track reading progress",
       "type": "bundle",
       "author": "Crow",
@@ -2216,8 +2219,9 @@
         },
         {
           "name": "KAVITA_LIBRARY_PATH",
-          "description": "Host path for manga/comics/ebooks (Docker mode)",
-          "required": false
+          "description": "Host path for manga/comics/ebooks (Docker mode). Empty: a folder in Crow's folder (media/kavita).",
+          "required": false,
+          "default_in_crow_home": "media/kavita"
         }
       ],
       "ports": [
@@ -3323,7 +3327,7 @@
     {
       "id": "matrix-dendrite",
       "name": "Matrix (Dendrite)",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "description": "Matrix homeserver on Dendrite — federated real-time chat with end-to-end encryption. Lighter than Synapse, monolithic binary. Joins the Matrix federation graph via HTTPS federation (:8448 or .well-known delegation).",
       "type": "bundle",
       "author": "Crow",
@@ -4064,7 +4068,7 @@
     {
       "id": "navidrome",
       "name": "Navidrome",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Lightweight music streaming server — browse albums, artists, playlists, and stream music",
       "type": "bundle",
       "author": "Crow",
@@ -4124,8 +4128,9 @@
         },
         {
           "name": "NAVIDROME_MUSIC_PATH",
-          "description": "Host path for music files (Docker mode)",
-          "required": true
+          "description": "Host path for music files (Docker mode). Leave it empty to start with an empty library in Crow's folder (media/music); point it at your music later in Configure.",
+          "required": true,
+          "default_in_crow_home": "media/music"
         }
       ],
       "ports": [
@@ -4203,7 +4208,7 @@
     {
       "id": "nextcloud",
       "name": "Nextcloud (connect existing)",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "description": "Deprecated: connect Crow to a Nextcloud you already run, over WebDAV. To host your own files, documents and calendars, install Crow Workspace instead.",
       "type": "skill",
       "author": "Crow",
@@ -5894,7 +5899,7 @@
     {
       "id": "tax",
       "name": "Tax Filing Assistant",
-      "version": "2.0.2",
+      "version": "2.0.3",
       "description": "Prepare federal income taxes — PDF document ingestion, calculation, form generation, and guided filing. Federal returns only (no state). Supports 1040, Schedules 1/C/D/SE, Form 8889, Form 8863, and common credits. 2024 + 2025 tax years.",
       "type": "mcp-server",
       "author": "Crow",
@@ -6729,7 +6734,7 @@
     {
       "id": "writefreely",
       "name": "WriteFreely",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Lightweight, minimalist ActivityPub blogging platform. Single-binary, single-SQLite-file footprint — ideal for long-form writing federated to the fediverse. Complements GoToSocial (microblog) and Crow's own blog.",
       "type": "bundle",
       "author": "Crow",

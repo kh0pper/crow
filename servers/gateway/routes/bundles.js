@@ -61,6 +61,7 @@ import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-prov
 import { checkComposeModel, loadComposeModel, usesHostNetwork } from "../compose-guard.js";
 import { resolveDataDir } from "../../db.js";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
+import { isPlaceholderValue } from "../bundle-env-placeholders.js";
 import { planGeneratedEnv, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedKeys, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
 
 /**
@@ -2051,7 +2052,7 @@ export function installBlockingEnvKeys(bundleId, manifest = getManifest(bundleId
   try { if (existsSync(composePath)) text = readFileSync(composePath, "utf8"); } catch { /* unreadable → only install_required can block */ }
   const hard = hardFailComposeKeys(text);
   return (manifest?.env_vars || [])
-    .filter((v) => v && typeof v.name === "string" && !v.generate && !nonBlankEnv(v.default)
+    .filter((v) => v && typeof v.name === "string" && !v.generate && !nonBlankEnv(v.default) && !crowHomeDefaultRel(v)
       && (v.install_required === true || (v.required && hard.has(v.name))))
     .map((v) => v.name);
 }
@@ -2322,7 +2323,7 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
  *
  * Every rung writes mode 600 — bundle .env files hold secrets.
  */
-export function writeInstallEnv(destDir, envVars, manifest, log = () => {}, { baseText = null } = {}) {
+export function writeInstallEnv(destDir, envVars, manifest, log = () => {}, { baseText = null, baseIsExample = false, crowHome = null } = {}) {
   const envPath = join(destDir, ".env");
   const examplePath = join(destDir, ".env.example");
   const usable = {};
@@ -2331,28 +2332,76 @@ export function writeInstallEnv(destDir, envVars, manifest, log = () => {}, { ba
   }
   const count = Object.keys(usable).length;
   const pathKeys = pathEnvKeys(manifest);
+  // Keys with env_vars[].default_in_crow_home that would install blank or as an example
+  // value get a folder inside this instance's CROW_HOME, created now (by the gateway user,
+  // so Docker never creates it as root).
+  // An existing .env (reinstall) is never "fixed" behind the user's back: there only a
+  // blank or missing key gets the default; the checklist flags a placeholder instead.
+  const homeDefaults = (base, { replacePlaceholders = true } = {}) => {
+    const out = {};
+    if (!crowHome) return out;
+    const baseEnv = parseEnvText(base || "");
+    for (const v of manifest?.env_vars || []) {
+      const rel = crowHomeDefaultRel(v);
+      if (!rel) continue;
+      const cur = usable[v.name] ?? baseEnv[v.name];
+      if (cur !== undefined && cur !== "" && !(replacePlaceholders && isPlaceholderValue(cur))) continue;
+      const dir = join(crowHome, rel);
+      try { mkdirSync(dir, { recursive: true, mode: 0o755 }); } catch { continue; }
+      out[v.name] = dir;
+    }
+    if (Object.keys(out).length) log(`Using a folder inside Crow's home for ${Object.keys(out).join(", ")} (change it in Configure)`);
+    return out;
+  };
   if (typeof baseText === "string") {
     // Seeded from an existing .env / .env.example: line-preserving (C4) — the base's
     // own lines (comments, legacy values, ${VAR} references) stay byte-for-byte.
-    writePrivateFile(envPath, updateEnvText(baseText, usable, { pathKeys }));
+    writePrivateFile(envPath, updateEnvText(baseText, { ...homeDefaults(baseText, { replacePlaceholders: baseIsExample }), ...usable }, { pathKeys }));
     log(`Wrote ${count} env vars`);
     return;
   }
   if (count > 0) {
-    writePrivateFile(envPath, formatEnvLines(usable, { pathKeys }));
+    writePrivateFile(envPath, formatEnvLines({ ...homeDefaults(""), ...usable }, { pathKeys }));
     log(`Wrote ${count} env vars`);
     return;
   }
   if (existsSync(envPath)) { chmodSync(envPath, 0o600); return; }
   if (existsSync(examplePath)) {
-    writePrivateFile(envPath, readFileSync(examplePath, "utf8"));
-    log("Created .env from .env.example");
+    // Example values are documentation, never live config: placeholder lines become
+    // comments (the checklist then lists the key), the rest is kept.
+    const text = scrubPlaceholderLines(readFileSync(examplePath, "utf8"));
+    writePrivateFile(envPath, updateEnvText(text, homeDefaults(text), { pathKeys }));
+    log("Created .env from .env.example (example values left out)");
+    return;
+  }
+  const defaults = homeDefaults("");
+  if (Object.keys(defaults).length) {
+    writePrivateFile(envPath, formatEnvLines(defaults, { pathKeys }));
     return;
   }
   if ((manifest?.env_vars || []).length > 0) {
     writePrivateFile(envPath, "# Managed by Crow — no values provided at install; configure via the dashboard Extensions panel.\n");
     log("Wrote placeholder .env (no values provided — configure via Extensions)");
   }
+}
+
+/** env_vars[].default_in_crow_home as a safe relative path, or null. */
+export function crowHomeDefaultRel(v) {
+  const rel = v?.default_in_crow_home;
+  if (typeof rel !== "string" || rel === "" || isAbsolute(rel) || rel.includes("\\") || rel.includes("$")) return null;
+  const norm = relativePath(".", rel);
+  if (!norm || norm.startsWith("..") || isAbsolute(norm)) return null;
+  return norm;
+}
+
+/** .env text with every KEY=<placeholder> line turned into a comment naming only the key. */
+export function scrubPlaceholderLines(text) {
+  return String(text || "").split("\n").map((line) => {
+    const m = line.match(/^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    if (!m) return line;
+    const val = parseEnvText(`${m[2]}=${m[3]}`)[m[2]];
+    return isPlaceholderValue(val) ? `# ${m[2]}= (example value left out: set it in Extensions)` : line;
+  }).join("\n");
 }
 
 export async function runInstallJob(bundleId, envVars, { job, installedSnapshot, consentVerified, manifest, keychain = null }) {
@@ -2462,6 +2511,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     const writeEnv = { ...(reqEnv || {}), ...generated };
     let installEnv = writeEnv;
     let baseText = null;
+    let baseIsExample = false;
     if (Object.keys(generated).length > 0) {
       // Writing values bypasses the .env / .env.example rungs, so seed from them:
       // existing .env, else .env.example — LINE-PRESERVING (C4): the base's own lines are
@@ -2470,7 +2520,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       const exP = join(destDir, ".env.example");
       try {
         if (existsSync(envP)) baseText = readFileSync(envP, "utf8");
-        else if (existsSync(exP)) baseText = readFileSync(exP, "utf8");
+        else if (existsSync(exP)) { baseText = scrubPlaceholderLines(readFileSync(exP, "utf8")); baseIsExample = true; }
       } catch { /* unreadable base: fall back to provided values only */ }
       if (baseText !== null) installEnv = { ...parseEnvText(baseText), ...writeEnv };
     }
@@ -2485,7 +2535,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       return { ok: false, reason: "could not save the generated password to Crow keychain; nothing was written — retry the install" };
     }
     plan.persist();
-    writeInstallEnv(destDir, writeEnv, manifest, (msg) => appendLog(job, msg), { baseText });
+    writeInstallEnv(destDir, writeEnv, manifest, (msg) => appendLog(job, msg), { baseText, baseIsExample, crowHome: CROW_HOME });
     if (Object.keys(generated).length > 0) {
       appendLog(job, `Generated ${Object.keys(generated).length} internal secret(s) — stored at mode 600, never shown`);
     }

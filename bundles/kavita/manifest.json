@@ -1,7 +1,7 @@
 {
   "id": "kavita",
   "name": "Kavita",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Self-hosted manga, comics, and ebook reader — browse series, track reading progress",
   "type": "bundle",
   "author": "Crow",
@@ -18,7 +18,7 @@
     { "name": "KAVITA_URL", "description": "Kavita server URL", "default": "http://localhost:5000", "required": true },
     { "name": "KAVITA_USERNAME", "description": "Kavita username for API authentication", "required": true },
     { "name": "KAVITA_PASSWORD", "description": "Kavita password for API authentication", "required": true, "secret": true },
-    { "name": "KAVITA_LIBRARY_PATH", "description": "Host path for manga/comics/ebooks (Docker mode)", "required": false }
+    { "name": "KAVITA_LIBRARY_PATH", "description": "Host path for manga/comics/ebooks (Docker mode). Empty: a folder in Crow's folder (media/kavita).", "required": false, "default_in_crow_home": "media/kavita" }
   ],
   "ports": [5000],
   "webUI": { "port": 5000, "path": "/", "label": "Kavita" },
