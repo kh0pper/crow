@@ -229,6 +229,9 @@ export const translations = {
   "signals.integrations.action": { en: "Check connections", es: "Revisar conexiones" },
   // backup
   "signals.backup.label": { en: "Backup", es: "Copia de seguridad" },
+  "signals.keychainExport.label": { en: "Keychain export", es: "Exportación del llavero" },
+  "signals.keychainExport.issue": { en: "{n} password(s) Crow generated are not in a keychain Export yet. If this machine is lost, they cannot be recovered without one.", es: "{n} contraseña(s) que Crow generó aún no están en una exportación del llavero. Si pierdes esta máquina, no se pueden recuperar sin una." },
+  "signals.keychainExport.action": { en: "Export keychain", es: "Exportar llavero" },
   "signals.backup.verified": { en: "checked ✓", es: "verificada ✓" },
   "signals.backup.damaged": { en: "may be damaged", es: "puede estar dañada" },
   "signals.backup.damagedIssue": { en: "Your latest backup may be damaged — make a new backup now", es: "Tu última copia de seguridad puede estar dañada — haz una copia nueva ahora" },

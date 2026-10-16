@@ -59,6 +59,12 @@ const EXPECT = [
   { id: "maker-lab-advanced", key: "MLA_ADMIN_PASSWORD", propagate: false, username: "${MLA_ADMIN_USER}" },
   { id: "actual-budget", key: "ACTUAL_SERVER_PASSWORD", propagate: false },
   { id: "lemmy", key: "LEMMY_ADMIN_PASSWORD", propagate: false, username: "admin_pending" },
+  { id: "mastodon", key: "MASTODON_SECRET_KEY_BASE", propagate: false },
+  { id: "mastodon", key: "MASTODON_OTP_SECRET", propagate: false },
+  { id: "mastodon", key: "MASTODON_AR_ENCRYPTION_DETERMINISTIC_KEY", propagate: false },
+  { id: "mastodon", key: "MASTODON_AR_ENCRYPTION_KEY_DERIVATION_SALT", propagate: false },
+  { id: "mastodon", key: "MASTODON_AR_ENCRYPTION_PRIMARY_KEY", propagate: false },
+  { id: "peertube", key: "PEERTUBE_SECRET", propagate: false },
 ];
 
 test("each key is generated, keychain-saved, and propagated only where an MCP child reads it", () => {
@@ -306,4 +312,14 @@ test("actual-budget: a stale typed password never becomes the new server's passw
   assert.deepEqual(AB.loginCandidates("https://actual.example.invalid", env), ["stale-typed"], "the generated one never leaves the machine");
   const server = readFileSync(join(REPO, "bundles/actual-budget/server/server.js"), "utf8");
   assert.match(server, /ensureBootstrapped\(ACTUAL_URL, process\.env\.ACTUAL_SERVER_PASSWORD/, "only the generated password bootstraps");
+});
+
+test("recovery keys (c): the Pixelfed APP_KEY (laravel_key) is saved to the keychain too, and stays out of the gateway .env", () => {
+  const v = specOf("pixelfed", "PIXELFED_APP_KEY");
+  assert.equal(v.generate, "laravel_key");
+  assert.equal(v.keychain, true);
+  assert.ok(v.keychain_label);
+  assert.equal(S.gatewayGeneratedKeys(manifestOf("pixelfed")).includes("PIXELFED_APP_KEY"), false);
+  const r = validateManifest(manifestOf("pixelfed"), join(REPO, "bundles", "pixelfed"));
+  assert.deepEqual(r.errors || [], []);
 });

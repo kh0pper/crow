@@ -55,7 +55,7 @@ import {
 import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";
 import { syncBundleSkills, removeBundleSkills, readSkillLedger, skillSyncMode } from "../bundle-skill-sync.js";
 import { envValueProblem, encodeEnvValue, formatEnvLines, updateEnvText, pathEnvKeys } from "../bundle-env-codec.js";
-import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved } from "../keychain/install-hooks.js";
+import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved, keychainRestoreValues } from "../keychain/install-hooks.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
 import { checkComposeModel, loadComposeModel, usesHostNetwork } from "../compose-guard.js";
@@ -2509,7 +2509,12 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     const reqEnv = stripGeneratedKeys(manifest, envVars);
     let composeTextForEnv = null;
     try { const cp = join(destDir, "docker-compose.yml"); if (existsSync(cp)) composeTextForEnv = readFileSync(cp, "utf8"); } catch { /* no fallbacks */ }
-    const plan = planGeneratedEnv(bundleId, manifest, { destDir, crowHome: CROW_HOME, composeText: composeTextForEnv, priorInstall: priorInstallEnv });
+    // A rebuilt machine (crow.db restored + keychain Export imported) has no .env and no
+    // retained copy: its keychain:true generated keys come back from the keychain instead of
+    // being minted again (recovery keys, queue item 30). Best-effort; values never logged.
+    const fromKeychain = await keychainRestoreValues(bundleId, manifest, { log: (m) => appendLog(job, m) });
+    const plan = planGeneratedEnv(bundleId, manifest, { destDir, crowHome: CROW_HOME, composeText: composeTextForEnv, priorInstall: priorInstallEnv, keychain: fromKeychain });
+    if (plan.restored.length > 0) appendLog(job, `Restored ${plan.restored.length} key(s) from Crow keychain (Settings → Passwords): ${plan.restored.join(", ")}`);
     const generated = plan.env;
     const writeEnv = { ...(reqEnv || {}), ...generated };
     let installEnv = writeEnv;

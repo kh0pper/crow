@@ -18,6 +18,7 @@ import {
   exportableEntries, importEntries, ensureWriteKey,
 } from "./store.js";
 import { vaultwardenStatus, saveToVault } from "./vault-save.js";
+import { recordKeychainExport } from "./reminder.js";
 
 const BASE = "/dashboard/keychain/api";
 
@@ -180,6 +181,7 @@ export function keychainApiRouter({
     if (!key) return res.status(409).json(KEY_MISSING);
     const entries = await exportableEntries(db, key);
     const file = await sealExport(entries, passphrase);
+    await recordKeychainExport(db).catch(() => {}); // the Nest reminder; never blocks the download
     await audit(db, "keychain_export", { ip: req.ip, details: { count: entries.length } });
     res.set("Content-Disposition", `attachment; filename="crow-keychain-${new Date().toISOString().slice(0, 10)}.json"`);
     res.json(file);
