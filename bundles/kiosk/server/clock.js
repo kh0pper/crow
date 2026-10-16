@@ -257,7 +257,7 @@ export function matchClockFastPath(transcript, { now = Date.now(), tz = null } =
 /**
  * Queue item 17a (2026-10-15): "add a car appointment 8:15 a.m. Monday" said on Thursday 15 October was read as
  * the PAST Monday. The quick voice model slips when it counts weekdays from the [Now] line, so a turn that names
- * a relative day gets the dates computed here: the next seven, each by weekday (a bare weekday means its next
+ * a relative day gets the dates computed here: the next six days by weekday, plus next week's today (a bare weekday means its next
  * date; today's weekday is offered as today or next week, since either is meant), the rule for the past (the
  * mistranscribed "I had … Monday" is why tense is not a signal), and the zone's UTC offset for a calendar tool, each
  * day's taken at local noon (a DST change happens at night); a day whose offset differs carries its own. The rule
@@ -281,9 +281,9 @@ export function relativeDatesContext(now, tz) {
   return `[Dates] To add or plan something, a day named without a date is the next one: ${days.join(", ")}; ${fmtYmd("en-US", today, WEEKDAY)} is today ${isoYmd(today)} or next week ${at(7)}. For something already past, it is the previous one. UTC offset ${off}.`;
 }
 
-const RELATIVE_DAY = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|weekend|next week|lunes|martes|miercoles|jueves|viernes|sabado|domingo|manana|fin de semana|proxima semana|semana que viene)(s)?\b/;
-// "de/por/en la mañana" is "in the morning", not "tomorrow".
-const MORNING = /\b(de|por|en) la manana\b/g;
+const RELATIVE_DAY = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|thur?s?|fri|sat|sun|tomorrow|tmrw|weekend|next week|lunes|martes|miercoles|jueves|viernes|sabado|domingo|manana|fin de semana|proxima semana|semana que viene)(s)?\b/;
+// "a/de/por/en la mañana" is "in the morning", not "tomorrow".
+const MORNING = /\b(a|de|por|en) la manana\b/g;
 /** True when the transcript names a weekday or a relative day (en, es; whole words, accents ignored). */
 export function mentionsRelativeDay(transcript) {
   if (typeof transcript !== "string" || !transcript) return false;

@@ -198,7 +198,7 @@ export function createGlassesTurns(deps) {
       const result = await deps.voice.runVoiceTurn({
         db, device, transcript, sink: env.sink, signal, startedAt: t0,
         promptSuffix: L.prompt_suffix,
-        turnContext: (t) => (mentionsRelativeDay(t) ? `${nowContext(now(), deps.timeZone)}\n${relativeDatesContext(now(), deps.timeZone)}` : nowContext(now(), deps.timeZone)),
+        turnContext: (t, at = now()) => (mentionsRelativeDay(t) ? `${nowContext(at, deps.timeZone)}\n${relativeDatesContext(at, deps.timeZone)}` : nowContext(at, deps.timeZone)),
         denyTools: deny,
         extraTools,
         maxToolRounds: GLASSES_MAX_TOOL_ROUNDS,

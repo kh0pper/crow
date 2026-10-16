@@ -170,7 +170,7 @@ test("relativeDatesContext: a bad zone falls back to the server's and never thro
 
 test("mentionsRelativeDay: weekdays and relative days in English and Spanish, as whole words", () => {
   for (const t of ["Add a car appointment at 8:15 a.m. Monday to my calendar", "I had a car appointment at 815 a.m. Monday to my calendar.", "remind me tomorrow", "what's on next week?",
-    "Schedule lunch on Friday's afternoon", "this weekend", "the day after tomorrow", "TUESDAY", "manana a las 9", "el miércoles a las 8 de la mañana", "cita el lunes a las ocho", "mañana a las 9", "el sábado", "pasado mañana",
+    "Schedule lunch on Friday's afternoon", "this weekend", "the day after tomorrow", "TUESDAY", "manana a las 9", "el miércoles a las 8 de la mañana", "on Mon at 3", "Thurs", "lunch tmrw", "cita el lunes a las ocho", "mañana a las 9", "el sábado", "pasado mañana",
     "la próxima semana", "la semana que viene", "este fin de semana", "el miercoles", "What do I have on Sunday?"]) assert.equal(mentionsRelativeDay(t), true, t);
-  for (const t of ["what time is it", "play kpft", "Sundance festival", "set a timer for five minutes", "dinner tonight", "pon la cita a las 8 de la mañana", "por la mañana", "en la manana", "", null, undefined, 42, "Mondaybeat"]) assert.equal(mentionsRelativeDay(t), false, String(t));
+  for (const t of ["what time is it", "play kpft", "Sundance festival", "set a timer for five minutes", "dinner tonight", "pon la cita a las 8 de la mañana", "por la mañana", "en la manana", "a la mañana", "Monitor the oven", "the wedding", "a fried egg", "", null, undefined, 42, "Mondaybeat"]) assert.equal(mentionsRelativeDay(t), false, String(t));
 });

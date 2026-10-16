@@ -156,7 +156,7 @@ export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = 
     promptSuffix: displayPromptSuffix(ctx.caps, tools.map((x) => x.definition.name)),
     // A turn that asks for NEW content sees kinds and counts only (no open card's title to copy); a turn
     // that asks to CHANGE the open card sees its words.
-    turnContext: (t) => `${kioskNowContext(now(), tz)}\n${mentionsRelativeDay(t) ? `${relativeDatesContext(now(), tz)}\n` : ""}${displayTurnContext(ctx.store, ctx.deviceId, { countsOnly: wantsNewDisplay(t), media: mediaLine(), card: cardUpdate(t, ctx.store, ctx.deviceId) !== null })}`,
+    turnContext: (t, at = now()) => `${kioskNowContext(at, tz)}\n${mentionsRelativeDay(t) ? `${relativeDatesContext(at, tz)}\n` : ""}${displayTurnContext(ctx.store, ctx.deviceId, { countsOnly: wantsNewDisplay(t), media: mediaLine(), card: cardUpdate(t, ctx.store, ctx.deviceId) !== null })}`,
     familiesOnIntent: true,
     denyTools: KIOSK_DENY_TOOLS,
     sttModel: (p) => kioskSttModel(p, cfg()),

@@ -448,8 +448,9 @@ test("17a: a glasses turn that names a relative day gets the kiosk's computed [D
     playback: { state: () => "idle", control: () => {}, start: () => {} }, log: () => {}, timeZone: "America/Chicago",
   });
   await turns.runTurn({ deviceId: "g", audio: Buffer.alloc(4), send: { text: () => {}, binary: () => {} } });
-  const ctx = typeof seen.turnContext === "function" ? seen.turnContext("add a dentist appointment Monday at 9") : seen.turnContext;
+  assert.equal(typeof seen.turnContext, "function", "the context is built from each turn's transcript");
+  const ctx = seen.turnContext("add a dentist appointment Monday at 9");
   assert.match(ctx, /^\[Now\] [^\n]+\(time zone America\/Chicago\)\n\[Dates\] To add or plan something, a day named without a date is the next one: /);
-  const plain = typeof seen.turnContext === "function" ? seen.turnContext("what is the capital of Portugal") : seen.turnContext;
+  const plain = seen.turnContext("what is the capital of Portugal");
   assert.match(plain, /^\[Now\] [^\n]+$/, "a plain question: the [Now] line only");
 });
