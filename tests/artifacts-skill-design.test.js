@@ -33,3 +33,11 @@ test("the manifest is bumped from 0.5.5", () => {
   assert.equal(man.version, "0.6.0");
   assert.equal(man.optional_bundles, undefined, "no reader exists for optional_bundles (review L12)");
 });
+
+test("final review I2/M1: refusals, renderer-down and Mermaid <br> wording", () => {
+  assert.match(skill, /at most 2 self-corrections in all/);
+  assert.match(skill, /check before rendering/);
+  assert.match(skill, /`\{ engine, source \}` has no code to fall back to, so while the renderer is down it is refused \(nothing saved\)/);
+  assert.match(skill, /`<br>`, `<br\/>` or `<br \/>`/);
+  assert.match(skill, /no comments; write & as `&amp;`; no named entities such as `&nbsp;` \(numeric `&#160;` is fine\)/);
+});

@@ -309,7 +309,7 @@ function safeSvg(svg, bot) {
     || hasExternalRef(low, bot) || hasExternalRef(asciiLower(dec), bot) || dec.includes("\\"));
 }
 /** Fixed, actionable text for a bot's own SVG that fails safeSvg. */
-const BOT_SVG = "svg must be plain SVG: one root <svg> holding shapes, text, gradients, filters and <style> only, every attribute quoted, <title> and <desc> as plain text; no links, HTML, comments, CDATA outside <style>, CSS escapes or external references (a Design kit icon is <image href=\"__lib/icons/<set>/<name>.svg\">)";
+const BOT_SVG = "svg must be plain SVG: one root <svg> holding shapes, text, gradients, filters and <style> only, every attribute quoted, <title> and <desc> as plain text; no links, HTML, CDATA outside <style>, CSS escapes or external references; no comments; write & as &amp;; no named entities such as &nbsp; (numeric &#160; is fine) (a Design kit icon is <image href=\"__lib/icons/<set>/<name>.svg\">)";
 
 const specKey = (engine, source) => `${engine}:${createHash("sha256").update(String(source)).digest("hex")}`;
 

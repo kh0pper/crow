@@ -394,3 +394,13 @@ test("fix round 3: a bot { svg } diagram fails closed on HTML, links, external r
   // The older, more specific messages still win where they apply.
   assert.match((await errOf(renderVersion("diagram", { svg: "<svg><script>alert(1)</script></svg>" }, {}))).message, /scripts/);
 });
+
+test("final review M1: a bot { svg } refusal names the entity rule; numeric references stay usable", async () => {
+  for (const svg of ["<svg><text>a &nbsp; b</text></svg>", "<svg><text>R & D</text></svg>", "<svg><!-- note --><rect/></svg>"]) {
+    const e = await errOf(renderVersion("diagram", { svg }, {}));
+    assert.equal(e && e.code, "bad_source", svg);
+    assert.match(e.message, BOT_SVG_MSG, svg);
+    assert.match(e.message, /no comments; write & as &amp;; no named entities such as &nbsp; \(numeric &#160; is fine\)/, svg);
+  }
+  assert.ok(await renderVersion("diagram", { svg: "<svg><text>a&#160;b &amp; c</text></svg>" }, {}));
+});
