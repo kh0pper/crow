@@ -29,7 +29,7 @@ host.docker.internal:host-gateway`) but the connection times out; verified
 on a live install 2026-07-14),
 `ROOKERY_MODEL_ID` (as reported by the endpoint's `/v1/models`),
 `ROOKERY_MODEL_API_KEY` (only if your endpoint checks it; default `local`),
-`ROOKERY_WORKSPACES_DIR` (default `~/.crow/data/rookery/workspaces` is
+`ROOKERY_WORKSPACES_DIR` (default `~/.crow/data/rookery-workspaces`, beside the bundle data folder, not inside it, is
 usually fine), and `ROOKERY_CORS_ORIGINS`/`ROOKERY_REVIEWER_URL` — see below.
 Host prerequisite: the `rookery_assemble_exp` MCP tool and the panel's
 assemble form both run via `uv` at `~/.local/bin/uv` (rookery is the first

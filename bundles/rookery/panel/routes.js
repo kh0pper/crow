@@ -5,7 +5,7 @@ import { join } from "node:path";
 import os from "node:os";
 
 const WORKSPACES = () =>
-  (process.env.ROOKERY_WORKSPACES_DIR || join(os.homedir(), ".crow/data/rookery/workspaces"))
+  (process.env.ROOKERY_WORKSPACES_DIR || join(os.homedir(), ".crow/data/rookery-workspaces"))
     .replace(/^~(?=\/)/, os.homedir());
 // Root-origin serving (plan deviation 4): the reviewer is NOT behind /proxy/<id>/.
 // Scheme allowlist: the value lands in anchor hrefs in the tile — a non-http(s)

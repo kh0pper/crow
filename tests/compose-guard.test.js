@@ -193,7 +193,8 @@ dockerTest("every tracked first-party compose passes the model check (with its m
       cpSync(src, dir, { recursive: true, filter: (f) => !f.includes("node_modules") });
       const loaded = await G.loadComposeModel(dir, { env, runConfig: run });
       if (loaded.error) { bad.push(`${id}: ${loaded.error}`); continue; }
-      const r = G.checkComposeModel(loaded.model, { bundleDir: dir, manifest, consentVerified: true, ctx: { crowHome: ch, dataDir: join(ch, "data"), appRoot: REPO, home } });
+      const { readdirSync } = await import("node:fs");
+      const r = G.checkComposeModel(loaded.model, { bundleDir: dir, manifest, consentVerified: true, ctx: { crowHome: ch, dataDir: join(ch, "data"), appRoot: REPO, home, shipped: new Set(readdirSync(src)) } });
       if (!r.valid) bad.push(`${id}: ${r.reason}`);
     }
   } finally { rmSync(home, { recursive: true, force: true }); }
@@ -279,7 +280,7 @@ test("model: a bundle may use its OWN subfolder of the data folder, never a sibl
   assert.equal(check(svc({ volumes: [bind(join(DATA, "rk", "ws"))] }), { manifest: m }).valid, true);
   assert.equal(check(svc({ volumes: [bind(join(DATA, "backups"))] }), { manifest: m }).valid, false);
   assert.equal(check(svc({ volumes: [bind(DATA)] }), { manifest: m }).valid, false);
-  assert.equal(check(svc({ volumes: [bind(join(DATA, "rk-other"))] }), { manifest: m }).valid, false);
+  assert.equal(check(svc({ volumes: [bind(join(DATA, "rkx"))] }), { manifest: m }).valid, false, "a different id that only starts the same");
 });
 
 test("model: more host areas — /root, /boot, Docker's data, /run, /dev are refused; /proc and /sys only read-only with consent", () => {
@@ -556,4 +557,36 @@ test("code-execution paths are refused: folders on PATH, any git checkout, syste
   assert.equal(G.checkComposeModel(svc({ volumes: [bind(onPath)] }), { bundleDir: bundleDir(), manifest: {}, consentVerified: false, ctx: { ...CTX, path: `/usr/bin:${onPath}` } }).valid, false, "a folder on PATH");
   rmSync(repoLike, { recursive: true, force: true });
   rmSync(onPath, { recursive: true, force: true });
+});
+
+test("data folder: <id> or <id>-* only, never a name Crow's data uses and never an existing file", () => {
+  for (const [id, rel] of [["backups", "backups"], ["peers", "peers"], ["instance", "instance-id"], ["identity", "identity.json"], ["tasks", "tasks.db"]]) {
+    if (rel === "instance-id") writeFileSync(join(DATA, "instance-id"), "x");
+    assert.equal(check(svc({ volumes: [bind(join(DATA, rel))] }), { manifest: { id } }).valid, false, `${id} → ${rel}`);
+  }
+  assert.equal(check(svc({ volumes: [bind(join(DATA, "rk-workspaces"))] }), { manifest: { id: "rk" } }).valid, true);
+});
+
+test("a bind mount inside another read-write bind mount is refused (the container could swap it for a symlink)", () => {
+  const dir = bundleDir();
+  const outer = join(DATA, "nest");
+  assert.equal(check(svc({ volumes: [bind(outer), bind(join(outer, "inner"))] }), { manifest: { id: "nest" }, dir }).valid, false);
+  assert.equal(check(svc({ volumes: [bind(outer, true), bind(join(outer, "inner"), true)] }), { manifest: { id: "nest" }, dir }).valid, true, "read-only outer is fine");
+  assert.equal(check({ services: { a: { image: "x", volumes: [bind(outer)] }, b: { image: "x", volumes: [bind(join(outer, "x"), true)] } } }, { manifest: { id: "nest" }, dir }).valid, false, "across services too");
+});
+
+test("no tracked compose bundle's id is a name Crow's data folder reserves", () => {
+  const clash = [...trackedBundleSet()].filter((id) => existsSync(join(REPO, "bundles", id, "docker-compose.yml")) && G.RESERVED_DATA_NAMES.has(id));
+  assert.deepEqual(clash, []);
+});
+
+test("anything the bundle ships (settings-section.js, run.sh, src/…) is never mountable read-write", () => {
+  const dir = join(CROW_HOME, "bundles", "fx-ship");
+  mkdirSync(dir, { recursive: true });
+  const ctx = { ...CTX, shipped: new Set(["settings-section.js", "run.sh", "src", ".venv"]) };
+  for (const rel of ["settings-section.js", "run.sh", "src", ".venv"]) {
+    assert.equal(G.checkComposeModel(svc({ volumes: [bind(join(dir, rel))] }), { bundleDir: dir, manifest: { id: "fx-ship" }, ctx }).valid, false, rel);
+    assert.equal(G.checkComposeModel(svc({ volumes: [bind(join(dir, rel), true)] }), { bundleDir: dir, manifest: { id: "fx-ship" }, ctx }).valid, true, `${rel} ro`);
+  }
+  assert.equal(G.checkComposeModel(svc({ volumes: [bind(join(dir, "data"))] }), { bundleDir: dir, manifest: { id: "fx-ship" }, ctx }).valid, true, "a runtime data folder");
 });

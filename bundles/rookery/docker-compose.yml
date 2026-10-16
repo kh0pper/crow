@@ -14,7 +14,7 @@ services:
       MCP_RESEARCH_URL: ${ROOKERY_MCP_RESEARCH_URL:-}
     volumes:
       - ${HOME}/.crow/data/rookery:/data
-      - ${ROOKERY_WORKSPACES_DIR:-${HOME}/.crow/data/rookery/workspaces}:/workspaces
+      - ${ROOKERY_WORKSPACES_DIR:-${HOME}/.crow/data/rookery-workspaces}:/workspaces
     ports:
       - "127.0.0.1:3061:3061"
     extra_hosts:

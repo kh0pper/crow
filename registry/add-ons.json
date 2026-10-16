@@ -5358,7 +5358,7 @@
       "id": "rookery",
       "name": "Open Science Reviewer",
       "origin": "community",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "description": "Self-hosted OpenScience reviewer + experiment-audit workspace assembler — audit a report's numeric claims against its registered evidence, on your own local model",
       "type": "bundle",
       "author": "kh0pper",
@@ -5415,7 +5415,7 @@
         {
           "name": "ROOKERY_WORKSPACES_DIR",
           "description": "Host directory where audit workspaces are assembled (shared by the reviewer and the assemble tool)",
-          "default": "~/.crow/data/rookery/workspaces",
+          "default": "~/.crow/data/rookery-workspaces",
           "required": false
         },
         {

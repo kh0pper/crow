@@ -107,6 +107,10 @@ const TOP_OK = new Set(["name", "services", "networks", "volumes", "secrets", "c
 const BUNDLE_CONTROL = new Set(["manifest.json", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
   "docker-compose.override.yml", "docker-compose.override.yaml", "compose.override.yml", "compose.override.yaml",
   ".env", ".env.example", "package.json", "package-lock.json", "node_modules", "server", "panel", "scripts", "ops", "skills", "public", "bin"]);
+// Names Crow's own data uses directly under the data folder.
+export const RESERVED_DATA_NAMES = new Set(["backups", "peers", "identity", "instance-id", "instance-sync", "legacy", "projects",
+  "models", "media", "kb-media", "tasks", "keys", "keychain", "secrets", "nostr", "sync", "storage", "uploads", "cache", "tmp", "logs",
+  "orchestrator-refcounts", "ntfy-push", "ntfy-push-status", "workspace-tools", "wayfinder-tile-cache", "glasses-photos"]);
 // Names Crow itself uses directly under CROW_HOME: no bundle id may claim them as its own.
 export const RESERVED_HOME_NAMES = new Set(["data", "secrets", "bundles", "panels", "skills", "media", "backups", "env", "logs",
   "p4", "pi-bots", "eval", "blog", "bin", "tmp", "cache", "config", "android-keystore", "keychain", "identity", "peer",
@@ -148,7 +152,14 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     for (const d of roots.dataDirs) {
       if (!under(p, d)) continue;
       if (readOnly && isPrivilegedAllowed && p === join(d, "crow.db")) return null;
-      if (ownId && under(p, join(d, ownId))) return null;
+      // <data>/<id> or <data>/<id>-* — a folder (or not created yet), never a name Crow's
+      // own data uses (backups, peers, identity…) and never an existing file.
+      const first = p === d ? "" : p.slice(d.length + 1).split(sep)[0];
+      if (ownId && !RESERVED_DATA_NAMES.has(ownId) && (first === ownId || first.startsWith(`${ownId}-`)) && !RESERVED_DATA_NAMES.has(first)) {
+        let isFile = false;
+        try { isFile = !statSync(join(d, first)).isDirectory(); } catch { /* not there yet */ }
+        if (!isFile) return null;
+      }
       return refuse(`${what}: mounts a path in Crow's data folder outside its own <data>/${ownId || "<id>"}`);
     }
     if (under(p, roots.crowHome)) {
@@ -158,7 +169,8 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
         // The bundle's own folder, but never the folder itself or its control files read-write:
         // the gateway reads the manifest, compose file and .env, and runs server/ code, so a
         // container that could rewrite them could grant itself privileges at the next Start.
-        if (!readOnly && (p === bundleReal || BUNDLE_CONTROL.has(p.slice(bundleReal.length + 1).split(sep)[0]))) {
+        const top = p.slice(bundleReal.length + 1).split(sep)[0];
+        if (!readOnly && (p === bundleReal || BUNDLE_CONTROL.has(top) || (ctx.shipped && ctx.shipped.has(top)))) {
           return refuse(`${what}: mounts the bundle's own control files read-write`);
         }
         return null;
@@ -215,6 +227,21 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     for (const k of Object.keys(obj)) if (!allowed.includes(k)) return refuse(`${what}: key '${k}' is not one the install check understands`);
     return null;
   };
+
+  // A bind source inside another READ-WRITE bind of this project: the container can swap it
+  // for a symlink after this check, and Docker follows it at the next (re)start, which
+  // nothing re-checks (restart: unless-stopped). Refused.
+  {
+    const binds = [];
+    for (const s of Object.values(model.services || {})) {
+      for (const v of (s && s.volumes) || []) if (v && v.type === "bind" && typeof v.source === "string" && isAbsolute(v.source)) binds.push({ p: resolveHostPath(v.source), rw: v.read_only !== true });
+    }
+    for (const a of binds) {
+      for (const b of binds) {
+        if (a !== b && a.rw && a.p !== b.p && under(b.p, a.p)) return refuse(`a bind mount sits inside another read-write bind mount (${b.p.slice(-60)})`);
+      }
+    }
+  }
 
   const networkNames = new Set(Object.keys(model.networks || {}));
   for (const [name, s] of Object.entries(model.services)) {
