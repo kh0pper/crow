@@ -57,7 +57,17 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     }
     // The Design kit (spec §4): used only when installed on this instance.
     // Panel-path renders get it too, like the MCP mount's renderDeps.
-    if (S.design === undefined) { const d = await bundleImport("server/design.js"); S.design = d.createDesign({ crowHome: process.env.CROW_HOME || join(homedir(), ".crow"), db: S.db }); }
+    // design.js failing to load degrades to "no kit" (null, not retried);
+    // it never takes the panel down (final review M4).
+    if (S.design === undefined) {
+      try {
+        const d = await (S.importDesign || (() => bundleImport("server/design.js")))();
+        S.design = d.createDesign({ crowHome: process.env.CROW_HOME || join(homedir(), ".crow"), db: S.db });
+      } catch (e) {
+        console.warn(`[artifacts] the Design kit seam could not be loaded (${(e && e.code) || "error"}); the panel runs without the kit`);
+        S.design = null;
+      }
+    }
     if (!S.renderDeps) { const r = await appImport("servers/blog/renderer.js"); S.renderDeps = { markdownBlocks: r.markdownBlocks, design: S.design }; }
     if (!S.designShared) S.designShared = await appImport("servers/shared/design-kit.js");
     if (!S.csrf) S.csrf = (await appImport("servers/gateway/dashboard/shared/csrf.js")).csrfMiddleware;

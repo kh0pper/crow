@@ -216,3 +216,13 @@ test("house style on a page: the save result names the files to link (review M3)
     for (const p of made.data.design.house_style_links) assert.ok(files.includes(p), `${p} is in the version`);
   } finally { delete s.houseStyle.bobby; await c.close(); }
 });
+
+test("final review M4: the gateway mount imports design.js on its own, and a failure leaves design = null instead of skipping the Artifacts mount", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../servers/gateway/boot/mcp-mounts.js", import.meta.url), "utf8");
+  const all = src.match(/await Promise\.all\(\[("[^"]+\.js",? ?)+\]\.map\(imp\)\)/);
+  assert.ok(all, "the bundle modules load together");
+  assert.doesNotMatch(all[0], /design\.js/, "design.js is not in the all-or-nothing import");
+  assert.match(src, /let design = null;\s*try \{ design = \(await imp\("design\.js"\)\)\.createDesign\(/);
+  assert.match(src, /catch \(e\) \{ console\.warn\(`\[gateway\] artifacts: the Design kit seam could not be loaded/);
+});
