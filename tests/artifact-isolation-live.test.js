@@ -1074,7 +1074,11 @@ async function kitDesign() {
   return { real, design: { kit: async () => ({ themes: real.themes, resolve: real.resolve, render: async () => svg }) } };
 }
 
-test("design kit: a document with a rendered chart and a house style loads its __render image and theme fonts (review M4)", async (ctx) => {
+// Proves the document wiring (the __render image and the house style's theme
+// fonts reach a real document frame under its CSP). It is NOT the proof of the
+// font ACAO change: a document frame speaks, so its responses already carried
+// ACAO *. The diagram and sealed-page tests below are the ones that need it.
+test("design kit: a document with a rendered chart and a house style loads its __render image and theme fonts", async (ctx) => {
   if (!chrome) return ctx.skip("no headless Chrome");
   const { markdownBlocks } = await import("../servers/blog/renderer.js");
   const { renderVersion } = await import("../bundles/artifacts/server/render.js");

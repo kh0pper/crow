@@ -30,3 +30,18 @@ test("diagram and document frames: fonts get ACAO *, HTML and CSS do not", async
     }
   }
 });
+
+// Final review T18: the cases that need the font ACAO are the frames that do
+// NOT speak — a diagram (above) and a scripts-off (sealed) page. A speaking
+// document or page got ACAO * before the change, so it cannot discriminate.
+test("a scripts-off page (sealed, does not speak): fonts get ACAO *, HTML and CSS do not", async () => {
+  const { token } = tokens.mint({ artifactId: "art-font", versionN: 1, type: "page", dashboardOrigin: "http://dash.test", scriptsOff: true });
+  const font = await fetch(`http://127.0.0.1:${port}/v/${token}/__lib/font/demo/demo-latin-400-normal.woff2`);
+  assert.equal(font.status, 200);
+  assert.equal(font.headers.get("access-control-allow-origin"), "*", "sealed page: font readable cross-origin");
+  assert.equal(font.headers.get("access-control-allow-credentials"), null);
+  const html = await fetch(`http://127.0.0.1:${port}/v/${token}/`);
+  assert.equal(html.headers.get("access-control-allow-origin"), null, "sealed page: HTML unchanged");
+  const css = await fetch(`http://127.0.0.1:${port}/v/${token}/__lib/css/demo/demo.css`);
+  assert.equal(css.headers.get("access-control-allow-origin"), null, "sealed page: CSS unchanged");
+});
