@@ -808,6 +808,21 @@ test("H3: the SAME tab after a reload (its tab flag) auto-resumes a playing loca
   assert.equal(h.audio.currentTime, 42);
 });
 
+test("data usage: a paused (or new-tab) local item never asks for its media on a page load; the position is the start position, and pagehide keeps it", async () => {
+  const marker = { backend: "local", src: "https://pod.example/ep.mp3", title: "Episode", time: 42 };
+  for (const [name, saved, session] of [
+    ["paused, same tab", { ...marker, wasPlaying: false }, new Map([["crow-player-tab", "1"]])],
+    ["playing, new tab", { ...marker, wasPlaying: true }, new Map()],
+  ]) {
+    const local = new Map([["crow-player-state", JSON.stringify(saved)]]);
+    const h = harness({ local, session });
+    assert.notEqual(h.audio.preload, "metadata", name + ": no metadata fetch (or open stream) for an item that will not resume");
+    assert.equal(h.audio.currentTime, 42, name + ": the saved position is the start position before any metadata");
+    h.fireWin("pagehide");
+    assert.equal(JSON.parse(local.get("crow-player-state")).time, 42, name + ": a pagehide here never overwrites the position with 0");
+  }
+});
+
 test("I1: the tab flag is in sessionStorage only between pagehide and the next load (a tab duplicated while live copies none)", async () => {
   const session = new Map([["crow-player-tab", "1"]]);
   const h = harness({ session });

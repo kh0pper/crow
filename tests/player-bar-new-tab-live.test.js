@@ -131,11 +131,45 @@ test("(b)(c) H3: a playing local item — a NEW tab shows it paused, never plays
     assert.equal(s.paused, true, "no second copy of the podcast");
     assert.equal(s.pulse, false, "paused WITHOUT pulsing");
     await b.close(); b = null;
+    const was = await a.evalIn("document.getElementById('crow-audio').currentTime");
     await a.send("Page.reload");
     assert.equal(await until(a.evalIn, isNest), true);
     assert.equal(await until(a.evalIn, playingNow), true, "the same tab resumes: " + JSON.stringify(await a.evalIn(BAR)));
-    const saved = JSON.parse(await a.evalIn("localStorage.getItem('crow-player-state')")).time;
-    assert.ok(saved > 0.5, "from where it was, not from the start: " + saved);
+    const now = await a.evalIn("document.getElementById('crow-audio').currentTime");
+    assert.ok(now >= was - 0.5, "from where it was, not from the start: " + now + " vs " + was);
+  } finally { if (b) await b.close(); await clearStorage(a); await a.close(); }
+});
+
+test("(f) data usage: a PAUSED local item's page loads (its own tab's reload, a new tab's viewer) ask for no media; a tap there plays from the saved position", async (t) => {
+  if (!chrome) return t.skip("no headless Chrome");
+  const a = await tab();
+  let b = null;
+  try {
+    await localOnBar(a);
+    await sleep(1200);
+    await a.evalIn("window.crowPlayer.toggle()");
+    assert.equal(await until(a.evalIn, "document.getElementById('crow-audio').paused"), true);
+    const at = await a.evalIn("document.getElementById('crow-audio').currentTime");
+    assert.ok(at > 1, "played a while: " + at);
+    await a.go(rig.base + "/dashboard/artifacts");   // the paused tab moves on (pagehide saves wasPlaying:false)
+    assert.equal(await until(a.evalIn, "!!document.getElementById('h') && document.getElementById('h').textContent === 'Library' && !!window.crowPlayer"), true);
+    const m0 = rig.mediaHits.length;
+    await a.send("Page.reload");
+    assert.equal(await until(a.evalIn, "!!window.crowPlayer"), true);
+    b = await tab();
+    await b.go(rig.base + rig.viewerHref);
+    assert.equal(await until(b.evalIn, isViewer), true);
+    await settle();
+    assert.equal(rig.mediaHits.length - m0, 0, "no metadata fetch on a paused item's page load: " + JSON.stringify(rig.mediaHits.slice(m0)));
+    const s = await b.evalIn(BAR);
+    assert.equal(s.visible, true);
+    assert.equal(s.paused, true);
+    assert.ok(Math.abs(JSON.parse(s.marker).time - at) < 0.3, "the position survives both page loads: " + s.marker + " vs " + at);
+    await b.close(); b = null;
+    await a.evalIn("window.crowPlayer.toggle()", { gesture: true });
+    assert.equal(await until(a.evalIn, playingNow), true, JSON.stringify(await a.evalIn(BAR)));
+    const now = await a.evalIn("document.getElementById('crow-audio').currentTime");
+    assert.ok(now >= at - 0.3 && now < at + 3, "a tap plays from the saved position: " + now + " vs " + at);
   } finally { if (b) await b.close(); await clearStorage(a); await a.close(); }
 });
 
@@ -160,13 +194,18 @@ test("(d) H3 duplicated: a tab opened from a tab that is playing a local item sh
   } finally { if (d) await d.close(); await clearStorage(a); await a.close(); }
 });
 
-test("(e) the owning tab whose session ended elsewhere (stopped from another device): a reload says Playback ended and drops the marker", async (t) => {
+test("(e) the owning tab whose session ended elsewhere (stopped from another device) while it was away: coming back says Playback ended and drops the marker", async (t) => {
   if (!chrome) return t.skip("no headless Chrome");
   const a = await tab();
   try {
     await stationOnBar(a);
+    // Leave first, THEN stop: a page still open when the stream is cut notices by itself (the element's retry
+    // gets a 404, the bar asks the server, says Playback ended and drops the marker), so a reload racing that
+    // would find no marker. That page's own answer is right; this test is about the restore.
+    await a.go("about:blank");
+    assert.equal(await until(a.evalIn, "location.href === 'about:blank' && document.readyState === 'complete'"), true);
     rig.k.media.stop(rig.displayId);
-    await a.send("Page.reload");
+    await a.go(rig.base + "/dashboard/nest");
     assert.equal(await until(a.evalIn, isNest), true);
     assert.equal(await until(a.evalIn, `(function(){ var s = ${BAR}; return s.visible && s.subtitle === 'Playback ended'; })()`), true, JSON.stringify(await a.evalIn(BAR)));
     const s = await a.evalIn(BAR);

@@ -1145,10 +1145,17 @@ export function playerBarJs(lang) {
           subtitleEl.textContent = saved.subtitle;
           subtitleEl.style.display = 'block';
         }
-        // preload="none" (the bar's default) never fetches metadata, so loadedmetadata would never fire and the
-        // saved position and play state would never come back: ask for the metadata of a restored item.
-        audio.preload = 'metadata';
+        // H3: only the tab that was playing it resumes it; a new tab shows it paused (a tap plays it there).
+        var resumes = !!(saved.wasPlaying && tabHadFlag);
+        // preload="none" (the bar's default) never fetches metadata, so loadedmetadata would never fire and a
+        // resuming item would never come back: ask for metadata ONLY then. An item shown paused stays at "none"
+        // (no fetch, no open live stream on every page load); its saved position becomes the start position
+        // now, so a tap seeks there and a pagehide here saves it instead of 0.
+        if (resumes) audio.preload = 'metadata';
         audio.src = saved.src;
+        if (!resumes && saved.time) {
+          try { audio.currentTime = saved.time; } catch (e) {}
+        }
         if (saved.metadata) {
           currentMetadata = saved.metadata;
           applyMediaSessionMetadata(saved.metadata);
@@ -1157,8 +1164,7 @@ export function playerBarJs(lang) {
           if (saved.time) {
             try { audio.currentTime = saved.time; } catch (e) {}
           }
-          // H3: only the tab that was playing it resumes it; a new tab shows it paused (a tap plays it there).
-          if (saved.wasPlaying && tabHadFlag) {
+          if (resumes) {
             var p = audio.play();
             if (p && p.catch) {
               p.catch(function(err) {

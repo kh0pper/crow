@@ -71,6 +71,7 @@ export async function startBarRig() {
   const logs = [];
   const streams = [];          // { status, at } per /display/t request (never the ticket)
   const gets = [];             // the B3 GETs: { owner, item }
+  const mediaHits = [];        // every /media/tone.wav request: { range, at }
   let restarts = 0;
 
   function newRuntime() {
@@ -141,6 +142,7 @@ ${turbo ? `<script>${TURBO}</script>` : ""}<style>${designTokensCss()} body{marg
   app.get("/dashboard/perch", auth.dashboardAuth, (_req, res) => res.type("html").send(page("Perch", `<iframe id="sheet" src="${viewerHref}" style="width:100%;height:500px;border:0"></iframe>`)));
   // A podcast-like file: seekable (byte ranges), as a real podcast host serves it.
   app.get("/media/tone.wav", auth.dashboardAuth, (req, res) => {
+    mediaHits.push({ range: req.headers.range || null, at: Date.now() });
     res.type("audio/wav").setHeader("accept-ranges", "bytes");
     const m = /^bytes=(\d+)-(\d*)$/.exec(String(req.headers.range || ""));
     if (!m) { res.setHeader("content-length", WAV.length); return res.end(WAV); }
@@ -163,7 +165,7 @@ ${turbo ? `<script>${TURBO}</script>` : ""}<style>${designTokensCss()} body{marg
   const base = `http://127.0.0.1:${srv.address().port}`;
 
   return {
-    base, viewerHref, sessionToken, displayId, logs, streams, gets,
+    base, viewerHref, sessionToken, displayId, logs, streams, gets, mediaHits,
     get k() { return k; },
     get restarts() { return restarts; },
     cookies: () => [
