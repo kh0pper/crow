@@ -253,3 +253,40 @@ export function matchClockFastPath(transcript, { now = Date.now(), tz = null } =
   }
   return say ? { say, events: [] } : null;
 }
+
+/**
+ * Queue item 17a (2026-10-15): "add a car appointment 8:15 a.m. Monday" said on Thursday 15 October was read as
+ * the PAST Monday. The quick voice model slips when it counts weekdays from the [Now] line, so a turn that names
+ * a relative day gets the dates computed here: the next seven, each by weekday (a bare weekday means its next
+ * date; today's weekday is offered as today or next week, since either is meant), the rule for the past (the
+ * mistranscribed "I had … Monday" is why tense is not a signal), and the zone's UTC offset for a calendar tool, each
+ * day's taken at local noon (a DST change happens at night); a day whose offset differs carries its own. The rule
+ * rides in the line, so the system message stays byte-stable. "Next Monday" stays the model's call (US speech uses
+ * it both ways).
+ */
+function offsetOf(ymd, tz) {
+  const name = new Intl.DateTimeFormat("en-US", { timeZone: zoneOf(tz), timeZoneName: "longOffset" })
+    .formatToParts(new Date(Date.UTC(ymd.y, ymd.m - 1, ymd.d, 12))).find((x) => x.type === "timeZoneName")?.value || "GMT";
+  const m = /^GMT([+-]\d{2}:\d{2})$/.exec(name);
+  return m ? m[1] : "+00:00";
+}
+const isoYmd = ({ y, m, d }) => `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+
+export function relativeDatesContext(now, tz) {
+  const today = localYmd(now, tz);
+  const off = offsetOf(today, tz);
+  const at = (i) => { const day = fromDayNum(dayNum(today) + i); const o = offsetOf(day, tz); return `${isoYmd(day)}${o !== off ? ` (${o})` : ""}`; };
+  const days = [];
+  for (let i = 1; i <= 6; i++) days.push(`${fmtYmd("en-US", fromDayNum(dayNum(today) + i), WEEKDAY)} ${at(i)}${i === 1 ? " (tomorrow)" : ""}`);
+  return `[Dates] To add or plan something, a day named without a date is the next one: ${days.join(", ")}; ${fmtYmd("en-US", today, WEEKDAY)} is today ${isoYmd(today)} or next week ${at(7)}. For something already past, it is the previous one. UTC offset ${off}.`;
+}
+
+const RELATIVE_DAY = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|weekend|next week|lunes|martes|miercoles|jueves|viernes|sabado|domingo|manana|fin de semana|proxima semana|semana que viene)(s)?\b/;
+// "de/por/en la mañana" is "in the morning", not "tomorrow".
+const MORNING = /\b(de|por|en) la manana\b/g;
+/** True when the transcript names a weekday or a relative day (en, es; whole words, accents ignored). */
+export function mentionsRelativeDay(transcript) {
+  if (typeof transcript !== "string" || !transcript) return false;
+  const t = transcript.slice(0, INTENT_MAX_CHARS).toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/['’]/g, "");
+  return RELATIVE_DAY.test(t.replace(MORNING, " "));
+}

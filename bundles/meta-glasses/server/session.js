@@ -21,7 +21,7 @@
  */
 import { stringsFor } from "./strings.js";
 import { wantsLook, wantsMemory, matchTransport } from "./intent.js";
-import { matchClockFastPath, nowContext } from "./voice-shared.js";
+import { matchClockFastPath, nowContext, relativeDatesContext, mentionsRelativeDay } from "./voice-shared.js";
 
 /** Never on a glasses turn: work handed to other bots, schedules, schema discovery, and the note and library tools (their text is not for a voice turn's tool loop). */
 export const GLASSES_DENY_TOOLS = Object.freeze([
@@ -198,7 +198,7 @@ export function createGlassesTurns(deps) {
       const result = await deps.voice.runVoiceTurn({
         db, device, transcript, sink: env.sink, signal, startedAt: t0,
         promptSuffix: L.prompt_suffix,
-        turnContext: nowContext(now(), deps.timeZone),
+        turnContext: (t) => (mentionsRelativeDay(t) ? `${nowContext(now(), deps.timeZone)}\n${relativeDatesContext(now(), deps.timeZone)}` : nowContext(now(), deps.timeZone)),
         denyTools: deny,
         extraTools,
         maxToolRounds: GLASSES_MAX_TOOL_ROUNDS,

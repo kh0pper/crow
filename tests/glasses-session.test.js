@@ -429,3 +429,27 @@ test("the camera is not on any surface's generic tool list, bound or unbound: on
     assert.ok(!getChatTools(opts).some((t) => t.name === LOOK_TOOL), JSON.stringify(opts));
   }
 });
+
+test("17a: a glasses turn that names a relative day gets the kiosk's computed [Dates] line after [Now]; other turns do not", async () => {
+  const shared = await import("../bundles/meta-glasses/server/voice-shared.js");
+  const kioskClock = await import("../bundles/kiosk/server/clock.js");
+  assert.equal(shared.relativeDatesContext, kioskClock.relativeDatesContext);
+  assert.equal(shared.mentionsRelativeDay, kioskClock.mentionsRelativeDay);
+  let seen = null;
+  const fakeVoice = {
+    convo: { get: () => [] },
+    transcribe: async () => ({ text: "add a dentist appointment Monday at 9" }),
+    speakText: async () => true,
+    runVoiceTurn: async (o) => { seen = o; o.sink.event({ type: "tts_start", codec: "pcm", sample_rate: 24000 }); o.sink.event({ type: "tts_end" }); return { route: "fast", failed: null, timings: {}, replies: [] }; },
+  };
+  const turns = createGlassesTurns({
+    voice: fakeVoice, openDb: () => ({ close() {} }), findDevice: async () => ({ id: "g", bound_bot_id: "b", token_hash: "x" }), listTtsProfiles: async () => [{ id: "k", provider: "kokoro", isDefault: true }],
+    botToolNames: async () => [], capture: async () => ({}), describePhoto: async () => null, readEnvelope,
+    playback: { state: () => "idle", control: () => {}, start: () => {} }, log: () => {}, timeZone: "America/Chicago",
+  });
+  await turns.runTurn({ deviceId: "g", audio: Buffer.alloc(4), send: { text: () => {}, binary: () => {} } });
+  const ctx = typeof seen.turnContext === "function" ? seen.turnContext("add a dentist appointment Monday at 9") : seen.turnContext;
+  assert.match(ctx, /^\[Now\] [^\n]+\(time zone America\/Chicago\)\n\[Dates\] To add or plan something, a day named without a date is the next one: /);
+  const plain = typeof seen.turnContext === "function" ? seen.turnContext("what is the capital of Portugal") : seen.turnContext;
+  assert.match(plain, /^\[Now\] [^\n]+$/, "a plain question: the [Now] line only");
+});
