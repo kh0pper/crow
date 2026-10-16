@@ -10,7 +10,7 @@
  * describe(m) must be called with the server's load message before media-view sets src (it carries the title etc.).
  */
 const EVENTS = new Set(["playing", "pause", "ended", "error", "waiting", "stalled"]);
-const COMMANDS = new Set(["next", "previous", "stop"]);
+const COMMANDS = new Set(["next", "previous", "stop", "pause", "resume"]);
 const abortError = () => { const e = new Error("aborted"); e.name = "AbortError"; return e; };
 
 export function createBarLink({ parent, origin, onCommand = () => {} }) {

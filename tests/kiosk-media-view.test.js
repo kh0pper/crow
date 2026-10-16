@@ -486,12 +486,12 @@ test("item 21: with no gate (a Pi, a desktop) a load plays at once, as before", 
 import { createBarLink } from "../bundles/kiosk/public/bar-link.js";
 
 const ORIGIN = "https://crow.example.ts.net:8444";
-function barSetup() {
+function barSetup(opts = {}) {
   const parent = { posts: [], postMessage(m, origin) { this.posts.push({ m, origin }); } };
   const cmds = [];
   const link = createBarLink({ parent, origin: ORIGIN, onCommand: (v) => cmds.push(v) });
   const chip = fakeChip(), sent = [], tm = timers();
-  const view = createMediaView({ audio: link, chip, send: (o) => sent.push(o), setTimer: tm.setTimer, clearTimer: tm.clearTimer });
+  const view = createMediaView({ audio: link, chip, send: (o) => sent.push(o), setTimer: tm.setTimer, clearTimer: tm.clearTimer, ...opts });
   const url = (id) => `/display/t/${id.padEnd(22, "x")}/stream`;
   const msg = (id, extra = {}) => ({ type: "media", action: "load", id, form: "audio", url: url(id), title: `Title ${id}`, subtitle: "Sub", source: "radio", live: true, has_next: false, has_previous: true, volume: 50, muted: false, ...extra });
   const load = (id, extra) => { const m = msg(id, extra); link.describe(m); view.apply(m); return m; };
@@ -629,4 +629,37 @@ test("B3 + item 21: an overlay closed while the mic gate holds a start hands the
   const n = gated({ next: true });
   n.load("m1");
   assert.equal(n.view.release().resume, false, "already started (not held): the bar keeps its own state");
+});
+
+test("review 3: the bar's ⏯ comes back as resume/pause commands (the server answers, and the mic gate decides the start)", () => {
+  const s = barSetup();
+  s.load("m1");
+  s.ev("m1", "cmd", { do: "pause" });
+  s.ev("m1", "cmd", { do: "resume" });
+  assert.deepEqual(s.cmds, ["pause", "resume"]);
+});
+
+test("review 6: in bar mode the offline clear drops only the frame's view — the bar is never paused or stopped", () => {
+  const s = barSetup({ bar: true });
+  s.load("m1");
+  s.ev("m1", "play-result", { ok: true });
+  s.ev("m1", "playing");
+  s.parent.posts.length = 0;
+  s.view.offline(true);
+  s.tm.advance(OFFLINE_CLEAR_MS);
+  assert.deepEqual(s.ops(), [], "no pause, no stop to the bar");
+  assert.equal(s.view.current(), null, "the frame forgets the item");
+  assert.equal(s.view.state(), "none");
+  // Back online, the server's snapshot names the same item: the bar keeps playing it (the parent's same-item path).
+  s.view.offline(false);
+  s.load("m1");
+  assert.deepEqual(s.ops().filter((o) => o !== "volume"), ["load", "play"]);
+  // Not bar mode: the element stops as before.
+  const p = barSetup();
+  p.load("m1");
+  p.ev("m1", "playing");
+  p.parent.posts.length = 0;
+  p.view.offline(true);
+  p.tm.advance(OFFLINE_CLEAR_MS);
+  assert.ok(p.ops().includes("stop"));
 });

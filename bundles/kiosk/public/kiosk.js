@@ -482,7 +482,7 @@ if (SESSION) {
 }
 
 mediaView = createMediaView({
-  audio: barLink || $("media"), chip: BAR ? document.createElement("button") : $("np-chip"), send, t,
+  audio: barLink || $("media"), chip: BAR ? document.createElement("button") : $("np-chip"), send, t, bar: BAR,
   // Item 21: never start over an open capture or within mic_settle_ms of its release; A7's evidence is in the ring.
   // In bar mode too: the parent bar plays, but this frame's open mic is what puts Android in call mode.
   canStart: () => { const g = mediaStartGate({ micOpen: !!mic, micOpening: micGate.opening(), releasedAt: micReleasedAt, now: performance.now(), config }); return g.ok || g.waitMs; },

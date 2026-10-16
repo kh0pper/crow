@@ -504,6 +504,7 @@ test("B3 bar mode: the media view drives the bar link, with no chip; each load i
   const mv = src.slice(src.indexOf("mediaView = createMediaView({"));
   assert.match(mv, /audio: barLink \|\| \$\("media"\)/);
   assert.match(mv, /chip: BAR \? document\.createElement\("button"\) : \$\("np-chip"\)/, "bar mode: the chip is never shown (the player bar is the now-playing surface)");
+  assert.match(mv, /\bbar: BAR,/, "review 6: bar mode tells the view, so an offline clear never stops the bar");
   const media = src.slice(src.indexOf('case "media":'), src.indexOf("break;", src.indexOf('case "media":')));
   assert.ok(media.indexOf("barLink?.describe(m)") >= 0 && media.indexOf("barLink?.describe(m)") < media.indexOf("mediaView?.apply(m)"));
 });

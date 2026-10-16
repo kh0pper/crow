@@ -30,7 +30,7 @@ function mkStorage(map) {
  * respond(url, opts) → { status, body } (default: 200 with an empty view).
  * local / session: Maps that stand for this tab's storage (pass the same ones again to "reload").
  */
-function harness({ local = new Map(), session = new Map(), respond } = {}) {
+function harness({ local = new Map(), session = new Map(), respond, BroadcastChannel } = {}) {
   session.set("crow-glasses-bundle", "false");          // no glasses probe traffic
   const { document, window } = parseHTML(`<html><head></head><body>${playerBarHtml("en")}</body></html>`);
   Object.defineProperty(document, "cookie", { configurable: true, get: () => "other=1; crow_csrf=csrf-abc; x=2" });
@@ -81,8 +81,8 @@ function harness({ local = new Map(), session = new Map(), respond } = {}) {
   };
   const crypto = { getRandomValues: (a) => { for (let i = 0; i < a.length; i++) a[i] = (i * 37 + 11) % 256; return a; } };
   const noop = () => {};
-  new Function("window", "document", "localStorage", "sessionStorage", "fetch", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "navigator", "MediaMetadata", "EventSource", "console", "crypto", playerBarJs("en"))(
-    win, document, mkStorage(local), mkStorage(session), fetch, setT, clearT, () => 0, noop, navigator, MediaMetadata, undefined, { warn: noop, log: noop }, crypto);
+  new Function("window", "document", "localStorage", "sessionStorage", "fetch", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "navigator", "MediaMetadata", "EventSource", "console", "crypto", "BroadcastChannel", playerBarJs("en"))(
+    win, document, mkStorage(local), mkStorage(session), fetch, setT, clearT, () => 0, noop, navigator, MediaMetadata, undefined, { warn: noop, log: noop }, crypto, BroadcastChannel);
   const P = win.crowPlayer;
   const posted = [];
   let live = true;
@@ -220,18 +220,23 @@ test("S2 at the bar too: a message the shared validator refuses is dropped whole
   assert.equal(h.srcSets(), 0);
 });
 
-test("attached: ⏭/⏮/■ go to the frame as commands (the frame tells the server); ⏯ acts on the element so the frame hears a real pause", () => {
+test("attached: ⏭/⏮/⏯/■ go to the frame as commands (the frame tells the server, and its mic gate decides a resume)", () => {
   const h = harness();
   h.attach();
   h.P.kioskApply({ ...LOAD, live: false, has_next: true });
   h.P.kioskApply({ crow: "media", v: 1, op: "play", id: "m1" });
   h.P.next(); h.P.prev();
   assert.deepEqual(h.events("cmd").map((m) => [m.id, m.do]), [["m1", "next"], ["m1", "previous"]]);
+  const plays = h.calls.filter((c) => c[0] === "play").length;
   h.P.toggle();
-  assert.equal(h.audio.paused, true);
-  assert.ok(h.events("pause").length >= 1);
+  assert.equal(h.audio.paused, false, "the bar's ⏯ never pauses the element itself while attached");
+  assert.equal(h.events("cmd").at(-1).do, "pause");
+  h.audio.pause();                                  // the frame's answer: a pause op
+  h.handlers.play();                                // MediaSession / a headset button
+  assert.equal(h.events("cmd").at(-1).do, "resume");
+  assert.equal(h.calls.filter((c) => c[0] === "play").length, plays, "review: the bar's own play never bypasses the frame's mic gate");
   h.P.stop();
-  assert.deepEqual(h.events("cmd").map((m) => m.do), ["next", "previous", "stop"]);
+  assert.deepEqual(h.events("cmd").map((m) => m.do), ["next", "previous", "pause", "resume", "stop"]);
   assert.equal(h.shown(), false);
   assert.equal(h.fetches.length, 0);
 });
@@ -469,4 +474,128 @@ test("no fetch at all on a plain page load (no kiosk marker): the kiosk backend 
   const h = harness();
   await flush();
   assert.equal(h.fetches.length, 0);
+});
+
+// ─── B3 client review ───────────────────────────────────────────────────────
+
+/** A fake BroadcastChannel bus: a message reaches every OTHER open channel of the same name, asynchronously. */
+function bcBus() {
+  const chans = [];
+  function BC(name) { this.name = name; this.onmessage = null; this.closed = false; chans.push(this); }
+  BC.prototype.postMessage = function (data) {
+    for (const c of chans) if (c !== this && c.name === this.name && !c.closed) setImmediate(() => c.onmessage && c.onmessage({ data: structuredClone(data) }));
+  };
+  BC.prototype.close = function () { this.closed = true; };
+  return { BC, chans };
+}
+const KEY = "crow-kiosk-bar-owner";
+const NONCE = "Owner_nonce-0123456789";
+
+test("review 1: a duplicated tab (sessionStorage copied) finds its nonce held by a live tab and mints its own before it restores", async () => {
+  const bus = bcBus();
+  const a = harness({ session: new Map([[KEY, NONCE]]), BroadcastChannel: bus.BC });
+  await flush(); a.advance(5000); await flush();
+  assert.equal(a.P.kioskOwner(), NONCE, "alone: a reload keeps its nonce");
+  const marker = JSON.stringify({ backend: "kiosk", title: "Song One" });
+  const b = harness({ session: new Map([[KEY, NONCE]]), local: new Map([["crow-player-state", marker]]), BroadcastChannel: bus.BC, respond: (r) => (r.method === "GET" ? { status: 200, body: view(ITEM1) } : null) });
+  assert.equal(b.fetches.length, 0, "the restore waits for the claim");
+  await flush();
+  const o = b.P.kioskOwner();
+  assert.notEqual(o, NONCE);
+  assert.match(o, OWNER_RE);
+  assert.equal(b.session.get(KEY), o, "stored for this tab's reloads");
+  assert.equal(a.P.kioskOwner(), NONCE, "the original keeps it");
+  assert.deepEqual(b.fetches.map((f) => [f.method, f.headers["X-Crow-Owner"]]), [["GET", o]]);
+});
+
+test("review 1: a reload with nobody answering keeps the nonce and restores after the claim window; no BroadcastChannel restores at once", async () => {
+  const bus = bcBus();
+  const marker = JSON.stringify({ backend: "kiosk", title: "Song One" });
+  const respond = (r) => (r.method === "GET" ? { status: 200, body: view(ITEM1) } : null);
+  const h = harness({ session: new Map([[KEY, NONCE]]), local: new Map([["crow-player-state", marker]]), BroadcastChannel: bus.BC, respond });
+  await flush();
+  assert.equal(h.fetches.length, 0);
+  h.advance(1000); await flush();
+  assert.deepEqual(h.fetches.map((f) => [f.method, f.headers["X-Crow-Owner"]]), [["GET", NONCE]]);
+  assert.equal(h.P.kioskOwner(), NONCE);
+  function Broken() { throw new Error("no channel"); }
+  const g = harness({ session: new Map([[KEY, NONCE]]), local: new Map([["crow-player-state", marker]]), BroadcastChannel: Broken, respond });
+  assert.equal(g.fetches.length, 1, "degrades: restores at once with the stored nonce");
+  assert.equal(g.fetches[0].headers["X-Crow-Owner"], NONCE);
+});
+
+test("review 2 (S3): leaving the kiosk backend through setBackend silences the element and drops the ticket src", () => {
+  for (const type of ["local", "glasses"]) {
+    const h = harness();
+    h.attach();
+    h.P.kioskApply(LOAD);
+    h.P.kioskApply({ crow: "media", v: 1, op: "play", id: "m1" });
+    h.P.setBackend(type);
+    assert.equal(h.audio.paused, true, type);
+    assert.equal(h.audio.src, "", type);
+  }
+});
+
+test("review 2 (S3): saveState never stores a ticket src, whatever the backend", () => {
+  const local = new Map();
+  const h = harness({ local });
+  h.P.load("/media/a.mp3", "A");
+  h.audio.src = P1;
+  h.document.dispatchEvent(new h.window.Event("turbo:before-visit"));
+  for (const v of local.values()) assert.ok(!String(v).includes("/display/t/"), v);
+});
+
+test("review 4: a 403 clears the bar like a 401", async () => {
+  const h = detached(() => ({ status: 403, body: { error: "forbidden" } }));
+  h.P.next();
+  await flush();
+  assert.equal(h.shown(), false);
+  assert.equal(h.P.getBackend(), "local");
+});
+
+test("review 4: a 5xx answering a detached ended/error keeps the bar, paused, ⏯ pulsing; a tap sends the report again", async () => {
+  for (const verb of ["ended", "error"]) {
+    let fail = true;
+    const h = detached((r) => (r.method === "POST" ? (fail ? { status: 503, body: {} } : { status: 200, body: view(ITEM2) }) : null));
+    h.fire(verb);
+    await flush();
+    assert.ok(h.shown(), verb);
+    assert.equal(h.P.getBackend(), "kiosk");
+    assert.equal(h.audio.paused, true);
+    assert.match(h.$("crow-player-toggle").style.animation, /crow-pulse/);
+    fail = false;
+    h.P.toggle();
+    await flush();
+    assert.deepEqual(h.fetches.map((f) => f.body.do), [verb, verb], "the tap retries what the server never heard");
+    assert.equal(h.audio.src, P2);
+  }
+  // Other verbs failing with a 5xx change nothing.
+  const h = detached(() => ({ status: 500, body: {} }));
+  h.P.next();
+  await flush();
+  assert.ok(h.shown());
+  assert.doesNotMatch(String(h.$("crow-player-toggle").style.animation || ""), /crow-pulse/);
+});
+
+test("review 5: a reload during a station retry (url:null) keeps the saved title on the bar and asks again after retry_ms", async () => {
+  const radio = { ...ITEM1, source: "radio", live: true };
+  let gets = 0;
+  const local = new Map([["crow-player-state", JSON.stringify({ backend: "kiosk", title: "Morning Mix" })]]);
+  const h = harness({ local, respond: (r) => {
+    if (r.method !== "GET") return null;
+    gets++;
+    return gets === 1 ? { status: 200, body: view({ ...radio, url: null }, { retry_ms: 2000 }) } : { status: 200, body: view(radio) };
+  } });
+  await flush();
+  assert.equal(gets, 1);
+  assert.ok(h.shown(), "the bar stays");
+  assert.equal(h.$("crow-player-title").textContent, "Morning Mix");
+  assert.ok(local.has("crow-player-state"), "the marker stays");
+  h.advance(1999); await flush();
+  assert.equal(gets, 1);
+  h.advance(1); await flush();
+  assert.equal(gets, 2);
+  assert.equal(h.audio.src, P1);
+  assert.equal(h.audio.paused, false);
+  assert.equal(h.$("crow-player-title").textContent, "Song One");
 });

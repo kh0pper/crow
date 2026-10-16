@@ -170,6 +170,7 @@ export function playerBarJs(lang) {
       try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ backend: 'kiosk', title: titleEl.textContent })); } catch (e) {}
       return;
     }
+    if (String(audio.src || '').indexOf('/display/t/') !== -1) return;   // S3: never a ticket path, whatever the backend
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
         backend: activeBackend,
@@ -278,7 +279,7 @@ export function playerBarJs(lang) {
 
   function playItem(item) {
     closedByUser = false;
-    leaveKiosk();
+    leaveKiosk(true);
     switchToLocal();
     bar.style.display = 'block';
     setPending(false);
@@ -333,17 +334,25 @@ export function playerBarJs(lang) {
   var kioskIsLive = null;   // () → is that frame still the live one (review 2)
   var kioskEpoch = 0;       // bumped whenever the bar moves on: a late answer for an older state is dropped
   var kioskStall = null, kioskRetry = null, kioskOwnerMem = null;
+  var kioskRedo = null;     // an ended/error report the server failed (5xx): ⏯ sends it again
+  var kioskRestoring = false, kioskSavedTitle = '';
+  var KIOSK_CLAIM_MS = 300;
 
   /** The kiosk's level curve (media-view levelOf): 0–100 from the server → the element's 0–1. */
   function kioskLevel(v, muted) {
     if (muted || !(v > 0)) return 0;
     return Math.min(1, Math.pow(10, (Math.min(100, v) - 100) / 40));
   }
-  function kioskOwner() {
+  /** This tab's stored nonce, or null (never mints). */
+  function kioskStored() {
     var o = null;
     try { o = sessionStorage.getItem(KIOSK_OWNER_KEY); } catch (e) {}
     if (o && /^[A-Za-z0-9_-]{16,64}$/.test(o)) return o;
-    if (kioskOwnerMem) return kioskOwnerMem;
+    return kioskOwnerMem;
+  }
+  function kioskOwner() { return kioskStored() || kioskMint(); }
+  function kioskMint() {
+    var o;
     var abc = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-';
     var bytes = new Uint8Array(24);
     try { crypto.getRandomValues(bytes); } catch (e) { for (var i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256); }
@@ -352,6 +361,27 @@ export function playerBarJs(lang) {
     kioskOwnerMem = o;
     try { sessionStorage.setItem(KIOSK_OWNER_KEY, o); } catch (e) {}
     return o;
+  }
+  /**
+   * Review 1: a duplicated tab (Duplicate tab, window.open) copies sessionStorage, nonce included. At startup the
+   * stored nonce is claimed on a BroadcastChannel: a live tab holding it answers, and this tab mints its own.
+   * done() runs once the claim settles (answered, or KIOSK_CLAIM_MS of silence); at once with no channel.
+   */
+  function kioskClaim(done) {
+    var o = kioskStored(), finished = false, timer = null, ch = null;
+    function end() { if (finished) return; finished = true; if (timer) clearTimeout(timer); done(); }
+    try { ch = new BroadcastChannel('crow-kiosk-owner'); } catch (e) { ch = null; }
+    if (!ch) { end(); return; }
+    ch.onmessage = function (e) {
+      var d = e && e.data;
+      if (!d || typeof d !== 'object' || typeof d.n !== 'string') return;
+      var mine = kioskStored();
+      if (d.q === 1 && mine && d.n === mine) { try { ch.postMessage({ a: 1, n: mine }); } catch (x) {} }
+      else if (d.a === 1 && !finished && o && d.n === o && mine === o) { kioskOwnerMem = null; kioskMint(); end(); }
+    };
+    if (!o) { end(); return; }
+    try { ch.postMessage({ q: 1, n: o }); } catch (e) { end(); return; }
+    timer = setTimeout(end, KIOSK_CLAIM_MS);
   }
   function kioskCookie(name) {
     var parts = String(document.cookie || '').split(';');
@@ -384,6 +414,7 @@ export function playerBarJs(lang) {
   function kioskShow(m) {
     closedByUser = false;
     activeBackend = 'kiosk';
+    kioskRedo = null; kioskRestoring = false;
     queue = []; queueIndex = -1;
     kioskItem = { id: m.id, url: m.url, title: m.title, subtitle: m.subtitle, source: m.source, live: m.live, has_next: m.has_next, has_previous: m.has_previous };
     bar.style.display = 'block';
@@ -413,7 +444,7 @@ export function playerBarJs(lang) {
     kioskEpoch++;
     kioskTimersOff();
     var had = activeBackend === 'kiosk';
-    kioskItem = null;
+    kioskItem = null; kioskRedo = null; kioskRestoring = false;
     if (!had) { try { localStorage.removeItem(STORAGE_KEY); } catch (e) {} return; }   // a reload marker with nothing behind it
     activeBackend = 'local';
     try { audio.pause(); } catch (e) {}
@@ -422,11 +453,18 @@ export function playerBarJs(lang) {
     updateNavButtons();
     try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
   }
-  function kioskAnswer(epoch) {
+  function kioskAnswer(epoch, verb) {
     return function (r) {
       if (epoch !== kioskEpoch) return;
       if (r.status === 200) return r.json().then(function (v) { if (epoch === kioskEpoch) kioskApplyView(v); });
-      if (r.status === 409 || r.status === 401 || r.status === 404) kioskClear();   // S8: superseded or logged out
+      if (r.status === 409 || r.status === 401 || r.status === 403 || r.status === 404) { kioskClear(); return; }   // S8: superseded or logged out
+      // Review 4: the server never heard that the item ended or failed. Keep the bar, paused, ⏯ pulsing: a tap retries.
+      if (r.status >= 500 && (verb === 'ended' || verb === 'error') && kioskItem) {
+        kioskRedo = verb;
+        if (!audio.paused) audio.pause();
+        updateToggleIcon();
+        showResumeOverlay();
+      }
     };
   }
   /** Detached: one verb about the bar's own item. The answer (the new view) is applied unless the bar moved on. */
@@ -438,7 +476,7 @@ export function playerBarJs(lang) {
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', 'X-Crow-Csrf': kioskCookie('crow_csrf') },
       body: JSON.stringify({ do: verb, id: kioskItem.id, owner: owner }),
-    }).then(kioskAnswer(kioskEpoch)).catch(function () {});
+    }).then(kioskAnswer(kioskEpoch, verb)).catch(function () {});
   }
   /** A reload, or a station reload's retry: what does the server hold for this tab? */
   function kioskGet() {
@@ -456,7 +494,16 @@ export function playerBarJs(lang) {
     if (!v || typeof v !== 'object') return;
     var it = v.item;
     if (!it || typeof it !== 'object') { kioskClear(); return; }
-    if (it.url === null && kioskItem && it.id === kioskItem.id) {
+    if (it.url === null && !kioskItem && kioskRestoring) {
+      // Review 5: a reload while a station reload is pending: the saved title stays on the bar until it is due.
+      activeBackend = 'kiosk';
+      bar.style.display = 'block';
+      adjustPosition();
+      titleEl.textContent = kioskSavedTitle || PAUSED_LABEL;
+      subtitleEl.style.display = 'none';
+      updateNavButtons();
+    }
+    if (it.url === null && (kioskItem ? it.id === kioskItem.id : kioskRestoring)) {
       // A station reload is pending (D4): ask again once it is due.
       var wait = Number(v.retry_ms);
       if (kioskRetry) clearTimeout(kioskRetry);
@@ -485,15 +532,22 @@ export function playerBarJs(lang) {
     queue = []; queueIndex = -1;
     try { audio.pause(); } catch (e) {}
   }
-  /** The bar leaves the kiosk backend (the Media app or the glasses take it): the overlay's item is stopped (review 4). */
-  function leaveKiosk() {
+  /**
+   * The bar leaves the kiosk backend (the Media app or the glasses take it): the overlay's item is stopped (review 4)
+   * and the element falls silent with no ticket src left on it (S3), unless the caller sets a new src next.
+   */
+  function leaveKiosk(replacing) {
     kioskEpoch++;
+    kioskRestoring = false;
     if (activeBackend !== 'kiosk') return;
     if (kioskItem) kioskCommand('stop');
     kioskEpoch++;
     kioskTimersOff();
-    kioskItem = null;
+    kioskItem = null; kioskRedo = null;
     activeBackend = 'local';
+    if (replacing) return;
+    try { audio.pause(); } catch (e) {}
+    try { audio.removeAttribute('src'); audio.load(); } catch (e) {}
   }
   /** A validated frame op. Every op but load names its item and is ignored unless that item is on the bar (review 3). */
   function kioskApply(raw) {
@@ -795,8 +849,9 @@ export function playerBarJs(lang) {
     toggle: function() {
       if (activeBackend === 'kiosk') {
         if (!kioskItem) return;
-        // Attached: act on the element, so the frame hears a real (the person's) pause or play.
-        if (kioskAttached()) { if (audio.paused) kioskPlay(); else audio.pause(); return; }
+        // Attached: a command to the frame (review 3): it tells the server, and its mic gate decides when a resume plays.
+        if (kioskToFrame('cmd', { do: audio.paused ? 'resume' : 'pause' })) return;
+        if (kioskRedo) { var redo = kioskRedo; kioskRedo = null; kioskSend(redo); return; }
         if (!audio.paused) { audio.pause(); kioskSend('pause'); return; }
         // A station resumes live on a new ticket (the answer brings it); a track resumes here at once.
         if (!kioskItem.live) kioskPlay();
@@ -912,8 +967,10 @@ export function playerBarJs(lang) {
     var saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
     if (saved) {
       if (saved.backend === 'kiosk') {
-        // The overlay's media outlived the page: ask the server what this tab's bar holds (never a stored path).
-        kioskGet();
+        // The overlay's media outlived the page: ask the server what this tab's bar holds (never a stored path),
+        // once this tab's nonce is its own (review 1: see kioskClaim).
+        kioskRestoring = true;
+        kioskSavedTitle = typeof saved.title === 'string' ? saved.title.slice(0, 80) : '';
       } else if (saved.backend === 'glasses' && saved.glassesDeviceId) {
         // Restore glasses in pending (dimmed) state until first poll confirms
         glassesDeviceId = saved.glassesDeviceId;
@@ -965,6 +1022,7 @@ export function playerBarJs(lang) {
       }
     }
   } catch(e) {}
+  kioskClaim(function () { if (kioskRestoring) kioskGet(); });
 
   // --- Auto-detect glasses bundle on page load ---
   // Check sessionStorage cache first to avoid re-probing every page navigation

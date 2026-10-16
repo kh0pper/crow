@@ -55,7 +55,7 @@ export function createDucker(audio, { setTimer = setTimeout, clearTimer = clearT
  * onChange(): what is shown changed (the now-playing window redraws). t(key): page strings.
  */
 /** Item 21: canStart() → true, or ms until a held start is tried again (the mic is letting go); onPlay(): each real play(). */
-export function createMediaView({ audio, chip, send, setTimer = setTimeout, clearTimer = clearTimeout, onState = () => {}, onChange = () => {}, onChipTap = () => {}, t = (k) => k, canStart = () => true, onPlay = () => {} }) {
+export function createMediaView({ audio, chip, send, setTimer = setTimeout, clearTimer = clearTimeout, onState = () => {}, onChange = () => {}, onChipTap = () => {}, t = (k) => k, canStart = () => true, onPlay = () => {}, bar = false }) {
   const ducker = createDucker(audio, { setTimer, clearTimer });
   let cur = null, quiet = false, held = false, startDog = null, stallDog = null, unsent = null, swapping = false, offline = false, offlineTimer = null, retry = null;
   const clearDogs = () => { clearTimer(startDog); clearTimer(stallDog); clearTimer(retry); startDog = stallDog = retry = null; };
@@ -179,12 +179,12 @@ export function createMediaView({ audio, chip, send, setTimer = setTimeout, clea
     },
     /** Item 21: the mic was let go — try a held start now (the gate says how much longer). */
     kick() { if (retry) { clearTimer(retry); retry = null; if (cur && !cur.paused && !held) start(); } },
-    /** F9: the socket closed (true) or is back (false). */
+    /** F9: the socket closed (true) or is back (false). B3 bar: the clear drops only this view. */
     offline(on) {
       if (on === offline) return;
       offline = on === true;
       clearTimer(offlineTimer); offlineTimer = null;
-      if (offline) offlineTimer = setTimer(() => { offlineTimer = null; if (offline && cur) { clearDogs(); cur = null; held = false; quietPause(); quiet = false; audio.removeAttribute("src"); try { audio.load(); } catch {} } render(); }, OFFLINE_CLEAR_MS);
+      if (offline) offlineTimer = setTimer(() => { offlineTimer = null; if (offline && cur) { clearDogs(); cur = null; held = false; if (!bar) { quietPause(); quiet = false; audio.removeAttribute("src"); try { audio.load(); } catch {} } } render(); }, OFFLINE_CLEAR_MS);
       render();
     },
     /** After `ready`: send again what the socket could not carry, if it is still about the current item. */
