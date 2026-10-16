@@ -89,12 +89,14 @@ test("no generated key here goes to the shared gateway .env (co-hosted instances
 function stage(id) {
   const dir = join(FIXTURES, id);
   mkdirSync(dir, { recursive: true });
-  copyFileSync(join(REPO, "bundles", id, "manifest.json"), join(dir, "manifest.json"));
   for (const f of [".env.example", "docker-compose.yml"]) {
     if (existsSync(join(REPO, "bundles", id, f))) copyFileSync(join(REPO, "bundles", id, f), join(dir, f));
   }
   if (existsSync(join(REPO, "bundles", id, "scripts"))) cpSync(join(REPO, "bundles", id, "scripts"), join(dir, "scripts"), { recursive: true });
-  return manifestOf(id);
+  // No ports/webUI: the installer would otherwise try `sudo -n ufw` / `tailscale serve` on this host.
+  const manifest = { ...manifestOf(id), ports: [], webUI: null };
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest));
+  return manifest;
 }
 
 async function entriesFor(id) {
