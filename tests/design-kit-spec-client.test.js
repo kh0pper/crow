@@ -235,8 +235,6 @@ test("guardSpec: Mermaid refuses shape data, protocol-relative urls, url( and ta
     'flowchart LR\n A["</b>"]',
     'flowchart LR\n A["<!-- x -->"]',
     'flowchart LR\n A["<?xml?>"]',
-    'flowchart LR\n A["a<br>b"]',
-    'classDiagram\n class A\n <<interface>> A',
   ];
   for (const src of probes) assert.equal(reason("mermaid", src), "links", JSON.stringify(src));
   const ok = [
@@ -261,6 +259,37 @@ test("guardSpec: D2 refuses an @ not preceded by a name character, and every bac
 
 test("guardSpec: escapes carry a fixed message", () => {
   const m = (engine, src) => { try { guardSpec(engine, src); } catch (e) { return e.message; } return null; };
-  assert.equal(m("d2", "x: ic\\on"), "backslash escapes are not allowed in diagrams");
-  assert.equal(m("mermaid", "flowchart LR\n A[\\x41]"), "backslash escapes are not allowed in diagrams");
+  assert.equal(m("d2", "x: ic\\on"), "escapes and look-alike letters are not allowed in diagrams");
+  assert.equal(m("mermaid", "flowchart LR\n A[\\x41]"), "escapes and look-alike letters are not allowed in diagrams");
+});
+
+// ---- fix round 3 -----------------------------------------------------------
+
+test("guardSpec: Mermaid front matter closes only on an unindented ---; config/init anywhere before the type is refused", () => {
+  const bypass = "---\ntitle: x\n  ---\n  flowchart\nconfig:\n  htmlLabels: true\n  theme: forest\n---\nflowchart LR\n A-->B";
+  assert.equal(reason("mermaid", bypass), "directives");
+  assert.equal(reason("mermaid", "---\ntitle: x\n\t---\nflowchart LR\n A-->B"), "directives");
+  assert.equal(reason("mermaid", "flowchart LR\n A-->B\n  ---"), "directives", "an indented --- line is refused anywhere");
+  assert.equal(reason("mermaid", "%% config: {}\nflowchart LR\n A-->B"), "directives");
+  assert.equal(reason("mermaid", "\n\nInit\nflowchart LR\n A-->B"), "directives");
+  assert.equal(reason("mermaid", "---\ntitle: x\n---   \nflowchart LR\n A-->B"), null, "trailing spaces on the closer are fine");
+  assert.equal(reason("mermaid", "---\ntitle: x\n---\nflowchart LR\n A[config] --> B"), null, "config inside the diagram body is a label");
+});
+
+test("guardSpec: Unicode case-fold look-alikes — D2 refuses them, Mermaid folds them before keyword checks", () => {
+  for (const src of ["x: { İcon: /etc/hostname }", "linK: x", "d2-confİg: x", "x: ſy"]) assert.equal(reason("d2", src), "escapes", JSON.stringify(src));
+  assert.equal(reason("mermaid", "flowchart LR\n A-->B\n clİcK A cb"), "links");
+  assert.equal(reason("mermaid", "İnit\nflowchart LR\n A-->B"), "directives");
+});
+
+test("guardSpec: Mermaid allows exact <br> tokens and the fixed annotation list only", () => {
+  for (const src of ['flowchart LR\n A["a<br>b"]', 'flowchart LR\n A["a<BR/>b"]', 'flowchart LR\n A["a<br />b"]',
+    "classDiagram\n class A\n <<interface>> A", "classDiagram\n class A\n <<Abstract>> A", "classDiagram\n class A\n <<enumeration>> A",
+    "classDiagram\n class A\n <<service>> A", "stateDiagram-v2\n state f <<fork>>\n state j <<join>>\n state c <<choice>>"]) {
+    assert.equal(reason("mermaid", src), null, JSON.stringify(src));
+  }
+  for (const src of ['flowchart LR\n A["<br onload=x>"]', 'flowchart LR\n A["<br  />"]', "classDiagram\n class A\n <<style>> A", "classDiagram\n class A\n <<img>> A",
+    "classDiagram\n class A\n <<svg>> A", 'flowchart LR\n A["<b<br>r>"]', 'flowchart LR\n A["<b<<interface>>r>"]', 'flowchart LR\n A["<<inter<br>face>>"]', "classDiagram\n class A\n <<interface >> A"]) {
+    assert.equal(reason("mermaid", src), "links", JSON.stringify(src));
+  }
 });

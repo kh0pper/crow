@@ -74,7 +74,7 @@ const SPEC_MESSAGES = Object.freeze({
   too_deep: "the spec is nested too deeply",
   external_data: "chart data must be inline: urls, links and usermeta are not allowed",
   unsupported_type: "this Mermaid diagram type is not supported",
-  escapes: "backslash escapes are not allowed in diagrams",
+  escapes: "escapes and look-alike letters are not allowed in diagrams",
   "mermaid:links": DIAGRAM_LINKS,
   "mermaid:directives": DIAGRAM_LINKS,
   "d2:icons": "icons are not allowed in D2 diagrams",
@@ -99,8 +99,16 @@ const refuse = (reason, engine) => {
 //  - a tag opener: "<" followed by a letter, "/", "!" or "?" (<img, <style,
 //    <br>, </b>, <!--, <?xml). Arrows (<--, <-->, <|--, <.., <==) stay legal;
 //    classDiagram <<annotations>> are refused (trade-off).
+//  - <br>, <br/>, <br /> and the fixed <<annotation>> words are allowed: they
+//    are replaced by a space (never joined) before the tag-opener check;
+//  - Unicode letters that case-fold onto ASCII (U+0130 -> i, U+212A -> k,
+//    U+017F -> s) are folded on a private copy before every keyword check.
 const MERMAID_DIRECTIVE = /%%\{/;
 const BACKSLASH = /\\/;
+const MERMAID_ALLOWED_TAGS = [/<<(?:interface|abstract|enumeration|service|fork|join|choice)>>/gi, /<br(?: ?\/)?>/gi];
+const INDENTED_FENCE = /^[ \t]+---[ \t]*$/m;
+const FENCE = /^---[ \t]*$/;
+const foldLookalikes = (t) => t.replace(/\u0130/g, "i").replace(/\u212A/g, "k").replace(/\u017F/g, "s");
 const MERMAID_LINKS = /\b(?:click|links?|callback|href)\b|javascript:|\/\/|url\(|@\s*\{|<[a-z/!?]/i;
 const MERMAID_FRONT_MATTER_BAD = /\b(?:config|init)\b/i;
 
@@ -108,8 +116,10 @@ const MERMAID_FRONT_MATTER_BAD = /\b(?:config|init)\b/i;
 // spell icon/link/import inside keys or quoted strings). An "@" is refused
 // unless it follows a name character [A-Za-z0-9_.+-], so "me@example.org"
 // stays legal while "x: @y", "x: [a;@y]", "x: {@y}" and "...@y" are imports.
+// Go's case folding maps U+0130 -> i, U+212A -> k and U+017F -> s, so those
+// letters can spell keywords D2 honours: refused as escapes.
 const D2_RULES = [
-  ["escapes", /\\/],
+  ["escapes", /[\\\u0130\u212A\u017F]/],
   ["imports", /\.\.\.@|(?<![A-Za-z0-9_.+-])@|\bimport\b/i],
   ["icons", /\bicon\b/i],
   ["links", /\blink\b|\/\//i],
@@ -139,17 +149,21 @@ function findKey(root, keys) {
 }
 
 /** First Mermaid keyword after blank lines, %% comments and one front-matter
- *  block; front matter that is unclosed or carries config/init is a directive. */
-function mermaidType(lines) {
+ *  block (opened and closed by an unindented "---", as Mermaid requires).
+ *  Unclosed front matter, or config/init anywhere up to and including the type
+ *  line, is a directive. `text` is already look-alike folded. */
+function mermaidType(text) {
+  const lines = text.split("\n");
   let i = 0;
   const skip = () => { while (i < lines.length && (!lines[i].trim() || lines[i].trim().startsWith("%%"))) i++; };
   skip();
-  if (i < lines.length && lines[i].trim() === "---") {
-    const end = lines.findIndex((l, j) => j > i && l.trim() === "---");
-    if (end < 0 || MERMAID_FRONT_MATTER_BAD.test(lines.slice(i + 1, end).join("\n"))) throw refuse("directives", "mermaid");
+  if (i < lines.length && FENCE.test(lines[i])) {
+    const end = lines.findIndex((l, j) => j > i && FENCE.test(l));
+    if (end < 0) throw refuse("directives", "mermaid");
     i = end + 1;
     skip();
   }
+  if (MERMAID_FRONT_MATTER_BAD.test(lines.slice(0, i + 1).join("\n"))) throw refuse("directives", "mermaid");
   return i < lines.length ? lines[i].trim().toLowerCase().split(/[\s:;]/)[0] : null;
 }
 
@@ -168,10 +182,12 @@ export function guardSpec(engine, source) {
   }
   const text = source.replace(/\r\n?/g, "\n");
   if (engine === "mermaid") {
-    if (MERMAID_DIRECTIVE.test(text)) throw refuse("directives", engine);
-    if (BACKSLASH.test(text)) throw refuse("escapes", engine);
-    if (MERMAID_LINKS.test(text)) throw refuse("links", engine);
-    if (!MERMAID_TYPES.has(mermaidType(text.split("\n")))) throw refuse("unsupported_type", engine);
+    const folded = foldLookalikes(text);
+    if (MERMAID_DIRECTIVE.test(folded) || INDENTED_FENCE.test(folded)) throw refuse("directives", engine);
+    if (BACKSLASH.test(folded)) throw refuse("escapes", engine);
+    const stripped = MERMAID_ALLOWED_TAGS.reduce((t, re) => t.replace(re, " "), folded);
+    if (MERMAID_LINKS.test(stripped)) throw refuse("links", engine);
+    if (!MERMAID_TYPES.has(mermaidType(folded))) throw refuse("unsupported_type", engine);
     return;
   }
   for (const [reason, re] of D2_RULES) if (re.test(text)) throw refuse(reason, engine);
