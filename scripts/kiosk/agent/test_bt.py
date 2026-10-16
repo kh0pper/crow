@@ -8,9 +8,14 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _testenv  # noqa: E402,F401  (must come before config is imported)
 import bt  # noqa: E402
-from bt import BtSpeaker, parse_bt_name, sink_listed  # noqa: E402
+from bt import BtSpeaker, parse_bt_adapter, parse_bt_name, sink_listed  # noqa: E402
 
 MAC = "00:11:22:AA:BB:CC"
+ADAPTER_ON = "Controller AA:BB:CC:DD:EE:FF (public)\n\tPowered: yes\n\tPowerState: on\n"
+ADAPTER_OFF = "Controller AA:BB:CC:DD:EE:FF (public)\n\tPowered: no\n\tPowerState: off\n"
+ADAPTER_BLOCKED = "Controller AA:BB:CC:DD:EE:FF (public)\n\tPowered: no\n\tPowerState: off-blocked\n"
+NO_ADAPTER = "No default controller available\n"
+NOT_AVAILABLE = f"Device {MAC} not available\n"
 
 
 def info(paired=True, connected=False, name="Kitchen speaker"):
@@ -43,11 +48,13 @@ class FakeCtl:
 
     async def __call__(self, *args, timeout=5):
         self.calls.append(args)
+        assert timeout <= 15, "every call is bounded"
+        if args == ("show",):
+            return None if self.hang_show else self.adapter
         assert args[0] in ("info", "connect"), (
-            f"only info/connect are allowed, got {args}"
+            f"only show/info/connect are allowed, got {args}"
         )
         assert args[1] == MAC, "only the configured MAC is ever used"
-        assert timeout <= 15, "every call is bounded"
         if args[0] == "connect":
             self.active_connects += 1
             self.max_active_connects = max(
@@ -63,9 +70,14 @@ class FakeCtl:
         await asyncio.sleep(self.info_delay)
         if self.hang_info:
             return None              # what run_bluetoothctl returns on a timeout
+        if self.not_available:
+            return NOT_AVAILABLE
         return info(self.paired, self.connected)
 
     hang_info = False
+    hang_show = False
+    not_available = False
+    adapter = ADAPTER_ON
 
     def connects(self):
         return sum(1 for c in self.calls if c[0] == "connect")
@@ -116,7 +128,7 @@ class BtTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (r["result"], r["connected"], r["name"]), ("ok", True, "Kitchen speaker")
         )
-        self.assertEqual([c[0] for c in ctl.calls], ["info", "connect", "info"])
+        self.assertEqual([c[0] for c in ctl.calls], ["info", "show", "connect", "info"])
         self.assertEqual(len(self.pushed), 1)
         self.assertNotIn(MAC, repr(self.pushed) + repr(r))
 
@@ -183,6 +195,7 @@ class BtTests(unittest.IsolatedAsyncioTestCase):
     async def test_deadlines_nest(self):
         self.assertLessEqual(
             bt.INFO_TIMEOUT_S
+            + bt.SHOW_TIMEOUT_S
             + bt.CONNECT_TIMEOUT_S
             + bt.REINFO_TIMEOUT_S
             + bt.SINK_TIMEOUT_S,
@@ -301,7 +314,7 @@ class BtTests(unittest.IsolatedAsyncioTestCase):
         self.clock.t = 930
         await sp.tick()
         self.assertEqual(sp.unanswered, 0)
-        self.assertTrue(all(c[0] in ("info", "connect") for c in ctl.calls), "recovery never removes or pairs")
+        self.assertTrue(all(c[0] in ("show", "info", "connect") for c in ctl.calls), "recovery never removes or pairs")
 
     async def test_needs_restart_is_reported_as_hw_fault_and_cleared_by_a_working_speaker(self):
         ctl = FakeCtl(connect_works=False)
@@ -331,6 +344,111 @@ class BtTests(unittest.IsolatedAsyncioTestCase):
         await sp.tick()
         await sp.tick()
         self.assertEqual(routed, [MAC], "once, on the transition")
+
+    # ---- reason (queue item 18): why the speaker is not connected, for the page's line ------------------
+    async def test_reason_is_none_when_connected_and_no_adapter_check_runs(self):
+        ctl = FakeCtl(connected=True)
+        sp = self.mk(ctl)
+        self.clock.t = 5000
+        await sp.tick()
+        self.assertTrue(sp.connected)
+        self.assertIsNone(sp.state()["reason"])
+        self.assertNotIn(("show",), ctl.calls, "a connected speaker costs no extra bluetoothctl call")
+
+    async def test_reason_off_or_out_of_range_when_paired_and_the_adapter_is_fine(self):
+        ctl = FakeCtl(connect_works=False)
+        sp = self.mk(ctl)
+        r = await sp.reconnect_now()
+        self.assertEqual((r["result"], r["reason"]), ("failed", "off_or_out_of_range"))
+
+    async def test_reason_not_paired(self):
+        ctl = FakeCtl(paired=False)
+        sp = self.mk(ctl)
+        r = await sp.reconnect_now()
+        self.assertEqual((r["result"], r["reason"]), ("not_paired", "not_paired"))
+
+    async def test_adapter_facts_are_read_before_not_available_means_not_paired(self):
+        # The bond lives on another controller and the default one is rfkill-blocked: `info` says
+        # "not available", but the household's fix is turning Bluetooth on, not pairing again.
+        for text, reason in ((ADAPTER_BLOCKED, "adapter_blocked"), (ADAPTER_OFF, "adapter_off"), (NO_ADAPTER, "no_adapter")):
+            ctl = FakeCtl()
+            ctl.not_available, ctl.adapter = True, text
+            sp = self.mk(ctl)
+            r = await sp.reconnect_now()
+            self.assertEqual((r["result"], r["reason"]), ("failed", reason), reason)
+            self.assertEqual(ctl.connects(), 0)
+            show_at = ctl.calls.index(("show",))
+            self.assertEqual(ctl.calls[show_at - 1][0], "info")
+
+    async def test_paired_speaker_on_a_powered_off_adapter_is_not_connected_to(self):
+        ctl = FakeCtl()
+        ctl.adapter = ADAPTER_OFF
+        sp = self.mk(ctl)
+        r = await sp.reconnect_now()
+        self.assertEqual((r["result"], r["reason"]), ("failed", "adapter_off"))
+        self.assertEqual(ctl.connects(), 0, "connecting through a powered-off controller only burns 15 s")
+
+    async def test_a_show_timeout_is_no_answer_never_adapter_off_or_not_paired(self):
+        ctl = FakeCtl()
+        ctl.not_available, ctl.hang_show = True, True
+        sp = self.mk(ctl)
+        r = await sp.reconnect_now()
+        self.assertEqual((r["result"], r["reason"]), ("failed", "no_answer"))
+
+    async def test_a_hung_info_is_no_answer(self):
+        ctl = FakeCtl()
+        ctl.hang_info = True
+        sp = self.mk(ctl)
+        self.clock.t = 5000
+        await sp.tick()
+        self.assertEqual(sp.state()["reason"], "no_answer")
+
+    async def test_reason_no_sink_and_hw_fault(self):
+        ctl = FakeCtl(connected=True)
+        sp = self.mk(ctl, sink_works=False)
+        r = await sp.reconnect_now()
+        self.assertEqual(r["reason"], "no_sink")
+        self.assertNotIn(("show",), ctl.calls, "the link is up: the adapter is evidently on")
+        ctl2 = FakeCtl(connect_works=False)
+        sp2 = self.mk(ctl2)
+        self.recovery_outcome = "needs_restart"
+        self.clock.t = 5000
+        await sp2.tick()
+        self.assertEqual(sp2.state()["reason"], "hw_fault")
+
+    async def test_a_reason_change_is_published_once_and_a_steady_reason_is_not_republished(self):
+        ctl = FakeCtl(connect_works=False)
+        sp = self.mk(ctl)
+        sp.last_reason = None                 # as after the loop's first report
+        for t in (5000, 5030, 5060):
+            self.clock.t = t
+            await sp.tick()
+        self.assertEqual([p["reason"] for p in self.pushed], ["off_or_out_of_range"])
+        ctl.adapter = ADAPTER_BLOCKED       # someone blocks Bluetooth: connected is unchanged, the reason is not
+        for t in (5090, 5120):
+            self.clock.t = t
+            await sp.tick()
+        self.assertEqual([p["reason"] for p in self.pushed], ["off_or_out_of_range", "adapter_blocked"])
+        self.assertEqual({p["connected"] for p in self.pushed}, {False})
+
+    async def test_the_first_report_carries_the_reason_and_is_not_doubled(self):
+        ctl = FakeCtl(paired=False)
+        sp = self.mk(ctl, check_s=0.01)
+        self.clock.t = 50000
+        stop = []
+        task = asyncio.create_task(sp.loop(lambda: bool(stop)))
+        await asyncio.sleep(0.05)
+        stop.append(1)
+        await asyncio.wait_for(task, 1)
+        self.assertEqual(len(self.pushed), 1, "one line at start, none after while nothing changes")
+        self.assertEqual((self.pushed[0]["reason"], self.pushed[0]["retry_window"]), ("not_paired", False))
+
+    def test_adapter_parsing(self):
+        self.assertEqual(parse_bt_adapter(ADAPTER_ON), "ok")
+        self.assertEqual(parse_bt_adapter(ADAPTER_OFF), "adapter_off")
+        self.assertEqual(parse_bt_adapter(ADAPTER_BLOCKED), "adapter_blocked")
+        self.assertEqual(parse_bt_adapter(NO_ADAPTER), "no_adapter")
+        self.assertEqual(parse_bt_adapter("Waiting to connect to bluetoothd..."), "ok", "unknown output is no evidence")
 
     def test_chromium_stream_and_sink_name_parsing(self):
         inputs = """Sink Input #41

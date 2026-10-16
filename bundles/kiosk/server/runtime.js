@@ -64,6 +64,7 @@ export const ASSETS = {
   "kiosk.js": "text/javascript", "state.js": "text/javascript", "audio.js": "text/javascript",
   "resample.js": "text/javascript", "pcm-worklet.js": "text/javascript", "vad.js": "text/javascript",
   "wm-view.js": "text/javascript", "bird-view.js": "text/javascript", "metrics.js": "text/javascript", "media-view.js": "text/javascript",
+  "agent-link.js": "text/javascript", "speaker-view.js": "text/javascript",
   "kiosk.css": "text/css",
 };
 

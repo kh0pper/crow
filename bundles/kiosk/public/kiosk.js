@@ -1,5 +1,5 @@
 /**
- * Crow kiosk page: pairing → session → tap-to-talk. Phone-friendly (D8); Pi agent hooks arrive in K2.
+ * Crow kiosk page: pairing → session → tap-to-talk. Phone-friendly (D8). A Pi (?agent=1) also gets the speaker chip.
  * Session mode (/display/session, inside the dashboard's Talk to Crow overlay): the viewer is already
  * logged in to the dashboard, so there is no pairing and no stored token — the socket is authorised by
  * the dashboard session cookie and hello echoes the CSRF cookie.
@@ -416,3 +416,10 @@ mediaView = createMediaView({
 });
 $("mic").textContent = t("mic_talk");
 connect();
+// DV13 speaker chip: a Pi (?agent=1) only; one agent link per page load.
+if (!SESSION && new URLSearchParams(location.search).get("agent") === "1") Promise.all([import("./agent-link.js"), import("./speaker-view.js")]).then(([{ createAgentLink }, { createSpeakerView }]) => {
+  let view = null;
+  const link = createAgentLink({ onStatus: (s) => view.status(s), onBtState: (b) => { note("speaker", b.connected ? "on" : b.reason || "off"); view.bt(b); } });
+  view = createSpeakerView($("speaker"), { t, link });
+  view.start(); link.start();
+}).catch(() => {});

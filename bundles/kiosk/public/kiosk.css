@@ -8,6 +8,13 @@ button { font: inherit; color: inherit; min-height: 56px; min-width: 56px; borde
 .k-top { display: flex; align-items: baseline; gap: 16px; }
 .k-clock { font-size: 34px; font-weight: 700; }
 .k-date { color: var(--k-dim); }
+.k-spk { margin-left: auto; position: relative; }
+.k-spk-btn { display: flex; align-items: center; gap: 8px; min-height: 56px; padding: 0 16px; border-radius: 28px; background: var(--k-card); border: 1px solid var(--k-line); }
+.k-spk.is-connected .k-spk-btn { opacity: .7; }
+.k-spk-glyph { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2; }
+.k-spk-label { max-width: 40vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.k-spk-line { position: absolute; right: 0; top: 100%; z-index: 2; padding: 4px 12px; background: var(--k-card); max-width: 60vw; }
+.k-spk-line:empty { display: none; }
 .k-stage { display: grid; grid-template-columns: 2fr 3fr; gap: 16px; min-height: 0; }
 .k-bird { position: relative; display: grid; place-items: center; border-radius: 24px; background: var(--k-card); border: 1px solid var(--k-line); }
 .k-bird-art, .k-bird-svg { width: min(100%, 300px); aspect-ratio: 1; display: block; }

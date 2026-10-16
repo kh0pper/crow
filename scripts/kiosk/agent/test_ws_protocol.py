@@ -236,6 +236,30 @@ class MicLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(v == 1 for v in det.chunks))
 
 
+class BtStateReasonTests(unittest.IsolatedAsyncioTestCase):
+    def test_bt_state_msg_passes_the_reason_through(self):
+        import protocol
+        st = {"type": "bt_state", "configured": True, "connected": False, "link": False, "hw_fault": False,
+              "name": "Kitchen speaker", "reconnecting": False, "reason": "adapter_blocked", "retry_window": True}
+        out = json.loads(protocol.bt_state_msg(st, "r1"))
+        self.assertEqual((out["reason"], out["req"]), ("adapter_blocked", "r1"))
+        self.assertNotIn("retry_window", out)
+        self.assertIsNone(json.loads(protocol.bt_state_msg({**st, "connected": True, "reason": None}))["reason"])
+
+    async def test_the_reason_is_in_the_log_line(self):
+        cfg = load_config(overrides={"crow_origin": ORIGIN, "listen_port": free_port()})
+        agent = Agent(cfg, detector=None, backlight=Backlight("/nonexistent"))
+        st = {"type": "bt_state", "configured": True, "connected": False, "link": False, "hw_fault": False,
+              "name": None, "reconnecting": False, "reason": "not_paired"}
+        with self.assertLogs("crow-kiosk-agent", "INFO") as logs:
+            await agent._push_bt_state(st)
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("not paired", logs.output[0])
+        with self.assertLogs("crow-kiosk-agent", "INFO") as logs:
+            await agent._push_bt_state({**st, "reason": "adapter_blocked"})
+        self.assertIn("Bluetooth adapter is blocked", logs.output[0])
+
+
 @unittest.skipIf(websockets is None, "python websockets package not installed")
 class WsBluetoothTests(unittest.IsolatedAsyncioTestCase):
     async def test_reconnect_button_round_trip_and_rate_limit(self):
@@ -261,7 +285,7 @@ class WsBluetoothTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(websockets.exceptions.ConnectionClosed):
                 await asyncio.wait_for(ws.recv(), 2)
             self.assertEqual(ws.close_code, 4400)
-            self.assertTrue(all(c[1] == MAC for c in ctl.calls))
+            self.assertTrue(all(c == ("show",) or c[1] == MAC for c in ctl.calls))
         finally:
             server.close()
             await server.wait_closed()
