@@ -15,7 +15,7 @@
 
 import { escapeHtml, section, formField, badge, dataTable } from "../shared/components.js";
 import { t, tJs, fill } from "../shared/i18n.js";
-import { existsSync, readFileSync, unlinkSync, readdirSync, lstatSync, statSync, chmodSync } from "fs";
+import { existsSync, readFileSync, unlinkSync, readdirSync, lstatSync, openSync, fstatSync, closeSync, constants as fsConstants } from "fs";
 import { join, basename, dirname } from "path";
 import { fileURLToPath } from "url";
 import { resolveCrowHome } from "../../../shared/crow-home.js";
@@ -82,10 +82,7 @@ const toLf = (text) => text.replace(/\r\n/g, "\n");
 /** Write a skill file (tmp + rename), keeping an existing regular file's mode. */
 function writeSkill(filePath, text) {
   const st = lstatOrNull(filePath);
-  atomicWrite(filePath, toLf(text));
-  if (st && st.isFile()) {
-    try { chmodSync(filePath, st.mode & 0o777); } catch { /* best effort */ }
-  }
+  atomicWrite(filePath, toLf(text), st && st.isFile() ? st.mode & 0o777 : null);
 }
 
 const NOTICE_CODES = {
@@ -114,12 +111,18 @@ function listSkillFiles(dir) {
  * FIFO or a device yields null instead of an error or a blocked event loop.
  */
 function readSkillContent(filePath) {
+  let fd = null;
   try {
-    const st = statSync(filePath);
+    // Open non-blocking and check the OPENED file, so a target swapped
+    // between a check and the read can never block on a FIFO.
+    fd = openSync(filePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+    const st = fstatSync(fd);
     if (!st.isFile() || st.size > MAX_SKILL_BYTES) return null;
-    return readFileSync(filePath, "utf-8");
+    return readFileSync(fd, "utf-8");
   } catch {
     return null;
+  } finally {
+    if (fd !== null) try { closeSync(fd); } catch { /* already closed */ }
   }
 }
 
@@ -152,8 +155,8 @@ export default {
       for (const k of ["action", "filename", "content", "sectionKey"]) {
         if (body[k] !== undefined && typeof body[k] !== "string") {
           // text/html so Turbo shows it (a text/plain 4xx is dropped silently).
-          res.status(400).type("html").send(`<p>${escapeHtml(t("skills.errorBadRequest", lang))}</p>`);
-          return;
+          res.status(400);
+          return layout({ title: t("skills.pageTitle", lang), content: section(t("skills.pageTitle", lang), `<p>${escapeHtml(t("skills.errorBadRequest", lang))}</p><a href="/dashboard/skills" class="btn btn-secondary">${t("skills.back", lang)}</a>`) });
         }
       }
       const action = one(body.action);
@@ -596,7 +599,8 @@ export default {
     // One notice for a refused create (audit A10/A11); unknown codes show nothing.
     // A create also names the file it made (the slug can differ from the input).
     const noticeKey = NOTICE_CODES[one(query.error)];
-    const created = existingSkillName(one(query.created));
+    const createdName = existingSkillName(one(query.created));
+    const created = createdName && lstatOrNull(join(userSkillsDir(), createdName)) ? createdName : null;
     const noticeBox = (role, accent, text) => `<div class="skills-notice" role="${role}" style="margin-bottom:1.5rem;padding:0.75rem 1rem;border:1px solid var(--crow-border);border-left:3px solid ${accent};border-radius:8px;background:var(--crow-bg-elevated)">${escapeHtml(text)}</div>`;
     const notice = noticeKey
       ? noticeBox("alert", "var(--crow-error, #c62828)", t(noticeKey, lang))

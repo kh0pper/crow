@@ -55,3 +55,12 @@ test("Bot Builder chips on a non-primary instance list only that instance's skil
   assert.ok(!names.includes("main-only"), "no chip for a primary-only skill");
   assert.ok(!names.includes("stale-checkout-only"));
 });
+
+test("Bot Builder chips list only names the resolver can load (code review M2)", () => {
+  put(join(other, "skills"), "MixedCase");
+  writeFileSync(join(other, "skills", ".md"), "old bug\n");
+  const names = loadSkills(other);
+  assert.ok(!names.includes("MixedCase"), "resolveSkill('MixedCase') looks up mixedcase.md, so no chip");
+  assert.ok(!names.includes(""), "no empty chip from a dotfile");
+  assert.equal(resolveSkill("MixedCase", { crowHome: other }), null);
+});

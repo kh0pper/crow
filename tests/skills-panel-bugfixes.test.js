@@ -65,7 +65,7 @@ test("A6: a POST with a repeated action answers 400 and writes nothing", async (
   const r = await call({ method: "POST", body: { action: ["save", "delete"], filename: "dup-action.md", content: "new" } });
   assert.equal(r.status, 400);
   assert.equal(readFileSync(join(SKILLS, "dup-action.md"), "utf8"), "old\n");
-  assert.match(r.body, /<p>/, "an HTML body, so Turbo renders it instead of dropping it");
+  assert.match(r.body, /<title>/, "a full HTML page, so Turbo renders it with a way back");
   const r2 = await call({ method: "POST", body: { action: "save", filename: ["a.md", "b.md"], content: "x" } });
   assert.equal(r2.status, 400, "array filename is refused, not a basename() TypeError");
 });
@@ -369,4 +369,35 @@ test("A24: skills.js renders no hard-coded English button or badge text", () => 
   for (const lit of [">Edit<", ">Save<", ">Cancel<", ">Writing Rules<", 'badge("', 'section("', 'formField("', "`Edit: "]) {
     assert.ok(!src.includes(lit), `hard-coded "${lit}" in skills.js`);
   }
+});
+
+test("code review M3/M8: bundleShippingSkill reads string entries and ignores hostile ids", async () => {
+  const { bundleShippingSkill } = await import("../servers/gateway/bundle-skill-sync.js");
+  const apps = join(scratch, "apps");
+  mkdirSync(join(apps, "fixture-kit"), { recursive: true });
+  writeFileSync(join(apps, "fixture-kit", "manifest.json"), JSON.stringify({ skills: ["skills/fixture-skill.md"] }));
+  mkdirSync(join(scratch, "evil"), { recursive: true });
+  writeFileSync(join(scratch, "evil", "manifest.json"), JSON.stringify({ skills: ["skills/fixture-skill.md"] }));
+  const home = join(scratch, "ship-home"); mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, "installed.json"), JSON.stringify(["fixture-kit"]));
+  assert.equal(bundleShippingSkill({ crowHome: home, appBundles: apps, skill: "fixture-skill.md" }), "fixture-kit", "a plain string entry counts");
+  assert.equal(bundleShippingSkill({ crowHome: home, appBundles: apps, skill: "other.md" }), null);
+  writeFileSync(join(home, "installed.json"), JSON.stringify([{ id: "../evil" }, { id: "a/b" }, "..", { id: 7 }]));
+  assert.equal(bundleShippingSkill({ crowHome: home, appBundles: apps, skill: "fixture-skill.md" }), null, "no id escapes appBundles");
+});
+
+test("code review M8: a skill over 1 MiB is never read into the page; override keeps no stale mode", async () => {
+  put("huge.md", "x".repeat(1024 * 1024 + 1));
+  const r = await call({ query: { edit: "huge.md", source: "user" } });
+  assert.equal(r.redirect, "/dashboard/skills");
+  rmSync(join(SKILLS, "huge.md"));
+  const r2 = await call({ method: "POST", body: { action: "override", filename: "ideation.md" } });
+  assert.equal(r2.status, 303);
+  assert.ok(lstatSync(join(SKILLS, "ideation.md")).isFile());
+  rmSync(join(SKILLS, "ideation.md"));
+});
+
+test("code review M4: a crafted ?created= for a file that does not exist shows no notice", async () => {
+  const r = await call({ query: { created: "never-made.md" } });
+  assert.doesNotMatch(r.body, /Created never-made/);
 });

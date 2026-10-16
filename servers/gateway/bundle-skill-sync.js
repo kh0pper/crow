@@ -35,7 +35,7 @@
  * scripts/build-skill-history.mjs load this file directly.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync, rmSync, chmodSync } from "node:fs";
 import { join, dirname, isAbsolute } from "node:path";
 
 /** sha256 of the LF-normalised text (a CRLF checkout of the same text matches). */
@@ -76,12 +76,13 @@ function readRecord(recordPath) {
   } catch { return {}; }
 }
 
-/** tmp (pid + random, same directory) + rename. */
-export function atomicWrite(path, data) {
+/** tmp (pid + random, same directory) + rename; `mode` is set on the tmp file before the rename. */
+export function atomicWrite(path, data, mode = null) {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   try {
     writeFileSync(tmp, data);
+    if (mode != null) chmodSync(tmp, mode);
     renameSync(tmp, path);
   } catch (e) {
     try { unlinkSync(tmp); } catch { /* never written */ }
@@ -241,7 +242,8 @@ export function removeBundleSkills({ id, manifest, src = null, skillsDir, record
 export function bundleShippingSkill({ crowHome, appBundles, skill }) {
   let installed;
   try { installed = JSON.parse(readFileSync(join(crowHome, "installed.json"), "utf8")); } catch { return null; }
-  const ids = Array.isArray(installed) ? installed.map((e) => e && e.id) : Object.keys(installed || {});
+  // Same entry shapes the boot loop accepts: "id" strings or {id} objects.
+  const ids = Array.isArray(installed) ? installed.map((e) => (typeof e === "string" ? e : e && e.id)) : Object.keys(installed || {});
   for (const id of ids) {
     if (typeof id !== "string" || !/^[a-z0-9][a-z0-9._-]*$/i.test(id) || id.includes("..")) continue;
     let manifest;

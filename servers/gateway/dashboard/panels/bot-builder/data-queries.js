@@ -173,7 +173,7 @@ export function loadSkills(crowHome) {
     try {
       for (const f of readdirSync(dir)) {
         // Only names the resolver can load (a dotfile such as ".md" is not one).
-        if (f.endsWith(".md") && normalizeSkillName(f)) names.add(f.replace(/\.md$/, ""));
+        if (f.endsWith(".md") && normalizeSkillName(f) === f.slice(0, -3)) names.add(f.slice(0, -3));
       }
     } catch { /* dir missing */ }
   }

@@ -87,7 +87,7 @@ function addonTools(crowHome) {
 function localSkills(crowHome) {
   const names = new Set();
   for (const dir of skillDirs(crowHome)) {
-    try { for (const f of readdirSync(dir)) if (f.endsWith(".md") && normalizeSkillName(f)) names.add(f.replace(/\.md$/, "")); }
+    try { for (const f of readdirSync(dir)) if (f.endsWith(".md") && normalizeSkillName(f) === f.slice(0, -3)) names.add(f.slice(0, -3)); }
     catch { /* dir missing */ }
   }
   return [...names].sort().map((name) => ({ name }));
