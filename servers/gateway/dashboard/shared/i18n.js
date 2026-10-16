@@ -144,6 +144,8 @@ export const translations = {
   "player.close": { en: "Close", es: "Cerrar" },
   "player.playing": { en: "Playing...", es: "Reproduciendo..." },
   "player.paused": { en: "Paused", es: "Pausado" },
+  "player.ended": { en: "Playback ended", es: "Reproducción terminada" },
+  "player.dismiss": { en: "Dismiss", es: "Descartar" },
 
   // ─── Health / Nest Panel ───
   "health.pageTitle": { en: "Crow's Nest", es: "Nido del Cuervo" },
