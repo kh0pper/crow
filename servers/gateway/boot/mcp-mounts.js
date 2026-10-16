@@ -345,7 +345,7 @@ export async function mountMcpServers(app, deps) {
     const artDir = join(resolveCrowHome(), "bundles", "artifacts", "server");
     if (existsSync(join(artDir, "mcp.js"))) {
       const imp = (f) => import(pathToFileURL(join(artDir, f)).href);
-      const [{ createArtifactsMcpServer }, { initArtifactsTables }, { createBlobStore }, artStore] = await Promise.all(["mcp.js", "init-tables.js", "blob-store-minio.js", "store.js"].map(imp));
+      const [{ createArtifactsMcpServer }, { initArtifactsTables }, { createBlobStore }, artStore, { createDesign }] = await Promise.all(["mcp.js", "init-tables.js", "blob-store-minio.js", "store.js", "design.js"].map(imp));
       const { resolveDataDir } = await import("../../db.js");
       const { markdownBlocks } = await import("../../blog/renderer.js");
       const artDb = createDbClient();
@@ -391,7 +391,10 @@ export async function mountMcpServers(app, deps) {
       // without a chat link; the bundle cannot open tasks.db, so the gateway
       // answers (fails closed on any error).
       const { cardMadeByOwner } = await import("../board/artifact-card.js");
-      mountMcpServer(app, "/artifacts", () => createArtifactsMcpServer({ db: artDb, blobs, McpServer, z, verifyActor: verifyArtifactsActorSig, renderDeps: { markdownBlocks }, onRoundDone, emitExternal, cardMadeByOwner: (id) => cardMadeByOwner(id) }), sessionManager, authMiddleware, peerExposureGate);
+      // Design kit (spec §4): used only when installed on THIS instance; the
+      // installed copy is re-read when its manifest changes (no restart).
+      const design = createDesign({ crowHome: resolveCrowHome(), db: artDb });
+      mountMcpServer(app, "/artifacts", () => createArtifactsMcpServer({ db: artDb, blobs, McpServer, z, verifyActor: verifyArtifactsActorSig, renderDeps: { markdownBlocks, design }, onRoundDone, emitExternal, cardMadeByOwner: (id) => cardMadeByOwner(id) }), sessionManager, authMiddleware, peerExposureGate);
       const { readReservation } = await import("../box-reservation.js");
       const botDefOf = async (botId) => { const r = (await artDb.execute({ sql: "SELECT definition FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0]; try { return r ? JSON.parse(r.definition || "{}") : null; } catch { return null; } };
       // R2-M5/R2-M2: the sweep runs whether or not a Perch engine exists

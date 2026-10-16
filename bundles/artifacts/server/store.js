@@ -197,13 +197,25 @@ export async function createArtifact(db, blobs, { title, type, source, actor, ch
   if (!t) throw err("bad_request", "title required");
   const rendered = await renderVersion(type, source, deps);
   const sourceJson = JSON.stringify(source);
+  const bot = actor.kind === "bot" ? actor.id : null;
   return withWriteLock(async () => {
   const plan = await planFiles(blobs, rendered.files, sourceJson);
+  // Review M10: a client that timed out and retried must not make a second
+  // artifact. Only for a bot in a real chat (a thread): that is where MCP
+  // retries happen. Nothing is written and no card frame is sent.
+  if (bot && actor.thread) {
+    const dup = (await db.execute({
+      sql: `SELECT a.id FROM artifacts a JOIN artifact_versions v ON v.artifact_id=a.id AND v.n=1
+            WHERE a.created_by_bot=? AND a.origin_session IS ? AND a.title=? AND a.type=? AND v.content_hash=?
+              AND a.deleted_at IS NULL AND a.created_at > datetime('now','-10 minutes') ORDER BY a.created_at DESC LIMIT 1`,
+      args: [bot, origin.session || actor.thread || null, t, type, plan.contentHash],
+    })).rows[0];
+    if (dup) return { id: dup.id, versionN: 1, design: rendered.design || null, duplicate: true };
+  }
   await assertQuota(db, blobs, plan.newBytes);
   const manifest = await writePlanned(blobs, plan, db);
   const { size, contentHash } = plan;
   const id = newArtifactId();
-  const bot = actor.kind === "bot" ? actor.id : null;
   // M3/B6 (plan PR-3 Task 3.2): the origin link rides the SAME batch as the
   // artifact row — bound to the signed actor's OWN thread (never
   // origin.session) and only for a Perch actor (a channel or job turn's
@@ -253,6 +265,21 @@ export async function addVersion(db, blobs, { artifactId, source, actor, baseVer
   const bot = actor.kind === "bot" ? actor.id : null;
   return withWriteLock(async () => {
   const plan = await planFiles(blobs, rendered.files, sourceJson);
+  // Review M10 + ruling F11: a client retry returns the current version when
+  // it has the same content, was made by the same bot under the SAME round
+  // (or both under none) and is under 10 minutes old. A different round id is
+  // never swallowed: that round's update must do its own bookkeeping.
+  if (bot && actor.thread) {
+    const cur = (await db.execute({
+      sql: `SELECT v.n, v.content_hash, v.made_by_bot, v.untrusted_input, v.trust_cleared_at, (v.created_at > datetime('now','-10 minutes')) AS recent
+            FROM artifact_versions v JOIN artifacts a ON a.id=v.artifact_id AND a.current_version=v.n
+            WHERE v.artifact_id=? AND v.round_id IS ?`,
+      args: [artifactId, roundId == null ? null : Number(roundId)],
+    })).rows[0];
+    if (cur && cur.content_hash === plan.contentHash && cur.made_by_bot === bot && Number(cur.recent) === 1) {
+      return { n: Number(cur.n), state: "current", anchorMap: rendered.anchorMap, untrusted: isTainted(cur), design: rendered.design || null, duplicate: true };
+    }
+  }
   await assertQuota(db, blobs, plan.newBytes);
   const manifest = await writePlanned(blobs, plan, db);
   const { size, contentHash } = plan;

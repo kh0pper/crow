@@ -164,6 +164,14 @@ export const TOOL_CLASSES = Object.freeze({
 // 1a-L1; pinned by the error-path sentinel sweep in tests/artifacts-mcp.test.js).
 const fail = (e) => ({ content: [{ type: "text", text: `[${e.code || "error"}] ${e.message}` }], isError: true });
 
+/** Spec §4.1: the tool-level `libs` joins source.libs (deduplicated, order
+ *  kept). A non-array source.libs is left alone for the renderer to refuse. */
+export function withLibs(source, libs) {
+  if (!Array.isArray(libs) || !libs.length || !source || typeof source !== "object") return source;
+  if (source.libs !== undefined && !Array.isArray(source.libs)) return source;
+  return { ...source, libs: [...new Set([...(source.libs || []), ...libs])] };
+}
+
 export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor, renderDeps = {}, onVersion = null, onRoundDone = async () => {}, emitExternal = null, cardMadeByOwner = async () => false } = {}) {
   // Default: a new current version carries open threads forward (§4.2).
   if (!onVersion) onVersion = async ({ artifactId, n, state, onlyThreads }) => { if (state === "current") await comments.carryForwardTo(db, blobs, artifactId, n, onlyThreads || null); };
@@ -176,6 +184,10 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
   const hub = (artifactId, n, event) => notifyHub({ db, artifactId, n, event, emitExternal });
 
   const scopeOfActor = (actor) => scopeOf(db, actor);
+  // Per-call render deps (Task 14 adds the actor's house style here).
+  const depsFor = async (_actor) => renderDeps;
+  const libsSchema = z.array(z.string().max(120)).max(40).optional();
+  const withDesign = (out, v) => (v.design ? { ...out, design: v.design } : out);
   const tool = (name, desc, schema, fn) => {
     if (!TOOL_CLASSES[name]) throw new Error(`artifacts tool ${name} has no taint class`);
     return server.tool(name, desc, schema, async (args, extra) => {
@@ -194,19 +206,19 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
   };
   const scopedOut = (scope) => { if (scope) throw Object.assign(new Error("not available in this round"), { code: "forbidden" }); };
 
-  tool("artifact_create", "Create an artifact the owner can view and comment on. type: page (html + assets), document (markdown), diagram (svg).",
-    { title: z.string(), type: z.enum(["page", "document", "diagram"]), source: z.record(z.any()), change_note: z.string().optional() },
+  tool("artifact_create", "Create an artifact the owner can view and comment on. type: page (html, assets, libs), document (markdown; with the Design kit, ```vega-lite / ```mermaid / ```d2 fences become pictures), diagram (svg, or { engine, source } with the Design kit).",
+    { title: z.string(), type: z.enum(["page", "document", "diagram"]), source: z.record(z.any()), libs: libsSchema, change_note: z.string().optional() },
     async (a, actor, scope) => {
       scopedOut(scope);
       // Re-read at save time: a bot whose session is not provably clean makes a tainted version.
       const untrusted = actor.kind === "bot" && !(await sessionIsClean(db, actor.id, actor.thread));
-      const out = await store.createArtifact(db, blobs, { title: a.title, type: a.type, source: a.source, actor, changeNote: a.change_note, untrusted }, renderDeps);
-      await hub(out.id, 1, "create");
-      return out;
+      const out = await store.createArtifact(db, blobs, { title: a.title, type: a.type, source: withLibs(a.source, a.libs), actor, changeNote: a.change_note, untrusted }, await depsFor(actor));
+      if (!out.duplicate) await hub(out.id, 1, "create");   // a client retry already has its card
+      return withDesign({ id: out.id, versionN: out.versionN }, out);
     });
 
   tool("artifact_update", "Make a new version. During a feedback round pass round_id and base_version.",
-    { artifact_id: z.string(), source: z.record(z.any()), change_note: z.string().optional(), round_id: z.number().int().optional(), base_version: z.number().int().optional() },
+    { artifact_id: z.string(), source: z.record(z.any()), libs: libsSchema, change_note: z.string().optional(), round_id: z.number().int().optional(), base_version: z.number().int().optional() },
     async (a, actor, scope) => {
       // F7(4): a bot whose chat is mid-round for THIS artifact must attribute
       // its update to the round — the smoke's v2 landed with round_id NULL
@@ -244,7 +256,12 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
       // The session's trust is re-read NOW (not cached from dispatch): a
       // session tainted after its round was sent writes a tainted version.
       const clean = actor.kind === "session" || (await sessionIsClean(db, actor.id, actor.thread));
-      const v = await store.addVersion(db, blobs, { artifactId: a.artifact_id, source: a.source, actor, baseVersion: base, roundId: round?.id ?? null, changeNote: a.change_note, untrusted: !!pol.untrusted || !!scope || !clean, proposedReason: pol.proposedReason }, renderDeps);
+      const v = await store.addVersion(db, blobs, { artifactId: a.artifact_id, source: withLibs(a.source, a.libs), actor, baseVersion: base, roundId: round?.id ?? null, changeNote: a.change_note, untrusted: !!pol.untrusted || !!scope || !clean, proposedReason: pol.proposedReason }, await depsFor(actor));
+      // A client retry (review M10, ruling F11: same content, bot and round,
+      // under 10 minutes): no onVersion, no round bookkeeping, no card frame.
+      // It runs AFTER the link gate above, so an unlinked chat still gets
+      // needs_link, never a cached success.
+      if (v.duplicate) return withDesign({ version: v.n, state: v.state }, v);
       await onVersion({ artifactId: a.artifact_id, n: v.n, state: v.state, anchorMap: v.anchorMap, onlyThreads: scope ? scope.roundThreads : null });
       if (round && v.state === "current") {
         // The round's result version (drives "Version N is ready" through
@@ -267,11 +284,11 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
           await onRoundDone(r);
           await hub(a.artifact_id, v.n, "update");
           await hub(a.artifact_id, v.n, "round-done");
-          return { version: v.n, state: v.state, round_done: !r.late && !r.idempotent };
+          return withDesign({ version: v.n, state: v.state, round_done: !r.late && !r.idempotent }, v);
         }
       }
       await hub(a.artifact_id, v.n, "update");
-      return { version: v.n, state: v.state };
+      return withDesign({ version: v.n, state: v.state }, v);
     });
 
   tool("artifact_get", "Read an artifact: metadata, current version, source.",
