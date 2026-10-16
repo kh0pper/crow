@@ -47,7 +47,7 @@ const RESERVE = `(function () {
 
 export function playerShellHtml(lang = "en", { dark = false } = {}) {
   return `<style>${designTokensCss()}
-#crow-player-bar{--crow-sidebar-width:0px}${dark ? "\n" + darkBarTokens() : ""}</style>
+#crow-player-bar{--crow-sidebar-width:0px;font-family:var(--crow-body-font);color:var(--crow-text-primary)}${dark ? "\n" + darkBarTokens() : ""}</style>
 ${playerBarHtml(lang)}
 <script>${FRAME_GUARD}</script>
 <script>${playerBarJs(lang)}</script>

@@ -23,7 +23,7 @@ test("the shell carries the bar, the audio, the tokens, and a zero sidebar offse
     assert.match(html, /id="crow-player-bar"/);
     assert.match(html, /id="crow-audio"/);
     assert.ok(html.includes(designTokensCss()), "the one token source, verbatim");
-    assert.match(html, /#crow-player-bar\{--crow-sidebar-width:0px\}/);
+    assert.match(html, /#crow-player-bar\{--crow-sidebar-width:0px;font-family:var\(--crow-body-font\);color:var\(--crow-text-primary\)\}/, "no sidebar; the dashboard's font and ink, not the host page's");
   }
 });
 
