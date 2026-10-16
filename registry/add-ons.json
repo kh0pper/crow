@@ -6210,7 +6210,7 @@
     {
       "id": "vllm",
       "name": "vLLM",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "GPU-accelerated local LLM inference server — OpenAI-compatible endpoint backed by vLLM's continuous batching and PagedAttention. Recommended classroom engine for Maker Lab: the Phase 0 Ollama benchmark hit unusable p95 latencies at N=25 concurrent learners; vLLM is architecturally the right shape for that scale.",
       "type": "bundle",
       "author": "Crow",

@@ -58,6 +58,8 @@ import { envValueProblem, encodeEnvValue, formatEnvLines, updateEnvText, pathEnv
 import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved } from "../keychain/install-hooks.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
+import { checkComposeModel, loadComposeModel } from "../compose-guard.js";
+import { resolveDataDir } from "../../db.js";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { planGeneratedEnv, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedKeys, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
 
@@ -1479,7 +1481,7 @@ function validateComposeFile(composePath, bundleId, opts = {}) {
     for (const f of [".env", ".env.example"]) {
       let t = "";
       try { t = readFileSync(join(dirname(composePath), f), "utf8"); } catch { continue; }
-      if (/^\s*(?:export\s+)?COMPOSE_[A-Za-z0-9_]*\s*=/m.test(t)) {
+      if (/^\s*(?:export\s+)?COMPOSE_[A-Za-z0-9_]*\s*[=:]/m.test(t)) {
         return { valid: false, reason: `Bundle ${f} sets a COMPOSE_* variable, which would change what Docker Compose runs` };
       }
     }
@@ -1581,6 +1583,32 @@ function validateComposeFile(composePath, bundleId, opts = {}) {
   } catch (err) {
     return { valid: false, reason: `Could not read compose file: ${err.message}` };
   }
+}
+
+// Test-only: replace `docker compose config` (the model the shared check reads).
+let _composeConfigRunnerForTest = null;
+export function _setComposeConfigRunnerForTest(fn) { _composeConfigRunnerForTest = fn || null; }
+async function runComposeConfig(args, { cwd, env }) {
+  if (_composeConfigRunnerForTest) return _composeConfigRunnerForTest(args, { cwd, env });
+  const compose = await getComposeCmd();
+  return run(compose.cmd, [...compose.prefix, ...args], { cwd, env, timeout: 60_000 });
+}
+
+/**
+ * THE install security check, shared by every path that runs `docker compose up` on a
+ * bundle: install (single + collection, via runInstallJob), Start/recreate, and the
+ * shared-storage re-apply. `textCheck` (install only) also checks the file as shipped —
+ * e.g. no extra compose files; at Start an operator's own override is part of the model
+ * that is checked instead. The model check reads what Compose will actually apply.
+ */
+export async function checkBundleCompose(bundleDir, { bundleId, manifest, consentVerified = false, textCheck = true } = {}) {
+  if (textCheck) {
+    const t = validateComposeFile(join(bundleDir, "docker-compose.yml"), bundleId, { manifest, consentVerified });
+    if (!t.valid) return t;
+  }
+  const loaded = await loadComposeModel(bundleDir, { env: composeEnv(), runConfig: runComposeConfig });
+  if (loaded.error) return { valid: false, reason: loaded.error };
+  return checkComposeModel(loaded.model, { bundleDir, manifest, consentVerified, ctx: { crowHome: CROW_HOME, dataDir: resolveDataDir(), appRoot: APP_ROOT } });
 }
 
 // --- PR 0: Consent token helpers (server-validated install consent) ---
@@ -2414,10 +2442,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         // PR 0: validate compose for ALL bundles (first-party + community).
         // First-party bundles with privileged/host-network must declare manifest.privileged
         // and the install request must include a verified consent token.
-        const validation = validateComposeFile(composePath, bundleId, {
-          manifest,
-          consentVerified,
-        });
+        const validation = await checkBundleCompose(destDir, { bundleId, manifest, consentVerified });
         if (!validation.valid) {
           appendLog(job, `Security check failed: ${validation.reason}`);
           // Clean up copied files
@@ -3473,6 +3498,12 @@ export default function bundlesRouter() {
       if (own.refusal) return res.status(409).json({ error: own.refusal, code: "compose_project_foreign" });
       if (own.warning) console.warn(`[bundles] ${bundleId} ${action}: ${own.warning}`);
       if (action === "start") {
+        // The same check as install, on what Compose will apply NOW (Configure may have
+        // changed .env; an override may sit next to the file). The installed bundle was
+        // consented to at install, so a consent bundle keeps its consent here.
+        const im = getInstalledFirstManifest(bundleId);
+        const gate = await checkBundleCompose(bundleDir, { bundleId, manifest: im, consentVerified: manifestRequiresConsent(im), textCheck: false });
+        if (!gate.valid) return res.status(403).json({ error: `Security check failed: ${gate.reason}`, code: "compose_security_check" });
         const content = readFileSync(composePath, "utf8");
         const upArgs = /^\s+build:/m.test(content) ? ["up", "-d", "--build"] : ["up", "-d"];
         // recreate:true (the Configure dialog's explicit Restart): new env only
@@ -3756,6 +3787,10 @@ export default function bundlesRouter() {
       // Force-recreate so the affected containers pick up the new env.
       const composePath = join(bundleDir, "docker-compose.yml");
       if (existsSync(composePath)) {
+        // Checked AFTER the injection: the new .env is part of what Compose applies.
+        const im = getInstalledFirstManifest(bundleId);
+        const gate = await checkBundleCompose(bundleDir, { bundleId, manifest: im, consentVerified: manifestRequiresConsent(im), textCheck: false });
+        if (!gate.valid) return res.status(403).json({ error: `Security check failed: ${gate.reason}`, code: "compose_security_check" });
         await runCompose(["up", "-d", "--force-recreate"], { cwd: bundleDir });
       }
       res.json({ ok: true, version: injected.version, recreated: existsSync(composePath) });
