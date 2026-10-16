@@ -163,37 +163,73 @@ export async function recordKeychainForInstall({ bundleId, manifest, env, minted
 }
 
 /**
- * Plaintext of this bundle's keychain:true GENERATED keys that a readable keychain entry
- * holds (any status: an uninstall marks entries extension_removed and keeps them), for
- * planGeneratedEnv's keychain rung. This is how a rebuilt machine gets its keys back: restore
- * crow.db, import the keychain Export, reinstall. Best-effort and read-only: no key file, a
- * damaged one, or no table → {} and the install mints as before. An entry sealed under
- * another keychain key is reported by NAME through `log`, never read. Values never leave
- * this process: they are not logged and never synced (crow_keychain is LOCAL_ONLY).
+ * For planGeneratedEnv's keychain rung: `values` = plaintext of this bundle's keychain:true
+ * GENERATED keys that a readable entry holds (any status: an uninstall marks entries
+ * extension_removed and keeps them); `unreadable` = such keys whose entry exists but is
+ * sealed with a keychain key this machine does not have (or has no key file at all). This
+ * is how a rebuilt machine gets its keys back: restore crow.db, import the keychain Export,
+ * reinstall. Read-only and best-effort: a failure returns nothing and the install mints as
+ * before. Values are never logged and never synced (crow_keychain is LOCAL_ONLY).
  */
-export async function keychainRestoreValues(bundleId, manifest, { log = () => {} } = {}) {
+export async function keychainRestoreValues(bundleId, manifest) {
   const keys = keychainGeneratedKeys(manifest);
-  if (keys.length === 0) return {};
-  const out = {};
+  const out = { values: {}, unreadable: [] };
+  if (keys.length === 0) return out;
   let db;
   try {
     const key = deps().readKey();
-    if (!key) return {};
     db = deps().openDb();
-    const unreadable = [];
-    for (const e of await listEntries(db, { keyId: key.id })) {
+    for (const e of await listEntries(db, { keyId: key?.id ?? null })) {
       if (e.kind !== "extension" || e.bundle_id !== bundleId || !keys.includes(e.env_key)) continue;
-      if (!e.readable) { unreadable.push(e.env_key); continue; }
+      if (!e.readable || !key) { out.unreadable.push(e.env_key); continue; }
       const plain = await openEntrySecret(db, key, e.id);
-      if (typeof plain === "string" && plain !== "") out[e.env_key] = plain;
+      if (typeof plain === "string" && plain !== "") out.values[e.env_key] = plain;
     }
-    if (unreadable.length) log(`Crow keychain holds ${unreadable.join(", ")} sealed with another keychain key, so it could not be read; a new one is generated. Import the keychain Export from the old machine first to keep the old one.`);
   } catch {
-    return {};
+    return { values: {}, unreadable: [] };
   } finally {
     try { db?.close(); } catch {}
   }
   return out;
+}
+
+/**
+ * Boot backfill (recovery keys, queue item 30): an installed extension whose manifest now
+ * saves a generated key to the keychain (campaigns/tax, mastodon/pixelfed/peertube data
+ * keys) but was installed before that has the key only in its .env / retained copy / MCP
+ * entry, and the field is no longer shown in Configure. Save each such value once, so it is
+ * visible in Settings → Passwords and goes into the user's Export. Never overwrites an
+ * entry (any status, readable or not); skips store_as keys (only a hash is on disk). No
+ * first view (nothing new was minted). Best-effort; names only in `log`.
+ * `values` = { envKey: { plain, origin } } gathered by the caller.
+ */
+export async function backfillKeychainEntries(bundleId, manifest, values, { log = () => {} } = {}) {
+  const specs = new Map((manifest?.env_vars || []).map((v) => [v.name, v]));
+  const todo = keychainGeneratedKeys(manifest).filter((k) => !specs.get(k)?.store_as && values?.[k]?.plain);
+  if (todo.length === 0) return 0;
+  let db;
+  let saved = 0;
+  try {
+    db = deps().openDb();
+    const missing = [];
+    for (const k of todo) if (!(await hasExtensionEntry(db, bundleId, k))) missing.push(k);
+    if (missing.length === 0) return 0;
+    const key = await deps().writeKey(db);
+    const tEnv = templateEnv(manifest, Object.fromEntries(Object.entries(values).map(([k, v]) => [k, v.plain])));
+    for (const k of missing) {
+      const spec = specs.get(k) || {};
+      const label = `${manifest?.name || bundleId} — ${spec.keychain_label || k}`;
+      const r = await saveExtensionSecret(db, key, { bundleId, envKey: k, label, username: expandKeychainTemplate(spec.keychain_username, tEnv), url: expandKeychainTemplate(spec.keychain_url, tEnv), secret: values[k].plain, origin: values[k].origin === "generated" ? "generated" : "typed", firstView: false });
+      await deps().audit(db, "keychain_save", { details: { entry_id: r.id, bundle_id: bundleId, env_key: k, origin: "kept", backfill: true } });
+      saved++;
+    }
+    log(`${bundleId}: saved ${missing.join(", ")} to Crow keychain (kept from the existing install)`);
+  } catch (err) {
+    log(`${bundleId}: could not save kept keys to Crow keychain (${err?.code || err?.name || "error"})`);
+  } finally {
+    try { db?.close(); } catch {}
+  }
+  return saved;
 }
 
 export async function markBundleKeychainRemoved(bundleId) {

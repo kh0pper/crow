@@ -173,13 +173,13 @@ test("Export → Import round-trips through a passphrase file; wrong passphrase 
   const db2 = freshDb();
   const key2 = KEY.createKeychainKey({ crowHome: home() });
   await K.saveExtensionSecret(db2, key, { bundleId: "workspace", envKey: "WORKSPACE_ADMIN_PASSWORD", label: "WS admin", secret: "stale", origin: "typed" });
-  const out = await K.importEntries(db2, key2, await X.openExport(file, "correct horse battery"));
+  const { ids: _ids, ...out } = await K.importEntries(db2, key2, await X.openExport(file, "correct horse battery"));
   assert.deepEqual(out, { imported: 2, skipped: 0 }, "the unreadable restored row is replaced");
   const list = await K.listEntries(db2, { keyId: key2.id });
   assert.ok(list.every((e) => e.readable));
   const ws = list.find((e) => e.env_key === "WORKSPACE_ADMIN_PASSWORD");
   assert.equal(await K.openEntrySecret(db2, key2, ws.id), "ws-pass 1");
-  assert.deepEqual(await K.importEntries(db2, key2, await X.openExport(file, "correct horse battery")), { imported: 0, skipped: 2 }, "re-import overwrites nothing");
+  assert.deepEqual(await K.importEntries(db2, key2, await X.openExport(file, "correct horse battery")), { imported: 0, skipped: 2, ids: [] }, "re-import overwrites nothing");
 });
 
 test("init-db creates crow_keychain with the same columns as the store's lazy ensure (no CHECK constraints)", async () => {
@@ -246,7 +246,7 @@ test("import drops a non-http(s) url but still imports the entry", async () => {
     { kind: "manual", label: "Evil link", username: null, url: "javascript:alert(1)", secret: "s1" },
     { kind: "manual", label: "Good link", username: null, url: "HTTPS://ok.example", secret: "s2" },
   ]);
-  assert.deepEqual(out, { imported: 2, skipped: 0 });
+  assert.deepEqual(out, { imported: 2, skipped: 0, ids: [] }, "manual entries are not extension ids");
   const list = await K.listEntries(db, { keyId: key.id });
   assert.equal(list.find((e) => e.label === "Evil link").url, null);
   assert.equal(list.find((e) => e.label === "Good link").url, "HTTPS://ok.example");

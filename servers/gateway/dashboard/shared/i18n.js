@@ -230,7 +230,7 @@ export const translations = {
   // backup
   "signals.backup.label": { en: "Backup", es: "Copia de seguridad" },
   "signals.keychainExport.label": { en: "Keychain export", es: "Exportación del llavero" },
-  "signals.keychainExport.issue": { en: "{n} password(s) Crow generated are not in a keychain Export yet. If this machine is lost, they cannot be recovered without one.", es: "{n} contraseña(s) que Crow generó aún no están en una exportación del llavero. Si pierdes esta máquina, no se pueden recuperar sin una." },
+  "signals.keychainExport.issue": { en: "{n} saved extension password(s) are not in a keychain Export yet. If this machine is lost, they cannot be recovered without one.", es: "{n} contraseña(s) guardadas de extensiones aún no están en una exportación del llavero. Si pierdes esta máquina, no se pueden recuperar sin una." },
   "signals.keychainExport.action": { en: "Export keychain", es: "Exportar llavero" },
   "signals.backup.verified": { en: "checked ✓", es: "verificada ✓" },
   "signals.backup.damaged": { en: "may be damaged", es: "puede estar dañada" },
@@ -2358,7 +2358,7 @@ export const translations = {
   "passwords.statusRemoved": { en: "Extension removed", es: "Extensión eliminada" },
   "passwords.statusUnreadable": { en: "Unreadable — key missing", es: "Ilegible: falta la clave" },
   "passwords.noReauth": { en: "Revealing, copying, deleting and exporting passwords need Crow to confirm it's you, but this Crow has no dashboard password and no two-factor authentication. Set one in Settings → Change Password or Two-Factor Auth first.", es: "Para mostrar, copiar, eliminar o exportar contraseñas, Crow tiene que confirmar que eres tú, pero esta instancia no tiene contraseña del panel ni autenticación de dos factores. Configura una primero en Ajustes → Cambiar contraseña o Autenticación 2FA." },
-  "passwords.deleteGeneratedConfirm": { en: "Crow generated this token and keeps no other copy. Without it you cannot sign in to the extension's admin page. Delete it anyway?", es: "Crow generó este token y no guarda otra copia. Sin él no podrás entrar en la página de administración de la extensión. ¿Eliminarlo de todos modos?" },
+  "passwords.deleteGeneratedConfirm": { en: "Crow generated this and keeps no other copy. Without it you may not be able to sign in to the extension, or read data it encrypted. Delete it anyway?", es: "Crow generó esto y no guarda otra copia. Sin ello quizá no puedas entrar en la extensión ni leer los datos que cifró. ¿Eliminarlo de todos modos?" },
   "passwords.exportTitle": { en: "Export and import", es: "Exportar e importar" },
   "passwords.exportHint": { en: "Export writes every readable password into one file encrypted with a passphrase you choose. Keep it offline. Import it here, or on a new machine, to get the passwords back.", es: "Exportar guarda todas las contraseñas legibles en un archivo cifrado con una frase de paso que eliges tú. Guárdalo fuera de línea. Impórtalo aquí, o en una máquina nueva, para recuperar las contraseñas." },
   "passwords.exportPassphrase": { en: "Passphrase (at least 12 characters)", es: "Frase de paso (al menos 12 caracteres)" },
