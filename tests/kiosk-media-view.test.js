@@ -415,3 +415,69 @@ test("r7b M3: the page names its own media state in one fixed word (for the turn
   s.view.offline(true);
   assert.equal(s.view.state(), "offline");
 });
+
+// Item 21 (earpiece): the page may hold a start (the mic is still letting go). canStart() → true or ms to wait.
+function gated(gate) {
+  const audio = fakeAudio(), chip = fakeChip(), sent = [], tm = timers(), starts = [];
+  const view = createMediaView({ audio, chip, send: (o) => sent.push(o), setTimer: tm.setTimer, clearTimer: tm.clearTimer, canStart: () => gate.next, onPlay: () => starts.push(audio.src) });
+  const load = (id, extra = {}) => view.apply({ type: "media", action: "load", id, form: "audio", url: `/display/t/${id.padEnd(22, "x")}/stream`, title: `Title ${id}`, source: "music", volume: 50, muted: false, ...extra });
+  const events = () => sent.filter((m) => m.type === "media_event").map((m) => `${m.id}:${m.state}${m.code ? ":" + m.code : ""}`);
+  return { audio, tm, view, load, events, starts };
+}
+
+test("item 21: a held start never calls play(); it tries again when the gate's wait runs out, and plays once", () => {
+  const gate = { next: 500 };
+  const s = gated(gate);
+  s.load("m1");
+  assert.equal(s.audio.plays, 0, "no play() while the gate holds it");
+  s.tm.advance(499);
+  assert.equal(s.audio.plays, 0);
+  gate.next = true;
+  s.tm.advance(1);
+  assert.equal(s.audio.plays, 1);
+  assert.equal(s.starts.length, 1, "onPlay marks the real play() only");
+  s.tm.advance(5000);
+  assert.equal(s.audio.plays, 1, "no second play() from a stale retry");
+});
+
+test("item 21: kick() tries a held start at once (the mic was let go); a stop or a pause meanwhile drops the held start", () => {
+  const gate = { next: 500 };
+  const s = gated(gate);
+  s.load("m1");
+  gate.next = true;
+  s.view.kick();
+  assert.equal(s.audio.plays, 1);
+  s.tm.advance(1000);
+  assert.equal(s.audio.plays, 1, "the retry timer was cleared by the kick");
+  s.view.kick();
+  assert.equal(s.audio.plays, 1, "kick with nothing held does nothing");
+  const t = gated({ next: 500 });
+  t.load("m1");
+  t.view.apply({ action: "stop" });
+  t.tm.advance(1000);
+  assert.equal(t.audio.plays, 0, "stopped: the held start is dropped");
+  const u = gated({ next: 500 });
+  u.load("m1");
+  u.view.apply({ type: "media", action: "pause", id: "m1" });
+  u.tm.advance(1000);
+  assert.equal(u.audio.plays, 0, "paused meanwhile: never started");
+});
+
+test("item 21: the start watchdog arms only on a real play() — a start held past START_MS is no `stalled`; a real one still is", () => {
+  const gate = { next: 1000 };
+  const s = gated(gate);
+  s.load("m1");
+  s.tm.advance(START_MS * 2);
+  assert.deepEqual(s.events(), [], "held, not stalled");
+  gate.next = true;
+  s.tm.advance(1000);
+  assert.equal(s.audio.plays, 1);
+  s.tm.advance(START_MS);
+  assert.deepEqual(s.events(), ["m1:error:stalled"]);
+});
+
+test("item 21: with no gate (a Pi, a desktop) a load plays at once, as before", () => {
+  const s = setup();
+  s.load("m1");
+  assert.equal(s.audio.plays, 1);
+});

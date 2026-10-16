@@ -1196,17 +1196,18 @@ test("smoke F3/F6 (wired): a phone's display_config says pause while listening a
     const cfg = (m) => m.msgs.find((x) => x.type === "ready").display_config;
     assert.deepEqual([cfg(phone).pause_media_on_listen, cfg(phone).mic_per_turn], [true, true]);
     assert.deepEqual([cfg(bare).pause_media_on_listen, cfg(bare).mic_per_turn], [false, false]);
+    assert.deepEqual([cfg(phone).mic_release_for_media, cfg(phone).mic_settle_ms, cfg(bare).mic_release_for_media], [true, 800, false], "item 21 rides the same display_config");
     const row = await store.findDevice(db(), "kiosk-f3-phone");
     assert.equal(Object.hasOwn(row.kiosk_settings, "pause_media_on_listen"), false, "the default is never written");
   } finally { phone.ws.close(); bare.ws.close(); }
   const { audioPolicy } = await import("../bundles/kiosk/server/caps.js");
-  assert.deepEqual(audioPolicy({ profile: "phone", pause_media_on_listen: false }, PHONE_CAPS), { pause_media_on_listen: false, mic_per_turn: true });
+  assert.deepEqual(audioPolicy({ profile: "phone", pause_media_on_listen: false }, PHONE_CAPS), { pause_media_on_listen: false, mic_per_turn: true, mic_release_for_media: true, mic_settle_ms: 800 });
   // Review M4: an iPhone keeps the open mic until an iPhone smoke row passes (pause-while-listening still applies).
-  assert.deepEqual(audioPolicy({ profile: "phone" }, { ...PHONE_CAPS, platform: "iPhone" }), { pause_media_on_listen: true, mic_per_turn: false });
-  assert.deepEqual(audioPolicy({ profile: "phone" }, null), { pause_media_on_listen: true, mic_per_turn: false }, "no platform reported: the mic stays open");
-  assert.deepEqual(audioPolicy({ profile: "pi3" }, PHONE_CAPS), { pause_media_on_listen: false, mic_per_turn: false }, "a stored type wins over the page's guess");
-  assert.deepEqual(audioPolicy({}, PHONE_CAPS), { pause_media_on_listen: true, mic_per_turn: true }, "no stored type (a session display): the page's guess");
-  assert.deepEqual(audioPolicy({ profile: "desktop", pause_media_on_listen: true }, null), { pause_media_on_listen: true, mic_per_turn: false });
+  assert.deepEqual(audioPolicy({ profile: "phone" }, { ...PHONE_CAPS, platform: "iPhone" }), { pause_media_on_listen: true, mic_per_turn: false, mic_release_for_media: false, mic_settle_ms: 800 });
+  assert.deepEqual(audioPolicy({ profile: "phone" }, null), { pause_media_on_listen: true, mic_per_turn: false, mic_release_for_media: false, mic_settle_ms: 800 }, "no platform reported: the mic stays open");
+  assert.deepEqual(audioPolicy({ profile: "pi3" }, PHONE_CAPS), { pause_media_on_listen: false, mic_per_turn: false, mic_release_for_media: false, mic_settle_ms: 800 }, "a stored type wins over the page's guess");
+  assert.deepEqual(audioPolicy({}, PHONE_CAPS), { pause_media_on_listen: true, mic_per_turn: true, mic_release_for_media: true, mic_settle_ms: 800 }, "no stored type (a session display): the page's guess");
+  assert.deepEqual(audioPolicy({ profile: "desktop", pause_media_on_listen: true }, null), { pause_media_on_listen: true, mic_per_turn: false, mic_release_for_media: false, mic_settle_ms: 800 });
 });
 
 test("smoke F8 (wired): playback starting opens the now-playing window on a display with a screen (after the load), once; the chip's tap brings it forward; an audio-first display gets none", async () => {

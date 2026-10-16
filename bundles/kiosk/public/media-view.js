@@ -53,10 +53,11 @@ export function createDucker(audio, { setTimer = setTimeout, clearTimer = clearT
  * send(obj): a frame to the server. onState(id, state): every reported state (effect time).
  * onChange(): what is shown changed (the now-playing window redraws). t(key): page strings.
  */
-export function createMediaView({ audio, chip, send, setTimer = setTimeout, clearTimer = clearTimeout, onState = () => {}, onChange = () => {}, onChipTap = () => {}, t = (k) => k }) {
+/** Item 21: canStart() → true, or ms until a held start is tried again (the mic is letting go); onPlay(): each real play(). */
+export function createMediaView({ audio, chip, send, setTimer = setTimeout, clearTimer = clearTimeout, onState = () => {}, onChange = () => {}, onChipTap = () => {}, t = (k) => k, canStart = () => true, onPlay = () => {} }) {
   const ducker = createDucker(audio, { setTimer, clearTimer });
-  let cur = null, quiet = false, held = false, startDog = null, stallDog = null, unsent = null, swapping = false, offline = false, offlineTimer = null;
-  const clearDogs = () => { clearTimer(startDog); clearTimer(stallDog); startDog = stallDog = null; };
+  let cur = null, quiet = false, held = false, startDog = null, stallDog = null, unsent = null, swapping = false, offline = false, offlineTimer = null, retry = null;
+  const clearDogs = () => { clearTimer(startDog); clearTimer(stallDog); clearTimer(retry); startDog = stallDog = retry = null; };
   function report(state, code) {
     if (!cur) return;
     const ev = { type: "media_event", id: cur.id, state, ...(code ? { code } : {}) };
@@ -78,7 +79,12 @@ export function createMediaView({ audio, chip, send, setTimer = setTimeout, clea
   function start() {
     if (!cur) return;
     const id = cur.id;
+    clearTimer(retry); retry = null;
+    const g = canStart();
+    // Held: no play() and no watchdog until it really starts.
+    if (g !== true) { retry = setTimer(() => { retry = null; if (cur && cur.id === id && !cur.paused && !held) start(); }, g); return; }
     clearTimer(startDog);
+    onPlay();
     startDog = setTimer(() => { if (cur && cur.id === id && !cur.playing) fail("stalled"); }, START_MS);
     let p;
     try { p = audio.play(); } catch (err) { p = Promise.reject(err); }
@@ -170,6 +176,8 @@ export function createMediaView({ audio, chip, send, setTimer = setTimeout, clea
       if (on && !held) { held = true; if (cur && !cur.paused) quietPause(); }
       else if (!on && held) { held = false; if (cur && !cur.paused) start(); }
     },
+    /** Item 21: the mic was let go — try a held start now (the gate says how much longer). */
+    kick() { if (retry) { clearTimer(retry); retry = null; if (cur && !cur.paused && !held) start(); } },
     /** F9: the socket closed (true) or is back (false). */
     offline(on) {
       if (on === offline) return;

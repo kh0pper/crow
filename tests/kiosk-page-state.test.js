@@ -5,6 +5,7 @@ import {
   closeDecision, backoffMs, micDecision, isNight, themeFor, msToNextMinute,
   displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics, NO_AUDIO_WAIT_MS, createStatusRing,
   duckDecision, duckBackstop, DUCK_BACKSTOP_MS, noteEffect, EFFECT_WAIT_MS, micAfterTurn, MEDIA_RECONNECT_CAP_MS,
+  mediaStartGate, MIC_SETTLE_MS, releaseForMediaDecision,
 } from "../bundles/kiosk/public/state.js";
 import { OFFLINE_CLEAR_MS } from "../bundles/kiosk/public/media-view.js";
 import { SESSION_GRACE_MS } from "../bundles/kiosk/server/media.js";
@@ -680,4 +681,43 @@ test("r7b M3: the turn report carries the page's own media state at the tap and 
   const src = readFileSync(new URL("../bundles/kiosk/public/kiosk.js", import.meta.url), "utf8");
   assert.match(src, /pageMediaStart = mediaView\?\.state\(\) \?\? null/);
   assert.match(src, /pageMedia: mediaView\?\.state\(\) \?\? null/);
+});
+
+// Item 21 (earpiece): on a display that lets the mic go per turn (display_config.mic_release_for_media), the music
+// never starts while the capture is open, nor within mic_settle_ms of its release (Chromium closes it asynchronously).
+test("item 21: mediaStartGate holds the music while the mic is open or opening, and for mic_settle_ms after its release; off: always ok", () => {
+  const on = { mic_release_for_media: true };
+  assert.equal(MIC_SETTLE_MS, 800);
+  assert.deepEqual(mediaStartGate({ micOpen: true, micOpening: false, releasedAt: null, now: 5000, config: on }), { ok: false, waitMs: 800 });
+  assert.deepEqual(mediaStartGate({ micOpen: false, micOpening: true, releasedAt: null, now: 5000, config: on }), { ok: false, waitMs: 800 });
+  assert.deepEqual(mediaStartGate({ micOpen: false, micOpening: false, releasedAt: 4900, now: 5000, config: on }), { ok: false, waitMs: 700 });
+  assert.deepEqual(mediaStartGate({ micOpen: false, micOpening: false, releasedAt: 4200, now: 5000, config: on }), { ok: true });
+  assert.deepEqual(mediaStartGate({ micOpen: false, micOpening: false, releasedAt: null, now: 5000, config: on }), { ok: true });
+  // display_config.mic_settle_ms tunes it (bad values fall back to the default).
+  assert.deepEqual(mediaStartGate({ micOpen: false, micOpening: false, releasedAt: 4900, now: 5000, config: { ...on, mic_settle_ms: 1500 } }), { ok: false, waitMs: 1400 });
+  assert.deepEqual(mediaStartGate({ micOpen: true, micOpening: false, releasedAt: null, now: 5000, config: { ...on, mic_settle_ms: 0 } }), { ok: false, waitMs: 100 }, "0: no settle, still never over an open capture (polled every 100 ms)");
+  assert.deepEqual(mediaStartGate({ micOpen: false, micOpening: false, releasedAt: 4999, now: 5000, config: { ...on, mic_settle_ms: 0 } }), { ok: true });
+  assert.deepEqual(mediaStartGate({ micOpen: false, micOpening: false, releasedAt: 4900, now: 5000, config: { ...on, mic_settle_ms: "x" } }), { ok: false, waitMs: 700 });
+  for (const c of [{ mic_release_for_media: false }, {}, null, undefined, { mic_release_for_media: "yes" }]) {
+    assert.deepEqual(mediaStartGate({ micOpen: true, micOpening: true, releasedAt: 4999, now: 5000, config: c }), { ok: true }, JSON.stringify(c));
+  }
+});
+
+test("item 21: no follow-up mic after a turn that loaded media on a release-for-media display; elsewhere follow-up is as before", () => {
+  const tn = { done: { turn_id: "t" }, ended: true, reason: "silence", source: "tap", playAt: 10, mediaLoaded: true };
+  assert.equal(followUpDecision(tn, { follow_up: true, mic_release_for_media: true }, { playing: false }), false);
+  assert.equal(followUpDecision(tn, { follow_up: true }, { playing: false }), true, "a Pi or desktop still follows up");
+  assert.equal(followUpDecision({ ...tn, mediaLoaded: false }, { follow_up: true, mic_release_for_media: true }, { playing: false }), true);
+  // settle then lets the mic go instead.
+  const cfg = { follow_up: true, mic_per_turn: true, mic_release_for_media: true };
+  assert.deepEqual(settleDecision(tn, { current: tn, playing: false, config: cfg }), { followUp: false, release: true });
+});
+
+test("item 21: a media load with the mic open and no turn in flight lets the mic go at once — never while TTS plays (G12) or mid-turn; off: never", () => {
+  const on = { mic_release_for_media: true };
+  assert.equal(releaseForMediaDecision({ config: on, micOpen: true, turnOpen: false, playing: false }), true);
+  assert.equal(releaseForMediaDecision({ config: on, micOpen: true, turnOpen: false, playing: true }), false, "TTS plays: the drain settles it");
+  assert.equal(releaseForMediaDecision({ config: on, micOpen: true, turnOpen: true, playing: false }), false, "mid-turn: the settle lets it go");
+  assert.equal(releaseForMediaDecision({ config: on, micOpen: false, turnOpen: false, playing: false }), false);
+  assert.equal(releaseForMediaDecision({ config: {}, micOpen: true, turnOpen: false, playing: false }), false);
 });

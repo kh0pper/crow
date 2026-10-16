@@ -9,7 +9,7 @@ import {
   closeDecision, backoffMs, micDecision, isNight, themeFor, msToNextMinute,
   displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics,
   releasesMic, ttsStartDecision, settleDecision, pairStartDecision, bannerAfterReady, createStatusRing, errorDecision, toolsLine,
-  duckDecision, duckBackstop, DUCK_BACKSTOP_MS, noteEffect, micAfterTurn, MEDIA_RECONNECT_CAP_MS,
+  duckDecision, duckBackstop, DUCK_BACKSTOP_MS, noteEffect, micAfterTurn, MEDIA_RECONNECT_CAP_MS, mediaStartGate, releaseForMediaDecision,
 } from "./state.js";
 import { createVad, TURN_GUARD_MS, VAD_DEFAULTS } from "./vad.js";
 import { openMic, createPlayer, createMicGate } from "./audio.js";
@@ -40,7 +40,7 @@ const t = (k) => STRINGS[lang]?.[k] || STRINGS.en?.[k] || "";
 let ws = null, attempt = 0, halted = false, config = {}, bird = null, wmView = null, reconnectTimer = null;
 let ctx = null, mic = null, player = null, birdState = "idle", serverBird = "idle", turn = null, clockTimer = null, serverOffset = 0;
 let ttsSeq = 0, bannerKey = null, pairAttempt = 0;
-let mediaView = null, duckSince = null, duckTimer = null, duckOverride = false, micOpenMs = null, starting = false;
+let mediaView = null, duckSince = null, duckTimer = null, duckOverride = false, micOpenMs = null, starting = false, micReleasedAt = null;
 const micGate = createMicGate(() => openMic(ctx, onFrame));
 
 /*
@@ -216,6 +216,7 @@ function onText(m) {
     case "media":
       noteEffect(turn, { kind: m.action === "load" && !m.paused ? "load" : "media", id: m.id, at: performance.now() });
       note("media", `${m.action}${m.id ? " " + m.id : ""}`);
+      if (m.action === "load" && !m.paused) { if (turn) turn.mediaLoaded = true; micForMedia(); }   // item 21
       mediaView?.apply(m);
       break;
     // The closing frame of a turn that never ran (empty, too long, busy): the turn ends here, no metrics.
@@ -275,7 +276,7 @@ async function ensureAudio() {
         renderBird();
       },
       // r7b L3: the mic (and its call audio mode) goes before the music is un-held.
-      onDrained: () => { if (turn) settle(turn); renderBird(); },
+      onDrained: () => { if (turn) settle(turn); else micForMedia(); renderBird(); },
       onStall: (info) => { if (turn) { turn.ttsStalled = true; turn.stall ??= { ctx_state: info.ctxState, clock_moved: info.clockMoved === true }; } note("audio", `reply stalled (${info.left} left, ${info.ctxState})`); },
     });
   }
@@ -331,12 +332,20 @@ function endTurn(reason, speechEndAt) {
   syncDuck();
   send({ type: "turn_end", vad_reason: reason, voiced_bytes: turn.voicedBytes });
 }
+/** Item 21: music loaded while an open mic idles (no turn in flight, no TTS: G12) — let it go so the music can start. */
+function micForMedia() {
+  if (!releaseForMediaDecision({ config, micOpen: !!mic || micGate.opening(), turnOpen: !!(turn && !(turn.ended && turn.done)), playing: !!player?.playing })) return;
+  micGate.release();
+  mic = null; micReleasedAt = performance.now();
+  note("mic", "released for media");
+}
 /** F6: a phone lets the microphone go (Android leaves voice-call audio mode) once the turn has settled — never mid-reply (r7 G12). */
 function releaseMicAfterTurn(phase) {
   if (micAfterTurn(config, { phase }) !== "release" || (!mic && !micGate.opening())) return;
   micGate.release();
-  mic = null;
+  mic = null; micReleasedAt = performance.now();
   note("mic", "released");
+  mediaView?.kick();                              // item 21: a held start now waits only the settle time
 }
 /** turn_metrics, once per turn, when playback settles (F3) or the no-audio wait runs out (F9). */
 function report(tn, force = false) {
@@ -410,6 +419,9 @@ if (SESSION) {
 
 mediaView = createMediaView({
   audio: $("media"), chip: $("np-chip"), send, t,
+  // Item 21: never start over an open capture or within mic_settle_ms of its release; A7's evidence is in the ring.
+  canStart: () => { const g = mediaStartGate({ micOpen: !!mic, micOpening: micGate.opening(), releasedAt: micReleasedAt, now: performance.now(), config }); return g.ok || g.waitMs; },
+  onPlay: () => note("media", `start mic=${mic || micGate.opening() ? "open" : "closed"}`),
   onState: (id, state) => { if (state === "playing") noteEffect(turn, { kind: "playing", id, at: performance.now() }); },
   onChange: () => wmView?.refresh(),
   onChipTap: () => send({ type: "wm_event", kind: "nowplaying" }),   // F8: the server opens (or brings forward) the window

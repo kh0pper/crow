@@ -60,6 +60,7 @@ export function tapDecision({ halted, playing, birdState, turnOpen, starting = f
 export function followUpDecision(turn, config, { playing }) {
   if (!config?.follow_up || !turn || !turn.done || playing) return false;
   if (turn.done.aborted || turn.barged || turn.followedUp || turn.playAt == null) return false;
+  if (turn.mediaLoaded && config.mic_release_for_media === true) return false;   // item 21: music needs the mic let go
   return turn.reason !== "no_speech" && turn.source !== "follow_up";
 }
 
@@ -125,6 +126,23 @@ export function micAfterTurn(config, { phase = "end" } = {}) {
   // has drained, or no follow-up started — review M4's one switch per conversation still holds), or on "closed".
   return phase === "end" ? "keep" : "release";
 }
+
+/*
+ * Item 21 (earpiece): where the mic goes per turn (display_config.mic_release_for_media), music never starts over an
+ * open capture, nor within mic_settle_ms (default MIC_SETTLE_MS) of its release: Chromium closes it asynchronously and
+ * an output opened meanwhile is routed as call audio. → { ok: true } or { ok: false, waitMs } (try again then).
+ */
+export const MIC_SETTLE_MS = 800;
+export function mediaStartGate({ micOpen, micOpening, releasedAt, now, config }) {
+  if (config?.mic_release_for_media !== true) return { ok: true };
+  const n = config.mic_settle_ms, settle = Number.isFinite(n) && n >= 0 ? Math.min(5000, n) : MIC_SETTLE_MS;
+  if (micOpen || micOpening) return { ok: false, waitMs: Math.max(100, settle) };
+  const left = releasedAt == null ? 0 : settle - (now - releasedAt);
+  return left > 0 ? { ok: false, waitMs: left } : { ok: true };
+}
+/** Music loads with the mic open and no turn in flight: let it go now — never while TTS plays (G12: the drain settles it). */
+export const releaseForMediaDecision = ({ config, micOpen, turnOpen, playing }) =>
+  config?.mic_release_for_media === true && !!micOpen && !turnOpen && !playing;
 
 /*
  * Ducking (review C1). The music is turned down (or paused) while a turn is OPEN: the mic is open,
