@@ -74,6 +74,7 @@ const SPEC_MESSAGES = Object.freeze({
   too_deep: "the spec is nested too deeply",
   external_data: "chart data must be inline: urls, links and usermeta are not allowed",
   unsupported_type: "this Mermaid diagram type is not supported",
+  escapes: "backslash escapes are not allowed in diagrams",
   "mermaid:links": DIAGRAM_LINKS,
   "mermaid:directives": DIAGRAM_LINKS,
   "d2:icons": "icons are not allowed in D2 diagrams",
@@ -91,15 +92,25 @@ const refuse = (reason, engine) => {
 // Mermaid fails closed: these anywhere in the source (case-insensitive, word
 // boundaries) refuse it. False positives (a label saying "link") are accepted;
 // the author can reword.
+//  - any backslash: YAML front matter decodes "\x63onfig", "\u0063onfig" and
+//    escaped-newline splits into config/init (trade-off: no "\n" in labels);
+//  - "@{" shape data (the image shape fetches its img url in the renderer);
+//  - "//" (covers "://" and protocol-relative urls) and "url(";
+//  - a tag opener: "<" followed by a letter, "/", "!" or "?" (<img, <style,
+//    <br>, </b>, <!--, <?xml). Arrows (<--, <-->, <|--, <.., <==) stay legal;
+//    classDiagram <<annotations>> are refused (trade-off).
 const MERMAID_DIRECTIVE = /%%\{/;
-const MERMAID_LINKS = /\b(?:click|links?|callback|href)\b|javascript:|:\/\/|<(?:a\b|script|iframe)/i;
+const BACKSLASH = /\\/;
+const MERMAID_LINKS = /\b(?:click|links?|callback|href)\b|javascript:|\/\/|url\(|@\s*\{|<[a-z/!?]/i;
 const MERMAID_FRONT_MATTER_BAD = /\b(?:config|init)\b/i;
 
-// D2 fails closed the same way. An "@" refuses only where it begins a value
-// (line start, or after ":", "[", whitespace or a quote), so "me@example.org"
-// stays legal while "x: @y", "x: [@y]" and "...@y" are imports.
+// D2 fails closed the same way. Any backslash is refused first (escapes can
+// spell icon/link/import inside keys or quoted strings). An "@" is refused
+// unless it follows a name character [A-Za-z0-9_.+-], so "me@example.org"
+// stays legal while "x: @y", "x: [a;@y]", "x: {@y}" and "...@y" are imports.
 const D2_RULES = [
-  ["imports", /\.\.\.@|(?:^|[:[\s"'])@|\bimport\b/im],
+  ["escapes", /\\/],
+  ["imports", /\.\.\.@|(?<![A-Za-z0-9_.+-])@|\bimport\b/i],
   ["icons", /\bicon\b/i],
   ["links", /\blink\b|\/\//i],
   ["directives", /\bvars\b|d2-config/i],
@@ -158,6 +169,7 @@ export function guardSpec(engine, source) {
   const text = source.replace(/\r\n?/g, "\n");
   if (engine === "mermaid") {
     if (MERMAID_DIRECTIVE.test(text)) throw refuse("directives", engine);
+    if (BACKSLASH.test(text)) throw refuse("escapes", engine);
     if (MERMAID_LINKS.test(text)) throw refuse("links", engine);
     if (!MERMAID_TYPES.has(mermaidType(text.split("\n")))) throw refuse("unsupported_type", engine);
     return;

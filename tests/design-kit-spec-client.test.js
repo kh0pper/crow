@@ -186,7 +186,7 @@ test("guardSpec: D2 fails closed on icons, imports, links, vars, config and mark
     "x: d2-config": "directives",
     "x: |md # hi |": "markup",
     "x: ||md # hi ||": "markup",
-    "x: |latex \\frac{1}{2} |": "markup",
+    "x: |latex x^2 |": "markup",
     "x: |tex a |": "markup",
   };
   for (const [src, want] of Object.entries(probes)) assert.equal(reason("d2", src), want, JSON.stringify(src));
@@ -208,4 +208,59 @@ test("guardSpec: refusals carry a fixed message per reason", () => {
   assert.equal(m("mermaid", "%%{init:{}}%%\nflowchart LR"), "links, callbacks and directives are not allowed in diagrams");
   assert.notEqual(m("d2", "x: { icon: a }"), m("vega-lite", "{"));
   for (const msg of [m("d2", "x: { icon: a }"), m("d2", "x: @y"), m("vega-lite", "{"), m("mermaid", "pie2\n x")]) assert.ok(typeof msg === "string" && msg.length > 5);
+});
+
+// ---- fix round 2 -----------------------------------------------------------
+
+test("guardSpec: Mermaid refuses every backslash (YAML escapes can spell config/init)", () => {
+  const probes = [
+    '---\n"\\x63onfig": {}\n---\nflowchart LR\n A-->B',
+    '---\n"\\u0063onfig": {}\n---\nflowchart LR\n A-->B',
+    '---\n"con\\\n  fig": {}\n---\nflowchart LR\n A-->B',
+    'flowchart LR\n A["a\\nb"] --> B',
+  ];
+  for (const src of probes) assert.equal(reason("mermaid", src), "escapes", JSON.stringify(src));
+});
+
+test("guardSpec: Mermaid refuses shape data, protocol-relative urls, url( and tag openers", () => {
+  const probes = [
+    'flowchart LR\n A@{ img: "//evil.example/x.png" }',
+    'flowchart LR\n A@{ shape: rect }',
+    'flowchart LR\n A["see //evil.example/x"]',
+    'flowchart LR\n A["url(x)"]',
+    'flowchart LR\n A["<img src=x>"]',
+    'flowchart LR\n A["<IMG src=x>"]',
+    'flowchart LR\n A["<style>*{}</style>"]',
+    'flowchart LR\n A["<foreignObject>"]',
+    'flowchart LR\n A["</b>"]',
+    'flowchart LR\n A["<!-- x -->"]',
+    'flowchart LR\n A["<?xml?>"]',
+    'flowchart LR\n A["a<br>b"]',
+    'classDiagram\n class A\n <<interface>> A',
+  ];
+  for (const src of probes) assert.equal(reason("mermaid", src), "links", JSON.stringify(src));
+  const ok = [
+    "flowchart LR\n A --> B\n B <--> C\n C -.-> D\n D ==> E\n E <-.-> F\n F --o G\n G --x H",
+    "classDiagram\n A <|-- B\n C *-- D\n E o-- F\n G <.. H\n I ..|> J",
+    "sequenceDiagram\n A->>B: hi\n B-->>A: ok\n A-xB: x\n A-)B: async",
+    "erDiagram\n A ||--o{ B : has",
+    "stateDiagram-v2\n [*] --> S\n S --> [*]",
+    "flowchart LR\n A[a < b] --> B[2 < 3]",
+  ];
+  for (const src of ok) assert.equal(reason("mermaid", src), null, JSON.stringify(src));
+});
+
+test("guardSpec: D2 refuses an @ not preceded by a name character, and every backslash", () => {
+  for (const src of ["x: [a;@y]", "x;@y", "x: {@y}", "x: (@y)", "x: <@y>", "x:\t@y"]) assert.equal(reason("d2", src), "imports", JSON.stringify(src));
+  assert.equal(reason("d2", "a -> b: mail first.last+tag@example.org"), null);
+  assert.equal(reason("d2", "a -> b: v1_2-x@y"), null);
+  for (const src of ["x: { ic\\on: a }", "x: { l\\ink: a }", 'x: { "\\u0069con": a }', 'x: { "ic\\x6fn": a }', "x: { i\\\ncon: a }", 'a: "say \\"hi\\""']) {
+    assert.equal(reason("d2", src), "escapes", JSON.stringify(src));
+  }
+});
+
+test("guardSpec: escapes carry a fixed message", () => {
+  const m = (engine, src) => { try { guardSpec(engine, src); } catch (e) { return e.message; } return null; };
+  assert.equal(m("d2", "x: ic\\on"), "backslash escapes are not allowed in diagrams");
+  assert.equal(m("mermaid", "flowchart LR\n A[\\x41]"), "backslash escapes are not allowed in diagrams");
 });
