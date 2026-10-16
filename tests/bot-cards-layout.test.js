@@ -141,7 +141,9 @@ async function measure(page, w, h, { textSize = null, css = "", openMenu = false
       var tops=cards.map(function(c){return Math.round(c.getBoundingClientRect().top);});
       var menu=document.querySelector('.btb-menu:not([hidden])');
       var hit=null;
-      if(menu){ var mr=menu.getBoundingClientRect(); var el=document.elementFromPoint(mr.left+mr.width/2, Math.min(mr.top+12, innerHeight-2)); hit=!!(el&&menu.contains(el)); }
+      var hitBottom=null;
+      if(menu){ var mr=menu.getBoundingClientRect(); var el=document.elementFromPoint(mr.left+mr.width/2, Math.min(mr.top+12, innerHeight-2)); hit=!!(el&&menu.contains(el));
+        var eb=document.elementFromPoint(mr.left+mr.width/2, Math.max(0, Math.min(mr.bottom-12, innerHeight-2))); hitBottom=!!(eb&&menu.contains(eb)); }
       var sheet=document.querySelector('details.bb-picker[open] .bb-sheet');
       var sheetHit=null;
       if(sheet){ var sr=sheet.getBoundingClientRect(); var se=document.elementFromPoint(sr.left+sr.width/2, sr.top+sr.height/2); sheetHit=!!(se&&sheet.contains(se)); }
@@ -158,7 +160,7 @@ async function measure(page, w, h, { textSize = null, css = "", openMenu = false
         onFirstScreen: cards.filter(function(c){var r=c.getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight;}).length,
         newTile: vis(document.querySelector('.btb-botcard-new')),
         newTileTop: box(document.querySelector('.btb-botcard-new')),
-        menu: box(menu), menuOnTop: hit,
+        menu: box(menu), menuOnTop: hit, menuBottomOnTop: hitBottom,
         menuStatic: menu ? getComputedStyle(menu).position==='static' : null,
         picker: vis(document.querySelector('.bb-pick-btn')),
         sheet: box(sheet), sheetOnTop: sheetHit,
@@ -218,12 +220,15 @@ for (const [w, h] of [[390, 844], [1280, 800]]) {
 
     test(`live @${label}: the ⋯ menu opens ${phone ? "inline below the footer" : "as a popover on top"}, unclipped, no sideways pan`, async (t) => {
       if (!chrome) return t.skip("no headless Chrome");
-      // the first card, and a card in the last column on wide (index 2)
-      for (const idx of phone ? [0] : [0, 2]) {
+      // the first card, a card in the last column on wide (index 2), and the
+      // last row on wide (index 3, 4), whose popover spills past the list's
+      // section card over the next one
+      for (const idx of phone ? [0] : [0, 2, 3, 4]) {
         const m = await measure("list", w, h, { textSize, openMenu: idx, shot: idx ? "" : `list-menu-${w}${xl}` });
         assert.ok(m.doc <= 0 && m.body === 0, `an open ⋯ menu does not pan the page ${JSON.stringify(m)}`);
         assert.ok(m.menu && m.menu.l >= 0 && m.menu.r <= m.iw, `the menu is inside the screen ${JSON.stringify(m)}`);
         assert.equal(m.menuOnTop, true, `nothing covers the menu ${JSON.stringify(m)}`);
+        assert.equal(m.menuBottomOnTop, true, `nothing covers the menu's last item (card ${idx}) ${JSON.stringify(m)}`);
         assert.equal(m.menuStatic, phone, `${phone ? "inline" : "a popover"} ${JSON.stringify(m)}`);
       }
     });

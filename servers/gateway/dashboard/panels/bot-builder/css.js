@@ -220,6 +220,11 @@ export function botBuilderStyles() {
   @media(min-width:1024px){.btb-cards{grid-template-columns:repeat(3,minmax(0,1fr))}}
   .btb-botcard{position:relative;display:grid;align-content:start;gap:.6rem;min-width:0;padding:.85rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:var(--crow-radius-card)}
   .btb-botcard:has(.btb-more[aria-expanded="true"]){z-index:3}
+  /* The layout's .card keeps its fadeInUp transform, so each section card is
+     its own stacking context and a later one (the run monitor) paints over a
+     popover spilling out of the list's card. Lift the card that holds the
+     open menu. */
+  .card:has(.btb-more[aria-expanded="true"]){position:relative;z-index:5}
   .btb-botcard-top{display:flex;align-items:center;gap:.75rem;min-width:0}
   .btb-botcard-tm{flex:1;min-width:0;display:grid;gap:1px}
   .btb-av{flex:none;display:inline-grid;place-items:center;width:40px;height:40px;border-radius:12px;font-weight:700;font-size:1rem}
