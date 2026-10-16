@@ -215,20 +215,24 @@ export function botBuilderStyles() {
   .btb-guide-link{font-size:.85rem;color:var(--crow-accent);text-decoration:none}
   .btb-guide-link:hover{text-decoration:underline}
   .btb-rows{display:grid;grid-template-columns:minmax(0,1fr);background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:var(--crow-radius-card);min-width:0}
-  .btb-row{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem .75rem;padding:.75rem;border-top:1px solid var(--crow-border);min-width:0}
+  /* A grid, not a wrapping flex row: the avatar stays beside the name at any
+     text size. Each row is its own size container: a narrow row (a phone, or
+     one of the two wide-screen columns) puts Chat / Edit / ⋯ on their own
+     line under the text instead of squeezing the name. */
+  .btb-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;align-content:start;gap:.4rem .75rem;padding:.7rem .75rem;border-top:1px solid var(--crow-border);min-width:0;container-type:inline-size}
   .btb-row:first-child{border-top:0}
-  @media(min-width:960px){
+  @media(min-width:1200px){
     .btb-rows{grid-template-columns:repeat(2,minmax(0,1fr))}
     .btb-row:nth-child(2){border-top:0}
     .btb-row:nth-child(odd){border-right:1px solid var(--crow-border)}
   }
-  .btb-av{display:inline-grid;place-items:center;flex:none;width:40px;height:40px;border-radius:12px;font-weight:700;font-size:1rem}
+  .btb-av{grid-column:1;grid-row:1;display:inline-grid;place-items:center;width:40px;height:40px;border-radius:12px;font-weight:700;font-size:1rem}
   .btb-hue-0{background:color-mix(in srgb,var(--crow-accent) 16%,transparent);color:var(--crow-accent)}
   .btb-hue-1{background:color-mix(in srgb,var(--crow-info) 16%,transparent);color:var(--crow-info)}
   .btb-hue-2{background:color-mix(in srgb,var(--crow-success) 16%,transparent);color:var(--crow-success)}
   .btb-hue-3{background:color-mix(in srgb,var(--crow-warning) 18%,transparent);color:var(--crow-text-primary)}
   .btb-hue-4{background:color-mix(in srgb,var(--crow-brand-gold) 20%,transparent);color:var(--crow-text-primary)}
-  .btb-row-main{flex:1 1 11rem;min-width:0;display:grid;gap:1px}
+  .btb-row-main{grid-column:2;grid-row:1;min-width:0;display:grid;gap:1px}
   .btb-row-name{display:flex;align-items:center;gap:.45rem;min-width:0;font-weight:600}
   .btb-row-name>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .btb-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--crow-success)}
@@ -237,13 +241,18 @@ export function botBuilderStyles() {
   .btb-row-purpose{color:var(--crow-text-secondary);font-size:.85rem;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .btb-row-meta{display:flex;flex-wrap:wrap;align-items:center;gap:.15rem .7rem;font-size:.8rem;color:var(--crow-text-muted);min-width:0}
   .btb-row-meta>span{min-width:0;overflow-wrap:anywhere}
-  .btb-nob{padding:0 .5rem;border-radius:var(--crow-radius-pill);border:1px dashed var(--crow-border-strong);color:var(--crow-text-secondary)}
-  .btb-row-acts{display:flex;flex-wrap:wrap;align-items:center;gap:.35rem;margin-left:auto}
+  .btb-nob{white-space:nowrap;padding:0 .5rem;border-radius:var(--crow-radius-pill);border:1px dashed var(--crow-border-strong);color:var(--crow-text-secondary)}
+  .btb-row-acts{grid-column:3;grid-row:1;display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:.35rem}
+  @container (max-width:520px){
+    .btb-row-acts{grid-column:2 / -1;grid-row:2;justify-content:flex-start}
+    .btb-row-acts .btb-more{margin-left:auto}
+  }
+  @media(max-width:600px){.btb-av{width:34px;height:34px;border-radius:10px;font-size:.9rem}}
   .btb-row-acts .btn{min-height:36px}
   .btb-more{min-width:44px;min-height:36px;padding:.2rem .5rem;font-size:1.15rem;line-height:1;color:var(--crow-text-secondary);background:none;border:1px solid transparent;border-radius:var(--crow-radius-control);cursor:pointer}
   .btb-more[aria-expanded="true"]{background:var(--crow-bg-elevated);border-color:var(--crow-border)}
   .btb-more:focus-visible,.btb-menu a:focus-visible,.btb-menu button:focus-visible{outline:2px solid var(--crow-accent);outline-offset:-2px}
-  .btb-menu{flex:1 1 100%;display:flex;flex-direction:column;gap:2px;padding:4px;border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);background:var(--crow-bg-surface);min-width:0}
+  .btb-menu{grid-column:1 / -1;display:flex;flex-direction:column;gap:2px;padding:4px;border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);background:var(--crow-bg-surface);min-width:0}
   .btb-menu[hidden]{display:none}
   .btb-menu-form{margin:0}
   .btb-menu a,.btb-menu button{display:block;width:100%;box-sizing:border-box;text-align:left;min-height:44px;padding:.6rem .75rem;border:0;border-radius:8px;background:none;color:var(--crow-text-primary);font:inherit;font-size:.9rem;text-decoration:none;cursor:pointer}
