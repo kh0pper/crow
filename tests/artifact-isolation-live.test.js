@@ -975,3 +975,161 @@ test("D28 helper (review M-3): a real drag-select proposes ONCE (debounced — n
     assert.equal(st.tripped, false, "an ordinary drag-select never trips the flood guard");
   } finally { await t.close(); }
 });
+
+// Design kit (spec §3.2, §4.1): the kit's page scripts, copied into a version
+// under __lib/, run under the REAL page CSP (no eval) and send nothing out.
+function designKitPage(entries) {
+  const tags = entries.filter((e) => e.main.endsWith(".js")).map((e) => `<script src="${e.main}"></script>`).join("");
+  return `<!doctype html><html><head><meta charset="utf-8">${tags}</head><body><div id="c"></div><script>
+(async () => {
+  const r = {};
+  try {
+    // An expression-bearing spec (calculate transform): without ast:true Vega
+    // compiles expressions with new Function, which the page CSP refuses.
+    // vega-embed carries its own CSP-safe interpreter, used when ast is set.
+    const spec = { data: { values: [{ a: "x", b: 1 }, { a: "y", b: 3 }] }, transform: [{ calculate: "datum.b * 10 + 1", as: "c" }], mark: "bar", encoding: { x: { field: "a", type: "nominal" }, y: { field: "c", type: "quantitative" } } };
+    const out = await vegaEmbed("#c", spec, { actions: false, renderer: "svg", ast: true });
+    r.vega = document.querySelector("#c svg") ? "ok" : "no svg";
+    r.calc = out.view.data("data_0").map((d) => d.c).join(",");
+    // Positive control: the same spec WITHOUT ast must be refused by the CSP.
+    try { await vegaEmbed(document.body.appendChild(document.createElement("div")), spec, { actions: false, renderer: "svg" }); r.noAst = "rendered"; }
+    catch (e) { r.noAst = "ERR:" + (e && e.name); }
+  } catch (e) { r.vega = "ERR:" + (e && e.name) + ":" + String(e && e.message).slice(0, 80); }
+  try {
+    mermaid.initialize({ startOnLoad: false, securityLevel: "strict" });
+    const out = await mermaid.render("m1", "flowchart LR\\n A --> B");
+    r.mermaid = String(out.svg).indexOf("<svg") === 0 ? "ok" : "no svg";
+  } catch (e) { r.mermaid = "ERR:" + (e && e.name) + ":" + String(e && e.message).slice(0, 80); }
+  parent.postMessage({ t: "design-result", r }, "*");
+})();
+</script></body></html>`;
+}
+
+test("design kit: vega-embed (CSP-safe interpreter) and mermaid from __lib draw under the page CSP, with no egress", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  const { openKit } = await import("../bundles/design-kit/server/kit.js");
+  const kit = openKit(new URL("../bundles/design-kit", import.meta.url).pathname);
+  const lib = kit.resolve(["vega-embed", "mermaid"], { target: "page" });
+  const files = { "index.html": { body: Buffer.from(designKitPage(lib.entries)), contentType: "text/html; charset=utf-8" } };
+  for (const f of lib.files) files[f.path] = { body: f.body, contentType: f.contentType };
+  const t = await tab();
+  try {
+    const before = evil.length;
+    const g = grantFor("page", files);
+    await harness(t, g);
+    const res = await waitFor(() => t.evalIn(`(__r.raw.find(m => m && m.t === "design-result") || {}).r`), 20000);
+    assert.ok(res, "the page reported");
+    assert.equal(res.vega, "ok", `vega-embed: ${res.vega}`);
+    assert.equal(res.calc, "11,31", "the calculate expression ran through the interpreter");
+    assert.match(res.noAst, /^ERR:EvalError/, "control: without ast the page CSP refuses Vega's compiled expressions");
+    assert.equal(res.mermaid, "ok", `mermaid: ${res.mermaid}`);
+    assert.deepEqual(evil.slice(before), [], "nothing left the frame");
+    assert.equal((await t.evalIn("__v.state()")).tripped, false);
+  } finally { await t.close(); }
+});
+
+// A CDP tab that records Network events from the page AND its out-of-process
+// frames (the artifact frame is cross-site, so it is its own target).
+async function netTab() {
+  const t = await (await fetch(chrome.cdp + "/json/new?about:blank", { method: "PUT" })).json();
+  const { default: WebSocket } = await import("ws");
+  const ws = new WebSocket(t.webSocketDebuggerUrl);
+  await new Promise((r, j) => { ws.once("open", r); ws.once("error", j); });
+  let id = 0;
+  const events = [];
+  const send = (method, params = {}, sessionId) => new Promise((resolve, reject) => {
+    const mine = ++id;
+    const on = (raw) => { const m = JSON.parse(raw); if (m.id !== mine) return; ws.off("message", on); m.error ? reject(new Error(JSON.stringify(m.error))) : resolve(m.result || {}); };
+    ws.on("message", on); ws.send(JSON.stringify({ id: mine, method, params, ...(sessionId ? { sessionId } : {}) }));
+  });
+  ws.on("message", (raw) => {
+    const m = JSON.parse(raw);
+    if (m.method === "Target.attachedToTarget") {
+      const sid = m.params.sessionId;
+      send("Network.enable", {}, sid).catch(() => {});
+      send("Runtime.runIfWaitingForDebugger", {}, sid).catch(() => {});
+    } else if (m.method && m.method.startsWith("Network.")) events.push(m);
+  });
+  await send("Page.enable"); await send("Network.enable");
+  await send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
+  const evalIn = async (expression) => { const o = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }); return o.exceptionDetails ? { threw: o.exceptionDetails.text } : o.result.value; };
+  const nav = async (url) => { await send("Page.navigate", { url }); await waitFor(async () => (await evalIn("document.readyState")) === "complete"); };
+  return { send, evalIn, nav, events, close: async () => { ws.close(); await fetch(chrome.cdp + "/json/close/" + t.id).catch(() => {}); } };
+}
+/** url → { status, failed } for requests whose URL contains `part`. */
+function loads(events, part) {
+  const byId = new Map();
+  for (const e of events) {
+    const p = e.params || {};
+    if (e.method === "Network.requestWillBeSent" && p.request.url.includes(part)) byId.set(p.requestId, { url: p.request.url, status: null, failed: null });
+    if (e.method === "Network.responseReceived" && byId.has(p.requestId)) byId.get(p.requestId).status = p.response.status;
+    if (e.method === "Network.loadingFailed" && byId.has(p.requestId)) byId.get(p.requestId).failed = p.blockedReason || (p.corsErrorStatus && p.corsErrorStatus.corsError) || p.errorText || "failed";
+  }
+  return [...byId.values()];
+}
+async function kitDesign() {
+  const { openKit } = await import("../bundles/design-kit/server/kit.js");
+  const real = openKit(new URL("../bundles/design-kit", import.meta.url).pathname);
+  const svg = '<svg viewBox="0 0 120 40"><rect id="n1" width="60" height="30"/><text x="5" y="25">A</text></svg>';
+  return { real, design: { kit: async () => ({ themes: real.themes, resolve: real.resolve, render: async () => svg }) } };
+}
+
+test("design kit: a document with a rendered chart and a house style loads its __render image and theme fonts (review M4)", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  const { markdownBlocks } = await import("../servers/blog/renderer.js");
+  const { renderVersion } = await import("../bundles/artifacts/server/render.js");
+  const { real, design } = await kitDesign();
+  const [themeId] = real.themes.keys();
+  const r = await renderVersion("document", { markdown: "# Title\n\nBody text.\n\n```mermaid\nflowchart LR\n  A --> B\n```" }, { markdownBlocks, design, houseStyle: themeId });
+  const files = {};
+  for (const f of r.files) files[f.path] = { body: f.body, contentType: f.contentType };
+  const t = await netTab();
+  try {
+    const before = evil.length;
+    await harness(t, grantFor("document", files));
+    assert.ok(await waitFor(() => loads(t.events, "/__lib/font/").some((x) => x.status === 200), 15000), "a theme font loaded");
+    for (const l of loads(t.events, "/__lib/font/")) assert.equal(l.failed, null, `font ${l.url} failed: ${l.failed}`);
+    assert.ok(loads(t.events, "/__render/b3.svg").some((x) => x.status === 200), "the rendered chart image loaded");
+    assert.deepEqual(evil.slice(before), []);
+  } finally { await t.close(); }
+});
+
+test("design kit: a diagram with font libs loads the font in its sealed frame (review M4)", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  const { renderVersion } = await import("../bundles/artifacts/server/render.js");
+  const { real, design } = await kitDesign();
+  const font = [...real.entries.values()].find((e) => e.kind === "font");
+  const r = await renderVersion("diagram", { svg: `<svg viewBox="0 0 200 50"><text x="10" y="30" style="font-family:'${font.family}'">Hello</text></svg>`, libs: [font.name] }, { design });
+  const files = {};
+  for (const f of r.files) files[f.path] = { body: f.body, contentType: f.contentType };
+  const t = await netTab();
+  try {
+    await harness(t, grantFor("diagram", files));
+    await waitFor(() => loads(t.events, `/__lib/font/${font.name.slice(5)}/`).some((x) => x.url.endsWith(".woff2") && (x.status || x.failed)), 15000);
+    assert.ok(loads(t.events, `/__lib/font/${font.name.slice(5)}/`).some((x) => x.status === 200 && x.url.endsWith(".woff2")), "the font loaded: " + JSON.stringify(loads(t.events, "/__lib/font/")));
+    for (const l of loads(t.events, "/__lib/font/")) assert.equal(l.failed, null, `font ${l.url} failed: ${l.failed}`);
+  } finally { await t.close(); }
+});
+
+test("design kit: a sealed (scripts-off) page with a house style loads its theme fonts (review M4)", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  const { renderVersion } = await import("../bundles/artifacts/server/render.js");
+  const { real, design } = await kitDesign();
+  const [themeId] = real.themes.keys();
+  const r0 = await renderVersion("page", { html: "<!doctype html><p>x</p>" }, { design, houseStyle: themeId });
+  const links = r0.design.house_style_links;
+  assert.ok(links.length, "the house style names its CSS");
+  const html = `<!doctype html><html><head><meta charset="utf-8">${links.map((h) => `<link rel="stylesheet" href="${h}">`).join("")}</head><body><h1>Heading</h1><p>Body text.</p></body></html>`;
+  const files = { "index.html": { body: Buffer.from(html), contentType: "text/html; charset=utf-8" } };
+  for (const f of r0.files) if (f.path !== "index.html") files[f.path] = { body: f.body, contentType: f.contentType };
+  const t = await netTab();
+  try {
+    const before = evil.length;
+    await harness(t, grantFor("page", files, { scriptsOff: true }));
+    await waitFor(() => loads(t.events, "/__lib/font/").some((x) => x.url.endsWith(".woff2") && (x.status || x.failed)), 15000);
+    const got = loads(t.events, "/__lib/font/");
+    assert.ok(got.some((x) => x.status === 200 && x.url.endsWith(".woff2")), "a theme font loaded: " + JSON.stringify(got));
+    for (const l of got) assert.equal(l.failed, null, `font ${l.url} failed: ${l.failed}`);
+    assert.deepEqual(evil.slice(before), []);
+  } finally { await t.close(); }
+});
