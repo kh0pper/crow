@@ -487,7 +487,9 @@ test("a signed peer instance can't install, mint consent, uninstall or re-apply 
   const base = `http://127.0.0.1:${server.address().port}`;
   try {
     for (const [method, path] of [["POST", "/bundles/api/install"], ["POST", "/bundles/api/install-set"], ["GET", "/bundles/api/consent-challenge/browser"],
-      ["POST", "/bundles/api/uninstall"], ["POST", "/bundles/api/shared-storage/apply/funkwhale"], ["POST", "/bundles/api/repin"]]) {
+      ["POST", "/bundles/api/uninstall"], ["POST", "/bundles/api/shared-storage/apply/funkwhale"], ["POST", "/bundles/api/repin"],
+      ["POST", "/bundles/api/INSTALL"], ["POST", "/bundles/api/install/"], ["GET", "/bundles/api/Consent-Challenge/browser"],
+      ["GET", "/BUNDLES/api/consent-challenge/browser"], ["POST", "/bundles/api/Install-Set/"], ["POST", "/bundles/api//install"]]) {
       const r = await fetch(base + path, { method, headers: { "content-type": "application/json" }, ...(method === "POST" ? { body: JSON.stringify({ bundle_id: "browser" }) } : {}) });
       assert.equal(r.status, 403, `${method} ${path}`);
     }

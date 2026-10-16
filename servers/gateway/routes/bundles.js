@@ -2970,7 +2970,10 @@ export default function bundlesRouter() {
   const OWNER_ONLY = new Set(["/bundles/api/install", "/bundles/api/install-set", "/bundles/api/uninstall", "/bundles/api/repin"]);
   router.use((req, res, next) => {
     if (!req.crossHostAuth) return next();
-    if (OWNER_ONLY.has(req.path) || req.path.startsWith("/bundles/api/consent-challenge/") || req.path.startsWith("/bundles/api/shared-storage/apply/")) {
+    // Express matches routes case-insensitively and ignores a trailing slash: compare
+    // the same normalized form, so /INSTALL or /install/ can't slip past.
+    const p = String(req.path || "").toLowerCase().replace(/\/+$/, "").replace(/\/{2,}/g, "/");
+    if (OWNER_ONLY.has(p) || p.startsWith("/bundles/api/consent-challenge/") || p.startsWith("/bundles/api/shared-storage/apply/")) {
       return res.status(403).json({ error: "This is an owner action on this instance; a peer instance can't perform it", code: "owner_only" });
     }
     return next();
