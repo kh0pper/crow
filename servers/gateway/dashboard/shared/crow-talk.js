@@ -308,7 +308,9 @@ export function crowTalkJs() {
     p.kioskApply(e.data);
   });
   // Android Back (and any Turbo visit) swaps the body, overlay and frame with it, without a close.
-  document.addEventListener('turbo:before-render', function () { if (frameEl()) closeTalk(); });
+  // turbo:visit fires before the swap for every visit, Back (restore) included; not turbo:before-render, whose
+  // listener count the shell keeps at one (tests/perch-hub-stream-leak.test.js).
+  document.addEventListener('turbo:visit', function () { if (frameEl()) closeTalk(); });
 
   // The kiosk page asks to close (Escape pressed while focus is inside the frame).
   window.addEventListener('message', function (e) {

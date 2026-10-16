@@ -185,11 +185,13 @@ test("review 1: close hands crowKioskRelease()'s {volume, resume} to kioskDetach
   assert.deepEqual(g.of("detach").map((c) => c[1]), [null]);
 });
 
-test("review 2: a Turbo body swap (Android Back) closes the overlay the same way: release, then detach", () => {
+test("review 2: a Turbo visit (Android Back) closes the overlay the same way: release, then detach — on turbo:visit, so the shell's turbo:before-render listener count stays 1 (perch-hub-stream-leak)", () => {
   const h = talk();
   const fw = h.open();
   h.send(LOAD, { source: fw });
-  const ev = new h.window.Event("turbo:before-render");
+  h.document.dispatchEvent(new h.window.Event("turbo:before-render"));
+  assert.equal(h.calls.filter((c) => c[0] === "detach").length, 0, "no before-render listener of its own");
+  const ev = new h.window.Event("turbo:visit");
   h.document.dispatchEvent(ev);
   assert.deepEqual(h.calls.filter((c) => c[0] === "release" || c[0] === "detach").map((c) => c[0]), ["release", "detach"]);
   assert.equal(h.overlay.classList.contains("active"), false);
