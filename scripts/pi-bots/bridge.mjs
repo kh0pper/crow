@@ -352,7 +352,8 @@ export class PiRpc {
     // S6-CROW: read roots. pi-lab (>= c8bbb02) confines read/grep/find/ls to
     // cwd + dirname(PI_BOT_MCP_CONFIG) + write_paths + read_paths. The
     // effective read_paths = the def's explicit entries + the bot's project
-    // workspace (only when it has a project). The world root stays a read root
+    // workspace (only when it has a project) + engine extras (opts.extraReadPaths:
+    // a carried-over old world root, world-root.mjs). The world root stays a read root
     // in BOTH delivery modes through dirname(PI_BOT_MCP_CONFIG) (kept set in fd
     // mode, below). Computed on the COPY; the stored def is never mutated. A bot with no project and
     // no explicit entries gets no read_paths key at all (policy unchanged).
@@ -360,7 +361,7 @@ export class PiRpc {
     if (opts.permissionMode === "bypass") {
       piPolicy.read_paths = ["/"];
     } else {
-      const readPaths = effectiveReadPaths(def, { projectWorkspaceDir: opts.projectWorkspaceDir || null });
+      const readPaths = effectiveReadPaths(def, { projectWorkspaceDir: opts.projectWorkspaceDir || null, extra: opts.extraReadPaths || [] });
       if (readPaths.length || Object.prototype.hasOwnProperty.call(piPolicy, "read_paths")) piPolicy.read_paths = readPaths;
     }
     // C-12 spawn_env hygiene (r1 S3 — security): a bot def could otherwise set

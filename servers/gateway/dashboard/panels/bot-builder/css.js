@@ -208,6 +208,68 @@ export function botBuilderStyles() {
   .btb-proposal{border:1px solid var(--crow-border);border-radius:6px;padding:.6rem;margin:.5rem 0}
   @media (prefers-reduced-motion:reduce){.btb-tab{transition:none}}
 
+  /* Bot list cards (queue item 20, option B): one compact card per bot in a
+     grid, the Nest grid idea (#475) at card size. One column on a phone, two
+     from 640px, three from 1024px; the grid ends in a dashed + New bot tile
+     (wide only: on a phone the toolbar button is the way in). The ⋯ menu is
+     a popover under the card's footer; on a phone it renders inline below
+     the footer instead, so it can never be clipped by the screen edge. */
+  .btb-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem .9rem;margin:0 0 .9rem}
+  .btb-cards{display:grid;grid-template-columns:minmax(0,1fr);gap:.75rem;min-width:0}
+  @media(min-width:640px){.btb-cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  @media(min-width:1024px){.btb-cards{grid-template-columns:repeat(3,minmax(0,1fr))}}
+  .btb-botcard{position:relative;display:grid;align-content:start;gap:.6rem;min-width:0;padding:.85rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:var(--crow-radius-card)}
+  .btb-botcard:has(.btb-more[aria-expanded="true"]){z-index:3}
+  /* The layout's .card keeps its fadeInUp transform, so each section card is
+     its own stacking context and a later one (the run monitor) paints over a
+     popover spilling out of the list's card. Lift the card that holds the
+     open menu. */
+  .card:has(.btb-more[aria-expanded="true"]){position:relative;z-index:5}
+  .btb-botcard-top{display:flex;align-items:center;gap:.75rem;min-width:0}
+  .btb-botcard-tm{flex:1;min-width:0;display:grid;gap:1px}
+  .btb-av{flex:none;display:inline-grid;place-items:center;width:40px;height:40px;border-radius:12px;font-weight:700;font-size:1rem}
+  .btb-av-l{width:48px;height:48px;border-radius:14px;font-size:1.2rem}
+  .btb-hue-0{background:color-mix(in srgb,var(--crow-accent) 16%,transparent);color:var(--crow-accent)}
+  .btb-hue-1{background:color-mix(in srgb,var(--crow-info) 16%,transparent);color:var(--crow-info)}
+  .btb-hue-2{background:color-mix(in srgb,var(--crow-success) 16%,transparent);color:var(--crow-success)}
+  .btb-hue-3{background:color-mix(in srgb,var(--crow-warning) 18%,transparent);color:var(--crow-text-primary)}
+  .btb-hue-4{background:color-mix(in srgb,var(--crow-brand-gold) 20%,transparent);color:var(--crow-text-primary)}
+  .btb-botcard-name{display:flex;align-items:center;gap:.45rem;min-width:0;font-weight:600}
+  /* Two lines, then clipped: a long name reads whole on a narrow card. */
+  .btb-botcard-name>span:first-child{min-width:0;overflow:hidden;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2}
+  .btb-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--crow-success)}
+  .btb-dot-off{background:var(--crow-text-muted)}
+  .btb-dot-active{background:var(--crow-accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--crow-accent) 25%,transparent)}
+  .btb-botcard-purpose{color:var(--crow-text-secondary);font-size:.85rem;min-width:0;overflow-wrap:anywhere}
+  .btb-botcard-meta{display:flex;flex-wrap:wrap;align-items:center;gap:.3rem .6rem;font-size:.8rem;color:var(--crow-text-muted);min-width:0}
+  .btb-botcard-meta>span{min-width:0;overflow-wrap:anywhere}
+  .btb-mchip{padding:.05rem .55rem;border-radius:var(--crow-radius-pill);background:var(--crow-bg-elevated);border:1px solid var(--crow-border);color:var(--crow-text-secondary)}
+  .btb-nob{white-space:nowrap;padding:.05rem .55rem;border-radius:var(--crow-radius-pill);border:1px dashed var(--crow-border-strong);color:var(--crow-text-secondary)}
+  .btb-botcard-foot{display:flex;flex-wrap:wrap;align-items:center;gap:.35rem;margin-top:auto}
+  .btb-botcard-foot .btn{min-height:36px}
+  .btb-botcard-foot .btb-more{margin-left:auto}
+  .btb-botcard-new{display:flex;min-width:0;border:1px dashed var(--crow-border-strong);border-radius:var(--crow-radius-card);min-height:150px}
+  .btb-botcard-new-link{flex:1;display:grid;place-content:center;justify-items:center;gap:.25rem;padding:.85rem;text-align:center;text-decoration:none;color:var(--crow-text-muted);font-size:.85rem;border-radius:inherit}
+  .btb-botcard-new-link b{color:var(--crow-accent);font-size:1rem}
+  .btb-botcard-new-link:hover{background:var(--crow-bg-elevated)}
+  .btb-botcard-new-link:focus-visible{outline:2px solid var(--crow-accent);outline-offset:2px}
+  @media(max-width:639px){.btb-botcard-new{display:none}}
+  .btb-helpline{margin:.8rem 0 0;font-size:.85rem}
+  .btb-helpline a{color:var(--crow-text-muted)}
+  .btb-helpline a:hover{color:var(--crow-accent)}
+  .btb-more{min-width:44px;min-height:36px;padding:.2rem .5rem;font-size:1.15rem;line-height:1;color:var(--crow-text-secondary);background:none;border:1px solid transparent;border-radius:var(--crow-radius-control);cursor:pointer}
+  .btb-more[aria-expanded="true"]{background:var(--crow-bg-elevated);border-color:var(--crow-border)}
+  .btb-more:focus-visible,.btb-menu a:focus-visible,.btb-menu button:focus-visible{outline:2px solid var(--crow-accent);outline-offset:-2px}
+  .btb-menu{display:flex;flex-direction:column;gap:2px;padding:4px;border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);background:var(--crow-bg-surface);min-width:0}
+  .btb-pop{position:absolute;top:calc(100% - .5rem);right:.5rem;z-index:20;width:min(18rem,calc(100% - 1rem));box-shadow:0 8px 24px rgba(0,0,0,.14)}
+  @media(max-width:640px){.btb-pop{position:static;width:auto;box-shadow:none}}
+  .btb-menu[hidden]{display:none}
+  .btb-menu-form{margin:0}
+  .btb-menu a,.btb-menu button{display:block;width:100%;box-sizing:border-box;text-align:left;min-height:44px;padding:.6rem .75rem;border:0;border-radius:8px;background:none;color:var(--crow-text-primary);font:inherit;font-size:.9rem;text-decoration:none;cursor:pointer}
+  .btb-menu a:hover,.btb-menu button:hover{background:var(--crow-bg-elevated)}
+  .btb-menu .btb-danger-link{color:var(--crow-error)}
+  .btb-mhint{display:block;font-size:.78rem;color:var(--crow-text-muted);margin-top:.15rem;white-space:normal}
+
   /* Engine-attach gate modal (C4 Task 8) */
   #engine-gate-modal-overlay{
     display:none; position:fixed;

@@ -902,6 +902,9 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
 
     function switchView(view){
       currentView=view;
+      // the phone's lane tabs belong to the columns view
+      var laneTabs=document.querySelector('.bb-lane-tabs');
+      if(laneTabs) laneTabs.style.display=view==='list'?'none':'';
       if(view==='list'){
         if(bbBoard) bbBoard.style.display='none';
         if(bbListWrap){bbListWrap.style.display='';buildListTable();applyFilters();}

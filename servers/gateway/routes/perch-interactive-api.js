@@ -144,6 +144,9 @@ const ERROR_MAP = {
   // directory. The route validates first (400 bad_cwd); buildBotWorld is the
   // belt-and-braces second gate and throws the same typed code.
   bad_cwd: [400, "bad_cwd"],
+  // buildBotWorld: a carried-over world link ("Turn on a board") points at a
+  // folder that is gone. The message names the link; nothing is busy.
+  world_link_broken: [409, "world_link_broken"],
   cycle_busy: [409, "cycle_busy"],
   // control({planMode}) on a hibernating session (perch-interactive.js's own
   // `if (!s.pi) throw engineError("not_awake")` — plan mode always needs a

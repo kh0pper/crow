@@ -8,11 +8,15 @@
  * tbody is VOLATILE-SKIP (replaced every 5s by routes/streams.js, spec rule 5).
  */
 
-import { escapeHtml, section, badge, dataTable, formField, actionBar, docsUrl } from "../../shared/components.js";
+import { escapeHtml, section, formField, actionBar, docsUrl } from "../../shared/components.js";
 import { csrfInput } from "../../shared/csrf.js";
 import { loadModelOptions } from "./data-queries.js";
-import { t, SUPPORTED_LANGS } from "../../shared/i18n.js";
+import { t, fill, SUPPORTED_LANGS } from "../../shared/i18n.js";
 import { parseCookies } from "../../auth.js";
+import { listProvidersAll } from "../../../../shared/providers-db.js";
+import { boardState, friendlyModel, purposeLine, agoText } from "../../shared/bot-display.js";
+import { perchAttached } from "../../../shared/perch-attached.js";
+import { rowMenuScript } from "./row-menu.js";
 
 // Same crow_lang-cookie resolution the dashboard router uses (index.js);
 // defensive because tests render with header-less reqs.
@@ -23,6 +27,75 @@ function reqLang(req) {
   } catch { return "en"; }
 }
 
+// A deterministic hue per bot id, so an avatar keeps its colour across renders.
+function hueOf(id) {
+  let h = 0;
+  for (const ch of String(id)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return h % 5;
+}
+
+/**
+ * One bot as a compact card (option B): a large initial avatar beside the
+ * name (id on hover) + status dot and an optional purpose line; a meta line
+ * (the friendly model as a chip with the raw key on hover, a No board chip,
+ * updated N ago); then Chat / Edit / ⋯ along the bottom. The ⋯ menu is a
+ * popover under the footer (inline on a phone) and carries every other
+ * action the old table offered. Empty fields are left out, never dashed.
+ */
+function botCardHtml(bt, { i, lang, req, now, providerRows, active }) {
+  let def = {};
+  try { def = JSON.parse(bt.definition || "{}") || {}; } catch { def = {}; }
+  const id = String(bt.bot_id);
+  const enc = encodeURIComponent(id);
+  const name = bt.display_name || id;
+  const board = boardState(bt);
+  const modelKey = (def.models && def.models.default) || "";
+  const model = friendlyModel(modelKey, providerRows);
+  const purpose = purposeLine(def, lang, board.state === "on");
+  const ago = agoText(bt.updated_at, now, lang);
+  const dot = !bt.enabled ? ["off", t("botbuilder.dotOff", lang)]
+    : active ? ["active", t("botbuilder.dotActive", lang)] : ["on", t("botbuilder.dotOn", lang)];
+  const editHref = `/dashboard/bot-builder?bot=${enc}&tab=ai`;
+  const menuId = `btb-menu-${i}`;
+  const meta = [
+    model ? `<span class="btb-mchip" title="${escapeHtml(modelKey)}">${escapeHtml(model)}</span>` : "",
+    board.state === "off" ? `<span class="btb-nob">${t("botbuilder.rowNoBoard", lang)}</span>` : "",
+    ago ? `<span>${escapeHtml(ago)}</span>` : "",
+  ].filter(Boolean).join("");
+  let boardItem;
+  if (board.state === "on" || board.state === "custom") {
+    boardItem = `<a role="menuitem" tabindex="-1" href="/dashboard/bot-board?bot=${enc}">${t("botbuilder.rowOpenBoard", lang)}</a>`;
+  } else if (board.reason === "no_slug") {
+    boardItem = `<a role="menuitem" tabindex="-1" href="/dashboard/bot-builder?bot=${enc}&tab=tracker">${t("botbuilder.rowSetUpInEdit", lang)}</a>`;
+  } else {
+    boardItem = `<form method="POST" action="/dashboard/bot-builder" class="btb-menu-form">` +
+      `<input type="hidden" name="action" value="board_on"><input type="hidden" name="bot_id" value="${escapeHtml(id)}">` +
+      `<input type="hidden" name="return" value="list">${csrfInput(req)}` +
+      `<button type="submit" role="menuitem" tabindex="-1">${t("botbuilder.rowTurnOn", lang)}` +
+      `<span class="btb-mhint">${t("botbuilder.boardOnWarn", lang)}</span></button></form>`;
+  }
+  const menu = `<div class="btb-menu btb-pop" id="${menuId}" role="menu" hidden>` + boardItem +
+    `<a role="menuitem" tabindex="-1" href="/dashboard/bot-board?bot=${enc}">${t("botbuilder.rowGiveTask", lang)}</a>` +
+    `<a role="menuitem" tabindex="-1" href="/dashboard/perch">${t("botbuilder.rowSessions", lang)}</a>` +
+    (bt.project_id != null ? `<a role="menuitem" tabindex="-1" href="/dashboard/projects?view=${encodeURIComponent(String(bt.project_id))}">${t("botbuilder.rowProject", lang)}</a>` : "") +
+    `<a role="menuitem" tabindex="-1" class="btb-danger-link" href="/dashboard/bot-builder?bot=${enc}&confirm_delete=1">${t("botbuilder.rowDelete", lang)}</a>` +
+    `</div>`;
+  return `<div class="btb-botcard" role="listitem" data-bot="${escapeHtml(id)}">` +
+    `<div class="btb-botcard-top"><span class="btb-av btb-av-l btb-hue-${hueOf(id)}" aria-hidden="true">${escapeHtml(Array.from(name.trim())[0] || "?").toUpperCase()}</span>` +
+    `<div class="btb-botcard-tm">` +
+    `<div class="btb-botcard-name"><span title="${escapeHtml(id)}">${escapeHtml(name)}</span>` +
+    `<span class="btb-dot btb-dot-${dot[0]}" role="img" aria-label="${escapeHtml(dot[1])}" title="${escapeHtml(dot[1])}"></span></div>` +
+    (purpose ? `<div class="btb-botcard-purpose">${escapeHtml(purpose)}</div>` : "") +
+    `</div></div>` +
+    (meta ? `<div class="btb-botcard-meta">${meta}</div>` : "") +
+    `<div class="btb-botcard-foot">` +
+    (perchAttached(def) ? `<a class="btn btn-primary btn-sm" href="/dashboard/perch?bot=${enc}">${t("perch.tabChat", lang)}</a>` : "") +
+    `<a class="btn btn-secondary btn-sm" href="${editHref}">${t("botbuilder.rowEdit", lang)}</a>` +
+    `<button type="button" class="btb-more" aria-haspopup="menu" aria-expanded="false" aria-controls="${menuId}" ` +
+    `aria-label="${escapeHtml(fill(t("botbuilder.rowMore", lang), { name }))}">&#x22ef;</button>` +
+    `</div>` + menu + `</div>`;
+}
+
 export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) {
   const lang = reqLang(req);
   let bots = [], sessions = [], sessRows = [];
@@ -31,35 +104,27 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) 
     sessions = (await db.execute({ sql: "SELECT bot_id, status, count(*) AS n FROM bot_sessions GROUP BY bot_id, status", args: [] })).rows;
     sessRows = (await db.execute({ sql: "SELECT id, bot_id, status, model, escalated, control, card_id, gateway_thread_id, datetime(updated_at) AS updated_at FROM bot_sessions ORDER BY updated_at DESC LIMIT 50", args: [] })).rows;
   } catch { /* defensive */ }
-  const sessSummary = (id) => sessions.filter((s) => s.bot_id === id).map((s) => `${escapeHtml(s.status)}:${s.n}`).join(" ") || "—";
-  const rows = bots.map((bt) => {
-    let model = "—", trackerType = "none";
-    try { const d = JSON.parse(bt.definition || "{}"); model = (d.models && d.models.default) || "—"; trackerType = (d.tracker_config && d.tracker_config.type) || "kanban"; } catch {}
-    // M3b: project_id from the column (not JSON).
-    const proj = bt.project_id == null ? "—" : bt.project_id;
-    const boardLink = bt.enabled && trackerType !== "none"
-      ? `<a href="/dashboard/bot-board?bot=${encodeURIComponent(bt.bot_id)}">Board</a>` : "";
-    return [
-      `<a href="/dashboard/bot-builder?bot=${encodeURIComponent(bt.bot_id)}&tab=ai">${escapeHtml(bt.bot_id)}</a>`,
-      escapeHtml(bt.display_name || ""),
-      bt.enabled ? badge("enabled", "connected") : badge("disabled", "draft"),
-      escapeHtml(String(model)),
-      escapeHtml(String(proj)),
-      escapeHtml(sessSummary(bt.bot_id)),
-      escapeHtml(bt.updated_at || ""),
-      boardLink,
-      `<a href="/dashboard/bot-builder?bot=${encodeURIComponent(bt.bot_id)}&tab=ai">Edit</a>`,
-      `<a class="btb-danger-link" href="/dashboard/bot-builder?bot=${encodeURIComponent(bt.bot_id)}&confirm_delete=1">${t("botbuilder.deleteBotLink", lang)}</a>`,
-    ];
-  });
+  let providerRows = [];
+  try { providerRows = await listProvidersAll(db); } catch { providerRows = []; }
+  const now = Date.now();
+  const activeIds = new Set(sessions.filter((s) => s.status === "active" && Number(s.n) > 0).map((s) => s.bot_id));
+  const cards = bots.map((bt, i) => botCardHtml(bt, { i, lang, req, now, providerRows, active: activeIds.has(bt.bot_id) }));
   // Item 5 PR1 (spec §D1): the guided wizard is the primary creation path.
+  // Option B: once bots exist, "+ New bot" sits in the toolbar and closes
+  // the grid as a dashed tile, and the tutorial is one quiet line under the
+  // grid; with none, the empty state keeps its wording (the hero).
   const tutorialHref = docsUrl((lang === "es" ? "es/" : "") + "guide/bot-builder-tutorial");
-  const wizCta =
-    `<p style="margin:0 0 1rem"><a class="btn btn-primary btn-md" href="/dashboard/bot-builder?new=1">${t("botbuilder.wizCta", lang)}</a> ` +
-    `<a class="btb-hint" style="margin-left:.75rem" href="${escapeHtml(tutorialHref)}" target="_blank" rel="noopener">${t("botbuilder.tutorialLink", lang)}</a></p>`;
+  const wizCta = cards.length
+    ? `<div class="btb-toolbar"><a class="btn btn-primary btn-sm" href="/dashboard/bot-builder?new=1">${t("botbuilder.rowNewBot", lang)}</a></div>`
+    : `<p style="margin:0 0 1rem"><a class="btn btn-primary btn-md" href="/dashboard/bot-builder?new=1">${t("botbuilder.wizCta", lang)}</a> ` +
+      `<a class="btb-hint" style="margin-left:.75rem" href="${escapeHtml(tutorialHref)}" target="_blank" rel="noopener">${t("botbuilder.tutorialLink", lang)}</a></p>`;
+  const newTile = `<div class="btb-botcard-new" role="listitem"><a class="btb-botcard-new-link" href="/dashboard/bot-builder?new=1">` +
+    `<b>${t("botbuilder.rowNewBot", lang)}</b><span>${t("botbuilder.newTileHint", lang)}</span></a></div>`;
   const list = section(t("botbuilder.listTitle", lang),
-    notice + wizCta + (rows.length
-      ? dataTable(["listThBotId", "listThName", "listThState", "listThModel", "listThProject", "listThSessions", "listThUpdated", "listThBoard"].map((k) => t("botbuilder." + k, lang)).concat(["", ""]), rows, { stack: true })
+    notice + wizCta + (cards.length
+      ? `<div class="btb-cards" role="list">${cards.join("")}${newTile}</div>` +
+        `<p class="btb-helpline"><a href="${escapeHtml(tutorialHref)}" target="_blank" rel="noopener">${t("botbuilder.tutorialLink", lang)}</a></p>` +
+        rowMenuScript()
       : `<p>${t("botbuilder.emptyListWizard", lang)} <a href="/dashboard/bot-builder?new=1">${t("botbuilder.emptyListWizardLink", lang)}</a></p>`));
   // Create form: project + model dropdowns (Phase 1, S3 plan review)
   let createProjects = [];
