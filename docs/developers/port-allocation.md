@@ -111,8 +111,8 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 9090 | 127.0.0.1 | linkding (existing) | existing |
 | 11434 | 127.0.0.1 | ollama (existing) | existing |
 | 13378 | 127.0.0.1 | audiobookshelf (existing) | existing |
-| 18100-18199 | gateway-internal loopback | native model servers (per-CROW_HOME dynamic range, not bundle ports — managed by servers/gateway/models/state.js) | informational |
 | 18018 | 127.0.0.1 | design-kit renderer SMOKE instance (`scripts/design-kit/smoke-renderer.sh`; transient, tests only, never left running) | Design kit v1 |
+| 18100-18199 | gateway-internal loopback | native model servers (per-CROW_HOME dynamic range, not bundle ports — managed by servers/gateway/models/state.js) | informational |
 | 18789 | 127.0.0.1 | openclaw-old-docker (pre-existing external process) | existing |
 | 19999 | 127.0.0.1 | netdata | MVP PR 2 |
 | 32400 | host | plex (host networking, existing) | existing |

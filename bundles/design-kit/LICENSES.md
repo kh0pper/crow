@@ -18,7 +18,7 @@ Exact versions and per-file sha256 for everything in `lib/` are in `lib/manifest
 | svgo | MIT | renderer image | |
 | puppeteer-core | Apache-2.0 | renderer image | |
 | Chromium (Debian package) | BSD-3-Clause and others (Debian's copyright file in the image) | renderer image | Unmodified distribution package; runs headless and offline. See *Chromium version* below. |
-| Other Debian packages in the renderer image (fonts-dejavu-core, fonts-liberation, util-linux for `prlimit`, curl, ca-certificates) | each package's own licence (Debian's copyright file under `/usr/share/doc/<package>/` in the image) | renderer image | Unmodified distribution packages, used as separate programs or data files. |
+| Other Debian packages in the renderer image (fonts-dejavu-core, fonts-liberation, util-linux for `prlimit`, ca-certificates) | each package's own licence (Debian's copyright file under `/usr/share/doc/<package>/` in the image) | renderer image | Unmodified distribution packages, used as separate programs or data files. curl is installed only to download the D2 binary at build time and is purged in the same layer, so it is not in the image. |
 | Node.js (base image) | MIT | renderer image | Pinned by digest in `renderer/Dockerfile`. |
 
 ## Reserved Font Names
