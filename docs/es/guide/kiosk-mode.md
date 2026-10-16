@@ -12,6 +12,8 @@ Abre el compañero en su propia dirección —el puerto `12393` del host de Crow
 
 El encabezado de Crow's Nest ya no tiene el botón **Compañero**. Su único botón, el pájaro, abre la bandeja con un toque y **Hablar con Crow** con una pulsación larga; Hablar con Crow es la página de la [Pantalla kiosk](/es/architecture/kiosk) (tu pájaro de Ramble, toca para hablar), no el compañero con avatar.
 
+La música o la radio que inicias desde Hablar con Crow suena en la **barra del reproductor** del panel, abajo en la página, no dentro de la superposición. Sigue sonando al cerrar la superposición y al pasar de un panel a otro; los botones de la barra la pausan, saltan y detienen, y al recargar la página la barra vuelve (toca ⏯ si el navegador retuvo el sonido). Termina cuando la detienes o cierras sesión.
+
 ## Personalización por dispositivo
 
 Un kiosco es un **dispositivo** vinculado a un agente del [Bot Builder](/es/architecture/bot-builder) — el mismo modelo de vinculación que los [lentes Meta](/es/guide/meta-glasses). Pantallas distintas pueden ejecutar bots distintos:

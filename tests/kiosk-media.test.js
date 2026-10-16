@@ -391,6 +391,17 @@ test("B3 view: an empty display; the current item as one item with its ticket pa
   assert.equal(s.media.itemId("nobody"), null);
 });
 
+test("B3: every load message says whether there is a next / previous item (the attached bar shows ⏮/⏭ from it)", () => {
+  const s = setup();
+  s.media.play("d", [track("One"), track("Two"), track("Three")]);
+  assert.deepEqual([last(s).has_next, last(s).has_previous], [true, false]);
+  s.media.next("d");
+  assert.deepEqual([last(s).has_next, last(s).has_previous], [true, true]);
+  s.media.next("d");
+  assert.deepEqual([last(s).has_next, last(s).has_previous], [false, true]);
+  assert.deepEqual([s.media.snapshot("d").has_next, s.media.snapshot("d").has_previous], [false, true]);
+});
+
 test("B3 item kind: `live` is true for a station and false for a library track, on the load message and the view", () => {
   const s = setup();
   s.media.play("d", [station()]);

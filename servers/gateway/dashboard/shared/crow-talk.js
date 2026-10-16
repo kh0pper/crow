@@ -13,6 +13,15 @@
  * its audio, then removes the frame — the frame's document, socket and media
  * stream go with it.
  *
+ * Kiosk B3: when the dashboard's player bar has the kiosk backend, the frame is
+ * opened with ?bar=1 and its media plays in the bar instead (it keeps playing
+ * after the overlay closes, until logout). The frame posts { crow: "media" }
+ * ops; they are acted on only from this origin AND the live frame's window
+ * (S1), and only after the shared validator (S2, kiosk-media-protocol.js, the
+ * same text embedded below). Closing hands crowKioskRelease()'s
+ * { volume, resume } to the bar (crowPlayer.kioskDetach). A Turbo body swap
+ * (Android Back) closes the overlay the same way.
+ *
  * With no Kiosk extension there is no row, the bird is not armed (a long press
  * is an ordinary tap) and nothing here opens. There is no other voice surface
  * behind this button.
@@ -22,6 +31,7 @@
  */
 
 import { t } from "./i18n.js";
+import { validatorSource } from "./kiosk-media-protocol.js";
 
 /** The Kiosk extension's session display (bundles/kiosk/server/runtime.js). */
 export const CROW_TALK_PATH = "/display/session";
@@ -136,6 +146,13 @@ export function crowTalkJs() {
   var swallowTap = false;      // the click that ends a long-press is not a tap
   var deferredFocus = false;   // opened by a held key: focus Close only once the key is up
   var lastFocus = null;
+  var barWin = null;           // the frame window the player bar is attached to (B3)
+  ${validatorSource()}
+
+  function barPlayer() {
+    var p = window.crowPlayer;
+    return p && typeof p.kioskAttach === 'function' && typeof p.kioskApply === 'function' ? p : null;
+  }
 
   function overlay() { return document.getElementById('crow-talk-overlay'); }
   function frameEl() { return document.getElementById('crow-talk-frame'); }
@@ -152,7 +169,8 @@ export function crowTalkJs() {
     lastFocus = document.activeElement || null;
     var frame = document.createElement('iframe');
     frame.id = 'crow-talk-frame';
-    frame.setAttribute('src', TALK_PATH);
+    // D1: bar mode only when this dashboard's player can take it; otherwise the page plays in itself.
+    frame.setAttribute('src', TALK_PATH + (barPlayer() ? '?bar=1' : ''));
     frame.setAttribute('title', o.getAttribute('aria-label') || '');
     frame.setAttribute('allow', 'microphone; autoplay');
     o.appendChild(frame);
@@ -169,12 +187,19 @@ export function crowTalkJs() {
     if (frame) {
       // Stop the microphone and any audio NOW (same-origin call), then drop the frame:
       // its document, media stream and socket are destroyed with it either way.
+      // In bar mode the page keeps its media playing and returns the bar's un-ducked level + un-hold.
+      var st = null;
       try {
         var w = frame.contentWindow;
-        if (w && typeof w.crowKioskRelease === 'function') w.crowKioskRelease();
+        if (w && typeof w.crowKioskRelease === 'function') st = w.crowKioskRelease();
       } catch (e) {}
       if (frame.parentNode) frame.parentNode.removeChild(frame);
+      var p = barPlayer();
+      if (p && typeof p.kioskDetach === 'function') {
+        try { p.kioskDetach(st && typeof st === 'object' ? { volume: st.volume, resume: st.resume === true } : null); } catch (e) {}
+      }
     }
+    barWin = null;
     var wasOpen = o.classList.contains('active');
     o.classList.remove('active');
     document.body.classList.remove('crow-talk-open');
@@ -261,6 +286,31 @@ export function crowTalkJs() {
     if (p.fired) { if (deferredFocus) { deferredFocus = false; focusClose(); } return; }
     if (p.el && typeof p.el.click === 'function') p.el.click();
   });
+
+  // B3: the page's media ops for the player bar. S1: this origin and the live frame's window only;
+  // S2: the shared validator drops anything else whole (the bar validates again).
+  window.addEventListener('message', function (e) {
+    if (!e || !e.data || typeof e.data !== 'object' || e.data.crow !== 'media' || e.origin !== location.origin) return;
+    var frame = frameEl();
+    var w = null;
+    try { w = frame ? frame.contentWindow : null; } catch (err) { w = null; }
+    if (!frame || !w || e.source !== w) return;
+    if (!validateFrameMessage(e.data)) return;
+    var p = barPlayer();
+    if (!p) return;
+    if (barWin !== w) {
+      barWin = w;
+      p.kioskAttach(function (obj) { try { w.postMessage(obj, location.origin); } catch (err) {} }, function () {
+        var f = frameEl();
+        try { return !!f && f.contentWindow === w; } catch (err) { return false; }
+      });
+    }
+    p.kioskApply(e.data);
+  });
+  // Android Back (and any Turbo visit) swaps the body, overlay and frame with it, without a close.
+  // turbo:visit fires before the swap for every visit, Back (restore) included; not turbo:before-render, whose
+  // listener count the shell keeps at one (tests/perch-hub-stream-leak.test.js).
+  document.addEventListener('turbo:visit', function () { if (frameEl()) closeTalk(); });
 
   // The kiosk page asks to close (Escape pressed while focus is inside the frame).
   window.addEventListener('message', function (e) {

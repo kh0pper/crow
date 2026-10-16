@@ -70,7 +70,7 @@ export function createMediaStore({ now = Date.now, tickets, send, onFailed = () 
   /** One Quieter from v: VOLUME_MOVE down, never below VOLUME_FLOOR (a level already at or under it stays). */
   const quieter = (v) => { const cur = Number(v) || 0; return cur <= VOLUME_FLOOR ? cur : Math.max(VOLUME_FLOOR, cur - VOLUME_MOVE); };
   const step = (v, max = 100) => Math.max(0, Math.min(Math.min(100, Math.max(VOLUME_STEP, max)), Math.round(v / VOLUME_STEP) * VOLUME_STEP));
-  const loadMsg = (d, extra = {}) => ({ type: "media", action: "load", id: d.item.id, form: "audio", url: d.item.path, title: d.item.title, subtitle: d.item.subtitle, source: d.item.source, live: isRadio(d), volume: d.volume, muted: d.muted, ...extra });
+  const loadMsg = (d, extra = {}) => ({ type: "media", action: "load", id: d.item.id, form: "audio", url: d.item.path, title: d.item.title, subtitle: d.item.subtitle, source: d.item.source, live: isRadio(d), has_next: d.index + 1 < d.queue.length, has_previous: d.index > 0, volume: d.volume, muted: d.muted, ...extra });
   const isRadio = (d) => d.item.source === "radio";
   function unload(d) {
     if (d.retry) { clearTimer(d.retry); d.retry = null; }

@@ -39,6 +39,7 @@ window.crowPlayer.getQueueIndex() // Returns current index
 - **Queue management**: Auto-advance to next track on `ended`. Previous button restarts the current track if more than 3 seconds in.
 - **Seek bar**: Clickable progress bar with time display.
 - **Responsive**: Adjusts position for mobile (sidebar hidden).
+- **Kiosk backend (internal)**: besides the local `<audio>` and the Meta glasses, the bar has a third backend for the Talk to Crow overlay's media (kiosk B3). Only the overlay script uses it (`kioskAttach`/`kioskApply`/`kioskDetach`/`kioskOwner`); a panel never calls these. Calling `load`/`queue` while it plays stops the overlay's item first. Its state is never stored with the ticket path: a reload asks `/api/kiosk/session/media` again.
 
 ### Using from a Panel
 

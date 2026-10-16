@@ -481,3 +481,185 @@ test("item 21: with no gate (a Pi, a desktop) a load plays at once, as before", 
   s.load("m1");
   assert.equal(s.audio.plays, 1);
 });
+
+// ─── B3 (T10): the bar link — media-view driving the dashboard's player bar through the parent ───
+import { createBarLink } from "../bundles/kiosk/public/bar-link.js";
+
+const ORIGIN = "https://crow.example.ts.net:8444";
+function barSetup(opts = {}) {
+  const parent = { posts: [], postMessage(m, origin) { this.posts.push({ m, origin }); } };
+  const cmds = [];
+  const link = createBarLink({ parent, origin: ORIGIN, onCommand: (v) => cmds.push(v) });
+  const chip = fakeChip(), sent = [], tm = timers();
+  const view = createMediaView({ audio: link, chip, send: (o) => sent.push(o), setTimer: tm.setTimer, clearTimer: tm.clearTimer, ...opts });
+  const url = (id) => `/display/t/${id.padEnd(22, "x")}/stream`;
+  const msg = (id, extra = {}) => ({ type: "media", action: "load", id, form: "audio", url: url(id), title: `Title ${id}`, subtitle: "Sub", source: "radio", live: true, has_next: false, has_previous: true, volume: 50, muted: false, ...extra });
+  const load = (id, extra) => { const m = msg(id, extra); link.describe(m); view.apply(m); return m; };
+  /** The parent's element event (or play-result) for an item; from the parent unless told otherwise. */
+  const ev = (id, type, extra = {}, { source = parent, origin = ORIGIN } = {}) => link.onMessage({ data: { crow: "media-event", v: 1, id, type, ...extra }, source, origin });
+  const ops = () => parent.posts.map((p) => p.m.op);
+  const events = () => sent.filter((m) => m.type === "media_event").map((m) => `${m.id}:${m.state}${m.code ? ":" + m.code : ""}`);
+  return { parent, link, chip, sent, tm, view, load, ev, ops, events, cmds, url };
+}
+
+test("bar link: a load posts {crow:'media', v:1, op:'load'} with the ticket url and the item's details, to this origin only", () => {
+  const s = barSetup();
+  s.load("m1");
+  const first = s.parent.posts.find((p) => p.m.op === "load");
+  assert.equal(first.origin, ORIGIN);
+  assert.deepEqual(first.m, { crow: "media", v: 1, op: "load", id: "m1", url: s.url("m1"), title: "Title m1", subtitle: "Sub", source: "radio", live: true, volume: levelOf(50, false), paused: false, has_next: false, has_previous: true });
+  assert.deepEqual(s.ops(), ["load", "play"], "the view asks to play: the parent's play op");
+});
+
+test("bar link: the parent's events drive media-view — playing settles play(), a pause that is not the page's own is the person's (F4)", async () => {
+  const s = barSetup();
+  s.load("m1");
+  s.ev("m1", "play-result", { ok: true });
+  s.ev("m1", "playing");
+  await flush();
+  assert.deepEqual(s.events(), ["m1:playing"]);
+  assert.equal(s.link.paused, false);
+  s.ev("m1", "pause");
+  assert.deepEqual(s.events(), ["m1:playing", "m1:paused"]);
+  s.tm.advance(START_MS + STALL_MS);
+  assert.deepEqual(s.events(), ["m1:playing", "m1:paused"], "no watchdog failure after a real pause");
+});
+
+test("bar link: a refused play (NotAllowedError) is reported blocked; ended reaches the server", async () => {
+  const s = barSetup();
+  s.load("m1");
+  s.ev("m1", "play-result", { ok: false, name: "NotAllowedError" });
+  await flush();
+  assert.deepEqual(s.events(), ["m1:blocked"]);
+  s.ev("m1", "playing");
+  s.ev("m1", "ended");
+  assert.deepEqual(s.events(), ["m1:blocked", "m1:playing", "m1:ended"]);
+});
+
+test("S1: the bar link ignores events not from the parent or not from this origin, and events about another item", () => {
+  const s = barSetup();
+  s.load("m1");
+  s.ev("m1", "playing", {}, { source: {} });
+  s.ev("m1", "playing", {}, { origin: "https://evil.example" });
+  s.ev("m2", "playing");
+  s.link.onMessage({ data: "crow-talk-close", source: s.parent, origin: ORIGIN });
+  s.link.onMessage({ data: { crow: "media-event", v: 2, id: "m1", type: "playing" }, source: s.parent, origin: ORIGIN });
+  s.ev("m1", "cmd", { do: "next" }, { source: {} });
+  assert.deepEqual(s.events(), []);
+  assert.deepEqual(s.cmds, []);
+  assert.equal(s.link.paused, true);
+});
+
+test("bar link: the duck reaches the bar as volume ≈ 0.15 × target; pauseMode hold posts pause, the un-hold posts play", async () => {
+  const s = barSetup();
+  s.load("m1");
+  s.ev("m1", "playing");
+  s.parent.posts.length = 0;
+  s.view.hold(true, false);
+  const vol = s.parent.posts.filter((p) => p.m.op === "volume").at(-1).m;
+  assert.equal(vol.id, "m1");
+  assert.ok(Math.abs(vol.volume - DUCK_FACTOR * levelOf(50, false)) < 1e-9);
+  s.view.hold(false, false);
+  s.tm.advance(RESTORE_DELAY_MS + RESTORE_MS + 100);
+  assert.ok(Math.abs(s.parent.posts.filter((p) => p.m.op === "volume").at(-1).m.volume - levelOf(50, false)) < 1e-9, "restored");
+  s.parent.posts.length = 0;
+  s.view.hold(true, true);
+  assert.deepEqual(s.ops(), ["pause"]);
+  s.ev("m1", "pause");                      // the parent's element obeys: the page's own pause, not reported
+  assert.deepEqual(s.events(), ["m1:playing"]);
+  s.view.hold(false, true);
+  assert.deepEqual(s.ops(), ["pause", "play"]);
+});
+
+test("bar link: stop posts stop for the item and forgets it; later events for it are ignored", () => {
+  const s = barSetup();
+  s.load("m1");
+  s.view.apply({ type: "media", action: "stop" });
+  assert.equal(s.parent.posts.at(-1).m.op, "stop");
+  assert.equal(s.parent.posts.at(-1).m.id, "m1");
+  s.ev("m1", "playing");
+  assert.deepEqual(s.events(), []);
+  // A stop with nothing loaded (a hello snapshot on a quiet display) posts nothing: the bar's own playback is not the page's.
+  const q = barSetup();
+  q.view.apply({ type: "media", action: "stop" });
+  assert.deepEqual(q.parent.posts, []);
+});
+
+test("bar link: ⏭/⏮/■ on the bar come back as commands for the current item", () => {
+  const s = barSetup();
+  s.load("m1");
+  s.ev("m1", "cmd", { do: "next" });
+  s.ev("m1", "cmd", { do: "previous" });
+  s.ev("m1", "cmd", { do: "stop" });
+  s.ev("m1", "cmd", { do: "volume_up" });
+  s.ev("m9", "cmd", { do: "next" });
+  assert.deepEqual(s.cmds, ["next", "previous", "stop"]);
+});
+
+test("release(): the un-ducked level and whether a pauseMode hold must be undone on close (review 1)", () => {
+  const s = barSetup();
+  assert.deepEqual(s.view.release(), { volume: null, resume: false }, "nothing loaded");
+  s.load("m1");
+  s.ev("m1", "playing");
+  s.view.hold(true, false);
+  assert.deepEqual(s.view.release(), { volume: levelOf(50, false), resume: false });
+  s.view.hold(false, false);
+  s.view.hold(true, true);
+  assert.deepEqual(s.view.release(), { volume: levelOf(50, false), resume: true });
+  s.view.apply({ action: "pause", id: "m1" });
+  assert.deepEqual(s.view.release(), { volume: levelOf(50, false), resume: false }, "paused by the person: stays paused");
+});
+
+test("a src the page was not told about (no describe) posts nothing", () => {
+  const s = barSetup();
+  s.view.apply({ type: "media", action: "load", id: "m1", form: "audio", url: s.url("m1"), title: "x", volume: 50, muted: false });
+  assert.equal(s.parent.posts.filter((p) => p.m.op === "load").length, 0);
+});
+
+test("B3 + item 21: an overlay closed while the mic gate holds a start hands the bar resume: true, and the held start never fires after the close", () => {
+  const s = gated({ next: 500 });
+  s.load("m1");
+  assert.equal(s.audio.plays, 0);
+  assert.deepEqual(s.view.release(), { volume: levelOf(50, false), resume: true }, "the closing overlay takes its mic with it: the bar plays");
+  s.tm.advance(5000);
+  assert.equal(s.audio.plays, 0, "the frame's own retry is cleared");
+  const p = gated({ next: 500 });
+  p.load("m1", { paused: true });
+  assert.equal(p.view.release().resume, false, "paused: nothing to start");
+  const n = gated({ next: true });
+  n.load("m1");
+  assert.equal(n.view.release().resume, false, "already started (not held): the bar keeps its own state");
+});
+
+test("review 3: the bar's ⏯ comes back as resume/pause commands (the server answers, and the mic gate decides the start)", () => {
+  const s = barSetup();
+  s.load("m1");
+  s.ev("m1", "cmd", { do: "pause" });
+  s.ev("m1", "cmd", { do: "resume" });
+  assert.deepEqual(s.cmds, ["pause", "resume"]);
+});
+
+test("review 6: in bar mode the offline clear drops only the frame's view — the bar is never paused or stopped", () => {
+  const s = barSetup({ bar: true });
+  s.load("m1");
+  s.ev("m1", "play-result", { ok: true });
+  s.ev("m1", "playing");
+  s.parent.posts.length = 0;
+  s.view.offline(true);
+  s.tm.advance(OFFLINE_CLEAR_MS);
+  assert.deepEqual(s.ops(), [], "no pause, no stop to the bar");
+  assert.equal(s.view.current(), null, "the frame forgets the item");
+  assert.equal(s.view.state(), "none");
+  // Back online, the server's snapshot names the same item: the bar keeps playing it (the parent's same-item path).
+  s.view.offline(false);
+  s.load("m1");
+  assert.deepEqual(s.ops().filter((o) => o !== "volume"), ["load", "play"]);
+  // Not bar mode: the element stops as before.
+  const p = barSetup();
+  p.load("m1");
+  p.ev("m1", "playing");
+  p.parent.posts.length = 0;
+  p.view.offline(true);
+  p.tm.advance(OFFLINE_CLEAR_MS);
+  assert.ok(p.ops().includes("stop"));
+});

@@ -43,15 +43,18 @@ test("no requestAnimationFrame and no video/iframe creation anywhere in the page
   }
 });
 
-// Fetched only by a Pi launched with ?agent=1, through kiosk.js's dynamic import(): never part of a phone's page load.
-const LAZY = new Set(["agent-link.js", "speaker-view.js"]);
+// Fetched only through kiosk.js's dynamic import(), never part of a plain page load: agent-link.js + speaker-view.js by a
+// Pi launched with ?agent=1 (DV13), bar-link.js by a dashboard session frame opened with ?bar=1 (B3; a Pi never fetches it).
+const LAZY = new Set(["agent-link.js", "speaker-view.js", "bar-link.js"]);
 
+// 88 → 90 KB (2026-10-16, B3 PR-C rebased on queue item 21c): the Android audio-mode guard (#500) took ~2.9 KB of the
+// headroom kept for the bar's eager part (~2 KB: the ?bar=1 gate, the release/describe hooks); the bar link itself stays LAZY.
 // 82 → 88 KB (2026-10-15, queue item 21): the B3 mic-release start gate now, the player-bar link next (~+7 KB once, cached on a Pi 3).
 // 80 → 82 KB (2026-10-15, queue item 18): the page was at 80,853 of 81,920 bytes; the DV13 speaker chip's eager part
 // (its slot, its CSS and the ?agent=1 gate, ~1.2 KB) does not fit. The chip's code itself stays out of the count (LAZY).
-test("page weight ≤ 88 KB (html + css + eagerly loaded js, uncompressed); the agent-only modules are loaded on demand", () => {
+test("page weight ≤ 90 KB (html + css + eagerly loaded js, uncompressed); the agent-only and bar-only modules are loaded on demand", () => {
   const total = files.filter((f) => !LAZY.has(f)).reduce((n, f) => n + statSync(new URL(f, PUB)).size, 0);
-  assert.ok(total <= 88 * 1024, `page is ${total} bytes`);
+  assert.ok(total <= 90 * 1024, `page is ${total} bytes`);
   for (const f of files.filter((x) => x.endsWith(".js"))) {
     for (const m of read(f).matchAll(/from\s+["']\.\/([\w.-]+)["']/g)) assert.ok(!LAZY.has(m[1]), `${f} imports ${m[1]} eagerly`);
   }
@@ -298,7 +301,7 @@ test("session mode: no pairing and no stored token — the socket is the dashboa
   assert.match(connect, /const id = SESSION \? null : ls\.get\(LS_DEV\), tok = SESSION \? null : ls\.get\(LS_TOK\);/, "session mode never reads a device token");
   assert.match(connect, /if \(!SESSION && \(!id \|\| !tok\)\) \{ pair\(\); return; \}/, "session mode never pairs");
   assert.match(connect, /\/api\/kiosk\/session\$\{SESSION \? "\/dashboard" : ""\}/);
-  assert.match(connect, /\{ type: "hello", mode: "session", csrf: cookie\("crow_csrf"\), caps: CAPS, tz: TZ \}/, "session mode reports the browser's time zone too");
+  assert.match(connect, /\{ type: "hello", mode: "session", csrf: cookie\("crow_csrf"\), caps: CAPS, tz: TZ, owner: barOwner \}/, "session mode reports the browser's time zone too (and, in bar mode, the tab's owner nonce)");
   assert.match(connect, /closeDecision\(ev\.code, ev\.reason, SESSION \? "session" : "paired"\)/);
   assert.doesNotMatch(src, /ls\.set\([^)]*\)[^\n]*SESSION|SESSION[^\n]*ls\.set\(/, "nothing is stored for a session display");
   assert.doesNotMatch(read("kiosk.html"), /data-mode/, "the mode is stamped by the server on /display/session only");
@@ -309,9 +312,10 @@ test("session mode: the dashboard can stop the mic, audio and socket at once; Es
   const block = src.slice(src.indexOf("if (SESSION) {\n  // The dashboard closes the overlay"));
   assert.ok(block.length > 100, "session block present");
   const rel = block.slice(block.indexOf("window.crowKioskRelease"), block.indexOf("document.addEventListener(\"keydown\""));
-  for (const needle of ["halted = true", "clearTimeout(reconnectTimer)", "releaseAudio()", "ctx?.close()", "s?.close(1000"]) assert.ok(rel.includes(needle), needle);
+  for (const needle of ["halted = true", "clearTimeout(reconnectTimer)", "releaseAudio(", "ctx?.close()", "s?.close(1000"]) assert.ok(rel.includes(needle), needle);
   assert.match(block, /e\.key === "Escape" && window\.parent !== window\) window\.parent\.postMessage\("crow-talk-close", location\.origin\)/, "posted to this origin only, never '*'");
-  const release = src.slice(src.indexOf("function releaseAudio()"), src.indexOf("function setBird("));
+  const release = src.slice(src.indexOf("function releaseAudio("), src.indexOf("function setBird("));
+  assert.ok(release.length > 50);
   for (const needle of ["micGate.release()", "player?.flush()", "ctx?.suspend()"]) assert.ok(release.includes(needle), needle);   // the mic goes through the one gate (review H3)
   assert.doesNotMatch(src, /postMessage\([^)]*["']\*["']\)/);
 });
@@ -365,7 +369,8 @@ test("media wiring: ducking follows the mic, the server's bird and the TTS — n
   assert.match(err, /syncDuck\(\)/);
   const start = src.slice(src.indexOf("async function startTurn("), src.indexOf("function endTurn("));
   assert.ok(start.indexOf("syncDuck()") < start.indexOf('send({ type: "turn_start"'), "ducking starts at the tap, before the server answers");
-  assert.match(src, /case "media":[\s\S]{0,400}mediaView\?\.apply\(m\)/);
+  // 400 → 600: item 21's micForMedia line and B3's barLink?.describe line both sit before apply (still the same case).
+  assert.match(src, /case "media":[\s\S]{0,600}mediaView\?\.apply\(m\)/);
 });
 
 test("now-playing window: title and source as text, six buttons that send the touch verbs", () => {
@@ -458,7 +463,7 @@ test("item 21c rev 2: in the Android app only, an idle AudioContext is paused af
   const src = read("kiosk.js");
   const fn = src.slice(src.indexOf("function pauseOutput()"), src.indexOf("const outputNeedsResume"));
   assert.match(fn, /if \(!audioPort \|\| !ctx \|\| outputPaused \|\| ctx\.state !== "running" \|\| player\?\.playing \|\| mic \|\| micGate\.opening\(\)\) return;/, "no port (a Pi, a browser): untouched; never while a reply plays or a mic is still held");
-  const rel0 = src.slice(src.indexOf("function releaseAudio()"), src.indexOf("function setBird("));
+  const rel0 = src.slice(src.indexOf("function releaseAudio("), src.indexOf("function setBird("));
   assert.match(rel0, /if \(audioPort && ctx\) outputPaused = true;\s*\/\/[^\n]*\n  try \{ ctx\?\.suspend\(\); \} catch \{\}/, "releaseAudio's suspend is tracked too (re-review N3)");
   assert.match(fn, /outputPaused = true;\n  try \{ ctx\.suspend\(\)/, "the REQUEST is tracked: suspend() is async and ctx.state lags (review I1)");
   assert.match(src, /const outputNeedsResume = \(\) => !!ctx && \(outputPaused \|\| ctx\.state === "suspended"\);/);
@@ -478,4 +483,63 @@ test("item 21c rev 2: in the Android app only, an idle AudioContext is paused af
   assert.match(close, /player\?\.flush\(\);\n    pauseOutput\(\);/, "after a socket close the flushed context is paused (review M2)");
   const tap = src.slice(src.indexOf("async function onTap()"), src.indexOf('$("bird").addEventListener'));
   assert.match(tap, /player\?\.flush\(\);\n      pauseOutput\(\);/, "after a barge the flushed context is paused (review M2)");
+});
+
+// ─── B3 (T10): bar mode — the overlay's media plays in the dashboard's player bar ───
+
+test("B3 bar mode: only a session frame opened with ?bar=1 whose parent bar has an owner; bar-link.js is a dynamic import (a Pi never fetches it)", () => {
+  const src = read("kiosk.js");
+  assert.match(src, /const BAR_WANTED = SESSION && window\.parent !== window && new URLSearchParams\(location\.search\)\.get\("bar"\) === "1";/);
+  assert.match(src, /barOwner = window\.parent\.crowPlayer\.kioskOwner\(\)/);
+  assert.match(src, /await import\("\.\/bar-link\.js"\)/);
+  assert.doesNotMatch(src, /from\s+["']\.\/bar-link\.js["']/, "never a static import");
+  assert.match(src, /const BAR = !!barLink;/);
+  assert.match(src, /CAPS\.bar = BAR;/);
+  assert.ok(src.indexOf("CAPS.bar = BAR;") < src.indexOf("\nconnect();"), "caps carry bar before the first hello");
+  assert.ok(Object.hasOwn(ASSETS, "bar-link.js"), "served");
+  assert.match(src, /window\.addEventListener\("message", barLink\.onMessage\)/);
+  assert.match(src, /onCommand: \(verb\) => send\(\{ type: "media_cmd", do: verb \}\)/);
+});
+
+test("B3 bar mode: the media view drives the bar link, with no chip; each load is described to the link before the view sees it", () => {
+  const src = read("kiosk.js");
+  const mv = src.slice(src.indexOf("mediaView = createMediaView({"));
+  assert.match(mv, /audio: barLink \|\| \$\("media"\)/);
+  assert.match(mv, /chip: BAR \? document\.createElement\("button"\) : \$\("np-chip"\)/, "bar mode: the chip is never shown (the player bar is the now-playing surface)");
+  assert.match(mv, /\bbar: BAR,/, "review 6: bar mode tells the view, so an offline clear never stops the bar");
+  const media = src.slice(src.indexOf('case "media":'), src.indexOf("break;", src.indexOf('case "media":')));
+  assert.ok(media.indexOf("barLink?.describe(m)") >= 0 && media.indexOf("barLink?.describe(m)") < media.indexOf("mediaView?.apply(m)"));
+});
+
+test("B3 bar mode (review 1): crowKioskRelease keeps the media and RETURNS {volume, resume}; pagehide never stops bar media", () => {
+  const src = read("kiosk.js");
+  const block = src.slice(src.indexOf("window.crowKioskRelease"), src.indexOf("document.addEventListener(\"keydown\""));
+  assert.match(block, /const keep = BAR \? mediaView\?\.release\(\) \?\? null : undefined;/);
+  assert.match(block, /releaseAudio\(\{ keepMedia: BAR \}\)/);
+  assert.match(block, /return keep;/);
+  assert.ok(block.indexOf("mediaView?.release()") < block.indexOf("releaseAudio("), "read before the release");
+  const release = src.slice(src.indexOf("function releaseAudio("), src.indexOf("function setBird("));
+  assert.match(release, /if \(!keepMedia\) mediaView\?\.apply\(\{ action: "stop" \}\);/);
+  assert.match(src, /window\.addEventListener\("pagehide", \(\) => releaseAudio\(\{ keepMedia: BAR \}\)\);/);
+});
+
+test("B3 bar mode x item 21c: the Android audio-mode guard hears every capture end in bar mode too (the bar's audio plays on after the frame is gone)", () => {
+  const src = read("kiosk.js");
+  // Bar media plays in the parent's <audio>, never through this frame's AudioContext: the guard only needs the frame's
+  // capture start/end signals, which ride the mic gate whatever the mode. Closing the overlay must still say the capture ended.
+  const release = src.slice(src.indexOf("function releaseAudio("), src.indexOf("function setBird("));
+  assert.match(release, /\n  micGate\.release\(\); captureEnded\(\);\n/, "captureEnded is not behind keepMedia");
+  const block = src.slice(src.indexOf("window.crowKioskRelease"), src.indexOf("document.addEventListener(\"keydown\""));
+  assert.ok(block.indexOf("releaseAudio({ keepMedia: BAR })") < block.indexOf("ctx?.close()"), "the end is posted before the context closes");
+  assert.doesNotMatch(src, /if \(!BAR\)[^\n]*captureEnded|BAR[^\n]*\?[^\n]*captureEnded/, "no bar-mode branch skips a guard signal");
+  const mv = src.slice(src.indexOf("mediaView = createMediaView({"));
+  assert.match(mv, /canStart: \(\) => \{ const g = mediaStartGate\(/, "a bar start waits for the same mic release + settle as in-page audio");
+  assert.doesNotMatch(read("bar-link.js"), /AudioContext|CrowAudioPort/, "the bar link opens no audio stream of its own");
+});
+
+test("bar-link.js stays small and posts to this origin only", () => {
+  const src = read("bar-link.js");
+  assert.ok(statSync(new URL("bar-link.js", PUB)).size < 5 * 1024);
+  assert.doesNotMatch(src, /postMessage\([^)]*["']\*["']\)/);
+  assert.match(src, /e\.source !== parent \|\| e\.origin !== origin/);
 });

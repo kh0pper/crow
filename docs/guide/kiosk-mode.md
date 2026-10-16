@@ -12,6 +12,8 @@ Open the companion at its own address — port `12393` on the Crow host — in a
 
 The Crow's Nest header no longer has a **Companion** button. Its one button, the bird, opens the tray on a tap and **Talk to Crow** on a long press; Talk to Crow is the [Kiosk display](/architecture/kiosk) page (your Ramble bird, tap to talk), not the avatar companion.
 
+Music or radio you start from Talk to Crow plays in the dashboard's **player bar** at the bottom of the page, not inside the overlay. It keeps playing after you close the overlay and while you move between panels; the bar's buttons pause, skip and stop it, and a reload of the page brings the bar back (tap ⏯ if the browser held the sound back). It ends when you stop it or log out.
+
 ## Per-device customization
 
 A kiosk is a **device** bound to a [Bot Builder](/architecture/bot-builder) agent — the same binding model as [Meta Glasses](/guide/meta-glasses). Different displays can run different bots:
