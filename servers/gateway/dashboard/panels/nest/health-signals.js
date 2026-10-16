@@ -15,6 +15,8 @@
  *   updates   — auto_update_* version comparison (info if update available)
  *   backup    — newest of THIS instance's files in CROW_BACKUP_DIR (none → info;
  *               >7d → warn; owned by another instance → warn)
+ *   keychainExport — keys Crow generated that are in no keychain Export yet (info; no
+ *               card when there are none)
  *   providers — alwaysResident provider residency (unreachable ≥threshold → warn)
  *   externalEngines — engines another machine runs (spec 2026-09-23): own id,
  *               info at most — never warn, never a push; no card when none
@@ -56,6 +58,7 @@ import { readReservation } from "../../../box-reservation.js";
 import { localBackupContext, newestBackupOwnership } from "../../../../shared/backup-naming.js";
 import { getStats as getOutboxStats } from "../../../../sharing/sync-outbox-drain.js";
 import { createSidecarHealthReader } from "../../../artifact-origin/sidecar-health.js";
+import { unexportedGeneratedCount } from "../../../keychain/reminder.js";
 
 // ─── Module-level 30s cache ───────────────────────────────────────────────────
 
@@ -672,6 +675,19 @@ async function backupSignal(db, nowFn, lang) {
   };
 }
 
+// Keychain Export reminder (recovery keys, queue item 30): a key Crow generated that is in no
+// keychain Export lives only on this machine. Info only (strip, never a push); no card
+// when every generated key is exported or there are none.
+async function keychainExportSignal(db, lang) {
+  const n = await unexportedGeneratedCount(db);
+  if (n <= 0) return null;
+  return {
+    id: "keychainExport", severity: "info", state: "info", label: t("signals.keychainExport.label", lang),
+    value: String(n), issueLabel: fill(t("signals.keychainExport.issue", lang), { n }),
+    actionLabel: t("signals.keychainExport.action", lang), actionHref: "/dashboard/settings?section=passwords",
+  };
+}
+
 // ─── Security-maintenance signals (W2) ────────────────────────────────────────
 
 async function loginsSignal(db, lang) {
@@ -1181,6 +1197,7 @@ export async function collectHealthSignals(db, opts = {}) {
     syncDialSignal(db, lang, nowFn),
     updatesSignal(db),
     backupSignal(db, nowFn, lang),
+    keychainExportSignal(db, lang),
     syncConflictsSignal(db),
     outboxSignal(db),
     loginsSignal(db, lang),

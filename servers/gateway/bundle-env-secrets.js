@@ -135,11 +135,15 @@ export function keychainEligibleKeys(manifest) {
  *   minted   plaintext of keychain:true keys created by THIS call (empty on reinstall)
  *   persist  writes the retained copy; call it only after `minted` is safely in the
  *            keychain — otherwise a lost plaintext would leave an unusable hash behind.
- * Order per key: installed .env → retained copy → new value (never regenerated).
+ * Order per key: installed .env → retained copy → compose fallback → `keychain` (plaintext of
+ * a readable keychain entry, keychain:true keys only — install-hooks keychainRestoreValues) →
+ * new value (never regenerated). The keychain rung is the rebuilt-machine path: crow.db
+ * restored and the keychain Export imported, but no .env and no retained copy. A restored
+ * value is REUSED (listed in `restored`), never minted, so its entry is never overwritten.
  */
-export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, composeText = null, priorInstall = false }) {
+export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, composeText = null, priorInstall = false, keychain = null }) {
   const keys = generatedEnvKeys(manifest);
-  if (keys.length === 0) return { env: {}, minted: {}, reusedPlain: {}, persist() {} };
+  if (keys.length === 0) return { env: {}, minted: {}, reusedPlain: {}, restored: [], persist() {} };
   if (typeof bundleId !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(bundleId) || bundleId.length > 64) {
     throw new Error(`Invalid bundle ID: ${JSON.stringify(bundleId)}`);
   }
@@ -157,6 +161,7 @@ export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, compos
   // keychain:true values kept from an earlier install (typed, or generated before): the
   // keychain may not hold them, and the form no longer shows the field — see install-hooks.
   const reusedPlain = {};
+  const restored = [];
   const existingFor = (k) => installed[k] || retained[k] || legacy[k] || "";
   // Private halves first, so a public half can be derived from (or minted with) its pair.
   const order = [...keys].sort((a, b) => (byName.get(a)?.generate === "vapid_public_key") - (byName.get(b)?.generate === "vapid_public_key"));
@@ -172,6 +177,14 @@ export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, compos
       // Always the private key's own pair (a kept public key that no longer matches is
       // replaced); an undecodable private key keeps whatever public key was there.
       env[k] = pairs[spec.pair] || vapidPublicFromPrivate(priv) || existing;
+      continue;
+    }
+    const fromKeychain = !existing && spec.keychain === true && keychain && typeof keychain[k] === "string" && keychain[k] !== "" ? keychain[k] : "";
+    if (fromKeychain) {
+      // The keychain holds the plaintext; a store_as key gets a fresh hash of it (any hash
+      // of the same plaintext verifies). Its entry exists, so nothing is saved again.
+      env[k] = spec.store_as === "argon2id" ? argon2idPhc(fromKeychain) : fromKeychain;
+      restored.push(k);
       continue;
     }
     if (existing) {
@@ -203,7 +216,7 @@ export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, compos
         formatEnvLines({ ...retained, ...env }),
     );
   };
-  return { env, minted, reusedPlain, persist };
+  return { env, minted, reusedPlain, restored, persist };
 }
 
 /**
