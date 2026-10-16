@@ -80,7 +80,10 @@ export function giveScript(lang) {
   function focusables(){
     var d = dlg();
     if (!d) return [];
-    return Array.prototype.slice.call(d.querySelectorAll('input,button')).filter(function(e){ return !e.disabled && !e.hidden; });
+    /* type=hidden inputs (a board-off bot's Turn on form) are never focusable */
+    return Array.prototype.slice.call(d.querySelectorAll('input,button')).filter(function(e){
+      return !e.disabled && !e.hidden && String(e.getAttribute('type') || '').toLowerCase() !== 'hidden';
+    });
   }
   function open(btn){
     var d = dlg();

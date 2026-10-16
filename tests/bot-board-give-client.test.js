@@ -82,7 +82,7 @@ class El {
   getBoundingClientRect() { return { left: 500, top: 300, bottom: 340, right: 600, width: 100, height: 40 }; }
 }
 
-function mount({ wide = false, lang = "en" } = {}) {
+function mount({ wide = false, lang = "en", noOnBots = false } = {}) {
   const listeners = {};
   const doc = { activeElement: null, addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); } };
   const E = (tag, attrs) => new El(doc, tag, attrs);
@@ -98,7 +98,14 @@ function mount({ wide = false, lang = "en" } = {}) {
   const hint = E("p", { id: "bb-give-hint", hidden: "" });
   const cancel = E("button", { "data-give-close": "" });
   const go = E("button", { id: "bb-give-go", disabled: "" });
-  panel.append(cardLine, hank, glassy, later, now, hint, cancel, go);
+  // noOnBots: no board-on bot, only a board-off bot's Turn on form (hidden
+  // inputs + its submit button), as giveSheetHtml renders it.
+  const offForm = E("form", { method: "POST" });
+  const offHidden = [E("input", { type: "hidden", name: "action", value: "board_on" }), E("input", { type: "hidden", name: "bot_id", value: "assistant" })];
+  const turnOn = E("button", { type: "submit" });
+  offForm.append(...offHidden, turnOn);
+  if (noOnBots) panel.append(cardLine, offForm, later, now, hint, cancel, go);
+  else panel.append(cardLine, hank, glassy, later, now, hint, cancel, go);
   dialog.append(panel);
   root.append(giveBtn, dialog);
   const all = () => [root, ...root.querySelectorAll("*,[id],[name],[class]")];
@@ -128,7 +135,7 @@ function mount({ wide = false, lang = "en" } = {}) {
   };
   const pick = (radio) => { for (const r of [hank, glassy]) r.checked = r === radio; fire("change", radio); };
   const flush = () => new Promise((r) => setTimeout(r, 0));
-  return { doc, dialog, panel, cardLine, hank, glassy, later, now, hint, cancel, go, giveBtn, fire, pick, flush, fetches, toasts, reloads, setRespond: (f) => { respond = f; } };
+  return { offHidden, turnOn, doc, dialog, panel, cardLine, hank, glassy, later, now, hint, cancel, go, giveBtn, fire, pick, flush, fetches, toasts, reloads, setRespond: (f) => { respond = f; } };
 }
 
 test("Give to… opens the dialog with the card's title; nothing picked yet, so Give is disabled", () => {
@@ -251,4 +258,17 @@ test("on wide the panel is placed as a popover beside the card; on a phone it st
   p.fire("click", p.giveBtn);
   assert.ok(!p.panel.classList.contains("bb-placed"));
   assert.equal(p.panel.style.top || "", "");
+});
+
+test("the focus trap skips hidden inputs (a board-off bot's Turn on form) — with no board-on bots too", () => {
+  const d = mount({ noOnBots: true });
+  d.fire("click", d.giveBtn);
+  assert.equal(d.doc.activeElement, d.turnOn, "opening focuses the first real control, not a type=hidden input");
+  d.cancel.focus();
+  d.fire("keydown", d.cancel, { key: "Tab" });
+  assert.ok(!d.offHidden.includes(d.doc.activeElement), "Tab never lands on a hidden input");
+  assert.equal(d.doc.activeElement, d.turnOn);
+  d.turnOn.focus();
+  d.fire("keydown", d.turnOn, { key: "Tab", shiftKey: true });
+  assert.equal(d.doc.activeElement, d.cancel, "Shift+Tab on the first real control wraps to the last enabled one (Give stays disabled: no bot to pick)");
 });
