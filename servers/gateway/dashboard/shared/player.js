@@ -507,7 +507,7 @@ export function playerBarJs(lang) {
       // A station reload is pending (D4): ask again once it is due.
       var wait = Number(v.retry_ms);
       if (kioskRetry) clearTimeout(kioskRetry);
-      kioskRetry = setTimeout(function () { kioskRetry = null; kioskGet(); }, isFinite(wait) ? Math.max(0, Math.min(wait, 60000)) : 1000);
+      kioskRetry = setTimeout(function () { kioskRetry = null; kioskGet(); }, isFinite(wait) ? Math.max(250, Math.min(wait, 60000)) : 1000);   // floored: never a tight loop
       return;
     }
     var m = validateFrameMessage({ crow: 'media', v: 1, op: 'load', id: it.id, url: it.url, title: it.title, subtitle: it.subtitle || '', source: it.source || '', live: it.live === true, has_next: v.has_next === true, has_previous: v.has_previous === true });
@@ -849,8 +849,10 @@ export function playerBarJs(lang) {
     toggle: function() {
       if (activeBackend === 'kiosk') {
         if (!kioskItem) return;
-        // Attached: a command to the frame (review 3): it tells the server, and its mic gate decides when a resume plays.
-        if (kioskToFrame('cmd', { do: audio.paused ? 'resume' : 'pause' })) return;
+        // Attached: a pause acts here at once (always safe; the frame hears the element's pause and tells the server).
+        // A resume goes to the frame as a command (review 3): its mic gate decides when it plays.
+        if (!audio.paused && kioskAttached()) { audio.pause(); return; }
+        if (audio.paused && kioskToFrame('cmd', { do: 'resume' })) return;
         if (kioskRedo) { var redo = kioskRedo; kioskRedo = null; kioskSend(redo); return; }
         if (!audio.paused) { audio.pause(); kioskSend('pause'); return; }
         // A station resumes live on a new ticket (the answer brings it); a track resumes here at once.

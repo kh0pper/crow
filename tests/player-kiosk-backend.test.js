@@ -229,14 +229,13 @@ test("attached: ⏭/⏮/⏯/■ go to the frame as commands (the frame tells the
   assert.deepEqual(h.events("cmd").map((m) => [m.id, m.do]), [["m1", "next"], ["m1", "previous"]]);
   const plays = h.calls.filter((c) => c[0] === "play").length;
   h.P.toggle();
-  assert.equal(h.audio.paused, false, "the bar's ⏯ never pauses the element itself while attached");
-  assert.equal(h.events("cmd").at(-1).do, "pause");
-  h.audio.pause();                                  // the frame's answer: a pause op
+  assert.equal(h.audio.paused, true, "re-review: a pause acts on the element at once (a dropped frame socket must not leave it playing); the frame hears the element's pause");
+  assert.equal(h.events("cmd").length, 2, "no pause command is needed");
   h.handlers.play();                                // MediaSession / a headset button
   assert.equal(h.events("cmd").at(-1).do, "resume");
   assert.equal(h.calls.filter((c) => c[0] === "play").length, plays, "review: the bar's own play never bypasses the frame's mic gate");
   h.P.stop();
-  assert.deepEqual(h.events("cmd").map((m) => m.do), ["next", "previous", "pause", "resume", "stop"]);
+  assert.deepEqual(h.events("cmd").map((m) => m.do), ["next", "previous", "resume", "stop"]);
   assert.equal(h.shown(), false);
   assert.equal(h.fetches.length, 0);
 });
@@ -598,4 +597,17 @@ test("review 5: a reload during a station retry (url:null) keeps the saved title
   assert.equal(h.audio.src, P1);
   assert.equal(h.audio.paused, false);
   assert.equal(h.$("crow-player-title").textContent, "Song One");
+});
+
+test("re-review: a retry_ms of 0 never becomes a tight GET loop (floored at 250 ms)", async () => {
+  const radio = { ...ITEM1, source: "radio", live: true };
+  let gets = 0;
+  const local = new Map([["crow-player-state", JSON.stringify({ backend: "kiosk", title: "Morning Mix" })]]);
+  const h = harness({ local, respond: (r) => { if (r.method !== "GET") return null; gets++; return { status: 200, body: view({ ...radio, url: null }, { retry_ms: 0 }) }; } });
+  await flush();
+  assert.equal(gets, 1);
+  h.advance(249); await flush();
+  assert.equal(gets, 1, "not before 250 ms");
+  h.advance(1); await flush();
+  assert.equal(gets, 2);
 });
