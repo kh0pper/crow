@@ -18,9 +18,10 @@ if docker ps --format '{{.Names}}' | grep -qw crow-lemmy-postgres; then
 fi
 
 # pict-rs sled + files (a Docker-managed volume, read through the running container)
-if docker ps --format '{{.Names}}' | grep -qw crow-lemmy-pictrs; then
-  docker exec crow-lemmy-pictrs tar -C /mnt -cf - . > "$WORK/pictrs.tar" 2>/dev/null || true
-fi
+# A hot copy: pict-rs keeps running, so its sled db may need pict-rs's own repair on restore.
+docker ps --format '{{.Names}}' | grep -qw crow-lemmy-pictrs || { echo "crow-lemmy-pictrs is not running; no backup written" >&2; exit 1; }
+docker exec crow-lemmy-pictrs tar -C /mnt -cf - . > "$WORK/pictrs.tar"
+[ -s "$WORK/pictrs.tar" ] || { echo "pict-rs archive is empty; no backup written" >&2; exit 1; }
 
 OUT="${BACKUP_ROOT}/lemmy-${STAMP}.tar.zst"
 if command -v zstd >/dev/null 2>&1; then

@@ -107,7 +107,7 @@ services:
       - |
         umask 077
         case "$${CROW_LEMMY_HOSTNAME}" in
-          ""|*[!A-Za-z0-9.:-]*|.*|-*) echo "LEMMY_HOSTNAME must be a bare hostname such as lemmy.example.com (no https://, no path)" >&2; exit 64 ;;
+          ""|*[!a-z0-9.:-]*|[.:-]*|*[.:-]|*..*) echo "LEMMY_HOSTNAME must be a bare lowercase hostname such as lemmy.example.com (no https://, no path)" >&2; exit 64 ;;
         esac
         mkdir -p /tmp/crow-lemmy
         cat > /tmp/crow-lemmy/config.hjson <<HJSON
