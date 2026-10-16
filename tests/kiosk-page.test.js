@@ -72,7 +72,7 @@ test("item 21 (source): a media load marks the turn and lets an idle open mic go
   assert.match(mfm, /micReleasedAt = performance\.now\(\)/);
   assert.match(mfm, /mediaView\?\.kick\(\)/, "a held start goes at once, not on its next poll (review minor 2)");
   const ens = src.slice(src.indexOf("const d = micDecision(null, ctx.state);"), src.indexOf("banner(null);"));
-  assert.match(ens, /if \(config\.mic_per_turn\) \{ micGate\.release\(\); mic = null; micReleasedAt = performance\.now\(\); \}/, "no turn after needs_gesture: the phone's mic is not left open (review minor 3)");
+  assert.match(ens, /if \(config\.mic_per_turn\) \{ micGate\.release\(\); captureEnded\(\); mic = null; micReleasedAt = performance\.now\(\); pauseOutput\(\); \}/, "no turn after needs_gesture: the phone's mic is not left open (review minor 3)");
   assert.match(src, /canStart: \(\) => \{ const g = mediaStartGate\(\{ micOpen: !!mic, micOpening: micGate\.opening\(\), releasedAt: micReleasedAt, now: performance\.now\(\), config \}\); return g\.ok \|\| g\.waitMs; \}/);
   assert.match(src, /onPlay: \(\) => note\("media", `start mic=\$\{mic \|\| micGate\.opening\(\) \? "open" : "closed"\}`\)/);
   const drained = /onDrained: \(\) => \{([^}]*)\}/.exec(src)[1];
@@ -437,4 +437,37 @@ test("DV13 speaker chip CSS: 56 px touch target, sits at the right of the top ba
   assert.match(rule(".k-spk-btn"), /min-height:\s*56px/);
   assert.match(rule(".k-spk-line"), /top:\s*100%/);
   assert.match(css, /\.k-spk-line:empty \{[^}]*display:\s*none/);
+});
+
+test("item 21c: every mic release tells the Android app (CrowAudioPort) the capture ended, only through the guarded helper", () => {
+  const src = read("kiosk.js");
+  const releases = src.match(/micGate\.release\(\)/g) || [];
+  const told = src.match(/micGate\.release\(\); captureEnded\(\);/g) || [];
+  assert.ok(releases.length >= 4, "the four release paths exist");
+  assert.equal(told.length, releases.length, "each micGate.release() is followed by captureEnded()");
+  assert.match(src, /const audioPort = globalThis\.CrowAudioPort \|\| null;/, "no port off Android: every call is a no-op");
+  assert.match(src, /const captureEnded = \(\) => \{ try \{ audioPort\?\.postMessage\('\{"op":"captureEnded"\}'\); \} catch \{\} \};/);
+  // The page posts exactly the two ops the app accepts, and nothing else on the port.
+  const posts = [...src.matchAll(/audioPort\??\.postMessage\(([^)]*)\)/g)].map((m) => m[1]);
+  assert.deepEqual(posts.sort(), [`'{"op":"captureEnded"}'`, `'{"op":"captureStarting"}'`, `'{"op":"hello"}'`]);
+  assert.match(src, /audioPortLine\(e\?\.data\)/, "native lines go through the parser before the debug ring");
+  assert.match(src, /createMicGate\(\(\) => \{ captureStarting\(\); return openMic\(ctx, onFrame\); \}\)/, "every getUserMedia is announced first (rev 2, R2.2)");
+});
+
+test("item 21c rev 2: in the Android app only, an idle AudioContext is paused after each mic release, and every play path resumes it", () => {
+  const src = read("kiosk.js");
+  const fn = src.slice(src.indexOf("function pauseOutput()"), src.indexOf("const resumeOutput"));
+  assert.match(fn, /if \(!audioPort \|\| !ctx \|\| ctx\.state !== "running" \|\| player\?\.playing\) return;/, "no port (a Pi, a browser): untouched; never while a reply plays");
+  assert.match(fn, /ctx\.suspend\(\)/);
+  assert.match(fn, /note\("audio", "output paused"\)/);
+  const rel = src.slice(src.indexOf("function releaseMicAfterTurn("), src.indexOf("/** turn_metrics, once per turn"));
+  assert.match(rel, /note\("mic", "released"\);\n  pauseOutput\(\);/);
+  const mfm = src.slice(src.indexOf("function micForMedia("), src.indexOf("function releaseMicAfterTurn("));
+  assert.match(mfm, /note\("mic", "released for media"\);\n  pauseOutput\(\);/);
+  const tts = src.slice(src.indexOf('case "tts_start"'), src.indexOf('case "wm"'));
+  assert.ok(tts.indexOf("resumeOutput()") >= 0 && tts.indexOf("resumeOutput()") < tts.indexOf("player?.begin("), "an announcement resumes before it plays");
+  const chime = src.slice(src.indexOf("function chime()"), src.indexOf("async function onTap()"));
+  assert.match(chime, /if \(!ctx\) return;\n  resumeOutput\(\);/, "a timer chime is never silent");
+  const ens = src.slice(src.indexOf("async function ensureAudio()"), src.indexOf("function onFrame("));
+  assert.match(ens, /if \(ctx\.state === "suspended"\) \{ try \{ await ctx\.resume\(\); \} catch \{\} \}/, "a tap resumes before the mic opens");
 });

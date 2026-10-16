@@ -9,7 +9,7 @@ import {
   closeDecision, backoffMs, micDecision, isNight, themeFor, msToNextMinute,
   displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics,
   releasesMic, ttsStartDecision, settleDecision, pairStartDecision, bannerAfterReady, createStatusRing, errorDecision, toolsLine,
-  duckDecision, duckBackstop, DUCK_BACKSTOP_MS, noteEffect, micAfterTurn, MEDIA_RECONNECT_CAP_MS, mediaStartGate, releaseForMediaDecision,
+  duckDecision, duckBackstop, DUCK_BACKSTOP_MS, noteEffect, micAfterTurn, MEDIA_RECONNECT_CAP_MS, mediaStartGate, releaseForMediaDecision, audioPortLine,
 } from "./state.js";
 import { createVad, TURN_GUARD_MS, VAD_DEFAULTS } from "./vad.js";
 import { openMic, createPlayer, createMicGate } from "./audio.js";
@@ -41,7 +41,7 @@ let ws = null, attempt = 0, halted = false, config = {}, bird = null, wmView = n
 let ctx = null, mic = null, player = null, birdState = "idle", serverBird = "idle", turn = null, clockTimer = null, serverOffset = 0;
 let ttsSeq = 0, bannerKey = null, pairAttempt = 0;
 let mediaView = null, duckSince = null, duckTimer = null, duckOverride = false, micOpenMs = null, starting = false, micReleasedAt = null;
-const micGate = createMicGate(() => openMic(ctx, onFrame));
+const micGate = createMicGate(() => { captureStarting(); return openMic(ctx, onFrame); });
 
 /*
  * Debug ring (smoke 2026-10-04: an unidentified message flashed after silent taps).
@@ -57,12 +57,33 @@ function caption(text, why) { $("cap-bot").textContent = text; note(`caption:${w
 function banner(key) { bannerKey = key || null; const b = $("banner"); b.textContent = key ? t(key) : ""; b.hidden = !key; note("banner", key ? `${key}: ${b.textContent}` : "(hidden)"); if (key === "session_no_bot") b.append(" ", kioskPanelLink()); }
 /** Session mode: the fix for "no assistant" is one tap away — the Kiosk panel, in the dashboard itself. */
 function kioskPanelLink() { const a = document.createElement("a"); a.href = "/dashboard/kiosk"; a.target = "_top"; a.textContent = t("session_bot_link"); return a; }
+/*
+ * Queue item 21c: the Crow Android app injects window.CrowAudioPort on its paired gateway origin only. Each mic
+ * release tells it the capture ended; the app then checks the phone's audio mode (call mode left on sends music
+ * to the earpiece) and answers with one line for the debug ring. Elsewhere (a Pi, a browser) there is no port.
+ */
+const audioPort = globalThis.CrowAudioPort || null;
+const captureStarting = () => { try { audioPort?.postMessage('{"op":"captureStarting"}'); } catch {} };
+const captureEnded = () => { try { audioPort?.postMessage('{"op":"captureEnded"}'); } catch {} };
+/** App only (rev 2, R2.1): an idle AudioContext keeps a call-type stream playing; pause it once the mic is gone. Every play path resumes it. */
+function pauseOutput() {
+  if (!audioPort || !ctx || ctx.state !== "running" || player?.playing) return;
+  try { ctx.suspend(); } catch {}
+  note("audio", "output paused");
+}
+const resumeOutput = () => { if (ctx && ctx.state === "suspended") ctx.resume().catch(() => {}); };
+if (audioPort) {
+  try {
+    audioPort.onmessage = (e) => { const l = audioPortLine(e?.data); if (l) note("audio", l); };
+    audioPort.postMessage('{"op":"hello"}');
+  } catch {}
+}
 const cookie = (name) => { for (const c of document.cookie.split(";")) { const [k, ...v] = c.trim().split("="); if (k === name) return v.join("="); } return ""; };
 /** Halt / unpaired / page hidden for good: turn the mic off (the phone's indicator); the next tap reopens it. */
 function releaseAudio() {
   if (turn && !turn.ended) endTurn("manual", null);
   mediaView?.apply({ action: "stop" });             // the server's media state comes back with the next hello
-  micGate.release();
+  micGate.release(); captureEnded();
   mic = null;
   player?.flush();
   try { ctx?.suspend(); } catch {}
@@ -208,6 +229,7 @@ function onText(m) {
       if (!d.play) break;                            // a barged turn's in-flight start: the player stays muted
       ttsSeq++;
       if (d.own) { turn.tts = true; turn.ttsSeq = ttsSeq; }   // this turn's own audio
+      resumeOutput();                                // an announcement after pauseOutput (21c)
       player?.begin(m.codec, m.sample_rate, ttsSeq);
       break;
     }
@@ -289,7 +311,7 @@ async function ensureAudio() {
   const d = micDecision(null, ctx.state);
   if (d !== "ok") {
     banner(d);
-    if (config.mic_per_turn) { micGate.release(); mic = null; micReleasedAt = performance.now(); }   // item 21: no turn, so no open mic held
+    if (config.mic_per_turn) { micGate.release(); captureEnded(); mic = null; micReleasedAt = performance.now(); pauseOutput(); }   // item 21: no turn, so no open mic held
     return false;
   }
   banner(null);
@@ -339,17 +361,19 @@ function endTurn(reason, speechEndAt) {
 /** Item 21: music loaded while an open mic idles (no turn in flight, no TTS: G12) — let it go so the music can start. */
 function micForMedia() {
   if (!releaseForMediaDecision({ config, micOpen: !!mic || micGate.opening(), turnOpen: !!(turn && !(turn.ended && turn.done)), playing: !!player?.playing })) return;
-  micGate.release();
+  micGate.release(); captureEnded();
   mic = null; micReleasedAt = performance.now();
   note("mic", "released for media");
+  pauseOutput();
   mediaView?.kick();
 }
 /** F6: a phone lets the microphone go (Android leaves voice-call audio mode) once the turn has settled — never mid-reply (r7 G12). */
 function releaseMicAfterTurn(phase) {
   if (micAfterTurn(config, { phase }) !== "release" || (!mic && !micGate.opening())) return;
-  micGate.release();
+  micGate.release(); captureEnded();
   mic = null; micReleasedAt = performance.now();
   note("mic", "released");
+  pauseOutput();
   mediaView?.kick();                              // item 21: a held start now waits only the settle time
 }
 /** turn_metrics, once per turn, when playback settles (F3) or the no-audio wait runs out (F9). */
@@ -372,6 +396,7 @@ function settle(tn) {
 }
 function chime() {
   if (!ctx) return;
+  resumeOutput();
   const o = ctx.createOscillator(), g = ctx.createGain();
   o.frequency.value = 880; g.gain.value = 0.15;
   o.connect(g); g.connect(ctx.destination);
