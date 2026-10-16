@@ -145,10 +145,13 @@ test("every generated key of a docker bundle is consumed by its compose file", (
     const keys = S.generatedEnvKeys(m);
     if (keys.length === 0) continue;
     const text = composeText(dir);
-    assert.ok(text, `${dir}: generated keys only make sense for a compose bundle (the MCP env never receives them)`);
+    assert.ok(text, `${dir}: generated keys only make sense for a compose bundle`);
     const consumed = B.composeConsumedKeys(text);
-    // Explicit interpolation only: an env_file .env would make `consumed.all` pass vacuously.
-    for (const k of keys) assert.ok(consumed.keys.has(k), `${dir}: ${k} is generated but its compose never interpolates it`);
+    // Consumed = interpolated by the compose file, or listed in server.envKeys (the
+    // installer puts those into this instance's MCP entry). Explicit interpolation only:
+    // an env_file .env would make `consumed.all` pass vacuously.
+    const mcpKeys = new Set(m.server?.envKeys || []);
+    for (const k of keys) assert.ok(consumed.keys.has(k) || mcpKeys.has(k), `${dir}: ${k} is generated but neither its compose nor its MCP server reads it`);
   }
 });
 

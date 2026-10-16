@@ -10,15 +10,19 @@
  * - Update budget amounts
  * - Generate spending reports
  *
- * Auth: POST /account/login with { password } to get a Bearer token.
+ * Auth: POST /account/login with { password } to get a Bearer token. A new local
+ * server is given the generated password first (bootstrap.js).
  * Amounts are stored in cents (integer). Negative = expense, positive = income.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { ensureBootstrapped, effectivePassword } from "./bootstrap.js";
 
 const ACTUAL_URL = (process.env.ACTUAL_URL || "http://localhost:5006").replace(/\/+$/, "");
-const ACTUAL_PASSWORD = process.env.ACTUAL_PASSWORD || "";
+// A typed password (an Actual server you run elsewhere) wins; otherwise the generated
+// password of the server Crow installed here, which is only ever sent to a loopback URL.
+const ACTUAL_PASSWORD = effectivePassword(ACTUAL_URL, process.env);
 const ACTUAL_SYNC_ID = process.env.ACTUAL_SYNC_ID || "";
 
 let authToken = null;
@@ -34,6 +38,8 @@ async function getToken() {
   const timeout = setTimeout(() => controller.abort(), 10000);
 
   try {
+    // A new server Crow deployed has no password yet: set the generated one first.
+    await ensureBootstrapped(ACTUAL_URL, ACTUAL_PASSWORD);
     const res = await fetch(`${ACTUAL_URL}/account/login`, {
       method: "POST",
       signal: controller.signal,

@@ -27,16 +27,7 @@ Install Miniflux as a Crow bundle. This runs Miniflux with PostgreSQL in Docker 
 
 Or install from the **Extensions** panel in the Crow's Nest.
 
-After installation, set your admin password:
-
-```bash
-# In your .env file
-MINIFLUX_ADMIN_PASSWORD=your-secure-password
-```
-
-Restart the bundle for changes to take effect:
-
-> "Crow, restart the Miniflux bundle"
+Crow generates the admin password at install and saves it in **Settings** > **Passwords** (this machine only; username `admin` unless you set `MINIFLUX_ADMIN_USER`).
 
 Miniflux will be available at `http://your-server:8085`. Log in with the admin account, then generate an API key from **Settings** > **API Keys**.
 

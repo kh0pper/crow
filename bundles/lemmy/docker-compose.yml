@@ -80,8 +80,14 @@ services:
       RUST_BACKTRACE: "full"
       LEMMY_DATABASE_URL: "postgres://lemmy:${LEMMY_DB_PASSWORD}@postgres:5432/lemmy"
       LEMMY_CONFIG_LOCATION: /config/config.hjson
-    volumes:
-      - ./config:/config:ro
+      # Secrets reach the entrypoint through the environment and are expanded by its
+      # shell ($${...}), so the script text that stays in PID 1's command line (init: true)
+      # holds variable names, never values.
+      CROW_LEMMY_DB_PASSWORD: "${LEMMY_DB_PASSWORD}"
+      CROW_LEMMY_PICTRS_API_KEY: "${LEMMY_PICTRS_API_KEY}"
+      CROW_LEMMY_ADMIN_PASSWORD: "${LEMMY_ADMIN_PASSWORD}"
+    # No ./config mount: the entrypoint below writes /config/config.hjson from env on
+    # every start, and a read-only mount made that write (and the start) fail.
     entrypoint:
       - sh
       - -c
@@ -98,11 +104,11 @@ services:
             port: 5432
             database: lemmy
             user: lemmy
-            password: "${LEMMY_DB_PASSWORD}"
+            password: "$${CROW_LEMMY_DB_PASSWORD}"
           }
           pictrs: {
             url: "http://pictrs:8080/"
-            api_key: "${LEMMY_PICTRS_API_KEY}"
+            api_key: "$${CROW_LEMMY_PICTRS_API_KEY}"
           }
           federation: {
             enabled: ${LEMMY_FEDERATION_ENABLED:-true}
@@ -110,7 +116,7 @@ services:
           }
           setup: {
             admin_username: "admin_pending"
-            admin_password: "change_me_via_web_setup"
+            admin_password: "$${CROW_LEMMY_ADMIN_PASSWORD}"
             site_name: "Crow Lemmy"
           }
           captcha: { enabled: true, difficulty: medium }

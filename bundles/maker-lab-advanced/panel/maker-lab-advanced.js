@@ -22,7 +22,7 @@ export default {
 
     const port = process.env.MLA_HTTP_PORT || "8088";
     const hubUrl = `http://${req.hostname || "localhost"}:${port}`;
-    const adminUser = process.env.MLA_ADMIN_USER || "(MLA_ADMIN_USER unset — set in .env before first launch)";
+    const adminUser = process.env.MLA_ADMIN_USER || "admin";
 
     // Short liveness probe so the operator sees status at a glance.
     async function probe(url, timeoutMs) {
@@ -58,7 +58,7 @@ export default {
         <section class="ma-card">
           <h2>First-boot checklist</h2>
           <ol>
-            <li>Set <code>MLA_ADMIN_USER</code> and <code>MLA_ADMIN_PASSWORD</code> in <code>.env</code>. Restart the bundle if you changed them.</li>
+            <li>Crow generated the admin password at install: it is in Settings → Passwords (username <code>admin</code> unless you set <code>MLA_ADMIN_USER</code>).</li>
             <li>Navigate to <code>${escapeHtml(hubUrl)}/hub/signup</code>, sign up with the admin username + password from step 1. Because that username is in the hub's <code>admin_users</code> list, the account auto-authorizes — no self-approval required.</li>
             <li>Admin view at <code>${escapeHtml(hubUrl)}/hub/admin</code> lists users + server status.</li>
             <li>Learner signups go to <code>${escapeHtml(hubUrl)}/hub/authorize</code> for admin approval before they can spawn a server.</li>

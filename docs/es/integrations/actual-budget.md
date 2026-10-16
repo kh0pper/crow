@@ -27,16 +27,7 @@ Instala Actual Budget como un bundle de Crow. Esto ejecuta Actual Budget en Dock
 
 O instálalo desde el panel de **Extensiones** en el Crow's Nest.
 
-Después de la instalación, Actual Budget estará disponible en `http://tu-servidor:5006`. En tu primera visita a la interfaz web, se te pedirá establecer una contraseña del servidor. Usa la misma contraseña que `ACTUAL_PASSWORD` en tu archivo `.env`:
-
-```bash
-# En tu archivo .env
-ACTUAL_PASSWORD=tu-contrasena-del-servidor
-```
-
-Reinicia el bundle para que los cambios surtan efecto:
-
-> "Crow, reinicia el bundle de Actual Budget"
+Después de la instalación, Actual Budget estará disponible en `http://tu-servidor:5006`. Crow genera la contraseña del servidor, la establece en el servidor nuevo justo después de instalar y la guarda en **Ajustes** > **Contraseñas** (solo en esta máquina). Inicia sesión en Actual con ella y crea un presupuesto.
 
 ### Opción B: Conectar a Actual Budget existente
 

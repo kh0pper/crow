@@ -4,7 +4,7 @@
     {
       "id": "actual-budget",
       "name": "Actual Budget",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Privacy-first personal finance — track spending, manage budgets, and view financial reports",
       "type": "bundle",
       "author": "Crow",
@@ -27,7 +27,8 @@
         ],
         "envKeys": [
           "ACTUAL_URL",
-          "ACTUAL_PASSWORD"
+          "ACTUAL_PASSWORD",
+          "ACTUAL_SERVER_PASSWORD"
         ]
       },
       "panel": "panel/actual-budget.js",
@@ -36,11 +37,12 @@
         "skills/actual-budget.md"
       ],
       "requires": {
-        "env": [
-          "ACTUAL_PASSWORD"
-        ],
         "min_ram_mb": 256,
         "min_disk_mb": 200
+      },
+      "postInstall": {
+        "script": "scripts/set-server-password.sh",
+        "timeout_s": 180
       },
       "env_vars": [
         {
@@ -51,9 +53,19 @@
         },
         {
           "name": "ACTUAL_PASSWORD",
-          "description": "Actual server password",
-          "required": true,
+          "description": "Password of an Actual server you already run elsewhere. Leave it empty for the Actual server Crow installs on this machine: Crow generates that one's password.",
+          "required": false,
           "secret": true
+        },
+        {
+          "name": "ACTUAL_SERVER_PASSWORD",
+          "description": "Password of the Actual server Crow installs on this machine. Crow generates it, saves it in Settings → Passwords (this machine only) and sets it on the new server right after install. Log in to Actual with it.",
+          "required": true,
+          "secret": true,
+          "generate": "secret",
+          "keychain": true,
+          "keychain_label": "server password",
+          "keychain_url": "http://localhost:5006/"
         },
         {
           "name": "ACTUAL_SYNC_ID",
@@ -69,7 +81,7 @@
         "path": "/",
         "label": "Actual Budget"
       },
-      "notes": "Privacy-first budgeting. Data stays local. Set ACTUAL_PASSWORD to match your Actual server password.",
+      "notes": "Privacy-first budgeting. Data stays local. Crow sets a generated password on the Actual server it installs (Settings → Passwords). To use an Actual server you already run, set ACTUAL_URL and ACTUAL_PASSWORD instead.",
       "official": true
     },
     {
@@ -2505,7 +2517,7 @@
     {
       "id": "lemmy",
       "name": "Lemmy",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Federated link aggregator and discussion platform over ActivityPub — Reddit-alternative on the fediverse. Posts, comments, communities, votes; remote Lemmy/Mastodon/Kbin users can follow your communities and comment cross-server.",
       "type": "bundle",
       "author": "Crow",
@@ -2576,6 +2588,16 @@
           "required": true,
           "secret": true,
           "generate": "secret"
+        },
+        {
+          "name": "LEMMY_ADMIN_PASSWORD",
+          "description": "Password of the first Lemmy admin (username admin_pending). Crow generates it at install and saves it in Settings → Passwords (this machine only); Lemmy creates the admin with it on first start.",
+          "required": true,
+          "secret": true,
+          "generate": "secret",
+          "keychain": true,
+          "keychain_label": "admin password",
+          "keychain_username": "admin_pending"
         },
         {
           "name": "LEMMY_JWT",
@@ -2941,7 +2963,7 @@
     {
       "id": "maker-lab-advanced",
       "name": "Maker Lab Advanced",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "description": "Self-hosted JupyterHub for older learners (ages 9+) — single-machine multi-user Python notebooks with kid-safe kernel defaults and an AI pair-programmer. Sibling bundle to maker-lab: Blockly is the 5-9 on-ramp, Scratch is the 8+ step-up, this is the 9+ landing zone with real Python.",
       "type": "bundle",
       "author": "Crow",
@@ -2982,13 +3004,18 @@
         {
           "name": "MLA_ADMIN_USER",
           "description": "Initial JupyterHub admin username. Gets first login; add more admins from the UI after setup.",
-          "required": true
+          "required": true,
+          "default": "admin"
         },
         {
           "name": "MLA_ADMIN_PASSWORD",
-          "description": "Initial admin password. Set via NativeAuthenticator on first boot; change via the JupyterHub UI afterward.",
+          "description": "Initial admin password. Crow generates it at install and saves it in Settings → Passwords (this machine only); NativeAuthenticator sets it on first boot. Change it in the JupyterHub UI afterward if you like.",
           "required": true,
-          "secret": true
+          "secret": true,
+          "generate": "secret",
+          "keychain": true,
+          "keychain_label": "admin password",
+          "keychain_username": "${MLA_ADMIN_USER}"
         },
         {
           "name": "MLA_HTTP_PORT",
@@ -3772,7 +3799,7 @@
     {
       "id": "miniflux",
       "name": "Miniflux",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Minimalist RSS reader — subscribe to feeds, read articles, and track news",
       "type": "bundle",
       "author": "Crow",
@@ -3831,9 +3858,14 @@
         },
         {
           "name": "MINIFLUX_ADMIN_PASSWORD",
-          "description": "Admin password for Docker setup",
+          "description": "Admin password for the Miniflux web app. Crow generates it at install and saves it in Settings → Passwords (this machine only); Miniflux creates the admin with it on first start.",
           "required": true,
-          "secret": true
+          "secret": true,
+          "generate": "secret",
+          "keychain": true,
+          "keychain_label": "admin password",
+          "keychain_username": "${MINIFLUX_ADMIN_USER}",
+          "keychain_url": "${MINIFLUX_URL}"
         },
         {
           "name": "MINIFLUX_DB_PASSWORD",
@@ -3851,7 +3883,7 @@
         "path": "/",
         "label": "Miniflux"
       },
-      "notes": "Self-host via Docker (set MINIFLUX_ADMIN_PASSWORD) or connect to existing (set MINIFLUX_URL + MINIFLUX_API_KEY).",
+      "notes": "Self-host via Docker (Crow generates the admin password and saves it in Settings → Passwords) or connect to an existing server (set MINIFLUX_URL + MINIFLUX_API_KEY). Either way, create an API key in Miniflux (Settings → API Keys) and paste it into MINIFLUX_API_KEY.",
       "official": true
     },
     {

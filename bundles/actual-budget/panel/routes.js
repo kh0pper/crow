@@ -7,9 +7,36 @@
  */
 
 import { Router } from "express";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 
 const ACTUAL_URL = () => (process.env.ACTUAL_URL || "http://localhost:5006").replace(/\/+$/, "");
-const ACTUAL_PASSWORD = () => process.env.ACTUAL_PASSWORD || "";
+
+function isLoopbackUrl(url) {
+  try {
+    const host = new URL(url).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    return host === "localhost" || host === "::1" || /^127(?:\.\d{1,3}){3}$/.test(host);
+  } catch {
+    return false;
+  }
+}
+
+/** The generated password of the Actual server Crow installed here, from THIS instance's
+ * installed copy (co-hosted instances each have their own CROW_HOME). */
+function generatedServerPassword() {
+  try {
+    const envPath = join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "actual-budget", ".env");
+    const line = readFileSync(envPath, "utf8").split("\n").reverse().find((l) => l.startsWith("ACTUAL_SERVER_PASSWORD="));
+    return line ? line.slice("ACTUAL_SERVER_PASSWORD=".length).trim().replace(/^"(.*)"$/, "$1") : "";
+  } catch {
+    return "";
+  }
+}
+
+// Typed ACTUAL_PASSWORD (a server you run elsewhere) wins; the generated one is sent only
+// to a loopback URL, so it never leaves this machine.
+const ACTUAL_PASSWORD = () => process.env.ACTUAL_PASSWORD || (isLoopbackUrl(ACTUAL_URL()) ? generatedServerPassword() : "");
 const ACTUAL_SYNC_ID = () => process.env.ACTUAL_SYNC_ID || "";
 
 let authToken = null;
