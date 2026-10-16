@@ -47,12 +47,14 @@ test("no requestAnimationFrame and no video/iframe creation anywhere in the page
 // Pi launched with ?agent=1 (DV13), bar-link.js by a dashboard session frame opened with ?bar=1 (B3; a Pi never fetches it).
 const LAZY = new Set(["agent-link.js", "speaker-view.js", "bar-link.js"]);
 
+// 88 → 90 KB (2026-10-16, B3 PR-C rebased on queue item 21c): the Android audio-mode guard (#500) took ~2.9 KB of the
+// headroom kept for the bar's eager part (~2 KB: the ?bar=1 gate, the release/describe hooks); the bar link itself stays LAZY.
 // 82 → 88 KB (2026-10-15, queue item 21): the B3 mic-release start gate now, the player-bar link next (~+7 KB once, cached on a Pi 3).
 // 80 → 82 KB (2026-10-15, queue item 18): the page was at 80,853 of 81,920 bytes; the DV13 speaker chip's eager part
 // (its slot, its CSS and the ?agent=1 gate, ~1.2 KB) does not fit. The chip's code itself stays out of the count (LAZY).
-test("page weight ≤ 88 KB (html + css + eagerly loaded js, uncompressed); the agent-only and bar-only modules are loaded on demand", () => {
+test("page weight ≤ 90 KB (html + css + eagerly loaded js, uncompressed); the agent-only and bar-only modules are loaded on demand", () => {
   const total = files.filter((f) => !LAZY.has(f)).reduce((n, f) => n + statSync(new URL(f, PUB)).size, 0);
-  assert.ok(total <= 88 * 1024, `page is ${total} bytes`);
+  assert.ok(total <= 90 * 1024, `page is ${total} bytes`);
   for (const f of files.filter((x) => x.endsWith(".js"))) {
     for (const m of read(f).matchAll(/from\s+["']\.\/([\w.-]+)["']/g)) assert.ok(!LAZY.has(m[1]), `${f} imports ${m[1]} eagerly`);
   }
@@ -519,6 +521,20 @@ test("B3 bar mode (review 1): crowKioskRelease keeps the media and RETURNS {volu
   const release = src.slice(src.indexOf("function releaseAudio("), src.indexOf("function setBird("));
   assert.match(release, /if \(!keepMedia\) mediaView\?\.apply\(\{ action: "stop" \}\);/);
   assert.match(src, /window\.addEventListener\("pagehide", \(\) => releaseAudio\(\{ keepMedia: BAR \}\)\);/);
+});
+
+test("B3 bar mode x item 21c: the Android audio-mode guard hears every capture end in bar mode too (the bar's audio plays on after the frame is gone)", () => {
+  const src = read("kiosk.js");
+  // Bar media plays in the parent's <audio>, never through this frame's AudioContext: the guard only needs the frame's
+  // capture start/end signals, which ride the mic gate whatever the mode. Closing the overlay must still say the capture ended.
+  const release = src.slice(src.indexOf("function releaseAudio("), src.indexOf("function setBird("));
+  assert.match(release, /\n  micGate\.release\(\); captureEnded\(\);\n/, "captureEnded is not behind keepMedia");
+  const block = src.slice(src.indexOf("window.crowKioskRelease"), src.indexOf("document.addEventListener(\"keydown\""));
+  assert.ok(block.indexOf("releaseAudio({ keepMedia: BAR })") < block.indexOf("ctx?.close()"), "the end is posted before the context closes");
+  assert.doesNotMatch(src, /if \(!BAR\)[^\n]*captureEnded|BAR[^\n]*\?[^\n]*captureEnded/, "no bar-mode branch skips a guard signal");
+  const mv = src.slice(src.indexOf("mediaView = createMediaView({"));
+  assert.match(mv, /canStart: \(\) => \{ const g = mediaStartGate\(/, "a bar start waits for the same mic release + settle as in-page audio");
+  assert.doesNotMatch(read("bar-link.js"), /AudioContext|CrowAudioPort/, "the bar link opens no audio stream of its own");
 });
 
 test("bar-link.js stays small and posts to this origin only", () => {
