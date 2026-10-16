@@ -40,6 +40,9 @@ const STRING_KEYS = {
   autoNow: "botbuilder.voiceUseAutoNow",
   autoNone: "botbuilder.voiceUseAutoNone",
   autoKeep: "botbuilder.voiceUseAutoKeep",
+  autoWould: "botbuilder.voiceUseAutoWould",
+  autoWouldNone: "botbuilder.voiceUseAutoWouldNone",
+  moveFrom: "botbuilder.voiceUseMoveFrom",
   already: "botbuilder.voiceUseAlready",
   kioskLink: "botbuilder.voiceUseKioskLink",
   nextOpen: "botbuilder.voiceUseNextOpen",
@@ -96,7 +99,7 @@ const CLIENT = `(function(){
   try { S = JSON.parse(document.getElementById('btb-vu-s').textContent) || {}; } catch (e) { S = {}; }
   var st = window.__btbVoiceUse;
   if (!st) {
-    st = window.__btbVoiceUse = { data: null, bot: null, name: '', trigger: null, busy: false, init: {}, explicit: false, results: {}, S: S };
+    st = window.__btbVoiceUse = { data: null, bot: null, name: '', trigger: null, busy: false, gen: 0, init: {}, explicit: false, results: {}, S: S };
     bind();
   }
   st.S = S;
@@ -112,6 +115,8 @@ const CLIENT = `(function(){
   /** fit by a display's memory setting; an older listing without fit_memory uses the plain fit. */
   function fitOf(b, mem){ if (!b) return null; return mem && b.fit_memory !== undefined ? b.fit_memory : b.fit; }
   function dashOn(){ var d = st.data; return !!(d && d.dashboard_voice && d.dashboard_voice.available); }
+  /** Automatic answers when nothing is chosen, or when the chosen bot is off/gone (the server then falls back: effective differs). */
+  function dashAuto(dv){ return !dv.bot_id || dv.bot_id !== dv.effective_bot_id; }
   function usable(){ var d = st.data; return !!(d && (dashOn() || d.devices.length)); }
 
   /** Read the Kiosk listing (once per render, on opening the dialog, after a save). Never throws. */
@@ -136,7 +141,7 @@ const CLIENT = `(function(){
     each(document.querySelectorAll('.btb-voice[data-voice-bot]'), function(line){
       var id = line.getAttribute('data-voice-bot');
       var parts = [];
-      if (d && dashOn() && d.dashboard_voice.effective_bot_id === id) parts.push(S.phoneDash + (d.dashboard_voice.bot_id ? '' : ' ' + S.automatic));
+      if (d && dashOn() && d.dashboard_voice.effective_bot_id === id) parts.push(S.phoneDash + (dashAuto(d.dashboard_voice) ? ' ' + S.automatic : ''));
       if (d) each(d.devices, function(x){ if (x.bound_bot_id === id) parts.push(x.name || x.id); });
       var srv = line.getAttribute('data-voice-srv') === '1';
       var kk = line.querySelector('.btb-voice-kk');
@@ -176,7 +181,7 @@ const CLIENT = `(function(){
     if (dashOn()) {
       var dv = d.dashboard_voice, cur = dv.effective_bot_id === st.bot;
       st.explicit = cur && dv.bot_id === st.bot;
-      var sub = dv.bot_id ? (dv.effective_bot_id ? fill(S.now, { name: nameOf(dv.effective_bot_id) }) : S.nobody)
+      var sub = !dashAuto(dv) ? fill(S.now, { name: nameOf(dv.effective_bot_id) })
         : (dv.effective_bot_id ? fill(S.autoNow, { name: nameOf(dv.effective_bot_id) }) : S.autoNone);
       var lv = fitOf(me, false);
       var row = addRow(box, 'dash', S.phoneDash, sub, cur, !cur && lv === 'too_large');
@@ -189,7 +194,10 @@ const CLIENT = `(function(){
       each(d.devices, function(x){
         var key = 'dev:' + x.id, cur = x.bound_bot_id === st.bot;
         var lv = fitOf(me, !!(x.kiosk_settings || {}).memory_integration);
-        var row = addRow(box, key, x.name || x.id, x.bound_bot_id ? fill(S.now, { name: nameOf(x.bound_bot_id) }) : S.nobody, cur, cur || lv === 'too_large');
+        var off = cur || lv === 'too_large';
+        // Held by another bot and tickable: say what ticking does (it moves the display), not just who has it.
+        var sub = !x.bound_bot_id ? S.nobody : fill(off ? S.now : S.moveFrom, { name: nameOf(x.bound_bot_id) });
+        var row = addRow(box, key, x.name || x.id, sub, cur, off);
         if (cur) {
           var why = el('span', 'btb-vu-sub', S.already + ' ');
           var a = el('a', null, S.kioskLink); a.setAttribute('href', '/dashboard/kiosk');
@@ -216,7 +224,10 @@ const CLIENT = `(function(){
     st.bot = btn.getAttribute('data-bot-id');
     st.name = btn.getAttribute('data-name') || st.bot;
     st.trigger = closeMenu(btn) || btn;
-    st.results = {}; st.busy = false; st.touched = false;
+    // A new generation: a save chain still running for the previous open keeps st.busy (Save stays
+    // blocked until it ends) but its results are dropped, never shown on this dialog.
+    st.gen++; st.results = {}; st.touched = false;
+    var go = $('btb-vu-save'); if (go) go.disabled = st.busy;
     var h = $('btb-vu-h'); if (h) h.textContent = fill(st.S.title, { name: st.name });
     var ch = $('btb-vu-ch-link'); if (ch) ch.setAttribute('href', '/dashboard/bot-builder?bot=' + encodeURIComponent(st.bot) + '&tab=basics');
     var status = $('btb-vu-status'); if (status) status.textContent = '';
@@ -224,7 +235,8 @@ const CLIENT = `(function(){
     dlg.hidden = false;
     firstFocus();
     // The card line may be stale (another session): read it again, and redraw unless the operator already started.
-    load().then(function(){ if (!st.touched && !dlg.hidden) { renderRows(); firstFocus(); } });
+    var gen = st.gen;
+    load().then(function(){ if (gen === st.gen && !st.touched && !dlg.hidden) { renderRows(); firstFocus(); } });
   }
   function close(refocus){
     var dlg = $('btb-vu');
@@ -262,16 +274,22 @@ const CLIENT = `(function(){
     var status = $('btb-vu-status');
     if (!ops.length) { if (status) status.textContent = st.S.nothing; return; }
     st.busy = true;
+    var gen = st.gen;
     var go = $('btb-vu-save'); if (go) go.disabled = true;
     st.results = {};
     function next(i){
       if (i >= ops.length) return load().then(function(){
-        st.busy = false; st.touched = false;
+        st.busy = false;
         if (go) go.disabled = false;
+        if (gen !== st.gen) return; // the dialog was reopened meanwhile: leave its rows alone
+        st.touched = false;
         if (status) status.textContent = '';
         renderRows();
       });
-      return post(ops[i].url, ops[i].body).then(function(r){ st.results[ops[i].key] = r.ok ? st.S.saved : refusal(r.j); return next(i + 1); });
+      return post(ops[i].url, ops[i].body).then(function(r){
+        if (gen === st.gen) st.results[ops[i].key] = r.ok ? st.S.saved : refusal(r.j);
+        return next(i + 1);
+      });
     }
     next(0);
   }
@@ -297,11 +315,17 @@ const CLIENT = `(function(){
       if (!t || !t.getAttribute || !t.getAttribute('data-vu-key')) return;
       st.touched = true;
       // An automatic-only pick cannot be unticked: Automatic would choose this bot again. Say so instead.
-      if (t.getAttribute('data-vu-key') === 'dash' && !t.checked && st.init.dash && !st.explicit) {
+      if (t.getAttribute('data-vu-key') !== 'dash' || !st.init.dash) return;
+      var row = t.closest('[data-vu-row]');
+      var m = row ? row.querySelector('.btb-vu-msg') : null;
+      if (!t.checked && !st.explicit) {
         t.checked = true;
-        var row = t.closest('[data-vu-row]');
-        var m = row ? row.querySelector('.btb-vu-msg') : null;
         if (m) m.textContent = fill(st.S.autoKeep, { name: st.name });
+      } else if (m) {
+        // Unticking an explicit choice goes back to Automatic, which may pick this same bot: say whom, before saving.
+        var dv = (st.data && st.data.dashboard_voice) || {};
+        var known = Object.prototype.hasOwnProperty.call(dv, 'auto_bot_id');
+        m.textContent = t.checked || !known ? '' : (dv.auto_bot_id ? fill(st.S.autoWould, { name: nameOf(dv.auto_bot_id) }) : st.S.autoWouldNone);
       }
     });
     document.addEventListener('keydown', function(ev){

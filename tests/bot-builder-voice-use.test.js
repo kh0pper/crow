@@ -58,6 +58,7 @@ function page({ cards = [["a-one", "Alpha One", ["Office glasses"]], ["b-two", "
   const fetch = async (url, opts = {}) => {
     calls.push({ url, method: opts.method || "GET", body: opts.body ? JSON.parse(opts.body) : undefined });
     const r = queue.length ? queue.shift() : {};
+    if (r.wait) await r.wait;
     const status = r.status || 200;
     const payload = r.body !== undefined ? r.body : listing();
     return {
@@ -120,6 +121,19 @@ test("card line: an explicit choice reads without '(automatic)'", async () => {
   assert.ok(!p.line("a-one").textContent.includes(T("botbuilder.voicePhoneDash")));
 });
 
+test("card line + dialog: a chosen bot that is off (bot_id set, effective differs) reads as Automatic", async () => {
+  const off = listing({ dashboard_voice: { available: true, bot_id: "zz-off", effective_bot_id: "a-one", auto_bot_id: "a-one" } });
+  const p = page({ replies: [{ body: off }, { body: off }] });
+  await p.flush();
+  assert.ok(p.line("a-one").textContent.includes(`${T("botbuilder.voicePhoneDash")} ${T("botbuilder.voiceAutomatic")}`), "the card says (automatic)");
+  await p.open("a-one");
+  assert.ok(p.row("dash").textContent.includes("Automatic — now Alpha One"), "the dialog says Automatic — now X");
+  assert.ok(!p.row("dash").textContent.includes("now: Alpha One"));
+  // and it cannot be unticked (Automatic picks it), as with any automatic pick
+  p.box("dash").checked = false; p.change(p.box("dash"));
+  assert.equal(p.box("dash").checked, true);
+});
+
 test("no kiosk listing (404, a login page, a redirect, a network error, available:false with no displays): kiosk parts and the ⋯ item stay hidden", async () => {
   for (const reply of [{ status: 404, body: { error: "not_found" } }, { type: "text/html", body: "{}" }, { redirected: true }, { body: listing({ devices: [], dashboard_voice: { available: false } }) }]) {
     const p = page({ replies: [reply] });
@@ -161,7 +175,8 @@ test("dialog: opens for the bot from its ⋯ item, names it, re-reads the listin
   assert.ok(p.dlg().textContent.includes(T("botbuilder.voiceUseDisplaysNow")), "I5: displays switch right away");
   assert.equal(p.box("dev:kiosk-1").checked, false);
   assert.equal(p.box("dev:kiosk-1").disabled, false);
-  assert.ok(p.row("dev:kiosk-1").textContent.includes("now: Beta Two"));
+  assert.ok(p.row("dev:kiosk-1").textContent.includes("Ticking moves it from Beta Two"), "a display held by another bot says ticking moves it");
+  assert.ok(!p.row("dev:kiosk-1").textContent.includes("now: Beta Two"));
   const ch = p.document.getElementById("btb-vu-ch-link");
   assert.equal(ch.getAttribute("href"), "/dashboard/bot-builder?bot=a-one&tab=basics", "glasses/companion: read-only, a link to the channel settings");
   assert.ok(p.dlg().textContent.includes(T("botbuilder.voiceUseChannels")));
@@ -220,6 +235,60 @@ test("dialog: checking Phone & dashboard POSTs {bot_id}; unchecking an explicit 
   await q.save();
   assert.deepEqual(q.posts(), [{ url: DASH_VOICE_PATH, method: "POST", body: dashAutoBody() }]);
   assert.ok(q.row("dash").textContent.includes("Automatic — now Alpha One"), "the row then says who Automatic picks");
+});
+
+test("dialog: unticking an explicit choice says before saving whom Automatic would pick (auto_bot_id), and re-ticking clears it", async () => {
+  const sameBot = listing({ dashboard_voice: { available: true, bot_id: "b-two", effective_bot_id: "b-two", auto_bot_id: "b-two" } });
+  const p = page({ replies: [{ body: sameBot }, { body: sameBot }] });
+  await p.flush();
+  await p.open("b-two");
+  p.box("dash").checked = false; p.change(p.box("dash"));
+  assert.equal(p.box("dash").checked, false, "an explicit choice can be unticked");
+  assert.ok(p.row("dash").textContent.includes("Back to Automatic, which would pick Beta Two"));
+  assert.deepEqual(p.posts(), [], "nothing is saved yet");
+  p.box("dash").checked = true; p.change(p.box("dash"));
+  assert.ok(!p.row("dash").textContent.includes("Back to Automatic"));
+
+  const none = listing({ dashboard_voice: { available: true, bot_id: "b-two", effective_bot_id: "b-two", auto_bot_id: null } });
+  const q = page({ replies: [{ body: none }, { body: none }] });
+  await q.flush();
+  await q.open("b-two");
+  q.box("dash").checked = false; q.change(q.box("dash"));
+  assert.ok(q.row("dash").textContent.includes(T("botbuilder.voiceUseAutoWouldNone")));
+
+  // An older listing without auto_bot_id: no guess.
+  const old = listing({ dashboard_voice: { available: true, bot_id: "b-two", effective_bot_id: "b-two" } });
+  const r = page({ replies: [{ body: old }, { body: old }] });
+  await r.flush();
+  await r.open("b-two");
+  r.box("dash").checked = false; r.change(r.box("dash"));
+  assert.ok(!r.row("dash").textContent.includes("Back to Automatic"));
+});
+
+test("dialog: a save still running when the dialog is reopened for another bot — its results stay off the new dialog, and Save stays blocked until it ends", async () => {
+  let release;
+  const wait = new Promise((r) => { release = r; });
+  const p = page({ replies: [{}, {}, { wait, body: { ok: true, device: {} } }] });
+  await p.flush();
+  await p.open("a-one");
+  p.box("dev:kiosk-1").checked = true; p.change(p.box("dev:kiosk-1"));
+  await p.save();
+  assert.equal(p.posts().length, 1, "the first save is in flight");
+  p.click(p.dlg().querySelector("[data-vu-close]"));
+  await p.open("d-lean");
+  assert.equal(p.document.getElementById("btb-vu-save").disabled, true, "Save stays blocked while the old chain runs");
+  p.box("dash").checked = true; p.change(p.box("dash"));
+  await p.save();
+  assert.equal(p.posts().length, 1, "no second save runs at the same time");
+  release();
+  await p.flush();
+  assert.ok(!p.row("dev:kiosk-1").textContent.includes(T("botbuilder.voiceUseSaved")), "the old chain's result does not land on Dee Lean's dialog");
+  assert.equal(p.document.getElementById("btb-vu-h").textContent, "Use Dee Lean for voice");
+  assert.equal(p.box("dash").checked, true, "the new dialog's unsaved tick survives");
+  assert.equal(p.document.getElementById("btb-vu-save").disabled, false, "Save is free once the old chain ends");
+  p.queue.push({ body: { ok: true } });
+  await p.save();
+  assert.deepEqual(p.posts()[1], { url: DASH_VOICE_PATH, method: "POST", body: dashBody("d-lean") });
 });
 
 test("dialog: unchecking an automatic-only pick is a no-op with a hint (nothing is posted)", async () => {
