@@ -31,6 +31,14 @@ from wakegate import WakeGate  # noqa: E402
 from watchdog import PageWatchdog  # noqa: E402
 
 log = logging.getLogger("crow-kiosk-agent")
+# bt_state reasons worth a line on the Pi; BtSpeaker publishes only when one changes, so each logs once.
+REASON_LOG = {
+    "not_paired": "not paired with this controller: pair it again (pi-setup)",
+    "adapter_blocked": "the Bluetooth adapter is blocked (rfkill)",
+    "adapter_off": "the Bluetooth adapter is powered off",
+    "no_adapter": "no Bluetooth controller is available",
+    "no_answer": "bluetoothctl did not answer",
+}
 CHUNK_BYTES = 1280 * 2
 MAX_QUEUED_CHUNKS = (
     3  # > 240 ms behind real time: drop the oldest audio rather than lag further
@@ -181,6 +189,9 @@ class Agent:
         what = "connected" if state["connected"] else ("link up, no audio sink" if state.get("link") else "disconnected")
         if state.get("hw_fault"):
             what += ", Bluetooth hardware needs a restart"
+        why = REASON_LOG.get(state.get("reason"))
+        if why:
+            what += f" ({why})"
         extra = ""
         if "retry_window" in state:
             extra = " (retry window open)" if state["retry_window"] else " (no retry window)"

@@ -2,7 +2,7 @@
 
 The page (served from the Crow origin) connects to ws://127.0.0.1:8770.
 Agent -> page: agent (status on connect), wake, touch_while_dark,
-               bt_state {configured, connected, name, reconnecting, result?}.
+               bt_state {configured, connected, link, hw_fault, name, reconnecting, reason, result?, req?}.
 Page -> agent: display {on}, speaking {on}, media {on, level}, bt_reconnect {}.
 Everything else is refused. Frames are small JSON objects.
 """
@@ -108,7 +108,7 @@ def touch_while_dark_msg():
 
 
 def bt_state_msg(state, req=None):
-    allowed = {"type", "configured", "connected", "link", "hw_fault", "name", "reconnecting", "result"}
+    allowed = {"type", "configured", "connected", "link", "hw_fault", "name", "reconnecting", "reason", "result"}
     out = {k: v for k, v in state.items() if k in allowed}
     out["type"] = "bt_state"
     if req is not None:

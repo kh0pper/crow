@@ -4,7 +4,13 @@
 (`bluez_output.<MAC_with_underscores>…`). A link without a sink is silence, so it counts as disconnected
 (the page then holds captions).
 
-- Watching: every `check_s` (30 s) one `info` + one sink check. Watching never connects.
+- Watching: every `check_s` (30 s) one `info` + one sink check, plus one `show` (the default controller)
+  while the speaker is not connected. Watching never connects.
+- `reason` in bt_state says why the speaker is not connected (null when it is): adapter_blocked (rfkill),
+  adapter_off, no_adapter, not_paired, no_sink (link up, no PipeWire sink), hw_fault, no_answer (bluetoothctl
+  timed out) or off_or_out_of_range. The controller is checked BEFORE `info`'s "not available" is read as
+  not_paired: a bond held by another, powered-off controller also reads "not available", and its fix is
+  turning Bluetooth on, not pairing again. A reason change is published (and logged) once.
 - Background retry: only inside a window of `retry_window_s` (10 min) that opens at agent start and when
   the agent sees the speaker drop (connected -> not connected). Inside it, connect attempts at 0 s, then
   after gaps of 30, 60, 120 and 240 s; then it stops. After that, the speaker's own auto-connect (it
@@ -13,8 +19,8 @@
 - Manual reconnect (page button, or the Kiosk panel through the page): one attempt now, at most one per
   `manual_min_interval_s` (15 s), refused with `busy` while any attempt or check runs.
 - One asyncio.Lock covers every attempt and check, so background and manual work never overlap.
-- Every attempt (info <= 5 s, connect <= 15 s, info <= 3 s, sink check <= 2 s) is also cut off as a whole
-  at ATTEMPT_DEADLINE_S = 25 s. The page waits 30 s for an answer and the server 35 s, so an answer always
+- Every attempt (info <= 5 s, show <= 2 s, connect <= 15 s, info <= 3 s, sink check <= 2 s) is also cut off
+  as a whole at ATTEMPT_DEADLINE_S = 27 s. The page waits 30 s for an answer and the server 35 s, so an answer always
   arrives before either gives up (a test checks this ordering).
 - Only `bluetoothctl info|connect <the MAC from agent.json>`; nothing scans, pairs, trusts or removes. The
   MAC never leaves the Pi: bt_state carries the speaker's name only.
@@ -35,17 +41,34 @@ import re
 from hw import parse_bt_info, valid_mac
 
 INFO_TIMEOUT_S = 5
+SHOW_TIMEOUT_S = 2
 CONNECT_TIMEOUT_S = 15
 REINFO_TIMEOUT_S = 3
 SINK_TIMEOUT_S = 2
 ATTEMPT_DEADLINE_S = (
-    25  # < the page's btReconnect timeout (30 s) < the server relay (35 s)
+    27  # < the page's btReconnect timeout (30 s) < the server relay (35 s)
 )
 RECOVERY_REQUEST = "/run/crow-kiosk/bt-recover.request"
 RECOVERY_STATE = "/run/crow-kiosk/bt-recover.state"
 UNANSWERED_BEFORE_RECOVERY = 3
 RECOVERY_MIN_INTERVAL_S = 600
 RESULTS = ("ok", "failed", "busy", "rate_limited", "not_paired", "not_configured")
+REASONS = ("adapter_blocked", "adapter_off", "no_adapter", "not_paired", "no_sink", "hw_fault", "no_answer",
+           "off_or_out_of_range")
+_UNPUBLISHED = object()
+
+
+def parse_bt_adapter(text):
+    """The default controller from `bluetoothctl show`: ok, adapter_blocked, adapter_off or no_adapter.
+    Output without a power line is no evidence either way, so it reads as ok."""
+    if re.search(r"No default controller available", text):
+        return "no_adapter"
+    if re.search(r"^\s*PowerState:\s*off-blocked\s*$", text, re.M):
+        return "adapter_blocked"
+    m = re.search(r"^\s*Powered:\s*(yes|no)\s*$", text, re.M)
+    if m and m.group(1) == "no":
+        return "adapter_off"
+    return "ok"
 
 
 def parse_bt_name(text):
@@ -181,8 +204,17 @@ class BtSpeaker:
         self.unanswered = 0
         self.last_recovery_request = None
         self.hw_fault = False
+        self.cause = None          # why the last observation found no speaker (see reason())
+        self.last_reason = _UNPUBLISHED   # nothing reported yet: the loop's first report carries it
 
     # ---- state -----------------------------------------------------------------------------------
+    def reason(self):
+        if self.mac is None or self.connected:
+            return None
+        if self.hw_fault:
+            return "hw_fault"
+        return self.cause
+
     def state(self, result=None):
         s = {
             "type": "bt_state",
@@ -192,14 +224,20 @@ class BtSpeaker:
             "link": self.link,
             "name": self.name,
             "reconnecting": self.lock.locked(),
+            "reason": self.reason(),
         }
         if result:
             s["result"] = result
         return s
 
     async def _publish(self, result=None):
+        self.last_reason = self.reason()
         if self.on_state:
             await self.on_state(self.state(result))
+
+    async def _publish_if_reason_changed(self):
+        if self.last_reason is not _UNPUBLISHED and self.reason() != self.last_reason:
+            await self._publish()
 
     def open_retry_window(self, now):
         self.retry_until = now + self.retry_window_s
@@ -234,22 +272,40 @@ class BtSpeaker:
             )  # a drop: retry for the next 10 minutes
         if was != self.connected:
             await self._publish()
+        else:
+            await self._publish_if_reason_changed()
         if self.connected and not was and self.on_connected:
             try:
                 await self.on_connected(self.mac)
             except Exception:  # noqa: BLE001 - routing is best effort; captions cover a silent sink
                 pass
 
+    async def _adapter(self):
+        """The default controller's state; `show` timing out is no_answer (never read as adapter_off)."""
+        text = await self.run("show", timeout=SHOW_TIMEOUT_S)
+        return parse_bt_adapter(text) if text else "no_answer"
+
+    async def _unanswered(self):
+        self.cause = "no_answer"              # unknown: connected/link stay as they were
+        await self._publish_if_reason_changed()
+
     async def _attempt(self, connect=True):
         info, sink = await self._observe()
         if info is None:
-            return None                       # unknown: change nothing
-        if not info["connected"] and info["paired"] and connect:
+            return await self._unanswered()
+        adapter = "ok" if info["connected"] else await self._adapter()
+        if not info["connected"] and info["paired"] and connect and adapter == "ok":
             self.connect_calls += 1
             await self.run("connect", self.mac, timeout=CONNECT_TIMEOUT_S)
             info, sink = await self._observe(REINFO_TIMEOUT_S)
             if info is None:
-                return None
+                return await self._unanswered()
+        if info["connected"]:
+            self.cause = None if sink else "no_sink"
+        elif adapter != "ok":
+            self.cause = adapter
+        else:
+            self.cause = "off_or_out_of_range" if info["paired"] else "not_paired"
         await self._apply(info, sink)
         return info
 
@@ -277,8 +333,8 @@ class BtSpeaker:
             info = await self._bounded(connect=True)
         if self.connected:
             return self.state("ok")
-        if info is not None and not info["paired"]:
-            return self.state("not_paired")
+        if info is not None and self.cause == "not_paired":
+            return self.state("not_paired")   # never when the controller is off or did not answer
         return self.state("failed")
 
     # ---- background --------------------------------------------------------------------------------
@@ -305,8 +361,8 @@ class BtSpeaker:
                 self.next_connect_at = (
                     None  # window spent: wait for the speaker or the button
                 )
-        if not info["paired"]:
-            self.next_connect_at = None       # a real "Paired: no" / "not available"
+        if self.cause == "not_paired":
+            self.next_connect_at = None       # a real "Paired: no" / "not available" on a working controller
 
     async def _check_hardware(self, info, now):
         self.unanswered = 0 if info is not None else self.unanswered + 1
@@ -338,5 +394,6 @@ class BtSpeaker:
                 if self.on_state:      # always report the starting state once (a log line on the Pi)
                     st = self.state()
                     st["retry_window"] = self.in_retry_window(self.clock())
+                    self.last_reason = st["reason"]
                     await self.on_state(st)
             await asyncio.sleep(self.check_s)
