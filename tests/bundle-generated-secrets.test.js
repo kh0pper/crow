@@ -148,7 +148,7 @@ test("lemmy: no literal credential in the compose file; secrets reach the script
   const compose = readFileSync(join(REPO, "bundles", "lemmy", "docker-compose.yml"), "utf8");
   assert.match(compose, /admin_password:\s*"\$\$\{CROW_LEMMY_ADMIN_PASSWORD\}"/);
   assert.match(compose, /CROW_LEMMY_ADMIN_PASSWORD:\s*"\$\{LEMMY_ADMIN_PASSWORD\}"/);
-  const script = compose.slice(compose.indexOf("cat > /config"), compose.indexOf("HJSON\n        exec"));
+  const script = compose.slice(compose.indexOf("cat > /tmp/crow-lemmy"), compose.indexOf("HJSON\n        exec"));
   assert.ok(script.length > 100, "found the entrypoint script");
   assert.doesNotMatch(script, /(?<!\$)\$\{LEMMY_(DB_PASSWORD|PICTRS_API_KEY|ADMIN_PASSWORD)\}/, "no compose-interpolated secret in the script text (PID 1's command line)");
 });
