@@ -542,3 +542,18 @@ test("a signed peer instance can't install, mint consent, uninstall or re-apply 
     }
   } finally { server.close(); }
 });
+
+test("code-execution paths are refused: folders on PATH, any git checkout, systemd/cron/docker dirs, shell rc and autostart", () => {
+  const home = homedir();
+  const repoLike = mkdtempSync(join(tmpdir(), "crow-cguard-git-"));
+  mkdirSync(join(repoLike, ".git"), { recursive: true });
+  mkdirSync(join(repoLike, "scripts"), { recursive: true });
+  for (const src of [repoLike, join(repoLike, "scripts"), "/etc/systemd/system", "/var/spool/cron/crontabs", "/var/lib/docker", "/var/lib/containerd",
+    "/usr/local/bin", join(home, ".config", "autostart"), join(home, ".profile"), join(home, ".bashrc"), join(home, ".ssh")]) {
+    assert.equal(check(svc({ volumes: [bind(src)] }), { manifest: PRIV, consent: true }).valid, false, src);
+  }
+  const onPath = mkdtempSync(join(tmpdir(), "crow-cguard-path-"));
+  assert.equal(G.checkComposeModel(svc({ volumes: [bind(onPath)] }), { bundleDir: bundleDir(), manifest: {}, consentVerified: false, ctx: { ...CTX, path: `/usr/bin:${onPath}` } }).valid, false, "a folder on PATH");
+  rmSync(repoLike, { recursive: true, force: true });
+  rmSync(onPath, { recursive: true, force: true });
+});

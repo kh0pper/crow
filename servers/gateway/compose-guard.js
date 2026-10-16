@@ -72,6 +72,9 @@ export function sensitiveRoots(ctx) {
     trees: [
       ...sys.map((d) => ({ root: real(d), why: d, hostInfo: d === "/proc" || d === "/sys" })),
       ...(ctx.appRoot ? [{ root: real(ctx.appRoot), why: "the gateway's code and .env" }] : []),
+      // Every folder on the gateway's PATH: a writable one is code the host runs.
+      ...[...new Set(String(ctx.path ?? process.env.PATH ?? "").split(":").filter((d) => d.startsWith("/")))]
+        .map((d) => ({ root: real(d), why: `a folder on PATH (${d})` })),
     ],
     dockerSockets: new Set(["/var/run/docker.sock", "/run/docker.sock", real("/var/run/docker.sock"), real("/run/docker.sock")]),
     localtime: real("/etc/localtime"),
@@ -183,6 +186,12 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
       if (!(under(p, t.root) || under(t.root, p))) continue;
       if (t.hostInfo && readOnly && under(p, t.root) && (isConsentBundle || isPrivilegedAllowed)) continue;
       return refuse(`${what}: mounts a sensitive host path (${t.why})`);
+    }
+    // A git working tree (another Crow checkout, lab scripts that timers run): code. Walk up
+    // from the path to the filesystem root looking for .git, and refuse a folder holding one.
+    for (let d = p; ; d = dirname(d)) {
+      if (existsSync(join(d, ".git"))) return refuse(`${what}: mounts a git checkout (code something on this host may run)`);
+      if (dirname(d) === d) break;
     }
     return null;
   };
