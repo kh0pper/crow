@@ -61,7 +61,7 @@ test("page weight ≤ 88 KB (html + css + eagerly loaded js, uncompressed); the 
 test("item 21 (source): a media load marks the turn and lets an idle open mic go BEFORE the view sees it; the settle release stamps the time and kicks a held start; the view's start asks mediaStartGate and notes each real start", () => {
   const src = read("kiosk.js");
   const media = src.slice(src.indexOf('case "media":'), src.indexOf("mediaView?.apply(m);") + 20);
-  assert.match(media, /if \(m\.action === "load" && !m\.paused\) \{ if \(turn\) turn\.mediaLoaded = true; micForMedia\(\); \}/);
+  assert.match(media, /if \(\(m\.action === "load" && !m\.paused\) \|\| m\.action === "play"\) \{ if \(turn\) turn\.mediaLoaded = true; micForMedia\(\); \}/, "a resume counts too (review minor 1)");
   assert.ok(media.indexOf("micForMedia()") < media.indexOf("mediaView?.apply(m)"), "the mic goes before the view tries to start");
   const rel = src.slice(src.indexOf("function releaseMicAfterTurn("), src.indexOf("/** turn_metrics, once per turn"));
   assert.match(rel, /micReleasedAt = performance\.now\(\)/);
@@ -70,6 +70,9 @@ test("item 21 (source): a media load marks the turn and lets an idle open mic go
   assert.match(mfm, /releaseForMediaDecision\(\{ config, micOpen: !!mic \|\| micGate\.opening\(\), turnOpen: !!\(turn && !\(turn\.ended && turn\.done\)\), playing: !!player\?\.playing \}\)/);
   assert.match(mfm, /micGate\.release\(\)/);
   assert.match(mfm, /micReleasedAt = performance\.now\(\)/);
+  assert.match(mfm, /mediaView\?\.kick\(\)/, "a held start goes at once, not on its next poll (review minor 2)");
+  const ens = src.slice(src.indexOf("const d = micDecision(null, ctx.state);"), src.indexOf("banner(null);"));
+  assert.match(ens, /if \(config\.mic_per_turn\) \{ micGate\.release\(\); mic = null; micReleasedAt = performance\.now\(\); \}/, "no turn after needs_gesture: the phone's mic is not left open (review minor 3)");
   assert.match(src, /canStart: \(\) => \{ const g = mediaStartGate\(\{ micOpen: !!mic, micOpening: micGate\.opening\(\), releasedAt: micReleasedAt, now: performance\.now\(\), config \}\); return g\.ok \|\| g\.waitMs; \}/);
   assert.match(src, /onPlay: \(\) => note\("media", `start mic=\$\{mic \|\| micGate\.opening\(\) \? "open" : "closed"\}`\)/);
   const drained = /onDrained: \(\) => \{([^}]*)\}/.exec(src)[1];

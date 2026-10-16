@@ -216,7 +216,7 @@ function onText(m) {
     case "media":
       noteEffect(turn, { kind: m.action === "load" && !m.paused ? "load" : "media", id: m.id, at: performance.now() });
       note("media", `${m.action}${m.id ? " " + m.id : ""}`);
-      if (m.action === "load" && !m.paused) { if (turn) turn.mediaLoaded = true; micForMedia(); }   // item 21
+      if ((m.action === "load" && !m.paused) || m.action === "play") { if (turn) turn.mediaLoaded = true; micForMedia(); }   // item 21 (a resume too)
       mediaView?.apply(m);
       break;
     // The closing frame of a turn that never ran (empty, too long, busy): the turn ends here, no metrics.
@@ -287,7 +287,11 @@ async function ensureAudio() {
     micOpenMs = micGate.takeOpenMs();
   }
   const d = micDecision(null, ctx.state);
-  if (d !== "ok") { banner(d); return false; }
+  if (d !== "ok") {
+    banner(d);
+    if (config.mic_per_turn) { micGate.release(); mic = null; micReleasedAt = performance.now(); }   // item 21: no turn, so no open mic held
+    return false;
+  }
   banner(null);
   return true;
 }
@@ -338,6 +342,7 @@ function micForMedia() {
   micGate.release();
   mic = null; micReleasedAt = performance.now();
   note("mic", "released for media");
+  mediaView?.kick();
 }
 /** F6: a phone lets the microphone go (Android leaves voice-call audio mode) once the turn has settled — never mid-reply (r7 G12). */
 function releaseMicAfterTurn(phase) {
