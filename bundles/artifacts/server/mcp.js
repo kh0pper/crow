@@ -197,9 +197,11 @@ export function unwrapText(v) {
  *  could never send a string. Unknown keys are dropped (none is read by the
  *  renderer). A fresh schema instance per field: an instance used twice in one tool
  *  publishes a $ref.
- *  Messages are static strings (the fail() contract). */
+ *  A null text field reads as absent (some providers fill unused fields
+ *  with null; the renderer always ignored them). Messages are static
+ *  strings (the fail() contract). */
 function sourceSchema(z) {
-  const text = (field, what, example) => z.preprocess(unwrapText, z.string({ invalid_type_error: `source.${field} must be a plain string, not an object or a list, e.g. ${example}` }).optional()).describe(what);
+  const text = (field, what, example) => z.preprocess((v) => (v === null ? undefined : unwrapText(v)), z.string({ invalid_type_error: `source.${field} must be a plain string, not an object or a list, e.g. ${example}` }).optional()).describe(what);
   // ORDER MATTERS: llama.cpp's grammar admits optional properties only in
   // declared order, so the short fields come first and the bodies last — a
   // model that writes "title" first can still write "markdown" after it.

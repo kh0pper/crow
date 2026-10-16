@@ -862,7 +862,7 @@ test("item 26: anything but a one-level string wrapper is refused, and the refus
       const r = await call(op, "artifact_create", { title: "Bad", type: "page", source: { html } });
       assert.ok(r.err, `refused: ${JSON.stringify(html)}`);
       assert.match(r.err, /source\.html must be a plain string/, JSON.stringify(html));
-      assert.match(r.err, /e\.g\. \{\\"html\\": \\"<!doctype html>/, "the example shape (JSON-escaped by the SDK's issue dump)");
+      assert.match(r.err, /e\.g\. \{.{0,2}html.{0,6}<!doctype html>/, "the example shape (however the SDK escapes its issue dump)");
     }
     const fm = await call(op, "artifact_create", { title: "Front matter", type: "document", source: { markdown: { title: "t", subtitle: "s", date: "d" } } });
     assert.match(fm.err, /source\.markdown must be a plain string/);
@@ -945,5 +945,15 @@ test("item 26 (review): unwrapText is one level and exact; libs still merge onto
     const r = await op.callTool({ name: "artifact_create", arguments: { title: SENT, type: "page", source: { html: { content: SENT, extra: SENT } } } });
     assert.equal(r.isError, true);
     assert.ok(!JSON.stringify(r).includes(SENT), "the schema error carries no authored text");
+  } finally { await op.close(); }
+});
+
+test("item 26 (review I-1): a null text field reads as absent, as the renderer always treated it", async () => {
+  const op = await client(s.fullToken);
+  try {
+    const d = await call(op, "artifact_create", { title: "Null fields", type: "document", source: { markdown: "# a", title: null, lang: null, html: null, svg: null, engine: null, source: null } });
+    assert.equal(d.err, null);
+    assert.deepEqual(JSON.parse((await store.getVersion(s.db, d.data.id, 1)).source_json), { markdown: "# a" });
+    assert.match((await call(op, "artifact_create", { title: "Null html", type: "page", source: { html: null } })).err, /page needs source\.html/);
   } finally { await op.close(); }
 });
