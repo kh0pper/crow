@@ -1,0 +1,186 @@
+{
+  "schema": 1,
+  "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+  "themes": {
+    "arctic-frost": {
+      "name": "Arctic Frost",
+      "upstream": "themes/arctic-frost.md",
+      "colors": {
+        "bg": "#fafafa",
+        "fg": "#4a6fa5",
+        "accent": "#4a6fa5",
+        "accent2": "#c0c0c0"
+      },
+      "fonts": {
+        "heading": "font:instrument-sans",
+        "body": "font:instrument-sans"
+      },
+      "upstream_fonts": {
+        "heading": "DejaVu Sans Bold",
+        "body": "DejaVu Sans"
+      }
+    },
+    "botanical-garden": {
+      "name": "Botanical Garden",
+      "upstream": "themes/botanical-garden.md",
+      "colors": {
+        "bg": "#f5f3ed",
+        "fg": "#b7472a",
+        "accent": "#4a7c59",
+        "accent2": "#f9a620"
+      },
+      "fonts": {
+        "heading": "font:lora",
+        "body": "font:work-sans"
+      },
+      "upstream_fonts": {
+        "heading": "DejaVu Serif Bold",
+        "body": "DejaVu Sans"
+      }
+    },
+    "desert-rose": {
+      "name": "Desert Rose",
+      "upstream": "themes/desert-rose.md",
+      "colors": {
+        "bg": "#e8d5c4",
+        "fg": "#5d2e46",
+        "accent": "#b87d6d",
+        "accent2": "#d4a5a5"
+      },
+      "fonts": {
+        "heading": "font:instrument-sans",
+        "body": "font:instrument-sans"
+      },
+      "upstream_fonts": {
+        "heading": "FreeSans Bold",
+        "body": "FreeSans"
+      }
+    },
+    "forest-canopy": {
+      "name": "Forest Canopy",
+      "upstream": "themes/forest-canopy.md",
+      "colors": {
+        "bg": "#faf9f6",
+        "fg": "#2d4a2b",
+        "accent": "#7d8471",
+        "accent2": "#a4ac86"
+      },
+      "fonts": {
+        "heading": "font:crimson-pro",
+        "body": "font:instrument-sans"
+      },
+      "upstream_fonts": {
+        "heading": "FreeSerif Bold",
+        "body": "FreeSans"
+      }
+    },
+    "golden-hour": {
+      "name": "Golden Hour",
+      "upstream": "themes/golden-hour.md",
+      "colors": {
+        "bg": "#d4b896",
+        "fg": "#4a403a",
+        "accent": "#f4a900",
+        "accent2": "#c1666b"
+      },
+      "fonts": {
+        "heading": "font:instrument-sans",
+        "body": "font:instrument-sans"
+      },
+      "upstream_fonts": {
+        "heading": "FreeSans Bold",
+        "body": "FreeSans"
+      }
+    },
+    "midnight-galaxy": {
+      "name": "Midnight Galaxy",
+      "upstream": "themes/midnight-galaxy.md",
+      "colors": {
+        "bg": "#2b1e3e",
+        "fg": "#e6e6fa",
+        "accent": "#a490c2",
+        "accent2": "#4a4e8f"
+      },
+      "fonts": {
+        "heading": "font:instrument-sans",
+        "body": "font:instrument-sans"
+      },
+      "upstream_fonts": {
+        "heading": "FreeSans Bold",
+        "body": "FreeSans"
+      }
+    },
+    "modern-minimalist": {
+      "name": "Modern Minimalist",
+      "upstream": "themes/modern-minimalist.md",
+      "colors": {
+        "bg": "#ffffff",
+        "fg": "#36454f",
+        "accent": "#708090",
+        "accent2": "#d3d3d3"
+      },
+      "fonts": {
+        "heading": "font:work-sans",
+        "body": "font:work-sans"
+      },
+      "upstream_fonts": {
+        "heading": "DejaVu Sans Bold",
+        "body": "DejaVu Sans"
+      }
+    },
+    "ocean-depths": {
+      "name": "Ocean Depths",
+      "upstream": "themes/ocean-depths.md",
+      "colors": {
+        "bg": "#1a2332",
+        "fg": "#f1faee",
+        "accent": "#2d8b8b",
+        "accent2": "#a8dadc"
+      },
+      "fonts": {
+        "heading": "font:work-sans",
+        "body": "font:work-sans"
+      },
+      "upstream_fonts": {
+        "heading": "DejaVu Sans Bold",
+        "body": "DejaVu Sans"
+      }
+    },
+    "sunset-boulevard": {
+      "name": "Sunset Boulevard",
+      "upstream": "themes/sunset-boulevard.md",
+      "colors": {
+        "bg": "#e9c46a",
+        "fg": "#264653",
+        "accent": "#e76f51",
+        "accent2": "#f4a261"
+      },
+      "fonts": {
+        "heading": "font:lora",
+        "body": "font:work-sans"
+      },
+      "upstream_fonts": {
+        "heading": "DejaVu Serif Bold",
+        "body": "DejaVu Sans"
+      }
+    },
+    "tech-innovation": {
+      "name": "Tech Innovation",
+      "upstream": "themes/tech-innovation.md",
+      "colors": {
+        "bg": "#1e1e1e",
+        "fg": "#ffffff",
+        "accent": "#0066ff",
+        "accent2": "#00ffff"
+      },
+      "fonts": {
+        "heading": "font:outfit",
+        "body": "font:instrument-sans"
+      },
+      "upstream_fonts": {
+        "heading": "DejaVu Sans Bold",
+        "body": "DejaVu Sans"
+      }
+    }
+  }
+}

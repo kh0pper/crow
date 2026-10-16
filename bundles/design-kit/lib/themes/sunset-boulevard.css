@@ -1,0 +1,4 @@
+:root{--hs-bg:#e9c46a;--hs-fg:#264653;--hs-accent:#e76f51;--hs-accent-2:#f4a261;--hs-font-heading:"Lora",serif;--hs-font-body:"Work Sans",sans-serif}
+body{background:var(--hs-bg);color:var(--hs-fg);font-family:var(--hs-font-body)}
+h1,h2,h3,h4,h5,h6{font-family:var(--hs-font-heading)}
+a{color:var(--hs-accent)}

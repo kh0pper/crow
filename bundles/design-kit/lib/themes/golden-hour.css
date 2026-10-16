@@ -1,0 +1,4 @@
+:root{--hs-bg:#d4b896;--hs-fg:#4a403a;--hs-accent:#f4a900;--hs-accent-2:#c1666b;--hs-font-heading:"Instrument Sans",sans-serif;--hs-font-body:"Instrument Sans",sans-serif}
+body{background:var(--hs-bg);color:var(--hs-fg);font-family:var(--hs-font-body)}
+h1,h2,h3,h4,h5,h6{font-family:var(--hs-font-heading)}
+a{color:var(--hs-accent)}

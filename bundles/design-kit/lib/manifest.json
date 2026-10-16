@@ -612,6 +612,260 @@
       ]
     },
     {
+      "name": "theme:arctic-frost",
+      "kind": "theme",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "license_file": "licenses/anthropic-skills-theme-factory.txt",
+      "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+      "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "path": "themes/arctic-frost.css",
+          "sha256": "991aff7c540ff368fc8aa5a8a3a1f8aa53edf7cf31ccf604f9b157b023a928c8",
+          "type": "text/css"
+        }
+      ],
+      "main": "themes/arctic-frost.css",
+      "requires": [
+        "font:instrument-sans"
+      ]
+    },
+    {
+      "name": "theme:botanical-garden",
+      "kind": "theme",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "license_file": "licenses/anthropic-skills-theme-factory.txt",
+      "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+      "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "path": "themes/botanical-garden.css",
+          "sha256": "8087cc25ced190e6d9dbdc74253bd6961ee6bd86e1fad1658b84683dd868100f",
+          "type": "text/css"
+        }
+      ],
+      "main": "themes/botanical-garden.css",
+      "requires": [
+        "font:lora",
+        "font:work-sans"
+      ]
+    },
+    {
+      "name": "theme:desert-rose",
+      "kind": "theme",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "license_file": "licenses/anthropic-skills-theme-factory.txt",
+      "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+      "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "path": "themes/desert-rose.css",
+          "sha256": "b90e512cf0eed42c56083585ce9105a968d419d63586a1f015c342542436adb8",
+          "type": "text/css"
+        }
+      ],
+      "main": "themes/desert-rose.css",
+      "requires": [
+        "font:instrument-sans"
+      ]
+    },
+    {
+      "name": "theme:forest-canopy",
+      "kind": "theme",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "license_file": "licenses/anthropic-skills-theme-factory.txt",
+      "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+      "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "path": "themes/forest-canopy.css",
+          "sha256": "8e3b897ee1c6717210630113e5a35fa66e6690aebd75c28cddbceaa820c9fbc4",
+          "type": "text/css"
+        }
+      ],
+      "main": "themes/forest-canopy.css",
+      "requires": [
+        "font:crimson-pro",
+        "font:instrument-sans"
+      ]
+    },
+    {
+      "name": "theme:golden-hour",
+      "kind": "theme",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "license_file": "licenses/anthropic-skills-theme-factory.txt",
+      "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+      "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "path": "themes/golden-hour.css",
+          "sha256": "dadd63b16e0e6a7fe572d3bb13b95ec19d9dc8798e0f9ccf06823e03a9195fe8",
+          "type": "text/css"
+        }
+      ],
+      "main": "themes/golden-hour.css",
+      "requires": [
+        "font:instrument-sans"
+      ]
+    },
+    {
+      "name": "theme:midnight-galaxy",
+      "kind": "theme",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "license_file": "licenses/anthropic-skills-theme-factory.txt",
+      "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+      "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "path": "themes/midnight-galaxy.css",
+          "sha256": "0ca9079a9e375fadaf9e22d798091fd101e0139ced988ca0323f0587005067a7",
+          "type": "text/css"
+        }
+      ],
+      "main": "themes/midnight-galaxy.css",
+      "requires": [
+        "font:instrument-sans"
+      ]
+    },
+    {
+      "name": "theme:modern-minimalist",
+      "kind": "theme",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "license_file": "licenses/anthropic-skills-theme-factory.txt",
+      "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+      "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "path": "themes/modern-minimalist.css",
+          "sha256": "413ea8ad167bbd7266e58b473598788ae39ca2d1ab1e743e97b1bf0fc9f0ba21",
+          "type": "text/css"
+        }
+      ],
+      "main": "themes/modern-minimalist.css",
+      "requires": [
+        "font:work-sans"
+      ]
+    },
+    {
+      "name": "theme:ocean-depths",
+      "kind": "theme",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "license_file": "licenses/anthropic-skills-theme-factory.txt",
+      "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+      "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "path": "themes/ocean-depths.css",
+          "sha256": "2d7360ecc3f53178100fba7370608937fed91ca3d7691d49f88431afc8598697",
+          "type": "text/css"
+        }
+      ],
+      "main": "themes/ocean-depths.css",
+      "requires": [
+        "font:work-sans"
+      ]
+    },
+    {
+      "name": "theme:sunset-boulevard",
+      "kind": "theme",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "license_file": "licenses/anthropic-skills-theme-factory.txt",
+      "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+      "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "path": "themes/sunset-boulevard.css",
+          "sha256": "9e15f6544f83ac0d2712e9e4b28187e5a7a017fdeba3411a3b09e3df24e44582",
+          "type": "text/css"
+        }
+      ],
+      "main": "themes/sunset-boulevard.css",
+      "requires": [
+        "font:lora",
+        "font:work-sans"
+      ]
+    },
+    {
+      "name": "theme:tech-innovation",
+      "kind": "theme",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "license_file": "licenses/anthropic-skills-theme-factory.txt",
+      "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+      "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "path": "themes/tech-innovation.css",
+          "sha256": "da59090bf0098a549b9f6f89d908795707d229964003737f47b439c532c51f35",
+          "type": "text/css"
+        }
+      ],
+      "main": "themes/tech-innovation.css",
+      "requires": [
+        "font:outfit",
+        "font:instrument-sans"
+      ]
+    },
+    {
       "name": "vega",
       "kind": "script",
       "version": "6.4.0",
@@ -698,5 +952,11 @@
       "global": "vegaLite"
     }
   ],
-  "meta_files": []
+  "meta_files": [
+    {
+      "path": "themes.json",
+      "sha256": "d4e2c21231b04ebbc68d2a29ef7a7afb78531e551735a813e7a634539dd77c41",
+      "type": "application/json"
+    }
+  ]
 }
