@@ -628,3 +628,209 @@ test("a session display gets the same turn rules as a paired one: display tool o
     c.ws.close();
   } finally { f.close(); }
 });
+
+// ─── B3: the player bar's endpoint and the bar display's lifetime (dormant until a bar hello) ───
+// A runtime on the same database and core auth, with a fake relay (a stream that answers 200, or holds
+// the request open until its ticket is cut), a settable clock, the minute sweep captured, and the
+// media session's timers in hand.
+
+const MEDIA = "/api/kiosk/session/media";
+const OWNER = "tab-owner-aaaaaaaaaaaa";
+const TICKET_IN = /\/display\/t\/([A-Za-z0-9_-]{22})\/stream/;
+
+async function barServe() {
+  const { sessionDisplayId } = await import("../bundles/kiosk/server/session-display.js");
+  const clock = { t: Date.now() };
+  const sweeps = [];
+  const mediaTimers = [];
+  const barLogs = [];
+  const held = [];
+  const relay = {
+    toResponse: async (resource, req, res, { signal }) => {
+      res.status(200).type("audio/mpeg");
+      if (!req.headers["x-test-hold"]) { res.end("ok"); return "ok"; }
+      res.write("x");
+      held.push(signal);
+      await new Promise((r) => (signal.aborted ? r() : signal.addEventListener("abort", r, { once: true })));
+      res.destroy();
+      return "aborted";
+    },
+  };
+  const k = kiosk.createKioskRuntime({
+    Router: express.Router, json: express.json, WebSocketServer,
+    isAllowedNetwork: auth.isAllowedNetwork, csrfMiddleware: csrf.csrfMiddleware, csrfTokenAccepted: csrf.csrfTokenAccepted,
+    sessionFromRequest: auth.sessionFromRequest, verifySession: auth.verifySession,
+    openDb: open, deviceStore: store,
+    settings: { readSetting: registry.readSetting, writeSetting: registry.writeSetting },
+    voice: { runVoiceTurn: async () => ({ route: "fast", timings: {} }), speakText: async () => true },
+    sttWarmup: async () => {},
+    resolveDisplayBird: async () => ({ species: "crow", seed: 0, mood: "happy", outfit: null, source: "default" }),
+    themeCss: () => "", files: { publicDir: join(REPO, "bundles", "kiosk", "public"), birdSvgPath: join(REPO, "bundles", "ramble", "server", "bird-svg.cjs") },
+    announceToken: { validate: async () => false }, helloTimeoutMs: 300, wrapPcmAsWav,
+    relay,
+    now: () => clock.t,
+    setInterval: (fn) => { sweeps.push(fn); return { unref() {} }; },
+    mediaTimers: { setTimer: (fn, ms) => { const t = { fn, ms, on: true }; mediaTimers.push(t); return t; }, clearTimer: (t) => { if (t) t.on = false; } },
+    log: (m) => barLogs.push(m),
+  });
+  const app = express();
+  app.use(k.router(auth.dashboardAuth));
+  const s = http.createServer(app);
+  const sconns = new Set();
+  s.on("connection", (c) => { sconns.add(c); c.on("close", () => sconns.delete(c)); });
+  k.attachUpgrade(s);
+  await new Promise((r) => s.listen(0, "127.0.0.1", r));
+  const b = `http://127.0.0.1:${s.address().port}`;
+  const H = (tok = sessionToken) => ({ ...SERVE, Cookie: cookie(tok) });
+  const rig = {
+    k, b, clock, mediaTimers, barLogs, held,
+    idOf: (tok = sessionToken) => sessionDisplayId(tok),
+    /** Open the overlay's socket with (or without) the bar; resolves once ready. */
+    async open({ tok = sessionToken, bar = true, owner = OWNER } = {}) {
+      const ws = new WebSocket(b.replace("http", "ws") + WS_PATH, { headers: { ...H(tok), Origin: b } });
+      const msgs = []; let closed = null;
+      ws.on("message", (d, bin) => { if (!bin) msgs.push(JSON.parse(d.toString())); });
+      ws.on("close", (code, reason) => { closed = { code, reason: reason.toString() }; });
+      ws.on("error", () => {});
+      await new Promise((r, j) => { ws.on("open", r); ws.on("unexpected-response", (q, res) => j(new Error("refused " + res.statusCode))); });
+      ws.send(JSON.stringify({ type: "hello", mode: "session", csrf: CSRF, ...(bar ? { owner } : {}), caps: { v: 2, kinds: ["card", "timer", "nowplaying"], screen: { w: 800, h: 600 }, ...(bar ? { bar: true } : {}) } }));
+      const until = async (fn, ms = 1500) => { for (let i = 0; i < ms / 10 && !fn(); i++) await new Promise((r) => setTimeout(r, 10)); return fn(); };
+      await until(() => msgs.some((m) => m.type === "ready") || closed);
+      const shut = async () => { ws.close(); await until(() => !k.hub.isConnected(rig.idOf(tok))); };
+      return { ws, msgs, until, shut, get closed() { return closed; } };
+    },
+    /** Play a queue on this login's display (as a voice "play" would), → the load message's ticket path. */
+    play(tok = sessionToken, titles = ["One", "Two"], source = "music") {
+      const item = k.media.play(rig.idOf(tok), titles.map((t) => ({ upstream: { url: `https://stream.example.invalid/${t}`, hop: { kind: "public" } }, title: t, subtitle: "", source })));
+      return k.media.view(rig.idOf(tok)).item.url ?? item;
+    },
+    get: (tok = sessionToken, headers = H(tok)) => fetch(b + MEDIA, { headers, redirect: "manual" }),
+    post: (body, { tok = sessionToken, headers } = {}) => fetch(b + MEDIA, { method: "POST", redirect: "manual", headers: headers || { ...H(tok), "Content-Type": "application/json", "X-Crow-Csrf": CSRF }, body: JSON.stringify(body) }),
+    stream: (path, hold = false) => fetch(b + path, { headers: { ...SERVE, ...(hold ? { "x-test-hold": "1" } : {}) } }),
+    /** One minute sweep, awaited. */
+    sweep: async () => { for (const fn of sweeps) await fn(); },
+    close: () => { k.stop(); for (const c of sconns) c.destroy(); s.close(); },
+  };
+  return rig;
+}
+
+test("B3 endpoint: auth matrix — session cookie (401), CSRF double-submit on POST (403), Funnel and off-network (403); GET needs no CSRF; never cached", async () => {
+  const r = await barServe();
+  try {
+    const c = await r.open();
+    const path = r.play();
+    const id = r.k.media.itemId(r.idOf());
+    const json = { "Content-Type": "application/json" };
+    // No session, a bogus session, a paired-device token: 401 (GET and POST alike).
+    assert.equal((await r.get(null, SERVE)).status, 401);
+    assert.equal((await r.get(null, { ...SERVE, Cookie: "crow_session=not-a-session; crow_csrf=" + CSRF })).status, 401);
+    assert.equal((await r.post({ do: "pause", id, owner: OWNER }, { headers: { ...SERVE, ...json, Cookie: "crow_csrf=" + CSRF, "X-Crow-Csrf": CSRF } })).status, 401);
+    // CSRF: none, wrong, or a header with no cookie to match.
+    assert.equal((await r.post({ do: "pause", id, owner: OWNER }, { headers: { ...SERVE, ...json, Cookie: cookie() } })).status, 403);
+    assert.equal((await r.post({ do: "pause", id, owner: OWNER }, { headers: { ...SERVE, ...json, Cookie: cookie(), "X-Crow-Csrf": "wrong" } })).status, 403);
+    assert.equal((await r.post({ do: "pause", id, owner: OWNER }, { headers: { ...SERVE, ...json, Cookie: `crow_session=${sessionToken}`, "X-Crow-Csrf": CSRF } })).status, 403);
+    // The network gate runs first: Funnel and off-network are refused even with a valid session + CSRF.
+    for (const headers of [{ ...SERVE, ...json, Cookie: cookie(), "X-Crow-Csrf": CSRF, "Tailscale-Funnel-Request": "?1" }, { ...json, Cookie: cookie(), "X-Crow-Csrf": CSRF }]) {
+      assert.equal((await r.post({ do: "pause", id, owner: OWNER }, { headers })).status, 403);
+      const { "X-Crow-Csrf": _x, ...g } = headers;
+      assert.equal((await r.get(null, g)).status, 403);
+    }
+    assert.equal(r.k.media.current(r.idOf()).state, "playing", "no refused request touched the media");
+    // A malformed body is 400.
+    for (const body of [{ do: "eval", id, owner: OWNER }, { do: "pause", owner: OWNER }, { do: "pause", id: "x", owner: OWNER }, { do: "pause", id }, { do: "pause", id, owner: "short" }]) assert.equal((await r.post(body)).status, 400, JSON.stringify(body));
+    // A valid GET (no CSRF needed) and POST.
+    const g = await r.get();
+    assert.equal(g.status, 200);
+    assert.equal(g.headers.get("cache-control"), "no-store");
+    assert.deepEqual([(await g.json()).item.url], [path]);
+    const p = await r.post({ do: "pause", id, owner: OWNER });
+    assert.equal(p.status, 200);
+    assert.equal(p.headers.get("cache-control"), "no-store");
+    assert.equal((await p.json()).state, "paused");
+    c.ws.close();
+  } finally { r.close(); }
+});
+
+test("B3 endpoint: two logins cannot see or steer each other's media (the display is the caller's own login, never taken from the body)", async () => {
+  const r = await barServe();
+  const { token: other } = await auth.mintSsoSession("test");
+  try {
+    const a = await r.open();
+    r.play();
+    const id = r.k.media.itemId(r.idOf());
+    const b = await r.open({ tok: other, owner: "tab-owner-cccccccccccc" });
+    const seen = await (await r.get(other)).json();
+    assert.equal(seen.item, null, "B sees nothing of A's media");
+    assert.ok(!JSON.stringify(seen).includes("/display/t/"));
+    // Even knowing A's item id and A's tab nonce, B's requests reach only B's own display.
+    for (const doIt of ["stop", "next", "pause"]) {
+      const res = await r.post({ do: doIt, id, owner: OWNER }, { tok: other });
+      assert.ok(res.status === 409 || (res.status === 200 && (await res.json()).item === null), `${doIt}: ${res.status}`);
+    }
+    assert.equal(r.k.media.itemId(r.idOf()), id, "A's item is untouched");
+    assert.equal(r.k.media.current(r.idOf()).state, "playing");
+    a.ws.close(); b.ws.close();
+  } finally { r.close(); await auth.destroySession(other); }
+});
+
+test("B3 endpoint: next returns the next ticket and the old one answers 404; stop ends the session (view empty, ticket 404); a stale id → 409 superseded", async () => {
+  const r = await barServe();
+  try {
+    const c = await r.open();
+    const first = r.play();
+    const id = r.k.media.itemId(r.idOf());
+    assert.equal((await r.stream(first)).status, 200);
+    const n = await r.post({ do: "next", id, owner: OWNER });
+    assert.equal(n.status, 200);
+    const v = await n.json();
+    assert.equal(v.item.title, "Two");
+    assert.match(v.item.url, TICKET_IN);
+    assert.notEqual(v.item.url, first);
+    assert.equal((await r.stream(first)).status, 404, "the old ticket is revoked");
+    assert.equal((await r.stream(v.item.url)).status, 200);
+    const stale = await r.post({ do: "pause", id, owner: OWNER });
+    assert.equal(stale.status, 409);
+    assert.deepEqual(await stale.json(), { error: "superseded" });
+    const s = await r.post({ do: "stop", id: v.item.id, owner: OWNER });
+    assert.equal((await s.json()).item, null);
+    assert.equal((await r.stream(v.item.url)).status, 404);
+    assert.equal((await (await r.get()).json()).item, null);
+    c.ws.close();
+  } finally { r.close(); }
+});
+
+test("B3 dormancy: today's session page (no bar) — the endpoint never hands out its ticket nor steers it", async () => {
+  const r = await barServe();
+  try {
+    const c = await r.open({ bar: false });
+    const path = r.play();
+    const id = r.k.media.itemId(r.idOf());
+    assert.equal((await (await r.get()).json()).item, null, "GET shows nothing for a display whose page plays its own audio");
+    assert.equal((await r.post({ do: "stop", id, owner: OWNER })).status, 409);
+    assert.equal(r.k.media.itemId(r.idOf()), id);
+    assert.equal((await r.stream(path)).status, 200);
+    c.ws.close();
+  } finally { r.close(); }
+});
+
+test("B3 endpoint: absent without the core session helpers (an older gateway)", async () => {
+  const k = kiosk.createKioskRuntime({
+    Router: express.Router, json: express.json, WebSocketServer,
+    isAllowedNetwork: () => true, csrfMiddleware: (req, res, next) => next(),
+    openDb: open, deviceStore: store,
+    settings: { readSetting: registry.readSetting, writeSetting: registry.writeSetting },
+    voice: { runVoiceTurn: async () => ({}), speakText: async () => true },
+    sttWarmup: async () => {}, resolveDisplayBird: async () => ({}), themeCss: () => "",
+    files: { publicDir: join(REPO, "bundles", "kiosk", "public"), birdSvgPath: join(REPO, "bundles", "ramble", "server", "bird-svg.cjs") },
+    announceToken: { validate: async () => false }, wrapPcmAsWav, log: () => {},
+  });
+  const app = express();
+  app.use(k.router((req, res, next) => next()));
+  const s = http.createServer(app);
+  await new Promise((r) => s.listen(0, "127.0.0.1", r));
+  try {
+    const b = `http://127.0.0.1:${s.address().port}`;
+    assert.equal((await fetch(b + MEDIA, { headers: { Cookie: cookie() } })).status, 404);
+    assert.equal((await fetch(b + MEDIA, { method: "POST", headers: { Cookie: cookie(), "X-Crow-Csrf": CSRF, "Content-Type": "application/json" }, body: "{}" })).status, 404);
+  } finally { k.stop(); s.close(); }
+});

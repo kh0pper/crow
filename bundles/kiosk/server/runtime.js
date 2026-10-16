@@ -14,7 +14,7 @@ import { createWmStore, matchWmFastPath, contentBlocks, wantsNewDisplay } from "
 import { createDisplayTools, cardUpdate } from "./display-tools.js";
 import { matchSpoken } from "./tiers.js";
 import { displayPromptSuffix, displayTurnContext } from "./prompt.js";
-import { effectiveCaps, audioPolicy } from "./caps.js";
+import { effectiveCaps, audioPolicy, BAR_OWNER_RE } from "./caps.js";
 import { ensureKioskSttProfile, pickKioskTtsProfile, kioskSttModel } from "./profiles.js";
 import { resolveSessionBot, sameOriginUpgrade, sessionDisplayId, SESSION_BOT_SETTING } from "./session-display.js";
 import { STRINGS } from "./strings.js";
@@ -57,6 +57,15 @@ export const PAGE_CSP = [
  */
 export const SESSION_PAGE_PATH = "/display/session";
 export const SESSION_WS_PATH = "/api/kiosk/session/dashboard";
+/**
+ * B3: the dashboard player bar's view of, and buttons on, its login's session display while the Talk to Crow
+ * overlay is closed (GET: the current item; POST { do, id, owner }). Same gate as the session socket: network rule
+ * (never Funnel), the dashboard session cookie, and the CSRF double-submit on POST. The display is ALWAYS the
+ * caller's own login's (sessionDisplayId of the request's cookie), never named by the body.
+ */
+export const SESSION_MEDIA_PATH = "/api/kiosk/session/media";
+export const SESSION_MEDIA_VERBS = Object.freeze(["pause", "resume", "next", "previous", "stop", "ended", "error"]);
+const ITEM_ID = /^m\d{1,9}$/;
 export const SESSION_PAGE_CSP = PAGE_CSP.replace("frame-ancestors 'none'", "frame-ancestors 'self'");
 /** How long a closed session display keeps its windows/timers/conversation (a phone's network blip reconnects well inside it). */
 export const SESSION_DISPLAY_GRACE_MS = 2 * 60 * 1000;
@@ -275,6 +284,7 @@ export function createKioskRuntime(deps) {
     send: (id, msg) => hub?.sendTo(id, msg) === true,
     onFailed: (id, item) => { const S = STRINGS[langOf(id)]; hub?.speak(id, (item.started ? S.say_play_lost : S.say_play_failed).replace("{title}", item.title || "")); },
     onEnded: closeNowPlaying,
+    ...(deps.mediaTimers || {}),   // tests only: the grace-period and station-reload timers
     // F8: a display with a screen shows what is playing as soon as it starts (rules in play.js autoNowPlaying).
     onStarted: (id) => { for (const ev of autoNowPlaying({ store: wm, deviceId: id, caps: hub?.capsOf?.(id), title: STRINGS[langOf(id)].now_playing_title })) hub?.sendTo(id, ev); },
   });
@@ -560,6 +570,7 @@ export function createKioskRuntime(deps) {
     r.use("/api/kiosk/pair", gate);
     r.use("/api/kiosk/admin", gate, dashboardAuth, deps.csrfMiddleware);
     r.use("/api/kiosk/internal", internal);
+    r.use(SESSION_MEDIA_PATH, gate);
 
     r.get("/display", (req, res) => {
       res.setHeader("Content-Security-Policy", PAGE_CSP);
@@ -578,6 +589,24 @@ export function createKioskRuntime(deps) {
       const html = readFileSync(join(deps.files.publicDir, "kiosk.html"), "utf8");
       res.type("html").send(html.replace("<html ", '<html data-mode="session" '));
     }));
+    // B3: the player bar (see SESSION_MEDIA_PATH). The answer carries a ticket path: never cached, never logged.
+    const sessionMedia = wrap(async (req, res) => {
+      res.setHeader("Cache-Control", "no-store");
+      if (!sessionMode) return res.status(404).json({ error: "not_found" });
+      const token = await deps.sessionFromRequest(req);
+      if (!token) return res.status(401).json({ error: "unauthorized" });
+      const id = sessionDisplayId(token);
+      if (req.method === "GET") return res.json(media.barView(id));
+      if (!deps.csrfTokenAccepted(req, req.headers["x-crow-csrf"])) return res.status(403).json({ error: "csrf" });
+      const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+      if (!SESSION_MEDIA_VERBS.includes(b.do) || typeof b.id !== "string" || !ITEM_ID.test(b.id) || typeof b.owner !== "string" || !BAR_OWNER_RE.test(b.owner)) return res.status(400).json({ error: "bad_request" });
+      const out = media.endpoint(id, { do: b.do, id: b.id, owner: b.owner });
+      if (out.status === 409) return res.status(409).json({ error: "superseded" });
+      if (out.status !== 200) return res.status(400).json({ error: "bad_request" });
+      res.json(out.view);
+    });
+    r.get(SESSION_MEDIA_PATH, sessionMedia);
+    r.post(SESSION_MEDIA_PATH, json, sessionMedia);
     r.get("/display/assets/:file", (req, res) => {
       const f = req.params.file;
       res.setHeader("Cache-Control", "no-cache");
