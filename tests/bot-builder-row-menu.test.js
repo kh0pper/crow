@@ -76,7 +76,7 @@ function makeDom(rowCount = 2) {
   const outside = new El(doc, "p", { class: "elsewhere" });
   body.append(outside);
   const fire = (type, target, extra = {}) => {
-    const ev = { type, target, key: extra.key, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopPropagation() {} };
+    const ev = { type, target, key: extra.key, relatedTarget: extra.relatedTarget || null, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopPropagation() {} };
     for (const fn of listeners[type] || []) fn(ev);
     return ev;
   };
@@ -143,4 +143,25 @@ test("binds once: a second run (a Turbo visit) adds no second set of listeners",
   const before = (listeners.click || []).length;
   new Function("window", "document", scriptBody())(win, doc);
   assert.equal((listeners.click || []).length, before);
+});
+
+test("Tab away from an open menu closes it (focusout to outside); moving focus inside keeps it open", () => {
+  const { doc, rows, outside, fire } = makeDom();
+  fire("click", rows[0].more);
+  fire("focusout", rows[0].items[0], { relatedTarget: rows[0].items[1] });
+  assert.equal(rows[0].menu.hidden, false, "focus moving between items keeps the menu open");
+  fire("focusout", rows[0].items[1], { relatedTarget: rows[0].more });
+  assert.equal(rows[0].menu.hidden, false, "focus going back to its own trigger keeps it open");
+  fire("click", rows[0].more); fire("click", rows[0].more);
+  fire("focusout", rows[0].items[0], { relatedTarget: outside });
+  assert.equal(rows[0].menu.hidden, true, "Tab out of the menu closes it");
+  assert.equal(rows[0].more.getAttribute("aria-expanded"), "false");
+  assert.notEqual(doc.activeElement, rows[0].more, "focus is not pulled back to the trigger");
+});
+
+test("focusout with no destination (window blur) leaves the menu alone", () => {
+  const { rows, fire } = makeDom();
+  fire("click", rows[1].more);
+  fire("focusout", rows[1].items[0], {});
+  assert.equal(rows[1].menu.hidden, false);
 });

@@ -5,7 +5,8 @@
  * buildRowMenu): the menu opens INLINE under its row; opening one closes the
  * others; ArrowDown on the trigger opens it on its first item; arrows,
  * Home/End move inside; Escape closes and hands focus back to the trigger; an
- * outside click closes it. "Is a menu open" is read from the DOM every time.
+ * outside click closes it, and so does focus leaving it (Tab away) for
+ * anything that is neither the menu nor its trigger. "Is a menu open" is read from the DOM every time.
  *
  * Document-level delegation, bound once per page lifetime: Turbo swaps the
  * body but keeps window/document, so a second run must not stack listeners.
@@ -48,6 +49,13 @@ export function rowMenuScript() {
     }
     var cur = openMenu();
     if (cur && !(t && cur.contains(t))) setOpen(cur, false, false);
+  });
+  document.addEventListener('focusout', function(ev){
+    var cur = openMenu();
+    var to = ev.relatedTarget;
+    if (!cur || !to) return;
+    if (cur.contains(to) || to === trigOf(cur)) return;
+    setOpen(cur, false, false);
   });
   document.addEventListener('keydown', function(ev){
     var t = ev.target;
