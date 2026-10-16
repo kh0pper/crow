@@ -29,8 +29,9 @@ test("the skill states the hand-written diagram, engine and fallback rules", () 
   assert.match(skill, /at most (2|two)/i);
 });
 
-test("the manifest is bumped from 0.5.5", () => {
-  assert.equal(man.version, "0.6.0");
+test("the manifest is bumped past 0.5.5 (the Design kit wiring landed in 0.6.0)", () => {
+  const [maj, min] = man.version.split(".").map(Number);
+  assert.ok(maj > 0 || min >= 6, `version ${man.version} is at least 0.6.0`);
   assert.equal(man.optional_bundles, undefined, "no reader exists for optional_bundles (review L12)");
 });
 

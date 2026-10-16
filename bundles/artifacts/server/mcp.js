@@ -172,6 +172,56 @@ export function withLibs(source, libs) {
   return { ...source, libs: [...new Set([...(source.libs || []), ...libs])] };
 }
 
+/** Queue item 26: a one-level string wrapper — {value|content|text: "…"},
+ *  optionally beside a string `type`/`content_type` — becomes the string.
+ *  Anything else is returned as is, for the string check to refuse. Never
+ *  recursive. Runs inside the input schema, so every gate and cap after it
+ *  sees exactly what a plain string would have given. */
+const WRAP_KEYS = new Set(["value", "content", "text"]);
+const WRAP_META = new Set(["type", "content_type"]);
+export function unwrapText(v) {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return v;
+  const proto = Object.getPrototypeOf(v);
+  if (proto !== Object.prototype && proto !== null) return v;
+  let inner;
+  for (const [k, x] of Object.entries(v)) {
+    if (WRAP_KEYS.has(k)) { if (inner !== undefined || typeof x !== "string") return v; inner = x; }
+    else if (!WRAP_META.has(k) || typeof x !== "string") return v;
+  }
+  return inner === undefined ? v : inner;
+}
+
+/** The typed `source` (queue item 26). Every field is a plain string or a
+ *  typed array: an untyped field publishes the empty schema {}, which
+ *  llama.cpp's JSON-schema grammar forces to be an OBJECT, so a local model
+ *  could never send a string. Unknown keys are dropped (none is read by the
+ *  renderer). A fresh schema instance per field: an instance used twice in one tool
+ *  publishes a $ref.
+ *  A null text field reads as absent (some providers fill unused fields
+ *  with null; the renderer always ignored them). Messages are static
+ *  strings (the fail() contract). */
+function sourceSchema(z) {
+  const text = (field, what, example) => z.preprocess((v) => (v === null ? undefined : unwrapText(v)), z.string({ invalid_type_error: `source.${field} must be a plain string, not an object or a list, e.g. ${example}` }).optional()).describe(what);
+  // ORDER MATTERS: llama.cpp's grammar admits optional properties only in
+  // declared order, so the short fields come first and the bodies last — a
+  // model that writes "title" first can still write "markdown" after it.
+  return z.object({
+    title: text("title", "document: its title, a plain string", '{"title": "Q3 report"}'),
+    lang: text("lang", "document: its language, en or es", '{"lang": "en"}'),
+    engine: text("engine", "diagram with the Design kit: vega-lite, mermaid or d2", '{"engine": "mermaid", "source": "flowchart LR\\n  a --> b"}'),
+    libs: z.array(z.string().max(120)).max(40).optional().describe("Design kit library names, e.g. [\"font:lora\"]"),
+    assets: z.array(z.object({
+      path: z.string().describe("file path inside the artifact, e.g. img/logo.png"),
+      contentType: z.string().describe("e.g. image/png"),
+      base64: z.string().describe("the file, base64-encoded"),
+    })).optional().describe("page or document: files the content references"),
+    html: text("html", "page: the whole HTML document as ONE string, not an object", '{"html": "<!doctype html>…"}'),
+    markdown: text("markdown", "document: the whole Markdown text as ONE string, not an object", '{"markdown": "# Title\\n\\nText…"}'),
+    svg: text("svg", "diagram: one <svg>…</svg> element as ONE string, not an object", '{"svg": "<svg xmlns=…>…</svg>"}'),
+    source: text("source", "diagram with the Design kit: the spec text as ONE string", '{"engine": "mermaid", "source": "flowchart LR\\n  a --> b"}'),
+  }).describe('Strings only. page: {"html": "<!doctype html>…"}; document: {"markdown": "# Title…", "title"?}; diagram: {"svg": "<svg…>…</svg>"} or, with the Design kit, {"engine": "mermaid", "source": "…"}.');
+}
+
 export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor, renderDeps = {}, onVersion = null, onRoundDone = async () => {}, emitExternal = null, cardMadeByOwner = async () => false } = {}) {
   // Default: a new current version carries open threads forward (§4.2).
   if (!onVersion) onVersion = async ({ artifactId, n, state, onlyThreads }) => { if (state === "current") await comments.carryForwardTo(db, blobs, artifactId, n, onlyThreads || null); };
@@ -212,8 +262,8 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
   };
   const scopedOut = (scope) => { if (scope) throw Object.assign(new Error("not available in this round"), { code: "forbidden" }); };
 
-  tool("artifact_create", "Create an artifact the owner can view and comment on. type: page (html, assets, libs), document (markdown; with the Design kit, ```vega-lite / ```mermaid / ```d2 fences become pictures), diagram (svg, or { engine, source } with the Design kit).",
-    { title: z.string(), type: z.enum(["page", "document", "diagram"]), source: z.record(z.any()), libs: libsSchema, change_note: z.string().optional() },
+  tool("artifact_create", 'Create an artifact the owner can view and comment on. Every source field is a plain string. type page: source {"html": "<!doctype html>…"} (+ assets, libs). type document: source {"markdown": "# Title…"} (with the Design kit, ```vega-lite / ```mermaid / ```d2 fences become pictures). type diagram: source {"svg": "<svg…>…</svg>"}, or {"engine": "mermaid", "source": "…"} with the Design kit.',
+    { title: z.string(), type: z.enum(["page", "document", "diagram"]), source: sourceSchema(z), libs: libsSchema, change_note: z.string().optional() },
     async (a, actor, scope) => {
       scopedOut(scope);
       // Re-read at save time: a bot whose session is not provably clean makes a tainted version.
@@ -223,8 +273,8 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
       return withDesign({ id: out.id, versionN: out.versionN }, out);
     });
 
-  tool("artifact_update", "Make a new version. During a feedback round pass round_id and base_version.",
-    { artifact_id: z.string(), source: z.record(z.any()), libs: libsSchema, change_note: z.string().optional(), round_id: z.number().int().optional(), base_version: z.number().int().optional() },
+  tool("artifact_update", "Make a new version: the whole source again, same shape as artifact_create (plain strings). During a feedback round pass round_id and base_version.",
+    { artifact_id: z.string(), source: sourceSchema(z), libs: libsSchema, change_note: z.string().optional(), round_id: z.number().int().optional(), base_version: z.number().int().optional() },
     async (a, actor, scope) => {
       // F7(4): a bot whose chat is mid-round for THIS artifact must attribute
       // its update to the round — the smoke's v2 landed with round_id NULL

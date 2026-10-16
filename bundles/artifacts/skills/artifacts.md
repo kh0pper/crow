@@ -12,6 +12,7 @@ Use `artifact_create` to make something the owner can open in Crow's Nest → Ar
 - `page`: `{ html, assets?, libs? }` — self-contained HTML/CSS/JS. It runs sandboxed with **no network**: put all data in the page, images and fonts in `assets` (base64) or `libs`. Never load anything from another site.
 - `document`: `{ markdown, title?, libs? }` — each top-level block becomes a section people can comment on.
 - `diagram`: `{ svg }` — one SVG element; no scripts, event handlers or foreignObject. Give important shapes an `id` and a `<title>`. With the Design kit, `{ engine, source }` instead (see below).
+- Every `source` field is ONE plain string, never an object: `{"html": "<!doctype html>…"}`, not `{"html": {"content": "…"}}`. `artifact_update` takes the whole source again in the same shape.
 
 ## Looks and the Design kit
 

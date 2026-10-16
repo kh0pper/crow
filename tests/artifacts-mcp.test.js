@@ -19,7 +19,7 @@ import { localTokenAuthMiddleware, generateArtifactsToken, generatePhoneToken, g
 import { markdownBlocks } from "../servers/blog/renderer.js";
 import { initArtifactsTables } from "../bundles/artifacts/server/init-tables.js";
 import { createLocalBlobStore } from "../bundles/artifacts/server/blob-store.js";
-import { createArtifactsMcpServer, TOOL_CLASSES, WITHHELD, gate, U } from "../bundles/artifacts/server/mcp.js";
+import { createArtifactsMcpServer, TOOL_CLASSES, WITHHELD, gate, U, unwrapText, withLibs } from "../bundles/artifacts/server/mcp.js";
 import * as comments from "../bundles/artifacts/server/comments.js";
 import * as rounds from "../bundles/artifacts/server/rounds.js";
 import * as store from "../bundles/artifacts/server/store.js";
@@ -789,4 +789,171 @@ test("S2 M5: a card-bound session counts as linked when the OWNER made the card;
     s.tasksBroken = true;
     assert.equal((await call(ownerCard, "artifact_update", { artifact_id: id, source: { markdown: "# broken" } })).err, NEEDS_LINK, "unreadable: not owner-made (fail closed)");
   } finally { s.tasksBroken = false; await ownerCard.close(); await botCard.close(); }
+});
+
+// ─── Queue item 26: a typed `source` (local grammar-constrained models) ─────
+// z.record(z.any()) published `source` as {additionalProperties: {}}, and
+// llama.cpp's JSON-schema grammar turns an empty `{}` schema into "object":
+// the local model could only send {html: {content: "…"}} and never saved.
+const walkSchema = (node, fn, path = "$") => {
+  if (!node || typeof node !== "object") return;
+  fn(node, path);
+  for (const [k, v] of Object.entries(node)) {
+    if (Array.isArray(v)) v.forEach((x, i) => walkSchema(x, fn, `${path}.${k}[${i}]`));
+    else if (v && typeof v === "object") walkSchema(v, fn, `${path}.${k}`);
+  }
+};
+
+test("item 26: artifact_create/update publish a TYPED source (string fields, no empty {} schema, no $ref)", async () => {
+  const op = await client(s.fullToken);
+  try {
+    const { tools } = await op.listTools();
+    for (const name of ["artifact_create", "artifact_update"]) {
+      const schema = tools.find((t) => t.name === name).inputSchema;
+      const src = schema.properties.source;
+      assert.equal(src.type, "object", name);
+      assert.equal(src.additionalProperties, false, `${name}: unknown source keys are not advertised`);
+      for (const k of ["html", "markdown", "svg", "engine", "source", "title", "lang"]) {
+        assert.equal(src.properties[k]?.type, "string", `${name}: source.${k} is a string`);
+        assert.ok(src.properties[k].description, `${name}: source.${k} says what it is`);
+      }
+      assert.equal(src.properties.libs.type, "array");
+      assert.equal(src.properties.libs.items.type, "string");
+      assert.equal(src.properties.assets.type, "array");
+      assert.equal(src.properties.assets.items.properties.base64.type, "string");
+      walkSchema(schema, (n, p) => {
+        assert.ok(!("$ref" in n), `${name}: no $ref at ${p}`);
+        if (p.endsWith(".additionalProperties") || /\.properties\.[^.]+$/.test(p) || p.endsWith(".items")) {
+          assert.ok(Object.keys(n).some((k) => k !== "description"), `${name}: an empty schema at ${p} would be grammar-forced to an object`);
+        }
+      });
+    }
+  } finally { await op.close(); }
+});
+
+test("item 26: a one-level {value|content|text} string wrapper is unwrapped on create and update; the stored source is plain", async () => {
+  const op = await client(s.fullToken);
+  try {
+    const page = await call(op, "artifact_create", { title: "Wrapped page", type: "page", source: { html: { content: "<p>wrapped</p>" } } });
+    assert.equal(page.err, null);
+    const v1 = await store.getVersion(s.db, page.data.id, 1);
+    assert.deepEqual(JSON.parse(v1.source_json), { html: "<p>wrapped</p>" });
+    const typed = await call(op, "artifact_create", { title: "Typed wrapper", type: "page", source: { html: { type: "text/html", content: "<p>t</p>" } } });
+    assert.equal(typed.err, null, "{type, content} as seen from the local model");
+    const val = await call(op, "artifact_create", { title: "Value wrapper", type: "page", source: { html: { value: "<p>v</p>", content_type: "text/html" } } });
+    assert.equal(val.err, null);
+    const doc = await call(op, "artifact_create", { title: "Wrapped doc", type: "document", source: { markdown: { text: "# Heading\n\nBody" }, title: { value: "Doc title" } } });
+    assert.equal(doc.err, null);
+    assert.deepEqual(JSON.parse((await store.getVersion(s.db, doc.data.id, 1)).source_json), { markdown: "# Heading\n\nBody", title: "Doc title" });
+    const dia = await call(op, "artifact_create", { title: "Wrapped diagram", type: "diagram", source: { svg: { content: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect id="r" width="5" height="5"/></svg>' } } });
+    assert.equal(dia.err, null);
+    const up = await call(op, "artifact_update", { artifact_id: page.data.id, source: { html: { value: "<p>v2</p>" } } });
+    assert.equal(up.err, null);
+    assert.deepEqual(JSON.parse((await store.getVersion(s.db, page.data.id, up.data.version)).source_json), { html: "<p>v2</p>" });
+    const plain = await call(op, "artifact_create", { title: "Plain page", type: "page", source: { html: "<p>plain</p>", libs: [] } });
+    assert.equal(plain.err, null, "the plain-string (cloud) path is unchanged");
+  } finally { await op.close(); }
+});
+
+test("item 26: anything but a one-level string wrapper is refused, and the refusal names the exact shape", async () => {
+  const op = await client(s.fullToken);
+  try {
+    for (const html of [{ content: { x: 1 } }, { content: "a", extra: "b" }, { content: "a", value: "b" }, ["<p>a</p>"], { content: { content: "<p>a</p>" } }, { type: 1, content: "a" }, 42]) {
+      const r = await call(op, "artifact_create", { title: "Bad", type: "page", source: { html } });
+      assert.ok(r.err, `refused: ${JSON.stringify(html)}`);
+      assert.match(r.err, /source\.html must be a plain string/, JSON.stringify(html));
+      assert.match(r.err, /e\.g\. \{.{0,2}html.{0,6}<!doctype html>/, "the example shape (however the SDK escapes its issue dump)");
+    }
+    const fm = await call(op, "artifact_create", { title: "Front matter", type: "document", source: { markdown: { title: "t", subtitle: "s", date: "d" } } });
+    assert.match(fm.err, /source\.markdown must be a plain string/);
+    const svgObj = await call(op, "artifact_create", { title: "Svg object", type: "diagram", source: { svg: { width: 10, height: 10 } } });
+    assert.match(svgObj.err, /source\.svg must be a plain string/);
+    const n = Number((await s.db.execute({ sql: "SELECT COUNT(*) AS n FROM artifacts WHERE title IN ('Bad','Front matter','Svg object')", args: [] })).rows[0].n);
+    assert.equal(n, 0, "nothing saved");
+  } finally { await op.close(); }
+});
+
+test("item 26: a missing field names the shape for its type; unknown source keys are dropped; a wrapped value still meets the size cap", async () => {
+  const op = await client(s.fullToken);
+  try {
+    assert.match((await call(op, "artifact_create", { title: "No html", type: "page", source: { markdown: "# x" } })).err, /^\[bad_source\] page needs source\.html: the whole HTML document as one string/);
+    assert.match((await call(op, "artifact_create", { title: "No md", type: "document", source: { html: "<p>" } })).err, /^\[bad_source\] document needs source\.markdown: the whole Markdown text as one string/);
+    assert.match((await call(op, "artifact_create", { title: "No svg", type: "diagram", source: {} })).err, /^\[bad_source\] diagram needs source\.svg/);
+    const extra = await call(op, "artifact_create", { title: "Extra keys", type: "page", source: { html: "<p>e</p>", subtitle: "dropped", css: "body{}" } });
+    assert.equal(extra.err, null);
+    assert.deepEqual(JSON.parse((await store.getVersion(s.db, extra.data.id, 1)).source_json), { html: "<p>e</p>" });
+    // The harness's express.json() takes 100 kB, so the cap is lowered for this one call.
+    const cap = LIMITS.documentMarkdownBytes;
+    LIMITS.documentMarkdownBytes = 1024;
+    try {
+      const big = "# big\n\n" + "x".repeat(2048);
+      assert.match((await call(op, "artifact_create", { title: "Big wrapped", type: "document", source: { markdown: { content: big } } })).err, /^\[too_large\]/);
+    } finally { LIMITS.documentMarkdownBytes = cap; }
+  } finally { await op.close(); }
+});
+
+test("item 26: the needs_link gate and the retry dedupe see a wrapped update exactly as a plain one", async () => {
+  const id = await gateDoc("Wrapped gate doc");
+  await freshSession("bobby", "perchlive-w1");
+  const w1 = await client(s.artToken, bot("bobby", "perchlive-w1"));
+  const g0 = await client(s.artToken, bot("bobby", "perchlive-g0"));
+  try {
+    const before = await versions(id);
+    assert.equal((await call(w1, "artifact_update", { artifact_id: id, source: { markdown: { content: "# sneaky" } } })).err, NEEDS_LINK);
+    assert.equal(await versions(id), before, "no version");
+    const a = await call(g0, "artifact_update", { artifact_id: id, source: { markdown: { content: "# same body" } } });
+    assert.equal(a.err, null);
+    const b = await call(g0, "artifact_update", { artifact_id: id, source: { markdown: "# same body" } });
+    assert.equal(b.data.version, a.data.version, "a plain retry of a wrapped save is the same version (dedupe)");
+    assert.equal(await versions(id), before + 1);
+  } finally { await w1.close(); await g0.close(); }
+});
+
+test("item 26 (review): source fields are declared short-first, bodies last (llama.cpp admits optional keys only in declared order)", async () => {
+  const op = await client(s.fullToken);
+  try {
+    const { tools } = await op.listTools();
+    for (const name of ["artifact_create", "artifact_update"]) {
+      assert.deepEqual(Object.keys(tools.find((t) => t.name === name).inputSchema.properties.source.properties),
+        ["title", "lang", "engine", "libs", "assets", "html", "markdown", "svg", "source"], name);
+    }
+  } finally { await op.close(); }
+});
+
+test("item 26 (review): edge shapes — a body-less wrapper, libs merging after an unwrap, a typed asset, a change_note put inside source", async () => {
+  const op = await client(s.fullToken);
+  try {
+    assert.match((await call(op, "artifact_create", { title: "Type only", type: "page", source: { html: { type: "text/html" } } })).err, /source\.html must be a plain string/);
+    const noType = await call(op, "artifact_create", { title: "Asset no type", type: "page", source: { html: "<p>a</p>", assets: [{ path: "a.png", base64: "AAAA" }] } });
+    assert.match(noType.err, /Input validation error/, "an asset without contentType is refused by the schema");
+    const inner = await call(op, "artifact_create", { title: "Inner note", type: "page", source: { html: { content: "<p>n</p>" }, change_note: "first cut" } });
+    assert.equal(inner.err, null);
+    assert.deepEqual(JSON.parse((await store.getVersion(s.db, inner.data.id, 1)).source_json), { html: "<p>n</p>" }, "a change_note inside source is dropped, not stored");
+  } finally { await op.close(); }
+});
+
+test("item 26 (review): unwrapText is one level and exact; libs still merge onto the unwrapped source; a refused wrapper never echoes its text", async () => {
+  assert.equal(unwrapText({ content: "a" }), "a");
+  assert.equal(unwrapText({ text: "a", type: "markdown" }), "a");
+  for (const v of [{ content: { content: "a" } }, { content: "a", text: "b" }, { content: "a", other: "b" }, { type: "x" }, { content: 1 }, ["a"], "a", null, Object.assign(Object.create({ content: "p" }), {})]) {
+    assert.deepEqual(unwrapText(v), v, JSON.stringify(v));
+  }
+  assert.deepEqual(withLibs({ html: unwrapText({ content: "<p>" }), libs: ["font:lora"] }, ["font:lora", "css:open-props"]), { html: "<p>", libs: ["font:lora", "css:open-props"] });
+  const op = await client(s.fullToken);
+  try {
+    const SENT = "SENTINEL-WRAP-4412";
+    const r = await op.callTool({ name: "artifact_create", arguments: { title: SENT, type: "page", source: { html: { content: SENT, extra: SENT } } } });
+    assert.equal(r.isError, true);
+    assert.ok(!JSON.stringify(r).includes(SENT), "the schema error carries no authored text");
+  } finally { await op.close(); }
+});
+
+test("item 26 (review I-1): a null text field reads as absent, as the renderer always treated it", async () => {
+  const op = await client(s.fullToken);
+  try {
+    const d = await call(op, "artifact_create", { title: "Null fields", type: "document", source: { markdown: "# a", title: null, lang: null, html: null, svg: null, engine: null, source: null } });
+    assert.equal(d.err, null);
+    assert.deepEqual(JSON.parse((await store.getVersion(s.db, d.data.id, 1)).source_json), { markdown: "# a" });
+    assert.match((await call(op, "artifact_create", { title: "Null html", type: "page", source: { html: null } })).err, /page needs source\.html/);
+  } finally { await op.close(); }
 });

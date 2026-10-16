@@ -479,7 +479,7 @@ export async function renderVersion(type, source, { markdownBlocks, design = nul
   if (!source || typeof source !== "object") throw err("bad_source", "source must be an object");
   const kit = design ? await design.kit() : null;
   if (type === "page") {
-    if (typeof source.html !== "string" || !source.html.trim()) throw err("bad_source", "page needs html");
+    if (typeof source.html !== "string" || !source.html.trim()) throw err("bad_source", 'page needs source.html: the whole HTML document as one string, e.g. {"html": "<!doctype html>…"}');
     const lib = await libsFor("page", source, kit, houseStyle);
     return {
       files: [{ path: "index.html", body: Buffer.from(source.html), contentType: "text/html; charset=utf-8" }, ...assetsFor("page", source.assets), ...(lib ? lib.files : [])],
@@ -488,7 +488,7 @@ export async function renderVersion(type, source, { markdownBlocks, design = nul
     };
   }
   if (type === "document") {
-    if (typeof source.markdown !== "string") throw err("bad_source", "document needs markdown");
+    if (typeof source.markdown !== "string") throw err("bad_source", 'document needs source.markdown: the whole Markdown text as one string, e.g. {"markdown": "# Title\\n\\nText…"}');
     if (Buffer.byteLength(source.markdown) > LIMITS.documentMarkdownBytes) throw err("too_large", `markdown over ${LIMITS.documentMarkdownBytes} bytes`);
     if (typeof markdownBlocks !== "function") throw err("no_renderer", "markdown renderer unavailable");
     const lib = await libsFor("document", source, kit, houseStyle);
@@ -550,7 +550,7 @@ export async function renderVersion(type, source, { markdownBlocks, design = nul
     let renderFiles = [];
     if (source.engine !== undefined) {
       if (!kit) throw err("kit_missing", KIT_MISSING);
-      if (typeof source.engine !== "string" || typeof source.source !== "string") throw err("bad_source", "a rendered diagram needs { engine, source }");
+      if (typeof source.engine !== "string" || typeof source.source !== "string") throw err("bad_source", 'a rendered diagram needs source.engine and source.source as strings, e.g. {"engine": "mermaid", "source": "flowchart LR\\n  a --> b"}');
       const key = specKey(source.engine, source.source);
       // Unavailable here is a retryable refusal: there is no code to fall back to.
       raw = cachedSvg(priorRenders && new Map(priorRenders), key) || await renderSpec(kit, source.engine, source.source, Date.now() + LIMITS.saveRenderMs);
@@ -562,7 +562,8 @@ export async function renderVersion(type, source, { markdownBlocks, design = nul
       ];
     }
     // Cap BEFORE any scan; then only linear indexOf/startsWith work (ReDoS review).
-    if (typeof raw !== "string" || raw.length > 5 * 1024 * 1024) throw err("too_large", "svg over 5 MB");
+    if (typeof raw !== "string") throw err("bad_source", 'diagram needs source.svg: one <svg>…</svg> element as one string, e.g. {"svg": "<svg xmlns=…>…</svg>"}');
+    if (raw.length > 5 * 1024 * 1024) throw err("too_large", "svg over 5 MB");
     let svg = raw.trim();
     if (svg.startsWith("<?xml")) { const e = svg.indexOf("?>"); svg = e < 0 ? "" : svg.slice(e + 2).trim(); }
     const head = svg.slice(0, 5).toLowerCase();
