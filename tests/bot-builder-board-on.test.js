@@ -286,6 +286,18 @@ test("rollback on a lost compare-and-swap removes every link and the empty bots 
   assert.ok(existsSync(join(oldRoot, "sessions", "a_sess-1.jsonl")), "the old world is untouched");
 });
 
+test("a failed Turn on from the board (return=board) fails back to the board, error attached", async () => {
+  await addBot("ret-fail-bot", "Ret Fail Bot", BASE_DEF());
+  seedOldWorld("ret-fail-bot");
+  const broken = dbWith(async () => { throw new Error("disk full"); });
+  const to = await post({ bot_id: "ret-fail-bot", return: "board" }, broken);
+  assert.match(to, /^\/dashboard\/bot-board\?bot=ret-fail-bot&error=/);
+  assert.equal(new URLSearchParams(to.split("?")[1]).get("error"), "disk full");
+  assert.equal((await bot("ret-fail-bot")).project_id, null);
+  const toList = await post({ bot_id: "ret-fail-bot" }, broken);
+  assert.match(toList, /^\/dashboard\/bot-builder\?error=/, "from the list it still fails to the list");
+});
+
 test("rollback when the write throws midway: no links remain", async () => {
   await addBot("throw-bot", "Throw Bot", BASE_DEF());
   const oldRoot = seedOldWorld("throw-bot");

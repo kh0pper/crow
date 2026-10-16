@@ -107,6 +107,9 @@ export default {
     if (q.err === "locked") noticeBits.push(`<p class="bb-msg err">${t("botboard.errLocked", lang)}</p>`);
     else if (q.err === "bad_move") noticeBits.push(`<p class="bb-msg err">${t("botboard.errBadMove", lang)}</p>`);
     else if (q.err === "move_failed") noticeBits.push(`<p class="bb-msg err">${t("botboard.errMoveFailed", lang)}</p>`);
+    // A failed Turn on (bot-builder board_on, return=board) comes back with
+    // its message; free text, so always escaped.
+    if (typeof q.error === "string" && q.error) noticeBits.push(`<p class="bb-msg err">${escapeHtml(q.error.slice(0, 500))}</p>`);
     if (reqBot != null && !selBot) {
       noticeBits.push(`<p class="bb-msg err">⚠️ Bot <code>${escapeHtml(reqBot)}</code> ${t("botboard.botNotFound", lang)}</p>`);
     }

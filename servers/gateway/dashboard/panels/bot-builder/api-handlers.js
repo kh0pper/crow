@@ -111,7 +111,8 @@ async function handleBoardOn(req, res, { db }) {
   const botId = String(b.bot_id || "");
   const enc = encodeURIComponent(botId);
   const done = () => res.redirectAfterPost(b.return === "board" ? `/dashboard/bot-board?bot=${enc}` : "/dashboard/bot-builder?saved=1");
-  const fail = (msg) => res.redirectAfterPost("/dashboard/bot-builder?error=" + encodeURIComponent(msg));
+  // A failure lands where the button was: the board (return=board) or the list.
+  const fail = (msg) => res.redirectAfterPost((b.return === "board" ? `/dashboard/bot-board?bot=${enc}&error=` : "/dashboard/bot-builder?error=") + encodeURIComponent(msg));
   let row = null;
   try {
     row = (await db.execute({ sql: "SELECT bot_id, display_name, definition, project_id FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0] || null;

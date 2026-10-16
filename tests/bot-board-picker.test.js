@@ -176,6 +176,16 @@ test("a type-none bot gets the Turn-on panel, not 'This bot has no tracker.'", a
   assert.ok(html.includes(translations["botbuilder.boardOnWarn"].en), "the effect is stated before the button");
 });
 
+test("a failed Turn on lands back here with its error shown, escaped", async () => {
+  const { html } = await render({ bot: "assistant", error: "Can't link <b>x</b> & \"y\"" });
+  assert.ok(html.includes('<p class="bb-msg err">Can&#39;t link &lt;b&gt;x&lt;/b&gt; &amp; &quot;y&quot;</p>') ||
+    html.includes('<p class="bb-msg err">Can\'t link &lt;b&gt;x&lt;/b&gt; &amp; &quot;y&quot;</p>'), "the error, escaped");
+  assert.ok(!html.includes("<b>x</b>"), "never raw");
+  assert.ok(html.includes('name="action" value="board_on"'), "the Turn-on panel is still there to retry");
+  const { html: clean } = await render({ bot: "assistant" });
+  assert.ok(!clean.includes('class="bb-msg err"'), "no error, no message");
+});
+
 test("a kanban bot with no project gets the same panel, not the noProjectLinked dead end", async () => {
   const { html } = await render({ bot: "noproj" });
   assert.ok(!html.includes(translations["botboard.noProjectLinked"].en));
