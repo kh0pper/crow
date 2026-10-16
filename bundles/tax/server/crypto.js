@@ -46,7 +46,7 @@ function deriveKey(passphrase, salt) {
 export function encrypt(plaintext, passphrase) {
   if (!passphrase) throw new Error("Encryption passphrase required (CROW_TAX_ENCRYPTION_KEY)");
   if (isExampleKey(passphrase)) {
-    throw new Error("CROW_TAX_ENCRYPTION_KEY is the example value published in Crow's repository. Set a passphrase of your own in Extensions, and put the old one in CROW_TAX_ENCRYPTION_KEY_PREVIOUS so returns saved with it stay readable (each one is re-encrypted with the new passphrase the next time it is saved).");
+    throw new Error("CROW_TAX_ENCRYPTION_KEY is the example value published in Crow's repository. Set a passphrase of your own in Extensions, and put the old one in CROW_TAX_ENCRYPTION_KEY_PREVIOUS so returns saved with it stay readable (they move to the new passphrase when the tax server next starts, or when each is saved).");
   }
 
   const salt = randomBytes(SALT_LENGTH);

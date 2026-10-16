@@ -136,9 +136,7 @@ test("Finish setup lists a required key whose value is a placeholder", () => {
 });
 
 test("no tracked .env.example ships a value for a secret key (unless it is the manifest default) or a placeholder for a required key", () => {
-  // plex: its manifest is also changed by the install-guard PR; its placeholder goes in a
-  // follow-up once that lands (two PRs bumping one manifest version would collide).
-  const LATER = new Set(["plex"]);
+  const LATER = new Set();
   const bad = [];
   for (const id of [...trackedBundleSet()].sort()) {
     if (LATER.has(id)) continue;
