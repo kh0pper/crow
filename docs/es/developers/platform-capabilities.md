@@ -35,6 +35,7 @@ window.crowPlayer.getQueueIndex() // Devuelve el índice actual
 
 ### Características
 
+- **Backend de quiosco (interno)**: además del `<audio>` local y las gafas Meta, la barra tiene un tercer backend para los medios de la superposición Hablar con Crow (quiosco B3). Solo lo usa el script de la superposición (`kioskAttach`/`kioskApply`/`kioskDetach`/`kioskOwner`); un panel nunca los llama. Llamar a `load`/`queue` mientras suena detiene primero el elemento de la superposición. Su estado nunca se guarda con la ruta del ticket: al recargar se vuelve a pedir `/api/kiosk/session/media`.
 - **Persistencia**: El estado del reproductor (pista, posición, cola) se guarda en `localStorage` y se restaura al cargar la página. Los usuarios pueden navegar entre paneles sin perder la reproducción.
 - **Gestión de la cola**: Avance automático a la siguiente pista en `ended`. El botón de anterior reinicia la pista actual si llevas más de 3 segundos de reproducción.
 - **Barra de progreso**: Barra de progreso clicable con indicador de tiempo.
