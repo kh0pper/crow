@@ -189,32 +189,6 @@ test("tax: decrypt keeps working for data an install already encrypted with an e
   assert.equal(decrypt(packed, key), "old-ssn");
 });
 
-test("Configure: changing tax's encryption key keeps the old one in CROW_TAX_ENCRYPTION_KEY_PREVIOUS", async () => {
-  const express = (await import("express")).default;
-  const id = "tax";
-  const dir = join(CROW_HOME, "bundles", id);
-  mkdirSync(dir, { recursive: true });
-  copyFileSync(join(REPO, "bundles", id, "manifest.json"), join(dir, "manifest.json"));
-  writeFileSync(join(dir, ".env"), "CROW_TAX_ENCRYPTION_KEY=old-pass-1\n");
-  const app = express(); app.use(express.json()); app.use(B.default());
-  const server = app.listen(0, "127.0.0.1"); await new Promise((r) => server.once("listening", r));
-  try {
-    const post = (env) => fetch(`http://127.0.0.1:${server.address().port}/bundles/api/env`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ bundle_id: id, env_vars: env }) });
-    assert.equal((await post({ CROW_TAX_ENCRYPTION_KEY: "new-pass-2" })).status, 200);
-    let env = parseEnvText(readFileSync(join(dir, ".env"), "utf8"));
-    assert.equal(env.CROW_TAX_ENCRYPTION_KEY, "new-pass-2");
-    assert.equal(env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS, "old-pass-1", "the old key is kept");
-    // A second change while the slot still holds an older key would strand data saved
-    // with the middle one: refused until the slot is cleared.
-    const r3 = await post({ CROW_TAX_ENCRYPTION_KEY: "newer-pass-3" });
-    assert.equal(r3.status, 409);
-    assert.equal((await r3.json()).code, "previous_key_in_use");
-    env = parseEnvText(readFileSync(join(dir, ".env"), "utf8"));
-    assert.equal(env.CROW_TAX_ENCRYPTION_KEY, "new-pass-2", "nothing changed");
-    assert.equal(env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS, "old-pass-1");
-  } finally { server.close(); }
-});
-
 test("reinstall over kept data reuses the library path the earlier install used, not an empty CROW_HOME folder", () => {
   const S = { retain: null };
   const dest = scratch();
@@ -252,5 +226,20 @@ test("tax: at start, returns only the previous key opens are re-encrypted to the
     assert.equal(decrypt(rows.b, "k2-new"), "on-new");
     assert.throws(() => decrypt(rows.c, "k2-new"), undefined, "a row neither key opens is left alone");
     assert.equal(await reencryptToCurrentKey(db, "k2-new", "k1-old"), 0, "idempotent");
+    // A save that lands between the read and the write is never overwritten.
+    await ins("d", encrypt("old-version", "k1-old"));
+    const realExecute = db.execute.bind(db);
+    let raced = false;
+    db.execute = async (q) => {
+      if (!raced && typeof q === "object" && /^UPDATE/.test(q.sql)) {
+        raced = true;
+        await realExecute({ sql: "UPDATE tax_returns SET data = ? WHERE id = 'd'", args: [encrypt("user-edit", "k2-new")] });
+      }
+      return realExecute(q);
+    };
+    await reencryptToCurrentKey(db, "k2-new", "k1-old");
+    db.execute = realExecute;
+    const d = (await db.execute("SELECT data FROM tax_returns WHERE id = 'd'")).rows[0].data;
+    assert.equal(decrypt(d, "k2-new"), "user-edit", "the newer save wins");
   } finally { db.close?.(); }
 });

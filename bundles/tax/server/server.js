@@ -38,8 +38,9 @@ export async function reencryptToCurrentKey(db, current, previous) {
     try { decrypt(r.data, current); continue; } catch { /* not on the current key */ }
     let plain;
     try { plain = decrypt(r.data, previous); } catch { continue; }
-    await db.execute({ sql: "UPDATE tax_returns SET data = ? WHERE id = ?", args: [encrypt(plain, current), r.id] });
-    moved++;
+    // Compare-and-swap: a save that landed after the read wins; this row is moved later.
+    const res = await db.execute({ sql: "UPDATE tax_returns SET data = ? WHERE id = ? AND data = ?", args: [encrypt(plain, current), r.id, r.data] });
+    if ((res.rowsAffected ?? res.changes ?? 1) > 0) moved++;
   }
   return moved;
 }

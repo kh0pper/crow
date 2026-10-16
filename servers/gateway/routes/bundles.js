@@ -3743,26 +3743,6 @@ export default function bundlesRouter() {
       const oldEnvText = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
       const existing = parseEnvText(oldEnvText);
 
-      // env_vars[].previous_key (tax's encryption key): changing the key keeps the old one
-      // in the named slot, so data saved with it stays readable. The old value is the one
-      // the MCP child really runs with (its mcp-addons entry, then the gateway env, then
-      // this .env). If the slot still holds a DIFFERENT older key, the change is refused:
-      // overwriting it would strand everything saved with that one.
-      {
-        const entryEnv = readJsonSafe(MCP_ADDONS_PATH, {})?.[bundle_id]?.env || {};
-        for (const v of getInstalledFirstManifest(bundle_id)?.env_vars || []) {
-          const prev = v && typeof v.previous_key === "string" ? v.previous_key : null;
-          if (!prev || env_vars[v.name] === undefined || env_vars[v.name] === "" || env_vars[prev] !== undefined) continue;
-          const old = entryEnv[v.name] || process.env[v.name] || existing[v.name] || "";
-          if (!old || old === String(env_vars[v.name])) continue;
-          const kept = entryEnv[prev] || process.env[prev] || existing[prev] || "";
-          if (kept && kept !== old) {
-            return res.status(409).json({ code: "previous_key_in_use", key: prev, error: `${prev} still holds an older key. Open the extension once (it re-encrypts saved data to the current key at start), then clear ${prev} before changing ${v.name} again.` });
-          }
-          env_vars[prev] = old;
-        }
-      }
-
       // Keys whose value this save actually changes (names only, never values).
       const changedKeys = Object.keys(env_vars).filter((k) => {
         const next = env_vars[k];
