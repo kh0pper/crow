@@ -75,7 +75,14 @@ test("fileview: the bar follows the crow_lang cookie", async () => {
   const { playerShellHtml } = await import("../servers/gateway/dashboard/shared/player-shell.js");
   const html = await (await get("/dashboard/fileview?path=" + encodeURIComponent(md), "crow_session=good; crow_lang=es")).text();
   assert.ok(html.includes(playerShellHtml("es", { dark: true })));
-  assert.match(html, /<html lang="en">/, "the page's own words stay English; only the bar follows the cookie");
+  assert.match(html, /<html lang="es">/, "the document's language is the resolved one (the bar's words are in it)");
+  assert.match(await (await get("/dashboard/fileview?path=" + encodeURIComponent(md))).text(), /<html lang="en">/, "no cookie: en");
+});
+
+test("fileview: under an es page, the page's own English words say so (lang=\"en\" on the not-found note)", async () => {
+  const html = await (await get("/dashboard/fileview?path=" + encodeURIComponent(join(root, "missing.md")), "crow_session=good; crow_lang=es")).text();
+  assert.match(html, /<html lang="es">/);
+  assert.match(html, /<p lang="en">File not found/);
 });
 
 test("fileview: no session, no bar (401 from dashboardAuth)", async () => {

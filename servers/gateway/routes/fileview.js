@@ -72,7 +72,7 @@ function langOf(req) {
  * render (turbo-visit-control), and the shell's reserve script installs once per document anyway.
  */
 function page(title, bodyHtml, lang = "en") {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+  return `<!doctype html><html lang="${lang === "es" ? "es" : "en"}"><head><meta charset="utf-8">` +
     `<meta name="viewport" content="width=device-width, initial-scale=1">` +
     `<meta name="turbo-visit-control" content="reload">` +
     `<title>${escapeHtml(title)}</title><style>` +
@@ -105,14 +105,14 @@ export default function fileviewRouter(dashboardAuth) {
     const safe = resolveSafeMarkdownPath(raw);
     if (!safe) {
       return res.status(404).type("html").send(
-        page("Not found", `<p>File not found, not a <code>.md</code> file, or outside the allowed root.</p>`, lang)
+        page("Not found", `<p lang="en">File not found, not a <code>.md</code> file, or outside the allowed root.</p>`, lang)
       );
     }
     let md;
     try {
       md = readFileSync(safe, "utf8");
     } catch {
-      return res.status(404).type("html").send(page("Not found", `<p>File could not be read.</p>`, lang));
+      return res.status(404).type("html").send(page("Not found", `<p lang="en">File could not be read.</p>`, lang));
     }
     const body = `<p class="crumb">${escapeHtml(safe)}</p><article>${renderMarkdown(md)}</article>`;
     res.type("html").send(page(basename(safe), body, lang));
