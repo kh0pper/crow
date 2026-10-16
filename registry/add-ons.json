@@ -1793,8 +1793,7 @@
       },
       "requires": {
         "env": [
-          "GTS_HOST",
-          "GTS_ACCOUNT_DOMAIN"
+          "GTS_HOST"
         ],
         "bundles": [
           "caddy"
@@ -1807,13 +1806,13 @@
       "env_vars": [
         {
           "name": "GTS_HOST",
-          "description": "Public domain for this GoToSocial instance (e.g., gts.example.com). Must be a subdomain dedicated to GoToSocial — ActivityPub actors are URL-keyed and subpath mounts break federation.",
+          "description": "Public domain for this GoToSocial instance (e.g., gts.example.com). Must be a subdomain dedicated to GoToSocial — ActivityPub actors are URL-keyed and subpath mounts break federation. Set it before the first start: the app fixes it then, and changing it later breaks federation (only a reinstall with its data deleted can change it).",
           "required": true
         },
         {
           "name": "GTS_ACCOUNT_DOMAIN",
-          "description": "Account domain used in @user@domain handles. Usually the same as GTS_HOST. If your apex is example.com and GTS_HOST=gts.example.com, set this to example.com and add a .well-known/webfinger delegation on the apex.",
-          "required": true
+          "description": "Account domain used in @user@domain handles. Usually the same as GTS_HOST. If your apex is example.com and GTS_HOST=gts.example.com, set this to example.com and add a .well-known/webfinger delegation on the apex. Leave it empty to use GTS_HOST. Set it before the first start: the app fixes it then, and changing it later breaks federation (only a reinstall with its data deleted can change it).",
+          "required": false
         },
         {
           "name": "GTS_URL",
@@ -3380,7 +3379,7 @@
       "env_vars": [
         {
           "name": "MATRIX_SERVER_NAME",
-          "description": "The homeserver's public domain — this is the server_name that appears in user IDs (@alice:example.com). Typically an apex (example.com) with a .well-known/matrix/server delegation, OR a subdomain you'll expose on :8448 directly (matrix.example.com).",
+          "description": "The homeserver's public domain — this is the server_name that appears in user IDs (@alice:example.com). Typically an apex (example.com) with a .well-known/matrix/server delegation, OR a subdomain you'll expose on :8448 directly (matrix.example.com). Set it before the first start: the app fixes it then, and changing it later breaks federation (only a reinstall with its data deleted can change it).",
           "required": true
         },
         {
@@ -5937,9 +5936,10 @@
         },
         {
           "name": "CROW_TAX_ENCRYPTION_KEY",
-          "description": "Passphrase that encrypts personal data at rest (SSN, names). Choose your own and keep a copy: without it saved returns can't be read.",
+          "description": "Passphrase that encrypts personal data at rest (SSN, names). Choose your own and keep a copy: without it saved returns can't be read. Changing it keeps the old one in CROW_TAX_ENCRYPTION_KEY_PREVIOUS, so returns saved with it stay readable.",
           "required": true,
-          "secret": true
+          "secret": true,
+          "previous_key": "CROW_TAX_ENCRYPTION_KEY_PREVIOUS"
         },
         {
           "name": "CROW_TAX_ENCRYPTION_KEY_PREVIOUS",
@@ -6792,7 +6792,7 @@
       "env_vars": [
         {
           "name": "WF_HOST",
-          "description": "Public domain for this WriteFreely instance (must be a subdomain; subpath mounts break ActivityPub).",
+          "description": "Public domain for this WriteFreely instance (must be a subdomain; subpath mounts break ActivityPub). Set it before the first start: the app fixes it then, and changing it later breaks federation (only a reinstall with its data deleted can change it).",
           "required": true
         },
         {

@@ -62,7 +62,7 @@ import { checkComposeModel, loadComposeModel, usesHostNetwork } from "../compose
 import { resolveDataDir } from "../../db.js";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { isPlaceholderValue } from "../bundle-env-placeholders.js";
-import { planGeneratedEnv, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedKeys, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
+import { planGeneratedEnv, retainedEnvPath, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedKeys, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
 
 /**
  * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
@@ -2323,7 +2323,7 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
  *
  * Every rung writes mode 600 — bundle .env files hold secrets.
  */
-export function writeInstallEnv(destDir, envVars, manifest, log = () => {}, { baseText = null, baseIsExample = false, crowHome = null } = {}) {
+export function writeInstallEnv(destDir, envVars, manifest, log = () => {}, { baseText = null, baseIsExample = false, crowHome = null, retained = null } = {}) {
   const envPath = join(destDir, ".env");
   const examplePath = join(destDir, ".env.example");
   const usable = {};
@@ -2346,6 +2346,9 @@ export function writeInstallEnv(destDir, envVars, manifest, log = () => {}, { ba
       if (!rel) continue;
       const cur = usable[v.name] ?? baseEnv[v.name];
       if (cur !== undefined && cur !== "" && !(replacePlaceholders && isPlaceholderValue(cur))) continue;
+      // A reinstall over kept data: the path the earlier install used (retained at uninstall).
+      const kept = retained?.[v.name];
+      if (kept && !isPlaceholderValue(kept)) { out[v.name] = kept; continue; }
       const dir = join(crowHome, rel);
       try { mkdirSync(dir, { recursive: true, mode: 0o755 }); } catch { continue; }
       out[v.name] = dir;
@@ -2397,7 +2400,7 @@ export function crowHomeDefaultRel(v) {
 /** .env text with every KEY=<placeholder> line turned into a comment naming only the key. */
 export function scrubPlaceholderLines(text) {
   return String(text || "").split("\n").map((line) => {
-    const m = line.match(/^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    const m = line.match(/^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
     if (!m) return line;
     const val = parseEnvText(`${m[2]}=${m[3]}`)[m[2]];
     return isPlaceholderValue(val) ? `# ${m[2]}= (example value left out: set it in Extensions)` : line;
@@ -2535,7 +2538,9 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       return { ok: false, reason: "could not save the generated password to Crow keychain; nothing was written — retry the install" };
     }
     plan.persist();
-    writeInstallEnv(destDir, writeEnv, manifest, (msg) => appendLog(job, msg), { baseText, baseIsExample, crowHome: CROW_HOME });
+    let retainedForPaths = null;
+    try { retainedForPaths = parseEnvText(readFileSync(retainedEnvPath(CROW_HOME, bundleId), "utf8")); } catch { /* none kept */ }
+    writeInstallEnv(destDir, writeEnv, manifest, (msg) => appendLog(job, msg), { baseText, baseIsExample, crowHome: CROW_HOME, retained: retainedForPaths });
     if (Object.keys(generated).length > 0) {
       appendLog(job, `Generated ${Object.keys(generated).length} internal secret(s) — stored at mode 600, never shown`);
     }
@@ -3737,6 +3742,15 @@ export default function bundlesRouter() {
       const envPath = join(bundleDir, ".env");
       const oldEnvText = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
       const existing = parseEnvText(oldEnvText);
+
+      // env_vars[].previous_key (tax's encryption key): changing the key keeps the old one
+      // in the named slot when that slot is empty, so data saved with it stays readable.
+      for (const v of getInstalledFirstManifest(bundle_id)?.env_vars || []) {
+        const prev = v && typeof v.previous_key === "string" ? v.previous_key : null;
+        if (!prev || env_vars[v.name] === undefined || env_vars[v.name] === "" || env_vars[prev] !== undefined) continue;
+        const old = existing[v.name] || process.env[v.name] || "";
+        if (old && old !== String(env_vars[v.name]) && !(existing[prev] || process.env[prev])) env_vars[prev] = old;
+      }
 
       // Keys whose value this save actually changes (names only, never values).
       const changedKeys = Object.keys(env_vars).filter((k) => {

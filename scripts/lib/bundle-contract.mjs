@@ -201,6 +201,10 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
       if (v.propagate === true && v.store_as !== undefined) errors.push(`env_vars ${v.name}: propagate: true cannot be combined with store_as (the gateway would get a hash)`);
     }
     if (v.advanced !== undefined && typeof v.advanced !== "boolean") errors.push(`env_vars ${v.name}: advanced must be a boolean`);
+    if (v.previous_key !== undefined) {
+      const other = (manifest.env_vars || []).find((o) => o && o.name === v.previous_key);
+      if (typeof v.previous_key !== "string" || !other || other.name === v.name) errors.push(`env_vars ${v.name}: previous_key must name another declared env var`);
+    }
     if (v.default_in_crow_home !== undefined) {
       const rel = v.default_in_crow_home;
       if (typeof rel !== "string" || rel === "" || rel.startsWith("/") || rel.includes("\\") || rel.includes("$") || rel.split("/").includes("..")) {

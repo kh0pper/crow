@@ -273,7 +273,9 @@ export function gatewayGeneratedKeys(manifest) {
  */
 export function retainGeneratedForReinstall(bundleId, manifest, { destDir, crowHome, composeText = null, includeFallbacks = true }) {
   try {
-    const keys = generatedEnvKeys(manifest);
+    // Plus the library paths a reinstall must not lose (env_vars[].default_in_crow_home):
+    // kept data (Jellyfin's database) still points at the user's real media folder.
+    const keys = [...generatedEnvKeys(manifest), ...(manifest?.env_vars || []).filter((v) => v && typeof v.name === "string" && v.default_in_crow_home).map((v) => v.name)];
     if (keys.length === 0 || !/^[a-z0-9][a-z0-9-]*$/.test(String(bundleId)) || String(bundleId).length > 64) return 0;
     const installedPath = join(destDir, ".env");
     if (!existsSync(installedPath)) return 0;

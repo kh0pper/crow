@@ -188,3 +188,43 @@ test("tax: decrypt keeps working for data an install already encrypted with an e
   const packed = Buffer.concat([salt, iv, c.getAuthTag(), ct]).toString("base64");
   assert.equal(decrypt(packed, key), "old-ssn");
 });
+
+test("Configure: changing tax's encryption key keeps the old one in CROW_TAX_ENCRYPTION_KEY_PREVIOUS", async () => {
+  const express = (await import("express")).default;
+  const id = "tax";
+  const dir = join(CROW_HOME, "bundles", id);
+  mkdirSync(dir, { recursive: true });
+  copyFileSync(join(REPO, "bundles", id, "manifest.json"), join(dir, "manifest.json"));
+  writeFileSync(join(dir, ".env"), "CROW_TAX_ENCRYPTION_KEY=old-pass-1\n");
+  const app = express(); app.use(express.json()); app.use(B.default());
+  const server = app.listen(0, "127.0.0.1"); await new Promise((r) => server.once("listening", r));
+  try {
+    const post = (env) => fetch(`http://127.0.0.1:${server.address().port}/bundles/api/env`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ bundle_id: id, env_vars: env }) });
+    assert.equal((await post({ CROW_TAX_ENCRYPTION_KEY: "new-pass-2" })).status, 200);
+    let env = parseEnvText(readFileSync(join(dir, ".env"), "utf8"));
+    assert.equal(env.CROW_TAX_ENCRYPTION_KEY, "new-pass-2");
+    assert.equal(env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS, "old-pass-1", "the old key is kept");
+    assert.equal((await post({ CROW_TAX_ENCRYPTION_KEY: "newer-pass-3" })).status, 200);
+    env = parseEnvText(readFileSync(join(dir, ".env"), "utf8"));
+    assert.equal(env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS, "old-pass-1", "a filled previous slot is never overwritten");
+  } finally { server.close(); }
+});
+
+test("reinstall over kept data reuses the library path the earlier install used, not an empty CROW_HOME folder", () => {
+  const S = { retain: null };
+  const dest = scratch();
+  const manifest = { env_vars: [{ name: "MEDIA", required: true, default_in_crow_home: "media/kept" }] };
+  B.writeInstallEnv(dest, {}, manifest, () => {}, { crowHome: CROW_HOME, retained: { MEDIA: "/srv/films" } });
+  assert.equal(parseEnvText(readFileSync(join(dest, ".env"), "utf8")).MEDIA, "/srv/films");
+  assert.equal(S.retain, null);
+});
+
+test("uninstall keeps library paths for a reinstall (retained copy)", async () => {
+  const sec = await import("../servers/gateway/bundle-env-secrets.js");
+  const dest = scratch();
+  const home = scratch();
+  writeFileSync(join(dest, ".env"), "MEDIA=/srv/films\n");
+  const n = sec.retainGeneratedForReinstall("fx-lib", { env_vars: [{ name: "MEDIA", default_in_crow_home: "media/x" }] }, { destDir: dest, crowHome: home });
+  assert.equal(n, 1);
+  assert.equal(parseEnvText(readFileSync(sec.retainedEnvPath(home, "fx-lib"), "utf8")).MEDIA, "/srv/films");
+});

@@ -33,7 +33,7 @@
   "env_vars": [
     {
       "name": "MATRIX_SERVER_NAME",
-      "description": "The homeserver's public domain — this is the server_name that appears in user IDs (@alice:example.com). Typically an apex (example.com) with a .well-known/matrix/server delegation, OR a subdomain you'll expose on :8448 directly (matrix.example.com).",
+      "description": "The homeserver's public domain — this is the server_name that appears in user IDs (@alice:example.com). Typically an apex (example.com) with a .well-known/matrix/server delegation, OR a subdomain you'll expose on :8448 directly (matrix.example.com). Set it before the first start: the app fixes it then, and changing it later breaks federation (only a reinstall with its data deleted can change it).",
       "required": true
     },
     {

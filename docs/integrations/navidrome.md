@@ -27,7 +27,7 @@ Install Navidrome as a Crow bundle. This runs Navidrome in Docker alongside your
 
 Or install from the **Extensions** panel in the Crow's Nest.
 
-After installation, set the path to your music directory:
+Left empty at install, Navidrome starts with an empty library in Crow's folder (`media/music`). To use your own music, set the path in Configure (or in the bundle's `.env`):
 
 ```bash
 # In your .env file
