@@ -48,7 +48,7 @@ export function playerBarHtml(lang) {
         <div id="crow-player-progress" style="height:100%;background:var(--crow-accent);border-radius:3px;width:0%;transition:width 0.1s linear"></div>
       </div>
     </div>
-    <button onclick="window.crowPlayer.close()" title="${t("player.close", lang)}" style="background:none;border:none;color:var(--crow-text-muted);cursor:pointer;font-size:1.2rem;flex-shrink:0;padding:0.2rem">&times;</button>
+    <button id="crow-player-close" onclick="window.crowPlayer.close()" title="${t("player.close", lang)}" aria-label="${t("player.close", lang)}" style="background:none;border:none;color:var(--crow-text-muted);cursor:pointer;font-size:1.2rem;flex-shrink:0;padding:0.2rem">&times;</button>
   </div>
   <audio id="crow-audio" preload="none"></audio>
 </div>`;
@@ -58,8 +58,10 @@ export function playerBarJs(lang) {
   return `
 (function() {
   var audio = document.getElementById('crow-audio');
-  // Early-return if this page has no player bar (non-dashboard layouts).
-  if (!audio) return;
+  var bar = document.getElementById('crow-player-bar');
+  // Early-return if this page has no player bar (non-dashboard layouts, or the player shell inside a frame:
+  // its top-level-only guard removed the bar, see player-shell.js).
+  if (!audio || !bar) return;
   // Under Turbo Drive, this IIFE re-executes on every nav, but the audio
   // element rides along inside the data-turbo-permanent bar. Check the dataset
   // flag to avoid re-attaching listeners to the same persistent element.
@@ -69,7 +71,6 @@ export function playerBarJs(lang) {
   // it (tests/player-bar-turbo-nav-live.test.js).
   if (audio.dataset.crowPlayerInitialized === '1') return;
   audio.dataset.crowPlayerInitialized = '1';
-  var bar = document.getElementById('crow-player-bar');
   var titleEl = document.getElementById('crow-player-title');
   var subtitleEl = document.getElementById('crow-player-subtitle');
   var timeEl = document.getElementById('crow-player-time');
@@ -80,12 +81,16 @@ export function playerBarJs(lang) {
   var stopBtn = document.getElementById('crow-player-stop');
   var sourceEl = document.getElementById('crow-player-source');
   var seekWrap = document.getElementById('crow-player-seek-wrap');
+  var closeBtn = document.getElementById('crow-player-close');
 
   var PLAY_ICON = '\\u25B6';
   var PAUSE_ICON = '\\u23F8';
   var PLAYING_LABEL = '${tJs("player.playing", lang)}';
   var PAUSED_LABEL = '${tJs("player.paused", lang)}';
   var SOURCE_GLASSES = '${tJs("player.sourceGlasses", lang)}';
+  var ENDED_LABEL = '${tJs("player.ended", lang)}';
+  var CLOSE_LABEL = '${tJs("player.close", lang)}';
+  var DISMISS_LABEL = '${tJs("player.dismiss", lang)}';
 
   var queue = [];
   var queueIndex = -1;
@@ -93,6 +98,17 @@ export function playerBarJs(lang) {
   var STORAGE_KEY = 'crow-player-state';
   var currentMetadata = null;
   var closedByUser = false;
+  var endedNote = false;   // the bar shows "Playback ended" for an item that cannot come back (Q1)
+
+  // --- Which tab is this? (bar on every Crow page, H2/H3) ---
+  // TAB_KEY: "this tab has played". Held in memory while the page lives and written to sessionStorage only on
+  // pagehide, then consumed on the next load: so the same tab's next page (a reload, a visit to the artifact
+  // viewer, Back) finds it, while a tab duplicated or opened from a live page (sessionStorage copied) does not.
+  // A local item that was playing auto-resumes only in a tab that had it; a new tab shows it paused.
+  var TAB_KEY = 'crow-player-tab';
+  var tabPlayed = false;
+  try { tabPlayed = sessionStorage.getItem(TAB_KEY) === '1'; sessionStorage.removeItem(TAB_KEY); } catch (e) {}
+  var tabHadFlag = tabPlayed;
 
   // --- Backend state ---
   var activeBackend = 'local'; // 'local' | 'glasses' | 'kiosk'
@@ -192,8 +208,45 @@ export function playerBarJs(lang) {
     if (nextBtn) nextBtn.disabled = on;
   }
 
+  /**
+   * Q1: an item that cannot come back (a Crow restart, superseded by another tab, a logout, its end) never
+   * vanishes silently: the bar keeps its title, says "Playback ended", ⏯ is off and × dismisses it.
+   * Never saved as a marker; the next item clears it.
+   */
+  function showEnded(title) {
+    endedNote = true;
+    activeBackend = 'local';
+    queue = []; queueIndex = -1;
+    bar.style.display = 'block';
+    setPending(false);
+    adjustPosition();
+    titleEl.textContent = title || '';
+    subtitleEl.textContent = ENDED_LABEL;
+    subtitleEl.style.display = 'block';
+    progressEl.style.width = '0%';
+    timeEl.textContent = '';
+    updateNavButtons();
+    updateToggleIcon();
+    seekWrap.style.display = 'none';
+    toggleBtn.disabled = true;
+    toggleBtn.style.opacity = '0.4';
+    toggleBtn.style.animation = '';
+    toggleBtn.style.boxShadow = '';
+    if (closeBtn) { closeBtn.title = DISMISS_LABEL; closeBtn.setAttribute('aria-label', DISMISS_LABEL); }
+    dbg('ended note');
+  }
+  function clearEnded() {
+    if (!endedNote) return;
+    endedNote = false;
+    toggleBtn.disabled = false;
+    toggleBtn.style.opacity = '';
+    if (closeBtn) { closeBtn.title = CLOSE_LABEL; closeBtn.setAttribute('aria-label', CLOSE_LABEL); }
+  }
+
   function saveState() {
-    if (closedByUser) return;
+    // NOTE: the marker is shared by every tab (localStorage). A second tab showing an item paused writes it on
+    // its pagehide too (wasPlaying:false); a tab that is playing re-saves within 5 s (throttledSave).
+    if (closedByUser || endedNote) return;
     if (bar.style.display === 'none') return;
     if (activeBackend === 'kiosk') {
       // S3: the ticket path never reaches storage; a reload asks the server (GET) instead.
@@ -228,7 +281,7 @@ export function playerBarJs(lang) {
   }
 
   audio.addEventListener('timeupdate', function() { updateTime(); throttledSave(); });
-  audio.addEventListener('play', function() { updateToggleIcon(); saveState(); });
+  audio.addEventListener('play', function() { tabPlayed = true; updateToggleIcon(); saveState(); });
   audio.addEventListener('pause', function() {
     updateToggleIcon(); saveState();
     dbg('pause by=' + (pauseSrc || 'browser') + ' inDoc=' + (audio.isConnected === false ? 0 : 1) + ' ' + activeBackend);
@@ -237,7 +290,12 @@ export function playerBarJs(lang) {
   audio.addEventListener('playing', function() { dbg('playing ' + activeBackend); });
   document.addEventListener('turbo:visit', function() { dbg('nav'); });
   // Save immediately on navigation — pagehide fires for tab close + cross-origin nav.
-  window.addEventListener('pagehide', function() { saveState(); });
+  window.addEventListener('pagehide', function() {
+    saveState();
+    if (tabPlayed) { try { sessionStorage.setItem(TAB_KEY, '1'); } catch (e) {} }
+  });
+  // Back/forward cache: the page lives on, so the flag goes back to memory only.
+  window.addEventListener('pageshow', function(e) { if (e && e.persisted) { try { sessionStorage.removeItem(TAB_KEY); } catch (x) {} } });
   // Under Turbo Drive, in-document nav fires turbo:before-visit instead of pagehide.
   // Save state there too so audio position persists across client-side nav.
   document.addEventListener('turbo:before-visit', function() { saveState(); });
@@ -316,6 +374,7 @@ export function playerBarJs(lang) {
 
   function playItem(item) {
     closedByUser = false;
+    clearEnded();
     leaveKiosk(true);
     switchToLocal();
     bar.style.display = 'block';
@@ -468,6 +527,7 @@ export function playerBarJs(lang) {
   /** Show an item (a validated load) on the bar. Does not touch src or play. */
   function kioskShow(m) {
     closedByUser = false;
+    clearEnded();
     activeBackend = 'kiosk';
     kioskRedo = null; kioskRestoring = false;
     queue = []; queueIndex = -1;
@@ -499,18 +559,30 @@ export function playerBarJs(lang) {
       if (name !== 'AbortError') showResumeOverlay();
     });
   }
-  /** The bar lets the overlay's media go: hidden, silent, no marker. Never calls the server itself. */
-  function kioskClear() {
+  /**
+   * The bar lets the overlay's media go: silent, no marker. Never calls the server itself.
+   * note: the server ended it (an answer, not the user's own stop): the bar says Playback ended (Q1) instead
+   * of hiding. A restore in a tab that did not start with its own nonce (a new or duplicated tab, H2) finds
+   * nothing of its own: it hides and leaves the shared marker alone, it is another tab's.
+   */
+  function kioskClear(note) {
     kioskEpoch++;
     kioskTimersOff();
     var had = activeBackend === 'kiosk';
+    var restoring = kioskRestoring;
+    var title = had ? titleEl.textContent : kioskSavedTitle;
     kioskItem = null; kioskRedo = null; kioskRestoring = false;
-    if (!had) { try { localStorage.removeItem(STORAGE_KEY); } catch (e) {} return; }   // a reload marker with nothing behind it
+    if (!had) {
+      if (restoring && !ownTab) { dbg('restore: nothing for this tab'); return; }
+      try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}   // a reload marker with nothing behind it
+      if (note && restoring) showEnded(title || PAUSED_LABEL);
+      return;
+    }
     dbg('clear');
     pauseAndEmpty('clear', activeBackend);
     activeBackend = 'local';
-    bar.style.display = 'none';
-    updateNavButtons();
+    if (note) showEnded(title);
+    else { bar.style.display = 'none'; updateNavButtons(); }
     try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
   }
   function kioskAnswer(epoch, verb) {
@@ -518,7 +590,7 @@ export function playerBarJs(lang) {
       dbg('server ' + (verb || 'get') + ' ' + r.status);
       if (epoch !== kioskEpoch) return;
       if (r.status === 200) return r.json().then(function (v) { if (epoch === kioskEpoch) kioskApplyView(v); });
-      if (r.status === 409 || r.status === 401 || r.status === 403 || r.status === 404) { kioskClear(); return; }   // S8: superseded or logged out
+      if (r.status === 409 || r.status === 401 || r.status === 403 || r.status === 404) { kioskClear(true); return; }   // S8: superseded or logged out
       // Review 4: the server never heard that the item ended or failed. Keep the bar, paused, ⏯ pulsing: a tap retries.
       if (r.status >= 500 && (verb === 'ended' || verb === 'error') && kioskItem) {
         kioskRedo = verb;
@@ -554,7 +626,7 @@ export function playerBarJs(lang) {
   function kioskApplyView(v) {
     if (!v || typeof v !== 'object') return;
     var it = v.item;
-    if (!it || typeof it !== 'object') { kioskClear(); return; }
+    if (!it || typeof it !== 'object') { kioskClear(true); return; }
     if (it.url === null && !kioskItem && kioskRestoring) {
       // Review 5: a reload while a station reload is pending: the saved title stays on the bar until it is due.
       activeBackend = 'kiosk';
@@ -572,7 +644,7 @@ export function playerBarJs(lang) {
       return;
     }
     var m = validateFrameMessage({ crow: 'media', v: 1, op: 'load', id: it.id, url: it.url, title: it.title, subtitle: it.subtitle || '', source: it.source || '', live: it.live === true, has_next: v.has_next === true, has_previous: v.has_previous === true });
-    if (!m) { kioskClear(); return; }
+    if (!m) { kioskClear(true); return; }
     var same = activeBackend === 'kiosk' && kioskItem && kioskItem.id === m.id && kioskItem.url === m.url;
     if (!same) {
       if (activeBackend !== 'kiosk') leaveOtherForKiosk();
@@ -649,6 +721,8 @@ export function playerBarJs(lang) {
   ['playing', 'pause', 'ended', 'error', 'waiting', 'stalled'].forEach(function (type) {
     audio.addEventListener(type, function () {
       if (activeBackend !== 'kiosk' || !kioskItem) return;
+      // I2: a refused stream (e.g. the ticket's 429 on a fast reload) reaches the element as an error: name its code.
+      if (type === 'error') dbg('media error ' + ((audio.error && audio.error.code) || '?') + ' ' + kioskItem.id);
       if (kioskToFrame(type)) return;
       if (type === 'playing' || type === 'pause') { if (kioskStall) { clearTimeout(kioskStall); kioskStall = null; } return; }
       if (type === 'waiting' || type === 'stalled') {
@@ -696,6 +770,7 @@ export function playerBarJs(lang) {
 
   function showGlassesBar(title, artist, state) {
     closedByUser = false;
+    clearEnded();
     leaveKiosk();
     activeBackend = 'glasses';
     glassesTitle = title || '';
@@ -912,6 +987,7 @@ export function playerBarJs(lang) {
     },
 
     toggle: function() {
+      if (endedNote) return;
       if (activeBackend === 'kiosk') {
         if (!kioskItem) return;
         // Attached: a pause acts here at once (always safe; the frame hears the element's pause and tells the server).
@@ -943,6 +1019,7 @@ export function playerBarJs(lang) {
         hideGlassesBar();
         return;
       }
+      clearEnded();
       audio.pause();
       audio.src = '';
       bar.style.display = 'none';
@@ -964,6 +1041,7 @@ export function playerBarJs(lang) {
         hideGlassesBar();
         return;
       }
+      clearEnded();
       audio.pause();
       audio.src = '';
       bar.style.display = 'none';
@@ -1034,6 +1112,7 @@ export function playerBarJs(lang) {
   }
 
   // --- Restore state from localStorage ---
+  var startNonce = kioskStored(), ownTab = false;
   try {
     var saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
     if (saved) {
@@ -1075,7 +1154,8 @@ export function playerBarJs(lang) {
           if (saved.time) {
             try { audio.currentTime = saved.time; } catch (e) {}
           }
-          if (saved.wasPlaying) {
+          // H3: only the tab that was playing it resumes it; a new tab shows it paused (a tap plays it there).
+          if (saved.wasPlaying && tabHadFlag) {
             var p = audio.play();
             if (p && p.catch) {
               p.catch(function(err) {
@@ -1093,7 +1173,12 @@ export function playerBarJs(lang) {
       }
     }
   } catch(e) {}
-  kioskClaim(function () { if (kioskRestoring) kioskGet(); });
+  // I1: this is the tab's own session only if it started with a nonce AND that nonce survived the claim
+  // (a duplicated tab's copy is answered by the live tab and re-minted).
+  kioskClaim(function () {
+    ownTab = !!startNonce && kioskStored() === startNonce;
+    if (kioskRestoring) kioskGet();
+  });
 
   // --- Auto-detect glasses bundle on page load ---
   // Check sessionStorage cache first to avoid re-probing every page navigation
