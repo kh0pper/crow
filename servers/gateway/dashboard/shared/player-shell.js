@@ -17,7 +17,9 @@
  *      removed, so the player exits at once — the hosting page already has the tab's one player;
  *   4. playerBarJs(lang);
  *   5. the reserve script: --crow-player-h on <html> is the bar's height while it shows, else 0px, so a
- *      page pads its content and bottom sheets with var(--crow-player-h,0px). Installs once per document.
+ *      page pads its content and bottom sheets with var(--crow-player-h,0px). It re-measures on the bar's
+ *      style/children/text changes, on the bar's own resize (ResizeObserver, where there is one), once web
+ *      fonts land, and on a window resize. Installs once per document.
  */
 import { designTokensCss } from "./design-tokens.js";
 import { playerBarHtml, playerBarJs } from "./player.js";
@@ -41,7 +43,9 @@ const RESERVE = `(function () {
   }
   set();
   if (!bar) return;
-  try { new MutationObserver(set).observe(bar, { attributes: true, attributeFilter: ['style'], childList: true, subtree: true }); } catch (e) {}
+  try { new MutationObserver(set).observe(bar, { attributes: true, attributeFilter: ['style'], childList: true, characterData: true, subtree: true }); } catch (e) {}
+  try { if (typeof ResizeObserver === 'function') new ResizeObserver(function () { set(); }).observe(bar); } catch (e) {}
+  try { if (document.fonts && document.fonts.ready) document.fonts.ready.then(set, function () {}); } catch (e) {}
   window.addEventListener('resize', set);
 })();`;
 
