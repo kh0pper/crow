@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 import { MERMAID_CONFIG } from "../mermaid-config.mjs";
 
 const MERMAID_JS = fileURLToPath(new URL("../node_modules/mermaid/dist/mermaid.min.js", import.meta.url));
+// --no-sandbox: the container is the sandbox (non-root, read-only rootfs, cap_drop
+// ALL, no-new-privileges, no network). Never add SYS_ADMIN to enable Chromium's own.
 const ARGS = ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--no-first-run", "--disable-extensions",
   "--disable-background-networking", "--disable-crash-reporter", "--disable-breakpad", "--disable-component-update",
   "--disable-sync", "--disable-default-apps", "--metrics-recording-only", "--mute-audio"];

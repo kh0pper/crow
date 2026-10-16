@@ -128,7 +128,10 @@ const MERMAID_FRONT_MATTER_BAD = /\b(?:config|init)\b/i;
 const D2_RULES = [
   ["escapes", /[\\\u0130\u212A\u017F]/],
   ["imports", /\.\.\.@|(?<![A-Za-z0-9_.+-])@|\bimport\b/i],
-  ["icons", /\bicon\b/i],
+  // A plain substring, not \bicon\b: the renderer refuses any "icon" (D2 0.9.0
+  // reads a local icon file even with --bundle=false), so "Silicon" or
+  // "lexicon" are refused here, with a message the bot can act on.
+  ["icons", /icon/i],
   ["links", /\blink\b|\/\//i],
   ["directives", /\bvars\b|d2-config/i],
   // (?<!\|): a run of pipes is tried once, from its first pipe (no O(n^2)).

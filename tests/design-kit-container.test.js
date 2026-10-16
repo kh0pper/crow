@@ -23,6 +23,8 @@ test("only the door publishes, on 127.0.0.1:8018; the renderer is internal-only"
   for (const k of ["read_only: true", "cap_drop: [ALL]", "no-new-privileges:true", "mem_limit:", "pids_limit:"]) assert.ok(render.includes(k), `render: ${k}`);
   assert.doesNotMatch(compose, /network_mode:\s*host|privileged:\s*true|docker\.sock/);
   assert.match(compose, /build:\n\s+context: \.\/renderer/, "block-form build context (refreshed on version bumps)");
+  const door = compose.split(/^  door:/m)[1].split(/^networks:/m)[0];
+  for (const k of ["read_only: true", "cap_drop: [ALL]", "no-new-privileges:true", "mem_limit:", "pids_limit:", "cpus:"]) assert.ok(door.includes(k), `door: ${k}`);
 });
 
 test("the smoke script never touches the prod names or port, and is caught by the deadman prefix", () => {
@@ -32,6 +34,14 @@ test("the smoke script never touches the prod names or port, and is caught by th
   const names = [...s.matchAll(/--name (\S+)|network create (?:--internal )?(\S+)/g)].map((m) => m[1] || m[2]);
   assert.ok(names.length >= 4);
   for (const n of names) assert.match(n, /^design-kit-smoke-/, n);
+  assert.match(s, /trap .*down.* ERR/, "a failed 'up' tears itself down");
+  assert.match(s, /"\$0" down >&2\n\s*echo "smoke renderer did not come up"/, "health timeout tears down");
+  assert.match(s, /--cpus [\d.]+ [^\n]*door\.mjs/, "door has a CPU limit");
+});
+
+test("Chromium runs without its own sandbox only because the container is the sandbox (no SYS_ADMIN)", () => {
+  assert.match(read("bundles/design-kit/renderer/engines/mermaid.mjs"), /--no-sandbox: the container is the sandbox[^\n]*\n[^\n]*Never add SYS_ADMIN/);
+  assert.doesNotMatch(compose, /SYS_ADMIN|cap_add/);
 });
 
 test("base image and D2 are pinned", () => {
@@ -39,6 +49,7 @@ test("base image and D2 are pinned", () => {
   assert.match(df, /^FROM node:24-bookworm-slim@sha256:[0-9a-f]{64}$/m);
   assert.match(df, /^ARG D2_VERSION=\d+\.\d+\.\d+$/m);
   assert.match(df, /sha256sum -c/);
+  assert.match(df, /Chromium is not pinned/, "the accepted Chromium drift is stated");
   const sums = read("bundles/design-kit/renderer/d2.sha256").trim().split("\n");
   assert.deepEqual(sums.map((l) => l.replace(/^[0-9a-f]{64} {2}/, "")), ["/tmp/d2-amd64.tar.gz", "/tmp/d2-arm64.tar.gz"]);
   assert.ok(sums.every((l) => /^[0-9a-f]{64} {2}/.test(l)));

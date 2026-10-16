@@ -38,6 +38,10 @@ test("guardSpec: D2 imports and remote icons or links are refused", () => {
   assert.equal(reason("d2", "x: { link: \"http://evil.example\" }"), "links");
   assert.equal(reason("d2", "x: { icon: /etc/hostname }"), "icons", "no icons at all: D2 would read local files (review L4)");
   assert.equal(reason("d2", "x.icon: ./a.svg"), "icons");
+  // Task 8 fix: the renderer refuses any "icon" substring (D2 0.9.0 reads a
+  // local icon even with --bundle=false), so the guard refuses the same and
+  // the bot is told why instead of getting an unexplained "invalid spec".
+  for (const s of ["a -> b: Silicon wafer", "lexicon -> b", "x: iconic", "ICONS: a"]) assert.equal(reason("d2", s), "icons", s);
 });
 
 test("guardSpec: engine, empty and size", () => {
