@@ -232,3 +232,75 @@ test("the four host-network bundles are privileged and explain it in English and
     assert.ok((m.install_consent_messages?.es || "").length > 40, `${id}: Spanish consent text missing`);
   }
 });
+
+// ---- review round 2: ways to make Compose run config the check never read ----------
+
+function gateDir(files, opts = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "crow-gate-"));
+  try {
+    for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
+    return validate(join(dir, "docker-compose.yml"), "fx", opts);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+test("COMPOSE_* settings in the bundle's .env/.env.example (Compose reads them: COMPOSE_FILE swaps the file) are refused", () => {
+  for (const name of [".env", ".env.example"]) {
+    for (const line of ["COMPOSE_FILE=evil.yml", "  COMPOSE_FILE = evil.yml", "export COMPOSE_FILE=evil.yml", "COMPOSE_PATH_SEPARATOR=;", "COMPOSE_PROFILES=x"]) {
+      assert.equal(gateDir({ "docker-compose.yml": svc(""), [name]: `A=1\n${line}\n` }, PRIV).valid, false, `${name}: ${line}`);
+    }
+  }
+  assert.equal(gateDir({ "docker-compose.yml": svc(""), ".env.example": "# COMPOSE_FILE is not used\nA=1\n" }).valid, true);
+});
+
+test("include: and extends: file: pull in config the check never read", () => {
+  assert.equal(gate(`include:\n  - other.yml\n${svc("")}`, PRIV).valid, false);
+  assert.equal(gate(`include: [other.yml]\n${svc("")}`, PRIV).valid, false);
+  assert.equal(gate(svc("    extends:\n      file: other.yml\n      service: x\n"), PRIV).valid, false);
+  assert.equal(gate(svc("    extends: { file: other.yml, service: x }\n"), PRIV).valid, false);
+  assert.equal(gate(svc("    extends:\n      service: base\n")).valid, true, "extends within the same file is fine");
+});
+
+test("host files outside the bundle can't be read in through env_file, secrets/configs file:, or the build context", () => {
+  for (const body of [
+    "    env_file: /home/u/.crow/.env\n",
+    "    env_file:\n      - ../../.env\n",
+    "    env_file:\n      - ~/.crow/.env\n",
+    "    env_file:\n      - path: /etc/shadow\n",
+    "    build:\n      context: /\n",
+    "    build: /etc\n",
+    "    build:\n      context: ../..\n",
+    "    build: ~/\n",
+  ]) {
+    assert.equal(gate(svc(body), PRIV).valid, false, body);
+  }
+  assert.equal(gate(`${svc("")}secrets:\n  s:\n    file: /etc/shadow\n`, PRIV).valid, false);
+  assert.equal(gate(`${svc("")}configs:\n  c:\n    file: ../../data/crow.db\n`, PRIV).valid, false);
+  for (const ok of ["    env_file: .env\n", "    env_file:\n      - ./app.env\n", "    build: .\n", "    build:\n      context: ./renderer\n"]) {
+    assert.equal(gate(svc(ok)).valid, true, ok);
+  }
+  assert.equal(gate(`${svc("")}secrets:\n  s:\n    file: ./secret.txt\n`).valid, true);
+});
+
+test("a mount source that climbs out of the bundle dir with .. is refused (../../data is the Crow data dir)", () => {
+  for (const v of ["      - ../../data:/d\n", "      - ./../../data:/d:ro\n", '      - "../x:/x"\n', "      - ${X:-.}/../../data:/d\n"]) {
+    assert.equal(gate(svc(`    volumes:\n${v}`), PRIV).valid, false, v);
+  }
+  assert.equal(gate(svc("    volumes:\n      - type: bind\n        source: ../../data\n        target: /d\n"), PRIV).valid, false);
+  assert.equal(gate(svc("    volumes:\n      - ./data..old:/d\n")).valid, true, "a name containing .. is not a parent step");
+});
+
+test("sharing another container's network, or the host's PID/user namespace, needs privileged + consent", () => {
+  for (const body of ["    network_mode: container:crow-browser\n", '    network_mode: "container:abc"\n', "    pid: host\n", '    pid: "host"\n', "    pid: container:x\n", "    userns_mode: host\n"]) {
+    assert.equal(gate(svc(body)).valid, false, body);
+    assert.equal(gate(svc(body), PRIV).valid, true, body);
+  }
+  assert.equal(gate(svc("    network_mode: service:db\n")).valid, true, "service: is a service in the same, checked file");
+});
+
+test("install and Configure refuse COMPOSE_* / DOCKER_* keys (they would steer Docker Compose itself)", async () => {
+  const { findInvalidEnv } = await import("../servers/gateway/routes/bundles.js");
+  for (const k of ["COMPOSE_FILE", "COMPOSE_PROJECT_NAME", "DOCKER_HOST"]) {
+    assert.equal(findInvalidEnv({ [k]: "x" })?.key, k, k);
+  }
+  assert.equal(findInvalidEnv({ MY_COMPOSE_FILE: "x", A: "1" }), null);
+});

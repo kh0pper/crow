@@ -1474,6 +1474,47 @@ function validateComposeFile(composePath, bundleId, opts = {}) {
       return { valid: false, reason: `Bundle ships another compose file (${other.join(", ")}) that Docker Compose would use; only docker-compose.yml is allowed` };
     }
 
+    // Compose reads COMPOSE_* from the project's .env (COMPOSE_FILE swaps the very file
+    // checked here); .env.example becomes .env when an install sends no values.
+    for (const f of [".env", ".env.example"]) {
+      let t = "";
+      try { t = readFileSync(join(dirname(composePath), f), "utf8"); } catch { continue; }
+      if (/^\s*(?:export\s+)?COMPOSE_[A-Za-z0-9_]*\s*=/m.test(t)) {
+        return { valid: false, reason: `Bundle ${f} sets a COMPOSE_* variable, which would change what Docker Compose runs` };
+      }
+    }
+
+    // Config pulled in from other files is never read by this check.
+    if (/^["']?include["']?\s*:/m.test(content) || /extends["']?\s*:\s*\{[^}]*\bfile\s*:/.test(content) || /^(\s*)extends\s*:\s*\n(?:\1\s+.*\n)*?\1\s+file\s*:/m.test(content)) {
+      return { valid: false, reason: "Compose file uses include: or extends: file:, which pull in config this check cannot see" };
+    }
+
+    // Host files outside the bundle can't be read in: env_file, secrets/configs `file:`,
+    // and the build context must be relative paths inside the bundle (no /, ~, ..).
+    // Model bundles (inference: true; installed only by the Model Catalog, never here)
+    // read the shared GPU env file under ~/.crow/env.
+    const outside = (v) => /^["']?(?:\/|~|\$\{?HOME\b)/.test(v) || /(?:^|\/)\.\.(?:\/|["']?\s*$)/.test(v.replace(/\s+#.*$/, "").trim());
+    const lines = content.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i];
+      let m = l.match(/^(\s*)(?:-\s+)?(env_file|file|context|path)\s*:\s*(.*)$/) || l.match(/^(\s*)()build\s*:\s*(\S.*)$/);
+      if (m && m[3] && outside(m[3].trim())) {
+        if (!(m[2] === "env_file" && manifest?.inference === true)) {
+          return { valid: false, reason: `Compose file reads a host path outside the bundle (${(m[2] || "build").trim()})` };
+        }
+      }
+      m = l.match(/^(\s*)env_file\s*:\s*$/);
+      if (m) {
+        for (let j = i + 1; j < lines.length; j++) {
+          const item = lines[j].match(/^(\s*)-\s+(?:path\s*:\s*)?(.*)$/);
+          if (!item || item[1].length <= m[1].length) break;
+          if (outside(item[2].trim()) && manifest?.inference !== true) {
+            return { valid: false, reason: "Compose file reads a host path outside the bundle (env_file)" };
+          }
+        }
+      }
+    }
+
     // Sensitive host paths that should never be mounted (regardless of consent).
     // Short syntax (`- /etc:/x`) and long syntax (`source: /etc`).
     const mountText = withoutTzMounts(content);
@@ -1486,7 +1527,19 @@ function validateComposeFile(composePath, bundleId, opts = {}) {
       /^\s*(?:-\s+)?source:\s*["']?\/etc(?:[/"'\s]|$)/m,            // source: /etc
       /^\s*(?:-\s+)?source:\s*["']?~?\/?\.ssh(?:[/"'\s]|$)/m,       // source: ~/.ssh
       /^\s*(?:-\s+)?source:\s*["']?~?\/?\.crow\/data(?:[/"'\s]|$)/m, // source: ~/.crow/data
+      /^\s*(?:-\s+)?source:\s*["']?(?:[^"'\s]*\/)?\.\.(?:[/"'\s]|$)/m, // source: ../
     ];
+
+    // A short-syntax source with a `..` step climbs out of the bundle dir (../../data is
+    // the Crow data dir). ${...} is masked so its `:-` is not taken as the separator.
+    for (const l of mountText.split("\n")) {
+      const item = l.match(/^\s*-\s+["']?(.*)$/);
+      if (!item) continue;
+      const host = item[1].replace(/\$\{[^}]*\}/g, "X").split(":")[0];
+      if (/(?:^|\/)\.\.(?:\/|["']?\s*$)/.test(host)) {
+        return { valid: false, reason: "Compose file mounts a host path outside the bundle (a .. step)" };
+      }
+    }
 
     for (const pattern of sensitivePatterns) {
       if (pattern.test(mountText)) {
@@ -1516,9 +1569,12 @@ function validateComposeFile(composePath, bundleId, opts = {}) {
       return { valid: false, reason: "Compose file requests dangerous capabilities (NET_ADMIN, SYS_ADMIN, NET_RAW, etc.) but manifest does not declare 'privileged: true' (or consent was not verified)" };
     }
 
-    // Host networking — gated by manifest.privileged + consent
-    if (HOST_NETWORK.test(content) && !isPrivilegedAllowed) {
-      return { valid: false, reason: "Compose file uses host networking but manifest does not declare 'privileged: true' (or consent was not verified)" };
+    // Host networking, another container's network, or the host's PID/user namespace —
+    // gated by manifest.privileged + consent (`network_mode: service:x` stays in this file).
+    const sharedNs = /network_mode["']?\s*:\s*["']?container:/i.test(content)
+      || /^\s*["']?(?:pid|userns_mode)["']?\s*:\s*["']?(?:host|container:)/im.test(content);
+    if ((HOST_NETWORK.test(content) || sharedNs) && !isPrivilegedAllowed) {
+      return { valid: false, reason: "Compose file uses host networking (or shares another namespace) but manifest does not declare 'privileged: true' (or consent was not verified)" };
     }
 
     return { valid: true };
@@ -1919,6 +1975,9 @@ export function findInvalidEnv(envVars) {
   if (!envVars || typeof envVars !== "object") return null;
   for (const [k, v] of Object.entries(envVars)) {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(k)) return { key: k, why: "is not a valid environment variable name" };
+    // A bundle .env is also Docker Compose's own settings file: COMPOSE_FILE would swap the
+    // file the install security check read, and Start never re-checks it.
+    if (/^(?:COMPOSE|DOCKER)_/.test(k)) return { key: k, why: "controls Docker itself, so an extension can't set it" };
     if (v !== undefined && v !== null) {
       const problem = envValueProblem(v);
       if (problem) return { key: k, why: problem };
