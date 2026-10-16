@@ -100,7 +100,7 @@ after(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-async function measure(page, w, h, { textSize = null, css = "", openMenu = false, openPicker = false, laneTab = -1, shot = "" } = {}) {
+async function measure(page, w, h, { textSize = null, css = "", openMenu = false, openPicker = false, laneTab = -1, view = "", shot = "" } = {}) {
   const tab = await (await fetch(chrome.cdp + "/json/new?about:blank", { method: "PUT" })).json();
   const { default: WebSocket } = await import("ws");
   const ws = new WebSocket(tab.webSocketDebuggerUrl);
@@ -128,6 +128,7 @@ async function measure(page, w, h, { textSize = null, css = "", openMenu = false
     if (openMenu !== false) await evalIn("(function(){var b=document.querySelectorAll('.btb-more')[" + (openMenu === true ? 0 : openMenu) + "];b.scrollIntoView({block:'center'});b.click();return 1;})()");
     if (openPicker) await evalIn("(function(){document.querySelector('.bb-pick-btn').click();return 1;})()");
     if (laneTab >= 0) await evalIn("(function(){document.querySelectorAll('.bb-lane-tabs [role=tab]')[" + laneTab + "].click();return 1;})()");
+    if (view) await evalIn("(function(){document.querySelector('.bb-view-btn[data-view=" + view + "]').click();return 1;})()");
     if (css) await evalIn(`(function(){var s=document.createElement('style');s.textContent=${JSON.stringify(css)};document.head.appendChild(s);return 1;})()`);
     await evalIn("new Promise(function(r){requestAnimationFrame(function(){requestAnimationFrame(function(){r(1);});});})");
     const m = JSON.parse(await evalIn(`(function(){
@@ -173,6 +174,8 @@ async function measure(page, w, h, { textSize = null, css = "", openMenu = false
       mkdirSync(SHOT_DIR, { recursive: true });
       writeFileSync(join(SHOT_DIR, shot + ".png"), Buffer.from(png.data, "base64"));
     }
+    // the view toggle is remembered per browser profile; never leak it into the next page
+    if (view) await evalIn("(function(){try{Object.keys(localStorage).forEach(function(k){if(k.indexOf('bb-view-')===0)localStorage.removeItem(k);});}catch(e){}return 1;})()");
     return m;
   } finally { ws.close(); await fetch(chrome.cdp + "/json/close/" + tab.id).catch(() => {}); }
 }
@@ -248,6 +251,11 @@ for (const [w, h] of [[390, 844], [1280, 800]]) {
         assert.deepEqual(m2.cols, ["done"], `a tab switches the lane ${JSON.stringify(m2)}`);
         assert.equal(m2.selTab, "done");
         assert.ok(m2.doc <= 0 && m2.body === 0, JSON.stringify(m2));
+        const m3 = await measure("board-on", w, h, { textSize, view: "list" });
+        assert.equal(m3.tabsShown, false, `the list view hides the lane tabs ${JSON.stringify(m3)}`);
+        assert.deepEqual(m3.cols, [], `the list view hides the lanes ${JSON.stringify(m3)}`);
+        const m4 = await measure("board-on", w, h, { textSize });
+        assert.equal(m4.tabsShown, true, `the next page is back on columns ${JSON.stringify(m4)}`);
       } else {
         assert.equal(m.tabsShown, false, `no tabs on wide ${JSON.stringify(m)}`);
         assert.ok(m.cols.length >= 3, `the columns show side by side ${JSON.stringify(m)}`);
