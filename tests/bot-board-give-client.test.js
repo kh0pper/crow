@@ -87,7 +87,7 @@ function mount({ wide = false, lang = "en", noOnBots = false } = {}) {
   const doc = { activeElement: null, addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); } };
   const E = (tag, attrs) => new El(doc, tag, attrs);
   const root = E("body");
-  const giveBtn = E("button", { class: "btn bb-give-btn", "data-card-id": "7", "data-card-title": "Water the plants" });
+  const giveBtn = E("button", { class: "btn bb-give-btn", "data-card-id": "7", "data-card-title": "Water the plants", hidden: "" });
   const dialog = E("div", { class: "bb-give", id: "bb-give", role: "dialog", hidden: "" });
   const panel = E("div", { class: "bb-give-panel" });
   const cardLine = E("p", { id: "bb-give-card" });
@@ -127,7 +127,11 @@ function mount({ wide = false, lang = "en", noOnBots = false } = {}) {
     return Promise.resolve({ ok: r.ok, status: r.status, json: () => Promise.resolve(r.body) });
   };
   const fn = new Function("window", "document", "fetch", "setTimeout", "location", body(lang));
-  fn(win, doc, fetch, (f) => reloads.push(f), { href: "/dashboard/bot-board?bot=hank", reload() {} });
+  const loc = { href: "/dashboard/bot-board?bot=hank", reload() {} };
+  fn(win, doc, fetch, (f) => reloads.push(f), loc);
+  // A Turbo visit renders a fresh body and re-runs the inline script against
+  // the SAME window (already bound): only the reveal must run again.
+  const rerun = () => fn(win, doc, fetch, (f) => reloads.push(f), loc);
   const fire = (type, target, extra = {}) => {
     const ev = { type, target, key: extra.key, shiftKey: !!extra.shiftKey, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
     for (const f of listeners[type] || []) f(ev);
@@ -135,7 +139,7 @@ function mount({ wide = false, lang = "en", noOnBots = false } = {}) {
   };
   const pick = (radio) => { for (const r of [hank, glassy]) r.checked = r === radio; fire("change", radio); };
   const flush = () => new Promise((r) => setTimeout(r, 0));
-  return { offHidden, turnOn, doc, dialog, panel, cardLine, hank, glassy, later, now, hint, cancel, go, giveBtn, fire, pick, flush, fetches, toasts, reloads, setRespond: (f) => { respond = f; } };
+  return { E, root, rerun, offHidden, turnOn, doc, dialog, panel, cardLine, hank, glassy, later, now, hint, cancel, go, giveBtn, fire, pick, flush, fetches, toasts, reloads, setRespond: (f) => { respond = f; } };
 }
 
 test("Give to… opens the dialog with the card's title; nothing picked yet, so Give is disabled", () => {
@@ -271,4 +275,18 @@ test("the focus trap skips hidden inputs (a board-off bot's Turn on form) — wi
   d.turnOn.focus();
   d.fire("keydown", d.turnOn, { key: "Tab", shiftKey: true });
   assert.equal(d.doc.activeElement, d.cancel, "Shift+Tab on the first real control wraps to the last enabled one (Give stays disabled: no bot to pick)");
+});
+
+test("the script reveals the server-hidden Give to… buttons, again on a Turbo re-render, binding once", () => {
+  const d = mount();
+  assert.equal(d.giveBtn.hidden, false, "revealed on first run");
+  const fresh = d.E("button", { class: "btn bb-give-btn", "data-card-id": "8", "data-card-title": "Feed the cat", hidden: "" });
+  d.root.append(fresh);
+  d.rerun();
+  assert.equal(fresh.hidden, false, "a re-rendered button is revealed too");
+  d.fire("click", fresh);
+  assert.equal(d.cardLine.textContent, "Feed the cat");
+  d.fire("keydown", d.go, { key: "Escape" });
+  d.fire("click", d.giveBtn);
+  assert.equal(d.cardLine.textContent, "Water the plants", "listeners bound once: one open per click");
 });

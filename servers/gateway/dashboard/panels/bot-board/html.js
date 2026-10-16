@@ -111,7 +111,9 @@ function avatarOf(b, cls) {
 
 /**
  * The Unassigned lane: a dashed column of cards that are on no bot's board,
- * each with a Give to… button that opens the give sheet. Deliberately NOT a
+ * each with a Give to… button that opens the give sheet. The buttons render
+ * `hidden` and give-client.js reveals them, so without JS there is no dead
+ * button (the give sheet needs the script). Deliberately NOT a
  * .bb-col and its cards not .bb-card: it is not a status, so it must never
  * be a drop target for a status move, a filter count, or a list-view row.
  * "" when there are no such cards.
@@ -131,7 +133,7 @@ export function unassignedLaneHtml(cards, bots, lang, now = Date.now()) {
       `<div class="bb-un-title">${escapeHtml(title)}</div>${tagPillsHtml(c.tags)}` +
       `<div class="bb-un-meta">${ago ? `<span>${escapeHtml(ago)}</span>` : ""}${given}</div>` +
       `<button type="button" class="btn btn-secondary btn-sm bb-give-btn" data-card-id="${id}" data-card-title="${escapeHtml(title)}" ` +
-      `aria-haspopup="dialog" aria-controls="bb-give" aria-label="${escapeHtml(fill(t("botboard.giveToAria", lang), { title }))}">${t("botboard.giveTo", lang)}</button>` +
+      `aria-haspopup="dialog" aria-controls="bb-give" aria-label="${escapeHtml(fill(t("botboard.giveToAria", lang), { title }))}" hidden>${t("botboard.giveTo", lang)}</button>` +
       `</div>`;
   }).join("");
   return `<div class="bb-lane-un" id="bb-col-un" data-col="__unassigned">` +

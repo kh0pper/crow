@@ -23,6 +23,10 @@ import { tJs } from "../../shared/i18n.js";
 
 export function giveScript(lang) {
   return `<script>(function(){
+  /* The Give to… buttons render hidden (no dead button without JS): reveal
+     them on EVERY run — a Turbo visit re-runs this script against a fresh
+     body while the listeners below stay bound once. */
+  Array.prototype.slice.call(document.querySelectorAll('.bb-give-btn')).forEach(function(b){ b.hidden = false; });
   if (window.__bbGive) return;
   window.__bbGive = 1;
   var T = {

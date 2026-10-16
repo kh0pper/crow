@@ -156,7 +156,16 @@ test("each unassigned card: title, tags, 'added N ago', data-card-id and a Give 
   assert.ok(card.includes(">loose<"));
   assert.ok(card.includes(">home<") && card.includes(">urgent<"), "tags as pills");
   assert.match(card, /added (just now|\d+ (minute|hour|day|month)s? ago)/);
-  assert.match(card, new RegExp(`<button type="button" class="btn btn-secondary btn-sm bb-give-btn" data-card-id="${ids.loose}" data-card-title="loose" aria-haspopup="dialog" aria-controls="bb-give" aria-label="Give “loose” to a bot">Give to…</button>`));
+  assert.match(card, new RegExp(`<button type="button" class="btn btn-secondary btn-sm bb-give-btn" data-card-id="${ids.loose}" data-card-title="loose" aria-haspopup="dialog" aria-controls="bb-give" aria-label="Give “loose” to a bot" hidden>Give to…</button>`));
+});
+
+test("Give to… buttons render hidden (no dead buttons without JS); the give script reveals them, and CSS keeps [hidden] hidden on a .btn", async () => {
+  const l = lane(await render({ bot: "hank" }));
+  const btns = l.match(/<button[^>]*bb-give-btn[^>]*>/g) || [];
+  assert.equal(btns.length, 3);
+  for (const b of btns) assert.match(b, / hidden>$/, b);
+  const { botBoardStyles } = await import("../servers/gateway/dashboard/panels/bot-board/css.js");
+  assert.ok(String(botBoardStyles()).includes(".bb-give-btn[hidden]{display:none}"), ".btn is display:inline-flex, which would beat the UA [hidden] rule");
 });
 
 test("a card that only carries assigned_bot says who it was last given to", async () => {

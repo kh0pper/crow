@@ -127,6 +127,7 @@ export function botBoardStyles() {
   .bb-un-title{font-size:.9rem;font-weight:600;overflow-wrap:break-word}
   .bb-un-meta{display:flex;flex-wrap:wrap;gap:.2rem .6rem;margin:.3rem 0 .45rem;font-size:.75rem;color:var(--crow-text-muted)}
   .bb-give-btn{max-width:100%;white-space:nowrap}
+  .bb-give-btn[hidden]{display:none}
   .bb-un-wrap{margin-top:.9rem;max-width:26rem}
   .bb-un-hint{margin:.8rem 0 0;font-size:.82rem;color:var(--crow-text-muted)}
   /* The give sheet: a fixed full-screen layer (above the sidebar, z 100,
