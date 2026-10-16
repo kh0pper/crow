@@ -209,3 +209,15 @@ test("T9: messages from the previous frame are ignored after a reopen; the new f
   assert.equal(h.of("apply").length, 2);
   assert.equal(h.of("attach").length, 2);
 });
+
+test("bar-handoff (hypothesis 4): a pause/stop the closing frame posts during its release (its media-view letting go) lands after the close and never reaches the bar", () => {
+  const h = talk();
+  const fw = h.open();
+  h.send(LOAD, { source: fw });
+  // The frame's own teardown posts these; postMessage delivers them as later tasks, i.e. after closeTalk returned.
+  const late = [{ crow: "media", v: 1, op: "pause", id: "m12" }, { crow: "media", v: 1, op: "stop", id: "m12" }];
+  h.win.closeCrowTalk();
+  for (const m of late) h.send(m, { source: fw });
+  assert.deepEqual(h.of("apply").map((c) => c[1].op), ["load"], "nothing after the close");
+  assert.deepEqual(h.calls.map((c) => c[0]).slice(-2), ["release", "detach"]);
+});
