@@ -563,7 +563,8 @@ export function playerBarJs(lang) {
    * The bar lets the overlay's media go: silent, no marker. Never calls the server itself.
    * note: the server ended it (an answer, not the user's own stop): the bar says Playback ended (Q1) instead
    * of hiding. A restore in a tab that did not start with its own nonce (a new or duplicated tab, H2) finds
-   * nothing of its own: it hides and leaves the shared marker alone, it is another tab's.
+   * nothing of its own: it leaves the shared marker alone (it is another tab's) and touches the bar not at all;
+   * a kiosk restore never showed it, and it may hold a local item the user started meanwhile.
    */
   function kioskClear(note) {
     kioskEpoch++;
