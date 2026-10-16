@@ -221,6 +221,16 @@ test("carriedReadRoots trusts only the bot's own old root: a link the bot plante
   assert.deepEqual(WR.carriedReadRoots({ worldRoot: root, legacyRoot: legacy }), [realpathSync(legacy)]);
 });
 
+test("carriedReadRoots: a planted link to the old root itself (or a subpath under another name) adds nothing", () => {
+  const root = mkdtempSync(join(dir, "wr-"));
+  const legacy = mkdtempSync(join(dir, "legacy-"));
+  mkdirSync(join(legacy, "sessions"));
+  symlinkSync(legacy, join(root, "outputs"));
+  assert.deepEqual(WR.carriedReadRoots({ worldRoot: root, legacyRoot: legacy }), [], "ln -s <old root> outputs is not a carried entry");
+  symlinkSync(join(legacy, "sessions"), join(root, ".pi"));
+  assert.deepEqual(WR.carriedReadRoots({ worldRoot: root, legacyRoot: legacy }), [], "a link under the wrong name is not a carried entry");
+});
+
 test("no old world: nothing is carried, the audit says so, and the board still turns on", async () => {
   await addBot("fresh-bot", "Fresh Bot", BASE_DEF());
   assert.ok(!existsSync(join(process.env.CROW_HOME, "pi-bots", "fresh-bot")));

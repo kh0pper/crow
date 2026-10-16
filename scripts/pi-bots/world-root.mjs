@@ -136,7 +136,8 @@ export function undoCarryOver(created) {
 /**
  * Extra read roots for a spawn ("entries" fallback). When the world root is
  * not the bot's own pre-project root (legacyRoot) and one of its carried
- * entries is a link that resolves into legacyRoot, the realpath of legacyRoot
+ * entries is exactly the link applyCarryOver makes (it reads
+ * <legacyRoot>/<name>) and resolves into legacyRoot, the realpath of legacyRoot
  * is returned so pi-lab's realpath read gate accepts carried files. Only the
  * bot's OWN old root ever qualifies (worldRootFor without a workspace) — a
  * link pointing anywhere else adds nothing.
@@ -152,8 +153,12 @@ export function carriedReadRoots({ worldRoot, legacyRoot }) {
     const p = join(worldRoot, name);
     const st = lstatOrNull(p);
     if (!st || !st.isSymbolicLink()) continue;
-    let real;
-    try { real = realpathSync(p); } catch { continue; }
+    // Exactly the link applyCarryOver makes (<legacyRoot>/<name> at
+    // <worldRoot>/<name>); a bot-planted `ln -s <old root> outputs`, or a
+    // link under another name, is not a carried entry.
+    let target, real;
+    try { target = readlinkSync(p); real = realpathSync(p); } catch { continue; }
+    if (target !== join(legacyRoot, name)) continue;
     if (under(real, realLegacy)) return [realLegacy];
   }
   return [];
