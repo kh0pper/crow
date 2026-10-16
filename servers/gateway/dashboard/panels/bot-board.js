@@ -36,7 +36,7 @@ import { clientJs } from "./bot-board/client.js";
 import { handleBotBoardPost } from "./bot-board/api-handlers.js";
 import {
   drawerMarkup, renderKanbanBoard, renderCustomTracker,
-  botBoardState, botChipsHtml, boardCard, turnOnPanelHtml,
+  botBoardState, botPickerHtml, boardCard, turnOnPanelHtml,
 } from "./bot-board/html.js";
 import { createDbClient } from "../../../db.js";
 import { botRuntimeActive } from "./bot-runtime-flag.js";
@@ -115,12 +115,12 @@ export default {
     }
     const notice = noticeBits.join("");
 
-    // ---- Bot picker: a strip of chips (option A, queue item 20) ----
+    // ---- Bot picker: a name button opening a sheet (option B, queue item 20) ----
     // Card counts for the board-on bots: top-level, unarchived cards on each
     // bot's project, from the instance-global tasks.db only.
     const counts = await cardCountsFor(bots.filter((b) => botBoardState(b).state === "on").map((b) => Number(b.projectId)));
-    const chipStrip = bots.length
-      ? botChipsHtml(bots, selBot, counts, lang)
+    const picker = bots.length
+      ? botPickerHtml(bots, selBot, counts, req, lang)
       : `<p class="bb-msg">${t("botboard.noBotsOption", lang)}</p>`;
 
     const isKanban = selBot && (selBot.trackerType === "kanban" || selBot.trackerType === "task-list");
@@ -150,7 +150,7 @@ export default {
 
     // The board's own actions and links (the old switcher form minus its
     // <select>): every action stays where it was.
-    const switcher = chipStrip +
+    const switcher = picker +
       `<div class="bb-switch">` + editBotLink + perchLink + switcherButtons + `</div>`;
 
     // ---- No bot selected ----

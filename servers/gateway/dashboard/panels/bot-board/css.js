@@ -63,31 +63,74 @@ export function botBoardStyles() {
   ${birdCss}
   ${roostCss}
   ${birdDrawerCss()}
-  /* Option A (queue item 20): the bot picker chip strip. It scrolls sideways
-     INSIDE itself on a phone (nowrap + its own scroller); the page never does. */
-  .bb-chips-bots{display:flex;flex-wrap:nowrap;overflow-x:auto;gap:.5rem;padding:0 0 .35rem;margin:0 0 .6rem;scrollbar-width:thin}
-  .bb-bchip{display:inline-flex;align-items:center;gap:.45rem;flex:none;min-height:40px;padding:.2rem .8rem .2rem .25rem;border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);background:var(--crow-bg-surface);color:var(--crow-text-primary);font-size:.85rem;font-weight:500;white-space:nowrap;text-decoration:none}
-  .bb-bchip:hover{border-color:var(--crow-accent)}
-  .bb-bchip.on{border-color:var(--crow-accent);background:color-mix(in srgb,var(--crow-accent) 12%,transparent);color:var(--crow-accent)}
-  .bb-bchip.nob{border-style:dashed;color:var(--crow-text-muted)}
-  .bb-bchip.nob.on{color:var(--crow-accent)}
-  .bb-bchip:focus-visible{outline:2px solid var(--crow-accent);outline-offset:2px}
-  .bb-bchip-av{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;font-size:.75rem;font-weight:700;flex:none}
-  .bb-bchip-n{font-family:'JetBrains Mono',monospace;font-size:.72rem;color:var(--crow-text-muted)}
+  /* Option B (queue item 20): the bot picker is a name button (the summary
+     of a <details>) that opens a sheet: a popover under the button on wide,
+     a bottom sheet on a phone. The open sheet's scrim is the summary's own
+     ::before, so a tap anywhere outside the sheet closes it, JS or not. */
+  .bb-picker{position:relative;display:inline-block;max-width:100%;margin:0 0 .6rem}
+  .bb-pick-btn{display:inline-flex;align-items:center;gap:.5rem;max-width:100%;min-height:44px;padding:.25rem .85rem .25rem .3rem;border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);background:var(--crow-bg-surface);color:var(--crow-text-primary);font-weight:600;font-size:1rem;cursor:pointer;list-style:none;box-sizing:border-box}
+  .bb-pick-btn::-webkit-details-marker{display:none}
+  .bb-pick-btn:hover{border-color:var(--crow-accent)}
+  .bb-pick-btn:focus-visible{outline:2px solid var(--crow-accent);outline-offset:2px}
+  .bb-pick-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .bb-pick-car{color:var(--crow-text-muted);font-size:.8rem}
+  .bb-picker[open]>.bb-pick-btn::before{content:"";position:fixed;inset:0;z-index:40;cursor:default;background:transparent}
+  .bb-pick-av{display:inline-grid;place-items:center;flex:none;width:32px;height:32px;border-radius:50%;font-size:.8rem;font-weight:700}
+  .bb-sheet{position:absolute;top:calc(100% + .35rem);left:0;z-index:41;width:min(22rem,calc(100vw - 2rem));max-height:min(60vh,32rem);overflow:auto;padding:.6rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:var(--crow-radius-card);box-shadow:0 12px 32px rgba(0,0,0,.18);box-sizing:border-box}
+  .bb-sheet-h{margin:.15rem .35rem .5rem;font-size:.85rem;font-weight:600;color:var(--crow-text-secondary)}
+  .bb-pick-list{list-style:none;margin:0;padding:0;display:grid;gap:2px}
+  .bb-pick-row,.bb-pick-main{display:flex;align-items:center;gap:.6rem;min-width:0;min-height:48px;padding:.35rem .5rem;border-radius:10px;color:var(--crow-text-primary);text-decoration:none}
+  .bb-pick-row:hover,.bb-pick-main:hover{background:var(--crow-bg-elevated)}
+  .bb-pick-row.on{background:color-mix(in srgb,var(--crow-accent) 12%,transparent)}
+  .bb-pick-row:focus-visible,.bb-pick-main:focus-visible{outline:2px solid var(--crow-accent);outline-offset:-2px}
+  li.bb-pick-row{padding:0 .5rem 0 0}
+  li.bb-pick-row:hover{background:none}
+  .bb-pick-main{flex:1}
+  .bb-pick-txt{display:grid;min-width:0;flex:1}
+  .bb-pick-txt b{font-weight:600;font-size:.92rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .bb-pick-txt small{font-size:.78rem;color:var(--crow-text-muted)}
+  .bb-pick-row.nob .bb-pick-av{opacity:.7}
+  .bb-pick-form{margin:0;flex:none}
+  .bb-pick-note{margin:.5rem .4rem .2rem;font-size:.78rem;color:var(--crow-text-muted)}
+  /* Lane tabs: phones only, and only once the script has run (the strip
+     ships hidden; without JS the columns stack as before). */
+  .bb-lane-tabs{display:flex;flex-wrap:nowrap;gap:3px;padding:3px;margin:0 0 .6rem;overflow-x:auto;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control)}
+  .bb-lane-tabs[hidden]{display:none}
+  .bb-lane-tabs [role="tab"]{flex:1 0 auto;min-height:40px;padding:.35rem .6rem;border:0;border-radius:8px;background:none;color:var(--crow-text-secondary);font:inherit;font-size:.85rem;font-weight:500;white-space:nowrap;cursor:pointer}
+  .bb-lane-tabs [role="tab"][aria-selected="true"]{background:var(--crow-bg-surface);color:var(--crow-text-primary);box-shadow:0 1px 2px rgba(0,0,0,.08)}
+  .bb-lane-tabs [role="tab"]:focus-visible{outline:2px solid var(--crow-accent);outline-offset:-2px}
+  .bb-lane-n{font-family:'JetBrains Mono',monospace;font-size:.72rem;color:var(--crow-text-muted);margin-left:.2rem}
+  @media (min-width:641px){.bb-lane-tabs{display:none !important}}
   .bb-hue-0{background:color-mix(in srgb,var(--crow-accent) 16%,transparent);color:var(--crow-accent)}
   .bb-hue-1{background:color-mix(in srgb,var(--crow-info) 16%,transparent);color:var(--crow-info)}
   .bb-hue-2{background:color-mix(in srgb,var(--crow-success) 16%,transparent);color:var(--crow-success)}
   .bb-hue-3{background:color-mix(in srgb,var(--crow-warning) 18%,transparent);color:var(--crow-text-primary)}
   .bb-hue-4{background:color-mix(in srgb,var(--crow-brand-gold) 20%,transparent);color:var(--crow-text-primary)}
   .bb-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
-  .bb-card-wrap{margin-bottom:var(--crow-space-5);position:relative}
+  /* The layout's .card fades in with a transform (and keeps it: fill-mode
+     "both"), and a transform makes the card the containing block of every
+     position:fixed descendant: the phone picker sheet and its scrim would
+     dock to the card, not the screen. Fade the board's card with opacity
+     alone. */
+  @keyframes bbCardIn{from{opacity:0}to{opacity:1}}
+  .bb-card-wrap{margin-bottom:var(--crow-space-5);position:relative;animation-name:bbCardIn}
   .bb-turnon{margin:.75rem 0 0;padding:.85rem 1rem;border:1px dashed var(--crow-border-strong);border-radius:var(--crow-radius-card);background:var(--crow-bg-elevated)}
   .bb-turnon-title{margin:0 0 .3rem;font-weight:600}
   .bb-turnon-why{margin:0 0 .7rem;font-size:.85rem;color:var(--crow-text-secondary);max-width:62ch}
   .bb-turnon-form{margin:0}
-  /* Q3 (Kevin, 2026-10-16): the bot status strip (roost) is hidden on phones,
-     where the chip strip above already lists the bots; kept on wide. */
-  @media (max-width:640px){.bb-roost{display:none}}
+  /* Q3 (operator decision, 2026-10-16): the bot status strip (roost) is hidden on phones,
+     where the picker above already lists the bots; kept on wide. On a phone
+     the picker's sheet docks to the bottom of the screen, and a tabbed board
+     shows one lane at a time. */
+  @media (max-width:640px){.bb-roost{display:none}
+    .bb-sheet{position:fixed;left:0;right:0;bottom:0;top:auto;width:auto;max-height:75vh;border-radius:var(--crow-radius-card) var(--crow-radius-card) 0 0;padding:.75rem .75rem calc(.75rem + env(safe-area-inset-bottom))}
+    .bb-picker[open]>.bb-pick-btn::before{background:rgba(0,0,0,.35)}
+    .bb-board.bb-tabbed{grid-template-columns:minmax(0,1fr);overflow:visible}
+    .bb-board.bb-tabbed .bb-col:not(.bb-lane-cur){display:none}
+    .bb-board.bb-tabbed .bb-col{min-width:0}
+    .bb-board.bb-tabbed .bb-col h4{display:none}
+    .bb-board.bb-tabbed .bb-col-collapsed .bb-col-body{display:block}
+  }
   .bb-switch{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
   .bb-switch select,.bb-switch input{padding:.45rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-primary)}
   .bb-switch button{padding:.45rem .9rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-control);color:var(--crow-accent-contrast);cursor:pointer}
