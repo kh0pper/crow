@@ -5,6 +5,8 @@ triggers: ["poster", "flyer", "visual piece", "cover art", "infographic"]
 license: Apache-2.0 — complete terms in third_party/anthropic-skills/canvas-design/LICENSE.txt; changes are listed in NOTICE.
 ---
 
+Modified from anthropics/skills `canvas-design` (Apache-2.0); full licence text and change list ship in the Design kit bundle (LICENSES.md, NOTICE).
+
 These are instructions for creating design philosophies - aesthetic movements that are then EXPRESSED VISUALLY. The output is a Crow artifact: a full-bleed `page` (HTML and CSS) or a `diagram`.
 
 Complete this in two steps:
@@ -133,3 +135,5 @@ To create additional pages when requested, create more creative pages along the 
 ## Using the Design kit in Crow
 
 Make the poster a `page` (full-bleed HTML and CSS, one screen) or a `diagram`. Write the design philosophy first, in one short paragraph, and put it in the change note. Fonts, icons and charts come from the Design kit by name; the design-frontend skill lists the names, where they land, and the chart and diagram rules. Nothing loads from the network.
+
+This skill applies only when your instructions contain the line `Design kit: installed`.

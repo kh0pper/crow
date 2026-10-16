@@ -5,6 +5,7 @@ triggers: ["house style", "theme", "brand colours"]
 license: Apache-2.0 — complete terms in third_party/anthropic-skills/theme-factory/LICENSE.txt; changes are listed in NOTICE.
 ---
 
+Modified from anthropics/skills `theme-factory` (Apache-2.0); full licence text and change list ship in the Design kit bundle (LICENSES.md, NOTICE).
 
 # Theme Factory Skill
 

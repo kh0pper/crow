@@ -15,6 +15,8 @@ this bundle ships come from @fontsource, with their own OFL-1.1 licence texts
 in lib/licenses/.)
 
 Changes made (Apache License 2.0, section 4(b)):
+- every ported skill: a one-line note added at the top of its body naming the
+  upstream skill and pointing to LICENSES.md and this NOTICE.
 - frontend-design -> skills/design-frontend.md: renamed; frontmatter replaced
   with Crow's; every instruction to load fonts, scripts or styles from a CDN or
   remote host replaced with "reference library assets by name" (the upstream

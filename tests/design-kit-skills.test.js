@@ -101,3 +101,17 @@ test("LICENSES.md carries the review notes: RFNs, notice files, Chromium drift, 
   assert.match(lic, /F3/);
   assert.match(lic, /11\.x[\s\S]*elkjs[\s\S]*EPL-2\.0/);
 });
+
+// Final-review carries: the licence notice travels inside each ported skill body
+// (a copied skill file alone still says where it came from), and design-poster
+// is gated like design-frontend.
+test("each ported skill body names its upstream skill and where the licence and changes ship", () => {
+  for (const [name, upstream] of Object.entries(SKILLS)) {
+    const body = read(`skills/${name}.md`).replace(/^---\n[\s\S]*?\n---\n/, "");
+    assert.ok(body.includes(`Modified from anthropics/skills \`${upstream}\` (Apache-2.0); full licence text and change list ship in the Design kit bundle (LICENSES.md, NOTICE).`), name);
+  }
+});
+
+test("design-poster applies only when the Design kit is installed", () => {
+  assert.match(read("skills/design-poster.md"), /^This skill applies only when your instructions contain the line `Design kit: installed`\.$/m);
+});

@@ -5,6 +5,8 @@ triggers: ["design", "make it look good", "styled page", "landing page", "mockup
 license: Apache-2.0 — complete terms in third_party/anthropic-skills/frontend-design/LICENSE.txt; changes are listed in NOTICE.
 ---
 
+Modified from anthropics/skills `frontend-design` (Apache-2.0); full licence text and change list ship in the Design kit bundle (LICENSES.md, NOTICE).
+
 # Frontend Design
 
 Approach this as the design lead at a design studio known for giving every client a distinct visual identity that is not mistaken for anyone else's. This client has already rejected proposals that felt cliché or templated, and is paying for a distinctive point of view: make deliberate, opinionated choices about palette, typography, and layout that are specific to this brief, and take aesthetic risk if justified.
