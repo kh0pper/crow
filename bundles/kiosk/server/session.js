@@ -21,7 +21,7 @@
  * the current item, or an explicit stop when there is none — so a page that kept an element from
  * before a restart never shows a stream the server no longer has.
  */
-import { effectiveCaps, guessProfile, PROFILES } from "./caps.js";
+import { effectiveCaps, guessProfile, PROFILES, BAR_OWNER_RE } from "./caps.js";
 import { validTimeZone } from "./clock.js";
 
 export const HELLO_TIMEOUT_MS = 5000;
@@ -43,6 +43,8 @@ export function createSessionHub(deps) {
     let authing = false;
     let caps = effectiveCaps(null, null);
     let rawCaps = null;   // what the page reported; kept so a profile change applies without a reconnect
+    let barOwner = null;  // B3: a session hello's tab nonce (never read for a paired display)
+    const capsOpts = () => ({ session: !!opts.authorize, owner: barOwner });
     let tz = null;                 // the page's IANA zone from hello (null = unknown: the server's zone is used)
     let inTurn = false;
     let frames = [];
@@ -82,7 +84,7 @@ export function createSessionHub(deps) {
     const state = (bird) => sendJson(ws, { type: "state", bird });
     /** The closing frame of a turn that never ran (see the header). */
     const turnOver = (id, reason) => sendJson(ws, { type: "turn_over", turn_id: id, reason });
-    const self = { ws, get device() { return device; }, get caps() { return caps; }, get busy() { return busy || speaking || inTurn; }, queueSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, runSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, abortTurn: () => abort?.abort(), recap: () => { caps = effectiveCaps(rawCaps, device?.kiosk_settings?.profile); } };
+    const self = { ws, get device() { return device; }, get caps() { return caps; }, get busy() { return busy || speaking || inTurn; }, queueSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, runSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, abortTurn: () => abort?.abort(), recap: () => { caps = effectiveCaps(rawCaps, device?.kiosk_settings?.profile, capsOpts()); } };
 
     /**
      * Session displays: is the dashboard login still live? An ended login closes the socket (4401).
@@ -144,6 +146,7 @@ export function createSessionHub(deps) {
       clearT(helloTimer);
       device = d;
       rawCaps = msg.caps;
+      barOwner = opts.authorize && typeof msg.owner === "string" && BAR_OWNER_RE.test(msg.owner) ? msg.owner : null;
       // A paired display nobody has typed yet gets the pairing guess, stored once as "guessed" (the
       // operator can change it in the panel). Never for a session display: no device record is written.
       if (!opts.authorize && !Object.hasOwn(PROFILES, d.kiosk_settings?.profile || "") && typeof deps.storeProfile === "function") {
@@ -153,7 +156,7 @@ export function createSessionHub(deps) {
           Promise.resolve().then(() => deps.storeProfile(d.id, guess)).catch((err) => deps.log?.(`[kiosk] storing the guessed display type failed: ${err.message}`));
         }
       }
-      caps = effectiveCaps(rawCaps, d.kiosk_settings?.profile);
+      caps = effectiveCaps(rawCaps, d.kiosk_settings?.profile, capsOpts());
       tz = validTimeZone(msg.tz);
       const prior = sessions.get(d.id);
       sessions.set(d.id, self);
@@ -161,6 +164,9 @@ export function createSessionHub(deps) {
       try {
         await sendReady();
         sendJson(ws, { type: "wm", action: "snapshot", windows: deps.wm.list(d.id) });
+        // B3: a session display's media follows the tab whose bar holds it (a new owner gets a new ticket; any other
+        // page — today's included — has none). Before the snapshot, so the snapshot carries the owner's ticket.
+        if (opts.authorize) deps.media?.setOwner?.(d.id, caps.bar ? barOwner : null);
         if (deps.media) { sendJson(ws, deps.media.snapshot(d.id) || { type: "media", action: "stop" }); deps.media.sessionBack(d.id); }
       } catch (err) { deps.log?.(`[kiosk] hello setup failed: ${err.message}`); ws.close(1011, "server_error"); return; }
       state("idle");
@@ -318,8 +324,10 @@ export function createSessionHub(deps) {
       if (speechAbort) speechAbort.abort();
       if (device && sessions.get(device.id) === self) {
         sessions.delete(device.id);
-        deps.media?.sessionLost(device.id);          // the stream outlives a network blip; the grace period decides
-        try { opts.onClose?.(device); } catch (err) { deps.log?.(`[kiosk] close hook failed: ${err?.message}`); }
+        // The stream outlives a network blip; the grace period decides. B3: audio handed to the player bar has no
+        // grace-period cut — it lives as long as the login (the runtime's sweep ends it at logout).
+        if (!caps.bar) deps.media?.sessionLost(device.id);
+        try { opts.onClose?.(device, caps); } catch (err) { deps.log?.(`[kiosk] close hook failed: ${err?.message}`); }
       }
     });
     ws.on("error", () => {});

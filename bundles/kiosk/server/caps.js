@@ -34,7 +34,15 @@ export function guessProfile(raw) {
   return w > 0 ? "desktop" : null;
 }
 
-export function effectiveCaps(raw, profileName) {
+/** B3: a dashboard tab's own nonce, sent with a bar hello and with each player-bar request (not a credential: it tells tabs apart). */
+export const BAR_OWNER_RE = /^[A-Za-z0-9_-]{16,64}$/;
+
+/**
+ * opts.session: the hello came over the dashboard SESSION socket (never true for a paired display); opts.owner: that
+ * hello's tab nonce. `bar` (B3: this display's audio is handed to the dashboard's player bar) needs all three: a session
+ * display, the page asking for it (raw.bar === true) and a well-formed owner nonce (S7). Every page today sends no bar.
+ */
+export function effectiveCaps(raw, profileName, { session = false, owner = null } = {}) {
   // No profile set (or one this build does not know): the audio-first profile. A display gets video only
   // when someone has said what it is, or the pairing guess (a later slice) has.
   const profile = Object.hasOwn(PROFILES, profileName) ? PROFILES[profileName] : PROFILES[DEFAULT_PROFILE];
@@ -61,6 +69,7 @@ export function effectiveCaps(raw, profileName) {
     // wake_over_media is a bench result stored on the device, never a claim from the page.
     input: { wake: r.input?.wake === true, keyboard: r.input?.keyboard === true, wake_over_media: "untested" },
     kinds, windows, iframe: false,
+    bar: session === true && r.bar === true && typeof owner === "string" && BAR_OWNER_RE.test(owner),
   };
 }
 
