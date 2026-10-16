@@ -23,6 +23,7 @@ import {
   serversForProbe,
 } from "../../../../../scripts/pi-bots/ext_registry.mjs";
 import { skillDirs } from "../../../../../scripts/pi-bots/skill_resolver.mjs";
+import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposals.mjs";
 import { piModelsFileKeys } from "../../../../../scripts/pi-bots/pi-model-catalog.mjs";
 import { tasksDbPath, botsWorkspaceRoot } from "../../../../../scripts/pi-bots/instance-paths.mjs";
 import { listProvidersAll } from "../../../../shared/providers-db.js";
@@ -34,7 +35,8 @@ import { readSetting } from "../../settings/registry.js";
 export const TASKS_DB = tasksDbPath();
 
 // Skill dirs are resolved per-instance by skill_resolver.skillDirs() (A6):
-// <crowHome>/skills, ~/.crow/skills, ~/crow/skills.
+// <crowHome>/skills, then the running checkout's skills/ (never another
+// instance's home).
 export const PI_BUILTIN = ["read", "edit", "write", "bash", "list", "glob", "grep"];
 // PI_EXT_ALLOWLIST is imported from the single-source module (Phase 2.4):
 // scripts/pi-bots/pi_extensions_allowlist.mjs — the panel only OFFERS these;
@@ -163,14 +165,15 @@ export async function loadModelOptions(db, { piKeysFn = () => piModelsFileKeys()
   }
 }
 
-// A6: instance-aware — scans <crowHome>/skills, ~/.crow/skills, ~/crow/skills
-// (the same order skill_resolver resolves), not the old hardcoded pair.
+// A6: instance-aware — scans the same dirs skill_resolver resolves from
+// (<crowHome>/skills, then the running checkout's skills/).
 export function loadSkills(crowHome) {
   const names = new Set();
   for (const dir of skillDirs(crowHome)) {
     try {
       for (const f of readdirSync(dir)) {
-        if (f.endsWith(".md")) names.add(f.replace(/\.md$/, ""));
+        // Only names the resolver can load (a dotfile such as ".md" is not one).
+        if (f.endsWith(".md") && normalizeSkillName(f) === f.slice(0, -3)) names.add(f.slice(0, -3));
       }
     } catch { /* dir missing */ }
   }

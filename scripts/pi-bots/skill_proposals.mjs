@@ -8,10 +8,10 @@
  *     <def.session_dir>/proposed-skills/<name>.md
  *
  * The file is INERT: skill_resolver loads skills only BY NAME from
- * skillDirs() = [<crowHome>/skills, ~/.crow/skills, ~/crow/skills], and the
- * staging dir is none of those. A proposal cannot load — and is not in
+ * skillDirs() = [<crowHome>/skills, <checkout>/skills], and the
+ * staging dir is neither of those. A proposal cannot load — and is not in
  * def.skills — until an OPERATOR approves it in the Bot Builder, which copies
- * the (operator-reviewed) text into ~/.crow/skills/<name>.md AND appends the
+ * the (operator-reviewed) text into <crowHome>/skills/<name>.md AND appends the
  * name to def.skills. Skills are PURE PROMPT TEXT: approval can never grant a
  * tool or change permission_policy (those come from def.tools /
  * def.permission_policy). The only residual risk is prompt-level guardrail

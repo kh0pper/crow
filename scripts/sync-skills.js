@@ -20,7 +20,7 @@ const DOCS_FILE = join(__dirname, "..", "docs", "skills", "index.md");
 
 // Classification of skills into categories
 const CORE_SKILLS = new Set([
-  "superpowers", "memory-management", "research-pipeline", "session-context",
+  "superpowers", "memory-management", "research-pipeline",
   "plan-review", "session-summary", "reflection", "skill-writing", "i18n",
 ]);
 

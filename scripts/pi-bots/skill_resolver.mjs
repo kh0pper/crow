@@ -9,31 +9,30 @@
  * it can never grant tools or alter permissions (those live in def.tools /
  * def.permission_policy).
  *
- * SEARCH ORDER (review finding A3 — must preserve existing behavior):
- *   1. <crowHome>/skills      — per-instance operator skills (MPA: ~/.crow-mpa/skills)
- *   2. ~/.crow/skills         — PRIMARY operator skills
- *   3. ~/crow/skills          — repo skills (shipped with Crow)
+ * SEARCH ORDER (skills audit A28, 2026-10-16):
+ *   1. <crowHome>/skills      — THIS instance's skills (crowHome defaults to
+ *                               CROW_HOME, then ~/.crow)
+ *   2. <checkout>/skills      — repo skills shipped with the RUNNING checkout
  *
- * The bridge previously hardcoded [~/.crow/skills, ~/crow/skills]. The MPA
- * bots that actually use skills (pir-portal-runner -> govqa-portal/oag-portal,
- * grackle -> household-kitchen) have those files in ~/.crow/skills (primary),
- * and ~/.crow-mpa/skills does not exist. Adding the per-instance dir FIRST
- * while KEEPING ~/.crow/skills (deduped) makes resolution instance-aware
- * without breaking any current injection. First match wins per name.
+ * There is no fallback to the primary instance's ~/.crow/skills any more. It
+ * existed for the retired MPA, whose bots kept their skills in the primary's
+ * dir; on a co-hosted instance (CROW_HOME=~/.crow-r4) it leaked the primary's
+ * skills (Design kit, personal ones) into that instance's Bot Builder and
+ * bots. The repo dir comes from this module's path, not a hard-coded
+ * $HOME/crow. First match wins per name.
  */
 import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { normalizeSkillName } from "./skill_proposals.mjs";
+import { resolveCrowHome } from "../../servers/shared/crow-home.js";
+
+/** The running checkout's shipped skills directory. */
+export const REPO_SKILLS_DIR = resolve(fileURLToPath(new URL("../../skills", import.meta.url)));
 
 /** Ordered, deduped skill directories for an instance. */
 export function skillDirs(crowHome) {
-  const HOME = homedir();
-  const dirs = [];
-  if (crowHome) dirs.push(join(crowHome, "skills"));
-  dirs.push(join(HOME, ".crow", "skills"));
-  dirs.push(join(HOME, "crow", "skills"));
-  return [...new Set(dirs)];
+  return [...new Set([join(crowHome || resolveCrowHome(), "skills"), REPO_SKILLS_DIR])];
 }
 
 /** Resolve one skill name to {name, path, text} or null (searched in order). */

@@ -31,21 +31,19 @@
 import Database from "better-sqlite3";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, lstatSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { normalizeSkillName } from "./skill_proposals.mjs";
-import { resolveSkill } from "./skill_resolver.mjs";
+import { resolveSkill, REPO_SKILLS_DIR } from "./skill_resolver.mjs";
 import { botAuthoredSkill, recordSkillEvent } from "./skill_provenance.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
 import { resolveCrowHome } from "../../servers/shared/crow-home.js";
 
-const HOME = homedir();
 const CROW_DB = botsDbPath();
 // Sole write target: THIS instance's skills dir (CROW_HOME/skills), the same dir
 // the gateway approve handler and Skills panel use. Was hardcoded ~/.crow/skills,
 // so a co-hosted instance (CROW_HOME=~/.crow-r4) promoted into the primary's.
 const CROW_USER_SKILLS = join(resolveCrowHome(), "skills");
 function userSkillsDir(crowHome) { return crowHome ? join(crowHome, "skills") : join(resolveCrowHome(), "skills"); }
-const REPO_SKILLS = join(HOME, "crow", "skills");         // protected (shipped) — never written
+const REPO_SKILLS = REPO_SKILLS_DIR;                      // protected (shipped, the running checkout) — never written
 
 function db() { const d = new Database(CROW_DB); d.pragma("busy_timeout = 10000"); return d; }
 

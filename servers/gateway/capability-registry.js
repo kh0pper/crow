@@ -8,6 +8,7 @@
 import { TOOL_MANIFESTS } from "./tool-manifests.js";
 import { listInstalledExtensions, voiceCategoryFor, resolveCrowHome } from "../../scripts/pi-bots/ext_registry.mjs";
 import { skillDirs } from "../../scripts/pi-bots/skill_resolver.mjs";
+import { normalizeSkillName } from "../../scripts/pi-bots/skill_proposals.mjs";
 import { readdirSync } from "node:fs";
 import { getExposedCapabilities } from "./peer-exposure.js";
 import { getPeerManagedBots } from "./bot-management-exposure.js";
@@ -86,7 +87,7 @@ function addonTools(crowHome) {
 function localSkills(crowHome) {
   const names = new Set();
   for (const dir of skillDirs(crowHome)) {
-    try { for (const f of readdirSync(dir)) if (f.endsWith(".md")) names.add(f.replace(/\.md$/, "")); }
+    try { for (const f of readdirSync(dir)) if (f.endsWith(".md") && normalizeSkillName(f) === f.slice(0, -3)) names.add(f.slice(0, -3)); }
     catch { /* dir missing */ }
   }
   return [...names].sort().map((name) => ({ name }));

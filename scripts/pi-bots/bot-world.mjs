@@ -90,9 +90,10 @@ export function withArtifactsCompanions(crowMcp) {
  * Design kit (spec §3.1, §4.3, §4.4; review H2). The kit mode is THIS
  * instance's install state (installedKitDir), passed in as kitInstalled and
  * stated in the prompt by kitModeLine — never inferred from which skill files
- * resolve, because skill_resolver also searches ~/.crow/skills, where the main
- * instance's kit skills live. Kit skills are therefore attached only from
- * <crowHome>/skills itself. design-poster is attached only when the operator
+ * resolve (the resolver also searches the repo skills/ dir). Kit skills are
+ * attached only from <crowHome>/skills itself; since the 2026-10-16 skills
+ * audit the resolver no longer reads the main instance's ~/.crow/skills from
+ * another instance at all. design-poster is attached only when the operator
  * selects it (review L9: spawn size).
  */
 export const DESIGN_SKILLS = Object.freeze(["design-frontend"]);
@@ -335,7 +336,7 @@ export async function prepareSpawn(world, { escalate = false, log = () => {} } =
   // def.skills[] is saved by the Bot Builder but was never consumed here —
   // bots with skills (e.g. pir-portal-runner: govqa-portal, oag-portal) ran
   // without them. A3: resolved per-instance via skill_resolver — first match
-  // across <crowHome>/skills, ~/.crow/skills, ~/crow/skills wins.
+  // across <crowHome>/skills, then the running checkout's skills/, wins.
   const { sections: skillSections, missing: missingSkills } =
     resolveSkills(skillNamesFor(def, { crowHome, kitInstalled: !!world.kitInstalled, houseStyle: world.houseStyle || null }), { crowHome });
   for (const s of skillSections) appendFileSync(sysFile, "\n\n" + s.text);
