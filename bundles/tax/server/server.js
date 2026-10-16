@@ -25,6 +25,25 @@ function getEncryptionKey() {
   return key;
 }
 
+/**
+ * Re-encrypt every return that only `previous` opens with `current`. Best-effort: a row
+ * neither key opens is left as it is. Returns the number of rows moved.
+ */
+export async function reencryptToCurrentKey(db, current, previous) {
+  if (!current || !previous || current === previous) return 0;
+  let moved = 0;
+  let rows;
+  try { rows = (await db.execute("SELECT id, data FROM tax_returns")).rows; } catch { return 0; }
+  for (const r of rows) {
+    try { decrypt(r.data, current); continue; } catch { /* not on the current key */ }
+    let plain;
+    try { plain = decrypt(r.data, previous); } catch { continue; }
+    await db.execute({ sql: "UPDATE tax_returns SET data = ? WHERE id = ?", args: [encrypt(plain, current), r.id] });
+    moved++;
+  }
+  return moved;
+}
+
 export function createTaxServer(dbPath, options = {}) {
   const server = new McpServer(
     { name: "crow-tax", version: "1.0.0" },
@@ -35,21 +54,7 @@ export function createTaxServer(dbPath, options = {}) {
 
   // After a passphrase change: re-encrypt every return that only the previous key opens,
   // so the previous key can be cleared (and changed again) without stranding data.
-  // Best-effort and quiet: a row neither key opens is left as it is.
-  (async () => {
-    const current = process.env.CROW_TAX_ENCRYPTION_KEY;
-    const previous = process.env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS;
-    if (!current || !previous || current === previous) return;
-    try {
-      const rows = await db.execute("SELECT id, data FROM tax_returns");
-      for (const r of rows.rows) {
-        try { decrypt(r.data, current); continue; } catch { /* not on the current key */ }
-        let plain;
-        try { plain = decrypt(r.data, previous); } catch { continue; }
-        await db.execute({ sql: "UPDATE tax_returns SET data = ? WHERE id = ?", args: [encrypt(plain, current), r.id] });
-      }
-    } catch { /* no table yet */ }
-  })();
+  reencryptToCurrentKey(db, process.env.CROW_TAX_ENCRYPTION_KEY, process.env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS).catch(() => {});
 
   // Helper: load return from DB
   async function loadReturn(id) {

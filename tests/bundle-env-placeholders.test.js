@@ -233,3 +233,24 @@ test("uninstall keeps library paths for a reinstall (retained copy)", async () =
   assert.equal(n, 1);
   assert.equal(parseEnvText(readFileSync(sec.retainedEnvPath(home, "fx-lib"), "utf8")).MEDIA, "/srv/films");
 });
+
+test("tax: at start, returns only the previous key opens are re-encrypted to the current key", async () => {
+  const { createDbClient } = await import("../servers/db.js");
+  const { initTaxTables } = await import("../bundles/tax/server/init-tables.js");
+  const { reencryptToCurrentKey } = await import("../bundles/tax/server/server.js");
+  const { encrypt, decrypt } = await import("../bundles/tax/server/crypto.js");
+  const db = createDbClient(join(scratch(), "tax.db"));
+  try {
+    await initTaxTables(db);
+    const ins = (id, data) => db.execute({ sql: "INSERT INTO tax_returns (id, tax_year, filing_status, data) VALUES (?, 2025, 'single', ?)", args: [id, data] });
+    await ins("a", encrypt("on-old", "k1-old"));
+    await ins("b", encrypt("on-new", "k2-new"));
+    await ins("c", encrypt("on-other", "k0-lost"));
+    assert.equal(await reencryptToCurrentKey(db, "k2-new", "k1-old"), 1);
+    const rows = Object.fromEntries((await db.execute("SELECT id, data FROM tax_returns")).rows.map((r) => [r.id, r.data]));
+    assert.equal(decrypt(rows.a, "k2-new"), "on-old");
+    assert.equal(decrypt(rows.b, "k2-new"), "on-new");
+    assert.throws(() => decrypt(rows.c, "k2-new"), undefined, "a row neither key opens is left alone");
+    assert.equal(await reencryptToCurrentKey(db, "k2-new", "k1-old"), 0, "idempotent");
+  } finally { db.close?.(); }
+});
