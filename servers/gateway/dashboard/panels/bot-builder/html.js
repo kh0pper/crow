@@ -119,7 +119,7 @@ function giveTaskDialogHtml(waiting, lang) {
     `<textarea id="btb-give-text" rows="3" maxlength="500" class="btb-give-text"></textarea>` +
     `<label class="btb-give-l" for="btb-give-card">${t("botbuilder.giveTaskOrPick", lang)}</label>` +
     `<select id="btb-give-card"><option value="">${t("botbuilder.giveTaskNone", lang)}</option>${opts}</select>` +
-    `<fieldset class="btb-seg"><legend class="btb-sr">${t("botboard.giveWhen", lang)}</legend>` +
+    `<fieldset class="btb-give-seg"><legend class="btb-sr">${t("botboard.giveWhen", lang)}</legend>` +
     `<label><input type="radio" name="btb-give-when" value="later" checked><span>${t("botboard.giveLater", lang)}</span></label>` +
     `<label><input type="radio" name="btb-give-when" value="now"><span>${t("botboard.giveNow", lang)}</span></label>` +
     `</fieldset>` +
