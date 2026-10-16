@@ -5,7 +5,7 @@ import {
   closeDecision, backoffMs, micDecision, isNight, themeFor, msToNextMinute,
   displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics, NO_AUDIO_WAIT_MS, createStatusRing,
   duckDecision, duckBackstop, DUCK_BACKSTOP_MS, noteEffect, EFFECT_WAIT_MS, micAfterTurn, MEDIA_RECONNECT_CAP_MS,
-  mediaStartGate, MIC_SETTLE_MS, releaseForMediaDecision,
+  mediaStartGate, MIC_SETTLE_MS, releaseForMediaDecision, audioPortLine,
 } from "../bundles/kiosk/public/state.js";
 import { OFFLINE_CLEAR_MS } from "../bundles/kiosk/public/media-view.js";
 import { SESSION_GRACE_MS } from "../bundles/kiosk/server/media.js";
@@ -720,4 +720,16 @@ test("item 21: a media load with the mic open and no turn in flight lets the mic
   assert.equal(releaseForMediaDecision({ config: on, micOpen: true, turnOpen: true, playing: false }), false, "mid-turn: the settle lets it go");
   assert.equal(releaseForMediaDecision({ config: on, micOpen: false, turnOpen: false, playing: false }), false);
   assert.equal(releaseForMediaDecision({ config: {}, micOpen: true, turnOpen: false, playing: false }), false);
+});
+
+test("item 21c: audioPortLine takes only the Android app's {type:audio, line} and cleans the text", () => {
+  assert.equal(audioPortLine(JSON.stringify({ type: "audio", line: "mode normal (was in_communication) · out: media@speaker 1 · route: speaker" })),
+    "mode normal (was in_communication) · out: media@speaker 1 · route: speaker");
+  assert.equal(audioPortLine(JSON.stringify({ type: "audio", line: "a\u0000b\nc\u007f" })), "abc", "control characters are dropped");
+  assert.equal(audioPortLine(JSON.stringify({ type: "audio", line: "x".repeat(300) })).length, 120);
+  for (const bad of [undefined, null, 42, {}, "", "nope", "null", "[]", JSON.stringify({ type: "steps", line: "x" }),
+    JSON.stringify({ type: "audio" }), JSON.stringify({ type: "audio", line: 7 }), JSON.stringify({ type: "audio", line: "  " }),
+    JSON.stringify({ type: "audio", line: "y".repeat(600) })]) {
+    assert.equal(audioPortLine(bad), null, String(bad));
+  }
 });

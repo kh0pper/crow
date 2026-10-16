@@ -244,3 +244,17 @@ export function createStatusRing(max = 20) {
     format() { return items.slice().reverse().map((i) => `${stamp(i.at)} ${i.kind}: ${i.text}`).join("\n"); },
   };
 }
+
+/**
+ * Queue item 21c: a line from the Android app's audio-mode guard (window.CrowAudioPort, injected by the
+ * app only on its paired gateway origin). Only {"type":"audio","line":"…"} counts; the text goes to the
+ * debug ring as "audio: …". Anything else → null.
+ */
+export function audioPortLine(data) {
+  if (typeof data !== "string" || data.length > 512) return null;
+  let m;
+  try { m = JSON.parse(data); } catch { return null; }
+  if (!m || typeof m !== "object" || m.type !== "audio" || typeof m.line !== "string") return null;
+  const line = m.line.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 120);
+  return line || null;
+}

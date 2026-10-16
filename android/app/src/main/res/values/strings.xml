@@ -22,6 +22,8 @@
     <!-- Tailscale -->
     <string name="tailscale_section">Tailscale</string>
     <string name="tailscale_description">Tailscale provides secure remote access to your home server.</string>
+    <string name="audio_guard_title">Audio mode guard</string>
+    <string name="audio_guard_description">After you talk to Crow, put the phone back in media mode so music and radio play from the speaker, not the earpiece. Turn off to only log what it would do.</string>
     <string name="tailscale_not_installed">Tailscale is not installed.</string>
     <string name="tailscale_disconnected">Tailscale is installed but no VPN is active.</string>
     <string name="tailscale_connected">VPN is active.</string>

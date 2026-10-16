@@ -40,6 +40,10 @@ public class CrowWebChromeClient extends WebChromeClient {
                 return;
             }
 
+            // Queue item 21c: a capture may be starting — the audio-mode guard
+            // keeps its hands off for a while (marked before the outcome is known).
+            if (needsAudio) activity.noteAudioCaptureRequested();
+
             boolean hasAudio = activity.hasAudioPermission();
             boolean hasCamera = activity.hasCameraPermission();
 

@@ -76,6 +76,24 @@ public class MainActivity extends AppCompatActivity {
     /** The allowedOriginRule currently registered for STEPS_PORT_NAME, or null. */
     private String stepsPortRule;
 
+    // Queue item 21c: the audio-mode guard (AudioModeWatcher) and its page
+    // channel, window.CrowAudioPort — injected only into frames on the paired
+    // gateway origin (sub-frames included: the voice overlay is a same-origin
+    // iframe). It takes three hints (hello, captureStarting, captureEnded),
+    // nothing else; the guard decides from native facts alone. Native sends
+    // back short debug lines. Off by Settings → "Audio mode guard" (log only).
+    static final String AUDIO_PORT_NAME = "CrowAudioPort";
+    private AudioModeWatcher audioWatcher;
+    /** The allowedOriginRule currently registered for AUDIO_PORT_NAME, or null. */
+    private String audioPortRule;
+    /**
+     * The frame that last spoke on the port: where debug lines go. Lines carry
+     * device-wide audio activity (anonymized counts, routes); any same-origin
+     * frame can take the sink — such a frame already has the dashboard session.
+     * Each MainActivity instance runs its own watcher (a second one is a no-op).
+     */
+    private JavaScriptReplyProxy audioReply;
+
     /** Where a steps result goes: the reply proxy (port) or evaluateJavascript (legacy). */
     private interface StepsReply {
         void send(String id, JSONObject payload);
@@ -113,6 +131,8 @@ public class MainActivity extends AppCompatActivity {
     private TextView statusText;
     private ValueCallback<Uri[]> fileUploadCallback;
     private PermissionRequest pendingWebViewPermRequest;
+    /** elapsedRealtime when pendingWebViewPermRequest was last set (21c staleness cap). */
+    private long pendingPermSince;
 
     private final ActivityResultLauncher<Intent> fileChooserLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -189,6 +209,13 @@ public class MainActivity extends AppCompatActivity {
         requestNotificationPermission();
 
         configureWebView();
+
+        // A prompt whose result never came back must not block the guard forever (2 min cap).
+        audioWatcher = new AudioModeWatcher(this,
+                () -> pendingWebViewPermRequest != null && SystemClock.elapsedRealtime() - pendingPermSince < 120_000L,
+                () -> getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getBoolean(SettingsActivity.KEY_AUDIO_GUARD, true));
+        audioWatcher.setSink(this::sendAudioLine);
+        audioWatcher.start();
 
         swipeRefresh.setOnRefreshListener(() -> {
             webView.reload();
@@ -363,6 +390,7 @@ public class MainActivity extends AppCompatActivity {
         if (stepsUsePort) {
             webView.addJavascriptInterface(new CrowBridge(), "Crow");
             refreshStepsPort();
+            refreshAudioPort();
         } else {
             webView.addJavascriptInterface(new CrowBridgeLegacySteps(), "Crow");
         }
@@ -392,6 +420,70 @@ public class MainActivity extends AppCompatActivity {
         } catch (IllegalArgumentException e) {
             // A rule WebView rejects: the steps bridge stays off (fail closed).
         }
+    }
+
+    /** Queue item 21c: (re)register CrowAudioPort for the CURRENT gateway origin (see refreshStepsPort). */
+    private void refreshAudioPort() {
+        if (!stepsUsePort || webView == null) return;
+        String rule = OriginCheck.allowedOriginRule(getGatewayUrl());
+        if (rule == null ? audioPortRule == null : rule.equals(audioPortRule)) return;
+        if (audioPortRule != null) {
+            WebViewCompat.removeWebMessageListener(webView, AUDIO_PORT_NAME);
+            audioPortRule = null;
+        }
+        audioReply = null;
+        if (rule == null) return;
+        try {
+            WebViewCompat.addWebMessageListener(webView, AUDIO_PORT_NAME,
+                    Collections.singleton(rule), this::onAudioMessage);
+            audioPortRule = rule;
+        } catch (IllegalArgumentException e) {
+            // A rule WebView rejects: no port; the native guard still runs from its callbacks.
+        }
+    }
+
+    /**
+     * CrowAudioPort messages, UI thread. Any frame, but its origin must be
+     * exactly the paired gateway origin (re-checked here against the saved
+     * URL). Only {"op":"hello"}, {"op":"captureStarting"} and
+     * {"op":"captureEnded"} do anything. Each makes that frame the debug-line
+     * sink; captureStarting holds the guard off (it can only DELAY a reset);
+     * captureEnded asks for a check — which decides from native facts, never
+     * from the message. A reply proxy to a removed frame may drop silently:
+     * harmless, every overlay open says hello again.
+     */
+    private void onAudioMessage(WebView view, WebMessageCompat message, Uri sourceOrigin,
+                                boolean isMainFrame, JavaScriptReplyProxy proxy) {
+        if (sourceOrigin == null || proxy == null) return;
+        if (!OriginCheck.sameOrigin(sourceOrigin.toString(), getGatewayUrl())) return;
+        if (message == null || message.getType() != WebMessageCompat.TYPE_STRING) return;
+        AudioModeGuard.PortOp op = AudioModeGuard.parsePortMessage(message.getData());
+        if (op == null) return;
+        audioReply = proxy;
+        if (audioWatcher == null) return;
+        if (op == AudioModeGuard.PortOp.CAPTURE_STARTING) audioWatcher.noteCaptureStarting();
+        else if (op == AudioModeGuard.PortOp.CAPTURE_ENDED) audioWatcher.requestCheck("page", true);
+    }
+
+    /** One debug line to the page frame that last spoke on CrowAudioPort, if any. */
+    private void sendAudioLine(String line) {
+        runOnUiThread(() -> {
+            JavaScriptReplyProxy p = audioReply;
+            if (p == null) return;
+            try {
+                JSONObject o = new JSONObject();
+                o.put("type", "audio");
+                o.put("line", line);
+                p.postMessage(o.toString());
+            } catch (Exception e) {
+                audioReply = null; // the frame is gone
+            }
+        });
+    }
+
+    /** Called by CrowWebChromeClient when the page asks for the microphone. */
+    void noteAudioCaptureRequested() {
+        if (audioWatcher != null) audioWatcher.noteCaptureStarting();
     }
 
     /**
@@ -754,6 +846,7 @@ public class MainActivity extends AppCompatActivity {
     /** Request RECORD_AUDIO and grant WebView permission on callback */
     public void requestAudioPermissionForWebView(PermissionRequest request) {
         pendingWebViewPermRequest = request;
+        pendingPermSince = SystemClock.elapsedRealtime();
         pendingNeedCamera = false;
         audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO);
     }
@@ -761,6 +854,7 @@ public class MainActivity extends AppCompatActivity {
     /** Request both RECORD_AUDIO and CAMERA, granting WebView permission when both complete */
     public void requestAudioAndCameraPermissionForWebView(PermissionRequest request) {
         pendingWebViewPermRequest = request;
+        pendingPermSince = SystemClock.elapsedRealtime();
         if (!hasAudioPermission()) {
             // Audio first, then camera in the audio callback
             pendingNeedCamera = true;
@@ -778,6 +872,7 @@ public class MainActivity extends AppCompatActivity {
     /** Request only CAMERA permission for WebView */
     public void requestCameraPermissionForWebView(PermissionRequest request) {
         pendingWebViewPermRequest = request;
+        pendingPermSince = SystemClock.elapsedRealtime();
         pendingNeedCamera = false;
         cameraPermissionLauncher.launch(Manifest.permission.CAMERA);
     }
@@ -796,6 +891,8 @@ public class MainActivity extends AppCompatActivity {
         // The gateway URL may have just changed in Settings: move the steps
         // listener's allowed origin with it (security fix 2026-10-04).
         refreshStepsPort();
+        refreshAudioPort();
+        if (audioWatcher != null) audioWatcher.requestCheck("resume", false);
         // Restart ntfy service (handles returning from settings with new gateway URL)
         startNtfyService();
     }
@@ -810,6 +907,11 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        if (audioWatcher != null) {
+            audioWatcher.stop();
+            audioWatcher = null;
+        }
+        audioReply = null;
         // Leak-safe WebView teardown (W3): detach from its parent before
         // destroy() so the Activity isn't retained via the WebView's native
         // callbacks. The parent is a SwipeRefreshLayout, so cast to ViewGroup
