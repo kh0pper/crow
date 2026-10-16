@@ -23,7 +23,6 @@ services:
       - "127.0.0.1:2224:22"
     volumes:
       - ${FORGEJO_DATA_DIR:-~/.crow/forgejo/data}:/data
-      - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
     environment:
       - USER_UID=1000

@@ -72,7 +72,7 @@ The registry is a JSON file at `registry/add-ons.json`:
 | `requires.min_disk_mb` | No | Minimum disk space in MB |
 | `requires.gpu` | No | Set `true` if the add-on needs a GPU |
 | `requires.bundles` | No | Array of bundle IDs that must be installed first. Install endpoint refuses if any are missing; uninstall is blocked while dependents are installed. |
-| `privileged` | No | Set `true` for bundles that need NET_ADMIN, NET_RAW, SYS_ADMIN, or `network_mode: host`. Triggers the install-modal consent flow with a server-validated single-use token. |
+| `privileged` | No | Set `true` for bundles that need NET_ADMIN, NET_RAW, SYS_ADMIN, or `network_mode: host`. Triggers the install-modal consent flow with a server-validated single-use token. `tests/bundle-compose-gate.test.js` runs the install security check over every first-party compose file, so a bundle that needs one of these and does not declare it fails CI. |
 | `consent_required` | No | Set `true` for bundles with significant operational cost or read-Docker-socket access (netdata, dozzle). Triggers the consent modal even if not `privileged`. |
 | `install_consent_messages` | No | Object keyed by language code (`en`, `es`, ...) with the warning text shown in the install-confirmation modal. Falls back to `install_consent_message` then a generic string. |
 | `install_consent_message` | No | Single-language fallback for `install_consent_messages`. |

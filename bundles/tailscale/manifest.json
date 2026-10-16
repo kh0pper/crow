@@ -1,7 +1,12 @@
 {
   "id": "tailscale",
   "name": "Tailscale",
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "privileged": true,
+  "install_consent_messages": {
+    "en": "The Tailscale container joins this machine to your tailnet. It uses host networking, the NET_ADMIN capability and the /dev/net/tun device, so it creates a network interface and changes this machine's routing and firewall rules. Do not install it on a machine that already runs Tailscale.",
+    "es": "El contenedor de Tailscale une esta máquina a tu tailnet. Usa la red del host, la capacidad NET_ADMIN y el dispositivo /dev/net/tun, así que crea una interfaz de red y cambia las rutas y las reglas de firewall de esta máquina. No lo instales en una máquina que ya ejecuta Tailscale."
+  },
   "description": "Private network access — reach your Crow from any device without exposing it to the public internet",
   "type": "bundle",
   "author": "Crow",

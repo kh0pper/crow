@@ -72,7 +72,7 @@ El registro es un archivo JSON en `registry/add-ons.json`:
 | `requires.min_disk_mb` | No | Espacio mínimo en disco en MB |
 | `requires.gpu` | No | Establece `true` si el complemento necesita una GPU |
 | `requires.bundles` | No | Arreglo de IDs de bundles que deben instalarse primero. El endpoint de instalación se niega si falta alguno; la desinstalación se bloquea mientras haya dependientes instalados. |
-| `privileged` | No | Establece `true` para bundles que necesitan NET_ADMIN, NET_RAW, SYS_ADMIN o `network_mode: host`. Activa el flujo de consentimiento del modal de instalación con un token de un solo uso validado por el servidor. |
+| `privileged` | No | Establece `true` para bundles que necesitan NET_ADMIN, NET_RAW, SYS_ADMIN o `network_mode: host`. Activa el flujo de consentimiento del modal de instalación con un token de un solo uso validado por el servidor. `tests/bundle-compose-gate.test.js` ejecuta la comprobación de seguridad de instalación sobre cada archivo compose propio, así que un bundle que necesita una de estas cosas y no lo declara falla en CI. |
 | `consent_required` | No | Establece `true` para bundles con un costo operativo significativo o con acceso de lectura al socket de Docker (netdata, dozzle). Activa el modal de consentimiento aunque no sean `privileged`. |
 | `install_consent_messages` | No | Objeto indexado por código de idioma (`en`, `es`, ...) con el texto de advertencia mostrado en el modal de confirmación de instalación. Recurre a `install_consent_message` y luego a una cadena genérica. |
 | `install_consent_message` | No | Alternativa de un solo idioma para `install_consent_messages`. |

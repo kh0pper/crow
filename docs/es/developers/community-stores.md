@@ -58,7 +58,9 @@ Las tiendas de la comunidad tienen restricciones adicionales en comparación con
 
 Antes de instalar un complemento de la comunidad, Crow valida el `docker-compose.yml`:
 
-- **Rechazado**: montajes a `/`, `/etc`, `~/.ssh`, `~/.crow/data` o cualquier ruta del host fuera de `~/.crow/bundles/<id>/data`
+- **Rechazado**: montajes a `/`, `/etc`, `~/.ssh`, `~/.crow/data` o cualquier ruta del host fuera de `~/.crow/bundles/<id>/data`. La única excepción es el montaje de zona horaria de solo lectura, escrito exactamente `- /etc/localtime:/etc/localtime:ro`
+- **Rechazado**: un segundo archivo compose (`compose.yaml`, `docker-compose.override.yml`, …) junto a `docker-compose.yml`
+- La comprobación lee el archivo como texto, comentarios incluidos: no nombres una capacidad o ruta bloqueada ni siquiera en un comentario
 - **Rechazado**: `privileged: true`
 - **Rechazado**: las capacidades `NET_ADMIN` o `SYS_ADMIN`
 - **Permitido**: volúmenes de Docker con nombre, `~/.crow/bundles/<id>/data`

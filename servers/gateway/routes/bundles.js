@@ -1416,19 +1416,46 @@ function isValidBundleId(id) {
   return /^[a-z0-9][a-z0-9-]*$/.test(id) && id.length <= 64;
 }
 
+// The one /etc mount allowed: /etc/localtime, read-only, same path on both sides, short
+// syntax, nothing after `:ro` but whitespace + a comment. It is public data on any host.
+const TZ_MOUNT_LINE = /^( *)- +(["']?)\/etc\/localtime:\/etc\/localtime:ro\2(?:[ \t]+#.*)?$/;
+
+/** Text with the allowed timezone mounts removed — only when the NEXT non-blank line is not
+ * more indented (a more-indented line would continue the scalar: `:ro` + `\n  ,rw`). */
+function withoutTzMounts(content) {
+  const lines = content.split("\n");
+  return lines.filter((line, i) => {
+    const m = line.match(TZ_MOUNT_LINE);
+    if (!m) return true;
+    const next = lines.slice(i + 1).find((l) => l.trim() !== "");
+    if (next === undefined) return false;
+    const ind = next.match(/^[ \t]*/)[0];
+    return ind.includes("\t") || ind.length > m[1].length; // keep (so the /etc rule refuses it) if it continues
+  }).join("\n");
+}
+
+const HOST_NETWORK = /network_mode["']?\s*:\s*["']?host/i;
+
+// Compose picks these up instead of, or on top of, docker-compose.yml; the check reads
+// only docker-compose.yml, so a bundle shipping one would run unchecked config.
+const OTHER_COMPOSE_FILES = ["compose.yaml", "compose.yml", "docker-compose.yaml",
+  "docker-compose.override.yml", "docker-compose.override.yaml", "compose.override.yml", "compose.override.yaml"];
+
 /**
- * Validate a docker-compose.yml for security issues.
+ * Inspect a compose file for security concerns (PR 0).
  * Rejects: sensitive host mounts, privileged mode, dangerous capabilities.
- * Returns { valid: true } or { valid: false, reason: string }.
- */
-/**
- * Inspect a compose file for security concerns.
+ *
+ * A TEXT check, not a YAML parse: it catches the written forms our bundles and reviewed
+ * add-ons use, and errs toward refusing. Known gaps (flow/JSON-style keys, interpolated
+ * host paths, `..` paths, `secrets: file:`) are listed in the private engineering notes;
+ * tests/bundle-compose-gate.test.js runs it over every first-party bundle.
  *
  * @param {string} composePath - path to docker-compose.yml
  * @param {string} bundleId
  * @param {object} [opts]
  * @param {object} [opts.manifest] - bundle manifest; if it has `privileged: true`
- *   AND `opts.consentVerified` is true, NET_ADMIN/host-network/privileged are allowed.
+ *   AND `opts.consentVerified` is true, NET_ADMIN/host-network/privileged are allowed
+ *   (never for an `origin: "community"` bundle).
  *   Read-only Docker socket mounts are allowed when manifest declares `consent_required: true`
  *   (and consent has been verified) — bundles like netdata/dozzle need this.
  * @param {boolean} [opts.consentVerified=false] - true when the install request supplied a
@@ -1437,21 +1464,32 @@ function isValidBundleId(id) {
  */
 function validateComposeFile(composePath, bundleId, opts = {}) {
   const { manifest, consentVerified = false } = opts;
-  const isPrivilegedAllowed = !!(manifest?.privileged && consentVerified);
+  const isPrivilegedAllowed = !!(manifest?.privileged && consentVerified && manifest?.origin !== "community");
   const isConsentBundle = !!(manifest?.consent_required && consentVerified);
   try {
     const content = readFileSync(composePath, "utf8");
 
-    // Sensitive host paths that should never be mounted (regardless of consent)
+    const other = OTHER_COMPOSE_FILES.filter((f) => existsSync(join(dirname(composePath), f)));
+    if (other.length) {
+      return { valid: false, reason: `Bundle ships another compose file (${other.join(", ")}) that Docker Compose would use; only docker-compose.yml is allowed` };
+    }
+
+    // Sensitive host paths that should never be mounted (regardless of consent).
+    // Short syntax (`- /etc:/x`) and long syntax (`source: /etc`).
+    const mountText = withoutTzMounts(content);
     const sensitivePatterns = [
       /^\s*-\s+["']?\/:/m,                    // root mount /
       /^\s*-\s+["']?\/etc[/:]/m,              // /etc
       /^\s*-\s+["']?~?\/?\.ssh[/:]/m,         // ~/.ssh
       /^\s*-\s+["']?~?\/?\.crow\/data[/:]/m,  // ~/.crow/data
+      /^\s*(?:-\s+)?source:\s*["']?\/(?:["'\s]|$)/m,                // source: /
+      /^\s*(?:-\s+)?source:\s*["']?\/etc(?:[/"'\s]|$)/m,            // source: /etc
+      /^\s*(?:-\s+)?source:\s*["']?~?\/?\.ssh(?:[/"'\s]|$)/m,       // source: ~/.ssh
+      /^\s*(?:-\s+)?source:\s*["']?~?\/?\.crow\/data(?:[/"'\s]|$)/m, // source: ~/.crow/data
     ];
 
     for (const pattern of sensitivePatterns) {
-      if (pattern.test(content)) {
+      if (pattern.test(mountText)) {
         return { valid: false, reason: `Compose file mounts a sensitive host path (matched: ${pattern.source})` };
       }
     }
@@ -1467,18 +1505,19 @@ function validateComposeFile(composePath, bundleId, opts = {}) {
       return { valid: false, reason: "Docker socket mount requires manifest 'consent_required: true' and verified consent" };
     }
 
-    // Privileged mode
-    if (/^\s*privileged:\s*true/m.test(content) && !isPrivilegedAllowed) {
+    // Privileged mode (any case, quoted key or value)
+    if (/^\s*["']?privileged["']?\s*:\s*["']?true\b/im.test(content) && !isPrivilegedAllowed) {
       return { valid: false, reason: "Compose file uses privileged mode but manifest does not declare 'privileged: true' (or consent was not verified)" };
     }
 
-    // Dangerous capabilities (NET_ADMIN etc.) — gated by manifest.privileged + consent
-    if (/NET_ADMIN|SYS_ADMIN|SYS_PTRACE|SYS_RAWIO|NET_RAW/m.test(content) && !isPrivilegedAllowed) {
+    // Dangerous capabilities (NET_ADMIN etc., or cap_add ALL) — gated by manifest.privileged + consent
+    const allCaps = /cap_add["']?\s*:\s*\[[^\]]*\bALL\b/i.test(content) || /^\s*-\s*["']?(?:CAP_)?ALL["']?\s*$/m.test(content);
+    if ((/NET_ADMIN|SYS_ADMIN|SYS_PTRACE|SYS_RAWIO|NET_RAW/m.test(content) || allCaps) && !isPrivilegedAllowed) {
       return { valid: false, reason: "Compose file requests dangerous capabilities (NET_ADMIN, SYS_ADMIN, NET_RAW, etc.) but manifest does not declare 'privileged: true' (or consent was not verified)" };
     }
 
     // Host networking — gated by manifest.privileged + consent
-    if (/network_mode:\s*host/i.test(content) && !isPrivilegedAllowed) {
+    if (HOST_NETWORK.test(content) && !isPrivilegedAllowed) {
       return { valid: false, reason: "Compose file uses host networking but manifest does not declare 'privileged: true' (or consent was not verified)" };
     }
 
@@ -1570,12 +1609,12 @@ function summarizePrivileges(manifest, composePath) {
   if (manifest?.privileged) {
     try {
       const content = readFileSync(composePath, "utf8");
-      if (/network_mode:\s*host/i.test(content)) caps.push("host networking");
+      if (HOST_NETWORK.test(content)) caps.push("host networking");
       if (/NET_ADMIN/.test(content)) caps.push("NET_ADMIN (modify firewall)");
       if (/NET_RAW/.test(content)) caps.push("NET_RAW (raw sockets)");
       if (/SYS_ADMIN/.test(content)) caps.push("SYS_ADMIN (system administration)");
       if (/SYS_PTRACE/.test(content)) caps.push("SYS_PTRACE (process tracing)");
-      if (/^\s*privileged:\s*true/m.test(content)) caps.push("full privileged mode");
+      if (/^\s*["']?privileged["']?\s*:\s*["']?true\b/im.test(content)) caps.push("full privileged mode");
     } catch { /* ignore */ }
   }
   if (manifest?.consent_required && !manifest?.privileged) {
@@ -1761,7 +1800,7 @@ function getAiProviderConfig(bundleId, envVars) {
  * (Task 6) maps it to a per-member skip/fail entry. Semantics are identical to
  * the pre-refactor inline chain in POST /bundles/api/install (order matters:
  * id → source exists → already-installed → dependencies → hardware → GPU →
- * docker-at-point-of-use → consent → hosted-host-networking refusal).
+ * docker-at-point-of-use → hosted-host-networking refusal → consent).
  *
  * @returns {Promise<
  *   { ok: true, manifest: object, installed: Array, consentVerified: boolean, hardwareWarning?: object }
@@ -2036,6 +2075,22 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
     }
   }
 
+  // Block bundles with network_mode: host on managed hosting (security risk on shared
+  // infrastructure). Checked BEFORE consent, so a host-network bundle (they are all
+  // privileged) is refused without spending the user's consent token first.
+  if (process.env.CROW_HOSTED) {
+    const composePath = join(sourceDir, "docker-compose.yml");
+    if (existsSync(composePath)) {
+      const composeContent = readFileSync(composePath, "utf8");
+      if (HOST_NETWORK.test(composeContent)) {
+        return {
+          ok: false, status: 403, code: "hosted_forbidden",
+          error: "This bundle requires host networking and is not available on managed hosting.",
+        };
+      }
+    }
+  }
+
   // PR 0: consent token check — required for privileged or consent_required bundles
   let consentVerified = false;
   if (manifestRequiresConsent(manifest)) {
@@ -2058,20 +2113,6 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
         error: "Consent token is invalid, expired, or already consumed. Mint a new one and retry.",
         extra: { consent_expired: true },
       };
-    }
-  }
-
-  // Block bundles with network_mode: host on managed hosting (security risk on shared infrastructure)
-  if (process.env.CROW_HOSTED) {
-    const composePath = join(sourceDir, "docker-compose.yml");
-    if (existsSync(composePath)) {
-      const composeContent = readFileSync(composePath, "utf8");
-      if (/network_mode:\s*host/i.test(composeContent)) {
-        return {
-          ok: false, status: 403, code: "hosted_forbidden",
-          error: "This bundle requires host networking and is not available on managed hosting.",
-        };
-      }
     }
   }
 

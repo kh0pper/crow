@@ -1,7 +1,7 @@
 {
   "id": "gitea",
   "name": "Gitea",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Self-hosted git service — repos, issues, pull requests, and built-in SSH server for git over SSH",
   "type": "bundle",
   "author": "Crow",

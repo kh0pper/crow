@@ -1,7 +1,7 @@
 {
   "id": "frigate",
   "name": "Frigate NVR",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Self-hosted NVR with AI object detection — cameras, events, clips. RTSP/ONVIF cameras, local CPU detection, optional Coral TPU.",
   "type": "bundle",
   "author": "Crow",

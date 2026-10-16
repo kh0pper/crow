@@ -11,7 +11,7 @@ services:
       - nominatim-data:/var/lib/postgresql/14/main
       - nominatim-flat:/nominatim/flatnode
     ports:
-      - "${NOMINATIM_PORT:-8088}:8080"
+      - "127.0.0.1:${NOMINATIM_PORT:-8088}:8080"
     mem_limit: 4g
     shm_size: 1g
     healthcheck:

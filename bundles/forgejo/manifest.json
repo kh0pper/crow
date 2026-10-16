@@ -1,7 +1,7 @@
 {
   "id": "forgejo",
   "name": "Forgejo",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Community-driven soft-fork of Gitea — self-hosted git with an independent governance model and ActivityPub federation roadmap",
   "type": "bundle",
   "author": "Crow",

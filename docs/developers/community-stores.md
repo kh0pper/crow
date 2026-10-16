@@ -58,7 +58,9 @@ Community stores have additional restrictions compared to the official registry:
 
 Before installing a community add-on, Crow validates the `docker-compose.yml`:
 
-- **Rejected**: mounts to `/`, `/etc`, `~/.ssh`, `~/.crow/data`, or any host path outside `~/.crow/bundles/<id>/data`
+- **Rejected**: mounts to `/`, `/etc`, `~/.ssh`, `~/.crow/data`, or any host path outside `~/.crow/bundles/<id>/data`. The one exception is the read-only timezone mount, written exactly `- /etc/localtime:/etc/localtime:ro`
+- **Rejected**: a second compose file (`compose.yaml`, `docker-compose.override.yml`, …) next to `docker-compose.yml`
+- The check reads the file as text, comments included: don't name a blocked capability or path even in a comment
 - **Rejected**: `privileged: true`
 - **Rejected**: `NET_ADMIN` or `SYS_ADMIN` capabilities
 - **Allowed**: named Docker volumes, `~/.crow/bundles/<id>/data`

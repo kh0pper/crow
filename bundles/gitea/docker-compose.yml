@@ -24,7 +24,6 @@ services:
       - "127.0.0.1:2223:22"
     volumes:
       - ${GITEA_DATA_DIR:-~/.crow/gitea/data}:/data
-      - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
     environment:
       - USER_UID=1000
