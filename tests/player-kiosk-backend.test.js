@@ -801,6 +801,7 @@ test("H3: the SAME tab after a reload (its tab flag) auto-resumes a playing loca
   const local = new Map([["crow-player-state", JSON.stringify({ backend: "local", src: "https://pod.example/ep.mp3", title: "Episode", time: 42, wasPlaying: true })]]);
   const session = new Map([["crow-player-tab", "1"]]);
   const h = harness({ local, session });
+  assert.equal(h.audio.preload, "metadata", "preload=none would never fire loadedmetadata, so nothing would resume (found live)");
   h.fire("loadedmetadata");
   await flush();
   assert.equal(h.audio.paused, false);

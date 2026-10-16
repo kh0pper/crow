@@ -1145,6 +1145,9 @@ export function playerBarJs(lang) {
           subtitleEl.textContent = saved.subtitle;
           subtitleEl.style.display = 'block';
         }
+        // preload="none" (the bar's default) never fetches metadata, so loadedmetadata would never fire and the
+        // saved position and play state would never come back: ask for the metadata of a restored item.
+        audio.preload = 'metadata';
         audio.src = saved.src;
         if (saved.metadata) {
           currentMetadata = saved.metadata;
