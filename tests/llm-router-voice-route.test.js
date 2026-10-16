@@ -34,3 +34,20 @@ test("every scripted latency question routes fast on a kiosk (tools always prese
     assert.ok(q.split(/\s+/).length <= 12, `short question: ${q}`);
   }
 });
+
+test("actionIntent (the voice turn: an action request whose tools the quick model was not offered) escalates; without it nothing changes", () => {
+  const r = chooseVoiceRoute(u("Add a car appointment for Monday to my calendar"), { hasTools: true, actionIntent: true });
+  assert.deepEqual(r, { route: "escalate", reason: "action-intent", key: VOICE_ROUTE_KEYS.escalate });
+  assert.equal(chooseVoiceRoute(u("Add a car appointment for Monday to my calendar"), { hasTools: true }).route, "fast", "the regex alone does not cover it");
+  assert.equal(chooseVoiceRoute(u("What is the capital of Portugal?"), { hasTools: false, actionIntent: false }).route, "fast");
+  assert.equal(chooseVoiceRoute(u("!escalate add it"), { hasTools: true, actionIntent: true }).reason, "manual", "the typed token still wins");
+});
+
+test("COMPANION_TOOL_ESCALATION=0 turns action-intent escalation off too", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const url = new URL("../servers/gateway/routes/llm-router.js", import.meta.url).href;
+  const code = `const m = await import(${JSON.stringify(url)}); process.stdout.write(m.chooseVoiceRoute([{ role: "user", content: "add it to my calendar" }], { hasTools: true, actionIntent: true }).route);`;
+  const run = (v) => execFileSync(process.execPath, ["--input-type=module", "-e", code], { env: { ...process.env, COMPANION_TOOL_ESCALATION: v }, encoding: "utf8" });
+  assert.equal(run("0"), "fast");
+  assert.equal(run("1"), "escalate");
+});

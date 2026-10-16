@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { toolCategoryOf } from "../servers/gateway/ai/tool-executor.js";
 import { TURN_CONTEXT_NOTE } from "../servers/gateway/voice/context-echo.js";
-import { createVoiceTurnRunner, wasOffered, ESCALATION_READY_TIMEOUT_MS, FILLER_TEXT, FALLBACK_TEXT, STOP_TOOLS_NOTE, BOT_TOO_LARGE_TEXT, DISPLAY_MISSED_TEXT } from "../servers/gateway/voice/turn.js";
+import { createVoiceTurnRunner, wasOffered, ESCALATION_READY_TIMEOUT_MS, FILLER_TEXT, FALLBACK_TEXT, STOP_TOOLS_NOTE, BOT_TOO_LARGE_TEXT, DISPLAY_MISSED_TEXT, ACTION_NOTE, NOT_READY_TEXT } from "../servers/gateway/voice/turn.js";
 
 /** A fake clock: sleep() advances it. */
 function clock() { let t = 1_000; return { now: () => t, sleep: async (ms) => { t += ms; }, advance: (ms) => { t += ms; } }; }
@@ -1908,4 +1908,180 @@ test("r7c (review re-check, L1 residuals): a pretty-printed JSON call split righ
     await ok.runner.runVoiceTurn({ db: {}, device: ok.device, transcript: "Punctuation?", sink: ok.sink });
     assert.equal(ok.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join(""), text, text);
   }
+});
+
+// ── Queue item 29: an action request must never end on a claim no tool backs ───────────────────
+import { wantsAction } from "../bundles/kiosk/server/action-intent.js";
+const CANT = "Sorry, I can't do that from here: this assistant has no tool for it.";
+const NOT_DONE = "Sorry, I couldn't do that from here, so nothing was changed.";
+const INCIDENT = "Add a car appointment for 815am Monday to my calendar";
+const actTurn = (h, transcript, extra = {}) => famTurn(h, transcript, { actionWhen: wantsAction, cantDoText: CANT, notDoneText: NOT_DONE, ...extra });
+const routerSees = (h) => { const seen = []; h.deps.chooseVoiceRoute = (msgs, o) => { seen.push(o); return { route: "fast", reason: null, key: "crow-voice/qwen3.5-4b" }; }; return seen; };
+const calCall = [{ type: "tool_call", id: "c", name: "crow_tools", arguments: { action: "ws_cal_create_event", params: {} } }, { type: "done" }];
+
+test("item 29 repro: an assistant with NO tool asked to add a calendar event gets the could-not-do line, with no model call", async () => {
+  const h = harness({ chatTools: [], rounds: [says("I've added your car appointment for 8:15 AM on Monday. I'll remind you about it later today. ")] });
+  h.deps.toolFamilies = FAM();
+  const r = await actTurn(h, INCIDENT);
+  assert.equal(h.log.length, 0, "the quick model is never asked");
+  assert.deepEqual(h.calls.spoken, [CANT]);
+  assert.equal(h.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join(""), CANT);
+  assert.equal(r.timings.action_no_tool, true);
+  assert.equal(r.timings.action_intent, true);
+  assert.equal(r.failed, null);
+  assert.deepEqual(h.runner.convo.get(h.device.id).map((m) => [m.role, m.content]), [["user", INCIDENT], ["assistant", CANT]]);
+});
+
+test("item 29: a plain question on the same tool-less assistant is untouched (no note, no hold, same system message)", async () => {
+  const h = harness({ chatTools: [], rounds: [says("Lisbon is the capital. ")] });
+  h.deps.toolFamilies = FAM();
+  const r = await actTurn(h, "What is the capital of Portugal?");
+  assert.deepEqual(h.calls.spoken, ["Lisbon is the capital."]);
+  assert.equal(r.timings.action_guard, undefined);
+  assert.ok(!h.log[0].messages.at(-1).content.includes("[Tools]"));
+});
+
+test("item 29: the follow-up after an action turn is guarded — told it has no tool (tagged context, short), and a claim is replaced", async () => {
+  const h = harness({ chatTools: [], rounds: [says("Done, I've moved it to 9. "), says("You're welcome. ")] });
+  h.deps.toolFamilies = FAM();
+  await actTurn(h, INCIDENT);
+  const r = await actTurn(h, "Move it to 9 instead.", { turnContext: "[Now] Monday" });
+  const user = h.log[0].messages.at(-1).content;
+  assert.ok(user.includes(ACTION_NOTE) && user.indexOf(ACTION_NOTE) < user.indexOf("Move it to 9"), "the note sits in the context block, the user's words stay last");
+  assert.ok(h.log[0].opts.maxTokens <= 150);
+  assert.ok(!h.log[0].messages[0].content.includes("[Tools]"), "the system message is untouched");
+  assert.deepEqual(h.calls.spoken.slice(1), [CANT]);
+  assert.equal(r.timings.claim_blocked, true);
+  assert.ok(h.runner.convo.get(h.device.id).every((m) => !/moved it/.test(String(m.content))));
+  h.calls.spoken.length = 0;
+  const t = await actTurn(h, "Thanks!");
+  assert.deepEqual(h.calls.spoken, ["You're welcome."], "two turns on, an ordinary turn again");
+  assert.equal(t.timings.action_guard, undefined);
+});
+
+test("item 29: a read-back of the note is never heard", async () => {
+  const h = harness({ chatTools: [], rounds: [says("x. "), says(`${ACTION_NOTE} OK. `)] });
+  h.deps.toolFamilies = FAM();
+  await actTurn(h, INCIDENT);
+  await actTurn(h, "And what about Tuesday?");
+  assert.ok(!h.calls.spoken.join(" ").includes("No tool is available"));
+});
+
+test("item 29: an action request whose tools were withheld from the quick model tells the router; a display turn and a plain question do not", async () => {
+  const h = harness({ chatTools: ["crow_tools"], rounds: [says("Done. ")] });
+  h.deps.toolFamilies = FAM();
+  const seen = routerSees(h);
+  const r = await actTurn(h, INCIDENT);
+  assert.equal(seen[0].actionIntent, true, "an add-on behind the crow_tools wrapper was withheld");
+  assert.equal(seen[0].hasTools, true, "the wrapper counts as tools for the router");
+  assert.deepEqual(r.timings.families, { offered: [], withheld: ["addons"] });
+  const d = harness({ chatTools: ["crow_tools"], rounds: [says("Done. ")] });
+  d.deps.toolFamilies = FAM();
+  const seenD = routerSees(d);
+  await actTurn(d, "Add milk to my shopping list", { extraTools: [{ ...displayTool(), when: () => true }] });
+  assert.equal(seenD[0].actionIntent, false, "a display tool is on offer: it stays on the quick model");
+  const q = harness({ chatTools: ["crow_blog"], rounds: [says("Lisbon. ")] });
+  q.deps.toolFamilies = FAM();
+  const seenQ = routerSees(q);
+  await actTurn(q, "What is the capital of Portugal?");
+  assert.equal(seenQ[0].actionIntent, false);
+});
+
+test("item 29: an escalated action turn whose tool succeeds is heard as said", async () => {
+  const h = harness({ chatTools: ["crow_tools"], route: "escalate", probe: () => true, rounds: [calCall, says("I've added it to your calendar. ")] });
+  h.deps.toolFamilies = FAM();
+  const r = await actTurn(h, INCIDENT);
+  assert.equal(r.escalated, true);
+  assert.deepEqual(h.calls.executed, ["crow_tools"]);
+  assert.deepEqual(h.calls.spoken.slice(1), ["I've added it to your calendar."]);
+  assert.equal(r.timings.claim_blocked, undefined);
+});
+
+test("item 29: an escalated action turn whose tool fails (or is never called) cannot claim it was done", async () => {
+  const h = harness({ chatTools: ["crow_tools"], route: "escalate", probe: () => true, rounds: [calCall, says("All set, I've added it. ")] });
+  h.deps.toolFamilies = FAM();
+  h.deps.createToolExecutor = () => ({ executeToolCalls: async (tcs) => tcs.map((t) => ({ id: t.id, name: t.name, result: "bad params", isError: true })), close: async () => {} });
+  const r = await actTurn(h, INCIDENT);
+  assert.deepEqual(h.calls.spoken.slice(1), [NOT_DONE]);
+  assert.equal(r.timings.claim_blocked, true);
+  const n = harness({ chatTools: ["crow_tools"], route: "escalate", probe: () => true, rounds: [says("Sure, I'll put it on your calendar. ")] });
+  n.deps.toolFamilies = FAM();
+  await actTurn(n, INCIDENT);
+  assert.deepEqual(n.calls.spoken.slice(1), [NOT_DONE]);
+});
+
+test("item 29: an action-intent escalation that cannot get the larger model says so; the quick model is never handed every tool", async () => {
+  const h = harness({ chatTools: ["crow_tools"], route: "escalate", probe: () => false, rounds: [says("I've added it. ")] });
+  h.deps.toolFamilies = FAM();
+  h.deps.chooseVoiceRoute = () => ({ route: "escalate", reason: "action-intent", key: "crow-chat/qwen3.6-35b-a3b" });
+  const r = await actTurn(h, INCIDENT, { notReadyText: "NOT READY" });
+  assert.equal(h.log.length, 0, "no model call");
+  assert.deepEqual(h.calls.spoken, [FILLER_TEXT, "NOT READY"]);
+  assert.equal(r.timings.action_not_ready, true);
+  const d = harness({ chatTools: ["crow_tools"], route: "escalate", probe: () => false, rounds: [says("x. ")] });
+  d.deps.toolFamilies = FAM();
+  d.deps.chooseVoiceRoute = () => ({ route: "escalate", reason: "action-intent", key: "crow-chat/qwen3.6-35b-a3b" });
+  await actTurn(d, INCIDENT, { notReadyText: undefined });
+  assert.equal(d.calls.spoken.at(-1), NOT_READY_TEXT);
+});
+
+test("item 29: memory on + 'remind me' — a saved memory is not a reminder; 'I'll remind you' is replaced, 'I've saved that' is not", async () => {
+  const memCall = [{ type: "tool_call", id: "m", name: "crow_memory", arguments: { action: "search_memories", params: {} } }, { type: "done" }];
+  const mk = (reply) => {
+    const h = harness({ chatTools: ["crow_memory"], rounds: [memCall, says(reply)] });
+    h.deps.toolFamilies = FAM();
+    h.device.kiosk_settings.memory_integration = true;
+    return h;
+  };
+  const a = mk("Saved. I'll remind you at 5. ");
+  const ra = await actTurn(a, "Remember to call mom at 5", { memoryWhen: () => true });
+  assert.deepEqual(a.calls.executed, ["crow_memory"]);
+  assert.deepEqual(a.calls.spoken, [NOT_DONE]);
+  assert.equal(ra.timings.claim_blocked, true);
+  const b = mk("I've saved that. ");
+  await actTurn(b, "Remember to call mom at 5", { memoryWhen: () => true });
+  assert.deepEqual(b.calls.spoken, ["I've saved that."]);
+});
+
+test("item 29: a display call that did something backs the turn ('add two minutes' on an open timer)", async () => {
+  const seen = [];
+  const h = harness({ chatTools: [], rounds: [[{ type: "tool_call", id: "w", name: "crow_wm", arguments: { command: "timer add 2" } }, { type: "done" }], says("Added two minutes. ")] });
+  h.deps.toolFamilies = FAM();
+  await actTurn(h, "Add two minutes to my reminder", { extraTools: [{ ...displayTool(seen), when: () => true }] });
+  assert.equal(seen.length, 1);
+  assert.deepEqual(h.calls.spoken, ["Added two minutes."]);
+});
+
+test("item 29: a Spanish display hears its own line", async () => {
+  const ES = "Lo siento, no puedo hacer eso desde aquí: este asistente no tiene una herramienta para eso.";
+  const h = harness({ chatTools: [], rounds: [says("Listo, he añadido tu cita. ")] });
+  h.deps.toolFamilies = FAM();
+  await actTurn(h, "Añade una cita para el lunes a las 8:15", { cantDoText: ES });
+  assert.deepEqual(h.calls.spoken, [ES]);
+});
+
+test("item 29: barge-in and the first-audio budget win over a held reply (the claim is never heard or saved)", async () => {
+  const ac = new AbortController();
+  const h = harness({ chatTools: ["crow_tools"], route: "escalate", probe: () => true, rounds: [[{ type: "content_delta", text: "I've added it. " }, { type: "hang" }]] });
+  h.deps.toolFamilies = FAM();
+  setImmediate(() => ac.abort());
+  const r = await actTurn(h, INCIDENT, { signal: ac.signal });
+  assert.equal(r.aborted, true);
+  assert.ok(!h.calls.spoken.some((t) => /added/.test(t)));
+  assert.ok(!h.events.some((e) => e.type === "caption_delta" && /added/.test(e.text)));
+  const b = harness({ chatTools: ["crow_tools"], route: "escalate", probe: () => true, rounds: [[{ type: "content_delta", text: "I've added it" }, { type: "hang" }]] });
+  b.deps.toolFamilies = FAM();
+  b.deps.setTimeout = (fn) => { setImmediate(fn); return 1; };
+  b.deps.clearTimeout = () => {};
+  const rb = await actTurn(b, INCIDENT, { firstAudioBudgetMs: 5 });
+  assert.equal(rb.failed, "budget");
+  assert.ok(!b.calls.spoken.some((t) => /added/.test(t)));
+});
+
+test("item 29 regression pin: without actionWhen nothing changes", async () => {
+  const h = harness({ chatTools: [], rounds: [says("I've added it. ")] });
+  h.deps.toolFamilies = FAM();
+  const r = await famTurn(h, INCIDENT);
+  assert.deepEqual(h.calls.spoken, ["I've added it."]);
+  assert.equal(r.timings.action_intent, undefined);
 });

@@ -14,6 +14,7 @@ import {
 } from "./turn-helpers.js";
 import { withTurnContext, createContextEchoGate, stripContextEcho, stripContextEchoDeep, TURN_CONTEXT_NOTE } from "./context-echo.js";
 import { estimatePromptTokens, requestFits, choosePromptFit, dropOldestExchange } from "./prompt-fit.js";
+import { claimsAction, claimsReminder } from "./action-claims.js";
 
 export const ESCALATION_READY_TIMEOUT_MS = 8000;
 export const ESCALATION_PROBE_EVERY_MS = 500;
@@ -60,6 +61,25 @@ const SOFT_DENY = { crow_discover: "Tool discovery is not needed here: every too
 const EXTRA_NOT_NEEDED = "Not needed for this question: nothing was done. Answer the user aloud now, in one or two short sentences. Do not call another tool.";
 // Memories are on for this display, but opts.memoryWhen said this question does not ask for them.
 const MEMORY_NOT_ASKED = "The user did not ask to remember or recall anything, so memory was not used. Answer the user aloud now from what you know. Do not call another tool.";
+/*
+ * Action turns (opts.actionWhen, queue item 29): the user asked the assistant to DO something (add to the
+ * calendar, remind, send…), or the turn right after one ("move it to 9"). A reply on such a turn must never
+ * claim an action no tool did:
+ *  - an action request on a turn with NO tool is answered with CANT_DO_TEXT and no model call;
+ *  - an action request whose tools were withheld from the quick model escalates; when the larger model
+ *    cannot be had, NOT_READY_TEXT is spoken (the quick model is never handed the whole tool set);
+ *  - otherwise the model's text is held until a tool really did something (a remote call that returned ok,
+ *    or a display call with an effect). Text still held at the end is checked, and a claim of an action —
+ *    done, promised or offered — is replaced by NOT_DONE_TEXT (CANT_DO_TEXT on a turn with no tool).
+ * Callers pass localized lines (cantDoText, notDoneText, notReadyText).
+ */
+/** Rides on a tool-less action turn's context block (tagged: an echo of it is never heard); never saved. */
+export const ACTION_NOTE = "[Tools] No tool is available on this turn: nothing can be added, created, scheduled, sent, changed, deleted, saved, looked up or set as a reminder. Never say you did or will do any of that, and don't offer reminders or follow-ups; if the user asks for it, say in one short sentence, in the user's language, that you can't do it from here.";
+export const CANT_DO_TEXT = "Sorry, I can't do that from here: this assistant has no tool for it.";
+export const NOT_DONE_TEXT = "Sorry, I couldn't do that from here, so nothing was changed.";
+export const NOT_READY_TEXT = "The assistant that can do that isn't ready yet. Try again in a moment.";
+/** max_tokens for a held tool-less action turn: the answer is one short sentence, and nothing is heard until it ends. */
+export const ACTION_HELD_MAX_TOKENS = 150;
 /** Spoken + captioned when a must-run display tool never succeeded: the turn must not end on a claim that something is on the screen. Callers pass a localized one. */
 export const DISPLAY_MISSED_TEXT = "Sorry, I couldn't put that on the screen.";
 // The corrective round's note when the must-run tool brings none of its own (rides on the last message, never saved).
@@ -114,6 +134,8 @@ export function createVoiceTurnRunner(deps) {
   // Tool families (opts.familiesOnIntent): what the previous turn on each display used, and which
   // "no intent list" notes were already logged.
   const lastFamilies = new Map();
+  // Displays whose previous turn was an action request (opts.actionWhen): the next turn is an action turn too.
+  const lastAction = new Set();
   const famLogged = new Set();
   const NO_FAMILIES = new Set();
 
@@ -334,6 +356,15 @@ export function createVoiceTurnRunner(deps) {
     let history = null;
     let executor = null;
     let usedFamilies = null;
+    let actionAsked = false;
+    /** Speak + caption a fixed line instead of a model call, and save the exchange (the plain transcript and the line). */
+    const speakLine = async (line) => {
+      sink.event({ type: "caption_delta", text: line });
+      await say(line);
+      if (aborted()) { result.aborted = true; return; }
+      say.end();
+      convo.save(device.id, [...(history || []), { role: "user", content: result.transcript }, { role: "assistant", content: line }]);
+    };
     /** Speak + caption the fallback, record the failure, and save a clean exchange (no looping tool chatter). */
     const speakFallback = async (why, spokenBefore, fallbackText = defaultFallbackText) => {
       result.failed = why;
@@ -502,9 +533,19 @@ export function createVoiceTurnRunner(deps) {
       // quick model instead of being escalated: mustRoute "fast".
       // opts.noEscalate (the kiosk's post-deploy turn check): never the router, never an escalation, so the
       // turn can never start a model and its result does not depend on which model is resident.
+      // Action turns (see ACTION_NOTE above). The add-on wrapper (crow_tools) is never in famIds: when the quick
+      // model is not offered it, the assistant still has tools, and the router must know.
+      actionAsked = typeof opts.actionWhen === "function" && opts.actionWhen(transcript) === true;
+      const actionTurn = actionAsked || (typeof opts.actionWhen === "function" && lastAction.has(device.id));
+      const isFamTool = (t) => famOf(t) !== undefined;
+      const wrapperWithheld = !!fam && baseTools.some((t) => famOf(t) === "addons") && !quickTools.some((t) => famOf(t) === "addons");
+      // Escalate an action request when the quick model got no family tool but the assistant has some — and no
+      // display tool is on offer (a display command such as "add two minutes" stays on the quick model).
+      const actionWithheld = !!fam && actionAsked && offered.size === 0 && !quickTools.some(isFamTool) && baseTools.some(isFamTool);
+      if (actionAsked) timings.action_intent = true;
       const decision = mustX?.mustRoute === "fast" || opts.noEscalate === true
         ? { route: "fast", reason: opts.noEscalate === true ? "no-escalate" : "must-fast", key: bot.fast_voice_model || deps.fastKey }
-        : deps.chooseVoiceRoute(routeView, { hasTools: quickTools.length > 0 || unlisted.length > 0 });
+        : deps.chooseVoiceRoute(routeView, { hasTools: quickTools.length > 0 || unlisted.length > 0 || wrapperWithheld, actionIntent: actionWithheld });
       let chat = await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
       result.route = "fast";
       if (decision.route === "escalate") {
@@ -528,10 +569,27 @@ export function createVoiceTurnRunner(deps) {
       if (aborted()) { result.aborted = true; return result; }
       if (budgetHit) { await speakFallback("budget", false); return result; }
       // A turn the router escalated (or that fell back from an escalation) is offered every family.
+      // An action-intent escalation that could not get the larger model: say so, never hand the quick model
+      // every tool (with the add-on wrapper that is hundreds of tool names) to guess with.
+      if (decision.reason === "action-intent" && !result.escalated) {
+        timings.action_not_ready = true;
+        await speakLine(String(opts.notReadyText || NOT_READY_TEXT));
+        return result;
+      }
       if (fam && (result.escalated || result.degraded)) { tools = baseTools; famAll = true; }
       if (fam) {
-        const on = new Set(tools.map(famOf).filter((id) => typeof id === "string" && id !== "addons"));
-        timings.families = { offered: [...on].sort(), withheld: famIds.filter((id) => !on.has(id)).sort() };
+        const on = new Set(tools.map(famOf).filter((id) => typeof id === "string"));
+        const all = baseTools.some((t) => famOf(t) === "addons") ? [...famIds, "addons"] : famIds;
+        on.delete("addons");
+        if (tools.some((t) => famOf(t) === "addons")) on.add("addons");
+        timings.families = { offered: [...on].sort(), withheld: all.filter((id) => !on.has(id)).sort() };
+      }
+      // An action request on a turn with no tool at all: no model call. The quick model, given nothing to act
+      // with, role-plays success ("I've added your appointment … I'll remind you", queue item 29).
+      if (actionAsked && tools.length === 0) {
+        timings.action_no_tool = true;
+        await speakLine(String(opts.cantDoText || CANT_DO_TEXT));
+        return result;
       }
       if (unlisted.length) {
         const once = `${bot.bot_id}|${unlisted.join(",")}`;
@@ -673,6 +731,20 @@ export function createVoiceTurnRunner(deps) {
       let heldLast = "";
       let endedFinal = false;
       timings.tools_offered = tools.length;
+      // The action guard (see ACTION_NOTE above). A must-run or hold-to-end display turn has its own truth rules.
+      const actionGuard = actionTurn && !mustX && !holdEnd;
+      let backed = false;          // a tool really did something this turn
+      let memoryBacked = false;    // only a memory call did (a saved note is not a reminder)
+      let guardHeld = "";
+      if (actionGuard) {
+        timings.action_guard = true;
+        if (tools.length === 0) {
+          // A follow-up with no tool: told so in the context block, and kept short (it is held to the end).
+          userMsg.content = withTurnContext(ctxLine ? `${ctxLine}\n${ACTION_NOTE}` : ACTION_NOTE, transcript);
+          echoGuard.push(ACTION_NOTE, TURN_CONTEXT_NOTE);
+          nextMax = Math.min(nextMax, ACTION_HELD_MAX_TOKENS);
+        }
+      }
       while (!budgetHit) {
         rounds++;
         const think = createThinkGate();
@@ -731,7 +803,8 @@ export function createVoiceTurnRunner(deps) {
                 mark("llm_first_token_ms");
                 content += ev.text;
                 const spoken = echo.feed(toolText.feed(think.feed(ev.text)));
-                if (spoken && defer) deferred += spoken;
+                if (spoken && actionGuard && !backed) guardHeld += spoken;
+                else if (spoken && defer) deferred += spoken;
                 else if (spoken && holdEnd) heldRound += spoken;
                 else if (spoken && !hold) {
                   roundText += spoken;
@@ -768,7 +841,8 @@ export function createVoiceTurnRunner(deps) {
         const held = toolText.flush();
         if (toolText.cut) { timings.tool_text = true; content = stripToolSyntax(content); }
         const tail = (held ? echo.feed(held) : "") + echo.flush();
-        if (tail && !hold && !aborted() && !budgetHit) {
+        if (tail && actionGuard && !backed) guardHeld += tail;
+        else if (tail && !hold && !aborted() && !budgetHit) {
           if (tail.trim()) { roundSpoken += tail.trim().length; spokenChars += tail.trim().length; }
           sink.event({ type: "caption_delta", text: tail });
           await chunker.push(tail);
@@ -857,6 +931,7 @@ export function createVoiceTurnRunner(deps) {
               ? { name: tc.name, say: res.say.trim(), code, effect: ok && res.effect !== false } : null;
             // A display tool that changed the screen is user-visible progress.
             if (ok) roundDisplay = true;
+            if (ok && res.effect !== false) backed = true;
             if (holdEnd && ok && res.effect !== false && typeof res.say === "string" && res.say.trim()) endLines.push(res.say.trim());
             if (tc.name === mustName && (typeof mustX.mustDone === "function" ? mustX.mustDone(res) === true : ok)) mustDone = true;
             local.push({ id: tc.id, name: tc.name, result: out, neutral: true });
@@ -871,6 +946,10 @@ export function createVoiceTurnRunner(deps) {
         (remoteResults || []).forEach((r, i) => {
           if (!remote[i]) return;
           outcome.set(remote[i], r?.isError ? "error" : "ok");
+          if (!r?.isError) {
+            const eff = deps.effectiveToolName(remote[i]);
+            if (deps.isMemoryTool(remote[i].name) || (eff && deps.isMemoryTool(eff))) memoryBacked = true; else backed = true;
+          }
           if (usedFamilies && !r?.isError) {
             const eff = deps.effectiveToolName(remote[i]);
             const id = callFamily(remote[i], eff ? [eff] : []);
@@ -949,6 +1028,29 @@ export function createVoiceTurnRunner(deps) {
         await speakFallback("budget", spokenChars > 0);
         return result;
       } else {
+        if (actionGuard && !overflow && !endedFinal && !aborted()) {
+          // Text held on an action turn: a claim no tool backs is replaced; text held before a tool did
+          // something (a preamble) is heard only when nothing else was said.
+          const said = guardHeld.trim();
+          let line = backed ? (spokenChars === 0 ? said : "") : said;
+          if (!backed && said && (memoryBacked ? claimsReminder(said) : claimsAction(said))) {
+            line = String(tools.length === 0 ? (opts.cantDoText || CANT_DO_TEXT) : (opts.notDoneText || NOT_DONE_TEXT));
+            timings.claim_blocked = true;
+            log(`[voice-turn] ${device.id} bot ${bot.bot_id}: a reply claiming an action no tool did was replaced`);
+            // What is kept as said is what was heard: the claim never reaches the saved conversation.
+            for (let i = messages.length - 1; i > messages.indexOf(userMsg); i--) {
+              if (messages[i].role !== "assistant") continue;
+              if (messages[i].tool_calls) messages[i] = { ...messages[i], content: "" };
+              else messages.splice(i, 1);
+            }
+            messages.push({ role: "assistant", content: line });
+          }
+          if (line) {
+            sink.event({ type: "caption_delta", text: spokenChars > 0 ? ` ${line}` : line });
+            await say(line);
+            spokenChars += line.length;
+          }
+        }
         if (holdEnd && !overflow && !endedFinal) {
           // The end of a held compound turn: what the display really did, in the server's words; else the
           // model's last text when no display call did anything and nothing was owed.
@@ -992,6 +1094,9 @@ export function createVoiceTurnRunner(deps) {
       if (budgetTimer) (deps.clearTimeout || clearTimeout)(budgetTimer);
       if (opts.familiesOnIntent === true && device?.id && result.transcript) {
         if (usedFamilies && usedFamilies.size) lastFamilies.set(device.id, usedFamilies); else lastFamilies.delete(device.id);
+      }
+      if (typeof opts.actionWhen === "function" && device?.id && result.transcript) {
+        if (actionAsked) lastAction.add(device.id); else lastAction.delete(device.id);
       }
       timings.total_ms = now() - t0;
       if (say) timings.spoken_chars = say.chars();
