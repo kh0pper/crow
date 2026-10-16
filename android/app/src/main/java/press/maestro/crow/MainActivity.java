@@ -86,7 +86,12 @@ public class MainActivity extends AppCompatActivity {
     private AudioModeWatcher audioWatcher;
     /** The allowedOriginRule currently registered for AUDIO_PORT_NAME, or null. */
     private String audioPortRule;
-    /** The frame that last said hello / captureEnded: where debug lines go. */
+    /**
+     * The frame that last spoke on the port: where debug lines go. Lines carry
+     * device-wide audio activity (anonymized counts, routes); any same-origin
+     * frame can take the sink — such a frame already has the dashboard session.
+     * Each MainActivity instance runs its own watcher (a second one is a no-op).
+     */
     private JavaScriptReplyProxy audioReply;
 
     /** Where a steps result goes: the reply proxy (port) or evaluateJavascript (legacy). */
@@ -126,6 +131,8 @@ public class MainActivity extends AppCompatActivity {
     private TextView statusText;
     private ValueCallback<Uri[]> fileUploadCallback;
     private PermissionRequest pendingWebViewPermRequest;
+    /** elapsedRealtime when pendingWebViewPermRequest was last set (21c staleness cap). */
+    private long pendingPermSince;
 
     private final ActivityResultLauncher<Intent> fileChooserLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -203,7 +210,9 @@ public class MainActivity extends AppCompatActivity {
 
         configureWebView();
 
-        audioWatcher = new AudioModeWatcher(this, () -> pendingWebViewPermRequest != null,
+        // A prompt whose result never came back must not block the guard forever (2 min cap).
+        audioWatcher = new AudioModeWatcher(this,
+                () -> pendingWebViewPermRequest != null && SystemClock.elapsedRealtime() - pendingPermSince < 120_000L,
                 () -> getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getBoolean(SettingsActivity.KEY_AUDIO_GUARD, true));
         audioWatcher.setSink(this::sendAudioLine);
         audioWatcher.start();
@@ -837,6 +846,7 @@ public class MainActivity extends AppCompatActivity {
     /** Request RECORD_AUDIO and grant WebView permission on callback */
     public void requestAudioPermissionForWebView(PermissionRequest request) {
         pendingWebViewPermRequest = request;
+        pendingPermSince = SystemClock.elapsedRealtime();
         pendingNeedCamera = false;
         audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO);
     }
@@ -844,6 +854,7 @@ public class MainActivity extends AppCompatActivity {
     /** Request both RECORD_AUDIO and CAMERA, granting WebView permission when both complete */
     public void requestAudioAndCameraPermissionForWebView(PermissionRequest request) {
         pendingWebViewPermRequest = request;
+        pendingPermSince = SystemClock.elapsedRealtime();
         if (!hasAudioPermission()) {
             // Audio first, then camera in the audio callback
             pendingNeedCamera = true;
@@ -861,6 +872,7 @@ public class MainActivity extends AppCompatActivity {
     /** Request only CAMERA permission for WebView */
     public void requestCameraPermissionForWebView(PermissionRequest request) {
         pendingWebViewPermRequest = request;
+        pendingPermSince = SystemClock.elapsedRealtime();
         pendingNeedCamera = false;
         cameraPermissionLauncher.launch(Manifest.permission.CAMERA);
     }

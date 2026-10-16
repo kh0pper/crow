@@ -38,6 +38,8 @@ final class AudioModeGuard {
 
     /** A mic grant this recent means a capture may be starting: hands off. */
     static final long GRANT_QUIET_MS = 3000L;
+    /** The mode became IN_COMMUNICATION this recently with no recording yet: Chromium may be about to start one. */
+    static final long MODE_QUIET_MS = 1500L;
     /** The page's debug ring caps a line at 120 characters. */
     static final int MAX_LINE = 120;
     static final int MAX_PORT_MESSAGE = 128;
@@ -58,6 +60,8 @@ final class AudioModeGuard {
         boolean permissionPending;
         /** Milliseconds since the WebView was last granted audio capture (large when never). */
         long msSinceAudioGrant = Long.MAX_VALUE;
+        /** Milliseconds since the mode last became IN_COMMUNICATION (large when unknown). */
+        long msSinceModeEntered = Long.MAX_VALUE;
         /** The Settings kill switch ("Audio mode guard"); off = log only, never setMode. */
         boolean guardEnabled = true;
     }
@@ -70,6 +74,7 @@ final class AudioModeGuard {
         if (f.btScoOn || f.commDeviceType == DEVICE_BT_SCO) return Action.KEEP_SCO;
         if (f.permissionPending) return Action.KEEP_PENDING_PERMISSION;
         if (f.msSinceAudioGrant < GRANT_QUIET_MS) return Action.KEEP_RECENT_GRANT;
+        if (f.msSinceModeEntered < MODE_QUIET_MS) return Action.KEEP_RECENT_GRANT;
         if (!f.guardEnabled) return Action.SKIP_DISABLED;
         return Action.RESET;
     }
@@ -136,6 +141,13 @@ final class AudioModeGuard {
             case SOURCE_VOICE_PERFORMANCE: return "perf";
             default: return "other";
         }
+    }
+
+    /** Whether any active recording uses the call-type source (Chromium's echo-cancelled capture). */
+    static boolean hasVoiceCommunication(int[] sources) {
+        if (sources == null) return false;
+        for (int s : sources) if (s == SOURCE_VOICE_COMMUNICATION) return true;
+        return false;
     }
 
     /** "none" | "1 vc" | "1 vc, 2 vr" from the client audio sources of the active recordings. */

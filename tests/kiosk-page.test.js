@@ -456,9 +456,11 @@ test("item 21c: every mic release tells the Android app (CrowAudioPort) the capt
 
 test("item 21c rev 2: in the Android app only, an idle AudioContext is paused after each mic release, and every play path resumes it", () => {
   const src = read("kiosk.js");
-  const fn = src.slice(src.indexOf("function pauseOutput()"), src.indexOf("const resumeOutput"));
-  assert.match(fn, /if \(!audioPort \|\| !ctx \|\| ctx\.state !== "running" \|\| player\?\.playing\) return;/, "no port (a Pi, a browser): untouched; never while a reply plays");
-  assert.match(fn, /ctx\.suspend\(\)/);
+  const fn = src.slice(src.indexOf("function pauseOutput()"), src.indexOf("const outputNeedsResume"));
+  assert.match(fn, /if \(!audioPort \|\| !ctx \|\| outputPaused \|\| ctx\.state !== "running" \|\| player\?\.playing\) return;/, "no port (a Pi, a browser): untouched; never while a reply plays");
+  assert.match(fn, /outputPaused = true;\n  try \{ ctx\.suspend\(\)/, "the REQUEST is tracked: suspend() is async and ctx.state lags (review I1)");
+  assert.match(src, /const outputNeedsResume = \(\) => !!ctx && \(outputPaused \|\| ctx\.state === "suspended"\);/);
+  assert.match(src, /const resumeOutput = \(\) => \{ if \(!audioPort \|\| !outputNeedsResume\(\)\) return; outputPaused = false;/, "app only (review M6)");
   assert.match(fn, /note\("audio", "output paused"\)/);
   const rel = src.slice(src.indexOf("function releaseMicAfterTurn("), src.indexOf("/** turn_metrics, once per turn"));
   assert.match(rel, /note\("mic", "released"\);\n  pauseOutput\(\);/);
@@ -469,5 +471,9 @@ test("item 21c rev 2: in the Android app only, an idle AudioContext is paused af
   const chime = src.slice(src.indexOf("function chime()"), src.indexOf("async function onTap()"));
   assert.match(chime, /if \(!ctx\) return;\n  resumeOutput\(\);/, "a timer chime is never silent");
   const ens = src.slice(src.indexOf("async function ensureAudio()"), src.indexOf("function onFrame("));
-  assert.match(ens, /if \(ctx\.state === "suspended"\) \{ try \{ await ctx\.resume\(\); \} catch \{\} \}/, "a tap resumes before the mic opens");
+  assert.match(ens, /if \(outputNeedsResume\(\)\) \{ outputPaused = false; try \{ await ctx\.resume\(\); \} catch \{\} \}/, "a tap resumes before the mic opens, even mid-suspend (review I1)");
+  const close = src.slice(src.indexOf("sock.onclose"), src.indexOf("const send = "));
+  assert.match(close, /player\?\.flush\(\);\n    pauseOutput\(\);/, "after a socket close the flushed context is paused (review M2)");
+  const tap = src.slice(src.indexOf("async function onTap()"), src.indexOf('$("bird").addEventListener'));
+  assert.match(tap, /player\?\.flush\(\);\n      pauseOutput\(\);/, "after a barge the flushed context is paused (review M2)");
 });

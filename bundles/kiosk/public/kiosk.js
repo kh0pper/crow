@@ -65,13 +65,20 @@ function kioskPanelLink() { const a = document.createElement("a"); a.href = "/da
 const audioPort = globalThis.CrowAudioPort || null;
 const captureStarting = () => { try { audioPort?.postMessage('{"op":"captureStarting"}'); } catch {} };
 const captureEnded = () => { try { audioPort?.postMessage('{"op":"captureEnded"}'); } catch {} };
-/** App only (rev 2, R2.1): an idle AudioContext keeps a call-type stream playing; pause it once the mic is gone. Every play path resumes it. */
+/**
+ * App only (rev 2, R2.1): an idle AudioContext keeps a call-type stream playing; pause it once the mic is gone. Every play
+ * path resumes it. suspend() is async (ctx.state still reads "running" for a while), so the request is tracked, not the state:
+ * a resume issued after a pending suspend still wins (control messages run in order).
+ */
+let outputPaused = false;
 function pauseOutput() {
-  if (!audioPort || !ctx || ctx.state !== "running" || player?.playing) return;
-  try { ctx.suspend(); } catch {}
+  if (!audioPort || !ctx || outputPaused || ctx.state !== "running" || player?.playing) return;
+  outputPaused = true;
+  try { ctx.suspend().catch(() => {}); } catch {}
   note("audio", "output paused");
 }
-const resumeOutput = () => { if (ctx && ctx.state === "suspended") ctx.resume().catch(() => {}); };
+const outputNeedsResume = () => !!ctx && (outputPaused || ctx.state === "suspended");
+const resumeOutput = () => { if (!audioPort || !outputNeedsResume()) return; outputPaused = false; try { ctx.resume().catch(() => {}); } catch {} };
 if (audioPort) {
   try {
     audioPort.onmessage = (e) => { const l = audioPortLine(e?.data); if (l) note("audio", l); };
@@ -185,6 +192,7 @@ function connect() {
     releaseMicAfterTurn("closed");
     mediaView?.offline(true);                       // F9: what plays is shown as not connected
     player?.flush();
+    pauseOutput();                                  // 21c: the release above ran while the reply still played
     serverBird = "idle";
     renderBird();
     note("ws", `closed ${ev.code} ${ev.reason || ""}`.trim());
@@ -289,7 +297,7 @@ function mountUi() {
 
 async function ensureAudio() {
   if (!ctx) ctx = new AudioContext({ latencyHint: "interactive" });
-  if (ctx.state === "suspended") { try { await ctx.resume(); } catch {} }
+  if (outputNeedsResume()) { outputPaused = false; try { await ctx.resume(); } catch {} }
   if (!player) {
     player = createPlayer(ctx, {
       onLevel: (v) => bird?.setLevel(v),
@@ -411,6 +419,7 @@ async function onTap() {
       if (turn && !turn.reported) turn.barged = true;   // after turn_done too: the server already said idle (F3)
       releaseMicAfterTurn("closed");                    // a barge ends the conversation: no follow-up comes
       player?.flush();
+      pauseOutput();                                    // 21c: the release above ran while the reply still played
       if (serverBird === "speaking") serverBird = "idle";
       renderBird();
       if (turn) report(turn);

@@ -162,6 +162,25 @@ public class AudioModeGuardTest {
     }
 
     @Test
+    public void aModeJustEnteredWithNoRecordingYetIsLeftAlone() {
+        int ic = AudioModeGuard.MODE_IN_COMMUNICATION;
+        AudioModeGuard.Facts f = quiet();
+        f.msSinceModeEntered = AudioModeGuard.MODE_QUIET_MS - 1;
+        assertEquals(AudioModeGuard.Action.KEEP_RECENT_GRANT, AudioModeGuard.decide(ic, f));
+        f.msSinceModeEntered = AudioModeGuard.MODE_QUIET_MS;
+        assertEquals(AudioModeGuard.Action.RESET, AudioModeGuard.decide(ic, f));
+        f.msSinceModeEntered = -1;
+        assertEquals(AudioModeGuard.Action.KEEP_RECENT_GRANT, AudioModeGuard.decide(ic, f));
+    }
+
+    @Test
+    public void voiceCommunicationSourceIsSpotted() {
+        assertTrue(AudioModeGuard.hasVoiceCommunication(new int[]{ AudioModeGuard.SOURCE_VOICE_RECOGNITION, AudioModeGuard.SOURCE_VOICE_COMMUNICATION }));
+        assertTrue(!AudioModeGuard.hasVoiceCommunication(new int[]{ AudioModeGuard.SOURCE_VOICE_RECOGNITION }));
+        assertTrue(!AudioModeGuard.hasVoiceCommunication(null));
+    }
+
+    @Test
     public void theKillSwitchStopsOnlyTheReset() {
         int ic = AudioModeGuard.MODE_IN_COMMUNICATION;
         AudioModeGuard.Facts f = quiet();

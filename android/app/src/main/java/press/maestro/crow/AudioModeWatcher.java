@@ -45,6 +45,7 @@ final class AudioModeWatcher {
     private boolean started;
     private boolean recordingWasActive;
     private long lastAudioGrantAt; // elapsedRealtime; 0 = never
+    private long modeEnteredAt;    // elapsedRealtime of the last change to IN_COMMUNICATION; 0 = never
     /** The last line sent to the page: a follow-up is sent only when it differs. */
     private String lastReported;
     /** Set by a RESET: the next capture is probed once for call mode. */
@@ -72,6 +73,7 @@ final class AudioModeWatcher {
     private final AudioManager.OnModeChangedListener modeListener = mode -> {
         Log.i(TAG, "mode changed to " + AudioModeGuard.modeName(mode));
         if (mode == AudioModeGuard.MODE_IN_COMMUNICATION) {
+            modeEnteredAt = SystemClock.elapsedRealtime();
             trigger("mode", false, AudioCheckQueue.MODE_CHECK_DELAY_MS);
         }
     };
@@ -145,6 +147,7 @@ final class AudioModeWatcher {
         f.commDeviceType = commDeviceType();
         f.permissionPending = permissionPending.getAsBoolean();
         f.msSinceAudioGrant = lastAudioGrantAt == 0 ? Long.MAX_VALUE : SystemClock.elapsedRealtime() - lastAudioGrantAt;
+        f.msSinceModeEntered = modeEnteredAt == 0 ? Long.MAX_VALUE : SystemClock.elapsedRealtime() - modeEnteredAt;
         f.guardEnabled = guardEnabled.getAsBoolean();
         AudioModeGuard.Action a = AudioModeGuard.decide(mode, f);
 
@@ -174,7 +177,9 @@ final class AudioModeWatcher {
     private void onCaptureProbe() {
         if (!started) return;
         int[] sources = recordingSources();
-        if (sources.length == 0) return;
+        // Only a call-type capture (Chromium's AEC path) is expected to be in call mode;
+        // the glasses pump (VOICE_RECOGNITION over SCO) or another app's recorder is not.
+        if (!AudioModeGuard.hasVoiceCommunication(sources) || GlassesService.isScoHeld()) return;
         int mode = am.getMode();
         if (mode == AudioModeGuard.MODE_IN_COMMUNICATION) return;
         String line = AudioModeGuard.captureWithoutCallModeLine(mode, AudioModeGuard.recordingSummary(sources));
@@ -235,7 +240,12 @@ final class AudioModeWatcher {
         }
     }
 
-    /** [usages, device types] of every player this app can see (registered, playing or not). */
+    /**
+     * [usages, device types] of every player AudioManager lists: device-wide
+     * (other apps' entries are anonymized but listed), registered players
+     * whether playing or not — getPlayerState() is not public API. So
+     * "voice 1" may be an idle stream; dumpsys audio shows player state.
+     */
     private int[][] players() {
         try {
             List<AudioPlaybackConfiguration> cs = am.getActivePlaybackConfigurations();
