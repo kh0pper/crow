@@ -30,7 +30,7 @@ function mkStorage(map) {
  * respond(url, opts) → { status, body } (default: 200 with an empty view).
  * local / session: Maps that stand for this tab's storage (pass the same ones again to "reload").
  */
-function harness({ local = new Map(), session = new Map(), respond, BroadcastChannel } = {}) {
+function harness({ local = new Map(), session = new Map(), respond, BroadcastChannel, queuedPause = false } = {}) {
   session.set("crow-glasses-bundle", "false");          // no glasses probe traffic
   const { document, window } = parseHTML(`<html><head></head><body>${playerBarHtml("en")}</body></html>`);
   Object.defineProperty(document, "cookie", { configurable: true, get: () => "other=1; crow_csrf=csrf-abc; x=2" });
@@ -46,8 +46,11 @@ function harness({ local = new Map(), session = new Map(), respond, BroadcastCha
     if (audio.paused) { audio.paused = false; fire("play"); fire("playing"); }
     return Promise.resolve();
   };
-  audio.pause = () => { calls.push(["pause"]); if (!audio.paused) { audio.paused = true; fire("pause"); } };
-  audio.load = () => { calls.push(["load"]); };
+  // queuedPause: as in a browser, pause() queues its event and load() drops any still queued (media element task source).
+  let pending = [];
+  audio.pause = () => { calls.push(["pause"]); if (!audio.paused) { audio.paused = true; if (queuedPause) pending.push("pause"); else fire("pause"); } };
+  audio.load = () => { calls.push(["load"]); pending = []; };
+  const drain = () => { const q = pending; pending = []; for (const t of q) fire(t); };
   const realRemove = audio.removeAttribute.bind(audio);
   audio.removeAttribute = (k) => { if (k === "src") { src = ""; calls.push(["src", ""]); } return realRemove(k); };
 
@@ -89,7 +92,7 @@ function harness({ local = new Map(), session = new Map(), respond, BroadcastCha
   const attach = () => P.kioskAttach((m) => posted.push(m), () => live);
   const $ = (id) => document.getElementById(id);
   return {
-    P, win, window, document, audio, calls, fire, fetches, posted, advance, handlers, local, session, attach, $,
+    P, win, window, document, audio, calls, fire, drain, fetches, posted, advance, handlers, local, session, attach, $,
     setLive: (v) => { live = v; },
     shown: () => $("crow-player-bar").style.display !== "none",
     events: (type) => posted.filter((m) => m.type === type),
@@ -693,4 +696,54 @@ test("debug ring: a long press on the bar's title shows it (and the phone's own 
   title.dispatchEvent(cm);
   assert.equal(cm.defaultPrevented, true, "the phone's text-selection menu is suppressed");
   assert.notEqual(box().style.display, "none");
+});
+
+// load() drops the queued pause event, so a pause this script asked for right before it must not lend its
+// name to the NEXT pause (the browser's / OS's), and is named in the ring at once, with the backend it left.
+test("debug ring: a clear (stop) names its own pause with the kiosk backend; the next browser pause is by=browser, not by=clear", async () => {
+  const h = harness({ queuedPause: true });
+  h.attach();
+  h.P.kioskApply(LOAD);
+  h.P.kioskApply({ crow: "media", v: 1, op: "play", id: "m1" });
+  await flush();
+  h.P.kioskApply({ crow: "media", v: 1, op: "stop", id: "m1" });
+  h.drain();
+  assert.match(h.P.debug().join("\n"), /pause by=clear inDoc=\d kiosk/);
+  h.P.load("/media/a.mp3", "A");
+  if (h.audio.paused) h.P.toggle();
+  await flush();
+  assert.equal(h.audio.paused, false);
+  h.audio.pause();
+  h.drain();
+  const pauses = h.P.debug().filter((l) => / pause by=/.test(l));
+  assert.match(pauses[pauses.length - 1], /pause by=browser /);
+});
+
+test("debug ring: leaving the kiosk backend names its pause (by=leave, kiosk); the next browser pause is by=browser", async () => {
+  const h = harness({ queuedPause: true });
+  h.attach();
+  h.P.kioskApply(LOAD);
+  h.P.kioskApply({ crow: "media", v: 1, op: "play", id: "m1" });
+  await flush();
+  h.P.setBackend("local");
+  h.drain();
+  assert.match(h.P.debug().join("\n"), /pause by=leave inDoc=\d kiosk/);
+  h.P.load("/media/a.mp3", "A");
+  if (h.audio.paused) h.P.toggle();
+  await flush();
+  assert.equal(h.audio.paused, false);
+  h.audio.pause();
+  h.drain();
+  const pauses = h.P.debug().filter((l) => / pause by=/.test(l));
+  assert.match(pauses[pauses.length - 1], /pause by=browser /);
+});
+
+test("debug ring: the bar's title cannot be selected (a long press opens the ring); the ring is a log region", () => {
+  const h = harness();
+  const style = h.$("crow-player-title").getAttribute("style");
+  assert.match(style, /user-select:none/);
+  assert.match(style, /-webkit-touch-callout:none/);
+  h.P.kioskApply(LOAD);
+  h.$("crow-player-title").dispatchEvent(new h.window.Event("contextmenu", { cancelable: true }));
+  assert.equal(h.$("crow-player-debug").getAttribute("role"), "log");
 });

@@ -39,7 +39,7 @@ export function playerBarHtml(lang) {
     <button id="crow-player-stop" onclick="window.crowPlayer.stop()" title="${t("player.stop", lang)}" style="background:none;border:none;color:var(--crow-text-muted);cursor:pointer;font-size:0.9rem;padding:0.2rem;display:none">&#9632;</button>
     <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
       <div style="display:flex;align-items:center;gap:0.5rem">
-        <div id="crow-player-title" style="font-size:0.8rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0"></div>
+        <div id="crow-player-title" style="font-size:0.8rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none"></div>
         <span id="crow-player-source" style="font-size:0.6rem;color:var(--crow-text-muted);background:var(--crow-bg-elevated);padding:0.05rem 0.35rem;border-radius:3px;display:none;flex-shrink:0"></span>
         <span id="crow-player-time" style="font-size:0.7rem;color:var(--crow-text-muted);font-family:'JetBrains Mono',monospace;flex-shrink:0"></span>
       </div>
@@ -120,6 +120,16 @@ export function playerBarJs(lang) {
   function pauseBy(src) {
     if (!audio.paused) pauseSrc = src;
     try { audio.pause(); } catch (e) {}
+  }
+  /**
+   * pauseBy, then empty the element. load() drops the still-queued pause event, so the pause is named here (with
+   * the backend it left) and its label cleared: a stale one would name the NEXT pause, the browser's or the OS's.
+   */
+  function pauseAndEmpty(src, from) {
+    pauseBy(src);
+    try { audio.removeAttribute('src'); audio.load(); } catch (e) {}
+    if (pauseSrc) dbg('pause by=' + pauseSrc + ' inDoc=' + (audio.isConnected === false ? 0 : 1) + ' ' + from);
+    pauseSrc = '';
   }
 
   function fmt(s) {
@@ -354,6 +364,7 @@ export function playerBarJs(lang) {
     if (!dbgBox) {
       dbgBox = document.createElement('div');
       dbgBox.id = 'crow-player-debug';
+      dbgBox.setAttribute('role', 'log');
       dbgBox.style.cssText = 'position:absolute;bottom:100%;left:0;right:0;max-height:50vh;overflow:auto;white-space:pre-wrap;font:11px/1.35 monospace;background:var(--crow-bg-elevated);color:var(--crow-text-primary);border-top:1px solid var(--crow-border);padding:0.4rem 0.6rem';
       dbgBox.addEventListener('click', function() { dbgBox.style.display = 'none'; });
       bar.appendChild(dbgBox);
@@ -496,9 +507,8 @@ export function playerBarJs(lang) {
     kioskItem = null; kioskRedo = null; kioskRestoring = false;
     if (!had) { try { localStorage.removeItem(STORAGE_KEY); } catch (e) {} return; }   // a reload marker with nothing behind it
     dbg('clear');
-    pauseBy('clear');
+    pauseAndEmpty('clear', activeBackend);
     activeBackend = 'local';
-    try { audio.removeAttribute('src'); audio.load(); } catch (e) {}
     bar.style.display = 'none';
     updateNavButtons();
     try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
@@ -597,8 +607,7 @@ export function playerBarJs(lang) {
     kioskItem = null; kioskRedo = null;
     activeBackend = 'local';
     if (replacing) return;
-    pauseBy('leave');
-    try { audio.removeAttribute('src'); audio.load(); } catch (e) {}
+    pauseAndEmpty('leave', 'kiosk');
   }
   /** A validated frame op. Every op but load names its item and is ignored unless that item is on the bar (review 3). */
   function kioskApply(raw) {
