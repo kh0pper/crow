@@ -6,6 +6,8 @@
  * RULE: only a route that has ALREADY passed dashboardAuth may emit this fragment. Never a route that
  * answers anonymously, never a public page (/blog, /kb, playlists, songbook), never anything reachable
  * through Tailscale Funnel (tests/player-shell-exposure.test.js keeps the list of callers).
+ * (CROW_DASHBOARD_PUBLIC=true lifts dashboardAuth's network check for the whole dashboard; the bar then
+ * goes exactly where the dashboard goes, still only after a login.)
  *
  * playerShellHtml(lang, { dark }) → one fragment to place just before </body>:
  *   1. the design tokens (custom properties only) and a zero sidebar offset on the bar (no sidebar here);
