@@ -8,11 +8,37 @@ import { escapeHtml, section } from "../shared/components.js";
 import { t } from "../shared/i18n.js";
 import { botBoardStyles } from "./bot-board/css.js";
 import {
-  gatherPeerBots, tableMissing, parseBotDef,
+  gatherPeerBots, tableMissing, parseBotDef, TASKS_DB,
 } from "./bot-board/data-queries.js";
+
+/** Top-level, unarchived cards per project (board_id NULL = kanban cards). */
+async function cardCountsFor(projectIds) {
+  const out = new Map();
+  const ids = [...new Set(projectIds.filter((n) => Number.isInteger(n)))];
+  if (!ids.length) return out;
+  let tdb;
+  try {
+    tdb = createDbClient(TASKS_DB);
+    const { rows } = await tdb.execute({
+      sql: `SELECT project_id, COUNT(*) AS n FROM tasks_items
+            WHERE board_id IS NULL AND archived_at IS NULL AND parent_id IS NULL
+              AND project_id IN (${ids.map(() => "?").join(",")})
+            GROUP BY project_id`,
+      args: ids,
+    });
+    for (const id of ids) out.set(id, 0);
+    for (const r of rows || []) out.set(Number(r.project_id), Number(r.n));
+  } catch { /* tasks.db absent: chips just carry no count */ }
+  finally { if (tdb) { try { tdb.close(); } catch { /* already closed */ } } }
+  return out;
+}
 import { clientJs } from "./bot-board/client.js";
 import { handleBotBoardPost } from "./bot-board/api-handlers.js";
-import { drawerMarkup, renderKanbanBoard, renderCustomTracker } from "./bot-board/html.js";
+import {
+  drawerMarkup, renderKanbanBoard, renderCustomTracker,
+  botBoardState, botChipsHtml, boardCard, turnOnPanelHtml,
+} from "./bot-board/html.js";
+import { createDbClient } from "../../../db.js";
 import { botRuntimeActive } from "./bot-runtime-flag.js";
 
 export default {
@@ -89,16 +115,13 @@ export default {
     }
     const notice = noticeBits.join("");
 
-    // ---- Bot switcher (GET form) ----
-    const switcherOptions = bots.length
-      ? bots.map((b) => {
-          const typeLabel = b.trackerType === "custom" && b.trackerSlug
-            ? `custom: ${escapeHtml(b.trackerSlug)}`
-            : escapeHtml(b.trackerType);
-          const selected = selBot && b.botId === selBot.botId ? " selected" : "";
-          return `<option value="${escapeHtml(b.botId)}"${selected}>${escapeHtml(b.displayName)} (${typeLabel})</option>`;
-        }).join("")
-      : `<option value="">${t("botboard.noBotsOption", lang)}</option>`;
+    // ---- Bot picker: a strip of chips (option A, queue item 20) ----
+    // Card counts for the board-on bots: top-level, unarchived cards on each
+    // bot's project, from the instance-global tasks.db only.
+    const counts = await cardCountsFor(bots.filter((b) => botBoardState(b).state === "on").map((b) => Number(b.projectId)));
+    const chipStrip = bots.length
+      ? botChipsHtml(bots, selBot, counts, lang)
+      : `<p class="bb-msg">${t("botboard.noBotsOption", lang)}</p>`;
 
     const isKanban = selBot && (selBot.trackerType === "kanban" || selBot.trackerType === "task-list");
     const isCustom = selBot && selBot.trackerType === "custom";
@@ -125,15 +148,10 @@ export default {
       `style="font-size:.78rem;color:var(--crow-text-muted);text-decoration:none;margin-left:.3rem">` +
       `${t("botboard.perchLink", lang)}</a>`;
 
-    const switcher =
-      `<form method="GET" action="/dashboard/bot-board" class="bb-switch">` +
-      `<label for="bb-bot" style="font-size:.8rem;color:var(--crow-text-muted)">${t("botboard.labelBotSwitcher", lang)}</label>` +
-      `<select id="bb-bot" name="bot" onchange="this.form.requestSubmit ? this.form.requestSubmit() : this.form.submit()">` +
-      switcherOptions +
-      `</select>` + editBotLink + perchLink +
-      `<noscript><button type="submit">Go</button></noscript>` +
-      switcherButtons +
-      `</form>`;
+    // The board's own actions and links (the old switcher form minus its
+    // <select>): every action stays where it was.
+    const switcher = chipStrip +
+      `<div class="bb-switch">` + editBotLink + perchLink + switcherButtons + `</div>`;
 
     // ---- No bot selected ----
     if (!selBot) {
@@ -179,11 +197,8 @@ export default {
 
     if (trackerType === "none") {
       return layout({
-        title: `Bot Board — ${selBot.displayName}`,
-        content: botBoardStyles() + section(
-          `Board — ${escapeHtml(selBot.displayName)}`,
-          notice + switcher +
-          `<p style="margin-top:1rem;color:var(--crow-text-muted)">${t("botboard.noTracker", lang)}</p>`),
+        title: "Bot Board",
+        content: botBoardStyles() + boardCard(selBot, notice + switcher + turnOnPanelHtml(selBot, req, lang)),
       });
     }
 

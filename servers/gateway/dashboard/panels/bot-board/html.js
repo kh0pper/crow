@@ -30,6 +30,69 @@ import { perchAttached } from "../../../shared/perch-attached.js";
 // RECORDS now (D-T1.4), not the retired file rail — same store the JS
 // drawer's GET /card/:id/plan route (plan-service.getCurrentPlan) reads.
 import { getCurrentPlan } from "../../../board/plan-service.js";
+import { csrfInput } from "../../shared/csrf.js";
+import { boardState } from "../../shared/bot-display.js";
+
+// ---- Option A (queue item 20): chip-strip picker + Turn-on panel ----
+
+/** boardState() for a parseBotDef() row. */
+export function botBoardState(b) {
+  return boardState({ definition: b.definition, project_id: b.projectId });
+}
+
+function chipHue(id) {
+  let h = 0;
+  for (const ch of String(id)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return h % 5;
+}
+
+/**
+ * The bot picker: one plain link per enabled bot (works without JS), bots
+ * whose board is on first with their card count, the rest as dashed
+ * "no board" chips that open the Turn-on panel. Scrolls sideways inside
+ * itself on a phone; the page never does.
+ */
+export function botChipsHtml(bots, selBot, counts, lang) {
+  if (!bots.length) return "";
+  const rank = (b) => (botBoardState(b).state === "off" ? 1 : 0);
+  const ordered = bots.map((b, i) => [b, i]).sort((x, y) => rank(x[0]) - rank(y[0]) || x[1] - y[1]).map((x) => x[0]);
+  const chips = ordered.map((b) => {
+    const st = botBoardState(b).state;
+    const sel = selBot && b.botId === selBot.botId;
+    const name = String(b.displayName || b.botId);
+    const av = `<span class="bb-bchip-av bb-hue-${chipHue(b.botId)}" aria-hidden="true">${escapeHtml((Array.from(name.trim())[0] || "?").toUpperCase())}</span>`;
+    const href = `/dashboard/bot-board?bot=${encodeURIComponent(b.botId)}`;
+    const cur = sel ? ` aria-current="page"` : "";
+    if (st === "off") {
+      return `<a class="bb-bchip nob${sel ? " on" : ""}" href="${href}"${cur} title="${escapeHtml(b.botId)}">${av}${escapeHtml(name)} · ${t("botboard.chipNoBoard", lang)}</a>`;
+    }
+    const n = st === "on" && counts ? counts.get(Number(b.projectId)) : undefined;
+    return `<a class="bb-bchip${sel ? " on" : ""}" href="${href}"${cur} title="${escapeHtml(b.botId)}">${av}${escapeHtml(name)}` +
+      (n != null ? ` <span class="bb-bchip-n" aria-label="${escapeHtml(t("botboard.chipCards", lang).replace("{n}", String(n)))}">${n}</span>` : "") + `</a>`;
+  }).join("");
+  return `<nav class="bb-chips-bots" aria-label="${t("botboard.labelBotSwitcher", lang)}">${chips}</nav>`;
+}
+
+/** The board body, headed by the selected bot's name for screen readers only. */
+export function boardCard(selBot, body, srSuffix = "") {
+  return `<div class="card bb-card-wrap"><h2 class="bb-sr">${escapeHtml(selBot.displayName)}${srSuffix ? " " + escapeHtml(srSuffix) : ""}</h2>${body}</div>`;
+}
+
+/**
+ * Board off (type none, or kanban with no project): say so, say what turning
+ * one on does, and offer it — a native POST through the CSRF rail that lands
+ * back here (return=board).
+ */
+export function turnOnPanelHtml(selBot, req, lang) {
+  return `<div class="bb-turnon">` +
+    `<p class="bb-turnon-title">${escapeHtml(t("botboard.turnOnTitle", lang).replace("{name}", () => String(selBot.displayName)))}</p>` +
+    `<p class="bb-turnon-why">${escapeHtml(t("botbuilder.boardOnWarn", lang))}</p>` +
+    `<form method="POST" action="/dashboard/bot-builder" class="bb-turnon-form">` +
+    `<input type="hidden" name="action" value="board_on">` +
+    `<input type="hidden" name="bot_id" value="${escapeHtml(selBot.botId)}">` +
+    `<input type="hidden" name="return" value="board">${csrfInput(req)}` +
+    `<button type="submit" class="btn btn-primary btn-sm">${t("botbuilder.rowTurnOn", lang)}</button></form></div>`;
+}
 
 // Display: configured values render raw (tracker-style); only the builtin
 // fallback def keeps the i18n'd four.
@@ -598,11 +661,8 @@ export async function renderKanbanBoard(req, res, {
 
   if (projectId == null) {
     return layout({
-      title: `Bot Board — ${selBot.displayName}`,
-      content: botBoardStyles() + section(
-        `Board — ${escapeHtml(selBot.displayName)}`,
-        notice + switcher +
-        `<p style="margin-top:1rem;color:var(--crow-text-muted)">${t("botboard.noProjectLinked", lang)}</p>`) +
+      title: "Bot Board",
+      content: botBoardStyles() + boardCard(selBot, notice + switcher + turnOnPanelHtml(selBot, req, lang)) +
         drawerMarkup(lang) + birdDrawerMarkup(lang) + clientJs(selBot.botId, "kanban", null, null, null, lang, false),
     });
   }
@@ -762,14 +822,13 @@ export async function renderKanbanBoard(req, res, {
   // a test overriding it drives BOTH the card glyphs and the strip.
   const roostHtml = await roostStripHtml(bots, engine, lang);
 
-  const content = botBoardStyles() + section(
-    `Board — ${escapeHtml(selBot.displayName)}`,
+  const content = botBoardStyles() + boardCard(selBot,
     notice + switcher + roostHtml + filterBarHtml + boardHtml) +
     drawerMarkup(lang, def) + boardSettingsDrawerMarkup(lang, projectId) + roostDispatchDialogMarkup(lang) +
     birdDrawerMarkup(lang) +
     clientJs(selBot.botId, "kanban", projectId, null, null, lang, includeArchived);
 
-  return layout({ title: `Bot Board — ${selBot.displayName}`, content });
+  return layout({ title: "Bot Board", content });
 }
 
 // ---- Custom tracker rendering ----
@@ -778,11 +837,11 @@ export async function renderCustomTracker(req, res, { db, layout, selBot, bots, 
   const trackerSlug = selBot.trackerSlug;
   if (!trackerSlug) {
     return layout({
-      title: `Bot Board — ${selBot.displayName}`,
-      content: botBoardStyles() + section(
-        `Board — ${escapeHtml(selBot.displayName)}`,
+      title: "Bot Board",
+      content: botBoardStyles() + boardCard(selBot,
         notice + switcher +
-        `<p style="margin-top:1rem;color:var(--crow-text-muted)">${t("botboard.noTrackerSlug", lang)}</p>`),
+        `<p style="margin-top:1rem;color:var(--crow-text-muted)">${t("botboard.noTrackerSlug", lang)} ` +
+        `<a href="/dashboard/bot-builder?bot=${encodeURIComponent(selBot.botId)}&tab=tracker">${t("botbuilder.rowSetUpInEdit", lang)}</a></p>`),
     });
   }
 
@@ -799,9 +858,8 @@ export async function renderCustomTracker(req, res, { db, layout, selBot, bots, 
   if (!trackerDef) {
     if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
     return layout({
-      title: `Bot Board — ${selBot.displayName}`,
-      content: botBoardStyles() + section(
-        `Board — ${escapeHtml(selBot.displayName)}`,
+      title: "Bot Board",
+      content: botBoardStyles() + boardCard(selBot,
         notice + switcher +
         `<p style="margin-top:1rem;color:var(--crow-text-muted)">${t("botboard.trackerNotFound", lang).replace("{slug}", escapeHtml(trackerSlug))}</p>`),
     });
@@ -877,11 +935,10 @@ export async function renderCustomTracker(req, res, { db, layout, selBot, bots, 
     archivedToggleHtml(selBot.botId, includeArchived, lang) +
     `</div>`;
 
-  const content = botBoardStyles() + section(
-    `Board — ${escapeHtml(selBot.displayName)} (${escapeHtml(trackerDef.display_name || trackerSlug)})`,
-    notice + switcher + filterBarHtml + boardHtml) +
+  const content = botBoardStyles() + boardCard(selBot,
+    notice + switcher + filterBarHtml + boardHtml, `(${trackerDef.display_name || trackerSlug})`) +
     trackerDrawerMarkup(lang) + drawerMarkup(lang) +
     clientJs(selBot.botId, "custom", null, trackerSlug, contextFields, lang, includeArchived);
 
-  return layout({ title: `Bot Board — ${selBot.displayName}`, content });
+  return layout({ title: "Bot Board", content });
 }

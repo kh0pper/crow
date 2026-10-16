@@ -63,6 +63,31 @@ export function botBoardStyles() {
   ${birdCss}
   ${roostCss}
   ${birdDrawerCss()}
+  /* Option A (queue item 20): the bot picker chip strip. It scrolls sideways
+     INSIDE itself on a phone (nowrap + its own scroller); the page never does. */
+  .bb-chips-bots{display:flex;flex-wrap:nowrap;overflow-x:auto;gap:.5rem;padding:0 0 .35rem;margin:0 0 .6rem;scrollbar-width:thin}
+  .bb-bchip{display:inline-flex;align-items:center;gap:.45rem;flex:none;min-height:40px;padding:.2rem .8rem .2rem .25rem;border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);background:var(--crow-bg-surface);color:var(--crow-text-primary);font-size:.85rem;font-weight:500;white-space:nowrap;text-decoration:none}
+  .bb-bchip:hover{border-color:var(--crow-accent)}
+  .bb-bchip.on{border-color:var(--crow-accent);background:color-mix(in srgb,var(--crow-accent) 12%,transparent);color:var(--crow-accent)}
+  .bb-bchip.nob{border-style:dashed;color:var(--crow-text-muted)}
+  .bb-bchip.nob.on{color:var(--crow-accent)}
+  .bb-bchip:focus-visible{outline:2px solid var(--crow-accent);outline-offset:2px}
+  .bb-bchip-av{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;font-size:.75rem;font-weight:700;flex:none}
+  .bb-bchip-n{font-family:'JetBrains Mono',monospace;font-size:.72rem;color:var(--crow-text-muted)}
+  .bb-hue-0{background:color-mix(in srgb,var(--crow-accent) 16%,transparent);color:var(--crow-accent)}
+  .bb-hue-1{background:color-mix(in srgb,var(--crow-info) 16%,transparent);color:var(--crow-info)}
+  .bb-hue-2{background:color-mix(in srgb,var(--crow-success) 16%,transparent);color:var(--crow-success)}
+  .bb-hue-3{background:color-mix(in srgb,var(--crow-warning) 18%,transparent);color:var(--crow-text-primary)}
+  .bb-hue-4{background:color-mix(in srgb,var(--crow-brand-gold) 20%,transparent);color:var(--crow-text-primary)}
+  .bb-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+  .bb-card-wrap{margin-bottom:var(--crow-space-5);position:relative}
+  .bb-turnon{margin:.75rem 0 0;padding:.85rem 1rem;border:1px dashed var(--crow-border-strong);border-radius:var(--crow-radius-card);background:var(--crow-bg-elevated)}
+  .bb-turnon-title{margin:0 0 .3rem;font-weight:600}
+  .bb-turnon-why{margin:0 0 .7rem;font-size:.85rem;color:var(--crow-text-secondary);max-width:62ch}
+  .bb-turnon-form{margin:0}
+  /* Q3 (Kevin, 2026-10-16): the bot status strip (roost) is hidden on phones,
+     where the chip strip above already lists the bots; kept on wide. */
+  @media (max-width:640px){.bb-roost{display:none}}
   .bb-switch{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
   .bb-switch select,.bb-switch input{padding:.45rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-primary)}
   .bb-switch button{padding:.45rem .9rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-control);color:var(--crow-accent-contrast);cursor:pointer}

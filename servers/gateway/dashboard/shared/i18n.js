@@ -1659,6 +1659,10 @@ export const translations = {
   "botboard.noTracker": { en: "This bot has no tracker.", es: "Este bot no tiene rastreador." },
   "botboard.noBotsOption": { en: "-- no bots --", es: "-- sin bots --" },
   "botboard.labelBotSwitcher": { en: "Bot", es: "Bot" },
+  // Bot Board picker (queue item 20, option A)
+  "botboard.chipNoBoard": { en: "no board", es: "sin tablero" },
+  "botboard.chipCards": { en: "{n} cards", es: "{n} tarjetas" },
+  "botboard.turnOnTitle": { en: "{name} has no board", es: "{name} no tiene tablero" },
   "botboard.editBotLink": { en: "Edit bot", es: "Editar bot" },
   "botboard.perchLink": { en: "Open Perch chat", es: "Abrir chat de Perch" },
   "botboard.botNotFound": { en: "not found or disabled.", es: "no encontrado o desactivado." },
