@@ -126,3 +126,16 @@ test("withTurnContext: the context lines, the note line, a blank line, then the 
   assert.equal(withTurnContext(null, "Okay."), "Okay.");
   assert.match(TURN_CONTEXT_NOTE, /^\[[A-Z][a-z]+\] /, "the note is a tagged line too, so an echo of it is removed");
 });
+
+test("17a: an echo of the [Dates] line is removed like the [Now] line, streamed or whole", async () => {
+  const { relativeDatesContext } = await import("../bundles/kiosk/server/clock.js");
+  const dates = relativeDatesContext(Date.UTC(2026, 9, 15, 21, 57), "America/Chicago");
+  const ctx = `${NOW}\n${dates}`;
+  assert.equal(stripContextEcho(`${dates} Added for Monday, October 19.`, [ctx]), "Added for Monday, October 19.");
+  const gate = createContextEchoGate([ctx]);
+  let out = "";
+  for (let i = 0; i < dates.length; i += 7) out += gate.feed(dates.slice(i, i + 7));
+  out += gate.feed(" Done.");
+  out += gate.flush();
+  assert.equal(out.trim(), "Done.");
+});

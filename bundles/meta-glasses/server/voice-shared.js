@@ -19,3 +19,5 @@ export const { wantsMemory } = memoryMod;
 export const { matchClockFastPath } = clockMod;
 /** The [Now] line for the turn's user message (never the system message). */
 export const nowContext = clockMod.kioskNowContext;
+/** The [Dates] line (queue item 17a) and its trigger: added after [Now] when the transcript names a relative day. */
+export const { relativeDatesContext, mentionsRelativeDay } = clockMod;

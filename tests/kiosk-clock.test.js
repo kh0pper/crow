@@ -137,3 +137,40 @@ test("'what's tomorrow?' is not a date question here: an assistant with a calend
   assert.equal(chi("What's tomorrow?"), null);
   assert.equal(chi("What is tomorrow?"), null);
 });
+
+// ── Queue item 17a (2026-10-15): "add a car appointment 8:15 a.m. Monday" on Thursday Oct 15 was read as the PAST
+// Monday. A voice turn that names a relative day gets a computed [Dates] line: the next seven dates, today, the offset.
+import { relativeDatesContext, mentionsRelativeDay } from "../bundles/kiosk/server/clock.js";
+
+const THU = Date.UTC(2026, 9, 15, 21, 57);   // Thursday 15 October 2026, 4:57 PM in Chicago (CDT)
+
+test("relativeDatesContext: the next seven dates by weekday, tomorrow marked, today stated, the zone's offset", () => {
+  assert.equal(relativeDatesContext(THU, "America/Chicago"),
+    "[Dates] To add or plan something, a day named without a date is the next one: Friday 2026-10-16 (tomorrow), Saturday 2026-10-17, Sunday 2026-10-18, Monday 2026-10-19, Tuesday 2026-10-20, Wednesday 2026-10-21; Thursday is today 2026-10-15 or next week 2026-10-22. For something already past, it is the previous one. UTC offset -05:00.");
+});
+
+test("relativeDatesContext: late Sunday night → tomorrow is Monday; the display's zone decides the day", () => {
+  const sunLate = Date.UTC(2026, 9, 19, 4, 30);   // Sunday 18 Oct 11:30 PM Chicago = Monday 19 Oct 1:30 PM Tokyo
+  assert.match(relativeDatesContext(sunLate, "America/Chicago"), /: Monday 2026-10-19 \(tomorrow\), .* Saturday 2026-10-24; Sunday is today 2026-10-18 or next week 2026-10-25\. .* UTC offset -05:00\.$/);
+  assert.match(relativeDatesContext(sunLate, "Asia/Tokyo"), /: Tuesday 2026-10-20 \(tomorrow\), .* Sunday 2026-10-25; Monday is today 2026-10-19 or next week 2026-10-26\. .* UTC offset \+09:00\.$/);
+  assert.match(relativeDatesContext(sunLate, "UTC"), /UTC offset \+00:00\.$/);
+  assert.match(relativeDatesContext(sunLate, "Asia/Kolkata"), /UTC offset \+05:30\.$/);
+});
+
+test("relativeDatesContext: a day across a DST change carries its own offset", () => {
+  const thu29 = Date.UTC(2026, 9, 29, 17, 0);   // Thu 29 Oct 2026, Chicago; US DST ends Sun 1 Nov
+  const line = relativeDatesContext(thu29, "America/Chicago");
+  assert.match(line, /Saturday 2026-10-31, Sunday 2026-11-01 \(-06:00\), Monday 2026-11-02 \(-06:00\),/);
+  assert.match(line, /UTC offset -05:00\.$/);
+});
+
+test("relativeDatesContext: a bad zone falls back to the server's and never throws", () => {
+  assert.match(relativeDatesContext(THU, "Mars/Olympus"), /^\[Dates\] To add or plan something, a day named without a date is the next one: \w+day \d{4}-\d\d-\d\d \(tomorrow\), /);
+});
+
+test("mentionsRelativeDay: weekdays and relative days in English and Spanish, as whole words", () => {
+  for (const t of ["Add a car appointment at 8:15 a.m. Monday to my calendar", "I had a car appointment at 815 a.m. Monday to my calendar.", "remind me tomorrow", "what's on next week?",
+    "Schedule lunch on Friday's afternoon", "this weekend", "the day after tomorrow", "TUESDAY", "manana a las 9", "el miércoles a las 8 de la mañana", "on Mon at 3", "Thurs", "lunch tmrw", "cita el lunes a las ocho", "mañana a las 9", "el sábado", "pasado mañana",
+    "la próxima semana", "la semana que viene", "este fin de semana", "el miercoles", "What do I have on Sunday?"]) assert.equal(mentionsRelativeDay(t), true, t);
+  for (const t of ["what time is it", "play kpft", "Sundance festival", "set a timer for five minutes", "dinner tonight", "pon la cita a las 8 de la mañana", "por la mañana", "en la manana", "a la mañana", "Monitor the oven", "the wedding", "a fried egg", "", null, undefined, 42, "Mondaybeat"]) assert.equal(mentionsRelativeDay(t), false, String(t));
+});

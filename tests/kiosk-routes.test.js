@@ -761,6 +761,9 @@ test("live test (wired): a kiosk turn offers crow_wm only when asked, carries th
   }
   // D: date, time and zone ride on the turn context (the user message), never the system suffix.
   assert.match(call.turnContext("Tell me a joke"), /^\[Now\] \w+day, \w+ \d{1,2}, \d{4}, \d{1,2}:\d\d [AP]M \(time zone Asia\/Tokyo\)\n\[Display\] Open windows: none\.$/);
+  // 17a: a turn that names a relative day also gets the computed dates, between [Now] and [Display].
+  assert.match(call.turnContext("Add a car appointment at 8:15 a.m. Monday"), /^\[Now\] [^\n]+\n\[Dates\] To add or plan something, a day named without a date is the next one: [^\n]+ UTC offset \+09:00\.\n\[Display\] Open windows: none\.$/);
+  assert.doesNotMatch(call.turnContext("Tell me a joke"), /\[Dates\]/, "a plain question pays no extra tokens");
   assert.doesNotMatch(call.promptSuffix, /\d{4}|[AP]M\b|Tokyo/, "the system message stays byte-stable");
   assert.equal(call.promptSuffix, displayPromptSuffix(effectiveCaps({}, undefined)));
   assert.match(call.promptSuffix, /\[Now\]/, "the model is told what the bracketed lines are");
