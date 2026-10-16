@@ -28,9 +28,9 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, utimesSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname, sep } from "node:path";
+import { join, dirname, basename, resolve, sep } from "node:path";
 import Database from "better-sqlite3";
 
 for (const k of Object.keys(process.env)) {
@@ -321,6 +321,63 @@ test("ACCEPTANCE (fd): bot A's read roots cover its own world + project + explic
   const cPolicy = JSON.parse(c.env.PI_BOT_PERMISSION_POLICY);
   assert.deepEqual(cPolicy.read_paths, [W2], "C gets ITS project, never A's");
   for (const p of [A_WORLD, W1, B_WORLD, EXTRA]) assert.equal(readable(c, p), false, "C must not reach " + p);
+});
+
+// pi-lab's realpath read gate (bot-paths.ts realish + underRealRoots), ported.
+function realish(p) {
+  let head = resolve(p);
+  const rest = [];
+  for (;;) {
+    try { return rest.length ? join(realpathSync(head), ...rest.reverse()) : realpathSync(head); }
+    catch {
+      const parent = dirname(head);
+      if (parent === head) return resolve(p);
+      rest.push(basename(head));
+      head = parent;
+    }
+  }
+}
+const readableReal = (cap, p) => {
+  const rt = realish(p);
+  return readRootsOf(cap).some((r) => { const rr = realish(r); return rt === rr || rt.startsWith(rr.endsWith(sep) ? rr : rr + sep); });
+};
+
+test("Turn on a board, fallback carry-over: the spawn adds the bot's OLD world root as a read root so carried uploads pass the realpath gate", async () => {
+  process.env.PIBOT_MCP_CONFIG_DELIVERY = "fd";
+  // Bot D: had no project (old root <CROW_HOME>/pi-bots/botd), then got one
+  // whose bots/botd already existed — so its entries were linked one by one.
+  const W4 = join(dir, "projects", "delta");
+  const D_OLD = join(process.env.CROW_HOME, "pi-bots", "botd");
+  const D_WORLD = join(W4, "bots", "botd");
+  mkdirSync(join(D_OLD, "outputs", "s9"), { recursive: true });
+  mkdirSync(join(D_OLD, "sessions"), { recursive: true });
+  writeFileSync(join(D_OLD, "outputs", "s9", "upload.txt"), "hello");
+  mkdirSync(D_WORLD, { recursive: true });
+  symlinkSync(join(D_OLD, "outputs"), join(D_WORLD, "outputs"));
+  symlinkSync(join(D_OLD, "sessions"), join(D_WORLD, "sessions"));
+  // Bot E: same shape, but its link points somewhere that is NOT its own old root.
+  const W5 = join(dir, "projects", "echo");
+  const E_WORLD = join(W5, "bots", "bote");
+  const ELSEWHERE = join(dir, "not-bote");
+  mkdirSync(ELSEWHERE, { recursive: true });
+  mkdirSync(E_WORLD, { recursive: true });
+  symlinkSync(ELSEWHERE, join(E_WORLD, ".pi"));
+  const c = new Database(DB_FILE);
+  c.prepare("INSERT INTO project_spaces (id, slug, name, workspace_dir) VALUES (?,?,?,?)").run(104, "delta", "Delta", W4);
+  c.prepare("INSERT INTO project_spaces (id, slug, name, workspace_dir) VALUES (?,?,?,?)").run(105, "echo", "Echo", W5);
+  const ins = c.prepare("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?,?,?,?,?)");
+  ins.run("botd", "Bot D", JSON.stringify(baseDef([])), 1, 104);
+  ins.run("bote", "Bot E", JSON.stringify(baseDef([])), 1, 105);
+  c.close();
+
+  const d = await channelTurn("botd", "d-fallback");
+  assert.equal(d.cwd, D_WORLD);
+  assert.deepEqual(JSON.parse(d.env.PI_BOT_PERMISSION_POLICY).read_paths, [W4, realpathSync(D_OLD)]);
+  assert.ok(readableReal(d, join(D_WORLD, "outputs", "s9", "upload.txt")), "the carried upload passes pi-lab's realpath gate");
+  assert.equal(readableReal(d, join(process.env.CROW_HOME, "pi-bots", "botb")), false, "another bot's old root stays out");
+
+  const e = await channelTurn("bote", "e-fallback");
+  assert.deepEqual(JSON.parse(e.env.PI_BOT_PERMISSION_POLICY).read_paths, [W5], "a link to anywhere but its own old root adds nothing");
 });
 
 test("ACCEPTANCE (fd): a background job writes no /tmp/pibot-job-*/.mcp.json and keeps the project read root", async () => {

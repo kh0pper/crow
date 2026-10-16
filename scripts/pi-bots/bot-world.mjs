@@ -48,7 +48,7 @@ import { resolveSkills, resolveSkill, skillDirs } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { proposalsDir, selfAuthoringPromptBlock } from "./skill_proposals.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
-import { worldRootFor } from "./world-root.mjs";
+import { worldRootFor, carriedReadRoots, brokenWorldLink } from "./world-root.mjs";
 import { installedKitDir, readKitThemes, readHouseStyleSync, houseStyleLinks } from "../../servers/shared/design-kit.js";
 
 /** Lazy bridge handle — see the CYCLE NOTE above. */
@@ -194,6 +194,15 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
   // World root storage: pi session files, outputs/<sid>, uploads — always
   // under sessionDir, NEVER inside the operator's chosen cwd (a session's
   // deliverables must not litter the project directory).
+  // A carried-over world ("Turn on a board", world-root.mjs) whose link now
+  // points nowhere would make that mkdir throw EEXIST on every turn; name it.
+  const broken = brokenWorldLink(sessionDir);
+  if (broken) {
+    const msg = "the bot's carried-over world link is broken: " + broken.path + " -> " + broken.target +
+      " (the old folder is gone; restore it, or remove the link to start a fresh world)";
+    log(msg);
+    throw Object.assign(new Error(msg), { code: "world_link_broken" });
+  }
   mkdirSync(sessionDir + "/sessions", { recursive: true });
 
   // Keep the per-bot <sessionDir>/.mcp.json in sync with the def on every
@@ -299,7 +308,12 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
   return { def, bot, crowHome, projectId, projectSpace, projectMembers, sessionDir,
     cwd: resolvedCwd, mcpConfigPath: mcpDelivery === "file" ? join(sessionDir, ".mcp.json") : null,
     mcpDelivery, mcpConfig, tasksDbPath, remoteEnabled, peerGatewayUrls, session, botClassifier,
-    narrowedTools, gatewayType, kitInstalled, houseStyle };
+    narrowedTools, gatewayType, kitInstalled, houseStyle,
+    // "Turn on a board" fallback carry-over (world-root.mjs): entries linked
+    // one by one from the bot's own pre-project root resolve outside every
+    // root pi-lab's realpath read gate knows, so that old root joins the read
+    // roots. [] for every other bot.
+    extraReadPaths: carriedReadRoots({ worldRoot: sessionDir, legacyRoot: worldRootFor({ workspaceDir: null, def, crowHome, botId }) }) };
 }
 
 /**
@@ -393,6 +407,7 @@ export async function prepareSpawn(world, { escalate = false, log = () => {} } =
       // S6-CROW: the bot's project workspace joins its read roots (PiRpc,
       // bot-read-paths.mjs); null for a bot without a project.
       projectWorkspaceDir: (world.projectId != null && world.projectSpace && world.projectSpace.workspace_dir) || null,
+      extraReadPaths: world.extraReadPaths || [],
       // S6-CROW: how the MCP config reaches pi. Absent on a hand-built world
       // (test seams) => PiRpc's pre-S6 file env.
       mcpDelivery: world.mcpDelivery,

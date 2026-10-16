@@ -39,7 +39,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -483,6 +483,33 @@ test("B2: no session_dir + no project space falls back to <crowHome>/pi-bots/<bo
   assert.equal(world.sessionDir, expected, "the old no_session_dir refusal is now a fallback world root");
   assert.equal(world.cwd, expected, "cwd defaults to the world root");
   assert.ok(existsSync(join(expected, "sessions")), "fallback root is mkdir'd");
+});
+
+test("a carried-over world whose link is broken fails the turn with a clear world_link_broken error (not an opaque EEXIST)", async () => {
+  const { buildBotWorld } = await import("../scripts/pi-bots/bot-world.mjs");
+  const c = new Database(DB_FILE);
+  const ins = c.prepare("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?,?,?,?)");
+  const mk = (id, sessionDir) => ins.run(id, id, JSON.stringify({
+    system_prompt: "You are a test bot.", models: { default: "stub/m1" }, tools: { pi_builtin: ["read"] }, session_dir: sessionDir,
+  }), 1);
+  // per-entry carry-over: sessions -> an old root that has since gone
+  const entryRoot = join(dir, "broken-entry");
+  mkdirSync(entryRoot, { recursive: true });
+  symlinkSync(join(dir, "gone-old-root", "sessions"), join(entryRoot, "sessions"));
+  mk("brokenentry", entryRoot);
+  // whole-root carry-over: the root itself -> a gone old root
+  const wholeRoot = join(dir, "broken-whole");
+  symlinkSync(join(dir, "gone-old-root-2"), wholeRoot);
+  mk("brokenwhole", wholeRoot);
+  c.close();
+  const logs = [];
+  for (const [botId, link] of [["brokenentry", join(entryRoot, "sessions")], ["brokenwhole", wholeRoot]]) {
+    await assert.rejects(
+      () => buildBotWorld({ botId, threadId: "m1-" + botId, gatewayType: "perch", log: (l) => logs.push(l) }),
+      (e) => e.code === "world_link_broken" && e.message.includes(link) && /carried|link/i.test(e.message),
+      botId + ": a typed, named error");
+  }
+  assert.ok(logs.some((l) => l.includes(wholeRoot)), "the reason is logged too");
 });
 
 test("B3: PiRpc spawns pi in opts.cwd; no cwd keeps the world root; --session-dir never follows the cwd", async () => {
