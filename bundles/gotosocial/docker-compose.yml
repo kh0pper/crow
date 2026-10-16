@@ -20,7 +20,7 @@ services:
       - default
       - crow-federation
     environment:
-      GTS_HOST: ${GTS_HOST}
+      GTS_HOST: ${GTS_HOST:?Set GTS_HOST to your public domain}
       GTS_ACCOUNT_DOMAIN: ${GTS_ACCOUNT_DOMAIN:-${GTS_HOST}}
       GTS_PROTOCOL: https
       GTS_PORT: "8080"

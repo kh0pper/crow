@@ -12,6 +12,7 @@
  * Imports node builtins ONLY — no circular-import risk with routes/bundles.js.
  */
 
+import { isPlaceholderValue } from "./bundle-env-placeholders.js";
 import { parseEnvText } from "./bundle-env-codec.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
@@ -161,8 +162,8 @@ export function resolveEffectiveEnv(bundleId, manifest, { envOverride = null } =
 /**
  * Manifest-required env keys that are still EMPTY in the bundle's EFFECTIVE env.
  *
- * Keys with a value (including .env.example defaults — DB passwords, secret keys)
- * count as configured and are NEVER surfaced: those are consumed at first container
+ * Keys with a real value count as configured and are NEVER surfaced (an example
+ * placeholder does not count — isPlaceholderValue): those are consumed at first container
  * boot, and changing them afterwards breaks the app or strands its data. Corollary:
  * manifest `default`s are copied into mcp-addons.json at install, so an MCP bundle
  * whose required key has a placeholder default will never be reported. Same rule.
@@ -180,5 +181,7 @@ export function needsConfigKeys(bundleId, envOverride = null) {
   if (required.length === 0) return [];
   const { managed, env } = resolveEffectiveEnv(bundleId, man, { envOverride });
   if (!managed) return [];
-  return required.filter((k) => !isSet(env[k]));
+  // An example value copied from .env.example ("/path/to/media", "x.example.com", a key
+  // once published in the repo) is not configuration: list it, never rewrite the .env.
+  return required.filter((k) => !isSet(env[k]) || isPlaceholderValue(env[k]));
 }

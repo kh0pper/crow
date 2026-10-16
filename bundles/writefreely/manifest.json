@@ -1,7 +1,7 @@
 {
   "id": "writefreely",
   "name": "WriteFreely",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Lightweight, minimalist ActivityPub blogging platform. Single-binary, single-SQLite-file footprint — ideal for long-form writing federated to the fediverse. Complements GoToSocial (microblog) and Crow's own blog.",
   "type": "bundle",
   "author": "Crow",
@@ -33,7 +33,7 @@
   "env_vars": [
     {
       "name": "WF_HOST",
-      "description": "Public domain for this WriteFreely instance (must be a subdomain; subpath mounts break ActivityPub).",
+      "description": "Public domain for this WriteFreely instance (must be a subdomain; subpath mounts break ActivityPub). Set it before the first start: the app fixes it then, and changing it later breaks federation (only a reinstall with its data deleted can change it).",
       "required": true
     },
     {

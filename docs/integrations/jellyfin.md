@@ -26,7 +26,7 @@ Install Jellyfin as a Crow bundle. This runs Jellyfin in Docker alongside your C
 
 Or install from the **Extensions** panel in the Crow's Nest.
 
-After installation, set the path to your media files:
+Left empty at install, Jellyfin starts with an empty library in Crow's folder (`media/jellyfin`). To use your own media, set the path in Configure (or in the bundle's `.env`):
 
 ```bash
 # In your .env file

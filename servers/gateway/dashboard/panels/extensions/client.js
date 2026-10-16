@@ -694,12 +694,19 @@ export function extensionsClientJS(lang) {
                   // Keychain / vault outcome (review S4): shown, and given time to be read.
                   var kcMsgs = (res.data.keychain && res.data.keychain.messages) || [];
                   if (kcMsgs.length) statusDiv.textContent += " " + kcMsgs.join(" ");
+                  // Server warnings (e.g. a replaced previous encryption key): shown, in the
+                  // warning colour, long enough to read.
+                  var warnMsgs = res.data.warnings || [];
+                  if (warnMsgs.length) {
+                    statusDiv.style.color = "var(--crow-warning, #f0ad4e)";
+                    statusDiv.textContent += " " + warnMsgs.join(" ");
+                  }
                   setTimeout(function() {
                     // Hand the WHOLE response to onSaved: needs_config is the server's
                     // re-derived truth about what is still missing, and the only thing
                     // allowed to decide whether the "Needs setup" badge may come off.
                     if (typeof onSaved === "function") onSaved(res.data);
-                  }, kcMsgs.length ? 4000 : 1200);
+                  }, warnMsgs.length ? 9000 : (kcMsgs.length ? 4000 : 1200));
                 } else {
                   statusDiv.style.color = "var(--crow-error, #e74c3c)";
                   statusDiv.textContent = (res.data && res.data.error) || '${tJs("extensions.configureFailed", lang)}';

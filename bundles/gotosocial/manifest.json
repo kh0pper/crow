@@ -1,7 +1,7 @@
 {
   "id": "gotosocial",
   "name": "GoToSocial",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Lightweight ActivityPub microblog server (fediverse). Pi-friendly single-binary alternative to Mastodon — joins the public fediverse with a sub-500 MB footprint.",
   "type": "bundle",
   "author": "Crow",
@@ -23,7 +23,7 @@
     "es": "GoToSocial se une al fediverso: tu instancia será públicamente direccionable bajo el dominio que configures, y todo el contenido que publiques se replica a otros servidores ActivityPub. El contenido replicado no puede recuperarse completamente — las eliminaciones pueden no llegar a todos los servidores que guardaron tu publicación. La instancia obtiene y guarda contenido e imágenes de perfil de otros servidores federados, que pueden incluir material objetable. Eres responsable de moderar tu instancia y cumplir con la ley de tu jurisdicción. Si tu instancia es reportada por abuso, los nodos principales (mastodon.social, matrix.org) pueden dejar de federarse con tu dominio — y un dominio envenenado no puede rehabilitarse fácilmente; puede que tengas que mudarte a un dominio nuevo. La limpieza automática de medios (14 días por defecto, 7 días en hosts tipo Pi) está activa desde el primer día; los cachés de medios remotos igualmente crecen bajo federación activa."
   },
   "requires": {
-    "env": ["GTS_HOST", "GTS_ACCOUNT_DOMAIN"],
+    "env": ["GTS_HOST"],
     "bundles": ["caddy"],
     "min_ram_mb": 512,
     "recommended_ram_mb": 1024,
@@ -33,13 +33,13 @@
   "env_vars": [
     {
       "name": "GTS_HOST",
-      "description": "Public domain for this GoToSocial instance (e.g., gts.example.com). Must be a subdomain dedicated to GoToSocial — ActivityPub actors are URL-keyed and subpath mounts break federation.",
+      "description": "Public domain for this GoToSocial instance (e.g., gts.example.com). Must be a subdomain dedicated to GoToSocial — ActivityPub actors are URL-keyed and subpath mounts break federation. Set it before the first start: the app fixes it then, and changing it later breaks federation (only a reinstall with its data deleted can change it).",
       "required": true
     },
     {
       "name": "GTS_ACCOUNT_DOMAIN",
-      "description": "Account domain used in @user@domain handles. Usually the same as GTS_HOST. If your apex is example.com and GTS_HOST=gts.example.com, set this to example.com and add a .well-known/webfinger delegation on the apex.",
-      "required": true
+      "description": "Account domain used in @user@domain handles. Usually the same as GTS_HOST. If your apex is example.com and GTS_HOST=gts.example.com, set this to example.com and add a .well-known/webfinger delegation on the apex. Leave it empty to use GTS_HOST. Set it before the first start: the app fixes it then, and changing it later breaks federation (only a reinstall with its data deleted can change it).",
+      "required": false
     },
     {
       "name": "GTS_URL",

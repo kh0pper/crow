@@ -202,7 +202,7 @@
     {
       "id": "audiobookshelf",
       "name": "Audiobookshelf",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Self-hosted audiobook and podcast server — search, browse, and track listening progress",
       "type": "bundle",
       "author": "Crow",
@@ -255,12 +255,12 @@
         },
         {
           "name": "AUDIOBOOKSHELF_AUDIOBOOK_PATH",
-          "description": "Host path for audiobook files (Docker mode)",
+          "description": "Host path for audiobook files (Docker mode).",
           "required": false
         },
         {
           "name": "AUDIOBOOKSHELF_PODCAST_PATH",
-          "description": "Host path for podcast files (Docker mode)",
+          "description": "Host path for podcast files (Docker mode).",
           "required": false
         }
       ],
@@ -553,7 +553,7 @@
     {
       "id": "calibre-server",
       "name": "Calibre Server",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "OPDS content server for ebooks — search, browse, and download from your Calibre library",
       "type": "bundle",
       "author": "Crow",
@@ -630,7 +630,7 @@
     {
       "id": "calibre-web",
       "name": "Calibre-Web",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Web-based ebook reader and library manager for Calibre",
       "type": "bundle",
       "author": "Crow",
@@ -1755,7 +1755,7 @@
     {
       "id": "gotosocial",
       "name": "GoToSocial",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Lightweight ActivityPub microblog server (fediverse). Pi-friendly single-binary alternative to Mastodon — joins the public fediverse with a sub-500 MB footprint.",
       "type": "bundle",
       "author": "Crow",
@@ -1793,8 +1793,7 @@
       },
       "requires": {
         "env": [
-          "GTS_HOST",
-          "GTS_ACCOUNT_DOMAIN"
+          "GTS_HOST"
         ],
         "bundles": [
           "caddy"
@@ -1807,13 +1806,13 @@
       "env_vars": [
         {
           "name": "GTS_HOST",
-          "description": "Public domain for this GoToSocial instance (e.g., gts.example.com). Must be a subdomain dedicated to GoToSocial — ActivityPub actors are URL-keyed and subpath mounts break federation.",
+          "description": "Public domain for this GoToSocial instance (e.g., gts.example.com). Must be a subdomain dedicated to GoToSocial — ActivityPub actors are URL-keyed and subpath mounts break federation. Set it before the first start: the app fixes it then, and changing it later breaks federation (only a reinstall with its data deleted can change it).",
           "required": true
         },
         {
           "name": "GTS_ACCOUNT_DOMAIN",
-          "description": "Account domain used in @user@domain handles. Usually the same as GTS_HOST. If your apex is example.com and GTS_HOST=gts.example.com, set this to example.com and add a .well-known/webfinger delegation on the apex.",
-          "required": true
+          "description": "Account domain used in @user@domain handles. Usually the same as GTS_HOST. If your apex is example.com and GTS_HOST=gts.example.com, set this to example.com and add a .well-known/webfinger delegation on the apex. Leave it empty to use GTS_HOST. Set it before the first start: the app fixes it then, and changing it later breaks federation (only a reinstall with its data deleted can change it).",
+          "required": false
         },
         {
           "name": "GTS_URL",
@@ -2073,7 +2072,7 @@
     {
       "id": "jellyfin",
       "name": "Jellyfin",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Self-hosted media server — stream movies, TV shows, and music with AI-powered library management",
       "type": "bundle",
       "author": "Crow",
@@ -2133,8 +2132,10 @@
         },
         {
           "name": "JELLYFIN_MEDIA_PATH",
-          "description": "Host path for media files (Docker mode)",
-          "required": true
+          "description": "Host path for media files (Docker mode). Leave it empty to start with an empty library in Crow's folder (media/jellyfin); point it at your media later in Configure.",
+          "required": true,
+          "default_in_crow_home": "media/jellyfin",
+          "propagate": false
         },
         {
           "name": "JELLYFIN_CONFIG_PATH",
@@ -2156,7 +2157,7 @@
     {
       "id": "kavita",
       "name": "Kavita",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Self-hosted manga, comics, and ebook reader — browse series, track reading progress",
       "type": "bundle",
       "author": "Crow",
@@ -2216,7 +2217,7 @@
         },
         {
           "name": "KAVITA_LIBRARY_PATH",
-          "description": "Host path for manga/comics/ebooks (Docker mode)",
+          "description": "Host path for manga/comics/ebooks (Docker mode).",
           "required": false
         }
       ],
@@ -3323,7 +3324,7 @@
     {
       "id": "matrix-dendrite",
       "name": "Matrix (Dendrite)",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "description": "Matrix homeserver on Dendrite — federated real-time chat with end-to-end encryption. Lighter than Synapse, monolithic binary. Joins the Matrix federation graph via HTTPS federation (:8448 or .well-known delegation).",
       "type": "bundle",
       "author": "Crow",
@@ -3378,7 +3379,7 @@
       "env_vars": [
         {
           "name": "MATRIX_SERVER_NAME",
-          "description": "The homeserver's public domain — this is the server_name that appears in user IDs (@alice:example.com). Typically an apex (example.com) with a .well-known/matrix/server delegation, OR a subdomain you'll expose on :8448 directly (matrix.example.com).",
+          "description": "The homeserver's public domain — this is the server_name that appears in user IDs (@alice:example.com). Typically an apex (example.com) with a .well-known/matrix/server delegation, OR a subdomain you'll expose on :8448 directly (matrix.example.com). Set it before the first start: the app fixes it then, and changing it later breaks federation (only a reinstall with its data deleted can change it).",
           "required": true
         },
         {
@@ -4064,7 +4065,7 @@
     {
       "id": "navidrome",
       "name": "Navidrome",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Lightweight music streaming server — browse albums, artists, playlists, and stream music",
       "type": "bundle",
       "author": "Crow",
@@ -4124,8 +4125,10 @@
         },
         {
           "name": "NAVIDROME_MUSIC_PATH",
-          "description": "Host path for music files (Docker mode)",
-          "required": true
+          "description": "Host path for music files (Docker mode). Leave it empty to start with an empty library in Crow's folder (media/music); point it at your music later in Configure.",
+          "required": true,
+          "default_in_crow_home": "media/music",
+          "propagate": false
         }
       ],
       "ports": [
@@ -4203,7 +4206,7 @@
     {
       "id": "nextcloud",
       "name": "Nextcloud (connect existing)",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "description": "Deprecated: connect Crow to a Nextcloud you already run, over WebDAV. To host your own files, documents and calendars, install Crow Workspace instead.",
       "type": "skill",
       "author": "Crow",
@@ -4854,7 +4857,7 @@
     {
       "id": "plex",
       "name": "Plex",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "privileged": true,
       "install_consent_messages": {
         "en": "Crow does not start a Plex server at install: it runs only if you start it from Extensions. If you do, the self-hosted Plex server uses host networking (Plex's own recommendation) so devices on your local network can discover it. It listens on every network interface of this machine (port 32400 and Plex's discovery ports) and mounts your media folder read-write. Until you claim it with your Plex account (PLEX_CLAIM_TOKEN), the first person who opens it can claim it.",
@@ -5894,7 +5897,7 @@
     {
       "id": "tax",
       "name": "Tax Filing Assistant",
-      "version": "2.0.2",
+      "version": "2.0.3",
       "description": "Prepare federal income taxes — PDF document ingestion, calculation, form generation, and guided filing. Federal returns only (no state). Supports 1040, Schedules 1/C/D/SE, Form 8889, Form 8863, and common credits. 2024 + 2025 tax years.",
       "type": "mcp-server",
       "author": "Crow",
@@ -5913,7 +5916,9 @@
           "server/index.js"
         ],
         "envKeys": [
-          "CROW_TAX_DB_PATH"
+          "CROW_TAX_DB_PATH",
+          "CROW_TAX_ENCRYPTION_KEY",
+          "CROW_TAX_ENCRYPTION_KEY_PREVIOUS"
         ]
       },
       "panel": "panel/tax.js",
@@ -5933,8 +5938,15 @@
         },
         {
           "name": "CROW_TAX_ENCRYPTION_KEY",
-          "description": "Passphrase for encrypting PII at rest (SSN, names). Set on first use.",
+          "description": "Passphrase that encrypts personal data at rest (SSN, names). Choose your own and keep a copy: without it saved returns can't be read. Changing it keeps the key it replaces in CROW_TAX_ENCRYPTION_KEY_PREVIOUS, and the tax server moves saved returns to the new key when it next starts. Restart it between two changes.",
           "required": true,
+          "secret": true,
+          "previous_key": "CROW_TAX_ENCRYPTION_KEY_PREVIOUS"
+        },
+        {
+          "name": "CROW_TAX_ENCRYPTION_KEY_PREVIOUS",
+          "description": "Only after changing the passphrase: the old one, so returns saved with it can still be opened. Each return moves to the new passphrase when the tax server next starts or the return is saved; then this can be cleared.",
+          "required": false,
           "secret": true
         }
       ],
@@ -6729,7 +6741,7 @@
     {
       "id": "writefreely",
       "name": "WriteFreely",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Lightweight, minimalist ActivityPub blogging platform. Single-binary, single-SQLite-file footprint — ideal for long-form writing federated to the fediverse. Complements GoToSocial (microblog) and Crow's own blog.",
       "type": "bundle",
       "author": "Crow",
@@ -6782,7 +6794,7 @@
       "env_vars": [
         {
           "name": "WF_HOST",
-          "description": "Public domain for this WriteFreely instance (must be a subdomain; subpath mounts break ActivityPub).",
+          "description": "Public domain for this WriteFreely instance (must be a subdomain; subpath mounts break ActivityPub). Set it before the first start: the app fixes it then, and changing it later breaks federation (only a reinstall with its data deleted can change it).",
           "required": true
         },
         {

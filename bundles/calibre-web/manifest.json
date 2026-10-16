@@ -1,7 +1,7 @@
 {
   "id": "calibre-web",
   "name": "Calibre-Web",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Web-based ebook reader and library manager for Calibre",
   "type": "bundle",
   "author": "Crow",

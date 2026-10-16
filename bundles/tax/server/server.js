@@ -10,7 +10,7 @@ import { z } from "zod";
 import { randomBytes } from "node:crypto";
 import { createDbClient } from "./db.js";
 import { initTaxTables } from "./init-tables.js";
-import { encrypt, decrypt } from "./crypto.js";
+import { encrypt, decrypt, decryptWithFallback } from "./crypto.js";
 import { processReturn, loadTables, getFormLines, requiredForms, validate } from "../engine/index.js";
 
 function genReturnId() {
@@ -25,6 +25,26 @@ function getEncryptionKey() {
   return key;
 }
 
+/**
+ * Re-encrypt every return that only `previous` opens with `current`. Best-effort: a row
+ * neither key opens is left as it is. Returns the number of rows moved.
+ */
+export async function reencryptToCurrentKey(db, current, previous) {
+  if (!current || !previous || current === previous) return 0;
+  let moved = 0;
+  let rows;
+  try { rows = (await db.execute("SELECT id, data FROM tax_returns")).rows; } catch { return 0; }
+  for (const r of rows) {
+    try { decrypt(r.data, current); continue; } catch { /* not on the current key */ }
+    let plain;
+    try { plain = decrypt(r.data, previous); } catch { continue; }
+    // Compare-and-swap: a save that landed after the read wins; this row is moved later.
+    const res = await db.execute({ sql: "UPDATE tax_returns SET data = ? WHERE id = ? AND data = ?", args: [encrypt(plain, current), r.id, r.data] });
+    if ((res.rowsAffected ?? res.changes ?? 1) > 0) moved++;
+  }
+  return moved;
+}
+
 export function createTaxServer(dbPath, options = {}) {
   const server = new McpServer(
     { name: "crow-tax", version: "1.0.0" },
@@ -33,13 +53,19 @@ export function createTaxServer(dbPath, options = {}) {
 
   const db = createDbClient(dbPath);
 
+  // After a passphrase change: re-encrypt every return that only the previous key opens,
+  // so the previous key can be cleared (and changed again) without stranding data.
+  reencryptToCurrentKey(db, process.env.CROW_TAX_ENCRYPTION_KEY, process.env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS).catch(() => {});
+
   // Helper: load return from DB
   async function loadReturn(id) {
     const row = await db.execute({ sql: "SELECT * FROM tax_returns WHERE id = ?", args: [id] });
     if (row.rows.length === 0) return null;
     const r = row.rows[0];
     try {
-      const decrypted = decrypt(r.data, getEncryptionKey());
+      // After a passphrase change, rows saved with the old one still open; saving
+      // re-encrypts them with the current passphrase.
+      const decrypted = decryptWithFallback(r.data, [getEncryptionKey(), process.env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS]);
       return { ...r, data: JSON.parse(decrypted), result: r.result ? JSON.parse(r.result) : null };
     } catch {
       return { ...r, data: JSON.parse(r.data), result: r.result ? JSON.parse(r.result) : null };
