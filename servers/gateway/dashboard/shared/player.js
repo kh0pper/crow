@@ -4,9 +4,15 @@
  * Provides a fixed bottom bar with play/pause, seek, queue, next/prev, stop,
  * and localStorage persistence. Any panel can use `window.crowPlayer` to play.
  *
- * Supports two backends:
+ * Supports three backends:
  *   - "local": HTML5 <audio> element (podcasts, media briefings, Funkwhale proxy, etc.)
  *   - "glasses": Meta-glasses device audio via REST control endpoints
+ *   - "kiosk": the Talk to Crow overlay's media (kiosk B3), one item at a time, on the same <audio>.
+ *     Internal API for crow-talk.js only: kioskAttach / kioskApply / kioskDetach / kioskOwner.
+ *     While the overlay's frame is attached the frame drives the element (validated ops) and hears its
+ *     events back; detached (overlay closed, or after a reload) the bar's controls and the element's
+ *     ended/error/stall go to /api/kiosk/session/media. No ticket path is ever stored (S3): the reload
+ *     marker is {backend:"kiosk", title} and a reload asks the server again.
  *
  * Exports:
  *   playerBarHtml(lang)  — HTML string for the bar (hidden by default)
@@ -14,6 +20,14 @@
  */
 
 import { t, tJs } from "./i18n.js";
+import { validatorSource } from "./kiosk-media-protocol.js";
+
+/** Kiosk B3: the bar's side of the hand-off (see crow-talk.js). */
+export const KIOSK_MEDIA_URL = "/api/kiosk/session/media";
+/** sessionStorage key of this tab's owner nonce: it survives a reload of the tab, never another tab. */
+export const KIOSK_OWNER_KEY = "crow-kiosk-bar-owner";
+/** Detached: no `playing` this long after waiting/stalled → POST error (the frame's own watchdog is STALL_MS too). */
+export const KIOSK_STALL_MS = 15000;
 
 export function playerBarHtml(lang) {
   return `<style>@media(max-width:768px){#crow-player-bar{left:0!important}}</style>
@@ -77,7 +91,7 @@ export function playerBarJs(lang) {
   var closedByUser = false;
 
   // --- Backend state ---
-  var activeBackend = 'local'; // 'local' | 'glasses'
+  var activeBackend = 'local'; // 'local' | 'glasses' | 'kiosk'
   var glassesDeviceId = null;
   var glassesState = 'idle'; // 'idle' | 'playing' | 'paused'
   var glassesTitle = '';
@@ -95,7 +109,7 @@ export function playerBarJs(lang) {
   }
 
   function updateTime() {
-    if (activeBackend !== 'local') { timeEl.textContent = ''; return; }
+    if (activeBackend === 'glasses' || (activeBackend === 'kiosk' && (!kioskItem || kioskItem.live))) { timeEl.textContent = ''; return; }
     if (!audio.duration) { timeEl.textContent = ''; return; }
     timeEl.textContent = fmt(audio.currentTime) + ' / ' + fmt(audio.duration);
     var pct = (audio.currentTime / audio.duration) * 100;
@@ -119,6 +133,15 @@ export function playerBarJs(lang) {
       timeEl.style.display = 'none';
       sourceEl.textContent = SOURCE_GLASSES;
       sourceEl.style.display = 'inline';
+    } else if (activeBackend === 'kiosk') {
+      var k = kioskItem || {};
+      prevBtn.style.display = k.has_previous ? 'block' : 'none';
+      nextBtn.style.display = k.has_next ? 'block' : 'none';
+      stopBtn.style.display = 'block';
+      seekWrap.style.display = k.live ? 'none' : 'block';
+      timeEl.style.display = k.live ? 'none' : '';
+      sourceEl.textContent = k.source || '';
+      sourceEl.style.display = k.source ? 'inline' : 'none';
     } else {
       var show = queue.length > 1;
       prevBtn.style.display = show ? 'block' : 'none';
@@ -141,6 +164,12 @@ export function playerBarJs(lang) {
   function saveState() {
     if (closedByUser) return;
     if (bar.style.display === 'none') return;
+    if (activeBackend === 'kiosk') {
+      // S3: the ticket path never reaches storage; a reload asks the server (GET) instead.
+      if (!kioskItem) return;
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ backend: 'kiosk', title: titleEl.textContent })); } catch (e) {}
+      return;
+    }
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
         backend: activeBackend,
@@ -196,11 +225,13 @@ export function playerBarJs(lang) {
   // through end-to-end on flaky networks.
   var stallTimer = null;
   var retriedThisTrack = false;
+  // The kiosk backend has its own rules (the frame or the server decides what comes next).
   function clearStall() {
     if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
   }
   function armStall() {
     clearStall();
+    if (activeBackend === 'kiosk') return;
     stallTimer = setTimeout(function() {
       if (!retriedThisTrack) {
         retriedThisTrack = true;
@@ -212,6 +243,7 @@ export function playerBarJs(lang) {
     }, 8000);
   }
   audio.addEventListener('error', function() {
+    if (activeBackend === 'kiosk') return;
     try { console.warn('[crowPlayer] audio error', audio.error && audio.error.code); } catch (e) {}
     if (queueIndex < queue.length - 1) {
       setTimeout(function() { window.crowPlayer.next(); }, 500);
@@ -224,6 +256,7 @@ export function playerBarJs(lang) {
 
   audio.addEventListener('ended', function() {
     clearStall();
+    if (activeBackend === 'kiosk') return;
     if (queueIndex < queue.length - 1) {
       window.crowPlayer.next();
     } else {
@@ -245,6 +278,7 @@ export function playerBarJs(lang) {
 
   function playItem(item) {
     closedByUser = false;
+    leaveKiosk();
     switchToLocal();
     bar.style.display = 'block';
     setPending(false);
@@ -286,6 +320,227 @@ export function playerBarJs(lang) {
     } catch (e) {}
   }
 
+
+  // --- Kiosk backend (B3): the Talk to Crow overlay's media ---
+  // The validator below is kiosk-media-protocol.js's own text (validatorSource), so the
+  // tested function and the shipped one are the same.
+  ${validatorSource()}
+  var KIOSK_URL = ${JSON.stringify(KIOSK_MEDIA_URL)};
+  var KIOSK_OWNER_KEY = ${JSON.stringify(KIOSK_OWNER_KEY)};
+  var KIOSK_STALL_MS = ${KIOSK_STALL_MS};
+  var kioskItem = null;     // { id, url, title, subtitle, source, live, has_next, has_previous }
+  var kioskPost = null;     // the frame's postMessage, while attached
+  var kioskIsLive = null;   // () → is that frame still the live one (review 2)
+  var kioskEpoch = 0;       // bumped whenever the bar moves on: a late answer for an older state is dropped
+  var kioskStall = null, kioskRetry = null, kioskOwnerMem = null;
+
+  /** The kiosk's level curve (media-view levelOf): 0–100 from the server → the element's 0–1. */
+  function kioskLevel(v, muted) {
+    if (muted || !(v > 0)) return 0;
+    return Math.min(1, Math.pow(10, (Math.min(100, v) - 100) / 40));
+  }
+  function kioskOwner() {
+    var o = null;
+    try { o = sessionStorage.getItem(KIOSK_OWNER_KEY); } catch (e) {}
+    if (o && /^[A-Za-z0-9_-]{16,64}$/.test(o)) return o;
+    if (kioskOwnerMem) return kioskOwnerMem;
+    var abc = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-';
+    var bytes = new Uint8Array(24);
+    try { crypto.getRandomValues(bytes); } catch (e) { for (var i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256); }
+    o = '';
+    for (var j = 0; j < bytes.length; j++) o += abc.charAt(bytes[j] % 64);
+    kioskOwnerMem = o;
+    try { sessionStorage.setItem(KIOSK_OWNER_KEY, o); } catch (e) {}
+    return o;
+  }
+  function kioskCookie(name) {
+    var parts = String(document.cookie || '').split(';');
+    for (var i = 0; i < parts.length; i++) {
+      var p = parts[i].replace(/^ +/, '');
+      if (p.indexOf(name + '=') === 0) return p.slice(name.length + 1);
+    }
+    return '';
+  }
+  /** Attached = a frame registered AND it is still the live frame (Android Back can swap the body without a close). */
+  function kioskAttached() {
+    if (!kioskPost) return false;
+    var live = false;
+    try { live = !kioskIsLive || kioskIsLive() === true; } catch (e) { live = false; }
+    if (!live) { kioskPost = null; kioskIsLive = null; }
+    return live;
+  }
+  function kioskToFrame(type, extra) {
+    if (!kioskItem || !kioskAttached()) return false;
+    var m = { crow: 'media-event', v: 1, id: kioskItem.id, type: type };
+    if (extra) for (var k in extra) m[k] = extra[k];
+    try { kioskPost(m); } catch (e) {}
+    return true;
+  }
+  function kioskTimersOff() {
+    if (kioskStall) { clearTimeout(kioskStall); kioskStall = null; }
+    if (kioskRetry) { clearTimeout(kioskRetry); kioskRetry = null; }
+  }
+  /** Show an item (a validated load) on the bar. Does not touch src or play. */
+  function kioskShow(m) {
+    closedByUser = false;
+    activeBackend = 'kiosk';
+    queue = []; queueIndex = -1;
+    kioskItem = { id: m.id, url: m.url, title: m.title, subtitle: m.subtitle, source: m.source, live: m.live, has_next: m.has_next, has_previous: m.has_previous };
+    bar.style.display = 'block';
+    setPending(false);
+    adjustPosition();
+    titleEl.textContent = m.title || PLAYING_LABEL;
+    if (m.subtitle) { subtitleEl.textContent = m.subtitle; subtitleEl.style.display = 'block'; }
+    else { subtitleEl.textContent = ''; subtitleEl.style.display = 'none'; }
+    progressEl.style.width = '0%';
+    timeEl.textContent = '';
+    updateNavButtons();
+    updateToggleIcon();
+    applyMediaSessionMetadata({ title: m.title, artist: m.subtitle });
+    saveState();
+  }
+  function kioskSetSrc(url) {
+    kioskTimersOff();
+    audio.src = url;
+  }
+  function kioskPlay() {
+    var p;
+    try { p = audio.play(); } catch (e) { p = null; }
+    if (p && p.catch) p.catch(function (err) { if (err && err.name === 'NotAllowedError') showResumeOverlay(); });
+  }
+  /** The bar lets the overlay's media go: hidden, silent, no marker. Never calls the server itself. */
+  function kioskClear() {
+    kioskEpoch++;
+    kioskTimersOff();
+    var had = activeBackend === 'kiosk';
+    kioskItem = null;
+    if (!had) { try { localStorage.removeItem(STORAGE_KEY); } catch (e) {} return; }   // a reload marker with nothing behind it
+    activeBackend = 'local';
+    try { audio.pause(); } catch (e) {}
+    try { audio.removeAttribute('src'); audio.load(); } catch (e) {}
+    bar.style.display = 'none';
+    updateNavButtons();
+    try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+  }
+  function kioskAnswer(epoch) {
+    return function (r) {
+      if (epoch !== kioskEpoch) return;
+      if (r.status === 200) return r.json().then(function (v) { if (epoch === kioskEpoch) kioskApplyView(v); });
+      if (r.status === 409 || r.status === 401 || r.status === 404) kioskClear();   // S8: superseded or logged out
+    };
+  }
+  /** Detached: one verb about the bar's own item. The answer (the new view) is applied unless the bar moved on. */
+  function kioskSend(verb) {
+    if (!kioskItem) return;
+    var owner = kioskOwner();
+    fetch(KIOSK_URL, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-Crow-Csrf': kioskCookie('crow_csrf') },
+      body: JSON.stringify({ do: verb, id: kioskItem.id, owner: owner }),
+    }).then(kioskAnswer(kioskEpoch)).catch(function () {});
+  }
+  /** A reload, or a station reload's retry: what does the server hold for this tab? */
+  function kioskGet() {
+    fetch(KIOSK_URL, { method: 'GET', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Crow-Owner': kioskOwner() } })
+      .then(kioskAnswer(kioskEpoch)).catch(function () {});
+  }
+  /** A verb from the bar's own controls: through the frame while attached (it tells the server), else POST. */
+  function kioskCommand(verb) {
+    if (!kioskItem) return;
+    if (kioskToFrame('cmd', { do: verb })) return;
+    kioskSend(verb);
+  }
+  /** The server's one-item view (GET/POST answer). Its item goes through the same validator as a frame's load. */
+  function kioskApplyView(v) {
+    if (!v || typeof v !== 'object') return;
+    var it = v.item;
+    if (!it || typeof it !== 'object') { kioskClear(); return; }
+    if (it.url === null && kioskItem && it.id === kioskItem.id) {
+      // A station reload is pending (D4): ask again once it is due.
+      var wait = Number(v.retry_ms);
+      if (kioskRetry) clearTimeout(kioskRetry);
+      kioskRetry = setTimeout(function () { kioskRetry = null; kioskGet(); }, isFinite(wait) ? Math.max(0, Math.min(wait, 60000)) : 1000);
+      return;
+    }
+    var m = validateFrameMessage({ crow: 'media', v: 1, op: 'load', id: it.id, url: it.url, title: it.title, subtitle: it.subtitle || '', source: it.source || '', live: it.live === true, has_next: v.has_next === true, has_previous: v.has_previous === true });
+    if (!m) { kioskClear(); return; }
+    var same = activeBackend === 'kiosk' && kioskItem && kioskItem.id === m.id && kioskItem.url === m.url;
+    if (!same) {
+      if (activeBackend !== 'kiosk') leaveOtherForKiosk();
+      kioskEpoch++;
+      kioskShow(m);
+      kioskSetSrc(m.url);
+    } else {
+      kioskItem.has_next = m.has_next; kioskItem.has_previous = m.has_previous;
+      updateNavButtons();
+    }
+    audio.volume = kioskLevel(v.volume, v.muted);
+    if (v.state === 'paused') { if (!audio.paused) audio.pause(); return; }
+    if (!same || audio.paused) kioskPlay();
+  }
+  /** The kiosk takes the bar: whatever the local queue played stops (its src is replaced next). */
+  function leaveOtherForKiosk() {
+    clearStall();
+    queue = []; queueIndex = -1;
+    try { audio.pause(); } catch (e) {}
+  }
+  /** The bar leaves the kiosk backend (the Media app or the glasses take it): the overlay's item is stopped (review 4). */
+  function leaveKiosk() {
+    kioskEpoch++;
+    if (activeBackend !== 'kiosk') return;
+    if (kioskItem) kioskCommand('stop');
+    kioskEpoch++;
+    kioskTimersOff();
+    kioskItem = null;
+    activeBackend = 'local';
+  }
+  /** A validated frame op. Every op but load names its item and is ignored unless that item is on the bar (review 3). */
+  function kioskApply(raw) {
+    var m = validateFrameMessage(raw);
+    if (!m) return;
+    if (m.op === 'load') {
+      if (activeBackend === 'kiosk' && kioskItem && kioskItem.id === m.id && kioskItem.url === m.url) {
+        kioskItem.has_next = m.has_next; kioskItem.has_previous = m.has_previous;
+        updateNavButtons();
+        kioskToFrame(audio.paused ? 'pause' : 'playing');   // a reopened overlay finds it as it is
+        return;
+      }
+      if (activeBackend !== 'kiosk') leaveOtherForKiosk();
+      kioskEpoch++;
+      kioskShow(m);
+      kioskSetSrc(m.url);
+      audio.volume = m.volume;
+      return;
+    }
+    if (activeBackend !== 'kiosk' || !kioskItem || m.id !== kioskItem.id) return;
+    if (m.op === 'play') {
+      var id = m.id, p;
+      try { p = audio.play(); } catch (e) { p = Promise.reject(e); }
+      Promise.resolve(p).then(function () {
+        if (kioskItem && kioskItem.id === id) kioskToFrame('play-result', { ok: true });
+      }, function (err) {
+        if (kioskItem && kioskItem.id === id) kioskToFrame('play-result', { ok: false, name: String((err && err.name) || 'Error').slice(0, 40) });
+      });
+    } else if (m.op === 'pause') audio.pause();
+    else if (m.op === 'volume') audio.volume = m.volume;
+    else if (m.op === 'stop') kioskClear();
+  }
+  // The element's events: to the frame while attached; detached, ended/error/stall go to the server.
+  ['playing', 'pause', 'ended', 'error', 'waiting', 'stalled'].forEach(function (type) {
+    audio.addEventListener(type, function () {
+      if (activeBackend !== 'kiosk' || !kioskItem) return;
+      if (kioskToFrame(type)) return;
+      if (type === 'playing' || type === 'pause') { if (kioskStall) { clearTimeout(kioskStall); kioskStall = null; } return; }
+      if (type === 'waiting' || type === 'stalled') {
+        if (!kioskStall && !audio.paused) kioskStall = setTimeout(function () { kioskStall = null; if (activeBackend === 'kiosk') kioskSend('error'); }, KIOSK_STALL_MS);
+        return;
+      }
+      if (kioskStall) { clearTimeout(kioskStall); kioskStall = null; }
+      kioskSend(type);
+    });
+  });
+
   // --- navigator.mediaSession (Android shade/lockscreen controls) ---
   function applyMediaSessionMetadata(meta) {
     currentMetadata = meta || null;
@@ -322,6 +577,7 @@ export function playerBarJs(lang) {
 
   function showGlassesBar(title, artist, state) {
     closedByUser = false;
+    leaveKiosk();
     activeBackend = 'glasses';
     glassesTitle = title || '';
     glassesArtist = artist || '';
@@ -392,6 +648,7 @@ export function playerBarJs(lang) {
     }
 
     // glasses are playing or paused
+    if (activeBackend === 'kiosk' && kioskItem) return;   // the overlay's media keeps the bar
     if (activeBackend === 'local' && !audio.paused && audio.src) {
       // Local audio is actively playing — don't steal the bar
       return;
@@ -512,6 +769,7 @@ export function playerBarJs(lang) {
     },
 
     next: function() {
+      if (activeBackend === 'kiosk') { kioskCommand('next'); return; }
       if (activeBackend === 'glasses') {
         glassesControl('next');
         return;
@@ -523,6 +781,7 @@ export function playerBarJs(lang) {
     },
 
     prev: function() {
+      if (activeBackend === 'kiosk') { kioskCommand('previous'); return; }
       if (activeBackend === 'glasses') return; // no prev for glasses
       if (audio.currentTime > 3 || queueIndex === 0) {
         audio.currentTime = 0;
@@ -534,6 +793,16 @@ export function playerBarJs(lang) {
     },
 
     toggle: function() {
+      if (activeBackend === 'kiosk') {
+        if (!kioskItem) return;
+        // Attached: act on the element, so the frame hears a real (the person's) pause or play.
+        if (kioskAttached()) { if (audio.paused) kioskPlay(); else audio.pause(); return; }
+        if (!audio.paused) { audio.pause(); kioskSend('pause'); return; }
+        // A station resumes live on a new ticket (the answer brings it); a track resumes here at once.
+        if (!kioskItem.live) kioskPlay();
+        kioskSend('resume');
+        return;
+      }
       if (activeBackend === 'glasses') {
         var action = glassesState === 'paused' ? 'resume' : 'pause';
         glassesState = (action === 'pause') ? 'paused' : 'playing';
@@ -546,6 +815,7 @@ export function playerBarJs(lang) {
 
     stop: function() {
       closedByUser = true;
+      if (activeBackend === 'kiosk') { kioskCommand('stop'); kioskClear(); return; }
       if (activeBackend === 'glasses') {
         glassesControl('stop');
         hideGlassesBar();
@@ -566,6 +836,7 @@ export function playerBarJs(lang) {
 
     close: function() {
       closedByUser = true;
+      if (activeBackend === 'kiosk') { kioskCommand('stop'); kioskClear(); return; }
       if (activeBackend === 'glasses') {
         glassesControl('stop');
         hideGlassesBar();
@@ -581,6 +852,7 @@ export function playerBarJs(lang) {
 
     _seek: function(e) {
       if (activeBackend === 'glasses') return; // no seek for glasses
+      if (activeBackend === 'kiosk' && (!kioskItem || kioskItem.live)) return;
       if (!audio.duration) return;
       var rect = seekWrap.getBoundingClientRect();
       var pct = (e.clientX - rect.left) / rect.width;
@@ -592,6 +864,8 @@ export function playerBarJs(lang) {
 
     // --- Backend API ---
     setBackend: function(type, config) {
+      if (type === 'kiosk') return;   // only a frame's load puts the bar on the kiosk backend
+      leaveKiosk();
       activeBackend = type;
       if (type === 'glasses' && config && config.deviceId) {
         glassesDeviceId = config.deviceId;
@@ -599,7 +873,26 @@ export function playerBarJs(lang) {
       }
     },
     getBackend: function() { return activeBackend; },
-    getGlassesDeviceId: function() { return glassesDeviceId; }
+    getGlassesDeviceId: function() { return glassesDeviceId; },
+
+    // --- Kiosk backend (internal: crow-talk.js only) ---
+    /** The overlay's frame is up: post(obj) reaches it; isLive() says whether it still is. */
+    kioskAttach: function(post, isLive) {
+      if (typeof post !== 'function') return;
+      kioskPost = post;
+      kioskIsLive = typeof isLive === 'function' ? isLive : null;
+    },
+    /** A message from the frame (the parent has checked origin + source); validated here again. */
+    kioskApply: kioskApply,
+    /** The frame is going: { volume, resume } is what crowKioskRelease() returned (the un-ducked level, un-hold). */
+    kioskDetach: function(s) {
+      kioskPost = null; kioskIsLive = null;
+      if (activeBackend !== 'kiosk' || !kioskItem || !s || typeof s !== 'object') return;
+      if (typeof s.volume === 'number' && isFinite(s.volume)) audio.volume = Math.max(0, Math.min(1, s.volume));
+      if (s.resume === true && audio.paused) kioskPlay();
+    },
+    /** This tab's owner nonce (sent in the frame's hello and with every request). */
+    kioskOwner: kioskOwner
   };
 
   // Register MediaSession action handlers once. They delegate to the public
@@ -618,7 +911,10 @@ export function playerBarJs(lang) {
   try {
     var saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
     if (saved) {
-      if (saved.backend === 'glasses' && saved.glassesDeviceId) {
+      if (saved.backend === 'kiosk') {
+        // The overlay's media outlived the page: ask the server what this tab's bar holds (never a stored path).
+        kioskGet();
+      } else if (saved.backend === 'glasses' && saved.glassesDeviceId) {
         // Restore glasses in pending (dimmed) state until first poll confirms
         glassesDeviceId = saved.glassesDeviceId;
         glassesTitle = saved.glassesTitle || '';
