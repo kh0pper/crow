@@ -243,7 +243,7 @@ test("review M3 pins: a received artifact is never a target; the engine's own bo
   assert.equal((await pickSendTarget(s.db, { artifactId: x.art.id, loadBotDef: async () => DEF })).threadId, x.A, "the Library pick skips the locked chat");
 });
 
-test("Kevin 2026-10-13: a trusted 'New chat with <bot>' Send links the new chat (owner-yes, audited); an untrusted round's locked chat is NEVER linked", async () => {
+test("operator decision 2026-10-13: a trusted 'New chat with <bot>' Send links the new chat (owner-yes, audited); an untrusted round's locked chat is NEVER linked", async () => {
   const x = await setup();
   const r = await startTo(x, null);
   const e = engine([]);

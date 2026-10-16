@@ -28,3 +28,16 @@
 #crow-artifacts .ca-warn{background:#e2a03f22;border:1px solid #e2a03f}
 #crow-artifacts button{min-height:44px}
 #crow-artifacts [hidden]{display:none !important}
+
+/* House style (design kit spec §4.4) */
+#crow-artifacts .ca-hs-open{align-self:flex-start;width:auto;margin:0;min-height:44px}
+.ca-hs{margin:0 0 1rem;padding:.75rem 1rem;border:1px solid #8884;border-radius:8px}
+.ca-hs h3{margin:0 0 .25rem}
+.ca-hs h4{margin:.75rem 0 .25rem}
+.ca-hs-help{margin:0 0 .5rem;opacity:.85}
+.ca-hs-row{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;padding:.25rem 0}
+.ca-hs-name{flex:1 1 10rem;min-width:0;overflow-wrap:anywhere}
+#crow-artifacts .ca-hs-row select{width:auto;flex:0 1 16rem;min-width:0;max-width:100%;min-height:44px;font:inherit}
+.ca-hs-sws{display:inline-flex;gap:2px}
+.ca-hs-sw{display:inline-block;width:.9rem;height:.9rem;border-radius:3px;border:1px solid #8886}
+.ca-hs-warn{flex-basis:100%;font-size:.85em;opacity:.8}

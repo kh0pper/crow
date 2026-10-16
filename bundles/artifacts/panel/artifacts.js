@@ -28,6 +28,12 @@ export const ARTIFACTS_STRINGS = {
     open_chat: "Open chat", unlink: "Unlink", no_links: "Not linked to any chat.", asleep: "stopped",
     soon_projects: "Adding artifacts to projects is coming soon.", soon_sharing: "Sharing artifacts with contacts is coming soon.",
     no_audit: "Nothing recorded yet.", failed: "That didn't work. Try again.",
+    hs_button: "House style", hs_title: "House style",
+    hs_help: "Choose a theme for a project's or a bot's artifacts. It is off unless you set one: without it, bots give each artifact its own distinctive look.",
+    hs_no_kit: "Install the Design kit extension to choose a house style.", hs_projects: "Projects", hs_bots: "Bots (used when their project has none)",
+    hs_none: "No house style", hs_for: "House style for {name}", hs_missing: "This theme is no longer in the Design kit, so it is ignored.",
+    hs_no_projects: "No projects yet.", hs_no_bots: "No bots use Artifacts yet.",
+    hs_stale: "This bot was changed somewhere else. Reload the page and try again.",
   },
   es: {
     title: "Artefactos", empty: "Aún no hay artefactos. Pídele a un bot que haga una página, un documento o un diagrama.",
@@ -42,6 +48,12 @@ export const ARTIFACTS_STRINGS = {
     open_chat: "Abrir chat", unlink: "Desvincular", no_links: "No está vinculado a ningún chat.", asleep: "detenido",
     soon_projects: "Pronto podrás añadir artefactos a proyectos.", soon_sharing: "Pronto podrás compartir artefactos con tus contactos.",
     no_audit: "Aún no hay registros.", failed: "No funcionó. Inténtalo de nuevo.",
+    hs_button: "Estilo de la casa", hs_title: "Estilo de la casa",
+    hs_help: "Elige un tema para los artefactos de un proyecto o de un bot. Está desactivado salvo que elijas uno: sin él, los bots dan a cada artefacto un aspecto propio.",
+    hs_no_kit: "Instala la extensión Design kit para elegir un estilo de la casa.", hs_projects: "Proyectos", hs_bots: "Bots (se usa cuando su proyecto no tiene uno)",
+    hs_none: "Sin estilo de la casa", hs_for: "Estilo de la casa para {name}", hs_missing: "Este tema ya no está en el Design kit, así que se ignora.",
+    hs_no_projects: "Aún no hay proyectos.", hs_no_bots: "Ningún bot usa Artefactos todavía.",
+    hs_stale: "Este bot se cambió en otro lugar. Recarga la página e inténtalo de nuevo.",
   },
 };
 

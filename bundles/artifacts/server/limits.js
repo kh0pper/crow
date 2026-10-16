@@ -26,6 +26,11 @@ export const LIMITS = Object.seal({
   titleChars: 200,
   changeNoteChars: 2000,
   summaryChars: 4000,
+  // Design kit (spec §4.2, §4.5; review M10): a rendered chart/diagram SVG,
+  // specs per document, and the overall render deadline of one save.
+  renderedSvgBytes: 2 * 1024 * 1024,
+  specsPerVersion: 12,
+  saveRenderMs: 60000,
 });
 
 const DEFAULTS = Object.freeze({ ...LIMITS });

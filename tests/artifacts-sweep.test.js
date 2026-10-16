@@ -30,8 +30,12 @@ before(async () => {
 });
 after(() => { try { s.db.close(); } catch {} rmSync(s.dir, { recursive: true, force: true }); });
 
+// Each round gets its OWN artifact: identical creates from one bot chat within
+// ten minutes are a client retry (review M10) and return the first artifact.
+let made = 0;
 async function makeRound({ untrusted, resultVersion = null }) {
-  const a = await store.createArtifact(s.db, s.blobs, { title: "Sweep artifact", type: "document", source: { markdown: "x" }, actor: BOT }, { markdownBlocks });
+  made += 1;
+  const a = await store.createArtifact(s.db, s.blobs, { title: `Sweep artifact ${made}`, type: "document", source: { markdown: `x ${made}` }, actor: BOT }, { markdownBlocks });
   const author = untrusted ? { kind: "contact", id: "c1" } : { kind: "owner" };
   const t = await comments.addThread(s.db, { artifactId: a.id, versionN: 1, anchor: { kind: "whole" }, text: "words", author });
   const r = await rounds.startRound(s.db, { artifactId: a.id, actor: OWNER, include: [t.threadId] });

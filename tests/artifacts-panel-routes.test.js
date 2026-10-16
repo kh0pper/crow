@@ -670,3 +670,26 @@ test("D28 (review low): a block anchor resolves against the REQUESTED version's 
   const a = JSON.parse((await s.db.execute({ sql: "SELECT anchor_json FROM artifact_threads WHERE id=?", args: [r.body.threadId] })).rows[0].anchor_json);
   assert.deepEqual(a, { kind: "block", id: "b1", text: "Version one words.", quote: "one words", span: { start: 8, end: 17, nth: 0 } }, "S1: the span is against the requested version");
 });
+
+test("final review M4: design.js failing to import leaves the panel up without the kit (design = null), and says why once", async () => {
+  const warns = []; const warn = console.warn; console.warn = (m) => warns.push(String(m));
+  let calls = 0;
+  const app = express();
+  const dashboardAuth = (req, res, next) => next();
+  app.use(artifactsRouter(dashboardAuth, {
+    db: s.db, blobs: s.blobs, runtime, policy, csrf: csrfMiddleware, engine: { async list() { return []; } },
+    createBoardCard: null, notify: async () => {},
+    importDesign: async () => { calls++; throw Object.assign(new Error("Cannot find module app-root.js"), { code: "ERR_MODULE_NOT_FOUND" }); },
+  }));
+  const srv = app.listen(0, "127.0.0.1"); await new Promise((r) => srv.once("listening", r));
+  try {
+    const get = (p) => new Promise((resolve, reject) => http.get({ host: "127.0.0.1", port: srv.address().port, path: p }, (res) => {
+      let b = ""; res.on("data", (d) => (b += d)); res.on("end", () => resolve({ status: res.statusCode, body: JSON.parse(b) }));
+    }).on("error", reject));
+    assert.equal((await get("/api/artifacts")).status, 200, "the list still answers");
+    const hs = await get("/api/artifacts/house-style");
+    assert.equal(hs.status, 200, "house style answers with no kit");
+    assert.equal(calls, 1, "not retried per request");
+    assert.equal(warns.filter((w) => /Design kit seam could not be loaded/.test(w)).length, 1);
+  } finally { console.warn = warn; srv.close(); }
+});

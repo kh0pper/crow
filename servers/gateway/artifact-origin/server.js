@@ -161,7 +161,11 @@ export function createArtifactOriginHandler({ tokens, resolveContent, publicBase
         mark(m[1], "docServed");
         if (inject) mark(m[1], "helperInjected");
       }
-      return send(res, 200, { csp, headers: { "content-type": c.contentType, ...cors }, body, head });
+      // Fonts are CORS-mode loads; from an opaque-origin frame that does not
+      // speak (a diagram, a sealed page) they fail without ACAO. Font
+      // bytes are not secret (design kit review M4): any frame may read them.
+      const fontCors = /^font\//i.test(String(c.contentType)) ? { "access-control-allow-origin": "*" } : {};
+      return send(res, 200, { csp, headers: { "content-type": c.contentType, ...cors, ...fontCors }, body, head });
     } catch {
       return send(res, 500, { body: "error", head });
     }

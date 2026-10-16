@@ -37,7 +37,7 @@
  */
 import { normalizeStoredBashPolicy, resolveClassifierEndpoint } from "../../servers/shared/bot-bash-policy.js";
 import { readBotClassifierSync } from "./bot-classifier.mjs";
-import { mkdirSync, writeFileSync, appendFileSync, mkdtempSync, statSync } from "node:fs";
+import { mkdirSync, writeFileSync, appendFileSync, mkdtempSync, statSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeBotMcp, removeStaleBotMcp } from "./mcp_writer.mjs";
@@ -48,6 +48,7 @@ import { resolveSkills, resolveSkill, skillDirs } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { proposalsDir, selfAuthoringPromptBlock } from "./skill_proposals.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
+import { installedKitDir, readKitThemes, readHouseStyleSync, houseStyleLinks } from "../../servers/shared/design-kit.js";
 
 /** Lazy bridge handle — see the CYCLE NOTE above. */
 function loadBridge() { return import("./bridge.mjs"); }
@@ -85,6 +86,20 @@ export function withArtifactsCompanions(crowMcp) {
 }
 
 /**
+ * Design kit (spec §3.1, §4.3, §4.4; review H2). The kit mode is THIS
+ * instance's install state (installedKitDir), passed in as kitInstalled and
+ * stated in the prompt by kitModeLine — never inferred from which skill files
+ * resolve, because skill_resolver also searches ~/.crow/skills, where the main
+ * instance's kit skills live. Kit skills are therefore attached only from
+ * <crowHome>/skills itself. design-poster is attached only when the operator
+ * selects it (review L9: spawn size).
+ */
+export const DESIGN_SKILLS = Object.freeze(["design-frontend"]);
+/** Every skill the Design kit ships: dropped from a kit-less instance's spawn
+ *  by exact name (another design-* skill is the operator's own and stays). */
+export const KIT_SKILLS = Object.freeze(["design-frontend", "design-themes", "design-poster"]);
+export const kitModeLine = (installed) => (installed ? "Design kit: installed" : "Design kit: not installed");
+/**
  * The skill names a spawn inlines, in order. F4 (Artifacts acceptance smoke):
  * a bot whose tools grant the Artifacts server ran WITHOUT the protocol skill
  * unless the operator had attached it by hand — it tried to `read` the skill
@@ -94,10 +109,19 @@ export function withArtifactsCompanions(crowMcp) {
  * attaches the skill: an explicit def selection wins, a missing skill file
  * (bundle not installed on this instance) adds nothing and stays quiet.
  */
-export function skillNamesFor(def, { crowHome } = {}) {
-  const names = [...(def.skills || [])];
-  if (!names.includes("artifacts") && botGrantsServer(def, "artifacts") && resolveSkill("artifacts", { crowHome })) names.push("artifacts");
+export function skillNamesFor(def, { crowHome, kitInstalled = false, houseStyle = null } = {}) {
+  const names = [...(def.skills || [])].filter((n) => kitInstalled || !KIT_SKILLS.includes(n));
+  if (!botGrantsServer(def, "artifacts")) return names;
+  if (!names.includes("artifacts") && resolveSkill("artifacts", { crowHome })) names.push("artifacts");
+  if (!kitInstalled || !crowHome) return names;
+  const own = (n) => existsSync(join(crowHome, "skills", `${n}.md`));
+  for (const n of [...DESIGN_SKILLS, ...(houseStyle ? ["design-themes"] : [])]) if (!names.includes(n) && own(n)) names.push(n);
   return names;
+}
+
+/** The house-style block a spawn appends (spec §4.4 "the bot is told"; review M3). */
+export function houseStylePromptBlock(hs) {
+  return `## House style\n\nThis bot's artifacts use the house style "${hs.name}" (theme:${hs.id}). Crow adds its fonts and colours to every artifact you save. Documents and diagrams pick it up by themselves. In a page, link these files in the <head>: ${hs.links.join(", ")}; then use the CSS variables from the design-themes skill. Do not choose your own palette or fonts.`;
 }
 
 /**
@@ -121,7 +145,7 @@ export function skillNamesFor(def, { crowHome } = {}) {
  *   behavior byte-identically: cwd === sessionDir (the world root).
  * @returns {Promise<{def, bot, crowHome, projectId, projectSpace, projectMembers,
  *          sessionDir, cwd, tasksDbPath, remoteEnabled, peerGatewayUrls, session,
- *          narrowedTools, gatewayType}>}
+ *          narrowedTools, gatewayType, kitInstalled, houseStyle}>}
  */
 export async function buildBotWorld({ botId, threadId, gatewayType = "perch", log = () => {}, jobId = null, cardBound = false, cwd = null }) {
   const B = await loadBridge();
@@ -194,6 +218,7 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
   // here (setting, else an installed local candidate). null for every other
   // policy — the spawn policy is then byte-identical to before.
   let botClassifier = null;
+  let houseStyle = null, kitInstalled = false;
   try {
     remoteEnabled = B.readRemoteInvocationEnabled(_conn);
     if (remoteEnabled) peerGatewayUrls = B.readPeerGatewayUrls(_conn);
@@ -201,6 +226,15 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
       botClassifier = readBotClassifierSync(_conn);
       if (!botClassifier.ok) log("bash=auto but no usable safety classifier (" + botClassifier.reason + ") — every command will be asked (interactive) or refused (unattended)");
     }
+    // Design kit (spec §4.3, §4.4; review H2): this instance's install state,
+    // then the house style (the project's theme, else the bot default; null
+    // unless the installed kit knows it). Never fails a turn.
+    try {
+      kitInstalled = !!installedKitDir(crowHome);
+      const themes = kitInstalled ? readKitThemes(crowHome) : new Map();
+      const id = themes.size ? readHouseStyleSync(_conn, { projectId, def, known: new Set(themes.keys()) }) : null;
+      houseStyle = id ? { id, name: themes.get(id).name, links: houseStyleLinks(id, themes.get(id)) } : null;
+    } catch { kitInstalled = false; houseStyle = null; }
   } finally { _conn.close(); }
   // Pin an operator-named *.ts.net endpoint to its tailnet IP (refused when it
   // resolves anywhere else); IP endpoints pass through.
@@ -264,7 +298,7 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
   return { def, bot, crowHome, projectId, projectSpace, projectMembers, sessionDir,
     cwd: resolvedCwd, mcpConfigPath: mcpDelivery === "file" ? join(sessionDir, ".mcp.json") : null,
     mcpDelivery, mcpConfig, tasksDbPath, remoteEnabled, peerGatewayUrls, session, botClassifier,
-    narrowedTools, gatewayType };
+    narrowedTools, gatewayType, kitInstalled, houseStyle };
 }
 
 /**
@@ -288,8 +322,14 @@ export async function prepareSpawn(world, { escalate = false, log = () => {} } =
   // without them. A3: resolved per-instance via skill_resolver — first match
   // across <crowHome>/skills, ~/.crow/skills, ~/crow/skills wins.
   const { sections: skillSections, missing: missingSkills } =
-    resolveSkills(skillNamesFor(def, { crowHome }), { crowHome });
+    resolveSkills(skillNamesFor(def, { crowHome, kitInstalled: !!world.kitInstalled, houseStyle: world.houseStyle || null }), { crowHome });
   for (const s of skillSections) appendFileSync(sysFile, "\n\n" + s.text);
+  // Design kit (review H2): an Artifacts bot is told the kit mode in exactly
+  // one line — a missing line (job turns) reads as "not installed".
+  if (botGrantsServer(def, "artifacts")) {
+    appendFileSync(sysFile, "\n\n" + kitModeLine(!!world.kitInstalled));
+    if (world.kitInstalled && world.houseStyle) appendFileSync(sysFile, "\n\n" + houseStylePromptBlock(world.houseStyle));
+  }
   for (const name of missingSkills) {
     log("skill file not found for '" + name + "' in " + skillDirs(crowHome).join(", "));
   }

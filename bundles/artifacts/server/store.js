@@ -197,13 +197,25 @@ export async function createArtifact(db, blobs, { title, type, source, actor, ch
   if (!t) throw err("bad_request", "title required");
   const rendered = await renderVersion(type, source, deps);
   const sourceJson = JSON.stringify(source);
+  const bot = actor.kind === "bot" ? actor.id : null;
   return withWriteLock(async () => {
   const plan = await planFiles(blobs, rendered.files, sourceJson);
+  // Review M10: a client that timed out and retried must not make a second
+  // artifact. Only for a bot in a real chat (a thread): that is where MCP
+  // retries happen. Nothing is written and no card frame is sent.
+  if (bot && actor.thread) {
+    const dup = (await db.execute({
+      sql: `SELECT a.id FROM artifacts a JOIN artifact_versions v ON v.artifact_id=a.id AND v.n=1
+            WHERE a.created_by_bot=? AND a.origin_session IS ? AND a.title=? AND a.type=? AND v.content_hash=?
+              AND a.deleted_at IS NULL AND a.created_at > datetime('now','-10 minutes') ORDER BY a.created_at DESC LIMIT 1`,
+      args: [bot, origin.session || actor.thread || null, t, type, plan.contentHash],
+    })).rows[0];
+    if (dup) return { id: dup.id, versionN: 1, design: rendered.design || null, duplicate: true };
+  }
   await assertQuota(db, blobs, plan.newBytes);
   const manifest = await writePlanned(blobs, plan, db);
   const { size, contentHash } = plan;
   const id = newArtifactId();
-  const bot = actor.kind === "bot" ? actor.id : null;
   // M3/B6 (plan PR-3 Task 3.2): the origin link rides the SAME batch as the
   // artifact row — bound to the signed actor's OWN thread (never
   // origin.session) and only for a Perch actor (a channel or job turn's
@@ -216,7 +228,7 @@ export async function createArtifact(db, blobs, { title, type, source, actor, ch
       args: [id, 1, "current", JSON.stringify(manifest), sourceJson, size, contentHash, bot ? "bot" : "user", bot, changeNote ? String(changeNote).slice(0, LIMITS.changeNoteChars) : null, rendered.anchorMap ? JSON.stringify(rendered.anchorMap) : null, untrusted ? 1 : 0] },
   ]); } catch (e) { await gcKeys(db, blobs, manifest.map((m) => m.key)); throw e; }
   await audit(db, { artifactId: id, actor, action: "create", target: "v1" });
-  return { id, versionN: 1 };
+  return { id, versionN: 1, design: rendered.design || null };
   }, blobs);
 }
 
@@ -246,11 +258,28 @@ export async function approveVersion(db, { artifactId, n, actor }) {
 export async function addVersion(db, blobs, { artifactId, source, actor, baseVersion = null, roundId = null, madeBy = null, changeNote = null, untrusted = false, proposedReason = null }, deps = {}) {
   const art = await requireAccess(db, actor, artifactId);
   if (flagUntrusted(art.received)) throw err("forbidden", "a received artifact cannot be edited");
-  const rendered = await renderVersion(art.type, source, deps);
+  // Review M10: an unchanged spec reuses the base version's render.
+  const priorRenders = await priorRendersFor(db, blobs, artifactId, baseVersion != null ? Number(baseVersion) : Number(art.current_version));
+  const rendered = await renderVersion(art.type, source, { ...deps, priorRenders });
   const sourceJson = JSON.stringify(source);
   const bot = actor.kind === "bot" ? actor.id : null;
   return withWriteLock(async () => {
   const plan = await planFiles(blobs, rendered.files, sourceJson);
+  // Review M10 + ruling F11: a client retry returns the current version when
+  // it has the same content, was made by the same bot under the SAME round
+  // (or both under none) and is under 10 minutes old. A different round id is
+  // never swallowed: that round's update must do its own bookkeeping.
+  if (bot && actor.thread) {
+    const cur = (await db.execute({
+      sql: `SELECT v.n, v.content_hash, v.made_by_bot, v.untrusted_input, v.trust_cleared_at, (v.created_at > datetime('now','-10 minutes')) AS recent
+            FROM artifact_versions v JOIN artifacts a ON a.id=v.artifact_id AND a.current_version=v.n
+            WHERE v.artifact_id=? AND v.round_id IS ?`,
+      args: [artifactId, roundId == null ? null : Number(roundId)],
+    })).rows[0];
+    if (cur && cur.content_hash === plan.contentHash && cur.made_by_bot === bot && Number(cur.recent) === 1) {
+      return { n: Number(cur.n), state: "current", anchorMap: rendered.anchorMap, untrusted: isTainted(cur), design: rendered.design || null, duplicate: true };
+    }
+  }
   await assertQuota(db, blobs, plan.newBytes);
   const manifest = await writePlanned(blobs, plan, db);
   const { size, contentHash } = plan;
@@ -282,7 +311,7 @@ export async function addVersion(db, blobs, { artifactId, source, actor, baseVer
       await audit(db, { artifactId, actor, action: state === "current" ? "version" : "version-proposed", target: `v${n}`, detail: { base: baseVersion, roundId, untrusted: tainted } });
       const pruned = await prune(db, artifactId);
       if (pruned.keys.length) await gcKeys(db, blobs, pruned.keys);
-      return { n, state, anchorMap: rendered.anchorMap, untrusted: tainted };
+      return { n, state, anchorMap: rendered.anchorMap, untrusted: tainted, design: rendered.design || null };
     } catch (e) {
       if (attempt < 2 && (e.code === "cas_lost" || /UNIQUE|PRIMARY KEY/.test(String(e.message)))) continue;
       await gcKeys(db, blobs, manifest.map((m) => m.key));
@@ -337,6 +366,28 @@ export async function prune(db, artifactId) {
     await db.execute({ sql: "DELETE FROM artifact_versions WHERE artifact_id=? AND n=?", args: [artifactId, n] });
   }
   return { victims, keys };
+}
+
+/** Review M10: the renders of version n (from its __render/index.json), so an
+ *  unchanged spec is never re-rendered. Map<key, svg>; empty on any problem.
+ *  Only Crow writes __render/ (cleanAssetPath refuses it for bot assets), and
+ *  render.js re-checks every cached SVG before it is used. */
+export async function priorRendersFor(db, blobs, artifactId, n) {
+  const out = new Map();
+  try {
+    const v = await getVersion(db, artifactId, n);
+    if (!v) return out;
+    const files = JSON.parse(v.files_json);
+    const idx = files.find((f) => f.path === "__render/index.json");
+    if (!idx) return out;
+    const items = JSON.parse((await blobs.get(idx.key)).toString("utf8")).items || [];
+    for (const it of items.slice(0, 64)) {
+      const f = it && typeof it.path === "string" && it.path.startsWith("__render/") && files.find((x) => x.path === it.path);
+      const body = f && await blobs.get(f.key);
+      if (body && typeof it.key === "string") out.set(it.key, body.toString("utf8"));
+    }
+  } catch { return new Map(); }
+  return out;
 }
 
 export async function getVersion(db, artifactId, n) {

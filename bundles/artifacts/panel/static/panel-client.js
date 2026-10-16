@@ -147,9 +147,65 @@
 
   [search, typeSel, stateSel].forEach(function (c) { c.addEventListener("input", renderList); c.addEventListener("change", renderList); });
 
+  // House style (design kit spec §4.4, D4): the owner picks a theme per
+  // project and a default per bot. Off unless set: "No house style" is the
+  // first option. Every authored string goes in with textContent; colours
+  // arrive server-checked as #hex and are set as style properties.
+  var hsBtn = el("button", { type: "button", class: "btn btn-secondary btn-sm ca-hs-open", "aria-expanded": "false", text: T.hs_button });
+  var hsBox = el("section", { class: "ca-hs", hidden: "" });
+  function hsSwatches(holder, themes, id) {
+    holder.textContent = "";
+    var t = null;
+    themes.forEach(function (x) { if (x.id === id) t = x; });
+    (t ? t.colors || [] : []).forEach(function (c) { var sw = el("span", { class: "ca-hs-sw" }); sw.style.background = c; holder.appendChild(sw); });
+  }
+  function hsRow(scope, item, themes) {
+    var sel = el("select", { "aria-label": fmt(T.hs_for, { name: item.name }) });
+    sel.appendChild(el("option", { value: "", text: T.hs_none }));
+    themes.forEach(function (t) { var o = el("option", { value: t.id, text: t.name }); if (item.theme === t.id) o.selected = true; sel.appendChild(o); });
+    var known = !item.theme || themes.some(function (t) { return t.id === item.theme; });
+    var sw = el("span", { class: "ca-hs-sws", "aria-hidden": "true" });
+    hsSwatches(sw, themes, item.theme);
+    sel.addEventListener("change", function () {
+      var want = sel.value || null;
+      sel.disabled = true;
+      api("POST", "/api/artifacts/house-style", { scope: scope, id: item.id, theme: want }).then(function () {
+        sel.disabled = false; item.theme = want; hsSwatches(sw, themes, want);
+        if (warn && warn.parentNode) warn.parentNode.removeChild(warn);
+      }, function (e) {
+        sel.disabled = false;
+        sel.value = item.theme && known ? item.theme : "";
+        banner(e && e.code === "stale" ? T.hs_stale : T.failed, "warn");
+      });
+    });
+    var warn = known ? null : el("span", { class: "ca-hs-warn", text: T.hs_missing });
+    return el("li", { class: "ca-hs-row" }, [el("span", { class: "ca-hs-name", text: item.name }), sel, sw, warn]);
+  }
+  function renderHouseStyle() {
+    hsBox.textContent = "";
+    hsBox.appendChild(el("h3", { text: T.hs_title }));
+    hsBox.appendChild(el("p", { class: "ca-hs-help", text: T.hs_help }));
+    api("GET", "/api/artifacts/house-style").then(function (j) {
+      if (!j.kit) { hsBox.appendChild(el("p", { text: T.hs_no_kit })); return; }
+      [["project", T.hs_projects, j.projects || [], T.hs_no_projects], ["bot", T.hs_bots, j.bots || [], T.hs_no_bots]].forEach(function (g) {
+        hsBox.appendChild(el("h4", { text: g[1] }));
+        var ul = el("ul", { class: "ca-sub ca-hs-list" });
+        if (!g[2].length) ul.appendChild(el("li", { text: g[3] }));
+        g[2].forEach(function (item) { ul.appendChild(hsRow(g[0], item, j.themes || [])); });
+        hsBox.appendChild(ul);
+      });
+    }, function () { hsBox.appendChild(el("p", { text: T.failed })); });
+  }
+  hsBtn.addEventListener("click", function () {
+    var open = hsBox.hasAttribute("hidden");
+    if (open) { hsBox.removeAttribute("hidden"); renderHouseStyle(); } else hsBox.setAttribute("hidden", "");
+    hsBtn.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+
   fetch("/api/artifacts", { credentials: "same-origin" }).then(function (r) { return r.json(); }).then(function (j) {
     root.textContent = "";
     root.appendChild(el("h2", { text: T.title }));
+    root.appendChild(hsBtn); root.appendChild(hsBox);
     var iso = j.origin && j.origin.isolation;
     if (iso === "shared-host") banner(LOCAL_HOSTS.test(location.host) ? T.weaker : T.fallback_remote, "warn");
     else if (iso === "unavailable" || !iso) banner(T.unavailable, "warn");

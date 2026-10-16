@@ -4,10 +4,11 @@
 // hardened container, never here. Everything here is pure string work in the
 // gateway process, so every input is size-capped first.
 //
-// Output: { files: [{ path, body: Buffer, contentType }], anchorMap }
+// Output: { files: [{ path, body: Buffer, contentType }], anchorMap, design }
 //   anchorMap — what the trusted viewer may anchor to from OUTSIDE a
 //   script-free frame: document blocks {id:"b<n>", type, text}; diagram
 //   elements {id, title} plus the SVG aspect ratio for region anchors.
+import { createHash } from "node:crypto";
 import { LIMITS } from "./limits.js";
 
 const ASSET_TYPES = {
@@ -16,13 +17,329 @@ const ASSET_TYPES = {
   diagram: new Set(),
 };
 
-const err = (code, message) => Object.assign(new Error(message || code), { code });
+const err = (code, message, extra) => Object.assign(new Error(message || code), { code }, extra || {});
+
+/** Spec §4.3 as amended (operator decision 2026-10-15): only the explicit kit features are
+ *  refused without the kit — libs and a diagram's { engine, source }. Fences
+ *  in a document stay code, as today. */
+export const KIT_MISSING = "the Design kit extension isn't installed: remove libs, and send a diagram as { svg } instead of { engine, source }, or ask the owner to install it";
+
+// Kit errors → static, fixable messages (mcp.js fail() contract: never authored text).
+const LIB_MESSAGES = {
+  too_many_libs: () => "libs: at most 40 names",
+  bad_lib_name: (e) => `libs[${Number(e.index) || 0}] must be a library name such as "css:pico" or "icons:lucide/coffee"`,
+  unknown_lib: (e) => `libs[${Number(e.index) || 0}] is not in the Design kit (the design-frontend skill lists the names)`,
+  lib_not_allowed: (e, type) => `libs[${Number(e.index) || 0}] is not allowed in a ${type} (allowed in: ${(e.allowed || []).filter((t) => ["page", "document", "diagram"].includes(t)).join(", ")})`,
+  lib_integrity: () => "a Design kit file failed its integrity check: ask the owner to reinstall the Design kit",
+};
+function libError(e, type) {
+  const m = e && LIB_MESSAGES[e.code];
+  return m ? err(e.code, m(e, type)) : err("lib_integrity", LIB_MESSAGES.lib_integrity());
+}
+
+/** source.libs (+ the house style's theme) → resolved kit files (spec §4.1,
+ *  §4.4). null when nothing is asked and no house style applies. A house style
+ *  the kit does not know (kit gone, theme dropped by an upgrade) is ignored:
+ *  only an explicit libs list is ever refused for a missing kit. */
+async function libsFor(type, source, kit, houseStyle) {
+  const names = source.libs === undefined ? [] : source.libs;
+  if (!Array.isArray(names)) throw err("bad_source", "libs must be a list of library names");
+  const style = kit && typeof houseStyle === "string" && kit.themes.has(houseStyle) ? houseStyle : null;
+  if (!names.length && !style) return null;
+  if (!kit) throw err("kit_missing", KIT_MISSING);
+  let r;
+  try { r = kit.resolve(style ? [...names, `theme:${style}`] : names, { target: type }); } catch (e) { throw libError(e, type); }
+  if (!style) return { ...r, houseStyle: null, houseStyleLinks: [] };
+  // resolve() dedupes refs (first-seen order), so the requested libs are the
+  // first |distinct names| refs; the appended theme is reported as
+  // house_style (+ the CSS a page must link), never as a requested lib.
+  const t = kit.themes.get(style);
+  const themeFonts = new Set(t && t.fonts ? [t.fonts.heading, t.fonts.body] : []);
+  const links = r.entries.filter((e) => e.name === `theme:${style}` || (e.kind === "font" && themeFonts.has(e.name))).map((e) => e.main);
+  return { ...r, refs: r.refs.slice(0, new Set(names).size), houseStyle: style, houseStyleLinks: links };
+}
+
+/** <head> additions for script-free types: stylesheet links for every CSS main
+ *  (fonts, CSS, theme) in dependency order, then the font rule when no theme. */
+function headLinks(lib) {
+  if (!lib || !lib.entries.length) return "";
+  const links = lib.entries.filter((e) => e.main.endsWith(".css")).map((e) => `<link rel="stylesheet" href="${escAttr(e.main)}">`).join("");
+  const fonts = lib.entries.filter((e) => e.kind === "font");
+  let rule = "";
+  if (fonts.length && !lib.entries.some((e) => e.kind === "theme")) {
+    const fam = (f) => `"${f.family}",${f.fallback}`;
+    rule = `body{font-family:${fam(fonts[0])}}` + (fonts[1] ? `h1,h2,h3,h4,h5,h6{font-family:${fam(fonts[1])}}` : "");
+  }
+  return links + (rule ? `<style>${rule}</style>` : "");
+}
+const designMeta = (lib, rendered = 0, notes = []) => (lib || rendered || notes.length
+  ? { libs: lib ? lib.refs : [], house_style: lib ? lib.houseStyle || null : null, ...(lib && lib.houseStyle ? { house_style_links: lib.houseStyleLinks } : {}), rendered, notes }
+  : null);
+
+// ---- Specs: fenced vega-lite / mermaid / d2 rendered by the kit (spec §4.2, §4.5) ----
+const SPEC_ENGINES = new Set(["vega-lite", "mermaid", "d2"]);
+const SPEC_ALT = { "vega-lite": "Vega-Lite chart", mermaid: "Mermaid diagram", d2: "D2 diagram" };
+const FAIL_CATEGORIES = new Set(["parse error", "invalid spec", "unsupported diagram type", "timeout", "render error"]);
+const SPEC_REASONS = {
+  engine: "unknown engine (use vega-lite, mermaid or d2)", empty: "the spec is empty", too_large: "the spec is over 64 KB",
+  not_json: "a Vega-Lite spec must be JSON", too_deep: "the Vega-Lite spec is nested too deeply",
+  external_data: "Vega-Lite data must be inline (data.values); url and href are not allowed",
+  links: "links and click handlers are not allowed", icons: "icons are not allowed", imports: "D2 imports are not allowed",
+  directives: "Mermaid directives and front-matter config are not allowed",
+  escapes: "backslashes and look-alike letters are not allowed", markup: "Markdown and LaTeX blocks are not allowed",
+  unsupported_type: "this diagram type is not supported (the design-frontend skill lists the supported types)",
+};
+/** Fixed text (operator decision 2026-10-15): the save succeeded, the charts are code for now. */
+export const RENDERER_DOWN_NOTE = "renderer_unavailable: the chart and diagram renderer is unavailable, so charts in this version are shown as code; save again later to render them";
+const UNAVAILABLE = "the chart and diagram renderer is not answering; try again in a minute";
+const TOO_LARGE = "the rendered SVG is over 2 MB; simplify the chart or diagram";
+const UNSAFE = "the rendered SVG carried scripts, links, HTML or external references and was refused";
+
+// Static text only (mcp.js fail() contract): engine name from a fixed set, a
+// category from a fixed set, an integer line. Never the kit's or renderer's text.
+function specError(engine, e) {
+  const eng = SPEC_ENGINES.has(engine) ? engine : "spec";
+  const code = e && e.code;
+  if (code === "bad_spec") return err("bad_spec", `${eng}: ${Object.hasOwn(SPEC_REASONS, e.reason) ? SPEC_REASONS[e.reason] : "spec refused"}`);
+  // The text stays fixed; retryable passes through (not_loopback is not).
+  if (code === "render_unavailable") return err("render_unavailable", UNAVAILABLE, { retryable: e.retryable !== false });
+  if (code === "render_too_large") return err("render_too_large", TOO_LARGE);
+  const cat = e && FAIL_CATEGORIES.has(e.category) ? e.category : "render error";
+  return err("render_failed", `${eng}: ${cat}${e && Number.isInteger(e.line) ? ` at line ${e.line}` : ""}`);
+}
+
+const WS = (c) => c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\f";
+const LIB_HREF = /^__lib\/(?!.*\.\.)[a-z0-9._/-]{1,200}\.svg$/;
+// data: URLs a rendered SVG may carry in url(): fonts (D2 embeds its fonts)
+// and raster images. Never data:image/svg+xml or text/html (a nested document).
+const DATA_MIME_PREFIXES = ["font/", "application/font-", "application/x-font-"];
+const DATA_MIME_EXACT = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+/** "data:<mime>" followed by ";" or "," with an allowed MIME type. */
+function okDataUrl(low, j) {
+  if (!low.startsWith("data:", j)) return false;
+  let k = j + 5;
+  const m0 = k;
+  while (k - m0 < 64 && /[a-z0-9.+/-]/.test(low.charAt(k))) k++;
+  if (low.charAt(k) !== ";" && low.charAt(k) !== ",") return false;
+  const mime = low.slice(m0, k);
+  const slash = mime.indexOf("/");
+  const sub = mime.slice(slash + 1);
+  if (slash < 1 || !/^[a-z0-9.+-]+$/.test(sub)) return false; // one subtype, no second "/"
+  return DATA_MIME_EXACT.has(mime) || DATA_MIME_PREFIXES.some((p) => mime.startsWith(p) && mime.length > p.length);
+}
+/** href / xlink:href that is not an in-document fragment (any whitespace
+ *  around "="), url() that is not #id or a font/raster data: URL, @import,
+ *  image-set(, src(. Linear scans (ReDoS review). Input is lowercased. */
+export function hasExternalRef(low, libOk = false) {
+  let i = 0;
+  for (;;) {
+    const k = low.indexOf("href", i);
+    if (k < 0) break;
+    i = k + 4;
+    let j = i;
+    while (WS(low.charAt(j))) j++;
+    if (low.charAt(j) !== "=") continue;
+    j++;
+    while (WS(low.charAt(j))) j++;
+    const q = low.charAt(j);
+    if (q !== '"' && q !== "'") return true;
+    if (low.charAt(j + 1) === "#") continue;
+    // A bot diagram may point an <image> at a Design kit icon copied into the
+    // version (__lib/…): same version, relative, no "..", no query or scheme.
+    const close = libOk ? low.indexOf(q, j + 1) : -1;
+    if (close < 0 || !LIB_HREF.test(low.slice(j + 1, close))) return true;
+  }
+  if (low.includes("@import") || low.includes("image-set(") || low.includes("src(")) return true;
+  i = 0;
+  for (;;) {
+    const k = low.indexOf("url(", i);
+    if (k < 0) return false;
+    i = k + 4;
+    let j = i;
+    while (WS(low.charAt(j)) || low.charAt(j) === "'" || low.charAt(j) === '"') j++;
+    if (!(low.startsWith("#", j) || okDataUrl(low, j))) return true;
+  }
+}
+
+// Elements a rendered chart or diagram may contain (the live Mermaid, Vega and
+// D2 output, plus their plain-shape relatives). Everything else is refused:
+// <a> (links stay inert by never existing: Task 6 review), script,
+// foreignObject, animation/set (they can rewrite href), image/feImage (fetch),
+// and any namespaced or HTML element.
+const SVG_ELEMENTS = new Set(["svg", "g", "defs", "symbol", "use", "title", "desc", "style", "marker", "mask", "clippath", "pattern",
+  "lineargradient", "radialgradient", "stop", "filter", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon", "text", "tspan", "textpath",
+  "feblend", "fecolormatrix", "fecomponenttransfer", "fecomposite", "feconvolvematrix", "fediffuselighting", "fedisplacementmap", "fedistantlight",
+  "fedropshadow", "feflood", "fefunca", "fefuncb", "fefuncg", "fefuncr", "fegaussianblur", "femerge", "femergenode", "femorphology", "feoffset",
+  "fepointlight", "fespecularlighting", "fespotlight", "fetile", "feturbulence"]);
+// Second layer, by substring (the brief's list): never in any rendered SVG.
+const BANNED_TAGS = ["<script", "<foreignobject", "<set", "<animate", "<a ", "<a>", "<a\n", "<a\t", "<a/", "<iframe", "<embed", "<object", "<img"];
+const TEXT_ONLY = new Set(["title", "desc"]);
+const NAME_CH = (c) => (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c === "-";
+
+/** Markup walk (linear): exactly one root <svg>, well nested (an element
+ *  stack: every close tag matches the open one), nothing but whitespace after
+ *  the root closes (fix round 2: after </svg> an HTML parser reads <style> as
+ *  raw text, so a "CDATA" could end it and smuggle live HTML); every tag an
+ *  allowed element; no comment, doctype or processing instruction; CDATA only
+ *  inside a <style> inside the root; no backslash (a CSS escape such as
+ *  \75 rl( or @\69mport) in any tag or in style text. */
+function markupOk(low, allowImage = false) {
+  let i = 0;
+  const stack = [];
+  for (;;) {
+    const lt = low.indexOf("<", i);
+    const inStyle = stack.at(-1) === "style";
+    if (lt < 0) return false; // the root never closed
+    if (inStyle && low.slice(i, lt).includes("\\")) return false;
+    if (low.startsWith("<![cdata[", lt)) {
+      if (!inStyle) return false;
+      const end = low.indexOf("]]>", lt + 9);
+      if (end < 0 || low.slice(lt + 9, end).includes("\\")) return false;
+      i = end + 3;
+      continue;
+    }
+    if (i > 0 && !stack.length) return false; // a tag before or after the root
+    const closing = low.charAt(lt + 1) === "/";
+    let j = lt + (closing ? 2 : 1);
+    const n0 = j;
+    while (NAME_CH(low.charAt(j))) j++;
+    const name = low.slice(n0, j);
+    const after = low.charAt(j);
+    if (!(name && name.charAt(0) >= "a" && name.charAt(0) <= "z" && (SVG_ELEMENTS.has(name) || (allowImage && name === "image"))) || !(WS(after) || after === "/" || after === ">")) return false;
+    if (lt === 0 ? name !== "svg" || closing : !stack.length) return false;
+    // Fix round 3: <title> and <desc> are HTML integration points in inline
+    // SVG (a <style> in them is HTML raw text, without CDATA): text only.
+    if (!closing && TEXT_ONLY.has(stack.at(-1))) return false;
+    if (inStyle && !(closing && name === "style")) return false;
+    j = closing ? skipWs(low, j) : attrsEnd(low, j);
+    if (j < 0 || low.charAt(j) !== ">") return false;
+    if (closing) { if (stack.pop() !== name) return false; }
+    else if (low.charAt(j - 1) !== "/") stack.push(name);
+    else if (!stack.length) return false; // a self-closed root: <svg/>
+    i = j + 1;
+    if (!stack.length) {
+      for (let k = i; k < low.length; k++) if (!WS(low.charAt(k))) return false;
+      return true;
+    }
+  }
+}
+
+const skipWs = (low, j) => { while (WS(low.charAt(j))) j++; return j; };
+const ATTR_START = (c) => c >= "a" && c <= "z";
+const ATTR_CH = (c) => ATTR_START(c) || (c >= "0" && c <= "9") || c === ":" || c === "." || c === "_" || c === "-";
+/** Attributes of one start tag, read the way the WHATWG tokenizer would, but
+ *  narrower: name [a-z][a-z0-9:._-]*, then "=", then a quoted value with no
+ *  "<" or backslash, then whitespace, "/>" or ">". No "on*" names, no xml:base.
+ *  Returns the index of the closing ">" or -1. Linear. */
+function attrsEnd(low, j) {
+  for (;;) {
+    const sep = j;
+    j = skipWs(low, j);
+    const c = low.charAt(j);
+    if (c === ">") return j;
+    if (c === "/") return low.charAt(j + 1) === ">" ? j + 1 : -1;
+    if (j === sep || !ATTR_START(c)) return -1; // a name needs whitespace before it
+    const n0 = j;
+    while (ATTR_CH(low.charAt(j))) j++;
+    const name = low.slice(n0, j);
+    if (name.startsWith("on") || name === "xml:base") return -1;
+    j = skipWs(low, j);
+    if (low.charAt(j) !== "=") return -1;
+    j = skipWs(low, j + 1);
+    const q = low.charAt(j);
+    if (q !== '"' && q !== "'") return -1;
+    const close = low.indexOf(q, j + 1);
+    if (close < 0) return -1;
+    const v = low.slice(j + 1, close);
+    if (v.includes("\\") || v.includes("<")) return -1;
+    j = close + 1;
+    const after = low.charAt(j);
+    if (!(WS(after) || after === "/" || after === ">")) return -1;
+  }
+}
+
+/** The XML character references a renderer emits, decoded; null when any other
+ *  "&" appears (an HTML named reference such as &lpar; would decode to "(" when
+ *  the SVG is inlined in a page). Linear. */
+const XML_ENT = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'" };
+function decodeRefs(s) {
+  let out = "", i = 0;
+  for (;;) {
+    const a = s.indexOf("&", i);
+    if (a < 0) return out + s.slice(i);
+    out += s.slice(i, a);
+    const semi = s.indexOf(";", a);
+    const ref = semi > a && semi - a <= 10 ? s.slice(a, semi + 1) : "";
+    let ch = null;
+    if (Object.hasOwn(XML_ENT, ref)) ch = XML_ENT[ref];
+    else if (/^&#x[0-9a-f]{1,6};$/.test(ref)) ch = String.fromCodePoint(Math.min(parseInt(ref.slice(3, -1), 16), 0x10ffff));
+    else if (/^&#[0-9]{1,7};$/.test(ref)) ch = String.fromCodePoint(Math.min(parseInt(ref.slice(2, -1), 10), 0x10ffff));
+    if (ch === null) return null;
+    out += ch;
+    i = semi + 1;
+  }
+}
+// ASCII-only lower-casing, as browsers match tag, attribute and CSS names
+// (String#toLowerCase would also fold non-ASCII and shift indexes).
+const asciiLower = (s) => s.replace(/[A-Z]+/g, (m) => m.toLowerCase());
+
+/** Renderer output is untrusted (spec §4.5): size cap, one <svg> element,
+ *  allowed elements only, no event attributes, no external references in
+ *  attributes or CSS (also after decoding character references), no CSS
+ *  escapes. Fail closed: refused, never repaired. */
+export function checkRenderedSvg(raw) {
+  if (typeof raw !== "string" || Buffer.byteLength(raw) > LIMITS.renderedSvgBytes) throw err("render_too_large", TOO_LARGE);
+  const svg = stripProlog(raw);
+  if (!safeSvg(svg, false)) throw err("render_failed", UNSAFE);
+  return svg;
+}
+const stripProlog = (raw) => {
+  let svg = raw.trim();
+  if (svg.startsWith("<?xml")) { const e = svg.indexOf("?>"); svg = e < 0 ? "" : svg.slice(e + 2).trim(); }
+  return svg;
+};
+/** The structure and reference rules, shared by renderer output and a bot's
+ *  own { svg } diagram (fix round 3). `bot` also allows <image> of a kit icon
+ *  under __lib/. */
+function safeSvg(svg, bot) {
+  const low = asciiLower(svg);
+  const opens = low.startsWith("<svg>") || (low.startsWith("<svg") && WS(low.charAt(4)));
+  const dec = opens ? decodeRefs(low) : null;
+  return !(!opens || !low.endsWith("</svg>") || dec === null || BANNED_TAGS.some((t) => low.includes(t)) || !markupOk(low, bot) || hasEventAttr(low)
+    || hasExternalRef(low, bot) || hasExternalRef(asciiLower(dec), bot) || dec.includes("\\"));
+}
+/** Fixed, actionable text for a bot's own SVG that fails safeSvg. */
+const BOT_SVG = "svg must be plain SVG: one root <svg> holding shapes, text, gradients, filters and <style> only, every attribute quoted, <title> and <desc> as plain text; no links, HTML, CDATA outside <style>, CSS escapes or external references; no comments; write & as &amp;; no named entities such as &nbsp; (numeric &#160; is fine) (a Design kit icon is <image href=\"__lib/icons/<set>/<name>.svg\">)";
+
+const specKey = (engine, source) => `${engine}:${createHash("sha256").update(String(source)).digest("hex")}`;
+
+/** A cached render, re-checked (it may predate a stricter check). */
+function cachedSvg(cache, key) {
+  if (!cache || !cache.has(key)) return null;
+  try { return checkRenderedSvg(cache.get(key)); } catch { return null; }
+}
+
+/** Render one spec inside the save's deadline, then check the output. The
+ *  deadline is enforced here too, whatever the kit does with timeoutMs. */
+async function renderSpec(kit, engine, source, deadline) {
+  const timeoutMs = deadline - Date.now();
+  if (timeoutMs <= 0) throw err("render_unavailable", UNAVAILABLE, { retryable: true });
+  let timer;
+  const late = new Promise((_, reject) => { timer = setTimeout(() => reject(err("render_unavailable", UNAVAILABLE, { retryable: true })), timeoutMs); });
+  let svg;
+  try { svg = await Promise.race([kit.render(engine, source, { timeoutMs }), late]); }
+  catch (e) { throw specError(engine, e); }
+  finally { clearTimeout(timer); }
+  return checkRenderedSvg(svg);
+}
 
 export function cleanAssetPath(p) {
   if (typeof p !== "string" || !p || p.length > 200) return null;
   const segs = p.split("/");
   for (const s of segs) if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(s) || s === "." || s === "..") return null;
-  if (p === "index.html" || p.startsWith("__crow/")) return null;
+  // __lib/ (Design kit copies) and __render/ (rendered engine output) are
+  // filled by Crow only: a bot's own asset can never land there (ruling F3).
+  if (p === "index.html" || /^__(crow|lib|render)(\/|$)/.test(p)) return null;
   return p;
 }
 
@@ -158,35 +475,95 @@ a[data-inert-href]{text-decoration:underline dotted;cursor:help}
 img{max-width:100%}pre{overflow:auto}table{border-collapse:collapse}td,th{border:1px solid #8884;padding:.25rem .5rem}
 @media print{body{max-width:none;padding:0}.blk:target{outline:none}}`;
 
-export async function renderVersion(type, source, { markdownBlocks } = {}) {
+export async function renderVersion(type, source, { markdownBlocks, design = null, priorRenders = null, houseStyle = null } = {}) {
   if (!source || typeof source !== "object") throw err("bad_source", "source must be an object");
+  const kit = design ? await design.kit() : null;
   if (type === "page") {
     if (typeof source.html !== "string" || !source.html.trim()) throw err("bad_source", "page needs html");
+    const lib = await libsFor("page", source, kit, houseStyle);
     return {
-      files: [{ path: "index.html", body: Buffer.from(source.html), contentType: "text/html; charset=utf-8" }, ...assetsFor("page", source.assets)],
+      files: [{ path: "index.html", body: Buffer.from(source.html), contentType: "text/html; charset=utf-8" }, ...assetsFor("page", source.assets), ...(lib ? lib.files : [])],
       anchorMap: null,
+      design: designMeta(lib),
     };
   }
   if (type === "document") {
     if (typeof source.markdown !== "string") throw err("bad_source", "document needs markdown");
     if (Buffer.byteLength(source.markdown) > LIMITS.documentMarkdownBytes) throw err("too_large", `markdown over ${LIMITS.documentMarkdownBytes} bytes`);
     if (typeof markdownBlocks !== "function") throw err("no_renderer", "markdown renderer unavailable");
+    const lib = await libsFor("document", source, kit, houseStyle);
     const blocks = markdownBlocks(source.markdown);
-    const body = blocks.map((b, i) => `<div class="blk" id="b${i + 1}">${inertLinks(b.html)}</div>`).join("\n");
+    // Specs (spec §4.2; §4.3 as amended): only with the kit. Without it every
+    // fence is code, byte-identical to before the kit existed.
+    const specAt = [];
+    if (kit) blocks.forEach((b, i) => { if (b.type === "code" && SPEC_ENGINES.has(b.lang)) specAt.push(i); });
+    if (specAt.length > LIMITS.specsPerVersion) throw err("too_many_specs", `at most ${LIMITS.specsPerVersion} charts and diagrams per document`);
+    const deadline = Date.now() + LIMITS.saveRenderMs;
+    const cache = new Map(priorRenders || []);
+    const rendered = new Map();
+    const notes = [];
+    let down = false;
+    for (const i of specAt) {
+      const key = specKey(blocks[i].lang, blocks[i].code);
+      const hit = cachedSvg(cache, key);
+      if (hit) { rendered.set(i, { key, svg: hit }); continue; }
+      if (down) continue;
+      try {
+        const svg = await renderSpec(kit, blocks[i].lang, blocks[i].code, deadline);
+        cache.set(key, svg);
+        rendered.set(i, { key, svg });
+      } catch (e) {
+        if (e.code !== "render_unavailable") throw e; // the renderer answered: refuse (spec §4.2)
+        down = true; // down or out of time: the rest stay code
+      }
+    }
+    if (down) notes.push(RENDERER_DOWN_NOTE);
+    const specFiles = [];
+    const indexItems = [];
+    const body = blocks.map((b, i) => {
+      if (!rendered.has(i)) return `<div class="blk" id="b${i + 1}">${inertLinks(b.html)}</div>`;
+      const path = `__render/b${i + 1}.svg`;
+      specFiles.push({ path, body: Buffer.from(rendered.get(i).svg), contentType: "image/svg+xml" });
+      indexItems.push({ key: rendered.get(i).key, path });
+      return `<div class="blk" id="b${i + 1}"><figure class="spec"><img src="${path}" alt="${SPEC_ALT[b.lang]}"></figure></div>`;
+    }).join("\n");
+    if (indexItems.length) specFiles.push({ path: "__render/index.json", body: Buffer.from(JSON.stringify({ schema: 1, items: indexItems })), contentType: "application/json" });
+    const specCss = rendered.size ? "<style>figure.spec{margin:1rem 0}figure.spec img{display:block;max-width:100%;height:auto}</style>" : "";
     const title = typeof source.title === "string" ? source.title.slice(0, LIMITS.titleChars) : "Document";
-    const html = `<!doctype html><html lang="${source.lang === "es" ? "es" : "en"}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escText(title)}</title><style>${DOC_CSS}</style></head><body><main>\n${body}\n</main></body></html>`;
+    const html = `<!doctype html><html lang="${source.lang === "es" ? "es" : "en"}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escText(title)}</title><style>${DOC_CSS}</style>${headLinks(lib)}${specCss}</head><body><main>\n${body}\n</main></body></html>`;
     return {
-      files: [{ path: "index.html", body: Buffer.from(html), contentType: "text/html; charset=utf-8" }, ...assetsFor("document", source.assets)],
+      files: [{ path: "index.html", body: Buffer.from(html), contentType: "text/html; charset=utf-8" }, ...assetsFor("document", source.assets), ...(lib ? lib.files : []), ...specFiles],
       // D28: `plain` is the block's RENDERED text (tags stripped, entities
       // decoded, whitespace squashed): what a reader can select. `text` stays
       // the markdown source carry-forward matches on.
-      anchorMap: { kind: "blocks", blocks: blocks.map((b, i) => ({ id: `b${i + 1}`, type: b.type, text: b.text, plain: plainOf(b.html) })) },
+      // A rendered spec's `plain` is its alt text (review L7): a reader selects
+      // nothing inside an image, and the anchor is block-level only.
+      anchorMap: { kind: "blocks", blocks: blocks.map((b, i) => ({ id: `b${i + 1}`, type: b.type, text: b.text, plain: rendered.has(i) ? SPEC_ALT[b.lang] : plainOf(b.html) })) },
+      design: designMeta(lib, rendered.size, notes),
     };
   }
   if (type === "diagram") {
+    const lib = await libsFor("diagram", source, kit, houseStyle); // a libs error wins over any render
+    // { engine, source }: rendered by the kit, then the same path as { svg }.
+    let raw = source.svg;
+    let renderedN = 0;
+    let renderFiles = [];
+    if (source.engine !== undefined) {
+      if (!kit) throw err("kit_missing", KIT_MISSING);
+      if (typeof source.engine !== "string" || typeof source.source !== "string") throw err("bad_source", "a rendered diagram needs { engine, source }");
+      const key = specKey(source.engine, source.source);
+      // Unavailable here is a retryable refusal: there is no code to fall back to.
+      raw = cachedSvg(priorRenders && new Map(priorRenders), key) || await renderSpec(kit, source.engine, source.source, Date.now() + LIMITS.saveRenderMs);
+      renderedN = 1;
+      // The cache keeps the SVG itself (not the HTML wrapper) for the next version.
+      renderFiles = [
+        { path: "__render/diagram.svg", body: Buffer.from(raw), contentType: "image/svg+xml" },
+        { path: "__render/index.json", body: Buffer.from(JSON.stringify({ schema: 1, items: [{ key, path: "__render/diagram.svg" }] })), contentType: "application/json" },
+      ];
+    }
     // Cap BEFORE any scan; then only linear indexOf/startsWith work (ReDoS review).
-    if (typeof source.svg !== "string" || source.svg.length > 5 * 1024 * 1024) throw err("too_large", "svg over 5 MB");
-    let svg = source.svg.trim();
+    if (typeof raw !== "string" || raw.length > 5 * 1024 * 1024) throw err("too_large", "svg over 5 MB");
+    let svg = raw.trim();
     if (svg.startsWith("<?xml")) { const e = svg.indexOf("?>"); svg = e < 0 ? "" : svg.slice(e + 2).trim(); }
     const head = svg.slice(0, 5).toLowerCase();
     if (!(head === "<svg>" || (svg.slice(0, 4).toLowerCase() === "<svg" && /\s/.test(svg.charAt(4)))) || !svg.toLowerCase().endsWith("</svg>")) throw err("bad_source", "diagram needs one <svg> element");
@@ -194,12 +571,16 @@ export async function renderVersion(type, source, { markdownBlocks } = {}) {
     // source honest and the anchor map meaningful.
     const low = svg.toLowerCase();
     if (low.includes("<script") || low.includes("<foreignobject") || hasEventAttr(low)) throw err("bad_source", "svg may not carry scripts, event handlers or foreignObject");
+    // Fix round 3: the SVG is inlined into HTML, so the HTML parser's
+    // break-outs apply to a bot's own SVG too. Rendered SVG passed already.
+    if (!renderedN && !safeSvg(svg, true)) throw err("bad_source", BOT_SVG);
     const aspect = svgAspect(svg);
     const elements = svgElements(svg);
-    const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;background:#fff}svg{display:block;width:100%;height:auto}</style></head><body>${svg}</body></html>`;
+    const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;background:#fff}svg{display:block;width:100%;height:auto}</style>${headLinks(lib)}</head><body>${svg}</body></html>`;
     return {
-      files: [{ path: "index.html", body: Buffer.from(html), contentType: "text/html; charset=utf-8" }],
+      files: [{ path: "index.html", body: Buffer.from(html), contentType: "text/html; charset=utf-8" }, ...(lib ? lib.files : []), ...renderFiles],
       anchorMap: { kind: "diagram", aspect, elements },
+      design: designMeta(lib, renderedN),
     };
   }
   throw err("type_unavailable", `${type} needs the render kit (step 4)`);
@@ -215,11 +596,11 @@ function hasEventAttr(low) {
     if (k < 0) return false;
     i = k + 2;
     const before = low.charAt(k - 1);
-    if (!(before === " " || before === "\t" || before === "\n" || before === "\r" || before === "/")) continue;
+    if (!(before === " " || before === "\t" || before === "\n" || before === "\r" || before === "\f" || before === "/" || before === '"' || before === "'")) continue;
     let j = k + 2;
     while (j < low.length && j - k < 40 && low.charCodeAt(j) >= 97 && low.charCodeAt(j) <= 122) j++;
     if (j === k + 2) continue;
-    while (j < low.length && (low.charAt(j) === " " || low.charAt(j) === "\t" || low.charAt(j) === "\n")) j++;
+    while (j < low.length && (low.charAt(j) === " " || low.charAt(j) === "\t" || low.charAt(j) === "\n" || low.charAt(j) === "\r" || low.charAt(j) === "\f")) j++;
     if (low.charAt(j) === "=") return true;
   }
 }
