@@ -243,3 +243,29 @@ test("tax: at start, returns only the previous key opens are re-encrypted to the
     assert.equal(decrypt(d, "k2-new"), "user-edit", "the newer save wins");
   } finally { db.close?.(); }
 });
+
+test("Configure: a tax key change keeps the outgoing key in _PREVIOUS when that is empty; never overwrites another kept key", async () => {
+  const express = (await import("express")).default;
+  const id = "tax";
+  const dir = join(CROW_HOME, "bundles", id);
+  mkdirSync(dir, { recursive: true });
+  copyFileSync(join(REPO, "bundles", id, "manifest.json"), join(dir, "manifest.json"));
+  writeFileSync(join(dir, ".env"), "CROW_TAX_ENCRYPTION_KEY=old-pass-1\n");
+  const app = express(); app.use(express.json()); app.use(B.default());
+  const server = app.listen(0, "127.0.0.1"); await new Promise((r) => server.once("listening", r));
+  try {
+    const post = (env) => fetch(`http://127.0.0.1:${server.address().port}/bundles/api/env`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ bundle_id: id, env_vars: env }) }).then(async (r) => ({ status: r.status, body: await r.json() }));
+    assert.equal((await post({ CROW_TAX_ENCRYPTION_KEY: "new-pass-2" })).status, 200);
+    let env = parseEnvText(readFileSync(join(dir, ".env"), "utf8"));
+    assert.equal(env.CROW_TAX_ENCRYPTION_KEY, "new-pass-2");
+    assert.equal(env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS, "old-pass-1");
+    const r = await post({ CROW_TAX_ENCRYPTION_KEY: "newer-pass-3" });
+    assert.equal(r.status, 200);
+    assert.ok((r.body.warnings || []).some((w) => /already holds an older key/.test(w)), "warns, naming keys only");
+    assert.ok(!JSON.stringify(r.body).includes("old-pass-1") && !JSON.stringify(r.body).includes("new-pass-2"));
+    env = parseEnvText(readFileSync(join(dir, ".env"), "utf8"));
+    assert.equal(env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS, "old-pass-1", "another kept key is never overwritten");
+    assert.equal((await post({ CROW_TAX_ENCRYPTION_KEY: "k4", CROW_TAX_ENCRYPTION_KEY_PREVIOUS: "newer-pass-3" })).status, 200, "a typed previous key wins");
+    assert.equal(parseEnvText(readFileSync(join(dir, ".env"), "utf8")).CROW_TAX_ENCRYPTION_KEY_PREVIOUS, "newer-pass-3");
+  } finally { server.close(); }
+});

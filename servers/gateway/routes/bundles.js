@@ -3743,6 +3743,26 @@ export default function bundlesRouter() {
       const oldEnvText = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
       const existing = parseEnvText(oldEnvText);
 
+      // env_vars[].previous_key (tax's encryption key): a key change that does not fill the
+      // previous-key slot itself keeps the outgoing key there — when the slot is empty (or
+      // already holds the new key) — so returns saved with it stay readable. The outgoing
+      // key is read where the MCP child runs with it (its entry, the gateway env, this .env).
+      // A slot that holds some other key is left alone, with a warning naming the key only.
+      const keyWarnings = [];
+      {
+        const entryEnv = readJsonSafe(MCP_ADDONS_PATH, {})?.[bundle_id]?.env || {};
+        for (const v of getInstalledFirstManifest(bundle_id)?.env_vars || []) {
+          const prev = v && typeof v.previous_key === "string" ? v.previous_key : null;
+          if (!prev || env_vars[v.name] === undefined || env_vars[v.name] === "" || env_vars[prev] !== undefined) continue;
+          const next = String(env_vars[v.name]);
+          const old = entryEnv[v.name] || process.env[v.name] || existing[v.name] || "";
+          if (!old || old === next) continue;
+          const kept = entryEnv[prev] || process.env[prev] || existing[prev] || "";
+          if (!kept || kept === next) env_vars[prev] = old;
+          else keyWarnings.push(`${prev} already holds an older key, so ${v.name}'s previous value was not kept; data saved with it opens only if you enter it in ${prev}.`);
+        }
+      }
+
       // Keys whose value this save actually changes (names only, never values).
       const changedKeys = Object.keys(env_vars).filter((k) => {
         const next = env_vars[k];
@@ -3812,9 +3832,11 @@ export default function bundlesRouter() {
       } else if (appliesOnNextStart) {
         message += `. The bundle is not running; ${bundleRestartKeys.join(", ")} will apply on its next start`;
       }
+      if (keyWarnings.length) message += `. ${keyWarnings.join(" ")}`;
       res.json({
         ok: true,
         message,
+        ...(keyWarnings.length ? { warnings: keyWarnings } : {}),
         needs_restart: needsRestart,
         needs_bundle_restart: needsBundleRestart,
         applies_on_next_start: appliesOnNextStart,

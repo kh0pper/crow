@@ -5938,9 +5938,10 @@
         },
         {
           "name": "CROW_TAX_ENCRYPTION_KEY",
-          "description": "Passphrase that encrypts personal data at rest (SSN, names). Choose your own and keep a copy: without it saved returns can't be read. When you change it, put the old one in CROW_TAX_ENCRYPTION_KEY_PREVIOUS so returns saved with it stay readable.",
+          "description": "Passphrase that encrypts personal data at rest (SSN, names). Choose your own and keep a copy: without it saved returns can't be read. Changing it keeps the old one in CROW_TAX_ENCRYPTION_KEY_PREVIOUS (when that is empty), so returns saved with it stay readable.",
           "required": true,
-          "secret": true
+          "secret": true,
+          "previous_key": "CROW_TAX_ENCRYPTION_KEY_PREVIOUS"
         },
         {
           "name": "CROW_TAX_ENCRYPTION_KEY_PREVIOUS",
