@@ -23,3 +23,16 @@ test("resolveBotSessionDir: no project_id → def.session_dir", async () => {
   const dir = await resolveBotSessionDir(db, "scout", { session_dir: "/legacy" }, null);
   assert.equal(dir, "/legacy");
 });
+
+test("resolveBotSessionDir: no project_id, no def.session_dir → the world root under crowHome (worldRootFor)", async () => {
+  const { worldRootFor } = await import("../scripts/pi-bots/world-root.mjs");
+  const db = dbWith({});
+  const dir = await resolveBotSessionDir(db, "scout", {}, null, "/home/x/.crow");
+  assert.equal(dir, worldRootFor({ workspaceDir: null, def: {}, crowHome: "/home/x/.crow", botId: "scout" }));
+  assert.equal(dir, "/home/x/.crow/pi-bots/scout");
+});
+
+test("resolveBotSessionDir: a project with no workspace_dir falls back like worldRootFor", async () => {
+  const db = dbWith({ project_spaces: [{ workspace_dir: null }] });
+  assert.equal(await resolveBotSessionDir(db, "scout", { session_dir: "/legacy" }, 7), "/legacy");
+});

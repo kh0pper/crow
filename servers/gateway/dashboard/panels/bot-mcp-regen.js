@@ -6,18 +6,23 @@
 import { writeBotMcp } from "../../../../scripts/pi-bots/mcp_writer.mjs";
 import { resolveCrowHome } from "../../../../scripts/pi-bots/ext_registry.mjs";
 import { mcpConfigDelivery } from "../../../../scripts/pi-bots/mcp-delivery.mjs";
+import { worldRootFor } from "../../../../scripts/pi-bots/world-root.mjs";
 
-/** Resolve the sessionDir pi runs from: project workspace wins over def.session_dir. */
-export async function resolveBotSessionDir(db, botId, def, projectId) {
-  let sessionDir = def.session_dir;
+/**
+ * Resolve the sessionDir pi runs from — the bot's world root, by the same
+ * rule the bridge uses (worldRootFor): project workspace wins, then
+ * def.session_dir, then <crowHome>/pi-bots/<botId>.
+ */
+export async function resolveBotSessionDir(db, botId, def, projectId, crowHome = resolveCrowHome()) {
+  let workspaceDir = null;
   if (projectId != null) {
     const ws = (await db.execute({
       sql: "SELECT workspace_dir FROM project_spaces WHERE id=?",
       args: [projectId],
     })).rows[0];
-    if (ws && ws.workspace_dir) sessionDir = ws.workspace_dir + "/bots/" + botId;
+    workspaceDir = (ws && ws.workspace_dir) || null;
   }
-  return sessionDir;
+  return worldRootFor({ workspaceDir, def, crowHome, botId });
 }
 
 /**
@@ -35,8 +40,9 @@ export async function regenerateBotMcp(db, botId) {
   })).rows[0];
   if (!row) throw new Error("bot_not_found");
   const def = JSON.parse(row.definition || "{}");
-  const sessionDir = await resolveBotSessionDir(db, botId, def, row.project_id);
-  const r = writeBotMcp(def, { sessionDir, crowHome: resolveCrowHome(), write: mcpConfigDelivery() === "file" });
+  const crowHome = resolveCrowHome();
+  const sessionDir = await resolveBotSessionDir(db, botId, def, row.project_id, crowHome);
+  const r = writeBotMcp(def, { sessionDir, crowHome, write: mcpConfigDelivery() === "file" });
   const { json: _omit, ...safe } = r;
   return safe;
 }
