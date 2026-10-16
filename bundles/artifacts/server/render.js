@@ -4,7 +4,7 @@
 // hardened container, never here. Everything here is pure string work in the
 // gateway process, so every input is size-capped first.
 //
-// Output: { files: [{ path, body: Buffer, contentType }], anchorMap }
+// Output: { files: [{ path, body: Buffer, contentType }], anchorMap, design }
 //   anchorMap — what the trusted viewer may anchor to from OUTSIDE a
 //   script-free frame: document blocks {id:"b<n>", type, text}; diagram
 //   elements {id, title} plus the SVG aspect ratio for region anchors.
@@ -16,13 +16,57 @@ const ASSET_TYPES = {
   diagram: new Set(),
 };
 
-const err = (code, message) => Object.assign(new Error(message || code), { code });
+const err = (code, message, extra) => Object.assign(new Error(message || code), { code }, extra || {});
+
+/** Spec §4.3 as amended (Kevin 2026-10-15): only the explicit kit features are
+ *  refused without the kit — libs and a diagram's { engine, source }. Fences
+ *  in a document stay code, as today. */
+export const KIT_MISSING = "the Design kit extension isn't installed: remove libs, and send a diagram as { svg } instead of { engine, source }, or ask the owner to install it";
+
+// Kit errors → static, fixable messages (mcp.js fail() contract: never authored text).
+const LIB_MESSAGES = {
+  too_many_libs: () => "libs: at most 40 names",
+  bad_lib_name: (e) => `libs[${Number(e.index) || 0}] must be a library name such as "css:pico" or "icons:lucide/coffee"`,
+  unknown_lib: (e) => `libs[${Number(e.index) || 0}] is not in the Design kit (the design-frontend skill lists the names)`,
+  lib_not_allowed: (e, type) => `libs[${Number(e.index) || 0}] is not allowed in a ${type} (allowed in: ${(e.allowed || []).filter((t) => ["page", "document", "diagram"].includes(t)).join(", ")})`,
+  lib_integrity: () => "a Design kit file failed its integrity check: ask the owner to reinstall the Design kit",
+};
+function libError(e, type) {
+  const m = e && LIB_MESSAGES[e.code];
+  return m ? err(e.code, m(e, type)) : err("lib_integrity", LIB_MESSAGES.lib_integrity());
+}
+
+/** source.libs → resolved kit files (spec §4.1). null when nothing is asked. */
+async function libsFor(type, source, kit) {
+  const names = source.libs === undefined ? [] : source.libs;
+  if (!Array.isArray(names)) throw err("bad_source", "libs must be a list of library names");
+  if (!names.length) return null;
+  if (!kit) throw err("kit_missing", KIT_MISSING);
+  try { return kit.resolve(names, { target: type }); } catch (e) { throw libError(e, type); }
+}
+
+/** <head> additions for script-free types: stylesheet links for every CSS main
+ *  (fonts, CSS, theme) in dependency order, then the font rule when no theme. */
+function headLinks(lib) {
+  if (!lib || !lib.entries.length) return "";
+  const links = lib.entries.filter((e) => e.main.endsWith(".css")).map((e) => `<link rel="stylesheet" href="${escAttr(e.main)}">`).join("");
+  const fonts = lib.entries.filter((e) => e.kind === "font");
+  let rule = "";
+  if (fonts.length && !lib.entries.some((e) => e.kind === "theme")) {
+    const fam = (f) => `"${f.family}",${f.fallback}`;
+    rule = `body{font-family:${fam(fonts[0])}}` + (fonts[1] ? `h1,h2,h3,h4,h5,h6{font-family:${fam(fonts[1])}}` : "");
+  }
+  return links + (rule ? `<style>${rule}</style>` : "");
+}
+const designMeta = (lib, rendered = 0, houseStyle = null) => (lib || rendered || houseStyle ? { libs: lib ? lib.refs : [], house_style: houseStyle, rendered } : null);
 
 export function cleanAssetPath(p) {
   if (typeof p !== "string" || !p || p.length > 200) return null;
   const segs = p.split("/");
   for (const s of segs) if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(s) || s === "." || s === "..") return null;
-  if (p === "index.html" || p.startsWith("__crow/")) return null;
+  // __lib/ (Design kit copies) and __render/ (rendered engine output) are
+  // filled by Crow only: a bot's own asset can never land there (ruling F3).
+  if (p === "index.html" || /^__(crow|lib|render)(\/|$)/.test(p)) return null;
   return p;
 }
 
@@ -158,29 +202,34 @@ a[data-inert-href]{text-decoration:underline dotted;cursor:help}
 img{max-width:100%}pre{overflow:auto}table{border-collapse:collapse}td,th{border:1px solid #8884;padding:.25rem .5rem}
 @media print{body{max-width:none;padding:0}.blk:target{outline:none}}`;
 
-export async function renderVersion(type, source, { markdownBlocks } = {}) {
+export async function renderVersion(type, source, { markdownBlocks, design = null } = {}) {
   if (!source || typeof source !== "object") throw err("bad_source", "source must be an object");
+  const kit = design ? await design.kit() : null;
   if (type === "page") {
     if (typeof source.html !== "string" || !source.html.trim()) throw err("bad_source", "page needs html");
+    const lib = await libsFor("page", source, kit);
     return {
-      files: [{ path: "index.html", body: Buffer.from(source.html), contentType: "text/html; charset=utf-8" }, ...assetsFor("page", source.assets)],
+      files: [{ path: "index.html", body: Buffer.from(source.html), contentType: "text/html; charset=utf-8" }, ...assetsFor("page", source.assets), ...(lib ? lib.files : [])],
       anchorMap: null,
+      design: designMeta(lib),
     };
   }
   if (type === "document") {
     if (typeof source.markdown !== "string") throw err("bad_source", "document needs markdown");
     if (Buffer.byteLength(source.markdown) > LIMITS.documentMarkdownBytes) throw err("too_large", `markdown over ${LIMITS.documentMarkdownBytes} bytes`);
     if (typeof markdownBlocks !== "function") throw err("no_renderer", "markdown renderer unavailable");
+    const lib = await libsFor("document", source, kit);
     const blocks = markdownBlocks(source.markdown);
     const body = blocks.map((b, i) => `<div class="blk" id="b${i + 1}">${inertLinks(b.html)}</div>`).join("\n");
     const title = typeof source.title === "string" ? source.title.slice(0, LIMITS.titleChars) : "Document";
-    const html = `<!doctype html><html lang="${source.lang === "es" ? "es" : "en"}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escText(title)}</title><style>${DOC_CSS}</style></head><body><main>\n${body}\n</main></body></html>`;
+    const html = `<!doctype html><html lang="${source.lang === "es" ? "es" : "en"}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escText(title)}</title><style>${DOC_CSS}</style>${headLinks(lib)}</head><body><main>\n${body}\n</main></body></html>`;
     return {
-      files: [{ path: "index.html", body: Buffer.from(html), contentType: "text/html; charset=utf-8" }, ...assetsFor("document", source.assets)],
+      files: [{ path: "index.html", body: Buffer.from(html), contentType: "text/html; charset=utf-8" }, ...assetsFor("document", source.assets), ...(lib ? lib.files : [])],
       // D28: `plain` is the block's RENDERED text (tags stripped, entities
       // decoded, whitespace squashed): what a reader can select. `text` stays
       // the markdown source carry-forward matches on.
       anchorMap: { kind: "blocks", blocks: blocks.map((b, i) => ({ id: `b${i + 1}`, type: b.type, text: b.text, plain: plainOf(b.html) })) },
+      design: designMeta(lib),
     };
   }
   if (type === "diagram") {
@@ -196,10 +245,12 @@ export async function renderVersion(type, source, { markdownBlocks } = {}) {
     if (low.includes("<script") || low.includes("<foreignobject") || hasEventAttr(low)) throw err("bad_source", "svg may not carry scripts, event handlers or foreignObject");
     const aspect = svgAspect(svg);
     const elements = svgElements(svg);
-    const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;background:#fff}svg{display:block;width:100%;height:auto}</style></head><body>${svg}</body></html>`;
+    const lib = await libsFor("diagram", source, kit);
+    const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;background:#fff}svg{display:block;width:100%;height:auto}</style>${headLinks(lib)}</head><body>${svg}</body></html>`;
     return {
-      files: [{ path: "index.html", body: Buffer.from(html), contentType: "text/html; charset=utf-8" }],
+      files: [{ path: "index.html", body: Buffer.from(html), contentType: "text/html; charset=utf-8" }, ...(lib ? lib.files : [])],
       anchorMap: { kind: "diagram", aspect, elements },
+      design: designMeta(lib),
     };
   }
   throw err("type_unavailable", `${type} needs the render kit (step 4)`);

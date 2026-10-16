@@ -216,7 +216,7 @@ export async function createArtifact(db, blobs, { title, type, source, actor, ch
       args: [id, 1, "current", JSON.stringify(manifest), sourceJson, size, contentHash, bot ? "bot" : "user", bot, changeNote ? String(changeNote).slice(0, LIMITS.changeNoteChars) : null, rendered.anchorMap ? JSON.stringify(rendered.anchorMap) : null, untrusted ? 1 : 0] },
   ]); } catch (e) { await gcKeys(db, blobs, manifest.map((m) => m.key)); throw e; }
   await audit(db, { artifactId: id, actor, action: "create", target: "v1" });
-  return { id, versionN: 1 };
+  return { id, versionN: 1, design: rendered.design || null };
   }, blobs);
 }
 
@@ -282,7 +282,7 @@ export async function addVersion(db, blobs, { artifactId, source, actor, baseVer
       await audit(db, { artifactId, actor, action: state === "current" ? "version" : "version-proposed", target: `v${n}`, detail: { base: baseVersion, roundId, untrusted: tainted } });
       const pruned = await prune(db, artifactId);
       if (pruned.keys.length) await gcKeys(db, blobs, pruned.keys);
-      return { n, state, anchorMap: rendered.anchorMap, untrusted: tainted };
+      return { n, state, anchorMap: rendered.anchorMap, untrusted: tainted, design: rendered.design || null };
     } catch (e) {
       if (attempt < 2 && (e.code === "cas_lost" || /UNIQUE|PRIMARY KEY/.test(String(e.message)))) continue;
       await gcKeys(db, blobs, manifest.map((m) => m.key));
