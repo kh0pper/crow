@@ -157,6 +157,7 @@ export function createPlayResolver({ registry, timeoutMs = SOURCE_TIMEOUT_MS, no
  * → wm events for the page ([] when nothing changes).
  */
 export function autoNowPlaying({ store, deviceId, caps, title }) {
+  if (caps?.bar === true) return [];   // B3: the dashboard's player bar shows what is playing
   if (!Array.isArray(caps?.kinds) || !caps.kinds.includes("nowplaying") || !(Number(caps?.screen?.w) > 0)) return [];
   const open = store.list(deviceId);
   if (open.some((w) => w.kind === "nowplaying")) return [];
@@ -167,6 +168,7 @@ export function autoNowPlaying({ store, deviceId, caps, title }) {
 }
 /** The chip was tapped (F8): bring the now-playing window to the front, opening it if needed. → wm events, or null when this display cannot draw it. */
 export function showNowPlaying({ store, deviceId, caps, title }) {
+  if (caps?.bar === true) return [];   // B3: the bar is the now-playing view (the page hides its chip)
   if (!Array.isArray(caps?.kinds) || !caps.kinds.includes("nowplaying")) return null;
   const w = store.list(deviceId).find((x) => x.kind === "nowplaying");
   if (w) { store.focus(deviceId, w.id); return [{ type: "wm", action: "focus", id: w.id }]; }
@@ -220,6 +222,7 @@ export function createMediaVerbs({ media, resolver, maxVolume = () => 100 }) {
   }
   /** The now-playing window, when this display draws that kind. */
   function nowPlayingWindow(ctx, S) {
+    if (ctx.caps?.bar === true) return { had: false, events: [], shown: false };
     if (!Array.isArray(ctx.caps?.kinds) || !ctx.caps.kinds.includes("nowplaying")) return { had: false, events: [], shown: false };
     const had = ctx.store.list(ctx.deviceId).some((w) => w.kind === "nowplaying");
     const { window, evicted } = ctx.store.put(ctx.deviceId, { kind: "nowplaying", title: S.now_playing_title });
@@ -228,6 +231,7 @@ export function createMediaVerbs({ media, resolver, maxVolume = () => 100 }) {
   function openItem(i, ctx, S) {
     if (i.app !== "now_playing") return ctx.strict ? null : result(false, "unavailable", S.say_open_unavailable);
     if (!media.active(ctx.deviceId)) return ctx.strict ? null : result(false, "unavailable", S.say_nothing_playing);
+    if (ctx.caps?.bar === true) return result(true, "done", S.say_in_player_bar, { events: [] });
     const w = nowPlayingWindow(ctx, S);
     if (!w.shown) return ctx.strict ? null : result(false, "unavailable", S.say_open_unavailable);
     return result(true, w.had ? "focused" : "opened", fill(S.say_now_playing, { title: media.current(ctx.deviceId).title }), { events: w.events });

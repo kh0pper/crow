@@ -934,3 +934,21 @@ test("S6 no ticket in any log line: play, close the overlay, next, a stream that
     }
   } finally { r.close(); await auth.destroySession(token).catch(() => {}); }
 });
+
+test("B3 now playing on a live session display: with the bar no window opens on play or on a chip tap and nothing toggles; without it (today) the window opens as before", async () => {
+  const r = await barServe();
+  try {
+    const c = await r.open();
+    r.play();
+    c.ws.send(JSON.stringify({ type: "wm_event", kind: "nowplaying" }));
+    await new Promise((res) => setTimeout(res, 50));
+    assert.ok(!c.msgs.some((m) => m.type === "wm" && m.action !== "snapshot"), JSON.stringify(c.msgs.filter((m) => m.type === "wm")));
+    assert.equal(r.k.media.current(r.idOf()).state, "playing", "the chip tap did not pause it");
+    await c.shut();
+    const plain = await r.open({ bar: false });
+    r.play(sessionToken, ["Three"]);
+    await plain.until(() => plain.msgs.some((m) => m.type === "wm" && m.action === "open"));
+    assert.equal(plain.msgs.find((m) => m.type === "wm" && m.action === "open").window.kind, "nowplaying", "today's page: F8 auto window unchanged");
+    plain.ws.close();
+  } finally { r.close(); }
+});
