@@ -98,7 +98,7 @@ test("render client: posts {engine, source} to /render with a per-call timeout s
   assert.equal(seen.init.method, "POST");
   assert.deepEqual(JSON.parse(seen.init.body), { engine: "d2", source: "a -> b" });
   assert.ok(seen.init.signal instanceof AbortSignal);
-  assert.throws(() => makeRenderClient({ url: "http://127.0.0.1:8018/x" }), (e) => e.code === "render_unavailable" && e.reason === "not_loopback");
+  assert.equal(seen.init.redirect, "error", "the client never follows a redirect off loopback");
 });
 
 test("guardSpec: error messages never echo the spec", () => {
@@ -112,4 +112,100 @@ test("guardSpec: error messages never echo the spec", () => {
 test("MERMAID_TYPES is one exported Set", () => {
   assert.ok(MERMAID_TYPES instanceof Set);
   assert.ok(MERMAID_TYPES.has("flowchart") && MERMAID_TYPES.has("sequencediagram"));
+});
+
+// ---- fix round 1 -----------------------------------------------------------
+
+test("render client: maps by error code — only render_failed fails, too_large as before, everything else is unavailable", async () => {
+  const c = (impl) => makeRenderClient({ url: "http://127.0.0.1:8018", fetchImpl: impl });
+  const cases = [[400, { error: { code: "bad_request" } }], [400, { error: { code: "bad_engine" } }], [429, { error: { code: "busy" } }],
+    [422, { error: { code: "busy" } }], [404, { error: { code: "not_found" } }], [422, { error: {} }], [422, {}], [422, { error: { code: "SENTINEL" } }],
+    [400, { error: "render_failed" }]];
+  for (const [status, body] of cases) {
+    const e = await err(c(reply(status, body))("mermaid", "x"));
+    assert.deepEqual([e.code, e.retryable], ["render_unavailable", true], JSON.stringify([status, body]));
+    assert.ok(!JSON.stringify(e).includes("SENTINEL"));
+  }
+  const f = await err(c(reply(400, { error: { code: "render_failed", category: "invalid spec", line: 7 } }))("mermaid", "x"));
+  assert.deepEqual([f.code, f.category, f.line], ["render_failed", "invalid spec", 7]);
+});
+
+test("render client: a non-loopback URL throws a fresh, non-retryable error on every call", async () => {
+  let sent = false;
+  const c = makeRenderClient({ url: "http://192.0.2.10:8018", fetchImpl: async () => { sent = true; return { status: 200, json: async () => ({ svg: "<svg/>" }) }; } });
+  const a = await err(c("mermaid", "x")); const b = await err(c("mermaid", "x"));
+  for (const e of [a, b]) assert.deepEqual([e.code, e.reason, e.retryable], ["render_unavailable", "not_loopback", false]);
+  let e1, e2; try { await c("d2", "a"); } catch (e) { e1 = e; } try { await c("d2", "a"); } catch (e) { e2 = e; }
+  assert.notEqual(e1, e2, "no shared mutable error object");
+  e1.retryable = true; assert.equal((await err(c("d2", "a"))).retryable, false);
+  assert.equal(sent, false);
+  assert.equal((await err(makeRenderClient({ url: "http://127.0.0.1:8018/x", fetchImpl: async () => { sent = true; } })("d2", "a"))).reason, "not_loopback");
+  assert.equal(sent, false);
+});
+
+test("guardSpec: Mermaid fails closed on links, callbacks and directives anywhere", () => {
+  const probes = {
+    "flowchart LR\n A-->B %%{init: {\"flowchart\":{\"htmlLabels\":true}}}%%": "directives",
+    "flowchart LR\r A-->B\r click A href \"https://evil\"": "links",
+    "flowchart LR\r\n A-->B\r\n click A call cb()": "links",
+    "flowchart LR\n A-->B; click A href \"x\"": "links",
+    "flowchart LR\n A-->B\n click\tA cb": "links",
+    "flowchart LR\n A-->B\n CLICK A cb": "links",
+    "classDiagram\n class A\n link A \"https://evil\"": "links",
+    "classDiagram\n class A\n callback A \"fn\"": "links",
+    "sequenceDiagram\n participant A\n link A: Dash @ https://evil": "links",
+    "sequenceDiagram\n participant A\n links A: {\"Dash\": \"x\"}": "links",
+    "flowchart LR\n A[\"<a href=x>y</a>\"]": "links",
+    "flowchart LR\n A[\"<script>x</script>\"]": "links",
+    "flowchart LR\n A[\"<iframe src=x>\"]": "links",
+    "flowchart LR\n A[\"javascript:alert(1)\"]": "links",
+    "flowchart LR\n A[\"see ftp://x\"]": "links",
+    "---\ntitle: t\ninit: {}\n---\nflowchart LR\n A-->B": "directives",
+    "---\ntitle: t\n---\n%% c\n\nquadrantChart\n x": "unsupported_type",
+    "---\ntitle: t\nflowchart LR\n A-->B": "directives",
+  };
+  for (const [src, want] of Object.entries(probes)) assert.equal(reason("mermaid", src), want, JSON.stringify(src));
+  assert.equal(reason("mermaid", "---\ntitle: My chart\n---\n\n%% note\nflowchart LR\n A-->B"), null, "plain front matter (title only) is fine");
+  assert.equal(reason("mermaid", "flowchart LR\r\n A-->B"), null);
+  assert.equal(reason("mermaid", "flowchart LR\n A[linked list] --> B[clicker]"), null, "word boundaries: linked, clicker are words of their own");
+});
+
+test("guardSpec: D2 fails closed on icons, imports, links, vars, config and markup anywhere", () => {
+  const probes = {
+    "x: { \"icon\": https://evil/i.svg }": "icons",
+    "x: { ICON: a }": "icons",
+    "x: @\"a b\"": "imports",
+    "x: [@y]": "imports",
+    "@base": "imports",
+    "x: '@y'": "imports",
+    "link: //evil.example/x": "links",
+    "x: see //evil.example": "links",
+    "x: see https://evil.example": "links",
+    "x: { import: a }": "imports",
+    "vars: { a: 1 }": "directives",
+    "x: d2-config": "directives",
+    "x: |md # hi |": "markup",
+    "x: ||md # hi ||": "markup",
+    "x: |latex \\frac{1}{2} |": "markup",
+    "x: |tex a |": "markup",
+  };
+  for (const [src, want] of Object.entries(probes)) assert.equal(reason("d2", src), want, JSON.stringify(src));
+  assert.equal(reason("d2", "a -> b: mail me@example.org"), null, "an @ after a letter is not an import");
+  assert.equal(reason("d2", "x: |go fmt.Println(1) |"), null, "code blocks are text");
+});
+
+test("guardSpec: Vega-Lite usermeta is refused and only data.values / top-level datasets are skipped", () => {
+  assert.equal(reason("vega-lite", JSON.stringify({ usermeta: { embedOptions: { config: "https://evil/c.json" } }, mark: "bar" })), "external_data");
+  assert.equal(reason("vega-lite", JSON.stringify({ layer: [{ usermeta: {} }] })), "external_data");
+  assert.equal(reason("vega-lite", JSON.stringify({ values: { data: { url: "x" } } })), "external_data");
+  assert.equal(reason("vega-lite", JSON.stringify({ layer: [{ datasets: { d: [{ url: "x" }] } }] })), "external_data", "datasets is skipped at the top level only");
+  assert.equal(reason("vega-lite", JSON.stringify({ layer: [{ data: { values: [{ url: "x" }] }, mark: "bar" }] })), null, "a layer's inline data.values is still data");
+});
+
+test("guardSpec: refusals carry a fixed message per reason", () => {
+  const m = (engine, src) => { try { guardSpec(engine, src); } catch (e) { return e.message; } return null; };
+  assert.equal(m("mermaid", "flowchart LR\n click A x"), "links, callbacks and directives are not allowed in diagrams");
+  assert.equal(m("mermaid", "%%{init:{}}%%\nflowchart LR"), "links, callbacks and directives are not allowed in diagrams");
+  assert.notEqual(m("d2", "x: { icon: a }"), m("vega-lite", "{"));
+  for (const msg of [m("d2", "x: { icon: a }"), m("d2", "x: @y"), m("vega-lite", "{"), m("mermaid", "pie2\n x")]) assert.ok(typeof msg === "string" && msg.length > 5);
 });

@@ -55,38 +55,95 @@ export const FAIL_CATEGORIES = new Set(["parse error", "invalid spec", "unsuppor
 const LOOPBACK = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d{1,5}$/;
 const MAX_DEPTH = 64;
 // Mermaid diagram types the kit renders with SVG labels (no foreignObject),
-// matched lower-cased against the first non-comment line's keyword and refused
-// up front otherwise (review M7). Task 8 removes any type whose live render
-// fails; the skill lists exactly these. Keep this the ONE place the list lives.
+// matched lower-cased against the first keyword after blank lines, %% comments
+// and front matter, and refused up front otherwise (review M7). Task 8 removes
+// any type whose live render fails; the skill lists exactly these. Keep this
+// the ONE place the list lives.
 export const MERMAID_TYPES = new Set(["flowchart", "graph", "sequencediagram", "classdiagram", "statediagram", "statediagram-v2", "erdiagram", "gantt", "pie", "timeline", "mindmap"]);
-// Inline data is data: a column named url/href is not a fetch (review L10).
-const DATA_KEYS = new Set(["values", "datasets"]);
-const VEGA_FETCH_KEYS = new Set(["url", "href"]);
-// Renderer statuses that mean "misconfigured" (Host check, content-type check,
-// wrong path), not "this spec is bad": the caller falls back, it does not refuse.
-const MISCONFIGURED = new Set([403, 404, 415]);
+// Keys that make Vega-Lite / vega-embed fetch something: data urls, href
+// channels/marks, and usermeta (embedOptions config/patch can load a URL).
+const VEGA_FETCH_KEYS = new Set(["url", "href", "usermeta"]);
 
-/** Any object key in `keys`, at any depth; deeper than MAX_DEPTH is refused. Iterative. */
+// Fixed refusal messages, per engine and reason. Never spec text.
+const DIAGRAM_LINKS = "links, callbacks and directives are not allowed in diagrams";
+const SPEC_MESSAGES = Object.freeze({
+  engine: "unknown diagram engine",
+  empty: "the spec is empty",
+  too_large: "the spec is too large",
+  not_json: "a Vega-Lite spec must be JSON",
+  too_deep: "the spec is nested too deeply",
+  external_data: "chart data must be inline: urls, links and usermeta are not allowed",
+  unsupported_type: "this Mermaid diagram type is not supported",
+  "mermaid:links": DIAGRAM_LINKS,
+  "mermaid:directives": DIAGRAM_LINKS,
+  "d2:icons": "icons are not allowed in D2 diagrams",
+  "d2:imports": "imports are not allowed in D2 diagrams",
+  "d2:links": "links and urls are not allowed in D2 diagrams",
+  "d2:directives": "variables and config are not allowed in D2 diagrams",
+  "d2:markup": "Markdown and LaTeX blocks are not allowed in D2 diagrams",
+});
+const refuse = (reason, engine) => {
+  const e = kitError("bad_spec", { reason });
+  e.message = SPEC_MESSAGES[`${engine}:${reason}`] || SPEC_MESSAGES[reason] || MESSAGES.bad_spec;
+  return e;
+};
+
+// Mermaid fails closed: these anywhere in the source (case-insensitive, word
+// boundaries) refuse it. False positives (a label saying "link") are accepted;
+// the author can reword.
+const MERMAID_DIRECTIVE = /%%\{/;
+const MERMAID_LINKS = /\b(?:click|links?|callback|href)\b|javascript:|:\/\/|<(?:a\b|script|iframe)/i;
+const MERMAID_FRONT_MATTER_BAD = /\b(?:config|init)\b/i;
+
+// D2 fails closed the same way. An "@" refuses only where it begins a value
+// (line start, or after ":", "[", whitespace or a quote), so "me@example.org"
+// stays legal while "x: @y", "x: [@y]" and "...@y" are imports.
+const D2_RULES = [
+  ["imports", /\.\.\.@|(?:^|[:[\s"'])@|\bimport\b/im],
+  ["icons", /\bicon\b/i],
+  ["links", /\blink\b|\/\//i],
+  ["directives", /\bvars\b|d2-config/i],
+  ["markup", /\|+`*\s*(?:md|markdown|latex|tex)\b/i],
+];
+
+/** Any key in `keys`, at any depth; deeper than MAX_DEPTH is refused. Iterative.
+ *  Skipped as inline data (review L10): `values` directly under a `data` object
+ *  (at any depth, so layers keep their inline data) and the top-level `datasets`. */
 function findKey(root, keys) {
-  const stack = [[root, 0]];
+  const stack = [[root, 0, null]];
   while (stack.length) {
-    const [v, d] = stack.pop();
+    const [v, d, parentKey] = stack.pop();
     if (d > MAX_DEPTH) return "too_deep";
-    if (Array.isArray(v)) { for (const x of v) stack.push([x, d + 1]); continue; }
+    if (Array.isArray(v)) { for (const x of v) stack.push([x, d + 1, null]); continue; }
     if (v && typeof v === "object") {
       for (const k of Object.keys(v)) {
         if (keys.has(k)) return "external_data";
-        if (!DATA_KEYS.has(k)) stack.push([v[k], d + 1]);
+        if (k === "values" && parentKey === "data") continue;
+        if (k === "datasets" && v === root) continue;
+        stack.push([v[k], d + 1, k]);
       }
     }
   }
   return null;
 }
 
-const refuse = (reason) => kitError("bad_spec", { reason });
+/** First Mermaid keyword after blank lines, %% comments and one front-matter
+ *  block; front matter that is unclosed or carries config/init is a directive. */
+function mermaidType(lines) {
+  let i = 0;
+  const skip = () => { while (i < lines.length && (!lines[i].trim() || lines[i].trim().startsWith("%%"))) i++; };
+  skip();
+  if (i < lines.length && lines[i].trim() === "---") {
+    const end = lines.findIndex((l, j) => j > i && l.trim() === "---");
+    if (end < 0 || MERMAID_FRONT_MATTER_BAD.test(lines.slice(i + 1, end).join("\n"))) throw refuse("directives", "mermaid");
+    i = end + 1;
+    skip();
+  }
+  return i < lines.length ? lines[i].trim().toLowerCase().split(/[\s:;]/)[0] : null;
+}
 
-/** Spec rules checked BEFORE any render (spec §4.2). Throws bad_spec {reason};
- *  the error never carries spec text. */
+/** Spec rules checked BEFORE any render (spec §4.2). Throws bad_spec {reason}
+ *  with a fixed message; the error never carries spec text. */
 export function guardSpec(engine, source) {
   if (!ENGINES.has(engine)) throw refuse("engine");
   if (typeof source !== "string" || !source.trim()) throw refuse("empty");
@@ -98,39 +155,33 @@ export function guardSpec(engine, source) {
     if (hit) throw refuse(hit);
     return;
   }
-  const lines = source.split("\n");
+  const text = source.replace(/\r\n?/g, "\n");
   if (engine === "mermaid") {
-    if (source.trimStart().startsWith("---")) throw refuse("directives");
-    let first = null;
-    for (const line of lines) {
-      const t = line.trim().toLowerCase();
-      if (t.startsWith("%%{")) throw refuse("directives");
-      if (t.startsWith("click ")) throw refuse("links");
-      if (first === null && t && !t.startsWith("%%")) first = t.split(/[\s:]/)[0];
-    }
-    if (!MERMAID_TYPES.has(first)) throw refuse("unsupported_type");
+    if (MERMAID_DIRECTIVE.test(text)) throw refuse("directives", engine);
+    if (MERMAID_LINKS.test(text)) throw refuse("links", engine);
+    if (!MERMAID_TYPES.has(mermaidType(text.split("\n")))) throw refuse("unsupported_type", engine);
     return;
   }
-  for (const line of lines) {   // d2
-    const t = line.trim().toLowerCase();
-    if (t.includes("...@") || /(?:^|[:{\s])@[a-z0-9_./-]/.test(t)) throw refuse("imports");
-    // No icons at all: D2 fetches remote icons and reads local paths (review L4).
-    if (/\bicon\s*:/.test(t)) throw refuse("icons");
-    if (/\blink\s*:\s*["']?[a-z][a-z0-9+.-]*:/.test(t)) throw refuse("links");
-  }
+  for (const [reason, re] of D2_RULES) if (re.test(text)) throw refuse(reason, engine);
 }
 
-/** The renderer's HTTP client. Loopback only; every answer becomes a fixed error:
- *  render_unavailable {retryable} (network, timeout, 5xx, 403/404/415, non-JSON),
- *  render_too_large, bad_spec {reason:"too_large"}, render_failed {category, line}. */
+/** The renderer's HTTP client. Loopback only (a non-loopback url makes every
+ *  call throw a fresh render_unavailable {reason:"not_loopback", retryable:false}
+ *  without sending). Mapped by the renderer's error code, not HTTP status:
+ *  render_failed -> render_failed {category, line}; too_large -> render_too_large
+ *  (output) or bad_spec {reason:"too_large"} (input); everything else (network,
+ *  timeout, non-JSON, busy, bad_request, not_found, no/unknown code) ->
+ *  render_unavailable {retryable:true}, so callers fall back rather than refuse. */
 export function makeRenderClient({ url = DEFAULT_RENDER_URL, fetchImpl = globalThis.fetch, timeoutMs = KIT_LIMITS.renderTimeoutMs } = {}) {
-  if (!LOOPBACK.test(String(url))) throw kitError("render_unavailable", { reason: "not_loopback" });
+  if (!LOOPBACK.test(String(url))) {
+    return async () => { throw kitError("render_unavailable", { reason: "not_loopback", retryable: false }); };
+  }
   const unavailable = () => kitError("render_unavailable", { retryable: true });
   return async (engine, source, { timeoutMs: callTimeout = timeoutMs } = {}) => {
     const limit = Math.max(1, Math.min(timeoutMs, Number.isFinite(callTimeout) ? callTimeout : timeoutMs));
     let res;
     try {
-      res = await fetchImpl(url + "/render", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine, source }), signal: AbortSignal.timeout(limit) });
+      res = await fetchImpl(url + "/render", { method: "POST", redirect: "error", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine, source }), signal: AbortSignal.timeout(limit) });
     } catch { throw unavailable(); }
     let j = null;
     try { j = await res.json(); } catch { j = null; }
@@ -139,9 +190,9 @@ export function makeRenderClient({ url = DEFAULT_RENDER_URL, fetchImpl = globalT
       if (Buffer.byteLength(j.svg) > KIT_LIMITS.svgBytes) throw kitError("render_too_large");
       return j.svg;
     }
-    if (!j || res.status >= 500 || MISCONFIGURED.has(res.status)) throw unavailable();
-    const e = j.error && typeof j.error === "object" ? j.error : {};
+    const e = j && j.error && typeof j.error === "object" ? j.error : {};
     if (e.code === "too_large") throw e.category === "output" ? kitError("render_too_large") : refuse("too_large");
+    if (e.code !== "render_failed") throw unavailable();
     const category = FAIL_CATEGORIES.has(e.category) ? e.category : "render error";
     const line = Number.isInteger(e.line) && e.line > 0 && e.line < 1e6 ? e.line : null;
     throw kitError("render_failed", { category, line });
@@ -175,9 +226,7 @@ export function openKit(kitDir, { renderUrl = DEFAULT_RENDER_URL, fetchImpl = gl
   const themes = new Map(themesMeta ? Object.entries(JSON.parse(readVerified(themesMeta).toString("utf8")).themes || {}) : []);
 
   const iconSets = new Map();
-  let client;
-  try { client = makeRenderClient({ url: renderUrl, fetchImpl }); }
-  catch (e) { client = async () => { throw e; }; }
+  const client = makeRenderClient({ url: renderUrl, fetchImpl });
   const render = async (engine, source, opts = {}) => { guardSpec(engine, source); return client(engine, source, opts); };
   const iconsOf = (set) => {
     if (!iconSets.has(set.name)) iconSets.set(set.name, JSON.parse(readVerified(set.files[0]).toString("utf8")));
