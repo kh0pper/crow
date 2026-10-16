@@ -265,8 +265,9 @@ export function botBuilderStyles() {
   @media(max-width:640px){.btb-pop{position:static;width:auto;box-shadow:none}}
   .btb-menu[hidden]{display:none}
   /* "Give <Name> a task" (queue item 20, PR 2): a centred modal on wide,
-     a bottom sheet on a phone. */
-  .btb-give{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.3)}
+     a bottom sheet on a phone; above the sidebar (z 100) and the phone
+     drawer (z 1100); its buttons stay in view while the panel scrolls. */
+  .btb-give{position:fixed;inset:0;z-index:1200;background:rgba(0,0,0,.3)}
   .btb-give[hidden]{display:none}
   .btb-give-panel{position:absolute;top:12vh;left:50%;transform:translateX(-50%);width:min(28rem,calc(100vw - 2rem));max-height:80vh;overflow:auto;padding:1rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:var(--crow-radius-card);box-shadow:0 12px 32px rgba(0,0,0,.22);box-sizing:border-box}
   .btb-give-h{margin:0 0 .6rem;font-weight:600;font-size:1.05rem;overflow-wrap:anywhere}
@@ -280,7 +281,7 @@ export function botBuilderStyles() {
   .btb-seg input:focus-visible+span{outline:2px solid var(--crow-accent);outline-offset:-2px}
   .btb-seg input:disabled+span{opacity:.45}
   .btb-give-hint{margin:0 0 .6rem;font-size:.78rem;color:var(--crow-text-muted)}
-  .btb-give-actions{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:.5rem;margin-top:.5rem}
+  .btb-give-actions{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:.5rem;position:sticky;bottom:-1rem;margin:.5rem -1rem -1rem;padding:.6rem 1rem 1rem;background:var(--crow-bg-surface);border-top:1px solid var(--crow-border)}
   @media(max-width:640px){.btb-give-panel{top:auto;bottom:0;left:0;right:0;transform:none;width:auto;border-radius:var(--crow-radius-card) var(--crow-radius-card) 0 0;padding:1rem 1rem calc(1rem + env(safe-area-inset-bottom))}}
   .btb-menu-form{margin:0}
   .btb-menu a,.btb-menu button{display:block;width:100%;box-sizing:border-box;text-align:left;min-height:44px;padding:.6rem .75rem;border:0;border-radius:8px;background:none;color:var(--crow-text-primary);font:inherit;font-size:.9rem;text-decoration:none;cursor:pointer}

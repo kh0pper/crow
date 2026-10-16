@@ -120,19 +120,20 @@ export function botBoardStyles() {
   .bb-turnon-form{margin:0}
   /* Unassigned lane (PR 2): a dashed first column of cards on no board. Not
      a .bb-col on purpose (never a drop target or a filter count). */
-  .bb-lane-un{background:var(--crow-bg-elevated);border:1px dashed var(--crow-border-strong);border-radius:var(--crow-radius-card);padding:.6rem;min-height:120px;min-width:0}
+  .bb-lane-un{background:var(--crow-bg-elevated);border:1px dashed var(--crow-border-strong);border-radius:var(--crow-radius-card);padding:.6rem;min-height:120px;min-width:140px}
   .bb-lane-un h4{margin:.1rem 0 .6rem;font-size:.85rem;text-transform:uppercase;letter-spacing:.05em;color:var(--crow-text-muted);display:flex;justify-content:space-between}
   .bb-un-body{display:grid;gap:.5rem}
   .bb-un-card{background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);padding:.55rem .6rem;min-width:0}
-  .bb-un-title{font-size:.9rem;font-weight:600;overflow-wrap:anywhere}
+  .bb-un-title{font-size:.9rem;font-weight:600;overflow-wrap:break-word}
   .bb-un-meta{display:flex;flex-wrap:wrap;gap:.2rem .6rem;margin:.3rem 0 .45rem;font-size:.75rem;color:var(--crow-text-muted)}
-  .bb-give-btn{max-width:100%}
+  .bb-give-btn{max-width:100%;white-space:nowrap}
   .bb-un-wrap{margin-top:.9rem;max-width:26rem}
   .bb-un-hint{margin:.8rem 0 0;font-size:.82rem;color:var(--crow-text-muted)}
-  /* The give sheet: a fixed full-screen layer whose transparent backdrop
+  /* The give sheet: a fixed full-screen layer (above the sidebar, z 100,
+     and the phone drawer, z 1100) whose transparent backdrop
      closes it on a tap outside; the panel is a popover beside the card on
      wide (placed by give-client.js) and a bottom sheet on a phone. */
-  .bb-give{position:fixed;inset:0;z-index:60;background:transparent}
+  .bb-give{position:fixed;inset:0;z-index:1200;background:transparent}
   .bb-give[hidden]{display:none}
   .bb-give-panel{position:absolute;top:20vh;left:50%;transform:translateX(-50%);width:min(24rem,calc(100vw - 2rem));max-height:min(80vh,36rem);overflow:auto;padding:.85rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:var(--crow-radius-card);box-shadow:0 12px 32px rgba(0,0,0,.22);box-sizing:border-box}
   .bb-give-panel.bb-placed{transform:none}
@@ -155,7 +156,7 @@ export function botBoardStyles() {
   .bb-seg input:focus-visible+span{outline:2px solid var(--crow-accent);outline-offset:-2px}
   .bb-seg input:disabled+span{opacity:.45}
   .bb-give-hint{margin:-.2rem 0 .6rem;font-size:.78rem;color:var(--crow-text-muted)}
-  .bb-give-actions{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:.5rem}
+  .bb-give-actions{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:.5rem;position:sticky;bottom:calc(-.85rem - 1px);margin:0 -.85rem -.85rem;padding:.6rem .85rem .85rem;background:var(--crow-bg-surface);border-top:1px solid var(--crow-border)}
   /* Q3 (operator decision, 2026-10-16): the bot status strip (roost) is hidden on phones,
      where the picker above already lists the bots; kept on wide. On a phone
      the picker's sheet docks to the bottom of the screen, and a tabbed board
@@ -167,6 +168,7 @@ export function botBoardStyles() {
     .bb-board.bb-tabbed .bb-col:not(.bb-lane-cur){display:none}
     .bb-board.bb-tabbed .bb-lane-un:not(.bb-lane-cur){display:none}
     .bb-board.bb-tabbed .bb-lane-un h4{display:none}
+    .bb-board.bb-tabbed .bb-lane-un{min-width:0}
     .bb-give{background:rgba(0,0,0,.35)}
     .bb-give-panel,.bb-give-panel.bb-placed{top:auto;bottom:0;left:0;right:0;transform:none;width:auto;max-height:80vh;border-radius:var(--crow-radius-card) var(--crow-radius-card) 0 0;padding:.9rem .9rem calc(.9rem + env(safe-area-inset-bottom))}
     .bb-board.bb-tabbed .bb-col{min-width:0}

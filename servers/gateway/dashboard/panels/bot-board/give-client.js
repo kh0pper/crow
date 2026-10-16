@@ -66,7 +66,13 @@ export function giveScript(lang) {
     var r = btn.getBoundingClientRect(), w = p.offsetWidth, h = p.offsetHeight;
     var left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8));
     var top = r.bottom + 6;
-    if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 6);
+    if (top + h > window.innerHeight - 8) top = r.top - h - 6;
+    if (top < 8) {
+      /* fits neither under nor over the button: beside it, vertically
+         centred on it and kept inside the screen */
+      left = r.right + 8 + w <= window.innerWidth - 8 ? r.right + 8 : Math.max(8, r.left - w - 8);
+      top = Math.max(8, Math.min(r.top + r.height / 2 - h / 2, window.innerHeight - h - 8));
+    }
     p.style.left = Math.round(left) + 'px';
     p.style.top = Math.round(top) + 'px';
     p.classList.add('bb-placed');
@@ -143,7 +149,10 @@ export function giveScript(lang) {
   });
   document.addEventListener('change', function(ev){
     var t = ev.target, d = dlg();
-    if (d && t && d.contains(t)) sync();
+    if (!d || !t || !d.contains(t)) return;
+    sync();
+    /* the hint can appear or go, changing the panel's height: re-place it */
+    if (!d.hidden && st.trigger) place(st.trigger);
   });
   document.addEventListener('keydown', function(ev){
     var d = dlg();
