@@ -59,7 +59,7 @@ export const SESSION_PAGE_PATH = "/display/session";
 export const SESSION_WS_PATH = "/api/kiosk/session/dashboard";
 /**
  * B3: the dashboard player bar's view of, and buttons on, its login's session display while the Talk to Crow
- * overlay is closed (GET: the current item; POST { do, id, owner }). Same gate as the session socket: network rule
+ * overlay is closed (GET with X-Crow-Owner: the current item, for the owning tab only; POST { do, id, owner }). Same gate as the session socket: network rule
  * (never Funnel), the dashboard session cookie, and the CSRF double-submit on POST. The display is ALWAYS the
  * caller's own login's (sessionDisplayId of the request's cookie), never named by the body.
  */
@@ -614,7 +614,11 @@ export function createKioskRuntime(deps) {
       const token = await deps.sessionFromRequest(req);
       if (!token) return res.status(401).json({ error: "unauthorized" });
       const id = sessionDisplayId(token);
-      if (req.method === "GET") return res.json(media.barView(id));
+      if (req.method === "GET") {
+        // S8: only the tab that owns the audio is handed the ticket (its bar-hello nonce, sent as X-Crow-Owner).
+        const owner = req.headers["x-crow-owner"];
+        return res.json(media.barView(id, typeof owner === "string" && BAR_OWNER_RE.test(owner) ? owner : null));
+      }
       if (!deps.csrfTokenAccepted(req, req.headers["x-crow-csrf"])) return res.status(403).json({ error: "csrf" });
       const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
       if (!SESSION_MEDIA_VERBS.includes(b.do) || typeof b.id !== "string" || !ITEM_ID.test(b.id) || typeof b.owner !== "string" || !BAR_OWNER_RE.test(b.owner)) return res.status(400).json({ error: "bad_request" });

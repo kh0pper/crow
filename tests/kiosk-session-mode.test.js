@@ -705,6 +705,8 @@ async function barServe() {
       return k.media.view(rig.idOf(tok)).item.url ?? item;
     },
     get: (tok = sessionToken, headers = H(tok)) => fetch(b + MEDIA, { headers, redirect: "manual" }),
+    /** GET as the tab that sent `owner` in its bar hello (X-Crow-Owner): only the owning tab is handed the ticket. */
+    getOwned: (owner = OWNER, tok = sessionToken) => fetch(b + MEDIA, { headers: { ...H(tok), "X-Crow-Owner": owner }, redirect: "manual" }),
     post: (body, { tok = sessionToken, headers } = {}) => fetch(b + MEDIA, { method: "POST", redirect: "manual", headers: headers || { ...H(tok), "Content-Type": "application/json", "X-Crow-Csrf": CSRF }, body: JSON.stringify(body) }),
     stream: (path, hold = false) => fetch(b + path, { headers: { ...SERVE, ...(hold ? { "x-test-hold": "1" } : {}) } }),
     /** One minute sweep, awaited. */
@@ -739,7 +741,7 @@ test("B3 endpoint: auth matrix — session cookie (401), CSRF double-submit on P
     // A malformed body is 400.
     for (const body of [{ do: "eval", id, owner: OWNER }, { do: "pause", owner: OWNER }, { do: "pause", id: "x", owner: OWNER }, { do: "pause", id }, { do: "pause", id, owner: "short" }]) assert.equal((await r.post(body)).status, 400, JSON.stringify(body));
     // A valid GET (no CSRF needed) and POST.
-    const g = await r.get();
+    const g = await r.getOwned();
     assert.equal(g.status, 200);
     assert.equal(g.headers.get("cache-control"), "no-store");
     assert.deepEqual([(await g.json()).item.url], [path]);
@@ -759,8 +761,8 @@ test("B3 endpoint: two logins cannot see or steer each other's media (the displa
     r.play();
     const id = r.k.media.itemId(r.idOf());
     const b = await r.open({ tok: other, owner: "tab-owner-cccccccccccc" });
-    const seen = await (await r.get(other)).json();
-    assert.equal(seen.item, null, "B sees nothing of A's media");
+    const seen = await (await r.getOwned(OWNER, other)).json();
+    assert.equal(seen.item, null, "B sees nothing of A's media, even sending A's tab nonce");
     assert.ok(!JSON.stringify(seen).includes("/display/t/"));
     // Even knowing A's item id and A's tab nonce, B's requests reach only B's own display.
     for (const doIt of ["stop", "next", "pause"]) {
@@ -794,7 +796,47 @@ test("B3 endpoint: next returns the next ticket and the old one answers 404; sto
     const s = await r.post({ do: "stop", id: v.item.id, owner: OWNER });
     assert.equal((await s.json()).item, null);
     assert.equal((await r.stream(v.item.url)).status, 404);
-    assert.equal((await (await r.get()).json()).item, null);
+    assert.equal((await (await r.getOwned()).json()).item, null);
+    c.ws.close();
+  } finally { r.close(); }
+});
+
+test("S8 GET hands the ticket only to the owning tab: after a second tab takes over, the old tab's GET (and one with no or a malformed X-Crow-Owner) gets item null", async () => {
+  const r = await barServe();
+  const NEW = "tab-owner-dddddddddddd";
+  try {
+    const a = await r.open();
+    r.play();
+    const b = await r.open({ owner: NEW });
+    const cur = r.k.media.view(r.idOf()).item.url;
+    const mine = await r.getOwned(NEW);
+    assert.equal(mine.status, 200);
+    assert.equal((await mine.json()).item.url, cur, "the new owner's GET gets the new ticket");
+    for (const [label, res] of [["old owner", await r.getOwned(OWNER)], ["no header", await r.get()], ["malformed header", await r.getOwned("short")], ["oversized header", await r.getOwned("x".repeat(65))]]) {
+      assert.equal(res.status, 200, label);
+      const v = await res.json();
+      assert.equal(v.item, null, label);
+      assert.ok(!JSON.stringify(v).includes("/display/t/"), label);
+    }
+    a.ws.close(); b.ws.close();
+  } finally { r.close(); }
+});
+
+test("B3 endpoint: the owner's stop with a stale item id (a station reload changed it) ends the session — view empty, ticket 404; a non-owner's stop is 409 and changes nothing", async () => {
+  const r = await barServe();
+  try {
+    const c = await r.open();
+    const path = r.play();
+    const id = r.k.media.itemId(r.idOf());
+    const foreign = await r.post({ do: "stop", id, owner: "tab-owner-eeeeeeeeeeee" });
+    assert.equal(foreign.status, 409);
+    assert.equal(r.k.media.itemId(r.idOf()), id, "the non-owner changed nothing");
+    assert.equal((await r.stream(path)).status, 200);
+    const st = await r.post({ do: "stop", id: "m999999", owner: OWNER });
+    assert.equal(st.status, 200);
+    assert.equal((await st.json()).item, null);
+    assert.equal((await r.stream(path)).status, 404, "the ticket is revoked");
+    assert.equal(r.k.media.itemId(r.idOf()), null, "nothing is left to replay");
     c.ws.close();
   } finally { r.close(); }
 });
@@ -846,7 +888,7 @@ test("B3 lifetime: overlay closed with bar:true — the ticket still answers 200
     for (let i = 0; i < 5; i++) { r.clock.t += 60_000; await r.sweep(); }
     assert.equal(r.mediaTimers.filter((t) => t.on).length, 0, "no grace-period cut was armed");
     assert.equal((await r.stream(path)).status, 200);
-    assert.equal((await (await r.get()).json()).item.url, path, "a dashboard reload finds it (GET)");
+    assert.equal((await (await r.getOwned()).json()).item.url, path, "a dashboard reload finds it (GET)");
     assert.equal(r.k.wm.list(id).length, 0, "windows, timers and conversation still end with the grace period");
   } finally { r.close(); }
 });
@@ -919,7 +961,7 @@ test("S6 no ticket in any log line: play, close the overlay, next, a stream that
     r.play(token, ["One", "Two", "Three"]);
     note(c.msgs); note(r.k.media.view(r.idOf(token)));
     await c.shut();
-    let v = await (await r.get(token)).json(); note(v);
+    let v = await (await r.getOwned(OWNER, token)).json(); note(v);
     v = await (await r.post({ do: "next", id: v.item.id, owner: OWNER }, { tok: token })).json(); note(v);
     // A stream request on a revoked ticket and a malformed one, both answered without logging the path.
     for (const t of seen) await r.stream(`/display/t/${t}/stream`);

@@ -228,8 +228,12 @@ export function createMediaStore({ now = Date.now, tickets, send, onFailed = () 
       else api[verb](id);
     },
     view,
-    /** B3 GET: the view for the bar of a display whose audio was handed to it (an owner); any other display shows nothing. */
-    barView(id) { const d = devs.get(id); return d && d.owner ? view(id) : view(null); },
+    /**
+     * B3 GET: the view (with its ticket) only for the tab that owns this display's audio. Any other tab of the same
+     * login — the old owner after a change, one that sent no owner — and any display without an owner sees nothing,
+     * so two tabs never stream at once.
+     */
+    barView(id, owner) { const d = devs.get(id); return d?.owner && owner === d.owner ? view(id) : view(null); },
     itemId: (id) => live(id)?.item.id ?? null,
     /** B3: does this display's session still hold a usable stream (its ticket alive, or a station reload pending)? */
     holdsTicket(id) { const d = live(id); return !!d && (!!d.retry || !!tickets.get(d.item.ticket)); },
@@ -248,7 +252,9 @@ export function createMediaStore({ now = Date.now, tickets, send, onFailed = () 
     },
     /**
      * B3 POST from the player bar (overlay closed): { do, id, owner }. Only the owning tab, only about the current
-     * item: anything else is 409 (superseded) and changes nothing — a stale stop never ends another tab's item.
+     * item: anything else is 409 (superseded) and changes nothing. The one exception is the owner's stop: it ends the
+     * session even with a stale item id (a station reload changed it), so nothing is left queued to replay on the next
+     * overlay open. A stop from any other tab is still refused by the owner check.
      * With nothing playing the answer is the empty view. → { status, view? }
      */
     endpoint(id, { do: verb, id: itemId, owner } = {}) {
@@ -257,7 +263,7 @@ export function createMediaStore({ now = Date.now, tickets, send, onFailed = () 
       if (!holder?.owner || owner !== holder.owner) return { status: 409 };
       const d = live(id);
       if (!d) return { status: 200, view: view(id) };
-      if (itemId !== d.item.id) return { status: 409 };
+      if (verb !== "stop" && itemId !== d.item.id) return { status: 409 };
       if (verb === "ended" || verb === "error") api.onEvent(id, { id: itemId, state: verb });
       else api[verb](id);
       return { status: 200, view: view(id) };
