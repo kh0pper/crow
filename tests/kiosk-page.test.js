@@ -457,7 +457,9 @@ test("item 21c: every mic release tells the Android app (CrowAudioPort) the capt
 test("item 21c rev 2: in the Android app only, an idle AudioContext is paused after each mic release, and every play path resumes it", () => {
   const src = read("kiosk.js");
   const fn = src.slice(src.indexOf("function pauseOutput()"), src.indexOf("const outputNeedsResume"));
-  assert.match(fn, /if \(!audioPort \|\| !ctx \|\| outputPaused \|\| ctx\.state !== "running" \|\| player\?\.playing\) return;/, "no port (a Pi, a browser): untouched; never while a reply plays");
+  assert.match(fn, /if \(!audioPort \|\| !ctx \|\| outputPaused \|\| ctx\.state !== "running" \|\| player\?\.playing \|\| mic \|\| micGate\.opening\(\)\) return;/, "no port (a Pi, a browser): untouched; never while a reply plays or a mic is still held");
+  const rel0 = src.slice(src.indexOf("function releaseAudio()"), src.indexOf("function setBird("));
+  assert.match(rel0, /if \(audioPort && ctx\) outputPaused = true;\s*\/\/[^\n]*\n  try \{ ctx\?\.suspend\(\); \} catch \{\}/, "releaseAudio's suspend is tracked too (re-review N3)");
   assert.match(fn, /outputPaused = true;\n  try \{ ctx\.suspend\(\)/, "the REQUEST is tracked: suspend() is async and ctx.state lags (review I1)");
   assert.match(src, /const outputNeedsResume = \(\) => !!ctx && \(outputPaused \|\| ctx\.state === "suspended"\);/);
   assert.match(src, /const resumeOutput = \(\) => \{ if \(!audioPort \|\| !outputNeedsResume\(\)\) return; outputPaused = false;/, "app only (review M6)");

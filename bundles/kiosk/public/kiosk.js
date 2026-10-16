@@ -72,7 +72,7 @@ const captureEnded = () => { try { audioPort?.postMessage('{"op":"captureEnded"}
  */
 let outputPaused = false;
 function pauseOutput() {
-  if (!audioPort || !ctx || outputPaused || ctx.state !== "running" || player?.playing) return;
+  if (!audioPort || !ctx || outputPaused || ctx.state !== "running" || player?.playing || mic || micGate.opening()) return;
   outputPaused = true;
   try { ctx.suspend().catch(() => {}); } catch {}
   note("audio", "output paused");
@@ -93,6 +93,7 @@ function releaseAudio() {
   micGate.release(); captureEnded();
   mic = null;
   player?.flush();
+  if (audioPort && ctx) outputPaused = true;        // 21c: a play path resumes even mid-suspend (re-review N3)
   try { ctx?.suspend(); } catch {}
 }
 function setBird(s) {

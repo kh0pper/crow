@@ -167,6 +167,13 @@ final class AudioModeWatcher {
         Log.i(TAG, "check (" + due.trigger + "): " + line);
         if ("page".equals(due.trigger)) Log.i(TAG, "recordings: " + recordingDetail());
 
+        if (a == AudioModeGuard.Action.KEEP_RECENT_GRANT) {
+            // Re-review N1: a quiet-window keep must not be the last word — look again just after it.
+            long left = Math.max(AudioModeGuard.GRANT_QUIET_MS - f.msSinceAudioGrant,
+                    AudioModeGuard.MODE_QUIET_MS - f.msSinceModeEntered);
+            trigger("quiet", due.report, Math.max(0L, left) + 100L);
+        }
+
         boolean send;
         if (due.followUp) send = !line.equals(lastReported);
         else send = due.report || a == AudioModeGuard.Action.RESET;
@@ -179,7 +186,10 @@ final class AudioModeWatcher {
         int[] sources = recordingSources();
         // Only a call-type capture (Chromium's AEC path) is expected to be in call mode;
         // the glasses pump (VOICE_RECOGNITION over SCO) or another app's recorder is not.
-        if (!AudioModeGuard.hasVoiceCommunication(sources) || GlassesService.isScoHeld()) return;
+        if (!AudioModeGuard.hasVoiceCommunication(sources) || GlassesService.isScoHeld()) {
+            probeNextCapture = true; // re-review N4: not the capture we meant to probe; wait for the next one
+            return;
+        }
         int mode = am.getMode();
         if (mode == AudioModeGuard.MODE_IN_COMMUNICATION) return;
         String line = AudioModeGuard.captureWithoutCallModeLine(mode, AudioModeGuard.recordingSummary(sources));
