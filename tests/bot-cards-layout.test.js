@@ -1,13 +1,19 @@
 /**
- * Bot Builder rows + Bot Board picker (queue item 20, option A; T11) — live
+ * Bot Builder cards + Bot Board picker (queue item 20, option B; T11) — live
  * layout. The real rendered Bot Builder list and Bot Board (a board-on bot
  * and a board-off bot) inside the real dashboard layout, at a 390 px phone
  * and a 1280 px wide screen, default and xlarge text:
- *   - the page never scrolls sideways (the chip strip scrolls inside itself);
+ *   - the page never scrolls sideways, with the ⋯ popover or the picker
+ *     sheet open too;
  *   - the header title is one line;
- *   - on a phone the five bot rows fit within one 844 px screen (one and a
- *     half at xlarge text);
- *   - on a wide screen the rows sit in two columns;
+ *   - on a phone the cards are one column and at least two are fully on the
+ *     first screen (default text); the ⋯ menu opens inline, unclipped;
+ *   - on a wide screen the cards sit in three columns, the third row ending
+ *     in the + New bot tile; the ⋯ popover is on top, unclipped;
+ *   - the picker sheet docks to the bottom on a phone, drops under the
+ *     button on wide;
+ *   - the lanes are tabs on a phone (one lane shown; a tab switches it) and
+ *     columns on wide;
  *   - the bot status strip is hidden on a phone and shown on a wide screen.
  * Plus a control that proves the overflow check reaches the mechanism.
  *
@@ -25,7 +31,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 
-const dir = mkdtempSync(join(tmpdir(), "bot-rows-layout-"));
+const dir = mkdtempSync(join(tmpdir(), "bot-cards-layout-"));
 process.env.CROW_DATA_DIR = dir;
 process.env.CROW_TASKS_DB_PATH = join(dir, "tasks.db");
 delete process.env.CROW_DB_PATH;
@@ -94,7 +100,7 @@ after(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-async function measure(page, w, h, { textSize = null, css = "", openMenu = false, shot = "" } = {}) {
+async function measure(page, w, h, { textSize = null, css = "", openMenu = false, openPicker = false, laneTab = -1, shot = "" } = {}) {
   const tab = await (await fetch(chrome.cdp + "/json/new?about:blank", { method: "PUT" })).json();
   const { default: WebSocket } = await import("ws");
   const ws = new WebSocket(tab.webSocketDebuggerUrl);
@@ -119,25 +125,46 @@ async function measure(page, w, h, { textSize = null, css = "", openMenu = false
     let ok = false;
     for (let i = 0; i < 75 && !ok; i++) { await new Promise((r) => setTimeout(r, 200)); try { ok = await evalIn("!!document.querySelector('.content-body') && document.readyState==='complete'"); } catch {} }
     assert.ok(ok, "the page never loaded: " + page);
-    if (openMenu) await evalIn("(function(){var b=document.querySelector('.btb-more');if(b)b.click();return 1;})()");
+    if (openMenu !== false) await evalIn("(function(){var b=document.querySelectorAll('.btb-more')[" + (openMenu === true ? 0 : openMenu) + "];b.scrollIntoView({block:'center'});b.click();return 1;})()");
+    if (openPicker) await evalIn("(function(){document.querySelector('.bb-pick-btn').click();return 1;})()");
+    if (laneTab >= 0) await evalIn("(function(){document.querySelectorAll('.bb-lane-tabs [role=tab]')[" + laneTab + "].click();return 1;})()");
     if (css) await evalIn(`(function(){var s=document.createElement('style');s.textContent=${JSON.stringify(css)};document.head.appendChild(s);return 1;})()`);
     await evalIn("new Promise(function(r){requestAnimationFrame(function(){requestAnimationFrame(function(){r(1);});});})");
     const m = JSON.parse(await evalIn(`(function(){
       var cb=document.querySelector('.content-body');
       var h2=document.querySelector('.content-header h2'); var rg=document.createRange(); rg.selectNodeContents(h2);
       var lines={}; Array.prototype.forEach.call(rg.getClientRects(),function(r){ if(r.width>0) lines[Math.round(r.top)]=1; });
-      var rows=Array.prototype.slice.call(document.querySelectorAll('.btb-row'));
+      var vis=function(e){ if(!e) return null; var r=e.getBoundingClientRect(); return r.width>0&&r.height>0; };
+      var box=function(e){ if(!e) return null; var r=e.getBoundingClientRect(); return {l:Math.round(r.left),r:Math.round(r.right),t:Math.round(r.top),b:Math.round(r.bottom)}; };
+      var cards=Array.prototype.slice.call(document.querySelectorAll('.btb-botcard'));
+      var tops=cards.map(function(c){return Math.round(c.getBoundingClientRect().top);});
+      var menu=document.querySelector('.btb-menu:not([hidden])');
+      var hit=null;
+      if(menu){ var mr=menu.getBoundingClientRect(); var el=document.elementFromPoint(mr.left+mr.width/2, Math.min(mr.top+12, innerHeight-2)); hit=!!(el&&menu.contains(el)); }
+      var sheet=document.querySelector('details.bb-picker[open] .bb-sheet');
+      var sheetHit=null;
+      if(sheet){ var sr=sheet.getBoundingClientRect(); var se=document.elementFromPoint(sr.left+sr.width/2, sr.top+sr.height/2); sheetHit=!!(se&&sheet.contains(se)); }
       var roost=document.querySelector('.bb-roost');
-      var chips=document.querySelector('.bb-chips-bots');
+      var cols=Array.prototype.slice.call(document.querySelectorAll('#bb-board .bb-col')).filter(vis).map(function(c){return c.getAttribute('data-col');});
+      var tabs=document.querySelector('.bb-lane-tabs');
       return JSON.stringify({
         doc: document.documentElement.scrollWidth-innerWidth,
         body: cb.scrollWidth-cb.clientWidth,
         titleLines: Object.keys(lines).length,
-        rows: rows.length,
-        rowsSpan: rows.length ? Math.round(rows[rows.length-1].getBoundingClientRect().bottom-rows[0].getBoundingClientRect().top) : 0,
-        sameTop: rows.length>1 ? rows[0].offsetTop===rows[1].offsetTop : null,
+        iw: innerWidth, ih: innerHeight,
+        cards: cards.length,
+        tops: tops,
+        onFirstScreen: cards.filter(function(c){var r=c.getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight;}).length,
+        newTile: vis(document.querySelector('.btb-botcard-new')),
+        newTileTop: box(document.querySelector('.btb-botcard-new')),
+        menu: box(menu), menuOnTop: hit,
+        menuStatic: menu ? getComputedStyle(menu).position==='static' : null,
+        picker: vis(document.querySelector('.bb-pick-btn')),
+        sheet: box(sheet), sheetOnTop: sheetHit,
         roostShown: roost ? roost.getBoundingClientRect().height>0 : null,
-        chipsFit: chips ? chips.getBoundingClientRect().right<=cb.getBoundingClientRect().right+1 : null
+        tabsShown: vis(tabs),
+        cols: cols,
+        selTab: (function(){var t=document.querySelector('.bb-lane-tabs [aria-selected=true]');return t?t.getAttribute('data-lane'):null;})()
       });})()`));
     if (shot && SHOT_DIR) {
       const full = await evalIn("Math.ceil(document.documentElement.scrollHeight)");
@@ -154,43 +181,89 @@ for (const [w, h] of [[390, 844], [1280, 800]]) {
   for (const textSize of [null, "xlarge"]) {
     const label = `${w}x${h}${textSize ? " xlarge text" : ""}`;
     const phone = w < 700;
+    const xl = textSize ? "-xl" : "";
     test(`live @${label}: list and board never pan sideways; the title is one line`, async (t) => {
       if (!chrome) return t.skip("no headless Chrome");
       for (const page of ["list", "board-on", "board-off"]) {
-        const shot = `${page}-${w}${textSize ? "-xl" : ""}`;
-        const m = await measure(page, w, h, { textSize, shot });
+        const m = await measure(page, w, h, { textSize, shot: `${page}-${w}${xl}` });
         assert.ok(m.doc <= 0, `${page}: the page is wider than the screen ${JSON.stringify(m)}`);
         assert.equal(m.body, 0, `${page}: the panel pans inside .content-body ${JSON.stringify(m)}`);
         assert.equal(m.titleLines, 1, `${page}: the header title wraps ${JSON.stringify(m)}`);
-        if (page !== "list") {
-          assert.equal(m.chipsFit, true, `${page}: the chip strip stays inside the panel ${JSON.stringify(m)}`);
-        }
+        if (page !== "list") assert.equal(m.picker, true, `${page}: the name button shows ${JSON.stringify(m)}`);
         if (page === "board-on") {
           assert.equal(m.roostShown, !phone, `${page}: the bot status strip is ${phone ? "hidden on a phone" : "shown on wide"} ${JSON.stringify(m)}`);
         }
       }
-      const open = await measure("list", w, h, { textSize, openMenu: true, shot: `list-menu-${w}${textSize ? "-xl" : ""}` });
-      assert.ok(open.doc <= 0 && open.body === 0, `an open ⋯ menu does not pan the page ${JSON.stringify(open)}`);
     });
 
-    test(`live @${label}: the rows ${phone ? (textSize ? "fit one and a half phone screens" : "fit one phone screen") : "sit in two columns"}`, async (t) => {
+    test(`live @${label}: the cards ${phone ? "are one column, two+ on the first screen" : "sit in three columns, ending in the New bot tile"}`, async (t) => {
       if (!chrome) return t.skip("no headless Chrome");
       const m = await measure("list", w, h, { textSize });
-      assert.equal(m.rows, 5);
-      // The one-screen budget is for the default text size. At xlarge every
-      // line is ~1.3x taller and a row is four lines plus its buttons, so the
-      // budget there is the same five rows within one and a half screens.
+      assert.equal(m.cards, 5);
+      const distinctTops = new Set(m.tops).size;
       if (phone) {
-        const budget = textSize ? Math.round(844 * 1.5) : 844;
-        assert.ok(m.rowsSpan <= budget, `five rows take ${m.rowsSpan}px (budget ${budget}) ${JSON.stringify(m)}`);
+        assert.equal(distinctTops, 5, `one card per line ${JSON.stringify(m)}`);
+        assert.equal(m.newTile, false, `the tile is wide-only; the toolbar button is the phone's way in ${JSON.stringify(m)}`);
+        // the first-screen budget is for the default text size
+        if (!textSize) assert.ok(m.onFirstScreen >= 2, `at least two whole cards on the first screen ${JSON.stringify(m)}`);
+      } else {
+        assert.ok(m.tops[0] === m.tops[1] && m.tops[1] === m.tops[2] && m.tops[3] > m.tops[2], `three per line ${JSON.stringify(m)}`);
+        assert.equal(m.newTile, true);
+        assert.equal(m.newTileTop.t, m.tops[3], `the tile closes the second line ${JSON.stringify(m)}`);
       }
-      else assert.equal(m.sameTop, true, `rows 1 and 2 share a line ${JSON.stringify(m)}`);
+    });
+
+    test(`live @${label}: the ⋯ menu opens ${phone ? "inline below the footer" : "as a popover on top"}, unclipped, no sideways pan`, async (t) => {
+      if (!chrome) return t.skip("no headless Chrome");
+      // the first card, and a card in the last column on wide (index 2)
+      for (const idx of phone ? [0] : [0, 2]) {
+        const m = await measure("list", w, h, { textSize, openMenu: idx, shot: idx ? "" : `list-menu-${w}${xl}` });
+        assert.ok(m.doc <= 0 && m.body === 0, `an open ⋯ menu does not pan the page ${JSON.stringify(m)}`);
+        assert.ok(m.menu && m.menu.l >= 0 && m.menu.r <= m.iw, `the menu is inside the screen ${JSON.stringify(m)}`);
+        assert.equal(m.menuOnTop, true, `nothing covers the menu ${JSON.stringify(m)}`);
+        assert.equal(m.menuStatic, phone, `${phone ? "inline" : "a popover"} ${JSON.stringify(m)}`);
+      }
+    });
+
+    test(`live @${label}: the picker sheet ${phone ? "docks to the bottom" : "drops under the button"}`, async (t) => {
+      if (!chrome) return t.skip("no headless Chrome");
+      const m = await measure("board-on", w, h, { textSize, openPicker: true, shot: `board-picker-${w}${xl}` });
+      assert.ok(m.doc <= 0 && m.body === 0, `the open sheet does not pan the page ${JSON.stringify(m)}`);
+      assert.ok(m.sheet, `the sheet opens ${JSON.stringify(m)}`);
+      assert.equal(m.sheetOnTop, true, `nothing covers the sheet ${JSON.stringify(m)}`);
+      if (phone) {
+        assert.ok(m.sheet.l === 0 && m.sheet.r === m.iw && Math.abs(m.sheet.b - m.ih) <= 1, `a full-width bottom sheet ${JSON.stringify(m)}`);
+      } else {
+        assert.ok(m.sheet.l >= 0 && m.sheet.r <= m.iw && m.sheet.b <= m.ih, `a popover inside the screen ${JSON.stringify(m)}`);
+      }
+    });
+
+    test(`live @${label}: the lanes are ${phone ? "tabs, one shown at a time" : "columns, no tabs"}`, async (t) => {
+      if (!chrome) return t.skip("no headless Chrome");
+      const m = await measure("board-on", w, h, { textSize });
+      if (phone) {
+        assert.equal(m.tabsShown, true, `tabs show ${JSON.stringify(m)}`);
+        assert.deepEqual(m.cols, ["pending"], `the lane with cards opens first, alone ${JSON.stringify(m)}`);
+        const m2 = await measure("board-on", w, h, { textSize, laneTab: 2, shot: `board-tab-done-${w}${xl}` });
+        assert.deepEqual(m2.cols, ["done"], `a tab switches the lane ${JSON.stringify(m2)}`);
+        assert.equal(m2.selTab, "done");
+        assert.ok(m2.doc <= 0 && m2.body === 0, JSON.stringify(m2));
+      } else {
+        assert.equal(m.tabsShown, false, `no tabs on wide ${JSON.stringify(m)}`);
+        assert.ok(m.cols.length >= 3, `the columns show side by side ${JSON.stringify(m)}`);
+      }
     });
   }
 }
 
-test("live @390x844: the check reaches the mechanism — a row that may not shrink pans the page", async (t) => {
+test("live @390x844: the check reaches the mechanism — a card that may not shrink pans the page", async (t) => {
   if (!chrome) return t.skip("no headless Chrome");
-  const m = await measure("list", 390, 844, { css: ".btb-row{white-space:nowrap;width:600px;flex-wrap:nowrap}" });
-  assert.ok(m.doc > 0 || m.body > 0, "forcing a 600px row must overflow, or this file proves nothing: " + JSON.stringify(m));
+  const m = await measure("list", 390, 844, { css: ".btb-botcard{white-space:nowrap;width:600px}" });
+  assert.ok(m.doc > 0 || m.body > 0, "forcing a 600px card must overflow, or this file proves nothing: " + JSON.stringify(m));
+});
+
+test("live @1280x800: the check reaches the mechanism — a clipping card hides its popover", async (t) => {
+  if (!chrome) return t.skip("no headless Chrome");
+  const m = await measure("list", 1280, 800, { openMenu: true, css: ".btb-botcard{overflow:hidden}" });
+  assert.equal(m.menuOnTop, false, "a clipped popover must read as covered, or the unclipped check proves nothing: " + JSON.stringify(m));
 });

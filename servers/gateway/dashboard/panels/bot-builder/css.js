@@ -230,7 +230,8 @@ export function botBuilderStyles() {
   .btb-hue-3{background:color-mix(in srgb,var(--crow-warning) 18%,transparent);color:var(--crow-text-primary)}
   .btb-hue-4{background:color-mix(in srgb,var(--crow-brand-gold) 20%,transparent);color:var(--crow-text-primary)}
   .btb-botcard-name{display:flex;align-items:center;gap:.45rem;min-width:0;font-weight:600}
-  .btb-botcard-name>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* Two lines, then clipped: a long name reads whole on a narrow card. */
+  .btb-botcard-name>span:first-child{min-width:0;overflow:hidden;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2}
   .btb-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--crow-success)}
   .btb-dot-off{background:var(--crow-text-muted)}
   .btb-dot-active{background:var(--crow-accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--crow-accent) 25%,transparent)}
