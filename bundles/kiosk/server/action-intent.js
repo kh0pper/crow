@@ -61,10 +61,20 @@ export function wantsActionFollowUp(transcript) {
   return !!t && FOLLOW_UP.test(t);
 }
 
-// Things the display itself holds: a request that names one can be served by the display tools.
-const DISPLAY_OBJECT = /\b(list|lists|timer|timers|card|cards|minute|minutes|lista|listas|temporizador|temporizadores|tarjeta|tarjetas|minuto|minutos)( |$)/;
-/** Does the request name something the display holds (a list, a timer, a card)? (The voice turn's displayObjectWhen.) */
-export function namesDisplayObject(transcript) {
+// Things the display itself holds, by the window kind that holds them. A request that names one, while
+// such a window is really open, can be served by the display tools. A request that also names something
+// the display never holds (a calendar, a message) cannot: "text her I'll be 10 minutes late" with a timer up.
+const TIMER_OBJECT = /\b(timer|timers|minute|minutes|second|seconds|temporizador|temporizadores|minuto|minutos|segundo|segundos)( |$)/;
+const CARD_OBJECT = /\b(list|lists|card|cards|note|notes|recipe|recipes|lista|listas|tarjeta|tarjetas|nota|notas|receta|recetas)( |$)/;
+const NOT_DISPLAY = /\b(calendar|calendars|appointment|appointments|email|emails|e mail|text|texts|message|messages|contact|contacts|calendario|cita|citas|agenda|correo|correos|mensaje|mensajes|contacto)( |$)/;
+/**
+ * Does the request name something an OPEN window holds? openKinds: the kinds of the windows open on this
+ * display ("timer", "content", "recipe"; a finished timer left out). Music playing alone never counts.
+ * (The voice turn's displayObjectWhen.)
+ */
+export function namesDisplayObject(transcript, openKinds = []) {
   const t = intentText(transcript);
-  return !!t && DISPLAY_OBJECT.test(t);
+  if (!t || NOT_DISPLAY.test(t)) return false;
+  const kinds = new Set(Array.isArray(openKinds) ? openKinds : []);
+  return (kinds.has("timer") && TIMER_OBJECT.test(t)) || ((kinds.has("content") || kinds.has("recipe")) && CARD_OBJECT.test(t));
 }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { wantsAction, wantsActionFollowUp } from "../bundles/kiosk/server/action-intent.js";
+import { wantsAction, wantsActionFollowUp, namesDisplayObject } from "../bundles/kiosk/server/action-intent.js";
 import { LATENCY_QUESTIONS } from "../bundles/kiosk/server/questions.js";
 
 test("wantsAction: a request to add, schedule, remind, send or delete is an action request (en + es)", () => {
@@ -92,4 +92,14 @@ test("wantsAction: none of the scripted latency questions is an action request (
 test("wantsActionFollowUp: a change to the last request is a follow-up; a new question is not", () => {
   for (const s of ["Move it to 9 instead", "Make it 10", "Also Tuesday", "Actually, cancel that", "Cámbiala a las nueve", "Mejor el martes", "Change it to 9"]) assert.equal(wantsActionFollowUp(s), true, s);
   for (const s of ["When is the World Cup final?", "Thanks!", "What is the capital of Portugal?", "Gracias", "", "Is it going to rain?", "What's the weather like this weekend?", "¿Cuál es la capital de Francia?"]) assert.equal(wantsActionFollowUp(s), false, s);
+});
+
+test("namesDisplayObject: only against what is really open, and never with a non-display object (code review round 3)", () => {
+  assert.equal(namesDisplayObject("Put eggs on the shopping list", ["content"]), true);
+  assert.equal(namesDisplayObject("Add two minutes to my reminder", ["timer"]), true);
+  assert.equal(namesDisplayObject("Añade dos minutos", ["timer"]), true);
+  assert.equal(namesDisplayObject("Add milk to my shopping list", ["timer"]), false, "a timer is up, no list card");
+  assert.equal(namesDisplayObject("Send a text to my wife saying I'll be 10 minutes late", ["timer"]), false);
+  assert.equal(namesDisplayObject("Add a dentist appointment to my calendar for 30 minutes from now", ["timer", "content"]), false);
+  assert.equal(namesDisplayObject("Put eggs on the list", []), false, "music playing alone opens no window");
 });

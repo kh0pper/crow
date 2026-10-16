@@ -113,12 +113,13 @@ test("changesSomething: only a tool that changes something backs an action turn"
   for (const n of ["ws_cal_list_events", "gcal_get_event", "crow_search_memories", "tasks_list", "crow_discover", "gmail_search_threads", "", null]) assert.equal(changesSomething(n), false, String(n));
 });
 
-test("toolEffect: the real add-on names, camelCase and hyphens; a write word wins over a read word", () => {
+test("toolEffect: the real add-on names, camelCase and hyphens; the first verb decides (find_replace is a write)", () => {
   for (const n of ["ws_cal_create_event", "ws_cal_update_event", "ws_cal_delete_event", "ws_cal_respond_to_event", "ws_contacts_create", "gcal_create_event", "gmail_send_to_self",
     "gmail_create_draft", "crow_voice_memo", "crow_crosspost", "crow_react", "crow_dismiss_notification", "ws_change_status", "ws_undo_last_change", "ws_drive_restore_version",
     "gdocs_find_replace", "gdocs_rewrite_passages", "gdocs_resolve_comment", "gslides_duplicate_slide", "gslides_reorder_slides", "gdrive_transfer_ownership", "bigquery_sync_sheet_to_table",
     "createEvent", "create-event", "crow_create_schedule"]) assert.equal(toolEffect(n), "write", n);
-  for (const n of ["ws_cal_list_events", "gcal_get_event", "gmail_search_threads", "crow_search_memories", "tasks_list", "crow_discover"]) assert.equal(toolEffect(n), "read", n);
+  for (const n of ["ws_cal_list_events", "gcal_get_event", "gmail_search_threads", "crow_search_memories", "tasks_list", "crow_discover",
+    "crow_get_post", "list_new_messages", "get_call_log", "get_order_status", "search_start_time"]) assert.equal(toolEffect(n), "read", n);
   for (const n of ["acme_frobnicate", "", null]) assert.equal(toolEffect(n), "unknown", String(n));
   assert.equal(changesSomething("gcal_create_event"), true);
 });

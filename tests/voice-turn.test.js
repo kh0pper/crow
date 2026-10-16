@@ -1915,7 +1915,7 @@ import { wantsAction, wantsActionFollowUp, namesDisplayObject } from "../bundles
 const CANT = "Sorry, I can't do that from here: this assistant has no tool for it.";
 const NOT_DONE = "Sorry, I couldn't do that from here, so nothing was changed.";
 const INCIDENT = "Add a car appointment for 815am Monday to my calendar";
-const actTurn = (h, transcript, extra = {}) => famTurn(h, transcript, { actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp, displayObjectWhen: namesDisplayObject, cantDoText: CANT, notDoneText: NOT_DONE, unsureText: "UNSURE", ...extra });
+const actTurn = (h, transcript, extra = {}) => famTurn(h, transcript, { actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp, displayObjectWhen: (t) => namesDisplayObject(t, ["timer", "content"]), cantDoText: CANT, notDoneText: NOT_DONE, unsureText: "UNSURE", ...extra });
 // The real effectiveToolName: a crow_tools call is named by its action (the add-on tool it runs).
 const wrapperNames = (h) => { const base = h.deps.effectiveToolName; h.deps.effectiveToolName = (tc) => (tc.name === "crow_tools" && tc.arguments?.action ? tc.arguments.action : base(tc)); return h; };
 /** A display tool whose words-ask test (holdText) reads the transcript, as the kiosk's do. */
@@ -2205,4 +2205,18 @@ test("item 29 (re-review minor): 'put eggs on the list' with a card open still r
   assert.equal(seen.length, 1);
   assert.deepEqual(h.calls.spoken, ["Eggs are on the list."]);
   assert.equal(r.timings.action_no_tool, undefined);
+});
+
+test("item 29 (code review round 3): with music on (no window) a text request is not 'served' by the display tool — escalates, or the could-not-do line", async () => {
+  const media = { ...displayTool([]), when: () => true, holdText: () => false };
+  const TEXT = "Send a text to my wife saying I'll be 10 minutes late";
+  const w = harness({ chatTools: ["crow_tools"], rounds: [says("x. ")] });
+  w.deps.toolFamilies = FAM();
+  const seen = routerSees(w);
+  await actTurn(w, TEXT, { extraTools: [media], displayObjectWhen: (t) => namesDisplayObject(t, []) });
+  assert.equal(seen[0].actionIntent, true);
+  const n = harness({ chatTools: [], rounds: [says("I've texted her. ")] });
+  n.deps.toolFamilies = FAM();
+  await actTurn(n, TEXT, { extraTools: [media], displayObjectWhen: (t) => namesDisplayObject(t, ["timer"]) });
+  assert.deepEqual(n.calls.spoken, [CANT], "a timer up: 'minutes' still does not make a text a display request");
 });

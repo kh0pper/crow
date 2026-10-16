@@ -202,7 +202,8 @@ export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = 
     // the could-not-do line without a model call; tools withheld from the quick model → escalate.
     actionWhen: wantsAction,
     actionFollowWhen: wantsActionFollowUp,
-    displayObjectWhen: namesDisplayObject,
+    // Only against the windows really open now (never because music plays).
+    displayObjectWhen: (t) => namesDisplayObject(t, ctx.store.list(ctx.deviceId).filter((w) => !(w.kind === "timer" && w.done)).map((w) => w.kind)),
     cantDoText: kioskCantDoText(lang),
     notDoneText: kioskNotDoneText(lang),
     notReadyText: kioskNotReadyText(lang),

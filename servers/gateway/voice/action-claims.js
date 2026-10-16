@@ -96,15 +96,21 @@ const READS = /(?:^|_)(?:list|get|search|read|find|discover|status|query|export|
 const words = (name) => String(name || "").replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^crow_/, "").replace(/^_+|_+$/g, "");
 /**
  * "write" | "read" | "unknown" for an (effective) tool name. Only a write backs an action turn; an ok read
- * (list events, search mail) proves nothing was added, and its text may be anyone's. A WRITE word wins
- * over a read word ("find_replace" changes the document). Unknown is neither: after an ok unknown call
- * the turn never says "nothing was changed".
+ * (list events, search mail) proves nothing was added, and its text may be anyone's. The first verb in the
+ * name decides; "find_replace" is one write. Unknown is neither:
+ * after an ok unknown call the turn never says "nothing was changed".
  */
 export function toolEffect(name) {
   const n = words(name);
   if (!n) return "unknown";
-  if (WRITES.test(n)) return "write";
-  if (READS.test(n)) return "read";
+  // The first verb decides ("crow_get_post" reads; "ws_cal_create_event" writes), except find/search
+  // straight before replace, which is one compound write ("find_replace").
+  const parts = n.split("_");
+  for (let i = 0; i < parts.length; i++) {
+    const w = `_${parts[i]}_`;
+    if (WRITES.test(w)) return "write";
+    if (READS.test(w)) return (parts[i] === "find" || parts[i] === "search") && parts[i + 1] === "replace" ? "write" : "read";
+  }
   return "unknown";
 }
 export const changesSomething = (name) => toolEffect(name) === "write";
