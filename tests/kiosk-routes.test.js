@@ -20,6 +20,7 @@ import { resolveDisplayBird, DEFAULT_BIRD } from "../bundles/kiosk/server/bird.j
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { readPortrait, portraitMood } from "../servers/sharing/profile-avatar.js";
 import { wrapPcmAsWav } from "../servers/gateway/voice/turn-helpers.js";
+import { DASH_VOICE_PATH, displayPath, dashBody, dashAutoBody, displayBody } from "./fixtures/voice-use-bodies.mjs";
 
 let srv, base, rt, raw, tailnet = true, session = true;
 const db = () => ({ execute: (q) => raw.execute(q), close() {} });
@@ -1435,4 +1436,45 @@ test("r8b (review M2): a server from listen() closes at once even while a wired 
   await new Promise((res) => s.close(res));          // never ws.close(): what a failing test leaves behind
   assert.ok(Date.now() - t0 < 1000, `closed in ${Date.now() - t0} ms`);
   await new Promise((res) => (ws.readyState === 3 ? res() : ws.on("close", res)));
+});
+
+// ── Item 20 PR 3: Bot Builder's "Use for voice…" writes through these same routes ─────────────
+test("same path: the Bot Builder dialog's bodies store exactly what the Kiosk panel's saves store — the dashboard setting, a display's assistant (nothing else), and the open page gets its config", async () => {
+  await raw.execute({ sql: "INSERT INTO pi_bot_defs VALUES ('vu-other','Other','{}',1)", args: [] });
+  await store.pairDevice(db(), { id: "kiosk-vu 1", name: "Kitchen", device_kind: "kiosk", stt_profile_id: "fw", tts_profile_id: "kk", kiosk_settings: { follow_up: true, vad_hangover_ms: 600 } });
+  await store.updateDeviceProfiles(db(), "kiosk-vu 1", { bound_bot_id: "household" });
+  const pushed = [];
+  const push = rt.hub.pushConfig;
+  rt.hub.pushConfig = async (id) => { pushed.push(id); return push.call(rt.hub, id); };
+  const post = (path, body) => j(path, { method: "POST", body: JSON.stringify(body) });
+  const prevChoice = settings.get("kiosk_dashboard_bot_id");
+  try {
+    const before = await store.findDevice(db(), "kiosk-vu 1");
+    // The dialog: a display → vu-other.
+    const r = await post(displayPath("kiosk-vu 1"), displayBody("vu-other"));
+    assert.equal(r.status, 200);
+    const afterDialog = await store.findDevice(db(), "kiosk-vu 1");
+    assert.equal(afterDialog.bound_bot_id, "vu-other");
+    const { bound_bot_id: _a, ...restBefore } = before;
+    const { bound_bot_id: _b, ...restAfter } = afterDialog;
+    assert.deepEqual(restAfter, restBefore, "nothing but the assistant changed (voice, speech model, settings, token)");
+    assert.deepEqual(pushed, ["kiosk-vu 1"], "the open page gets its new config at once");
+    // The Kiosk panel's own Save when only the assistant changed (kiosk.js savePatch) posts the same body.
+    await store.updateDeviceProfiles(db(), "kiosk-vu 1", { bound_bot_id: "household" });
+    assert.equal((await post(displayPath("kiosk-vu 1"), { bound_bot_id: "vu-other" })).status, 200);
+    assert.deepEqual(await store.findDevice(db(), "kiosk-vu 1"), afterDialog, "the panel's save lands on the same record");
+    // Phone & dashboard: the dialog's {bot_id} and back to Automatic, the setting the voice socket reads.
+    const d1 = await (await post(DASH_VOICE_PATH, dashBody("vu-other"))).json();
+    assert.deepEqual([d1.ok, d1.bot_id, d1.effective_bot_id], [true, "vu-other", "vu-other"]);
+    assert.equal(settings.get("kiosk_dashboard_bot_id"), "vu-other");
+    const d2 = await (await post(DASH_VOICE_PATH, dashAutoBody())).json();
+    assert.equal(d2.bot_id, null);
+    assert.equal(settings.get("kiosk_dashboard_bot_id"), "", "the same empty value the panel's Automatic option posts");
+    assert.equal(d2.effective_bot_id, d2.auto_bot_id, "Automatic is who answers now");
+  } finally {
+    rt.hub.pushConfig = push;
+    if (prevChoice === undefined) settings.delete("kiosk_dashboard_bot_id"); else settings.set("kiosk_dashboard_bot_id", prevChoice);
+    await store.unpairDevice(db(), "kiosk-vu 1");
+    await raw.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id = 'vu-other'", args: [] });
+  }
 });

@@ -58,7 +58,7 @@ export default {
   navOrder: 14,
   category: "tools",
 
-  async handler(req, res, { db, layout, lang }) {
+  async handler(req, res, { db, layout, lang, kioskAvailable = false }) {
     const notAvail = await tableMissing(db);
 
     // ---- F4a L3: remote edit of a TRUSTED PEER's bot (?peer=<instanceId>&bot=<botId>) ----
@@ -125,6 +125,6 @@ export default {
     }
 
     // ---- list + create + run monitor (C6: delegated to html.js) ----
-    return renderBotList(res, { db, layout, notice, PAGE_CSS, req });
+    return renderBotList(res, { db, layout, notice, PAGE_CSS, req, kioskAvailable });
   },
 };

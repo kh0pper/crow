@@ -879,6 +879,8 @@ export default function dashboardRouter(mcpAuthMiddleware) {
         db,
         appRoot: resolve(import.meta.dirname, "../../.."),
         lang,
+        // Bot Builder's "Use for voice…" binds through the Kiosk's own endpoints: offered only when it is there.
+        kioskAvailable: talkAvailable,
         layout: (opts) => renderLayout({
           ...opts,
           activePanel: panelId,
