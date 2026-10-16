@@ -1598,7 +1598,9 @@ function validateComposeFile(composePath, bundleId, opts = {}) {
 
 /** What the owner consented to at install, kept on the installed.json record. */
 function consentRecord(manifest, consentVerified) {
-  if (!manifestRequiresConsent(manifest)) return {};
+  // Always written (also for a bundle that asked for nothing), so a missing record can only
+  // mean "installed before this was kept", never "a bundle that asked for nothing".
+  if (!manifestRequiresConsent(manifest)) return { consent: { verified: false, privileged: false, consent_required: false } };
   return { consent: { verified: !!consentVerified, privileged: manifest?.privileged === true, consent_required: manifest?.consent_required === true } };
 }
 
@@ -1611,14 +1613,26 @@ function consentRecord(manifest, consentVerified) {
  * consent gate of its time.
  */
 function startConsent(bundleId, { crossHost = false } = {}) {
-  const im = getInstalledFirstManifest(bundleId);
-  if (!manifestRequiresConsent(im) || crossHost) return { manifest: im, consentVerified: false };
+  // Trust flags never come from the installed copy: its folder can be mounted into the
+  // bundle's own container. They come from the reviewed repo manifest (privileged,
+  // consent_required, origin, inference), capped by what the owner consented to.
+  const installed = getInstalledFirstManifest(bundleId) || {};
+  const repo = getManifest(bundleId);
+  const trust = {
+    privileged: repo?.privileged === true,
+    consent_required: repo?.consent_required === true,
+    origin: repo ? repo.origin : "community",
+    inference: repo?.inference === true,
+    id: bundleId,
+  };
+  const manifest = { ...installed, ...trust };
+  if (!manifestRequiresConsent(manifest) || crossHost) return { manifest, consentVerified: false };
   const rec = getInstalled().find((i) => i.id === bundleId);
-  if (!rec) return { manifest: im, consentVerified: false };
-  if (!rec.consent) return { manifest: im, consentVerified: true };
-  if (rec.consent.verified !== true) return { manifest: im, consentVerified: false };
+  if (!rec) return { manifest, consentVerified: false };
+  if (!rec.consent) return { manifest, consentVerified: true }; // installed before consent was kept: the repo flags, as of then
+  if (rec.consent.verified !== true) return { manifest, consentVerified: false };
   return {
-    manifest: { ...im, privileged: im.privileged === true && rec.consent.privileged === true, consent_required: im.consent_required === true && rec.consent.consent_required === true },
+    manifest: { ...manifest, privileged: trust.privileged && rec.consent.privileged === true, consent_required: trust.consent_required && rec.consent.consent_required === true },
     consentVerified: true,
   };
 }

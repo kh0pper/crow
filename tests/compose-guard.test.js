@@ -380,25 +380,28 @@ dockerTest("allowlist on real Compose output: use_api_socket, a host network by 
 
 // ---- authorization: whose consent a later Start runs with ----------------------------
 
-function seedInstalled(id, manifest, record) {
+function seedInstalled(id, manifest, record, { repo = manifest } = {}) {
   const dir = join(CROW_HOME, "bundles", id);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "manifest.json"), JSON.stringify({ id, name: id, version: "0.1.0", type: "bundle", ...manifest }));
+  if (repo) {
+    mkdirSync(join(FIXTURES, id), { recursive: true });
+    writeFileSync(join(FIXTURES, id, "manifest.json"), JSON.stringify({ id, name: id, version: "0.1.0", type: "bundle", ...repo }));
+  }
   const path = join(CROW_HOME, "installed.json");
   const list = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : [];
   writeFileSync(path, JSON.stringify([...list.filter((x) => x.id !== id), { id, type: "bundle", version: "0.1.0", ...record }]));
 }
 
-test("install records the consent the owner gave, and only for a bundle that asked for it", () => {
+test("install records the consent the owner gave, also for a bundle that asked for none", () => {
   assert.deepEqual(B._consentRecordForTest({ privileged: true }, true), { consent: { verified: true, privileged: true, consent_required: false } });
-  assert.deepEqual(B._consentRecordForTest({}, true), {});
+  assert.deepEqual(B._consentRecordForTest({}, true), { consent: { verified: false, privileged: false, consent_required: false } });
 });
 
 test("Start runs with the install-time consent: never a peer's, never for privileges added later", () => {
   seedInstalled("fx-c1", { privileged: true }, B._consentRecordForTest({ privileged: true }, true));
   assert.equal(B._startConsentForTest("fx-c1").consentVerified, true);
   assert.equal(B._startConsentForTest("fx-c1", { crossHost: true }).consentVerified, false, "a peer instance can't use the owner's consent");
-  // installed as consent_required only; a refresh made the manifest privileged
   seedInstalled("fx-c2", { privileged: true, consent_required: true }, B._consentRecordForTest({ consent_required: true }, true));
   const sc = B._startConsentForTest("fx-c2");
   assert.equal(sc.manifest.privileged, false, "privileged was never consented to");
@@ -406,8 +409,52 @@ test("Start runs with the install-time consent: never a peer's, never for privil
   seedInstalled("fx-c3", { privileged: true }, { consent: { verified: false, privileged: true } });
   assert.equal(B._startConsentForTest("fx-c3").consentVerified, false);
   seedInstalled("fx-c4", { privileged: true }, {});
-  assert.equal(B._startConsentForTest("fx-c4").consentVerified, true, "a record from before consent was kept: installed through the gate of its time");
+  assert.equal(B._startConsentForTest("fx-c4").consentVerified, true, "a record from before consent was kept: the repo flags, as of then");
   assert.equal(B._startConsentForTest("fx-not-installed").consentVerified, false);
+});
+
+test("Start takes trust flags from the repo manifest, never the installed copy (a container can rewrite that)", () => {
+  // Installed copy rewritten to claim privileged/inference/first-party; the repo says none of it.
+  seedInstalled("fx-tamper", { privileged: true, inference: true, origin: "official" }, B._consentRecordForTest({}, true), { repo: { origin: "community" } });
+  const sc = B._startConsentForTest("fx-tamper");
+  assert.equal(sc.manifest.privileged, false);
+  assert.equal(sc.manifest.inference, false);
+  assert.equal(sc.manifest.origin, "community");
+  assert.equal(sc.consentVerified, false);
+  // A legacy record (no consent field) for a bundle the repo never made privileged.
+  seedInstalled("fx-tamper2", { privileged: true }, {}, { repo: {} });
+  assert.equal(B._startConsentForTest("fx-tamper2").manifest.privileged, false);
+  // A bundle gone from the repo: treated as community, nothing privileged.
+  seedInstalled("fx-gone", { privileged: true }, {}, { repo: null });
+  const g = B._startConsentForTest("fx-gone");
+  assert.equal(g.manifest.privileged, false);
+  assert.equal(g.manifest.origin, "community");
+});
+
+test("a bundle can't mount its own control files read-write, nor claim a Crow name or file in CROW_HOME by its id", () => {
+  const dir = join(CROW_HOME, "bundles", "fx-ctl");
+  mkdirSync(join(dir, "data"), { recursive: true });
+  const m = { manifest: { id: "fx-ctl" }, dir };
+  for (const rel of ["", "manifest.json", "docker-compose.yml", ".env", "server", "panel"]) {
+    assert.equal(check(svc({ volumes: [bind(join(dir, rel))] }), m).valid, false, `rw ${rel || "(the folder)"}`);
+  }
+  assert.equal(check(svc({ volumes: [bind(dir, true)] }), m).valid, true, "read-only is fine");
+  assert.equal(check(svc({ volumes: [bind(join(dir, "data"))] }), m).valid, true, "a data subfolder is fine");
+  for (const id of ["mcp", "peer", "secrets", "backups", "panels", "skills", "data", "bundles"]) {
+    for (const f of [id, `${id}-addons.json`, `${id}-tokens.json`]) {
+      assert.equal(check(svc({ volumes: [bind(join(CROW_HOME, f))] }), { manifest: { id } }).valid, false, `${id} → ${f}`);
+    }
+  }
+  writeFileSync(join(CROW_HOME, "board-token"), "x");
+  assert.equal(check(svc({ volumes: [bind(join(CROW_HOME, "board-token"), true)] }), { manifest: { id: "board-token" } }).valid, false, "an existing file named like the id");
+  assert.equal(check(svc({ volumes: [bind(join(CROW_HOME, "fx-ctl-tokens"))] }), m).valid, false, "only <id> and <id>-downloads");
+  assert.equal(check(svc({ volumes: [bind(join(CROW_HOME, "fx-ctl-downloads"))] }), m).valid, true);
+});
+
+test("no tracked compose bundle's id is a name Crow reserves in CROW_HOME", async () => {
+  const { RESERVED_HOME_NAMES } = G;
+  const clash = [...trackedBundleSet()].filter((id) => existsSync(join(REPO, "bundles", id, "docker-compose.yml")) && RESERVED_HOME_NAMES.has(id));
+  assert.deepEqual(clash, []);
 });
 
 dockerTest("Compose never sees the gateway's secrets: ${ANY_VAR} interpolates to empty", async () => {

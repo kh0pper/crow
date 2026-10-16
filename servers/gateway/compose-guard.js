@@ -16,7 +16,7 @@
  * (single and collection: both go through runInstallJob), Start/recreate, and the
  * shared-storage re-apply.
  */
-import { existsSync, readFileSync, realpathSync, lstatSync, readlinkSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, lstatSync, readlinkSync, statSync } from "node:fs";
 import { join, resolve as resolvePath, dirname, basename, sep, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 
@@ -100,6 +100,14 @@ const SERVICE_OK = new Set([
 const SERVICE_PRIV = new Set(["cgroup_parent", "device_cgroup_rules", "external_links", "isolation", "storage_opt",
   "credential_spec", "oom_kill_disable", "use_api_socket", "post_start", "pre_stop", "develop", "models", "provider"]);
 const TOP_OK = new Set(["name", "services", "networks", "volumes", "secrets", "configs"]);
+// Top-level entries of a bundle folder that the gateway reads or runs.
+const BUNDLE_CONTROL = new Set(["manifest.json", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
+  "docker-compose.override.yml", "docker-compose.override.yaml", "compose.override.yml", "compose.override.yaml",
+  ".env", ".env.example", "package.json", "package-lock.json", "node_modules", "server", "panel", "scripts", "ops", "skills", "public", "bin"]);
+// Names Crow itself uses directly under CROW_HOME: no bundle id may claim them as its own.
+export const RESERVED_HOME_NAMES = new Set(["data", "secrets", "bundles", "panels", "skills", "media", "backups", "env", "logs",
+  "p4", "pi-bots", "eval", "blog", "bin", "tmp", "cache", "config", "android-keystore", "keychain", "identity", "peer",
+  "mcp", "models", "board", "phone-token", "artifacts-sidecar", "browser-sessions", "instances", "installed", "live2d-models"]);
 
 /**
  * Check a Compose model (the parsed `docker compose config --format json` output).
@@ -143,8 +151,23 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     if (under(p, roots.crowHome)) {
       const rel = p.slice(roots.crowHome.length + 1);
       const first = rel.split(sep)[0];
-      if (under(p, bundleReal)) return null;
-      if (ownId && (first === ownId || first.startsWith(`${ownId}-`))) return null;
+      if (under(p, bundleReal)) {
+        // The bundle's own folder, but never the folder itself or its control files read-write:
+        // the gateway reads the manifest, compose file and .env, and runs server/ code, so a
+        // container that could rewrite them could grant itself privileges at the next Start.
+        if (!readOnly && (p === bundleReal || BUNDLE_CONTROL.has(p.slice(bundleReal.length + 1).split(sep)[0]))) {
+          return refuse(`${what}: mounts the bundle's own control files read-write`);
+        }
+        return null;
+      }
+      // CROW_HOME/<id> (a folder, or not created yet) and CROW_HOME/<id>-downloads. Never a
+      // name Crow itself uses there, and never an existing file (tokens, registries).
+      if (ownId && !RESERVED_HOME_NAMES.has(ownId) && (first === ownId || first === `${ownId}-downloads`)) {
+        const top = join(roots.crowHome, first);
+        let isFile = false;
+        try { isFile = !statSync(top).isDirectory(); } catch { /* not there yet */ }
+        if (!isFile) return null;
+      }
       if (first === "media" && rel !== "media") return null;
       if (readOnly && isPrivilegedAllowed && p === join(roots.crowHome, "bundles")) return null;
       return refuse(`${what}: mounts a path in Crow's home that is not this bundle's own`);
