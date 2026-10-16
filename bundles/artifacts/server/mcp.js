@@ -79,7 +79,7 @@ const ok = (d) => ({ content: [{ type: "text", text: JSON.stringify(d) }] });
  * signed gateway is `perch` (and that has a thread) — the one place a link
  * card can be shown. EVERY other gateway is exempt: Discord, Gmail, jobs,
  * crow-messages rooms, glasses, the companion, Telegram, Slack and anything
- * added later. That is the accepted residual (Kevin's S2b, review M6): a bot
+ * added later. That is the accepted residual (operator ruling S2b, review M6): a bot
  * reaching an artifact from any non-Perch gateway — including a job it made
  * for itself with board tools — can update without a link, so ask-first is
  * advisory for such bots. What those turns write saves untrusted whenever

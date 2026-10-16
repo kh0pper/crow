@@ -129,7 +129,7 @@ async function deliverClaimed(db, round, { engine, botDef, choice = "chat", crea
     }
     if (choice === "new-session") {
       const s = await spawnAndSend(false);
-      // Kevin 2026-10-13 (review L8): the owner's "New chat with <bot>" Send
+      // Operator decision 2026-10-13 (review L8): the owner's "New chat with <bot>" Send
       // links that chat, so later versions show there and it can be the next
       // Send's target. Trusted rounds only (this branch): an untrusted
       // round's locked chat is never linked. A writer of artifact_links driven

@@ -19,7 +19,7 @@ const ASSET_TYPES = {
 
 const err = (code, message, extra) => Object.assign(new Error(message || code), { code }, extra || {});
 
-/** Spec §4.3 as amended (Kevin 2026-10-15): only the explicit kit features are
+/** Spec §4.3 as amended (operator decision 2026-10-15): only the explicit kit features are
  *  refused without the kit — libs and a diagram's { engine, source }. Fences
  *  in a document stay code, as today. */
 export const KIT_MISSING = "the Design kit extension isn't installed: remove libs, and send a diagram as { svg } instead of { engine, source }, or ask the owner to install it";
@@ -89,7 +89,7 @@ const SPEC_REASONS = {
   escapes: "backslashes and look-alike letters are not allowed", markup: "Markdown and LaTeX blocks are not allowed",
   unsupported_type: "this diagram type is not supported (the design-frontend skill lists the supported types)",
 };
-/** Fixed text (Kevin 2026-10-15): the save succeeded, the charts are code for now. */
+/** Fixed text (operator decision 2026-10-15): the save succeeded, the charts are code for now. */
 export const RENDERER_DOWN_NOTE = "renderer_unavailable: the chart and diagram renderer is unavailable, so charts in this version are shown as code; save again later to render them";
 const UNAVAILABLE = "the chart and diagram renderer is not answering; try again in a minute";
 const TOO_LARGE = "the rendered SVG is over 2 MB; simplify the chart or diagram";
