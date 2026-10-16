@@ -11,6 +11,7 @@ import { getTrustedInstances } from "../nest/data-queries.js";
 import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
 import { t } from "../../shared/i18n.js";
 import { SESSION_LOCK_STATUSES, lockMapFor as sharedLockMapFor } from "../../../routes/board-lock.js";
+import { DEFAULT_BOARD_DEF } from "../../../routes/board-defs.js";
 
 export const TASKS_DB = tasksDbPath();
 
@@ -165,6 +166,36 @@ export async function liveBirdsByCard(engine, db) {
     }
   }
   return map;
+}
+
+// ---- Unassigned cards (queue item 20, PR 2) ----
+// A card that belongs to no board: board_id NULL (a card, not a tracker item)
+// AND project_id NULL (a kanban board is keyed on the bot's project). Top
+// level, unarchived, and not finished: a project-less card has no board def
+// of its own, so "finished" is the builtin def's terminals. A card with an
+// assigned_bot but no project (dispatched straight from the roost) still
+// counts — the lane shows who it was last given to. `tdb` is the
+// instance-global tasks.db; never a per-project store.
+export async function listUnassignedCards(tdb) {
+  const terms = DEFAULT_BOARD_DEF.terminal_values;
+  const { rows } = await tdb.execute({
+    sql: `SELECT id, title, tags, assigned_bot, status, created_at FROM tasks_items
+          WHERE board_id IS NULL AND project_id IS NULL AND parent_id IS NULL AND archived_at IS NULL
+            AND status NOT IN (${terms.map(() => "?").join(",")})
+          ORDER BY priority ASC, id ASC LIMIT 200`,
+    args: [...terms],
+  });
+  return rows || [];
+}
+
+/** Cards on no board, from the instance-global tasks.db; [] when it is absent. */
+export async function loadUnassigned() {
+  let tdb;
+  try {
+    tdb = createDbClient(TASKS_DB);
+    return await listUnassignedCards(tdb);
+  } catch { return []; }
+  finally { if (tdb) { try { tdb.close(); } catch { /* already closed */ } } }
 }
 
 // ---- Resolve bot info from pi_bot_defs ----

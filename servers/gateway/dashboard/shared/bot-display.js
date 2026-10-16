@@ -92,17 +92,19 @@ function parseUtc(s) {
  * "updated N <unit> ago" with real singular/plural keys in each language.
  * @param {string} isoUtc  stored timestamp (SQLite UTC text or ISO)
  * @param {number} now     epoch ms (injected so tests and renders agree)
+ * @param {string} [prefix] i18n key prefix: "botbuilder.updated" (default)
+ *   or "botboard.added" — each has JustNow + AgoMinute(s)…AgoMonth(s) keys
  */
-export function agoText(isoUtc, now, lang = "en") {
+export function agoText(isoUtc, now, lang = "en", prefix = "botbuilder.updated") {
   if (!isoUtc) return "";
   const ms = parseUtc(isoUtc);
   if (ms == null) return "";
   const sec = Math.max(0, Math.floor((now - ms) / 1000));
-  if (sec < 60) return t("botbuilder.updatedJustNow", lang);
+  if (sec < 60) return t(prefix + "JustNow", lang);
   const min = Math.floor(sec / 60), hr = Math.floor(min / 60), day = Math.floor(hr / 24), mon = Math.floor(day / 30);
   const pick = (n, one, many) => fill(t(n === 1 ? one : many, lang), { n });
-  if (mon >= 1) return pick(mon, "botbuilder.updatedAgoMonth", "botbuilder.updatedAgoMonths");
-  if (day >= 1) return pick(day, "botbuilder.updatedAgoDay", "botbuilder.updatedAgoDays");
-  if (hr >= 1) return pick(hr, "botbuilder.updatedAgoHour", "botbuilder.updatedAgoHours");
-  return pick(min, "botbuilder.updatedAgoMinute", "botbuilder.updatedAgoMinutes");
+  if (mon >= 1) return pick(mon, prefix + "AgoMonth", prefix + "AgoMonths");
+  if (day >= 1) return pick(day, prefix + "AgoDay", prefix + "AgoDays");
+  if (hr >= 1) return pick(hr, prefix + "AgoHour", prefix + "AgoHours");
+  return pick(min, prefix + "AgoMinute", prefix + "AgoMinutes");
 }

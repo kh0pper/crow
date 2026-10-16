@@ -264,6 +264,25 @@ export function botBuilderStyles() {
   .btb-pop{position:absolute;top:calc(100% - .5rem);right:.5rem;z-index:20;width:min(18rem,calc(100% - 1rem));box-shadow:0 8px 24px rgba(0,0,0,.14)}
   @media(max-width:640px){.btb-pop{position:static;width:auto;box-shadow:none}}
   .btb-menu[hidden]{display:none}
+  /* "Give <Name> a task" (queue item 20, PR 2): a centred modal on wide,
+     a bottom sheet on a phone; above the sidebar (z 100) and the phone
+     drawer (z 1100); its buttons stay in view while the panel scrolls. */
+  .btb-give{position:fixed;inset:0;z-index:1200;background:rgba(0,0,0,.3)}
+  .btb-give[hidden]{display:none}
+  .btb-give-panel{position:absolute;top:12vh;left:50%;transform:translateX(-50%);width:min(28rem,calc(100vw - 2rem));max-height:80vh;overflow:auto;padding:1rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:var(--crow-radius-card);box-shadow:0 12px 32px rgba(0,0,0,.22);box-sizing:border-box}
+  .btb-give-h{margin:0 0 .6rem;font-weight:600;font-size:1.05rem;overflow-wrap:anywhere}
+  .btb-give-l{display:block;margin:.5rem 0 .25rem;font-size:.85rem;color:var(--crow-text-secondary)}
+  .btb-give-text,#btb-give-card{width:100%;box-sizing:border-box;max-width:100%;font:inherit;padding:.5rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-primary)}
+  .btb-give-seg{display:flex;gap:3px;margin:.75rem 0 .5rem;padding:3px;min-width:0;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control)}
+  .btb-give-seg label{flex:1 1 0;min-width:0;position:relative;display:flex}
+  .btb-give-seg input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer}
+  .btb-give-seg span{flex:1;display:grid;place-items:center;text-align:center;min-height:40px;padding:.3rem .45rem;border-radius:8px;font-size:.85rem;color:var(--crow-text-secondary)}
+  .btb-give-seg input:checked+span{background:var(--crow-bg-surface);color:var(--crow-text-primary);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.08)}
+  .btb-give-seg input:focus-visible+span{outline:2px solid var(--crow-accent);outline-offset:-2px}
+  .btb-give-seg input:disabled+span{opacity:.45}
+  .btb-give-hint{margin:0 0 .6rem;font-size:.78rem;color:var(--crow-text-muted)}
+  .btb-give-actions{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:.5rem;position:sticky;bottom:-1rem;margin:.5rem -1rem -1rem;padding:.6rem 1rem 1rem;background:var(--crow-bg-surface);border-top:1px solid var(--crow-border)}
+  @media(max-width:640px){.btb-give-panel{top:auto;bottom:0;left:0;right:0;transform:none;width:auto;border-radius:var(--crow-radius-card) var(--crow-radius-card) 0 0;padding:1rem 1rem calc(1rem + env(safe-area-inset-bottom))}}
   .btb-menu-form{margin:0}
   .btb-menu a,.btb-menu button{display:block;width:100%;box-sizing:border-box;text-align:left;min-height:44px;padding:.6rem .75rem;border:0;border-radius:8px;background:none;color:var(--crow-text-primary);font:inherit;font-size:.9rem;text-decoration:none;cursor:pointer}
   .btb-menu a:hover,.btb-menu button:hover{background:var(--crow-bg-elevated)}

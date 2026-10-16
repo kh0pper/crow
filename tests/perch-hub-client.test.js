@@ -630,7 +630,7 @@ function makeResponse(status, body) {
  *  path, opts)` decides how every perchApi call resolves; the default 200s
  *  everything with `{}`. Returns the fake DOM pieces and every fetch call
  *  made, in order, so a test can assert on both wiring and traffic. */
-async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", split = false,
+async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", initialSearch = "", split = false,
                           legacyMediaQuery = false, innerWidth, localStorage, crowTextSize, lang = "en" } = {}) {
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
   const js = perchHubJs(lang);
@@ -756,6 +756,7 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
       winTarget._dispatch("hashchange", {});
     },
     href: "",
+    search: initialSearch,
   };
 
   // Timers are recorded, never actually fired by the real clock — nothing
@@ -1501,6 +1502,50 @@ test("C1: with more than one attached bot the picker decides, and only attached 
   await new Promise((r) => setTimeout(r, 0));
   const spawns = hub.fetchCalls.filter((c) => c.path.endsWith("/interactive"));
   assert.equal(spawns[0].path, "/bots/beta/interactive", "the picked bot, not the first one");
+});
+
+// Queue item 20 PR 2 (T10): the Bot Builder card's Chat link is
+// /dashboard/perch?bot=<id> — it lands with that bot already picked.
+test("?bot=<id> preselects that bot in the launcher's picker", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_TWO_BOTS), initialSearch: "?bot=beta" });
+  assert.equal(hub.els["perch-new-bot"].value, "beta");
+  hub.els["perch-new"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.fetchCalls.filter((c) => c.path.endsWith("/interactive"))[0].path, "/bots/beta/interactive");
+});
+
+test("?bot=<id> is ignored when that bot is not offered (not attached, or unknown)", async () => {
+  for (const q of ["?bot=quiet", "?bot=nobody", "?bot="]) {
+    const hub = await mountHub({ fetchImpl: roostFetch(ROOST_TWO_BOTS), initialSearch: q });
+    assert.ok(!["quiet", "nobody"].includes(hub.els["perch-new-bot"].value), q);
+    hub.els["perch-new"].onclick();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(hub.fetchCalls.filter((c) => c.path.endsWith("/interactive"))[0].path, "/bots/alpha/interactive", q + ": the first offered bot");
+  }
+});
+
+test("?bot=<id> applies once: a later poll keeps the operator's own pick", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_TWO_BOTS), initialSearch: "?bot=beta" });
+  hub.els["perch-new-bot"].value = "alpha";
+  for (const fn of hub.timers.values()) fn();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.els["perch-new-bot"].value, "alpha");
+});
+
+test("?bot=<id> not offered yet: the operator's own pick wins over a later poll that offers it", async () => {
+  // First roost: alpha + gamma (beta not attached yet). The operator picks
+  // gamma. A later poll offers beta too — it must NOT yank the select to beta.
+  const GAMMA = { id: "gamma", name: "Gamma", perch_attached: true, state: "working", sessions: [] };
+  let roost = { birds: [ROOST_TWO_BOTS.birds[0], GAMMA] };
+  const hub = await mountHub({ fetchImpl: (m, p) => roostFetch(roost)(m, p), initialSearch: "?bot=beta" });
+  const sel = hub.els["perch-new-bot"];
+  assert.notEqual(sel.value, "beta");
+  sel.value = "gamma";
+  sel.onchange();
+  roost = { birds: [ROOST_TWO_BOTS.birds[0], ROOST_TWO_BOTS.birds[1], GAMMA] };
+  for (const fn of hub.timers.values()) fn();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(sel.value, "gamma");
 });
 
 test("C1: one attached bot spawns with no picker at all", async () => {

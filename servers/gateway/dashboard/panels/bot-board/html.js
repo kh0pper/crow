@@ -7,13 +7,14 @@
  */
 
 import { escapeHtml, section, badge } from "../../shared/components.js";
-import { t } from "../../shared/i18n.js";
+import { t, fill } from "../../shared/i18n.js";
 import { createDbClient } from "../../../../db.js";
 import { botBoardStyles } from "./css.js";
 import { clientJs } from "./client.js";
 import {
   TASKS_DB, STATUS_BADGE,
   lockMapFor, statusLabel, liveBirdsByCard, sessionBirdState, foldBirdStates,
+  loadUnassigned,
 } from "./data-queries.js";
 import { DEFAULT_BOARD_DEF, resolveBoardDef, resolveSlugBoardDef } from "../../../routes/board-defs.js";
 // Track 3 Task 11 (spec §5.6): the interactive-engine singleton — live bird
@@ -31,8 +32,9 @@ import { perchAttached } from "../../../shared/perch-attached.js";
 // drawer's GET /card/:id/plan route (plan-service.getCurrentPlan) reads.
 import { getCurrentPlan } from "../../../board/plan-service.js";
 import { csrfInput } from "../../shared/csrf.js";
-import { boardState } from "../../shared/bot-display.js";
+import { boardState, agoText } from "../../shared/bot-display.js";
 import { pickerScript, laneTabsScript } from "./picker-client.js";
+import { giveScript } from "./give-client.js";
 
 // ---- Option B (queue item 20): name-button picker + Turn-on panel ----
 
@@ -98,6 +100,96 @@ export function botPickerHtml(bots, selBot, counts, req, lang) {
     `<ul class="bb-pick-list">${rows}</ul>` +
     (anyOff ? `<p class="bb-pick-note">${escapeHtml(t("botbuilder.boardOnWarn", lang))}</p>` : "") +
     `</div></details>` + pickerScript();
+}
+
+// ---- Unassigned lane + "Give to…" (queue item 20, PR 2) ----
+
+function avatarOf(b, cls) {
+  const name = String(b.displayName || b.botId);
+  return `<span class="${cls} bb-hue-${chipHue(b.botId)}" aria-hidden="true">${escapeHtml((Array.from(name.trim())[0] || "?").toUpperCase())}</span>`;
+}
+
+/**
+ * The Unassigned lane: a dashed column of cards that are on no bot's board,
+ * each with a Give to… button that opens the give sheet. The buttons render
+ * `hidden` and give-client.js reveals them, so without JS there is no dead
+ * button (the give sheet needs the script). Deliberately NOT a
+ * .bb-col and its cards not .bb-card: it is not a status, so it must never
+ * be a drop target for a status move, a filter count, or a list-view row.
+ * "" when there are no such cards.
+ */
+export function unassignedLaneHtml(cards, bots, lang, now = Date.now()) {
+  if (!cards.length) return "";
+  const nameOf = (id) => {
+    const b = bots.find((x) => x.botId === id);
+    return b ? String(b.displayName || b.botId) : String(id);
+  };
+  const body = cards.map((c) => {
+    const id = escapeHtml(String(c.id));
+    const title = String(c.title || "");
+    const ago = agoText(c.created_at, now, lang, "botboard.added");
+    const given = c.assigned_bot ? `<span>${escapeHtml(fill(t("botboard.lastGivenTo", lang), { name: nameOf(c.assigned_bot) }))}</span>` : "";
+    return `<div class="bb-un-card" data-card-id="${id}">` +
+      `<div class="bb-un-title">${escapeHtml(title)}</div>${tagPillsHtml(c.tags)}` +
+      `<div class="bb-un-meta">${ago ? `<span>${escapeHtml(ago)}</span>` : ""}${given}</div>` +
+      `<button type="button" class="btn btn-secondary btn-sm bb-give-btn" data-card-id="${id}" data-card-title="${escapeHtml(title)}" ` +
+      `aria-haspopup="dialog" aria-controls="bb-give" aria-label="${escapeHtml(fill(t("botboard.giveToAria", lang), { title }))}" hidden>${t("botboard.giveTo", lang)}</button>` +
+      `</div>`;
+  }).join("");
+  return `<div class="bb-lane-un" id="bb-col-un" data-col="__unassigned">` +
+    `<h4><span>${t("botboard.unassignedLane", lang)}</span><span>${cards.length}</span></h4>` +
+    `<div class="bb-un-body">${body}</div></div>`;
+}
+
+/**
+ * The give sheet: one per page, opened by any Give to… button (give-client.js
+ * fills in the card). A bottom sheet on a phone, a popover beside the card on
+ * wide. Board-on bots are radio rows (data-perch says whether "Start now" can
+ * work for that bot); board-off bots are listed with a Turn on form (a
+ * native POST through the CSRF rail, landing on that bot's board).
+ * "Add to board for later" is the default — "Start right away" is off
+ * everywhere (spins up a model).
+ */
+export function giveSheetHtml(bots, req, lang) {
+  const on = bots.filter((b) => botBoardState(b).state === "on");
+  const off = bots.filter((b) => { const st = botBoardState(b); return st.state === "off" && st.reason !== "no_slug"; });
+  const nameOf = (b) => String(b.displayName || b.botId);
+  const onRows = on.map((b) =>
+    `<label class="bb-give-bot"><input type="radio" name="bb-give-bot" value="${escapeHtml(b.botId)}" data-perch="${perchAttached(b.definition) ? 1 : 0}" data-name="${escapeHtml(nameOf(b))}">` +
+    `${avatarOf(b, "bb-pick-av")}<span class="bb-pick-txt"><b>${escapeHtml(nameOf(b))}</b></span></label>`).join("");
+  const offRows = off.map((b) =>
+    `<div class="bb-give-bot nob">${avatarOf(b, "bb-pick-av")}<span class="bb-pick-txt"><b>${escapeHtml(nameOf(b))}</b><small>${t("botboard.pickerNoBoard", lang)}</small></span>` +
+    `<form method="POST" action="/dashboard/bot-builder" class="bb-pick-form">` +
+    `<input type="hidden" name="action" value="board_on">` +
+    `<input type="hidden" name="bot_id" value="${escapeHtml(b.botId)}">` +
+    `<input type="hidden" name="return" value="board">${csrfInput(req)}` +
+    `<button type="submit" class="btn btn-secondary btn-sm">${t("botboard.pickerTurnOn", lang)}</button></form></div>`).join("");
+  return `<div class="bb-give" id="bb-give" role="dialog" aria-modal="true" aria-labelledby="bb-give-h" hidden>` +
+    `<div class="bb-give-panel">` +
+    `<p class="bb-give-h" id="bb-give-h">${t("botboard.giveTo", lang)}</p>` +
+    `<p class="bb-give-card" id="bb-give-card"></p>` +
+    `<fieldset class="bb-give-bots"><legend>${t("botboard.giveWhichBot", lang)}</legend>` +
+    (on.length ? onRows : `<p class="bb-give-none">${t("botboard.giveNoBots", lang)}</p>`) + offRows +
+    `</fieldset>` +
+    `<fieldset class="bb-seg"><legend class="bb-sr">${t("botboard.giveWhen", lang)}</legend>` +
+    `<label><input type="radio" name="bb-give-when" value="later" checked><span>${t("botboard.giveLater", lang)}</span></label>` +
+    `<label><input type="radio" name="bb-give-when" value="now"><span>${t("botboard.giveNow", lang)}</span></label>` +
+    `</fieldset>` +
+    `<p class="bb-give-hint" id="bb-give-hint" hidden>${t("botboard.giveNowNeedsPerch", lang)}</p>` +
+    `<div class="bb-give-actions">` +
+    `<button type="button" class="btn btn-secondary btn-sm" data-give-close>${t("common.cancel", lang)}</button>` +
+    `<button type="button" class="btn btn-primary btn-sm" id="bb-give-go" disabled>${t("botboard.giveTo", lang)}</button>` +
+    `</div></div></div>` + giveScript(lang);
+}
+
+/** The Turn-on view's Unassigned block: the lane (cards can still go to
+ * another bot) or, with none, a one-line hint saying what the lane is for. */
+export async function turnOnUnassignedHtml(bots, req, lang) {
+  const cards = await loadUnassigned();
+  const lane = unassignedLaneHtml(cards, bots, lang);
+  return lane
+    ? `<div class="bb-un-wrap">${lane}</div>` + giveSheetHtml(bots, req, lang)
+    : `<p class="bb-un-hint">${t("botboard.unassignedHint", lang)}</p>`;
 }
 
 /** The board body, headed by the selected bot's name for screen readers only. */
@@ -689,7 +781,8 @@ export async function renderKanbanBoard(req, res, {
   if (projectId == null) {
     return layout({
       title: "Bot Board",
-      content: botBoardStyles() + boardCard(selBot, notice + switcher + turnOnPanelHtml(selBot, req, lang)) +
+      content: botBoardStyles() + boardCard(selBot, notice + switcher + turnOnPanelHtml(selBot, req, lang) +
+        await turnOnUnassignedHtml(bots, req, lang)) +
         drawerMarkup(lang) + birdDrawerMarkup(lang) + clientJs(selBot.botId, "kanban", null, null, null, lang, false),
     });
   }
@@ -813,9 +906,17 @@ export async function renderKanbanBoard(req, res, {
     ...def.status_values,
     ...Object.keys(byStatus).filter((s) => !def.status_values.includes(s) && byStatus[s].length),
   ];
+  // Unassigned lane (PR 2): first column on wide, first phone tab, only
+  // when it has cards.
+  const unCards = await loadUnassigned();
+  const unLane = unassignedLaneHtml(unCards, bots, lang);
   // Option B: on a phone the columns become tabs (script-enhanced; the
   // strip ships hidden, so without JS the columns simply stack).
   const laneTabs = `<div class="bb-lane-tabs" role="tablist" aria-label="${t("botboard.laneTabsLabel", lang)}" hidden>` +
+    (unLane
+      ? `<button type="button" role="tab" id="bb-tab-un" data-lane="__unassigned" aria-controls="bb-col-un" aria-selected="false">` +
+        `${t("botboard.unassignedLane", lang)} <span class="bb-lane-n">${unCards.length}</span></button>`
+      : "") +
     columnOrder.map((st, i) =>
       `<button type="button" role="tab" id="bb-tab-${i}" data-lane="${escapeHtml(st)}" aria-controls="bb-col-${i}" aria-selected="false">` +
       `${escapeHtml(defStatusLabel(def, st, lang))} <span class="bb-lane-n">${(byStatus[st] || []).length}</span></button>`).join("") +
@@ -831,8 +932,8 @@ export async function renderKanbanBoard(req, res, {
       `<div class="bb-col-body" data-col-body="${escapeHtml(st)}">${cardsHtml}</div></div>`;
   }).join("");
 
-  const boardHtml = laneTabs + `<div class="bb-board" id="bb-board" data-statuses="${escapeHtml(JSON.stringify(def.status_values))}" style="--bb-cols:${columnOrder.length || 1}">${columns}</div>` +
-    `<div id="bb-list-wrap" style="display:none"></div>` + laneTabsScript();
+  const boardHtml = laneTabs + `<div class="bb-board" id="bb-board" data-statuses="${escapeHtml(JSON.stringify(def.status_values))}" style="--bb-cols:${(columnOrder.length || 1) + (unLane ? 1 : 0)}">${unLane}${columns}</div>` +
+    `<div id="bb-list-wrap" style="display:none"></div>` + laneTabsScript() + (unLane ? giveSheetHtml(bots, req, lang) : "");
 
   // The tracker path's affordances, adopted (Track 0): search, status chips,
   // list toggle. Same markup, same client wiring.

@@ -163,7 +163,10 @@ test("the ⋯ menu: a role=menu popover, hidden, Edit and Delete… on every car
     assert.match(row, /<div class="btb-menu btb-pop" id="[^"]+" role="menu" hidden>/, `${id}: menu starts hidden`);
     assert.ok(row.includes(`href="/dashboard/bot-builder?bot=${id}&tab=ai"`), `${id}: Edit`);
     assert.ok(row.includes(`href="/dashboard/bot-builder?bot=${id}&confirm_delete=1"`), `${id}: Delete… keeps its confirmation page`);
-    assert.ok(row.includes(`href="/dashboard/bot-board?bot=${id}"`), `${id}: Give a task…`);
+    // PR 2: the board-on bot's "Give a task…" opens the give dialog
+    // (tests/bot-builder-give-task.test.js); the others link to their board.
+    if (id === "helper") assert.ok(row.includes('class="btb-give-task" data-bot-id="helper"'), `${id}: Give a task… dialog`);
+    else assert.ok(row.includes(`href="/dashboard/bot-board?bot=${id}"`), `${id}: Give a task…`);
   }
 });
 
