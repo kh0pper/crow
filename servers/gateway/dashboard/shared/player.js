@@ -39,7 +39,7 @@ export function playerBarHtml(lang) {
     <button id="crow-player-stop" onclick="window.crowPlayer.stop()" title="${t("player.stop", lang)}" style="background:none;border:none;color:var(--crow-text-muted);cursor:pointer;font-size:0.9rem;padding:0.2rem;display:none">&#9632;</button>
     <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
       <div style="display:flex;align-items:center;gap:0.5rem">
-        <div id="crow-player-title" style="font-size:0.8rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0"></div>
+        <div id="crow-player-title" style="font-size:0.8rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none"></div>
         <span id="crow-player-source" style="font-size:0.6rem;color:var(--crow-text-muted);background:var(--crow-bg-elevated);padding:0.05rem 0.35rem;border-radius:3px;display:none;flex-shrink:0"></span>
         <span id="crow-player-time" style="font-size:0.7rem;color:var(--crow-text-muted);font-family:'JetBrains Mono',monospace;flex-shrink:0"></span>
       </div>
@@ -50,7 +50,7 @@ export function playerBarHtml(lang) {
     </div>
     <button onclick="window.crowPlayer.close()" title="${t("player.close", lang)}" style="background:none;border:none;color:var(--crow-text-muted);cursor:pointer;font-size:1.2rem;flex-shrink:0;padding:0.2rem">&times;</button>
   </div>
-  <audio id="crow-audio" data-turbo-permanent preload="none"></audio>
+  <audio id="crow-audio" preload="none"></audio>
 </div>`;
 }
 
@@ -61,8 +61,12 @@ export function playerBarJs(lang) {
   // Early-return if this page has no player bar (non-dashboard layouts).
   if (!audio) return;
   // Under Turbo Drive, this IIFE re-executes on every nav, but the audio
-  // element is data-turbo-permanent. Check the dataset flag to avoid
-  // re-attaching listeners to the same persistent element.
+  // element rides along inside the data-turbo-permanent bar. Check the dataset
+  // flag to avoid re-attaching listeners to the same persistent element.
+  // The <audio> itself must NOT be data-turbo-permanent: nested inside the
+  // permanent bar, Turbo preserves it a second time, leaves a cloneNode() copy
+  // in the bar and the real element outside the document, where Chrome pauses
+  // it (tests/player-bar-turbo-nav-live.test.js).
   if (audio.dataset.crowPlayerInitialized === '1') return;
   audio.dataset.crowPlayerInitialized = '1';
   var bar = document.getElementById('crow-player-bar');
@@ -100,6 +104,33 @@ export function playerBarJs(lang) {
   var glassesDeviceProbeTimer = null;
   var glassesBundleAvailable = null; // null = unknown, true/false after probe
   var glassesPending = false; // true during restore-from-localStorage until first poll
+
+  // --- Hand-off debug ring (bar-handoff fix, 2026-10-16) ---
+  // What happened to the element and the kiosk hand-off, newest last, in memory only (never stored, never sent):
+  // attach/detach (resume, volume), loads by item id, play() results with the refusal's name, every pause with
+  // who asked for it ("browser" = nobody in this script: the OS, the WebView, a removal from the page), visits.
+  // Never a URL: no ticket path can reach it. Long-press the bar's title to see it; window.crowPlayer.debug().
+  var DBG_MAX = 40, dbgLines = [], dbgBox = null, dbgHold = null, pauseSrc = '';
+  function dbg(text) {
+    dbgLines.push(new Date().toISOString().slice(14, 23) + ' ' + text);
+    if (dbgLines.length > DBG_MAX) dbgLines.shift();
+    if (dbgBox && dbgBox.style.display !== 'none') dbgBox.textContent = dbgLines.join('\\n');
+  }
+  /** This script's own pause, named in the ring (an already-paused element fires no event, so nothing is named). */
+  function pauseBy(src) {
+    if (!audio.paused) pauseSrc = src;
+    try { audio.pause(); } catch (e) {}
+  }
+  /**
+   * pauseBy, then empty the element. load() drops the still-queued pause event, so the pause is named here (with
+   * the backend it left) and its label cleared: a stale one would name the NEXT pause, the browser's or the OS's.
+   */
+  function pauseAndEmpty(src, from) {
+    pauseBy(src);
+    try { audio.removeAttribute('src'); audio.load(); } catch (e) {}
+    if (pauseSrc) dbg('pause by=' + pauseSrc + ' inDoc=' + (audio.isConnected === false ? 0 : 1) + ' ' + from);
+    pauseSrc = '';
+  }
 
   function fmt(s) {
     if (!s || !isFinite(s)) return '0:00';
@@ -198,7 +229,13 @@ export function playerBarJs(lang) {
 
   audio.addEventListener('timeupdate', function() { updateTime(); throttledSave(); });
   audio.addEventListener('play', function() { updateToggleIcon(); saveState(); });
-  audio.addEventListener('pause', function() { updateToggleIcon(); saveState(); });
+  audio.addEventListener('pause', function() {
+    updateToggleIcon(); saveState();
+    dbg('pause by=' + (pauseSrc || 'browser') + ' inDoc=' + (audio.isConnected === false ? 0 : 1) + ' ' + activeBackend);
+    pauseSrc = '';
+  });
+  audio.addEventListener('playing', function() { dbg('playing ' + activeBackend); });
+  document.addEventListener('turbo:visit', function() { dbg('nav'); });
   // Save immediately on navigation — pagehide fires for tab close + cross-origin nav.
   window.addEventListener('pagehide', function() { saveState(); });
   // Under Turbo Drive, in-document nav fires turbo:before-visit instead of pagehide.
@@ -322,6 +359,24 @@ export function playerBarJs(lang) {
   }
 
 
+  // The ring on the phone: long-press the title (or the phone's own long-press menu); a tap on it hides it.
+  function showDbg() {
+    if (!dbgBox) {
+      dbgBox = document.createElement('div');
+      dbgBox.id = 'crow-player-debug';
+      dbgBox.setAttribute('role', 'log');
+      dbgBox.style.cssText = 'position:absolute;bottom:100%;left:0;right:0;max-height:50vh;overflow:auto;white-space:pre-wrap;font:11px/1.35 monospace;background:var(--crow-bg-elevated);color:var(--crow-text-primary);border-top:1px solid var(--crow-border);padding:0.4rem 0.6rem';
+      dbgBox.addEventListener('click', function() { dbgBox.style.display = 'none'; });
+      bar.appendChild(dbgBox);
+    }
+    dbgBox.textContent = dbgLines.length ? dbgLines.join('\\n') : '(empty)';
+    dbgBox.style.display = 'block';
+  }
+  function dbgCancel() { if (dbgHold) { clearTimeout(dbgHold); dbgHold = null; } }
+  titleEl.addEventListener('pointerdown', function() { dbgCancel(); dbgHold = setTimeout(function() { dbgHold = null; showDbg(); }, 700); });
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach(function(type) { titleEl.addEventListener(type, dbgCancel); });
+  titleEl.addEventListener('contextmenu', function(e) { e.preventDefault(); dbgCancel(); showDbg(); });
+
   // --- Kiosk backend (B3): the Talk to Crow overlay's media ---
   // The validator below is kiosk-media-protocol.js's own text (validatorSource), so the
   // tested function and the shipped one are the same.
@@ -434,10 +489,15 @@ export function playerBarJs(lang) {
     kioskTimersOff();
     audio.src = url;
   }
-  function kioskPlay() {
+  /** ctx names the caller in the ring. A refusal (anything but AbortError: a newer src or pause won) pulses ⏯. */
+  function kioskPlay(ctx) {
     var p;
-    try { p = audio.play(); } catch (e) { p = null; }
-    if (p && p.catch) p.catch(function (err) { if (err && err.name === 'NotAllowedError') showResumeOverlay(); });
+    try { p = audio.play(); } catch (e) { p = Promise.reject(e); }
+    Promise.resolve(p).then(function () { dbg('play ok (' + ctx + ')'); }, function (err) {
+      var name = String((err && err.name) || 'Error').slice(0, 40);
+      dbg('play refused ' + name + ' (' + ctx + ')');
+      if (name !== 'AbortError') showResumeOverlay();
+    });
   }
   /** The bar lets the overlay's media go: hidden, silent, no marker. Never calls the server itself. */
   function kioskClear() {
@@ -446,22 +506,23 @@ export function playerBarJs(lang) {
     var had = activeBackend === 'kiosk';
     kioskItem = null; kioskRedo = null; kioskRestoring = false;
     if (!had) { try { localStorage.removeItem(STORAGE_KEY); } catch (e) {} return; }   // a reload marker with nothing behind it
+    dbg('clear');
+    pauseAndEmpty('clear', activeBackend);
     activeBackend = 'local';
-    try { audio.pause(); } catch (e) {}
-    try { audio.removeAttribute('src'); audio.load(); } catch (e) {}
     bar.style.display = 'none';
     updateNavButtons();
     try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
   }
   function kioskAnswer(epoch, verb) {
     return function (r) {
+      dbg('server ' + (verb || 'get') + ' ' + r.status);
       if (epoch !== kioskEpoch) return;
       if (r.status === 200) return r.json().then(function (v) { if (epoch === kioskEpoch) kioskApplyView(v); });
       if (r.status === 409 || r.status === 401 || r.status === 403 || r.status === 404) { kioskClear(); return; }   // S8: superseded or logged out
       // Review 4: the server never heard that the item ended or failed. Keep the bar, paused, ⏯ pulsing: a tap retries.
       if (r.status >= 500 && (verb === 'ended' || verb === 'error') && kioskItem) {
         kioskRedo = verb;
-        if (!audio.paused) audio.pause();
+        pauseBy('redo');
         updateToggleIcon();
         showResumeOverlay();
       }
@@ -523,14 +584,14 @@ export function playerBarJs(lang) {
       updateNavButtons();
     }
     audio.volume = kioskLevel(v.volume, v.muted);
-    if (v.state === 'paused') { if (!audio.paused) audio.pause(); return; }
-    if (!same || audio.paused) kioskPlay();
+    if (v.state === 'paused') { pauseBy('server'); return; }
+    if (!same || audio.paused) kioskPlay('server');
   }
   /** The kiosk takes the bar: whatever the local queue played stops (its src is replaced next). */
   function leaveOtherForKiosk() {
     clearStall();
     queue = []; queueIndex = -1;
-    try { audio.pause(); } catch (e) {}
+    pauseBy('kiosk');
   }
   /**
    * The bar leaves the kiosk backend (the Media app or the glasses take it): the overlay's item is stopped (review 4)
@@ -546,8 +607,7 @@ export function playerBarJs(lang) {
     kioskItem = null; kioskRedo = null;
     activeBackend = 'local';
     if (replacing) return;
-    try { audio.pause(); } catch (e) {}
-    try { audio.removeAttribute('src'); audio.load(); } catch (e) {}
+    pauseAndEmpty('leave', 'kiosk');
   }
   /** A validated frame op. Every op but load names its item and is ignored unless that item is on the bar (review 3). */
   function kioskApply(raw) {
@@ -555,11 +615,13 @@ export function playerBarJs(lang) {
     if (!m) return;
     if (m.op === 'load') {
       if (activeBackend === 'kiosk' && kioskItem && kioskItem.id === m.id && kioskItem.url === m.url) {
+        dbg('load ' + m.id + ' same');
         kioskItem.has_next = m.has_next; kioskItem.has_previous = m.has_previous;
         updateNavButtons();
         kioskToFrame(audio.paused ? 'pause' : 'playing');   // a reopened overlay finds it as it is
         return;
       }
+      dbg('load ' + m.id + (m.live ? ' live' : ''));
       if (activeBackend !== 'kiosk') leaveOtherForKiosk();
       kioskEpoch++;
       kioskShow(m);
@@ -572,11 +634,14 @@ export function playerBarJs(lang) {
       var id = m.id, p;
       try { p = audio.play(); } catch (e) { p = Promise.reject(e); }
       Promise.resolve(p).then(function () {
+        dbg('play ok (frame)');
         if (kioskItem && kioskItem.id === id) kioskToFrame('play-result', { ok: true });
       }, function (err) {
-        if (kioskItem && kioskItem.id === id) kioskToFrame('play-result', { ok: false, name: String((err && err.name) || 'Error').slice(0, 40) });
+        var name = String((err && err.name) || 'Error').slice(0, 40);
+        dbg('play refused ' + name + ' (frame)');
+        if (kioskItem && kioskItem.id === id) kioskToFrame('play-result', { ok: false, name: name });
       });
-    } else if (m.op === 'pause') audio.pause();
+    } else if (m.op === 'pause') pauseBy('frame');
     else if (m.op === 'volume') audio.volume = m.volume;
     else if (m.op === 'stop') kioskClear();
   }
@@ -851,12 +916,12 @@ export function playerBarJs(lang) {
         if (!kioskItem) return;
         // Attached: a pause acts here at once (always safe; the frame hears the element's pause and tells the server).
         // A resume goes to the frame as a command (review 3): its mic gate decides when it plays.
-        if (!audio.paused && kioskAttached()) { audio.pause(); return; }
+        if (!audio.paused && kioskAttached()) { pauseBy('toggle'); return; }
         if (audio.paused && kioskToFrame('cmd', { do: 'resume' })) return;
         if (kioskRedo) { var redo = kioskRedo; kioskRedo = null; kioskSend(redo); return; }
-        if (!audio.paused) { audio.pause(); kioskSend('pause'); return; }
+        if (!audio.paused) { pauseBy('toggle'); kioskSend('pause'); return; }
         // A station resumes live on a new ticket (the answer brings it); a track resumes here at once.
-        if (!kioskItem.live) kioskPlay();
+        if (!kioskItem.live) kioskPlay('toggle');
         kioskSend('resume');
         return;
       }
@@ -867,7 +932,7 @@ export function playerBarJs(lang) {
         glassesControl(action);
         return;
       }
-      if (audio.paused) audio.play().catch(function() {}); else audio.pause();
+      if (audio.paused) audio.play().catch(function() {}); else pauseBy('toggle');
     },
 
     stop: function() {
@@ -936,6 +1001,7 @@ export function playerBarJs(lang) {
     /** The overlay's frame is up: post(obj) reaches it; isLive() says whether it still is. */
     kioskAttach: function(post, isLive) {
       if (typeof post !== 'function') return;
+      dbg('attach');
       kioskPost = post;
       kioskIsLive = typeof isLive === 'function' ? isLive : null;
     },
@@ -944,12 +1010,15 @@ export function playerBarJs(lang) {
     /** The frame is going: { volume, resume } is what crowKioskRelease() returned (the un-ducked level, un-hold). */
     kioskDetach: function(s) {
       kioskPost = null; kioskIsLive = null;
+      dbg('detach ' + (s && typeof s === 'object' ? 'resume=' + (s.resume === true) + ' volume=' + (typeof s.volume === 'number' && isFinite(s.volume) ? Math.round(s.volume * 100) / 100 : '-') : '(no state)') + ' paused=' + audio.paused + ' ' + activeBackend);
       if (activeBackend !== 'kiosk' || !kioskItem || !s || typeof s !== 'object') return;
       if (typeof s.volume === 'number' && isFinite(s.volume)) audio.volume = Math.max(0, Math.min(1, s.volume));
-      if (s.resume === true && audio.paused) kioskPlay();
+      if (s.resume === true && audio.paused) kioskPlay('detach');
     },
     /** This tab's owner nonce (sent in the frame's hello and with every request). */
-    kioskOwner: kioskOwner
+    kioskOwner: kioskOwner,
+    /** The hand-off debug ring (a copy, newest last). */
+    debug: function() { return dbgLines.slice(); }
   };
 
   // Register MediaSession action handlers once. They delegate to the public

@@ -30,7 +30,7 @@ function mkStorage(map) {
  * respond(url, opts) → { status, body } (default: 200 with an empty view).
  * local / session: Maps that stand for this tab's storage (pass the same ones again to "reload").
  */
-function harness({ local = new Map(), session = new Map(), respond, BroadcastChannel } = {}) {
+function harness({ local = new Map(), session = new Map(), respond, BroadcastChannel, queuedPause = false } = {}) {
   session.set("crow-glasses-bundle", "false");          // no glasses probe traffic
   const { document, window } = parseHTML(`<html><head></head><body>${playerBarHtml("en")}</body></html>`);
   Object.defineProperty(document, "cookie", { configurable: true, get: () => "other=1; crow_csrf=csrf-abc; x=2" });
@@ -46,8 +46,11 @@ function harness({ local = new Map(), session = new Map(), respond, BroadcastCha
     if (audio.paused) { audio.paused = false; fire("play"); fire("playing"); }
     return Promise.resolve();
   };
-  audio.pause = () => { calls.push(["pause"]); if (!audio.paused) { audio.paused = true; fire("pause"); } };
-  audio.load = () => { calls.push(["load"]); };
+  // queuedPause: as in a browser, pause() queues its event and load() drops any still queued (media element task source).
+  let pending = [];
+  audio.pause = () => { calls.push(["pause"]); if (!audio.paused) { audio.paused = true; if (queuedPause) pending.push("pause"); else fire("pause"); } };
+  audio.load = () => { calls.push(["load"]); pending = []; };
+  const drain = () => { const q = pending; pending = []; for (const t of q) fire(t); };
   const realRemove = audio.removeAttribute.bind(audio);
   audio.removeAttribute = (k) => { if (k === "src") { src = ""; calls.push(["src", ""]); } return realRemove(k); };
 
@@ -89,7 +92,7 @@ function harness({ local = new Map(), session = new Map(), respond, BroadcastCha
   const attach = () => P.kioskAttach((m) => posted.push(m), () => live);
   const $ = (id) => document.getElementById(id);
   return {
-    P, win, window, document, audio, calls, fire, fetches, posted, advance, handlers, local, session, attach, $,
+    P, win, window, document, audio, calls, fire, drain, fetches, posted, advance, handlers, local, session, attach, $,
     setLive: (v) => { live = v; },
     shown: () => $("crow-player-bar").style.display !== "none",
     events: (type) => posted.filter((m) => m.type === type),
@@ -610,4 +613,137 @@ test("re-review: a retry_ms of 0 never becomes a tight GET loop (floored at 250 
   assert.equal(gets, 1, "not before 250 ms");
   h.advance(1); await flush();
   assert.equal(gets, 2);
+});
+
+// ─── bar-handoff fix (2026-10-16): the Turbo-permanent audio, the pulse, the debug ring ─────────────
+
+test("Turbo: only the bar is data-turbo-permanent; the <audio> rides inside it (a nested permanent one is cloned and left detached — see player-bar-turbo-nav-live)", () => {
+  const { document } = parseHTML(`<html><body>${playerBarHtml("en")}</body></html>`);
+  const perm = [...document.querySelectorAll("[data-turbo-permanent]")].map((e) => e.id);
+  assert.deepEqual(perm, ["crow-player-bar"]);
+  assert.ok(document.getElementById("crow-player-bar").contains(document.getElementById("crow-audio")));
+});
+
+test("detach with resume: a play() the browser refuses (any reason but AbortError) pulses ⏯ instead of sitting silently paused", async () => {
+  for (const name of ["NotAllowedError", "NotSupportedError", "Error"]) {
+    const h = harness();
+    h.attach();
+    h.P.kioskApply(LOAD);
+    h.audio.refuse = name;
+    h.P.kioskDetach({ volume: 0.8, resume: true });
+    await flush();
+    assert.match(h.$("crow-player-toggle").style.animation || "", /crow-pulse/, name);
+  }
+  const h = harness();
+  h.attach();
+  h.P.kioskApply(LOAD);
+  h.audio.refuse = "AbortError";                 // a newer src or pause won: not the person's problem
+  h.P.kioskDetach({ volume: 0.8, resume: true });
+  await flush();
+  assert.equal(h.$("crow-player-toggle").style.animation || "", "");
+});
+
+test("debug ring: attach, load, detach (resume + volume), play results and every pause with who caused it — no ticket path", async () => {
+  const h = harness();
+  h.attach();
+  h.P.kioskApply({ ...LOAD, live: false });
+  h.P.kioskApply({ crow: "media", v: 1, op: "play", id: "m1" });
+  await flush();
+  h.P.kioskApply({ crow: "media", v: 1, op: "pause", id: "m1" });       // the frame's pause (a hold)
+  h.P.kioskDetach({ volume: 0.8, resume: true });
+  await flush();
+  h.audio.pause();                                                        // nobody in the player: the browser / OS
+  h.document.dispatchEvent(new h.window.Event("turbo:visit"));
+  h.audio.refuse = "NotAllowedError";
+  h.P.toggle();
+  await flush();
+  const lines = h.P.debug();
+  assert.ok(Array.isArray(lines));
+  const text = lines.join("\n");
+  for (const re of [/attach/, /load m1/, /play ok \(frame\)/, /pause by=frame/, /detach resume=true volume=0\.8/, /play ok \(detach\)/, /pause by=browser inDoc=/, /nav/, /play refused NotAllowedError \(toggle\)/]) assert.match(text, re);
+  assert.ok(!text.includes("/display/t/") && !text.includes(T1), "never a ticket path");
+  for (const l of lines) assert.match(l, /^\d\d:\d\d\.\d\d\d /, "each line is time-stamped");
+});
+
+test("debug ring: bounded (oldest dropped) and nothing is written to storage", async () => {
+  const local = new Map(), session = new Map();
+  const h = harness({ local, session });
+  h.attach();
+  h.P.kioskApply(LOAD);
+  for (let i = 0; i < 100; i++) { h.P.kioskApply({ crow: "media", v: 1, op: "play", id: "m1" }); h.P.kioskApply({ crow: "media", v: 1, op: "pause", id: "m1" }); }
+  await flush();
+  assert.ok(h.P.debug().length <= 40);
+  for (const [, v] of [...local, ...session]) assert.ok(!/pause by=|detach resume/.test(v));
+});
+
+test("debug ring: a long press on the bar's title shows it (and the phone's own long-press, contextmenu, too); a tap hides it", () => {
+  const h = harness();
+  h.attach();
+  h.P.kioskApply(LOAD);
+  const title = h.$("crow-player-title");
+  const box = () => h.$("crow-player-debug");
+  title.dispatchEvent(new h.window.Event("pointerdown"));
+  h.advance(300);
+  title.dispatchEvent(new h.window.Event("pointerup"));
+  assert.ok(!box() || box().style.display === "none", "a short press is not a long press");
+  title.dispatchEvent(new h.window.Event("pointerdown"));
+  h.advance(700);
+  assert.ok(box() && box().style.display !== "none");
+  assert.match(box().textContent, /load m1/);
+  box().dispatchEvent(new h.window.Event("click"));
+  assert.equal(box().style.display, "none");
+  const cm = new h.window.Event("contextmenu", { cancelable: true });
+  title.dispatchEvent(cm);
+  assert.equal(cm.defaultPrevented, true, "the phone's text-selection menu is suppressed");
+  assert.notEqual(box().style.display, "none");
+});
+
+// load() drops the queued pause event, so a pause this script asked for right before it must not lend its
+// name to the NEXT pause (the browser's / OS's), and is named in the ring at once, with the backend it left.
+test("debug ring: a clear (stop) names its own pause with the kiosk backend; the next browser pause is by=browser, not by=clear", async () => {
+  const h = harness({ queuedPause: true });
+  h.attach();
+  h.P.kioskApply(LOAD);
+  h.P.kioskApply({ crow: "media", v: 1, op: "play", id: "m1" });
+  await flush();
+  h.P.kioskApply({ crow: "media", v: 1, op: "stop", id: "m1" });
+  h.drain();
+  assert.match(h.P.debug().join("\n"), /pause by=clear inDoc=\d kiosk/);
+  h.P.load("/media/a.mp3", "A");
+  if (h.audio.paused) h.P.toggle();
+  await flush();
+  assert.equal(h.audio.paused, false);
+  h.audio.pause();
+  h.drain();
+  const pauses = h.P.debug().filter((l) => / pause by=/.test(l));
+  assert.match(pauses[pauses.length - 1], /pause by=browser /);
+});
+
+test("debug ring: leaving the kiosk backend names its pause (by=leave, kiosk); the next browser pause is by=browser", async () => {
+  const h = harness({ queuedPause: true });
+  h.attach();
+  h.P.kioskApply(LOAD);
+  h.P.kioskApply({ crow: "media", v: 1, op: "play", id: "m1" });
+  await flush();
+  h.P.setBackend("local");
+  h.drain();
+  assert.match(h.P.debug().join("\n"), /pause by=leave inDoc=\d kiosk/);
+  h.P.load("/media/a.mp3", "A");
+  if (h.audio.paused) h.P.toggle();
+  await flush();
+  assert.equal(h.audio.paused, false);
+  h.audio.pause();
+  h.drain();
+  const pauses = h.P.debug().filter((l) => / pause by=/.test(l));
+  assert.match(pauses[pauses.length - 1], /pause by=browser /);
+});
+
+test("debug ring: the bar's title cannot be selected (a long press opens the ring); the ring is a log region", () => {
+  const h = harness();
+  const style = h.$("crow-player-title").getAttribute("style");
+  assert.match(style, /user-select:none/);
+  assert.match(style, /-webkit-touch-callout:none/);
+  h.P.kioskApply(LOAD);
+  h.$("crow-player-title").dispatchEvent(new h.window.Event("contextmenu", { cancelable: true }));
+  assert.equal(h.$("crow-player-debug").getAttribute("role"), "log");
 });
