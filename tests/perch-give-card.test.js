@@ -33,7 +33,7 @@ const DB_FILE = join(dir, "crow.db");
 const TASKS = process.env.CROW_TASKS_DB_PATH;
 const REPO = new URL("..", import.meta.url).pathname;
 
-let server, base, _setEngineStatusForTest, engineImpl, calls;
+let server, base, _setEngineStatusForTest, engineImpl, calls, engineCalls = 0;
 let PID, PID2, PID_ARCH;
 
 const raw = () => new Database(DB_FILE);
@@ -46,10 +46,10 @@ function seedBot(id, def, { enabled = 1, project = null } = {}) {
   c.close();
 }
 
-function seedCard({ title = "card", boardId = null, archivedAt = null, projectId = null } = {}) {
+function seedCard({ title = "card", boardId = null, archivedAt = null, projectId = null, parentId = null, status = "pending" } = {}) {
   const t = rawTasks();
-  const r = t.prepare("INSERT INTO tasks_items (title, board_id, archived_at, project_id) VALUES (?,?,?,?)")
-    .run(title, boardId, archivedAt, projectId);
+  const r = t.prepare("INSERT INTO tasks_items (title, board_id, archived_at, project_id, parent_id, status) VALUES (?,?,?,?,?,?)")
+    .run(title, boardId, archivedAt, projectId, parentId, status);
   t.close();
   return Number(r.lastInsertRowid);
 }
@@ -88,6 +88,11 @@ before(async () => {
   t.exec(`CREATE TABLE board_mutations (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL,
     verb TEXT NOT NULL, actor_kind TEXT NOT NULL, actor_id TEXT, job_id TEXT,
     detail_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  // glassy's board (PID2) has its own vocabulary: "shipped" is terminal there.
+  t.exec(`CREATE TABLE board_defs (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT, project_id INTEGER,
+    display_name TEXT, status_values TEXT NOT NULL, terminal_values TEXT NOT NULL, fields_json TEXT NOT NULL DEFAULT '[]')`);
+  t.prepare("INSERT INTO board_defs (project_id, display_name, status_values, terminal_values) VALUES (?,?,?,?)")
+    .run(PID2, "Glassy", JSON.stringify(["pending", "doing", "shipped"]), JSON.stringify(["shipped"]));
   t.close();
 
   ({ _setEngineStatusForTest } = await import("../servers/gateway/dashboard/panels/bot-builder/engine-gate.js"));
@@ -104,7 +109,7 @@ before(async () => {
   const router = express.Router();
   router.use("/dashboard", csrfMiddleware);          // index.js order: CSRF first,
   router.use(perchInteractiveApiRouter(auth, {        // then the perch-api router
-    engine: () => engineImpl,
+    engine: () => { engineCalls++; return engineImpl; },
     annotate: async (m) => m, providerModels: () => [], piProviders: () => null,
   }));
   app.use(router);
@@ -115,6 +120,7 @@ before(async () => {
 after(() => { _setEngineStatusForTest(null); if (server) server.close(); rmSync(dir, { recursive: true, force: true }); });
 
 beforeEach(() => {
+  engineCalls = 0;
   _setEngineStatusForTest({ state: "ready", source: "test", cliPath: "/nonexistent/pi" });
   calls = { spawn: [], message: [], checkCardFree: [] };
   engineImpl = {
@@ -329,4 +335,102 @@ test("POST /bots/:id/tasks refuses a blank title (400) and a board-off bot (409 
   assert.equal(r3.status, 400);
   assert.equal(r3.body.error, "bot_unavailable");
   assert.equal(rawTasks().prepare("SELECT COUNT(*) AS n FROM tasks_items").get().n, before);
+});
+
+// ---- subtasks and parents: a child always lives in its parent's project ----
+
+test("a subtask cannot be given on its own: 400 bad_request, unchanged", async () => {
+  const parent = seedCard({ title: "parent" });
+  const child = seedCard({ title: "child", parentId: parent });
+  const r = await post(`/cards/${child}/give`, { bot_id: "helper" });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.error, "bad_request");
+  assert.equal(card(child).project_id, null);
+  assert.equal(mutations(child).length, 0);
+  assert.equal(audits(`card:${child}`).length, 0);
+});
+
+test("giving a parent moves its live children (and theirs) to the same board; archived ones stay; ONE audit row with the count", async () => {
+  const parent = seedCard({ title: "parent" });
+  const kid1 = seedCard({ title: "kid1", parentId: parent });
+  const kid2 = seedCard({ title: "kid2", parentId: parent, projectId: PID2 });
+  const grandkid = seedCard({ title: "grandkid", parentId: kid1 });
+  const gone = seedCard({ title: "gone", parentId: parent, archivedAt: "2026-01-01 00:00:00" });
+  const r = await post(`/cards/${parent}/give`, { bot_id: "helper" });
+  assert.equal(r.status, 200);
+  assert.equal(card(parent).project_id, PID);
+  for (const k of [kid1, kid2, grandkid]) {
+    assert.equal(card(k).project_id, PID, "child " + k);
+    const m = mutations(k);
+    assert.equal(m.length, 1, "one update per child");
+    assert.deepEqual(Object.keys(JSON.parse(m[0].detail_json)), ["project_id"], "only the project moves; a child is not assigned");
+  }
+  assert.equal(card(gone).project_id, null, "an archived child is left alone");
+  assert.equal(mutations(gone).length, 0);
+  const a = audits(`card:${parent}`);
+  assert.equal(a.length, 1);
+  assert.deepEqual(JSON.parse(a[0].payload), { bot_id: "helper", start: false, children: 3 });
+  for (const k of [kid1, kid2, grandkid]) assert.equal(audits(`card:${k}`).length, 0, "audited once, for the parent");
+});
+
+// ---- a finished card is not given ----
+
+test("a card in a terminal status (the default board's done/cancelled) is refused 409 finished, unchanged", async () => {
+  for (const status of ["done", "cancelled"]) {
+    const id = seedCard({ status });
+    const r = await post(`/cards/${id}/give`, { bot_id: "helper" });
+    assert.equal(r.status, 409, status);
+    assert.equal(r.body.error, "finished", status);
+    assert.equal(card(id).project_id, null);
+    assert.equal(mutations(id).length, 0);
+  }
+});
+
+test("terminal per the TARGET board's definition: 'shipped' on glassy's board is finished there", async () => {
+  const id = seedCard({ status: "shipped" });
+  const r = await post(`/cards/${id}/give`, { bot_id: "glassy" });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.error, "finished");
+  assert.equal(card(id).project_id, null);
+  const ok = await post(`/cards/${seedCard({ status: "doing" })}/give`, { bot_id: "glassy" });
+  assert.equal(ok.status, 200, "a non-terminal status on that board gives fine");
+});
+
+test("terminal on the card's CURRENT board counts too: a 'shipped' card on glassy's board is not re-given to helper", async () => {
+  const id = seedCard({ status: "shipped", projectId: PID2 });
+  const r = await post(`/cards/${id}/give`, { bot_id: "helper" });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.error, "finished");
+  assert.equal(card(id).project_id, PID2);
+});
+
+// ---- the engine singleton is resolved only once a start can actually run ----
+
+test("give without start never resolves the engine, ready or not", async () => {
+  await post(`/cards/${seedCard()}/give`, { bot_id: "helper" });
+  _setEngineStatusForTest({ state: "missing", source: "test" });
+  await post(`/cards/${seedCard()}/give`, { bot_id: "helper" });
+  assert.equal(engineCalls, 0);
+});
+
+test("a start refused before spawn (engine not ready, no Perch channel) never resolves the engine", async () => {
+  await post(`/cards/${seedCard()}/give`, { bot_id: "glassy", start: true });
+  _setEngineStatusForTest({ state: "missing", source: "test" });
+  await post(`/cards/${seedCard()}/give`, { bot_id: "helper", start: true });
+  await post(`/bots/helper/tasks`, { title: "x", start: true });
+  assert.equal(engineCalls, 0);
+});
+
+test("a refused dispatch (engine not ready / no Perch channel) never resolves the engine", async () => {
+  const id = seedCard();
+  const r1 = await post(`/bots/glassy/dispatch`, { card_id: id });
+  assert.equal(r1.status, 403);
+  _setEngineStatusForTest({ state: "missing", source: "test" });
+  const r2 = await post(`/bots/helper/dispatch`, { card_id: id });
+  assert.equal(r2.status, 409);
+  assert.equal(engineCalls, 0);
+  _setEngineStatusForTest({ state: "ready", source: "test", cliPath: "/nonexistent/pi" });
+  const r3 = await post(`/bots/helper/dispatch`, { card_id: id });
+  assert.equal(r3.status, 201);
+  assert.equal(engineCalls, 1, "resolved once a dispatch can run");
 });

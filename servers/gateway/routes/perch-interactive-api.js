@@ -56,6 +56,7 @@ import { updateCard, createCard } from "../board/card-service.js";
 import { lockState } from "./board-lock.js";
 import { boardState } from "../dashboard/shared/bot-display.js";
 import { assertProjectExists, appendAudit } from "../../shared/project-acl.js";
+import { resolveBoardDef, isTerminal } from "./board-defs.js";
 import { annotateAvailability } from "../model-availability.js";
 import { providerModelListWarm, pickerModels, loadPiProviderNames, referencedModelKeys } from "../perch-model-catalog.js";
 import { renderBotMarkdown } from "../../blog/renderer.js";
@@ -215,7 +216,7 @@ function parseCardId(body) {
  * archived→409. */
 async function loadDispatchableCard(tdb, cardId) {
   const row = (await tdb.execute({
-    sql: "SELECT id, board_id, archived_at FROM tasks_items WHERE id=?",
+    sql: "SELECT id, board_id, archived_at, parent_id, project_id, status FROM tasks_items WHERE id=?",
     args: [cardId],
   })).rows[0];
   if (!row) throw routeFail("card not found", "not_found", 404);
@@ -276,11 +277,16 @@ async function loadBotRow(db, botId) {
  *
  * `ctx.tdb` is opened here on first need (so an engine/perch refusal never
  * touches the tasks store) and left open for the CALLER to close.
+ *
+ * `getEng` is the engine GETTER, called only once the engine-ready and
+ * Perch checks pass: resolving it creates the interactive-engine singleton,
+ * which a refused dispatch (or a give that never starts) must not do.
  */
-async function dispatchCard(ctx, { row, eng, botId, cardId, note, skipProvenance = false }) {
+async function dispatchCard(ctx, { row, getEng, botId, cardId, note, skipProvenance = false }) {
   if (resolveEngineStatus().state !== "ready") throw routeFail("engine_required", "engine_required", 409);
   const def = row ? parseDef(row) : {};
   if (!perchAttached(def)) throw routeFail("perch_not_attached", "perch_not_attached", 403);
+  const eng = getEng();
 
   if (!ctx.tdb) ctx.tdb = createDbClient(TASKS_DB);
   await loadDispatchableCard(ctx.tdb, cardId);
@@ -344,15 +350,43 @@ async function loadGiveTarget(db, botId) {
  * start:true ("Start right away" defaults OFF) — the dispatch core. A start
  * that fails does NOT undo the give: the card is visibly on the bot's board
  * and can be started from there; the response says why it did not start. */
-async function startAfterGive(ctx, { row, eng, botId, cardId, start, note }) {
+async function startAfterGive(ctx, { row, getEng, botId, cardId, start, note }) {
   const out = { ok: true, assigned: true, started: false, cardId };
   if (start !== true) return out;
   try {
-    const r = await dispatchCard(ctx, { row, eng, botId, cardId, note, skipProvenance: true });
+    const r = await dispatchCard(ctx, { row, getEng, botId, cardId, note, skipProvenance: true });
     return { ...out, started: true, sessionId: r.sessionId };
   } catch (err) {
     return { ...out, code: String((err && err.code) || "start_failed") };
   }
+}
+
+/** Giving a parent carries its subtree: card-service keeps a child in its
+ * parent's project (createCard/updateCard re-inherit it), so a parent moved
+ * alone would leave its children on no board anyone renders. Every live
+ * (non-archived) descendant moves to `projectId`, one updateCard (one
+ * board_mutations row) each — card-service has no transaction primitive, and
+ * each write is independently valid. Archived descendants (and anything
+ * under them) stay put. Returns how many moved. */
+async function moveDescendants(tdb, parentId, projectId) {
+  const seen = new Set([parentId]);
+  let frontier = [parentId], n = 0;
+  while (frontier.length) {
+    const { rows } = await tdb.execute({
+      sql: `SELECT id FROM tasks_items WHERE parent_id IN (${frontier.map(() => "?").join(",")}) AND board_id IS NULL AND archived_at IS NULL`,
+      args: frontier,
+    });
+    frontier = [];
+    for (const r of rows) {
+      const id = Number(r.id);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      await updateCard(tdb, id, { project_id: projectId }, DASHBOARD_ACTOR);
+      frontier.push(id);
+      n++;
+    }
+  }
+  return n;
 }
 
 function giveAudit(db, row, cardId, extra) {
@@ -731,7 +765,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     const ctx = { tdb: null };
     try {
       const row = await loadBotRow(db, botId);
-      const result = await dispatchCard(ctx, { row, eng: resolveEngine(), botId, cardId, note });
+      const result = await dispatchCard(ctx, { row, getEng: resolveEngine, botId, cardId, note });
       res.status(201).json(result);
     } catch (err) {
       mapEngineError(res, err);
@@ -744,12 +778,16 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
   // ---- POST /cards/:id/give — put a card on a bot's board ("Give to…") ----
   // Queue item 20, PR 2. Body {bot_id, start?, note?}. CSRF-railed (this
   // router mounts after csrfMiddleware), session-gated, never public. Steps:
-  // the card is a live card (404/400/409 archived), not locked by a session
-  // or job (409 locked), the bot can take it (loadGiveTarget: 400
-  // bot_unavailable / 409 no_board); then ONE updateCard write (project_id +
-  // assigned_bot, one board_mutations row, autonomy untouched so it stays
-  // gated) and one card_given audit row; then, only on start:true, the
-  // dispatch core. Single-operator dashboard: no project_members check, the
+  // the card is a live card (404/400/409 archived), top level (400
+  // bad_request for a subtask: it lives in its parent's project), not locked
+  // by a session or job (409 locked), the bot can take it (loadGiveTarget:
+  // 400 bot_unavailable / 409 no_board), not finished (409 finished:
+  // terminal on the target or current board); then ONE updateCard write
+  // (project_id + assigned_bot, one board_mutations row, autonomy untouched
+  // so it stays gated), the card's live subtree moved with it
+  // (moveDescendants), and one card_given audit row (with a children count
+  // when any moved); then, only on start:true, the dispatch core — whose
+  // engine getter is resolved only once a start can actually run. Single-operator dashboard: no project_members check, the
   // session-authenticated operator owns the box (same as every route here).
   router.post(P + "/cards/:id/give", async (req, res) => {
     const cardId = /^\d+$/.test(String(req.params.id)) ? Number(req.params.id) : null;
@@ -762,13 +800,23 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     const ctx = { tdb: null };
     try {
       ctx.tdb = createDbClient(TASKS_DB);
-      await loadDispatchableCard(ctx.tdb, cardId);
+      const cur = await loadDispatchableCard(ctx.tdb, cardId);
+      // A subtask lives in its parent's project — give the parent instead.
+      if (cur.parent_id != null) return jsonError(res, 400, "bad_request");
       const lock = await lockState(db, cardId);
       if (lock.locked) return jsonError(res, 409, "locked", { rail: lock.rail });
       const row = await loadGiveTarget(db, botId);
-      await updateCard(ctx.tdb, cardId, { project_id: Number(row.project_id), assigned_bot: botId }, DASHBOARD_ACTOR);
-      await giveAudit(db, row, cardId, { start: body.start === true });
-      res.json(await startAfterGive(ctx, { row, eng: resolveEngine(), botId, cardId, start: body.start, note }));
+      const projectId = Number(row.project_id);
+      // A finished card is not a task to give: terminal per the TARGET
+      // board's definition or the card's CURRENT one (each the builtin
+      // default when the board has none — an unassigned card's case).
+      const finished = isTerminal(await resolveBoardDef(ctx.tdb, { projectId }), cur.status)
+        || isTerminal(await resolveBoardDef(ctx.tdb, { projectId: cur.project_id }), cur.status);
+      if (finished) return jsonError(res, 409, "finished");
+      await updateCard(ctx.tdb, cardId, { project_id: projectId, assigned_bot: botId }, DASHBOARD_ACTOR);
+      const children = await moveDescendants(ctx.tdb, cardId, projectId);
+      await giveAudit(db, row, cardId, { start: body.start === true, ...(children ? { children } : {}) });
+      res.json(await startAfterGive(ctx, { row, getEng: resolveEngine, botId, cardId, start: body.start, note }));
     } catch (err) {
       mapEngineError(res, err);
     } finally {
@@ -796,7 +844,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       ctx.tdb = createDbClient(TASKS_DB);
       const { id: cardId } = await createCard(ctx.tdb, { title, project_id: Number(row.project_id), assigned_bot: botId }, DASHBOARD_ACTOR);
       await giveAudit(db, row, cardId, { start: body.start === true, created: true });
-      res.json(await startAfterGive(ctx, { row, eng: resolveEngine(), botId, cardId, start: body.start, note }));
+      res.json(await startAfterGive(ctx, { row, getEng: resolveEngine, botId, cardId, start: body.start, note }));
     } catch (err) {
       mapEngineError(res, err);
     } finally {
