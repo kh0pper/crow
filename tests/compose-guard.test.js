@@ -590,3 +590,20 @@ test("anything the bundle ships (settings-section.js, run.sh, src/…) is never 
   }
   assert.equal(G.checkComposeModel(svc({ volumes: [bind(join(dir, "data"))] }), { bundleDir: dir, manifest: { id: "fx-ship" }, ctx }).valid, true, "a runtime data folder");
 });
+
+test("cross-bundle: no other bundle's project, volume or network names, and no prefix-sibling folders", () => {
+  const m = { manifest: { id: "fx-x" } };
+  assert.equal(check({ name: "crow-workspace", ...svc() }, m).valid, false, "another bundle's project");
+  assert.equal(check({ name: "fx-x", ...svc() }, m).valid, true);
+  assert.equal(check({ name: "crow-fx-x-r4", ...svc() }, m).valid, true, "a second instance's project");
+  assert.equal(check({ name: "fx-x", ...svc({ volumes: [{ type: "volume", source: "v", target: "/v" }] }), volumes: { v: { name: "crow-workspace_db" } } }, m).valid, false);
+  assert.equal(check({ name: "fx-x", ...svc({ volumes: [{ type: "volume", source: "v", target: "/v" }] }), volumes: { v: { name: "fx-x_v" } } }, m).valid, true);
+  assert.equal(check({ name: "fx-x", ...svc({ networks: { n: null } }), networks: { n: { name: "crow-workspace_default" } } }, m).valid, false);
+  assert.equal(check(svc({ volumes: [bind(join(DATA, "rook-x"))] }), { manifest: { id: "rook" } }).valid, false, "id rook can't reach bundle rook-x's data");
+  assert.equal(check(svc({ volumes: [bind(join(DATA, "rook-workspaces"))] }), { manifest: { id: "rook" } }).valid, true);
+});
+
+test("no tracked bundle id ends in an owned-place suffix (so the suffix rule can't reach another bundle)", () => {
+  const bad = [...trackedBundleSet()].filter((id) => G.OWN_SUFFIXES.some((x) => id.endsWith(x)));
+  assert.deepEqual(bad, []);
+});

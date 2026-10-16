@@ -107,6 +107,9 @@ const TOP_OK = new Set(["name", "services", "networks", "volumes", "secrets", "c
 const BUNDLE_CONTROL = new Set(["manifest.json", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
   "docker-compose.override.yml", "docker-compose.override.yaml", "compose.override.yml", "compose.override.yaml",
   ".env", ".env.example", "package.json", "package-lock.json", "node_modules", "server", "panel", "scripts", "ops", "skills", "public", "bin"]);
+// The only "<id><suffix>" names a bundle owns beside <id> itself (a fixed set, so id "rook"
+// never reaches bundle "rook-x"'s folder). No bundle id may end in one (tested).
+export const OWN_SUFFIXES = ["-downloads", "-workspaces", "-data", "-cache"];
 // Names Crow's own data uses directly under the data folder.
 export const RESERVED_DATA_NAMES = new Set(["backups", "peers", "identity", "instance-id", "instance-sync", "legacy", "projects",
   "models", "media", "kb-media", "tasks", "keys", "keychain", "secrets", "nostr", "sync", "storage", "uploads", "cache", "tmp", "logs",
@@ -155,7 +158,7 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
       // <data>/<id> or <data>/<id>-* — a folder (or not created yet), never a name Crow's
       // own data uses (backups, peers, identity…) and never an existing file.
       const first = p === d ? "" : p.slice(d.length + 1).split(sep)[0];
-      if (ownId && !RESERVED_DATA_NAMES.has(ownId) && (first === ownId || first.startsWith(`${ownId}-`)) && !RESERVED_DATA_NAMES.has(first)) {
+      if (ownId && !RESERVED_DATA_NAMES.has(ownId) && (first === ownId || OWN_SUFFIXES.some((x) => first === `${ownId}${x}`)) && !RESERVED_DATA_NAMES.has(first)) {
         let isFile = false;
         try { isFile = !statSync(join(d, first)).isDirectory(); } catch { /* not there yet */ }
         if (!isFile) return null;
@@ -177,7 +180,7 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
       }
       // CROW_HOME/<id> (a folder, or not created yet) and CROW_HOME/<id>-downloads. Never a
       // name Crow itself uses there, and never an existing file (tokens, registries).
-      if (ownId && !RESERVED_HOME_NAMES.has(ownId) && (first === ownId || first === `${ownId}-downloads`)) {
+      if (ownId && !RESERVED_HOME_NAMES.has(ownId) && (first === ownId || OWN_SUFFIXES.some((x) => first === `${ownId}${x}`))) {
         const top = join(roots.crowHome, first);
         let isFile = false;
         try { isFile = !statSync(top).isDirectory(); } catch { /* not there yet */ }
@@ -326,8 +329,19 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
       }
     }
   }
+  // The project name decides which volumes and networks Compose reuses: a bundle may not
+  // take another bundle's (name: crow-workspace) to reach its data. It must be <id>,
+  // crow-<id>, or one of those plus "-<suffix>" (a second instance). Volume and network
+  // names must stay inside the project.
+  const project = String(model.name || "");
+  if (ownId && project) {
+    const okProject = [ownId, `crow-${ownId}`].some((b) => project === b || project.startsWith(`${b}-`));
+    if (!okProject) return refuse(`the compose project name '${project.slice(0, 60)}' is not this bundle's (${ownId})`);
+  }
+  const inProject = (n) => !project || n.startsWith(`${project}_`) || n.startsWith(`${project}-`) || n === project;
   for (const [name, n] of Object.entries(model.networks || {})) {
     let r;
+    if (n && !n.external && n.name && !inProject(String(n.name))) return refuse(`network '${name}' is named outside this project (${String(n.name).slice(0, 60)})`);
     if ((r = checkKeys(n, ["name", "driver", "driver_opts", "external", "internal", "attachable", "ipam", "labels", "enable_ipv6", "enable_ipv4"], `network ${name}`))) return r;
     const real = String(n.name || name);
     // An external network joins another project's network; only Crow's shared federation
@@ -338,6 +352,7 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
   for (const [name, vol] of Object.entries(model.volumes || {})) {
     let r;
     if ((r = checkKeys(vol, ["name", "driver", "driver_opts", "external", "labels"], `volume ${name}`))) return r;
+    if (!vol.external && vol.name && !inProject(String(vol.name))) return refuse(`volume '${name}' is named outside this project (${String(vol.name).slice(0, 60)}): another bundle's data`);
     // An external volume is another project's data (another extension's database…).
     if (vol.external && (r = needPriv(`the external volume '${vol.name || name}'`))) return r;
     if (vol.driver !== undefined && vol.driver !== "local" && (r = needPriv(`volume driver ${vol.driver}`))) return r;
@@ -414,7 +429,10 @@ export async function loadComposeModel(bundleDir, { env, runConfig }) {
     return JSON.parse(String(stdout));
   };
   try {
-    return { model: await attempt(env) };
+    const model = await attempt(env);
+    // Compose always names the project; a model without one is not what up would apply.
+    if (!model || typeof model.name !== "string" || !model.name) return { error: "Docker Compose produced a model without a project name" };
+    return { model };
   } catch (first) {
     let text = "";
     for (const f of ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]) {
@@ -427,7 +445,10 @@ export async function loadComposeModel(bundleDir, { env, runConfig }) {
       if (!filled[k] && !dot[k]) { filled[k] = UNSET_SENTINEL; changed = true; }
     }
     if (changed) {
-      try { return { model: await attempt(filled) }; } catch { /* fall through */ }
+      try {
+        const model = await attempt(filled);
+        if (model && typeof model.name === "string" && model.name) return { model };
+      } catch { /* fall through */ }
     }
     const msg = String(first?.stderr || first?.message || "unknown error").split("\n").map((l) => l.trim()).filter(Boolean).slice(-2).join(" ");
     return { error: `Docker Compose could not read the bundle's compose file (${msg.slice(0, 300)})` };
