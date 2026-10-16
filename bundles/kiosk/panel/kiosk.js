@@ -127,23 +127,38 @@ export const CLIENT_SCRIPT = `
     box.appendChild(el('p', 'kk-dim', S.dash_voice_intro));
     if (!data.bots.length) { box.appendChild(el('p', 'kk-warn', S.dash_voice_none)); return; }
     var sel = el('select'); opt(sel, '', S.dash_voice_auto, !dv.bot_id);
+    var autoOpt = sel.firstChild;
     data.bots.forEach(function (b) { opt(sel, b.bot_id, botLabel(b, false), b.bot_id === dv.bot_id); });
     var l = el('label', null, S.bot); l.appendChild(sel); box.appendChild(l);
     box.appendChild(fitLine(data.bots, sel, function () { return false; }).node);   // same status as the display pickers
     var now = el('p', 'kk-dim'), msg = el('span', 'kk-msg');
+    function nameOf(id) { var hit = data.bots.filter(function (b) { return b.bot_id === id; })[0]; return hit ? (hit.display_name || hit.bot_id) : null; }
+    /** Who Automatic picks: auto_bot_id from the server (the socket's own resolver); an older listing only says so when nothing is chosen. */
+    function autoLabel() {
+      var known = Object.prototype.hasOwnProperty.call(dv, 'auto_bot_id');
+      var id = known ? dv.auto_bot_id : (dv.bot_id ? undefined : dv.effective_bot_id);
+      if (id === undefined) return S.dash_voice_auto;
+      var name = id ? nameOf(id) : null;
+      return name ? fill(S.dash_voice_auto_now, { name: name }) : S.dash_voice_auto_none;
+    }
     function showNow() {
-      var hit = data.bots.filter(function (b) { return b.bot_id === dv.effective_bot_id; })[0];
-      now.className = hit ? 'kk-dim' : 'kk-warn';
-      now.textContent = hit ? fill(S.dash_voice_now, { name: hit.display_name || hit.bot_id }) : S.dash_voice_none_fit;   // assistants exist, none fits
+      var name = nameOf(dv.effective_bot_id);
+      now.className = name ? 'kk-dim' : 'kk-warn';
+      now.textContent = name ? fill(S.dash_voice_now, { name: name }) : S.dash_voice_none_fit;   // assistants exist, none fits
+      autoOpt.textContent = autoLabel();
     }
     showNow();
     sel.addEventListener('change', function () {
       api('POST', '/api/kiosk/admin/dashboard-voice', { bot_id: sel.value }).then(function (j) {
         if (!j.ok) { msg.textContent = S[j.error] || j.error || ''; return; }
-        dv.bot_id = j.bot_id; dv.effective_bot_id = j.effective_bot_id; showNow(); msg.textContent = S.saved;
+        dv.bot_id = j.bot_id; dv.effective_bot_id = j.effective_bot_id;
+        if (Object.prototype.hasOwnProperty.call(j, 'auto_bot_id')) dv.auto_bot_id = j.auto_bot_id; else delete dv.auto_bot_id;
+        showNow(); msg.textContent = S.saved;
       });
     });
     box.appendChild(now); box.appendChild(msg);
+    box.appendChild(el('p', 'kk-dim', S.dash_voice_fits_explain));
+    box.appendChild(el('p', 'kk-hint', S.voice_also_in_builder));
   }
 
   function renderDevice(d, data) {
@@ -179,7 +194,7 @@ export const CLIENT_SCRIPT = `
     initial = current();
     var fit = fitLine(data.bots, bot, function () { return mem.checked; });
     mem.addEventListener('change', fit.show);
-    [[S.bot, bot], [S.stt, stt], [S.stt_model, sm], [S.tts, tts], [S.profile, pf], [S.vad_wait, vad], [S.follow_up, fu], [S.memory, mem], [S.theme, th], [S.max_volume, mv], [S.pause_media_on_listen, pml]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); card.appendChild(l); if (pair[1] === bot) card.appendChild(fit.node); });
+    [[S.bot, bot], [S.stt, stt], [S.stt_model, sm], [S.tts, tts], [S.profile, pf], [S.vad_wait, vad], [S.follow_up, fu], [S.memory, mem], [S.theme, th], [S.max_volume, mv], [S.pause_media_on_listen, pml]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); card.appendChild(l); if (pair[1] === bot) { card.appendChild(fit.node); card.appendChild(el('p', 'kk-hint', S.voice_also_in_builder)); } });
     card.appendChild(el('p', 'kk-dim', S.vad_wait_hint));
     card.appendChild(el('p', 'kk-dim', S.memory_warn + ' ' + S.memory_hint));
     card.appendChild(el('p', 'kk-dim', S.profile_hint + (ks.profile_source === 'guessed' ? ' ' + S.profile_guessed : '')));
@@ -374,6 +389,7 @@ const STYLES = `
   .kk-card h3 { display: flex; gap: 12px; align-items: baseline; margin: 0 0 4px; }
   .kk-on { color: var(--crow-success); font-size: .85rem; } .kk-off { color: var(--crow-text-muted); font-size: .85rem; }
   .kk-card label, .kk-form label { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+  .kk-card select, .kk-form select { min-width: 0; max-width: 100%; }
   .kk-bar { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
   .kk-form { display: grid; gap: 4px; max-width: 420px; }
   .kk-form input[name=code] { font-size: 1.4rem; letter-spacing: .15em; width: 9ch; }
