@@ -204,9 +204,14 @@ test("Configure: changing tax's encryption key keeps the old one in CROW_TAX_ENC
     let env = parseEnvText(readFileSync(join(dir, ".env"), "utf8"));
     assert.equal(env.CROW_TAX_ENCRYPTION_KEY, "new-pass-2");
     assert.equal(env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS, "old-pass-1", "the old key is kept");
-    assert.equal((await post({ CROW_TAX_ENCRYPTION_KEY: "newer-pass-3" })).status, 200);
+    // A second change while the slot still holds an older key would strand data saved
+    // with the middle one: refused until the slot is cleared.
+    const r3 = await post({ CROW_TAX_ENCRYPTION_KEY: "newer-pass-3" });
+    assert.equal(r3.status, 409);
+    assert.equal((await r3.json()).code, "previous_key_in_use");
     env = parseEnvText(readFileSync(join(dir, ".env"), "utf8"));
-    assert.equal(env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS, "old-pass-1", "a filled previous slot is never overwritten");
+    assert.equal(env.CROW_TAX_ENCRYPTION_KEY, "new-pass-2", "nothing changed");
+    assert.equal(env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS, "old-pass-1");
   } finally { server.close(); }
 });
 

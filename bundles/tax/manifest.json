@@ -11,7 +11,7 @@
   "server": {
     "command": "node",
     "args": ["server/index.js"],
-    "envKeys": ["CROW_TAX_DB_PATH"]
+    "envKeys": ["CROW_TAX_DB_PATH", "CROW_TAX_ENCRYPTION_KEY", "CROW_TAX_ENCRYPTION_KEY_PREVIOUS"]
   },
   "panel": "panel/tax.js",
   "panelRoutes": "panel/routes.js",

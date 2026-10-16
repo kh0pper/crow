@@ -33,6 +33,24 @@ export function createTaxServer(dbPath, options = {}) {
 
   const db = createDbClient(dbPath);
 
+  // After a passphrase change: re-encrypt every return that only the previous key opens,
+  // so the previous key can be cleared (and changed again) without stranding data.
+  // Best-effort and quiet: a row neither key opens is left as it is.
+  (async () => {
+    const current = process.env.CROW_TAX_ENCRYPTION_KEY;
+    const previous = process.env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS;
+    if (!current || !previous || current === previous) return;
+    try {
+      const rows = await db.execute("SELECT id, data FROM tax_returns");
+      for (const r of rows.rows) {
+        try { decrypt(r.data, current); continue; } catch { /* not on the current key */ }
+        let plain;
+        try { plain = decrypt(r.data, previous); } catch { continue; }
+        await db.execute({ sql: "UPDATE tax_returns SET data = ? WHERE id = ?", args: [encrypt(plain, current), r.id] });
+      }
+    } catch { /* no table yet */ }
+  })();
+
   // Helper: load return from DB
   async function loadReturn(id) {
     const row = await db.execute({ sql: "SELECT * FROM tax_returns WHERE id = ?", args: [id] });

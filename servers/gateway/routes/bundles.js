@@ -2353,7 +2353,7 @@ export function writeInstallEnv(destDir, envVars, manifest, log = () => {}, { ba
       try { mkdirSync(dir, { recursive: true, mode: 0o755 }); } catch { continue; }
       out[v.name] = dir;
     }
-    if (Object.keys(out).length) log(`Using a folder inside Crow's home for ${Object.keys(out).join(", ")} (change it in Configure)`);
+    if (Object.keys(out).length) log(`Set ${Object.keys(out).join(", ")} (the earlier install's path, else a folder inside Crow's home; change it in Configure)`);
     return out;
   };
   if (typeof baseText === "string") {
@@ -3524,7 +3524,7 @@ export default function bundlesRouter() {
         let composeTextForRetain = null;
         try { const cp = join(bundleDir, "docker-compose.yml"); if (existsSync(cp)) composeTextForRetain = readFileSync(cp, "utf8"); } catch {}
         const keptSecrets = retainGeneratedForReinstall(bundle_id, manifest, { destDir: bundleDir, crowHome: CROW_HOME, composeText: composeTextForRetain, includeFallbacks: !volumesRemoved });
-        if (keptSecrets) appendLog(job, `Kept ${keptSecrets} generated secret(s) for a later reinstall (mode 600)`);
+        if (keptSecrets) appendLog(job, `Kept ${keptSecrets} generated secret(s) / library path(s) for a later reinstall (mode 600)`);
         rmSync(bundleDir, { recursive: true, force: true });
         appendLog(job, "Bundle files removed");
 
@@ -3744,12 +3744,23 @@ export default function bundlesRouter() {
       const existing = parseEnvText(oldEnvText);
 
       // env_vars[].previous_key (tax's encryption key): changing the key keeps the old one
-      // in the named slot when that slot is empty, so data saved with it stays readable.
-      for (const v of getInstalledFirstManifest(bundle_id)?.env_vars || []) {
-        const prev = v && typeof v.previous_key === "string" ? v.previous_key : null;
-        if (!prev || env_vars[v.name] === undefined || env_vars[v.name] === "" || env_vars[prev] !== undefined) continue;
-        const old = existing[v.name] || process.env[v.name] || "";
-        if (old && old !== String(env_vars[v.name]) && !(existing[prev] || process.env[prev])) env_vars[prev] = old;
+      // in the named slot, so data saved with it stays readable. The old value is the one
+      // the MCP child really runs with (its mcp-addons entry, then the gateway env, then
+      // this .env). If the slot still holds a DIFFERENT older key, the change is refused:
+      // overwriting it would strand everything saved with that one.
+      {
+        const entryEnv = readJsonSafe(MCP_ADDONS_PATH, {})?.[bundle_id]?.env || {};
+        for (const v of getInstalledFirstManifest(bundle_id)?.env_vars || []) {
+          const prev = v && typeof v.previous_key === "string" ? v.previous_key : null;
+          if (!prev || env_vars[v.name] === undefined || env_vars[v.name] === "" || env_vars[prev] !== undefined) continue;
+          const old = entryEnv[v.name] || process.env[v.name] || existing[v.name] || "";
+          if (!old || old === String(env_vars[v.name])) continue;
+          const kept = entryEnv[prev] || process.env[prev] || existing[prev] || "";
+          if (kept && kept !== old) {
+            return res.status(409).json({ code: "previous_key_in_use", key: prev, error: `${prev} still holds an older key. Open the extension once (it re-encrypts saved data to the current key at start), then clear ${prev} before changing ${v.name} again.` });
+          }
+          env_vars[prev] = old;
+        }
       }
 
       // Keys whose value this save actually changes (names only, never values).
