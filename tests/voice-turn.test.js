@@ -1911,11 +1911,11 @@ test("r7c (review re-check, L1 residuals): a pretty-printed JSON call split righ
 });
 
 // ── Queue item 29: an action request must never end on a claim no tool backs ───────────────────
-import { wantsAction, wantsActionFollowUp } from "../bundles/kiosk/server/action-intent.js";
+import { wantsAction, wantsActionFollowUp, namesDisplayObject } from "../bundles/kiosk/server/action-intent.js";
 const CANT = "Sorry, I can't do that from here: this assistant has no tool for it.";
 const NOT_DONE = "Sorry, I couldn't do that from here, so nothing was changed.";
 const INCIDENT = "Add a car appointment for 815am Monday to my calendar";
-const actTurn = (h, transcript, extra = {}) => famTurn(h, transcript, { actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp, cantDoText: CANT, notDoneText: NOT_DONE, ...extra });
+const actTurn = (h, transcript, extra = {}) => famTurn(h, transcript, { actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp, displayObjectWhen: namesDisplayObject, cantDoText: CANT, notDoneText: NOT_DONE, unsureText: "UNSURE", ...extra });
 // The real effectiveToolName: a crow_tools call is named by its action (the add-on tool it runs).
 const wrapperNames = (h) => { const base = h.deps.effectiveToolName; h.deps.effectiveToolName = (tc) => (tc.name === "crow_tools" && tc.arguments?.action ? tc.arguments.action : base(tc)); return h; };
 /** A display tool whose words-ask test (holdText) reads the transcript, as the kiosk's do. */
@@ -2161,4 +2161,48 @@ test("item 29 regression pin: without actionWhen nothing changes", async () => {
   const r = await famTurn(h, INCIDENT);
   assert.deepEqual(h.calls.spoken, ["I've added it."]);
   assert.equal(r.timings.action_intent, undefined);
+});
+
+test("item 29 (re-review N1): after an ok call to a tool of UNKNOWN effect a claim gets the not-sure line, never 'nothing was changed'", async () => {
+  const odd = [{ type: "tool_call", id: "o", name: "crow_tools", arguments: { action: "acme_frobnicate", params: {} } }, { type: "done" }];
+  const h = wrapperNames(harness({ chatTools: ["crow_tools"], route: "escalate", probe: () => true, rounds: [odd, says("I've added it to your calendar. ")] }));
+  h.deps.toolFamilies = FAM();
+  const r = await actTurn(h, INCIDENT);
+  assert.deepEqual(h.calls.spoken.slice(1), ["UNSURE"]);
+  assert.equal(r.timings.claim_blocked, true);
+  const w = wrapperNames(harness({ chatTools: ["crow_tools"], route: "escalate", probe: () => true, rounds: [[{ type: "tool_call", id: "c", name: "crow_tools", arguments: { action: "createEvent", params: {} } }, { type: "done" }], says("Added it. ")] }));
+  w.deps.toolFamilies = FAM();
+  await actTurn(w, INCIDENT);
+  assert.deepEqual(w.calls.spoken.slice(1), ["Added it."], "a camelCase write backs the turn");
+});
+
+test("item 29 (re-review N2): a memory save does not back 'I've saved it to your calendar'", async () => {
+  const memCall = [{ type: "tool_call", id: "m", name: "crow_memory", arguments: { action: "store_memory", params: {} } }, { type: "done" }];
+  const h = harness({ chatTools: ["crow_memory"], rounds: [memCall, says("I've saved it to your calendar. ")] });
+  h.deps.toolFamilies = FAM();
+  h.deps.isMemoryTool = (n) => n === "crow_memory" || n === "crow_store_memory";
+  h.device.kiosk_settings.memory_integration = true;
+  await actTurn(h, "Remember to add the dentist to my calendar", { memoryWhen: () => true });
+  assert.deepEqual(h.calls.spoken, [NOT_DONE]);
+});
+
+test("item 29 (re-review minor): a scheduled reminder (crow_create_schedule) backs the turn; it is not 'only a memory'", async () => {
+  const sched = [{ type: "tool_call", id: "s", name: "crow_memory", arguments: { action: "create_schedule", params: {} } }, { type: "done" }];
+  const h = harness({ chatTools: ["crow_memory"], rounds: [sched, says("I'll remind you at 5. ")] });
+  h.deps.toolFamilies = FAM();
+  h.deps.isMemoryTool = (n) => n === "crow_memory" || n === "crow_create_schedule";
+  h.device.kiosk_settings.memory_integration = true;
+  await actTurn(h, "Remind me to call mom at 5", { memoryWhen: () => true });
+  assert.deepEqual(h.calls.spoken, ["I'll remind you at 5."]);
+});
+
+test("item 29 (re-review minor): 'put eggs on the list' with a card open still reaches the display tool (no could-not-do line)", async () => {
+  const seen = [];
+  const show = { ...displayTool(seen), when: () => true, holdText: () => false };
+  const h = harness({ chatTools: [], rounds: [[{ type: "tool_call", id: "w", name: "crow_wm", arguments: { command: "x" } }, { type: "done" }], says("Eggs are on the list. ")] });
+  h.deps.toolFamilies = FAM();
+  const r = await actTurn(h, "Put eggs on the shopping list", { extraTools: [show] });
+  assert.equal(seen.length, 1);
+  assert.deepEqual(h.calls.spoken, ["Eggs are on the list."]);
+  assert.equal(r.timings.action_no_tool, undefined);
 });

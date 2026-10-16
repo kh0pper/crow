@@ -21,7 +21,7 @@ import { STRINGS } from "./strings.js";
 import { createBotFit } from "./fit.js";
 import { kioskNowContext, matchClockFastPath, relativeDatesContext, mentionsRelativeDay } from "./clock.js";
 import { wantsMemory } from "./memory-intent.js";
-import { wantsAction, wantsActionFollowUp } from "./action-intent.js";
+import { wantsAction, wantsActionFollowUp, namesDisplayObject } from "./action-intent.js";
 import { createRelay } from "./relay.js";
 import { createTicketStore } from "./tickets.js";
 import { createMediaStore, migrateMaxVolume } from "./media.js";
@@ -202,6 +202,7 @@ export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = 
     // the could-not-do line without a model call; tools withheld from the quick model → escalate.
     actionWhen: wantsAction,
     actionFollowWhen: wantsActionFollowUp,
+    displayObjectWhen: namesDisplayObject,
     cantDoText: kioskCantDoText(lang),
     notDoneText: kioskNotDoneText(lang),
     notReadyText: kioskNotReadyText(lang),

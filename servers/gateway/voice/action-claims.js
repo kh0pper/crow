@@ -17,7 +17,7 @@
 export const CLAIM_MAX_CHARS = 2000;
 
 const NEG = "(?<!\\bno(?: (?:te|lo|la|los|las|se|le|me|nunca|todavia|aun))* )";
-const EN_DONE = "added|created|scheduled|rescheduled|booked|set up|set|sent|saved|stored|noted|deleted|removed|canceled|cancelled|moved|changed|updated|emailed|texted|invited|written down";
+const EN_DONE = "added|created|scheduled|rescheduled|booked|set up|set|sent|saved|stored|noted|put|deleted|removed|canceled|cancelled|moved|changed|updated|emailed|texted|invited|written down";
 const EN_DO = "add|create|schedule|reschedule|book|set up|set|send|save|store|note|put|delete|remove|cancel|move|change|update|email|text|invite|remind|write down|let you know|follow up|keep track|check back|ping|notify|alert";
 // "Let me …" without the verbs a plain answer uses ("let me put it this way", "let me note that…").
 const EN_LET = "add|create|schedule|reschedule|book|set up|set|send|save|delete|remove|cancel|move|update|email|text|invite|remind";
@@ -36,9 +36,11 @@ const CLAIMS = [
   new RegExp(`\\blet me (?:just |go ahead and )?(?:${EN_LET})\\b`),
   new RegExp(`\\bi d (?:be happy|love|be glad) to (?:${EN_DO})\\b`),
   // Bare, at the start of a sentence after an opener: "Added!", "Done.", "Got it", "Moved it to 9."
-  new RegExp(`${OPEN}(?:done|added|scheduled|rescheduled|booked|saved|sent|noted|moved|changed|updated|deleted|removed|canceled|cancelled|got it|all done|all set|consider it done|you re all set|reminder set)\\b`),
+  new RegExp(`${OPEN}(?:done|added|set|scheduled|rescheduled|booked|saved|sent|noted|moved|changed|updated|deleted|removed|canceled|cancelled|got it|all done|all set|consider it done|you re all set|reminder set)\\b`),
+  // "Car appointment added to your calendar."
+  /\b(?:added|scheduled|booked|saved|put|set|created) (?:to|on|in|into|for) (?:your|the) (?:calendar|list|agenda|schedule|reminders)\b/,
   // State with an assistant-made subject: "your car appointment is scheduled for…", "it's in your calendar", "has been added".
-  /\b(?:your|the) (?:\w+ ){0,2}(?:appointment|event|meeting|reminder|alarm|email|message|booking|reservation)s? (?:is|are|has been|have been) (?:now |all )?(?:set|scheduled|rescheduled|booked|added|saved|sent|created|confirmed|moved|updated|canceled|cancelled|deleted)\b/,
+  /\b(?:your|the) (?:\w+ ){0,5}(?:appointment|event|meeting|reminder|alarm|email|message|booking|reservation)s?(?: \w+){0,4} (?:is|are|has been|have been) (?:now |all )?(?:all set|set|scheduled|rescheduled|booked|added|saved|sent|created|confirmed|moved|updated|canceled|cancelled|deleted)\b/,
   /\b(?:it|that|this) (?:s|is|has been) (?:now |all )?(?:set|scheduled|booked|added|saved|sent|done|in your (?:calendar|list|schedule|agenda)|on your (?:calendar|list|schedule|agenda))\b/,
   /\b(?:your|the) (?:\w+ ){0,2}(?:appointment|event|meeting|reminder|alarm|booking|reservation)s? (?:is|are) (?:now )?(?:in|on) (?:the|your) (?:calendar|agenda|schedule|list)\b/,
   /\b(?:has|have) been (?:added|created|scheduled|booked|sent|saved|deleted|removed|canceled|cancelled|moved|updated)\b/,
@@ -72,11 +74,14 @@ export function claimText(text) {
 export function claimSentences(text) {
   if (typeof text !== "string" || !text) return [];
   const capped = text.length > 2 * CLAIM_MAX_CHARS ? `${text.slice(0, CLAIM_MAX_CHARS)}\n${text.slice(-CLAIM_MAX_CHARS)}` : text;
-  return capped.split(/[.!?¡¿;:\n—–]+|,(?= )/).map(claimText).filter(Boolean);
+  // A time (8:15) or a decimal is not a sentence end.
+  return capped.split(/(?:(?<!\d)[.:]|[.:](?!\d)|[!?¡¿;\n—–])+|,(?= )/).map(claimText).filter(Boolean);
 }
 
+// Clauses joined by "and" are read on their own too ("I've made a note and added it to your calendar").
+const clauses = (text) => claimSentences(text).flatMap((t) => [t, ...t.split(/ (?:and|also|then|plus|y|tambien|luego) /)]);
 export function claimsAction(text) {
-  return claimSentences(text).some((t) => CLAIMS.some((re) => re.test(t)));
+  return clauses(text).some((t) => CLAIMS.some((re) => re.test(t)));
 }
 
 /** A claim of a reminder or a later follow-up — what a saved memory is not (a memory call alone backs the rest). */
@@ -84,26 +89,35 @@ export function claimsReminder(text) {
   return claimSentences(text).some((t) => CLAIMS.some((re) => re.test(t)) && REMINDER.some((re) => re.test(t)));
 }
 
-// Effective tool names that change something (create, send, delete…) versus ones that only read.
-const READS = /(?:^|_)(?:list|get|search|read|find|discover|status|query|export|download|recall|stats|structure|permissions|metadata|tabs|lookup|fetch|browse|preview)(?:_|$)/;
-const WRITES = /(?:^|_)(?:create|add|insert|append|update|edit|set|delete|remove|trash|send|schedule|book|respond|reply|move|rename|share|upload|store|save|write|cancel|archive|label|plan|call|draft|complete|make|new|post|publish|invite|copy|replace|format|apply|run)(?:_|$)/;
+// Effective tool names: what changes something (create, send, delete…), what only reads, and what is unknown.
+const WRITES = /(?:^|_)(?:create|add|insert|append|update|edit|set|delete|remove|trash|send|schedule|book|respond|reply|move|rename|share|upload|store|save|write|cancel|archive|label|plan|call|draft|complete|make|new|post|publish|invite|copy|replace|rewrite|format|apply|run|restore|undo|clear|duplicate|reorder|resolve|transfer|sync|react|dismiss|memo|crosspost|change|toggle|mark|assign|attach|submit|order|play|pause|stop|start|enable|disable)(?:_|$)/;
+const READS = /(?:^|_)(?:list|get|search|read|find|discover|status|query|export|download|recall|stats|structure|permissions|metadata|tabs|lookup|fetch|browse|preview|check|count|show|describe|info|inbox)(?:_|$)/;
+/** "createEvent", "create-event", "crow_create_event" → "create_event". */
+const words = (name) => String(name || "").replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^crow_/, "").replace(/^_+|_+$/g, "");
 /**
- * Does a tool by this (effective) name change something? Only such a call backs an action turn: a read
- * (list events, search mail) returning ok proves nothing was added, and its text may be anyone's.
+ * "write" | "read" | "unknown" for an (effective) tool name. Only a write backs an action turn; an ok read
+ * (list events, search mail) proves nothing was added, and its text may be anyone's. A WRITE word wins
+ * over a read word ("find_replace" changes the document). Unknown is neither: after an ok unknown call
+ * the turn never says "nothing was changed".
  */
-export function changesSomething(name) {
-  const n = String(name || "").toLowerCase().replace(/^crow_/, "");
-  if (!n || READS.test(n)) return false;
-  return WRITES.test(n);
+export function toolEffect(name) {
+  const n = words(name);
+  if (!n) return "unknown";
+  if (WRITES.test(n)) return "write";
+  if (READS.test(n)) return "read";
+  return "unknown";
 }
+export const changesSomething = (name) => toolEffect(name) === "write";
 
 // A sentence that only says something was saved or noted ("I've saved that", "Lo he guardado").
 const SAVE_ONLY = /\b(?:saved|noted|stored|remember|remembered|got it|note|guardado|anotado|apuntado|guardo|anoto|apunto|recordare eso|lo recordare)\b/;
+// A save that names a calendar, list, reminder or message is not a memory save ("I've saved it to your calendar").
+const NOT_MEMORY = /\b(?:calendar|agenda|schedule|list|reminders?|email|message|appointment|calendario|lista|recordatorio|correo|mensaje|cita)\b/;
 /**
  * After a memory was saved (and nothing else changed): a claim beyond that save — a reminder, a calendar
  * entry, a sent message. "I've saved that" is true; "I've saved it and added it to your calendar" is not.
  */
 export function claimsBeyondMemory(text) {
   return claimSentences(text).flatMap((t) => t.split(/ (?:and|also|then|plus|y|tambien|luego) /)).some((t) => CLAIMS.some((re) => re.test(t))
-    && (REMINDER.some((re) => re.test(t)) || !SAVE_ONLY.test(t)));
+    && (REMINDER.some((re) => re.test(t)) || NOT_MEMORY.test(t) || !SAVE_ONLY.test(t)));
 }

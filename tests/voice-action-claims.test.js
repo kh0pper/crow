@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { claimsAction, claimsReminder, claimText, changesSomething, CLAIM_MAX_CHARS } from "../servers/gateway/voice/action-claims.js";
+import { claimsAction, claimsReminder, claimsBeyondMemory, claimText, changesSomething, toolEffect, CLAIM_MAX_CHARS } from "../servers/gateway/voice/action-claims.js";
 
 test("claimsAction: a reply that says an action was done, promised or offered is a claim (en + es)", () => {
   const claims = [
@@ -111,4 +111,19 @@ test("claimsAction: a claim at the END of a very long reply is still read", () =
 test("changesSomething: only a tool that changes something backs an action turn", () => {
   for (const n of ["ws_cal_create_event", "gcal_create_event", "gmail_send_to_self", "crow_store_memory", "phone_plan_call", "ws_cal_delete_event"]) assert.equal(changesSomething(n), true, n);
   for (const n of ["ws_cal_list_events", "gcal_get_event", "crow_search_memories", "tasks_list", "crow_discover", "gmail_search_threads", "", null]) assert.equal(changesSomething(n), false, String(n));
+});
+
+test("toolEffect: the real add-on names, camelCase and hyphens; a write word wins over a read word", () => {
+  for (const n of ["ws_cal_create_event", "ws_cal_update_event", "ws_cal_delete_event", "ws_cal_respond_to_event", "ws_contacts_create", "gcal_create_event", "gmail_send_to_self",
+    "gmail_create_draft", "crow_voice_memo", "crow_crosspost", "crow_react", "crow_dismiss_notification", "ws_change_status", "ws_undo_last_change", "ws_drive_restore_version",
+    "gdocs_find_replace", "gdocs_rewrite_passages", "gdocs_resolve_comment", "gslides_duplicate_slide", "gslides_reorder_slides", "gdrive_transfer_ownership", "bigquery_sync_sheet_to_table",
+    "createEvent", "create-event", "crow_create_schedule"]) assert.equal(toolEffect(n), "write", n);
+  for (const n of ["ws_cal_list_events", "gcal_get_event", "gmail_search_threads", "crow_search_memories", "tasks_list", "crow_discover"]) assert.equal(toolEffect(n), "read", n);
+  for (const n of ["acme_frobnicate", "", null]) assert.equal(toolEffect(n), "unknown", String(n));
+  assert.equal(changesSomething("gcal_create_event"), true);
+});
+
+test("claimsBeyondMemory: a save that names a calendar, list or message is not a memory save (en + es)", () => {
+  for (const s of ["I've saved it to your calendar.", "Lo he guardado en tu calendario.", "I've saved that. I'll remind you at 5."]) assert.equal(claimsBeyondMemory(s), true, s);
+  for (const s of ["I've saved that.", "Got it, I'll remember that the wifi is maple.", "Lo he guardado."]) assert.equal(claimsBeyondMemory(s), false, s);
 });

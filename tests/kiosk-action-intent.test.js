@@ -35,6 +35,9 @@ test("wantsAction: a request to add, schedule, remind, send or delete is an acti
     "Agéndame una cita con el dentista el martes",
     "Ok, schedule a call with the plumber",
     "Text my sister that I'm late",
+    // Re-review N4: a reminder about something is a reminder request.
+    "Remind me about the dentist tomorrow",
+    "Remind me of the meeting tomorrow at 9",
   ];
   for (const s of yes) assert.equal(wantsAction(s), true, s);
 });
@@ -87,6 +90,6 @@ test("wantsAction: none of the scripted latency questions is an action request (
 });
 
 test("wantsActionFollowUp: a change to the last request is a follow-up; a new question is not", () => {
-  for (const s of ["Move it to 9 instead", "Make it 10", "Also Tuesday", "Actually, cancel that", "Cámbiala a las nueve", "Mejor el martes"]) assert.equal(wantsActionFollowUp(s), true, s);
-  for (const s of ["When is the World Cup final?", "Thanks!", "What is the capital of Portugal?", "Gracias", ""]) assert.equal(wantsActionFollowUp(s), false, s);
+  for (const s of ["Move it to 9 instead", "Make it 10", "Also Tuesday", "Actually, cancel that", "Cámbiala a las nueve", "Mejor el martes", "Change it to 9"]) assert.equal(wantsActionFollowUp(s), true, s);
+  for (const s of ["When is the World Cup final?", "Thanks!", "What is the capital of Portugal?", "Gracias", "", "Is it going to rain?", "What's the weather like this weekend?", "¿Cuál es la capital de Francia?"]) assert.equal(wantsActionFollowUp(s), false, s);
 });

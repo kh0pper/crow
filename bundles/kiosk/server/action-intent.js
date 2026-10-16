@@ -18,7 +18,7 @@ const THING = "calendar|schedule|agenda|reminders?|to do list|todo list|to-do li
 const LEAD = "(?:^|\\b(?:please|can you|could you|would you|will you|i want to|i need to|i d like to|i would like to|let s|go ahead and|ok|okay|hey|so|crow|hey crow|and|also|then) )";
 const ACTION_INTENT = [
   // "Remind me what a gerund is" is a question: remind me + a question word is not a reminder request.
-  /\bremind me(?! (what|who|how|when|where|why|which|of|about|again what))\b/,
+  /\bremind me(?! (what|who|how|when|where|why|which|again what|(of|about) (what|who|how|when|where|why|which|the name|the word|the title)))\b/,
   /\b(set an alarm|set my alarm|set a reminder|set up a reminder|sign me up)\b|\breminders?\b(?! (app|apps))/,
   new RegExp(`${LEAD}remember to\\b`),
   // A calendar or appointment of the user's own ("what is the Mayan calendar" is not).
@@ -49,7 +49,7 @@ function howTo(t) {
 }
 // The turn right after an action request is guarded only when it reads as a change to it ("move it to 9
 // instead", "make it 10", "also Tuesday", "cámbiala a las nueve"), not on any next question.
-const FOLLOW_UP = /\b(it|that|this|instead|too|also|actually|move|change|make it|cancel|undo|same|another|one more|and on|lo|la|eso|esa|ese|tambi[eé]n|mejor|en vez|c[aá]mbia(la|lo)?|mu[eé]ve(la|lo)?|otra|otro)( |$)/;
+const FOLLOW_UP = /\b(instead|too|also|actually|undo|en vez|mejor|tambi[eé]n|(move|change|make|cancel|delete|remove|push|set|put|switch) (it|that|this|them|the time)|c[aá]mbia(la|lo)|mu[eé]ve(la|lo)|p[aá]sa(la|lo)|b[oó]rra(la|lo)|canc[eé]la(la|lo)|ponla|ponlo)( |$)/;
 export function wantsAction(transcript) {
   const t = intentText(transcript);
   return !!t && !howTo(t) && ACTION_INTENT.some((re) => re.test(t));
@@ -59,4 +59,12 @@ export function wantsAction(transcript) {
 export function wantsActionFollowUp(transcript) {
   const t = intentText(transcript);
   return !!t && FOLLOW_UP.test(t);
+}
+
+// Things the display itself holds: a request that names one can be served by the display tools.
+const DISPLAY_OBJECT = /\b(list|lists|timer|timers|card|cards|minute|minutes|lista|listas|temporizador|temporizadores|tarjeta|tarjetas|minuto|minutos)( |$)/;
+/** Does the request name something the display holds (a list, a timer, a card)? (The voice turn's displayObjectWhen.) */
+export function namesDisplayObject(transcript) {
+  const t = intentText(transcript);
+  return !!t && DISPLAY_OBJECT.test(t);
 }
