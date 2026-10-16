@@ -1106,7 +1106,8 @@
       ],
       "icon": "image",
       "docker": {
-        "composefile": "docker-compose.yml"
+        "composefile": "docker-compose.yml",
+        "pull_timeout_s": 1800
       },
       "skills": [
         "skills/design-frontend.md",

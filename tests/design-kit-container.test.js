@@ -10,7 +10,7 @@ const compose = read("bundles/design-kit/docker-compose.yml");
 test("the manifest declares no ports and no webUI: no ufw rule is ever opened (review H3)", () => {
   const m = JSON.parse(read("bundles/design-kit/manifest.json"));
   for (const k of ["ports", "port", "webUI"]) assert.equal(m[k], undefined, k);
-  assert.deepEqual(m.docker, { composefile: "docker-compose.yml" });
+  assert.deepEqual(m.docker, { composefile: "docker-compose.yml", pull_timeout_s: 1800 });
 });
 
 test("only the door publishes, on 127.0.0.1:8018; the renderer is internal-only", () => {

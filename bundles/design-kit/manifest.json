@@ -8,7 +8,7 @@
   "category": "productivity",
   "tags": ["design", "fonts", "icons", "charts", "diagrams", "artifacts"],
   "icon": "image",
-  "docker": { "composefile": "docker-compose.yml" },
+  "docker": { "composefile": "docker-compose.yml", "pull_timeout_s": 1800 },
   "skills": ["skills/design-frontend.md", "skills/design-themes.md", "skills/design-poster.md"],
   "refreshFiles": ["lib", "third_party", "LICENSES.md", "NOTICE"],
   "requires": { "min_ram_mb": 1024, "min_disk_mb": 1500 },
