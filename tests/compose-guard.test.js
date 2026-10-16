@@ -12,7 +12,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSyn
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
+import { execFileSync, execFile } from "node:child_process";
 
 process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-cguard-home-"));
 process.env.CROW_DATA_DIR = mkdtempSync(join(tmpdir(), "crow-cguard-data-"));
@@ -116,7 +116,7 @@ test("model: env_file, build context, secrets/configs files and bind-device volu
   assert.equal(check(svc({ env_file: [{ path: "/opt/gpu.env" }] }), { dir, manifest: { inference: true } }).valid, true, "model bundles' shared GPU env file");
   assert.equal(check(svc({ build: { context: "/" } }), { dir }).valid, false);
   assert.equal(check(svc({ build: { context: dir, additional_contexts: { x: "/etc" } } }), { dir }).valid, false);
-  assert.equal(check(svc({ build: { context: "https://example.invalid/repo.git" } }), { dir }).valid, true);
+  assert.equal(check(svc({ build: { context: "https://example.invalid/repo.git" } }), { dir }).valid, false, "remote build contexts are refused (not modelled)");
   assert.equal(check({ ...svc(), secrets: { s: { file: out } } }, { dir }).valid, false);
   assert.equal(check({ ...svc(), configs: { c: { file: join(dir, "c.conf") } } }, { dir }).valid, true);
   assert.equal(check({ ...svc(), volumes: { v: { driver_opts: { type: "none", o: "bind", device: "/etc" } } } }, { dir, manifest: PRIV, consent: true }).valid, false);
@@ -305,4 +305,105 @@ dockerTest("review fixtures: privileged via interpolation/yes/!!bool, long-synta
     const r = await gateDir(project(files), { textCheck: false });
     assert.equal(r.valid, false, JSON.stringify(files));
   }
+});
+
+// ---- allowlist: anything the check does not understand is refused --------------------
+
+test("allowlist: unknown service or top-level keys are refused, even with privileged consent", () => {
+  assert.equal(check(svc({ some_future_key: true }), { manifest: PRIV, consent: true }).valid, false);
+  assert.equal(check({ ...svc(), models: { m: {} } }, { manifest: PRIV, consent: true }).valid, false);
+  assert.equal(check({ ...svc(), "x-anything": { privileged: true } }).valid, true, "x- extension fields are inert");
+});
+
+test("allowlist: escape-capable service keys need privileged consent", () => {
+  for (const extra of [
+    { cgroup_parent: "/" }, { device_cgroup_rules: ["a *:* rwm"] }, { external_links: ["other"] }, { use_api_socket: true },
+    { post_start: [{ command: "id", privileged: true }] }, { pre_stop: [{ command: "id" }] }, { develop: { watch: [] } },
+    { sysctls: { "kernel.shm_rmid_forced": "1" } }, { oom_score_adj: -1000 }, { runtime: "sysbox-runc" },
+    { cap_add: ["SYS_TIME"] }, { cap_add: ["BPF"] }, { cap_add: ["LINUX_IMMUTABLE"] },
+    { deploy: { resources: { reservations: { devices: [{ driver: "x", capabilities: ["tpu"] }] } } } },
+    { volumes: [{ type: "bind", source: join(CROW_HOME, "bundles", "fx-z"), target: "/x", bind: { propagation: "rshared" } }] },
+    { volumes: [{ type: "bind", source: join(CROW_HOME, "bundles", "fx-z"), target: "/x", bind: { selinux: "Z" } }] },
+  ]) {
+    assert.equal(check(svc(extra)).valid, false, JSON.stringify(extra));
+  }
+  assert.equal(check(svc({ cap_add: ["CHOWN", "NET_BIND_SERVICE"], oom_score_adj: -500, runtime: "nvidia",
+    deploy: { resources: { reservations: { devices: [{ driver: "nvidia", count: 1, capabilities: [["gpu"]] }] } } } })).valid, true);
+});
+
+test("allowlist: builds can't use host network, SSH agent, build secrets, privileged builds or remote contexts", () => {
+  const dir = bundleDir();
+  for (const extra of [{ network: "host" }, { ssh: ["default"] }, { secrets: ["s"] }, { privileged: true }, { entitlements: ["network.host"] }]) {
+    assert.equal(check(svc({ build: { context: dir, ...extra } }), { dir }).valid, false, JSON.stringify(extra));
+  }
+  assert.equal(check(svc({ build: { context: dir, dockerfile: "Dockerfile", args: { A: "1" } } }), { dir }).valid, true);
+});
+
+test("allowlist: networks and volumes — host network by name, non-bridge drivers, non-local volume drivers", () => {
+  assert.equal(check({ ...svc({ networks: { h: null } }), networks: { h: { name: "host", external: true } } }).valid, false);
+  assert.equal(check({ ...svc({ networks: { m: null } }), networks: { m: { driver: "macvlan" } } }).valid, false);
+  assert.equal(check({ ...svc({ networks: { f: null } }), networks: { f: { name: "crow-federation", external: true } } }).valid, true);
+  assert.equal(check(svc({ networks: { undeclared: null } })).valid, false);
+  assert.equal(check({ ...svc(), volumes: { v: { driver: "some-plugin" } } }).valid, false);
+  assert.equal(check(svc({ volumes: [{ type: "volume", source: "undeclared", target: "/x" }] })).valid, false);
+});
+
+test("allowlist: secrets/configs can't copy a variable from the gateway's environment", () => {
+  assert.equal(check({ ...svc(), secrets: { s: { environment: "ANY_GATEWAY_SECRET" } } }, { manifest: PRIV, consent: true }).valid, false);
+  assert.equal(check({ ...svc(), configs: { c: { content: "inline" } } }).valid, true);
+});
+
+dockerTest("allowlist on real Compose output: use_api_socket, a host network by name, a secret from the environment", async () => {
+  for (const files of [
+    { "docker-compose.yml": C("    use_api_socket: true\n") },
+    { "docker-compose.yml": C("    networks: [h]\n") + "networks:\n  h:\n    name: host\n    external: true\n" },
+    { "docker-compose.yml": C("    secrets: [s]\n") + "secrets:\n  s:\n    environment: PATH\n" },
+    { "docker-compose.yml": C("    build:\n      context: .\n      network: host\n") },
+  ]) {
+    const r = await gateDir(project(files), { textCheck: false });
+    assert.equal(r.valid, false, JSON.stringify(files));
+  }
+});
+
+// ---- authorization: whose consent a later Start runs with ----------------------------
+
+function seedInstalled(id, manifest, record) {
+  const dir = join(CROW_HOME, "bundles", id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify({ id, name: id, version: "0.1.0", type: "bundle", ...manifest }));
+  const path = join(CROW_HOME, "installed.json");
+  const list = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : [];
+  writeFileSync(path, JSON.stringify([...list.filter((x) => x.id !== id), { id, type: "bundle", version: "0.1.0", ...record }]));
+}
+
+test("install records the consent the owner gave, and only for a bundle that asked for it", () => {
+  assert.deepEqual(B._consentRecordForTest({ privileged: true }, true), { consent: { verified: true, privileged: true, consent_required: false } });
+  assert.deepEqual(B._consentRecordForTest({}, true), {});
+});
+
+test("Start runs with the install-time consent: never a peer's, never for privileges added later", () => {
+  seedInstalled("fx-c1", { privileged: true }, B._consentRecordForTest({ privileged: true }, true));
+  assert.equal(B._startConsentForTest("fx-c1").consentVerified, true);
+  assert.equal(B._startConsentForTest("fx-c1", { crossHost: true }).consentVerified, false, "a peer instance can't use the owner's consent");
+  // installed as consent_required only; a refresh made the manifest privileged
+  seedInstalled("fx-c2", { privileged: true, consent_required: true }, B._consentRecordForTest({ consent_required: true }, true));
+  const sc = B._startConsentForTest("fx-c2");
+  assert.equal(sc.manifest.privileged, false, "privileged was never consented to");
+  assert.equal(sc.manifest.consent_required, true);
+  seedInstalled("fx-c3", { privileged: true }, { consent: { verified: false, privileged: true } });
+  assert.equal(B._startConsentForTest("fx-c3").consentVerified, false);
+  seedInstalled("fx-c4", { privileged: true }, {});
+  assert.equal(B._startConsentForTest("fx-c4").consentVerified, true, "a record from before consent was kept: installed through the gate of its time");
+  assert.equal(B._startConsentForTest("fx-not-installed").consentVerified, false);
+});
+
+dockerTest("Compose never sees the gateway's secrets: ${ANY_VAR} interpolates to empty", async () => {
+  process.env.CROW_TEST_GATEWAY_SECRET = "gw-secret-value-xyz";
+  try {
+    const dir = project({ "docker-compose.yml": C("    environment:\n      - LEAK=${CROW_TEST_GATEWAY_SECRET:-}\n") });
+    const run = (args, { cwd, env }) => new Promise((resolve, reject) => execFile("docker", ["compose", ...args], { cwd, env }, (e, stdout, stderr) => (e ? reject(Object.assign(e, { stderr })) : resolve({ stdout }))));
+    const { model } = await G.loadComposeModel(dir, { env: B.composeEnv(), runConfig: run });
+    assert.ok(model, "model loaded");
+    assert.ok(!JSON.stringify(model).includes("gw-secret-value-xyz"));
+  } finally { delete process.env.CROW_TEST_GATEWAY_SECRET; }
 });

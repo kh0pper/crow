@@ -87,6 +87,29 @@ export function sensitiveRoots(ctx) {
   };
 }
 
+// ---- the allowlist -------------------------------------------------------------------
+// Every key Compose can emit for a service / top-level item is listed here with how it is
+// treated. A key that is not listed refuses the bundle (fail-closed): new Compose
+// features have to be read and classified before a bundle may use them.
+//   "ok"    inert for host access (resources, metadata, container-internal settings)
+//   "priv"  any non-default value needs privileged + consent (never for community)
+//   fn      validated by its function below
+const SAFE_CAPS = new Set(["CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "SETGID", "SETUID", "SETPCAP", "NET_BIND_SERVICE", "SYS_CHROOT", "MKNOD", "AUDIT_WRITE", "SETFCAP", "SYS_NICE", "SYS_RESOURCE", "IPC_LOCK"]);
+const SERVICE_OK = new Set([
+  "image", "command", "entrypoint", "environment", "container_name", "hostname", "domainname", "ports", "expose",
+  "restart", "healthcheck", "depends_on", "labels", "annotations", "working_dir", "user", "init", "mem_limit",
+  "mem_reservation", "memswap_limit", "mem_swappiness", "cpus", "cpu_shares", "cpu_quota", "cpu_period", "cpuset",
+  "cpu_count", "cpu_percent", "cpu_rt_runtime", "cpu_rt_period", "shm_size", "stop_signal", "stop_grace_period",
+  "tty", "stdin_open", "read_only", "tmpfs", "ulimits", "extra_hosts", "dns", "dns_search", "dns_opt", "pull_policy",
+  "platform", "profiles", "attach", "cap_drop", "logging", "pids_limit", "blkio_config", "mac_address", "scale",
+  "secrets", "configs", "links", "group_add", "stop_timeout", "networks", "gpus", "deploy", "runtime", "sysctls",
+  "oom_score_adj", "privileged", "cap_add", "security_opt", "network_mode", "pid", "ipc", "uts", "userns_mode",
+  "cgroup", "devices", "volumes", "env_file", "build", "label_file", "volumes_from",
+]);
+const SERVICE_PRIV = new Set(["cgroup_parent", "device_cgroup_rules", "external_links", "isolation", "storage_opt",
+  "credential_spec", "oom_kill_disable", "use_api_socket", "post_start", "pre_stop", "develop", "models", "provider"]);
+const TOP_OK = new Set(["name", "services", "networks", "volumes", "secrets", "configs"]);
+
 /**
  * Check a Compose model (the parsed `docker compose config --format json` output).
  * @returns {{valid: true} | {valid: false, reason: string}}
@@ -99,9 +122,12 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
   const ownId = /^[a-z0-9][a-z0-9-]*$/.test(String(manifest?.id || "")) ? manifest.id : null;
   const refuse = (reason) => ({ valid: false, reason });
   const needPriv = (what) => (isPrivilegedAllowed ? null : refuse(`Compose file uses ${what} but manifest does not declare 'privileged: true' (or consent was not verified)`));
-  if (!model || typeof model !== "object" || !model.services || typeof model.services !== "object") return refuse("Docker Compose produced no services model");
+  const isObj = (v) => v && typeof v === "object" && !Array.isArray(v);
+  if (!isObj(model) || !isObj(model.services)) return refuse("Docker Compose produced no services model");
+  for (const k of Object.keys(model)) {
+    if (!TOP_OK.has(k) && !k.startsWith("x-")) return refuse(`top-level key '${k}' is not one the install check understands`);
+  }
 
-  /** A host path the container gets, read-only or not. */
   const checkOne = (p, { readOnly, what }) => {
     if (roots.dockerSockets.has(p)) {
       if (!readOnly) return refuse("Read-write Docker socket mounts are not permitted");
@@ -112,23 +138,16 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     if ((p === "/etc/localtime" || p === roots.localtime) && readOnly) return null;
     for (const t of roots.trees) {
       if (!(under(p, t.root) || under(t.root, p))) continue;
-      // /proc and /sys read-only: host metrics (netdata), only for a bundle the user consented to.
       if (t.hostInfo && readOnly && under(p, t.root) && (isConsentBundle || isPrivilegedAllowed)) continue;
-      // The one data-folder file a privileged bundle may READ with consent: crow.db (the
-      // companion reads its bot settings from it). Its consent text says so.
       if (t.dataDir && readOnly && isPrivilegedAllowed && basename(p) === "crow.db" && dirname(p) === t.root) continue;
-      // The bundle's OWN subfolder of the data folder (<data>/<bundle id>), never a parent.
       if (t.dataDir && ownId && under(p, join(t.root, ownId))) continue;
-      // The extensions folder, read-only, with privileged consent (companion's text says so).
       if (t.bundlesDir && readOnly && isPrivilegedAllowed && p === t.root) continue;
-      // A bundle's own folder sits under the extensions folder: its own files are fine.
       if (t.bundlesDir && under(p, bundleReal)) continue;
       return refuse(`${what}: mounts a sensitive host path (${t.why})`);
     }
     return null;
   };
-  /** Both the path as written and where it really leads (symlinks): /etc/localtime is a
-   * link out of /etc, yet a read-write mount of it still writes a host system file. */
+  /** Both the path as written and where it really leads (symlinks, dangling ones too). */
   const checkHostPath = (src, { readOnly, what }) => {
     if (typeof src !== "string" || src === "") return refuse(`${what}: a host path Compose could not resolve`);
     if (!isAbsolute(src)) return refuse(`${what}: a host path that is not absolute after Compose resolved it (${src.slice(0, 80)})`);
@@ -138,76 +157,126 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
   };
   const insideBundle = (src, what, { allowOutside = false } = {}) => {
     if (typeof src !== "string" || src === "") return refuse(`${what}: a path Compose could not resolve`);
-    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(src) || /^git@/.test(src)) return null; // a remote build context reads nothing local
+    if (!isAbsolute(src)) return refuse(`${what}: a path that is not absolute after Compose resolved it`);
     const p = resolveHostPath(src);
     if (under(p, bundleReal) || allowOutside) return null;
     return refuse(`${what}: reads a host path outside the bundle`);
   };
+  const checkKeys = (obj, allowed, what) => {
+    if (!isObj(obj)) return refuse(`${what}: not a mapping`);
+    for (const k of Object.keys(obj)) if (!allowed.includes(k)) return refuse(`${what}: key '${k}' is not one the install check understands`);
+    return null;
+  };
 
+  const networkNames = new Set(Object.keys(model.networks || {}));
   for (const [name, s] of Object.entries(model.services)) {
-    if (!s || typeof s !== "object") return refuse(`service ${name}: not a mapping`);
     const tag = `service ${name}`;
+    if (!isObj(s)) return refuse(`${tag}: not a mapping`);
     let r;
-    if (s.privileged === true && (r = needPriv("privileged mode"))) return r;
+    for (const k of Object.keys(s)) {
+      if (SERVICE_PRIV.has(k)) { if ((r = needPriv(`${k}`))) return r; continue; }
+      if (!SERVICE_OK.has(k)) return refuse(`${tag}: key '${k}' is not one the install check understands`);
+    }
+    if (s.privileged !== undefined && s.privileged !== false && (r = needPriv("privileged mode"))) return r;
     for (const c of s.cap_add || []) {
       const cap = String(c).toUpperCase().replace(/^CAP_/, "");
-      if (DANGEROUS_CAPS.has(cap) && (r = needPriv(`a dangerous capability (${cap})`))) return r;
+      if (!SAFE_CAPS.has(cap) && (r = needPriv(`a capability outside the safe set (${cap})`))) return r;
     }
-    const nm = String(s.network_mode || "");
-    if ((nm === "host" || nm.startsWith("container:")) && (r = needPriv(nm === "host" ? "host networking" : "another container's network"))) return r;
-    for (const k of ["pid", "ipc", "userns_mode", "uts", "cgroup"]) {
-      const v = String(s[k] || "");
-      if ((v === "host" || v.startsWith("container:")) && (r = needPriv(`${k}: ${v}`))) return r;
+    const nm = s.network_mode === undefined ? "" : String(s.network_mode);
+    if (nm && !(nm === "bridge" || nm === "none" || nm === "default" || nm.startsWith("service:")) && (r = needPriv(`network_mode ${nm}`))) return r;
+    for (const k of ["pid", "ipc", "uts", "userns_mode", "cgroup"]) {
+      if (s[k] === undefined) continue;
+      const v = String(s[k]);
+      const ok = (k === "ipc" && (v === "private" || v === "shareable" || v.startsWith("service:"))) || (k === "cgroup" && v === "private") || (k === "pid" && v.startsWith("service:"));
+      if (!ok && (r = needPriv(`${k}: ${v}`))) return r;
     }
     for (const o of s.security_opt || []) {
-      if (/unconfined|label[=:]disable|systempaths=unconfined/i.test(String(o)) && (r = needPriv(`security_opt ${o}`))) return r;
+      if (!/^no-new-privileges(?:[:=]true)?$/.test(String(o)) && (r = needPriv(`security_opt ${o}`))) return r;
     }
-    if (Array.isArray(s.volumes_from) && s.volumes_from.length && (r = needPriv("volumes_from"))) return r;
-    // Host devices (raw disks, the TUN device…) need privileged consent; the GPU render
-    // nodes are the exception every GPU app needs.
+    if (s.volumes_from !== undefined && (r = needPriv("volumes_from"))) return r;
+    if (s.sysctls !== undefined && Object.keys(s.sysctls || {}).length && (r = needPriv("sysctls"))) return r;
+    // A moderately negative score (workspace's DB: -500) only changes who the OOM killer
+    // picks; below -500, down to OOM-immune -1000, needs consent.
+    if (s.oom_score_adj !== undefined && !(Number(s.oom_score_adj) >= -500) && (r = needPriv("oom_score_adj below -500"))) return r;
+    if (s.runtime !== undefined && !["runc", "nvidia"].includes(String(s.runtime)) && (r = needPriv(`runtime ${s.runtime}`))) return r;
     for (const d of s.devices || []) {
       const src = typeof d === "string" ? d.split(":")[0] : d?.source;
       const gpu = /^\/dev\/(dri(\/.*)?|kfd|nvidia[a-z0-9-]*)$/.test(String(src || ""));
       if (!gpu && (r = needPriv(`a host device (${String(src || "?").slice(0, 60)})`))) return r;
     }
+    if (s.deploy !== undefined) {
+      if ((r = checkKeys(s.deploy, ["resources", "restart_policy", "replicas", "mode", "labels", "update_config", "rollback_config", "placement", "endpoint_mode"], `${tag} deploy`))) return r;
+      for (const dev of s.deploy.resources?.reservations?.devices || []) {
+        const caps = (dev.capabilities || []).flat().map(String);
+        if (!(caps.length && caps.every((c) => ["gpu", "compute", "utility", "graphics", "video", "display"].includes(c)))) {
+          if ((r = needPriv("a device reservation other than a GPU"))) return r;
+        }
+      }
+    }
+    for (const n of Object.keys(isObj(s.networks) ? s.networks : {})) {
+      if (!networkNames.has(n)) return refuse(`${tag}: network '${n}' is not declared`);
+    }
     for (const v of s.volumes || []) {
-      if (!v || typeof v !== "object") return refuse(`${tag}: a volume Compose did not normalize`);
+      if (!isObj(v)) return refuse(`${tag}: a volume Compose did not normalize`);
+      if ((r = checkKeys(v, ["type", "source", "target", "read_only", "consistency", "bind", "volume", "tmpfs", "image"], `${tag} volume`))) return r;
       if (v.type === "bind") {
+        if (v.bind !== undefined) {
+          if ((r = checkKeys(v.bind, ["propagation", "create_host_path", "selinux"], `${tag} bind`))) return r;
+          if (v.bind.propagation !== undefined && !["private", "rprivate"].includes(v.bind.propagation) && (r = needPriv(`bind propagation ${v.bind.propagation}`))) return r;
+          if (v.bind.selinux !== undefined && (r = needPriv("an SELinux relabel of a host path"))) return r;
+        }
         if ((r = checkHostPath(v.source, { readOnly: v.read_only === true, what: tag }))) return r;
-      } else if (!["volume", "tmpfs", "npipe", "image"].includes(v.type)) {
-        return refuse(`${tag}: an unknown volume type (${v.type})`);
+      } else if (v.type === "volume" || v.type === "tmpfs" || v.type === "image") {
+        if (v.type === "volume" && v.source !== undefined && !Object.hasOwn(model.volumes || {}, v.source)) return refuse(`${tag}: volume '${v.source}' is not declared`);
+      } else {
+        return refuse(`${tag}: volume type '${v.type}' is not one the install check understands`);
       }
     }
     for (const e of s.env_file || []) {
       const path = typeof e === "string" ? e : e?.path;
       if ((r = insideBundle(path, `${tag} env_file`, { allowOutside: manifest?.inference === true }))) return r;
     }
-    if (s.build) {
+    for (const lf of [].concat(s.label_file || [])) if ((r = insideBundle(lf, `${tag} label_file`))) return r;
+    if (s.build !== undefined) {
       const b = typeof s.build === "string" ? { context: s.build } : s.build;
+      if ((r = checkKeys(b, ["context", "dockerfile", "dockerfile_inline", "args", "target", "labels", "cache_from", "cache_to", "no_cache", "pull", "platforms", "tags", "shm_size", "additional_contexts", "network"], `${tag} build`))) return r;
+      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(String(b.context))) return refuse(`${tag}: a remote build context`);
       if ((r = insideBundle(b.context, `${tag} build context`))) return r;
+      if (b.network !== undefined && b.network !== "default" && b.network !== "none" && (r = needPriv(`build network ${b.network}`))) return r;
       for (const c of Object.values(b.additional_contexts || {})) {
-        if (/^(docker-image|service|oci-layout):/.test(String(c))) continue;
         if ((r = insideBundle(c, `${tag} build additional_contexts`))) return r;
+      }
+    }
+  }
+  for (const [name, n] of Object.entries(model.networks || {})) {
+    let r;
+    if ((r = checkKeys(n, ["name", "driver", "driver_opts", "external", "internal", "attachable", "ipam", "labels", "enable_ipv6", "enable_ipv4"], `network ${name}`))) return r;
+    const real = String(n.name || name);
+    if (n.external && (real === "host" || real === "none")) { if ((r = needPriv(`the '${real}' network`))) return r; }
+    if (n.driver !== undefined && n.driver !== "bridge" && (r = needPriv(`network driver ${n.driver}`))) return r;
+  }
+  for (const [name, vol] of Object.entries(model.volumes || {})) {
+    let r;
+    if ((r = checkKeys(vol, ["name", "driver", "driver_opts", "external", "labels"], `volume ${name}`))) return r;
+    if (vol.driver !== undefined && vol.driver !== "local" && (r = needPriv(`volume driver ${vol.driver}`))) return r;
+    const dev = vol.driver_opts?.device;
+    if (dev !== undefined) {
+      const o = String(vol.driver_opts.o || "");
+      const type = String(vol.driver_opts.type || "");
+      const remote = /^(nfs4?|cifs|smb3?)$/.test(type) && !/(?:^|,)r?bind(?:,|$)/.test(o);
+      if (!remote) {
+        if (typeof dev !== "string" || !dev.startsWith("/")) return refuse(`volume ${name}: a bind device that is not an absolute path`);
+        if ((r = checkHostPath(dev, { readOnly: /(?:^|,)ro(?:,|$)/.test(o), what: `volume ${name}` }))) return r;
       }
     }
   }
   for (const [kind, items] of [["secrets", model.secrets], ["configs", model.configs]]) {
     for (const [name, it] of Object.entries(items || {})) {
-      if (it && typeof it.file === "string") {
-        const r = insideBundle(it.file, `${kind} ${name}`);
-        if (r) return r;
-      }
-    }
-  }
-  for (const [name, vol] of Object.entries(model.volumes || {})) {
-    const dev = vol?.driver_opts?.device;
-    const o = String(vol?.driver_opts?.o || "");
-    const isBind = /(?:^|,)r?bind(?:,|$)/.test(o) || vol?.driver_opts?.type === "none";
-    if (typeof dev === "string" && isBind && !dev.startsWith("/")) return refuse(`volume ${name}: a bind device that is not an absolute path`);
-    if (typeof dev === "string" && dev.startsWith("/")) {
-      const ro = /(?:^|,)ro(?:,|$)/.test(String(vol.driver_opts.o || ""));
-      const r = checkHostPath(dev, { readOnly: ro, what: `volume ${name}` });
-      if (r) return r;
+      let r;
+      if ((r = checkKeys(it, ["name", "file", "content", "external", "labels"], `${kind} ${name}`))) return r;
+      // (`environment:` is refused by omission: it copies a variable from the env Compose
+      // runs with — the gateway's — into the container.)
+      if (it.file !== undefined && (r = insideBundle(it.file, `${kind} ${name}`))) return r;
     }
   }
   return { valid: true };

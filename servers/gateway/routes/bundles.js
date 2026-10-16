@@ -544,7 +544,7 @@ function composeExpandEnv(destDir) {
   } catch { /* no .env → process env only */ }
   // compose: shell env wins over .env; composeEnv() adds the CROW_HOME every
   // compose run gets (the prod gateway unit may not export it).
-  return composeEnv({ ...fileVars, ...process.env });
+  return { ...fileVars, ...composeEnv() };
 }
 
 /**
@@ -1148,9 +1148,20 @@ async function getComposeCmd() {
  * (`${CROW_HOME:?…}`), so an unset value fails the run outright. Resolving it here
  * means every compose run names its instance explicitly rather than depending on
  * whichever unit happened to export it.
+ *
+ * Only an ALLOWLIST of the gateway's own variables goes through: Compose interpolates
+ * `${ANY_VAR}` from this env, so passing all of it would let a compose file copy any
+ * gateway secret (API keys, tokens) into its container. A bundle's own settings come
+ * from its .env, which Compose reads itself.
  */
+const COMPOSE_ENV_KEYS = new Set(["PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ", "TMPDIR", "XDG_RUNTIME_DIR", "CROW_GATEWAY_PORT", "CROW_GATEWAY_URL", "CROW_DB_PATH", "CROW_DATA_DIR"]);
 export function composeEnv(base = process.env) {
-  return { ...base, CROW_HOME };
+  const env = {};
+  for (const [k, v] of Object.entries(base || {})) {
+    if (COMPOSE_ENV_KEYS.has(k) || /^LC_[A-Z]+$/.test(k) || (/^DOCKER_[A-Z_]+$/.test(k) && k !== "DOCKER_DEFAULT_PLATFORM")) env[k] = v;
+  }
+  env.CROW_HOME = CROW_HOME;
+  return env;
 }
 
 // Test-only: replace every `docker compose` invocation (pull/up/down/...) with a
@@ -1584,6 +1595,35 @@ function validateComposeFile(composePath, bundleId, opts = {}) {
     return { valid: false, reason: `Could not read compose file: ${err.message}` };
   }
 }
+
+/** What the owner consented to at install, kept on the installed.json record. */
+function consentRecord(manifest, consentVerified) {
+  if (!manifestRequiresConsent(manifest)) return {};
+  return { consent: { verified: !!consentVerified, privileged: manifest?.privileged === true, consent_required: manifest?.consent_required === true } };
+}
+
+/**
+ * The manifest + consent a later `compose up` (Start, recreate) is checked with. Consent
+ * is the owner's, given at install and kept on the installed record, and covers only what
+ * the manifest asked for THEN (a refresh that makes a bundle privileged does not inherit
+ * it). A peer instance's request never carries it. A record from before this was kept
+ * (no `consent` field) keeps its installed manifest's flags: it was installed through the
+ * consent gate of its time.
+ */
+function startConsent(bundleId, { crossHost = false } = {}) {
+  const im = getInstalledFirstManifest(bundleId);
+  if (!manifestRequiresConsent(im) || crossHost) return { manifest: im, consentVerified: false };
+  const rec = getInstalled().find((i) => i.id === bundleId);
+  if (!rec) return { manifest: im, consentVerified: false };
+  if (!rec.consent) return { manifest: im, consentVerified: true };
+  if (rec.consent.verified !== true) return { manifest: im, consentVerified: false };
+  return {
+    manifest: { ...im, privileged: im.privileged === true && rec.consent.privileged === true, consent_required: im.consent_required === true && rec.consent.consent_required === true },
+    consentVerified: true,
+  };
+}
+
+export { startConsent as _startConsentForTest, consentRecord as _consentRecordForTest };
 
 // Test-only: replace `docker compose config` (the model the shared check reads).
 let _composeConfigRunnerForTest = null;
@@ -2490,7 +2530,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
           // "Start" — recorded NOW so a later step throwing can't lose it.
           const installed2 = getInstalled();
           if (!installed2.find((i) => i.id === bundleId)) {
-            installed2.push({ id: bundleId, type: addonType, version: manifest?.version, installedAt: new Date().toISOString() });
+            installed2.push({ id: bundleId, type: addonType, version: manifest?.version, installedAt: new Date().toISOString(), ...consentRecord(manifest, consentVerified) });
             saveInstalled(installed2);
           }
           composeFailure = `docker compose up failed: ${detail}`;
@@ -2694,6 +2734,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       type: addonType,
       version: manifest?.version || "1.0.0",
       installedAt: new Date().toISOString(),
+      ...consentRecord(manifest, consentVerified),
     });
     saveInstalled(installedSnapshot);
     appendLog(job, "Installation tracked");
@@ -3501,8 +3542,8 @@ export default function bundlesRouter() {
         // The same check as install, on what Compose will apply NOW (Configure may have
         // changed .env; an override may sit next to the file). The installed bundle was
         // consented to at install, so a consent bundle keeps its consent here.
-        const im = getInstalledFirstManifest(bundleId);
-        const gate = await checkBundleCompose(bundleDir, { bundleId, manifest: im, consentVerified: manifestRequiresConsent(im), textCheck: false });
+        const sc = startConsent(bundleId, { crossHost: !!req?.crossHostAuth });
+        const gate = await checkBundleCompose(bundleDir, { bundleId, manifest: sc.manifest, consentVerified: sc.consentVerified, textCheck: false });
         if (!gate.valid) return res.status(403).json({ error: `Security check failed: ${gate.reason}`, code: "compose_security_check" });
         const content = readFileSync(composePath, "utf8");
         const upArgs = /^\s+build:/m.test(content) ? ["up", "-d", "--build"] : ["up", "-d"];
@@ -3788,8 +3829,8 @@ export default function bundlesRouter() {
       const composePath = join(bundleDir, "docker-compose.yml");
       if (existsSync(composePath)) {
         // Checked AFTER the injection: the new .env is part of what Compose applies.
-        const im = getInstalledFirstManifest(bundleId);
-        const gate = await checkBundleCompose(bundleDir, { bundleId, manifest: im, consentVerified: manifestRequiresConsent(im), textCheck: false });
+        const sc = startConsent(bundleId);
+        const gate = await checkBundleCompose(bundleDir, { bundleId, manifest: sc.manifest, consentVerified: sc.consentVerified, textCheck: false });
         if (!gate.valid) return res.status(403).json({ error: `Security check failed: ${gate.reason}`, code: "compose_security_check" });
         await runCompose(["up", "-d", "--force-recreate"], { cwd: bundleDir });
       }
