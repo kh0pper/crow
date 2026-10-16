@@ -109,11 +109,18 @@ const MERMAID_ALLOWED_TAGS = [/<<(?:interface|abstract|enumeration|service|fork|
 const INDENTED_FENCE = /^[ \t]+---[ \t]*$/m;
 // Front matter, decided by Mermaid 11.17.2's OWN regex (its opener eats any
 // whitespace-only lines, so "---" right after the opener does not close the
-// block). Inside it only blank lines and one plain "title:" line are allowed;
-// the title value may not open a YAML structure (flow, anchor, alias, tag,
-// block scalar, quote, directive). Any later "---" line is refused.
+// block). Inside it only blank lines and one plain "title:" line are allowed.
+// The title value may not START with a YAML indicator (flow, anchor, alias,
+// tag, block scalar, quote, directive, comment, entry, key) and may not hold
+// ": " / ":" at the end (a nested mapping) or " #" (a comment) anywhere.
+// Any later "---" line is refused.
+// The regex backtracks O(n^2) on a failed match, so it runs only on a leading
+// window (FRONT_MATTER_WINDOW: the first 8 lines, at most 1024 characters);
+// a block that does not close inside it is refused.
 const MERMAID_FRONT_MATTER = /^([^\S\n\r]*)-{3}\s*[\n\r](.*?)[\n\r]\1-{3}\s*[\n\r]+/s;
-const FRONT_MATTER_TITLE = /^title:[ \t]+[^{}[\]&*!|>%@`"'\n]*$/;
+const FRONT_MATTER_WINDOW = { lines: 8, chars: 1024 };
+const FRONT_MATTER_TITLE = /^title:[ \t]+(?![-?:,[\]{}#&*!|>'"%@`])\S(?:(?!:(?:\s|$)|\s#).)*$/;
+const WHITESPACE_RUN = /\s*/y;
 const FENCE_LINE = /^---[ \t]*$/m;
 const foldLookalikes = (t) => t.replace(/\u0130/g, "i").replace(/\u212A/g, "k").replace(/\u017F/g, "s");
 const MERMAID_LINKS = /\b(?:click|links?|callback|href)\b|javascript:|\/\/|url\(|@\s*\{|<[a-z/!?]/i;
@@ -131,7 +138,8 @@ const D2_RULES = [
   ["icons", /\bicon\b/i],
   ["links", /\blink\b|\/\//i],
   ["directives", /\bvars\b|d2-config/i],
-  ["markup", /\|+`*\s*(?:md|markdown|latex|tex)\b/i],
+  // (?<!\|): a run of pipes is tried once, from its first pipe (no O(n^2)).
+  ["markup", /(?<!\|)\|+`*\s*(?:md|markdown|latex|tex)\b/i],
 ];
 
 /** Any key in `keys`, at any depth; deeper than MAX_DEPTH is refused. Iterative.
@@ -162,14 +170,35 @@ function findKey(root, keys) {
 function mermaidBody(text) {
   let body = text;
   if (text.trimStart().startsWith("---")) {
-    const m = MERMAID_FRONT_MATTER.exec(text);
+    // Why the window is enough. The window is a prefix of the text, so every
+    // attempt that stays inside it behaves as on the full text: the opener's
+    // whitespace run ends inside it, and each earlier closer candidate fails
+    // there for the same reason. An attempt that runs past the window can win
+    // in Mermaid only by closing on a later "---" line; that line sits in the
+    // body after this block and the FENCE_LINE check below refuses it (an
+    // indented one was already refused by INDENTED_FENCE). So every source that
+    // passes gets Mermaid's groups 1-2. Only the trailing \s*[\n\r]+ may be
+    // cut short by the window: extend it over the full text to just past the
+    // last newline of the closer's whitespace run, as Mermaid's greedy match does.
+    const m = MERMAID_FRONT_MATTER.exec(frontMatterWindow(text));
     if (!m) throw refuse("directives", "mermaid");
     const lines = m[2].split("\n").filter((l) => l.trim());
     if (lines.length > 1 || (lines.length === 1 && !FRONT_MATTER_TITLE.test(lines[0]))) throw refuse("directives", "mermaid");
-    body = text.slice(m[0].length);
+    const closerEnd = m[0].trimEnd().length;
+    WHITESPACE_RUN.lastIndex = closerEnd;
+    const run = WHITESPACE_RUN.exec(text)[0];
+    body = text.slice(closerEnd + run.lastIndexOf("\n") + 1);
   }
   if (FENCE_LINE.test(body)) throw refuse("directives", "mermaid");
   return body;
+}
+
+/** The leading FRONT_MATTER_WINDOW of `text`, newline of its last line included. */
+function frontMatterWindow(text) {
+  const end = Math.min(text.length, FRONT_MATTER_WINDOW.chars);
+  let lines = 0;
+  for (let i = 0; i < end; i++) if (text[i] === "\n" && ++lines === FRONT_MATTER_WINDOW.lines) return text.slice(0, i + 1);
+  return text.slice(0, end);
 }
 
 /** First Mermaid keyword after blank lines and %% comments. config/init

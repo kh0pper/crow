@@ -331,3 +331,65 @@ test("guardSpec: plain title-only front matter still passes", () => {
     assert.equal(reason("mermaid", src), null, JSON.stringify(src));
   }
 });
+
+// ---- fix round 5 -----------------------------------------------------------
+// guardSpec runs synchronously in the gateway: no 64 KB input may make a regex
+// backtrack. Front matter is searched for only in a short leading window, and
+// D2's markup rule starts only at the first pipe of a run. Titles may use
+// YAML indicator characters after the first character.
+
+const fastest = (engine, src) => {
+  let best = Infinity; let r;
+  for (let i = 0; i < 3; i++) { const t = performance.now(); r = reason(engine, src); best = Math.min(best, performance.now() - t); }
+  return { r, ms: best };
+};
+
+test("guardSpec: adversarial 64 KB inputs finish in under 50 ms", () => {
+  const N = 65000;
+  for (const [engine, src, want] of [
+    ["mermaid", "---" + "\n".repeat(65530), "directives"],
+    ["mermaid", "---" + "\r".repeat(65530), "directives"],
+    ["mermaid", "---" + " \n".repeat(32000), "directives"],
+    ["mermaid", "---" + "\r\n".repeat(32760), "directives"],
+    ["mermaid", "---\n" + "title: x\n".repeat(7000), "directives"],
+    ["mermaid", "---\n" + "\n".repeat(N) + "---\nflowchart LR\n A-->B", "directives"],
+    ["mermaid", "---\ntitle: x\n---" + " \n".repeat(32000) + "flowchart LR\n A-->B", null],
+    ["mermaid", " ".repeat(N) + "---", "directives"],
+    ["mermaid", "\n".repeat(N) + "flowchart LR\n A-->B", null],
+    ["mermaid", "flowchart LR\n" + " ".repeat(N) + "x", null],
+    ["mermaid", "flowchart LR\n" + "@" + " ".repeat(N), null],
+    ["mermaid", "flowchart LR\n" + "<<".repeat(N / 2), null],
+    ["mermaid", "flowchart LR\n" + "---   ".repeat(N / 6), null],
+    ["d2", "|".repeat(N), null],
+    ["d2", "|".repeat(N / 2) + "`".repeat(N / 2), null],
+    ["d2", "|`".repeat(N / 2), null],
+    ["d2", "| ".repeat(N / 2), null],
+    ["d2", "|".repeat(N - 3) + " md", "markup"],
+    ["d2", ".".repeat(N), null],
+  ]) {
+    const { r, ms } = fastest(engine, src);
+    assert.equal(r, want, `${engine} ${JSON.stringify(src.slice(0, 20))}`);
+    assert.ok(ms < 50, `${engine} ${JSON.stringify(src.slice(0, 20))} took ${ms.toFixed(1)} ms`);
+  }
+});
+
+test("guardSpec: Mermaid front matter must close within its first 8 lines (1024 characters)", () => {
+  assert.equal(reason("mermaid", "---\n\n\n\n\n\ntitle: x\n---\nflowchart LR\n A-->B"), null, "closer on line 8");
+  assert.equal(reason("mermaid", "---\n\n\n\n\n\n\ntitle: x\n---\nflowchart LR\n A-->B"), "directives", "closer on line 9");
+  assert.equal(reason("mermaid", "---\ntitle: " + "x".repeat(1100) + "\n---\nflowchart LR\n A-->B"), "directives", "past 1024 characters");
+  assert.equal(reason("mermaid", "---\ntitle: x\n---" + " \n".repeat(600) + "flowchart LR\n A-->B"), null, "whitespace after the closer runs past the window");
+  assert.equal(reason("mermaid", "---\ntitle: x\n---\n" + "\n".repeat(20) + "flowchart LR\n A-->B"), null);
+  assert.equal(reason("mermaid", "---\ntitle: x\n---" + " \n".repeat(600) + "   ---\nflowchart LR\n A-->B"), "directives");
+  assert.equal(reason("mermaid", "---\n\n---\n" + "\n".repeat(10) + "x: 1\nconfig:\n  htmlLabels: true\n---\nflowchart LR\n A-->B"), "directives",
+    "Mermaid closes on the later --- past the window: refused as a second fence");
+});
+
+test("guardSpec: Mermaid titles may use YAML indicators after the first character", () => {
+  for (const t of ["Revenue & costs", "50% growth", "Q&A [draft] {v2} *new* it's | ok!", "a:b", "x > y @z `w`", "Café — 2026"]) {
+    assert.equal(reason("mermaid", `---\ntitle: ${t}\n---\nflowchart LR\n A-->B`), null, t);
+  }
+  for (const t of ["&a x", "*a", "!tag x", "|", ">", "%x", "@x", "`x`", "'x'", '"x"', "[x]", "{x: 1}", "]", "}", "- x", "? x", ": x", ", x", "#x",
+    "a: b", "a:", "a:\tb", "a #b", "a\t#b", "x {htmlLabels: true}", "x, {a: 1}"]) {
+    assert.equal(reason("mermaid", `---\ntitle: ${t}\n---\nflowchart LR\n A-->B`), "directives", t);
+  }
+});
