@@ -17,12 +17,9 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { ensureBootstrapped, effectivePassword } from "./bootstrap.js";
+import { ensureBootstrapped, loginCandidates } from "./bootstrap.js";
 
 const ACTUAL_URL = (process.env.ACTUAL_URL || "http://localhost:5006").replace(/\/+$/, "");
-// A typed password (an Actual server you run elsewhere) wins; otherwise the generated
-// password of the server Crow installed here, which is only ever sent to a loopback URL.
-const ACTUAL_PASSWORD = effectivePassword(ACTUAL_URL, process.env);
 const ACTUAL_SYNC_ID = process.env.ACTUAL_SYNC_ID || "";
 
 let authToken = null;
@@ -38,26 +35,22 @@ async function getToken() {
   const timeout = setTimeout(() => controller.abort(), 10000);
 
   try {
-    // A new server Crow deployed has no password yet: set the generated one first.
-    await ensureBootstrapped(ACTUAL_URL, ACTUAL_PASSWORD);
-    const res = await fetch(`${ACTUAL_URL}/account/login`, {
-      method: "POST",
-      signal: controller.signal,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: ACTUAL_PASSWORD }),
-    });
-
-    if (!res.ok) {
-      if (res.status === 401 || res.status === 400) {
-        throw new Error("Actual Budget login failed. If this server kept its data from an earlier install, it still has that install's password: type it into ACTUAL_PASSWORD in Configure.");
-      }
-      throw new Error(`Actual Budget login error: ${res.status} ${res.statusText}`);
+    // A new server Crow deployed has no password yet: set the GENERATED one (never a
+    // typed value, which may be stale from an older install), loopback only.
+    await ensureBootstrapped(ACTUAL_URL, process.env.ACTUAL_SERVER_PASSWORD || "");
+    for (const password of loginCandidates(ACTUAL_URL, process.env)) {
+      const res = await fetch(`${ACTUAL_URL}/account/login`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (!res.ok && res.status !== 400 && res.status !== 401) throw new Error(`Actual Budget login error: ${res.status} ${res.statusText}`);
+      const data = res.ok ? await res.json().catch(() => ({})) : {};
+      authToken = data.data?.token || data.token || null;
+      if (authToken) return authToken;
     }
-
-    const data = await res.json();
-    authToken = data.data?.token || data.token;
-    if (!authToken) throw new Error("No token returned from Actual Budget login");
-    return authToken;
+    throw new Error("Actual Budget login failed. The generated server password is in Settings → Passwords; if this server has another password (changed in Actual, or kept data from an earlier install), type it into ACTUAL_PASSWORD in Configure.");
   } catch (err) {
     if (err.name === "AbortError") {
       throw new Error("Actual Budget login timed out after 10s");

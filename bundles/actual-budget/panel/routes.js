@@ -34,9 +34,6 @@ function generatedServerPassword() {
   }
 }
 
-// Typed ACTUAL_PASSWORD (a server you run elsewhere) wins; the generated one is sent only
-// to a loopback URL, so it never leaves this machine.
-const ACTUAL_PASSWORD = () => process.env.ACTUAL_PASSWORD || (isLoopbackUrl(ACTUAL_URL()) ? generatedServerPassword() : "");
 const ACTUAL_SYNC_ID = () => process.env.ACTUAL_SYNC_ID || "";
 
 let authToken = null;
@@ -52,18 +49,22 @@ async function getToken() {
   const timeout = setTimeout(() => controller.abort(), 10000);
 
   try {
-    const res = await fetch(`${ACTUAL_URL()}/account/login`, {
-      method: "POST",
-      signal: controller.signal,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: ACTUAL_PASSWORD() }),
-    });
-
-    if (!res.ok) throw new Error("Actual Budget login failed — check ACTUAL_PASSWORD");
-    const data = await res.json();
-    authToken = data.data?.token || data.token;
-    if (!authToken) throw new Error("No token returned from login");
-    return authToken;
+    // Typed password first, then (loopback only) the generated one: a stale typed value
+    // must not lock the panel out of the server Crow set up.
+    const candidates = [...new Set([process.env.ACTUAL_PASSWORD, isLoopbackUrl(ACTUAL_URL()) ? generatedServerPassword() : ""].filter(Boolean))];
+    for (const password of candidates) {
+      const res = await fetch(`${ACTUAL_URL()}/account/login`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (!res.ok && res.status !== 400 && res.status !== 401) throw new Error(`Actual Budget login error: ${res.status}`);
+      const data = res.ok ? await res.json().catch(() => ({})) : {};
+      authToken = data.data?.token || data.token || null;
+      if (authToken) return authToken;
+    }
+    throw new Error("Actual Budget login failed. The generated server password is in Settings → Passwords; if this server has another one, type it into ACTUAL_PASSWORD in Configure.");
   } catch (err) {
     if (err.name === "AbortError") throw new Error("Actual Budget login timed out");
     if (err.message.includes("fetch failed") || err.message.includes("ECONNREFUSED")) {

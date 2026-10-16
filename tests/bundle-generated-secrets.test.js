@@ -299,3 +299,11 @@ test("set-server-password.sh: bootstraps a new local server once, sends the pass
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("actual-budget: a stale typed password never becomes the new server's password, and login falls back to the generated one on loopback", () => {
+  const env = { ACTUAL_PASSWORD: "stale-typed", ACTUAL_SERVER_PASSWORD: "generated" };
+  assert.deepEqual(AB.loginCandidates("http://localhost:5006", env), ["stale-typed", "generated"]);
+  assert.deepEqual(AB.loginCandidates("https://actual.example.invalid", env), ["stale-typed"], "the generated one never leaves the machine");
+  const server = readFileSync(join(REPO, "bundles/actual-budget/server/server.js"), "utf8");
+  assert.match(server, /ensureBootstrapped\(ACTUAL_URL, process\.env\.ACTUAL_SERVER_PASSWORD/, "only the generated password bootstraps");
+});

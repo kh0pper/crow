@@ -34,6 +34,16 @@ export function effectivePassword(url, env = process.env) {
 }
 
 /**
+ * Passwords to try, in order: the typed one, then (loopback only) the generated one. A
+ * stale typed value (kept in the gateway .env from an older install) must not lock the
+ * user out of the server Crow just set up with the generated password.
+ */
+export function loginCandidates(url, env = process.env) {
+  const out = [env.ACTUAL_PASSWORD, isLoopbackUrl(url) ? env.ACTUAL_SERVER_PASSWORD : ""].filter((v) => typeof v === "string" && v !== "");
+  return [...new Set(out)];
+}
+
+/**
  * @returns {Promise<"bootstrapped"|"ready"|"skipped">}
  *   bootstrapped  this call set the password
  *   ready         the server already had one
