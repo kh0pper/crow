@@ -293,3 +293,41 @@ test("guardSpec: Mermaid allows exact <br> tokens and the fixed annotation list 
     assert.equal(reason("mermaid", src), "links", JSON.stringify(src));
   }
 });
+
+// ---- fix round 4 -----------------------------------------------------------
+// Mermaid's own front-matter regex decides where the block ends; its opener
+// greedily eats whitespace-only lines, so "---" right after the opener does not
+// close the block in Mermaid. The guard applies that exact regex and allows
+// only blank lines and one plain title line inside it.
+
+test("guardSpec: Mermaid front matter follows Mermaid's own regex; a --- right after the opener does not close it", () => {
+  const cfg = "flowchart LR: 1\nconfig:\n  htmlLabels: true\n  flowchart:\n    htmlLabels: true\n---\nflowchart LR\n A-->B";
+  for (const src of [
+    "---\n---\n" + cfg,
+    "---\n---\nflowchart LR: 1\nconfig:\n  themeCSS: 'x'\n---\nflowchart LR\n A-->B",
+    "---\n\n---\n" + cfg,
+    "---\n  \t\n---\n" + cfg,
+    "---  \n---\n" + cfg,
+    "---\r---\rflowchart LR: 1\rconfig:\r  htmlLabels: true\r---\rflowchart LR\r A-->B",
+    "---\n---\nflowchart LR: 1\ninit:\n  htmlLabels: true\n---\nflowchart LR\n A-->B",
+    "---\n---\nflowchart LR: &a {htmlLabels: true}\n? config\n: *a\n---\nflowchart LR\n A-->B",
+    "---\ntitle: x\n? config\n: {htmlLabels: true}\n---\nflowchart LR\n A-->B",
+    "---\ntitle: x\nfoo: 1\n---\nflowchart LR\n A-->B",
+    "---\ntitle: a\ntitle: b\n---\nflowchart LR\n A-->B",
+    "---\ntitle: &a x\n---\nflowchart LR\n A-->B",
+    "---\ntitle: {config: 1}\n---\nflowchart LR\n A-->B",
+    "---\ntitle: 'x'\n---\nflowchart LR\n A-->B",
+    "---\ntitle: |\n  x\n---\nflowchart LR\n A-->B",
+    "---\ntitle: x\n",
+    "---\ntitle: x\n---\nflowchart LR\n A-->B\n---\nconfig:\n  htmlLabels: true\n---",
+    "flowchart LR\n A-->B\n---",
+    "flowchart LR\n A-->B\n---  ",
+  ]) assert.equal(reason("mermaid", src), "directives", JSON.stringify(src));
+});
+
+test("guardSpec: plain title-only front matter still passes", () => {
+  for (const src of ["---\ntitle: My chart\n---\nflowchart LR\n A-->B", "---\r\ntitle: My chart\r\n---\r\nflowchart LR\r\n A-->B",
+    "---\n\ntitle: My chart\n\n---\n\nflowchart LR\n A-->B", "---\ntitle: x\n---   \nflowchart LR\n A-->B"]) {
+    assert.equal(reason("mermaid", src), null, JSON.stringify(src));
+  }
+});

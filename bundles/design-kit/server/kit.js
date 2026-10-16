@@ -107,7 +107,14 @@ const MERMAID_DIRECTIVE = /%%\{/;
 const BACKSLASH = /\\/;
 const MERMAID_ALLOWED_TAGS = [/<<(?:interface|abstract|enumeration|service|fork|join|choice)>>/gi, /<br(?: ?\/)?>/gi];
 const INDENTED_FENCE = /^[ \t]+---[ \t]*$/m;
-const FENCE = /^---[ \t]*$/;
+// Front matter, decided by Mermaid 11.17.2's OWN regex (its opener eats any
+// whitespace-only lines, so "---" right after the opener does not close the
+// block). Inside it only blank lines and one plain "title:" line are allowed;
+// the title value may not open a YAML structure (flow, anchor, alias, tag,
+// block scalar, quote, directive). Any later "---" line is refused.
+const MERMAID_FRONT_MATTER = /^([^\S\n\r]*)-{3}\s*[\n\r](.*?)[\n\r]\1-{3}\s*[\n\r]+/s;
+const FRONT_MATTER_TITLE = /^title:[ \t]+[^{}[\]&*!|>%@`"'\n]*$/;
+const FENCE_LINE = /^---[ \t]*$/m;
 const foldLookalikes = (t) => t.replace(/\u0130/g, "i").replace(/\u212A/g, "k").replace(/\u017F/g, "s");
 const MERMAID_LINKS = /\b(?:click|links?|callback|href)\b|javascript:|\/\/|url\(|@\s*\{|<[a-z/!?]/i;
 const MERMAID_FRONT_MATTER_BAD = /\b(?:config|init)\b/i;
@@ -148,21 +155,29 @@ function findKey(root, keys) {
   return null;
 }
 
-/** First Mermaid keyword after blank lines, %% comments and one front-matter
- *  block (opened and closed by an unindented "---", as Mermaid requires).
- *  Unclosed front matter, or config/init anywhere up to and including the type
- *  line, is a directive. `text` is already look-alike folded. */
+/** The text after a Mermaid front-matter block, or the whole text when there
+ *  is none. Throws directives unless the block is exactly what Mermaid parses
+ *  and holds only blank lines and at most one plain title line, or when any
+ *  further "---" line follows. `text` is normalized and look-alike folded. */
+function mermaidBody(text) {
+  let body = text;
+  if (text.trimStart().startsWith("---")) {
+    const m = MERMAID_FRONT_MATTER.exec(text);
+    if (!m) throw refuse("directives", "mermaid");
+    const lines = m[2].split("\n").filter((l) => l.trim());
+    if (lines.length > 1 || (lines.length === 1 && !FRONT_MATTER_TITLE.test(lines[0]))) throw refuse("directives", "mermaid");
+    body = text.slice(m[0].length);
+  }
+  if (FENCE_LINE.test(body)) throw refuse("directives", "mermaid");
+  return body;
+}
+
+/** First Mermaid keyword after blank lines and %% comments. config/init
+ *  anywhere up to and including the type line is a directive. */
 function mermaidType(text) {
   const lines = text.split("\n");
   let i = 0;
-  const skip = () => { while (i < lines.length && (!lines[i].trim() || lines[i].trim().startsWith("%%"))) i++; };
-  skip();
-  if (i < lines.length && FENCE.test(lines[i])) {
-    const end = lines.findIndex((l, j) => j > i && FENCE.test(l));
-    if (end < 0) throw refuse("directives", "mermaid");
-    i = end + 1;
-    skip();
-  }
+  while (i < lines.length && (!lines[i].trim() || lines[i].trim().startsWith("%%"))) i++;
   if (MERMAID_FRONT_MATTER_BAD.test(lines.slice(0, i + 1).join("\n"))) throw refuse("directives", "mermaid");
   return i < lines.length ? lines[i].trim().toLowerCase().split(/[\s:;]/)[0] : null;
 }
@@ -187,7 +202,7 @@ export function guardSpec(engine, source) {
     if (BACKSLASH.test(folded)) throw refuse("escapes", engine);
     const stripped = MERMAID_ALLOWED_TAGS.reduce((t, re) => t.replace(re, " "), folded);
     if (MERMAID_LINKS.test(stripped)) throw refuse("links", engine);
-    if (!MERMAID_TYPES.has(mermaidType(folded))) throw refuse("unsupported_type", engine);
+    if (!MERMAID_TYPES.has(mermaidType(mermaidBody(folded)))) throw refuse("unsupported_type", engine);
     return;
   }
   for (const [reason, re] of D2_RULES) if (re.test(text)) throw refuse(reason, engine);
