@@ -255,15 +255,13 @@
         },
         {
           "name": "AUDIOBOOKSHELF_AUDIOBOOK_PATH",
-          "description": "Host path for audiobook files (Docker mode). Empty: a folder in Crow's folder (media/audiobooks).",
-          "required": false,
-          "default_in_crow_home": "media/audiobooks"
+          "description": "Host path for audiobook files (Docker mode).",
+          "required": false
         },
         {
           "name": "AUDIOBOOKSHELF_PODCAST_PATH",
-          "description": "Host path for podcast files (Docker mode). Empty: a folder in Crow's folder (media/podcasts).",
-          "required": false,
-          "default_in_crow_home": "media/podcasts"
+          "description": "Host path for podcast files (Docker mode).",
+          "required": false
         }
       ],
       "ports": [
@@ -2137,7 +2135,8 @@
           "name": "JELLYFIN_MEDIA_PATH",
           "description": "Host path for media files (Docker mode). Leave it empty to start with an empty library in Crow's folder (media/jellyfin); point it at your media later in Configure.",
           "required": true,
-          "default_in_crow_home": "media/jellyfin"
+          "default_in_crow_home": "media/jellyfin",
+          "propagate": false
         },
         {
           "name": "JELLYFIN_CONFIG_PATH",
@@ -2219,9 +2218,8 @@
         },
         {
           "name": "KAVITA_LIBRARY_PATH",
-          "description": "Host path for manga/comics/ebooks (Docker mode). Empty: a folder in Crow's folder (media/kavita).",
-          "required": false,
-          "default_in_crow_home": "media/kavita"
+          "description": "Host path for manga/comics/ebooks (Docker mode).",
+          "required": false
         }
       ],
       "ports": [
@@ -4130,7 +4128,8 @@
           "name": "NAVIDROME_MUSIC_PATH",
           "description": "Host path for music files (Docker mode). Leave it empty to start with an empty library in Crow's folder (media/music); point it at your music later in Configure.",
           "required": true,
-          "default_in_crow_home": "media/music"
+          "default_in_crow_home": "media/music",
+          "propagate": false
         }
       ],
       "ports": [
@@ -5938,8 +5937,14 @@
         },
         {
           "name": "CROW_TAX_ENCRYPTION_KEY",
-          "description": "Passphrase for encrypting PII at rest (SSN, names). Set on first use.",
+          "description": "Passphrase that encrypts personal data at rest (SSN, names). Choose your own and keep a copy: without it saved returns can't be read.",
           "required": true,
+          "secret": true
+        },
+        {
+          "name": "CROW_TAX_ENCRYPTION_KEY_PREVIOUS",
+          "description": "Only after changing the passphrase: the old one, so returns saved with it can still be opened. Each return is re-encrypted with the new passphrase when it is next saved.",
+          "required": false,
           "secret": true
         }
       ],

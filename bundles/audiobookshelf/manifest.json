@@ -17,8 +17,8 @@
   "env_vars": [
     { "name": "AUDIOBOOKSHELF_URL", "description": "Audiobookshelf server URL", "default": "http://localhost:13378", "required": true },
     { "name": "AUDIOBOOKSHELF_API_KEY", "description": "Audiobookshelf API token (Settings > Users > your user)", "required": true, "secret": true },
-    { "name": "AUDIOBOOKSHELF_AUDIOBOOK_PATH", "description": "Host path for audiobook files (Docker mode). Empty: a folder in Crow's folder (media/audiobooks).", "required": false, "default_in_crow_home": "media/audiobooks" },
-    { "name": "AUDIOBOOKSHELF_PODCAST_PATH", "description": "Host path for podcast files (Docker mode). Empty: a folder in Crow's folder (media/podcasts).", "required": false, "default_in_crow_home": "media/podcasts" }
+    { "name": "AUDIOBOOKSHELF_AUDIOBOOK_PATH", "description": "Host path for audiobook files (Docker mode).", "required": false },
+    { "name": "AUDIOBOOKSHELF_PODCAST_PATH", "description": "Host path for podcast files (Docker mode).", "required": false }
   ],
   "ports": [13378],
   "webUI": { "port": 13378, "path": "/", "label": "Audiobookshelf" },

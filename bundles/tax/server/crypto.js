@@ -20,12 +20,20 @@ const ITERATIONS = 100000;
 // SHA-256 of the example key once published in this bundle's .env.example.
 const PUBLISHED_EXAMPLE_KEYS = new Set(["113e3beef46e2a2ab77b0c3ea62ef37d823b82eab4f713a44af32bcdd2655365"]);
 
-/** An example passphrase: placeholder-shaped, or the one published in the repo. Only
- * encryption refuses it; decrypt() still opens data an install saved with it. */
+/** The example passphrase once published in this repo (matched by hash only, so no real
+ * passphrase is ever refused for its shape). Only encryption refuses it; decrypt() still
+ * opens data an install saved with it. */
 export function isExampleKey(passphrase) {
-  const s = String(passphrase).trim();
-  if (PUBLISHED_EXAMPLE_KEYS.has(createHash("sha256").update(s).digest("hex"))) return true;
-  return /\bchange[-_ ]?me\b|\breplace[-_ ]?me\b|(?:^|[^a-z])your[-_]|\bplaceholder\b|^<[^>]*>$|\bxxx+\b|\bexample\b/i.test(s);
+  return PUBLISHED_EXAMPLE_KEYS.has(createHash("sha256").update(String(passphrase).trim()).digest("hex"));
+}
+
+/** Decrypt with the current passphrase, else the previous one (after a key change). */
+export function decryptWithFallback(encoded, passphrases) {
+  let last;
+  for (const p of passphrases.filter(Boolean)) {
+    try { return decrypt(encoded, p); } catch (err) { last = err; }
+  }
+  throw last || new Error("Encryption passphrase required (CROW_TAX_ENCRYPTION_KEY)");
 }
 
 function deriveKey(passphrase, salt) {
@@ -38,7 +46,7 @@ function deriveKey(passphrase, salt) {
 export function encrypt(plaintext, passphrase) {
   if (!passphrase) throw new Error("Encryption passphrase required (CROW_TAX_ENCRYPTION_KEY)");
   if (isExampleKey(passphrase)) {
-    throw new Error("CROW_TAX_ENCRYPTION_KEY is an example value (it looks like a placeholder, or it was published in Crow's repository). Set a passphrase of your own in Extensions before saving personal data; data saved earlier with it can still be read.");
+    throw new Error("CROW_TAX_ENCRYPTION_KEY is the example value published in Crow's repository. Set a passphrase of your own in Extensions, and put the old one in CROW_TAX_ENCRYPTION_KEY_PREVIOUS so returns saved with it stay readable (each one is re-encrypted with the new passphrase the next time it is saved).");
   }
 
   const salt = randomBytes(SALT_LENGTH);

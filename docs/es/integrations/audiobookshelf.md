@@ -27,7 +27,7 @@ Instala Audiobookshelf como un bundle de Crow. Esto ejecuta Audiobookshelf en Do
 
 O instálalo desde el panel de **Extensiones** en el Crow's Nest.
 
-Si las dejas vacías al instalar, Audiobookshelf usa carpetas vacías en la carpeta de Crow (`media/audiobooks`, `media/podcasts`). Para usar las tuyas, configura las rutas en Configurar (o en el `.env` del bundle):
+Después de la instalación, configura las rutas a tus directorios multimedia:
 
 ```bash
 # En tu archivo .env

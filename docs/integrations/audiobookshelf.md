@@ -27,7 +27,7 @@ Install Audiobookshelf as a Crow bundle. This runs Audiobookshelf in Docker alon
 
 Or install from the **Extensions** panel in the Crow's Nest.
 
-Left empty at install, Audiobookshelf uses empty folders in Crow's folder (`media/audiobooks`, `media/podcasts`). To use your own, set the paths in Configure (or in the bundle's `.env`):
+After installation, set the paths to your media directories:
 
 ```bash
 # In your .env file

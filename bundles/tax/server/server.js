@@ -10,7 +10,7 @@ import { z } from "zod";
 import { randomBytes } from "node:crypto";
 import { createDbClient } from "./db.js";
 import { initTaxTables } from "./init-tables.js";
-import { encrypt, decrypt } from "./crypto.js";
+import { encrypt, decrypt, decryptWithFallback } from "./crypto.js";
 import { processReturn, loadTables, getFormLines, requiredForms, validate } from "../engine/index.js";
 
 function genReturnId() {
@@ -39,7 +39,9 @@ export function createTaxServer(dbPath, options = {}) {
     if (row.rows.length === 0) return null;
     const r = row.rows[0];
     try {
-      const decrypted = decrypt(r.data, getEncryptionKey());
+      // After a passphrase change, rows saved with the old one still open; saving
+      // re-encrypts them with the current passphrase.
+      const decrypted = decryptWithFallback(r.data, [getEncryptionKey(), process.env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS]);
       return { ...r, data: JSON.parse(decrypted), result: r.result ? JSON.parse(r.result) : null };
     } catch {
       return { ...r, data: JSON.parse(r.data), result: r.result ? JSON.parse(r.result) : null };

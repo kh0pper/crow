@@ -28,8 +28,14 @@
     },
     {
       "name": "CROW_TAX_ENCRYPTION_KEY",
-      "description": "Passphrase for encrypting PII at rest (SSN, names). Set on first use.",
+      "description": "Passphrase that encrypts personal data at rest (SSN, names). Choose your own and keep a copy: without it saved returns can't be read.",
       "required": true,
+      "secret": true
+    },
+    {
+      "name": "CROW_TAX_ENCRYPTION_KEY_PREVIOUS",
+      "description": "Only after changing the passphrase: the old one, so returns saved with it can still be opened. Each return is re-encrypted with the new passphrase when it is next saved.",
+      "required": false,
       "secret": true
     }
   ],

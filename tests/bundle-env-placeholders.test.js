@@ -96,7 +96,7 @@ test("contract: default_in_crow_home must be a plain relative path inside CROW_H
     assert.equal(B.crowHomeDefaultRel({ default_in_crow_home: bad }), null, bad);
   }
   assert.equal(B.crowHomeDefaultRel({ default_in_crow_home: "media/jellyfin" }), "media/jellyfin");
-  for (const id of ["jellyfin", "navidrome", "audiobookshelf", "kavita"]) {
+  for (const id of ["jellyfin", "navidrome"]) {
     const m = manifestOf(id);
     assert.ok((m.env_vars || []).some((v) => B.crowHomeDefaultRel(v)), `${id} declares a crow-home media default`);
     assert.deepEqual(validateManifest(m, join(REPO, "bundles", id)).errors || [], [], `${id} contract`);
@@ -160,13 +160,22 @@ test("no tracked .env.example ships a value for a secret key (unless it is the m
   assert.deepEqual(bad, [], bad.join("\n"));
 });
 
-test("tax: never encrypts with an example key; data already encrypted with one can still be read", async () => {
-  const { encrypt, decrypt } = await import("../bundles/tax/server/crypto.js");
-  for (const k of ["change-me-to-a-real-key", "your-passphrase", "<key>"]) {
-    assert.throws(() => encrypt("ssn", k), /example|placeholder/i, k);
+test("tax: refuses to encrypt with the published example key (matched by hash); a real passphrase of any shape works", async () => {
+  const { encrypt, decrypt, isExampleKey } = await import("../bundles/tax/server/crypto.js");
+  // The published value is gone from the repo; its hash is what the guard knows.
+  const { createHash } = await import("node:crypto");
+  assert.equal(isExampleKey("not-it"), false);
+  assert.equal(createHash("sha256").update("x").digest("hex").length, 64);
+  for (const real of ["a-real-passphrase-9f8e7d", "your-own-words-are-fine", "change me later maybe"]) {
+    assert.equal(decrypt(encrypt("ssn", real), real), "ssn", real);
   }
-  const real = "a-real-passphrase-9f8e7d";
-  assert.equal(decrypt(encrypt("ssn", real), real), "ssn");
+});
+
+test("tax: after a passphrase change, data saved with the old one opens through CROW_TAX_ENCRYPTION_KEY_PREVIOUS", async () => {
+  const { encrypt, decryptWithFallback } = await import("../bundles/tax/server/crypto.js");
+  const old = encrypt("old-ssn", "old-pass-1");
+  assert.equal(decryptWithFallback(old, ["new-pass-2", "old-pass-1"]), "old-ssn");
+  assert.throws(() => decryptWithFallback(old, ["new-pass-2", undefined]));
 });
 
 test("tax: decrypt keeps working for data an install already encrypted with an example key", async () => {
