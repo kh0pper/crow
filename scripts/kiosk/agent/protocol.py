@@ -3,7 +3,7 @@
 The page (served from the Crow origin) connects to ws://127.0.0.1:8770.
 Agent -> page: agent (status on connect), wake, touch_while_dark,
                bt_state {configured, connected, link, hw_fault, name, reconnecting, reason, result?, req?}.
-Page -> agent: display {on}, speaking {on}, media {on, level}, bt_reconnect {}.
+Page -> agent: display {on}, speaking {on}, media {on, level}, bt_reconnect {req?}.
 Everything else is refused. Frames are small JSON objects.
 """
 

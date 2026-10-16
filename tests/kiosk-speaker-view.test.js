@@ -199,3 +199,35 @@ test("the view builds DOM with textContent only (no HTML parsing anywhere)", asy
   const src = readFileSync(new URL("../bundles/kiosk/public/speaker-view.js", import.meta.url), "utf8");
   assert.doesNotMatch(src, /innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
 });
+
+test("review: a failed tap on a display whose Bluetooth is off/blocked/missing/unanswering or faulted shows that cause, not 'is the speaker on?'", async () => {
+  for (const [state, key] of [[{ reason: "adapter_off" }, "speaker_reason_adapter_off"], [{ reason: "adapter_blocked" }, "speaker_reason_adapter_off"], [{ reason: "no_adapter" }, "speaker_reason_no_adapter"], [{ reason: "no_answer" }, "speaker_reason_no_answer"], [{ reason: "hw_fault", hw_fault: true }, "speaker_reason_hw_fault"]]) {
+    const s = setup();
+    s.view.start(); s.view.status(UP); s.view.bt(bt(state));
+    await s.tap();
+    s.answer(bt({ ...state, result: "failed" }));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(s.line(), STRINGS.en[key], JSON.stringify(state));
+  }
+  const old = setup();   // an old agent (no reason) keeps the tap's answer
+  old.view.start(); old.view.status(UP); old.view.bt(bt({}));
+  await old.tap();
+  old.answer(bt({ result: "failed" }));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(old.line(), STRINGS.en.speaker_result_failed);
+});
+
+test("review: 'reconnected' clears after a few seconds while the speaker stays connected", async () => {
+  const s = setup();
+  s.view.start(); s.view.status(UP); s.view.bt(bt({ connected: true, reason: null }));
+  await s.tap();
+  s.answer(bt({ connected: true, reason: null, result: "ok" }));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(s.line(), STRINGS.en.speaker_result_ok);
+  s.clock.advance(5000);
+  assert.equal(s.line(), "");
+});
+
+test("review: zero-width and directional marks are stripped from the speaker's name too", () => {
+  assert.equal(sanitizeName("Kit​chen‎  speaker﻿؜"), "Kitchen speaker");
+});

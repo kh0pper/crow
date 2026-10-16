@@ -13,7 +13,8 @@
  */
 export const UNAVAILABLE_AFTER_MS = 20000;
 
-const STRIP = /[\u0000-\u001F\u007F-\u009F‪-‮⁦-⁩]/g;
+// C0/C1 controls, bidi embeddings/overrides/isolates, directional and zero-width marks, line/paragraph separators.
+const STRIP = /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u2028-\u202E\u2066-\u2069\u061C\uFEFF]/g;
 export function sanitizeName(name) {
   if (typeof name !== "string") return null;
   const clean = Array.from(name.replace(STRIP, "").trim()).slice(0, 64).join("");
@@ -32,6 +33,9 @@ function reasonKey(bt) {
   return `speaker_reason_${REASONS[bt.reason] || "out_of_range"}`;
 }
 const resultKey = (r) => (r === "not_paired" ? "speaker_reason_not_paired" : `speaker_result_${r}`);
+// A cause the agent knows better than "is the speaker on?": a failed tap shows it instead.
+const HARD_REASONS = new Set(["adapter_off", "adapter_blocked", "no_adapter", "no_answer", "hw_fault", "not_paired"]);
+export const OK_LINE_MS = 5000;
 const signature = (bt) => [bt.connected, bt.link, bt.hw_fault, bt.reason].map(String).join("|");
 
 export function createSpeakerView(root, { doc = root.ownerDocument, t, link, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
@@ -74,7 +78,7 @@ export function createSpeakerView(root, { doc = root.ownerDocument, t, link, set
     }
     label.textContent = connected ? sanitizeName(bt.name) || t("speaker_default") : t("speaker_reconnect");
     if (waiting) line.textContent = t("speaker_reconnecting");
-    else if (result && result.sig === signature(bt)) line.textContent = t(result.key);
+    else if (result && result.sig === signature(bt) && !(result.key === "speaker_result_failed" && (bt.hw_fault || HARD_REASONS.has(bt.reason)))) line.textContent = t(result.key);
     else line.textContent = connected ? "" : t(reasonKey(bt));
   }
 
@@ -85,6 +89,8 @@ export function createSpeakerView(root, { doc = root.ownerDocument, t, link, set
     Promise.resolve(link.btReconnect()).then((m) => {
       waiting = false;
       result = { key: resultKey(m && m.result), sig: bt ? signature(bt) : null };
+      // "Reconnected" is news, not state: it goes after a few seconds (the agent publishes only on a change).
+      if (m && m.result === "ok") { const shown = result; setTimer(() => { if (result === shown) { result = null; render(); } }, OK_LINE_MS); }
       render();
     });
   });
