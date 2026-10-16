@@ -46,6 +46,7 @@ export function createDucker(audio, { setTimer = setTimeout, clearTimer = clearT
     },
     setTarget(v) { target = Math.max(0, Math.min(1, v)); if (ducked) audio.volume = target * DUCK_FACTOR; else if (!timer) audio.volume = target; },
     ducked: () => ducked,
+    target: () => target,
   };
 }
 
@@ -193,5 +194,7 @@ export function createMediaView({ audio, chip, send, setTimer = setTimeout, clea
     /** r7b M3: one fixed word for the turn's metrics. */
     state: () => (!cur ? "none" : offline ? "offline" : cur.blocked ? "blocked" : cur.paused ? "paused" : cur.playing ? "playing" : "loading"),
     ducked: () => ducker.ducked(),
+    /** B3 close: un-ducked level, held? */
+    release: () => ({ volume: cur ? ducker.target() : null, resume: held && !!cur && !cur.paused }),
   };
 }

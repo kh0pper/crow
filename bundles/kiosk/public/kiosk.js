@@ -26,6 +26,26 @@ const SESSION = document.documentElement.dataset.mode === "session";
  */
 const CAPS = { v: 2, screen: { w: screen.width, h: screen.height, touch: navigator.maxTouchPoints > 0 }, audio: { out: true, in: !!navigator.mediaDevices }, codecs: [], frames: 0, max_windows: 4, input: { wake: false, keyboard: false }, kinds: ["card", "timer", "nowplaying"],
   mobile: navigator.userAgentData ? navigator.userAgentData.mobile === true : /Mobi|Android/i.test(navigator.userAgent), pointer: matchMedia("(pointer: coarse)").matches ? "coarse" : "fine", platform: String(navigator.platform || "").slice(0, 40) };
+/*
+ * B3 bar mode: inside the dashboard's Talk to Crow overlay, opened with ?bar=1 (the dashboard does that only when its
+ * player bar has the kiosk backend), the media plays in the player bar through a bar link, and outlives the overlay.
+ * The tab's owner nonce comes from the bar (it survives a reload of the tab). Anything missing → today's in-page audio.
+ */
+const BAR_WANTED = SESSION && window.parent !== window && new URLSearchParams(location.search).get("bar") === "1";
+let barLink = null, barOwner = null;
+if (BAR_WANTED) {
+  try {
+    barOwner = window.parent.crowPlayer.kioskOwner();
+    if (typeof barOwner === "string" && barOwner) {
+      const { createBarLink } = await import("./bar-link.js");
+      barLink = createBarLink({ parent: window.parent, origin: location.origin, onCommand: (verb) => send({ type: "media_cmd", do: verb }) });
+      window.addEventListener("message", barLink.onMessage);
+    }
+  } catch { barLink = null; }
+  if (!barLink) barOwner = null;
+}
+const BAR = !!barLink;
+CAPS.bar = BAR;
 /** This display's IANA time zone, sent in hello so "what time is it" is answered in local time. */
 const TZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch { return null; } })();
 const $ = (id) => document.getElementById(id);
@@ -87,9 +107,9 @@ if (audioPort) {
 }
 const cookie = (name) => { for (const c of document.cookie.split(";")) { const [k, ...v] = c.trim().split("="); if (k === name) return v.join("="); } return ""; };
 /** Halt / unpaired / page hidden for good: turn the mic off (the phone's indicator); the next tap reopens it. */
-function releaseAudio() {
+function releaseAudio({ keepMedia = false } = {}) {
   if (turn && !turn.ended) endTurn("manual", null);
-  mediaView?.apply({ action: "stop" });             // the server's media state comes back with the next hello
+  if (!keepMedia) mediaView?.apply({ action: "stop" });   // the server's media state comes back with the next hello (bar mode: it plays on in the bar)
   micGate.release(); captureEnded();
   mic = null;
   player?.flush();
@@ -178,7 +198,7 @@ function connect() {
   ws = sock;
   sock.binaryType = "arraybuffer";
   let opened = false;
-  sock.onopen = () => { opened = true; if (ws === sock) sock.send(JSON.stringify(SESSION ? { type: "hello", mode: "session", csrf: cookie("crow_csrf"), caps: CAPS, tz: TZ } : { type: "hello", device_id: id, token: tok, caps: CAPS, tz: TZ })); };
+  sock.onopen = () => { opened = true; if (ws === sock) sock.send(JSON.stringify(SESSION ? { type: "hello", mode: "session", csrf: cookie("crow_csrf"), caps: CAPS, tz: TZ, owner: barOwner } : { type: "hello", device_id: id, token: tok, caps: CAPS, tz: TZ })); };
   sock.onmessage = (ev) => {
     if (ws !== sock) return;
     if (typeof ev.data !== "string") { player?.push(ev.data); return; }
@@ -248,6 +268,7 @@ function onText(m) {
       noteEffect(turn, { kind: m.action === "load" && !m.paused ? "load" : "media", id: m.id, at: performance.now() });
       note("media", `${m.action}${m.id ? " " + m.id : ""}`);
       if ((m.action === "load" && !m.paused) || m.action === "play") { if (turn) turn.mediaLoaded = true; micForMedia(); }   // item 21 (a resume too)
+      if (m.action === "load") barLink?.describe(m);   // the bar shows its title etc.
       mediaView?.apply(m);
       break;
     // The closing frame of a turn that never ran (empty, too long, busy): the turn ends here, no metrics.
@@ -440,26 +461,30 @@ $("bird").addEventListener("click", onTap);
   $("debug").addEventListener("click", () => { $("debug").hidden = true; });
 }
 $("mic").addEventListener("click", onTap);
-window.addEventListener("pagehide", releaseAudio);
+window.addEventListener("pagehide", () => releaseAudio({ keepMedia: BAR }));
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && !halted && (SESSION || ls.get(LS_TOK))) connect(); });   // connect() is a no-op while a socket is live
 if (SESSION) {
   // The dashboard closes the overlay (its own close button, or Escape): it calls this first so the
-  // microphone, any playing audio and the socket stop at once, then removes the frame.
+  // microphone, any playing audio and the socket stop at once, then removes the frame. Bar mode: the
+  // audio plays on in the bar, which gets back its un-ducked level and whether to undo a hold.
   window.crowKioskRelease = () => {
     halted = true;
     clearTimeout(reconnectTimer); reconnectTimer = null;
-    releaseAudio();
+    const keep = BAR ? mediaView?.release() ?? null : undefined;
+    releaseAudio({ keepMedia: BAR });
     try { ctx?.close(); } catch {}
     const s = ws; ws = null;
     try { s?.close(1000, "closed"); } catch {}
+    return keep;
   };
   // Escape pressed while focus is inside the frame never reaches the dashboard: ask it to close.
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && window.parent !== window) window.parent.postMessage("crow-talk-close", location.origin); });
 }
 
 mediaView = createMediaView({
-  audio: $("media"), chip: $("np-chip"), send, t,
+  audio: barLink || $("media"), chip: BAR ? document.createElement("button") : $("np-chip"), send, t,
   // Item 21: never start over an open capture or within mic_settle_ms of its release; A7's evidence is in the ring.
+  // In bar mode too: the parent bar plays, but this frame's open mic is what puts Android in call mode.
   canStart: () => { const g = mediaStartGate({ micOpen: !!mic, micOpening: micGate.opening(), releasedAt: micReleasedAt, now: performance.now(), config }); return g.ok || g.waitMs; },
   onPlay: () => note("media", `start mic=${mic || micGate.opening() ? "open" : "closed"}`),
   onState: (id, state) => { if (state === "playing") noteEffect(turn, { kind: "playing", id, at: performance.now() }); },
