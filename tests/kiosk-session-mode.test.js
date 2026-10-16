@@ -1008,3 +1008,21 @@ test("B3 now playing on a live session display: with the bar no window opens on 
     plain.ws.close();
   } finally { r.close(); }
 });
+
+test("I2 (bar on every page): a ticket's third concurrent stream is refused 429 AND logged (the device, never the ticket), so a lost bar after fast navigation can be told apart", async () => {
+  const r = await barServe();
+  try {
+    const c = await r.open();
+    const path = r.play();
+    const a = await r.stream(path, true), b = await r.stream(path, true);
+    assert.deepEqual([a.status, b.status], [200, 200]);
+    const third = await r.stream(path);
+    assert.equal(third.status, 429);
+    const line = r.barLogs.find((l) => /429/.test(l));
+    assert.ok(line, "logged: " + JSON.stringify(r.barLogs));
+    assert.ok(line.includes(r.idOf()), "names the display");
+    assert.ok(!line.includes(path.split("/")[3]), "never the ticket");
+    a.body?.cancel?.(); b.body?.cancel?.();
+    c.ws.close();
+  } finally { r.close(); }
+});

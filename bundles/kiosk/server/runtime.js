@@ -23,7 +23,7 @@ import { kioskNowContext, matchClockFastPath, relativeDatesContext, mentionsRela
 import { wantsMemory } from "./memory-intent.js";
 import { wantsAction, wantsActionFollowUp, namesDisplayObject } from "./action-intent.js";
 import { createRelay } from "./relay.js";
-import { createTicketStore } from "./tickets.js";
+import { createTicketStore, MAX_CONCURRENT } from "./tickets.js";
 import { createMediaStore, migrateMaxVolume } from "./media.js";
 import { createSourceRegistry } from "./sources/index.js";
 import { createStationsSource, normalizeStations, parseStations, probeStation, stationNamesHint, callSignHotwords, commandNames, STATIONS_SETTING } from "./sources/stations.js";
@@ -684,7 +684,11 @@ export function createKioskRuntime(deps) {
       if (req.method !== "GET") { res.setHeader("Allow", "GET"); return res.status(405).type("text/plain").send("Method not allowed"); }
       const t = tickets.get(String(req.params.ticket || ""));
       if (!t || t.kind !== "stream") return res.status(404).type("text/plain").send("Not found");
-      if (!tickets.enter(t)) return res.status(429).type("text/plain").send("Too many requests");
+      if (!tickets.enter(t)) {
+        // Logged (by device, never the ticket): a bar lost after fast page-to-page navigation shows up here.
+        log(`[kiosk] stream for ${t.deviceId} refused: 429 (already ${MAX_CONCURRENT} open on its ticket)`);
+        return res.status(429).type("text/plain").send("Too many requests");
+      }
       res.on("close", () => tickets.leave(t));
       const code = await relay.toResponse(t.resource, req, res, { signal: t.abort.signal });
       // The reason is logged by code only: never the upstream address, never the ticket.
