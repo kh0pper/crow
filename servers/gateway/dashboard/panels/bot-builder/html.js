@@ -17,6 +17,8 @@ import { listProvidersAll } from "../../../../shared/providers-db.js";
 import { boardState, friendlyModel, purposeLine, agoText } from "../../shared/bot-display.js";
 import { perchAttached } from "../../../shared/perch-attached.js";
 import { rowMenuScript } from "./row-menu.js";
+import { giveTaskScript } from "./give-task.js";
+import { loadUnassigned } from "../bot-board/data-queries.js";
 
 // Same crow_lang-cookie resolution the dashboard router uses (index.js);
 // defensive because tests render with header-less reqs.
@@ -75,7 +77,13 @@ function botCardHtml(bt, { i, lang, req, now, providerRows, active }) {
       `<span class="btb-mhint">${t("botbuilder.boardOnWarn", lang)}</span></button></form>`;
   }
   const menu = `<div class="btb-menu btb-pop" id="${menuId}" role="menu" hidden>` + boardItem +
-    `<a role="menuitem" tabindex="-1" href="/dashboard/bot-board?bot=${enc}">${t("botbuilder.rowGiveTask", lang)}</a>` +
+    // A board-on bot gets the "Give <Name> a task" dialog (PR 2); any other
+    // bot keeps the link to its board, where a board-off bot is offered
+    // Turn on a board.
+    (board.state === "on" && Number(bt.enabled)
+      ? `<button type="button" role="menuitem" tabindex="-1" class="btb-give-task" data-bot-id="${escapeHtml(id)}" data-name="${escapeHtml(name)}" ` +
+        `data-perch="${perchAttached(def) ? 1 : 0}" aria-haspopup="dialog" aria-controls="btb-give">${t("botbuilder.rowGiveTask", lang)}</button>`
+      : `<a role="menuitem" tabindex="-1" href="/dashboard/bot-board?bot=${enc}">${t("botbuilder.rowGiveTask", lang)}</a>`) +
     `<a role="menuitem" tabindex="-1" href="/dashboard/perch">${t("botbuilder.rowSessions", lang)}</a>` +
     (bt.project_id != null ? `<a role="menuitem" tabindex="-1" href="/dashboard/projects?view=${encodeURIComponent(String(bt.project_id))}">${t("botbuilder.rowProject", lang)}</a>` : "") +
     `<a role="menuitem" tabindex="-1" class="btb-danger-link" href="/dashboard/bot-builder?bot=${enc}&confirm_delete=1">${t("botbuilder.rowDelete", lang)}</a>` +
@@ -96,6 +104,32 @@ function botCardHtml(bt, { i, lang, req, now, providerRows, active }) {
     `</div>` + menu + `</div>`;
 }
 
+/**
+ * "Give <Name> a task" (queue item 20, PR 2): one dialog per page, opened
+ * from a board-on bot card's ⋯ menu (give-task.js fills in the bot). Write a
+ * new task, or pick a waiting card from the Unassigned list; then "Add to
+ * board for later" (the default — starting spins up a model) or "Start now".
+ */
+function giveTaskDialogHtml(waiting, lang) {
+  const opts = waiting.map((c) => `<option value="${escapeHtml(String(c.id))}">${escapeHtml(String(c.title || ""))}</option>`).join("");
+  return `<div class="btb-give" id="btb-give" role="dialog" aria-modal="true" aria-labelledby="btb-give-h" hidden>` +
+    `<div class="btb-give-panel">` +
+    `<p class="btb-give-h" id="btb-give-h"></p>` +
+    `<label class="btb-give-l" for="btb-give-text">${t("botbuilder.giveTaskNew", lang)}</label>` +
+    `<textarea id="btb-give-text" rows="3" maxlength="500" class="btb-give-text"></textarea>` +
+    `<label class="btb-give-l" for="btb-give-card">${t("botbuilder.giveTaskOrPick", lang)}</label>` +
+    `<select id="btb-give-card"><option value="">${t("botbuilder.giveTaskNone", lang)}</option>${opts}</select>` +
+    `<fieldset class="btb-seg"><legend class="btb-sr">${t("botboard.giveWhen", lang)}</legend>` +
+    `<label><input type="radio" name="btb-give-when" value="later" checked><span>${t("botboard.giveLater", lang)}</span></label>` +
+    `<label><input type="radio" name="btb-give-when" value="now"><span>${t("botboard.giveNow", lang)}</span></label>` +
+    `</fieldset>` +
+    `<p class="btb-give-hint" id="btb-give-hint" hidden>${t("botboard.giveNowNeedsPerch", lang)}</p>` +
+    `<div class="btb-give-actions">` +
+    `<button type="button" class="btn btn-secondary btn-sm" data-give-close>${t("common.cancel", lang)}</button>` +
+    `<button type="button" class="btn btn-primary btn-sm" id="btb-give-go">${t("botboard.giveTo", lang)}</button>` +
+    `</div></div></div>`;
+}
+
 export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) {
   const lang = reqLang(req);
   let bots = [], sessions = [], sessRows = [];
@@ -109,6 +143,12 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) 
   const now = Date.now();
   const activeIds = new Set(sessions.filter((s) => s.status === "active" && Number(s.n) > 0).map((s) => s.bot_id));
   const cards = bots.map((bt, i) => botCardHtml(bt, { i, lang, req, now, providerRows, active: activeIds.has(bt.bot_id) }));
+  // The give dialog ships only when some bot can take a card. It sits
+  // OUTSIDE the list section: the layout's .card animates a transform, which
+  // would make it the containing block of the dialog's position:fixed.
+  const giveDialog = bots.some((bt) => Number(bt.enabled) && boardState(bt).state === "on")
+    ? giveTaskDialogHtml(await loadUnassigned(), lang) + giveTaskScript(lang)
+    : "";
   // Item 5 PR1 (spec §D1): the guided wizard is the primary creation path.
   // Option B: once bots exist, "+ New bot" sits in the toolbar and closes
   // the grid as a dashed tile, and the tutorial is one quiet line under the
@@ -196,5 +236,5 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) 
     `<th>${t("botbuilder.monThControl", lang)}</th><th>${t("botbuilder.monThCard", lang)}</th><th>${t("botbuilder.monThThread", lang)}</th>` +
     `<th>${t("botbuilder.monThUpdated", lang)}</th></tr></thead>` +
     `<tbody id="pibot-sessions-tbody">${monRows}</tbody></table></div>`);
-  return res.send(layout({ title: "Bot Builder", content: PAGE_CSS + list + monitor + form }));
+  return res.send(layout({ title: "Bot Builder", content: PAGE_CSS + list + giveDialog + monitor + form }));
 }

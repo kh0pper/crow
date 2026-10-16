@@ -14,7 +14,7 @@ import { clientJs } from "./client.js";
 import {
   TASKS_DB, STATUS_BADGE,
   lockMapFor, statusLabel, liveBirdsByCard, sessionBirdState, foldBirdStates,
-  listUnassignedCards,
+  loadUnassigned,
 } from "./data-queries.js";
 import { DEFAULT_BOARD_DEF, resolveBoardDef, resolveSlugBoardDef } from "../../../routes/board-defs.js";
 // Track 3 Task 11 (spec §5.6): the interactive-engine singleton — live bird
@@ -103,16 +103,6 @@ export function botPickerHtml(bots, selBot, counts, req, lang) {
 }
 
 // ---- Unassigned lane + "Give to…" (queue item 20, PR 2) ----
-
-/** Cards on no board, from the instance-global tasks.db; [] when it is absent. */
-export async function loadUnassigned() {
-  let tdb;
-  try {
-    tdb = createDbClient(TASKS_DB);
-    return await listUnassignedCards(tdb);
-  } catch { return []; }
-  finally { if (tdb) { try { tdb.close(); } catch { /* already closed */ } } }
-}
 
 function avatarOf(b, cls) {
   const name = String(b.displayName || b.botId);

@@ -188,6 +188,16 @@ export async function listUnassignedCards(tdb) {
   return rows || [];
 }
 
+/** Cards on no board, from the instance-global tasks.db; [] when it is absent. */
+export async function loadUnassigned() {
+  let tdb;
+  try {
+    tdb = createDbClient(TASKS_DB);
+    return await listUnassignedCards(tdb);
+  } catch { return []; }
+  finally { if (tdb) { try { tdb.close(); } catch { /* already closed */ } } }
+}
+
 // ---- Resolve bot info from pi_bot_defs ----
 export function parseBotDef(row) {
   let def = {};
