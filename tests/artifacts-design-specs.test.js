@@ -328,3 +328,26 @@ test("fix round 1: a non-retryable unavailable (not_loopback) stays non-retryabl
   answer = async () => SVG;
 });
 
+
+// Fix round 2: once the root </svg> closes, a <style> is HTML raw text on the
+// inlined diagram path, so a "CDATA" inside it could end it and smuggle live
+// HTML. Exactly one root <svg>; nothing but whitespace after it.
+test("fix round 2: one root <svg>, nothing after it; CDATA only inside a <style> inside it", () => {
+  const refused = (svg) => { try { checkRenderedSvg(svg); return null; } catch (e) { return e.code; } };
+  const tail = (html) => `<svg></svg><style><![CDATA[</style>${html}]]></style></svg>`;
+  const bad = [
+    tail('<meta http-equiv="refresh" content="0;url=https://evil.example/">'),
+    tail('<table background="https://evil.example/t.png"></table>'),
+    tail('<form action="https://evil.example/"><button>x</button></form>'),
+    "<svg></svg><svg></svg>", "<svg></svg>x</svg>", "<svg/><g></g></svg>", "<svg></svg><g></g></svg>",
+    "<svg><g></svg></g></svg>", "<svg></svg></svg>", "<svg></g></svg>",
+    '<svg><style>a{b:url(data:font/x/y,AA)}</style></svg>', '<svg><style>a{b:url(data:application/font-woff/x;base64,AA)}</style></svg>',
+    '<svg><style>a{b:url(data:font/,AA)}</style></svg>',
+  ];
+  for (const svg of bad) assert.equal(refused(svg), "render_failed", JSON.stringify(svg));
+  const good = [
+    "<svg><svg viewBox=\"0 0 1 1\"><style><![CDATA[.a{fill:red}]]></style><rect/></svg><g></g></svg>\n \t",
+    '<svg><style>a{b:url(data:font/woff2;base64,AA)}c{d:url(data:application/x-font-ttf;base64,AA)}</style></svg>',
+  ];
+  for (const svg of good) assert.ok(checkRenderedSvg(svg).startsWith("<svg"), svg);
+});

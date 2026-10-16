@@ -106,6 +106,9 @@ function okDataUrl(low, j) {
   while (k - m0 < 64 && /[a-z0-9.+/-]/.test(low.charAt(k))) k++;
   if (low.charAt(k) !== ";" && low.charAt(k) !== ",") return false;
   const mime = low.slice(m0, k);
+  const slash = mime.indexOf("/");
+  const sub = mime.slice(slash + 1);
+  if (slash < 1 || !/^[a-z0-9.+-]+$/.test(sub)) return false; // one subtype, no second "/"
   return DATA_MIME_EXACT.has(mime) || DATA_MIME_PREFIXES.some((p) => mime.startsWith(p) && mime.length > p.length);
 }
 /** href / xlink:href that is not an in-document fragment (any whitespace
@@ -152,14 +155,20 @@ const SVG_ELEMENTS = new Set(["svg", "g", "defs", "symbol", "use", "title", "des
 const BANNED_TAGS = ["<script", "<foreignobject", "<set", "<animate", "<a ", "<a>", "<a\n", "<a\t", "<a/", "<iframe", "<embed", "<object", "<img"];
 const NAME_CH = (c) => (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c === "-";
 
-/** Markup walk (linear): every tag is an allowed element; no comment,
- *  doctype or processing instruction; CDATA only inside <style>; no backslash
- *  (a CSS escape such as \75 rl( or @\69mport) in any tag or in style text. */
+/** Markup walk (linear): exactly one root <svg>, well nested (an element
+ *  stack: every close tag matches the open one), nothing but whitespace after
+ *  the root closes (fix round 2: after </svg> an HTML parser reads <style> as
+ *  raw text, so a "CDATA" could end it and smuggle live HTML); every tag an
+ *  allowed element; no comment, doctype or processing instruction; CDATA only
+ *  inside a <style> inside the root; no backslash (a CSS escape such as
+ *  \75 rl( or @\69mport) in any tag or in style text. */
 function markupOk(low) {
-  let i = 0, inStyle = false;
+  let i = 0;
+  const stack = [];
   for (;;) {
     const lt = low.indexOf("<", i);
-    if (lt < 0) return !inStyle;
+    const inStyle = stack.at(-1) === "style";
+    if (lt < 0) return false; // the root never closed
     if (inStyle && low.slice(i, lt).includes("\\")) return false;
     if (low.startsWith("<![cdata[", lt)) {
       if (!inStyle) return false;
@@ -168,6 +177,7 @@ function markupOk(low) {
       i = end + 3;
       continue;
     }
+    if (i > 0 && !stack.length) return false; // a tag before or after the root
     const closing = low.charAt(lt + 1) === "/";
     let j = lt + (closing ? 2 : 1);
     const n0 = j;
@@ -175,11 +185,18 @@ function markupOk(low) {
     const name = low.slice(n0, j);
     const after = low.charAt(j);
     if (!(name && name.charAt(0) >= "a" && name.charAt(0) <= "z" && SVG_ELEMENTS.has(name)) || !(WS(after) || after === "/" || after === ">")) return false;
+    if (lt === 0 ? name !== "svg" || closing : !stack.length) return false;
+    if (inStyle && !(closing && name === "style")) return false;
     j = closing ? skipWs(low, j) : attrsEnd(low, j);
     if (j < 0 || low.charAt(j) !== ">") return false;
-    if (name === "style") inStyle = !closing && low.charAt(j - 1) !== "/";
-    else if (inStyle) return false;
+    if (closing) { if (stack.pop() !== name) return false; }
+    else if (low.charAt(j - 1) !== "/") stack.push(name);
+    else if (!stack.length) return false; // a self-closed root: <svg/>
     i = j + 1;
+    if (!stack.length) {
+      for (let k = i; k < low.length; k++) if (!WS(low.charAt(k))) return false;
+      return true;
+    }
   }
 }
 
