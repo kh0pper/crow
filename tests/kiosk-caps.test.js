@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { effectiveCaps, guessProfile, PROFILES, PAGE_KINDS, DEFAULT_PROFILE } from "../bundles/kiosk/server/caps.js";
+import { effectiveCaps, guessProfile, PROFILES, PAGE_KINDS, DEFAULT_PROFILE, audioPolicy } from "../bundles/kiosk/server/caps.js";
 
 const V2 = { v: 2, screen: { w: 800, h: 480, touch: true }, audio: { out: true, in: true }, codecs: [], frames: 0, max_windows: 4, input: { wake: false, keyboard: false }, kinds: ["card", "timer"] };
 
@@ -58,4 +58,27 @@ test("the pairing guess: a phone says it is mobile; a small ARM Linux screen is 
   assert.equal(guessProfile(v2({ mobile: false, pointer: "fine", platform: "Win32", screen: { w: 1920, h: 1080, touch: false } })), "desktop");
   assert.equal(guessProfile({ windows: ["timer"] }), null);
   assert.equal(guessProfile(null), null);
+});
+
+// Item 21 (earpiece), review 6: mic_release_for_media is exactly mic_per_turn — an Android phone or tablet (paired, the
+// app's overlay or Chrome) holds its music until the mic has let go; a Pi, a desktop and an iPhone are unchanged.
+test("item 21: audioPolicy's mic_release_for_media follows mic_per_turn per display kind; mic_settle_ms defaults to 800 and is tunable", () => {
+  const android = { v: 2, mobile: true, pointer: "coarse", platform: "Linux armv81", screen: { w: 412, h: 915, touch: true } };
+  const rows = [
+    ["Android phone (paired)", { profile: "phone" }, android, true],
+    ["Android tablet", { profile: "tablet" }, { ...android, screen: { w: 1280, h: 800, touch: true } }, true],
+    ["Android app overlay / Chrome session (no stored type)", {}, android, true],
+    ["iPhone", { profile: "phone" }, { ...android, platform: "iPhone" }, false],
+    ["Pi", { profile: "pi3" }, { platform: "Linux aarch64" }, false],
+    ["desktop", { profile: "desktop" }, { platform: "Linux x86_64", pointer: "fine" }, false],
+    ["desktop session (no stored type)", {}, { v: 2, platform: "Linux x86_64", pointer: "fine", mobile: false, screen: { w: 1920, h: 1080 } }, false],
+  ];
+  for (const [name, ks, raw, want] of rows) {
+    const p = audioPolicy(ks, raw);
+    assert.equal(p.mic_release_for_media, want, name);
+    assert.equal(p.mic_release_for_media, p.mic_per_turn, name);
+    assert.equal(p.mic_settle_ms, 800, name);
+  }
+  assert.equal(audioPolicy({ profile: "phone", mic_settle_ms: 1200 }, android).mic_settle_ms, 1200);
+  for (const bad of [-1, "x", null, 99999, 1.5]) assert.equal(audioPolicy({ mic_settle_ms: bad }, android).mic_settle_ms, 800, String(bad));
 });

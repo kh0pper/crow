@@ -57,7 +57,9 @@ export const KIOSK_PROFILE_SOURCES = Object.freeze(["operator", "guessed"]);
  * music is paused, rather than turned down, while the display listens (absent = turned down).
  */
 export const KIOSK_MEDIA_KEYS = Object.freeze(["max_volume", "pause_media_on_listen", "max_volume_scale"]);
-const KIOSK_OPTIONAL_KEYS = new Set(["profile", "profile_source", ...KIOSK_MEDIA_KEYS]);
+/** Item 21 (earpiece): how long music waits after the mic is let go (ms; absent = the kiosk's own default). */
+export const KIOSK_MIC_SETTLE_RANGE = Object.freeze({ min: 0, max: 5000 });
+const KIOSK_OPTIONAL_KEYS = new Set(["profile", "profile_source", "mic_settle_ms", ...KIOSK_MEDIA_KEYS]);
 
 function sha256Hex(s) {
   return createHash("sha256").update(String(s)).digest("hex");
@@ -94,6 +96,11 @@ export function normalizeKioskSettings(input, prior) {
   if ("vad_hangover_ms" in src) {
     const n = Number.parseInt(src.vad_hangover_ms, 10);
     if (Number.isFinite(n)) out.vad_hangover_ms = Math.min(KIOSK_VAD_HANGOVER_RANGE.max, Math.max(KIOSK_VAD_HANGOVER_RANGE.min, n));   // latency lever 1 (ruling R20)
+  }
+  if ("mic_settle_ms" in src) {
+    const n = Number.parseInt(src.mic_settle_ms, 10);
+    if (Number.isFinite(n)) out.mic_settle_ms = Math.min(KIOSK_MIC_SETTLE_RANGE.max, Math.max(KIOSK_MIC_SETTLE_RANGE.min, n));
+    else if (src.mic_settle_ms === null || src.mic_settle_ms === "") delete out.mic_settle_ms;
   }
   if ("stt_model" in src && KIOSK_STT_MODEL_CHOICES.includes(src.stt_model)) out.stt_model = src.stt_model;
   if ("theme" in src && KIOSK_THEME_CHOICES.includes(src.theme)) out.theme = src.theme;

@@ -203,6 +203,18 @@ test("kiosk_settings: max_volume is 10..100 in steps of ten; pause_media_on_list
   assert.equal(n({}, { max_volume: 30, pause_media_on_listen: true }).max_volume, 30, "an untouched save keeps both");
 });
 
+test("kiosk_settings (item 21): mic_settle_ms is an optional 0..5000 ms integer (never filled in by a default); bad input keeps the prior; null clears it", () => {
+  const n = (input, prior) => store.normalizeKioskSettings(input, prior);
+  assert.equal(Object.hasOwn(n({ follow_up: true }, null), "mic_settle_ms"), false);
+  assert.equal(n({ mic_settle_ms: 1200 }).mic_settle_ms, 1200);
+  assert.equal(n({ mic_settle_ms: "600" }).mic_settle_ms, 600);
+  assert.equal(n({ mic_settle_ms: 99999 }).mic_settle_ms, 5000);
+  assert.equal(n({ mic_settle_ms: -5 }).mic_settle_ms, 0);
+  assert.equal(n({ mic_settle_ms: "soon" }, { mic_settle_ms: 900 }).mic_settle_ms, 900);
+  assert.equal(n({}, { mic_settle_ms: 900 }).mic_settle_ms, 900, "an untouched save keeps it");
+  assert.equal(Object.hasOwn(n({ mic_settle_ms: null }, { mic_settle_ms: 900 }), "mic_settle_ms"), false, "null: back to the default");
+});
+
 test("r8b: every save of max_volume on this build marks it as on the −50…0 dB scale ('db5'); rev 8's 'db10' mark is kept until the cap is moved or saved; a mark is never set from input on its own", () => {
   const n = (input, prior) => store.normalizeKioskSettings(input, prior);
   assert.equal(n({ max_volume: 70 }).max_volume_scale, "db5");

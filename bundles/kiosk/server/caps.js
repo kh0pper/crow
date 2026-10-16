@@ -75,8 +75,12 @@ export function effectiveCaps(raw, profileName) {
  *                          next tap: on Android an open echo-cancelled capture keeps the device in voice-call
  *                          audio mode, which plays all music through the call path. A Linux display (the Pi)
  *                          keeps it open.
- * → { pause_media_on_listen: boolean, mic_per_turn: boolean }
+ *   mic_release_for_media  item 21 (earpiece): the same displays (review: exactly mic_per_turn) never start music over
+ *                          an open capture, nor within mic_settle_ms of its release, and skip the follow-up mic after
+ *                          a turn that loaded music. mic_settle_ms: the stored value (0..5000) or MIC_SETTLE_MS.
+ * → { pause_media_on_listen, mic_per_turn, mic_release_for_media: boolean, mic_settle_ms: number }
  */
+export const MIC_SETTLE_MS = 800;
 export const HANDHELD_PROFILES = Object.freeze(["phone", "tablet"]);
 export function audioPolicy(kioskSettings, rawCaps) {
   const ks = kioskSettings && typeof kioskSettings === "object" ? kioskSettings : {};
@@ -86,5 +90,9 @@ export function audioPolicy(kioskSettings, rawCaps) {
   // silent — Android (its browser reports a Linux platform). iOS Safari is unverified (a re-prompt, an <audio>
   // interruption): it keeps the open mic until an iPhone row of the smoke passes.
   const android = /^linux/i.test(String(rawCaps?.platform || "").slice(0, 40));
-  return { pause_media_on_listen: typeof ks.pause_media_on_listen === "boolean" ? ks.pause_media_on_listen : handheld, mic_per_turn: handheld && android };
+  const settle = ks.mic_settle_ms, perTurn = handheld && android;
+  return {
+    pause_media_on_listen: typeof ks.pause_media_on_listen === "boolean" ? ks.pause_media_on_listen : handheld, mic_per_turn: perTurn,
+    mic_release_for_media: perTurn, mic_settle_ms: Number.isInteger(settle) && settle >= 0 && settle <= 5000 ? settle : MIC_SETTLE_MS,
+  };
 }

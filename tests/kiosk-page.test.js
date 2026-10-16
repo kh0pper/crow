@@ -46,15 +46,37 @@ test("no requestAnimationFrame and no video/iframe creation anywhere in the page
 // Fetched only by a Pi launched with ?agent=1, through kiosk.js's dynamic import(): never part of a phone's page load.
 const LAZY = new Set(["agent-link.js", "speaker-view.js"]);
 
+// 82 → 88 KB (2026-10-15, queue item 21): the B3 mic-release start gate now, the player-bar link next (~+7 KB once, cached on a Pi 3).
 // 80 → 82 KB (2026-10-15, queue item 18): the page was at 80,853 of 81,920 bytes; the DV13 speaker chip's eager part
 // (its slot, its CSS and the ?agent=1 gate, ~1.2 KB) does not fit. The chip's code itself stays out of the count (LAZY).
-test("page weight ≤ 82 KB (html + css + eagerly loaded js, uncompressed); the agent-only modules are loaded on demand", () => {
+test("page weight ≤ 88 KB (html + css + eagerly loaded js, uncompressed); the agent-only modules are loaded on demand", () => {
   const total = files.filter((f) => !LAZY.has(f)).reduce((n, f) => n + statSync(new URL(f, PUB)).size, 0);
-  assert.ok(total <= 82 * 1024, `page is ${total} bytes`);
+  assert.ok(total <= 88 * 1024, `page is ${total} bytes`);
   for (const f of files.filter((x) => x.endsWith(".js"))) {
     for (const m of read(f).matchAll(/from\s+["']\.\/([\w.-]+)["']/g)) assert.ok(!LAZY.has(m[1]), `${f} imports ${m[1]} eagerly`);
   }
   for (const f of LAZY) assert.ok(files.includes(f), f);
+});
+
+test("item 21 (source): a media load marks the turn and lets an idle open mic go BEFORE the view sees it; the settle release stamps the time and kicks a held start; the view's start asks mediaStartGate and notes each real start", () => {
+  const src = read("kiosk.js");
+  const media = src.slice(src.indexOf('case "media":'), src.indexOf("mediaView?.apply(m);") + 20);
+  assert.match(media, /if \(\(m\.action === "load" && !m\.paused\) \|\| m\.action === "play"\) \{ if \(turn\) turn\.mediaLoaded = true; micForMedia\(\); \}/, "a resume counts too (review minor 1)");
+  assert.ok(media.indexOf("micForMedia()") < media.indexOf("mediaView?.apply(m)"), "the mic goes before the view tries to start");
+  const rel = src.slice(src.indexOf("function releaseMicAfterTurn("), src.indexOf("/** turn_metrics, once per turn"));
+  assert.match(rel, /micReleasedAt = performance\.now\(\)/);
+  assert.match(rel, /mediaView\?\.kick\(\)/);
+  const mfm = src.slice(src.indexOf("function micForMedia("), src.indexOf("function releaseMicAfterTurn("));
+  assert.match(mfm, /releaseForMediaDecision\(\{ config, micOpen: !!mic \|\| micGate\.opening\(\), turnOpen: !!\(turn && !\(turn\.ended && turn\.done\)\), playing: !!player\?\.playing \}\)/);
+  assert.match(mfm, /micGate\.release\(\)/);
+  assert.match(mfm, /micReleasedAt = performance\.now\(\)/);
+  assert.match(mfm, /mediaView\?\.kick\(\)/, "a held start goes at once, not on its next poll (review minor 2)");
+  const ens = src.slice(src.indexOf("const d = micDecision(null, ctx.state);"), src.indexOf("banner(null);"));
+  assert.match(ens, /if \(config\.mic_per_turn\) \{ micGate\.release\(\); mic = null; micReleasedAt = performance\.now\(\); \}/, "no turn after needs_gesture: the phone's mic is not left open (review minor 3)");
+  assert.match(src, /canStart: \(\) => \{ const g = mediaStartGate\(\{ micOpen: !!mic, micOpening: micGate\.opening\(\), releasedAt: micReleasedAt, now: performance\.now\(\), config \}\); return g\.ok \|\| g\.waitMs; \}/);
+  assert.match(src, /onPlay: \(\) => note\("media", `start mic=\$\{mic \|\| micGate\.opening\(\) \? "open" : "closed"\}`\)/);
+  const drained = /onDrained: \(\) => \{([^}]*)\}/.exec(src)[1];
+  assert.match(drained, /if \(turn\) settle\(turn\); else micForMedia\(\);/, "TTS with no turn (G12): the drain lets the mic go");
 });
 
 test("every relative import resolves to a whitelisted asset", () => {
@@ -327,7 +349,7 @@ test("media: one <audio> element (preload none) and a now-playing chip that [hid
   assert.equal(chip.tagName, "BUTTON");
   assert.ok(chip.hasAttribute("hidden"));
   assert.ok(Object.hasOwn(ASSETS, "media-view.js"));
-  assert.ok(statSync(new URL("media-view.js", PUB)).size < 10 * 1024, "media-view.js stays under 10 KB");
+  assert.ok(statSync(new URL("media-view.js", PUB)).size < 11 * 1024, "media-view.js stays under 11 KB (10 → 11 for the item 21 start gate)");
 });
 
 test("media wiring: ducking follows the mic, the server's bird and the TTS — never turn_done; turn_over and errors re-check it", () => {
@@ -343,7 +365,7 @@ test("media wiring: ducking follows the mic, the server's bird and the TTS — n
   assert.match(err, /syncDuck\(\)/);
   const start = src.slice(src.indexOf("async function startTurn("), src.indexOf("function endTurn("));
   assert.ok(start.indexOf("syncDuck()") < start.indexOf('send({ type: "turn_start"'), "ducking starts at the tap, before the server answers");
-  assert.match(src, /case "media":[\s\S]{0,300}mediaView\?\.apply\(m\)/);
+  assert.match(src, /case "media":[\s\S]{0,400}mediaView\?\.apply\(m\)/);
 });
 
 test("now-playing window: title and source as text, six buttons that send the touch verbs", () => {
