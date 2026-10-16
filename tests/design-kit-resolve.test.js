@@ -5,6 +5,7 @@ import { readFileSync, cpSync, mkdtempSync, writeFileSync, rmSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openKit, kitError, KIT_LIMITS, DEFAULT_RENDER_URL } from "../bundles/design-kit/server/kit.js";
+import { checkLib, svgUnsafe, sha256Hex } from "../bundles/design-kit/server/lib-check.js";
 
 const KIT = new URL("../bundles/design-kit", import.meta.url).pathname;
 const kit = openKit(KIT);
@@ -151,4 +152,41 @@ test("repeated names give each ref once, in first-seen order (files were already
   const r = kit.resolve(["icons:lucide/coffee", "css:pico", "icons:lucide/coffee", "css:pico", "css:open-props"], { target: "page" });
   assert.deepEqual(r.refs, ["__lib/icons/lucide/coffee.svg", `__lib/${kit.entries.get("css:pico").main}`, "__lib/css/open-props/open-props.min.css"]);
   assert.equal(new Set(r.files.map((f) => f.path)).size, r.files.length);
+});
+
+// Final re-review probe (T5 differential): checkLib validates the file named by
+// `main`, so resolve must serve that same file, never whatever sits at files[0].
+const EVIL = { coffee: '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>' };
+const plantEvil = (d) => {
+  const body = Buffer.from(JSON.stringify(EVIL));
+  writeFileSync(join(d, "lib", "icons", "evil.json"), body);
+  const p = join(d, "lib", "manifest.json");
+  const man = JSON.parse(readFileSync(p, "utf8"));
+  const set = man.entries.find((e) => e.name === "icons:lucide");
+  set.files.unshift({ path: "icons/evil.json", sha256: sha256Hex(body), type: "application/json" });
+  writeFileSync(p, JSON.stringify(man));
+};
+
+test("an extra hash-pinned map placed before main is never served, and checkLib refuses the entry", () => {
+  const dir = tamperedCopy(plantEvil);
+  try {
+    const svg = openKit(dir).resolve(["icons:lucide/coffee"], { target: "page" }).files.find((f) => f.path === "__lib/icons/lucide/coffee.svg");
+    assert.ok(svg, "coffee is served");
+    assert.doesNotMatch(svg.body.toString("utf8"), /onload/);
+    assert.equal(svgUnsafe(svg.body), false);
+    assert.match(checkLib(join(dir, "lib")).errors.join("\n"), /icons:lucide: an icon set has exactly one file, its main/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a malformed icon map is lib_integrity, not a raw parse error", () => {
+  const dir = tamperedCopy((d) => {
+    const body = Buffer.from("{not json");
+    writeFileSync(join(d, "lib", "icons", "lucide.json"), body);
+    const p = join(d, "lib", "manifest.json");
+    const man = JSON.parse(readFileSync(p, "utf8"));
+    man.entries.find((e) => e.name === "icons:lucide").files[0].sha256 = sha256Hex(body);
+    writeFileSync(p, JSON.stringify(man));
+  });
+  try { assert.equal(code(() => openKit(dir).resolve(["icons:lucide/coffee"], { target: "page" })).code, "lib_integrity"); }
+  finally { rmSync(dir, { recursive: true, force: true }); }
 });

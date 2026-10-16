@@ -259,8 +259,16 @@ export function openKit(kitDir, { renderUrl = DEFAULT_RENDER_URL, fetchImpl = gl
   const iconSets = new Map();
   const client = makeRenderClient({ url: renderUrl, fetchImpl });
   const render = async (engine, source, opts = {}) => { guardSpec(engine, source); return client(engine, source, opts); };
+  // Serve the map named by `main`, the file checkLib validates, never files[0].
   const iconsOf = (set) => {
-    if (!iconSets.has(set.name)) iconSets.set(set.name, JSON.parse(readVerified(set.files[0]).toString("utf8")));
+    if (!iconSets.has(set.name)) {
+      const file = (set.files || []).find((f) => f && f.path === set.main);
+      if (!file) throw kitError("lib_integrity");
+      let map;
+      try { map = JSON.parse(readVerified(file).toString("utf8")); } catch (e) { if (e && e.code === "lib_integrity") throw e; throw kitError("lib_integrity"); }
+      if (!map || typeof map !== "object" || Array.isArray(map)) throw kitError("lib_integrity");
+      iconSets.set(set.name, map);
+    }
     return iconSets.get(set.name);
   };
 

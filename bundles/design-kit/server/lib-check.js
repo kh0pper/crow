@@ -301,7 +301,11 @@ export function checkLib(libDir) {
       verify(where, f);
     }
     if (!e.files.some((f) => f.path === e.main)) fail(`${where}: main must be one of its files`);
-    if (e.kind === "icon-set") checkIconMap(where, e.main);
+    if (e.kind === "icon-set") {
+      // kit.js serves the map named by main; nothing else may ride along.
+      if (e.files.length !== 1 || e.files[0].path !== e.main) fail(`${where}: an icon set has exactly one file, its main`);
+      checkIconMap(where, e.main);
+    }
     for (const r of e.requires || []) if (!names.has(r)) fail(`${where}: requires unknown ${r}`);
   }
   for (const m of man.meta_files || []) {
