@@ -30,7 +30,7 @@ for (const [id, t] of Object.entries(doc.themes)) {
   const c = t.colors;
   const css = `:root{--hs-bg:${c.bg};--hs-fg:${c.fg};--hs-accent:${c.accent};--hs-accent-2:${c.accent2};--hs-font-heading:${fam(t.fonts.heading)};--hs-font-body:${fam(t.fonts.body)}}\n`
     + "body{background:var(--hs-bg);color:var(--hs-fg);font-family:var(--hs-font-body)}\n"
-    + "h1,h2,h3,h4,h5,h6{font-family:var(--hs-font-heading)}\na{color:var(--hs-accent)}\n";
+    + "h1,h2,h3,h4,h5,h6{font-family:var(--hs-font-heading)}\na{color:var(--hs-fg);text-decoration:underline;text-decoration-color:var(--hs-accent)}\n";
   const rel = `themes/${id}.css`;
   writeFileSync(join(LIB, rel), css);
   themeEntries.push({
@@ -41,6 +41,7 @@ for (const [id, t] of Object.entries(doc.themes)) {
   });
 }
 man.entries = [...byName.values(), ...themeEntries].sort((a, b) => (a.name < b.name ? -1 : 1));
-man.meta_files = [{ path: "themes.json", sha256: sha256Hex(readFileSync(join(LIB, "themes.json"))), type: "application/json" }];
+const meta = { path: "themes.json", sha256: sha256Hex(readFileSync(join(LIB, "themes.json"))), type: "application/json" };
+man.meta_files = [...(man.meta_files || []).filter((m) => m.path !== meta.path), meta];
 writeFileSync(join(LIB, "manifest.json"), JSON.stringify(man, null, 2) + "\n");
 console.log(`built ${themeEntries.length} themes`);

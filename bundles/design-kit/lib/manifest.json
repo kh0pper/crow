@@ -627,7 +627,7 @@
       "files": [
         {
           "path": "themes/arctic-frost.css",
-          "sha256": "991aff7c540ff368fc8aa5a8a3a1f8aa53edf7cf31ccf604f9b157b023a928c8",
+          "sha256": "049eea25b38012cffa154afefab92abfe01fe11cb473f553cd12fe1b16c0999a",
           "type": "text/css"
         }
       ],
@@ -652,7 +652,7 @@
       "files": [
         {
           "path": "themes/botanical-garden.css",
-          "sha256": "8087cc25ced190e6d9dbdc74253bd6961ee6bd86e1fad1658b84683dd868100f",
+          "sha256": "100676f1c3bc118f4657cc51fa30a56112e60791b950f487bb37dc214bfe179e",
           "type": "text/css"
         }
       ],
@@ -678,7 +678,7 @@
       "files": [
         {
           "path": "themes/desert-rose.css",
-          "sha256": "b90e512cf0eed42c56083585ce9105a968d419d63586a1f015c342542436adb8",
+          "sha256": "00ff9706b913f50adb7444771d9943df98eeca69a2a299255e9e719f828be2c7",
           "type": "text/css"
         }
       ],
@@ -703,7 +703,7 @@
       "files": [
         {
           "path": "themes/forest-canopy.css",
-          "sha256": "8e3b897ee1c6717210630113e5a35fa66e6690aebd75c28cddbceaa820c9fbc4",
+          "sha256": "91f71548554ce277f0ee7cb82b9e05b89d0b4c53e89e20358b6cc2049ead4d59",
           "type": "text/css"
         }
       ],
@@ -729,7 +729,7 @@
       "files": [
         {
           "path": "themes/golden-hour.css",
-          "sha256": "dadd63b16e0e6a7fe572d3bb13b95ec19d9dc8798e0f9ccf06823e03a9195fe8",
+          "sha256": "32756876610c4ddcb143f2ff5e856be092763bed6f9a17d6d657a35951e59c17",
           "type": "text/css"
         }
       ],
@@ -754,7 +754,7 @@
       "files": [
         {
           "path": "themes/midnight-galaxy.css",
-          "sha256": "0ca9079a9e375fadaf9e22d798091fd101e0139ced988ca0323f0587005067a7",
+          "sha256": "74135535fb4d26389a4d5ddb58d10d9ffeb13b9147c07b53b7b6c5707d068211",
           "type": "text/css"
         }
       ],
@@ -779,7 +779,7 @@
       "files": [
         {
           "path": "themes/modern-minimalist.css",
-          "sha256": "413ea8ad167bbd7266e58b473598788ae39ca2d1ab1e743e97b1bf0fc9f0ba21",
+          "sha256": "f0a0ebef6609f42e1b25be9743ad6d88f99cc8e28bdea04662b31c37f374ddef",
           "type": "text/css"
         }
       ],
@@ -804,7 +804,7 @@
       "files": [
         {
           "path": "themes/ocean-depths.css",
-          "sha256": "2d7360ecc3f53178100fba7370608937fed91ca3d7691d49f88431afc8598697",
+          "sha256": "883311d2283cb7fe90090c24cfc9e9640bc97d8f28e43ff77ec1c08bb6d14780",
           "type": "text/css"
         }
       ],
@@ -829,7 +829,7 @@
       "files": [
         {
           "path": "themes/sunset-boulevard.css",
-          "sha256": "9e15f6544f83ac0d2712e9e4b28187e5a7a017fdeba3411a3b09e3df24e44582",
+          "sha256": "f149361ff847fa50cb0e13eb96a588a8238cd91f76616098ccc9259e2d2fa487",
           "type": "text/css"
         }
       ],
@@ -855,7 +855,7 @@
       "files": [
         {
           "path": "themes/tech-innovation.css",
-          "sha256": "da59090bf0098a549b9f6f89d908795707d229964003737f47b439c532c51f35",
+          "sha256": "0900405f94d4775fbd38ccfb488f3cb285fca3e03558bb6c042856da3c42b6a1",
           "type": "text/css"
         }
       ],

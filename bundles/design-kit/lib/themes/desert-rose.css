@@ -1,4 +1,4 @@
 :root{--hs-bg:#e8d5c4;--hs-fg:#5d2e46;--hs-accent:#b87d6d;--hs-accent-2:#d4a5a5;--hs-font-heading:"Instrument Sans",sans-serif;--hs-font-body:"Instrument Sans",sans-serif}
 body{background:var(--hs-bg);color:var(--hs-fg);font-family:var(--hs-font-body)}
 h1,h2,h3,h4,h5,h6{font-family:var(--hs-font-heading)}
-a{color:var(--hs-accent)}
+a{color:var(--hs-fg);text-decoration:underline;text-decoration-color:var(--hs-accent)}

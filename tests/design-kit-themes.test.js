@@ -45,3 +45,27 @@ test("themes.json is hash-listed", () => {
   const man = JSON.parse(readFileSync(join(LIB, "manifest.json"), "utf8"));
   assert.ok(man.meta_files.some((m) => m.path === "themes.json"));
 });
+
+test("every foreground/background pair the generated CSS sets reaches 4.5:1", () => {
+  for (const [id, t] of Object.entries(themes.themes)) {
+    const css = readFileSync(join(LIB, entries.get(`theme:${id}`).main), "utf8");
+    const vars = Object.fromEntries([...css.matchAll(/(--hs-[a-z0-9-]+):([^;}]+)/g)].map((m) => [m[1], m[2]]));
+    const resolve = (v) => { const m = /^var\((--hs-[a-z0-9-]+)\)$/.exec(v.trim()); return m ? vars[m[1]] : v.trim(); };
+    const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter((m) => !m[1].includes(":root")).map((m) => ({
+      sel: m[1].trim(),
+      decl: Object.fromEntries(m[2].split(";").filter(Boolean).map((d) => { const i = d.indexOf(":"); return [d.slice(0, i).trim(), resolve(d.slice(i + 1))]; })),
+    }));
+    const pageBg = rules.find((r) => r.decl["background"] || r.decl["background-color"]);
+    assert.ok(pageBg, `${id}: page background`);
+    const bgOf = (r) => r.decl["background-color"] || r.decl["background"] || pageBg.decl["background"] || pageBg.decl["background-color"];
+    let pairs = 0;
+    for (const r of rules) {
+      if (!r.decl.color) continue;
+      pairs++;
+      assert.match(r.decl.color, /^#[0-9a-f]{6}$/, `${id} ${r.sel} colour resolves`);
+      const c = contrast(r.decl.color, bgOf(r));
+      assert.ok(c >= 4.5, `${id}: "${r.sel}" ${r.decl.color} on ${bgOf(r)} is ${c.toFixed(2)} < 4.5`);
+    }
+    assert.ok(pairs >= 2, `${id}: expected body and link colours`);
+  }
+});
