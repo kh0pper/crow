@@ -1532,6 +1532,22 @@ test("?bot=<id> applies once: a later poll keeps the operator's own pick", async
   assert.equal(hub.els["perch-new-bot"].value, "alpha");
 });
 
+test("?bot=<id> not offered yet: the operator's own pick wins over a later poll that offers it", async () => {
+  // First roost: alpha + gamma (beta not attached yet). The operator picks
+  // gamma. A later poll offers beta too — it must NOT yank the select to beta.
+  const GAMMA = { id: "gamma", name: "Gamma", perch_attached: true, state: "working", sessions: [] };
+  let roost = { birds: [ROOST_TWO_BOTS.birds[0], GAMMA] };
+  const hub = await mountHub({ fetchImpl: (m, p) => roostFetch(roost)(m, p), initialSearch: "?bot=beta" });
+  const sel = hub.els["perch-new-bot"];
+  assert.notEqual(sel.value, "beta");
+  sel.value = "gamma";
+  sel.onchange();
+  roost = { birds: [ROOST_TWO_BOTS.birds[0], ROOST_TWO_BOTS.birds[1], GAMMA] };
+  for (const fn of hub.timers.values()) fn();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(sel.value, "gamma");
+});
+
 test("C1: one attached bot spawns with no picker at all", async () => {
   const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
   assert.equal(hub.els["perch-new-bot"].hidden, true, "a one-item dropdown is a tap for nothing");

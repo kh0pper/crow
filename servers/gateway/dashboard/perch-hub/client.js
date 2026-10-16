@@ -910,7 +910,9 @@ export function perchHubJs(lang = "en") {
       renderLaunchModels(r.j.models,launchModels.default);
     });
   }
-  el('perch-new-bot').onchange=function(){ syncLaunchModels(); };
+  /* The operator's own pick ends the ?bot= preselect: a later poll that
+     first offers that bot must not override what they chose. */
+  el('perch-new-bot').onchange=function(){ wantBot=null; syncLaunchModels(); };
 
   /* The launch control's own handler. Resolves the bot from the picker when
      there is one, then hands off to startSession() verbatim — the 409/403/
