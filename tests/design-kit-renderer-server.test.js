@@ -107,3 +107,10 @@ test("a reset that never settles does not wedge the queue (bounded like a render
   assert.equal((await post({ engine: "mermaid", source: "a" })).body.error.category, "timeout");
   assert.deepEqual(await post({ engine: "mermaid", source: "b" }), { status: 200, body: { svg: "<svg/>" } });
 });
+
+test("a sanitizer failure is a fixed render error with no line (the cleaner's text can quote the SVG)", async () => {
+  const clean = () => { throw new Error("SvgoParserError: <input>:7:3: Unclosed root tag SENTINEL-SVG-9"); };
+  const { post } = await start({ mermaid: ok }, {}, clean);
+  const r = await post({ engine: "mermaid", source: "abc" });
+  assert.deepEqual(r, { status: 422, body: { error: { code: "render_failed", category: "render error" } } });
+});

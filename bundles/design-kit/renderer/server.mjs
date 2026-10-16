@@ -61,7 +61,10 @@ export function createRenderServer({ engines, clean = (s) => s, limits = DEFAULT
         const raw = await job;
         if (typeof raw !== "string") throw new Error("render error");
         if (Buffer.byteLength(raw) > limits.svgBytes * 4) return fail(res, 422, "too_large", "output");
-        const svg = await clean(raw);
+        // A cleaner failure says nothing about the spec's lines and its text can
+        // quote the SVG: a fixed category, never a line (review of Task 8).
+        let svg;
+        try { svg = await clean(raw); } catch { log(`[render] ${engine}: sanitize failed`); return fail(res, 422, "render_failed", "render error"); }
         if (Buffer.byteLength(svg) > limits.svgBytes) return fail(res, 422, "too_large", "output");
         send(res, 200, { svg });
       } catch (e) {

@@ -8,5 +8,6 @@
   "category": "productivity",
   "tags": ["design", "fonts", "icons", "charts", "diagrams", "artifacts"],
   "icon": "image",
+  "docker": { "composefile": "docker-compose.yml" },
   "draft": true
 }

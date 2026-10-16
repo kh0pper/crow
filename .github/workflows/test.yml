@@ -162,6 +162,16 @@ jobs:
             echo "npm audit failed, retry $i/3"; sleep $((i*10))
           done
           exit 1
+      # The design kit renderer parses specs that can come from outside the
+      # owner's Crow (vega, mermaid, svgo, puppeteer-core): its own lock file gets
+      # the same blocking critical-tier audit.
+      - name: npm audit (blocking, critical, design-kit renderer production deps)
+        run: |
+          for i in 1 2 3; do
+            npm audit --prefix bundles/design-kit/renderer --omit=dev --audit-level=critical && exit 0
+            echo "npm audit failed, retry $i/3"; sleep $((i*10))
+          done
+          exit 1
       - name: npm audit (informational, full)
         continue-on-error: true
         run: npm audit || true
