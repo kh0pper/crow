@@ -115,7 +115,7 @@
   // sheet, open or not (and above it in z-order), never under it.
   function placeSelBar() {
     var docked = window.getComputedStyle(side).position === "fixed";
-    selBar.style.bottom = docked ? (side.offsetHeight + 8) + "px" : "";
+    selBar.style.bottom = docked ? "calc(" + (side.offsetHeight + 8) + "px + var(--crow-player-h,0px))" : "";   // the sheet sits on the player bar
   }
   window.addEventListener("resize", placeSelBar);
   // S7: no floating button. Pages and diagrams get the Comment toggle in the

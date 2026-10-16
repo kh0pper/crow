@@ -1,4 +1,5 @@
-/* Crow Artifacts — viewer page. Perch tokens (light-first, OS-driven dark). */
+/* Crow Artifacts — viewer page. Perch tokens (light-first, OS-driven dark).
+   --crow-player-h: the player bar's height while it shows, else 0 (set by the core player shell). */
 #crow-artifact-viewer{--sky:#eef1f3;--card:#fff;--ink:#22303a;--dim:#5d6d78;--teal:#0e6b62;--teal-soft:#dcecea;
 --line:#dde4e8;--ok:#1d6b43;--ok-soft:#e1f1e8;--warn:#8a5300;--warn-soft:#fbefd6;--err:#b42318;--err-soft:#fbe8e6;--pin:#d1633e}
 @media (prefers-color-scheme:dark){#crow-artifact-viewer{--sky:#131a1f;--card:#1b242b;--ink:#e4ebef;--dim:#8fa0ab;
@@ -7,7 +8,7 @@ html,body{margin:0;padding:0;overscroll-behavior-y:contain}   /* S4: no pull-to-
 body{background:#eef1f3}
 @media (prefers-color-scheme:dark){body{background:#131a1f}}
 #crow-artifact-viewer{box-sizing:border-box;min-height:100vh;background:var(--sky);color:var(--ink);
-  font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:12px 16px 96px;overflow-x:hidden}
+  font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:12px 16px calc(96px + var(--crow-player-h,0px));overflow-x:hidden}
 #crow-artifact-viewer *,#crow-artifact-viewer *::before,#crow-artifact-viewer *::after{box-sizing:inherit}
 #crow-artifact-viewer button,#crow-artifact-viewer select,#crow-artifact-viewer summary,#crow-artifact-viewer .cv-openchat{
   min-height:44px;min-width:44px;padding:8px 12px;border:1px solid var(--line);border-radius:10px;background:var(--card);
@@ -81,7 +82,7 @@ body{background:#eef1f3}
 
 /* Phone and narrow panes (the hub's sheet, a split pane): a bottom sheet. */
 @media (max-width:1023.98px){
-  .cv-side{position:fixed;left:0;right:0;bottom:0;z-index:25;border-radius:14px 14px 0 0;max-height:62px;overflow:hidden;
+  .cv-side{position:fixed;left:0;right:0;bottom:var(--crow-player-h,0px);z-index:25;border-radius:14px 14px 0 0;max-height:62px;overflow:hidden;
     box-shadow:0 -4px 20px rgba(0,0,0,.18);transition:max-height .2s}
   .cv-side.cv-open{max-height:70vh;overflow-y:auto;overscroll-behavior:contain}
   .cv-handle{flex:1 1 auto}
@@ -89,9 +90,9 @@ body{background:#eef1f3}
 /* Wide: the threads column on the right, the frame beside it. */
 @media (min-width:1024px){
   .cv-body{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px;align-items:start}
-  .cv-side{position:sticky;top:12px;max-height:calc(100vh - 24px);overflow-y:auto}
+  .cv-side{position:sticky;top:12px;max-height:calc(100vh - 24px - var(--crow-player-h,0px));overflow-y:auto}
   .cv-handle{pointer-events:none;border:0 !important;background:transparent !important;font-weight:600}
-  #crow-artifact-viewer{padding-bottom:24px}
+  #crow-artifact-viewer{padding-bottom:calc(24px + var(--crow-player-h,0px))}
 }
 /* The way out (full-tab viewer only) and the owner's comment actions. */
 /* QW4 B2: a slim, full-bleed, header-like bar. The negative margins undo the
@@ -118,7 +119,7 @@ body{background:#eef1f3}
 .cv-where-opt.cv-disabled{color:var(--dim)}
 /* D28: the trusted "Comment on <selection>" button. S6: above the bottom
    sheet (z-order and position; viewer-client sets bottom from the sheet). */
-.cv-selbar{position:fixed;left:16px;right:16px;bottom:24px;z-index:30;display:flex;justify-content:center}
-@media (max-width:1023.98px){.cv-selbar{bottom:70px}}
+.cv-selbar{position:fixed;left:16px;right:16px;bottom:calc(24px + var(--crow-player-h,0px));z-index:30;display:flex;justify-content:center}
+@media (max-width:1023.98px){.cv-selbar{bottom:calc(70px + var(--crow-player-h,0px))}}
 .cv-selbar{pointer-events:none}
 .cv-selbar button{pointer-events:auto;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;box-shadow:0 2px 10px rgba(0,0,0,.18)}
