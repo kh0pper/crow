@@ -408,7 +408,7 @@ export function createKioskRuntime(deps) {
     sweepWarmAt.set(d.id, t);
     warm(d);
   };
-  const sweep = (deps.setInterval || setInterval)(() => {
+  const sweep = (deps.setInterval || setInterval)(async () => {
     for (const id of hub.connectedIds()) {
       for (const w of wm.sweepIdle(id)) hub.sendTo(id, { type: "wm", action: "close", id: w.id });
       // Keep STT warm for an idle connected display (throttled to 10 min inside sttWarmup).
@@ -417,8 +417,10 @@ export function createKioskRuntime(deps) {
     }
     // Session displays: a login that ended closes its display within a minute even when idle,
     // and a display closed for longer than the grace period leaves nothing behind.
-    hub.revalidateSessions().catch((err) => log(`[kiosk] session sweep: ${err.message}`));
+    const open = hub.revalidateSessions().catch((err) => log(`[kiosk] session sweep: ${err.message}`));
     expireSessionDisplays();
+    // B3: audio handed to the player bar outlives the overlay, so its login is re-checked here with no socket open.
+    await Promise.all([open, revalidateBarDisplays().catch((err) => log(`[kiosk] session sweep: ${err.message}`))]);
   }, 60_000);
   sweep.unref?.();
 
@@ -426,13 +428,29 @@ export function createKioskRuntime(deps) {
   // Off entirely unless the gateway provides the core session helpers.
   const sessionMode = typeof deps.sessionFromRequest === "function" && typeof deps.verifySession === "function" && typeof deps.csrfTokenAccepted === "function";
   const closedSessionDisplays = new Map();   // device id → closed-at (ms)
+  /**
+   * B3: session displays whose overlay closed while their audio was in the player bar → their login's check
+   * (verifySession over the token held in this closure only, as the socket's own revalidate does). The minute
+   * sweep ends the media at logout; an entry whose stream is gone (stopped, or the 12 h ticket ran out) is dropped.
+   */
+  const barRevalidators = new Map();
+  async function revalidateBarDisplays() {
+    for (const [id, check] of [...barRevalidators]) {
+      if (hub.isConnected(id)) continue;            // an open overlay: the hub re-checks its socket
+      if (!media.holdsTicket(id)) { barRevalidators.delete(id); media.closeDevice(id); continue; }
+      let ok = false;
+      try { ok = (await check()) === true; }
+      catch (err) { log(`[kiosk] session check failed: ${err?.message}`); continue; }   // the store could not be read: try next minute
+      if (!ok) { barRevalidators.delete(id); media.closeDevice(id); }                     // logged out: tickets revoked, open streams cut
+    }
+  }
   function expireSessionDisplays(at = now()) {
     for (const [id, closedAt] of closedSessionDisplays) {
       if (hub.isConnected(id)) { closedSessionDisplays.delete(id); continue; }
       if (at - closedAt < SESSION_DISPLAY_GRACE_MS) continue;
       closedSessionDisplays.delete(id);
       wm.closeAll(id);
-      media.closeDevice(id);
+      if (!(barRevalidators.has(id) && media.active(id))) media.closeDevice(id);   // B3: the bar's audio lives to logout
       try { deps.voice.convo?.clear?.(id); } catch {}
       sweepWarmAt.delete(id);
     }
@@ -889,12 +907,15 @@ export function createKioskRuntime(deps) {
         accept(req, socket, head, {
           authorize: (msg) => authorizeSessionHello(req, token, msg),
           revalidate: () => deps.verifySession(token),
-          onClose: (d) => { closedSessionDisplays.set(d.id, now()); },
+          onClose: (d, caps) => {
+            closedSessionDisplays.set(d.id, now());
+            if (caps?.bar) barRevalidators.set(d.id, () => deps.verifySession(token)); else barRevalidators.delete(d.id);
+          },
         });
       }).catch((err) => { log(`[kiosk] session upgrade failed: ${err?.message}`); refuse(socket, 401, "Unauthorized"); });
     });
     return { openSessionCount: () => hub.connectedIds().length };
   }
 
-  return { router, attachUpgrade, hub, pairing, wm, metrics, tickets, media, stationsReady, musicReady, music, announce, show, bootWarmup, migrateVolumeCaps, expireSessionDisplays, stop: () => { clearInterval(sweep); music?.stop(); } };
+  return { router, attachUpgrade, hub, pairing, wm, metrics, tickets, media, stationsReady, musicReady, music, announce, show, bootWarmup, migrateVolumeCaps, expireSessionDisplays, barDisplays: () => barRevalidators.size, stop: () => { clearInterval(sweep); music?.stop(); } };
 }

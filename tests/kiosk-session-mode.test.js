@@ -834,3 +834,103 @@ test("B3 endpoint: absent without the core session helpers (an older gateway)", 
     assert.equal((await fetch(b + MEDIA, { method: "POST", headers: { Cookie: cookie(), "X-Crow-Csrf": CSRF, "Content-Type": "application/json" }, body: "{}" })).status, 404);
   } finally { k.stop(); s.close(); }
 });
+
+test("B3 lifetime: overlay closed with bar:true — the ticket still answers 200 after 2 min and several sweeps; the display's windows still go", async () => {
+  const r = await barServe();
+  try {
+    const c = await r.open();
+    const path = r.play();
+    const id = r.idOf();
+    r.k.wm.open(id, { kind: "content", title: "Note", blocks: [] });
+    await c.shut();
+    for (let i = 0; i < 5; i++) { r.clock.t += 60_000; await r.sweep(); }
+    assert.equal(r.mediaTimers.filter((t) => t.on).length, 0, "no grace-period cut was armed");
+    assert.equal((await r.stream(path)).status, 200);
+    assert.equal((await (await r.get()).json()).item.url, path, "a dashboard reload finds it (GET)");
+    assert.equal(r.k.wm.list(id).length, 0, "windows, timers and conversation still end with the grace period");
+  } finally { r.close(); }
+});
+
+test("B3 dormancy (regression guard): today's session page without bar — closing the overlay cuts the stream after 30 s, and the display is gone after the grace", async () => {
+  const r = await barServe();
+  try {
+    const c = await r.open({ bar: false });
+    const path = r.play();
+    await c.shut();
+    const cut = r.mediaTimers.filter((t) => t.on);
+    assert.deepEqual(cut.map((t) => t.ms), [30_000], "sessionLost armed as before");
+    cut[0].fn();
+    assert.equal((await r.stream(path)).status, 404);
+    // And had the cut not fired, the grace sweep still closes the media (unchanged).
+    const c2 = await r.open({ bar: false });
+    const p2 = r.play();
+    await c2.shut();
+    r.clock.t += 3 * 60_000;
+    await r.sweep();
+    assert.equal(r.k.media.active(r.idOf()), false);
+    assert.equal((await r.stream(p2)).status, 404);
+  } finally { r.close(); }
+});
+
+test("S5 logout ends bar media with the overlay closed: within one sweep the ticket 404s, the open stream is cut, the endpoint 401s", async () => {
+  const r = await barServe();
+  const { token } = await auth.mintSsoSession("test");
+  try {
+    const c = await r.open({ tok: token });
+    const path = r.play(token);
+    const open = await r.stream(path, true);
+    assert.equal(open.status, 200);
+    const body = open.body.getReader();
+    await c.shut();
+    r.clock.t += 60_000; await r.sweep();
+    assert.equal(r.k.media.active(r.idOf(token)), true, "still logged in: it plays on");
+    await auth.destroySession(token);
+    await r.sweep();
+    assert.equal(r.held.length, 1);
+    assert.equal(r.held[0].aborted, true, "the in-flight stream request was cut");
+    await body.cancel().catch(() => {});
+    assert.equal((await r.stream(path)).status, 404);
+    assert.equal(r.k.media.active(r.idOf(token)), false);
+    assert.equal((await r.get(token)).status, 401);
+    assert.equal((await r.post({ do: "resume", id: "m1", owner: OWNER }, { tok: token })).status, 401);
+  } finally { r.close(); await auth.destroySession(token).catch(() => {}); }
+});
+
+test("B3 lifetime: a closed bar display whose ticket has run out (12 h) is dropped by the sweep — no login check is kept for it", async () => {
+  const r = await barServe();
+  try {
+    const c = await r.open();
+    r.play();
+    await c.shut();
+    r.clock.t += 12 * 60 * 60 * 1000 + 1;
+    await r.sweep();
+    assert.equal(r.k.media.active(r.idOf()), false);
+    assert.equal(r.k.barDisplays(), 0);
+  } finally { r.close(); }
+});
+
+test("S6 no ticket in any log line: play, close the overlay, next, a stream that fails, error, logout", async () => {
+  const r = await barServe();
+  const { token } = await auth.mintSsoSession("test");
+  const seen = new Set();
+  const note = (v) => { for (const m of JSON.stringify(v).matchAll(new RegExp(TICKET_IN.source, "g"))) seen.add(m[1]); };
+  try {
+    const c = await r.open({ tok: token });
+    r.play(token, ["One", "Two", "Three"]);
+    note(c.msgs); note(r.k.media.view(r.idOf(token)));
+    await c.shut();
+    let v = await (await r.get(token)).json(); note(v);
+    v = await (await r.post({ do: "next", id: v.item.id, owner: OWNER }, { tok: token })).json(); note(v);
+    // A stream request on a revoked ticket and a malformed one, both answered without logging the path.
+    for (const t of seen) await r.stream(`/display/t/${t}/stream`);
+    await r.stream("/display/t/not-a-ticket/stream");
+    v = await (await r.post({ do: "error", id: v.item.id, owner: OWNER }, { tok: token })).json(); note(v);
+    await auth.destroySession(token);
+    await r.sweep();
+    assert.ok(seen.size >= 3, `tickets seen: ${seen.size}`);
+    for (const line of r.barLogs) {
+      assert.doesNotMatch(line, TICKET_IN, line);
+      for (const t of seen) assert.ok(!line.includes(t), line);
+    }
+  } finally { r.close(); await auth.destroySession(token).catch(() => {}); }
+});
