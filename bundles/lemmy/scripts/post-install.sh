@@ -42,24 +42,19 @@ cat <<EOF
 
 Lemmy stack is up. Next steps:
 
-  1. Expose via Caddy (one-time):
-       caddy_add_federation_site {
-         domain: "${LEMMY_HOSTNAME:-lemmy.example.com}",
-         upstream: "lemmy-ui:1234",
-         profile: "activitypub"
-       }
+  1. Lemmy created the admin admin_pending with the password Crow generated
+     at install (Settings -> Passwords). There is no setup wizard.
 
-  2. Open https://${LEMMY_HOSTNAME:-<your-domain>}/ and complete the setup
-     wizard (admin username + password + site name). The compose
-     entrypoint creates a first admin, admin_pending, with the password
-     Crow generated at install (Settings -> Passwords).
+  2. Expose ${LEMMY_HOSTNAME:-<your-domain>} with a Caddy site that sends /api,
+     /pictrs, /feeds, /nodeinfo, /.well-known and ActivityPub requests to
+     lemmy:8536 and everything else to lemmy-ui:1234 (lemmy-ui does not proxy
+     the API).
 
   3. Obtain a JWT:
        curl -X POST https://${LEMMY_HOSTNAME:-<your-domain>}/api/v3/user/login \\
          -H 'Content-Type: application/json' \\
-         -d '{"username_or_email":"admin","password":"<your-pw>"}'
-     Paste the returned jwt into .env as LEMMY_JWT, then:
-       crow bundle restart lemmy
+         -d '{"username_or_email":"admin_pending","password":"<from Settings -> Passwords>"}'
+     Put the returned jwt in LEMMY_JWT, then restart the extension.
 
   4. Verify:
        lemmy_status {}

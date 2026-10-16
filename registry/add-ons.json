@@ -2518,7 +2518,7 @@
     {
       "id": "lemmy",
       "name": "Lemmy",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "description": "Federated link aggregator and discussion platform over ActivityPub — Reddit-alternative on the fediverse. Posts, comments, communities, votes; remote Lemmy/Mastodon/Kbin users can follow your communities and comment cross-server.",
       "type": "bundle",
       "author": "Crow",
@@ -2573,7 +2573,7 @@
       "env_vars": [
         {
           "name": "LEMMY_HOSTNAME",
-          "description": "Public domain (subdomain; path-mounts break ActivityPub).",
+          "description": "Public hostname, bare (no https://, no path), e.g. lemmy.example.com. Lemmy stores it in every federated identity at its first start, so choose it before installing.",
           "required": true
         },
         {
@@ -2592,7 +2592,7 @@
         },
         {
           "name": "LEMMY_ADMIN_PASSWORD",
-          "description": "Password of the first Lemmy admin (username admin_pending). Crow generates it at install and saves it in Settings → Passwords (this machine only); Lemmy creates the admin with it on its first successful start. (This bundle's container does not start yet — see the notes.)",
+          "description": "Password of the first Lemmy admin (username admin_pending). Crow generates it at install and saves it in Settings → Passwords (this machine only); Lemmy creates the admin with it on its first start against an empty database; change it after your first login.",
           "required": true,
           "secret": true,
           "generate": "secret",
@@ -2602,7 +2602,7 @@
         },
         {
           "name": "LEMMY_JWT",
-          "description": "Admin login JWT (obtain via POST /api/v3/user/login after registering the admin via the web UI).",
+          "description": "Admin login JWT: POST /api/v3/user/login with username admin_pending and the admin password from Settings → Passwords, then paste the returned jwt here.",
           "required": false,
           "secret": true
         },
@@ -2611,23 +2611,11 @@
           "description": "Internal URL the MCP server uses to reach Lemmy's API (default http://lemmy:8536 over crow-federation).",
           "default": "http://lemmy:8536",
           "required": false
-        },
-        {
-          "name": "LEMMY_OPEN_REGISTRATION",
-          "description": "Allow new user signups (true/false). Default false — opens registration only after moderation tooling is configured.",
-          "default": "false",
-          "required": false
-        },
-        {
-          "name": "LEMMY_FEDERATION_ENABLED",
-          "description": "Whether to federate with other ActivityPub servers (true/false).",
-          "default": "true",
-          "required": false
         }
       ],
       "ports": [],
       "webUI": null,
-      "notes": "Four containers (lemmy + lemmy-ui + postgres + pict-rs). Expose via caddy_add_federation_site { domain: LEMMY_HOSTNAME, upstream: 'lemmy-ui:1234', profile: 'activitypub' }. The UI proxies /api/v3/ to lemmy:8536 internally. Initial admin registers via the /signup page during the first-boot setup wizard (no CLI bootstrap needed). Known issue: the entrypoint runs a path the pinned Lemmy image does not have, so the container does not start yet; a fix needs a live test.",
+      "notes": "Four containers (lemmy + lemmy-ui + postgres + pict-rs); data lives in two Docker volumes (database, images), removed by uninstall with delete data. On its first start Lemmy creates the admin admin_pending with the generated password saved in Settings → Passwords; log in with it, then change the password and rename the account or add your own admin. lemmy-ui does not proxy the API: the public site must send /api, /pictrs, /feeds, /nodeinfo, /.well-known and ActivityPub requests (Accept: application/activity+json) to lemmy:8536 and the rest to lemmy-ui:1234. caddy_add_federation_site takes one upstream, so that split is a hand-written Caddy site for now. Federation, registration and captcha are site settings in Lemmy's Admin → Settings (Lemmy 0.19 does not read them from its config file). Licensing: Lemmy and lemmy-ui are AGPL-3.0 (image labels: AGPL-3.0-or-later), pict-rs is AGPL-3.0-only, Postgres uses the PostgreSQL License. Crow pulls the unmodified upstream images and runs them as separate containers, so Crow's own code stays MIT; a hosted Crow offering that runs Lemmy for other people must offer them the source of the Lemmy version it runs, including any changes (AGPL section 13).",
       "official": true
     },
     {
