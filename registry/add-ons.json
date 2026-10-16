@@ -2208,7 +2208,7 @@
     {
       "id": "kiosk",
       "name": "Kiosk display",
-      "version": "0.3.13",
+      "version": "0.3.14",
       "type": "mcp-server",
       "author": "Crow",
       "category": "hardware",
