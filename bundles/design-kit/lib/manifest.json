@@ -1,0 +1,962 @@
+{
+  "schema": 1,
+  "kit_version": "1.0.0",
+  "entries": [
+    {
+      "name": "css:open-props",
+      "kind": "css",
+      "version": "1.7.23",
+      "license": "MIT",
+      "license_file": "licenses/css-open-props.txt",
+      "license_sha256": "fed3aa342094f6bb33701d09133c159a4c124e509ede255a889dd2c28ec3ab6e",
+      "source": "npm:open-props@1.7.23",
+      "npm_integrity": "sha512-+xyrJmxV9QUBFbSwPROYhOg/FLXry+uuPr4R+B5EaE4556Oc18/8ZC/fL5A+/lbRSwNvA0Alh+C0KpyFWLmLZg==",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "css/open-props/open-props.min.css",
+          "sha256": "c821e5530345f79f48ad24ff1896eb6d06d5fe12297c94c5f85a5def8eebe559",
+          "type": "text/css"
+        }
+      ],
+      "main": "css/open-props/open-props.min.css",
+      "notes": [
+        "open-props.min.css: --noise-1: inline SVG fails the lib-check SVG allowlist, replaced with none",
+        "open-props.min.css: --noise-2: inline SVG fails the lib-check SVG allowlist, replaced with none",
+        "open-props.min.css: --noise-3: inline SVG fails the lib-check SVG allowlist, replaced with none",
+        "open-props.min.css: --noise-4: inline SVG fails the lib-check SVG allowlist, replaced with none",
+        "open-props.min.css: --noise-5: inline SVG fails the lib-check SVG allowlist, replaced with none"
+      ]
+    },
+    {
+      "name": "css:pico",
+      "kind": "css",
+      "version": "2.1.1",
+      "license": "MIT",
+      "license_file": "licenses/css-pico.txt",
+      "license_sha256": "afaff063e044233f917b7807dccab022f09dca474f92b642846bee4850655bbf",
+      "notices": [
+        {
+          "path": "licenses/css-pico-banner.txt",
+          "sha256": "cb278fbd4d69ee6cf86f293ab7c3cd46bd03049dfa39018ae270e3b77032ccda"
+        }
+      ],
+      "source": "npm:@picocss/pico@2.1.1",
+      "npm_integrity": "sha512-kIDugA7Ps4U+2BHxiNHmvgPIQDWPDU4IeU6TNRdvXQM1uZX+FibqDQT2xUOnnO2yq/LUHcwnGlu1hvf4KfXnMg==",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "css/pico/pico.min.css",
+          "sha256": "b417ad72a1ee94144b3e9f988a24fd90fa9b69a7ef708bff02cb248096d790d2",
+          "type": "text/css"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-checkbox.svg",
+          "sha256": "08cdae007ac07d1b19cc1da76c8e1621e1ccf4a68e2d35bddaa7e6c4d2c914e7",
+          "type": "image/svg+xml"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-minus.svg",
+          "sha256": "29781427e500acc97c11f7a1140c41859def74364e3ea7cb23d151342c6a05b9",
+          "type": "image/svg+xml"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-chevron.svg",
+          "sha256": "b229b93105cf730d9c82453d8b7d2fe0c626e4fefe158376b3196cf5592f63c6",
+          "type": "image/svg+xml"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-date.svg",
+          "sha256": "661e4cdd038db52b87b9edae28e40e13c9def5f453363b8cf1c742a06196274b",
+          "type": "image/svg+xml"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-time.svg",
+          "sha256": "a81521e9a4c9f8392df57fd01dff92cf5026ae20d3b540c9a89c0e7c82f6b0bf",
+          "type": "image/svg+xml"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-search.svg",
+          "sha256": "f5ca49c4652cefdb408ecf6800d876b76fce2d0a1ab798657131290545cec56f",
+          "type": "image/svg+xml"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-close.svg",
+          "sha256": "1cf499e54abf1adc36eb0c881ad840a4c064883993e8865dd1479555d8222b6f",
+          "type": "image/svg+xml"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-valid.svg",
+          "sha256": "ff23289d8cc94b9f245657d4dc7d21f30dc661d8a7166d366fb55faed809a233",
+          "type": "image/svg+xml"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-invalid.svg",
+          "sha256": "5f0e070c423d28c59cb09ea8ada84ee6260d81dd91cec3fc23da546fb9ea3dc1",
+          "type": "image/svg+xml"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-valid-2.svg",
+          "sha256": "bd79f1e531fd7509ec520f2e74ac54f8958342a0c005020071b1b61ef721c6fe",
+          "type": "image/svg+xml"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-invalid-2.svg",
+          "sha256": "a5bafed8d7781a7b26171dc39c5d1ef2a90da98e4a021cc4f30b431929101d59",
+          "type": "image/svg+xml"
+        }
+      ],
+      "main": "css/pico/pico.min.css",
+      "notes": [
+        "css/pico.min.css: 1 comment(s) removed; 1 licence banner(s) kept in licenses/css-pico-banner.txt",
+        "css/pico.min.css: --pico-icon-checkbox: inline SVG extracted to icons/pico-icon-checkbox.svg",
+        "css/pico.min.css: --pico-icon-minus: inline SVG extracted to icons/pico-icon-minus.svg",
+        "css/pico.min.css: --pico-icon-chevron: inline SVG extracted to icons/pico-icon-chevron.svg",
+        "css/pico.min.css: --pico-icon-date: inline SVG extracted to icons/pico-icon-date.svg",
+        "css/pico.min.css: --pico-icon-time: inline SVG extracted to icons/pico-icon-time.svg",
+        "css/pico.min.css: --pico-icon-search: inline SVG extracted to icons/pico-icon-search.svg",
+        "css/pico.min.css: --pico-icon-close: inline SVG extracted to icons/pico-icon-close.svg",
+        "css/pico.min.css: --pico-icon-loading: inline SVG fails the lib-check SVG allowlist, replaced with none",
+        "css/pico.min.css: --pico-icon-valid: inline SVG extracted to icons/pico-icon-valid.svg",
+        "css/pico.min.css: --pico-icon-invalid: inline SVG extracted to icons/pico-icon-invalid.svg",
+        "css/pico.min.css: --pico-icon-valid: inline SVG extracted to icons/pico-icon-valid-2.svg",
+        "css/pico.min.css: --pico-icon-invalid: inline SVG extracted to icons/pico-icon-invalid-2.svg",
+        "css/pico.min.css: --pico-icon-valid: inline SVG extracted to icons/pico-icon-valid-2.svg",
+        "css/pico.min.css: --pico-icon-invalid: inline SVG extracted to icons/pico-icon-invalid-2.svg"
+      ]
+    },
+    {
+      "name": "font:bricolage-grotesque",
+      "kind": "font",
+      "version": "5.3.0",
+      "license": "OFL-1.1",
+      "license_file": "licenses/font-bricolage-grotesque.txt",
+      "license_sha256": "923f4ddf0fd39f9b7794ab0df7332f3d95dc43e8ad7ec2289d6d9e8491177f51",
+      "source": "npm:@fontsource/bricolage-grotesque@5.3.0",
+      "npm_integrity": "sha512-MdOVb/5in11IfN/IQJOExMuu6AroCIQbirl0yX7NUvKk+h0HYIKfGaVAXRS/gCPil4aFxWhjZnOw28tUwv7tFw==",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "font/bricolage-grotesque/bricolage-grotesque-latin-400-normal.woff2",
+          "sha256": "826772cb1251f09b4c9d76fc6266993d67b03507bee337ea2eac0fb3e0879de3",
+          "type": "font/woff2"
+        },
+        {
+          "path": "font/bricolage-grotesque/bricolage-grotesque-latin-700-normal.woff2",
+          "sha256": "4c373ce3c1cca41c864eb3e27c059a59fc6310547ab9c9b6cd780d387ba24206",
+          "type": "font/woff2"
+        },
+        {
+          "path": "font/bricolage-grotesque/font.css",
+          "sha256": "3611694fa325248691fd8c197b448ab85eda98961bcedf49dd329e21cc657785",
+          "type": "text/css"
+        }
+      ],
+      "main": "font/bricolage-grotesque/font.css",
+      "family": "Bricolage Grotesque",
+      "fallback": "sans-serif",
+      "weights": [
+        400,
+        700
+      ]
+    },
+    {
+      "name": "font:crimson-pro",
+      "kind": "font",
+      "version": "5.3.0",
+      "license": "OFL-1.1",
+      "license_file": "licenses/font-crimson-pro.txt",
+      "license_sha256": "a36998c273ee904e6303921fce9da2fe49c96b42cfb0bc1b70de9c3b58546a41",
+      "source": "npm:@fontsource/crimson-pro@5.3.0",
+      "npm_integrity": "sha512-PXQH0NGma2wwskZAySBH+s/ezAYBwyDH0I4oRURBu9u81nNUCm5DcNCJaUS9H0UR1y8qlslLfVRU6mnDBpffrA==",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "font/crimson-pro/crimson-pro-latin-400-normal.woff2",
+          "sha256": "d2a3a146387d91b8d476d508849dd1d93a3cbde85d1e0d303e3d5c970726a703",
+          "type": "font/woff2"
+        },
+        {
+          "path": "font/crimson-pro/crimson-pro-latin-700-normal.woff2",
+          "sha256": "e34581dd821e87e007f5525f03b45f90207539a6c79132851217b5c1a0616c68",
+          "type": "font/woff2"
+        },
+        {
+          "path": "font/crimson-pro/font.css",
+          "sha256": "d2c70df2fe9b4b7bbe56c9f3985e589f4f0e27ae59a0d7abc027f85e757bf90d",
+          "type": "text/css"
+        }
+      ],
+      "main": "font/crimson-pro/font.css",
+      "family": "Crimson Pro",
+      "fallback": "serif",
+      "weights": [
+        400,
+        700
+      ]
+    },
+    {
+      "name": "font:ibm-plex-mono",
+      "kind": "font",
+      "version": "5.3.0",
+      "license": "OFL-1.1",
+      "license_file": "licenses/font-ibm-plex-mono.txt",
+      "license_sha256": "23b0a9d0c6d3f140a0b77e483c5cfa6bba574325ef5cb189ed9f2fec4884533f",
+      "source": "npm:@fontsource/ibm-plex-mono@5.3.0",
+      "npm_integrity": "sha512-eTgnZjZEGk1QtD3ZstF+Vclo2HLAni8YMy34/DxllwZvyz1lR/1RF/xTiAquOBO7MvqBx8D2Ig2WCPMVfdZu7Q==",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "font/ibm-plex-mono/ibm-plex-mono-latin-400-normal.woff2",
+          "sha256": "08949f728dc52d528e69b1667d15c89a5686a4ee9a296ff90983985f99c380f7",
+          "type": "font/woff2"
+        },
+        {
+          "path": "font/ibm-plex-mono/ibm-plex-mono-latin-700-normal.woff2",
+          "sha256": "4f84d86cfd060f4ded334358ff8a4c81d4db2ed5addd568359d693f44a87765a",
+          "type": "font/woff2"
+        },
+        {
+          "path": "font/ibm-plex-mono/font.css",
+          "sha256": "0f2aec5ac86acc8d6ab9757fffa71f7b3ad5ef81bd1f92c2e43a8daa11df6431",
+          "type": "text/css"
+        }
+      ],
+      "main": "font/ibm-plex-mono/font.css",
+      "family": "IBM Plex Mono",
+      "fallback": "monospace",
+      "weights": [
+        400,
+        700
+      ]
+    },
+    {
+      "name": "font:instrument-sans",
+      "kind": "font",
+      "version": "5.3.0",
+      "license": "OFL-1.1",
+      "license_file": "licenses/font-instrument-sans.txt",
+      "license_sha256": "c27a3c53c3beed7f5c26853afa15991478ff7145d3754a36b0382f84e10c0d03",
+      "source": "npm:@fontsource/instrument-sans@5.3.0",
+      "npm_integrity": "sha512-QwXc4hb/px3XvSPS2CPAOgey8nyrQFxgxrmXQQ+pN+P51hKdAcchxpg8rSbjANFfPu6VKXhDqkVDucXMZ9CM5g==",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "font/instrument-sans/instrument-sans-latin-400-normal.woff2",
+          "sha256": "9a91efaa3599a6ef01b2f49e9ec670e3a2f39baeef09c73198f1052cf3bb0850",
+          "type": "font/woff2"
+        },
+        {
+          "path": "font/instrument-sans/instrument-sans-latin-700-normal.woff2",
+          "sha256": "bcf650536cae57403741af193e1e237c245f8929b936f03601279079a64fd699",
+          "type": "font/woff2"
+        },
+        {
+          "path": "font/instrument-sans/font.css",
+          "sha256": "e22572fef2028c63837e7082503dfdc68878c7475b6a8457c5f0d6feec136763",
+          "type": "text/css"
+        }
+      ],
+      "main": "font/instrument-sans/font.css",
+      "family": "Instrument Sans",
+      "fallback": "sans-serif",
+      "weights": [
+        400,
+        700
+      ]
+    },
+    {
+      "name": "font:instrument-serif",
+      "kind": "font",
+      "version": "5.3.0",
+      "license": "OFL-1.1",
+      "license_file": "licenses/font-instrument-serif.txt",
+      "license_sha256": "b6106a757902d2d412e09d94dc4a226fe3da80485208a98003969f1b8b6b1d74",
+      "source": "npm:@fontsource/instrument-serif@5.3.0",
+      "npm_integrity": "sha512-mDiaIg0u67sYV59fie92Wz4sM8UiVlbL7fLxnFPCKkX15DMASEnQTREbaP5S5/3DCcsoAOcQ0sV9E4AeY4QqYQ==",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "font/instrument-serif/instrument-serif-latin-400-normal.woff2",
+          "sha256": "5eb09b5ac0e28b67c2f041c8ba6d244604ca0c0980d65912ab2d47fed84ddc31",
+          "type": "font/woff2"
+        },
+        {
+          "path": "font/instrument-serif/font.css",
+          "sha256": "2ef95014b28ef3136fd736232c89844f21aa1493d21e9d9fb09864f998149b29",
+          "type": "text/css"
+        }
+      ],
+      "main": "font/instrument-serif/font.css",
+      "family": "Instrument Serif",
+      "fallback": "serif",
+      "weights": [
+        400
+      ]
+    },
+    {
+      "name": "font:jetbrains-mono",
+      "kind": "font",
+      "version": "5.3.0",
+      "license": "OFL-1.1",
+      "license_file": "licenses/font-jetbrains-mono.txt",
+      "license_sha256": "403581b69dac5cff4079205e01c6b467e56af449ecbd7247693ddb1baafa005b",
+      "source": "npm:@fontsource/jetbrains-mono@5.3.0",
+      "npm_integrity": "sha512-fqDfB5I9f1p1TV486aUgB9t8zP84P0O1FtQR5Ol9vjwPy+S+EIGlVYm1cvj2W5shcZMTg2nZFdVMoH5wFu8a1A==",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "font/jetbrains-mono/jetbrains-mono-latin-400-normal.woff2",
+          "sha256": "14425ba9c695763c1547f48a206b7aa60350a33ae23de09f0407877f3fcd89eb",
+          "type": "font/woff2"
+        },
+        {
+          "path": "font/jetbrains-mono/jetbrains-mono-latin-700-normal.woff2",
+          "sha256": "d0d4e818808f2a0ba39b2b09d1989366f63494e295f003c7ef436697378507e8",
+          "type": "font/woff2"
+        },
+        {
+          "path": "font/jetbrains-mono/font.css",
+          "sha256": "7765d9489c83ac802391df78db0273d7e19dbc85dca8a80e7e50909ded6cc2ec",
+          "type": "text/css"
+        }
+      ],
+      "main": "font/jetbrains-mono/font.css",
+      "family": "JetBrains Mono",
+      "fallback": "monospace",
+      "weights": [
+        400,
+        700
+      ]
+    },
+    {
+      "name": "font:lora",
+      "kind": "font",
+      "version": "5.3.0",
+      "license": "OFL-1.1",
+      "license_file": "licenses/font-lora.txt",
+      "license_sha256": "948aed765160f7b974105606c21994715a171f89fca48e57bf1e0a23aca0bef1",
+      "source": "npm:@fontsource/lora@5.3.0",
+      "npm_integrity": "sha512-OK1g1z01rHVPqO5aw/FOIoDqc46KKYZdgL3NOLkxLWDk6QhDHhdr/h2BV1cke6gTvR1tzpDfdKyUkGsC+sQLeQ==",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "font/lora/lora-latin-400-normal.woff2",
+          "sha256": "ac079950fd9885261c0f73d9e87233f31b5427333ce0eb20e26c119458493c40",
+          "type": "font/woff2"
+        },
+        {
+          "path": "font/lora/lora-latin-700-normal.woff2",
+          "sha256": "c05fd5289492ed310ed882259b944ca5287e76e572a65d92d3941f9f44f0342a",
+          "type": "font/woff2"
+        },
+        {
+          "path": "font/lora/font.css",
+          "sha256": "c9300ac70ea562b409a49031dd930194f3b458eed067e1863f8b58c36754bc05",
+          "type": "text/css"
+        }
+      ],
+      "main": "font/lora/font.css",
+      "family": "Lora",
+      "fallback": "serif",
+      "weights": [
+        400,
+        700
+      ]
+    },
+    {
+      "name": "font:outfit",
+      "kind": "font",
+      "version": "5.3.0",
+      "license": "OFL-1.1",
+      "license_file": "licenses/font-outfit.txt",
+      "license_sha256": "0e5fcef5d93bfcae273c11c00f0bb453d3b5491860e1ac8b658767b7577c938f",
+      "source": "npm:@fontsource/outfit@5.3.0",
+      "npm_integrity": "sha512-0AVHzTTVJSxWDOxPKSfMeHhZeBFDU3cmgrcOb76ZEyhGo0+xgyG3GsLF3h9+X8w0IX7G4jzjJgFQEBiWdX6VgA==",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "font/outfit/outfit-latin-400-normal.woff2",
+          "sha256": "71f028fd2349990b3f8aa643abe767e82e0f596be407ae66f0004ff164121bdb",
+          "type": "font/woff2"
+        },
+        {
+          "path": "font/outfit/outfit-latin-700-normal.woff2",
+          "sha256": "5d5e3734089a74707292ce8a3e186def34cd63e33879f9ac3689a8d8da9d0706",
+          "type": "font/woff2"
+        },
+        {
+          "path": "font/outfit/font.css",
+          "sha256": "f2c0aed15b0db7cbbd9934e7dd0d9c3f931bacb478827cedfa9a464dd50f7bac",
+          "type": "text/css"
+        }
+      ],
+      "main": "font/outfit/font.css",
+      "family": "Outfit",
+      "fallback": "sans-serif",
+      "weights": [
+        400,
+        700
+      ]
+    },
+    {
+      "name": "font:work-sans",
+      "kind": "font",
+      "version": "5.3.0",
+      "license": "OFL-1.1",
+      "license_file": "licenses/font-work-sans.txt",
+      "license_sha256": "e7c426573d51f3d2e5e92254878c862344ffa0b9272f79a880f9f99010f002c7",
+      "source": "npm:@fontsource/work-sans@5.3.0",
+      "npm_integrity": "sha512-3cKV28+bEiLGdyOl0VgEGCFWE1XdZJu/K+nH4Jt76XC3T//XrRtm2EF7jA61GSMIy8sYp6ZFTE01nD3lLaBV9A==",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "font/work-sans/work-sans-latin-400-normal.woff2",
+          "sha256": "418b06936717d2e9b6c7a1fb61acb7e2f40030be4b230452f96505230e7b6b41",
+          "type": "font/woff2"
+        },
+        {
+          "path": "font/work-sans/work-sans-latin-700-normal.woff2",
+          "sha256": "c1e51267967030c3d8893931aa3b2e087b9caf44332cf7c384f4f4c22da0dadc",
+          "type": "font/woff2"
+        },
+        {
+          "path": "font/work-sans/font.css",
+          "sha256": "6d20686c973c82ac3639dc814603a75d0b6d3ce5bf741001adcbf7326b5589c9",
+          "type": "text/css"
+        }
+      ],
+      "main": "font/work-sans/font.css",
+      "family": "Work Sans",
+      "fallback": "sans-serif",
+      "weights": [
+        400,
+        700
+      ]
+    },
+    {
+      "name": "font:young-serif",
+      "kind": "font",
+      "version": "5.3.0",
+      "license": "OFL-1.1",
+      "license_file": "licenses/font-young-serif.txt",
+      "license_sha256": "ea3081eef60700a513afba76c1b7130facee06be5d221b19a20b75aa52665e06",
+      "source": "npm:@fontsource/young-serif@5.3.0",
+      "npm_integrity": "sha512-/ay2kPm7QzGKW/9tL7UVh+B5meX3J6gh2PLnHV2ohlIbQSMRGTuyzNNVWpzsHc3P3bcpMm1IPfuO7GRtFrXWvQ==",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "font/young-serif/young-serif-latin-400-normal.woff2",
+          "sha256": "6ba68b9927ad2a640d32cbea050ffc2b5d0ae6cbaa785afe470da9d6bf0ef39f",
+          "type": "font/woff2"
+        },
+        {
+          "path": "font/young-serif/font.css",
+          "sha256": "6302c85428ae37e74204ae51d44073d257e0b08b19a40fcba136748187232aa1",
+          "type": "text/css"
+        }
+      ],
+      "main": "font/young-serif/font.css",
+      "family": "Young Serif",
+      "fallback": "serif",
+      "weights": [
+        400
+      ]
+    },
+    {
+      "name": "icons:lucide",
+      "kind": "icon-set",
+      "version": "1.57.0",
+      "license": "ISC",
+      "license_file": "licenses/icons-lucide.txt",
+      "license_sha256": "b495047bd93a9b06913511076f504daba17d5bbeb3e0650f3bb53a4220329c57",
+      "source": "npm:lucide-static@1.57.0",
+      "npm_integrity": "sha512-nuf4YoaKt3Pq9scXVQ71SLr0Q1/UZiTcfBBivFsCVL6biAzPplTikVWXLetBmK3oFEJS6f2L1rzgEsoJN/Ce0Q==",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "icons/lucide.json",
+          "sha256": "f54a9264f3a82a48431670f7f9aebe9b948220f7cd0d0ffcef75da5491576513",
+          "type": "application/json"
+        }
+      ],
+      "main": "icons/lucide.json",
+      "count": 2154,
+      "notes": [
+        "built from icons/*.svg: licence comments removed, whitespace collapsed"
+      ]
+    },
+    {
+      "name": "icons:tabler",
+      "kind": "icon-set",
+      "version": "3.49.0",
+      "license": "MIT",
+      "license_file": "licenses/icons-tabler.txt",
+      "license_sha256": "b740a1d46122672da62833e97f7e7c8a13fa85cbc7445b584b297cc00dde93db",
+      "source": "npm:@tabler/icons@3.49.0",
+      "npm_integrity": "sha512-l+GnSkFETx0U26icxv1VUFnxxiTqXfCcVRiRAnyMwibupM2S2L/hSaZ9gmSgz01rkrsH/93NvLsxykqdanc6lw==",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "icons/tabler.json",
+          "sha256": "c9a1c566a3af110d24aa519d964acd9383b62e717c9d7458d91667eba2a9e593",
+          "type": "application/json"
+        }
+      ],
+      "main": "icons/tabler.json",
+      "count": 5184,
+      "notes": [
+        "built from icons/outline/*.svg: licence comments removed, whitespace collapsed"
+      ]
+    },
+    {
+      "name": "mermaid",
+      "kind": "script",
+      "version": "11.17.2",
+      "license": "MIT",
+      "license_file": "licenses/mermaid.txt",
+      "license_sha256": "ec9fb67dcb25eccc416ed56e1aab819222c805a2a4bfe4cb19e7556bf2ffde80",
+      "notices": [
+        {
+          "path": "licenses/mermaid-third-party.txt",
+          "sha256": "a4803abdd3c9e2119960641bf72a6bfee496f94b819167cb0f04ec301445c69f"
+        }
+      ],
+      "source": "npm:mermaid@11.17.2",
+      "npm_integrity": "sha512-V6K3C8EBdEsPFZXSKMJe6ppQOENxuHARr9GvHX4hh47lAbhMRD9qf4oEK7LoaRQxULMa80/qt5gHO73aCleBBg==",
+      "allowed": [
+        "page"
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "js/mermaid/mermaid.min.js",
+          "sha256": "581ed7d74bd9048d0e3a91363927d72ef22942d7722546b27f7cc29e35390eb8",
+          "type": "text/javascript"
+        }
+      ],
+      "main": "js/mermaid/mermaid.min.js",
+      "global": "mermaid",
+      "notes": [
+        "pinned to 11.x: 12.x bundles elkjs (EPL-2.0)"
+      ]
+    },
+    {
+      "name": "theme:arctic-frost",
+      "kind": "theme",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "license_file": "licenses/anthropic-skills-theme-factory.txt",
+      "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+      "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "path": "themes/arctic-frost.css",
+          "sha256": "049eea25b38012cffa154afefab92abfe01fe11cb473f553cd12fe1b16c0999a",
+          "type": "text/css"
+        }
+      ],
+      "main": "themes/arctic-frost.css",
+      "requires": [
+        "font:instrument-sans"
+      ]
+    },
+    {
+      "name": "theme:botanical-garden",
+      "kind": "theme",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "license_file": "licenses/anthropic-skills-theme-factory.txt",
+      "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+      "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "path": "themes/botanical-garden.css",
+          "sha256": "100676f1c3bc118f4657cc51fa30a56112e60791b950f487bb37dc214bfe179e",
+          "type": "text/css"
+        }
+      ],
+      "main": "themes/botanical-garden.css",
+      "requires": [
+        "font:lora",
+        "font:work-sans"
+      ]
+    },
+    {
+      "name": "theme:desert-rose",
+      "kind": "theme",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "license_file": "licenses/anthropic-skills-theme-factory.txt",
+      "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+      "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "path": "themes/desert-rose.css",
+          "sha256": "00ff9706b913f50adb7444771d9943df98eeca69a2a299255e9e719f828be2c7",
+          "type": "text/css"
+        }
+      ],
+      "main": "themes/desert-rose.css",
+      "requires": [
+        "font:instrument-sans"
+      ]
+    },
+    {
+      "name": "theme:forest-canopy",
+      "kind": "theme",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "license_file": "licenses/anthropic-skills-theme-factory.txt",
+      "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+      "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "path": "themes/forest-canopy.css",
+          "sha256": "91f71548554ce277f0ee7cb82b9e05b89d0b4c53e89e20358b6cc2049ead4d59",
+          "type": "text/css"
+        }
+      ],
+      "main": "themes/forest-canopy.css",
+      "requires": [
+        "font:crimson-pro",
+        "font:instrument-sans"
+      ]
+    },
+    {
+      "name": "theme:golden-hour",
+      "kind": "theme",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "license_file": "licenses/anthropic-skills-theme-factory.txt",
+      "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+      "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "path": "themes/golden-hour.css",
+          "sha256": "32756876610c4ddcb143f2ff5e856be092763bed6f9a17d6d657a35951e59c17",
+          "type": "text/css"
+        }
+      ],
+      "main": "themes/golden-hour.css",
+      "requires": [
+        "font:instrument-sans"
+      ]
+    },
+    {
+      "name": "theme:midnight-galaxy",
+      "kind": "theme",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "license_file": "licenses/anthropic-skills-theme-factory.txt",
+      "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+      "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "path": "themes/midnight-galaxy.css",
+          "sha256": "74135535fb4d26389a4d5ddb58d10d9ffeb13b9147c07b53b7b6c5707d068211",
+          "type": "text/css"
+        }
+      ],
+      "main": "themes/midnight-galaxy.css",
+      "requires": [
+        "font:instrument-sans"
+      ]
+    },
+    {
+      "name": "theme:modern-minimalist",
+      "kind": "theme",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "license_file": "licenses/anthropic-skills-theme-factory.txt",
+      "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+      "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "path": "themes/modern-minimalist.css",
+          "sha256": "f0a0ebef6609f42e1b25be9743ad6d88f99cc8e28bdea04662b31c37f374ddef",
+          "type": "text/css"
+        }
+      ],
+      "main": "themes/modern-minimalist.css",
+      "requires": [
+        "font:work-sans"
+      ]
+    },
+    {
+      "name": "theme:ocean-depths",
+      "kind": "theme",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "license_file": "licenses/anthropic-skills-theme-factory.txt",
+      "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+      "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "path": "themes/ocean-depths.css",
+          "sha256": "883311d2283cb7fe90090c24cfc9e9640bc97d8f28e43ff77ec1c08bb6d14780",
+          "type": "text/css"
+        }
+      ],
+      "main": "themes/ocean-depths.css",
+      "requires": [
+        "font:work-sans"
+      ]
+    },
+    {
+      "name": "theme:sunset-boulevard",
+      "kind": "theme",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "license_file": "licenses/anthropic-skills-theme-factory.txt",
+      "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+      "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "path": "themes/sunset-boulevard.css",
+          "sha256": "f149361ff847fa50cb0e13eb96a588a8238cd91f76616098ccc9259e2d2fa487",
+          "type": "text/css"
+        }
+      ],
+      "main": "themes/sunset-boulevard.css",
+      "requires": [
+        "font:lora",
+        "font:work-sans"
+      ]
+    },
+    {
+      "name": "theme:tech-innovation",
+      "kind": "theme",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "license_file": "licenses/anthropic-skills-theme-factory.txt",
+      "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+      "source": "github:anthropics/skills@dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "allowed": [
+        "page",
+        "document",
+        "diagram"
+      ],
+      "files": [
+        {
+          "path": "themes/tech-innovation.css",
+          "sha256": "0900405f94d4775fbd38ccfb488f3cb285fca3e03558bb6c042856da3c42b6a1",
+          "type": "text/css"
+        }
+      ],
+      "main": "themes/tech-innovation.css",
+      "requires": [
+        "font:outfit",
+        "font:instrument-sans"
+      ]
+    },
+    {
+      "name": "vega",
+      "kind": "script",
+      "version": "6.4.0",
+      "license": "BSD-3-Clause",
+      "license_file": "licenses/vega.txt",
+      "license_sha256": "63727832aaf62004a2b249c933e327f3c90caf49e41a72f4bf436edf632cbda8",
+      "notices": [
+        {
+          "path": "licenses/vega-third-party.txt",
+          "sha256": "dfa1239d82e21d335fa32e0b3f363f7ec74f32cdc87962bb90801d79f953884a"
+        }
+      ],
+      "source": "npm:vega@6.4.0",
+      "npm_integrity": "sha512-rHXCq2LpEWCLMjXBEj7hocY9G0/i5TGYRayGGSj06VTF4+l2IG2Z7oeZKCjWbUh/7hTE/mVhbaOPB72wCElh6g==",
+      "allowed": [
+        "page"
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "js/vega/vega.min.js",
+          "sha256": "8f6a3587cf8d4f42c7e08120e3eb05d067e746d554e39d2dcf52acc0bd5ba28f",
+          "type": "text/javascript"
+        }
+      ],
+      "main": "js/vega/vega.min.js",
+      "global": "vega"
+    },
+    {
+      "name": "vega-embed",
+      "kind": "script",
+      "version": "7.3.0",
+      "license": "BSD-3-Clause",
+      "license_file": "licenses/vega-embed.txt",
+      "license_sha256": "32df67148f0fc3db0eb9e263a7b75d07f1eb14c61955005a4a39c6918d10d137",
+      "notices": [
+        {
+          "path": "licenses/vega-embed-third-party.txt",
+          "sha256": "bfaf0a9e46de1c6bf44f0eea209fdeac57f60d479204fad06a13954b208c51b9"
+        }
+      ],
+      "source": "npm:vega-embed@7.3.0",
+      "npm_integrity": "sha512-wQ8s5GaSzqoKgmRfbRolgBrjE2CP7ZKHXqH7NijxMqPjpdWxSs4Dn8tvp9g0giQvh2cK+3p56sxjWWM0wNngGw==",
+      "allowed": [
+        "page"
+      ],
+      "requires": [
+        "vega",
+        "vega-lite"
+      ],
+      "files": [
+        {
+          "path": "js/vega-embed/vega-embed.min.js",
+          "sha256": "b1455caba2fb1a72fb46025ba0ba1316e2dbc7f0dd40a3f6040172bf9c08ba91",
+          "type": "text/javascript"
+        }
+      ],
+      "main": "js/vega-embed/vega-embed.min.js",
+      "global": "vegaEmbed"
+    },
+    {
+      "name": "vega-lite",
+      "kind": "script",
+      "version": "6.5.0",
+      "license": "BSD-3-Clause",
+      "license_file": "licenses/vega-lite.txt",
+      "license_sha256": "f618900fd0d64046963b29f40590cdd1e341a2f41449f99110d82fd81fea808c",
+      "source": "npm:vega-lite@6.5.0",
+      "npm_integrity": "sha512-fMXF6s0MrIg0UTWnLIfeFtgSLzVhyzSKobzGrh5rhS+mL6FOYFG3m7ouJ4U23gj65EK+gl9FIIT5w7wLNaAzkA==",
+      "allowed": [
+        "page"
+      ],
+      "requires": [
+        "vega"
+      ],
+      "files": [
+        {
+          "path": "js/vega-lite/vega-lite.min.js",
+          "sha256": "83e215e84e308ee8688fa6503ba0f1cf8a3c05c0d61df2841a0b92bf86809e00",
+          "type": "text/javascript"
+        }
+      ],
+      "main": "js/vega-lite/vega-lite.min.js",
+      "global": "vegaLite"
+    }
+  ],
+  "meta_files": [
+    {
+      "path": "themes.json",
+      "sha256": "d4e2c21231b04ebbc68d2a29ef7a7afb78531e551735a813e7a634539dd77c41",
+      "type": "application/json"
+    }
+  ]
+}

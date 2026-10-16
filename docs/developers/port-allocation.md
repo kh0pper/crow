@@ -80,6 +80,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 8004 | tailscale IP | llamacpp-vulkan-qwen3-embed (crow-embed; same port as faster-whisper, different interface) | existing |
 | 8007 | 127.0.0.1 | llamacpp-cpu-qwen3-embed (CPU embeddings) | PR #111 |
 | 8011 | tailscale IP | vllm-rocm-qwen35-4b (crow-voice classifier / fast route) | existing |
+| 8018 | 127.0.0.1 | design-kit (renderer door: Vega-Lite / Mermaid / D2 → SVG; the render container itself sits on an internal-only Docker network with no egress; no ufw rule) | Design kit v1 |
 | 8080 | 127.0.0.1 | localai (existing) | existing |
 | 8081 | 127.0.0.1 | calibre-server (existing) | existing |
 | 8083 | 127.0.0.1 | calibre-web (existing) | existing |
@@ -110,6 +111,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 9090 | 127.0.0.1 | linkding (existing) | existing |
 | 11434 | 127.0.0.1 | ollama (existing) | existing |
 | 13378 | 127.0.0.1 | audiobookshelf (existing) | existing |
+| 18018 | 127.0.0.1 | design-kit renderer SMOKE instance (`scripts/design-kit/smoke-renderer.sh`; transient, tests only, never left running) | Design kit v1 |
 | 18100-18199 | gateway-internal loopback | native model servers (per-CROW_HOME dynamic range, not bundle ports — managed by servers/gateway/models/state.js) | informational |
 | 18789 | 127.0.0.1 | openclaw-old-docker (pre-existing external process) | existing |
 | 19999 | 127.0.0.1 | netdata | MVP PR 2 |

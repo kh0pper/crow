@@ -62,6 +62,7 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 | 6875 | 127.0.0.1 | bookstack (existente) | existente |
 | 8000 | 127.0.0.1 | paperless (existente) | existente |
 | 8004 | 127.0.0.1 | faster-whisper-server (STT local) | existente |
+| 8018 | 127.0.0.1 | design-kit (puerta del renderizador: Vega-Lite / Mermaid / D2 → SVG; el contenedor de renderizado está en una red Docker interna sin salida; sin regla ufw) | Design kit v1 |
 | 8080 | 127.0.0.1 | localai (existente) | existente |
 | 8081 | 127.0.0.1 | calibre-server (existente) | existente |
 | 8083 | 127.0.0.1 | calibre-web (existente) | existente |
@@ -89,6 +90,7 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 | 9090 | 127.0.0.1 | linkding (existente) | existente |
 | 11434 | 127.0.0.1 | ollama (existente) | existente |
 | 13378 | 127.0.0.1 | audiobookshelf (existente) | existente |
+| 18018 | 127.0.0.1 | design-kit, instancia de PRUEBA del renderizador (`scripts/design-kit/smoke-renderer.sh`; temporal, solo para pruebas) | Design kit v1 |
 | 18789 | 127.0.0.1 | openclaw-old-docker (proceso externo preexistente) | existente |
 | 19999 | 127.0.0.1 | netdata | MVP PR 2 |
 | 32400 | host | plex (red del host, existente) | existente |

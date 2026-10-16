@@ -1089,6 +1089,46 @@
       "official": true
     },
     {
+      "id": "design-kit",
+      "name": "Design kit",
+      "version": "1.0.0",
+      "description": "Fonts, icons, styles, themes and chart and diagram rendering so bots can make artifacts that look designed. Everything is stored on this machine and works offline.",
+      "type": "bundle",
+      "author": "Crow",
+      "category": "productivity",
+      "tags": [
+        "design",
+        "fonts",
+        "icons",
+        "charts",
+        "diagrams",
+        "artifacts"
+      ],
+      "icon": "image",
+      "docker": {
+        "composefile": "docker-compose.yml",
+        "pull_timeout_s": 1800
+      },
+      "skills": [
+        "skills/design-frontend.md",
+        "skills/design-themes.md",
+        "skills/design-poster.md"
+      ],
+      "refreshFiles": [
+        "lib",
+        "third_party",
+        "LICENSES.md",
+        "NOTICE"
+      ],
+      "requires": {
+        "min_ram_mb": 1024,
+        "min_disk_mb": 1500
+      },
+      "env_vars": [],
+      "notes": "The renderer turns Vega-Lite, Mermaid and D2 specs into SVG. It listens on 127.0.0.1:8018 only, and its rendering container has no route to the internet. Library files are copied into each artifact version when it is saved, never served from a shared path. v1: install it on the main Crow instance only; other instances on the same machine keep showing chart and diagram code as code. Licences: LICENSES.md and NOTICE.",
+      "official": true
+    },
+    {
       "id": "dozzle",
       "name": "Dozzle",
       "version": "1.0.1",

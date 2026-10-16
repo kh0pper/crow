@@ -1,0 +1,4 @@
+:root{--hs-bg:#1a2332;--hs-fg:#f1faee;--hs-accent:#2d8b8b;--hs-accent-2:#a8dadc;--hs-font-heading:"Work Sans",sans-serif;--hs-font-body:"Work Sans",sans-serif}
+body{background:var(--hs-bg);color:var(--hs-fg);font-family:var(--hs-font-body)}
+h1,h2,h3,h4,h5,h6{font-family:var(--hs-font-heading)}
+a{color:var(--hs-fg);text-decoration:underline;text-decoration-color:var(--hs-accent)}

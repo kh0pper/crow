@@ -1,0 +1,4 @@
+:root{--hs-bg:#faf9f6;--hs-fg:#2d4a2b;--hs-accent:#7d8471;--hs-accent-2:#a4ac86;--hs-font-heading:"Crimson Pro",serif;--hs-font-body:"Instrument Sans",sans-serif}
+body{background:var(--hs-bg);color:var(--hs-fg);font-family:var(--hs-font-body)}
+h1,h2,h3,h4,h5,h6{font-family:var(--hs-font-heading)}
+a{color:var(--hs-fg);text-decoration:underline;text-decoration-color:var(--hs-accent)}

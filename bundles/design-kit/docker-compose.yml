@@ -1,0 +1,55 @@
+# Design kit renderer (spec §3.3).
+#   render — the engines (Vega-Lite, Mermaid in headless Chromium, D2, svgo). It
+#            joins ONLY an internal network, so it has no route out (no egress).
+#   door   — a byte relay on the internal network and an edge network; the only
+#            published port, on loopback. Docker does not publish ports for a
+#            container whose only network is internal, hence the relay.
+# One image, built once; both services run it. Port registry:
+# docs/developers/port-allocation.md (8018).
+services:
+  render:
+    build:
+      context: ./renderer
+    image: crow-design-kit-renderer:1.0.0
+    container_name: crow-design-kit-render
+    command: ["node", "main.mjs"]
+    networks: [render-internal]
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    cpus: 2
+    pids_limit: 256
+    init: true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8018/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  door:
+    image: crow-design-kit-renderer:1.0.0
+    pull_policy: never
+    container_name: crow-design-kit-door
+    command: ["node", "door.mjs"]
+    depends_on: [render]
+    networks: [render-internal, render-edge]
+    ports:
+      - "127.0.0.1:8018:8018"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 64m
+    cpus: 0.5
+    pids_limit: 32
+    init: true
+    restart: unless-stopped
+networks:
+  render-internal:
+    internal: true
+  render-edge: {}

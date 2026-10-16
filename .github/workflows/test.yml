@@ -108,6 +108,12 @@ jobs:
       # field are skipped by design — that is the pre-vendor draft state.
       - name: Vendored payload digest check
         run: node scripts/check-vendored-payloads.mjs
+      # Design kit (bundles/design-kit/lib): every pinned file's sha256, every
+      # licence file, exact version pins, no CSS that fetches at runtime, and no
+      # remote URL in the kit's code or skills. Fix by re-vendoring:
+      # node scripts/design-kit/vendor-lib.mjs
+      - name: Design kit library check
+        run: node scripts/check-design-kit-lib.mjs
       - run: npm run validate-model-catalog
       # This repo is public: no process documents (specs/plans/handoffs),
       # credentials, or real tailnet hostnames in tracked files. The local
@@ -153,6 +159,16 @@ jobs:
         run: |
           for i in 1 2 3; do
             npm audit --prefix bundles/workspace --omit=dev --audit-level=critical && exit 0
+            echo "npm audit failed, retry $i/3"; sleep $((i*10))
+          done
+          exit 1
+      # The design kit renderer parses specs that can come from outside the
+      # owner's Crow (vega, mermaid, svgo, puppeteer-core): its own lock file gets
+      # the same blocking critical-tier audit.
+      - name: npm audit (blocking, critical, design-kit renderer production deps)
+        run: |
+          for i in 1 2 3; do
+            npm audit --prefix bundles/design-kit/renderer --omit=dev --audit-level=critical && exit 0
             echo "npm audit failed, retry $i/3"; sleep $((i*10))
           done
           exit 1

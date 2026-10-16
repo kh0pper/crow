@@ -1,0 +1,42 @@
+Crow Design kit
+Copyright 2026 the Crow contributors.
+
+This bundle includes material developed by Anthropic, PBC: three skills from
+github.com/anthropics/skills at commit dbd4588f9e1033efb41dad4bef2f7947c8993d44,
+each licensed under the Apache License, Version 2.0 (see
+third_party/anthropic-skills/<skill>/LICENSE.txt). Unmodified copies are kept
+in third_party/anthropic-skills/.
+
+Upstream NOTICE: The upstream repository ships no NOTICE file at that commit.
+(Its THIRD_PARTY_NOTICES.md covers the Python packages, FFmpeg and the
+canvas-fonts TTF files used by its other skills and by canvas-design's font
+directory; none of those files is copied into this bundle. The font families
+this bundle ships come from @fontsource, with their own OFL-1.1 licence texts
+in lib/licenses/.)
+
+Changes made (Apache License 2.0, section 4(b)):
+- every ported skill: a one-line note added at the top of its body naming the
+  upstream skill and pointing to LICENSES.md and this NOTICE.
+- frontend-design -> skills/design-frontend.md: renamed; frontmatter replaced
+  with Crow's; every instruction to load fonts, scripts or styles from a CDN or
+  remote host replaced with "reference library assets by name" (the upstream
+  text at this commit has none, so its body is otherwise unchanged); the actor
+  addressed as "you"; added the section "Using the Design kit in Crow".
+- theme-factory -> skills/design-themes.md, lib/themes.json, lib/themes/*.css:
+  renamed; frontmatter replaced; the themes' colour values transcribed
+  unchanged into lib/themes.json with roles (bg, fg, accent, accent2); each
+  theme's fonts mapped to OFL fonts shipped in lib/ (the upstream names are kept
+  per theme as "upstream_fonts"); references to the showcase PDF and to slides
+  replaced with Crow's house-style text (the "Purpose", "Usage Instructions",
+  "Theme Details" and "Application Process" sections reworded so the owner's
+  chosen house style is applied through CSS custom properties, and "Create your
+  Own Theme" replaced by a note that only the ten themes are available); added
+  the Crow section with the ten theme ids and names.
+- canvas-design -> skills/design-poster.md: renamed; frontmatter replaced;
+  output retargeted from PNG/PDF files written with code to Crow pages and
+  diagrams (the design philosophy goes in the change note instead of a .md
+  file; extra pages become separate artifacts or full-screen sections);
+  instructions to run code and to read the bundled canvas-fonts directory
+  removed (the same OFL families ship from @fontsource as woff2), and the
+  instruction to download fonts replaced with the font: libraries; "the next
+  Claude" addressed as "you"; added the Crow section.
