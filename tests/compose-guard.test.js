@@ -74,7 +74,8 @@ test("model: sensitive host paths are refused even with privileged consent; thei
     join(CROW_HOME, ".env"), join(CROW_HOME, "mcp-addons.json"), join(REPO, ".env"), REPO, "/home"]) {
     assert.equal(check(svc({ volumes: [bind(src, true)] }), { manifest: PRIV, consent: true }).valid, false, src);
   }
-  assert.equal(check(svc({ volumes: [bind(join(CROW_HOME, "workspace", "db"))] })).valid, true, "an ordinary folder under CROW_HOME");
+  assert.equal(check(svc({ volumes: [bind(join(CROW_HOME, "workspace", "db"))] }), { manifest: { id: "workspace" } }).valid, true, "the bundle's own CROW_HOME/<id> folder");
+  assert.equal(check(svc({ volumes: [bind(join(CROW_HOME, "workspace", "db"))] }), { manifest: { id: "other" } }).valid, false, "another bundle's CROW_HOME folder");
 });
 
 test("model: the narrow exceptions — /etc/localtime read-only; crow.db and the extensions folder read-only only with privileged consent", () => {
@@ -174,16 +175,28 @@ dockerTest("a compose file Compose cannot read is refused (fail-closed)", async 
   assert.match(r.reason, /Docker Compose could not read/);
 });
 
-dockerTest("every tracked first-party compose passes the model check (with its manifest + consent)", async () => {
+dockerTest("every tracked first-party compose passes the model check (with its manifest + consent), laid out as on a real host", async () => {
+  // A real host: HOME/.crow is CROW_HOME and bundles run from CROW_HOME/bundles/<id>.
+  const { cpSync } = await import("node:fs");
+  const home = mkdtempSync(join(tmpdir(), "crow-cguard-realhome-"));
+  const ch = join(home, ".crow");
+  const env = { PATH: process.env.PATH, HOME: home, CROW_HOME: ch };
+  const run = (args, { cwd, env: e }) => new Promise((resolve, reject) => execFile("docker", ["compose", ...args], { cwd, env: e }, (err, stdout, stderr) => (err ? reject(Object.assign(err, { stderr })) : resolve({ stdout }))));
   const bad = [];
-  for (const id of [...trackedBundleSet()].sort()) {
-    const src = join(REPO, "bundles", id);
-    if (!existsSync(join(src, "docker-compose.yml"))) continue;
-    const manifest = JSON.parse(readFileSync(join(src, "manifest.json"), "utf8"));
-    if (manifest.inference === true) continue; // model bundles: Model Catalog + gpu-orchestrator, never this route
-    const r = await B.checkBundleCompose(src, { bundleId: id, manifest, consentVerified: true, textCheck: false });
-    if (!r.valid) bad.push(`${id}: ${r.reason}`);
-  }
+  try {
+    for (const id of [...trackedBundleSet()].sort()) {
+      const src = join(REPO, "bundles", id);
+      if (!existsSync(join(src, "docker-compose.yml"))) continue;
+      const manifest = JSON.parse(readFileSync(join(src, "manifest.json"), "utf8"));
+      if (manifest.inference === true) continue; // model bundles: Model Catalog + gpu-orchestrator, never this route
+      const dir = join(ch, "bundles", id);
+      cpSync(src, dir, { recursive: true, filter: (f) => !f.includes("node_modules") });
+      const loaded = await G.loadComposeModel(dir, { env, runConfig: run });
+      if (loaded.error) { bad.push(`${id}: ${loaded.error}`); continue; }
+      const r = G.checkComposeModel(loaded.model, { bundleDir: dir, manifest, consentVerified: true, ctx: { crowHome: ch, dataDir: join(ch, "data"), appRoot: REPO, home } });
+      if (!r.valid) bad.push(`${id}: ${r.reason}`);
+    }
+  } finally { rmSync(home, { recursive: true, force: true }); }
   assert.deepEqual(bad, [], bad.join("\n"));
 });
 
@@ -427,4 +440,56 @@ dockerTest("managed hosting: host networking is refused from the resolved model 
       assert.equal(r.code, "hosted_forbidden", `${id}: ${JSON.stringify(r)}`);
     }
   } finally { if (prev === undefined) delete process.env.CROW_HOSTED; else process.env.CROW_HOSTED = prev; }
+});
+
+// ---- review round A ------------------------------------------------------------------
+
+test("devices: a GPU-looking path that climbs out (/dev/dri/../nvme0n1) is a raw disk, not a GPU", () => {
+  for (const src of ["/dev/dri/../nvme0n1", "/dev/dri/../../etc", "/dev/kfd/.."]) {
+    assert.equal(check(svc({ devices: [{ source: src, target: "/dev/dri", permissions: "rwm" }] })).valid, false, src);
+  }
+  assert.equal(check(svc({ devices: [{ source: "/dev/dri/renderD128", target: "/dev/dri/renderD128" }] })).valid, true);
+});
+
+test("inside Crow's home only the bundle's own places are mountable (peer tokens, identity, keystores are not)", () => {
+  const m = { manifest: { id: "fx" } };
+  for (const f of ["peer-tokens.json", "identity.json", "board-token", ".keystore-env", "android-keystore", "installed.json", "panels", "skills", "other-bundle"]) {
+    assert.equal(check(svc({ volumes: [bind(join(CROW_HOME, f), true)] }), m).valid, false, f);
+  }
+  for (const f of ["fx", "fx-downloads", join("media", "fx")]) {
+    assert.equal(check(svc({ volumes: [bind(join(CROW_HOME, f))] }), m).valid, true, f);
+  }
+  assert.equal(check(svc({ volumes: [bind(join(CROW_HOME, "media"))] }), m).valid, false, "the whole media folder");
+});
+
+test("host code and config locations are refused: system dirs, the gateway checkout, home dot-folders, ~/bin", () => {
+  const home = homedir();
+  for (const src of ["/usr/local/bin", "/opt/x", "/var/spool/cron", "/var/lib/x", "/lib/systemd", join(home, ".config", "systemd", "user"),
+    join(home, ".bashrc"), join(home, ".local", "bin"), join(home, "bin"), join(REPO, "servers"), join(REPO, ".env")]) {
+    assert.equal(check(svc({ volumes: [bind(src)] }), { manifest: PRIV, consent: true }).valid, false, src);
+  }
+  for (const src of [join(home, "Music"), "/srv/media", "/mnt/external/films", "/media/usb"]) {
+    assert.equal(check(svc({ volumes: [bind(src, true)] })).valid, true, src);
+  }
+});
+
+test("external volumes (another project's data) and external networks other than crow-federation need privileged consent", () => {
+  assert.equal(check({ ...svc({ volumes: [{ type: "volume", source: "db", target: "/d" }] }), volumes: { db: { external: true, name: "crow-workspace_db" } } }).valid, false);
+  assert.equal(check({ ...svc({ networks: { n: null } }), networks: { n: { external: true, name: "crow-workspace_internal" } } }).valid, false);
+  assert.equal(check({ ...svc({ networks: { f: null } }), networks: { f: { external: true, name: "crow-federation" } } }).valid, true);
+});
+
+test("a signed peer instance can't install, mint consent, uninstall or re-apply storage here", async () => {
+  const app = express(); app.use(express.json());
+  app.use((req, _res, next) => { req.crossHostAuth = { sourceInstanceId: "peer-x" }; next(); });
+  app.use(B.default());
+  const server = app.listen(0, "127.0.0.1"); await new Promise((r) => server.once("listening", r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    for (const [method, path] of [["POST", "/bundles/api/install"], ["POST", "/bundles/api/install-set"], ["GET", "/bundles/api/consent-challenge/browser"],
+      ["POST", "/bundles/api/uninstall"], ["POST", "/bundles/api/shared-storage/apply/funkwhale"], ["POST", "/bundles/api/repin"]]) {
+      const r = await fetch(base + path, { method, headers: { "content-type": "application/json" }, ...(method === "POST" ? { body: JSON.stringify({ bundle_id: "browser" }) } : {}) });
+      assert.equal(r.status, 403, `${method} ${path}`);
+    }
+  } finally { server.close(); }
 });

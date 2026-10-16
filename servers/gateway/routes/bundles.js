@@ -2963,6 +2963,19 @@ export default function bundlesRouter() {
   });
   router.use(xhostVerify);
 
+  // Owner actions. A signed peer instance may start/stop, read status and Configure
+  // (which never saves to the keychain for a peer, and whose result Start re-checks
+  // without consent), never install, mint consent, uninstall or re-apply storage here:
+  // a peer-minted consent token would let it apply a privileged bundle the owner never saw.
+  const OWNER_ONLY = new Set(["/bundles/api/install", "/bundles/api/install-set", "/bundles/api/uninstall", "/bundles/api/repin"]);
+  router.use((req, res, next) => {
+    if (!req.crossHostAuth) return next();
+    if (OWNER_ONLY.has(req.path) || req.path.startsWith("/bundles/api/consent-challenge/") || req.path.startsWith("/bundles/api/shared-storage/apply/")) {
+      return res.status(403).json({ error: "This is an owner action on this instance; a peer instance can't perform it", code: "owner_only" });
+    }
+    return next();
+  });
+
   // GET /bundles/api/status — List installed bundles with container status
   router.get("/bundles/api/status", async (req, res) => {
     const installed = getInstalled();

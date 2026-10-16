@@ -60,28 +60,20 @@ const under = (p, root) => p === root || p.startsWith(root.endsWith(sep) ? root 
 export function sensitiveRoots(ctx) {
   const home = ctx.home || homedir();
   const real = (p) => resolveHostPath(p);
+  const crowHome = real(ctx.crowHome);
   const dataDirs = [...new Set([ctx.dataDir, join(ctx.crowHome, "data"), join(home, ".crow", "data")].filter(Boolean).map(real))];
+  const sys = ["/etc", "/root", "/boot", "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/opt", "/var", "/run", "/dev", "/snap", "/proc", "/sys"];
   return {
-    exact: new Set([real("/"), real(ctx.crowHome), real(home), ...(ctx.appRoot ? [real(ctx.appRoot)] : [])]),
+    crowHome,
+    dataDirs,
+    home: real(home),
+    homesRoot: real(dirname(home)),
+    exact: new Set([real("/"), real(home), real(dirname(home)), ...(ctx.appRoot ? [real(ctx.appRoot)] : [])]),
     trees: [
-      { root: real("/etc"), why: "/etc" },
-      { root: real("/root"), why: "/root" },
-      { root: real("/boot"), why: "/boot" },
-      { root: real("/var/lib/docker"), why: "Docker's own data" },
-      { root: real("/run"), why: "/run (system sockets)" },
-      { root: real("/var/run"), why: "/var/run (system sockets)" },
-      { root: real("/dev"), why: "/dev (host devices)" },
-      { root: real("/proc"), why: "/proc", hostInfo: true },
-      { root: real("/sys"), why: "/sys", hostInfo: true },
-      { root: real(join(home, ".ssh")), why: "~/.ssh" },
-      { root: real(join(ctx.crowHome, "secrets")), why: "Crow's secrets folder" },
-      ...dataDirs.map((d) => ({ root: d, why: "Crow's data folder", dataDir: true })),
-      ...(ctx.appRoot ? [{ root: real(join(ctx.appRoot, ".env")), why: "the gateway .env" }] : []),
-      { root: real(join(ctx.crowHome, ".env")), why: "Crow's .env" },
-      { root: real(join(ctx.crowHome, "mcp-addons.json")), why: "the extension registry (holds extension settings)" },
-      { root: real(join(ctx.crowHome, "bundles")), why: "the extensions folder (holds other extensions' settings)", bundlesDir: true },
+      ...sys.map((d) => ({ root: real(d), why: d, hostInfo: d === "/proc" || d === "/sys" })),
+      ...(ctx.appRoot ? [{ root: real(ctx.appRoot), why: "the gateway's code and .env" }] : []),
     ],
-    dockerSockets: new Set([real("/var/run/docker.sock"), real("/run/docker.sock")]),
+    dockerSockets: new Set(["/var/run/docker.sock", "/run/docker.sock", real("/var/run/docker.sock"), real("/run/docker.sock")]),
     localtime: real("/etc/localtime"),
   };
 }
@@ -127,6 +119,11 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     if (!TOP_OK.has(k) && !k.startsWith("x-")) return refuse(`top-level key '${k}' is not one the install check understands`);
   }
 
+  // Host-path policy. Inside Crow's home and data folder it is an ALLOWLIST: the bundle's
+  // own folder, CROW_HOME/<id> or <id>-*, <data>/<id>, CROW_HOME/media (library defaults),
+  // and, read-only with privileged consent, crow.db and the extensions folder (companion).
+  // Elsewhere: system folders, the gateway checkout, home dot-folders and ~/bin are
+  // refused, and so is any folder that CONTAINS one of these.
   const checkOne = (p, { readOnly, what }) => {
     if (roots.dockerSockets.has(p)) {
       if (!readOnly) return refuse("Read-write Docker socket mounts are not permitted");
@@ -135,13 +132,33 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     }
     if (roots.exact.has(p)) return refuse(`${what}: mounts a sensitive host path (${p === "/" ? "/" : "a top-level folder"})`);
     if ((p === "/etc/localtime" || p === roots.localtime) && readOnly) return null;
+    const zones = [roots.crowHome, ...roots.dataDirs];
+    if (zones.some((z) => under(z, p) && z !== p)) return refuse(`${what}: mounts a folder that contains Crow's home or data folder`);
+    for (const d of roots.dataDirs) {
+      if (!under(p, d)) continue;
+      if (readOnly && isPrivilegedAllowed && p === join(d, "crow.db")) return null;
+      if (ownId && under(p, join(d, ownId))) return null;
+      return refuse(`${what}: mounts a path in Crow's data folder outside its own <data>/${ownId || "<id>"}`);
+    }
+    if (under(p, roots.crowHome)) {
+      const rel = p.slice(roots.crowHome.length + 1);
+      const first = rel.split(sep)[0];
+      if (under(p, bundleReal)) return null;
+      if (ownId && (first === ownId || first.startsWith(`${ownId}-`))) return null;
+      if (first === "media" && rel !== "media") return null;
+      if (readOnly && isPrivilegedAllowed && p === join(roots.crowHome, "bundles")) return null;
+      return refuse(`${what}: mounts a path in Crow's home that is not this bundle's own`);
+    }
+    // Home folders (this user's and others'): dot-folders and ~/bin hold shells, keys,
+    // autostart and user services.
+    if (under(p, roots.homesRoot) && p !== roots.homesRoot) {
+      const parts = p.slice(roots.homesRoot.length + 1).split(sep);
+      if (parts.length === 1) return refuse(`${what}: mounts a whole home folder`);
+      if (parts[1].startsWith(".") || parts[1] === "bin") return refuse(`${what}: mounts a home folder's ${parts[1]}`);
+    }
     for (const t of roots.trees) {
       if (!(under(p, t.root) || under(t.root, p))) continue;
       if (t.hostInfo && readOnly && under(p, t.root) && (isConsentBundle || isPrivilegedAllowed)) continue;
-      if (t.dataDir && readOnly && isPrivilegedAllowed && basename(p) === "crow.db" && dirname(p) === t.root) continue;
-      if (t.dataDir && ownId && under(p, join(t.root, ownId))) continue;
-      if (t.bundlesDir && readOnly && isPrivilegedAllowed && p === t.root) continue;
-      if (t.bundlesDir && under(p, bundleReal)) continue;
       return refuse(`${what}: mounts a sensitive host path (${t.why})`);
     }
     return null;
@@ -199,8 +216,11 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     if (s.oom_score_adj !== undefined && !(Number(s.oom_score_adj) >= -500) && (r = needPriv("oom_score_adj below -500"))) return r;
     if (s.runtime !== undefined && !["runc", "nvidia"].includes(String(s.runtime)) && (r = needPriv(`runtime ${s.runtime}`))) return r;
     for (const d of s.devices || []) {
-      const src = typeof d === "string" ? d.split(":")[0] : d?.source;
-      const gpu = /^\/dev\/(dri(\/.*)?|kfd|nvidia[a-z0-9-]*)$/.test(String(src || ""));
+      const raw = typeof d === "string" ? d.split(":")[0] : d?.source;
+      // Normalized AND resolved: /dev/dri/../nvme0n1 is a raw disk.
+      const isGpu = (x) => /^\/dev\/(dri(\/[A-Za-z0-9_.-]+)?|kfd|nvidia[a-z0-9-]*)$/.test(x) && !x.split("/").includes("..");
+      const gpu = typeof raw === "string" && isAbsolute(raw) && isGpu(resolvePath(raw)) && isGpu(resolveHostPath(raw));
+      const src = raw;
       if (!gpu && (r = needPriv(`a host device (${String(src || "?").slice(0, 60)})`))) return r;
     }
     if (s.deploy !== undefined) {
@@ -251,12 +271,16 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     let r;
     if ((r = checkKeys(n, ["name", "driver", "driver_opts", "external", "internal", "attachable", "ipam", "labels", "enable_ipv6", "enable_ipv4"], `network ${name}`))) return r;
     const real = String(n.name || name);
-    if (n.external && (real === "host" || real === "none")) { if ((r = needPriv(`the '${real}' network`))) return r; }
+    // An external network joins another project's network; only Crow's shared federation
+    // network is expected.
+    if (n.external && real !== "crow-federation") { if ((r = needPriv(`the external network '${real}'`))) return r; }
     if (n.driver !== undefined && n.driver !== "bridge" && (r = needPriv(`network driver ${n.driver}`))) return r;
   }
   for (const [name, vol] of Object.entries(model.volumes || {})) {
     let r;
     if ((r = checkKeys(vol, ["name", "driver", "driver_opts", "external", "labels"], `volume ${name}`))) return r;
+    // An external volume is another project's data (another extension's database…).
+    if (vol.external && (r = needPriv(`the external volume '${vol.name || name}'`))) return r;
     if (vol.driver !== undefined && vol.driver !== "local" && (r = needPriv(`volume driver ${vol.driver}`))) return r;
     const dev = vol.driver_opts?.device;
     if (dev !== undefined) {
