@@ -10,6 +10,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -69,7 +70,18 @@ test("the hostname reaches the script through the environment and is checked bef
   assert.match(lemmy, /hostname:\s*"\$\$\{CROW_LEMMY_HOSTNAME\}"/);
   assert.match(lemmy, /case "\$\$\{CROW_LEMMY_HOSTNAME\}" in/);
   const body = lemmy.slice(lemmy.indexOf("- |"));
-  assert.doesNotMatch(body, /(?<!\$)\$\{LEMMY_HOSTNAME/, "no compose-interpolated hostname inside the shell script");
+  assert.doesNotMatch(body, /(?<!\$)\$\{LEMMY_/, "no compose-interpolated LEMMY_* value inside the shell script");
+});
+
+test("the hostname check accepts bare lowercase hostnames and refuses everything else", () => {
+  const m = lemmy.match(/case "\$\$\{CROW_LEMMY_HOSTNAME\}" in\n\s*(.*?)\) echo/);
+  assert.ok(m, "found the case pattern");
+  const script = `case "$1" in ${m[1]}) exit 64 ;; esac; exit 0`;
+  const ok = (h) => spawnSync("sh", ["-c", script, "sh", h]).status === 0;
+  for (const h of ["lemmy.example.com", "a-b.example.org", "lemmy.localhost", "host.test:8536"]) assert.ok(ok(h), `accepts ${h}`);
+  for (const h of ["", "https://lemmy.example.com", "lemmy.example.com/x", "LEMMY.example.com", "host.", ".host", "-host", "a..b", "host:", "a\"b", "a b", "a$(id)", "a`id`", "a\nb"]) {
+    assert.equal(ok(h), false, `refuses ${JSON.stringify(h)}`);
+  }
 });
 
 test("pict-rs limits use the 0.5 key names (0.4 names are silently ignored)", () => {
