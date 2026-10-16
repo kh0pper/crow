@@ -1492,7 +1492,9 @@ function validateComposeFile(composePath, bundleId, opts = {}) {
     for (const f of [".env", ".env.example"]) {
       let t = "";
       try { t = readFileSync(join(dirname(composePath), f), "utf8"); } catch { continue; }
-      if (/^\s*(?:export\s+)?COMPOSE_[A-Za-z0-9_]*\s*[=:]/m.test(t)) {
+      // COMPOSE_PROJECT_NAME is allowed (a co-hosted instance names its own project; the
+      // model check holds it to <id>/crow-<id>[-suffix]). Any other COMPOSE_* is refused.
+      if (/^\s*(?:export\s+)?COMPOSE_(?!PROJECT_NAME\s*[=:])[A-Za-z0-9_]*\s*[=:]/m.test(t)) {
         return { valid: false, reason: `Bundle ${f} sets a COMPOSE_* variable, which would change what Docker Compose runs` };
       }
     }
@@ -2063,7 +2065,7 @@ export function findInvalidEnv(envVars) {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(k)) return { key: k, why: "is not a valid environment variable name" };
     // A bundle .env is also Docker Compose's own settings file: COMPOSE_FILE would swap the
     // file the install security check read, and Start never re-checks it.
-    if (/^(?:COMPOSE|DOCKER)_/.test(k)) return { key: k, why: "controls Docker itself, so an extension can't set it" };
+    if (/^(?:COMPOSE|DOCKER)_/.test(k) && k !== "COMPOSE_PROJECT_NAME") return { key: k, why: "controls Docker itself, so an extension can't set it" };
     if (v !== undefined && v !== null) {
       const problem = envValueProblem(v);
       if (problem) return { key: k, why: problem };

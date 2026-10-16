@@ -156,6 +156,8 @@ dockerTest("parser differentials: YAML merge keys, anchors, flow style and inter
 dockerTest("Start-time sources: an override file and COMPOSE_FILE in .env are part of the checked model", async () => {
   const over = project({ "docker-compose.yml": C(""), "docker-compose.override.yml": "services:\n  app:\n    privileged: true\n" });
   assert.equal((await gateDir(over, { textCheck: false })).valid, false);
+  const renamed = project({ "docker-compose.yml": C(""), ".env": "COMPOSE_PROJECT_NAME=crow-workspace\n" });
+  assert.equal((await gateDir(renamed, { textCheck: false, manifest: { id: "fx-r" } })).valid, false, "COMPOSE_PROJECT_NAME can't take another bundle's project");
   const swapped = project({ "docker-compose.yml": C(""), "evil.yml": C("    network_mode: host\n"), ".env": "COMPOSE_FILE=evil.yml\n" });
   assert.equal((await gateDir(swapped, { textCheck: false })).valid, false);
   const benign = project({ "docker-compose.yml": C("    volumes:\n      - ./data:/d\n"), "docker-compose.override.yml": "services:\n  app:\n    volumes: !override\n      - ./data:/var/lib/x\n" });

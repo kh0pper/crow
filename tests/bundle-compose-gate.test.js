@@ -299,8 +299,9 @@ test("sharing another container's network, or the host's PID/user namespace, nee
 
 test("install and Configure refuse COMPOSE_* / DOCKER_* keys (they would steer Docker Compose itself)", async () => {
   const { findInvalidEnv } = await import("../servers/gateway/routes/bundles.js");
-  for (const k of ["COMPOSE_FILE", "COMPOSE_PROJECT_NAME", "DOCKER_HOST"]) {
+  for (const k of ["COMPOSE_FILE", "COMPOSE_PROFILES", "DOCKER_HOST"]) {
     assert.equal(findInvalidEnv({ [k]: "x" })?.key, k, k);
   }
   assert.equal(findInvalidEnv({ MY_COMPOSE_FILE: "x", A: "1" }), null);
+  assert.equal(findInvalidEnv({ COMPOSE_PROJECT_NAME: "browser-r4" }), null, "a co-hosted instance names its project (the model check holds the name to the bundle)");
 });

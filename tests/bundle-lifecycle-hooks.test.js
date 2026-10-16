@@ -200,8 +200,10 @@ test("install: an unsafe precreate entry refuses the install and removes the cop
 });
 
 test("REVIEW FOCUS 6 — a second instance cannot adopt another instance's compose project", async () => {
+  // (The project name is one this bundle may use — crow-<id>-<suffix> — so the OWNERSHIP guard
+  // is what refuses; a foreign project name is refused earlier by the install security check.)
   const id = "hk-owned";
-  const m = fixture(id, { postInstall: { script: "ops/bootstrap.sh" } }, "name: crow-shared\nservices:\n  app:\n    image: busybox:1.36\n");
+  const m = fixture(id, { postInstall: { script: "ops/bootstrap.sh" } }, "name: crow-hk-owned-shared\nservices:\n  app:\n    image: busybox:1.36\n");
   const composeCalls = [];
   B._setComposeRunnerForTest(async (args) => { composeCalls.push(args[0]); return { stdout: "", stderr: "" }; });
   // The household's install lives in ANOTHER Crow home that really lists this bundle.
@@ -217,15 +219,15 @@ test("REVIEW FOCUS 6 — a second instance cannot adopt another instance's compo
   // install refused, nothing started, copied files removed
   const { out } = await install(id, m);
   assert.equal(out.ok, false);
-  assert.equal(out.reason, `This extension's containers (compose project "crow-shared") belong to another Crow install on this host (${otherHome}/bundles/${id}): manage them from there.`);
+  assert.equal(out.reason, `This extension's containers (compose project "crow-hk-owned-shared") belong to another Crow install on this host (${otherHome}/bundles/${id}): manage them from there.`);
   assert.deepEqual(composeCalls, []);
-  assert.ok(dockerCalls.some((a) => a.includes("label=com.docker.compose.project=crow-shared")));
+  assert.ok(dockerCalls.some((a) => a.includes("label=com.docker.compose.project=crow-hk-owned-shared")));
   assert.equal(existsSync(join(CROW_HOME, "bundles", id)), false);
   // a copy that IS installed here (older install) cannot start/stop/down the foreign project
   const dir = join(CROW_HOME, "bundles", id);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "manifest.json"), JSON.stringify(m));
-  writeFileSync(join(dir, "docker-compose.yml"), "name: crow-shared\nservices:\n  app:\n    image: busybox:1.36\n");
+  writeFileSync(join(dir, "docker-compose.yml"), "name: crow-hk-owned-shared\nservices:\n  app:\n    image: busybox:1.36\n");
   writeFileSync(join(CROW_HOME, "installed.json"), JSON.stringify([...installedIds().map((i) => ({ id: i })), { id, type: "bundle", version: "0.1.0" }]));
   const app = express(); app.use(express.json()); app.use(B.default());
   const server = app.listen(0, "127.0.0.1"); await new Promise((r) => server.once("listening", r));
