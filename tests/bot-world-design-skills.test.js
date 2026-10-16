@@ -65,3 +65,9 @@ test("spawn growth is measured (review L9)", async () => {
   assert.ok(b > a);
   console.log(`[design-kit] fixture spawn growth with the kit: ${b - a} bytes (Step 4 records the real skill's growth)`);
 });
+
+test("final review M2: only the three kit skill names are dropped on a kit-less instance; another design-* skill survives", () => {
+  const picks = ["design-frontend", "design-themes", "design-poster", "design-notes", "memory-management"];
+  assert.deepEqual(skillNamesFor(def(["memory"], picks), { crowHome, kitInstalled: false }), ["design-notes", "memory-management"]);
+  assert.deepEqual(skillNamesFor(def(["memory"], picks), { crowHome, kitInstalled: true }), picks);
+});

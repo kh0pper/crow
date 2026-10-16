@@ -95,6 +95,9 @@ export function withArtifactsCompanions(crowMcp) {
  * selects it (review L9: spawn size).
  */
 export const DESIGN_SKILLS = Object.freeze(["design-frontend"]);
+/** Every skill the Design kit ships: dropped from a kit-less instance's spawn
+ *  by exact name (another design-* skill is the operator's own and stays). */
+export const KIT_SKILLS = Object.freeze(["design-frontend", "design-themes", "design-poster"]);
 export const kitModeLine = (installed) => (installed ? "Design kit: installed" : "Design kit: not installed");
 /**
  * The skill names a spawn inlines, in order. F4 (Artifacts acceptance smoke):
@@ -107,7 +110,7 @@ export const kitModeLine = (installed) => (installed ? "Design kit: installed" :
  * (bundle not installed on this instance) adds nothing and stays quiet.
  */
 export function skillNamesFor(def, { crowHome, kitInstalled = false, houseStyle = null } = {}) {
-  const names = [...(def.skills || [])].filter((n) => kitInstalled || !String(n).startsWith("design-"));
+  const names = [...(def.skills || [])].filter((n) => kitInstalled || !KIT_SKILLS.includes(n));
   if (!botGrantsServer(def, "artifacts")) return names;
   if (!names.includes("artifacts") && resolveSkill("artifacts", { crowHome })) names.push("artifacts");
   if (!kitInstalled || !crowHome) return names;
