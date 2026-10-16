@@ -71,7 +71,7 @@ const HOME = process.env.HOME || homedir();
 // module does, rather than recomputing them at call time.
 export const CROW_DB = botsDbPath();
 // Skill-file roots are resolved per-instance by skill_resolver (A3):
-// <crowHome>/skills, then ~/.crow/skills, then the repo ~/crow/skills.
+// <crowHome>/skills, then the running checkout's skills/.
 export const TASKS_DB = resolveTasksDbPath();
 const TURN_TIMEOUT_MS = Number(process.env.PIBOT_TURN_TIMEOUT_MS || 600000);
 const PROMPT_ACK_TIMEOUT_MS = Number(process.env.PIBOT_PROMPT_ACK_TIMEOUT_MS || 60000);
