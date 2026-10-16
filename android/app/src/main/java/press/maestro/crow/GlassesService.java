@@ -93,6 +93,14 @@ public class GlassesService extends Service {
     private AudioTrack audioTrack;
     private String deviceId;
     private volatile boolean inTurn = false;
+    // Queue item 21c: whether this service has Bluetooth SCO up for a voice
+    // turn or a note stream. MainActivity's audio-mode guard never touches the
+    // (process-wide) audio mode while either is set.
+    private static volatile boolean sTurnSco = false;
+    private static volatile boolean sNoteSco = false;
+
+    /** True while a glasses voice turn or note stream holds Bluetooth SCO. */
+    static boolean isScoHeld() { return sTurnSco || sNoteSco; }
     // Reconnect bookkeeping. `stopping` is set in onDestroy so our own
     // close() doesn't trigger a reconnect loop. `reconnectPending` prevents
     // stacking multiple pending reconnects if both onClosed and onFailure
@@ -290,6 +298,7 @@ public class GlassesService extends Service {
         } catch (Exception ignored) {}
         ws.send(msg.toString());
         // Start BT SCO so the glasses mic becomes the active audio source.
+        sTurnSco = true;
         audioManager.startBluetoothSco();
         audioManager.setBluetoothScoOn(true);
         startMicPump();
@@ -305,6 +314,7 @@ public class GlassesService extends Service {
         stopMicPump();
         audioManager.setBluetoothScoOn(false);
         audioManager.stopBluetoothSco();
+        sTurnSco = false;
         if (ws != null) ws.send("{\"type\":\"turn_end\"}");
     }
 
@@ -510,6 +520,7 @@ public class GlassesService extends Service {
             registerReceiver(noteStreamScoReceiver, filter);
         }
 
+        sNoteSco = true;
         try {
             audioManager.startBluetoothSco();
             audioManager.setBluetoothScoOn(true);
@@ -659,6 +670,7 @@ public class GlassesService extends Service {
             try { audioManager.stopBluetoothSco(); } catch (Exception ignored) {}
         }
         noteStreamScoConnected = false;
+        sNoteSco = false; // a voice turn that still holds SCO keeps sTurnSco
         noteStreamSessionId = 0;
         if (wasRunning) updateNotification("Connected");
         Log.i(TAG, "noteStream stopped reason=" + reason);
@@ -1420,6 +1432,10 @@ public class GlassesService extends Service {
         if (noteStreamRunning || noteStreamScoReceiver != null) {
             stopNoteStreamPump("service_destroyed");
         }
+        // The service holds nothing any more; a route it left up is still
+        // seen by the guard through AudioManager.isBluetoothScoOn().
+        sTurnSco = false;
+        sNoteSco = false;
         try { if (ws != null) ws.close(1000, "service_stop"); } catch (Exception ignored) {}
         ws = null;
         closeAudioTrack();

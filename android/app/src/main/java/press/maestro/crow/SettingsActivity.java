@@ -18,6 +18,8 @@ public class SettingsActivity extends AppCompatActivity {
 
     private static final String PREFS_NAME = "CrowPrefs";
     private static final String KEY_GATEWAY_URL = "gateway_url";
+    /** Queue item 21c: the audio-mode guard's kill switch (default on). Off = log only. */
+    static final String KEY_AUDIO_GUARD = "audio_guard_enabled";
 
     private EditText urlInput;
     private TextView connectionStatus;
@@ -25,6 +27,7 @@ public class SettingsActivity extends AppCompatActivity {
     private Button testButton;
     private Button tailscaleButton;
     private Button saveButton;
+    private androidx.appcompat.widget.SwitchCompat audioGuardSwitch;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -37,11 +40,16 @@ public class SettingsActivity extends AppCompatActivity {
         testButton = findViewById(R.id.testButton);
         tailscaleButton = findViewById(R.id.tailscaleButton);
         saveButton = findViewById(R.id.saveButton);
+        audioGuardSwitch = findViewById(R.id.audioGuardSwitch);
 
         // Load saved URL
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         String savedUrl = prefs.getString(KEY_GATEWAY_URL, "");
         urlInput.setText(savedUrl);
+        audioGuardSwitch.setChecked(prefs.getBoolean(KEY_AUDIO_GUARD, true));
+        // Saved at once (not by "Save"): it is read at every check.
+        audioGuardSwitch.setOnCheckedChangeListener((b, on) ->
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putBoolean(KEY_AUDIO_GUARD, on).apply());
 
         updateTailscaleStatus();
 

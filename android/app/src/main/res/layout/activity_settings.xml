@@ -94,6 +94,24 @@
             android:text="@string/open_tailscale"
             android:layout_marginBottom="32dp" />
 
+        <!-- Audio (queue item 21c) -->
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/audioGuardSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/audio_guard_title"
+            android:textColor="@color/text_primary"
+            android:textSize="16sp"
+            android:layout_marginBottom="4dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/audio_guard_description"
+            android:textColor="@color/text_secondary"
+            android:textSize="14sp"
+            android:layout_marginBottom="32dp" />
+
         <!-- Save -->
         <View
             android:layout_width="match_parent"
