@@ -36,7 +36,7 @@ import { clientJs } from "./bot-board/client.js";
 import { handleBotBoardPost } from "./bot-board/api-handlers.js";
 import {
   drawerMarkup, renderKanbanBoard, renderCustomTracker,
-  botBoardState, botPickerHtml, boardCard, turnOnPanelHtml,
+  botBoardState, botPickerHtml, boardCard, turnOnPanelHtml, turnOnUnassignedHtml,
 } from "./bot-board/html.js";
 import { createDbClient } from "../../../db.js";
 import { botRuntimeActive } from "./bot-runtime-flag.js";
@@ -201,7 +201,8 @@ export default {
     if (trackerType === "none") {
       return layout({
         title: "Bot Board",
-        content: botBoardStyles() + boardCard(selBot, notice + switcher + turnOnPanelHtml(selBot, req, lang)),
+        content: botBoardStyles() + boardCard(selBot, notice + switcher + turnOnPanelHtml(selBot, req, lang) +
+          await turnOnUnassignedHtml(bots, req, lang)),
       });
     }
 

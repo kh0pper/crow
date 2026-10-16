@@ -110,3 +110,10 @@ test("agoText: SQLite UTC text is read as UTC; empty or bad input gives ''", () 
   assert.equal(agoText(null, NOW, "en"), "");
   assert.equal(agoText("not a date", NOW, "en"), "");
 });
+
+test("agoText takes a key prefix, so the Unassigned lane can say \"added N ago\"", () => {
+  const now = Date.parse("2026-10-16T12:00:00Z");
+  assert.equal(agoText("2026-10-14 12:00:00", now, "en", "botboard.added"), "added 2 days ago");
+  assert.equal(agoText("2026-10-16 11:59:30", now, "es", "botboard.added"), "añadida ahora mismo");
+  assert.equal(agoText("2026-10-14 12:00:00", now, "en"), "updated 2 days ago", "the default stays \"updated\"");
+});
