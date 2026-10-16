@@ -171,11 +171,25 @@ export async function initArtifactsTables(db) {
       ts TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (bot_id, thread_id)
     );
+    -- House style per project (design kit spec §4.4, D5). Bundle-owned like
+    -- every table here (no SCHEMA_GENERATION bump). Keyed by project_spaces.uuid:
+    -- integer ids can be reused after a delete, uuids cannot (review L8).
+    -- Consumer-neutral name: read by servers/shared/design-kit.js and the bot
+    -- spawn; a later consumer (Workspace) creates it with this same DDL. The bot
+    -- default lives in pi_bot_defs.definition.design.house_style.
+    CREATE TABLE IF NOT EXISTS design_house_styles (
+      project_uuid TEXT PRIMARY KEY,
+      theme TEXT NOT NULL,
+      set_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
   // Additive migrations for databases created by an earlier version of this
   // bundle (plan review R-L6). CREATE IF NOT EXISTS never adds a column, so
   // every column added after the first release is listed here as well.
   for (const [table, col, decl] of ADDED_COLUMNS) await addColumnIfMissing(db, table, col, decl);
+  // A deleted project's house style goes with it (review L8). No project_spaces
+  // table (tests, a fresh install mid-boot): nothing to prune.
+  try { await db.execute({ sql: "DELETE FROM design_house_styles WHERE project_uuid NOT IN (SELECT uuid FROM project_spaces WHERE uuid IS NOT NULL)", args: [] }); } catch { /* no project_spaces */ }
   await db.execute({ sql: "INSERT OR IGNORE INTO artifact_store_meta (key, value) VALUES ('store_id', ?)", args: [randomBytes(16).toString("hex")] });
   // D22 (R3-L1): Perch sessions that existed before D22 have no record of what
   // they read; mark them tainted once (they re-earn trust only as new sessions).

@@ -184,8 +184,14 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
   const hub = (artifactId, n, event) => notifyHub({ db, artifactId, n, event, emitExternal });
 
   const scopeOfActor = (actor) => scopeOf(db, actor);
-  // Per-call render deps (Task 14 adds the actor's house style here).
-  const depsFor = async (_actor) => renderDeps;
+  // The actor's house style (spec §4.4): a verified bot's project theme or bot
+  // default; never for the operator or an unattributed caller.
+  const depsFor = async (actor) => {
+    if (!renderDeps.design || actor.kind !== "bot" || !actor.id) return renderDeps;
+    let houseStyle = null;
+    try { houseStyle = await renderDeps.design.houseStyleFor(actor.id); } catch { houseStyle = null; }
+    return { ...renderDeps, houseStyle };
+  };
   const libsSchema = z.array(z.string().max(120)).max(40).optional();
   const withDesign = (out, v) => (v.design ? { ...out, design: v.design } : out);
   const tool = (name, desc, schema, fn) => {

@@ -37,13 +37,26 @@ function libError(e, type) {
   return m ? err(e.code, m(e, type)) : err("lib_integrity", LIB_MESSAGES.lib_integrity());
 }
 
-/** source.libs → resolved kit files (spec §4.1). null when nothing is asked. */
-async function libsFor(type, source, kit) {
+/** source.libs (+ the house style's theme) → resolved kit files (spec §4.1,
+ *  §4.4). null when nothing is asked and no house style applies. A house style
+ *  the kit does not know (kit gone, theme dropped by an upgrade) is ignored:
+ *  only an explicit libs list is ever refused for a missing kit. */
+async function libsFor(type, source, kit, houseStyle) {
   const names = source.libs === undefined ? [] : source.libs;
   if (!Array.isArray(names)) throw err("bad_source", "libs must be a list of library names");
-  if (!names.length) return null;
+  const style = kit && typeof houseStyle === "string" && kit.themes.has(houseStyle) ? houseStyle : null;
+  if (!names.length && !style) return null;
   if (!kit) throw err("kit_missing", KIT_MISSING);
-  try { return kit.resolve(names, { target: type }); } catch (e) { throw libError(e, type); }
+  let r;
+  try { r = kit.resolve(style ? [...names, `theme:${style}`] : names, { target: type }); } catch (e) { throw libError(e, type); }
+  if (!style) return { ...r, houseStyle: null, houseStyleLinks: [] };
+  // resolve() dedupes refs (first-seen order), so the requested libs are the
+  // first |distinct names| refs; the appended theme is reported as
+  // house_style (+ the CSS a page must link), never as a requested lib.
+  const t = kit.themes.get(style);
+  const themeFonts = new Set(t && t.fonts ? [t.fonts.heading, t.fonts.body] : []);
+  const links = r.entries.filter((e) => e.name === `theme:${style}` || (e.kind === "font" && themeFonts.has(e.name))).map((e) => e.main);
+  return { ...r, refs: r.refs.slice(0, new Set(names).size), houseStyle: style, houseStyleLinks: links };
 }
 
 /** <head> additions for script-free types: stylesheet links for every CSS main
@@ -59,7 +72,9 @@ function headLinks(lib) {
   }
   return links + (rule ? `<style>${rule}</style>` : "");
 }
-const designMeta = (lib, rendered = 0, notes = [], houseStyle = null) => (lib || rendered || notes.length || houseStyle ? { libs: lib ? lib.refs : [], house_style: houseStyle, rendered, notes } : null);
+const designMeta = (lib, rendered = 0, notes = []) => (lib || rendered || notes.length
+  ? { libs: lib ? lib.refs : [], house_style: lib ? lib.houseStyle || null : null, ...(lib && lib.houseStyle ? { house_style_links: lib.houseStyleLinks } : {}), rendered, notes }
+  : null);
 
 // ---- Specs: fenced vega-lite / mermaid / d2 rendered by the kit (spec §4.2, §4.5) ----
 const SPEC_ENGINES = new Set(["vega-lite", "mermaid", "d2"]);
@@ -460,12 +475,12 @@ a[data-inert-href]{text-decoration:underline dotted;cursor:help}
 img{max-width:100%}pre{overflow:auto}table{border-collapse:collapse}td,th{border:1px solid #8884;padding:.25rem .5rem}
 @media print{body{max-width:none;padding:0}.blk:target{outline:none}}`;
 
-export async function renderVersion(type, source, { markdownBlocks, design = null, priorRenders = null } = {}) {
+export async function renderVersion(type, source, { markdownBlocks, design = null, priorRenders = null, houseStyle = null } = {}) {
   if (!source || typeof source !== "object") throw err("bad_source", "source must be an object");
   const kit = design ? await design.kit() : null;
   if (type === "page") {
     if (typeof source.html !== "string" || !source.html.trim()) throw err("bad_source", "page needs html");
-    const lib = await libsFor("page", source, kit);
+    const lib = await libsFor("page", source, kit, houseStyle);
     return {
       files: [{ path: "index.html", body: Buffer.from(source.html), contentType: "text/html; charset=utf-8" }, ...assetsFor("page", source.assets), ...(lib ? lib.files : [])],
       anchorMap: null,
@@ -476,7 +491,7 @@ export async function renderVersion(type, source, { markdownBlocks, design = nul
     if (typeof source.markdown !== "string") throw err("bad_source", "document needs markdown");
     if (Buffer.byteLength(source.markdown) > LIMITS.documentMarkdownBytes) throw err("too_large", `markdown over ${LIMITS.documentMarkdownBytes} bytes`);
     if (typeof markdownBlocks !== "function") throw err("no_renderer", "markdown renderer unavailable");
-    const lib = await libsFor("document", source, kit);
+    const lib = await libsFor("document", source, kit, houseStyle);
     const blocks = markdownBlocks(source.markdown);
     // Specs (spec §4.2; §4.3 as amended): only with the kit. Without it every
     // fence is code, byte-identical to before the kit existed.
@@ -528,7 +543,7 @@ export async function renderVersion(type, source, { markdownBlocks, design = nul
     };
   }
   if (type === "diagram") {
-    const lib = await libsFor("diagram", source, kit); // a libs error wins over any render
+    const lib = await libsFor("diagram", source, kit, houseStyle); // a libs error wins over any render
     // { engine, source }: rendered by the kit, then the same path as { svg }.
     let raw = source.svg;
     let renderedN = 0;

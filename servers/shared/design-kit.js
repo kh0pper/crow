@@ -14,3 +14,71 @@ export function installedKitDir(crowHome) {
   const ids = Array.isArray(list) ? list.map((x) => (typeof x === "string" ? x : x && x.id)) : [];
   return ids.includes("design-kit") ? dir : null;
 }
+
+// ---- House style (spec §4.4, D4/D5): off unless set; project > bot default > none ----
+export const THEME_ID_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
+const FONT_NAME_RE = /^font:[a-z0-9][a-z0-9-]{0,39}$/;
+
+/** The bot definition's default theme id, or null. */
+export function botThemeOf(def) {
+  const t = def && def.design && def.design.house_style;
+  return typeof t === "string" ? t : null;
+}
+
+/** Project wins, then the bot default; only ids the installed kit knows. */
+export function pickHouseStyle({ projectTheme = null, botTheme = null, known } = {}) {
+  const ok = (t) => typeof t === "string" && THEME_ID_RE.test(t) && known instanceof Set && known.has(t);
+  if (ok(projectTheme)) return projectTheme;
+  return ok(botTheme) ? botTheme : null;
+}
+
+/** The installed kit's themes as id → { name, fonts }; empty when not installed. */
+export function readKitThemes(crowHome) {
+  const dir = installedKitDir(crowHome);
+  if (!dir) return new Map();
+  try {
+    const doc = JSON.parse(readFileSync(join(dir, "lib", "themes.json"), "utf8"));
+    const out = new Map();
+    for (const [id, t] of Object.entries((doc && doc.themes) || {})) {
+      if (!THEME_ID_RE.test(id)) continue;
+      const fonts = [...new Set([t && t.fonts && t.fonts.heading, t && t.fonts && t.fonts.body])].filter((f) => typeof f === "string" && FONT_NAME_RE.test(f));
+      out.set(id, { name: String((t && t.name) || id).replace(/[^\p{L}\p{N} ]/gu, "").slice(0, 60) || id, fonts });
+    }
+    return out;
+  } catch { return new Map(); }
+}
+
+/** What a PAGE must <link> to use a house style (review M3). Pages are written
+ *  by the bot, so nothing is injected; documents and diagrams get these links
+ *  in their head automatically. Paths follow the kit's layout convention. */
+export function houseStyleLinks(id, theme) {
+  return [...(theme && theme.fonts ? theme.fonts : []).map((f) => `__lib/font/${f.slice(5)}/font.css`), `__lib/themes/${id}.css`];
+}
+
+/** Bot spawn (better-sqlite3, sync). Missing tables read as no theme. */
+export function readHouseStyleSync(conn, { projectId = null, def = null, known } = {}) {
+  let projectTheme = null;
+  if (projectId != null) {
+    try {
+      const r = conn.prepare("SELECT h.theme FROM design_house_styles h JOIN project_spaces p ON p.uuid=h.project_uuid WHERE p.id=?").get(Number(projectId));
+      projectTheme = r ? r.theme : null;
+    } catch { projectTheme = null; }
+  }
+  return pickHouseStyle({ projectTheme, botTheme: botThemeOf(def), known });
+}
+
+/** Artifacts save path (createDbClient, async). */
+export async function readHouseStyle(db, botId, { known } = {}) {
+  let row = null;
+  try { row = (await db.execute({ sql: "SELECT definition, project_id FROM pi_bot_defs WHERE bot_id=?", args: [String(botId)] })).rows[0] || null; } catch { row = null; }
+  if (!row) return null;
+  let def = null;
+  try { def = JSON.parse(row.definition || "{}"); } catch { def = null; }
+  let projectTheme = null;
+  if (row.project_id != null) {
+    try {
+      projectTheme = (await db.execute({ sql: "SELECT h.theme FROM design_house_styles h JOIN project_spaces p ON p.uuid=h.project_uuid WHERE p.id=?", args: [Number(row.project_id)] })).rows[0]?.theme ?? null;
+    } catch { projectTheme = null; }
+  }
+  return pickHouseStyle({ projectTheme, botTheme: botThemeOf(def), known });
+}

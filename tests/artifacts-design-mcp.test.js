@@ -183,3 +183,36 @@ test("idempotency runs after the link gate: an unlinked chat repeating the curre
     assert.match(r.err || "", /^\[needs_link\]/);
   } finally { await other.close(); }
 });
+
+test("house style set: the theme is added on save and reported; kit gone: save works with no theme (Review Focus 2)", async () => {
+  const [themeId] = s.kit.themes.keys();
+  s.houseStyle.bobby = themeId;
+  const c = await client();
+  try {
+    const made = await call(c, "artifact_create", { title: "Brief", type: "document", source: { markdown: "# Brief\n\nText." } });
+    assert.equal(made.err, null);
+    assert.equal(made.data.design.house_style, themeId);
+    const v = await store.getVersion(s.db, made.data.id, 1);
+    assert.ok(JSON.parse(v.files_json).some((f) => f.path === `__lib/themes/${themeId}.css`));
+    s.kitOn = false;
+    const plain = await call(c, "artifact_update", { artifact_id: made.data.id, source: { markdown: "# Brief\n\nMore." } });
+    assert.equal(plain.err, null, "house style set but kit gone: save works, no theme");
+    assert.equal(plain.data.design, undefined);
+    assert.match((await call(c, "artifact_update", { artifact_id: made.data.id, source: { markdown: "# B", libs: ["css:pico"] } })).err, /^\[kit_missing\]/);
+  } finally { s.kitOn = true; delete s.houseStyle.bobby; await c.close(); }
+});
+
+test("house style on a page: the save result names the files to link (review M3)", async () => {
+  const [themeId] = s.kit.themes.keys();
+  s.houseStyle.bobby = themeId;
+  const c = await client();
+  try {
+    const made = await call(c, "artifact_create", { title: "Landing", type: "page", source: { html: "<h1>Hi</h1>" } });
+    assert.equal(made.err, null);
+    const t = s.kit.themes.get(themeId);
+    const fonts = [...new Set([t.fonts.heading, t.fonts.body])];
+    assert.deepEqual(made.data.design.house_style_links, [...fonts.map((f) => `__lib/font/${f.slice(5)}/font.css`), `__lib/themes/${themeId}.css`]);
+    const files = JSON.parse((await store.getVersion(s.db, made.data.id, 1)).files_json).map((f) => f.path);
+    for (const p of made.data.design.house_style_links) assert.ok(files.includes(p), `${p} is in the version`);
+  } finally { delete s.houseStyle.bobby; await c.close(); }
+});
