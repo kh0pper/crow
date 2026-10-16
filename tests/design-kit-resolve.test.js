@@ -78,9 +78,9 @@ test("a licence shared by several entries is copied once", () => {
   assert.equal(paths.filter((p) => p === `__lib/${kit.entries.get(ids[0]).license_file}`).length, 1);
 });
 
-test("repeat names are idempotent: one ref per request, files once", () => {
+test("repeat names are idempotent: one ref per distinct name, files once", () => {
   const r = kit.resolve(["css:pico", "css:pico", "icons:tabler/home", "icons:tabler/home"], { target: "page" });
-  assert.equal(r.refs.length, 4);
+  assert.equal(r.refs.length, 2);
   assert.equal(r.entries.filter((e) => e.name === "css:pico").length, 1);
   const paths = r.files.map((f) => f.path);
   assert.equal(new Set(paths).size, paths.length);
@@ -103,7 +103,7 @@ test("unknown, malformed and too many names", () => {
   assert.deepEqual(code(() => kit.resolve(["css:pico", 42], { target: "page" })), { code: "bad_lib_name", index: 1, allowed: undefined });
   assert.equal(code(() => kit.resolve("font:lora", { target: "page" })).code, "bad_lib_name");
   assert.equal(code(() => kit.resolve(Array(41).fill("css:pico"), { target: "page" })).code, "too_many_libs");
-  assert.equal(kit.resolve(Array(40).fill("css:pico"), { target: "page" }).refs.length, 40);
+  assert.equal(kit.resolve(Array(40).fill("css:pico"), { target: "page" }).refs.length, 1, "repeated names give one ref");
   assert.equal(code(() => kit.resolve([], { target: "slides" })).code, "bad_target");
   assert.equal(code(() => kit.resolve([])).code, "bad_target");
   assert.equal(code(() => kit.resolve([], { target: "constructor" })).code, "bad_target");
@@ -145,4 +145,10 @@ test("themes are exposed", () => {
   const r = kit.resolve([`theme:${id}`], { target: "document" });
   assert.deepEqual(r.entries.at(-1).name, `theme:${id}`, "fonts before the theme");
   for (const f of Object.values(kit.themes.get(id).fonts)) assert.ok(r.entries.some((e) => e.name === f), f);
+});
+
+test("repeated names give each ref once, in first-seen order (files were already deduped)", () => {
+  const r = kit.resolve(["icons:lucide/coffee", "css:pico", "icons:lucide/coffee", "css:pico", "css:open-props"], { target: "page" });
+  assert.deepEqual(r.refs, ["__lib/icons/lucide/coffee.svg", `__lib/${kit.entries.get("css:pico").main}`, "__lib/css/open-props/open-props.min.css"]);
+  assert.equal(new Set(r.files.map((f) => f.path)).size, r.files.length);
 });

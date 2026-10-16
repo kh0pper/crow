@@ -271,7 +271,7 @@ export function openKit(kitDir, { renderUrl = DEFAULT_RENDER_URL, fetchImpl = gl
     const order = [];
     const added = new Set();
     const icons = new Map();
-    const refs = [];
+    const refs = new Set(); // a name given twice links once (files are deduped too)
 
     const addEntry = (e, index, chain) => {
       if (added.has(e.name)) return;
@@ -298,13 +298,13 @@ export function openKit(kitDir, { renderUrl = DEFAULT_RENDER_URL, fetchImpl = gl
         if (!Object.hasOwn(all, icon) || typeof all[icon] !== "string") throw kitError("unknown_lib", { index });
         const path = `__lib/icons/${set.name.slice(ICON_PREFIX.length)}/${icon}.svg`;
         icons.set(path, { svg: all[icon], set });
-        refs.push(path);
+        refs.add(path);
         return;
       }
       const e = entries.get(n);
       if (!e || e.kind === "icon-set") throw kitError("unknown_lib", { index });
       addEntry(e, index, []);
-      refs.push(`__lib/${e.main}`);
+      refs.add(`__lib/${e.main}`);
     });
 
     const files = [];
@@ -325,7 +325,7 @@ export function openKit(kitDir, { renderUrl = DEFAULT_RENDER_URL, fetchImpl = gl
 
     return {
       files,
-      refs,
+      refs: [...refs],
       entries: order.map((e) => ({ name: e.name, kind: e.kind, main: `__lib/${e.main}`, ...(e.kind === "font" ? { family: e.family, fallback: e.fallback } : {}) })),
     };
   }
