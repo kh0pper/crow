@@ -86,7 +86,8 @@ function specError(engine, e) {
   const eng = SPEC_ENGINES.has(engine) ? engine : "spec";
   const code = e && e.code;
   if (code === "bad_spec") return err("bad_spec", `${eng}: ${Object.hasOwn(SPEC_REASONS, e.reason) ? SPEC_REASONS[e.reason] : "spec refused"}`);
-  if (code === "render_unavailable") return err("render_unavailable", UNAVAILABLE, { retryable: true });
+  // The text stays fixed; retryable passes through (not_loopback is not).
+  if (code === "render_unavailable") return err("render_unavailable", UNAVAILABLE, { retryable: e.retryable !== false });
   if (code === "render_too_large") return err("render_too_large", TOO_LARGE);
   const cat = e && FAIL_CATEGORIES.has(e.category) ? e.category : "render error";
   return err("render_failed", `${eng}: ${cat}${e && Number.isInteger(e.line) ? ` at line ${e.line}` : ""}`);
@@ -95,7 +96,18 @@ function specError(engine, e) {
 const WS = (c) => c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\f";
 // data: URLs a rendered SVG may carry in url(): fonts (D2 embeds its fonts)
 // and raster images. Never data:image/svg+xml or text/html (a nested document).
-const DATA_URL_TYPES = ["data:font/", "data:application/font-", "data:application/x-font-", "data:image/png", "data:image/jpeg", "data:image/gif", "data:image/webp"];
+const DATA_MIME_PREFIXES = ["font/", "application/font-", "application/x-font-"];
+const DATA_MIME_EXACT = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+/** "data:<mime>" followed by ";" or "," with an allowed MIME type. */
+function okDataUrl(low, j) {
+  if (!low.startsWith("data:", j)) return false;
+  let k = j + 5;
+  const m0 = k;
+  while (k - m0 < 64 && /[a-z0-9.+/-]/.test(low.charAt(k))) k++;
+  if (low.charAt(k) !== ";" && low.charAt(k) !== ",") return false;
+  const mime = low.slice(m0, k);
+  return DATA_MIME_EXACT.has(mime) || DATA_MIME_PREFIXES.some((p) => mime.startsWith(p) && mime.length > p.length);
+}
 /** href / xlink:href that is not an in-document fragment (any whitespace
  *  around "="), url() that is not #id or a font/raster data: URL, @import,
  *  image-set(, src(. Linear scans (ReDoS review). Input is lowercased. */
@@ -122,7 +134,7 @@ export function hasExternalRef(low) {
     i = k + 4;
     let j = i;
     while (WS(low.charAt(j)) || low.charAt(j) === "'" || low.charAt(j) === '"') j++;
-    if (!(low.startsWith("#", j) || DATA_URL_TYPES.some((t) => low.startsWith(t, j)))) return true;
+    if (!(low.startsWith("#", j) || okDataUrl(low, j))) return true;
   }
 }
 
@@ -163,27 +175,45 @@ function markupOk(low) {
     const name = low.slice(n0, j);
     const after = low.charAt(j);
     if (!(name && name.charAt(0) >= "a" && name.charAt(0) <= "z" && SVG_ELEMENTS.has(name)) || !(WS(after) || after === "/" || after === ">")) return false;
-    // Attributes: every value quoted, straight after "=" (an unquoted value
-    // with a stray quote would hide markup from this walk while an HTML
-    // parser, which reads the inlined diagram, sees it).
-    for (; j < low.length; j++) {
-      const c = low.charAt(j);
-      if (c === ">") break;
-      if (c === "\\" || c === "<" || c === '"' || c === "'") return false;
-      if (c === "=") {
-        j++;
-        while (WS(low.charAt(j))) j++;
-        const q = low.charAt(j);
-        if (q !== '"' && q !== "'") return false;
-        const close = low.indexOf(q, j + 1);
-        if (close < 0 || low.slice(j + 1, close).includes("\\")) return false;
-        j = close;
-      }
-    }
-    if (j >= low.length) return false;
+    j = closing ? skipWs(low, j) : attrsEnd(low, j);
+    if (j < 0 || low.charAt(j) !== ">") return false;
     if (name === "style") inStyle = !closing && low.charAt(j - 1) !== "/";
     else if (inStyle) return false;
     i = j + 1;
+  }
+}
+
+const skipWs = (low, j) => { while (WS(low.charAt(j))) j++; return j; };
+const ATTR_START = (c) => c >= "a" && c <= "z";
+const ATTR_CH = (c) => ATTR_START(c) || (c >= "0" && c <= "9") || c === ":" || c === "." || c === "_" || c === "-";
+/** Attributes of one start tag, read the way the WHATWG tokenizer would, but
+ *  narrower: name [a-z][a-z0-9:._-]*, then "=", then a quoted value with no
+ *  "<" or backslash, then whitespace, "/>" or ">". No "on*" names, no xml:base.
+ *  Returns the index of the closing ">" or -1. Linear. */
+function attrsEnd(low, j) {
+  for (;;) {
+    const sep = j;
+    j = skipWs(low, j);
+    const c = low.charAt(j);
+    if (c === ">") return j;
+    if (c === "/") return low.charAt(j + 1) === ">" ? j + 1 : -1;
+    if (j === sep || !ATTR_START(c)) return -1; // a name needs whitespace before it
+    const n0 = j;
+    while (ATTR_CH(low.charAt(j))) j++;
+    const name = low.slice(n0, j);
+    if (name.startsWith("on") || name === "xml:base") return -1;
+    j = skipWs(low, j);
+    if (low.charAt(j) !== "=") return -1;
+    j = skipWs(low, j + 1);
+    const q = low.charAt(j);
+    if (q !== '"' && q !== "'") return -1;
+    const close = low.indexOf(q, j + 1);
+    if (close < 0) return -1;
+    const v = low.slice(j + 1, close);
+    if (v.includes("\\") || v.includes("<")) return -1;
+    j = close + 1;
+    const after = low.charAt(j);
+    if (!(WS(after) || after === "/" || after === ">")) return -1;
   }
 }
 
@@ -511,11 +541,11 @@ function hasEventAttr(low) {
     if (k < 0) return false;
     i = k + 2;
     const before = low.charAt(k - 1);
-    if (!(before === " " || before === "\t" || before === "\n" || before === "\r" || before === "/")) continue;
+    if (!(before === " " || before === "\t" || before === "\n" || before === "\r" || before === "\f" || before === "/" || before === '"' || before === "'")) continue;
     let j = k + 2;
     while (j < low.length && j - k < 40 && low.charCodeAt(j) >= 97 && low.charCodeAt(j) <= 122) j++;
     if (j === k + 2) continue;
-    while (j < low.length && (low.charAt(j) === " " || low.charAt(j) === "\t" || low.charAt(j) === "\n")) j++;
+    while (j < low.length && (low.charAt(j) === " " || low.charAt(j) === "\t" || low.charAt(j) === "\n" || low.charAt(j) === "\r" || low.charAt(j) === "\f")) j++;
     if (low.charAt(j) === "=") return true;
   }
 }

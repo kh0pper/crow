@@ -284,3 +284,47 @@ test("LIVE: real Mermaid, Vega-Lite and D2 output passes checkRenderedSvg, end t
   const d = await renderVersion("diagram", { engine: "d2", source: LIVE_EXAMPLES.at(-2)[1] }, { markdownBlocks, design: { kit: async () => real } });
   assert.equal(d.design.rendered, 1);
 });
+
+// Fix round 1: HTML-tokenizer differentials (the diagram path inlines the SVG
+// into HTML; the CSP contains these, the checker must fail closed on its own).
+test("fix round 1: attribute grammar follows the HTML tokenizer, fail closed", () => {
+  const refused = (svg) => { try { checkRenderedSvg(svg); return null; } catch (e) { return e.code; } };
+  const bad = [
+    '<svg><rect x="1"onload="alert(1)"/></svg>',
+    '<svg><rect\fonload="alert(1)"/></svg>',
+    '<svg><rect x="1"\fonload="alert(1)"/></svg>',
+    "<svg><rect =\"a><div><video poster='https://evil.example/p.png'></video></div>\"/></svg>",
+    "<svg><rect =\"a><meta http-equiv='refresh' content='0;url=https://evil.example/'>\"/></svg>",
+    "<svg><rect =\"a><table background='https://evil.example/t.png'></table>\"/></svg>",
+    '<svg><rect x="1" ="2"/></svg>',
+    '<svg><rect x="1"y="2"/></svg>',
+    '<svg><rect 1x="1"/></svg>',
+    '<svg><rect x/></svg>',
+    '<svg><rect x="1" / y="2"/></svg>',
+    '<svg><rect ONLOAD="x()"/></svg>',
+    '<svg><rect onbegin="x()"/></svg>',
+    '<svg><rect x="a<b"/></svg>',
+    '<svg xml:base="https://evil.example/"><use href="#g"/></svg>',
+    '<svg><g></g x="1"></svg>',
+    '<svg><style>a{b:url(data:font/woff2)}</style></svg>', '<svg><style>a{b:url(data:image/png+svg,AA)}</style></svg>',
+    '<svg><style>a{b:url(data:image/pngx,AA)}</style></svg>',
+    '<svg><style>a{b:url(data:application/font-woff)}</style></svg>',
+  ];
+  for (const svg of bad) assert.equal(refused(svg), "render_failed", JSON.stringify(svg));
+  const good = [
+    '<svg viewBox="0 0 1 1"><rect x="1" y=\'2\' class="a b"/><g\ttransform="x"\n></g ></svg>',
+    '<svg xmlns:xlink="http://www.w3.org/1999/xlink"><use xlink:href="#g" data-et_al="1"/><text x="1">a > b</text></svg>',
+    '<svg><style>a{b:url(data:font/woff2;base64,AA)}c{d:url("data:image/png,AA")}e{f:url(data:application/font-woff;base64,AA)}</style></svg>',
+  ];
+  for (const svg of good) assert.ok(checkRenderedSvg(svg).startsWith("<svg"), svg);
+});
+
+test("fix round 1: a non-retryable unavailable (not_loopback) stays non-retryable; text fixed", async () => {
+  answer = async () => { throw kitError("render_unavailable", { reason: "not_loopback", retryable: false }); };
+  assert.deepEqual(await errOf(renderVersion("diagram", { engine: "d2", source: "a -> b" }, deps)),
+    { code: "render_unavailable", message: "the chart and diagram renderer is not answering; try again in a minute", retryable: false });
+  const r = await renderVersion("document", { markdown: MD }, deps);
+  assert.deepEqual(r.design.notes, [RENDERER_DOWN_NOTE], "a document still falls back to code");
+  answer = async () => SVG;
+});
+
