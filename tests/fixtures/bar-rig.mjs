@@ -139,7 +139,16 @@ ${turbo ? `<script>${TURBO}</script>` : ""}<style>${designTokensCss()} body{marg
   app.get("/dashboard/nest", auth.dashboardAuth, (_req, res) => res.type("html").send(page("Nest", `<a id="viewer" data-turbo="false" href="${viewerHref}">Open artifact</a><a id="lib" href="/dashboard/artifacts">Artifacts</a>`)));
   app.get("/dashboard/artifacts", auth.dashboardAuth, (_req, res) => res.type("html").send(page("Library", `<a id="viewer" data-turbo="false" href="${viewerHref}">Open artifact</a><a id="nest" href="/dashboard/nest">Nest</a>`)));
   app.get("/dashboard/perch", auth.dashboardAuth, (_req, res) => res.type("html").send(page("Perch", `<iframe id="sheet" src="${viewerHref}" style="width:100%;height:500px;border:0"></iframe>`)));
-  app.get("/media/tone.wav", auth.dashboardAuth, (_req, res) => { res.type("audio/wav").setHeader("content-length", WAV.length); res.end(WAV); });
+  // A podcast-like file: seekable (byte ranges), as a real podcast host serves it.
+  app.get("/media/tone.wav", auth.dashboardAuth, (req, res) => {
+    res.type("audio/wav").setHeader("accept-ranges", "bytes");
+    const m = /^bytes=(\d+)-(\d*)$/.exec(String(req.headers.range || ""));
+    if (!m) { res.setHeader("content-length", WAV.length); return res.end(WAV); }
+    const start = Number(m[1]), end = m[2] ? Math.min(Number(m[2]), WAV.length - 1) : WAV.length - 1;
+    res.status(206).setHeader("content-range", `bytes ${start}-${end}/${WAV.length}`);
+    res.setHeader("content-length", end - start + 1);
+    res.end(WAV.subarray(start, end + 1));
+  });
   app.use(artifactsRouter(auth.dashboardAuth, {
     db: artDb, blobs: createLocalBlobStore(join(dir, "blobs")), runtime: artRuntime, policy, csrf: csrf.csrfMiddleware, renderDeps: { markdownBlocks },
     engine: { async list() { return []; }, async spawn() { return {}; }, async message() {} },
