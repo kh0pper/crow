@@ -161,11 +161,11 @@ test("guardSpec: Mermaid fails closed on links, callbacks and directives anywher
     "flowchart LR\n A[\"javascript:alert(1)\"]": "links",
     "flowchart LR\n A[\"see ftp://x\"]": "links",
     "---\ntitle: t\ninit: {}\n---\nflowchart LR\n A-->B": "directives",
-    "---\ntitle: t\n---\n%% c\n\nquadrantChart\n x": "unsupported_type",
+    "---\ntitle: t\n---\n%% c\n\nquadrantChart\n x": "directives", // ruling 2026-10-15: no front matter at all
     "---\ntitle: t\nflowchart LR\n A-->B": "directives",
   };
   for (const [src, want] of Object.entries(probes)) assert.equal(reason("mermaid", src), want, JSON.stringify(src));
-  assert.equal(reason("mermaid", "---\ntitle: My chart\n---\n\n%% note\nflowchart LR\n A-->B"), null, "plain front matter (title only) is fine");
+  assert.equal(reason("mermaid", "---\ntitle: My chart\n---\n\n%% note\nflowchart LR\n A-->B"), "directives", "ruling 2026-10-15: even title-only front matter is refused");
   assert.equal(reason("mermaid", "flowchart LR\r\n A-->B"), null);
   assert.equal(reason("mermaid", "flowchart LR\n A[linked list] --> B[clicker]"), null, "word boundaries: linked, clicker are words of their own");
 });
@@ -272,8 +272,8 @@ test("guardSpec: Mermaid front matter closes only on an unindented ---; config/i
   assert.equal(reason("mermaid", "flowchart LR\n A-->B\n  ---"), "directives", "an indented --- line is refused anywhere");
   assert.equal(reason("mermaid", "%% config: {}\nflowchart LR\n A-->B"), "directives");
   assert.equal(reason("mermaid", "\n\nInit\nflowchart LR\n A-->B"), "directives");
-  assert.equal(reason("mermaid", "---\ntitle: x\n---   \nflowchart LR\n A-->B"), null, "trailing spaces on the closer are fine");
-  assert.equal(reason("mermaid", "---\ntitle: x\n---\nflowchart LR\n A[config] --> B"), null, "config inside the diagram body is a label");
+  assert.equal(reason("mermaid", "---\ntitle: x\n---   \nflowchart LR\n A-->B"), "directives", "ruling 2026-10-15: no front matter at all");
+  assert.equal(reason("mermaid", "flowchart LR\n A[config] --> B"), null, "config inside the diagram body is a label");
 });
 
 test("guardSpec: Unicode case-fold look-alikes — D2 refuses them, Mermaid folds them before keyword checks", () => {
@@ -325,10 +325,10 @@ test("guardSpec: Mermaid front matter follows Mermaid's own regex; a --- right a
   ]) assert.equal(reason("mermaid", src), "directives", JSON.stringify(src));
 });
 
-test("guardSpec: plain title-only front matter still passes", () => {
+test("guardSpec: title-only front matter is refused too (ruling 2026-10-15, was allowed in round 4)", () => {
   for (const src of ["---\ntitle: My chart\n---\nflowchart LR\n A-->B", "---\r\ntitle: My chart\r\n---\r\nflowchart LR\r\n A-->B",
     "---\n\ntitle: My chart\n\n---\n\nflowchart LR\n A-->B", "---\ntitle: x\n---   \nflowchart LR\n A-->B"]) {
-    assert.equal(reason("mermaid", src), null, JSON.stringify(src));
+    assert.equal(reason("mermaid", src), "directives", JSON.stringify(src));
   }
 });
 
@@ -353,7 +353,11 @@ test("guardSpec: adversarial 64 KB inputs finish in under 50 ms", () => {
     ["mermaid", "---" + "\r\n".repeat(32760), "directives"],
     ["mermaid", "---\n" + "title: x\n".repeat(7000), "directives"],
     ["mermaid", "---\n" + "\n".repeat(N) + "---\nflowchart LR\n A-->B", "directives"],
-    ["mermaid", "---\ntitle: x\n---" + " \n".repeat(32000) + "flowchart LR\n A-->B", null],
+    ["mermaid", "---\ntitle: x\n---" + " \n".repeat(32000) + "flowchart LR\n A-->B", "directives"],
+    ["mermaid", "flowchart LR\n" + " ---\n".repeat(13000), "directives"],
+    ["mermaid", "flowchart LR\n A-->B\n" + " ---".repeat(16000), null],
+    ["mermaid", "flowchart LR\n" + "\u00a0".repeat(N / 2) + "---", "directives"],
+    ["mermaid", "flowchart LR\n" + "\u3000\n".repeat(N / 5), null],
     ["mermaid", " ".repeat(N) + "---", "directives"],
     ["mermaid", "\n".repeat(N) + "flowchart LR\n A-->B", null],
     ["mermaid", "flowchart LR\n" + " ".repeat(N) + "x", null],
@@ -373,23 +377,51 @@ test("guardSpec: adversarial 64 KB inputs finish in under 50 ms", () => {
   }
 });
 
-test("guardSpec: Mermaid front matter must close within its first 8 lines (1024 characters)", () => {
-  assert.equal(reason("mermaid", "---\n\n\n\n\n\ntitle: x\n---\nflowchart LR\n A-->B"), null, "closer on line 8");
-  assert.equal(reason("mermaid", "---\n\n\n\n\n\n\ntitle: x\n---\nflowchart LR\n A-->B"), "directives", "closer on line 9");
-  assert.equal(reason("mermaid", "---\ntitle: " + "x".repeat(1100) + "\n---\nflowchart LR\n A-->B"), "directives", "past 1024 characters");
-  assert.equal(reason("mermaid", "---\ntitle: x\n---" + " \n".repeat(600) + "flowchart LR\n A-->B"), null, "whitespace after the closer runs past the window");
-  assert.equal(reason("mermaid", "---\ntitle: x\n---\n" + "\n".repeat(20) + "flowchart LR\n A-->B"), null);
-  assert.equal(reason("mermaid", "---\ntitle: x\n---" + " \n".repeat(600) + "   ---\nflowchart LR\n A-->B"), "directives");
-  assert.equal(reason("mermaid", "---\n\n---\n" + "\n".repeat(10) + "x: 1\nconfig:\n  htmlLabels: true\n---\nflowchart LR\n A-->B"), "directives",
-    "Mermaid closes on the later --- past the window: refused as a second fence");
+test("guardSpec: former windowed front-matter cases are all refused now (ruling 2026-10-15)", () => {
+  for (const src of ["---\n\n\n\n\n\ntitle: x\n---\nflowchart LR\n A-->B", "---\n\n\n\n\n\n\ntitle: x\n---\nflowchart LR\n A-->B",
+    "---\ntitle: " + "x".repeat(1100) + "\n---\nflowchart LR\n A-->B", "---\ntitle: x\n---" + " \n".repeat(600) + "flowchart LR\n A-->B",
+    "---\ntitle: x\n---\n" + "\n".repeat(20) + "flowchart LR\n A-->B", "---\ntitle: x\n---" + " \n".repeat(600) + "   ---\nflowchart LR\n A-->B",
+    "---\n\n---\n" + "\n".repeat(10) + "x: 1\nconfig:\n  htmlLabels: true\n---\nflowchart LR\n A-->B"]) {
+    assert.equal(reason("mermaid", src), "directives", JSON.stringify(src.slice(0, 40)));
+  }
 });
 
-test("guardSpec: Mermaid titles may use YAML indicators after the first character", () => {
-  for (const t of ["Revenue & costs", "50% growth", "Q&A [draft] {v2} *new* it's | ok!", "a:b", "x > y @z `w`", "Café — 2026"]) {
-    assert.equal(reason("mermaid", `---\ntitle: ${t}\n---\nflowchart LR\n A-->B`), null, t);
-  }
-  for (const t of ["&a x", "*a", "!tag x", "|", ">", "%x", "@x", "`x`", "'x'", '"x"', "[x]", "{x: 1}", "]", "}", "- x", "? x", ": x", ", x", "#x",
-    "a: b", "a:", "a:\tb", "a #b", "a\t#b", "x {htmlLabels: true}", "x, {a: 1}"]) {
+test("guardSpec: Mermaid titles are refused whatever they hold (ruling 2026-10-15; was round 5's indicator allowlist)", () => {
+  for (const t of ["Revenue & costs", "50% growth", "Café — 2026", "&a x", "a: b", "x {htmlLabels: true}"]) {
     assert.equal(reason("mermaid", `---\ntitle: ${t}\n---\nflowchart LR\n A-->B`), "directives", t);
   }
+});
+
+// ---- fix round 6 (controller ruling 2026-10-15) ------------------------------
+// Mermaid's closer \1-{3}\s*[\n\r]+ uses JS Unicode whitespace, so a space/tab
+// fence check missed NBSP / \v / \f / U+FEFF / U+3000 closers and leaked config.
+// Ruling: Mermaid diagrams take NO front matter. Any line that is "---" with
+// Unicode whitespace around it (/^\s*-{3}\s*$/mu) is refused anywhere.
+
+const UNI_WS = ["\u00a0", "\v", "\f", "\ufeff", "\u3000", "\u2028", "\u2029", "\u2003", "\u1680", " ", "\t"];
+
+test("guardSpec: a Unicode-whitespace closer outside the old window is refused (the re-review bypass)", () => {
+  const bypass = "---\n\n---\nflowchart: LR\na: 1\nb: 1\nc: 1\nd: 1\ne: 1\nconfig:\n  htmlLabels: true\n--- \nflowchart LR\n A-->B";
+  assert.equal(reason("mermaid", bypass), "directives");
+  const cfg = "flowchart: LR\na: 1\nb: 1\nc: 1\nd: 1\ne: 1\nf: 1\nconfig:\n  htmlLabels: true\n";
+  for (const ws of UNI_WS) {
+    for (const src of [
+      "---\n\n---\n" + cfg + "---" + ws + "\nflowchart LR\n A-->B",
+      "---\n\n---\n" + cfg + ws + "---\nflowchart LR\n A-->B",
+      "---\r\n\r\n---\r\n" + cfg.replace(/\n/g, "\r\n") + "---" + ws + "\r\nflowchart LR\r\n A-->B",
+      "---\n" + "\n".repeat(10) + "---\n" + cfg + "---" + ws + "\nflowchart LR\n A-->B",
+      ws + "---\n" + cfg + ws + "---" + ws + "\nflowchart LR\n A-->B",
+      "---" + ws + "\n" + cfg + "---\nflowchart LR\n A-->B",
+      "flowchart LR\n A-->B\n" + ws + "---" + ws,
+    ]) assert.equal(reason("mermaid", src), "directives", JSON.stringify(src));
+  }
+});
+
+test("guardSpec: Mermaid takes no front matter — the type check runs on the source after blank and %% lines", () => {
+  assert.equal(reason("mermaid", "\n\n%% a\n  \nflowchart LR\n A-->B"), null);
+  assert.equal(reason("mermaid", "\u00a0\n\u3000\n%% a\npie\n \"a\": 1"), null, "Unicode-blank lines are blank");
+  assert.equal(reason("mermaid", "%% a\nquadrantChart\n x"), "unsupported_type");
+  assert.equal(reason("mermaid", "flowchart LR\n A---B"), null, "a --- link inside a line is not a fence");
+  assert.equal(reason("mermaid", "flowchart LR\n A-->B\n----"), null, "four dashes are not a fence");
+  assert.equal(reason("mermaid", "flowchart LR\n A-->B\n-- -"), null);
 });
