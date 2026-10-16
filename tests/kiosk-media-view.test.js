@@ -615,3 +615,18 @@ test("a src the page was not told about (no describe) posts nothing", () => {
   s.view.apply({ type: "media", action: "load", id: "m1", form: "audio", url: s.url("m1"), title: "x", volume: 50, muted: false });
   assert.equal(s.parent.posts.filter((p) => p.m.op === "load").length, 0);
 });
+
+test("B3 + item 21: an overlay closed while the mic gate holds a start hands the bar resume: true, and the held start never fires after the close", () => {
+  const s = gated({ next: 500 });
+  s.load("m1");
+  assert.equal(s.audio.plays, 0);
+  assert.deepEqual(s.view.release(), { volume: levelOf(50, false), resume: true }, "the closing overlay takes its mic with it: the bar plays");
+  s.tm.advance(5000);
+  assert.equal(s.audio.plays, 0, "the frame's own retry is cleared");
+  const p = gated({ next: 500 });
+  p.load("m1", { paused: true });
+  assert.equal(p.view.release().resume, false, "paused: nothing to start");
+  const n = gated({ next: true });
+  n.load("m1");
+  assert.equal(n.view.release().resume, false, "already started (not held): the bar keeps its own state");
+});

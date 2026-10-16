@@ -367,7 +367,8 @@ test("media wiring: ducking follows the mic, the server's bird and the TTS — n
   assert.match(err, /syncDuck\(\)/);
   const start = src.slice(src.indexOf("async function startTurn("), src.indexOf("function endTurn("));
   assert.ok(start.indexOf("syncDuck()") < start.indexOf('send({ type: "turn_start"'), "ducking starts at the tap, before the server answers");
-  assert.match(src, /case "media":[\s\S]{0,400}mediaView\?\.apply\(m\)/);
+  // 400 → 600: item 21's micForMedia line and B3's barLink?.describe line both sit before apply (still the same case).
+  assert.match(src, /case "media":[\s\S]{0,600}mediaView\?\.apply\(m\)/);
 });
 
 test("now-playing window: title and source as text, six buttons that send the touch verbs", () => {

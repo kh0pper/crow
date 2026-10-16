@@ -194,7 +194,7 @@ export function createMediaView({ audio, chip, send, setTimer = setTimeout, clea
     /** r7b M3: one fixed word for the turn's metrics. */
     state: () => (!cur ? "none" : offline ? "offline" : cur.blocked ? "blocked" : cur.paused ? "paused" : cur.playing ? "playing" : "loading"),
     ducked: () => ducker.ducked(),
-    /** B3 close: un-ducked level, held? */
-    release: () => ({ volume: cur ? ducker.target() : null, resume: held && !!cur && !cur.paused }),
+    /** B3 close: un-ducked level, and should the bar play (a hold, or a start the mic gate is holding: the mic goes too)? */
+    release() { const r = { volume: cur ? ducker.target() : null, resume: (held || !!retry) && !!cur && !cur.paused }; clearTimer(retry); retry = null; return r; },
   };
 }
