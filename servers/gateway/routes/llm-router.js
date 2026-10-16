@@ -304,10 +304,15 @@ export const VOICE_ROUTE_KEYS = Object.freeze({ fast: FAST_KEY, escalate: ESC_KE
  * THE voice routing policy (kiosk spec §7.2): the same decision /llm/v1 makes,
  * callable in-process so the kiosk needs no HTTP hop. `messages` is the full
  * OpenAI-style list; `hasTools` says whether the turn advertises any tools.
+ * `actionIntent` (the in-process voice turn only; /llm/v1 never sets it): the user
+ * asked for an action and the assistant has tools the quick model was not offered,
+ * so the quick model could only pretend (queue item 29) — escalate.
  */
-export function chooseVoiceRoute(messages, { hasTools = false } = {}) {
+export function chooseVoiceRoute(messages, { hasTools = false, actionIntent = false } = {}) {
   const body = { messages: Array.isArray(messages) ? messages : [], tools: hasTools ? [{}] : [] };
   if (wantsEscalation(body)) return { route: "escalate", reason: "manual", key: ESC_KEY };
+  // COMPANION_TOOL_ESCALATION=0 turns this off too (the same switch as the tool-intent regex).
+  if (actionIntent === true && TOOL_ESCALATION) return { route: "escalate", reason: "action-intent", key: ESC_KEY };
   if (wantsToolEscalation(body)) return { route: "escalate", reason: "tool-intent", key: ESC_KEY };
   return { route: "fast", reason: null, key: FAST_KEY };
 }

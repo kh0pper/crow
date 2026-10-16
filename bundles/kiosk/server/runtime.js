@@ -21,6 +21,7 @@ import { STRINGS } from "./strings.js";
 import { createBotFit } from "./fit.js";
 import { kioskNowContext, matchClockFastPath, relativeDatesContext, mentionsRelativeDay } from "./clock.js";
 import { wantsMemory } from "./memory-intent.js";
+import { wantsAction, wantsActionFollowUp, namesDisplayObject } from "./action-intent.js";
 import { createRelay } from "./relay.js";
 import { createTicketStore } from "./tickets.js";
 import { createMediaStore, migrateMaxVolume } from "./media.js";
@@ -117,6 +118,27 @@ export function kioskDisplayMissedText(lang) {
   return STRINGS[lang === "es" ? "es" : "en"].display_missed_say;
 }
 
+/** Spoken + captioned instead of a reply that claimed an action the turn had no tool for (queue item 29). */
+export function kioskCantDoText(lang) {
+  return STRINGS[lang === "es" ? "es" : "en"].cant_do_say;
+}
+/** Spoken instead of a claim on an action turn whose tools did nothing (queue item 29). */
+export function kioskNotDoneText(lang) {
+  return STRINGS[lang === "es" ? "es" : "en"].not_done_say;
+}
+/** Spoken when an action request needs the larger model and it cannot be had right now (queue item 29). */
+export function kioskNotReadyText(lang) {
+  return STRINGS[lang === "es" ? "es" : "en"].not_ready_say;
+}
+/** Spoken when a memory was saved but the reply promised a reminder (queue item 29). */
+export function kioskMemoOnlyText(lang) {
+  return STRINGS[lang === "es" ? "es" : "en"].memo_only_say;
+}
+/** Spoken when the first-audio budget runs out after a change was sent to a tool (queue item 29). */
+export function kioskUnsureText(lang) {
+  return STRINGS[lang === "es" ? "es" : "en"].unsure_say;
+}
+
 /**
  * Everything a display turn passes to the voice turn besides the audio, from the display's executor
  * context (display-tools.js). Pure, and the ONE place these options are built: the real turn, the
@@ -176,6 +198,17 @@ export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = 
     tooLargeText: kioskTooLargeText(lang),
     displayMissedText: kioskDisplayMissedText(lang),
     memoryWhen: wantsMemory,
+    // Queue item 29: an action request never ends on a claim no tool backs (turn.js, ACTION_NOTE): no tool →
+    // the could-not-do line without a model call; tools withheld from the quick model → escalate.
+    actionWhen: wantsAction,
+    actionFollowWhen: wantsActionFollowUp,
+    // Only against the windows really open now (never because music plays).
+    displayObjectWhen: (t) => namesDisplayObject(t, ctx.store.list(ctx.deviceId).filter((w) => !(w.kind === "timer" && w.done)).map((w) => w.kind)),
+    cantDoText: kioskCantDoText(lang),
+    notDoneText: kioskNotDoneText(lang),
+    notReadyText: kioskNotReadyText(lang),
+    memoOnlyText: kioskMemoOnlyText(lang),
+    unsureText: kioskUnsureText(lang),
     ...(typeof onToolResult === "function" ? { onToolResult } : {}),
     // F1: the names this display's sources answer to, as the STT's prompt bias (bounded in turn.js).
     ...(typeof sttPrompt === "function" ? { sttPrompt } : {}),
