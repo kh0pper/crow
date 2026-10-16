@@ -298,13 +298,28 @@ test("viewer page route: owner session only, the exact core viewerCsp, no-store,
   assert.match(ok.body, /<html lang="en">/);
   const junk = await getPage(`/dashboard/artifacts/view/${s.art.id}?v=x&thread=%22%3E%3Cscript%3E`);
   assert.match(junk.body, /data-version="" data-thread=""/, "junk query values are dropped");
-  assert.doesNotMatch(junk.body, /<script>/);
+  assert.ok(!junk.body.includes('"><script>'), "the junk thread never reaches the page");
   assert.equal((await getPage("/dashboard/artifacts/view/not-an-id")).status, 404);
   assert.equal((await getPage(`/dashboard/artifacts/view/art_${"x".repeat(41)}`)).status, 404);
   const es = await getPage(`/dashboard/artifacts/view/${s.art.id}`, { cookie: "crow_session=good; crow_csrf=tok; crow_lang=es" });
   assert.match(es.body, /<html lang="es">/);
   assert.equal((await getPage("/artifacts/static/viewer-client.js")).status, 200);
   assert.equal((await getPage("/artifacts/static/viewer.css")).headers["content-type"], "text/css; charset=utf-8");
+});
+
+test("bar on every page: the viewer carries the player bar (the core shell, in the page's language) — only behind dashboardAuth", async () => {
+  const ok = await getPage(`/dashboard/artifacts/view/${s.art.id}`);
+  assert.equal(ok.status, 200);
+  assert.match(ok.body, /id="crow-player-bar"/);
+  assert.match(ok.body, /id="crow-audio"/);
+  assert.match(ok.body, /window\.top !== window/, "the top-level-only guard");
+  const { playerShellHtml } = await import("../servers/gateway/dashboard/shared/player-shell.js");
+  assert.ok(ok.body.includes(playerShellHtml("en")));
+  const es = await getPage(`/dashboard/artifacts/view/${s.art.id}`, { cookie: "crow_session=good; crow_csrf=tok; crow_lang=es" });
+  assert.ok(es.body.includes(playerShellHtml("es")));
+  const anon = await getPage(`/dashboard/artifacts/view/${s.art.id}`, { cookie: null });
+  assert.equal(anon.status, 401);
+  assert.doesNotMatch(anon.body, /crow-player-bar/);
 });
 
 test("comment edit: the owner edits their OWN comments only, never while a round holds the thread; edits are stamped and audited", async () => {
