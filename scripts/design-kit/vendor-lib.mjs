@@ -7,7 +7,8 @@
  * scripts/check-design-kit-lib.mjs then verifies what this wrote.
  *
  * CSS goes through normalize-css.mjs (comments out, licence banners kept under
- * licenses/, inline SVG data: URLs in custom properties set to none); what it
+ * licenses/, inline SVG data: URLs in custom properties extracted to
+ * <css dir>/icons/*.svg when they pass the SVG allowlist, else set to none); what it
  * changed is listed in the entry's "notes". Icon sets are built from the
  * per-icon SVG files (never a sprite or an icon font), whitespace-collapsed, and
  * every icon must pass lib-check's SVG allowlist.
@@ -129,8 +130,11 @@ const BUILD = {
     const notes = [];
     const banners = [];
     for (const f of pin.files) {
-      const { css, comments, changes } = normalizeCss(need(p.dir, f.from, pin.package).toString("utf8"));
+      // Inline SVG icons that pass the allowlist become files next to the
+      // stylesheet (<dir of "to">/icons/…), referenced by a relative url().
+      const { css, comments, changes, assets } = normalizeCss(need(p.dir, f.from, pin.package).toString("utf8"), { extractSvgDir: "icons" });
       files.push(put(f.to, Buffer.from(css)));
+      for (const a of assets) files.push(put(`${dirname(f.to)}/${a.file}`, Buffer.from(a.svg)));
       const kept = comments.filter((c) => c.startsWith("/*!") || /licen[cs]e|copyright/i.test(c));
       banners.push(...kept.map((c) => `From ${pin.package}@${pin.version} ${f.from}:\n${c}`));
       if (comments.length) notes.push(`${f.from}: ${comments.length} comment(s) removed${kept.length ? `; ${kept.length} licence banner(s) kept in licenses/${fileStem(pin.name)}-banner.txt` : ""}`);

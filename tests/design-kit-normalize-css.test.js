@@ -31,3 +31,33 @@ test("the result must pass the lib checker, or the normalizer throws", () => {
   assert.throws(() => normalizeCss(".x{background:url(https:x)}"), /lib-check/);
   assert.throws(() => normalizeCss("@import 'a.css';"), /lib-check/);
 });
+
+test("a single-quoted inline SVG custom property is handled too", () => {
+  const r = normalizeCss(`:root{--a:url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg"%3E%3C/svg%3E')}`);
+  assert.equal(r.css, ":root{--a:none}");
+  assert.equal(r.changes.length, 1);
+});
+
+test("a custom property spread over several lines is handled", () => {
+  const r = normalizeCss(`:root{\n  --a:\n    url(\n      "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3C/svg%3E"\n    );\n  --b: 2;\n}`);
+  assert.equal(r.css, ":root{\n  --a:none;\n  --b: 2;\n}");
+});
+
+const OK_SVG = (c) => `%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' stroke='${c}'%3E%3Cpath d='M1 1L2 2'/%3E%3C/svg%3E`;
+const BAD_SVG = "%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Cstyle%3Eg{}%3C/style%3E%3C/svg%3E";
+
+test("extract mode: each distinct SVG that passes the allowlist becomes a relative file; a failing one stays none", () => {
+  const src = `:root{--icon-a:url("data:image/svg+xml,${OK_SVG("red")}");--icon-b:url("data:image/svg+xml,${BAD_SVG}")}`
+    + `.d{--icon-a:url("data:image/svg+xml,${OK_SVG("blue")}")}.e{--icon-a:url("data:image/svg+xml,${OK_SVG("red")}")}`;
+  const r = normalizeCss(src, { extractSvgDir: "icons" });
+  assert.equal(r.css, ":root{--icon-a:url(icons/icon-a.svg);--icon-b:none}.d{--icon-a:url(icons/icon-a-2.svg)}.e{--icon-a:url(icons/icon-a.svg)}");
+  assert.deepEqual(r.assets.map((a) => a.file), ["icons/icon-a.svg", "icons/icon-a-2.svg"]);
+  assert.equal(r.assets[0].svg, decodeURIComponent(OK_SVG("red")));
+  assert.deepEqual(r.changes, [
+    "--icon-a: inline SVG extracted to icons/icon-a.svg",
+    "--icon-b: inline SVG fails the lib-check SVG allowlist, replaced with none",
+    "--icon-a: inline SVG extracted to icons/icon-a-2.svg",
+    "--icon-a: inline SVG extracted to icons/icon-a.svg",
+  ]);
+  assert.equal(cssFetches(Buffer.from(r.css)), false);
+});

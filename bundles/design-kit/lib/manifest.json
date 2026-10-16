@@ -26,11 +26,11 @@
       ],
       "main": "css/open-props/open-props.min.css",
       "notes": [
-        "open-props.min.css: --noise-1: inline SVG data: URL replaced with none",
-        "open-props.min.css: --noise-2: inline SVG data: URL replaced with none",
-        "open-props.min.css: --noise-3: inline SVG data: URL replaced with none",
-        "open-props.min.css: --noise-4: inline SVG data: URL replaced with none",
-        "open-props.min.css: --noise-5: inline SVG data: URL replaced with none"
+        "open-props.min.css: --noise-1: inline SVG fails the lib-check SVG allowlist, replaced with none",
+        "open-props.min.css: --noise-2: inline SVG fails the lib-check SVG allowlist, replaced with none",
+        "open-props.min.css: --noise-3: inline SVG fails the lib-check SVG allowlist, replaced with none",
+        "open-props.min.css: --noise-4: inline SVG fails the lib-check SVG allowlist, replaced with none",
+        "open-props.min.css: --noise-5: inline SVG fails the lib-check SVG allowlist, replaced with none"
       ]
     },
     {
@@ -57,27 +57,82 @@
       "files": [
         {
           "path": "css/pico/pico.min.css",
-          "sha256": "b64b7af455c8a3ef361a445e62b7aec8af82eacb40d674d1e7c9a992be5d8a25",
+          "sha256": "b417ad72a1ee94144b3e9f988a24fd90fa9b69a7ef708bff02cb248096d790d2",
           "type": "text/css"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-checkbox.svg",
+          "sha256": "08cdae007ac07d1b19cc1da76c8e1621e1ccf4a68e2d35bddaa7e6c4d2c914e7",
+          "type": "image/svg+xml"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-minus.svg",
+          "sha256": "29781427e500acc97c11f7a1140c41859def74364e3ea7cb23d151342c6a05b9",
+          "type": "image/svg+xml"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-chevron.svg",
+          "sha256": "b229b93105cf730d9c82453d8b7d2fe0c626e4fefe158376b3196cf5592f63c6",
+          "type": "image/svg+xml"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-date.svg",
+          "sha256": "661e4cdd038db52b87b9edae28e40e13c9def5f453363b8cf1c742a06196274b",
+          "type": "image/svg+xml"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-time.svg",
+          "sha256": "a81521e9a4c9f8392df57fd01dff92cf5026ae20d3b540c9a89c0e7c82f6b0bf",
+          "type": "image/svg+xml"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-search.svg",
+          "sha256": "f5ca49c4652cefdb408ecf6800d876b76fce2d0a1ab798657131290545cec56f",
+          "type": "image/svg+xml"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-close.svg",
+          "sha256": "1cf499e54abf1adc36eb0c881ad840a4c064883993e8865dd1479555d8222b6f",
+          "type": "image/svg+xml"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-valid.svg",
+          "sha256": "ff23289d8cc94b9f245657d4dc7d21f30dc661d8a7166d366fb55faed809a233",
+          "type": "image/svg+xml"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-invalid.svg",
+          "sha256": "5f0e070c423d28c59cb09ea8ada84ee6260d81dd91cec3fc23da546fb9ea3dc1",
+          "type": "image/svg+xml"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-valid-2.svg",
+          "sha256": "bd79f1e531fd7509ec520f2e74ac54f8958342a0c005020071b1b61ef721c6fe",
+          "type": "image/svg+xml"
+        },
+        {
+          "path": "css/pico/icons/pico-icon-invalid-2.svg",
+          "sha256": "a5bafed8d7781a7b26171dc39c5d1ef2a90da98e4a021cc4f30b431929101d59",
+          "type": "image/svg+xml"
         }
       ],
       "main": "css/pico/pico.min.css",
       "notes": [
         "css/pico.min.css: 1 comment(s) removed; 1 licence banner(s) kept in licenses/css-pico-banner.txt",
-        "css/pico.min.css: --pico-icon-checkbox: inline SVG data: URL replaced with none",
-        "css/pico.min.css: --pico-icon-minus: inline SVG data: URL replaced with none",
-        "css/pico.min.css: --pico-icon-chevron: inline SVG data: URL replaced with none",
-        "css/pico.min.css: --pico-icon-date: inline SVG data: URL replaced with none",
-        "css/pico.min.css: --pico-icon-time: inline SVG data: URL replaced with none",
-        "css/pico.min.css: --pico-icon-search: inline SVG data: URL replaced with none",
-        "css/pico.min.css: --pico-icon-close: inline SVG data: URL replaced with none",
-        "css/pico.min.css: --pico-icon-loading: inline SVG data: URL replaced with none",
-        "css/pico.min.css: --pico-icon-valid: inline SVG data: URL replaced with none",
-        "css/pico.min.css: --pico-icon-invalid: inline SVG data: URL replaced with none",
-        "css/pico.min.css: --pico-icon-valid: inline SVG data: URL replaced with none",
-        "css/pico.min.css: --pico-icon-invalid: inline SVG data: URL replaced with none",
-        "css/pico.min.css: --pico-icon-valid: inline SVG data: URL replaced with none",
-        "css/pico.min.css: --pico-icon-invalid: inline SVG data: URL replaced with none"
+        "css/pico.min.css: --pico-icon-checkbox: inline SVG extracted to icons/pico-icon-checkbox.svg",
+        "css/pico.min.css: --pico-icon-minus: inline SVG extracted to icons/pico-icon-minus.svg",
+        "css/pico.min.css: --pico-icon-chevron: inline SVG extracted to icons/pico-icon-chevron.svg",
+        "css/pico.min.css: --pico-icon-date: inline SVG extracted to icons/pico-icon-date.svg",
+        "css/pico.min.css: --pico-icon-time: inline SVG extracted to icons/pico-icon-time.svg",
+        "css/pico.min.css: --pico-icon-search: inline SVG extracted to icons/pico-icon-search.svg",
+        "css/pico.min.css: --pico-icon-close: inline SVG extracted to icons/pico-icon-close.svg",
+        "css/pico.min.css: --pico-icon-loading: inline SVG fails the lib-check SVG allowlist, replaced with none",
+        "css/pico.min.css: --pico-icon-valid: inline SVG extracted to icons/pico-icon-valid.svg",
+        "css/pico.min.css: --pico-icon-invalid: inline SVG extracted to icons/pico-icon-invalid.svg",
+        "css/pico.min.css: --pico-icon-valid: inline SVG extracted to icons/pico-icon-valid-2.svg",
+        "css/pico.min.css: --pico-icon-invalid: inline SVG extracted to icons/pico-icon-invalid-2.svg",
+        "css/pico.min.css: --pico-icon-valid: inline SVG extracted to icons/pico-icon-valid-2.svg",
+        "css/pico.min.css: --pico-icon-invalid: inline SVG extracted to icons/pico-icon-invalid-2.svg"
       ]
     },
     {

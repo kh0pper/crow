@@ -56,3 +56,15 @@ test("upstream CSS rewrites are recorded on the entry, and no inline SVG survive
     assert.ok(!readFileSync(join(LIB, e.main), "utf8").includes("data:image/svg"), `${n}: inline SVG left`);
   }
 });
+
+test("Pico's inline icons are extracted to hashed, allowlisted SVG files; only the animated loading icon stays none", () => {
+  const e = man().entries.find((x) => x.name === "css:pico");
+  const svgs = e.files.filter((f) => f.type === "image/svg+xml");
+  assert.equal(svgs.length, 11);
+  assert.ok(svgs.every((f) => f.path.startsWith("css/pico/icons/") && /^[0-9a-f]{64}$/.test(f.sha256)));
+  const css = readFileSync(join(LIB, e.main), "utf8");
+  for (const f of svgs) assert.ok(css.includes(`url(${f.path.slice("css/pico/".length)})`), `${f.path} is referenced relatively`);
+  for (const p of ["checkbox", "minus", "chevron", "date", "time", "search", "close", "valid", "invalid"]) assert.match(css, new RegExp(`--pico-icon-${p}:url\\(icons/pico-icon-${p}(-\\d)?\\.svg\\)`));
+  assert.match(css, /--pico-icon-loading:none/);
+  assert.ok(e.notes.some((n) => n.includes("--pico-icon-loading") && n.includes("none")));
+});
