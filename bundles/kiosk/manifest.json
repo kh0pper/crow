@@ -1,7 +1,7 @@
 {
   "id": "kiosk",
   "name": "Kiosk display",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "type": "mcp-server",
   "author": "Crow",
   "category": "hardware",
