@@ -15,7 +15,6 @@ SKILLS_DIR="$ROOT/.claude/skills"
 # Mapping: crow_skill_filename|claude_code_name|description
 SKILL_MAP=(
   "reflection.md|crow-reflection|Session reflection and friction analysis"
-  "session-context.md|crow-session-context|Session start and end protocol"
   "memory-management.md|crow-memory-management|Memory storage best practices"
   "superpowers.md|crow-superpowers|Master routing and auto-activation"
   "plan-review.md|crow-plan-review|Checkpoint-based planning"

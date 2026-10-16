@@ -230,3 +230,48 @@ export function removeBundleSkills({ id, manifest, src = null, skillsDir, record
   if (dirty) atomicWrite(recordPath, JSON.stringify(record, null, 2) + "\n");
   return { removed, kept };
 }
+
+/**
+ * The installed bundle that ships skill basename `skill`, or null. Reads the
+ * instance's installed.json (array, or the legacy {id: {...}} map) and each
+ * bundle's REPO manifest (`<appBundles>/<id>/manifest.json`) — the same
+ * manifest the boot sync reads. Bundle ids that are not a plain path segment
+ * are ignored.
+ */
+export function bundleShippingSkill({ crowHome, appBundles, skill }) {
+  let installed;
+  try { installed = JSON.parse(readFileSync(join(crowHome, "installed.json"), "utf8")); } catch { return null; }
+  const ids = Array.isArray(installed) ? installed.map((e) => e && e.id) : Object.keys(installed || {});
+  for (const id of ids) {
+    if (typeof id !== "string" || !/^[a-z0-9][a-z0-9._-]*$/i.test(id) || id.includes("..")) continue;
+    let manifest;
+    try { manifest = JSON.parse(readFileSync(join(appBundles, id, "manifest.json"), "utf8")); } catch { continue; }
+    if (manifestSkillPaths(manifest).some((p) => baseOf(p) === skill)) return id;
+  }
+  return null;
+}
+
+/**
+ * Record that the owner removed a LINKED skill a bundle ships (Skills panel
+ * delete). Without it, boot rule 2 reads "missing, no record" and installs a
+ * fresh copy; with it the boot pass reads skip-deleted, exactly as for a
+ * deleted copy, and an explicit reinstall (`install: true`) still restores it.
+ * An existing entry is left as it is. Refuses (returns false) when the record
+ * exists but does not parse — rewriting it from {} would drop every entry.
+ * Written in every mode (report included): it records the owner's intent,
+ * not a sync decision.
+ */
+export function recordRemovedLink({ recordPath, skill, bundle }) {
+  let record = {};
+  if (existsSync(recordPath)) {
+    try {
+      const j = JSON.parse(readFileSync(recordPath, "utf8"));
+      if (!j || typeof j !== "object" || Array.isArray(j)) return false;
+      record = j;
+    } catch { return false; }
+  }
+  if (record[skill]) return true;
+  record[skill] = { bundle, sha256: null, removedLink: true, removedAt: new Date().toISOString() };
+  atomicWrite(recordPath, JSON.stringify(record, null, 2) + "\n");
+  return true;
+}
