@@ -23,7 +23,7 @@ import { boardState } from "../../shared/bot-display.js";
 import { createProjectSpace } from "../../../../shared/project-spaces.js";
 import { appendAudit } from "../../../../shared/project-acl.js";
 import { resolveCrowHome } from "../../../../../scripts/pi-bots/ext_registry.mjs";
-import { worldRootFor, planCarryOver, applyCarryOver } from "../../../../../scripts/pi-bots/world-root.mjs";
+import { worldRootFor, planCarryOver, applyCarryOver, undoCarryOver } from "../../../../../scripts/pi-bots/world-root.mjs";
 import { rowRev } from "./def-adapter.js";
 import { changeTracker } from "./ui.js";
 import { saveBasics, saveAbilities, saveSafety, saveAdvanced } from "./save-handlers.js";
@@ -96,10 +96,13 @@ export function applyTrackerChoice(def, { projectId = null, type = "kanban", slu
  * a bot with no project gets a new "<Name>'s board" project linked, one that
  * has a project keeps it. Custom trackers are refused (never overwritten).
  * Linking a project moves the bot's world root (bot-world.mjs), so the old
- * root's sessions/outputs/.pi/.mcp.json are symlinked into the new one first
- * — where the new path is free; anything in the way refuses the action and
- * the just-made project row is removed again. `return` is an enum, never a
- * URL. Single-operator dashboard: no project_members check (the session
+ * world is carried first (world-root.mjs): normally the whole new root is one
+ * link to the old root; when the new root already exists, its entries are
+ * linked one by one where the path is free. Anything in the way refuses the
+ * action; any failure after that (the compare-and-swap lost to a racing
+ * write, a DB error) removes the links and empty dirs this request made and
+ * the just-made project row, so "nothing changed" is true. `return` is an
+ * enum, never a URL. Single-operator dashboard: no project_members check (the session
  * operator owns the box).
  */
 async function handleBoardOn(req, res, { db }) {
@@ -117,15 +120,20 @@ async function handleBoardOn(req, res, { db }) {
   let def;
   try { def = JSON.parse(row.definition || "{}") || {}; } catch { def = {}; }
   const tc = def.tracker_config || {};
-  if (tc.type === "custom") {
+  const board = boardState(row);
+  // A custom tracker, set up or not (no_slug: the list sends it to Edit).
+  if (board.state === "custom" || board.reason === "no_slug") {
     return res.redirectAfterPost(`/dashboard/bot-builder?bot=${enc}&tab=tracker&error=` + encodeURIComponent(t("botbuilder.boardOnCustom", lang)));
   }
-  if (boardState(row).state === "on") return done();
+  if (board.state === "on") return done();
 
   let projectId = row.project_id == null ? null : Number(row.project_id);
-  let created = null, carried = [];
-  // Removes the project row THIS request made (nothing references it yet).
+  let created = null, carried = [], carry = null, madePaths = [];
+  // Removes what THIS request made: the carry-over links/dirs, then the
+  // project row (nothing references it yet).
   const undo = async () => {
+    undoCarryOver(madePaths);
+    madePaths = [];
     if (!created) return;
     try { await db.execute({ sql: "DELETE FROM project_members WHERE project_id=?", args: [created.id] }); } catch {}
     try { await db.execute({ sql: "DELETE FROM project_spaces WHERE id=?", args: [created.id] }); } catch {}
@@ -142,8 +150,12 @@ async function handleBoardOn(req, res, { db }) {
       await undo();
       return fail(fill(t("botbuilder.boardOnConflict", lang), { path: plan.conflicts.map((c) => c.path).join(", ") }));
     }
-    try { carried = applyCarryOver(plan, newRoot).concat(plan.already); }
-    catch (e) { await undo(); return fail(fill(t("botbuilder.boardOnConflict", lang), { path: String(e.path || e.message || e) })); }
+    try {
+      const applied = applyCarryOver(plan, newRoot);
+      carried = applied.carried;
+      madePaths = applied.created;
+    } catch (e) { await undo(); return fail(fill(t("botbuilder.boardOnConflict", lang), { path: String(e.path || e.message || e) })); }
+    carry = plan.mode === "none" ? { carry: "none", carry_reason: plan.reason } : { carry: plan.mode };
     projectId = created.id;
   }
 
@@ -154,15 +166,18 @@ async function handleBoardOn(req, res, { db }) {
   // JSON copy; an existing copy is kept in step with the column.
   if (!hadProjectKey) delete def.project_id;
   // The same compare-and-swap the tab saves use: refuse a stale row.
-  const r = await db.execute({
-    sql: "UPDATE pi_bot_defs SET definition=?, project_id=?, updated_at=datetime('now') WHERE bot_id=? AND definition IS ? AND project_id IS ?",
-    args: [JSON.stringify(def), projectId, botId, row.definition ?? null, row.project_id ?? null],
-  });
+  let r;
+  try {
+    r = await db.execute({
+      sql: "UPDATE pi_bot_defs SET definition=?, project_id=?, updated_at=datetime('now') WHERE bot_id=? AND definition IS ? AND project_id IS ?",
+      args: [JSON.stringify(def), projectId, botId, row.definition ?? null, row.project_id ?? null],
+    });
+  } catch (e) { await undo(); return fail(String((e && e.message) || e)); }
   if (Number(r && r.rowsAffected) === 0) { await undo(); return fail(t("botbuilder.staleForm", lang)); }
   if (created) {
     await appendAudit(db, {
       project_id: created.id, actor_type: "local", action: "project.create", target: `bot:${botId}`,
-      payload: { via: "board_on", bot_id: botId, carried },
+      payload: { via: "board_on", bot_id: botId, carried, ...carry },
     });
   }
   emitBotDefsChanged(botId);
