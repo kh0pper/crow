@@ -56,12 +56,13 @@ Las tiendas de la comunidad tienen restricciones adicionales en comparación con
 
 ### Validación del archivo compose
 
-Antes de instalar un complemento de la comunidad, Crow valida el `docker-compose.yml`:
+Antes de instalar un complemento de la comunidad, y de nuevo cada vez que Crow inicia sus contenedores, Crow revisa el proyecto compose. Le pide a Docker Compose la configuración que de verdad aplicará (`docker compose config`: anclas, `include`, `extends`, archivos override y valores `${VAR}` resueltos) y revisa eso, siguiendo los enlaces simbólicos. Si Compose no puede leer el proyecto, la instalación se rechaza.
 
-- **Rechazado**: montajes a `/`, `/etc`, `~/.ssh`, `~/.crow/data` o cualquier ruta del host fuera de `~/.crow/bundles/<id>/data`
-- **Rechazado**: `privileged: true`
-- **Rechazado**: las capacidades `NET_ADMIN` o `SYS_ADMIN`
-- **Permitido**: volúmenes de Docker con nombre, `~/.crow/bundles/<id>/data`
+- **Rechazado**: montajes del host de `/`, tu carpeta personal, `/etc`, `/root`, `/boot`, `/run`, `/dev`, `~/.ssh`, los datos propios de Docker, la carpeta de Crow, su carpeta de datos, su carpeta de secretos y su `.env`, las carpetas de otras extensiones, o cualquier carpeta que contenga a estas. Excepciones: `/etc/localtime` en solo lectura; la subcarpeta propia del complemento `<carpeta de datos>/<id>`
+- **Rechazado**: `env_file`, archivos de `secrets`/`configs` y el contexto de build fuera de la carpeta propia del complemento
+- **Rechazado**: un segundo archivo compose (`compose.yaml`, `docker-compose.override.yml`, …) junto a `docker-compose.yml`, `include:`/`extends: file:` y ajustes `COMPOSE_*` en su `.env`
+- **Rechazado para complementos de la comunidad, y solo con consentimiento para los propios**: `privileged`, capacidades peligrosas (`NET_ADMIN`, `SYS_ADMIN`, `ALL`, …), la red del host o la de otro contenedor, los espacios de nombres PID/IPC/de usuario del host, opciones de seguridad `unconfined`, `volumes_from` y dispositivos del host que no sean los nodos de render de la GPU
+- **Permitido**: volúmenes de Docker con nombre y rutas dentro de la carpeta del complemento
 
 ### Aislamiento de red
 

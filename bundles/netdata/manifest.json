@@ -1,7 +1,7 @@
 {
   "id": "netdata",
   "name": "Netdata",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Real-time infrastructure and container monitoring — CPU, memory, disk, network, and Docker container metrics with one-second granularity.",
   "type": "bundle",
   "author": "Crow",

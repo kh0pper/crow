@@ -1,7 +1,7 @@
 {
   "id": "sdxl",
   "name": "SDXL Background Generator",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "AI-generated backgrounds for the companion avatar using SDXL Turbo. Requires NVIDIA GPU.",
   "type": "bundle",
   "author": "Crow",

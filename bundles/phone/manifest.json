@@ -1,7 +1,7 @@
 {
   "id": "phone",
   "name": "Phone",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Your assistant calls businesses for you: book appointments and ask questions, with your approval on every call.",
   "type": "bundle",
   "author": "Crow",
@@ -13,7 +13,8 @@
   "panelRoutes": "panel/routes.js",
   "privileged": true,
   "install_consent_messages": {
-    "en": "The phone runner uses host networking, bound to 127.0.0.1 only, so it can reach Crow and your local models. It opens no network ports to other machines."
+    "en": "The phone runner uses host networking, bound to 127.0.0.1 only, so it can reach Crow and your local models. It opens no network ports to other machines.",
+    "es": "El ejecutor del teléfono usa la red del host, vinculado solo a 127.0.0.1, para poder llegar a Crow y a tus modelos locales. No abre puertos de red hacia otras máquinas."
   },
   "ports": [3065],
   "requires": { "env": ["PHONE_RUNNER_SECRET"], "min_ram_mb": 256, "min_disk_mb": 200 },

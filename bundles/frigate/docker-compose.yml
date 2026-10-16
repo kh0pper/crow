@@ -7,9 +7,10 @@ services:
       - "127.0.0.1:8971:8971"
       # RTSP restreamer (cameras pull from this for multi-consumer restreaming)
       - "127.0.0.1:8554:8554"
-      # WebRTC (low-latency live view). Both TCP and UDP needed; bind to all interfaces for LAN access
-      - "8555:8555/tcp"
-      - "8555:8555/udp"
+      # WebRTC (low-latency live view). Both TCP and UDP. Loopback only, like every
+      # other Crow port: other devices watch through the authenticated UI above.
+      - "127.0.0.1:8555:8555/tcp"
+      - "127.0.0.1:8555:8555/udp"
       # Port 5000 (internal unauthenticated API) intentionally NOT published — would bypass auth.
     volumes:
       - ${FRIGATE_CONFIG_PATH:-frigate-config}:/config

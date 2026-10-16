@@ -1,7 +1,12 @@
 {
   "id": "plex",
   "name": "Plex",
-  "version": "1.0.1",
+  "version": "1.0.2",
+  "privileged": true,
+  "install_consent_messages": {
+    "en": "Crow does not start a Plex server at install: it runs only if you start it from Extensions. If you do, the self-hosted Plex server uses host networking (Plex's own recommendation) so devices on your local network can discover it. It listens on every network interface of this machine (port 32400 and Plex's discovery ports) and mounts your media folder read-write. Until you claim it with your Plex account (PLEX_CLAIM_TOKEN), the first person who opens it can claim it.",
+    "es": "Crow no inicia un servidor Plex al instalar: solo se ejecuta si lo inicias desde Extensiones. Si lo haces, el servidor Plex autoalojado usa la red del host (lo que recomienda Plex) para que los dispositivos de tu red local puedan descubrirlo. Escucha en todas las interfaces de red de esta máquina (el puerto 32400 y los puertos de descubrimiento de Plex) y monta tu carpeta de medios con lectura y escritura. Hasta que lo reclames con tu cuenta de Plex (PLEX_CLAIM_TOKEN), la primera persona que lo abra puede reclamarlo."
+  },
   "description": "Connect to Plex Media Server — search library, browse collections, control playback, view active sessions",
   "type": "mcp-server",
   "author": "Crow",

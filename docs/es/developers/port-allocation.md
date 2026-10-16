@@ -42,6 +42,7 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 | 3001 | 127.0.0.1 | gateway de Crow (HTTPS) | core |
 | 3002 | 127.0.0.1 | gateway de Crow (alterno) | core |
 | 3004 | 127.0.0.1 | gateway de Crow (alterno) | core |
+| 3005 | 127.0.0.1 | sdxl (se cambia con `SDXL_PORT`; companion lo alcanza en localhost por la red del host) | existente |
 | 3007 | 127.0.0.1 | uptime-kuma | MVP PR 1 |
 | 3020 | 127.0.0.1 | adguard-home (UI de administración) | MVP PR 3 |
 | 3030 | 127.0.0.1 | homepage | MVP PR 1 |
@@ -70,6 +71,7 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 | 8085 | 127.0.0.1 | miniflux (existente) | existente |
 | 8086 | 127.0.0.1 | shiori (existente) | existente |
 | 8088 | 127.0.0.1 | trilium (existente) | existente |
+| 8088 | 127.0.0.1 | valor por defecto de nominatim (`NOMINATIM_PORT`) — **choca con trilium**; define `NOMINATIM_PORT` si usas ambos | existente |
 | 8091 | 127.0.0.1 | crowdsec (LAPI) | MVP PR 4 |
 | 8092 | 127.0.0.1 | stirling-pdf | MVP PR 1 |
 | 8094 | 127.0.0.1 | gatus | MVP PR 2 |

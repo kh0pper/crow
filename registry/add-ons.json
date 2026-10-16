@@ -365,7 +365,7 @@
     {
       "id": "browser",
       "name": "Browser Automation",
-      "version": "1.3.5",
+      "version": "1.3.6",
       "description": "Stealth browser automation — navigate, fill forms, take screenshots, extract content via Chrome DevTools Protocol with VNC viewing",
       "type": "bundle",
       "author": "Crow",
@@ -383,6 +383,10 @@
         "composefile": "docker-compose.yml"
       },
       "privileged": true,
+      "install_consent_messages": {
+        "en": "The browser container uses host networking, so the browser it runs can reach every service on this machine that listens only on 127.0.0.1, as well as the internet. Its control port (Chrome DevTools) listens on 127.0.0.1 only. The VNC viewer (ports 6080 and 5900) listens on every network interface of this machine and is protected by the generated VNC password. It saves downloads under your Crow folder.",
+        "es": "El contenedor del navegador usa la red del host, así que el navegador que ejecuta puede llegar a todos los servicios de esta máquina que escuchan solo en 127.0.0.1, además de a internet. Su puerto de control (Chrome DevTools) escucha solo en 127.0.0.1. El visor VNC (puertos 6080 y 5900) escucha en todas las interfaces de red de esta máquina y está protegido por la contraseña VNC generada. Guarda las descargas dentro de tu carpeta de Crow."
+      },
       "server": {
         "command": "node",
         "args": [
@@ -841,7 +845,12 @@
     {
       "id": "companion",
       "name": "AI Companion",
-      "version": "1.0.2",
+      "version": "1.0.3",
+      "privileged": true,
+      "install_consent_messages": {
+        "en": "The AI Companion uses host networking so it can reach Crow and your local models on this machine. That also lets it reach every service on this machine that listens only on 127.0.0.1. Its own web page listens on 127.0.0.1 by default (COMPANION_BIND_HOST), and Crow serves it to your tailnet over HTTPS. It mounts Crow's database and your installed extensions folder read-only (that folder holds the other extensions' settings and passwords), and it is given Crow's local MCP token.",
+        "es": "El AI Companion usa la red del host para poder llegar a Crow y a tus modelos locales en esta máquina. Eso también le permite llegar a todos los servicios de esta máquina que escuchan solo en 127.0.0.1. Su propia página web escucha por defecto en 127.0.0.1 (COMPANION_BIND_HOST), y Crow la sirve a tu tailnet por HTTPS. Monta en solo lectura la base de datos de Crow y la carpeta de tus extensiones instaladas (esa carpeta guarda los ajustes y las contraseñas de las demás extensiones), y recibe el token MCP local de Crow."
+      },
       "description": "Voice-interactive AI companion with animated Live2D avatar. Powered by Open-LLM-VTuber with Crow's BYOAI profiles.",
       "type": "bundle",
       "author": "Crow",
@@ -920,7 +929,12 @@
     {
       "id": "coturn",
       "name": "TURN Server (coturn)",
-      "version": "1.0.1",
+      "version": "1.0.2",
+      "privileged": true,
+      "install_consent_messages": {
+        "en": "The TURN relay uses host networking because it relays calls over a range of UDP ports (49152-49252) as well as ports 3478 and 5349. It listens on every network interface of this machine so devices outside your network can reach it. Only callers holding a short-lived credential from Crow can relay through it, but a caller who holds one can relay traffic to addresses on your local network and tailnet too.",
+        "es": "El relé TURN usa la red del host porque retransmite llamadas por un rango de puertos UDP (49152-49252) además de los puertos 3478 y 5349. Escucha en todas las interfaces de red de esta máquina para que los dispositivos fuera de tu red puedan alcanzarlo. Solo quien tenga una credencial temporal de Crow puede retransmitir a través de él, pero quien tenga una también puede retransmitir tráfico hacia direcciones de tu red local y de tu tailnet."
+      },
       "description": "Self-hosted TURN relay for WebRTC voice chat. Enables NAT traversal for remote companion access when STUN alone is not sufficient.",
       "type": "bundle",
       "author": "Crow",
@@ -1222,7 +1236,7 @@
     {
       "id": "forgejo",
       "name": "Forgejo",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Community-driven soft-fork of Gitea — self-hosted git with an independent governance model and ActivityPub federation roadmap",
       "type": "bundle",
       "author": "Crow",
@@ -1290,7 +1304,7 @@
     {
       "id": "frigate",
       "name": "Frigate NVR",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Self-hosted NVR with AI object detection — cameras, events, clips. RTSP/ONVIF cameras, local CPU detection, optional Coral TPU.",
       "type": "bundle",
       "author": "Crow",
@@ -1662,7 +1676,7 @@
     {
       "id": "gitea",
       "name": "Gitea",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Self-hosted git service — repos, issues, pull requests, and built-in SSH server for git over SSH",
       "type": "bundle",
       "author": "Crow",
@@ -4095,7 +4109,7 @@
     {
       "id": "netdata",
       "name": "Netdata",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Real-time infrastructure and container monitoring — CPU, memory, disk, network, and Docker container metrics with one-second granularity.",
       "type": "bundle",
       "author": "Crow",
@@ -4204,7 +4218,7 @@
     {
       "id": "nominatim",
       "name": "Nominatim GIS",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Self-hosted geocoding and GIS — forward/reverse geocode, batch geocode data columns, generate GeoJSON, map visualizations",
       "type": "bundle",
       "author": "Crow",
@@ -4649,7 +4663,7 @@
     {
       "id": "phone",
       "name": "Phone",
-      "version": "0.2.4",
+      "version": "0.2.5",
       "description": "Your assistant calls businesses for you: book appointments and ask questions, with your approval on every call.",
       "type": "bundle",
       "author": "Crow",
@@ -4668,7 +4682,8 @@
       "panelRoutes": "panel/routes.js",
       "privileged": true,
       "install_consent_messages": {
-        "en": "The phone runner uses host networking, bound to 127.0.0.1 only, so it can reach Crow and your local models. It opens no network ports to other machines."
+        "en": "The phone runner uses host networking, bound to 127.0.0.1 only, so it can reach Crow and your local models. It opens no network ports to other machines.",
+        "es": "El ejecutor del teléfono usa la red del host, vinculado solo a 127.0.0.1, para poder llegar a Crow y a tus modelos locales. No abre puertos de red hacia otras máquinas."
       },
       "ports": [
         3065
@@ -4807,7 +4822,12 @@
     {
       "id": "plex",
       "name": "Plex",
-      "version": "1.0.1",
+      "version": "1.0.2",
+      "privileged": true,
+      "install_consent_messages": {
+        "en": "Crow does not start a Plex server at install: it runs only if you start it from Extensions. If you do, the self-hosted Plex server uses host networking (Plex's own recommendation) so devices on your local network can discover it. It listens on every network interface of this machine (port 32400 and Plex's discovery ports) and mounts your media folder read-write. Until you claim it with your Plex account (PLEX_CLAIM_TOKEN), the first person who opens it can claim it.",
+        "es": "Crow no inicia un servidor Plex al instalar: solo se ejecuta si lo inicias desde Extensiones. Si lo haces, el servidor Plex autoalojado usa la red del host (lo que recomienda Plex) para que los dispositivos de tu red local puedan descubrirlo. Escucha en todas las interfaces de red de esta máquina (el puerto 32400 y los puertos de descubrimiento de Plex) y monta tu carpeta de medios con lectura y escritura. Hasta que lo reclames con tu cuenta de Plex (PLEX_CLAIM_TOKEN), la primera persona que lo abra puede reclamarlo."
+      },
       "description": "Connect to Plex Media Server — search library, browse collections, control playback, view active sessions",
       "type": "mcp-server",
       "author": "Crow",
@@ -5338,7 +5358,7 @@
       "id": "rookery",
       "name": "Open Science Reviewer",
       "origin": "community",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "description": "Self-hosted OpenScience reviewer + experiment-audit workspace assembler — audit a report's numeric claims against its registered evidence, on your own local model",
       "type": "bundle",
       "author": "kh0pper",
@@ -5395,7 +5415,7 @@
         {
           "name": "ROOKERY_WORKSPACES_DIR",
           "description": "Host directory where audit workspaces are assembled (shared by the reviewer and the assemble tool)",
-          "default": "~/.crow/data/rookery/workspaces",
+          "default": "~/.crow/data/rookery-workspaces",
           "required": false
         },
         {
@@ -5509,7 +5529,7 @@
     {
       "id": "sdxl",
       "name": "SDXL Background Generator",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "AI-generated backgrounds for the companion avatar using SDXL Turbo. Requires NVIDIA GPU.",
       "type": "bundle",
       "author": "Crow",
@@ -5788,7 +5808,12 @@
     {
       "id": "tailscale",
       "name": "Tailscale",
-      "version": "1.0.0",
+      "version": "1.0.1",
+      "privileged": true,
+      "install_consent_messages": {
+        "en": "The Tailscale container joins this machine to your tailnet. It uses host networking, the NET_ADMIN capability and the /dev/net/tun device, so it creates a network interface and changes this machine's routing and firewall rules. Do not install it on a machine that already runs Tailscale.",
+        "es": "El contenedor de Tailscale une esta máquina a tu tailnet. Usa la red del host, la capacidad NET_ADMIN y el dispositivo /dev/net/tun, así que crea una interfaz de red y cambia las rutas y las reglas de firewall de esta máquina. No lo instales en una máquina que ya ejecuta Tailscale."
+      },
       "description": "Private network access — reach your Crow from any device without exposing it to the public internet",
       "type": "bundle",
       "author": "Crow",
@@ -6185,7 +6210,7 @@
     {
       "id": "vllm",
       "name": "vLLM",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "GPU-accelerated local LLM inference server — OpenAI-compatible endpoint backed by vLLM's continuous batching and PagedAttention. Recommended classroom engine for Maker Lab: the Phase 0 Ollama benchmark hit unusable p95 latencies at N=25 concurrent learners; vLLM is architecturally the right shape for that scale.",
       "type": "bundle",
       "author": "Crow",

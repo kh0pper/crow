@@ -47,6 +47,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 3001 | 127.0.0.1 | Crow gateway (HTTPS) | core |
 | 3002 | 127.0.0.1 | Crow gateway (alt) | core |
 | 3004 | 127.0.0.1 | Crow gateway (alt) | core |
+| 3005 | 127.0.0.1 | sdxl (overridable via `SDXL_PORT`; companion reaches it at localhost over host networking) | existing |
 | 3007 | 127.0.0.1 | uptime-kuma | MVP PR 1 |
 | 3008 | 127.0.0.1 | Crow gateway (alt) | core |
 | 3020 | 127.0.0.1 | adguard-home (admin UI) | MVP PR 3 |
@@ -88,6 +89,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 8085 | 127.0.0.1 | miniflux (existing) | existing |
 | 8086 | 127.0.0.1 | shiori (existing) | existing |
 | 8088 | 127.0.0.1 | trilium (existing) | existing |
+| 8088 | 127.0.0.1 | nominatim default (`NOMINATIM_PORT`) — **collides with trilium**; set `NOMINATIM_PORT` if you run both | existing |
 | 8089 | 127.0.0.1 + tailscale IP | edjobs nominatim (external, ~/ed-jobs-scraper) — R4 GIS tools + grackle scraper stack (ufw-scoped) | external |
 | 8090 | 127.0.0.1 | (reserved — a private bundle maintained outside this repo) | reserved |
 | 8091 | 127.0.0.1 | crowdsec (LAPI) | MVP PR 4 |

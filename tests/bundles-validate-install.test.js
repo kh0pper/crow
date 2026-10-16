@@ -85,10 +85,12 @@ test("consent bundle with an invalid/bogus token → 403 consent_invalid", async
 });
 
 test("host-networking bundle refused on managed hosting → 403 hosted_forbidden", async () => {
-  // 'plex' has `network_mode: host` in its docker-compose.yml and declares
-  // neither consent_required nor privileged, so with CROW_HOSTED set it must
-  // be refused by the hosted-networking gate (the branch the plan's code
-  // block missed entirely — nothing else in this suite pins it).
+  // 'plex' has `network_mode: host` in its docker-compose.yml, so with
+  // CROW_HOSTED set it must be refused by the hosted-networking gate (the
+  // branch the plan's code block missed entirely — nothing else in this suite
+  // pins it). plex is privileged now, and no consent token is passed: the
+  // hosted refusal comes BEFORE the consent check, so no token is spent on a
+  // bundle this host can never run.
   const prevHosted = process.env.CROW_HOSTED;
   process.env.CROW_HOSTED = "1";
   try {

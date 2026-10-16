@@ -56,12 +56,13 @@ Community stores have additional restrictions compared to the official registry:
 
 ### Compose File Validation
 
-Before installing a community add-on, Crow validates the `docker-compose.yml`:
+Before installing a community add-on, and again every time Crow starts its containers, Crow checks the compose project. It asks Docker Compose for the configuration it will actually apply (`docker compose config`: anchors, `include`, `extends`, override files and `${VAR}` values resolved) and checks that, following symlinks. If Compose can't read the project, the install is refused.
 
-- **Rejected**: mounts to `/`, `/etc`, `~/.ssh`, `~/.crow/data`, or any host path outside `~/.crow/bundles/<id>/data`
-- **Rejected**: `privileged: true`
-- **Rejected**: `NET_ADMIN` or `SYS_ADMIN` capabilities
-- **Allowed**: named Docker volumes, `~/.crow/bundles/<id>/data`
+- **Rejected**: host mounts of `/`, your home folder, `/etc`, `/root`, `/boot`, `/run`, `/dev`, `~/.ssh`, Docker's own data, Crow's folder, data folder, secrets folder and `.env`, other extensions' folders, or any parent of these. Exceptions: `/etc/localtime` read-only; the add-on's own `<data folder>/<id>` subfolder
+- **Rejected**: `env_file`, `secrets`/`configs` files and the build context outside the add-on's own folder
+- **Rejected**: a second compose file (`compose.yaml`, `docker-compose.override.yml`, …) shipped next to `docker-compose.yml`, `include:`/`extends: file:`, and `COMPOSE_*` settings in its `.env`
+- **Rejected for community add-ons, and only with consent for first-party ones**: `privileged`, dangerous capabilities (`NET_ADMIN`, `SYS_ADMIN`, `ALL`, …), host or another container's network, the host's PID/IPC/user namespaces, `unconfined` security options, `volumes_from`, and host devices other than GPU render nodes
+- **Allowed**: named Docker volumes and paths inside the add-on's folder
 
 ### Network Isolation
 

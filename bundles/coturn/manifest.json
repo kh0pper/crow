@@ -1,7 +1,12 @@
 {
   "id": "coturn",
   "name": "TURN Server (coturn)",
-  "version": "1.0.1",
+  "version": "1.0.2",
+  "privileged": true,
+  "install_consent_messages": {
+    "en": "The TURN relay uses host networking because it relays calls over a range of UDP ports (49152-49252) as well as ports 3478 and 5349. It listens on every network interface of this machine so devices outside your network can reach it. Only callers holding a short-lived credential from Crow can relay through it, but a caller who holds one can relay traffic to addresses on your local network and tailnet too.",
+    "es": "El relé TURN usa la red del host porque retransmite llamadas por un rango de puertos UDP (49152-49252) además de los puertos 3478 y 5349. Escucha en todas las interfaces de red de esta máquina para que los dispositivos fuera de tu red puedan alcanzarlo. Solo quien tenga una credencial temporal de Crow puede retransmitir a través de él, pero quien tenga una también puede retransmitir tráfico hacia direcciones de tu red local y de tu tailnet."
+  },
   "description": "Self-hosted TURN relay for WebRTC voice chat. Enables NAT traversal for remote companion access when STUN alone is not sufficient.",
   "type": "bundle",
   "author": "Crow",

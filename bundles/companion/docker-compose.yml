@@ -11,7 +11,8 @@ services:
       - companion-models:/app/models
       - companion-cache:/app/cache
       - companion-history:/app/chat_history
-      - ${EIKANYA_MODELS_DIR:-}:/app/live2d-models/eikanya:ro
+      # Unset → an empty folder inside the bundle (an empty host path is a compose error).
+      - ${EIKANYA_MODELS_DIR:-./eikanya-models}:/app/live2d-models/eikanya:ro
       - ${CROW_DB_PATH:-~/.crow/data/crow.db}:/crow-data/crow.db:ro
       - ${HOME}/.crow/bundles:/crow-bundles:ro
     environment:

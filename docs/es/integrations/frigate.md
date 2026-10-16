@@ -40,7 +40,7 @@ Esto ejecuta Frigate en Docker usando la imagen oficial `ghcr.io/blakeblackshear
 
 - `:8971` — interfaz + API REST autenticadas (solo loopback)
 - `:8554` — restreamer RTSP (solo loopback)
-- `:8555` — WebRTC para vista en vivo de baja latencia (LAN)
+- `:8555` — WebRTC para vista en vivo de baja latencia (solo loopback, como todos los puertos de Crow; los demás dispositivos miran a través de la interfaz autenticada)
 
 El puerto `5000` (la API interna no autenticada de Frigate) **intencionalmente no se publica**.
 
