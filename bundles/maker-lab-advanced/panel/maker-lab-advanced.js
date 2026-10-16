@@ -59,7 +59,7 @@ export default {
           <h2>First-boot checklist</h2>
           <ol>
             <li>Crow generated the admin password at install: it is in Settings → Passwords (username <code>admin</code> unless you set <code>MLA_ADMIN_USER</code>).</li>
-            <li>Navigate to <code>${escapeHtml(hubUrl)}/hub/signup</code>, sign up with the admin username + password from step 1. Because that username is in the hub's <code>admin_users</code> list, the account auto-authorizes — no self-approval required.</li>
+            <li>Open <code>${escapeHtml(hubUrl)}/hub/login</code> and log in with that username and password: Crow created the admin account on first boot.</li>
             <li>Admin view at <code>${escapeHtml(hubUrl)}/hub/admin</code> lists users + server status.</li>
             <li>Learner signups go to <code>${escapeHtml(hubUrl)}/hub/authorize</code> for admin approval before they can spawn a server.</li>
           </ol>

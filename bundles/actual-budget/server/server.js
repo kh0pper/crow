@@ -49,7 +49,7 @@ async function getToken() {
 
     if (!res.ok) {
       if (res.status === 401 || res.status === 400) {
-        throw new Error("Actual Budget login failed — check ACTUAL_PASSWORD");
+        throw new Error("Actual Budget login failed. If this server kept its data from an earlier install, it still has that install's password: type it into ACTUAL_PASSWORD in Configure.");
       }
       throw new Error(`Actual Budget login error: ${res.status} ${res.statusText}`);
     }

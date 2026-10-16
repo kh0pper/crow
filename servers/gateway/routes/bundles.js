@@ -1286,6 +1286,13 @@ export function removePanelEnabled(panelId, path = PANELS_CONFIG_PATH) {
 // `reqEnv` may carry generated values (runInstallJob passes them): only keys the manifest
 // lists in server.envKeys reach the entry, so a generated secret reaches its own MCP child
 // through this instance's mcp-addons.json (mode 600) and never the shared gateway .env.
+/** Generated values an MCP child may get: never a stored hash (store_as), which is useless
+ * to the child and must not look like the secret. */
+function generatedPlainForMcp(manifest, generated) {
+  const hashed = new Set((manifest?.env_vars || []).filter((v) => v && v.store_as).map((v) => v.name));
+  return Object.fromEntries(Object.entries(generated || {}).filter(([k]) => !hashed.has(k)));
+}
+
 export function mcpAddonEntryFor(manifest, reqEnv = null, { bundleDir = null } = {}) {
   const env = {};
   for (const key of manifest?.server?.envKeys || []) if (reqEnv && reqEnv[key]) env[key] = reqEnv[key];
@@ -2593,7 +2600,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         // locked". The MCP child instead inherits the SPAWNING gateway's
         // CROW_DB_PATH via process.env at launch (its own default otherwise),
         // so each gateway's children always use that gateway's DB.
-        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generated }, { bundleDir: destDir });
+        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir });
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
         needsRestart = true;
@@ -2630,7 +2637,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       // MCP server — register in mcp-addons.json
       if (manifest?.server) {
         const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
-        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generated }, { bundleDir: destDir });
+        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir });
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
       }

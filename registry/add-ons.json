@@ -2517,7 +2517,7 @@
     {
       "id": "lemmy",
       "name": "Lemmy",
-      "version": "1.0.3",
+      "version": "1.0.2",
       "description": "Federated link aggregator and discussion platform over ActivityPub — Reddit-alternative on the fediverse. Posts, comments, communities, votes; remote Lemmy/Mastodon/Kbin users can follow your communities and comment cross-server.",
       "type": "bundle",
       "author": "Crow",
@@ -2588,16 +2588,6 @@
           "required": true,
           "secret": true,
           "generate": "secret"
-        },
-        {
-          "name": "LEMMY_ADMIN_PASSWORD",
-          "description": "Password of the first Lemmy admin (username admin_pending). Crow generates it at install and saves it in Settings → Passwords (this machine only); Lemmy creates the admin with it on first start.",
-          "required": true,
-          "secret": true,
-          "generate": "secret",
-          "keychain": true,
-          "keychain_label": "admin password",
-          "keychain_username": "admin_pending"
         },
         {
           "name": "LEMMY_JWT",

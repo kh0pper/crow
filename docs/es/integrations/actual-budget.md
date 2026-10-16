@@ -80,7 +80,7 @@ Asegúrate de que la `ACTUAL_URL` sea accesible desde la máquina que ejecuta Cr
 
 ### "Login fallido" o error de autenticación
 
-La `ACTUAL_PASSWORD` debe coincidir con la contraseña del servidor que estableciste durante la configuración inicial en la interfaz web de Actual. Si cambiaste la contraseña en la interfaz web, actualiza tu archivo `.env` para que coincida.
+Para el servidor que instala Crow, Crow usa la contraseña generada en **Ajustes** > **Contraseñas**. Si la cambiaste en la interfaz web de Actual, o el servidor conservó sus datos (y su contraseña) de una instalación anterior, escribe la contraseña actual en `ACTUAL_PASSWORD` en Configurar. Para un servidor que ejecutas en otro lugar, `ACTUAL_PASSWORD` debe coincidir con su contraseña.
 
 ### No aparecen datos del presupuesto
 

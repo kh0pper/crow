@@ -9,7 +9,7 @@ ENV_FILE="${CROW_BUNDLE_DIR:-.}/.env"
 URL="${ACTUAL_BOOTSTRAP_URL:-http://127.0.0.1:5006}"   # override: tests only (hookEnv never passes it)
 [[ "$URL" =~ ^http://127\.0\.0\.1:[0-9]+$ ]] || { echo "Refusing a non-loopback Actual URL."; exit 0; }
 
-pw="$(sed -n 's/^ACTUAL_SERVER_PASSWORD=//p' "$ENV_FILE" 2>/dev/null | tail -n 1)"
+pw="$( (sed -n 's/^ACTUAL_SERVER_PASSWORD=//p' "$ENV_FILE" 2>/dev/null || true) | tail -n 1)"
 pw="${pw%\"}"; pw="${pw#\"}"
 if [ -z "$pw" ]; then
   echo "No generated server password in the extension settings; nothing to set."
@@ -22,7 +22,7 @@ fi
 command -v curl >/dev/null || { echo "curl is not installed; Crow sets the password the first time it connects instead."; exit 0; }
 
 state=""
-for _ in $(seq 1 "${ACTUAL_BOOTSTRAP_TRIES:-60}"); do
+for _ in $(seq 1 "${ACTUAL_BOOTSTRAP_TRIES:-20}"); do
   state="$(curl -fsS --max-time 5 "$URL/account/needs-bootstrap" 2>/dev/null || true)"
   [ -n "$state" ] && break
   sleep 2
@@ -31,8 +31,17 @@ if [ -z "$state" ]; then
   echo "The Actual server did not answer within 2 minutes; Crow sets the password the first time it connects instead."
   exit 0
 fi
+already_set() {
+  # Kept data from an earlier install has its own password: say so when ours doesn't open it.
+  login="$(printf '{"password":"%s"}' "$pw" | curl -sS --max-time 10 -H 'Content-Type: application/json' --data-binary @- "$URL/account/login" || true)"
+  if printf '%s' "$login" | grep -q '"token"'; then
+    echo "The Actual server already has this password; left unchanged."
+  else
+    echo "The Actual server kept its password from an earlier install, so the one Crow generated does not open it. Type the old password into ACTUAL_PASSWORD in Configure (and ignore the generated one in Settings → Passwords)."
+  fi
+}
 if ! printf '%s' "$state" | grep -q '"bootstrapped":false'; then
-  echo "The Actual server already has a password; left unchanged."
+  already_set
   exit 0
 fi
 # The body goes in on stdin, so the password never appears in a process list.
@@ -40,7 +49,7 @@ resp="$(printf '{"password":"%s"}' "$pw" | curl -sS --max-time 10 -H 'Content-Ty
 if printf '%s' "$resp" | grep -q '"status":"ok"'; then
   echo "Set the generated password on the Actual server (Settings → Passwords)."
 elif printf '%s' "$resp" | grep -q 'already-bootstrapped'; then
-  echo "The Actual server already has a password; left unchanged."
+  already_set
 else
   echo "Could not set the Actual server password; Crow tries again the first time it connects."
 fi

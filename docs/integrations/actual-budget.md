@@ -80,7 +80,7 @@ Make sure the `ACTUAL_URL` is reachable from the machine running Crow. If Actual
 
 ### "Login failed" or authentication error
 
-The `ACTUAL_PASSWORD` must match the server password you set during initial setup in Actual's web UI. If you changed the password in the web UI, update your `.env` file to match.
+For the server Crow installs, Crow uses the generated password in **Settings** > **Passwords**. If you changed it in Actual's web UI, or the server kept its data (and password) from an earlier install, type the current password into `ACTUAL_PASSWORD` in Configure. For a server you run elsewhere, `ACTUAL_PASSWORD` must match its password.
 
 ### No budget data showing up
 
