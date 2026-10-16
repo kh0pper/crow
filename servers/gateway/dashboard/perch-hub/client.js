@@ -730,6 +730,15 @@ export function perchHubJs(lang = "en") {
      Empty until the first /roost answers — which is why #perch-new ships
      disabled in the markup rather than enabled-and-lying. */
   var launchBots=[];
+  /* ?bot=<id> (the Bot Builder card's Chat link): the bot to preselect in
+     the launcher's picker, applied once — the first time the roster offers
+     that bot — and ignored when it is not offered. A later poll keeps the
+     operator's own pick. */
+  var wantBot=(function(){
+    var m=/[?&]bot=([^&#]*)/.exec(String((location&&location.search)||''));
+    if(!m) return null;
+    try{ return decodeURIComponent(m[1].replace(/\\+/g,' '))||null; }catch(e){ return null; }
+  })();
 
   function sameBotIds(a,b){
     if(a.length!==b.length) return false;
@@ -788,6 +797,7 @@ export function perchHubJs(lang = "en") {
         });
         if(keep&&bots.filter(function(b){ return b.id===keep; }).length) sel.value=keep;
       }
+      if(wantBot&&bots.filter(function(b){ return b.id===wantBot; }).length){ sel.value=wantBot; wantBot=null; }
     }
     syncLaunchModels();
   }
