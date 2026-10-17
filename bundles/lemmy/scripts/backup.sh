@@ -4,7 +4,6 @@ set -euo pipefail
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP_ROOT="${CROW_HOME:-$HOME/.crow}/backups/lemmy"
-DATA_DIR="${LEMMY_DATA_DIR:-$HOME/.crow/lemmy}"
 
 mkdir -p "$BACKUP_ROOT"
 WORK="$(mktemp -d)"
@@ -18,8 +17,11 @@ if docker ps --format '{{.Names}}' | grep -qw crow-lemmy-postgres; then
   docker exec crow-lemmy-postgres rm "/tmp/lemmy-${STAMP}.pgcustom"
 fi
 
-# pict-rs sled + files
-tar -C "$DATA_DIR/pictrs" -cf "$WORK/pictrs.tar" . 2>/dev/null || true
+# pict-rs sled + files (a Docker-managed volume, read through the running container)
+# A hot copy: pict-rs keeps running, so its sled db may need pict-rs's own repair on restore.
+docker ps --format '{{.Names}}' | grep -qw crow-lemmy-pictrs || { echo "crow-lemmy-pictrs is not running; no backup written" >&2; exit 1; }
+docker exec crow-lemmy-pictrs tar -C /mnt -cf - . > "$WORK/pictrs.tar"
+[ -s "$WORK/pictrs.tar" ] || { echo "pict-rs archive is empty; no backup written" >&2; exit 1; }
 
 OUT="${BACKUP_ROOT}/lemmy-${STAMP}.tar.zst"
 if command -v zstd >/dev/null 2>&1; then

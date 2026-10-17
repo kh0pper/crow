@@ -4,14 +4,18 @@
 # postgres + pict-rs (image hosting). lemmy + lemmy-ui on crow-federation
 # (Caddy reverse-proxies to lemmy-ui:1234); DB + pict-rs on default.
 #
-# Lemmy-UI serves the SPA AND proxies /api/v3/* to lemmy:8536 internally,
-# so a single Caddy federation site is enough.
+# lemmy-ui serves the web app only; it does NOT proxy the API (GET /api/v3/site on
+# lemmy-ui answers 404, checked live on 0.19.17). The public site must send /api,
+# /pictrs, /feeds, /nodeinfo, /.well-known and ActivityPub requests to lemmy:8536 and
+# everything else to lemmy-ui:1234.
 #
 # Data:
-#   ~/.crow/lemmy/postgres/    Postgres data dir
-#   ~/.crow/lemmy/pictrs/      pict-rs sled db + media files
-#   ~/.crow/lemmy/lemmy.hjson  Generated once at install time; not volume-mounted
-#                              because lemmy reads env-var overrides too.
+#   volume "postgres"  Postgres data (posts, users, the instance's private keys)
+#   volume "pictrs"    pict-rs sled db + media files
+#   Both are Docker-managed volumes of this compose project: the images run as their
+#   own uids (postgres 70, pict-rs 991), which a host folder created by the Docker
+#   daemon as root does not suit, and uninstall with delete data removes both.
+#   Lemmy's config is written inside the container at every start (see the entrypoint).
 #
 # Images: dessalines/lemmy:0.19.17 and dessalines/lemmy-ui:0.19.17 (floats
 # within 0.19.x — verify latest + CVE feed at implementation time per the
@@ -21,6 +25,10 @@ networks:
   crow-federation:
     external: true
   default:
+
+volumes:
+  postgres:
+  pictrs:
 
 services:
   postgres:
@@ -33,7 +41,7 @@ services:
       POSTGRES_PASSWORD: ${LEMMY_DB_PASSWORD}
       POSTGRES_DB: lemmy
     volumes:
-      - ${LEMMY_DATA_DIR:-~/.crow/lemmy}/postgres:/var/lib/postgresql/data
+      - postgres:/var/lib/postgresql/data
     init: true
     mem_limit: 512m
     restart: unless-stopped
@@ -52,15 +60,16 @@ services:
       - default
     environment:
       PICTRS__SERVER__API_KEY: ${LEMMY_PICTRS_API_KEY}
-      PICTRS__MEDIA__VIDEO_CODEC: vp9
-      PICTRS__MEDIA__GIF__MAX_WIDTH: "256"
-      PICTRS__MEDIA__GIF__MAX_HEIGHT: "256"
-      PICTRS__MEDIA__GIF__MAX_AREA: "65536"
-      PICTRS__MEDIA__GIF__MAX_FRAME_COUNT: "400"
+      # pict-rs 0.5 names (0.4's MEDIA__GIF__* and MEDIA__VIDEO_CODEC are ignored by 0.5)
+      PICTRS__MEDIA__VIDEO__VIDEO_CODEC: vp9
+      PICTRS__MEDIA__ANIMATION__MAX_WIDTH: "256"
+      PICTRS__MEDIA__ANIMATION__MAX_HEIGHT: "256"
+      PICTRS__MEDIA__ANIMATION__MAX_AREA: "65536"
+      PICTRS__MEDIA__ANIMATION__MAX_FRAME_COUNT: "400"
       RUST_LOG: warn,tracing=warn
       RUST_BACKTRACE: full
     volumes:
-      - ${LEMMY_DATA_DIR:-~/.crow/lemmy}/pictrs:/mnt
+      - pictrs:/mnt
     init: true
     mem_limit: 512m
     restart: unless-stopped
@@ -79,60 +88,56 @@ services:
       RUST_LOG: "warn"
       RUST_BACKTRACE: "full"
       LEMMY_DATABASE_URL: "postgres://lemmy:${LEMMY_DB_PASSWORD}@postgres:5432/lemmy"
-      LEMMY_CONFIG_LOCATION: /config/config.hjson
+      # The image runs as uid 1000 (lemmy) with no writable config folder, so the
+      # entrypoint writes the config into the container's own /tmp at every start.
+      LEMMY_CONFIG_LOCATION: /tmp/crow-lemmy/config.hjson
       # Secrets reach the entrypoint through the environment and are expanded by its
       # shell ($${...}), so the script text that stays in PID 1's command line (init: true)
       # holds variable names, never values.
-      CROW_LEMMY_DB_PASSWORD: "${LEMMY_DB_PASSWORD}"
+      CROW_LEMMY_HOSTNAME: "${LEMMY_HOSTNAME:?LEMMY_HOSTNAME is required}"
       CROW_LEMMY_PICTRS_API_KEY: "${LEMMY_PICTRS_API_KEY}"
       CROW_LEMMY_ADMIN_PASSWORD: "${LEMMY_ADMIN_PASSWORD}"
-    volumes:
-      - ./config:/config:ro
+    # Lemmy 0.19 reads only the keys below (federation on/off, captcha and registration
+    # are site settings in Admin -> Settings). tls_enabled: true because Caddy serves
+    # https; Lemmy itself still listens on plain http. `setup` is used once, at the
+    # first start against an empty database, to create the admin.
     entrypoint:
       - sh
       - -c
       - |
-        mkdir -p /config
-        cat > /config/config.hjson <<HJSON
+        umask 077
+        case "$${CROW_LEMMY_HOSTNAME}" in
+          ""|*[!a-z0-9.:-]*|[.:-]*|*[.:-]|*..*) echo "LEMMY_HOSTNAME must be a bare lowercase hostname such as lemmy.example.com (no https://, no path)" >&2; exit 64 ;;
+        esac
+        mkdir -p /tmp/crow-lemmy
+        cat > /tmp/crow-lemmy/config.hjson <<HJSON
         {
-          hostname: "${LEMMY_HOSTNAME}"
+          hostname: "$${CROW_LEMMY_HOSTNAME}"
           bind: "0.0.0.0"
           port: 8536
-          tls_enabled: false
-          database: {
-            host: postgres
-            port: 5432
-            database: lemmy
-            user: lemmy
-            password: "$${CROW_LEMMY_DB_PASSWORD}"
-          }
+          tls_enabled: true
           pictrs: {
             url: "http://pictrs:8080/"
             api_key: "$${CROW_LEMMY_PICTRS_API_KEY}"
-          }
-          federation: {
-            enabled: ${LEMMY_FEDERATION_ENABLED:-true}
-            debug: false
           }
           setup: {
             admin_username: "admin_pending"
             admin_password: "$${CROW_LEMMY_ADMIN_PASSWORD}"
             site_name: "Crow Lemmy"
           }
-          captcha: { enabled: true, difficulty: medium }
-          opentelemetry_url: null
         }
         HJSON
-        exec /app/lemmy
+        exec lemmy_server
     init: true
     mem_limit: 768m
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8536/api/v3/site >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:8536/api/v3/site || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 10
       start_period: 60s
+      start_interval: 5s
 
   lemmy-ui:
     image: dessalines/lemmy-ui:0.19.17
@@ -151,8 +156,9 @@ services:
     mem_limit: 256m
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:1234/ >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:1234/ || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 10
       start_period: 60s
+      start_interval: 5s

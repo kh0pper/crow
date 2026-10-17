@@ -36,22 +36,16 @@ Gated by F.0's hardware check. Refused below **1 GB effective RAM after committe
 
 ## First-run bootstrap
 
-1. After install, expose via Caddy:
-   ```
-   caddy_add_federation_site {
-     domain: "lemmy.example.com",
-     upstream: "lemmy-ui:1234",
-     profile: "activitypub"
-   }
-   ```
-2. Open https://lemmy.example.com/ and complete the setup wizard (admin username + password + site name). The compose entrypoint creates a first admin, `admin_pending`, with a password Crow generated at install (Settings → Passwords); log in with it if the wizard does not appear, and rename or replace the account.
+1. On its first start Lemmy creates the admin `admin_pending` with the password Crow generated at install (Settings → Passwords). There is no setup wizard.
+2. Expose it on its own subdomain. lemmy-ui serves the web app only and does **not** proxy the API, so the site must split traffic: `/api`, `/pictrs`, `/feeds`, `/nodeinfo`, `/.well-known` and ActivityPub requests (`Accept: application/activity+json`) go to `lemmy:8536`, everything else to `lemmy-ui:1234`. `caddy_add_federation_site` takes a single upstream, so write this Caddy site by hand for now.
 3. Obtain an auth JWT:
    ```bash
    curl -X POST https://lemmy.example.com/api/v3/user/login \
      -H 'Content-Type: application/json' \
-     -d '{"username_or_email":"admin","password":"<pw>"}'
+     -d '{"username_or_email":"admin_pending","password":"<password from Settings → Passwords>"}'
    ```
-   Copy `jwt` from the response into `.env` as `LEMMY_JWT`, then `crow bundle restart lemmy`.
+   Copy `jwt` from the response into `LEMMY_JWT` (the extension's settings), then restart the extension.
+4. Federation, registration and captcha are site settings: change them in Lemmy's Admin → Settings. Rename `admin_pending` or add your own admin there too.
 
 ## Common workflows
 
@@ -114,7 +108,7 @@ Lemmy's moderation is layered: **community mods** handle their community; **inst
 ## Troubleshooting
 
 - **"Cannot reach Lemmy"** — `docker ps | grep crow-lemmy`. First-boot migrations take 60+ seconds; the healthcheck has a 60s start period.
-- **Federation not working** — check `LEMMY_FEDERATION_ENABLED` is true (default). Also verify `federation.enabled` is true in `/config/config.hjson` inside the container (`docker exec crow-lemmy cat /config/config.hjson`).
+- **Federation not working** — check that federation is on in Lemmy's Admin → Settings, and that the public site sends `/.well-known`, `/nodeinfo` and ActivityPub requests to `lemmy:8536` (lemmy-ui answers them with 404).
 - **Images not loading** — pict-rs container health check. `docker logs crow-lemmy-pictrs` and verify `LEMMY_PICTRS_API_KEY` matches between the two containers.
 - **Disk filling fast** — federated community caching. Run `lemmy_media_prune` and reduce follow count on heavy communities.
 - **Admin endpoints returning 404** — your `LEMMY_JWT` may belong to a regular user rather than admin. Verify in the web UI's **Admin** dropdown — if absent, log out, promote the account via DB, and re-login.
