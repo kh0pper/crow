@@ -31,6 +31,10 @@ function keys() {
 const [cmd, ...rest] = process.argv.slice(2);
 const { key, previous } = keys();
 if (!key) { console.error("No tax key: install the tax extension, or set CROW_TAX_ENCRYPTION_KEY."); process.exit(2); }
+// The database of the SAME instance as the key and the folders (CROW_HOME), never another one's.
+if (process.env.CROW_HOME && !process.env.CROW_DB_PATH && !process.env.CROW_DATA_DIR && !process.env.CROW_TAX_DB_PATH) {
+  process.env.CROW_DB_PATH = join(process.env.CROW_HOME, "data", "crow.db");
+}
 const db = createDbClient();
 let out;
 if (cmd === "encrypt") {

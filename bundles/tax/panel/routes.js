@@ -13,6 +13,7 @@ import { readFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
+import { randomBytes } from "node:crypto";
 
 // This instance's documents folder (CROW_HOME). Files stored before 2026-10 went to
 // ~/.crow/tax-documents for every instance; their rows keep absolute paths, so the
@@ -115,6 +116,7 @@ export default function taxRouter(authMiddleware) {
         const r = await encryptStoredDocuments(db, { key, previous, docsDirs: [TAX_DOCS_DIR, LEGACY_TAX_DOCS_DIR] });
         if (r.encrypted || r.reencrypted) console.log(`[tax] encrypted ${r.encrypted} stored document(s), re-encrypted ${r.reencrypted}`);
         if (r.errors.length) console.warn(`[tax] ${r.errors.length} stored document(s) were left as they are: ${r.errors.join("; ")}`);
+        if (r.locked) console.warn("[tax] another run holds the documents lock; plain documents (if any) are encrypted at the next start");
       }
     } catch {}
   })();
@@ -208,14 +210,19 @@ export default function taxRouter(authMiddleware) {
       // Stored encrypted with the tax key; the plaintext is never written to disk.
       const { key } = taxKeys();
       if (!key) {
-        return res.status(409).json({ error: "The tax extension has no encryption key yet (CROW_TAX_ENCRYPTION_KEY). Reinstall or configure it in Extensions, then upload again." });
+        return res.status(409).json({ error: "The tax extension has no encryption key yet. Reinstall it in Extensions (your returns and documents are kept), then upload again." });
       }
       const { encryptDocument, writePrivateAtomic } = await docsCrypto;
+      let sealed;
+      try { sealed = await encryptDocument(req.file.buffer, key); } catch (err) {
+        // The example key once published in the repo: a reinstall moves this install to a new key.
+        return res.status(409).json({ error: `${err.message} Reinstall the tax extension in Extensions (your returns and documents are kept): it moves to a new key.` });
+      }
       const db = await getDb();
       const filename = req.file.originalname;
       const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
-      const filePath = join(TAX_DOCS_DIR, `${Date.now()}-${safeName}.enc`);
-      writePrivateAtomic(filePath, await encryptDocument(req.file.buffer, key));
+      const filePath = join(TAX_DOCS_DIR, `${Date.now()}-${randomBytes(3).toString("hex")}-${safeName}.enc`);
+      writePrivateAtomic(filePath, sealed);
 
       // Record upload with owner tag
       await db.execute({

@@ -67,6 +67,7 @@ test("an install still on the example key published in the repo gets a new key; 
   const kept = S.planGeneratedEnv("tax", m, { destDir, crowHome: HOME });
   assert.equal(kept.env.CROW_TAX_ENCRYPTION_KEY, EXAMPLE);
   assert.equal(kept.env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS, undefined);
+  assert.deepEqual(kept.replaceSkipped, ["CROW_TAX_ENCRYPTION_KEY"], "the install log says why it was left");
   // A typed key of the user's own is kept as it is.
   writeFileSync(join(destDir, ".env"), "CROW_TAX_ENCRYPTION_KEY=my-own-key-0987654321\n");
   assert.equal(S.planGeneratedEnv("tax", m, { destDir, crowHome: HOME }).env.CROW_TAX_ENCRYPTION_KEY, "my-own-key-0987654321");
@@ -179,8 +180,14 @@ test("the MCP ingest tool opens a stored encrypted document with the tax key", a
   const p = join(HOME, "tax-documents", "x.pdf.0123abcd.enc");
   D.writePrivateAtomic(p, await D.encryptDocument(PDF, TAX_KEY));
   // The fake PDF has no fields, so extraction fails — but only AFTER it was decrypted.
-  await assert.rejects(ingestDocument(p, "w2", { keys: [TAX_KEY] }), (err) => !/Only PDF files|different tax key|not an encrypted/.test(err.message));
+  await assert.rejects(ingestDocument(p, "w2", { keys: [TAX_KEY] }), /All extraction methods failed/);
   await assert.rejects(ingestDocument(p, "w2", { keys: ["wrong-" + "w".repeat(40)] }), /different tax key/);
+  // The path comes from the AI: nothing but a bounded regular .pdf/.enc file is ever read.
+  await assert.rejects(ingestDocument("/dev/zero", "w2"), /Only PDF files/);
+  const { symlinkSync } = await import("node:fs");
+  const dev = join(HOME, "zero.pdf");
+  symlinkSync("/dev/zero", dev);
+  await assert.rejects(ingestDocument(dev, "w2"), /Not a regular file/);
 });
 
 test("a version bump ships tax's engine/ and pdf/ to the installed copy (the panel imports the installed engine)", () => {

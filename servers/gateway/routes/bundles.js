@@ -2564,6 +2564,8 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       return { ok: false, reason };
     }
     if (plan.restored.length > 0) appendLog(job, `Restored ${plan.restored.length} key(s) from Crow keychain (Settings → Passwords): ${plan.restored.join(", ")}`);
+    if (plan.replaced.length > 0) appendLog(job, `${plan.replaced.join(", ")} was the example value once published in Crow's repository: a new key was generated, and the old one kept in its previous-key slot so data saved with it still opens`);
+    if (plan.replaceSkipped?.length > 0) appendLog(job, `${plan.replaceSkipped.join(", ")} is still the example value once published in Crow's repository, but its previous-key slot already holds another key, so it was left as it is. Open that data, clear the previous-key slot in Configure, then reinstall.`);
     const generated = plan.env;
     const writeEnv = { ...(reqEnv || {}), ...generated };
     let installEnv = writeEnv;

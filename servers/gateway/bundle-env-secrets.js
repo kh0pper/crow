@@ -150,7 +150,7 @@ export function keychainEligibleKeys(manifest) {
  */
 export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, composeText = null, priorInstall = false, keychain = null }) {
   const keys = generatedEnvKeys(manifest);
-  if (keys.length === 0) return { env: {}, minted: {}, reusedPlain: {}, restored: [], replaced: [], persist() {} };
+  if (keys.length === 0) return { env: {}, minted: {}, reusedPlain: {}, restored: [], replaced: [], replaceSkipped: [], persist() {} };
   if (typeof bundleId !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(bundleId) || bundleId.length > 64) {
     throw new Error(`Invalid bundle ID: ${JSON.stringify(bundleId)}`);
   }
@@ -170,6 +170,7 @@ export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, compos
   const reusedPlain = {};
   const restored = [];
   const replaced = [];
+  const replaceSkipped = [];
   const existingFor = (k) => installed[k] || retained[k] || legacy[k] || "";
   // Private halves first, so a public half can be derived from (or minted with) its pair.
   const order = [...keys].sort((a, b) => (byName.get(a)?.generate === "vapid_public_key") - (byName.get(b)?.generate === "vapid_public_key"));
@@ -196,6 +197,8 @@ export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, compos
         env[prevSlot] = existing;
         replaced.push(k);
         existing = "";
+      } else {
+        replaceSkipped.push(k);
       }
     }
     const fromKeychain = !existing && spec.keychain === true && !isReplacedValue(spec, keychain?.[k]) && keychain && typeof keychain[k] === "string" && keychain[k] !== "" ? keychain[k] : "";
@@ -235,7 +238,7 @@ export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, compos
         formatEnvLines({ ...retained, ...env }),
     );
   };
-  return { env, minted, reusedPlain, restored, replaced, persist };
+  return { env, minted, reusedPlain, restored, replaced, replaceSkipped, persist };
 }
 
 /**

@@ -37,7 +37,11 @@ test("round trip; the key id names the sealing key; a wrong key is refused; the 
   assert.equal(D.isEncryptedDocument(enc), true);
   assert.equal(enc.includes(Buffer.from("000-00-0000")), false, "no plaintext in the stored bytes");
   assert.ok((await D.decryptDocument(enc, [KEY])).plain.equals(PDF));
-  assert.equal(D.sealedWith(enc, [OLD, KEY]), KEY);
+  assert.equal(await D.sealedWith(enc, [OLD, KEY]), KEY);
+  // The key id comes from the salted PBKDF2 output: it differs per file for the same key,
+  // so it is no cheaper offline guess check than the ciphertext and links nothing.
+  const enc2 = await D.encryptDocument(PDF, KEY);
+  assert.equal(enc.subarray(D.MAGIC.length, D.MAGIC.length + 8).equals(enc2.subarray(D.MAGIC.length, D.MAGIC.length + 8)), false);
   await assert.rejects(D.decryptDocument(enc, ["wrong-" + "c".repeat(40)]), /different tax key/);
   assert.ok((await D.decryptDocument(await D.encryptDocument(PDF, OLD), [KEY, OLD])).plain.equals(PDF));
   await assert.rejects(D.encryptDocument(PDF, ""), /not set/);
@@ -147,7 +151,7 @@ test("re-encrypts a document only the previous key opens (after a key change)", 
   await db.execute({ sql: "INSERT INTO tax_documents (id, filename, file_path) VALUES (1, 'w2.pdf', ?)", args: [p] });
   const r = await D.encryptStoredDocuments(db, { key: KEY, previous: OLD, docsDirs: [docs] });
   assert.equal(r.reencrypted, 1);
-  assert.equal(D.sealedWith(readFileSync(p), [OLD, KEY]), KEY);
+  assert.equal(await D.sealedWith(readFileSync(p), [OLD, KEY]), KEY);
 });
 
 test("a crow.db restored under another home: a row pointing at the old home resolves to the same name in this folder", async () => {
@@ -177,4 +181,33 @@ test("reverse in place restores the identical bytes and the row; export copies l
   assert.equal(await pathOf(db, 1), p);
   assert.ok(readFileSync(p).equals(PDF));
   assert.equal(existsSync(enc), false);
+});
+
+test("a crow.db restored from a backup taken BEFORE the migration: the row (still naming the plain file) finds its .enc and is repointed", async () => {
+  const { docs, db } = await fresh("m9");
+  const p = await addPlain(db, docs, 1);
+  await D.encryptStoredDocuments(db, { key: KEY, docsDirs: [docs] });
+  const enc = await pathOf(db, 1);
+  await db.execute({ sql: "UPDATE tax_documents SET file_path = ? WHERE id = 1", args: [p] }); // the old backup's row
+  const r = await D.encryptStoredDocuments(db, { key: KEY, docsDirs: [docs] });
+  assert.deepEqual(r.errors, []);
+  assert.equal(await pathOf(db, 1), enc, "the row points at the encrypted file again");
+  assert.ok((await D.decryptDocument(readFileSync(enc), [KEY])).plain.equals(PDF));
+});
+
+test("a stale lock (no run touched it for 30 minutes) is taken over; a fresh one is respected", async () => {
+  const { docs, db } = await fresh("m10");
+  await addPlain(db, docs, 1);
+  const lock = join(docs, ".documents.lock");
+  writeFileSync(lock, "");
+  const held = await D.encryptStoredDocuments(db, { key: KEY, docsDirs: [docs] });
+  assert.equal(held.locked, true, "a live lock is respected");
+  const { utimesSync } = await import("node:fs");
+  const old = new Date(Date.now() - 31 * 60 * 1000);
+  utimesSync(lock, old, old);
+  const r = await D.encryptStoredDocuments(db, { key: KEY, docsDirs: [docs] });
+  assert.equal(r.locked, false);
+  assert.equal(r.encrypted, 1);
+  assert.equal(existsSync(lock), false, "released after the run");
+  assert.equal(statSync(docs).mode & 0o777, 0o700, "the folder is private");
 });
