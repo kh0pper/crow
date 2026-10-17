@@ -6,7 +6,7 @@
  * Returns extracted data with confidence scores.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { extname } from "node:path";
 import { extractW2 } from "./w2-reader.js";
 import { extract1099 } from "./1099-reader.js";
@@ -37,19 +37,39 @@ const EXTRACTORS = {
  * @param {string} documentType - Type of document (w2, 1099-sa, 1098-t, etc.)
  * @returns {Promise<{ data: object, confidence: object, warnings: string[], raw_text: string }>}
  */
-export async function ingestDocument(filePath, documentType) {
+const MAX_DOCUMENT_BYTES = 25 * 1024 * 1024;
+
+export async function ingestDocument(filePath, documentType, { keys = null } = {}) {
+  // Checked BEFORE reading: the path comes from the AI (crow_tax_ingest_document), so a
+  // device, FIFO or huge file must never be read.
+  const ext = extname(filePath).toLowerCase();
+  if (ext !== ".pdf" && ext !== ".enc") throw new Error(`Only PDF files are supported. Got: ${ext}`);
+  const st = statSync(filePath);
+  if (!st.isFile()) throw new Error("Not a regular file");
+  if (st.size > MAX_DOCUMENT_BYTES) throw new Error("Document is larger than 25 MB");
+  const buf = readFileSync(filePath);
+  // A document the dashboard stored encrypted at rest (.enc): open it with the tax key.
+  const { isEncryptedDocument, decryptDocument } = await import("../../server/documents-crypto.js");
+  if (isEncryptedDocument(buf)) {
+    const k = keys || [process.env.CROW_TAX_ENCRYPTION_KEY, process.env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS];
+    return ingestPdfBuffer((await decryptDocument(buf, k)).plain, documentType, filePath);
+  }
+  if (ext !== ".pdf") throw new Error(`Only PDF files are supported. Got: ${ext}`);
+  return ingestPdfBuffer(buf, documentType, filePath);
+}
+
+/**
+ * Ingest a PDF already in memory (the dashboard upload: the file on disk is stored
+ * encrypted, so the plaintext is never written out). `label` names it in errors.
+ */
+export async function ingestPdfBuffer(pdfBuffer, documentType, label = "the uploaded document") {
+  const filePath = label;
   const type = documentType.toLowerCase();
   const extractor = EXTRACTORS[type];
   if (!extractor) {
     throw new Error(`Unsupported document type: ${documentType}. Supported: ${Object.keys(EXTRACTORS).join(", ")}`);
   }
 
-  const ext = extname(filePath).toLowerCase();
-  if (ext !== ".pdf") {
-    throw new Error(`Only PDF files are supported. Got: ${ext}`);
-  }
-
-  const pdfBuffer = readFileSync(filePath);
 
   // Pipeline: try form fields first, then text extraction, then OCR
   let result;

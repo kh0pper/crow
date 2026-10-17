@@ -205,6 +205,13 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
       const other = (manifest.env_vars || []).find((o) => o && o.name === v.previous_key);
       if (typeof v.previous_key !== "string" || !other || other.name === v.name) errors.push(`env_vars ${v.name}: previous_key must name another declared env var`);
     }
+    if (v.replace_values_sha256 !== undefined) {
+      if (!Array.isArray(v.replace_values_sha256) || v.replace_values_sha256.length === 0 || !v.replace_values_sha256.every((h) => typeof h === "string" && /^[0-9a-f]{64}$/.test(h))) {
+        errors.push(`env_vars ${v.name}: replace_values_sha256 must be a non-empty list of lowercase sha256 hex digests`);
+      } else if (v.generate === undefined || typeof v.previous_key !== "string") {
+        errors.push(`env_vars ${v.name}: replace_values_sha256 needs generate and previous_key (the replaced value moves there)`);
+      }
+    }
     if (v.default_in_crow_home !== undefined) {
       const rel = v.default_in_crow_home;
       if (typeof rel !== "string" || rel === "" || rel.startsWith("/") || rel.includes("\\") || rel.includes("$") || rel.split("/").includes("..")) {

@@ -18,6 +18,8 @@ import {
   exportableEntries, importEntries, ensureWriteKey,
 } from "./store.js";
 import { vaultwardenStatus, saveToVault } from "./vault-save.js";
+import { recordKeychainExport, recordKeychainImport, exportSnapshot } from "./reminder.js";
+import { invalidateHealthCache } from "../dashboard/panels/nest/health-signals.js";
 
 const BASE = "/dashboard/keychain/api";
 
@@ -165,7 +167,7 @@ export function keychainApiRouter({
     if (!entry) return res.status(404).json({ error: "No such password." });
     // C5: a generated token may be the ONLY plaintext of a hash the extension still uses.
     if (entry.origin === "generated" && entry.status === "active" && req.body?.confirm_generated !== true) {
-      return res.status(409).json({ code: "generated_in_use", error: `Crow generated this token and keeps no other copy: without it you cannot sign in to ${entry.bundle_id || "the extension"}'s admin page. Export or save it elsewhere first.` });
+      return res.status(409).json({ code: "generated_in_use", error: `Crow generated this and keeps no other copy: without it you may not be able to sign in to ${entry.bundle_id || "the extension"}, or read data it encrypted. Export or save it elsewhere first.` });
     }
     await deleteEntry(db, entry.id);
     await audit(db, "keychain_delete", { ip: req.ip, details: auditDetails(entry) });
@@ -178,8 +180,11 @@ export function keychainApiRouter({
     if (passphrase.length < MIN_PASSPHRASE) return res.status(400).json({ error: `Choose a passphrase of at least ${MIN_PASSPHRASE} characters.` });
     const key = readKey();
     if (!key) return res.status(409).json(KEY_MISSING);
+    const snapshot = await exportSnapshot(db, key.id).catch(() => null);
     const entries = await exportableEntries(db, key);
     const file = await sealExport(entries, passphrase);
+    if (snapshot) await recordKeychainExport(db, key.id, snapshot).catch(() => {}); // the Nest reminder; never blocks the download
+    invalidateHealthCache();
     await audit(db, "keychain_export", { ip: req.ip, details: { count: entries.length } });
     res.set("Content-Disposition", `attachment; filename="crow-keychain-${new Date().toISOString().slice(0, 10)}.json"`);
     res.json(file);
@@ -189,7 +194,10 @@ export function keychainApiRouter({
     if (!(await requireGrant(req, res))) return;
     const entries = await openExport(req.body?.file, typeof req.body?.passphrase === "string" ? req.body.passphrase : "");
     if (!entries) return res.status(400).json({ error: "That passphrase does not open this file, or it is not a Crow keychain export." });
-    const out = await importEntries(db, await writeKey(db, req.ip), entries);
+    const ikey = await writeKey(db, req.ip);
+    const { ids, ...out } = await importEntries(db, ikey, entries);
+    await recordKeychainImport(db, ikey.id, ids).catch(() => {});
+    invalidateHealthCache();
     await audit(db, "keychain_import", { ip: req.ip, details: out });
     res.json({ ok: true, ...out });
   }));

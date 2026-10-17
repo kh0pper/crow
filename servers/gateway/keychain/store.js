@@ -199,6 +199,7 @@ export async function importEntries(db, key, entries) {
   const current = await listEntries(db, { keyId: key.id });
   let imported = 0;
   let skipped = 0;
+  const ids = [];
   for (let e of Array.isArray(entries) ? entries : []) {
     // A non-http(s) url is dropped (not the entry) so an otherwise-good export still imports.
     if (e && typeof e.url === "string" && e.url && !/^https?:\/\//i.test(e.url)) e = { ...e, url: null };
@@ -209,6 +210,7 @@ export async function importEntries(db, key, entries) {
       const origin = e.origin === "generated" ? "generated" : "typed";
       const { id } = await saveExtensionSecret(db, key, { bundleId: e.bundle_id, envKey: e.env_key, label: e.label, username: e.username, url: e.url, secret: e.secret, origin });
       if (e.status === "extension_removed") await db.execute({ sql: "UPDATE crow_keychain SET status = 'extension_removed' WHERE id = ?", args: [id] });
+      ids.push(id);
       imported++;
     } else {
       const dup = current.some((c) => c.kind === "manual" && c.readable && c.label === cleanText(e.label) && (c.username || null) === cleanText(e.username) && (c.url || null) === cleanText(e.url, 2048));
@@ -217,5 +219,5 @@ export async function importEntries(db, key, entries) {
       imported++;
     }
   }
-  return { imported, skipped };
+  return { imported, skipped, ids };
 }

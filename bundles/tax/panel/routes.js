@@ -9,12 +9,32 @@
 
 import { Router } from "express";
 import multer from "multer";
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
+import { randomBytes } from "node:crypto";
 
-const TAX_DOCS_DIR = join(homedir(), ".crow", "tax-documents");
+// This instance's documents folder (CROW_HOME). Files stored before 2026-10 went to
+// ~/.crow/tax-documents for every instance; their rows keep absolute paths, so the
+// encryption pass below also looks there.
+const TAX_DOCS_DIR = join(process.env.CROW_HOME || join(homedir(), ".crow"), "tax-documents");
+const LEGACY_TAX_DOCS_DIR = join(homedir(), ".crow", "tax-documents");
+
+/** The tax key, read when needed, in the SAME order the tax MCP server gets it (its env is
+ * the gateway env overlaid by this instance's tax entry in mcp-addons.json, proxy.js): the
+ * entry first, then the gateway env. A generated key reaches only that entry. Never logged. */
+const ADDONS_FILE = join(process.env.CROW_HOME || join(homedir(), ".crow"), "mcp-addons.json");
+function addonEnv() {
+  try { const env = JSON.parse(readFileSync(ADDONS_FILE, "utf8"))?.tax?.env; return env && typeof env === "object" ? env : {}; } catch { return {}; }
+}
+export function taxKeys() {
+  const a = addonEnv();
+  return {
+    key: a.CROW_TAX_ENCRYPTION_KEY || process.env.CROW_TAX_ENCRYPTION_KEY || "",
+    previous: a.CROW_TAX_ENCRYPTION_KEY_PREVIOUS || process.env.CROW_TAX_ENCRYPTION_KEY_PREVIOUS || "",
+  };
+}
 
 // Resolve bundle directory (installed vs repo)
 function resolveBundleDir() {
@@ -59,9 +79,10 @@ const upload = multer({
 export default function taxRouter(authMiddleware) {
   const router = Router();
   const bundleDir = resolveBundleDir();
+  const docsCrypto = import(pathToFileURL(join(bundleDir, "server", "documents-crypto.js")).href);
 
   // Ensure directories and tables exist
-  mkdirSync(TAX_DOCS_DIR, { recursive: true });
+  mkdirSync(TAX_DOCS_DIR, { recursive: true, mode: 0o700 });
   (async () => {
     try {
       const db = await getDb();
@@ -86,6 +107,17 @@ export default function taxRouter(authMiddleware) {
       try {
         await db.execute({ sql: "ALTER TABLE tax_documents ADD COLUMN owner TEXT DEFAULT 'taxpayer'", args: [] });
       } catch {} // Column already exists
+      // Documents stored before encryption at rest: move each to its encrypted form
+      // (verified before the plain file is removed; documents-crypto.js). Idempotent.
+      const { key, previous } = taxKeys();
+      // CROW_TAX_KEEP_PLAIN_DOCUMENTS=1: after `scripts/documents.mjs decrypt --in-place` (a downgrade).
+      if (key && process.env.CROW_TAX_KEEP_PLAIN_DOCUMENTS !== "1") {
+        const { encryptStoredDocuments } = await docsCrypto;
+        const r = await encryptStoredDocuments(db, { key, previous, docsDirs: [TAX_DOCS_DIR, LEGACY_TAX_DOCS_DIR] });
+        if (r.encrypted || r.reencrypted) console.log(`[tax] encrypted ${r.encrypted} stored document(s), re-encrypted ${r.reencrypted}`);
+        if (r.errors.length) console.warn(`[tax] ${r.errors.length} stored document(s) were left as they are: ${r.errors.join("; ")}`);
+        if (r.locked) console.warn("[tax] another run holds the documents lock; plain documents (if any) are encrypted at the next start");
+      }
     } catch {}
   })();
 
@@ -175,11 +207,22 @@ export default function taxRouter(authMiddleware) {
         return res.status(400).json({ error: "No PDF file uploaded" });
       }
 
+      // Stored encrypted with the tax key; the plaintext is never written to disk.
+      const { key } = taxKeys();
+      if (!key) {
+        return res.status(409).json({ error: "The tax extension has no encryption key yet. Reinstall it in Extensions (your returns and documents are kept), then upload again." });
+      }
+      const { encryptDocument, writePrivateAtomic } = await docsCrypto;
+      let sealed;
+      try { sealed = await encryptDocument(req.file.buffer, key); } catch (err) {
+        // The example key once published in the repo: a reinstall moves this install to a new key.
+        return res.status(409).json({ error: `${err.message} Reinstall the tax extension in Extensions (your returns and documents are kept): it moves to a new key.` });
+      }
       const db = await getDb();
       const filename = req.file.originalname;
       const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
-      const filePath = join(TAX_DOCS_DIR, `${Date.now()}-${safeName}`);
-      writeFileSync(filePath, req.file.buffer);
+      const filePath = join(TAX_DOCS_DIR, `${Date.now()}-${randomBytes(3).toString("hex")}-${safeName}.enc`);
+      writePrivateAtomic(filePath, sealed);
 
       // Record upload with owner tag
       await db.execute({
@@ -194,8 +237,8 @@ export default function taxRouter(authMiddleware) {
       // Try ingestion
       let ingestionResult = null;
       try {
-        const { ingestDocument } = await import(pathToFileURL(join(bundleDir, "engine", "ingest", "index.js")).href);
-        ingestionResult = await ingestDocument(filePath, doc_type);
+        const { ingestPdfBuffer } = await import(pathToFileURL(join(bundleDir, "engine", "ingest", "index.js")).href);
+        ingestionResult = await ingestPdfBuffer(req.file.buffer, doc_type, filename);
 
         await db.execute({
           sql: `UPDATE tax_documents SET status = 'ingested',
@@ -313,8 +356,11 @@ export default function taxRouter(authMiddleware) {
       const db = await getDb();
       // Get file path to delete the uploaded file
       const result = await db.execute({ sql: "SELECT file_path FROM tax_documents WHERE id = ?", args: [req.params.id] });
-      if (result.rows[0]?.file_path) {
-        try { (await import("node:fs")).unlinkSync(result.rows[0].file_path); } catch {}
+      // Only a regular file inside a documents folder is ever removed (the path comes from the DB).
+      const { storedDocumentPath } = await docsCrypto;
+      const fp = storedDocumentPath(result.rows[0]?.file_path, [TAX_DOCS_DIR, LEGACY_TAX_DOCS_DIR]);
+      if (fp) {
+        try { (await import("node:fs")).unlinkSync(fp); } catch {}
       }
       await db.execute({ sql: "DELETE FROM tax_documents WHERE id = ?", args: [req.params.id] });
       if (req.headers.accept?.includes("text/html")) {

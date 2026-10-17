@@ -55,14 +55,14 @@ import {
 import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";
 import { syncBundleSkills, removeBundleSkills, readSkillLedger, skillSyncMode } from "../bundle-skill-sync.js";
 import { envValueProblem, encodeEnvValue, formatEnvLines, updateEnvText, pathEnvKeys } from "../bundle-env-codec.js";
-import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved } from "../keychain/install-hooks.js";
+import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved, keychainRestoreValues, backfillKeychainEntries } from "../keychain/install-hooks.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
 import { checkComposeModel, loadComposeModel, usesHostNetwork } from "../compose-guard.js";
 import { resolveDataDir } from "../../db.js";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { isPlaceholderValue } from "../bundle-env-placeholders.js";
-import { planGeneratedEnv, retainedEnvPath, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedKeys, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
+import { keychainGeneratedKeys, planGeneratedEnv, retainedEnvPath, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedKeys, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
 
 /**
  * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
@@ -780,9 +780,11 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
   const topFiles = isDocker
     ? ["manifest.json", "settings-section.js", "package.json", "package-lock.json"]
     : ["manifest.json", "package.json", "package-lock.json", "pyproject.toml", "uv.lock", "settings-section.js", "main.py", "run.sh", "config.py"];
+  // engine/ + pdf/: tax's calculator, ingest and form filler (its panel imports the
+  // installed engine/, so a version bump must ship it with the panel).
   const dirs = isDocker
     ? ["server", "panel", "skills"]
-    : ["server", "panel", "skills", "curriculum", "public", "scripts", "templates", "routes", "config", "src"];
+    : ["server", "panel", "skills", "curriculum", "public", "scripts", "templates", "routes", "config", "src", "engine", "pdf"];
   // Never copied for ANY type: docker-compose.yml, Dockerfile, entrypoint.sh,
   // .env*, node_modules/, data/ — simply absent from both lists above. The ONE
   // exception is a docker bundle's explicit opt-in, manifest.refreshFiles
@@ -984,6 +986,35 @@ function installBundleSkills(bundleId, destDir, manifest, job) {
  *        defaults to the module's `run`).
  * @returns {Promise<{repaired: string[], errors: Array<{id, error}>}>}
  */
+/**
+ * Boot: save the keychain:true generated keys of extensions installed before their manifest
+ * saved them to the keychain (install-hooks backfillKeychainEntries). Values come from the
+ * installed .env, else the retained copy, else the MCP entry; never logged.
+ */
+export async function backfillBundleKeychain({ log = (m) => console.log(`[keychain] ${m}`) } = {}) {
+  let n = 0;
+  const addons = readJsonSafe(MCP_ADDONS_PATH, {}) || {};
+  for (const rec of getInstalled()) {
+    const id = rec?.id;
+    if (typeof id !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(id)) continue;
+    const manifest = getInstalledFirstManifest(id);
+    const keys = keychainGeneratedKeys(manifest);
+    if (keys.length === 0) continue;
+    let installed = {}, retained = {};
+    try { installed = parseEnvText(readFileSync(join(BUNDLES_DIR, id, ".env"), "utf8")); } catch { /* none */ }
+    try { retained = parseEnvText(readFileSync(retainedEnvPath(CROW_HOME, id), "utf8")); } catch { /* none */ }
+    const entryEnv = addons?.[id]?.env || {};
+    const values = {};
+    for (const k of keys) {
+      const plain = installed[k] || retained[k] || entryEnv[k] || "";
+      // The retained copy only ever holds values Crow generated; anything else was typed.
+      if (plain) values[k] = { plain, origin: retained[k] && retained[k] === plain ? "generated" : "typed" };
+    }
+    n += await backfillKeychainEntries(id, manifest, values, { log });
+  }
+  return n;
+}
+
 export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, run: runner = run, skillMode = skillSyncMode(), skillLedger = null, log = (m) => console.log(m) } = {}) {
   const repaired = [];
   const errors = [];
@@ -1237,6 +1268,9 @@ function readJsonSafe(path, fallback) {
 /** Write JSON file (creates parent dirs) */
 function writeJsonSafe(path, data) {
   mkdirSync(dirname(path), { recursive: true });
+  // mcp-addons.json carries MCP children's secrets (generated keys reach their MCP entry
+  // here): always written atomically at mode 600, whatever the umask or the old file's mode.
+  if (path === MCP_ADDONS_PATH) { writePrivateFile(path, JSON.stringify(data, null, 2)); return; }
   writeFileSync(path, JSON.stringify(data, null, 2));
 }
 
@@ -2509,7 +2543,29 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     const reqEnv = stripGeneratedKeys(manifest, envVars);
     let composeTextForEnv = null;
     try { const cp = join(destDir, "docker-compose.yml"); if (existsSync(cp)) composeTextForEnv = readFileSync(cp, "utf8"); } catch { /* no fallbacks */ }
-    const plan = planGeneratedEnv(bundleId, manifest, { destDir, crowHome: CROW_HOME, composeText: composeTextForEnv, priorInstall: priorInstallEnv });
+    // A rebuilt machine (crow.db restored + keychain Export imported) has no .env and no
+    // retained copy: its keychain:true generated keys come back from the keychain instead of
+    // being minted again (recovery keys, queue item 30). Best-effort; values never logged.
+    const kcRestore = await keychainRestoreValues(bundleId, manifest);
+    const plan = planGeneratedEnv(bundleId, manifest, { destDir, crowHome: CROW_HOME, composeText: composeTextForEnv, priorInstall: priorInstallEnv, keychain: kcRestore.values });
+    // A key the keychain holds but cannot read (sealed with a keychain key this machine does
+    // not have: crow.db restored, Export not imported yet) is never minted over: the new
+    // value would replace that entry, and a later Import skips a bundle+key that has a
+    // readable entry, so the old key (and the data saved with it) would be lost for good.
+    const mintingKc = Object.keys(plan.minted).filter((k) => manifest.env_vars?.find((v) => v.name === k)?.keychain === true);
+    const blocked = kcRestore.failed ? mintingKc : mintingKc.filter((k) => kcRestore.unreadable.includes(k));
+    if (blocked.length > 0) {
+      // A prior install's folder (its .env holds other generated secrets) is kept as it is.
+      if (!priorInstallEnv) rmSync(destDir, { recursive: true, force: true });
+      const reason = kcRestore.failed
+        ? `Crow keychain could not be read, so ${blocked.join(", ")} was not generated (a new value could replace one saved there). Try the install again; nothing was written.`
+        : `Crow keychain holds ${blocked.join(", ")} for this extension, sealed with a keychain key this machine does not have. Import your keychain Export first (Settings → Passwords → Import), then install again. To start fresh instead, delete the old saved password(s) there (this needs a dashboard password or two-factor sign-in).`;
+      appendLog(job, reason);
+      return { ok: false, reason };
+    }
+    if (plan.restored.length > 0) appendLog(job, `Restored ${plan.restored.length} key(s) from Crow keychain (Settings → Passwords): ${plan.restored.join(", ")}`);
+    if (plan.replaced.length > 0) appendLog(job, `${plan.replaced.join(", ")} was the example value once published in Crow's repository: a new key was generated, and the old one kept in its previous-key slot so data saved with it still opens`);
+    if (plan.replaceSkipped?.length > 0) appendLog(job, `${plan.replaceSkipped.join(", ")} is still the example value once published in Crow's repository, but its previous-key slot already holds another key, so it was left as it is. Open that data, clear the previous-key slot in Configure, then reinstall.`);
     const generated = plan.env;
     const writeEnv = { ...(reqEnv || {}), ...generated };
     let installEnv = writeEnv;

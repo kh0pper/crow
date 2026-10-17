@@ -6,7 +6,7 @@
  *   - internal machine secrets (DB/Redis passwords, app signing keys, JWT/OTP/VAPID, shared
  *     runner secrets) carry `generate` — never a typed field
  *   - every survey F1 key is generated, or exempt with a written reason
- *   - every generated key of a docker bundle is consumed by its compose file
+ *   - every generated key is consumed by its compose file or its MCP server
  *   - every required human field has a description
  *   - optional fields with a default fold under "Advanced" (bundle-env-form.js)
  *   - the fediverse bundles carry no dead per-bundle S3 fields
@@ -81,8 +81,6 @@ const INTERNAL_SECRET_PATTERNS = [
  * entry needs a reason a reviewer would accept.
  */
 const EXEMPT = {
-  "campaigns:CROW_CAMPAIGNS_ENCRYPTION_KEY": "data-at-rest key for an MCP-server bundle (no compose); losing it loses the data, so generation waits for the recovery-key decision (survey §5 Q5)",
-  "tax:CROW_TAX_ENCRYPTION_KEY": "data-at-rest key for an MCP-server bundle (no compose); losing it loses the data, so generation waits for the recovery-key decision (survey §5 Q5)",
   "crowdsec:CROWDSEC_API_KEY": "minted by `cscli bouncers add` after first boot and read by the MCP/panel from process.env, not by compose — a post-install hook, not pre-generation (survey §1.3)",
   "frigate:FRIGATE_RTSP_PASSWORD": "the operator's camera RTSP password, substituted into config.yml camera URLs ({FRIGATE_RTSP_PASSWORD}) — human input, not an internal secret",
   "lemmy:LEMMY_JWT": "an admin login JWT obtained from the running app after the admin registers (survey F2), not a value Crow can invent",
@@ -140,13 +138,14 @@ test("the internal-secret patterns do not swallow human credentials", () => {
   }
 });
 
-test("every generated key of a docker bundle is consumed by its compose file", () => {
+test("every generated key is consumed: by its compose file, or by its MCP server (server.envKeys)", () => {
   for (const { dir, m } of MANIFESTS) {
     const keys = S.generatedEnvKeys(m);
     if (keys.length === 0) continue;
     const text = composeText(dir);
-    assert.ok(text, `${dir}: generated keys only make sense for a compose bundle`);
-    const consumed = B.composeConsumedKeys(text);
+    // An MCP-server bundle (campaigns, tax: their data keys) has no compose file: its MCP
+    // entry is the only consumer, so every generated key must be in server.envKeys.
+    const consumed = text ? B.composeConsumedKeys(text) : { keys: new Set() };
     // Consumed = interpolated by the compose file, or listed in server.envKeys (the
     // installer puts those into this instance's MCP entry). Explicit interpolation only:
     // an env_file .env would make `consumed.all` pass vacuously.

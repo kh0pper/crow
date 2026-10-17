@@ -1,7 +1,7 @@
 {
   "id": "campaigns",
   "name": "Campaigns",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Social media campaign manager — draft, schedule, and publish posts across platforms (starting with Reddit)",
   "type": "mcp-server",
   "author": "Crow",
@@ -22,9 +22,12 @@
   "env_vars": [
     {
       "name": "CROW_CAMPAIGNS_ENCRYPTION_KEY",
-      "description": "AES-256-GCM encryption key for Reddit credentials (generate with: openssl rand -base64 32)",
+      "description": "Key that encrypts your saved Reddit credentials (AES-256-GCM). Crow generates it at install and saves it in Settings → Passwords (this machine only); a reinstall takes it back from the keychain. Without it, re-enter the Reddit credentials.",
       "required": true,
-      "secret": true
+      "secret": true,
+      "generate": "secret",
+      "keychain": true,
+      "keychain_label": "data encryption key"
     }
   ],
   "notes": "12 MCP tools for social media campaign management. Reddit support via snoowrap. Credentials encrypted at rest with AES-256-GCM. Dashboard panel with approval workflow."
