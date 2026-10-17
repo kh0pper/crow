@@ -24,7 +24,7 @@ const { createDbClient } = await import(pathToFileURL(join(serverDir, "db.js")).
 const { encrypt, decrypt } = await import(pathToFileURL(join(serverDir, "crypto.js")).href);
 const { createRedditClient, testAuth } = await import(pathToFileURL(join(serverDir, "reddit-client.js")).href);
 
-const ENCRYPTION_KEY = process.env.CROW_CAMPAIGNS_ENCRYPTION_KEY;
+const { campaignsKey } = await import(pathToFileURL(join(serverDir, "key.js")).href);
 
 /**
  * @param {Function} authMiddleware - Dashboard auth middleware
@@ -228,6 +228,7 @@ export default function campaignsRouter(authMiddleware) {
   // --- Credentials: save (encrypt + validate) ---
   router.post("/api/credentials", async (req, res) => {
     try {
+      const ENCRYPTION_KEY = campaignsKey();
       if (!ENCRYPTION_KEY) return res.status(500).json({ error: "CROW_CAMPAIGNS_ENCRYPTION_KEY not set" });
 
       const { platform, username, client_id, client_secret, password } = req.body;

@@ -10,7 +10,7 @@
  *  - the optional vault copy uses the typed vault credentials once, then drops them.
  */
 import { createDbClient, auditLog } from "../../db.js";
-import { keychainGeneratedKeys, keychainEligibleKeys, expandKeychainTemplate } from "../bundle-env-secrets.js";
+import { keychainGeneratedKeys, keychainEligibleKeys, expandKeychainTemplate, isReplacedValue } from "../bundle-env-secrets.js";
 import { createNotification } from "../../shared/notifications.js";
 import { saveExtensionSecret, reactivateBundleEntries, hasExtensionEntry, markBundleRemoved, ensureWriteKey, listEntries, openEntrySecret } from "./store.js";
 import { loadKeychainKey } from "./key.js";
@@ -214,7 +214,8 @@ export const BACKFILL_SETTING = "keychain_backfilled_keys";
 
 export async function backfillKeychainEntries(bundleId, manifest, values, { log = () => {} } = {}) {
   const specs = new Map((manifest?.env_vars || []).map((v) => [v.name, v]));
-  const todo = keychainGeneratedKeys(manifest).filter((k) => !specs.get(k)?.store_as && values?.[k]?.plain);
+  // Never a publicly known value (replace_values_sha256): the next install replaces it.
+  const todo = keychainGeneratedKeys(manifest).filter((k) => !specs.get(k)?.store_as && values?.[k]?.plain && !isReplacedValue(specs.get(k), values[k].plain));
   if (todo.length === 0) return 0;
   let db;
   let saved = 0;

@@ -70,6 +70,13 @@ export function generatedEnvKeys(manifest) {
     .map((v) => v.name);
 }
 
+/** Whether `value` is one the manifest lists as publicly known (sha256 of the trimmed value). */
+export function isReplacedValue(spec, value) {
+  const list = spec?.replace_values_sha256;
+  if (!Array.isArray(list) || typeof value !== "string" || value === "") return false;
+  return list.includes(createHash("sha256").update(value.trim()).digest("hex"));
+}
+
 export function newSecretValue(kind = "secret") {
   if (kind === "laravel_key") return `base64:${randomBytes(32).toString("base64")}`;
   return randomBytes(32).toString("base64url");
@@ -143,7 +150,7 @@ export function keychainEligibleKeys(manifest) {
  */
 export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, composeText = null, priorInstall = false, keychain = null }) {
   const keys = generatedEnvKeys(manifest);
-  if (keys.length === 0) return { env: {}, minted: {}, reusedPlain: {}, restored: [], persist() {} };
+  if (keys.length === 0) return { env: {}, minted: {}, reusedPlain: {}, restored: [], replaced: [], replaceSkipped: [], persist() {} };
   if (typeof bundleId !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(bundleId) || bundleId.length > 64) {
     throw new Error(`Invalid bundle ID: ${JSON.stringify(bundleId)}`);
   }
@@ -162,13 +169,15 @@ export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, compos
   // keychain may not hold them, and the form no longer shows the field — see install-hooks.
   const reusedPlain = {};
   const restored = [];
+  const replaced = [];
+  const replaceSkipped = [];
   const existingFor = (k) => installed[k] || retained[k] || legacy[k] || "";
   // Private halves first, so a public half can be derived from (or minted with) its pair.
   const order = [...keys].sort((a, b) => (byName.get(a)?.generate === "vapid_public_key") - (byName.get(b)?.generate === "vapid_public_key"));
   const pairs = {};
   for (const k of order) {
     const spec = byName.get(k) || {};
-    const existing = existingFor(k);
+    let existing = existingFor(k);
     if (spec.generate === "vapid_public_key") {
       const priv = env[spec.pair];
       if (!priv || byName.get(spec.pair)?.generate !== "vapid_private_key") {
@@ -179,7 +188,20 @@ export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, compos
       env[k] = pairs[spec.pair] || vapidPublicFromPrivate(priv) || existing;
       continue;
     }
-    const fromKeychain = !existing && spec.keychain === true && keychain && typeof keychain[k] === "string" && keychain[k] !== "" ? keychain[k] : "";
+    // A value once published in a repo example (env_vars[].replace_values_sha256, e.g. tax's
+    // old .env.example key) is never kept: a new key is generated and the old one moves to
+    // the previous_key slot, so data saved with it still opens and is re-encrypted.
+    if (existing && isReplacedValue(spec, existing)) {
+      const prevSlot = spec.previous_key;
+      if (prevSlot && !installed[prevSlot] && !retained[prevSlot]) {
+        env[prevSlot] = existing;
+        replaced.push(k);
+        existing = "";
+      } else {
+        replaceSkipped.push(k);
+      }
+    }
+    const fromKeychain = !existing && spec.keychain === true && !isReplacedValue(spec, keychain?.[k]) && keychain && typeof keychain[k] === "string" && keychain[k] !== "" ? keychain[k] : "";
     if (fromKeychain) {
       // The keychain holds the plaintext; a store_as key gets a fresh hash of it (any hash
       // of the same plaintext verifies). Its entry exists, so nothing is saved again.
@@ -216,7 +238,7 @@ export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, compos
         formatEnvLines({ ...retained, ...env }),
     );
   };
-  return { env, minted, reusedPlain, restored, persist };
+  return { env, minted, reusedPlain, restored, replaced, replaceSkipped, persist };
 }
 
 /**

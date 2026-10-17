@@ -780,9 +780,11 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
   const topFiles = isDocker
     ? ["manifest.json", "settings-section.js", "package.json", "package-lock.json"]
     : ["manifest.json", "package.json", "package-lock.json", "pyproject.toml", "uv.lock", "settings-section.js", "main.py", "run.sh", "config.py"];
+  // engine/ + pdf/: tax's calculator, ingest and form filler (its panel imports the
+  // installed engine/, so a version bump must ship it with the panel).
   const dirs = isDocker
     ? ["server", "panel", "skills"]
-    : ["server", "panel", "skills", "curriculum", "public", "scripts", "templates", "routes", "config", "src"];
+    : ["server", "panel", "skills", "curriculum", "public", "scripts", "templates", "routes", "config", "src", "engine", "pdf"];
   // Never copied for ANY type: docker-compose.yml, Dockerfile, entrypoint.sh,
   // .env*, node_modules/, data/ — simply absent from both lists above. The ONE
   // exception is a docker bundle's explicit opt-in, manifest.refreshFiles
@@ -2562,6 +2564,8 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       return { ok: false, reason };
     }
     if (plan.restored.length > 0) appendLog(job, `Restored ${plan.restored.length} key(s) from Crow keychain (Settings → Passwords): ${plan.restored.join(", ")}`);
+    if (plan.replaced.length > 0) appendLog(job, `${plan.replaced.join(", ")} was the example value once published in Crow's repository: a new key was generated, and the old one kept in its previous-key slot so data saved with it still opens`);
+    if (plan.replaceSkipped?.length > 0) appendLog(job, `${plan.replaceSkipped.join(", ")} is still the example value once published in Crow's repository, but its previous-key slot already holds another key, so it was left as it is. Open that data, clear the previous-key slot in Configure, then reinstall.`);
     const generated = plan.env;
     const writeEnv = { ...(reqEnv || {}), ...generated };
     let installEnv = writeEnv;

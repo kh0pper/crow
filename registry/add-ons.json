@@ -745,7 +745,7 @@
     {
       "id": "campaigns",
       "name": "Campaigns",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Social media campaign manager — draft, schedule, and publish posts across platforms (starting with Reddit)",
       "type": "mcp-server",
       "author": "Crow",
@@ -780,9 +780,12 @@
       "env_vars": [
         {
           "name": "CROW_CAMPAIGNS_ENCRYPTION_KEY",
-          "description": "AES-256-GCM encryption key for Reddit credentials (generate with: openssl rand -base64 32)",
+          "description": "Key that encrypts your saved Reddit credentials (AES-256-GCM). Crow generates it at install and saves it in Settings → Passwords (this machine only); a reinstall takes it back from the keychain. Without it, re-enter the Reddit credentials.",
           "required": true,
-          "secret": true
+          "secret": true,
+          "generate": "secret",
+          "keychain": true,
+          "keychain_label": "data encryption key"
         }
       ],
       "notes": "12 MCP tools for social media campaign management. Reddit support via snoowrap. Credentials encrypted at rest with AES-256-GCM. Dashboard panel with approval workflow.",
@@ -5905,7 +5908,7 @@
     {
       "id": "tax",
       "name": "Tax Filing Assistant",
-      "version": "2.0.3",
+      "version": "2.1.0",
       "description": "Prepare federal income taxes — PDF document ingestion, calculation, form generation, and guided filing. Federal returns only (no state). Supports 1040, Schedules 1/C/D/SE, Form 8889, Form 8863, and common credits. 2024 + 2025 tax years.",
       "type": "mcp-server",
       "author": "Crow",
@@ -5946,10 +5949,16 @@
         },
         {
           "name": "CROW_TAX_ENCRYPTION_KEY",
-          "description": "Passphrase that encrypts personal data at rest (SSN, names). Choose your own and keep a copy: without it saved returns can't be read. Changing it keeps the key it replaces in CROW_TAX_ENCRYPTION_KEY_PREVIOUS, and the tax server moves saved returns to the new key when it next starts. Restart it between two changes.",
+          "description": "Key that encrypts your saved returns and uploaded documents at rest. Crow generates it at install and saves it in Settings → Passwords (this machine only). Export the keychain to keep a copy: without the key, saved returns and documents can't be read on another machine. A reinstall takes it back from the keychain.",
           "required": true,
           "secret": true,
-          "previous_key": "CROW_TAX_ENCRYPTION_KEY_PREVIOUS"
+          "generate": "secret",
+          "keychain": true,
+          "keychain_label": "data encryption key",
+          "previous_key": "CROW_TAX_ENCRYPTION_KEY_PREVIOUS",
+          "replace_values_sha256": [
+            "113e3beef46e2a2ab77b0c3ea62ef37d823b82eab4f713a44af32bcdd2655365"
+          ]
         },
         {
           "name": "CROW_TAX_ENCRYPTION_KEY_PREVIOUS",
@@ -5959,7 +5968,7 @@
         }
       ],
       "webUI": null,
-      "notes": "Federal returns only — no state income tax support. Supports MFJ, Single, HoH filing. 2025 tax year. Generates filled IRS PDFs ready to mail and step-by-step guided filing instructions. PII is encrypted at rest. Not a substitute for professional tax advice.",
+      "notes": "Federal returns only — no state income tax support. Supports MFJ, Single, HoH filing. 2025 tax year. Generates filled IRS PDFs ready to mail and step-by-step guided filing instructions. Saved returns and uploaded documents are encrypted at rest with a key Crow generates and keeps in Settings → Passwords; the figures read from documents (shown on the Documents tab) are stored unencrypted in Crow's database. Documents uploaded before tax 2.1.0 are encrypted when the dashboard next starts; plain copies may remain in earlier backups or on the disk until overwritten. Not a substitute for professional tax advice.",
       "official": true
     },
     {

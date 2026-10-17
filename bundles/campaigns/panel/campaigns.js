@@ -67,7 +67,7 @@ export default {
       }
 
       if (action === "save_creds") {
-        const ENCRYPTION_KEY = process.env.CROW_CAMPAIGNS_ENCRYPTION_KEY;
+        const ENCRYPTION_KEY = (await import(pathToFileURL(join(serverDir, "key.js")).href)).campaignsKey();
         if (!ENCRYPTION_KEY) {
           return res.redirectAfterPost("/dashboard/campaigns?view=setup&error=CROW_CAMPAIGNS_ENCRYPTION_KEY+not+set");
         }
