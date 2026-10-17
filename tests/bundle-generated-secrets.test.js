@@ -65,6 +65,9 @@ const EXPECT = [
   { id: "mastodon", key: "MASTODON_AR_ENCRYPTION_KEY_DERIVATION_SALT", propagate: false },
   { id: "mastodon", key: "MASTODON_AR_ENCRYPTION_PRIMARY_KEY", propagate: false },
   { id: "peertube", key: "PEERTUBE_SECRET", propagate: false },
+  { id: "mastodon", key: "MASTODON_DB_PASSWORD", propagate: false },
+  { id: "pixelfed", key: "PIXELFED_DB_PASSWORD", propagate: false },
+  { id: "peertube", key: "PEERTUBE_DB_PASSWORD", propagate: false },
 ];
 
 test("each key is generated, keychain-saved, and propagated only where an MCP child reads it", () => {

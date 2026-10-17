@@ -81,12 +81,38 @@ test("the export fingerprints are local: not in the sync allowlist", () => {
   assert.equal(isSyncable(R.LAST_EXPORT_SETTING), false);
 });
 
-test("the export and import routes record the reminder state and drop the health cache", async () => {
-  const src = (await import("node:fs")).readFileSync(new URL("../servers/gateway/keychain/api.js", import.meta.url), "utf8");
-  const exportRoute = src.slice(src.indexOf("/export`"), src.indexOf("/import`"));
-  assert.match(exportRoute, /recordKeychainExport\(db, key\.id\)/);
-  assert.ok(exportRoute.indexOf("recordKeychainExport") > exportRoute.indexOf("sealExport"), "only after the file is sealed");
-  assert.match(exportRoute, /invalidateHealthCache\(\)/);
-  const importRoute = src.slice(src.indexOf("/import`"), src.indexOf("/vault-save`"));
-  assert.match(importRoute, /recordKeychainImport\(db, ikey\.id, ids\)/);
+test("an entry of a removed extension is in the Export too: reinstalling it does not raise the reminder", async () => {
+  await K.saveExtensionSecret(db, key, { bundleId: "peertube", envKey: "PEERTUBE_SECRET", label: "PeerTube — server secret", secret: "pt-" + "p".repeat(40), origin: "generated" });
+  await K.markBundleRemoved(db, "peertube");
+  await R.recordKeychainExport(db, key.id);
+  await K.reactivateBundleEntries(db, "peertube", ["PEERTUBE_SECRET"]);
+  assert.equal(await R.unexportedCount(db, key.id), 0);
+});
+
+test("the real export + import routes record the reminder state (HTTP, injected re-auth gate)", async () => {
+  const express = (await import("express")).default;
+  const { keychainApiRouter } = await import("../servers/gateway/keychain/api.js");
+  const gate = { method: async () => "password", isGranted: () => true, expiresAt: () => null, verify: async () => ({ ok: true }) };
+  const app = express();
+  app.use(express.json({ limit: "5mb" }));
+  app.use((req, res, next) => { req.dashboardSession = "test-session"; next(); });
+  app.use(keychainApiRouter({ gate, openDb: () => createDbClient() }));
+  const server = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
+  try {
+    const url = (p) => `http://127.0.0.1:${server.address().port}/dashboard/keychain/api${p}`;
+    await K.saveExtensionSecret(db, key, { bundleId: "romm", envKey: "ROMM_AUTH_SECRET_KEY", label: "RomM — secret", secret: "rm-" + "r".repeat(40), origin: "generated" });
+    assert.ok((await R.unexportedCount(db, key.id)) > 0);
+    const ex = await fetch(url("/export"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ passphrase: "a long export passphrase" }) });
+    assert.equal(ex.status, 200);
+    const file = await ex.json();
+    assert.equal(await R.unexportedCount(db, key.id), 0, "everything readable is in that Export");
+    HS.invalidateHealthCache();
+    assert.equal((await signal()).issue, null);
+    // Import into a fresh keychain row set: what comes in is in the file, so it never counts.
+    await db.execute("DELETE FROM crow_keychain WHERE bundle_id = 'romm'");
+    const im = await fetch(url("/import"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ file, passphrase: "a long export passphrase" }) });
+    assert.equal(im.status, 200);
+    assert.equal((await im.json()).imported, 1);
+    assert.equal(await R.unexportedCount(db, key.id), 0);
+  } finally { server.close(); }
 });

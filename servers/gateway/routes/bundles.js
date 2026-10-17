@@ -2550,10 +2550,14 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     // not have: crow.db restored, Export not imported yet) is never minted over: the new
     // value would replace that entry, and a later Import skips a bundle+key that has a
     // readable entry, so the old key (and the data saved with it) would be lost for good.
-    const blocked = Object.keys(plan.minted).filter((k) => kcRestore.unreadable.includes(k));
+    const mintingKc = Object.keys(plan.minted).filter((k) => manifest.env_vars?.find((v) => v.name === k)?.keychain === true);
+    const blocked = kcRestore.failed ? mintingKc : mintingKc.filter((k) => kcRestore.unreadable.includes(k));
     if (blocked.length > 0) {
-      rmSync(destDir, { recursive: true, force: true });
-      const reason = `Crow keychain holds ${blocked.join(", ")} for this extension, sealed with a keychain key this machine does not have. Import your keychain Export first (Settings → Passwords → Import), then install again. To start fresh instead, delete the old saved password(s) there.`;
+      // A prior install's folder (its .env holds other generated secrets) is kept as it is.
+      if (!priorInstallEnv) rmSync(destDir, { recursive: true, force: true });
+      const reason = kcRestore.failed
+        ? `Crow keychain could not be read, so ${blocked.join(", ")} was not generated (a new value could replace one saved there). Try the install again; nothing was written.`
+        : `Crow keychain holds ${blocked.join(", ")} for this extension, sealed with a keychain key this machine does not have. Import your keychain Export first (Settings → Passwords → Import), then install again. To start fresh instead, delete the old saved password(s) there (this needs a dashboard password or two-factor sign-in).`;
       appendLog(job, reason);
       return { ok: false, reason };
     }
