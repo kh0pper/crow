@@ -29,16 +29,27 @@ async function readState(db) {
   return { at: null, fp: {} };
 }
 
-async function activeRows(db, keyId, ids = null) {
+async function rows(db, keyId, { activeOnly = true, ids = null } = {}) {
   await ensureKeychainTable(db);
-  const { rows } = await db.execute({ sql: "SELECT id, secret_sealed FROM crow_keychain WHERE kind = 'extension' AND status = 'active' AND key_id = ?", args: [String(keyId || "")] });
-  return ids ? rows.filter((r) => ids.has(Number(r.id))) : rows;
+  const { rows: r } = await db.execute({ sql: `SELECT id, secret_sealed FROM crow_keychain WHERE kind = 'extension' AND key_id = ?${activeOnly ? " AND status = 'active'" : ""}`, args: [String(keyId || "")] });
+  return ids ? r.filter((x) => ids.has(Number(x.id))) : r;
+}
+const activeRows = (db, keyId, ids = null) => rows(db, keyId, { ids });
+
+/**
+ * Fingerprints of every readable extension entry (any status: the Export carries removed
+ * extensions' entries too). Take it BEFORE the Export is built, so an entry saved while it
+ * is sealed counts as not exported (a false reminder, never a false all-clear).
+ */
+export async function exportSnapshot(db, keyId) {
+  const fps = {};
+  for (const r of await rows(db, keyId, { activeOnly: false })) fps[Number(r.id)] = fp(r.secret_sealed);
+  return fps;
 }
 
-/** After an Export was sealed: every readable extension entry is in that file. */
-export async function recordKeychainExport(db, keyId, at = new Date()) {
-  const fps = {};
-  for (const r of await activeRows(db, keyId)) fps[Number(r.id)] = fp(r.secret_sealed);
+/** After an Export built from `snapshot` was sealed. */
+export async function recordKeychainExport(db, keyId, snapshot = null, at = new Date()) {
+  const fps = snapshot || (await exportSnapshot(db, keyId));
   await writeSetting(db, LAST_EXPORT_SETTING, JSON.stringify({ at: at.toISOString(), fp: fps }), { scope: "local" });
 }
 

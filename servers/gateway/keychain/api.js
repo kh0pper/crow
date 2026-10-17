@@ -18,7 +18,7 @@ import {
   exportableEntries, importEntries, ensureWriteKey,
 } from "./store.js";
 import { vaultwardenStatus, saveToVault } from "./vault-save.js";
-import { recordKeychainExport, recordKeychainImport } from "./reminder.js";
+import { recordKeychainExport, recordKeychainImport, exportSnapshot } from "./reminder.js";
 import { invalidateHealthCache } from "../dashboard/panels/nest/health-signals.js";
 
 const BASE = "/dashboard/keychain/api";
@@ -180,9 +180,10 @@ export function keychainApiRouter({
     if (passphrase.length < MIN_PASSPHRASE) return res.status(400).json({ error: `Choose a passphrase of at least ${MIN_PASSPHRASE} characters.` });
     const key = readKey();
     if (!key) return res.status(409).json(KEY_MISSING);
+    const snapshot = await exportSnapshot(db, key.id).catch(() => null);
     const entries = await exportableEntries(db, key);
     const file = await sealExport(entries, passphrase);
-    await recordKeychainExport(db, key.id).catch(() => {}); // the Nest reminder; never blocks the download
+    if (snapshot) await recordKeychainExport(db, key.id, snapshot).catch(() => {}); // the Nest reminder; never blocks the download
     invalidateHealthCache();
     await audit(db, "keychain_export", { ip: req.ip, details: { count: entries.length } });
     res.set("Content-Disposition", `attachment; filename="crow-keychain-${new Date().toISOString().slice(0, 10)}.json"`);

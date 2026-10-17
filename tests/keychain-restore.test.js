@@ -100,8 +100,9 @@ test("keychainRestoreValues: only keychain:true generated keys, only readable en
   const { values: v, unreadable } = await H.keychainRestoreValues(id, m);
   assert.deepEqual(Object.keys(v).sort(), ["DEMO_ADMIN_TOKEN", "DEMO_DATA_KEY"], "DEMO_DB_PASSWORD is never in the keychain, so never looked up");
   assert.deepEqual(unreadable, []);
+  assert.equal((await H.keychainRestoreValues(id, m)).failed, false);
   assert.equal(v.DEMO_DATA_KEY, (await entry(id, "DEMO_DATA_KEY")).plain);
-  assert.deepEqual(await H.keychainRestoreValues(id, { ...m, env_vars: [] }), { values: {}, unreadable: [] }, "a manifest with no keychain keys reads nothing");
+  assert.deepEqual(await H.keychainRestoreValues(id, { ...m, env_vars: [] }), { values: {}, unreadable: [], failed: false }, "a manifest with no keychain keys reads nothing");
 });
 
 test("machine lost → reinstall restores the SAME data key from the keychain (and does not overwrite the entry)", async () => {
@@ -150,12 +151,31 @@ test("an entry sealed with another machine's keychain key (Export not imported y
   assert.ok(again.env.DEMO_DATA_KEY);
 });
 
-test("a keychain read failure never fails the install (best-effort: it mints, as before)", async () => {
+test("a keychain read failure FAILS CLOSED: no keychain:true key is minted (it could replace an entry the read missed)", async () => {
   const id = "kcr-fail"; const m = fixture(id);
   H._setKeychainDepsForTest({ openDb: () => { throw new Error("db down"); } });
   try {
-    assert.deepEqual(await H.keychainRestoreValues(id, m), { values: {}, unreadable: [] });
+    assert.deepEqual(await H.keychainRestoreValues(id, m), { values: {}, unreadable: [], failed: true });
+    const job = B._createJobForTest(id, "install");
+    const out = await B.runInstallJob(id, {}, { job, installedSnapshot: [], consentVerified: false, manifest: m });
+    assert.equal(out.ok, false);
+    assert.match(out.reason, /could not be read.*Try the install again/);
   } finally { H._setKeychainDepsForTest(null); }
+});
+
+test("one damaged entry counts as unreadable (refused), never as 'none' (minted over)", async () => {
+  const id = "kcr-damaged"; const m = fixture(id);
+  await install(id, m);
+  const d = db();
+  try { await d.execute({ sql: "UPDATE crow_keychain SET secret_sealed = 'not-a-sealed-value' WHERE bundle_id = ? AND env_key = 'DEMO_DATA_KEY'", args: [id] }); } finally { d.close(); }
+  const r = await H.keychainRestoreValues(id, m);
+  assert.deepEqual(r.unreadable, ["DEMO_DATA_KEY"]);
+  assert.ok(r.values.DEMO_ADMIN_TOKEN, "the other entry is still read");
+  loseFiles(id);
+  const job = B._createJobForTest(id, "install");
+  const out = await B.runInstallJob(id, {}, { job, installedSnapshot: [], consentVerified: false, manifest: m });
+  assert.equal(out.ok, false);
+  assert.match(out.reason, /DEMO_DATA_KEY/);
 });
 
 test("crow_keychain stays local-only (never synced to a paired instance)", async () => {
@@ -222,4 +242,9 @@ test("boot backfill: a key kept only in an older install's .env is saved to the 
   writeFileSync(join(CROW_HOME, "bundles", id, ".env"), "DEMO_DATA_KEY=something-else-999999\n");
   await B.backfillBundleKeychain({ log: () => {} });
   assert.equal((await entry(id, "DEMO_DATA_KEY")).plain, "typed-long-ago-123456");
+  // The user deletes it in Settings → Passwords: a later boot never brings it back.
+  const d = db();
+  try { await d.execute({ sql: "DELETE FROM crow_keychain WHERE bundle_id = ? AND env_key = 'DEMO_DATA_KEY'", args: [id] }); } finally { d.close(); }
+  await B.backfillBundleKeychain({ log: () => {} });
+  assert.equal(await entry(id, "DEMO_DATA_KEY"), null, "a deleted entry stays deleted");
 });

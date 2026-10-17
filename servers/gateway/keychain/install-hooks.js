@@ -14,7 +14,8 @@ import { keychainGeneratedKeys, keychainEligibleKeys, expandKeychainTemplate } f
 import { createNotification } from "../../shared/notifications.js";
 import { saveExtensionSecret, reactivateBundleEntries, hasExtensionEntry, markBundleRemoved, ensureWriteKey, listEntries, openEntrySecret } from "./store.js";
 import { loadKeychainKey } from "./key.js";
-import { lastKeychainExport } from "./reminder.js";
+import { unexportedCount } from "./reminder.js";
+import { readSetting, writeSetting } from "../dashboard/settings/registry.js";
 import { vaultwardenStatus, saveToVault, VAULT_REASONS } from "./vault-save.js";
 
 let _override = null;
@@ -125,7 +126,7 @@ export async function recordKeychainForInstall({ bundleId, manifest, env, minted
     if (out.saved) log(`Saved ${out.saved} password(s) to Crow keychain (Settings → Passwords)`);
     if (mintedList.length && out.saved) {
       try {
-        if (!(await lastKeychainExport(db))) log("This key exists only on this machine: export your keychain (Settings → Passwords → Export) so it can be recovered if the machine is lost.");
+        if (key && (await unexportedCount(db, key.id)) > 0) log("This key exists only on this machine: export your keychain (Settings → Passwords → Export) so it can be recovered if the machine is lost.");
       } catch { /* the reminder never blocks an install */ }
     }
 
@@ -173,7 +174,7 @@ export async function recordKeychainForInstall({ bundleId, manifest, env, minted
  */
 export async function keychainRestoreValues(bundleId, manifest) {
   const keys = keychainGeneratedKeys(manifest);
-  const out = { values: {}, unreadable: [] };
+  const out = { values: {}, unreadable: [], failed: false };
   if (keys.length === 0) return out;
   let db;
   try {
@@ -182,11 +183,17 @@ export async function keychainRestoreValues(bundleId, manifest) {
     for (const e of await listEntries(db, { keyId: key?.id ?? null })) {
       if (e.kind !== "extension" || e.bundle_id !== bundleId || !keys.includes(e.env_key)) continue;
       if (!e.readable || !key) { out.unreadable.push(e.env_key); continue; }
-      const plain = await openEntrySecret(db, key, e.id);
-      if (typeof plain === "string" && plain !== "") out.values[e.env_key] = plain;
+      // A damaged entry counts as unreadable (it is never minted over), not as "none".
+      try {
+        const plain = await openEntrySecret(db, key, e.id);
+        if (typeof plain === "string" && plain !== "") out.values[e.env_key] = plain;
+        else out.unreadable.push(e.env_key);
+      } catch { out.unreadable.push(e.env_key); }
     }
   } catch {
-    return { values: {}, unreadable: [] };
+    // FAIL CLOSED: the keychain could not be read, so the caller must not mint a
+    // keychain:true key (a mint would replace an entry this read could not see).
+    return { values: {}, unreadable: [], failed: true };
   } finally {
     try { db?.close(); } catch {}
   }
@@ -203,6 +210,8 @@ export async function keychainRestoreValues(bundleId, manifest) {
  * first view (nothing new was minted). Best-effort; names only in `log`.
  * `values` = { envKey: { plain, origin } } gathered by the caller.
  */
+export const BACKFILL_SETTING = "keychain_backfilled_keys";
+
 export async function backfillKeychainEntries(bundleId, manifest, values, { log = () => {} } = {}) {
   const specs = new Map((manifest?.env_vars || []).map((v) => [v.name, v]));
   const todo = keychainGeneratedKeys(manifest).filter((k) => !specs.get(k)?.store_as && values?.[k]?.plain);
@@ -211,8 +220,18 @@ export async function backfillKeychainEntries(bundleId, manifest, values, { log 
   let saved = 0;
   try {
     db = deps().openDb();
+    // Once per bundle+key: a key the user later DELETED in Settings → Passwords is never
+    // brought back by a later boot (local setting; never synced).
+    let done = {};
+    try { done = JSON.parse((await readSetting(db, BACKFILL_SETTING)) || "{}") || {}; } catch { done = {}; }
+    const mark = async (ks) => { for (const k of ks) done[`${bundleId}:${k}`] = true; await writeSetting(db, BACKFILL_SETTING, JSON.stringify(done), { scope: "local" }); };
     const missing = [];
-    for (const k of todo) if (!(await hasExtensionEntry(db, bundleId, k))) missing.push(k);
+    const present = [];
+    for (const k of todo) {
+      if (done[`${bundleId}:${k}`]) continue;
+      if (await hasExtensionEntry(db, bundleId, k)) present.push(k); else missing.push(k);
+    }
+    if (present.length) await mark(present);
     if (missing.length === 0) return 0;
     const key = await deps().writeKey(db);
     const tEnv = templateEnv(manifest, Object.fromEntries(Object.entries(values).map(([k, v]) => [k, v.plain])));
@@ -223,6 +242,7 @@ export async function backfillKeychainEntries(bundleId, manifest, values, { log 
       await deps().audit(db, "keychain_save", { details: { entry_id: r.id, bundle_id: bundleId, env_key: k, origin: "kept", backfill: true } });
       saved++;
     }
+    await mark(missing);
     log(`${bundleId}: saved ${missing.join(", ")} to Crow keychain (kept from the existing install)`);
   } catch (err) {
     log(`${bundleId}: could not save kept keys to Crow keychain (${err?.code || err?.name || "error"})`);
