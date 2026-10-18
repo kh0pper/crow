@@ -583,9 +583,10 @@ export function createBlogServer(dbPath, options = {}) {
       artist: z.string().max(200).optional().describe("Artist/composer name"),
       tags: z.string().max(500).optional().describe("Additional comma-separated tags (songbook is auto-added)"),
       audio_key: z.string().max(500).optional().describe("S3 key for audio file"),
+      sunvox_key: z.string().max(500).optional().describe("S3 key for a SunVox project file (.sunvox/.xm/.mod) — renders an interactive practice player on the song page"),
       visibility: z.enum(["private", "public", "peers"]).optional().describe("Visibility (default: private)"),
     },
-    async ({ title, content, key, artist, tags, audio_key, visibility }) => {
+    async ({ title, content, key, artist, tags, audio_key, sunvox_key, visibility }) => {
       // Validate ChordPro content
       if (!isChordPro(content)) {
         return { content: [{ type: "text", text: "Content does not appear to be in ChordPro format. Include [Chord]lyric notation or ChordPro directives ({title:}, {key:}, {sov}/{eov}, etc.)." }], isError: true };
@@ -622,6 +623,9 @@ export function createBlogServer(dbPath, options = {}) {
       }
       if (audio_key && !content.match(/\*\*Audio:\*\*/i)) {
         finalContent = `**Audio:** storage:${audio_key}\n` + finalContent;
+      }
+      if (sunvox_key && !content.match(/\*\*SunVox:\*\*/i)) {
+        finalContent = `**SunVox:** storage:${sunvox_key}\n` + finalContent;
       }
 
       const result = await db.execute({

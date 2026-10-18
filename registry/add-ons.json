@@ -5769,8 +5769,8 @@
     {
       "id": "songbook",
       "name": "Songbook",
-      "version": "1.0.0",
-      "description": "Personal chord book — ChordPro charts, transposition, chord diagrams, setlists, audio, and peer sharing",
+      "version": "1.1.0",
+      "description": "Personal chord book — ChordPro charts, transposition, chord diagrams, setlists, audio, interactive SunVox backing tracks, and peer sharing",
       "type": "skill",
       "author": "Crow",
       "category": "media",
@@ -5780,7 +5780,8 @@
         "guitar",
         "piano",
         "songbook",
-        "chordpro"
+        "chordpro",
+        "sunvox"
       ],
       "icon": "music",
       "skills": [
@@ -5792,7 +5793,7 @@
         "min_disk_mb": 0
       },
       "webUI": null,
-      "notes": "Songs are blog posts tagged 'songbook' with ChordPro content. Adds a Songbook panel to the Crow's Nest and an AI skill for chord chart workflows.",
+      "notes": "Songs are blog posts tagged 'songbook' with ChordPro content. Adds a Songbook panel to the Crow's Nest and an AI skill for chord chart workflows. v1.1.0: interactive SunVox backing tracks — songs with a **SunVox:** storage key get a WASM practice player (transport + A/B section loop) on the song page; engine assets pinned to libsunvox 2.1.4d (MIT, see web/sunvox/LICENSE.txt; sha256: sunvox.js f088ccca15c2310e583def8b22557181429289d9da68c08546dbb828241c964e, sunvox_lib_loader.js 057ccc9d89c80d53432c661dab4441508176be6a85685995eac73b9bc70febbd, sunvox.wasm 3c27c364ff4045519fd8d57831ebf7bdc148628a3e2f60b0797ad920f9a785c1) served from /blog/songbook/lib/*.",
       "official": true
     },
     {

@@ -376,10 +376,10 @@ export function extractChords(ast) {
  * Parse song-specific metadata from post content.
  * Follows the same bold-key pattern as parsePodcastMeta.
  * @param {string} content
- * @returns {{ key: string|null, tempo: string|null, time: string|null, capo: string|null, tuning: string|null, artist: string|null, album: string|null }}
+ * @returns {{ key: string|null, tempo: string|null, time: string|null, capo: string|null, tuning: string|null, artist: string|null, album: string|null, sunvox: string|null }}
  */
 export function parseSongMeta(content) {
-  if (!content) return { key: null, tempo: null, time: null, capo: null, tuning: null, artist: null, album: null };
+  if (!content) return { key: null, tempo: null, time: null, capo: null, tuning: null, artist: null, album: null, sunvox: null };
 
   const keyMatch = content.match(/\*\*Key:\*\*\s*(.+)/i);
   const tempoMatch = content.match(/\*\*Tempo:\*\*\s*(.+)/i);
@@ -388,6 +388,7 @@ export function parseSongMeta(content) {
   const tuningMatch = content.match(/\*\*Tuning:\*\*\s*(.+)/i);
   const artistMatch = content.match(/\*\*Artist:\*\*\s*(.+)/i);
   const albumMatch = content.match(/\*\*Album:\*\*\s*(.+)/i);
+  const sunvoxMatch = content.match(/\*\*SunVox:\*\*\s*(.+)/i);
 
   return {
     key: keyMatch ? keyMatch[1].trim() : null,
@@ -397,6 +398,7 @@ export function parseSongMeta(content) {
     tuning: tuningMatch ? tuningMatch[1].trim() : null,
     artist: artistMatch ? artistMatch[1].trim() : null,
     album: albumMatch ? albumMatch[1].trim() : null,
+    sunvox: sunvoxMatch ? sunvoxMatch[1].trim() : null,
   };
 }
 

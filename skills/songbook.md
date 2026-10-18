@@ -21,7 +21,7 @@ tools:
 
 ## What It Does
 
-Manages a personal chord book built on Crow's blog. Songs are blog posts tagged "songbook" with ChordPro content. Features: ChordPro parsing, auto-transposition, chord diagrams (guitar + piano), audio attachments, setlists, and peer sharing.
+Manages a personal chord book built on Crow's blog. Songs are blog posts tagged "songbook" with ChordPro content. Features: ChordPro parsing, auto-transposition, chord diagrams (guitar + piano), audio attachments, interactive SunVox backing tracks, setlists, and peer sharing.
 
 ## ChordPro Quick Reference
 
@@ -87,6 +87,21 @@ Manages a personal chord book built on Crow's blog. Songs are blog posts tagged 
 1. Upload audio via `crow_upload_file` (S3 storage)
 2. Create or edit the song with `audio_key` parameter
 3. The audio player appears automatically on the song page
+
+### Attach a SunVox Backing Track (interactive practice player)
+
+Songs can carry a SunVox project (`.sunvox`, `.xm`, or `.mod`) that renders as an
+interactive player on the song page — transport, volume, and an **A/B section
+loop** for practicing a passage. The track loops endlessly until stopped.
+
+1. Upload the project via `crow_upload_file` (S3 storage)
+2. Create the song with `sunvox_key` parameter (or add `**SunVox:** storage:<key>` to the content of an existing song)
+3. The player appears automatically; its engine (~800KB WASM) loads lazily on first Play
+
+Notes:
+- Backing tracks play in their **recorded key** — the `?key=` transpose control does NOT transpose them. When a key override is active, the song page shows a "Track stays in <key>" badge.
+- Need a backing track that doesn't exist yet? The **sunvox-studio** bundle can compose one (`sunvox_compose` → `sunvox_render`), or convert/render `.xm`/`.mod` files.
+- Unlike plain audio, the project file stays interactive: tempo-neutral practice loops instead of a fixed recording.
 
 ## Music Theory Assistant
 

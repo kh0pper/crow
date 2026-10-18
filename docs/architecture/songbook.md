@@ -11,10 +11,11 @@ Songs are **blog posts tagged "songbook"** — not a separate entity. This means
 ```
 servers/blog/chordpro.js         — ChordPro parser + transpose engine
 servers/blog/chord-diagrams.js   — SVG chord diagram generator
-servers/blog/songbook-renderer.js — Song page HTML rendering
-servers/gateway/routes/songbook.js — Public routes
+servers/blog/songbook-renderer.js — Song page HTML rendering (+ SunVox player widget)
+servers/gateway/routes/songbook.js — Public routes (+ /blog/songbook/lib/* engine assets)
 servers/gateway/dashboard/panels/songbook.js — Nest panel
 skills/songbook.md               — AI skill file
+bundles/songbook/web/sunvox/     — Pinned libsunvox JS+WASM player engine (MIT, 2.1.4d)
 ```
 
 ## Content Flow
@@ -27,6 +28,15 @@ User pastes chords/lyrics
   → Transposition engine (if key override via ?key= param)
   → Songbook renderer → HTML (chords-over-lyrics + diagrams + audio)
   → Served at /blog/songbook/:slug
+```
+
+Songs with a `**SunVox:** storage:<key>` meta line additionally get the interactive player:
+
+```
+Song page loads (no engine yet — lazy)
+  → first Play press → loads /blog/songbook/lib/{sunvox.js,sunvox_lib_loader.js,sunvox.wasm}
+  → fetch track bytes via /blog/media/<key> → sv_load_from_memory (WASM, in-browser)
+  → transport + A/B loop via sv_play/sv_pause/sv_rewind/sv_get_current_line
 ```
 
 ## ChordPro Engine (`chordpro.js`)
@@ -105,6 +115,16 @@ Song metadata uses the same **bold-key** pattern as podcasts:
 
 `parseSongMeta()` follows the same regex pattern as `parsePodcastMeta()`. When a post is tagged both "songbook" and "podcast", both parsers read the same content without conflict.
 
+`**SunVox:** storage:<key>` (parsed by `parseSongMeta().sunvox`) attaches an interactive backing track; `crow_create_song` accepts `sunvox_key` and prepends the line. Only storage-backed keys are supported — the blog CSP's `connect-src 'self'` blocks cross-origin fetches.
+
+## SunVox Player (`renderSunvoxPlayer`)
+
+- **Engine**: libsunvox 2.1.4d JS+WASM (~800KB, MIT) pinned by sha256 in `bundles/songbook/manifest.json` notes; served from `/blog/songbook/lib/*` (whitelisted filenames only), loaded lazily on first Play.
+- **CSP**: song pages under `/blog/songbook` get a path-scoped `'wasm-unsafe-eval'` addition to `script-src` in the gateway security-headers middleware — WebAssembly compilation only, never `eval()`/`new Function()`. No other surface gains the directive.
+- **Practice model**: autostop off (loops endlessly), A/B loop via `sv_rewind` on an 80ms timer, line position from `sv_get_current_line`.
+- **Transposition interplay**: the player does NOT transpose; when `?key=` overrides the chart key, the renderer adds a "Track stays in \<originalKey\>" badge. Per-module `sv_set_module_relnote` transposition is a possible v2.
+- **Funnel**: `/blog` is already a public-safe funnel prefix, so the lib route needs no funnel change.
+
 ## Routes
 
 Mounted in the gateway **before** the blog's `/:slug` catch-all:
@@ -112,6 +132,7 @@ Mounted in the gateway **before** the blog's `/:slug` catch-all:
 | Route | Description |
 |-------|-------------|
 | `GET /blog/songbook` | Index page |
+| `GET /blog/songbook/lib/:file` | SunVox engine assets (exact-filename whitelist: sunvox.js, sunvox_lib_loader.js, sunvox.wasm; installed-bundle-first resolution) |
 | `GET /blog/songbook/:slug` | Song page |
 | `GET /blog/songbook/:slug?key=G` | Transposed view |
 | `GET /blog/songbook/:slug?instrument=piano` | Piano diagrams |

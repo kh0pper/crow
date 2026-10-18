@@ -346,6 +346,11 @@ app.use(async (req, res, next) => {
   // Content Security Policy — allows Google Fonts (dashboard), podcast audio,
   // data URIs, and (when configured) the storage endpoint so Nest panels can
   // render presigned-URL thumbnails for MinIO-backed assets.
+  // Songbook pages additionally get 'wasm-unsafe-eval' — the SunVox backing-track
+  // player compiles a pinned WASM engine (bundles/songbook/web/sunvox/). This is
+  // narrower than 'unsafe-eval': it permits WebAssembly compilation only, never
+  // eval()/new Function(). Scoped to /blog/songbook so no other surface gains it.
+  const wasmEval = req.path.startsWith("/blog/songbook") ? " 'wasm-unsafe-eval'" : "";
   const storageOrigin = await resolveCspStorageOrigin();
   const imgSrc = storageOrigin
     ? `img-src 'self' data: blob: ${storageOrigin}`
@@ -354,7 +359,7 @@ app.use(async (req, res, next) => {
     "default-src 'self'",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src https://fonts.gstatic.com",
-    "script-src 'self' 'unsafe-inline'",
+    `script-src 'self' 'unsafe-inline'${wasmEval}`,
     imgSrc,
     "media-src 'self' https: blob:",
     "connect-src 'self'",

@@ -276,6 +276,16 @@ export function renderSongPage(post, options = {}) {
       : podcastMeta.audioUrl;
   }
 
+  // SunVox backing track (interactive player). Only storage-backed keys are
+  // supported: the blog CSP's connect-src 'self' blocks cross-origin fetches.
+  let sunvoxUrl = null;
+  if (songMeta.sunvox) {
+    const svRaw = songMeta.sunvox;
+    if (svRaw.startsWith("storage:") || !/^https?:\/\//i.test(svRaw)) {
+      sunvoxUrl = `/blog/media/${encodeURIComponent(svRaw.replace("storage:", ""))}`;
+    }
+  }
+
   const baseUrl = `/blog/songbook/${escapeHtml(post.slug)}`;
 
   // Compute theme classes from blog settings
@@ -328,6 +338,9 @@ export function renderSongPage(post, options = {}) {
         ${ast.meta.capo ? `<span class="pill">Capo <span class="val">${escapeHtml(ast.meta.capo)}</span></span>` : ""}
         ${ast.meta.time ? `<span class="pill">${escapeHtml(ast.meta.time)} time</span>` : ""}
         ${ast.meta.tempo ? `<span class="pill">${escapeHtml(ast.meta.tempo)} bpm</span>` : ""}
+        ${sunvoxUrl && targetKey && originalKey && targetKey !== originalKey
+          ? `<span class="pill pill-warn" title="The SunVox backing track always plays in its recorded key">Track stays in ${escapeHtml(originalKey)}</span>`
+          : ""}
       </div>
     </div>
   </div>`;
@@ -383,6 +396,11 @@ export function renderSongPage(post, options = {}) {
       <a href="${escapeHtml(audioUrl)}" download class="download-link">&#8595; Download</a>
     </div>
   </div>`;
+  }
+
+  // SunVox interactive backing-track player (engine loads lazily on first Play)
+  if (sunvoxUrl) {
+    html += renderSunvoxPlayer(sunvoxUrl);
   }
 
   // Tags
@@ -630,4 +648,158 @@ export function renderSetlistPage(setlist, items, options = {}) {
 </div>
 </body>
 </html>`;
+}
+
+/**
+ * SunVox interactive backing-track player card.
+ *
+ * The engine (~800KB JS+WASM, MIT-licensed libsunvox 2.1.4d pinned in
+ * bundles/songbook/web/sunvox/) loads LAZILY on the first Play press, from
+ * /blog/songbook/lib/*. Song pages carry a path-scoped 'wasm-unsafe-eval'
+ * CSP carve-out in the gateway for the WASM compile.
+ *
+ * Practice features: transport (play/pause/stop), volume, line position,
+ * A/B section loop (sv_rewind on a timer). The track loops endlessly
+ * (autostop off) until stopped — it is a practice backing track.
+ * The inline script deliberately avoids backticks/`${` so it can live in
+ * this template-literal file.
+ */
+export function renderSunvoxPlayer(url) {
+  const safeUrl = escapeHtml(url);
+  return `
+  <style>
+  .sv-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }
+  .sv-btn { background: var(--crow-surface-2, #2a2a35); color: var(--crow-text, #eee); border: 1px solid var(--crow-border, #444); border-radius: 8px; padding: 7px 14px; font-size: 14px; cursor: pointer; }
+  .sv-btn:hover:not(:disabled) { border-color: var(--crow-accent, #7aa2f7); }
+  .sv-btn:disabled { opacity: 0.4; cursor: default; }
+  .sv-btn.sv-active { border-color: var(--crow-accent, #7aa2f7); color: var(--crow-accent, #7aa2f7); }
+  .sv-vol { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--crow-text-dim, #aaa); }
+  .sv-vol input { width: 90px; }
+  .sv-pos { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--crow-text-dim, #aaa); min-width: 80px; }
+  .sv-meta { font-size: 12px; font-weight: normal; color: var(--crow-text-dim, #aaa); margin-left: 8px; }
+  .sv-status { margin-top: 8px; font-size: 13px; color: var(--crow-text-dim, #aaa); }
+  .sv-loopgroup { display: flex; gap: 6px; align-items: center; border-left: 1px solid var(--crow-border, #444); padding-left: 12px; }
+  .sv-looplabel { font-size: 12px; color: var(--crow-text-dim, #aaa); }
+  .pill-warn { border-color: #d9a03f !important; color: #d9a03f !important; }
+  </style>
+  <div class="player-card" id="svPlayer" data-src="${safeUrl}">
+    <div class="player-title">SunVox Backing Track<span class="sv-meta" id="svMeta"></span></div>
+    <div class="sv-controls">
+      <button type="button" class="sv-btn" id="svPlay">&#9654; Play</button>
+      <button type="button" class="sv-btn" id="svStop" disabled>&#9632; Stop</button>
+      <label class="sv-vol">Vol <input type="range" id="svVol" min="0" max="256" value="220"></label>
+      <span class="sv-pos" id="svPos">&ndash; / &ndash;</span>
+      <span class="sv-loopgroup">
+        <span class="sv-looplabel">Loop</span>
+        <button type="button" class="sv-btn" id="svLoopA" disabled>A</button>
+        <button type="button" class="sv-btn" id="svLoopB" disabled>B</button>
+        <button type="button" class="sv-btn" id="svLoopClear" disabled>&#10005;</button>
+      </span>
+    </div>
+    <div class="sv-status" id="svStatus">Press Play to load the engine (~800KB, once per visit).</div>
+    <a href="${safeUrl}" download class="download-link" style="margin-top:8px;display:inline-block">&#8595; Download project</a>
+  </div>
+  <script>
+  (function () {
+    var card = document.getElementById("svPlayer");
+    if (!card) return;
+    var src = card.getAttribute("data-src");
+    var LIB = "/blog/songbook/lib/";
+    var $ = function (id) { return document.getElementById(id); };
+    var statusEl = $("svStatus"), playBtn = $("svPlay"), stopBtn = $("svStop"), volEl = $("svVol"),
+        posEl = $("svPos"), metaEl = $("svMeta"), aBtn = $("svLoopA"), bBtn = $("svLoopB"), clrBtn = $("svLoopClear");
+    var ready = false, loading = null, timer = null, loopA = null, loopB = null, totalLines = 0, started = false;
+
+    function setStatus(s) { statusEl.textContent = s; }
+    function loadScript(u) {
+      return new Promise(function (res, rej) {
+        var s = document.createElement("script");
+        s.src = u; s.onload = res; s.onerror = function () { rej(new Error("cannot load " + u)); };
+        document.head.appendChild(s);
+      });
+    }
+    function boot() {
+      if (loading) return loading;
+      setStatus("Loading engine\u2026");
+      loading = loadScript(LIB + "sunvox.js")
+        .then(function () { return loadScript(LIB + "sunvox_lib_loader.js"); })
+        .then(function () { return svlib; })
+        .then(function (Module) {
+          svlib = Module;
+          var ver = sv_init(null, 44100, 2, 0);
+          if (ver < 0) throw new Error("sv_init " + ver);
+          if (sv_open_slot(0) < 0) throw new Error("sv_open_slot failed");
+          return fetch(src).then(function (r) {
+            if (!r.ok) throw new Error("HTTP " + r.status + " fetching the track");
+            return r.arrayBuffer();
+          });
+        })
+        .then(function (ab) {
+          var rc = sv_load_from_memory(0, new Uint8Array(ab));
+          if (rc !== 0) throw new Error("load failed (rc " + rc + ")");
+          sv_set_autostop(0, 0); /* practice track: loop endlessly */
+          sv_volume(0, Number(volEl.value));
+          totalLines = sv_get_song_length_lines(0);
+          var name = sv_get_song_name(0) || "";
+          metaEl.textContent = (name ? name + " \u00b7 " : "") + sv_get_song_bpm(0) + " BPM \u00b7 " + totalLines + " lines";
+          ready = true;
+          playBtn.disabled = false; aBtn.disabled = false; bBtn.disabled = false;
+          setStatus("Ready \u2014 loops until stopped. Set A/B around a section to practice it.");
+        })
+        .catch(function (err) {
+          loading = null;
+          playBtn.disabled = false;
+          setStatus("Player failed: " + err.message + " \u2014 use the download link instead.");
+        });
+      return loading;
+    }
+    function tick() {
+      var cur = sv_get_current_line(0);
+      posEl.textContent = (cur + 1) + " / " + totalLines;
+      if (loopA !== null && loopB !== null && loopB > loopA && cur >= loopB) sv_rewind(0, loopA);
+    }
+    function startTimer() { if (!timer) timer = setInterval(tick, 80); }
+    function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
+
+    playBtn.disabled = true; /* re-enabled when the engine is ready */
+    playBtn.addEventListener("click", function () {
+      boot().then(function () {
+        if (!ready) return;
+        if (playBtn.getAttribute("data-mode") === "playing") {
+          sv_pause(0); playBtn.setAttribute("data-mode", "paused");
+          playBtn.innerHTML = "&#9654; Play"; stopTimer();
+        } else {
+          if (!started) { sv_play_from_beginning(0); started = true; } else { sv_resume(0); }
+          playBtn.setAttribute("data-mode", "playing");
+          playBtn.innerHTML = "&#10074;&#10074; Pause"; stopBtn.disabled = false; startTimer();
+        }
+      });
+    });
+    stopBtn.addEventListener("click", function () {
+      if (!ready) return;
+      sv_stop(0); started = false; stopBtn.disabled = true;
+      playBtn.setAttribute("data-mode", "stopped"); playBtn.innerHTML = "&#9654; Play";
+      stopTimer(); posEl.textContent = "\u2013 / " + totalLines;
+    });
+    volEl.addEventListener("input", function () { if (ready) sv_volume(0, Number(volEl.value)); });
+    aBtn.addEventListener("click", function () {
+      if (!ready) return;
+      loopA = sv_get_current_line(0); aBtn.classList.add("sv-active"); aBtn.textContent = "A:" + loopA;
+      clrBtn.disabled = false;
+    });
+    bBtn.addEventListener("click", function () {
+      if (!ready) return;
+      var b = sv_get_current_line(0);
+      if (loopA === null || b <= loopA) { setStatus("Set A first, then B after it (B must be later than A)."); return; }
+      loopB = b; bBtn.classList.add("sv-active"); bBtn.textContent = "B:" + loopB;
+      clrBtn.disabled = false; setStatus("Looping lines " + loopA + "\u2013" + loopB + ".");
+    });
+    clrBtn.addEventListener("click", function () {
+      loopA = loopB = null; clrBtn.disabled = true;
+      aBtn.classList.remove("sv-active"); bBtn.classList.remove("sv-active");
+      aBtn.textContent = "A"; bBtn.textContent = "B";
+      if (ready) setStatus("Loop cleared.");
+    });
+  })();
+  </script>`;
 }
