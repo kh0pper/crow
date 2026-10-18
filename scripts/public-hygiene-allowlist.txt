@@ -45,6 +45,10 @@ phone: 525512345678
 # address as printed in the licence text its licence requires us to
 # keep verbatim (licenses/*-third-party.txt), not contacts of ours.
 email: chalkerx@gmail.com
+# SunVox studio vendored library (bundles/sunvox-studio/vendor/). The upstream
+# author's address as printed in the MIT licence text and the sunvox.h header
+# its licence requires us to keep verbatim, not contacts of ours.
+email: nightradio@gmail.com
 # Numeric constants in vega@6.4.0 build/vega.min.js (an erf/normal-quantile
 # polynomial: "e*i+6.37396220353165" and so on), read as +CC numbers.
 phone: 637396220353165
