@@ -1120,8 +1120,8 @@
     {
       "id": "design-kit",
       "name": "Design kit",
-      "version": "1.0.0",
-      "description": "Fonts, icons, styles, themes and chart and diagram rendering so bots can make artifacts that look designed. Everything is stored on this machine and works offline.",
+      "version": "1.1.0",
+      "description": "Fonts, icons, styles, themes, chart and diagram rendering, and a WASM music engine (sunvox) so bots can make artifacts that look designed and can sound. Everything is stored on this machine and works offline.",
       "type": "bundle",
       "author": "Crow",
       "category": "productivity",

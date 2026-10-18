@@ -74,7 +74,7 @@ test("design-frontend states the final guard rules and names only real __lib pat
   const text = read("skills/design-frontend.md");
   const { openKit, guardSpec } = await import("../bundles/design-kit/server/kit.js");
   const kit = openKit(KIT);
-  const all = kit.resolve(["font:lora", "icons:lucide/coffee", "css:open-props", "css:pico", "vega-embed", "mermaid"], { target: "page" });
+  const all = kit.resolve(["font:lora", "icons:lucide/coffee", "css:open-props", "css:pico", "vega-embed", "mermaid", "sunvox"], { target: "page" });
   const real = new Set(all.files.map((f) => f.to || f.path));
   for (const p of text.match(/__lib\/[A-Za-z0-9_./-]+\.(?:css|js|svg)/g)) assert.ok(real.has(p), `${p} is copied by the kit`);
   assert.match(text, /no line that is just `---`/, "Mermaid takes no front matter");

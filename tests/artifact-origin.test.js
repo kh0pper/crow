@@ -52,7 +52,7 @@ function assertBaseHeaders(r, label) {
   assert.match(csp, /(^|; )sandbox( allow-scripts)?(;|$)/, `${label}: CSP sandbox on every response`);
   assert.match(csp, /default-src 'none'/, `${label}: default-src none`);
   assert.match(csp, /connect-src 'none'/, `${label}: connect-src none`);
-  assert.doesNotMatch(csp, /unsafe-eval/, `${label}: never unsafe-eval`);
+  assert.doesNotMatch(csp, /'unsafe-eval'/, `${label}: never bare unsafe-eval (the quoted match lets 'wasm-unsafe-eval' through on scripted rows)`);
   assert.doesNotMatch(csp, /allow-same-origin|allow-top-navigation|allow-popups|allow-forms/, `${label}: no widening sandbox flags`);
   assert.equal(r.headers["x-content-type-options"], "nosniff", label);
   assert.equal(r.headers["referrer-policy"], "no-referrer", label);
@@ -228,14 +228,24 @@ test("mint refuses a dashboardOrigin that is not a bare origin (frame-ancestors 
   assert.equal(s.mint({ artifactId: "z", versionN: 1, type: "page" }).expiresAt > 0, true);
 });
 
-test("CSP table: every type has a policy, scripted types match the iframe sandbox, none allow eval or connect", () => {
+test("CSP table: every type has a policy, scripted types match the iframe sandbox, none allow bare eval or connect", () => {
   for (const type of ARTIFACT_TYPES) {
     const csp = cspFor(type, { tokenBase: "https://a.example/v/T/", frameAncestors: "https://d.example" });
     assert.match(csp, /connect-src 'none'/, type);
     assert.match(csp, /worker-src 'none'/, type);
-    assert.doesNotMatch(csp, /unsafe-eval/, type);
+    assert.doesNotMatch(csp, /'unsafe-eval'/, `${type}: never bare unsafe-eval`);
     const sandbox = csp.split("; ").find((d) => d.startsWith("sandbox"));
     assert.equal(sandbox.replace(/^sandbox ?/, ""), iframeSandboxFor(type), type);
+    // D2 (2026-10-17): the bot-scripted rows carry 'wasm-unsafe-eval' (WASM
+    // compilation only) for pinned WASM libs; every other row — including pdf
+    // (a fixed viewer bundle, no bot script) and the helper-only document row
+    // — carries no eval-family token.
+    const scriptSrc = /(?:^|; )script-src ([^;]*)/.exec(csp)?.[1] || "";
+    if (["page", "slides", "data", "map"].includes(type)) {
+      assert.ok(scriptSrc.includes("'wasm-unsafe-eval'"), `${type}: bot-scripted row allows WASM compilation`);
+    } else {
+      assert.ok(!scriptSrc.includes("wasm-unsafe-eval"), `${type}: no WASM carve-out on a fixed-content row`);
+    }
   }
   assert.doesNotMatch(cspFor("pdf", { tokenBase: "https://a.example/v/T/" }), /script-src[^;]*unsafe-inline/, "pdf: no inline script (§5.2a)");
 });

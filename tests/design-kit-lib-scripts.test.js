@@ -52,6 +52,38 @@ test("each script file names its recorded global", () => {
   }
 });
 
+test("sunvox: url-pinned entry, page-only, WASM rides base64 in a generated prelude", () => {
+  const e = entries.get("sunvox");
+  assert.ok(e, "sunvox vendored");
+  assert.equal(e.kind, "script");
+  assert.deepEqual(e.allowed, ["page"], "page-only like every script lib");
+  assert.equal(e.global, "svlib");
+  assert.equal(e.license, "MIT");
+  assert.equal(e.version, "2.1.4");
+  assert.match(e.source, /^url:https:[^@]+@[0-9a-f]{64}$/, "source is a hash-pinned archive URL");
+  assert.match(e.archive_sha256, /^[0-9a-f]{64}$/);
+  assert.ok((e.notes || []).some((n) => n.includes("load order")), "the load order is documented in the entry");
+  const paths = e.files.map((f) => f.path).sort();
+  assert.deepEqual(paths, ["js/sunvox/sunvox-wasm.js", "js/sunvox/sunvox.js", "js/sunvox/sunvox_lib_loader.js"]);
+  assert.ok(e.files.every((f) => f.type === "text/javascript"), "no .wasm file: everything stays text/javascript (connect-src 'none')");
+  assert.equal(e.main, "js/sunvox/sunvox.js");
+  assert.ok(readFileSync(join(LIB, e.license_file), "utf8").includes("MIT"), "licence text travels with the entry");
+
+  // The glue and the generated prelude load DOM-free in a vm; the prelude
+  // wraps the factory so the loader's no-arg SunVoxLib() call gets wasmBinary.
+  const ctx = vm.createContext({ console, atob, TextEncoder, TextDecoder, WebAssembly });
+  ctx.globalThis = ctx;
+  vm.runInContext(readFileSync(join(LIB, "js/sunvox/sunvox.js"), "utf8"), ctx, { filename: "sunvox.js" });
+  assert.equal(typeof ctx.SunVoxLib, "function", "glue defines the SunVoxLib factory");
+  const original = ctx.SunVoxLib;
+  vm.runInContext(readFileSync(join(LIB, "js/sunvox/sunvox-wasm.js"), "utf8"), ctx, { filename: "sunvox-wasm.js" });
+  assert.equal(typeof ctx.SunVoxLib, "function", "still a factory after the prelude");
+  assert.notEqual(ctx.SunVoxLib, original, "the prelude wrapped the factory");
+  assert.match(ctx.SunVoxLib.toString(), /wasmBinary/, "the wrapper injects wasmBinary");
+  const loader = readFileSync(join(LIB, "js/sunvox/sunvox_lib_loader.js"), "utf8");
+  assert.match(loader, /svlib\s*=\s*SunVoxLib\(\s*\)/, "the loader calls SunVoxLib() with no args — the wrap intercepts it");
+});
+
 test("vega-embed carries the bundled expression interpreter and switches to it on { ast: true }", () => {
   const js = readFileSync(join(LIB, entries.get("vega-embed").main), "utf8");
   // vega-embed 7.3.0: const{ast:m}=opts … m?{expr: vega.expressionInterpreter ?? opts.expr ?? <bundled>}:{}
