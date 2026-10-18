@@ -62,7 +62,7 @@ Rules the server enforces (errors enumerate valid options):
 - `params` keys are controller names from `sunvox_module_types` (case-insensitive).
 - `connections` are chains (`[src, …, "out"]`); any module not used as a chain source auto-connects to Output.
 - Notes: `"C3"`, `"F#4"`, `"Bb2"` or 1–127 (C0 = 1). Velocity 1–129 (0 = default).
-- One line = one tick; `tpl` ticks per beat, `bpm` beats per minute. A 4/4 bar = 16 lines at TPL 4, or `tpl*4` lines generally.
+- One line = one tick-row; **duration formula: seconds/line = TPL × 2.5 / BPM** (tracker standard). A 32-line pattern at BPM 85 / TPL 8 ≈ 7.5s. Higher TPL = slower + finer rhythmic resolution.
 - Successive patterns: next `x` = previous `x` + previous `lines`.
 - Events can also set controllers/effects inline: `{ "ctl": N, "ctl_val": V }` or `{ "effect": 0xEE, "effect_param": 0xXXYY }`; `note_off: true` releases.
 
