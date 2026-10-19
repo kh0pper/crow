@@ -91,3 +91,13 @@ test("the kiosk's clock.js re-exports the core functions (same objects, so kiosk
   assert.equal(kiosk.kioskNowContext, core.nowContext);
   assert.equal(kiosk.validTimeZone, core.validTimeZone);
 });
+
+test("stripTrailingDates: removes the blank line + [Dates] line appendDates added; anything else is unchanged", async () => {
+  const { stripTrailingDates } = core;
+  const line = relativeDatesContext(THU, "America/Chicago");
+  const { text } = appendDates("move it to Monday", "move it to Monday", { now: THU, tz: "America/Chicago" });
+  assert.equal(stripTrailingDates(text), "move it to Monday");
+  assert.equal(stripTrailingDates(`a\n\n${line}\n\nmore`), `a\n\n${line}\n\nmore`, "only a TRAILING line");
+  assert.equal(stripTrailingDates("I typed [Dates] myself"), "I typed [Dates] myself");
+  for (const v of [null, undefined, 42, ""]) assert.equal(stripTrailingDates(v), v);
+});

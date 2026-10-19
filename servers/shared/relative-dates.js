@@ -89,3 +89,9 @@ export function appendDates(prompt, userText, { now = Date.now(), tz = null } = 
   const line = relativeDatesContext(now, tz);
   return { text: `${prompt}\n\n${line}`, line };
 }
+
+const TRAILING_DATES = /\n\n\[Dates\] To add or plan something, [^\n]*$/;
+/** The text without a trailing blank line + [Dates] line (what appendDates added), for showing the user's own words back. */
+export function stripTrailingDates(text) {
+  return typeof text === "string" ? text.replace(TRAILING_DATES, "") : text;
+}

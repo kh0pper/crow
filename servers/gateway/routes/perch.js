@@ -66,6 +66,26 @@ import { getInteractiveEngine } from "../perch-interactive.js";
 import { JOB_LOCK_STATUSES } from "./board-lock.js";
 import { renderBotMarkdown } from "../../blog/renderer.js";
 import { redactErrorText } from "../perch-error-text.js";
+import { stripTrailingDates } from "../../shared/relative-dates.js";
+
+/** A user message as the operator typed it: without the [Dates] line the engine appended (perch-interactive.js). */
+function withoutDatesLine(message) {
+  const c = message.content;
+  if (typeof c === "string") {
+    const t = stripTrailingDates(c);
+    return t === c ? message : { ...message, content: t };
+  }
+  if (!Array.isArray(c)) return message;
+  let changed = false;
+  const content = c.map((p) => {
+    if (!p || p.type !== "text" || typeof p.text !== "string") return p;
+    const t = stripTrailingDates(p.text);
+    if (t === p.text) return p;
+    changed = true;
+    return { ...p, text: t };
+  });
+  return changed ? { ...message, content } : message;
+}
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -410,6 +430,7 @@ function readTranscript(file) {
       // the provider's raw body in `errorMessage`. Replace it with the same
       // redacted text the live frame carried; the raw body stays on disk.
       const m = out && out.type === "message" ? out.message : null;
+      if (m && m.role === "user") out = { ...out, message: withoutDatesLine(m) };
       if (m && m.role === "assistant" && m.stopReason === "error") {
         const { errorMessage, ...rest } = m;
         out = { ...out, message: rest, errorText: redactErrorText(errorMessage) };

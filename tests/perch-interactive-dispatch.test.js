@@ -693,3 +693,29 @@ test("attachCard: idempotent reassert of the SAME card is a no-op — no claim c
   assert.deepEqual(result, { ok: true, cardId: 507, botId: "reasserter" });
   assert.equal((await engine.get(s.sessionId)).cardId, 507);
 });
+
+// ---------------------------------------------------------------------------
+// Dates (follow-up to queue item 17a): the operator's own words naming a relative day add the [Dates] line
+// ---------------------------------------------------------------------------
+
+test("dates: a free-chat message naming a relative day ends with a blank line and the [Dates] line (engine clock, server zone)", async () => {
+  const { relativeDatesContext } = await import("../servers/shared/relative-dates.js");
+  const { engine, state, clock } = makeEngine();
+  const r = await spawned(engine, { botId: "datechat" });
+  await engine.message(r.sessionId, "move my dentist to Monday");
+  assert.equal(state.instances[0].turns[0].message, "move my dentist to Monday\n\n" + relativeDatesContext(clock.now(), null));
+});
+
+test("dates: a dispatch whose PLAN names a weekday, with a plain operator note, gets no [Dates] line", async () => {
+  const { engine, state } = makeEngine({ bridgeOpts: { plan: "Ship it Friday." } });
+  const r = await spawned(engine, { botId: "datedispatch", cardId: 351 });
+  await engine.message(r.sessionId, "go ahead");
+  assert.doesNotMatch(state.instances[0].turns[0].message, /\[Dates\]/);
+});
+
+test("dates: a dispatch whose operator note names a relative day ends with the [Dates] line", async () => {
+  const { engine, state } = makeEngine();
+  const r = await spawned(engine, { botId: "datedispatch2", cardId: 352 });
+  await engine.message(r.sessionId, "finish it by tomorrow");
+  assert.match(state.instances[0].turns[0].message, /\n\n\[Dates\] To add or plan something, [^\n]+$/);
+});

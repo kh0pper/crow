@@ -153,6 +153,7 @@ import { isAbsolute, join, sep } from "node:path";
 import { createDbClient } from "../db.js";
 import { jobLockFor } from "./routes/board-lock.js";
 import { cardBriefBlock } from "../../scripts/pi-bots/card-brief.mjs";
+import { appendDates } from "../shared/relative-dates.js";
 
 /** Lease file name under CROW_HOME. Consumed by C-14's reaper exemption. */
 export const LEASE_FILENAME = "perch-interactive-leases.json";
@@ -2594,6 +2595,10 @@ export function createInteractiveEngine({
       }) + "\n\nDeliverables you produce as files go in: " + s.outputsDir;
       s.dispatchBrief = null;
     }
+    // Dates (follow-up to queue item 17a): the operator's OWN words naming a relative day add the computed [Dates]
+    // line at the end (never triggered by the brief: a plan or card can name weekdays). Server zone. The transcript
+    // route strips it again (routes/perch.js readTranscript); the live hub never shows the sent prompt.
+    promptText = appendDates(promptText, text, { now: now(), tz: null }).text;
     // ms=0: no bridge turn budget. The stall watchdog above is this turn's
     // only clock. Every engine-held promptTurn carries a .catch — a child that
     // dies mid-turn REJECTS it, and an unhandled rejection in the gateway
