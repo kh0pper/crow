@@ -17,7 +17,11 @@
  *    then the viewer's parent frame-src and second-load tripwire.
  *
  * The CSP limits egress, not XSS: 'unsafe-inline' for bot-written pages is
- * acceptable inside an opaque sandbox. 'unsafe-eval' is never granted.
+ * acceptable inside an opaque sandbox. Bare 'unsafe-eval' is never granted;
+ * scripted rows DO carry 'wasm-unsafe-eval' (decision D2, 2026-10-17) — it
+ * permits WebAssembly compilation only, never eval()/new Function(), so a
+ * pinned WASM library (the design kit's sunvox engine) can run inside a page.
+ * Sealed and document rows carry no eval-family directive at all.
  * connect-src and worker-src are always 'none' (a worker cannot start from an
  * opaque origin anyway; pdf.js runs its worker code on the main thread).
  */
@@ -71,10 +75,10 @@ const TABLE = {
   diagram:  { style: ["P", "'unsafe-inline'"], img: ["P"], font: ["P"] },
   image:    { img: ["P"] },
   docx:     { img: ["P"] },
-  page:     { script: ["P", "'unsafe-inline'"], style: ["P", "'unsafe-inline'"], img: ["P"], font: ["P"] },
-  slides:   { script: ["P", "'unsafe-inline'"], style: ["P", "'unsafe-inline'"], img: ["P"], font: ["P"] },
-  data:     { script: ["P"], style: ["P", "'unsafe-inline'"], img: ["P"] },
-  map:      { script: ["P"], style: ["P", "'unsafe-inline'"], img: ["P"] },
+  page:     { script: ["P", "'unsafe-inline'", "'wasm-unsafe-eval'"], style: ["P", "'unsafe-inline'"], img: ["P"], font: ["P"] },
+  slides:   { script: ["P", "'unsafe-inline'", "'wasm-unsafe-eval'"], style: ["P", "'unsafe-inline'"], img: ["P"], font: ["P"] },
+  data:     { script: ["P", "'wasm-unsafe-eval'"], style: ["P", "'unsafe-inline'"], img: ["P"] },
+  map:      { script: ["P", "'wasm-unsafe-eval'"], style: ["P", "'unsafe-inline'"], img: ["P"] },
   // §5.2a: the viewer page is a fixed bundle file — no inline script, no eval.
   pdf:      { script: ["P"], style: ["P", "'unsafe-inline'"], img: ["P", "data:", "blob:"], font: ["P", "data:"] },
 };

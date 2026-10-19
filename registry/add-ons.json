@@ -1120,8 +1120,8 @@
     {
       "id": "design-kit",
       "name": "Design kit",
-      "version": "1.0.0",
-      "description": "Fonts, icons, styles, themes and chart and diagram rendering so bots can make artifacts that look designed. Everything is stored on this machine and works offline.",
+      "version": "1.1.1",
+      "description": "Fonts, icons, styles, themes, chart and diagram rendering, and a WASM music engine (sunvox) so bots can make artifacts that look designed and can sound. Everything is stored on this machine and works offline.",
       "type": "bundle",
       "author": "Crow",
       "category": "productivity",
@@ -5769,8 +5769,8 @@
     {
       "id": "songbook",
       "name": "Songbook",
-      "version": "1.0.0",
-      "description": "Personal chord book — ChordPro charts, transposition, chord diagrams, setlists, audio, and peer sharing",
+      "version": "1.1.1",
+      "description": "Personal chord book — ChordPro charts, transposition, chord diagrams, setlists, audio, interactive SunVox backing tracks, and peer sharing",
       "type": "skill",
       "author": "Crow",
       "category": "media",
@@ -5780,7 +5780,8 @@
         "guitar",
         "piano",
         "songbook",
-        "chordpro"
+        "chordpro",
+        "sunvox"
       ],
       "icon": "music",
       "skills": [
@@ -5792,7 +5793,7 @@
         "min_disk_mb": 0
       },
       "webUI": null,
-      "notes": "Songs are blog posts tagged 'songbook' with ChordPro content. Adds a Songbook panel to the Crow's Nest and an AI skill for chord chart workflows.",
+      "notes": "Songs are blog posts tagged 'songbook' with ChordPro content. Adds a Songbook panel to the Crow's Nest and an AI skill for chord chart workflows. v1.1.0: interactive SunVox backing tracks — songs with a **SunVox:** storage key get a WASM practice player (transport + A/B section loop) on the song page; engine assets pinned to libsunvox 2.1.4d (MIT engine source, see web/sunvox/LICENSE.txt; the prebuilt library's terms and attribution line plus the SunDog/libFLAC/Tremor licences in web/sunvox/THIRD-PARTY-NOTICES.txt; sha256: sunvox.js f088ccca15c2310e583def8b22557181429289d9da68c08546dbb828241c964e, sunvox_lib_loader.js 057ccc9d89c80d53432c661dab4441508176be6a85685995eac73b9bc70febbd, sunvox.wasm 3c27c364ff4045519fd8d57831ebf7bdc148628a3e2f60b0797ad920f9a785c1) served from /blog/songbook/lib/*.",
       "official": true
     },
     {
@@ -5849,6 +5850,74 @@
         "label": "Stirling PDF"
       },
       "notes": "Stirling PDF has no public API suitable for MCP. This bundle ships a panel with an iframe to the web UI and a tiny MCP server with a status check. Stirling 2.x includes a login form by default; create the admin account on first visit. Bound to 127.0.0.1 only.",
+      "official": true
+    },
+    {
+      "id": "sunvox-studio",
+      "name": "SunVox Studio",
+      "version": "0.1.1",
+      "description": "AI-operable music engine — inspect, render and compose SunVox/XM/MOD tracker projects via the MIT-licensed SunVox library. Headless offline rendering (~130x realtime, no audio device) and programmatic composition from JSON specs. Pairs with Funkwhale for playback.",
+      "type": "mcp-server",
+      "author": "Crow",
+      "category": "media",
+      "tags": [
+        "music",
+        "sunvox",
+        "tracker",
+        "synth",
+        "composition",
+        "render",
+        "chiptune"
+      ],
+      "icon": "music",
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "SUNVOX_WORKDIR",
+          "SUNVOX_LIB_PATH",
+          "SUNVOX_READ_DIRS",
+          "SUNVOX_MAX_RENDER_SECONDS",
+          "MINIO_ENDPOINT",
+          "MINIO_ACCESS_KEY",
+          "MINIO_SECRET_KEY",
+          "MINIO_USE_SSL",
+          "MINIO_REGION"
+        ]
+      },
+      "skills": [
+        "skills/sunvox-studio.md"
+      ],
+      "requires": {
+        "min_ram_mb": 256,
+        "min_disk_mb": 50
+      },
+      "env_vars": [
+        {
+          "name": "SUNVOX_WORKDIR",
+          "description": "Where rendered audio and composed projects are written.",
+          "default": "~/.crow/data/sunvox-studio",
+          "required": false,
+          "secret": false
+        },
+        {
+          "name": "SUNVOX_READ_DIRS",
+          "description": "Extra folders (colon-separated) the tools may read project files from, besides the work dir. Name narrow music folders only; never /, .. or a home directory.",
+          "default": "",
+          "required": false,
+          "secret": false
+        },
+        {
+          "name": "SUNVOX_MAX_RENDER_SECONDS",
+          "description": "Longest render allowed, in seconds (default 1200, at most 3600).",
+          "default": "1200",
+          "required": false,
+          "secret": false
+        }
+      ],
+      "notes": "Vendors libsunvox 2.1.4d (MIT, (c) Alexander Zolotov / WarmPlace.ru) for linux x86_64 — see vendor/LICENSE.txt; the prebuilt library's terms (\"Powered by SunVox\" attribution) and the SunDog/libFLAC/Tremor licences are in vendor/THIRD-PARTY-NOTICES.txt. No Docker, no network ports: a pure stdio MCP server around the local engine library. Linux x86_64 only in v1 (arm64 .so available upstream).",
       "official": true
     },
     {

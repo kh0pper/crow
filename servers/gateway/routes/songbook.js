@@ -2,13 +2,43 @@
  * Songbook Public Routes
  *
  * GET /blog/songbook           — Songbook index (published songs)
+ * GET /blog/songbook/lib/:file — SunVox player engine assets (whitelisted)
  * GET /blog/songbook/:slug     — Individual song page (?key=G&instrument=piano)
  * GET /blog/songbook/setlist/:id — Setlist view
  */
 
 import { Router } from "express";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { createDbClient, escapeLikePattern } from "../../db.js";
 import { renderSongPage, renderSongbookIndex, renderSetlistPage } from "../../blog/songbook-renderer.js";
+import { BUNDLES_DIR, APP_BUNDLES } from "../bundles-config.js";
+
+/**
+ * SunVox player engine assets (MIT — see bundles/songbook/web/sunvox/LICENSE.txt),
+ * pinned to libsunvox 2.1.4d. Exact-filename whitelist: anything else 404s,
+ * so this route can never serve arbitrary bundle files.
+ */
+export const SUNVOX_LIB_FILES = {
+  "sunvox.js": "application/javascript; charset=utf-8",
+  "sunvox_lib_loader.js": "application/javascript; charset=utf-8",
+  "sunvox.wasm": "application/wasm",
+  // The upstream terms travel with the engine: song pages hand the binaries
+  // to every visitor, so the licences are served beside them (linked from the
+  // player card's "Powered by SunVox" line).
+  "LICENSE.txt": "text/plain; charset=utf-8",
+  "THIRD-PARTY-NOTICES.txt": "text/plain; charset=utf-8",
+};
+
+/** Resolve a whitelisted lib file, installed bundle first, repo fallback. */
+export function resolveSunvoxLibFile(file) {
+  if (!Object.hasOwn(SUNVOX_LIB_FILES, file)) return null;
+  for (const base of [join(BUNDLES_DIR, "songbook"), join(APP_BUNDLES, "songbook")]) {
+    const p = join(base, "web", "sunvox", file);
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
 
 /**
  * Get blog settings from dashboard_settings table.
@@ -36,6 +66,16 @@ async function getBlogSettings(db) {
  */
 export default function songbookRouter() {
   const router = Router();
+
+  // GET /blog/songbook/lib/:file — SunVox engine assets (must be before :slug)
+  router.get("/blog/songbook/lib/:file", (req, res) => {
+    const p = resolveSunvoxLibFile(req.params.file);
+    if (!p) return res.status(404).send("Not found");
+    res.set("Content-Type", SUNVOX_LIB_FILES[req.params.file]);
+    res.set("Cache-Control", "public, max-age=86400");
+    res.set("X-Robots-Tag", "noindex");
+    res.sendFile(p);
+  });
 
   // GET /blog/songbook/setlist/:id — Setlist view (must be before :slug)
   router.get("/blog/songbook/setlist/:id", async (req, res) => {

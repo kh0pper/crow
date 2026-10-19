@@ -343,6 +343,58 @@
       "notes": [
         "pinned to 11.x: 12.x bundles elkjs (EPL-2.0)"
       ]
+    },
+    {
+      "name": "sunvox",
+      "kind": "script",
+      "version": "2.1.4",
+      "source_url": "https://www.warmplace.ru/soft/sunvox/sunvox_lib-2.1.4d.zip",
+      "source_sha256": "abe851de9d65a10e06673bf33257154591a2ff63ad2bb298488a5941cc5f4057",
+      "license": "MIT",
+      "license_from": "sunvox_lib/lib_sunvox/LICENSE",
+      "allowed": [
+        "page"
+      ],
+      "files": [
+        {
+          "from": "sunvox_lib/sunvox_lib/js/lib/sunvox.js",
+          "to": "js/sunvox/sunvox.js"
+        },
+        {
+          "from": "sunvox_lib/sunvox_lib/js/lib/sunvox_lib_loader.js",
+          "to": "js/sunvox/sunvox_lib_loader.js"
+        }
+      ],
+      "wasm_embed": {
+        "from": "sunvox_lib/sunvox_lib/js/lib/sunvox.wasm",
+        "to": "js/sunvox/sunvox-wasm.js",
+        "factory": "SunVoxLib"
+      },
+      "main": "js/sunvox/sunvox.js",
+      "global": "svlib",
+      "notes": [
+        "upstream revision 2.1.4d (the archive's own label); manifest versions are strict x.y.z",
+        "page load order: sunvox.js, then sunvox-wasm.js (embeds the WASM, wraps the SunVoxLib factory), then sunvox_lib_loader.js; the engine is ready at svlib.then(Module => ...)",
+        "no .wasm file is shipped: artifact pages are connect-src 'none', so the engine bytes ride base64 inside sunvox-wasm.js"
+      ],
+      "notices_from": [
+        {
+          "from": "sunvox_lib/sunvox_lib/docs/license/LICENSE.txt",
+          "to": "licenses/sunvox-library-terms.txt"
+        },
+        {
+          "from": "sunvox_lib/sunvox_lib/docs/license/sundog.txt",
+          "to": "licenses/sunvox-sundog.txt"
+        },
+        {
+          "from": "sunvox_lib/sunvox_lib/docs/license/libflac.txt",
+          "to": "licenses/sunvox-libflac.txt"
+        },
+        {
+          "from": "sunvox_lib/sunvox_lib/docs/license/tremor.txt",
+          "to": "licenses/sunvox-tremor.txt"
+        }
+      ]
     }
   ]
 }

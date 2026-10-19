@@ -612,6 +612,63 @@
       ]
     },
     {
+      "name": "sunvox",
+      "kind": "script",
+      "version": "2.1.4",
+      "license": "MIT",
+      "license_file": "licenses/sunvox.txt",
+      "license_sha256": "b77951ea36be87cd26888c205f39c43493d2fad8a9ebbf9a4ee5c85ec8ebab62",
+      "notices": [
+        {
+          "path": "licenses/sunvox-library-terms.txt",
+          "sha256": "dacc30b18f685d220458036211a6bff5ecea9549985dd8b0d0def5be71ac52f4"
+        },
+        {
+          "path": "licenses/sunvox-sundog.txt",
+          "sha256": "b0d74f52317d11fabdf078fd150cd3353249baee4baccdd27323f60bef300875"
+        },
+        {
+          "path": "licenses/sunvox-libflac.txt",
+          "sha256": "12600ea1a7affcbf469bd0d8b2cd725e4167114a2ee834b88f5d2857bfd7ddbf"
+        },
+        {
+          "path": "licenses/sunvox-tremor.txt",
+          "sha256": "d2ab5758336489da61c12cc5bb757da5339c4ae9001f9bb0562b4370249af814"
+        }
+      ],
+      "source": "url:https://www.warmplace.ru/soft/sunvox/sunvox_lib-2.1.4d.zip@abe851de9d65a10e06673bf33257154591a2ff63ad2bb298488a5941cc5f4057",
+      "archive_sha256": "abe851de9d65a10e06673bf33257154591a2ff63ad2bb298488a5941cc5f4057",
+      "allowed": [
+        "page"
+      ],
+      "requires": [],
+      "files": [
+        {
+          "path": "js/sunvox/sunvox.js",
+          "sha256": "f088ccca15c2310e583def8b22557181429289d9da68c08546dbb828241c964e",
+          "type": "text/javascript"
+        },
+        {
+          "path": "js/sunvox/sunvox_lib_loader.js",
+          "sha256": "057ccc9d89c80d53432c661dab4441508176be6a85685995eac73b9bc70febbd",
+          "type": "text/javascript"
+        },
+        {
+          "path": "js/sunvox/sunvox-wasm.js",
+          "sha256": "ba2296360816fec5d834fb328c4f52f4681f84c67c5c1f1e4ec673ffa7d2c8b8",
+          "type": "text/javascript"
+        }
+      ],
+      "main": "js/sunvox/sunvox.js",
+      "global": "svlib",
+      "notes": [
+        "upstream revision 2.1.4d (the archive's own label); manifest versions are strict x.y.z",
+        "page load order: sunvox.js, then sunvox-wasm.js (embeds the WASM, wraps the SunVoxLib factory), then sunvox_lib_loader.js; the engine is ready at svlib.then(Module => ...)",
+        "no .wasm file is shipped: artifact pages are connect-src 'none', so the engine bytes ride base64 inside sunvox-wasm.js",
+        "the engine's WASM rides base64 inside js/sunvox/sunvox-wasm.js (wasm sha256 3c27c364ff4045519fd8d57831ebf7bdc148628a3e2f60b0797ad920f9a785c1): artifact pages are connect-src 'none', so nothing may fetch a .wasm at runtime; SunVoxLib is wrapped to receive the bytes as Module.wasmBinary"
+      ]
+    },
+    {
       "name": "theme:arctic-frost",
       "kind": "theme",
       "version": "1.0.0",

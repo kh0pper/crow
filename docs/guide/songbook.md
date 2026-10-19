@@ -39,6 +39,7 @@ Add song metadata using bold-key headers at the top of the content:
 **Artist:** Bob Dylan
 **Album:** Another Side of Bob Dylan
 **Audio:** storage:songs/ramona.mp3
+**SunVox:** storage:songs/ramona-backing.sunvox
 ```
 
 ### Supported Directives
@@ -89,6 +90,19 @@ Diagrams are generated algorithmically with curated overrides for common chords.
 Attach recordings to songs by uploading audio to Crow's storage. The song page renders an HTML5 audio player with a download button.
 
 Songs tagged both `songbook` and `podcast` appear in your podcast RSS feed.
+
+## SunVox Backing Tracks
+
+Attach a SunVox project (`.sunvox`, `.xm`, `.mod`) with the `**SunVox:** storage:<key>` metadata line (or `sunvox_key` on `crow_create_song`) and the song page renders an **interactive practice player** instead of a fixed recording:
+
+- Transport (play/pause/stop) and volume; the track loops endlessly until stopped
+- **A/B section loop** — tap A and B around a passage to practice it on repeat
+- Line position readout and project metadata (name, BPM, length)
+- The engine (~800KB JS+WASM, MIT-licensed libsunvox, pinned in the bundle) loads lazily on the first Play press — page loads stay light
+
+The player runs entirely in the browser from `/blog/songbook/lib/*`; nothing is rendered server-side. Backing tracks always play in their **recorded key**: the transpose control changes the chart but not the track, and a "Track stays in \<key\>" badge appears when a key override is active.
+
+Tracks can come from anywhere — including Crow itself: the **sunvox-studio** extension can compose and render new backing tracks from a JSON spec.
 
 ## Setlists
 

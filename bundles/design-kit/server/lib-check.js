@@ -27,7 +27,7 @@ export const CONTENT_TYPES = new Set(["font/woff2", "text/css", "application/jso
 export const LICENCE_TYPE = "text/plain; charset=utf-8";
 export const FONT_FALLBACKS = new Set(["serif", "sans-serif", "monospace", "cursive", "fantasy"]);
 export const NAME_RE = /^(?:font:|css:|icons:|theme:)?[a-z0-9][a-z0-9-]{0,39}$/;
-const SOURCE_RE = /^(?:npm:(?:@[a-z0-9-]+\/)?[a-z0-9._-]+@\d+\.\d+\.\d+|github:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}|crow:generated)$/;
+const SOURCE_RE = /^(?:npm:(?:@[a-z0-9-]+\/)?[a-z0-9._-]+@\d+\.\d+\.\d+|github:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}|url:https:\/\/[A-Za-z0-9.-]+(?:\/[A-Za-z0-9._-]+)+\.[a-z0-9]+@[0-9a-f]{64}|crow:generated)$/;
 const VERSION_RE = /^\d+\.\d+\.\d+$/;
 const SEG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 const FAMILY_RE = /^[A-Za-z0-9 ]{1,60}$/;
@@ -289,7 +289,7 @@ export function checkLib(libDir) {
       if (!np || !np.startsWith("licenses/")) { fail(`${where}: notices must live under licenses/`); continue; }
       verify(where, { ...n, type: "text/plain" });
     }
-    if (!SOURCE_RE.test(String(e.source))) fail(`${where}: source must be an exact pin (npm:pkg@x.y.z, github:owner/repo@<40-hex>, crow:generated)`);
+    if (!SOURCE_RE.test(String(e.source))) fail(`${where}: source must be an exact pin (npm:pkg@x.y.z, github:owner/repo@<40-hex>, url:<https archive url>@<64-hex archive sha256>, crow:generated)`);
     if (!Array.isArray(e.allowed) || !e.allowed.length || e.allowed.some((t) => !TARGETS.has(t))) fail(`${where}: allowed must be a non-empty subset of page, document, diagram`);
     if (e.kind === "font") {
       if (!FAMILY_RE.test(String(e.family))) fail(`${where}: font family must be letters, digits and spaces`);
