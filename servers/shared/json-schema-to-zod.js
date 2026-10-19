@@ -30,14 +30,14 @@ import { z } from "zod";
 
 const MAX_DEPTH = 12;
 // Work cap per tool, in units: every node visited costs 1, an enum costs its
-// values, a description its length / 256. It is charged BEFORE any work, and
+// values, a description its length / 1024, a $ref its length / 64. It is charged BEFORE any work, and
 // every loop stops once it is spent, so a hostile upstream schema (a $defs DAG
 // grows as fanout^depth; long enums or descriptions repeated at every $ref)
 // cannot blow up memory or the published size. Crow's largest tool uses ~60.
 const BUDGET = 4000;
 // Per upstream source (a third-party server or a peer): the units all its tools may spend
 // together. Past it, a tool is still published, with only its top-level arguments typed.
-export const SOURCE_BUDGET = 100_000;
+export const SOURCE_BUDGET = 50_000;
 const SHALLOW_MAX_PROPS = 100;
 const TYPE_KEYS = ["type", "properties", "items", "enum", "const", "$ref", "anyOf", "oneOf", "allOf"];
 
@@ -134,12 +134,17 @@ function typed(type, prop, ctx, depth, strict) {
 
 // A union needs strict objects only when more than one branch could take an object.
 const PRIMITIVE = new Set(["string", "number", "integer", "boolean", "null"]);
-const objectBranches = (list) => list.filter((x) => !(typeof x === "string" ? PRIMITIVE.has(x) : isObj(x) && typeof x.type === "string" && PRIMITIVE.has(x.type))).length > 1;
+const isPrimitiveBranch = (x) => typeof x === "string" ? PRIMITIVE.has(x)
+  : isObj(x) && typeof x.type === "string" && PRIMITIVE.has(x.type) && !["$ref", "properties", "items", "anyOf", "oneOf", "allOf"].some((k) => k in x);
+const objectBranches = (list) => list.filter((x) => !isPrimitiveBranch(x)).length > 1;
 
 function convert(prop, ctx, depth, strict = false) {
   if (!spend(ctx, 1) || !isObj(prop) || depth > MAX_DEPTH) return anyJson();
   if ("$ref" in prop) {
-    const target = resolveRef(prop.$ref, ctx);
+    // Charged before the pointer is split; a pointer longer than 1 KB is not followed.
+    const ref = prop.$ref;
+    const ok = typeof ref === "string" && ref.length <= 1024 && spend(ctx, Math.ceil(ref.length / 64));
+    const target = ok ? resolveRef(ref, ctx) : null;
     // Cycles are caught on the resolved NODE, so another spelling of the same pointer is no way round.
     if (!target || ctx.resolving.has(target)) return withMeta(anyJson(), prop, ctx);
     ctx.resolving.add(target);
@@ -187,13 +192,6 @@ export function jsonSchemaPropertiesToZod(schema) {
 }
 
 /**
- * The whole input schema as a zod object, for McpServer.registerTool(). Unlike
- * the raw shape (which the SDK wraps in a stripping z.object), an OPEN root
- * (additionalProperties absent or true) stays open: its unknown top-level
- * arguments reach the upstream, and a root with no listed properties is not
- * re-published as "no arguments at all".
- */
-/**
  * Fallback for a tool over budget: its top-level arguments with their own
  * type keyword only (nested types become "any"), required flags and short
  * descriptions; the root stays open so nothing is stripped.
@@ -215,6 +213,12 @@ function shallowObject(schema) {
 
 const converted = new WeakMap(); // upstream inputSchema object → zod: converted once, not per MCP session
 /**
+ * The whole input schema as a zod object, for McpServer.registerTool(). Unlike
+ * the raw shape (which the SDK wraps in a stripping z.object), an OPEN root
+ * (additionalProperties absent or true) stays open: its unknown top-level
+ * arguments reach the upstream, and a root with no listed properties is not
+ * re-published as "no arguments at all".
+ *
  * @param {object} schema the upstream tool's inputSchema
  * @param {{units:number}} [pool] the upstream source's shared budget (SOURCE_BUDGET); charged on first conversion
  */

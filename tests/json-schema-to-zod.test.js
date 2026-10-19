@@ -247,9 +247,11 @@ test("hostile upstream schemas are bounded: a $defs DAG and alias spellings of a
   const longEnum = { type: "object", $defs: { E: { type: "string", enum: Array.from({ length: 20000 }, (_, i) => `value-${i}-${"x".repeat(50)}`), description: "d".repeat(20000) } },
     properties: Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`f${i}`, { $ref: "#/$defs/E" }])) };
   const untypedAlts = { type: "object", $defs: { U: { anyOf: Array.from({ length: 30000 }, () => ({})) } }, properties: Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`u${i}`, { $ref: "#/$defs/U" }])) };
+  const longPtr = `#/$defs/${"x".repeat(900)}`;
+  const refScan = { type: "object", $defs: { ["x".repeat(900)]: { type: "string" } }, properties: Object.fromEntries(Array.from({ length: 3000 }, (_, i) => [`r${i}`, { $ref: longPtr }])) };
   const alias = { type: "object", properties: { a: { type: "object", properties: {
     x: { $ref: "#/properties/a" }, y: { $ref: "#//properties/a" }, z: { $ref: "#/%70roperties/a" }, w: { $ref: "#/properties//a" } } } } };
-  for (const [name, schema] of [["dag", dag], ["alias", alias], ["wide", wide], ["deep", deep], ["longEnum", longEnum], ["untypedAlts", untypedAlts]]) {
+  for (const [name, schema] of [["dag", dag], ["alias", alias], ["wide", wide], ["deep", deep], ["longEnum", longEnum], ["untypedAlts", untypedAlts], ["refScan", refScan]]) {
     const t0 = Date.now();
     const out = publish({ x: jsonSchemaToZodObject(schema) }).properties.x; // the re-publishers' path
     const ms = Date.now() - t0;
