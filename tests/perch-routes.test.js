@@ -491,6 +491,51 @@ test("GET transcript renders assistant markdown, and ONLY assistant text", async
   assert.equal(blank.html, undefined, "and whitespace renders nothing rather than an empty block");
 });
 
+test("GET transcript strips the trailing [Dates] line the engine added to a user message (string and text-part content)", async () => {
+  const sessions = join(dir, "sessions-dates");
+  mkdirSync(sessions, { recursive: true });
+  const uuid = "019eeb17-0000-7000-8000-dddddddddddd";
+  const DATES = "[Dates] To add or plan something, a day named without a date is the next one: Friday 2026-10-16 (tomorrow); Thursday is today 2026-10-15 or next week 2026-10-22. For something already past, it is the previous one. UTC offset -05:00.";
+  writeFileSync(join(sessions, "2026-10-15T16-50-50-013Z_" + uuid + ".jsonl"),
+    JSON.stringify({ type: "message", id: "u1", message: { role: "user", content: "move it to Monday\n\n" + DATES } }) + "\n" +
+    JSON.stringify({ type: "message", id: "u2", message: { role: "user", content: [{ type: "text", text: "and Friday?\n\n" + DATES }] } }) + "\n" +
+    JSON.stringify({ type: "message", id: "u3", message: { role: "user", content: "I typed [Dates] myself" } }) + "\n");
+  const c = raw();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,pi_session_dir,pi_session_id,status) " +
+    "VALUES ('chatty','perch','t-dates',?,?,'waiting-user')"
+  ).run(sessions, uuid);
+  c.close();
+  const { status, body } = await getJson("/bots/chatty/sessions/t-dates/transcript");
+  assert.equal(status, 200);
+  assert.equal(body.events[0].message.content, "move it to Monday");
+  assert.deepEqual(body.events[1].message.content, [{ type: "text", text: "and Friday?" }]);
+  assert.equal(body.events[2].message.content, "I typed [Dates] myself");
+});
+
+test("GET transcript strips an echo of the [Dates] line from the assistant replies of a turn that carried it, and only those", async () => {
+  const sessions = join(dir, "sessions-dates-echo");
+  mkdirSync(sessions, { recursive: true });
+  const uuid = "019eeb17-0000-7000-8000-eeeeeeeeeeee";
+  const DATES = "[Dates] To add or plan something, a day named without a date is the next one: Friday 2026-10-16 (tomorrow); Thursday is today 2026-10-15 or next week 2026-10-22. For something already past, it is the previous one. UTC offset -05:00.";
+  writeFileSync(join(sessions, "2026-10-15T16-50-50-013Z_" + uuid + ".jsonl"),
+    JSON.stringify({ type: "message", id: "u1", message: { role: "user", content: "move it to Monday\n\n" + DATES } }) + "\n" +
+    JSON.stringify({ type: "message", id: "a1", message: { role: "assistant", content: [{ type: "text", text: DATES + "\nMoved to Monday." }] } }) + "\n" +
+    JSON.stringify({ type: "message", id: "u2", message: { role: "user", content: "thanks" } }) + "\n" +
+    JSON.stringify({ type: "message", id: "a2", message: { role: "assistant", content: [{ type: "text", text: DATES + " stays here." }] } }) + "\n");
+  const c = raw();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,pi_session_dir,pi_session_id,status) " +
+    "VALUES ('chatty','perch','t-dates-echo',?,?,'waiting-user')"
+  ).run(sessions, uuid);
+  c.close();
+  const { status, body } = await getJson("/bots/chatty/sessions/t-dates-echo/transcript");
+  assert.equal(status, 200);
+  assert.deepEqual(body.events[1].message.content, [{ type: "text", text: "Moved to Monday." }]);
+  assert.doesNotMatch(body.events[1].html, /\[Dates\]/);
+  assert.deepEqual(body.events[3].message.content, [{ type: "text", text: DATES + " stays here." }]);
+});
+
 test("GET transcript (strand 1): an errored assistant message carries a server-redacted errorText and NO raw errorMessage", async () => {
   const sessions = join(dir, "sessions-err");
   mkdirSync(sessions, { recursive: true });

@@ -153,6 +153,8 @@ import { isAbsolute, join, sep } from "node:path";
 import { createDbClient } from "../db.js";
 import { jobLockFor } from "./routes/board-lock.js";
 import { cardBriefBlock } from "../../scripts/pi-bots/card-brief.mjs";
+import { appendDates } from "../shared/relative-dates.js";
+import { stripContextEcho } from "./voice/context-echo.js";
 
 /** Lease file name under CROW_HOME. Consumed by C-14's reaper exemption. */
 export const LEASE_FILENAME = "perch-interactive-leases.json";
@@ -187,6 +189,11 @@ function engineError(code, extra) {
 function assistantTextOf(message) {
   if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return "";
   return message.content.filter((c) => c && c.type === "text").map((c) => c.text).join("");
+}
+
+/** text without an echo of the [Dates] line this turn's prompt carried (none added → as is). */
+function withoutDatesEcho(turn, text) {
+  return turn && turn.datesLine ? stripContextEcho(text, [turn.datesLine]) : text;
 }
 
 /** The reply text of a completed turn, taken from the agent_end we were handed
@@ -1847,7 +1854,7 @@ export function createInteractiveEngine({
         return;
       case "message_end": {
         // Message-level streaming; delta-level is a recorded non-goal.
-        const text = assistantTextOf(m.message);
+        const text = withoutDatesEcho(s.turn, assistantTextOf(m.message));
         // Fix round 2 N1: the turn this message belongs to rides the frame, so
         // the drawer can judge a `reply` against its OWN turn instead of
         // against a client-side memory of one that a reconnect invalidates.
@@ -2198,7 +2205,7 @@ export function createInteractiveEngine({
     // The invariant is stated over the TURN, not over a pre-await snapshot: an
     // abort that landed during the metering awaits still silences the reply.
     if (!turn.aborted) {
-      const replyText = replyTextOf(end);
+      const replyText = withoutDatesEcho(turn, replyTextOf(end));
       // Strand 1: the turn ENDED in a model error (retries, if any, are
       // spent — this is the non-retrying agent_end). One frame per turn, by
       // construction: stall/abort, onTurnError and pi_exit never reach here.
@@ -2594,6 +2601,13 @@ export function createInteractiveEngine({
       }) + "\n\nDeliverables you produce as files go in: " + s.outputsDir;
       s.dispatchBrief = null;
     }
+    // Dates (follow-up to queue item 17a): the operator's OWN words naming a relative day add the computed [Dates]
+    // line at the end (never triggered by the brief: a plan or card can name weekdays). Server zone. The transcript
+    // route strips it again (routes/perch.js readTranscript); the live hub never shows the sent prompt. The turn keeps
+    // the line so an echo of it is stripped from this turn's text and reply frames (as the bridge does).
+    const dated = appendDates(promptText, text, { now: now(), tz: null });
+    promptText = dated.text;
+    turn.datesLine = dated.line;
     // ms=0: no bridge turn budget. The stall watchdog above is this turn's
     // only clock. Every engine-held promptTurn carries a .catch — a child that
     // dies mid-turn REJECTS it, and an unhandled rejection in the gateway

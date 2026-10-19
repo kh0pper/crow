@@ -560,14 +560,16 @@ def generate_config(profiles, env_vars, tts_profiles=None):
     # OLVV talks to it instead of a model directly. The router picks the fast model
     # (Qwen3.5-4B) by default, escalating to the 35B on a "!escalate" prefix, and
     # forwards messages + tools verbatim so OLVV's own tool loop / crow_wm /
-    # streaming all keep working. The `model` field is a placeholder — the router
-    # rewrites it per chosen upstream. (Host network → localhost reaches the gateway.)
+    # streaming all keep working. The `model` field names the companion to the router
+    # ("crow-companion", llm-router.js COMPANION_TURN_MODEL): only that id gets the
+    # per-turn [Now]/[Dates] context; the router rewrites it per chosen upstream.
+    # (Host network → localhost reaches the gateway.)
     proxy_url = os.environ.get("COMPANION_PROXY_URL", "")
     if proxy_url:
         llm_config = {
             "base_url": proxy_url.rstrip("/"),
             "llm_api_key": "not-needed",
-            "model": os.environ.get("COMPANION_PROXY_MODEL", "qwen3.5-4b"),
+            "model": os.environ.get("COMPANION_PROXY_MODEL", "crow-companion"),
             "temperature": 0.8,
         }
         print(f"Companion LLM routed through the gateway /llm/v1 router: {proxy_url}", file=sys.stderr)

@@ -66,6 +66,56 @@ import { getInteractiveEngine } from "../perch-interactive.js";
 import { JOB_LOCK_STATUSES } from "./board-lock.js";
 import { renderBotMarkdown } from "../../blog/renderer.js";
 import { redactErrorText } from "../perch-error-text.js";
+import { stripTrailingDates } from "../../shared/relative-dates.js";
+import { stripContextEcho } from "../voice/context-echo.js";
+
+/**
+ * A user message as the operator typed it: without the [Dates] line the engine appended (perch-interactive.js).
+ * → { message, line } — line is the removed [Dates] line (null when there was none), so the replies of that turn
+ * can be echo-guarded against it.
+ */
+function withoutDatesLine(message) {
+  const c = message.content;
+  let line = null;
+  const strip = (text) => {
+    const t = stripTrailingDates(text);
+    if (t !== text) line = text.slice(t.length).trim();
+    return t;
+  };
+  if (typeof c === "string") {
+    const t = strip(c);
+    return { message: t === c ? message : { ...message, content: t }, line };
+  }
+  if (!Array.isArray(c)) return { message, line };
+  let changed = false;
+  const content = c.map((p) => {
+    if (!p || p.type !== "text" || typeof p.text !== "string") return p;
+    const t = strip(p.text);
+    if (t === p.text) return p;
+    changed = true;
+    return { ...p, text: t };
+  });
+  return { message: changed ? { ...message, content } : message, line };
+}
+
+/** An assistant message without an echo of the turn's [Dates] line in its text blocks (the live frames do the same). */
+function withoutDatesEcho(message, line) {
+  const c = message.content;
+  if (typeof c === "string") {
+    const t = stripContextEcho(c, [line]);
+    return t === c ? message : { ...message, content: t };
+  }
+  if (!Array.isArray(c)) return message;
+  let changed = false;
+  const content = c.map((p) => {
+    if (!p || p.type !== "text" || typeof p.text !== "string") return p;
+    const t = stripContextEcho(p.text, [line]);
+    if (t === p.text) return p;
+    changed = true;
+    return { ...p, text: t };
+  });
+  return changed ? { ...message, content } : message;
+}
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -398,9 +448,19 @@ function readTranscript(file) {
   const all = text.split("\n").filter((l) => l.trim());
   const kept = all.length > TRANSCRIPT_TAIL_LINES ? all.slice(-TRANSCRIPT_TAIL_LINES) : all;
   const events = [];
+  let datesLine = null;   // the [Dates] line of the current turn (set by its user message)
   for (const line of kept) {
     try {
-      const event = JSON.parse(line);
+      let event = JSON.parse(line);
+      const em = event && event.type === "message" ? event.message : null;
+      if (em && em.role === "user") {
+        const u = withoutDatesLine(em);
+        datesLine = u.line;
+        if (u.message !== em) event = { ...event, message: u.message };
+      } else if (em && em.role === "assistant" && datesLine) {
+        const a = withoutDatesEcho(em, datesLine);
+        if (a !== em) event = { ...event, message: a };
+      }
       // Additive: `html` rides ALONGSIDE the untouched pi event, so the
       // client keeps its own messageText() fallback and nothing downstream
       // that reads `message` sees a changed shape.

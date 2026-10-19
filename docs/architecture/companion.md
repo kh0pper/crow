@@ -28,7 +28,7 @@ Model routing runs in-process in the gateway: `servers/gateway/routes/llm-router
 
 - exposes `/llm/v1/chat/completions` and `/llm/v1/models`, OpenAI-compatible;
 - routes each turn to the **fast** model by default, switching to the **escalation** model when the latest user message begins with `!escalate` (the token is stripped before forwarding);
-- **forwards `messages` + `tools` verbatim** and pipes the upstream SSE back, so OLVV's tool loop, `tool_call_status`, and streaming are untouched;
+- **forwards `messages` + `tools` verbatim** and pipes the upstream SSE back, so OLVV's tool loop, `tool_call_status`, and streaming are untouched — with one addition: a request naming the companion's own model id, `crow-companion` (what `generate-config.py` sends), gets a `[Now]` line (server time zone) on its latest user message every turn, plus a `[Dates]` line (the next week's dates by weekday) when the user names a day like "Monday" or "tomorrow". The system prompt and earlier messages are never changed, and an echo of those lines is stripped from the reply (`servers/gateway/voice/sse-echo.js`). `COMPANION_TURN_CONTEXT=0` on the gateway turns this off. An existing install keeps its old generated model id until **Restart** on the Extensions page rebuilds the image (`up -d --build`), and a custom `COMPANION_PROXY_MODEL` skips the feature;
 - disables visible chain-of-thought on the fast route (`chat_template_kwargs.enable_thinking=false`) so the avatar doesn't speak its reasoning; escalation keeps reasoning for agentic work;
 - runs globally (not per device): OLVV's `base_url` is fixed per container, so **the model pair is shared across every device on one companion container**.
 

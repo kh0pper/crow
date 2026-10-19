@@ -33,6 +33,8 @@ import { nonPerchChannels, effectiveShellMode } from "../../servers/shared/bot-p
 import { createStderrDiag } from "./pi-stderr-diag.mjs";
 import { classifierPolicyBlock, normalizeStoredBashPolicy } from "../../servers/shared/bot-bash-policy.js";
 import { buildBotBaseEnv, botEnvScrubbed } from "../../servers/shared/bot-env.js";
+import { appendDates } from "../../servers/shared/relative-dates.js";
+import { stripContextEcho } from "../../servers/gateway/voice/context-echo.js";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
@@ -1028,6 +1030,12 @@ export async function handleInbound(opts) {
       "unless their message is genuinely ambiguous.";
   }
 
+  // Dates (follow-up to queue item 17a): pi's system prompt carries no date and is cached per session, so a turn
+  // whose USER words name a relative day ("move my dentist to Monday") gets the computed [Dates] line at the end of
+  // the prompt. Triggered on cleanMsg only: a card brief or project header can name weekdays. Server zone.
+  const dated = appendDates(promptText, cleanMsg, { now: opts.now ?? Date.now(), tz: null });
+  promptText = dated.text;
+
   // Phase 3.0 (R4): if an escalation flips the model vs the session's recorded
   // one, force a FRESH pi session — resuming a session created under a
   // different provider/model is an unproven pi path. `resume` still shapes the
@@ -1078,7 +1086,7 @@ export async function handleInbound(opts) {
     const st1 = await pi.getState().catch(() => null);
     const stats1 = await pi.getSessionStats().catch(() => null);
     const piSessionId = (st1 && st1.data && st1.data.sessionId) || (st0 && st0.data && st0.data.sessionId) || (effectiveResume ? session.pi_session_id : null) || null;
-    const text = pi.assistantText() || "(no reply)";
+    const text = (dated.line ? stripContextEcho(pi.assistantText(), [dated.line]) : pi.assistantText()) || "(no reply)";
     const calls = pi.toolCalls();
     postTurn = { user: cleanMsg, assistant: text, toolNames: calls.map((c) => c.tool) };
     const newCardStatus = cardId != null ? cardStatus(cardId, tasksDbPath) : null;

@@ -8,24 +8,14 @@
  * The zone is the one the page reports in `hello` (validated here); without one, the server's.
  */
 import { INTENT_MAX_CHARS } from "./intent-text.js";
+import { appImport } from "./app-root.js";
 
-const SPACES = /[\u00a0\u202f]/g;   // ICU puts a narrow no-break space before AM/PM
-
-/** An IANA zone this runtime knows, or null. Length and shape are checked before Intl sees it. */
-export function validTimeZone(tz) {
-  if (typeof tz !== "string" || tz.length < 1 || tz.length > 64 || !/^[A-Za-z0-9_+/-]+$/.test(tz)) return null;
-  const parts = tz.split("/");
-  if (parts.length > 3 || parts.some((x) => !x) || !/^[A-Za-z]/.test(tz)) return null;
-  try { new Intl.DateTimeFormat("en-US", { timeZone: tz }); return tz; } catch { return null; }
-}
-const zoneOf = (tz) => validTimeZone(tz) || Intl.DateTimeFormat().resolvedOptions().timeZone;
-const fmt = (locale, opts, at, tz) => new Intl.DateTimeFormat(locale, { ...opts, timeZone: zoneOf(tz) }).format(new Date(at)).replace(SPACES, " ");
-const DATE = { weekday: "long", month: "long", day: "numeric", year: "numeric" };
-const TIME = { hour: "numeric", minute: "2-digit" };
-
-export function kioskNowContext(now, tz) {
-  return `[Now] ${fmt("en-US", DATE, now, tz)}, ${fmt("en-US", TIME, now, tz)} (time zone ${zoneOf(tz)})`;
-}
+// The day lines and helpers have ONE implementation, in core (servers/shared/relative-dates.js), read through the app
+// root like netscope.js reads ip-classify.js: kiosk, glasses (via this file) and the core callers run the same functions.
+const core = await appImport("servers/shared/relative-dates.js");
+const { fmt, DATE, TIME, localYmd, dayNum, fromDayNum, fmtYmd, WEEKDAY } = core;
+export const { validTimeZone, relativeDatesContext, mentionsRelativeDay } = core;
+export const kioskNowContext = core.nowContext;
 
 /**
  * The phrase table (after normalize(): lower case, no accents or apostrophes, punctuation
@@ -90,19 +80,9 @@ const TABLE = Object.fromEntries(Object.entries(CLOCK_PHRASES).map(([k, t]) => [
 }]));
 const sameAt = (w, at, phrase) => phrase.every((x, i) => w[at + i] === x);
 
-/** Calendar days in the display's zone. All arithmetic is on whole days in UTC, so no DST hour can shift a date. */
-function localYmd(now, tz) {
-  const p = new Intl.DateTimeFormat("en-CA", { timeZone: zoneOf(tz), year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(now));
-  const g = (t) => Number(p.find((x) => x.type === t).value);
-  return { y: g("year"), m: g("month"), d: g("day") };
-}
-const dayNum = ({ y, m, d }) => Math.round(Date.UTC(y, m - 1, d) / 86400000);
-const fromDayNum = (n) => { const t = new Date(n * 86400000); return { y: t.getUTCFullYear(), m: t.getUTCMonth() + 1, d: t.getUTCDate() }; };
 const validYmd = ({ y, m, d }) => { const t = new Date(Date.UTC(y, m - 1, d)); return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d; };
-const fmtYmd = (locale, ymd, opts) => new Intl.DateTimeFormat(locale, { ...opts, timeZone: "UTC" }).format(new Date(Date.UTC(ymd.y, ymd.m - 1, ymd.d, 12))).replace(SPACES, " ");
 const LONG = { month: "long", day: "numeric", year: "numeric" };
 const SHORT = { month: "long", day: "numeric" };
-const WEEKDAY = { weekday: "long" };
 
 const MONTHS = Object.freeze({
   january: 1, february: 2, march: 3, april: 4, may: 5, june: 6, july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
@@ -254,39 +234,4 @@ export function matchClockFastPath(transcript, { now = Date.now(), tz = null } =
   return say ? { say, events: [] } : null;
 }
 
-/**
- * Queue item 17a (2026-10-15): "add a car appointment 8:15 a.m. Monday" said on Thursday 15 October was read as
- * the PAST Monday. The quick voice model slips when it counts weekdays from the [Now] line, so a turn that names
- * a relative day gets the dates computed here: the next six days by weekday, plus next week's today (a bare weekday means its next
- * date; today's weekday is offered as today or next week, since either is meant), the rule for the past (the
- * mistranscribed "I had … Monday" is why tense is not a signal), and the zone's UTC offset for a calendar tool, each
- * day's taken at local noon (a DST change happens at night); a day whose offset differs carries its own. The rule
- * rides in the line, so the system message stays byte-stable. "Next Monday" stays the model's call (US speech uses
- * it both ways).
- */
-function offsetOf(ymd, tz) {
-  const name = new Intl.DateTimeFormat("en-US", { timeZone: zoneOf(tz), timeZoneName: "longOffset" })
-    .formatToParts(new Date(Date.UTC(ymd.y, ymd.m - 1, ymd.d, 12))).find((x) => x.type === "timeZoneName")?.value || "GMT";
-  const m = /^GMT([+-]\d{2}:\d{2})$/.exec(name);
-  return m ? m[1] : "+00:00";
-}
-const isoYmd = ({ y, m, d }) => `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-
-export function relativeDatesContext(now, tz) {
-  const today = localYmd(now, tz);
-  const off = offsetOf(today, tz);
-  const at = (i) => { const day = fromDayNum(dayNum(today) + i); const o = offsetOf(day, tz); return `${isoYmd(day)}${o !== off ? ` (${o})` : ""}`; };
-  const days = [];
-  for (let i = 1; i <= 6; i += 1) days.push(`${fmtYmd("en-US", fromDayNum(dayNum(today) + i), WEEKDAY)} ${at(i)}${i === 1 ? " (tomorrow)" : ""}`);
-  return `[Dates] To add or plan something, a day named without a date is the next one: ${days.join(", ")}; ${fmtYmd("en-US", today, WEEKDAY)} is today ${isoYmd(today)} or next week ${at(7)}. For something already past, it is the previous one. UTC offset ${off}.`;
-}
-
-const RELATIVE_DAY = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|thur?s?|fri|sat|sun|tomorrow|tmrw|weekend|next week|lunes|martes|miercoles|jueves|viernes|sabado|domingo|manana|fin de semana|proxima semana|semana que viene)(s)?\b/;
-// "a/de/por/en la mañana" is "in the morning", not "tomorrow".
-const MORNING = /\b(a|de|por|en) la manana\b/g;
-/** True when the transcript names a weekday or a relative day (en, es; whole words, accents ignored). */
-export function mentionsRelativeDay(transcript) {
-  if (typeof transcript !== "string" || !transcript) return false;
-  const t = transcript.slice(0, INTENT_MAX_CHARS).toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/['’]/g, "");
-  return RELATIVE_DAY.test(t.replace(MORNING, " "));
-}
+// Queue item 17a (relativeDatesContext / mentionsRelativeDay): moved to servers/shared/relative-dates.js, re-exported above.
