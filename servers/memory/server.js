@@ -22,6 +22,7 @@ import {
 } from "./embeddings.js";
 import { rerank as phase4Rerank } from "./rerank.js";
 import { emitOrQueue } from "../shared/sync-emit.js";
+import { jsonObject } from "../shared/tool-schema-types.js";
 
 export function createMemoryServer(dbPath, options = {}) {
   const db = createDbClient(dbPath);
@@ -1279,12 +1280,16 @@ export function createMemoryServer(dbPath, options = {}) {
     "Create a notification for the user. Use for reminders, alerts, or any information the user should see in the Crow's Nest or at next session start.",
     {
       title: z.string().max(500).describe("Short headline"),
-      body: z.string().max(5000).optional().describe("Longer description"),
       type: z.string().max(50).default("reminder").describe("Type: reminder, media, peer, system, attention"),
       priority: z.enum(["low", "normal", "high"]).default("normal").describe("Priority level"),
       action_url: z.string().max(1000).optional().describe("Dashboard link to navigate to"),
-      metadata: z.record(z.any()).optional().describe("Structured data (stored as JSON)"),
       expires_in_minutes: z.number().optional().describe("Auto-expire after N minutes"),
+      // Short fields first, bodies last: engines that constrain the arguments as one
+      // JSON object admit optional keys only in declared order (llama.cpp's tagged
+      // formats take top-level arguments in any order). jsonObject, not
+      // z.record(z.any()), which published {} values (queue item 26).
+      body: z.string().max(5000).optional().describe("Longer description"),
+      metadata: jsonObject().optional().describe("Structured data as an object of JSON values (stored as JSON)"),
     },
     async ({ title, body, type, priority, action_url, metadata, expires_in_minutes }) => {
       const result = await createNotification(db, {

@@ -55,6 +55,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { jsonObject } from "../shared/tool-schema-types.js";
 import { createDbClient } from "../db.js";
 import { tasksDbPath } from "../../scripts/pi-bots/instance-paths.mjs";
 import {
@@ -341,7 +342,7 @@ export function createBoardMcpServer(options = {}) {
       slug: z.string().optional(),
       bot_id: z.string().optional(),
       action_needed: z.string().optional(),
-      data: z.record(z.any()).optional(),
+      data: jsonObject().optional().describe("Tracker item fields as an object of JSON values (merged into the item's data)"),
     },
     async (fields, extra) => {
       const actor = resolveActor(extra);
@@ -374,7 +375,7 @@ export function createBoardMcpServer(options = {}) {
       next_followup_date: z.string().optional(),
       processing_lease: z.string().nullable().optional(),
       processing_lease_status: z.string().nullable().optional(),
-      data: z.record(z.any()).optional(),
+      data: jsonObject().optional().describe("Tracker item fields as an object of JSON values (merged into the item's data)"),
     },
     async ({ id, ...fields }, extra) => dispatchUpdate(tdb, id, fields, resolveActor(extra)));
 

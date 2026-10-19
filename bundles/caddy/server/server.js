@@ -478,7 +478,15 @@ export function createCaddyServer(options = {}) {
     {
       domain: z.string().min(1).max(253).describe("Apex or subdomain that serves the well-known JSON (e.g., example.com)."),
       kind: z.enum(Object.keys(WELLKNOWN_PATHS)).describe(`One of: ${Object.keys(WELLKNOWN_PATHS).join(" | ")}`),
-      opts: z.record(z.string(), z.any()).optional().describe("Kind-specific options. matrix-server: { delegate_to: 'matrix.example.com:443' }. matrix-client: { homeserver_base_url: 'https://matrix.example.com' }. nodeinfo: { href: '...' }."),
+      // The four keys buildWellKnownJson reads, typed: the old z.record(z.string(), z.any())
+      // published {} values, which a grammar-constrained local model can only fill with
+      // objects (queue item 26). Other keys were never read; they are dropped.
+      opts: z.object({
+        delegate_to: z.string().optional().describe("matrix-server, e.g. 'matrix.example.com:443'"),
+        homeserver_base_url: z.string().optional().describe("matrix-client, e.g. 'https://matrix.example.com'"),
+        identity_server_base_url: z.string().optional().describe("matrix-client (optional)"),
+        href: z.string().optional().describe("nodeinfo, e.g. 'https://masto.example.com/nodeinfo/2.0'"),
+      }).optional().describe("Kind-specific options. matrix-server: { delegate_to: 'matrix.example.com:443' }. matrix-client: { homeserver_base_url: 'https://matrix.example.com' }. nodeinfo: { href: '...' }."),
       body_json: z.string().max(5000).optional().describe("Override the canned JSON body entirely. Must be valid JSON."),
     },
     async ({ domain, kind, opts, body_json }) => {

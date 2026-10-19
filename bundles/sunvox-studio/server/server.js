@@ -132,6 +132,58 @@ async function renderToFile(buf, { name, format }) {
   return { info, path: outPath, format: path.extname(outPath).slice(1), size_bytes: stat.size, duration_s: info.duration_s };
 }
 
+// The spec compose() (sunvox-engine.js) reads, as a typed schema: the old
+// z.record(z.string(), z.any()) published {} values, which a grammar-constrained
+// local model can only fill with objects (queue item 26). Types only — the
+// engine keeps every range/count check and its messages. Nullable where the
+// engine treats null as "not given"; objects stay open (the engine ignores
+// unknown keys). A spec sent as a JSON string is parsed first. Inside the
+// nested objects short fields come first, bodies last (a JSON-grammar engine
+// admits optional keys only in declared order).
+export function parseJsonObjectString(v) {
+  if (typeof v !== "string" || !v.trim().startsWith("{")) return v;
+  try { const o = JSON.parse(v); return o && typeof o === "object" && !Array.isArray(o) ? o : v; } catch { return v; }
+}
+function composeSpecSchema() {
+  const num = () => z.number().nullable().optional();
+  const module = z.object({
+    id: z.string().describe("your id for this module, used in connections and events"),
+    type: z.string().describe("a type from sunvox_module_types"),
+    name: z.string().nullable().optional(),
+    x: num(),
+    y: num(),
+    params: z.record(z.string(), z.number()).nullable().optional().describe("controller name → number"),
+  }).passthrough();
+  const event = z.object({
+    track: num(),
+    line: num(),
+    module: z.string().optional().describe("module id"),
+    note: z.union([z.string(), z.number()]).nullable().optional().describe("\"C3\" / \"F#4\" or 1-127"),
+    velocity: num().describe("1-129"),
+    note_off: z.boolean().optional(),
+    ctl: z.number().optional(),
+    ctl_val: num(),
+    effect: z.number().optional(),
+    effect_param: num(),
+  }).passthrough();
+  const pattern = z.object({
+    name: z.string().nullable().optional(),
+    id: z.union([z.string(), z.number()]).nullable().optional(),
+    tracks: num(),
+    lines: num(),
+    x: num(),
+    y: num(),
+    events: z.array(event).optional(),
+  }).passthrough();
+  return z.preprocess(parseJsonObjectString, z.object({
+    bpm: num(),
+    tpl: num(),
+    modules: z.array(module),
+    connections: z.array(z.array(z.string())).nullable().optional().describe("chains of module ids; \"out\" is the Output"),
+    patterns: z.array(pattern),
+  }).passthrough()).describe("The composition spec (see tool description)");
+}
+
 export function createSunvoxServer() {
   const server = new McpServer({ name: "sunvox-studio", version: "0.1.1" });
 
@@ -183,10 +235,10 @@ export function createSunvoxServer() {
       "Spec: { bpm? (1-999), tpl? (1-31), modules: [{ id, type, name?, params?: {controllerName: value}, x?, y? }], connections?: [[srcId, ..., \"out\"], ...] (chains; modules not used as a chain source auto-connect to Output), patterns: [{ name?, tracks, lines, x?, y?, events: [{ track, line, note (\"C3\"/\"F#4\"/1-127), velocity? (1-129), module (id), ctl?/ctl_val? or effect?/effect_param?, note_off? }] }] }. " +
       "Use sunvox_module_types first to pick module types and param names. Notes: C0=1; a line is one tick (TPL ticks per beat). Keep patterns 16-64 lines; place successive patterns at x = previous x + lines.",
     inputSchema: {
-      spec: z.record(z.string(), z.any()).describe("The composition spec (see tool description)"),
       name: z.string().default("crow-compose").describe("Project/file name"),
       render: z.boolean().default(false).describe("Also render to audio in the same call"),
       format: z.enum(["wav", "mp3", "ogg"]).default("wav").describe("Render format when render=true"),
+      spec: composeSpecSchema(),
     },
   }, async (args) => {
     try {

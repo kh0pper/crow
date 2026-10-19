@@ -16,7 +16,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { getPeerCreds } from "../../servers/shared/peer-credentials.js";
-import { jsonSchemaPropertiesToZod } from "../../servers/shared/json-schema-to-zod.js";
+import { jsonSchemaToZodObject } from "../../servers/shared/json-schema-to-zod.js";
 
 const CONNECT_TIMEOUT_MS = 15000;
 
@@ -72,7 +72,7 @@ export async function buildRemoteProxyServer({ clientFactory = defaultClientFact
   const server = new McpServer({ name: "crow-remote-proxy", version: "0.1.0" });
   const { tools } = await listTools();
   for (const t of tools) {
-    server.tool(t.name, t.description || "", jsonSchemaPropertiesToZod(t.inputSchema), async (args) => {
+    server.registerTool(t.name, { description: t.description || "", inputSchema: jsonSchemaToZodObject(t.inputSchema) }, async (args) => {
       return callTool({ name: t.name, arguments: args || {} });
     });
   }

@@ -14,10 +14,14 @@ import { openXlsx, readRange, writeRange, appendRows, addTab, renameTab, deleteT
 export const XLSX = Object.freeze({ ext: "xlsx", noun: "an .xlsx spreadsheet", open: openXlsx });
 const TEMPLATE = new URL("../templates/blank.xlsx", import.meta.url);
 
-const cellV = z.union([z.string().max(32767), z.number(), z.boolean(), z.null(), z.record(z.any()), z.array(z.any())]);
-const values2d = z.union([z.array(z.array(cellV)).min(1).max(50000), z.array(cellV).min(1).max(16384)]);
+// Factories, not shared instances: one zod instance used twice in a tool publishes a $ref.
+// The object branch is z.object({}).passthrough() (not z.record(z.any()), which published {}
+// values a grammar-constrained local model can only fill with objects; queue item 26); xlsx.js
+// still JSON-stringifies an object or array cell, as before.
+const cellV = () => z.union([z.string().max(32767), z.number(), z.boolean(), z.null(), z.object({}).passthrough(), z.array(z.any())]);
+const values2d = () => z.union([z.array(z.array(cellV())).min(1).max(50000), z.array(cellV()).min(1).max(16384)]);
 // F7: no .min(1) here — an empty append reaches the handler, which answers bad_args inside the result envelope
-const appendVals = z.union([z.array(z.array(cellV)).max(50000), z.array(cellV).max(16384), z.record(cellV), z.array(z.record(cellV)).max(50000)]);
+const appendVals = () => z.union([z.array(z.array(cellV())).max(50000), z.array(cellV()).max(16384), z.record(cellV()), z.array(z.record(cellV())).max(50000)]);
 const inputOpt = z.enum(["USER_ENTERED", "RAW"]).optional().default("USER_ENTERED").describe("USER_ENTERED parses '=formulas', numeric text, TRUE/FALSE and ISO dates into date cells; RAW keeps strings as text (JSON numbers/booleans keep their type)");
 
 const xlsxWrite = (ctx, args, fn) => ooxmlWrite(ctx, args, XLSX, fn);
@@ -47,10 +51,10 @@ export const sheetsDefs = [
     schema: { ...fileRef, range: z.string().min(1).max(300), value_render_option: z.string().optional().default("FORMATTED_VALUE") },
     run: async (a, c) => { const { entry, model: wb } = await loadOoxml(c.getConfig(), refOf(a), XLSX); return { path: entry.path, ...readRange(wb, a.range, a.value_render_option) }; } },
   { name: "ws_sheets_write", description: "Overwrite cells starting at the range's top-left (a flat list is one row). USER_ENTERED parses '=formulas', numbers, TRUE/FALSE; RAW stores strings as text as-is. Keeps cell formatting. Refuses non-top-left cells of merged areas and partial shared-formula ranges.",
-    schema: { ...fileRef, range: z.string().min(1).max(300), values: values2d, value_input_option: inputOpt, ...writeOpts },
+    schema: { ...fileRef, range: z.string().min(1).max(300), values: values2d(), value_input_option: inputOpt, ...writeOpts },
     run: (a, c) => xlsxWrite(c, a, (wb) => { const r = writeRange(wb, a.range, a.values, a.value_input_option); return { changed: r.cells, summary: `write ${r.range}`, data: { updated_range: r.range, updated_cells: r.cells } }; }) },
   { name: "ws_sheets_append", description: "Append rows after the last non-empty row. Accepts rows, a dict, or a list of dicts keyed by the header row (unknown keys are an error).",
-    schema: { ...fileRef, sheet_name: z.string().min(1).max(31), values: appendVals, value_input_option: inputOpt, ...writeOpts },
+    schema: { ...fileRef, sheet_name: z.string().min(1).max(31), values: appendVals(), value_input_option: inputOpt, ...writeOpts },
     run: (a, c) => xlsxWrite(c, a, (wb) => { const r = appendRows(wb, a.sheet_name, a.values, a.value_input_option); return { changed: r.rows, summary: `append ${r.rows} row(s)`, data: r }; }) },
   { name: "ws_sheets_create", description: "Create an .xlsx from the blank template; the first tabs entry renames Sheet1. Dedupes by name when folder is given (find_existing=true); find_existing=false picks a free name.",
     schema: { title: z.string().min(1).max(200), folder: z.string().max(4096).optional(), tabs: z.array(z.string().min(1).max(31)).max(50).optional(), find_existing: z.boolean().optional().default(true) },

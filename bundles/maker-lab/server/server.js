@@ -83,6 +83,42 @@ async function touchActivity(db, token, reason) {
 
 // ─── Factory ──────────────────────────────────────────────────────────────
 
+// The lesson shape lesson-validator.js checks, as a typed schema: a
+// grammar-constrained local model could only send objects into the old
+// z.record(z.any()) (it published {} values; queue item 26). It mirrors the
+// validator's own leniency: every field optional, null wherever the validator
+// reads null as "not given" (its "!= null" checks), a numeric id (it checks
+// String(id)), every object open. So "missing: x" and the range/length
+// messages still come from validateLesson; only a wrong TYPE is now an input
+// error naming the field. A lesson sent as a JSON string is parsed first.
+// Inside nested objects short fields come first, bodies last (a JSON-grammar
+// engine admits optional keys only in declared order).
+export function parseJsonObjectString(v) {
+  if (typeof v !== "string" || !v.trim().startsWith("{")) return v;
+  try { const o = JSON.parse(v); return o && typeof o === "object" && !Array.isArray(o) ? o : v; } catch { return v; }
+}
+function lessonSchema() {
+  const strings = () => z.array(z.string());
+  const opt = (t) => t.nullable().optional();
+  return z.preprocess(parseJsonObjectString, z.object({
+    id: opt(z.union([z.string(), z.number()])).describe("letters, digits, _ or -; starts with a letter or digit; max 100"),
+    title: opt(z.string()),
+    surface: opt(z.enum(["blockly", "scratch", "kolibri"])),
+    age_band: opt(z.enum(["5-9", "10-13", "14+"])),
+    reading_level: opt(z.number()).describe("at most 3 for age_band 5-9"),
+    goal: opt(z.string()),
+    tags: opt(strings()),
+    toolbox: opt(z.union([
+      strings(),
+      z.object({ categories: z.array(z.object({ name: z.string().optional(), colour: opt(z.string()), blocks: strings().optional() }).passthrough()).optional() }).passthrough(),
+    ])).describe("block-type strings, or { categories: [{ name, colour?, blocks }] }"),
+    success_check: opt(z.object({ required_blocks: opt(strings()), message_missing: opt(z.string()) }).passthrough()),
+    canned_hints: opt(strings()).describe("at least one hint, each at most 500 characters"),
+    starter_workspace: opt(z.string()).describe("Blockly XML"),
+    steps: opt(z.array(z.object({ prompt: z.string().optional().describe("at most 1000 characters") }).passthrough())).describe("at least one step"),
+  }).passthrough()).describe("The lesson JSON object (required: id, title, surface, age_band, steps, canned_hints)");
+}
+
 export function createMakerLabServer(db, options = {}) {
   const server = new McpServer(
     { name: "crow-maker-lab", version: "0.1.0" },
@@ -676,7 +712,7 @@ export function createMakerLabServer(db, options = {}) {
   server.tool(
     "maker_validate_lesson",
     "Validate a lesson JSON against the schema. Returns specific errors so custom lesson authors (teachers/parents) can fix them without reading code.",
-    { lesson: z.record(z.any()) },
+    { lesson: lessonSchema() },
     async ({ lesson }) => {
       const { validateLesson } = await import("./lesson-validator.js");
       const { valid, errors } = validateLesson(lesson);

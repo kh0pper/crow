@@ -21,6 +21,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
+import { jsonObject } from "../shared/tool-schema-types.js";
 
 import { createMemoryServer } from "../memory/server.js";
 import { createProjectServer } from "../research/server.js";
@@ -160,7 +161,9 @@ export function createRouterServer(options = {}) {
       description,
       {
         action: z.string().describe("Action name (e.g. 'store_memory', 'search_memories'). Use crow_discover to see available actions and their full schemas."),
-        params: z.record(z.any()).optional().describe("Parameters for the action"),
+        // jsonObject, not z.record(z.any()): that published {} values, which a
+        // grammar-constrained local model can only fill with objects (queue item 26).
+        params: jsonObject().optional().describe("Parameters for the action, as an object (e.g. {\"query\": \"...\"}); the dispatched server validates them"),
       },
       async ({ action, params }) => {
         try {
@@ -182,8 +185,8 @@ export function createRouterServer(options = {}) {
     "Route to external integration tools (Trello, Canvas, Slack, etc.) and remote Crow instances. Use crow_discover with category 'tools' or 'instances' to see what's available.",
     {
       action: z.string().describe("Tool name from the external server"),
-      params: z.record(z.any()).optional().describe("Parameters for the tool"),
       instance_id: z.string().optional().describe("Route to a specific remote instance by ID (use crow_discover category 'instances' to see available)"),
+      params: jsonObject().optional().describe("Parameters for the tool, as an object; the tool validates them"),
     },
     async ({ action, params, instance_id }) => {
       // If instance_id is specified, route directly to that remote instance
