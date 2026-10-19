@@ -17,7 +17,7 @@
  * shared-storage re-apply. The gpu-orchestrator checks model bundles itself
  * (preflightBundleUp) with the same checkComposeModel.
  */
-import { existsSync, readFileSync, realpathSync, lstatSync, readlinkSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, lstatSync, readlinkSync, statSync, openSync, fstatSync, readSync, closeSync, constants as fsConstants } from "node:fs";
 import { join, resolve as resolvePath, dirname, basename, sep, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 
@@ -187,7 +187,7 @@ const ENV_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*\.env$/;
  * instead of a privileged grant or a loophole:
  *   gpu        GPU device nodes (/dev/dri, /dev/kfd, /dev/nvidia*), gpus:, GPU device
  *              reservations, runtime nvidia, NVIDIA_VISIBLE_DEVICES / NVIDIA_DRIVER_CAPABILITIES
- *              in its environment. (Image env is not in the compose model: on a host whose
+ *              in its environment, any NVIDIA_ mention in an env_file. (Image env is not in the compose model: on a host whose
  *              Docker default runtime is nvidia an image's own NVIDIA_VISIBLE_DEVICES still
  *              reaches the GPUs; the gate is complete only on hosts whose default runtime is runc.)
  *   shm_size   the /dev/shm its compose may ask for above SHM_DEFAULT_MAX. A declaration of
@@ -221,27 +221,31 @@ export function normalizeHostGrants(g) {
 }
 
 const NVIDIA_ENV = ["NVIDIA_VISIBLE_DEVICES", "NVIDIA_DRIVER_CAPABILITIES"];
+export const ENV_FILE_MAX_BYTES = 1024 * 1024;
 /**
- * The NVIDIA_* key an env_file sets to something that asks for a GPU, null when none,
- * false when the path is not a small regular file (never read then). Matches the forms
- * Compose accepts (KEY=value, KEY: value, export, quotes); `raw` keeps quotes literal.
+ * Read an ADMITTED env_file for the NVIDIA_* check: { missing } when there is no file,
+ * { bad } when it is not a regular file of at most ENV_FILE_MAX_BYTES, else { nvidia }.
+ *
+ * No dotenv parsing (a parser differential with Compose would be a GPU-grant bypass):
+ * ANY mention of NVIDIA_ (any case, any separator, quoting or line ending) counts.
+ * stat before open (a device or FIFO is never opened), then open non-blocking and check
+ * that the descriptor is the same regular file, and read at most the cap from it.
  */
-export function envFileNvidiaKey(path, raw = false) {
-  let text;
+export function scanEnvFile(path) {
+  let st;
+  try { st = statSync(path); } catch (e) { return e?.code === "ENOENT" || e?.code === "ENOTDIR" ? { missing: true } : { bad: true }; }
+  if (!st.isFile() || st.size > ENV_FILE_MAX_BYTES) return { bad: true };
+  let fd;
+  try { fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOCTTY); } catch { return { bad: true }; }
   try {
-    if (typeof path !== "string" || !existsSync(path)) return null; // Compose fails at up
-    const st = statSync(path);
-    if (!st.isFile() || st.size > 1024 * 1024) return false;
-    text = readFileSync(path, "utf8");
-  } catch { return null; }
-  for (const line of text.replace(/^\uFEFF/, "").split(/\r?\n/)) {
-    const m = line.match(/^\s*(?:export\s+)?(NVIDIA_VISIBLE_DEVICES|NVIDIA_DRIVER_CAPABILITIES)\s*[=:]\s*(.*)$/);
-    if (!m) continue;
-    let v = m[2].trim();
-    if (!raw) v = v.replace(/^(["'])(.*)\1$/, "$2");
-    if (v !== "" && v !== "void" && v !== "none") return m[1];
-  }
-  return null;
+    const fst = fstatSync(fd);
+    if (!fst.isFile() || fst.dev !== st.dev || fst.ino !== st.ino || fst.size > ENV_FILE_MAX_BYTES) return { bad: true };
+    const buf = Buffer.alloc(ENV_FILE_MAX_BYTES + 1);
+    let n = 0;
+    for (let r; n <= ENV_FILE_MAX_BYTES && (r = readSync(fd, buf, n, buf.length - n, null)) > 0;) n += r;
+    if (n > ENV_FILE_MAX_BYTES) return { bad: true };
+    return { nvidia: /nvidia_/i.test(buf.subarray(0, n).toString("latin1")) };
+  } catch { return { bad: true }; } finally { closeSync(fd); }
 }
 
 /**
@@ -397,11 +401,23 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
   // A bind source inside another READ-WRITE bind of this project: the container can swap it
   // for a symlink after this check, and Docker follows it at the next (re)start, which
   // nothing re-checks (restart: unless-stopped). Refused.
+  const binds = [];
+  for (const s of Object.values(model.services || {})) {
+    for (const v of (s && s.volumes) || []) if (v && v.type === "bind" && typeof v.source === "string" && isAbsolute(v.source)) binds.push({ p: resolveHostPath(v.source), rw: v.read_only !== true });
+  }
+  // Host folders a container of this project can write: read-write binds and local
+  // volumes on a bind device (not read-only). A file the gateway or Compose reads there
+  // could be swapped for a symlink or a FIFO after this check.
+  const writable = binds.filter((b) => b.rw).map((b) => b.p);
+  for (const vol of Object.values(isObj(model.volumes) ? model.volumes : {})) {
+    const dev = vol?.driver_opts?.device;
+    if (typeof dev === "string" && isAbsolute(dev) && !/(?:^|,)ro(?:,|$)/.test(String(vol.driver_opts.o || ""))) writable.push(resolveHostPath(dev));
+  }
+  const containerWritable = (path) => {
+    const p = resolveHostPath(path);
+    return writable.some((w) => under(p, w));
+  };
   {
-    const binds = [];
-    for (const s of Object.values(model.services || {})) {
-      for (const v of (s && s.volumes) || []) if (v && v.type === "bind" && typeof v.source === "string" && isAbsolute(v.source)) binds.push({ p: resolveHostPath(v.source), rw: v.read_only !== true });
-    }
     for (const a of binds) {
       for (const b of binds) {
         if (a !== b && a.rw && a.p !== b.p && under(b.p, a.p)) return refuse(`a bind mount sits inside another read-write bind mount (${b.p.slice(-60)})`);
@@ -498,12 +514,18 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
       const path = typeof e === "string" ? e : e?.path;
       const shared = typeof path === "string" && isAbsolute(path) && sharedEnvFile(path);
       if (!shared && (r = insideBundle(path, `${tag} env_file`))) return r;
+      if (containerWritable(path)) return refuse(`${tag} env_file: inside a folder a container of this bundle can write`);
       // Admitted: now (never before) read it for NVIDIA_* (the model is built with
       // --no-env-resolution, so env_file contents are not in it). Only a small regular file:
       // a device, FIFO or huge file would block or exhaust the gateway.
-      const nv = envFileNvidiaKey(path, e?.format === "raw");
-      if (nv === false) return refuse(`${tag} env_file: not a regular file of at most 1 MiB`);
-      if (nv && (r = needGpu(nv))) return r;
+      const scan = scanEnvFile(path);
+      if (scan.missing) {
+        // Fail closed: a file that appears between this check and `up` is never checked.
+        if (e?.required === false) continue;
+        return refuse(`${tag} env_file: ${String(path).slice(-60)} does not exist`);
+      }
+      if (scan.bad) return refuse(`${tag} env_file: not a regular file of at most 1 MiB`);
+      if (scan.nvidia && (r = needGpu("NVIDIA_* in an env_file"))) return r;
     }
     for (const lf of [].concat(s.label_file || [])) if ((r = insideBundle(lf, `${tag} label_file`))) return r;
     if (s.build !== undefined) {

@@ -113,6 +113,7 @@ test("model: env_file, build context, secrets/configs files and bind-device volu
   const dir = bundleDir();
   const out = "/etc/hostname";
   assert.equal(check(svc({ env_file: [{ path: join(CROW_HOME, ".env") }] }), { dir }).valid, false);
+  writeFileSync(join(dir, "app.env"), "A=1\n");
   assert.equal(check(svc({ env_file: [{ path: join(dir, "app.env") }] }), { dir }).valid, true);
   assert.equal(check(svc({ env_file: [{ path: "/opt/gpu.env" }] }), { dir, manifest: { inference: true } }).valid, false, "inference alone no longer opens env_file (host_grants.env_files does)");
   assert.equal(check(svc({ build: { context: "/" } }), { dir }).valid, false);
@@ -416,6 +417,37 @@ test("host_grants.gpu: GPU devices, gpus, GPU reservations, the nvidia runtime a
   execFileSync("mkfifo", [join(d, "fifo.env")]);
   assert.equal(check(svc({ env_file: [{ path: join(d, "fifo.env") }] }), { dir: d }).valid, false, "a FIFO");
   assert.ok(Date.now() - t0 < 2000, "refused quickly");
+  // Final security pass: no dotenv re-implementation to out-guess. ANY NVIDIA_* mention in an
+  // admitted env_file needs the gpu grant, whatever the separator, quoting, line ending or case.
+  const forms = ["A=1\rNVIDIA_VISIBLE_DEVICES=all\n", "\u0085NVIDIA_VISIBLE_DEVICES=all\n", "export\tNVIDIA_VISIBLE_DEVICES = 'all' # gpu\n",
+    "NVIDIA_VISIBLE_DEVICES=void\n", "nvidia_visible_devices=all\n", "NVIDIA_MIG_CONFIG_DEVICES=all\n", "B=\"x\\\nNVIDIA_VISIBLE_DEVICES=all\"\n"];
+  for (const [i, text] of forms.entries()) {
+    writeFileSync(join(d, `form${i}.env`), text);
+    assert.equal(check(svc({ env_file: [{ path: join(d, `form${i}.env`) }] }), { dir: d }).valid, false, JSON.stringify(text));
+    assert.equal(check(svc({ env_file: [{ path: join(d, `form${i}.env`) }] }), { dir: d, manifest: { host_grants: { gpu: true } } }).valid, true, `granted: ${JSON.stringify(text)}`);
+  }
+  writeFileSync(join(d, "plain.env"), "A=1\nB=2\n");
+  assert.equal(check(svc({ env_file: [{ path: join(d, "plain.env") }] }), { dir: d }).valid, true, "no NVIDIA_* mention: no grant needed");
+  // A missing env_file fails closed unless Compose was told it is optional.
+  assert.equal(check(svc({ env_file: [{ path: join(d, "absent.env") }] }), { dir: d }).valid, false, "missing and required");
+  assert.equal(check(svc({ env_file: [join(d, "absent.env")] }), { dir: d }).valid, false, "missing, short syntax");
+  assert.equal(check(svc({ env_file: [{ path: join(d, "absent.env"), required: false }] }), { dir: d }).valid, true, "missing and optional");
+  symlinkSync(join(d, "nowhere.env"), join(d, "dangling.env"));
+  assert.equal(check(svc({ env_file: [{ path: join(d, "dangling.env") }] }), { dir: d }).valid, false, "a dangling symlink is missing");
+  // An env_file a container can rewrite (under a read-write bind of this project, or a
+  // bind-device volume) is refused: it could become a symlink or a FIFO before Compose reads it.
+  mkdirSync(join(d, "data"), { recursive: true });
+  writeFileSync(join(d, "data", "app.env"), "A=1\n");
+  const rwBind = (extra) => ({ services: { app: { image: "busybox", env_file: [{ path: join(d, "data", "app.env") }], volumes: [{ type: "bind", source: join(d, "data"), target: "/data", ...extra }] } } });
+  assert.equal(check(rwBind({}), { dir: d }).valid, false, "under a read-write bind");
+  assert.equal(check(rwBind({ read_only: true }), { dir: d }).valid, true, "a read-only bind cannot rewrite it");
+  const other = { services: { app: { image: "busybox", env_file: [{ path: join(d, "data", "app.env") }] }, side: { image: "busybox", volumes: [{ type: "bind", source: join(d, "data"), target: "/x" }] } } };
+  assert.equal(check(other, { dir: d }).valid, false, "another service's read-write bind counts");
+  const fileBind = { services: { app: { image: "busybox", env_file: [{ path: join(d, "data", "app.env") }], volumes: [{ type: "bind", source: join(d, "data", "app.env"), target: "/app.env" }] } } };
+  assert.equal(check(fileBind, { dir: d }).valid, false, "the env_file itself bound read-write");
+  const devVol = { services: { app: { image: "busybox", env_file: [{ path: join(d, "data", "app.env") }], volumes: [{ type: "volume", source: "v", target: "/v" }] } },
+    volumes: { v: { driver_opts: { type: "none", o: "bind", device: join(d, "data") } } } };
+  assert.equal(check(devVol, { dir: d }).valid, false, "under a bind-device volume");
   // Unknown grant keys and bad shapes are dropped.
   assert.deepEqual(G.normalizeHostGrants({ gpu: "yes", shm_size: "lots", env_files: ["../x.env", "ok.env", 5], path_env: ["LLM_CACHE", "bad key"], privileged: true }), { env_files: ["ok.env"], path_env: ["LLM_CACHE"] });
   assert.equal(G.normalizeHostGrants([]), null);
