@@ -652,7 +652,7 @@ const MEDIA = "/api/kiosk/session/media";
 const OWNER = "tab-owner-aaaaaaaaaaaa";
 const TICKET_IN = /\/display\/t\/([A-Za-z0-9_-]{22})\/stream/;
 
-async function barServe() {
+async function barServe({ verifySession = auth.verifySession, barCheckTimeoutMs } = {}) {
   const { sessionDisplayId } = await import("../bundles/kiosk/server/session-display.js");
   const clock = { t: Date.now() };
   const sweeps = [];
@@ -673,7 +673,8 @@ async function barServe() {
   const k = kiosk.createKioskRuntime({
     Router: express.Router, json: express.json, WebSocketServer,
     isAllowedNetwork: auth.isAllowedNetwork, csrfMiddleware: csrf.csrfMiddleware, csrfTokenAccepted: csrf.csrfTokenAccepted,
-    sessionFromRequest: auth.sessionFromRequest, verifySession: auth.verifySession,
+    sessionFromRequest: auth.sessionFromRequest, verifySession,
+    ...(barCheckTimeoutMs ? { barCheckTimeoutMs } : {}),
     openDb: open, deviceStore: store,
     settings: { readSetting: registry.readSetting, writeSetting: registry.writeSetting },
     voice: { runVoiceTurn: async () => ({ route: "fast", timings: {} }), speakText: async () => true },
@@ -1071,6 +1072,73 @@ test("B1 the paused, reload-pending station still ends at the 12 h cap: one swee
     r.clock.t += 12 * 60 * 60 * 1000 + 1;
     await r.sweep();
     assert.equal(r.k.media.active(id), false);
+    assert.equal(r.k.barDisplays(), 0);
+  } finally { r.close(); }
+});
+
+/** B2 rig: a login store that can be made to throw (or hang) on demand, for the bar's minute check only. */
+function flakyStore() {
+  const failing = { on: false, hang: false };
+  const verifySession = async (tok) => {
+    if (failing.hang) return new Promise(() => {});
+    if (failing.on) throw new Error("store unreadable");
+    return auth.verifySession(tok);
+  };
+  return { failing, verifySession };
+}
+
+test("B2 the bar's login check failing BAR_CHECK_FAILURES minutes in a row closes the bar audio (fail closed), logged without the ticket", async () => {
+  assert.equal(kiosk.BAR_CHECK_FAILURES, 3);
+  const { failing, verifySession } = flakyStore();
+  const r = await barServe({ verifySession });
+  try {
+    const c = await r.open();
+    const path = r.play();
+    await c.shut();
+    failing.on = true;
+    for (let i = 1; i < kiosk.BAR_CHECK_FAILURES; i++) {
+      r.clock.t += 60_000; await r.sweep();
+      assert.equal((await r.stream(path)).status, 200, `still playing after ${i} failed check(s)`);
+    }
+    r.clock.t += 60_000; await r.sweep();
+    assert.equal((await r.stream(path)).status, 404, "the third failure in a row ends it");
+    assert.equal(r.k.media.active(r.idOf()), false);
+    assert.equal(r.k.barDisplays(), 0);
+    const line = r.barLogs.find((l) => /session check failed 3 times/.test(l));
+    assert.ok(line, JSON.stringify(r.barLogs));
+    assert.ok(line.includes(r.idOf()), "names the display");
+    for (const l of r.barLogs) { assert.doesNotMatch(l, TICKET_IN, l); assert.ok(!l.includes(path.split("/")[3]), l); }
+  } finally { r.close(); }
+});
+
+test("B2 a successful check resets the count: fail, fail, succeed, fail, fail leaves the audio playing", async () => {
+  const { failing, verifySession } = flakyStore();
+  const r = await barServe({ verifySession });
+  try {
+    const c = await r.open();
+    const path = r.play();
+    await c.shut();
+    for (const fail of [true, true, false, true, true]) { failing.on = fail; r.clock.t += 60_000; await r.sweep(); }
+    assert.equal((await r.stream(path)).status, 200);
+    assert.equal(r.k.media.active(r.idOf()), true);
+    assert.equal(r.k.barDisplays(), 1);
+  } finally { r.close(); }
+});
+
+test("B2 a hung login check counts as a failure after the check timeout, and an id whose check is in flight is not checked twice", { timeout: 10_000 }, async () => {
+  const { failing, verifySession } = flakyStore();
+  const r = await barServe({ verifySession, barCheckTimeoutMs: 20 });
+  try {
+    const c = await r.open();
+    const path = r.play();
+    await c.shut();
+    failing.hang = true;
+    // Two overlapping sweeps (a slow minute): one check, so one failure.
+    await Promise.all([r.sweep(), r.sweep()]);
+    await Promise.all([r.sweep(), r.sweep()]);
+    assert.equal((await r.stream(path)).status, 200, "two failures so far, not four");
+    await r.sweep();
+    assert.equal((await r.stream(path)).status, 404, "the third timed-out check closes the audio");
     assert.equal(r.k.barDisplays(), 0);
   } finally { r.close(); }
 });

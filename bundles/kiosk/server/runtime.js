@@ -71,6 +71,9 @@ export const ITEM_ID = /^m\d{1,9}$/;
 export const SESSION_PAGE_CSP = PAGE_CSP.replace("frame-ancestors 'none'", "frame-ancestors 'self'");
 /** How long a closed session display keeps its windows/timers/conversation (a phone's network blip reconnects well inside it). */
 export const SESSION_DISPLAY_GRACE_MS = 2 * 60 * 1000;
+/** B2: the bar audio's minute login check failing (or hanging past BAR_CHECK_TIMEOUT_MS) this many times in a row closes it. */
+export const BAR_CHECK_FAILURES = 3;
+export const BAR_CHECK_TIMEOUT_MS = 10_000;
 export const ASSETS = {
   "kiosk.js": "text/javascript", "state.js": "text/javascript", "audio.js": "text/javascript",
   "resample.js": "text/javascript", "pcm-worklet.js": "text/javascript", "vad.js": "text/javascript",
@@ -468,14 +471,40 @@ export function createKioskRuntime(deps) {
    * sweep ends the media at logout; an entry whose stream is gone (stopped, or the 12 h ticket ran out) is dropped.
    */
   const barRevalidators = new Map();
+  /**
+   * B2: consecutive failed (thrown or timed-out) checks per bar display; a success resets it. Deleted with the
+   * revalidator on every path (logout, stream gone, the overlay closing again). An open overlay (hub.isConnected)
+   * neither resets nor deletes it: its onClose re-sets both.
+   */
+  const barCheckFailures = new Map();
+  const barChecksInFlight = new Set();          // an id whose check is still running is not checked again by an overlapping sweep
+  const barCheckTimeoutMs = deps.barCheckTimeoutMs || BAR_CHECK_TIMEOUT_MS;
+  const dropBar = (id) => { barRevalidators.delete(id); barCheckFailures.delete(id); };
+  async function checkWithin(check) {
+    let timer;
+    const late = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer in ${barCheckTimeoutMs} ms`)), barCheckTimeoutMs); timer.unref?.(); });
+    try { return await Promise.race([Promise.resolve().then(check), late]); } finally { clearTimeout(timer); }
+  }
   async function revalidateBarDisplays() {
     for (const [id, check] of [...barRevalidators]) {
       if (hub.isConnected(id)) continue;            // an open overlay: the hub re-checks its socket
-      if (!media.holdsTicket(id)) { barRevalidators.delete(id); media.closeDevice(id); continue; }
+      if (barChecksInFlight.has(id)) continue;
+      if (!media.holdsTicket(id)) { dropBar(id); media.closeDevice(id); continue; }
       let ok = false;
-      try { ok = (await check()) === true; }
-      catch (err) { log(`[kiosk] session check failed: ${err?.message}`); continue; }   // the store could not be read: try next minute
-      if (!ok) { barRevalidators.delete(id); media.closeDevice(id); }                     // logged out: tickets revoked, open streams cut
+      barChecksInFlight.add(id);
+      try { ok = (await checkWithin(check)) === true; }
+      catch (err) {
+        // The store could not be read (or did not answer): try next minute, but not forever — the bar's own POSTs already 401.
+        const n = (barCheckFailures.get(id) || 0) + 1;
+        log(`[kiosk] session check failed: ${err?.message}`);
+        if (n >= BAR_CHECK_FAILURES) {
+          log(`[kiosk] session check failed ${n} times: closing bar audio for display ${id}`);
+          dropBar(id); media.closeDevice(id);
+        } else barCheckFailures.set(id, n);
+        continue;
+      } finally { barChecksInFlight.delete(id); }
+      barCheckFailures.delete(id);
+      if (!ok) { dropBar(id); media.closeDevice(id); }                     // logged out: tickets revoked, open streams cut
     }
   }
   function expireSessionDisplays(at = now()) {
@@ -953,6 +982,7 @@ export function createKioskRuntime(deps) {
           revalidate: () => deps.verifySession(token),
           onClose: (d, caps) => {
             closedSessionDisplays.set(d.id, now());
+            barCheckFailures.delete(d.id);
             if (caps?.bar) barRevalidators.set(d.id, () => deps.verifySession(token)); else barRevalidators.delete(d.id);
           },
         });
