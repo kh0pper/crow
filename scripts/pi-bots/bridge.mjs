@@ -99,6 +99,28 @@ export function toolAllowlist(def, { remoteEnabled = false } = {}) {
 }
 
 /**
+ * The envelope csv in a canonical order: pi builtins (every non-`mcp__` name)
+ * first, then `mcp__` names, each group in code-unit order — a pure function
+ * of the SET of granted tools. pi sends tools in the order of the `--tools`
+ * csv, and some engines cache the tool block (rendered before the system
+ * message) across conversations, so a reorder of the same set must not change
+ * the bytes. The stored def's order is not canonical: Bot Builder moves a
+ * re-moded source's block to the end of crow_mcp. Duplicates are kept (pi
+ * dedupes) so the tool-budget count is unchanged.
+ *
+ * "pi sends csv order" holds because pi-lab registers every MCP tool during
+ * extension load, before pi's first tool refresh: pi 0.85.1
+ * core/agent-session.js _refreshToolRegistry → setActiveToolsByName walks the
+ * initial active names (= the csv, core/sdk.js:144) and only APPENDS tools
+ * registered later. Re-check with a live capture after a pi or pi-lab upgrade.
+ */
+export function canonicalToolOrder(csv) {
+  const names = String(csv || "").split(",").filter(Boolean);
+  const isMcp = (n) => n.startsWith("mcp__");
+  return names.sort((a, b) => (isMcp(a) - isMcp(b)) || (a < b ? -1 : a > b ? 1 : 0)).join(",");
+}
+
+/**
  * THE `--tools` csv a pi child is pinned with (strand 2: extracted from the
  * PiRpc constructor verbatim, so the channel tool-budget preflight counts
  * exactly what the child will get). Also returns the multi-agent flags,
@@ -113,7 +135,7 @@ export function buildToolsCsv(def, { resolved, remoteEnabled = false, interactiv
   // custom tools"). Only expose `subagent` to the model when capable+
   // opted-in; otherwise pi never offers it. The gate is the backstop if a
   // hand DB-edit bypasses this.
-  let tools = toolAllowlist(def, { remoteEnabled });
+  let tools = canonicalToolOrder(toolAllowlist(def, { remoteEnabled }));
   if (maOptIn && maCapable) tools = [tools, "subagent"].filter(Boolean).join(",");
   // PL-3 completion, same belt as subagent above. pi-lab's ask-user
   // extension REGISTERS ask_user only under PI_BOT_INTERACTIVE=1

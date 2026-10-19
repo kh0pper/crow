@@ -145,7 +145,7 @@ const MA_RESOLVED = { provider: "zai-coding", model: "glm-5", key: "zai-coding/g
 
 test("PiRpc without narrowing spawns the def envelope unchanged (hot-path regression)", async () => {
   const argv = await spawnArgs({ def: MA_DEF, resolved: MA_RESOLVED });
-  assert.equal(toolsFlag(argv), "read,bash,mcp__crow-tasks__tasks_list,subagent");
+  assert.equal(toolsFlag(argv), "bash,read,mcp__crow-tasks__tasks_list,subagent");
 });
 
 test("PiRpc applies narrowing to the FINAL csv, after the subagent append", async () => {
@@ -176,7 +176,7 @@ test("malformed narrowing at the spawn keeps the def envelope", async () => {
     def: { tools: { pi_builtin: ["read", "bash"] } },
     narrowedTools: "{not json",
   });
-  assert.equal(toolsFlag(argv), "read,bash");
+  assert.equal(toolsFlag(argv), "bash,read");
 });
 
 test("a toolless def with no narrowing now pins --tools \"\" instead of omitting the flag", async () => {
@@ -197,7 +197,7 @@ const BOT_DEF = {
   models: { default: "stub/m1" },
   permission_policy: { multi_agent: false, bash: "deny", write_paths: [] },
 };
-const FULL_CSV = "read,bash,mcp__crow-tasks__tasks_list";
+const FULL_CSV = "bash,read,mcp__crow-tasks__tasks_list";   // canonical order (stable-tool-arrays)
 
 before(() => {
   execFileSync(process.execPath, ["scripts/init-db.js"], {
@@ -345,7 +345,7 @@ test("R2-L2: grant shapes — the bundle's grantsServer and the bridge path (too
 test("strand 2: the pinned --tools csv, literally, for channel / interactive / narrowed / multi-agent / remote spawns", async () => {
   const { buildToolsCsv } = await import("../scripts/pi-bots/bridge.mjs");
   const base = { tools: { pi_builtin: ["read", "bash"], crow_mcp: ["crow-tasks/tasks_list", "crow-memory/crow_store_memory"] } };
-  const MCP = "read,bash,mcp__crow-tasks__tasks_list,mcp__crow-memory__crow_store_memory";
+  const MCP = "bash,read,mcp__crow-memory__crow_store_memory,mcp__crow-tasks__tasks_list";   // canonical order
   const ma = Object.assign({}, base, { permission_policy: { multi_agent: true } });
   const remote = { tools: { pi_builtin: ["read"], remote_mcp: ["abcdef0123456789::crow-memory", "bad-entry"] } };
   const stub = { provider: "stub", model: "m1", key: "stub/m1" };
@@ -354,7 +354,7 @@ test("strand 2: the pinned --tools csv, literally, for channel / interactive / n
     [{ def: base }, stub, MCP],
     [{ def: base, extraEnv: { PI_BOT_INTERACTIVE: "1" } }, stub, MCP + ",ask_user,send_user_file"],
     [{ def: base, extraEnv: { PI_BOT_INTERACTIVE: "1" }, narrowedTools: '["bash","ask_user"]' }, stub,
-      "read,mcp__crow-tasks__tasks_list,mcp__crow-memory__crow_store_memory,send_user_file"],
+      "read,mcp__crow-memory__crow_store_memory,mcp__crow-tasks__tasks_list,send_user_file"],
     [{ def: ma }, stub, MCP],                                      // opted in, model not capable
     [{ def: ma, extraEnv: { PI_BOT_INTERACTIVE: "1" } }, capable, MCP + ",subagent,ask_user,send_user_file"],
     [{ def: remote, remoteEnabled: true }, stub, "read,mcp__crow-remote-abcdef01-crow-memory"],
