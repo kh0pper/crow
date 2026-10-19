@@ -345,6 +345,7 @@ test("bt-recover.sh: acts only on hci0 evidence, rebinds the serdev device, rest
     fake("journalctl", `[ -f "${dir}/fault" ] && echo "Oct 05 kernel: Bluetooth: hci0: command 0x0406 tx timeout"; exit 0`);
     fake("bluetoothctl", `[ "$1" = show ] && [ -f "${dir}/powered" ] && echo "	Powered: yes"; exit 0`);
     fake("systemctl", "exit 0"); fake("runuser", "exit 0"); fake("logger", "exit 0"); fake("id", `echo 1001`); fake("sleep", "exit 0");
+    fake("btmgmt", "exit 0");                        // no controller list: the serdev record path (pre-USB installs)
     const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, CROW_KIOSK_TEST_ROOT: root, CROW_KIOSK_BT_WAIT: "2" };
     const run = () => spawnSync("bash", [join(K, "bt-recover.sh")], { encoding: "utf8", env });
     const state = () => readFileSync(join(root, "run/crow-kiosk/bt-recover.state"), "utf8").split(" ")[0];
@@ -374,6 +375,96 @@ test("bt-recover.sh: acts only on hci0 evidence, rebinds the serdev device, rest
     assert.equal(run().status, 0);
     assert.match(calls(), /systemctl reboot/, "operator-enabled reboot");
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// bt-recover with a USB adapter (hci1, port 1-1.2) as the default controller and the onboard hci0 unmanaged.
+const btRecoverUsb = (dir, { cls = "e0", driver = "btusb", port = "1-1.2", listed = true, record = false, usbreset = true } = {}) => {
+  const root = join(dir, "root"), bin = join(dir, "bin"), log = join(dir, "calls");
+  const usbDev = join(root, "sys/devices/platform/soc/3f980000.usb/usb1", port === "1-1" ? "1-1" : "1-1/" + port);
+  const intf = join(usbDev, `${port}:1.0`);
+  mkdirSync(intf, { recursive: true }); mkdirSync(join(root, "sys/bus/usb/drivers", driver), { recursive: true });
+  symlinkSync(join(root, "sys/bus/usb/drivers", driver), join(intf, "driver"));
+  writeFileSync(join(usbDev, "bDeviceClass"), cls + "\n"); writeFileSync(join(usbDev, "busnum"), "1\n"); writeFileSync(join(usbDev, "devnum"), "5\n");
+  mkdirSync(join(root, "sys/bus/usb/devices"), { recursive: true }); symlinkSync(usbDev, join(root, "sys/bus/usb/devices", port));
+  mkdirSync(join(root, "sys/class/bluetooth/hci1"), { recursive: true }); symlinkSync(intf, join(root, "sys/class/bluetooth/hci1/device"));
+  mkdirSync(join(root, SERIAL_DEV), { recursive: true }); mkdirSync(join(root, "sys/class/bluetooth/hci0"), { recursive: true });
+  symlinkSync(join(root, SERIAL_DEV), join(root, "sys/class/bluetooth/hci0/device"));
+  if (record) { mkdirSync(join(root, "var/lib/crow-kiosk"), { recursive: true }); writeFileSync(join(root, "var/lib/crow-kiosk/bt-controller"), `bus=usb\nid=${port}\naddr=${USBBT}\n`); }
+  mkdirSync(bin);
+  const fake = (name, body) => writeFileSync(join(bin, name), `#!/bin/bash\necho "${name} $*" >> "${log}"\n${body}\n`, { mode: 0o755 });
+  fake("journalctl", `[ -f "${dir}/fault" ] && cat "${dir}/fault"; exit 0`);
+  fake("bluetoothctl", `case "$1" in
+  list) ${listed ? `echo "Controller ${USBBT} kiosk [default]"` : ":"} ;;
+  show) [ -f "${dir}/powered" ] && printf '\\tPowered: yes\\n' ;;
+esac; exit 0`);
+  fake("btmgmt", listed ? `printf 'Index list with 1 item\\nhci1:\\tPrimary controller\\n\\taddr ${USBBT} version 10 manufacturer 93 class 0x000000\\n'` : `echo "Index list with 0 items"`);
+  if (usbreset) fake("usbreset", `touch "${dir}/powered"; exit 0`);
+  fake("systemctl", "exit 0"); fake("runuser", "exit 0"); fake("logger", "exit 0"); fake("id", "echo 1001"); fake("sleep", "exit 0");
+  // never the host's own usbreset: the fake, or a path that does not exist
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, CROW_KIOSK_TEST_ROOT: root, CROW_KIOSK_BT_WAIT: "2", CROW_KIOSK_USBRESET: join(bin, "usbreset") };
+  return {
+    run: () => spawnSync("bash", [join(K, "bt-recover.sh")], { encoding: "utf8", env }),
+    state: () => readFileSync(join(root, "run/crow-kiosk/bt-recover.state"), "utf8").split(" ")[0],
+    calls: () => (existsSync(log) ? readFileSync(log, "utf8") : ""),
+    fault: (hci) => writeFileSync(join(dir, "fault"), `Oct 18 kernel: Bluetooth: ${hci}: command 0x0405 tx timeout\n`),
+  };
+};
+
+test("bt-recover.sh with a USB adapter: resets that adapter's port only, re-finds it by address, then bluetoothd + WirePlumber", (t) => {
+  if (!have("python3")) return t.skip("python3 not available");
+  const dir = mkdtempSync(join(tmpdir(), "kiosk-btrec-usb-"));
+  try {
+    const b = btRecoverUsb(dir);
+    b.fault("hci1");
+    const r = b.run();
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(b.state(), "ok", r.stdout);
+    const c = b.calls();
+    assert.match(c, /^usbreset 001\/005$/m, "the adapter's own bus/device number, never a hub or the webcam");
+    assert.match(c, new RegExp(`^bluetoothctl show ${USBBT}$`, "m"), "found again by its address");
+    assert.ok(c.indexOf("usbreset") < c.indexOf("systemctl restart bluetooth.service"));
+    assert.ok(c.indexOf("systemctl restart bluetooth.service") < c.indexOf("runuser -u kiosk"));
+    assert.doesNotMatch(c, /bluetoothctl (remove|pair|trust)/, "recovery never re-pairs");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("bt-recover.sh with a USB adapter: errors from another controller are no evidence", (t) => {
+  if (!have("python3")) return t.skip("python3 not available");
+  const dir = mkdtempSync(join(tmpdir(), "kiosk-btrec-usb-"));
+  try {
+    const b = btRecoverUsb(dir);
+    b.fault("hci0");                                 // the unused onboard controller
+    assert.equal(b.run().status, 0);
+    assert.equal(b.state(), "no_fault");
+    assert.doesNotMatch(b.calls(), /usbreset/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("bt-recover.sh with a USB adapter: BlueZ lost it, so the controller record finds the port", (t) => {
+  if (!have("python3")) return t.skip("python3 not available");
+  const dir = mkdtempSync(join(tmpdir(), "kiosk-btrec-usb-"));
+  try {
+    const b = btRecoverUsb(dir, { listed: false, record: true });
+    b.fault("hci1");
+    assert.equal(b.run().status, 0);
+    assert.equal(b.state(), "ok");
+    assert.match(b.calls(), /^usbreset 001\/005$/m);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("bt-recover.sh with a USB adapter: a hub, a device without btusb, a root-level port or no usbreset is never reset", (t) => {
+  if (!have("python3")) return t.skip("python3 not available");
+  for (const [opts, what] of [[{ cls: "09" }, "hub class"], [{ driver: "uvcvideo" }, "not btusb"], [{ port: "1-1" }, "root-level port"], [{ usbreset: false }, "no usbreset"]]) {
+    const dir = mkdtempSync(join(tmpdir(), "kiosk-btrec-usb-"));
+    try {
+      const b = btRecoverUsb(dir, opts);
+      b.fault("hci1");
+      assert.equal(b.run().status, 0, what);
+      assert.equal(b.state(), "needs_restart", what);
+      assert.doesNotMatch(b.calls(), /^usbreset/m, what);
+      assert.doesNotMatch(b.calls(), /restart bluetooth\.service/, what);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
 });
 
 test("kiosk-launch.sh waits (bounded) for the speaker's sink before starting Chromium", () => {
