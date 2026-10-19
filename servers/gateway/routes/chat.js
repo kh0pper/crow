@@ -31,6 +31,8 @@ import { recordUsageEvent } from "../../shared/metering.js";
 import { resolveTenantId } from "../../shared/tenancy.js";
 import { parseCookies } from "../dashboard/auth.js";
 import { t, fill, SUPPORTED_LANGS } from "../dashboard/shared/i18n.js";
+import { appendDates } from "../../shared/relative-dates.js";
+import { createContextEchoGate } from "../voice/context-echo.js";
 
 /** Sliding window: max messages to send to AI */
 const CONTEXT_WINDOW = 20;
@@ -52,6 +54,37 @@ const messageRateLimit = fixedWindowLimit({ max: 10, windowMs: 60 * 1000 });
  * minutes — long enough that a bare "warming" pill with no explanation
  * reads as a hang.
  */
+/**
+ * The latest USER turn's per-request rewrite (never historical messages, so the cached prefix is undisturbed):
+ *   1. slash-command strip (stripSlash: the smart-router matched a `/code`/`/vision`/… prefix; the raw prefix stays
+ *      in chat_messages.content for transparency);
+ *   2. the current date/time stamp (moved off the static system preamble, see buildPreamble in ai/system-prompt.js);
+ *   3. a [Dates] line (servers/shared/relative-dates.js) when the user's own words name a relative day — tested on
+ *      the (stripped) words, never the stamp, which names a weekday.
+ * Applied to the latest user message in EVERY tool round (not only while it is the last message), with one `now`
+ * per request, so the model keeps the date after a tool call and the message's bytes match round to round.
+ * Server zone (the zone the stamp has always used). → { messages, datesLine } (datesLine null when none added).
+ */
+export function stampLatestUserTurn(recentMessages, { now = new Date(), stripSlash = false } = {}) {
+  const at = now instanceof Date ? now : new Date(now);
+  let idx = -1;
+  for (let i = recentMessages.length - 1; i >= 0; i--) if (recentMessages[i]?.role === "user") { idx = i; break; }
+  const target = recentMessages[idx];
+  if (idx < 0 || typeof target.content !== "string") return { messages: recentMessages.slice(), datesLine: null };
+  const words = stripSlash ? stripSlashCommand(target.content) : target.content;
+  const nowLine = `Current date and time: ${at.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}, ${at.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZoneName: "short" })}`;
+  const { text, line } = appendDates(`${words}\n\n[${nowLine}]`, words, { now: at.getTime(), tz: null });
+  const messages = recentMessages.slice();
+  messages[idx] = { ...target, content: text };
+  return { messages, datesLine: line };
+}
+
+/** One per model round: removes an echo of the turn's [Dates] line from the streamed answer (a pass-through without one). */
+export function chatEchoGate(datesLine) {
+  if (!datesLine) return { feed: (text) => text, flush: () => "" };
+  return createContextEchoGate([datesLine]);
+}
+
 export function nativeWarmingEvent(providerName, isNative, lang) {
   if (!isNative) return { provider_id: providerName };
   return {
@@ -752,6 +785,12 @@ export default function chatRouter(dashboardAuth) {
       // Get MCP tools for AI
       const tools = getChatTools();
 
+      // One `now` for the whole request: the stamped user message is byte-identical in every tool round.
+      const turnNow = new Date();
+      const stripSlash = !!(smartRoute_result
+        && typeof smartRoute_result.reason === "string"
+        && /matched \//.test(smartRoute_result.reason));
+
       // Tool call loop
       let rounds = 0;
       let totalInputTokens = 0;
@@ -791,52 +830,38 @@ export default function chatRouter(dashboardAuth) {
           }
         }
 
-        // Build messages array for AI. Two rewrites apply ONLY to the latest
-        // user turn (the tail), never to historical messages, so the cached
-        // KV prefix (system + tools + prior turns) is never disturbed:
-        //   1. Slash-command strip — when the smart-router matched on a
-        //      `/code`/`/vision`/etc. prefix, the model sees the clean prompt
-        //      (the raw prefix stays in chat_messages.content for transparency).
-        //   2. Current date/time stamp — moved off the static system preamble
-        //      (see buildPreamble in ai/system-prompt.js) to here, where it is
-        //      reprocessed every turn anyway and cannot bust the prefix cache.
-        const lastMsg = recentMessages[recentMessages.length - 1];
-        const now = new Date();
-        const nowLine = `Current date and time: ${now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}, ${now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZoneName: "short" })}`;
+        // Build messages array for AI: the latest user turn is stamped (stampLatestUserTurn above).
+        const stamped = stampLatestUserTurn(recentMessages, { now: turnNow, stripSlash });
         const aiMessages = [
           { role: "system", content: systemPrompt },
-          ...recentMessages.map((m) => {
-            if (m !== lastMsg || m.role !== "user" || typeof m.content !== "string") {
-              return m;
-            }
-            let content = m.content;
-            if (
-              smartRoute_result
-              && typeof smartRoute_result.reason === "string"
-              && /matched \//.test(smartRoute_result.reason)
-            ) {
-              content = stripSlashCommand(content);
-            }
-            content = `${content}\n\n[${nowLine}]`;
-            return { ...m, content };
-          }),
+          ...stamped.messages,
         ];
-
         // Stream response from AI
         let assistantContent = "";
         const toolCalls = [];
         let roundInputTokens = 0;
         let roundOutputTokens = 0;
+        // Echo guard for the [Dates] line, one gate per round; flushed before the round's text is saved on every path.
+        const echo = chatEchoGate(stamped.datesLine);
+        const flushEcho = () => {
+          const rest = echo.flush();
+          if (!rest) return;
+          assistantContent += rest;
+          if (!abortController.signal.aborted) sendEvent("content", { delta: rest });
+        };
 
         try {
           for await (const event of adapter.chatStream(aiMessages, tools, chatStreamOptionsFor(resolvedProviderCfg, abortController.signal))) {
             if (abortController.signal.aborted) break;
 
             switch (event.type) {
-              case "content_delta":
-                assistantContent += event.text;
-                sendEvent("content", { delta: event.text });
+              case "content_delta": {
+                const safe = echo.feed(event.text);
+                if (!safe) break;
+                assistantContent += safe;
+                sendEvent("content", { delta: safe });
                 break;
+              }
 
               case "tool_call":
                 toolCalls.push({
@@ -859,7 +884,9 @@ export default function chatRouter(dashboardAuth) {
                 break;
             }
           }
+          flushEcho();
         } catch (err) {
+          flushEcho();
           if (abortController.signal.aborted) {
             // Cancelled — save partial content
             if (assistantContent) {
