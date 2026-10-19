@@ -177,8 +177,8 @@ test("sunvox: filesystem paths are confined to the work dir", async () => {
 
 test("sunvox: compose bounds and numeric params", { skip: !engine && SKIP_REASON }, async () => {
   const pat = { tracks: 1, lines: 4, events: [] };
-  await assert.rejects(() => engine.compose({ modules: [{ id: "g", type: "Analog generator" }], patterns: [{ tracks: 1, lines: 100000, events: [] }] }), /lines: at most/);
-  await assert.rejects(() => engine.compose({ modules: [{ id: "g", type: "Analog generator" }], patterns: [{ tracks: 99, lines: 4, events: [] }] }), /tracks: at most/);
+  await assert.rejects(() => engine.compose({ modules: [{ id: "g", type: "Analog generator" }], patterns: [{ tracks: 1, lines: 100000, events: [] }] }), /lines: an integer from 1 to/);
+  await assert.rejects(() => engine.compose({ modules: [{ id: "g", type: "Analog generator" }], patterns: [{ tracks: 99, lines: 4, events: [] }] }), /tracks: an integer from 1 to/);
   await assert.rejects(() => engine.compose({ modules: Array.from({ length: 500 }, (_, i) => ({ id: "m" + i, type: "Generator" })), patterns: [pat] }), /at most \d+ modules/);
   await assert.rejects(
     () => engine.compose({ modules: [{ id: "g", type: "Analog generator", params: { Waveform: "sawtooth" } }], patterns: [pat] }),
@@ -240,4 +240,17 @@ test("sunvox: total pattern cells are capped and a null event gets a clear error
   const big = Array.from({ length: 256 }, () => ({ tracks: 32, lines: 4096, events: [] }));
   await assert.rejects(() => engine.compose({ modules: mods, patterns: big }), /cells/);
   await assert.rejects(() => engine.compose({ modules: mods, patterns: [{ tracks: 1, lines: 4, events: [null] }] }), /every pattern event must be an object/);
+});
+
+test("sunvox: negative, fractional or huge tracks/lines are refused before the cell total is summed", { skip: !engine && SKIP_REASON }, async () => {
+  const mods = [{ id: "g", type: "Analog generator" }];
+  // A negative pattern used to subtract from the running cell total and let
+  // the next pattern exceed maxCells.
+  const bypass = [{ tracks: -32, lines: 4096, events: [] }, ...Array.from({ length: 17 }, () => ({ tracks: 32, lines: 4096, events: [] }))]; // 17 alone exceed maxCells; the old sum minus the negative landed exactly on it
+  await assert.rejects(() => engine.compose({ modules: mods, patterns: bypass }), /tracks: an integer from 1 to/);
+  for (const bad of [{ tracks: 1, lines: -64 }, { tracks: 0, lines: 4 }, { tracks: 1.5, lines: 4 }, { tracks: 1, lines: 1e9 }, { tracks: 2 ** 40, lines: 4 }, { tracks: "4", lines: 4 }]) {
+    await assert.rejects(() => engine.compose({ modules: mods, patterns: [{ ...bad, events: [] }] }), /an integer from 1 to/, JSON.stringify(bad));
+  }
+  const ok = await engine.compose({ modules: mods, patterns: [{ events: [] }] }); // defaults 1 x 64
+  assert.equal(ok.info.pattern_list[0].lines, 64);
 });

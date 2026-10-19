@@ -380,11 +380,16 @@ export function compose(spec, { name = "crow-compose" } = {}) {
     let cells = 0;
     for (const p of spec.patterns) {
       if (!p || typeof p !== "object") throw new Error("every pattern must be an object");
-      if ((p.tracks | 0) > LIMITS.maxTracks) throw new Error(`pattern tracks: at most ${LIMITS.maxTracks}`);
-      if ((p.lines | 0) > LIMITS.maxLines) throw new Error(`pattern lines: at most ${LIMITS.maxLines}`);
+      // tracks/lines: integers in [1, max] after the defaults (1 track, 64
+      // lines). Checked before summing so a negative value cannot lower the
+      // cell total and slip past maxCells.
+      const tracks = p.tracks === undefined || p.tracks === null ? 1 : p.tracks;
+      const lines = p.lines === undefined || p.lines === null ? 64 : p.lines;
+      if (!Number.isInteger(tracks) || tracks < 1 || tracks > LIMITS.maxTracks) throw new Error(`pattern tracks: an integer from 1 to ${LIMITS.maxTracks}, got ${JSON.stringify(p.tracks)}`);
+      if (!Number.isInteger(lines) || lines < 1 || lines > LIMITS.maxLines) throw new Error(`pattern lines: an integer from 1 to ${LIMITS.maxLines}, got ${JSON.stringify(p.lines)}`);
       if (p.events !== undefined && !Array.isArray(p.events)) throw new Error("pattern events must be an array");
       if ((p.events || []).some((ev) => !ev || typeof ev !== "object")) throw new Error("every pattern event must be an object");
-      cells += (p.tracks | 0 || 1) * (p.lines | 0 || 64);
+      cells += tracks * lines;
       eventCount += (p.events || []).length;
     }
     if (eventCount > LIMITS.maxEvents) throw new Error(`spec has ${eventCount} events; at most ${LIMITS.maxEvents}`);
