@@ -1143,6 +1143,86 @@ test("B2 a hung login check counts as a failure after the check timeout, and an 
   } finally { r.close(); }
 });
 
+/** B2/B3 rig: a login store whose next check (once armed) waits until the test settles it. */
+function gatedStore() {
+  const gate = { armed: false, pending: null };
+  const verifySession = async (tok) => {
+    if (gate.armed) {
+      gate.armed = false;
+      return new Promise((resolve, reject) => { gate.pending = { resolve, reject }; });
+    }
+    return auth.verifySession(tok);
+  };
+  return { gate, verifySession };
+}
+/** Start a sweep whose bar check hangs on the gate; → { done } (the sweep) once the check is waiting. */
+async function sweepHeldAtCheck(r, gate) {
+  gate.armed = true;
+  const done = r.sweep();
+  for (let i = 0; i < 200 && !gate.pending; i++) await new Promise((res) => setTimeout(res, 5));
+  assert.ok(gate.pending, "the bar check started");
+  return { done };
+}
+
+test("B3 a bar check that answers 'logged out' only after the overlay reopened leaves the reopened overlay's audio alone", async () => {
+  const { gate, verifySession } = gatedStore();
+  const r = await barServe({ verifySession });
+  try {
+    const c = await r.open();
+    const path = r.play();
+    await c.shut();
+    r.clock.t += 60_000;
+    const { done } = await sweepHeldAtCheck(r, gate);
+    const c2 = await r.open();
+    gate.pending.resolve(false);
+    await done;
+    assert.equal(r.k.media.active(r.idOf()), true, "the stale answer did not close the device");
+    assert.equal((await r.stream(path)).status, 200);
+    c2.ws.close();
+  } finally { r.close(); }
+});
+
+test("B3 a bar check that answers 'logged out' only after a new bar hello re-registered the display is ignored", async () => {
+  const { gate, verifySession } = gatedStore();
+  const r = await barServe({ verifySession });
+  try {
+    const c = await r.open();
+    const path = r.play();
+    await c.shut();
+    r.clock.t += 60_000;
+    const { done } = await sweepHeldAtCheck(r, gate);
+    const c2 = await r.open();
+    await c2.shut();                                  // a new revalidator replaces the one in flight
+    gate.pending.resolve(false);
+    await done;
+    assert.equal(r.k.media.active(r.idOf()), true);
+    assert.equal(r.k.barDisplays(), 1, "the new revalidator is kept");
+    assert.equal((await r.stream(path)).status, 200);
+  } finally { r.close(); }
+});
+
+test("B2 a bar check that throws only after the overlay reopened is not counted (no third-failure close)", async () => {
+  const { gate, verifySession } = gatedStore();
+  const failing = { on: false };
+  const r = await barServe({ verifySession: async (tok) => { if (failing.on) throw new Error("store unreadable"); return verifySession(tok); } });
+  try {
+    const c = await r.open();
+    const path = r.play();
+    await c.shut();
+    failing.on = true;
+    for (let i = 1; i < kiosk.BAR_CHECK_FAILURES; i++) { r.clock.t += 60_000; await r.sweep(); }
+    failing.on = false;
+    r.clock.t += 60_000;
+    const { done } = await sweepHeldAtCheck(r, gate);
+    const c2 = await r.open();
+    gate.pending.reject(new Error("store unreadable"));
+    await done;
+    assert.equal(r.k.media.active(r.idOf()), true, "the late failure did not close the reopened overlay's audio");
+    assert.equal((await r.stream(path)).status, 200);
+    c2.ws.close();
+  } finally { r.close(); }
+});
+
 /** B3 rig: bar audio at volume 30, muted, the overlay closed, then the owner's stop from the bar. */
 async function stoppedInGrace(r, tok = sessionToken) {
   const c = await r.open({ tok });

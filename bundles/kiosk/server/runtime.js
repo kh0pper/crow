@@ -480,6 +480,8 @@ export function createKioskRuntime(deps) {
   const barChecksInFlight = new Set();          // an id whose check is still running is not checked again by an overlapping sweep
   const barCheckTimeoutMs = deps.barCheckTimeoutMs || BAR_CHECK_TIMEOUT_MS;
   const dropBar = (id) => { barRevalidators.delete(id); barCheckFailures.delete(id); };
+  // The timeout does not cancel the underlying verifySession: a hung store keeps its call pending, so at most ~3 hung
+  // calls (one per minute, never two at once for an id) pile up before BAR_CHECK_FAILURES closes the bar.
   async function checkWithin(check) {
     let timer;
     const late = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer in ${barCheckTimeoutMs} ms`)), barCheckTimeoutMs); timer.unref?.(); });
@@ -493,15 +495,20 @@ export function createKioskRuntime(deps) {
         // The stream is gone (stopped, or the 12 h ticket ran out): no login check is kept. Inside the grace window the
         // device entry (its volume, mute) is left to expireSessionDisplays, which closes it at grace end now that the
         // revalidator is gone; nothing streams meanwhile (end() revoked the ticket). This relies on the sweep running
-        // expireSessionDisplays() BEFORE this function, so an entry past its grace is already gone here.
+        // expireSessionDisplays() BEFORE this function, so an entry past its grace is already gone here — at sweep
+        // start: a long loop (each check may wait up to the timeout) can close an entry a minute late, which is harmless.
         dropBar(id);
         if (!closedSessionDisplays.has(id)) media.closeDevice(id);
         continue;
       }
       let ok = false;
       barChecksInFlight.add(id);
+      // While the check waited (up to the timeout) the overlay may have reopened, or a new bar hello re-registered the
+      // display: the answer is stale then, so it neither closes the audio the overlay now uses nor counts as a failure.
+      const stale = () => hub.isConnected(id) || barRevalidators.get(id) !== check;
       try { ok = (await checkWithin(check)) === true; }
       catch (err) {
+        if (stale()) continue;
         // The store could not be read (or did not answer): try next minute, but not forever — the bar's own POSTs already 401.
         const n = (barCheckFailures.get(id) || 0) + 1;
         log(`[kiosk] session check failed: ${err?.message}`);
@@ -511,6 +518,7 @@ export function createKioskRuntime(deps) {
         } else barCheckFailures.set(id, n);
         continue;
       } finally { barChecksInFlight.delete(id); }
+      if (stale()) continue;
       barCheckFailures.delete(id);
       if (!ok) { dropBar(id); media.closeDevice(id); }                     // logged out: tickets revoked, open streams cut
     }
