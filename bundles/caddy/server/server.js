@@ -151,6 +151,26 @@ export async function federationNetworkNames(network = "crow-federation") {
   return names;
 }
 
+/**
+ * caddy_add_site's extra_directives: one-line directives from a short list, with no
+ * braces, quotes-escapes or comments, so nothing can close the site block, open another
+ * one, proxy elsewhere (Caddy's admin API, a tailnet machine) or import a file. Anything
+ * richer is a hand edit of the Caddyfile.
+ */
+export const EXTRA_DIRECTIVES = new Set(["encode", "header", "redir", "rewrite", "uri", "respond", "tls", "log", "request_body"]);
+export function extraDirectivesProblem(text) {
+  if (text === undefined || text === null || text === "") return null;
+  for (const raw of String(text).split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (/[{}#`\\]/.test(line)) return "braces, backticks, backslashes and # are not allowed";
+    if (/(^|[^0-9])2019([^0-9]|$)/.test(line)) return "port 2019 (Caddy's admin API) is not allowed";
+    const first = line.split(/\s+/)[0];
+    if (!EXTRA_DIRECTIVES.has(first)) return `only ${[...EXTRA_DIRECTIVES].join(", ")} (got ${first.slice(0, 40)})`;
+  }
+  return null;
+}
+
 export function createCaddyServer(options = {}) {
   const networkNames = options.networkNames || federationNetworkNames;
   /** Why these upstreams can't be used, or null: the strict form, then network membership. */
@@ -297,7 +317,7 @@ export function createCaddyServer(options = {}) {
     {
       domain: z.string().min(1).max(253).describe("Site address (e.g., example.com, *.example.com, :8080). Must not contain whitespace or braces."),
       upstream: z.string().min(1).max(500).describe("Reverse-proxy upstream: a container on Caddy's network crow-federation, as name:port (e.g., crow-gotosocial:8080). Never a loopback address (that is the Caddy container itself) or port 2019."),
-      extra_directives: z.string().max(5000).optional().describe("Optional extra Caddyfile directives to include in the site block, one per line (no leading indent)."),
+      extra_directives: z.string().max(5000).optional().describe(`Optional extra directives for the site block, one per line (no leading indent), no braces or comments. Only: ${[...EXTRA_DIRECTIVES].join(", ")}. Anything else (another proxy, a nested block, import, admin): edit the Caddyfile by hand and call caddy_reload.`),
     },
     async ({ domain, upstream, extra_directives }) => {
       try {
@@ -307,6 +327,10 @@ export function createCaddyServer(options = {}) {
         {
           const bad = await upstreamsProblem([["upstream", upstream]]);
           if (bad) return { content: [{ type: "text", text: `Error: ${bad}.` }] };
+        }
+        {
+          const bad = extraDirectivesProblem(extra_directives);
+          if (bad) return { content: [{ type: "text", text: `Error: extra_directives: ${bad}.` }] };
         }
 
         const source = readCaddyfile(CONFIG_DIR());

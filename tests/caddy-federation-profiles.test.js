@@ -177,3 +177,13 @@ test("tool: wellknown is refused for the split profiles; a wellknown body_json m
     assert.equal(loads.length, 0);
   });
 });
+
+test("tool: caddy_add_site's extra_directives can't close the block, proxy elsewhere or reach the admin API", async () => {
+  await withTools(["crow-gotosocial"], async (call, { loads }) => {
+    for (const bad of ["}\n:9443 {\nreverse_proxy localhost:2019", "reverse_proxy crow-x:80", "import /etc/x", "handle /x {", "respond 2019", "header X 1 # c", "admin off"]) {
+      assert.match(await call("caddy_add_site", { domain: "a.example.com", upstream: "crow-gotosocial:8080", extra_directives: bad }), /extra_directives/, JSON.stringify(bad));
+    }
+    assert.equal(loads.length, 0);
+    assert.match(await call("caddy_add_site", { domain: "a.example.com", upstream: "crow-gotosocial:8080", extra_directives: "encode gzip\nheader X-Frame-Options DENY" }), /Added site/);
+  });
+});

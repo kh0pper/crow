@@ -129,7 +129,7 @@ test("Lemmy's API is published on loopback only, and every default URL points at
   assert.equal(env.LEMMY_URL.default, undefined);
   assert.equal(env.LEMMY_API_PORT.default, "8040");
   assert.match("8040", new RegExp(env.LEMMY_API_PORT.pattern));
-  assert.doesNotMatch("80; rm", new RegExp(env.LEMMY_API_PORT.pattern));
+  for (const bad of ["80; rm", "08040", "65536", "99999", "0"]) assert.doesNotMatch(bad, new RegExp(env.LEMMY_API_PORT.pattern), bad);
   assert.ok(manifest.server.envKeys.includes("LEMMY_API_PORT"), "the MCP server gets the port");
   assert.deepEqual(manifest.ports, [], "loopback only: no tailnet firewall rule (manifest.ports opens one)");
   for (const f of ["server/server.js", "panel/routes.js"]) {
