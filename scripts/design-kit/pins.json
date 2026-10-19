@@ -376,6 +376,24 @@
         "upstream revision 2.1.4d (the archive's own label); manifest versions are strict x.y.z",
         "page load order: sunvox.js, then sunvox-wasm.js (embeds the WASM, wraps the SunVoxLib factory), then sunvox_lib_loader.js; the engine is ready at svlib.then(Module => ...)",
         "no .wasm file is shipped: artifact pages are connect-src 'none', so the engine bytes ride base64 inside sunvox-wasm.js"
+      ],
+      "notices_from": [
+        {
+          "from": "sunvox_lib/sunvox_lib/docs/license/LICENSE.txt",
+          "to": "licenses/sunvox-library-terms.txt"
+        },
+        {
+          "from": "sunvox_lib/sunvox_lib/docs/license/sundog.txt",
+          "to": "licenses/sunvox-sundog.txt"
+        },
+        {
+          "from": "sunvox_lib/sunvox_lib/docs/license/libflac.txt",
+          "to": "licenses/sunvox-libflac.txt"
+        },
+        {
+          "from": "sunvox_lib/sunvox_lib/docs/license/tremor.txt",
+          "to": "licenses/sunvox-tremor.txt"
+        }
       ]
     }
   ]

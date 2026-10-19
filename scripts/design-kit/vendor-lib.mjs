@@ -365,9 +365,17 @@ for (const pin of PINS.entries) {
         notes.push(`the engine's WASM rides base64 inside ${pin.wasm_embed.to} (wasm sha256 ${sha256Hex(wasm)}): artifact pages are connect-src 'none', so nothing may fetch a .wasm at runtime; ${pin.wasm_embed.factory} is wrapped to receive the bytes as Module.wasmBinary`);
       }
       const lic = put(`licenses/${fileStem(pin.name)}.txt`, need(p.dir, pin.license_from, pin.source_url));
+      // Upstream terms that travel with the prebuilt binaries (attribution
+      // line, bundled third-party licences) ship verbatim as notices.
+      const notices = (pin.notices_from || []).map((n) => {
+        if (!String(n.to).startsWith("licenses/")) throw new Error(`${pin.name}: notice ${n.to} must live under licenses/`);
+        const w = put(n.to, need(p.dir, n.from, pin.source_url));
+        return { path: w.path, sha256: w.sha256 };
+      });
       byName.set(pin.name, {
         name: pin.name, kind: pin.kind, version: pin.version, license: pin.license,
         license_file: lic.path, license_sha256: lic.sha256,
+        ...(notices.length ? { notices } : {}),
         source: `url:${pin.source_url}@${pin.source_sha256}`, archive_sha256: pin.source_sha256,
         allowed: pin.allowed, requires: pin.requires || [],
         files, main: pin.main, ...(pin.global ? { global: pin.global } : {}),

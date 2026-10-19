@@ -618,6 +618,24 @@
       "license": "MIT",
       "license_file": "licenses/sunvox.txt",
       "license_sha256": "b77951ea36be87cd26888c205f39c43493d2fad8a9ebbf9a4ee5c85ec8ebab62",
+      "notices": [
+        {
+          "path": "licenses/sunvox-library-terms.txt",
+          "sha256": "dacc30b18f685d220458036211a6bff5ecea9549985dd8b0d0def5be71ac52f4"
+        },
+        {
+          "path": "licenses/sunvox-sundog.txt",
+          "sha256": "b0d74f52317d11fabdf078fd150cd3353249baee4baccdd27323f60bef300875"
+        },
+        {
+          "path": "licenses/sunvox-libflac.txt",
+          "sha256": "12600ea1a7affcbf469bd0d8b2cd725e4167114a2ee834b88f5d2857bfd7ddbf"
+        },
+        {
+          "path": "licenses/sunvox-tremor.txt",
+          "sha256": "d2ab5758336489da61c12cc5bb757da5339c4ae9001f9bb0562b4370249af814"
+        }
+      ],
       "source": "url:https://www.warmplace.ru/soft/sunvox/sunvox_lib-2.1.4d.zip@abe851de9d65a10e06673bf33257154591a2ff63ad2bb298488a5941cc5f4057",
       "archive_sha256": "abe851de9d65a10e06673bf33257154591a2ff63ad2bb298488a5941cc5f4057",
       "allowed": [

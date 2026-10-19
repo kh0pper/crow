@@ -55,3 +55,14 @@ lib/manifest.json and scripts/design-kit/pins.json.
   sunvox.wasm as base64 and wraps the engine's SunVoxLib factory so the loader
   receives the bytes as Module.wasmBinary. This exists because artifact pages
   run under connect-src 'none' — no runtime fetch of a .wasm file is possible.
+
+The prebuilt library carries upstream terms beyond the engine-source MIT text
+(sunvox_lib/docs/license/ in the pinned archive), shipped verbatim under
+lib/licenses/ and copied into every artifact that uses the library:
+  Powered by SunVox (modular synth & tracker)
+  Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.ru
+- lib/licenses/sunvox-library-terms.txt: the library terms (free use, including
+  commercial, with the attribution line above)
+- lib/licenses/sunvox-sundog.txt: SunDog engine, MIT
+- lib/licenses/sunvox-libflac.txt: libFLAC, BSD-3-Clause (Xiph.Org)
+- lib/licenses/sunvox-tremor.txt: Tremor (Ogg Vorbis decoder), BSD-3-Clause (Xiph.Org)
