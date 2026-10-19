@@ -164,7 +164,8 @@ export function profileTakesBackend(profile) {
  *     no FQDN that public DNS could point at 127.0.0.1;
  *   - never Caddy itself (`caddy`, `crow-caddy`) or `localhost`: Caddy runs in its own
  *     container with its admin API on 0.0.0.0:2019 there, so a proxied request to it
- *     could rewrite the whole configuration;
+ *     could rewrite the whole configuration (the network check in server.js also drops every
+ *     other name of that container, such as its short container ID);
  *   - the port is a decimal 1-65535 without leading zeros, and never 2019.
  * Nothing it accepts can end a line, open a block, start a comment or quote in a Caddyfile.
  */

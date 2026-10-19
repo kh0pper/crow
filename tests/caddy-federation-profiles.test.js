@@ -187,3 +187,15 @@ test("tool: caddy_add_site's extra_directives can't close the block, proxy elsew
     assert.match(await call("caddy_add_site", { domain: "a.example.com", upstream: "crow-gotosocial:8080", extra_directives: "encode gzip\nheader X-Frame-Options DENY" }), /Added site/);
   });
 });
+
+test("federationNetworkNames never offers Caddy's own container, under any of its names (its short ID is a DNS name too)", async () => {
+  const { federationNetworkNames } = await import("../bundles/caddy/server/server.js");
+  const net = [{ Containers: { aaa: {}, bbb: {} } }];
+  const inspect = [
+    { Id: "abcdef123456789", Name: "/crow-caddy", NetworkSettings: { Networks: { "crow-federation": { Aliases: ["caddy"], DNSNames: ["crow-caddy", "caddy", "abcdef123456"] } } } },
+    { Id: "fedcba654321000", Name: "/crow-lemmy", NetworkSettings: { Networks: { "crow-federation": { Aliases: ["lemmy"], DNSNames: ["crow-lemmy", "lemmy", "fedcba654321"] } } } },
+  ];
+  const docker = async (args) => (args[0] === "network" ? net : inspect);
+  const names = await federationNetworkNames("crow-federation", { docker });
+  assert.deepEqual([...names].sort(), ["crow-lemmy", "fedcba654321", "lemmy"]);
+});

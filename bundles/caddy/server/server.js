@@ -138,13 +138,18 @@ function dockerJson(args) {
     try { resolve(JSON.parse(String(stdout))); } catch (e) { reject(e); }
   }));
 }
-export async function federationNetworkNames(network = "crow-federation") {
-  const [net] = await dockerJson(["network", "inspect", network, "--format", "json"]);
+// Caddy's own container: never an upstream under any name (its short container ID is a
+// Docker DNS name too, and Caddy's admin API listens inside it).
+const CADDY_CONTAINER = "crow-caddy";
+export async function federationNetworkNames(network = "crow-federation", { docker = dockerJson } = {}) {
+  const [net] = await docker(["network", "inspect", network, "--format", "json"]);
   const ids = Object.keys(net?.Containers || {});
   const names = new Set();
   if (!ids.length) return names;
-  for (const c of await dockerJson(["inspect", "--format", "json", ...ids])) {
-    if (c?.Name) names.add(String(c.Name).replace(/^\//, "").toLowerCase());
+  for (const c of await docker(["inspect", "--format", "json", ...ids])) {
+    const name = String(c?.Name || "").replace(/^\//, "").toLowerCase();
+    if (name === CADDY_CONTAINER) continue;
+    if (name) names.add(name);
     const ep = c?.NetworkSettings?.Networks?.[network];
     for (const a of [...(ep?.Aliases || []), ...(ep?.DNSNames || [])]) names.add(String(a).toLowerCase());
   }
