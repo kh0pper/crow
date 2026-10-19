@@ -232,3 +232,41 @@ test("through the /tools proxy: an open root keeps its arguments, a closed root 
   assert.equal(closed.forwarded.length, 1, "refused calls never reach the upstream");
   await closed.close();
 });
+
+test("hostile upstream schemas are bounded: a $defs DAG and alias spellings of a self-ref stay small and fast", () => {
+  const defs = {};
+  for (let l = 0; l < 9; l++) {
+    const props = {};
+    for (let f = 0; f < 12; f++) props[`p${f}`] = l === 8 ? { type: "string" } : { $ref: `#/$defs/L${l + 1}` };
+    defs[`L${l}`] = { type: "object", properties: props };
+  }
+  const dag = { type: "object", $defs: defs, properties: { root: { $ref: "#/$defs/L0" } } };
+  const alias = { type: "object", properties: { a: { type: "object", properties: {
+    x: { $ref: "#/properties/a" }, y: { $ref: "#//properties/a" }, z: { $ref: "#/%70roperties/a" }, w: { $ref: "#/properties//a" } } } } };
+  for (const [name, schema] of [["dag", dag], ["alias", alias]]) {
+    const t0 = Date.now();
+    const out = roundTrip(schema);
+    const ms = Date.now() - t0;
+    assert.ok(ms < 1000, `${name}: ${ms} ms`);
+    assert.ok(JSON.stringify(out).length < 512 * 1024, `${name}: ${JSON.stringify(out).length} bytes`);
+    assert.deepEqual(grammarHazards(out), [], name);
+  }
+});
+
+test("a malformed $ref never throws, and one bad tool never sinks the re-published surface", async () => {
+  assert.deepEqual(grammarHazards(roundTrip({ type: "object", properties: { a: { $ref: "#/%E0%A4%A" } } })), []);
+  const { jsonSchemaToZodObject } = await import("../servers/shared/json-schema-to-zod.js");
+  const poisoned = { type: "object", get properties() { throw new Error("boom"); } };
+  const zs = jsonSchemaToZodObject(poisoned);
+  assert.deepEqual(zs.parse({ any: 1 }), { any: 1 }, "falls back to forwarding as is");
+});
+
+test("a union of closed objects never silently drops keys (zod takes the first branch that parses)", () => {
+  const branch = (props) => ({ type: "object", properties: props, required: ["id"], additionalProperties: false });
+  const s = { type: "object", properties: { target: { anyOf: [branch({ id: { type: "string" } }), branch({ id: { type: "string" }, recursive: { type: "boolean" } })] } } };
+  const r = parse(s, { target: { id: "x", recursive: true } });
+  assert.ok(r.success);
+  assert.deepEqual(r.data.target, { id: "x", recursive: true });
+  assert.deepEqual(parse(s, { target: { id: "x" } }).data.target, { id: "x" });
+  assert.equal(parse(s, { target: { id: "x", junk: 1 } }).success, false, "no branch admits an unknown key");
+});

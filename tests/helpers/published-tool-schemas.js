@@ -137,112 +137,114 @@ export async function collectPublishedToolSchemas() {
   const { z } = await import("zod");
   const { createDbClient } = await import("../../servers/db.js");
   const savedDbPath = process.env.CROW_DB_PATH;
-  const { dir, dbPath } = scratchDb();
-  const ctx = { dbPath, db: createDbClient(dbPath), McpServer, z };
-  const entries = [];
-  const failures = [];
-  const add = (source, tools) => { for (const t of tools) entries.push({ source, tool: t.name, inputSchema: t.inputSchema }); };
-  // One source never hangs the whole inventory: 15 s each, then a readable failure.
-  const withTimeout = (p, source) => {
-    let t;
-    return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`${source}: no tool list within 15 s`)), 15_000); })]).finally(() => clearTimeout(t));
-  };
-  const attempt = async (source, build) => {
-    try { add(source, await withTimeout((async () => listOf(await build()))(), source)); }
-    catch (err) { failures.push({ source, error: err?.stack || String(err) }); }
-  };
-  // Tool lists that are plain JSON, not an MCP server: added as is.
-  const addStatic = (source, list) => { for (const t of list) entries.push({ source, tool: t.name, inputSchema: t.inputSchema }); };
+  try {
+    const { dir, dbPath } = scratchDb();
+    const ctx = { dbPath, db: createDbClient(dbPath), McpServer, z };
+    const entries = [];
+    const failures = [];
+    const add = (source, tools) => { for (const t of tools) entries.push({ source, tool: t.name, inputSchema: t.inputSchema }); };
+    // One source never hangs the whole inventory: 15 s each, then a readable failure.
+    const withTimeout = (p, source) => {
+      let t;
+      return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`${source}: no tool list within 15 s`)), 15_000); })]).finally(() => clearTimeout(t));
+    };
+    const attempt = async (source, build) => {
+      try { add(source, await withTimeout((async () => listOf(await build()))(), source)); }
+      catch (err) { failures.push({ source, error: err?.stack || String(err) }); }
+    };
+    // Tool lists that are plain JSON, not an MCP server: added as is.
+    const addStatic = (source, list) => { for (const t of list) entries.push({ source, tool: t.name, inputSchema: t.inputSchema }); };
 
-  // Core servers.
-  const core = [
-    ["memory", "../../servers/memory/server.js", "createMemoryServer"],
-    ["projects", "../../servers/research/server.js", "createProjectServer"],
-    ["sharing", "../../servers/sharing/server.js", "createSharingServer"],
-    ["storage", "../../servers/storage/server.js", "createStorageServer"],
-    ["blog", "../../servers/blog/server.js", "createBlogServer"],
-    ["wm", "../../servers/wm/server.js", "createWmServer"],
-  ];
-  for (const [id, path, fn] of core) {
-    await attempt(`core:${id}`, async () => (await import(path))[fn](dbPath));
-  }
+    // Core servers.
+    const core = [
+      ["memory", "../../servers/memory/server.js", "createMemoryServer"],
+      ["projects", "../../servers/research/server.js", "createProjectServer"],
+      ["sharing", "../../servers/sharing/server.js", "createSharingServer"],
+      ["storage", "../../servers/storage/server.js", "createStorageServer"],
+      ["blog", "../../servers/blog/server.js", "createBlogServer"],
+      ["wm", "../../servers/wm/server.js", "createWmServer"],
+    ];
+    for (const [id, path, fn] of core) {
+      await attempt(`core:${id}`, async () => (await import(path))[fn](dbPath));
+    }
 
-  // Gateway servers.
-  await attempt("gateway:router", async () => (await import("../../servers/gateway/router.js")).createRouterServer());
-  await attempt("gateway:board", async () => {
-    const { createBoardMcpServer } = await import("../../servers/gateway/board-mcp.js");
-    return createBoardMcpServer({ tdb: createDbClient(join(dir, "tasks.db")), cdb: ctx.db, verifyActor: () => null });
-  });
+    // Gateway servers.
+    await attempt("gateway:router", async () => (await import("../../servers/gateway/router.js")).createRouterServer());
+    await attempt("gateway:board", async () => {
+      const { createBoardMcpServer } = await import("../../servers/gateway/board-mcp.js");
+      return createBoardMcpServer({ tdb: createDbClient(join(dir, "tasks.db")), cdb: ctx.db, verifyActor: () => null });
+    });
 
-  // Every bundle server factory in the repo.
-  const bundlesDir = join(repoRoot, "bundles");
-  const bundleFactories = [];
-  for (const id of readdirSync(bundlesDir).sort()) {
-    for (const file of ["server.js", "mcp.js"]) {
-      const p = join(bundlesDir, id, "server", file);
-      if (!existsSync(p)) continue;
-      const src = readFileSync(p, "utf8");
-      const names = [...src.matchAll(/^export (?:async )?function (create\w*(?:Server|McpServer))\s*\(/gm)].map((m) => m[1]);
-      for (const name of names) {
-        const source = `bundle:${id}`;
-        bundleFactories.push(`${id}/${file}:${name}`);
-        await attempt(source, async () => {
-          const mod = await import(pathToFileURL(p).href);
-          return await mod[name](...bundleArgs(name, ctx));
-        });
+    // Every bundle server factory in the repo.
+    const bundlesDir = join(repoRoot, "bundles");
+    const bundleFactories = [];
+    for (const id of readdirSync(bundlesDir).sort()) {
+      for (const file of ["server.js", "mcp.js"]) {
+        const p = join(bundlesDir, id, "server", file);
+        if (!existsSync(p)) continue;
+        const src = readFileSync(p, "utf8");
+        const names = [...src.matchAll(/^export (?:async )?function (create\w*(?:Server|McpServer))\s*\(/gm)].map((m) => m[1]);
+        for (const name of names) {
+          const source = `bundle:${id}`;
+          bundleFactories.push(`${id}/${file}:${name}`);
+          await attempt(source, async () => {
+            const mod = await import(pathToFileURL(p).href);
+            return await mod[name](...bundleArgs(name, ctx));
+          });
+        }
       }
     }
+
+    // The on-demand crow-core server, with every server it can proxy switched on
+    // (it re-publishes them through a JSON Schema -> zod conversion of its own).
+    try {
+      const { createCoreServer } = await import("../../servers/core/server.js");
+      const client = await connectClient(await createCoreServer(dbPath));
+      for (const name of ["projects", "sharing", "blog", "storage"]) {
+        const r = await client.callTool({ name: "crow_activate_server", arguments: { server: name } });
+        if (r.isError) throw new Error(`crow-core could not activate ${name}: ${JSON.stringify(r.content)}`);
+      }
+      add("core:crow-core", (await client.listTools()).tools);
+      await client.close();
+    } catch (err) { failures.push({ source: "core:crow-core", error: err?.stack || String(err) }); }
+
+    // The re-publishers, fed every first-hand schema collected above.
+    const firstHand = entries.filter((e) => !e.source.startsWith("republish:"));
+    const fake = { tools: firstHand.map((e) => ({ name: `${e.source.replace(/\W/g, "_")}__${e.tool}`, description: "", inputSchema: e.inputSchema })) };
+    await attempt("republish:gateway-proxy", async () => {
+      const { connectedServers, createProxyServer } = await import("../../servers/gateway/proxy.js");
+      const key = "schema-audit-fake";
+      connectedServers.set(key, { status: "connected", client: { callTool: async () => ({ content: [] }) }, tools: fake.tools });
+      try { return createProxyServer({ allowSources: [key] }); }
+      finally { connectedServers.delete(key); }
+    });
+    await attempt("republish:crow-remote-proxy", async () => {
+      const { buildRemoteProxyServer } = await import("../../scripts/pi-bots/crow-remote-proxy.mjs");
+      const { server } = await buildRemoteProxyServer({ clientFactory: async () => ({ listTools: async () => fake, callTool: async () => ({ content: [] }) }) });
+      return server;
+    });
+
+    // The gateway chat/voice tool list (dashboard chat, voice, glasses), with every first-hand
+    // bundle tool connected the way an installed add-on is.
+    try {
+      const { connectedServers } = await import("../../servers/gateway/proxy.js");
+      const { getChatTools } = await import("../../servers/gateway/ai/tool-executor.js");
+      const key = "schema-audit-chat";
+      connectedServers.set(key, { status: "connected", client: { callTool: async () => ({ content: [] }) }, tools: fake.tools });
+      try { addStatic("chat:getChatTools", getChatTools({})); }
+      finally { connectedServers.delete(key); }
+    } catch (err) { failures.push({ source: "chat:getChatTools", error: err?.stack || String(err) }); }
+    // The kiosk voice loop's hand-written tools, with every option on.
+    try {
+      const kiosk = await import("../../bundles/kiosk/server/tools.js");
+      addStatic("kiosk:tools", kiosk.buildToolDefinitions({ windows: ["recipe", ...kiosk.SHOW_KINDS], sources: [...kiosk.PLAY_SOURCES],
+        items: [{ id: "weather", title: "Weather" }], verbs: [...kiosk.WM_VERBS, ...kiosk.MEDIA_VERBS] }));
+    } catch (err) { failures.push({ source: "kiosk:tools", error: err?.stack || String(err) }); }
+    cached = { entries, failures, bundleFactories, stubbedPackages: [...stubbed].sort() };
+    return cached;
+  } finally {
+    if (savedDbPath === undefined) delete process.env.CROW_DB_PATH; else process.env.CROW_DB_PATH = savedDbPath;
   }
-
-  // The on-demand crow-core server, with every server it can proxy switched on
-  // (it re-publishes them through a JSON Schema -> zod conversion of its own).
-  try {
-    const { createCoreServer } = await import("../../servers/core/server.js");
-    const client = await connectClient(await createCoreServer(dbPath));
-    for (const name of ["projects", "sharing", "blog", "storage"]) {
-      const r = await client.callTool({ name: "crow_activate_server", arguments: { server: name } });
-      if (r.isError) throw new Error(`crow-core could not activate ${name}: ${JSON.stringify(r.content)}`);
-    }
-    add("core:crow-core", (await client.listTools()).tools);
-    await client.close();
-  } catch (err) { failures.push({ source: "core:crow-core", error: err?.stack || String(err) }); }
-
-  // The re-publishers, fed every first-hand schema collected above.
-  const firstHand = entries.filter((e) => !e.source.startsWith("republish:"));
-  const fake = { tools: firstHand.map((e) => ({ name: `${e.source.replace(/\W/g, "_")}__${e.tool}`, description: "", inputSchema: e.inputSchema })) };
-  await attempt("republish:gateway-proxy", async () => {
-    const { connectedServers, createProxyServer } = await import("../../servers/gateway/proxy.js");
-    const key = "schema-audit-fake";
-    connectedServers.set(key, { status: "connected", client: { callTool: async () => ({ content: [] }) }, tools: fake.tools });
-    try { return createProxyServer({ allowSources: [key] }); }
-    finally { connectedServers.delete(key); }
-  });
-  await attempt("republish:crow-remote-proxy", async () => {
-    const { buildRemoteProxyServer } = await import("../../scripts/pi-bots/crow-remote-proxy.mjs");
-    const { server } = await buildRemoteProxyServer({ clientFactory: async () => ({ listTools: async () => fake, callTool: async () => ({ content: [] }) }) });
-    return server;
-  });
-
-  // The gateway chat/voice tool list (dashboard chat, voice, glasses), with every first-hand
-  // bundle tool connected the way an installed add-on is.
-  try {
-    const { connectedServers } = await import("../../servers/gateway/proxy.js");
-    const { getChatTools } = await import("../../servers/gateway/ai/tool-executor.js");
-    const key = "schema-audit-chat";
-    connectedServers.set(key, { status: "connected", client: { callTool: async () => ({ content: [] }) }, tools: fake.tools });
-    try { addStatic("chat:getChatTools", getChatTools({})); }
-    finally { connectedServers.delete(key); }
-  } catch (err) { failures.push({ source: "chat:getChatTools", error: err?.stack || String(err) }); }
-  // The kiosk voice loop's hand-written tools, with every option on.
-  try {
-    const kiosk = await import("../../bundles/kiosk/server/tools.js");
-    addStatic("kiosk:tools", kiosk.buildToolDefinitions({ windows: ["recipe", ...kiosk.SHOW_KINDS], sources: [...kiosk.PLAY_SOURCES],
-      items: [{ id: "weather", title: "Weather" }], verbs: [...kiosk.WM_VERBS, ...kiosk.MEDIA_VERBS] }));
-  } catch (err) { failures.push({ source: "kiosk:tools", error: err?.stack || String(err) }); }
-
-  if (savedDbPath === undefined) delete process.env.CROW_DB_PATH; else process.env.CROW_DB_PATH = savedDbPath;
-  cached = { entries, failures, bundleFactories, stubbedPackages: [...stubbed].sort() };
-  return cached;
 }
 
 /**
