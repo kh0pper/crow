@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import express from "express";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, existsSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, execFile } from "node:child_process";
 
@@ -518,9 +518,78 @@ test("host code and config locations are refused: system dirs, the gateway check
     join(home, ".bashrc"), join(home, ".local", "bin"), join(home, "bin"), join(REPO, "servers"), join(REPO, ".env")]) {
     assert.equal(check(svc({ volumes: [bind(src)] }), { manifest: PRIV, consent: true }).valid, false, src);
   }
+  // Outside Crow's home only folders the owner chose pass (follow-up B); these are, and
+  // the denied places above stay refused even when the owner "chose" them.
   for (const src of [join(home, "Music"), "/srv/media", "/mnt/external/films", "/media/usb"]) {
-    assert.equal(check(svc({ volumes: [bind(src, true)] })).valid, true, src);
+    assert.equal(check(svc({ volumes: [bind(src, true)] })).valid, false, `${src}: not chosen`);
+    assert.equal(checkWith(svc({ volumes: [bind(src, true)] }), { operatorRoots: [src] }).valid, true, src);
   }
+  for (const src of ["/usr/local/bin", "/opt/x", "/var/lib/x", join(home, ".config", "systemd", "user"), join(home, ".bashrc"), join(home, ".local", "bin"), join(home, "bin"), join(REPO, "servers"), home, "/", dirname(home)]) {
+    assert.equal(checkWith(svc({ volumes: [bind(src)] }), { operatorRoots: [src] }).valid, false, `${src}: denied even when chosen`);
+  }
+});
+
+// ---- follow-up B: outside Crow's home, an allowlist ----------------------------------
+
+const checkWith = (model, { operatorRoots = [], manifest = {}, consent = false, dir = bundleDir(), home } = {}) =>
+  G.checkComposeModel(model, { bundleDir: dir, manifest, consentVerified: consent, ctx: { ...CTX, operatorRoots, ...(home ? { home } : {}) } });
+
+test("outside Crow's home: refused unless the owner chose the folder; the reason says where to choose it", () => {
+  const media = mkdtempSync(join(tmpdir(), "crow-cguard-media-"));
+  try {
+    const r = checkWith(svc({ volumes: [bind(join(media, "films"))] }));
+    assert.equal(r.valid, false);
+    assert.match(r.reason, /not a folder you allowed/);
+    assert.match(r.reason, /Configure/);
+    assert.equal(checkWith(svc({ volumes: [bind(media)] }), { operatorRoots: [media] }).valid, true, "the folder itself");
+    assert.equal(checkWith(svc({ volumes: [bind(join(media, "films", "x"))] }), { operatorRoots: [media] }).valid, true, "below it");
+    assert.equal(checkWith(svc({ volumes: [bind(`${media}2`)] }), { operatorRoots: [media] }).valid, false, "a sibling with the same prefix");
+    assert.equal(checkWith(svc({ volumes: [bind(dirname(media))] }), { operatorRoots: [media] }).valid, false, "its parent");
+    // A symlink inside the chosen folder that leads out of it is judged by where it leads.
+    const other = mkdtempSync(join(tmpdir(), "crow-cguard-other-"));
+    symlinkSync(other, join(media, "link"));
+    assert.equal(checkWith(svc({ volumes: [bind(join(media, "link"))] }), { operatorRoots: [media] }).valid, false, "a symlink out of the chosen folder");
+    // A chosen folder reached through a symlink: both the written and the real path match.
+    const alias = join(other, "alias");
+    symlinkSync(media, alias);
+    assert.equal(checkWith(svc({ volumes: [bind(join(alias, "films"))] }), { operatorRoots: [alias] }).valid, true, "a chosen symlinked folder");
+    rmSync(other, { recursive: true, force: true });
+    // Top-level volumes binding a device follow the same rule.
+    const vol = (device) => ({ ...svc(), volumes: { v: { driver_opts: { type: "none", o: "bind", device } } } });
+    assert.equal(checkWith(vol(media)).valid, false);
+    assert.equal(checkWith(vol(media), { operatorRoots: [media] }).valid, true);
+  } finally { rmSync(media, { recursive: true, force: true }); }
+});
+
+test("outside Crow's home: the fixed system entries keep their rules (no operator choice needed)", () => {
+  assert.equal(checkWith(svc({ volumes: [bind("/etc/localtime", true)] })).valid, true);
+  assert.equal(checkWith(svc({ volumes: [bind("/etc/localtime")] })).valid, false, "read-write");
+  assert.equal(checkWith(svc({ volumes: [bind("/etc/timezone", true)] })).valid, false, "only /etc/localtime");
+  assert.equal(checkWith(svc({ volumes: [bind("/proc", true)] }), { manifest: { consent_required: true }, consent: true }).valid, true);
+  assert.equal(checkWith(svc({ volumes: [bind("/proc", true)] })).valid, false, "no consent");
+  assert.equal(checkWith(svc({ volumes: [bind("/var/run/docker.sock", true)] }), { manifest: { consent_required: true }, consent: true }).valid, true);
+  assert.equal(checkWith(svc({ volumes: [bind("/etc", true)] }), { operatorRoots: ["/etc"] }).valid, false);
+});
+
+test("granted folders count only if they pass the floor themselves and do not nest with another bundle's", () => {
+  const base = mkdtempSync(join(tmpdir(), "crow-cguard-roots-"));
+  try {
+    const media = join(base, "media");
+    const photos = join(media, "photos");
+    mkdirSync(photos, { recursive: true });
+    const src = svc({ volumes: [bind(join(photos, "x"), true)] });
+    assert.equal(checkWith(src, { operatorRoots: [media] }).valid, true);
+    assert.equal(G.checkComposeModel(src, { bundleDir: bundleDir(), manifest: {}, consentVerified: false, ctx: { ...CTX, operatorRoots: [photos], otherRoots: [media] } }).valid, false, "inside another bundle's folder");
+    assert.equal(G.checkComposeModel(src, { bundleDir: bundleDir(), manifest: {}, consentVerified: false, ctx: { ...CTX, operatorRoots: [media], otherRoots: [photos] } }).valid, false, "containing another bundle's folder");
+    assert.equal(G.checkComposeModel(src, { bundleDir: bundleDir(), manifest: {}, consentVerified: false, ctx: { ...CTX, operatorRoots: [media], otherRoots: [media] } }).valid, true, "the same folder is fine");
+    // A root that is itself a denied place admits nothing, not even an allowed-looking child.
+    const home = homedir();
+    for (const root of ["/", "/srv", home, dirname(home), "/etc", "/usr/local", join(home, ".config")]) {
+      assert.equal(checkWith(svc({ volumes: [bind(join(root, "zz-crow-test", "m"), true)] }), { operatorRoots: [root] }).valid, false, `root ${root}`);
+    }
+    // The gateway checkout (and any git tree) is never a root.
+    assert.equal(checkWith(svc({ volumes: [bind(join(REPO, "docs"), true)] }), { operatorRoots: [REPO] }).valid, false);
+  } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
 test("external volumes (another project's data) and external networks other than crow-federation need privileged consent", () => {

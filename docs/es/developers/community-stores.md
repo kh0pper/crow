@@ -51,13 +51,14 @@ Las tiendas de la comunidad tienen restricciones adicionales en comparación con
 | Insignia de verificado | Sí | No (insignia "Community") |
 | Actualizaciones automáticas | Compatibles | Requieren confirmación manual |
 | Red de Docker | Red del host disponible | Solo red aislada |
-| Montaje de volúmenes | Volúmenes con nombre + rutas en lista de permitidos | Solo volúmenes con nombre |
+| Montaje de volúmenes | Volúmenes con nombre, las carpetas propias del complemento, carpetas que permitiste | Volúmenes con nombre, las carpetas propias del complemento, carpetas que permitiste |
 | Modo privilegiado | Caso por caso | Nunca permitido |
 
 ### Validación del archivo compose
 
 Antes de instalar un complemento de la comunidad, y de nuevo cada vez que Crow inicia sus contenedores, Crow revisa el proyecto compose. Le pide a Docker Compose la configuración que de verdad aplicará (`docker compose config`: anclas, `include`, `extends`, archivos override y valores `${VAR}` resueltos) y revisa eso, siguiendo los enlaces simbólicos. Si Compose no puede leer el proyecto, la instalación se rechaza.
 
+- **Fuera de las carpetas de Crow, solo carpetas que permitiste**: una carpeta del host fuera de la carpeta de Crow y de su carpeta de datos se monta solo si la escribiste para esta extensión en su formulario de instalación o en Configurar, desde el panel de esta misma máquina (con su contraseña: no desde una instancia emparejada ni con un inicio de sesión de otra instancia). Un valor por defecto o de ejemplo de la extensión nunca cuenta, y una carpeta permitida cuenta solo mientras ese ajuste la siga nombrando, así que una edición a mano del `.env` vuelve a mostrar el ajuste en Configurar. Una carpeta permitida no puede estar dentro de la de otra extensión, ni contenerla. Las únicas entradas fijas del host son `/etc/localtime` en solo lectura, `/proc` y `/sys` en solo lectura con consentimiento, y el socket de Docker en solo lectura con consentimiento.
 - **Rechazado**: montajes del host de `/`, tu carpeta personal, `/etc`, `/root`, `/boot`, `/run`, `/dev`, `~/.ssh`, los datos propios de Docker, la carpeta de Crow, su carpeta de datos, su carpeta de secretos y su `.env`, las carpetas de otras extensiones, o cualquier carpeta que contenga a estas. Excepciones: `/etc/localtime` en solo lectura; la subcarpeta propia del complemento `<carpeta de datos>/<id>`
 - **Rechazado**: `env_file`, archivos de `secrets`/`configs` y el contexto de build fuera de la carpeta propia del complemento
 - **Rechazado**: un segundo archivo compose (`compose.yaml`, `docker-compose.override.yml`, …) junto a `docker-compose.yml`, `include:`/`extends: file:` y ajustes `COMPOSE_*` en su `.env`

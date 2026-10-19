@@ -18,6 +18,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { resolveCrowHome } from "../shared/crow-home.js";
 import { fileURLToPath } from "node:url";
+import { ungrantedFolderKeys } from "./folder-grants.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -176,12 +177,22 @@ export function resolveEffectiveEnv(bundleId, manifest, { envOverride = null } =
  * @returns {string[]} key NAMES only. Never values: those are secrets (see D5).
  */
 export function needsConfigKeys(bundleId, envOverride = null) {
+  // A folder outside Crow's home the owner has not allowed (follow-up B: a hand edit, a CLI
+  // install, a value a peer set) blocks Start: list its key so Configure offers it.
+  let folders = [];
+  if (!envOverride) {
+    try {
+      const dataDirs = [...new Set([process.env.CROW_DATA_DIR, join(CROW_HOME, "data")].filter(Boolean))];
+      folders = ungrantedFolderKeys(bundleId, { crowHome: CROW_HOME, dataDirs, home: process.env.HOME || undefined });
+    } catch { folders = []; }
+  }
   const man = getInstalledFirstManifest(bundleId);
   const required = (man?.env_vars || []).filter((v) => v.required && !v.generate).map((v) => v.name);
-  if (required.length === 0) return [];
+  if (required.length === 0) return folders;
   const { managed, env } = resolveEffectiveEnv(bundleId, man, { envOverride });
-  if (!managed) return [];
+  if (!managed) return folders;
   // An example value copied from .env.example ("/path/to/media", "x.example.com", a key
   // once published in the repo) is not configuration: list it, never rewrite the .env.
-  return required.filter((k) => !isSet(env[k]) || isPlaceholderValue(env[k]));
+  const missing = required.filter((k) => !isSet(env[k]) || isPlaceholderValue(env[k]));
+  return [...new Set([...missing, ...folders])];
 }

@@ -51,13 +51,14 @@ Community stores have additional restrictions compared to the official registry:
 | Verified badge | Yes | No ("Community" badge) |
 | Auto-updates | Supported | Manual confirmation required |
 | Docker network | Host network available | Isolated network only |
-| Volume mounts | Named volumes + allowlisted paths | Named volumes only |
+| Volume mounts | Named volumes, the add-on's own folders, folders you allowed | Named volumes, the add-on's own folders, folders you allowed |
 | Privileged mode | Case-by-case | Never allowed |
 
 ### Compose File Validation
 
 Before installing a community add-on, and again every time Crow starts its containers, Crow checks the compose project. It asks Docker Compose for the configuration it will actually apply (`docker compose config`: anchors, `include`, `extends`, override files and `${VAR}` values resolved) and checks that, following symlinks. If Compose can't read the project, the install is refused.
 
+- **Outside Crow's folders, only folders you allowed**: a host folder outside Crow's home and data folder is mounted only if you typed it for this extension in its install form or Configure, on this machine's own dashboard (signed in with its password: not from a paired instance, not through a peer sign-in). A default or example value from the extension never counts, and an allowed folder counts only while that setting still names it, so a hand edit of `.env` shows the setting in Configure again. Allowed folders may not sit inside, or contain, another extension's allowed folder. The only fixed host entries are `/etc/localtime` read-only, `/proc` and `/sys` read-only with consent, and the Docker socket read-only with consent.
 - **Rejected**: host mounts of `/`, your home folder, `/etc`, `/root`, `/boot`, `/run`, `/dev`, `~/.ssh`, Docker's own data, Crow's folder, data folder, secrets folder and `.env`, other extensions' folders, or any parent of these. Exceptions: `/etc/localtime` read-only; the add-on's own `<data folder>/<id>` subfolder
 - **Rejected**: `env_file`, `secrets`/`configs` files and the build context outside the add-on's own folder
 - **Rejected**: a second compose file (`compose.yaml`, `docker-compose.override.yml`, …) shipped next to `docker-compose.yml`, `include:`/`extends: file:`, and `COMPOSE_*` settings in its `.env`

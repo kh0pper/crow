@@ -56,6 +56,8 @@ const under = (p, root) => p === root || p.startsWith(root.endsWith(sep) ? root 
  * @param {string} [ctx.dataDir]   the instance's data dir (crow.db lives here)
  * @param {string} [ctx.appRoot]   the gateway checkout (its .env holds gateway secrets)
  * @param {string} [ctx.home]
+ * @param {string[]} [ctx.operatorRoots] host folders the owner granted this bundle (folder-grants.js)
+ * @param {string[]} [ctx.otherRoots]    folders granted to OTHER bundles (no root may nest with one)
  */
 export function sensitiveRoots(ctx) {
   const home = ctx.home || homedir();
@@ -78,8 +80,22 @@ export function sensitiveRoots(ctx) {
     ],
     dockerSockets: new Set(["/var/run/docker.sock", "/run/docker.sock", real("/var/run/docker.sock"), real("/run/docker.sock")]),
     localtime: real("/etc/localtime"),
+    // Folders the owner chose (operatorRoots below), as written AND as they really lead,
+    // so a path is matched in both forms (checkHostPath checks both).
+    operatorRoots: [...new Set((Array.isArray(ctx.operatorRoots) ? ctx.operatorRoots : [])
+      .filter((r) => typeof r === "string" && isAbsolute(r))
+      .flatMap((r) => [resolvePath(r), real(r)]))],
+    otherRoots: [...new Set((Array.isArray(ctx.otherRoots) ? ctx.otherRoots : [])
+      .filter((r) => typeof r === "string" && isAbsolute(r))
+      .map((r) => real(r)))],
   };
 }
+
+/** A value an owner typed that names a host folder: absolute or ~/, no interpolation. */
+export function looksLikeHostPath(v) {
+  return typeof v === "string" && (v.startsWith("/") || v.startsWith("~/")) && !v.includes("$") && !/[\r\n\0]/.test(v);
+}
+
 
 // ---- the allowlist -------------------------------------------------------------------
 // Every key Compose can emit for a service / top-level item is listed here with how it is
@@ -137,11 +153,44 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     if (!TOP_OK.has(k) && !k.startsWith("x-")) return refuse(`top-level key '${k}' is not one the install check understands`);
   }
 
-  // Host-path policy. Inside Crow's home and data folder it is an ALLOWLIST: the bundle's
-  // own folder, CROW_HOME/<id> or <id>-*, <data>/<id>, CROW_HOME/media (library defaults),
-  // and, read-only with privileged consent, crow.db and the extensions folder (companion).
-  // Elsewhere: system folders, the gateway checkout, home dot-folders and ~/bin are
-  // refused, and so is any folder that CONTAINS one of these.
+  // Host-path policy: an ALLOWLIST everywhere. Inside Crow's home and data folder: the
+  // bundle's own folder, CROW_HOME/<id> or <id>-*, <data>/<id>, CROW_HOME/media (library
+  // defaults), and, read-only with privileged consent, crow.db and the extensions folder
+  // (companion). Outside them: /etc/localtime read-only, the Docker socket and /proc, /sys
+  // (read-only, consent), and folders the owner chose (ctx.operatorRoots). Under a chosen
+  // folder a floor still applies: system folders, PATH folders, the gateway checkout, home
+  // dot-folders and ~/bin, a whole home folder, a git checkout, and any folder that
+  // CONTAINS one of these stay refused.
+  // The floor: places never mountable outside Crow's home, even in a folder the owner
+  // allowed (defence in depth: an owner tricked into allowing ~/.ssh is still refused).
+  const floorProblem = (p) => {
+    if (roots.exact.has(p)) return `mounts a sensitive host path (${p === "/" ? "/" : "a top-level folder"})`;
+    const zones = [roots.crowHome, ...roots.dataDirs];
+    if (zones.some((z) => under(z, p) || under(p, z))) return "mounts a folder that contains, or is inside, Crow's home or data folder";
+    // Home folders (this user's and others'): dot-folders and ~/bin hold shells, keys,
+    // autostart and user services.
+    if (under(p, roots.homesRoot) && p !== roots.homesRoot) {
+      const parts = p.slice(roots.homesRoot.length + 1).split(sep);
+      if (parts.length === 1) return "mounts a whole home folder";
+      if (parts[1].startsWith(".") || parts[1] === "bin") return `mounts a home folder's ${parts[1]}`;
+    }
+    for (const t of roots.trees) {
+      if (under(p, t.root) || under(t.root, p)) return `mounts a sensitive host path (${t.why})`;
+    }
+    // A git working tree (another Crow checkout, lab scripts that timers run): code. Walk up
+    // from the path to the filesystem root looking for .git, and refuse a folder holding one.
+    for (let d = p; ; d = dirname(d)) {
+      if (existsSync(join(d, ".git"))) return "mounts a git checkout (code something on this host may run)";
+      if (dirname(d) === d) break;
+    }
+    return null;
+  };
+  // Granted folders count only when they would pass the floor themselves, are at least two
+  // levels deep, and do not nest with another bundle's (a container holding the outer one
+  // could swap the inner one for a symlink before that bundle's next restart). Equal
+  // folders are fine: a container cannot replace its own mount point.
+  const activeRoots = roots.operatorRoots.filter((r) => r.split(sep).filter(Boolean).length >= 2 && !floorProblem(r)
+    && !roots.otherRoots.some((o) => o !== r && (under(o, r) || under(r, o))));
   const checkOne = (p, { readOnly, what }) => {
     if (roots.dockerSockets.has(p)) {
       if (!readOnly) return refuse("Read-write Docker socket mounts are not permitted");
@@ -190,24 +239,21 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
       if (readOnly && isPrivilegedAllowed && p === join(roots.crowHome, "bundles")) return null;
       return refuse(`${what}: mounts a path in Crow's home that is not this bundle's own`);
     }
-    // Home folders (this user's and others'): dot-folders and ~/bin hold shells, keys,
-    // autostart and user services.
-    if (under(p, roots.homesRoot) && p !== roots.homesRoot) {
-      const parts = p.slice(roots.homesRoot.length + 1).split(sep);
-      if (parts.length === 1) return refuse(`${what}: mounts a whole home folder`);
-      if (parts[1].startsWith(".") || parts[1] === "bin") return refuse(`${what}: mounts a home folder's ${parts[1]}`);
-    }
+    // Outside Crow's home and data folder it is an ALLOWLIST too: the fixed system entries
+    // above (/etc/localtime read-only, the Docker socket), host information (/proc, /sys)
+    // read-only with consent, and folders the owner chose (operator roots). The checks
+    // after this are a floor that applies even to a chosen folder.
     for (const t of roots.trees) {
-      if (!(under(p, t.root) || under(t.root, p))) continue;
-      if (t.hostInfo && readOnly && under(p, t.root) && (isConsentBundle || isPrivilegedAllowed)) continue;
-      return refuse(`${what}: mounts a sensitive host path (${t.why})`);
+      if (t.hostInfo && under(p, t.root)) {
+        if (readOnly && (isConsentBundle || isPrivilegedAllowed)) return null;
+        return refuse(`${what}: mounts a sensitive host path (${t.why})`);
+      }
     }
-    // A git working tree (another Crow checkout, lab scripts that timers run): code. Walk up
-    // from the path to the filesystem root looking for .git, and refuse a folder holding one.
-    for (let d = p; ; d = dirname(d)) {
-      if (existsSync(join(d, ".git"))) return refuse(`${what}: mounts a git checkout (code something on this host may run)`);
-      if (dirname(d) === d) break;
+    if (!activeRoots.some((r) => under(p, r))) {
+      return refuse(`${what}: mounts ${p.length > 80 ? `…${p.slice(-80)}` : p}, outside Crow's home, which is not a folder you allowed for this extension (open its Configure and enter this folder, then Start)`);
     }
+    const f = floorProblem(p);
+    if (f) return refuse(`${what}: ${f}`);
     return null;
   };
   /** Both the path as written and where it really leads (symlinks, dangling ones too). */
@@ -402,15 +448,17 @@ export function requiredComposeVars(text) {
   return [...out];
 }
 
-function parseDotEnv(path) {
+function parseDotEnvText(text) {
   const out = {};
-  try {
-    for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
-      const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
-      if (m) out[m[1]] = m[2].trim().replace(/^(["'])(.*)\1$/, "$2");
-    }
-  } catch { /* none */ }
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (m) out[m[1]] = m[2].trim().replace(/^(["'])(.*)\1$/, "$2");
+  }
   return out;
+}
+
+export function parseDotEnv(path) {
+  try { return parseDotEnvText(readFileSync(path, "utf8")); } catch { return {}; }
 }
 
 /**

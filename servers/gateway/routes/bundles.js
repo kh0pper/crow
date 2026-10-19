@@ -26,6 +26,7 @@ import { execFile } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync, statSync, realpathSync, readdirSync } from "node:fs";
 import { join, dirname, resolve as resolvePath, relative as relativePath, isAbsolute, basename } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
+import { homedir } from "node:os";
 import { checkInstall as checkHardwareGate } from "../hardware-gate.js";
 import { checkGpuArchCompatible } from "../gpu-arch.js";
 import { forwardBundleAction } from "../../shared/peer-forward.js";
@@ -59,6 +60,8 @@ import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRe
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
 import { checkComposeModel, loadComposeModel, usesHostNetwork } from "../compose-guard.js";
+import { grantCandidates, activeRoots, otherBundlesRoots, migrateGrants, recordGrants, dropGrants, composeReferencedKeys, hostPathOf, outsideCrow } from "../folder-grants.js";
+import { isLocalPasswordSession } from "../dashboard/local-session.js";
 import { resolveDataDir } from "../../db.js";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { isPlaceholderValue } from "../bundle-env-placeholders.js";
@@ -1686,6 +1689,26 @@ function startConsent(bundleId, { crossHost = false } = {}) {
 
 export { startConsent as _startConsentForTest, consentRecord as _consentRecordForTest };
 
+// Follow-up B: who may allow a folder outside Crow's home (the owner at this machine's own
+// dashboard), and the folders each check may admit.
+let _ownerCheckForTest = null;
+export function _setOwnerCheckForTest(fn) { _ownerCheckForTest = fn || null; }
+async function isLocalOwner(req) {
+  if (_ownerCheckForTest) return !!(await _ownerCheckForTest(req));
+  return isLocalPasswordSession(req);
+}
+const dataDirsForGrants = () => [...new Set([resolveDataDir(), join(CROW_HOME, "data")])];
+/** The folders outside Crow's home a check of this bundle may admit, and other bundles'. */
+function grantRootsFor(bundleId, bundleDir, { exclude = null } = {}) {
+  const home = process.env.HOME || homedir();
+  migrateGrants({ crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home, exclude });
+  return {
+    operatorRoots: activeRoots(bundleId, { crowHome: CROW_HOME, bundleDir, home }),
+    otherRoots: otherBundlesRoots(bundleId, { crowHome: CROW_HOME, home }),
+  };
+}
+export function _migrateGrantsForTest() { return migrateGrants({ crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: process.env.HOME || homedir() }); }
+
 // Test-only: replace `docker compose config` (the model the shared check reads).
 let _composeConfigRunnerForTest = null;
 export function _setComposeConfigRunnerForTest(fn) { _composeConfigRunnerForTest = fn || null; }
@@ -1702,7 +1725,7 @@ async function runComposeConfig(args, { cwd, env }) {
  * e.g. no extra compose files; at Start an operator's own override is part of the model
  * that is checked instead. The model check reads what Compose will actually apply.
  */
-export async function checkBundleCompose(bundleDir, { bundleId, manifest, consentVerified = false, textCheck = true } = {}) {
+export async function checkBundleCompose(bundleDir, { bundleId, manifest, consentVerified = false, textCheck = true, operatorRoots } = {}) {
   if (textCheck) {
     const t = validateComposeFile(join(bundleDir, "docker-compose.yml"), bundleId, { manifest, consentVerified });
     if (!t.valid) return t;
@@ -1713,7 +1736,12 @@ export async function checkBundleCompose(bundleDir, { bundleId, manifest, consen
   // gateway may load: never mountable read-write.
   let shipped = null;
   try { shipped = new Set(readdirSync(join(APP_BUNDLES, bundleId || basename(bundleDir)))); } catch { /* not in the repo */ }
-  return checkComposeModel(loaded.model, { bundleDir, manifest, consentVerified, ctx: { crowHome: CROW_HOME, dataDir: resolveDataDir(), appRoot: APP_ROOT, shipped } });
+  // Folders outside Crow's home: given by the install (its owner-typed folders, nothing
+  // from .env or a record), else the bundle's live grants (Start, shared-storage re-apply).
+  const id = bundleId || basename(bundleDir);
+  const g = grantRootsFor(id, bundleDir, { exclude: operatorRoots !== undefined ? id : null });
+  const roots = operatorRoots !== undefined ? operatorRoots : g.operatorRoots;
+  return checkComposeModel(loaded.model, { bundleDir, manifest, consentVerified, ctx: { crowHome: CROW_HOME, dataDir: resolveDataDir(), appRoot: APP_ROOT, shipped, operatorRoots: roots, otherRoots: g.otherRoots, home: process.env.HOME || homedir() } });
 }
 
 // --- PR 0: Consent token helpers (server-validated install consent) ---
@@ -2441,7 +2469,7 @@ export function scrubPlaceholderLines(text) {
   }).join("\n");
 }
 
-export async function runInstallJob(bundleId, envVars, { job, installedSnapshot, consentVerified, manifest, keychain = null }) {
+export async function runInstallJob(bundleId, envVars, { job, installedSnapshot, consentVerified, manifest, keychain = null, ownerEnv = null }) {
   let needsRestart = false;
   // Set when `docker compose up` fails. The install does NOT stop there: the
   // non-container steps (gateway env, MCP registration, panel + routes,
@@ -2630,7 +2658,18 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         // PR 0: validate compose for ALL bundles (first-party + community).
         // First-party bundles with privileged/host-network must declare manifest.privileged
         // and the install request must include a verified consent token.
-        const validation = await checkBundleCompose(destDir, { bundleId, manifest, consentVerified });
+        // Folders outside Crow's home the OWNER typed in this install (never a default, an
+        // example or a retained value): granted once the check passes with exactly these.
+        let grants = {};
+        if (ownerEnv) {
+          let exampleEnv = {};
+          try { exampleEnv = parseEnvText(readFileSync(join(destDir, ".env.example"), "utf8")); } catch { /* none */ }
+          grants = grantCandidates({ manifest, submitted: stripGeneratedKeys(manifest, ownerEnv), composeText: readFileSync(composePath, "utf8"), exampleEnv, retained: retainedForPaths || {}, crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: process.env.HOME || homedir() });
+        }
+        // Plus folders this bundle was allowed before (a reinstall restoring a kept value):
+        // a grant is key + folder, so it counts only while that key still names it.
+        const kept = activeRoots(bundleId, { crowHome: CROW_HOME, bundleDir: destDir, home: process.env.HOME || homedir() });
+        const validation = await checkBundleCompose(destDir, { bundleId, manifest, consentVerified, operatorRoots: [...Object.values(grants).map((g) => g.real), ...kept] });
         if (!validation.valid) {
           appendLog(job, `Security check failed: ${validation.reason}`);
           // Clean up copied files
@@ -2638,6 +2677,10 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
           return { ok: false, reason: `Security check failed: ${validation.reason}` };
         }
         appendLog(job, "Security check passed");
+        if (Object.keys(grants).length) {
+          recordGrants(CROW_HOME, bundleId, grants);
+          appendLog(job, `Allowed the folder(s) you chose outside Crow's home: ${Object.keys(grants).join(", ")}`);
+        }
 
         const own = await composeOwnership(bundleId, destDir, manifest);
         if (own.refusal) {
@@ -3081,6 +3124,9 @@ export async function handleRepinRequest(req, res, { crowHome = CROW_HOME } = {}
 }
 
 export default function bundlesRouter() {
+  // Folder grants (follow-up B): grandfather the folders installed extensions already use,
+  // once, before any request.
+  try { _migrateGrantsForTest(); } catch (err) { console.warn(`[bundles] folder-grant migration: ${err.message}`); }
   const router = Router();
 
   // C4 Task 4: register this module's jobs Map as bot-engine-status's active-job
@@ -3289,6 +3335,7 @@ export default function bundlesRouter() {
 
     // Create job for async tracking
     const keychainReq = sanitizeKeychainRequest(req.body?.keychain, { localSession: !!req.dashboardSession && !req.crossHostAuth });
+    const owner = await isLocalOwner(req);
     const job = createJob(bundle_id, "install");
     res.json({ ok: true, job_id: job.id, message: `Installing ${bundle_id}...` });
 
@@ -3301,6 +3348,7 @@ export default function bundlesRouter() {
         consentVerified: v.consentVerified,
         manifest: v.manifest,
         keychain: keychainReq,
+        ownerEnv: owner ? env_vars : null,
       });
       if (!out.ok) {
         finishJob(job, "failed");
@@ -3793,6 +3841,21 @@ export default function bundlesRouter() {
         return res.status(400).json({ code: "invalid_env", key: badPattern.key, error: `Environment variable '${badPattern.key}' ${badPattern.why}` });
       }
 
+      // Folders outside Crow's home (follow-up B): only the owner at this machine's own
+      // dashboard sets one; a peer's or a peer sign-in's request that tries is refused.
+      const owner = await isLocalOwner(req);
+      let folderKeys = new Set();
+      try { folderKeys = composeReferencedKeys(readFileSync(join(bundleDir, "docker-compose.yml"), "utf8")); } catch { /* no compose */ }
+      const homeForGrants = process.env.HOME || homedir();
+      const outsideKeys = Object.keys(env_vars).filter((k) => {
+        if (!folderKeys.has(k)) return false;
+        const abs = hostPathOf(env_vars[k], homeForGrants);
+        return !!abs && outsideCrow(abs, { crowHome: CROW_HOME, dataDirs: dataDirsForGrants() });
+      });
+      if (outsideKeys.length && !owner) {
+        return res.status(403).json({ code: "folder_needs_owner", key: outsideKeys[0], error: `Folders outside Crow's home (${outsideKeys.join(", ")}) are set from this machine's own dashboard, signed in with its password.` });
+      }
+
       // Read the existing .env. The save is LINE-PRESERVING (C4): only the submitted
       // keys change; every other line (legacy values, comments) stays byte-for-byte.
       const envPath = join(bundleDir, ".env");
@@ -3832,6 +3895,20 @@ export default function bundlesRouter() {
 
       Object.assign(existing, env_vars); // the effective env after this save
       writePrivateFile(envPath, updateEnvText(oldEnvText, env_vars, { pathKeys: pathEnvKeys(getInstalledFirstManifest(bundle_id)) }));
+      if (owner && folderKeys.size) {
+        // The owner typed these folders here: allow them (a default is not a choice). Keys
+        // the owner set to anything else lose their grant.
+        const man = getInstalledFirstManifest(bundle_id);
+        let composeTextG = "";
+        try { composeTextG = readFileSync(join(bundleDir, "docker-compose.yml"), "utf8"); } catch { /* none */ }
+        // The form prefills the manifest default: a default (or an example) is never a choice.
+        let exampleEnv = {};
+        try { exampleEnv = parseEnvText(readFileSync(join(bundleDir, ".env.example"), "utf8")); } catch { /* none */ }
+        const g = grantCandidates({ manifest: man, submitted: env_vars, composeText: composeTextG, exampleEnv, crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: homeForGrants });
+        try { migrateGrants({ crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: homeForGrants }); } catch { /* best-effort */ }
+        recordGrants(CROW_HOME, bundle_id, g);
+        dropGrants(CROW_HOME, bundle_id, Object.keys(env_vars).filter((k) => folderKeys.has(k) && !g[k]));
+      }
       const keychainReq = sanitizeKeychainRequest(req.body?.keychain, { localSession: !!req.dashboardSession && !req.crossHostAuth });
       // keychain_configure:false fields (Workspace admin password): setup applied the stored value
       // once and Configure cannot re-apply a new one, so never overwrite the stored copy here.
