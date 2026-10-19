@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import panel, { CLIENT_SCRIPT } from "../bundles/kiosk/panel/kiosk.js";
 import { STRINGS } from "../bundles/kiosk/server/strings.js";
 
-const SAME_OK = new Set(["brand"]);
+const SAME_OK = new Set(["brand", "abil_blog"]);
 
 test("strings: en/es parity — same keys, non-empty, translated, same {placeholders}", () => {
   const en = Object.keys(STRINGS.en).sort(), es = Object.keys(STRINGS.es).sort();
@@ -467,4 +467,68 @@ test("smoke F5: the Music library line is asked again while the names are being 
   assert.ok(box.textContent.includes("Ready: 12 albums, 7 artists, 3 genres."));
   assert.equal(timers.length, 0, "ready: no more polling");
   assert.equal(box.querySelector("input").value, "http://100.64.20.9:9000", "what was being typed is untouched");
+});
+
+// ── "By voice on displays: …" under each assistant picker (bot voice abilities) ─────────────
+const AB = (items) => ({ items, none: items.length === 0 });
+const ABIL_BOTS = [
+  { bot_id: "chef", display_name: "Chef", fit: "full", fit_memory: "full", abilities: AB([{ id: "calendar", quick: false }, { id: "lists", quick: true }]), abilities_memory: AB([{ id: "calendar", quick: false }, { id: "lists", quick: true }, { id: "memory", quick: true }]) },
+  { bot_id: "household", display_name: "Household", fit: "full", fit_memory: "full", abilities: AB([]), abilities_memory: AB([{ id: "memory", quick: true }]) },
+  { bot_id: "older", display_name: "Older", fit: "full", fit_memory: "full" },
+  { bot_id: "addon", display_name: "Addon", fit: "full", fit_memory: "full", abilities: AB([{ id: "addon:nb", quick: true, label: "<i>Notebook</i>" }]), abilities_memory: AB([]) },
+];
+const by = (list) => STRINGS.en.abil_by.replace("{list}", list);
+const slower = (w) => STRINGS.en.abil_slower.replace("{item}", w);
+
+test("abilities on a paired display: the bound assistant's line follows the picker and the memory box", async () => {
+  const p = await runPanel({ ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { bots: ABIL_BOTS });
+  const line = p.card.querySelector(".kk-abil");
+  assert.ok(line, "the line");
+  assert.ok(p.card.querySelector(".kk-fit").nextSibling === line, "right under the fit line");
+  assert.equal(line.textContent, by(`${slower(STRINGS.en.abil_calendar)}, ${STRINGS.en.abil_lists}`));
+  p.choose(p.bot, "household");
+  assert.equal(line.textContent, STRINGS.en.abil_none);
+  const mem = [...p.card.querySelectorAll("input")].filter((i) => i.type === "checkbox")[1];
+  mem.checked = true; p.change(mem);
+  assert.equal(line.textContent, by(STRINGS.en.abil_memory), "memories on: the memory-on view");
+  p.choose(p.bot, "older");
+  assert.equal(line.textContent, "", "an older listing without the field: no line");
+  p.choose(p.bot, "addon");
+  mem.checked = false; p.change(mem);
+  assert.equal(line.textContent, by("<i>Notebook</i>"), "an add-on name is text");
+  assert.equal(line.querySelector("i"), null);
+});
+
+test("abilities in the pairing form (memories off) and the dashboard-voice picker (Automatic: who answers now)", async () => {
+  const dv = { available: true, bot_id: null, effective_bot_id: "chef" };
+  const p = await runPanel({ ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { bots: ABIL_BOTS, dashboard_voice: dv });
+  const pair = p.pairForm.querySelector(".kk-abil");
+  assert.equal(pair.textContent, "", "nothing chosen yet");
+  p.choose(p.pairForm.querySelector("select"), "household");
+  assert.equal(pair.textContent, STRINGS.en.abil_none, "memories off on a new display");
+  const box = p.document.getElementById("kk-dash");
+  const line = box.querySelector(".kk-abil");
+  assert.equal(line.textContent, by(`${slower(STRINGS.en.abil_calendar)}, ${STRINGS.en.abil_lists}`), "Automatic: the assistant that answers now");
+  const sel = box.querySelector("select");
+  p.choose(sel, "household");
+  assert.equal(line.textContent, STRINGS.en.abil_none);
+});
+
+test("abilities strings: en + es, placeholders, the wording", () => {
+  for (const L of ["en", "es"]) {
+    for (const k of ["abil_by", "abil_none", "abil_slower", "abil_more", "abil_calendar", "abil_reminders", "abil_messages", "abil_crow_messages", "abil_lists", "abil_memory", "abil_projects", "abil_blog", "abil_news", "abil_files"]) assert.ok(STRINGS[L][k], `${L}.${k}`);
+    assert.ok(STRINGS[L].abil_by.includes("{list}") && STRINGS[L].abil_slower.includes("{item}") && STRINGS[L].abil_more.includes("{n}"));
+  }
+  assert.ok(STRINGS.en.abil_by.startsWith("By voice on displays"));
+  assert.equal(STRINGS.en.abil_crow_messages, "Crow messages");
+});
+
+test("abilities under a picker: more than four → four and '+N more', the whole list in the title", async () => {
+  const items = ["calendar", "reminders", "messages", "lists", "projects"].map((id) => ({ id, quick: true }));
+  const bots = [{ bot_id: "chef", display_name: "Chef", fit: "full", fit_memory: "full", abilities: { items, none: false }, abilities_memory: { items, none: false } }];
+  const p = await runPanel({ ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { bots });
+  const line = p.card.querySelector(".kk-abil");
+  const w = ["abil_calendar", "abil_reminders", "abil_messages", "abil_lists"].map((k) => STRINGS.en[k]);
+  assert.equal(line.textContent, STRINGS.en.abil_by.replace("{list}", `${w.join(", ")}, ${STRINGS.en.abil_more.replace("{n}", "1")}`));
+  assert.equal(line.getAttribute("title"), STRINGS.en.abil_by.replace("{list}", [...w, STRINGS.en.abil_projects].join(", ")));
 });
