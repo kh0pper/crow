@@ -23,9 +23,10 @@ import bus from "../../shared/event-bus.js";
 import { isSupervised } from "../../shared/supervisor.js";
 import { createDbClient } from "../../db.js";
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync, statSync, realpathSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync, statSync, realpathSync, readdirSync, lstatSync, mkdtempSync } from "node:fs";
 import { join, dirname, resolve as resolvePath, relative as relativePath, isAbsolute, basename } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
+import { homedir } from "node:os";
 import { checkInstall as checkHardwareGate } from "../hardware-gate.js";
 import { checkGpuArchCompatible } from "../gpu-arch.js";
 import { forwardBundleAction } from "../../shared/peer-forward.js";
@@ -58,7 +59,9 @@ import { envValueProblem, encodeEnvValue, formatEnvLines, updateEnvText, pathEnv
 import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved, keychainRestoreValues, backfillKeychainEntries } from "../keychain/install-hooks.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
-import { checkComposeModel, loadComposeModel, usesHostNetwork } from "../compose-guard.js";
+import { checkComposeModel, loadComposeModel, usesHostNetwork, resolveHostPath } from "../compose-guard.js";
+import { grantCandidates, activeRoots, otherBundlesRoots, migrateGrants, recordGrants, dropGrants, composeReferencedKeys, readGrants, ungrantedFolderKeys } from "../folder-grants.js";
+import { isLocalPasswordSession } from "../dashboard/local-session.js";
 import { resolveDataDir } from "../../db.js";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { isPlaceholderValue } from "../bundle-env-placeholders.js";
@@ -1686,6 +1689,134 @@ function startConsent(bundleId, { crossHost = false } = {}) {
 
 export { startConsent as _startConsentForTest, consentRecord as _consentRecordForTest };
 
+// Follow-up B: who may allow a folder outside Crow's home (the owner at this machine's own
+// dashboard), and the folders each check may admit.
+let _ownerCheckForTest = null;
+export function _setOwnerCheckForTest(fn) { _ownerCheckForTest = fn || null; }
+async function isLocalOwner(req) {
+  if (_ownerCheckForTest) return !!(await _ownerCheckForTest(req));
+  return isLocalPasswordSession(req);
+}
+const dataDirsForGrants = () => [...new Set([resolveDataDir(), join(CROW_HOME, "data")])];
+/** The folders outside Crow's home a check of this bundle may admit, and other bundles'. */
+function grantRootsFor(bundleId, bundleDir, { exclude = null } = {}) {
+  const home = process.env.HOME || homedir();
+  try { migrateGrants({ crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home, exclude }); } catch (err) {
+    console.warn(`[bundles] folder-grant migration: ${err.message}`); // no grants then: fail closed
+  }
+  return {
+    operatorRoots: activeRoots(bundleId, { crowHome: CROW_HOME, bundleDir, home }),
+    otherRoots: otherBundlesRoots(bundleId, { crowHome: CROW_HOME, home }),
+  };
+}
+/**
+ * A value Compose could turn into a host path outside the bundle folder: absolute or ~/,
+ * a ../ segment, or an interpolation ($X, ${X}). A URL, a time zone, a token or ./sub stays
+ * where it is. Non-owners may not set such a value for a setting the compose file uses.
+ */
+export function reachesHostPath(v) {
+  const t = String(v ?? "").replace(/\$\$/g, ""); // $$ is a literal $ to Compose
+  return /^[\/~]/.test(t) || /(^|[\/])\.\.([\/]|$)/.test(t) || /\$\{?[A-Za-z_]/.test(t);
+}
+/**
+ * A folder two extensions share may be mounted only as itself. An extension that already
+ * mounts something INSIDE the folder was checked before the share existed, and Docker
+ * restarts it without a check, so the new extension's container could first swap that
+ * subfolder for a symlink. Such a grant is refused, in either install order (the other
+ * order is refused by the check itself). Reads the compose model of each other extension
+ * holding that same live folder; an unreadable one refuses (fail closed).
+ * @returns {Promise<string|null>} why the folder can't be granted
+ */
+async function sharedFolderConflict(bundleId, real) {
+  const home = process.env.HOME || homedir();
+  const all = readGrants(CROW_HOME);
+  const inside = (p, root) => p !== root && p.startsWith(root.endsWith("/") ? root : `${root}/`);
+  for (const id of Object.keys(all)) {
+    if (id === bundleId || id.startsWith("_") || !isValidBundleId(id)) continue;
+    const dir = join(BUNDLES_DIR, id);
+    if (!activeRoots(id, { crowHome: CROW_HOME, bundleDir: dir, home, grants: all }).some((r) => resolveHostPath(r) === real)) continue;
+    const loaded = await loadComposeModel(dir, { env: composeEnv(), runConfig: runComposeConfig });
+    if (loaded.error || !loaded.model) return `the extension ${id} was allowed the same folder, and its compose file could not be read`;
+    const sources = [];
+    for (const svc of Object.values(loaded.model.services || {})) for (const v of (svc && svc.volumes) || []) if (v?.type === "bind" && typeof v.source === "string") sources.push(v.source);
+    for (const v of Object.values(loaded.model.volumes || {})) if (typeof v?.driver_opts?.device === "string") sources.push(v.driver_opts.device);
+    if (sources.some((src) => inside(resolveHostPath(src), real))) {
+      return `the extension ${id} mounts a folder inside it (two extensions may share a folder only when neither mounts a folder inside it)`;
+    }
+  }
+  return null;
+}
+/** Remove the grants sharedFolderConflict refuses; `refused[key]` says why. */
+async function dropSharedFolderConflicts(bundleId, grants, refused) {
+  for (const [k, g] of Object.entries(grants)) {
+    const why = await sharedFolderConflict(bundleId, g.real);
+    if (why) { delete grants[k]; refused[k] = why; }
+  }
+}
+
+/**
+ * Before an install copies a bundle over an existing folder: back up what the copy and the
+ * .env writes will touch, so an install refused before its containers start leaves the
+ * earlier install as it was (its code, compose file and .env), never half-replaced and
+ * never deleted (its data and secrets live there). A fresh install's folder is removed.
+ * node_modules is not backed up (dependencies, rebuilt by npm): one the install created is
+ * removed. `settle()` restores unless `commit()` ran first.
+ */
+export function snapshotInstallDir(sourceDir, destDir, { backupRoot }) {
+  let done = false;
+  if (!existsSync(destDir)) {
+    return { commit() { done = true; }, settle() { if (!done) { done = true; rmSync(destDir, { recursive: true, force: true }); } } };
+  }
+  mkdirSync(backupRoot, { recursive: true, mode: 0o700 });
+  const backup = mkdtempSync(join(backupRoot, "install-"));
+  const saved = [];
+  const added = [];
+  const present = (r) => { try { return lstatSync(join(destDir, r)); } catch { return null; } };
+  const save = (r) => { saved.push(r); cpSync(join(destDir, r), join(backup, r), { recursive: true, verbatimSymlinks: true }); };
+  const visit = (rel) => {
+    let ents = [];
+    try { ents = readdirSync(join(sourceDir, rel), { withFileTypes: true }); } catch { return; }
+    for (const ent of ents) {
+      const r = rel ? join(rel, ent.name) : ent.name;
+      if (r === "node_modules") continue;
+      const st = present(r);
+      if (!st) added.push(r);
+      else if (ent.isDirectory() && st.isDirectory()) visit(r);
+      else save(r);
+    }
+  };
+  visit("");
+  if (!saved.includes(".env") && !added.includes(".env")) { if (present(".env")) save(".env"); else added.push(".env"); }
+  if (!present("node_modules")) added.push("node_modules");
+  return {
+    commit() { done = true; rmSync(backup, { recursive: true, force: true }); },
+    settle() {
+      if (done) return;
+      done = true;
+      // Never through a link: a container with the bundle folder mounted read-write may have
+      // swapped a folder on the way for a symlink to a host folder since the snapshot.
+      const realParents = (r) => {
+        let cur = destDir;
+        for (const part of [".", ...dirname(r).split("/").filter((x) => x && x !== ".")]) {
+          if (part !== ".") cur = join(cur, part);
+          let st;
+          try { st = lstatSync(cur); } catch { return part !== "."; } // gone below destDir: recreated by cp
+          if (!st.isDirectory() || st.isSymbolicLink()) return false;
+        }
+        return true;
+      };
+      for (const r of added) if (realParents(r)) rmSync(join(destDir, r), { recursive: true, force: true });
+      for (const r of saved) {
+        if (!realParents(r)) continue;
+        rmSync(join(destDir, r), { recursive: true, force: true });
+        cpSync(join(backup, r), join(destDir, r), { recursive: true, verbatimSymlinks: true });
+      }
+      rmSync(backup, { recursive: true, force: true });
+    },
+  };
+}
+export function _migrateGrantsForTest() { return migrateGrants({ crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: process.env.HOME || homedir() }); }
+
 // Test-only: replace `docker compose config` (the model the shared check reads).
 let _composeConfigRunnerForTest = null;
 export function _setComposeConfigRunnerForTest(fn) { _composeConfigRunnerForTest = fn || null; }
@@ -1702,7 +1833,7 @@ async function runComposeConfig(args, { cwd, env }) {
  * e.g. no extra compose files; at Start an operator's own override is part of the model
  * that is checked instead. The model check reads what Compose will actually apply.
  */
-export async function checkBundleCompose(bundleDir, { bundleId, manifest, consentVerified = false, textCheck = true } = {}) {
+export async function checkBundleCompose(bundleDir, { bundleId, manifest, consentVerified = false, textCheck = true, operatorRoots } = {}) {
   if (textCheck) {
     const t = validateComposeFile(join(bundleDir, "docker-compose.yml"), bundleId, { manifest, consentVerified });
     if (!t.valid) return t;
@@ -1713,7 +1844,12 @@ export async function checkBundleCompose(bundleDir, { bundleId, manifest, consen
   // gateway may load: never mountable read-write.
   let shipped = null;
   try { shipped = new Set(readdirSync(join(APP_BUNDLES, bundleId || basename(bundleDir)))); } catch { /* not in the repo */ }
-  return checkComposeModel(loaded.model, { bundleDir, manifest, consentVerified, ctx: { crowHome: CROW_HOME, dataDir: resolveDataDir(), appRoot: APP_ROOT, shipped } });
+  // Folders outside Crow's home: given by the install (its owner-typed folders, nothing
+  // from .env or a record), else the bundle's live grants (Start, shared-storage re-apply).
+  const id = bundleId || basename(bundleDir);
+  const g = grantRootsFor(id, bundleDir, { exclude: operatorRoots !== undefined ? id : null });
+  const roots = operatorRoots !== undefined ? operatorRoots : g.operatorRoots;
+  return checkComposeModel(loaded.model, { bundleDir, manifest, consentVerified, ctx: { crowHome: CROW_HOME, dataDir: resolveDataDir(), appRoot: APP_ROOT, shipped, operatorRoots: roots, otherRoots: g.otherRoots, home: process.env.HOME || homedir() } });
 }
 
 // --- PR 0: Consent token helpers (server-validated install consent) ---
@@ -2441,7 +2577,7 @@ export function scrubPlaceholderLines(text) {
   }).join("\n");
 }
 
-export async function runInstallJob(bundleId, envVars, { job, installedSnapshot, consentVerified, manifest, keychain = null }) {
+export async function runInstallJob(bundleId, envVars, { job, installedSnapshot, consentVerified, manifest, keychain = null, ownerEnv = null }) {
   let needsRestart = false;
   // Set when `docker compose up` fails. The install does NOT stop there: the
   // non-container steps (gateway env, MCP registration, panel + routes,
@@ -2450,6 +2586,8 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
   let composeFailure = null;
   let runHook = false;
   let hookFailure = null;
+  // Until the pre-up checks pass, a failed or refused install puts the folder back (below).
+  let installSnap = null;
   try {
     const addonType = manifest?.type || "bundle";
     const sourceDir = join(APP_BUNDLES, bundleId);
@@ -2458,6 +2596,11 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     const destDir = join(BUNDLES_DIR, bundleId);
     // Seen BEFORE the copy: the source tree may carry its own .env (a dev checkout).
     const priorInstallEnv = existsSync(join(destDir, ".env"));
+    // The earlier install's values: one the request repeats is not a new choice (the .env
+    // may hold a value something other than the owner wrote), so it is never granted.
+    let priorEnvValues = {};
+    if (priorInstallEnv) { try { priorEnvValues = parseEnvText(readFileSync(join(destDir, ".env"), "utf8")); } catch { /* unreadable: nothing excluded beyond the rest */ } }
+    installSnap = snapshotInstallDir(sourceDir, destDir, { backupRoot: join(CROW_HOME, ".install-rollback") });
     mkdirSync(destDir, { recursive: true });
     cpSync(sourceDir, destDir, { recursive: true });
     appendLog(job, "Copied bundle files");
@@ -2485,12 +2628,10 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
           && !nodeSatisfiesMin(process.versions.node, manifest.min_node)) {
         const reason = `requires Node.js >= ${manifest.min_node.trim()} — this Crow runs Node ${process.versions.node}; upgrade Node.js, restart Crow, and retry`;
         appendLog(job, "npm install refused: " + reason);
-        rmSync(destDir, { recursive: true, force: true });
         return { ok: false, reason };
       }
       if (!existsSync(pkgJsonPath)) {
         appendLog(job, "npm install failed: package.json missing from bundle (npm_required)");
-        rmSync(destDir, { recursive: true, force: true });
         return { ok: false, reason: "npm install failed: package.json missing from bundle" };
       }
 
@@ -2509,14 +2650,12 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       } catch (err) {
         const stderrTail = String(err.stderr || err.message || "").slice(-2000).trim();
         appendLog(job, `npm install failed: ${stderrTail}`);
-        rmSync(destDir, { recursive: true, force: true });
         return { ok: false, reason: `npm install failed: ${stderrTail}` };
       }
 
       const missing = (manifest.verify_paths || []).filter((p) => !existsSync(join(destDir, p)));
       if (missing.length > 0) {
         appendLog(job, `npm install verification failed: missing ${missing.join(", ")}`);
-        rmSync(destDir, { recursive: true, force: true });
         return { ok: false, reason: `npm install failed: verify_paths missing: ${missing.join(", ")}` };
       }
     } else if (existsSync(pkgJsonPath) && !existsSync(join(destDir, "node_modules"))) {
@@ -2555,8 +2694,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     const mintingKc = Object.keys(plan.minted).filter((k) => manifest.env_vars?.find((v) => v.name === k)?.keychain === true);
     const blocked = kcRestore.failed ? mintingKc : mintingKc.filter((k) => kcRestore.unreadable.includes(k));
     if (blocked.length > 0) {
-      // A prior install's folder (its .env holds other generated secrets) is kept as it is.
-      if (!priorInstallEnv) rmSync(destDir, { recursive: true, force: true });
+      // A prior install's folder (its .env holds other generated secrets) is put back as it was.
       const reason = kcRestore.failed
         ? `Crow keychain could not be read, so ${blocked.join(", ")} was not generated (a new value could replace one saved there). Try the install again; nothing was written.`
         : `Crow keychain holds ${blocked.join(", ")} for this extension, sealed with a keychain key this machine does not have. Import your keychain Export first (Settings → Passwords → Import), then install again. To start fresh instead, delete the old saved password(s) there (this needs a dashboard password or two-factor sign-in).`;
@@ -2590,7 +2728,6 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     // for seconds and a later compose failure still leaves the password saved.
     const kc = await recordKeychainForInstall({ bundleId, manifest, env: installEnv, minted: plan.minted, reusedPlain: plan.reusedPlain, keychainReq: keychain, log: (m) => appendLog(job, m) });
     if (!kc.mintedSaved) {
-      rmSync(destDir, { recursive: true, force: true });
       return { ok: false, reason: "could not save the generated password to Crow keychain; nothing was written — retry the install" };
     }
     plan.persist();
@@ -2622,6 +2759,9 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       }
     }
 
+    // No compose check ahead: the copy stands from here.
+    if (!(addonType === "bundle" && existsSync(join(destDir, "docker-compose.yml")))) installSnap.commit();
+
     // 3. Type-specific install steps
     if (addonType === "bundle") {
       // Docker bundle — pull images and start containers
@@ -2630,11 +2770,26 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         // PR 0: validate compose for ALL bundles (first-party + community).
         // First-party bundles with privileged/host-network must declare manifest.privileged
         // and the install request must include a verified consent token.
-        const validation = await checkBundleCompose(destDir, { bundleId, manifest, consentVerified });
+        // Folders outside Crow's home the OWNER typed in this install (never a default, an
+        // example or a retained value): granted once the check passes with exactly these.
+        let grants = {};
+        if (ownerEnv) {
+          let exampleEnv = {};
+          try { exampleEnv = parseEnvText(readFileSync(join(destDir, ".env.example"), "utf8")); } catch { /* none */ }
+          const home = process.env.HOME || homedir();
+          const refused = {};
+          const typed = Object.fromEntries(Object.entries(stripGeneratedKeys(manifest, ownerEnv) || {}).filter(([k, v]) => priorEnvValues[k] === undefined || String(priorEnvValues[k]) !== String(v)));
+          grants = grantCandidates({ manifest, submitted: typed, composeText: readFileSync(composePath, "utf8"), exampleEnv, retained: retainedForPaths || {}, crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home, appRoot: APP_ROOT, otherRoots: otherBundlesRoots(bundleId, { crowHome: CROW_HOME, home }), refused });
+          await dropSharedFolderConflicts(bundleId, grants, refused);
+          for (const [k, why] of Object.entries(refused)) appendLog(job, `The folder in ${k} is not allowed: ${why}`);
+        }
+        // Plus folders this bundle was allowed before (a reinstall restoring a kept value):
+        // a grant is key + folder, so it counts only while that key still names it.
+        const kept = activeRoots(bundleId, { crowHome: CROW_HOME, bundleDir: destDir, home: process.env.HOME || homedir() });
+        const validation = await checkBundleCompose(destDir, { bundleId, manifest, consentVerified, operatorRoots: [...Object.values(grants).map((g) => g.real), ...kept] });
         if (!validation.valid) {
           appendLog(job, `Security check failed: ${validation.reason}`);
-          // Clean up copied files
-          rmSync(destDir, { recursive: true, force: true });
+          // The copied files go; an earlier install is put back as it was (`finally` below).
           return { ok: false, reason: `Security check failed: ${validation.reason}` };
         }
         appendLog(job, "Security check passed");
@@ -2642,7 +2797,6 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         const own = await composeOwnership(bundleId, destDir, manifest);
         if (own.refusal) {
           appendLog(job, `Install refused: ${own.refusal}`);
-          rmSync(destDir, { recursive: true, force: true });
           return { ok: false, reason: own.refusal };
         }
         if (own.warning) appendLog(job, `Note: ${own.warning}`);
@@ -2651,8 +2805,14 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
           if (made.length) appendLog(job, `Prepared data folders: ${made.map((p) => relativePath(CROW_HOME, p)).join(", ")}`);
         } catch (err) {
           appendLog(job, `Install refused: ${err.message}`);
-          rmSync(destDir, { recursive: true, force: true });
           return { ok: false, reason: err.message };
+        }
+        // Every pre-up check passed: the copied files stand from here, and so do the
+        // folders the owner chose (recorded only now: a refused install keeps its old grants).
+        installSnap.commit();
+        if (Object.keys(grants).length) {
+          recordGrants(CROW_HOME, bundleId, grants);
+          appendLog(job, `Allowed the folder(s) you chose outside Crow's home: ${Object.keys(grants).join(", ")}`);
         }
 
         appendLog(job, "Pulling Docker images...");
@@ -3007,6 +3167,10 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     const reason = err?.message || String(err);
     appendLog(job, `Install failed: ${reason}`);
     return { ok: false, reason: composeFailure ? `${composeFailure}; then: ${reason}` : reason };
+  } finally {
+    // Failed or refused before the pre-up checks passed: the earlier install comes back as
+    // it was (a fresh install's folder goes). A no-op once committed.
+    try { installSnap?.settle(); } catch (err) { appendLog(job, `Could not put the earlier install back: ${err.message}`); }
   }
 }
 
@@ -3081,6 +3245,9 @@ export async function handleRepinRequest(req, res, { crowHome = CROW_HOME } = {}
 }
 
 export default function bundlesRouter() {
+  // Folder grants (follow-up B): grandfather the folders installed extensions already use,
+  // once, before any request.
+  try { _migrateGrantsForTest(); } catch (err) { console.warn(`[bundles] folder-grant migration: ${err.message}`); }
   const router = Router();
 
   // C4 Task 4: register this module's jobs Map as bot-engine-status's active-job
@@ -3289,6 +3456,15 @@ export default function bundlesRouter() {
 
     // Create job for async tracking
     const keychainReq = sanitizeKeychainRequest(req.body?.keychain, { localSession: !!req.dashboardSession && !req.crossHostAuth });
+    const owner = await isLocalOwner(req);
+    if (!owner && env_vars && typeof env_vars === "object") {
+      // The same rule as Configure: a non-owner (a peer sign-in session) can't point a setting
+      // the compose file uses at a host path, at install either.
+      let used = new Set();
+      try { used = composeReferencedKeys(readFileSync(join(APP_BUNDLES, bundle_id, "docker-compose.yml"), "utf8")); } catch { /* no compose */ }
+      const bad = Object.keys(env_vars).filter((k) => used.has(k) && reachesHostPath(env_vars[k]));
+      if (bad.length) return res.status(403).json({ code: "folder_needs_owner", key: bad[0], error: `Folder settings (${bad.join(", ")}) are set from this machine's own dashboard, signed in with its password.` });
+    }
     const job = createJob(bundle_id, "install");
     res.json({ ok: true, job_id: job.id, message: `Installing ${bundle_id}...` });
 
@@ -3301,6 +3477,7 @@ export default function bundlesRouter() {
         consentVerified: v.consentVerified,
         manifest: v.manifest,
         keychain: keychainReq,
+        ownerEnv: owner ? env_vars : null,
       });
       if (!out.ok) {
         finishJob(job, "failed");
@@ -3793,6 +3970,17 @@ export default function bundlesRouter() {
         return res.status(400).json({ code: "invalid_env", key: badPattern.key, error: `Environment variable '${badPattern.key}' ${badPattern.why}` });
       }
 
+      // Folders outside Crow's home (follow-up B): only the owner at this machine's own
+      // dashboard sets one; a peer's or a peer sign-in's request that tries is refused.
+      const owner = await isLocalOwner(req);
+      let folderKeys = new Set();
+      try { folderKeys = composeReferencedKeys(readFileSync(join(bundleDir, "docker-compose.yml"), "utf8")); } catch { /* no compose */ }
+      const homeForGrants = process.env.HOME || homedir();
+      const pathishKeys = Object.keys(env_vars).filter((k) => folderKeys.has(k) && reachesHostPath(env_vars[k]));
+      if (pathishKeys.length && !owner) {
+        return res.status(403).json({ code: "folder_needs_owner", key: pathishKeys[0], error: `Folder settings (${pathishKeys.join(", ")}) are set from this machine's own dashboard, signed in with its password.` });
+      }
+
       // Read the existing .env. The save is LINE-PRESERVING (C4): only the submitted
       // keys change; every other line (legacy values, comments) stays byte-for-byte.
       const envPath = join(bundleDir, ".env");
@@ -3832,6 +4020,40 @@ export default function bundlesRouter() {
 
       Object.assign(existing, env_vars); // the effective env after this save
       writePrivateFile(envPath, updateEnvText(oldEnvText, env_vars, { pathKeys: pathEnvKeys(getInstalledFirstManifest(bundle_id)) }));
+      const folderWarnings = [];
+      if (owner && folderKeys.size) {
+        // The owner typed these folders here: allow them (a default is not a choice). Only
+        // keys this save CHANGES: an unchanged value may have been written by something else
+        // (a hand edit, a CLI install, a container that can write the .env), and the form
+        // sends every filled field. A changed key the owner set to anything else loses its
+        // grant; an unchanged one keeps whatever it had.
+        const changed = new Set(changedKeys);
+        const man = getInstalledFirstManifest(bundle_id);
+        let composeTextG = "";
+        try { composeTextG = readFileSync(join(bundleDir, "docker-compose.yml"), "utf8"); } catch { /* none */ }
+        let exampleEnv = {};
+        try { exampleEnv = parseEnvText(readFileSync(join(bundleDir, ".env.example"), "utf8")); } catch { /* none */ }
+        // The form prefills (and sends) the manifest default: a default or an example is never
+        // taken as the owner's choice, here as at install.
+        try { migrateGrants({ crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: homeForGrants }); } catch { /* best-effort */ }
+        const refused = {};
+        const submittedChanged = Object.fromEntries(Object.entries(env_vars).filter(([k]) => changed.has(k)));
+        const g = grantCandidates({ manifest: man, submitted: submittedChanged, composeText: composeTextG, exampleEnv, crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: homeForGrants, appRoot: APP_ROOT, otherRoots: otherBundlesRoots(bundle_id, { crowHome: CROW_HOME, home: homeForGrants }), refused });
+        await dropSharedFolderConflicts(bundle_id, g, refused);
+        recordGrants(CROW_HOME, bundle_id, g);
+        dropGrants(CROW_HOME, bundle_id, [...changed].filter((k) => folderKeys.has(k) && !g[k]));
+        // Say why a folder this save names is still not allowed (Start would refuse it).
+        let ungranted = [];
+        try { ungranted = ungrantedFolderKeys(bundle_id, { crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: homeForGrants, bundleDir, appRoot: APP_ROOT }); } catch { /* none */ }
+        for (const k of ungranted) {
+          if (env_vars[k] === undefined) continue;
+          const why = refused[k] || (changed.has(k)
+            ? "it can't be allowed"
+            : "it did not change in this save, and a folder is allowed only when you type it here (retype it, for example with a trailing /)");
+          folderWarnings.push(`${k} was saved, but its folder is not allowed, so the extension will not start with it: ${why}.`);
+        }
+      }
+      keyWarnings.push(...folderWarnings);
       const keychainReq = sanitizeKeychainRequest(req.body?.keychain, { localSession: !!req.dashboardSession && !req.crossHostAuth });
       // keychain_configure:false fields (Workspace admin password): setup applied the stored value
       // once and Configure cannot re-apply a new one, so never overwrite the stored copy here.
