@@ -105,32 +105,60 @@ test("over HTTP: /tools/mcp initializes (200) with two peers and lists no peer t
   }
 });
 
-// The peer-invocation gate resolves /tools calls against connectedServers. It
-// must see the sources that would actually run: never a peer entry, never a
-// disconnected one, and on /tools never an ambiguous name (which duplicate is
-// kept depends on registration order). Router crow_tools keeps first-match,
-// which is how router.js executes it.
+// The peer-invocation gate resolves /tools and router crow_tools calls
+// against connectedServers, separately from (and before) the executor. It
+// resolves a name only when exactly one LOCAL entry holds it, whatever that
+// entry's status, so the executor can only run that entry or nothing. Peers
+// never resolve.
 const callBody = (name, args = {}) => ({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } });
+const rt = (action) => ({ method: "tools/call", params: { name: "crow_tools", arguments: { action } } });
 const gateMap = () => new Map([
   peer("p1"),
   local("texas-gov-data", [{ name: "tx_query" }, { name: "dup_tool" }]),
   local("trello", [{ name: "add_card" }, { name: "dup_tool" }]),
-  ["old-addon", { client: null, status: "disconnected", tools: [{ name: "add_card" }, { name: "tx_query" }] }],
+  ["old-addon", { client: null, status: "disconnected", tools: [{ name: "add_card" }, { name: "old_only" }] }],
 ]);
 
-test("peer gate: /tools ignores peers and disconnected sources, denies an ambiguous name", () => {
+test("peer gate: peers never resolve; a name held by two local entries (any status) is denied", () => {
   const m = gateMap();
-  assert.equal(resolveCalledCanonicalId("/tools", callBody("crow_store_memory"), m), null, "a peer's tool resolves to nothing (deny)");
-  assert.equal(resolveCalledCanonicalId("/tools", callBody("tx_query"), m), "texas-gov-data", "a disconnected duplicate does not make it ambiguous");
-  assert.equal(resolveCalledCanonicalId("/tools-readonly", callBody("add_card"), m), "trello");
-  assert.equal(resolveCalledCanonicalId("/tools", callBody("dup_tool"), m), null, "ambiguous → fail closed");
+  for (const prefix of ["/tools", "/tools-readonly"]) {
+    assert.equal(resolveCalledCanonicalId(prefix, callBody("crow_store_memory"), m), null, "a peer's tool resolves to nothing (deny)");
+    assert.equal(resolveCalledCanonicalId(prefix, callBody("tx_query"), m), "texas-gov-data");
+    assert.equal(resolveCalledCanonicalId(prefix, callBody("dup_tool"), m), null, "two connected holders → deny");
+    assert.equal(resolveCalledCanonicalId(prefix, callBody("add_card"), m), null, "a disconnected holder still makes it ambiguous");
+    assert.equal(resolveCalledCanonicalId(prefix, callBody("old_only"), m), "old-addon", "unique holder: the only entry that could ever run it");
+  }
+  assert.equal(resolveCalledCanonicalId("/router", rt("tx_query"), m), "texas-gov-data");
+  assert.equal(resolveCalledCanonicalId("/router", rt("dup_tool"), m), null);
+  assert.equal(resolveCalledCanonicalId("/router", rt("add_card"), m), null);
+  assert.equal(resolveCalledCanonicalId("/router", rt("crow_store_memory"), m), null);
 });
 
-test("peer gate: router crow_tools keeps first-match on a local duplicate, never resolves a peer tool", () => {
-  const m = gateMap();
-  const rt = (action) => ({ method: "tools/call", params: { name: "crow_tools", arguments: { action } } });
-  assert.equal(resolveCalledCanonicalId("/router", rt("dup_tool"), m), "texas-gov-data");
-  assert.equal(resolveCalledCanonicalId("/router", rt("crow_store_memory"), m), null);
+// TOCTOU: the gate approves, then the source set changes before router.js
+// dispatches. With a status-filtered first-match the gate would approve the
+// connected "trello" for add_card while, after "old-addon" reconnects ahead of
+// it in map order, the executor runs "old-addon". Run the REAL router
+// crow_tools executor on both sides of that change.
+test("peer gate vs router executor: a source reconnecting between gate and dispatch cannot run under another source's approval", async () => {
+  const calls = [];
+  const m = new Map([
+    ["old-addon", { client: null, status: "disconnected", tools: [{ name: "add_card" }] }],
+    local("trello", [{ name: "add_card" }], calls),
+  ]);
+  assert.equal(resolveCalledCanonicalId("/router", rt("add_card"), m), null, "denied before anything can diverge");
+
+  // Show the divergence the rule prevents: the executor's pick moves.
+  for (const [k, v] of m) connectedServers.set(k, v);
+  const { createRouterServer } = await import("../servers/gateway/router.js");
+  const router = createRouterServer();
+  const crowTools = router._registeredTools?.crow_tools;
+  assert.ok(crowTools, "router exposes crow_tools");
+  const run = (args) => (crowTools.callback || crowTools.handler)(args, {});
+  await run({ action: "add_card", params: {} });
+  connectedServers.set("old-addon", { client: stubClient("old-addon", calls), status: "connected", tools: [{ name: "add_card" }] });
+  await run({ action: "add_card", params: {} });
+  assert.deepEqual(calls, ["trello:add_card", "old-addon:add_card"], "same call, different executing source after a reconnect");
+  assert.equal(resolveCalledCanonicalId("/router", rt("add_card"), connectedServers), null, "and the gate denies in both states");
 });
 
 test("peer gate: even with instance-p1 in the exposure list, a /tools call to a peer-held name is denied and raises no Fix-it card", async () => {
