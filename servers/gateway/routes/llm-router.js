@@ -522,7 +522,9 @@ async function handleChat(req, res, deps) {
     await new Promise((resolve, reject) => {
       const nodeStream = Readable.fromWeb(upstream.body);
       nodeStream.on("error", reject);
-      res.on("close", () => nodeStream.destroy());
+      // A client abort destroys the stream with "close", not "error", and res never emits "finish": resolve on
+      // close too (as forwardDoor does), or the turn never settles.
+      res.on("close", () => { nodeStream.destroy(); resolve(); });
       res.on("finish", resolve);
       if (!xf) {
         nodeStream.on("data", (chunk) => tap(chunk.toString("utf8")));

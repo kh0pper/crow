@@ -41,6 +41,12 @@ before(async () => {
         res.end("data: [DONE]\n\n");
         return;
       }
+      if (mode === "hang") {
+        // One frame, then the upstream never ends: only the client's disconnect can end the turn.
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(`data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 1, model: "m", choices: [{ index: 0, delta: { content: "Thinking" }, finish_reason: null }] })}\n\n`);
+        return;
+      }
       if (mode === "error") {
         res.writeHead(500, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { message: `${NOW} upstream broke` } }));
@@ -71,7 +77,7 @@ before(async () => {
   await new Promise((r) => srv.listen(0, "127.0.0.1", r));
   appUrl = `http://127.0.0.1:${srv.address().port}`;
 });
-after(() => { srv?.close(); up?.close(); });
+after(() => { srv?.closeAllConnections?.(); up?.closeAllConnections?.(); srv?.close(); up?.close(); });
 beforeEach(() => { seen = []; metered = []; mode = "json"; reserveEsc = false; delete process.env.COMPANION_TURN_CONTEXT; });
 
 const post = (body, path = "/llm/v1/chat/completions") => fetch(`${appUrl}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -180,4 +186,22 @@ test("an upstream error body passes through untouched", async () => {
   const r = await post({ model: "crow-companion", messages: [{ role: "user", content: "hi" }] });
   assert.equal(r.status, 500);
   assert.equal((await r.json()).error.message, `${NOW} upstream broke`);
+});
+
+test("a client disconnect mid-stream settles the turn (filtered and plain paths alike)", async () => {
+  mode = "hang";
+  for (const model of ["crow-companion", "crow-voice/qwen3.5-4b"]) {
+    const logs = [];
+    const orig = console.log;
+    console.log = (...a) => { logs.push(a.join(" ")); };
+    try {
+      const ac = new AbortController();
+      const r = await fetch(`${appUrl}/llm/v1/chat/completions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model, messages: [{ role: "user", content: "monday?" }], stream: true }), signal: ac.signal });
+      const reader = r.body.getReader();
+      await reader.read();
+      ac.abort();
+      for (let i = 0; i < 50 && !logs.some((l) => /\[llm-router\] done /.test(l)); i++) await new Promise((res) => setTimeout(res, 20));
+    } finally { console.log = orig; }
+    assert.ok(logs.some((l) => /\[llm-router\] done /.test(l)), `${model}: the handler never finished after the client left: ${logs.join(" | ")}`);
+  }
 });
