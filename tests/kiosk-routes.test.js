@@ -652,6 +652,51 @@ test("fit: the listing gives every assistant its fit (with and without memories)
   } finally { f.close(); await raw.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id LIKE 'fit-%'", args: [] }); }
 });
 
+// ── "By voice on displays: …" (bot voice abilities) ─────────────
+test("abilities: the listing gives every assistant its abilities with memories off / on, asked with the kiosk's own tool list, cached like fits", async () => {
+  const asked = [];
+  const voice = {
+    runVoiceTurn: async () => ({ route: "fast", timings: {} }), speakText: async () => true,
+    assessBot: async () => null,
+    abilitiesOf: async (o) => {
+      asked.push(o);
+      if (o.botId === "ab-broken") throw new Error("index unreadable");
+      return { items: [{ id: "calendar", quick: false }, ...(o.memoryOn ? [{ id: "memory", quick: true }] : [])], none: false };
+    },
+  };
+  await raw.execute({ sql: "INSERT INTO pi_bot_defs VALUES ('ab-one','One','{}',1),('ab-broken','Broken','{}',1)", args: [] });
+  const k = createKioskRuntime(runtimeDeps({ voice }));
+  const app = express();
+  app.use(k.router((req, res, next) => next()));
+  const { s, base: b } = await listen(app, k);
+  try {
+    const body = await (await fetch(b + "/api/kiosk/admin/displays")).json();
+    const by = Object.fromEntries(body.bots.map((x) => [x.bot_id, x]));
+    assert.deepEqual(by["ab-one"].abilities, { items: [{ id: "calendar", quick: false }], none: false });
+    assert.deepEqual(by["ab-one"].abilities_memory.items.map((x) => x.id), ["calendar", "memory"]);
+    assert.equal(by["ab-broken"].abilities, null, "a failed check is no line, never a guess");
+    const q = asked.find((o) => o.botId === "ab-one" && o.memoryOn === false);
+    assert.deepEqual(q.denyTools, KIOSK_DENY_TOOLS);
+    assert.deepEqual(q.extraTools.map((x) => x.definition.name), ["crow_show", "crow_wm"]);
+    assert.equal(typeof q.displayObjectWhen, "function");
+    assert.equal(q.displayObjectWhen("add milk to my shopping list"), true, "taken as if a card were open");
+    assert.equal(q.displayObjectWhen("add lunch to my calendar"), false);
+    const n = asked.length;
+    await (await fetch(b + "/api/kiosk/admin/displays")).json();
+    assert.equal(asked.length, n, "the 5 s panel poll does not recompute: abilities are cached");
+  } finally { k.stop(); s.close(); await raw.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id LIKE 'ab-%'", args: [] }); }
+});
+
+test("abilities: a voice runner without abilitiesOf (an older core) → the fields are absent and the listing still answers", async () => {
+  const f = await fitRuntime({ household: "full" });
+  try {
+    const r = await fetch(f.b + "/api/kiosk/admin/displays");
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    for (const bot of body.bots) assert.ok(!("abilities" in bot) && !("abilities_memory" in bot), bot.bot_id);
+  } finally { f.close(); }
+});
+
 test("fit: pairing a display to a too-large assistant is refused (bot_too_large) and the code stays usable; without-skills and unknown fits pair", async () => {
   await raw.execute({ sql: `INSERT INTO pi_bot_defs VALUES ${FIT_BOTS}`, args: [] });
   const f = await fitRuntime({ household: "full", "fit-general": "no_skills", "fit-huge": "too_large", "fit-broken": new Error("x") });

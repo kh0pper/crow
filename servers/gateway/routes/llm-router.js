@@ -356,6 +356,8 @@ function echoTransform(contentType, ctx) {
 
 /** The fast/escalate keys the router and the kiosk voice turn share. */
 export const VOICE_ROUTE_KEYS = Object.freeze({ fast: FAST_KEY, escalate: ESC_KEY });
+/** COMPANION_TOOL_ESCALATION: may a voice turn escalate on tool/action intent at all? (The Bot Builder's ability line asks.) */
+export function toolEscalationEnabled() { return TOOL_ESCALATION; }
 
 /**
  * THE voice routing policy (kiosk spec §7.2): the same decision /llm/v1 makes,
