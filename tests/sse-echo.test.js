@@ -120,3 +120,11 @@ test("stripJsonEcho: a non-stream response has the echo removed from message.con
   assert.equal(stripJsonEcho(clean, [CTX]), clean);
   assert.equal(stripJsonEcho("{nope", [CTX]), "{nope");
 });
+
+test("held text is flushed BEFORE a tool_calls frame, so content never arrives after the tool-call deltas", () => {
+  const out = run(ROLE + delta("Let me add that [No") + TOOL + FINISH + DONE);
+  assert.equal(contentOf(out), "Let me add that [No");
+  const flushAt = out.indexOf('"content":"[No"');
+  assert.ok(flushAt > 0 && flushAt < out.indexOf(TOOL), "the held text comes before the tool_calls frame");
+  assert.ok(out.includes(TOOL));
+});

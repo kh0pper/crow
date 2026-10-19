@@ -7,8 +7,8 @@
  * createContextEchoGate(); every other event — the role frame (content null), tool_call deltas, reasoning_content,
  * usage, `[DONE]`, comments, anything that is not JSON — passes through byte for byte, and so does a content frame
  * the gate left unchanged. Text the gate is still holding is emitted as a synthetic chunk (copying id, object,
- * created, model and the choice index) before the first frame carrying a finish_reason, before `[DONE]`, or at the
- * end of the stream. Tool-call arguments are not rewritten (accepted risk; the kiosk path uses stripContextEchoDeep).
+ * created, model and the choice index) before the first frame carrying a finish_reason or a tool_calls delta, before
+ * `[DONE]`, or at the end of the stream. Tool-call arguments are not rewritten (accepted risk; the kiosk path uses stripContextEchoDeep).
  */
 import { createContextEchoGate, stripContextEcho, TURN_CONTEXT_NOTE } from "./context-echo.js";
 
@@ -54,13 +54,14 @@ export function createSseEchoFilter(contexts) {
     try { obj = JSON.parse(data); } catch { return raw; }
     if (!Array.isArray(obj?.choices)) return raw;
     const choice = obj.choices[0];
-    const finishes = obj.choices.some((c) => c && c.finish_reason != null);
-    if (!choice || typeof choice.delta?.content !== "string") return (finishes ? flushFrame() : "") + raw;
+    // A finish_reason or a tool_calls delta closes the text: held text goes out before it, never after.
+    const closes = obj.choices.some((c) => c && (c.finish_reason != null || c.delta?.tool_calls));
+    if (!choice || typeof choice.delta?.content !== "string") return (closes ? flushFrame() : "") + raw;
     template = obj;
     const content = choice.delta.content;
-    // A content frame that also finishes carries the gate's rest itself.
+    // A content frame that also closes the text carries the gate's rest itself.
     let safe = gate.feed(content);
-    if (finishes) { safe += gate.flush(); held = false; } else held = true;
+    if (closes) { safe += gate.flush(); held = false; } else held = true;
     if (safe === content) return raw;
     choice.delta.content = safe;
     return `data: ${JSON.stringify(obj)}${nl}${nl}`;
