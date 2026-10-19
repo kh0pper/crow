@@ -18,7 +18,13 @@
 import { readFileSync, readdirSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
 import { join, isAbsolute, resolve as resolvePath, dirname, sep } from "node:path";
 import { homedir } from "node:os";
-import { looksLikeHostPath, resolveHostPath, parseDotEnv } from "./compose-guard.js";
+import { looksLikeHostPath, resolveHostPath, grantRootProblem } from "./compose-guard.js";
+import { parseEnvText } from "./bundle-env-codec.js";
+
+// The same .env decoding the gateway writes with (quotes, escapes).
+const readEnv = (path) => { try { return parseEnvText(readFileSync(path, "utf8")); } catch { return {}; } };
+// Keys Compose takes from the gateway's environment (composeEnv), not from .env.
+const GATEWAY_KEYS = new Set(["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "XDG_RUNTIME_DIR", "CROW_HOME", "CROW_DATA_DIR", "CROW_DB_PATH"]);
 
 export const GRANTS_FILE = "folder-grants.json";
 const ID = /^[a-z0-9][a-z0-9._-]*$/;
@@ -28,10 +34,18 @@ const under = (p, root) => p === root || p.startsWith(root.endsWith(sep) ? root 
 export function grantsPath(crowHome) { return join(crowHome, GRANTS_FILE); }
 
 export function readGrants(crowHome) {
+  let text;
+  try { text = readFileSync(grantsPath(crowHome), "utf8"); } catch (err) {
+    return err?.code === "ENOENT" ? {} : { _migrated: 1, _unreadable: true };
+  }
   try {
-    const d = JSON.parse(readFileSync(grantsPath(crowHome), "utf8"));
-    return d && typeof d === "object" && !Array.isArray(d) ? d : {};
-  } catch { return {}; }
+    const d = JSON.parse(text);
+    if (d && typeof d === "object" && !Array.isArray(d)) return d;
+  } catch { /* corrupt */ }
+  // Corrupt: fail closed. No grants, and never a second migration (it would grandfather
+  // whatever every .env holds NOW, peer-written or hand-edited values included).
+  console.warn(`[folder-grants] ${grantsPath(crowHome)} is unreadable: no folders outside Crow's home are allowed until it is fixed`);
+  return { _migrated: 1, _corrupt: true };
 }
 
 function writeGrants(crowHome, data) {
@@ -57,6 +71,20 @@ export function hostPathOf(value, home = homedir()) {
   return isAbsolute(abs) ? abs : null;
 }
 
+/**
+ * Keys a compose text uses at the START of a host-path position: a short-syntax volume
+ * (`- ${KEY}…:`), a long-syntax `source:`, or a volume `device:`. Only these can name a
+ * folder to mount; a URL-path or port setting never becomes a grant.
+ */
+export function composeMountKeys(text) {
+  const out = new Set();
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const m = line.match(/^\s*(?:-\s*|source:\s*|device:\s*)["']?\$\{?([A-Za-z_][A-Za-z0-9_]*)/);
+    if (m && !GATEWAY_KEYS.has(m[1])) out.add(m[1]);
+  }
+  return out;
+}
+
 /** Names a compose text interpolates (`${NAME…}` / `$NAME`). */
 export function composeReferencedKeys(text) {
   const out = new Set();
@@ -66,13 +94,13 @@ export function composeReferencedKeys(text) {
   return out;
 }
 
-/** True when the folder lies outside Crow's home and every data folder. */
+/**
+ * True when the folder REALLY lies outside Crow's home and every data folder (where it
+ * leads, through symlinks: CROW_HOME/media linked to an external drive is outside).
+ */
 export function outsideCrow(p, { crowHome, dataDirs = [] }) {
   const real = resolveHostPath(p);
-  return ![crowHome, ...dataDirs].filter(Boolean).some((z) => {
-    const zr = resolveHostPath(z);
-    return under(real, zr) || under(p, resolvePath(z));
-  });
+  return ![crowHome, ...dataDirs].filter(Boolean).some((z) => under(real, resolveHostPath(z)));
 }
 
 /**
@@ -83,19 +111,23 @@ export function outsideCrow(p, { crowHome, dataDirs = [] }) {
  * defaults, so a default is never taken as the owner's choice.
  * @returns {Record<string, {value: string, real: string}>}
  */
-export function grantCandidates({ manifest, submitted, composeText, exampleEnv = {}, retained = {}, crowHome, dataDirs = [], home = homedir() }) {
-  const used = composeReferencedKeys(composeText);
+export function grantCandidates({ manifest, submitted, composeText, exampleEnv = {}, retained = {}, crowHome, dataDirs = [], home = homedir(), allowDefaults = false, appRoot, otherRoots = [] }) {
+  const used = composeMountKeys(composeText);
   const byName = new Map((manifest?.env_vars || []).filter((v) => v && typeof v.name === "string").map((v) => [v.name, v]));
   const out = {};
   for (const [k, v] of Object.entries(submitted || {})) {
     if (!used.has(k) || typeof v !== "string") continue;
     const decl = byName.get(k);
     if (decl?.secret === true) continue;
-    const bundleChosen = [decl?.default, decl?.example, exampleEnv[k], retained[k]].filter((x) => typeof x === "string");
+    const bundleChosen = allowDefaults ? [] : [decl?.default, decl?.example, exampleEnv[k], retained[k]].filter((x) => typeof x === "string");
     if (bundleChosen.includes(v)) continue;
     const abs = hostPathOf(v, home);
     if (!abs || !outsideCrow(abs, { crowHome, dataDirs })) continue;
-    out[k] = { value: v, real: resolveHostPath(abs) };
+    const real = resolveHostPath(abs);
+    // Never a folder the check would ignore anyway: the floor, too shallow, nesting.
+    if (grantRootProblem(abs, { crowHome, dataDir: dataDirs[0], appRoot, home })) continue;
+    if (otherRoots.some((o) => o !== real && (under(o, real) || under(real, o)))) continue;
+    out[k] = { value: v, real };
   }
   return out;
 }
@@ -107,7 +139,7 @@ export function grantCandidates({ manifest, submitted, composeText, exampleEnv =
 export function activeRoots(bundleId, { crowHome, bundleDir, home = homedir(), grants = readGrants(crowHome) }) {
   const mine = grants[bundleId];
   if (!mine || typeof mine !== "object") return [];
-  const env = parseDotEnv(join(bundleDir || join(crowHome, "bundles", bundleId), ".env"));
+  const env = readEnv(join(bundleDir || join(crowHome, "bundles", bundleId), ".env"));
   const out = [];
   for (const [k, g] of Object.entries(mine)) {
     if (!g || typeof g.real !== "string") continue;
@@ -129,17 +161,23 @@ export function otherBundlesRoots(bundleId, { crowHome, home = homedir(), grants
 }
 
 /** The bundle's compose-referenced keys whose current value is an outside folder without a live grant. */
-export function ungrantedFolderKeys(bundleId, { crowHome, dataDirs = [], home = homedir(), bundleDir = join(crowHome, "bundles", bundleId) }) {
+export function ungrantedFolderKeys(bundleId, { crowHome, dataDirs = [], home = homedir(), bundleDir = join(crowHome, "bundles", bundleId), appRoot } = {}) {
   let text = "";
   try { text = readFileSync(join(bundleDir, "docker-compose.yml"), "utf8"); } catch { return []; }
-  const used = composeReferencedKeys(text);
-  const env = parseDotEnv(join(bundleDir, ".env"));
-  const grants = readGrants(crowHome)[bundleId] || {};
+  const used = composeMountKeys(text);
+  const env = readEnv(join(bundleDir, ".env"));
+  const all = readGrants(crowHome);
+  const grants = all[bundleId] || {};
+  const others = otherBundlesRoots(bundleId, { crowHome, home, grants: all }).filter((o) => !grantRootProblem(o, { crowHome, dataDir: dataDirs[0], appRoot, home }));
   const out = [];
   for (const k of used) {
     const abs = hostPathOf(env[k], home);
     if (!abs || !outsideCrow(abs, { crowHome, dataDirs })) continue;
-    if (grants[k]?.real === resolveHostPath(abs)) continue;
+    const real = resolveHostPath(abs);
+    // Granted AND usable (passes the floor, does not nest): nothing to do. Otherwise
+    // Configure offers the key, so the owner can enter a folder that works.
+    const usable = !grantRootProblem(abs, { crowHome, dataDir: dataDirs[0], appRoot, home }) && !others.some((o) => o !== real && (under(o, real) || under(real, o)));
+    if (grants[k]?.real === real && usable) continue;
     out.push(k);
   }
   return out;
@@ -161,8 +199,8 @@ export function migrateGrants({ crowHome, dataDirs = [], home = homedir(), exclu
     const dir = join(crowHome, "bundles", id);
     let text = "";
     try { text = readFileSync(join(dir, "docker-compose.yml"), "utf8"); } catch { continue; }
-    const used = composeReferencedKeys(text);
-    const env = parseDotEnv(join(dir, ".env"));
+    const used = composeMountKeys(text);
+    const env = readEnv(join(dir, ".env"));
     for (const k of used) {
       const abs = hostPathOf(env[k], home);
       if (!abs || !outsideCrow(abs, { crowHome, dataDirs })) continue;

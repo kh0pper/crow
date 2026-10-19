@@ -91,6 +91,40 @@ export function sensitiveRoots(ctx) {
   };
 }
 
+// The floor: places never mountable outside Crow's home, even in a folder the owner
+// allowed (defence in depth: an owner tricked into allowing ~/.ssh is still refused).
+export function hostFloorProblem(p, roots) {
+  if (roots.exact.has(p)) return `mounts a sensitive host path (${p === "/" ? "/" : "a top-level folder"})`;
+  const zones = [roots.crowHome, ...roots.dataDirs];
+  if (zones.some((z) => under(z, p) || under(p, z))) return "mounts a folder that contains, or is inside, Crow's home or data folder";
+  // Home folders (this user's and others'): dot-folders and ~/bin hold shells, keys,
+  // autostart and user services.
+  if (under(p, roots.homesRoot) && p !== roots.homesRoot) {
+    const parts = p.slice(roots.homesRoot.length + 1).split(sep);
+    if (parts.length === 1) return "mounts a whole home folder";
+    if (parts[1].startsWith(".") || parts[1] === "bin") return `mounts a home folder's ${parts[1]}`;
+  }
+  for (const t of roots.trees) {
+    if (under(p, t.root) || under(t.root, p)) return `mounts a sensitive host path (${t.why})`;
+  }
+  // A git working tree (another Crow checkout, lab scripts that timers run): code. Walk up
+  // from the path to the filesystem root looking for .git, and refuse a folder holding one.
+  for (let d = p; ; d = dirname(d)) {
+    if (existsSync(join(d, ".git"))) return "mounts a git checkout (code something on this host may run)";
+    if (dirname(d) === d) break;
+  }
+  return null;
+}
+
+/** Why a folder can't be granted (outside the floor, too shallow), or null. */
+export function grantRootProblem(p, ctx) {
+  const roots = sensitiveRoots(ctx);
+  const real = resolveHostPath(p);
+  if (real.split(sep).filter(Boolean).length < 2) return "a folder at least two levels deep";
+  // Where it really leads (a CROW_HOME/media link to an external drive is judged as the drive).
+  return hostFloorProblem(real, roots);
+}
+
 /** A value an owner typed that names a host folder: absolute or ~/, no interpolation. */
 export function looksLikeHostPath(v) {
   return typeof v === "string" && (v.startsWith("/") || v.startsWith("~/")) && !v.includes("$") && !/[\r\n\0]/.test(v);
@@ -161,36 +195,17 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
   // folder a floor still applies: system folders, PATH folders, the gateway checkout, home
   // dot-folders and ~/bin, a whole home folder, a git checkout, and any folder that
   // CONTAINS one of these stay refused.
-  // The floor: places never mountable outside Crow's home, even in a folder the owner
-  // allowed (defence in depth: an owner tricked into allowing ~/.ssh is still refused).
-  const floorProblem = (p) => {
-    if (roots.exact.has(p)) return `mounts a sensitive host path (${p === "/" ? "/" : "a top-level folder"})`;
-    const zones = [roots.crowHome, ...roots.dataDirs];
-    if (zones.some((z) => under(z, p) || under(p, z))) return "mounts a folder that contains, or is inside, Crow's home or data folder";
-    // Home folders (this user's and others'): dot-folders and ~/bin hold shells, keys,
-    // autostart and user services.
-    if (under(p, roots.homesRoot) && p !== roots.homesRoot) {
-      const parts = p.slice(roots.homesRoot.length + 1).split(sep);
-      if (parts.length === 1) return "mounts a whole home folder";
-      if (parts[1].startsWith(".") || parts[1] === "bin") return `mounts a home folder's ${parts[1]}`;
-    }
-    for (const t of roots.trees) {
-      if (under(p, t.root) || under(t.root, p)) return `mounts a sensitive host path (${t.why})`;
-    }
-    // A git working tree (another Crow checkout, lab scripts that timers run): code. Walk up
-    // from the path to the filesystem root looking for .git, and refuse a folder holding one.
-    for (let d = p; ; d = dirname(d)) {
-      if (existsSync(join(d, ".git"))) return "mounts a git checkout (code something on this host may run)";
-      if (dirname(d) === d) break;
-    }
-    return null;
-  };
   // Granted folders count only when they would pass the floor themselves, are at least two
   // levels deep, and do not nest with another bundle's (a container holding the outer one
   // could swap the inner one for a symlink before that bundle's next restart). Equal
   // folders are fine: a container cannot replace its own mount point.
-  const activeRoots = roots.operatorRoots.filter((r) => r.split(sep).filter(Boolean).length >= 2 && !floorProblem(r)
-    && !roots.otherRoots.some((o) => o !== r && (under(o, r) || under(r, o))));
+  const floorProblem = (p) => hostFloorProblem(p, roots);
+  const validRoot = (r) => r.split(sep).filter(Boolean).length >= 2 && !floorProblem(r);
+  const others = roots.otherRoots.filter(validRoot);
+  const activeRoots = roots.operatorRoots.filter((r) => validRoot(r) && !others.some((o) => o !== r && (under(o, r) || under(r, o))));
+  // A folder another extension was allowed too: only that folder itself may be mounted,
+  // never something below it (that extension's container could swap it for a symlink).
+  const sharedRoots = new Set(activeRoots.filter((r) => others.includes(r)));
   const checkOne = (p, { readOnly, what }) => {
     if (roots.dockerSockets.has(p)) {
       if (!readOnly) return refuse("Read-write Docker socket mounts are not permitted");
@@ -249,7 +264,7 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
         return refuse(`${what}: mounts a sensitive host path (${t.why})`);
       }
     }
-    if (!activeRoots.some((r) => under(p, r))) {
+    if (!activeRoots.some((r) => under(p, r) && (!sharedRoots.has(r) || p === r))) {
       return refuse(`${what}: mounts ${p.length > 80 ? `…${p.slice(-80)}` : p}, outside Crow's home, which is not a folder you allowed for this extension (open its Configure and enter this folder, then Start)`);
     }
     const f = floorProblem(p);

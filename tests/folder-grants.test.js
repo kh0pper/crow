@@ -154,18 +154,87 @@ dockerTest("Configure: a peer cannot set a folder outside Crow's home; the owner
     assert.equal((await post("/bundles/api/env", { bundle_id: "fx-g6", env_vars: { MEDIA_DIR: "./media" } })).status, 200);
     assert.equal(grants()["fx-g6"].MEDIA_DIR, undefined);
   });
-  // A peer may still change settings that are not outside folders.
+  // A peer can't set a folder setting at all, even a relative or interpolated one (Compose
+  // resolves ../../ and ${X} to the same folders); settings the compose file doesn't mount
+  // still work.
   await withApp("peer", async (post) => {
-    assert.equal((await post("/bundles/api/env", { bundle_id: "fx-g6", env_vars: { MEDIA_DIR: "./media2" } })).status, 200);
+    for (const v of ["./media2", "../../../../../srv/x", "${HOME}/x", "~/x"]) {
+      assert.equal((await post("/bundles/api/env", { bundle_id: "fx-g6", env_vars: { MEDIA_DIR: v } })).status, 403, v);
+    }
+    assert.equal((await post("/bundles/api/env", { bundle_id: "fx-g6", env_vars: { UNRELATED: "x/y" } })).status, 200);
   });
 });
 
-dockerTest("a grant survives uninstall for the same folder, so a reinstall restoring the kept value starts", async () => {
+dockerTest("a reinstall over the kept .env keeps the allowed folder", async () => {
   stage("fx-g7");
   assert.equal((await install("fx-g7", { MEDIA_DIR: MEDIA })).ok, true);
-  // Reinstall over the kept .env (the request carries nothing).
   const out = await install("fx-g7", {}, { owner: false });
   assert.equal(out.ok, true, out.reason);
+});
+
+dockerTest("after uninstall, a reinstall that restores the retained folder still starts (the grant is kept)", async () => {
+  const id = "fx-g10";
+  const dir = join(FIXTURES, id);
+  stage(id);
+  const man = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
+  man.env_vars[0].default_in_crow_home = "fx-g10-media";
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify(man));
+  const lib = join(OTHER, "lib10");
+  mkdirSync(lib, { recursive: true });
+  assert.equal((await install(id, { MEDIA_DIR: lib })).ok, true);
+  // Uninstall: the bundle folder goes, the value is retained (as uninstall keeps it).
+  rmSync(join(CROW_HOME, "bundles", id), { recursive: true, force: true });
+  const { retainedEnvPath } = await import("../servers/gateway/bundle-env-secrets.js");
+  mkdirSync(join(retainedEnvPath(CROW_HOME, id), ".."), { recursive: true });
+  writeFileSync(retainedEnvPath(CROW_HOME, id), `MEDIA_DIR=${lib}\n`);
+  const out = await install(id, {}, { owner: false });
+  assert.equal(out.ok, true, out.reason);
+  assert.match(readFileSync(join(CROW_HOME, "bundles", id, ".env"), "utf8"), new RegExp(lib));
+});
+
+dockerTest("a folder inside Crow's home that symlinks outside it needs a grant too, and Configure offers it", async () => {
+  const { symlinkSync } = await import("node:fs");
+  stage("fx-g11");
+  mkdirSync(join(CROW_HOME, "media"), { recursive: true });
+  const drive = join(OTHER, "drive11");
+  mkdirSync(drive, { recursive: true });
+  symlinkSync(drive, join(CROW_HOME, "media", "ext11"));
+  const viaHome = join(CROW_HOME, "media", "ext11");
+  assert.equal((await install("fx-g11", { MEDIA_DIR: viaHome }, { owner: false })).ok, false, "not the owner's: refused");
+  assert.equal((await install("fx-g11", { MEDIA_DIR: viaHome })).ok, true, "the owner's: allowed");
+  assert.equal(grants()["fx-g11"].MEDIA_DIR.real.endsWith("drive11"), true);
+});
+
+test("the owner check: only a local password session (not a peer sign-in, not a signed peer request)", async () => {
+  const { createDbClient } = await import("../servers/db.js");
+  const { createHash } = await import("node:crypto");
+  const { isLocalPasswordSession } = await import("../servers/gateway/dashboard/local-session.js");
+  const db = createDbClient();
+  const h = (t) => createHash("sha256").update(t).digest("hex");
+  try {
+    await db.execute("CREATE TABLE IF NOT EXISTS oauth_tokens (token TEXT PRIMARY KEY, token_type TEXT, client_id TEXT, scopes TEXT, expires_at TEXT)");
+    const later = new Date(Date.now() + 3600_000).toISOString();
+    for (const [t, scopes, exp] of [["local", "dashboard", later], ["sso", "dashboard sso", later], ["old", "dashboard", "2000-01-01T00:00:00Z"]]) {
+      await db.execute({ sql: "INSERT OR REPLACE INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', ?, ?)", args: [h(t), scopes, exp] });
+    }
+  } finally { db.close(); }
+  assert.equal(await isLocalPasswordSession({ dashboardSession: "local" }), true);
+  assert.equal(await isLocalPasswordSession({ dashboardSession: "sso" }), false, "a peer sign-in session");
+  assert.equal(await isLocalPasswordSession({ dashboardSession: "old" }), false, "expired");
+  assert.equal(await isLocalPasswordSession({ dashboardSession: "local", crossHostAuth: {} }), false, "a signed peer request");
+  assert.equal(await isLocalPasswordSession({ dashboardSession: "nope" }), false);
+  assert.equal(await isLocalPasswordSession({}), false);
+});
+
+test("a corrupt grants store fails closed: no grants, no second migration", () => {
+  const other = mkdtempSync(join(tmpdir(), "crow-grants-corrupt-"));
+  try {
+    writeFileSync(join(other, "folder-grants.json"), "{not json");
+    const g = FG.readGrants(other);
+    assert.equal(g._migrated, 1);
+    assert.equal(FG.migrateGrants({ crowHome: other }), false);
+    assert.equal(readFileSync(join(other, "folder-grants.json"), "utf8"), "{not json", "left for the owner to fix");
+  } finally { rmSync(other, { recursive: true, force: true }); }
 });
 
 dockerTest("no folder may nest with another extension's allowed folder", async () => {
@@ -176,9 +245,13 @@ dockerTest("no folder may nest with another extension's allowed folder", async (
   assert.equal((await install("fx-g9", { MEDIA_DIR: MEDIA })).ok, true, "the same folder as fx-g1 is fine");
 });
 
-test("grantCandidates: referenced, path-like, outside Crow, not secret, not the bundle's own value", () => {
-  const manifest = { env_vars: [{ name: "A", default: "/srv/a" }, { name: "S", secret: true }, { name: "E" }] };
-  const compose = "x: ${A}\ny: ${B:-x}\nz: ${S}\nw: ${E}\nv: ${IN}\n";
-  const c = FG.grantCandidates({ manifest, submitted: { A: "/srv/a", B: "/srv/b", S: "/srv/s", E: "/srv/e", IN: join(CROW_HOME, "x"), U: "/srv/u", R: "/srv/r" }, composeText: compose + "r: ${R}\n", exampleEnv: { E: "/srv/e" }, retained: { R: "/srv/r" }, crowHome: CROW_HOME, dataDirs: [DATA] });
+test("grantCandidates: mount-source keys only, path-like, outside Crow, not secret, not the bundle's own value, a valid root", () => {
+  const manifest = { env_vars: [{ name: "A", default: "/srv/a/x" }, { name: "S", secret: true }, { name: "E" }] };
+  const vols = (k) => `      - \${${k}}:/m\n`;
+  const compose = "services:\n  app:\n    environment:\n      URLPATH: ${U}\n    volumes:\n" + ["A", "B", "S", "E", "IN", "R", "ROOT", "HOMEK", "SHALLOW"].map(vols).join("");
+  const c = FG.grantCandidates({ manifest, composeText: compose, exampleEnv: { E: "/srv/e/x" }, retained: { R: "/srv/r/x" }, crowHome: CROW_HOME, dataDirs: [DATA],
+    submitted: { A: "/srv/a/x", B: "/srv/b/x", S: "/srv/s/x", E: "/srv/e/x", IN: join(CROW_HOME, "x"), U: "/srv/u/x", R: "/srv/r/x", ROOT: "/", HOMEK: process.env.HOME || "/home/x", SHALLOW: "/srv" } });
   assert.deepEqual(Object.keys(c), ["B"]);
+  assert.deepEqual([...FG.composeMountKeys(compose)].sort(), ["A", "B", "E", "HOMEK", "IN", "R", "ROOT", "S", "SHALLOW"]);
+  assert.ok(!FG.composeMountKeys("    volumes:\n      - ${CROW_HOME:?x}/b:/b\n").has("CROW_HOME"), "gateway-supplied keys are not the .env's");
 });

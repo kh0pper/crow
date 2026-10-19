@@ -60,7 +60,7 @@ import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRe
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
 import { checkComposeModel, loadComposeModel, usesHostNetwork } from "../compose-guard.js";
-import { grantCandidates, activeRoots, otherBundlesRoots, migrateGrants, recordGrants, dropGrants, composeReferencedKeys, hostPathOf, outsideCrow } from "../folder-grants.js";
+import { grantCandidates, activeRoots, otherBundlesRoots, migrateGrants, recordGrants, dropGrants, composeReferencedKeys } from "../folder-grants.js";
 import { isLocalPasswordSession } from "../dashboard/local-session.js";
 import { resolveDataDir } from "../../db.js";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
@@ -1701,7 +1701,9 @@ const dataDirsForGrants = () => [...new Set([resolveDataDir(), join(CROW_HOME, "
 /** The folders outside Crow's home a check of this bundle may admit, and other bundles'. */
 function grantRootsFor(bundleId, bundleDir, { exclude = null } = {}) {
   const home = process.env.HOME || homedir();
-  migrateGrants({ crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home, exclude });
+  try { migrateGrants({ crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home, exclude }); } catch (err) {
+    console.warn(`[bundles] folder-grant migration: ${err.message}`); // no grants then: fail closed
+  }
   return {
     operatorRoots: activeRoots(bundleId, { crowHome: CROW_HOME, bundleDir, home }),
     otherRoots: otherBundlesRoots(bundleId, { crowHome: CROW_HOME, home }),
@@ -2664,7 +2666,8 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         if (ownerEnv) {
           let exampleEnv = {};
           try { exampleEnv = parseEnvText(readFileSync(join(destDir, ".env.example"), "utf8")); } catch { /* none */ }
-          grants = grantCandidates({ manifest, submitted: stripGeneratedKeys(manifest, ownerEnv), composeText: readFileSync(composePath, "utf8"), exampleEnv, retained: retainedForPaths || {}, crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: process.env.HOME || homedir() });
+          const home = process.env.HOME || homedir();
+          grants = grantCandidates({ manifest, submitted: stripGeneratedKeys(manifest, ownerEnv), composeText: readFileSync(composePath, "utf8"), exampleEnv, retained: retainedForPaths || {}, crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home, appRoot: APP_ROOT, otherRoots: otherBundlesRoots(bundleId, { crowHome: CROW_HOME, home }) });
         }
         // Plus folders this bundle was allowed before (a reinstall restoring a kept value):
         // a grant is key + folder, so it counts only while that key still names it.
@@ -2672,8 +2675,8 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         const validation = await checkBundleCompose(destDir, { bundleId, manifest, consentVerified, operatorRoots: [...Object.values(grants).map((g) => g.real), ...kept] });
         if (!validation.valid) {
           appendLog(job, `Security check failed: ${validation.reason}`);
-          // Clean up copied files
-          rmSync(destDir, { recursive: true, force: true });
+          // Clean up copied files (never an earlier install's folder: its .env holds secrets)
+          if (!priorInstallEnv) rmSync(destDir, { recursive: true, force: true });
           return { ok: false, reason: `Security check failed: ${validation.reason}` };
         }
         appendLog(job, "Security check passed");
@@ -3847,13 +3850,11 @@ export default function bundlesRouter() {
       let folderKeys = new Set();
       try { folderKeys = composeReferencedKeys(readFileSync(join(bundleDir, "docker-compose.yml"), "utf8")); } catch { /* no compose */ }
       const homeForGrants = process.env.HOME || homedir();
-      const outsideKeys = Object.keys(env_vars).filter((k) => {
-        if (!folderKeys.has(k)) return false;
-        const abs = hostPathOf(env_vars[k], homeForGrants);
-        return !!abs && outsideCrow(abs, { crowHome: CROW_HOME, dataDirs: dataDirsForGrants() });
-      });
-      if (outsideKeys.length && !owner) {
-        return res.status(403).json({ code: "folder_needs_owner", key: outsideKeys[0], error: `Folders outside Crow's home (${outsideKeys.join(", ")}) are set from this machine's own dashboard, signed in with its password.` });
+      // Anything that could become a path once Compose resolves it (/, ~, ., $): a relative
+      // ../../ or an interpolated value reaches the same folders an absolute one does.
+      const pathishKeys = Object.keys(env_vars).filter((k) => folderKeys.has(k) && /[\/~$]|^\./.test(String(env_vars[k] ?? "")));
+      if (pathishKeys.length && !owner) {
+        return res.status(403).json({ code: "folder_needs_owner", key: pathishKeys[0], error: `Folder settings (${pathishKeys.join(", ")}) are set from this machine's own dashboard, signed in with its password.` });
       }
 
       // Read the existing .env. The save is LINE-PRESERVING (C4): only the submitted
@@ -3901,10 +3902,11 @@ export default function bundlesRouter() {
         const man = getInstalledFirstManifest(bundle_id);
         let composeTextG = "";
         try { composeTextG = readFileSync(join(bundleDir, "docker-compose.yml"), "utf8"); } catch { /* none */ }
-        // The form prefills the manifest default: a default (or an example) is never a choice.
         let exampleEnv = {};
         try { exampleEnv = parseEnvText(readFileSync(join(bundleDir, ".env.example"), "utf8")); } catch { /* none */ }
-        const g = grantCandidates({ manifest: man, submitted: env_vars, composeText: composeTextG, exampleEnv, crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: homeForGrants });
+        // Configure is a deliberate save of the field the owner sees, so a default typed or kept
+        // here counts (the install modal's prefill does not).
+        const g = grantCandidates({ manifest: man, submitted: env_vars, composeText: composeTextG, exampleEnv, crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: homeForGrants, allowDefaults: true, appRoot: APP_ROOT, otherRoots: otherBundlesRoots(bundle_id, { crowHome: CROW_HOME, home: homeForGrants }) });
         try { migrateGrants({ crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: homeForGrants }); } catch { /* best-effort */ }
         recordGrants(CROW_HOME, bundle_id, g);
         dropGrants(CROW_HOME, bundle_id, Object.keys(env_vars).filter((k) => folderKeys.has(k) && !g[k]));

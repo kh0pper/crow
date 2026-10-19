@@ -183,7 +183,7 @@ export function needsConfigKeys(bundleId, envOverride = null) {
   if (!envOverride) {
     try {
       const dataDirs = [...new Set([process.env.CROW_DATA_DIR, join(CROW_HOME, "data")].filter(Boolean))];
-      folders = ungrantedFolderKeys(bundleId, { crowHome: CROW_HOME, dataDirs, home: process.env.HOME || undefined });
+      folders = ungrantedFolderKeys(bundleId, { crowHome: CROW_HOME, dataDirs, home: process.env.HOME || undefined, appRoot: APP_ROOT });
     } catch { folders = []; }
   }
   const man = getInstalledFirstManifest(bundleId);

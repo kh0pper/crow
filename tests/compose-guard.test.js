@@ -581,7 +581,13 @@ test("granted folders count only if they pass the floor themselves and do not ne
     assert.equal(checkWith(src, { operatorRoots: [media] }).valid, true);
     assert.equal(G.checkComposeModel(src, { bundleDir: bundleDir(), manifest: {}, consentVerified: false, ctx: { ...CTX, operatorRoots: [photos], otherRoots: [media] } }).valid, false, "inside another bundle's folder");
     assert.equal(G.checkComposeModel(src, { bundleDir: bundleDir(), manifest: {}, consentVerified: false, ctx: { ...CTX, operatorRoots: [media], otherRoots: [photos] } }).valid, false, "containing another bundle's folder");
-    assert.equal(G.checkComposeModel(src, { bundleDir: bundleDir(), manifest: {}, consentVerified: false, ctx: { ...CTX, operatorRoots: [media], otherRoots: [media] } }).valid, true, "the same folder is fine");
+    assert.equal(G.checkComposeModel(src, { bundleDir: bundleDir(), manifest: {}, consentVerified: false, ctx: { ...CTX, operatorRoots: [media], otherRoots: [media] } }).valid, false, "a shared folder: nothing below it");
+    assert.equal(G.checkComposeModel(svc({ volumes: [bind(media, true)] }), { bundleDir: bundleDir(), manifest: {}, consentVerified: false, ctx: { ...CTX, operatorRoots: [media], otherRoots: [media] } }).valid, true, "a shared folder itself is fine");
+    // Another bundle's folder that fails the floor (/, a home) does not block anyone.
+    assert.equal(G.checkComposeModel(src, { bundleDir: bundleDir(), manifest: {}, consentVerified: false, ctx: { ...CTX, operatorRoots: [media], otherRoots: ["/", homedir()] } }).valid, true, "invalid other roots are ignored");
+    assert.match(G.grantRootProblem("/srv", CTX), /two levels/);
+    assert.ok(G.grantRootProblem(join(homedir(), ".ssh", "x"), CTX));
+    assert.equal(G.grantRootProblem(photos, CTX), null);
     // A root that is itself a denied place admits nothing, not even an allowed-looking child.
     const home = homedir();
     for (const root of ["/", "/srv", home, dirname(home), "/etc", "/usr/local", join(home, ".config")]) {
