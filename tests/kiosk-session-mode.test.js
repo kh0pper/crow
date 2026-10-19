@@ -1026,3 +1026,10 @@ test("I2 (bar on every page): a ticket's third concurrent stream is refused 429 
     c.ws.close();
   } finally { r.close(); }
 });
+
+test("B4 parity: the runtime's item-id rule is the core protocol's ITEM_ID_RE (the bundle cannot import core by repo path, so it keeps a copy)", async () => {
+  const { ITEM_ID_RE } = await import("../servers/gateway/dashboard/shared/kiosk-media-protocol.js");
+  assert.ok(kiosk.ITEM_ID instanceof RegExp, "runtime exports ITEM_ID");
+  assert.equal(kiosk.ITEM_ID.source, ITEM_ID_RE.source);
+  assert.equal(kiosk.ITEM_ID.flags, ITEM_ID_RE.flags);
+});

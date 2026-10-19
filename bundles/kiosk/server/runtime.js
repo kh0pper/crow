@@ -66,7 +66,8 @@ export const SESSION_WS_PATH = "/api/kiosk/session/dashboard";
  */
 export const SESSION_MEDIA_PATH = "/api/kiosk/session/media";
 export const SESSION_MEDIA_VERBS = Object.freeze(["pause", "resume", "next", "previous", "stop", "ended", "error"]);
-const ITEM_ID = /^m\d{1,9}$/;
+/** Item ids on the bar POST. A copy of core kiosk-media-protocol.js ITEM_ID_RE (a bundle cannot import core by repo path); a test keeps them equal. */
+export const ITEM_ID = /^m\d{1,9}$/;
 export const SESSION_PAGE_CSP = PAGE_CSP.replace("frame-ancestors 'none'", "frame-ancestors 'self'");
 /** How long a closed session display keeps its windows/timers/conversation (a phone's network blip reconnects well inside it). */
 export const SESSION_DISPLAY_GRACE_MS = 2 * 60 * 1000;
