@@ -16,6 +16,13 @@ ADAPTER_OFF = "Controller AA:BB:CC:DD:EE:FF (public)\n\tPowered: no\n\tPowerStat
 ADAPTER_BLOCKED = "Controller AA:BB:CC:DD:EE:FF (public)\n\tPowered: no\n\tPowerState: off-blocked\n"
 NO_ADAPTER = "No default controller available\n"
 NOT_AVAILABLE = f"Device {MAC} not available\n"
+# `bluetoothctl show` for a USB adapter as BlueZ 5.82 prints it (placeholder address). Its Modalias is
+# BlueZ's DeviceID, not the bus: nothing here may depend on it.
+USB_SHOW = ("Controller AA:BB:CC:DD:EE:02 (public)\n\tManufacturer: 0x005d (93)\n\tName: kiosk\n\tPowered: {p}\n"
+            "\tPowerState: {s}\n\tPairable: no\n\tModalias: usb:v1D6Bp0246d0552\n")
+USB_ON = USB_SHOW.format(p="yes", s="on")
+USB_OFF = USB_SHOW.format(p="no", s="off")
+USB_BLOCKED = USB_SHOW.format(p="no", s="off-blocked")
 
 
 def info(paired=True, connected=False, name="Kitchen speaker"):
@@ -380,6 +387,29 @@ class BtTests(unittest.IsolatedAsyncioTestCase):
             show_at = ctl.calls.index(("show",))
             self.assertEqual(ctl.calls[show_at - 1][0], "info")
 
+    async def test_a_usb_adapter_as_the_default_controller(self):
+        # pi-setup --usb-bt: the default controller is the adapter; `show` follows it.
+        for text, reason in ((USB_BLOCKED, "adapter_blocked"), (USB_OFF, "adapter_off")):
+            ctl = FakeCtl()
+            ctl.not_available, ctl.adapter = True, text
+            r = await self.mk(ctl).reconnect_now()
+            self.assertEqual((r["result"], r["reason"]), ("failed", reason), reason)
+            self.assertEqual(ctl.connects(), 0)
+
+    async def test_the_adapter_pulled_out_under_usb_bt_is_no_adapter(self):
+        ctl = FakeCtl()
+        ctl.not_available, ctl.adapter = True, NO_ADAPTER
+        r = await self.mk(ctl).reconnect_now()
+        self.assertEqual((r["result"], r["reason"]), ("failed", "no_adapter"))
+
+    async def test_a_bond_left_on_the_onboard_controller_reads_not_paired_on_a_powered_usb_adapter(self):
+        # the fix is re-pairing on the adapter (pi-setup --repair-speaker), so not_paired is right
+        ctl = FakeCtl()
+        ctl.not_available, ctl.adapter = True, USB_ON
+        r = await self.mk(ctl).reconnect_now()
+        self.assertEqual((r["result"], r["reason"]), ("not_paired", "not_paired"))
+        self.assertEqual(ctl.connects(), 0)
+
     async def test_paired_speaker_on_a_powered_off_adapter_is_not_connected_to(self):
         ctl = FakeCtl()
         ctl.adapter = ADAPTER_OFF
@@ -449,6 +479,9 @@ class BtTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parse_bt_adapter(ADAPTER_BLOCKED), "adapter_blocked")
         self.assertEqual(parse_bt_adapter(NO_ADAPTER), "no_adapter")
         self.assertEqual(parse_bt_adapter("Waiting to connect to bluetoothd..."), "ok", "unknown output is no evidence")
+        self.assertEqual(parse_bt_adapter(USB_ON), "ok")
+        self.assertEqual(parse_bt_adapter(USB_OFF), "adapter_off")
+        self.assertEqual(parse_bt_adapter(USB_BLOCKED), "adapter_blocked")
 
     def test_chromium_stream_and_sink_name_parsing(self):
         inputs = """Sink Input #41

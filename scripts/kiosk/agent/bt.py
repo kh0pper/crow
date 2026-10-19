@@ -10,7 +10,9 @@
   adapter_off, no_adapter, not_paired, no_sink (link up, no PipeWire sink), hw_fault, no_answer (bluetoothctl
   timed out) or off_or_out_of_range. The controller is checked BEFORE `info`'s "not available" is read as
   not_paired: a bond held by another, powered-off controller also reads "not available", and its fix is
-  turning Bluetooth on, not pairing again. A reason change is published (and logged) once.
+  turning Bluetooth on, not pairing again. With a USB adapter (pi-setup --usb-bt) the default controller
+  is the adapter, so `show` follows it; a bond left on the onboard controller then reads not_paired (the
+  fix is pi-setup --repair-speaker on the adapter). A reason change is published (and logged) once.
 - Background retry: only inside a window of `retry_window_s` (10 min) that opens at agent start and when
   the agent sees the speaker drop (connected -> not connected). Inside it, connect attempts at 0 s, then
   after gaps of 30, 60, 120 and 240 s; then it stops. After that, the speaker's own auto-connect (it
@@ -28,7 +30,7 @@
   remove + pair is refused ("br-connection-refused") until the operator clears the speaker's own list.
 - Hung controller: after 3 unanswered checks in a row (bluetoothctl timing out, about 90 s) the agent asks
   the root helper (crow-kiosk-bt-recover, via a request file) to reset the controller; the helper acts only
-  if the kernel log shows hci0 errors. Its outcome file says whether the hardware needs a restart, which
+  if the kernel log shows errors for the controller in use. Its outcome file says whether the hardware needs a restart, which
   bt_state reports as `hw_fault`.
 - When the speaker (re)connects, `on_connected(mac)` runs so the agent can move Chromium's audio there.
 `run(*args, timeout)`, `sink_present(mac)` and `clock()` are injected so the logic is tested without

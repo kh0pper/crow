@@ -104,7 +104,7 @@ fi
 # the same controller, by address (its hciN may change), back and powered
 up=0
 for _ in $(seq 1 "$WAIT_S"); do
-  if timeout 5 bluetoothctl show ${C_ADDR:+"$C_ADDR"} 2>/dev/null | grep -q "Powered: yes"; then up=1; break; fi
+  if timeout 2 bluetoothctl show ${C_ADDR:+"$C_ADDR"} 2>/dev/null | grep -q "Powered: yes"; then up=1; break; fi
   sleep 1
 done
 if [ "$up" = 1 ]; then
