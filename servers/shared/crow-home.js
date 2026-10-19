@@ -119,7 +119,7 @@ export const INSTANCE_PATHS_EXIT_CODE = 78;
  *   1. CROW_DATA_DIR / CROW_DB_PATH from the checkout .env, CROW_HOME not → refuse
  *   2. data dir or DB inside the host-default ~/.crow/data → refuse
  *   3. no CROW_DATA_DIR and no CROW_DB_PATH, <home>/data holds no instance
- *      (no instance-id, no crow.db), while the
+ *      (no instance-id), while the
  *      host-default crow.db exists → refuse (a fresh second instance, or one
  *      whose data really is in ~/.crow/data — deriving would fork it onto an
  *      empty DB)
@@ -154,9 +154,10 @@ export function instancePathsVerdict(env = process.env, { envFileKeys = new Set(
   if (isWithin(dataDir, defData)) waivable.push(`its data dir ${dataDir} is the host-default instance's data dir`);
   if (isWithin(dbPath, defData) && !isWithin(dataDir, defData)) waivable.push(`its database ${dbPath} is inside the host-default instance's data dir`);
   const fixed = [];
-  // Keyed on instance evidence, not the directory: a stray empty <home>/data
-  // (made by a bundle child, a stdio server or init-db) must not count.
-  const ownInstance = exists(join(ownData, "instance-id")) || exists(join(ownData, "crow.db"));
+  // Keyed on instance evidence, not the directory: a stray <home>/data, even
+  // one holding a fresh crow.db from init-db, is not an instance until a
+  // gateway gave it an instance-id.
+  const ownInstance = exists(join(ownData, "instance-id"));
   if (!env.CROW_DATA_DIR && !env.CROW_DB_PATH && !ownInstance && exists(join(defData, "crow.db"))) {
     fixed.push(`CROW_DATA_DIR is unset and ${ownData} holds no instance yet, while a host-default database exists at ${join(defData, "crow.db")}`);
   }

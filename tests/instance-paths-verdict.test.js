@@ -8,6 +8,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { resolveInstanceDataDir, instancePathsVerdict, coHostedDataDirWarning } from "../servers/shared/crow-home.js";
@@ -216,4 +217,24 @@ test("index.js imports the gate FIRST (import-time constants must see final path
   const src = readFileSync(join(import.meta.dirname, "..", "servers", "gateway", "index.js"), "utf8");
   const firstImport = src.match(/^import\s[^;]*;/m)[0];
   assert.equal(firstImport, 'import "./boot/run-instance-paths-gate.js";');
+});
+
+test("init-db run with only CROW_HOME (the auto-update child on a legacy host) does not unlock the gate", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { host, home2 } = layout("g-initdb");
+  // A legacy-shape host: CROW_HOME set, data really in the default dir.
+  const env = { PATH: process.env.PATH, HOME: host, CROW_HOME: home2 };
+  execFileSync(process.execPath, ["scripts/init-db.js"], { env, cwd: join(import.meta.dirname, ".."), stdio: "pipe" });
+  assert.ok(existsSync(join(home2, "data", "crow.db")), "the scenario: init-db made a fresh DB in the derived dir");
+  const v = instancePathsVerdict({ CROW_HOME: home2 }, { homeDir: host });
+  assert.equal(v.ok, false, "a fresh crow.db is not an instance: still refused");
+  assert.match(v.error, /holds no instance/);
+});
+
+test("the init-db child is pinned to the DB the guard verifies", async () => {
+  const { initDbChildEnv } = await import("../servers/shared/migration-guard.js");
+  const env = initDbChildEnv("/srv/x/data/crow.db", { CROW_HOME: "/srv/x", KEEP: "1" });
+  assert.equal(env.CROW_DB_PATH, "/srv/x/data/crow.db");
+  assert.equal(env.KEEP, "1");
+  assert.equal(env.CROW_HOME, "/srv/x");
 });
