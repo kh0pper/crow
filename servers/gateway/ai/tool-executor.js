@@ -16,6 +16,7 @@ import { createProjectServer } from "../../research/server.js";
 import { createSharingServer } from "../../sharing/server.js";
 import { createBlogServer } from "../../blog/server.js";
 import { TOOL_MANIFESTS } from "../tool-manifests.js";
+import { sortedServers, sortedByName } from "../../shared/stable-order.js";
 import { connectedServers } from "../proxy.js";
 import { voiceCategoryFor } from "../../../scripts/pi-bots/ext_registry.mjs";
 import { createDbClient } from "../../db.js";
@@ -957,11 +958,15 @@ export function getChatTools(opts = {}) {
     const promotedTools = [];
     const allAddonLines = [];
 
-    for (const [id, entry] of connectedServers) {
+    // Sorted (servers by id, tools by name): connectedServers fills in connect-COMPLETION
+    // order (built-in integrations connect in parallel; a reinstall appends), and some
+    // engines cache the tool block across conversations, so the same set must serialize
+    // to the same bytes on every boot.
+    for (const [id, entry] of sortedServers(connectedServers)) {
       if (entry.status !== "connected" || !entry.tools?.length) continue;
       const toolNames = [];
 
-      for (const tool of entry.tools) {
+      for (const tool of sortedByName(entry.tools)) {
         // Bound: advertise only addon tools the bot selected (scoped, by name).
         if (scope && !scope.selectedToolNames.has(tool.name)) continue;
         const isPromoted = PROMOTED_PATTERNS.some((p) => p.test(tool.name));
@@ -1003,7 +1008,7 @@ export function getChatTools(opts = {}) {
   // against everything already advertised. Absent unless the bound bot opted in.
   if (Array.isArray(opts.remoteTools) && opts.remoteTools.length) {
     const have = new Set(tools.map((t) => t.name));
-    for (const rt of opts.remoteTools) {
+    for (const rt of sortedByName(opts.remoteTools.filter(Boolean))) {
       if (!rt || !rt.name || have.has(rt.name)) continue;
       have.add(rt.name);
       tools.push({

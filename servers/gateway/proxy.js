@@ -17,6 +17,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { jsonSchemaPropertiesToZod } from "../shared/json-schema-to-zod.js";
+import { sortedServers, sortedByName } from "../shared/stable-order.js";
 import { INTEGRATIONS, isIntegrationConfigured, getSpawnEnv } from "./integrations.js";
 import { createDbClient } from "../db.js";
 import { isApproved, hasApproval, verifyBackendLaunch, backendEnv, parseStoredSpec, prepareSpawn, PENDING_STATUS } from "../shared/data-backend-approval.js";
@@ -567,13 +568,15 @@ export function createProxyServer(filter) {
     version: "0.1.0",
   });
 
-  // Register proxy tools for each connected server
-  for (const [integrationId, entry] of connectedServers) {
+  // Register proxy tools for each connected server — servers by id, tools by
+  // name, so tools/list is the same bytes on every boot (stable-order.js:
+  // connectedServers fills in connect-completion order).
+  for (const [integrationId, entry] of sortedServers(connectedServers)) {
     if (entry.status !== "connected" || !entry.client) continue;
     if (filter?.allowSources && !filter.allowSources.includes(integrationId)) continue;
     if (filter?.denySources?.includes(integrationId)) continue;
 
-    for (const tool of entry.tools) {
+    for (const tool of sortedByName(entry.tools)) {
       // Tools surface under their upstream name. Sources already self-namespace
       // (crow_browser_*, brave_web_search, etc.). If two sources ever do collide
       // on a tool name, the second server.tool() call throws — surface the bug

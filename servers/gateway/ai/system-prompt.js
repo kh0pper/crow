@@ -8,6 +8,7 @@
 
 import { generateInstructions, STATIC_INSTRUCTIONS } from "../../shared/instructions.js";
 import { connectedServers, resolveCrowHome } from "../proxy.js";
+import { sortedServers, sortedByName } from "../../shared/stable-order.js";
 import { resolveSkillText } from "../../../scripts/pi-bots/skill_resolver.mjs";
 
 function buildPreamble() {
@@ -65,11 +66,13 @@ When uncertain about parameters, use crow_discover first to get the full schema.
 function buildAddonGuidance() {
   if (!connectedServers || connectedServers.size === 0) return "";
 
+  // Sorted like getChatTools (stable-order.js), so the system prompt is the
+  // same bytes on every boot and a model server's prompt cache can reuse it.
   const sections = [];
-  for (const [id, entry] of connectedServers) {
+  for (const [id, entry] of sortedServers(connectedServers)) {
     if (entry.status !== "connected" || !entry.tools?.length) continue;
 
-    const toolLines = entry.tools.map((t) => {
+    const toolLines = sortedByName(entry.tools).map((t) => {
       // Build compact parameter hint from schema
       let paramHint = "";
       const schema = t.inputSchema;
