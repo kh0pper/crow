@@ -537,3 +537,41 @@ test("B3 holdsTicket: false once the item's ticket has expired or the session en
   s.clock.t += 12 * 60 * 60 * 1000;
   assert.equal(s.media.holdsTicket("d"), false, "the 12 h ticket has run out");
 });
+
+test("B1 a station paused (bar pause) while its reload waits still holds the session after the timer, and resume reloads it live on a new ticket", () => {
+  const s = setup();
+  s.media.setOwner("d", OWNER);
+  s.media.play("d", [station()]);
+  const first = last(s);
+  s.media.onEvent("d", { id: first.id, state: "playing" });
+  assert.equal(s.media.endpoint("d", { do: "error", id: first.id, owner: OWNER }).status, 200);
+  assert.equal(s.media.endpoint("d", { do: "pause", id: first.id, owner: OWNER }).status, 200);
+  const t = s.timers.find((x) => x.on);
+  t.on = false; t.fn();
+  assert.equal(s.media.holdsTicket("d"), true, "a paused, reload-pending station is not dropped by the sweep");
+  assert.equal(s.media.stateOf("d"), "paused");
+  const r = s.media.endpoint("d", { do: "resume", id: first.id, owner: OWNER });
+  assert.equal(r.status, 200);
+  assert.equal(s.media.stateOf("d"), "loading");
+  assert.notEqual(r.view.item.id, first.id, "a new item");
+  assert.match(r.view.item.url, /^\/display\/t\/[A-Za-z0-9_-]{22}\/stream$/);
+  assert.notEqual(r.view.item.url, first.url, "a new ticket");
+  assert.ok(s.tickets.get(ticketOf(r.view.item.url)), "the new ticket is live");
+  s.media.onEvent("d", { id: r.view.item.id, state: "playing" });
+  assert.equal(s.media.stateOf("d"), "playing");
+});
+
+test("B1 the paused reload marker keeps the 12 h cap: past the dead ticket's expiry the session no longer holds", () => {
+  const s = setup();
+  s.media.setOwner("d", OWNER);
+  s.media.play("d", [station()]);
+  const first = last(s);
+  s.media.onEvent("d", { id: first.id, state: "playing" });
+  s.media.endpoint("d", { do: "error", id: first.id, owner: OWNER });
+  s.media.endpoint("d", { do: "pause", id: first.id, owner: OWNER });
+  const t = s.timers.find((x) => x.on);
+  t.on = false; t.fn();
+  assert.equal(s.media.holdsTicket("d"), true);
+  s.clock.t += 12 * 60 * 60 * 1000 + 1;
+  assert.equal(s.media.holdsTicket("d"), false, "the 12 h cap still applies");
+});

@@ -107,13 +107,17 @@ export function createMediaStore({ now = Date.now, tickets, send, onFailed = () 
     if (d.retries >= RADIO_RETRIES) { fail(id, d); return; }
     const wait = RADIO_BACKOFF_MS[d.retries];
     d.retries += 1;
+    const deadline = tickets.get(d.item.ticket)?.expires ?? 0;   // B1: the 12 h cap a paused reload keeps (below)
     tickets.revoke(d.item.ticket);                 // the dead stream's ticket goes now; the item stays so the session is still "this station"
     d.item.playingSince = null;
     d.retryAt = now() + wait;
     d.retry = setTimer(() => {
       d.retry = null; d.retryAt = 0;
       if (live(id) !== d) return;
-      if (d.state === "paused") return;            // paused meanwhile: resume() loads a live stream anyway
+      // Paused meanwhile: resume() loads a live stream anyway. B1: until the dead ticket's own expiry the session still
+      // holds (holdsTicket), so the bar's minute sweep does not close a station that is only waiting for its resume.
+      // load() builds a fresh item, so the marker goes with resume, next or previous.
+      if (d.state === "paused") { d.item.reloadBy = deadline; return; }
       load(id, d, d.index, { again: true });
     }, wait);
     d.retry?.unref?.();
@@ -235,8 +239,11 @@ export function createMediaStore({ now = Date.now, tickets, send, onFailed = () 
      */
     barView(id, owner) { const d = devs.get(id); return d?.owner && owner === d.owner ? view(id) : view(null); },
     itemId: (id) => live(id)?.item.id ?? null,
-    /** B3: does this display's session still hold a usable stream (its ticket alive, or a station reload pending)? */
-    holdsTicket(id) { const d = live(id); return !!d && (!!d.retry || !!tickets.get(d.item.ticket)); },
+    /**
+     * B3: does this display's session still hold a usable stream (its ticket alive, a station reload pending, or — B1 —
+     * a station paused during its reload, until the dead ticket's 12 h expiry)?
+     */
+    holdsTicket(id) { const d = live(id); return !!d && (!!d.retry || (d.item.reloadBy ?? 0) > now() || !!tickets.get(d.item.ticket)); },
     /**
      * B3: the tab whose player bar owns this display's audio (a per-tab nonce from a bar hello; null for every other
      * page). A change of owner moves the current item to a new ticket, so the old tab's stream stops. → changed?

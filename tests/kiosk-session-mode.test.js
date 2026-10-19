@@ -1033,3 +1033,44 @@ test("B4 parity: the runtime's item-id rule is the core protocol's ITEM_ID_RE (t
   assert.equal(kiosk.ITEM_ID.source, ITEM_ID_RE.source);
   assert.equal(kiosk.ITEM_ID.flags, ITEM_ID_RE.flags);
 });
+
+/** B1 rig: a station plays on the bar display, the owner reports an error (a reload waits), pauses, and the reload timer fires. */
+async function pausedDuringReload(r) {
+  const c = await r.open();
+  r.play(sessionToken, ["R"], "radio");
+  const id = r.idOf();
+  const first = r.k.media.itemId(id);
+  r.k.media.onEvent(id, { id: first, state: "playing" });
+  assert.equal((await r.post({ do: "error", id: first, owner: OWNER })).status, 200);
+  assert.equal((await r.post({ do: "pause", id: first, owner: OWNER })).status, 200);
+  for (const t of r.mediaTimers.filter((x) => x.on)) { t.on = false; t.fn(); }
+  await c.shut();
+  return { id, first };
+}
+
+test("B1 a station paused while its reload waited survives the bar sweeps, and the bar's resume plays it on a live ticket", async () => {
+  const r = await barServe();
+  try {
+    const { id, first } = await pausedDuringReload(r);
+    r.clock.t += 60_000; await r.sweep();
+    r.clock.t += 60_000; await r.sweep();
+    assert.equal(r.k.media.active(id), true, "the sweep kept the paused station");
+    assert.equal(r.k.barDisplays(), 1);
+    const res = await r.post({ do: "resume", id: first, owner: OWNER });
+    assert.equal(res.status, 200);
+    const v = await res.json();
+    assert.notEqual(v.item.id, first);
+    assert.equal((await r.stream(v.item.url)).status, 200, "the fresh ticket answers");
+  } finally { r.close(); }
+});
+
+test("B1 the paused, reload-pending station still ends at the 12 h cap: one sweep past it, it is inactive and no login check is kept", async () => {
+  const r = await barServe();
+  try {
+    const { id } = await pausedDuringReload(r);
+    r.clock.t += 12 * 60 * 60 * 1000 + 1;
+    await r.sweep();
+    assert.equal(r.k.media.active(id), false);
+    assert.equal(r.k.barDisplays(), 0);
+  } finally { r.close(); }
+});
