@@ -112,10 +112,12 @@ export function toolAllowlist(def, { remoteEnabled = false } = {}) {
  * extension load, before pi's first tool refresh: pi 0.85.1
  * core/agent-session.js _refreshToolRegistry → setActiveToolsByName walks the
  * initial active names (= the csv, core/sdk.js:144) and only APPENDS tools
- * registered later. Re-check with a live capture after a pi or pi-lab upgrade.
+ * registered later. An extension that calls setActiveTools (pi-lab plan mode)
+ * replaces the order outright for that session. Re-check with a live capture
+ * after a pi or pi-lab upgrade.
  */
 export function canonicalToolOrder(csv) {
-  const names = String(csv || "").split(",").filter(Boolean);
+  const names = String(csv || "").split(",").map((n) => n.trim()).filter(Boolean);
   const isMcp = (n) => n.startsWith("mcp__");
   return names.sort((a, b) => (isMcp(a) - isMcp(b)) || (a < b ? -1 : a > b ? 1 : 0)).join(",");
 }

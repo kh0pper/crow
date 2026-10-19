@@ -15,7 +15,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -135,6 +135,7 @@ async function pinnedTools(def) {
   try { pi.close(); } catch { /* already exited */ }
   assert.ok(existsSync(out), "stub pi never recorded its argv");
   const argv = JSON.parse(readFileSync(out, "utf8"));
+  rmSync(scratch, { recursive: true, force: true });
   return argv[argv.indexOf("--tools") + 1];
 }
 
@@ -229,5 +230,14 @@ async function proxyToolsList() {
 test("/tools/mcp tools/list is byte-identical whatever order the servers connected in", async () => {
   const one = await withServers(ORDER_1, false, proxyToolsList);
   const two = await withServers(ORDER_2, true, proxyToolsList);
+  assert.equal(one, two);
+});
+
+test("dashboard chat's system prompt lists add-on tools in a stable order", async () => {
+  const { generateSystemPrompt } = await import("../servers/gateway/ai/system-prompt.js");
+  const addonPart = (p) => p.slice(p.indexOf("## Installed Extension Tools"));
+  const one = await withServers(ORDER_1, false, async () => addonPart(await generateSystemPrompt()));
+  const two = await withServers(ORDER_2, true, async () => addonPart(await generateSystemPrompt()));
+  assert.ok(one.includes("### zz-stable-fake-a"), "the add-on section is present");
   assert.equal(one, two);
 });
