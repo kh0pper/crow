@@ -227,7 +227,7 @@ test("sunvox: SUNVOX_READ_DIRS entries resolve against the work dir, and a root 
     const srv = await import(pathToFileURL(path.join(BUNDLE, "server", "server.js")).href + "?readdirs");
     assert.equal(srv.resolveReadablePath(path.join(extraDir, "c.sunvox")), fs.realpathSync(path.join(extraDir, "c.sunvox")));
     process.env.SUNVOX_READ_DIRS = "/";
-    assert.ok(srv.resolveReadablePath(path.join(extraDir, "c.sunvox")), "an explicit / root admits everything");
+    assert.ok(srv.resolveReadablePath(path.join(extraDir, "c.sunvox")), "a root ending in a separator is matched (path logic; the docs warn against configuring /)");
   } finally {
     for (const [k, v] of [["SUNVOX_WORKDIR", prev.w], ["SUNVOX_READ_DIRS", prev.r]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
     fs.rmSync(work, { recursive: true, force: true });
@@ -246,11 +246,23 @@ test("sunvox: negative, fractional or huge tracks/lines are refused before the c
   const mods = [{ id: "g", type: "Analog generator" }];
   // A negative pattern used to subtract from the running cell total and let
   // the next pattern exceed maxCells.
-  const bypass = [{ tracks: -32, lines: 4096, events: [] }, ...Array.from({ length: 17 }, () => ({ tracks: 32, lines: 4096, events: [] }))]; // 17 alone exceed maxCells; the old sum minus the negative landed exactly on it
+  // 17 full patterns alone exceed maxCells; the old sum minus a trailing
+  // negative pattern landed exactly on the cap, so the 17 were allocated.
+  const bypass = [...Array.from({ length: 17 }, () => ({ tracks: 32, lines: 4096, events: [] })), { tracks: -32, lines: 4096, events: [] }];
   await assert.rejects(() => engine.compose({ modules: mods, patterns: bypass }), /tracks: an integer from 1 to/);
   for (const bad of [{ tracks: 1, lines: -64 }, { tracks: 0, lines: 4 }, { tracks: 1.5, lines: 4 }, { tracks: 1, lines: 1e9 }, { tracks: 2 ** 40, lines: 4 }, { tracks: "4", lines: 4 }]) {
     await assert.rejects(() => engine.compose({ modules: mods, patterns: [{ ...bad, events: [] }] }), /an integer from 1 to/, JSON.stringify(bad));
   }
   const ok = await engine.compose({ modules: mods, patterns: [{ events: [] }] }); // defaults 1 x 64
   assert.equal(ok.info.pattern_list[0].lines, 64);
+});
+
+test("sunvox: event fields are range-checked, never silently wrapped", { skip: !engine && SKIP_REASON }, async () => {
+  const mods = [{ id: "g", type: "Analog generator" }];
+  const one = (ev) => engine.compose({ modules: mods, patterns: [{ tracks: 2, lines: 8, events: [{ module: "g", note: "C3", ...ev }] }] });
+  for (const ev of [{ track: 2 ** 32 + 1 }, { track: 1.7 }, { track: "1" }, { line: -1 }, { ctl: -1 }, { ctl: 300 }, { ctl: 0, ctl_val: 0x10000 }, { effect: 0x1ff }, { effect: 1, effect_param: -5 }]) {
+    await assert.rejects(() => one(ev), /must be an integer from/, JSON.stringify(ev));
+  }
+  const ok = await one({ track: 1, line: 7, effect: 0x0f, effect_param: 4 });
+  assert.equal(ok.info.patterns, 1);
 });

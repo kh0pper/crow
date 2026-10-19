@@ -267,7 +267,7 @@ function renderFrames(a, maxTailFrames) {
     }
     chunks.push(Buffer.from(buf));
     frames += CHUNK_FRAMES;
-    if (frames > sampleRate * LIMITS.maxRenderSeconds + maxTailFrames) { // the pre-check bounds the song; allow its tail
+    if (frames > sampleRate * LIMITS.maxRenderSeconds + maxTailFrames + CHUNK_FRAMES) { // the pre-check bounds the song; allow its tail
       a.sv_stop(SLOT);
       throw new Error(`render exceeded ${LIMITS.maxRenderSeconds} s (SUNVOX_MAX_RENDER_SECONDS) — project too long or never ends`);
     }
@@ -472,8 +472,12 @@ export function compose(spec, { name = "crow-compose" } = {}) {
         if (pat < 0) throw new Error(`sv_new_pattern failed (rc=${pat})`);
         if (firstPat < 0) firstPat = pat;
         for (const ev of p.events || []) {
-          const track = ev.track | 0;
-          const line = ev.line | 0;
+          const range = (v, lo, hi, what) => {
+            if (!Number.isInteger(v) || v < lo || v > hi) throw new Error(`${what} must be an integer from ${lo} to ${hi}, got ${JSON.stringify(v)}`);
+            return v;
+          };
+          const track = range(ev.track ?? 0, 0, tracks - 1, `event track (pattern has ${tracks})`);
+          const line = range(ev.line ?? 0, 0, lines - 1, `event line (pattern has ${lines})`);
           if (track < 0 || track >= tracks) throw new Error(`event track ${track} out of range (pattern has ${tracks})`);
           if (line < 0 || line >= lines) throw new Error(`event line ${line} out of range (pattern has ${lines})`);
           let nn = 0;
@@ -488,8 +492,8 @@ export function compose(spec, { name = "crow-compose" } = {}) {
           }
           let ccee = 0;
           let xxyy = 0;
-          if (ev.ctl !== undefined) { ccee = ((ev.ctl | 0) + 1) << 8; xxyy = ev.ctl_val | 0; }
-          else if (ev.effect !== undefined) { ccee = ev.effect | 0; xxyy = ev.effect_param | 0; }
+          if (ev.ctl !== undefined) { ccee = (range(ev.ctl, 0, 126, "event ctl") + 1) << 8; xxyy = range(ev.ctl_val ?? 0, 0, 0xffff, "event ctl_val"); }
+          else if (ev.effect !== undefined) { ccee = range(ev.effect, 0, 0xff, "event effect"); xxyy = range(ev.effect_param ?? 0, 0, 0xffff, "event effect_param"); }
           const rc = a.sv_set_pattern_event(SLOT, pat, track, line, nn, vv, mm, ccee, xxyy);
           if (rc < 0) throw new Error(`set event at pattern ${pat} track ${track} line ${line} failed (rc=${rc})`);
         }

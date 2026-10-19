@@ -5901,6 +5901,20 @@
           "default": "~/.crow/data/sunvox-studio",
           "required": false,
           "secret": false
+        },
+        {
+          "name": "SUNVOX_READ_DIRS",
+          "description": "Extra folders (colon-separated) the tools may read project files from, besides the work dir. Name narrow music folders only; never /, .. or a home directory.",
+          "default": "",
+          "required": false,
+          "secret": false
+        },
+        {
+          "name": "SUNVOX_MAX_RENDER_SECONDS",
+          "description": "Longest render allowed, in seconds (default 1200, at most 3600).",
+          "default": "1200",
+          "required": false,
+          "secret": false
         }
       ],
       "notes": "Vendors libsunvox 2.1.4d (MIT, (c) Alexander Zolotov / WarmPlace.ru) for linux x86_64 — see vendor/LICENSE.txt; the prebuilt library's terms (\"Powered by SunVox\" attribution) and the SunDog/libFLAC/Tremor licences are in vendor/THIRD-PARTY-NOTICES.txt. No Docker, no network ports: a pure stdio MCP server around the local engine library. Linux x86_64 only in v1 (arm64 .so available upstream).",
