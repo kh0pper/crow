@@ -29,9 +29,12 @@
 import { z } from "zod";
 
 const MAX_DEPTH = 12;
-// Work cap per tool: every convert() call spends one. Bounds $ref expansion of
-// an upstream schema (a DAG of $defs grows as fanout^depth) and the published size.
-const NODE_BUDGET = 2000;
+// Work cap per tool, in units: every node visited costs 1, an enum costs its
+// values, a description its length / 256. It is charged BEFORE any work, and
+// every loop stops once it is spent, so a hostile upstream schema (a $defs DAG
+// grows as fanout^depth; long enums or descriptions repeated at every $ref)
+// cannot blow up memory or the published size. Crow's largest tool uses ~60.
+const BUDGET = 1000;
 const TYPE_KEYS = ["type", "properties", "items", "enum", "const", "$ref", "anyOf", "oneOf", "allOf"];
 
 /** Any JSON value, spelled so it publishes without an empty {} anywhere. */
@@ -41,10 +44,13 @@ export function anyJson() {
 
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const hasTypeInfo = (s) => isObj(s) && TYPE_KEYS.some((k) => k in s);
+const spend = (ctx, units) => (ctx.budget -= units) >= 0;
+const spent = (ctx) => ctx.budget < 0;
 
-function withMeta(zs, prop) {
+function withMeta(zs, prop, ctx) {
   let out = prop.nullable === true ? zs.nullable() : zs; // OpenAPI-style nullable
-  if (typeof prop.description === "string" && prop.description) out = out.describe(prop.description);
+  const d = prop.description;
+  if (typeof d === "string" && d && spend(ctx, Math.ceil(d.length / 256))) out = out.describe(d);
   return out;
 }
 
@@ -54,9 +60,9 @@ function unionOf(list) {
   return z.union(list);
 }
 
-function literalUnion(values) {
+function literalUnion(values, ctx) {
   const ok = values.filter((v) => v === null || ["string", "number", "boolean"].includes(typeof v));
-  if (ok.length === 0) return anyJson();
+  if (ok.length === 0 || !spend(ctx, ok.reduce((n, v) => n + 1 + Math.floor(String(v).length / 64), 0))) return anyJson();
   if (ok.every((v) => typeof v === "string")) return z.enum(ok);
   return unionOf(ok.map((v) => z.literal(v)));
 }
@@ -74,35 +80,37 @@ function resolveRef(ref, ctx) {
   return isObj(node) ? node : null;
 }
 
-function propertiesShape(schema, ctx, depth) {
+function propertiesShape(schema, ctx, depth, strict) {
   const shape = {};
   const required = new Set(Array.isArray(schema.required) ? schema.required : []);
   for (const [key, prop] of Object.entries(schema.properties)) {
+    if (spent(ctx)) break;
     if (key === "__proto__") continue; // would set the shape's prototype instead of a property
-    const zs = convert(prop, ctx, depth + 1);
+    const zs = convert(prop, ctx, depth + 1, strict);
     shape[key] = required.has(key) ? zs : zs.optional();
   }
   return shape;
 }
 
-function objectOf(prop, ctx, depth, inUnion = false) {
+// `strict`: this node sits inside a union with more than one non-null branch.
+// zod takes the FIRST branch that parses, so a closed object that strips
+// unknown keys (zod's default) could silently drop the keys of the branch that
+// was meant; there, closed objects are strict instead.
+function objectOf(prop, ctx, depth, strict) {
   const ap = prop.additionalProperties;
   if (isObj(prop.properties)) {
-    const shape = propertiesShape(prop, ctx, depth);
-    if (ctx.budget < 0) return z.object({}).passthrough(); // over budget: this object goes out untyped, not huge
-    // Closed: zod's default strip, published additionalProperties:false. As a union
-    // branch it is strict instead: zod takes the FIRST branch that parses, and a
-    // stripping branch with a subset of the keys would silently drop the rest.
-    if (ap === false) return inUnion ? z.object(shape).strict() : z.object(shape);
-    if (isObj(ap) && hasTypeInfo(ap)) return z.object(shape).catchall(convert(ap, ctx, depth + 1));
+    const shape = propertiesShape(prop, ctx, depth, strict);
+    if (spent(ctx)) return z.object({}).passthrough(); // over budget: this object goes out untyped, not huge
+    if (ap === false) return strict ? z.object(shape).strict() : z.object(shape); // closed: published additionalProperties:false
+    if (isObj(ap) && hasTypeInfo(ap)) return z.object(shape).catchall(convert(ap, ctx, depth + 1, strict));
     return z.object(shape).passthrough(); // absent, true or an untyped schema: open, any values
   }
-  if (isObj(ap) && hasTypeInfo(ap)) return z.record(z.string(), convert(ap, ctx, depth + 1));
+  if (isObj(ap) && hasTypeInfo(ap)) return z.record(z.string(), convert(ap, ctx, depth + 1, strict));
   return z.object({}).passthrough();
 }
 
-function typed(type, prop, ctx, depth, inUnion = false) {
-  if (Array.isArray(prop.enum) && prop.enum.length && type !== "object" && type !== "array") return literalUnion(prop.enum);
+function typed(type, prop, ctx, depth, strict) {
+  if (Array.isArray(prop.enum) && prop.enum.length && type !== "object" && type !== "array") return literalUnion(prop.enum, ctx);
   switch (type) {
     case "string": return z.string();
     case "number": return z.number();
@@ -111,43 +119,51 @@ function typed(type, prop, ctx, depth, inUnion = false) {
     case "null": return z.null();
     case "array":
       // z.array(z.any()) publishes {type:"array"} (no items): llama.cpp's "array of any values".
-      return isObj(prop.items) ? z.array(convert(prop.items, ctx, depth + 1)) : z.array(z.any());
-    case "object": return objectOf(prop, ctx, depth, inUnion);
+      return isObj(prop.items) ? z.array(convert(prop.items, ctx, depth + 1, strict)) : z.array(z.any());
+    case "object": return objectOf(prop, ctx, depth, strict);
     default: return anyJson();
   }
 }
 
-function convert(prop, ctx, depth, inUnion = false) {
-  if (!isObj(prop) || depth > MAX_DEPTH || --ctx.budget < 0) return anyJson();
+const branches = (list, isNull) => list.filter((x) => !isNull(x)).length > 1;
+
+function convert(prop, ctx, depth, strict = false) {
+  if (!spend(ctx, 1) || !isObj(prop) || depth > MAX_DEPTH) return anyJson();
   if ("$ref" in prop) {
     const target = resolveRef(prop.$ref, ctx);
     // Cycles are caught on the resolved NODE, so another spelling of the same pointer is no way round.
-    if (!target || ctx.resolving.has(target)) return withMeta(anyJson(), prop);
+    if (!target || ctx.resolving.has(target)) return withMeta(anyJson(), prop, ctx);
     ctx.resolving.add(target);
-    try { return withMeta(convert(target, ctx, depth + 1, inUnion), prop); }
+    try { return withMeta(convert(target, ctx, depth + 1, strict), prop, ctx); }
     finally { ctx.resolving.delete(target); }
   }
   if (Array.isArray(prop.allOf) && prop.allOf.length === 1 && !TYPE_KEYS.some((k) => k !== "allOf" && k in prop)) {
     // pydantic v1: a described model field is {description, allOf:[{$ref}]}.
-    return withMeta(convert(prop.allOf[0], ctx, depth + 1, inUnion), prop);
+    return withMeta(convert(prop.allOf[0], ctx, depth + 1, strict), prop, ctx);
   }
   let zs;
   const alts = Array.isArray(prop.anyOf) ? prop.anyOf : Array.isArray(prop.oneOf) ? prop.oneOf : null;
   // {type:"object", properties, anyOf:[{required:[a]},{required:[b]}]} — branches that only add
   // requirements are not types; keep the parent's type then (the upstream enforces the rest).
   const typedAlts = alts && alts.some(hasTypeInfo) ? alts : null;
-  if (typedAlts) zs = unionOf(typedAlts.map((a) => convert(a, ctx, depth + 1, typedAlts.length > 1)));
-  else if ("const" in prop) zs = literalUnion([prop.const]);
-  else if (Array.isArray(prop.type)) zs = unionOf(prop.type.map((t) => typed(t, prop, ctx, depth, prop.type.length > 1)));
-  else if (typeof prop.type === "string") zs = typed(prop.type, prop, ctx, depth, inUnion);
-  else if (Array.isArray(prop.enum)) zs = literalUnion(prop.enum);
-  else if (isObj(prop.properties)) zs = objectOf(prop, ctx, depth, inUnion);
-  else if (isObj(prop.items)) zs = typed("array", prop, ctx, depth);
+  if (typedAlts) {
+    const inner = strict || branches(typedAlts, (a) => isObj(a) && a.type === "null");
+    const list = [];
+    for (const a of typedAlts) { if (spent(ctx)) break; list.push(convert(a, ctx, depth + 1, inner)); }
+    zs = spent(ctx) ? anyJson() : unionOf(list);
+  } else if ("const" in prop) zs = literalUnion([prop.const], ctx);
+  else if (Array.isArray(prop.type)) {
+    const inner = strict || branches(prop.type, (t) => t === "null");
+    zs = unionOf(prop.type.slice(0, 8).map((t) => typed(t, prop, ctx, depth, inner)));
+  } else if (typeof prop.type === "string") zs = typed(prop.type, prop, ctx, depth, strict);
+  else if (Array.isArray(prop.enum)) zs = literalUnion(prop.enum, ctx);
+  else if (isObj(prop.properties)) zs = objectOf(prop, ctx, depth, strict);
+  else if (isObj(prop.items)) zs = typed("array", prop, ctx, depth, strict);
   else zs = anyJson(); // {}, description-only, multi-member allOf, not, …
-  return withMeta(zs, prop);
+  return withMeta(zs, prop, ctx);
 }
 
-const newCtx = (root) => ({ root: isObj(root) ? root : {}, resolving: new Set(), budget: NODE_BUDGET });
+const newCtx = (root) => ({ root: isObj(root) ? root : {}, resolving: new Set(), budget: BUDGET });
 
 /** Convert one JSON Schema node to a zod schema (`root` resolves local $refs). */
 export function jsonSchemaToZod(prop, root = prop) {
@@ -157,7 +173,7 @@ export function jsonSchemaToZod(prop, root = prop) {
 /** Convert a JSON Schema "properties" + "required" into a Zod object shape. */
 export function jsonSchemaPropertiesToZod(schema) {
   if (!isObj(schema) || !isObj(schema.properties)) return {};
-  return propertiesShape(schema, newCtx(schema), 0);
+  return propertiesShape(schema, newCtx(schema), 0, false);
 }
 
 /**
@@ -167,11 +183,17 @@ export function jsonSchemaPropertiesToZod(schema) {
  * arguments reach the upstream, and a root with no listed properties is not
  * re-published as "no arguments at all".
  */
+const converted = new WeakMap(); // upstream inputSchema object → zod: converted once, not per MCP session
 export function jsonSchemaToZodObject(schema) {
+  if (isObj(schema) && converted.has(schema)) return converted.get(schema);
   try {
-    const shape = jsonSchemaPropertiesToZod(schema);
+    const ctx = newCtx(schema);
+    const shape = isObj(schema) && isObj(schema.properties) ? propertiesShape(schema, ctx, 0, false) : {};
     const closed = isObj(schema) && schema.additionalProperties === false;
-    return closed ? z.object(shape) : z.object(shape).passthrough();
+    // Over budget: a partial closed shape would strip the arguments it never reached.
+    const out = spent(ctx) ? z.object({}).passthrough() : closed ? z.object(shape) : z.object(shape).passthrough();
+    if (isObj(schema)) converted.set(schema, out);
+    return out;
   } catch (err) {
     // One malformed upstream tool never sinks the others: it is forwarded as is.
     console.warn(`[json-schema-to-zod] could not convert a tool schema (${err?.message || err}); forwarding it untyped`);

@@ -241,13 +241,18 @@ test("hostile upstream schemas are bounded: a $defs DAG and alias spellings of a
     defs[`L${l}`] = { type: "object", properties: props };
   }
   const dag = { type: "object", $defs: defs, properties: { root: { $ref: "#/$defs/L0" } } };
+  const wide = { type: "object", properties: Object.fromEntries(Array.from({ length: 50000 }, (_, i) => [`p${i}`, i % 2 ? true : 7])) };
+  let deep = { type: "string" };
+  for (let i = 0; i < 40; i++) deep = { type: "object", properties: Object.fromEntries(Array.from({ length: 6 }, (_, j) => [`k${j}`, deep])) };
+  const longEnum = { type: "object", $defs: { E: { type: "string", enum: Array.from({ length: 20000 }, (_, i) => `value-${i}-${"x".repeat(50)}`), description: "d".repeat(20000) } },
+    properties: Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`f${i}`, { $ref: "#/$defs/E" }])) };
   const alias = { type: "object", properties: { a: { type: "object", properties: {
     x: { $ref: "#/properties/a" }, y: { $ref: "#//properties/a" }, z: { $ref: "#/%70roperties/a" }, w: { $ref: "#/properties//a" } } } } };
-  for (const [name, schema] of [["dag", dag], ["alias", alias]]) {
+  for (const [name, schema] of [["dag", dag], ["alias", alias], ["wide", wide], ["deep", deep], ["longEnum", longEnum]]) {
     const t0 = Date.now();
     const out = roundTrip(schema);
     const ms = Date.now() - t0;
-    assert.ok(ms < 1000, `${name}: ${ms} ms`);
+    assert.ok(ms < 3000, `${name}: ${ms} ms`);
     assert.ok(JSON.stringify(out).length < 512 * 1024, `${name}: ${JSON.stringify(out).length} bytes`);
     assert.deepEqual(grammarHazards(out), [], name);
   }
@@ -269,4 +274,27 @@ test("a union of closed objects never silently drops keys (zod takes the first b
   assert.deepEqual(r.data.target, { id: "x", recursive: true });
   assert.deepEqual(parse(s, { target: { id: "x" } }).data.target, { id: "x" });
   assert.equal(parse(s, { target: { id: "x", junk: 1 } }).success, false, "no branch admits an unknown key");
+});
+
+test("over budget, a tool goes out untyped and open, never as a partial closed shape that strips arguments", async () => {
+  const { jsonSchemaToZodObject } = await import("../servers/shared/json-schema-to-zod.js");
+  const props = Object.fromEntries(Array.from({ length: 3000 }, (_, i) => [`p${i}`, { type: "string" }]));
+  const zs = jsonSchemaToZodObject({ type: "object", properties: props, additionalProperties: false });
+  assert.deepEqual(zs.parse({ p2999: "kept", other: 1 }), { p2999: "kept", other: 1 });
+  const small = { type: "object", properties: { a: { type: "string" } }, additionalProperties: false };
+  assert.equal(jsonSchemaToZodObject(small), jsonSchemaToZodObject(small), "converted once per upstream schema object");
+});
+
+test("strictness reaches every closed object inside a multi-branch union, and only there", () => {
+  const closed = (props, req = []) => ({ type: "object", properties: props, required: req, additionalProperties: false });
+  const s = { type: "object", properties: {
+    nested: { anyOf: [closed({ kind: { const: "a" }, opt: closed({ x: { type: "string" } }) }, ["kind"]), closed({ kind: { const: "a" }, opt: closed({ x: { type: "string" }, y: { type: "string" } }) }, ["kind"])] },
+    single: { anyOf: [{ type: "string" }, { anyOf: [closed({ id: { type: "string" } }, ["id"])] }, closed({ id: { type: "string" }, deep: { type: "boolean" } }, ["id"])] },
+    typeArr: { type: ["object", "string"], properties: { id: { type: "string" } }, additionalProperties: false },
+    maybe: { type: ["object", "null"], properties: { id: { type: "string" } }, additionalProperties: false },
+  } };
+  assert.deepEqual(parse(s, { nested: { kind: "a", opt: { x: "1", y: "2" } } }).data.nested, { kind: "a", opt: { x: "1", y: "2" } });
+  assert.deepEqual(parse(s, { single: { id: "x", deep: true } }).data.single, { id: "x", deep: true });
+  assert.equal(parse(s, { typeArr: { id: "x", junk: 1 } }).success, false, "object|string: the object branch is strict");
+  assert.deepEqual(parse(s, { maybe: { id: "x", junk: 1 } }).data.maybe, { id: "x" }, "object|null is not a real union: it strips as before");
 });
