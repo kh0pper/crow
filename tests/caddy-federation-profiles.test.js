@@ -71,19 +71,25 @@ test("a second upstream is refused for a profile that has one upstream (never si
 });
 
 test("upstreams are host[:port] only: nothing that could end the line, open a block or start a comment", () => {
-  for (const ok of ["crow-lemmy:8536", "lemmy:8536", "10.89.0.5:8040", "[fd00::5]:8040", "http://crow-lemmy:8536", "lemmy"]) {
+  for (const ok of ["crow-lemmy:8536", "lemmy:8536", "crow_x:1", "http://crow-lemmy:8536", "HTTPS://crow-lemmy:443", "lemmy", "crow-lemmy:65535"]) {
     assert.equal(P.upstreamLike(ok), true, ok);
   }
-  for (const bad of ["a b", "a\nb", "a{", "a}", "a#x", "a;b", "", "a:99999", "a:8/x", "-x", "a\"b", "a'b", "a`b", "unix//x", "$x", "a\\b"]) {
+  for (const bad of ["a b", "a\nb", "a{", "a}", "a#x", "a;b", "", "a:99999", "a:65536", "a:0", "a:8/x", "-x", "a\"b", "a'b", "a`b", "unix//x", "$x", "a\\b",
+    "lemmy.example.com:80", "crow-lemmy.:80", "10.89.0.5:8040", "[fd00::5]:8040", "1x:80"]) {
     assert.equal(P.upstreamLike(bad), false, JSON.stringify(bad));
   }
-  // Never Caddy itself: its admin API would take a proxied POST /load from the internet.
-  for (const caddy of ["127.0.0.1:2019", "crow-lemmy:2019", "localhost:8080", "127.0.0.2:80", "0.0.0.0:80", "[::1]:80", "[::]:80", "[0:0:0:0:0:0:0:1]:80", "[::ffff:127.0.0.1]:80",
-    "crow-caddy:80", "caddy:443", "http://127.0.0.1:8536", "LOCALHOST:1", "x.localhost:1"]) {
-    assert.match(P.upstreamProblem(caddy), /Caddy/, caddy);
-    assert.throws(() => P.renderProfileDirectives("lemmy", "crow-lemmy-ui:1234", { backend: caddy }), /Caddy/, caddy);
-    assert.throws(() => P.renderProfileDirectives("activitypub", caddy), /Caddy/, caddy);
+  // Never Caddy itself: its admin API (0.0.0.0:2019 inside its container) would take a
+  // proxied POST /load from the internet. Fail-closed: IP literals in every form are out.
+  for (const caddy of ["127.0.0.1:2019", "crow-lemmy:2019", "crow-lemmy:02019", "crow-lemmy:002019", "crow-lemmy:+2019", "localhost:8080", "LOCALHOST:1", "x.localhost:1",
+    "localhost.:80", "127.0.0.2:80", "127.1:80", "2130706433:80", "0x7f000001:80", "0x7f.1:80", "0177.0.0.1:80", "0.0.0.0:80", "0:80", "[::1]:80", "[::]:80",
+    "[0:0:0:0:0:0:0:1]:80", "[::ffff:127.0.0.1]:80", "[::ffff:7f00:1]:80", "crow-caddy:80", "CROW-CADDY:80", "caddy:443", "http://127.0.0.1:8536", "localtest.me:80"]) {
+    assert.ok(P.upstreamProblem(caddy), caddy);
+    assert.throws(() => P.renderProfileDirectives("lemmy", "crow-lemmy-ui:1234", { backend: caddy }), /upstream/, caddy);
+    assert.throws(() => P.renderProfileDirectives("activitypub", caddy), /upstream/, caddy);
   }
+  assert.match(P.upstreamProblem("crow-lemmy:02019"), /leading zeros/);
+  assert.match(P.upstreamProblem("crow-lemmy:2019"), /2019/);
+  assert.match(P.upstreamProblem("crow-caddy:80"), /Caddy itself/);
   assert.throws(() => P.renderProfileDirectives("lemmy", "crow-lemmy-ui:1234", { backend: "x # y" }), /upstream/i);
   assert.throws(() => P.renderProfileDirectives("lemmy", "x{", {}), /upstream/i);
 });

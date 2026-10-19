@@ -146,8 +146,10 @@ Profiles:
   timeouts.
 - `generic-ws` — plain `reverse_proxy`, escape hatch.
 
-`backend_upstream` is accepted only by the two split profiles; upstreams are
-`host:port` (optionally `http://`/`https://`).
+`backend_upstream` is accepted only by the two split profiles. An upstream is
+the app's container name on Caddy's network, as `name:port` (optionally
+`http://`/`https://`): one name starting with a letter, never an IP address,
+`localhost`, the Caddy container or port 2019 (Caddy's admin API).
 
 ### `caddy_set_wellknown`
 

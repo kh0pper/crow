@@ -156,25 +156,31 @@ export function profileTakesBackend(profile) {
 }
 
 /**
- * Why an upstream is not one the federation tools accept, or null. An upstream is
- * host[:port] (a DNS name, IPv4 or a bracketed IPv6 address), optionally with an http://
- * or https:// scheme: nothing that could end the line, open or close a block, start a
- * comment or quote in a Caddyfile. And never Caddy itself: Caddy runs in its own
- * container, so a loopback address is Caddy, and its admin API (port 2019, which listens
- * on every interface of that container) would let anyone who can reach the site rewrite
- * the whole configuration through a proxied request.
+ * Why an upstream is not one the federation tools accept, or null. Fail-closed ALLOWLIST:
+ * an upstream is a container name on Caddy's Docker network (crow-federation), as
+ * `name[:port]`, optionally with an http:// or https:// scheme:
+ *   - the name is ONE DNS label that starts with a letter (letters, digits, `-`, `_`,
+ *     `.` not allowed): no IP literal in any form (dotted, decimal, hex, IPv6, IPv4-mapped),
+ *     no FQDN that public DNS could point at 127.0.0.1;
+ *   - never Caddy itself (`caddy`, `crow-caddy`) or `localhost`: Caddy runs in its own
+ *     container with its admin API on 0.0.0.0:2019 there, so a proxied request to it
+ *     could rewrite the whole configuration;
+ *   - the port is a decimal 1-65535 without leading zeros, and never 2019.
+ * Nothing it accepts can end a line, open a block, start a comment or quote in a Caddyfile.
  */
 export function upstreamProblem(s) {
-  if (typeof s !== "string" || s.length === 0 || s.length > 300) return "an upstream must be host:port";
-  const m = s.match(/^(?:https?:\/\/)?([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::(\d{1,5}))?$/);
-  if (!m) return "an upstream must be host:port (letters, digits, dots, dashes; no spaces, braces, quotes or #)";
-  if (m[2] !== undefined && !(Number(m[2]) >= 1 && Number(m[2]) <= 65535)) return "an upstream port must be 1-65535";
-  const host = m[1].toLowerCase().replace(/^\[|\]$/g, "");
-  if (m[2] === "2019") return "an upstream may not be port 2019 (Caddy's admin API)";
-  const loopback = host === "localhost" || host.endsWith(".localhost") || /^127\./.test(host) || host === "0.0.0.0"
-    || (host.includes(":") && (/^[0:]*1?$/.test(host) || /^[0:]*:ffff:(127\.|0\.0\.0\.0$)/.test(host)));
-  if (loopback || host === "crow-caddy" || host === "caddy") {
-    return "an upstream may not be Caddy itself (a loopback address or the Caddy container): name the app's container instead";
+  if (typeof s !== "string" || s.length === 0 || s.length > 300) return "an upstream must be a container name (name:port)";
+  const m = s.match(/^(?:[Hh][Tt][Tt][Pp][Ss]?:\/\/)?([A-Za-z][A-Za-z0-9_-]{0,62})(?::([0-9]+))?$/);
+  if (!m) return "an upstream must be the app's container name on Caddy's network, as name:port (one name, starting with a letter; no IP address, no dots, spaces, braces, quotes or #)";
+  if (m[2] !== undefined) {
+    if (!/^[1-9][0-9]{0,4}$/.test(m[2])) return "an upstream port must be a number 1-65535 without leading zeros";
+    const port = Number.parseInt(m[2], 10);
+    if (port > 65535) return "an upstream port must be a number 1-65535 without leading zeros";
+    if (port === 2019) return "an upstream may not be port 2019 (Caddy's admin API)";
+  }
+  const host = m[1].toLowerCase();
+  if (host === "localhost" || host === "caddy" || host === "crow-caddy") {
+    return "an upstream may not be Caddy itself (localhost or the Caddy container): name the app's container instead";
   }
   return null;
 }
