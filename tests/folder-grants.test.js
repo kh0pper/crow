@@ -146,8 +146,20 @@ dockerTest("Configure: a peer cannot set a folder outside Crow's home; the owner
     assert.equal(s.status, 403, JSON.stringify(s.body));
     assert.match(s.body.error, /Configure/);
     assert.ok(BC.needsConfigKeys("fx-g6").includes("MEDIA_DIR"), "Configure offers the folder");
-    // The owner enters it in Configure: allowed, Start works, nothing left to configure.
-    assert.equal((await post("/bundles/api/env", { bundle_id: "fx-g6", env_vars: { MEDIA_DIR: OTHER } })).status, 200);
+    // Saving the hand-edited value unchanged does NOT allow it (a container that can write
+    // the .env would otherwise get any folder granted by the owner's next Save), and the
+    // save says why.
+    const same = await post("/bundles/api/env", { bundle_id: "fx-g6", env_vars: { MEDIA_DIR: OTHER } });
+    assert.equal(same.status, 200);
+    assert.notEqual(grants()["fx-g6"].MEDIA_DIR?.value, OTHER, "an unchanged value is never granted");
+    assert.match((same.body.warnings || []).join(" "), /MEDIA_DIR.*not allowed/);
+    assert.equal((await post("/bundles/api/start", { bundle_id: "fx-g6" })).status, 403);
+    // The owner enters it in Configure (a new value): allowed, Start works, nothing left to configure.
+    assert.equal((await post("/bundles/api/env", { bundle_id: "fx-g6", env_vars: { MEDIA_DIR: `${OTHER}/` } })).status, 200);
+    assert.equal(grants()["fx-g6"].MEDIA_DIR.value, `${OTHER}/`);
+    // A save that does not change it keeps the grant (only changed keys are granted or dropped).
+    assert.equal((await post("/bundles/api/env", { bundle_id: "fx-g6", env_vars: { MEDIA_DIR: `${OTHER}/`, UNRELATED: "y" } })).status, 200);
+    assert.equal(grants()["fx-g6"].MEDIA_DIR.value, `${OTHER}/`);
     assert.equal((await post("/bundles/api/start", { bundle_id: "fx-g6" })).status, 200);
     assert.ok(!BC.needsConfigKeys("fx-g6").includes("MEDIA_DIR"));
     // The owner sets it back inside the bundle: the grant goes.
@@ -165,6 +177,16 @@ dockerTest("Configure: a peer cannot set a folder outside Crow's home; the owner
     // Ordinary values of a setting the compose file uses stay settable: a sub-folder of the bundle.
     assert.equal((await post("/bundles/api/env", { bundle_id: "fx-g6", env_vars: { MEDIA_DIR: "./media2" } })).status, 200);
   });
+});
+
+dockerTest("a reinstall that repeats the .env's own ungranted folder does not allow it", async () => {
+  stage("fx-g12");
+  assert.equal((await install("fx-g12", {})).ok, true);
+  // Something other than the owner (a container that can write the .env) put a folder there.
+  writeFileSync(join(CROW_HOME, "bundles", "fx-g12", ".env"), `MEDIA_DIR=${OTHER}/g12\n`);
+  const out = await install("fx-g12", { MEDIA_DIR: `${OTHER}/g12` });
+  assert.equal(out.ok, false, "the repeated value is not the owner's new choice");
+  assert.equal(grants()["fx-g12"], undefined);
 });
 
 dockerTest("a reinstall over the kept .env keeps the allowed folder", async () => {
@@ -263,4 +285,73 @@ test("grantCandidates: mount-source keys only, path-like, outside Crow, not secr
 test("reachesHostPath: paths and interpolations yes; URLs, time zones, tokens and ./sub no", () => {
   for (const v of ["/srv", "~/x", "../x", "./a/../../x", "a/../../x", "${X}", "$X/y", "x${Y}"]) assert.equal(B.reachesHostPath(v), true, v);
   for (const v of ["https://lemmy.example.com/api", "America/Chicago", "abc+/def==", "./media", "media/sub", "pa$$word", "p$1", ""]) assert.equal(B.reachesHostPath(v), false, v);
+});
+
+dockerTest("a refused reinstall puts the earlier install back exactly (no new files, the old compose and .env, data kept)", async () => {
+  const id = "fx-r1";
+  stage(id);
+  assert.equal((await install(id, {})).ok, true);
+  const dest = join(CROW_HOME, "bundles", id);
+  mkdirSync(join(dest, "data"), { recursive: true });
+  writeFileSync(join(dest, "data", "keep.txt"), "user data");
+  const envBefore = readFileSync(join(dest, ".env"), "utf8");
+  const composeBefore = readFileSync(join(dest, "docker-compose.yml"), "utf8");
+  // The new version mounts a folder nobody allowed, and ships new code.
+  const src = join(FIXTURES, id);
+  writeFileSync(join(src, "docker-compose.yml"), `services:\n  app:\n    image: busybox\n    volumes:\n      - ${OTHER}/r1:/x\n`);
+  mkdirSync(join(src, "server"), { recursive: true });
+  writeFileSync(join(src, "server", "new.js"), "export default 1;\n");
+  upCalls.length = 0;
+  const out = await install(id, { MEDIA_DIR: "./elsewhere" }, { owner: false });
+  assert.equal(out.ok, false);
+  assert.match(out.reason, /Security check failed/);
+  assert.equal(upCalls.length, 0);
+  assert.equal(readFileSync(join(dest, "docker-compose.yml"), "utf8"), composeBefore, "the old compose is back");
+  assert.equal(readFileSync(join(dest, ".env"), "utf8"), envBefore, "the old .env is back");
+  assert.ok(!existsSync(join(dest, "server", "new.js")), "no new code left behind");
+  assert.ok(!existsSync(join(dest, "server")), "no new folder left behind");
+  assert.equal(readFileSync(join(dest, "data", "keep.txt"), "utf8"), "user data", "data kept");
+  // A refused FRESH install leaves nothing.
+  stage("fx-r2");
+  writeFileSync(join(FIXTURES, "fx-r2", "docker-compose.yml"), `services:\n  app:\n    image: busybox\n    volumes:\n      - ${OTHER}/r2:/x\n`);
+  assert.equal((await install("fx-r2", {}, { owner: false })).ok, false);
+  assert.ok(!existsSync(join(CROW_HOME, "bundles", "fx-r2")));
+});
+
+dockerTest("a folder two extensions share is never granted when the other one mounts something inside it (either install order)", async () => {
+  const SH = mkdtempSync(join(tmpdir(), "crow-grants-shared-"));
+  try {
+    // fx-s1 mounts a SUBFOLDER of its allowed folder.
+    stage("fx-s1");
+    writeFileSync(join(FIXTURES, "fx-s1", "docker-compose.yml"), "services:\n  app:\n    image: busybox\n    volumes:\n      - ${MEDIA_DIR:-./media}/sub:/media\n");
+    assert.equal((await install("fx-s1", { MEDIA_DIR: SH })).ok, true);
+    // fx-s2 asks for the same folder later: its container could swap SH/sub for a symlink
+    // that fx-s1's next Docker restart follows. Refused, and no grant is recorded.
+    stage("fx-s2");
+    const out = await install("fx-s2", { MEDIA_DIR: SH });
+    assert.equal(out.ok, false);
+    assert.match(out.log, /fx-s1 mounts a folder inside it/);
+    assert.equal(grants()["fx-s2"], undefined);
+    // The same request through Configure: saved, not allowed, and the save says why.
+    stage("fx-s3");
+    assert.equal((await install("fx-s3", {})).ok, true);
+    await withApp("owner", async (post) => {
+      const r = await post("/bundles/api/env", { bundle_id: "fx-s3", env_vars: { MEDIA_DIR: SH } });
+      assert.equal(r.status, 200);
+      assert.equal(grants()["fx-s3"]?.MEDIA_DIR, undefined);
+      assert.match((r.body.warnings || []).join(" "), /fx-s1 mounts a folder inside it/);
+    });
+  } finally { rmSync(SH, { recursive: true, force: true }); }
+  // The other order: the folder is shared first, then a bundle mounting a subfolder of it
+  // is refused at its check, and the refusal says why.
+  const SH2 = mkdtempSync(join(tmpdir(), "crow-grants-shared2-"));
+  try {
+    stage("fx-s4");
+    assert.equal((await install("fx-s4", { MEDIA_DIR: SH2 })).ok, true);
+    stage("fx-s5");
+    writeFileSync(join(FIXTURES, "fx-s5", "docker-compose.yml"), "services:\n  app:\n    image: busybox\n    volumes:\n      - ${MEDIA_DIR:-./media}/sub:/media\n");
+    const out = await install("fx-s5", { MEDIA_DIR: SH2 });
+    assert.equal(out.ok, false);
+    assert.match(out.reason, /another extension was allowed the same folder/);
+  } finally { rmSync(SH2, { recursive: true, force: true }); }
 });

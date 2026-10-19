@@ -111,25 +111,30 @@ export function outsideCrow(p, { crowHome, dataDirs = [] }) {
  * compose file references, whose value is a host path outside Crow's home, that is not a
  * `secret` key, and that is NOT a value the bundle chose (the manifest's default/example,
  * the .env.example value, the value retained from an earlier install). The modals prefill
- * defaults, so a default is never taken as the owner's choice.
+ * defaults, so a default is never taken as the owner's choice. Callers pass only the keys
+ * the owner CHANGED (Configure: compared with the .env before the save), so a value
+ * something else wrote to the .env is never granted by an unrelated Save.
+ * `refused` (optional) collects, per key, why an outside folder was not granted.
  * @returns {Record<string, {value: string, real: string}>}
  */
-export function grantCandidates({ manifest, submitted, composeText, exampleEnv = {}, retained = {}, crowHome, dataDirs = [], home = homedir(), allowDefaults = false, appRoot, otherRoots = [] }) {
+export function grantCandidates({ manifest, submitted, composeText, exampleEnv = {}, retained = {}, crowHome, dataDirs = [], home = homedir(), appRoot, otherRoots = [], refused = null }) {
   const used = composeMountKeys(composeText);
   const byName = new Map((manifest?.env_vars || []).filter((v) => v && typeof v.name === "string").map((v) => [v.name, v]));
   const out = {};
   for (const [k, v] of Object.entries(submitted || {})) {
     if (!used.has(k) || typeof v !== "string") continue;
     const decl = byName.get(k);
-    if (decl?.secret === true) continue;
-    const bundleChosen = allowDefaults ? [] : [decl?.default, decl?.example, exampleEnv[k], retained[k]].filter((x) => typeof x === "string");
-    if (bundleChosen.includes(v)) continue;
     const abs = hostPathOf(v, home);
     if (!abs || !outsideCrow(abs, { crowHome, dataDirs })) continue;
+    const no = (why) => { if (refused) refused[k] = why; };
+    if (decl?.secret === true) { no("it is a secret setting"); continue; }
+    const bundleChosen = [decl?.default, decl?.example, exampleEnv[k], retained[k]].filter((x) => typeof x === "string");
+    if (bundleChosen.includes(v)) { no("it is the extension's own default or example value, which the form fills in (type the folder yourself, for example with a trailing /, to allow it)"); continue; }
     const real = resolveHostPath(abs);
     // Never a folder the check would ignore anyway: the floor, too shallow, nesting.
-    if (grantRootProblem(abs, { crowHome, dataDir: dataDirs[0], appRoot, home })) continue;
-    if (otherRoots.some((o) => o !== real && (under(o, real) || under(real, o)))) continue;
+    const problem = grantRootProblem(abs, { crowHome, dataDir: dataDirs[0], appRoot, home });
+    if (problem) { no(`it is not a folder an extension may be allowed (${problem})`); continue; }
+    if (otherRoots.some((o) => o !== real && (under(o, real) || under(real, o)))) { no("it sits inside, or contains, a folder another extension was allowed"); continue; }
     out[k] = { value: v, real };
   }
   return out;

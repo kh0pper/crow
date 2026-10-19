@@ -265,7 +265,15 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
       }
     }
     if (!activeRoots.some((r) => under(p, r) && (!sharedRoots.has(r) || p === r))) {
-      return refuse(`${what}: mounts ${p.length > 80 ? `…${p.slice(-80)}` : p}, outside Crow's home, which is not a folder you allowed for this extension (open its Configure and enter this folder, then Start)`);
+      const shown = p.length > 80 ? `…${p.slice(-80)}` : p;
+      // An allowed folder that can't count: say why, so Configure is not offered in vain.
+      const allowed = roots.operatorRoots.find((r) => under(p, r));
+      let why = null;
+      if (allowed && sharedRoots.has(allowed)) why = "another extension was allowed the same folder, so only that folder itself can be mounted, not a folder inside it";
+      else if (allowed && !validRoot(allowed)) why = `the folder you allowed can't be used (${allowed.split(sep).filter(Boolean).length < 2 ? "it is not at least two levels deep" : floorProblem(allowed)})`;
+      else if (allowed) why = "the folder you allowed sits inside, or contains, a folder another extension was allowed";
+      if (why) return refuse(`${what}: mounts ${shown}, outside Crow's home: ${why}. Choose another folder in its Configure`);
+      return refuse(`${what}: mounts ${shown}, outside Crow's home, which is not a folder you allowed for this extension (open its Configure and enter this folder, then Start)`);
     }
     const f = floorProblem(p);
     if (f) return refuse(`${what}: ${f}`);
