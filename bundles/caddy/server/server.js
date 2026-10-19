@@ -17,6 +17,7 @@
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { execFile } from "node:child_process";
 import { z } from "zod";
 
 import {
@@ -33,6 +34,11 @@ import {
 import {
   SUPPORTED_PROFILES,
   renderProfileDirectives,
+  profileTakesBackend,
+  upstreamLike,
+  upstreamProblem,
+  upstreamHost,
+  defaultBackend,
   renderWellKnownHandle,
   buildWellKnownJson,
   WELLKNOWN_PATHS,
@@ -119,7 +125,77 @@ function domainLike(s) {
   return !/[\s{}\n\r]/.test(s);
 }
 
+/**
+ * Names Caddy can reach on its shared Docker network: every container on crow-federation
+ * (its container name and its aliases/DNS names on that network). An upstream must be one
+ * of them: a bare name could otherwise resolve through the host's DNS search domain (a
+ * tailnet machine) and publish a private service. Fails closed (an error) when Docker
+ * cannot be asked.
+ */
+function dockerJson(args) {
+  return new Promise((resolve, reject) => execFile("docker", args, { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+    if (err) return reject(err);
+    try { resolve(JSON.parse(String(stdout))); } catch (e) { reject(e); }
+  }));
+}
+// Caddy's own container: never an upstream under any name (its short container ID is a
+// Docker DNS name too, and Caddy's admin API listens inside it).
+const CADDY_CONTAINER = "crow-caddy";
+export async function federationNetworkNames(network = "crow-federation", { docker = dockerJson } = {}) {
+  const [net] = await docker(["network", "inspect", network, "--format", "json"]);
+  const ids = Object.keys(net?.Containers || {});
+  const names = new Set();
+  if (!ids.length) return names;
+  for (const c of await docker(["inspect", "--format", "json", ...ids])) {
+    const name = String(c?.Name || "").replace(/^\//, "").toLowerCase();
+    if (name === CADDY_CONTAINER) continue;
+    if (name) names.add(name);
+    const ep = c?.NetworkSettings?.Networks?.[network];
+    for (const a of [...(ep?.Aliases || []), ...(ep?.DNSNames || [])]) names.add(String(a).toLowerCase());
+  }
+  return names;
+}
+
+/**
+ * caddy_add_site's extra_directives: one-line directives from a short list, with no
+ * braces, quotes-escapes or comments, so nothing can close the site block, open another
+ * one, proxy elsewhere (Caddy's admin API, a tailnet machine) or import a file. Anything
+ * richer is a hand edit of the Caddyfile.
+ */
+export const EXTRA_DIRECTIVES = new Set(["encode", "header", "redir", "rewrite", "uri", "respond", "tls", "log", "request_body"]);
+export function extraDirectivesProblem(text) {
+  if (text === undefined || text === null || text === "") return null;
+  for (const raw of String(text).split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (/[{}#`\\]/.test(line)) return "braces, backticks, backslashes and # are not allowed";
+    if (/(^|[^0-9])2019([^0-9]|$)/.test(line)) return "port 2019 (Caddy's admin API) is not allowed";
+    const first = line.split(/\s+/)[0];
+    if (!EXTRA_DIRECTIVES.has(first)) return `only ${[...EXTRA_DIRECTIVES].join(", ")} (got ${first.slice(0, 40)})`;
+  }
+  return null;
+}
+
 export function createCaddyServer(options = {}) {
+  const networkNames = options.networkNames || federationNetworkNames;
+  /** Why these upstreams can't be used, or null: the strict form, then network membership. */
+  async function upstreamsProblem(list) {
+    for (const [label, u] of list) {
+      if (u === undefined) continue;
+      const p = upstreamProblem(u);
+      if (p) return `${label}: ${p}`;
+    }
+    let names;
+    try { names = await networkNames(); } catch (err) {
+      return `could not list the containers on Caddy's network crow-federation (${String(err?.message || err).slice(0, 120)}); is Caddy installed and Docker running?`;
+    }
+    for (const [label, u] of list) {
+      if (u === undefined) continue;
+      const host = upstreamHost(u);
+      if (!names.has(host)) return `${label}: ${host} is not a container on Caddy's network crow-federation (start the extension first, and use its container name)`;
+    }
+    return null;
+  }
   const server = new McpServer(
     { name: "crow-caddy", version: "1.0.0" },
     { instructions: options.instructions },
@@ -245,16 +321,21 @@ export function createCaddyServer(options = {}) {
     "Add a reverse-proxy site block to the Caddyfile and reload. For anything beyond `reverse_proxy <upstream>`, edit the Caddyfile directly and call caddy_reload.",
     {
       domain: z.string().min(1).max(253).describe("Site address (e.g., example.com, *.example.com, :8080). Must not contain whitespace or braces."),
-      upstream: z.string().min(1).max(500).describe("Reverse-proxy upstream (e.g., localhost:3001, 127.0.0.1:3456). Must not contain whitespace."),
-      extra_directives: z.string().max(5000).optional().describe("Optional extra Caddyfile directives to include in the site block, one per line (no leading indent)."),
+      upstream: z.string().min(1).max(500).describe("Reverse-proxy upstream: a container on Caddy's network crow-federation, as name:port (e.g., crow-gotosocial:8080). Never a loopback address (that is the Caddy container itself) or port 2019."),
+      extra_directives: z.string().max(5000).optional().describe(`Optional extra directives for the site block, one per line (no leading indent), no braces or comments. Only: ${[...EXTRA_DIRECTIVES].join(", ")}. Anything else (another proxy, a nested block, import, admin): edit the Caddyfile by hand and call caddy_reload.`),
     },
     async ({ domain, upstream, extra_directives }) => {
       try {
         if (!domainLike(domain)) {
           return { content: [{ type: "text", text: "Error: domain contains disallowed characters (whitespace, braces, or newlines)." }] };
         }
-        if (!domainLike(upstream)) {
-          return { content: [{ type: "text", text: "Error: upstream contains disallowed characters (whitespace, braces, or newlines)." }] };
+        {
+          const bad = await upstreamsProblem([["upstream", upstream]]);
+          if (bad) return { content: [{ type: "text", text: `Error: ${bad}.` }] };
+        }
+        {
+          const bad = extraDirectivesProblem(extra_directives);
+          if (bad) return { content: [{ type: "text", text: `Error: extra_directives: ${bad}.` }] };
         }
 
         const source = readCaddyfile(CONFIG_DIR());
@@ -321,23 +402,34 @@ export function createCaddyServer(options = {}) {
     "Add a federation-aware reverse-proxy site block. Emits directives for the chosen profile (matrix | activitypub | peertube | generic-ws) — websocket upgrade, large request body, proxy timeouts — plus optional /.well-known/ handlers. Idempotent: re-running with the same domain replaces the existing block.",
     {
       domain: z.string().min(1).max(253).describe("Public site address (e.g., masto.example.com). Must be a subdomain dedicated to this federated app — ActivityPub actors are URL-keyed and subpath mounts break federation."),
-      upstream: z.string().min(1).max(500).describe("Upstream the app is reachable at (e.g., gotosocial:8080 over the shared crow-federation docker network, or 127.0.0.1:8080 for host-published debug mode)."),
-      profile: z.enum(SUPPORTED_PROFILES).describe(`One of: ${SUPPORTED_PROFILES.join(" | ")}`),
+      upstream: z.string().min(1).max(500).describe("Upstream the app is reachable at, as host:port: its container name on the shared crow-federation docker network (e.g., crow-gotosocial:8080). Never a loopback address (that is the Caddy container itself) or port 2019."),
+      profile: z.enum(SUPPORTED_PROFILES).describe(`One of: ${SUPPORTED_PROFILES.join(" | ")}. lemmy: upstream is lemmy-ui (crow-lemmy-ui:1234); /api, /pictrs, /feeds, /nodeinfo, /version, /.well-known, /sitemap.xml, ActivityPub reads (GET/HEAD asking for activity+json/ld+json) and every other method go to backend_upstream (default crow-lemmy:8536). activitypub-mastodon: upstream is web (crow-mastodon-web:3000); /api/v1/streaming goes to backend_upstream (default crow-mastodon-streaming:4000).`),
+      backend_upstream: z.string().min(1).max(300).optional().describe("Second upstream, only for the lemmy and activitypub-mastodon profiles: a container name as name:port. Omit to use the bundle's container name."),
       wellknown: z.record(z.string(), z.object({}).passthrough()).optional().describe(`Optional map of well-known handlers to emit inside this site block. Keys: ${Object.keys(WELLKNOWN_PATHS).join(", ")}. Values are either { body_json: "<literal JSON string>" } or kind-specific opts (matrix-server: { delegate_to }, matrix-client: { homeserver_base_url, identity_server_base_url? }, nodeinfo: { href }).`),
     },
-    async ({ domain, upstream, profile, wellknown }) => {
+    async ({ domain, upstream, profile, backend_upstream, wellknown }) => {
       try {
         if (!domainLike(domain)) {
           return { content: [{ type: "text", text: "Error: domain contains disallowed characters (whitespace, braces, or newlines)." }] };
         }
         if (!domainLike(upstream)) {
-          return { content: [{ type: "text", text: "Error: upstream contains disallowed characters." }] };
+          return { content: [{ type: "text", text: `Error: upstream: ${upstreamProblem(upstream) || "disallowed characters"}.` }] };
         }
         if (domain.includes("/")) {
           return { content: [{ type: "text", text: `Error: federation sites must be a bare subdomain (e.g., "masto.example.com"), not a subpath. ActivityPub actors are URL-keyed and subpath mounts break federation.` }] };
         }
 
-        let body = renderProfileDirectives(profile, upstream);
+        {
+          const backend = backend_upstream ?? (profileTakesBackend(profile) ? defaultBackend(profile) : undefined);
+          const bad = await upstreamsProblem([["upstream", upstream], ["backend_upstream", backend]]);
+          if (bad) return { content: [{ type: "text", text: `Error: ${bad}.` }] };
+        }
+        // Lemmy and Mastodon answer their own webfinger/nodeinfo/host-meta (per user, per
+        // instance): a static handle in front of them would break federation.
+        if (profileTakesBackend(profile) && wellknown && Object.keys(wellknown).length) {
+          return { content: [{ type: "text", text: `Error: the ${profile} profile serves .well-known from the app itself; leave wellknown out (use caddy_set_wellknown on a different domain for delegation).` }] };
+        }
+        let body = renderProfileDirectives(profile, upstream, { backend: backend_upstream });
 
         if (wellknown && Object.keys(wellknown).length) {
           const handles = [];
@@ -348,6 +440,9 @@ export function createCaddyServer(options = {}) {
             }
             let jsonBody;
             if (opts && typeof opts.body_json === "string") {
+              try { JSON.parse(opts.body_json); } catch {
+                return { content: [{ type: "text", text: `Error: wellknown.${kind}.body_json is not valid JSON.` }] };
+              }
               jsonBody = opts.body_json;
             } else {
               jsonBody = buildWellKnownJson(kind, opts || {});
@@ -367,7 +462,7 @@ export function createCaddyServer(options = {}) {
         return {
           content: [{
             type: "text",
-            text: `${replaced ? "Replaced" : "Added"} federation site ${domain} → ${upstream} (profile: ${profile}). ${sites.length} total site block(s). Caddy will request a Let's Encrypt cert on first request.`,
+            text: `${replaced ? "Replaced" : "Added"} federation site ${domain} → ${upstream}${profileTakesBackend(profile) ? ` + backend ${backend_upstream || "(default)"}` : ""} (profile: ${profile}). ${sites.length} total site block(s). Caddy will request a Let's Encrypt cert on first request.`,
           }],
         };
       } catch (err) {
@@ -459,12 +554,16 @@ export function createCaddyServer(options = {}) {
     "Add a :8448 site block with its own Let's Encrypt cert, reverse-proxied to a Matrix homeserver's federation listener. Use this OR `caddy_set_wellknown` with kind=matrix-server — not both. Opening 8448 requires the router/firewall to forward it; .well-known delegation avoids that at the cost of an apex HTTPS handler.",
     {
       domain: z.string().min(1).max(253).describe("Matrix server name (e.g., matrix.example.com). The cert issued for :8448 will match this SNI."),
-      upstream_8448: z.string().min(1).max(500).describe("Dendrite/Synapse federation listener (e.g., dendrite:8448 over the shared docker network)."),
+      upstream_8448: z.string().min(1).max(500).describe("Dendrite/Synapse federation listener: its container on crow-federation as name:port (e.g., crow-dendrite:8448)."),
     },
     async ({ domain, upstream_8448 }) => {
       try {
-        if (!domainLike(domain) || !domainLike(upstream_8448)) {
-          return { content: [{ type: "text", text: "Error: domain or upstream contains disallowed characters." }] };
+        if (!domainLike(domain)) {
+          return { content: [{ type: "text", text: "Error: domain contains disallowed characters." }] };
+        }
+        {
+          const bad = await upstreamsProblem([["upstream_8448", upstream_8448]]);
+          if (bad) return { content: [{ type: "text", text: `Error: ${bad}.` }] };
         }
         const source = readCaddyfile(CONFIG_DIR());
         const existingWellknown = parseSites(source)

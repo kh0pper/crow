@@ -114,3 +114,37 @@ test("the manifest no longer says the bundle cannot start, and names the upstrea
   assert.doesNotMatch(text, /does not start yet/);
   assert.match(manifest.notes, /AGPL-3\.0/);
 });
+
+// Crow's MCP server and the panel run on the HOST: `http://lemmy:8536` resolves only
+// inside Docker networks, so the default must be the loopback port the bundle publishes.
+test("Lemmy's API is published on loopback only, and every default URL points at it", () => {
+  const ports = lemmy.match(/^    ports:\n((?:      - .*\n)+)/m);
+  assert.ok(ports, "lemmy publishes a port");
+  const entries = ports[1].trim().split("\n").map((l) => l.replace(/^\s*-\s*/, "").replace(/^"|"$/g, ""));
+  assert.deepEqual(entries, ["127.0.0.1:${LEMMY_API_PORT:-8040}:8536"]);
+  for (const other of ["lemmy-ui", "postgres", "pictrs"]) assert.doesNotMatch(service(other), /^    ports:/m, `${other} publishes nothing`);
+  const env = Object.fromEntries(manifest.env_vars.map((v) => [v.name, v]));
+  // No LEMMY_URL default: an install would pin it into the MCP entry, and a later
+  // LEMMY_API_PORT change would then leave it pointing at the old port.
+  assert.equal(env.LEMMY_URL.default, undefined);
+  assert.equal(env.LEMMY_API_PORT.default, "8040");
+  assert.match("8040", new RegExp(env.LEMMY_API_PORT.pattern));
+  for (const bad of ["80; rm", "08040", "65536", "99999", "0"]) assert.doesNotMatch(bad, new RegExp(env.LEMMY_API_PORT.pattern), bad);
+  assert.ok(manifest.server.envKeys.includes("LEMMY_API_PORT"), "the MCP server gets the port");
+  assert.deepEqual(manifest.ports, [], "loopback only: no tailnet firewall rule (manifest.ports opens one)");
+  for (const f of ["server/server.js", "panel/routes.js"]) {
+    const src = readFileSync(join(DIR, f), "utf8");
+    assert.match(src, /process\.env\.LEMMY_URL \|\| `http:\/\/127\.0\.0\.1:\$\{process\.env\.LEMMY_API_PORT \|\| 8040\}`/, f);
+    assert.doesNotMatch(src, /\|\|\s*["'`]http:\/\/lemmy:8536/, `${f} has no Docker-only default`);
+  }
+  const hook = readFileSync(join(DIR, "scripts", "post-install.sh"), "utf8");
+  assert.doesNotMatch(hook, /lemmy:8536/);
+  assert.match(hook, /"profile": "lemmy"/);
+});
+
+test("the docs point at the Caddy profile, not a hand-written site", () => {
+  const skill = readFileSync(join(DIR, "skills", "lemmy.md"), "utf8");
+  assert.match(skill, /"profile": "lemmy"/);
+  assert.doesNotMatch(skill, /by hand/);
+  assert.doesNotMatch(manifest.notes, /hand-written/);
+});

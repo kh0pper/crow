@@ -4,7 +4,7 @@
 
 import { Router } from "express";
 
-const URL_BASE = () => (process.env.LEMMY_URL || "http://lemmy:8536").replace(/\/+$/, "");
+const URL_BASE = () => (process.env.LEMMY_URL || `http://127.0.0.1:${process.env.LEMMY_API_PORT || 8040}`).replace(/\/+$/, "");
 const JWT = () => process.env.LEMMY_JWT || "";
 const HOSTNAME = () => process.env.LEMMY_HOSTNAME || "";
 const TIMEOUT = 15_000;

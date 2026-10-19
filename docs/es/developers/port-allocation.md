@@ -64,6 +64,7 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 | 8000 | 127.0.0.1 | paperless (existente) | existente |
 | 8004 | 127.0.0.1 | faster-whisper-server (STT local) | existente |
 | 8018 | 127.0.0.1 | design-kit (puerta del renderizador: Vega-Lite / Mermaid / D2 → SVG; el contenedor de renderizado está en una red Docker interna sin salida; sin regla ufw) | Design kit v1 |
+| 8040 | 127.0.0.1 | lemmy (API para el servidor MCP y el panel de Crow, que corren en el host, `LEMMY_API_PORT`; el sitio público pasa por Caddy) | item 30 |
 | 8080 | 127.0.0.1 | localai (existente) | existente |
 | 8081 | 127.0.0.1 | calibre-server (existente) | existente |
 | 8083 | 127.0.0.1 | calibre-web (existente) | existente |

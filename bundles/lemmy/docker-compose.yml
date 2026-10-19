@@ -7,7 +7,9 @@
 # lemmy-ui serves the web app only; it does NOT proxy the API (GET /api/v3/site on
 # lemmy-ui answers 404, checked live on 0.19.17). The public site must send /api,
 # /pictrs, /feeds, /nodeinfo, /.well-known and ActivityPub requests to lemmy:8536 and
-# everything else to lemmy-ui:1234.
+# everything else to lemmy-ui:1234: caddy_add_federation_site with profile "lemmy" does
+# that. Lemmy's API is also published on 127.0.0.1:${LEMMY_API_PORT:-8040} for the
+# host-run MCP server and panel (LEMMY_URL).
 #
 # Data:
 #   volume "postgres"  Postgres data (posts, users, the instance's private keys)
@@ -84,6 +86,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Loopback only: Crow's MCP server and the panel run on the host and reach the API
+    # here (LEMMY_URL). The public site goes through Caddy (profile "lemmy").
+    ports:
+      - "127.0.0.1:${LEMMY_API_PORT:-8040}:8536"
     environment:
       RUST_LOG: "warn"
       RUST_BACKTRACE: "full"

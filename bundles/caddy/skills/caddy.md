@@ -56,8 +56,8 @@ domain is requested. It caches state in `~/.crow/caddy/data/` (mode 0700).
 
 ```
 caddy_add_site {
-  "domain": "notes.example.com",
-  "upstream": "localhost:3040"
+  "domain": "music.example.com",
+  "upstream": "crow-funkwhale:80"
 }
 ```
 
@@ -103,8 +103,10 @@ tools cover this without requiring hand-edited Caddyfiles.
 
 Installing Caddy creates the external docker network `crow-federation`
 (via `scripts/post-install.sh`). Every federated bundle joins this same
-network, so Caddy reaches upstreams by docker service name (e.g.,
-`dendrite:8008`, `gts:8080`) rather than by host-published port. No app
+network, so Caddy reaches upstreams by their container name on it (e.g.,
+`crow-dendrite:8008`, `crow-gotosocial:8080`) rather than by host-published
+port. Every upstream-taking tool checks that the name is a container on
+`crow-federation` (start the extension first). No app
 port is published to the host by default — federated apps are only
 reachable through Caddy's 443.
 
@@ -115,11 +117,11 @@ the same domain replaces the existing block.
 
 ```
 caddy_add_federation_site {
-  "domain": "masto.example.com",
-  "upstream": "mastodon-web:3000",
+  "domain": "gts.example.com",
+  "upstream": "crow-gotosocial:8080",
   "profile": "activitypub",
   "wellknown": {
-    "nodeinfo": { "href": "https://masto.example.com/nodeinfo/2.0" }
+    "nodeinfo": { "href": "https://gts.example.com/nodeinfo/2.0" }
   }
 }
 ```
@@ -130,11 +132,27 @@ Profiles:
   federation backfill and long-polling sync.
 - `activitypub` — 40 MB body, forwarded headers (Host, X-Real-IP,
   X-Forwarded-For, X-Forwarded-Proto), 300s read timeout. Works for
-  Mastodon, GoToSocial, Pixelfed, Funkwhale, Lemmy, WriteFreely,
-  BookWyrm, Mobilizon.
+  GoToSocial, Pixelfed, Funkwhale, WriteFreely, BookWyrm, Mobilizon (one
+  upstream). Mastodon and Lemmy need their own profile (below).
+- `activitypub-mastodon` — the `activitypub` settings, plus
+  `/api/v1/streaming` sent to `backend_upstream` (default
+  `crow-mastodon-streaming:4000`); `upstream` is the web container
+  (`crow-mastodon-web:3000`).
+- `lemmy` — the `activitypub` settings, with the split Lemmy needs:
+  lemmy-ui serves the web app only, so `/api`, `/pictrs`, `/feeds`,
+  `/nodeinfo`, `/version`, `/.well-known`, `/sitemap.xml`, ActivityPub
+  reads (GET/HEAD with `Accept: application/activity+json` or
+  `application/ld+json`) and every other method go to `backend_upstream` (default
+  `crow-lemmy:8536`); everything else goes to `upstream`
+  (`crow-lemmy-ui:1234`).
 - `peertube` — 8 GB body (direct video uploads), 1800s read/write
   timeouts.
 - `generic-ws` — plain `reverse_proxy`, escape hatch.
+
+`backend_upstream` is accepted only by the two split profiles. An upstream is
+the app's container name on Caddy's network, as `name:port` (optionally
+`http://`/`https://`): one name starting with a letter, never an IP address,
+`localhost`, the Caddy container or port 2019 (Caddy's admin API).
 
 ### `caddy_set_wellknown`
 
@@ -164,7 +182,7 @@ the same SNI.
 ```
 caddy_add_matrix_federation_port {
   "domain": "matrix.example.com",
-  "upstream_8448": "dendrite:8448"
+  "upstream_8448": "crow-dendrite:8448"
 }
 ```
 

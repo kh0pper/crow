@@ -27,7 +27,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { appImport } from "./app-root.js";
 
-const LEMMY_URL = (process.env.LEMMY_URL || "http://lemmy:8536").replace(/\/+$/, "");
+// Crow runs this server on the host, so the default is the loopback port the bundle
+// publishes (LEMMY_API_PORT), never a Docker-network name.
+const LEMMY_URL = (process.env.LEMMY_URL || `http://127.0.0.1:${process.env.LEMMY_API_PORT || 8040}`).replace(/\/+$/, "");
 const LEMMY_JWT = process.env.LEMMY_JWT || "";
 const LEMMY_HOSTNAME = process.env.LEMMY_HOSTNAME || "";
 
@@ -87,8 +89,9 @@ async function lemFetch(path, { method = "GET", body, query, noAuth, timeoutMs =
     try { return JSON.parse(text); } catch { return { raw: text }; }
   } catch (err) {
     if (err.name === "AbortError") throw new Error(`Lemmy request timed out: ${path}`);
-    if (err.cause?.code === "ECONNREFUSED" || err.message?.includes("ECONNREFUSED")) {
-      throw new Error(`Cannot reach Lemmy at ${LEMMY_URL}. Verify crow-lemmy is up and on the crow-federation network.`);
+    const code = err.cause?.code || "";
+    if (["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"].includes(code) || /ECONNREFUSED|ENOTFOUND|EAI_AGAIN/.test(err.message || "")) {
+      throw new Error(`Cannot reach Lemmy at ${LEMMY_URL}. Verify crow-lemmy is running. Crow reaches it on the loopback port the bundle publishes (LEMMY_API_PORT, default 8040); an install from before Lemmy 1.0.5 points LEMMY_URL at http://lemmy:8536, which only resolves inside Docker, and publishes no port: reinstall the extension (its data volumes are kept).`);
     }
     throw err;
   } finally {
