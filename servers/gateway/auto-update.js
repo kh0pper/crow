@@ -573,7 +573,9 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
       return { updated: false, error: msg, converge: false };
     }
   } else {
-    const initRes = await run("node", ["scripts/init-db.js"]);
+    // Pinned to the running instance's DB (queue item 33): the pulled code may
+    // resolve the data dir differently from the code that is running.
+    const initRes = await run("node", ["scripts/init-db.js"], { env: guard.initDbChildEnv(dbPath) });
     if (initRes.code !== 0) {
       const msg = `init-db failed (exit ${initRes.code}) — restart withheld, running code unchanged`;
       log(msg);

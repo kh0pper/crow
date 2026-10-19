@@ -67,13 +67,13 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname, resolve } from "node:path";
-import { loadProviders as loadCachedProviders } from "../shared/providers.js";
+import { loadProviders as loadCachedProviders, invalidateAndRefreshProvidersCache } from "../shared/providers.js";
 import { getOwnAddresses, isLocallyOrchestratable } from "../shared/locality.js";
 import {
   setResidencyInitialized, recordResidency, releaseResidency,
   pruneResidency, getProviderHealth,
 } from "./provider-health.js";
-import { resolveDataDir, createDbClient } from "../db.js";
+import { resolveDataDir, resolveDbPath, createDbClient } from "../db.js";
 import { loadState, saveState, reconcileOnBoot, findRegistryEntries, findRegistryEntryForProvider } from "./models/state.js";
 // wasLive-marker plumbing lives in this file (not state.js) so it can reuse
 // `startNativeAndAwaitReady`'s ALREADY-resolved `dir` — see
@@ -85,7 +85,9 @@ import { getCachedProbe, reprobe } from "./models/probe.js";
 import { readReservation, isStartAllowed, ReservedError } from "./box-reservation.js";
 import { createNoticeState, reservationNotices, sendReservationNotice } from "./box-reservation-notify.js";
 import { enqueueDownload } from "./models/manager.js";
-import { listProvidersAll } from "../shared/providers-db.js";
+import { listProvidersAll, upsertProvider } from "../shared/providers-db.js";
+import { applyLegacyRowUpgrades } from "./models/legacy-row-upgrade.js";
+import { sameDbLocation, readLocalInstanceIdOrNull } from "../shared/crow-home.js";
 import { mergeLaunch } from "./models/launch.js";
 import { hostLaunchDefaults } from "./models/host-profile.js";
 import { getRuntimeOverride, getModelRuntimeOverride } from "./models/runtime-override.js";
@@ -1808,6 +1810,7 @@ const EMPTY_RECONCILE_PLAN = Object.freeze({ freedReservations: [], orphanRows: 
 
 export async function initNativeModels({
   dir = resolveDataDir(),
+  dbPath = null,
   db,
   loadStateFn = loadState,
   saveStateFn = saveState,
@@ -1816,7 +1819,23 @@ export async function initNativeModels({
   reconcileOnBootFn = reconcileOnBoot,
   enqueueDownloadFn = enqueueDownload,
   loadCatalogFn = defaultLoadCatalog,
+  upgradeLegacyRowsFn = applyLegacyRowUpgrades,
+  upsertProviderFn = upsertProvider,
+  ownInstanceIdFn = readLocalInstanceIdOrNull,
+  refreshProvidersFn = invalidateAndRefreshProvidersCache,
+  readOnly = isModelOrchestrationDisabled(),
 } = {}) {
+  // One instance's state and one instance's DB, never a mix (queue item 33):
+  // a second gateway that resolved the primary's data dir but its own DB
+  // freed the primary's port reservation here. `dbPath` is the file `db` was
+  // opened from; when it is not this data dir's crow.db, nothing below runs.
+  if (dbPath && !sameDbLocation(dbPath, dir)) {
+    console.warn(`[gpu-orchestrator] native model reconcile skipped: model state ${dir} and database ${dbPath} are not one instance's (set CROW_DATA_DIR to the database's directory)`);
+    return EMPTY_RECONCILE_PLAN;
+  }
+  // Under CROW_DISABLE_MODEL_ORCHESTRATION the reconcile only reports: no
+  // state write, no download resume, no row upgrade (a second guard — the
+  // 2026-10-16 scratch gateway had that flag set and still freed a port).
   // Whole body wrapped: `reconcileOnBootFn` is an injected seam (a caller's
   // stub, or a future state.js change) just as capable of throwing as the
   // I/O around it — every step here is "convenience/cleanup", never
@@ -1824,6 +1843,20 @@ export async function initNativeModels({
   // propagating (this function's own promise must never reject).
   try {
     const state = loadStateFn(dir);
+
+    // Legacy native rows ({runtime, mutexGroup} only) gain catalogId/port so
+    // the Model Catalog can Edit and repair them. Own rows only; idempotent.
+    if (db && !readOnly) {
+      try {
+        const upgraded = await upgradeLegacyRowsFn({
+          db, listProvidersAllFn, upsertProviderFn, catalog: loadCatalogFn(), state,
+          ownInstanceId: ownInstanceIdFn(), log: (m) => console.log(`[gpu-orchestrator] ${m}`),
+        });
+        if (upgraded?.length) await refreshProvidersFn();
+      } catch (err) {
+        console.warn(`[gpu-orchestrator] legacy row upgrade failed: ${err.message}`);
+      }
+    }
 
     let nativeRows = [];
     if (db) {
@@ -1844,15 +1877,20 @@ export async function initNativeModels({
     });
 
     if (plan.freedReservations.length) {
-      console.log(`[gpu-orchestrator] native model reconcile: freed ${plan.freedReservations.length} stale port reservation(s): ${plan.freedReservations.map((r) => r.modelId).join(", ")}`);
-      saveStateFn(dir, state);
+      const ids = plan.freedReservations.map((r) => r.modelId).join(", ");
+      if (readOnly) {
+        console.log(`[gpu-orchestrator] native model reconcile (read-only, orchestration disabled): would free ${plan.freedReservations.length} stale port reservation(s): ${ids}`);
+      } else {
+        console.log(`[gpu-orchestrator] native model reconcile: freed ${plan.freedReservations.length} stale port reservation(s): ${ids}`);
+        saveStateFn(dir, state);
+      }
     }
 
     if (plan.orphanRows.length) {
       console.warn(`[gpu-orchestrator] native model reconcile: ${plan.orphanRows.length} provider row(s) with no matching port reservation: ${plan.orphanRows.map((r) => r.modelId).join(", ")}`);
     }
 
-    for (const dl of plan.resumableDownloads) {
+    for (const dl of readOnly ? [] : plan.resumableDownloads) {
       try {
         const catalog = loadCatalogFn();
         console.log(`[gpu-orchestrator] native model reconcile: resuming interrupted download for ${dl.modelId} (${dl.bytesDone || 0} bytes so far)`);
@@ -1864,6 +1902,7 @@ export async function initNativeModels({
       }
     }
 
+    console.log(`[gpu-orchestrator] native model reconcile done${readOnly ? " (read-only)" : ""}: state ${dir}`);
     return plan;
   } catch (err) {
     console.warn(`[gpu-orchestrator] native model reconcile failed: ${err.message}`);
@@ -1949,7 +1988,7 @@ export async function initOrchestrator() {
   try {
     const db = createDbClient();
     try {
-      await initNativeModels({ db });
+      await initNativeModels({ db, dbPath: resolveDbPath() });
     } finally {
       try { db.close(); } catch { /* best effort */ }
     }

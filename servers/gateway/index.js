@@ -30,8 +30,10 @@
  *   OAuth routes (/.well-known/*, /authorize, /token, /register)
  */
 
-// Load .env file if present (for systemd and other environments without dotenv)
-import { readFileSync, existsSync } from "node:fs";
+// FIRST import: the instance-path boot gate (queue item 33) must be evaluated
+// before every other module in this graph. Keep it the first import.
+import "./boot/run-instance-paths-gate.js";
+
 import { resolve as resolvePath, dirname as dirnamePath } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -41,16 +43,8 @@ const __appRoot = resolvePath(__gatewayDir, "../..");
 // resolve shared servers/ modules without a hardcoded repo-relative path —
 // see bundles/maker-lab/server/app-root.js (BH-4 phase 2).
 process.env.CROW_APP_ROOT ||= __appRoot;
-const envPath = resolvePath(__appRoot, ".env");
-if (existsSync(envPath)) {
-  for (const line of readFileSync(envPath, "utf8").split("\n")) {
-    const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
-    if (match && !(match[1] in process.env)) {
-      // Only set if not already in environment (env vars take precedence over .env)
-      process.env[match[1]] = match[2];
-    }
-  }
-}
+// The checkout .env is applied by ./boot/run-instance-paths-gate.js (the first
+// import above), so import-time constants already see its values.
 
 import { mcpAuthRouter, createOAuthMetadata } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { mcpAuthMetadataRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";

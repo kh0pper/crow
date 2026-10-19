@@ -429,9 +429,15 @@ export function readTreeGeneration(appRoot) {
 
 /* ------------------------------------------------------------ orchestration */
 
-function defaultRunInitDb(appRoot) {
+/** The init-db child env: pinned to the DB the guard backs up and verifies
+ *  (queue item 33) — never a path the child would re-derive on its own. */
+export function initDbChildEnv(dbPath, env = process.env) {
+  return dbPath ? { ...env, CROW_DB_PATH: resolve(dbPath) } : { ...env };
+}
+
+function defaultRunInitDb(appRoot, dbPath) {
   return new Promise((res) => {
-    execFile("node", ["scripts/init-db.js"], { cwd: appRoot, timeout: 600000 }, (err, stdout, stderr) => {
+    execFile("node", ["scripts/init-db.js"], { cwd: appRoot, timeout: 600000, env: initDbChildEnv(dbPath) }, (err, stdout, stderr) => {
       res({ code: err ? err.code || 1 : 0, stdout: String(stdout || ""), stderr: String(stderr || "") });
     });
   });
@@ -459,7 +465,7 @@ export async function runGuardedInitDb({
   // Pre-flight
   const state = readSchemaState(dbPath);
   if (!state.exists) {
-    const r = await runInitDb(appRoot);
+    const r = await runInitDb(appRoot, dbPath);
     return { verdict: "fresh", initDbExit: r.code };
   }
   if (!state.readable) {
@@ -476,11 +482,11 @@ export async function runGuardedInitDb({
       title: "Crow DB unreadable before migration",
       body: `The database at ${dbPath} could not be read before a migration run. File copies were saved to ${dir}. If the migration fails, run \`npm run recover-db\`.`,
     });
-    const r = await runInitDb(appRoot);
+    const r = await runInitDb(appRoot, dbPath);
     return { verdict: "unreadable", initDbExit: r.code };
   }
   if (state.coreTableCount < 3) {
-    const r = await runInitDb(appRoot);
+    const r = await runInitDb(appRoot, dbPath);
     return { verdict: "fresh", initDbExit: r.code };
   }
 
@@ -490,7 +496,7 @@ export async function runGuardedInitDb({
     snapA = snapshotDb(dbPath);
   } catch (err) {
     log(`snapshot failed (${err?.message}) — running unguarded`);
-    const r = await runInitDb(appRoot);
+    const r = await runInitDb(appRoot, dbPath);
     return { verdict: "unreadable", initDbExit: r.code };
   }
   const fromGen = snapA.userVersion;
@@ -505,7 +511,7 @@ export async function runGuardedInitDb({
   }
 
   // The migration
-  const r = await runInitDb(appRoot);
+  const r = await runInitDb(appRoot, dbPath);
 
   // Snapshot B + classify
   let result;
