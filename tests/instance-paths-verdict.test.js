@@ -238,3 +238,21 @@ test("the init-db child is pinned to the DB the guard verifies", async () => {
   assert.equal(env.KEEP, "1");
   assert.equal(env.CROW_HOME, "/srv/x");
 });
+
+test("a non-gateway process with only CROW_HOME (a stdio server on a legacy host) does not mint the instance-id that unlocks the gate", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { host, home2 } = layout("g-stdio-id");
+  const env = { PATH: process.env.PATH, HOME: host, CROW_HOME: home2 };
+  const script = `import { getOrCreateLocalInstanceId } from "./servers/gateway/instance-registry.js";
+const a = getOrCreateLocalInstanceId(); const b = getOrCreateLocalInstanceId();
+process.stdout.write(JSON.stringify({ a, b }));`;
+  const out = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script], { env, cwd: join(import.meta.dirname, ".."), stdio: "pipe" }).toString());
+  assert.match(out.a, /^[0-9a-f]+$/);
+  assert.equal(out.a, out.b, "stable within the process");
+  assert.ok(!existsSync(join(home2, "data", "instance-id")), "no instance-id written under a derived, unpinned data dir");
+  const v = instancePathsVerdict({ CROW_HOME: home2 }, { homeDir: host });
+  assert.equal(v.ok, false, "still refused");
+  // Once the gate pinned CROW_DATA_DIR (the gateway, and every child it spawns), the id persists.
+  execFileSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...env, CROW_DATA_DIR: join(home2, "data") }, cwd: join(import.meta.dirname, ".."), stdio: "pipe" });
+  assert.ok(existsSync(join(home2, "data", "instance-id")), "an explicit data dir persists the id");
+});

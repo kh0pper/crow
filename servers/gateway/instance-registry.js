@@ -13,7 +13,7 @@ import { randomBytes, createHash } from "crypto";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "fs";
 import { resolve, dirname } from "path";
 import { hostname as osHostname, tmpdir } from "os";
-import { resolveCrowHome, resolveInstanceDataDir, readLocalInstanceIdOrNull } from "../shared/crow-home.js";
+import { resolveCrowHome, resolveInstanceDataDir, readLocalInstanceIdOrNull, isDefaultCrowHome } from "../shared/crow-home.js";
 import bus from "../shared/event-bus.js";
 import { livenessStatusSql } from "../shared/instance-status.js";
 import { createDbClient } from "../db.js";
@@ -436,8 +436,10 @@ export async function discoverLocalInstances(db) {
   return discovered;
 }
 
+let _unpinnedId = null;
+
 /**
- * Get the current instance's ID. Reads from ~/.crow/data/instance-id or generates one.
+ * Get the current instance's ID. Reads from <data dir>/instance-id or generates one.
  */
 export function getOrCreateLocalInstanceId() {
   const dataDir = resolveInstanceDataDir();
@@ -448,6 +450,21 @@ export function getOrCreateLocalInstanceId() {
       return readFileSync(idPath, "utf-8").trim();
     }
   } catch {}
+
+  // An instance-id is the boot gate's evidence that <CROW_HOME>/data is an
+  // instance (crow-home.js instancePathsVerdict rule 3). Only a gateway that
+  // passed the gate may mint it there: the gate pins CROW_DATA_DIR for itself
+  // and every child it spawns. A process with a non-default CROW_HOME and
+  // neither CROW_DATA_DIR nor CROW_DB_PATH (a stdio server or bot on a legacy
+  // host whose data really is in ~/.crow/data) gets a per-process id instead,
+  // so it cannot unlock the gate and fork that instance onto an empty DB.
+  if (!isDefaultCrowHome() && !process.env.CROW_DATA_DIR && !process.env.CROW_DB_PATH) {
+    if (!_unpinnedId) {
+      _unpinnedId = generateInstanceId();
+      console.warn(`[instance-registry] ${dataDir} is derived from CROW_HOME and not pinned yet; not persisting an instance-id there`);
+    }
+    return _unpinnedId;
+  }
 
   const id = generateInstanceId();
   try {
