@@ -8,7 +8,7 @@ function mkRes() {
     json(o) { this._json = o; this.headersSent = true; return this; } };
 }
 const fakeDb = {}; // not read when exposedSetOverride is supplied
-const connected = new Map([["funkwhale", { tools: [{ name: "fw_play" }] }]]);
+const connected = new Map([["funkwhale", { status: "connected", tools: [{ name: "fw_play" }] }]]);
 
 test("a not_exposed deny emits peer-exposure:denied once with the canonical capability", async () => {
   const emits = [];

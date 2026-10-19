@@ -57,7 +57,7 @@ import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 import { buildBotWorld, prepareSpawn } from "./bot-world.mjs";
 import { runSkillReview } from "./skill_review.mjs";
 import { botsDbPath, tasksDbPath as resolveTasksDbPath, resolveSqlitePath } from "./instance-paths.mjs";
-import { remoteServersForBot, parseRemoteInvocationFlag } from "./remote-blocks.mjs";
+import { remoteServersForBot, parseRemoteInvocationFlag, remoteBlockName } from "./remote-blocks.mjs";
 import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
 import { getOrCreateLocalInstanceId } from "../../servers/gateway/instance-registry.js";
@@ -89,10 +89,10 @@ export function toolAllowlist(def, { remoteEnabled = false } = {}) {
   const out = [...builtin, ...mcp];
   if (remoteEnabled) {
     // Server-level allow per remote capability (= all that capability's tools;
-    // the peer's L2a gate is the per-call enforcement). Block names mirror
-    // mintRemoteBlocks: crow-remote-<instanceId8>-<canonicalId>.
+    // the peer's L2a gate is the per-call enforcement). The block is
+    // router-mode, so pi-lab registers exactly mcp__<block name> (item 38a).
     for (const { instanceId, canonicalId } of remoteServersForBot(def)) {
-      out.push(`mcp__crow-remote-${instanceId.slice(0, 8)}-${canonicalId}`);
+      out.push(`mcp__${remoteBlockName(instanceId, canonicalId)}`);
     }
   }
   return out.join(",");

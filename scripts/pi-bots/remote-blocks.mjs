@@ -18,6 +18,15 @@ export const REMOTE_CANON_MOUNT = {
   "crow-blog": "/blog-mcp",
 };
 
+/**
+ * The .mcp.json server name for one (peer, capability) forward proxy. The
+ * bridge's --tools csv names `mcp__` + this (the router-mode gateway tool), so
+ * both sides MUST build it here.
+ */
+export function remoteBlockName(instanceId, canonicalId) {
+  return `crow-remote-${instanceId.slice(0, 8)}-${canonicalId}`;
+}
+
 /** Parse a raw `feature_flags` setting value → is remote_invocation enabled? */
 export function parseRemoteInvocationFlag(raw) {
   if (raw == null) return false;
@@ -69,7 +78,7 @@ export function mintRemoteBlocks(def, { peerGatewayUrls = {}, proxyPath, node, p
       warnings.push(`remote '${instanceId}::${canonicalId}' skipped — unknown/revoked peer or no gateway_url for instance '${instanceId}'`);
       continue;
     }
-    const name = `crow-remote-${instanceId.slice(0, 8)}-${canonicalId}`;
+    const name = remoteBlockName(instanceId, canonicalId);
     if (blocks[name]) {
       warnings.push(`remote '${instanceId}::${canonicalId}' skipped — block name '${name}' collides with another selected peer (8-char instanceId prefix clash); keeping the first`);
       continue;
@@ -77,6 +86,14 @@ export function mintRemoteBlocks(def, { peerGatewayUrls = {}, proxyPath, node, p
     blocks[name] = {
       command: node,
       args: [proxyPath],
+      // Router mode: pi-lab's mcp-client registers ONE gateway tool,
+      // mcp__<name> (action list|describe|call), which is exactly the
+      // server-level entry bridge.mjs toolAllowlist puts in --tools. Without
+      // it pi-lab registers mcp__<name>__<tool> per tool, pi's exact-match
+      // --tools filter drops every one, and the bot silently has no remote
+      // tool (queue item 38a). One tool per capability also keeps the
+      // tool-budget count (one per csv entry) honest.
+      router: true,
       env: {
         CROW_REMOTE_INSTANCE_ID: instanceId,
         CROW_REMOTE_GATEWAY_URL: gatewayUrl,

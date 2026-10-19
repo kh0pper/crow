@@ -9,6 +9,9 @@ import { writeSetting } from "../../dashboard/settings/registry.js";
 export default async function exposeCapability(args, ctx) {
   const capability = args && typeof args.capability === "string" ? args.capability.trim() : "";
   if (!capability) return { resolved: false, message: "No capability specified." };
+  // A federation peer's proxy entry (instance-<id>) is never a capability of
+  // this instance: exposing it would let one peer reach another through us.
+  if (capability.startsWith("instance-")) return { resolved: false, message: "That is another instance, not a capability of this one." };
   const db = ctx.db;
   const exposed = await getExposedCapabilities(db); // Set<string>, deny-all on error
   exposed.add(capability);

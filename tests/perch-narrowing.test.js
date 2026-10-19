@@ -373,6 +373,24 @@ test("strand 2: the pinned --tools csv, literally, for channel / interactive / n
   }
 });
 
+// Queue item 38a: the remote literal above was right as a STRING and still
+// delivered nothing — pi-lab registered per-tool names for the non-router
+// remote block, so pi's exact --tools match dropped them. Pin what the model
+// is offered: the csv against the names pi-lab registers for the blocks the
+// writer mints (tests/helpers/pi-tool-names.mjs mirrors both upstream rules;
+// tests/remote-tools-reach-pi.test.js runs the real pi where it exists).
+test("strand 2: the remote csv entry is a tool pi actually offers for the minted remote block", async () => {
+  const { buildToolsCsv } = await import("../scripts/pi-bots/bridge.mjs");
+  const { mintRemoteBlocks } = await import("../scripts/pi-bots/remote-blocks.mjs");
+  const { piLabRegisteredNames, piOfferedTools } = await import("./helpers/pi-tool-names.mjs");
+  const remote = { tools: { pi_builtin: ["read"], remote_mcp: ["abcdef0123456789::crow-memory", "bad-entry"] } };
+  const { csv } = buildToolsCsv(remote, { resolved: { provider: "stub", model: "m1", key: "stub/m1" }, remoteEnabled: true });
+  const { blocks } = mintRemoteBlocks(remote, { peerGatewayUrls: { abcdef0123456789: "http://127.0.0.1:9" }, proxyPath: "/p.mjs", node: "/n" });
+  const registered = ["read", ...piLabRegisteredNames(blocks, { "crow-remote-abcdef01-crow-memory": ["crow_store_memory", "crow_search_memories"] })];
+  assert.deepEqual(piOfferedTools(csv, registered), ["read", "mcp__crow-remote-abcdef01-crow-memory"]);
+  assert.equal(piOfferedTools(csv, registered).length, csv.split(",").length, "budget count == tools offered");
+});
+
 test("strand 2: a channel turn on a model whose maxTools the bot exceeds is refused BEFORE pi spawns — reply names no provider, row is error, the result carries the sentence", async () => {
   const c = raw();
   c.prepare("INSERT OR REPLACE INTO providers (id, base_url, models, disabled) VALUES (?,?,?,0)")

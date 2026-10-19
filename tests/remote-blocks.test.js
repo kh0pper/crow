@@ -49,6 +49,9 @@ test("mintRemoteBlocks mints one stdio block per (instance,capability); token NO
   assert.equal(b.env.CROW_REMOTE_MOUNT, "/memory");
   assert.ok(!JSON.stringify(b).includes("auth_token"));
   assert.equal(warnings.length, 0);
+  // 38a: router mode, so pi-lab registers the ONE gateway tool
+  // mcp__crow-remote-<id8>-<canonical> that the bridge's --tools csv names.
+  assert.equal(b.router, true);
 });
 
 test("mintRemoteBlocks warns + skips addon caps and unknown peers", () => {
