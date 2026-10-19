@@ -7,7 +7,10 @@
  *   - `mutexGroup: "<name>"` providers — only one member of the group can
  *     be resident at a time. Acquiring one stops the others.
  *
- * Control plane: `docker compose -f bundles/<bundleId>/docker-compose.yml`.
+ * Control plane: `docker compose -f bundles/<bundleId>/docker-compose.yml`, for model
+ * bundles only (repo manifest `inference: true`), with the gateway's allowlisted compose
+ * env, and every `up` checked first by the install security check (compose-guard.js)
+ * on the model that exact invocation applies — before any mutex sibling is evicted.
  * Data plane: readiness probe against `{baseUrl}/models`.
  *
  * Single-flight: only one swap can run at a time (`_swapInFlight` promise).
@@ -98,12 +101,16 @@ import { servingClassRefusal, ServingClassError } from "./models/serving-class.j
 import { isExternalEngine, externalEngineInfo, ExternalEngineError } from "../shared/provider-engine.js";
 import { startExternalEngineMonitor } from "./external-engine-poll.js";
 import { isModelOrchestrationDisabled, OrchestrationDisabledError } from "../shared/model-orchestration.js";
+import { checkComposeModel, loadComposeModel, composeEnv, hostGrants, parseDotEnv } from "./compose-guard.js";
+import { resolveCrowHome } from "../shared/crow-home.js";
+import { homedir } from "node:os";
 export { ServingClassError } from "./models/serving-class.js";
 export { ExternalEngineError } from "../shared/provider-engine.js";
 export { OrchestrationDisabledError } from "../shared/model-orchestration.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const BUNDLES_DIR = resolve(dirname(__filename), "..", "..", "bundles");
+const APP_ROOT = resolve(dirname(__filename), "..", "..");
 const MODEL_CATALOG_PATH = resolve(dirname(__filename), "..", "..", "registry", "model-catalog.json");
 
 // mtime-checked cache — `defaultLoadCatalog` runs on every native acquire
@@ -297,11 +304,13 @@ export function composeFile(bundleId) {
   return join(BUNDLES_DIR, bundleId, "docker-compose.yml");
 }
 
-function runDockerCompose(args, { timeoutMs = 60_000 } = {}) {
+function runDockerCompose(args, { timeoutMs = 60_000, cwd = BUNDLES_DIR, env } = {}) {
+  if (_composeRunnerForTest) return _composeRunnerForTest(args, { timeoutMs, cwd, env });
   return new Promise((resolveP, reject) => {
     const child = spawn("docker", ["compose", ...args], {
       stdio: ["ignore", "pipe", "pipe"],
-      cwd: BUNDLES_DIR,
+      cwd,
+      ...(env ? { env } : {}),
     });
     let stdout = "", stderr = "";
     child.stdout.on("data", (b) => { stdout += b.toString(); });
@@ -313,7 +322,7 @@ function runDockerCompose(args, { timeoutMs = 60_000 } = {}) {
     child.on("exit", (code) => {
       clearTimeout(timer);
       if (code === 0) resolveP({ stdout, stderr });
-      else reject(new Error(`docker compose ${args.join(" ")} exit ${code}: ${stderr || stdout}`));
+      else reject(Object.assign(new Error(`docker compose ${args.join(" ")} exit ${code}: ${stderr || stdout}`), { stderr }));
     });
     child.on("error", (err) => {
       clearTimeout(timer);
@@ -322,15 +331,77 @@ function runDockerCompose(args, { timeoutMs = 60_000 } = {}) {
   });
 }
 
-async function bundleUp(bundleId) {
+// Test-only: replace every `docker compose` spawn (config/up/stop) with a stub.
+let _composeRunnerForTest = null;
+export function _setOrchestratorComposeRunnerForTest(fn) { _composeRunnerForTest = fn || null; }
+
+/** A model bundle start or stop the install security check refused (nothing ran). */
+export class ComposeGuardError extends Error {
+  constructor(bundleId, reason) {
+    super(`orchestrator: refused to start ${bundleId}: ${reason}`);
+    this.name = "ComposeGuardError";
+    this.code = "COMPOSE_GUARD_REFUSED";
+    this.bundleId = bundleId;
+    this.reason = reason;
+  }
+}
+
+/**
+ * The ONE invocation both the check and `up`/`stop` use for a model bundle: the repo
+ * compose file by `-f`, from the repo bundles folder, with the gateway's allowlisted
+ * compose env (never its secrets). Only a bundle whose REPO manifest says
+ * `inference: true` (and names this id) — a fleet-synced provider row can name any id.
+ */
+export function modelBundleInvocation(bundleId) {
+  const file = composeFile(bundleId);
+  let manifest = null;
+  try { manifest = JSON.parse(readFileSync(join(BUNDLES_DIR, bundleId, "manifest.json"), "utf8")); } catch { /* none */ }
+  if (!manifest || manifest.id !== bundleId || manifest.inference !== true) {
+    throw new ComposeGuardError(bundleId, "not a model bundle (its repo manifest must declare inference: true)");
+  }
+  if (!existsSync(file)) throw new ComposeGuardError(bundleId, "the bundle has no docker-compose.yml");
+  return { bundleId, manifest, file, cwd: BUNDLES_DIR, env: composeEnv(process.env, resolveCrowHome()) };
+}
+
+/**
+ * Check a model bundle before anything is stopped or started: the model Compose applies
+ * for exactly `modelBundleInvocation`'s `up`, through the shared install security check.
+ * Host folders the operator wrote into the bundle's .env (host_grants.path_env, e.g.
+ * LLM_CACHE) are passed as operator roots. Throws ComposeGuardError; returns the invocation.
+ */
+export async function preflightBundleUp(bundleId) {
   if (isModelOrchestrationDisabled()) throw new OrchestrationDisabledError(bundleId);
-  await runDockerCompose(["-f", composeFile(bundleId), "up", "-d"], { timeoutMs: 30_000 });
+  const inv = modelBundleInvocation(bundleId);
+  const bundleDir = join(BUNDLES_DIR, bundleId);
+  const loaded = await loadComposeModel(bundleDir, {
+    env: inv.env, composeFile: inv.file, cwd: inv.cwd,
+    runConfig: (args, { cwd, env }) => runDockerCompose(args, { cwd, env, timeoutMs: 60_000 }),
+  });
+  if (loaded.error) throw new ComposeGuardError(bundleId, loaded.error);
+  const dot = parseDotEnv(join(bundleDir, ".env"));
+  const home = process.env.HOME || homedir();
+  const operatorRoots = hostGrants(inv.manifest).pathEnv.map((k) => dot[k]).filter((v) => typeof v === "string" && v.startsWith("/"));
+  const verdict = checkComposeModel(loaded.model, {
+    bundleDir, manifest: inv.manifest, consentVerified: false,
+    ctx: { crowHome: resolveCrowHome(), dataDir: resolveDataDir(), appRoot: APP_ROOT, home, operatorRoots },
+  });
+  if (!verdict.valid) throw new ComposeGuardError(bundleId, verdict.reason);
+  return inv;
+}
+
+async function bundleUp(bundleId, inv = null) {
+  if (isModelOrchestrationDisabled()) throw new OrchestrationDisabledError(bundleId);
+  const use = inv && inv.bundleId === bundleId ? inv : await preflightBundleUp(bundleId);
+  await runDockerCompose(["-f", use.file, "up", "-d"], { timeoutMs: 30_000, cwd: use.cwd, env: use.env });
 }
 
 async function bundleStop(bundleId) {
   if (isModelOrchestrationDisabled()) throw new OrchestrationDisabledError(bundleId);
-  await runDockerCompose(["-f", composeFile(bundleId), "stop"], { timeoutMs: 30_000 });
+  const inv = modelBundleInvocation(bundleId);
+  await runDockerCompose(["-f", inv.file, "stop"], { timeoutMs: 30_000, cwd: inv.cwd, env: inv.env });
 }
+
+export { bundleUp as _bundleUpForTest, bundleStop as _bundleStopForTest };
 
 // -----------------------------------------------------------------------
 // Readiness probe
@@ -1357,6 +1428,10 @@ export async function acquireProvider(providerName, opts = {}) {
       stopModelFn = stopModel,
       waitForReadyFn = waitForReady,
     } = opts;
+    // The security check runs BEFORE any sibling is evicted: a refused target must not
+    // cost the box its resident model. (A test that injects its own bundleUpFn gets no
+    // default preflight unless it injects one.)
+    const preflightFn = opts.preflightFn ?? (bundleUpFn === bundleUp ? preflightBundleUp : async () => null);
 
     // Fast path: already resident.
     if (await probeReadyFn(p.baseUrl)) {
@@ -1369,6 +1444,8 @@ export async function acquireProvider(providerName, opts = {}) {
     // any sibling is stopped.
     const blocked = startBlockedBy(providerName);
     if (blocked) throw refuseStart(blocked, providerName, opts);
+
+    const invocation = await preflightFn(p.bundleId);
 
     // Stop mutex siblings first. A sibling can be native (Task 9 review
     // round 1, finding 3: same-PROCESS symmetric eviction — a native
@@ -1409,7 +1486,7 @@ export async function acquireProvider(providerName, opts = {}) {
 
     // Start target.
     console.log(`[gpu-orchestrator] starting ${providerName} (bundleId=${p.bundleId}) requested-by=${opts.requester || "-"}`);
-    await bundleUpFn(p.bundleId);
+    await bundleUpFn(p.bundleId, invocation);
     const ready = await waitForReadyFn(p.baseUrl);
     if (ready) {
       console.log(`[gpu-orchestrator] ${providerName} ready`);
