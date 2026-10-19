@@ -90,3 +90,34 @@ export function createToolFamilies({ manifests = {}, listExtensions = () => [], 
     },
   };
 }
+
+const NO_FAMILIES = new Set();
+/**
+ * The voice turn's family classification (runVoiceTurn calls it once per turn; the Bot Builder's
+ * "By voice on displays" line calls it with a fixed request, so both read one decision). Pure.
+ * baseTools: the turn's tools after its own gates. fam: createToolFamilies() or null (families off:
+ * every tool goes to the quick model). prevFam: the families the previous turn used.
+ * isExtraTool / isMemoryTool: those tools keep their own gates and are never a family tool.
+ * → { famOf, famWanted, quickTools, famIds, unlisted, wrapperWithheld, actionWithheld(actionAsked, displayBacks) }
+ */
+export function classifyTools({ baseTools, fam, transcript, prevFam = NO_FAMILIES, isExtraTool = () => false, isMemoryTool = () => false }) {
+  const famWanted = (id) => prevFam.has(id) || fam.wants(id, transcript);
+  // undefined = not a family tool (display tools and memory keep their own gates); "other" = a tool no family claims.
+  const famOf = (t) => (fam && !isExtraTool(t.name) && !isMemoryTool(t.name) ? (fam.familyOf(t.name) || "other") : undefined);
+  const quickTools = !fam ? baseTools : baseTools.filter((t) => {
+    const id = famOf(t);
+    if (id === undefined) return true;
+    if (id === "addons") return baseTools.some((x) => { const f = famOf(x); return typeof f === "string" && f.startsWith("addon:") && famWanted(f); });
+    return id !== "other" && famWanted(id);
+  });
+  // Families with no intent list never reach the quick model; they keep the router's view of
+  // "this assistant has tools", so a turn the router escalates can still use them.
+  const famIds = !fam ? [] : [...new Set(baseTools.map(famOf).filter((id) => typeof id === "string" && id !== "addons"))];
+  const unlisted = famIds.filter((id) => !fam.hasList(id));
+  const wrapperWithheld = !!fam && baseTools.some((t) => famOf(t) === "addons") && !quickTools.some((t) => famOf(t) === "addons");
+  const isFamTool = (t) => famOf(t) !== undefined;
+  // Escalate an action request when the quick model got no family tool but the assistant has some — and no
+  // display tool is on offer (a display command such as "add two minutes" stays on the quick model).
+  const actionWithheld = (actionAsked, displayBacks) => !!fam && actionAsked && !displayBacks && !quickTools.some(isFamTool) && baseTools.some(isFamTool);
+  return { famOf, famWanted, quickTools, famIds, unlisted, wrapperWithheld, isFamTool, actionWithheld };
+}

@@ -15,6 +15,7 @@ import {
 import { withTurnContext, createContextEchoGate, stripContextEcho, stripContextEchoDeep, TURN_CONTEXT_NOTE } from "./context-echo.js";
 import { estimatePromptTokens, requestFits, choosePromptFit, dropOldestExchange } from "./prompt-fit.js";
 import { claimsAction, claimsReminder, claimsBeyondMemory, toolEffect } from "./action-claims.js";
+import { classifyTools } from "./tool-families.js";
 
 export const ESCALATION_READY_TIMEOUT_MS = 8000;
 export const ESCALATION_PROBE_EVERY_MS = 500;
@@ -483,19 +484,9 @@ export function createVoiceTurnRunner(deps) {
       // keep their own gates above. A plain question therefore goes out with no tools at all.
       const fam = opts.familiesOnIntent === true && deps.toolFamilies ? deps.toolFamilies : null;
       const prevFam = lastFamilies.get(device.id) || NO_FAMILIES;
-      const famWanted = (id) => prevFam.has(id) || fam.wants(id, transcript);
-      // undefined = not a family tool (display tools and memory keep their own gates); "other" = a tool no family claims.
-      const famOf = (t) => (fam && !extraByName.has(t.name) && !deps.isMemoryTool(t.name) ? (fam.familyOf(t.name) || "other") : undefined);
-      const quickTools = !fam ? baseTools : baseTools.filter((t) => {
-        const id = famOf(t);
-        if (id === undefined) return true;
-        if (id === "addons") return baseTools.some((x) => { const f = famOf(x); return typeof f === "string" && f.startsWith("addon:") && famWanted(f); });
-        return id !== "other" && famWanted(id);
-      });
-      // Families with no intent list never reach the quick model; they keep the router's view of
-      // "this assistant has tools", so a turn the router escalates can still use them.
-      const famIds = !fam ? [] : [...new Set(baseTools.map(famOf).filter((id) => typeof id === "string" && id !== "addons"))];
-      const unlisted = famIds.filter((id) => !fam.hasList(id));
+      // The classification is shared with the Bot Builder's "By voice on displays" line (tool-families.js classifyTools).
+      const cls = classifyTools({ baseTools, fam, transcript, prevFam, isExtraTool: (n) => extraByName.has(n), isMemoryTool: (n) => deps.isMemoryTool(n) });
+      const { famWanted, famOf, quickTools, famIds, unlisted } = cls;
       let tools = quickTools;
       let famAll = false;   // an escalated turn is offered every family
       if (fam) usedFamilies = new Set();
@@ -548,7 +539,6 @@ export function createVoiceTurnRunner(deps) {
       actionAsked = typeof opts.actionWhen === "function" && opts.actionWhen(transcript) === true;
       const actionTurn = actionAsked || (typeof opts.actionWhen === "function" && lastAction.has(device.id)
         && typeof opts.actionFollowWhen === "function" && opts.actionFollowWhen(transcript) === true);
-      const isFamTool = (t) => famOf(t) !== undefined;
       // A display tool offered because a window is open (or music plays) is not what this request asks for:
       // only one whose holdText/must reads the transcript as a display request is.
       const displayAsked = extra.some((x) => offered.has(x.definition.name)
@@ -556,10 +546,10 @@ export function createVoiceTurnRunner(deps) {
       // …or, with a display tool on offer (a card or a timer is up), the request names a thing the display holds
       // ("put eggs on the list", "add two minutes"): opts.displayObjectWhen (kiosk: list, timer, card, minutes).
       const displayBacks = displayAsked || (offered.size > 0 && typeof opts.displayObjectWhen === "function" && opts.displayObjectWhen(transcript) === true);
-      const wrapperWithheld = !!fam && baseTools.some((t) => famOf(t) === "addons") && !quickTools.some((t) => famOf(t) === "addons");
+      const wrapperWithheld = cls.wrapperWithheld;
       // Escalate an action request when the quick model got no family tool but the assistant has some — and no
       // display tool is on offer (a display command such as "add two minutes" stays on the quick model).
-      const actionWithheld = !!fam && actionAsked && !displayBacks && !quickTools.some(isFamTool) && baseTools.some(isFamTool);
+      const actionWithheld = cls.actionWithheld(actionAsked, displayBacks);
       if (actionAsked) timings.action_intent = true;
       const decision = mustX?.mustRoute === "fast" || opts.noEscalate === true
         ? { route: "fast", reason: opts.noEscalate === true ? "no-escalate" : "must-fast", key: bot.fast_voice_model || deps.fastKey }
