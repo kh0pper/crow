@@ -131,12 +131,15 @@ async function pinnedTools(def) {
     def, sessionDir: scratch, resolved: RESOLVED, nodeBin: process.execPath, cliPath: stub,
     extraEnv: { CROW_TEST_ARGV_OUT: out },
   });
-  for (let i = 0; i < 100 && !existsSync(out); i++) await new Promise((r) => setTimeout(r, 50));
-  try { pi.close(); } catch { /* already exited */ }
-  assert.ok(existsSync(out), "stub pi never recorded its argv");
-  const argv = JSON.parse(readFileSync(out, "utf8"));
-  rmSync(scratch, { recursive: true, force: true });
-  return argv[argv.indexOf("--tools") + 1];
+  try {
+    for (let i = 0; i < 100 && !existsSync(out); i++) await new Promise((r) => setTimeout(r, 50));
+    try { pi.close(); } catch { /* already exited */ }
+    assert.ok(existsSync(out), "stub pi never recorded its argv");
+    const argv = JSON.parse(readFileSync(out, "utf8"));
+    return argv[argv.indexOf("--tools") + 1];
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }
 
 test("two real PiRpc spawns of permuted defs pin byte-identical --tools", async () => {
