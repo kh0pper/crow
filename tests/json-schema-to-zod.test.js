@@ -10,7 +10,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { z } from "zod";
 import { toJsonSchemaCompat } from "@modelcontextprotocol/sdk/server/zod-json-schema-compat.js";
-import { jsonSchemaToZod, jsonSchemaPropertiesToZod } from "../servers/shared/json-schema-to-zod.js";
+import { jsonSchemaToZod, jsonSchemaPropertiesToZod, jsonSchemaToZodObject } from "../servers/shared/json-schema-to-zod.js";
 import { grammarHazards } from "./helpers/published-tool-schemas.js";
 
 // Exactly how the MCP SDK (1.27, zod 3) publishes a tool's input schema.
@@ -246,11 +246,12 @@ test("hostile upstream schemas are bounded: a $defs DAG and alias spellings of a
   for (let i = 0; i < 40; i++) deep = { type: "object", properties: Object.fromEntries(Array.from({ length: 6 }, (_, j) => [`k${j}`, deep])) };
   const longEnum = { type: "object", $defs: { E: { type: "string", enum: Array.from({ length: 20000 }, (_, i) => `value-${i}-${"x".repeat(50)}`), description: "d".repeat(20000) } },
     properties: Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`f${i}`, { $ref: "#/$defs/E" }])) };
+  const untypedAlts = { type: "object", $defs: { U: { anyOf: Array.from({ length: 30000 }, () => ({})) } }, properties: Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`u${i}`, { $ref: "#/$defs/U" }])) };
   const alias = { type: "object", properties: { a: { type: "object", properties: {
     x: { $ref: "#/properties/a" }, y: { $ref: "#//properties/a" }, z: { $ref: "#/%70roperties/a" }, w: { $ref: "#/properties//a" } } } } };
-  for (const [name, schema] of [["dag", dag], ["alias", alias], ["wide", wide], ["deep", deep], ["longEnum", longEnum]]) {
+  for (const [name, schema] of [["dag", dag], ["alias", alias], ["wide", wide], ["deep", deep], ["longEnum", longEnum], ["untypedAlts", untypedAlts]]) {
     const t0 = Date.now();
-    const out = roundTrip(schema);
+    const out = publish({ x: jsonSchemaToZodObject(schema) }).properties.x; // the re-publishers' path
     const ms = Date.now() - t0;
     assert.ok(ms < 3000, `${name}: ${ms} ms`);
     assert.ok(JSON.stringify(out).length < 512 * 1024, `${name}: ${JSON.stringify(out).length} bytes`);
@@ -276,11 +277,28 @@ test("a union of closed objects never silently drops keys (zod takes the first b
   assert.equal(parse(s, { target: { id: "x", junk: 1 } }).success, false, "no branch admits an unknown key");
 });
 
-test("over budget, a tool goes out untyped and open, never as a partial closed shape that strips arguments", async () => {
-  const { jsonSchemaToZodObject } = await import("../servers/shared/json-schema-to-zod.js");
-  const props = Object.fromEntries(Array.from({ length: 3000 }, (_, i) => [`p${i}`, { type: "string" }]));
-  const zs = jsonSchemaToZodObject({ type: "object", properties: props, additionalProperties: false });
-  assert.deepEqual(zs.parse({ p2999: "kept", other: 1 }), { p2999: "kept", other: 1 });
+test("over budget, a tool keeps its typed top-level arguments and stays open; never a partial closed shape", async () => {
+  const { jsonSchemaToZodObject, SOURCE_BUDGET } = await import("../servers/shared/json-schema-to-zod.js");
+  const big = { type: "object", additionalProperties: false, required: ["notebookId", "body"], properties: {
+    notebookId: { type: "string", description: "the notebook" },
+    body: { type: "object", properties: Object.fromEntries(Array.from({ length: 6000 }, (_, i) => [`k${i}`, { type: "string" }])) },
+    extra: { type: "integer" },
+  } };
+  const zs = jsonSchemaToZodObject(big);
+  const pub = publish({ x: zs }).properties.x;
+  assert.deepEqual(Object.keys(pub.properties), ["notebookId", "body", "extra"]);
+  assert.deepEqual(pub.required, ["notebookId", "body"]);
+  assert.equal(pub.properties.notebookId.type, "string");
+  assert.equal(pub.additionalProperties, true);
+  assert.deepEqual(grammarHazards(pub), []);
+  assert.deepEqual(zs.parse({ notebookId: "n", body: { k5999: "kept" }, other: 1 }), { notebookId: "n", body: { k5999: "kept" }, other: 1 });
+  assert.equal(zs.safeParse({ body: {} }).success, false, "a required argument is still required");
+  // A source whose tools together exceed the pool: later tools go out shallow, still typed at the top.
+  const pool = { units: 0 };
+  const late = publish({ x: jsonSchemaToZodObject({ type: "object", properties: { q: { type: "string" }, o: { type: "object", properties: { a: { type: "string" } } } }, required: ["q"] }, pool) }).properties.x;
+  assert.equal(late.properties.q.type, "string");
+  assert.deepEqual(late.properties.o, { type: "object", properties: {}, additionalProperties: true });
+  assert.ok(SOURCE_BUDGET > 0);
   const small = { type: "object", properties: { a: { type: "string" } }, additionalProperties: false };
   assert.equal(jsonSchemaToZodObject(small), jsonSchemaToZodObject(small), "converted once per upstream schema object");
 });
@@ -295,6 +313,8 @@ test("strictness reaches every closed object inside a multi-branch union, and on
   } };
   assert.deepEqual(parse(s, { nested: { kind: "a", opt: { x: "1", y: "2" } } }).data.nested, { kind: "a", opt: { x: "1", y: "2" } });
   assert.deepEqual(parse(s, { single: { id: "x", deep: true } }).data.single, { id: "x", deep: true });
-  assert.equal(parse(s, { typeArr: { id: "x", junk: 1 } }).success, false, "object|string: the object branch is strict");
+  assert.deepEqual(parse(s, { typeArr: { id: "x", junk: 1 } }).data.typeArr, { id: "x" }, "object|string: one object branch, so it strips as before");
   assert.deepEqual(parse(s, { maybe: { id: "x", junk: 1 } }).data.maybe, { id: "x" }, "object|null is not a real union: it strips as before");
+  const strOrObj = { type: "object", properties: { v: { anyOf: [{ type: "string" }, closed({ id: { type: "string" } })] } } };
+  assert.deepEqual(parse(strOrObj, { v: { id: "x", junk: 1 } }).data.v, { id: "x" }, "only one branch can take an object: it strips as the upstream would");
 });

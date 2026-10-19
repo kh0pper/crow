@@ -34,7 +34,11 @@ const MAX_DEPTH = 12;
 // every loop stops once it is spent, so a hostile upstream schema (a $defs DAG
 // grows as fanout^depth; long enums or descriptions repeated at every $ref)
 // cannot blow up memory or the published size. Crow's largest tool uses ~60.
-const BUDGET = 1000;
+const BUDGET = 4000;
+// Per upstream source (a third-party server or a peer): the units all its tools may spend
+// together. Past it, a tool is still published, with only its top-level arguments typed.
+export const SOURCE_BUDGET = 100_000;
+const SHALLOW_MAX_PROPS = 100;
 const TYPE_KEYS = ["type", "properties", "items", "enum", "const", "$ref", "anyOf", "oneOf", "allOf"];
 
 /** Any JSON value, spelled so it publishes without an empty {} anywhere. */
@@ -50,7 +54,7 @@ const spent = (ctx) => ctx.budget < 0;
 function withMeta(zs, prop, ctx) {
   let out = prop.nullable === true ? zs.nullable() : zs; // OpenAPI-style nullable
   const d = prop.description;
-  if (typeof d === "string" && d && spend(ctx, Math.ceil(d.length / 256))) out = out.describe(d);
+  if (typeof d === "string" && d && spend(ctx, Math.ceil(d.length / 1024))) out = out.describe(d);
   return out;
 }
 
@@ -61,8 +65,9 @@ function unionOf(list) {
 }
 
 function literalUnion(values, ctx) {
+  if (!spend(ctx, values.length)) return anyJson(); // charged before the scan
   const ok = values.filter((v) => v === null || ["string", "number", "boolean"].includes(typeof v));
-  if (ok.length === 0 || !spend(ctx, ok.reduce((n, v) => n + 1 + Math.floor(String(v).length / 64), 0))) return anyJson();
+  if (ok.length === 0 || !spend(ctx, ok.reduce((n, v) => n + Math.floor(String(v).length / 64), 0))) return anyJson();
   if (ok.every((v) => typeof v === "string")) return z.enum(ok);
   return unionOf(ok.map((v) => z.literal(v)));
 }
@@ -82,7 +87,9 @@ function resolveRef(ref, ctx) {
 
 function propertiesShape(schema, ctx, depth, strict) {
   const shape = {};
-  const required = new Set(Array.isArray(schema.required) ? schema.required : []);
+  const req = Array.isArray(schema.required) ? schema.required : [];
+  if (!spend(ctx, req.length)) return shape;
+  const required = new Set(req);
   for (const [key, prop] of Object.entries(schema.properties)) {
     if (spent(ctx)) break;
     if (key === "__proto__") continue; // would set the shape's prototype instead of a property
@@ -125,7 +132,9 @@ function typed(type, prop, ctx, depth, strict) {
   }
 }
 
-const branches = (list, isNull) => list.filter((x) => !isNull(x)).length > 1;
+// A union needs strict objects only when more than one branch could take an object.
+const PRIMITIVE = new Set(["string", "number", "integer", "boolean", "null"]);
+const objectBranches = (list) => list.filter((x) => !(typeof x === "string" ? PRIMITIVE.has(x) : isObj(x) && typeof x.type === "string" && PRIMITIVE.has(x.type))).length > 1;
 
 function convert(prop, ctx, depth, strict = false) {
   if (!spend(ctx, 1) || !isObj(prop) || depth > MAX_DEPTH) return anyJson();
@@ -145,16 +154,17 @@ function convert(prop, ctx, depth, strict = false) {
   const alts = Array.isArray(prop.anyOf) ? prop.anyOf : Array.isArray(prop.oneOf) ? prop.oneOf : null;
   // {type:"object", properties, anyOf:[{required:[a]},{required:[b]}]} — branches that only add
   // requirements are not types; keep the parent's type then (the upstream enforces the rest).
+  if (alts && !spend(ctx, alts.length)) return anyJson(); // charged before the scan
   const typedAlts = alts && alts.some(hasTypeInfo) ? alts : null;
   if (typedAlts) {
-    const inner = strict || branches(typedAlts, (a) => isObj(a) && a.type === "null");
+    const inner = strict || objectBranches(typedAlts);
     const list = [];
     for (const a of typedAlts) { if (spent(ctx)) break; list.push(convert(a, ctx, depth + 1, inner)); }
     zs = spent(ctx) ? anyJson() : unionOf(list);
   } else if ("const" in prop) zs = literalUnion([prop.const], ctx);
   else if (Array.isArray(prop.type)) {
-    const inner = strict || branches(prop.type, (t) => t === "null");
-    zs = unionOf(prop.type.slice(0, 8).map((t) => typed(t, prop, ctx, depth, inner)));
+    const types = prop.type.slice(0, 8);
+    zs = unionOf(types.map((t) => typed(t, prop, ctx, depth, strict || objectBranches(types))));
   } else if (typeof prop.type === "string") zs = typed(prop.type, prop, ctx, depth, strict);
   else if (Array.isArray(prop.enum)) zs = literalUnion(prop.enum, ctx);
   else if (isObj(prop.properties)) zs = objectOf(prop, ctx, depth, strict);
@@ -183,20 +193,54 @@ export function jsonSchemaPropertiesToZod(schema) {
  * arguments reach the upstream, and a root with no listed properties is not
  * re-published as "no arguments at all".
  */
+/**
+ * Fallback for a tool over budget: its top-level arguments with their own
+ * type keyword only (nested types become "any"), required flags and short
+ * descriptions; the root stays open so nothing is stripped.
+ */
+function shallowObject(schema) {
+  const shape = {};
+  const props = isObj(schema) && isObj(schema.properties) ? Object.entries(schema.properties).slice(0, SHALLOW_MAX_PROPS) : [];
+  const required = new Set(isObj(schema) && Array.isArray(schema.required) ? schema.required.slice(0, SHALLOW_MAX_PROPS) : []);
+  for (const [key, prop] of props) {
+    if (key === "__proto__") continue;
+    const t = isObj(prop) ? prop.type : undefined;
+    let zs = t === "string" ? z.string() : t === "integer" ? z.number().int() : t === "number" ? z.number() : t === "boolean" ? z.boolean()
+      : t === "array" ? z.array(z.any()) : t === "object" ? z.object({}).passthrough() : anyJson();
+    if (isObj(prop) && typeof prop.description === "string" && prop.description) zs = zs.describe(prop.description.slice(0, 500));
+    shape[key] = required.has(key) ? zs : zs.optional();
+  }
+  return z.object(shape).passthrough();
+}
+
 const converted = new WeakMap(); // upstream inputSchema object → zod: converted once, not per MCP session
-export function jsonSchemaToZodObject(schema) {
+/**
+ * @param {object} schema the upstream tool's inputSchema
+ * @param {{units:number}} [pool] the upstream source's shared budget (SOURCE_BUDGET); charged on first conversion
+ */
+export function jsonSchemaToZodObject(schema, pool) {
   if (isObj(schema) && converted.has(schema)) return converted.get(schema);
+  let out;
   try {
-    const ctx = newCtx(schema);
-    const shape = isObj(schema) && isObj(schema.properties) ? propertiesShape(schema, ctx, 0, false) : {};
-    const closed = isObj(schema) && schema.additionalProperties === false;
-    // Over budget: a partial closed shape would strip the arguments it never reached.
-    const out = spent(ctx) ? z.object({}).passthrough() : closed ? z.object(shape) : z.object(shape).passthrough();
-    if (isObj(schema)) converted.set(schema, out);
-    return out;
+    // Pool spent: shallow typing, itself charged per argument; spent twice over: untyped and open.
+    if (pool && pool.units <= -SOURCE_BUDGET) out = z.object({}).passthrough();
+    else if (pool && pool.units <= 0) {
+      out = shallowObject(schema);
+      pool.units -= isObj(schema) && isObj(schema.properties) ? Math.min(Object.keys(schema.properties).length, SHALLOW_MAX_PROPS) : 0;
+    }
+    else {
+      const ctx = newCtx(schema);
+      const shape = isObj(schema) && isObj(schema.properties) ? propertiesShape(schema, ctx, 0, false) : {};
+      if (pool) pool.units -= BUDGET - Math.max(ctx.budget, 0);
+      const closed = isObj(schema) && schema.additionalProperties === false;
+      // Over budget: a partial closed shape would strip the arguments it never reached.
+      out = spent(ctx) ? shallowObject(schema) : closed ? z.object(shape) : z.object(shape).passthrough();
+    }
   } catch (err) {
     // One malformed upstream tool never sinks the others: it is forwarded as is.
     console.warn(`[json-schema-to-zod] could not convert a tool schema (${err?.message || err}); forwarding it untyped`);
-    return z.object({}).passthrough();
+    out = z.object({}).passthrough();
   }
+  if (isObj(schema)) converted.set(schema, out);
+  return out;
 }

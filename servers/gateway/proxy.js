@@ -16,7 +16,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { jsonSchemaToZodObject } from "../shared/json-schema-to-zod.js";
+import { jsonSchemaToZodObject, SOURCE_BUDGET } from "../shared/json-schema-to-zod.js";
 import { sortedServers, sortedByName } from "../shared/stable-order.js";
 import { INTEGRATIONS, isIntegrationConfigured, getSpawnEnv } from "./integrations.js";
 import { createDbClient } from "../db.js";
@@ -607,7 +607,7 @@ export function createProxyServer(filter) {
       // Re-publish the upstream's types (servers/shared/json-schema-to-zod.js).
       server.registerTool(
         tool.name,
-        { description: tool.description || `Tool from ${integrationId}`, inputSchema: jsonSchemaToZodObject(tool.inputSchema) },
+        { description: tool.description || `Tool from ${integrationId}`, inputSchema: jsonSchemaToZodObject(tool.inputSchema, (entry.schemaPool ||= { units: SOURCE_BUDGET })) },
         async (args) => {
           try {
             const result = await entry.client.callTool({
