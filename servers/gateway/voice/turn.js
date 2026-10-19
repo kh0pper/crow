@@ -237,7 +237,10 @@ export function createVoiceTurnRunner(deps) {
       } catch { return true; }
     };
     const classify = (transcript) => classifyTools({ baseTools: tools, fam, transcript, isMemoryTool: (n) => deps.isMemoryTool(n) });
-    return voiceAbilities({ tools, hidden, classify, escalates, displayBacks, families: fam, memoryOn: memoryOn === true, allowed });
+    // "Remembers things" only when the turn would really offer crow_memory (the bot has it, the display does
+    // not deny it) and the bot's policy lets it store a memory.
+    const memTool = memoryOn === true && turnTools(bot, { memoryOn: true, extra, deny }).some((t) => t.name === "crow_memory");
+    return voiceAbilities({ tools, hidden, classify, escalates, displayBacks, families: fam, memoryOn: memTool && allowed("crow_store_memory"), allowed });
   }
 
   async function loadBot(db, botId) {

@@ -72,6 +72,21 @@ test("abilitiesOf: memory on adds 'remembers things', off leaves it out", async 
   assert.deepEqual(on.items, [...off.items, { id: "memory", quick: true }]);
 });
 
+test("abilitiesOf: memory on lists 'remembers things' only when the bot itself has crow_memory", async () => {
+  const h = harness({ chatTools: ["crow_delegate", "ws_cal_create_event", "crow_tools"] });
+  const r = await h.runner.abilitiesOf({ db: {}, botId: "kitchen", memoryOn: true });
+  assert.ok(!r.items.some((x) => x.id === "memory"), "no crow_memory on the bot → never 'remembers things'");
+  const denied = harness();
+  const r2 = await denied.runner.abilitiesOf({ db: {}, botId: "kitchen", memoryOn: true, denyTools: ["crow_memory"] });
+  assert.ok(!r2.items.some((x) => x.id === "memory"), "the display denies crow_memory → no memory");
+});
+
+test("abilitiesOf: memory on lists no memory when the bot's policy denies crow_store_memory", async () => {
+  const h = harness({ bot: { permission_policy: { deny: ["crow_store_memory"] } } });
+  const r = await h.runner.abilitiesOf({ db: {}, botId: "kitchen", memoryOn: true });
+  assert.ok(!r.items.some((x) => x.id === "memory"));
+});
+
 test("abilitiesOf: the display's deny list and the bot's own policy are respected; crow_delegate is never an ability", async () => {
   const h = harness({ chatTools: ["crow_delegate", "ws_cal_create_event"] });
   assert.deepEqual(await h.runner.abilitiesOf({ db: {}, botId: "kitchen", denyTools: ["ws_cal_create_event", "crow_delegate"] }), { items: [], none: true });
