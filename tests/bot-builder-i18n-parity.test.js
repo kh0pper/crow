@@ -30,6 +30,7 @@ const SAME_OK = new Set([
   "botbuilder.monThBot",        // "bot" is identical in Spanish
   "botbuilder.monThEsc",        // "esc" — identical abbreviation
   "botbuilder.monThControl",    // "control" is identical in Spanish
+  "botbuilder.abilBlog",        // "blog" is identical in Spanish
 ]);
 
 test("every botbuilder.* key has non-empty en and es", () => {

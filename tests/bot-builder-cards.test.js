@@ -379,3 +379,47 @@ test("CSS: a hidden ⋯ item and a hidden voice line really hide (the menu's dis
   assert.match(css, /\.btb-voice\{[^}]*overflow-wrap:anywhere/);
   assert.match(css, /\.btb-vu-row\{[^}]*min-width:0/);
 });
+
+// ── "By voice on displays: …" (bot voice abilities) ─────────────────────────
+const ABIL_KEYS = ["botbuilder.abilBy", "botbuilder.abilNone", "botbuilder.abilCalendar", "botbuilder.abilReminders", "botbuilder.abilMessages",
+  "botbuilder.abilCrowMessages", "botbuilder.abilLists", "botbuilder.abilMemory", "botbuilder.abilProjects", "botbuilder.abilBlog",
+  "botbuilder.abilNews", "botbuilder.abilFiles", "botbuilder.abilSlower", "botbuilder.abilMore"];
+
+test("ability line (server part): one hidden line under each card's voice line, only with the kiosk available; the client fills it", async () => {
+  const off = await render();
+  assert.ok(!off.includes("btb-abil"), "no kiosk: no line (nothing could fill it)");
+  const on = await render("en", { kioskAvailable: true });
+  for (const [id] of BOTS) {
+    const card = rowOf(on, id);
+    const m = card.match(/<p class="btb-abil"[^>]*><\/p>/);
+    assert.ok(m, `${id}: the line`);
+    assert.match(m[0], new RegExp(`data-abil-bot="${id}"`));
+    assert.match(m[0], /\shidden/, `${id}: hidden until the Kiosk listing says what the bot can do`);
+    assert.ok(card.indexOf("btb-abil") > card.indexOf('class="btb-voice"'), `${id}: under the voice line`);
+  }
+});
+
+test("ability line: the bot id is escaped", async () => {
+  const { abilityLineHtml } = await import("../servers/gateway/dashboard/panels/bot-builder/voice-use.js");
+  const html = abilityLineHtml('x"><b>');
+  assert.ok(html.includes('data-abil-bot="x&quot;&gt;&lt;b&gt;"'));
+  assert.ok(!html.includes("<b>"));
+});
+
+test("ability line: en + es strings, and the Spanish render carries none of the English ones", async () => {
+  for (const k of ABIL_KEYS) {
+    const e = translations[k];
+    assert.ok(e && e.en && e.es, `${k} ships en+es`);
+    assert.ok(!/[`]|\$\{/.test(e.en + e.es), `${k}: no backtick or dollar-brace`);
+  }
+  assert.ok(translations["botbuilder.abilBy"].en.includes("{list}") && translations["botbuilder.abilBy"].es.includes("{list}"));
+  assert.ok(translations["botbuilder.abilBy"].en.startsWith("By voice on displays"));
+  assert.ok(translations["botbuilder.abilSlower"].en.includes("{item}") && translations["botbuilder.abilSlower"].es.includes("{item}"));
+  assert.ok(translations["botbuilder.abilMore"].en.includes("{n}") && translations["botbuilder.abilMore"].es.includes("{n}"));
+  const es = await render("es", { kioskAvailable: true });
+  for (const k of ["botbuilder.abilNone", "botbuilder.abilCrowMessages", "botbuilder.abilMemory", "botbuilder.abilCalendar"]) {
+    const en = translations[k].en.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    assert.doesNotMatch(es, new RegExp("(^|[^\\p{L}])" + en + "($|[^\\p{L}])", "u"), `${k}: English in the es render`);
+    assert.ok(es.includes(JSON.stringify(translations[k].es).slice(1, -1)), `${k}: the Spanish string ships`);
+  }
+});

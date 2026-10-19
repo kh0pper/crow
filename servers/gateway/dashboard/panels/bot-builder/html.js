@@ -18,7 +18,7 @@ import { boardState, friendlyModel, purposeLine, agoText } from "../../shared/bo
 import { perchAttached } from "../../../shared/perch-attached.js";
 import { rowMenuScript } from "./row-menu.js";
 import { giveTaskScript } from "./give-task.js";
-import { voiceLineHtml, voiceUseItemHtml, voiceUseDialogHtml, voiceUseScript } from "./voice-use.js";
+import { voiceLineHtml, abilityLineHtml, voiceUseItemHtml, voiceUseDialogHtml, voiceUseScript } from "./voice-use.js";
 import { listDevices } from "../../../../shared/device-store.js";
 import { loadUnassigned } from "../bot-board/data-queries.js";
 
@@ -101,6 +101,7 @@ function botCardHtml(bt, { i, lang, req, now, providerRows, active, voiceNames, 
     `</div></div>` +
     (meta ? `<div class="btb-botcard-meta">${meta}</div>` : "") +
     voiceLineHtml(id, voiceNames, lang) +
+    (kioskAvailable ? abilityLineHtml(id) : "") +
     `<div class="btb-botcard-foot">` +
     (perchAttached(def) ? `<a class="btn btn-primary btn-sm" href="/dashboard/perch?bot=${enc}">${t("perch.tabChat", lang)}</a>` : "") +
     `<a class="btn btn-secondary btn-sm" href="${editHref}">${t("botbuilder.rowEdit", lang)}</a>` +

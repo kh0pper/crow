@@ -60,6 +60,7 @@ const IDENTICAL_OK = new Set([
   "botbuilder.monThBot",
   "botbuilder.monThEsc", // column abbreviation
   "botbuilder.monThControl", // "control" is Spanish too
+  "botbuilder.abilBlog", // "blog" is Spanish too
   "botboard.jsLeasePrefix", // prefixes a raw English enum value — translating only the prefix buys nothing
   "botboard.labelBotSwitcher", // "Bot"
   "botboard.colBot",

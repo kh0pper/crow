@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import vm from "node:vm";
 import { parseHTML } from "linkedom";
 import { translations } from "../servers/gateway/dashboard/shared/i18n.js";
-import { voiceUseScript, voiceUseDialogHtml, voiceLineHtml, voiceUseItemHtml } from "../servers/gateway/dashboard/panels/bot-builder/voice-use.js";
+import { voiceUseScript, voiceUseDialogHtml, voiceLineHtml, voiceUseItemHtml, abilityLineHtml } from "../servers/gateway/dashboard/panels/bot-builder/voice-use.js";
 import { DASH_VOICE_PATH, displayPath, dashBody, dashAutoBody, displayBody } from "./fixtures/voice-use-bodies.mjs";
 
 const T = (k) => translations[k].en;
@@ -45,7 +45,7 @@ function scriptsOf(html) {
  */
 function page({ cards = [["a-one", "Alpha One", ["Office glasses"]], ["b-two", "Beta Two", []], ["c-big", "Cee Big", []], ["d-lean", "Dee Lean", []]], replies = [], lang = "en" } = {}) {
   const body = cards.map(([id, name, srv], i) =>
-    `<div class="btb-botcard" data-bot="${id}">` + voiceLineHtml(id, srv, lang) +
+    `<div class="btb-botcard" data-bot="${id}">` + voiceLineHtml(id, srv, lang) + abilityLineHtml(id) +
     `<button type="button" class="btb-more" aria-controls="btb-menu-${i}" aria-expanded="false">⋯</button>` +
     `<div class="btb-menu" id="btb-menu-${i}" role="menu" hidden>` + voiceUseItemHtml(id, name, lang) + `</div></div>`).join("");
   const html = voiceUseDialogHtml(lang) + voiceUseScript(lang);
@@ -78,6 +78,7 @@ function page({ cards = [["a-one", "Alpha One", ["Office glasses"]], ["b-two", "
   run();
   const flush = async () => { for (let i = 0; i < 12; i++) await new Promise((r) => setImmediate(r)); };
   const line = (id) => document.querySelector(`.btb-voice[data-voice-bot="${id}"]`);
+  const abil = (id) => document.querySelector(`.btb-abil[data-abil-bot="${id}"]`);
   const item = (id) => document.querySelector(`.btb-voice-use[data-bot-id="${id}"]`);
   const dlg = () => document.getElementById("btb-vu");
   // (assertions compare nodes with === / ok: a failing deepEqual on a linkedom node would inspect the whole DOM)
@@ -89,7 +90,7 @@ function page({ cards = [["a-one", "Alpha One", ["Office glasses"]], ["b-two", "
   const open = async (id) => { click(item(id)); await flush(); };
   const save = async () => { click(document.getElementById("btb-vu-save")); await flush(); };
   const posts = () => calls.filter((c) => c.method === "POST");
-  return { document, window, calls, posts, queue, flush, line, item, dlg, row, box, click, change, key, open, save, run, listeners, active: () => active };
+  return { document, window, calls, posts, queue, flush, line, abil, item, dlg, row, box, click, change, key, open, save, run, listeners, active: () => active };
 }
 
 test("the emitted script is a template literal's worth: no backticks, no dollar-brace; the strings JSON cannot close its script", () => {
@@ -374,4 +375,57 @@ test("Spanish: the dialog and lines use the Spanish strings", async () => {
   await p.open("a-one");
   assert.equal(p.document.getElementById("btb-vu-h").textContent, "Usar a Alpha One para la voz");
   assert.ok(!p.dlg().textContent.includes(T("botbuilder.voiceUseNextOpen")));
+});
+
+// ── "By voice on displays: …" (bot voice abilities) ─────────────────────────
+const withAbil = (map) => listing({ bots: BOTS.map((b) => (map[b.bot_id] === undefined ? b : { ...b, abilities: map[b.bot_id] })) });
+const fillS = (k, o) => T(k).replace(/\{(\w+)\}/g, (m, x) => o[x]);
+
+test("ability line: the bot's abilities in order, a slower one marked, from the same single listing read", async () => {
+  const p = page({ replies: [{ body: withAbil({ "a-one": { items: [{ id: "calendar", quick: false }, { id: "crow_messages", quick: true }], none: false } }) }] });
+  await p.flush();
+  assert.equal(p.calls.length, 1, "no extra fetch");
+  const want = fillS("botbuilder.abilBy", { list: `${fillS("botbuilder.abilSlower", { item: T("botbuilder.abilCalendar") })}, ${T("botbuilder.abilCrowMessages")}` });
+  assert.equal(p.abil("a-one").hidden, false);
+  assert.equal(p.abil("a-one").textContent, want);
+});
+
+test("ability line: nothing it can do → 'answers questions only'", async () => {
+  const p = page({ replies: [{ body: withAbil({ "b-two": { items: [], none: true } }) }] });
+  await p.flush();
+  assert.equal(p.abil("b-two").hidden, false);
+  assert.equal(p.abil("b-two").textContent, T("botbuilder.abilNone"));
+});
+
+test("ability line: more than four → the first four and '+N more', the whole list in the title", async () => {
+  const items = ["calendar", "reminders", "messages", "lists", "projects", "files"].map((id) => ({ id, quick: true }));
+  const p = page({ replies: [{ body: withAbil({ "a-one": { items, none: false } }) }] });
+  await p.flush();
+  const words = [T("botbuilder.abilCalendar"), T("botbuilder.abilReminders"), T("botbuilder.abilMessages"), T("botbuilder.abilLists")];
+  assert.equal(p.abil("a-one").textContent, fillS("botbuilder.abilBy", { list: `${words.join(", ")}, ${fillS("botbuilder.abilMore", { n: 2 })}` }));
+  assert.equal(p.abil("a-one").getAttribute("title"), fillS("botbuilder.abilBy", { list: [...words, T("botbuilder.abilProjects"), T("botbuilder.abilFiles")].join(", ") }));
+});
+
+test("ability line: an add-on's name is data — text, never markup; an id the page does not know is left out", async () => {
+  const p = page({ replies: [{ body: withAbil({ "a-one": { items: [{ id: "addon:notes", quick: true, label: "<b>Notes</b>" }, { id: "weather", quick: true }, { id: "By", quick: true }, { id: "memory", quick: true }], none: false } }) }] });
+  await p.flush();
+  const n = p.abil("a-one");
+  assert.equal(n.textContent, fillS("botbuilder.abilBy", { list: `<b>Notes</b>, ${T("botbuilder.abilMemory")}` }));
+  assert.equal(n.querySelector("b"), null);
+});
+
+test("ability line: no field (an older Kiosk), null (a failed check), or no listing → stays hidden", async () => {
+  const p = page({ replies: [{ body: withAbil({ "a-one": null }) }] });
+  await p.flush();
+  for (const id of ["a-one", "b-two", "c-big"]) assert.equal(p.abil(id).hidden, true, id);
+  const q = page({ replies: [{ status: 500, body: {} }] });
+  await q.flush();
+  assert.equal(q.abil("a-one").hidden, true);
+});
+
+test("ability line: Spanish labels on a Spanish page", async () => {
+  const ES = (k) => translations[k].es;
+  const p = page({ lang: "es", replies: [{ body: withAbil({ "a-one": { items: [{ id: "lists", quick: false }], none: false } }) }] });
+  await p.flush();
+  assert.equal(p.abil("a-one").textContent, ES("botbuilder.abilBy").replace("{list}", ES("botbuilder.abilSlower").replace("{item}", ES("botbuilder.abilLists"))));
 });
