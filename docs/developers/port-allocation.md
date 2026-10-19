@@ -82,6 +82,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 8007 | 127.0.0.1 | llamacpp-cpu-qwen3-embed (CPU embeddings) | PR #111 |
 | 8011 | tailscale IP | vllm-rocm-qwen35-4b (crow-voice classifier / fast route) | existing |
 | 8018 | 127.0.0.1 | design-kit (renderer door: Vega-Lite / Mermaid / D2 → SVG; the render container itself sits on an internal-only Docker network with no egress; no ufw rule) | Design kit v1 |
+| 8040 | 127.0.0.1 | lemmy (API for Crow's host-run MCP server and panel, `LEMMY_API_PORT`; the public site goes through Caddy) | item 30 |
 | 8080 | 127.0.0.1 | localai (existing) | existing |
 | 8081 | 127.0.0.1 | calibre-server (existing) | existing |
 | 8083 | 127.0.0.1 | calibre-web (existing) | existing |

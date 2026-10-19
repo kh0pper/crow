@@ -17,6 +17,16 @@
  *                  + host-meta + nodeinfo well-known handlers.
  *   peertube    — PeerTube. Large body (8 GiB), long timeouts for uploads.
  *   generic-ws  — Generic HTTP + websocket upgrade. Escape hatch.
+ *
+ * Split-upstream profiles (a second, `backend` upstream):
+ *   lemmy                 — lemmy-ui serves the web app only and does not proxy the
+ *                           API. As lemmy-ansible's nginx config (0.19 line) does:
+ *                           /api, /pictrs, /feeds, /nodeinfo, /version, /.well-known
+ *                           and /sitemap.xml; GET/HEAD asking for ActivityPub JSON
+ *                           (Accept: application/activity+json or ld+json); and every
+ *                           other method (inbox deliveries) go to Lemmy's backend, the
+ *                           rest to lemmy-ui.
+ *   activitypub-mastodon  — /api/v1/streaming to the streaming server, the rest to web.
  */
 
 /**
@@ -75,21 +85,132 @@ const PROFILE_DIRECTIVES = {
   ],
 };
 
-export const SUPPORTED_PROFILES = Object.keys(PROFILE_DIRECTIVES);
+// The proxy block every ActivityPub upstream gets (headers the apps use to build
+// absolute URLs, and a timeout long enough for federation fetches).
+const AP_PROXY = (upstream) => [
+  `reverse_proxy ${upstream} {`,
+  "  header_up Host {host}",
+  "  header_up X-Real-IP {remote_host}",
+  "  header_up X-Forwarded-For {remote_host}",
+  "  header_up X-Forwarded-Proto {scheme}",
+  "  transport http {",
+  "    read_timeout 300s",
+  "  }",
+  "}",
+];
+const STREAM_PROXY = (upstream) => [
+  `reverse_proxy ${upstream} {`,
+  "  header_up Host {host}",
+  "  header_up X-Real-IP {remote_host}",
+  "  header_up X-Forwarded-For {remote_host}",
+  "  header_up X-Forwarded-Proto {scheme}",
+  "}",
+];
+const indent = (lines) => lines.map((l) => `  ${l}`);
+const AP_BODY = ["request_body {", "  max_size 40MB", "}"];
+
+// Profiles whose site splits traffic between two upstreams: { backend default, render }.
+// Default backends are container names, never compose service names: on the shared
+// crow-federation network a service alias such as `web` can belong to any project.
+const SPLIT_PROFILES = {
+  lemmy: {
+    defaultBackend: "crow-lemmy:8536",
+    render: (upstream, backend) => [
+      ...AP_BODY,
+      // Several paths in one matcher: keep it multi-path, so Caddy keeps these handles in
+      // text order (it sorts by path length only single-path matchers).
+      "@lemmy_backend {",
+      "  path /api /api/* /pictrs /pictrs/* /feeds /feeds/* /nodeinfo /nodeinfo/* /version /.well-known/* /sitemap.xml",
+      "}",
+      // [+] instead of \+: no backslash for the Caddyfile lexer to interpret.
+      "@lemmy_activitypub {",
+      "  method GET HEAD",
+      "  header_regexp Accept (?i)application/(activity|ld)[+]json",
+      "}",
+      "@lemmy_write {",
+      "  not method GET HEAD",
+      "}",
+      "handle @lemmy_backend {", ...indent(AP_PROXY(backend)), "}",
+      "handle @lemmy_activitypub {", ...indent(AP_PROXY(backend)), "}",
+      "handle @lemmy_write {", ...indent(AP_PROXY(backend)), "}",
+      "handle {", ...indent(AP_PROXY(upstream)), "}",
+    ],
+  },
+  "activitypub-mastodon": {
+    defaultBackend: "crow-mastodon-streaming:4000",
+    render: (upstream, backend) => [
+      ...AP_BODY,
+      "@mastodon_streaming path /api/v1/streaming /api/v1/streaming/*",
+      // No read timeout on the long-lived streaming connections (Caddy's defaults fit).
+      "handle @mastodon_streaming {", ...indent(STREAM_PROXY(backend)), "}",
+      "handle {", ...indent(AP_PROXY(upstream)), "}",
+    ],
+  },
+};
+
+export const SUPPORTED_PROFILES = [...Object.keys(PROFILE_DIRECTIVES), ...Object.keys(SPLIT_PROFILES)];
+
+/** True when the profile routes part of the site to a second (backend) upstream. */
+export function profileTakesBackend(profile) {
+  return Object.hasOwn(SPLIT_PROFILES, profile);
+}
+
+/**
+ * Why an upstream is not one the federation tools accept, or null. An upstream is
+ * host[:port] (a DNS name, IPv4 or a bracketed IPv6 address), optionally with an http://
+ * or https:// scheme: nothing that could end the line, open or close a block, start a
+ * comment or quote in a Caddyfile. And never Caddy itself: Caddy runs in its own
+ * container, so a loopback address is Caddy, and its admin API (port 2019, which listens
+ * on every interface of that container) would let anyone who can reach the site rewrite
+ * the whole configuration through a proxied request.
+ */
+export function upstreamProblem(s) {
+  if (typeof s !== "string" || s.length === 0 || s.length > 300) return "an upstream must be host:port";
+  const m = s.match(/^(?:https?:\/\/)?([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::(\d{1,5}))?$/);
+  if (!m) return "an upstream must be host:port (letters, digits, dots, dashes; no spaces, braces, quotes or #)";
+  if (m[2] !== undefined && !(Number(m[2]) >= 1 && Number(m[2]) <= 65535)) return "an upstream port must be 1-65535";
+  const host = m[1].toLowerCase().replace(/^\[|\]$/g, "");
+  if (m[2] === "2019") return "an upstream may not be port 2019 (Caddy's admin API)";
+  const loopback = host === "localhost" || host.endsWith(".localhost") || /^127\./.test(host) || host === "0.0.0.0"
+    || (host.includes(":") && (/^[0:]*1?$/.test(host) || /^[0:]*:ffff:(127\.|0\.0\.0\.0$)/.test(host)));
+  if (loopback || host === "crow-caddy" || host === "caddy") {
+    return "an upstream may not be Caddy itself (a loopback address or the Caddy container): name the app's container instead";
+  }
+  return null;
+}
+
+/** True when upstreamProblem finds nothing. */
+export function upstreamLike(s) {
+  return upstreamProblem(s) === null;
+}
 
 /**
  * Render the directives for a profile with the upstream substituted.
  * Returns a multi-line string with no site-block wrapper and no leading
  * indent; the Caddyfile writer indents each line as part of the block body.
+ * `backend` is the second upstream of a split profile (its default is used when
+ * omitted); passing one to a single-upstream profile is an error, never ignored.
  */
-export function renderProfileDirectives(profile, upstream) {
-  const template = PROFILE_DIRECTIVES[profile];
-  if (!template) {
+export function renderProfileDirectives(profile, upstream, { backend } = {}) {
+  const split = Object.hasOwn(SPLIT_PROFILES, profile) ? SPLIT_PROFILES[profile] : null;
+  const template = Object.hasOwn(PROFILE_DIRECTIVES, profile) ? PROFILE_DIRECTIVES[profile] : null;
+  if (!split && !template) {
     throw new Error(
       `Unknown federation profile "${profile}". Supported: ${SUPPORTED_PROFILES.join(", ")}`,
     );
   }
-  return template.map((line) => line.replace("{upstream}", upstream)).join("\n");
+  const up = upstreamProblem(upstream);
+  if (up) throw new Error(`upstream: ${up} (got ${JSON.stringify(String(upstream).slice(0, 80))})`);
+  if (!split) {
+    if (backend !== undefined && backend !== null && backend !== "") {
+      throw new Error(`Profile "${profile}" has one upstream; backend_upstream is only for: ${Object.keys(SPLIT_PROFILES).join(", ")}`);
+    }
+    return template.map((line) => line.replace("{upstream}", upstream)).join("\n");
+  }
+  const be = backend === undefined || backend === null || backend === "" ? split.defaultBackend : backend;
+  const bp = upstreamProblem(be);
+  if (bp) throw new Error(`backend upstream: ${bp} (got ${JSON.stringify(String(be).slice(0, 80))})`);
+  return split.render(upstream, be).join("\n");
 }
 
 /**

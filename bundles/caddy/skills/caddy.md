@@ -115,11 +115,11 @@ the same domain replaces the existing block.
 
 ```
 caddy_add_federation_site {
-  "domain": "masto.example.com",
-  "upstream": "mastodon-web:3000",
+  "domain": "gts.example.com",
+  "upstream": "crow-gotosocial:8080",
   "profile": "activitypub",
   "wellknown": {
-    "nodeinfo": { "href": "https://masto.example.com/nodeinfo/2.0" }
+    "nodeinfo": { "href": "https://gts.example.com/nodeinfo/2.0" }
   }
 }
 ```
@@ -130,11 +130,24 @@ Profiles:
   federation backfill and long-polling sync.
 - `activitypub` — 40 MB body, forwarded headers (Host, X-Real-IP,
   X-Forwarded-For, X-Forwarded-Proto), 300s read timeout. Works for
-  Mastodon, GoToSocial, Pixelfed, Funkwhale, Lemmy, WriteFreely,
-  BookWyrm, Mobilizon.
+  GoToSocial, Pixelfed, Funkwhale, WriteFreely, BookWyrm, Mobilizon (one
+  upstream). Mastodon and Lemmy need their own profile (below).
+- `activitypub-mastodon` — the `activitypub` settings, plus
+  `/api/v1/streaming` sent to `backend_upstream` (default
+  `crow-mastodon-streaming:4000`); `upstream` is the web container
+  (`crow-mastodon-web:3000`).
+- `lemmy` — the `activitypub` settings, with the split Lemmy needs:
+  lemmy-ui serves the web app only, so `/api`, `/pictrs`, `/feeds`,
+  `/nodeinfo`, `/.well-known`, ActivityPub requests (`Accept:
+  application/*`) and every POST go to `backend_upstream` (default
+  `crow-lemmy:8536`); everything else goes to `upstream`
+  (`crow-lemmy-ui:1234`).
 - `peertube` — 8 GB body (direct video uploads), 1800s read/write
   timeouts.
 - `generic-ws` — plain `reverse_proxy`, escape hatch.
+
+`backend_upstream` is accepted only by the two split profiles; upstreams are
+`host:port` (optionally `http://`/`https://`).
 
 ### `caddy_set_wellknown`
 

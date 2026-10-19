@@ -33,6 +33,9 @@ import {
 import {
   SUPPORTED_PROFILES,
   renderProfileDirectives,
+  profileTakesBackend,
+  upstreamLike,
+  upstreamProblem,
   renderWellKnownHandle,
   buildWellKnownJson,
   WELLKNOWN_PATHS,
@@ -321,11 +324,12 @@ export function createCaddyServer(options = {}) {
     "Add a federation-aware reverse-proxy site block. Emits directives for the chosen profile (matrix | activitypub | peertube | generic-ws) — websocket upgrade, large request body, proxy timeouts — plus optional /.well-known/ handlers. Idempotent: re-running with the same domain replaces the existing block.",
     {
       domain: z.string().min(1).max(253).describe("Public site address (e.g., masto.example.com). Must be a subdomain dedicated to this federated app — ActivityPub actors are URL-keyed and subpath mounts break federation."),
-      upstream: z.string().min(1).max(500).describe("Upstream the app is reachable at (e.g., gotosocial:8080 over the shared crow-federation docker network, or 127.0.0.1:8080 for host-published debug mode)."),
-      profile: z.enum(SUPPORTED_PROFILES).describe(`One of: ${SUPPORTED_PROFILES.join(" | ")}`),
+      upstream: z.string().min(1).max(500).describe("Upstream the app is reachable at, as host:port: its container name on the shared crow-federation docker network (e.g., crow-gotosocial:8080). Never a loopback address (that is the Caddy container itself) or port 2019."),
+      profile: z.enum(SUPPORTED_PROFILES).describe(`One of: ${SUPPORTED_PROFILES.join(" | ")}. lemmy: upstream is lemmy-ui (crow-lemmy-ui:1234); /api, /pictrs, /feeds, /nodeinfo, /.well-known, ActivityPub and POST requests go to backend_upstream (default crow-lemmy:8536). activitypub-mastodon: upstream is web (crow-mastodon-web:3000); /api/v1/streaming goes to backend_upstream (default crow-mastodon-streaming:4000).`),
+      backend_upstream: z.string().min(1).max(300).optional().describe("Second upstream, only for the lemmy and activitypub-mastodon profiles (host:port). Omit to use the bundle's container name."),
       wellknown: z.record(z.string(), z.object({}).passthrough()).optional().describe(`Optional map of well-known handlers to emit inside this site block. Keys: ${Object.keys(WELLKNOWN_PATHS).join(", ")}. Values are either { body_json: "<literal JSON string>" } or kind-specific opts (matrix-server: { delegate_to }, matrix-client: { homeserver_base_url, identity_server_base_url? }, nodeinfo: { href }).`),
     },
-    async ({ domain, upstream, profile, wellknown }) => {
+    async ({ domain, upstream, profile, backend_upstream, wellknown }) => {
       try {
         if (!domainLike(domain)) {
           return { content: [{ type: "text", text: "Error: domain contains disallowed characters (whitespace, braces, or newlines)." }] };
@@ -337,7 +341,18 @@ export function createCaddyServer(options = {}) {
           return { content: [{ type: "text", text: `Error: federation sites must be a bare subdomain (e.g., "masto.example.com"), not a subpath. ActivityPub actors are URL-keyed and subpath mounts break federation.` }] };
         }
 
-        let body = renderProfileDirectives(profile, upstream);
+        if (backend_upstream !== undefined && !upstreamLike(backend_upstream)) {
+          return { content: [{ type: "text", text: `Error: backend_upstream: ${upstreamProblem(backend_upstream)}.` }] };
+        }
+        if (!upstreamLike(upstream)) {
+          return { content: [{ type: "text", text: `Error: upstream: ${upstreamProblem(upstream)}.` }] };
+        }
+        // Lemmy and Mastodon answer their own webfinger/nodeinfo/host-meta (per user, per
+        // instance): a static handle in front of them would break federation.
+        if (profileTakesBackend(profile) && wellknown && Object.keys(wellknown).length) {
+          return { content: [{ type: "text", text: `Error: the ${profile} profile serves .well-known from the app itself; leave wellknown out (use caddy_set_wellknown on a different domain for delegation).` }] };
+        }
+        let body = renderProfileDirectives(profile, upstream, { backend: backend_upstream });
 
         if (wellknown && Object.keys(wellknown).length) {
           const handles = [];
@@ -348,6 +363,9 @@ export function createCaddyServer(options = {}) {
             }
             let jsonBody;
             if (opts && typeof opts.body_json === "string") {
+              try { JSON.parse(opts.body_json); } catch {
+                return { content: [{ type: "text", text: `Error: wellknown.${kind}.body_json is not valid JSON.` }] };
+              }
               jsonBody = opts.body_json;
             } else {
               jsonBody = buildWellKnownJson(kind, opts || {});
@@ -367,7 +385,7 @@ export function createCaddyServer(options = {}) {
         return {
           content: [{
             type: "text",
-            text: `${replaced ? "Replaced" : "Added"} federation site ${domain} → ${upstream} (profile: ${profile}). ${sites.length} total site block(s). Caddy will request a Let's Encrypt cert on first request.`,
+            text: `${replaced ? "Replaced" : "Added"} federation site ${domain} → ${upstream}${profileTakesBackend(profile) ? ` + backend ${backend_upstream || "(default)"}` : ""} (profile: ${profile}). ${sites.length} total site block(s). Caddy will request a Let's Encrypt cert on first request.`,
           }],
         };
       } catch (err) {

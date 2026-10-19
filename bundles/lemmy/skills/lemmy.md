@@ -37,7 +37,15 @@ Gated by F.0's hardware check. Refused below **1 GB effective RAM after committe
 ## First-run bootstrap
 
 1. On its first start Lemmy creates the admin `admin_pending` with the password Crow generated at install (Settings → Passwords). There is no setup wizard.
-2. Expose it on its own subdomain. lemmy-ui serves the web app only and does **not** proxy the API, so the site must split traffic: `/api`, `/pictrs`, `/feeds`, `/nodeinfo`, `/.well-known` and ActivityPub requests (`Accept: application/activity+json`) go to `lemmy:8536`, everything else to `lemmy-ui:1234`. `caddy_add_federation_site` takes a single upstream, so write this Caddy site by hand for now.
+2. Expose it on its own subdomain. lemmy-ui serves the web app only and does **not** proxy the API, so the site splits traffic; the `lemmy` profile does it:
+   ```
+   caddy_add_federation_site {
+     "domain": "lemmy.example.com",
+     "upstream": "crow-lemmy-ui:1234",
+     "profile": "lemmy"
+   }
+   ```
+   `/api`, `/pictrs`, `/feeds`, `/nodeinfo`, `/.well-known`, ActivityPub requests (`Accept: application/*`) and every POST go to Lemmy's backend (`crow-lemmy:8536`, override with `backend_upstream`), everything else to lemmy-ui.
 3. Obtain an auth JWT:
    ```bash
    curl -X POST https://lemmy.example.com/api/v3/user/login \
@@ -107,8 +115,8 @@ Lemmy's moderation is layered: **community mods** handle their community; **inst
 
 ## Troubleshooting
 
-- **"Cannot reach Lemmy"** — `docker ps | grep crow-lemmy`. First-boot migrations take 60+ seconds; the healthcheck has a 60s start period.
-- **Federation not working** — check that federation is on in Lemmy's Admin → Settings, and that the public site sends `/.well-known`, `/nodeinfo` and ActivityPub requests to `lemmy:8536` (lemmy-ui answers them with 404).
+- **"Cannot reach Lemmy"** — `docker ps | grep crow-lemmy`. First-boot migrations take 60+ seconds; the healthcheck has a 60s start period. The MCP tools and the panel reach Lemmy at `http://127.0.0.1:<LEMMY_API_PORT>` (default 8040, the loopback port the bundle publishes) unless `LEMMY_URL` overrides it. An install from before Lemmy 1.0.5 has `LEMMY_URL=http://lemmy:8536`, which only resolves inside Docker, and no published port: reinstall (the data volumes are kept).
+- **Federation not working** — check that federation is on in Lemmy's Admin → Settings, and that the public site sends `/.well-known`, `/nodeinfo` and ActivityPub requests to Lemmy's backend (lemmy-ui answers them with 404): re-run `caddy_add_federation_site` with profile `lemmy`.
 - **Images not loading** — pict-rs container health check. `docker logs crow-lemmy-pictrs` and verify `LEMMY_PICTRS_API_KEY` matches between the two containers.
 - **Disk filling fast** — federated community caching. Run `lemmy_media_prune` and reduce follow count on heavy communities.
 - **Admin endpoints returning 404** — your `LEMMY_JWT` may belong to a regular user rather than admin. Verify in the web UI's **Admin** dropdown — if absent, log out, promote the account via DB, and re-login.

@@ -51,11 +51,11 @@ Crow generates every internal secret at install and never shows them: the Postgr
    ```
    caddy_add_federation_site {
      domain: "mastodon.example.com",
-     upstream: "mastodon-web:3000",
+     upstream: "crow-mastodon-web:3000",
      profile: "activitypub-mastodon"
    }
    ```
-   The `activitypub-mastodon` profile wires `/api/v1/streaming` → `mastodon-streaming:4000` and sets the static-asset cache headers Mastodon expects.
+   The `activitypub-mastodon` profile sends `/api/v1/streaming` to the streaming container (`crow-mastodon-streaming:4000`, override with `backend_upstream`) and everything else to web, with the `activitypub` profile's body limit, forwarded headers and timeouts.
 4. Create the admin account:
    ```bash
    docker exec -it crow-mastodon-web \

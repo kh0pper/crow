@@ -45,13 +45,13 @@ Lemmy stack is up. Next steps:
   1. Lemmy created the admin admin_pending with the password Crow generated
      at install (Settings -> Passwords). There is no setup wizard.
 
-  2. Expose ${LEMMY_HOSTNAME:-<your-domain>} with a Caddy site that sends /api,
-     /pictrs, /feeds, /nodeinfo, /.well-known and ActivityPub requests to
-     lemmy:8536 and everything else to lemmy-ui:1234 (lemmy-ui does not proxy
-     the API).
+  2. Expose ${LEMMY_HOSTNAME:-<your-domain>} through Caddy (lemmy-ui does not
+     proxy the API, so the site splits traffic; the lemmy profile does it):
+       caddy_add_federation_site { "domain": "${LEMMY_HOSTNAME:-<your-domain>}",
+         "upstream": "crow-lemmy-ui:1234", "profile": "lemmy" }
 
-  3. Obtain a JWT:
-       curl -X POST https://${LEMMY_HOSTNAME:-<your-domain>}/api/v3/user/login \\
+  3. Obtain a JWT (on this machine, before DNS and Caddy are set up too):
+       curl -X POST http://127.0.0.1:${LEMMY_API_PORT:-8040}/api/v3/user/login \\
          -H 'Content-Type: application/json' \\
          -d '{"username_or_email":"admin_pending","password":"<from Settings -> Passwords>"}'
      Put the returned jwt in LEMMY_JWT, then restart the extension.
