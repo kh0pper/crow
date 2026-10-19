@@ -719,3 +719,29 @@ test("dates: a dispatch whose operator note names a relative day ends with the [
   await engine.message(r.sessionId, "finish it by tomorrow");
   assert.match(state.instances[0].turns[0].message, /\n\n\[Dates\] To add or plan something, [^\n]+$/);
 });
+
+test("dates: an echo of the [Dates] line is stripped from the live text and reply frames of that turn only", async () => {
+  const { relativeDatesContext } = await import("../servers/shared/relative-dates.js");
+  const { engine, state, clock } = makeEngine();
+  const r = await spawned(engine, { botId: "dateecho" });
+  const events = [];
+  await engine.subscribe(r.sessionId, (e) => events.push(e));
+  await engine.message(r.sessionId, "move my dentist to Monday");
+  const line = relativeDatesContext(clock.now(), null);
+  const pi = state.instances[0];
+  const echoed = { role: "assistant", content: [{ type: "text", text: line + "\nMoved to Monday 2026-10-19." }] };
+  pi.emit({ type: "message_end", message: echoed });
+  pi.lastTurn().resolve({ type: "agent_end", messages: [echoed] });
+  await tick(12);
+  assert.equal(events.find((e) => e.type === "text").text, "Moved to Monday 2026-10-19.");
+  assert.equal(events.find((e) => e.type === "reply").text, "Moved to Monday 2026-10-19.");
+
+  // A turn with no day named added no line: its text is left exactly as the model wrote it.
+  events.length = 0;
+  await engine.message(r.sessionId, "thanks");
+  const plain = { role: "assistant", content: [{ type: "text", text: "[Dates] is a tag I know." }] };
+  pi.emit({ type: "message_end", message: plain });
+  pi.lastTurn().resolve({ type: "agent_end", messages: [plain] });
+  await tick(12);
+  assert.equal(events.find((e) => e.type === "reply").text, "[Dates] is a tag I know.");
+});
