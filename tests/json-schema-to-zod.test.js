@@ -320,3 +320,15 @@ test("strictness reaches every closed object inside a multi-branch union, and on
   const strOrObj = { type: "object", properties: { v: { anyOf: [{ type: "string" }, closed({ id: { type: "string" } })] } } };
   assert.deepEqual(parse(strOrObj, { v: { id: "x", junk: 1 } }).data.v, { id: "x" }, "only one branch can take an object: it strips as the upstream would");
 });
+
+test("a $ref pointer is charged before it is split: a pointer over 1 KB is not followed, and MB-scale pointers stay fast", async () => {
+  const { jsonSchemaToZodObject } = await import("../servers/shared/json-schema-to-zod.js");
+  const key = "k".repeat(1100);
+  const capped = publish({ x: jsonSchemaToZodObject({ type: "object", $defs: { [key]: { type: "string" } }, properties: { a: { $ref: `#/$defs/${key}` } } }) }).properties.x;
+  assert.ok(Array.isArray(capped.properties.a.anyOf), "a > 1 KB pointer resolves to 'any', not to the string it names");
+  const huge = "/".repeat(1_000_000);
+  const t0 = Date.now();
+  const out = publish({ x: jsonSchemaToZodObject({ type: "object", properties: Object.fromEntries(Array.from({ length: 1900 }, (_, i) => [`r${i}`, { $ref: `#${huge}` }])) }) }).properties.x;
+  assert.ok(Date.now() - t0 < 3000, `${Date.now() - t0} ms`);
+  assert.deepEqual(grammarHazards(out), []);
+});
