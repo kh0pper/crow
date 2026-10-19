@@ -9,9 +9,18 @@
  *
  * Runs only where a pi CLI (pi_resolver ladder) and a pi-lab checkout
  * (pi-lab-compat findPiLabDir, or PIBOT_PI_LAB_DIR) both exist — CI has
- * neither and skips. Everything pi touches lives in one mkdtemp dir: HOME,
- * PI_CODING_AGENT_DIR, CROW_HOME, the session dir and the .mcp.json. The pi
- * child runs in its own process group and is killed with it.
+ * neither and skips. Set PIBOT_PI_LAB_DIR to pin a known pi-lab checkout;
+ * otherwise this runs whatever the operator's pi-lab has checked out.
+ * Everything pi touches lives in one mkdtemp dir: HOME, PI_CODING_AGENT_DIR,
+ * CROW_HOME, the session dir and the .mcp.json. The pi child runs in its own
+ * process group and is killed with it.
+ *
+ * Scope: only pi-lab's mcp-client is loaded (--no-extensions -e), with file
+ * delivery. It proves registration, the --tools match and the router call
+ * path; it does NOT exercise permission-gating (policy.confirm matches the
+ * gateway name for every router action — see the PR notes). Re-run it after
+ * any pi or pi-lab upgrade: tests/helpers/pi-tool-names.mjs is the offline
+ * mirror CI relies on.
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
@@ -118,7 +127,8 @@ test("a selected remote capability reaches the pi bot's model, and a call throug
   child = spawn(process.execPath, [pi.cliPath, "--mode", "rpc", "--no-approve", "--no-extensions", "-e", MCP_CLIENT,
     "--provider", "fake", "--model", "fake-model", "--session-dir", sessions, "--tools", csv], {
     cwd: botDir, detached: true, stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, HOME: home, PI_CODING_AGENT_DIR: agentDir, CROW_HOME: crowHome, PI_BOT_MCP_CONFIG: mcpPath },
+    // A minimal env: no operator PI_* / PIBOT_* / CROW_* value leaks in.
+    env: { PATH: process.env.PATH, HOME: home, PI_CODING_AGENT_DIR: agentDir, CROW_HOME: crowHome, PI_BOT_MCP_CONFIG: mcpPath },
   });
   let stderr = ""; child.stderr.on("data", (d) => { stderr += d; });
   const ended = await new Promise((res) => {

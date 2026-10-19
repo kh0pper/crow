@@ -47,21 +47,27 @@ const PREFIX_CANON = {
 };
 
 /**
- * Find the connectedServers id whose tool list contains `toolName`.
- * Federation peer entries (isRemote) are skipped: the raw tool surface never
- * exposes them (proxy.js createProxyServer), so a call naming a peer's tool
- * resolves to nothing and is denied. A name held by more than one local
- * source is ambiguous (which one runs depends on registration order), so it
- * resolves to null too — fail closed rather than gate against the wrong one.
+ * Find the connectedServers id that would run `toolName`, or null (deny).
+ * Same predicates as the executors: only connected entries, never a federation
+ * peer (isRemote — the raw tool surface never exposes peers, proxy.js
+ * createProxyServer, and router name lookup skips them too), so a call naming
+ * a peer's tool resolves to nothing: no grant, and no Fix-it card that could
+ * expose an `instance-<id>` string. With `{ unique: true }` (the /tools and
+ * /tools-* surface, where a duplicate name is kept by whichever source
+ * registered first) a name held by two sources is ambiguous and resolves to
+ * null — fail closed rather than gate against a source that may not be the
+ * one that runs. Router crow_tools keeps first-match, which is how
+ * router.js executes it.
  */
-function resolveProxyTool(toolName, connectedServers) {
+function resolveProxyTool(toolName, connectedServers, { unique = false } = {}) {
   if (!toolName || !connectedServers) return null;
   let found = null;
   for (const [id, entry] of connectedServers) {
-    if (!entry || entry.isRemote) continue;
+    if (!entry || entry.isRemote || entry.status !== "connected") continue;
     if (Array.isArray(entry.tools) && entry.tools.some((t) => t && t.name === toolName)) {
+      if (!unique) return id; // addon entries are keyed by their canonical id (proxy.js)
       if (found !== null) return null; // ambiguous
-      found = id; // addon entries are keyed by their canonical id (proxy.js)
+      found = id;
     }
   }
   return found;
@@ -97,7 +103,7 @@ export function resolveCalledCanonicalId(prefix, body, connectedServers) {
   }
 
   if (p === "tools" || p.startsWith("tools-")) {
-    return resolveProxyTool(toolName, connectedServers);
+    return resolveProxyTool(toolName, connectedServers, { unique: true });
   }
 
   return null; // unknown prefix — fail closed

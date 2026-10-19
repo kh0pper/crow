@@ -16,7 +16,7 @@ import express from "express";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { connectedServers, createProxyServer } from "../servers/gateway/proxy.js";
-import { resolveCalledCanonicalId } from "../servers/gateway/peer-exposure.js";
+import { resolveCalledCanonicalId, enforcePeerExposure } from "../servers/gateway/peer-exposure.js";
 import { SessionManager } from "../servers/gateway/session-manager.js";
 import { mountMcpServer } from "../servers/gateway/routes/mcp.js";
 
@@ -106,19 +106,43 @@ test("over HTTP: /tools/mcp initializes (200) with two peers and lists no peer t
 });
 
 // The peer-invocation gate resolves /tools calls against connectedServers. It
-// must see the same surface createProxyServer exposes: never a peer entry, and
-// never an ambiguous name (which source runs depends on iteration order).
-test("peer gate: /tools resolution ignores peer entries and denies an ambiguous name", () => {
-  const body = (name) => ({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: {} } });
-  const m = new Map([
-    peer("p1"),
-    local("texas-gov-data", [{ name: "tx_query" }, { name: "dup_tool" }]),
-    local("trello", [{ name: "add_card" }, { name: "dup_tool" }]),
-  ]);
-  assert.equal(resolveCalledCanonicalId("/tools", body("crow_store_memory"), m), null, "a peer's tool resolves to nothing (deny)");
-  assert.equal(resolveCalledCanonicalId("/tools", body("tx_query"), m), "texas-gov-data");
-  assert.equal(resolveCalledCanonicalId("/tools-readonly", body("add_card"), m), "trello");
-  assert.equal(resolveCalledCanonicalId("/tools", body("dup_tool"), m), null, "ambiguous → fail closed");
-  assert.equal(resolveCalledCanonicalId("/router", { method: "tools/call", params: { name: "crow_tools", arguments: { action: "dup_tool" } } }, m), null);
-  assert.equal(resolveCalledCanonicalId("/router", { method: "tools/call", params: { name: "crow_tools", arguments: { action: "crow_store_memory" } } }, m), null);
+// must see the sources that would actually run: never a peer entry, never a
+// disconnected one, and on /tools never an ambiguous name (which duplicate is
+// kept depends on registration order). Router crow_tools keeps first-match,
+// which is how router.js executes it.
+const callBody = (name, args = {}) => ({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } });
+const gateMap = () => new Map([
+  peer("p1"),
+  local("texas-gov-data", [{ name: "tx_query" }, { name: "dup_tool" }]),
+  local("trello", [{ name: "add_card" }, { name: "dup_tool" }]),
+  ["old-addon", { client: null, status: "disconnected", tools: [{ name: "add_card" }, { name: "tx_query" }] }],
+]);
+
+test("peer gate: /tools ignores peers and disconnected sources, denies an ambiguous name", () => {
+  const m = gateMap();
+  assert.equal(resolveCalledCanonicalId("/tools", callBody("crow_store_memory"), m), null, "a peer's tool resolves to nothing (deny)");
+  assert.equal(resolveCalledCanonicalId("/tools", callBody("tx_query"), m), "texas-gov-data", "a disconnected duplicate does not make it ambiguous");
+  assert.equal(resolveCalledCanonicalId("/tools-readonly", callBody("add_card"), m), "trello");
+  assert.equal(resolveCalledCanonicalId("/tools", callBody("dup_tool"), m), null, "ambiguous → fail closed");
+});
+
+test("peer gate: router crow_tools keeps first-match on a local duplicate, never resolves a peer tool", () => {
+  const m = gateMap();
+  const rt = (action) => ({ method: "tools/call", params: { name: "crow_tools", arguments: { action } } });
+  assert.equal(resolveCalledCanonicalId("/router", rt("dup_tool"), m), "texas-gov-data");
+  assert.equal(resolveCalledCanonicalId("/router", rt("crow_store_memory"), m), null);
+});
+
+test("peer gate: even with instance-p1 in the exposure list, a /tools call to a peer-held name is denied and raises no Fix-it card", async () => {
+  const emits = [];
+  const res = { headersSent: false, status() { return this; }, json(b) { this.body = b; this.headersSent = true; } };
+  const ok = await enforcePeerExposure({
+    prefix: "/tools", res, db: null, connectedServers: gateMap(),
+    req: { instanceAuth: { instance: { id: "p2" } }, body: callBody("crow_store_memory") },
+    exposedSetOverride: new Set(["instance-p1"]),
+    auditFn: async () => {}, emitFn: async (...a) => { emits.push(a); },
+  });
+  assert.equal(ok, false);
+  assert.equal(res.body.error.code, -32001);
+  assert.deepEqual(emits, []);
 });

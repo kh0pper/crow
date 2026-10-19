@@ -36,3 +36,9 @@ test("blank capability → not resolved", async () => {
   const r = await remedy({ capability: "" }, { db });
   assert.equal(r.resolved, false);
 });
+
+test("a federation peer's proxy key (instance-<id>) is never exposed (queue item 38)", async () => {
+  const r = await remedy({ capability: "instance-p2" }, { db });
+  assert.equal(r.resolved, false);
+  assert.ok(!(await getExposedCapabilities(db)).has("instance-p2"));
+});

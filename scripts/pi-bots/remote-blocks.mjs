@@ -18,6 +18,15 @@ export const REMOTE_CANON_MOUNT = {
   "crow-blog": "/blog-mcp",
 };
 
+/**
+ * The .mcp.json server name for one (peer, capability) forward proxy. The
+ * bridge's --tools csv names `mcp__` + this (the router-mode gateway tool), so
+ * both sides MUST build it here.
+ */
+export function remoteBlockName(instanceId, canonicalId) {
+  return `crow-remote-${instanceId.slice(0, 8)}-${canonicalId}`;
+}
+
 /** Parse a raw `feature_flags` setting value → is remote_invocation enabled? */
 export function parseRemoteInvocationFlag(raw) {
   if (raw == null) return false;
@@ -69,7 +78,7 @@ export function mintRemoteBlocks(def, { peerGatewayUrls = {}, proxyPath, node, p
       warnings.push(`remote '${instanceId}::${canonicalId}' skipped — unknown/revoked peer or no gateway_url for instance '${instanceId}'`);
       continue;
     }
-    const name = `crow-remote-${instanceId.slice(0, 8)}-${canonicalId}`;
+    const name = remoteBlockName(instanceId, canonicalId);
     if (blocks[name]) {
       warnings.push(`remote '${instanceId}::${canonicalId}' skipped — block name '${name}' collides with another selected peer (8-char instanceId prefix clash); keeping the first`);
       continue;

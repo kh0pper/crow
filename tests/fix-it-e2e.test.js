@@ -43,7 +43,7 @@ async function waitForPending(predicate, deadlineMs = 2000) {
 }
 
 test("denied call → card appears → remedy → next check allowed", async () => {
-  const connected = new Map([["funkwhale", { tools: [{ name: "fw_play" }] }]]);
+  const connected = new Map([["funkwhale", { status: "connected", tools: [{ name: "fw_play" }] }]]);
   const req = { instanceAuth: { instance: { id: "peer-9" } }, body: { method: "tools/call", params: { name: "fw_play" }, id: 1 } };
 
   // 1. Denied (nothing exposed) — uses the real emitFixIt (default emitFn).
