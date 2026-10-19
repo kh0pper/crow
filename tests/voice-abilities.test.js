@@ -112,6 +112,14 @@ test("secondary words follow the four, from listed families only; add-on names a
   assert.equal(r.none, false);
 });
 
+test("secondary words and add-on names respect the bot's policy: a family none of whose tools may run is never named", () => {
+  const tools = T("crow_projects", "crow_blog", "nt_publish_page");
+  const projects = new Set(Object.keys(TOOL_MANIFESTS.projects.tools));
+  const r = run(tools, { allowed: (n) => !projects.has(n) && n !== "nt_publish_page" });
+  assert.deepEqual(r.items.map((x) => x.id), ["blog"]);
+  assert.deepEqual(run(tools, { allowed: () => false }), { items: [], none: true });
+});
+
 test("an add-on family with no phrase list is not named (it only works after an escalation the card cannot promise)", () => {
   const r = run(T("todo_list_items"));
   assert.deepEqual(r, { items: [], none: true });

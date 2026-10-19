@@ -101,13 +101,17 @@ export function voiceAbilities({ tools = [], hidden = [], classify, escalates = 
     for (const b of backing) shownFamilies.add(b.family);
   }
   const present = new Set(tools.map((t) => anyCls.famOf(t)).filter((f) => typeof f === "string"));
-  for (const s of SECONDARY) if (present.has(s.family) && families.hasList(s.family)) items.push({ id: s.id, quick: true });
+  // A word or a name is shown only when the bot's policy lets at least one of its tools run.
+  for (const s of SECONDARY) {
+    if (present.has(s.family) && families.hasList(s.family) && families.categoryTools(s.family).some((n) => allowed(n))) items.push({ id: s.id, quick: true });
+  }
   // An add-on is named by its manifest name only when it has a phrase list (the quick model gets it on its
   // words) and none of its tools touches a calendar, reminder, message or list it could not be shown doing:
   // "Calendar App" on a bot that can only read the calendar would read as "adds to my calendar".
   const touchesObject = new Set(tools.filter((t) => objectWord(t.name)).map((t) => anyCls.famOf(t)));
   for (const f of present) {
     if (!f.startsWith("addon:") || shownFamilies.has(f) || touchesObject.has(f) || !families.hasList(f)) continue;
+    if (!tools.some((t) => anyCls.famOf(t) === f && allowed(t.name))) continue;
     items.push({ id: f, quick: true, label: families.nameOf(f) || f.slice(6) });
   }
   if (memoryOn) items.push({ id: "memory", quick: true });
