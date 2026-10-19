@@ -145,10 +145,9 @@ async function measure(page, w, h, { textSize = null, css = "", openMenu = false
     if (o.exceptionDetails) throw new Error(JSON.stringify(o.exceptionDetails)); return o.result.value; };
   try {
     await send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: w < 700 });
-    if (textSize) {
-      await send("Page.enable");
-      await send("Page.addScriptToEvaluateOnNewDocument", { source: `try{localStorage.setItem("crow-text-size",${JSON.stringify(textSize)})}catch(e){}` });
-    }
+    // Always set the size: tabs share the profile's localStorage, so a previous xlarge run would leak into a "default" one.
+    await send("Page.enable");
+    await send("Page.addScriptToEvaluateOnNewDocument", { source: `try{localStorage.setItem("crow-text-size",${JSON.stringify(textSize || "default")})}catch(e){}` });
     await send("Page.navigate", { url: `http://${chrome.pageHost}:${port}/${page}` });
     let ok = false;
     for (let i = 0; i < 75 && !ok; i++) { await new Promise((r) => setTimeout(r, 200)); try { ok = await evalIn("!!document.querySelector('.content-body') && document.readyState==='complete'"); } catch {} }
@@ -184,6 +183,7 @@ async function measure(page, w, h, { textSize = null, css = "", openMenu = false
       var cols=Array.prototype.slice.call(document.querySelectorAll('#bb-board .bb-col')).filter(vis).map(function(c){return c.getAttribute('data-col');});
       var tabs=document.querySelector('.bb-lane-tabs');
       return JSON.stringify({
+        textSizeAttr: document.documentElement.getAttribute('data-text-size'),
         doc: document.documentElement.scrollWidth-innerWidth,
         body: cb.scrollWidth-cb.clientWidth,
         titleLines: Object.keys(lines).length,
@@ -207,6 +207,7 @@ async function measure(page, w, h, { textSize = null, css = "", openMenu = false
         kkAbil: Array.prototype.slice.call(document.querySelectorAll('.kk-abil')).filter(function(e){return e.textContent;}).map(function(e){var r=e.getBoundingClientRect(), p=e.parentElement.getBoundingClientRect();
           return {l:Math.round(r.left),r:Math.round(r.right),pl:Math.round(p.left),pr:Math.round(p.right),sw:e.scrollWidth-e.clientWidth};})
       });})()`));
+    assert.equal(m.textSizeAttr, textSize || "default", "the page ran at the intended text size (tabs share localStorage)");
     if (shot && SHOT_DIR) {
       const full = await evalIn("Math.ceil(document.documentElement.scrollHeight)");
       await send("Emulation.setDeviceMetricsOverride", { width: w, height: Math.max(h, Math.min(full, 3000)), deviceScaleFactor: 1, mobile: w < 700 });
