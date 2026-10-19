@@ -16,7 +16,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { jsonSchemaPropertiesToZod } from "../shared/json-schema-to-zod.js";
+import { jsonSchemaToZodObject, SOURCE_BUDGET } from "../shared/json-schema-to-zod.js";
 import { sortedServers, sortedByName } from "../shared/stable-order.js";
 import { INTEGRATIONS, isIntegrationConfigured, getSpawnEnv } from "./integrations.js";
 import { createDbClient } from "../db.js";
@@ -596,7 +596,7 @@ export function createProxyServer(filter) {
       // Tools surface under their upstream name. Sources already self-namespace
       // (crow_browser_*, brave_web_search, etc.). If two sources do collide on
       // a tool name, the first one registered keeps it and the clash is logged
-      // once per process (warnToolClash) — server.tool() throws on a
+      // once per process (warnToolClash) — registerTool() throws on a
       // duplicate, and one bad source must not fail every session.
       if (filter?.allowTools && !filter.allowTools.includes(tool.name)) continue;
       if (filter?.denyTools?.includes(tool.name)) continue;
@@ -604,12 +604,10 @@ export function createProxyServer(filter) {
       if (holder !== undefined) { warnToolClash(tool.name, holder, integrationId); continue; }
       owners.set(tool.name, integrationId);
 
-      const zodShape = jsonSchemaPropertiesToZod(tool.inputSchema);
-
-      server.tool(
+      // Re-publish the upstream's types (servers/shared/json-schema-to-zod.js).
+      server.registerTool(
         tool.name,
-        tool.description || `Tool from ${integrationId}`,
-        zodShape,
+        { description: tool.description || `Tool from ${integrationId}`, inputSchema: jsonSchemaToZodObject(tool.inputSchema, (entry.schemaPool ||= { units: SOURCE_BUDGET })) },
         async (args) => {
           try {
             const result = await entry.client.callTool({

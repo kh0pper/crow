@@ -1,7 +1,7 @@
 {
   "id": "sunvox-studio",
   "name": "SunVox Studio",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "AI-operable music engine — inspect, render and compose SunVox/XM/MOD tracker projects via the MIT-licensed SunVox library. Headless offline rendering (~130x realtime, no audio device) and programmatic composition from JSON specs. Pairs with Funkwhale for playback.",
   "type": "mcp-server",
   "author": "Crow",

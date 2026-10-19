@@ -963,7 +963,10 @@ export function createBrowserServer(options = {}) {
     "crow_browser_export",
     "Export previously scraped data as CSV or JSON file.",
     {
-      data: z.array(z.record(z.string(), z.any())).describe("Array of data objects to export"),
+      // z.object({}).passthrough(), not z.record(z.string(), z.any()): that published {}
+      // values, which a grammar-constrained local model can only fill with objects
+      // (queue item 26). Same acceptance: any object, every key kept.
+      data: z.array(z.object({}).passthrough()).describe("Array of data objects to export (one object per row)"),
       format: z.enum(["csv", "json"]).describe("Export format"),
       filename: z.string().optional().describe("Output filename (saved to this instance's browser-exports/ directory — see crow_browser_status for the resolved path)"),
     },
@@ -1148,7 +1151,28 @@ export function createBrowserServer(options = {}) {
     "crow_browser_add_cookies",
     "Inject cookies into the current context (e.g. a copied session). Each cookie needs name, value, and either url or domain+path.",
     {
-      cookies: z.array(z.record(z.string(), z.any())).describe("Array of Playwright cookie objects"),
+      // Playwright's Cookie fields, typed (the old z.record(z.string(), z.any()) published {}
+      // values; queue item 26). Open object: newer Playwright fields still pass through.
+      // sameSite is normalised to Playwright's spelling. value last (it can be long).
+      cookies: z.array(z.object({
+        name: z.string(),
+        domain: z.string().optional(),
+        path: z.string().optional(),
+        url: z.string().optional(),
+        expires: z.number().optional().describe("Unix time in seconds; -1 = session cookie"),
+        httpOnly: z.boolean().optional(),
+        secure: z.boolean().optional(),
+        // Browser-extension exports spell it lower-case, no_restriction or unspecified.
+        sameSite: z.preprocess(
+          (v) => {
+            if (typeof v !== "string") return v;
+            const k = v.toLowerCase();
+            return k === "unspecified" ? undefined : ({ strict: "Strict", lax: "Lax", none: "None", no_restriction: "None" })[k] || v;
+          },
+          z.enum(["Strict", "Lax", "None"]).optional(),
+        ),
+        value: z.string(),
+      }).passthrough()).describe("Array of Playwright cookie objects: name, value, and either url or domain+path"),
     },
     async ({ cookies }) => {
       try {

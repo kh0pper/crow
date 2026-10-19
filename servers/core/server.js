@@ -25,6 +25,7 @@ import { createSharingServer } from "../sharing/server.js";
 import { createBlogServer } from "../blog/server.js";
 import { TOOL_MANIFESTS, getToolNames } from "../gateway/tool-manifests.js";
 import { generateInstructions } from "../shared/instructions.js";
+import { jsonSchemaToZodObject } from "../shared/json-schema-to-zod.js";
 
 const SERVER_FACTORIES = {
   memory: createMemoryServer,
@@ -97,13 +98,10 @@ export async function createCoreServer(dbPath) {
     const { tools } = await client.listTools();
 
     for (const tool of tools) {
-      // Convert JSON Schema to Zod for registration
-      const zodShape = jsonSchemaToZodShape(tool.inputSchema);
-
-      const registeredTool = server.tool(
+      // Re-publish the upstream's types (servers/shared/json-schema-to-zod.js).
+      const registeredTool = server.registerTool(
         tool.name,
-        tool.description || `Tool from ${name}`,
-        zodShape,
+        { description: tool.description || `Tool from ${name}`, inputSchema: jsonSchemaToZodObject(tool.inputSchema) },
         async (args) => {
           try {
             const result = await client.callTool({
@@ -261,50 +259,4 @@ export async function createCoreServer(dbPath) {
   }
 
   return server;
-}
-
-/**
- * Convert JSON Schema properties to a Zod shape object.
- * Simplified version — handles common MCP tool parameter types.
- */
-function jsonSchemaToZodShape(schema) {
-  if (!schema || !schema.properties) return {};
-
-  const shape = {};
-  const required = new Set(schema.required || []);
-
-  for (const [key, prop] of Object.entries(schema.properties)) {
-    let zodProp = jsonSchemaToZodProp(prop);
-    if (prop.description) zodProp = zodProp.describe(prop.description);
-    if (!required.has(key)) zodProp = zodProp.optional();
-    shape[key] = zodProp;
-  }
-  return shape;
-}
-
-function jsonSchemaToZodProp(prop) {
-  if (!prop) return z.string();
-
-  if (prop.anyOf) {
-    const nonNull = prop.anyOf.filter((s) => s.type !== "null");
-    if (nonNull.length === 1) return jsonSchemaToZodProp(nonNull[0]).optional();
-    return z.any();
-  }
-
-  switch (prop.type) {
-    case "string":
-      if (prop.enum) return z.enum(prop.enum);
-      return z.string();
-    case "number":
-    case "integer":
-      return z.number();
-    case "boolean":
-      return z.boolean();
-    case "array":
-      return z.array(prop.items ? jsonSchemaToZodProp(prop.items) : z.any());
-    case "object":
-      return z.record(z.any());
-    default:
-      return z.any();
-  }
 }
