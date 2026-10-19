@@ -62,11 +62,11 @@ Mastodon stack is up. Next steps:
   2. Expose via Caddy (one-time):
        caddy_add_federation_site {
          domain: "${MASTODON_LOCAL_DOMAIN:-mastodon.example.com}",
-         upstream: "mastodon-web:3000",
+         upstream: "crow-mastodon-web:3000",
          profile: "activitypub-mastodon"
        }
-     The activitypub-mastodon profile wires /api/v1/streaming to
-     mastodon-streaming:4000 and sets Mastodon's static-asset cache headers.
+     The activitypub-mastodon profile sends /api/v1/streaming to
+     crow-mastodon-streaming:4000 and everything else to web.
 
   3. Log in at https://${MASTODON_LOCAL_DOMAIN:-<your-domain>}/.
      Settings → Development → New Application, grant

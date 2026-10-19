@@ -45,7 +45,7 @@ Gated by F.0's hardware check. Refused below **1 GB effective RAM after committe
      "profile": "lemmy"
    }
    ```
-   `/api`, `/pictrs`, `/feeds`, `/nodeinfo`, `/.well-known`, ActivityPub requests (`Accept: application/*`) and every POST go to Lemmy's backend (`crow-lemmy:8536`, override with `backend_upstream`), everything else to lemmy-ui.
+   `/api`, `/pictrs`, `/feeds`, `/nodeinfo`, `/version`, `/.well-known`, `/sitemap.xml`, ActivityPub reads (GET/HEAD with `Accept: application/activity+json` or `application/ld+json`) and every other method (inbox deliveries) go to Lemmy's backend (`crow-lemmy:8536`, override with `backend_upstream`), everything else to lemmy-ui.
 3. Obtain an auth JWT:
    ```bash
    curl -X POST https://lemmy.example.com/api/v3/user/login \

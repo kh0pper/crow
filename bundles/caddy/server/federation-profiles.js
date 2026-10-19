@@ -185,6 +185,16 @@ export function upstreamProblem(s) {
   return null;
 }
 
+/** The container name of an upstream upstreamProblem accepts (lower-cased). */
+export function upstreamHost(s) {
+  return String(s).replace(/^https?:\/\//i, "").split(":")[0].toLowerCase();
+}
+
+/** The backend a split profile uses when backend_upstream is omitted. */
+export function defaultBackend(profile) {
+  return Object.hasOwn(SPLIT_PROFILES, profile) ? SPLIT_PROFILES[profile].defaultBackend : undefined;
+}
+
 /** True when upstreamProblem finds nothing. */
 export function upstreamLike(s) {
   return upstreamProblem(s) === null;

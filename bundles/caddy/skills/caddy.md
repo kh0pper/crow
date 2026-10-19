@@ -56,8 +56,8 @@ domain is requested. It caches state in `~/.crow/caddy/data/` (mode 0700).
 
 ```
 caddy_add_site {
-  "domain": "notes.example.com",
-  "upstream": "localhost:3040"
+  "domain": "music.example.com",
+  "upstream": "crow-funkwhale:80"
 }
 ```
 
@@ -103,8 +103,10 @@ tools cover this without requiring hand-edited Caddyfiles.
 
 Installing Caddy creates the external docker network `crow-federation`
 (via `scripts/post-install.sh`). Every federated bundle joins this same
-network, so Caddy reaches upstreams by docker service name (e.g.,
-`dendrite:8008`, `gts:8080`) rather than by host-published port. No app
+network, so Caddy reaches upstreams by their container name on it (e.g.,
+`crow-dendrite:8008`, `crow-gotosocial:8080`) rather than by host-published
+port. Every upstream-taking tool checks that the name is a container on
+`crow-federation` (start the extension first). No app
 port is published to the host by default — federated apps are only
 reachable through Caddy's 443.
 
@@ -138,8 +140,9 @@ Profiles:
   (`crow-mastodon-web:3000`).
 - `lemmy` — the `activitypub` settings, with the split Lemmy needs:
   lemmy-ui serves the web app only, so `/api`, `/pictrs`, `/feeds`,
-  `/nodeinfo`, `/.well-known`, ActivityPub requests (`Accept:
-  application/*`) and every POST go to `backend_upstream` (default
+  `/nodeinfo`, `/version`, `/.well-known`, `/sitemap.xml`, ActivityPub
+  reads (GET/HEAD with `Accept: application/activity+json` or
+  `application/ld+json`) and every other method go to `backend_upstream` (default
   `crow-lemmy:8536`); everything else goes to `upstream`
   (`crow-lemmy-ui:1234`).
 - `peertube` — 8 GB body (direct video uploads), 1800s read/write
@@ -179,7 +182,7 @@ the same SNI.
 ```
 caddy_add_matrix_federation_port {
   "domain": "matrix.example.com",
-  "upstream_8448": "dendrite:8448"
+  "upstream_8448": "crow-dendrite:8448"
 }
 ```
 

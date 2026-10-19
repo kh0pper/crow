@@ -2619,14 +2619,14 @@
           "name": "LEMMY_API_PORT",
           "description": "Loopback port Lemmy's API is published on for Crow's MCP server and panel (127.0.0.1 only; the public site goes through Caddy). Change it only if 8040 is taken.",
           "default": "8040",
-          "pattern": "^[0-9]{2,5}$",
+          "pattern": "^[1-9][0-9]{1,4}$",
           "pattern_hint": "a port number",
           "required": false
         }
       ],
       "ports": [],
       "webUI": null,
-      "notes": "Four containers (lemmy + lemmy-ui + postgres + pict-rs); data lives in two Docker volumes (database, images), removed by uninstall with delete data. On its first start Lemmy creates the admin admin_pending with the generated password saved in Settings → Passwords; log in with it, then change the password and rename the account or add your own admin. lemmy-ui does not proxy the API: the public site must send /api, /pictrs, /feeds, /nodeinfo, /.well-known, ActivityPub requests (Accept: application/*) and POSTs to Lemmy and the rest to lemmy-ui. caddy_add_federation_site with profile lemmy and upstream crow-lemmy-ui:1234 writes that site (backend crow-lemmy:8536). Lemmy's API is also published on 127.0.0.1:8040 (LEMMY_API_PORT) for Crow's MCP server and panel, which run on the host. Federation, registration and captcha are site settings in Lemmy's Admin → Settings (Lemmy 0.19 does not read them from its config file). Licensing: Lemmy and lemmy-ui are AGPL-3.0 (image labels: AGPL-3.0-or-later), pict-rs is AGPL-3.0-only, Postgres uses the PostgreSQL License. Crow pulls the unmodified upstream images and runs them as separate containers, so Crow's own code stays MIT; a hosted Crow offering that runs Lemmy for other people must offer them the source of the Lemmy version it runs, including any changes (AGPL section 13).",
+      "notes": "Four containers (lemmy + lemmy-ui + postgres + pict-rs); data lives in two Docker volumes (database, images), removed by uninstall with delete data. On its first start Lemmy creates the admin admin_pending with the generated password saved in Settings → Passwords; log in with it, then change the password and rename the account or add your own admin. lemmy-ui does not proxy the API: the public site must send /api, /pictrs, /feeds, /nodeinfo, /version, /.well-known, /sitemap.xml, ActivityPub reads (GET/HEAD asking for application/activity+json or ld+json) and every other method to Lemmy, and the rest to lemmy-ui. caddy_add_federation_site with profile lemmy and upstream crow-lemmy-ui:1234 writes that site (backend crow-lemmy:8536). Lemmy's API is also published on 127.0.0.1:8040 (LEMMY_API_PORT) for Crow's MCP server and panel, which run on the host. Federation, registration and captcha are site settings in Lemmy's Admin → Settings (Lemmy 0.19 does not read them from its config file). Licensing: Lemmy and lemmy-ui are AGPL-3.0 (image labels: AGPL-3.0-or-later), pict-rs is AGPL-3.0-only, Postgres uses the PostgreSQL License. Crow pulls the unmodified upstream images and runs them as separate containers, so Crow's own code stays MIT; a hosted Crow offering that runs Lemmy for other people must offer them the source of the Lemmy version it runs, including any changes (AGPL section 13).",
       "official": true
     },
     {

@@ -33,7 +33,9 @@ test("lemmy: API, media, feeds, nodeinfo, well-known, ActivityPub and POST go to
   assert.match(block("lemmy_activitypub"), /^\s*header_regexp Accept \(\?i\)application\/\(activity\|ld\)\[\+\]json$/m);
   assert.match(block("lemmy_write"), /^\s*not method GET HEAD$/m);
   assert.doesNotMatch(out, /\\/, "no backslash for the Caddyfile lexer");
-  const re = new RegExp("(?i)".length ? "application/(activity|ld)[+]json" : "", "i");
+  // The rendered regex itself (Go's (?i) prefix becomes JS's "i" flag).
+  const rendered = block("lemmy_activitypub").match(/header_regexp Accept (\S+)/)[1];
+  const re = new RegExp(rendered.replace(/^\(\?i\)/, ""), "i");
   for (const ok of ["application/activity+json", 'application/ld+json; profile="https://www.w3.org/ns/activitystreams"', "text/html, Application/Activity+JSON"]) assert.match(ok, re, ok);
   for (const no of ["application/json", "text/html", "application/xhtml+xml"]) assert.doesNotMatch(no, re, no);
   const h = handles(out);
@@ -106,4 +108,72 @@ test("the rendered site round-trips through the Caddyfile writer: one block, wel
   // Re-running replaces, never duplicates.
   const again = upsertRawSite(src, "lemmy.example.com", body);
   assert.equal(parseSites(again).length, 1);
+});
+
+// ---- the tool handlers (an in-memory MCP client, a stub admin API, a scratch config) ----
+
+import { createServer } from "node:http";
+import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+const { createCaddyServer } = await import("../bundles/caddy/server/server.js");
+
+async function withTools(names, fn) {
+  const loads = [];
+  const admin = createServer((req, res) => { let b = ""; req.on("data", (c) => { b += c; }); req.on("end", () => { loads.push({ url: req.url, body: b }); res.end("{}"); }); });
+  await new Promise((r) => admin.listen(0, "127.0.0.1", r));
+  const dir = mkdtempSync(join(tmpdir(), "crow-caddy-tools-"));
+  const saved = { a: process.env.CADDY_ADMIN_URL, c: process.env.CADDY_CONFIG_DIR };
+  process.env.CADDY_ADMIN_URL = `http://127.0.0.1:${admin.address().port}`;
+  process.env.CADDY_CONFIG_DIR = dir;
+  const server = createCaddyServer({ networkNames: async () => { if (names instanceof Error) throw names; return new Set(names); } });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "t", version: "1" });
+  await Promise.all([server.connect(a), client.connect(b)]);
+  const call = async (name, args) => (await client.callTool({ name, arguments: args })).content.map((c) => c.text).join("");
+  try { return await fn(call, { loads, caddyfile: () => (existsSync(join(dir, "Caddyfile")) ? readFileSync(join(dir, "Caddyfile"), "utf8") : "") }); } finally {
+    await client.close(); admin.close(); rmSync(dir, { recursive: true, force: true });
+    for (const [k, v] of [["CADDY_ADMIN_URL", saved.a], ["CADDY_CONFIG_DIR", saved.c]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
+}
+
+test("tool: the lemmy profile writes one split site when both containers are on Caddy's network", async () => {
+  await withTools(["crow-lemmy", "crow-lemmy-ui", "lemmy"], async (call, { loads, caddyfile }) => {
+    const out = await call("caddy_add_federation_site", { domain: "lemmy.example.com", upstream: "crow-lemmy-ui:1234", profile: "lemmy" });
+    assert.match(out, /Added federation site lemmy\.example\.com/, out);
+    assert.equal(loads.length, 1);
+    assert.match(caddyfile(), /handle @lemmy_write \{/);
+  });
+});
+
+test("tool: upstreams must be containers on crow-federation; Caddy itself, its admin port and unknown names are refused (all three tools)", async () => {
+  await withTools(["crow-lemmy-ui", "crow-dendrite"], async (call, { loads }) => {
+    const cases = [
+      ["caddy_add_federation_site", { domain: "l.example.com", upstream: "crow-lemmy-ui:1234", profile: "lemmy" }, /crow-lemmy is not a container/],
+      ["caddy_add_federation_site", { domain: "l.example.com", upstream: "crow-lemmy-ui:1234", profile: "lemmy", backend_upstream: "crow-lemmy-ui:2019" }, /2019/],
+      ["caddy_add_federation_site", { domain: "g.example.com", upstream: "grackle:3002", profile: "activitypub" }, /not a container/],
+      ["caddy_add_site", { domain: "a.example.com", upstream: "localhost:2019" }, /Caddy/],
+      ["caddy_add_site", { domain: "a.example.com", upstream: "127.0.0.1:3001" }, /upstream/],
+      ["caddy_add_matrix_federation_port", { domain: "m.example.com", upstream_8448: "crow-caddy:2019" }, /2019|Caddy/],
+      ["caddy_add_matrix_federation_port", { domain: "m.example.com", upstream_8448: "tailnet-box:8448" }, /not a container/],
+    ];
+    for (const [tool, args, re] of cases) assert.match(await call(tool, args), re, `${tool} ${JSON.stringify(args)}`);
+    assert.equal(loads.length, 0, "nothing reached Caddy");
+    assert.match(await call("caddy_add_matrix_federation_port", { domain: "m.example.com", upstream_8448: "crow-dendrite:8448" }), /Added Matrix federation listener/);
+  });
+  await withTools(new Error("docker: not found"), async (call, { loads }) => {
+    assert.match(await call("caddy_add_site", { domain: "a.example.com", upstream: "crow-x:80" }), /could not list the containers/, "fail-closed without Docker");
+    assert.equal(loads.length, 0);
+  });
+});
+
+test("tool: wellknown is refused for the split profiles; a wellknown body_json must be JSON", async () => {
+  await withTools(["crow-lemmy", "crow-lemmy-ui", "crow-gotosocial"], async (call, { loads }) => {
+    assert.match(await call("caddy_add_federation_site", { domain: "l.example.com", upstream: "crow-lemmy-ui:1234", profile: "lemmy", wellknown: { nodeinfo: { href: "https://l.example.com/nodeinfo/2.0" } } }), /leave wellknown out/);
+    assert.match(await call("caddy_add_federation_site", { domain: "g.example.com", upstream: "crow-gotosocial:8080", profile: "activitypub", wellknown: { nodeinfo: { body_json: "{not json" } } }), /not valid JSON/);
+    assert.match(await call("caddy_add_federation_site", { domain: "g.example.com", upstream: "crow-gotosocial:8080", profile: "activitypub", backend_upstream: "crow-lemmy:8536" }), /backend/i);
+    assert.equal(loads.length, 0);
+  });
 });
