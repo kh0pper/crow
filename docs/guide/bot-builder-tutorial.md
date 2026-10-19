@@ -73,9 +73,19 @@ Everything technical (the raw definition, diagnostics) is tucked under **Advance
 
 For a Crow Messages bot: open the bot's **Basics** tab, click **Share access**, and you get a link + QR code. Open the link (or open **Messages** in the sidebar) and say hello. For other channels, message it where it lives — email it, mention it on Discord, and so on.
 
+## Your bot list
+
+The Bot Builder page lists your bots as cards.
+
+- Each **card** shows the bot's name, a status dot (**On**, **Off** or **Working now**), its purpose, its model and when it was last updated. **Chat** appears only on a bot with the Perch channel; **Edit** opens the editor.
+- The card's **⋯** menu has **Open board**, or **Turn on a board** for a bot without one (a bot whose custom tracker is not set up yet shows **Set up its tracker in Edit** instead). Turning a board on creates "*Name*'s board", moves the bot's working folder into it (old chats are carried over), and from then on the bot sees its board's cards in every chat. After that come **Give a task…**, **Use for voice…** (only for a bot that is turned on, and only when the Kiosk extension is installed), **Sessions**, **Project** (when the bot has one) and **Delete…**.
+- **Give a task…** opens a dialog for a bot with a board: write a new task or pick a waiting card, then choose **Add to board for later** (the default) or **Start now** (only for a bot with a Perch chat). On a bot whose board is turned off (or a bot that is off), **Give a task…** is a link to its board instead of the dialog.
+- On the Bot Board, cards that belong to no bot wait in the **Unassigned** lane. **Give to…** hands one to a bot.
+- **+ New bot** sits at the top of the page and as the last tile of the grid.
+
 ## Cleaning up
 
-Made a test bot you don't want? Open it, open **Advanced** and choose **Delete this bot** (or use the **Delete this bot…** link on the bot list) and confirm. The confirmation page lists exactly what will be removed — including your conversation history with that bot — before you commit. Deleting cannot be undone.
+Made a test bot you don't want? Open it, open **Advanced** and choose **Delete this bot**, or on the bot list open the bot card's **⋯** menu and choose **Delete…**. Either way you reach a confirmation page that lists exactly what will be removed — including your conversation history with that bot — before you commit. Deleting cannot be undone.
 
 ## Channel guides
 

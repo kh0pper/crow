@@ -652,7 +652,7 @@ const MEDIA = "/api/kiosk/session/media";
 const OWNER = "tab-owner-aaaaaaaaaaaa";
 const TICKET_IN = /\/display\/t\/([A-Za-z0-9_-]{22})\/stream/;
 
-async function barServe() {
+async function barServe({ verifySession = auth.verifySession, barCheckTimeoutMs } = {}) {
   const { sessionDisplayId } = await import("../bundles/kiosk/server/session-display.js");
   const clock = { t: Date.now() };
   const sweeps = [];
@@ -673,7 +673,8 @@ async function barServe() {
   const k = kiosk.createKioskRuntime({
     Router: express.Router, json: express.json, WebSocketServer,
     isAllowedNetwork: auth.isAllowedNetwork, csrfMiddleware: csrf.csrfMiddleware, csrfTokenAccepted: csrf.csrfTokenAccepted,
-    sessionFromRequest: auth.sessionFromRequest, verifySession: auth.verifySession,
+    sessionFromRequest: auth.sessionFromRequest, verifySession,
+    ...(barCheckTimeoutMs ? { barCheckTimeoutMs } : {}),
     openDb: open, deviceStore: store,
     settings: { readSetting: registry.readSetting, writeSetting: registry.writeSetting },
     voice: { runVoiceTurn: async () => ({ route: "fast", timings: {} }), speakText: async () => true },
@@ -1025,4 +1026,262 @@ test("I2 (bar on every page): a ticket's third concurrent stream is refused 429 
     a.body?.cancel?.(); b.body?.cancel?.();
     c.ws.close();
   } finally { r.close(); }
+});
+
+test("B4 parity: the runtime's item-id rule is the core protocol's ITEM_ID_RE (the bundle cannot import core by repo path, so it keeps a copy)", async () => {
+  const { ITEM_ID_RE } = await import("../servers/gateway/dashboard/shared/kiosk-media-protocol.js");
+  assert.ok(kiosk.ITEM_ID instanceof RegExp, "runtime exports ITEM_ID");
+  assert.equal(kiosk.ITEM_ID.source, ITEM_ID_RE.source);
+  assert.equal(kiosk.ITEM_ID.flags, ITEM_ID_RE.flags);
+});
+
+/** B1 rig: a station plays on the bar display, the owner reports an error (a reload waits), pauses, and the reload timer fires. */
+async function pausedDuringReload(r) {
+  const c = await r.open();
+  r.play(sessionToken, ["R"], "radio");
+  const id = r.idOf();
+  const first = r.k.media.itemId(id);
+  r.k.media.onEvent(id, { id: first, state: "playing" });
+  assert.equal((await r.post({ do: "error", id: first, owner: OWNER })).status, 200);
+  assert.equal((await r.post({ do: "pause", id: first, owner: OWNER })).status, 200);
+  for (const t of r.mediaTimers.filter((x) => x.on)) { t.on = false; t.fn(); }
+  await c.shut();
+  return { id, first };
+}
+
+test("B1 a station paused while its reload waited survives the bar sweeps, and the bar's resume plays it on a live ticket", async () => {
+  const r = await barServe();
+  try {
+    const { id, first } = await pausedDuringReload(r);
+    r.clock.t += 60_000; await r.sweep();
+    r.clock.t += 60_000; await r.sweep();
+    assert.equal(r.k.media.active(id), true, "the sweep kept the paused station");
+    assert.equal(r.k.barDisplays(), 1);
+    const res = await r.post({ do: "resume", id: first, owner: OWNER });
+    assert.equal(res.status, 200);
+    const v = await res.json();
+    assert.notEqual(v.item.id, first);
+    assert.equal((await r.stream(v.item.url)).status, 200, "the fresh ticket answers");
+  } finally { r.close(); }
+});
+
+test("B1 the paused, reload-pending station still ends at the 12 h cap: one sweep past it, it is inactive and no login check is kept", async () => {
+  const r = await barServe();
+  try {
+    const { id } = await pausedDuringReload(r);
+    r.clock.t += 12 * 60 * 60 * 1000 + 1;
+    await r.sweep();
+    assert.equal(r.k.media.active(id), false);
+    assert.equal(r.k.barDisplays(), 0);
+  } finally { r.close(); }
+});
+
+/** B2 rig: a login store that can be made to throw (or hang) on demand, for the bar's minute check only. */
+function flakyStore() {
+  const failing = { on: false, hang: false };
+  const verifySession = async (tok) => {
+    if (failing.hang) return new Promise(() => {});
+    if (failing.on) throw new Error("store unreadable");
+    return auth.verifySession(tok);
+  };
+  return { failing, verifySession };
+}
+
+test("B2 the bar's login check failing BAR_CHECK_FAILURES minutes in a row closes the bar audio (fail closed), logged without the ticket", async () => {
+  assert.equal(kiosk.BAR_CHECK_FAILURES, 3);
+  const { failing, verifySession } = flakyStore();
+  const r = await barServe({ verifySession });
+  try {
+    const c = await r.open();
+    const path = r.play();
+    await c.shut();
+    failing.on = true;
+    for (let i = 1; i < kiosk.BAR_CHECK_FAILURES; i++) {
+      r.clock.t += 60_000; await r.sweep();
+      assert.equal((await r.stream(path)).status, 200, `still playing after ${i} failed check(s)`);
+    }
+    r.clock.t += 60_000; await r.sweep();
+    assert.equal((await r.stream(path)).status, 404, "the third failure in a row ends it");
+    assert.equal(r.k.media.active(r.idOf()), false);
+    assert.equal(r.k.barDisplays(), 0);
+    const line = r.barLogs.find((l) => /session check failed 3 times/.test(l));
+    assert.ok(line, JSON.stringify(r.barLogs));
+    assert.ok(line.includes(r.idOf()), "names the display");
+    for (const l of r.barLogs) { assert.doesNotMatch(l, TICKET_IN, l); assert.ok(!l.includes(path.split("/")[3]), l); }
+  } finally { r.close(); }
+});
+
+test("B2 a successful check resets the count: fail, fail, succeed, fail, fail leaves the audio playing", async () => {
+  const { failing, verifySession } = flakyStore();
+  const r = await barServe({ verifySession });
+  try {
+    const c = await r.open();
+    const path = r.play();
+    await c.shut();
+    for (const fail of [true, true, false, true, true]) { failing.on = fail; r.clock.t += 60_000; await r.sweep(); }
+    assert.equal((await r.stream(path)).status, 200);
+    assert.equal(r.k.media.active(r.idOf()), true);
+    assert.equal(r.k.barDisplays(), 1);
+  } finally { r.close(); }
+});
+
+test("B2 a hung login check counts as a failure after the check timeout, and an id whose check is in flight is not checked twice", { timeout: 10_000 }, async () => {
+  const { failing, verifySession } = flakyStore();
+  const r = await barServe({ verifySession, barCheckTimeoutMs: 20 });
+  try {
+    const c = await r.open();
+    const path = r.play();
+    await c.shut();
+    failing.hang = true;
+    // Two overlapping sweeps (a slow minute): one check, so one failure.
+    await Promise.all([r.sweep(), r.sweep()]);
+    await Promise.all([r.sweep(), r.sweep()]);
+    assert.equal((await r.stream(path)).status, 200, "two failures so far, not four");
+    await r.sweep();
+    assert.equal((await r.stream(path)).status, 404, "the third timed-out check closes the audio");
+    assert.equal(r.k.barDisplays(), 0);
+  } finally { r.close(); }
+});
+
+/** B2/B3 rig: a login store whose next check (once armed) waits until the test settles it. */
+function gatedStore() {
+  const gate = { armed: false, pending: null };
+  const verifySession = async (tok) => {
+    if (gate.armed) {
+      gate.armed = false;
+      return new Promise((resolve, reject) => { gate.pending = { resolve, reject }; });
+    }
+    return auth.verifySession(tok);
+  };
+  return { gate, verifySession };
+}
+/** Start a sweep whose bar check hangs on the gate; → { done } (the sweep) once the check is waiting. */
+async function sweepHeldAtCheck(r, gate) {
+  gate.armed = true;
+  const done = r.sweep();
+  for (let i = 0; i < 200 && !gate.pending; i++) await new Promise((res) => setTimeout(res, 5));
+  assert.ok(gate.pending, "the bar check started");
+  return { done };
+}
+
+test("B3 a bar check that answers 'logged out' only after the overlay reopened leaves the reopened overlay's audio alone", async () => {
+  const { gate, verifySession } = gatedStore();
+  const r = await barServe({ verifySession });
+  try {
+    const c = await r.open();
+    const path = r.play();
+    await c.shut();
+    r.clock.t += 60_000;
+    const { done } = await sweepHeldAtCheck(r, gate);
+    const c2 = await r.open();
+    gate.pending.resolve(false);
+    await done;
+    assert.equal(r.k.media.active(r.idOf()), true, "the stale answer did not close the device");
+    assert.equal((await r.stream(path)).status, 200);
+    c2.ws.close();
+  } finally { r.close(); }
+});
+
+test("B3 a bar check that answers 'logged out' only after a new bar hello re-registered the display is ignored", async () => {
+  const { gate, verifySession } = gatedStore();
+  const r = await barServe({ verifySession });
+  try {
+    const c = await r.open();
+    const path = r.play();
+    await c.shut();
+    r.clock.t += 60_000;
+    const { done } = await sweepHeldAtCheck(r, gate);
+    const c2 = await r.open();
+    await c2.shut();                                  // a new revalidator replaces the one in flight
+    gate.pending.resolve(false);
+    await done;
+    assert.equal(r.k.media.active(r.idOf()), true);
+    assert.equal(r.k.barDisplays(), 1, "the new revalidator is kept");
+    assert.equal((await r.stream(path)).status, 200);
+  } finally { r.close(); }
+});
+
+test("B2 a bar check that throws only after the overlay reopened is not counted (no third-failure close)", async () => {
+  const { gate, verifySession } = gatedStore();
+  const failing = { on: false };
+  const r = await barServe({ verifySession: async (tok) => { if (failing.on) throw new Error("store unreadable"); return verifySession(tok); } });
+  try {
+    const c = await r.open();
+    const path = r.play();
+    await c.shut();
+    failing.on = true;
+    for (let i = 1; i < kiosk.BAR_CHECK_FAILURES; i++) { r.clock.t += 60_000; await r.sweep(); }
+    failing.on = false;
+    r.clock.t += 60_000;
+    const { done } = await sweepHeldAtCheck(r, gate);
+    const c2 = await r.open();
+    gate.pending.reject(new Error("store unreadable"));
+    await done;
+    assert.equal(r.k.media.active(r.idOf()), true, "the late failure did not close the reopened overlay's audio");
+    assert.equal((await r.stream(path)).status, 200);
+    c2.ws.close();
+  } finally { r.close(); }
+});
+
+/** B3 rig: bar audio at volume 30, muted, the overlay closed, then the owner's stop from the bar. */
+async function stoppedInGrace(r, tok = sessionToken) {
+  const c = await r.open({ tok });
+  const path = r.play(tok);
+  const id = r.idOf(tok);
+  r.k.media.volume(id, { set: 30 });
+  r.k.media.mute(id, true);
+  await c.shut();
+  assert.equal((await r.post({ do: "stop", id: r.k.media.itemId(id), owner: OWNER }, { tok })).status, 200);
+  return { id, path };
+}
+const loadVolume = (c) => c.msgs.filter((m) => m.type === "media" && m.action === "load").at(-1)?.volume;
+
+test("B3 a bar display stopped inside the grace window keeps its volume: a reopen within 2 min plays at the same level", async () => {
+  const r = await barServe();
+  try {
+    const { id, path } = await stoppedInGrace(r);
+    r.clock.t += 60_000; await r.sweep();
+    assert.equal(r.k.barDisplays(), 0, "no login check is kept for a stopped stream");
+    assert.equal((await r.stream(path)).status, 404, "nothing streamable meanwhile");
+    assert.equal(r.k.media.view(id).volume, 30);
+    assert.equal(r.k.media.view(id).muted, true);
+    const c2 = await r.open();
+    r.play();
+    await c2.until(() => loadVolume(c2) != null);
+    assert.equal(loadVolume(c2), 30, "the level carries over (an explicit play clears mute by design)");
+    c2.ws.close();
+  } finally { r.close(); }
+});
+
+test("B3 past the grace window the stopped bar display is gone (the grace sweep runs before the bar sweep): a reopen gets the default volume", async () => {
+  const { DEFAULT_VOLUME } = await import("../bundles/kiosk/server/media.js");
+  const r = await barServe();
+  try {
+    const { id } = await stoppedInGrace(r);
+    r.clock.t += 60_000; await r.sweep();
+    r.clock.t += 2 * 60_000; await r.sweep();
+    assert.equal(r.k.media.view(id).volume, DEFAULT_VOLUME, "past grace: the entry was closed");
+    const c2 = await r.open();
+    r.play();
+    await c2.until(() => loadVolume(c2) != null);
+    assert.equal(loadVolume(c2), DEFAULT_VOLUME);
+    c2.ws.close();
+  } finally { r.close(); }
+});
+
+test("B3 a logout inside the grace window after a stop cuts nothing that streams: no ticket answers, no login check is kept, the entry goes at grace end", async () => {
+  const { DEFAULT_VOLUME } = await import("../bundles/kiosk/server/media.js");
+  const r = await barServe();
+  const { token } = await auth.mintSsoSession("test");
+  try {
+    const { id, path } = await stoppedInGrace(r, token);
+    await auth.destroySession(token);
+    await r.sweep();
+    assert.equal(r.k.barDisplays(), 0);
+    assert.equal(r.k.media.active(id), false);
+    assert.equal((await r.stream(path)).status, 404);
+    assert.equal(r.held.length, 0, "no stream was open to cut");
+    r.clock.t += 3 * 60_000; await r.sweep();
+    assert.equal(r.k.media.view(id).volume, DEFAULT_VOLUME, "the ticketless entry is gone at grace end");
+  } finally { r.close(); await auth.destroySession(token).catch(() => {}); }
 });
