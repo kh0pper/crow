@@ -383,7 +383,7 @@ test("CSS: a hidden ⋯ item and a hidden voice line really hide (the menu's dis
 // ── "By voice on displays: …" (bot voice abilities) ─────────────────────────
 const ABIL_KEYS = ["botbuilder.abilBy", "botbuilder.abilNone", "botbuilder.abilCalendar", "botbuilder.abilReminders", "botbuilder.abilMessages",
   "botbuilder.abilCrowMessages", "botbuilder.abilLists", "botbuilder.abilMemory", "botbuilder.abilProjects", "botbuilder.abilBlog",
-  "botbuilder.abilNews", "botbuilder.abilFiles", "botbuilder.abilSlower", "botbuilder.abilMore"];
+  "botbuilder.abilNews", "botbuilder.abilFiles", "botbuilder.abilSlowGroup", "botbuilder.abilBySlowOnly", "botbuilder.abilMore"];
 
 test("ability line (server part): one hidden line under each card's voice line, only with the kiosk available; the client fills it", async () => {
   const off = await render();
@@ -414,7 +414,9 @@ test("ability line: en + es strings, and the Spanish render carries none of the 
   }
   assert.ok(translations["botbuilder.abilBy"].en.includes("{list}") && translations["botbuilder.abilBy"].es.includes("{list}"));
   assert.ok(translations["botbuilder.abilBy"].en.startsWith("By voice on displays"));
-  assert.ok(translations["botbuilder.abilSlower"].en.includes("{item}") && translations["botbuilder.abilSlower"].es.includes("{item}"));
+  assert.equal(translations["botbuilder.abilSlower"], undefined, "the per-item suffix is gone");
+  assert.deepEqual(translations["botbuilder.abilSlowGroup"], { en: "slower (bigger model): {list}", es: "más lento (modelo grande): {list}" });
+  assert.deepEqual(translations["botbuilder.abilBySlowOnly"], { en: "By voice on displays, slower (bigger model): {list}", es: "Por voz en pantallas, más lento (modelo grande): {list}" });
   assert.ok(translations["botbuilder.abilMore"].en.includes("{n}") && translations["botbuilder.abilMore"].es.includes("{n}"));
   const es = await render("es", { kioskAvailable: true });
   for (const k of ["botbuilder.abilNone", "botbuilder.abilCrowMessages", "botbuilder.abilMemory", "botbuilder.abilCalendar"]) {

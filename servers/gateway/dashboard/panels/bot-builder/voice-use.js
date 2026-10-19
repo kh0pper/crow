@@ -58,7 +58,8 @@ const STRING_KEYS = {
   loadFailed: "botbuilder.voiceUseLoadFailed",
   abilBy: "botbuilder.abilBy",
   abilNone: "botbuilder.abilNone",
-  abilSlower: "botbuilder.abilSlower",
+  abilBySlowOnly: "botbuilder.abilBySlowOnly",
+  abilSlowGroup: "botbuilder.abilSlowGroup",
   abilMore: "botbuilder.abilMore",
   abilcalendar: "botbuilder.abilCalendar",
   abilreminders: "botbuilder.abilReminders",
@@ -186,15 +187,22 @@ const CLIENT = `(function(){
     var a = b ? b.abilities : null, S = st.S;
     line.removeAttribute('title');
     if (!a || !Array.isArray(a.items)) { line.textContent = ''; line.hidden = true; return; }
-    var words = [];
-    each(a.items, function(x){ var w = abilWord(x); if (w) words.push(x.quick === false ? fill(S.abilSlower, { item: w }) : w); });
-    if (!words.length) line.textContent = S.abilNone;
-    else if (words.length <= 4) line.textContent = fill(S.abilBy, { list: words.join(', ') });
+    var quick = [], slow = [];
+    each(a.items, function(x){ var w = abilWord(x); if (w) (x.quick === false ? slow : quick).push(w); });
+    if (!quick.length && !slow.length) line.textContent = S.abilNone;
     else {
-      line.textContent = fill(S.abilBy, { list: words.slice(0, 4).join(', ') + ', ' + fill(S.abilMore, { n: words.length - 4 }) });
-      line.setAttribute('title', fill(S.abilBy, { list: words.join(', ') }));
+      line.textContent = abilLineText(quick, slow, 4);
+      if (quick.length + slow.length > 4) line.setAttribute('title', abilLineText(quick, slow, Infinity));
     }
     line.hidden = false;
+  }
+  /** The quick words, then the slower ones as one group at the tail; at most cap words in all, then "+N more". */
+  function abilLineText(quick, slow, cap){
+    var S = st.S, q = quick.slice(0, cap), w = slow.slice(0, Math.max(0, cap - q.length));
+    var more = quick.length + slow.length - q.length - w.length;
+    var tail = more > 0 ? ', ' + fill(S.abilMore, { n: more }) : '';
+    if (!q.length) return fill(S.abilBySlowOnly, { list: w.join(', ') + tail });
+    return fill(S.abilBy, { list: q.join(', ') + (w.length ? ' · ' + fill(S.abilSlowGroup, { list: w.join(', ') }) : '') + tail });
   }
 
   function fitNote(row, lv){

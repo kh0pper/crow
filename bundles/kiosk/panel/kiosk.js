@@ -70,11 +70,18 @@ export const CLIENT_SCRIPT = `
   function abilText(b, memOn) {
     var a = b ? (memOn ? b.abilities_memory : b.abilities) : null;
     if (!a || !Array.isArray(a.items)) return { text: '', title: '' };
-    var words = [];
-    a.items.forEach(function (x) { var w = abilWord(x); if (w) words.push(x.quick === false ? fill(S.abil_slower, { item: w }) : w); });
-    if (!words.length) return { text: S.abil_none, title: '' };
-    if (words.length <= 4) return { text: fill(S.abil_by, { list: words.join(', ') }), title: '' };
-    return { text: fill(S.abil_by, { list: words.slice(0, 4).join(', ') + ', ' + fill(S.abil_more, { n: words.length - 4 }) }), title: fill(S.abil_by, { list: words.join(', ') }) };
+    var quick = [], slow = [];
+    a.items.forEach(function (x) { var w = abilWord(x); if (w) (x.quick === false ? slow : quick).push(w); });
+    if (!quick.length && !slow.length) return { text: S.abil_none, title: '' };
+    return { text: abilJoin(quick, slow, 4), title: quick.length + slow.length > 4 ? abilJoin(quick, slow, Infinity) : '' };
+  }
+  /** The quick words, then the slower ones as one group at the tail; at most cap words in all, then "+N more". */
+  function abilJoin(quick, slow, cap) {
+    var q = quick.slice(0, cap), w = slow.slice(0, Math.max(0, cap - q.length));
+    var more = quick.length + slow.length - q.length - w.length;
+    var tail = more > 0 ? ', ' + fill(S.abil_more, { n: more }) : '';
+    if (!q.length) return fill(S.abil_by_slow_only, { list: w.join(', ') + tail });
+    return fill(S.abil_by, { list: q.join(', ') + (w.length ? ' · ' + fill(S.abil_slow_group, { list: w.join(', ') }) : '') + tail });
   }
   /** The ability line under a picker: follows the selection (fallbackId: who answers when the picker says Automatic). */
   function abilLine(bots, sel, memOn, fallbackId) {

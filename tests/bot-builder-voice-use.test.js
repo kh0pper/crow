@@ -385,7 +385,8 @@ test("ability line: the bot's abilities in order, a slower one marked, from the 
   const p = page({ replies: [{ body: withAbil({ "a-one": { items: [{ id: "calendar", quick: false }, { id: "crow_messages", quick: true }], none: false } }) }] });
   await p.flush();
   assert.equal(p.calls.length, 1, "no extra fetch");
-  const want = fillS("botbuilder.abilBy", { list: `${fillS("botbuilder.abilSlower", { item: T("botbuilder.abilCalendar") })}, ${T("botbuilder.abilCrowMessages")}` });
+  const want = fillS("botbuilder.abilBy", { list: `${T("botbuilder.abilCrowMessages")} · ${fillS("botbuilder.abilSlowGroup", { list: T("botbuilder.abilCalendar") })}` });
+  assert.equal(want, "By voice on displays: Crow messages · slower (bigger model): calendar");
   assert.equal(p.abil("a-one").hidden, false);
   assert.equal(p.abil("a-one").textContent, want);
 });
@@ -427,5 +428,20 @@ test("ability line: Spanish labels on a Spanish page", async () => {
   const ES = (k) => translations[k].es;
   const p = page({ lang: "es", replies: [{ body: withAbil({ "a-one": { items: [{ id: "lists", quick: false }], none: false } }) }] });
   await p.flush();
-  assert.equal(p.abil("a-one").textContent, ES("botbuilder.abilBy").replace("{list}", ES("botbuilder.abilSlower").replace("{item}", ES("botbuilder.abilLists"))));
+  assert.equal(p.abil("a-one").textContent, "Por voz en pantallas, más lento (modelo grande): listas");
+});
+
+test("ability line: slower ones grouped at the tail, the cap counting both groups, the whole line in the title (en and es)", async () => {
+  const Q = (id) => ({ id, quick: true }), W = (id) => ({ id, quick: false });
+  const items = [W("calendar"), W("reminders"), Q("crow_messages"), W("lists"), Q("projects")];
+  const p = page({ replies: [{ body: withAbil({ "a-one": { items, none: false } }) }] });
+  await p.flush();
+  assert.equal(p.abil("a-one").textContent, "By voice on displays: Crow messages, projects & notes · slower (bigger model): calendar, reminders, +1 more");
+  assert.equal(p.abil("a-one").getAttribute("title"), "By voice on displays: Crow messages, projects & notes · slower (bigger model): calendar, reminders, lists");
+  const e = page({ lang: "es", replies: [{ body: withAbil({ "a-one": { items: items.slice(0, 4), none: false } }) }] });
+  await e.flush();
+  assert.equal(e.abil("a-one").textContent, "Por voz en pantallas: mensajes de Crow · más lento (modelo grande): calendario, recordatorios, listas");
+  const only = page({ replies: [{ body: withAbil({ "a-one": { items: [W("calendar"), W("reminders")], none: false } }) }] });
+  await only.flush();
+  assert.equal(only.abil("a-one").textContent, "By voice on displays, slower (bigger model): calendar, reminders");
 });
