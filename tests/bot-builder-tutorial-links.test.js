@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { docsUrl, DOCS_BASE } from "../servers/gateway/dashboard/shared/components.js";
-import { translations } from "../servers/gateway/dashboard/shared/i18n.js";
+import { translations, t } from "../servers/gateway/dashboard/shared/i18n.js";
 
 const dir = mkdtempSync(join(tmpdir(), "btb-tutorial-"));
 process.env.CROW_DATA_DIR = dir;
@@ -83,4 +83,27 @@ test("list page links the tutorial beside the CTA", async () => {
 test("tutorialLink key ships en+es", () => {
   const e = translations["botbuilder.tutorialLink"];
   assert.ok(e && e.en && e.es && e.en !== e.es);
+});
+
+// T13: the bot list is a card grid. The tutorial must not point at the old
+// list's "Delete this bot…" link, and must name the card's actions with the
+// exact UI strings (read from i18n, so a later rename fails here instead of
+// leaving the docs silently stale).
+test("tutorial describes the card grid with the current UI strings, per locale (no stale bot-list delete link)", () => {
+  for (const [lang, f, heading, ref, anchor] of [
+    ["en", "docs/guide/bot-builder-tutorial.md", "## Your bot list", "docs/guide/bot-builder.md", "](/guide/bot-builder-tutorial#your-bot-list)"],
+    ["es", "docs/es/guide/bot-builder-tutorial.md", "## Tu lista de bots", "docs/es/guide/bot-builder.md", "](/es/guide/bot-builder-tutorial#tu-lista-de-bots)"],
+  ]) {
+    const doc = readFileSync(new URL(`../${f}`, import.meta.url), "utf8");
+    assert.doesNotMatch(doc, /link on the bot list|enlace \*\*Eliminar este bot…\*\* en la lista/, `${lang}: stale bot-list delete link`);
+    assert.ok(doc.includes("**⋯**"), `${lang}: names the card's ⋯ menu`);
+    assert.ok(doc.includes(`\n${heading}\n`), `${lang}: has the "${heading}" section`);
+    for (const key of ["botbuilder.rowDelete", "botbuilder.rowTurnOn", "botbuilder.rowGiveTask", "botboard.giveTo", "botboard.unassignedLane"]) {
+      const label = t(key, lang);
+      assert.ok(label && label !== key, `${key} has a ${lang} string`);
+      assert.ok(doc.includes(`**${label}**`), `${lang}: tutorial names **${label}** (${key})`);
+    }
+    const refDoc = readFileSync(new URL(`../${ref}`, import.meta.url), "utf8");
+    assert.ok(refDoc.includes(anchor), `${lang}: the reference page links the bot-list section`);
+  }
 });

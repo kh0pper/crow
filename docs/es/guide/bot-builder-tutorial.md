@@ -71,9 +71,19 @@ Todo lo técnico (la definición sin procesar, los diagnósticos) está guardado
 
 Para un bot de Crow Messages: abre la pestaña **Lo básico** del bot, pulsa **Compartir acceso** y obtendrás un enlace + código QR. Abre el enlace (o abre **Mensajes** en la barra lateral) y salúdalo. Para otros canales, escríbele donde vive: mándale un correo, menciónalo en Discord, etcétera.
 
+## Tu lista de bots
+
+La página del Bot Builder muestra tus bots como tarjetas.
+
+- Cada **tarjeta** muestra el nombre del bot, un punto de estado (**Encendido**, **Apagado** o **Trabajando ahora**), su propósito, su modelo y cuándo se actualizó por última vez. **Chat** aparece solo en un bot con el canal Perch; **Editar** abre el editor.
+- El menú **⋯** de la tarjeta tiene **Abrir tablero**, o **Activar un tablero** para un bot que no tiene uno. Activar un tablero crea "Tablero de *Nombre*", pasa la carpeta de trabajo del bot a ese tablero (los chats anteriores se conservan) y desde entonces el bot ve las tarjetas de su tablero en cada chat. Después vienen **Darle una tarea…**, **Usar para la voz…** (solo cuando la extensión Kiosk está instalada), **Sesiones**, **Proyecto** (cuando el bot tiene uno) y **Eliminar…**.
+- **Darle una tarea…** abre un diálogo para un bot con tablero: escribe una tarea nueva o elige una tarjeta en espera, y luego elige **Añadir al tablero para después** (la opción por defecto) o **Empezar ahora** (solo para un bot con chat de Perch).
+- En el Bot Board, las tarjetas que no son de ningún bot esperan en el carril **Sin asignar**. **Dar a…** le pasa una a un bot.
+- **+ Nuevo bot** está arriba de la página y como la última tarjeta de la cuadrícula.
+
 ## Limpieza
 
-¿Creaste un bot de prueba que no quieres? Ábrelo, abre **Avanzado** y elige **Eliminar este bot** (o usa el enlace **Eliminar este bot…** en la lista de bots) y confirma. La página de confirmación muestra exactamente qué se eliminará — incluido tu historial de conversación con ese bot — antes de que lo apruebes. La eliminación no se puede deshacer.
+¿Creaste un bot de prueba que no quieres? Ábrelo, abre **Avanzado** y elige **Eliminar este bot**, o, en la lista de bots, abre el menú **⋯** de la tarjeta del bot y elige **Eliminar…**. De cualquier forma llegas a una página de confirmación que muestra exactamente qué se eliminará — incluido tu historial de conversación con ese bot — antes de que lo apruebes. La eliminación no se puede deshacer.
 
 ## Guías de canales
 
