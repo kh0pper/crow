@@ -14,6 +14,7 @@ import { randomBytes, createHash, createHmac, createCipheriv, createDecipheriv, 
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, chmodSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDefaultCrowHome, resolveInstanceDataDir } from "../shared/crow-home.js";
 import * as ed from "@noble/ed25519";
 import { sha512 } from "@noble/hashes/sha512";
 import { hkdf } from "@noble/hashes/hkdf";
@@ -26,11 +27,15 @@ ed.etc.sha512Sync = (...m) => sha512(ed.etc.concatBytes(...m));
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
- * Resolve data directory. Priority: CROW_DATA_DIR env → ~/.crow/data/ → ./data/
+ * Resolve data directory. Priority: CROW_DATA_DIR env → for a non-default
+ * CROW_HOME, resolveInstanceDataDir (the servers/db.js rule) → ~/.crow/data/ → ./data/
  */
 function resolveDataDir() {
   if (process.env.CROW_DATA_DIR) {
     return resolve(process.env.CROW_DATA_DIR);
+  }
+  if (!isDefaultCrowHome(process.env)) {
+    return resolveInstanceDataDir(process.env);
   }
   const home = process.env.HOME || process.env.USERPROFILE || "";
   const crowHome = resolve(home, ".crow", "data");

@@ -27,6 +27,7 @@ import os from "node:os";
 import { existsSync, statSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
+import { isDefaultCrowHome, resolveInstanceDataDir } from "./shared/crow-home.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -117,11 +118,17 @@ export function escapeLikePattern(input) {
 
 /**
  * Resolve the Crow data directory path.
- * Priority: CROW_DATA_DIR env → ~/.crow/data/ → ./data/ (fallback)
+ * Priority: CROW_DATA_DIR env → for a non-default CROW_HOME,
+ * dirname(CROW_DB_PATH) else <CROW_HOME>/data (queue item 33: never another
+ * instance's ~/.crow/data; servers/shared/crow-home.js) → ~/.crow/data/ →
+ * ./data/ (fallback)
  */
 export function resolveDataDir() {
   if (process.env.CROW_DATA_DIR) {
     return resolve(process.env.CROW_DATA_DIR);
+  }
+  if (!isDefaultCrowHome(process.env)) {
+    return resolveInstanceDataDir(process.env);
   }
   const home = process.env.HOME || process.env.USERPROFILE || "";
   const crowHome = resolve(home, ".crow", "data");
@@ -130,6 +137,11 @@ export function resolveDataDir() {
     return crowHome;
   }
   return resolve(__dirname, "../data");
+}
+
+/** This instance's crow.db path: CROW_DB_PATH → <resolveDataDir()>/crow.db. */
+export function resolveDbPath() {
+  return process.env.CROW_DB_PATH ? resolve(process.env.CROW_DB_PATH) : resolve(resolveDataDir(), "crow.db");
 }
 
 /**

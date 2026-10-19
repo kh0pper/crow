@@ -49,14 +49,14 @@ const DEFAULT_CROW_HOME = join(homedir(), ".crow");
 /**
  * This instance's canonical values for the four instance-scoped env vars.
  *
- * botsDbPath()/tasksDbPath() (instance-paths.mjs) read CROW_DB_PATH /
- * CROW_DATA_DIR from the environment but never CROW_HOME, so a caller that
- * hands us a `crowHome` without ALSO setting one of those two env vars would
- * otherwise resolve to the PRIMARY instance's database — silently rebinding
- * a correct block onto the wrong instance, which is worse than not rebinding
- * at all. So when the env doesn't decide, honor the crowHome argument itself
- * (unless it IS the default, in which case botsDbPath()'s own fallback is
- * already correct).
+ * botsDbPath()/tasksDbPath() (instance-paths.mjs) resolve from the PROCESS
+ * env (CROW_DB_PATH / CROW_DATA_DIR, and since queue item 33 a non-default
+ * process CROW_HOME), never from the `crowHome` argument, so a caller that
+ * hands us a `crowHome` for ANOTHER instance would otherwise resolve to this
+ * process's database — silently rebinding a correct block onto the wrong
+ * instance, which is worse than not rebinding at all. So when the env doesn't
+ * decide, honor the crowHome argument itself (unless it IS the default, in
+ * which case botsDbPath()'s own fallback is already correct).
  *
  * The tasks path is normalized through resolveSqlitePath(): production stores
  * `file:` URIs in project_spaces.tasks_db_uri and better-sqlite3 has no URI

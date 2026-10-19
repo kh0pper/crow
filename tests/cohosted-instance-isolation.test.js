@@ -74,10 +74,12 @@ test("isForeignOwner: differing instance id, db path or CROW_HOME is foreign; mi
   assert.equal(isForeignOwner({ crow_home: "/h/.crow", db_path: "/d/a.db" }, { crow_home: "/h/.crow", db_path: "/d/b.db" }), true);
 });
 
-test("coHostedDataDirWarning flags CROW_HOME without CROW_DATA_DIR only", () => {
+test("coHostedDataDirWarning flags a CROW_HOME whose data dir is the host default only", () => {
   assert.equal(coHostedDataDirWarning({}), null);
   assert.equal(coHostedDataDirWarning({ CROW_HOME: "/srv/.crow-x", CROW_DATA_DIR: "/srv/.crow-x/data" }), null);
-  assert.match(coHostedDataDirWarning({ CROW_HOME: "/srv/.crow-x" }), /SHARED/);
+  // No CROW_DATA_DIR now derives <CROW_HOME>/data (queue item 33): not shared.
+  assert.equal(coHostedDataDirWarning({ CROW_HOME: "/srv/.crow-x" }), null);
+  assert.match(coHostedDataDirWarning({ CROW_HOME: "/srv/.crow-x", CROW_DATA_DIR: join(resolveCrowHome({}), "data") }), /SHARED/);
   assert.equal(isDefaultCrowHome({ CROW_HOME: resolveCrowHome({}) }), true);
 });
 

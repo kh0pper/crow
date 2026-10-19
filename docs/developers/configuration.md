@@ -13,7 +13,8 @@ A brand-new operator usually only ever touches these: `CROW_GATEWAY_URL` (remote
 | Variable | Default | Purpose |
 |---|---|---|
 | `CROW_HOME` | `~/.crow` | Config/data base directory. A second instance on one machine uses its own (e.g. `~/.crow-mpa`). |
-| `CROW_DATA_DIR` | `~/.crow/data` | SQLite data root. |
+| `CROW_DATA_DIR` | `<CROW_HOME>/data` | SQLite data root, model state, identity and instance-id. Unset with the default home, it is `~/.crow/data`. Unset with any other `CROW_HOME`, it is the directory of `CROW_DB_PATH`, or `<CROW_HOME>/data` when that is unset too. The gateway refuses to start when another home's data dir or DB points into `~/.crow/data`, when either value comes from the checkout `.env` and `CROW_HOME` does not (that file belongs to the default instance), or when it would have to create `<CROW_HOME>/data` while `~/.crow/data/crow.db` already exists. A refusal exits with code 78; put `RestartPreventExitStatus=78` in the unit (the installer does) so systemd does not restart it in a loop. Set it explicitly in every co-hosted unit. |
+| `CROW_ALLOW_SHARED_DATA_DIR` | unset | `1` lets a non-default `CROW_HOME` with an explicit `CROW_DATA_DIR` or `CROW_DB_PATH` inside `~/.crow/data` start anyway (an older single-instance layout: set both this and `CROW_DATA_DIR=~/.crow/data`). It never changes where a path points, and it does not waive the "would create `<CROW_HOME>/data`" refusal. |
 | `CROW_DB_PATH` | `~/.crow/data/crow.db` | Main database file. |
 | `CROW_GATEWAY_PORT` / `PORT` | `3001` | Gateway listen port. |
 | `CROW_GATEWAY_BIND` | `0.0.0.0` | Gateway bind address. |

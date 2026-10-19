@@ -316,6 +316,8 @@ WorkingDirectory=$CROW_APP
 ExecStart=$(which node) servers/gateway/index.js
 Restart=on-failure
 RestartSec=5
+# 78 = refused instance paths (servers/shared/crow-home.js): a config error, not a crash
+RestartPreventExitStatus=78
 Environment=NODE_ENV=production
 Environment=CROW_DATA_DIR=$CROW_DATA
 Environment=CROW_DB_PATH=$CROW_DATA/crow.db

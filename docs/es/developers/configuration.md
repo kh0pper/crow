@@ -13,7 +13,8 @@ Un operador recién llegado normalmente solo toca estas: `CROW_GATEWAY_URL` (acc
 | Variable | Predeterminado | Propósito |
 |---|---|---|
 | `CROW_HOME` | `~/.crow` | Directorio base de configuración/datos. Una segunda instancia en la misma máquina usa el suyo propio (p. ej. `~/.crow-mpa`). |
-| `CROW_DATA_DIR` | `~/.crow/data` | Raíz de los datos SQLite. |
+| `CROW_DATA_DIR` | `<CROW_HOME>/data` | Raíz de los datos SQLite, del estado de modelos, de la identidad y del instance-id. Sin definir y con el home por defecto, es `~/.crow/data`. Sin definir y con otro `CROW_HOME`, es el directorio de `CROW_DB_PATH`, o `<CROW_HOME>/data` si tampoco está definido. El gateway no arranca si el directorio de datos o la base de otro home apuntan dentro de `~/.crow/data`, si alguno de los dos viene del `.env` del checkout y `CROW_HOME` no (ese archivo es de la instancia por defecto), o si tendría que crear `<CROW_HOME>/data` cuando ya existe `~/.crow/data/crow.db`. Al negarse sale con el código 78; pon `RestartPreventExitStatus=78` en la unidad (el instalador ya lo hace) para que systemd no lo reinicie en bucle. Defínelo explícitamente en cada unidad co-alojada. |
+| `CROW_ALLOW_SHARED_DATA_DIR` | sin definir | `1` permite arrancar a un `CROW_HOME` no predeterminado cuyo `CROW_DATA_DIR` o `CROW_DB_PATH` explícito está dentro de `~/.crow/data` (una disposición antigua de una sola instancia: define esto y `CROW_DATA_DIR=~/.crow/data`). Nunca cambia adónde apunta una ruta y no anula la negativa de "tendría que crear `<CROW_HOME>/data`". |
 | `CROW_DB_PATH` | `~/.crow/data/crow.db` | Archivo de base de datos principal. |
 | `CROW_GATEWAY_PORT` / `PORT` | `3001` | Puerto de escucha del gateway. |
 | `CROW_GATEWAY_BIND` | `0.0.0.0` | Dirección de enlace del gateway. |
