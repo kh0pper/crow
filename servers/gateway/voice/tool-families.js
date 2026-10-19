@@ -59,10 +59,10 @@ export function createToolFamilies({ manifests = {}, listExtensions = () => [], 
     const p = normalizeIntentLists(m?.voiceIntent);
     if (p.length) core.set(`core:${category}`, p);
   }
-  let addons = { at: -Infinity, byTool: new Map(), lists: new Map() };
+  let addons = { at: -Infinity, byTool: new Map(), lists: new Map(), names: new Map() };
   function index() {
     if (now() - addons.at < ttlMs) return addons;
-    const byTool = new Map(), lists = new Map();
+    const byTool = new Map(), lists = new Map(), names = new Map();
     try {
       for (const [id, entry] of connected()) for (const t of entry?.tools || []) if (t?.name && !byTool.has(t.name)) byTool.set(t.name, `addon:${id}`);
       for (const ext of listExtensions()) {
@@ -70,9 +70,10 @@ export function createToolFamilies({ manifests = {}, listExtensions = () => [], 
         for (const t of ext?.capabilities?.tools || []) if (t?.name && !byTool.has(t.name)) byTool.set(t.name, fam);
         const p = normalizeIntentLists(ext?.capabilities?.voice_intent);
         if (p.length) lists.set(fam, p);
+        if (typeof ext?.name === "string" && ext.name && ext.name !== ext.id) names.set(fam, ext.name.slice(0, 60));
       }
     } catch { /* an unreadable add-on index offers nothing; it is read again after ttlMs */ }
-    addons = { at: now(), byTool, lists };
+    addons = { at: now(), byTool, lists, names };
     return addons;
   }
   return {
@@ -88,6 +89,13 @@ export function createToolFamilies({ manifests = {}, listExtensions = () => [], 
       const p = core.get(family) || index().lists.get(family);
       return !!p && listMatches(phraseWords(transcript), p);
     },
+    /** A core family's action names (its manifest's tools); [] for anything else. */
+    categoryTools(family) {
+      const m = /^core:(.+)$/.exec(String(family ?? ""));
+      return m && Object.hasOwn(manifests, m[1]) ? Object.keys(manifests[m[1]]?.tools || {}) : [];
+    },
+    /** An add-on family's manifest name (data: callers escape it), or null. */
+    nameOf: (family) => index().names.get(family) || null,
   };
 }
 

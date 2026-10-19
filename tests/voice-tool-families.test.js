@@ -222,3 +222,17 @@ test("classifyTools: without families (fam null) every tool is offered and nothi
   assert.deepEqual([r.famIds, r.unlisted, r.wrapperWithheld, r.actionWithheld(true, false)], [[], [], false, false]);
   assert.equal(r.famOf({ name: "crow_projects" }), undefined);
 });
+
+test("families: a core family's manifest actions and an add-on family's manifest name (for the ability line)", () => {
+  const f = createToolFamilies({
+    manifests: { sharing: { tools: { crow_send_message: {}, crow_inbox: {} } } },
+    connected: () => new Map([["mb", { status: "connected", tools: [{ name: "mb_play" }] }]]),
+    listExtensions: () => [{ id: "mb", name: "Music Box", capabilities: {} }, { id: "anon", capabilities: {} }],
+  });
+  assert.deepEqual(f.categoryTools("core:sharing"), ["crow_send_message", "crow_inbox"]);
+  assert.deepEqual(f.categoryTools("core:nope"), []);
+  assert.deepEqual(f.categoryTools("addon:mb"), []);
+  assert.equal(f.nameOf("addon:mb"), "Music Box");
+  assert.equal(f.nameOf("addon:anon"), null);
+  assert.equal(f.nameOf("core:sharing"), null);
+});

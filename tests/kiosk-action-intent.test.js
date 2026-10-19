@@ -103,3 +103,8 @@ test("namesDisplayObject: only against what is really open, and never with a non
   assert.equal(namesDisplayObject("Add a dentist appointment to my calendar for 30 minutes from now", ["timer", "content"]), false);
   assert.equal(namesDisplayObject("Put eggs on the list", []), false, "music playing alone opens no window");
 });
+
+test("ACTION_OBJECTS: the object words the regexes are built from (pinned: the list is the same THING alternation as before)", async () => {
+  const { ACTION_OBJECTS } = await import("../bundles/kiosk/server/action-intent.js");
+  assert.equal(ACTION_OBJECTS.flatMap((o) => o.thing).join("|"), "calendar|schedule|agenda|reminders?|to do list|todo list|to-do list|shopping list|grocery list|list");
+});

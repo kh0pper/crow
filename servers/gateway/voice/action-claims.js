@@ -93,7 +93,7 @@ export function claimsReminder(text) {
 const WRITES = /(?:^|_)(?:create|add|insert|append|update|edit|set|delete|remove|trash|send|schedule|book|respond|reply|move|rename|share|upload|store|save|write|cancel|archive|label|plan|call|draft|complete|make|new|post|publish|invite|copy|replace|rewrite|format|apply|run|restore|undo|clear|duplicate|reorder|resolve|transfer|sync|react|dismiss|memo|crosspost|change|toggle|mark|assign|attach|submit|order|play|pause|stop|start|enable|disable)(?:_|$)/;
 const READS = /(?:^|_)(?:list|get|search|read|find|discover|status|query|export|download|recall|stats|structure|permissions|metadata|tabs|lookup|fetch|browse|preview|check|count|show|describe|info|inbox)(?:_|$)/;
 /** "createEvent", "create-event", "crow_create_event" → "create_event". */
-const words = (name) => String(name || "").replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^crow_/, "").replace(/^_+|_+$/g, "");
+export const toolNameWords = (name) => String(name || "").replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^crow_/, "").replace(/^_+|_+$/g, "");
 /**
  * "write" | "read" | "unknown" for an (effective) tool name. Only a write backs an action turn; an ok read
  * (list events, search mail) proves nothing was added, and its text may be anyone's. The first verb in the
@@ -101,7 +101,7 @@ const words = (name) => String(name || "").replace(/([a-z0-9])([A-Z])/g, "$1_$2"
  * after an ok unknown call the turn never says "nothing was changed".
  */
 export function toolEffect(name) {
-  const n = words(name);
+  const n = toolNameWords(name);
   if (!n) return "unknown";
   // The first verb decides ("crow_get_post" reads; "ws_cal_create_event" writes), except find/search
   // straight before replace, which is one compound write ("find_replace").
