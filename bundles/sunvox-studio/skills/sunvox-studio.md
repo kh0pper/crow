@@ -88,6 +88,6 @@ Rules the server enforces (errors enumerate valid options):
 - `mp3`/`ogg` need ffmpeg on the host; fall back to `wav` with a note if conversion errors.
 - The engine is serialised internally (one slot) — concurrent tool calls queue safely, but batch large renders one at a time.
 - `.xm`/`.mod` load fine (info/render) but compose always saves `.sunvox`.
-- **Limits**: renders stop at 20 minutes (`SUNVOX_MAX_RENDER_SECONDS`, at most 60); a spec may have up to 128 modules, 256 patterns, 32 tracks and 4096 lines per pattern, and 65,536 events; source files up to 64 MB. `params` values are numbers (selectors take an index; see the min/max in `sunvox_module_types`).
+- **Limits**: renders stop at 20 minutes (`SUNVOX_MAX_RENDER_SECONDS`, at most 60); a spec may have up to 128 modules, 256 patterns, 32 tracks and 4096 lines per pattern (about 2 million track-lines in all), and 65,536 events; source files up to 64 MB. `params` values are numbers (selectors take an index; see the min/max in `sunvox_module_types`).
 - **Files**: a `path` must sit inside the work dir (`~/.crow/data/sunvox-studio/`, where compose and render write); other folders need `SUNVOX_READ_DIRS`. Otherwise pass a `storage_key`.
 - Linux x86_64 only in v1. If `libsunvox not found` appears, the bundle's `vendor/sunvox.so` is missing — reinstall the bundle.

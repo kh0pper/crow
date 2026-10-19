@@ -204,3 +204,40 @@ test("sunvox: bpm or tpl alone keeps the other at its default; bad coordinates n
   const after = await engine.compose({ modules: mods, patterns: [pat] });
   assert.equal(after.info.patterns, 1, "engine usable after rejected specs (no stuck lock)");
 });
+
+test("sunvox: withLock releases the slot lock when the locked call throws", async () => {
+  const mod = await import(pathToFileURL(path.join(BUNDLE, "server", "sunvox-engine.js")).href);
+  const calls = [];
+  const a = { sv_lock_slot: () => calls.push("lock"), sv_unlock_slot: () => calls.push("unlock") };
+  assert.throws(() => mod.withLock(a, () => { throw new TypeError("koffi: expected number"); }), /expected number/);
+  assert.deepEqual(calls, ["lock", "unlock"]);
+  assert.equal(mod.withLock(a, () => 7), 7, "return value passes through");
+});
+
+test("sunvox: SUNVOX_READ_DIRS entries resolve against the work dir, and a root of / works", async () => {
+  const os = await import("node:os");
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "sv-work2-"));
+  fs.mkdirSync(path.join(work, "..", path.basename(work) + "-extra"), { recursive: true });
+  const extraDir = path.join(work, "..", path.basename(work) + "-extra");
+  fs.writeFileSync(path.join(extraDir, "c.sunvox"), "x");
+  const prev = { w: process.env.SUNVOX_WORKDIR, r: process.env.SUNVOX_READ_DIRS };
+  process.env.SUNVOX_WORKDIR = work;
+  try {
+    process.env.SUNVOX_READ_DIRS = "../" + path.basename(extraDir);
+    const srv = await import(pathToFileURL(path.join(BUNDLE, "server", "server.js")).href + "?readdirs");
+    assert.equal(srv.resolveReadablePath(path.join(extraDir, "c.sunvox")), fs.realpathSync(path.join(extraDir, "c.sunvox")));
+    process.env.SUNVOX_READ_DIRS = "/";
+    assert.ok(srv.resolveReadablePath(path.join(extraDir, "c.sunvox")), "an explicit / root admits everything");
+  } finally {
+    for (const [k, v] of [["SUNVOX_WORKDIR", prev.w], ["SUNVOX_READ_DIRS", prev.r]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    fs.rmSync(work, { recursive: true, force: true });
+    fs.rmSync(extraDir, { recursive: true, force: true });
+  }
+});
+
+test("sunvox: total pattern cells are capped and a null event gets a clear error", { skip: !engine && SKIP_REASON }, async () => {
+  const mods = [{ id: "g", type: "Analog generator" }];
+  const big = Array.from({ length: 256 }, () => ({ tracks: 32, lines: 4096, events: [] }));
+  await assert.rejects(() => engine.compose({ modules: mods, patterns: big }), /cells/);
+  await assert.rejects(() => engine.compose({ modules: mods, patterns: [{ tracks: 1, lines: 4, events: [null] }] }), /every pattern event must be an object/);
+});

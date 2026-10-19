@@ -49,6 +49,7 @@ export const LIMITS = Object.freeze({
   maxTracks: 32,
   maxLines: 4096,
   maxEvents: 65536,
+  maxCells: 2 * 1024 * 1024, // tracks x lines summed over all patterns
 });
 
 let koffiLib = null;
@@ -153,7 +154,7 @@ export function engineInfo() {
 
 /** Run a mutator under the slot lock; the lock is released even if the FFI
  *  call throws (koffi throws on a non-numeric int argument). */
-function withLock(a, fn) {
+export function withLock(a, fn) {
   a.sv_lock_slot(SLOT);
   try { return fn(); } finally { a.sv_unlock_slot(SLOT); }
 }
@@ -266,7 +267,7 @@ function renderFrames(a, maxTailFrames) {
     }
     chunks.push(Buffer.from(buf));
     frames += CHUNK_FRAMES;
-    if (frames > sampleRate * LIMITS.maxRenderSeconds) {
+    if (frames > sampleRate * LIMITS.maxRenderSeconds + maxTailFrames) { // the pre-check bounds the song; allow its tail
       a.sv_stop(SLOT);
       throw new Error(`render exceeded ${LIMITS.maxRenderSeconds} s (SUNVOX_MAX_RENDER_SECONDS) — project too long or never ends`);
     }
@@ -376,14 +377,18 @@ export function compose(spec, { name = "crow-compose" } = {}) {
     if (spec.modules.length > LIMITS.maxModules) throw new Error(`spec.modules: at most ${LIMITS.maxModules} modules`);
     if (spec.patterns.length > LIMITS.maxPatterns) throw new Error(`spec.patterns: at most ${LIMITS.maxPatterns} patterns`);
     let eventCount = 0;
+    let cells = 0;
     for (const p of spec.patterns) {
       if (!p || typeof p !== "object") throw new Error("every pattern must be an object");
       if ((p.tracks | 0) > LIMITS.maxTracks) throw new Error(`pattern tracks: at most ${LIMITS.maxTracks}`);
       if ((p.lines | 0) > LIMITS.maxLines) throw new Error(`pattern lines: at most ${LIMITS.maxLines}`);
       if (p.events !== undefined && !Array.isArray(p.events)) throw new Error("pattern events must be an array");
+      if ((p.events || []).some((ev) => !ev || typeof ev !== "object")) throw new Error("every pattern event must be an object");
+      cells += (p.tracks | 0 || 1) * (p.lines | 0 || 64);
       eventCount += (p.events || []).length;
     }
     if (eventCount > LIMITS.maxEvents) throw new Error(`spec has ${eventCount} events; at most ${LIMITS.maxEvents}`);
+    if (cells > LIMITS.maxCells) throw new Error(`spec patterns total ${cells} cells (tracks x lines); at most ${LIMITS.maxCells}`);
 
     a.sv_open_slot(SLOT);
     try {

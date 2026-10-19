@@ -32,12 +32,12 @@ export const WORKDIR = path.resolve(process.env.SUNVOX_WORKDIR || path.join(os.h
 
 // --- Lazy storage import (works from the repo tree; degrades with a clear error) ---
 let storageMod = null;
-let storageTried = false;
 /** Crow storage through the app's own s3-client, resolved via the app root
  *  (CROW_APP_ROOT, in-repo run, or ~/crow) so installed copies find it too. */
 async function storage() {
-  if (storageTried) return storageMod;
-  storageTried = true;
+  // Only a working client is cached: storage that was down at the first call
+  // is retried on the next one instead of staying off for the session.
+  if (storageMod) return storageMod;
   try {
     const { appImport } = await import("./app-root.js");
     const mod = await appImport("servers/storage/s3-client.js");
@@ -58,15 +58,17 @@ export const MAX_SOURCE_BYTES = 64 * 1024 * 1024;
  * arbitrary host files to the native parser.
  */
 export function readRoots() {
-  const extra = String(process.env.SUNVOX_READ_DIRS || "").split(":").map((d) => d.trim()).filter(Boolean);
-  return [WORKDIR, ...extra].map((d) => { try { return fs.realpathSync(d); } catch { return path.resolve(d); } });
+  // Relative entries resolve against the work dir, never the process cwd.
+  const extra = String(process.env.SUNVOX_READ_DIRS || "").split(":").map((d) => d.trim()).filter(Boolean)
+    .map((d) => path.resolve(WORKDIR, d));
+  return [WORKDIR, ...extra].map((d) => { try { return fs.realpathSync(d); } catch { return d; } });
 }
 
 export function resolveReadablePath(p) {
   const abs = path.resolve(WORKDIR, p);
   if (!fs.existsSync(abs)) throw new Error(`file not found: ${abs}`);
   const real = fs.realpathSync(abs);
-  const ok = readRoots().some((root) => real === root || real.startsWith(root + path.sep));
+  const ok = readRoots().some((root) => real === root || real.startsWith(root.endsWith(path.sep) ? root : root + path.sep));
   if (!ok) throw new Error(`path is outside the SunVox work dir (${WORKDIR}); copy the file there, use storage_key, or add its folder to SUNVOX_READ_DIRS`);
   const st = fs.statSync(real);
   if (!st.isFile()) throw new Error(`not a file: ${abs}`);
