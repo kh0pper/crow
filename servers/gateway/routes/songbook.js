@@ -23,6 +23,11 @@ export const SUNVOX_LIB_FILES = {
   "sunvox.js": "application/javascript; charset=utf-8",
   "sunvox_lib_loader.js": "application/javascript; charset=utf-8",
   "sunvox.wasm": "application/wasm",
+  // The upstream terms travel with the engine: song pages hand the binaries
+  // to every visitor, so the licences are served beside them (linked from the
+  // player card's "Powered by SunVox" line).
+  "LICENSE.txt": "text/plain; charset=utf-8",
+  "THIRD-PARTY-NOTICES.txt": "text/plain; charset=utf-8",
 };
 
 /** Resolve a whitelisted lib file, installed bundle first, repo fallback. */

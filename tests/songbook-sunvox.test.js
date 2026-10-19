@@ -78,7 +78,7 @@ test("renderSunvoxPlayer widget exposes practice controls", () => {
 });
 
 test("lib route whitelist: exact filenames only, resolver finds the vendored assets", () => {
-  assert.deepEqual(Object.keys(SUNVOX_LIB_FILES).sort(), ["sunvox.js", "sunvox.wasm", "sunvox_lib_loader.js"]);
+  assert.deepEqual(Object.keys(SUNVOX_LIB_FILES).sort(), ["LICENSE.txt", "THIRD-PARTY-NOTICES.txt", "sunvox.js", "sunvox.wasm", "sunvox_lib_loader.js"]);
   assert.equal(SUNVOX_LIB_FILES["sunvox.wasm"], "application/wasm");
 
   // traversal and non-whitelisted names are refused
@@ -92,4 +92,54 @@ test("lib route whitelist: exact filenames only, resolver finds the vendored ass
     assert.ok(p, `${f} resolves`);
     assert.ok(existsSync(p), `${f} exists at ${p}`);
   }
+});
+
+// --- Review fixes (2026-10-19) ---
+
+test("lib route also serves the upstream licence texts beside the engine", () => {
+  for (const f of ["LICENSE.txt", "THIRD-PARTY-NOTICES.txt"]) {
+    assert.match(SUNVOX_LIB_FILES[f], /^text\/plain/);
+    assert.ok(resolveSunvoxLibFile(f), `${f} resolves`);
+  }
+  const card = renderSunvoxPlayer("/blog/media/x.sunvox");
+  assert.match(card, /Powered by <a [^>]*>SunVox<\/a> \(modular synth &amp; tracker\)/, "attribution (upstream REQUIREMENT 1)");
+  assert.match(card, /href="\/blog\/songbook\/lib\/THIRD-PARTY-NOTICES\.txt"/);
+});
+
+test("vendored engine files match the sha256 pins recorded in the songbook manifest", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { createHash } = await import("node:crypto");
+  const notes = JSON.parse(readFileSync(new URL("../bundles/songbook/manifest.json", import.meta.url), "utf8")).notes;
+  for (const f of ["sunvox.js", "sunvox_lib_loader.js", "sunvox.wasm"]) {
+    const pin = new RegExp(f.replace(".", "\\.") + " ([0-9a-f]{64})").exec(notes)?.[1];
+    assert.ok(pin, `${f} pinned in manifest notes`);
+    const got = createHash("sha256").update(readFileSync(resolveSunvoxLibFile(f))).digest("hex");
+    assert.equal(got, pin, `${f} sha256`);
+  }
+});
+
+test("player: Play is clickable before the engine loads and the first click boots it", async () => {
+  const vm = await import("node:vm");
+  const html = renderSunvoxPlayer("/blog/media/song.sunvox");
+  const script = /<script>([\s\S]*?)<\/script>/.exec(html)[1];
+  const els = {};
+  const el = (id) => (els[id] ||= {
+    id, disabled: /svStop|svLoop/.test(id), textContent: "", innerHTML: "", attrs: {}, handlers: {},
+    classList: { add() {}, remove() {} },
+    getAttribute(k) { return k === "data-src" ? "/blog/media/song.sunvox" : this.attrs[k]; },
+    setAttribute(k, v) { this.attrs[k] = v; },
+    addEventListener(t, fn) { this.handlers[t] = fn; },
+    value: "220",
+  });
+  for (const id of ["svPlayer", "svStatus", "svPlay", "svStop", "svVol", "svPos", "svMeta", "svLoopA", "svLoopB", "svLoopClear"]) el(id);
+  const appended = [];
+  const ctx = vm.createContext({
+    document: { getElementById: (id) => els[id] || null, createElement: () => ({}), head: { appendChild: (s) => appended.push(s) } },
+    setInterval, clearInterval, Promise, Number, Error,
+  });
+  vm.runInContext(script, ctx);
+  assert.equal(els.svPlay.disabled, false, "Play must not start disabled: boot() only runs from its click");
+  els.svPlay.handlers.click();
+  assert.equal(appended[0]?.src, "/blog/songbook/lib/sunvox.js", "first click starts loading the engine");
+  assert.equal(els.svPlay.disabled, true, "Play is disabled while the engine loads");
 });

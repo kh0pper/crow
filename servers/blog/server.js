@@ -622,10 +622,10 @@ export function createBlogServer(dbPath, options = {}) {
         finalContent = `**Artist:** ${artist}\n` + finalContent;
       }
       if (audio_key && !content.match(/\*\*Audio:\*\*/i)) {
-        finalContent = `**Audio:** storage:${audio_key}\n` + finalContent;
+        finalContent = `**Audio:** storage:${String(audio_key).replace(/[\r\n]+/g, "")}\n` + finalContent;
       }
       if (sunvox_key && !content.match(/\*\*SunVox:\*\*/i)) {
-        finalContent = `**SunVox:** storage:${sunvox_key}\n` + finalContent;
+        finalContent = `**SunVox:** storage:${String(sunvox_key).replace(/[\r\n]+/g, "")}\n` + finalContent;
       }
 
       const result = await db.execute({

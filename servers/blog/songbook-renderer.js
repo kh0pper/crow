@@ -680,6 +680,8 @@ export function renderSunvoxPlayer(url) {
   .sv-status { margin-top: 8px; font-size: 13px; color: var(--crow-text-dim, #aaa); }
   .sv-loopgroup { display: flex; gap: 6px; align-items: center; border-left: 1px solid var(--crow-border, #444); padding-left: 12px; }
   .sv-looplabel { font-size: 12px; color: var(--crow-text-dim, #aaa); }
+  .sv-credit { margin-top: 8px; font-size: 11px; color: var(--crow-text-dim, #aaa); }
+  .sv-credit a { color: inherit; }
   .pill-warn { border-color: #d9a03f !important; color: #d9a03f !important; }
   </style>
   <div class="player-card" id="svPlayer" data-src="${safeUrl}">
@@ -698,6 +700,7 @@ export function renderSunvoxPlayer(url) {
     </div>
     <div class="sv-status" id="svStatus">Press Play to load the engine (~800KB, once per visit).</div>
     <a href="${safeUrl}" download class="download-link" style="margin-top:8px;display:inline-block">&#8595; Download project</a>
+    <div class="sv-credit">Powered by <a href="https://warmplace.ru/soft/sunvox/" rel="noopener">SunVox</a> (modular synth &amp; tracker), &copy; Alexander Zolotov, WarmPlace.ru &middot; <a href="/blog/songbook/lib/THIRD-PARTY-NOTICES.txt">licences</a></div>
   </div>
   <script>
   (function () {
@@ -720,6 +723,7 @@ export function renderSunvoxPlayer(url) {
     }
     function boot() {
       if (loading) return loading;
+      playBtn.disabled = true; /* while the engine loads; re-enabled on ready or failure */
       setStatus("Loading engine\u2026");
       loading = loadScript(LIB + "sunvox.js")
         .then(function () { return loadScript(LIB + "sunvox_lib_loader.js"); })
@@ -761,7 +765,6 @@ export function renderSunvoxPlayer(url) {
     function startTimer() { if (!timer) timer = setInterval(tick, 80); }
     function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
 
-    playBtn.disabled = true; /* re-enabled when the engine is ready */
     playBtn.addEventListener("click", function () {
       boot().then(function () {
         if (!ready) return;
