@@ -7,7 +7,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const child = spawn(process.execPath, [path.join(HERE, "..", "server", "index.js")], { stdio: ["pipe", "pipe", "inherit"] });
+// The fixture sits outside the work dir, so allow this folder explicitly.
+const child = spawn(process.execPath, [path.join(HERE, "..", "server", "index.js")], { stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, SUNVOX_READ_DIRS: HERE } });
 
 let buf = "";
 const pending = new Map();

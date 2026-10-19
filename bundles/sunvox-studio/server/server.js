@@ -12,8 +12,8 @@
  *                          save .sunvox, optionally render in one call
  *   sunvox_module_types  — the module/controller catalogue (compose reference)
  *
- * Sources resolve from `path` (filesystem) or `storage_key` (Crow storage,
- * via the repo's s3-client when reachable; env-configured MinIO fallback).
+ * Sources resolve from `path` (inside the work dir) or `storage_key` (Crow
+ * storage, via the app's s3-client resolved through server/app-root.js).
  * Renders land in the work dir (SUNVOX_WORKDIR, default
  * ~/.crow/data/sunvox-studio/) and the returned path can be handed straight
  * to fw_upload_track for Funkwhale/glasses playback.
@@ -28,43 +28,79 @@ import os from "node:os";
 import { spawnSync } from "node:child_process";
 import * as engine from "./sunvox-engine.js";
 
-const WORKDIR = process.env.SUNVOX_WORKDIR || path.join(os.homedir(), ".crow", "data", "sunvox-studio");
+export const WORKDIR = path.resolve(process.env.SUNVOX_WORKDIR || path.join(os.homedir(), ".crow", "data", "sunvox-studio"));
 
 // --- Lazy storage import (works from the repo tree; degrades with a clear error) ---
 let storageMod = null;
 let storageTried = false;
+/** Crow storage through the app's own s3-client, resolved via the app root
+ *  (CROW_APP_ROOT, in-repo run, or ~/crow) so installed copies find it too. */
 async function storage() {
   if (storageTried) return storageMod;
   storageTried = true;
-  for (const rel of ["../../../servers/storage/s3-client.js", "../../../../crow/servers/storage/s3-client.js"]) {
-    try {
-      storageMod = await import(rel);
-      if (await storageMod.isAvailable()) return storageMod;
-    } catch { /* try next */ }
+  try {
+    const { appImport } = await import("./app-root.js");
+    const mod = await appImport("servers/storage/s3-client.js");
+    storageMod = (await mod.isAvailable()) ? mod : null;
+  } catch {
+    storageMod = null;
   }
-  storageMod = null;
-  return null;
+  return storageMod;
+}
+
+/** Largest project file accepted (SunVox projects are typically < 5 MB). */
+export const MAX_SOURCE_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Directories a filesystem `path` may point into: the work dir (compose
+ * output, renders) plus any extra SUNVOX_READ_DIRS (colon-separated) the
+ * operator configures. Anything else is refused, so a tool call cannot feed
+ * arbitrary host files to the native parser.
+ */
+export function readRoots() {
+  const extra = String(process.env.SUNVOX_READ_DIRS || "").split(":").map((d) => d.trim()).filter(Boolean);
+  return [WORKDIR, ...extra].map((d) => { try { return fs.realpathSync(d); } catch { return path.resolve(d); } });
+}
+
+export function resolveReadablePath(p) {
+  const abs = path.resolve(WORKDIR, p);
+  if (!fs.existsSync(abs)) throw new Error(`file not found: ${abs}`);
+  const real = fs.realpathSync(abs);
+  const ok = readRoots().some((root) => real === root || real.startsWith(root + path.sep));
+  if (!ok) throw new Error(`path is outside the SunVox work dir (${WORKDIR}); copy the file there, use storage_key, or add its folder to SUNVOX_READ_DIRS`);
+  const st = fs.statSync(real);
+  if (!st.isFile()) throw new Error(`not a file: ${abs}`);
+  if (st.size > MAX_SOURCE_BYTES) throw new Error(`file is ${st.size} bytes; the limit is ${MAX_SOURCE_BYTES}`);
+  return real;
 }
 
 async function readSource({ path: p, storage_key }) {
   if (p) {
-    const abs = path.resolve(p);
-    if (!fs.existsSync(abs)) throw new Error(`file not found: ${abs}`);
-    return { buf: await fsp.readFile(abs), name: path.basename(abs) };
+    const real = resolveReadablePath(p);
+    return { buf: await fsp.readFile(real), name: path.basename(real) };
   }
   if (storage_key) {
     const s3 = await storage();
     if (!s3) throw new Error(`storage unavailable — pass a filesystem "path" instead of storage_key "${storage_key}" (storage needs MINIO_* env or the repo s3-client)`);
-    const { stream } = await s3.getObject(storage_key);
+    const { stream, stat } = await s3.getObject(storage_key);
+    if (stat && stat.size > MAX_SOURCE_BYTES) {
+      stream.destroy?.();
+      throw new Error(`storage object is ${stat.size} bytes; the limit is ${MAX_SOURCE_BYTES}`);
+    }
     const chunks = [];
-    for await (const c of stream) chunks.push(c);
+    let total = 0;
+    for await (const c of stream) {
+      total += c.length;
+      if (total > MAX_SOURCE_BYTES) { stream.destroy?.(); throw new Error(`storage object exceeds ${MAX_SOURCE_BYTES} bytes`); }
+      chunks.push(c);
+    }
     return { buf: Buffer.concat(chunks), name: path.basename(storage_key) };
   }
   throw new Error('provide either "path" or "storage_key"');
 }
 
 const SOURCE_SCHEMA = {
-  path: z.string().optional().describe("Filesystem path to a .sunvox/.xm/.mod file"),
+  path: z.string().optional().describe("Path to a .sunvox/.xm/.mod file inside the SunVox work dir (relative paths resolve there; extra folders via SUNVOX_READ_DIRS)"),
   storage_key: z.string().optional().describe("Crow storage key (s3_key) of the project file"),
 };
 
@@ -73,7 +109,7 @@ function sanitize(n) { return String(n).replace(/[^a-zA-Z0-9 _.-]/g, "").slice(0
 async function ensureWorkdir() { await fsp.mkdir(WORKDIR, { recursive: true }); return WORKDIR; }
 
 function convertWithFfmpeg(wavPath, outPath) {
-  const ff = spawnSync("ffmpeg", ["-y", "-i", wavPath, "-codec:a", outPath.endsWith(".mp3") ? "libmp3lame" : "libvorbis", "-qscale:a", "4", outPath], { encoding: "utf8" });
+  const ff = spawnSync("ffmpeg", ["-y", "-i", wavPath, "-codec:a", outPath.endsWith(".mp3") ? "libmp3lame" : "libvorbis", "-qscale:a", "4", outPath], { encoding: "utf8", timeout: 10 * 60 * 1000, maxBuffer: 16 * 1024 * 1024 });
   if (ff.status !== 0) throw new Error(`ffmpeg conversion failed (is ffmpeg installed?): ${String(ff.stderr).slice(-400)}`);
   return outPath;
 }
@@ -95,7 +131,7 @@ async function renderToFile(buf, { name, format }) {
 }
 
 export function createSunvoxServer() {
-  const server = new McpServer({ name: "sunvox-studio", version: "0.1.0" });
+  const server = new McpServer({ name: "sunvox-studio", version: "0.1.1" });
 
   server.registerTool("sunvox_module_types", {
     title: "Module catalogue",
@@ -142,7 +178,7 @@ export function createSunvoxServer() {
     title: "Compose a project",
     description:
       "Build a SunVox project programmatically from a JSON spec, save it as .sunvox, and optionally render it in the same call. " +
-      "Spec: { bpm? (1-255), tpl? (1-32), modules: [{ id, type, name?, params?: {controllerName: value}, x?, y? }], connections?: [[srcId, ..., \"out\"], ...] (chains; modules not used as a chain source auto-connect to Output), patterns: [{ name?, tracks, lines, x?, y?, events: [{ track, line, note (\"C3\"/\"F#4\"/1-127), velocity? (1-129), module (id), ctl?/ctl_val? or effect?/effect_param?, note_off? }] }] }. " +
+      "Spec: { bpm? (1-999), tpl? (1-31), modules: [{ id, type, name?, params?: {controllerName: value}, x?, y? }], connections?: [[srcId, ..., \"out\"], ...] (chains; modules not used as a chain source auto-connect to Output), patterns: [{ name?, tracks, lines, x?, y?, events: [{ track, line, note (\"C3\"/\"F#4\"/1-127), velocity? (1-129), module (id), ctl?/ctl_val? or effect?/effect_param?, note_off? }] }] }. " +
       "Use sunvox_module_types first to pick module types and param names. Notes: C0=1; a line is one tick (TPL ticks per beat). Keep patterns 16-64 lines; place successive patterns at x = previous x + lines.",
     inputSchema: {
       spec: z.record(z.string(), z.any()).describe("The composition spec (see tool description)"),

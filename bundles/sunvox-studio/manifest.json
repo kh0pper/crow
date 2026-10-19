@@ -1,7 +1,7 @@
 {
   "id": "sunvox-studio",
   "name": "SunVox Studio",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AI-operable music engine — inspect, render and compose SunVox/XM/MOD tracker projects via the MIT-licensed SunVox library. Headless offline rendering (~130x realtime, no audio device) and programmatic composition from JSON specs. Pairs with Funkwhale for playback.",
   "type": "mcp-server",
   "author": "Crow",
@@ -11,7 +11,7 @@
   "server": {
     "command": "node",
     "args": ["server/index.js"],
-    "envKeys": ["SUNVOX_WORKDIR", "SUNVOX_LIB_PATH", "MINIO_ENDPOINT", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "MINIO_USE_SSL", "MINIO_REGION"]
+    "envKeys": ["SUNVOX_WORKDIR", "SUNVOX_LIB_PATH", "SUNVOX_READ_DIRS", "SUNVOX_MAX_RENDER_SECONDS", "MINIO_ENDPOINT", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "MINIO_USE_SSL", "MINIO_REGION"]
   },
   "skills": ["skills/sunvox-studio.md"],
   "requires": {
@@ -21,5 +21,5 @@
   "env_vars": [
     { "name": "SUNVOX_WORKDIR", "description": "Where rendered audio and composed projects are written.", "default": "~/.crow/data/sunvox-studio", "required": false, "secret": false }
   ],
-  "notes": "Vendors libsunvox 2.1.4d (MIT, (c) Alexander Zolotov / WarmPlace.ru) for linux x86_64 — see vendor/LICENSE.txt. No Docker, no network ports: a pure stdio MCP server around the local engine library. Linux x86_64 only in v1 (arm64 .so available upstream)."
+  "notes": "Vendors libsunvox 2.1.4d (MIT, (c) Alexander Zolotov / WarmPlace.ru) for linux x86_64 — see vendor/LICENSE.txt; the prebuilt library's terms (\"Powered by SunVox\" attribution) and the SunDog/libFLAC/Tremor licences are in vendor/THIRD-PARTY-NOTICES.txt. No Docker, no network ports: a pure stdio MCP server around the local engine library. Linux x86_64 only in v1 (arm64 .so available upstream)."
 }

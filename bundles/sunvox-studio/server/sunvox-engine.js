@@ -13,6 +13,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 
 const require = createRequire(import.meta.url);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -29,6 +30,26 @@ const NOTECMD_NOTE_OFF = 128;
 
 const SLOT = 0;
 const CHUNK_FRAMES = 4096;
+
+/** sha256 of the vendored linux x86_64 libsunvox 2.1.4d (vendor/sunvox.so). */
+export const VENDORED_SO_SHA256 = "291b24de4461b0942ff45c364bdc9d3fdf7845038a496cfa5ca34872c952006b";
+
+/**
+ * Resource limits. A render holds its PCM in memory (4 bytes/frame at
+ * 44.1 kHz stereo int16, about 10.6 MB per minute), so the default cap of
+ * 20 minutes keeps one render near 210 MB. SUNVOX_MAX_RENDER_SECONDS raises
+ * or lowers it (hard ceiling 60 min). Compose specs are bounded so a single
+ * call cannot ask the engine for unbounded patterns or events.
+ */
+const envInt = (k, d) => { const v = parseInt(process.env[k] || "", 10); return Number.isFinite(v) && v > 0 ? v : d; };
+export const LIMITS = Object.freeze({
+  maxRenderSeconds: Math.min(envInt("SUNVOX_MAX_RENDER_SECONDS", 20 * 60), 60 * 60),
+  maxModules: 128,
+  maxPatterns: 256,
+  maxTracks: 32,
+  maxLines: 4096,
+  maxEvents: 65536,
+});
 
 let koffiLib = null;
 let api = null;
@@ -49,6 +70,12 @@ function loadLib() {
   const koffi = require("koffi");
   const soPath = process.env.SUNVOX_LIB_PATH || path.join(HERE, "..", "vendor", "sunvox.so");
   if (!fs.existsSync(soPath)) throw new Error(`libsunvox not found at ${soPath}`);
+  // The vendored library is hash-pinned (spec §4.4). An operator-supplied
+  // SUNVOX_LIB_PATH is their own choice and is not checked against the pin.
+  if (!process.env.SUNVOX_LIB_PATH) {
+    const got = createHash("sha256").update(fs.readFileSync(soPath)).digest("hex");
+    if (got !== VENDORED_SO_SHA256) throw new Error(`vendor/sunvox.so sha256 ${got} does not match the pinned ${VENDORED_SO_SHA256} — refusing to load`);
+  }
   koffiLib = koffi.load(soPath);
   const f = (proto) => koffiLib.func(proto);
   api = {
@@ -122,6 +149,20 @@ export function engineInfo() {
       lib_path: process.env.SUNVOX_LIB_PATH || path.join(HERE, "..", "vendor", "sunvox.so"),
     };
   });
+}
+
+/** Run a mutator under the slot lock; the lock is released even if the FFI
+ *  call throws (koffi throws on a non-numeric int argument). */
+function withLock(a, fn) {
+  a.sv_lock_slot(SLOT);
+  try { return fn(); } finally { a.sv_unlock_slot(SLOT); }
+}
+
+/** A finite integer from a spec field, or the default; anything else is an error. */
+function int(v, d, what) {
+  if (v === undefined || v === null) return d;
+  if (typeof v !== "number" || !Number.isFinite(v)) throw new Error(`${what} must be a number, got ${JSON.stringify(v)}`);
+  return Math.trunc(v);
 }
 
 function check(rc, what) {
@@ -225,13 +266,16 @@ function renderFrames(a, maxTailFrames) {
     }
     chunks.push(Buffer.from(buf));
     frames += CHUNK_FRAMES;
-    if (frames > sampleRate * 3600 * 4) throw new Error("render exceeded 4h — runaway project?");
+    if (frames > sampleRate * LIMITS.maxRenderSeconds) {
+      a.sv_stop(SLOT);
+      throw new Error(`render exceeded ${LIMITS.maxRenderSeconds} s (SUNVOX_MAX_RENDER_SECONDS) — project too long or never ends`);
+    }
   }
   a.sv_stop(SLOT);
-  return { pcm: Buffer.concat(chunks), frames };
+  return { chunks, frames };
 }
 
-function wavEncode(pcm, frames) {
+function wavEncode(chunks, frames) {
   const dataSize = frames * 2 * 2;
   const hdr = Buffer.alloc(44);
   hdr.write("RIFF", 0);
@@ -247,7 +291,7 @@ function wavEncode(pcm, frames) {
   hdr.writeUInt16LE(16, 34);
   hdr.write("data", 36);
   hdr.writeUInt32LE(dataSize, 40);
-  return Buffer.concat([hdr, pcm]);
+  return Buffer.concat([hdr, ...chunks]); // one copy: the chunks are never joined separately
 }
 
 /** sunvox_render: offline render → WAV Buffer + info. */
@@ -258,8 +302,11 @@ export function render(buf) {
     try {
       loadBuffer(a, buf);
       const infoObj = readInfo(a);
-      const { pcm, frames } = renderFrames(a, sampleRate * 2);
-      return { info: infoObj, wav: wavEncode(pcm, frames), frames };
+      if (infoObj.length_frames > sampleRate * LIMITS.maxRenderSeconds) {
+        throw new Error(`project is ${infoObj.duration_s} s long; renders are capped at ${LIMITS.maxRenderSeconds} s (SUNVOX_MAX_RENDER_SECONDS)`);
+      }
+      const { chunks, frames } = renderFrames(a, sampleRate * 2);
+      return { info: infoObj, wav: wavEncode(chunks, frames), frames };
     } finally {
       a.sv_close_slot(SLOT);
     }
@@ -326,6 +373,17 @@ export function compose(spec, { name = "crow-compose" } = {}) {
     if (!spec || typeof spec !== "object") throw new Error("spec must be an object");
     if (!Array.isArray(spec.modules) || spec.modules.length === 0) throw new Error("spec.modules must be a non-empty array");
     if (!Array.isArray(spec.patterns) || spec.patterns.length === 0) throw new Error("spec.patterns must be a non-empty array");
+    if (spec.modules.length > LIMITS.maxModules) throw new Error(`spec.modules: at most ${LIMITS.maxModules} modules`);
+    if (spec.patterns.length > LIMITS.maxPatterns) throw new Error(`spec.patterns: at most ${LIMITS.maxPatterns} patterns`);
+    let eventCount = 0;
+    for (const p of spec.patterns) {
+      if (!p || typeof p !== "object") throw new Error("every pattern must be an object");
+      if ((p.tracks | 0) > LIMITS.maxTracks) throw new Error(`pattern tracks: at most ${LIMITS.maxTracks}`);
+      if ((p.lines | 0) > LIMITS.maxLines) throw new Error(`pattern lines: at most ${LIMITS.maxLines}`);
+      if (p.events !== undefined && !Array.isArray(p.events)) throw new Error("pattern events must be an array");
+      eventCount += (p.events || []).length;
+    }
+    if (eventCount > LIMITS.maxEvents) throw new Error(`spec has ${eventCount} events; at most ${LIMITS.maxEvents}`);
 
     a.sv_open_slot(SLOT);
     try {
@@ -342,9 +400,7 @@ export function compose(spec, { name = "crow-compose" } = {}) {
       const patSlots0 = a.sv_get_number_of_patterns(SLOT);
       for (let i = patSlots0 - 1; i >= 0; i--) {
         if (a.sv_get_pattern_lines(SLOT, i) > 0) {
-          a.sv_lock_slot(SLOT);
-          a.sv_remove_pattern(SLOT, i);
-          a.sv_unlock_slot(SLOT);
+          withLock(a, () => a.sv_remove_pattern(SLOT, i));
         }
       }
 
@@ -357,14 +413,17 @@ export function compose(spec, { name = "crow-compose" } = {}) {
         if (/^out(put)?$/i.test(m.id)) throw new Error(`module id "${m.id}" is reserved (Output is module 0, referenced as "out")`);
         if (String(m.type).toLowerCase() === "output") throw new Error("do not create an Output module — it exists automatically; connect chains to \"out\"");
         seenTypes.add(m.type);
-        a.sv_lock_slot(SLOT);
-        const mod = a.sv_new_module(SLOT, String(m.type), String(m.name || m.id), m.x ?? 512, m.y ?? 400, 0);
-        a.sv_unlock_slot(SLOT);
+        const mod = withLock(a, () => a.sv_new_module(SLOT, String(m.type), String(m.name || m.id), int(m.x, 512, "module x"), int(m.y, 400, "module y"), 0));
         if (mod < 0) throw new Error(`sv_new_module failed for type "${m.type}" (rc=${mod}). Use sunvox_module_types for valid types.`);
         ids.set(m.id, mod);
         for (const [pname, pval] of Object.entries(m.params || {})) {
           const c = findCtl(a, mod, pname);
-          const rc = a.sv_set_module_ctl_value(SLOT, mod, c, pval | 0, 0);
+          // Controller values are numbers (selectors are indexes): a string
+          // such as "sawtooth" used to coerce silently to 0.
+          if (typeof pval !== "number" || !Number.isFinite(pval)) {
+            throw new Error(`param "${pname}" on "${m.id}" must be a number (selectors take an index; see sunvox_module_types for min/max), got ${JSON.stringify(pval)}`);
+          }
+          const rc = a.sv_set_module_ctl_value(SLOT, mod, c, Math.trunc(pval), 0);
           if (rc < 0) throw new Error(`set param "${pname}" on "${m.id}" failed (rc=${rc})`);
         }
       }
@@ -383,18 +442,14 @@ export function compose(spec, { name = "crow-compose" } = {}) {
           const src = resolveId(chain[i]);
           const dst = resolveId(chain[i + 1]);
           chainSources.add(chain[i]);
-          a.sv_lock_slot(SLOT);
-          const rc = a.sv_connect_module(SLOT, src, dst);
-          a.sv_unlock_slot(SLOT);
+          const rc = withLock(a, () => a.sv_connect_module(SLOT, src, dst));
           if (rc < 0) throw new Error(`connect ${chain[i]} -> ${chain[i + 1]} failed (rc=${rc})`);
         }
       }
       // auto-connect unconnected modules to Output
       for (const [id, mod] of ids) {
         if (chainSources.has(id)) continue;
-        a.sv_lock_slot(SLOT);
-        a.sv_connect_module(SLOT, mod, outMod);
-        a.sv_unlock_slot(SLOT);
+        withLock(a, () => a.sv_connect_module(SLOT, mod, outMod));
       }
 
       // --- patterns ---
@@ -403,9 +458,7 @@ export function compose(spec, { name = "crow-compose" } = {}) {
         const tracks = p.tracks | 0 || 1;
         const lines = p.lines | 0 || 64;
         if (tracks < 1 || lines < 1) throw new Error("pattern tracks/lines must be >= 1");
-        a.sv_lock_slot(SLOT);
-        const pat = a.sv_new_pattern(SLOT, -1, p.x ?? 0, p.y ?? 0, tracks, lines, Math.floor(Math.random() * 1e6), String(p.name || p.id || "pattern"));
-        a.sv_unlock_slot(SLOT);
+        const pat = withLock(a, () => a.sv_new_pattern(SLOT, -1, int(p.x, 0, "pattern x"), int(p.y, 0, "pattern y"), tracks, lines, Math.floor(Math.random() * 1e6), String(p.name || p.id || "pattern")));
         if (pat < 0) throw new Error(`sv_new_pattern failed (rc=${pat})`);
         if (firstPat < 0) firstPat = pat;
         for (const ev of p.events || []) {
@@ -438,9 +491,11 @@ export function compose(spec, { name = "crow-compose" } = {}) {
       // writes only non-negative values, so nn/vv/mm = -1 merge the effect
       // into a cell WITHOUT clobbering an existing note. Cells whose ctl
       // column (3) is already taken are skipped.
-      if (spec.bpm || spec.tpl) {
-        const bpm = Math.max(1, Math.min(65535, spec.bpm | 0 || 0));
-        const tpl = Math.max(1, Math.min(31, spec.tpl | 0 || 0));
+      // Each value is placed only when the spec gives it: a missing bpm or tpl
+      // keeps the engine default (125/6) instead of collapsing to 1.
+      const bpm = spec.bpm == null ? 0 : Math.max(1, Math.min(999, int(spec.bpm, 0, "spec.bpm")));
+      const tpl = spec.tpl == null ? 0 : Math.max(1, Math.min(31, int(spec.tpl, 0, "spec.tpl")));
+      if (bpm || tpl) {
         const firstTracks = a.sv_get_pattern_tracks(SLOT, firstPat);
         const place = (ee, xxyy) => {
           for (let tr = 0; tr < firstTracks; tr++) {
@@ -456,13 +511,18 @@ export function compose(spec, { name = "crow-compose" } = {}) {
       }
 
       // --- save to temp, reload, verify ---
-      const tmp = path.join(fs.mkdtempSync(path.join(require("node:os").tmpdir(), "sunvox-")), `${sanitizeName(name)}.sunvox`);
-      check(a.sv_save(SLOT, tmp), "sv_save");
-      a.sv_close_slot(SLOT);
-      a.sv_open_slot(SLOT);
-      check(a.sv_load(SLOT, tmp), "sv_load (reload of composed project)");
-      const project = fs.readFileSync(tmp);
-      fs.rmSync(path.dirname(tmp), { recursive: true, force: true });
+      const tmpDir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "sunvox-"));
+      let project;
+      try {
+        const tmp = path.join(tmpDir, `${sanitizeName(name)}.sunvox`);
+        check(a.sv_save(SLOT, tmp), "sv_save");
+        a.sv_close_slot(SLOT);
+        a.sv_open_slot(SLOT);
+        check(a.sv_load(SLOT, tmp), "sv_load (reload of composed project)");
+        project = fs.readFileSync(tmp);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
       const infoObj = readInfo(a);
       a.sv_close_slot(SLOT);
       return { project, info: infoObj };
@@ -491,9 +551,7 @@ export function moduleCatalogue() {
     try {
       const cat = {};
       for (const type of TYPES) {
-        a.sv_lock_slot(SLOT);
-        const mod = a.sv_new_module(SLOT, type, "probe", 512, 512, 0);
-        a.sv_unlock_slot(SLOT);
+        const mod = withLock(a, () => a.sv_new_module(SLOT, type, "probe", 512, 512, 0));
         if (mod < 0) continue;
         const nctls = a.sv_get_number_of_module_ctls(SLOT, mod);
         const ctls = [];
@@ -511,9 +569,7 @@ export function moduleCatalogue() {
           kind: flags & SV_MODULE_FLAG_GENERATOR ? "generator" : flags & SV_MODULE_FLAG_EFFECT ? "effect" : "other",
           controllers: ctls,
         };
-        a.sv_lock_slot(SLOT);
-        a.sv_remove_module(SLOT, mod);
-        a.sv_unlock_slot(SLOT);
+        withLock(a, () => a.sv_remove_module(SLOT, mod));
       }
       catalogueCache = { output_note: "Output exists automatically at module 0 in every project; reference it as \"out\" in connections.", modules: cat };
       return catalogueCache;
