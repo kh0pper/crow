@@ -1793,8 +1793,21 @@ export function snapshotInstallDir(sourceDir, destDir, { backupRoot }) {
     settle() {
       if (done) return;
       done = true;
-      for (const r of added) rmSync(join(destDir, r), { recursive: true, force: true });
+      // Never through a link: a container with the bundle folder mounted read-write may have
+      // swapped a folder on the way for a symlink to a host folder since the snapshot.
+      const realParents = (r) => {
+        let cur = destDir;
+        for (const part of [".", ...dirname(r).split("/").filter((x) => x && x !== ".")]) {
+          if (part !== ".") cur = join(cur, part);
+          let st;
+          try { st = lstatSync(cur); } catch { return part !== "."; } // gone below destDir: recreated by cp
+          if (!st.isDirectory() || st.isSymbolicLink()) return false;
+        }
+        return true;
+      };
+      for (const r of added) if (realParents(r)) rmSync(join(destDir, r), { recursive: true, force: true });
       for (const r of saved) {
+        if (!realParents(r)) continue;
         rmSync(join(destDir, r), { recursive: true, force: true });
         cpSync(join(backup, r), join(destDir, r), { recursive: true, verbatimSymlinks: true });
       }
@@ -2780,10 +2793,6 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
           return { ok: false, reason: `Security check failed: ${validation.reason}` };
         }
         appendLog(job, "Security check passed");
-        if (Object.keys(grants).length) {
-          recordGrants(CROW_HOME, bundleId, grants);
-          appendLog(job, `Allowed the folder(s) you chose outside Crow's home: ${Object.keys(grants).join(", ")}`);
-        }
 
         const own = await composeOwnership(bundleId, destDir, manifest);
         if (own.refusal) {
@@ -2798,8 +2807,13 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
           appendLog(job, `Install refused: ${err.message}`);
           return { ok: false, reason: err.message };
         }
-        // Every pre-up check passed: the copied files stand from here.
+        // Every pre-up check passed: the copied files stand from here, and so do the
+        // folders the owner chose (recorded only now: a refused install keeps its old grants).
         installSnap.commit();
+        if (Object.keys(grants).length) {
+          recordGrants(CROW_HOME, bundleId, grants);
+          appendLog(job, `Allowed the folder(s) you chose outside Crow's home: ${Object.keys(grants).join(", ")}`);
+        }
 
         appendLog(job, "Pulling Docker images...");
         try {

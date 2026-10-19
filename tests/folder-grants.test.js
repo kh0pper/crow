@@ -9,7 +9,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -354,4 +354,46 @@ dockerTest("a folder two extensions share is never granted when the other one mo
     assert.equal(out.ok, false);
     assert.match(out.reason, /another extension was allowed the same folder/);
   } finally { rmSync(SH2, { recursive: true, force: true }); }
+});
+
+dockerTest("a reinstall refused after its security check keeps the earlier grant (grants are recorded only once every pre-up check passed)", async () => {
+  const id = "fx-p1";
+  const A = mkdtempSync(join(tmpdir(), "crow-grants-pa-"));
+  const Bd = mkdtempSync(join(tmpdir(), "crow-grants-pb-"));
+  try {
+    stage(id);
+    assert.equal((await install(id, { MEDIA_DIR: A })).ok, true);
+    const man = JSON.parse(readFileSync(join(FIXTURES, id, "manifest.json"), "utf8"));
+    man.docker.precreate = ["../outside"]; // refused after the security check passes
+    writeFileSync(join(FIXTURES, id, "manifest.json"), JSON.stringify(man));
+    const out = await install(id, { MEDIA_DIR: Bd });
+    assert.equal(out.ok, false);
+    assert.equal(grants()[id].MEDIA_DIR.value, A, "the earlier grant stands");
+    assert.match(readFileSync(join(CROW_HOME, "bundles", id, ".env"), "utf8"), new RegExp(A), "and its .env");
+  } finally { rmSync(A, { recursive: true, force: true }); rmSync(Bd, { recursive: true, force: true }); }
+});
+
+test("the rollback never writes or deletes through a symlink swapped in after the snapshot", async () => {
+  const { symlinkSync } = await import("node:fs");
+  const root = mkdtempSync(join(tmpdir(), "crow-grants-snap-"));
+  try {
+    const src = join(root, "src"), dest = join(root, "dest"), victim = join(root, "victim");
+    for (const d of [join(src, "server"), join(dest, "server"), victim]) mkdirSync(d, { recursive: true });
+    writeFileSync(join(src, "server", "a.js"), "new a\n");
+    writeFileSync(join(src, "server", "new.js"), "new\n");
+    writeFileSync(join(dest, "server", "a.js"), "old a\n");
+    writeFileSync(join(dest, ".env"), "K=1\n");
+    const snap = B.snapshotInstallDir(src, dest, { backupRoot: join(root, "bk") });
+    // During the install window a container with the bundle folder mounted read-write
+    // swaps server/ for a link to a host folder.
+    rmSync(join(dest, "server"), { recursive: true, force: true });
+    symlinkSync(victim, join(dest, "server"));
+    writeFileSync(join(victim, "a.js"), "victim a\n");
+    writeFileSync(join(victim, "new.js"), "victim new\n");
+    snap.settle();
+    assert.equal(readFileSync(join(victim, "a.js"), "utf8"), "victim a\n", "never overwritten through the link");
+    assert.equal(readFileSync(join(victim, "new.js"), "utf8"), "victim new\n", "never deleted through the link");
+    assert.equal(readFileSync(join(dest, ".env"), "utf8"), "K=1\n", "what can be restored still is");
+    assert.ok(!existsSync(join(root, "bk")) || readdirSync(join(root, "bk")).length === 0, "backup removed");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
