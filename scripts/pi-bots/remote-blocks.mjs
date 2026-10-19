@@ -77,6 +77,14 @@ export function mintRemoteBlocks(def, { peerGatewayUrls = {}, proxyPath, node, p
     blocks[name] = {
       command: node,
       args: [proxyPath],
+      // Router mode: pi-lab's mcp-client registers ONE gateway tool,
+      // mcp__<name> (action list|describe|call), which is exactly the
+      // server-level entry bridge.mjs toolAllowlist puts in --tools. Without
+      // it pi-lab registers mcp__<name>__<tool> per tool, pi's exact-match
+      // --tools filter drops every one, and the bot silently has no remote
+      // tool (queue item 38a). One tool per capability also keeps the
+      // tool-budget count (one per csv entry) honest.
+      router: true,
       env: {
         CROW_REMOTE_INSTANCE_ID: instanceId,
         CROW_REMOTE_GATEWAY_URL: gatewayUrl,
