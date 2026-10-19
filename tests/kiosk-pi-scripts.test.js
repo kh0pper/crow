@@ -27,6 +27,13 @@ test("agent unit tests pass (python3 + numpy; websockets tests skip without it)"
   assert.match(r.stderr, /\nOK/);
 });
 
+test("pi-setup helper unit tests pass (boot config, BlueZ main.conf, controller diagnosis)", (t) => {
+  if (!have("python3")) return t.skip("python3 not available");
+  const r = spawnSync("python3", ["-W", "error::ResourceWarning", "-m", "unittest", "discover", "-s", K, "-p", "test_setup_helpers.py"], { encoding: "utf8", timeout: 60000 });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stderr, /\nOK/);
+});
+
 test("pi-setup.sh --dry-run renders every file, changes nothing on the host, and is idempotent", (t) => {
   if (!have("python3")) return t.skip("python3 not available");
   const dir = mkdtempSync(join(tmpdir(), "kiosk-dry-"));
