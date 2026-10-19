@@ -1,7 +1,7 @@
 {
   "id": "localai",
   "name": "LocalAI",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Run local AI models with an OpenAI-compatible API. Supports chat, embeddings, and text-to-speech.",
   "type": "bundle",
   "author": "Crow",
@@ -33,6 +33,7 @@
       "cpu"
     ]
   },
+  "host_grants": {"gpu": true},
   "env_vars": [
     {
       "name": "LOCALAI_HOST",

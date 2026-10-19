@@ -2664,6 +2664,7 @@
     },
     {
       "id": "llamacpp-vulkan-qwen3-embed",
+      "version": "1.0.1",
       "type": "bundle",
       "name": "llama.cpp Qwen3-Embedding-0.6B (Vulkan/ROCm)",
       "category": "ai",
@@ -2675,6 +2676,16 @@
         "platform": "linux-x86_64",
         "gpu_arch": [
           "gfx1151"
+        ]
+      },
+      "host_grants": {
+        "gpu": true,
+        "shm_size": "2g",
+        "env_files": [
+          "rocm.env"
+        ],
+        "path_env": [
+          "LLM_CACHE"
         ]
       },
       "env_vars": [],
@@ -2701,7 +2712,7 @@
     },
     {
       "id": "llamacpp-vulkan-qwen36-35b-a3b",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "type": "bundle",
       "name": "llama.cpp Qwen3.6-35B-A3B UD-Q6_K + Vision (Vulkan AMDVLK)",
       "category": "ai",
@@ -2713,6 +2724,16 @@
         "platform": "linux-x86_64",
         "gpu_arch": [
           "gfx1151"
+        ]
+      },
+      "host_grants": {
+        "gpu": true,
+        "shm_size": "16g",
+        "env_files": [
+          "rocm.env"
+        ],
+        "path_env": [
+          "LLM_CACHE"
         ]
       },
       "env_vars": [],
@@ -2739,7 +2760,7 @@
     {
       "id": "localai",
       "name": "LocalAI",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Run local AI models with an OpenAI-compatible API. Supports chat, embeddings, and text-to-speech.",
       "type": "bundle",
       "author": "Crow",
@@ -2770,6 +2791,9 @@
           "rocm",
           "cpu"
         ]
+      },
+      "host_grants": {
+        "gpu": true
       },
       "env_vars": [
         {
@@ -4175,7 +4199,7 @@
     {
       "id": "ollama",
       "name": "Ollama (Local AI)",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Run local AI models for embeddings, summarization, and content classification via Ollama",
       "type": "bundle",
       "author": "Crow",
@@ -4205,6 +4229,9 @@
           "rocm",
           "cpu"
         ]
+      },
+      "host_grants": {
+        "gpu": true
       },
       "env_vars": [
         {
@@ -5339,7 +5366,7 @@
     {
       "id": "sdxl",
       "name": "SDXL Background Generator",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "AI-generated backgrounds for the companion avatar using SDXL Turbo. Requires NVIDIA GPU.",
       "type": "bundle",
       "author": "Crow",
@@ -5367,6 +5394,9 @@
         "gpu_arch": [
           "cuda"
         ]
+      },
+      "host_grants": {
+        "gpu": true
       },
       "env_vars": [
         {
@@ -6104,7 +6134,7 @@
     {
       "id": "vllm",
       "name": "vLLM",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "GPU-accelerated local LLM inference server — OpenAI-compatible endpoint backed by vLLM's continuous batching and PagedAttention. Recommended classroom engine for Maker Lab: the Phase 0 Ollama benchmark hit unusable p95 latencies at N=25 concurrent learners; vLLM is architecturally the right shape for that scale.",
       "type": "bundle",
       "author": "Crow",
@@ -6141,6 +6171,10 @@
         "gpu_arch": [
           "cuda"
         ]
+      },
+      "host_grants": {
+        "gpu": true,
+        "shm_size": "8g"
       },
       "env_vars": [
         {
@@ -6192,6 +6226,7 @@
     },
     {
       "id": "vllm-cuda-embed",
+      "version": "1.0.1",
       "type": "bundle",
       "name": "vLLM Embeddings — Qwen3-Embedding-0.6B",
       "category": "ai",
@@ -6203,6 +6238,16 @@
         "platform": "linux-x86_64",
         "gpu_arch": [
           "cuda"
+        ]
+      },
+      "host_grants": {
+        "gpu": true,
+        "shm_size": "2g",
+        "env_files": [
+          "cuda.env"
+        ],
+        "path_env": [
+          "GRACKLE_HF_CACHE"
         ]
       },
       "env_vars": [],
@@ -6235,6 +6280,7 @@
     },
     {
       "id": "vllm-cuda-rerank",
+      "version": "1.0.1",
       "type": "bundle",
       "name": "vLLM Reranker — Qwen3-Reranker-0.6B",
       "category": "ai",
@@ -6246,6 +6292,16 @@
         "platform": "linux-x86_64",
         "gpu_arch": [
           "cuda"
+        ]
+      },
+      "host_grants": {
+        "gpu": true,
+        "shm_size": "2g",
+        "env_files": [
+          "cuda.env"
+        ],
+        "path_env": [
+          "GRACKLE_HF_CACHE"
         ]
       },
       "env_vars": [],
@@ -6271,6 +6327,7 @@
     },
     {
       "id": "vllm-cuda-vision",
+      "version": "1.0.1",
       "type": "bundle",
       "name": "vLLM Vision — Qwen3-VL-8B-Instruct-FP8",
       "category": "ai",
@@ -6282,6 +6339,16 @@
         "platform": "linux-x86_64",
         "gpu_arch": [
           "cuda"
+        ]
+      },
+      "host_grants": {
+        "gpu": true,
+        "shm_size": "4g",
+        "env_files": [
+          "cuda.env"
+        ],
+        "path_env": [
+          "GRACKLE_HF_CACHE"
         ]
       },
       "env_vars": [],
@@ -6308,6 +6375,7 @@
     },
     {
       "id": "vllm-rocm-qwen35-4b",
+      "version": "1.0.1",
       "type": "bundle",
       "name": "vLLM Qwen3.5-4B (ROCm gfx1151)",
       "category": "ai",
@@ -6319,6 +6387,16 @@
         "platform": "linux-x86_64",
         "gpu_arch": [
           "gfx1151"
+        ]
+      },
+      "host_grants": {
+        "gpu": true,
+        "shm_size": "8g",
+        "env_files": [
+          "rocm.env"
+        ],
+        "path_env": [
+          "LLM_CACHE"
         ]
       },
       "env_vars": [],

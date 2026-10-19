@@ -60,7 +60,9 @@ services:
       - -ub
       - "4096"
     restart: unless-stopped
-    ipc: host
+    # No ipc: host. llama-server is one process and shares no memory with any other, so the
+    # host IPC namespace buys nothing (the install security check refuses it without
+    # privileged consent). A private /dev/shm of shm_size is kept as headroom.
     shm_size: 2g
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8000/v1/models >/dev/null"]

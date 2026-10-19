@@ -1,6 +1,6 @@
 {
   "id": "llamacpp-vulkan-qwen36-35b-a3b",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "bundle",
   "name": "llama.cpp Qwen3.6-35B-A3B UD-Q6_K + Vision (Vulkan AMDVLK)",
   "category": "ai",
@@ -12,6 +12,7 @@
     "platform": "linux-x86_64",
     "gpu_arch": ["gfx1151"]
   },
+  "host_grants": {"gpu": true, "shm_size": "16g", "env_files": ["rocm.env"], "path_env": ["LLM_CACHE"]},
   "env_vars": [],
   "port": 8003,
   "inference": true,
