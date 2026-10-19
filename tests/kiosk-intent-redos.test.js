@@ -7,7 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { matchClockFastPath, CLOCK_PHRASES } from "../bundles/kiosk/server/clock.js";
+import { matchClockFastPath, CLOCK_PHRASES, mentionsRelativeDay } from "../bundles/kiosk/server/clock.js";
 import { wantsDisplay, wantsNewDisplay, newDisplayKind, parseKioskCommand, matchWmFastPath, createWmStore, isPlaceholderText } from "../bundles/kiosk/server/wm.js";
 import { wantsMemory } from "../bundles/kiosk/server/memory-intent.js";
 import { wantsAction, wantsActionFollowUp, namesDisplayObject } from "../bundles/kiosk/server/action-intent.js";
@@ -30,6 +30,7 @@ const MUSIC_CHOICES = decide(readRequest("greatest misses"), MUSIC_IX, MUSIC_LIV
 const STATIONS = createStationsSource({ list: () => normalizeStations([{ name: "WXYZ HD1", aliases: ["ninety point one"], url: "https://stream.example.invalid/1" }, { name: "WXYZ HD2", aliases: ["HD two"], url: "https://stream.example.invalid/2" }]) });
 const MATCHERS = {
   matchClockFastPath: (s) => matchClockFastPath(s, { now: 0, tz: "UTC" }),
+  mentionsRelativeDay,
   wantsDisplay, wantsNewDisplay, newDisplayKind, wantsMemory, wantsAction, wantsActionFollowUp, namesDisplayObject,
   matchWmFastPath: (s) => matchWmFastPath(s, store, "d", null),
   parseKioskCommand, isPlaceholderText, intentText,
