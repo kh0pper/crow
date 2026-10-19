@@ -406,6 +406,16 @@ test("host_grants.gpu: GPU devices, gpus, GPU reservations, the nvidia runtime a
   writeFileSync(join(d, "gpu.env"), "NVIDIA_VISIBLE_DEVICES=all\n");
   assert.equal(check(svc({ env_file: [{ path: join(d, "gpu.env") }] }), { dir: d }).valid, false, "NVIDIA_* from an env_file");
   assert.equal(check(svc({ env_file: [{ path: join(d, "gpu.env") }] }), { dir: d, manifest: { host_grants: { gpu: true } } }).valid, true);
+  writeFileSync(join(d, "colon.env"), "NVIDIA_VISIBLE_DEVICES: all\n");
+  assert.equal(check(svc({ env_file: [{ path: join(d, "colon.env") }] }), { dir: d }).valid, false, "the KEY: value form Compose accepts");
+  // Never opened before it is admitted, and never a device or FIFO: /dev/zero would hang the gateway.
+  const t0 = Date.now();
+  assert.equal(check(svc({ env_file: [{ path: "/dev/zero" }] }), { dir: d }).valid, false);
+  symlinkSync("/dev/zero", join(d, "zero.env"));
+  assert.equal(check(svc({ env_file: [{ path: join(d, "zero.env") }] }), { dir: d }).valid, false, "a symlink to a device inside the bundle");
+  execFileSync("mkfifo", [join(d, "fifo.env")]);
+  assert.equal(check(svc({ env_file: [{ path: join(d, "fifo.env") }] }), { dir: d }).valid, false, "a FIFO");
+  assert.ok(Date.now() - t0 < 2000, "refused quickly");
   // Unknown grant keys and bad shapes are dropped.
   assert.deepEqual(G.normalizeHostGrants({ gpu: "yes", shm_size: "lots", env_files: ["../x.env", "ok.env", 5], path_env: ["LLM_CACHE", "bad key"], privileged: true }), { env_files: ["ok.env"], path_env: ["LLM_CACHE"] });
   assert.equal(G.normalizeHostGrants([]), null);

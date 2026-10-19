@@ -367,7 +367,8 @@ export function modelBundleInvocation(bundleId, action = "start") {
  * Check a model bundle before anything is stopped or started: the model Compose applies
  * for exactly `modelBundleInvocation`'s `up`, through the shared install security check.
  * Host folders the operator wrote into the bundle's .env (host_grants.path_env, e.g.
- * LLM_CACHE) are passed as operator roots. Throws ComposeGuardError; returns the invocation.
+ * LLM_CACHE) are passed as ctx.operatorRoots, which the check does not use yet (the
+ * host-path allowlist, item 30 B, will). Throws ComposeGuardError; returns the invocation.
  */
 export async function preflightBundleUp(bundleId) {
   if (isModelOrchestrationDisabled()) throw new OrchestrationDisabledError(bundleId);
