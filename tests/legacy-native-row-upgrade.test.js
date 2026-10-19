@@ -102,7 +102,7 @@ test("non-candidates: not native, disabled, bundle rows, external engines", () =
 });
 
 test("all or nothing: a row without a loopback base_url and valid port is never touched", () => {
-  for (const baseUrl of ["http://127.0.0.1:3001/llm/p/small-chat/v1", "http://100.64.20.5:18100/v1", "http://10.0.0.9:18100/v1", "http://127.0.0.1/v1", "not a url", "http://127.0.0.1:80/v1", "https://127.0.0.1:18100/v1"]) {
+  for (const baseUrl of ["http://127.0.0.1:3001/llm/p/small-chat/v1", "http://100.64.20.5:18100/v1", "http://192.0.2.9:18100/v1", "http://127.0.0.1/v1", "not a url", "http://127.0.0.1:80/v1", "https://127.0.0.1:18100/v1"]) {
     assert.deepEqual(planLegacyRowUpgrades({ rows: [legacyRow({ baseUrl })], catalog, state, ownInstanceId: OWN }), [], baseUrl);
   }
   for (const [baseUrl, port] of [["http://localhost:18105/v1", 18105], ["http://[::1]:18107/v1", 18107]]) {
@@ -112,7 +112,7 @@ test("all or nothing: a row without a loopback base_url and valid port is never 
 });
 
 test("a LAN-address legacy row keeps working: no owner is written without a port", async () => {
-  const row = legacyRow({ baseUrl: "http://10.0.0.9:18100/v1" });
+  const row = legacyRow({ baseUrl: "http://192.0.2.9:18100/v1" });
   assert.deepEqual(planLegacyRowUpgrades({ rows: [row], catalog, state, ownInstanceId: OWN }), []);
 });
 
@@ -128,6 +128,14 @@ test("catalogId needs exactly one catalog model the row actually serves", () => 
   const two = legacyRow({ models: [{ id: "small-chat" }, { id: "embedder" }] });
   const [p2] = planLegacyRowUpgrades({ rows: [two], catalog, state, ownInstanceId: OWN });
   assert.equal(p2?.gpuPolicy.catalogId, undefined, "ambiguous → no catalogId");
+});
+
+test("a provider id that differs from its catalog model gets no catalogId (its start path stays the same)", () => {
+  const row = legacyRow({ id: "voice-fast" });
+  const [p] = planLegacyRowUpgrades({ rows: [row], catalog, state, ownInstanceId: OWN });
+  assert.equal(p.gpuPolicy.catalogId, undefined);
+  assert.equal(p.gpuPolicy.quant, undefined);
+  assert.equal(p.gpuPolicy.port, 18100, "the port is still recorded");
 });
 
 test("quant only when exactly one registry entry has that catalogId", () => {

@@ -9,7 +9,8 @@
  *
  * The boot upgrade fills ONLY missing keys:
  *   catalogId  the one catalog model the row serves (row.models[].id — the
- *              same "ours" test `registerModel` applies)
+ *              same "ours" test `registerModel` applies), and only when it
+ *              equals the provider id, so the start path is unchanged
  *   port       from a loopback base_url (`http://127.0.0.1:<port>/...`)
  *   quant      when exactly one local registry entry has that catalogId
  *   owner      this instance's id
@@ -89,8 +90,11 @@ export function planLegacyRowUpgrades({ rows, catalog, state, ownInstanceId }) {
     const next = { ...gp };
     const filled = [];
     if (!hasKey(gp, "catalogId")) {
+      // Only when the provider id IS the catalog id (every pre-catalog row):
+      // the start path keys launch profile and registry entry on
+      // `catalogId || providerName`, so any other row would start differently.
       const catalogId = matchCatalogId(row, catalog);
-      if (catalogId) { next.catalogId = catalogId; filled.push("catalogId"); }
+      if (catalogId && catalogId === row.id) { next.catalogId = catalogId; filled.push("catalogId"); }
     }
     if (!hasKey(gp, "port")) { next.port = urlPort; filled.push("port"); }
     if (!filled.length) continue; // nothing Edit/repair would gain
@@ -106,7 +110,7 @@ export function planLegacyRowUpgrades({ rows, catalog, state, ownInstanceId }) {
 
 /**
  * Plan against the live rows and write each upgrade as a full-row upsert
- * (own row: a normal lamport bump + sync emit). Never throws; one failing row
+ * (a normal own-row upsert; loopback rows never leave this instance). Never throws; one failing row
  * is logged and the rest continue.
  * @returns {Promise<{ id: string, filled: string[] }[]>} the rows written
  */

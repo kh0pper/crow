@@ -4,7 +4,8 @@
  * F3 (Bot Builder -> core): replaces the hardcoded ~/.crow-mpa literals that
  * used to pin pi-bots to the MPA instance. Working files anchor on CROW_DB_PATH
  * first (the templated pibot-*@.service env files set it), then resolveDataDir()
- * (CROW_DATA_DIR -> ~/.crow/data -> ./data). tasks DB and the per-bot workspace
+ * (CROW_DATA_DIR -> for a non-default CROW_HOME its own data dir -> ~/.crow/data
+ * -> ./data). tasks DB and the per-bot workspace
  * derive from the SAME anchor, so they always sit beside the crow.db actually in
  * use. The instance SEED is the one exception — see instanceSeedDir(). All
  * functions read process.env at call time.

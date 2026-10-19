@@ -52,7 +52,7 @@ function layout(name, { defaultDb = true, ownData = false } = {}) {
   mkdirSync(defData, { recursive: true });
   if (defaultDb) writeFileSync(join(defData, "crow.db"), "");
   const home2 = join(host, ".crow-second");
-  if (ownData) mkdirSync(join(home2, "data"), { recursive: true });
+  if (ownData) { mkdirSync(join(home2, "data"), { recursive: true }); writeFileSync(join(home2, "data", "instance-id"), "e".repeat(32)); }
   return { host, defData, home2 };
 }
 
@@ -102,6 +102,14 @@ test("ambiguous: own data dir missing while the host-default DB exists → refus
   assert.equal(v.ok, false);
   assert.match(v.error, /CROW_DATA_DIR/);
   assert.match(v.error, new RegExp(join(home2, "data").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("a stray EMPTY <home>/data is not an instance: still refused", () => {
+  const { host, home2 } = layout("v-empty-own");
+  mkdirSync(join(home2, "data"), { recursive: true });
+  const v = instancePathsVerdict({ CROW_HOME: home2 }, { homeDir: host });
+  assert.equal(v.ok, false);
+  assert.match(v.error, /holds no instance/);
 });
 
 test("data dir or DB inside the host-default data dir → refuse", () => {
@@ -155,7 +163,7 @@ test("the hatch does not waive the ambiguous case (deriving would fork a legacy 
   assert.match(v.error, /CROW_DATA_DIR=.*CROW_ALLOW_SHARED_DATA_DIR=1/);
 });
 
-test("default home with the DB outside the data dir: ok with a warning (grackle / dev .env shape)", () => {
+test("default home with the DB outside the data dir: ok with a warning (symlinked or dev .env shape)", () => {
   const { host, defData } = layout("v-split");
   const v = instancePathsVerdict({ CROW_DATA_DIR: defData, CROW_DB_PATH: "/repo/data/crow.db" }, { homeDir: host });
   assert.equal(v.ok, true);

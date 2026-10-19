@@ -79,7 +79,7 @@ export function isWithin(p, root) {
 
 /**
  * True when `dbPath` is the data dir's own crow.db: in that directory, or the
- * same file through a symlink (grackle and migrated wizard installs link
+ * same file through a symlink (some hosts and migrated wizard installs link
  * <data>/crow.db or ./data to one copy). Relative paths resolve against the
  * cwd, as better-sqlite3 opens them.
  */
@@ -118,7 +118,8 @@ export const INSTANCE_PATHS_EXIT_CODE = 78;
  * (dev, Docker and older installs use that layout). Non-default home:
  *   1. CROW_DATA_DIR / CROW_DB_PATH from the checkout .env, CROW_HOME not → refuse
  *   2. data dir or DB inside the host-default ~/.crow/data → refuse
- *   3. no CROW_DATA_DIR and no CROW_DB_PATH, <home>/data missing, while the
+ *   3. no CROW_DATA_DIR and no CROW_DB_PATH, <home>/data holds no instance
+ *      (no instance-id, no crow.db), while the
  *      host-default crow.db exists → refuse (a fresh second instance, or one
  *      whose data really is in ~/.crow/data — deriving would fork it onto an
  *      empty DB)
@@ -137,7 +138,7 @@ export function instancePathsVerdict(env = process.env, { envFileKeys = new Set(
     const warning = env.CROW_DB_PATH && !sameDbLocation(dbPath, dataDir)
       ? `crow.db is ${dbPath} but the data dir is ${dataDir}: instance-id, identity, peers, refcounts and ` +
         `model state live in the data dir, so any other gateway using ${dataDir} shares them. ` +
-        `The boot model reconcile is skipped until the two agree.`
+        `The boot model reconcile may be skipped until the two agree.`
       : null;
     return { ok: true, warning, pin: null };
   }
@@ -153,8 +154,11 @@ export function instancePathsVerdict(env = process.env, { envFileKeys = new Set(
   if (isWithin(dataDir, defData)) waivable.push(`its data dir ${dataDir} is the host-default instance's data dir`);
   if (isWithin(dbPath, defData) && !isWithin(dataDir, defData)) waivable.push(`its database ${dbPath} is inside the host-default instance's data dir`);
   const fixed = [];
-  if (!env.CROW_DATA_DIR && !env.CROW_DB_PATH && !exists(ownData) && exists(join(defData, "crow.db"))) {
-    fixed.push(`CROW_DATA_DIR is unset and ${ownData} does not exist yet, while a host-default database exists at ${join(defData, "crow.db")}`);
+  // Keyed on instance evidence, not the directory: a stray empty <home>/data
+  // (made by a bundle child, a stdio server or init-db) must not count.
+  const ownInstance = exists(join(ownData, "instance-id")) || exists(join(ownData, "crow.db"));
+  if (!env.CROW_DATA_DIR && !env.CROW_DB_PATH && !ownInstance && exists(join(defData, "crow.db"))) {
+    fixed.push(`CROW_DATA_DIR is unset and ${ownData} holds no instance yet, while a host-default database exists at ${join(defData, "crow.db")}`);
   }
 
   const allow = env.CROW_ALLOW_SHARED_DATA_DIR === "1";

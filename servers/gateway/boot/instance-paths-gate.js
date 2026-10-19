@@ -49,7 +49,7 @@ export function runInstancePathsGate({ env = process.env, envPath = resolve(appR
   }
   if (verdict.warning) log.warn(`[instance-paths] WARNING: ${verdict.warning}`);
   if (verdict.pin) {
-    mkdirSync(verdict.pin.CROW_DATA_DIR, { recursive: true });
+    mkdirSync(verdict.pin.CROW_DATA_DIR, { recursive: true, mode: 0o700 });
     env.CROW_DATA_DIR = verdict.pin.CROW_DATA_DIR;
     log.log(`[instance-paths] CROW_DATA_DIR unset; using ${verdict.pin.CROW_DATA_DIR} (derived from CROW_HOME)`);
   }
