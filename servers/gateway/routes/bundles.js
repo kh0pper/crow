@@ -1709,6 +1709,15 @@ function grantRootsFor(bundleId, bundleDir, { exclude = null } = {}) {
     otherRoots: otherBundlesRoots(bundleId, { crowHome: CROW_HOME, home }),
   };
 }
+/**
+ * A value Compose could turn into a host path outside the bundle folder: absolute or ~/,
+ * a ../ segment, or an interpolation ($X, ${X}). A URL, a time zone, a token or ./sub stays
+ * where it is. Non-owners may not set such a value for a setting the compose file uses.
+ */
+export function reachesHostPath(v) {
+  const t = String(v ?? "").replace(/\$\$/g, ""); // $$ is a literal $ to Compose
+  return /^[\/~]/.test(t) || /(^|[\/])\.\.([\/]|$)/.test(t) || /\$\{?[A-Za-z_]/.test(t);
+}
 export function _migrateGrantsForTest() { return migrateGrants({ crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: process.env.HOME || homedir() }); }
 
 // Test-only: replace `docker compose config` (the model the shared check reads).
@@ -3339,6 +3348,14 @@ export default function bundlesRouter() {
     // Create job for async tracking
     const keychainReq = sanitizeKeychainRequest(req.body?.keychain, { localSession: !!req.dashboardSession && !req.crossHostAuth });
     const owner = await isLocalOwner(req);
+    if (!owner && env_vars && typeof env_vars === "object") {
+      // The same rule as Configure: a non-owner (a peer sign-in session) can't point a setting
+      // the compose file uses at a host path, at install either.
+      let used = new Set();
+      try { used = composeReferencedKeys(readFileSync(join(APP_BUNDLES, bundle_id, "docker-compose.yml"), "utf8")); } catch { /* no compose */ }
+      const bad = Object.keys(env_vars).filter((k) => used.has(k) && reachesHostPath(env_vars[k]));
+      if (bad.length) return res.status(403).json({ code: "folder_needs_owner", key: bad[0], error: `Folder settings (${bad.join(", ")}) are set from this machine's own dashboard, signed in with its password.` });
+    }
     const job = createJob(bundle_id, "install");
     res.json({ ok: true, job_id: job.id, message: `Installing ${bundle_id}...` });
 
@@ -3850,9 +3867,7 @@ export default function bundlesRouter() {
       let folderKeys = new Set();
       try { folderKeys = composeReferencedKeys(readFileSync(join(bundleDir, "docker-compose.yml"), "utf8")); } catch { /* no compose */ }
       const homeForGrants = process.env.HOME || homedir();
-      // Anything that could become a path once Compose resolves it (/, ~, ., $): a relative
-      // ../../ or an interpolated value reaches the same folders an absolute one does.
-      const pathishKeys = Object.keys(env_vars).filter((k) => folderKeys.has(k) && /[\/~$]|^\./.test(String(env_vars[k] ?? "")));
+      const pathishKeys = Object.keys(env_vars).filter((k) => folderKeys.has(k) && reachesHostPath(env_vars[k]));
       if (pathishKeys.length && !owner) {
         return res.status(403).json({ code: "folder_needs_owner", key: pathishKeys[0], error: `Folder settings (${pathishKeys.join(", ")}) are set from this machine's own dashboard, signed in with its password.` });
       }
@@ -3904,9 +3919,9 @@ export default function bundlesRouter() {
         try { composeTextG = readFileSync(join(bundleDir, "docker-compose.yml"), "utf8"); } catch { /* none */ }
         let exampleEnv = {};
         try { exampleEnv = parseEnvText(readFileSync(join(bundleDir, ".env.example"), "utf8")); } catch { /* none */ }
-        // Configure is a deliberate save of the field the owner sees, so a default typed or kept
-        // here counts (the install modal's prefill does not).
-        const g = grantCandidates({ manifest: man, submitted: env_vars, composeText: composeTextG, exampleEnv, crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: homeForGrants, allowDefaults: true, appRoot: APP_ROOT, otherRoots: otherBundlesRoots(bundle_id, { crowHome: CROW_HOME, home: homeForGrants }) });
+        // The form prefills (and sends) the manifest default: a default or an example is never
+        // taken as the owner's choice, here as at install.
+        const g = grantCandidates({ manifest: man, submitted: env_vars, composeText: composeTextG, exampleEnv, crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: homeForGrants, appRoot: APP_ROOT, otherRoots: otherBundlesRoots(bundle_id, { crowHome: CROW_HOME, home: homeForGrants }) });
         try { migrateGrants({ crowHome: CROW_HOME, dataDirs: dataDirsForGrants(), home: homeForGrants }); } catch { /* best-effort */ }
         recordGrants(CROW_HOME, bundle_id, g);
         dropGrants(CROW_HOME, bundle_id, Object.keys(env_vars).filter((k) => folderKeys.has(k) && !g[k]));

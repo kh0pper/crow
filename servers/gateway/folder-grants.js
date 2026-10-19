@@ -59,6 +59,9 @@ function writeGrants(crowHome, data) {
 /** Apply `fn(data)` to the live store and write it back. */
 export function updateGrants(crowHome, fn) {
   const data = readGrants(crowHome);
+  // A corrupt or unreadable store is left for the owner to fix, never overwritten (the
+  // grants it held would be lost); nothing new is recorded meanwhile (fail closed).
+  if (data._corrupt || data._unreadable) return data;
   fn(data);
   writeGrants(crowHome, data);
   return data;

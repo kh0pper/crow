@@ -158,10 +158,12 @@ dockerTest("Configure: a peer cannot set a folder outside Crow's home; the owner
   // resolves ../../ and ${X} to the same folders); settings the compose file doesn't mount
   // still work.
   await withApp("peer", async (post) => {
-    for (const v of ["./media2", "../../../../../srv/x", "${HOME}/x", "~/x"]) {
+    for (const v of ["/srv/x", "./a/../../../../../srv/x", "../srv", "${HOME}/x", "$HOME/x", "~/x"]) {
       assert.equal((await post("/bundles/api/env", { bundle_id: "fx-g6", env_vars: { MEDIA_DIR: v } })).status, 403, v);
     }
     assert.equal((await post("/bundles/api/env", { bundle_id: "fx-g6", env_vars: { UNRELATED: "x/y" } })).status, 200);
+    // Ordinary values of a setting the compose file uses stay settable: a sub-folder of the bundle.
+    assert.equal((await post("/bundles/api/env", { bundle_id: "fx-g6", env_vars: { MEDIA_DIR: "./media2" } })).status, 200);
   });
 });
 
@@ -234,6 +236,8 @@ test("a corrupt grants store fails closed: no grants, no second migration", () =
     assert.equal(g._migrated, 1);
     assert.equal(FG.migrateGrants({ crowHome: other }), false);
     assert.equal(readFileSync(join(other, "folder-grants.json"), "utf8"), "{not json", "left for the owner to fix");
+    FG.recordGrants(other, "x", { K: { value: "/srv/a/b", real: "/srv/a/b" } });
+    assert.equal(readFileSync(join(other, "folder-grants.json"), "utf8"), "{not json", "never overwritten by a save");
   } finally { rmSync(other, { recursive: true, force: true }); }
 });
 
@@ -254,4 +258,9 @@ test("grantCandidates: mount-source keys only, path-like, outside Crow, not secr
   assert.deepEqual(Object.keys(c), ["B"]);
   assert.deepEqual([...FG.composeMountKeys(compose)].sort(), ["A", "B", "E", "HOMEK", "IN", "R", "ROOT", "S", "SHALLOW"]);
   assert.ok(!FG.composeMountKeys("    volumes:\n      - ${CROW_HOME:?x}/b:/b\n").has("CROW_HOME"), "gateway-supplied keys are not the .env's");
+});
+
+test("reachesHostPath: paths and interpolations yes; URLs, time zones, tokens and ./sub no", () => {
+  for (const v of ["/srv", "~/x", "../x", "./a/../../x", "a/../../x", "${X}", "$X/y", "x${Y}"]) assert.equal(B.reachesHostPath(v), true, v);
+  for (const v of ["https://lemmy.example.com/api", "America/Chicago", "abc+/def==", "./media", "media/sub", "pa$$word", "p$1", ""]) assert.equal(B.reachesHostPath(v), false, v);
 });
