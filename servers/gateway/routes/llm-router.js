@@ -52,6 +52,9 @@ import { loadProviders } from "../../shared/providers.js";
 import { validateLocalToken, validateModelsToken } from "../local-token.js";
 import { resolveDoorTarget, listDoorModels, isTrustedDoorRequest, DOOR_PROVIDER_HEADER, DOOR_HOP_HEADER } from "../models/door-resolve.js";
 import { providerDoorUrl } from "../models/door.js";
+import { nowContext, relativeDatesContext, mentionsRelativeDay } from "../../shared/relative-dates.js";
+import { withTurnContext } from "../voice/context-echo.js";
+import { createSseEchoFilter, stripJsonEcho } from "../voice/sse-echo.js";
 
 const FAST_KEY = process.env.COMPANION_FAST_MODEL || "crow-voice/qwen3.5-4b";
 const ESC_KEY = process.env.COMPANION_ESCALATION_MODEL || "crow-chat/qwen3.6-35b-a3b";
@@ -127,7 +130,14 @@ function authHeaders(apiKey) {
   return apiKey && apiKey !== "none" ? { Authorization: `Bearer ${apiKey}` } : {};
 }
 
-const COMPANION_MODEL_IDS = [FAST_KEY, ESC_KEY].map((k) => splitKey(k)[1]).filter(Boolean);
+/**
+ * The model id the AI Companion's generated config sends (bundles/companion/scripts/generate-config.py). Only a
+ * request naming exactly this id gets the turn context below: a request with no model, an unknown id or a bare
+ * fast/escalate id (a peer, pi-lab, an outside client) is forwarded as it came.
+ */
+export const COMPANION_TURN_MODEL = "crow-companion";
+
+const COMPANION_MODEL_IDS = [...[FAST_KEY, ESC_KEY].map((k) => splitKey(k)[1]).filter(Boolean), COMPANION_TURN_MODEL];
 
 async function defaultDoorAuth(token) {
   if (!token) return false;
@@ -297,6 +307,53 @@ function stripEscalate(body) {
   }
 }
 
+/**
+ * The companion's turn context (dates follow-up to queue item 17a). Open-LLM-VTuber sends a static system prompt and
+ * no date, so "add a dentist appointment Monday" had nothing to count from. On a request naming COMPANION_TURN_MODEL,
+ * the LAST user message gets [Now] (every turn) and [Dates] (when the user's words name a relative day), closed by
+ * the [Note] line (context-echo.js withTurnContext). Never the system message or an earlier message: OLVV keeps the
+ * raw text in its memory, so history (and the prefix cache over it) matches turn to turn. Server zone (OLVV sends
+ * none). Skipped when the message already carries a [Now]/[Dates] line or a dashboard-style "Current date and
+ * time:" stamp. COMPANION_TURN_CONTEXT=0 turns it off (read per request).
+ * → the injected context text (for the echo guard), or null when nothing was added.
+ */
+const ALREADY_STAMPED = /^\[(Now|Dates)\] |Current date and time:/m;
+function injectCompanionTurnContext(body, now) {
+  if (process.env.COMPANION_TURN_CONTEXT === "0") return null;
+  if (body?.model !== COMPANION_TURN_MODEL) return null;
+  const msgs = Array.isArray(body.messages) ? body.messages : [];
+  let i = msgs.length - 1;
+  while (i >= 0 && msgs[i]?.role !== "user") i--;
+  if (i < 0) return null;
+  const text = lastUserText(body);
+  if (ALREADY_STAMPED.test(text)) return null;
+  const ctx = nowContext(now, null) + (mentionsRelativeDay(text) ? `\n${relativeDatesContext(now, null)}` : "");
+  const c = msgs[i].content;
+  if (typeof c === "string") {
+    msgs[i] = { ...msgs[i], content: withTurnContext(ctx, c) };
+  } else if (Array.isArray(c)) {
+    const k = c.findIndex((p) => p && typeof p === "object" && p.type === "text" && typeof p.text === "string");
+    const content = c.slice();
+    if (k >= 0) content[k] = { ...c[k], text: withTurnContext(ctx, c[k].text) };
+    else content.unshift({ type: "text", text: withTurnContext(ctx, "") });
+    msgs[i] = { ...msgs[i], content };
+  } else {
+    return null;
+  }
+  return ctx;
+}
+
+/** The reply-side echo guard for an injected turn: SSE by content-type, else a whole JSON body. */
+function echoTransform(contentType, ctx) {
+  if (/text\/event-stream/i.test(contentType || "")) return createSseEchoFilter([ctx]);
+  const decoder = new TextDecoder("utf-8");
+  let all = "";
+  return {
+    write(chunk) { all += decoder.decode(chunk, { stream: true }); return ""; },
+    end() { all += decoder.decode(); return stripJsonEcho(all, [ctx]); },
+  };
+}
+
 /** The fast/escalate keys the router and the kiosk voice turn share. */
 export const VOICE_ROUTE_KEYS = Object.freeze({ fast: FAST_KEY, escalate: ESC_KEY });
 
@@ -340,6 +397,8 @@ async function handleChat(req, res, deps) {
 
   const decision = chooseVoiceRoute(body.messages, { hasTools: Array.isArray(body.tools) && body.tools.length > 0 });
   if (decision.reason === "manual") stripEscalate(body); // only the typed token is stripped
+  // After the route decision (it reads the user's own words) and before any degrade note is appended.
+  const injected = injectCompanionTurnContext(body, deps.nowFn());
   const escalate = decision.route === "escalate";
   const escReason = decision.reason;
   let key = escalate ? ESC_KEY : FAST_KEY;
@@ -453,26 +512,37 @@ async function handleChat(req, res, deps) {
   // Tap the pass-through to meter usage (companion/glasses). Bytes are forwarded
   // unchanged; we keep only a bounded tail because the OpenAI usage block rides
   // the final include_usage SSE frame (or is the whole non-streaming JSON body).
+  // An injected companion turn goes through the echo guard (not an error body: that passes as it came); the
+  // metering tap then reads the filtered bytes (the usage frame passes the filter untouched).
   let captured = "";
   const CAP = 64 * 1024;
+  const tap = (text) => { captured += text; if (captured.length > CAP) captured = captured.slice(-CAP); };
+  const xf = injected && upstream.ok ? echoTransform(upstream.headers.get("content-type"), injected) : null;
   try {
     await new Promise((resolve, reject) => {
       const nodeStream = Readable.fromWeb(upstream.body);
       nodeStream.on("error", reject);
-      nodeStream.on("data", (chunk) => {
-        captured += chunk.toString("utf8");
-        if (captured.length > CAP) captured = captured.slice(-CAP);
-      });
       res.on("close", () => nodeStream.destroy());
-      nodeStream.pipe(res);
       res.on("finish", resolve);
+      if (!xf) {
+        nodeStream.on("data", (chunk) => tap(chunk.toString("utf8")));
+        nodeStream.pipe(res);
+        return;
+      }
+      nodeStream.on("data", (chunk) => {
+        const out = xf.write(chunk);
+        if (!out) return;
+        tap(out);
+        if (!res.write(out)) { nodeStream.pause(); res.once("drain", () => nodeStream.resume()); }
+      });
+      nodeStream.on("end", () => { const out = xf.end(); if (out) tap(out); res.end(out); });
     });
     // Metering: best-effort, never affects the proxied response.
     if (upstream.ok) {
       try {
         const usage = extractUsageFromOpenAIResponse(captured);
         if (usage) {
-          await recordUsageEvent(db(), {
+          await deps.recordUsageFn({
             tenantId: resolveTenantId(),
             surface: "llm",
             providerId,
@@ -526,6 +596,8 @@ export default function llmRouterRouter(opts = {}) {
     loadProvidersFn: loadProviders,
     remoteAddressFn: (req) => req.socket?.remoteAddress || "",
     doorAuthFn: defaultDoorAuth,
+    nowFn: Date.now,
+    recordUsageFn: (event) => recordUsageEvent(db(), event),
     ...opts,
   };
   const router = express.Router();
