@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createToolFamilies, phraseWords, normalizeIntentLists, listMatches, INTENT_MAX_CHARS, MAX_PHRASES } from "../servers/gateway/voice/tool-families.js";
+import { createToolFamilies, classifyTools, phraseWords, normalizeIntentLists, listMatches, INTENT_MAX_CHARS, MAX_PHRASES } from "../servers/gateway/voice/tool-families.js";
 import { TOOL_MANIFESTS } from "../servers/gateway/tool-manifests.js";
 import { listInstalledExtensions, listCapabilityBundles } from "../scripts/pi-bots/ext_registry.mjs";
 
@@ -164,4 +164,75 @@ test("adversarial input: 50,000-repeat transcripts answer inside 50 ms of CPU ti
     const s = run.repeat(50_000) + tail;
     for (const fam of ["core:blog", "core:projects", "core:media"]) assert.ok(cpuMs(() => f.wants(fam, s)) < 50, `${fam} on ${JSON.stringify(run)}`);
   }
+});
+
+// classifyTools: the voice turn's family classification, extracted unchanged (turn.js calls it; the
+// Bot Builder's "By voice on displays" line calls the same function with a fixed request).
+const CLS_FAM = () => createToolFamilies({
+  manifests: { projects: { tools: {}, voiceIntent: { en: ["project"], es: ["proyecto"] } }, sharing: { tools: {}, voiceIntent: { en: ["message", "send"], es: ["mensaje"] } }, blog: { tools: {} } },
+  connected: () => new Map([["cal", { status: "connected", tools: [{ name: "cal_create_event" }, { name: "cal_hidden_add" }] }], ["plain", { status: "connected", tools: [{ name: "pl_do" }] }]]),
+  listExtensions: () => [{ id: "cal", capabilities: { voice_intent: { en: ["calendar"], es: ["calendario"] } } }],
+});
+const T = (...names) => names.map((name) => ({ name }));
+const names = (list) => list.map((t) => t.name);
+const BASE = T("crow_projects", "crow_sharing", "crow_blog", "cal_create_event", "pl_do", "crow_tools", "crow_delegate", "crow_memory", "crow_wm");
+const clsOpts = (transcript, extra = {}) => ({ baseTools: BASE, fam: CLS_FAM(), transcript, isExtraTool: (n) => n === "crow_wm", isMemoryTool: (n) => n === "crow_memory", ...extra });
+
+test("classifyTools: a listed family is offered only when the request names it; display and memory tools keep their own gates", () => {
+  const plain = classifyTools(clsOpts("what is the capital of Portugal"));
+  assert.deepEqual(names(plain.quickTools), ["crow_memory", "crow_wm"]);
+  const proj = classifyTools(clsOpts("open my project"));
+  assert.deepEqual(names(proj.quickTools), ["crow_projects", "crow_memory", "crow_wm"]);
+  assert.equal(proj.famOf({ name: "crow_wm" }), undefined);
+  assert.equal(proj.famOf({ name: "crow_memory" }), undefined);
+  assert.equal(proj.famOf({ name: "crow_delegate" }), "other");
+  assert.equal(proj.famWanted("core:projects"), true);
+  assert.equal(proj.famWanted("core:sharing"), false);
+});
+
+test("classifyTools: unlisted families and the wrapper — offered with a wanted add-on family, withheld otherwise", () => {
+  const off = classifyTools(clsOpts("what time is it"));
+  assert.deepEqual(off.famIds, ["core:projects", "core:sharing", "core:blog", "addon:cal", "addon:plain", "other"]);
+  assert.deepEqual(off.unlisted, ["core:blog", "addon:plain", "other"]);
+  assert.equal(off.wrapperWithheld, true);
+  const on = classifyTools(clsOpts("add lunch to my calendar"));
+  assert.deepEqual(names(on.quickTools), ["cal_create_event", "crow_tools", "crow_memory", "crow_wm"]);
+  assert.equal(on.wrapperWithheld, false);
+});
+
+test("classifyTools: the previous turn's families stay on offer for one follow-up", () => {
+  const r = classifyTools(clsOpts("and the other one", { prevFam: new Set(["core:sharing"]) }));
+  assert.deepEqual(names(r.quickTools), ["crow_sharing", "crow_memory", "crow_wm"]);
+});
+
+test("classifyTools: actionWithheld — an action request whose family tools were all withheld, with no display backing", () => {
+  const cold = classifyTools(clsOpts("remind me to call alex"));
+  assert.equal(cold.actionWithheld(true, false), true);
+  assert.equal(cold.actionWithheld(true, true), false, "the display backs it");
+  assert.equal(cold.actionWithheld(false, false), false, "not an action request");
+  const offered = classifyTools(clsOpts("send a message to alex"));
+  assert.equal(offered.actionWithheld(true, false), false, "a family tool reached the quick model");
+  const none = classifyTools(clsOpts("remind me to call alex", { baseTools: T("crow_memory", "crow_wm") }));
+  assert.equal(none.actionWithheld(true, false), false, "no family tool at all");
+});
+
+test("classifyTools: without families (fam null) every tool is offered and nothing is withheld", () => {
+  const r = classifyTools(clsOpts("anything", { fam: null }));
+  assert.equal(r.quickTools, BASE);
+  assert.deepEqual([r.famIds, r.unlisted, r.wrapperWithheld, r.actionWithheld(true, false)], [[], [], false, false]);
+  assert.equal(r.famOf({ name: "crow_projects" }), undefined);
+});
+
+test("families: a core family's manifest actions and an add-on family's manifest name (for the ability line)", () => {
+  const f = createToolFamilies({
+    manifests: { sharing: { tools: { crow_send_message: {}, crow_inbox: {} } } },
+    connected: () => new Map([["mb", { status: "connected", tools: [{ name: "mb_play" }] }]]),
+    listExtensions: () => [{ id: "mb", name: "Music Box", capabilities: {} }, { id: "anon", capabilities: {} }],
+  });
+  assert.deepEqual(f.categoryTools("core:sharing"), ["crow_send_message", "crow_inbox"]);
+  assert.deepEqual(f.categoryTools("core:nope"), []);
+  assert.deepEqual(f.categoryTools("addon:mb"), []);
+  assert.equal(f.nameOf("addon:mb"), "Music Box");
+  assert.equal(f.nameOf("addon:anon"), null);
+  assert.equal(f.nameOf("core:sharing"), null);
 });

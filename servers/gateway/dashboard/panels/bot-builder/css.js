@@ -291,6 +291,8 @@ export function botBuilderStyles() {
   .btb-voice{margin:0;font-size:.8rem;color:var(--crow-text-secondary);min-width:0;overflow-wrap:anywhere}
   .btb-voice[hidden]{display:none}
   .btb-voice-l{color:var(--crow-text-muted)}
+  .btb-abil{margin:0;font-size:.8rem;color:var(--crow-text-secondary);min-width:0;overflow-wrap:anywhere}
+  .btb-abil[hidden]{display:none}
   /* "Use <Name> for voice" rows (voice-use.js), inside the give dialog's panel styles. */
   .btb-vu-rows{display:flex;flex-direction:column;gap:.5rem;min-width:0}
   .btb-vu-row{display:flex;flex-direction:column;gap:.15rem;min-width:0;padding:.45rem .6rem;border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);overflow-wrap:anywhere}

@@ -28,3 +28,20 @@ export function createBotFit({ assess, now = Date.now, log = () => {}, ttlMs = F
     return level;
   };
 }
+
+/**
+ * "By voice on displays: …": the runner's abilitiesOf, cached like a fit (the panel polls its listing).
+ * Returns botAbilities(db, botId, memoryOn) → { items, none } or null (unknown bot, a failed check).
+ */
+export function createBotAbilities({ abilities, now = Date.now, log = () => {}, ttlMs = FIT_TTL_MS }) {
+  const cache = new Map();
+  return async function botAbilities(db, botId, memoryOn = false) {
+    const key = `${botId}|${memoryOn ? 1 : 0}`;
+    const hit = cache.get(key);
+    if (hit && now() - hit.at < ttlMs) return hit.value;
+    let value = null;
+    try { value = (await abilities(db, botId, !!memoryOn)) || null; } catch (err) { log(`[kiosk] ability check for ${botId} failed: ${err.message}`); }
+    cache.set(key, { value, at: now() });
+    return value;
+  };
+}

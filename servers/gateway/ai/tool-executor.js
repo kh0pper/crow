@@ -98,7 +98,7 @@ export function botVoiceScope(botDef) {
 }
 
 /** Set of tool names currently advertised by connected addon servers. */
-function connectedAddonToolNames() {
+export function connectedAddonToolNames() {
   const names = new Set();
   if (!connectedServers) return names;
   for (const [, entry] of connectedServers) {

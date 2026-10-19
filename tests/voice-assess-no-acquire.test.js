@@ -125,3 +125,48 @@ test("control: the spies reach the mechanism — a display save that changes its
   assert.equal(calls.warm, before.warm + 1, "the warm-up spy is the one the runtime calls");
   assert.equal(calls.push, before.push + 1, "the push spy is the one the runtime calls");
 });
+
+// "By voice on displays: …" (bot voice abilities): the card line rides on the same listing and must stay as cheap —
+// no prompt build, no context length, no model start / probe / chat adapter / network.
+test("abilitiesOf on the real voice deps: computed for every fixture bot with no prompt build, model start, probe, chat adapter or network", async () => {
+  await raw.execute({ sql: "INSERT OR REPLACE INTO pi_bot_defs VALUES (?,?,?,1)", args: ["v-mem", "Memory", JSON.stringify({ system_prompt: "You help.", fast_voice_model: "voice-test/big", tools: { crow_mcp: ["crow-memory/crow_store_memory"] } })] });
+  await raw.execute({ sql: "INSERT OR REPLACE INTO pi_bot_defs VALUES (?,?,?,1)", args: ["v-proj", "Projects", JSON.stringify({ system_prompt: "You help.", fast_voice_model: "voice-test/big", tools: { crow_mcp: ["crow-projects/crow_create_project"] } })] });
+  const real = await defaultVoiceDeps();
+  assert.equal(typeof real.toolEscalationEnabled, "function", "the router's escalation switch is wired");
+  assert.equal(typeof real.connectedAddonTools, "function");
+  assert.ok(real.escalateKey, "the larger model's key is wired");
+  let prompt = 0, ctxReads = 0;
+  const voice = createVoiceTurnRunner({ ...real,
+    acquire: async () => { calls.acquire++; throw new Error("x"); },
+    probeReady: async () => { calls.probeReady++; throw new Error("x"); },
+    createChatAdapter: async () => { calls.chat++; throw new Error("x"); },
+    generateSystemPrompt: async () => { prompt++; throw new Error("no system prompt for the ability line"); },
+    contextLenFor: async () => { ctxReads++; throw new Error("no context length for the ability line"); } });
+  const before = { ...calls };
+  for (const botId of ["v-full", "v-huge", "v-unknown", "v-proj", "v-mem"]) {
+    for (const memoryOn of [false, true]) {
+      const r = await voice.abilitiesOf({ db: db(), botId, memoryOn, denyTools: ["crow_delegate"] });
+      assert.ok(r && Array.isArray(r.items), `${botId}: an answer`);
+      assert.equal(r.items.some((x) => x.id === "memory"), memoryOn && botId === "v-mem", `${botId}: memory follows the toggle, and only on a bot with crow_memory`);
+    }
+  }
+  assert.ok((await voice.abilitiesOf({ db: db(), botId: "v-proj" })).items.some((x) => x.id === "projects"), "a real category tool reaches the line");
+  assert.deepEqual([prompt, ctxReads], [0, 0]);
+  assert.deepEqual(calls, before, "nothing that could start or reach a model ran");
+  await raw.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id IN ('v-proj', 'v-mem')", args: [] });
+});
+
+test("the Kiosk listing carries each bot's abilities (memories off / on) and still starts, warms or pushes nothing", async () => {
+  await raw.execute({ sql: "INSERT OR REPLACE INTO pi_bot_defs VALUES (?,?,?,1)", args: ["v-mem", "Memory", JSON.stringify({ system_prompt: "You help.", fast_voice_model: "voice-test/big", tools: { crow_mcp: ["crow-memory/crow_store_memory"] } })] });
+  const before = { ...calls };
+  const r = await get("/api/kiosk/admin/displays");
+  assert.equal(r.status, 200);
+  assert.ok(r.json.bots.some((b) => b.bot_id === "v-mem"));
+  for (const b of r.json.bots) {
+    assert.ok(b.abilities && Array.isArray(b.abilities.items), `${b.bot_id}: abilities`);
+    assert.equal(b.abilities.items.some((x) => x.id === "memory"), false, `${b.bot_id}: memories off`);
+    assert.equal(b.abilities_memory.items.some((x) => x.id === "memory"), b.bot_id === "v-mem", `${b.bot_id}: abilities_memory only with crow_memory`);
+  }
+  assert.deepEqual(calls, before);
+  await raw.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id = 'v-mem'", args: [] });
+});

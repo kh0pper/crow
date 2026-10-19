@@ -18,7 +18,7 @@ import { effectiveCaps, audioPolicy, BAR_OWNER_RE } from "./caps.js";
 import { ensureKioskSttProfile, pickKioskTtsProfile, kioskSttModel } from "./profiles.js";
 import { resolveSessionBot, sameOriginUpgrade, sessionDisplayId, SESSION_BOT_SETTING } from "./session-display.js";
 import { STRINGS } from "./strings.js";
-import { createBotFit } from "./fit.js";
+import { createBotFit, createBotAbilities } from "./fit.js";
 import { kioskNowContext, matchClockFastPath, relativeDatesContext, mentionsRelativeDay } from "./clock.js";
 import { wantsMemory } from "./memory-intent.js";
 import { wantsAction, wantsActionFollowUp, namesDisplayObject } from "./action-intent.js";
@@ -388,14 +388,28 @@ export function createKioskRuntime(deps) {
    *  the voice turn's one onToolResult hook (envelope.js decides what is honoured). */
   const turnOptions = (device, caps, tz, emit, hooks) => displayTurnOptions(displayCtx(device, caps, emit, hooks), { now, tz, settings: () => device.kiosk_settings, mediaLine: () => media.describe(device.id), sttPrompt: sttPromptFor(device), sttHotwords: sttHotwordsFor(device),
     onToolResult: music ? createEnvelopeHandler({ media, deviceId: device.id, music, meta: () => ({ maxVolume: Number(device.kiosk_settings?.max_volume) || 100 }) }) : null });
+  // The display tools as the panel counts them (no display, no windows): the bind-time fit and the ability line.
+  const panelTools = () => createDisplayTools(displayCtx({ id: "", kiosk_settings: {} }, effectiveCaps(null, null), () => {}));
   // Bind-time fit: the voice turn's own ladder, with this bundle's tool list (the display tools on, the deny list, the suffix).
   const botFit = createBotFit({
     now, log,
     assess: async (db, botId, memoryOn) => (deps.voice.assessBot ? deps.voice.assessBot({
       db, botId, memoryOn, denyTools: KIOSK_DENY_TOOLS, promptSuffix: displayPromptSuffix(null, ["crow_show", "crow_wm"]),
-      extraTools: createDisplayTools(displayCtx({ id: "", kiosk_settings: {} }, effectiveCaps(null, null), () => {})),
+      extraTools: panelTools(),
     }) : null),
   });
+
+  // "By voice on displays: …" (Bot Builder card, the pickers below): the voice turn's own classifier, with the same
+  // tool list as the fit. A request the display could hold is taken as if a card or a timer were open (understate).
+  const ALL_WINDOW_KINDS = ["timer", "content", "recipe"];
+  const botAbilities = typeof deps.voice?.abilitiesOf === "function" ? createBotAbilities({
+    now, log,
+    abilities: (db, botId, memoryOn) => deps.voice.abilitiesOf({
+      db, botId, memoryOn, denyTools: KIOSK_DENY_TOOLS,
+      extraTools: panelTools(),
+      displayObjectWhen: (t) => namesDisplayObject(t, ALL_WINDOW_KINDS),
+    }),
+  }) : null;
 
   hub = createSessionHub({
     verifyKiosk: (id, token) => withDb((db) => deps.deviceStore.verifyToken(db, id, token, { kind: "kiosk" })),
@@ -760,6 +774,8 @@ export function createKioskRuntime(deps) {
         const bots = (await db.execute({ sql: "SELECT bot_id, display_name FROM pi_bot_defs WHERE enabled = 1 ORDER BY display_name", args: [] })).rows.map((x) => ({ bot_id: x.bot_id, display_name: x.display_name }));
         // fit / fit_memory: "full" | "no_skills" | "too_large" | null (unknown), with memories off / on.
         for (const b of bots) { b.fit = await botFit(db, b.bot_id, false); b.fit_memory = await botFit(db, b.bot_id, true); }
+        // abilities / abilities_memory: { items: [{ id, quick, label? }], none } | null; absent with an older core.
+        if (botAbilities) for (const b of bots) { b.abilities = await botAbilities(db, b.bot_id, false); b.abilities_memory = await botAbilities(db, b.bot_id, true); }
         const prof = async (k) => { try { return JSON.parse((await deps.settings.readSetting(db, k)) || "[]").map((p) => ({ id: p.id, name: p.name || p.id, provider: p.provider })); } catch { return []; } };
         const chosen = String((await deps.settings.readSetting(db, SESSION_BOT_SETTING)) || "") || null;
         const dashboard_voice = { available: sessionMode, bot_id: chosen, effective_bot_id: await sessionBot(db), auto_bot_id: await automaticBot(db) };

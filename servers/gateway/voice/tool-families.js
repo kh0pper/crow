@@ -59,10 +59,10 @@ export function createToolFamilies({ manifests = {}, listExtensions = () => [], 
     const p = normalizeIntentLists(m?.voiceIntent);
     if (p.length) core.set(`core:${category}`, p);
   }
-  let addons = { at: -Infinity, byTool: new Map(), lists: new Map() };
+  let addons = { at: -Infinity, byTool: new Map(), lists: new Map(), names: new Map() };
   function index() {
     if (now() - addons.at < ttlMs) return addons;
-    const byTool = new Map(), lists = new Map();
+    const byTool = new Map(), lists = new Map(), names = new Map();
     try {
       for (const [id, entry] of connected()) for (const t of entry?.tools || []) if (t?.name && !byTool.has(t.name)) byTool.set(t.name, `addon:${id}`);
       for (const ext of listExtensions()) {
@@ -70,9 +70,10 @@ export function createToolFamilies({ manifests = {}, listExtensions = () => [], 
         for (const t of ext?.capabilities?.tools || []) if (t?.name && !byTool.has(t.name)) byTool.set(t.name, fam);
         const p = normalizeIntentLists(ext?.capabilities?.voice_intent);
         if (p.length) lists.set(fam, p);
+        if (typeof ext?.name === "string" && ext.name && ext.name !== ext.id) names.set(fam, ext.name.slice(0, 60));
       }
     } catch { /* an unreadable add-on index offers nothing; it is read again after ttlMs */ }
-    addons = { at: now(), byTool, lists };
+    addons = { at: now(), byTool, lists, names };
     return addons;
   }
   return {
@@ -88,5 +89,43 @@ export function createToolFamilies({ manifests = {}, listExtensions = () => [], 
       const p = core.get(family) || index().lists.get(family);
       return !!p && listMatches(phraseWords(transcript), p);
     },
+    /** A core family's action names (its manifest's tools); [] for anything else. */
+    categoryTools(family) {
+      const m = /^core:(.+)$/.exec(String(family ?? ""));
+      return m && Object.hasOwn(manifests, m[1]) ? Object.keys(manifests[m[1]]?.tools || {}) : [];
+    },
+    /** An add-on family's manifest name (data: callers escape it), or null. */
+    nameOf: (family) => index().names.get(family) || null,
   };
+}
+
+const NO_FAMILIES = new Set();
+/**
+ * The voice turn's family classification (runVoiceTurn calls it once per turn; the Bot Builder's
+ * "By voice on displays" line calls it with a fixed request, so both read one decision). Pure.
+ * baseTools: the turn's tools after its own gates. fam: createToolFamilies() or null (families off:
+ * every tool goes to the quick model). prevFam: the families the previous turn used.
+ * isExtraTool / isMemoryTool: those tools keep their own gates and are never a family tool.
+ * → { famOf, famWanted, quickTools, famIds, unlisted, wrapperWithheld, actionWithheld(actionAsked, displayBacks) }
+ */
+export function classifyTools({ baseTools, fam, transcript, prevFam = NO_FAMILIES, isExtraTool = () => false, isMemoryTool = () => false }) {
+  const famWanted = (id) => prevFam.has(id) || fam.wants(id, transcript);
+  // undefined = not a family tool (display tools and memory keep their own gates); "other" = a tool no family claims.
+  const famOf = (t) => (fam && !isExtraTool(t.name) && !isMemoryTool(t.name) ? (fam.familyOf(t.name) || "other") : undefined);
+  const quickTools = !fam ? baseTools : baseTools.filter((t) => {
+    const id = famOf(t);
+    if (id === undefined) return true;
+    if (id === "addons") return baseTools.some((x) => { const f = famOf(x); return typeof f === "string" && f.startsWith("addon:") && famWanted(f); });
+    return id !== "other" && famWanted(id);
+  });
+  // Families with no intent list never reach the quick model; they keep the router's view of
+  // "this assistant has tools", so a turn the router escalates can still use them.
+  const famIds = !fam ? [] : [...new Set(baseTools.map(famOf).filter((id) => typeof id === "string" && id !== "addons"))];
+  const unlisted = famIds.filter((id) => !fam.hasList(id));
+  const wrapperWithheld = !!fam && baseTools.some((t) => famOf(t) === "addons") && !quickTools.some((t) => famOf(t) === "addons");
+  const isFamTool = (t) => famOf(t) !== undefined;
+  // Escalate an action request when the quick model got no family tool but the assistant has some — and no
+  // display tool is on offer (a display command such as "add two minutes" stays on the quick model).
+  const actionWithheld = (actionAsked, displayBacks) => !!fam && actionAsked && !displayBacks && !quickTools.some(isFamTool) && baseTools.some(isFamTool);
+  return { famOf, famWanted, quickTools, famIds, unlisted, wrapperWithheld, isFamTool, actionWithheld };
 }

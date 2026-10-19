@@ -15,6 +15,8 @@ import {
 import { withTurnContext, createContextEchoGate, stripContextEcho, stripContextEchoDeep, TURN_CONTEXT_NOTE } from "./context-echo.js";
 import { estimatePromptTokens, requestFits, choosePromptFit, dropOldestExchange } from "./prompt-fit.js";
 import { claimsAction, claimsReminder, claimsBeyondMemory, toolEffect } from "./action-claims.js";
+import { classifyTools } from "./tool-families.js";
+import { voiceAbilities } from "./voice-abilities.js";
 
 export const ESCALATION_READY_TIMEOUT_MS = 8000;
 export const ESCALATION_PROBE_EVERY_MS = 500;
@@ -189,6 +191,56 @@ export function createVoiceTurnRunner(deps) {
     const tools = turnTools(bot, { memoryOn, extra, deny: turnDeny(denyTools, extra) });
     const fit = await promptFit({ db, bot, tools, promptSuffix, key });
     return { level: fit.level, ctx: fit.ctx, est_tokens: fit.est, est_no_skills_tokens: fit.est_no_skills, reserve_tokens: fit.reserve, model: key };
+  }
+
+  /**
+   * "By voice on displays: …" (Bot Builder card, Kiosk panel): what this bot can do by voice on a display that
+   * turns on tool families (familiesOnIntent), decided by the turn's own classifier on a fixed request per
+   * ability (voice-abilities.js). Cheap at render: the bot row, the tool list and the family index — never a
+   * system prompt, a context length, a model start, a probe or a chat adapter. The larger model's key is
+   * resolved (a provider-table read) only to know whether an escalation could happen at all.
+   * extraTools / denyTools: as for assessBot (the display's own tools are never an ability; they only keep a
+   * request they would take on the quick model). displayObjectWhen(transcript): the display could hold what
+   * the request names — taken as if a card or a timer were open (the line may understate, never overstate).
+   * null = no such enabled bot, or no tool families on this gateway.
+   * → { items: [{ id, quick, label? }], none }
+   */
+  async function abilitiesOf({ db, botId, memoryOn = false, extraTools, denyTools, displayObjectWhen }) {
+    const fam = deps.toolFamilies;
+    if (!fam) return null;
+    const bot = await loadBot(db, botId);
+    if (!bot) return null;
+    const extra = Array.isArray(extraTools) ? extraTools : [];
+    const extraNames = new Set(extra.map((x) => x?.definition?.name));
+    const deny = turnDeny(denyTools, extra);
+    const tools = turnTools(bot, { memoryOn: false, extra, deny }).filter((t) => !extraNames.has(t.name));
+    const policy = bot.permission_policy || {};
+    const allowed = (n) => !deny.has(n)
+      && !(Array.isArray(policy.deny) && policy.deny.includes(n))
+      && !(policy.external_send === "draft_only" && typeof deps.isExternalSendTool === "function" && deps.isExternalSendTool(n));
+    let hidden = [];
+    if (tools.some((t) => t.name === "crow_tools") && typeof deps.connectedAddonTools === "function") {
+      const scope = deps.botVoiceScope(bot);
+      const direct = new Set(tools.map((t) => t.name));
+      hidden = [...deps.connectedAddonTools()].filter((n) => !direct.has(n) && (!scope || scope.selectedToolNames.has(n)));
+    }
+    let escalates = false;
+    if (deps.escalateKey && typeof deps.toolEscalationEnabled === "function" && deps.toolEscalationEnabled() === true) {
+      try { escalates = !!(await deps.resolveKey(deps.escalateKey))?.baseUrl; } catch { escalates = false; }
+    }
+    // As the turn reads it (displayAsked / displayBacks); a display tool that throws is taken as taking the request.
+    const displayBacks = (t) => {
+      try {
+        return extra.some((x) => (typeof x.when !== "function" || x.when(t) === true)
+          && ((typeof x.holdText === "function" && x.holdText(t) === true) || (typeof x.must === "function" && x.must(t) === true)))
+          || (extra.length > 0 && typeof displayObjectWhen === "function" && displayObjectWhen(t) === true);
+      } catch { return true; }
+    };
+    const classify = (transcript) => classifyTools({ baseTools: tools, fam, transcript, isMemoryTool: (n) => deps.isMemoryTool(n) });
+    // "Remembers things" only when the turn would really offer crow_memory (the bot has it, the display does
+    // not deny it) and the bot's policy lets it store a memory.
+    const memTool = memoryOn === true && turnTools(bot, { memoryOn: true, extra, deny }).some((t) => t.name === "crow_memory");
+    return voiceAbilities({ tools, hidden, classify, escalates, displayBacks, families: fam, memoryOn: memTool && allowed("crow_store_memory"), allowed });
   }
 
   async function loadBot(db, botId) {
@@ -483,19 +535,9 @@ export function createVoiceTurnRunner(deps) {
       // keep their own gates above. A plain question therefore goes out with no tools at all.
       const fam = opts.familiesOnIntent === true && deps.toolFamilies ? deps.toolFamilies : null;
       const prevFam = lastFamilies.get(device.id) || NO_FAMILIES;
-      const famWanted = (id) => prevFam.has(id) || fam.wants(id, transcript);
-      // undefined = not a family tool (display tools and memory keep their own gates); "other" = a tool no family claims.
-      const famOf = (t) => (fam && !extraByName.has(t.name) && !deps.isMemoryTool(t.name) ? (fam.familyOf(t.name) || "other") : undefined);
-      const quickTools = !fam ? baseTools : baseTools.filter((t) => {
-        const id = famOf(t);
-        if (id === undefined) return true;
-        if (id === "addons") return baseTools.some((x) => { const f = famOf(x); return typeof f === "string" && f.startsWith("addon:") && famWanted(f); });
-        return id !== "other" && famWanted(id);
-      });
-      // Families with no intent list never reach the quick model; they keep the router's view of
-      // "this assistant has tools", so a turn the router escalates can still use them.
-      const famIds = !fam ? [] : [...new Set(baseTools.map(famOf).filter((id) => typeof id === "string" && id !== "addons"))];
-      const unlisted = famIds.filter((id) => !fam.hasList(id));
+      // The classification is shared with the Bot Builder's "By voice on displays" line (tool-families.js classifyTools).
+      const cls = classifyTools({ baseTools, fam, transcript, prevFam, isExtraTool: (n) => extraByName.has(n), isMemoryTool: (n) => deps.isMemoryTool(n) });
+      const { famWanted, famOf, quickTools, famIds, unlisted } = cls;
       let tools = quickTools;
       let famAll = false;   // an escalated turn is offered every family
       if (fam) usedFamilies = new Set();
@@ -548,7 +590,6 @@ export function createVoiceTurnRunner(deps) {
       actionAsked = typeof opts.actionWhen === "function" && opts.actionWhen(transcript) === true;
       const actionTurn = actionAsked || (typeof opts.actionWhen === "function" && lastAction.has(device.id)
         && typeof opts.actionFollowWhen === "function" && opts.actionFollowWhen(transcript) === true);
-      const isFamTool = (t) => famOf(t) !== undefined;
       // A display tool offered because a window is open (or music plays) is not what this request asks for:
       // only one whose holdText/must reads the transcript as a display request is.
       const displayAsked = extra.some((x) => offered.has(x.definition.name)
@@ -556,10 +597,10 @@ export function createVoiceTurnRunner(deps) {
       // …or, with a display tool on offer (a card or a timer is up), the request names a thing the display holds
       // ("put eggs on the list", "add two minutes"): opts.displayObjectWhen (kiosk: list, timer, card, minutes).
       const displayBacks = displayAsked || (offered.size > 0 && typeof opts.displayObjectWhen === "function" && opts.displayObjectWhen(transcript) === true);
-      const wrapperWithheld = !!fam && baseTools.some((t) => famOf(t) === "addons") && !quickTools.some((t) => famOf(t) === "addons");
+      const wrapperWithheld = cls.wrapperWithheld;
       // Escalate an action request when the quick model got no family tool but the assistant has some — and no
       // display tool is on offer (a display command such as "add two minutes" stays on the quick model).
-      const actionWithheld = !!fam && actionAsked && !displayBacks && !quickTools.some(isFamTool) && baseTools.some(isFamTool);
+      const actionWithheld = cls.actionWithheld(actionAsked, displayBacks);
       if (actionAsked) timings.action_intent = true;
       const decision = mustX?.mustRoute === "fast" || opts.noEscalate === true
         ? { route: "fast", reason: opts.noEscalate === true ? "no-escalate" : "must-fast", key: bot.fast_voice_model || deps.fastKey }
@@ -1155,7 +1196,7 @@ export function createVoiceTurnRunner(deps) {
     return true;
   }
 
-  return { runVoiceTurn, speakText, transcribe, assessBot, convo };
+  return { runVoiceTurn, speakText, transcribe, assessBot, abilitiesOf, convo };
 }
 
 /** The real dependencies (gateway process). Lazy so tests never load them. */
@@ -1209,6 +1250,9 @@ export async function defaultVoiceDeps() {
     acquire: (providerId) => orch.maybeAcquireLocalProvider(providerId, { requester: "kiosk" }),
     chooseVoiceRoute: router.chooseVoiceRoute,
     fastKey: router.VOICE_ROUTE_KEYS.fast,
+    // The ability line ("By voice on displays"): may an action escalate, and to which model.
+    escalateKey: router.VOICE_ROUTE_KEYS.escalate,
+    toolEscalationEnabled: router.toolEscalationEnabled,
     getChatTools: tx.getChatTools,
     toolCategory: tx.toolCategoryOf,
     createToolExecutor: tx.createToolExecutor,
@@ -1216,6 +1260,7 @@ export async function defaultVoiceDeps() {
     effectiveToolName: tx.effectiveToolName,
     isExternalSendTool: tx.isExternalSendTool,
     isConnectedAddonTool: tx.isConnectedAddonTool,
+    connectedAddonTools: () => tx.connectedAddonToolNames(),
     botVoiceScope: tx.botVoiceScope,
     generateSystemPrompt: sp.generateSystemPrompt,
     isMemoryTool: (n) => n === "crow_memory" || memoryTools.has(n),

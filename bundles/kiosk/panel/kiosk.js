@@ -60,6 +60,43 @@ export const CLIENT_SCRIPT = `
     show();
     return { node: p, show: show };
   }
+  /** "By voice on displays: …" for an assistant (the listing's abilities, by the memory setting); '' when the listing has none. */
+  var ABIL_IDS = ['calendar', 'reminders', 'messages', 'crow_messages', 'lists', 'memory', 'projects', 'blog', 'news', 'files'];
+  function abilWord(x) {
+    if (!x || typeof x.id !== 'string') return null;
+    if (x.id.indexOf('addon:') === 0) return typeof x.label === 'string' && x.label ? x.label.slice(0, 60) : null;
+    return ABIL_IDS.indexOf(x.id) >= 0 ? S['abil_' + x.id] : null;
+  }
+  function abilText(b, memOn) {
+    var a = b ? (memOn ? b.abilities_memory : b.abilities) : null;
+    if (!a || !Array.isArray(a.items)) return { text: '', title: '' };
+    var quick = [], slow = [];
+    a.items.forEach(function (x) { var w = abilWord(x); if (w) (x.quick === false ? slow : quick).push(w); });
+    if (!quick.length && !slow.length) return { text: S.abil_none, title: '' };
+    return { text: abilJoin(quick, slow, 4), title: quick.length + slow.length > 4 ? abilJoin(quick, slow, Infinity) : '' };
+  }
+  /** The quick words, then the slower ones as one group at the tail; at most cap words in all, then "+N more". */
+  function abilJoin(quick, slow, cap) {
+    var q = quick.slice(0, cap), w = slow.slice(0, Math.max(0, cap - q.length));
+    var more = quick.length + slow.length - q.length - w.length;
+    var tail = more > 0 ? ', ' + fill(S.abil_more, { n: more }) : '';
+    if (!q.length) return fill(S.abil_by_slow_only, { list: w.join(', ') + tail });
+    return fill(S.abil_by, { list: q.join(', ') + (w.length ? ' · ' + fill(S.abil_slow_group, { list: w.join(', ') }) : '') + tail });
+  }
+  /** The ability line under a picker: follows the selection (fallbackId: who answers when the picker says Automatic). */
+  function abilLine(bots, sel, memOn, fallbackId) {
+    var p = el('p', 'kk-abil');
+    function show() {
+      var id = sel.value || (fallbackId ? fallbackId() : ''), b = null;
+      bots.forEach(function (x) { if (x.bot_id === id) b = x; });
+      var r = abilText(b, memOn());
+      p.textContent = r.text;
+      if (r.title) p.setAttribute('title', r.title); else p.removeAttribute('title');
+    }
+    sel.addEventListener('change', show);
+    show();
+    return { node: p, show: show };
+  }
   /** Only what changed is sent: an untouched (or unset) field is never rebound by Save. */
   function savePatch(a, b) {
     var p = {}, any = false;
@@ -99,10 +136,11 @@ export const CLIENT_SCRIPT = `
     var bot = el('select'); bot.name = 'bot_id'; opt(bot, '', '— ' + S.bot + ' —', true);
     data.bots.forEach(function (b) { opt(bot, b.bot_id, botLabel(b, false), false); });
     var fit = fitLine(data.bots, bot, function () { return false; });   // a new display starts with memories off
+    var abil = abilLine(data.bots, bot, function () { return false; });
     var go = el('button', 'btn btn-primary', S.approve); go.type = 'submit';
     var msg = el('p', 'kk-msg');
     [[S.code, code], [S.name, name], [S.bot, bot]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); form.appendChild(l); });
-    form.appendChild(fit.node); form.appendChild(go); form.appendChild(msg);
+    form.appendChild(fit.node); form.appendChild(abil.node); form.appendChild(go); form.appendChild(msg);
     form.addEventListener('submit', function (ev) {
       ev.preventDefault();
       if (!bot.value) { msg.textContent = S.bot_required; return; }
@@ -131,6 +169,8 @@ export const CLIENT_SCRIPT = `
     data.bots.forEach(function (b) { opt(sel, b.bot_id, botLabel(b, false), b.bot_id === dv.bot_id); });
     var l = el('label', null, S.bot); l.appendChild(sel); box.appendChild(l);
     box.appendChild(fitLine(data.bots, sel, function () { return false; }).node);   // same status as the display pickers
+    var dashAbil = abilLine(data.bots, sel, function () { return false; }, function () { return dv.effective_bot_id; });
+    box.appendChild(dashAbil.node);
     var now = el('p', 'kk-dim'), msg = el('span', 'kk-msg');
     function nameOf(id) { var hit = data.bots.filter(function (b) { return b.bot_id === id; })[0]; return hit ? (hit.display_name || hit.bot_id) : null; }
     /** Who Automatic picks: auto_bot_id from the server (the socket's own resolver); an older listing only says so when nothing is chosen. */
@@ -153,7 +193,7 @@ export const CLIENT_SCRIPT = `
         if (!j.ok) { msg.textContent = S[j.error] || j.error || ''; return; }
         dv.bot_id = j.bot_id; dv.effective_bot_id = j.effective_bot_id;
         if (Object.prototype.hasOwnProperty.call(j, 'auto_bot_id')) dv.auto_bot_id = j.auto_bot_id; else delete dv.auto_bot_id;
-        showNow(); msg.textContent = S.saved;
+        showNow(); dashAbil.show(); msg.textContent = S.saved;
       });
     });
     box.appendChild(now); box.appendChild(msg);
@@ -193,8 +233,10 @@ export const CLIENT_SCRIPT = `
     var initial = null;
     initial = current();
     var fit = fitLine(data.bots, bot, function () { return mem.checked; });
+    var abil = abilLine(data.bots, bot, function () { return mem.checked; });
     mem.addEventListener('change', fit.show);
-    [[S.bot, bot], [S.stt, stt], [S.stt_model, sm], [S.tts, tts], [S.profile, pf], [S.vad_wait, vad], [S.follow_up, fu], [S.memory, mem], [S.theme, th], [S.max_volume, mv], [S.pause_media_on_listen, pml]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); card.appendChild(l); if (pair[1] === bot) { card.appendChild(fit.node); card.appendChild(el('p', 'kk-hint', S.voice_also_in_builder)); } });
+    mem.addEventListener('change', abil.show);
+    [[S.bot, bot], [S.stt, stt], [S.stt_model, sm], [S.tts, tts], [S.profile, pf], [S.vad_wait, vad], [S.follow_up, fu], [S.memory, mem], [S.theme, th], [S.max_volume, mv], [S.pause_media_on_listen, pml]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); card.appendChild(l); if (pair[1] === bot) { card.appendChild(fit.node); card.appendChild(abil.node); card.appendChild(el('p', 'kk-hint', S.voice_also_in_builder)); } });
     card.appendChild(el('p', 'kk-dim', S.vad_wait_hint));
     card.appendChild(el('p', 'kk-dim', S.memory_warn + ' ' + S.memory_hint));
     card.appendChild(el('p', 'kk-dim', S.profile_hint + (ks.profile_source === 'guessed' ? ' ' + S.profile_guessed : '')));
@@ -385,6 +427,8 @@ const STYLES = `
   .kk-fit-warn { color: var(--crow-warning); }
   .kk-fit-bad { color: var(--crow-error); font-weight: 600; }
   .kk-fit-bad::before { content: "\\26A0  "; }
+  .kk-abil { margin: 0 0 6px; font-size: .9rem; color: var(--crow-text-secondary); overflow-wrap: anywhere; }
+  .kk-abil:empty { display: none; }
   .kk-card { border: 1px solid var(--crow-border); border-radius: 14px; padding: 12px 16px; margin: 12px 0; background: var(--crow-bg-surface); }
   .kk-card h3 { display: flex; gap: 12px; align-items: baseline; margin: 0 0 4px; }
   .kk-on { color: var(--crow-success); font-size: .85rem; } .kk-off { color: var(--crow-text-muted); font-size: .85rem; }

@@ -14,7 +14,9 @@
  *     button on wide;
  *   - the lanes are tabs on a phone (one lane shown; a tab switches it) and
  *     columns on wide;
- *   - the bot status strip is hidden on a phone and shown on a wide screen.
+ *   - the bot status strip is hidden on a phone and shown on a wide screen;
+ *   - the "By voice on displays: …" line (filled from a Kiosk listing served here) wraps inside its card,
+ *     and the Kiosk panel's lines under each assistant picker stay inside their boxes.
  * Plus a control that proves the overflow check reaches the mechanism.
  *
  * A private headless Chrome (tests/fixtures/headless-chrome.mjs), never the
@@ -79,6 +81,12 @@ before(async () => {
   const res = { send(s) { this.html = s; } };
   await renderBotList(res, { db, layout: layoutFor("bot-builder"), notice: "", PAGE_CSS: botBuilderStyles(), req: { headers: {}, csrfToken: "tok" } });
   pages.list = res.html;
+  // "By voice on displays: …": the same list with the Kiosk available; its line is filled from the listing below.
+  const resAbil = { send(s) { this.html = s; } };
+  await renderBotList(resAbil, { db, layout: layoutFor("bot-builder"), notice: "", PAGE_CSS: botBuilderStyles(), req: { headers: {}, csrfToken: "tok" }, kioskAvailable: true });
+  pages["list-abil"] = resAbil.html;
+  const { default: kioskPanel } = await import("../bundles/kiosk/panel/kiosk.js");
+  await kioskPanel.handler({ query: {} }, { send(h) { pages.kiosk = h; } }, { db, lang: "en", layout: layoutFor("kiosk") });
   for (const [key, bot] of [["board-on", "helper"], ["board-off", "assistant"]]) {
     pages[key] = await boardPanel.handler({ method: "GET", query: { bot }, headers: {}, csrfToken: "tok" },
       { redirect() {} }, { db, layout: layoutFor("bot-board"), lang: "en" });
@@ -87,6 +95,8 @@ before(async () => {
   chrome = await startHeadlessChrome();
   if (!chrome) return;
   server = http.createServer((req, r) => {
+    const api = API[(req.url || "/").split("?")[0]];
+    if (api) { r.writeHead(200, { "content-type": "application/json" }); r.end(JSON.stringify(api)); return; }
     r.writeHead(200, { "content-type": "text/html" });
     r.end(pages[(req.url || "/").slice(1)] || "");
   });
@@ -100,7 +110,25 @@ after(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-async function measure(page, w, h, { textSize = null, css = "", openMenu = false, openPicker = false, laneTab = -1, view = "", shot = "" } = {}) {
+// The Kiosk listing the ability lines are filled from: the longest real line (four of the five abilities, two
+// slower, plus "+N more") on the first card, "answers questions only" on another; a display with memories on.
+const ABIL_LONG = { items: [{ id: "calendar", quick: false }, { id: "reminders", quick: false }, { id: "crow_messages", quick: true }, { id: "lists", quick: false }, { id: "projects", quick: true }, { id: "addon:nb", quick: true, label: "A notebook add-on with a long name" }], none: false };
+const ABIL_BOTS = ["assistant", "helper", "home-kiosk", "glasses-bot", "quiet-bot"].map((id, i) => ({
+  bot_id: id, display_name: id, fit: "full", fit_memory: "full",
+  abilities: i === 0 ? ABIL_LONG : i === 4 ? { items: [], none: true } : { items: [{ id: "crow_messages", quick: true }], none: false },
+  abilities_memory: i === 0 ? { items: [...ABIL_LONG.items, { id: "memory", quick: true }], none: false } : { items: [{ id: "memory", quick: true }], none: false },
+}));
+const API = {
+  "/api/kiosk/admin/displays": {
+    devices: [{ id: "kiosk-a", name: "Kitchen", connected: true, latency: {}, bound_bot_id: "assistant", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { memory_integration: true } }],
+    bots: ABIL_BOTS, pending: [], stt_profiles: [{ id: "stt-a", name: "Whisper" }], tts_profiles: [{ id: "tts-a", name: "Kokoro", provider: "kokoro" }],
+    dashboard_voice: { available: true, bot_id: null, effective_bot_id: "assistant", auto_bot_id: "assistant" },
+  },
+  "/api/kiosk/admin/stations": { stations: [], max: 50 },
+  "/api/kiosk/admin/music": { installed: false },
+};
+
+async function measure(page, w, h, { textSize = null, css = "", openMenu = false, openPicker = false, laneTab = -1, view = "", shot = "", waitFor = "" } = {}) {
   const tab = await (await fetch(chrome.cdp + "/json/new?about:blank", { method: "PUT" })).json();
   const { default: WebSocket } = await import("ws");
   const ws = new WebSocket(tab.webSocketDebuggerUrl);
@@ -117,14 +145,18 @@ async function measure(page, w, h, { textSize = null, css = "", openMenu = false
     if (o.exceptionDetails) throw new Error(JSON.stringify(o.exceptionDetails)); return o.result.value; };
   try {
     await send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: w < 700 });
-    if (textSize) {
-      await send("Page.enable");
-      await send("Page.addScriptToEvaluateOnNewDocument", { source: `try{localStorage.setItem("crow-text-size",${JSON.stringify(textSize)})}catch(e){}` });
-    }
+    // Always set the size: tabs share the profile's localStorage, so a previous xlarge run would leak into a "default" one.
+    await send("Page.enable");
+    await send("Page.addScriptToEvaluateOnNewDocument", { source: `try{localStorage.setItem("crow-text-size",${JSON.stringify(textSize || "default")})}catch(e){}` });
     await send("Page.navigate", { url: `http://${chrome.pageHost}:${port}/${page}` });
     let ok = false;
     for (let i = 0; i < 75 && !ok; i++) { await new Promise((r) => setTimeout(r, 200)); try { ok = await evalIn("!!document.querySelector('.content-body') && document.readyState==='complete'"); } catch {} }
     assert.ok(ok, "the page never loaded: " + page);
+    if (waitFor) {
+      let ready = false;
+      for (let i = 0; i < 50 && !ready; i++) { try { ready = await evalIn(waitFor); } catch {} if (!ready) await new Promise((r) => setTimeout(r, 100)); }
+      assert.ok(ready, "never filled: " + waitFor);
+    }
     if (openMenu !== false) await evalIn("(function(){var b=document.querySelectorAll('.btb-more')[" + (openMenu === true ? 0 : openMenu) + "];b.scrollIntoView({block:'center'});b.click();return 1;})()");
     if (openPicker) await evalIn("(function(){document.querySelector('.bb-pick-btn').click();return 1;})()");
     if (laneTab >= 0) await evalIn("(function(){document.querySelectorAll('.bb-lane-tabs [role=tab]')[" + laneTab + "].click();return 1;})()");
@@ -151,6 +183,7 @@ async function measure(page, w, h, { textSize = null, css = "", openMenu = false
       var cols=Array.prototype.slice.call(document.querySelectorAll('#bb-board .bb-col')).filter(vis).map(function(c){return c.getAttribute('data-col');});
       var tabs=document.querySelector('.bb-lane-tabs');
       return JSON.stringify({
+        textSizeAttr: document.documentElement.getAttribute('data-text-size'),
         doc: document.documentElement.scrollWidth-innerWidth,
         body: cb.scrollWidth-cb.clientWidth,
         titleLines: Object.keys(lines).length,
@@ -167,8 +200,14 @@ async function measure(page, w, h, { textSize = null, css = "", openMenu = false
         roostShown: roost ? roost.getBoundingClientRect().height>0 : null,
         tabsShown: vis(tabs),
         cols: cols,
-        selTab: (function(){var t=document.querySelector('.bb-lane-tabs [aria-selected=true]');return t?t.getAttribute('data-lane'):null;})()
+        selTab: (function(){var t=document.querySelector('.bb-lane-tabs [aria-selected=true]');return t?t.getAttribute('data-lane'):null;})(),
+        abil: (function(){var a=document.querySelector('.btb-abil:not([hidden])'); if(!a) return null; var c=a.closest('.btb-botcard').getBoundingClientRect(), r=a.getBoundingClientRect();
+          return {l:Math.round(r.left),r:Math.round(r.right),h:Math.round(r.height),lh:parseFloat(getComputedStyle(a).lineHeight)||16,cl:Math.round(c.left),cr:Math.round(c.right),sw:a.scrollWidth-a.clientWidth,text:a.textContent};})(),
+        abilShown: document.querySelectorAll('.btb-abil:not([hidden])').length,
+        kkAbil: Array.prototype.slice.call(document.querySelectorAll('.kk-abil')).filter(function(e){return e.textContent;}).map(function(e){var r=e.getBoundingClientRect(), p=e.parentElement.getBoundingClientRect();
+          return {l:Math.round(r.left),r:Math.round(r.right),pl:Math.round(p.left),pr:Math.round(p.right),sw:e.scrollWidth-e.clientWidth};})
       });})()`));
+    assert.equal(m.textSizeAttr, textSize || "default", "the page ran at the intended text size (tabs share localStorage)");
     if (shot && SHOT_DIR) {
       const full = await evalIn("Math.ceil(document.documentElement.scrollHeight)");
       await send("Emulation.setDeviceMetricsOverride", { width: w, height: Math.max(h, Math.min(full, 3000)), deviceScaleFactor: 1, mobile: w < 700 });
@@ -216,6 +255,29 @@ for (const [w, h] of [[390, 844], [1280, 800]]) {
         assert.equal(m.newTile, true);
         assert.equal(m.newTileTop.t, m.tops[3], `the tile closes the second line ${JSON.stringify(m)}`);
       }
+    });
+
+    test(`live @${label}: the 'By voice on displays' line wraps inside its card; the page never pans; ${phone ? "two+ cards still on the first screen" : "three columns hold"}`, async (t) => {
+      if (!chrome) return t.skip("no headless Chrome");
+      const m = await measure("list-abil", w, h, { textSize, waitFor: "document.querySelectorAll('.btb-abil:not([hidden])').length===5", shot: `list-abil-${w}${xl}` });
+      assert.ok(m.doc <= 0 && m.body === 0, `no sideways pan ${JSON.stringify(m)}`);
+      assert.equal(m.abilShown, 5, `every enabled bot has its line ${JSON.stringify(m)}`);
+      assert.ok(m.abil && m.abil.text.indexOf("By voice on displays: ") === 0, JSON.stringify(m.abil));
+      assert.ok(m.abil.l >= m.abil.cl && m.abil.r <= m.abil.cr && m.abil.sw <= 0, `the line stays inside its card ${JSON.stringify(m.abil)}`);
+      if (phone) {
+        assert.ok(m.abil.h > m.abil.lh * 1.5, `the long line wraps on a phone ${JSON.stringify(m.abil)}`);
+        if (!textSize) assert.ok(m.onFirstScreen >= 2, `at least two whole cards on the first screen ${JSON.stringify(m)}`);
+      } else {
+        assert.ok(m.tops[0] === m.tops[1] && m.tops[1] === m.tops[2], `three per line ${JSON.stringify(m)}`);
+      }
+    });
+
+    test(`live @${label}: the Kiosk panel's ability lines under the pickers stay inside their boxes`, async (t) => {
+      if (!chrome) return t.skip("no headless Chrome");
+      const m = await measure("kiosk", w, h, { textSize, waitFor: "Array.prototype.filter.call(document.querySelectorAll('.kk-abil'),function(e){return e.textContent;}).length>=2", shot: `kiosk-abil-${w}${xl}` });
+      assert.ok(m.doc <= 0 && m.body === 0, `no sideways pan ${JSON.stringify(m)}`);
+      assert.ok(m.kkAbil.length >= 2, `the dashboard picker and the display's picker each show a line ${JSON.stringify(m.kkAbil)}`);
+      for (const a of m.kkAbil) assert.ok(a.l >= a.pl && a.r <= a.pr && a.sw <= 0, `inside its box ${JSON.stringify(a)}`);
     });
 
     test(`live @${label}: the ⋯ menu opens ${phone ? "inline below the footer" : "as a popover on top"}, unclipped, no sideways pan`, async (t) => {
@@ -279,4 +341,11 @@ test("live @1280x800: the check reaches the mechanism — a clipping card hides 
   if (!chrome) return t.skip("no headless Chrome");
   const m = await measure("list", 1280, 800, { openMenu: true, css: ".btb-botcard{overflow:hidden}" });
   assert.equal(m.menuOnTop, false, "a clipped popover must read as covered, or the unclipped check proves nothing: " + JSON.stringify(m));
+});
+
+test("live @390x844: the check reaches the mechanism — an ability line that may not wrap leaves its card or pans the page", async (t) => {
+  if (!chrome) return t.skip("no headless Chrome");
+  const m = await measure("list-abil", 390, 844, { css: ".btb-abil{white-space:nowrap}", waitFor: "document.querySelectorAll('.btb-abil:not([hidden])').length===5" });
+  const a = m.abil;
+  assert.ok(m.doc > 0 || m.body > 0 || a.r > a.cr || a.sw > 0 || a.h <= a.lh * 1.5, "a nowrap line must read as overflowing or unwrapped, or the wrap check proves nothing: " + JSON.stringify(m));
 });

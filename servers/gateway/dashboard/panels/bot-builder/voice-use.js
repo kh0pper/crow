@@ -56,6 +56,21 @@ const STRING_KEYS = {
   nothing: "botbuilder.voiceUseNothing",
   noTargets: "botbuilder.voiceUseNoTargets",
   loadFailed: "botbuilder.voiceUseLoadFailed",
+  abilBy: "botbuilder.abilBy",
+  abilNone: "botbuilder.abilNone",
+  abilBySlowOnly: "botbuilder.abilBySlowOnly",
+  abilSlowGroup: "botbuilder.abilSlowGroup",
+  abilMore: "botbuilder.abilMore",
+  abilcalendar: "botbuilder.abilCalendar",
+  abilreminders: "botbuilder.abilReminders",
+  abilmessages: "botbuilder.abilMessages",
+  abilcrow_messages: "botbuilder.abilCrowMessages",
+  abillists: "botbuilder.abilLists",
+  abilmemory: "botbuilder.abilMemory",
+  abilprojects: "botbuilder.abilProjects",
+  abilblog: "botbuilder.abilBlog",
+  abilnews: "botbuilder.abilNews",
+  abilfiles: "botbuilder.abilFiles",
 };
 
 /** The card line. `names` = the glasses/companion devices bound to this bot (server side); hidden when empty. */
@@ -64,6 +79,15 @@ export function voiceLineHtml(botId, names, lang) {
   return `<p class="btb-voice" data-voice-bot="${escapeHtml(String(botId))}" data-voice-srv="${srv ? 1 : 0}"${srv ? "" : " hidden"}>` +
     `<span class="btb-voice-l">${escapeHtml(t("botbuilder.voiceOn", lang))}</span> ` +
     `<span class="btb-voice-srv">${srv}</span><span class="btb-voice-kk"></span></p>`;
+}
+
+/**
+ * "By voice on displays: …" — what the bot can do by voice on a display (the Kiosk listing's `abilities`,
+ * decided by the voice turn's own classifier: servers/gateway/voice/voice-abilities.js). Rendered only when
+ * the Kiosk is available, hidden until the listing fills it; an older Kiosk without the field leaves it hidden.
+ */
+export function abilityLineHtml(botId) {
+  return `<p class="btb-abil" data-abil-bot="${escapeHtml(String(botId))}" hidden></p>`;
 }
 
 /** The ⋯ menu item (enabled bots, kiosk available); hidden until the Kiosk listing loads. */
@@ -149,6 +173,36 @@ const CLIENT = `(function(){
       line.hidden = !(srv || parts.length);
     });
     each(document.querySelectorAll('.btb-voice-use'), function(b){ b.hidden = !usable(); });
+    each(document.querySelectorAll('.btb-abil[data-abil-bot]'), function(line){ paintAbil(line, d ? botOf(line.getAttribute('data-abil-bot')) : null); });
+  }
+
+  /** One ability's words: a known id from the strings, an add-on by its manifest name (text, never markup); else none. */
+  function abilWord(x){
+    if (!x || typeof x.id !== 'string') return null;
+    if (x.id.indexOf('addon:') === 0) return typeof x.label === 'string' && x.label ? x.label.slice(0, 60) : null;
+    return /^[a-z_]{1,32}$/.test(x.id) && Object.prototype.hasOwnProperty.call(st.S, 'abil' + x.id) ? st.S['abil' + x.id] : null;
+  }
+  /** "By voice on displays: …" from the bot's abilities (memories off: a card is not one display). No field → hidden. */
+  function paintAbil(line, b){
+    var a = b ? b.abilities : null, S = st.S;
+    line.removeAttribute('title');
+    if (!a || !Array.isArray(a.items)) { line.textContent = ''; line.hidden = true; return; }
+    var quick = [], slow = [];
+    each(a.items, function(x){ var w = abilWord(x); if (w) (x.quick === false ? slow : quick).push(w); });
+    if (!quick.length && !slow.length) line.textContent = S.abilNone;
+    else {
+      line.textContent = abilLineText(quick, slow, 4);
+      if (quick.length + slow.length > 4) line.setAttribute('title', abilLineText(quick, slow, Infinity));
+    }
+    line.hidden = false;
+  }
+  /** The quick words, then the slower ones as one group at the tail; at most cap words in all, then "+N more". */
+  function abilLineText(quick, slow, cap){
+    var S = st.S, q = quick.slice(0, cap), w = slow.slice(0, Math.max(0, cap - q.length));
+    var more = quick.length + slow.length - q.length - w.length;
+    var tail = more > 0 ? ', ' + fill(S.abilMore, { n: more }) : '';
+    if (!q.length) return fill(S.abilBySlowOnly, { list: w.join(', ') + tail });
+    return fill(S.abilBy, { list: q.join(', ') + (w.length ? ' · ' + fill(S.abilSlowGroup, { list: w.join(', ') }) : '') + tail });
   }
 
   function fitNote(row, lv){

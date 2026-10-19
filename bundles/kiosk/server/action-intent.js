@@ -12,8 +12,19 @@
  */
 import { intentText } from "./intent-text.js";
 
-// Objects an assistant needs a tool for: a calendar, a reminder, a message, a list.
-const THING = "calendar|schedule|agenda|reminders?|to do list|todo list|to-do list|shopping list|grocery list|list";
+/**
+ * Objects an assistant needs a tool for: a calendar, a reminder, a message, a list. `thing`: the
+ * words that stand for it after "add … to my" (THING below); messages are named by their own verbs.
+ * Core's "By voice on displays" line maps each id to an ability (servers/gateway/voice/voice-abilities.js);
+ * tests/voice-abilities.test.js fails while an object here has no ability there.
+ */
+export const ACTION_OBJECTS = Object.freeze([
+  Object.freeze({ id: "calendar", thing: Object.freeze(["calendar", "schedule", "agenda"]) }),
+  Object.freeze({ id: "reminders", thing: Object.freeze(["reminders?"]) }),
+  Object.freeze({ id: "messages", thing: Object.freeze([]) }),
+  Object.freeze({ id: "lists", thing: Object.freeze(["to do list", "todo list", "to-do list", "shopping list", "grocery list", "list"]) }),
+]);
+const THING = ACTION_OBJECTS.flatMap((o) => o.thing).join("|");
 // Where a command verb stands: the start of the sentence, or after a lead-in ("can you", "please", "ok").
 const LEAD = "(?:^|\\b(?:please|can you|could you|would you|will you|i want to|i need to|i d like to|i would like to|let s|go ahead and|ok|okay|hey|so|crow|hey crow|and|also|then) )";
 const ACTION_INTENT = [
