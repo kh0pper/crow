@@ -129,12 +129,12 @@ test("the ssh check does not pipe sshd -T into grep -q (pipefail + SIGPIPE gave 
   assert.match(src, /SSHD_T="\$\(sshd -T/);
 });
 
-test("Bluetooth: classic-only controller mode (original kept), bluetoothd + WirePlumber restarted together", (t) => {
+test("Bluetooth: classic-only controller mode + AutoEnable (original kept), bluetoothd + WirePlumber restarted together", (t) => {
   if (!have("python3")) return t.skip("python3 not available");
   const dir = mkdtempSync(join(tmpdir(), "kiosk-bt-"));
   const env = { ...process.env, SUDO_USER: "alex" };
   try {
-    const conf = "[General]\n#Name = BlueZ\n#ControllerMode = dual\n\n[Policy]\nAutoEnable=true\n";
+    const conf = "[General]\n#Name = BlueZ\n#ControllerMode = dual\n\n[Policy]\n#AutoEnable=true\n";
     mkdirSync(join(dir, "etc/bluetooth"), { recursive: true });
     writeFileSync(join(dir, "etc/bluetooth/main.conf"), conf);
     mkdirSync(join(dir, "etc/crow-kiosk"), { recursive: true });
@@ -144,7 +144,7 @@ test("Bluetooth: classic-only controller mode (original kept), bluetoothd + Wire
     assert.equal(r.status, 0, r.stderr);
     const after = readFileSync(join(dir, "etc/bluetooth/main.conf"), "utf8");
     assert.match(after, /^\[General\]\n#Name = BlueZ\nControllerMode = bredr\n/);
-    assert.match(after, /\[Policy\]\nAutoEnable=true/);
+    assert.match(after, /\[Policy\]\nAutoEnable=true\n/, "BlueZ powers every controller it manages (the USB adapter too)");
     assert.equal(readFileSync(join(dir, "etc/bluetooth/main.conf.orig"), "utf8"), conf);
     const restartBt = r.stdout.indexOf("+ systemctl restart bluetooth.service");
     const restartWp = r.stdout.indexOf("systemctl --user restart wireplumber.service");

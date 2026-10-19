@@ -7,6 +7,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import boot_config  # noqa: E402
+import bt_main_conf  # noqa: E402
 
 MARK = "# crow-kiosk: onboard Bluetooth off (pi-setup --usb-bt)"
 LINE = "dtoverlay=disable-bt"
@@ -118,6 +119,32 @@ class BootConfigDisable(unittest.TestCase):
         self.assertFalse(
             boot_config.marked("dtoverlay=disable-bt\n"), "only our own pair counts"
         )
+
+
+class BtMainConf(unittest.TestCase):
+    def test_empty_file_gets_both_sections(self):
+        self.assertEqual(bt_main_conf.fix(""), "[General]\nControllerMode = bredr\n\n[Policy]\nAutoEnable=true\n")
+
+    def test_autoenable_is_added_to_an_existing_policy_section(self):
+        out = bt_main_conf.fix("[General]\n#Name = BlueZ\n\n[Policy]\n#ReconnectAttempts=7\n")
+        self.assertEqual(out, "[General]\n#Name = BlueZ\nControllerMode = bredr\n\n[Policy]\n#ReconnectAttempts=7\nAutoEnable=true\n")
+
+    def test_autoenable_is_replaced_in_place(self):
+        for line in ("#AutoEnable=true", "AutoEnable = false", "# AutoEnable=false"):
+            out = bt_main_conf.fix(f"[General]\nControllerMode = bredr\n[Policy]\n{line}\nReconnectAttempts=7\n")
+            self.assertEqual(out, "[General]\nControllerMode = bredr\n[Policy]\nAutoEnable=true\nReconnectAttempts=7\n", line)
+
+    def test_policy_section_is_created_when_missing_and_bredr_kept(self):
+        out = bt_main_conf.fix("[General]\nControllerMode = bredr\n\n[LE]\n#MinSleepTime=1\n")
+        self.assertEqual(out, "[General]\nControllerMode = bredr\n\n[LE]\n#MinSleepTime=1\n\n[Policy]\nAutoEnable=true\n")
+
+    def test_autoenable_outside_policy_is_left_alone(self):
+        out = bt_main_conf.fix("[General]\n#AutoEnable=false\n")
+        self.assertEqual(out, "[General]\n#AutoEnable=false\nControllerMode = bredr\n\n[Policy]\nAutoEnable=true\n")
+
+    def test_idempotent(self):
+        once = bt_main_conf.fix("[General]\n#ControllerMode = dual\n[Policy]\n#AutoEnable=true\n")
+        self.assertEqual(bt_main_conf.fix(once), once)
 
 
 if __name__ == "__main__":
