@@ -64,7 +64,7 @@ test("pi-setup.sh --dry-run renders every file, changes nothing on the host, and
     }
     assert.match(readFileSync(join(dir, "home/kiosk/.config/wireplumber/wireplumber.conf.d/52-crow-kiosk-stream-targets.conf"), "utf8"), /node\.stream\.restore-target = false/);
     assert.match(readFileSync(join(dir, "etc/tmpfiles.d/crow-kiosk.conf"), "utf8"), /^f \/run\/crow-kiosk\/bt-recover\.request 0620 root kiosk -$/m);
-    assert.match(r1.stdout, /\+ systemctl enable --now crow-kiosk-bt-recover\.path/);
+    assert.match(r1.stdout, /\+ systemctl enable crow-kiosk-bt-recover\.path\n(.*\n)*\+ systemctl start crow-kiosk-bt-recover\.path/);
     assert.ok(!existsSync(join(dir, "etc/crow-kiosk/bt-auto-reboot")), "automatic reboot is off by default");
     assert.doesNotMatch(r1.stdout, /python3-onnxruntime/, "Debian's onnxruntime dies with SIGILL on a Pi 3");
     assert.match(r1.stdout, /apt-get install .*\bwlr-randr\b/);
@@ -161,6 +161,154 @@ test("Bluetooth: classic-only controller mode + AutoEnable (original kept), blue
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Placeholder addresses only (public repository): onboard, USB adapter, speaker.
+const ONBOARD = "AA:BB:CC:DD:EE:01", USBBT = "AA:BB:CC:DD:EE:02", SPEAKER = "00:11:22:33:44:55";
+const SERIAL_DEV = "sys/devices/platform/soc/3f201000.serial/3f201000.serial:0/3f201000.serial:0.0/serial0/serial0-0";
+const USB_DEV = "sys/devices/platform/soc/3f980000.usb/usb1/1-1/1-1.2";
+const BOOT_STOCK = "# http://rptl.io/configtxt\ndtparam=audio=on\ndtoverlay=vc4-kms-v3d\narm_64bit=1\n\n[cm5]\ndtoverlay=dwc2,dr_mode=host\n\n[pi5]\ndtoverlay=nospi10\n\n[all]\n";
+const BOOT_MARKED = "# crow-kiosk: onboard Bluetooth off (pi-setup --usb-bt)\ndtoverlay=disable-bt\n";
+// A Pi 3 as sysfs shows it: the onboard UART controller and/or a USB adapter on port 1-1.2.
+const piRoot = (dir, { serial = true, usb = true, boot = BOOT_STOCK } = {}) => {
+  const ctl = (hci, dev) => {
+    mkdirSync(join(dir, dev), { recursive: true });
+    mkdirSync(join(dir, "sys/class/bluetooth", hci), { recursive: true });
+    symlinkSync(join(dir, dev), join(dir, "sys/class/bluetooth", hci, "device"));
+  };
+  if (serial) ctl("hci0", SERIAL_DEV);
+  if (usb) ctl("hci1", USB_DEV + "/1-1.2:1.0");
+  if (boot !== null) { mkdirSync(join(dir, "boot/firmware"), { recursive: true }); writeFileSync(join(dir, "boot/firmware/config.txt"), boot); }
+  mkdirSync(join(dir, "var/lib/systemd/rfkill"), { recursive: true });
+  writeFileSync(join(dir, "var/lib/systemd/rfkill/platform-3f980000.usb-usb-0:1.2:1.0:bluetooth"), "1\n");
+  writeFileSync(join(dir, "var/lib/systemd/rfkill/platform-3f300000.mmcnr:wlan"), "1\n");
+};
+// fake bluetoothctl / btmgmt answering as BlueZ does with the USB adapter as the default controller
+const fakeBt = (bin, { defaultAddr = USBBT, blocked = false } = {}) => {
+  mkdirSync(bin, { recursive: true });
+  const hci = defaultAddr === USBBT ? "hci1" : "hci0";
+  writeFileSync(join(bin, "bluetoothctl"), `#!/bin/bash
+case "$1" in
+  list) echo "Controller ${defaultAddr} kiosk [default]" ;;
+  show) printf 'Controller ${defaultAddr} (public)\\n\\tPowered: ${blocked ? "no" : "yes"}\\n\\tPowerState: ${blocked ? "off-blocked" : "on"}\\n' ;;
+esac
+exit 0
+`, { mode: 0o755 });
+  writeFileSync(join(bin, "btmgmt"), `#!/bin/bash
+[ "$1" = info ] && printf 'Index list with 1 item\\n${hci}:\\tPrimary controller\\n\\taddr ${defaultAddr} version 10 manufacturer 93 class 0x000000\\n'
+exit 0
+`, { mode: 0o755 });
+  return { CROW_KIOSK_BTCTL: join(bin, "bluetoothctl"), CROW_KIOSK_BTMGMT: join(bin, "btmgmt") };
+};
+
+test("--usb-bt: onboard Bluetooth off in config.txt (backed up once, crash-safe), saved rfkill blocks cleared, reboot required", (t) => {
+  if (!have("python3")) return t.skip("python3 not available");
+  const dir = mkdtempSync(join(tmpdir(), "kiosk-usbbt-"));
+  try {
+    const st = join(dir, "st"), bin = join(dir, "bin");
+    piRoot(st);
+    mkdirSync(join(st, "var/lib/crow-kiosk"), { recursive: true });
+    writeFileSync(join(st, "var/lib/crow-kiosk/bt-serdev"), "serial0-0\n");
+    const env = { ...process.env, SUDO_USER: "alex", ...fakeBt(bin) };
+    const run = (...a) => spawnSync("bash", [join(K, "pi-setup.sh"), ...a, "--dry-run", st], { encoding: "utf8", env });
+    let r = run("--crow-url", ORIGIN, "--bt-sink", SPEAKER, "--usb-bt");
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const cfg = join(st, "boot/firmware/config.txt");
+    assert.equal(readFileSync(cfg, "utf8"), BOOT_STOCK + BOOT_MARKED);
+    assert.equal(readFileSync(cfg + ".crow-kiosk.orig", "utf8"), BOOT_STOCK, "the original is kept");
+    assert.ok(!readdirSync(join(st, "boot/firmware")).some((f) => f.includes(".new")), "no temp file left behind");
+    assert.match(r.stdout, /\+ sync\n(.*\n)*?\+ sync/, "synced before and after the rename");
+    assert.match(r.stdout, /REBOOT REQUIRED: the onboard controller goes away and the USB adapter becomes hci0 at the next boot \(sudo reboot\)/);
+    assert.doesNotMatch(r.stdout, /restart bluetooth\.service|restart crow-kiosk-cage\.service/, "no restart dance before the reboot");
+    assert.match(readFileSync(join(st, "etc/crow-kiosk/setup.env"), "utf8"), /^USB_BT=1$/m);
+    assert.equal(readFileSync(join(st, "var/lib/systemd/rfkill/platform-3f980000.usb-usb-0:1.2:1.0:bluetooth"), "utf8"), "0\n", "the saved soft-block is cleared");
+    assert.equal(readFileSync(join(st, "var/lib/systemd/rfkill/platform-3f300000.mmcnr:wlan"), "utf8"), "1\n", "Wi-Fi state untouched");
+    assert.match(r.stdout, /\+ rm -f \/var\/lib\/crow-kiosk\/bt-serdev/, "the stale serdev record goes");
+    assert.equal(readFileSync(join(st, "var/lib/crow-kiosk/bt-controller"), "utf8"), `bus=usb\nid=1-1.2\naddr=${USBBT}\n`);
+    assert.ok(existsSync(join(st, "usr/local/lib/crow-kiosk/bt_controllers.py")), "bt-recover's helper is installed");
+    const stop = r.stdout.indexOf("+ systemctl stop crow-kiosk-bt-recover.path");
+    const boot = r.stdout.indexOf("wrote     /boot/firmware/config.txt");
+    const start = r.stdout.indexOf("+ systemctl start crow-kiosk-bt-recover.path");
+    assert.ok(stop > 0 && stop < boot && boot < start, "recovery is paused around the Bluetooth changes");
+
+    r = run();                                        // remembered; nothing to rewrite; the reboot is still due
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(readFileSync(cfg, "utf8"), BOOT_STOCK + BOOT_MARKED);
+    assert.doesNotMatch(r.stdout, /wrote {5}\/boot/);
+    assert.match(r.stdout, /REBOOT REQUIRED/);
+
+    r = run("--repair-speaker");                      // refused at argument time while the reboot is pending
+    assert.equal(r.status, 2, r.stdout + r.stderr);
+    assert.match(r.stderr, /reboot first, then re-run with --repair-speaker/);
+    assert.doesNotMatch(r.stdout, /== files/, "refused before anything is written");
+
+    r = run("--no-usb-bt");
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(readFileSync(cfg, "utf8"), BOOT_STOCK, "only the marked pair is removed");
+    assert.equal(readFileSync(cfg + ".crow-kiosk.orig", "utf8"), BOOT_STOCK);
+    assert.match(r.stdout, /REBOOT REQUIRED: the onboard Bluetooth controller comes back at the next boot/);
+    assert.match(readFileSync(join(st, "etc/crow-kiosk/setup.env"), "utf8"), /^USB_BT=0$/m);
+    r = run();
+    assert.doesNotMatch(r.stdout, /REBOOT REQUIRED|wrote {5}\/boot/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("--usb-bt refuses without a USB Bluetooth adapter, with miniuart-bt, or without /boot/firmware/config.txt", (t) => {
+  if (!have("python3")) return t.skip("python3 not available");
+  for (const [opts, why] of [[{ usb: false }, /no USB Bluetooth adapter.*--no-usb-bt/s],
+    [{ boot: BOOT_STOCK + "dtoverlay=miniuart-bt\n" }, /miniuart-bt/], [{ boot: null }, /\/boot\/firmware\/config\.txt/]]) {
+    const dir = mkdtempSync(join(tmpdir(), "kiosk-usbbt-"));
+    try {
+      piRoot(dir, opts);
+      const r = spawnSync("bash", [join(K, "pi-setup.sh"), "--crow-url", ORIGIN, "--usb-bt", "--dry-run", dir], { encoding: "utf8", env: { ...process.env, SUDO_USER: "alex" } });
+      assert.equal(r.status, 2, r.stdout + r.stderr);
+      assert.match(r.stderr, why);
+      assert.ok(!existsSync(join(dir, "etc")), "nothing written");
+      if (opts.boot !== null) assert.equal(readFileSync(join(dir, "boot/firmware/config.txt"), "utf8"), opts.boot ?? BOOT_STOCK);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test("--usb-bt disables hciuart.service only where it exists (it is gone on trixie)", (t) => {
+  if (!have("python3")) return t.skip("python3 not available");
+  for (const present of [true, false]) {
+    const dir = mkdtempSync(join(tmpdir(), "kiosk-usbbt-"));
+    try {
+      const st = join(dir, "st"), bin = join(dir, "bin");
+      piRoot(st);
+      mkdirSync(bin);
+      writeFileSync(join(bin, "systemctl"), `#!/bin/bash\n[ "$1 $2" = "cat hciuart.service" ] && exit ${present ? 0 : 1}\nexit 1\n`, { mode: 0o755 });
+      const r = spawnSync("bash", [join(K, "pi-setup.sh"), "--crow-url", ORIGIN, "--usb-bt", "--dry-run", st], { encoding: "utf8", env: { ...process.env, SUDO_USER: "alex", PATH: `${bin}:${process.env.PATH}` } });
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      if (present) assert.match(r.stdout, /\+ systemctl disable hciuart\.service/);
+      else assert.doesNotMatch(r.stdout, /hciuart/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test("pi-setup diagnosis: a speaker bond held by the onboard controller while the USB adapter is in use", (t) => {
+  if (!have("python3")) return t.skip("python3 not available");
+  const dir = mkdtempSync(join(tmpdir(), "kiosk-diag-"));
+  try {
+    const st = join(dir, "st"), bin = join(dir, "bin");
+    piRoot(st, { boot: BOOT_STOCK });
+    mkdirSync(join(st, "var/lib/bluetooth", ONBOARD, SPEAKER), { recursive: true });
+    mkdirSync(join(st, "var/lib/bluetooth", USBBT), { recursive: true });
+    const env = { ...process.env, SUDO_USER: "alex", ...fakeBt(bin) };
+    const r = spawnSync("bash", [join(K, "pi-setup.sh"), "--crow-url", ORIGIN, "--bt-sink", SPEAKER, "--dry-run", st], { encoding: "utf8", env });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, new RegExp(`warning: the speaker's pairing is held by ${ONBOARD} \\(onboard, hci0\\) but Bluetooth uses ${USBBT} \\(USB, hci1\\)\\.`));
+    assert.match(r.stdout, /keep the USB adapter: re-run with --usb-bt, reboot, then --repair-speaker \(clear the speaker's list and put it in pairing mode first\); or unplug the adapter and reboot\./);
+    assert.ok(existsSync(join(st, "var/lib/bluetooth", ONBOARD, SPEAKER)), "the stale bond is never removed");
+    assert.doesNotMatch(r.stdout, /REBOOT REQUIRED/, "without --usb-bt config.txt is not touched");
+    assert.equal(readFileSync(join(st, "boot/firmware/config.txt"), "utf8"), BOOT_STOCK);
+
+    // the speaker bonded on the controller in use: no warning
+    mkdirSync(join(st, "var/lib/bluetooth", USBBT, SPEAKER), { recursive: true });
+    const ok = spawnSync("bash", [join(K, "pi-setup.sh"), "--dry-run", st], { encoding: "utf8", env });
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.doesNotMatch(ok.stdout, /warning: .*(pairing|paired)/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("repair-speaker.sh: remove, scan until seen, pair, trust, connect — only the given address", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "kiosk-repair-"));
   try {
@@ -235,6 +383,14 @@ test("kiosk-launch.sh waits (bounded) for the speaker's sink before starting Chr
   assert.match(launch, /for _ in \$\(seq 1 20\)/);
 });
 
+test("pi-setup.sh --help prints the whole usage block (its sed range follows the header)", () => {
+  const r = spawnSync("bash", [join(K, "pi-setup.sh"), "--help"], { encoding: "utf8" });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /^Crow kiosk: set up a Raspberry Pi/);
+  assert.match(r.stdout, /--usb-bt \| --no-usb-bt/);
+  assert.match(r.stdout, /\n {2}-h, --help\n$/, "ends at -h, --help");
+});
+
 test("pi-setup.sh never writes through a symlink planted in a user's home", (t) => {
   if (!have("python3")) return t.skip("python3 not available");
   const env = { ...process.env, SUDO_USER: "alex" };
@@ -283,7 +439,7 @@ test("pi-setup.sh refuses bad arguments before touching anything", (t) => {
       ["--crow-url", ORIGIN, "--bt-sink", "00:11:22:33:44:55", "--keep-admin-audio"],
       ["--crow-url", ORIGIN, "--wake-model-url", "https://crow.example.ts.net/x/..", "--wake-model-sha256", "a".repeat(64)],
       ["--crow-url", ORIGIN, "--mic-target", "x;reboot"], ["--crow-url", ORIGIN, "--repair-speaker"],
-      ["--crow-url", ORIGIN, "--wake-threads", "8"], ["--crow-url", ORIGIN, "--wake-step", "0"]]) {
+      ["--crow-url", ORIGIN, "--wake-threads", "8"], ["--crow-url", ORIGIN, "--wake-step", "0"], ["--crow-url", ORIGIN, "--usb-bt"]]) {
       const r = spawnSync("bash", [join(K, "pi-setup.sh"), ...bad, "--dry-run", join(dir, "x")], { encoding: "utf8" });
       assert.equal(r.status, 2, `${bad.join(" ")}: ${r.stdout}${r.stderr}`);
       assert.ok(!existsSync(join(dir, "x", "etc")), "nothing written");
