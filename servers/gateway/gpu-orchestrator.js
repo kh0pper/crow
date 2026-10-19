@@ -337,8 +337,8 @@ export function _setOrchestratorComposeRunnerForTest(fn) { _composeRunnerForTest
 
 /** A model bundle start or stop the install security check refused (nothing ran). */
 export class ComposeGuardError extends Error {
-  constructor(bundleId, reason) {
-    super(`orchestrator: refused to start ${bundleId}: ${reason}`);
+  constructor(bundleId, reason, action = "start") {
+    super(`orchestrator: refused to ${action} ${bundleId}: ${reason}`);
     this.name = "ComposeGuardError";
     this.code = "COMPOSE_GUARD_REFUSED";
     this.bundleId = bundleId;
@@ -352,14 +352,14 @@ export class ComposeGuardError extends Error {
  * compose env (never its secrets). Only a bundle whose REPO manifest says
  * `inference: true` (and names this id) — a fleet-synced provider row can name any id.
  */
-export function modelBundleInvocation(bundleId) {
+export function modelBundleInvocation(bundleId, action = "start") {
   const file = composeFile(bundleId);
   let manifest = null;
   try { manifest = JSON.parse(readFileSync(join(BUNDLES_DIR, bundleId, "manifest.json"), "utf8")); } catch { /* none */ }
   if (!manifest || manifest.id !== bundleId || manifest.inference !== true) {
-    throw new ComposeGuardError(bundleId, "not a model bundle (its repo manifest must declare inference: true)");
+    throw new ComposeGuardError(bundleId, "not a model bundle (its repo manifest must declare inference: true)", action);
   }
-  if (!existsSync(file)) throw new ComposeGuardError(bundleId, "the bundle has no docker-compose.yml");
+  if (!existsSync(file)) throw new ComposeGuardError(bundleId, "the bundle has no docker-compose.yml", action);
   return { bundleId, manifest, file, cwd: BUNDLES_DIR, env: composeEnv(process.env, resolveCrowHome()) };
 }
 
@@ -397,7 +397,7 @@ async function bundleUp(bundleId, inv = null) {
 
 async function bundleStop(bundleId) {
   if (isModelOrchestrationDisabled()) throw new OrchestrationDisabledError(bundleId);
-  const inv = modelBundleInvocation(bundleId);
+  const inv = modelBundleInvocation(bundleId, "stop");
   await runDockerCompose(["-f", inv.file, "stop"], { timeoutMs: 30_000, cwd: inv.cwd, env: inv.env });
 }
 

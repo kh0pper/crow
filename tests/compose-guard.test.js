@@ -401,6 +401,11 @@ test("host_grants.gpu: GPU devices, gpus, GPU reservations, the nvidia runtime a
   }
   assert.equal(check(svc({ group_add: ["44"] })).valid, true, "group_add alone grants nothing (root in the container bypasses file permissions anyway)");
   assert.equal(check(svc({ environment: { NVIDIA_VISIBLE_DEVICES: "void" } })).valid, true, "void/none asks for no GPU");
+  // An env_file inside the bundle carrying it counts too (env_file contents are not in the model).
+  const d = bundleDir();
+  writeFileSync(join(d, "gpu.env"), "NVIDIA_VISIBLE_DEVICES=all\n");
+  assert.equal(check(svc({ env_file: [{ path: join(d, "gpu.env") }] }), { dir: d }).valid, false, "NVIDIA_* from an env_file");
+  assert.equal(check(svc({ env_file: [{ path: join(d, "gpu.env") }] }), { dir: d, manifest: { host_grants: { gpu: true } } }).valid, true);
   // Unknown grant keys and bad shapes are dropped.
   assert.deepEqual(G.normalizeHostGrants({ gpu: "yes", shm_size: "lots", env_files: ["../x.env", "ok.env", 5], path_env: ["LLM_CACHE", "bad key"], privileged: true }), { env_files: ["ok.env"], path_env: ["LLM_CACHE"] });
   assert.equal(G.normalizeHostGrants([]), null);

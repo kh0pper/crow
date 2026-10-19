@@ -188,13 +188,15 @@ const ENV_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*\.env$/;
  *              reservations, runtime nvidia, NVIDIA_VISIBLE_DEVICES / NVIDIA_DRIVER_CAPABILITIES
  *              in its environment. (Image env is not in the compose model: on a host whose
  *              Docker default runtime is nvidia an image's own NVIDIA_VISIBLE_DEVICES still
- *              reaches the GPUs. crow and grackle default to runc.)
+ *              reaches the GPUs; the gate is complete only on hosts whose default runtime is runc.)
  *   shm_size   the /dev/shm its compose may ask for above SHM_DEFAULT_MAX. A declaration of
  *              need, NOT a security boundary (tmpfs mounts and container memory are not
  *              capped): it replaces `ipc: host`, which shares the HOST's IPC namespace.
  *   env_files  shared host env files it reads, by name, from ~/.crow/env/ or CROW_HOME/env/
  *   path_env   .env keys whose value is a host folder the operator chose (read by the
- *              gpu-orchestrator for ctx.operatorRoots; not used by this check itself)
+ *              gpu-orchestrator for ctx.operatorRoots). This check does not read
+ *              operatorRoots yet: it relaxes nothing until the host-path allowlist
+ *              (follow-up B) consumes it, and that applies its own floor to them.
  * Never honoured for community bundles. Callers pass the REPO manifest (startConsent,
  * the orchestrator), never an installed copy a container could rewrite.
  */
@@ -418,10 +420,19 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     }
     if (s.gpus !== undefined && s.gpus !== null && !(Array.isArray(s.gpus) && s.gpus.length === 0) && (r = needGpu("gpus"))) return r;
     {
-      const envOf = (k) => (Array.isArray(s.environment) ? (s.environment.find((e) => String(e).split("=")[0] === k) || "").split("=").slice(1).join("=") : s.environment?.[k]);
+      // In the service's environment AND in every env_file it reads (the model is built
+      // with --no-env-resolution, so env_file contents are not in it).
+      const listed = (env, k) => (Array.isArray(env) ? (env.find((e) => String(e).split("=")[0] === k) || "").split("=").slice(1).join("=") : env?.[k]);
+      const sources = [s.environment];
+      for (const e of s.env_file || []) {
+        const path = typeof e === "string" ? e : e?.path;
+        if (typeof path === "string" && isAbsolute(path)) sources.push(parseDotEnv(path));
+      }
       for (const k of ["NVIDIA_VISIBLE_DEVICES", "NVIDIA_DRIVER_CAPABILITIES"]) {
-        const v = envOf(k);
-        if (v !== undefined && v !== null && v !== "" && !["void", "none"].includes(String(v)) && (r = needGpu(`${k}`))) return r;
+        for (const env of sources) {
+          const v = listed(env, k);
+          if (v !== undefined && v !== null && v !== "" && !["void", "none"].includes(String(v)) && (r = needGpu(`${k}`))) return r;
+        }
       }
     }
     if (s.shm_size !== undefined && s.shm_size !== null) {
