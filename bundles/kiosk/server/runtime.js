@@ -489,7 +489,15 @@ export function createKioskRuntime(deps) {
     for (const [id, check] of [...barRevalidators]) {
       if (hub.isConnected(id)) continue;            // an open overlay: the hub re-checks its socket
       if (barChecksInFlight.has(id)) continue;
-      if (!media.holdsTicket(id)) { dropBar(id); media.closeDevice(id); continue; }
+      if (!media.holdsTicket(id)) {
+        // The stream is gone (stopped, or the 12 h ticket ran out): no login check is kept. Inside the grace window the
+        // device entry (its volume, mute) is left to expireSessionDisplays, which closes it at grace end now that the
+        // revalidator is gone; nothing streams meanwhile (end() revoked the ticket). This relies on the sweep running
+        // expireSessionDisplays() BEFORE this function, so an entry past its grace is already gone here.
+        dropBar(id);
+        if (!closedSessionDisplays.has(id)) media.closeDevice(id);
+        continue;
+      }
       let ok = false;
       barChecksInFlight.add(id);
       try { ok = (await checkWithin(check)) === true; }

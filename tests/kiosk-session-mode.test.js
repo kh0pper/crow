@@ -1142,3 +1142,66 @@ test("B2 a hung login check counts as a failure after the check timeout, and an 
     assert.equal(r.k.barDisplays(), 0);
   } finally { r.close(); }
 });
+
+/** B3 rig: bar audio at volume 30, muted, the overlay closed, then the owner's stop from the bar. */
+async function stoppedInGrace(r, tok = sessionToken) {
+  const c = await r.open({ tok });
+  const path = r.play(tok);
+  const id = r.idOf(tok);
+  r.k.media.volume(id, { set: 30 });
+  r.k.media.mute(id, true);
+  await c.shut();
+  assert.equal((await r.post({ do: "stop", id: r.k.media.itemId(id), owner: OWNER }, { tok })).status, 200);
+  return { id, path };
+}
+const loadVolume = (c) => c.msgs.filter((m) => m.type === "media" && m.action === "load").at(-1)?.volume;
+
+test("B3 a bar display stopped inside the grace window keeps its volume: a reopen within 2 min plays at the same level", async () => {
+  const r = await barServe();
+  try {
+    const { id, path } = await stoppedInGrace(r);
+    r.clock.t += 60_000; await r.sweep();
+    assert.equal(r.k.barDisplays(), 0, "no login check is kept for a stopped stream");
+    assert.equal((await r.stream(path)).status, 404, "nothing streamable meanwhile");
+    assert.equal(r.k.media.view(id).volume, 30);
+    assert.equal(r.k.media.view(id).muted, true);
+    const c2 = await r.open();
+    r.play();
+    await c2.until(() => loadVolume(c2) != null);
+    assert.equal(loadVolume(c2), 30, "the level carries over (an explicit play clears mute by design)");
+    c2.ws.close();
+  } finally { r.close(); }
+});
+
+test("B3 past the grace window the stopped bar display is gone (the grace sweep runs before the bar sweep): a reopen gets the default volume", async () => {
+  const { DEFAULT_VOLUME } = await import("../bundles/kiosk/server/media.js");
+  const r = await barServe();
+  try {
+    const { id } = await stoppedInGrace(r);
+    r.clock.t += 60_000; await r.sweep();
+    r.clock.t += 2 * 60_000; await r.sweep();
+    assert.equal(r.k.media.view(id).volume, DEFAULT_VOLUME, "past grace: the entry was closed");
+    const c2 = await r.open();
+    r.play();
+    await c2.until(() => loadVolume(c2) != null);
+    assert.equal(loadVolume(c2), DEFAULT_VOLUME);
+    c2.ws.close();
+  } finally { r.close(); }
+});
+
+test("B3 a logout inside the grace window after a stop cuts nothing that streams: no ticket answers, no login check is kept, the entry goes at grace end", async () => {
+  const { DEFAULT_VOLUME } = await import("../bundles/kiosk/server/media.js");
+  const r = await barServe();
+  const { token } = await auth.mintSsoSession("test");
+  try {
+    const { id, path } = await stoppedInGrace(r, token);
+    await auth.destroySession(token);
+    await r.sweep();
+    assert.equal(r.k.barDisplays(), 0);
+    assert.equal(r.k.media.active(id), false);
+    assert.equal((await r.stream(path)).status, 404);
+    assert.equal(r.held.length, 0, "no stream was open to cut");
+    r.clock.t += 3 * 60_000; await r.sweep();
+    assert.equal(r.k.media.view(id).volume, DEFAULT_VOLUME, "the ticketless entry is gone at grace end");
+  } finally { r.close(); await auth.destroySession(token).catch(() => {}); }
+});
