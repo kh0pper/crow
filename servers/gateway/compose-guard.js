@@ -14,7 +14,8 @@
  *
  * Every gateway path that runs `compose up` calls checkBundleCompose first: install
  * (single and collection: both go through runInstallJob), Start/recreate, and the
- * shared-storage re-apply.
+ * shared-storage re-apply. The gpu-orchestrator checks model bundles itself
+ * (preflightBundleUp) with the same checkComposeModel.
  */
 import { existsSync, readFileSync, realpathSync, lstatSync, readlinkSync, statSync } from "node:fs";
 import { join, resolve as resolvePath, dirname, basename, sep, isAbsolute } from "node:path";
@@ -219,6 +220,30 @@ export function normalizeHostGrants(g) {
   return out;
 }
 
+const NVIDIA_ENV = ["NVIDIA_VISIBLE_DEVICES", "NVIDIA_DRIVER_CAPABILITIES"];
+/**
+ * The NVIDIA_* key an env_file sets to something that asks for a GPU, null when none,
+ * false when the path is not a small regular file (never read then). Matches the forms
+ * Compose accepts (KEY=value, KEY: value, export, quotes); `raw` keeps quotes literal.
+ */
+export function envFileNvidiaKey(path, raw = false) {
+  let text;
+  try {
+    if (typeof path !== "string" || !existsSync(path)) return null; // Compose fails at up
+    const st = statSync(path);
+    if (!st.isFile() || st.size > 1024 * 1024) return false;
+    text = readFileSync(path, "utf8");
+  } catch { return null; }
+  for (const line of text.replace(/^\uFEFF/, "").split(/\r?\n/)) {
+    const m = line.match(/^\s*(?:export\s+)?(NVIDIA_VISIBLE_DEVICES|NVIDIA_DRIVER_CAPABILITIES)\s*[=:]\s*(.*)$/);
+    if (!m) continue;
+    let v = m[2].trim();
+    if (!raw) v = v.replace(/^(["'])(.*)\1$/, "$2");
+    if (v !== "" && v !== "void" && v !== "none") return m[1];
+  }
+  return null;
+}
+
 /**
  * Check a Compose model (the parsed `docker compose config --format json` output).
  * @returns {{valid: true} | {valid: false, reason: string}}
@@ -420,19 +445,11 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     }
     if (s.gpus !== undefined && s.gpus !== null && !(Array.isArray(s.gpus) && s.gpus.length === 0) && (r = needGpu("gpus"))) return r;
     {
-      // In the service's environment AND in every env_file it reads (the model is built
-      // with --no-env-resolution, so env_file contents are not in it).
+      // In the service's environment (env_file contents: below, once each file is admitted).
       const listed = (env, k) => (Array.isArray(env) ? (env.find((e) => String(e).split("=")[0] === k) || "").split("=").slice(1).join("=") : env?.[k]);
-      const sources = [s.environment];
-      for (const e of s.env_file || []) {
-        const path = typeof e === "string" ? e : e?.path;
-        if (typeof path === "string" && isAbsolute(path)) sources.push(parseDotEnv(path));
-      }
-      for (const k of ["NVIDIA_VISIBLE_DEVICES", "NVIDIA_DRIVER_CAPABILITIES"]) {
-        for (const env of sources) {
-          const v = listed(env, k);
-          if (v !== undefined && v !== null && v !== "" && !["void", "none"].includes(String(v)) && (r = needGpu(`${k}`))) return r;
-        }
+      for (const k of NVIDIA_ENV) {
+        const v = listed(s.environment, k);
+        if (v !== undefined && v !== null && v !== "" && !["void", "none"].includes(String(v)) && (r = needGpu(`${k}`))) return r;
       }
     }
     if (s.shm_size !== undefined && s.shm_size !== null) {
@@ -479,8 +496,14 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     }
     for (const e of s.env_file || []) {
       const path = typeof e === "string" ? e : e?.path;
-      if (typeof path === "string" && isAbsolute(path) && sharedEnvFile(path)) continue;
-      if ((r = insideBundle(path, `${tag} env_file`))) return r;
+      const shared = typeof path === "string" && isAbsolute(path) && sharedEnvFile(path);
+      if (!shared && (r = insideBundle(path, `${tag} env_file`))) return r;
+      // Admitted: now (never before) read it for NVIDIA_* (the model is built with
+      // --no-env-resolution, so env_file contents are not in it). Only a small regular file:
+      // a device, FIFO or huge file would block or exhaust the gateway.
+      const nv = envFileNvidiaKey(path, e?.format === "raw");
+      if (nv === false) return refuse(`${tag} env_file: not a regular file of at most 1 MiB`);
+      if (nv && (r = needGpu(nv))) return r;
     }
     for (const lf of [].concat(s.label_file || [])) if ((r = insideBundle(lf, `${tag} label_file`))) return r;
     if (s.build !== undefined) {
