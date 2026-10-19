@@ -4,6 +4,7 @@ or back on (--no-usb-bt). Pure text in, text out:
 
   boot_config.py enable|disable < config.txt > new   (exit 3 from enable: dtoverlay=miniuart-bt present)
   boot_config.py marked < config.txt                  (exit 0 if our marked pair is there, else 1)
+  boot_config.py applies < config.txt                 (exit 0 if any disable-bt applies to all boards)
 
 enable appends two lines, a marker comment and `dtoverlay=disable-bt`, so they apply to every board
 (an `[all]` header is added first when the file ends inside a conditional section such as `[pi5]`). It
@@ -62,6 +63,11 @@ def marked(text):
     return any(lines[i] == MARK and lines[i + 1] == LINE for i in range(len(lines) - 1))
 
 
+def applies(text):
+    """True when an uncommented disable-bt (ours or the user's) is in effect for every board."""
+    return _applies_to_all(_split(text)[0])
+
+
 def enable(text):
     lines, nl = _split(text)
     if _applies_to_all(lines):
@@ -99,6 +105,8 @@ if __name__ == "__main__":
         sys.stdout.write(disable(src))
     elif cmd == "marked":
         sys.exit(0 if marked(src) else 1)
+    elif cmd == "applies":
+        sys.exit(0 if applies(src) else 1)
     else:
-        sys.stderr.write("usage: boot_config.py enable|disable|marked < config.txt\n")
+        sys.stderr.write("usage: boot_config.py enable|disable|marked|applies < config.txt\n")
         sys.exit(2)

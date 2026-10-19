@@ -20,7 +20,10 @@
 #      until the operator clears the speaker's own list);
 #   5. writes the outcome to /run/crow-kiosk/bt-recover.state (ok | no_fault | rate_limited |
 #      needs_restart) for the agent; reboots only if the operator enabled it (/etc/crow-kiosk/bt-auto-reboot)
-#      and the Pi has not rebooted for this in the last 24 h.
+#      and the Pi has not rebooted for this in the last 24 h;
+#   6. stays inside the unit's 90 s TimeoutStartSec, so an outcome is always written: every external call is
+#      bounded (usbreset 10 s, bluetoothd restart 15 s, WirePlumber 10 s) and the power wait ends 60 s after
+#      the start. Out of time (or a restart that hangs) is needs_restart.
 set -u
 R="${CROW_KIOSK_TEST_ROOT:-}"          # tests only: prefix for every path below
 STATE_DIR="$R/run/crow-kiosk"
@@ -35,6 +38,11 @@ USBRESET="${CROW_KIOSK_USBRESET:-usbreset}"
 AUTO_REBOOT_MARK="$R/etc/crow-kiosk/bt-auto-reboot"
 WAIT_S="${CROW_KIOSK_BT_WAIT:-20}"
 JOURNAL_SINCE="${CROW_KIOSK_BT_SINCE:--15min}"
+USBRESET_T="${CROW_KIOSK_BT_USBRESET_TIMEOUT:-10}"
+RESTART_T="${CROW_KIOSK_BT_RESTART_TIMEOUT:-15}"
+# worst case to here ~25 s (probes 5+5+10, usbreset 10); after it the restarts need 15 + 10 s: 60 + 25 < 90
+BUDGET_S="${CROW_KIOSK_BT_BUDGET:-60}"
+SECONDS=0
 now="$(date +%s)"
 mkdir -p "$STATE_DIR" "$(dirname "$LOGF")"
 say() { echo "$*"; logger -t crow-kiosk-bt-recover "$*" 2>/dev/null || true; }
@@ -52,15 +60,21 @@ for kv in $(python3 "$HELPER" resolve --root "${R:-/}" --list "$TMP/list" --mgmt
   esac
 done
 [[ "$C_HCI" =~ ^hci[0-9]+$ ]] || C_HCI=""
+EV_SKIP=""                                            # controllers whose errors are never evidence
 if [ -n "$C_HCI" ]; then EV_HCI="$C_HCI"
-elif [ "$C_BUS" = usb ]; then EV_HCI='hci[0-9]+'      # the adapter fell out of sysfs: its old name is unknown
+elif [ "$C_BUS" = usb ]; then
+  EV_HCI='hci[0-9]+'                                  # the adapter fell out of sysfs: its old name is unknown,
+  for d in "$R"/sys/class/bluetooth/hci*; do          # but an onboard (serdev) controller still there is not it
+    [ -e "$d/device" ] || continue
+    [[ "$(readlink -f "$d/device")" =~ /serial[0-9]+-[0-9]+$ ]] && EV_SKIP="${EV_SKIP:+$EV_SKIP|}$(basename "$d")"
+  done
 else EV_HCI=hci0; fi                                  # no controller facts: the onboard one, as before
 
 # 1. evidence
-if ! journalctl -k --since "$JOURNAL_SINCE" --no-pager -q 2>/dev/null \
-     | grep -Eq "${EV_HCI}: (command 0x[0-9a-f]+ tx timeout|Opcode 0x[0-9a-f]+ failed: -110|Opcode 0x0c03 failed)"; then
-  finish no_fault
-fi
+ev="$(timeout 10 journalctl -k --since "$JOURNAL_SINCE" --no-pager -q 2>/dev/null \
+      | grep -E "${EV_HCI}: (command 0x[0-9a-f]+ tx timeout|Opcode 0x[0-9a-f]+ failed: -110|Opcode 0x0c03 failed)" || true)"
+[ -z "$EV_SKIP" ] || ev="$(grep -Ev "\\b(${EV_SKIP}): " <<< "$ev" || true)"
+[ -n "$ev" ] || finish no_fault
 
 # 2. rate limit (from the log of earlier attempts)
 recent10=0; recent60=0
@@ -87,7 +101,7 @@ if [ "$C_BUS" = usb ]; then
   command -v "$USBRESET" >/dev/null 2>&1 || { say "usbreset is not installed (usbutils)"; finish needs_restart; }
   target="$(printf '%03d/%03d' "$((10#$busnum))" "$((10#$devnum))")"
   say "resetting USB $C_ID ($target, btusb)"
-  "$USBRESET" "$target" >/dev/null 2>&1 || true
+  timeout "$USBRESET_T" "$USBRESET" "$target" >/dev/null 2>&1 || say "usbreset failed or timed out"
 else
   # rebind the controller's serdev device
   dev=""
@@ -102,17 +116,19 @@ else
   echo "$dev" > "$DRIVER/bind" 2>/dev/null || true
 fi
 # the same controller, by address (its hciN may change), back and powered
-up=0
+up=0 out_of_time=0
 for _ in $(seq 1 "$WAIT_S"); do
+  [ $((SECONDS + 3)) -le "$BUDGET_S" ] || { out_of_time=1; break; }   # one more try: up to 2 s + 1 s
   if timeout 2 bluetoothctl show ${C_ADDR:+"$C_ADDR"} 2>/dev/null | grep -q "Powered: yes"; then up=1; break; fi
   sleep 1
 done
 if [ "$up" = 1 ]; then
-  systemctl restart bluetooth.service
+  timeout "$RESTART_T" systemctl restart bluetooth.service || { say "bluetooth.service restart failed or timed out"; finish needs_restart; }
   KUID="$(id -u kiosk 2>/dev/null || true)"
-  [ -z "$KUID" ] || runuser -u kiosk -- env XDG_RUNTIME_DIR="/run/user/$KUID" systemctl --user restart wireplumber.service || true
+  [ -z "$KUID" ] || timeout 10 runuser -u kiosk -- env XDG_RUNTIME_DIR="/run/user/$KUID" systemctl --user restart wireplumber.service || true
   finish ok
 fi
+if [ "$out_of_time" = 1 ]; then say "the controller did not come back within the time budget"; finish needs_restart; fi
 
 # 4. still dead: a reboot is the only cure
 if [ -e "$AUTO_REBOOT_MARK" ]; then

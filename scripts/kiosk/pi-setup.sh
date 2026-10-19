@@ -26,6 +26,13 @@
 #                              original kept once as config.txt.crow-kiosk.orig); needs a reboot. Refused
 #                              unless a USB adapter is plugged in. --no-usb-bt removes the pair (reboot).
 #                              Side effect: the Pi 3's PL011 UART returns to GPIO 14/15 (serial console).
+#                              --dry-run --usb-bt needs a USB adapter plugged in too (or a faked sysfs under
+#                              DIR: sys/class/bluetooth/hciN/device linking to a usbN device path).
+#                              Recovery resets the adapter's own USB port; where the adapter sits on a root
+#                              port (Pi 5, Zero 2 W) it reports needs_restart instead of resetting it.
+#                              config.txt is on vfat, where the rename of .config.txt.crow-kiosk.new over it
+#                              is not atomic: after a power cut a leftover .new file is harmless (delete it),
+#                              and if config.txt is damaged, copy config.txt.crow-kiosk.orig back over it.
 #   --repair-speaker           after setup, re-pair the --bt-sink speaker (operator present: clear the
 #                              speaker's paired list in its app and put it in pairing mode first); refused
 #                              while a Bluetooth reboot is pending
@@ -53,7 +60,7 @@ SAVED_KEYS=(CROW_URL BT_SINK MIC_TARGET FRAME_ORIGINS ADMIN_USER KEEP_ADMIN_AUDI
 
 die() { echo "pi-setup: $*" >&2; exit 2; }
 say() { echo "== $*"; }
-usage() { sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,/^#   -h, --help$/p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # Flags given on this run (empty = not given)
 declare -A GIVEN=()
@@ -141,7 +148,10 @@ BOOT_CFG=/boot/firmware/config.txt
 BT_ROOT="${ROOT:-/}"                # sysfs and /var/lib/bluetooth (the staging dir in dry-run)
 btc() { python3 "$SRC_DIR/bt_controllers.py" "$@" --root "$BT_ROOT"; }
 boot_cfg() { python3 "$SRC_DIR/boot_config.py" "$1" < "$(p "$BOOT_CFG")"; }
-BOOT_ACTION="" BOOT_WILL_CHANGE=0 BOOT_PENDING=0
+BOOT_ACTION="" BOOT_WILL_CHANGE=0 BOOT_PENDING=0 BOOT_OFF_AFTER=0
+# Written whenever this script changes config.txt (either direction); /run is a tmpfs, so the reboot
+# clears it. Until then the controller in use is still the one from before the change.
+BOOT_MARK=/run/crow-kiosk/bt-boot-pending
 if [ "${CFG[USB_BT]}" = 1 ]; then
   if ! btc usb-present; then
     if [ -n "${GIVEN[USB_BT]:-}" ]; then
@@ -158,9 +168,16 @@ elif [ -f "$(p "$BOOT_CFG")" ]; then
 fi
 if [ -n "$BOOT_ACTION" ]; then
   boot_cfg "$BOOT_ACTION" | cmp -s - "$(p "$BOOT_CFG")" || BOOT_WILL_CHANGE=1
-  # pending: this run edits config.txt, or our line is there but the onboard (UART) controller still is too
-  if [ "$BOOT_WILL_CHANGE" = 1 ] || { boot_cfg marked && btc serial-present; }; then BOOT_PENDING=1; fi
+  boot_cfg "$BOOT_ACTION" | python3 "$SRC_DIR/boot_config.py" applies && BOOT_OFF_AFTER=1
+  # pending: this run edits config.txt, or a disable-bt (ours or the user's) applies to all boards but the
+  # onboard (UART) controller is still there
+  if [ "$BOOT_WILL_CHANGE" = 1 ] || { [ "$BOOT_OFF_AFTER" = 1 ] && btc serial-present; }; then BOOT_PENDING=1; fi
+  if [ "${CFG[USB_BT]}" = 0 ] && [ "$BOOT_OFF_AFTER" = 1 ]; then
+    echo "pi-setup: warning: $BOOT_CFG has a dtoverlay=disable-bt not written by pi-setup: the onboard Bluetooth controller stays off although USB_BT=0 (remove that line yourself and reboot to use it)" >&2
+  fi
 fi
+# ... or an earlier run changed config.txt and the Pi has not rebooted since
+[ ! -e "$(p "$BOOT_MARK")" ] || BOOT_PENDING=1
 if [ "$REPAIR_SPEAKER" = 1 ] && [ "$BOOT_PENDING" = 1 ]; then
   die "--repair-speaker: a Bluetooth reboot is pending (config.txt changes the controller): reboot first, then re-run with --repair-speaker"
 fi
@@ -354,8 +371,9 @@ if [ -n "$AU" ] && [ "${CFG[KEEP_ADMIN_AUDIO]}" = 0 ]; then
   run loginctl disable-linger "$AU"
   echo "   $AU's PipeWire is masked; inspect audio with: sudo -u kiosk XDG_RUNTIME_DIR=/run/user/\$(id -u kiosk) wpctl status"
 fi
-# bt-recover must not reset a controller while this run changes Bluetooth (started again at the end)
-run systemctl stop crow-kiosk-bt-recover.path 2>/dev/null || true
+# bt-recover must not reset a controller while this run changes Bluetooth: the path stops new runs, the
+# service stops one already running. Only the path is started again at the end (it starts the service).
+run systemctl stop crow-kiosk-bt-recover.path crow-kiosk-bt-recover.service 2>/dev/null || true
 BT_PATH_STOPPED=1
 run rfkill unblock bluetooth
 # systemd-rfkill restores a SAVED soft-block whenever an rfkill device appears (late, for a USB adapter;
@@ -377,6 +395,8 @@ fi
 printf '%s\n' "$BT_BEFORE" | python3 "$SRC_DIR/bt_main_conf.py" | put 0644 "$BT_MAIN"
 if [ "$(cat "$(p "$BT_MAIN")")" != "$BT_BEFORE" ]; then BT_RESTART=1; else BT_RESTART=0; fi
 # config.txt (FAT, read by the firmware): back up once, write a temp file next to it, sync, rename, sync.
+# vfat has no atomic rename: a power cut mid-rename can leave .config.txt.crow-kiosk.new behind (harmless,
+# delete it) or, rarely, a damaged config.txt (copy config.txt.crow-kiosk.orig back; see --help).
 BOOT_CHANGED=0
 if [ "$BOOT_WILL_CHANGE" = 1 ]; then
   cfg="$(p "$BOOT_CFG")"
@@ -389,6 +409,8 @@ if [ "$BOOT_WILL_CHANGE" = 1 ]; then
   tmp="$(dirname "$cfg")/.config.txt.crow-kiosk.new"
   boot_cfg "$BOOT_ACTION" > "$tmp" || { rm -f "$tmp"; die "could not render $BOOT_CFG"; }
   run sync
+  mkdir -p "$(p "$(dirname "$BOOT_MARK")")"
+  printf '%s\n' "$BOOT_ACTION" > "$(p "$BOOT_MARK")"   # before the rename: a crash in between still says "reboot"
   mv -f "$tmp" "$cfg"
   run sync
   echo "   wrote     $BOOT_CFG"; changed; BOOT_CHANGED=1
@@ -450,7 +472,13 @@ if [ "$DRY" = 1 ] || sshd -t; then run systemctl reload ssh.service; else die "s
 run systemctl enable crow-kiosk-cage.service
 run systemd-tmpfiles --create /etc/tmpfiles.d/crow-kiosk.conf
 run systemctl enable crow-kiosk-bt-recover.path
-if [ "$BT_FACTS" = 1 ]; then   # remembered so recovery finds the controller while BlueZ has lost it
+if [ "$BOOT_PENDING" = 1 ]; then
+  # the controller in use changes at the reboot: a record now would point recovery at the wrong one
+  if [ -e "$(p /var/lib/crow-kiosk/bt-controller)" ]; then
+    rm -f "$(p /var/lib/crow-kiosk/bt-controller)"; echo "   removed   /var/lib/crow-kiosk/bt-controller (stale until the reboot)"
+  fi
+  echo "   re-run pi-setup after the reboot to record the controller (bt-recover uses the record when BlueZ has lost it)"
+elif [ "$BT_FACTS" = 1 ]; then   # remembered so recovery finds the controller while BlueZ has lost it
   rec="$(btc record --list "$BT_TMP/list" --mgmt "$BT_TMP/mgmt" || true)"
   if [ -n "$rec" ]; then
     mkdir -p "$(p /var/lib/crow-kiosk)"
@@ -492,6 +520,8 @@ say "apply"
 if [ "$BOOT_PENDING" = 1 ]; then
   if [ "$BOOT_ACTION" = enable ]; then
     echo "   REBOOT REQUIRED: the onboard controller goes away and the USB adapter becomes hci0 at the next boot (sudo reboot)"
+  elif [ "$BOOT_OFF_AFTER" = 1 ]; then
+    echo "   REBOOT REQUIRED: config.txt turns the onboard Bluetooth controller off at the next boot (sudo reboot)"
   else
     echo "   REBOOT REQUIRED: the onboard Bluetooth controller comes back at the next boot (sudo reboot)"
   fi

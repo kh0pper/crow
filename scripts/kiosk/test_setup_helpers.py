@@ -124,6 +124,20 @@ class BootConfigDisable(unittest.TestCase):
             boot_config.marked("dtoverlay=disable-bt\n"), "only our own pair counts"
         )
 
+    def test_applies_counts_any_uncommented_disable_bt_for_all_boards(self):
+        self.assertTrue(boot_config.applies(boot_config.enable(STOCK)))
+        self.assertTrue(boot_config.applies(STOCK + "dtoverlay=disable-bt\n"), "a user's own line too")
+        self.assertFalse(boot_config.applies(STOCK))
+        self.assertFalse(boot_config.applies("#dtoverlay=disable-bt\n[pi4]\ndtoverlay=disable-bt\n"))
+
+    def test_applies_cli_exit_codes(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        run = lambda text: subprocess.run(  # noqa: E731
+            [sys.executable, os.path.join(here, "boot_config.py"), "applies"], input=text, text=True
+        ).returncode
+        self.assertEqual(run("dtoverlay=disable-bt\n"), 0)
+        self.assertEqual(run(STOCK), 1)
+
 
 class BtMainConf(unittest.TestCase):
     def test_empty_file_gets_both_sections(self):
