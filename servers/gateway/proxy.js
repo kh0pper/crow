@@ -552,6 +552,14 @@ export async function loadDynamicBackends() {
   }
 }
 
+const warnedToolClashes = new Set();
+function warnToolClash(name, kept, skipped) {
+  const key = `${name}\u0000${kept}\u0000${skipped}`;
+  if (warnedToolClashes.has(key)) return;
+  warnedToolClashes.add(key);
+  console.warn(`[proxy] tool "${name}" is offered by both "${kept}" and "${skipped}"; /tools keeps "${kept}" and skips the duplicate`);
+}
+
 /**
  * Create a new McpServer instance with proxy tools for all connected servers.
  * Called per-session by the gateway's MCP handler.
@@ -567,6 +575,7 @@ export function createProxyServer(filter) {
     name: "crow-tools",
     version: "0.1.0",
   });
+  const owners = new Map(); // tool name -> the source that registered it
 
   // Register proxy tools for each connected server — servers by id, tools by
   // name, so tools/list is the same bytes on every boot (stable-order.js:
@@ -575,14 +584,25 @@ export function createProxyServer(filter) {
     if (entry.status !== "connected" || !entry.client) continue;
     if (filter?.allowSources && !filter.allowSources.includes(integrationId)) continue;
     if (filter?.denySources?.includes(integrationId)) continue;
+    // Federation peers (loadRemoteInstances' instance-<id> entries) are never
+    // part of the raw tool surface: they carry the peer's /memory/mcp tools
+    // under the same crow_* names as this instance (two peers threw on the
+    // duplicate and 500'd every session; one peer's tools answered to the
+    // local names and wrote to the peer). Peers are reached via /router/mcp
+    // and the bot remote proxy. No filter can opt one back in.
+    if (entry.isRemote) continue;
 
     for (const tool of sortedByName(entry.tools)) {
       // Tools surface under their upstream name. Sources already self-namespace
-      // (crow_browser_*, brave_web_search, etc.). If two sources ever do collide
-      // on a tool name, the second server.tool() call throws — surface the bug
-      // instead of papering over it with prefixes.
+      // (crow_browser_*, brave_web_search, etc.). If two sources do collide on
+      // a tool name, the first one registered keeps it and the clash is logged
+      // once per process (warnToolClash) — server.tool() throws on a
+      // duplicate, and one bad source must not fail every session.
       if (filter?.allowTools && !filter.allowTools.includes(tool.name)) continue;
       if (filter?.denyTools?.includes(tool.name)) continue;
+      const holder = owners.get(tool.name);
+      if (holder !== undefined) { warnToolClash(tool.name, holder, integrationId); continue; }
+      owners.set(tool.name, integrationId);
 
       const zodShape = jsonSchemaPropertiesToZod(tool.inputSchema);
 

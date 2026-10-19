@@ -46,15 +46,25 @@ const PREFIX_CANON = {
   "blog-mcp": "crow-blog",
 };
 
-/** Find the connectedServers id whose tool list contains `toolName`. */
+/**
+ * Find the connectedServers id whose tool list contains `toolName`.
+ * Federation peer entries (isRemote) are skipped: the raw tool surface never
+ * exposes them (proxy.js createProxyServer), so a call naming a peer's tool
+ * resolves to nothing and is denied. A name held by more than one local
+ * source is ambiguous (which one runs depends on registration order), so it
+ * resolves to null too — fail closed rather than gate against the wrong one.
+ */
 function resolveProxyTool(toolName, connectedServers) {
   if (!toolName || !connectedServers) return null;
+  let found = null;
   for (const [id, entry] of connectedServers) {
-    if (entry && Array.isArray(entry.tools) && entry.tools.some((t) => t && t.name === toolName)) {
-      return id; // addon entries are keyed by their canonical id (proxy.js)
+    if (!entry || entry.isRemote) continue;
+    if (Array.isArray(entry.tools) && entry.tools.some((t) => t && t.name === toolName)) {
+      if (found !== null) return null; // ambiguous
+      found = id; // addon entries are keyed by their canonical id (proxy.js)
     }
   }
-  return null;
+  return found;
 }
 
 /**
