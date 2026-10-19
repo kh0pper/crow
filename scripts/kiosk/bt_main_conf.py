@@ -1,41 +1,62 @@
 #!/usr/bin/env python3
-"""stdin: /etc/bluetooth/main.conf (may be empty) -> stdout: the same file with ControllerMode = bredr
-in [General]. Other lines are kept as they are; an existing (or commented) ControllerMode line in
-[General] is replaced in place. Idempotent."""
+"""stdin: /etc/bluetooth/main.conf (may be empty) -> stdout: the same file with
+  ControllerMode = bredr   in [General]  (A2DP needs classic Bluetooth; LE reconnects failed), and
+  AutoEnable=true          in [Policy]   (BlueZ powers every controller it manages, a USB adapter too).
+Other lines are kept as they are; an existing (or commented) line for the key in its section is replaced
+in place; a missing section is added ([General] first in the file, [Policy] at the end). Idempotent."""
+
 import re
 import sys
 
-WANT = "ControllerMode = bredr"
+SETTINGS = (
+    ("General", "ControllerMode", "ControllerMode = bredr", "start"),
+    ("Policy", "AutoEnable", "AutoEnable=true", "end"),
+)
 
 
-def fix(text):
-    lines = text.splitlines()
-    out, section, done, general_at = [], None, False, None
+def _set(lines, section, key, want, new_at):
+    out, current, done, seen = [], None, False, False
+    key_re = re.compile(rf"^\s*#?\s*{key}\s*=")
     for line in lines:
         m = re.match(r"^\s*\[([^\]]+)\]\s*$", line)
         if m:
-            if section == "General" and not done:
-                out.append(WANT)
+            if current == section and not done:
+                while out and out[-1] == "":
+                    out.pop()
+                out.append(want)
+                out.append("")
                 done = True
-            section = m.group(1)
-            if section == "General":
-                general_at = len(out)
+            current = m.group(1)
+            seen = seen or current == section
             out.append(line)
             continue
-        if section == "General" and re.match(r"^\s*#?\s*ControllerMode\s*=", line):
+        if current == section and key_re.match(line):
             if not done:
-                out.append(WANT)
+                out.append(want)
                 done = True
             continue
         out.append(line)
     if not done:
-        if general_at is None:
-            out = ["[General]", WANT] + ([""] if out else []) + out
+        if seen:
+            while out and out[-1] == "":
+                out.pop()
+            out.append(want)
+        elif new_at == "start":
+            out = [f"[{section}]", want] + ([""] if out else []) + out
         else:
-            out.append(WANT)
-    while out and out[-1] == "":
-        out.pop()
-    return "\n".join(out) + "\n"
+            while out and out[-1] == "":
+                out.pop()
+            out = out + ([""] if out else []) + [f"[{section}]", want]
+    return out
+
+
+def fix(text):
+    lines = text.splitlines()
+    for section, key, want, new_at in SETTINGS:
+        lines = _set(lines, section, key, want, new_at)
+    while lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines) + "\n"
 
 
 if __name__ == "__main__":

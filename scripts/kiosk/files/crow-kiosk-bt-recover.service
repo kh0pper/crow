@@ -1,5 +1,5 @@
 [Unit]
-Description=Crow kiosk: recover a hung Bluetooth controller (rebind hci_uart; never re-pairs)
+Description=Crow kiosk: recover a hung Bluetooth controller (serdev rebind or USB port reset; never re-pairs)
 
 [Service]
 Type=oneshot
