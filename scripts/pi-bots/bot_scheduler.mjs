@@ -30,6 +30,7 @@ import Database from "better-sqlite3";
 import { CronExpressionParser } from "cron-parser";
 import { generateJobId, ensureBotJobsSchema } from "./job_runner.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
+import { isVoiceBotId } from "../../servers/shared/voice-bot.js";
 
 export const BOTCRON_PREFIX = "pipeline:botcron:";
 
@@ -87,6 +88,7 @@ export function tickBotSchedules({ log = () => {} } = {}) {
           .run(now, next, s.id);
 
         if (!botId || !spec.goal) { log(`schedule #${s.id} missing bot/goal — advanced, not enqueued`); continue; }
+        if (isVoiceBotId(botId)) { log(`schedule #${s.id} targets the voice bot, which cannot take background jobs — advanced, not enqueued`); continue; }
 
         const jobId = generateJobId();
         const deliver = spec.deliver_to == null ? null

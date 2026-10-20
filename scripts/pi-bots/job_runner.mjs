@@ -45,6 +45,7 @@ import { botsDbPath } from "./instance-paths.mjs";
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "./bot-jobs-schema.mjs";
 import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
+import { isVoiceBotId, isVoiceBotDef } from "../../servers/shared/voice-bot.js";
 
 const JOB_TIMEOUT_MS = Number(process.env.PIBOT_JOB_TIMEOUT_MS || 600000); // 10 min, < 30-min reaper cap
 const MAX_JOB_ATTEMPTS = Number(process.env.PIBOT_MAX_JOB_ATTEMPTS || 3);  // caps re-enqueue of abandoned jobs
@@ -291,6 +292,9 @@ export function jobActor(job) {
 export async function runJob(job, { log = () => {}, bridge: injectedBridge = null } = {}) {
   // loadBot is exported from bridge.mjs (S1). Lazy-import the whole module so we
   // also get PiRpc without a static cycle.
+  // The Crow voice bot takes no background jobs, from any producer. Refused
+  // before any bot load or pi spawn; the throw fails the job (runAndFinalize).
+  if (isVoiceBotId(job.bot_id)) throw new Error(`'${job.bot_id}' cannot take background jobs`);
   const bridge = injectedBridge || await import("./bridge.mjs");
 
   // Card jobs delegate to the bridge, which owns the prompt, stranding
@@ -312,6 +316,7 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
 
   const bot = bridge.loadBot(job.bot_id); // throws on unknown/disabled
   const def = bot.def;
+  if (isVoiceBotDef(def)) throw new Error(`'${job.bot_id}' cannot take background jobs`);
   const crowHome = resolveCrowHome();
   const sessionDir = mkdtempSync(join(tmpdir(), "pibot-job-"));
   mkdirSync(join(sessionDir, "sessions"), { recursive: true });

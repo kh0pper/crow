@@ -40,6 +40,7 @@ import {
 } from "./bot-board/html.js";
 import { createDbClient } from "../../../db.js";
 import { botRuntimeActive } from "./bot-runtime-flag.js";
+import { CROW_VOICE_BOT_ID } from "../../../shared/voice-bot.js";
 
 export default {
   id: "bot-board",
@@ -73,8 +74,8 @@ export default {
     let botRows = [];
     try {
       botRows = (await db.execute({
-        sql: "SELECT bot_id, display_name, definition, enabled, project_id FROM pi_bot_defs WHERE enabled=1 ORDER BY bot_id",
-        args: [],
+        sql: "SELECT bot_id, display_name, definition, enabled, project_id FROM pi_bot_defs WHERE enabled=1 AND bot_id != ? ORDER BY bot_id",
+        args: [CROW_VOICE_BOT_ID],
       })).rows || [];
     } catch { botRows = []; }
 

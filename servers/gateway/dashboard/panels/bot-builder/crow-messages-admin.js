@@ -13,6 +13,7 @@ import {
   loadInstanceSeed, deriveBotIdentity, generateBotInviteCode,
 } from "../../../../sharing/identity.js";
 import { instanceSeedDir } from "../../../../../scripts/pi-bots/instance-paths.mjs";
+import { CROW_VOICE_BOT_ID } from "../../../../shared/voice-bot.js";
 
 const DEFAULT_RELAYS = ["wss://relay.damus.io", "wss://nos.lol"];
 
@@ -137,8 +138,8 @@ export async function getOrCreatePairedRosterInvite(db, botId) {
 /** Bots whose def has a crow-messages gateway with allow_paired_instances=true. */
 export async function listAdvertisedBots(db) {
   const { rows } = await db.execute({
-    sql: "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE enabled=1",
-    args: [],
+    sql: "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE enabled=1 AND bot_id != ?",
+    args: [CROW_VOICE_BOT_ID],
   });
   const out = [];
   for (const r of rows) {
