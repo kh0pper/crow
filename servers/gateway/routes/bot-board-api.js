@@ -99,6 +99,8 @@ import { getInteractiveEngine } from "../perch-interactive.js";
 // THE single bot_jobs DDL (shared with init-db, job_runner and tool-executor).
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "../../../scripts/pi-bots/bot-jobs-schema.mjs";
 import { isVoiceBotId } from "../../shared/voice-bot.js";
+import { decideOption } from "../board/decision-service.js";
+import { isEnabledBot } from "../board/bot-lookup.js";
 
 // Slice C: operator-approved promotion target (the PRIMARY skills dir both the
 // pi bridge and the glasses voice path search via skill_resolver).
@@ -285,7 +287,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       const card = (await tdb.execute({
         sql:
           "SELECT id,title,description,status,priority,due_date,owner,tags,parent_id,project_id," +
-          "assigned_bot,archived_at,autonomy," +
+          "assigned_bot,archived_at,autonomy,data_json," +
           "datetime(updated_at) AS updated_at, completed_at FROM tasks_items WHERE id=? AND board_id IS NULL",
         args: [id],
       })).rows[0];
@@ -297,6 +299,12 @@ export default function botBoardApiRouter(dashboardAuth) {
         projects = (await cdb.execute({ sql: "SELECT id, name, slug, repo_path FROM project_spaces WHERE archived_at IS NULL ORDER BY id", args: [] })).rows || [];
       } catch { projects = []; }
       const { locked } = await lockState(cdb, id);
+      // Decision cards carry their question/options in data_json; expose it as
+      // an additive `decision` key (null for any other card) and keep the raw
+      // blob off the card object so existing consumers see the same shape.
+      let decision = null;
+      try { decision = JSON.parse(card.data_json || "{}").decision ?? null; } catch { decision = null; }
+      delete card.data_json;
       // Track 1 Task 9 (additive keys only — every key above is untouched):
       // autonomy/plan_head/latest_results/mutations give the drawer (history
       // strip, autonomy select, "approve & mark done") one hydration call
@@ -320,6 +328,7 @@ export default function botBoardApiRouter(dashboardAuth) {
         plan_head,
         latest_results,
         mutations,
+        decision,
       });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
@@ -397,10 +406,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       // has no business making it, so this stays here too.
       if (botSet && botVal != null) {
         if (isVoiceBotId(botVal)) return jsonError(res, 400, "assigned_bot not found or disabled", { code: "bot_unavailable" });
-        const botRow = (await cdb.execute({
-          sql: "SELECT bot_id FROM pi_bot_defs WHERE bot_id=? AND enabled=1", args: [botVal],
-        })).rows[0];
-        if (!botRow) return jsonError(res, 400, "assigned_bot not found or disabled");
+        if (!(await isEnabledBot(cdb, botVal))) return jsonError(res, 400, "assigned_bot not found or disabled");
       }
       tdb = createDbClient(TASKS_DB);
       const cur = await getCard(tdb, id);
@@ -528,6 +534,31 @@ export default function botBoardApiRouter(dashboardAuth) {
       return serviceError(res, e);
     } finally {
       if (tdb) { try { tdb.close(); } catch {} }
+    }
+  });
+
+  // ---- answer a decision card ----
+  // The ONLY way a decision is answered (no MCP tool may): the actor is the
+  // dashboard's human actor, which is what downstream readers of the
+  // 'decision' mutation trust. Body: {index: int (-1 = Other), other_text?}.
+  router.post(P + "/card/:id/decision", async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
+    const b = req.body || {};
+    if (!Number.isInteger(b.index)) return jsonError(res, 400, "index must be an integer");
+    if (b.other_text != null && typeof b.other_text !== "string") return jsonError(res, 400, "other_text must be a string");
+    let tdb, cdb;
+    try {
+      tdb = createDbClient(TASKS_DB);
+      cdb = createDbClient();
+      const r = await decideOption(tdb, cdb, id, { index: b.index, otherText: b.other_text },
+        DASHBOARD_ACTOR, { isEnabledBot: (botId) => isEnabledBot(cdb, botId) });
+      return res.json({ ok: true, chosen: r.chosen, created_card_id: r.created_card_id });
+    } catch (e) {
+      return serviceError(res, e);
+    } finally {
+      if (tdb) { try { tdb.close(); } catch {} }
+      if (cdb) { try { cdb.close(); } catch {} }
     }
   });
 
