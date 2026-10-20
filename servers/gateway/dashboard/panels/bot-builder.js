@@ -15,8 +15,18 @@ import { renderBotEditor } from "./bot-builder/editor.js";
 import { renderBotList } from "./bot-builder/html.js";
 import { renderWizard } from "./bot-builder/wizard.js";
 import { renderDeleteConfirm } from "./bot-builder/delete-bot.js";
+import { renderVoiceBotEditor, VOICE_ERROR_KEYS } from "./bot-builder/voice-bot-editor.js";
+import { isVoiceBotId } from "../../../shared/voice-bot.js";
 
 const PAGE_CSS = botBuilderStyles();
+
+// ?error= codes that have their own words (the Crow voice bot's refusals and
+// its editor's saves); every other code keeps rendering raw.
+const ERROR_KEYS = {
+  voice_bot_readonly: "botbuilder.voiceBotReadonly",
+  voice_bot_permanent: "botbuilder.voiceBotPermanent",
+  ...VOICE_ERROR_KEYS,
+};
 
 // C4 Task 8: q.error="engine_required" / q.warn="bot_runtime_off" are the
 // ONLY two values these params ever carry from api-handlers.js's Task 7
@@ -90,6 +100,7 @@ export default {
     const baseNotice = q.saved ? `<p class="btb-notice-ok" role="status">${escapeHtml(t("botbuilder.noticeSaved", lang))}</p>`
       : q.deleted ? `<p class="btb-notice-ok" role="status">${escapeHtml(fill(t("botbuilder.noticeDeleted", lang), { id: String(q.deleted) }))}</p>`
       : q.error === "engine_required" ? engineRequiredBanner(lang)
+      : typeof q.error === "string" && Object.hasOwn(ERROR_KEYS, q.error) ? `<p class="btb-notice-err">${escapeHtml(t(ERROR_KEYS[q.error], lang))}</p>`
       : q.error ? `<p class="btb-notice-err">${escapeHtml(String(q.error))}</p>` : "";
     // Soft, non-blocking warning (e.g. AI-tab model pair not in models.json).
     // Independent of the base notice so it can ride alongside a Saved.
@@ -107,6 +118,11 @@ export default {
     const bodyAction = req.method === "POST" ? String((req.body || {}).action || "") : "";
     if (bodyAction === "wizard_step" || bodyAction === "wizard_create" || (req.method !== "POST" && q.new)) {
       return renderWizard(req, res, { db, layout, lang, PAGE_CSS, notice });
+    }
+
+    // ---- the Crow voice editor: ?bot=crow.voice, whatever tab (or confirm_delete) says ----
+    if (q.bot && isVoiceBotId(String(q.bot))) {
+      return renderVoiceBotEditor(req, res, { db, layout, lang, PAGE_CSS, notice, kioskAvailable });
     }
 
     // ---- delete confirmation page (Item 5 PR2, spec §D5) — plain GET ----

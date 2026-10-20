@@ -613,6 +613,20 @@ export function createKioskRuntime(deps) {
     }
     return voiceBotId;
   };
+  /**
+   * The listing's `voice`: the Crow voice bot as the Kiosk panel and Bot Builder show it — its name, its fit on the
+   * quick voice model with memories off / on, and what it can do by voice (absent fields stay null: no claim).
+   */
+  const voiceListing = async (db) => {
+    let name = "Crow";
+    try { name = (await db.execute({ sql: "SELECT display_name FROM pi_bot_defs WHERE bot_id = ?", args: [voiceBotId] })).rows[0]?.display_name || name; } catch {}
+    return {
+      bot_id: voiceBotId, name,
+      fit: await botFit(db, voiceBotId, false), fit_memory: await botFit(db, voiceBotId, true),
+      abilities: botAbilities ? await botAbilities(db, voiceBotId, false) : null,
+      abilities_memory: botAbilities ? await botAbilities(db, voiceBotId, true) : null,
+    };
+  };
   /** Who "Automatic" would pick right now, whatever is chosen: the old resolver with no choice (never a voice bot). */
   const automaticBot = (db) => resolveSessionBot(db, { readSetting: async () => "" }, (id) => botFit(db, id, false), notVoice);
   /** hello on the session socket: CSRF double-submit, then the assistant. `req` is the verified upgrade request. */
@@ -818,21 +832,22 @@ export function createKioskRuntime(deps) {
         // abilities / abilities_memory: { items: [{ id, quick, label? }], none } | null; absent with an older core.
         if (botAbilities) for (const b of bots) { b.abilities = await botAbilities(db, b.bot_id, false); b.abilities_memory = await botAbilities(db, b.bot_id, true); }
         const prof = async (k) => { try { return JSON.parse((await deps.settings.readSetting(db, k)) || "[]").map((p) => ({ id: p.id, name: p.name || p.id, provider: p.provider })); } catch { return []; } };
+        const base = { devices, bots, pending: pairing.listPending(), stt_profiles: await prof("stt_profiles"), tts_profiles: await prof("tts_profiles") };
+        // Every display and the session overlay answer as the Crow voice bot: the panel shows "Answers as Crow" with
+        // its fit and abilities (voice), and the Talk to Crow box only where the overlay is served (dashboard_talk).
+        if (voiceBotId) return { ...base, voice: await voiceListing(db), dashboard_talk: sessionMode };
+        // Without the shared voice module (an older caller, a test stub): the old chosen-assistant block.
         const chosen = String((await deps.settings.readSetting(db, SESSION_BOT_SETTING)) || "") || null;
         const dashboard_voice = { available: sessionMode, bot_id: chosen, effective_bot_id: await sessionBot(db), auto_bot_id: await automaticBot(db) };
-        return { devices, bots, pending: pairing.listPending(), stt_profiles: await prof("stt_profiles"), tts_profiles: await prof("tts_profiles"), dashboard_voice };
+        return { ...base, dashboard_voice };
       });
       res.json(body);
     }));
     r.post("/api/kiosk/admin/approve", json, wrap(async (req, res) => {
       const code = String(req.body?.code || "");
       const name = String(req.body?.name || "").trim().slice(0, 64) || "Display";
-      const botId = String(req.body?.bot_id || "");
+      // No assistant is chosen or bound here: every display answers as Crow (a bot_id from an older page is ignored).
       await withDb(async (db) => {
-        const bot = (await db.execute({ sql: "SELECT bot_id FROM pi_bot_defs WHERE bot_id = ? AND enabled = 1", args: [botId] })).rows[0];
-        if (!bot) return res.status(400).json({ error: "bot_required" });
-        // A new display starts with memories off. Checked BEFORE the code is claimed.
-        if ((await botFit(db, botId, false, { fresh: true })) === "too_large") return res.status(400).json({ error: "bot_too_large" });
         const c = pairing.claim(code);
         if (c.error) return res.status(c.status).json({ error: c.error, retry_after_s: c.retry_after_s });
         let created = null;
@@ -842,16 +857,15 @@ export function createKioskRuntime(deps) {
           const id = "kiosk-" + randomBytes(6).toString("hex");
           created = id;
           const { token } = await deps.deviceStore.pairDevice(db, { id, name, device_kind: "kiosk", stt_profile_id: stt.id, tts_profile_id: tts ? tts.id : null });
-          await deps.deviceStore.updateDeviceProfiles(db, id, { bound_bot_id: botId });
           if (!pairing.complete(c.pending.pair_id, { device_id: id, token })) {
             await deps.deviceStore.unpairDevice(db, id);          // expired between claim and complete: no orphan device
             return res.status(410).json({ error: "pairing_expired" });
           }
           created = null;                                          // delivered: never clean it up after this
-          log(`[kiosk] paired ${id} "${name}" → bot ${botId} (requester ${c.pending.ip})`);
+          log(`[kiosk] paired ${id} "${name}" (requester ${c.pending.ip})`);
           res.json({ ok: true, device_id: id, tts: tts ? tts.name || tts.id : null });
         } catch (err) {
-          // Never leave a paired device whose token is never delivered (e.g. the bot bind failed).
+          // Never leave a paired device whose token is never delivered (e.g. a profile write failed).
           if (created) { try { await deps.deviceStore.unpairDevice(db, created); } catch (e) { log(`[kiosk] orphan cleanup ${created} failed: ${e.message}`); } }
           pairing.release(c.pending.pair_id);
           throw err;
@@ -976,16 +990,17 @@ export function createKioskRuntime(deps) {
     // never start a model and its result does not depend on which model is resident. It passes only
     // when the card is really up (the card sentence is tried up to three times).
     r.post("/api/kiosk/internal/turn-check", json, wrap(async (req, res) => {
+      // bot_id is optional: it only picks which paired display's voice settings the check borrows. The check
+      // itself answers as the Crow voice bot, in Crow's voice when it sets one.
       const botId = String(req.body?.bot_id || "").slice(0, 80);
-      if (!botId) return res.status(400).json({ error: "bot_id_required" });
       const lang = req.body?.lang === "es" ? "es" : "en";
-      // Speak with a voice a real display uses (a display bound to this assistant first, else any paired
+      // Speak with a voice a real display uses (with a bot_id, a display bound to it first; else any paired
       // display), never the instance default: that one can be a voice the gateway cannot run at all.
       const paired = (await withDb((db) => kioskDevices(db))).filter((d) => d.tts_profile_id);
-      const voiceFrom = paired.find((d) => d.bound_bot_id === botId) || paired[0];
-      // The check answers as the Crow voice bot, in its voice when it sets one (applied to this in-memory display only).
+      const voiceFrom = (botId && paired.find((d) => d.bound_bot_id === botId)) || paired[0];
+      // Crow's own speaking voice and STT are applied on top (to this in-memory display only).
       const vb = await withDb((db) => loadVoiceBot(db));
-      const device = voiced({ id: TURN_CHECK_DEVICE, name: "turn check", device_kind: "kiosk", bound_bot_id: botId, tts_profile_id: voiceFrom?.tts_profile_id ?? null, kiosk_settings: { lang, memory_integration: false } }, vb);
+      const device = voiced({ id: TURN_CHECK_DEVICE, name: "turn check", device_kind: "kiosk", bound_bot_id: voiceBotId || botId || null, tts_profile_id: voiceFrom?.tts_profile_id ?? null, kiosk_settings: { lang, memory_integration: false } }, vb);
       const caps = effectiveCaps(null, null);
       const out = [];
       const once = async (transcript) => {

@@ -31,8 +31,8 @@ export const isSessionDisplayId = (id) => typeof id === "string" && id.startsWit
 
 /**
  * No longer who answers: every session display answers as the Crow voice bot (runtime.js
- * sessionBot). Kept for the evaluation harness (and the Kiosk listing's auto_bot_id while that
- * listing still has its dashboard_voice block); it never returns a voice bot.
+ * sessionBot). Kept for the evaluation harness and for a runtime without the shared voice module
+ * (its listing keeps the old dashboard_voice block); it never returns a voice bot.
  *
  * The bot the old rule picks: the one chosen in the Kiosk panel when it is still enabled, else
  * ("Automatic") the first enabled assistant by id, the same default the bot board opens on. null

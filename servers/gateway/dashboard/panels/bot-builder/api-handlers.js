@@ -29,6 +29,7 @@ import { changeTracker } from "./ui.js";
 import { saveBasics, saveAbilities, saveSafety, saveAdvanced } from "./save-handlers.js";
 import { guardPolicyForSave } from "./policy-guard.js";
 import { isVoiceBotId } from "../../../../shared/voice-bot.js";
+import { handleVoiceBotSave, handleVoiceBotPreset } from "./voice-bot-editor.js";
 import { ENGINE_CHANNELS } from "../../../bot-engine-status.js";
 import { botRuntimeActive } from "../bot-runtime-flag.js";
 import {
@@ -192,9 +193,9 @@ export function sanitizeBotId(raw) {
   return String(raw || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
 }
 
-/** Bot Builder actions allowed on the Crow voice bot (the voice editor's own).
- * Empty for now: a later PR adds them; every generic action is refused. */
-const VOICE_BOT_ACTIONS = new Set();
+/** Bot Builder actions allowed on the Crow voice bot: the voice editor's own
+ * (voice-bot-editor.js). Every generic action is refused. */
+const VOICE_BOT_ACTIONS = new Set(["voice_bot_save", "voice_bot_preset"]);
 
 export async function handleBotBuilderPost(req, res, { db }) {
   const b = req.body || {};
@@ -205,6 +206,10 @@ export async function handleBotBuilderPost(req, res, { db }) {
   if (isVoiceBotId(String(b.bot_id ?? "").trim()) && action !== "delete_confirm" && !VOICE_BOT_ACTIONS.has(action)) {
     return res.redirectAfterPost("/dashboard/bot-builder?error=voice_bot_readonly");
   }
+
+  // The Crow voice editor's two writes: they only ever touch the crow.voice row.
+  if (action === "voice_bot_save") return handleVoiceBotSave(req, res, { db });
+  if (action === "voice_bot_preset") return handleVoiceBotPreset(req, res, { db });
 
   if (action === "board_on") return handleBoardOn(req, res, { db });
 

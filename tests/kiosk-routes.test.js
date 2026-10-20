@@ -135,16 +135,15 @@ test("Funnel and off-tailnet are refused on page, pair and session", async () =>
   } finally { tailnet = true; }
 });
 
-test("full pairing: start → admin approve (bot required) → one-time pickup → session hello works", async () => {
+test("full pairing: start → admin approve (no assistant: every display answers as Crow) → one-time pickup → session hello works", async () => {
   const s = await (await j("/api/kiosk/pair/start", { method: "POST", body: JSON.stringify({ name_hint: "Phone" }) })).json();
-  assert.equal((await j("/api/kiosk/admin/approve", { method: "POST", body: JSON.stringify({ code: s.code, name: "Kitchen", bot_id: "off" }) })).status, 400, "disabled bot refused");
   const pend = await (await fetch(base + "/api/kiosk/admin/displays")).json();
   assert.equal(pend.pending.length, 1);
   assert.ok(!JSON.stringify(pend).includes(s.code), "code never shown in the admin listing");
-  const ok = await (await j("/api/kiosk/admin/approve", { method: "POST", body: JSON.stringify({ code: s.code, name: "Kitchen", bot_id: "household" }) })).json();
-  assert.equal(ok.ok, true);
+  const ok = await (await j("/api/kiosk/admin/approve", { method: "POST", body: JSON.stringify({ code: s.code, name: "Kitchen", bot_id: "off" }) })).json();
+  assert.equal(ok.ok, true, "a bot_id (even a disabled bot's) is neither required nor checked");
   const dev = await store.findDevice(db(), ok.device_id);
-  assert.equal(dev.device_kind, "kiosk"); assert.equal(dev.bound_bot_id, "household");
+  assert.equal(dev.device_kind, "kiosk"); assert.ok(!dev.bound_bot_id, "nothing is bound");
   assert.equal(dev.stt_profile_id, "kiosk-stt-distil-small-en"); assert.equal(dev.tts_profile_id, "kk");
   const p1 = await (await fetch(base + `/api/kiosk/pair/status?pair_id=${s.pair_id}`, { headers: { "X-Kiosk-Poll": s.poll_secret } })).json();
   assert.equal(p1.state, "approved");
@@ -497,8 +496,8 @@ test("MCP server: gateway port order matches the gateway (PORT before CROW_GATEW
 
 // Review fix 4: a failure after pairDevice must not leave a paired, unbound device
 // whose token is never delivered.
-test("approve: a failure binding the bot unpairs the just-created device and releases the code", async () => {
-  const failing = { ...store, updateDeviceProfiles: async () => { throw new Error("db busy"); } };
+test("approve: a failure once the device row is written unpairs the just-created device and releases the code", async () => {
+  const failing = { ...store, pairDevice: async (d, o) => { await store.pairDevice(d, o); throw new Error("db busy"); } };
   const k = createKioskRuntime(runtimeDeps({ deviceStore: failing }));
   const app = express();
   app.use(k.router((req, res, next) => next()));
@@ -506,7 +505,7 @@ test("approve: a failure binding the bot unpairs the just-created device and rel
   try {
     const before = (await store.listDevices(db())).filter((d) => d.device_kind === "kiosk").map((d) => d.id);
     const st = await (await fetch(b + "/api/kiosk/pair/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).json();
-    const r = await fetch(b + "/api/kiosk/admin/approve", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: st.code, name: "Orphan", bot_id: "household" }) });
+    const r = await fetch(b + "/api/kiosk/admin/approve", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: st.code, name: "Orphan" }) });
     assert.equal(r.status, 500);
     const after = (await store.listDevices(db())).filter((d) => d.device_kind === "kiosk").map((d) => d.id);
     assert.deepEqual(after, before, "no orphan kiosk device left behind");
@@ -697,20 +696,18 @@ test("abilities: a voice runner without abilitiesOf (an older core) → the fiel
   } finally { f.close(); }
 });
 
-test("fit: pairing a display to a too-large assistant is refused (bot_too_large) and the code stays usable; without-skills and unknown fits pair", async () => {
+test("fit: pairing never checks an assistant (every display answers as Crow): a posted bot_id, too large or not, neither refuses nor binds", async () => {
   await raw.execute({ sql: `INSERT INTO pi_bot_defs VALUES ${FIT_BOTS}`, args: [] });
   const f = await fitRuntime({ household: "full", "fit-general": "no_skills", "fit-huge": "too_large", "fit-broken": new Error("x") });
   try {
-    const st = await (await f.post("/api/kiosk/pair/start", {})).json();
-    const no = await f.post("/api/kiosk/admin/approve", { code: st.code, name: "Kitchen", bot_id: "fit-huge" });
-    assert.equal(no.status, 400);
-    assert.deepEqual(await no.json(), { error: "bot_too_large" });
-    assert.equal(f.k.pairing.listPending().length, 1, "the code was not used up");
-    const ok = await (await f.post("/api/kiosk/admin/approve", { code: st.code, name: "Kitchen", bot_id: "fit-general" })).json();
-    assert.equal(ok.ok, true);
-    assert.equal((await store.findDevice(db(), ok.device_id)).bound_bot_id, "fit-general");
-    const st2 = await (await f.post("/api/kiosk/pair/start", {})).json();
-    assert.equal((await (await f.post("/api/kiosk/admin/approve", { code: st2.code, name: "Hall", bot_id: "fit-broken" })).json()).ok, true, "a failed fit check never blocks pairing");
+    const n = f.asked.length;
+    for (const bot_id of ["fit-huge", undefined]) {
+      const st = await (await f.post("/api/kiosk/pair/start", {})).json();
+      const ok = await (await f.post("/api/kiosk/admin/approve", { code: st.code, name: "Kitchen", ...(bot_id ? { bot_id } : {}) })).json();
+      assert.equal(ok.ok, true, String(bot_id));
+      assert.ok(!(await store.findDevice(db(), ok.device_id)).bound_bot_id, "nothing is bound");
+    }
+    assert.equal(f.asked.length, n, "no fit check at pairing");
   } finally { f.close(); await raw.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id LIKE 'fit-%'", args: [] }); }
 });
 
@@ -921,8 +918,10 @@ test("turn check (wired): loopback and the announce token only; fixed sentences 
     assert.equal(typeof c.fastPaths, "function");
   }
   assert.deepEqual(rt.wm.list(TURN_CHECK_DEVICE), [], "nothing is left behind");
-  const bad = await fetch(base + "/api/kiosk/internal/turn-check", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer ann-ok" }, body: "{}" });
-  assert.equal(bad.status, 400);
+  // bot_id is optional now (it only picks whose display voice the check borrows): no body field is no refusal.
+  const none = await fetch(base + "/api/kiosk/internal/turn-check", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer ann-ok" }, body: "{}" });
+  assert.equal(none.status, 200);
+  assert.ok(!JSON.stringify(await none.json()).includes("bot_id_required"));
 });
 
 test("turn check speaks with a real display's voice, never the instance default (a default voice the gateway cannot run failed every line)", async () => {

@@ -520,16 +520,20 @@ async function runSessionTurn(ws, deviceId, audio) {
   if (entry?.playback && ws.readyState === 1) startEnvelopePlayback(deviceId, entry.playback);
 }
 
-/** Would the bound assistant's voice prompt fit its quick model? Cached for a minute per device and assistant. */
+/**
+ * Would the answering bot's voice prompt fit its quick model? That is the Crow voice bot (turn.js answers every
+ * glasses turn as it), else (an older core) the device's bound bot. Cached for a minute per device and bot.
+ */
 const _fitCache = new Map();
 async function botFit(db, d) {
-  if (!d.bound_bot_id) return null;
-  const key = `${d.id}|${d.bound_bot_id}`;
+  const botId = _voiceDeps.voiceBotId || d.bound_bot_id;
+  if (!botId) return null;
+  const key = `${d.id}|${botId}`;
   const hit = _fitCache.get(key);
   if (hit && Date.now() - hit.at < 60_000) return hit.fit;
   let fit = null;
   try {
-    const r = await _voice.assessBot({ db, botId: d.bound_bot_id, memoryOn: d.voice_settings?.memory !== false, denyTools: GLASSES_DENY_TOOLS, promptSuffix: stringsFor(d.voice_settings?.lang).prompt_suffix });
+    const r = await _voice.assessBot({ db, botId, memoryOn: d.voice_settings?.memory !== false, denyTools: GLASSES_DENY_TOOLS, promptSuffix: stringsFor(d.voice_settings?.lang).prompt_suffix });
     fit = r ? { level: r.level, model: r.model } : { level: "no_bot", model: null };
   } catch { fit = null; }
   _fitCache.set(key, { at: Date.now(), fit });
@@ -579,7 +583,7 @@ export default function metaGlassesRouter(dashboardAuth) {
       let ttsProfiles = [];
       try { ttsProfiles = await (await loadTts()).getTtsProfiles(db, { includeKeys: false }); } catch { ttsProfiles = []; }
       // Only glasses records: the registry is shared with kiosk displays and companions.
-      // fit = the bound assistant against its quick voice model; voice = whether any profile gives
+      // fit = the answering bot (Crow) against its quick voice model; voice = whether any profile gives
       // the raw PCM the app plays; recent_turns = outcome codes and timings only.
       const annotated = [];
       // The voice a turn would really use: Crow's when it sets a playable one, else the device's (session.js).

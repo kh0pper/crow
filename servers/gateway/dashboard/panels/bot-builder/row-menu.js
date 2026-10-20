@@ -13,8 +13,7 @@
  * Document-level delegation, bound once per page lifetime: Turbo swaps the
  * body but keeps window/document, so a second run must not stack listeners.
  * The cards are server-rendered (html.js); the script carries no strings.
- * A hidden item (or one inside a hidden wrapper) is never focused: "Use for
- * voice…" stays hidden until the Kiosk listing loads (voice-use.js).
+ * A hidden item (or one inside a hidden wrapper) is never focused.
  *
  * This is a template literal: never put a backtick or a dollar-brace inside.
  */

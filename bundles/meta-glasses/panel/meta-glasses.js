@@ -109,13 +109,10 @@ const CLIENT_SCRIPT = `
       var lastSeen = d.last_seen ? new Date(d.last_seen).toLocaleString() : 'never';
       meta.appendChild(document.createTextNode('paired ' + pairedAt + ' · last seen ' + lastSeen));
       if (d.household_profile) meta.appendChild(document.createTextNode(' · profile: ' + d.household_profile));
-      // Slice B (B6): surface the bound bot, if any, so it's clear which
-      // assistant drives this device's voice turn. Bind/unbind in Bot Builder.
-      if (d.bound_bot_id) meta.appendChild(document.createTextNode(' · bot: ' + d.bound_bot_id));
       card.appendChild(meta);
 
-      // Will these glasses answer? The bound assistant against the quick voice model, and a voice
-      // the app can play. Each line says what the wearer will hear.
+      // Who answers (always Crow), whether Crow fits the quick voice model, and a voice the app can
+      // play. Each line says what the wearer will hear.
       card.appendChild(fitLine(d));
       card.appendChild(voicePickers(d));
       if (d.voice === 'none') card.appendChild(warnLine('No voice these glasses can play: add a local Kokoro or Piper voice profile. Until then nothing is spoken.'));
@@ -208,14 +205,22 @@ const CLIENT_SCRIPT = `
     var w = el('div', { className: 'mg-fit mg-fit-warn' }, text);
     return w;
   }
+  // Every pair of glasses answers as Crow (the reserved voice bot): one line says so, with a link to
+  // Crow's editor, then whether Crow fits the quick voice model.
   function fitLine(d) {
-    if (!d.bound_bot_id) return warnLine('No assistant bound. The glasses will say "These glasses have no assistant yet." Choose one in Bot Builder (the Personal voice assistant template is made for this).');
-    var f = d.fit;
-    if (!f) return el('div', { className: 'mg-fit' }, 'Assistant fit: not known right now.');
-    if (f.level === 'full') return el('div', { className: 'mg-fit mg-fit-ok' }, 'Assistant fits the quick voice model' + (f.model ? ' (' + f.model + ')' : '') + '.');
-    if (f.level === 'no_skills') return el('div', { className: 'mg-fit' }, 'Assistant fits the quick voice model only without its skills; answers use its persona and tools.');
-    if (f.level === 'too_large') return warnLine('Assistant is too large for the quick voice model: the glasses will say so instead of answering. Choose a smaller assistant.');
-    return warnLine('The bound assistant is switched off or missing. The glasses will say so.');
+    var box = el('div');
+    var who = el('div', { className: 'mg-fit' }, 'Answers as Crow · ');
+    who.appendChild(el('a', { href: '/dashboard/bot-builder?bot=crow.voice' }, 'Customise in Bot Builder'));
+    box.appendChild(who);
+    box.appendChild(crowFitLine(d.fit));
+    return box;
+  }
+  function crowFitLine(f) {
+    if (!f) return el('div', { className: 'mg-fit' }, "Crow's fit: not known right now.");
+    if (f.level === 'full') return el('div', { className: 'mg-fit mg-fit-ok' }, 'Crow fits the quick voice model' + (f.model ? ' (' + f.model + ')' : '') + '.');
+    if (f.level === 'no_skills') return el('div', { className: 'mg-fit' }, 'Crow fits the quick voice model only without its skills; answers use its persona and tools.');
+    if (f.level === 'too_large') return warnLine('Crow is too large for the quick voice model: the glasses will say so instead of answering. Shorten its persona or tools in Bot Builder.');
+    return warnLine("Crow's voice is switched off or not set up yet. The glasses will say there is no assistant.");
   }
   function turnsBlock(turns) {
     var box = el('div', { className: 'mg-turns' });

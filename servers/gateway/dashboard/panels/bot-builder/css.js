@@ -287,25 +287,22 @@ export function botBuilderStyles() {
   .btb-menu a,.btb-menu button{display:block;width:100%;box-sizing:border-box;text-align:left;min-height:44px;padding:.6rem .75rem;border:0;border-radius:8px;background:none;color:var(--crow-text-primary);font:inherit;font-size:.9rem;text-decoration:none;cursor:pointer}
   .btb-menu a:hover,.btb-menu button:hover{background:var(--crow-bg-elevated)}
   .btb-menu [hidden]{display:none}
-  /* "Answers voice on: …" (queue item 20, PR 3): one quiet line that wraps; hidden when there is nothing to say. */
-  .btb-voice{margin:0;font-size:.8rem;color:var(--crow-text-secondary);min-width:0;overflow-wrap:anywhere}
-  .btb-voice[hidden]{display:none}
-  .btb-voice-l{color:var(--crow-text-muted)}
+  /* "By voice on displays: …" on Crow's card and in its editor (voice-use.js): one quiet line that wraps; hidden when there is nothing to say. */
   .btb-abil{margin:0;font-size:.8rem;color:var(--crow-text-secondary);min-width:0;overflow-wrap:anywhere}
   .btb-abil[hidden]{display:none}
-  /* "Use <Name> for voice" rows (voice-use.js), inside the give dialog's panel styles. */
-  .btb-vu-rows{display:flex;flex-direction:column;gap:.5rem;min-width:0}
-  .btb-vu-row{display:flex;flex-direction:column;gap:.15rem;min-width:0;padding:.45rem .6rem;border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);overflow-wrap:anywhere}
-  .btb-vu-l{display:flex;align-items:center;gap:.5rem;min-height:36px;font-weight:600;cursor:pointer}
-  .btb-vu-l input{flex:none;width:20px;height:20px;margin:0}
-  .btb-vu-name{min-width:0;overflow-wrap:anywhere}
-  .btb-vu-sub,.btb-vu-fit,.btb-vu-msg{font-size:.8rem;color:var(--crow-text-secondary)}
-  .btb-vu-msg:empty{display:none}
-  .btb-vu-bad{color:var(--crow-error)}
-  .btb-vu-warn{color:var(--crow-warning)}
-  .btb-vu-group{margin:.4rem 0 0;font-size:.85rem;font-weight:600;color:var(--crow-text-secondary)}
-  .btb-vu-hint{margin:0;font-size:.78rem;color:var(--crow-text-muted)}
-  .btb-vu-status:empty{display:none}
+  /* Crow's card (voice-bot-card.js) and the Crow voice editor (voice-bot-editor.js). */
+  .btb-vchip{display:inline-block;padding:.05rem .45rem;border-radius:999px;font-size:.72rem;font-weight:600;background:var(--crow-accent);color:var(--crow-bg-surface)}
+  .btb-vsec{margin:0 0 1.1rem;padding:0;border:0;min-width:0}
+  .btb-vsec>legend,.btb-vsec>h3{margin:0 0 .4rem;padding:0;font-size:1rem;font-weight:600}
+  .btb-vsec label{display:block;margin:.35rem 0 .2rem;font-size:.85rem;color:var(--crow-text-secondary)}
+  .btb-vsec select,.btb-vsec input[type=text],.btb-vsec textarea{width:100%;max-width:36rem;box-sizing:border-box;font:inherit}
+  .btb-vsec .btb-vcheck{display:flex;align-items:center;gap:.5rem;color:var(--crow-text-primary)}
+  .btb-vpresets{display:grid;grid-template-columns:minmax(0,1fr);gap:.5rem;max-width:36rem}
+  @media(min-width:640px){.btb-vpresets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  .btb-vpreset{display:flex;gap:.5rem;align-items:flex-start;padding:.6rem .7rem;border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);min-width:0;overflow-wrap:anywhere}
+  .btb-vpreset input{margin-top:.2rem}
+  .btb-vpreset span{display:block}
+  .btb-vpreset small{display:block;color:var(--crow-text-muted)}
   .btb-menu .btb-danger-link{color:var(--crow-error)}
   .btb-mhint{display:block;font-size:.78rem;color:var(--crow-text-muted);margin-top:.15rem;white-space:normal}
 

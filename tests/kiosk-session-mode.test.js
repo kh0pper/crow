@@ -650,7 +650,7 @@ test("a session display gets the same turn rules as a paired one: display tool o
 // bot-defs generation (as its pibots:defs-changed does).
 
 const CROW = "crow.voice";
-async function crowServe({ def, ensure = true, providers = [] } = {}) {
+async function crowServe({ def, ensure = true, providers = [], voiceExtra = {} } = {}) {
   const cv = await import("../servers/gateway/voice/crow-voice.js");
   const { voiceBotDefinition } = await import("../servers/shared/voice-bot.js");
   const voiceDef = def || voiceBotDefinition({ preset: "fast_local", fastKey: "voice-test/quick" });
@@ -664,6 +664,7 @@ async function crowServe({ def, ensure = true, providers = [] } = {}) {
     runVoiceTurn: async (o) => { calls.push(o); return { route: "fast", timings: {} }; },
     speakText: async () => true,
     transcribe: async (o) => { stt.push(o); return { text: "Tell me a joke" }; },
+    ...voiceExtra,
   };
   const f = await serve(voice, {
     crowVoice: { turnOptions: cv.crowVoiceTurnOptions, withVoiceProfiles: cv.withVoiceProfiles, VOICE_DENY_TOOLS: cv.VOICE_DENY_TOOLS, CROW_VOICE_BOT_ID: cv.CROW_VOICE_BOT_ID, isVoiceBotId: cv.isVoiceBotId },
@@ -711,8 +712,8 @@ test("session display answers as Crow on surface phone, even when kiosk_dashboar
     assert.equal(call.device.stt_profile_id, "fw-crow", "Crow's speech recognition");
     assert.equal(f.ensured.length, 1, "the voice bot was ensured before the hello was answered");
     const l = await f.listing();
-    assert.equal(l.dashboard_voice.effective_bot_id, CROW);
-    assert.notEqual(l.dashboard_voice.auto_bot_id, CROW, "Automatic never names the voice bot");
+    assert.equal(l.voice.bot_id, CROW, "the listing names Crow as the one that answers");
+    assert.equal("dashboard_voice" in l, false, "no Automatic / chosen-assistant block any more");
     c.ws.close();
   } finally { await f.close(); }
 });
@@ -793,6 +794,62 @@ test("no voice bot row (ensure failed): the hello still opens, no profiles apply
     assert.match(call.device.stt_profile_id, /^kiosk-stt-/, "the session display's own STT (the kiosk profile), no Crow profile");
     assert.ok(logs.some((m) => /voice bot/.test(m) && /fast_model_required/.test(m)));
     c.ws.close();
+  } finally { await f.close(); }
+});
+
+test("the listing answers as Crow: voice { bot_id, name, fit, fit_memory, abilities, abilities_memory } in place of dashboard_voice; dashboard_talk says the overlay is there", async () => {
+  const asked = [];
+  const f = await crowServe({ voiceExtra: {
+    assessBot: async ({ botId, memoryOn }) => { asked.push(["fit", botId, memoryOn]); return { level: memoryOn ? "no_skills" : "full", ctx: 8192, model: "voice/quick" }; },
+    abilitiesOf: async ({ botId, memoryOn }) => { asked.push(["abil", botId, memoryOn]); return { items: [{ id: "lists", quick: true }, ...(memoryOn ? [{ id: "memory", quick: true }] : [])], none: false }; },
+  } });
+  try {
+    await f.open().then((c) => c.ws.close());   // the first hello creates the voice row
+    const l = await f.listing();
+    assert.equal("dashboard_voice" in l, false);
+    assert.equal(l.dashboard_talk, true);
+    assert.deepEqual(Object.keys(l.voice).sort(), ["abilities", "abilities_memory", "bot_id", "fit", "fit_memory", "name"]);
+    assert.equal(l.voice.bot_id, CROW);
+    assert.equal(l.voice.name, "Crow");
+    assert.deepEqual([l.voice.fit, l.voice.fit_memory], ["full", "no_skills"]);
+    assert.deepEqual(l.voice.abilities.items.map((x) => x.id), ["lists"]);
+    assert.deepEqual(l.voice.abilities_memory.items.map((x) => x.id), ["lists", "memory"]);
+    assert.ok(asked.some((a) => a[0] === "fit" && a[1] === CROW) && asked.some((a) => a[0] === "abil" && a[1] === CROW), "asked about Crow itself");
+  } finally { await f.close(); }
+});
+
+test("pairing without bot_id: approve pairs the display and binds nothing; a posted bot_id is ignored; nothing else is rewritten", async () => {
+  const f = await crowServe();
+  const H = { ...SERVE, "Content-Type": "application/json" };
+  const A = { ...H, Cookie: cookie(), "X-Crow-Csrf": CSRF };
+  try {
+    const before = await withDb((db) => store.listDevices(db));
+    const s1 = await (await fetch(f.b + "/api/kiosk/pair/start", { method: "POST", headers: H, body: JSON.stringify({ name_hint: "Hall" }) })).json();
+    const ok = await (await fetch(f.b + "/api/kiosk/admin/approve", { method: "POST", headers: A, body: JSON.stringify({ code: s1.code, name: "Hall" }) })).json();
+    assert.equal(ok.ok, true, JSON.stringify(ok));
+    const dev = await withDb((db) => store.findDevice(db, ok.device_id));
+    assert.equal(dev.device_kind, "kiosk");
+    assert.ok(!dev.bound_bot_id, "no assistant is bound");
+    const s2 = await (await fetch(f.b + "/api/kiosk/pair/start", { method: "POST", headers: H, body: JSON.stringify({ name_hint: "Den" }) })).json();
+    const ok2 = await (await fetch(f.b + "/api/kiosk/admin/approve", { method: "POST", headers: A, body: JSON.stringify({ code: s2.code, name: "Den", bot_id: "nobody-at-all" }) })).json();
+    assert.equal(ok2.ok, true, "a bot_id from an older page is not a reason to refuse");
+    assert.ok(!(await withDb((db) => store.findDevice(db, ok2.device_id))).bound_bot_id, "and it is not bound either");
+    const after = await withDb((db) => store.listDevices(db));
+    for (const d of before) assert.deepEqual(after.find((x) => x.id === d.id), d, `${d.id} is untouched`);
+    for (const id of [ok.device_id, ok2.device_id]) await withDb((db) => store.unpairDevice(db, id));
+  } finally { await f.close(); }
+});
+
+test("the turn check needs no bot_id: with none it answers as Crow, in Crow's voice when it sets one", async () => {
+  const f = await crowServe({ def: await crowDef({}, { tts_profile_id: "kk-crow" }) });
+  try {
+    await f.open().then((c) => c.ws.close());
+    const r = await fetch(f.b + "/api/kiosk/internal/turn-check", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    assert.equal(r.status, 200);
+    const j = await r.json();
+    assert.equal(j.tts_profile_id, "kk-crow");
+    assert.ok(f.calls.length >= 3);
+    for (const c of f.calls.filter((x) => x.device?.id === "turn-check")) { assert.equal(c.botId, CROW); assert.equal(c.device.bound_bot_id, CROW); }
   } finally { await f.close(); }
 });
 
