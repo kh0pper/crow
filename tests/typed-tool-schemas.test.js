@@ -166,9 +166,9 @@ test("maker-lab: lesson is typed (fields in grammar-friendly order) and the vali
 
 test("sunvox: spec is typed from compose(); a real-shaped spec is accepted unchanged, a JSON-string spec is parsed", async () => {
   const s = await schemaOf("bundle:sunvox-studio", "sunvox_compose");
-  assert.deepEqual(Object.keys(s.properties), ["name", "render", "format", "spec"]);
+  assert.deepEqual(Object.keys(s.properties), ["name", "overwrite", "render", "format", "sample_rate", "notify", "funkwhale_library", "save_to_storage", "reference_type", "reference_id", "spec"]);
   const spec = s.properties.spec;
-  assert.deepEqual(Object.keys(spec.properties), ["bpm", "tpl", "modules", "connections", "patterns"]);
+  assert.deepEqual(Object.keys(spec.properties), ["bpm", "tpl", "modules", "connections", "patterns", "arrangement"]);
   assert.deepEqual(spec.required, ["modules", "patterns"]);
   const ev = spec.properties.patterns.items.properties.events.items;
   assert.deepEqual(Object.keys(ev.properties).slice(0, 4), ["track", "line", "module", "note"]);
