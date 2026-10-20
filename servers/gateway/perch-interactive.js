@@ -3264,6 +3264,7 @@ export function createInteractiveEngine({
           clearStall(s); armIdle(s);
           emit(s, { type: "ask_user", ...s.pendingUi });
         } else {
+          settleAsk(s);                              // nothing left waiting: close the group
           s.pendingUi = null;
           armStall(s); armIdle(s); emit(s, stateEvent(s));
         }
