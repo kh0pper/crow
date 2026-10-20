@@ -47,10 +47,11 @@ function page({ replies = [], lang = "en", ids = [CROW, "alpha"] } = {}) {
     };
   };
   const ctx = vm.createContext({ document, window: {}, fetch, JSON, String, Array, Object, Promise, encodeURIComponent });
-  for (const src of scriptsOf(html)) vm.runInContext(src, ctx);
+  const run = () => { for (const src of scriptsOf(html)) vm.runInContext(src, ctx); };
+  run();
   const flush = async () => { for (let i = 0; i < 12; i++) await new Promise((r) => setImmediate(r)); };
   const abil = (id) => document.querySelector(`.btb-abil[data-abil-bot="${id}"]`);
-  return { document, calls, flush, abil };
+  return { document, calls, flush, abil, run, queue };
 }
 const fillS = (k, o) => T(k).replace(/\{(\w+)\}/g, (m, x) => o[x]);
 
@@ -137,4 +138,15 @@ test("ability line: slower ones grouped at the tail, the cap counting both group
   const only = page({ replies: [{ body: listing({ abilities: { items: [W("calendar"), W("reminders")], none: false } }) }] });
   await only.flush();
   assert.equal(only.abil(CROW).textContent, "By voice on displays, slower (bigger model): calendar, reminders");
+});
+
+test("Turbo: a second run of the script (a Turbo render) reads the listing again and refills the line", async () => {
+  const p = page({ replies: [{ body: listing({ abilities: { items: [{ id: "lists", quick: true }], none: false } }) }] });
+  await p.flush();
+  assert.equal(p.abil(CROW).textContent, fillS("botbuilder.abilBy", { list: T("botbuilder.abilLists") }));
+  p.queue.push({ body: listing({ abilities: { items: [], none: true } }) });
+  p.run();
+  await p.flush();
+  assert.equal(p.calls.length, 2, "one read per render");
+  assert.equal(p.abil(CROW).textContent, T("botbuilder.abilNone"), "the line follows the new listing");
 });

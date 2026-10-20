@@ -184,7 +184,7 @@ export const STRINGS = {
     locked: "Too many wrong codes. Try again in {s} seconds.",
     session_expired: "You're signed out of Crow. Close this and sign in again.",
     session_no_bot: "No assistant is ready to talk here yet.",
-    session_bot_link: "Choose one in Kiosk",
+    session_bot_link: "Customise Crow's voice in Bot Builder",
     // Every display and Talk to Crow answer as Crow (PR 1): what the panel says where the assistant pickers were.
     answers_as_crow: "Answers as Crow",
     customise_in_builder: "Customise in Bot Builder",
@@ -394,7 +394,7 @@ export const STRINGS = {
     locked: "Demasiados códigos incorrectos. Inténtalo de nuevo en {s} segundos.",
     session_expired: "Se cerró tu sesión de Crow. Cierra esto y vuelve a iniciar sesión.",
     session_no_bot: "Todavía no hay ningún asistente listo para hablar aquí.",
-    session_bot_link: "Elige uno en Kiosk",
+    session_bot_link: "Personaliza la voz de Crow en Bot Builder",
     answers_as_crow: "Responde como Crow",
     customise_in_builder: "Personalizar en Bot Builder",
     crow_fit_full: "Crow cabe en el modelo de voz rápido.",

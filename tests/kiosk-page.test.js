@@ -322,7 +322,7 @@ test("session mode: the dashboard can stop the mic, audio and socket at once; Es
 
 test("session mode: 'no assistant' links to the Kiosk panel in the top window; the link is built with DOM calls", () => {
   const src = read("kiosk.js");
-  assert.match(src, /a\.href = "\/dashboard\/kiosk"; a\.target = "_top"; a\.textContent = t\("session_bot_link"\)/);
+  assert.match(src, /a\.href = "\/dashboard\/bot-builder\?bot=crow\.voice"; a\.target = "_top"; a\.textContent = t\("session_bot_link"\)/);
   // Which banner an error frame shows is decided in state.js (errorDecision, unit-tested): in session
   // mode both "no assistant" and "assistant too large" show session_no_bot — the banner that gets this link.
   assert.match(src, /errorDecision\(m\.code, m\.recoverable, SESSION \? "session" : "paired"\); if \(d\.banner\) banner\(d\.banner\)/);

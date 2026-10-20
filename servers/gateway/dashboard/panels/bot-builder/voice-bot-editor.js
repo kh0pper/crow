@@ -7,10 +7,11 @@
  *   voice_bot_save    the switch, model, escalation, persona and name, the
  *                     speaking voice and speech recognition, memory tools
  *   voice_bot_preset  rebuild the model, escalation and the preset's tool
- *                     entries from voiceBotDefinition; "Reset to preset"
+ *                     entries from voiceBotDefinition (Memory tools stay as
+ *                     the operator set them); "Reset to preset"
  *                     also puts back the persona and the bare preset tool list
  *
- * Both are a compare-and-swap on the row the page showed (`rev`, rowRev): a
+ * Both are a compare-and-swap on the row the page showed (`rev`, voiceRev): a
  * stale page gets error=stale and writes nothing. Neither touches another
  * bot's row, a device record or a setting. Everything the saves do not own
  * (routine, handoff, migrated_from, permission_policy, the carried-over
@@ -30,7 +31,7 @@ import {
   CROW_VOICE_BOT_ID, VOICE_PRESETS, DEFAULT_PERSONA, voiceBotDefinition, normalizeVoiceSettings,
 } from "../../../../shared/voice-bot.js";
 import { loadModelOptions } from "./data-queries.js";
-import { rowRev } from "./def-adapter.js";
+import { rowRev, defRev } from "./def-adapter.js";
 import { emitBotDefsChanged } from "./defs-changed.js";
 import { abilityLineHtml, voiceAbilityScript } from "./voice-use.js";
 import { VOICE_EDITOR_HREF } from "./voice-bot-card.js";
@@ -53,6 +54,14 @@ export const VOICE_ERROR_KEYS = {
   voice_cloud_model_required: "botbuilder.voiceErrCloudModel",
 };
 
+/**
+ * The voice editor's revision of the row it showed: the generic rowRev (definition, name,
+ * project) plus `enabled`, which this editor also writes, so a stale tab cannot flip the switch.
+ */
+export function voiceRev(row) {
+  return defRev(rowRev(row) + "\u0000" + String(Number(row?.enabled) ? 1 : 0));
+}
+
 const obj = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
 const crowMcpOf = (def) => (Array.isArray(def?.tools?.crow_mcp) ? def.tools.crow_mcp.filter((x) => typeof x === "string" && x) : []);
 
@@ -71,11 +80,11 @@ async function loadProfiles(db, key) {
   } catch { return []; }
 }
 
-/** The compare-and-swap every voice write uses: lands only if the row still holds what the page showed. */
+/** The compare-and-swap every voice write uses: lands only if the row still holds what the page showed (voiceRev's columns). */
 async function casWrite(db, row, { definition, displayName = row.display_name, enabled = row.enabled }) {
   const r = await db.execute({
-    sql: "UPDATE pi_bot_defs SET definition=?, display_name=?, enabled=?, updated_at=datetime('now') WHERE bot_id=? AND definition IS ? AND display_name IS ? AND project_id IS ?",
-    args: [definition, displayName, Number(enabled) ? 1 : 0, CROW_VOICE_BOT_ID, row.definition ?? null, row.display_name ?? null, row.project_id ?? null],
+    sql: "UPDATE pi_bot_defs SET definition=?, display_name=?, enabled=?, updated_at=datetime('now') WHERE bot_id=? AND definition IS ? AND display_name IS ? AND project_id IS ? AND enabled = ?",
+    args: [definition, displayName, Number(enabled) ? 1 : 0, CROW_VOICE_BOT_ID, row.definition ?? null, row.display_name ?? null, row.project_id ?? null, Number(row.enabled) ? 1 : 0],
   });
   return Number(r && r.rowsAffected) > 0;
 }
@@ -88,7 +97,7 @@ async function freshRow(req, res, db) {
   const def = row ? parseDef(row) : null;
   if (!row || !def) { back(res, "error=voice_missing"); return null; }
   const rev = (req.body || {}).rev;
-  if (typeof rev !== "string" || !rev || rev !== rowRev(row)) { back(res, "error=stale"); return null; }
+  if (typeof rev !== "string" || !rev || rev !== voiceRev(row)) { back(res, "error=stale"); return null; }
   return { row, def };
 }
 
@@ -150,15 +159,19 @@ export async function handleVoiceBotPreset(req, res, { db }) {
   catch { return back(res, "error=voice_cloud_model_required"); }
   const presetTools = base.tools.crow_mcp;
   const reset = b.reset === "1";
-  // A preset switch keeps the tools the migration carried (entries beyond the preset list);
-  // Reset to preset deliberately goes back to the bare preset list and the default persona.
-  const carried = crowMcpOf(def).filter((x) => !presetTools.includes(x));
+  // A preset switch keeps the tools the migration carried (entries beyond the preset list) and the
+  // Memory tools switch as it stands (absent memory entries stay absent); Reset to preset
+  // deliberately goes back to the bare preset list and the default persona.
+  const current = crowMcpOf(def);
+  const carried = current.filter((x) => !presetTools.includes(x));
+  const memoryOff = !MEMORY_TOOLS.some((m) => current.includes(m));
+  const rebuilt = memoryOff ? presetTools.filter((x) => !MEMORY_TOOLS.includes(x)) : [...presetTools];
   const next = {
     ...def,
     preset: base.preset,
     fast_voice_model: base.fast_voice_model,
     voice: { ...obj(def.voice), escalation: base.voice.escalation },
-    tools: { ...obj(def.tools), crow_mcp: reset ? [...presetTools] : [...presetTools, ...carried] },
+    tools: { ...obj(def.tools), crow_mcp: reset ? [...presetTools] : [...rebuilt, ...carried] },
   };
   if (reset) next.system_prompt = DEFAULT_PERSONA;
   if (!(await casWrite(db, row, { definition: JSON.stringify(next) }))) return back(res, "error=stale");
@@ -198,7 +211,7 @@ export async function renderVoiceBotEditor(req, res, { db, layout, lang = "en", 
     }));
   }
   const v = normalizeVoiceSettings(def);
-  const rev = rowRev(row);
+  const rev = voiceRev(row);
   const { opts } = await loadModelOptions(db);
   let providerRows = [];
   try { providerRows = await listProvidersAll(db); } catch { providerRows = []; }

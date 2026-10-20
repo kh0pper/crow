@@ -24,7 +24,7 @@ process.env.CROW_TASKS_DB_PATH = join(dir, "tasks.db");
 delete process.env.CROW_DB_PATH;
 const REPO = new URL("..", import.meta.url).pathname;
 
-let db, renderBotList, renderVoiceBotEditor, handleBotBuilderPost, translations, rowRev, panel;
+let db, renderBotList, renderVoiceBotEditor, handleBotBuilderPost, translations, rowRev, panel, voiceRev;
 let voiceBotDefinition, DEFAULT_PERSONA, writeSetting;
 const MIGRATED = { at: "2026-10-01T00:00:00.000Z", dashboard_bot: "writer", dashboard_setting: null, devices: {}, tools: ["blog/crow_list_posts"], skipped_tools: [] };
 let SEED_DEF = null;
@@ -34,7 +34,7 @@ before(async () => {
   const { createDbClient } = await import("../servers/db.js");
   db = createDbClient();
   ({ renderBotList } = await import("../servers/gateway/dashboard/panels/bot-builder/html.js"));
-  ({ renderVoiceBotEditor } = await import("../servers/gateway/dashboard/panels/bot-builder/voice-bot-editor.js"));
+  ({ renderVoiceBotEditor, voiceRev } = await import("../servers/gateway/dashboard/panels/bot-builder/voice-bot-editor.js"));
   ({ handleBotBuilderPost } = await import("../servers/gateway/dashboard/panels/bot-builder/api-handlers.js"));
   ({ translations } = await import("../servers/gateway/dashboard/shared/i18n.js"));
   ({ rowRev } = await import("../servers/gateway/dashboard/panels/bot-builder/def-adapter.js"));
@@ -77,9 +77,9 @@ async function editor({ lang = "en", notice = "", kioskAvailable = false } = {})
     { db, layout: ({ content }) => content, lang, PAGE_CSS: "", notice, kioskAvailable });
   return res.html;
 }
-async function post(body) {
+async function post(body, dbOver = db) {
   const res = { redirected: null, headersSent: false, redirectAfterPost(u) { this.redirected = u; this.headersSent = true; } };
-  await handleBotBuilderPost({ body, headers: {} }, res, { db });
+  await handleBotBuilderPost({ body, headers: {} }, res, { db: dbOver });
   return res.redirected;
 }
 const qOf = (url) => new URL(url, "http://x").searchParams;
@@ -153,7 +153,7 @@ test("the editor: every section, the rev of the rendered row, and the stored val
   for (const k of ["voiceOnTitle", "voicePresetTitle", "voicePresetFast", "voicePresetCloud", "voicePresetReset", "voiceModelTitle", "voicePersonaTitle", "voiceTtsTitle", "voiceSttTitle", "voiceMemoryTitle", "voiceAbilTitle"]) {
     assert.ok(html.includes(T("botbuilder." + k)), `section ${k}`);
   }
-  const rev = rowRev(await voiceRow());
+  const rev = voiceRev(await voiceRow());
   assert.equal((html.match(new RegExp(`name="rev" value="${rev}"`, "g")) || []).length, 2, "the save and the preset forms both carry the row's rev");
   assert.match(html, /<option value="crow-voice\/qwen3\.5-4b" selected>/, "the stored model is selected");
   assert.ok(html.includes(">" + DEFAULT_PERSONA.slice(0, 40)), "the persona");
@@ -183,7 +183,7 @@ test("cloud warnings show only for a cloud model", async () => {
 // ── the saves ───────────────────────────────────────────────────────────────
 
 const saveBody = async (over = {}) => ({
-  action: "voice_bot_save", bot_id: "crow.voice", rev: rowRev(await voiceRow()),
+  action: "voice_bot_save", bot_id: "crow.voice", rev: voiceRev(await voiceRow()),
   display_name: "Crow", system_prompt: "mine", fast_voice_model: "crow-voice/qwen3.5-4b", escalation: "default",
   tts_profile_id: "t2", stt_profile_id: "", memory_tools: "on", enabled: "on", ...over,
 });
@@ -191,6 +191,7 @@ const saveBody = async (over = {}) => ({
 test("save: writes only Crow's row, keeps migration, routine and handoff; memory tools on/off", async () => {
   await reset();
   const others = await otherRows();
+  const policyBefore = (await voiceDef()).permission_policy;
   const url = await post(await saveBody({ display_name: "Crow Two", memory_tools: "off" }));
   assert.equal(qOf(url).get("saved"), "1", url);
   assert.equal(qOf(url).get("bot"), "crow.voice");
@@ -206,6 +207,7 @@ test("save: writes only Crow's row, keeps migration, routine and handoff; memory
   assert.ok(!d.tools.crow_mcp.some((x) => x.startsWith("crow-memory/")), "memory tools off removes the three");
   assert.ok(d.tools.crow_mcp.includes("blog/crow_list_posts"), "a carried tool stays");
   assert.deepEqual(await otherRows(), others, "no other bot is touched");
+  assert.deepEqual(d.permission_policy, policyBefore, "the permission policy is kept as stored");
   const on = await post(await saveBody({ memory_tools: "on", enabled: "off" }));
   assert.equal(qOf(on).get("saved"), "1");
   const d2 = await voiceDef();
@@ -238,7 +240,9 @@ test("a preset switch keeps persona, profiles and migration", async () => {
   def.system_prompt = "mine";
   def.voice.tts_profile_id = "t2";
   await reset(def, "Crow Two");
-  const url = await post({ action: "voice_bot_preset", bot_id: "crow.voice", rev: rowRev(await voiceRow()), preset: "cloud", cloud_model: "cloud-x/model-y" });
+  const others = await otherRows();
+  const policyBefore = (await voiceDef()).permission_policy;
+  const url = await post({ action: "voice_bot_preset", bot_id: "crow.voice", rev: voiceRev(await voiceRow()), preset: "cloud", cloud_model: "cloud-x/model-y" });
   assert.equal(qOf(url).get("saved"), "1", url);
   const d = await voiceDef();
   assert.equal(d.preset, "cloud");
@@ -251,9 +255,11 @@ test("a preset switch keeps persona, profiles and migration", async () => {
   assert.deepEqual(d.handoff, SEED_DEF.handoff);
   assert.ok(d.tools.crow_mcp.includes("blog/crow_list_posts"), "the carried tool stays");
   assert.ok(d.permission_policy.confirm.includes("crow_list_posts"), "and its confirm entry");
+  assert.deepEqual(d.permission_policy, policyBefore, "the permission policy is kept as stored");
+  assert.deepEqual(await otherRows(), others, "no other bot is touched");
   assert.equal((await voiceRow()).display_name, "Crow Two", "the name stays");
   // back to fast and local: the quick local model, escalation on, the carried tool still there
-  const back = await post({ action: "voice_bot_preset", bot_id: "crow.voice", rev: rowRev(await voiceRow()), preset: "fast_local" });
+  const back = await post({ action: "voice_bot_preset", bot_id: "crow.voice", rev: voiceRev(await voiceRow()), preset: "fast_local" });
   assert.equal(qOf(back).get("saved"), "1", back);
   const d2 = await voiceDef();
   assert.equal(d2.preset, "fast_local");
@@ -264,12 +270,63 @@ test("a preset switch keeps persona, profiles and migration", async () => {
   await reset();
 });
 
+test("a stale tab cannot switch Crow's voice on or off: the rev covers enabled", async () => {
+  await reset();
+  const first = await editor();
+  const second = await editor();
+  const revOf = (html) => html.match(/name="rev" value="([^"]+)"/)[1];
+  assert.equal(revOf(first), revOf(second));
+  const off = await post(await saveBody({ rev: revOf(first), enabled: "off" }));
+  assert.equal(qOf(off).get("saved"), "1", off);
+  const afterOff = await voiceRow();
+  assert.equal(Number(afterOff.enabled), 0);
+  const stale = await post(await saveBody({ rev: revOf(second), enabled: "on" }));
+  assert.equal(qOf(stale).get("error"), "stale", "the second, now stale page is refused");
+  const now = await voiceRow();
+  assert.equal(Number(now.enabled), 0, "still off");
+  assert.equal(now.definition, afterOff.definition);
+  await reset();
+});
+
+test("compare-and-swap race: the rev matches but the row changes underneath → error=stale, nothing written", async () => {
+  for (const action of ["voice_bot_save", "voice_bot_preset"]) {
+    await reset();
+    const raced = JSON.parse(JSON.stringify(SEED_DEF));
+    raced.system_prompt = "changed underneath";
+    const racing = { execute: async (q) => {
+      if (/^\s*UPDATE pi_bot_defs/i.test(String(q.sql || q))) await db.execute({ sql: "UPDATE pi_bot_defs SET definition=? WHERE bot_id='crow.voice'", args: [JSON.stringify(raced)] });
+      return db.execute(q);
+    } };
+    const body = action === "voice_bot_save" ? await saveBody({ system_prompt: "mine" })
+      : { action, bot_id: "crow.voice", rev: voiceRev(await voiceRow()), preset: "fast_local", reset: "1" };
+    const url = await post(body, racing);
+    assert.equal(qOf(url).get("error"), "stale", `${action}: ${url}`);
+    assert.equal((await voiceDef()).system_prompt, "changed underneath", `${action}: the racing write stands, ours wrote nothing`);
+  }
+  await reset();
+});
+
+test("a preset switch keeps Memory tools off; Reset to preset turns them back on", async () => {
+  await reset();
+  assert.equal(qOf(await post(await saveBody({ memory_tools: "off" }))).get("saved"), "1");
+  const mem = (d) => d.tools.crow_mcp.filter((x) => x.startsWith("crow-memory/"));
+  assert.deepEqual(mem(await voiceDef()), []);
+  const sw = await post({ action: "voice_bot_preset", bot_id: "crow.voice", rev: voiceRev(await voiceRow()), preset: "cloud", cloud_model: "cloud-x/model-y" });
+  assert.equal(qOf(sw).get("saved"), "1", sw);
+  assert.deepEqual(mem(await voiceDef()), [], "still off after a preset switch");
+  assert.ok((await voiceDef()).tools.crow_mcp.includes("funkwhale/fw_play"), "the other preset entries are rebuilt");
+  const rs = await post({ action: "voice_bot_preset", bot_id: "crow.voice", rev: voiceRev(await voiceRow()), preset: "fast_local", reset: "1" });
+  assert.equal(qOf(rs).get("saved"), "1", rs);
+  assert.equal(mem(await voiceDef()).length, 3, "Reset to preset re-applies the preset list");
+  await reset();
+});
+
 test("reset to preset re-applies the persona and the preset tool list, keeps migration, profiles, routine and handoff", async () => {
   const def = JSON.parse(JSON.stringify(SEED_DEF));
   def.system_prompt = "mine";
   def.voice.tts_profile_id = "t2";
   await reset(def);
-  const url = await post({ action: "voice_bot_preset", bot_id: "crow.voice", rev: rowRev(await voiceRow()), preset: "fast_local", reset: "1" });
+  const url = await post({ action: "voice_bot_preset", bot_id: "crow.voice", rev: voiceRev(await voiceRow()), preset: "fast_local", reset: "1" });
   assert.equal(qOf(url).get("saved"), "1", url);
   const d = await voiceDef();
   const base = voiceBotDefinition({ preset: "fast_local", fastKey: "crow-voice/qwen3.5-4b" });
@@ -284,7 +341,7 @@ test("reset to preset re-applies the persona and the preset tool list, keeps mig
 test("preset refuses a cloud preset without a known model, an unknown preset and a stale page; nothing is written", async () => {
   await reset();
   const before = await voiceRow();
-  const rev = rowRev(before);
+  const rev = voiceRev(before);
   for (const body of [{ preset: "cloud", rev }, { preset: "cloud", cloud_model: "nope/none", rev }, { preset: "turbo", rev }, { preset: "fast_local", rev: "0000000000000000" }]) {
     const url = await post({ action: "voice_bot_preset", bot_id: "crow.voice", ...body });
     assert.ok(qOf(url).get("error"), JSON.stringify(body));
