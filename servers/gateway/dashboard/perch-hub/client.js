@@ -118,7 +118,7 @@ export function perchHubJs(lang = "en") {
      session brings the list straight back without forgetting the choice.
      Read and applied HERE, at the top, before applyHash() can open a session
      and ask listOnScreen() whether to poll: a direct #sid load must not poll a
-     list it is about to hide. localStorage can throw (private window, blocked
+     list it is about to hide. Web Storage can throw (private window, blocked
      site data), so every access is guarded. No document or window listener:
      the buttons use onclick slots, which Turbo replaces with the elements. */
   function readCollapsed(){
