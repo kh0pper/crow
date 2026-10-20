@@ -159,19 +159,40 @@ export function isDestructiveTool(name) {
   return DESTRUCTIVE_EXACT.has(name) || DESTRUCTIVE_REGEX.test(name);
 }
 
+// The category proxies (tool-executor.js CATEGORY_PROXY_RE). The executor runs one with args.params ALONE:
+// every top-level field but `action` is dropped.
+const CATEGORY_PROXY_RE = /^crow_(memory|projects|blog|sharing|storage|media)$/;
+/** A category proxy call ({ action, params }): its effective tool name came from `action`. */
+export function isCategoryProxyCall(tc) {
+  return CATEGORY_PROXY_RE.test(String(tc?.name || "")) && typeof tc?.arguments?.action === "string" && tc.arguments.action !== "";
+}
+const objOf = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
+/** The object the executor really passes to the tool: params for a proxied call, the args themselves otherwise. */
+export const executedArgs = (args, proxied) => (proxied ? objOf(objOf(args).params) : objOf(args));
+// Every field the confirm question or a voice policy check reads.
+const DESCRIBED_FIELDS = ["id", "slug", "post_id", "memory_id", "setlist_id", "section_key", "delete", "task", "enabled", "cron_expression"];
 /**
- * The action the confirm question names. A proxied call (crow_memory { action, params }) carries its
- * details in `params`; both places are read. crow_update_schedule with delete: true deletes.
+ * A proxied call whose top-level copy of a described field disagrees with the params copy (the one that runs):
+ * the question would name one value and the tool run another. The voice gate refuses it outright.
  */
-export function describeDestructiveAction(tc) {
-  const top = tc.arguments && typeof tc.arguments === "object" ? tc.arguments : {};
-  const params = top.params && typeof top.params === "object" ? top.params : {};
-  const pick = (k) => (top[k] !== undefined && top[k] !== null && top[k] !== "" ? top[k] : params[k]);
+export function proxyArgsConflict(args) {
+  const top = objOf(args);
+  const params = objOf(top.params);
+  return DESCRIBED_FIELDS.some((k) => top[k] !== undefined && params[k] !== undefined && canonicalArgsHash(top[k]) !== canonicalArgsHash(params[k]));
+}
+
+/**
+ * The action the confirm question names, read ONLY from what the executor runs (executedArgs): for a proxied
+ * call ({ proxied: true }) that is params, for a direct one its own args. crow_update_schedule with delete: true deletes.
+ */
+export function describeDestructiveAction(tc, { proxied = false } = {}) {
+  const src = executedArgs(tc.arguments, proxied);
+  const has = (v) => v !== undefined && v !== null && v !== "";
   let name = String(tc.name || "");
-  if (name === "crow_update_schedule" && (pick("delete") === true || pick("delete") === "true")) name = "crow_delete_schedule";
+  if (name === "crow_update_schedule" && (src.delete === true || src.delete === "true")) name = "crow_delete_schedule";
   const base = name.replace(/^crow_/, "").replace(/_/g, " ");
-  const ref = ["id", "slug", "post_id", "memory_id", "setlist_id", "section_key"].map(pick).find((v) => v !== undefined && v !== null && v !== "") ?? "";
-  return ref !== "" ? `${base} ${ref}` : base;
+  const ref = ["id", "slug", "post_id", "memory_id", "setlist_id", "section_key"].map((k) => src[k]).find(has);
+  return has(ref) ? `${base} ${ref}` : base;
 }
 
 export function canonicalArgsHash(args) {

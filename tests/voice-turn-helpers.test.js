@@ -168,10 +168,34 @@ test("the confirm gate never allows a pending delete on a negated yes", () => {
 test("the confirm question names what happens: proxied args are read, a schedule delete says delete", () => {
   const d = H.describeDestructiveAction;
   assert.equal(d({ name: "crow_update_schedule", arguments: { id: 3, delete: true } }), "delete schedule 3");
-  assert.equal(d({ name: "crow_update_schedule", arguments: { action: "update_schedule", params: { id: 3, delete: true } } }), "delete schedule 3");
-  assert.equal(d({ name: "crow_update_schedule", arguments: { action: "update_schedule", params: { id: 3, cron_expression: "0 8 * * *" } } }), "update schedule 3");
-  assert.equal(d({ name: "crow_delete_memory", arguments: { action: "delete_memory", params: { id: 12 } } }), "delete memory 12");
-  assert.equal(d({ name: "crow_update_context_section", arguments: { action: "update_context_section", params: { section_key: "notes" } } }), "update context section notes");
+  const P = { proxied: true };
+  assert.equal(d({ name: "crow_update_schedule", arguments: { action: "update_schedule", params: { id: 3, delete: true } } }, P), "delete schedule 3");
+  assert.equal(d({ name: "crow_update_schedule", arguments: { action: "update_schedule", params: { id: 3, cron_expression: "0 8 * * *" } } }, P), "update schedule 3");
+  assert.equal(d({ name: "crow_delete_memory", arguments: { action: "delete_memory", params: { id: 12 } } }, P), "delete memory 12");
+  assert.equal(d({ name: "crow_update_context_section", arguments: { action: "update_context_section", params: { section_key: "notes" } } }, P), "update context section notes");
   assert.equal(d({ name: "crow_delete_post", arguments: { id: 3 } }), "delete post 3", "the direct form is unchanged");
   assert.equal(d({ name: "crow_delete_post", arguments: {} }), "delete post");
+});
+
+test("security: a proxied call is described ONLY from params (what the executor runs); a direct one only from its own args", () => {
+  const d = H.describeDestructiveAction;
+  // The executor runs a category proxy with args.params alone: a top-level id or delete is never what runs.
+  assert.equal(d({ name: "crow_update_schedule", arguments: { action: "update_schedule", id: 9, params: { id: 3, delete: true } } }, { proxied: true }), "delete schedule 3");
+  assert.equal(d({ name: "crow_update_schedule", arguments: { action: "update_schedule", id: 9, delete: true, params: { id: 3 } } }, { proxied: true }), "update schedule 3");
+  // A direct tool gets its args as they are; a stray params object is not what runs.
+  assert.equal(d({ name: "crow_update_schedule", arguments: { id: 3, params: { id: 9, delete: true } } }), "update schedule 3");
+});
+
+test("security: proxyArgsConflict flags a described field whose top-level and params values disagree", () => {
+  const c = H.proxyArgsConflict;
+  assert.equal(c({ action: "update_schedule", id: 9, params: { id: 3, delete: true } }), true);
+  assert.equal(c({ action: "update_schedule", delete: false, params: { id: 3, delete: true } }), true);
+  assert.equal(c({ action: "update_context_section", section_key: "a", params: { section_key: "b" } }), true);
+  assert.equal(c({ action: "create_schedule", task: "x", params: { task: "pipeline:botcron:writer" } }), true);
+  assert.equal(c({ action: "update_schedule", id: 3, params: { id: 3, delete: true } }), false, "the same value is consistent");
+  assert.equal(c({ action: "update_schedule", params: { id: 3, delete: true } }), false);
+  assert.equal(c({ action: "update_schedule", id: 9, params: {} }), false, "absent in params: nothing to disagree with");
+  assert.equal(H.isCategoryProxyCall({ name: "crow_memory", arguments: { action: "x" } }), true);
+  assert.equal(H.isCategoryProxyCall({ name: "crow_memory", arguments: {} }), false);
+  assert.equal(H.isCategoryProxyCall({ name: "crow_update_schedule", arguments: { action: "x" } }), false);
 });

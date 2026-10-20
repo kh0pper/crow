@@ -11,6 +11,7 @@
 import {
   createThinkGate, createSentenceChunker, createConfirmGate, createConvoStore, degenerateTranscript, createToolSyntaxGate, stripToolSyntax,
   negotiatePcm, pcmStream, isDestructiveTool, describeDestructiveAction, SENTENCE_END,
+  isCategoryProxyCall, proxyArgsConflict,
 } from "./turn-helpers.js";
 import { withTurnContext, createContextEchoGate, stripContextEcho, stripContextEchoDeep, TURN_CONTEXT_NOTE } from "./context-echo.js";
 import { estimatePromptTokens, requestFits, choosePromptFit, dropOldestExchange } from "./prompt-fit.js";
@@ -32,12 +33,19 @@ const scheduleArgs = (args) => {
   const a = args && typeof args === "object" ? args : {};
   return [a, a.params && typeof a.params === "object" ? a.params : {}];
 };
-/** crow_notification_settings asked to change (anything but action "get"; a proxied call's own action is in params). */
-const changesNotifications = (args) => {
-  const a = args && typeof args === "object" ? args : {};
-  const act = a.params && typeof a.params === "object" ? a.params.action : a.action;
-  return act !== "get";
+/**
+ * crow_notification_settings asked for anything but a read. The field the executor runs with decides: a direct
+ * call's args.action, a proxied (crow_memory) call's params.action (its top-level action names the tool). Fail
+ * safe: any OTHER action field present that is not "get" (a direct call's stray params.action) also asks.
+ */
+const changesNotifications = (tc, proxied) => {
+  const a = tc.arguments && typeof tc.arguments === "object" ? tc.arguments : {};
+  const p = a.params && typeof a.params === "object" ? a.params : {};
+  const runs = proxied ? p.action : a.action;
+  const others = proxied ? [] : ["action" in p ? p.action : "get"];
+  return runs !== "get" || others.some((x) => x !== "get");
 };
+const VOICE_ARGS_CONFLICT = "This call names one value at the top and another in params, so it cannot be confirmed by voice. Tell the user you couldn't do that, then end your turn — do not call another tool.";
 const startsPipeline = (args) => scheduleArgs(args).some((x) => typeof x.task === "string" && /^\s*pipeline:/i.test(x.task));
 /** Turning a schedule back on without naming its task: it may be a pipeline: row (the gate cannot see the stored task). */
 const reenablesUnseen = (args) => scheduleArgs(args).some((x) => (x.enabled === true || x.enabled === 1 || x.enabled === "true") && x.task === undefined);
@@ -783,14 +791,18 @@ export function createVoiceTurnRunner(deps) {
         }
         // The voice bot (kind "voice"): never schedules background bot work, and asks a spoken yes
         // before anything that deletes, changes or sends, and before a schedule or a context change.
+        // A proxied call runs with params alone: a top-level copy that disagrees would make the question name
+        // values that never run (a spoofed yes). Refused outright, before any question.
+        const proxied = isCategoryProxyCall(tc);
+        if (voiceKind && proxied && proxyArgsConflict(tc.arguments)) return refuse("refused_policy", VOICE_ARGS_CONFLICT);
         if (voiceKind && names.some((n) => VOICE_SCHEDULE_TOOLS.has(n)) && startsPipeline(tc.arguments)) return refuse("refused_policy", VOICE_NO_PIPELINE);
         if (voiceKind && names.includes("crow_update_schedule") && reenablesUnseen(tc.arguments)) return refuse("refused_policy", VOICE_NO_REENABLE);
         const confirmName = names.find((n) => isDestructiveTool(n) || (Array.isArray(policy.confirm) && policy.confirm.includes(n))
           || (voiceKind && (needsSpokenYes(n) || VOICE_CONFIRM_TOOLS.includes(n)
-            || (n === VOICE_NOTIFICATION_TOOL && changesNotifications(tc.arguments)))));
+            || (n === VOICE_NOTIFICATION_TOOL && changesNotifications(tc, proxied)))));
         if (!confirmName) return null;
         if (confirm.check({ deviceId: device.id, eff: confirmName, args: tc.arguments, transcript }) === "allow") return null;
-        return refuse("needs_confirm", `Confirmation required. Tell the user: "Are you sure you want to ${describeDestructiveAction({ name: confirmName, arguments: tc.arguments })}? Say yes to proceed." Then end your turn — do not call another tool.`);
+        return refuse("needs_confirm", `Confirmation required. Tell the user: "Are you sure you want to ${describeDestructiveAction({ name: confirmName, arguments: tc.arguments }, { proxied })}? Say yes to proceed." Then end your turn — do not call another tool.`);
       };
 
       // First chunk = first clause (latency lever 3); later chunks are whole sentences.

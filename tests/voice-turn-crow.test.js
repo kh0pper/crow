@@ -330,3 +330,60 @@ test("the voice system message is byte-identical on two turns with different tra
   assert.ok(!/Open windows/.test(s0.content), "per-turn context never rides on the system message");
   assert.match(h.log[1].messages.at(-1).content, /timer 1, timer 2/, "it rides on the user message");
 });
+
+// ── security fix round ──────────────────────────────────────────────────────
+
+test("security: notification settings ask unless every present action field is get (direct and proxied)", async () => {
+  const ask = [
+    ["crow_notification_settings", { action: "set" }],
+    ["crow_notification_settings", { action: "get", params: { action: "set" } }],
+    ["crow_notification_settings", { params: { action: "get" }, action: "set" }],
+    ["crow_notification_settings", {}],
+    ["crow_memory", { action: "notification_settings", params: { action: "set" } }],
+    ["crow_memory", { action: "notification_settings", params: {} }],
+  ];
+  for (const [tool, args] of ask) {
+    const tc = { type: "tool_call", id: "n1", name: tool, arguments: args };
+    const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: [tool], rounds: [callRound(tc), sayRound("Sure?")] });
+    await turn(h, { transcript: "change my notifications", memoryOn: true });
+    assert.deepEqual(h.calls.executed, [], JSON.stringify(args));
+    assert.match(lastToolText(h, 1), /Confirmation required/, JSON.stringify(args));
+  }
+  const free = [
+    ["crow_notification_settings", { action: "get" }],
+    ["crow_notification_settings", { action: "get", params: { action: "get" } }],
+    ["crow_memory", { action: "notification_settings", params: { action: "get" } }],
+  ];
+  for (const [tool, args] of free) {
+    const tc = { type: "tool_call", id: "n2", name: tool, arguments: args };
+    const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: [tool], rounds: [callRound(tc), sayRound("All on.")] });
+    await turn(h, { transcript: "which notifications are on", memoryOn: true });
+    assert.deepEqual(h.calls.executed, [tool], JSON.stringify(args));
+  }
+});
+
+test("security: a proxied call whose top-level and params values disagree is refused outright, never executed", async () => {
+  const tc = { type: "tool_call", id: "m1", name: "crow_memory", arguments: { action: "update_schedule", id: 9, params: { id: 3, delete: true } } };
+  const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["crow_memory"], rounds: [callRound(tc), sayRound("I can't."), callRound(tc), sayRound("I can't.")] });
+  await turn(h, { transcript: "change schedule 9", memoryOn: true });
+  assert.deepEqual(h.calls.executed, []);
+  assert.doesNotMatch(lastToolText(h, 1), /Confirmation required/, "refused, never asked");
+  await turn(h, { transcript: "yes", memoryOn: true });
+  assert.deepEqual(h.calls.executed, [], "a yes does not run it either");
+  // Consistent values: the question describes params, and the yes runs it.
+  const ok = { type: "tool_call", id: "m2", name: "crow_memory", arguments: { action: "update_schedule", id: 3, params: { id: 3, delete: true } } };
+  const k = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["crow_memory"], rounds: [callRound(ok), sayRound("Sure?"), callRound(ok), sayRound("Deleted.")] });
+  await turn(k, { transcript: "delete schedule 3", memoryOn: true });
+  assert.match(lastToolText(k, 1), /Are you sure you want to delete schedule 3\?/);
+  await turn(k, { transcript: "yes", memoryOn: true });
+  assert.deepEqual(k.calls.executed, ["crow_memory"]);
+  // Direct calls are unchanged: described from their own args, never refused for a stray params object.
+  const direct = { type: "tool_call", id: "u1", name: "crow_update_schedule", arguments: { id: 3, delete: true } };
+  const dh = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["crow_update_schedule"], rounds: [callRound(direct), sayRound("Sure?")] });
+  await turn(dh, { transcript: "delete schedule 3" });
+  assert.match(lastToolText(dh, 1), /Are you sure you want to delete schedule 3\?/);
+  // An ordinary bot is unaffected by the voice-only refusal.
+  const o = crowHarness({ chatTools: ["crow_memory"], rounds: [callRound(tc), sayRound("Done.")] });
+  await turn(o, { botId: "household", transcript: "change schedule 9", memoryOn: true });
+  assert.deepEqual(o.calls.executed, ["crow_memory"]);
+});
