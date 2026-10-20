@@ -50,7 +50,17 @@ export const LIMITS = Object.freeze({
   maxLines: 4096,
   maxEvents: 65536,
   maxCells: 2 * 1024 * 1024, // tracks x lines summed over all patterns
+  maxArrangement: 4096, // placements on the timeline (repeats are clones sharing data)
+  maxTimelineX: 65536, // the line a placement may start at (the render cap still bounds the length)
+  maxTimelineY: 1024, // |y| of a placement (timeline rows)
 });
+
+/**
+ * Output sample rates a render may ask for. The library falls back to 44100
+ * for anything lower (verified: 22050 and 32000 render at 44100), and higher
+ * rates would raise the render memory ceiling past the 20-minute budget.
+ */
+export const SAMPLE_RATES = Object.freeze([44100, 48000]);
 
 let koffiLib = null;
 let api = null;
@@ -90,6 +100,7 @@ function loadLib() {
     sv_load_from_memory: f("int sv_load_from_memory(int slot, void *data, uint32 data_size)"),
     sv_save: f("int sv_save(int slot, const char *filename)"),
     sv_get_song_name: f("const char *sv_get_song_name(int slot)"),
+    sv_set_song_name: f("int sv_set_song_name(int slot, const char *name)"),
     sv_get_base_version: f("int sv_get_base_version(int slot)"),
     sv_get_song_bpm: f("int sv_get_song_bpm(int slot)"),
     sv_get_song_tpl: f("int sv_get_song_tpl(int slot)"),
@@ -103,6 +114,8 @@ function loadLib() {
     sv_get_module_flags: f("uint32 sv_get_module_flags(int slot, int mod)"),
     sv_get_module_type: f("const char *sv_get_module_type(int slot, int mod)"),
     sv_get_module_name: f("const char *sv_get_module_name(int slot, int mod)"),
+    sv_get_module_xy: f("uint32 sv_get_module_xy(int slot, int mod)"),
+    sv_get_module_color: f("int sv_get_module_color(int slot, int mod)"),
     sv_get_number_of_module_ctls: f("int sv_get_number_of_module_ctls(int slot, int mod)"),
     sv_get_module_ctl_name: f("const char *sv_get_module_ctl_name(int slot, int mod, int ctl)"),
     sv_get_module_ctl_min: f("int sv_get_module_ctl_min(int slot, int mod, int ctl, int scaled)"),
@@ -116,6 +129,9 @@ function loadLib() {
     sv_get_pattern_name: f("const char *sv_get_pattern_name(int slot, int pat)"),
     sv_get_pattern_tracks: f("int sv_get_pattern_tracks(int slot, int pat)"),
     sv_get_pattern_lines: f("int sv_get_pattern_lines(int slot, int pat)"),
+    sv_get_pattern_x: f("int sv_get_pattern_x(int slot, int pat)"),
+    sv_get_pattern_y: f("int sv_get_pattern_y(int slot, int pat)"),
+    sv_set_pattern_xy: f("int sv_set_pattern_xy(int slot, int pat, int x, int y)"),
     sv_get_pattern_event: f("int sv_get_pattern_event(int slot, int pat, int track, int line, int column)"),
     sv_get_time_map: f("int sv_get_time_map(int slot, int start_line, int len, uint32 *dest, int flags)"),
     sv_set_autostop: f("int sv_set_autostop(int slot, int autostop)"),
@@ -130,15 +146,53 @@ function loadLib() {
   return api;
 }
 
-function ensureEngine() {
+/** The engine at `rate` (re-initialised when a render asks for another rate;
+ *  callers hold the serial queue, and no slot is open between ops). */
+function ensureEngine(rate = 44100) {
   const a = loadLib();
-  if (engineVersion >= 0) return a;
-  const ver = a.sv_init(null, 44100, 2,
+  if (!SAMPLE_RATES.includes(rate)) throw new Error(`sample_rate must be one of ${SAMPLE_RATES.join(", ")}, got ${JSON.stringify(rate)}`);
+  if (engineVersion >= 0 && sampleRate === rate) return a;
+  if (engineVersion >= 0) { a.sv_deinit(); engineVersion = -1; }
+  const ver = a.sv_init(null, rate, 2,
     SV_INIT_FLAG_NO_DEBUG_OUTPUT | SV_INIT_FLAG_OFFLINE | SV_INIT_FLAG_AUDIO_INT16 | SV_INIT_FLAG_ONE_THREAD);
   if (ver < 0) throw new Error(`sv_init failed: ${ver}`);
   engineVersion = ver;
-  sampleRate = a.sv_get_sample_rate() || 44100;
+  sampleRate = a.sv_get_sample_rate() || rate;
+  if (sampleRate !== rate) throw new Error(`the engine runs at ${sampleRate} Hz, not the requested ${rate} Hz`);
   return a;
+}
+
+/** A packed version as a dotted string: 4 bytes for a project's base version
+ *  (sv_get_base_version 0x02010403 → "2.1.4.3"), 3 for the engine (sv_init
+ *  0x020104 → "2.1.4"). */
+export function versionString(v, parts = 4) {
+  if (!Number.isInteger(v) || v < 0) return null;
+  const out = [];
+  for (let i = parts - 1; i >= 0; i--) out.push((v >>> (8 * i)) & 0xff);
+  return out.join(".");
+}
+
+/**
+ * The file format from its first bytes: SunVox projects start with "SVOX",
+ * FastTracker XM with "Extended Module:", ProTracker-style MOD files carry a
+ * four-character tag at offset 1080 (M.K., FLT4, 8CHN, ...).
+ */
+export function detectFormat(buf) {
+  const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf || []);
+  if (b.length >= 4 && b.toString("latin1", 0, 4) === "SVOX") return "sunvox";
+  if (b.length >= 17 && b.toString("latin1", 0, 17) === "Extended Module: ") return "xm";
+  if (b.length >= 1084) {
+    const tag = b.toString("latin1", 1080, 1084);
+    if (/^(M\.K\.|M!K!|M&K!|FLT[48]|FA0[468]|CD81|OKTA|OCTA|TDZ[1-9]|\dCHN|\d\dCH|\d\dCN)$/.test(tag)) return "mod";
+  }
+  return "unknown";
+}
+
+const signed16 = (v) => ((v & 0xffff) ^ 0x8000) - 0x8000;
+/** "#rrggbb" from the engine's 0xBBGGRR. */
+export function colorHex(bgr) {
+  const r = bgr & 0xff, g = (bgr >> 8) & 0xff, b = (bgr >> 16) & 0xff;
+  return "#" + [r, g, b].map((n) => n.toString(16).padStart(2, "0")).join("");
 }
 
 export function engineInfo() {
@@ -206,22 +260,30 @@ function readInfo(a) {
   for (let i = 0; i < modSlots; i++) {
     const flags = a.sv_get_module_flags(SLOT, i);
     if (!(flags & SV_MODULE_FLAG_EXISTS)) continue;
+    const xy = a.sv_get_module_xy(SLOT, i);
     modules.push({
       num: i,
       type: a.sv_get_module_type(SLOT, i),
       name: a.sv_get_module_name(SLOT, i),
       kind: flags & SV_MODULE_FLAG_GENERATOR ? "generator" : flags & SV_MODULE_FLAG_EFFECT ? "effect" : "other",
       controllers: a.sv_get_number_of_module_ctls(SLOT, i),
+      x: signed16(xy),
+      y: signed16(xy >>> 16),
+      color: colorHex(a.sv_get_module_color(SLOT, i)),
     });
   }
   const patterns = [];
   for (let i = 0; i < patSlots; i++) {
     const lines = a.sv_get_pattern_lines(SLOT, i);
     if (!(lines > 0)) continue;
-    patterns.push({ num: i, name: a.sv_get_pattern_name(SLOT, i), tracks: a.sv_get_pattern_tracks(SLOT, i), lines });
+    patterns.push({ num: i, name: a.sv_get_pattern_name(SLOT, i), tracks: a.sv_get_pattern_tracks(SLOT, i), lines, x: a.sv_get_pattern_x(SLOT, i), y: a.sv_get_pattern_y(SLOT, i) });
   }
+  const baseVersion = a.sv_get_base_version(SLOT);
   return {
     name: a.sv_get_song_name(SLOT),
+    version: versionString(baseVersion),
+    base_version: baseVersion >= 0 ? `0x${baseVersion.toString(16)}` : null,
+    engine_version: versionString(engineVersion, 3),
     bpm: a.sv_get_song_bpm(SLOT),
     tpl: a.sv_get_song_tpl(SLOT),
     effective_tempo: effectiveTempo(a),
@@ -243,7 +305,7 @@ export function info(buf) {
     a.sv_open_slot(SLOT);
     try {
       loadBuffer(a, buf);
-      return readInfo(a);
+      return { format: detectFormat(buf), ...readInfo(a) };
     } finally {
       a.sv_close_slot(SLOT);
     }
@@ -295,10 +357,10 @@ function wavEncode(chunks, frames) {
   return Buffer.concat([hdr, ...chunks]); // one copy: the chunks are never joined separately
 }
 
-/** sunvox_render: offline render → WAV Buffer + info. */
-export function render(buf) {
+/** sunvox_render: offline render → WAV Buffer + info, at `sampleRate` (44100 or 48000). */
+export function render(buf, { sampleRate: rate = 44100 } = {}) {
   return serial(() => {
-    const a = ensureEngine();
+    const a = ensureEngine(rate);
     a.sv_open_slot(SLOT);
     try {
       loadBuffer(a, buf);
@@ -307,7 +369,7 @@ export function render(buf) {
         throw new Error(`project is ${infoObj.duration_s} s long; renders are capped at ${LIMITS.maxRenderSeconds} s (SUNVOX_MAX_RENDER_SECONDS)`);
       }
       const { chunks, frames } = renderFrames(a, sampleRate * 2);
-      return { info: infoObj, wav: wavEncode(chunks, frames), frames };
+      return { info: { format: detectFormat(buf), ...infoObj }, wav: wavEncode(chunks, frames), frames, sample_rate: sampleRate };
     } finally {
       a.sv_close_slot(SLOT);
     }
@@ -360,9 +422,12 @@ function findCtl(a, mod, name) {
  *     connections?: [[idOrOut, idOrOut, ...], ...],   // chains; "out" = Output
  *     patterns: [{ id?, name?, tracks, lines, x?, y?,
  *                  events: [{ track, line, note?, velocity?, module (id),
- *                             ctl?, ctl_val?, effect?, effect_param?, note_off? }] }] }
+ *                             ctl?, ctl_val?, effect?, effect_param?, note_off? }] }],
+ *     arrangement?: [{ pattern (id or name), x?, y? }, ...] }   // see planArrangement
  * Modules whose id never appears as a chain source are auto-connected to Output.
- * bpm/tpl are applied via tracker speed effects at the first pattern's line 0
+ * Module params must lie inside each controller's min..max. The tool's name
+ * becomes the project's song name.
+ * bpm/tpl are applied via tracker speed effects at line 0 of the pattern that plays first
  * (0x1F "Set BPM to XXYY" in a free cell; TPL via 0x0F "Set playing speed").
  * NOTE: these affect PLAYBACK speed from line 0 on — sv_get_song_bpm() still
  * reports the project header default (125/6); effective tempo is verified via
@@ -394,6 +459,8 @@ export function compose(spec, { name = "crow-compose" } = {}) {
     }
     if (eventCount > LIMITS.maxEvents) throw new Error(`spec has ${eventCount} events; at most ${LIMITS.maxEvents}`);
     if (cells > LIMITS.maxCells) throw new Error(`spec patterns total ${cells} cells (tracks x lines); at most ${LIMITS.maxCells}`);
+    const placements = planArrangement(spec);
+    const songName = cleanSongName(name);
 
     a.sv_open_slot(SLOT);
     try {
@@ -433,7 +500,10 @@ export function compose(spec, { name = "crow-compose" } = {}) {
           if (typeof pval !== "number" || !Number.isFinite(pval)) {
             throw new Error(`param "${pname}" on "${m.id}" must be a number (selectors take an index; see sunvox_module_types for min/max), got ${JSON.stringify(pval)}`);
           }
-          const rc = a.sv_set_module_ctl_value(SLOT, mod, c, Math.trunc(pval), 0);
+          const v = Math.trunc(pval);
+          const lo = a.sv_get_module_ctl_min(SLOT, mod, c, 0), hi = a.sv_get_module_ctl_max(SLOT, mod, c, 0);
+          if (v < lo || v > hi) throw new Error(`param "${pname}" on "${m.id}" must be from ${lo} to ${hi} (see sunvox_module_types), got ${JSON.stringify(pval)}`);
+          const rc = a.sv_set_module_ctl_value(SLOT, mod, c, v, 0);
           if (rc < 0) throw new Error(`set param "${pname}" on "${m.id}" failed (rc=${rc})`);
         }
       }
@@ -463,14 +533,17 @@ export function compose(spec, { name = "crow-compose" } = {}) {
       }
 
       // --- patterns ---
-      let firstPat = -1;
-      for (const p of spec.patterns) {
+      // The icon seed is derived from the pattern's name and index (it used to
+      // be random), so the same spec always saves the same bytes.
+      const patNums = []; // spec index -> pattern number
+      for (const [pi, p] of spec.patterns.entries()) {
         const tracks = p.tracks | 0 || 1;
         const lines = p.lines | 0 || 64;
         if (tracks < 1 || lines < 1) throw new Error("pattern tracks/lines must be >= 1");
-        const pat = withLock(a, () => a.sv_new_pattern(SLOT, -1, int(p.x, 0, "pattern x"), int(p.y, 0, "pattern y"), tracks, lines, Math.floor(Math.random() * 1e6), String(p.name || p.id || "pattern")));
+        const pname = String(p.name || p.id || "pattern");
+        const pat = withLock(a, () => a.sv_new_pattern(SLOT, -1, int(p.x, 0, "pattern x"), int(p.y, 0, "pattern y"), tracks, lines, iconSeed(pname, pi), pname));
         if (pat < 0) throw new Error(`sv_new_pattern failed (rc=${pat})`);
-        if (firstPat < 0) firstPat = pat;
+        patNums.push(pat);
         for (const ev of p.events || []) {
           const range = (v, lo, hi, what) => {
             if (!Number.isInteger(v) || v < lo || v > hi) throw new Error(`${what} must be an integer from ${lo} to ${hi}, got ${JSON.stringify(v)}`);
@@ -499,6 +572,40 @@ export function compose(spec, { name = "crow-compose" } = {}) {
         }
       }
 
+      // --- arrangement: first placement moves the pattern, repeats are clones ---
+      // Every placement was validated by planArrangement before the slot opened.
+      if (placements) {
+        const placed = new Set();
+        for (const pl of placements) {
+          const src = patNums[pl.index];
+          if (!placed.has(pl.index)) {
+            placed.add(pl.index);
+            const rc = withLock(a, () => a.sv_set_pattern_xy(SLOT, src, pl.x, pl.y));
+            if (rc < 0) throw new Error(`placing pattern "${pl.ref}" failed (rc=${rc})`);
+          } else {
+            const p = spec.patterns[pl.index];
+            const clone = withLock(a, () => a.sv_new_pattern(SLOT, src, pl.x, pl.y, a.sv_get_pattern_tracks(SLOT, src), a.sv_get_pattern_lines(SLOT, src), iconSeed(String(p.name || p.id || "pattern"), pl.index), String(p.name || p.id || "pattern")));
+            if (clone < 0) throw new Error(`repeating pattern "${pl.ref}" at line ${pl.x} failed (rc=${clone})`);
+          }
+        }
+      }
+
+      // The tempo goes into the pattern that plays FIRST (lowest x, then lowest
+      // y), so it takes hold from the start of the song whatever the spec order.
+      let firstPat = -1;
+      {
+        // Scan every pattern slot, clones included (a repeat placed earlier
+        // than its original shares the original's data, so either works).
+        let best = null;
+        const nSlots = a.sv_get_number_of_patterns(SLOT);
+        for (let pat = 0; pat < nSlots; pat++) {
+          if (!(a.sv_get_pattern_lines(SLOT, pat) > 0)) continue;
+          const x = a.sv_get_pattern_x(SLOT, pat), y = a.sv_get_pattern_y(SLOT, pat);
+          if (!best || x < best.x || (x === best.x && y < best.y)) best = { pat, x, y };
+        }
+        firstPat = best.pat;
+      }
+
       // --- tempo via speed effects merged into line 0 of the first pattern ---
       // Effect codes per the SunVox manual: 0x1F = Set BPM to XXYY;
       // 0x0F = Set playing speed (YY: 1..0x1F = TPL). sv_set_pattern_event
@@ -518,11 +625,13 @@ export function compose(spec, { name = "crow-compose" } = {}) {
             if (rc < 0) throw new Error(`tempo effect 0x${ee.toString(16)} failed (rc=${rc})`);
             return;
           }
-          throw new Error("no free ctl column in the first pattern's line 0 for the tempo effect");
+          throw new Error("no free effect column in line 0 of the pattern that plays first for the tempo effect: setting both bpm and tpl needs two free tracks there; give that pattern another track, or set only one of them");
         };
         if (bpm) place(0x1f, bpm);
         if (tpl) place(0x0f, tpl);
       }
+
+      if (songName) check(a.sv_set_song_name(SLOT, songName), "sv_set_song_name");
 
       // --- save to temp, reload, verify ---
       const tmpDir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "sunvox-"));
@@ -549,6 +658,58 @@ export function compose(spec, { name = "crow-compose" } = {}) {
 
 function sanitizeName(n) {
   return String(n).replace(/[^a-zA-Z0-9 _.-]/g, "").slice(0, 80) || "crow-compose";
+}
+
+/** The project's song name: the compose name without control characters, at most 80 chars. */
+function cleanSongName(n) {
+  return String(n ?? "").replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 80);
+}
+
+/** A stable icon seed for a pattern (FNV-1a of name and index, 0..999999). */
+function iconSeed(name, index) {
+  let h = 0x811c9dc5;
+  for (const ch of `${index}:${name}`) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h % 1000000;
+}
+
+/**
+ * Validate spec.arrangement and lay it out. → null when the spec has none,
+ * else [{ index, ref, x, y }] in placement order. Each entry names a pattern
+ * by its id (or name, when it has no id); a missing x starts right after the
+ * previous placement (first: line 0), a missing y is 0. With an arrangement,
+ * every spec pattern must be placed at least once: SunVox has no pattern pool,
+ * so an unplaced pattern would still play at its own x/y.
+ */
+export function planArrangement(spec) {
+  const arr = spec.arrangement;
+  if (arr === undefined || arr === null) return null;
+  if (!Array.isArray(arr) || arr.length === 0) throw new Error("spec.arrangement must be a non-empty array of { pattern, x?, y? }");
+  if (arr.length > LIMITS.maxArrangement) throw new Error(`spec.arrangement: at most ${LIMITS.maxArrangement} placements`);
+  const keys = new Map(); // ref -> spec index
+  spec.patterns.forEach((p, i) => {
+    const key = p.id !== undefined && p.id !== null ? String(p.id) : p.name ? String(p.name) : null;
+    if (key === null) throw new Error(`with an arrangement, every pattern needs an id (pattern ${i} has none)`);
+    if (keys.has(key)) throw new Error(`with an arrangement, pattern ids must be unique ("${key}" repeats)`);
+    keys.set(key, i);
+  });
+  const out = [];
+  let nextX = 0;
+  for (const [n, e] of arr.entries()) {
+    if (!e || typeof e !== "object") throw new Error(`arrangement entry ${n} must be an object { pattern, x?, y? }`);
+    const ref = e.pattern === undefined || e.pattern === null ? null : String(e.pattern);
+    if (ref === null || !keys.has(ref)) throw new Error(`arrangement entry ${n} names unknown pattern ${JSON.stringify(e.pattern)}; patterns: ${[...keys.keys()].join(", ")}`);
+    const index = keys.get(ref);
+    const x = e.x === undefined || e.x === null ? nextX : e.x;
+    const y = e.y === undefined || e.y === null ? 0 : e.y;
+    if (!Number.isInteger(x) || x < 0 || x > LIMITS.maxTimelineX) throw new Error(`arrangement entry ${n}: x must be an integer from 0 to ${LIMITS.maxTimelineX}, got ${JSON.stringify(e.x)}`);
+    if (!Number.isInteger(y) || Math.abs(y) > LIMITS.maxTimelineY) throw new Error(`arrangement entry ${n}: y must be an integer from -${LIMITS.maxTimelineY} to ${LIMITS.maxTimelineY}, got ${JSON.stringify(e.y)}`);
+    const lines = spec.patterns[index].lines ?? 64;
+    nextX = x + lines;
+    out.push({ index, ref, x, y });
+  }
+  const unplaced = [...keys].filter(([, i]) => !out.some((pl) => pl.index === i)).map(([k]) => k);
+  if (unplaced.length) throw new Error(`pattern(s) ${unplaced.join(", ")} are not in the arrangement; place them or remove them (every SunVox pattern sits on the timeline)`);
+  return out;
 }
 
 /** sunvox_module_types: live-generate the module/controller catalogue. */

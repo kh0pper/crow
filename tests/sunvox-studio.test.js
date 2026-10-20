@@ -1,9 +1,10 @@
 /**
  * sunvox-studio bundle — engine-level tests over the vendored libsunvox.so.
  *
- * Skips cleanly when the native pieces are unavailable (no koffi installed
- * in the bundle dir, non-linux/x86_64 host, or vendor/sunvox.so missing),
- * so CI and non-primary machines stay green.
+ * The engine cases need koffi in the bundle's own node_modules (CI installs
+ * it: npm ci --prefix bundles/sunvox-studio --omit=optional --ignore-scripts)
+ * on linux/x86_64. Elsewhere they skip, unless CROW_REQUIRE_SUNVOX_ENGINE=1
+ * (set in CI), which turns a missing engine into a failure.
  */
 
 import { test } from "node:test";
@@ -16,7 +17,7 @@ import { createRequire } from "node:module";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const BUNDLE = path.join(ROOT, "bundles", "sunvox-studio");
 const SO = path.join(BUNDLE, "vendor", "sunvox.so");
-const FIXTURE = path.join(BUNDLE, "spike", "fixture.sunvox");
+const FIXTURE = path.join(ROOT, "tests", "fixtures", "sunvox", "crow-fixture.sunvox");
 
 const require = createRequire(import.meta.url);
 function nativeAvailable() {
@@ -29,16 +30,68 @@ const SKIP_REASON = "sunvox native lib unavailable (need linux/x64 + bundle npm 
 const engine = nativeAvailable()
   ? await import(pathToFileURL(path.join(BUNDLE, "server", "sunvox-engine.js")).href)
   : null;
+const hasFfmpeg = (() => { try { return (require("node:child_process").spawnSync("ffmpeg", ["-version"]).status === 0); } catch { return false; } })();
+// With CROW_REQUIRE_SUNVOX_ENGINE=1 (CI) the mp3/ogg cases run whether or not ffmpeg is there, so a missing ffmpeg fails them.
+const NO_FFMPEG = !hasFfmpeg && process.env.CROW_REQUIRE_SUNVOX_ENGINE !== "1" && "ffmpeg not installed";
 
-test("sunvox: engine reports info matching upstream reference for fixture", { skip: !engine && SKIP_REASON }, async () => {
+test("sunvox: the engine loads when CI requires it", { skip: process.env.CROW_REQUIRE_SUNVOX_ENGINE !== "1" && "CROW_REQUIRE_SUNVOX_ENGINE not set" }, () => {
+  assert.ok(engine, SKIP_REASON);
+});
+
+test("sunvox: the fixture is our own composition, reproducible from its spec", { skip: !engine && SKIP_REASON }, async () => {
+  const { composeFixture, FIXTURE_NAME, FIXTURE_SPEC } = await import(pathToFileURL(path.join(ROOT, "scripts", "sunvox-studio", "make-fixture.mjs")).href);
+  const { project } = await composeFixture();
+  const sha = (b) => require("node:crypto").createHash("sha256").update(b).digest("hex");
+  assert.equal(sha(project), sha(fs.readFileSync(FIXTURE)), "recomposing FIXTURE_SPEC gives the committed bytes (run node scripts/sunvox-studio/make-fixture.mjs after an intended change)");
   const info = await engine.info(fs.readFileSync(FIXTURE));
-  // Reference values published on warmplace.ru/soft/sunvox/jsplay for this file.
-  assert.equal(info.bpm, 125);
-  assert.equal(info.tpl, 4);
-  assert.equal(info.length_frames, 1368864);
-  assert.equal(info.length_lines, 260);
-  assert.ok(info.modules >= 26);
-  assert.ok(info.module_list.some((m) => m.type === "DrumSynth"));
+  assert.equal(info.name, FIXTURE_NAME);
+  assert.equal(info.format, "sunvox");
+  assert.equal(info.version, "2.1.4.3");
+  assert.equal(info.engine_version, "2.1.4");
+  // Expected values come from the spec and the tracker timing rule, not from
+  // reading the file back: lines = the arrangement laid end to end; a line
+  // lasts TPL x 2.5 / BPM seconds.
+  const spec = FIXTURE_SPEC;
+  const linesOf = (id) => spec.patterns.find((p) => p.id === id).lines;
+  const songLines = spec.arrangement.reduce((n, a) => n + linesOf(a.pattern), 0);
+  assert.deepEqual(info.effective_tempo.at_line_0, { bpm: spec.bpm, tpl: spec.tpl });
+  assert.equal(info.length_lines, songLines);
+  assert.equal(info.length_frames, Math.round(songLines * spec.tpl * 2.5 / spec.bpm * 44100));
+  assert.equal(info.modules, spec.modules.length + 1, "the spec's modules plus Output");
+  assert.deepEqual(info.module_list.map((m) => [m.type, m.name, m.x, m.y]), [
+    ["Output", "Output", 512, 512], ["DrumSynth", "kick", 300, 300], ["Analog generator", "bass", 300, 500], ["Echo", "echo", 500, 500],
+  ]);
+  for (const m of info.module_list) assert.match(m.color, /^#[0-9a-f]{6}$/);
+  let x = 0;
+  assert.deepEqual(info.pattern_list.map((p) => [p.name, p.x, p.y, p.lines]), spec.arrangement.map((a) => { const at = x; x += linesOf(a.pattern); return [a.pattern, at, 0, linesOf(a.pattern)]; }));
+  // And it sounds: the render is at least the song long and not silent.
+  const r = await engine.render(fs.readFileSync(FIXTURE));
+  assert.ok(r.frames >= info.length_frames);
+  let peak = 0;
+  for (let i = 44; i < r.wav.length - 1; i += 2) peak = Math.max(peak, Math.abs(r.wav.readInt16LE(i)));
+  assert.ok(peak > 1000, "fixture render is silent");
+});
+
+test("sunvox: the old upstream demo song is gone from the repo and the bundle ships no spike/", () => {
+  assert.ok(!fs.existsSync(path.join(BUNDLE, "spike")), "bundles/sunvox-studio/spike must not exist (it shipped in installed copies)");
+  const upstreamDemo = "machine 0001"; // the library author's demo song, formerly spike/fixture.sunvox
+  assert.ok(!fs.readFileSync(FIXTURE).includes(Buffer.from(upstreamDemo)));
+});
+
+test("sunvox: format detection and version strings (no engine needed)", async () => {
+  const mod = await import(pathToFileURL(path.join(BUNDLE, "server", "sunvox-engine.js")).href);
+  assert.equal(mod.detectFormat(Buffer.from("SVOX\0\0\0\0")), "sunvox");
+  assert.equal(mod.detectFormat(Buffer.from("Extended Module: song name here")), "xm");
+  const m = Buffer.alloc(1200); m.write("M.K.", 1080, "latin1");
+  assert.equal(mod.detectFormat(m), "mod");
+  const m8 = Buffer.alloc(1200); m8.write("8CHN", 1080, "latin1");
+  assert.equal(mod.detectFormat(m8), "mod");
+  assert.equal(mod.detectFormat(Buffer.alloc(1200)), "unknown");
+  assert.equal(mod.detectFormat(Buffer.from("RIFF")), "unknown");
+  assert.equal(mod.versionString(0x02010403), "2.1.4.3");
+  assert.equal(mod.versionString(0x020104, 3), "2.1.4");
+  assert.equal(mod.versionString(-1), null);
+  assert.equal(mod.colorHex(0x00ffae), "#aeff00");
 });
 
 test("sunvox: compose round-trips with tempo, modules, patterns; render is audible", { skip: !engine && SKIP_REASON }, async () => {
@@ -265,4 +318,287 @@ test("sunvox: event fields are range-checked, never silently wrapped", { skip: !
   }
   const ok = await one({ track: 1, line: 7, effect: 0x0f, effect_param: 4 });
   assert.equal(ok.info.patterns, 1);
+});
+
+// --- Completion (2026-10-20): arrangement, song name, controller ranges, sample rate ---
+
+const G = [{ id: "g", type: "Analog generator" }];
+const pat = (id, lines = 8, extra = {}) => ({ id, tracks: 2, lines, events: [{ track: 0, line: 0, note: "C3", module: "g" }], ...extra });
+
+test("sunvox: arrangement places patterns in order and repeats become clones", { skip: !engine && SKIP_REASON }, async () => {
+  const r = await engine.compose({
+    modules: G,
+    patterns: [pat("a", 8), pat("b", 4)],
+    arrangement: [{ pattern: "a" }, { pattern: "b" }, { pattern: "a", y: 3 }, { pattern: "b", x: 40 }],
+  }, { name: "arr" });
+  assert.deepEqual(r.info.pattern_list.map((p) => [p.name, p.x, p.y]), [["a", 0, 0], ["b", 8, 0], ["a", 12, 3], ["b", 40, 0]]);
+  assert.equal(r.info.length_lines, 44);
+});
+
+test("sunvox: arrangement errors are actionable and bounded", { skip: !engine && SKIP_REASON }, async () => {
+  const two = [pat("a"), pat("b")];
+  await assert.rejects(() => engine.compose({ modules: G, patterns: two, arrangement: [{ pattern: "a" }, { pattern: "zzz" }] }), /unknown pattern "zzz"; patterns: a, b/);
+  await assert.rejects(() => engine.compose({ modules: G, patterns: two, arrangement: [{ pattern: "a" }] }), /pattern\(s\) b are not in the arrangement/);
+  await assert.rejects(() => engine.compose({ modules: G, patterns: [pat("a"), pat("a")], arrangement: [{ pattern: "a" }] }), /must be unique/);
+  await assert.rejects(() => engine.compose({ modules: G, patterns: [pat("a")], arrangement: [{ pattern: "a", x: -1 }] }), /x must be an integer from 0/);
+  await assert.rejects(() => engine.compose({ modules: G, patterns: [pat("a")], arrangement: [{ pattern: "a", x: 65537 }] }), /x must be an integer from 0 to 65536/);
+  await assert.rejects(() => engine.compose({ modules: G, patterns: [pat("a")], arrangement: [{ pattern: "a", y: 5000 }] }), /y must be an integer/);
+  await assert.rejects(() => engine.compose({ modules: G, patterns: [pat("a")], arrangement: [] }), /non-empty array/);
+  await assert.rejects(() => engine.compose({ modules: G, patterns: [pat("a")], arrangement: Array.from({ length: 4097 }, () => ({ pattern: "a" })) }), /at most 4096 placements/);
+  const ok = await engine.compose({ modules: G, patterns: [pat("a")], arrangement: [{ pattern: "a" }] });
+  assert.equal(ok.info.patterns, 1, "engine usable after rejected arrangements");
+});
+
+test("sunvox: the tempo goes into the pattern that plays first, whatever the spec order", { skip: !engine && SKIP_REASON }, async () => {
+  const r = await engine.compose({
+    bpm: 90, tpl: 4, modules: G,
+    patterns: [pat("late", 8), pat("early", 8)],
+    arrangement: [{ pattern: "late", x: 8 }, { pattern: "early", x: 0 }],
+  });
+  assert.deepEqual(r.info.effective_tempo.at_line_0, { bpm: 90, tpl: 4 });
+  await assert.rejects(() => engine.compose({ bpm: 90, tpl: 4, modules: G, patterns: [{ id: "one", tracks: 1, lines: 8, events: [] }] }), /needs two free tracks/);
+});
+
+test("sunvox: the compose name becomes the song name", { skip: !engine && SKIP_REASON }, async () => {
+  const r = await engine.compose({ modules: G, patterns: [pat("a")] }, { name: "Late night\nloop" });
+  assert.equal(r.info.name, "Late nightloop");
+  const info = await engine.info(r.project);
+  assert.equal(info.name, "Late nightloop");
+});
+
+test("sunvox: module params must lie inside the controller's min..max", { skip: !engine && SKIP_REASON }, async () => {
+  const one = (params) => engine.compose({ modules: [{ id: "g", type: "Analog generator", params }], patterns: [pat("a")] });
+  await assert.rejects(() => one({ Volume: 257 }), /param "Volume" on "g" must be from 0 to 256/);
+  await assert.rejects(() => one({ Volume: -1 }), /must be from 0 to 256/);
+  await assert.rejects(() => one({ Waveform: 99 }), /param "Waveform" on "g" must be from 0 to \d+/, "selectors too");
+  const ok = await one({ Volume: 256, Waveform: 1 });
+  assert.equal(ok.info.modules, 2);
+});
+
+test("sunvox: renders at 48000 Hz on request, then back at 44100; other rates are refused", { skip: !engine && SKIP_REASON }, async () => {
+  const buf = fs.readFileSync(FIXTURE);
+  const hi = await engine.render(buf, { sampleRate: 48000 });
+  assert.equal(hi.sample_rate, 48000);
+  assert.equal(hi.wav.readUInt32LE(24), 48000, "WAV header rate");
+  assert.equal(hi.info.length_frames, 345600, "7.2 s at 48 kHz");
+  assert.ok(hi.frames >= 345600);
+  const lo = await engine.render(buf);
+  assert.equal(lo.wav.readUInt32LE(24), 44100);
+  assert.equal(lo.info.length_frames, 317520);
+  await assert.rejects(() => engine.render(buf, { sampleRate: 22050 }), /sample_rate must be one of 44100, 48000/);
+  const info = await engine.info(buf);
+  assert.equal(info.sample_rate, 44100);
+});
+
+// --- Tool level (in-memory MCP client, fake storage/db/Funkwhale) ---
+
+async function toolClient(inject, workdir) {
+  const prev = process.env.SUNVOX_WORKDIR;
+  process.env.SUNVOX_WORKDIR = workdir;
+  const srv = await import(pathToFileURL(path.join(BUNDLE, "server", "server.js")).href + `?tools=${encodeURIComponent(workdir)}`);
+  if (prev === undefined) delete process.env.SUNVOX_WORKDIR; else process.env.SUNVOX_WORKDIR = prev;
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  const server = srv.createSunvoxServer(inject);
+  await server.connect(a);
+  const client = new Client({ name: "t", version: "0" });
+  await client.connect(b);
+  return {
+    call: async (name, args) => {
+      const r = await client.callTool({ name, arguments: args });
+      return { isError: !!r.isError, text: r.content[0].text, json: (() => { try { return JSON.parse(r.content[0].text); } catch { return null; } })() };
+    },
+    close: () => client.close(),
+  };
+}
+function memS3() {
+  const objects = new Map();
+  return {
+    objects,
+    defaultBucket: () => "crow-files",
+    getBucketStats: async () => ({ fileCount: objects.size, totalSizeBytes: [...objects.values()].reduce((n, b) => n + b.length, 0) }),
+    uploadObject: async (k, d) => { objects.set(k, Buffer.from(d)); },
+    deleteObject: async (k) => { objects.delete(k); },
+    getPresignedUrl: async (k) => `http://storage.example/crow-files/${k}?X-Amz-Signature=x`,
+  };
+}
+function memDb() {
+  const rows = { storage_files: [], notifications: [] };
+  return { rows, execute: async ({ sql, args }) => { if (/INSERT INTO storage_files/.test(sql)) rows.storage_files.push(args); return { rows: [] }; } };
+}
+const tinySpec = { bpm: 120, modules: [{ id: "g", type: "Analog generator" }], patterns: [{ id: "a", tracks: 2, lines: 8, events: [{ track: 0, line: 0, note: "C3", module: "g" }] }] };
+
+test("sunvox tools: compose saves project + render to storage, refuses a same-name overwrite unless asked", { skip: !engine && SKIP_REASON }, async () => {
+  const os = await import("node:os");
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "sv-tools-"));
+  const s3 = memS3(); const db = memDb(); const notes = [];
+  const c = await toolClient({ storage: async () => s3, db: async () => db, createNotification: async (_db, o) => { notes.push(o); return { id: 1 }; } }, work);
+  try {
+    const r = await c.call("sunvox_compose", { name: "My Loop", render: true, spec: tinySpec, reference_type: "blog_post", notify: true });
+    assert.equal(r.isError, false, r.text);
+    assert.match(r.json.project_storage_key, /^sunvox-studio\/projects\/\d+-[0-9a-f]{32}-My_Loop\.sunvox$/);
+    assert.match(r.json.render_storage_key, /^sunvox-studio\/renders\/\d+-[0-9a-f]{32}-My_Loop-\d+-[0-9a-f]{6}\.wav$/);
+    assert.equal(r.json.project_media_path, `/blog/media/${r.json.project_storage_key}`);
+    assert.ok(r.json.project_storage_url.startsWith("http://storage.example/"));
+    assert.equal(r.json.info.name, "My Loop");
+    assert.equal(r.json.notified, true);
+    assert.equal(notes[0].source, "sunvox-studio");
+    assert.equal(s3.objects.size, 2);
+    assert.deepEqual(db.rows.storage_files.map((a) => a[5]), ["blog_post", "blog_post"]);
+    assert.ok(s3.objects.get(r.json.project_storage_key).subarray(0, 4).equals(Buffer.from("SVOX")));
+    assert.ok(s3.objects.get(r.json.render_storage_key).subarray(0, 4).equals(Buffer.from("RIFF")));
+
+    const again = await c.call("sunvox_compose", { name: "My Loop", spec: tinySpec });
+    assert.equal(again.isError, true);
+    assert.match(again.text, /already exists.*overwrite: true/);
+    const forced = await c.call("sunvox_compose", { name: "My Loop", spec: tinySpec, overwrite: true, save_to_storage: false });
+    assert.equal(forced.isError, false, forced.text);
+    assert.equal(forced.json.project_storage_key, undefined);
+    assert.equal(s3.objects.size, 2, "save_to_storage false stores nothing");
+  } finally { await c.close(); fs.rmSync(work, { recursive: true, force: true }); }
+});
+
+test("sunvox tools: without storage a render keeps its local path and says why; save_to_storage true fails", { skip: !engine && SKIP_REASON }, async () => {
+  const os = await import("node:os");
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "sv-tools-"));
+  fs.copyFileSync(FIXTURE, path.join(work, "f.sunvox"));
+  const c = await toolClient({ storage: async () => null, db: async () => memDb() }, work);
+  try {
+    const r = await c.call("sunvox_render", { path: "f.sunvox" });
+    assert.equal(r.isError, false, r.text);
+    assert.ok(fs.existsSync(r.json.path));
+    // duration_s is the audio actually written (the song plus its effect tail), not the song length.
+    const wav = fs.readFileSync(r.json.path);
+    assert.equal(r.json.duration_s, +((wav.length - 44) / 4 / 44100).toFixed(3));
+    assert.equal(r.json.song_duration_s, 7.2);
+    assert.match(r.json.storage, /not saved: storage is not available/);
+    const strict = await c.call("sunvox_render", { path: "f.sunvox", save_to_storage: true });
+    assert.equal(strict.isError, true);
+    assert.match(strict.text, /storage is not available/);
+    const bad = await c.call("sunvox_render", { path: "f.sunvox", sample_rate: 22050 });
+    assert.equal(bad.isError, true, "the schema refuses rates the library cannot render");
+  } finally { await c.close(); fs.rmSync(work, { recursive: true, force: true }); }
+});
+
+test("sunvox tools: render pushes an mp3 to Funkwhale using only the configured origin", { skip: (!engine && SKIP_REASON) || NO_FFMPEG }, async () => {
+  const os = await import("node:os");
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "sv-tools-"));
+  fs.copyFileSync(FIXTURE, path.join(work, "f.sunvox"));
+  const LIB = "0f8a6c1e-1111-4222-8333-444455556666";
+  const UP = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const seen = [];
+  const fetchImpl = async (url, init) => {
+    seen.push({ url: String(url), redirect: init.redirect, auth: init.headers.Authorization });
+    if (String(url).endsWith("/api/v1/uploads/")) {
+      const f = init.body.get("audio_file");
+      assert.ok(Buffer.from(await f.arrayBuffer()).length > 1000);
+      return new Response(JSON.stringify({ uuid: UP, import_status: "finished", track: { id: 9 } }), { status: 201 });
+    }
+    return new Response("{}", { status: 404 });
+  };
+  const c = await toolClient({ storage: async () => memS3(), db: async () => memDb(), musicConfig: async () => ({ origin: "http://127.0.0.1:5999", token: "tok" }), consumeToken: async () => ({ allowed: true }), fetchImpl }, work);
+  try {
+    const r = await c.call("sunvox_render", { path: "f.sunvox", format: "mp3", funkwhale_library: LIB });
+    assert.equal(r.isError, false, r.text);
+    assert.equal(r.json.format, "mp3");
+    const probe = require("node:child_process").spawnSync("ffprobe", ["-v", "error", "-show_entries", "format_tags=title,artist,album", "-of", "json", r.json.path], { encoding: "utf8" });
+    const tags = JSON.parse(probe.stdout).format.tags;
+    assert.deepEqual([tags.title, tags.artist, tags.album], ["Crow fixture", "Crow", "SunVox Studio"], "a library import needs title, artist and album tags");
+    assert.equal(r.json.funkwhale.funkwhale_upload_uuid, UP);
+    assert.equal(r.json.funkwhale.funkwhale_track_id, 9);
+    assert.ok(seen.length >= 1 && seen.every((s) => s.url.startsWith("http://127.0.0.1:5999/") && s.redirect === "error" && s.auth === "Bearer tok"));
+    const wav = await c.call("sunvox_render", { path: "f.sunvox", funkwhale_library: LIB });
+    assert.equal(wav.isError, false, "the render itself succeeds");
+    assert.match(wav.json.funkwhale.error, /mp3 or ogg/);
+  } finally { await c.close(); fs.rmSync(work, { recursive: true, force: true }); }
+});
+
+test("sunvox: the work dir follows the instance data dir, and a '~/' setting expands", async () => {
+  const os = await import("node:os");
+  const { spawnSync } = await import("node:child_process");
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "sv-data-"));
+  const url = pathToFileURL(path.join(BUNDLE, "server", "server.js")).href;
+  const run = (env) => {
+    const r = spawnSync(process.execPath, ["--input-type=module", "-e", `const m = await import(${JSON.stringify(url)}); console.log(m.WORKDIR)`], { env: { ...process.env, CROW_APP_ROOT: ROOT, SUNVOX_WORKDIR: "", ...env }, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  try {
+    assert.equal(run({ CROW_DATA_DIR: dataDir }), path.join(dataDir, "sunvox-studio"));
+    assert.equal(run({ CROW_DATA_DIR: dataDir, SUNVOX_WORKDIR: "~/music-out" }), path.join(os.homedir(), "music-out"));
+    // 0.1.x installs carry the old manifest default in their entry: it means "the default", per instance.
+    assert.equal(run({ CROW_DATA_DIR: dataDir, SUNVOX_WORKDIR: "~/.crow/data/sunvox-studio" }), path.join(dataDir, "sunvox-studio"));
+  } finally { fs.rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test("sunvox: repeats in an arrangement share their notes with the original (clones, not copies)", { skip: !engine && SKIP_REASON }, async () => {
+  const { project } = await engine.compose({ modules: G, patterns: [pat("a", 8)], arrangement: [{ pattern: "a" }, { pattern: "a" }, { pattern: "a" }] });
+  // A clone adds a timeline entry but no pattern data: three placements of one 8-line
+  // pattern save smaller than three separate 8-line patterns with the same notes.
+  const copies = await engine.compose({ modules: G, patterns: [pat("a", 8), pat("b", 8), pat("c", 8)], arrangement: [{ pattern: "a" }, { pattern: "b" }, { pattern: "c" }] });
+  assert.ok(project.length < copies.project.length, `${project.length} < ${copies.project.length}`);
+  const info = await engine.info(project);
+  assert.deepEqual(info.pattern_list.map((p) => p.x), [0, 8, 16]);
+  const ok = await engine.compose({ modules: G, patterns: [pat("a", 1)], arrangement: Array.from({ length: 4096 }, () => ({ pattern: "a" })) });
+  assert.equal(ok.info.patterns, 4096, "the 4096-placement limit itself is accepted");
+});
+
+test("sunvox: wipeKeys zeroes every key buffer of an identity", async () => {
+  const srv = await import(pathToFileURL(path.join(BUNDLE, "server", "server.js")).href + "?wipe");
+  const id = { crowId: "crow:x", seed: Buffer.from([1, 2, 3]), ed25519Priv: new Uint8Array([4, 5]), secp256k1Priv: new Uint8Array([6]) };
+  srv.wipeKeys(id);
+  assert.deepEqual([...id.seed, ...id.ed25519Priv, ...id.secp256k1Priv], [0, 0, 0, 0, 0, 0]);
+  assert.equal(id.crowId, "crow:x");
+});
+
+test("sunvox tools: storage_key reads only this bundle's files and blog media, never project or private files", { skip: !engine && SKIP_REASON }, async () => {
+  const os = await import("node:os");
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "sv-tools-"));
+  const fixture = fs.readFileSync(FIXTURE);
+  const rows = {
+    "sunvox-studio/projects/1-x-own.sunvox": { reference_type: null, project_id: null },
+    "1700-shared.sunvox": { reference_type: "blog_post", project_id: null },
+    "1700-private.sunvox": { reference_type: null, project_id: null },
+    "proj/1700-secret.sunvox": { reference_type: "blog_post", project_id: 4 },
+    "sunvox-studio/projects/in-project.sunvox": { reference_type: null, project_id: 4 },
+  };
+  const db = { execute: async ({ sql, args }) => (/FROM storage_files WHERE s3_key/.test(sql) ? { rows: rows[args[0]] ? [rows[args[0]]] : [] } : { rows: [] }) };
+  const fetched = [];
+  const s3 = { ...memS3(), getObject: async (k) => { fetched.push(k); const { Readable } = await import("node:stream"); return { stream: Readable.from([fixture]), stat: { size: fixture.length } }; } };
+  const c = await toolClient({ storage: async () => s3, db: async () => db }, work);
+  try {
+    for (const k of ["sunvox-studio/projects/1-x-own.sunvox", "1700-shared.sunvox"]) {
+      const r = await c.call("sunvox_info", { storage_key: k });
+      assert.equal(r.isError, false, `${k}: ${r.text}`);
+    }
+    for (const k of ["1700-private.sunvox", "proj/1700-secret.sunvox", "sunvox-studio/projects/in-project.sunvox", "not-in-the-table.sunvox"]) {
+      const r = await c.call("sunvox_render", { storage_key: k, reference_type: "blog_post" });
+      assert.equal(r.isError, true, k);
+      assert.match(r.text, /is not readable here/);
+    }
+    assert.deepEqual(fetched, ["sunvox-studio/projects/1-x-own.sunvox", "1700-shared.sunvox"], "refused keys were never fetched");
+  } finally { await c.close(); fs.rmSync(work, { recursive: true, force: true }); }
+});
+
+test("sunvox tools: a render that used up most of the 60 s tool call skips the Funkwhale push before any request or rate token", { skip: (!engine && SKIP_REASON) || NO_FFMPEG }, async () => {
+  const os = await import("node:os");
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "sv-tools-"));
+  fs.copyFileSync(FIXTURE, path.join(work, "f.sunvox"));
+  let t = 0; const calls = []; const tokens = [];
+  const now = () => { const v = t; t = 50_000; return v; }; // the call starts at 0; every later reading is 50 s in
+  const c = await toolClient({
+    storage: async () => null, db: async () => memDb(), now,
+    musicConfig: async () => ({ origin: "http://127.0.0.1:5999", token: "tok" }),
+    consumeToken: async () => { tokens.push(1); return { allowed: true }; },
+    fetchImpl: async (u) => { calls.push(String(u)); return new Response("{}", { status: 500 }); },
+  }, work);
+  try {
+    t = 0;
+    const late = await c.call("sunvox_render", { path: "f.sunvox", format: "mp3", funkwhale_library: "0f8a6c1e-1111-4222-8333-444455556666" });
+    assert.equal(late.isError, false, late.text);
+    // 50 s into the call: 5 s left of the 55 s budget, under the 10 s a push needs.
+    assert.match(late.json.funkwhale.error, /not uploaded.*fw_upload_track/);
+    assert.deepEqual([calls.length, tokens.length], [0, 0]);
+  } finally { await c.close(); fs.rmSync(work, { recursive: true, force: true }); }
 });

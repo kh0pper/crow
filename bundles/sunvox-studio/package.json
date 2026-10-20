@@ -1,6 +1,6 @@
 {
   "name": "sunvox-studio",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "SunVox Studio MCP server — inspect, render and compose SunVox/XM/MOD projects via the MIT-licensed SunVox engine library (offline, headless)",
   "type": "module",
   "main": "server/index.js",
