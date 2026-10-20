@@ -670,3 +670,46 @@ test("board_notify_decisions pushes once per batch; the second call pushes nothi
   assert.equal(pushes.length, 1);
   await client.close();
 });
+
+test("board_notify_decisions: a bot notifies only its own batch (403 for another bot), a session can, and a notified batch reports already_notified", async () => {
+  const owner = await connectClient("/board/mcp", state.boardToken, signedBoard("bot-owner"));
+  const other = await connectClient("/board/mcp", state.boardToken, signedBoard("bot-other"));
+  const session = await connectClient("/board/mcp", state.localToken);
+  const unattributed = await connectClient("/board/mcp", state.boardToken);
+  try {
+    await owner.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, "mcp-batch-own") });
+    const denied = await other.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-own" } });
+    assert.equal(denied.isError, true);
+    assert.match(denied.content[0].text, /^\[403 forbidden\]/);
+    const deniedAnon = await unattributed.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-own" } });
+    assert.match(deniedAnon.content[0].text, /^\[403 forbidden\]/);
+
+    const pushed = payload(await owner.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-own" } }));
+    assert.deepEqual(pushed, { pushed: true, count: 1 });
+    const again = payload(await session.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-own" } }));
+    assert.deepEqual(again, { pushed: false, count: 0, reason: "already_notified" });
+
+    // an unattributed bot can notify its own unattributed batch
+    await unattributed.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, "mcp-batch-anon") });
+    const anon = payload(await unattributed.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-anon" } }));
+    assert.deepEqual(anon, { pushed: true, count: 1 });
+  } finally {
+    for (const c of [owner, other, session, unattributed]) await c.close();
+  }
+});
+
+test("board_notify_decisions: the 4th push of the day by one caller is 429 push_limit", async () => {
+  const bot = await connectClient("/board/mcp", state.boardToken, signedBoard("bot-capped"));
+  try {
+    for (let i = 1; i <= 3; i++) {
+      await bot.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, `mcp-cap-${i}`) });
+      assert.equal(payload(await bot.callTool({ name: "board_notify_decisions", arguments: { batch: `mcp-cap-${i}` } })).pushed, true);
+    }
+    await bot.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, "mcp-cap-4") });
+    const r = await bot.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-cap-4" } });
+    assert.equal(r.isError, true);
+    assert.match(r.content[0].text, /^\[429 push_limit\]/);
+  } finally {
+    await bot.close();
+  }
+});
