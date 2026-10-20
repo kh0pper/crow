@@ -21,14 +21,22 @@ import { CROW_VOICE_BOT_ID, normalizeVoiceSettings, isVoiceBotDef } from "../../
 
 /**
  * A voice bot (kind "voice") also asks a spoken yes before these: a schedule or a change to the
- * user's context sections (direct, or as the matching action of the crow_memory proxy).
+ * user's context sections (direct, or as the matching action of the crow_memory proxy), and a
+ * change to the notification settings (VOICE_NOTIFICATION_TOOL; its "get" is a read and stays free).
  */
 export const VOICE_CONFIRM_TOOLS = Object.freeze(["crow_create_schedule", "crow_update_schedule", "crow_add_context_section", "crow_update_context_section"]);
 const VOICE_SCHEDULE_TOOLS = new Set(["crow_create_schedule", "crow_update_schedule"]);
+const VOICE_NOTIFICATION_TOOL = "crow_notification_settings";
 /** A schedule task that starts background bot work (bot_scheduler's "pipeline:botcron:<bot>" and every other "pipeline:" row). */
 const scheduleArgs = (args) => {
   const a = args && typeof args === "object" ? args : {};
   return [a, a.params && typeof a.params === "object" ? a.params : {}];
+};
+/** crow_notification_settings asked to change (anything but action "get"; a proxied call's own action is in params). */
+const changesNotifications = (args) => {
+  const a = args && typeof args === "object" ? args : {};
+  const act = a.params && typeof a.params === "object" ? a.params.action : a.action;
+  return act !== "get";
 };
 const startsPipeline = (args) => scheduleArgs(args).some((x) => typeof x.task === "string" && /^\s*pipeline:/i.test(x.task));
 /** Turning a schedule back on without naming its task: it may be a pipeline: row (the gate cannot see the stored task). */
@@ -778,7 +786,8 @@ export function createVoiceTurnRunner(deps) {
         if (voiceKind && names.some((n) => VOICE_SCHEDULE_TOOLS.has(n)) && startsPipeline(tc.arguments)) return refuse("refused_policy", VOICE_NO_PIPELINE);
         if (voiceKind && names.includes("crow_update_schedule") && reenablesUnseen(tc.arguments)) return refuse("refused_policy", VOICE_NO_REENABLE);
         const confirmName = names.find((n) => isDestructiveTool(n) || (Array.isArray(policy.confirm) && policy.confirm.includes(n))
-          || (voiceKind && (needsSpokenYes(n) || VOICE_CONFIRM_TOOLS.includes(n))));
+          || (voiceKind && (needsSpokenYes(n) || VOICE_CONFIRM_TOOLS.includes(n)
+            || (n === VOICE_NOTIFICATION_TOOL && changesNotifications(tc.arguments)))));
         if (!confirmName) return null;
         if (confirm.check({ deviceId: device.id, eff: confirmName, args: tc.arguments, transcript }) === "allow") return null;
         return refuse("needs_confirm", `Confirmation required. Tell the user: "Are you sure you want to ${describeDestructiveAction({ name: confirmName, arguments: tc.arguments })}? Say yes to proceed." Then end your turn — do not call another tool.`);

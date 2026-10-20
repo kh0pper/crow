@@ -479,3 +479,13 @@ test("abilities: more than four → four and '+N more', the whole list in the ti
   assert.equal(line.textContent, STRINGS.en.abil_by.replace("{list}", `${w.join(", ")}, ${STRINGS.en.abil_more.replace("{n}", "1")}`));
   assert.equal(line.getAttribute("title"), STRINGS.en.abil_by.replace("{list}", [...w, STRINGS.en.abil_projects].join(", ")));
 });
+
+test("the no-assistant line points at Crow's voice in Bot Builder; the room hint names Reset to preset (en + es)", () => {
+  assert.equal(STRINGS.en.no_bot, "Crow's voice is switched off or unavailable. Check Crow's voice in Bot Builder.");
+  assert.equal(STRINGS.es.no_bot, "La voz de Crow está apagada o no disponible. Revisa la voz de Crow en Bot Builder.");
+  for (const lang of ["en", "es"]) assert.doesNotMatch(STRINGS[lang].no_bot, /Kiosk|Elige uno|Choose one/, lang);
+  assert.match(STRINGS.en.household_hint, /Reset to preset/);
+  assert.match(STRINGS.en.household_hint, /Bot Builder → Crow/);
+  assert.match(STRINGS.es.household_hint, /Restablecer la configuración base/);
+  assert.match(STRINGS.es.household_hint, /Bot Builder → Crow/);
+});

@@ -1109,7 +1109,7 @@ export function createMemoryServer(dbPath, options = {}) {
       // The reserved voice bot takes no bot-cron schedule (the scheduler skips it; refuse up front).
       const botcron = String(task).trim().match(/^pipeline:botcron:(.+)$/);
       if (botcron && isVoiceBotId(botcron[1])) {
-        return { content: [{ type: "text", text: "The Crow voice bot cannot take background jobs, so it cannot be scheduled." }] };
+        return { content: [{ type: "text", text: "The Crow voice bot cannot take background jobs, so it cannot be scheduled." }], isError: true };
       }
       // Validate and compute next_run
       let nextRun = null;

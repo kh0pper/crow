@@ -385,10 +385,12 @@ test("crow_create_schedule refuses the voice bot's botcron task (trimmed) and in
     for (const task of ["pipeline:botcron:crow.voice", "  pipeline:botcron:crow.voice \n"]) {
       const r = await client.callTool({ name: "crow_create_schedule", arguments: { task, cron_expression: "0 9 * * *" } });
       assert.match(r.content[0].text, /cannot take background jobs/);
+      assert.equal(r.isError, true, "the refusal reads as an error");
     }
     assert.equal(count("%crow.voice%"), before, "no new schedules row for the voice bot");
     const ok = await client.callTool({ name: "crow_create_schedule", arguments: { task: "pipeline:botcron:alpha", cron_expression: "0 9 * * *" } });
     assert.match(ok.content[0].text, /Schedule created/);
+    assert.ok(!ok.isError, "an ordinary create is not an error");
     const ok2 = await client.callTool({ name: "crow_create_schedule", arguments: { task: "water the plants", cron_expression: "0 9 * * *" } });
     assert.match(ok2.content[0].text, /Schedule created/);
     assert.equal(count("pipeline:botcron:alpha"), 1);

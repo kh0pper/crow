@@ -433,6 +433,32 @@ test("smoke 2026-10-04: boot warm-up warms every paired display and retries unti
   r.stop(); r2.stop();
 });
 
+test("hello warms the STT the display's turns really use: Crow's speech recognition when the voice bot sets one", async () => {
+  const warmed = [];
+  const r = createKioskRuntime(runtimeDeps({
+    sttWarmup: async (d) => { warmed.push(d.stt_profile_id); return true; },
+    loadVoiceBot: async () => ({ def: { voice: { stt_profile_id: "crow-stt" } }, cloud: false }),
+    crowVoice: { withVoiceProfiles: (device, def) => ({ ...device, stt_profile_id: def.voice.stt_profile_id }) },
+  }));
+  const app = express();
+  app.use(r.router((req, res, next) => next()));
+  const { s, base: b } = await listen(app, r);
+  let ws = null;
+  try {
+  const { token } = await store.pairDevice(db(), { id: "kiosk-hello-warm", name: "w", device_kind: "kiosk" });
+  await store.updateDeviceProfiles(db(), "kiosk-hello-warm", { stt_profile_id: "fw" });
+  ws = new WebSocket(wsUrl(b));
+  const msgs = [];
+  await new Promise((x) => ws.on("open", x));
+  ws.on("message", (d, bin) => { if (!bin) msgs.push(JSON.parse(d.toString())); });
+  ws.send(JSON.stringify({ type: "hello", device_id: "kiosk-hello-warm", token, caps: {} }));
+  for (let i = 0; i < 50 && !msgs.some((m) => m.type === "ready"); i++) await new Promise((x) => setTimeout(x, 10));
+  for (let i = 0; i < 50 && !warmed.length; i++) await new Promise((x) => setTimeout(x, 10));
+  assert.ok(warmed.length >= 1, "hello warmed something");
+  assert.ok(warmed.every((id) => id === "crow-stt"), `Crow's STT profile, never the device's own (${warmed.join(",")})`);
+  } finally { try { ws?.terminate(); } catch {} r.stop(); s.close(); }
+});
+
 test("smoke 2026-10-04: changing a display's speech model warms it at once", async () => {
   const warmed = [];
   const r = createKioskRuntime(runtimeDeps({ sttWarmup: async (d) => { warmed.push(d.kiosk_settings?.stt_model); return true; } }));

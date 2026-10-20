@@ -38,13 +38,17 @@ import { VOICE_EDITOR_HREF } from "./voice-bot-card.js";
 
 const NAME_MAX = 40;
 const PROMPT_MAX = 4000;
-// The three memory selections the "Memory tools" switch adds or removes (the preset's own).
+// The three memory selections the "Memory tools" switch adds back (the preset's own). Off removes
+// EVERY crow-memory/ entry: any one of them keeps the memory category, and with it the whole
+// crow_memory proxy (tool-executor.js).
 const MEMORY_TOOLS = voiceBotDefinition({ preset: "fast_local", fastKey: "x/y" }).tools.crow_mcp.filter((x) => x.startsWith("crow-memory/"));
+const isMemoryTool = (x) => x.startsWith("crow-memory/");
 
 /** ?error= codes these saves give (the panel banner maps them to text: bot-builder.js). */
 export const VOICE_ERROR_KEYS = {
   stale: "botbuilder.staleForm",
   voice_missing: "botbuilder.voiceErrMissing",
+  voice_corrupt: "botbuilder.voiceErrCorrupt",
   voice_name_invalid: "botbuilder.voiceErrName",
   voice_prompt_too_long: "botbuilder.voiceErrPrompt",
   voice_model_invalid: "botbuilder.voiceErrModel",
@@ -95,7 +99,8 @@ const back = (res, q) => res.redirectAfterPost(`${VOICE_EDITOR_HREF}&${q}`);
 async function freshRow(req, res, db) {
   const row = await loadVoiceRow(db);
   const def = row ? parseDef(row) : null;
-  if (!row || !def) { back(res, "error=voice_missing"); return null; }
+  if (!row) { back(res, "error=voice_missing"); return null; }
+  if (!def) { back(res, "error=voice_corrupt"); return null; }
   const rev = (req.body || {}).rev;
   if (typeof rev !== "string" || !rev || rev !== voiceRev(row)) { back(res, "error=stale"); return null; }
   return { row, def };
@@ -126,7 +131,7 @@ export async function handleVoiceBotSave(req, res, { db }) {
 
   let tools = crowMcpOf(def);
   if (b.memory_tools === "on") { for (const m of MEMORY_TOOLS) if (!tools.includes(m)) tools.push(m); }
-  else tools = tools.filter((x) => !MEMORY_TOOLS.includes(x));
+  else tools = tools.filter((x) => !isMemoryTool(x));
   const next = {
     ...def,
     fast_voice_model: model,
@@ -164,8 +169,8 @@ export async function handleVoiceBotPreset(req, res, { db }) {
   // deliberately goes back to the bare preset list and the default persona.
   const current = crowMcpOf(def);
   const carried = current.filter((x) => !presetTools.includes(x));
-  const memoryOff = !MEMORY_TOOLS.some((m) => current.includes(m));
-  const rebuilt = memoryOff ? presetTools.filter((x) => !MEMORY_TOOLS.includes(x)) : [...presetTools];
+  const memoryOff = !current.some(isMemoryTool);
+  const rebuilt = memoryOff ? presetTools.filter((x) => !isMemoryTool(x)) : [...presetTools];
   const next = {
     ...def,
     preset: base.preset,
@@ -205,9 +210,11 @@ export async function renderVoiceBotEditor(req, res, { db, layout, lang = "en", 
   const row = await loadVoiceRow(db);
   const def = row ? parseDef(row) : null;
   if (!row || !def) {
+    // A row that is there but can't be read is kept as it is (ensureVoiceBot never rewrites it).
+    const key = row ? "botbuilder.voiceErrCorrupt" : "botbuilder.voiceErrMissing";
     return res.send(layout({
       title: "Bot Builder",
-      content: PAGE_CSS + section(t("botbuilder.voiceEditorTitle", lang), backLink + notice + `<p>${escapeHtml(t("botbuilder.voiceErrMissing", lang))}</p>`),
+      content: PAGE_CSS + section(t("botbuilder.voiceEditorTitle", lang), backLink + notice + `<p>${escapeHtml(t(key, lang))}</p>`),
     }));
   }
   const v = normalizeVoiceSettings(def);
@@ -221,7 +228,7 @@ export async function renderVoiceBotEditor(req, res, { db, layout, lang = "en", 
   const provId = model.includes("/") ? model.slice(0, model.indexOf("/")) : "";
   const provRow = providerRows.find((p) => p && p.id === provId);
   const cloud = !!provRow && provRow.host === "cloud";
-  const memoryOn = MEMORY_TOOLS.every((m) => crowMcpOf(def).includes(m));
+  const memoryOn = crowMcpOf(def).some(isMemoryTool);
   const name = row.display_name || "Crow";
   const sec = (key, body) => `<div class="btb-vsec"><h3>${escapeHtml(t(key, lang))}</h3>${body}</div>`;
   const hint = (key) => `<p class="btb-hint">${escapeHtml(t(key, lang))}</p>`;

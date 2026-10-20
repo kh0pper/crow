@@ -1370,6 +1370,7 @@ export const translations = {
   "botbuilder.voiceErrEscalation": { en: "Choose what happens to harder questions.", es: "Elige qué pasa con las preguntas difíciles." },
   "botbuilder.voiceErrPreset": { en: "Choose one of the two presets.", es: "Elige una de las dos configuraciones base." },
   "botbuilder.voiceErrCloudModel": { en: "Choose a model for the cloud preset.", es: "Elige un modelo para la opción en la nube." },
+  "botbuilder.voiceErrCorrupt": { en: "Crow's voice settings can't be read. They are kept as they are; ask for help repairing them.", es: "No se pueden leer los ajustes de voz de Crow. Se guardan tal como están; pide ayuda para repararlos." },
   "botbuilder.voiceErrMissing": { en: "Crow's voice is not set up on this instance yet. It is created the first time someone talks to Crow.", es: "La voz de Crow todavía no está configurada en esta instancia. Se crea la primera vez que alguien habla con Crow." },
   // "By voice on displays: …" (voice-use.js): what the bot can do by voice on a display, from the Kiosk listing.
   "botbuilder.abilBy": { en: "By voice on displays: {list}", es: "Por voz en pantallas: {list}" },

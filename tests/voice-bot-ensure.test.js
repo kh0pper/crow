@@ -322,3 +322,50 @@ test("boot hook: a failure is caught and logged, never thrown", async () => {
   assert.equal(res.created, false);
   assert.equal(res.error, "no db");
 });
+
+// ── final-review fix: a corrupt voice row is never silent ───────────────────
+
+async function captureWarn(fn) {
+  const orig = console.warn;
+  const lines = [];
+  console.warn = (...a) => { lines.push(a.map(String).join(" ")); };
+  try { return { out: await fn(), lines }; } finally { console.warn = orig; }
+}
+
+test("a corrupt voice row: the boot ensure and the turn-time ensure each warn once, naming the row, and leave it untouched", async () => {
+  seedBot(CROW_VOICE_BOT_ID, "{not json");
+  const { ensureVoiceBotAtBoot } = await import("../servers/gateway/boot/post-listen.js");
+  const boot = await captureWarn(() => ensureVoiceBotAtBoot({ noAuth: false }));
+  assert.equal(boot.out.corrupt, true);
+  const hits = (lines) => lines.filter((l) => l.includes("crow.voice") && /left untouched/.test(l));
+  assert.equal(hits(boot.lines).length, 1, boot.lines.join("\n"));
+  const { defaultVoiceDeps } = await import("../servers/gateway/voice/turn.js");
+  const deps = await defaultVoiceDeps();
+  const db = createDbClient();
+  try {
+    const t = await captureWarn(() => deps.ensureVoiceBot(db));
+    assert.equal(hits(t.lines).length, 1, t.lines.join("\n"));
+  } finally { db.close?.(); }
+  assert.equal(voiceRow().definition, "{not json");
+});
+
+test("a voice turn on a corrupt voice row: the no-assistant result, no throw, the row text unchanged", async () => {
+  seedBot(CROW_VOICE_BOT_ID, "{not json");
+  const { harness } = await import("./fixtures/voice-turn-harness.mjs");
+  const { ensureCrowVoiceBot } = await import("../servers/gateway/voice/ensure-voice-bot.js");
+  const h = harness();
+  h.deps.voiceBotId = CROW_VOICE_BOT_ID;
+  h.deps.loadBotRow = async (db, id) => (await db.execute({ sql: "SELECT bot_id, definition, enabled FROM pi_bot_defs WHERE bot_id = ?", args: [id] })).rows[0] || null;
+  const warned = [];
+  h.deps.ensureVoiceBot = async (db) => { await ensureCrowVoiceBot(db, { log: () => {}, warn: (m) => warned.push(m) }); };
+  const db = createDbClient();
+  try {
+    let r;
+    await assert.doesNotReject(async () => { r = await h.runner.runVoiceTurn({ db, device: h.device, transcript: "hello", sink: h.sink }); });
+    assert.deepEqual(h.events.filter((e) => e.type === "error").map((e) => e.code), ["no_bound_bot"]);
+    assert.ok(r, "the turn returned a result");
+    assert.equal(h.log.length, 0, "no model was called");
+    assert.equal(warned.length, 1);
+  } finally { db.close?.(); }
+  assert.equal(voiceRow().definition, "{not json");
+});

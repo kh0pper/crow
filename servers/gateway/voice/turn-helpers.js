@@ -144,16 +144,34 @@ const DESTRUCTIVE_REGEX = /^crow_(delete|remove|destroy|unpublish)_/;
 export const AFFIRMATIVE_STARTS = /^\s*(?:(?:yes|yeah|yep|yup|confirmed?|do it|go ahead|proceed|ok|okay)\b|¡?(?:s[ií]|claro|dale|hazlo|adelante|vale|de acuerdo)(?=[\s,.!?]|$))/i;
 export const NEGATIVE_STARTS = /^\s*(?:(?:no|nope|cancel|stop|wait|nevermind|never mind)\b|¡?(?:no|espera|cancela|para)(?=[\s,.!?]|$))/i;
 
+// A negation in the first few words ("claro que no", "of course not", "yes, no wait") is never a yes.
+const NEGATION_WORDS = new Set(["no", "not", "nope", "don't", "dont", "never", "nunca", "tampoco"]);
+const NEGATION_WINDOW = 4;
+const leadNegated = (text) => String(text || "").toLowerCase().replace(/[\u2018\u2019]/g, "'")
+  .split(/[^\p{L}']+/u).filter(Boolean).slice(0, NEGATION_WINDOW).some((w) => NEGATION_WORDS.has(w));
+/** A spoken yes: starts as one, and no negation word in its first few words. */
+export const isAffirmative = (text) => AFFIRMATIVE_STARTS.test(text || "") && !leadNegated(text);
+/** A spoken no: starts as one, or a negation word in its first few words. */
+export const isNegative = (text) => NEGATIVE_STARTS.test(text || "") || leadNegated(text);
+
 export function isDestructiveTool(name) {
   if (!name) return false;
   return DESTRUCTIVE_EXACT.has(name) || DESTRUCTIVE_REGEX.test(name);
 }
 
+/**
+ * The action the confirm question names. A proxied call (crow_memory { action, params }) carries its
+ * details in `params`; both places are read. crow_update_schedule with delete: true deletes.
+ */
 export function describeDestructiveAction(tc) {
-  const base = (tc.name || "").replace(/^crow_/, "").replace(/_/g, " ");
-  const arg = tc.arguments || {};
-  const ref = arg.id || arg.slug || arg.post_id || arg.memory_id || arg.setlist_id || "";
-  return ref ? `${base} ${ref}` : base;
+  const top = tc.arguments && typeof tc.arguments === "object" ? tc.arguments : {};
+  const params = top.params && typeof top.params === "object" ? top.params : {};
+  const pick = (k) => (top[k] !== undefined && top[k] !== null && top[k] !== "" ? top[k] : params[k]);
+  let name = String(tc.name || "");
+  if (name === "crow_update_schedule" && (pick("delete") === true || pick("delete") === "true")) name = "crow_delete_schedule";
+  const base = name.replace(/^crow_/, "").replace(/_/g, " ");
+  const ref = ["id", "slug", "post_id", "memory_id", "setlist_id", "section_key"].map(pick).find((v) => v !== undefined && v !== null && v !== "") ?? "";
+  return ref !== "" ? `${base} ${ref}` : base;
 }
 
 export function canonicalArgsHash(args) {
@@ -174,8 +192,8 @@ export function createConfirmGate({ now = Date.now, ttlMs = CONFIRM_TTL_MS } = {
     check({ deviceId, eff, args, transcript }) {
       const p = pending.get(deviceId);
       const hash = canonicalArgsHash(args);
-      const yes = AFFIRMATIVE_STARTS.test(transcript || "");
-      const no = NEGATIVE_STARTS.test(transcript || "");
+      const yes = isAffirmative(transcript);
+      const no = isNegative(transcript);
       if (p && p.toolName === eff && p.argsHash === hash && now() - p.at < ttlMs && yes && !no) {
         pending.delete(deviceId);
         return "allow";

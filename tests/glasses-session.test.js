@@ -257,6 +257,11 @@ test("no bound bot still answers: the session runs the turn with the shared voic
   assert.equal(opts.fallbackText, STRINGS.es.fallback, "the glasses' own lines still win");
 });
 
+test("the glasses' no-assistant line points at Crow's voice in Bot Builder (en + es)", () => {
+  assert.equal(STRINGS.en.no_bot, "Crow's voice is switched off or unavailable. Check Crow's voice in Bot Builder.");
+  assert.equal(STRINGS.es.no_bot, "La voz de Crow está apagada o no disponible. Revisa la voz de Crow en Bot Builder.");
+});
+
 test("the bound assistant was switched off: spoken, not silent", async () => {
   reset();
   const evs = await withVoiceBot({ enabled: 0 }, async () => {

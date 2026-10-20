@@ -470,7 +470,8 @@ export function createKioskRuntime(deps) {
       return [];
     },
     wrapPcmAsWav: deps.wrapPcmAsWav,
-    warmup: (d) => deps.sttWarmup(d),
+    // Hello warms the STT the turns really use (Crow's, through warm below; called only after hello, so after it is set).
+    warmup: (d) => warm(d),
     helloTimeoutMs: deps.helloTimeoutMs,
     now, log,
   });

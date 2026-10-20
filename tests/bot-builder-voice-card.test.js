@@ -376,3 +376,50 @@ test("voice editor strings: en + es, differing, no backtick or dollar-brace", ()
   assert.equal(T("botbuilder.voiceCloudSlower"), "A cloud model makes every voice turn slower than the local quick model.");
   assert.equal(T("botbuilder.voiceCloudLeaves"), "With a cloud model, what you say to Crow is sent to {provider}.");
 });
+
+// ── final-review fixes ──────────────────────────────────────────────────────
+
+test("Memory tools off removes every crow-memory/ entry, a carried one too; a preset switch keeps it off; on adds the three back", async () => {
+  const def = JSON.parse(JSON.stringify(SEED_DEF));
+  def.tools.crow_mcp.push("crow-memory/crow_list_memories");   // a read-only memory tool the migration carried
+  await reset(def);
+  const mem = (d) => d.tools.crow_mcp.filter((x) => x.startsWith("crow-memory/"));
+  assert.match(await editor(), /name="memory_tools"[^>]*checked/, "on while any memory entry is there");
+  assert.equal(qOf(await post(await saveBody({ memory_tools: "off" }))).get("saved"), "1");
+  assert.deepEqual(mem(await voiceDef()), [], "no crow-memory/ entry is left");
+  assert.doesNotMatch(await editor(), /name="memory_tools"[^>]*checked/, "the switch shows off");
+  const sw = await post({ action: "voice_bot_preset", bot_id: "crow.voice", rev: voiceRev(await voiceRow()), preset: "cloud", cloud_model: "cloud-x/model-y" });
+  assert.equal(qOf(sw).get("saved"), "1", sw);
+  assert.deepEqual(mem(await voiceDef()), [], "still off after a preset switch");
+  assert.equal(qOf(await post(await saveBody({ memory_tools: "on" }))).get("saved"), "1");
+  assert.deepEqual(mem(await voiceDef()).sort(), ["crow-memory/crow_recall_by_context", "crow-memory/crow_search_memories", "crow-memory/crow_store_memory"]);
+  await reset();
+});
+
+test("a preset switch with only a carried memory entry keeps memory on (it is on)", async () => {
+  const def = JSON.parse(JSON.stringify(SEED_DEF));
+  def.tools.crow_mcp = def.tools.crow_mcp.filter((x) => !x.startsWith("crow-memory/"));
+  def.tools.crow_mcp.push("crow-memory/crow_list_memories");
+  await reset(def);
+  const sw = await post({ action: "voice_bot_preset", bot_id: "crow.voice", rev: voiceRev(await voiceRow()), preset: "fast_local" });
+  assert.equal(qOf(sw).get("saved"), "1", sw);
+  const mem = (await voiceDef()).tools.crow_mcp.filter((x) => x.startsWith("crow-memory/"));
+  assert.ok(mem.includes("crow-memory/crow_list_memories") && mem.includes("crow-memory/crow_store_memory"), mem.join(","));
+  await reset();
+});
+
+test("a corrupt voice row: the editor says it can't be read and is kept, en + es; a save is refused and writes nothing", async () => {
+  await db.execute({ sql: "UPDATE pi_bot_defs SET definition=? WHERE bot_id='crow.voice'", args: ["{not json"] });
+  try {
+    const { escapeHtml } = await import("../servers/gateway/dashboard/shared/components.js");
+    for (const lang of ["en", "es"]) {
+      const html = await editor({ lang });
+      assert.ok(html.includes(escapeHtml(T("botbuilder.voiceErrCorrupt", lang))), lang);
+      assert.ok(!html.includes(escapeHtml(T("botbuilder.voiceErrMissing", lang))), `${lang}: not the missing-row text`);
+    }
+    assert.equal(T("botbuilder.voiceErrCorrupt"), "Crow's voice settings can't be read. They are kept as they are; ask for help repairing them.");
+    const url = await post({ action: "voice_bot_save", bot_id: "crow.voice", rev: "x", display_name: "Crow" });
+    assert.equal(qOf(url).get("error"), "voice_corrupt", url);
+    assert.equal((await voiceRow()).definition, "{not json");
+  } finally { await reset(); }
+});

@@ -131,3 +131,47 @@ test("review I2/M8/M9: leading whitespace never uses up the first-clause split; 
   assert.equal(H.firstClauseEnd("The ratio is 3 - 2 and "), -1, "a spaced hyphen is not a clause break");
   assert.equal(H.CLAUSE_END.global, false);
 });
+
+test("a negation in the first words is never a yes, and always a no (claro que no, of course not, yes no)", () => {
+  for (const t of ["claro que no", "Claro que no, no lo borres", "of course not", "yes, no wait", "Yes no", "sí, pero no", "dale, nunca", "ok don't", "yeah, dont", "claro, tampoco", "yes never mind", "of course not!"]) {
+    assert.equal(H.isAffirmative(t), false, `${t}: not a yes`);
+    assert.equal(H.isNegative(t), true, `${t}: a no`);
+  }
+  for (const t of ["sí", "Sí.", "claro", "dale", "yes please", "yes do it", "vale", "de acuerdo", "ok"]) {
+    assert.equal(H.isAffirmative(t), true, `${t}: a yes`);
+    assert.equal(H.isNegative(t), false, `${t}: not a no`);
+  }
+  for (const t of ["no", "nope", "no, espera", "cancel", "para", "never mind"]) assert.equal(H.isNegative(t), true, t);
+  // A negation late in a long yes does not undo it (only the first few words count).
+  assert.equal(H.isAffirmative("yes go ahead and delete the one that is no longer needed"), true);
+});
+
+test("the confirm gate never allows a pending delete on a negated yes", () => {
+  for (const no of ["claro que no", "Claro que no, no lo borres", "of course not", "yes, no wait"]) {
+    let t = 0;
+    const g = H.createConfirmGate({ now: () => t });
+    const call = { deviceId: "d", eff: "crow_delete_post", args: { id: 3 } };
+    assert.equal(g.check({ ...call, transcript: "delete post 3" }), "confirm");
+    t = 1000;
+    assert.equal(g.check({ ...call, transcript: no }), "confirm", no);
+  }
+  for (const yes of ["sí", "claro", "dale", "yes please"]) {
+    let t = 0;
+    const g = H.createConfirmGate({ now: () => t });
+    const call = { deviceId: "d", eff: "crow_delete_post", args: { id: 3 } };
+    g.check({ ...call, transcript: "delete post 3" });
+    t = 1000;
+    assert.equal(g.check({ ...call, transcript: yes }), "allow", yes);
+  }
+});
+
+test("the confirm question names what happens: proxied args are read, a schedule delete says delete", () => {
+  const d = H.describeDestructiveAction;
+  assert.equal(d({ name: "crow_update_schedule", arguments: { id: 3, delete: true } }), "delete schedule 3");
+  assert.equal(d({ name: "crow_update_schedule", arguments: { action: "update_schedule", params: { id: 3, delete: true } } }), "delete schedule 3");
+  assert.equal(d({ name: "crow_update_schedule", arguments: { action: "update_schedule", params: { id: 3, cron_expression: "0 8 * * *" } } }), "update schedule 3");
+  assert.equal(d({ name: "crow_delete_memory", arguments: { action: "delete_memory", params: { id: 12 } } }), "delete memory 12");
+  assert.equal(d({ name: "crow_update_context_section", arguments: { action: "update_context_section", params: { section_key: "notes" } } }), "update context section notes");
+  assert.equal(d({ name: "crow_delete_post", arguments: { id: 3 } }), "delete post 3", "the direct form is unchanged");
+  assert.equal(d({ name: "crow_delete_post", arguments: {} }), "delete post");
+});

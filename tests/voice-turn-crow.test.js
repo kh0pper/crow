@@ -261,3 +261,72 @@ test("a voice bot never re-enables a schedule or creates a pipeline: one through
   await turn(o, { botId: "household", transcript: "turn it back on" });
   assert.deepEqual(o.calls.executed, ["crow_update_schedule"]);
 });
+
+// ── final-review fixes ──────────────────────────────────────────────────────
+
+test("a negated Spanish or English yes never confirms a pending delete, and declines it", async () => {
+  const del = { type: "tool_call", id: "d1", name: "crow_delete_post", arguments: { id: 3 } };
+  for (const no of ["claro que no", "Claro que no, no lo borres", "of course not", "yes, no wait"]) {
+    const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["crow_delete_post"], rounds: [callRound(del), sayRound("¿Seguro?"), callRound(del), sayRound("Vale.")] });
+    await turn(h, { transcript: "borra el post 3" });
+    await turn(h, { transcript: no });
+    assert.deepEqual(h.calls.executed, [], no);
+    assert.match(lastToolText(h, 3), /Confirmation required/, `${no}: still asks`);
+  }
+  for (const yes of ["sí", "claro", "dale", "yes please"]) {
+    const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["crow_delete_post"], rounds: [callRound(del), sayRound("¿Seguro?"), callRound(del), sayRound("Hecho.")] });
+    await turn(h, { transcript: "borra el post 3" });
+    await turn(h, { transcript: yes });
+    assert.deepEqual(h.calls.executed, ["crow_delete_post"], yes);
+  }
+});
+
+test("a voice bot's notification settings change waits for the yes, direct or through the memory proxy; a get does not", async () => {
+  const cases = [
+    ["crow_notification_settings", { type: "tool_call", id: "n1", name: "crow_notification_settings", arguments: { action: "set", types_enabled: ["reminder"] } }],
+    ["crow_memory", { type: "tool_call", id: "n2", name: "crow_memory", arguments: { action: "notification_settings", params: { action: "set", types_enabled: [] } } }],
+  ];
+  for (const [tool, tc] of cases) {
+    const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: [tool], rounds: [callRound(tc), sayRound("Sure?"), callRound(tc), sayRound("Done.")] });
+    await turn(h, { transcript: "turn off my notifications", memoryOn: true });
+    assert.deepEqual(h.calls.executed, [], tool);
+    assert.match(lastToolText(h, 1), /Confirmation required/, tool);
+    await turn(h, { transcript: "yes", memoryOn: true });
+    assert.deepEqual(h.calls.executed, [tool], tool);
+  }
+  const get = { type: "tool_call", id: "n3", name: "crow_notification_settings", arguments: { action: "get" } };
+  const g = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["crow_notification_settings"], rounds: [callRound(get), sayRound("All on.")] });
+  await turn(g, { transcript: "which notifications are on" });
+  assert.deepEqual(g.calls.executed, ["crow_notification_settings"], "a read needs no yes");
+  // An ordinary bot is unaffected.
+  const set = cases[0][1];
+  const o = crowHarness({ chatTools: ["crow_notification_settings"], rounds: [callRound(set), sayRound("Done.")] });
+  await turn(o, { botId: "household", transcript: "turn off my notifications" });
+  assert.deepEqual(o.calls.executed, ["crow_notification_settings"]);
+});
+
+test("the confirm question for a proxied schedule delete says delete and names the schedule", async () => {
+  const tc = { type: "tool_call", id: "m1", name: "crow_memory", arguments: { action: "update_schedule", params: { id: 3, delete: true } } };
+  const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["crow_memory"], rounds: [callRound(tc), sayRound("Sure?")] });
+  await turn(h, { transcript: "delete the plants reminder", memoryOn: true });
+  assert.deepEqual(h.calls.executed, []);
+  assert.match(lastToolText(h, 1), /Are you sure you want to delete schedule 3\?/);
+});
+
+test("the voice system message is byte-identical on two turns with different transcripts and per-turn context", async () => {
+  const { generateSystemPrompt } = await import("../servers/gateway/ai/system-prompt.js");
+  const { voiceBotDefinition } = await import("../servers/shared/voice-bot.js");
+  const def = { ...voiceBotDefinition({ preset: "fast_local", fastKey: "crow-voice/qwen3.5-4b" }), bot_id: "crow.voice", display_name: "Crow" };
+  const h = crowHarness({ rows: { "crow.voice": def }, rounds: [sayRound("Lisbon."), sayRound("Two timers.")] });
+  h.deps.generateSystemPrompt = generateSystemPrompt;
+  await turn(h, { transcript: "What is the capital of Portugal?", turnContext: "Open windows: none." });
+  h.c.advance(5_000);
+  await turn(h, { transcript: "How many timers are running?", turnContext: "Open windows: timer 1, timer 2." });
+  assert.equal(h.log.length, 2);
+  const s0 = h.log[0].messages[0], s1 = h.log[1].messages[0];
+  assert.equal(s0.role, "system");
+  assert.ok(s0.content.length > 0);
+  assert.equal(s1.content, s0.content, "byte-identical system message");
+  assert.ok(!/Open windows/.test(s0.content), "per-turn context never rides on the system message");
+  assert.match(h.log[1].messages.at(-1).content, /timer 1, timer 2/, "it rides on the user message");
+});
