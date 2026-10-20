@@ -15,11 +15,10 @@
  *   2. playerBarHtml(lang);
  *   3. a guard that runs BEFORE the player: inside a frame (Perch's "Open beside chat") the bar is
  *      removed, so the player exits at once — the hosting page already has the tab's one player;
- *   4. playerBarJs(lang);
- *   5. the reserve script: --crow-player-h on <html> is the bar's height while it shows, else 0px, so a
- *      page pads its content and bottom sheets with var(--crow-player-h,0px). It re-measures on the bar's
- *      style/children/text changes, on the bar's own resize (ResizeObserver, where there is one), once web
- *      fonts land, and on a window resize. Installs once per document.
+ *   4. playerBarJs(lang), which also runs the bar's reserve (player.js PLAYER_RESERVE_JS, the one copy the
+ *      dashboard layout uses too): --crow-player-h on <html> is the bar's height while it shows, else 0px
+ *      (also 0px inside a frame, where the guard removed the bar), so a page pads its content and bottom
+ *      sheets with var(--crow-player-h,0px).
  */
 import { designTokensCss } from "./design-tokens.js";
 import { playerBarHtml, playerBarJs } from "./player.js";
@@ -32,28 +31,10 @@ function darkBarTokens() {
 
 const FRAME_GUARD = `if (window.top !== window) { var b = document.getElementById('crow-player-bar'); if (b && b.parentNode) b.parentNode.removeChild(b); }`;
 
-const RESERVE = `(function () {
-  var root = document.documentElement;
-  if (root.getAttribute('data-crow-player-reserve') === '1') return;
-  root.setAttribute('data-crow-player-reserve', '1');
-  var bar = document.getElementById('crow-player-bar');
-  function set() {
-    var shown = !!bar && bar.isConnected !== false && bar.style.display !== 'none';
-    root.style.setProperty('--crow-player-h', (shown ? (bar.offsetHeight || 0) : 0) + 'px');
-  }
-  set();
-  if (!bar) return;
-  try { new MutationObserver(set).observe(bar, { attributes: true, attributeFilter: ['style'], childList: true, characterData: true, subtree: true }); } catch (e) {}
-  try { if (typeof ResizeObserver === 'function') new ResizeObserver(function () { set(); }).observe(bar); } catch (e) {}
-  try { if (document.fonts && document.fonts.ready) document.fonts.ready.then(set, function () {}); } catch (e) {}
-  window.addEventListener('resize', set);
-})();`;
-
 export function playerShellHtml(lang = "en", { dark = false } = {}) {
   return `<style>${designTokensCss()}
 #crow-player-bar{--crow-sidebar-width:0px;font-family:var(--crow-body-font);color:var(--crow-text-primary)}${dark ? "\n" + darkBarTokens() : ""}</style>
 ${playerBarHtml(lang)}
 <script>${FRAME_GUARD}</script>
-<script>${playerBarJs(lang)}</script>
-<script>${RESERVE}</script>`;
+<script>${playerBarJs(lang)}</script>`;
 }

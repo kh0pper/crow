@@ -482,7 +482,7 @@ export const headerIconsCss = `
   .crow-call-toast-dismiss:hover { color: var(--crow-error, #ef4444); }
 
   @media (max-width: 768px) {
-    .header-dropdown { position: fixed; top: auto; bottom: 60px; right: 8px; left: 8px; min-width: auto; max-width: none; }
+    .header-dropdown { position: fixed; top: auto; bottom: calc(60px + var(--crow-player-h,0px)); right: 8px; left: 8px; min-width: auto; max-width: none; }
     .health-label { display: none; }
     .crow-call-toast { max-width: none; width: calc(100% - 1rem); }
   }
@@ -881,7 +881,7 @@ export const tamagotchiCss = `
   .crow-health-crit { color: var(--crow-error); }
 
   @media (max-width: 768px) {
-    .crow-dropdown { position: fixed; top: auto; bottom: 60px; right: 8px; left: 8px; min-width: auto; max-width: none; }
+    .crow-dropdown { position: fixed; top: auto; bottom: calc(60px + var(--crow-player-h,0px)); right: 8px; left: 8px; min-width: auto; max-width: none; }
   }
 `;
 

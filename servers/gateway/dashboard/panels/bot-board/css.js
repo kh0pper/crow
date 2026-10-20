@@ -163,7 +163,7 @@ export function botBoardStyles() {
      the picker's sheet docks to the bottom of the screen, and a tabbed board
      shows one lane at a time. */
   @media (max-width:640px){.bb-roost{display:none}
-    .bb-sheet{position:fixed;left:0;right:0;bottom:0;top:auto;width:auto;max-height:75vh;border-radius:var(--crow-radius-card) var(--crow-radius-card) 0 0;padding:.75rem .75rem calc(.75rem + env(safe-area-inset-bottom))}
+    .bb-sheet{position:fixed;left:0;right:0;bottom:var(--crow-player-h,0px);top:auto;width:auto;max-height:75vh;border-radius:var(--crow-radius-card) var(--crow-radius-card) 0 0;padding:.75rem .75rem calc(.75rem + max(0px, env(safe-area-inset-bottom, 0px) - var(--crow-player-h,0px)))}
     .bb-picker[open]>.bb-pick-btn::before{background:rgba(0,0,0,.35)}
     .bb-board.bb-tabbed{grid-template-columns:minmax(0,1fr);overflow:visible}
     .bb-board.bb-tabbed .bb-col:not(.bb-lane-cur){display:none}
@@ -206,7 +206,7 @@ export function botBoardStyles() {
   .bb-nojs-move{display:flex;gap:.25rem;flex-wrap:wrap;margin-top:.4rem}
   .bb-nojs-move button{font-size:.66rem;padding:.15rem .4rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-secondary);cursor:pointer}
   body.bb-js .bb-nojs-move{display:none}
-  .bb-drawer{position:fixed;top:0;right:0;height:100vh;height:100dvh;width:min(480px,92vw);background:var(--crow-bg-surface);border-left:1px solid var(--crow-border);box-shadow:-8px 0 24px rgba(0,0,0,.3);transform:translateX(100%);transition:transform .18s ease;z-index:50;overflow-y:auto;padding:1rem}
+  .bb-drawer{position:fixed;top:0;right:0;height:100vh;height:calc(100dvh - var(--crow-player-h,0px));width:min(480px,92vw);background:var(--crow-bg-surface);border-left:1px solid var(--crow-border);box-shadow:-8px 0 24px rgba(0,0,0,.3);transform:translateX(100%);transition:transform .18s ease;z-index:50;overflow-y:auto;padding:1rem}
   .bb-drawer.bb-open{transform:translateX(0)}
   .bb-drawer label{display:block;font-size:.75rem;color:var(--crow-text-muted);text-transform:uppercase;letter-spacing:.05em;margin:.7rem 0 .25rem}
   .bb-drawer input,.bb-drawer select,.bb-drawer textarea{width:100%;padding:.45rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:6px;color:var(--crow-text-primary);font:inherit}
