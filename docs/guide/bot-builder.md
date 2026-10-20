@@ -119,6 +119,16 @@ Messaging or steering a session extends that from reading to driving: anyone who
 
 Attach the Perch channel only on a Crow whose dashboard login you treat as seriously as shell access on that machine — a live session can run any tool the agent's own permission policy allows, including ones that start programs on the machine it runs on.
 
+## Decision cards
+
+A bot that needs you to choose between a few options can ask with a **decision card** instead of a free-text question. It calls `board_ask_decision` on the board's MCP server; the card shows up on the Bot Board, and opening it shows a **Decision** block above the plan.
+
+**What a decision holds.** A question (up to 300 characters), optional context (shown as plain text), and **2 to 4 options**. Each option has a label (up to 120 characters) and a consequence line (up to 240) saying what happens if you pick it. Exactly one option is marked recommended, and it must be listed first; the drawer badges it **Recommended**. An option can also carry `snooze_days` (0 to 90: after you pick it, the same question is not asked again for that many days) and a follow-up card to create. A decision expires on its `expires` date (default seven days out); an expired card is read-only.
+
+**Answering.** Click an option, or **Other…** to type your own answer (up to 2,000 characters) and **Send answer**. Only the dashboard can answer; no MCP tool can. The choice is recorded once: a second click or a second tab gets "already decided" and sees the first answer. The card then closes. If the chosen option names a follow-up card, exactly one is created, always **gated** (it waits for your plan approval), and the drawer links to it. The card's history shows **decision asked** and **decided**.
+
+**No repeats, no floods.** A card whose `fingerprint` matches one that is still open is not created again; the open card is returned instead (`deduped: true`). The same holds while a chosen option's snooze is running. A bot gets at most **5 open decision cards per batch**; a sixth is refused (`batch_full`). Asking never pushes a notification: the bot calls `board_notify_decisions` once at the end of the batch for one grouped push, and each card is pushed at most once however often that is called.
+
 ## Permissions and safety
 
 Every agent carries a permission policy that governs what it may do without asking:

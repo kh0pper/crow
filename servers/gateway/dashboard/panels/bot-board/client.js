@@ -7,6 +7,7 @@
 
 import { tJs } from "../../shared/i18n.js";
 import { birdDrawerJs } from "./drawer.js";
+import { decisionJs } from "./decision-client.js";
 
 export function clientJs(botId, trackerType, projectId, trackerSlug, contextFields, lang, includeArchived) {
   const bi = botId == null ? "null" : JSON.stringify(String(botId));
@@ -133,6 +134,8 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     var d_archiveBtn=$('bb-d-archive'), d_unarchiveBtn=$('bb-d-unarchive');
     var DRAWER_FIELD_IDS=['bb-d-title-in','bb-d-status','bb-d-prio','bb-d-due','bb-d-owner','bb-d-tags','bb-d-desc','bb-d-project','bb-d-autonomy','bb-d-save','bb-d-cancel','bb-d-plan','bb-d-plan-save','bb-d-plan-approve'];
     applyArchivedUi(d_archiveBtn,d_unarchiveBtn,DRAWER_FIELD_IDS,cur.archived,cur.locked);
+    // Clear the previous card's decision block until this card's GET lands.
+    renderDecision(null);
     api('GET','/card/'+cur.id).then(function(r){
       if(r.ok&&r.j&&r.j.card){var c=r.j.card;
         // Server truth wins over the DOM snapshot (cur.archived came from the
@@ -162,6 +165,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         // response — additive keys, no extra round trip.
         renderHistory(r.j.mutations||[]);
         renderResults(r.j.latest_results||[], (r.j.board&&r.j.board.terminal_values)||[]);
+        renderDecision(r.j.decision);
       } else if(!r.ok){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); }
     }).catch(function(){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });
     loadPlan();
@@ -201,7 +205,10 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     plan_save:'${tJs("board.mutationVerb.plan_save", lang)}',
     plan_approve:'${tJs("board.mutationVerb.plan_approve", lang)}',
     result_report:'${tJs("board.mutationVerb.result_report", lang)}',
-    result_decide:'${tJs("board.mutationVerb.result_decide", lang)}'
+    result_decide:'${tJs("board.mutationVerb.result_decide", lang)}',
+    decision_ask:'${tJs("board.mutationVerb.decision_ask", lang)}',
+    decision:'${tJs("board.mutationVerb.decision", lang)}',
+    decision_expire:'${tJs("board.mutationVerb.decision_expire", lang)}'
   };
   function actorLabel(m){
     if(m.actor_kind==='bot') return m.actor_id||'bot';
@@ -315,6 +322,11 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     box.appendChild(btnRow);
     wrap.appendChild(box);
   }
+
+  // Decision cards (renderDecision): emitted by decision-client.js, spliced
+  // in as a bare block sharing this IIFE's scope ($, clearEl, api, msg,
+  // errText, cur).
+  ${decisionJs(lang)}
 
   // ---- Tracker item drawer ----
   function fillTrackerDrawer(cardEl){
