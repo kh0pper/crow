@@ -26,6 +26,5 @@
     }
   ],
   "panel": "panel/calls.js",
-  "skills": ["skills/calls.md"],
-  "enhancedBy": ["companion"]
+  "skills": ["skills/calls.md"]
 }

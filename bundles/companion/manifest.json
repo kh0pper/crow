@@ -1,7 +1,8 @@
 {
   "id": "companion",
   "name": "AI Companion",
-  "version": "1.0.4",
+  "version": "1.0.5",
+  "draft": true,
   "privileged": true,
   "install_consent_messages": {
     "en": "The AI Companion uses host networking so it can reach Crow and your local models on this machine. That also lets it reach every service on this machine that listens only on 127.0.0.1. Its own web page listens on 127.0.0.1 by default (COMPANION_BIND_HOST), and Crow serves it to your tailnet over HTTPS. It mounts Crow's database and your installed extensions folder read-only (that folder holds the other extensions' settings and passwords), and it is given Crow's local MCP token.",
