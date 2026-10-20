@@ -175,3 +175,31 @@ test("an installed draft Companion + Maker Lab still uninstall: Maker Lab first,
   });
   assert.ok(restarts.length >= 1, "Remove still schedules the gateway restart that unloads the panel / web UI");
 });
+
+test("the Companion's version bump refreshes an installed copy without bringing its compose file or Dockerfile in", async () => {
+  // Plan step A2/A4: the installed copy on a live box has no compose file, so
+  // Remove skips `docker compose down`. The bump must not change that, and must
+  // not shell out (no npm, no docker) at gateway boot.
+  B._setAppBundlesForTest(APP_FIXTURE);
+  rmSync(join(APP_FIXTURE, "companion"), { recursive: true, force: true });
+  stageRepoCopy("companion");
+  for (const f of ["docker-compose.yml", "Dockerfile", "settings-section.js"]) {
+    cpSync(join(ROOT, "bundles", "companion", f), join(APP_FIXTURE, "companion", f));
+  }
+  writeFileSync(join(CROW_HOME, "installed.json"), JSON.stringify([{ id: "companion", type: "bundle", version: "1.0.0" }]));
+  const dest = join(BUNDLES_DIR, "companion");
+  rmSync(dest, { recursive: true, force: true });
+  mkdirSync(dest, { recursive: true });
+  writeFileSync(join(dest, "manifest.json"), JSON.stringify({ ...repoManifest("companion"), version: "1.0.4", draft: undefined }));
+
+  const calls = [];
+  const out = await B.repairInstalledBundleAssets({ appBundles: APP_FIXTURE, run: async (...a) => { calls.push(a); return { stdout: "", stderr: "" }; }, log: () => {} });
+  assert.deepEqual(out.errors, []);
+  assert.ok(out.repaired.some((r) => r.startsWith("companion: refreshed 1.0.4 -> ")), JSON.stringify(out.repaired));
+  const installed = JSON.parse(readFileSync(join(dest, "manifest.json"), "utf8"));
+  assert.equal(installed.version, repoManifest("companion").version);
+  assert.equal(installed.draft, true);
+  assert.equal(existsSync(join(dest, "docker-compose.yml")), false, "Remove must still find no compose file");
+  assert.equal(existsSync(join(dest, "Dockerfile")), false);
+  assert.deepEqual(calls, [], "the refresh must not run npm or docker");
+});
