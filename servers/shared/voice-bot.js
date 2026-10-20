@@ -127,13 +127,15 @@ const policyList = (def, key) => (Array.isArray(def?.permission_policy?.[key]) ?
  * mcp__<server>__<tool> (Bot Builder's def-adapter.js stores both); the
  * "server/tool" key itself also counts.
  */
+function voiceTurnNames(key) {
+  const name = toolName(key);
+  return name.startsWith("crow_") ? [name] : [name, `crow_${name}`];
+}
 function policyEntryMatches(entry, key) {
   const k = String(key);
   const i = k.lastIndexOf("/");
-  const name = k.slice(i + 1);
-  const names = [k, name];
-  if (!name.startsWith("crow_")) names.push(`crow_${name}`);
-  if (i > 0) names.push(`mcp__${k.slice(0, i)}__${name}`);
+  const names = [k, ...voiceTurnNames(k)];
+  if (i > 0) names.push(`mcp__${k.slice(0, i)}__${k.slice(i + 1)}`);
   return names.includes(entry);
 }
 const isVoiceRow = (row) => isVoiceBotId(String(row.bot_id)) || isVoiceBotDef(parseDef(row.definition));
@@ -167,13 +169,15 @@ async function isProviderModel(db, key) {
  *
  * Tool carry-over: an added crow_mcp entry is carried only when it passes the
  * voice denylist, no source bot that selects it denies it, and the injected
- * toolEffect (servers/gateway/voice/action-claims.js) calls it "read". With no
- * toolEffect nothing extra is carried (fail closed). Source confirm entries
+ * toolEffect (servers/gateway/voice/action-claims.js) calls it "read", and its
+ * server maps (injected voiceCategoryFor, scripts/pi-bots/ext_registry.mjs) to
+ * no voice category or to one the preset already opens. With either dep
+ * missing nothing extra is carried (fail closed). Source confirm entries
  * for a carried tool are copied onto the voice bot's permission_policy.confirm.
  *
  * @returns {Promise<{created: boolean, corrupt?: true}>}
  */
-export async function ensureVoiceBot(db, { fastKey, readSetting, listDevices, toolEffect = null, log = () => {} } = {}) {
+export async function ensureVoiceBot(db, { fastKey, readSetting, listDevices, toolEffect = null, voiceCategoryFor = null, log = () => {} } = {}) {
   if (typeof fastKey !== "string" || !fastKey) throw new Error("fast_model_required");
 
   const existing = (await db.execute({ sql: "SELECT definition FROM pi_bot_defs WHERE bot_id = ?", args: [CROW_VOICE_BOT_ID] })).rows[0];
@@ -230,6 +234,13 @@ export async function ensureVoiceBot(db, { fastKey, readSetting, listDevices, to
   // Candidate additions in first-seen order, each with every source bot that selects it.
   const tools = [...def.tools.crow_mcp];
   const preset = new Set(tools);
+  // A crow_mcp entry on one of Crow's core servers opens that server's whole
+  // voice category proxy (every action, writes included), so a carried entry
+  // may only land in a category the preset already opens. Fail closed: with no
+  // category map nothing extra is carried.
+  const hasCategoryMap = typeof voiceCategoryFor === "function";
+  const categoryOf = (key) => { const i = key.indexOf("/"); return i > 0 ? voiceCategoryFor(key.slice(0, i)) : null; };
+  const presetCategories = new Set(hasCategoryMap ? tools.map(categoryOf).filter(Boolean) : []);
   const candidates = new Map();
   for (const src of sources) {
     for (const t of crowMcpOf(src)) {
@@ -243,12 +254,23 @@ export async function ensureVoiceBot(db, { fastKey, readSetting, listDevices, to
     let reason = null;
     if (deniedTool(t)) reason = "voice_denied";
     else if (srcs.some((src) => policyList(src, "deny").some((e) => policyEntryMatches(e, t)))) reason = "denied_by_source";
+    else if (!hasCategoryMap) reason = "core_category";
+    else if (categoryOf(t) && !presetCategories.has(categoryOf(t))) reason = "core_category";
     else if (typeof toolEffect !== "function" || toolEffect(toolName(t)) !== "read") reason = "not_read_only";
     if (reason) { skipped.push({ tool: t, reason }); continue; }
     tools.push(t); added.push(t);
+    let voiceSeesConfirm = false, matched = false;
     for (const src of srcs) {
-      for (const e of policyList(src, "confirm")) if (policyEntryMatches(e, t) && !confirm.includes(e)) confirm.push(e);
+      for (const e of policyList(src, "confirm")) {
+        if (!policyEntryMatches(e, t)) continue;
+        matched = true;
+        if (voiceTurnNames(t).includes(e)) voiceSeesConfirm = true;
+        if (!confirm.includes(e)) confirm.push(e);
+      }
     }
+    // The voice turn checks only the bare name and its crow_ form: a confirm
+    // stored only as mcp__<server>__<tool> (or server/tool) also gets the bare name.
+    if (matched && !voiceSeesConfirm && !confirm.includes(toolName(t))) confirm.push(toolName(t));
   }
   for (const e of confirm) if (!def.permission_policy.confirm.includes(e)) def.permission_policy.confirm.push(e);
   def.tools.crow_mcp = tools;

@@ -23,6 +23,7 @@ const { ensureVoiceBot, CROW_VOICE_BOT_ID, VOICE_DENY_TOOLS, voiceBotDefinition 
 const { listDevices } = await import("../servers/shared/device-store.js");
 const { createDbClient } = await import("../servers/db.js");
 const { toolEffect } = await import("../servers/gateway/voice/action-claims.js");
+const { voiceCategoryFor } = await import("../scripts/pi-bots/ext_registry.mjs");
 
 const FAST = "crow-voice/qwen3.5-4b";
 const PRESET = voiceBotDefinition({ preset: "fast_local", fastKey: FAST }).tools.crow_mcp;
@@ -52,7 +53,7 @@ const allDefs = () => { const c = raw(); const r = c.prepare("SELECT bot_id, def
 async function run(extra = {}) {
   const db = createDbClient();
   try {
-    return await ensureVoiceBot(db, { fastKey: FAST, readSetting, listDevices, toolEffect, log: () => {}, ...extra });
+    return await ensureVoiceBot(db, { fastKey: FAST, readSetting, listDevices, toolEffect, voiceCategoryFor, log: () => {}, ...extra });
   } finally { db.close?.(); }
 }
 
@@ -194,6 +195,39 @@ test("a carried read tool keeps the source bot's confirm entries", async () => {
   assert.deepEqual(def.permission_policy.confirm, ["mcp__gmail__gmail_search", "gmail_search"]);
   const preset = voiceBotDefinition({ preset: "fast_local", fastKey: FAST }).permission_policy;
   assert.deepEqual({ ...def.permission_policy, confirm: [] }, preset);
+});
+
+test("a read tool on a core category server is not carried (the whole category proxy would open)", async () => {
+  seedBot("alpha", { tools: { crow_mcp: ["crow-blog/crow_list_posts", "brave-search/brave_web_search"] } });
+  await run();
+  const def = voiceDef();
+  assert.ok(!def.tools.crow_mcp.some((t) => t.startsWith("crow-blog/")));
+  assert.ok(def.tools.crow_mcp.includes("brave-search/brave_web_search"));
+  assert.deepEqual(def.migrated_from.skipped_tools, [{ tool: "crow-blog/crow_list_posts", reason: "core_category" }]);
+});
+
+test("a core category the preset already covers grants nothing new", async () => {
+  seedBot("alpha", { tools: { crow_mcp: ["crow-memory/crow_list_memories"] } });
+  await run();
+  const def = voiceDef();
+  const cats = new Set(def.tools.crow_mcp.map((t) => voiceCategoryFor(t.slice(0, t.indexOf("/")))).filter(Boolean));
+  assert.deepEqual([...cats], ["memory"]);
+});
+
+test("without a voiceCategoryFor dep nothing extra is carried", async () => {
+  seedBot("alpha", { tools: { crow_mcp: ["brave-search/brave_web_search"] } });
+  await run({ voiceCategoryFor: undefined });
+  assert.deepEqual(voiceDef().tools.crow_mcp, PRESET);
+  assert.deepEqual(voiceDef().migrated_from.skipped_tools, [{ tool: "brave-search/brave_web_search", reason: "core_category" }]);
+});
+
+test("a confirm entry only in pi form also adds the bare name the voice turn checks", async () => {
+  seedBot("alpha", {
+    tools: { crow_mcp: ["gmail/gmail_search"] },
+    permission_policy: { confirm: ["mcp__gmail__gmail_search"] },
+  });
+  await run();
+  assert.deepEqual(voiceDef().permission_policy.confirm, ["mcp__gmail__gmail_search", "gmail_search"]);
 });
 
 test("a write tool is not carried", async () => {
