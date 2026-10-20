@@ -510,3 +510,9 @@ test("re-review R1: Spanish comparatives ('Pon la música más alta', 'Ponla má
   assert.equal(d.requests[0].tool_choice, undefined, "the TV: nothing forced");
   assert.equal(radio.media.current("kiosk-live").volume, DEFAULT_VOLUME);
 });
+
+test("the kiosk's own deny list is the shared voice deny list (parity, not a copy that can drift)", async () => {
+  const { VOICE_DENY_TOOLS } = await import("../servers/gateway/voice/crow-voice.js");
+  assert.ok(Object.isFrozen(KIOSK_DENY_TOOLS));
+  assert.deepEqual([...KIOSK_DENY_TOOLS].sort(), [...VOICE_DENY_TOOLS].sort());
+});

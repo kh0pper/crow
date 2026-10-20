@@ -180,11 +180,18 @@ export function stationSttHotwords(device, profile, stations, on = sttHotwordsOn
   if (!on || (lang && lang !== "en") || profile?.language !== "en") return "";
   return callSignHotwords(stations);
 }
-export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = {}, mediaLine = () => "", wrapTools = null, onToolResult = null, sttPrompt = null, sttHotwords = null } = {}) {
+export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = {}, mediaLine = () => "", wrapTools = null, onToolResult = null, sttPrompt = null, sttHotwords = null, crowVoice = null, voiceDef = null, cloud = false } = {}) {
   const tools = createDisplayTools(ctx);
   const cfg = () => (typeof settings === "function" ? settings() : settings) || {};
   const lang = cfg().lang;
+  // One set of voice rules for every surface (servers/gateway/voice/crow-voice.js, injected by the panel
+  // routes as o.crowVoice): spread first, so the display's own options and localized lines below win.
+  // Without it (an older caller, a test stub) the display keeps today's rules.
+  const shared = crowVoice && typeof crowVoice.turnOptions === "function"
+    ? crowVoice.turnOptions({ surface: ctx.surface, lang, voiceDef, cloud, actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp })
+    : { ...(ctx.surface ? { surface: ctx.surface } : {}), familiesOnIntent: true, actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp };
   return {
+    ...shared,
     extraTools: typeof wrapTools === "function" ? wrapTools(tools) : tools,
     // T0 and T1 (the tier framework), then the K1 fast path and the clock, unchanged, behind them.
     fastPaths: async (t) => (await matchSpoken(t, ctx)) || matchWmFastPath(t, ctx.store, ctx.deviceId, ctx.caps) || matchClockFastPath(t, { now: now(), tz }),
@@ -193,8 +200,8 @@ export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = 
     // A turn that asks for NEW content sees kinds and counts only (no open card's title to copy); a turn
     // that asks to CHANGE the open card sees its words.
     turnContext: (t, at = now()) => `${kioskNowContext(at, tz)}\n${mentionsRelativeDay(t) ? `${relativeDatesContext(at, tz)}\n` : ""}${displayTurnContext(ctx.store, ctx.deviceId, { countsOnly: wantsNewDisplay(t), media: mediaLine(), card: cardUpdate(t, ctx.store, ctx.deviceId) !== null })}`,
-    familiesOnIntent: true,
-    denyTools: KIOSK_DENY_TOOLS,
+    // The display's own deny list always holds (a parity test keeps it equal to the shared one).
+    denyTools: [...new Set([...(Array.isArray(shared.denyTools) ? shared.denyTools : []), ...KIOSK_DENY_TOOLS])],
     sttModel: (p) => kioskSttModel(p, cfg()),
     maxToolRounds: KIOSK_MAX_TOOL_ROUNDS,
     firstAudioBudgetMs: KIOSK_FIRST_AUDIO_BUDGET_MS,
@@ -204,8 +211,7 @@ export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = 
     memoryWhen: wantsMemory,
     // Queue item 29: an action request never ends on a claim no tool backs (turn.js, ACTION_NOTE): no tool →
     // the could-not-do line without a model call; tools withheld from the quick model → escalate.
-    actionWhen: wantsAction,
-    actionFollowWhen: wantsActionFollowUp,
+    // (actionWhen / actionFollowWhen: the kiosk's own tests, set in `shared` above.)
     // Only against the windows really open now (never because music plays).
     displayObjectWhen: (t) => namesDisplayObject(t, ctx.store.list(ctx.deviceId).filter((w) => !(w.kind === "timer" && w.done)).map((w) => w.kind)),
     cantDoText: kioskCantDoText(lang),
@@ -387,6 +393,7 @@ export function createKioskRuntime(deps) {
   /** A display turn's options: this display's media line, the STT hints, and the library's stream envelopes read through
    *  the voice turn's one onToolResult hook (envelope.js decides what is honoured). */
   const turnOptions = (device, caps, tz, emit, hooks) => displayTurnOptions(displayCtx(device, caps, emit, hooks), { now, tz, settings: () => device.kiosk_settings, mediaLine: () => media.describe(device.id), sttPrompt: sttPromptFor(device), sttHotwords: sttHotwordsFor(device),
+    crowVoice: deps.crowVoice || null,
     onToolResult: music ? createEnvelopeHandler({ media, deviceId: device.id, music, meta: () => ({ maxVolume: Number(device.kiosk_settings?.max_volume) || 100 }) }) : null });
   // The display tools as the panel counts them (no display, no windows): the bind-time fit and the ability line.
   const panelTools = () => createDisplayTools(displayCtx({ id: "", kiosk_settings: {} }, effectiveCaps(null, null), () => {}));

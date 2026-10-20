@@ -14,10 +14,24 @@ import {
 } from "./turn-helpers.js";
 import { withTurnContext, createContextEchoGate, stripContextEcho, stripContextEchoDeep, TURN_CONTEXT_NOTE } from "./context-echo.js";
 import { estimatePromptTokens, requestFits, choosePromptFit, dropOldestExchange } from "./prompt-fit.js";
-import { claimsAction, claimsReminder, claimsBeyondMemory, toolEffect } from "./action-claims.js";
+import { claimsAction, claimsReminder, claimsBeyondMemory, toolEffect, needsSpokenYes } from "./action-claims.js";
 import { classifyTools } from "./tool-families.js";
 import { voiceAbilities } from "./voice-abilities.js";
-import { CROW_VOICE_BOT_ID, normalizeVoiceSettings } from "../../shared/voice-bot.js";
+import { CROW_VOICE_BOT_ID, normalizeVoiceSettings, isVoiceBotDef } from "../../shared/voice-bot.js";
+
+/**
+ * A voice bot (kind "voice") also asks a spoken yes before these: a schedule or a change to the
+ * user's context sections (direct, or as the matching action of the crow_memory proxy).
+ */
+export const VOICE_CONFIRM_TOOLS = Object.freeze(["crow_create_schedule", "crow_update_schedule", "crow_add_context_section", "crow_update_context_section"]);
+const VOICE_SCHEDULE_TOOLS = new Set(["crow_create_schedule", "crow_update_schedule"]);
+/** A schedule task that starts background bot work (bot_scheduler's "pipeline:botcron:<bot>" and every other "pipeline:" row). */
+const startsPipeline = (args) => {
+  const a = args && typeof args === "object" ? args : {};
+  const p = a.params && typeof a.params === "object" ? a.params : {};
+  return [a.task, p.task].some((t) => typeof t === "string" && /^\s*pipeline:/i.test(t));
+};
+const VOICE_NO_PIPELINE = "Background bot work cannot be scheduled by voice. Tell the user to set it up in Bot Builder, then end your turn — do not call another tool.";
 
 export const ESCALATION_READY_TIMEOUT_MS = 8000;
 export const ESCALATION_PROBE_EVERY_MS = 500;
@@ -713,6 +727,7 @@ export function createVoiceTurnRunner(deps) {
       // 5. Streamed tool loop
       const scope = deps.botVoiceScope(bot);
       const policy = bot.permission_policy || {};
+      const voiceKind = isVoiceBotDef(bot);
       const shortName = (n) => String(n || "").replace(/^crow_/, "").replace(/_/g, " ");
       // → null (run it) or { code, message, neutral }: `code` goes to the log, `message` to the model;
       // neutral = the tool is simply not on this display / not offered (invisible to the router).
@@ -755,7 +770,11 @@ export function createVoiceTurnRunner(deps) {
         if (Array.isArray(policy.deny) && names.some((n) => policy.deny.includes(n))) {
           return refuse("refused_policy", `This assistant is not permitted to use "${shortName(eff)}" by voice. Tell the user and end your turn — do not call another tool.`);
         }
-        const confirmName = names.find((n) => isDestructiveTool(n) || (Array.isArray(policy.confirm) && policy.confirm.includes(n)));
+        // The voice bot (kind "voice"): never schedules background bot work, and asks a spoken yes
+        // before anything that deletes, changes or sends, and before a schedule or a context change.
+        if (voiceKind && names.some((n) => VOICE_SCHEDULE_TOOLS.has(n)) && startsPipeline(tc.arguments)) return refuse("refused_policy", VOICE_NO_PIPELINE);
+        const confirmName = names.find((n) => isDestructiveTool(n) || (Array.isArray(policy.confirm) && policy.confirm.includes(n))
+          || (voiceKind && (needsSpokenYes(n) || VOICE_CONFIRM_TOOLS.includes(n))));
         if (!confirmName) return null;
         if (confirm.check({ deviceId: device.id, eff: confirmName, args: tc.arguments, transcript }) === "allow") return null;
         return refuse("needs_confirm", `Confirmation required. Tell the user: "Are you sure you want to ${describeDestructiveAction({ name: confirmName, arguments: tc.arguments })}? Say yes to proceed." Then end your turn — do not call another tool.`);

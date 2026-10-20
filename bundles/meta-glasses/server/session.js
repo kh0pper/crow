@@ -10,18 +10,19 @@
  *  - Never silent. A turn that produced no speech ends on a fixed spoken line.
  *  - A voice this app can play. The app plays raw PCM only; a profile that cannot give PCM is
  *    replaced by a local one that can, or the turn says nothing can be spoken (an error event).
- *  - A bound assistant is required. With none, the session says so and stops.
+ *  - Every device answers as the Crow voice bot (turn.js), bound or not; the shared voice rules
+ *    (servers/gateway/voice/crow-voice.js, injected as deps.crowVoice) go first in the turn options.
  *  - The camera as a turn tool: offered ALONE on a turn that asks for it, must run, and what it
  *    saw never stays in the saved conversation.
  *  - Audio envelopes: obeyed only from the music add-on's tools (./envelope.js); the stream is
  *    handed back to the caller, who starts it after the turn's speech has been sent.
  *
  * Every gateway dependency is injected. The only app code it reads is the kiosk's pure phrase
- * helpers (memory intent, clock table, [Now] line), through ./voice-shared.js.
+ * helpers (memory intent, clock table, [Now] line, action intent), through ./voice-shared.js.
  */
 import { stringsFor } from "./strings.js";
 import { wantsLook, wantsMemory, matchTransport } from "./intent.js";
-import { matchClockFastPath, nowContext, relativeDatesContext, mentionsRelativeDay } from "./voice-shared.js";
+import { matchClockFastPath, nowContext, relativeDatesContext, mentionsRelativeDay, wantsAction, wantsActionFollowUp } from "./voice-shared.js";
 
 /** Never on a glasses turn: work handed to other bots, schedules, schema discovery, and the note and library tools (their text is not for a voice turn's tool loop). */
 export const GLASSES_DENY_TOOLS = Object.freeze([
@@ -87,6 +88,7 @@ export function oneEnvelope(send) {
  *   readEnvelope(toolName, result)      (./envelope.js)
  *   playback: { state(deviceId), control(deviceId, action) }   (starting a stream is the caller's job: see runTurn's result)
  *   timeZone         IANA zone for [Now] and the clock answers (the server's; the phone sends none)
+ *   crowVoice        { turnOptions, VOICE_DENY_TOOLS } (servers/gateway/voice/crow-voice.js), optional
  *   log(line), now()
  */
 export function createGlassesTurns(deps) {
@@ -135,13 +137,6 @@ export function createGlassesTurns(deps) {
         return entry;
       }
       const device = { ...device0, tts_profile_id: ttsId };
-
-      if (!device.bound_bot_id) {
-        await sayLine(db, device, env, L.no_bot, signal);
-        send.text({ type: "error", code: "no_bound_bot", recoverable: false });
-        entry.failed = "no_bound_bot";
-        return entry;
-      }
 
       // Speech-to-text first: what the turn offers depends on what was asked.
       let transcript = "";
@@ -195,11 +190,16 @@ export function createGlassesTurns(deps) {
         });
       }
 
+      // One set of voice rules for every surface, first; the glasses' own options and lines below win.
+      const shared = deps.crowVoice && typeof deps.crowVoice.turnOptions === "function"
+        ? deps.crowVoice.turnOptions({ surface: "glasses", lang: vs.lang, actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp })
+        : { surface: "glasses" };
       const result = await deps.voice.runVoiceTurn({
+        ...shared,
         db, device, transcript, sink: env.sink, signal, startedAt: t0,
         promptSuffix: L.prompt_suffix,
         turnContext: (t, at = now()) => (mentionsRelativeDay(t) ? `${nowContext(at, deps.timeZone)}\n${relativeDatesContext(at, deps.timeZone)}` : nowContext(at, deps.timeZone)),
-        denyTools: deny,
+        denyTools: [...new Set([...(Array.isArray(shared.denyTools) ? shared.denyTools : []), ...deny])],
         extraTools,
         maxToolRounds: GLASSES_MAX_TOOL_ROUNDS,
         firstAudioBudgetMs: look ? GLASSES_LOOK_BUDGET_MS : GLASSES_FIRST_AUDIO_BUDGET_MS,

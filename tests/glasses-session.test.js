@@ -207,16 +207,54 @@ test("memory is offered only when the sentence asks for it", async () => {
   assert.ok((seen.chat[0].tools || []).map((t) => t.function?.name || t.name).includes("crow_memory"));
 });
 
-test("no assistant bound: the line is spoken, no model is called", async () => {
-  reset();
+test("no assistant bound: the device still answers as Crow", async () => {
+  reset({ chat: [sayRound("Lisbon.")] });
   const c = await client("glasses-unbound");
   const evs = await c.turn();
   c.close();
   assert.deepEqual([count(evs, "tts_start"), count(evs, "tts_end")], [1, 1]);
-  assert.deepEqual(seen.tts.map((t) => t.input), [L.no_bot]);
-  assert.ok(evs.some((e) => e.type === "error" && e.code === "no_bound_bot"));
+  assert.ok(!evs.some((e) => e.type === "error" && e.code === "no_bound_bot"));
+  assert.equal(seen.stt, 1);
+  assert.equal(seen.chat.length, 1);
+  assert.match(seen.chat[0].messages[0].content, /You are Crow/);
+  assert.deepEqual(seen.tts.map((t) => t.input), ["Lisbon."]);
+});
+
+test("an action the voice bot has no tool for: the shared could-not-do line, no model call (the real routes wire the shared rules)", async () => {
+  const { voiceLine } = await import("../servers/gateway/voice/voice-lines.js");
+  reset({ stt: "Email my landlord about the heating." });
+  const c = await client("glasses-a");
+  const evs = await c.turn();
+  c.close();
   assert.equal(seen.chat.length, 0);
-  assert.equal(seen.stt, 0, "nothing was transcribed either");
+  assert.deepEqual(seen.tts.map((t) => t.input), [voiceLine("cant_do_say", "en")]);
+  assert.deepEqual([count(evs, "tts_start"), count(evs, "tts_end")], [1, 1]);
+});
+
+test("no bound bot still answers: the session runs the turn with the shared voice rules", async () => {
+  const { crowVoiceTurnOptions, VOICE_DENY_TOOLS } = await import("../servers/gateway/voice/crow-voice.js");
+  let opts = null;
+  const fakeVoice = {
+    convo: { get: () => [] },
+    transcribe: async () => ({ text: "add milk to my list" }),
+    speakText: async () => true,
+    runVoiceTurn: async (o) => { opts = o; o.sink.event({ type: "tts_start" }); o.sink.audio(Buffer.from("xx")); return { route: "fast", failed: null, timings: {} }; },
+  };
+  const turns = createGlassesTurns({
+    voice: fakeVoice, openDb: () => ({ close() {} }), findDevice: async () => ({ id: "g", token_hash: "x", voice_settings: { lang: "es" } }), listTtsProfiles: async () => [{ id: "k", provider: "kokoro", isDefault: true }],
+    botToolNames: async () => [], capture: async () => ({}), describePhoto: async () => null, readEnvelope,
+    playback: { state: () => "idle", control: () => {}, start: () => {} }, log: () => {},
+    crowVoice: { turnOptions: crowVoiceTurnOptions, VOICE_DENY_TOOLS },
+  });
+  const entry = await turns.runTurn({ deviceId: "g", audio: Buffer.alloc(4), send: { text: () => {}, binary: () => {} } });
+  assert.equal(entry.failed, null);
+  assert.ok(opts, "runVoiceTurn was reached");
+  assert.equal(opts.familiesOnIntent, true);
+  assert.equal(opts.surface, "glasses");
+  assert.equal(typeof opts.actionWhen, "function");
+  assert.equal(typeof opts.actionFollowWhen, "function");
+  for (const n of [...VOICE_DENY_TOOLS, ...GLASSES_DENY_TOOLS]) assert.ok(opts.denyTools.includes(n), n);
+  assert.equal(opts.fallbackText, STRINGS.es.fallback, "the glasses' own lines still win");
 });
 
 test("the bound assistant was switched off: spoken, not silent", async () => {
@@ -269,7 +307,7 @@ test("speech-to-text is down, and a turn with no words: each is answered aloud",
 });
 
 test("a model that only calls tools it may not use: at most three tool rounds and one forced answer, then the fallback line; nothing is executed", async () => {
-  reset({ stt: "Email my landlord about the heating.", chat: [callRound("crow_delegate", { goal: "x" }), callRound("crow_delegate", { goal: "x" }), callRound("crow_delegate", { goal: "x" }), callRound("crow_delegate", { goal: "x" }), callRound("crow_delegate", { goal: "x" })] });
+  reset({ stt: "What do you know about my landlord?", chat: [callRound("crow_delegate", { goal: "x" }), callRound("crow_delegate", { goal: "x" }), callRound("crow_delegate", { goal: "x" }), callRound("crow_delegate", { goal: "x" }), callRound("crow_delegate", { goal: "x" })] });
   const c = await client("glasses-a");
   const evs = await c.turn();
   c.close();

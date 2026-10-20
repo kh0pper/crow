@@ -92,6 +92,8 @@ const { createDbClient: openAppDb } = await appImport("servers/db.js");
 const { createVoiceTurnRunner, defaultVoiceDeps } = await appImport("servers/gateway/voice/turn.js");
 const { wrapPcmAsWav } = await appImport("servers/gateway/voice/turn-helpers.js");
 const { createGlassesTurns, playableTtsProfile, GLASSES_DENY_TOOLS } = await bImport("server/session.js");
+// One set of voice rules for every surface (passed to createGlassesTurns as deps.crowVoice).
+const { crowVoiceTurnOptions, VOICE_DENY_TOOLS } = await appImport("servers/gateway/voice/crow-voice.js");
 const { stringsFor } = await bImport("server/strings.js");
 
 /* ---------- Device-token routes: who may call, and how often ----------
@@ -467,7 +469,8 @@ const glassesTurns = createGlassesTurns({
   listTtsProfiles: async (db) => (await loadTts()).getTtsProfiles(db, { includeKeys: false }),
   botToolNames: async (db, device) => {
     let def = null;
-    try { const row = await _voiceDeps.loadBotRow(db, device.bound_bot_id); def = row && row.enabled ? JSON.parse(row.definition) : null; } catch { def = null; }
+    // The bot that answers the turn: the Crow voice bot (turn.js), whatever the device is bound to.
+    try { const row = await _voiceDeps.loadBotRow(db, _voiceDeps.voiceBotId || device.bound_bot_id); def = row && row.enabled ? JSON.parse(row.definition) : null; } catch { def = null; }
     return def ? _voiceDeps.getChatTools({ botDef: def }).map((t) => t.name) : [];
   },
   capture: (deviceId) => {
@@ -478,6 +481,7 @@ const glassesTurns = createGlassesTurns({
   readEnvelope,
   playback: { state: (id) => _devicePlaybackState.get(id) || "idle", control: applyMediaControl, start: startEnvelopePlayback },
   timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  crowVoice: { turnOptions: crowVoiceTurnOptions, VOICE_DENY_TOOLS },
 });
 
 /** A turn never runs beside another turn or a library relay on the same socket: wait briefly for the lock, never re-enter it. */

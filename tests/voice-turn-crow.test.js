@@ -146,3 +146,64 @@ test("defaultVoiceDeps: the voice bot id, a real ensure, and one defs-changed su
   bus.emit("pibots:defs-changed", { bot_id: "crow.voice" });
   assert.equal(a.botDefsGeneration(), before + 1);
 });
+
+// ── Task 1.5: a voice bot asks for a spoken yes before it deletes, changes or sends ──
+const VOICE = { ...CROW, kind: "voice" };
+const callRound = (tc) => [tc, { type: "done" }];
+const sayRound = (text) => [{ type: "content_delta", text }, { type: "done" }];
+const lastToolText = (h, i) => h.log[i].messages.at(-1).content;
+
+test("a voice bot asks before a send", async () => {
+  const send = { type: "tool_call", id: "s1", name: "gmail_send_to_self", arguments: { subject: "Milk", body: "Buy milk" } };
+  const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["gmail_send_to_self"], rounds: [callRound(send), sayRound("Are you sure?"), callRound(send), sayRound("Sent.")] });
+  await turn(h, { transcript: "email me a note to buy milk" });
+  assert.deepEqual(h.calls.executed, [], "the first turn never runs the send");
+  assert.match(lastToolText(h, 1), /Confirmation required/);
+  await turn(h, { transcript: "yes" });
+  assert.deepEqual(h.calls.executed, ["gmail_send_to_self"], "the yes with the same args runs it");
+});
+
+test("an ordinary bot is unaffected by the voice bot's spoken yes", async () => {
+  const send = { type: "tool_call", id: "s1", name: "gmail_send_to_self", arguments: { subject: "Milk" } };
+  const sched = { type: "tool_call", id: "c1", name: "crow_create_schedule", arguments: { task: "pipeline:botcron:writer", cron: "0 9 * * *" } };
+  const h = crowHarness({ chatTools: ["gmail_send_to_self", "crow_create_schedule"], rounds: [callRound(send), sayRound("Sent."), callRound(sched), sayRound("Scheduled.")] });
+  await turn(h, { botId: "household", transcript: "email me" });
+  assert.deepEqual(h.calls.executed, ["gmail_send_to_self"]);
+  await turn(h, { botId: "household", transcript: "schedule the writer" });
+  assert.deepEqual(h.calls.executed, ["gmail_send_to_self", "crow_create_schedule"]);
+});
+
+test("a voice bot's schedule create waits for the yes, direct or through the memory proxy", async () => {
+  const direct = { type: "tool_call", id: "c1", name: "crow_create_schedule", arguments: { task: "Water the plants", cron: "0 9 * * *" } };
+  const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["crow_create_schedule"], rounds: [callRound(direct), sayRound("Sure?"), callRound(direct), sayRound("Scheduled.")] });
+  await turn(h, { transcript: "remind me to water the plants every morning" });
+  assert.deepEqual(h.calls.executed, []);
+  assert.match(lastToolText(h, 1), /Confirmation required/);
+  await turn(h, { transcript: "yes" });
+  assert.deepEqual(h.calls.executed, ["crow_create_schedule"]);
+
+  const proxied = { type: "tool_call", id: "m1", name: "crow_memory", arguments: { action: "update_context_section", params: { section_key: "notes", content: "x" } } };
+  const p = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["crow_memory"], rounds: [callRound(proxied), sayRound("Sure?"), callRound(proxied), sayRound("Done.")] });
+  await turn(p, { transcript: "change my notes", memoryOn: true });
+  assert.deepEqual(p.calls.executed, []);
+  assert.match(lastToolText(p, 1), /Confirmation required/);
+  await turn(p, { transcript: "yes", memoryOn: true });
+  assert.deepEqual(p.calls.executed, ["crow_memory"]);
+});
+
+test("a voice bot never schedules background bot work: a pipeline: task is refused and never executed", async () => {
+  const direct = { type: "tool_call", id: "c1", name: "crow_create_schedule", arguments: { task: "pipeline:botcron:writer", cron: "0 9 * * *" } };
+  const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["crow_create_schedule"], rounds: [callRound(direct), sayRound("I can't."), callRound(direct), sayRound("I can't.")] });
+  await turn(h, { transcript: "have the writer run every morning" });
+  assert.deepEqual(h.calls.executed, []);
+  assert.doesNotMatch(lastToolText(h, 1), /Confirmation required/, "refused outright, never asked");
+  assert.match(lastToolText(h, 1), /bot/i);
+  await turn(h, { transcript: "yes" });
+  assert.deepEqual(h.calls.executed, [], "a yes does not run it either");
+
+  const proxied = { type: "tool_call", id: "m1", name: "crow_memory", arguments: { action: "update_schedule", params: { id: 3, task: "pipeline:botcron:writer" } } };
+  const p = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["crow_memory"], rounds: [callRound(proxied), sayRound("I can't.")] });
+  await turn(p, { transcript: "move the writer job", memoryOn: true });
+  assert.deepEqual(p.calls.executed, []);
+  assert.doesNotMatch(lastToolText(p, 1), /Confirmation required/);
+});

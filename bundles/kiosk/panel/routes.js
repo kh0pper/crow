@@ -30,6 +30,8 @@ const { csrfMiddleware, csrfTokenAccepted } = await appImport("servers/gateway/d
 const deviceStore = await appImport("servers/shared/device-store.js");
 const { createVoiceTurnRunner, defaultVoiceDeps } = await appImport("servers/gateway/voice/turn.js");
 const { wrapPcmAsWav } = await appImport("servers/gateway/voice/turn-helpers.js");
+// One set of voice rules for every surface (passed to displayTurnOptions as o.crowVoice).
+const { crowVoiceTurnOptions, VOICE_DENY_TOOLS } = await appImport("servers/gateway/voice/crow-voice.js");
 const { readSetting, writeSetting } = await appImport("servers/gateway/dashboard/settings/registry.js");
 const { ensureKioskAnnounceToken, validateKioskAnnounceToken } = await appImport("servers/gateway/local-token.js");
 const { PERCH_TOKENS } = await appImport("servers/gateway/dashboard/shared/design-tokens.js");
@@ -59,6 +61,7 @@ const runtime = createKioskRuntime({
   sessionFromRequest, verifySession, csrfTokenAccepted,
   openDb: () => createDbClient(),
   deviceStore, voice, sttWarmup, wrapPcmAsWav,
+  crowVoice: { turnOptions: crowVoiceTurnOptions, VOICE_DENY_TOOLS },
   settings: { readSetting, writeSetting },
   resolveDisplayBird: (db) => resolveDisplayBird(db, { readPortrait }),
   themeCss: () => kioskThemeCss(PERCH_TOKENS),
