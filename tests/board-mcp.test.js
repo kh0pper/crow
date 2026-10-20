@@ -713,3 +713,45 @@ test("board_notify_decisions: the 4th push of the day by one caller is 429 push_
     await bot.close();
   }
 });
+
+// ---- assigned_bot on board_create_item ----
+
+test("board_create_item assigned_bot: enabled bot assigns the card; refusals are 400 and nothing is created", async () => {
+  await state.cdb.execute(`CREATE TABLE IF NOT EXISTS pi_bot_defs (bot_id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
+    definition TEXT, enabled INTEGER NOT NULL DEFAULT 1, project_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  for (const [id, enabled] of [["bot-1", 1], ["bot-off", 0], ["crow.voice", 1]]) {
+    await state.cdb.execute({
+      sql: "INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, enabled) VALUES (?,?,?)",
+      args: [id, id, enabled],
+    });
+  }
+  const client = await connectClient("/board/mcp", state.boardToken, signedBoard("alex-bot", "job-assign-1"));
+  const count = async () => Number((await state.tdb.execute("SELECT COUNT(*) AS n FROM tasks_items")).rows[0].n);
+
+  const created = payload(await client.callTool({
+    name: "board_create_item", arguments: { title: "assigned card", project_id: 1, assigned_bot: "bot-1" },
+  }));
+  const row = (await state.tdb.execute({ sql: "SELECT assigned_bot, autonomy FROM tasks_items WHERE id=?", args: [created.id] })).rows[0];
+  assert.equal(row.assigned_bot, "bot-1");
+  assert.equal(row.autonomy, "gated");
+  const mut = (await state.tdb.execute({
+    sql: "SELECT actor_kind, actor_id FROM board_mutations WHERE item_id=? AND verb='create'", args: [created.id],
+  })).rows[0];
+  assert.equal(mut.actor_kind, "bot");
+  assert.equal(mut.actor_id, "alex-bot");
+
+  const before = await count();
+  for (const [args, re] of [
+    [{ assigned_bot: "bot-off" }, /^\[400 bad_bot\]/],
+    [{ assigned_bot: "no-such-bot" }, /^\[400 bad_bot\]/],
+    [{ assigned_bot: "crow.voice" }, /^\[400 bad_bot\]/],
+    [{ assigned_bot: "bot-1", slug: "intake" }, /^\[400 bad_field\]/],
+  ]) {
+    const r = await client.callTool({ name: "board_create_item", arguments: { title: "refused", project_id: 1, ...args } });
+    assert.equal(r.isError, true);
+    assert.match(r.content[0].text, re);
+  }
+  assert.equal(await count(), before, "no card created by a refused call");
+  await client.close();
+});
