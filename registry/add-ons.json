@@ -3676,8 +3676,8 @@
     {
       "id": "meeting-recorder",
       "name": "Meeting Recorder",
-      "version": "1.0.1",
-      "description": "Record a meeting in the browser (shared tab audio plus microphone) and transcribe it locally with faster-whisper. Nothing leaves the machine.",
+      "version": "1.0.2",
+      "description": "Record a meeting in the browser (shared tab audio plus microphone) and transcribe it with a faster-whisper endpoint you run (loopback by default), cut at pauses and checked for repetition loops.",
       "type": "bundle",
       "author": "Crow",
       "category": "ai",
@@ -3714,6 +3714,18 @@
           "description": "Model name passed to that endpoint.",
           "required": false,
           "default": "Systran/faster-whisper-large-v3"
+        },
+        {
+          "name": "WHISPER_FALLBACK_URL",
+          "description": "Optional second transcription endpoint. A chunk the primary cannot answer, or answers only with a suspected repetition loop, is retried here. Unset means one endpoint, as before.",
+          "required": false,
+          "default": ""
+        },
+        {
+          "name": "WHISPER_FALLBACK_MODEL",
+          "description": "Model name for the fallback endpoint. Defaults to WHISPER_MODEL.",
+          "required": false,
+          "default": ""
         },
         {
           "name": "MEETING_RECORDER_EXPORT_DIR",
