@@ -985,7 +985,7 @@ test("turn check: ok only when the clock took the no-model path, the plain quest
 
 test("one set of turn options: the runtime's display turn (and so the turn check) is built by displayTurnOptions, the function the evaluation runs", () => {
   const rt = readFileSync(new URL("../bundles/kiosk/server/runtime.js", import.meta.url), "utf8");
-  assert.match(rt, /const turnOptions = \(device, caps, tz, emit, hooks\) => displayTurnOptions\(/);
+  assert.match(rt, /const turnOptions = \(device, caps, tz, emit, hooks, vb = null\) => displayTurnOptions\(/);
   assert.equal((rt.match(/createDisplayTools\(/g) || []).length, 2, "one in displayTurnOptions, one for the bind-time fit");
 });
 

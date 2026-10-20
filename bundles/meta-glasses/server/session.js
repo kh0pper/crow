@@ -50,6 +50,35 @@ export function playableTtsProfile(device, profiles) {
   return local ? local.id : false;
 }
 
+/**
+ * The TTS profile a glasses turn speaks with, once Crow's voice is applied (`voiced` = withVoiceProfiles(device, voiceDef)):
+ * Crow's own speaking voice when the voice bot chose one this app can play (raw PCM), else whatever the device's own
+ * choice gives (playableTtsProfile(device, …)): an unplayable Crow voice never replaces a playable device voice
+ * with the local fallback. → id | null | false, as playableTtsProfile.
+ */
+export function voicedTtsProfile(device, voiced, profiles) {
+  const id = voiced?.tts_profile_id;
+  if (id && id !== device?.tts_profile_id) {
+    const p = (Array.isArray(profiles) ? profiles : []).find((x) => x.id === id);
+    if (p && PCM_TTS_PROVIDERS.includes(p.provider)) return p.id;
+  }
+  return playableTtsProfile(device, profiles);
+}
+
+/**
+ * botToolNames for the session: every tool the Crow voice bot would be offered (it answers every glasses turn,
+ * whatever the device is bound to), so a look turn can deny them all. loadVoiceBot(db) → { def } | null;
+ * no voice bot (or a failed read) → [].
+ */
+export function voiceBotToolNames(loadVoiceBot, getChatTools) {
+  return async (db) => {
+    let def = null;
+    try { def = (await loadVoiceBot(db))?.def || null; } catch { def = null; }
+    if (!def) return [];
+    try { return getChatTools({ botDef: def }).map((t) => t.name); } catch { return []; }
+  };
+}
+
 /** One speech envelope over a transport: duplicate starts are dropped, the end is sent once by close(). Remembers the last error code that passed through. */
 export function oneEnvelope(send) {
   let open = false;
@@ -88,13 +117,21 @@ export function oneEnvelope(send) {
  *   readEnvelope(toolName, result)      (./envelope.js)
  *   playback: { state(deviceId), control(deviceId, action) }   (starting a stream is the caller's job: see runTurn's result)
  *   timeZone         IANA zone for [Now] and the clock answers (the server's; the phone sends none)
- *   crowVoice        { turnOptions, VOICE_DENY_TOOLS } (servers/gateway/voice/crow-voice.js), optional
+ *   crowVoice        { turnOptions, withVoiceProfiles, VOICE_DENY_TOOLS } (servers/gateway/voice/crow-voice.js), optional
+ *   loadVoiceBot(db) → { def, cloud } | null: the Crow voice bot (its voice, STT, cloud model), optional
  *   log(line), now()
  */
 export function createGlassesTurns(deps) {
   const log = deps.log || ((m) => console.log(m));
   const now = deps.now || Date.now;
   const recent = new Map();
+  /** The Crow voice bot, or null (none, switched off, corrupt, no loader, a failed read): never throws. */
+  async function voiceBot(db) {
+    if (typeof deps.loadVoiceBot !== "function") return null;
+    try { return (await deps.loadVoiceBot(db)) || null; } catch (err) { log(`[meta-glasses] voice bot not read: ${err?.message || err}`); return null; }
+  }
+  /** The device with Crow's speaking voice and STT, in memory for this one use; the stored record is never touched. */
+  const voiced = (device, vb) => (vb?.def && typeof deps.crowVoice?.withVoiceProfiles === "function" ? deps.crowVoice.withVoiceProfiles(device, vb.def) : device);
 
   function record(deviceId, entry) {
     const list = recent.get(deviceId) || [];
@@ -128,7 +165,9 @@ export function createGlassesTurns(deps) {
       const vs = device0.voice_settings && typeof device0.voice_settings === "object" ? device0.voice_settings : {};
       const L = stringsFor(vs.lang);
 
-      const ttsId = playableTtsProfile(device0, await deps.listTtsProfiles(db));
+      const vb = await voiceBot(db);
+      const crow = voiced(device0, vb);
+      const ttsId = voicedTtsProfile(device0, crow, await deps.listTtsProfiles(db));
       if (ttsId === false) {
         // Nothing this client can play: the one case that cannot be spoken. The panel shows it.
         log(`[meta-glasses] ${deviceId} has no voice profile that returns raw PCM; nothing can be spoken`);
@@ -136,7 +175,8 @@ export function createGlassesTurns(deps) {
         entry.failed = "no_playable_voice";
         return entry;
       }
-      const device = { ...device0, tts_profile_id: ttsId };
+      // Crow's STT (and its voice when the app can play it) for this turn.
+      const device = { ...crow, tts_profile_id: ttsId };
 
       // Speech-to-text first: what the turn offers depends on what was asked.
       let transcript = "";
@@ -192,7 +232,7 @@ export function createGlassesTurns(deps) {
 
       // One set of voice rules for every surface, first; the glasses' own options and lines below win.
       const shared = deps.crowVoice && typeof deps.crowVoice.turnOptions === "function"
-        ? deps.crowVoice.turnOptions({ surface: "glasses", lang: vs.lang, actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp })
+        ? deps.crowVoice.turnOptions({ surface: "glasses", lang: vs.lang, voiceDef: vb?.def || null, cloud: vb?.cloud === true, actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp })
         : { surface: "glasses" };
       const result = await deps.voice.runVoiceTurn({
         ...shared,
@@ -270,9 +310,10 @@ export function createGlassesTurns(deps) {
     try {
       const stored = await deps.findDevice(db, deviceId);
       if (!stored) return { delivered: false, reason: "device_not_found" };
-      const ttsId = playableTtsProfile(stored, await deps.listTtsProfiles(db));
+      const crow = voiced(stored, await voiceBot(db));
+      const ttsId = voicedTtsProfile(stored, crow, await deps.listTtsProfiles(db));
       if (ttsId === false) return { delivered: false, reason: "no_playable_voice" };
-      const ok = await sayLine(db, { ...stored, tts_profile_id: ttsId }, env, String(text || "").slice(0, 2000), signal);
+      const ok = await sayLine(db, { ...crow, tts_profile_id: ttsId }, env, String(text || "").slice(0, 2000), signal);
       return ok && env.bytes > 0 ? { delivered: true } : { delivered: false, reason: "tts_failed" };
     } finally {
       env.close();

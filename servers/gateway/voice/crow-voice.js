@@ -3,10 +3,65 @@
  * options share, built in one place. A surface spreads these first, then its own display-only options.
  * Bundles reach this module through their panel routes' appImport (never a static import).
  */
-import { VOICE_DENY_TOOLS, normalizeVoiceSettings } from "../../shared/voice-bot.js";
+import { VOICE_DENY_TOOLS, CROW_VOICE_BOT_ID, isVoiceBotId, normalizeVoiceSettings } from "../../shared/voice-bot.js";
 import { voiceLine } from "./voice-lines.js";
 
-export { VOICE_DENY_TOOLS };
+export { VOICE_DENY_TOOLS, CROW_VOICE_BOT_ID, isVoiceBotId };
+
+/** How long a surface keeps the loaded voice bot (as turn.js keeps a bot); a bot-defs change reloads it at once. */
+export const VOICE_BOT_CACHE_MS = 30_000;
+
+/**
+ * The device as a voice turn uses it: the voice bot's speaking voice (tts_profile_id) and speech
+ * recognition (stt_profile_id) in place of the device's, where the voice bot sets them. Returns a
+ * copy when anything is replaced, else the device itself; never mutates the device, and nothing
+ * stored is rewritten (a surface applies this in memory, per turn).
+ */
+export function withVoiceProfiles(device, voiceDef) {
+  if (!device || !voiceDef || typeof voiceDef !== "object") return device;
+  const { tts_profile_id: tts, stt_profile_id: stt } = normalizeVoiceSettings(voiceDef);
+  if (!tts && !stt) return device;
+  return { ...device, ...(tts ? { tts_profile_id: tts } : {}), ...(stt ? { stt_profile_id: stt } : {}) };
+}
+
+/** Is the fast voice model's provider row (the id before the first "/") a cloud one? false on any doubt. */
+async function fastModelIsCloud(db, def) {
+  const key = normalizeVoiceSettings(def).fast_voice_model;
+  const i = key ? key.indexOf("/") : -1;
+  if (i <= 0) return false;
+  try {
+    const row = (await db.execute({ sql: "SELECT host FROM providers WHERE id = ?", args: [key.slice(0, i)] })).rows[0];
+    return row?.host === "cloud";
+  } catch { return false; }
+}
+
+/**
+ * A surface's loader for the Crow voice bot: loadVoiceBot(db) → { def, cloud } | null.
+ *   def    the voice bot's parsed definition
+ *   cloud  its fast voice model's provider row has host "cloud" (crowVoiceTurnOptions' `cloud`)
+ * null when the row is missing, disabled or corrupt, or the read fails: the surface then applies no
+ * profiles and the turn speaks the no-assistant line (turn.js). Never throws. Cached VOICE_BOT_CACHE_MS;
+ * `generation()` (turn.js defaultVoiceDeps' botDefsGeneration, bumped on pibots:defs-changed) drops
+ * the cache at once.
+ */
+export function createVoiceBotLoader({ now = Date.now, generation = () => 0, ttlMs = VOICE_BOT_CACHE_MS } = {}) {
+  let hit = null;
+  return async function loadVoiceBot(db) {
+    let gen = 0;
+    try { gen = generation(); } catch { gen = 0; }
+    if (hit && hit.gen === gen && now() - hit.at < ttlMs) return hit.value;
+    let value = null;
+    try {
+      const row = (await db.execute({ sql: "SELECT definition, enabled FROM pi_bot_defs WHERE bot_id = ?", args: [CROW_VOICE_BOT_ID] })).rows[0];
+      if (row && Number(row.enabled) === 1) {
+        const def = JSON.parse(row.definition);
+        if (def && typeof def === "object" && !Array.isArray(def)) value = { def, cloud: await fastModelIsCloud(db, def) };
+      }
+    } catch { value = null; }
+    hit = { value, gen, at: now() };
+    return value;
+  };
+}
 
 /**
  * → the shared turn options.

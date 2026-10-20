@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { crowVoiceTurnOptions, VOICE_DENY_TOOLS } from "../servers/gateway/voice/crow-voice.js";
+import { crowVoiceTurnOptions, VOICE_DENY_TOOLS, withVoiceProfiles, createVoiceBotLoader, CROW_VOICE_BOT_ID, isVoiceBotId, VOICE_BOT_CACHE_MS } from "../servers/gateway/voice/crow-voice.js";
 import { voiceLine, VOICE_LINES } from "../servers/gateway/voice/voice-lines.js";
 import { VOICE_DENY_TOOLS as SHARED_DENY, voiceBotDefinition } from "../servers/shared/voice-bot.js";
 import { STRINGS } from "../bundles/kiosk/server/strings.js";
@@ -66,4 +66,77 @@ test("kiosk displayTurnOptions merges the shared rules first; the display's own 
   assert.equal(plain.familiesOnIntent, true);
   assert.deepEqual(plain.denyTools, KIOSK_DENY_TOOLS);
   assert.equal(typeof plain.actionWhen, "function");
+});
+
+test("withVoiceProfiles: the voice bot's speaking voice and speech recognition replace the device's, on a copy", () => {
+  const device = Object.freeze({ id: "d1", tts_profile_id: "t1", stt_profile_id: "s1", kiosk_settings: { lang: "en" } });
+  const def = { ...fast, voice: { ...fast.voice, tts_profile_id: "t2" } };
+  const out = withVoiceProfiles(device, def);
+  assert.equal(out.tts_profile_id, "t2");
+  assert.equal(out.stt_profile_id, "s1", "a null STT choice keeps the device's");
+  assert.notEqual(out, device, "a copy");
+  assert.deepEqual(device, { id: "d1", tts_profile_id: "t1", stt_profile_id: "s1", kiosk_settings: { lang: "en" } }, "the input is not mutated");
+  assert.equal(withVoiceProfiles(device, { ...fast, voice: { ...fast.voice, stt_profile_id: "s2" } }).stt_profile_id, "s2");
+  assert.equal(withVoiceProfiles(device, fast).tts_profile_id, "t1", "null keeps t1");
+  assert.equal(withVoiceProfiles(device, fast), device, "nothing to replace: the device unchanged");
+  assert.equal(withVoiceProfiles(device, null), device, "no voice bot: the device unchanged");
+  assert.equal(withVoiceProfiles(device, { voice: "corrupt" }), device);
+});
+
+test("crow-voice re-exports the reserved id and its test", () => {
+  assert.equal(CROW_VOICE_BOT_ID, "crow.voice");
+  assert.equal(isVoiceBotId("crow.voice"), true);
+  assert.equal(isVoiceBotId("helper"), false);
+});
+
+/** A db stand-in: the voice bot row and the providers rows, counting reads. */
+function fakeDb({ row, providers = {}, fail = false } = {}) {
+  const reads = { bot: 0, provider: 0 };
+  return {
+    reads,
+    async execute({ sql, args }) {
+      if (fail) throw new Error("db down");
+      if (/FROM pi_bot_defs/.test(sql)) { reads.bot++; assert.equal(args[0], CROW_VOICE_BOT_ID); return { rows: row ? [row] : [] }; }
+      if (/FROM providers/.test(sql)) { reads.provider++; const p = providers[args[0]]; return { rows: p ? [p] : [] }; }
+      throw new Error("unexpected sql " + sql);
+    },
+  };
+}
+
+test("loadVoiceBot: the voice bot and whether its fast model is a cloud provider (host \"cloud\")", async () => {
+  const cloudDb = fakeDb({ row: { definition: JSON.stringify(cloud), enabled: 1 }, providers: { "cloud-test": { host: "cloud" } } });
+  const c = await createVoiceBotLoader()(cloudDb);
+  assert.equal(c.def.fast_voice_model, "cloud-test/model");
+  assert.equal(c.cloud, true);
+  const localDb = fakeDb({ row: { definition: JSON.stringify(fast), enabled: 1 }, providers: { "crow-voice": { host: "local" } } });
+  assert.equal((await createVoiceBotLoader()(localDb)).cloud, false);
+  const noProvider = fakeDb({ row: { definition: JSON.stringify(cloud), enabled: 1 } });
+  assert.equal((await createVoiceBotLoader()(noProvider)).cloud, false, "no provider row: not cloud");
+  // The provider id is the part before the FIRST "/".
+  const slashes = { ...fast, fast_voice_model: "cloud-test/org/model" };
+  const sDb = fakeDb({ row: { definition: JSON.stringify(slashes), enabled: 1 }, providers: { "cloud-test": { host: "cloud" } } });
+  assert.equal((await createVoiceBotLoader()(sDb)).cloud, true);
+});
+
+test("loadVoiceBot: a missing, disabled or corrupt row, or a db error, is null; nothing throws", async () => {
+  assert.equal(await createVoiceBotLoader()(fakeDb({})), null);
+  assert.equal(await createVoiceBotLoader()(fakeDb({ row: { definition: JSON.stringify(fast), enabled: 0 } })), null);
+  assert.equal(await createVoiceBotLoader()(fakeDb({ row: { definition: "{not json", enabled: 1 } })), null);
+  assert.equal(await createVoiceBotLoader()(fakeDb({ row: { definition: "[1]", enabled: 1 } })), null);
+  assert.equal(await createVoiceBotLoader()(fakeDb({ fail: true })), null);
+});
+
+test("loadVoiceBot: cached 30 s, and a bot-defs change reloads it at once", async () => {
+  assert.equal(VOICE_BOT_CACHE_MS, 30_000);
+  let t = 1_000, gen = 0;
+  const load = createVoiceBotLoader({ now: () => t, generation: () => gen });
+  const db = fakeDb({ row: { definition: JSON.stringify(fast), enabled: 1 } });
+  await load(db); await load(db);
+  assert.equal(db.reads.bot, 1, "one read inside the cache window");
+  t += 30_000;
+  await load(db);
+  assert.equal(db.reads.bot, 2, "re-read after 30 s");
+  gen++;
+  await load(db);
+  assert.equal(db.reads.bot, 3, "pibots:defs-changed (a new generation) re-reads at once");
 });

@@ -91,9 +91,9 @@ const { fetchImagePinned, FetchRefused } = await bImport("server/net-guard.js");
 const { createDbClient: openAppDb } = await appImport("servers/db.js");
 const { createVoiceTurnRunner, defaultVoiceDeps } = await appImport("servers/gateway/voice/turn.js");
 const { wrapPcmAsWav } = await appImport("servers/gateway/voice/turn-helpers.js");
-const { createGlassesTurns, playableTtsProfile, GLASSES_DENY_TOOLS } = await bImport("server/session.js");
+const { createGlassesTurns, playableTtsProfile, voicedTtsProfile, voiceBotToolNames, GLASSES_DENY_TOOLS } = await bImport("server/session.js");
 // One set of voice rules for every surface (passed to createGlassesTurns as deps.crowVoice).
-const { crowVoiceTurnOptions, VOICE_DENY_TOOLS } = await appImport("servers/gateway/voice/crow-voice.js");
+const { crowVoiceTurnOptions, VOICE_DENY_TOOLS, withVoiceProfiles, createVoiceBotLoader } = await appImport("servers/gateway/voice/crow-voice.js");
 const { stringsFor } = await bImport("server/strings.js");
 
 /* ---------- Device-token routes: who may call, and how often ----------
@@ -425,6 +425,8 @@ const TURN_LOCK_WAIT_MS = 8_000;            // how long a new turn waits for a l
 const _turnAborts = new Map();              // deviceId → AbortController of the turn in flight
 const _voiceDeps = await defaultVoiceDeps();
 const _voice = createVoiceTurnRunner(_voiceDeps);
+// The Crow voice bot as the glasses see it (its voice, its STT, cloud or not): cached 30 s, reloaded on a bot-defs change.
+const loadVoiceBot = createVoiceBotLoader({ generation: _voiceDeps.botDefsGeneration });
 
 /** Describe a just-captured photo with the device's (or the default) vision profile. → text | null when no profile resolves. */
 async function describePhoto({ db, device, shot, question }) {
@@ -467,13 +469,10 @@ const glassesTurns = createGlassesTurns({
   openDb: () => openAppDb(),
   findDevice: async (db, id) => (await loadDeviceStore()).findDevice(db, id),
   listTtsProfiles: async (db) => (await loadTts()).getTtsProfiles(db, { includeKeys: false }),
-  botToolNames: async (db, device) => {
-    let def = null;
-    // The bot that answers the turn: the Crow voice bot (turn.js), whatever the device is bound to.
-    // Before the crow.voice row exists (turn.js creates it on its first turn), this list is empty on the very first look turn.
-    try { const row = await _voiceDeps.loadBotRow(db, _voiceDeps.voiceBotId || device.bound_bot_id); def = row && row.enabled ? JSON.parse(row.definition) : null; } catch { def = null; }
-    return def ? _voiceDeps.getChatTools({ botDef: def }).map((t) => t.name) : [];
-  },
+  // The bot that answers the turn: the Crow voice bot (turn.js), whatever the device is bound to, so a look turn denies
+  // every tool it has. Before the crow.voice row exists (turn.js creates it on its first turn), this list is empty on
+  // the very first look turn.
+  botToolNames: voiceBotToolNames(loadVoiceBot, _voiceDeps.getChatTools),
   capture: (deviceId) => {
     const sess = _sessions.get(deviceId);
     return sess ? triggerCapture(sess) : Promise.reject(new Error("no connected session"));
@@ -482,7 +481,8 @@ const glassesTurns = createGlassesTurns({
   readEnvelope,
   playback: { state: (id) => _devicePlaybackState.get(id) || "idle", control: applyMediaControl, start: startEnvelopePlayback },
   timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-  crowVoice: { turnOptions: crowVoiceTurnOptions, VOICE_DENY_TOOLS },
+  loadVoiceBot,
+  crowVoice: { turnOptions: crowVoiceTurnOptions, withVoiceProfiles, VOICE_DENY_TOOLS },
 });
 
 /** A turn never runs beside another turn or a library relay on the same socket: wait briefly for the lock, never re-enter it. */
@@ -582,10 +582,12 @@ export default function metaGlassesRouter(dashboardAuth) {
       // fit = the bound assistant against its quick voice model; voice = whether any profile gives
       // the raw PCM the app plays; recent_turns = outcome codes and timings only.
       const annotated = [];
+      // The voice a turn would really use: Crow's when it sets a playable one, else the device's (session.js).
+      const vb = await loadVoiceBot(db);
       for (const d of devices.filter(isGlassesRecord)) {
         annotated.push({
           ...d, connected: _sessions.has(d.id), fit: await botFit(db, d),
-          voice: playableTtsProfile(d, ttsProfiles) === false ? "none" : "ok",
+          voice: voicedTtsProfile(d, withVoiceProfiles(d, vb?.def), ttsProfiles) === false ? "none" : "ok",
           recent_turns: glassesTurns.recentTurns(d.id),
         });
       }

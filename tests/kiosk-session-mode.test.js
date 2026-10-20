@@ -450,7 +450,7 @@ test("without the core session helpers (an older gateway) the bundle offers no s
 // refuses one, and a turn on one says so and links to the Kiosk panel.
 
 /** A second runtime on the same database and core auth, with its own voice runner. */
-async function serve(voice) {
+async function serve(voice, extra = {}) {
   const k = kiosk.createKioskRuntime({
     Router: express.Router, json: express.json, WebSocketServer,
     isAllowedNetwork: auth.isAllowedNetwork, csrfMiddleware: csrf.csrfMiddleware, csrfTokenAccepted: csrf.csrfTokenAccepted,
@@ -461,6 +461,7 @@ async function serve(voice) {
     resolveDisplayBird: async () => ({ species: "crow", seed: 0, mood: "happy", outfit: null, source: "default" }),
     themeCss: () => "", files: { publicDir: join(REPO, "bundles", "kiosk", "public"), birdSvgPath: join(REPO, "bundles", "ramble", "server", "bird-svg.cjs") },
     announceToken: { validate: async () => false }, helloTimeoutMs: 300, wrapPcmAsWav, log: (m) => logs.push(m),
+    ...extra,
   });
   const app = express();
   app.use(k.router(auth.dashboardAuth));
@@ -641,6 +642,180 @@ test("a session display gets the same turn rules as a paired one: display tool o
     assert.deepEqual(f.k.wm.list(call.device.id).map((w) => w.title), ["Weather"]);
     c.ws.close();
   } finally { f.close(); }
+});
+
+// ─── Crow's voice: every session and paired display answers as the reserved voice bot ───
+// A runtime with the real shared voice module (crow-voice.js) and the real voice-bot loader on this
+// database; ensureVoiceBot is a stand-in that creates the row (as the gateway's does) and bumps the
+// bot-defs generation (as its pibots:defs-changed does).
+
+const CROW = "crow.voice";
+async function crowServe({ def, ensure = true, providers = [] } = {}) {
+  const cv = await import("../servers/gateway/voice/crow-voice.js");
+  const { voiceBotDefinition } = await import("../servers/shared/voice-bot.js");
+  const voiceDef = def || voiceBotDefinition({ preset: "fast_local", fastKey: "voice-test/quick" });
+  const calls = [], stt = [], ensured = [];
+  let gen = 0;
+  await withDb(async (db) => {
+    await db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES ('helper','Helper','{}',1) ON CONFLICT(bot_id) DO NOTHING", args: [] });
+    for (const [id, host] of providers) await db.execute({ sql: "INSERT INTO providers (id, base_url, host, models) VALUES (?, 'http://127.0.0.1:9/v1', ?, '[]')", args: [id, host] });
+  });
+  const voice = {
+    runVoiceTurn: async (o) => { calls.push(o); return { route: "fast", timings: {} }; },
+    speakText: async () => true,
+    transcribe: async (o) => { stt.push(o); return { text: "Tell me a joke" }; },
+  };
+  const f = await serve(voice, {
+    crowVoice: { turnOptions: cv.crowVoiceTurnOptions, withVoiceProfiles: cv.withVoiceProfiles, VOICE_DENY_TOOLS: cv.VOICE_DENY_TOOLS, CROW_VOICE_BOT_ID: cv.CROW_VOICE_BOT_ID, isVoiceBotId: cv.isVoiceBotId },
+    loadVoiceBot: cv.createVoiceBotLoader({ generation: () => gen }),
+    ensureVoiceBot: async (db) => {
+      ensured.push(1);
+      if (!ensure) throw new Error("fast_model_required");
+      await db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?, 'Crow', ?, 1) ON CONFLICT(bot_id) DO NOTHING", args: [CROW, JSON.stringify(voiceDef)] });
+      gen++;
+    },
+    announceToken: { validate: async () => true },
+  });
+  const sockets = [];
+  return {
+    ...f, calls, stt, ensured, sockets,
+    open: async (...a) => { const c = await f.open(...a); sockets.push(c.ws); return c; },
+    close: async () => {
+      for (const ws of sockets) ws.terminate();   // a failed assertion never leaves a socket holding the run open
+      f.close();
+      await withDb(async (db) => {
+        await db.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id IN (?, 'helper')", args: [CROW] });
+        for (const [id] of providers) await db.execute({ sql: "DELETE FROM providers WHERE id = ?", args: [id] });
+      });
+      await resetChoice();
+    },
+  };
+}
+const crowDef = async (over = {}, voice = {}) => {
+  const { voiceBotDefinition } = await import("../servers/shared/voice-bot.js");
+  const d = voiceBotDefinition({ preset: "fast_local", fastKey: "voice-test/quick" });
+  return { ...d, ...over, voice: { ...d.voice, ...voice } };
+};
+
+test("session display answers as Crow on surface phone, even when kiosk_dashboard_bot_id names another bot; Crow's own voice and STT", async () => {
+  const f = await crowServe({ def: await crowDef({}, { tts_profile_id: "kk-crow", stt_profile_id: "fw-crow" }) });
+  try {
+    await withDb((db) => registry.writeSetting(db, "kiosk_dashboard_bot_id", "helper"));
+    const c = await f.open();
+    assert.ok(c.msgs.some((m) => m.type === "ready"));
+    await c.ask();
+    const call = f.calls.at(-1);
+    assert.equal(call.surface, "phone");
+    assert.equal(call.device.bound_bot_id, CROW, "the voice bot answers, not the Kiosk panel's choice");
+    assert.equal(call.device.tts_profile_id, "kk-crow", "Crow's speaking voice");
+    assert.equal(call.device.stt_profile_id, "fw-crow", "Crow's speech recognition");
+    assert.equal(f.ensured.length, 1, "the voice bot was ensured before the hello was answered");
+    const l = await f.listing();
+    assert.equal(l.dashboard_voice.effective_bot_id, CROW);
+    assert.notEqual(l.dashboard_voice.auto_bot_id, CROW, "Automatic never names the voice bot");
+    c.ws.close();
+  } finally { await f.close(); }
+});
+
+test("session display: the early-STT hook transcribes with Crow's STT profile", async () => {
+  const f = await crowServe({ def: await crowDef({}, { stt_profile_id: "fw-crow" }) });
+  try {
+    const c = await f.open();
+    c.ws.send(JSON.stringify({ type: "turn_start", turn_id: "e1" }));
+    c.ws.send(Buffer.alloc(8000));
+    c.ws.send(JSON.stringify({ type: "speech_pause" }));
+    await c.until(() => f.stt.length > 0);
+    c.ws.send(JSON.stringify({ type: "turn_end", vad_reason: "manual" }));
+    await c.until(() => c.msgs.some((m) => m.type === "turn_done") || c.closed);
+    assert.ok(f.stt.length >= 1, "early STT ran");
+    assert.equal(f.stt[0].device.stt_profile_id, "fw-crow");
+    c.ws.close();
+  } finally { await f.close(); }
+});
+
+test("paired display turn says surface kiosk; Crow's profiles apply per turn and the stored device is untouched", async () => {
+  const f = await crowServe({ def: await crowDef({}, { tts_profile_id: "kk-crow", stt_profile_id: "fw-crow" }) });
+  const id = "kiosk-crow-paired";
+  try {
+    const { token } = await withDb((db) => store.pairDevice(db, { id, name: "Hall", device_kind: "kiosk", stt_profile_id: "fw", tts_profile_id: "kk" }));
+    await withDb((db) => store.updateDeviceProfiles(db, id, { bound_bot_id: "helper" }));
+    // The row exists from the start here (a paired display never calls sessionBot).
+    const def = await crowDef({}, { tts_profile_id: "kk-crow", stt_profile_id: "fw-crow" });
+    await withDb((db) => db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?, 'Crow', ?, 1)", args: [CROW, JSON.stringify(def)] }));
+    const ws = new WebSocket(f.b.replace("http", "ws") + "/api/kiosk/session", { headers: SERVE });
+    f.sockets.push(ws);
+    const msgs = [];
+    ws.on("message", (d, bin) => { if (!bin) msgs.push(JSON.parse(d.toString())); });
+    await new Promise((r) => ws.on("open", r));
+    ws.send(JSON.stringify({ type: "hello", device_id: id, token, caps: {} }));
+    for (let i = 0; i < 150 && !msgs.some((m) => m.type === "ready"); i++) await new Promise((r) => setTimeout(r, 10));
+    assert.ok(msgs.some((m) => m.type === "ready"));
+    const n = f.calls.length;
+    ws.send(JSON.stringify({ type: "turn_start", turn_id: "p1" }));
+    ws.send(Buffer.alloc(8000));
+    ws.send(JSON.stringify({ type: "turn_end", vad_reason: "manual" }));
+    for (let i = 0; i < 150 && f.calls.length === n; i++) await new Promise((r) => setTimeout(r, 10));
+    const call = f.calls.at(-1);
+    assert.equal(call.surface, "kiosk");
+    assert.equal(call.device.tts_profile_id, "kk-crow");
+    assert.equal(call.device.stt_profile_id, "fw-crow");
+    const stored = await withDb((db) => store.findDevice(db, id));
+    assert.deepEqual([stored.tts_profile_id, stored.stt_profile_id, stored.bound_bot_id], ["kk", "fw", "helper"], "the stored record is never rewritten");
+    ws.close();
+  } finally { await withDb((db) => store.unpairDevice(db, id)); await f.close(); }
+});
+
+test("a cloud fast voice model turns the tool-family gate off on the kiosk (familiesOnIntent false)", async () => {
+  const f = await crowServe({ def: await crowDef({ fast_voice_model: "cloud-kx/model-y" }), providers: [["cloud-kx", "cloud"]] });
+  try {
+    const c = await f.open();
+    await c.ask();
+    assert.equal(f.calls.at(-1).familiesOnIntent, false);
+    c.ws.close();
+  } finally { await f.close(); }
+  const l = await crowServe({ def: await crowDef({ fast_voice_model: "local-kx/model-y" }), providers: [["local-kx", "local"]] });
+  try {
+    const c = await l.open();
+    await c.ask();
+    assert.equal(l.calls.at(-1).familiesOnIntent, true, "a local provider keeps the gate");
+    c.ws.close();
+  } finally { await l.close(); }
+});
+
+test("no voice bot row (ensure failed): the hello still opens, no profiles apply, nothing throws; the turn runs as Crow", async () => {
+  const f = await crowServe({ ensure: false });
+  try {
+    const c = await f.open();
+    assert.ok(c.msgs.some((m) => m.type === "ready"), "the turn says the no-assistant line, the socket stays open");
+    await c.ask();
+    const call = f.calls.at(-1);
+    assert.equal(call.device.bound_bot_id, CROW);
+    assert.match(call.device.stt_profile_id, /^kiosk-stt-/, "the session display's own STT (the kiosk profile), no Crow profile");
+    assert.ok(logs.some((m) => /voice bot/.test(m) && /fast_model_required/.test(m)));
+    c.ws.close();
+  } finally { await f.close(); }
+});
+
+test("the kiosk turn check answers as the Crow voice bot (botId crow.voice)", async () => {
+  const f = await crowServe();
+  try {
+    const r = await fetch(f.b + "/api/kiosk/internal/turn-check", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bot_id: "helper" }) });
+    assert.equal(r.status, 200);
+    assert.ok(f.calls.length >= 3);
+    for (const c of f.calls) { assert.equal(c.botId, CROW); assert.equal(c.surface, "kiosk"); assert.equal(c.noEscalate, true); }
+  } finally { await f.close(); }
+});
+
+test("resolveSessionBot never returns a voice bot: neither an explicit choice of it nor Automatic", async () => {
+  const { resolveSessionBot } = await import("../bundles/kiosk/server/session-display.js");
+  const fake = (enabled) => ({ execute: async ({ sql, args }) => ({ rows: /bot_id = \?/.test(sql) ? (enabled.includes(args[0]) ? [{ bot_id: args[0] }] : []) : enabled.map((bot_id) => ({ bot_id })) }) });
+  const db = fake(["a.voice", CROW, "helper"]);
+  assert.equal(await resolveSessionBot(db, { readSetting: async () => CROW }), "a.voice", "the literal reserved id is excluded by default");
+  assert.equal(await resolveSessionBot(fake([CROW, "helper"]), { readSetting: async () => CROW }), "helper", "an explicit choice of crow.voice falls to Automatic");
+  assert.equal(await resolveSessionBot(fake([CROW, "helper"]), { readSetting: async () => "" }), "helper", "Automatic skips it");
+  assert.equal(await resolveSessionBot(fake([CROW]), { readSetting: async () => "" }), null);
+  assert.equal(await resolveSessionBot(db, { readSetting: async () => "" }, null, { isVoiceBotId: (id) => id.endsWith(".voice") }), "helper", "the injected test is used");
+  assert.equal(await resolveSessionBot(fake([CROW, "helper"]), { readSetting: async () => "" }, async () => "full"), "helper", "fit-aware Automatic skips it too");
 });
 
 // ─── B3: the player bar's endpoint and the bar display's lifetime (dormant until a bar hello) ───

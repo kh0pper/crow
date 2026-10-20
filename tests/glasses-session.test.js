@@ -517,3 +517,88 @@ test("17a: a glasses turn that names a relative day gets the kiosk's computed [D
   const plain = seen.turnContext("what is the capital of Portugal");
   assert.match(plain, /^\[Now\] [^\n]+$/, "a plain question: the [Now] line only");
 });
+
+// ─── Crow's speaking voice and speech recognition on the glasses ───
+/** A session adapter on a fake runner: what transcribe and the turn were handed. */
+async function crowTurns({ loadVoiceBot, device = { id: "g", bound_bot_id: "helper", token_hash: "x", tts_profile_id: "p", stt_profile_id: "s1" }, profiles, botToolNames = async () => [], stt = "What is the capital of Portugal?" } = {}) {
+  const cv = await import("../servers/gateway/voice/crow-voice.js");
+  const seenBy = { transcribe: [], turn: [], speak: [] };
+  const fakeVoice = {
+    convo: { get: () => [] },
+    transcribe: async (o) => { seenBy.transcribe.push(o.device); return { text: stt }; },
+    speakText: async (o) => { seenBy.speak.push(o.device); o.sink.event({ type: "tts_start" }); o.sink.audio(Buffer.from("xx")); return true; },
+    runVoiceTurn: async (o) => { seenBy.turn.push(o); o.sink.event({ type: "tts_start" }); o.sink.audio(Buffer.from("xx")); return { route: "fast", failed: null, timings: {} }; },
+  };
+  const turns = createGlassesTurns({
+    voice: fakeVoice, openDb: () => ({ close() {} }), findDevice: async () => ({ ...device }),
+    listTtsProfiles: async () => profiles || [{ id: "p", provider: "piper" }, { id: "e", provider: "edge" }, { id: "k", provider: "kokoro" }],
+    botToolNames, capture: async () => ({}), describePhoto: async () => null, readEnvelope,
+    playback: { state: () => "idle", control: () => {}, start: () => {} }, log: () => {},
+    loadVoiceBot,
+    crowVoice: { turnOptions: cv.crowVoiceTurnOptions, withVoiceProfiles: cv.withVoiceProfiles, VOICE_DENY_TOOLS: cv.VOICE_DENY_TOOLS },
+  });
+  const run = () => turns.runTurn({ deviceId: device.id, audio: Buffer.alloc(4), send: { text: () => {}, binary: () => {} } });
+  return { turns, run, seenBy };
+}
+const withVoice = (voice) => async () => ({ def: crowVoiceDef({ voice: { ...crowVoiceDef().voice, ...voice } }), cloud: false });
+
+test("a non-PCM voice-bot TTS falls back to the device's playable one", async () => {
+  const t = await crowTurns({ loadVoiceBot: withVoice({ tts_profile_id: "e" }) });
+  assert.equal((await t.run()).failed, null);
+  assert.equal(t.seenBy.turn[0].device.tts_profile_id, "p", "the device's own piper voice, not the local fallback");
+  const ok = await crowTurns({ loadVoiceBot: withVoice({ tts_profile_id: "k" }) });
+  await ok.run();
+  assert.equal(ok.seenBy.turn[0].device.tts_profile_id, "k", "a playable Crow voice wins");
+  const none = await crowTurns({ loadVoiceBot: withVoice({}) });
+  await none.run();
+  assert.equal(none.seenBy.turn[0].device.tts_profile_id, "p", "no Crow voice chosen: the device's");
+  // Say from the dashboard (speak) uses the same rule.
+  await ok.turns.speak({ deviceId: "g", text: "Dinner.", send: { text: () => {}, binary: () => {} } });
+  assert.equal(ok.seenBy.speak.at(-1).tts_profile_id, "k");
+});
+
+test("transcribe uses Crow's STT profile", async () => {
+  const t = await crowTurns({ loadVoiceBot: withVoice({ stt_profile_id: "s2" }) });
+  await t.run();
+  assert.equal(t.seenBy.transcribe[0].stt_profile_id, "s2");
+  assert.equal(t.seenBy.turn[0].device.stt_profile_id, "s2");
+  const own = await crowTurns({ loadVoiceBot: withVoice({}) });
+  await own.run();
+  assert.equal(own.seenBy.transcribe[0].stt_profile_id, "s1", "null keeps the device's");
+});
+
+test("a cloud fast voice model turns the tool-family gate off on the glasses (familiesOnIntent false)", async () => {
+  const c = await crowTurns({ loadVoiceBot: async () => ({ def: crowVoiceDef(), cloud: true }) });
+  await c.run();
+  assert.equal(c.seenBy.turn[0].familiesOnIntent, false);
+  const l = await crowTurns({ loadVoiceBot: async () => ({ def: crowVoiceDef(), cloud: false }) });
+  await l.run();
+  assert.equal(l.seenBy.turn[0].familiesOnIntent, true);
+});
+
+test("no voice bot (missing, disabled, corrupt) or a failing loader: no profiles, the turn still runs, nothing throws", async () => {
+  for (const loadVoiceBot of [async () => null, async () => { throw new Error("db down"); }, undefined]) {
+    const t = await crowTurns({ loadVoiceBot });
+    const entry = await t.run();
+    assert.equal(entry.failed, null);
+    assert.equal(t.seenBy.transcribe[0].stt_profile_id, "s1");
+    assert.equal(t.seenBy.turn[0].device.tts_profile_id, "p");
+  }
+});
+
+test("look turn denies every voice-bot tool", async () => {
+  const { getChatTools } = await import("../servers/gateway/ai/tool-executor.js");
+  const { voiceBotToolNames } = await import("../bundles/meta-glasses/server/session.js");
+  const def = crowVoiceDef();
+  const names = getChatTools({ botDef: def }).map((x) => x.name);
+  assert.ok(names.length > 0);
+  // The routes' resolution: the Crow voice bot's tools, whatever the device is bound to.
+  const t = await crowTurns({ loadVoiceBot: async () => ({ def, cloud: false }), botToolNames: voiceBotToolNames(async () => ({ def, cloud: false }), getChatTools), stt: "Take a photo and tell me what this is." });
+  await t.run();
+  const deny = t.seenBy.turn[0].denyTools;
+  for (const n of names) if (n !== LOOK_TOOL) assert.ok(deny.includes(n), `${n} is denied on a look turn`);
+  assert.ok(!deny.includes(LOOK_TOOL));
+  assert.deepEqual(t.seenBy.turn[0].extraTools.map((x) => x.definition.name), [LOOK_TOOL]);
+  assert.deepEqual(await voiceBotToolNames(async () => null, getChatTools)({}, { bound_bot_id: "helper" }), [], "no voice bot: nothing to deny beyond the fixed list");
+  assert.deepEqual(await voiceBotToolNames(async () => { throw new Error("x"); }, getChatTools)({}, {}), []);
+});
