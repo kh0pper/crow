@@ -41,8 +41,13 @@ const asPath = (p) => (p instanceof URL ? fileURLToPath(p) : Buffer.isBuffer(p) 
 function check(path, opts) {
   const p = asPath(path);
   if (p === null) return null;
-  // Resolve the parent only: deleting a symlink never touches its target.
-  const target = join(realish(dirname(resolve(p))), basename(resolve(p)));
+  // A plain final name: resolve the parent only (deleting a symlink never
+  // touches its target). A trailing slash, "." or ".." makes the OS follow a
+  // symlink, so resolve those physically.
+  const plainLeaf = !/(^|[\\/])\.\.?([\\/]|$)|[\\/]$/.test(p);
+  let target;
+  if (plainLeaf) target = join(realish(dirname(resolve(p))), basename(resolve(p)));
+  else { try { target = fs.realpathSync.native(p); } catch { target = realish(p); } }
   for (const root of ROOTS) {
     if (within(target, root) || (opts && opts.recursive && within(root, target))) return refusal(target, root);
   }

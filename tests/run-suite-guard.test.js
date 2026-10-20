@@ -107,3 +107,17 @@ test("realish keeps the order of several missing path components", async () => {
   const base = mkdtempSync(join(SCRATCH, "realish-"));
   assert.equal(realish(join(base, "a", "b", "c", "d")), join(realpathSync(base), "a", "b", "c", "d"));
 });
+
+test("a trailing slash or .. through a symlink to a protected root is still refused", () => {
+  const r = runFixture(`
+test("follow", () => {
+  const link = process.env.CROW_SUITE_SCRATCH + "/link-to-data";
+  fs.symlinkSync(FAKE + "/artifacts", link);
+  assert.throws(() => fs.rmSync(link + "/", { recursive: true, force: true }), { code: "ECROWSUITEGUARD" });
+  assert.throws(() => fs.rmSync(link + "/.", { recursive: true, force: true }), { code: "ECROWSUITEGUARD" });
+  assert.throws(() => fs.unlinkSync(link + "/../crow.db"), { code: "ECROWSUITEGUARD" });
+  fs.unlinkSync(link);
+});`);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(r.sentinel, true);
+});
