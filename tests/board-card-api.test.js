@@ -650,7 +650,7 @@ test("GET /card/:id gains ADDITIVE keys only: autonomy/plan_head/latest_results/
   const before = await (await fetch(base + "/card/" + created.id)).json();
   const EXISTING_KEYS = ["card", "projects", "locked", "board"];
   for (const k of EXISTING_KEYS) assert.ok(Object.hasOwn(before, k), "existing key survives: " + k);
-  assert.deepEqual(Object.keys(before).sort(), [...EXISTING_KEYS, "autonomy", "plan_head", "latest_results", "mutations"].sort(),
+  assert.deepEqual(Object.keys(before).sort(), [...EXISTING_KEYS, "autonomy", "plan_head", "latest_results", "mutations", "decision"].sort(),
     "additive-only: no existing key dropped, nothing unexpected added");
   assert.equal(before.autonomy, "gated");
   assert.equal(before.plan_head, null, "no plan saved yet");
@@ -738,4 +738,110 @@ test("\"approve & mark done\": decide + move is two writes, both recorded, and l
   assert.ok(row.completed_at, "the builtin board's 'done' is terminal — completed_at stamps");
   const rows = mutationsFor(created.id);
   assert.deepEqual(rows.map((m) => m.verb), ["create", "result_decide", "move"], "both writes recorded, in order");
+});
+
+// ---- decision cards: answer route + GET exposes the decision ----
+
+async function seedDecisionCard(over = {}) {
+  const { createDbClient } = await import("../servers/db.js");
+  const { askDecision } = await import("../servers/gateway/board/decision-service.js");
+  const tdb = createDbClient(process.env.CROW_TASKS_DB_PATH);
+  const cdb = createDbClient();
+  try {
+    const r = await askDecision(tdb, cdb, {
+      projectId: 1,
+      decision: {
+        question: "Run the cleanup?", fingerprint: "fp-" + Math.random(), batch: "b-" + Math.random(),
+        options: [
+          { label: "Yes", consequence: "It runs tonight", recommended: true, value: "yes",
+            then: { create_card: { title: "Follow up", assign_bot: "scout" } } },
+          { label: "Not now", consequence: "Asked again later", snooze_days: 7, value: "later" },
+        ],
+        ...over,
+      },
+    }, { kind: "bot", id: "scout", jobId: null });
+    return r.id ?? r.card_id ?? r.item_id;
+  } finally { tdb.close(); cdb.close(); }
+}
+
+function postDecision(id, body) {
+  return fetch(base + "/card/" + id + "/decision", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+}
+
+test("GET card exposes the decision for a decision card and null for a normal card", async () => {
+  const id = await seedDecisionCard();
+  const d = await (await fetch(base + "/card/" + id)).json();
+  assert.equal(d.decision.question, "Run the cleanup?");
+  assert.equal(d.decision.options.length, 2);
+  const n = await (await fetch(base + "/card/1")).json();
+  assert.equal(n.decision, null);
+  assert.ok(!Object.hasOwn(n.card, "data_json"), "raw data_json is not leaked on the card");
+});
+
+test("POST /card/:id/decision answers once, records a HUMAN decision mutation, creates the follow-up card", async () => {
+  const id = await seedDecisionCard();
+  const r = await postDecision(id, { index: 0 });
+  assert.equal(r.status, 200);
+  const j = await r.json();
+  assert.equal(j.ok, true);
+  assert.equal(j.chosen.index, 0);
+  assert.equal(j.chosen.label, "Yes");
+  assert.ok(Number.isInteger(j.created_card_id));
+  const m = mutationsFor(id).find((x) => x.verb === "decision");
+  assert.ok(m, "decision mutation recorded");
+  assert.equal(m.actor_kind, "human");
+  const again = await postDecision(id, { index: 1 });
+  assert.equal(again.status, 409, "second answer refused");
+  assert.equal((await again.json()).code, "already_decided");
+});
+
+test("POST /card/:id/decision: bad index 400, missing card 404, Other needs text", async () => {
+  const id = await seedDecisionCard();
+  assert.equal((await postDecision(id, { index: 9 })).status, 400);
+  assert.equal((await postDecision(id, { index: "0" })).status, 400);
+  assert.equal((await postDecision(id, {})).status, 400);
+  assert.equal((await postDecision(id, { index: -1 })).status, 400);
+  assert.equal((await postDecision(999999, { index: 0 })).status, 404);
+  const ok = await postDecision(id, { index: -1, other_text: "something else" });
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).chosen.other_text, "something else");
+});
+
+test("POST /card/:id/decision: archived, closed and locked cards answer 409", async () => {
+  const archived = await seedDecisionCard();
+  assert.equal((await fetch(base + "/card/" + archived + "/archive", { method: "POST" })).status, 200);
+  assert.equal((await postDecision(archived, { index: 0 })).status, 409);
+
+  const closed = await seedDecisionCard();
+  assert.equal((await fetch(base + "/card/" + closed + "/move", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ status: "done" }) })).status, 200);
+  const rc = await postDecision(closed, { index: 0 });
+  assert.equal(rc.status, 409);
+  assert.equal((await rc.json()).code, "closed");
+
+  const locked = await seedDecisionCard();
+  const c = new Database(process.env.CROW_DB_PATH);
+  c.prepare("INSERT INTO bot_sessions (bot_id, card_id, status) VALUES ('scout', ?, 'active')").run(locked);
+  c.close();
+  const rl = await postDecision(locked, { index: 0 });
+  assert.equal(rl.status, 409);
+  assert.equal((await rl.json()).code, "locked");
+});
+
+test("POST /card/:id/decision: a request without the dashboard session is refused like the sibling decide route", async () => {
+  const { default: express } = await import("express");
+  const { default: botBoardApiRouter } = await import("../servers/gateway/routes/bot-board-api.js");
+  const app = express();
+  app.use(express.json());
+  app.use(botBoardApiRouter((req, res) => res.status(401).json({ error: "unauthorized" })));
+  const srv = await new Promise((r) => { const s = app.listen(0, () => r(s)); });
+  try {
+    const b = "http://127.0.0.1:" + srv.address().port + "/dashboard/bot-board-api";
+    const opts = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ index: 0, decision: "approved" }) };
+    const sibling = await fetch(b + "/card/1/result/1/decide", opts);
+    const mine = await fetch(b + "/card/1/decision", opts);
+    assert.equal(sibling.status, 401);
+    assert.equal(mine.status, sibling.status);
+  } finally { srv.close(); }
 });
