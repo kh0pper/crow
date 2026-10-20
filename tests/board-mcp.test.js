@@ -617,6 +617,33 @@ test("board_ask_decision returns an id, dedupes by fingerprint, and the 6th card
   await client.close();
 });
 
+test("board_ask_decision roundtrip: value, snooze_days and then.create_card (incl. assign_bot) survive into the stored card", async () => {
+  const client = await connectClient("/board/mcp", state.localToken);
+  const args = decisionArgs(1, "mcp-batch-rt");
+  args.decision.options = [
+    { label: "Go", consequence: "It proceeds.", recommended: true, value: "go" },
+    {
+      label: "Later", consequence: "Asked again later.", value: "later", snooze_days: 5,
+      then: { create_card: { title: "Follow up", description: "do it", owner: "alex", assign_bot: "bot-1" } },
+    },
+  ];
+  const r = payload(await client.callTool({ name: "board_ask_decision", arguments: args }));
+  const row = (await state.tdb.execute({ sql: "SELECT data_json FROM tasks_items WHERE id=?", args: [r.id] })).rows[0];
+  const stored = JSON.parse(row.data_json).decision;
+  assert.equal(stored.options[0].value, "go");
+  assert.equal(stored.options[1].value, "later");
+  assert.equal(stored.options[1].snooze_days, 5);
+  assert.deepEqual(stored.options[1].then.create_card, {
+    title: "Follow up", description: "do it", owner: "alex", assign_bot: "bot-1",
+  });
+  // an unknown key on an option is refused at the wire, not silently dropped
+  const bad = decisionArgs(2, "mcp-batch-rt");
+  bad.decision.options[0].surprise = true;
+  const rej = await client.callTool({ name: "board_ask_decision", arguments: bad });
+  assert.equal(rej.isError, true);
+  await client.close();
+});
+
 test("board_ask_decision surfaces a validation error as isError", async () => {
   const client = await connectClient("/board/mcp", state.localToken);
   const args = decisionArgs(1, "mcp-batch-bad");

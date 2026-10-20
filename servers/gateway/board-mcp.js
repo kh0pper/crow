@@ -463,12 +463,12 @@ export function createBoardMcpServer(options = {}) {
         description: z.string().optional(),
         owner: z.string().optional(),
         assign_bot: z.string().optional(),
-      }).optional(),
-    }).optional(),
-  });
+      }).strict().optional(),
+    }).strict().optional(),
+  }).strict();
 
   tool(server, "board_ask_decision",
-    "Ask the operator a decision as a card with 2-4 options (exactly one recommended, listed first, each with a consequence). Never pushes; call board_notify_decisions once at the end of a batch. A card with the same fingerprint already open (or snoozed after a decided option) returns that card with deduped:true; a 6th open card in a batch is refused (429 batch_full).",
+    "Ask the operator a decision as a card with 2-4 options (exactly one recommended, listed first, each with a consequence). Never pushes; call board_notify_decisions once at the end of a batch. A card with the same fingerprint already open (or snoozed after a decided option) returns that card with deduped:true; a 6th open card in a batch is refused (429 batch_full). Caps: question <=300 chars, option label <=120, consequence <=240, fingerprint <=200, batch <=100, snooze_days an integer 0-90, expires an ISO date (default today+7), at most 5 open cards per batch. Answers come only from the dashboard; no tool answers a decision.",
     {
       project_id: z.number().int().optional(),
       title: z.string().optional(),
