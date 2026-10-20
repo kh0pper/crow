@@ -105,9 +105,13 @@ test("the real export + import routes record the reminder state (HTTP, injected 
     const url = (p) => `http://127.0.0.1:${server.address().port}/dashboard/keychain/api${p}`;
     await K.saveExtensionSecret(db, key, { bundleId: "romm", envKey: "ROMM_AUTH_SECRET_KEY", label: "RomM — secret", secret: "rm-" + "r".repeat(40), origin: "generated" });
     assert.ok((await R.unexportedCount(db, key.id)) > 0);
-    const ex = await fetch(url("/export"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ passphrase: "a long export passphrase" }) });
+    const prep = await fetch(url("/export"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ passphrase: "a long export passphrase" }) });
+    assert.equal(prep.status, 200);
+    assert.ok((await R.unexportedCount(db, key.id)) > 0, "a sealed file nobody downloaded is no Export");
+    const ex = await fetch(url((await prep.json()).download.replace("/dashboard/keychain/api", "")));
     assert.equal(ex.status, 200);
     const file = await ex.json();
+    await new Promise((r) => setTimeout(r, 50)); // recorded once the body was sent
     assert.equal(await R.unexportedCount(db, key.id), 0, "everything readable is in that Export");
     HS.invalidateHealthCache();
     assert.equal((await signal()).issue, null);

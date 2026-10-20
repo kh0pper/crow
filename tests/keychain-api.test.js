@@ -184,7 +184,10 @@ test("Export then Import (re-auth required): the file round-trips; a wrong passp
     assert.equal((await s.call("/export", { body: { passphrase: "correct horse battery" } })).status, 403);
     await s.call("/reauth", { body: { password: "right-password" } });
     assert.equal((await s.call("/export", { body: { passphrase: "short" } })).status, 400);
-    const ex = await s.call("/export", { body: { passphrase: "correct horse battery" } });
+    const prep = await s.call("/export", { body: { passphrase: "correct horse battery" } });
+    assert.equal(prep.status, 200);
+    assert.equal(prep.body.count, 1);
+    const ex = await s.call(prep.body.download.replace("/dashboard/keychain/api", ""));
     assert.equal(ex.status, 200);
     assert.match(ex.disposition, /attachment; filename="crow-keychain-\d{4}-\d{2}-\d{2}\.json"/);
     assert.equal(ex.body.count, 1);
