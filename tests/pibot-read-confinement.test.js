@@ -115,8 +115,8 @@ const { applyPeerPatch } = await import("../servers/gateway/bot-federation.js");
 const age = (p) => { const t = (Date.now() - STALE_MCP_GRACE_MS - 60000) / 1000; utimesSync(p, t, t); };
 
 // ---- fixture: two projects, three bots -------------------------------------
-const W1 = join(dir, "projects", "alpha");       // bot A's project workspace
-const W2 = join(dir, "projects", "beta");        // bot C's project workspace
+const W1 = join(dir, "projects", "alpha", "workspace"); // bot A's project workspace
+const W2 = join(dir, "projects", "beta", "workspace");  // bot C's project workspace
 const A_WORLD = join(W1, "bots", "bota");
 const B_WORLD = join(process.env.CROW_HOME, "pi-bots", "botb"); // no project, no session_dir
 const C_WORLD = join(W2, "bots", "botc");
@@ -481,4 +481,50 @@ test("federation PATCH validates permission_policy.read_paths like the Bot Build
   }
   assert.throws(() => applyPeerPatch({ permission_policy: { read_paths: ["/a"] } }, { "permission_policy.read_paths.1": "rel" }),
     /absolute paths/, "a deeper key cannot bypass the check");
+});
+
+// ---- the bot's own workspace, for pi-lab's bash exemption (2026-10-20) --------
+
+test("workspace env: a project bot's child gets its realpath'd workspace, the projects root and its id; a project-less bot gets none", async () => {
+  process.env.PIBOT_MCP_CONFIG_DELIVERY = "fd";
+  const a = await channelTurn("bota", "ws-a");
+  const b = await channelTurn("botb", "ws-b");
+  assert.equal(a.env.PI_BOT_WORKSPACE, realpathSync(W1));
+  assert.equal(a.env.PI_BOT_PROJECTS_ROOT, realpathSync(join(dir, "projects")));
+  assert.equal(a.env.PI_BOT_ID, "bota");
+  for (const k of ["PI_BOT_WORKSPACE", "PI_BOT_PROJECTS_ROOT", "PI_BOT_ID"]) {
+    assert.equal(b.env[k], undefined, "no project => no " + k);
+  }
+});
+
+test("workspace env: a bot def's spawn_env cannot set or point the workspace keys", async () => {
+  process.env.PIBOT_MCP_CONFIG_DELIVERY = "fd";
+  const c = new Database(DB_FILE);
+  const def = baseDef([]);
+  def.spawn_env = { PI_BOT_WORKSPACE: "/", PI_BOT_PROJECTS_ROOT: "/", PI_BOT_ID: "bota" };
+  c.prepare("UPDATE pi_bot_defs SET definition=? WHERE bot_id='botc'").run(JSON.stringify(def));
+  c.prepare("UPDATE pi_bot_defs SET definition=? WHERE bot_id='botb'").run(JSON.stringify(def));
+  c.close();
+  try {
+    const cc = await channelTurn("botc", "ws-c-spawnenv");
+    assert.equal(cc.env.PI_BOT_WORKSPACE, realpathSync(W2), "the bridge's value, never the def's");
+    assert.equal(cc.env.PI_BOT_ID, "botc");
+    const bb = await channelTurn("botb", "ws-b-spawnenv");
+    assert.equal(bb.env.PI_BOT_WORKSPACE, undefined, "a project-less bot cannot grant itself one");
+    assert.equal(bb.env.PI_BOT_ID, undefined);
+  } finally {
+    const c2 = new Database(DB_FILE);
+    c2.prepare("UPDATE pi_bot_defs SET definition=? WHERE bot_id IN ('botb','botc')").run(JSON.stringify(baseDef([])));
+    c2.close();
+  }
+});
+
+test("workspace env: a background job's child carries the same workspace keys", async () => {
+  process.env.PIBOT_MCP_CONFIG_DELIVERY = "fd";
+  arm("job-ws");
+  const r = await runJob({ job_id: "job-ws", bot_id: "bota", goal: "do it", escalate: 0 }, { log: () => {} });
+  assert.equal(r.result, "ok");
+  const cap = readCap();
+  assert.equal(cap.env.PI_BOT_WORKSPACE, realpathSync(W1));
+  assert.equal(cap.env.PI_BOT_ID, "bota");
 });

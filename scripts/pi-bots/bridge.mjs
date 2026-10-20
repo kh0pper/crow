@@ -56,7 +56,8 @@ import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 // see its CYCLE NOTE.
 import { buildBotWorld, prepareSpawn } from "./bot-world.mjs";
 import { runSkillReview } from "./skill_review.mjs";
-import { botsDbPath, tasksDbPath as resolveTasksDbPath, resolveSqlitePath } from "./instance-paths.mjs";
+import { botsDbPath, tasksDbPath as resolveTasksDbPath, resolveSqlitePath, botsProjectsRoot } from "./instance-paths.mjs";
+import { botWorkspaceEnv } from "./bot-workspace-env.mjs";
 import { remoteServersForBot, parseRemoteInvocationFlag, remoteBlockName } from "./remote-blocks.mjs";
 import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
@@ -422,6 +423,12 @@ export class PiRpc {
         // above, so a def can never point pi at a file of its choosing.
         PI_BOT_MCP_CONFIG: join(sessionDir, ".mcp.json"),
         PI_BOT_PERMISSION_POLICY: JSON.stringify(piPolicy) },
+      // The bot's own project workspace (PI_BOT_WORKSPACE / _PROJECTS_ROOT /
+      // _ID) for pi-lab's bash check: commands inside it are not "sensitive"
+      // just for sitting under the instance's data dir. Engine-reserved keys,
+      // stripped from def.spawn_env above; {} (no exemption) unless the folder
+      // really is a directory strictly under this instance's projects root.
+      botWorkspaceEnv({ workspaceDir: opts.projectWorkspaceDir || null, projectsRoot: botsProjectsRoot(), botId: opts.botId || null }),
       spawnEnv,
       // C-12: the interactive engine's per-session overrides (e.g.
       // PI_BOT_INTERACTIVE:"1") — merged LAST so they win over both the

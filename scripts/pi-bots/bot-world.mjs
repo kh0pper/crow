@@ -408,6 +408,8 @@ export async function prepareSpawn(world, { escalate = false, log = () => {} } =
       // S6-CROW: the bot's project workspace joins its read roots (PiRpc,
       // bot-read-paths.mjs); null for a bot without a project.
       projectWorkspaceDir: (world.projectId != null && world.projectSpace && world.projectSpace.workspace_dir) || null,
+      // The bot's id, for the workspace env (bot-workspace-env.mjs).
+      botId: (world.bot && world.bot.bot_id) || null,
       extraReadPaths: world.extraReadPaths || [],
       // S6-CROW: how the MCP config reaches pi. Absent on a hand-built world
       // (test seams) => PiRpc's pre-S6 file env.
