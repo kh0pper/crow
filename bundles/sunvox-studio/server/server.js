@@ -14,9 +14,11 @@
  *
  * Sources resolve from `path` (inside the work dir) or `storage_key` (Crow
  * storage, via the app's s3-client resolved through server/app-root.js).
- * Renders land in the work dir (SUNVOX_WORKDIR, default
- * ~/.crow/data/sunvox-studio/) and the returned path can be handed straight
- * to fw_upload_track for Funkwhale/glasses playback.
+ * Renders and projects land in the work dir (SUNVOX_WORKDIR, default
+ * ~/.crow/data/sunvox-studio/) and, when storage is available, in Crow
+ * storage too (server/outputs.js: storage key, storage_files row, short-lived
+ * URL). A render can also go straight into a Funkwhale library
+ * (server/funkwhale-push.js) and raise a notification when it is done.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -27,6 +29,8 @@ import path from "node:path";
 import os from "node:os";
 import { spawnSync } from "node:child_process";
 import * as engine from "./sunvox-engine.js";
+import { saveToStorage, storageMode, notifyDone, mimeFor, REFERENCE_TYPES } from "./outputs.js";
+import { pushToFunkwhale } from "./funkwhale-push.js";
 
 export const WORKDIR = path.resolve(process.env.SUNVOX_WORKDIR || path.join(os.homedir(), ".crow", "data", "sunvox-studio"));
 
@@ -76,6 +80,21 @@ export function resolveReadablePath(p) {
   return real;
 }
 
+// --- App modules, resolved lazily through the app root (tests inject fakes) ---
+let dbClient = null;
+async function appDeps() {
+  const { appImport } = await import("./app-root.js");
+  return {
+    db: async () => {
+      if (!dbClient) dbClient = (await appImport("servers/db.js")).createDbClient();
+      return dbClient;
+    },
+    createNotification: async (...a) => (await appImport("servers/shared/notifications.js")).createNotification(...a),
+    consumeToken: async (...a) => (await appImport("servers/shared/rate-limiter.js")).consumeToken(...a),
+    musicConfig: async () => (await appImport("servers/gateway/media/pinned-upstream.js")).musicUpstreamConfig(),
+  };
+}
+
 async function readSource({ path: p, storage_key }) {
   if (p) {
     const real = resolveReadablePath(p);
@@ -116,9 +135,9 @@ function convertWithFfmpeg(wavPath, outPath) {
   return outPath;
 }
 
-async function renderToFile(buf, { name, format }) {
+async function renderToFile(buf, { name, format, sampleRate = 44100 }) {
   const dir = await ensureWorkdir();
-  const { info, wav } = await engine.render(buf);
+  const { info, wav } = await engine.render(buf, { sampleRate });
   const base = path.join(dir, `${sanitize(name)}-${Date.now()}`);
   const wavPath = `${base}.wav`;
   await fsp.writeFile(wavPath, wav);
@@ -129,7 +148,68 @@ async function renderToFile(buf, { name, format }) {
     await fsp.unlink(wavPath).catch(() => {});
   }
   const stat = await fsp.stat(outPath);
-  return { info, path: outPath, format: path.extname(outPath).slice(1), size_bytes: stat.size, duration_s: info.duration_s };
+  return { info, path: outPath, format: path.extname(outPath).slice(1), sample_rate: sampleRate, size_bytes: stat.size, duration_s: info.duration_s };
+}
+
+const OUTPUT_SCHEMA = {
+  save_to_storage: z.boolean().optional().describe("Save to Crow storage (default: yes when storage is available; true = fail if it is not; false = local file only)"),
+  reference_type: z.enum(REFERENCE_TYPES).optional().describe("blog_post: attach to a blog/song post, which makes the stored file PUBLIC at /blog/media/<key> (a song page's player fetches it there)"),
+  reference_id: z.number().int().optional().describe("ID of the referenced post"),
+};
+const RENDER_OPTS_SCHEMA = {
+  sample_rate: z.union([z.literal(44100), z.literal(48000)]).optional().describe("Output sample rate (default 44100)"),
+  notify: z.boolean().optional().describe("Raise a Crow notification when the render is done"),
+  funkwhale_library: z.string().max(200).optional().describe("Also upload the render (mp3/ogg) to this Funkwhale library, by UUID or name, so fw_play can play it (needs the Funkwhale add-on)"),
+};
+
+/**
+ * Store one finished file (render or project) per the save_to_storage /
+ * reference_type options. → fields to merge into the tool result.
+ */
+async function storeOutput(deps, { buf, fileName, kind, args }) {
+  const s3 = await deps.storage();
+  const mode = storageMode(args.save_to_storage, !!s3);
+  if (mode === "off") return {};
+  if (mode === "skip-unavailable") return { storage: "not saved: storage is not available (the file is in the local work dir)" };
+  try {
+    return await saveToStorage({
+      s3, db: await deps.db(), buf, fileName, mimeType: mimeFor(path.extname(fileName).slice(1)), kind,
+      referenceType: args.reference_type ?? null, referenceId: args.reference_id ?? null,
+    });
+  } catch (err) {
+    // Asked for explicitly: the call fails. Otherwise the local file stands and the reason is reported.
+    if (args.save_to_storage === true) throw err;
+    return { storage: `not saved: ${err.message} (the file is in the local work dir)` };
+  }
+}
+
+/** Storage, Funkwhale and the notification for one finished render. */
+async function deliverRender(deps, res, { name, args }) {
+  const buf = await fsp.readFile(res.path);
+  const out = {};
+  const st = await storeOutput(deps, { buf, fileName: path.basename(res.path), kind: "renders", args });
+  for (const [k, v] of Object.entries(st)) out[k === "url" ? "storage_url" : k === "url_expires_in_s" ? "storage_url_expires_in_s" : k] = v;
+  if (args.funkwhale_library) {
+    try {
+      out.funkwhale = await pushToFunkwhale({
+        cfg: await deps.musicConfig(), buf, fileName: path.basename(res.path), library: args.funkwhale_library,
+        fetchImpl: deps.fetchImpl || fetch, db: await deps.db().catch(() => null), consumeToken: deps.consumeToken,
+      });
+    } catch (err) {
+      out.funkwhale = { error: err.message };
+    }
+  }
+  if (args.notify) {
+    let n;
+    try {
+      n = await notifyDone({ createNotification: deps.createNotification, db: await deps.db() }, { name, format: res.format, duration_s: res.duration_s, storage_key: out.storage_key || null });
+    } catch (err) {
+      n = { notified: false, error: err.message };
+    }
+    out.notified = n.notified;
+    if (n.error) out.notify_error = n.error;
+  }
+  return out;
 }
 
 // The spec compose() (sunvox-engine.js) reads, as a typed schema: the old
@@ -181,11 +261,30 @@ function composeSpecSchema() {
     modules: z.array(module),
     connections: z.array(z.array(z.string())).nullable().optional().describe("chains of module ids; \"out\" is the Output"),
     patterns: z.array(pattern),
+    arrangement: z.array(z.object({
+      pattern: z.union([z.string(), z.number()]).describe("a pattern id"),
+      x: num().describe("start line; default: right after the previous placement"),
+      y: num().describe("timeline row; default 0"),
+    }).passthrough()).nullable().optional().describe("the timeline, in order; a pattern placed twice repeats"),
   }).passthrough()).describe("The composition spec (see tool description)");
 }
 
-export function createSunvoxServer() {
-  const server = new McpServer({ name: "sunvox-studio", version: "0.1.1" });
+/**
+ * @param {object} [inject] test seams: storage() → s3-client-like or null,
+ *   db() → db client, createNotification, consumeToken, musicConfig(), fetchImpl.
+ */
+export function createSunvoxServer(inject = {}) {
+  const server = new McpServer({ name: "sunvox-studio", version: "0.2.0" });
+  let lazy = null;
+  const app = async () => (lazy ||= await appDeps());
+  const deps = {
+    storage: inject.storage || storage,
+    db: inject.db || (async () => (await app()).db()),
+    createNotification: inject.createNotification || (async (...a) => (await app()).createNotification(...a)),
+    consumeToken: inject.consumeToken || (async (...a) => (await app()).consumeToken(...a)),
+    musicConfig: inject.musicConfig || (async () => { try { return await (await app()).musicConfig(); } catch { return null; } }),
+    fetchImpl: inject.fetchImpl || null,
+  };
 
   server.registerTool("sunvox_module_types", {
     title: "Module catalogue",
@@ -198,7 +297,7 @@ export function createSunvoxServer() {
 
   server.registerTool("sunvox_info", {
     title: "Inspect a project",
-    description: "Structured metadata for a SunVox/XM/MOD file: name, BPM, TPL, duration, module list (type/name/kind/controller count), pattern list (name/tracks/lines). Cheap and safe — use it to look at any track before rendering or editing.",
+    description: "Structured metadata for a SunVox/XM/MOD file: format, name, project version, BPM, TPL (and the effective tempo), duration, module list (type/name/kind/controller count/x/y/colour), pattern list (name/tracks/lines/x/y on the timeline). Cheap and safe — use it to look at any track before rendering or editing.",
     inputSchema: SOURCE_SCHEMA,
   }, async (args) => {
     try {
@@ -212,16 +311,20 @@ export function createSunvoxServer() {
 
   server.registerTool("sunvox_render", {
     title: "Render to audio",
-    description: "Offline-render a SunVox/XM/MOD project to an audio file (wav, or mp3/ogg via ffmpeg). ~130x realtime. Returns the output path — hand it to fw_upload_track for Funkwhale, or play it via the glasses. No audio device needed on this machine.",
+    description: "Offline-render a SunVox/XM/MOD project to audio (wav, or mp3/ogg via ffmpeg), ~130x realtime, up to 20 minutes. Saves it to Crow storage when storage is available and returns the storage_key plus a short-lived storage_url; the local path is returned too. funkwhale_library uploads it to Funkwhale so fw_play can play it on the glasses; notify raises a Crow notification when it is done. No audio device needed on this machine.",
     inputSchema: {
       ...SOURCE_SCHEMA,
-      format: z.enum(["wav", "mp3", "ogg"]).default("wav").describe("Output format (mp3/ogg need ffmpeg)"),
+      format: z.enum(["wav", "mp3", "ogg"]).default("wav").describe("Output format (mp3/ogg need ffmpeg; Funkwhale takes mp3/ogg)"),
       out_name: z.string().optional().describe("Base filename (default: source name)"),
+      ...RENDER_OPTS_SCHEMA,
+      ...OUTPUT_SCHEMA,
     },
   }, async (args) => {
     try {
       const { buf, name } = await readSource(args);
-      const res = await renderToFile(buf, { name: args.out_name || path.parse(name).name, format: args.format || "wav" });
+      const outName = args.out_name || path.parse(name).name;
+      const res = await renderToFile(buf, { name: outName, format: args.format || "wav", sampleRate: args.sample_rate || 44100 });
+      Object.assign(res, await deliverRender(deps, res, { name: outName, args }));
       return { content: [{ type: "text", text: JSON.stringify(res, null, 1) }] };
     } catch (err) {
       return { isError: true, content: [{ type: "text", text: `sunvox_render failed: ${err.message}` }] };
@@ -232,27 +335,48 @@ export function createSunvoxServer() {
     title: "Compose a project",
     description:
       "Build a SunVox project programmatically from a JSON spec, save it as .sunvox, and optionally render it in the same call. " +
-      "Spec: { bpm? (1-999), tpl? (1-31), modules: [{ id, type, name?, params?: {controllerName: value}, x?, y? }], connections?: [[srcId, ..., \"out\"], ...] (chains; modules not used as a chain source auto-connect to Output), patterns: [{ name?, tracks, lines, x?, y?, events: [{ track, line, note (\"C3\"/\"F#4\"/1-127), velocity? (1-129), module (id), ctl?/ctl_val? or effect?/effect_param?, note_off? }] }] }. " +
-      "Use sunvox_module_types first to pick module types and param names. Notes: C0=1; a line is one tick (TPL ticks per beat). Keep patterns 16-64 lines; place successive patterns at x = previous x + lines.",
+      "Spec: { bpm? (1-999), tpl? (1-31), modules: [{ id, type, name?, params?: {controllerName: value within its min..max}, x?, y? }], connections?: [[srcId, ..., \"out\"], ...] (chains; modules not used as a chain source auto-connect to Output), patterns: [{ id, tracks, lines, x?, y?, events: [{ track, line, note (\"C3\"/\"F#4\"/1-127), velocity? (1-129), module (id), ctl?/ctl_val? or effect?/effect_param?, note_off? }] }], arrangement?: [{ pattern (id), x?, y? }] (the timeline in order: a missing x starts after the previous placement; a pattern placed twice repeats; every pattern must be placed) }. " +
+      "Use sunvox_module_types first to pick module types and param names. Notes: C0=1; a line is one tick (TPL ticks per beat). Keep patterns 16-64 lines. The name becomes the song name; an existing composition with the same name is kept unless overwrite is true. " +
+      "Saves the project (and the render, with render=true) to Crow storage when it is available; reference_type blog_post makes them public for a song page (**SunVox:** storage:<key>).",
     inputSchema: {
-      name: z.string().default("crow-compose").describe("Project/file name"),
+      name: z.string().default("crow-compose").describe("Project/file name, also the song name"),
+      overwrite: z.boolean().default(false).describe("Replace an existing composition with the same name in the work dir"),
       render: z.boolean().default(false).describe("Also render to audio in the same call"),
       format: z.enum(["wav", "mp3", "ogg"]).default("wav").describe("Render format when render=true"),
+      ...RENDER_OPTS_SCHEMA,
+      ...OUTPUT_SCHEMA,
       spec: composeSpecSchema(),
     },
   }, async (args) => {
     try {
-      const { project, info } = await engine.compose(args.spec, { name: args.name });
       const dir = await ensureWorkdir();
       const projectPath = path.join(dir, `${sanitize(args.name)}.sunvox`);
+      if (!args.overwrite && fs.existsSync(projectPath)) {
+        throw new Error(`a composition named "${sanitize(args.name)}" already exists in the work dir; pass overwrite: true to replace it, or pick another name`);
+      }
+      const { project, info } = await engine.compose(args.spec, { name: args.name });
       await fsp.writeFile(projectPath, project);
       const out = { project_path: projectPath, project_bytes: project.length, info };
+      const st = await storeOutput(deps, { buf: project, fileName: path.basename(projectPath), kind: "projects", args });
+      if (st.storage_key) {
+        out.project_storage_key = st.storage_key;
+        out.project_storage_url = st.url;
+        if (st.media_path) out.project_media_path = st.media_path;
+      } else if (st.storage) out.storage = st.storage;
       if (args.render) {
-        const res = await renderToFile(project, { name: args.name, format: args.format || "wav" });
+        const res = await renderToFile(project, { name: args.name, format: args.format || "wav", sampleRate: args.sample_rate || 44100 });
         out.render_path = res.path;
         out.render_format = res.format;
         out.render_size_bytes = res.size_bytes;
+        out.sample_rate = res.sample_rate;
         out.duration_s = res.duration_s;
+        const d = await deliverRender(deps, res, { name: args.name, args });
+        if (d.storage_key) {
+          out.render_storage_key = d.storage_key;
+          out.render_storage_url = d.storage_url;
+          if (d.media_path) out.render_media_path = d.media_path;
+        } else if (d.storage) out.render_storage = d.storage;
+        for (const k of ["funkwhale", "notified", "notify_error"]) if (d[k] !== undefined) out[k] = d[k];
       }
       return { content: [{ type: "text", text: JSON.stringify(out, null, 1) }] };
     } catch (err) {

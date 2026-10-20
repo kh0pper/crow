@@ -62,13 +62,22 @@ jobs:
       # Shell 153.0.8010.12 (build 1243). --with-deps installs its system libs.
       - name: Headless Chrome for the live layout tests
         run: npx --yes playwright@1.63.0 install --with-deps chromium-headless-shell
+      # The SunVox engine tests (tests/sunvox-studio.test.js) load the bundle's
+      # vendored native library through koffi, which lives in the bundle's own
+      # node_modules. Install it with exactly the flags the Extensions page
+      # installer uses, so CI also proves that install path loads the engine.
+      - name: SunVox Studio bundle deps (engine tests)
+        run: npm ci --prefix bundles/sunvox-studio --omit=optional --ignore-scripts --no-audit --no-fund
       # GITHUB_ACTIONS=true applies tests/ci-exclusions.json (empty today);
       # host-bound tests self-skip via in-file capability guards instead.
       # CROW_REQUIRE_TEST_CHROME: a browser that fails to start fails the live
       # tests instead of letting them skip silently.
+      # CROW_REQUIRE_SUNVOX_ENGINE: the SunVox engine tests fail instead of
+      # skipping when the engine cannot load.
       - run: npm test
         env:
           CROW_REQUIRE_TEST_CHROME: "1"
+          CROW_REQUIRE_SUNVOX_ENGINE: "1"
 
   static-checks:
     runs-on: ubuntu-latest

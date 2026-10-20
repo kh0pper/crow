@@ -162,7 +162,7 @@
     {
       "id": "artifacts",
       "name": "Artifacts",
-      "version": "0.6.2",
+      "version": "0.6.3",
       "description": "Pages, documents and diagrams your bots make. Comment on any part, send feedback, and the bot revises and replies in each thread.",
       "type": "bundle",
       "author": "Crow",
@@ -5863,8 +5863,8 @@
     {
       "id": "sunvox-studio",
       "name": "SunVox Studio",
-      "version": "0.1.2",
-      "description": "AI-operable music engine — inspect, render and compose SunVox/XM/MOD tracker projects via the MIT-licensed SunVox library. Headless offline rendering (~130x realtime, no audio device) and programmatic composition from JSON specs. Pairs with Funkwhale for playback.",
+      "version": "0.2.0",
+      "description": "AI-operable music engine — inspect, render and compose SunVox/XM/MOD tracker projects via the MIT-licensed SunVox library. Headless offline rendering (~130x realtime, no audio device) and programmatic composition from JSON specs (patterns, arrangement, song name). Renders and projects are saved to Crow storage; a render can go straight into a Funkwhale library for glasses playback.",
       "type": "mcp-server",
       "author": "Crow",
       "category": "media",
@@ -5925,7 +5925,7 @@
           "secret": false
         }
       ],
-      "notes": "Vendors libsunvox 2.1.4d (MIT, (c) Alexander Zolotov / WarmPlace.ru) for linux x86_64 — see vendor/LICENSE.txt; the prebuilt library's terms (\"Powered by SunVox\" attribution) and the SunDog/libFLAC/Tremor licences are in vendor/THIRD-PARTY-NOTICES.txt. No Docker, no network ports: a pure stdio MCP server around the local engine library. Linux x86_64 only in v1 (arm64 .so available upstream).",
+      "notes": "Vendors libsunvox 2.1.4d (MIT, (c) Alexander Zolotov / WarmPlace.ru) for linux x86_64 — see vendor/LICENSE.txt; the prebuilt library's terms (\"Powered by SunVox\" attribution) and the SunDog/libFLAC/Tremor licences are in vendor/THIRD-PARTY-NOTICES.txt. No Docker, no network ports: a pure stdio MCP server around the local engine library. Saves to Crow storage through the app's s3-client (MINIO_* env) and records storage_files rows; the Funkwhale upload uses the Funkwhale add-on's own configuration (the same one the gateway's media relay reads). Linux x86_64 only in v1 (arm64 .so available upstream).",
       "official": true
     },
     {
