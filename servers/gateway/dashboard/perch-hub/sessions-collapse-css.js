@@ -35,6 +35,9 @@ export function perchSessionsCollapseCss() {
      track it would land in the 320px column. */
   body[data-view="chat"] #perch-hub-root.sessions-collapsed .hub-split{grid-template-columns:minmax(0,1fr)}
   body[data-view="chat"] #perch-hub-root.sessions-collapsed #perch-list-reveal{display:inline-flex}
+  /* .perch-head is space-between; with the reveal button first that would
+     strand the bot name at the far edge. Keep the two together. */
+  body[data-view="chat"] #perch-hub-root.sessions-collapsed .perch-head{justify-content:flex-start}
 }
 `;
 }
