@@ -52,7 +52,7 @@ async function defaultWorkdir() {
 /** The value 0.1.x installs wrote into their add-on entry (the manifest default then).
  *  It means "the default", so it maps to this instance's data dir, not ~/.crow. */
 export const LEGACY_WORKDIR_DEFAULT = "~/.crow/data/sunvox-studio";
-const workdirSetting = String(process.env.SUNVOX_WORKDIR || "").trim();
+const workdirSetting = String(process.env.SUNVOX_WORKDIR || "").trim().replace(/\/+$/, "");
 export const WORKDIR = path.resolve(workdirSetting && workdirSetting !== LEGACY_WORKDIR_DEFAULT ? expandHome(workdirSetting) : await defaultWorkdir());
 
 // --- Lazy storage import (works from the repo tree; degrades with a clear error) ---
@@ -65,9 +65,12 @@ let storageInit = false;
  * Storage is usually configured in the Nest (storage.shared.* settings, with
  * sealed secrets), not in the environment. This child opens those settings
  * once with the instance identity (loaded only if it exists, never created),
- * wipes the identity's key material straight away and hands the s3-client
- * only the opened config (useStorageConfig): the root seed does not stay in a
- * process that feeds untrusted tracker files to a native parser. With no Nest
+ * zeroes the identity's key buffers straight away and hands the s3-client only
+ * the opened config (useStorageConfig), so the seed is not kept for the life
+ * of a process that feeds untrusted tracker files to a native parser. This
+ * narrows what a memory-disclosure bug could leak; it is no defence against
+ * code execution in this process (the identity file is readable by the same
+ * user, and string copies of the seed are not zeroed). With no Nest
  * config it falls back to the MINIO_* environment like the stdio storage server.
  */
 async function storage() {
@@ -78,7 +81,6 @@ async function storage() {
     const { appImport } = await import("./app-root.js");
     const mod = await appImport("servers/storage/s3-client.js");
     if (!storageInit) {
-      storageInit = true;
       try {
         const { loadIdentityIfPresent } = await appImport("servers/sharing/identity.js");
         if (typeof loadIdentityIfPresent === "function" && typeof mod.useStorageConfig === "function") {
@@ -87,9 +89,12 @@ async function storage() {
             let cfg = null;
             try { cfg = await mod.loadSharedStorageFromDb(await sharedDb(), identity); } finally { wipeKeys(identity); }
             if (cfg) mod.useStorageConfig(cfg);
-          }
-        }
-      } catch { /* env fallback (MINIO_*) stays active */ }
+            // No config may be a passing DB error: try again on the next call rather
+            // than settle on the env config (which would upload to another bucket).
+            storageInit = !!cfg;
+          } else storageInit = true;
+        } else storageInit = true;
+      } catch { /* env fallback (MINIO_*) stays active; retried on the next call */ }
     }
     storageMod = (await mod.isAvailable()) ? mod : null;
   } catch {
@@ -266,14 +271,24 @@ async function storeOutput(deps, { buf, fileName, kind, args }) {
 }
 
 /** Storage, Funkwhale and the notification for one finished render. */
-async function deliverRender(deps, res, { name, args }) {
+/** A gateway tool call times out after 60 s (the MCP client's default). The
+ *  Funkwhale push must finish inside it, counted from the tool call's start. */
+export const TOOL_CALL_BUDGET_MS = 55_000;
+export const MIN_PUSH_MS = 10_000;
+
+async function deliverRender(deps, res, { name, args, startedAt }) {
   const buf = await fsp.readFile(res.path);
   const out = {};
   const st = await storeOutput(deps, { buf, fileName: path.basename(res.path), kind: "renders", args });
   for (const [k, v] of Object.entries(st)) out[k === "url" ? "storage_url" : k === "url_expires_in_s" ? "storage_url_expires_in_s" : k] = v;
   if (args.funkwhale_library) {
-    try {
+    const left = TOOL_CALL_BUDGET_MS - (deps.now() - startedAt);
+    if (left < MIN_PUSH_MS) {
+      // Too late in this call: the gateway would give up first and a retry would upload twice.
+      out.funkwhale = { error: `not uploaded: the render took too long to also upload inside this call; upload ${path.basename(res.path)} with fw_upload_track (file_path: ${res.path})` };
+    } else try {
       out.funkwhale = await pushToFunkwhale({
+        totalMs: Math.min(35_000, left),
         cfg: await deps.musicConfig(), buf, fileName: path.basename(res.path), library: args.funkwhale_library,
         fetchImpl: deps.fetchImpl || fetch, db: await deps.db(), consumeToken: deps.consumeToken,
       });
@@ -366,6 +381,7 @@ export function createSunvoxServer(inject = {}) {
     consumeToken: inject.consumeToken || (async (...a) => (await app()).consumeToken(...a)),
     musicConfig: inject.musicConfig || (async () => { try { return await (await app()).musicConfig(); } catch { return null; } }),
     fetchImpl: inject.fetchImpl || null,
+    now: inject.now || Date.now,
   };
 
   server.registerTool("sunvox_module_types", {
@@ -402,11 +418,12 @@ export function createSunvoxServer(inject = {}) {
       ...OUTPUT_SCHEMA,
     },
   }, async (args) => {
+    const startedAt = deps.now();
     try {
       const { buf, name } = await readSource(args, deps);
       const outName = args.out_name || path.parse(name).name;
       const res = await renderToFile(buf, { name: outName, format: args.format || "wav", sampleRate: args.sample_rate || 44100 });
-      Object.assign(res, await deliverRender(deps, res, { name: outName, args }));
+      Object.assign(res, await deliverRender(deps, res, { name: outName, args, startedAt }));
       return { content: [{ type: "text", text: JSON.stringify(res, null, 1) }] };
     } catch (err) {
       return { isError: true, content: [{ type: "text", text: `sunvox_render failed: ${err.message}` }] };
@@ -430,6 +447,7 @@ export function createSunvoxServer(inject = {}) {
       spec: composeSpecSchema(),
     },
   }, async (args) => {
+    const startedAt = deps.now();
     try {
       const dir = await ensureWorkdir();
       const projectPath = path.join(dir, `${sanitize(args.name)}.sunvox`);
@@ -458,7 +476,7 @@ export function createSunvoxServer(inject = {}) {
         out.sample_rate = res.sample_rate;
         out.duration_s = res.duration_s;
         out.song_duration_s = res.song_duration_s;
-        const d = await deliverRender(deps, res, { name: args.name, args });
+        const d = await deliverRender(deps, res, { name: args.name, args, startedAt });
         if (d.storage_key) {
           out.render_storage_key = d.storage_key;
           out.render_storage_url = d.storage_url;

@@ -580,3 +580,25 @@ test("sunvox tools: storage_key reads only this bundle's files and blog media, n
     assert.deepEqual(fetched, ["sunvox-studio/projects/1-x-own.sunvox", "1700-shared.sunvox"], "refused keys were never fetched");
   } finally { await c.close(); fs.rmSync(work, { recursive: true, force: true }); }
 });
+
+test("sunvox tools: a render that used up most of the 60 s tool call skips the Funkwhale push before any request or rate token", { skip: (!engine && SKIP_REASON) || NO_FFMPEG }, async () => {
+  const os = await import("node:os");
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "sv-tools-"));
+  fs.copyFileSync(FIXTURE, path.join(work, "f.sunvox"));
+  let t = 0; const calls = []; const tokens = [];
+  const now = () => { const v = t; t = 50_000; return v; }; // the call starts at 0; every later reading is 50 s in
+  const c = await toolClient({
+    storage: async () => null, db: async () => memDb(), now,
+    musicConfig: async () => ({ origin: "http://127.0.0.1:5999", token: "tok" }),
+    consumeToken: async () => { tokens.push(1); return { allowed: true }; },
+    fetchImpl: async (u) => { calls.push(String(u)); return new Response("{}", { status: 500 }); },
+  }, work);
+  try {
+    t = 0;
+    const late = await c.call("sunvox_render", { path: "f.sunvox", format: "mp3", funkwhale_library: "0f8a6c1e-1111-4222-8333-444455556666" });
+    assert.equal(late.isError, false, late.text);
+    // 50 s into the call: 5 s left of the 55 s budget, under the 10 s a push needs.
+    assert.match(late.json.funkwhale.error, /not uploaded.*fw_upload_track/);
+    assert.deepEqual([calls.length, tokens.length], [0, 0]);
+  } finally { await c.close(); fs.rmSync(work, { recursive: true, force: true }); }
+});
