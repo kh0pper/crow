@@ -1,6 +1,7 @@
 /**
- * The reserved Crow voice bot: definition, presets and settings normalization.
- * Pure module, no I/O.
+ * The reserved Crow voice bot: definition, presets and settings normalization,
+ * plus ensureVoiceBot (the one-time boot create). The module imports nothing;
+ * ensureVoiceBot does its I/O through the db client and readers it is handed.
  */
 
 export const CROW_VOICE_BOT_ID = "crow.voice";
@@ -11,6 +12,12 @@ export const ROUTINE_BACKENDS = {
   reminders: ["auto", "crow", "off"],
   tasks: ["auto", "workspace", "board", "off"],
 };
+
+/** Tools the voice bot never gets: bot-to-bot work and schedules belong to the handoff, not to a voice turn. */
+export const VOICE_DENY_TOOLS = Object.freeze([
+  "crow_delegate", "crow_job_status", "crow_schedule_bot",
+  "crow_list_bot_schedules", "crow_delete_bot_schedule", "crow_discover",
+]);
 
 export const DEFAULT_PERSONA =
   "You are Crow, the user's voice assistant. Answer in one or two short spoken sentences, in the user's language. " +
@@ -104,4 +111,120 @@ export function normalizeVoiceSettings(def) {
         ? [...handoff.allowed_bots] : [],
     },
   };
+}
+
+const SESSION_BOT_SETTING = "kiosk_dashboard_bot_id";
+
+const parseDef = (text) => { try { const d = JSON.parse(text); return d && typeof d === "object" ? d : null; } catch { return null; } };
+const toolName = (entry) => String(entry).slice(String(entry).lastIndexOf("/") + 1);
+const deniedTool = (entry) => { const n = toolName(entry); return VOICE_DENY_TOOLS.includes(n) || n.startsWith("crow_glasses_"); };
+const crowMcpOf = (def) => (Array.isArray(def?.tools?.crow_mcp) ? def.tools.crow_mcp.filter((t) => typeof t === "string" && t) : []);
+const isVoiceRow = (row) => isVoiceBotId(String(row.bot_id)) || isVoiceBotDef(parseDef(row.definition));
+
+/**
+ * A "<provider_id>/<model_id>" key names a real model when an enabled provider
+ * row lists that model id (the Bot Builder's loadModelOptions rule: a models
+ * entry is a string id or an object with .id). Split on the first "/" only.
+ */
+async function isProviderModel(db, key) {
+  if (typeof key !== "string") return false;
+  const i = key.indexOf("/");
+  if (i <= 0 || i === key.length - 1) return false;
+  const pid = key.slice(0, i), mid = key.slice(i + 1);
+  const row = (await db.execute({ sql: "SELECT models, disabled FROM providers WHERE id = ?", args: [pid] })).rows[0];
+  if (!row || row.disabled) return false;
+  let models = [];
+  try { models = JSON.parse(row.models || "[]"); } catch { models = []; }
+  return Array.isArray(models) && models.some((m) => (typeof m === "string" ? m : m?.id) === mid);
+}
+
+/**
+ * Create the reserved Crow voice bot once. An existing row (enabled or not,
+ * parseable or not) is never touched. The new row records what the old voice
+ * bindings were (migrated_from) without editing any device, setting or bot.
+ *
+ * The effective previous voice bot: the kiosk_dashboard_bot_id setting when it
+ * names an enabled non-voice bot; else "Automatic" (the first enabled non-voice
+ * bot by id, as the kiosk's resolveSessionBot with no fit check); else the bound
+ * bot of the most recently seen device.
+ *
+ * @returns {Promise<{created: boolean, corrupt?: true}>}
+ */
+export async function ensureVoiceBot(db, { fastKey, readSetting, listDevices, log = () => {} } = {}) {
+  if (typeof fastKey !== "string" || !fastKey) throw new Error("fast_model_required");
+
+  const existing = (await db.execute({ sql: "SELECT definition FROM pi_bot_defs WHERE bot_id = ?", args: [CROW_VOICE_BOT_ID] })).rows[0];
+  if (existing) return parseDef(existing.definition) ? { created: false } : { created: false, corrupt: true };
+
+  let setting = null;
+  try { setting = (await readSetting(db, SESSION_BOT_SETTING)) || null; } catch { setting = null; }
+  if (setting !== null) setting = String(setting);
+
+  let devices = [];
+  try { devices = (await listDevices(db)) || []; } catch { devices = []; }
+  if (!Array.isArray(devices)) devices = [];
+
+  const rows = (await db.execute({ sql: "SELECT bot_id, definition, enabled FROM pi_bot_defs ORDER BY bot_id", args: [] })).rows;
+  const byId = new Map(rows.map((r) => [String(r.bot_id), r]));
+  const usable = (r) => r && Number(r.enabled) === 1 && !isVoiceRow(r);
+
+  let effective = null;
+  if (setting && usable(byId.get(setting))) effective = setting;
+  if (!effective) effective = rows.find(usable)?.bot_id ?? null;
+  if (!effective) {
+    let best = null, bestAt = -Infinity;
+    for (const d of devices) {
+      const b = typeof d?.bound_bot_id === "string" ? d.bound_bot_id : "";
+      if (!b || isVoiceBotId(b)) continue;
+      const r = byId.get(b);
+      if (r && isVoiceRow(r)) continue;
+      const at = d.last_seen ? Date.parse(d.last_seen) : NaN;
+      const t = Number.isFinite(at) ? at : -Infinity;
+      if (best === null || t > bestAt) { best = b; bestAt = t; }
+    }
+    effective = best;
+  }
+  if (effective !== null) effective = String(effective);
+  const effectiveDef = effective && byId.get(effective) ? parseDef(byId.get(effective).definition) : null;
+
+  const boundDevices = {};
+  for (const d of devices) {
+    if (d && typeof d.id === "string" && typeof d.bound_bot_id === "string" && d.bound_bot_id) boundDevices[d.id] = d.bound_bot_id;
+  }
+
+  const def = voiceBotDefinition({ preset: "fast_local", fastKey });
+  const carried = effectiveDef?.fast_voice_model;
+  if (await isProviderModel(db, carried)) def.fast_voice_model = carried;
+
+  const tools = [...def.tools.crow_mcp];
+  const seen = new Set(tools);
+  const added = [];
+  const sources = [effectiveDef];
+  for (const d of devices) {
+    if (!d || (d.device_kind || "glasses") !== "glasses" || typeof d.bound_bot_id !== "string") continue;
+    const r = byId.get(d.bound_bot_id);
+    if (r && !isVoiceRow(r)) sources.push(parseDef(r.definition));
+  }
+  for (const src of sources) {
+    for (const t of crowMcpOf(src)) {
+      if (seen.has(t) || deniedTool(t)) continue;
+      seen.add(t); tools.push(t); added.push(t);
+    }
+  }
+  def.tools.crow_mcp = tools;
+  def.migrated_from = {
+    at: new Date().toISOString(),
+    dashboard_bot: effective,
+    dashboard_setting: setting,
+    devices: boundDevices,
+    tools: added,
+  };
+
+  const res = await db.execute({
+    sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?, 'Crow', ?, 1, NULL) ON CONFLICT(bot_id) DO NOTHING",
+    args: [CROW_VOICE_BOT_ID, JSON.stringify(def)],
+  });
+  const created = Number(res.rowsAffected) === 1;
+  if (created) log(`[voice] created the Crow voice bot (fast model ${def.fast_voice_model}, carried from ${effective || "nothing"})`);
+  return { created };
 }
