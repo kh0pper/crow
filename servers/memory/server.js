@@ -23,6 +23,7 @@ import {
 import { rerank as phase4Rerank } from "./rerank.js";
 import { emitOrQueue } from "../shared/sync-emit.js";
 import { jsonObject } from "../shared/tool-schema-types.js";
+import { isVoiceBotId } from "../shared/voice-bot.js";
 
 export function createMemoryServer(dbPath, options = {}) {
   const db = createDbClient(dbPath);
@@ -1105,6 +1106,11 @@ export function createMemoryServer(dbPath, options = {}) {
       description: z.string().max(500).optional().describe("Optional description of the schedule"),
     },
     async ({ task, cron_expression, description }) => {
+      // The reserved voice bot takes no bot-cron schedule (the scheduler skips it; refuse up front).
+      const botcron = String(task).trim().match(/^pipeline:botcron:(.+)$/);
+      if (botcron && isVoiceBotId(botcron[1])) {
+        return { content: [{ type: "text", text: "The Crow voice bot cannot take background jobs, so it cannot be scheduled." }] };
+      }
       // Validate and compute next_run
       let nextRun = null;
       try {

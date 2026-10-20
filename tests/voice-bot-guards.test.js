@@ -370,3 +370,27 @@ test("ordinary bot schedules still enqueue", async () => {
   c2.close();
   assert.deepEqual({ ...job }, { bot_id: "writer", goal: "weekly notes", status: "queued" });
 });
+
+test("crow_create_schedule refuses the voice bot's botcron task (trimmed) and inserts no row; other tasks still create", async () => {
+  const { createMemoryServer } = await import("../servers/memory/server.js");
+  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const server = createMemoryServer(DB_FILE);
+  const [ct, st] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "t", version: "1" });
+  await Promise.all([server.connect(st), client.connect(ct)]);
+  const count = (like) => { const c = raw(); const n = c.prepare("SELECT COUNT(*) AS n FROM schedules WHERE task LIKE ?").get(like).n; c.close(); return n; };
+  const before = count("%crow.voice%");
+  try {
+    for (const task of ["pipeline:botcron:crow.voice", "  pipeline:botcron:crow.voice \n"]) {
+      const r = await client.callTool({ name: "crow_create_schedule", arguments: { task, cron_expression: "0 9 * * *" } });
+      assert.match(r.content[0].text, /cannot take background jobs/);
+    }
+    assert.equal(count("%crow.voice%"), before, "no new schedules row for the voice bot");
+    const ok = await client.callTool({ name: "crow_create_schedule", arguments: { task: "pipeline:botcron:alpha", cron_expression: "0 9 * * *" } });
+    assert.match(ok.content[0].text, /Schedule created/);
+    const ok2 = await client.callTool({ name: "crow_create_schedule", arguments: { task: "water the plants", cron_expression: "0 9 * * *" } });
+    assert.match(ok2.content[0].text, /Schedule created/);
+    assert.equal(count("pipeline:botcron:alpha"), 1);
+  } finally { await client.close(); }
+});
