@@ -204,7 +204,7 @@ async function findDecisionCards(tdb, { fingerprint, batch, decided = false } = 
   const args = [];
   if (await hasArchivedAtColumn(tdb)) where.push("archived_at IS NULL");
   if (fingerprint != null) { where.push("json_extract(data_json,'$.decision.fingerprint')=?"); args.push(fingerprint); }
-  if (batch != null) { where.push("json_extract(data_json,'$.decision.batch')=?"); args.push(batch); }
+  if (batch != null) { where.push("json_extract(data_json,'$.decision.batch_key')=?"); args.push(batch); }
   const { rows } = await tdb.execute({
     sql: `SELECT id, project_id, status, data_json FROM tasks_items
           WHERE board_id IS NULL AND CASE WHEN json_valid(data_json) THEN (${where.filter((w) => w !== "board_id IS NULL").join(" AND ")}) ELSE 0 END
@@ -272,8 +272,7 @@ export async function expireDecisions(tdb, cdb, now, actor = EXPIRY_ACTOR) {
 
 /**
  * Ask a decision. Returns {id, deduped}. Throws bad_decision (400),
- * batch_owned (409: the batch has open cards from a different actor key) or
- * batch_full (429). `now` is for tests.
+ * batch_full (429; batches are per asker, see batchKeyOf). `now` is for tests.
  */
 export async function askDecision(tdb, cdb, { projectId, title, tags, decision } = {}, actor, { now } = {}) {
   const ms = toMs(now);
@@ -293,13 +292,10 @@ export async function askDecision(tdb, cdb, { projectId, title, tags, decision }
     if (Number.isFinite(at) && at + days * DAY_MS > ms) return { id: Number(row.id), deduped: true };
   }
 
-  const inBatch = await findDecisionCards(tdb, { batch: v.batch });
-  // A batch belongs to whoever opened it: no one else may add to it (that
-  // would let them make the owner's notify fail authorisation).
-  const callerKey = actorKey(actor);
-  if (inBatch.some(({ decision: d }) => !d.asked_by || actorKey(d.asked_by) !== callerKey)) {
-    throw fail("this batch already has open decisions from another caller", "batch_owned", 409);
-  }
+  // Batches are namespaced by the asker: two callers using the same batch
+  // name get different keys, so nobody can squat on or push another's batch.
+  const batchKey = batchKeyOf(actor, v.batch);
+  const inBatch = await findDecisionCards(tdb, { batch: batchKey });
   if (inBatch.length >= MAX_OPEN_PER_BATCH) {
     throw fail(`batch already has ${MAX_OPEN_PER_BATCH} open decisions`, "batch_full", 429);
   }
@@ -310,9 +306,10 @@ export async function askDecision(tdb, cdb, { projectId, title, tags, decision }
     project_id: projectId ?? null,
   }, actor);
   await tdb.execute({
-    sql: `UPDATE tasks_items SET data_json=json_set(json_set(data_json,'$.decision',json(?)),'$.decision.asked_by',json(?))
+    sql: `UPDATE tasks_items
+          SET data_json=json_set(json_set(json_set(data_json,'$.decision',json(?)),'$.decision.asked_by',json(?)),'$.decision.batch_key',?)
           WHERE id=? AND board_id IS NULL`,
-    args: [JSON.stringify(v), JSON.stringify(askedBy(actor)), id],
+    args: [JSON.stringify(v), JSON.stringify(askedBy(actor)), batchKey, id],
   });
   await recordMutation(tdb, { itemId: id, verb: "decision_ask", actor, detail: { fingerprint: v.fingerprint, batch: v.batch } });
   return { id, deduped: false };
@@ -409,23 +406,22 @@ function actorKey(a) {
   return `${a?.kind ?? "bot"}:${a?.id ?? "unattributed"}`;
 }
 
-function isBotActor(a) {
-  return !a || a.kind === "bot";
+/** Batch namespace: `<actor key>|<batch name>`. */
+function batchKeyOf(a, batch) {
+  return `${actorKey(a)}|${batch}`;
 }
 
 /**
- * One grouped push for a batch's not-yet-notified open decisions. Rules:
- * - A bot may only notify a batch whose open cards it asked itself
- *   (asked_by key equal for every open card); sessions and humans may notify
- *   any batch. Otherwise 403 forbidden, nothing pushed. A missing actor is
- *   treated as an unattributed bot (fail closed).
+ * One grouped push for the CALLER's batch of that name (batches are
+ * namespaced by asker, so a caller can only ever notify its own cards; a
+ * missing actor is the unattributed-bot namespace). Rules:
  * - If any open card in the batch was already notified, nothing is pushed
  *   ({pushed:false,count:0,reason:"already_notified"}); later cards only show
  *   on the board.
  * - At most MAX_PUSHES_PER_ACTOR_PER_DAY pushes per actor key per UTC day,
  *   counted from the cards' own notify stamps, inside the claim statement;
  *   over it is 429 push_limit.
- * The set is then claimed (notified_at set) by ONE conditional UPDATE …
+ * The set is claimed (notified_at set) by ONE conditional UPDATE …
  * RETURNING before the push, so concurrent calls push each card at most once.
  * If the push throws, the claims are released.
  * `createNotification(cdb, opts)` is injected (servers/shared/notifications.js
@@ -434,18 +430,11 @@ function isBotActor(a) {
 export async function notifyBatch(tdb, cdb, batch, { createNotification, actor, now } = {}) {
   const ms = toMs(now);
   const stamp = new Date(ms).toISOString();
-  const all = (await findDecisionCards(tdb, { batch: String(batch ?? "") }))
+  const key = actorKey(actor);
+  const all = (await findDecisionCards(tdb, { batch: batchKeyOf(actor, String(batch ?? "")) }))
     .filter(({ decision }) => ms < expiryMs(decision.expires));
 
   if (!all.length) return { pushed: false, count: 0 };
-
-  const key = actorKey(actor);
-  if (isBotActor(actor)) {
-    for (const { decision } of all) {
-      const by = decision.asked_by;
-      if (!by || actorKey(by) !== key) throw fail("this batch was not asked by the caller", "forbidden", 403);
-    }
-  }
 
   if (all.some(({ decision }) => decision.notified_at)) {
     return { pushed: false, count: 0, reason: "already_notified" };
