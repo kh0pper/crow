@@ -97,7 +97,7 @@ test("GET serves the file once, as an attachment, and only then records the remi
     assert.equal((await openExport(dl.body, PASS)).length, 1);
     const ev = await s.audits();
     assert.deepEqual(ev.map((a) => a.event_type), ["keychain_export"]);
-    assert.deepEqual(JSON.parse(ev[0].details), { count: 1, confirm: false });
+    assert.deepEqual(JSON.parse(ev[0].details), { count: 1 });
     assert.ok(!JSON.stringify(ev).includes(ex.body.token), "the token is never audited");
   } finally { s.close(); }
 });
@@ -128,7 +128,7 @@ test("a GET from the Crow app's WebView (a navigation) never counts as saved", a
     assert.equal(dl.status, 200);
     await s.settle();
     assert.equal(await s.unexported(), 1);
-    assert.equal(JSON.parse((await s.audits())[0].details).confirm, true);
+    assert.deepEqual((await s.audits()).map((a) => a.event_type), ["keychain_export_fetched"]);
   } finally { s.close(); }
 });
 
@@ -162,8 +162,7 @@ test("?confirm=1 (the Crow app): served, but the reminder waits for POST /export
     assert.equal(await s.unexported(), 0);
     assert.equal((await s.call("/export/saved", { body: { token: ex.body.token } })).status, 404, "once");
     const ev = await s.audits();
-    assert.deepEqual(ev.map((a) => a.event_type), ["keychain_export", "keychain_export_saved"]);
-    assert.deepEqual(JSON.parse(ev[0].details), { count: 1, confirm: true });
+    assert.deepEqual(ev.map((a) => a.event_type), ["keychain_export_fetched", "keychain_export_saved"], "fetched by the app is not 'Exported'");
   } finally { s.close(); }
 });
 
@@ -174,6 +173,19 @@ test("saved before the file was fetched, or after a plain fetch, records nothing
     const early = await s.call("/export/saved", { body: { token: ex.body.token } });
     assert.equal(early.status, 409);
     assert.equal(early.body.code, "export_not_fetched");
+    assert.equal(await s.unexported(), 1);
+  } finally { s.close(); }
+});
+
+test("POST /export/saved after the 10-minute confirm window is 410 and records nothing", async () => {
+  const s = await setup();
+  try {
+    const ex = await s.call("/export", { body: { passphrase: PASS } });
+    assert.equal((await s.call(ex.body.download + "?confirm=1")).status, 200);
+    s.clock.t += 600_001;
+    const late = await s.call("/export/saved", { body: { token: ex.body.token } });
+    assert.equal(late.status, 410);
+    assert.equal(late.body.code, "export_link_expired");
     assert.equal(await s.unexported(), 1);
   } finally { s.close(); }
 });

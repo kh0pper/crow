@@ -225,7 +225,9 @@ export function keychainApiRouter({
     const deferRecord = req.query?.confirm === "1" || String(req.headers["user-agent"] || "").includes("CrowAndroid/");
     const out = tickets.take(req.params.token, req.dashboardSession, { deferRecord });
     if (out.error) return ticketError(res, out.error);
-    try { await audit(db, "keychain_export", { ip: req.ip, details: { count: out.count, confirm: deferRecord } }); } catch {} // the ticket is spent: always deliver
+    // Every fetch is audited (the sealed file left the server). A deferred one went to the app's
+    // page and may still be cancelled there, so it does not read "Exported".
+    try { await audit(db, deferRecord ? "keychain_export_fetched" : "keychain_export", { ip: req.ip, details: { count: out.count } }); } catch {} // the ticket is spent: always deliver
     // The reminder clears once the body was handed to the socket, never earlier.
     if (out.record) res.once("finish", () => { recordExport(out.record); });
     res.set("Content-Type", "application/json; charset=utf-8");

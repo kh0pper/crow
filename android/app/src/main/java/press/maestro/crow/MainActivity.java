@@ -557,7 +557,12 @@ public class MainActivity extends AppCompatActivity {
         if (!OriginCheck.sameOrigin(sourceOrigin.toString(), getGatewayUrl())) return;
         if (message == null || message.getType() != WebMessageCompat.TYPE_STRING) return;
         String data = message.getData();
-        if (data == null || data.length() > DownloadPolicy.MAX_MESSAGE_CHARS + 4096) return;
+        if (data == null) return;
+        // From here on, the trusted page always hears back (it has already spent its link).
+        if (data.length() > DownloadPolicy.MAX_MESSAGE_CHARS + 4096) {
+            replyInvalid(DownloadPolicy.peekId(data), proxy);
+            return;
+        }
         Map<String, Object> fields = new HashMap<>();
         try {
             JSONObject o = new JSONObject(data);
@@ -568,17 +573,22 @@ public class MainActivity extends AppCompatActivity {
                 fields.put(k, v == JSONObject.NULL ? null : v);
             }
         } catch (Exception e) {
+            replyInvalid(DownloadPolicy.peekId(data), proxy);
             return;
         }
         DownloadPolicy.SaveRequest req = DownloadPolicy.validateSave(fields);
         if (req == null) {
             Object idv = fields.get("id");
-            if (idv instanceof String && DOWNLOAD_ID.matcher((String) idv).matches()) {
-                finishSave(new PendingSave((String) idv, proxy, null, null, null), false, "invalid", null);
-            }
+            replyInvalid(idv instanceof String ? (String) idv : null, proxy);
             return;
         }
         beginSave(new PendingSave(req.id, proxy, req.bytes, null, null), req.name, req.mime);
+    }
+
+    /** UI thread. "invalid" to the frame, when the message carried a usable id. */
+    private void replyInvalid(String id, JavaScriptReplyProxy proxy) {
+        if (id == null || !DOWNLOAD_ID.matcher(id).matches()) return;
+        finishSave(new PendingSave(id, proxy, null, null, null), false, "invalid", null);
     }
 
     /** The WebView's DownloadListener (UI thread). */
@@ -631,7 +641,7 @@ public class MainActivity extends AppCompatActivity {
         pendingSave = null;
         Uri uri = resultCode == Activity.RESULT_OK && data != null ? data.getData() : null;
         if (p == null) {
-            if (uri != null) deleteQuietly(uri);
+            if (uri != null) downloadExecutor.execute(() -> deleteQuietly(uri)); // provider IPC: off the UI thread
             return;
         }
         if (uri == null) {
@@ -665,12 +675,10 @@ public class MainActivity extends AppCompatActivity {
 
     /** Background thread. Null on success, else a reason. The cookie never follows a redirect. */
     private String fetchInto(String url, String userAgent, String cookie, Uri uri) throws IOException {
-        OkHttpClient client = new OkHttpClient.Builder()
-                .followRedirects(false)
-                .followSslRedirects(false)
-                .connectTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(60, TimeUnit.SECONDS)
-                .build();
+        // Default trust store: a gateway with a self-signed certificate (which the WebView's SSL
+        // dialog lets the user accept) fails here with "Could not save the file". The keychain
+        // Export does not use this path (it saves through CrowDownloadPort).
+        OkHttpClient client = downloadClient();
         Request.Builder rb = new Request.Builder().url(url).get();
         if (cookie != null && !cookie.isEmpty()) rb.header("Cookie", cookie);
         if (userAgent != null && !userAgent.isEmpty()) rb.header("User-Agent", userAgent);
@@ -680,6 +688,21 @@ public class MainActivity extends AppCompatActivity {
             if (body == null) return "failed";
             return writeAll(uri, body.byteStream(), MAX_LISTENER_BYTES) ? null : "too_big";
         }
+    }
+
+    private OkHttpClient downloadHttp;
+
+    /** Background thread only (the single download executor), so no lock is needed. */
+    private OkHttpClient downloadClient() {
+        if (downloadHttp == null) {
+            downloadHttp = new OkHttpClient.Builder()
+                    .followRedirects(false)
+                    .followSslRedirects(false)
+                    .connectTimeout(15, TimeUnit.SECONDS)
+                    .readTimeout(60, TimeUnit.SECONDS)
+                    .build();
+        }
+        return downloadHttp;
     }
 
     /** Background thread. False when the stream ran past the cap. */
@@ -928,6 +951,13 @@ public class MainActivity extends AppCompatActivity {
                 return "unavailable";
             }
             return stepsStatusString();
+        }
+
+        /** No CrowDownloadPort without WEB_MESSAGE_LISTENER: this app cannot save files here. */
+        @Override
+        @JavascriptInterface
+        public String downloadStatus() {
+            return "unsupported";
         }
 
         /** Ask for ACTIVITY_RECOGNITION; delivers {status} to window.CrowSteps.deliver(id, ...). */

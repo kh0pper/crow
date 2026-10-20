@@ -41,7 +41,7 @@ function boot({ method = "password", vaultAvailable = true, routes = {}, confirm
     window, document, console, fetch: fetchStub,
     location: { reload() { reloads.n++; } },
     navigator: { userAgent, clipboard: { writeText: (s) => { clipboard.push(s); return Promise.resolve(); } } },
-    setTimeout: (fn) => { timers.push(fn); return timers.length; }, clearTimeout: () => {}, Date,
+    setTimeout: (fn) => { timers.push(fn); return timers.length; }, clearTimeout: (id) => { if (typeof id === "number" && timers[id - 1]) timers[id - 1] = () => {}; }, Date,
   });
   ctx.confirm = (q) => { confirms.push(q); return confirmAnswer; };
   vm.runInContext(js, ctx);
@@ -197,7 +197,7 @@ test("Export checks the passphrase pair client-side, then posts it (re-auth flow
   s.click(s.document.getElementById("pw-export-go"));
   await s.settle();
   assert.deepEqual(s.calls.find((c) => c.url.endsWith("/export")).body, { passphrase: "correct horse battery" });
-  assert.match(s.document.getElementById("pw-export-msg").textContent, /Exported 2 passwords to crow-keychain-2026-10-20\.json/);
+  assert.match(s.document.getElementById("pw-export-msg").textContent, /Your file of 2 passwords is ready/);
   assert.equal(s.document.getElementById("pw-export-pass").value, "", "passphrase cleared");
 
   const input = s.document.getElementById("pw-import-file");
@@ -229,21 +229,47 @@ function fakePort({ answer = { ok: true } } = {}) {
   return port;
 }
 
-test("browser Export: clicks a one-time attachment link (no blob:), shows the fallback link and an honest message; nothing is confirmed", async () => {
+test("browser Export: a one-time attachment link (no blob:) the user taps; it goes away once tapped, or after 2 minutes; nothing is confirmed", async () => {
   const s = boot({ routes: { "/export": () => ({ status: 200, d: TICKET }), "/activity": () => ({ status: 200, d: { events: [] } }) } });
   await exportWith(s);
-  assert.deepEqual(s.anchorClicks, [{ href: TICKET.download, download: TICKET.filename, turbo: "false", prefetch: "false" }]);
+  assert.deepEqual(s.anchorClicks, [], "no programmatic click: the tap is the user's");
   const box = s.document.getElementById("pw-export-link");
   assert.equal(box.hidden, false);
   const link = box.querySelector("a");
   assert.equal(link.getAttribute("href"), TICKET.download);
   assert.equal(link.getAttribute("download"), TICKET.filename);
+  assert.equal(link.getAttribute("data-turbo"), "false");
   assert.equal(link.getAttribute("data-turbo-prefetch"), "false");
-  assert.match(s.document.getElementById("pw-export-msg").textContent, /If no file appeared/);
+  assert.match(s.document.getElementById("pw-export-msg").textContent, /ready.*works once/);
   assert.equal(s.calls.filter((c) => c.url.includes("/export/file/")).length, 0, "the page itself never fetches the file");
-  assert.equal(s.calls.filter((c) => c.url.endsWith("/export/saved")).length, 0);
+  link.click();
+  assert.deepEqual(s.anchorClicks, [{ href: TICKET.download, download: TICKET.filename, turbo: "false", prefetch: "false" }]);
+  assert.match(s.document.getElementById("pw-export-msg").textContent, /Downloading crow-keychain-2026-10-20\.json \(2 passwords\).*If no file appeared/);
   s.timers.splice(0).forEach((fn) => fn());
-  assert.equal(box.hidden, true, "the one-time link goes away after 2 minutes");
+  assert.equal(box.hidden, true, "spent once tapped");
+  assert.match(s.document.getElementById("pw-export-msg").textContent, /Downloading/, "the expiry timer was cancelled by the tap");
+  assert.equal(s.calls.filter((c) => c.url.endsWith("/export/saved")).length, 0);
+
+  const u = boot({ routes: { "/export": () => ({ status: 200, d: TICKET }), "/activity": () => ({ status: 200, d: { events: [] } }) } });
+  await exportWith(u);
+  u.timers.splice(0).forEach((fn) => fn());
+  assert.equal(u.document.getElementById("pw-export-link").hidden, true, "untapped: gone after 2 minutes");
+  assert.match(u.document.getElementById("pw-export-msg").textContent, /expired/);
+});
+
+test("Crow app: Saved, but a refused /export/saved says the reminder stays", async () => {
+  const port = fakePort();
+  const s = boot({ port, userAgent: "CrowAndroid/1.6.3", routes: { "/export": () => ({ status: 200, d: TICKET }), ["/export/file/" + TOKEN + "?confirm=1"]: () => ({ status: 200, d: "{}" }), "/export/saved": () => ({ status: 410, d: { code: "export_link_expired" } }), "/activity": () => ({ status: 200, d: { events: [] } }) } });
+  await exportWith(s);
+  await s.settle();
+  assert.match(s.document.getElementById("pw-export-msg").textContent, /^Saved 2 passwords.*reminder stays/);
+});
+
+test("Crow app on a WebView without the save bridge (downloadStatus 'unsupported') says so, without spending the link", async () => {
+  const s = boot({ crow: { downloadStatus: () => "unsupported" }, userAgent: "CrowAndroid/1.6.3", routes: { "/export": () => ({ status: 200, d: TICKET }), "/activity": () => ({ status: 200, d: { events: [] } }) } });
+  await exportWith(s);
+  assert.equal(s.calls.filter((c) => c.url.includes("/export/file/")).length, 0);
+  assert.match(s.document.getElementById("pw-export-msg").textContent, /WebView on this phone is too old/);
 });
 
 test("an answer without our link shape is an error, not a navigation", async () => {
@@ -342,7 +368,7 @@ test("turbo:before-cache unwires the port listener and removes the one-time link
 });
 
 test("the export strings exist in en and es; the client has no backtick and no backslash", () => {
-  for (const k of ["exportReady", "exportLink", "exportSaving", "exportSaved", "exportNotSaved", "exportOldApp", "exportElsewhere", "event.keychain_export_saved"]) {
+  for (const k of ["exportReady", "exportLink", "exportSaving", "exportSaved", "exportNotSaved", "exportOldApp", "exportElsewhere", "exportNoBridge", "exportDownloading", "exportLinkExpired", "exportSavedUnrecorded", "event.keychain_export_fetched", "event.keychain_export_saved"]) {
     for (const lang of ["en", "es"]) assert.notEqual(t("passwords." + k, lang), "passwords." + k, k + " " + lang);
   }
   for (const lang of ["en", "es"]) {

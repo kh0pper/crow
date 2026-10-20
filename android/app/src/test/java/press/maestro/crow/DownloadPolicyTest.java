@@ -22,15 +22,15 @@ public class DownloadPolicyTest {
     public void pairedOriginGetsTheSession() {
         assertEquals(DownloadPolicy.Action.SAVE_WITH_SESSION, DownloadPolicy.decide(FILE, PAIRED));
         assertEquals(DownloadPolicy.Action.SAVE_WITH_SESSION, DownloadPolicy.decide("HTTPS://CROW.example.ts.net:8444/x", PAIRED));
-        assertEquals(DownloadPolicy.Action.SAVE_WITH_SESSION, DownloadPolicy.decide("http://10.0.0.201:3001/f", "http://10.0.0.201:3001"));
+        assertEquals(DownloadPolicy.Action.SAVE_WITH_SESSION, DownloadPolicy.decide("http://100.64.20.5:3001/f", "http://100.64.20.5:3001"));
     }
 
     @Test
     public void everyOtherHttpOriginOpensOutsideWithoutTheCookie() {
-        assertEquals(DownloadPolicy.Action.OPEN_EXTERNAL, DownloadPolicy.decide("https://crow.example.ts.net:8456/f", PAIRED)); // other port
+        assertEquals(DownloadPolicy.Action.OPEN_EXTERNAL, DownloadPolicy.decide("https://crow.example.ts.net:9443/f", PAIRED)); // other port
         assertEquals(DownloadPolicy.Action.OPEN_EXTERNAL, DownloadPolicy.decide("https://crow.example.ts.net/f", PAIRED));
         assertEquals(DownloadPolicy.Action.OPEN_EXTERNAL, DownloadPolicy.decide("http://crow.example.ts.net:8444/f", PAIRED)); // other scheme
-        assertEquals(DownloadPolicy.Action.OPEN_EXTERNAL, DownloadPolicy.decide("https://grackle.example.ts.net:8444/f", PAIRED));
+        assertEquals(DownloadPolicy.Action.OPEN_EXTERNAL, DownloadPolicy.decide("https://other.example.ts.net:8444/f", PAIRED));
         assertEquals(DownloadPolicy.Action.OPEN_EXTERNAL, DownloadPolicy.decide("https://crow.example.ts.net.evil.com:8444/f", PAIRED));
     }
 
@@ -143,6 +143,15 @@ public class DownloadPolicyTest {
         assertEquals("_x.json", r.name);
         assertEquals("application/octet-stream", r.mime);
         assertEquals("download", DownloadPolicy.validateSave(msg("op", "save", "id", "a", "text", "x")).name);
+    }
+
+    @Test
+    public void peekIdFindsTheIdOfAMessageThatCannotBeDecoded() {
+        assertEquals("kc1", DownloadPolicy.peekId("{\"op\":\"save\",\"id\":\"kc1\",\"text\":\"unterminated"));
+        assertEquals("kc2", DownloadPolicy.peekId("{\"op\": \"save\", \"id\" : \"kc2\"}"));
+        assertNull(DownloadPolicy.peekId("{\"op\":\"save\",\"id\":\"a-b\"}"), "not an id");
+        assertNull(DownloadPolicy.peekId(new String(new char[600]).replace('\0', ' ') + "\"id\":\"late\""), "past the first 512 chars");
+        assertNull(DownloadPolicy.peekId(null), "null");
     }
 
     private static void assertNull(Object o, String why) {

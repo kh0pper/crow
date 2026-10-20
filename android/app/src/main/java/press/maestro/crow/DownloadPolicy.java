@@ -105,6 +105,19 @@ final class DownloadPolicy {
         return d.equals("attachment") || d.startsWith("attachment;") || d.startsWith("attachment ");
     }
 
+    private static final Pattern PEEK_ID = Pattern.compile("\"id\"\\s*:\\s*\"([A-Za-z0-9]{1,32})\"");
+
+    /**
+     * The request id of a port message that cannot be decoded or validated (too big, bad JSON),
+     * read from its first 512 characters, so the page still hears "invalid" instead of waiting.
+     * The page sends {"op","id",...} in that order. Null when there is none.
+     */
+    static String peekId(String data) {
+        if (data == null) return null;
+        java.util.regex.Matcher m = PEEK_ID.matcher(data.length() > 512 ? data.substring(0, 512) : data);
+        return m.find() ? m.group(1) : null;
+    }
+
     static String mime(String m) {
         if (m == null) return "application/octet-stream";
         String s = m.trim().toLowerCase(Locale.ROOT);

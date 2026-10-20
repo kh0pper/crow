@@ -124,7 +124,7 @@ export function renderPasswordsPage({ entries, method, vaultAvailable, vaultNeed
 }
 
 export function passwordsClientJS(lang) {
-  const eventNames = ["keychain_reveal", "keychain_copy", "keychain_delete", "keychain_add", "keychain_save", "keychain_first_view", "keychain_vault_save", "keychain_reauth_ok", "keychain_reauth_failed", "keychain_reauth_lockout", "keychain_export", "keychain_export_saved", "keychain_import"];
+  const eventNames = ["keychain_reveal", "keychain_copy", "keychain_delete", "keychain_add", "keychain_save", "keychain_first_view", "keychain_vault_save", "keychain_reauth_ok", "keychain_reauth_failed", "keychain_reauth_lockout", "keychain_export", "keychain_export_fetched", "keychain_export_saved", "keychain_import"];
   const eventMap = JSON.stringify(Object.fromEntries(eventNames.map((n) => [n, t(`passwords.event.${n}`, lang)])));
   return `<script>
     (function() {
@@ -303,7 +303,11 @@ export function passwordsClientJS(lang) {
       function exportMode() {
         if (downloadPort()) return "app";
         var c = window.Crow;
-        if (c && typeof c.downloadStatus === "function") return "elsewhere";
+        if (c && typeof c.downloadStatus === "function") {
+          var st = "";
+          try { st = String(c.downloadStatus()); } catch (e) { st = ""; }
+          return st === "unsupported" ? "no-bridge" : "elsewhere";
+        }
         var ua = typeof navigator !== "undefined" ? String(navigator.userAgent || "") : "";
         return ua.indexOf("CrowAndroid/") >= 0 ? "old-app" : "web";
       }
@@ -319,16 +323,27 @@ export function passwordsClientJS(lang) {
         a.setAttribute("rel", "noreferrer");
         return a;
       }
-      function showExportLink(d) {
+      // The link works once: it is the user's own tap (a real gesture no browser blocks), and
+      // it goes away once tapped, so a second tap can never fetch a spent link.
+      function showExportLink(d, msg) {
         var box = document.getElementById("pw-export-link");
         box.textContent = "";
         if (exportLinkTimer) { clearTimeout(exportLinkTimer); exportLinkTimer = null; }
         if (!d) { box.hidden = true; return; }
         var a = downloadLink(d.download, d.filename);
+        a.className = "btn btn-sm btn-primary";
         a.textContent = '${tJs("passwords.exportLink", lang)}';
+        a.addEventListener("click", function() {
+          if (exportLinkTimer) { clearTimeout(exportLinkTimer); exportLinkTimer = null; }
+          setTimeout(function() { box.textContent = ""; box.hidden = true; }, 0);
+          if (msg) msg.textContent = exportText('${tJs("passwords.exportDownloading", lang)}', d);
+        });
         box.appendChild(a);
         box.hidden = false;
-        exportLinkTimer = setTimeout(function() { box.textContent = ""; box.hidden = true; }, 120000);
+        exportLinkTimer = setTimeout(function() {
+          box.textContent = ""; box.hidden = true;
+          if (msg) msg.textContent = '${tJs("passwords.exportLinkExpired", lang)}';
+        }, 120000);
       }
       function saveInApp(port, d, msg) {
         var notSaved = '${tJs("passwords.exportNotSaved", lang)}';
@@ -337,20 +352,26 @@ export function passwordsClientJS(lang) {
           if (!r.ok) throw new Error("not fetched");
           return r.text();
         }).then(function(text) {
+          // The app takes at most 8 MiB; past that it could not answer, so say so here.
+          if (text.length > 8388608) { msg.textContent = notSaved; return; }
           saveSeq += 1;
           var id = "kc" + saveSeq + String(Date.now());
-          // No answer in 10 minutes (the app was closed while its picker was open): not saved.
+          // No answer in 9 minutes (the app was closed while its picker was open): not saved.
+          // Shorter than the server's 10-minute confirm window, so a late answer cannot read
+          // as recorded when the server has already forgotten the link.
           var timer = setTimeout(function() {
             if (!saveWaits[id]) return;
             delete saveWaits[id];
             msg.textContent = notSaved;
-          }, 600000);
+          }, 540000);
           saveWaits[id] = function(m) {
             clearTimeout(timer);
             if (!m.ok) { msg.textContent = notSaved; return; }
             var shownName = typeof m.name === "string" && m.name ? m.name : d.filename;
-            msg.textContent = exportText('${tJs("passwords.exportSaved", lang)}', { count: d.count, filename: shownName });
-            post("/export/saved", { token: d.token }).catch(function() {});
+            var savedText = exportText('${tJs("passwords.exportSaved", lang)}', { count: d.count, filename: shownName });
+            msg.textContent = savedText;
+            var unrecorded = function() { msg.textContent = savedText + " " + '${tJs("passwords.exportSavedUnrecorded", lang)}'; };
+            post("/export/saved", { token: d.token }).then(function(res) { if (res.status !== 200) unrecorded(); }).catch(unrecorded);
           };
           port.postMessage(JSON.stringify({ op: "save", id: id, name: d.filename, mime: "application/json", text: text }));
         }).catch(function() { msg.textContent = notSaved; });
@@ -372,12 +393,10 @@ export function passwordsClientJS(lang) {
           // In the app away from the paired server, or in an app too old to save files, a
           // download would be dropped: fetching the link would only spend it.
           if (mode === "elsewhere") { msg.textContent = '${tJs("passwords.exportElsewhere", lang)}'; return; }
+          if (mode === "no-bridge") { msg.textContent = '${tJs("passwords.exportNoBridge", lang)}'; return; }
           if (mode === "old-app") { msg.textContent = '${tJs("passwords.exportOldApp", lang)}'; return; }
-          var a = downloadLink(d.download, d.filename);
-          a.hidden = true;
-          document.body.appendChild(a); a.click(); a.remove();
           msg.textContent = exportText('${tJs("passwords.exportReady", lang)}', d);
-          showExportLink(d);
+          showExportLink(d, msg);
         });
       });
 
