@@ -546,3 +546,62 @@ test("notifyBatch skips decided, expired and archived cards", async () => {
     assert.equal(n.calls.length, 0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Fix round 1
+// ---------------------------------------------------------------------------
+
+for (const [rail, sql, args] of [
+  ["job", "INSERT INTO bot_jobs (job_id, bot_id, card_id, card_action, status) VALUES (?,?,?,?,?)", (id) => ["job-x", "bot-1", id, "work", "running"]],
+  ["session", "INSERT INTO bot_sessions (bot_id, card_id, status) VALUES (?,?,?)", (id) => ["bot-1", id, "active"]],
+]) {
+  test(`decideOption on a card held by a bot ${rail} is 409 locked and writes nothing`, async () => {
+    await withStore(async ({ tdb, cdb }) => {
+      const a = await askDecision(tdb, cdb, { projectId: 1, decision: withFollowUp() }, BOT);
+      await cdb.execute({ sql, args: args(a.id) });
+      await rejects(decideOption(tdb, cdb, a.id, { index: 0 }, HUMAN, { isEnabledBot: yes }), "locked", 409);
+      const card = await getCard(tdb, a.id);
+      const d = dataOf(card).decision;
+      assert.equal(d.chosen, undefined, "no chosen written");
+      assert.equal(d.created_card_id, undefined);
+      assert.equal(card.status, "pending");
+      assert.equal(await countCards(tdb), 1, "no follow-up card");
+      assert.ok(!(await verbs(tdb, a.id)).includes("decision"));
+    });
+  });
+}
+
+test("expireDecisions: a held lock keeps the status but still expires the decision", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const t0 = Date.parse("2026-03-10T12:00:00Z");
+    const a = await askDecision(tdb, cdb, { projectId: 1, decision: decision({ expires: "2026-03-11" }) }, BOT, { now: t0 });
+    await cdb.execute({ sql: "INSERT INTO bot_sessions (bot_id, card_id, status) VALUES (?,?,?)", args: ["bot-1", a.id, "active"] });
+    assert.equal(await expireDecisions(tdb, cdb, Date.parse("2026-03-13T00:00:00Z")), 1);
+    const card = await getCard(tdb, a.id);
+    assert.equal(card.status, "pending");
+    assert.ok(dataOf(card).decision.expired_at);
+  });
+});
+
+test("notifyBatch: a throwing createNotification releases the claims for the next call", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const ids = [];
+    for (let i = 0; i < 2; i++) ids.push((await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: `fp-${i}` }) }, BOT)).id);
+    const boom = async () => { throw new Error("push down"); };
+    await assert.rejects(notifyBatch(tdb, cdb, "batch-1", { createNotification: boom }), /push down/);
+    for (const id of ids) assert.equal(dataOf(await getCard(tdb, id)).decision.notified_at, undefined);
+    const n = fakeNotifier();
+    assert.deepEqual(await notifyBatch(tdb, cdb, "batch-1", n), { pushed: true, count: 2 });
+    assert.equal(n.calls.length, 1);
+  });
+});
+
+test("validateDecision: optional strings are measured after trimming", () => {
+  const v = validateDecision(decision({
+    options: [{ ...opts()[0], value: "  " + "v".repeat(200) + "  " }, opts()[1]],
+  }));
+  assert.equal(v.options[0].value, "v".repeat(200));
+  assert.throws(() => validateDecision(decision({
+    options: [{ ...opts()[0], value: "v".repeat(201) }, opts()[1]],
+  })), (e) => e.code === "bad_decision");
+});

@@ -36,6 +36,7 @@
 
 import { createCard, getCard, moveCard, recordMutation } from "./card-service.js";
 import { resolveBoardDef, isTerminal } from "../routes/board-defs.js";
+import { lockState } from "../routes/board-lock.js";
 import { hasArchivedAtColumn } from "./util.js";
 
 export const MAX_OPEN_PER_BATCH = 5;
@@ -72,8 +73,8 @@ function reqStr(v, name, max) {
 function optStr(v, name, max) {
   if (v == null) return null;
   if (typeof v !== "string") throw bad(`${name} must be a string`);
-  if (v.length > max) throw bad(`${name} must be at most ${max} characters`);
   const s = v.trim();
+  if (s.length > max) throw bad(`${name} must be at most ${max} characters`);
   return s || null;
 }
 
@@ -257,8 +258,9 @@ export async function expireDecisions(tdb, cdb, now, actor = EXPIRY_ACTOR) {
     if (target && target !== String(row.status)) {
       try {
         await moveCard(tdb, cdb, id, target, actor);
-      } catch {
+      } catch (e) {
         // A held lock keeps the status as is; expired_at already closes the decision.
+        if (e?.code !== "locked") throw e;
       }
     }
   }
@@ -336,6 +338,11 @@ export async function decideOption(tdb, cdb, itemId, { index, otherText } = {}, 
     throw fail("no such option", "bad_option", 400);
   }
 
+  // Refuse a card a bot is working BEFORE anything is written: moveCard below
+  // applies the same lock rule, and failing there would report an error for a
+  // decision that had already been recorded.
+  if ((await lockState(cdb, itemId)).locked) throw fail("card is locked", "locked", 409);
+
   const chosen = {
     index,
     label: opt ? opt.label : "Other",
@@ -379,9 +386,10 @@ export async function decideOption(tdb, cdb, itemId, { index, otherText } = {}, 
 }
 
 /**
- * One grouped push for a batch's not-yet-notified open decisions. Each card is
- * claimed (notified_at set) by a conditional UPDATE before the push, so
- * repeated or concurrent calls push each card at most once.
+ * One grouped push for a batch's not-yet-notified open decisions. The set is
+ * claimed (notified_at set) by ONE conditional UPDATE … RETURNING before the
+ * push, so repeated or concurrent calls push each card at most once and one
+ * call owns the push. If the push throws, the claims are released.
  * `createNotification(cdb, opts)` is injected (servers/shared/notifications.js
  * in production).
  */
@@ -391,24 +399,39 @@ export async function notifyBatch(tdb, cdb, batch, { createNotification, now } =
   const open = (await findDecisionCards(tdb, { batch: String(batch ?? "") }))
     .filter(({ decision }) => !decision.notified_at && ms < expiryMs(decision.expires));
 
-  const claimed = [];
-  for (const { row, decision } of open) {
-    const r = await tdb.execute({
-      sql: `UPDATE tasks_items SET data_json=json_set(data_json,'$.decision.notified_at',?)
-            WHERE id=? AND board_id IS NULL AND json_extract(data_json,'$.decision.notified_at') IS NULL`,
-      args: [stamp, Number(row.id)],
-    });
-    if (r.rowsAffected === 1) claimed.push({ id: Number(row.id), question: String(decision.question ?? "") });
-  }
+  if (!open.length) return { pushed: false, count: 0 };
+
+  // Claim the whole set in ONE statement, so one call owns the push.
+  const ids = open.map(({ row }) => Number(row.id));
+  const questionOf = new Map(open.map(({ row, decision }) => [Number(row.id), String(decision.question ?? "")]));
+  const ph = ids.map(() => "?").join(",");
+  const { rows } = await tdb.execute({
+    sql: `UPDATE tasks_items SET data_json=json_set(data_json,'$.decision.notified_at',?)
+          WHERE id IN (${ph}) AND board_id IS NULL AND json_extract(data_json,'$.decision.notified_at') IS NULL
+          RETURNING id`,
+    args: [stamp, ...ids],
+  });
+  const claimed = rows.map((r) => Number(r.id)).sort((x, y) => x - y);
   if (!claimed.length) return { pushed: false, count: 0 };
 
   const count = claimed.length;
-  await createNotification(cdb, {
-    type: "attention",
-    priority: "normal",
-    title: `${count} decision${count > 1 ? "s" : ""} waiting`,
-    body: claimed.slice(0, 3).map((c) => c.question).join("\n"),
-    action_url: "/dashboard/bot-board#card=" + claimed[0].id,
-  });
+  try {
+    await createNotification(cdb, {
+      type: "attention",
+      priority: "normal",
+      title: `${count} decision${count > 1 ? "s" : ""} waiting`,
+      body: claimed.slice(0, 3).map((id) => questionOf.get(id)).join("\n"),
+      action_url: "/dashboard/bot-board#card=" + claimed[0],
+    });
+  } catch (e) {
+    // Release this call's claims so the next notify pushes these cards.
+    const cph = claimed.map(() => "?").join(",");
+    await tdb.execute({
+      sql: `UPDATE tasks_items SET data_json=json_remove(data_json,'$.decision.notified_at')
+            WHERE id IN (${cph}) AND json_extract(data_json,'$.decision.notified_at')=?`,
+      args: [...claimed, stamp],
+    });
+    throw e;
+  }
   return { pushed: true, count };
 }
