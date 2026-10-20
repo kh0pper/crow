@@ -110,7 +110,7 @@ test("the reserve runs BEFORE the player's no-bar return, so a framed shell page
   assert.equal(document.documentElement.style.getPropertyValue("--crow-player-h"), "0px");
 });
 
-test("a Turbo render with the permanent bar: the inline run finds no bar (Turbo holds it out of the page while the new body's scripts run), so it measures again a frame later", () => {
+test("a Turbo render with the permanent bar: the inline run finds no bar (Turbo holds it out of the page while the new body's scripts run), so it measures only a frame later (no 0px write and layout pass in between)", () => {
   const d = barDoc(57);
   d.bar.style.display = "block";
   const H = reserveHarness();
@@ -121,11 +121,12 @@ test("a Turbo render with the permanent bar: the inline run finds no bar (Turbo 
   const frames = [];
   H.win.requestAnimationFrame = (fn) => { frames.push(fn); return frames.length; };
   H.run(d.document);                               // the new body's player script runs now
-  assert.equal(d.h(), "0px", "no bar in the page at this instant");
+  assert.equal(d.h(), "57px", "no bar in the page at this instant: nothing written until the frame");
   d.document.body.appendChild(held);               // Bardo puts it back; no style change on it
+  d.box.h = 63;                                    // e.g. the new page's fonts: the frame must really measure
   assert.equal(frames.length, 1, "one frame scheduled");
   frames[0]();
-  assert.equal(d.h(), "57px", "the reserve is back to the bar's height");
+  assert.equal(d.h(), "63px", "the frame measures the bar that came back");
 });
 
 test("the reserve sets --crow-player-h from the bar (0px hidden, its height shown), observes the bar once", () => {

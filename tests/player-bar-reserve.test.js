@@ -131,11 +131,66 @@ test("Bot Board: the phone picker sheet sits on the bar, the drawer ends at it",
   const css = noComments(botBoardStyles());
   assert.ok(css.includes(`.bb-sheet{position:fixed;left:0;right:0;bottom:${VAR};top:auto;`));
   assert.ok(css.includes(`padding:.75rem .75rem calc(.75rem + ${SAFE_MINUS_BAR})}`));
-  assert.ok(css.includes(`height:100vh;height:calc(100dvh - ${VAR});`), "the drawer keeps the 100vh fallback");
+  assert.ok(css.includes(`height:calc(100vh - ${VAR});height:calc(100dvh - ${VAR});`),
+    "the drawer's vh fallback (no dvh support) leaves room for the bar too");
 });
 
 test("phone header dropdowns open above the bar", async () => {
   const { headerIconsCss, tamagotchiCss } = await import("../servers/gateway/dashboard/shared/notifications.js");
   assert.ok(headerIconsCss.includes(`.header-dropdown { position: fixed; top: auto; bottom: calc(60px + ${VAR});`));
   assert.ok(tamagotchiCss.includes(`.crow-dropdown { position: fixed; top: auto; bottom: calc(60px + ${VAR});`));
+});
+
+// ─── the reserve script, in a stub window (PLAYER_RESERVE_JS) ───────────────────────────────
+// A minimal document/window: enough to count the variable's writes and the listeners the script adds.
+
+async function reserveSandbox() {
+  const vm = await import("node:vm");
+  const { PLAYER_RESERVE_JS } = await import("../servers/gateway/dashboard/shared/player.js");
+  const writes = [], frames = [], docListeners = [], winListeners = [];
+  const props = {};
+  const root = { style: {
+    getPropertyValue: (k) => props[k] || "",
+    setProperty: (k, v) => { writes.push([k, v]); props[k] = v; },
+  } };
+  let bar = null;
+  const document = {
+    documentElement: root,
+    getElementById: (id) => (id === "crow-player-bar" ? bar : null),
+    addEventListener: (type, fn) => docListeners.push([type, fn]),
+  };
+  const window = {
+    requestAnimationFrame: (fn) => { frames.push(fn); return frames.length; },
+    addEventListener: (type, fn) => winListeners.push([type, fn]),
+  };
+  const ctx = vm.createContext({ window, document, MutationObserver: class { observe() {} } });
+  return {
+    run: () => vm.runInContext(PLAYER_RESERVE_JS, ctx),
+    setBar: (b) => { bar = b; },
+    writes, frames, docListeners, winListeners,
+  };
+}
+
+test("reserve (no bar at run time, a Turbo visit): no 0px write before the frame — it measures only in the rAF", async () => {
+  const sb = await reserveSandbox();
+  sb.run();
+  assert.deepEqual(sb.writes, [], "no immediate write while the bar is held out of the page");
+  assert.equal(sb.frames.length, 1, "one frame scheduled");
+  sb.setBar({ style: { display: "block" }, offsetHeight: 57, getAttribute: () => "1", setAttribute() {} });
+  sb.frames[0]();
+  assert.deepEqual(sb.writes, [["--crow-player-h", "57px"]], "the frame measures the bar that came back");
+});
+
+test("reserve: one turbo:load listener per window (re-runs on every visit add none), and it re-measures", async () => {
+  const sb = await reserveSandbox();
+  sb.setBar({ style: { display: "block" }, offsetHeight: 57, getAttribute: () => null, setAttribute() {} });
+  sb.run();
+  sb.run();
+  sb.run();
+  const loads = sb.docListeners.filter(([type]) => type === "turbo:load");
+  assert.equal(loads.length, 1, "installed once per window");
+  assert.equal(sb.winListeners.filter(([type]) => type === "resize").length, 1);
+  sb.setBar(null);                                  // a page without the bar, reached by a Turbo visit
+  loads[0][1]();
+  assert.equal(sb.writes.at(-1)[1], "0px", "the variable follows to 0px there");
 });

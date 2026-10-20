@@ -42,7 +42,9 @@ export const KIOSK_STALL_MS = 15000;
  *    MutationObserver on the bar's own style (shown/hidden); ResizeObserver for its content height
  *    (a wrapped title, the subtitle row); web fonts landing.
  *  - No bar when it runs (a Turbo visit holds the permanent bar out of the page while the new body's
- *    scripts run): it measures again a frame later.
+ *    scripts run): it measures only a frame later (no 0px write and layout pass in between).
+ *  - turbo:load (one listener per window): a Turbo visit to a page without the bar drops the variable
+ *    to 0px there, ResizeObserver or not.
  *  - Perch: a transcript pinned to its end is re-pinned after the column changes height.
  */
 export const PLAYER_RESERVE_JS = `(function () {
@@ -59,15 +61,22 @@ export const PLAYER_RESERVE_JS = `(function () {
       if (pinned) tr.scrollTop = tr.scrollHeight;
     };
     window.addEventListener('resize', function () { set(); });
+    // Once per window, like resize: a Turbo visit to a page WITHOUT the bar (the login page after a
+    // session expiry, KB public pages) runs no copy of this script, so nothing else would drop the
+    // variable back to 0px there when ResizeObserver is missing.
+    document.addEventListener('turbo:load', function () { set(); });
   }
-  set();
   var bar = document.getElementById('crow-player-bar');
   // A Turbo visit between two bar pages runs this while Turbo holds the permanent bar out of the page:
-  // no bar right now, the same one back a moment later with no style change. Measure again then.
-  if (!bar) { try { if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(function () { set(); }); } catch (e) {} return; }
+  // no bar right now, the same one back a moment later with no style change. Measure only then: a set()
+  // now would write 0px and force an extra layout pass before the bar's height comes back.
+  if (!bar) { try { if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(function () { set(); }); else set(); } catch (e) {} return; }
+  set();
   if (bar.getAttribute('data-crow-player-reserve') === '1') return;
   bar.setAttribute('data-crow-player-reserve', '1');
   try { new MutationObserver(function () { set(); }).observe(bar, { attributes: true, attributeFilter: ['style'] }); } catch (e) {}
+  // Without ResizeObserver (older browsers) a change in the bar's content height (a wrapped title, the
+  // subtitle row) is not observed; the show paths, resize, turbo:load and fonts.ready still measure.
   try { if (typeof ResizeObserver === 'function') new ResizeObserver(function () { set(); }).observe(bar); } catch (e) {}
   try { if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () { set(); }, function () {}); } catch (e) {}
 })();`;

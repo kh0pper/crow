@@ -109,7 +109,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const TWO_FRAMES = "new Promise(function(r){requestAnimationFrame(function(){requestAnimationFrame(function(){r(1);});});})";
 
 /** A tab at w x h on `path`, held open across evaluations. */
-async function open(w, h, path, ready) {
+async function open(w, h, path, ready, init = "") {
   const t = await (await fetch(chrome.cdp + "/json/new?about:blank", { method: "PUT" })).json();
   const { default: WebSocket } = await import("ws");
   const ws = new WebSocket(t.webSocketDebuggerUrl);
@@ -131,6 +131,7 @@ async function open(w, h, path, ready) {
   };
   await send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 2, mobile: w < 900 });
   await send("Page.enable");
+  if (init) await send("Page.addScriptToEvaluateOnNewDocument", { source: init });
   await send("Page.navigate", { url: `http://${HOST}:${port}${path}` });
   assert.equal(await until(ready), true, "the page never reached its ready state: " + ready);
   // Hermetic: the player persists its item in this origin's localStorage; start every tab with the bar hidden.
@@ -386,3 +387,26 @@ test("live (I2): Turbo visits — the variable survives one with the bar, and fo
     assert.ok(m.last.ok && m.last.bottom <= m.barTop + 0.5, "and the page still clears it: " + JSON.stringify(m));
   } finally { await s.close(); }
 });
+
+// A Turbo visit WITH the bar showing to a page without it (login after a session expiry, KB public pages):
+// the variable must not stay at the bar's height there. In Chrome the bar's ResizeObserver sees the bar
+// leave the page; without ResizeObserver (older browsers) only the turbo:load listener does.
+for (const [label, init] of [["", ""], [" (no ResizeObserver, an older browser)", "delete window.ResizeObserver;"]]) {
+  test(`live: a Turbo visit WITH the bar showing to a page without the bar → 0px there${label}`, async (t) => {
+    if (!chrome) return t.skip("no headless Chrome");
+    const s = await open(412, 915, "/dashboard/plain", PLAIN_READY, init);
+    try {
+      assert.equal(await s.evalIn("typeof window.Turbo"), "object", "fixture: Turbo really is loaded");
+      if (init) assert.equal(await s.evalIn("typeof window.ResizeObserver"), "undefined", "fixture: no ResizeObserver");
+      await s.showBar();
+      const v = "getComputedStyle(document.documentElement).getPropertyValue('--crow-player-h').trim()";
+      assert.notEqual(await s.evalIn(v), "0px", "fixture: the bar shows and reserves");
+      await s.evalIn("window.__sameRealm = 1; Turbo.visit('/dashboard/nobar', { action: 'replace' }); 1");
+      assert.equal(await s.until("!!document.getElementById('nobar') && !document.documentElement.hasAttribute('aria-busy')"), true);
+      assert.equal(await s.evalIn("!!document.getElementById('crow-player-bar')"), false, "fixture: no bar on this page");
+      assert.equal(await s.evalIn("window.__sameRealm === 1"), true, "fixture: a Turbo visit, not a full load");
+      await s.evalIn(TWO_FRAMES);
+      assert.equal(await s.evalIn(v), "0px", "a stale reserve would leave a bar-sized gap on a page with no bar");
+    } finally { await s.close(); }
+  });
+}
