@@ -884,8 +884,8 @@ test("the drawer sizes to the VISIBLE viewport, not the large one", async () => 
   const { botBoardStyles } = await import("../servers/gateway/dashboard/panels/bot-board/css.js");
   const css = botBoardStyles();
   assert.ok(/\.bb-drawer\{[^}]*height:100vh/.test(css), "the 100vh fallback stays for old engines");
-  assert.ok(/\.bb-drawer\{[^}]*height:100dvh/.test(css),
-    "100dvh tracks the viewport as the browser chrome shows and hides");
+  assert.ok(/\.bb-drawer\{[^}]*height:calc\(100dvh - var\(--crow-player-h,0px\)\)/.test(css),
+    "100dvh tracks the viewport as the browser chrome shows and hides (less the player bar while it shows)");
   const rule = css.match(/\.bb-drawer\{[^}]*\}/)[0];
   assert.ok(rule.indexOf("100dvh") > rule.indexOf("100vh"),
     "dvh must come AFTER vh or the fallback wins everywhere");
