@@ -119,6 +119,23 @@ const parseDef = (text) => { try { const d = JSON.parse(text); return d && typeo
 const toolName = (entry) => String(entry).slice(String(entry).lastIndexOf("/") + 1);
 const deniedTool = (entry) => { const n = toolName(entry); return VOICE_DENY_TOOLS.includes(n) || n.startsWith("crow_glasses_"); };
 const crowMcpOf = (def) => (Array.isArray(def?.tools?.crow_mcp) ? def.tools.crow_mcp.filter((t) => typeof t === "string" && t) : []);
+const policyList = (def, key) => (Array.isArray(def?.permission_policy?.[key]) ? def.permission_policy[key].filter((e) => typeof e === "string" && e) : []);
+/**
+ * Does a permission_policy deny/confirm entry name this "server/tool" entry?
+ * Exact names only (neither runtime has wildcards): the voice turn matches the
+ * bare tool name and its crow_-prefixed form (turn.js), pi matches
+ * mcp__<server>__<tool> (Bot Builder's def-adapter.js stores both); the
+ * "server/tool" key itself also counts.
+ */
+function policyEntryMatches(entry, key) {
+  const k = String(key);
+  const i = k.lastIndexOf("/");
+  const name = k.slice(i + 1);
+  const names = [k, name];
+  if (!name.startsWith("crow_")) names.push(`crow_${name}`);
+  if (i > 0) names.push(`mcp__${k.slice(0, i)}__${name}`);
+  return names.includes(entry);
+}
 const isVoiceRow = (row) => isVoiceBotId(String(row.bot_id)) || isVoiceBotDef(parseDef(row.definition));
 
 /**
@@ -148,9 +165,15 @@ async function isProviderModel(db, key) {
  * bot by id, as the kiosk's resolveSessionBot with no fit check); else the bound
  * bot of the most recently seen device.
  *
+ * Tool carry-over: an added crow_mcp entry is carried only when it passes the
+ * voice denylist, no source bot that selects it denies it, and the injected
+ * toolEffect (servers/gateway/voice/action-claims.js) calls it "read". With no
+ * toolEffect nothing extra is carried (fail closed). Source confirm entries
+ * for a carried tool are copied onto the voice bot's permission_policy.confirm.
+ *
  * @returns {Promise<{created: boolean, corrupt?: true}>}
  */
-export async function ensureVoiceBot(db, { fastKey, readSetting, listDevices, log = () => {} } = {}) {
+export async function ensureVoiceBot(db, { fastKey, readSetting, listDevices, toolEffect = null, log = () => {} } = {}) {
   if (typeof fastKey !== "string" || !fastKey) throw new Error("fast_model_required");
 
   const existing = (await db.execute({ sql: "SELECT definition FROM pi_bot_defs WHERE bot_id = ?", args: [CROW_VOICE_BOT_ID] })).rows[0];
@@ -196,21 +219,38 @@ export async function ensureVoiceBot(db, { fastKey, readSetting, listDevices, lo
   const carried = effectiveDef?.fast_voice_model;
   if (await isProviderModel(db, carried)) def.fast_voice_model = carried;
 
-  const tools = [...def.tools.crow_mcp];
-  const seen = new Set(tools);
-  const added = [];
+  // Source bots: the effective dashboard bot, then every glasses-bound bot (device order).
   const sources = [effectiveDef];
   for (const d of devices) {
     if (!d || (d.device_kind || "glasses") !== "glasses" || typeof d.bound_bot_id !== "string") continue;
     const r = byId.get(d.bound_bot_id);
     if (r && !isVoiceRow(r)) sources.push(parseDef(r.definition));
   }
+
+  // Candidate additions in first-seen order, each with every source bot that selects it.
+  const tools = [...def.tools.crow_mcp];
+  const preset = new Set(tools);
+  const candidates = new Map();
   for (const src of sources) {
     for (const t of crowMcpOf(src)) {
-      if (seen.has(t) || deniedTool(t)) continue;
-      seen.add(t); tools.push(t); added.push(t);
+      if (preset.has(t)) continue;
+      if (!candidates.has(t)) candidates.set(t, []);
+      if (src && !candidates.get(t).includes(src)) candidates.get(t).push(src);
     }
   }
+  const added = [], skipped = [], confirm = [];
+  for (const [t, srcs] of candidates) {
+    let reason = null;
+    if (deniedTool(t)) reason = "voice_denied";
+    else if (srcs.some((src) => policyList(src, "deny").some((e) => policyEntryMatches(e, t)))) reason = "denied_by_source";
+    else if (typeof toolEffect !== "function" || toolEffect(toolName(t)) !== "read") reason = "not_read_only";
+    if (reason) { skipped.push({ tool: t, reason }); continue; }
+    tools.push(t); added.push(t);
+    for (const src of srcs) {
+      for (const e of policyList(src, "confirm")) if (policyEntryMatches(e, t) && !confirm.includes(e)) confirm.push(e);
+    }
+  }
+  for (const e of confirm) if (!def.permission_policy.confirm.includes(e)) def.permission_policy.confirm.push(e);
   def.tools.crow_mcp = tools;
   def.migrated_from = {
     at: new Date().toISOString(),
@@ -218,6 +258,7 @@ export async function ensureVoiceBot(db, { fastKey, readSetting, listDevices, lo
     dashboard_setting: setting,
     devices: boundDevices,
     tools: added,
+    skipped_tools: skipped,
   };
 
   const res = await db.execute({

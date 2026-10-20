@@ -71,9 +71,10 @@ export async function ensureVoiceBotAtBoot({ noAuth, dbFactory = createDbClient 
     const { VOICE_ROUTE_KEYS } = await import("../routes/llm-router.js");
     const { readSetting } = await import("../dashboard/settings/registry.js");
     const { listDevices } = await import("../../shared/device-store.js");
+    const { toolEffect } = await import("../voice/action-claims.js");
     const db = dbFactory();
     try {
-      const res = await ensureVoiceBot(db, { fastKey: VOICE_ROUTE_KEYS.fast, readSetting, listDevices, log: (m) => console.log(m) });
+      const res = await ensureVoiceBot(db, { fastKey: VOICE_ROUTE_KEYS.fast, readSetting, listDevices, toolEffect, log: (m) => console.log(m) });
       if (res.created) {
         const { emitBotDefsChanged } = await import("../dashboard/panels/bot-builder/defs-changed.js");
         emitBotDefsChanged(CROW_VOICE_BOT_ID);

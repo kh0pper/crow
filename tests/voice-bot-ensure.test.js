@@ -22,6 +22,7 @@ const REPO = new URL("..", import.meta.url).pathname;
 const { ensureVoiceBot, CROW_VOICE_BOT_ID, VOICE_DENY_TOOLS, voiceBotDefinition } = await import("../servers/shared/voice-bot.js");
 const { listDevices } = await import("../servers/shared/device-store.js");
 const { createDbClient } = await import("../servers/db.js");
+const { toolEffect } = await import("../servers/gateway/voice/action-claims.js");
 
 const FAST = "crow-voice/qwen3.5-4b";
 const PRESET = voiceBotDefinition({ preset: "fast_local", fastKey: FAST }).tools.crow_mcp;
@@ -51,7 +52,7 @@ const allDefs = () => { const c = raw(); const r = c.prepare("SELECT bot_id, def
 async function run(extra = {}) {
   const db = createDbClient();
   try {
-    return await ensureVoiceBot(db, { fastKey: FAST, readSetting, listDevices, log: () => {}, ...extra });
+    return await ensureVoiceBot(db, { fastKey: FAST, readSetting, listDevices, toolEffect, log: () => {}, ...extra });
   } finally { db.close?.(); }
 }
 
@@ -158,6 +159,66 @@ test("old voice selections are carried, minus denied tools", async () => {
   assert.deepEqual(tools.slice(PRESET.length), ["gmail/gmail_search", "brave-search/brave_web_search"]);
   assert.deepEqual(def.migrated_from.tools, ["gmail/gmail_search", "brave-search/brave_web_search"]);
   assert.ok(!tools.some((t) => t.includes("crow_glasses_") || t.endsWith("/crow_delegate") || t.endsWith("/crow_discover")));
+});
+
+test("a tool the source bot denies is not carried", async () => {
+  seedBot("writer", {
+    tools: { crow_mcp: ["brave-search/brave_web_search"] },
+    permission_policy: { deny: ["brave_web_search"] },
+  });
+  setSetting("meta_glasses_devices", JSON.stringify([{ id: "g-1", device_kind: "glasses", bound_bot_id: "writer" }]));
+  await run();
+  const def = voiceDef();
+  assert.ok(!def.tools.crow_mcp.includes("brave-search/brave_web_search"));
+  assert.deepEqual(def.migrated_from.tools, []);
+  assert.deepEqual(def.migrated_from.skipped_tools, [{ tool: "brave-search/brave_web_search", reason: "denied_by_source" }]);
+});
+
+test("a deny in pi's mcp__server__tool form also blocks the carry", async () => {
+  seedBot("alpha", {
+    tools: { crow_mcp: ["gmail/gmail_search"] },
+    permission_policy: { deny: ["mcp__gmail__gmail_search"] },
+  });
+  await run();
+  assert.deepEqual(voiceDef().migrated_from.skipped_tools, [{ tool: "gmail/gmail_search", reason: "denied_by_source" }]);
+});
+
+test("a carried read tool keeps the source bot's confirm entries", async () => {
+  seedBot("alpha", {
+    tools: { crow_mcp: ["gmail/gmail_search", "brave-search/brave_web_search"] },
+    permission_policy: { confirm: ["mcp__gmail__gmail_search", "gmail_search", "other_tool"] },
+  });
+  await run();
+  const def = voiceDef();
+  assert.ok(def.tools.crow_mcp.includes("gmail/gmail_search"));
+  assert.deepEqual(def.permission_policy.confirm, ["mcp__gmail__gmail_search", "gmail_search"]);
+  const preset = voiceBotDefinition({ preset: "fast_local", fastKey: FAST }).permission_policy;
+  assert.deepEqual({ ...def.permission_policy, confirm: [] }, preset);
+});
+
+test("a write tool is not carried", async () => {
+  seedBot("alpha", { tools: { crow_mcp: ["google-workspace/gcal_create_event"] } });
+  await run();
+  const def = voiceDef();
+  assert.ok(!def.tools.crow_mcp.includes("google-workspace/gcal_create_event"));
+  assert.deepEqual(def.migrated_from.skipped_tools, [{ tool: "google-workspace/gcal_create_event", reason: "not_read_only" }]);
+});
+
+test("denied voice tools are recorded as voice_denied", async () => {
+  seedBot("alpha", { tools: { crow_mcp: ["crow-tools/crow_delegate", "meta-glasses/crow_glasses_add_to_note"] } });
+  await run();
+  assert.deepEqual(voiceDef().migrated_from.skipped_tools, [
+    { tool: "crow-tools/crow_delegate", reason: "voice_denied" },
+    { tool: "meta-glasses/crow_glasses_add_to_note", reason: "voice_denied" },
+  ]);
+});
+
+test("without a toolEffect dep nothing extra is carried", async () => {
+  seedBot("alpha", { tools: { crow_mcp: ["brave-search/brave_web_search"] } });
+  await run({ toolEffect: undefined });
+  const def = voiceDef();
+  assert.deepEqual(def.tools.crow_mcp, PRESET);
+  assert.deepEqual(def.migrated_from.tools, []);
 });
 
 test("fast model carried only when it is a real provider model", async () => {
