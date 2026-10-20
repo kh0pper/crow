@@ -650,7 +650,9 @@ test("notifyBatch: a different bot cannot notify another bot's batch (403, nothi
 test("notifyBatch: a mixed-asker batch is refused for a bot that asked only some of it", async () => {
   await withStore(async ({ tdb, cdb }) => {
     await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-1" }) }, BOT);
-    await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-2" }) }, BOT2);
+    const b = await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-2" }) }, BOT);
+    // askDecision no longer lets a second actor in; simulate a legacy card
+    await tdb.execute({ sql: "UPDATE tasks_items SET data_json=json_remove(data_json,'$.decision.asked_by') WHERE id=?", args: [b.id] });
     await rejects(notifyBatch(tdb, cdb, "batch-1", { ...fakeNotifier(), actor: BOT }), "forbidden", 403);
   });
 });
@@ -724,5 +726,26 @@ test("notifyBatch: a push failure clears all three notify fields", async () => {
     assert.equal(d.notified_by, undefined);
     assert.equal(d.notify_stamp, undefined);
     assert.equal((await notifyBatch(tdb, cdb, "batch-1", { ...fakeNotifier() })).pushed, true);
+  });
+});
+
+test("askDecision: another actor cannot add to a batch that already has open cards (409 batch_owned); the owner still can notify", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-a", batch: "x" }) }, BOT);
+    await rejects(askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-b", batch: "x" }) }, BOT2), "batch_owned", 409);
+    await rejects(askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-c", batch: "x" }) }, HUMAN), "batch_owned", 409);
+    assert.equal(await countCards(tdb), 1, "no card was created");
+    // the owner may keep adding, and can notify
+    await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-d", batch: "x" }) }, BOT);
+    const n = fakeNotifier();
+    assert.deepEqual(await notifyBatch(tdb, cdb, "x", n), { pushed: true, count: 2 });
+  });
+});
+
+test("notifyBatch: a malformed data_json row elsewhere does not break the cap query", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    await tdb.execute({ sql: "INSERT INTO tasks_items (title, data_json) VALUES ('junk', ?)", args: ["{not json"] });
+    await askDecision(tdb, cdb, { projectId: 1, decision: decision() }, BOT);
+    assert.deepEqual(await notifyBatch(tdb, cdb, "batch-1", fakeNotifier()), { pushed: true, count: 1 });
   });
 });
