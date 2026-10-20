@@ -25,8 +25,9 @@
  */
 import { readdirSync, readFileSync, mkdtempSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { tmpdir } from "node:os";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { tmpdir, homedir } from "node:os";
+import { realish, within, realUserCrowDir } from "./lib/protected-paths.mjs";
 import { spawn } from "node:child_process";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -84,6 +85,58 @@ if (explicitFiles.length > 0) {
 // --- scratch env, one per invocation (baseline semantics) ------------------
 const scratch = mkdtempSync(join(tmpdir(), "crow-test-"));
 const env = { ...process.env };
+
+// --- real instance paths: protect them, never inherit them -----------------
+// 2026-10-17: a run in a real checkout loaded that checkout's .env
+// (CROW_DATA_DIR=<the live data dir>) into a test process, and the test's
+// cleanup deleted the live data dir. Every instance path the shell or a .env
+// names becomes a protected root that no test process may delete or adopt
+// (scripts/lib/suite-guard.mjs), and none of them reaches the suite.
+const INSTANCE_KEYS = ["CROW_HOME", "CROW_DATA_DIR", "CROW_DB_PATH", "CROW_TASKS_DB_PATH"];
+const PATH_DIR_KEYS = new Set(["CROW_DB_PATH", "CROW_TASKS_DB_PATH"]); // file paths: protect their directory
+const parseEnvFile = (p) => {
+  const out = {};
+  try {
+    for (const line of readFileSync(p, "utf8").split("\n")) {
+      const m = line.match(/^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)\s*=\s*["']?([^"'\n]*)["']?\s*$/);
+      if (m) out[m[1]] = m[2];
+    }
+  } catch { /* no .env */ }
+  return out;
+};
+const protectedSet = new Set([realUserCrowDir(), join(homedir(), ".crow")]);
+const ignoredFromEnvFiles = [];
+const sources = [["shell", process.env]];
+for (const p of new Set([join(ROOT, ".env"), join(process.cwd(), ".env")])) sources.push([p, parseEnvFile(p)]);
+for (const [label, vars] of sources) {
+  for (const k of INSTANCE_KEYS) {
+    const v = vars[k];
+    if (!v || !v.startsWith("/")) continue;
+    protectedSet.add(PATH_DIR_KEYS.has(k) ? dirname(v) : v);
+    if (label !== "shell") ignoredFromEnvFiles.push(`${k} (${label})`);
+  }
+}
+const tmpReal = realish(tmpdir());
+const protectedRoots = [...protectedSet].map(realish).filter((r) => {
+  // A root that contains the temp dir would make every scratch path "protected".
+  if (within(tmpReal, r)) { console.error(`[run-suite] not protecting ${r}: it contains the temp dir ${tmpReal}`); return false; }
+  return true;
+});
+if (ignoredFromEnvFiles.length) {
+  console.error(`[run-suite] a checkout .env sets instance paths; the suite ignores that file and protects them: ${ignoredFromEnvFiles.join(", ")}`);
+}
+// The suite never reads or writes a checkout .env (bundles.js, the boot gate
+// and scripts/server-registry.js honour this seam), and inherits no shell
+// instance path but the scratch ones set below.
+env.CROW_APP_ENV_PATH = join(scratch, "gateway.env");
+delete env.CROW_DB_PATH;
+delete env.CROW_TASKS_DB_PATH;
+delete env.CROW_ALLOW_SHARED_DATA_DIR;
+env.CROW_SUITE_SCRATCH = scratch;
+env.CROW_SUITE_PROTECTED_ROOTS = protectedRoots.join("\n");
+const guardUrl = pathToFileURL(join(ROOT, "scripts", "lib", "suite-guard.mjs")).href;
+env.NODE_OPTIONS = `${env.NODE_OPTIONS ? env.NODE_OPTIONS + " " : ""}--import=${guardUrl}`;
+
 env.CROW_HOME = scratch;
 env.CROW_DATA_DIR = join(scratch, "data");
 // Created up front: a single-file run used to depend on SOME other test file
@@ -167,8 +220,20 @@ child.on("error", (err) => {
   cleanup();
   process.exit(1);
 });
+// Any test process that saw an instance path inside a protected root left a
+// record here (scripts/lib/suite-guard.mjs). That fails the run, green or not.
+function driftRecords() {
+  const dir = join(scratch, "drift");
+  try { return readdirSync(dir).map((f) => readFileSync(join(dir, f), "utf8").trim()); } catch { return []; }
+}
 child.on("close", (code, signal) => {
+  const drift = driftRecords();
   cleanup();
+  if (drift.length) {
+    console.error(`\n[run-suite] FAIL: ${drift.length} test process(es) pointed an instance path at a protected real directory:`);
+    for (const d of drift) console.error(`  ${d}`);
+    process.exit(1);
+  }
   // A signal-killed child has code null — that is a failed run, never a green.
   process.exit(code ?? 1);
 });

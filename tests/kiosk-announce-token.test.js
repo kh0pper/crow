@@ -1,6 +1,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, statSync, rmSync } from "node:fs";
+import { rmScratch } from "./helpers/safe-rm.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -20,7 +21,11 @@ before(() => {
   c.close();
   db = createDbClient(p);
 });
-after(() => { db.close(); rmSync(home, { recursive: true, force: true }); for (const [k, v] of [["CROW_HOME", saved.h], ["CROW_DATA_DIR", saved.d]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
+after(() => {
+  db.close();
+  rmScratch(home);
+  for (const [k, v] of [["CROW_HOME", saved.h], ["CROW_DATA_DIR", saved.d]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+});
 
 test("mint writes a 0600 file and a local-scope hash; validate is exact; ensure is idempotent", async () => {
   assert.deepEqual(await ensureKioskAnnounceToken(db), { minted: true });

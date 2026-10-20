@@ -8,6 +8,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { rmScratch } from "./helpers/safe-rm.js";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,7 +27,10 @@ process.env.CROW_HOME = other;
 
 const { skillDirs, resolveSkill, REPO_SKILLS_DIR } = await import("../scripts/pi-bots/skill_resolver.mjs");
 const { loadSkills } = await import("../servers/gateway/dashboard/panels/bot-builder/data-queries.js");
-after(() => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } rmSync(dir, { recursive: true, force: true }); });
+after(() => {
+  for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  rmScratch(dir);
+});
 
 const RUNNING_REPO_SKILLS = resolve(fileURLToPath(new URL("../skills", import.meta.url)));
 

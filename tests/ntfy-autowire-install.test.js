@@ -2,18 +2,21 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { rmScratch } from "./helpers/safe-rm.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import http from "node:http";
 
-process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-aw-home-"));
-process.env.CROW_DATA_DIR = mkdtempSync(join(tmpdir(), "crow-aw-data-"));
+const TMP_HOME = mkdtempSync(join(tmpdir(), "crow-aw-home-"));
+process.env.CROW_HOME = TMP_HOME;
+const TMP_DATA = mkdtempSync(join(tmpdir(), "crow-aw-data-"));
+process.env.CROW_DATA_DIR = TMP_DATA;
 process.env.CROW_AUTO_UPDATE = "0";
 process.env.CROW_DISABLE_HEALTH_MONITOR = "1";
 process.env.CROW_DISABLE_INSTANCE_SYNC = "1";
 process.env.CROW_DISABLE_NOSTR = "1";
 delete process.env.NTFY_TOPIC;
-writeFileSync(join(process.env.CROW_DATA_DIR, "instance-id"), "0867ac2809dedd885ba7769b21966f8e");
+writeFileSync(join(TMP_DATA, "instance-id"), "0867ac2809dedd885ba7769b21966f8e");
 
 // Any push the install job sends goes to this stand-in, never a host's real ntfy.
 const pushes = [];
@@ -31,8 +34,7 @@ B._setAppBundlesForTest(FIXTURES);
 after(() => {
   B._setComposeRunnerForTest(null); B._setDockerRunnerForTest(null);
   sink.close();
-  rmSync(process.env.CROW_HOME, { recursive: true, force: true });
-  rmSync(FIXTURES, { recursive: true, force: true });
+  for (const d of [TMP_HOME, TMP_DATA, FIXTURES]) rmScratch(d);
 });
 
 function fixture(id) {
@@ -83,7 +85,7 @@ test("installing a bundle that declares autowire provisions this instance's push
 });
 
 test("an env-configured gateway keeps its NTFY_* setup on install", async () => {
-  rmSync(join(process.env.CROW_DATA_DIR, "ntfy-push.json"), { force: true });
+  rmSync(join(TMP_DATA, "ntfy-push.json"), { force: true });
   const m = fixture("aw-ntfy2");
   const { runner, calls } = dockerFake();
   B._setDockerRunnerForTest(runner);
@@ -94,7 +96,7 @@ test("an env-configured gateway keeps its NTFY_* setup on install", async () => 
     const out = await B.runInstallJob("aw-ntfy2", {}, { job, installedSnapshot: [], consentVerified: false, manifest: m });
     assert.equal(out.ok, true, out.reason);
     assert.equal(calls.filter((c) => c.startsWith("exec")).length, 0);
-    assert.equal(existsSync(join(process.env.CROW_DATA_DIR, "ntfy-push.json")), false);
+    assert.equal(existsSync(join(TMP_DATA, "ntfy-push.json")), false);
   } finally {
     delete process.env.NTFY_TOPIC;
   }

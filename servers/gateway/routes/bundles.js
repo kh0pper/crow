@@ -63,6 +63,7 @@ import { checkComposeModel, loadComposeModel, usesHostNetwork, resolveHostPath }
 import { grantCandidates, activeRoots, otherBundlesRoots, migrateGrants, recordGrants, dropGrants, composeReferencedKeys, readGrants, ungrantedFolderKeys } from "../folder-grants.js";
 import { isLocalPasswordSession } from "../dashboard/local-session.js";
 import { resolveDataDir } from "../../db.js";
+import { PINNED_PATH_ENV_KEYS } from "../../shared/crow-home.js";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { isPlaceholderValue } from "../bundle-env-placeholders.js";
 import { keychainGeneratedKeys, planGeneratedEnv, retainedEnvPath, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedKeys, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
@@ -148,9 +149,12 @@ const SKILL_RECORD_PATH = join(CROW_HOME, "skill-installs.json");
 const PANELS_DIR = join(CROW_HOME, "panels");
 const PANELS_CONFIG_PATH = join(CROW_HOME, "panels.json");
 const INSTALLED_PATH = join(CROW_HOME, "installed.json");
-let APP_ENV_PATH = join(APP_ROOT, ".env");
+// CROW_APP_ENV_PATH: set only by scripts/run-suite.mjs, so a suite run inside
+// a real checkout never reads or rewrites that checkout's .env.
+const defaultAppEnvPath = () => process.env.CROW_APP_ENV_PATH || join(APP_ROOT, ".env");
+let APP_ENV_PATH = defaultAppEnvPath();
 /** Test-only: repoint the gateway .env that propagateEnvToGateway writes (normally <repo>/.env). */
-export function _setAppEnvPathForTest(path) { APP_ENV_PATH = path || join(APP_ROOT, ".env"); }
+export function _setAppEnvPathForTest(path) { APP_ENV_PATH = path || defaultAppEnvPath(); }
 // Test-only: replace the HIBP range fetch used by env_vars[].check "not_breached".
 let _breachFetchForTest = null;
 export function _setBreachFetchForTest(fn) { _breachFetchForTest = fn || null; }
@@ -1974,8 +1978,11 @@ function findDependents(bundleId) {
  * Uncomments and sets values for vars that are already present as comments,
  * or appends them if not found.
  */
+// Instance paths are on it too: a (community) manifest that declares
+// CROW_DATA_DIR must never repoint, re-comment or reload the gateway's own.
 const GATEWAY_ENV_DENYLIST = new Set([
   "CROW_DASHBOARD_PUBLIC", "NODE_OPTIONS", "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH",
+  ...PINNED_PATH_ENV_KEYS,
 ]);
 
 function propagateEnvToGateway(envVars) {
@@ -2054,6 +2061,7 @@ function revertEnvInGateway(envKeys) {
   let content = readFileSync(APP_ENV_PATH, "utf8");
 
   for (const key of envKeys) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || GATEWAY_ENV_DENYLIST.has(key)) continue;
     // Match uncommented lines like KEY=value
     const pattern = new RegExp(`^(${key}=.*)$`, "m");
     if (pattern.test(content)) {
@@ -2085,19 +2093,30 @@ function scheduleGatewayRestart(delayMs = 2000) {
       setTimeout(() => process.exit(1), 1000);
     }, delayMs);
   } else {
-    // Unsupervised — reload env vars into current process
+    // Unsupervised — reload env vars into current process. Instance paths
+    // (CROW_HOME, CROW_DATA_DIR, CROW_DB_PATH, ...) and the other
+    // GATEWAY_ENV_DENYLIST keys are never changed in a running process. On
+    // 2026-10-17 this reload copied a checkout .env's CROW_DATA_DIR into a
+    // test process, whose cleanup then deleted the live data dir.
     try {
       const envContent = readFileSync(APP_ENV_PATH, "utf8");
+      const skipped = [];
       for (const line of envContent.split("\n")) {
         const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
-        if (match && !match[1].startsWith("#")) {
-          process.env[match[1]] = match[2];
+        if (!match) continue;
+        if (GATEWAY_ENV_DENYLIST.has(match[1])) {
+          if (process.env[match[1]] !== match[2]) skipped.push(match[1]);
+          continue;
         }
+        process.env[match[1]] = match[2];
       }
       console.log("[bundles] Reloaded env vars into current process");
+      if (skipped.length) console.warn(`[bundles] .env reload left protected keys unchanged (restart to apply): ${skipped.join(", ")}`);
     } catch {}
   }
 }
+/** Test-only: the real restart scheduler (unsupervised in a suite: the .env reload) and the gateway .env writers. */
+export { scheduleGatewayRestart as _scheduleGatewayRestartForTest, propagateEnvToGateway as _propagateEnvToGatewayForTest, revertEnvInGateway as _revertEnvInGatewayForTest };
 
 /**
  * Map AI bundle IDs to AI Provider settings for auto-configuration.

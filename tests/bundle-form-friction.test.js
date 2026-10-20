@@ -18,13 +18,16 @@ import assert from "node:assert/strict";
 import vm from "node:vm";
 import { webcrypto, createECDH } from "node:crypto";
 import { readdirSync, readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync } from "node:fs";
+import { rmScratch } from "./helpers/safe-rm.js";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseHTML } from "linkedom";
 
-process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-friction-home-"));
-process.env.CROW_DATA_DIR = mkdtempSync(join(tmpdir(), "crow-friction-data-"));
+const TMP_HOME = mkdtempSync(join(tmpdir(), "crow-friction-home-"));
+process.env.CROW_HOME = TMP_HOME;
+const TMP_DATA = mkdtempSync(join(tmpdir(), "crow-friction-data-"));
+process.env.CROW_DATA_DIR = TMP_DATA;
 process.env.CROW_AUTO_UPDATE = "0";
 process.env.CROW_DISABLE_HEALTH_MONITOR = "1";
 process.env.CROW_DISABLE_INSTANCE_SYNC = "1";
@@ -38,9 +41,21 @@ const { buildExtensionsHTML } = await import("../servers/gateway/dashboard/panel
 const { extensionsClientJS } = await import("../servers/gateway/dashboard/panels/extensions/client.js");
 const { t } = await import("../servers/gateway/dashboard/shared/i18n.js");
 
+// Nothing in this file may restart the gateway or read/write a real checkout
+// .env. On 2026-10-17 the uninstall test below, run from a checkout with a
+// real .env, reloaded that .env into this process (CROW_DATA_DIR included)
+// and the cleanup then deleted the live data dir. The uninstall route calls
+// scheduleGatewayRestart(); the hook makes it a no-op here.
+const TMP_GW = mkdtempSync(join(tmpdir(), "crow-friction-gw-"));
+const GATEWAY_ENV = join(TMP_GW, ".env");
+const restarts = [];
+B._setAppEnvPathForTest(GATEWAY_ENV);
+B._setRestartHookForTest((delayMs) => { restarts.push(delayMs); });
+
 after(() => {
-  rmSync(process.env.CROW_HOME, { recursive: true, force: true });
-  rmSync(process.env.CROW_DATA_DIR, { recursive: true, force: true });
+  B._setRestartHookForTest(null);
+  B._setAppEnvPathForTest(null);
+  for (const d of [TMP_HOME, TMP_DATA, TMP_GW]) rmScratch(d);
 });
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -459,7 +474,7 @@ test("install (route-level wiring): generated + propagate:true secret lands in t
     assert.ok(gw.includes(`DEMO_RUNNER_SECRET=${bundleEnv.DEMO_RUNNER_SECRET}`), "the gateway reads the same secret");
     assert.ok(!gw.includes("DEMO_DB_PASSWORD"), "a plain generated secret never reaches the gateway .env");
   } finally {
-    B._setAppEnvPathForTest(null);
+    B._setAppEnvPathForTest(GATEWAY_ENV);
   }
 });
 
@@ -486,6 +501,7 @@ test("uninstall route keeps a pre-generation install's typed secret, and the rei
     const deadline = Date.now() + 10_000;
     while (existsSync(dir) && Date.now() < deadline) await new Promise((res) => setTimeout(res, 50));
   } finally { server.close(); }
+  assert.ok(restarts.length > 0, "the uninstall asked for a restart, and the test hook absorbed it");
   assert.equal(existsSync(dir), false, "uninstall removed the bundle dir");
   assert.equal(S.parseEnvText(readFileSync(S.retainedEnvPath(process.env.CROW_HOME, id), "utf8")).DEMO_DB_PASSWORD, "typed-long-ago");
   const job = B._createJobForTest(id, "install");

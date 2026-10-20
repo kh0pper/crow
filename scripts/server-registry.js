@@ -20,7 +20,9 @@ export const ROOT = resolve(__dirname, "..");
  * Skips empty values, comments, and lines without '='.
  */
 export function loadEnv() {
-  const envPath = resolve(ROOT, ".env");
+  // CROW_APP_ENV_PATH: set only by scripts/run-suite.mjs, so a suite run in a
+  // real checkout never reads that checkout's .env.
+  const envPath = process.env.CROW_APP_ENV_PATH || resolve(ROOT, ".env");
   const env = {};
   if (existsSync(envPath)) {
     const lines = readFileSync(envPath, "utf8").split("\n");

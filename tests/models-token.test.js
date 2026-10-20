@@ -3,6 +3,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, statSync, readFileSync } from "node:fs";
+import { rmScratch } from "./helpers/safe-rm.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
@@ -14,7 +15,11 @@ execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, 
 const prev = process.env.CROW_HOME;
 process.env.CROW_HOME = home;
 const db = createDbClient(join(dataDir, "crow.db"));
-after(() => { if (prev === undefined) delete process.env.CROW_HOME; else process.env.CROW_HOME = prev; try { db.close(); } catch {} rmSync(home, { recursive: true, force: true }); });
+after(() => {
+  if (prev === undefined) delete process.env.CROW_HOME; else process.env.CROW_HOME = prev;
+  try { db.close(); } catch {}
+  rmScratch(home);
+});
 
 test("ensureModelsToken mints once, 0600, and the file validates", async () => {
   assert.deepEqual(await ensureModelsToken(db), { minted: true });

@@ -7,12 +7,15 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
+import { rmScratch } from "./helpers/safe-rm.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
-process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-kcrem-home-"));
-process.env.CROW_DATA_DIR = mkdtempSync(join(tmpdir(), "crow-kcrem-data-"));
+const TMP_HOME = mkdtempSync(join(tmpdir(), "crow-kcrem-home-"));
+process.env.CROW_HOME = TMP_HOME;
+const TMP_DATA = mkdtempSync(join(tmpdir(), "crow-kcrem-data-"));
+process.env.CROW_DATA_DIR = TMP_DATA;
 process.env.CROW_DISABLE_HEALTH_MONITOR = "1";
 process.env.CROW_DISABLE_INSTANCE_SYNC = "1";
 process.env.CROW_DISABLE_NOSTR = "1";
@@ -24,7 +27,7 @@ const { createDbClient } = await import("../servers/db.js");
 const HS = await import("../servers/gateway/dashboard/panels/nest/health-signals.js");
 const { isSyncable } = await import("../servers/gateway/dashboard/settings/sync-allowlist.js");
 const R = await import("../servers/gateway/keychain/reminder.js");
-after(() => { for (const d of [process.env.CROW_HOME, process.env.CROW_DATA_DIR]) rmSync(d, { recursive: true, force: true }); });
+after(() => { for (const d of [TMP_HOME, TMP_DATA]) rmScratch(d); });
 
 const key = createKeychainKey();
 const db = createDbClient();
