@@ -5,6 +5,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { rmScratch } from "./helpers/safe-rm.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -20,7 +21,10 @@ process.env.HOME = join(dir, "fakehome");
 put(join(process.env.HOME, ".crow"), "design-frontend", "# Design frontend\n\nFROM-MAIN-INSTANCE");
 put(join(process.env.HOME, ".crow"), "design-themes", "# Design themes\n\nFROM-MAIN-INSTANCE");
 const { skillNamesFor, prepareSpawn, houseStylePromptBlock, kitModeLine, DESIGN_SKILLS } = await import("../scripts/pi-bots/bot-world.mjs");
-after(() => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } rmSync(dir, { recursive: true, force: true }); });
+after(() => {
+  for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  rmScratch(dir);
+});
 
 const def = (crowMcp, skills = []) => ({ tools: { crow_mcp: crowMcp }, skills, models: { default: "stub/m1" } });
 const HS = { id: "ocean-depths", name: "Ocean Depths", links: ["__lib/font/work-sans/font.css", "__lib/themes/ocean-depths.css"] };

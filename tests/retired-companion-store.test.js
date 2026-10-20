@@ -15,12 +15,15 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, cpSync } from "node:fs";
+import { rmScratch } from "./helpers/safe-rm.js";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-retired-companion-"));
-process.env.CROW_DATA_DIR = mkdtempSync(join(tmpdir(), "crow-retired-companion-data-"));
+const TMP_HOME = mkdtempSync(join(tmpdir(), "crow-retired-companion-"));
+process.env.CROW_HOME = TMP_HOME;
+const TMP_DATA = mkdtempSync(join(tmpdir(), "crow-retired-companion-data-"));
+process.env.CROW_DATA_DIR = TMP_DATA;
 process.env.CROW_AUTO_UPDATE = "0";
 process.env.CROW_DISABLE_HEALTH_MONITOR = "1";
 process.env.CROW_DISABLE_INSTANCE_SYNC = "1";
@@ -42,7 +45,7 @@ after(() => {
   B._setRestartHookForTest(null);
   B._setAppBundlesForTest(join(ROOT, "bundles"));
   B._setAppEnvPathForTest(null);
-  for (const d of [CROW_HOME, process.env.CROW_DATA_DIR, APP_FIXTURE]) rmSync(d, { recursive: true, force: true });
+  for (const d of [CROW_HOME, TMP_DATA, APP_FIXTURE]) rmScratch(d);
 });
 
 const repoManifest = (id) => JSON.parse(readFileSync(join(ROOT, "bundles", id, "manifest.json"), "utf8"));

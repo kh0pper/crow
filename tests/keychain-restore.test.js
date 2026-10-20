@@ -8,12 +8,15 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, statSync } from "node:fs";
+import { rmScratch } from "./helpers/safe-rm.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
-process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-kcrestore-home-"));
-process.env.CROW_DATA_DIR = mkdtempSync(join(tmpdir(), "crow-kcrestore-data-"));
+const TMP_HOME = mkdtempSync(join(tmpdir(), "crow-kcrestore-home-"));
+process.env.CROW_HOME = TMP_HOME;
+const TMP_DATA = mkdtempSync(join(tmpdir(), "crow-kcrestore-data-"));
+process.env.CROW_DATA_DIR = TMP_DATA;
 process.env.CROW_AUTO_UPDATE = "0";
 process.env.CROW_DISABLE_HEALTH_MONITOR = "1";
 process.env.CROW_DISABLE_INSTANCE_SYNC = "1";
@@ -35,7 +38,7 @@ B._setAppBundlesForTest(FIXTURES);
 B._setAppEnvPathForTest(join(mkdtempSync(join(tmpdir(), "crow-kcrestore-gw-")), ".env"));
 after(() => {
   B._setAppEnvPathForTest(null);
-  for (const d of [CROW_HOME, process.env.CROW_DATA_DIR, FIXTURES]) rmSync(d, { recursive: true, force: true });
+  for (const d of [CROW_HOME, TMP_DATA, FIXTURES]) rmScratch(d);
 });
 
 const MANIFEST = (id) => ({

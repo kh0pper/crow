@@ -9,13 +9,16 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from "node:fs";
+import { rmScratch } from "./helpers/safe-rm.js";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-ctkeys-home-"));
-process.env.CROW_DATA_DIR = mkdtempSync(join(tmpdir(), "crow-ctkeys-data-"));
+const TMP_HOME = mkdtempSync(join(tmpdir(), "crow-ctkeys-home-"));
+process.env.CROW_HOME = TMP_HOME;
+const TMP_DATA = mkdtempSync(join(tmpdir(), "crow-ctkeys-data-"));
+process.env.CROW_DATA_DIR = TMP_DATA;
 process.env.CROW_DISABLE_HEALTH_MONITOR = "1";
 process.env.CROW_DISABLE_INSTANCE_SYNC = "1";
 process.env.CROW_DISABLE_NOSTR = "1";
@@ -23,7 +26,7 @@ delete process.env.CROW_TAX_ENCRYPTION_KEY;
 delete process.env.CROW_CAMPAIGNS_ENCRYPTION_KEY;
 execFileSync(process.execPath, ["scripts/init-db.js"], { env: process.env, stdio: "pipe" });
 const HOME = process.env.CROW_HOME;
-after(() => { for (const d of [HOME, process.env.CROW_DATA_DIR]) rmSync(d, { recursive: true, force: true }); });
+after(() => { for (const d of [TMP_HOME, TMP_DATA]) rmScratch(d); });
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 const manifestOf = (id) => JSON.parse(readFileSync(join(REPO, "bundles", id, "manifest.json"), "utf8"));

@@ -7,13 +7,16 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, existsSync, rmSync, statSync } from "node:fs";
+import { rmScratch } from "./helpers/safe-rm.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 
-process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-ph-home-"));
-process.env.CROW_DATA_DIR = mkdtempSync(join(tmpdir(), "crow-ph-data-"));
+const TMP_HOME = mkdtempSync(join(tmpdir(), "crow-ph-home-"));
+process.env.CROW_HOME = TMP_HOME;
+const TMP_DATA = mkdtempSync(join(tmpdir(), "crow-ph-data-"));
+process.env.CROW_DATA_DIR = TMP_DATA;
 process.env.CROW_AUTO_UPDATE = "0";
 process.env.CROW_DISABLE_HEALTH_MONITOR = "1";
 process.env.CROW_DISABLE_INSTANCE_SYNC = "1";
@@ -36,7 +39,7 @@ B._setDockerRunnerForTest(async () => ({ stdout: "", stderr: "" }));
 after(() => {
   B._setComposeRunnerForTest(null);
   B._setDockerRunnerForTest(null);
-  for (const d of [CROW_HOME, process.env.CROW_DATA_DIR, FIXTURES]) rmSync(d, { recursive: true, force: true });
+  for (const d of [CROW_HOME, TMP_DATA, FIXTURES]) rmScratch(d);
 });
 const manifestOf = (id) => JSON.parse(readFileSync(join(REPO, "bundles", id, "manifest.json"), "utf8"));
 const scratch = () => mkdtempSync(join(tmpdir(), "crow-ph-"));

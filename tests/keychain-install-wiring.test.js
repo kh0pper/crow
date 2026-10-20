@@ -3,12 +3,15 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { rmScratch } from "./helpers/safe-rm.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
-process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-kcwire-home-"));
-process.env.CROW_DATA_DIR = mkdtempSync(join(tmpdir(), "crow-kcwire-data-"));
+const TMP_HOME = mkdtempSync(join(tmpdir(), "crow-kcwire-home-"));
+process.env.CROW_HOME = TMP_HOME;
+const TMP_DATA = mkdtempSync(join(tmpdir(), "crow-kcwire-data-"));
+process.env.CROW_DATA_DIR = TMP_DATA;
 process.env.CROW_AUTO_UPDATE = "0";
 process.env.CROW_DISABLE_HEALTH_MONITOR = "1";
 process.env.CROW_DISABLE_INSTANCE_SYNC = "1";
@@ -34,7 +37,7 @@ H._setKeychainDepsForTest({ vault: { status: () => ({ installed: true, cliPath: 
 after(() => {
   H._setKeychainDepsForTest(null);
   B._setAppEnvPathForTest(null);
-  for (const d of [CROW_HOME, process.env.CROW_DATA_DIR, FIXTURES]) rmSync(d, { recursive: true, force: true });
+  for (const d of [CROW_HOME, TMP_DATA, FIXTURES]) rmScratch(d);
 });
 
 const MANIFEST = (id) => ({
