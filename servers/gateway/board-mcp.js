@@ -68,6 +68,7 @@ import {
 } from "./board/card-service.js";
 import { getCurrentPlan, listPlans, savePlan, approvePlan } from "./board/plan-service.js";
 import { reportResult, decideResult, listResults } from "./board/result-service.js";
+import { askDecision, notifyBatch } from "./board/decision-service.js";
 
 const TASKS_DB = tasksDbPath();
 
@@ -447,6 +448,52 @@ export function createBoardMcpServer(options = {}) {
     },
     async ({ item_id, result_id, decision, via }, extra) =>
       decideResult(tdb, item_id, result_id, decision, resolveActor(extra), via || "chat"));
+
+  // Decision cards (C1 service). Validation is authoritative in
+  // validateDecision — the zod shape below only describes the wire format.
+  const decisionOption = z.object({
+    label: z.string(),
+    consequence: z.string(),
+    recommended: z.boolean().optional(),
+    value: z.string().optional(),
+    snooze_days: z.number().int().optional(),
+    then: z.object({
+      create_card: z.object({
+        title: z.string(),
+        description: z.string().optional(),
+        owner: z.string().optional(),
+        assign_bot: z.string().optional(),
+      }).optional(),
+    }).optional(),
+  });
+
+  tool(server, "board_ask_decision",
+    "Ask the operator a decision as a card with 2-4 options (exactly one recommended, listed first, each with a consequence). Never pushes; call board_notify_decisions once at the end of a batch. A card with the same fingerprint already open (or snoozed after a decided option) returns that card with deduped:true; a 6th open card in a batch is refused (429 batch_full).",
+    {
+      project_id: z.number().int().optional(),
+      title: z.string().optional(),
+      tags: z.string().optional(),
+      decision: z.object({
+        question: z.string(),
+        context_md: z.string().optional(),
+        fingerprint: z.string(),
+        batch: z.string(),
+        expires: z.string().optional(),
+        options: z.array(decisionOption),
+      }),
+    },
+    async ({ project_id, title, tags, decision }, extra) =>
+      askDecision(tdb, cdb, { projectId: project_id, title, tags, decision }, resolveActor(extra)));
+
+  tool(server, "board_notify_decisions",
+    "Send the one grouped push for a batch's open decision cards. Pushes at most once per card, so repeated calls are harmless; call it once at the end of the batch.",
+    { batch: z.string().min(1) },
+    async ({ batch }) => {
+      // notifications.js fails open on every downstream sender; cdb (crow.db)
+      // holds the shared notifications table (same import as result-service).
+      const { createNotification } = await import("../shared/notifications.js");
+      return notifyBatch(tdb, cdb, batch, { createNotification });
+    });
 
   tool(server, "board_store_briefing",
     "Persist a briefing snapshot. UNIQUE on briefing_date — re-runs for the same day overwrite the prior content.",

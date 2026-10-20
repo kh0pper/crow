@@ -87,6 +87,10 @@ function fixture() {
     CREATE TABLE dashboard_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT DEFAULT (datetime('now')));
     CREATE TABLE dashboard_settings_overrides (key TEXT NOT NULL, instance_id TEXT NOT NULL, value TEXT NOT NULL,
       updated_at TEXT DEFAULT (datetime('now')), lamport_ts INTEGER DEFAULT 0, PRIMARY KEY (key, instance_id));
+    CREATE TABLE notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL DEFAULT 'system',
+      source TEXT, title TEXT NOT NULL, body TEXT, priority TEXT DEFAULT 'normal', action_url TEXT, metadata TEXT,
+      is_read INTEGER DEFAULT 0, is_dismissed INTEGER DEFAULT 0, snoozed_until TEXT, schedule_id INTEGER,
+      expires_at TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
     INSERT INTO project_spaces (id, name, slug, archived_at) VALUES (1, 'R4 ACME', 'r4-acme', NULL);`);
   c.close();
 
@@ -567,5 +571,75 @@ test("board_save_plan / board_approve_plan / board_get_plan 404 against a nonexi
   assert.equal(get.isError, true);
   assert.match(get.content[0].text, /^\[404 not_found\]/);
 
+  await client.close();
+});
+
+// ---- decision cards: board_ask_decision / board_notify_decisions ----
+
+function decisionArgs(n, batch = "mcp-batch-a") {
+  return {
+    decision: {
+      question: `Choice ${n}?`,
+      context_md: "some context",
+      fingerprint: `mcp-fp-${batch}-${n}`,
+      batch,
+      options: [
+        { label: "Go", consequence: "It proceeds.", recommended: true, value: "go" },
+        { label: "Not now", consequence: "Asked again later.", snooze_days: 3, then: { create_card: { title: "Follow up" } } },
+      ],
+    },
+  };
+}
+
+test("decision tools are listed", async () => {
+  const client = await connectClient("/board/mcp", state.localToken);
+  const { tools } = await client.listTools();
+  assert.ok(tools.some((tl) => tl.name === "board_ask_decision"));
+  assert.ok(tools.some((tl) => tl.name === "board_notify_decisions"));
+  await client.close();
+});
+
+test("board_ask_decision returns an id, dedupes by fingerprint, and the 6th card in a batch is refused", async () => {
+  const client = await connectClient("/board/mcp", state.localToken);
+  const first = payload(await client.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, "mcp-batch-b") }));
+  assert.equal(typeof first.id, "number");
+  assert.equal(first.deduped, false);
+  const again = payload(await client.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, "mcp-batch-b") }));
+  assert.equal(again.id, first.id);
+  assert.equal(again.deduped, true);
+  for (let n = 2; n <= 5; n++) {
+    const r = payload(await client.callTool({ name: "board_ask_decision", arguments: decisionArgs(n, "mcp-batch-b") }));
+    assert.equal(r.deduped, false);
+  }
+  const sixth = await client.callTool({ name: "board_ask_decision", arguments: decisionArgs(6, "mcp-batch-b") });
+  assert.equal(sixth.isError, true);
+  assert.match(sixth.content[0].text, /^\[429 batch_full\]/);
+  await client.close();
+});
+
+test("board_ask_decision surfaces a validation error as isError", async () => {
+  const client = await connectClient("/board/mcp", state.localToken);
+  const args = decisionArgs(1, "mcp-batch-bad");
+  args.decision.options[0].recommended = false;
+  const r = await client.callTool({ name: "board_ask_decision", arguments: args });
+  assert.equal(r.isError, true);
+  assert.match(r.content[0].text, /^\[400 /);
+  await client.close();
+});
+
+test("board_notify_decisions pushes once per batch; the second call pushes nothing", async () => {
+  const client = await connectClient("/board/mcp", state.localToken);
+  await client.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, "mcp-batch-c") });
+  await client.callTool({ name: "board_ask_decision", arguments: decisionArgs(2, "mcp-batch-c") });
+  const firstRaw = await client.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-c" } });
+  assert.notEqual(firstRaw.isError, true, firstRaw.content[0].text);
+  const first = payload(firstRaw);
+  assert.equal(first.pushed, true);
+  assert.equal(first.count, 2);
+  const second = payload(await client.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-c" } }));
+  assert.equal(second.pushed, false);
+  assert.equal(second.count, 0);
+  const pushes = (await state.cdb.execute("SELECT title FROM notifications WHERE title LIKE '2 decisions%'")).rows;
+  assert.equal(pushes.length, 1);
   await client.close();
 });
