@@ -75,8 +75,8 @@ function showDebug() { const d = $("debug"); d.textContent = statuses.format(); 
 /** Sets the bot caption for a page/system reason (tap hint, error, clear) — fixed strings, so the text is recorded. */
 function caption(text, why) { $("cap-bot").textContent = text; note(`caption:${why}`, text); }
 function banner(key) { bannerKey = key || null; const b = $("banner"); b.textContent = key ? t(key) : ""; b.hidden = !key; note("banner", key ? `${key}: ${b.textContent}` : "(hidden)"); if (key === "session_no_bot") b.append(" ", kioskPanelLink()); }
-/** Session mode: the fix for "no assistant" is one tap away — the Kiosk panel, in the dashboard itself. */
-function kioskPanelLink() { const a = document.createElement("a"); a.href = "/dashboard/kiosk"; a.target = "_top"; a.textContent = t("session_bot_link"); return a; }
+/** Session mode: the fix for "no assistant" is one tap away — Crow's voice editor in Bot Builder, in the dashboard itself. */
+function kioskPanelLink() { const a = document.createElement("a"); a.href = "/dashboard/bot-builder?bot=crow.voice"; a.target = "_top"; a.textContent = t("session_bot_link"); return a; }
 /*
  * Queue item 21c: the Crow Android app injects window.CrowAudioPort on its paired gateway origin only. Each mic
  * release tells it the capture ended; the app then checks the phone's audio mode (call mode left on sends music

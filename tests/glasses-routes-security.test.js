@@ -283,7 +283,9 @@ test("retention: photos past the device's rule are pruned whether or not object 
 test("the device list: fit, a playable-voice flag, recent turns and the voice pickers' options, all without a token hash", async () => {
   const list = await (await call("/api/meta-glasses/devices", { headers: SESSION })).json();
   const a = list.devices.find((d) => d.id === "glasses-a");
-  assert.equal(a.fit, null, "no assistant bound: no fit to show (the panel says so)");
+  // The fit is Crow's (every pair of glasses answers as the voice bot), not the bound bot's: with no voice row on
+  // this instance it is "no_bot", which the panel words as Crow's voice being off or not set up yet.
+  assert.deepEqual(a.fit, { level: "no_bot", model: null }, "Crow's fit, whatever the device is bound to");
   assert.equal(a.voice, "none", "no voice profile at all on this instance: nothing the app can play");
   assert.ok(Array.isArray(a.recent_turns));
   assert.ok(!("token_hash" in a) && !("kiosk_token_hash" in a));

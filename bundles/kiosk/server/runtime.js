@@ -16,7 +16,7 @@ import { matchSpoken } from "./tiers.js";
 import { displayPromptSuffix, displayTurnContext } from "./prompt.js";
 import { effectiveCaps, audioPolicy, BAR_OWNER_RE } from "./caps.js";
 import { ensureKioskSttProfile, pickKioskTtsProfile, kioskSttModel } from "./profiles.js";
-import { resolveSessionBot, sameOriginUpgrade, sessionDisplayId, SESSION_BOT_SETTING } from "./session-display.js";
+import { resolveSessionBot, sameOriginUpgrade, sessionDisplayId, isSessionDisplayId, SESSION_BOT_SETTING } from "./session-display.js";
 import { STRINGS } from "./strings.js";
 import { createBotFit, createBotAbilities } from "./fit.js";
 import { kioskNowContext, matchClockFastPath, relativeDatesContext, mentionsRelativeDay } from "./clock.js";
@@ -180,11 +180,18 @@ export function stationSttHotwords(device, profile, stations, on = sttHotwordsOn
   if (!on || (lang && lang !== "en") || profile?.language !== "en") return "";
   return callSignHotwords(stations);
 }
-export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = {}, mediaLine = () => "", wrapTools = null, onToolResult = null, sttPrompt = null, sttHotwords = null } = {}) {
+export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = {}, mediaLine = () => "", wrapTools = null, onToolResult = null, sttPrompt = null, sttHotwords = null, crowVoice = null, voiceDef = null, cloud = false } = {}) {
   const tools = createDisplayTools(ctx);
   const cfg = () => (typeof settings === "function" ? settings() : settings) || {};
   const lang = cfg().lang;
+  // One set of voice rules for every surface (servers/gateway/voice/crow-voice.js, injected by the panel
+  // routes as o.crowVoice): spread first, so the display's own options and localized lines below win.
+  // Without it (an older caller, a test stub) the display keeps today's rules.
+  const shared = crowVoice && typeof crowVoice.turnOptions === "function"
+    ? crowVoice.turnOptions({ surface: ctx.surface, lang, voiceDef, cloud, actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp })
+    : { ...(ctx.surface ? { surface: ctx.surface } : {}), familiesOnIntent: true, actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp };
   return {
+    ...shared,
     extraTools: typeof wrapTools === "function" ? wrapTools(tools) : tools,
     // T0 and T1 (the tier framework), then the K1 fast path and the clock, unchanged, behind them.
     fastPaths: async (t) => (await matchSpoken(t, ctx)) || matchWmFastPath(t, ctx.store, ctx.deviceId, ctx.caps) || matchClockFastPath(t, { now: now(), tz }),
@@ -193,8 +200,8 @@ export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = 
     // A turn that asks for NEW content sees kinds and counts only (no open card's title to copy); a turn
     // that asks to CHANGE the open card sees its words.
     turnContext: (t, at = now()) => `${kioskNowContext(at, tz)}\n${mentionsRelativeDay(t) ? `${relativeDatesContext(at, tz)}\n` : ""}${displayTurnContext(ctx.store, ctx.deviceId, { countsOnly: wantsNewDisplay(t), media: mediaLine(), card: cardUpdate(t, ctx.store, ctx.deviceId) !== null })}`,
-    familiesOnIntent: true,
-    denyTools: KIOSK_DENY_TOOLS,
+    // The display's own deny list always holds (a parity test keeps it equal to the shared one).
+    denyTools: [...new Set([...(Array.isArray(shared.denyTools) ? shared.denyTools : []), ...KIOSK_DENY_TOOLS])],
     sttModel: (p) => kioskSttModel(p, cfg()),
     maxToolRounds: KIOSK_MAX_TOOL_ROUNDS,
     firstAudioBudgetMs: KIOSK_FIRST_AUDIO_BUDGET_MS,
@@ -204,8 +211,7 @@ export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = 
     memoryWhen: wantsMemory,
     // Queue item 29: an action request never ends on a claim no tool backs (turn.js, ACTION_NOTE): no tool →
     // the could-not-do line without a model call; tools withheld from the quick model → escalate.
-    actionWhen: wantsAction,
-    actionFollowWhen: wantsActionFollowUp,
+    // (actionWhen / actionFollowWhen: the kiosk's own tests, set in `shared` above.)
     // Only against the windows really open now (never because music plays).
     displayObjectWhen: (t) => namesDisplayObject(t, ctx.store.list(ctx.deviceId).filter((w) => !(w.kind === "timer" && w.done)).map((w) => w.kind)),
     cantDoText: kioskCantDoText(lang),
@@ -370,6 +376,8 @@ export function createKioskRuntime(deps) {
     const sources = registry.kinds();
     return {
       store: wm, deviceId: device.id, caps, lang, emit, sources,
+      // The phone overlay (a session display) or a paired kiosk: what turn.js records and the voice rules key on.
+      surface: isSessionDisplayId(device.id) ? "phone" : "kiosk",
       items: sources.length ? [{ id: "now_playing", title: STRINGS[lang].now_playing_title, aliases: lang === "es" ? ["lo que suena"] : ["whats playing"] }] : [],
       media, maxVolume: Number(device.kiosk_settings?.max_volume) || 100,
       ...verbs,
@@ -386,8 +394,21 @@ export function createKioskRuntime(deps) {
   const sttHotwordsFor = (device) => (profile) => stationSttHotwords(device, profile, stations);
   /** A display turn's options: this display's media line, the STT hints, and the library's stream envelopes read through
    *  the voice turn's one onToolResult hook (envelope.js decides what is honoured). */
-  const turnOptions = (device, caps, tz, emit, hooks) => displayTurnOptions(displayCtx(device, caps, emit, hooks), { now, tz, settings: () => device.kiosk_settings, mediaLine: () => media.describe(device.id), sttPrompt: sttPromptFor(device), sttHotwords: sttHotwordsFor(device),
+  const turnOptions = (device, caps, tz, emit, hooks, vb = null) => displayTurnOptions(displayCtx(device, caps, emit, hooks), { now, tz, settings: () => device.kiosk_settings, mediaLine: () => media.describe(device.id), sttPrompt: sttPromptFor(device), sttHotwords: sttHotwordsFor(device),
+    crowVoice: deps.crowVoice || null, voiceDef: vb?.def || null, cloud: vb?.cloud === true,
     onToolResult: music ? createEnvelopeHandler({ media, deviceId: device.id, music, meta: () => ({ maxVolume: Number(device.kiosk_settings?.max_volume) || 100 }) }) : null });
+  /**
+   * The Crow voice bot as the surface sees it (deps.loadVoiceBot, injected by the panel routes: cached 30 s, reloaded on
+   * pibots:defs-changed) → { def, cloud } | null. null (no row, switched off, corrupt, an older caller, a read that
+   * failed) applies no profiles, and the turn itself says there is no assistant. Never throws.
+   */
+  const loadVoiceBot = async (db) => {
+    if (typeof deps.loadVoiceBot !== "function") return null;
+    try { return (await deps.loadVoiceBot(db)) || null; } catch (err) { log(`[kiosk] voice bot not read: ${err?.message}`); return null; }
+  };
+  /** The device with Crow's speaking voice and speech recognition, in memory for this one use (crow-voice.js withVoiceProfiles). */
+  const voiced = (device, vb) => (vb?.def && typeof deps.crowVoice?.withVoiceProfiles === "function" ? deps.crowVoice.withVoiceProfiles(device, vb.def) : device);
+  const voicedNow = (db, device) => loadVoiceBot(db).then((vb) => voiced(device, vb));
   // The display tools as the panel counts them (no display, no windows): the bind-time fit and the ability line.
   const panelTools = () => createDisplayTools(displayCtx({ id: "", kiosk_settings: {} }, effectiveCaps(null, null), () => {}));
   // Bind-time fit: the voice turn's own ladder, with this bundle's tool list (the display tools on, the deny list, the suffix).
@@ -417,23 +438,28 @@ export function createKioskRuntime(deps) {
     storeProfile: (id, profile) => withDb((db) => deps.deviceStore.updateDeviceProfiles(db, id, { kiosk_settings: { profile, profile_source: "guessed" } })),
     // F3/F6: the page's effective audio policy rides on display_config (the stored settings are never rewritten by it).
     displayConfig: (d, rawCaps) => withDb(async (db) => ({ name: d.name, ...(d.kiosk_settings || {}), ...audioPolicy(d.kiosk_settings, rawCaps), bird: await deps.resolveDisplayBird(db) })),
-    runTurn: ({ device, audio, sink, signal, caps, tz, transcript, startedAt, sttEarly }) => withDb(async (db) => {
+    runTurn: ({ device: device0, audio, sink, signal, caps, tz, transcript, startedAt, sttEarly }) => withDb(async (db) => {
+      const vb = await loadVoiceBot(db);
+      const device = voiced(device0, vb);
       // r7 G9 evidence: the server's media state before and after every display turn (fixed words, on the metrics line).
       const mediaBefore = media.stateOf(device.id);
       // r8 P1: the playback verbs the model asked crow_wm for, and the sentence's own verb where that one ran instead (fixed words).
       const asked = [], kept = [];
       const r = await deps.voice.runVoiceTurn({
         db, device, audio, sink, signal, transcript: transcript ?? undefined, startedAt, sttEarly,
-        ...turnOptions(device, caps, tz, (ev) => sink.event(ev), { onModelVerb: (v, k) => { if (asked.length < 8) { asked.push(String(v).slice(0, 24)); if (k) kept.push(String(k).slice(0, 24)); } } }),
+        ...turnOptions(device, caps, tz, (ev) => sink.event(ev), { onModelVerb: (v, k) => { if (asked.length < 8) { asked.push(String(v).slice(0, 24)); if (k) kept.push(String(k).slice(0, 24)); } } }, vb),
       });
       if (r && typeof r === "object") r.timings = { ...(r.timings || {}), media_before: mediaBefore, media_after: media.stateOf(device.id), ...(asked.length ? { model_verbs: asked } : {}), ...(kept.length ? { model_verbs_kept: kept } : {}) };
       return r;
     }),
     // Early STT (lever D): same profile + per-display model as the turn's own STT.
     transcribe: deps.voice.transcribe
-      ? ({ device, audio, signal }) => withDb((db) => deps.voice.transcribe({ db, device, audio, signal, sttModel: (p) => kioskSttModel(p, device.kiosk_settings), sttPrompt: sttPromptFor(device), sttHotwords: sttHotwordsFor(device) }))
+      ? ({ device: device0, audio, signal }) => withDb(async (db) => {
+        const device = await voicedNow(db, device0);   // Crow's STT profile from the first word
+        return deps.voice.transcribe({ db, device, audio, signal, sttModel: (p) => kioskSttModel(p, device.kiosk_settings), sttPrompt: sttPromptFor(device), sttHotwords: sttHotwordsFor(device) });
+      })
       : null,
-    speak: ({ device, text, sink, signal }) => withDb((db) => deps.voice.speakText({ db, device, text, sink, signal })),
+    speak: ({ device, text, sink, signal }) => withDb(async (db) => deps.voice.speakText({ db, device: await voicedNow(db, device), text, sink, signal })),
     wm, metrics, media,
     // F8: the chip opens the now-playing window; a display that cannot draw it toggles the playback as before.
     openNowPlaying: (id, caps) => {
@@ -444,12 +470,14 @@ export function createKioskRuntime(deps) {
       return [];
     },
     wrapPcmAsWav: deps.wrapPcmAsWav,
-    warmup: (d) => deps.sttWarmup(d),
+    // Hello warms the STT the turns really use (Crow's, through warm below; called only after hello, so after it is set).
+    warmup: (d) => warm(d),
     helloTimeoutMs: deps.helloTimeoutMs,
     now, log,
   });
 
-  const warm = (d) => Promise.resolve().then(() => deps.sttWarmup?.(d)).catch(() => false);
+  // The STT a display's turns really use (Crow's when the voice bot sets one) is the one kept warm.
+  const warm = (d) => Promise.resolve().then(async () => deps.sttWarmup?.(typeof deps.loadVoiceBot === "function" ? await withDb((db) => voicedNow(db, d)) : d)).catch(() => false);
   // Sweep keep-warm: at most one attempt per display per 10 min, success or not (no per-minute DB
   // reads or failure-log spam while whisper is down; hello/boot/admin saves still warm at once).
   const sweepWarmAt = new Map();
@@ -570,10 +598,38 @@ export function createKioskRuntime(deps) {
       kiosk_settings: deps.deviceStore.normalizeKioskSettings({ lang }, null),
     };
   }
-  /** The session display's assistant; Automatic only picks one that fits (a session display starts with memories off). */
-  const sessionBot = (db) => resolveSessionBot(db, deps.settings, (id) => botFit(db, id, false));
-  /** Who "Automatic" would pick right now, whatever is chosen: the same resolver with no choice (the pickers name it). */
-  const automaticBot = (db) => resolveSessionBot(db, { readSetting: async () => "" }, (id) => botFit(db, id, false));
+  /**
+   * The session display's assistant: the Crow voice bot (deps.crowVoice.CROW_VOICE_BOT_ID), created once first
+   * (deps.ensureVoiceBot; a failure is logged, and the turn then says there is no assistant). Without the shared
+   * voice module (an older caller, a test stub) the old rule: the Kiosk panel's choice, else Automatic.
+   */
+  const voiceBotId = typeof deps.crowVoice?.CROW_VOICE_BOT_ID === "string" ? deps.crowVoice.CROW_VOICE_BOT_ID : null;
+  const notVoice = typeof deps.crowVoice?.isVoiceBotId === "function" ? { isVoiceBotId: deps.crowVoice.isVoiceBotId } : {};
+  let voiceEnsured = false;
+  const sessionBot = async (db) => {
+    if (!voiceBotId) return resolveSessionBot(db, deps.settings, (id) => botFit(db, id, false), notVoice);
+    if (!voiceEnsured && typeof deps.ensureVoiceBot === "function") {
+      voiceEnsured = true;
+      try { await deps.ensureVoiceBot(db); } catch (err) { log(`[kiosk] Crow voice bot not created (${err?.message || err})`); }
+    }
+    return voiceBotId;
+  };
+  /**
+   * The listing's `voice`: the Crow voice bot as the Kiosk panel and Bot Builder show it — its name, its fit on the
+   * quick voice model with memories off / on, and what it can do by voice (absent fields stay null: no claim).
+   */
+  const voiceListing = async (db) => {
+    let name = "Crow";
+    try { name = (await db.execute({ sql: "SELECT display_name FROM pi_bot_defs WHERE bot_id = ?", args: [voiceBotId] })).rows[0]?.display_name || name; } catch {}
+    return {
+      bot_id: voiceBotId, name,
+      fit: await botFit(db, voiceBotId, false), fit_memory: await botFit(db, voiceBotId, true),
+      abilities: botAbilities ? await botAbilities(db, voiceBotId, false) : null,
+      abilities_memory: botAbilities ? await botAbilities(db, voiceBotId, true) : null,
+    };
+  };
+  /** Who "Automatic" would pick right now, whatever is chosen: the old resolver with no choice (never a voice bot). */
+  const automaticBot = (db) => resolveSessionBot(db, { readSetting: async () => "" }, (id) => botFit(db, id, false), notVoice);
   /** hello on the session socket: CSRF double-submit, then the assistant. `req` is the verified upgrade request. */
   async function authorizeSessionHello(req, sessionToken, msg) {
     if (!deps.csrfTokenAccepted(req, msg?.csrf)) return null;
@@ -777,21 +833,22 @@ export function createKioskRuntime(deps) {
         // abilities / abilities_memory: { items: [{ id, quick, label? }], none } | null; absent with an older core.
         if (botAbilities) for (const b of bots) { b.abilities = await botAbilities(db, b.bot_id, false); b.abilities_memory = await botAbilities(db, b.bot_id, true); }
         const prof = async (k) => { try { return JSON.parse((await deps.settings.readSetting(db, k)) || "[]").map((p) => ({ id: p.id, name: p.name || p.id, provider: p.provider })); } catch { return []; } };
+        const base = { devices, bots, pending: pairing.listPending(), stt_profiles: await prof("stt_profiles"), tts_profiles: await prof("tts_profiles") };
+        // Every display and the session overlay answer as the Crow voice bot: the panel shows "Answers as Crow" with
+        // its fit and abilities (voice), and the Talk to Crow box only where the overlay is served (dashboard_talk).
+        if (voiceBotId) return { ...base, voice: await voiceListing(db), dashboard_talk: sessionMode };
+        // Without the shared voice module (an older caller, a test stub): the old chosen-assistant block.
         const chosen = String((await deps.settings.readSetting(db, SESSION_BOT_SETTING)) || "") || null;
         const dashboard_voice = { available: sessionMode, bot_id: chosen, effective_bot_id: await sessionBot(db), auto_bot_id: await automaticBot(db) };
-        return { devices, bots, pending: pairing.listPending(), stt_profiles: await prof("stt_profiles"), tts_profiles: await prof("tts_profiles"), dashboard_voice };
+        return { ...base, dashboard_voice };
       });
       res.json(body);
     }));
     r.post("/api/kiosk/admin/approve", json, wrap(async (req, res) => {
       const code = String(req.body?.code || "");
       const name = String(req.body?.name || "").trim().slice(0, 64) || "Display";
-      const botId = String(req.body?.bot_id || "");
+      // No assistant is chosen or bound here: every display answers as Crow (a bot_id from an older page is ignored).
       await withDb(async (db) => {
-        const bot = (await db.execute({ sql: "SELECT bot_id FROM pi_bot_defs WHERE bot_id = ? AND enabled = 1", args: [botId] })).rows[0];
-        if (!bot) return res.status(400).json({ error: "bot_required" });
-        // A new display starts with memories off. Checked BEFORE the code is claimed.
-        if ((await botFit(db, botId, false, { fresh: true })) === "too_large") return res.status(400).json({ error: "bot_too_large" });
         const c = pairing.claim(code);
         if (c.error) return res.status(c.status).json({ error: c.error, retry_after_s: c.retry_after_s });
         let created = null;
@@ -801,16 +858,15 @@ export function createKioskRuntime(deps) {
           const id = "kiosk-" + randomBytes(6).toString("hex");
           created = id;
           const { token } = await deps.deviceStore.pairDevice(db, { id, name, device_kind: "kiosk", stt_profile_id: stt.id, tts_profile_id: tts ? tts.id : null });
-          await deps.deviceStore.updateDeviceProfiles(db, id, { bound_bot_id: botId });
           if (!pairing.complete(c.pending.pair_id, { device_id: id, token })) {
             await deps.deviceStore.unpairDevice(db, id);          // expired between claim and complete: no orphan device
             return res.status(410).json({ error: "pairing_expired" });
           }
           created = null;                                          // delivered: never clean it up after this
-          log(`[kiosk] paired ${id} "${name}" → bot ${botId} (requester ${c.pending.ip})`);
+          log(`[kiosk] paired ${id} "${name}" (requester ${c.pending.ip})`);
           res.json({ ok: true, device_id: id, tts: tts ? tts.name || tts.id : null });
         } catch (err) {
-          // Never leave a paired device whose token is never delivered (e.g. the bot bind failed).
+          // Never leave a paired device whose token is never delivered (e.g. a profile write failed).
           if (created) { try { await deps.deviceStore.unpairDevice(db, created); } catch (e) { log(`[kiosk] orphan cleanup ${created} failed: ${e.message}`); } }
           pairing.release(c.pending.pair_id);
           throw err;
@@ -935,20 +991,23 @@ export function createKioskRuntime(deps) {
     // never start a model and its result does not depend on which model is resident. It passes only
     // when the card is really up (the card sentence is tried up to three times).
     r.post("/api/kiosk/internal/turn-check", json, wrap(async (req, res) => {
+      // bot_id is optional: it only picks which paired display's voice settings the check borrows. The check
+      // itself answers as the Crow voice bot, in Crow's voice when it sets one.
       const botId = String(req.body?.bot_id || "").slice(0, 80);
-      if (!botId) return res.status(400).json({ error: "bot_id_required" });
       const lang = req.body?.lang === "es" ? "es" : "en";
-      // Speak with a voice a real display uses (a display bound to this assistant first, else any paired
+      // Speak with a voice a real display uses (with a bot_id, a display bound to it first; else any paired
       // display), never the instance default: that one can be a voice the gateway cannot run at all.
       const paired = (await withDb((db) => kioskDevices(db))).filter((d) => d.tts_profile_id);
-      const voiceFrom = paired.find((d) => d.bound_bot_id === botId) || paired[0];
-      const device = { id: TURN_CHECK_DEVICE, name: "turn check", device_kind: "kiosk", bound_bot_id: botId, tts_profile_id: voiceFrom?.tts_profile_id ?? null, kiosk_settings: { lang, memory_integration: false } };
+      const voiceFrom = (botId && paired.find((d) => d.bound_bot_id === botId)) || paired[0];
+      // Crow's own speaking voice and STT are applied on top (to this in-memory display only).
+      const vb = await withDb((db) => loadVoiceBot(db));
+      const device = voiced({ id: TURN_CHECK_DEVICE, name: "turn check", device_kind: "kiosk", bound_bot_id: voiceBotId || botId || null, tts_profile_id: voiceFrom?.tts_profile_id ?? null, kiosk_settings: { lang, memory_integration: false } }, vb);
       const caps = effectiveCaps(null, null);
       const out = [];
       const once = async (transcript) => {
         const events = [];
         const sink = { event: (e) => events.push(e), audio: () => {} };
-        const r = await withDb((db) => deps.voice.runVoiceTurn({ db, device, sink, transcript, ...turnOptions(device, caps, null, (ev) => sink.event(ev)), noEscalate: true }));
+        const r = await withDb((db) => deps.voice.runVoiceTurn({ db, device, sink, transcript, ...turnOptions(device, caps, null, (ev) => sink.event(ev), undefined, vb), noEscalate: true, ...(voiceBotId ? { botId: voiceBotId } : {}) }));
         const row = { transcript, failed: r.failed ?? null, fast_path: r.fastPath === true, route: r.route ?? null, tools_offered: r.timings?.tools_offered ?? null, tools: r.timings?.tools || [], tool_choice: r.timings?.tool_choice ?? null,
           final: r.timings?.final ?? null, said: events.filter((e) => e.type === "caption_delta").map((e) => e.text).join("").slice(0, 200), windows: wm.list(device.id).map((w) => w.kind) };
         out.push(row);

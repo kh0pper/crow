@@ -90,7 +90,7 @@ export function claimsReminder(text) {
 }
 
 // Effective tool names: what changes something (create, send, delete…), what only reads, and what is unknown.
-const WRITES = /(?:^|_)(?:create|add|insert|append|update|edit|set|delete|remove|trash|send|schedule|book|respond|reply|move|rename|share|upload|store|save|write|cancel|archive|label|plan|call|draft|complete|make|new|post|publish|invite|copy|replace|rewrite|format|apply|run|restore|undo|clear|duplicate|reorder|resolve|transfer|sync|react|dismiss|memo|crosspost|change|toggle|mark|assign|attach|submit|order|play|pause|stop|start|enable|disable)(?:_|$)/;
+const WRITES = /(?:^|_)(?:create|add|insert|append|update|edit|set|delete|remove|trash|send|schedule|book|respond|reply|move|rename|share|upload|store|save|write|cancel|archive|label|plan|call|draft|complete|make|new|post|publish|unpublish|revoke|invite|copy|replace|rewrite|format|apply|run|restore|undo|clear|duplicate|reorder|resolve|transfer|sync|react|dismiss|memo|crosspost|change|toggle|mark|assign|attach|submit|order|play|pause|stop|start|enable|disable)(?:_|$)/;
 const READS = /(?:^|_)(?:list|get|search|read|find|discover|status|query|export|download|recall|stats|structure|permissions|metadata|tabs|lookup|fetch|browse|preview|check|count|show|describe|info|inbox)(?:_|$)/;
 /** "createEvent", "create-event", "crow_create_event" → "create_event". */
 export const toolNameWords = (name) => String(name || "").replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^crow_/, "").replace(/^_+|_+$/g, "");
@@ -101,19 +101,38 @@ export const toolNameWords = (name) => String(name || "").replace(/([a-z0-9])([A
  * after an ok unknown call the turn never says "nothing was changed".
  */
 export function toolEffect(name) {
+  return firstVerb(name)?.effect || "unknown";
+}
+/**
+ * The first verb in an (effective) tool name and what it does: { verb, effect: "write" | "read" } | null.
+ * "crow_get_post" → get (read); "ws_cal_create_event" → create (write); find/search straight before
+ * replace is one compound write, "replace" ("find_replace").
+ */
+function firstVerb(name) {
   const n = toolNameWords(name);
-  if (!n) return "unknown";
-  // The first verb decides ("crow_get_post" reads; "ws_cal_create_event" writes), except find/search
-  // straight before replace, which is one compound write ("find_replace").
+  if (!n) return null;
   const parts = n.split("_");
   for (let i = 0; i < parts.length; i++) {
     const w = `_${parts[i]}_`;
-    if (WRITES.test(w)) return "write";
-    if (READS.test(w)) return (parts[i] === "find" || parts[i] === "search") && parts[i + 1] === "replace" ? "write" : "read";
+    if (WRITES.test(w)) return { verb: parts[i], effect: "write" };
+    if (READS.test(w)) {
+      return (parts[i] === "find" || parts[i] === "search") && parts[i + 1] === "replace"
+        ? { verb: "replace", effect: "write" } : { verb: parts[i], effect: "read" };
+    }
   }
-  return "unknown";
+  return null;
 }
 export const changesSomething = (name) => toolEffect(name) === "write";
+
+// The verbs a voice bot asks a spoken yes for: what deletes, changes or sends (a create, a save, a play does not).
+const SPOKEN_YES_VERBS = new Set(["delete", "remove", "trash", "clear", "send", "reply", "post", "publish", "unpublish", "share",
+  "transfer", "update", "edit", "replace", "rewrite", "move", "rename", "archive", "cancel", "restore", "undo", "dismiss",
+  "write", "upload", "apply", "crosspost", "revoke"]);
+/** Does this (effective) tool name delete, change or send something? Its first verb (as toolEffect finds it) decides. */
+export function needsSpokenYes(name) {
+  const v = firstVerb(name);
+  return !!v && v.effect === "write" && SPOKEN_YES_VERBS.has(v.verb);
+}
 
 // A sentence that only says something was saved or noted ("I've saved that", "Lo he guardado").
 const SAVE_ONLY = /\b(?:saved|noted|stored|remember|remembered|got it|note|guardado|anotado|apuntado|guardo|anoto|apunto|recordare eso|lo recordare)\b/;

@@ -286,6 +286,8 @@ test("session mode error frames: no assistant AND assistant-too-large both show 
   assert.deepEqual(errorDecision("no_tts_profile", false, "session"), { banner: "error_generic" });
   assert.deepEqual(errorDecision("turn_failed", true, "session"), { caption: "err_turn_failed" });
   for (const L of ["en", "es"]) { assert.ok(STRINGS[L].session_no_bot); assert.ok(STRINGS[L].session_bot_link); }
+  assert.equal(STRINGS.en.session_bot_link, "Customise Crow's voice in Bot Builder");
+  assert.match(STRINGS.es.session_bot_link, /Bot Builder/);
 });
 
 // ---- Session mode (the dashboard's Talk to Crow overlay, /display/session) ----

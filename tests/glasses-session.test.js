@@ -22,6 +22,7 @@ import { STRINGS } from "../bundles/meta-glasses/server/strings.js";
 import { createGlassesTurns, playableTtsProfile, oneEnvelope, LOOK_TOOL, GLASSES_DENY_TOOLS } from "../bundles/meta-glasses/server/session.js";
 import { wantsLook, wantsMemory, matchTransport, intentText, INTENT_MAX_CHARS } from "../bundles/meta-glasses/server/intent.js";
 import { readEnvelope } from "../bundles/meta-glasses/server/envelope.js";
+import { CROW_VOICE_BOT_ID, DEFAULT_PERSONA, voiceBotDefinition } from "../servers/shared/voice-bot.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // Its own home and database inside the suite's scratch home (see glasses-routes-security.test.js).
@@ -35,6 +36,8 @@ const TAILNET = { "tailscale-user-login": "tester@example.invalid" };
 const L = STRINGS.en;
 
 let srv, base, db, store, svc;
+// Every glasses turn answers as the Crow voice bot (seeded below on the test's quick model).
+const crowVoiceDef = (over = {}) => ({ ...voiceBotDefinition({ preset: "fast_local", fastKey: "voice-test/quick-test" }), ...over });
 const tokens = {};
 // What the outside services saw, and what they answer next.
 const seen = { chat: [], tts: [], stt: 0, vision: [] };
@@ -97,6 +100,7 @@ before(async () => {
   }
   const bot = (over = {}) => JSON.stringify({ engine: "pi", fast_voice_model: "voice-test/quick-test", system_prompt: "You are a household assistant.", skills: [], tools: { crow_mcp: ["crow-memory/crow_store_memory", "crow-memory/crow_search_memories"] }, permission_policy: { external_send: "draft_only" }, ...over });
   await db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES ('helper', 'Helper', ?, 1), ('giant', 'Giant', ?, 1), ('asleep', 'Asleep', ?, 0)", args: [bot(), bot({ system_prompt: "You are a household assistant. ".repeat(2000) }), bot()] });
+  await db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?, 'Crow', ?, 1)", args: [CROW_VOICE_BOT_ID, JSON.stringify(crowVoiceDef())] });
 
   store = await import("../servers/shared/device-store.js");
   for (const [id, botId] of [["glasses-a", "helper"], ["glasses-unbound", null], ["glasses-giant", "giant"], ["glasses-asleep", "asleep"]]) {
@@ -148,6 +152,20 @@ async function client(deviceId, { onCapture } = {}) {
     close: () => ws.close(),
   };
 }
+/**
+ * Run `fn` with the Crow voice bot row changed, then put the seeded row back. The bot-defs-changed
+ * event drops the turn runner's cached bot, as a Bot Builder save does.
+ */
+async function withVoiceBot({ enabled = 1, def = crowVoiceDef() }, fn) {
+  const bus = (await import("../servers/shared/event-bus.js")).default;
+  const write = (en, d) => db.execute({ sql: "UPDATE pi_bot_defs SET enabled = ?, definition = ? WHERE bot_id = ?", args: [en, JSON.stringify(d), CROW_VOICE_BOT_ID] });
+  await write(enabled, def);
+  bus.emit("pibots:defs-changed", { bot_id: CROW_VOICE_BOT_ID });
+  try { return await fn(); } finally {
+    await write(1, crowVoiceDef());
+    bus.emit("pibots:defs-changed", { bot_id: CROW_VOICE_BOT_ID });
+  }
+}
 const types = (evs) => evs.map((e) => e.type).filter((t) => t !== "caption_delta");
 const count = (evs, type) => evs.filter((e) => e.type === type).length;
 function reset({ stt = "What is the capital of Portugal?", chat = [], chatStatus = 200, sttStatus = 200 } = {}) {
@@ -171,7 +189,8 @@ test("a plain question: one speech envelope, a voice the app can play, the assis
   assert.equal(seen.chat.length, 1);
   const rq = seen.chat[0];
   assert.equal(rq.model, "quick-test");
-  assert.match(rq.messages[0].content, /^You are a household assistant\./);
+  assert.ok(rq.messages[0].content.startsWith(DEFAULT_PERSONA), "Crow's persona answers, not the device's bound bot");
+  assert.ok(!rq.messages[0].content.includes("You are a household assistant."));
   assert.ok(rq.messages[0].content.includes(L.prompt_suffix));
   assert.match(rq.messages.at(-1).content, /^\[Now\] .+\n\[Note\] [^\n]+\n\nWhat is the capital of Portugal\?$/);
   const offered = (rq.tools || []).map((t) => t.function?.name || t.name);
@@ -188,23 +207,69 @@ test("memory is offered only when the sentence asks for it", async () => {
   assert.ok((seen.chat[0].tools || []).map((t) => t.function?.name || t.name).includes("crow_memory"));
 });
 
-test("no assistant bound: the line is spoken, no model is called", async () => {
-  reset();
+test("no assistant bound: the device still answers as Crow", async () => {
+  reset({ chat: [sayRound("Lisbon.")] });
   const c = await client("glasses-unbound");
   const evs = await c.turn();
   c.close();
   assert.deepEqual([count(evs, "tts_start"), count(evs, "tts_end")], [1, 1]);
-  assert.deepEqual(seen.tts.map((t) => t.input), [L.no_bot]);
-  assert.ok(evs.some((e) => e.type === "error" && e.code === "no_bound_bot"));
+  assert.ok(!evs.some((e) => e.type === "error" && e.code === "no_bound_bot"));
+  assert.equal(seen.stt, 1);
+  assert.equal(seen.chat.length, 1);
+  assert.match(seen.chat[0].messages[0].content, /You are Crow/);
+  assert.deepEqual(seen.tts.map((t) => t.input), ["Lisbon."]);
+});
+
+test("an action the voice bot has no tool for: the shared could-not-do line, no model call (the real routes wire the shared rules)", async () => {
+  const { voiceLine } = await import("../servers/gateway/voice/voice-lines.js");
+  reset({ stt: "Email my landlord about the heating." });
+  const c = await client("glasses-a");
+  const evs = await c.turn();
+  c.close();
   assert.equal(seen.chat.length, 0);
-  assert.equal(seen.stt, 0, "nothing was transcribed either");
+  assert.deepEqual(seen.tts.map((t) => t.input), [voiceLine("cant_do_say", "en")]);
+  assert.deepEqual([count(evs, "tts_start"), count(evs, "tts_end")], [1, 1]);
+});
+
+test("no bound bot still answers: the session runs the turn with the shared voice rules", async () => {
+  const { crowVoiceTurnOptions, VOICE_DENY_TOOLS } = await import("../servers/gateway/voice/crow-voice.js");
+  let opts = null;
+  const fakeVoice = {
+    convo: { get: () => [] },
+    transcribe: async () => ({ text: "add milk to my list" }),
+    speakText: async () => true,
+    runVoiceTurn: async (o) => { opts = o; o.sink.event({ type: "tts_start" }); o.sink.audio(Buffer.from("xx")); return { route: "fast", failed: null, timings: {} }; },
+  };
+  const turns = createGlassesTurns({
+    voice: fakeVoice, openDb: () => ({ close() {} }), findDevice: async () => ({ id: "g", token_hash: "x", voice_settings: { lang: "es" } }), listTtsProfiles: async () => [{ id: "k", provider: "kokoro", isDefault: true }],
+    botToolNames: async () => [], capture: async () => ({}), describePhoto: async () => null, readEnvelope,
+    playback: { state: () => "idle", control: () => {}, start: () => {} }, log: () => {},
+    crowVoice: { turnOptions: crowVoiceTurnOptions, VOICE_DENY_TOOLS },
+  });
+  const entry = await turns.runTurn({ deviceId: "g", audio: Buffer.alloc(4), send: { text: () => {}, binary: () => {} } });
+  assert.equal(entry.failed, null);
+  assert.ok(opts, "runVoiceTurn was reached");
+  assert.equal(opts.familiesOnIntent, true);
+  assert.equal(opts.surface, "glasses");
+  assert.equal(typeof opts.actionWhen, "function");
+  assert.equal(typeof opts.actionFollowWhen, "function");
+  for (const n of [...VOICE_DENY_TOOLS, ...GLASSES_DENY_TOOLS]) assert.ok(opts.denyTools.includes(n), n);
+  assert.equal(opts.fallbackText, STRINGS.es.fallback, "the glasses' own lines still win");
+});
+
+test("the glasses' no-assistant line points at Crow's voice in Bot Builder (en + es)", () => {
+  assert.equal(STRINGS.en.no_bot, "Crow's voice is switched off or unavailable. Check Crow's voice in Bot Builder.");
+  assert.equal(STRINGS.es.no_bot, "La voz de Crow está apagada o no disponible. Revisa la voz de Crow en Bot Builder.");
 });
 
 test("the bound assistant was switched off: spoken, not silent", async () => {
   reset();
-  const c = await client("glasses-asleep");
-  const evs = await c.turn();
-  c.close();
+  const evs = await withVoiceBot({ enabled: 0 }, async () => {
+    const c = await client("glasses-a");
+    const got = await c.turn();
+    c.close();
+    return got;
+  });
   assert.deepEqual([count(evs, "tts_start"), count(evs, "tts_end")], [1, 1]);
   assert.deepEqual(seen.tts.map((t) => t.input), [L.no_bot]);
   assert.equal(seen.chat.length, 0);
@@ -212,9 +277,12 @@ test("the bound assistant was switched off: spoken, not silent", async () => {
 
 test("an assistant too large for the quick model: the too-large line is spoken and no request is sent", async () => {
   reset();
-  const c = await client("glasses-giant");
-  const evs = await c.turn();
-  c.close();
+  const evs = await withVoiceBot({ def: crowVoiceDef({ system_prompt: "You are a household assistant. ".repeat(2000) }) }, async () => {
+    const c = await client("glasses-a");
+    const got = await c.turn();
+    c.close();
+    return got;
+  });
   assert.deepEqual([count(evs, "tts_start"), count(evs, "tts_end")], [1, 1]);
   assert.deepEqual(seen.tts.map((t) => t.input), [L.too_large]);
   assert.equal(seen.chat.length, 0);
@@ -244,7 +312,7 @@ test("speech-to-text is down, and a turn with no words: each is answered aloud",
 });
 
 test("a model that only calls tools it may not use: at most three tool rounds and one forced answer, then the fallback line; nothing is executed", async () => {
-  reset({ stt: "Email my landlord about the heating.", chat: [callRound("crow_delegate", { goal: "x" }), callRound("crow_delegate", { goal: "x" }), callRound("crow_delegate", { goal: "x" }), callRound("crow_delegate", { goal: "x" }), callRound("crow_delegate", { goal: "x" })] });
+  reset({ stt: "What do you know about my landlord?", chat: [callRound("crow_delegate", { goal: "x" }), callRound("crow_delegate", { goal: "x" }), callRound("crow_delegate", { goal: "x" }), callRound("crow_delegate", { goal: "x" }), callRound("crow_delegate", { goal: "x" })] });
   const c = await client("glasses-a");
   const evs = await c.turn();
   c.close();
@@ -453,4 +521,89 @@ test("17a: a glasses turn that names a relative day gets the kiosk's computed [D
   assert.match(ctx, /^\[Now\] [^\n]+\(time zone America\/Chicago\)\n\[Dates\] To add or plan something, a day named without a date is the next one: /);
   const plain = seen.turnContext("what is the capital of Portugal");
   assert.match(plain, /^\[Now\] [^\n]+$/, "a plain question: the [Now] line only");
+});
+
+// ─── Crow's speaking voice and speech recognition on the glasses ───
+/** A session adapter on a fake runner: what transcribe and the turn were handed. */
+async function crowTurns({ loadVoiceBot, device = { id: "g", bound_bot_id: "helper", token_hash: "x", tts_profile_id: "p", stt_profile_id: "s1" }, profiles, botToolNames = async () => [], stt = "What is the capital of Portugal?" } = {}) {
+  const cv = await import("../servers/gateway/voice/crow-voice.js");
+  const seenBy = { transcribe: [], turn: [], speak: [] };
+  const fakeVoice = {
+    convo: { get: () => [] },
+    transcribe: async (o) => { seenBy.transcribe.push(o.device); return { text: stt }; },
+    speakText: async (o) => { seenBy.speak.push(o.device); o.sink.event({ type: "tts_start" }); o.sink.audio(Buffer.from("xx")); return true; },
+    runVoiceTurn: async (o) => { seenBy.turn.push(o); o.sink.event({ type: "tts_start" }); o.sink.audio(Buffer.from("xx")); return { route: "fast", failed: null, timings: {} }; },
+  };
+  const turns = createGlassesTurns({
+    voice: fakeVoice, openDb: () => ({ close() {} }), findDevice: async () => ({ ...device }),
+    listTtsProfiles: async () => profiles || [{ id: "p", provider: "piper" }, { id: "e", provider: "edge" }, { id: "k", provider: "kokoro" }],
+    botToolNames, capture: async () => ({}), describePhoto: async () => null, readEnvelope,
+    playback: { state: () => "idle", control: () => {}, start: () => {} }, log: () => {},
+    loadVoiceBot,
+    crowVoice: { turnOptions: cv.crowVoiceTurnOptions, withVoiceProfiles: cv.withVoiceProfiles, VOICE_DENY_TOOLS: cv.VOICE_DENY_TOOLS },
+  });
+  const run = () => turns.runTurn({ deviceId: device.id, audio: Buffer.alloc(4), send: { text: () => {}, binary: () => {} } });
+  return { turns, run, seenBy };
+}
+const withVoice = (voice) => async () => ({ def: crowVoiceDef({ voice: { ...crowVoiceDef().voice, ...voice } }), cloud: false });
+
+test("a non-PCM voice-bot TTS falls back to the device's playable one", async () => {
+  const t = await crowTurns({ loadVoiceBot: withVoice({ tts_profile_id: "e" }) });
+  assert.equal((await t.run()).failed, null);
+  assert.equal(t.seenBy.turn[0].device.tts_profile_id, "p", "the device's own piper voice, not the local fallback");
+  const ok = await crowTurns({ loadVoiceBot: withVoice({ tts_profile_id: "k" }) });
+  await ok.run();
+  assert.equal(ok.seenBy.turn[0].device.tts_profile_id, "k", "a playable Crow voice wins");
+  const none = await crowTurns({ loadVoiceBot: withVoice({}) });
+  await none.run();
+  assert.equal(none.seenBy.turn[0].device.tts_profile_id, "p", "no Crow voice chosen: the device's");
+  // Say from the dashboard (speak) uses the same rule.
+  await ok.turns.speak({ deviceId: "g", text: "Dinner.", send: { text: () => {}, binary: () => {} } });
+  assert.equal(ok.seenBy.speak.at(-1).tts_profile_id, "k");
+});
+
+test("transcribe uses Crow's STT profile", async () => {
+  const t = await crowTurns({ loadVoiceBot: withVoice({ stt_profile_id: "s2" }) });
+  await t.run();
+  assert.equal(t.seenBy.transcribe[0].stt_profile_id, "s2");
+  assert.equal(t.seenBy.turn[0].device.stt_profile_id, "s2");
+  const own = await crowTurns({ loadVoiceBot: withVoice({}) });
+  await own.run();
+  assert.equal(own.seenBy.transcribe[0].stt_profile_id, "s1", "null keeps the device's");
+});
+
+test("a cloud fast voice model turns the tool-family gate off on the glasses (familiesOnIntent false)", async () => {
+  const c = await crowTurns({ loadVoiceBot: async () => ({ def: crowVoiceDef(), cloud: true }) });
+  await c.run();
+  assert.equal(c.seenBy.turn[0].familiesOnIntent, false);
+  const l = await crowTurns({ loadVoiceBot: async () => ({ def: crowVoiceDef(), cloud: false }) });
+  await l.run();
+  assert.equal(l.seenBy.turn[0].familiesOnIntent, true);
+});
+
+test("no voice bot (missing, disabled, corrupt) or a failing loader: no profiles, the turn still runs, nothing throws", async () => {
+  for (const loadVoiceBot of [async () => null, async () => { throw new Error("db down"); }, undefined]) {
+    const t = await crowTurns({ loadVoiceBot });
+    const entry = await t.run();
+    assert.equal(entry.failed, null);
+    assert.equal(t.seenBy.transcribe[0].stt_profile_id, "s1");
+    assert.equal(t.seenBy.turn[0].device.tts_profile_id, "p");
+  }
+});
+
+test("look turn denies every voice-bot tool", async () => {
+  const { getChatTools } = await import("../servers/gateway/ai/tool-executor.js");
+  const { voiceBotToolNames } = await import("../bundles/meta-glasses/server/session.js");
+  const def = crowVoiceDef();
+  const names = getChatTools({ botDef: def }).map((x) => x.name);
+  assert.ok(names.length > 0);
+  // The routes' resolution: the Crow voice bot's tools, whatever the device is bound to.
+  const t = await crowTurns({ loadVoiceBot: async () => ({ def, cloud: false }), botToolNames: voiceBotToolNames(async () => ({ def, cloud: false }), getChatTools), stt: "Take a photo and tell me what this is." });
+  await t.run();
+  const deny = t.seenBy.turn[0].denyTools;
+  for (const n of names) if (n !== LOOK_TOOL) assert.ok(deny.includes(n), `${n} is denied on a look turn`);
+  assert.ok(!deny.includes(LOOK_TOOL));
+  assert.deepEqual(t.seenBy.turn[0].extraTools.map((x) => x.definition.name), [LOOK_TOOL]);
+  assert.deepEqual(await voiceBotToolNames(async () => null, getChatTools)({}, { bound_bot_id: "helper" }), [], "no voice bot: nothing to deny beyond the fixed list");
+  assert.deepEqual(await voiceBotToolNames(async () => { throw new Error("x"); }, getChatTools)({}, {}), []);
 });

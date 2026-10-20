@@ -81,10 +81,15 @@ before(async () => {
   const res = { send(s) { this.html = s; } };
   await renderBotList(res, { db, layout: layoutFor("bot-builder"), notice: "", PAGE_CSS: botBuilderStyles(), req: { headers: {}, csrfToken: "tok" } });
   pages.list = res.html;
-  // "By voice on displays: …": the same list with the Kiosk available; its line is filled from the listing below.
+  // "By voice on displays: …": the same list with Crow's card (the voice bot) and the Kiosk available; Crow's line is
+  // filled from the listing below. The voice row is only there for this page.
+  const { voiceBotDefinition } = await import("../servers/shared/voice-bot.js");
+  await db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES ('crow.voice','Crow',?,1)",
+    args: [JSON.stringify(voiceBotDefinition({ preset: "fast_local", fastKey: "crow-chat/qwen3.6-35b-a3b" }))] });
   const resAbil = { send(s) { this.html = s; } };
   await renderBotList(resAbil, { db, layout: layoutFor("bot-builder"), notice: "", PAGE_CSS: botBuilderStyles(), req: { headers: {}, csrfToken: "tok" }, kioskAvailable: true });
   pages["list-abil"] = resAbil.html;
+  await db.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id = 'crow.voice'", args: [] });
   const { default: kioskPanel } = await import("../bundles/kiosk/panel/kiosk.js");
   await kioskPanel.handler({ query: {} }, { send(h) { pages.kiosk = h; } }, { db, lang: "en", layout: layoutFor("kiosk") });
   for (const [key, bot] of [["board-on", "helper"], ["board-off", "assistant"]]) {
@@ -111,7 +116,7 @@ after(async () => {
 });
 
 // The Kiosk listing the ability lines are filled from: the longest real line (four of the five abilities, two
-// slower, plus "+N more") on the first card, "answers questions only" on another; a display with memories on.
+// slower, plus "+N more") on Crow's card and under each Answers as Crow line; a display with memories on.
 const ABIL_LONG = { items: [{ id: "calendar", quick: false }, { id: "reminders", quick: false }, { id: "crow_messages", quick: true }, { id: "lists", quick: false }, { id: "projects", quick: true }, { id: "addon:nb", quick: true, label: "A notebook add-on with a long name" }], none: false };
 const ABIL_BOTS = ["assistant", "helper", "home-kiosk", "glasses-bot", "quiet-bot"].map((id, i) => ({
   bot_id: id, display_name: id, fit: "full", fit_memory: "full",
@@ -122,7 +127,8 @@ const API = {
   "/api/kiosk/admin/displays": {
     devices: [{ id: "kiosk-a", name: "Kitchen", connected: true, latency: {}, bound_bot_id: "assistant", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { memory_integration: true } }],
     bots: ABIL_BOTS, pending: [], stt_profiles: [{ id: "stt-a", name: "Whisper" }], tts_profiles: [{ id: "tts-a", name: "Kokoro", provider: "kokoro" }],
-    dashboard_voice: { available: true, bot_id: null, effective_bot_id: "assistant", auto_bot_id: "assistant" },
+    voice: { bot_id: "crow.voice", name: "Crow", fit: "full", fit_memory: "full", abilities: ABIL_LONG, abilities_memory: { items: [...ABIL_LONG.items, { id: "memory", quick: true }], none: false } },
+    dashboard_talk: true,
   },
   "/api/kiosk/admin/stations": { stations: [], max: 50 },
   "/api/kiosk/admin/music": { installed: false },
@@ -259,9 +265,9 @@ for (const [w, h] of [[390, 844], [1280, 800]]) {
 
     test(`live @${label}: the 'By voice on displays' line wraps inside its card; the page never pans; ${phone ? "two+ cards still on the first screen" : "three columns hold"}`, async (t) => {
       if (!chrome) return t.skip("no headless Chrome");
-      const m = await measure("list-abil", w, h, { textSize, waitFor: "document.querySelectorAll('.btb-abil:not([hidden])').length===5", shot: `list-abil-${w}${xl}` });
+      const m = await measure("list-abil", w, h, { textSize, waitFor: "document.querySelectorAll('.btb-abil:not([hidden])').length===1", shot: `list-abil-${w}${xl}` });
       assert.ok(m.doc <= 0 && m.body === 0, `no sideways pan ${JSON.stringify(m)}`);
-      assert.equal(m.abilShown, 5, `every enabled bot has its line ${JSON.stringify(m)}`);
+      assert.equal(m.abilShown, 1, `Crow's card has its line, and only Crow's ${JSON.stringify(m)}`);
       assert.ok(m.abil && m.abil.text.indexOf("By voice on displays: ") === 0, JSON.stringify(m.abil));
       assert.ok(m.abil.l >= m.abil.cl && m.abil.r <= m.abil.cr && m.abil.sw <= 0, `the line stays inside its card ${JSON.stringify(m.abil)}`);
       if (phone) {
@@ -272,11 +278,11 @@ for (const [w, h] of [[390, 844], [1280, 800]]) {
       }
     });
 
-    test(`live @${label}: the Kiosk panel's ability lines under the pickers stay inside their boxes`, async (t) => {
+    test(`live @${label}: the Kiosk panel's Answers as Crow ability lines stay inside their boxes`, async (t) => {
       if (!chrome) return t.skip("no headless Chrome");
       const m = await measure("kiosk", w, h, { textSize, waitFor: "Array.prototype.filter.call(document.querySelectorAll('.kk-abil'),function(e){return e.textContent;}).length>=2", shot: `kiosk-abil-${w}${xl}` });
       assert.ok(m.doc <= 0 && m.body === 0, `no sideways pan ${JSON.stringify(m)}`);
-      assert.ok(m.kkAbil.length >= 2, `the dashboard picker and the display's picker each show a line ${JSON.stringify(m.kkAbil)}`);
+      assert.ok(m.kkAbil.length >= 3, `the pairing form, Talk to Crow and the display each show Crow's line ${JSON.stringify(m.kkAbil)}`);
       for (const a of m.kkAbil) assert.ok(a.l >= a.pl && a.r <= a.pr && a.sw <= 0, `inside its box ${JSON.stringify(a)}`);
     });
 
@@ -345,7 +351,7 @@ test("live @1280x800: the check reaches the mechanism — a clipping card hides 
 
 test("live @390x844: the check reaches the mechanism — an ability line that may not wrap leaves its card or pans the page", async (t) => {
   if (!chrome) return t.skip("no headless Chrome");
-  const m = await measure("list-abil", 390, 844, { css: ".btb-abil{white-space:nowrap}", waitFor: "document.querySelectorAll('.btb-abil:not([hidden])').length===5" });
+  const m = await measure("list-abil", 390, 844, { css: ".btb-abil{white-space:nowrap}", waitFor: "document.querySelectorAll('.btb-abil:not([hidden])').length===1" });
   const a = m.abil;
   assert.ok(m.doc > 0 || m.body > 0 || a.r > a.cr || a.sw > 0 || a.h <= a.lh * 1.5, "a nowrap line must read as overflowing or unwrapped, or the wrap check proves nothing: " + JSON.stringify(m));
 });

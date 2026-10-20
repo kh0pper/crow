@@ -59,7 +59,12 @@ test("panel and docs say /display for the page URL", () => {
 
 // Final-review item 5: Save never silently rebinds. A current value missing
 // from the options shows a selected "(not set)" instead of the first option,
-// and only the fields the admin changed are posted.
+// and only the fields the admin changed are posted. PR 1: there is no
+// assistant picker (every display answers as Crow), so a card's selects are
+// speech-to-text, speech model, voice, then the rest.
+const AB = (items) => ({ items, none: items.length === 0 });
+const VOICE = { bot_id: "crow.voice", name: "Crow", fit: "full", fit_memory: "no_skills",
+  abilities: AB([{ id: "calendar", quick: false }, { id: "lists", quick: true }]), abilities_memory: AB([{ id: "lists", quick: true }, { id: "memory", quick: true }]) };
 async function runPanel(device, data = {}) {
   const { parseHTML } = await import("linkedom");
   const vm = await import("node:vm");
@@ -67,9 +72,10 @@ async function runPanel(device, data = {}) {
   const posts = [];
   const listing = {
     devices: [device], pending: [],
-    bots: [{ bot_id: "chef", display_name: "Chef" }, { bot_id: "household", display_name: "Household" }],
+    bots: [{ bot_id: "helper", display_name: "Helper" }, { bot_id: "household", display_name: "Household" }],
     stt_profiles: [{ id: "stt-a", name: "Whisper A" }, { id: "stt-b", name: "Whisper B" }],
     tts_profiles: [{ id: "tts-a", name: "Kokoro", provider: "kokoro" }],
+    voice: VOICE, dashboard_talk: true,
     ...data,
   };
   const fetch = async (path, opts = {}) => {
@@ -81,37 +87,41 @@ async function runPanel(device, data = {}) {
   vm.runInContext(CLIENT_SCRIPT, ctx);
   for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
   const card = document.querySelector("#kk-devices section");
-  const [bot, stt, sm, tts] = card.querySelectorAll("select");
+  const [stt, sm, tts] = card.querySelectorAll("select");
   const vad = [...card.querySelectorAll("input")].find((i) => i.type === "number");
   const save = [...card.querySelectorAll("button")].find((b) => b.textContent === STRINGS.en.save);
   const flush = async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); };
   const change = (node) => node.dispatchEvent(new window.Event("change"));
   // linkedom: selecting one option clears the others (and un-selecting ANY option clears the selected one), so only the target is set.
   const choose = (sel, value) => { [...sel.querySelectorAll("option")].find((o) => o.value === value).selected = true; change(sel); };
-  return { bot, stt, sm, tts, vad, save, posts, flush, card, document, window, change, choose, pairForm: document.querySelector("#kk-pair form") };
+  return { stt, sm, tts, vad, save, posts, flush, card, document, window, change, choose, pairForm: document.querySelector("#kk-pair form") };
 }
 const KDEV = { id: "kiosk-a", name: "Kitchen", connected: true, latency: {}, kiosk_settings: { follow_up: true, memory_integration: false } };
 
-test("panel Save: a missing bot/voice shows (not set) selected, and an untouched Save rebinds nothing", async () => {
+test("panel Save: a missing voice shows (not set) selected, and an untouched Save rebinds nothing — a stored bound_bot_id is never sent", async () => {
   const p = await runPanel({ ...KDEV, bound_bot_id: "deleted-bot", stt_profile_id: "stt-gone", tts_profile_id: null });
-  for (const sel of [p.bot, p.stt, p.tts]) {
+  for (const sel of [p.stt, p.tts]) {
     assert.equal(sel.querySelector("option").textContent, STRINGS.en.not_set);
     assert.equal(sel.value, "", "the blank option is selected, not the first real one");
   }
   p.save.dispatchEvent(new p.save.ownerDocument.defaultView.Event("click"));
   await p.flush();
   assert.equal(p.posts.length, 0, "nothing changed: no POST, no silent rebind");
+  for (const o of p.stt.querySelectorAll("option")) o.selected = o.value === "stt-b";
+  p.save.dispatchEvent(new p.window.Event("click"));
+  await p.flush();
+  assert.deepEqual(p.posts[0].body, { stt_profile_id: "stt-b" }, "a save never carries bound_bot_id");
 });
 
 test("panel Save: only changed fields are posted; a known current value has no (not set) option", async () => {
   const p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a" });
-  assert.equal(p.bot.value, "household");
-  assert.ok(![...p.bot.querySelectorAll("option")].some((o) => o.textContent === STRINGS.en.not_set));
+  assert.equal(p.stt.value, "stt-a");
+  assert.ok(![...p.stt.querySelectorAll("option")].some((o) => o.textContent === STRINGS.en.not_set));
   for (const o of p.stt.querySelectorAll("option")) o.selected = o.value === "stt-b";
   p.save.dispatchEvent(new p.save.ownerDocument.defaultView.Event("click"));
   await p.flush();
   assert.equal(p.posts.length, 1);
-  assert.deepEqual(p.posts[0].body, { stt_profile_id: "stt-b" }, "bot, tts and settings untouched → omitted");
+  assert.deepEqual(p.posts[0].body, { stt_profile_id: "stt-b" }, "tts and settings untouched → omitted");
   assert.equal(p.posts[0].path, "/api/kiosk/admin/displays/kiosk-a");
 });
 
@@ -154,140 +164,76 @@ test("panel theme: Automatic/Light/Dark per display, default Automatic; only a c
   for (const k of ["theme", "theme_auto", "theme_light", "theme_dark", "theme_hint"]) assert.ok(STRINGS.en[k] && STRINGS.es[k] && STRINGS.es[k] !== STRINGS.en[k], k);
 });
 
-// Assistant fit: the picker says, BEFORE binding, whether an assistant's prompt fits the quick voice model.
-const FIT_BOTS = [
-  { bot_id: "chef", display_name: "Chef", fit: "full", fit_memory: "full" },
-  { bot_id: "general", display_name: "General", fit: "no_skills", fit_memory: "no_skills" },
-  { bot_id: "edge", display_name: "Edge", fit: "no_skills", fit_memory: "too_large" },
-  { bot_id: "huge", display_name: "Huge", fit: "too_large", fit_memory: "too_large" },
-  { bot_id: "mystery", display_name: "Mystery", fit: null, fit_memory: null },
-];
+// ── PR 1: every display and Talk to Crow answer as Crow; no assistant picker anywhere ─────
+const crowLine = (box) => [...box.querySelectorAll(".kk-crow")];
 
-test("fit in the pairing form: every assistant is listed with its status; picking a too-large one shows the distinct warning before Pair", async () => {
-  const p = await runPanel({ ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { bots: FIT_BOTS, postReply: { error: "bot_too_large" } });
-  const sel = p.pairForm.querySelector("select");
-  const labels = Object.fromEntries([...sel.querySelectorAll("option")].map((o) => [o.value, o.textContent]));
-  assert.equal(labels.chef, "Chef");
-  assert.equal(labels.general, `General — ${STRINGS.en.fit_tag_no_skills}`);
-  assert.equal(labels.huge, `Huge — ${STRINGS.en.fit_tag_too_large}`);
-  assert.equal(labels.mystery, "Mystery", "unknown fit: no claim either way");
-  const line = p.pairForm.querySelector(".kk-fit");
-  assert.equal(line.textContent, "", "nothing chosen yet");
-  p.choose(sel, "general");
-  assert.equal(line.textContent, STRINGS.en.fit_no_skills);
-  assert.ok(line.classList.contains("kk-fit-warn") && !line.classList.contains("kk-fit-bad"));
-  p.choose(sel, "huge");
-  assert.equal(line.textContent, STRINGS.en.fit_too_large);
-  assert.ok(line.classList.contains("kk-fit-bad"), "too large is visually distinct");
-  p.choose(sel, "chef");
-  assert.equal(line.textContent, STRINGS.en.fit_full);
-  assert.ok(!line.classList.contains("kk-fit-bad") && !line.classList.contains("kk-fit-warn"));
-  // The server's refusal is shown in words.
-  p.choose(sel, "huge");
-  p.pairForm.querySelector("input[name=code]").value = "123456";
+test("no assistant picker: the pairing form, the Talk to Crow box and every display say Answers as Crow · Customise in Bot Builder", async () => {
+  const p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a" });
+  assert.equal(p.document.querySelectorAll('select[name="bot_id"]').length, 0, "no select named bot_id");
+  assert.equal(p.pairForm.querySelectorAll("select").length, 0, "the pairing form has no picker at all");
+  assert.ok(!/name\s*=\s*'bot_id'|\.name = 'bot_id'/.test(CLIENT_SCRIPT), "the panel script makes no bot_id field");
+  const dash = p.document.getElementById("kk-dash");
+  assert.equal(dash.hidden, false);
+  assert.equal(dash.querySelectorAll("select").length, 0, "no dashboard picker");
+  for (const [where, box] of [["pair", p.pairForm], ["dash", dash], ["display", p.card]]) {
+    const [line] = crowLine(box);
+    assert.ok(line, `${where}: the line`);
+    assert.ok(line.textContent.startsWith(STRINGS.en.answers_as_crow + " · "), `${where}: ${line.textContent}`);
+    const a = line.querySelector("a");
+    assert.equal(a.textContent, STRINGS.en.customise_in_builder);
+    assert.equal(a.getAttribute("href"), "/dashboard/bot-builder?bot=crow.voice");
+  }
+  assert.ok(!p.card.textContent.includes("Household"), "a stored bound bot is not shown as the answering assistant");
+});
+
+test("the Talk to Crow box shows only where the dashboard can talk (dashboard_talk) and a voice bot is there", async () => {
+  for (const data of [{ dashboard_talk: false }, { voice: null }]) {
+    const p = await runPanel({ ...KDEV, stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, data);
+    assert.equal(p.document.getElementById("kk-dash").hidden, true, JSON.stringify(data));
+  }
+});
+
+test("pairing: Pair posts only the code and the name (no assistant), and a refusal is shown in words", async () => {
+  const p = await runPanel({ ...KDEV, stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { postReply: { error: "bad_code" } });
+  p.pairForm.querySelector("input[name=code]").value = "123 456";
+  p.pairForm.querySelector("input[name=name]").value = "Hall";
   p.pairForm.dispatchEvent(new p.window.Event("submit"));
   await p.flush();
-  assert.equal(p.pairForm.querySelector(".kk-msg").textContent, STRINGS.en.bot_too_large);
+  assert.deepEqual(p.posts.at(-1), { path: "/api/kiosk/admin/approve", body: { code: "123456", name: "Hall" } });
+  assert.equal(p.pairForm.querySelector(".kk-msg").textContent, STRINGS.en.bad_code);
 });
 
-test("fit on a paired display: the bound assistant's status is shown, follows the picker and the memory box, and a refused save is explained", async () => {
-  const p = await runPanel({ ...KDEV, bound_bot_id: "huge", stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { bots: FIT_BOTS, postReply: { error: "bot_too_large" } });
+test("Crow's fit under the line: memories off in the pairing form and the Talk to Crow box; a display's follows its memory box", async () => {
+  const p = await runPanel({ ...KDEV, stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { voice: { ...VOICE, fit: "full", fit_memory: "too_large" } });
+  assert.equal(p.pairForm.querySelector(".kk-fit").textContent, STRINGS.en.crow_fit_full);
+  assert.equal(p.document.getElementById("kk-dash").querySelector(".kk-fit").textContent, STRINGS.en.crow_fit_full);
   const line = p.card.querySelector(".kk-fit");
-  assert.equal(line.textContent, STRINGS.en.fit_too_large, "a display already bound to a too-large assistant says so");
-  assert.ok(line.classList.contains("kk-fit-bad"));
-  assert.ok([...p.bot.querySelectorAll("option")].some((o) => o.textContent === `Huge — ${STRINGS.en.fit_tag_too_large}`));
-  p.choose(p.bot, "edge");
-  assert.equal(line.textContent, STRINGS.en.fit_no_skills);
+  assert.equal(line.textContent, STRINGS.en.crow_fit_full);
   const mem = [...p.card.querySelectorAll("input")].filter((i) => i.type === "checkbox")[1];
   mem.checked = true; p.change(mem);
-  assert.equal(line.textContent, STRINGS.en.fit_too_large, "with memories on this assistant no longer fits");
-  p.save.dispatchEvent(new p.window.Event("click"));
-  await p.flush();
-  assert.equal(p.posts.length, 1);
-  assert.equal(p.card.querySelector(".kk-msg").textContent, STRINGS.en.bot_too_large);
+  assert.equal(line.textContent, STRINGS.en.crow_fit_too_large, "with memories on Crow no longer fits on this display");
+  assert.ok(line.classList.contains("kk-fit-bad"), "too large is visually distinct");
+  const q = await runPanel({ ...KDEV, stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { voice: { ...VOICE, fit: "no_skills", fit_memory: null } });
+  assert.equal(q.card.querySelector(".kk-fit").textContent, STRINGS.en.crow_fit_no_skills);
+  assert.ok(q.card.querySelector(".kk-fit").classList.contains("kk-fit-warn"));
+  const mem2 = [...q.card.querySelectorAll("input")].filter((i) => i.type === "checkbox")[1];
+  mem2.checked = true; q.change(mem2);
+  assert.equal(q.card.querySelector(".kk-fit").textContent, "", "unknown fit: no claim either way");
 });
 
-test("fit strings: the three states and the refusal exist in en and es; the page's too-large line is its own string", () => {
+test("Answers as Crow strings: en + es, no backtick or dollar-brace; the retired picker strings are gone", () => {
   for (const L of ["en", "es"]) {
-    for (const k of ["fit_full", "fit_no_skills", "fit_too_large", "fit_tag_no_skills", "fit_tag_too_large", "bot_too_large", "err_bot_too_large"]) assert.ok(STRINGS[L][k], `${L}.${k}`);
-  }
-  assert.match(CLIENT_SCRIPT, /kk-fit-bad/);
-});
-
-test("fit in the dashboard-voice picker: every assistant has its status, the warning follows the selection, and 'nothing fits' is said in words", async () => {
-  const dv = { available: true, bot_id: null, effective_bot_id: "chef" };
-  const p = await runPanel({ ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { bots: FIT_BOTS, dashboard_voice: dv, postReply: { error: "bot_too_large" } });
-  const box = p.document.getElementById("kk-dash");
-  const sel = box.querySelector("select");
-  const labels = Object.fromEntries([...sel.querySelectorAll("option")].map((o) => [o.value, o.textContent]));
-  assert.equal(labels[""], STRINGS.en.dash_voice_auto_now.replace("{name}", "Chef"), "Automatic names who it picks");
-  assert.equal(labels.huge, `Huge — ${STRINGS.en.fit_tag_too_large}`);
-  assert.equal(labels.general, `General — ${STRINGS.en.fit_tag_no_skills}`);
-  assert.equal(labels.chef, "Chef");
-  const line = box.querySelector(".kk-fit");
-  assert.equal(line.textContent, "", "Automatic: the line below names who answers");
-  assert.ok(box.textContent.includes(STRINGS.en.dash_voice_now.replace("{name}", "Chef")));
-  p.choose(sel, "huge");
-  assert.equal(line.textContent, STRINGS.en.fit_too_large);
-  assert.ok(line.classList.contains("kk-fit-bad"));
-  await p.flush();
-  assert.equal(box.querySelector(".kk-msg").textContent, STRINGS.en.bot_too_large, "the server's refusal is shown");
-  // Automatic with assistants enabled but none that fits.
-  const none = await runPanel({ ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { bots: FIT_BOTS.filter((b) => b.bot_id === "huge"), dashboard_voice: { available: true, bot_id: null, effective_bot_id: null } });
-  const nbox = none.document.getElementById("kk-dash");
-  assert.ok(nbox.textContent.includes(STRINGS.en.dash_voice_none_fit));
-  assert.ok(nbox.querySelector(".kk-warn"));
-  for (const L of ["en", "es"]) { assert.ok(STRINGS[L].dash_voice_none_fit); assert.match(STRINGS[L].dash_voice_fits_explain, L === "en" ? /small enough/ : /pequeño/); }
-});
-
-// ── Item 20 PR 3: which bot answers voice ─────────────────────────────────
-const optLabels = (sel) => Object.fromEntries([...sel.querySelectorAll("option")].map((o) => [o.value, o.textContent]));
-
-test("voice bot choice: the Automatic option names the assistant it picks — also while another one is chosen — and says when none fits", async () => {
-  const dev = { ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" };
-  const auto = await runPanel(dev, { dashboard_voice: { available: true, bot_id: null, effective_bot_id: "household", auto_bot_id: "household" } });
-  const sel = auto.document.querySelector("#kk-dash select");
-  assert.equal(optLabels(sel)[""], "Automatic — now Household");
-  assert.equal(sel.value, "", "Automatic is selected");
-  const chosen = await runPanel(dev, { dashboard_voice: { available: true, bot_id: "chef", effective_bot_id: "chef", auto_bot_id: "household" } });
-  const csel = chosen.document.querySelector("#kk-dash select");
-  assert.equal(optLabels(csel)[""], "Automatic — now Household", "named even while Chef is the explicit choice");
-  assert.equal(csel.value, "chef");
-  const none = await runPanel(dev, { dashboard_voice: { available: true, bot_id: null, effective_bot_id: null, auto_bot_id: null } });
-  assert.equal(optLabels(none.document.querySelector("#kk-dash select"))[""], STRINGS.en.dash_voice_auto_none);
-  // An older listing without auto_bot_id: Automatic is the effective bot when nothing is chosen, else unnamed.
-  const old = await runPanel(dev, { dashboard_voice: { available: true, bot_id: "chef", effective_bot_id: "chef" } });
-  assert.equal(optLabels(old.document.querySelector("#kk-dash select"))[""], STRINGS.en.dash_voice_auto);
-});
-
-test("voice bot choice: after a save the Automatic label follows the server's answer", async () => {
-  const dev = { ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" };
-  const p = await runPanel(dev, { dashboard_voice: { available: true, bot_id: "chef", effective_bot_id: "chef", auto_bot_id: "chef" },
-    postReply: { ok: true, bot_id: null, effective_bot_id: "household", auto_bot_id: "household" } });
-  const sel = p.document.querySelector("#kk-dash select");
-  assert.equal(optLabels(sel)[""], "Automatic — now Chef");
-  p.choose(sel, "");
-  await p.flush();
-  assert.deepEqual(p.posts.at(-1), { path: "/api/kiosk/admin/dashboard-voice", body: { bot_id: "" } });
-  assert.equal(optLabels(sel)[""], "Automatic — now Household");
-  assert.ok(p.document.getElementById("kk-dash").textContent.includes(STRINGS.en.dash_voice_now.replace("{name}", "Household")));
-});
-
-test("voice bot choice: 'fits' is explained in plain words, and every picker says it can also be set from a bot's card in Bot Builder", async () => {
-  const p = await runPanel({ ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { dashboard_voice: { available: true, bot_id: null, effective_bot_id: "chef", auto_bot_id: "chef" } });
-  const dash = p.document.getElementById("kk-dash").textContent;
-  assert.ok(dash.includes(STRINGS.en.dash_voice_fits_explain));
-  assert.ok(dash.includes(STRINGS.en.voice_also_in_builder));
-  assert.ok(p.card.textContent.includes(STRINGS.en.voice_also_in_builder), "each display card too");
-  for (const L of ["en", "es"]) {
-    for (const k of ["dash_voice_auto_now", "dash_voice_auto_none", "dash_voice_fits_explain", "voice_also_in_builder"]) {
+    for (const k of ["answers_as_crow", "customise_in_builder", "crow_fit_full", "crow_fit_no_skills", "crow_fit_too_large"]) {
       assert.ok(STRINGS[L][k], `${L}.${k}`);
       assert.ok(!STRINGS[L][k].includes("`") && !STRINGS[L][k].includes("${"), `${L}.${k}`);
     }
-    assert.match(STRINGS[L].dash_voice_auto_now, /\{name\}/);
-    assert.match(STRINGS[L].voice_also_in_builder, /Bot Builder/);
+    for (const k of ["dash_voice_auto", "dash_voice_auto_now", "dash_voice_fits_explain", "voice_also_in_builder", "fit_tag_too_large"]) assert.equal(STRINGS[L][k], undefined, `${L}.${k} is retired`);
   }
+  assert.equal(STRINGS.en.answers_as_crow, "Answers as Crow");
+  assert.equal(STRINGS.en.customise_in_builder, "Customise in Bot Builder");
+  assert.match(CLIENT_SCRIPT, /kk-fit-bad/);
 });
+
 
 test("the memories switch says how memories are used: when asked to remember or recall, not on every question (en + es)", async () => {
   const p = await runPanel({ ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" });
@@ -300,11 +246,11 @@ test("the memories switch says how memories are used: when asked to remember or 
 
 test("panel: each display has a display-type select with the four profiles; only a change is posted, as kiosk_settings.profile", async () => {
   const p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { ...KDEV.kiosk_settings, profile: "pi3" } });
-  const pf = p.card.querySelectorAll("select")[4];
+  const pf = p.card.querySelectorAll("select")[3];
   assert.deepEqual([...pf.querySelectorAll("option")].map((o) => o.value), ["", "pi3", "phone", "tablet", "desktop"]);
   assert.equal(pf.value, "pi3");
   assert.ok(p.card.textContent.includes(STRINGS.en.profile_hint));
-  assert.deepEqual([p.bot.value, p.stt.value, p.sm.value, p.tts.value], ["household", "stt-a", "default", "tts-a"], "the four selects before it are where they were");
+  assert.deepEqual([p.stt.value, p.sm.value, p.tts.value], ["stt-a", "default", "tts-a"], "the three selects before it are where they were");
   p.save.dispatchEvent(new p.save.ownerDocument.defaultView.Event("click"));
   await p.flush();
   assert.equal(p.posts.length, 0, "untouched: nothing posted");
@@ -314,17 +260,17 @@ test("panel: each display has a display-type select with the four profiles; only
   assert.equal(p.posts.length, 1, "a profile change alone is a change");
   assert.deepEqual(p.posts[0].body, { kiosk_settings: { follow_up: true, memory_integration: false, profile: "tablet" } });
   const unset = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a" });
-  assert.equal(unset.card.querySelectorAll("select")[4].value, "", "a display with no profile shows Not set (read as the audio-first one), never a stored choice");
+  assert.equal(unset.card.querySelectorAll("select")[3].value, "", "a display with no profile shows Not set (read as the audio-first one), never a stored choice");
   assert.ok(!unset.card.textContent.includes(STRINGS.en.profile_guessed));
   const guessed = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { ...KDEV.kiosk_settings, profile: "phone", profile_source: "guessed" } });
-  assert.equal(guessed.card.querySelectorAll("select")[4].value, "phone");
+  assert.equal(guessed.card.querySelectorAll("select")[3].value, "phone");
   assert.ok(guessed.card.textContent.includes(STRINGS.en.profile_guessed), "a guessed type says so");
   for (const L of ["en", "es"]) for (const k of ["profile", "profile_unset", "profile_guessed", "profile_pi3", "profile_phone", "profile_tablet", "profile_desktop", "profile_hint"]) assert.ok(STRINGS[L][k], `${L}.${k}`);
 });
 
 test("panel media settings: loudest volume (10-100 %) and pause-while-listening are per display; only a change is posted", async () => {
   const p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { ...KDEV.kiosk_settings, max_volume: 70 } });
-  const mv = p.card.querySelectorAll("select")[6];
+  const mv = p.card.querySelectorAll("select")[5];
   assert.deepEqual([...mv.querySelectorAll("option")].map((o) => o.value), ["10", "20", "30", "40", "50", "60", "70", "80", "90", "100"]);
   assert.equal(mv.value, "70");
   const pml = [...p.card.querySelectorAll("label")].find((l) => l.textContent.startsWith(STRINGS.en.pause_media_on_listen)).querySelector("input");
@@ -341,7 +287,7 @@ test("smoke F3: pause-while-listening shows ON for a phone or tablet with nothin
   const label = (p) => [...p.card.querySelectorAll("label")].find((l) => l.textContent.startsWith(STRINGS.en.pause_media_on_listen)).querySelector("input");
   let p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { ...KDEV.kiosk_settings, profile: "phone" } });
   assert.equal(label(p).checked, true, "a phone: on by default");
-  p.choose(p.card.querySelectorAll("select")[6], "40");
+  p.choose(p.card.querySelectorAll("select")[5], "40");
   p.save.dispatchEvent(new p.window.Event("click"));
   await p.flush();
   assert.equal(Object.hasOwn(p.posts[0].body.kiosk_settings, "pause_media_on_listen"), false, "the default is not written by another save");
@@ -353,7 +299,7 @@ test("smoke F3: pause-while-listening shows ON for a phone or tablet with nothin
   assert.equal(p.posts[0].body.kiosk_settings.pause_media_on_listen, false, "the operator's choice is stored");
   p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { ...KDEV.kiosk_settings, profile: "pi3" } });
   assert.equal(label(p).checked, false, "a Pi: off by default");
-  p.choose(p.card.querySelectorAll("select")[4], "phone");
+  p.choose(p.card.querySelectorAll("select")[3], "phone");
   assert.equal(label(p).checked, true, "untouched, it follows the type chosen");
   p = await runPanel({ ...KDEV, bound_bot_id: "household", stt_profile_id: "stt-a", tts_profile_id: "tts-a", kiosk_settings: { ...KDEV.kiosk_settings, profile: "phone", pause_media_on_listen: false } });
   assert.equal(label(p).checked, false, "a stored choice wins over the default");
@@ -469,49 +415,30 @@ test("smoke F5: the Music library line is asked again while the names are being 
   assert.equal(box.querySelector("input").value, "http://100.64.20.9:9000", "what was being typed is untouched");
 });
 
-// ── "By voice on displays: …" under each assistant picker (bot voice abilities) ─────────────
-const AB = (items) => ({ items, none: items.length === 0 });
-const ABIL_BOTS = [
-  { bot_id: "chef", display_name: "Chef", fit: "full", fit_memory: "full", abilities: AB([{ id: "calendar", quick: false }, { id: "lists", quick: true }]), abilities_memory: AB([{ id: "calendar", quick: false }, { id: "lists", quick: true }, { id: "memory", quick: true }]) },
-  { bot_id: "household", display_name: "Household", fit: "full", fit_memory: "full", abilities: AB([]), abilities_memory: AB([{ id: "memory", quick: true }]) },
-  { bot_id: "older", display_name: "Older", fit: "full", fit_memory: "full" },
-  { bot_id: "addon", display_name: "Addon", fit: "full", fit_memory: "full", abilities: AB([{ id: "addon:nb", quick: true, label: "<i>Notebook</i>" }]), abilities_memory: AB([]) },
-];
+// ── "By voice on displays: …" under each Answers as Crow line (the listing's voice abilities) ─────────────
 const by = (list) => STRINGS.en.abil_by.replace("{list}", list);
 const slow = (list) => STRINGS.en.abil_slow_group.replace("{list}", list);
 
-test("abilities on a paired display: the bound assistant's line follows the picker and the memory box", async () => {
-  const p = await runPanel({ ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { bots: ABIL_BOTS });
+test("abilities on a paired display: Crow's line, right under its fit line, follows the memory box", async () => {
+  const p = await runPanel({ ...KDEV, stt_profile_id: "stt-a", tts_profile_id: "tts-a" });
   const line = p.card.querySelector(".kk-abil");
   assert.ok(line, "the line");
   assert.ok(p.card.querySelector(".kk-fit").nextSibling === line, "right under the fit line");
   assert.equal(line.textContent, by(`${STRINGS.en.abil_lists} · ${slow(STRINGS.en.abil_calendar)}`));
-  p.choose(p.bot, "household");
-  assert.equal(line.textContent, STRINGS.en.abil_none);
   const mem = [...p.card.querySelectorAll("input")].filter((i) => i.type === "checkbox")[1];
   mem.checked = true; p.change(mem);
-  assert.equal(line.textContent, by(STRINGS.en.abil_memory), "memories on: the memory-on view");
-  p.choose(p.bot, "older");
-  assert.equal(line.textContent, "", "an older listing without the field: no line");
-  p.choose(p.bot, "addon");
-  mem.checked = false; p.change(mem);
-  assert.equal(line.textContent, by("<i>Notebook</i>"), "an add-on name is text");
-  assert.equal(line.querySelector("i"), null);
+  assert.equal(line.textContent, by(`${STRINGS.en.abil_lists}, ${STRINGS.en.abil_memory}`), "memories on: the memory-on view");
+  const older = await runPanel({ ...KDEV, stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { voice: { bot_id: "crow.voice", name: "Crow", fit: "full", fit_memory: "full" } });
+  assert.equal(older.card.querySelector(".kk-abil").textContent, "", "an older listing without the field: no line");
+  const addon = await runPanel({ ...KDEV, stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { voice: { ...VOICE, abilities: AB([{ id: "addon:nb", quick: true, label: "<i>Notebook</i>" }]) } });
+  assert.equal(addon.card.querySelector(".kk-abil").textContent, by("<i>Notebook</i>"), "an add-on name is text");
+  assert.equal(addon.card.querySelector(".kk-abil i"), null);
 });
 
-test("abilities in the pairing form (memories off) and the dashboard-voice picker (Automatic: who answers now)", async () => {
-  const dv = { available: true, bot_id: null, effective_bot_id: "chef" };
-  const p = await runPanel({ ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { bots: ABIL_BOTS, dashboard_voice: dv });
-  const pair = p.pairForm.querySelector(".kk-abil");
-  assert.equal(pair.textContent, "", "nothing chosen yet");
-  p.choose(p.pairForm.querySelector("select"), "household");
-  assert.equal(pair.textContent, STRINGS.en.abil_none, "memories off on a new display");
-  const box = p.document.getElementById("kk-dash");
-  const line = box.querySelector(".kk-abil");
-  assert.equal(line.textContent, by(`${STRINGS.en.abil_lists} · ${slow(STRINGS.en.abil_calendar)}`), "Automatic: the assistant that answers now");
-  const sel = box.querySelector("select");
-  p.choose(sel, "household");
-  assert.equal(line.textContent, STRINGS.en.abil_none);
+test("abilities in the pairing form and the Talk to Crow box (memories off)", async () => {
+  const p = await runPanel({ ...KDEV, stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { voice: { ...VOICE, abilities: AB([]) } });
+  assert.equal(p.pairForm.querySelector(".kk-abil").textContent, STRINGS.en.abil_none);
+  assert.equal(p.document.getElementById("kk-dash").querySelector(".kk-abil").textContent, STRINGS.en.abil_none);
 });
 
 test("abilities strings: en + es, placeholders, the wording", () => {
@@ -528,11 +455,10 @@ test("abilities strings: en + es, placeholders, the wording", () => {
   assert.equal(STRINGS.es.abil_by_slow_only, "Por voz en pantallas, más lento (modelo grande): {list}");
 });
 
-test("abilities under a picker: the slower ones are grouped at the tail; only slower ones read 'By voice on displays, slower …'; the cap counts both groups", async () => {
+test("abilities: the slower ones are grouped at the tail; only slower ones read 'By voice on displays, slower …'; the cap counts both groups", async () => {
   const Q = (id) => ({ id, quick: true }), W = (id) => ({ id, quick: false });
-  const mk = (items) => [{ bot_id: "chef", display_name: "Chef", fit: "full", fit_memory: "full", abilities: { items, none: false }, abilities_memory: { items, none: false } }];
   const lineFor = async (items) => {
-    const p = await runPanel({ ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { bots: mk(items) });
+    const p = await runPanel({ ...KDEV, stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { voice: { ...VOICE, abilities: { items, none: false }, abilities_memory: { items, none: false } } });
     return p.card.querySelector(".kk-abil");
   };
   const four = await lineFor([W("calendar"), Q("crow_messages"), W("reminders"), Q("projects")]);
@@ -545,12 +471,21 @@ test("abilities under a picker: the slower ones are grouped at the tail; only sl
   assert.equal(five.getAttribute("title"), "By voice on displays: Crow messages, projects & notes · slower (bigger model): calendar, reminders, lists");
 });
 
-test("abilities under a picker: more than four → four and '+N more', the whole list in the title", async () => {
+test("abilities: more than four → four and '+N more', the whole list in the title", async () => {
   const items = ["calendar", "reminders", "messages", "lists", "projects"].map((id) => ({ id, quick: true }));
-  const bots = [{ bot_id: "chef", display_name: "Chef", fit: "full", fit_memory: "full", abilities: { items, none: false }, abilities_memory: { items, none: false } }];
-  const p = await runPanel({ ...KDEV, bound_bot_id: "chef", stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { bots });
+  const p = await runPanel({ ...KDEV, stt_profile_id: "stt-a", tts_profile_id: "tts-a" }, { voice: { ...VOICE, abilities: { items, none: false }, abilities_memory: { items, none: false } } });
   const line = p.card.querySelector(".kk-abil");
   const w = ["abil_calendar", "abil_reminders", "abil_messages", "abil_lists"].map((k) => STRINGS.en[k]);
   assert.equal(line.textContent, STRINGS.en.abil_by.replace("{list}", `${w.join(", ")}, ${STRINGS.en.abil_more.replace("{n}", "1")}`));
   assert.equal(line.getAttribute("title"), STRINGS.en.abil_by.replace("{list}", [...w, STRINGS.en.abil_projects].join(", ")));
+});
+
+test("the no-assistant line points at Crow's voice in Bot Builder; the room hint names Reset to preset (en + es)", () => {
+  assert.equal(STRINGS.en.no_bot, "Crow's voice is switched off or unavailable. Check Crow's voice in Bot Builder.");
+  assert.equal(STRINGS.es.no_bot, "La voz de Crow está apagada o no disponible. Revisa la voz de Crow en Bot Builder.");
+  for (const lang of ["en", "es"]) assert.doesNotMatch(STRINGS[lang].no_bot, /Kiosk|Elige uno|Choose one/, lang);
+  assert.match(STRINGS.en.household_hint, /Reset to preset/);
+  assert.match(STRINGS.en.household_hint, /Bot Builder → Crow/);
+  assert.match(STRINGS.es.household_hint, /Restablecer la configuración base/);
+  assert.match(STRINGS.es.household_hint, /Bot Builder → Crow/);
 });

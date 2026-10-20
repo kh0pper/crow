@@ -327,6 +327,8 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
       return res.json({ ok: true });
     }
     const id = String(b.id || "");
+    // The reserved Crow voice bot has no house style; refuse set and clear before any read or write.
+    if ((await appImport("servers/shared/voice-bot.js")).isVoiceBotId(id)) throw bad("the Crow voice bot has no house style");
     let row = null;
     try { row = (await S.db.execute({ sql: "SELECT definition FROM pi_bot_defs WHERE bot_id=?", args: [id] })).rows[0] || null; } catch { row = null; }
     if (!row) throw notFound("no such bot");

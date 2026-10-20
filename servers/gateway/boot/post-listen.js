@@ -58,6 +58,28 @@ export async function runCrossHostAuditPrune(dbFactory = createDbClient) {
   }
 }
 
+/**
+ * Create the reserved Crow voice bot once (servers/shared/voice-bot.js
+ * ensureVoiceBot). Skipped on a --no-auth gateway: a loopback secondary
+ * gateway is never the operator's dashboard. Opens a fresh db client via the
+ * injected factory and always closes it. NEVER throws.
+ */
+export async function ensureVoiceBotAtBoot({ noAuth, dbFactory = createDbClient } = {}) {
+  if (noAuth) return { skipped: true };
+  try {
+    const { ensureCrowVoiceBot } = await import("../voice/ensure-voice-bot.js");
+    const db = dbFactory();
+    try {
+      return await ensureCrowVoiceBot(db, { log: (m) => console.log(m) });
+    } finally {
+      try { db.close?.(); } catch {}
+    }
+  } catch (err) {
+    console.warn("[voice] Crow voice bot not created:", err?.message || err);
+    return { created: false, error: err?.message || String(err) };
+  }
+}
+
 export async function runPostListenSetup(server, app, deps) {
   const { setupCallsSignaling, setupCompanionProxy, extensionProxyWsSetup, PORT, BIND, noAuth } = deps;
 
@@ -202,6 +224,9 @@ export async function runPostListenSetup(server, app, deps) {
   };
   runRemoteProbe();
   setInterval(runRemoteProbe, 60_000).unref();
+
+  // Crow voice bot: create the reserved row once (never rewritten after).
+  setImmediate(() => { ensureVoiceBotAtBoot({ noAuth }); });
 
   // Start auto-update checker
   startAutoUpdate(createDbClient(), { noAuth }).catch((err) => {

@@ -1,6 +1,9 @@
 /**
- * Crow's Nest panel — Kiosk displays: pair (code approval), bind an assistant,
- * per-display voice + settings, unpair, latency diagnostics.
+ * Crow's Nest panel — Kiosk displays: pair (code approval), per-display voice +
+ * settings, unpair, latency diagnostics. Every display and the dashboard's Talk
+ * to Crow answer as Crow (the listing's `voice`): where the assistant pickers
+ * were, the panel says "Answers as Crow · Customise in Bot Builder", with
+ * Crow's fit and what it can do by voice. Nothing here binds an assistant.
  * All user data is rendered with textContent. CLIENT_SCRIPT has NO backticks
  * and NO "${" (it sits inside a template literal; tests/kiosk-panel.test.js).
  */
@@ -40,27 +43,10 @@ export const CLIENT_SCRIPT = `
     options.forEach(function (o) { opt(sel, o[0], o[1], o[0] === current); });
     return sel;
   }
-  /** An assistant's fit on the quick voice model: 'full' | 'no_skills' | 'too_large' | null (unknown), by the display's memory setting. */
-  function fitOf(b, memOn) { return b ? (memOn ? b.fit_memory : b.fit) : null; }
-  function botLabel(b, memOn) {
-    var lv = fitOf(b, memOn), name = b.display_name || b.bot_id;
-    return lv === 'too_large' ? name + ' — ' + S.fit_tag_too_large : lv === 'no_skills' ? name + ' — ' + S.fit_tag_no_skills : name;
-  }
-  /** The status line under an assistant picker. It follows the selection, so the warning shows BEFORE Pair/Save. */
-  function fitLine(bots, sel, memOn) {
-    var p = el('p', 'kk-fit');
-    function show() {
-      var b = null;
-      bots.forEach(function (x) { if (x.bot_id === sel.value) b = x; });
-      var lv = fitOf(b, memOn());
-      p.className = 'kk-fit' + (lv === 'too_large' ? ' kk-fit-bad' : lv === 'no_skills' ? ' kk-fit-warn' : '');
-      p.textContent = lv ? S['fit_' + lv] : '';
-    }
-    sel.addEventListener('change', show);
-    show();
-    return { node: p, show: show };
-  }
-  /** "By voice on displays: …" for an assistant (the listing's abilities, by the memory setting); '' when the listing has none. */
+  /** Crow's fit on the quick voice model: 'full' | 'no_skills' | 'too_large' | null (unknown), by the memory setting. */
+  var FITS = ['full', 'no_skills', 'too_large'];
+  function crowFit(v, memOn) { var lv = v ? (memOn ? v.fit_memory : v.fit) : null; return FITS.indexOf(lv) >= 0 ? lv : null; }
+  /** "By voice on displays: …" for Crow (the listing's voice abilities, by the memory setting); '' when the listing has none. */
   var ABIL_IDS = ['calendar', 'reminders', 'messages', 'crow_messages', 'lists', 'memory', 'projects', 'blog', 'news', 'files'];
   function abilWord(x) {
     if (!x || typeof x.id !== 'string') return null;
@@ -83,24 +69,31 @@ export const CLIENT_SCRIPT = `
     if (!q.length) return fill(S.abil_by_slow_only, { list: w.join(', ') + tail });
     return fill(S.abil_by, { list: q.join(', ') + (w.length ? ' · ' + fill(S.abil_slow_group, { list: w.join(', ') }) : '') + tail });
   }
-  /** The ability line under a picker: follows the selection (fallbackId: who answers when the picker says Automatic). */
-  function abilLine(bots, sel, memOn, fallbackId) {
-    var p = el('p', 'kk-abil');
+  /**
+   * Where the assistant pickers were: "Answers as Crow · Customise in Bot Builder", Crow's fit and what it can do
+   * by voice. show() follows memOn() (a display's memory box; a new display and Talk to Crow have memories off).
+   */
+  function crowBlock(data, memOn) {
+    var v = data.voice && typeof data.voice === 'object' ? data.voice : null;
+    var line = el('p', 'kk-crow', S.answers_as_crow + ' · ');
+    var a = el('a', null, S.customise_in_builder);
+    a.setAttribute('href', '/dashboard/bot-builder?bot=' + encodeURIComponent(v && typeof v.bot_id === 'string' && v.bot_id ? v.bot_id : 'crow.voice'));
+    line.appendChild(a);
+    var fit = el('p', 'kk-fit'), abil = el('p', 'kk-abil');
     function show() {
-      var id = sel.value || (fallbackId ? fallbackId() : ''), b = null;
-      bots.forEach(function (x) { if (x.bot_id === id) b = x; });
-      var r = abilText(b, memOn());
-      p.textContent = r.text;
-      if (r.title) p.setAttribute('title', r.title); else p.removeAttribute('title');
+      var lv = crowFit(v, memOn());
+      fit.className = 'kk-fit' + (lv === 'too_large' ? ' kk-fit-bad' : lv === 'no_skills' ? ' kk-fit-warn' : '');
+      fit.textContent = lv ? S['crow_fit_' + lv] : '';
+      var r = abilText(v, memOn());
+      abil.textContent = r.text;
+      if (r.title) abil.setAttribute('title', r.title); else abil.removeAttribute('title');
     }
-    sel.addEventListener('change', show);
     show();
-    return { node: p, show: show };
+    return { nodes: [line, fit, abil], show: show };
   }
   /** Only what changed is sent: an untouched (or unset) field is never rebound by Save. */
   function savePatch(a, b) {
     var p = {}, any = false;
-    if (b.bot !== a.bot && b.bot) { p.bound_bot_id = b.bot; any = true; }
     if (b.stt !== a.stt) { p.stt_profile_id = b.stt; any = true; }
     if (b.tts !== a.tts) { p.tts_profile_id = b.tts; any = true; }
     if (b.fu !== a.fu || b.mem !== a.mem || b.vad !== a.vad || b.sm !== a.sm || b.th !== a.th || b.pf !== a.pf || b.mv !== a.mv || b.pml !== a.pml) {
@@ -133,18 +126,15 @@ export const CLIENT_SCRIPT = `
     var form = el('form', 'kk-form');
     var code = el('input'); code.name = 'code'; code.inputMode = 'numeric'; code.autocomplete = 'off'; code.placeholder = '123 456'; code.required = true;
     var name = el('input'); name.name = 'name'; name.placeholder = S.name; name.maxLength = 64;
-    var bot = el('select'); bot.name = 'bot_id'; opt(bot, '', '— ' + S.bot + ' —', true);
-    data.bots.forEach(function (b) { opt(bot, b.bot_id, botLabel(b, false), false); });
-    var fit = fitLine(data.bots, bot, function () { return false; });   // a new display starts with memories off
-    var abil = abilLine(data.bots, bot, function () { return false; });
+    var crow = crowBlock(data, function () { return false; });   // a new display starts with memories off
     var go = el('button', 'btn btn-primary', S.approve); go.type = 'submit';
     var msg = el('p', 'kk-msg');
-    [[S.code, code], [S.name, name], [S.bot, bot]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); form.appendChild(l); });
-    form.appendChild(fit.node); form.appendChild(abil.node); form.appendChild(go); form.appendChild(msg);
+    [[S.code, code], [S.name, name]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); form.appendChild(l); });
+    crow.nodes.forEach(function (n) { form.appendChild(n); });
+    form.appendChild(go); form.appendChild(msg);
     form.addEventListener('submit', function (ev) {
       ev.preventDefault();
-      if (!bot.value) { msg.textContent = S.bot_required; return; }
-      api('POST', '/api/kiosk/admin/approve', { code: code.value.replace(/\\s+/g, ''), name: name.value, bot_id: bot.value }).then(function (j) {
+      api('POST', '/api/kiosk/admin/approve', { code: code.value.replace(/\\s+/g, ''), name: name.value }).then(function (j) {
         if (j.ok) { code.value = ''; name.value = ''; msg.textContent = S.saved; load(); return; }
         msg.textContent = j.error === 'locked' ? fill(S.locked, { s: j.retry_after_s }) : (S[j.error] || j.error || '');
       });
@@ -154,51 +144,15 @@ export const CLIENT_SCRIPT = `
     if (!data.tts_profiles.some(function (p) { return p.provider === 'kokoro'; })) box.appendChild(el('p', 'kk-warn', S.tts_missing));
   }
 
-  /** Which assistant answers the dashboard's own Talk to Crow (no display, no pairing). */
+  /** The dashboard's own Talk to Crow (no display, no pairing): it answers as Crow too. */
   function renderDash(data) {
     var box = document.getElementById('kk-dash'); if (!box) return;
     clear(box);
-    var dv = data.dashboard_voice;
-    box.hidden = !(dv && dv.available);
+    box.hidden = !(data.voice && data.dashboard_talk);
     if (box.hidden) return;
     box.appendChild(el('h2', null, S.dash_voice_title));
     box.appendChild(el('p', 'kk-dim', S.dash_voice_intro));
-    if (!data.bots.length) { box.appendChild(el('p', 'kk-warn', S.dash_voice_none)); return; }
-    var sel = el('select'); opt(sel, '', S.dash_voice_auto, !dv.bot_id);
-    var autoOpt = sel.firstChild;
-    data.bots.forEach(function (b) { opt(sel, b.bot_id, botLabel(b, false), b.bot_id === dv.bot_id); });
-    var l = el('label', null, S.bot); l.appendChild(sel); box.appendChild(l);
-    box.appendChild(fitLine(data.bots, sel, function () { return false; }).node);   // same status as the display pickers
-    var dashAbil = abilLine(data.bots, sel, function () { return false; }, function () { return dv.effective_bot_id; });
-    box.appendChild(dashAbil.node);
-    var now = el('p', 'kk-dim'), msg = el('span', 'kk-msg');
-    function nameOf(id) { var hit = data.bots.filter(function (b) { return b.bot_id === id; })[0]; return hit ? (hit.display_name || hit.bot_id) : null; }
-    /** Who Automatic picks: auto_bot_id from the server (the socket's own resolver); an older listing only says so when nothing is chosen. */
-    function autoLabel() {
-      var known = Object.prototype.hasOwnProperty.call(dv, 'auto_bot_id');
-      var id = known ? dv.auto_bot_id : (dv.bot_id ? undefined : dv.effective_bot_id);
-      if (id === undefined) return S.dash_voice_auto;
-      var name = id ? nameOf(id) : null;
-      return name ? fill(S.dash_voice_auto_now, { name: name }) : S.dash_voice_auto_none;
-    }
-    function showNow() {
-      var name = nameOf(dv.effective_bot_id);
-      now.className = name ? 'kk-dim' : 'kk-warn';
-      now.textContent = name ? fill(S.dash_voice_now, { name: name }) : S.dash_voice_none_fit;   // assistants exist, none fits
-      autoOpt.textContent = autoLabel();
-    }
-    showNow();
-    sel.addEventListener('change', function () {
-      api('POST', '/api/kiosk/admin/dashboard-voice', { bot_id: sel.value }).then(function (j) {
-        if (!j.ok) { msg.textContent = S[j.error] || j.error || ''; return; }
-        dv.bot_id = j.bot_id; dv.effective_bot_id = j.effective_bot_id;
-        if (Object.prototype.hasOwnProperty.call(j, 'auto_bot_id')) dv.auto_bot_id = j.auto_bot_id; else delete dv.auto_bot_id;
-        showNow(); dashAbil.show(); msg.textContent = S.saved;
-      });
-    });
-    box.appendChild(now); box.appendChild(msg);
-    box.appendChild(el('p', 'kk-dim', S.dash_voice_fits_explain));
-    box.appendChild(el('p', 'kk-hint', S.voice_also_in_builder));
+    crowBlock(data, function () { return false; }).nodes.forEach(function (n) { box.appendChild(n); });
   }
 
   function renderDevice(d, data) {
@@ -209,8 +163,6 @@ export const CLIENT_SCRIPT = `
     card.appendChild(el('p', 'kk-dim', d.last_seen ? fill(S.last_seen, { when: new Date(d.last_seen).toLocaleString() }) : S.never_seen));
     var lat = d.latency || {};
     card.appendChild(el('p', 'kk-lat', lat.n ? fill(S.latency, { median: lat.median_ms == null ? '>' + 3000 : lat.median_ms, p90: lat.p90_ms == null ? '>' + 3000 : lat.p90_ms, n: lat.n }) + (lat.no_audio ? ' · ' + lat.no_audio + ' ✗' : '') : S.no_latency));   // Infinity serializes as null
-    var memSaved = !!(d.kiosk_settings || {}).memory_integration;
-    var bot = pick(data.bots.map(function (b) { return [b.bot_id, botLabel(b, memSaved)]; }), d.bound_bot_id);
     var stt = pick(data.stt_profiles.map(function (p) { return [p.id, p.name]; }), d.stt_profile_id);
     var tts = pick(data.tts_profiles.map(function (p) { return [p.id, p.name]; }), d.tts_profile_id);
     var ks = d.kiosk_settings || {};
@@ -229,14 +181,13 @@ export const CLIENT_SCRIPT = `
     var pml = el('input'); pml.type = 'checkbox'; pml.checked = pmlSet ? ks.pause_media_on_listen : handheld(ks.profile);
     pml.addEventListener('change', function () { pmlSet = true; });
     pf.addEventListener('change', function () { if (!pmlSet) pml.checked = handheld(pf.value); });
-    function current() { return { bot: bot.value, stt: stt.value, tts: tts.value, fu: fu.checked, mem: mem.checked, vad: vadValue(), sm: sm.value, th: th.value, pf: pf.value, mv: parseInt(mv.value, 10) || 100, pml: pmlSet ? pml.checked : null }; }
+    function current() { return { stt: stt.value, tts: tts.value, fu: fu.checked, mem: mem.checked, vad: vadValue(), sm: sm.value, th: th.value, pf: pf.value, mv: parseInt(mv.value, 10) || 100, pml: pmlSet ? pml.checked : null }; }
     var initial = null;
     initial = current();
-    var fit = fitLine(data.bots, bot, function () { return mem.checked; });
-    var abil = abilLine(data.bots, bot, function () { return mem.checked; });
-    mem.addEventListener('change', fit.show);
-    mem.addEventListener('change', abil.show);
-    [[S.bot, bot], [S.stt, stt], [S.stt_model, sm], [S.tts, tts], [S.profile, pf], [S.vad_wait, vad], [S.follow_up, fu], [S.memory, mem], [S.theme, th], [S.max_volume, mv], [S.pause_media_on_listen, pml]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); card.appendChild(l); if (pair[1] === bot) { card.appendChild(fit.node); card.appendChild(abil.node); card.appendChild(el('p', 'kk-hint', S.voice_also_in_builder)); } });
+    var crow = crowBlock(data, function () { return mem.checked; });
+    mem.addEventListener('change', crow.show);
+    crow.nodes.forEach(function (n) { card.appendChild(n); });
+    [[S.stt, stt], [S.stt_model, sm], [S.tts, tts], [S.profile, pf], [S.vad_wait, vad], [S.follow_up, fu], [S.memory, mem], [S.theme, th], [S.max_volume, mv], [S.pause_media_on_listen, pml]].forEach(function (pair) { var l = el('label', null, pair[0]); l.appendChild(pair[1]); card.appendChild(l); });
     card.appendChild(el('p', 'kk-dim', S.vad_wait_hint));
     card.appendChild(el('p', 'kk-dim', S.memory_warn + ' ' + S.memory_hint));
     card.appendChild(el('p', 'kk-dim', S.profile_hint + (ks.profile_source === 'guessed' ? ' ' + S.profile_guessed : '')));
@@ -429,6 +380,7 @@ const STYLES = `
   .kk-fit-bad::before { content: "\\26A0  "; }
   .kk-abil { margin: 0 0 6px; font-size: .9rem; color: var(--crow-text-secondary); overflow-wrap: anywhere; }
   .kk-abil:empty { display: none; }
+  .kk-crow { margin: 6px 0 2px; font-weight: 600; }
   .kk-card { border: 1px solid var(--crow-border); border-radius: 14px; padding: 12px 16px; margin: 12px 0; background: var(--crow-bg-surface); }
   .kk-card h3 { display: flex; gap: 12px; align-items: baseline; margin: 0 0 4px; }
   .kk-on { color: var(--crow-success); font-size: .85rem; } .kk-off { color: var(--crow-text-muted); font-size: .85rem; }

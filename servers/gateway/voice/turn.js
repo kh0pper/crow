@@ -1,6 +1,6 @@
 /**
  * Transport-free voice turn (kiosk spec 2026-10-03 §7.1, D14). The reusable
- * core of the Meta Glasses loop: STT → bound bot (persona, botVoiceScope,
+ * core of the Meta Glasses loop: STT → the voice bot (persona, botVoiceScope,
  * permission policy, fast_voice_model) → route (chooseVoiceRoute; escalation
  * with filler + 8 s cold fallback) → streamed tool loop with the <think> gate
  * → sentence-chunked TTS. Every dependency is injected (defaultVoiceDeps()
@@ -11,17 +11,56 @@
 import {
   createThinkGate, createSentenceChunker, createConfirmGate, createConvoStore, degenerateTranscript, createToolSyntaxGate, stripToolSyntax,
   negotiatePcm, pcmStream, isDestructiveTool, describeDestructiveAction, SENTENCE_END,
+  isProxyCall, executedProxyArgs, proxyArgsConflict, reliesOnFlatFallback,
 } from "./turn-helpers.js";
 import { withTurnContext, createContextEchoGate, stripContextEcho, stripContextEchoDeep, TURN_CONTEXT_NOTE } from "./context-echo.js";
 import { estimatePromptTokens, requestFits, choosePromptFit, dropOldestExchange } from "./prompt-fit.js";
-import { claimsAction, claimsReminder, claimsBeyondMemory, toolEffect } from "./action-claims.js";
+import { claimsAction, claimsReminder, claimsBeyondMemory, toolEffect, needsSpokenYes } from "./action-claims.js";
 import { classifyTools } from "./tool-families.js";
 import { voiceAbilities } from "./voice-abilities.js";
+import { CROW_VOICE_BOT_ID, normalizeVoiceSettings, isVoiceBotDef } from "../../shared/voice-bot.js";
+
+/**
+ * A voice bot (kind "voice") also asks a spoken yes before these: a schedule or a change to the
+ * user's context sections (direct, or as the matching action of the crow_memory proxy), and a
+ * change to the notification settings (VOICE_NOTIFICATION_TOOL; its "get" is a read and stays free).
+ */
+export const VOICE_CONFIRM_TOOLS = Object.freeze(["crow_create_schedule", "crow_update_schedule", "crow_add_context_section", "crow_update_context_section"]);
+const VOICE_SCHEDULE_TOOLS = new Set(["crow_create_schedule", "crow_update_schedule"]);
+const VOICE_NOTIFICATION_TOOL = "crow_notification_settings";
+/** A schedule task that starts background bot work (bot_scheduler's "pipeline:botcron:<bot>" and every other "pipeline:" row). */
+const scheduleArgs = (args) => {
+  const a = args && typeof args === "object" ? args : {};
+  const p = a.params && typeof a.params === "object" ? a.params : {};
+  return [a, p, p.arguments && typeof p.arguments === "object" ? p.arguments : {}];
+};
+/**
+ * crow_notification_settings asked for anything but a read. The object the executor runs with decides
+ * (executedProxyArgs: a direct call's args, a proxy's params). Fail safe: every OTHER action field present
+ * (top level unless it is the proxy's selector, params, params.arguments) must be "get" too.
+ */
+const changesNotifications = (tc) => {
+  const a = tc.arguments && typeof tc.arguments === "object" ? tc.arguments : {};
+  const p = a.params && typeof a.params === "object" ? a.params : {};
+  const pa = p.arguments && typeof p.arguments === "object" ? p.arguments : {};
+  const runs = (executedProxyArgs(tc) || {}).action;
+  const layers = isProxyCall(tc) ? [p, pa] : [a, p, pa];
+  return runs !== "get" || layers.some((l) => "action" in l && l.action !== "get");
+};
+const VOICE_ARGS_CONFLICT = "This call names one value at the top and another in params, so it cannot be confirmed by voice. Tell the user you couldn't do that, then end your turn — do not call another tool.";
+const VOICE_ARGS_FLAT = "This call puts its values beside the action instead of in params, so it cannot be confirmed by voice. Tell the user you couldn't do that, then end your turn — do not call another tool.";
+const startsPipeline = (args) => scheduleArgs(args).some((x) => typeof x.task === "string" && /^\s*pipeline:/i.test(x.task));
+/** Turning a schedule back on without naming its task: it may be a pipeline: row (the gate cannot see the stored task). */
+const reenablesUnseen = (args) => scheduleArgs(args).some((x) => (x.enabled === true || x.enabled === 1 || x.enabled === "true") && x.task === undefined);
+const VOICE_NO_REENABLE = "A schedule cannot be turned back on by voice. Tell the user to turn it on in the Crow's Nest, then end your turn — do not call another tool.";
+const VOICE_NO_PIPELINE = "Background bot work cannot be scheduled by voice. Tell the user to set it up in Bot Builder, then end your turn — do not call another tool.";
 
 export const ESCALATION_READY_TIMEOUT_MS = 8000;
 export const ESCALATION_PROBE_EVERY_MS = 500;
 export const FILLER_TEXT = "One moment.";
 export const BOT_CACHE_TTL_MS = 30_000;
+/** What a turn records as timings.surface; anything else (or nothing) is "kiosk". */
+export const VOICE_SURFACES = Object.freeze(["phone", "kiosk", "glasses"]);
 /** Spoken + captioned when a turn ends with no answer (tool loop, empty reply, budget); callers pass a localized one. */
 export const FALLBACK_TEXT = "Sorry, I got stuck on that one. Try asking again.";
 /**
@@ -133,6 +172,8 @@ export function createVoiceTurnRunner(deps) {
   const convo = deps.convo || createConvoStore({ now });
   const confirm = deps.confirm || createConfirmGate({ now });
   const botCache = new Map();
+  // deps.ensureVoiceBot runs at most once per runner (a missing Crow voice bot), whatever happens after.
+  let voiceEnsured = false;
   const fillerCache = new Map();
   // Saved-history messages the router must not count as "recent tool context":
   // in-process display-tool calls and calls the gate REFUSED (denied tools such as
@@ -245,8 +286,11 @@ export function createVoiceTurnRunner(deps) {
 
   async function loadBot(db, botId) {
     if (!botId) return null;
+    // deps.botDefsGeneration(): bumped on every bot-def save (pibots:defs-changed), so a Bot Builder
+    // save applies on the next turn instead of after the 30 s cache.
+    const gen = typeof deps.botDefsGeneration === "function" ? deps.botDefsGeneration() : 0;
     const hit = botCache.get(botId);
-    if (hit && now() - hit.at < BOT_CACHE_TTL_MS) return hit.def;
+    if (hit && hit.gen === gen && now() - hit.at < BOT_CACHE_TTL_MS) return hit.def;
     let def = null;
     try {
       const row = await deps.loadBotRow(db, botId);
@@ -255,7 +299,7 @@ export function createVoiceTurnRunner(deps) {
         if (def) def.bot_id = row.bot_id;
       }
     } catch { def = null; }
-    botCache.set(botId, { def, at: now() });
+    botCache.set(botId, { def, at: now(), gen });
     return def;
   }
 
@@ -399,7 +443,7 @@ export function createVoiceTurnRunner(deps) {
     const { db, device, sink, signal } = opts;
     // opts.startedAt: when the turn really began (the kiosk's turn_end), so an early-STT wait counts.
     const t0 = Number.isFinite(opts.startedAt) ? opts.startedAt : now();
-    const timings = {};
+    const timings = { surface: VOICE_SURFACES.includes(opts.surface) ? opts.surface : "kiosk" };
     const result = { transcript: "", route: null, fastPath: false, escalated: false, degraded: null, aborted: false, failed: null, timings };
     const mark = (k) => { if (timings[k] == null) timings[k] = now() - t0; };
     const aborted = () => signal?.aborted === true;
@@ -498,8 +542,17 @@ export function createVoiceTurnRunner(deps) {
         }
       }
 
-      // 3. The bound bot drives the turn (ruling R11: no profile fallback)
-      const bot = await loadBot(db, device.bound_bot_id);
+      // 3. The voice bot drives the turn (ruling R11: no profile fallback): opts.botId (the kiosk's turn
+      // check, the eval harness), else deps.voiceBotId (the Crow voice bot), else the device's bound bot.
+      // Loaded only after the fast paths, so a missing or disabled voice bot never stops "pause" or the clock.
+      const botId = typeof opts.botId === "string" && opts.botId ? opts.botId : (deps.voiceBotId || device.bound_bot_id);
+      let bot = await loadBot(db, botId);
+      if (!bot && botId === CROW_VOICE_BOT_ID && !voiceEnsured && typeof deps.ensureVoiceBot === "function") {
+        voiceEnsured = true;
+        try { await deps.ensureVoiceBot(db); } catch (err) { log(`[voice-turn] Crow voice bot not created (${err?.message || err})`); }
+        botCache.delete(botId);   // the cached miss; a bot created just now answers this turn
+        bot = await loadBot(db, botId);
+      }
       if (!bot) { fail("no_bound_bot", false); return result; }
       history = convo.get(device.id);
       // First-audio budget (smoke 2026-10-04 #19: a 24.5 s silent tool loop). Counted from the turn
@@ -602,8 +655,10 @@ export function createVoiceTurnRunner(deps) {
       // display tool is on offer (a display command such as "add two minutes" stays on the quick model).
       const actionWithheld = cls.actionWithheld(actionAsked, displayBacks);
       if (actionAsked) timings.action_intent = true;
-      const decision = mustX?.mustRoute === "fast" || opts.noEscalate === true
-        ? { route: "fast", reason: opts.noEscalate === true ? "no-escalate" : "must-fast", key: bot.fast_voice_model || deps.fastKey }
+      // A voice bot with escalation off (Bot Builder) is taken as opts.noEscalate.
+      const noEscalate = opts.noEscalate === true || normalizeVoiceSettings(bot).escalation === "off";
+      const decision = mustX?.mustRoute === "fast" || noEscalate
+        ? { route: "fast", reason: noEscalate ? "no-escalate" : "must-fast", key: bot.fast_voice_model || deps.fastKey }
         : deps.chooseVoiceRoute(routeView, { hasTools: quickTools.length > 0 || unlisted.length > 0 || wrapperWithheld, actionIntent: actionWithheld });
       let chat = await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
       result.route = "fast";
@@ -694,6 +749,7 @@ export function createVoiceTurnRunner(deps) {
       // 5. Streamed tool loop
       const scope = deps.botVoiceScope(bot);
       const policy = bot.permission_policy || {};
+      const voiceKind = isVoiceBotDef(bot);
       const shortName = (n) => String(n || "").replace(/^crow_/, "").replace(/_/g, " ");
       // → null (run it) or { code, message, neutral }: `code` goes to the log, `message` to the model;
       // neutral = the tool is simply not on this display / not offered (invisible to the router).
@@ -736,10 +792,22 @@ export function createVoiceTurnRunner(deps) {
         if (Array.isArray(policy.deny) && names.some((n) => policy.deny.includes(n))) {
           return refuse("refused_policy", `This assistant is not permitted to use "${shortName(eff)}" by voice. Tell the user and end your turn — do not call another tool.`);
         }
-        const confirmName = names.find((n) => isDestructiveTool(n) || (Array.isArray(policy.confirm) && policy.confirm.includes(n)));
+        // The voice bot (kind "voice"): never schedules background bot work, and asks a spoken yes
+        // before anything that deletes, changes or sends, and before a schedule or a context change.
+        // A proxied call runs with params alone: a top-level copy that disagrees would make the question name
+        // values that never run (a spoofed yes). Refused outright, before any question.
+        const via = isProxyCall(tc) ? tc.name : null;
+        if (voiceKind && via && proxyArgsConflict(tc)) return refuse("refused_policy", VOICE_ARGS_CONFLICT);
+        if (voiceKind && names.some((n) => VOICE_SCHEDULE_TOOLS.has(n)) && startsPipeline(tc.arguments)) return refuse("refused_policy", VOICE_NO_PIPELINE);
+        if (voiceKind && names.includes("crow_update_schedule") && reenablesUnseen(tc.arguments)) return refuse("refused_policy", VOICE_NO_REENABLE);
+        const confirmName = names.find((n) => isDestructiveTool(n) || (Array.isArray(policy.confirm) && policy.confirm.includes(n))
+          || (voiceKind && (needsSpokenYes(n) || VOICE_CONFIRM_TOOLS.includes(n)
+            || (n === VOICE_NOTIFICATION_TOOL && changesNotifications(tc)))));
         if (!confirmName) return null;
+        // crow_tools' flat fallback runs locally but not on its remote route: a yes could confirm values that never run.
+        if (voiceKind && reliesOnFlatFallback(tc)) return refuse("refused_policy", VOICE_ARGS_FLAT);
         if (confirm.check({ deviceId: device.id, eff: confirmName, args: tc.arguments, transcript }) === "allow") return null;
-        return refuse("needs_confirm", `Confirmation required. Tell the user: "Are you sure you want to ${describeDestructiveAction({ name: confirmName, arguments: tc.arguments })}? Say yes to proceed." Then end your turn — do not call another tool.`);
+        return refuse("needs_confirm", `Confirmation required. Tell the user: "Are you sure you want to ${describeDestructiveAction({ name: confirmName, arguments: tc.arguments }, { via })}? Say yes to proceed." Then end your turn — do not call another tool.`);
       };
 
       // First chunk = first clause (latency lever 3); later chunks are whole sentences.
@@ -1199,8 +1267,22 @@ export function createVoiceTurnRunner(deps) {
   return { runVoiceTurn, speakText, transcribe, assessBot, abilitiesOf, convo };
 }
 
+// One pibots:defs-changed subscription per process, however many runners defaultVoiceDeps() feeds.
+let botDefsGeneration = 0;
+let botDefsSubscribed = false;
+async function subscribeBotDefsChanged() {
+  if (botDefsSubscribed) return;
+  botDefsSubscribed = true;
+  try {
+    const bus = (await import("../../shared/event-bus.js")).default;
+    bus.on("pibots:defs-changed", () => { botDefsGeneration++; });
+  } catch { botDefsSubscribed = false; }
+}
+
 /** The real dependencies (gateway process). Lazy so tests never load them. */
 export async function defaultVoiceDeps() {
+  await subscribeBotDefsChanged();
+  const { ensureCrowVoiceBot } = await import("./ensure-voice-bot.js");
   const stt = await import("../ai/stt/index.js");
   const tts = await import("../ai/tts/index.js");
   const provider = await import("../ai/provider.js");
@@ -1218,6 +1300,10 @@ export async function defaultVoiceDeps() {
   return {
     now: () => Date.now(),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    // Every voice turn answers as the Crow voice bot (created on the first turn that finds it missing).
+    voiceBotId: CROW_VOICE_BOT_ID,
+    ensureVoiceBot: async (db) => { await ensureCrowVoiceBot(db); },
+    botDefsGeneration: () => botDefsGeneration,
     loadBotRow: async (db, botId) => (await db.execute({ sql: "SELECT bot_id, definition, enabled FROM pi_bot_defs WHERE bot_id = ?", args: [botId] })).rows[0] || null,
     getSttProfile: async (db, device) => (device.stt_profile_id
       ? byId(await stt.getSttProfiles(db, { includeKeys: true }), device.stt_profile_id)

@@ -127,3 +127,21 @@ test("owner-only: no dashboard session is refused before anything is written", a
   assert.equal(r.status, 401);
   assert.equal((await fetch(s.base + "/api/artifacts/house-style", { headers: { cookie: "crow_csrf=tok" } })).status, 401);
 });
+
+test("the Crow voice bot has no house style: set and clear are refused and its row is untouched", async () => {
+  const stored = JSON.stringify({ kind: "voice", tools: { crow_mcp: ["artifacts"] }, design: { house_style: "ocean-depths" } });
+  await s.db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, updated_at) VALUES ('crow.voice','Crow',?,'2020-01-01')", args: [stored] });
+  try {
+    for (const theme of ["ocean-depths", null]) {
+      const r = await post({ scope: "bot", id: "crow.voice", theme });
+      assert.equal(r.status, 400, `theme=${theme}`);
+      assert.match(JSON.stringify(r.body), /no house style/);
+    }
+    const row = (await s.db.execute({ sql: "SELECT definition, updated_at FROM pi_bot_defs WHERE bot_id='crow.voice'", args: [] })).rows[0];
+    assert.equal(row.definition, stored, "byte-identical");
+    assert.equal(row.updated_at, "2020-01-01");
+    // an ordinary bot's clear still works
+    await post({ scope: "bot", id: "mail", theme: null });
+    assert.equal((await post({ scope: "bot", id: "mail", theme: null })).status, 200);
+  } finally { await s.db.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id='crow.voice'", args: [] }); }
+});

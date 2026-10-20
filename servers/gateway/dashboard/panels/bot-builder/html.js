@@ -18,8 +18,9 @@ import { boardState, friendlyModel, purposeLine, agoText } from "../../shared/bo
 import { perchAttached } from "../../../shared/perch-attached.js";
 import { rowMenuScript } from "./row-menu.js";
 import { giveTaskScript } from "./give-task.js";
-import { voiceLineHtml, abilityLineHtml, voiceUseItemHtml, voiceUseDialogHtml, voiceUseScript } from "./voice-use.js";
-import { listDevices } from "../../../../shared/device-store.js";
+import { voiceAbilityScript } from "./voice-use.js";
+import { voiceBotCardHtml } from "./voice-bot-card.js";
+import { isVoiceBotId } from "../../../../shared/voice-bot.js";
 import { loadUnassigned } from "../bot-board/data-queries.js";
 
 // Same crow_lang-cookie resolution the dashboard router uses (index.js);
@@ -46,7 +47,7 @@ function hueOf(id) {
  * popover under the footer (inline on a phone) and carries every other
  * action the old table offered. Empty fields are left out, never dashed.
  */
-function botCardHtml(bt, { i, lang, req, now, providerRows, active, voiceNames, kioskAvailable }) {
+function botCardHtml(bt, { i, lang, req, now, providerRows, active }) {
   let def = {};
   try { def = JSON.parse(bt.definition || "{}") || {}; } catch { def = {}; }
   const id = String(bt.bot_id);
@@ -86,8 +87,6 @@ function botCardHtml(bt, { i, lang, req, now, providerRows, active, voiceNames, 
       ? `<button type="button" role="menuitem" tabindex="-1" class="btb-give-task" data-bot-id="${escapeHtml(id)}" data-name="${escapeHtml(name)}" ` +
         `data-perch="${perchAttached(def) ? 1 : 0}" aria-haspopup="dialog" aria-controls="btb-give">${t("botbuilder.rowGiveTask", lang)}</button>`
       : `<a role="menuitem" tabindex="-1" href="/dashboard/bot-board?bot=${enc}">${t("botbuilder.rowGiveTask", lang)}</a>`) +
-    // Item 20 PR 3: "Use for voice…" (voice-use.js) — enabled bots, only when the Kiosk is there.
-    (kioskAvailable && Number(bt.enabled) ? voiceUseItemHtml(id, name, lang) : "") +
     `<a role="menuitem" tabindex="-1" href="/dashboard/perch">${t("botbuilder.rowSessions", lang)}</a>` +
     (bt.project_id != null ? `<a role="menuitem" tabindex="-1" href="/dashboard/projects?view=${encodeURIComponent(String(bt.project_id))}">${t("botbuilder.rowProject", lang)}</a>` : "") +
     `<a role="menuitem" tabindex="-1" class="btb-danger-link" href="/dashboard/bot-builder?bot=${enc}&confirm_delete=1">${t("botbuilder.rowDelete", lang)}</a>` +
@@ -100,8 +99,6 @@ function botCardHtml(bt, { i, lang, req, now, providerRows, active, voiceNames, 
     (purpose ? `<div class="btb-botcard-purpose">${escapeHtml(purpose)}</div>` : "") +
     `</div></div>` +
     (meta ? `<div class="btb-botcard-meta">${meta}</div>` : "") +
-    voiceLineHtml(id, voiceNames, lang) +
-    (kioskAvailable ? abilityLineHtml(id) : "") +
     `<div class="btb-botcard-foot">` +
     (perchAttached(def) ? `<a class="btn btn-primary btn-sm" href="/dashboard/perch?bot=${enc}">${t("perch.tabChat", lang)}</a>` : "") +
     `<a class="btn btn-secondary btn-sm" href="${editHref}">${t("botbuilder.rowEdit", lang)}</a>` +
@@ -137,28 +134,13 @@ function giveTaskDialogHtml(waiting, lang) {
 }
 
 /**
- * Glasses and AI Companion devices per bound bot (item 20 PR 3): ONE registry
- * read per render. Kiosk displays are left out — the card's kiosk part comes
- * from the Kiosk listing (voice-use.js). A record with no device_kind is glasses.
- * A registry failure is no names, never a broken grid.
- */
-async function voiceDevicesByBot(db) {
-  const out = new Map();
-  let devices = [];
-  try { devices = await listDevices(db); } catch { devices = []; }
-  for (const d of Array.isArray(devices) ? devices : []) {
-    if (!d || !d.bound_bot_id || (d.device_kind || "glasses") === "kiosk") continue;
-    const k = String(d.bound_bot_id);
-    if (!out.has(k)) out.set(k, []);
-    out.get(k).push(String(d.name || d.id));
-  }
-  return out;
-}
-
-/**
  * kioskAvailable: decided on the server (dashboard/index.js, isCrowTalkAvailable
- * on the installed Kiosk panel + its routes) — without it no "Use for voice…",
- * no dialog and no listing read.
+ * on the installed Kiosk panel + its routes) — without it Crow's card has no
+ * abilities line and no listing is read.
+ *
+ * Crow's card (voice-bot-card.js) comes first; the ordinary cards skip the
+ * voice row. Every voice surface answers as Crow, so no ordinary card says
+ * where it answers voice or offers "Use for voice…".
  */
 export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req, kioskAvailable = false }) {
   const lang = reqLang(req);
@@ -172,17 +154,18 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req, ki
   try { providerRows = await listProvidersAll(db); } catch { providerRows = []; }
   const now = Date.now();
   const activeIds = new Set(sessions.filter((s) => s.status === "active" && Number(s.n) > 0).map((s) => s.bot_id));
-  const voiceByBot = await voiceDevicesByBot(db);
-  const cards = bots.map((bt, i) => botCardHtml(bt, { i, lang, req, now, providerRows, active: activeIds.has(bt.bot_id),
-    voiceNames: voiceByBot.get(String(bt.bot_id)) || [], kioskAvailable: !!kioskAvailable }));
+  const voiceRow = bots.find((bt) => isVoiceBotId(String(bt.bot_id))) || null;
+  const ordinary = bots.filter((bt) => bt !== voiceRow);
+  const cards = (voiceRow ? [voiceBotCardHtml(voiceRow, { lang, req, providerRows, kioskAvailable: !!kioskAvailable })] : [])
+    .concat(ordinary.map((bt, i) => botCardHtml(bt, { i, lang, req, now, providerRows, active: activeIds.has(bt.bot_id) })));
   // The give dialog ships only when some bot can take a card. It sits
   // OUTSIDE the list section: the layout's .card animates a transform, which
   // would make it the containing block of the dialog's position:fixed.
-  const giveDialog = bots.some((bt) => Number(bt.enabled) && boardState(bt).state === "on")
+  const giveDialog = ordinary.some((bt) => Number(bt.enabled) && boardState(bt).state === "on")
     ? giveTaskDialogHtml(await loadUnassigned(), lang) + giveTaskScript(lang)
     : "";
-  // Same placement rule for the "Use for voice…" dialog.
-  const voiceDialog = kioskAvailable && bots.length ? voiceUseDialogHtml(lang) + voiceUseScript(lang) : "";
+  // What Crow can do by voice: one Kiosk listing read fills the line on its card.
+  const abilScript = kioskAvailable && voiceRow ? voiceAbilityScript(lang) : "";
   // Item 5 PR1 (spec §D1): the guided wizard is the primary creation path.
   // Option B: once bots exist, "+ New bot" sits in the toolbar and closes
   // the grid as a dashed tile, and the tutorial is one quiet line under the
@@ -270,5 +253,5 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req, ki
     `<th>${t("botbuilder.monThControl", lang)}</th><th>${t("botbuilder.monThCard", lang)}</th><th>${t("botbuilder.monThThread", lang)}</th>` +
     `<th>${t("botbuilder.monThUpdated", lang)}</th></tr></thead>` +
     `<tbody id="pibot-sessions-tbody">${monRows}</tbody></table></div>`);
-  return res.send(layout({ title: "Bot Builder", content: PAGE_CSS + list + giveDialog + voiceDialog + monitor + form }));
+  return res.send(layout({ title: "Bot Builder", content: PAGE_CSS + list + giveDialog + abilScript + monitor + form }));
 }
