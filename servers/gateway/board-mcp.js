@@ -497,7 +497,7 @@ export function createBoardMcpServer(options = {}) {
       askDecision(tdb, cdb, { projectId: project_id, title, tags, decision }, resolveActor(extra)));
 
   tool(server, "board_notify_decisions",
-    "Send the one grouped push for a batch's open decision cards. Pushes at most once per batch (once any card in it was notified, later calls push nothing, and cards added later show on the board only), so repeated calls are harmless; call it once at the end of the batch. A bot may notify only a batch it asked itself (403 otherwise); at most 3 pushes per caller per UTC day (429 push_limit).",
+    "Send the one grouped push for a batch's open decision cards. Pushes at most once per batch (once any card in it was notified, later calls push nothing, and cards added later show on the board only), so repeated calls are harmless; call it once at the end of the batch. Batches are per caller: the name you pass is looked up in your own namespace, so you can only notify cards you asked; at most 3 pushes per caller per UTC day (429 push_limit).",
     { batch: z.string().min(1) },
     async ({ batch }, extra) => {
       // notifications.js fails open on every downstream sender; cdb (crow.db)

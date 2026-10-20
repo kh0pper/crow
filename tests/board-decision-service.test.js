@@ -637,47 +637,6 @@ test("askDecision stores asked_by from the actor", async () => {
   });
 });
 
-test("notifyBatch: a different bot cannot notify another bot's batch (403, nothing pushed or claimed)", async () => {
-  await withStore(async ({ tdb, cdb }) => {
-    const a = await askDecision(tdb, cdb, { projectId: 1, decision: decision() }, BOT);
-    const n = fakeNotifier();
-    await rejects(notifyBatch(tdb, cdb, "batch-1", { ...n, actor: BOT2 }), "forbidden", 403);
-    assert.equal(n.calls.length, 0);
-    assert.equal(dataOf(await getCard(tdb, a.id)).decision.notified_at, undefined);
-  });
-});
-
-test("notifyBatch: a mixed-asker batch is refused for a bot that asked only some of it", async () => {
-  await withStore(async ({ tdb, cdb }) => {
-    await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-1" }) }, BOT);
-    const b = await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-2" }) }, BOT);
-    // askDecision no longer lets a second actor in; simulate a legacy card
-    await tdb.execute({ sql: "UPDATE tasks_items SET data_json=json_remove(data_json,'$.decision.asked_by') WHERE id=?", args: [b.id] });
-    await rejects(notifyBatch(tdb, cdb, "batch-1", { ...fakeNotifier(), actor: BOT }), "forbidden", 403);
-  });
-});
-
-test("notifyBatch: a session or human can notify any batch; a missing actor is refused", async () => {
-  await withStore(async ({ tdb, cdb }) => {
-    await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-1" }) }, BOT);
-    await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-b", batch: "batch-2" }) }, BOT2);
-    const n = fakeNotifier();
-    await rejects(notifyBatch(tdb, cdb, "batch-1", { createNotification: n.createNotification }), "forbidden", 403);
-    assert.deepEqual(await notifyBatch(tdb, cdb, "batch-1", { ...n, actor: SESSION }), { pushed: true, count: 1 });
-    assert.deepEqual(await notifyBatch(tdb, cdb, "batch-2", { ...n, actor: HUMAN }), { pushed: true, count: 1 });
-  });
-});
-
-test("notifyBatch: an unattributed bot can notify its own unattributed batch, not an attributed one", async () => {
-  await withStore(async ({ tdb, cdb }) => {
-    await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-u", batch: "batch-u" }) }, UNATTRIBUTED);
-    await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-a" }) }, BOT);
-    const n = fakeNotifier();
-    assert.deepEqual(await notifyBatch(tdb, cdb, "batch-u", { ...n, actor: UNATTRIBUTED }), { pushed: true, count: 1 });
-    await rejects(notifyBatch(tdb, cdb, "batch-1", { ...n, actor: UNATTRIBUTED }), "forbidden", 403);
-  });
-});
-
 test("notifyBatch: the 4th push of the day by one actor is 429 push_limit, claims untouched", async () => {
   await withStore(async ({ tdb, cdb }) => {
     const n = fakeNotifier();
@@ -729,23 +688,45 @@ test("notifyBatch: a push failure clears all three notify fields", async () => {
   });
 });
 
-test("askDecision: another actor cannot add to a batch that already has open cards (409 batch_owned); the owner still can notify", async () => {
-  await withStore(async ({ tdb, cdb }) => {
-    await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-a", batch: "x" }) }, BOT);
-    await rejects(askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-b", batch: "x" }) }, BOT2), "batch_owned", 409);
-    await rejects(askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-c", batch: "x" }) }, HUMAN), "batch_owned", 409);
-    assert.equal(await countCards(tdb), 1, "no card was created");
-    // the owner may keep adding, and can notify
-    await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-d", batch: "x" }) }, BOT);
-    const n = fakeNotifier();
-    assert.deepEqual(await notifyBatch(tdb, cdb, "x", n), { pushed: true, count: 2 });
-  });
-});
-
 test("notifyBatch: a malformed data_json row elsewhere does not break the cap query", async () => {
   await withStore(async ({ tdb, cdb }) => {
     await tdb.execute({ sql: "INSERT INTO tasks_items (title, data_json) VALUES ('junk', ?)", args: ["{not json"] });
     await askDecision(tdb, cdb, { projectId: 1, decision: decision() }, BOT);
     assert.deepEqual(await notifyBatch(tdb, cdb, "batch-1", fakeNotifier()), { pushed: true, count: 1 });
+  });
+});
+
+test("batches are per asker: two bots using the same name both succeed with separate caps, each notifies only its own", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const ids = { a: [], b: [] };
+    for (let i = 0; i < 5; i++) {
+      ids.a.push((await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: `a-${i}`, batch: "x" }) }, BOT)).id);
+      ids.b.push((await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: `b-${i}`, batch: "x" }) }, BOT2)).id);
+    }
+    await rejects(askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "a-6", batch: "x" }) }, BOT), "batch_full", 429);
+    await rejects(askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "b-6", batch: "x" }) }, BOT2), "batch_full", 429);
+
+    const n = fakeNotifier();
+    assert.deepEqual(await notifyBatch(tdb, cdb, "x", { ...n, actor: BOT2 }), { pushed: true, count: 5 });
+    for (const id of ids.b) assert.ok(dataOf(await getCard(tdb, id)).decision.notified_at);
+    for (const id of ids.a) assert.equal(dataOf(await getCard(tdb, id)).decision.notified_at, undefined, "bot-1's cards untouched");
+    assert.deepEqual(await notifyBatch(tdb, cdb, "x", { ...n, actor: BOT }), { pushed: true, count: 5 });
+    assert.equal(n.calls.length, 2);
+  });
+});
+
+test("notifyBatch: a caller with no cards under that name pushes nothing; sessions and unattributed bots have their own namespaces", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const a = await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-a" }) }, BOT);
+    const u = await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-u" }) }, UNATTRIBUTED);
+    const s = await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-s" }) }, SESSION);
+    const n = fakeNotifier();
+    assert.deepEqual(await notifyBatch(tdb, cdb, "batch-1", { ...n, actor: BOT2 }), { pushed: false, count: 0 });
+    assert.deepEqual(await notifyBatch(tdb, cdb, "batch-1", { ...n, actor: HUMAN }), { pushed: false, count: 0 });
+    assert.deepEqual(await notifyBatch(tdb, cdb, "batch-1", { createNotification: n.createNotification }), { pushed: true, count: 1 }, "missing actor = unattributed bot");
+    assert.deepEqual(await notifyBatch(tdb, cdb, "batch-1", { ...n, actor: SESSION }), { pushed: true, count: 1 });
+    assert.deepEqual(await notifyBatch(tdb, cdb, "batch-1", { ...n, actor: BOT }), { pushed: true, count: 1 });
+    for (const id of [a.id, u.id, s.id]) assert.ok(dataOf(await getCard(tdb, id)).decision.notified_at);
+    assert.equal(n.calls.length, 3);
   });
 });
