@@ -7,18 +7,21 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { rmScratch } from "./helpers/safe-rm.js";
 
-process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-kcdl-home-"));
-process.env.CROW_DATA_DIR = mkdtempSync(join(tmpdir(), "crow-kcdl-data-"));
+const TMP_HOME = mkdtempSync(join(tmpdir(), "crow-kcdl-home-"));
+const TMP_DATA = mkdtempSync(join(tmpdir(), "crow-kcdl-data-"));
+process.env.CROW_HOME = TMP_HOME;
+process.env.CROW_DATA_DIR = TMP_DATA;
 process.env.CROW_DISABLE_HEALTH_MONITOR = "1";
 process.env.CROW_DISABLE_INSTANCE_SYNC = "1";
 process.env.CROW_DISABLE_NOSTR = "1";
 execFileSync(process.execPath, ["scripts/init-db.js"], { env: process.env, stdio: "pipe" });
-after(() => { for (const d of [process.env.CROW_HOME, process.env.CROW_DATA_DIR]) rmSync(d, { recursive: true, force: true }); });
+after(() => { rmScratch(TMP_HOME); rmScratch(TMP_DATA); });
 
 const { createDbClient } = await import("../servers/db.js");
 const { keychainApiRouter } = await import("../servers/gateway/keychain/api.js");
