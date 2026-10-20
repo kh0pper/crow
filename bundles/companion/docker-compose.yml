@@ -3,8 +3,17 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: crow-companion
-    container_name: crow-companion
+      # The gateway passes a hash of the build inputs (Dockerfile + the files it COPYs;
+      # servers/gateway/bundle-build-inputs.js) on every up, so Extensions can tell when
+      # the image is older than the installed scripts ("Rebuild needed").
+      labels:
+        crow.build-inputs: "${CROW_BUILD_INPUTS:-}"
+    # One name per compose project (Compose sets COMPOSE_PROJECT_NAME to the project's
+    # name while it reads this file): the primary's project "companion" keeps
+    # crow-companion; a second instance (COMPOSE_PROJECT_NAME=companion-<x> in its .env)
+    # gets its own image and container instead of replacing the primary's.
+    image: crow-${COMPOSE_PROJECT_NAME:-companion}
+    container_name: crow-${COMPOSE_PROJECT_NAME:-companion}
     restart: unless-stopped
     network_mode: host
     volumes:
@@ -13,8 +22,12 @@ services:
       - companion-history:/app/chat_history
       # Unset → an empty folder inside the bundle (an empty host path is a compose error).
       - ${EIKANYA_MODELS_DIR:-./eikanya-models}:/app/live2d-models/eikanya:ro
-      - ${CROW_DB_PATH:-~/.crow/data/crow.db}:/crow-data/crow.db:ro
-      - ${HOME}/.crow/bundles:/crow-bundles:ro
+      # Crow's database, read-only: generate-config.py reads the AI/TTS profiles, providers
+      # and bots; notify-bridge.py reads notifications. This instance's own (CROW_HOME /
+      # CROW_DATA_DIR), never a fixed ~/.crow.
+      - ${CROW_DB_PATH:-${CROW_DATA_DIR:-${CROW_HOME:-~/.crow}/data}/crow.db}:/crow-data/crow.db:ro
+      # (No mount of the extensions folder: the Calls scripts come from the gateway —
+      # scripts/fetch-calls-scripts.sh.)
     environment:
       # Legacy per-container voice override. Leave EMPTY so the active TTS
       # profile's defaultVoice drives the voice (a non-empty value here is

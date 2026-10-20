@@ -189,8 +189,8 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
 
   // Host-path policy: an ALLOWLIST everywhere. Inside Crow's home and data folder: the
   // bundle's own folder, CROW_HOME/<id> or <id>-*, <data>/<id>, CROW_HOME/media (library
-  // defaults), and, read-only with privileged consent, crow.db and the extensions folder
-  // (companion). Outside them: /etc/localtime read-only, the Docker socket and /proc, /sys
+  // defaults), and, read-only with privileged consent, crow.db and (companion only)
+  // CROW_HOME/live2d-models. Outside them: /etc/localtime read-only, the Docker socket and /proc, /sys
   // (read-only, consent), and folders the owner chose (ctx.operatorRoots). Under a chosen
   // folder a floor still applies: system folders, PATH folders, the gateway checkout, home
   // dot-folders and ~/bin, a whole home folder, a git checkout, and any folder that
@@ -251,7 +251,11 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
         if (!isFile) return null;
       }
       if (first === "media" && rel !== "media") return null;
-      if (readOnly && isPrivilegedAllowed && p === join(roots.crowHome, "bundles")) return null;
+      // CROW_HOME/live2d-models: Live2D avatar art the AI Companion shows (its Eikanya
+      // models folder). Read-only, for the companion only, with its privileged consent.
+      // (The whole extensions folder, CROW_HOME/bundles, is never mountable: it holds
+      // every extension's .env.)
+      if (readOnly && isPrivilegedAllowed && ownId === "companion" && first === "live2d-models") return null;
       return refuse(`${what}: mounts a path in Crow's home that is not this bundle's own`);
     }
     // Outside Crow's home and data folder it is an ALLOWLIST too: the fixed system entries

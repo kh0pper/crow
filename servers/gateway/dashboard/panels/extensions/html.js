@@ -385,8 +385,18 @@ export function buildExtensionsHTML({
       if (repinReason) {
         actions += `<button class="btn btn-sm btn-primary bundle-action" data-action="repin" data-id="${escapeHtml(id)}" title="${escapeHtml(t("extensions.repinHint", lang))}">${t("extensions.repin", lang)}</button>`;
       }
+      // The running image is older than the installed build inputs (bundle-build-inputs.js).
+      const buildStale = isDocker && status?.buildStale === true;
+      const rebuildBadge = buildStale
+        ? `<span class="ext-installed__needsconfig" data-testid="rebuild-needed" title="${escapeHtml(t("extensions.rebuildHint", lang))}">${badge(t("extensions.rebuildNeeded", lang), "draft")}</span>`
+        : "";
       if (isDocker) {
-        if (isRunning) {
+        if (isRunning && buildStale) {
+          // Same start action (up --build): the label and status text say it builds.
+          actions += `
+              <button class="btn btn-sm btn-secondary bundle-action" data-action="stop" data-id="${escapeHtml(id)}">${t("extensions.stop", lang)}</button>
+              <button class="btn btn-sm btn-primary bundle-action" data-action="start" data-rebuild="1" data-id="${escapeHtml(id)}" title="${escapeHtml(t("extensions.rebuildHint", lang))}">${t("extensions.rebuild", lang)}</button>`;
+        } else if (isRunning) {
           actions += `
               <button class="btn btn-sm btn-secondary bundle-action" data-action="stop" data-id="${escapeHtml(id)}">${t("extensions.stop", lang)}</button>
               <button class="btn btn-sm btn-secondary bundle-action" data-action="start" data-id="${escapeHtml(id)}" title="${t("extensions.restart", lang)}">${t("extensions.restart", lang)}</button>`;
@@ -406,6 +416,7 @@ export function buildExtensionsHTML({
             ${statusBadge}
             ${needsSetupBadge}
             ${needsRepinBadge}
+            ${rebuildBadge}
             <span class="ext-installed__meta">v${escapeHtml(info.version || registryEntry?.version || "?")} · ${t("extensions.installedDate", lang)} ${formatDate(info.installed_at || info.installedAt)}</span>
           </div>
           <div class="ext-installed__actions">${actions}</div>

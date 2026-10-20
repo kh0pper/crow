@@ -81,6 +81,32 @@ Todo personaje del companion recibe `crow-wm` (gestor de ventanas) y `crow-stora
 
 La razón de privacidad es la misma en ambos casos: el personaje predeterminado de un kiosko compartido no debe poder buscar en la memoria del propietario solo por ejecutarse sobre la infraestructura de Crow — o bien un bot debe activarse deliberadamente, o la persona del perfil del hogar debe llevar su propio alcance de memoria por usuario.
 
+## Ciclo de vida: instalar, actualizar, reconstruir
+
+El Companion construye su propia imagen, así que su copia instalada (`CROW_HOME/bundles/companion/`) lleva lo necesario para construirla: `docker-compose.yml`, `Dockerfile`, `.dockerignore` y `scripts/`. Extensiones y Ajustes ejecutan Compose ahí, como con cualquier otra extensión compose. Un cambio de versión vuelve a copiar esos archivos (`refreshFiles` en el manifiesto; nunca `.env` ni datos) pero no reinicia nada.
+
+- **Hay que reconstruir.** Los scripts se copian a la imagen al construirla, así que un script cambiado necesita reconstruir, no reiniciar. Cada `compose up` que ejecuta el gateway pasa un hash de las entradas de la construcción (el Dockerfile y los archivos que copia; `servers/gateway/bundle-build-inputs.js`), que la imagen lleva como la etiqueta `crow.build-inputs`. Cuando la etiqueta del contenedor en ejecución no coincide con los archivos instalados (o no tiene ninguna: construido a mano, o antes de 1.1.0), Extensiones muestra **Hay que reconstruir** y un botón **Reconstruir**. Reconstruir, Iniciar y Reiniciar ejecutan `compose build` (una construcción sin cambios usa la caché) y después `up -d --no-build`, así que el contenedor anterior sigue funcionando mientras se construye la imagen. Se ejecuta un solo inicio a la vez por extensión.
+- **Guardar en Ajustes** vuelve a crear el contenedor por la misma ruta de inicio, con la revisión de seguridad de la instalación, y solo construye cuando la imagen es más antigua que sus entradas (editar la persona nunca reconstruye). Si el reinicio falla, la página lo dice (los ajustes se guardan de todos modos).
+- **Nombres.** Compose define `COMPOSE_PROJECT_NAME` mientras lee el archivo: el proyecto `companion` de la instancia principal conserva `crow-companion` como nombre de imagen y de contenedor, y `companion_companion-*` como nombres de volúmenes. Una segunda instancia define `COMPOSE_PROJECT_NAME=companion-<x>` en su `.env` y tiene sus propios nombres. Definirlo en una instalación existente cambia a volúmenes `<x>_companion-*` nuevos y vacíos (el historial de chat se queda en los anteriores).
+
+### Qué monta el contenedor
+
+| Host | Contenedor | Para qué |
+|---|---|---|
+| volúmenes `companion-models`, `companion-cache`, `companion-history` | `/app/models`, `/app/cache`, `/app/chat_history` | modelos, cachés, historial de chat |
+| `EIKANYA_MODELS_DIR` (predeterminado `./eikanya-models`), solo lectura | `/app/live2d-models/eikanya` | avatares Live2D adicionales. `CROW_HOME/live2d-models` se permite en solo lectura con el consentimiento de instalación. |
+| el `crow.db` de esta instancia (`CROW_DB_PATH`, si no `data/crow.db` de `CROW_DATA_DIR`/`CROW_HOME`), solo lectura | `/crow-data/crow.db` | `generate-config.py` lee perfiles de IA/TTS, proveedores y bots; `notify-bridge.py` lee notificaciones |
+
+La base de datos se monta como archivo completo, en solo lectura: el contenedor puede leer todas las tablas (incluidas las claves de proveedores) y nunca puede escribir en ella. Solo se monta el archivo principal, no el `-wal`, así que el contenedor lee el último estado consolidado; un cambio hecho segundos antes de un reinicio puede faltar hasta la siguiente consolidación.
+
+El contenedor **no** monta la carpeta de extensiones (guarda el `.env` de cada extensión). Cuando la extensión Calls está activa, `scripts/fetch-calls-scripts.sh` descarga sus dos scripts de navegador desde el gateway (`/calls/scripts/`, servidos mientras `CROW_CALLS_ENABLED=1`) al arrancar, espera hasta 60 s a un gateway que aún está arrancando y solo los incrusta cuando la respuesta es JavaScript. "Activa" significa habilitada: el gateway sirve su propia copia cuando Calls está habilitada pero no instalada.
+
+### Instalaciones que se ejecutaban desde el checkout del repositorio
+
+Una instalación anterior a 1.1.0 puede tener un contenedor iniciado desde `bundles/companion/` del repositorio (etiqueta de Compose `com.docker.compose.project.working_dir`), con una copia instalada sin archivo compose. Tras la actualización a 1.1.0 la copia instalada lo tiene; el nombre del proyecto (`companion`) y los nombres de los volúmenes son los mismos, así que Extensiones encuentra el contenedor en ejecución y Reconstruir lo vuelve a crear desde la copia instalada con los mismos volúmenes. La ruta de inicio compara primero los dos archivos `.env`: mientras exista el contenedor de la otra carpeta y los archivos difieran en alguna variable que use el archivo compose, Iniciar, Reconstruir y Ajustes se niegan y nombran las variables (no sus valores). Copia los ajustes que quieras al `.env` instalado y vuelve a iniciar. A partir de entonces, inicia el Companion solo desde Extensiones (o con Compose en la carpeta instalada), nunca desde el checkout del repositorio: eso devolvería el contenedor al archivo compose y al `.env` del repositorio.
+
+Con un archivo compose en la carpeta instalada, **Quitar** en Extensiones detiene y elimina el contenedor y, con "borrar datos", también sus volúmenes, incluido el historial de chat.
+
 ## Solución de problemas
 
 - **"error calling the chat endpoint…"** — el `conf.yaml` generado está apuntando OLVV a un endpoint que rechaza la solicitud. Revisa `docker logs crow-companion` para ver el error del upstream. Causas comunes: un perfil de nube que rechaza un arreglo `tools: []` vacío (usa un modelo local, que lo tolera), o un fallo del puente MCP por el que no se carga ninguna herramienta. El puente apunta a los montajes MCP del gateway (`/router`, `/storage`, `/wm`) en `CROW_MCP_BRIDGE_PORT` (predeterminado `3001`); `/router`, `/storage` y `/wm` requieren un token MCP local (genéralo en el panel Connect del dashboard; `generate-config.py` lo lee de la variable de entorno `CROW_LOCAL_MCP_TOKEN` y lo incrusta en `mcp_servers.json` — si no está definida, los puentes reciben 401).

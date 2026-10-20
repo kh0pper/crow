@@ -78,16 +78,26 @@ test("model: sensitive host paths are refused even with privileged consent; thei
   assert.equal(check(svc({ volumes: [bind(join(CROW_HOME, "workspace", "db"))] }), { manifest: { id: "other" } }).valid, false, "another bundle's CROW_HOME folder");
 });
 
-test("model: the narrow exceptions — /etc/localtime read-only; crow.db and the extensions folder read-only only with privileged consent", () => {
+test("model: the narrow exceptions — /etc/localtime read-only; crow.db and the Live2D models folder read-only only with privileged consent", () => {
   assert.equal(check(svc({ volumes: [bind("/etc/localtime", true)] })).valid, true);
   assert.equal(check(svc({ volumes: [bind("/etc/localtime")] })).valid, false, "read-write localtime");
   const db = join(DATA, "crow.db");
   assert.equal(check(svc({ volumes: [bind(db, true)] }), { manifest: PRIV, consent: true }).valid, true);
   assert.equal(check(svc({ volumes: [bind(db)] }), { manifest: PRIV, consent: true }).valid, false, "read-write crow.db");
   assert.equal(check(svc({ volumes: [bind(db, true)] })).valid, false, "no consent");
+  // The extensions folder holds every bundle's .env: never mountable, not even read-only
+  // with privileged consent (the Companion, its only user, now fetches what it needs).
   const bundles = join(CROW_HOME, "bundles");
-  assert.equal(check(svc({ volumes: [bind(bundles, true)] }), { manifest: PRIV, consent: true }).valid, true);
-  assert.equal(check(svc({ volumes: [bind(bundles, true)] })).valid, false);
+  assert.equal(check(svc({ volumes: [bind(bundles, true)] }), { manifest: PRIV, consent: true }).valid, false, "the whole extensions folder");
+  assert.equal(check(svc({ volumes: [bind(join(bundles, "calls", "scripts"), true)] }), { manifest: PRIV, consent: true }).valid, false, "another bundle's folder, even read-only");
+  // Live2D model art (the Companion's Eikanya avatars) — read-only with privileged consent.
+  const live2d = join(CROW_HOME, "live2d-models");
+  const COMPANION = { ...PRIV, id: "companion" };
+  assert.equal(check(svc({ volumes: [bind(live2d, true)] }), { manifest: COMPANION, consent: true }).valid, true);
+  assert.equal(check(svc({ volumes: [bind(live2d)] }), { manifest: COMPANION, consent: true }).valid, false, "read-write live2d-models");
+  assert.equal(check(svc({ volumes: [bind(live2d, true)] }), { manifest: { id: "companion" } }).valid, false, "no consent");
+  assert.equal(check(svc({ volumes: [bind(join(live2d, "sub"), true)] }), { manifest: COMPANION, consent: true }).valid, true, "a model folder inside it");
+  assert.equal(check(svc({ volumes: [bind(live2d, true)] }), { manifest: { ...PRIV, id: "other" }, consent: true }).valid, false, "another privileged bundle");
   const dir = bundleDir();
   assert.equal(check(svc({ volumes: [bind(join(dir, "data"))] }), { dir }).valid, true, "the bundle's own folder");
   assert.equal(check(svc({ volumes: [bind(join(bundles, "other", ".env"), true)] }), { dir }).valid, false, "another bundle's folder");

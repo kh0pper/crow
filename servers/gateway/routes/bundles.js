@@ -60,6 +60,7 @@ import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRe
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
 import { checkComposeModel, loadComposeModel, usesHostNetwork, resolveHostPath } from "../compose-guard.js";
+import { buildInputsHash, tracksBuildInputs, containerBuildLabel } from "../bundle-build-inputs.js";
 import { grantCandidates, activeRoots, otherBundlesRoots, migrateGrants, recordGrants, dropGrants, composeReferencedKeys, readGrants, ungrantedFolderKeys } from "../folder-grants.js";
 import { isLocalPasswordSession } from "../dashboard/local-session.js";
 import { resolveDataDir } from "../../db.js";
@@ -1227,6 +1228,7 @@ async function composeOwnership(bundleId, bundleDir, manifest) {
   const { owner, unrelated } = await classifyProjectOwners({ project, projectDir, bundleId, crowHome: CROW_HOME, runner });
   return {
     project,
+    unrelated,
     refusal: owner ? `This extension's containers (compose project "${project}") belong to another Crow install on this host (${owner}): manage them from there.` : null,
     warning: unrelated.length ? `compose project "${project}" also has containers started from ${unrelated.join(", ")} (legacy path) — continuing` : null,
   };
@@ -1240,8 +1242,43 @@ export async function composeOwnershipCheck(bundleId) {
 async function runCompose(composeArgs, opts = {}) {
   if (_composeRunnerForTest) return _composeRunnerForTest(composeArgs, opts);
   const compose = await getComposeCmd();
-  return run(compose.cmd, [...compose.prefix, ...composeArgs], { ...opts, env: composeEnv(opts.env) });
+  // extraEnv: values the gateway itself computes for this run (CROW_BUILD_INPUTS), added
+  // after composeEnv's allowlist filter.
+  const { extraEnv, ...rest } = opts;
+  return run(compose.cmd, [...compose.prefix, ...composeArgs], { ...rest, env: { ...composeEnv(rest.env), ...(extraEnv || {}) } });
 }
+
+// A build can take far longer than run()'s 300 s default and print more than execFile's
+// 1 MB default buffer (the Companion's image is ~14 GB): a build step gets both raised.
+const BUILD_TIMEOUT_MS = 45 * 60_000;
+const BUILD_MAX_BUFFER = 16 * 1024 * 1024;
+
+/**
+ * The compose calls that bring a bundle up. A compose with `build:` that should build
+ * runs `build` first (long, and harmless if the gateway is restarted halfway: the old
+ * container keeps running) and then a quick `up -d --no-build`, so the window in which
+ * the old container is gone and the new one not yet started is seconds, not the whole
+ * build. A compose that stamps the build-input label (bundle-build-inputs.js) gets
+ * CROW_BUILD_INPUTS on both calls. `build`: true (build; an unchanged build is a cache
+ * hit) or false (reuse the image).
+ */
+function composeStartSteps(bundleDir, composeText, { recreate = false, build = true, timeout } = {}) {
+  const hasBuild = /^\s+build:/m.test(composeText);
+  const extraEnv = {};
+  if (hasBuild && tracksBuildInputs(composeText)) {
+    const hash = buildInputsHash(bundleDir);
+    if (hash) extraEnv.CROW_BUILD_INPUTS = hash;
+  }
+  const env = Object.keys(extraEnv).length ? { extraEnv } : {};
+  const up = ["up", "-d", ...(hasBuild ? ["--no-build"] : []), ...(recreate ? ["--force-recreate"] : [])];
+  const upOpts = { cwd: bundleDir, ...(timeout ? { timeout } : {}), ...env };
+  if (!hasBuild || !build) return [{ args: up, opts: upOpts }];
+  return [
+    { args: ["build"], opts: { cwd: bundleDir, timeout: Math.max(timeout || 0, BUILD_TIMEOUT_MS), maxBuffer: BUILD_MAX_BUFFER, ...env } },
+    { args: up, opts: upOpts },
+  ];
+}
+export { composeStartSteps as _composeStartStepsForTest };
 
 /**
  * True when any of the bundle's compose services is running. A failed `ps`
@@ -1250,14 +1287,18 @@ async function runCompose(composeArgs, opts = {}) {
  */
 async function composeServiceRunning(bundleDir) {
   try {
-    const { stdout } = await runCompose(["ps", "--format", "json"], { cwd: bundleDir });
-    const rows = String(stdout || "").trim().split("\n").filter(Boolean).flatMap((line) => {
-      try { const j = JSON.parse(line); return Array.isArray(j) ? j : [j]; } catch { return []; }
-    });
-    return rows.some((c) => c && c.State === "running");
+    return (await composePsRows(bundleDir)).some((c) => c && c.State === "running");
   } catch {
     return true;
   }
+}
+
+/** `compose ps --format json` rows (both the one-per-line and the array forms); throws on a failed ps. */
+async function composePsRows(bundleDir, { all = false } = {}) {
+  const { stdout } = await runCompose(["ps", ...(all ? ["-a"] : []), "--format", "json"], { cwd: bundleDir });
+  return String(stdout || "").trim().split("\n").filter(Boolean).flatMap((line) => {
+    try { const j = JSON.parse(line); return Array.isArray(j) ? j : [j]; } catch { return []; }
+  });
 }
 
 /** Read JSON file with fallback */
@@ -1833,6 +1874,102 @@ async function runComposeConfig(args, { cwd, env }) {
  * e.g. no extra compose files; at Start an operator's own override is part of the model
  * that is checked instead. The model check reads what Compose will actually apply.
  */
+/**
+ * A container of this bundle's compose project that was started from ANOTHER folder (a
+ * repo checkout, from before the installed copy carried its compose file) ran with that
+ * folder's .env. Re-creating it from the installed copy applies the installed .env
+ * instead, so when the two disagree on any variable the compose file uses, refuse until
+ * the owner reconciles them (names only, never values). A folder that no longer exists
+ * can't be compared and is skipped.
+ */
+function legacyEnvConflict(bundleDir, composeText, unrelated) {
+  const keys = composeReferencedKeys(composeText);
+  let mine = {};
+  try { mine = parseEnvText(readFileSync(join(bundleDir, ".env"), "utf8")); } catch { /* none */ }
+  for (const d of unrelated || []) {
+    if (!existsSync(d)) continue;
+    let theirs = {};
+    try { theirs = parseEnvText(readFileSync(join(d, ".env"), "utf8")); } catch { /* none */ }
+    const differ = [...keys].filter((k) => (mine[k] ?? "") !== (theirs[k] ?? "")).sort();
+    if (differ.length) return { dir: d, keys: differ };
+  }
+  return null;
+}
+
+// One start at a time per bundle (a double-clicked Rebuild, or Rebuild plus a Settings save,
+// would otherwise run two `compose up` on the same project).
+const _starting = new Set();
+
+/**
+ * Start (or re-create) an installed bundle's containers on THIS host — the one start path
+ * for Extensions Start/Restart/Rebuild and the Companion's Settings saves. Runs the same
+ * checks every time: model orchestration, compose-project ownership, the legacy-folder
+ * .env check, and the install security check on what Compose will apply now (Configure
+ * may have changed .env); the installed bundle keeps the consent given at install.
+ *
+ * build: "always" (Extensions: build, a cache hit when nothing changed), "if-stale" (Settings:
+ * build only when the image is older than its build inputs, or there is no container), or
+ * "never".
+ *
+ * @returns {Promise<{ok: true, message: string, built: boolean} | {ok: false, status: number, error: string, code?: string}>}
+ */
+export async function startInstalledBundle(bundleId, { recreate = false, crossHost = false, build = "always" } = {}) {
+  if (!isValidBundleId(bundleId)) return { ok: false, status: 400, error: "Invalid bundle ID" };
+  const orchRefusal = bundleOrchestrationRefusal(bundleId);
+  if (orchRefusal) return { ok: false, status: orchRefusal.status, error: orchRefusal.error, code: orchRefusal.code };
+  const bundleDir = join(BUNDLES_DIR, bundleId);
+  const composePath = join(bundleDir, "docker-compose.yml");
+  if (!existsSync(composePath)) return { ok: false, status: 404, error: `Bundle '${bundleId}' has no Docker containers` };
+  if (_starting.has(bundleId)) return { ok: false, status: 409, error: `'${bundleId}' is already starting or rebuilding — wait for it to finish`, code: "bundle_start_in_progress" };
+  _starting.add(bundleId);
+  try {
+    const text = readFileSync(composePath, "utf8");
+    const own = await composeOwnership(bundleId, bundleDir, getInstalledFirstManifest(bundleId));
+    if (own.refusal) return { ok: false, status: 409, error: own.refusal, code: "compose_project_foreign" };
+    if (own.warning) console.warn(`[bundles] ${bundleId} start: ${own.warning}`);
+    const conflict = legacyEnvConflict(bundleDir, text, own.unrelated);
+    if (conflict) {
+      return {
+        ok: false, status: 409, code: "legacy_env_differs",
+        error: `The running container was started from ${conflict.dir}, whose .env differs from the installed one (${join(bundleDir, ".env")}) in: ${conflict.keys.join(", ")}. Starting from the installed copy would apply the installed values. Copy the settings you want into the installed .env, then start again.`,
+      };
+    }
+    const sc = startConsent(bundleId, { crossHost });
+    const gate = await checkBundleCompose(bundleDir, { bundleId, manifest: sc.manifest, consentVerified: sc.consentVerified, textCheck: false });
+    if (!gate.valid) return { ok: false, status: 403, error: `Security check failed: ${gate.reason}`, code: "compose_security_check" };
+    let doBuild = build !== "never";
+    if (build === "if-stale") doBuild = await imageStale(bundleDir, text);
+    const steps = composeStartSteps(bundleDir, text, { recreate, build: doBuild });
+    for (const st of steps) await runCompose(st.args, st.opts);
+    return { ok: true, built: steps.length > 1, message: `Bundle '${bundleId}' started` };
+  } catch (err) {
+    const detail = String(err.stderr || err.message || err).trim();
+    return { ok: false, status: 500, error: `Failed to start: ${detail.slice(-2000)}` };
+  } finally {
+    _starting.delete(bundleId);
+  }
+}
+
+/**
+ * For build "if-stale": true when the bundle stamps build inputs and a container (any
+ * state) carries a different label, or there is no container yet; false when every
+ * container matches or the bundle does not track build inputs (then nothing says a
+ * build is needed, and a Settings save stays fast).
+ */
+async function imageStale(bundleDir, composeText) {
+  if (!tracksBuildInputs(composeText)) return false;
+  const want = buildInputsHash(bundleDir);
+  if (!want) return false;
+  let rows;
+  try { rows = await composePsRows(bundleDir, { all: true }); } catch { return true; }
+  if (!rows.length) return true;
+  return rows.some((r) => containerBuildLabel(r) !== want);
+}
+
+// The Companion's settings-section.js (loaded from the INSTALLED bundle dir) restarts the
+// container through this; a process-wide registry, so it never imports this module itself.
+globalThis[Symbol.for("crow.startInstalledBundle")] = startInstalledBundle;
+
 export async function checkBundleCompose(bundleDir, { bundleId, manifest, consentVerified = false, textCheck = true, operatorRoots } = {}) {
   if (textCheck) {
     const t = validateComposeFile(join(bundleDir, "docker-compose.yml"), bundleId, { manifest, consentVerified });
@@ -2825,11 +2962,10 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
 
         // Start containers (add --build if compose file has build directives)
         const composeContent = readFileSync(composePath, "utf8");
-        const needsBuild = /^\s+build:/m.test(composeContent);
-        const upArgs = needsBuild ? ["up", "-d", "--build"] : ["up", "-d"];
-        appendLog(job, needsBuild ? "Building and starting containers..." : "Starting containers...");
+        const steps = composeStartSteps(destDir, composeContent, { timeout: pullTimeoutMs(manifest) });
+        appendLog(job, steps.length > 1 ? "Building and starting containers..." : "Starting containers...");
         try {
-          await runCompose(upArgs, { cwd: destDir, timeout: pullTimeoutMs(manifest) });
+          for (const st of steps) await runCompose(st.args, st.opts);
           appendLog(job, "Containers started");
         } catch (err) {
           const detail = err.stderr || err.message;
@@ -3867,6 +4003,14 @@ export default function bundlesRouter() {
     }
 
     // Local path
+    if (action === "start") {
+      // recreate:true (the Configure dialog's explicit Restart): new env only
+      // reaches a container that is re-created, so force it.
+      const r = await startInstalledBundle(bundleId, { recreate: req?.body?.recreate === true, crossHost: !!req?.crossHostAuth });
+      if (!r.ok) return res.status(r.status).json({ error: r.error, ...(r.code ? { code: r.code } : {}) });
+      return res.json({ ok: true, message: r.message });
+    }
+    if (action !== "stop") return res.status(400).json({ error: `unsupported action: ${action}` });
     const orchRefusal = bundleOrchestrationRefusal(bundleId);
     if (orchRefusal) return res.status(orchRefusal.status).json({ error: orchRefusal.error, code: orchRefusal.code });
 
@@ -3879,24 +4023,7 @@ export default function bundlesRouter() {
       const own = await composeOwnership(bundleId, bundleDir, getInstalledFirstManifest(bundleId));
       if (own.refusal) return res.status(409).json({ error: own.refusal, code: "compose_project_foreign" });
       if (own.warning) console.warn(`[bundles] ${bundleId} ${action}: ${own.warning}`);
-      if (action === "start") {
-        // The same check as install, on what Compose will apply NOW (Configure may have
-        // changed .env; an override may sit next to the file). The installed bundle was
-        // consented to at install, so a consent bundle keeps its consent here.
-        const sc = startConsent(bundleId, { crossHost: !!req?.crossHostAuth });
-        const gate = await checkBundleCompose(bundleDir, { bundleId, manifest: sc.manifest, consentVerified: sc.consentVerified, textCheck: false });
-        if (!gate.valid) return res.status(403).json({ error: `Security check failed: ${gate.reason}`, code: "compose_security_check" });
-        const content = readFileSync(composePath, "utf8");
-        const upArgs = /^\s+build:/m.test(content) ? ["up", "-d", "--build"] : ["up", "-d"];
-        // recreate:true (the Configure dialog's explicit Restart): new env only
-        // reaches a container that is re-created, so force it.
-        if (req?.body?.recreate === true) upArgs.push("--force-recreate");
-        await runCompose(upArgs, { cwd: bundleDir });
-      } else if (action === "stop") {
-        await runCompose(["stop"], { cwd: bundleDir });
-      } else {
-        return res.status(400).json({ error: `unsupported action: ${action}` });
-      }
+      await runCompose(["stop"], { cwd: bundleDir });
       return res.json({ ok: true, message: `Bundle '${bundleId}' ${action}ped` });
     } catch (err) {
       return res.status(500).json({ error: `Failed to ${action}: ${err.stderr || err.message}` });

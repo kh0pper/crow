@@ -60,10 +60,11 @@ bash /app/scripts/inject-device-config.sh
 echo "Injecting face tracking..."
 bash /app/scripts/inject-face-tracking.sh
 
-# If calls bundle is installed, layer enhancements on top
-CALLS_DIR="/crow-bundles/calls"
-if [ -d "$CALLS_DIR/scripts" ]; then
-  echo "Calls bundle detected, injecting enhancements..."
+# If the Calls extension is on, layer its enhancements on top. Its two browser
+# scripts come from this Crow's gateway (no mount of other extensions' folders).
+CALLS_DIR="/tmp/crow-calls"
+if bash /app/scripts/fetch-calls-scripts.sh "$CALLS_DIR"; then
+  echo "Calls extension detected, injecting enhancements..."
   bash /app/scripts/inject-call-enhancements.sh "$CALLS_DIR"
 fi
 

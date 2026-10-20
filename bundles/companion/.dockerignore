@@ -1,0 +1,8 @@
+# Only what the Dockerfile COPYs needs to reach the build: never this instance's
+# settings and secrets, its avatar folder, or the host-side pet build patches.
+.env
+.env.*
+eikanya-models
+patches
+node_modules
+**/__pycache__

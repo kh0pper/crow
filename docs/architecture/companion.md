@@ -81,6 +81,32 @@ Every companion character gets `crow-wm` (window manager) and `crow-storage` (up
 
 The privacy rationale is the same in both cases: a shared kiosk's default character must not be able to search the owner's memory store just by virtue of running on Crow's infrastructure — either a bot must be deliberately opted in, or the household-profile persona must carry its own per-user memory scoping.
 
+## Lifecycle: install, update, rebuild
+
+The Companion builds its own image, so its installed copy (`CROW_HOME/bundles/companion/`) carries the build: `docker-compose.yml`, `Dockerfile`, `.dockerignore` and `scripts/`. Extensions and Settings run Compose there, like every other compose extension. A version bump re-copies those files (`refreshFiles` in the manifest; never `.env` or data) but restarts nothing.
+
+- **Rebuild needed.** The scripts are copied into the image at build time, so a changed script needs a rebuild, not a restart. Every `compose up` the gateway runs passes a hash of the build inputs (the Dockerfile and the files it copies; `servers/gateway/bundle-build-inputs.js`), which the image carries as the `crow.build-inputs` label. When the running container's label differs from the installed files (or it has none: built by hand, or before 1.1.0), Extensions shows **Rebuild needed** and a **Rebuild** button. Rebuild, Start and Restart run `compose build` (an unchanged build is a cache hit) and then `up -d --no-build`, so the old container keeps running while the image builds. One start runs at a time per extension.
+- **Settings saves** re-create the container through the same start path, with the install security check, and build only when the image is older than its build inputs (a persona edit never rebuilds). If the restart fails, the page says so (the settings are saved either way).
+- **Names.** Compose sets `COMPOSE_PROJECT_NAME` while it reads the file: the primary's project `companion` keeps `crow-companion` as image and container name and `companion_companion-*` as volume names. A second instance sets `COMPOSE_PROJECT_NAME=companion-<x>` in its `.env` and gets its own names. Setting it on an existing install switches to new, empty `<x>_companion-*` volumes (the chat history stays in the old ones).
+
+### What the container mounts
+
+| Host | Container | Why |
+|---|---|---|
+| `companion-models`, `companion-cache`, `companion-history` volumes | `/app/models`, `/app/cache`, `/app/chat_history` | models, caches, chat history |
+| `EIKANYA_MODELS_DIR` (default `./eikanya-models`), read-only | `/app/live2d-models/eikanya` | extra Live2D avatars. `CROW_HOME/live2d-models` is allowed read-only with the install consent. |
+| this instance's `crow.db` (`CROW_DB_PATH`, else `CROW_DATA_DIR`/`CROW_HOME` `data/crow.db`), read-only | `/crow-data/crow.db` | `generate-config.py` reads AI/TTS profiles, providers and bots; `notify-bridge.py` reads notifications |
+
+The database mount is the whole file, read-only: the container can read every table (provider keys included) and can never write it. Only the main file is mounted, not the `-wal`, so the container reads the last checkpointed state; a change made seconds before a restart can be missing until the next checkpoint.
+
+The container does **not** mount the extensions folder (it holds every extension's `.env`). When the Calls extension is on, `scripts/fetch-calls-scripts.sh` fetches its two browser scripts from the gateway (`/calls/scripts/`, served while `CROW_CALLS_ENABLED=1`) at start, waiting up to 60 s for a gateway that is still starting, and inlines them only when the answer is JavaScript. "On" means enabled: the gateway serves its own copy when Calls is enabled but not installed.
+
+### Installs that ran from the repo checkout
+
+An install from before 1.1.0 can have a container started from the repo's `bundles/companion/` (Compose label `com.docker.compose.project.working_dir`), with an installed copy that has no compose file. After the 1.1.0 refresh the installed copy has one; the project name (`companion`) and volume names are the same, so Extensions finds the running container and a Rebuild re-creates it from the installed copy with the same volumes. The start path compares the two `.env` files first: while the container from the other folder exists and the files differ in any variable the compose file uses, Start, Rebuild and Settings refuse and name the variables (not their values). Copy the settings you want into the installed `.env`, then start. From then on, start the Companion only from Extensions (or Compose in the installed folder), never from the repo checkout: that would put the container back on the repo's compose file and `.env`.
+
+With a compose file in the installed folder, Extensions **Remove** stops and removes the container, and with "delete data" also its volumes, chat history included.
+
 ## Troubleshooting
 
 - **"error calling the chat endpoint…"** — the generated `conf.yaml` is pointing OLVV at an endpoint that rejects the request. Check `docker logs crow-companion` for the upstream error. Common causes: a cloud profile rejecting an empty `tools: []` array (use a local model, which tolerates it), or the MCP bridge failing so no tools load. The bridge targets the gateway's MCP mounts (`/router`, `/storage`, `/wm`) on `CROW_MCP_BRIDGE_PORT` (default `3001`); `/router`, `/storage`, and `/wm` all require a local MCP token (generate it in the dashboard's Connect panel; `generate-config.py` reads it from the `CROW_LOCAL_MCP_TOKEN` env var and embeds it in `mcp_servers.json` — unset, the bridges get 401s).

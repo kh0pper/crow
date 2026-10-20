@@ -1,15 +1,15 @@
 #!/bin/bash
 # Inject Crow Calls bundle enhancements into the companion frontend.
-# Called from entrypoint.sh when the calls bundle is detected at /crow-bundles/calls/.
+# Called from entrypoint.sh when fetch-calls-scripts.sh got the Calls scripts from the gateway.
 #
 # This script:
-# 1. Injects calls-bundle scripts (WebRTC + voice panel) from the read-only volume
+# 1. Injects calls-bundle scripts (WebRTC + voice panel) fetched into $CALLS_DIR/scripts
 # 2. Injects a bridge that disables companion's own WebRTC signaling (CrowCalls takes over)
 # 3. Extends CrowCalls.validModes to include "avatar" and "both"
 # 4. Adds an AI companion pill to the calls voice panel
 # 5. Adds avatar mode placeholder badge support
 
-CALLS_DIR="${1:-/crow-bundles/calls}"
+CALLS_DIR="${1:-/tmp/crow-calls}"
 FRONTEND_HTML="/app/frontend/index.html"
 GATEWAY_URL="${CROW_GATEWAY_URL:-}"
 

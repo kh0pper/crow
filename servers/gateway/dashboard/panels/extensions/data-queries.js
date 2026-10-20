@@ -16,6 +16,7 @@ import { loadCollections } from "./collections.js";
 // Router, db.js, peer-forward, cross-host-auth and the settings registry into the
 // panel's render path (it already imports ./collections.js, so that knot is real).
 import { needsConfigKeys } from "../../../bundles-config.js";
+import { buildInputsHash, tracksBuildInputs, containerBuildLabel } from "../../../bundle-build-inputs.js";
 
 // Respect the instance's CROW_HOME (matches bundles.js / proxy.js resolveCrowHome).
 // Without this, an alternate instance (CROW_HOME=~/.crow-mpa, ~/.crow-finance) reads
@@ -214,6 +215,25 @@ export function fetchNeedsConfig(installed) {
 }
 
 /**
+ * True when a container of this bundle carries a crow.build-inputs label different from
+ * what the installed copy would build now (or none: built before the label, or by hand);
+ * false when every container matches; null when the bundle does not track build inputs,
+ * has no containers, or the hash cannot be computed.
+ */
+export function buildStaleness(bundleDir, containers) {
+  try {
+    if (!containers || containers.length === 0) return null;
+    const text = readFileSync(join(bundleDir, "docker-compose.yml"), "utf8");
+    if (!tracksBuildInputs(text)) return null;
+    const want = buildInputsHash(bundleDir);
+    if (!want) return null;
+    return containers.some((c) => containerBuildLabel(c) !== want);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Probe docker-compose status for installed bundles.
  * Returns { bundleStatus }.
  */
@@ -260,6 +280,10 @@ export function fetchBundleStatus(installed) {
               running: containers.some((c) => c.State === "running"),
               containers: containers.length,
             };
+            // Image older than its build inputs? Only for a compose that stamps them
+            // (bundle-build-inputs.js); null = not tracked / unknown.
+            const stale = buildStaleness(join(bundlesDir, id), containers);
+            if (stale !== null) bundleStatus[id].buildStale = stale;
           } catch {
             bundleStatus[id] = { running: false, containers: 0 };
           }

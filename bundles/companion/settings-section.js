@@ -17,7 +17,6 @@ import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { homedir } from "os";
-import { execFileSync } from "child_process";
 
 /**
  * Dual-write sync-safe Companion settings into dashboard_settings under
@@ -102,14 +101,30 @@ function escapeHtml(s) {
     .replace(/'/g, "&#39;");
 }
 
-function recreateCompanion() {
+/**
+ * Apply saved settings: re-create the companion through the gateway's one start path
+ * (routes/bundles.js startInstalledBundle, published on a process-wide registry so this
+ * file never imports the router). That runs the install security check, rebuilds the
+ * image only when it is older than its build inputs (a persona edit never rebuilds), and
+ * force-recreates so the new .env reaches the container.
+ * Returns null on success, else why it did not restart (shown to the owner).
+ */
+async function restartCompanion() {
   try {
-    execFileSync("docker", ["compose", "up", "-d", "--no-build", "--force-recreate"], {
-      cwd: BUNDLE_DIR,
-      timeout: 60000,
-      stdio: "pipe",
-    });
-  } catch { /* best effort */ }
+    const start = globalThis[Symbol.for("crow.startInstalledBundle")];
+    if (typeof start !== "function") return "this Crow version cannot restart extensions from Settings";
+    const r = await start("companion", { recreate: true, build: "if-stale" });
+    return r && r.ok ? null : String((r && r.error) || "unknown error");
+  } catch (err) {
+    return String(err?.message || err);
+  }
+}
+
+/** The JSON a save answers with: saved either way; restart failures are reported, not swallowed. */
+async function savedAndRestarted(res) {
+  const why = await restartCompanion();
+  if (why) res.json({ ok: false, saved: true, error: `Saved, but the companion did not restart: ${why}` });
+  else res.json({ ok: true });
 }
 
 /* ---------- DB reads ---------- */
@@ -347,14 +362,14 @@ export default {
           ev.preventDefault();
           var key = form.getAttribute('data-section-form');
           var status = document.querySelector('[data-section-status="' + key + '"]');
-          status.textContent = 'Saving…';
+          status.textContent = 'Saving and restarting the companion…';
           status.style.color = 'var(--crow-text-muted)';
           var fd = new URLSearchParams(new FormData(form));
           fetch('/dashboard/settings', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: fd.toString() })
             .then(function(r){ return r.json(); })
             .then(function(data){
               if (data && data.ok) {
-                status.textContent = 'Saved. Restarting companion…';
+                status.textContent = 'Saved. Companion restarted.';
                 status.style.color = 'var(--crow-success)';
               } else {
                 status.textContent = (data && data.error) || 'Save failed';
@@ -407,8 +422,7 @@ export default {
       // Avatar path is per-machine, so it stays in bundle .env only.
       await mirrorToDashboard(db, "companion_persona", persona);
       await mirrorToDashboard(db, "companion_character_name", characterName);
-      recreateCompanion();
-      res.json({ ok: true });
+      await savedAndRestarted(res);
       return true;
     }
 
@@ -428,8 +442,7 @@ export default {
       // Mirror: ai profile id + model name (both sync-safe; names not paths)
       await mirrorToDashboard(db, "companion_ai_profile", env.COMPANION_AI_PROFILE || "");
       await mirrorToDashboard(db, "companion_ai_model", env.COMPANION_AI_MODEL || "");
-      recreateCompanion();
-      res.json({ ok: true });
+      await savedAndRestarted(res);
       return true;
     }
 
@@ -472,8 +485,7 @@ export default {
         });
       }
       await mirrorToDashboard(db, "companion_household", JSON.stringify(householdSummary));
-      recreateCompanion();
-      res.json({ ok: true });
+      await savedAndRestarted(res);
       return true;
     }
 

@@ -860,11 +860,11 @@
     {
       "id": "companion",
       "name": "AI Companion",
-      "version": "1.0.4",
+      "version": "1.1.0",
       "privileged": true,
       "install_consent_messages": {
-        "en": "The AI Companion uses host networking so it can reach Crow and your local models on this machine. That also lets it reach every service on this machine that listens only on 127.0.0.1. Its own web page listens on 127.0.0.1 by default (COMPANION_BIND_HOST), and Crow serves it to your tailnet over HTTPS. It mounts Crow's database and your installed extensions folder read-only (that folder holds the other extensions' settings and passwords), and it is given Crow's local MCP token.",
-        "es": "El AI Companion usa la red del host para poder llegar a Crow y a tus modelos locales en esta máquina. Eso también le permite llegar a todos los servicios de esta máquina que escuchan solo en 127.0.0.1. Su propia página web escucha por defecto en 127.0.0.1 (COMPANION_BIND_HOST), y Crow la sirve a tu tailnet por HTTPS. Monta en solo lectura la base de datos de Crow y la carpeta de tus extensiones instaladas (esa carpeta guarda los ajustes y las contraseñas de las demás extensiones), y recibe el token MCP local de Crow."
+        "en": "The AI Companion uses host networking so it can reach Crow and your local models on this machine. That also lets it reach every service on this machine that listens only on 127.0.0.1. Its own web page listens on 127.0.0.1 by default (COMPANION_BIND_HOST), and Crow serves it to your tailnet over HTTPS. It mounts Crow's database read-only (every table, including saved provider keys) and is given Crow's local MCP token. It does not mount your other extensions' folders.",
+        "es": "El AI Companion usa la red del host para poder llegar a Crow y a tus modelos locales en esta máquina. Eso también le permite llegar a todos los servicios de esta máquina que escuchan solo en 127.0.0.1. Su propia página web escucha por defecto en 127.0.0.1 (COMPANION_BIND_HOST), y Crow la sirve a tu tailnet por HTTPS. Monta en solo lectura la base de datos de Crow (todas las tablas, incluidas las claves de proveedores guardadas) y recibe el token MCP local de Crow. No monta las carpetas de tus demás extensiones."
       },
       "description": "Voice-interactive AI companion with animated Live2D avatar. Powered by Open-LLM-VTuber with Crow's BYOAI profiles.",
       "type": "bundle",
@@ -882,6 +882,12 @@
       "docker": {
         "composefile": "docker-compose.yml"
       },
+      "refreshFiles": [
+        "docker-compose.yml",
+        "Dockerfile",
+        ".dockerignore",
+        "scripts"
+      ],
       "ports": [
         12393
       ],

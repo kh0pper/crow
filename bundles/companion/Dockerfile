@@ -46,9 +46,10 @@ COPY scripts/inject-device-config.sh /app/scripts/inject-device-config.sh
 COPY scripts/crow-face-tracking.js /app/scripts/crow-face-tracking.js
 COPY scripts/inject-face-tracking.sh /app/scripts/inject-face-tracking.sh
 COPY scripts/inject-call-enhancements.sh /app/scripts/inject-call-enhancements.sh
+COPY scripts/fetch-calls-scripts.sh /app/scripts/fetch-calls-scripts.sh
 COPY scripts/entrypoint.sh /app/entrypoint.sh
 COPY scripts/download-models.sh /app/scripts/download-models.sh
-RUN chmod +x /app/entrypoint.sh /app/scripts/download-models.sh /app/scripts/inject-theme.sh /app/scripts/inject-bg-refresh.sh /app/scripts/inject-wm.sh /app/scripts/inject-webrtc.sh /app/scripts/inject-voice-panel.sh /app/scripts/inject-face-tracking.sh /app/scripts/inject-call-enhancements.sh
+RUN chmod +x /app/entrypoint.sh /app/scripts/download-models.sh /app/scripts/inject-theme.sh /app/scripts/inject-bg-refresh.sh /app/scripts/inject-wm.sh /app/scripts/inject-webrtc.sh /app/scripts/inject-voice-panel.sh /app/scripts/inject-face-tracking.sh /app/scripts/inject-call-enhancements.sh /app/scripts/fetch-calls-scripts.sh
 
 EXPOSE 12393
 
