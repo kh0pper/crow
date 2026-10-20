@@ -2181,6 +2181,16 @@ export const translations = {
   "board.mutationVerb.plan_approve": { en: "plan approved", es: "plan aprobado" },
   "board.mutationVerb.result_report": { en: "result reported", es: "resultado reportado" },
   "board.mutationVerb.result_decide": { en: "result decided", es: "resultado decidido" },
+  "board.mutationVerb.decision_ask": { en: "decision asked", es: "decisi\u00f3n planteada" },
+  "board.mutationVerb.decision": { en: "decided", es: "decidida" },
+  "board.mutationVerb.decision_expire": { en: "decision expired", es: "decisi\u00f3n vencida" },
+  "botboard.decision.heading": { en: "Decision", es: "Decisi\u00f3n" },
+  "botboard.decision.recommended": { en: "Recommended", es: "Recomendada" },
+  "botboard.decision.other": { en: "Other\u2026", es: "Otra\u2026" },
+  "botboard.decision.send": { en: "Send answer", es: "Enviar respuesta" },
+  "botboard.decision.chosen": { en: "Chosen:", es: "Elegida:" },
+  "botboard.decision.followUp": { en: "Follow-up card", es: "Tarjeta de seguimiento" },
+  "botboard.decision.expired": { en: "This decision expired without an answer.", es: "Esta decisi\u00f3n venci\u00f3 sin respuesta." },
 
   // ─── Projects Panel (W3-4) ───
   "projects.confirmRevoke": { en: "Revoke {who}?", es: "¿Revocar a {who}?" },
