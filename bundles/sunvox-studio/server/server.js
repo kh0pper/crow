@@ -28,6 +28,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import * as engine from "./sunvox-engine.js";
 import { saveToStorage, storageMode, notifyDone, mimeFor, REFERENCE_TYPES } from "./outputs.js";
 import { pushToFunkwhale } from "./funkwhale-push.js";
@@ -48,7 +49,11 @@ async function defaultWorkdir() {
     return path.join(os.homedir(), ".crow", "data", "sunvox-studio");
   }
 }
-export const WORKDIR = path.resolve(process.env.SUNVOX_WORKDIR ? expandHome(process.env.SUNVOX_WORKDIR) : await defaultWorkdir());
+/** The value 0.1.x installs wrote into their add-on entry (the manifest default then).
+ *  It means "the default", so it maps to this instance's data dir, not ~/.crow. */
+export const LEGACY_WORKDIR_DEFAULT = "~/.crow/data/sunvox-studio";
+const workdirSetting = String(process.env.SUNVOX_WORKDIR || "").trim();
+export const WORKDIR = path.resolve(workdirSetting && workdirSetting !== LEGACY_WORKDIR_DEFAULT ? expandHome(workdirSetting) : await defaultWorkdir());
 
 // --- Lazy storage import (works from the repo tree; degrades with a clear error) ---
 let storageMod = null;
@@ -58,10 +63,12 @@ let storageInit = false;
  * (CROW_APP_ROOT, in-repo run, or ~/crow) so installed copies find it too.
  *
  * Storage is usually configured in the Nest (storage.shared.* settings, with
- * sealed secrets), not in the environment. The gateway opens those with the
- * instance identity (initStorage); this child does the same once, with the
- * identity loaded ONLY if it exists (never created), and falls back to the
- * MINIO_* environment like the stdio storage server.
+ * sealed secrets), not in the environment. This child opens those settings
+ * once with the instance identity (loaded only if it exists, never created),
+ * wipes the identity's key material straight away and hands the s3-client
+ * only the opened config (useStorageConfig): the root seed does not stay in a
+ * process that feeds untrusted tracker files to a native parser. With no Nest
+ * config it falls back to the MINIO_* environment like the stdio storage server.
  */
 async function storage() {
   // Only a working client is cached: storage that was down at the first call
@@ -74,8 +81,14 @@ async function storage() {
       storageInit = true;
       try {
         const { loadIdentityIfPresent } = await appImport("servers/sharing/identity.js");
-        const identity = typeof loadIdentityIfPresent === "function" ? loadIdentityIfPresent() : null;
-        if (identity) await mod.initStorage({ db: await sharedDb(), identity });
+        if (typeof loadIdentityIfPresent === "function" && typeof mod.useStorageConfig === "function") {
+          const identity = loadIdentityIfPresent();
+          if (identity) {
+            let cfg = null;
+            try { cfg = await mod.loadSharedStorageFromDb(await sharedDb(), identity); } finally { wipeKeys(identity); }
+            if (cfg) mod.useStorageConfig(cfg);
+          }
+        }
       } catch { /* env fallback (MINIO_*) stays active */ }
     }
     storageMod = (await mod.isAvailable()) ? mod : null;
@@ -83,6 +96,26 @@ async function storage() {
     storageMod = null;
   }
   return storageMod;
+}
+
+/** Zero every key buffer an identity object carries (seed, private keys). */
+export function wipeKeys(identity) {
+  for (const v of Object.values(identity || {})) if (v instanceof Uint8Array) v.fill(0);
+}
+
+/**
+ * A storage_key may be read only when it is this bundle's own output or a
+ * file already public as blog media. Anything else (project files, message
+ * attachments, private uploads) is refused: a render of it could otherwise be
+ * re-published at /blog/media with reference_type blog_post.
+ */
+export async function assertReadableKey(db, key) {
+  const { rows } = await db.execute({ sql: "SELECT reference_type, project_id FROM storage_files WHERE s3_key = ?", args: [String(key)] });
+  const row = rows[0];
+  const own = String(key).startsWith("sunvox-studio/");
+  if (!row || row.project_id != null || !(own || row.reference_type === "blog_post")) {
+    throw new Error(`storage_key "${String(key).slice(0, 120)}" is not readable here: only SunVox Studio's own files (sunvox-studio/...) and blog media (uploaded with reference_type blog_post) can be read; for another file, copy it into the work dir and pass "path"`);
+  }
 }
 
 let dbClient = null;
@@ -133,13 +166,14 @@ async function appDeps() {
   };
 }
 
-async function readSource({ path: p, storage_key }) {
+async function readSource({ path: p, storage_key }, deps) {
   if (p) {
     const real = resolveReadablePath(p);
     return { buf: await fsp.readFile(real), name: path.basename(real) };
   }
   if (storage_key) {
-    const s3 = await storage();
+    const s3 = await deps.storage();
+    await assertReadableKey(await deps.db(), storage_key);
     if (!s3) throw new Error(`storage unavailable — pass a filesystem "path" instead of storage_key "${storage_key}" (storage needs MINIO_* env or the repo s3-client)`);
     const { stream, stat } = await s3.getObject(storage_key);
     if (stat && stat.size > MAX_SOURCE_BYTES) {
@@ -160,7 +194,7 @@ async function readSource({ path: p, storage_key }) {
 
 const SOURCE_SCHEMA = {
   path: z.string().optional().describe("Path to a .sunvox/.xm/.mod file inside the SunVox work dir (relative paths resolve there; extra folders via SUNVOX_READ_DIRS)"),
-  storage_key: z.string().optional().describe("Crow storage key (s3_key) of the project file"),
+  storage_key: z.string().optional().describe("Crow storage key of the project file: SunVox Studio's own files (sunvox-studio/...) or blog media only"),
 };
 
 function sanitize(n) { return String(n).replace(/[^a-zA-Z0-9 _.-]/g, "").slice(0, 80) || "sunvox"; }
@@ -185,7 +219,7 @@ async function renderToFile(buf, { name, format, sampleRate = 44100 }) {
   const dir = await ensureWorkdir();
   const { info, wav, frames } = await engine.render(buf, { sampleRate });
   const title = info.name || name;
-  const base = path.join(dir, `${sanitize(name)}-${Date.now()}`);
+  const base = path.join(dir, `${sanitize(name)}-${Date.now()}-${randomBytes(3).toString("hex")}`);
   const wavPath = `${base}.wav`;
   await fsp.writeFile(wavPath, wav);
   let outPath = wavPath;
@@ -241,7 +275,7 @@ async function deliverRender(deps, res, { name, args }) {
     try {
       out.funkwhale = await pushToFunkwhale({
         cfg: await deps.musicConfig(), buf, fileName: path.basename(res.path), library: args.funkwhale_library,
-        fetchImpl: deps.fetchImpl || fetch, db: await deps.db().catch(() => null), consumeToken: deps.consumeToken,
+        fetchImpl: deps.fetchImpl || fetch, db: await deps.db(), consumeToken: deps.consumeToken,
       });
     } catch (err) {
       out.funkwhale = { error: err.message };
@@ -349,7 +383,7 @@ export function createSunvoxServer(inject = {}) {
     inputSchema: SOURCE_SCHEMA,
   }, async (args) => {
     try {
-      const { buf, name } = await readSource(args);
+      const { buf, name } = await readSource(args, deps);
       const info = await engine.info(buf);
       return { content: [{ type: "text", text: JSON.stringify({ source: name, ...info }, null, 1) }] };
     } catch (err) {
@@ -369,7 +403,7 @@ export function createSunvoxServer(inject = {}) {
     },
   }, async (args) => {
     try {
-      const { buf, name } = await readSource(args);
+      const { buf, name } = await readSource(args, deps);
       const outName = args.out_name || path.parse(name).name;
       const res = await renderToFile(buf, { name: outName, format: args.format || "wav", sampleRate: args.sample_rate || 44100 });
       Object.assign(res, await deliverRender(deps, res, { name: outName, args }));

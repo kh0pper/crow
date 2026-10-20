@@ -437,8 +437,8 @@ test("sunvox tools: compose saves project + render to storage, refuses a same-na
   try {
     const r = await c.call("sunvox_compose", { name: "My Loop", render: true, spec: tinySpec, reference_type: "blog_post", notify: true });
     assert.equal(r.isError, false, r.text);
-    assert.match(r.json.project_storage_key, /^sunvox-studio\/projects\/\d+-[0-9a-f]{8}-My_Loop\.sunvox$/);
-    assert.match(r.json.render_storage_key, /^sunvox-studio\/renders\/\d+-[0-9a-f]{8}-My_Loop-\d+\.wav$/);
+    assert.match(r.json.project_storage_key, /^sunvox-studio\/projects\/\d+-[0-9a-f]{32}-My_Loop\.sunvox$/);
+    assert.match(r.json.render_storage_key, /^sunvox-studio\/renders\/\d+-[0-9a-f]{32}-My_Loop-\d+-[0-9a-f]{6}\.wav$/);
     assert.equal(r.json.project_media_path, `/blog/media/${r.json.project_storage_key}`);
     assert.ok(r.json.project_storage_url.startsWith("http://storage.example/"));
     assert.equal(r.json.info.name, "My Loop");
@@ -527,5 +527,56 @@ test("sunvox: the work dir follows the instance data dir, and a '~/' setting exp
   try {
     assert.equal(run({ CROW_DATA_DIR: dataDir }), path.join(dataDir, "sunvox-studio"));
     assert.equal(run({ CROW_DATA_DIR: dataDir, SUNVOX_WORKDIR: "~/music-out" }), path.join(os.homedir(), "music-out"));
+    // 0.1.x installs carry the old manifest default in their entry: it means "the default", per instance.
+    assert.equal(run({ CROW_DATA_DIR: dataDir, SUNVOX_WORKDIR: "~/.crow/data/sunvox-studio" }), path.join(dataDir, "sunvox-studio"));
   } finally { fs.rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test("sunvox: repeats in an arrangement share their notes with the original (clones, not copies)", { skip: !engine && SKIP_REASON }, async () => {
+  const { project } = await engine.compose({ modules: G, patterns: [pat("a", 8)], arrangement: [{ pattern: "a" }, { pattern: "a" }, { pattern: "a" }] });
+  // A clone adds a timeline entry but no pattern data: three placements of one 8-line
+  // pattern save smaller than three separate 8-line patterns with the same notes.
+  const copies = await engine.compose({ modules: G, patterns: [pat("a", 8), pat("b", 8), pat("c", 8)], arrangement: [{ pattern: "a" }, { pattern: "b" }, { pattern: "c" }] });
+  assert.ok(project.length < copies.project.length, `${project.length} < ${copies.project.length}`);
+  const info = await engine.info(project);
+  assert.deepEqual(info.pattern_list.map((p) => p.x), [0, 8, 16]);
+  const ok = await engine.compose({ modules: G, patterns: [pat("a", 1)], arrangement: Array.from({ length: 4096 }, () => ({ pattern: "a" })) });
+  assert.equal(ok.info.patterns, 4096, "the 4096-placement limit itself is accepted");
+});
+
+test("sunvox: wipeKeys zeroes every key buffer of an identity", async () => {
+  const srv = await import(pathToFileURL(path.join(BUNDLE, "server", "server.js")).href + "?wipe");
+  const id = { crowId: "crow:x", seed: Buffer.from([1, 2, 3]), ed25519Priv: new Uint8Array([4, 5]), secp256k1Priv: new Uint8Array([6]) };
+  srv.wipeKeys(id);
+  assert.deepEqual([...id.seed, ...id.ed25519Priv, ...id.secp256k1Priv], [0, 0, 0, 0, 0, 0]);
+  assert.equal(id.crowId, "crow:x");
+});
+
+test("sunvox tools: storage_key reads only this bundle's files and blog media, never project or private files", { skip: !engine && SKIP_REASON }, async () => {
+  const os = await import("node:os");
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "sv-tools-"));
+  const fixture = fs.readFileSync(FIXTURE);
+  const rows = {
+    "sunvox-studio/projects/1-x-own.sunvox": { reference_type: null, project_id: null },
+    "1700-shared.sunvox": { reference_type: "blog_post", project_id: null },
+    "1700-private.sunvox": { reference_type: null, project_id: null },
+    "proj/1700-secret.sunvox": { reference_type: "blog_post", project_id: 4 },
+    "sunvox-studio/projects/in-project.sunvox": { reference_type: null, project_id: 4 },
+  };
+  const db = { execute: async ({ sql, args }) => (/FROM storage_files WHERE s3_key/.test(sql) ? { rows: rows[args[0]] ? [rows[args[0]]] : [] } : { rows: [] }) };
+  const fetched = [];
+  const s3 = { ...memS3(), getObject: async (k) => { fetched.push(k); const { Readable } = await import("node:stream"); return { stream: Readable.from([fixture]), stat: { size: fixture.length } }; } };
+  const c = await toolClient({ storage: async () => s3, db: async () => db }, work);
+  try {
+    for (const k of ["sunvox-studio/projects/1-x-own.sunvox", "1700-shared.sunvox"]) {
+      const r = await c.call("sunvox_info", { storage_key: k });
+      assert.equal(r.isError, false, `${k}: ${r.text}`);
+    }
+    for (const k of ["1700-private.sunvox", "proj/1700-secret.sunvox", "sunvox-studio/projects/in-project.sunvox", "not-in-the-table.sunvox"]) {
+      const r = await c.call("sunvox_render", { storage_key: k, reference_type: "blog_post" });
+      assert.equal(r.isError, true, k);
+      assert.match(r.text, /is not readable here/);
+    }
+    assert.deepEqual(fetched, ["sunvox-studio/projects/1-x-own.sunvox", "1700-shared.sunvox"], "refused keys were never fetched");
+  } finally { await c.close(); fs.rmSync(work, { recursive: true, force: true }); }
 });

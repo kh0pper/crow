@@ -28,9 +28,12 @@ function checkOrigin(origin) {
   return u.origin;
 }
 
-async function call(fetchImpl, origin, token, pathAndQuery, { method = "GET", body, timeoutMs = 20_000 } = {}) {
+async function call(fetchImpl, origin, token, pathAndQuery, { method = "GET", body, timeoutMs = 20_000, deadline = Infinity } = {}) {
+  // Each request gets its own timeout, never past the push's overall deadline.
+  const left = Math.min(timeoutMs, deadline - Date.now());
+  if (!(left > 0)) throw new Error(`Funkwhale time budget used up before ${method} ${pathAndQuery.split("?")[0]}`);
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  const timer = setTimeout(() => ctl.abort(), left);
   try {
     const res = await fetchImpl(origin + pathAndQuery, {
       method, body, redirect: "error", signal: ctl.signal,
@@ -47,11 +50,11 @@ async function call(fetchImpl, origin, token, pathAndQuery, { method = "GET", bo
   }
 }
 
-async function resolveLibrary(fetchImpl, origin, token, library) {
+async function resolveLibrary(fetchImpl, origin, token, library, deadline) {
   const want = String(library || "").trim();
   if (!want) throw new Error("funkwhale_library is empty: pass a library UUID or name (fw_list_library lists them)");
   if (UUID_RE.test(want)) return want.toLowerCase();
-  const out = await call(fetchImpl, origin, token, "/api/v1/libraries/?scope=me&page_size=100");
+  const out = await call(fetchImpl, origin, token, "/api/v1/libraries/?scope=me&page_size=100", { timeoutMs: 10_000, deadline });
   const libs = Array.isArray(out?.results) ? out.results : [];
   const hit = libs.find((l) => typeof l?.name === "string" && l.name.toLowerCase() === want.toLowerCase());
   if (!hit || !UUID_RE.test(String(hit.uuid || ""))) {
@@ -67,37 +70,41 @@ async function resolveLibrary(fetchImpl, origin, token, library) {
  * imports in the background).
  */
 // Budgets: a gateway tool call times out after 60 s (the MCP client's
-// default), and the render and encode already took part of that. So the
-// upload gets 30 s and the import is checked twice at most, 2 s apart.
+// default), and the render and encode already took part of that. So the whole
+// push (lookup, upload, import checks) has one 35 s deadline that caps every
+// request; the upload alone gets at most 30 s, each check at most 3 s.
 export async function pushToFunkwhale({
   cfg, buf, fileName, library, fetchImpl = fetch, db = null, consumeToken = null,
-  pollMs = 2000, pollTimeoutMs = 4000, uploadTimeoutMs = 30_000,
+  pollMs = 2000, pollTimeoutMs = 5000, uploadTimeoutMs = 30_000, totalMs = 35_000,
 }) {
+  const deadline = Date.now() + totalMs;
   if (!cfg || !cfg.origin || !cfg.token) {
     throw new Error("the Funkwhale add-on is not installed or not configured (it needs FUNKWHALE_URL and FUNKWHALE_ACCESS_TOKEN); the render is saved, upload it later with fw_upload_track");
   }
   const ext = String(fileName).split(".").pop().toLowerCase();
   if (!PUSH_FORMATS.includes(ext)) throw new Error(`Funkwhale uploads take mp3 or ogg; render with format "mp3" (got ${ext})`);
   const origin = checkOrigin(cfg.origin);
-  if (db && consumeToken) {
+  if (consumeToken) {
+    // No database, no budget check: refuse rather than upload unmetered.
+    if (!db) throw new Error("the Funkwhale upload rate limit needs the Crow database, which is not available");
     const r = await consumeToken(db, RATE);
     if (!r.allowed) throw new Error(`Funkwhale upload rate limit reached (${RATE.capacity} per hour); try again in ${r.retry_after} s`);
   }
-  const libUuid = await resolveLibrary(fetchImpl, origin, cfg.token, library);
+  const libUuid = await resolveLibrary(fetchImpl, origin, cfg.token, library, deadline);
   const form = new FormData();
   form.append("library", libUuid);
   // The content hash: a retried call for the same render carries the same reference.
   form.append("import_reference", `sunvox-studio-${createHash("sha256").update(buf).digest("hex").slice(0, 16)}`);
   form.append("audio_file", new Blob([buf], { type: ext === "mp3" ? "audio/mpeg" : "audio/ogg" }), String(fileName).slice(0, 200));
-  const up = await call(fetchImpl, origin, cfg.token, "/api/v1/uploads/", { method: "POST", body: form, timeoutMs: uploadTimeoutMs });
+  const up = await call(fetchImpl, origin, cfg.token, "/api/v1/uploads/", { method: "POST", body: form, timeoutMs: uploadTimeoutMs, deadline });
   const upUuid = UUID_RE.test(String(up?.uuid || "")) ? String(up.uuid).toLowerCase() : null;
   const out = { funkwhale_library_uuid: libUuid, funkwhale_upload_uuid: upUuid, import_status: typeof up?.import_status === "string" ? up.import_status : null };
   if (!upUuid) return out;
-  const deadline = Date.now() + pollTimeoutMs;
+  const pollUntil = Math.min(Date.now() + pollTimeoutMs, deadline);
   let status = up;
-  while (status?.import_status !== "finished" && status?.import_status !== "errored" && Date.now() < deadline) {
+  while (status?.import_status !== "finished" && status?.import_status !== "errored" && Date.now() + pollMs < pollUntil) {
     await new Promise((r) => setTimeout(r, pollMs));
-    try { status = await call(fetchImpl, origin, cfg.token, `/api/v1/uploads/${upUuid}/`); } catch { break; }
+    try { status = await call(fetchImpl, origin, cfg.token, `/api/v1/uploads/${upUuid}/`, { timeoutMs: 3000, deadline: pollUntil }); } catch { break; }
   }
   if (typeof status?.import_status === "string") out.import_status = status.import_status;
   if (out.import_status === "errored") {

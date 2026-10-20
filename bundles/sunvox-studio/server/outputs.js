@@ -45,7 +45,7 @@ export function storageMode(requested, available) {
 export async function saveToStorage({
   s3, db, buf, fileName, mimeType, kind, referenceType = null, referenceId = null,
   maxBytes = defaultMaxBytes(), quotaBytes = defaultQuotaBytes(), now = Date.now(),
-  rand = () => randomBytes(4).toString("hex"),
+  rand = () => randomBytes(16).toString("hex"),
 }) {
   if (referenceType != null && !REFERENCE_TYPES.includes(referenceType)) {
     throw new Error(`reference_type must be one of ${REFERENCE_TYPES.join(", ")}`);

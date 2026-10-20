@@ -45,6 +45,19 @@ export async function initStorage({ db, identity }) {
 }
 
 /**
+ * Use a shared-storage config that the caller already opened (the result of
+ * loadSharedStorageFromDb) WITHOUT keeping the identity that opened it. For
+ * bundle MCP children: they need the storage credentials, not the instance's
+ * root seed, so they open the config, wipe the identity and hand only the
+ * config here. resetStorageClient() cannot reload it (no db/identity kept).
+ */
+export function useStorageConfig(cfg) {
+  _boot = { db: null, identity: null };
+  _cachedDbConfig = cfg || null;
+  clientInstance = null;
+}
+
+/**
  * Read the six storage.shared.* keys. Returns null if any required field is
  * missing (endpoint, access_key, secret_key) so getClient() falls back cleanly
  * during a half-synced window. Secrets are opened via secret-box; if opening

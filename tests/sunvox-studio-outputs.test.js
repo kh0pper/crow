@@ -58,7 +58,7 @@ test("saveToStorage: uploads under a sunvox-studio key, records storage_files, r
 test("saveToStorage: keys carry a random part by default", async () => {
   const a = await outputs.saveToStorage({ s3: fakeS3(), db: fakeDb(), buf: Buffer.alloc(1), fileName: "a.wav", mimeType: "audio/wav", kind: "renders", now: 1 });
   const b = await outputs.saveToStorage({ s3: fakeS3(), db: fakeDb(), buf: Buffer.alloc(1), fileName: "a.wav", mimeType: "audio/wav", kind: "renders", now: 1 });
-  assert.match(a.storage_key, /^sunvox-studio\/renders\/1-[0-9a-f]{8}-a\.wav$/);
+  assert.match(a.storage_key, /^sunvox-studio\/renders\/1-[0-9a-f]{32}-a\.wav$/, "128 random bits: blog_post files are public by key");
   assert.notEqual(a.storage_key, b.storage_key);
 });
 
@@ -166,14 +166,15 @@ test("funkwhale: by default the import is checked briefly, and a pending import 
     [`GET /api/v1/uploads/${UP}/`]: () => ({ uuid: UP, import_status: "pending" }),
   });
   const t0 = Date.now();
-  const r = await fw.pushToFunkwhale({ cfg: CFG, buf: Buffer.alloc(4), fileName: "a.mp3", library: LIB, fetchImpl: f, pollMs: 1 });
-  assert.ok(Date.now() - t0 < 5000);
+  const r = await fw.pushToFunkwhale({ cfg: CFG, buf: Buffer.alloc(4), fileName: "a.mp3", library: LIB, fetchImpl: f, pollMs: 50, pollTimeoutMs: 200 });
+  assert.ok(Date.now() - t0 < 2000);
+  assert.ok(f.calls.length <= 5, `a bounded number of checks (${f.calls.length})`);
   assert.equal(r.import_status, "pending");
   assert.match(r.note, /fw_search/);
   const err = fakeFetch({
     "POST /api/v1/uploads/": () => ({ uuid: UP, import_status: "errored", import_details: { error_code: "track_uuid_not_found" } }),
   });
-  const e = await fw.pushToFunkwhale({ cfg: CFG, buf: Buffer.alloc(4), fileName: "a.mp3", library: LIB, fetchImpl: err, pollMs: 1 });
+  const e = await fw.pushToFunkwhale({ cfg: CFG, buf: Buffer.alloc(4), fileName: "a.mp3", library: LIB, fetchImpl: err, pollMs: 50, pollTimeoutMs: 200 });
   assert.equal(e.import_status, "errored");
   assert.match(e.import_error, /track_uuid_not_found/);
 });
@@ -208,5 +209,21 @@ test("funkwhale: the rate limit refuses before any request", async () => {
   const f = fakeFetch({});
   const consume = async () => ({ allowed: false, retry_after: 120 });
   await assert.rejects(() => fw.pushToFunkwhale({ cfg: CFG, buf: Buffer.alloc(4), fileName: "a.mp3", library: LIB, fetchImpl: f, consumeToken: consume, db: {} }), /rate limit.*120 s/);
+  assert.equal(f.calls.length, 0);
+});
+
+test("funkwhale: one overall deadline caps every request, including a server that never answers", async () => {
+  const hang = async (url, init) => new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }))));
+  const t0 = Date.now();
+  await assert.rejects(() => fw.pushToFunkwhale({ cfg: CFG, buf: Buffer.alloc(4), fileName: "a.mp3", library: "Some Library", fetchImpl: hang, totalMs: 300 }), /timed out/);
+  assert.ok(Date.now() - t0 < 1500, "the lookup stopped at the overall deadline, not its own 10 s timeout");
+  // Defaults: the whole push stays inside a 60 s tool call with room for the render.
+  const src = (await import("node:fs")).readFileSync(path.join(BUNDLE, "server", "funkwhale-push.js"), "utf8");
+  assert.match(src, /totalMs = 35_000/);
+});
+
+test("funkwhale: with a rate limiter but no database the upload is refused, not unmetered", async () => {
+  const f = fakeFetch({});
+  await assert.rejects(() => fw.pushToFunkwhale({ cfg: CFG, buf: Buffer.alloc(4), fileName: "a.mp3", library: LIB, fetchImpl: f, consumeToken: async () => ({ allowed: true }), db: null }), /needs the Crow database/);
   assert.equal(f.calls.length, 0);
 });

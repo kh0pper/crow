@@ -35,7 +35,9 @@ Music as a first-class AI capability: inspect any SunVox/XM/MOD project, render 
 - **`sunvox_render`** — project → `wav`/`mp3`/`ogg`. Saved to Crow storage when it is available (returns `storage_key` and a 1-hour `storage_url`) and in the work dir (`path`). Options: `sample_rate` (44100 or 48000), `notify: true` (a Crow notification when done), `funkwhale_library` (UUID or name: uploads the mp3/ogg to Funkwhale so `fw_play` can play it on the glasses).
 - **`sunvox_compose`** — JSON spec → `.sunvox` project (+ optional render in the same call, with the same render options). The main creative tool.
 
-Storage options on both: `save_to_storage` (default: save when storage is available; `true` = fail without it; `false` = local file only) and `reference_type: "blog_post"`, which makes the stored files **public** at `/blog/media/<key>`. Use `blog_post` only for files meant for a song page or another published post.
+Storage options on both: `save_to_storage` (default: save when storage is available; `true` = fail without it; `false` = local file only) and `reference_type: "blog_post"`, which makes the stored files **public** at `/blog/media/<key>`. Use `blog_post` only for files meant for a song page or another published post: the file is public as soon as it is saved, even before any post uses it.
+
+Reading by `storage_key` works for SunVox Studio's own files (`sunvox-studio/...` keys) and blog media (files uploaded with `reference_type: "blog_post"`). Other stored files (project files, attachments, private uploads) are refused; copy such a file into the work dir and pass `path`.
 
 ## Compose spec (v1 contract)
 

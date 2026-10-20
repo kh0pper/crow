@@ -154,8 +154,17 @@ export function computeSafetyNumber(myEd25519Pub, theirEd25519Pub) {
  * and must not mint a second identity if their data dir resolves elsewhere.
  */
 export function loadIdentityIfPresent(passphrase = "") {
-  if (!existsSync(IDENTITY_PATH)) return null;
-  return loadOrCreateIdentity(passphrase);
+  let raw;
+  try {
+    raw = readFileSync(IDENTITY_PATH, "utf-8");
+  } catch (err) {
+    if (err.code === "ENOENT") return null;
+    throw err;
+  }
+  // Read-only: no mode change, and no create path at all (no window between a check and a create).
+  const stored = JSON.parse(raw);
+  const seed = stored.encrypted ? decryptSeed(stored.encrypted, passphrase) : Buffer.from(stored.seed, "hex");
+  return deriveIdentity(seed, stored);
 }
 
 export function loadOrCreateIdentity(passphrase = "") {
