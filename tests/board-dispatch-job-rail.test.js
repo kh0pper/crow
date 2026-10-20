@@ -203,3 +203,19 @@ test("a failed enqueue surfaces as an error and the card is untouched", async ()
     withCrow((c) => c.exec("DROP TRIGGER bot_jobs_boom"));
   }
 });
+
+test("execute refuses a card whose Perch session is waiting on the operator, and queues nothing", async () => {
+  const { _setInteractiveEngineForTest, _resetInteractiveEngineForTest } = await import("../servers/gateway/perch-interactive.js");
+  _setInteractiveEngineForTest({ waitingOnCard: (id) => Number(id) === 121 });
+  try {
+    const before = jobs().length;
+    const res = await post("/dashboard/bot-board-api/card/121/execute");
+    assert.equal(res.status, 409);
+    const body = await res.json();
+    assert.equal(body.code, "waiting_on_operator");
+    assert.match(body.reason, /waiting for you/);
+    assert.equal(jobs().length, before, "no parallel job beside a session that waits for an answer");
+  } finally {
+    _resetInteractiveEngineForTest();
+  }
+});

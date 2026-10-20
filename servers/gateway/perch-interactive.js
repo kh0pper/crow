@@ -223,6 +223,20 @@ const ASK_METHODS = new Set(["select", "input", "confirm", "editor"]);
  * `notify` message to mirror bus state (currently plan-mode) over the
  * extension-UI channel instead of the transcript. */
 const CROW_STATE_PREFIX = "crow-state:";
+/** The largest delay a Node timer accepts; anything larger fires at ~1 ms. */
+const MAX_TIMER_MS = 2147483647;
+/** A Perch child's dialog cap (PI_BOT_INTERACTIVE_ASK_TIMEOUT_MS): the
+ * maximum, so a pi-lab that still hands the model a "no" when its dialog
+ * times out waits ~24.8 days instead of its 2-minute default. A newer pi-lab
+ * only PARKS on this cap (private engineering notes: the pi-lab ask-timeout
+ * contract, 2026-10-20). */
+const PERCH_ASK_TIMEOUT_MS = String(MAX_TIMER_MS);
+/** How far ahead of pi's own dialog timer crow expires a card. */
+const ASK_EXPIRY_LEAD_MS = 2000;
+/** How many expired request ids a session remembers for late answers. */
+const EXPIRED_IDS_MAX = 20;
+/** Default window between grouped "needs you" re-pushes. */
+const DEFAULT_ATTENTION_REPUSH_MS = 600_000;
 
 /** PR-A (audit item 5): prefix pi-lab's ask-user extension puts on a `notify`
  * message to relay the RICH questions payload (`{id, questions}`) of an
@@ -477,6 +491,7 @@ export function createInteractiveEngine({
   setTimer = setTimeout,
   clearTimer = clearTimeout,
   log = (m) => console.log("[perch-interactive] " + m),
+  notifications = null,
 } = {}) {
   /** sessionId (= gateway_thread_id) → session record. */
   const sessions = new Map();
@@ -499,6 +514,8 @@ export function createInteractiveEngine({
   // Track 3 Task 8: a turn-end "<bot> replied" push only fires once the turn
   // ran at least this long — a fast reply doesn't need a nudge.
   const notifyMinRunS = () => numEnv("PERCH_NOTIFY_MIN_RUN_S", 30);
+  // Grouped "needs you": at most one re-push per this window per session.
+  const repushMs = () => Math.min(numEnv("PERCH_ATTENTION_REPUSH_MS", DEFAULT_ATTENTION_REPUSH_MS), MAX_TIMER_MS);
 
   // ---- seams ---------------------------------------------------------------
 
@@ -690,7 +707,9 @@ export function createInteractiveEngine({
       threadId: s.threadId,
       rowId: s.rowId,
       state: s.state,
-      pendingUi: s.pendingUi,
+      // A live card, or an expired one still shown (expired:true) so the
+      // operator sees what was asked: either way the session waits for them.
+      pendingUi: s.pendingUi || s.expiredAsk || null,
       lastError: s.lastError,
       // Track 3 Task 4: the engine-tracked model wins over the raw
       // prepareSpawn resolution once one is known (a live model_select or a
@@ -758,7 +777,7 @@ export function createInteractiveEngine({
     // handle in this module.
     let db;
     try {
-      const { createNotification } = await import("../shared/notifications.js");
+      const { createNotification } = await loadNotifications();
       db = createDbClient();
       await createNotification(db, opts);
     } catch (e) {
@@ -766,6 +785,151 @@ export function createInteractiveEngine({
     } finally {
       if (db) { try { db.close(); } catch { /* already closed */ } }
     }
+  }
+
+  /** The notification pipeline (servers/shared/notifications.js), lazily;
+   * a test may inject its own. */
+  async function loadNotifications() {
+    return notifications || (await import("../shared/notifications.js"));
+  }
+
+  const attentionUrl = (s) => "/dashboard/bot-board#bird=" + s.sessionId;
+  const attentionTitle = (s, n) => s.botId + " needs you" + (n > 1 ? " (" + n + ")" : "");
+
+  /**
+   * A "needs you" for an ask card, GROUPED per session (2026-10-20: one bot
+   * sent 44 high-priority pushes in one session, 8 s apart at the closest).
+   * The first card of a group writes one in-app row and pushes; every later
+   * card while that row is unread updates the same row (a count, the newest
+   * question, the full list in metadata) and does not push. A trailing timer
+   * re-pushes at most once per PERCH_ATTENTION_REPUSH_MS, and only while a
+   * card is still waiting. Every card still renders in Perch as before.
+   * Serialised per session so two cards arriving together cannot both insert.
+   * Fire-and-forget, like pushAttention: a failure never breaks the card.
+   */
+  function attentionForAsk(s, text) {
+    const question = String(text == null ? "" : text).slice(0, 300);
+    return chainAttention(s, async (db, N) => {
+      const r = await N.upsertGroupedNotification(db, {
+        type: "attention",
+        priority: "high",
+        title: (n) => attentionTitle(s, n),
+        body: question,
+        action_url: attentionUrl(s),
+        groupKey: attentionKey(s),
+        item: { title: question },
+        nowMs: now(),
+      });
+      if (!r || r.created) {
+        if (s.attnTimer != null) { clearTimer(s.attnTimer); s.attnTimer = null; }
+        return;
+      }
+      if (r.count > r.pushedCount) armRepush(s, r.lastPushAt);
+    });
+  }
+
+  const attentionKey = (s) => "perch-ask:" + s.sessionId;
+
+  /** Run one notification step for a session, after every earlier one. Each
+   * link catches its own failure, so one failed write never poisons the
+   * chain; a failure is logged and never breaks a card or a turn. */
+  function chainAttention(s, step) {
+    const run = async () => {
+      let db;
+      try {
+        const N = await loadNotifications();
+        db = createDbClient();
+        await step(db, N);
+      } catch (e) {
+        log("attention notify failed (non-fatal): " + ((e && e.message) || e));
+      } finally {
+        if (db) { try { db.close(); } catch { /* already closed */ } }
+      }
+    };
+    s.attnChain = (s.attnChain || Promise.resolve()).then(run, run);
+    return s.attnChain;
+  }
+
+  /** One trailing re-push per window, timed from the group's own last push
+   * (kept on the row, so a gateway restart does not reset it). */
+  function armRepush(s, lastPushAt) {
+    if (s.attnTimer != null) return;
+    const last = Number(lastPushAt);
+    const delay = Math.min(Math.max(0, (Number.isFinite(last) ? last : now()) + repushMs() - now()), MAX_TIMER_MS);
+    s.attnTimer = timer(() => {
+      s.attnTimer = null;
+      // Only for a live session still waiting on a live card: a question
+      // that was answered, withdrawn or expired needs no reminder.
+      if (sessions.get(s.sessionId) !== s || s.state === "stopped" || !s.pendingUi) return;
+      chainAttention(s, (db, N) => N.repushNotificationGroup(db, {
+        groupKey: attentionKey(s), title: (n) => attentionTitle(s, n),
+        priority: "high", type: "attention", nowMs: now(),
+      }));
+    }, delay);
+  }
+
+  /** The operator dealt with the session's question (answered, cancelled,
+   * aborted, stopped): close the group so the next question pushes again. */
+  function closeAttention(s) {
+    if (s.attnTimer != null) { clearTimer(s.attnTimer); s.attnTimer = null; }
+    return chainAttention(s, (db, N) => N.closeNotificationGroup(db, attentionKey(s)));
+  }
+
+  /**
+   * An ask card that is no longer answerable. Either pi's own dialog timer
+   * ran out (an older pi-lab: the request carried `timeout`, and pi has
+   * already handed the bot its "no"), or a newer pi-lab parked the turn
+   * (`crow-state:{"kind":"ask-parked"}`). The card leaves the live ask state
+   * (so the stall watchdog and idle timer re-arm) but stays visible as
+   * `expiredAsk`: the session is still waiting for the operator, and a late
+   * answer to it is refused with request_expired instead of being sent into
+   * a dialog pi no longer has. Returns true when it expired the current card.
+   */
+  function expireAsk(s, requestId, reason) {
+    const card = s.pendingUi;
+    if (!card || card.requestId !== requestId) return false;
+    if (s.askExpiryTimer != null) { clearTimer(s.askExpiryTimer); s.askExpiryTimer = null; }
+    s.expiredAsk = Object.assign({}, card, { expired: true, reason });
+    s.expiredIds = (s.expiredIds || []).filter((x) => x !== requestId).concat([requestId]).slice(-EXPIRED_IDS_MAX);
+    clearAsk(s);
+    emit(s, { type: "ask_expired", requestId, reason });
+    armStall(s);
+    armIdle(s);
+    emit(s, stateEvent(s));
+    return true;
+  }
+
+  /** Expire the card from the request's own `timeout` (older pi-lab). */
+  function armAskExpiry(s, m) {
+    if (s.askExpiryTimer != null) { clearTimer(s.askExpiryTimer); s.askExpiryTimer = null; }
+    const t = Number(m && m.timeout);
+    if (!Number.isFinite(t) || t <= 0) return;
+    const id = m.id;
+    // A little before pi's own timer, which started first: an answer in the
+    // last moment is refused as expired instead of being sent into a dialog
+    // pi has just resolved as "no" and dropped.
+    const ms = Math.min(Math.max(0, t - ASK_EXPIRY_LEAD_MS), MAX_TIMER_MS);
+    s.askExpiryTimer = timer(() => { s.askExpiryTimer = null; expireAsk(s, id, "timeout"); }, ms);
+  }
+
+  /** The live card was answered or withdrawn: its expiry no longer applies. */
+  function settleAskExpiry(s) {
+    if (s.askExpiryTimer != null) { clearTimer(s.askExpiryTimer); s.askExpiryTimer = null; }
+  }
+
+  /** True while a session holding this card waits on the operator (a live
+   * question, or an expired one on an awake child). The board's execute refuses such a card: a
+   * second turn must not start beside one that is waiting for an answer. */
+  function waitingOnCard(cardId) {
+    const cid = Number(cardId);
+    if (!Number.isInteger(cid)) return false;
+    for (const s of sessions.values()) {
+      if (s.state === "stopped" || s.cardId == null || Number(s.cardId) !== cid) continue;
+      // An expired question counts only while the child is awake: a session
+      // that hibernated (or a gateway that restarted) holds nothing open.
+      if (s.pendingUi || (s.expiredAsk && s.pi)) return true;
+    }
+    return false;
   }
 
   function stateEvent(s) {
@@ -776,7 +940,7 @@ export function createInteractiveEngine({
       threadId: s.threadId,
       state: s.state,
       lastError: s.lastError || null,
-      pendingUi: s.pendingUi || null,
+      pendingUi: s.pendingUi || s.expiredAsk || null,
       // Track 3 Task 4: same three additions as snapshot(), same rule.
       model: servingModel(s),
       label: s.label || null,
@@ -1655,7 +1819,9 @@ export function createInteractiveEngine({
       // The ONE thing the interactive engine adds to a bot's spawn: pi-lab's
       // ask-user ctx.ui unlock (PL-3). C-12's spawn_env hygiene guarantees a
       // bot def cannot set this itself for a channel turn.
-      extraEnv: { PI_BOT_INTERACTIVE: "1" },
+      // 2026-10-20: plus the maximum dialog cap, so no pi-lab ever answers an
+      // operator's silence with its 2-minute "no" (see PERCH_ASK_TIMEOUT_MS).
+      extraEnv: { PI_BOT_INTERACTIVE: "1", PI_BOT_INTERACTIVE_ASK_TIMEOUT_MS: PERCH_ASK_TIMEOUT_MS },
       // Track 3 Task 4: permissionMode binds at wake — the session record's
       // current value goes into every spawn/wake's PiRpc opts. Default
       // "guarded" is a byte-identical no-op for a fresh session (mirrors
@@ -2031,33 +2197,27 @@ export function createInteractiveEngine({
         s.pendingQuestions = null;
         s.askCtx = { questions: qs, firstFrame: m };
         s.pendingUi = { requestId: m.id, method: "questions", title: "", questions: qs };
+        s.expiredAsk = null;                         // a live question supersedes an expired one
+        armAskExpiry(s, m);
         clearStall(s);                               // paused while a human thinks
         emit(s, { type: "ask_user", ...s.pendingUi });
         armIdle(s);
-        pushAttention({
-          type: "attention",
-          priority: "high",
-          title: s.botId + " needs you",
-          body: askSummary(qs),
-          action_url: "/dashboard/bot-board#bird=" + s.sessionId,
-        });
+        attentionForAsk(s, askSummary(qs));
         return;
       }
       s.pendingUi = cardFrom(m);
+      s.expiredAsk = null;                           // a live question supersedes an expired one
+      armAskExpiry(s, m);
       clearStall(s);                                 // paused while a human thinks
       emit(s, { type: "ask_user", ...s.pendingUi });
       armIdle(s);                                    // no-op by design: a pending card blocks it
       // Track 3 Task 8: an ask card (incl. a permission confirm — "confirm"
-      // is one of ASK_METHODS) is a blocking event — it ALWAYS pushes,
-      // regardless of whether an operator is subscribed live, unlike the
-      // turn-end "replied" push below.
-      pushAttention({
-        type: "attention",
-        priority: "high",
-        title: s.botId + " needs you",
-        body: s.pendingUi.title || s.pendingUi.message || "",
-        action_url: "/dashboard/bot-board#bird=" + s.sessionId,
-      });
+      // is one of ASK_METHODS) is a blocking event — it ALWAYS reaches the
+      // operator, regardless of whether one is subscribed live, unlike the
+      // turn-end "replied" push below. 2026-10-20: GROUPED per session — one
+      // push while the session's "needs you" is unanswered, with a count.
+      const cardText = [s.pendingUi.title, s.pendingUi.message].filter(Boolean).join(": ");
+      attentionForAsk(s, cardText);
       return;
     }
     if (m.method === "notify") {
@@ -2079,6 +2239,17 @@ export function createInteractiveEngine({
         if (parsed && parsed.kind === "plan-mode") {
           s.planMode = parsed.state;
           emit(s, { type: "plan_state", state: parsed.state });
+        }
+        // 2026-10-20: pi-lab PARKED the turn on an unanswered dialog (its
+        // opt-in cap fired, or the turn was aborted) instead of handing the
+        // bot a "no". The current card expires (still shown, no longer
+        // answerable), any combined-question replay is dropped, and the
+        // turn's coming aborted end is "parked", not a failure.
+        if (parsed && parsed.kind === "ask-parked") {
+          const reason = parsed.reason === "aborted" ? "aborted" : "timeout";
+          if (s.pendingUi) expireAsk(s, s.pendingUi.requestId, reason);
+          else clearAsk(s);
+          if (s.turn) s.turn.parked = true;
         }
         return;
       }
@@ -2202,9 +2373,16 @@ export function createInteractiveEngine({
       log("audit failed (non-fatal): " + ((e && e.message) || e));
     }
 
+    // 2026-10-20: a turn pi-lab PARKED on an unanswered question ends as
+    // silently as an abort (no reply, no "replied"/"failed" push, no error
+    // frame): the session is waiting for the operator, not broken. It still
+    // meters and audits above, because it did run.
+    if (turn.parked && !turn.aborted) {
+      emit(s, { type: "parked", turnId: turn.id, requestId: s.expiredAsk ? s.expiredAsk.requestId : null });
+    }
     // The invariant is stated over the TURN, not over a pre-await snapshot: an
     // abort that landed during the metering awaits still silences the reply.
-    if (!turn.aborted) {
+    if (!turn.aborted && !turn.parked) {
       const replyText = withoutDatesEcho(turn, replyTextOf(end));
       // Strand 1: the turn ENDED in a model error (retries, if any, are
       // spent — this is the non-retrying agent_end). One frame per turn, by
@@ -2528,6 +2706,9 @@ export function createInteractiveEngine({
     // whether a "<bot> replied" attention push clears PERCH_NOTIFY_MIN_RUN_S.
     const turn = { id: randomUUID(), aborted: false, toolNames: [], statsBefore: null, graceTimer: null, startedAt: now(), errorShown: false };
     s.turn = turn;
+    // 2026-10-20: the operator wrote again, so an expired question is dealt
+    // with: the session is no longer waiting on it.
+    if (s.expiredAsk) { s.expiredAsk = null; closeAttention(s); }
     // Review M1: overflow-recovery state belongs to the PREVIOUS turn. A
     // retry that recovered leaves it set; a compaction still running (the
     // operator sent again while it summarizes) keeps it, so its failure still
@@ -3002,10 +3183,20 @@ export function createInteractiveEngine({
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
     const card = s.pendingUi;
+    // 2026-10-20: a late answer to a question that expired (pi's dialog timed
+    // out, or pi-lab parked the turn) must run nothing and say why: pi no
+    // longer holds that dialog, so a response would be dropped silently.
+    if ((!card || card.requestId !== requestId) && (s.expiredIds || []).includes(requestId)) {
+      throw engineError("request_expired");
+    }
     // Liveness BEFORE send (r1 S4): a dead child must yield a 409-shaped
     // no_such_request, never PiRpc's raw _exitError as a 500.
     const alive = !!(s.pi && s.pi._exitCode == null);
     if (!card || card.requestId !== requestId || !alive) throw engineError("no_such_request");
+    // The operator answered (or cancelled): the expiry no longer applies, and
+    // the session's "needs you" group is dealt with.
+    settleAskExpiry(s);
+    closeAttention(s);
     // PR-A (audit item 5): the combined multi-question card. The operator
     // answered every question at once; drive the child's blocking runTuiFlow
     // queue by replaying scripted select/input responses. The first select is
@@ -3079,7 +3270,10 @@ export function createInteractiveEngine({
   async function abortInFlight(s) {
     const turn = s.turn;
     clearStall(s);
+    if (s.pendingUi || s.expiredAsk) closeAttention(s);
+    settleAskExpiry(s);
     clearAsk(s);                                     // r1 S4 (+ PR-A dance state)
+    s.expiredAsk = null;
     if (turn) {
       turn.aborted = true;
       turn.graceTimer = timer(() => {
@@ -3098,7 +3292,7 @@ export function createInteractiveEngine({
     // I-2: nothing to abort — no in-flight turn and no pending card (the
     // adopted-after-restart hibernating case above all). An honest no-op
     // refusal, never a silent ok and never no_such_session.
-    if (!s.turn && !s.pendingUi) throw engineError("no_turn");
+    if (!s.turn && !s.pendingUi && !s.expiredAsk) throw engineError("no_turn");
     return abortInFlight(s);
   }
 
@@ -3207,7 +3401,10 @@ export function createInteractiveEngine({
     s.turn = null;
     clearStall(s);
     clearIdle(s);
+    if (s.pendingUi || s.expiredAsk) closeAttention(s);
+    settleAskExpiry(s);
     clearAsk(s);
+    s.expiredAsk = null;
     s.state = "stopped";
     // Track 3 Task 6: released on stop() — a stopped session's card is free
     // for a fresh dispatch. This is the primary release path (attachExit's
@@ -3275,6 +3472,7 @@ export function createInteractiveEngine({
       // hibernate / child exit all clear it, so a late subscriber can never be
       // shown a card no child is waiting on.
       if (s.pendingUi) fn({ type: "ask_user", ...s.pendingUi });
+      else if (s.expiredAsk) fn({ type: "ask_user", ...s.expiredAsk });
       // Track 3 Task 5: replay the last known plan-mode mirror so a late
       // subscriber's drawer opens already showing plan-mode state instead of
       // waiting for the NEXT bus tick (which may never come if nothing
@@ -3510,6 +3708,8 @@ export function createInteractiveEngine({
     /** Track 3 Task 6: exported so the dispatch ROUTE can 409 a card BEFORE
      * ever reaching spawn() — see the module header. */
     checkCardFree,
+    /** 2026-10-20: the board's execute refuses a card whose session waits on the operator. */
+    waitingOnCard,
     /** Track 3 Task 9: attach an existing session to a card — see its own doc. */
     attachCard,
     /** Precondition-test surface (r1 S10) — also the internal resolver. */

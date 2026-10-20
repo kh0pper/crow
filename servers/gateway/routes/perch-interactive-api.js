@@ -138,6 +138,9 @@ const ERROR_MAP = {
   no_such_session: [404, "no_such_session"],
   session_stopped: [410, "stopped"],
   no_such_request: [409, "no_such_request"],
+  // 2026-10-20: a late answer to a question that expired (pi's dialog timed
+  // out, or the turn was parked). Nothing was run; the clients say so.
+  request_expired: [409, "request_expired"],
   no_turn: [409, "no_turn"],
   bad_request: [400, "bad_request"],
   // Acceptance F3: a blank steer is a client bug, not a silent 200.

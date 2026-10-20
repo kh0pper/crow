@@ -95,6 +95,7 @@ import {
 // render and the no-JS move handler import the same module — see board-lock.js
 // for why a local copy is not allowed to exist here.
 import { lockState, sessionRowFor, SESSION_LOCK_STATUSES } from "./board-lock.js";
+import { getInteractiveEngine } from "../perch-interactive.js";
 // THE single bot_jobs DDL (shared with init-db, job_runner and tool-executor).
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "../../../scripts/pi-bots/bot-jobs-schema.mjs";
 import { isVoiceBotId } from "../../shared/voice-bot.js";
@@ -798,6 +799,16 @@ export default function botBoardApiRouter(dashboardAuth) {
       cdb = createDbClient();
       const { locked } = await lockState(cdb, id);
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
+      // 2026-10-20: perch-live sessions are outside the lock rail (T3-9), but
+      // one that is WAITING on the operator holds its card: a job turn must
+      // not start beside a session that is waiting for an answer.
+      const eng = getInteractiveEngine({ createIfMissing: false });
+      if (eng && typeof eng.waitingOnCard === "function" && eng.waitingOnCard(id)) {
+        return res.status(409).json({
+          reason: "a bot session on this card is waiting for you: answer or stop it in Perch first",
+          code: "waiting_on_operator",
+        });
+      }
       tdb = createDbClient(TASKS_DB);
       const card = (await tdb.execute({
         sql: "SELECT id, status, assigned_bot, project_id, archived_at FROM tasks_items WHERE id=? AND board_id IS NULL",

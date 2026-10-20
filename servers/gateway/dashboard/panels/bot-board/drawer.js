@@ -48,6 +48,7 @@ export function birdDrawerCss() {
   .bb-bd-ask-form{display:flex;gap:.4rem;margin-bottom:.4rem}
   .bb-bd-ask-form input,.bb-bd-ask-form textarea{flex:1;padding:.4rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:6px;color:var(--crow-text-primary);font:inherit}
   .bb-bd-ask-answered{font-size:.82rem;color:var(--crow-text-muted);font-style:italic;margin:.5rem 0}
+  .bb-bd-ask-note{font-size:.82rem;color:var(--crow-text-muted);font-style:italic;margin-top:.35rem}
   .bb-bd-picker-row{display:flex;justify-content:space-between;align-items:center;gap:.5rem;padding:.4rem 0;border-bottom:1px solid var(--crow-border);font-size:.85rem}
   .bb-card-focus{outline:2px solid ${PERCH_TOKENS.light.teal};outline-offset:2px}
   /* Every rule that has to beat css.js's \`.bb-drawer label\` / \`.bb-drawer
@@ -724,8 +725,14 @@ export function birdDrawerJs(lang) {
   function bdAnswerAsk(value,label){
     if(!bd.pendingCard||!bd.sid) return;
     var payload=Object.assign({requestId:bd.pendingCard.requestId},value);
+    var asked=bd.pendingCard;
     perchApi('POST','/interactive/'+encodeURIComponent(bd.sid)+'/answer',payload).then(function(r){
       if(r.ok) bdCollapseAsk(label);
+      else if(r.j&&r.j.error==='request_expired'){
+        // 2026-10-20: the question expired before this answer arrived; nothing ran.
+        crowToast('${tJs("perch.askExpired", lang)}',{type:'error'});
+        bdRenderAsk(Object.assign({},asked,{expired:true}));
+      }
       else crowToast((r.j&&r.j.error)||'${tJs("botboard.bdAnswerFailed", lang)}',{type:'error'});
     }).catch(function(){ crowToast('${tJs("botboard.bdAnswerFailed", lang)}',{type:'error'}); });
   }
@@ -741,10 +748,33 @@ export function birdDrawerJs(lang) {
   }
 
   function bdRenderAsk(card){
-    bd.pendingCard=card;
+    // An expired card (2026-10-20) is shown read-only and is NOT pending: it
+    // cannot be answered and does not hold "apply now" disabled.
+    bd.pendingCard=card&&!card.expired?card:null;
+    bd.askShown=card||null;
     bdUpdateCycleDisabled();
     clearEl(bdAskEl);
     if(!card) return;
+    if(card.expired){
+      var xw=document.createElement('div');
+      xw.className='bb-bd-ask-card bb-bd-ask-expired';
+      var xt=document.createElement('div');
+      xt.className='bb-bd-ask-title';
+      xt.textContent=card.title||(card.questions&&card.questions[0]&&card.questions[0].question)||'';
+      xw.appendChild(xt);
+      if(card.message){
+        var xm=document.createElement('div');
+        xm.className='bb-bd-ask-message';
+        xm.textContent=card.message;
+        xw.appendChild(xm);
+      }
+      var xn=document.createElement('div');
+      xn.className='bb-bd-ask-note';
+      xn.textContent='${tJs("perch.askExpired", lang)}';
+      xw.appendChild(xn);
+      bdAskEl.appendChild(xw);
+      return;
+    }
     var wrap=document.createElement('div');
     wrap.className='bb-bd-ask-card';
     var title=document.createElement('div');
@@ -859,6 +889,11 @@ export function birdDrawerJs(lang) {
     es.addEventListener('ask_user',function(e){
       if(bd.sid!==mySid) return;
       bdRenderAsk(parsed(e));
+    });
+    es.addEventListener('ask_expired',function(e){
+      if(bd.sid!==mySid) return;
+      var d=parsed(e);
+      if(bd.askShown&&bd.askShown.requestId===d.requestId) bdRenderAsk(Object.assign({},bd.askShown,{expired:true}));
     });
     es.addEventListener('plan_state',function(e){
       if(bd.sid!==mySid) return;

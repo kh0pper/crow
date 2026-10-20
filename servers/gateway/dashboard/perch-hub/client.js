@@ -383,6 +383,7 @@ export function perchHubJs(lang = "en") {
   var TRANSCRIPT_FAILED='${tJs("perch.transcriptFailed", lang)}';
   var RECONNECTING='${tJs("perch.reconnecting", lang)}';
   var ASK_STALE='${tJs("perch.askStale", lang)}';
+  var ASK_EXPIRED='${tJs("perch.askExpired", lang)}';
   var STEER_LABEL='${tJs("perch.steer", lang)}';
   var SEND_LABEL='${tJs("perch.send", lang)}';
   var ASK_CONFIRM='${tJs("perch.askConfirm", lang)}';
@@ -1588,6 +1589,8 @@ export function perchHubJs(lang = "en") {
     };
     on('state',function(d){
       setTurnInFlight(turnFlagFor(d));
+      /* An expired card leaves once the engine drops it (the next message). */
+      if(askShown&&askShown.expired&&!d.pendingUi) renderAsk(null);
       el('perch-state').textContent=d.state||'';
       /* The engine echoes the label on every state frame, so a rename made
          from the list row (or another tab) shows up here without a reload. */
@@ -1687,6 +1690,9 @@ export function perchHubJs(lang = "en") {
       renderFileCard(d);
     });
     on('ask_user',function(d){ renderAsk(d); });
+    on('ask_expired',function(d){
+      if(askShown&&d&&askShown.requestId===d.requestId) renderAsk(Object.assign({},askShown,{expired:true}));
+    });
     /* Spec 2026-10-01: a phone_call frame is a pointer — phone-card.js refetches the row. */
     on('phone_call',function(d){
       if(!histSettled){ phoneBuf.push(d); return; }   /* replayed by loadPhoneCards once the history lands */
@@ -2539,7 +2545,9 @@ export function perchHubJs(lang = "en") {
       if(current.sid!==mySid) return;
       clearEl(el('perch-ask'));
       setAttn(false);                          /* the banner dies with the card */
-      if(r.status===409) appendNote(ASK_STALE);
+      /* request_expired: the question timed out or the turn was parked
+         before this answer arrived — nothing was run, and the note says so. */
+      if(r.status===409) appendNote(r.j&&r.j.error==='request_expired'?ASK_EXPIRED:ASK_STALE);
     });
   }
 
@@ -2552,10 +2560,25 @@ export function perchHubJs(lang = "en") {
      scrollTop and so shows an older slice; re-pin it to the newest row (the
      running ask_user chip that explains the card). */
   function pinTranscript(){ var tr=el('perch-transcript'); if(tr) tr.scrollTop=tr.scrollHeight; }
+  var askShown=null;                         /* the card on screen, for ask_expired */
   function renderAsk(card){
     var pane=el('perch-ask'); if(!pane) return;
     clearEl(pane);
+    askShown=card&&card.requestId?card:null;
     if(!card||!card.requestId){ setAttn(false); return; }
+    /* 2026-10-20: an expired question stays on screen, read-only, so the
+       operator sees what was asked; the session still waits for them. */
+    if(card.expired){
+      var xf=document.createElement('div'); xf.className='ask-card ask-card-expired';
+      var xt=card.title||(card.questions&&card.questions[0]&&card.questions[0].question)||'';
+      if(xt) xf.appendChild(line('ask-title',xt));
+      if(card.message) xf.appendChild(line('ask-message',card.message));
+      xf.appendChild(line('ask-expired',ASK_EXPIRED));
+      pane.appendChild(xf);
+      setAttn(true);
+      pinTranscript();
+      return;
+    }
     /* PR-A: the combined multi-question card gets its own layout. */
     if(card.method==='questions'){ renderAskCombined(pane,card); return; }
     var frame=document.createElement('div'); frame.className='ask-card';

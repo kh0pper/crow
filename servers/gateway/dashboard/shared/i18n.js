@@ -2968,6 +2968,7 @@ export const translations = {
   "perch.askCancel": { en: "Cancel", es: "Cancelar" },
   "perch.askSubmit": { en: "Answer", es: "Responder" },
   "perch.askStale": { en: "That question is no longer open.", es: "Esa pregunta ya no está abierta." },
+  "perch.askExpired": { en: "This request expired. Nothing was run. Send a message to continue.", es: "Esta solicitud caducó. No se ejecutó nada. Envía un mensaje para continuar." },
   "perch.askSendAnswers": { en: "Send answers", es: "Enviar respuestas" },
   "perch.askSendAnswer": { en: "Send answer", es: "Enviar respuesta" },
   "perch.askSending": { en: "Sending…", es: "Enviando…" },
