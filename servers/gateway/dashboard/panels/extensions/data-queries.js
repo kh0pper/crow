@@ -273,8 +273,8 @@ export function fetchBundleStatus(installed) {
               timeout: 5000,
               env: { ...process.env, CROW_HOME: CROW_DIR },
             }).toString().trim();
-            const containers = out.split("\n").filter(Boolean).map((line) => {
-              try { return JSON.parse(line); } catch { return null; }
+            const containers = out.split("\n").filter(Boolean).flatMap((line) => {
+              try { const j = JSON.parse(line); return Array.isArray(j) ? j : [j]; } catch { return []; }
             }).filter(Boolean);
             bundleStatus[id] = {
               running: containers.some((c) => c.State === "running"),

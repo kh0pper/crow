@@ -136,7 +136,7 @@ test("classifyProjectOwners: only another Crow install OF THIS BUNDLE is an owne
   assert.deepEqual(await L.classifyProjectOwners(args(`${notInstalledHome}/bundles/ws\n`)), { owner: null, unrelated: [`${notInstalledHome}/bundles/ws`] });
   assert.deepEqual(await L.classifyProjectOwners(args(`${otherHome}/bundles/other-id\n`)), { owner: null, unrelated: [`${otherHome}/bundles/other-id`] });
   assert.deepEqual(await L.classifyProjectOwners(args(`${mine}\n${mine}\n`)), { owner: null, unrelated: [] });
-  assert.deepEqual(await L.classifyProjectOwners({ ...args(""), runner: async () => { throw new Error("no docker"); } }), { owner: null, unrelated: [] });
+  assert.deepEqual(await L.classifyProjectOwners({ ...args(""), runner: async () => { throw new Error("no docker"); } }), { owner: null, unrelated: [], unknown: true });
 });
 
 test("install: precreate, pull/up with opt-in long timeout, hook AFTER installed.json, minimal env", async () => {

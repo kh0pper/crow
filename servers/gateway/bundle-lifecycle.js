@@ -166,14 +166,15 @@ function installedListsId(installedPath, id) {
  *               and <H>/installed.json lists <id>. Callers refuse.
  *   unrelated — every other foreign working_dir (a legacy ~/crow-addons path, a repo
  *               checkout, a stale home). Callers warn and proceed, exactly as before.
- * Docker unreachable → nobody (compose will fail on its own).
+ * Docker unreachable → nobody (compose will fail on its own), flagged `unknown: true`.
  */
 export async function classifyProjectOwners({ project, projectDir, bundleId, crowHome, runner }) {
   let stdout = "";
   try {
     ({ stdout } = await runner("docker", ["ps", "-a", "--filter", `label=com.docker.compose.project=${project}`, "--format", '{{.Label "com.docker.compose.project.working_dir"}}'], { timeout: 15_000 }));
   } catch {
-    return { owner: null, unrelated: [] };
+    // Callers that must not guess (the start path's legacy-.env check) read `unknown`.
+    return { owner: null, unrelated: [], unknown: true };
   }
   const mine = realOrSelf(projectDir);
   const myHome = realOrSelf(crowHome);

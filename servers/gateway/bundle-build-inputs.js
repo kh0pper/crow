@@ -14,7 +14,8 @@
  * files and local droppings (node_modules, .git, .venv, caches). The context's
  * .dockerignore is hashed too (it changes what reaches the build) but not applied, so a
  * directory COPY may count an ignored file: a false "Rebuild needed", never a false
- * "current". Bounded (5000 files, 32 MB: over that the answer is "unknown"), and cached
+ * "current". A source it can't follow (${ARG}, a heredoc, git@) makes the answer
+ * "unknown". Bounded (5000 files, 2000 dirs, 32 MB: over that, "unknown"), and cached
  * on the inputs' size + mtime, so a page render re-reads only what changed.
  *
  * Text parsing on purpose (no YAML parser, no docker call): it runs on every
@@ -29,6 +30,7 @@ const SKIP = new Set([".venv", "__pycache__", ".pytest_cache", "node_modules", "
 const NEVER_FILE = /^\.env(\..*)?$/i;
 const MAX_FILES = 5000;
 const MAX_BYTES = 32 * 1024 * 1024;
+const MAX_DIRS = 2000;
 
 const clean = (v) => String(v).replace(/\s+#.*$/, "").trim().replace(/^["']|["']$/g, "");
 
@@ -125,6 +127,7 @@ function collectInputs(bundleDir, specs) {
   const files = [];
   const parts = [];
   const seen = new Set();
+  const seenDirs = new Set();
   let bytes = 0;
   const addFile = (real, st, ctxReal) => {
     if (seen.has(real)) return true;
@@ -141,7 +144,12 @@ function collectInputs(bundleDir, specs) {
     let st;
     try { st = statSync(real); } catch { return true; }
     if (st.isDirectory()) {
-      for (const name of readdirSync(real).sort()) {
+      if (seenDirs.has(real)) return true; // a symlink loop, or the same dir named twice
+      seenDirs.add(real);
+      if (seenDirs.size > MAX_DIRS) return false;
+      let names;
+      try { names = readdirSync(real).sort(); } catch { return false; }
+      for (const name of names) {
         if (SKIP.has(name) || NEVER_FILE.test(name)) continue;
         if (!addPath(join(real, name), ctxReal)) return false;
       }
@@ -155,13 +163,16 @@ function collectInputs(bundleDir, specs) {
     let ctxReal;
     try { ctxReal = realpathSync(resolve(bundleDir, spec.context)); } catch { return null; }
     if (!inside(rootReal, ctxReal)) return null;
-    const dfPath = resolve(ctxReal, spec.dockerfile);
+    let dfPath;
+    try { dfPath = realpathSync(resolve(ctxReal, spec.dockerfile)); } catch { return null; }
     if (!inside(ctxReal, dfPath) || !existsSync(dfPath)) return null;
     let df;
     try { df = readFileSync(dfPath, "utf8"); } catch { return null; }
     parts.push(`d\0${spec.context}\0${spec.dockerfile}\0${df}\0`);
     if (!addPath(join(ctxReal, ".dockerignore"), ctxReal)) return null;
     const sources = dockerfileSources(df);
+    // A source this parser can't follow (a build-arg, a heredoc, a git URL) → unknown.
+    if (sources.some((x) => /[$<]|^git@/.test(x))) return null;
     if (sources.some((x) => /[*?[]/.test(x))) {
       if (!addPath(ctxReal, ctxReal)) return null;
       continue;
@@ -182,7 +193,12 @@ const _cache = new Map();
  * sha256 (first 20 hex) of the bundle's build inputs, or null when the compose has no
  * build, a Dockerfile is missing, or the inputs exceed the bounds.
  */
-export function buildInputsHash(bundleDir, { composeFile = "docker-compose.yml" } = {}) {
+export function buildInputsHash(bundleDir, opts = {}) {
+  // Advisory only: whatever goes wrong, the answer is "unknown", never a thrown start.
+  try { return hashInputs(bundleDir, opts); } catch { return null; }
+}
+
+function hashInputs(bundleDir, { composeFile = "docker-compose.yml" } = {}) {
   let text;
   try { text = readFileSync(join(bundleDir, composeFile), "utf8"); } catch { return null; }
   const specs = composeBuildSpecs(text);

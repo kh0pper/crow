@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import {
@@ -127,5 +127,27 @@ test("over the size bound the answer is unknown (null), never a guess", () => {
   const d = bundle();
   put(d, "Dockerfile", "FROM x\nCOPY big /big\n");
   put(d, "big", Buffer.alloc(33 * 1024 * 1024));
+  assert.equal(buildInputsHash(d), null);
+});
+
+test("a symlink loop or an unreadable folder never throws (unknown at worst)", { skip: process.getuid?.() === 0 ? "root reads everything" : false }, () => {
+  const d = bundle();
+  put(d, "Dockerfile", "FROM x\nCOPY scripts /app/scripts\n");
+  symlinkSync("..", join(d, "scripts", "loop"));
+  assert.match(String(buildInputsHash(d)), /^[0-9a-f]{20}$/, "the loop is walked once");
+  mkdirSync(join(d, "scripts", "locked"));
+  chmodSync(join(d, "scripts", "locked"), 0o000);
+  try {
+    assert.equal(buildInputsHash(d), null);
+  } finally {
+    chmodSync(join(d, "scripts", "locked"), 0o755);
+  }
+});
+
+test("a COPY source the parser can't follow (build-arg, heredoc) → unknown, not a false current", () => {
+  const d = bundle();
+  put(d, "Dockerfile", "FROM x\nARG F=scripts/a.py\nCOPY ${F} /a\n");
+  assert.equal(buildInputsHash(d), null);
+  put(d, "Dockerfile", "FROM x\nCOPY <<EOT /a\nhi\nEOT\n");
   assert.equal(buildInputsHash(d), null);
 });

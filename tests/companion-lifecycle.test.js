@@ -252,6 +252,52 @@ dockerTest("startInstalledBundle: a container started from another folder with a
   }
 });
 
+dockerTest("startInstalledBundle: docker not answering the container listing → refused (503), never guessed", async () => {
+  installCompanionCopy();
+  B._setDockerRunnerForTest(async () => { throw new Error("timeout"); });
+  try {
+    composeCalls.length = 0;
+    const r = await B.startInstalledBundle("companion", { recreate: true });
+    assert.equal(r.ok, false);
+    assert.equal(r.status, 503);
+    assert.equal(r.code, "ownership_unknown");
+    assert.equal(composeCalls.filter((c) => c.args[0] === "up" || c.args[0] === "build").length, 0);
+  } finally {
+    B._setDockerRunnerForTest(async () => ({ stdout: "", stderr: "" }));
+  }
+});
+
+dockerTest("while a start holds the bundle, Stop and the shared-storage re-apply refuse (409)", async () => {
+  installCompanionCopy();
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  composeImpl = async (args) => { if (args[0] === "build") await gate; return { stdout: "" }; };
+  const { default: express } = await import("express");
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => { req.session = { authenticated: true }; next(); });
+  app.use(B.default());
+  const srv = await new Promise((r) => { const x = app.listen(0, "127.0.0.1", () => r(x)); });
+  try {
+    const first = B.startInstalledBundle("companion");
+    for (let i = 0; i < 200 && !B.bundleStartInProgress("companion"); i++) await new Promise((r) => setTimeout(r, 10));
+    for (let i = 0; i < 200 && !composeCalls.some((c) => c.args[0] === "build"); i++) await new Promise((r) => setTimeout(r, 10));
+    const base = `http://127.0.0.1:${srv.address().port}`;
+    const stop = await fetch(`${base}/bundles/api/stop`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ bundle_id: "companion" }) });
+    assert.equal(stop.status, 409);
+    assert.equal((await stop.json()).code, "bundle_start_in_progress");
+    const apply = await fetch(`${base}/bundles/api/shared-storage/apply/companion`, { method: "POST" });
+    assert.equal(apply.status, 409);
+    release();
+    assert.equal((await first).ok, true);
+    assert.equal(B.bundleStartInProgress("companion"), false);
+  } finally {
+    release();
+    composeImpl = async () => ({ stdout: "", stderr: "" });
+    srv.close();
+  }
+});
+
 dockerTest("shipped compose, real `docker compose config`: prod names and volumes unchanged; a second project gets its own", () => {
   const dir = mkdtempSync(join(tmpdir(), "crow-companion-life-cfg-"));
   const run = (sub) => {

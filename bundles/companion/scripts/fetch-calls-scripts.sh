@@ -27,7 +27,7 @@ deadline=$(( $(date +%s) + WAIT ))
 
 for f in $FILES; do
   while :; do
-    ctype=$(curl -fsS --max-time 5 -o "$OUT/scripts/$f.part" -w '%{content_type}' "$BASE/$f" 2>/dev/null)
+    ctype=$(curl -fsS --max-time 5 --max-filesize 2097152 -o "$OUT/scripts/$f.part" -w '%{content_type}' "$BASE/$f" 2>/dev/null)
     rc=$?
     if [ "$rc" -eq 0 ]; then
       case "$ctype" in

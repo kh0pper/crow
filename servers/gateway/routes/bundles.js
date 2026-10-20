@@ -1225,10 +1225,11 @@ async function composeOwnership(bundleId, bundleDir, manifest) {
   try { envVars = parseEnvText(readFileSync(join(projectDir, ".env"), "utf8")); } catch { /* no .env */ }
   const runner = _dockerRunnerForTest || run;
   const project = await resolveComposeProject({ projectDir, composeText: text, envVars, runner, env: composeEnv() });
-  const { owner, unrelated } = await classifyProjectOwners({ project, projectDir, bundleId, crowHome: CROW_HOME, runner });
+  const { owner, unrelated, unknown = false } = await classifyProjectOwners({ project, projectDir, bundleId, crowHome: CROW_HOME, runner });
   return {
     project,
     unrelated,
+    unknown,
     refusal: owner ? `This extension's containers (compose project "${project}") belong to another Crow install on this host (${owner}): manage them from there.` : null,
     warning: unrelated.length ? `compose project "${project}" also has containers started from ${unrelated.join(", ")} (legacy path) — continuing` : null,
   };
@@ -1868,13 +1869,6 @@ async function runComposeConfig(args, { cwd, env }) {
 }
 
 /**
- * THE install security check, shared by every path that runs `docker compose up` on a
- * bundle: install (single + collection, via runInstallJob), Start/recreate, and the
- * shared-storage re-apply. `textCheck` (install only) also checks the file as shipped —
- * e.g. no extra compose files; at Start an operator's own override is part of the model
- * that is checked instead. The model check reads what Compose will actually apply.
- */
-/**
  * A container of this bundle's compose project that was started from ANOTHER folder (a
  * repo checkout, from before the installed copy carried its compose file) ran with that
  * folder's .env. Re-creating it from the installed copy applies the installed .env
@@ -1899,6 +1893,8 @@ function legacyEnvConflict(bundleDir, composeText, unrelated) {
 // One start at a time per bundle (a double-clicked Rebuild, or Rebuild plus a Settings save,
 // would otherwise run two `compose up` on the same project).
 const _starting = new Set();
+/** Stop, Remove and the shared-storage re-apply refuse while a start holds the bundle. */
+export function bundleStartInProgress(bundleId) { return _starting.has(bundleId); }
 
 /**
  * Start (or re-create) an installed bundle's containers on THIS host — the one start path
@@ -1926,12 +1922,13 @@ export async function startInstalledBundle(bundleId, { recreate = false, crossHo
     const text = readFileSync(composePath, "utf8");
     const own = await composeOwnership(bundleId, bundleDir, getInstalledFirstManifest(bundleId));
     if (own.refusal) return { ok: false, status: 409, error: own.refusal, code: "compose_project_foreign" };
+    if (own.unknown) return { ok: false, status: 503, error: `Could not list ${bundleId}'s containers (docker did not answer); try again`, code: "ownership_unknown" };
     if (own.warning) console.warn(`[bundles] ${bundleId} start: ${own.warning}`);
     const conflict = legacyEnvConflict(bundleDir, text, own.unrelated);
     if (conflict) {
       return {
         ok: false, status: 409, code: "legacy_env_differs",
-        error: `The running container was started from ${conflict.dir}, whose .env differs from the installed one (${join(bundleDir, ".env")}) in: ${conflict.keys.join(", ")}. Starting from the installed copy would apply the installed values. Copy the settings you want into the installed .env, then start again.`,
+        error: `The running container was started from ${conflict.dir}, whose .env differs from the installed one (${join(bundleDir, ".env")}) in: ${conflict.keys.join(", ")}. Starting from the installed copy would apply the installed values. Copy the settings you want into the installed .env, then start again — or, to keep the installed values, remove the old container first (docker rm, on the container from that folder).`,
       };
     }
     const sc = startConsent(bundleId, { crossHost });
@@ -1970,6 +1967,13 @@ async function imageStale(bundleDir, composeText) {
 // container through this; a process-wide registry, so it never imports this module itself.
 globalThis[Symbol.for("crow.startInstalledBundle")] = startInstalledBundle;
 
+/**
+ * THE install security check, shared by every path that runs `docker compose up` on a
+ * bundle: install (single + collection, via runInstallJob), Start/recreate, and the
+ * shared-storage re-apply. `textCheck` (install only) also checks the file as shipped —
+ * e.g. no extra compose files; at Start an operator's own override is part of the model
+ * that is checked instead. The model check reads what Compose will actually apply.
+ */
 export async function checkBundleCompose(bundleDir, { bundleId, manifest, consentVerified = false, textCheck = true, operatorRoots } = {}) {
   if (textCheck) {
     const t = validateComposeFile(join(bundleDir, "docker-compose.yml"), bundleId, { manifest, consentVerified });
@@ -3736,6 +3740,7 @@ export default function bundlesRouter() {
 
     const orchRefusal = bundleOrchestrationRefusal(bundle_id);
     if (orchRefusal) return res.status(orchRefusal.status).json({ error: orchRefusal.error, code: orchRefusal.code });
+    if (bundleStartInProgress(bundle_id)) return res.status(409).json({ error: `'${bundle_id}' is starting or rebuilding — remove it when that finishes`, code: "bundle_start_in_progress" });
 
     const bundleDir = join(BUNDLES_DIR, bundle_id);
     if (!existsSync(bundleDir)) {
@@ -4011,6 +4016,7 @@ export default function bundlesRouter() {
       return res.json({ ok: true, message: r.message });
     }
     if (action !== "stop") return res.status(400).json({ error: `unsupported action: ${action}` });
+    if (bundleStartInProgress(bundleId)) return res.status(409).json({ error: `'${bundleId}' is starting or rebuilding — stop it when that finishes`, code: "bundle_start_in_progress" });
     const orchRefusal = bundleOrchestrationRefusal(bundleId);
     if (orchRefusal) return res.status(orchRefusal.status).json({ error: orchRefusal.error, code: orchRefusal.code });
 
@@ -4341,6 +4347,7 @@ export default function bundlesRouter() {
     }
     const orchRefusal = bundleOrchestrationRefusal(bundleId);
     if (orchRefusal) return res.status(orchRefusal.status).json({ error: orchRefusal.error, code: orchRefusal.code });
+    if (bundleStartInProgress(bundleId)) return res.status(409).json({ error: `'${bundleId}' is starting or rebuilding — try again when that finishes`, code: "bundle_start_in_progress" });
 
     const manifest = getManifest(bundleId);
     if (!manifest?.storage?.translator) {
