@@ -22,6 +22,7 @@ import { STRINGS } from "../bundles/meta-glasses/server/strings.js";
 import { createGlassesTurns, playableTtsProfile, oneEnvelope, LOOK_TOOL, GLASSES_DENY_TOOLS } from "../bundles/meta-glasses/server/session.js";
 import { wantsLook, wantsMemory, matchTransport, intentText, INTENT_MAX_CHARS } from "../bundles/meta-glasses/server/intent.js";
 import { readEnvelope } from "../bundles/meta-glasses/server/envelope.js";
+import { CROW_VOICE_BOT_ID, DEFAULT_PERSONA, voiceBotDefinition } from "../servers/shared/voice-bot.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // Its own home and database inside the suite's scratch home (see glasses-routes-security.test.js).
@@ -35,6 +36,8 @@ const TAILNET = { "tailscale-user-login": "tester@example.invalid" };
 const L = STRINGS.en;
 
 let srv, base, db, store, svc;
+// Every glasses turn answers as the Crow voice bot (seeded below on the test's quick model).
+const crowVoiceDef = (over = {}) => ({ ...voiceBotDefinition({ preset: "fast_local", fastKey: "voice-test/quick-test" }), ...over });
 const tokens = {};
 // What the outside services saw, and what they answer next.
 const seen = { chat: [], tts: [], stt: 0, vision: [] };
@@ -97,6 +100,7 @@ before(async () => {
   }
   const bot = (over = {}) => JSON.stringify({ engine: "pi", fast_voice_model: "voice-test/quick-test", system_prompt: "You are a household assistant.", skills: [], tools: { crow_mcp: ["crow-memory/crow_store_memory", "crow-memory/crow_search_memories"] }, permission_policy: { external_send: "draft_only" }, ...over });
   await db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES ('helper', 'Helper', ?, 1), ('giant', 'Giant', ?, 1), ('asleep', 'Asleep', ?, 0)", args: [bot(), bot({ system_prompt: "You are a household assistant. ".repeat(2000) }), bot()] });
+  await db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?, 'Crow', ?, 1)", args: [CROW_VOICE_BOT_ID, JSON.stringify(crowVoiceDef())] });
 
   store = await import("../servers/shared/device-store.js");
   for (const [id, botId] of [["glasses-a", "helper"], ["glasses-unbound", null], ["glasses-giant", "giant"], ["glasses-asleep", "asleep"]]) {
@@ -148,6 +152,20 @@ async function client(deviceId, { onCapture } = {}) {
     close: () => ws.close(),
   };
 }
+/**
+ * Run `fn` with the Crow voice bot row changed, then put the seeded row back. The bot-defs-changed
+ * event drops the turn runner's cached bot, as a Bot Builder save does.
+ */
+async function withVoiceBot({ enabled = 1, def = crowVoiceDef() }, fn) {
+  const bus = (await import("../servers/shared/event-bus.js")).default;
+  const write = (en, d) => db.execute({ sql: "UPDATE pi_bot_defs SET enabled = ?, definition = ? WHERE bot_id = ?", args: [en, JSON.stringify(d), CROW_VOICE_BOT_ID] });
+  await write(enabled, def);
+  bus.emit("pibots:defs-changed", { bot_id: CROW_VOICE_BOT_ID });
+  try { return await fn(); } finally {
+    await write(1, crowVoiceDef());
+    bus.emit("pibots:defs-changed", { bot_id: CROW_VOICE_BOT_ID });
+  }
+}
 const types = (evs) => evs.map((e) => e.type).filter((t) => t !== "caption_delta");
 const count = (evs, type) => evs.filter((e) => e.type === type).length;
 function reset({ stt = "What is the capital of Portugal?", chat = [], chatStatus = 200, sttStatus = 200 } = {}) {
@@ -171,7 +189,8 @@ test("a plain question: one speech envelope, a voice the app can play, the assis
   assert.equal(seen.chat.length, 1);
   const rq = seen.chat[0];
   assert.equal(rq.model, "quick-test");
-  assert.match(rq.messages[0].content, /^You are a household assistant\./);
+  assert.ok(rq.messages[0].content.startsWith(DEFAULT_PERSONA), "Crow's persona answers, not the device's bound bot");
+  assert.ok(!rq.messages[0].content.includes("You are a household assistant."));
   assert.ok(rq.messages[0].content.includes(L.prompt_suffix));
   assert.match(rq.messages.at(-1).content, /^\[Now\] .+\n\[Note\] [^\n]+\n\nWhat is the capital of Portugal\?$/);
   const offered = (rq.tools || []).map((t) => t.function?.name || t.name);
@@ -202,9 +221,12 @@ test("no assistant bound: the line is spoken, no model is called", async () => {
 
 test("the bound assistant was switched off: spoken, not silent", async () => {
   reset();
-  const c = await client("glasses-asleep");
-  const evs = await c.turn();
-  c.close();
+  const evs = await withVoiceBot({ enabled: 0 }, async () => {
+    const c = await client("glasses-a");
+    const got = await c.turn();
+    c.close();
+    return got;
+  });
   assert.deepEqual([count(evs, "tts_start"), count(evs, "tts_end")], [1, 1]);
   assert.deepEqual(seen.tts.map((t) => t.input), [L.no_bot]);
   assert.equal(seen.chat.length, 0);
@@ -212,9 +234,12 @@ test("the bound assistant was switched off: spoken, not silent", async () => {
 
 test("an assistant too large for the quick model: the too-large line is spoken and no request is sent", async () => {
   reset();
-  const c = await client("glasses-giant");
-  const evs = await c.turn();
-  c.close();
+  const evs = await withVoiceBot({ def: crowVoiceDef({ system_prompt: "You are a household assistant. ".repeat(2000) }) }, async () => {
+    const c = await client("glasses-a");
+    const got = await c.turn();
+    c.close();
+    return got;
+  });
   assert.deepEqual([count(evs, "tts_start"), count(evs, "tts_end")], [1, 1]);
   assert.deepEqual(seen.tts.map((t) => t.input), [L.too_large]);
   assert.equal(seen.chat.length, 0);
