@@ -13,6 +13,8 @@
  * or by the exact name of one of the token owner's own libraries.
  */
 
+import { createHash } from "node:crypto";
+
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const PUSH_FORMATS = Object.freeze(["mp3", "ogg"]);
 export const RATE = Object.freeze({ toolId: "sunvox_funkwhale_upload", bucketKey: "global", capacity: 10, windowSeconds: 3600 });
@@ -64,9 +66,12 @@ async function resolveLibrary(fetchImpl, origin, token, library) {
  * Waits up to pollTimeoutMs for the import to finish (best effort; Funkwhale
  * imports in the background).
  */
+// Budgets: a gateway tool call times out after 60 s (the MCP client's
+// default), and the render and encode already took part of that. So the
+// upload gets 30 s and the import is checked twice at most, 2 s apart.
 export async function pushToFunkwhale({
   cfg, buf, fileName, library, fetchImpl = fetch, db = null, consumeToken = null,
-  pollMs = 2000, pollTimeoutMs = 20_000,
+  pollMs = 2000, pollTimeoutMs = 4000, uploadTimeoutMs = 30_000,
 }) {
   if (!cfg || !cfg.origin || !cfg.token) {
     throw new Error("the Funkwhale add-on is not installed or not configured (it needs FUNKWHALE_URL and FUNKWHALE_ACCESS_TOKEN); the render is saved, upload it later with fw_upload_track");
@@ -81,9 +86,10 @@ export async function pushToFunkwhale({
   const libUuid = await resolveLibrary(fetchImpl, origin, cfg.token, library);
   const form = new FormData();
   form.append("library", libUuid);
-  form.append("import_reference", `sunvox-studio-${Date.now()}`);
+  // The content hash: a retried call for the same render carries the same reference.
+  form.append("import_reference", `sunvox-studio-${createHash("sha256").update(buf).digest("hex").slice(0, 16)}`);
   form.append("audio_file", new Blob([buf], { type: ext === "mp3" ? "audio/mpeg" : "audio/ogg" }), String(fileName).slice(0, 200));
-  const up = await call(fetchImpl, origin, cfg.token, "/api/v1/uploads/", { method: "POST", body: form, timeoutMs: 120_000 });
+  const up = await call(fetchImpl, origin, cfg.token, "/api/v1/uploads/", { method: "POST", body: form, timeoutMs: uploadTimeoutMs });
   const upUuid = UUID_RE.test(String(up?.uuid || "")) ? String(up.uuid).toLowerCase() : null;
   const out = { funkwhale_library_uuid: libUuid, funkwhale_upload_uuid: upUuid, import_status: typeof up?.import_status === "string" ? up.import_status : null };
   if (!upUuid) return out;
@@ -94,6 +100,11 @@ export async function pushToFunkwhale({
     try { status = await call(fetchImpl, origin, cfg.token, `/api/v1/uploads/${upUuid}/`); } catch { break; }
   }
   if (typeof status?.import_status === "string") out.import_status = status.import_status;
+  if (out.import_status === "errored") {
+    out.import_error = JSON.stringify(status?.import_details ?? status?.import_metadata ?? null).slice(0, 300);
+  } else if (out.import_status !== "finished") {
+    out.note = "Funkwhale is still importing the file; find it with fw_search (type tracks) in a moment, then fw_play it";
+  }
   const trackId = status?.track?.id ?? (typeof status?.track === "number" ? status.track : null);
   if (Number.isInteger(trackId)) out.funkwhale_track_id = trackId;
   return out;

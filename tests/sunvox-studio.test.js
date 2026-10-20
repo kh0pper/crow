@@ -31,13 +31,15 @@ const engine = nativeAvailable()
   ? await import(pathToFileURL(path.join(BUNDLE, "server", "sunvox-engine.js")).href)
   : null;
 const hasFfmpeg = (() => { try { return (require("node:child_process").spawnSync("ffmpeg", ["-version"]).status === 0); } catch { return false; } })();
+// With CROW_REQUIRE_SUNVOX_ENGINE=1 (CI) the mp3/ogg cases run whether or not ffmpeg is there, so a missing ffmpeg fails them.
+const NO_FFMPEG = !hasFfmpeg && process.env.CROW_REQUIRE_SUNVOX_ENGINE !== "1" && "ffmpeg not installed";
 
 test("sunvox: the engine loads when CI requires it", { skip: process.env.CROW_REQUIRE_SUNVOX_ENGINE !== "1" && "CROW_REQUIRE_SUNVOX_ENGINE not set" }, () => {
   assert.ok(engine, SKIP_REASON);
 });
 
 test("sunvox: the fixture is our own composition, reproducible from its spec", { skip: !engine && SKIP_REASON }, async () => {
-  const { composeFixture, FIXTURE_NAME } = await import(pathToFileURL(path.join(ROOT, "scripts", "sunvox-studio", "make-fixture.mjs")).href);
+  const { composeFixture, FIXTURE_NAME, FIXTURE_SPEC } = await import(pathToFileURL(path.join(ROOT, "scripts", "sunvox-studio", "make-fixture.mjs")).href);
   const { project } = await composeFixture();
   const sha = (b) => require("node:crypto").createHash("sha256").update(b).digest("hex");
   assert.equal(sha(project), sha(fs.readFileSync(FIXTURE)), "recomposing FIXTURE_SPEC gives the committed bytes (run node scripts/sunvox-studio/make-fixture.mjs after an intended change)");
@@ -46,15 +48,28 @@ test("sunvox: the fixture is our own composition, reproducible from its spec", {
   assert.equal(info.format, "sunvox");
   assert.equal(info.version, "2.1.4.3");
   assert.equal(info.engine_version, "2.1.4");
-  assert.deepEqual(info.effective_tempo.at_line_0, { bpm: 100, tpl: 6 });
-  assert.equal(info.length_lines, 48);
-  assert.equal(info.length_frames, 317520); // 48 lines x 6 ticks x 2.5/100 s x 44100
-  assert.equal(info.modules, 4);
+  // Expected values come from the spec and the tracker timing rule, not from
+  // reading the file back: lines = the arrangement laid end to end; a line
+  // lasts TPL x 2.5 / BPM seconds.
+  const spec = FIXTURE_SPEC;
+  const linesOf = (id) => spec.patterns.find((p) => p.id === id).lines;
+  const songLines = spec.arrangement.reduce((n, a) => n + linesOf(a.pattern), 0);
+  assert.deepEqual(info.effective_tempo.at_line_0, { bpm: spec.bpm, tpl: spec.tpl });
+  assert.equal(info.length_lines, songLines);
+  assert.equal(info.length_frames, Math.round(songLines * spec.tpl * 2.5 / spec.bpm * 44100));
+  assert.equal(info.modules, spec.modules.length + 1, "the spec's modules plus Output");
   assert.deepEqual(info.module_list.map((m) => [m.type, m.name, m.x, m.y]), [
     ["Output", "Output", 512, 512], ["DrumSynth", "kick", 300, 300], ["Analog generator", "bass", 300, 500], ["Echo", "echo", 500, 500],
   ]);
   for (const m of info.module_list) assert.match(m.color, /^#[0-9a-f]{6}$/);
-  assert.deepEqual(info.pattern_list.map((p) => [p.name, p.x, p.y, p.lines]), [["intro", 0, 0, 16], ["groove", 16, 0, 16], ["groove", 32, 0, 16]]);
+  let x = 0;
+  assert.deepEqual(info.pattern_list.map((p) => [p.name, p.x, p.y, p.lines]), spec.arrangement.map((a) => { const at = x; x += linesOf(a.pattern); return [a.pattern, at, 0, linesOf(a.pattern)]; }));
+  // And it sounds: the render is at least the song long and not silent.
+  const r = await engine.render(fs.readFileSync(FIXTURE));
+  assert.ok(r.frames >= info.length_frames);
+  let peak = 0;
+  for (let i = 44; i < r.wav.length - 1; i += 2) peak = Math.max(peak, Math.abs(r.wav.readInt16LE(i)));
+  assert.ok(peak > 1000, "fixture render is silent");
 });
 
 test("sunvox: the old upstream demo song is gone from the repo and the bundle ships no spike/", () => {
@@ -326,7 +341,7 @@ test("sunvox: arrangement errors are actionable and bounded", { skip: !engine &&
   await assert.rejects(() => engine.compose({ modules: G, patterns: two, arrangement: [{ pattern: "a" }] }), /pattern\(s\) b are not in the arrangement/);
   await assert.rejects(() => engine.compose({ modules: G, patterns: [pat("a"), pat("a")], arrangement: [{ pattern: "a" }] }), /must be unique/);
   await assert.rejects(() => engine.compose({ modules: G, patterns: [pat("a")], arrangement: [{ pattern: "a", x: -1 }] }), /x must be an integer from 0/);
-  await assert.rejects(() => engine.compose({ modules: G, patterns: [pat("a")], arrangement: [{ pattern: "a", x: 2 ** 21 }] }), /x must be an integer from 0/);
+  await assert.rejects(() => engine.compose({ modules: G, patterns: [pat("a")], arrangement: [{ pattern: "a", x: 65537 }] }), /x must be an integer from 0 to 65536/);
   await assert.rejects(() => engine.compose({ modules: G, patterns: [pat("a")], arrangement: [{ pattern: "a", y: 5000 }] }), /y must be an integer/);
   await assert.rejects(() => engine.compose({ modules: G, patterns: [pat("a")], arrangement: [] }), /non-empty array/);
   await assert.rejects(() => engine.compose({ modules: G, patterns: [pat("a")], arrangement: Array.from({ length: 4097 }, () => ({ pattern: "a" })) }), /at most 4096 placements/);
@@ -422,8 +437,8 @@ test("sunvox tools: compose saves project + render to storage, refuses a same-na
   try {
     const r = await c.call("sunvox_compose", { name: "My Loop", render: true, spec: tinySpec, reference_type: "blog_post", notify: true });
     assert.equal(r.isError, false, r.text);
-    assert.match(r.json.project_storage_key, /^sunvox-studio\/projects\/\d+-My_Loop\.sunvox$/);
-    assert.match(r.json.render_storage_key, /^sunvox-studio\/renders\/\d+-My Loop-\d+\.wav$|^sunvox-studio\/renders\/\d+-My_Loop-\d+\.wav$/);
+    assert.match(r.json.project_storage_key, /^sunvox-studio\/projects\/\d+-[0-9a-f]{8}-My_Loop\.sunvox$/);
+    assert.match(r.json.render_storage_key, /^sunvox-studio\/renders\/\d+-[0-9a-f]{8}-My_Loop-\d+\.wav$/);
     assert.equal(r.json.project_media_path, `/blog/media/${r.json.project_storage_key}`);
     assert.ok(r.json.project_storage_url.startsWith("http://storage.example/"));
     assert.equal(r.json.info.name, "My Loop");
@@ -462,7 +477,7 @@ test("sunvox tools: without storage a render keeps its local path and says why; 
   } finally { await c.close(); fs.rmSync(work, { recursive: true, force: true }); }
 });
 
-test("sunvox tools: render pushes an mp3 to Funkwhale using only the configured origin", { skip: (!engine && SKIP_REASON) || (!hasFfmpeg && "ffmpeg not installed") }, async () => {
+test("sunvox tools: render pushes an mp3 to Funkwhale using only the configured origin", { skip: (!engine && SKIP_REASON) || NO_FFMPEG }, async () => {
   const os = await import("node:os");
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "sv-tools-"));
   fs.copyFileSync(FIXTURE, path.join(work, "f.sunvox"));
@@ -483,6 +498,9 @@ test("sunvox tools: render pushes an mp3 to Funkwhale using only the configured 
     const r = await c.call("sunvox_render", { path: "f.sunvox", format: "mp3", funkwhale_library: LIB });
     assert.equal(r.isError, false, r.text);
     assert.equal(r.json.format, "mp3");
+    const probe = require("node:child_process").spawnSync("ffprobe", ["-v", "error", "-show_entries", "format_tags=title,artist,album", "-of", "json", r.json.path], { encoding: "utf8" });
+    const tags = JSON.parse(probe.stdout).format.tags;
+    assert.deepEqual([tags.title, tags.artist, tags.album], ["Crow fixture", "Crow", "SunVox Studio"], "a library import needs title, artist and album tags");
     assert.equal(r.json.funkwhale.funkwhale_upload_uuid, UP);
     assert.equal(r.json.funkwhale.funkwhale_track_id, 9);
     assert.ok(seen.length >= 1 && seen.every((s) => s.url.startsWith("http://127.0.0.1:5999/") && s.redirect === "error" && s.auth === "Bearer tok"));
@@ -490,4 +508,20 @@ test("sunvox tools: render pushes an mp3 to Funkwhale using only the configured 
     assert.equal(wav.isError, false, "the render itself succeeds");
     assert.match(wav.json.funkwhale.error, /mp3 or ogg/);
   } finally { await c.close(); fs.rmSync(work, { recursive: true, force: true }); }
+});
+
+test("sunvox: the work dir follows the instance data dir, and a '~/' setting expands", async () => {
+  const os = await import("node:os");
+  const { spawnSync } = await import("node:child_process");
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "sv-data-"));
+  const url = pathToFileURL(path.join(BUNDLE, "server", "server.js")).href;
+  const run = (env) => {
+    const r = spawnSync(process.execPath, ["--input-type=module", "-e", `const m = await import(${JSON.stringify(url)}); console.log(m.WORKDIR)`], { env: { ...process.env, CROW_APP_ROOT: ROOT, SUNVOX_WORKDIR: "", ...env }, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  try {
+    assert.equal(run({ CROW_DATA_DIR: dataDir }), path.join(dataDir, "sunvox-studio"));
+    assert.equal(run({ CROW_DATA_DIR: dataDir, SUNVOX_WORKDIR: "~/music-out" }), path.join(os.homedir(), "music-out"));
+  } finally { fs.rmSync(dataDir, { recursive: true, force: true }); }
 });

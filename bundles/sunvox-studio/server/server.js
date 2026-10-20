@@ -32,12 +32,37 @@ import * as engine from "./sunvox-engine.js";
 import { saveToStorage, storageMode, notifyDone, mimeFor, REFERENCE_TYPES } from "./outputs.js";
 import { pushToFunkwhale } from "./funkwhale-push.js";
 
-export const WORKDIR = path.resolve(process.env.SUNVOX_WORKDIR || path.join(os.homedir(), ".crow", "data", "sunvox-studio"));
+/** "~/x" → <home>/x (an installed entry can carry the manifest's "~/" default verbatim). */
+export function expandHome(p) {
+  const s = String(p);
+  return s === "~" || s.startsWith("~/") ? path.join(os.homedir(), s.slice(1)) : s;
+}
+
+/** This instance's data dir + sunvox-studio (a second instance gets its own). */
+async function defaultWorkdir() {
+  try {
+    const { appImport } = await import("./app-root.js");
+    const { resolveInstanceDataDir } = await appImport("servers/shared/crow-home.js");
+    return path.join(resolveInstanceDataDir(), "sunvox-studio");
+  } catch {
+    return path.join(os.homedir(), ".crow", "data", "sunvox-studio");
+  }
+}
+export const WORKDIR = path.resolve(process.env.SUNVOX_WORKDIR ? expandHome(process.env.SUNVOX_WORKDIR) : await defaultWorkdir());
 
 // --- Lazy storage import (works from the repo tree; degrades with a clear error) ---
 let storageMod = null;
-/** Crow storage through the app's own s3-client, resolved via the app root
- *  (CROW_APP_ROOT, in-repo run, or ~/crow) so installed copies find it too. */
+let storageInit = false;
+/**
+ * Crow storage through the app's own s3-client, resolved via the app root
+ * (CROW_APP_ROOT, in-repo run, or ~/crow) so installed copies find it too.
+ *
+ * Storage is usually configured in the Nest (storage.shared.* settings, with
+ * sealed secrets), not in the environment. The gateway opens those with the
+ * instance identity (initStorage); this child does the same once, with the
+ * identity loaded ONLY if it exists (never created), and falls back to the
+ * MINIO_* environment like the stdio storage server.
+ */
 async function storage() {
   // Only a working client is cached: storage that was down at the first call
   // is retried on the next one instead of staying off for the session.
@@ -45,11 +70,28 @@ async function storage() {
   try {
     const { appImport } = await import("./app-root.js");
     const mod = await appImport("servers/storage/s3-client.js");
+    if (!storageInit) {
+      storageInit = true;
+      try {
+        const { loadIdentityIfPresent } = await appImport("servers/sharing/identity.js");
+        const identity = typeof loadIdentityIfPresent === "function" ? loadIdentityIfPresent() : null;
+        if (identity) await mod.initStorage({ db: await sharedDb(), identity });
+      } catch { /* env fallback (MINIO_*) stays active */ }
+    }
     storageMod = (await mod.isAvailable()) ? mod : null;
   } catch {
     storageMod = null;
   }
   return storageMod;
+}
+
+let dbClient = null;
+async function sharedDb() {
+  if (!dbClient) {
+    const { appImport } = await import("./app-root.js");
+    dbClient = (await appImport("servers/db.js")).createDbClient();
+  }
+  return dbClient;
 }
 
 /** Largest project file accepted (SunVox projects are typically < 5 MB). */
@@ -64,7 +106,7 @@ export const MAX_SOURCE_BYTES = 64 * 1024 * 1024;
 export function readRoots() {
   // Relative entries resolve against the work dir, never the process cwd.
   const extra = String(process.env.SUNVOX_READ_DIRS || "").split(":").map((d) => d.trim()).filter(Boolean)
-    .map((d) => path.resolve(WORKDIR, d));
+    .map((d) => path.resolve(WORKDIR, expandHome(d)));
   return [WORKDIR, ...extra].map((d) => { try { return fs.realpathSync(d); } catch { return d; } });
 }
 
@@ -81,14 +123,10 @@ export function resolveReadablePath(p) {
 }
 
 // --- App modules, resolved lazily through the app root (tests inject fakes) ---
-let dbClient = null;
 async function appDeps() {
   const { appImport } = await import("./app-root.js");
   return {
-    db: async () => {
-      if (!dbClient) dbClient = (await appImport("servers/db.js")).createDbClient();
-      return dbClient;
-    },
+    db: sharedDb,
     createNotification: async (...a) => (await appImport("servers/shared/notifications.js")).createNotification(...a),
     consumeToken: async (...a) => (await appImport("servers/shared/rate-limiter.js")).consumeToken(...a),
     musicConfig: async () => (await appImport("servers/gateway/media/pinned-upstream.js")).musicUpstreamConfig(),
@@ -129,8 +167,16 @@ function sanitize(n) { return String(n).replace(/[^a-zA-Z0-9 _.-]/g, "").slice(0
 
 async function ensureWorkdir() { await fsp.mkdir(WORKDIR, { recursive: true }); return WORKDIR; }
 
-function convertWithFfmpeg(wavPath, outPath) {
-  const ff = spawnSync("ffmpeg", ["-y", "-i", wavPath, "-codec:a", outPath.endsWith(".mp3") ? "libmp3lame" : "libvorbis", "-qscale:a", "4", outPath], { encoding: "utf8", timeout: 10 * 60 * 1000, maxBuffer: 16 * 1024 * 1024 });
+/** Tags written into mp3/ogg renders. A music library such as Funkwhale
+ *  imports a file only when it carries a title, an artist and an album. */
+export function renderTags(title) {
+  const clean = String(title || "").replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 120) || "SunVox render";
+  return { title: clean, artist: "Crow", album: "SunVox Studio" };
+}
+
+function convertWithFfmpeg(wavPath, outPath, tags = {}) {
+  const meta = Object.entries(tags).flatMap(([k, v]) => ["-metadata", `${k}=${v}`]);
+  const ff = spawnSync("ffmpeg", ["-y", "-i", wavPath, "-codec:a", outPath.endsWith(".mp3") ? "libmp3lame" : "libvorbis", "-qscale:a", "4", ...meta, outPath], { encoding: "utf8", timeout: 10 * 60 * 1000, maxBuffer: 16 * 1024 * 1024 });
   if (ff.status !== 0) throw new Error(`ffmpeg conversion failed (is ffmpeg installed?): ${String(ff.stderr).slice(-400)}`);
   return outPath;
 }
@@ -138,13 +184,14 @@ function convertWithFfmpeg(wavPath, outPath) {
 async function renderToFile(buf, { name, format, sampleRate = 44100 }) {
   const dir = await ensureWorkdir();
   const { info, wav } = await engine.render(buf, { sampleRate });
+  const title = info.name || name;
   const base = path.join(dir, `${sanitize(name)}-${Date.now()}`);
   const wavPath = `${base}.wav`;
   await fsp.writeFile(wavPath, wav);
   let outPath = wavPath;
   if (format === "mp3" || format === "ogg") {
     outPath = `${base}.${format}`;
-    convertWithFfmpeg(wavPath, outPath);
+    convertWithFfmpeg(wavPath, outPath, renderTags(title));
     await fsp.unlink(wavPath).catch(() => {});
   }
   const stat = await fsp.stat(outPath);
@@ -335,7 +382,7 @@ export function createSunvoxServer(inject = {}) {
     title: "Compose a project",
     description:
       "Build a SunVox project programmatically from a JSON spec, save it as .sunvox, and optionally render it in the same call. " +
-      "Spec: { bpm? (1-999), tpl? (1-31), modules: [{ id, type, name?, params?: {controllerName: value within its min..max}, x?, y? }], connections?: [[srcId, ..., \"out\"], ...] (chains; modules not used as a chain source auto-connect to Output), patterns: [{ id, tracks, lines, x?, y?, events: [{ track, line, note (\"C3\"/\"F#4\"/1-127), velocity? (1-129), module (id), ctl?/ctl_val? or effect?/effect_param?, note_off? }] }], arrangement?: [{ pattern (id), x?, y? }] (the timeline in order: a missing x starts after the previous placement; a pattern placed twice repeats; every pattern must be placed) }. " +
+      "Spec: { bpm? (1-999), tpl? (1-31), modules: [{ id, type, name?, params?: {controllerName: value within its min..max}, x?, y? }], connections?: [[srcId, ..., \"out\"], ...] (chains; modules not used as a chain source auto-connect to Output), patterns: [{ id, tracks, lines, x?, y?, events: [{ track, line, note (\"C3\"/\"F#4\"/1-127), velocity? (1-129), module (id), ctl?/ctl_val? or effect?/effect_param?, note_off? }] }], arrangement?: [{ pattern (id), x?, y? }] (the timeline in order: a missing x starts after the previous placement; a pattern placed twice repeats; every pattern must be placed; it overrides the patterns' own x/y) }. " +
       "Use sunvox_module_types first to pick module types and param names. Notes: C0=1; a line is one tick (TPL ticks per beat). Keep patterns 16-64 lines. The name becomes the song name; an existing composition with the same name is kept unless overwrite is true. " +
       "Saves the project (and the render, with render=true) to Crow storage when it is available; reference_type blog_post makes them public for a song page (**SunVox:** storage:<key>).",
     inputSchema: {
@@ -351,11 +398,16 @@ export function createSunvoxServer(inject = {}) {
     try {
       const dir = await ensureWorkdir();
       const projectPath = path.join(dir, `${sanitize(args.name)}.sunvox`);
-      if (!args.overwrite && fs.existsSync(projectPath)) {
-        throw new Error(`a composition named "${sanitize(args.name)}" already exists in the work dir; pass overwrite: true to replace it, or pick another name`);
-      }
+      const exists = () => new Error(`a composition named "${sanitize(args.name)}" already exists in the work dir; pass overwrite: true to replace it, or pick another name`);
+      if (!args.overwrite && fs.existsSync(projectPath)) throw exists();
       const { project, info } = await engine.compose(args.spec, { name: args.name });
-      await fsp.writeFile(projectPath, project);
+      try {
+        // "wx": a same-name compose that finished first in the meantime is not clobbered.
+        await fsp.writeFile(projectPath, project, { flag: args.overwrite ? "w" : "wx" });
+      } catch (err) {
+        if (err.code === "EEXIST") throw exists();
+        throw err;
+      }
       const out = { project_path: projectPath, project_bytes: project.length, info };
       const st = await storeOutput(deps, { buf: project, fileName: path.basename(projectPath), kind: "projects", args });
       if (st.storage_key) {

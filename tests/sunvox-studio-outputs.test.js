@@ -40,8 +40,8 @@ function fakeDb({ failInsert = false } = {}) {
 
 test("saveToStorage: uploads under a sunvox-studio key, records storage_files, returns a presigned URL", async () => {
   const s3 = fakeS3(); const db = fakeDb();
-  const r = await outputs.saveToStorage({ s3, db, buf: Buffer.alloc(1000), fileName: "my song!.mp3", mimeType: "audio/mpeg", kind: "renders", now: 1700000000000 });
-  assert.equal(r.storage_key, "sunvox-studio/renders/1700000000000-my_song_.mp3");
+  const r = await outputs.saveToStorage({ s3, db, buf: Buffer.alloc(1000), fileName: "my song!.mp3", mimeType: "audio/mpeg", kind: "renders", now: 1700000000000, rand: () => "ab12cd34" });
+  assert.equal(r.storage_key, "sunvox-studio/renders/1700000000000-ab12cd34-my_song_.mp3");
   assert.equal(r.bucket, "crow-files");
   assert.match(r.url, /^http:\/\/storage\.example\//);
   assert.equal(r.url_expires_in_s, 3600);
@@ -55,9 +55,16 @@ test("saveToStorage: uploads under a sunvox-studio key, records storage_files, r
   assert.deepEqual([key, name, mime, size, bucket, refType, refId], [r.storage_key, "my song!.mp3", "audio/mpeg", 1000, "crow-files", null, null]);
 });
 
+test("saveToStorage: keys carry a random part by default", async () => {
+  const a = await outputs.saveToStorage({ s3: fakeS3(), db: fakeDb(), buf: Buffer.alloc(1), fileName: "a.wav", mimeType: "audio/wav", kind: "renders", now: 1 });
+  const b = await outputs.saveToStorage({ s3: fakeS3(), db: fakeDb(), buf: Buffer.alloc(1), fileName: "a.wav", mimeType: "audio/wav", kind: "renders", now: 1 });
+  assert.match(a.storage_key, /^sunvox-studio\/renders\/1-[0-9a-f]{8}-a\.wav$/);
+  assert.notEqual(a.storage_key, b.storage_key);
+});
+
 test("saveToStorage: blog_post reference makes a /blog/media path", async () => {
-  const r = await outputs.saveToStorage({ s3: fakeS3(), db: fakeDb(), buf: Buffer.alloc(10), fileName: "a.sunvox", mimeType: "application/octet-stream", kind: "projects", referenceType: "blog_post", now: 1 });
-  assert.equal(r.media_path, "/blog/media/sunvox-studio/projects/1-a.sunvox");
+  const r = await outputs.saveToStorage({ s3: fakeS3(), db: fakeDb(), buf: Buffer.alloc(10), fileName: "a.sunvox", mimeType: "application/octet-stream", kind: "projects", referenceType: "blog_post", now: 1, rand: () => "00ff00ff" });
+  assert.equal(r.media_path, "/blog/media/sunvox-studio/projects/1-00ff00ff-a.sunvox");
   assert.equal(r.gateway_path, undefined);
 });
 
@@ -67,8 +74,8 @@ test("saveToStorage: refuses unknown reference types (other types carry project 
 
 test("saveToStorage: a failed row insert removes the uploaded object", async () => {
   const s3 = fakeS3();
-  await assert.rejects(() => outputs.saveToStorage({ s3, db: fakeDb({ failInsert: true }), buf: Buffer.alloc(10), fileName: "a.wav", mimeType: "audio/wav", kind: "renders", now: 5 }), /db locked/);
-  assert.ok(s3.calls.some((c) => c[0] === "del" && c[1] === "sunvox-studio/renders/5-a.wav" && c[2] === "crow-files"));
+  await assert.rejects(() => outputs.saveToStorage({ s3, db: fakeDb({ failInsert: true }), buf: Buffer.alloc(10), fileName: "a.wav", mimeType: "audio/wav", kind: "renders", now: 5, rand: () => "r" }), /db locked/);
+  assert.ok(s3.calls.some((c) => c[0] === "del" && c[1] === "sunvox-studio/renders/5-r-a.wav" && c[2] === "crow-files"));
 });
 
 test("saveToStorage: size and quota limits are checked before any upload", async () => {
@@ -150,6 +157,25 @@ test("funkwhale: uploads to a library by UUID, bearer only to the configured ori
   const form = f.calls[0].init.body;
   assert.equal(form.get("library"), LIB);
   assert.equal(form.get("audio_file").name, "beat.mp3");
+  assert.match(form.get("import_reference"), /^sunvox-studio-[0-9a-f]{16}$/, "content hash: a retry carries the same reference");
+});
+
+test("funkwhale: by default the import is checked briefly, and a pending import comes back with a hint", async () => {
+  const f = fakeFetch({
+    "POST /api/v1/uploads/": () => ({ uuid: UP, import_status: "pending" }),
+    [`GET /api/v1/uploads/${UP}/`]: () => ({ uuid: UP, import_status: "pending" }),
+  });
+  const t0 = Date.now();
+  const r = await fw.pushToFunkwhale({ cfg: CFG, buf: Buffer.alloc(4), fileName: "a.mp3", library: LIB, fetchImpl: f, pollMs: 1 });
+  assert.ok(Date.now() - t0 < 5000);
+  assert.equal(r.import_status, "pending");
+  assert.match(r.note, /fw_search/);
+  const err = fakeFetch({
+    "POST /api/v1/uploads/": () => ({ uuid: UP, import_status: "errored", import_details: { error_code: "track_uuid_not_found" } }),
+  });
+  const e = await fw.pushToFunkwhale({ cfg: CFG, buf: Buffer.alloc(4), fileName: "a.mp3", library: LIB, fetchImpl: err, pollMs: 1 });
+  assert.equal(e.import_status, "errored");
+  assert.match(e.import_error, /track_uuid_not_found/);
 });
 
 test("funkwhale: a library name resolves to its UUID among the user's own libraries", async () => {

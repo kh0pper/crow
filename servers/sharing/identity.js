@@ -148,6 +148,16 @@ export function computeSafetyNumber(myEd25519Pub, theirEd25519Pub) {
 /**
  * Generate or load identity. Returns identity object with keys and Crow ID.
  */
+/**
+ * The instance identity when it already exists, else null. Never creates one:
+ * for processes (bundle MCP children) that only need to OPEN sealed settings
+ * and must not mint a second identity if their data dir resolves elsewhere.
+ */
+export function loadIdentityIfPresent(passphrase = "") {
+  if (!existsSync(IDENTITY_PATH)) return null;
+  return loadOrCreateIdentity(passphrase);
+}
+
 export function loadOrCreateIdentity(passphrase = "") {
   mkdirSync(DATA_DIR, { recursive: true });
 

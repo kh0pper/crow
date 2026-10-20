@@ -409,3 +409,15 @@ test("D28 review M7: variants of the helper path never redirect (CSP path-exact 
     assert.equal(r.headers.location, undefined, `${v}: no Location header`);
   }
 });
+
+test("CSP and the design kit agree: a WASM library is allowed only in types whose row permits WASM", async () => {
+  const fs = await import("node:fs");
+  const lib = JSON.parse(fs.readFileSync(new URL("../bundles/design-kit/lib/manifest.json", import.meta.url), "utf8"));
+  const wasmTypes = ARTIFACT_TYPES.filter((t) => /'wasm-unsafe-eval'/.test(cspFor(t, { tokenBase: "https://a.example/v/T/" })));
+  assert.deepEqual(wasmTypes, ["page"]);
+  const wasmLibs = lib.entries.filter((e) => (e.files || []).some((f) => /wasm/i.test(typeof f === "string" ? f : f.path)));
+  assert.ok(wasmLibs.some((e) => e.name === "sunvox"), "the sunvox engine is recognised as a WASM library");
+  for (const e of wasmLibs) {
+    for (const t of e.allowed || []) assert.ok(wasmTypes.includes(t), `${e.name} is allowed in ${t}, whose CSP has no 'wasm-unsafe-eval'`);
+  }
+});

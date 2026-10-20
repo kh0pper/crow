@@ -13,6 +13,8 @@
  *  research_note) carry project ACL checks in the storage server, which a
  *  bundle must not bypass. blog_post makes the file publicly readable at
  *  /blog/media/<key>, which is what a song page's player fetches. */
+import { randomBytes } from "node:crypto";
+
 export const REFERENCE_TYPES = Object.freeze(["blog_post"]);
 
 const envInt = (k, d) => { const v = parseInt(process.env[k] || "", 10); return Number.isFinite(v) && v > 0 ? v : d; };
@@ -43,6 +45,7 @@ export function storageMode(requested, available) {
 export async function saveToStorage({
   s3, db, buf, fileName, mimeType, kind, referenceType = null, referenceId = null,
   maxBytes = defaultMaxBytes(), quotaBytes = defaultQuotaBytes(), now = Date.now(),
+  rand = () => randomBytes(4).toString("hex"),
 }) {
   if (referenceType != null && !REFERENCE_TYPES.includes(referenceType)) {
     throw new Error(`reference_type must be one of ${REFERENCE_TYPES.join(", ")}`);
@@ -57,7 +60,8 @@ export async function saveToStorage({
     throw new Error(`storage quota exceeded (${Math.round(quotaBytes / 1024 / 1024)} MB, STORAGE_QUOTA_MB); delete files to free space`);
   }
   const safe = String(fileName).replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || "sunvox";
-  const key = `sunvox-studio/${kind}/${now}-${safe}`;
+  // A random part keeps keys unguessable: a blog_post file is public at /blog/media/<key>.
+  const key = `sunvox-studio/${kind}/${now}-${rand()}-${safe}`;
   await s3.uploadObject(key, buf, { bucket, contentType: mimeType });
   try {
     await db.execute({

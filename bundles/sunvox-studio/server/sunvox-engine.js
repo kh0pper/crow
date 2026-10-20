@@ -51,7 +51,7 @@ export const LIMITS = Object.freeze({
   maxEvents: 65536,
   maxCells: 2 * 1024 * 1024, // tracks x lines summed over all patterns
   maxArrangement: 4096, // placements on the timeline (repeats are clones sharing data)
-  maxTimelineX: 1024 * 1024, // the line a placement may start at
+  maxTimelineX: 65536, // the line a placement may start at (the render cap still bounds the length)
   maxTimelineY: 1024, // |y| of a placement (timeline rows)
 });
 

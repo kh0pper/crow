@@ -5889,10 +5889,10 @@
           "SUNVOX_READ_DIRS",
           "SUNVOX_MAX_RENDER_SECONDS",
           "MINIO_ENDPOINT",
-          "MINIO_ACCESS_KEY",
-          "MINIO_SECRET_KEY",
+          "MINIO_PORT",
           "MINIO_USE_SSL",
-          "MINIO_REGION"
+          "MINIO_ROOT_USER",
+          "MINIO_ROOT_PASSWORD"
         ]
       },
       "skills": [
@@ -5905,8 +5905,8 @@
       "env_vars": [
         {
           "name": "SUNVOX_WORKDIR",
-          "description": "Where rendered audio and composed projects are written.",
-          "default": "~/.crow/data/sunvox-studio",
+          "description": "Where rendered audio and composed projects are written (default: this instance's data dir + /sunvox-studio).",
+          "default": "",
           "required": false,
           "secret": false
         },
