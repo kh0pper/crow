@@ -183,7 +183,7 @@ function convertWithFfmpeg(wavPath, outPath, tags = {}) {
 
 async function renderToFile(buf, { name, format, sampleRate = 44100 }) {
   const dir = await ensureWorkdir();
-  const { info, wav } = await engine.render(buf, { sampleRate });
+  const { info, wav, frames } = await engine.render(buf, { sampleRate });
   const title = info.name || name;
   const base = path.join(dir, `${sanitize(name)}-${Date.now()}`);
   const wavPath = `${base}.wav`;
@@ -195,7 +195,8 @@ async function renderToFile(buf, { name, format, sampleRate = 44100 }) {
     await fsp.unlink(wavPath).catch(() => {});
   }
   const stat = await fsp.stat(outPath);
-  return { info, path: outPath, format: path.extname(outPath).slice(1), sample_rate: sampleRate, size_bytes: stat.size, duration_s: info.duration_s };
+  // duration_s: the audio written (the song plus up to 2 s of effect tail); song_duration_s: the song.
+  return { info, path: outPath, format: path.extname(outPath).slice(1), sample_rate: sampleRate, size_bytes: stat.size, duration_s: +(frames / sampleRate).toFixed(3), song_duration_s: info.duration_s };
 }
 
 const OUTPUT_SCHEMA = {
@@ -422,6 +423,7 @@ export function createSunvoxServer(inject = {}) {
         out.render_size_bytes = res.size_bytes;
         out.sample_rate = res.sample_rate;
         out.duration_s = res.duration_s;
+        out.song_duration_s = res.song_duration_s;
         const d = await deliverRender(deps, res, { name: args.name, args });
         if (d.storage_key) {
           out.render_storage_key = d.storage_key;

@@ -468,6 +468,10 @@ test("sunvox tools: without storage a render keeps its local path and says why; 
     const r = await c.call("sunvox_render", { path: "f.sunvox" });
     assert.equal(r.isError, false, r.text);
     assert.ok(fs.existsSync(r.json.path));
+    // duration_s is the audio actually written (the song plus its effect tail), not the song length.
+    const wav = fs.readFileSync(r.json.path);
+    assert.equal(r.json.duration_s, +((wav.length - 44) / 4 / 44100).toFixed(3));
+    assert.equal(r.json.song_duration_s, 7.2);
     assert.match(r.json.storage, /not saved: storage is not available/);
     const strict = await c.call("sunvox_render", { path: "f.sunvox", save_to_storage: true });
     assert.equal(strict.isError, true);
