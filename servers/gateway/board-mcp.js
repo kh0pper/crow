@@ -486,13 +486,13 @@ export function createBoardMcpServer(options = {}) {
       askDecision(tdb, cdb, { projectId: project_id, title, tags, decision }, resolveActor(extra)));
 
   tool(server, "board_notify_decisions",
-    "Send the one grouped push for a batch's open decision cards. Pushes at most once per card, so repeated calls are harmless; call it once at the end of the batch.",
+    "Send the one grouped push for a batch's open decision cards. Pushes at most once per card, so repeated calls are harmless; call it once at the end of the batch. A bot may only notify a batch it asked itself (403 otherwise); at most 3 pushes per caller per day (429).",
     { batch: z.string().min(1) },
-    async ({ batch }) => {
+    async ({ batch }, extra) => {
       // notifications.js fails open on every downstream sender; cdb (crow.db)
       // holds the shared notifications table (same import as result-service).
       const { createNotification } = await import("../shared/notifications.js");
-      return notifyBatch(tdb, cdb, batch, { createNotification });
+      return notifyBatch(tdb, cdb, batch, { createNotification, actor: resolveActor(extra) });
     });
 
   tool(server, "board_store_briefing",

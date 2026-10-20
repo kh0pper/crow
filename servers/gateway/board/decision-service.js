@@ -300,8 +300,9 @@ export async function askDecision(tdb, cdb, { projectId, title, tags, decision }
     project_id: projectId ?? null,
   }, actor);
   await tdb.execute({
-    sql: "UPDATE tasks_items SET data_json=json_set(data_json,'$.decision',json(?)) WHERE id=? AND board_id IS NULL",
-    args: [JSON.stringify(v), id],
+    sql: `UPDATE tasks_items SET data_json=json_set(json_set(data_json,'$.decision',json(?)),'$.decision.asked_by',json(?))
+          WHERE id=? AND board_id IS NULL`,
+    args: [JSON.stringify(v), JSON.stringify(askedBy(actor)), id],
   });
   await recordMutation(tdb, { itemId: id, verb: "decision_ask", actor, detail: { fingerprint: v.fingerprint, batch: v.batch } });
   return { id, deduped: false };
@@ -385,21 +386,70 @@ export async function decideOption(tdb, cdb, itemId, { index, otherText } = {}, 
   return { chosen, created_card_id: created };
 }
 
+export const NOTIFY_SOURCE = "board:decisions";
+export const MAX_PUSHES_PER_ACTOR_PER_DAY = 3;
+
+/** Who asked, as stored on the card: {kind, id, job_id}. */
+function askedBy(actor) {
+  return { kind: actor?.kind ?? null, id: actor?.id ?? null, job_id: actor?.jobId ?? null };
+}
+
+/** Comparable actor key. A missing/unattributed bot is "bot:unattributed". */
+function actorKey(a) {
+  return `${a?.kind ?? "bot"}:${a?.id ?? "unattributed"}`;
+}
+
+function isBotActor(a) {
+  return !a || a.kind === "bot";
+}
+
 /**
- * One grouped push for a batch's not-yet-notified open decisions. The set is
- * claimed (notified_at set) by ONE conditional UPDATE … RETURNING before the
- * push, so repeated or concurrent calls push each card at most once and one
- * call owns the push. If the push throws, the claims are released.
+ * One grouped push for a batch's not-yet-notified open decisions. Rules:
+ * - A bot may only notify a batch whose open cards it asked itself
+ *   (asked_by key equal for every open card); sessions and humans may notify
+ *   any batch. Otherwise 403 forbidden, nothing pushed. A missing actor is
+ *   treated as an unattributed bot (fail closed).
+ * - If any open card in the batch was already notified, nothing is pushed
+ *   ({pushed:false,count:0,reason:"already_notified"}); later cards only show
+ *   on the board.
+ * - At most MAX_PUSHES_PER_ACTOR_PER_DAY pushes per actor key per UTC day,
+ *   counted from the notifications table; over it is 429 push_limit.
+ * The set is then claimed (notified_at set) by ONE conditional UPDATE …
+ * RETURNING before the push, so concurrent calls push each card at most once.
+ * If the push throws, the claims are released.
  * `createNotification(cdb, opts)` is injected (servers/shared/notifications.js
  * in production).
  */
-export async function notifyBatch(tdb, cdb, batch, { createNotification, now } = {}) {
+export async function notifyBatch(tdb, cdb, batch, { createNotification, actor, now } = {}) {
   const ms = toMs(now);
   const stamp = new Date(ms).toISOString();
-  const open = (await findDecisionCards(tdb, { batch: String(batch ?? "") }))
-    .filter(({ decision }) => !decision.notified_at && ms < expiryMs(decision.expires));
+  const all = (await findDecisionCards(tdb, { batch: String(batch ?? "") }))
+    .filter(({ decision }) => ms < expiryMs(decision.expires));
 
-  if (!open.length) return { pushed: false, count: 0 };
+  if (!all.length) return { pushed: false, count: 0 };
+
+  const key = actorKey(actor);
+  if (isBotActor(actor)) {
+    for (const { decision } of all) {
+      const by = decision.asked_by;
+      if (!by || actorKey(by) !== key) throw fail("this batch was not asked by the caller", "forbidden", 403);
+    }
+  }
+
+  if (all.some(({ decision }) => decision.notified_at)) {
+    return { pushed: false, count: 0, reason: "already_notified" };
+  }
+  const open = all;
+
+  const day = new Date(ms).toISOString().slice(0, 10);
+  const used = Number((await cdb.execute({
+    sql: `SELECT COUNT(*) AS n FROM notifications
+          WHERE source = ? AND date(created_at) = ? AND json_extract(metadata,'$.actor_key') = ?`,
+    args: [NOTIFY_SOURCE, day, key],
+  })).rows[0]?.n ?? 0);
+  if (used >= MAX_PUSHES_PER_ACTOR_PER_DAY) {
+    throw fail(`at most ${MAX_PUSHES_PER_ACTOR_PER_DAY} decision pushes per day`, "push_limit", 429);
+  }
 
   // Claim the whole set in ONE statement, so one call owns the push.
   const ids = open.map(({ row }) => Number(row.id));
@@ -418,10 +468,12 @@ export async function notifyBatch(tdb, cdb, batch, { createNotification, now } =
   try {
     await createNotification(cdb, {
       type: "attention",
+      source: NOTIFY_SOURCE,
       priority: "normal",
       title: `${count} decision${count > 1 ? "s" : ""} waiting`,
       body: claimed.slice(0, 3).map((id) => questionOf.get(id)).join("\n"),
       action_url: "/dashboard/bot-board#card=" + claimed[0],
+      metadata: { actor_key: key },
     });
   } catch (e) {
     // Release this call's claims so the next notify pushes these cards.
