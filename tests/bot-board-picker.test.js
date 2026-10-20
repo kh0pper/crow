@@ -227,7 +227,7 @@ test("Spanish: the panel copy is translated", async () => {
 test("CSS: a bottom sheet on a phone, a popover on wide; lane tabs on phones only; the status strip hidden on phones only", () => {
   const css = botBoardStyles();
   assert.match(css, /\.bb-sheet\{[^}]*position:absolute/);
-  assert.match(css, /@media \(max-width:640px\)\{[^]*?\.bb-sheet\{position:fixed;left:0;right:0;bottom:0/);
+  assert.match(css, /@media \(max-width:640px\)\{[^]*?\.bb-sheet\{position:fixed;left:0;right:0;bottom:var\(--crow-player-h,0px\)/, "docked on the player bar (0px when it is hidden)");
   assert.match(css, /@media \(max-width:640px\)\{[^]*?\.bb-board\.bb-tabbed \.bb-col:not\(\.bb-lane-cur\)\{display:none\}/);
   assert.match(css, /@media \(min-width:641px\)\{\.bb-lane-tabs\{display:none !important\}\}/);
   assert.match(css, /@media \(max-width:\s*640px\)\s*\{[^}]*\.bb-roost\{display:none\}/);

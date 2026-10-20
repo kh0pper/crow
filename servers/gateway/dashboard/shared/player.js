@@ -29,9 +29,61 @@ export const KIOSK_OWNER_KEY = "crow-kiosk-bar-owner";
 /** Detached: no `playing` this long after waiting/stalled → POST error (the frame's own watchdog is STALL_MS too). */
 export const KIOSK_STALL_MS = 15000;
 
+/**
+ * The bar's reserve (2026-10-20; one copy, run by playerBarJs on every page that carries the bar — the
+ * dashboard layout and the player shell). --crow-player-h on <html> is the bar's height while it shows,
+ * else 0px; layouts reserve through var(--crow-player-h,0px) only (shared/layout.js app shells and
+ * .main-content, the bottom sheets). Plain ES5, no backtick (it is emitted inside a template literal).
+ *  - window.__crowPlayerReserve() measures the CURRENT #crow-player-bar and writes the variable only
+ *    when it changes. One per window, so one window resize handler; adjustPosition() calls it on every
+ *    show path, synchronously.
+ *  - The observers are attached once per BAR element (data-crow-player-reserve on the bar): Turbo keeps
+ *    <html> across visits, and a visit through a page without the bar brings back a new one.
+ *    MutationObserver on the bar's own style (shown/hidden); ResizeObserver for its content height
+ *    (a wrapped title, the subtitle row); web fonts landing.
+ *  - No bar when it runs (a Turbo visit holds the permanent bar out of the page while the new body's
+ *    scripts run): it measures only a frame later (no 0px write and layout pass in between).
+ *  - turbo:load (one listener per window): a Turbo visit to a page without the bar drops the variable
+ *    to 0px there, ResizeObserver or not.
+ *  - Perch: a transcript pinned to its end is re-pinned after the column changes height.
+ */
+export const PLAYER_RESERVE_JS = `(function () {
+  var set = window.__crowPlayerReserve;
+  if (typeof set !== 'function') {
+    set = window.__crowPlayerReserve = function () {
+      var root = document.documentElement;
+      var bar = document.getElementById('crow-player-bar');
+      var h = ((bar && bar.style.display !== 'none') ? (bar.offsetHeight || 0) : 0) + 'px';
+      if (root.style.getPropertyValue('--crow-player-h') === h) return;
+      var tr = document.getElementById('perch-transcript');
+      var pinned = !!tr && tr.scrollHeight - tr.scrollTop - tr.clientHeight <= 2;
+      root.style.setProperty('--crow-player-h', h);
+      if (pinned) tr.scrollTop = tr.scrollHeight;
+    };
+    window.addEventListener('resize', function () { set(); });
+    // Once per window, like resize: a Turbo visit to a page WITHOUT the bar (the login page after a
+    // session expiry, KB public pages) runs no copy of this script, so nothing else would drop the
+    // variable back to 0px there when ResizeObserver is missing.
+    document.addEventListener('turbo:load', function () { set(); });
+  }
+  var bar = document.getElementById('crow-player-bar');
+  // A Turbo visit between two bar pages runs this while Turbo holds the permanent bar out of the page:
+  // no bar right now, the same one back a moment later with no style change. Measure only then: a set()
+  // now would write 0px and force an extra layout pass before the bar's height comes back.
+  if (!bar) { try { if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(function () { set(); }); else set(); } catch (e) {} return; }
+  set();
+  if (bar.getAttribute('data-crow-player-reserve') === '1') return;
+  bar.setAttribute('data-crow-player-reserve', '1');
+  try { new MutationObserver(function () { set(); }).observe(bar, { attributes: true, attributeFilter: ['style'] }); } catch (e) {}
+  // Without ResizeObserver (older browsers) a change in the bar's content height (a wrapped title, the
+  // subtitle row) is not observed; the show paths, resize, turbo:load and fonts.ready still measure.
+  try { if (typeof ResizeObserver === 'function') new ResizeObserver(function () { set(); }).observe(bar); } catch (e) {}
+  try { if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () { set(); }, function () {}); } catch (e) {}
+})();`;
+
 export function playerBarHtml(lang) {
   return `<style>@media(max-width:768px){#crow-player-bar{left:0!important}}</style>
-<div id="crow-player-bar" data-turbo-permanent style="display:none;position:fixed;bottom:0;left:var(--crow-sidebar-width,240px);right:0;background:var(--crow-bg-surface);border-top:2px solid var(--crow-accent);z-index:1000;padding:0;transition:left 0.2s">
+<div id="crow-player-bar" data-turbo-permanent style="display:none;position:fixed;bottom:0;left:var(--crow-sidebar-width,240px);right:0;background:var(--crow-bg-surface);border-top:2px solid var(--crow-accent);z-index:1000;padding:0 0 env(safe-area-inset-bottom,0px);transition:left 0.2s">
   <div style="display:flex;align-items:center;gap:0.5rem;padding:0.4rem 1rem">
     <button id="crow-player-prev" onclick="window.crowPlayer.prev()" title="${t("player.previous", lang)}" style="background:none;border:none;color:var(--crow-text-muted);cursor:pointer;font-size:0.9rem;padding:0.2rem;display:none">&#9198;</button>
     <button id="crow-player-toggle" onclick="window.crowPlayer.toggle()" title="${t("player.playPause", lang)}" style="background:var(--crow-accent);color:var(--crow-accent-contrast);border:none;border-radius:50%;width:32px;height:32px;cursor:pointer;font-size:1rem;display:flex;align-items:center;justify-content:center;flex-shrink:0">&#9654;</button>
@@ -56,6 +108,7 @@ export function playerBarHtml(lang) {
 
 export function playerBarJs(lang) {
   return `
+${PLAYER_RESERVE_JS}
 (function() {
   var audio = document.getElementById('crow-audio');
   var bar = document.getElementById('crow-player-bar');
@@ -362,6 +415,7 @@ export function playerBarJs(lang) {
 
   function adjustPosition() {
     bar.style.left = (window.innerWidth <= 768) ? '0' : 'var(--crow-sidebar-width,240px)';
+    if (window.__crowPlayerReserve) window.__crowPlayerReserve();
   }
   window.addEventListener('resize', adjustPosition);
 

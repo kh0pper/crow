@@ -1051,6 +1051,11 @@ function dashboardCss() {
     min-width: 0;
     margin-left: var(--crow-sidebar-width);
     min-height: 100vh;
+    /* The player bar (fixed, bottom:0) covers the page's end unless the page
+       reserves its height: --crow-player-h is the bar's height while it
+       shows, else 0px (player.js PLAYER_RESERVE_JS). The app shells below
+       (phone, Perch) reserve through their height instead. */
+    padding-bottom: var(--crow-player-h,0px);
     transition: margin-left 0.2s ease-out;
   }
   .content-header {
@@ -1335,7 +1340,8 @@ function dashboardCss() {
   @supports (padding: env(safe-area-inset-top)) {
     .content-header { padding-top: env(safe-area-inset-top); }
     .sidebar { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
-    .content-body { padding-bottom: env(safe-area-inset-bottom); }
+    /* Under a showing player bar the bar itself pads the inset: not twice. */
+    .content-body { padding-bottom: max(0px, env(safe-area-inset-bottom, 0px) - var(--crow-player-h,0px)); }
   }
 
   /* Responsive — mobile */
@@ -1366,12 +1372,17 @@ function dashboardCss() {
       position: fixed;
       width: 100%;
     }
+    /* The app shell ends at the player bar's top (0px when it is hidden),
+       so .content-body's end can always scroll clear of it. min-height:0
+       beats the base min-height:100vh, which would grow it back under. */
     .main-content {
       margin-left: 0;
       display: flex;
       flex-direction: column;
-      height: 100vh;
-      height: 100dvh;
+      height: calc(100vh - var(--crow-player-h,0px));
+      height: calc(100dvh - var(--crow-player-h,0px));
+      min-height: 0;
+      padding-bottom: 0;
       overflow: hidden;
     }
     .content-header {
@@ -1501,7 +1512,7 @@ function dashboardCss() {
   /* ─── Global toast container (W3-4) ─── */
   .crow-toasts {
     position: fixed;
-    bottom: 1.5rem;
+    bottom: calc(1.5rem + var(--crow-player-h,0px));
     right: 1.5rem;
     z-index: 9999;
     display: flex;
@@ -1570,8 +1581,10 @@ function dashboardCss() {
      then makes #perch-hub-root/.hub-split/#perch-chat fill that height with
      flex:1;min-height:0 so the transcript — not the page — is what scrolls. */
   body:has(#perch-chat) .main-content {
-    height: 100vh;
-    height: 100dvh;
+    height: calc(100vh - var(--crow-player-h,0px));
+    height: calc(100dvh - var(--crow-player-h,0px));
+    min-height: 0;
+    padding-bottom: 0;
     display: flex;
     flex-direction: column;
     overflow: hidden;

@@ -90,3 +90,107 @@ test("fileview: no session, no bar (401 from dashboardAuth)", async () => {
   assert.equal(r.status, 401);
   assert.doesNotMatch(await r.text(), /crow-player-bar/);
 });
+
+// ─── dashboard layout pages (the reserve lives in the player core, 2026-10-20) ─────────────
+// Pages built with renderLayout reserve the bar through --crow-player-h only (set by playerBarJs);
+// tests/player-bar-reserve-live.test.js measures the result in a real browser.
+
+const SAFE_MINUS_BAR = "max(0px, env(safe-area-inset-bottom, 0px) - var(--crow-player-h,0px))";
+const noComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, "");
+const ruleBody = (css, selector, from = 0) => {
+  const i = css.indexOf(selector + " {", from) >= 0 ? css.indexOf(selector + " {", from) : css.indexOf(selector + "{", from);
+  assert.ok(i >= 0, "missing rule " + selector);
+  return css.slice(i, css.indexOf("}", i) + 1);
+};
+
+test("layout.js: a scrolling page pads .main-content by the bar; the app shells (phone, Perch) end at the bar", async () => {
+  const css = noComments(read("servers/gateway/dashboard/shared/layout.js"));
+  assert.match(ruleBody(css, ".main-content"), new RegExp(`padding-bottom: ${VAR.replace(/[()]/g, "\\$&")};`), "desktop: the last ~bar of every page can scroll clear");
+  const phone = css.slice(css.indexOf("body.sidebar-open {"));     // the phone block's .main-content follows it
+  const shells = [ruleBody(phone, ".main-content"), ruleBody(css, "body:has(#perch-chat) .main-content")];
+  for (const r of shells) {
+    assert.ok(r.includes(`height: calc(100vh - ${VAR});`), "vh fallback: " + r);
+    assert.ok(r.includes(`height: calc(100dvh - ${VAR});`), "dvh: " + r);
+    assert.ok(r.includes("min-height: 0;"), "C1: the base min-height:100vh must not win: " + r);
+    assert.ok(r.includes("padding-bottom: 0;"), "the shell height already reserves: no double reserve: " + r);
+  }
+  assert.ok(css.includes(`.content-body { padding-bottom: ${SAFE_MINUS_BAR}; }`), "the safe area is not counted twice under the bar");
+  assert.match(ruleBody(css, ".crow-toasts"), new RegExp(`bottom: calc\\(1\\.5rem \\+ ${VAR.replace(/[()]/g, "\\$&")}\\);`));
+});
+
+test("Perch: the tab bar's safe-area padding yields to the bar; the artifact pane (docked and full screen) ends at the bar", async () => {
+  const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js");
+  const css = noComments(perchHubCss());
+  assert.ok(css.includes(`#perch-tabs{display:flex;gap:4px;flex-shrink:0;order:10;border-top:1px solid var(--line);\npadding:6px 0 calc(6px + ${SAFE_MINUS_BAR})}`));
+  assert.ok(css.includes(`#perch-hub-root .art-pane-split{top:0;right:0;bottom:${VAR};`));
+  assert.ok(css.includes(`#perch-hub-root .art-pane-sheet{inset:0;bottom:${VAR};`));
+});
+
+test("Bot Board: the phone picker sheet sits on the bar, the drawer ends at it", async () => {
+  const { botBoardStyles } = await import("../servers/gateway/dashboard/panels/bot-board/css.js");
+  const css = noComments(botBoardStyles());
+  assert.ok(css.includes(`.bb-sheet{position:fixed;left:0;right:0;bottom:${VAR};top:auto;`));
+  assert.ok(css.includes(`padding:.75rem .75rem calc(.75rem + ${SAFE_MINUS_BAR})}`));
+  assert.ok(css.includes(`height:calc(100vh - ${VAR});height:calc(100dvh - ${VAR});`),
+    "the drawer's vh fallback (no dvh support) leaves room for the bar too");
+});
+
+test("phone header dropdowns open above the bar", async () => {
+  const { headerIconsCss, tamagotchiCss } = await import("../servers/gateway/dashboard/shared/notifications.js");
+  assert.ok(headerIconsCss.includes(`.header-dropdown { position: fixed; top: auto; bottom: calc(60px + ${VAR});`));
+  assert.ok(tamagotchiCss.includes(`.crow-dropdown { position: fixed; top: auto; bottom: calc(60px + ${VAR});`));
+});
+
+// ─── the reserve script, in a stub window (PLAYER_RESERVE_JS) ───────────────────────────────
+// A minimal document/window: enough to count the variable's writes and the listeners the script adds.
+
+async function reserveSandbox() {
+  const vm = await import("node:vm");
+  const { PLAYER_RESERVE_JS } = await import("../servers/gateway/dashboard/shared/player.js");
+  const writes = [], frames = [], docListeners = [], winListeners = [];
+  const props = {};
+  const root = { style: {
+    getPropertyValue: (k) => props[k] || "",
+    setProperty: (k, v) => { writes.push([k, v]); props[k] = v; },
+  } };
+  let bar = null;
+  const document = {
+    documentElement: root,
+    getElementById: (id) => (id === "crow-player-bar" ? bar : null),
+    addEventListener: (type, fn) => docListeners.push([type, fn]),
+  };
+  const window = {
+    requestAnimationFrame: (fn) => { frames.push(fn); return frames.length; },
+    addEventListener: (type, fn) => winListeners.push([type, fn]),
+  };
+  const ctx = vm.createContext({ window, document, MutationObserver: class { observe() {} } });
+  return {
+    run: () => vm.runInContext(PLAYER_RESERVE_JS, ctx),
+    setBar: (b) => { bar = b; },
+    writes, frames, docListeners, winListeners,
+  };
+}
+
+test("reserve (no bar at run time, a Turbo visit): no 0px write before the frame — it measures only in the rAF", async () => {
+  const sb = await reserveSandbox();
+  sb.run();
+  assert.deepEqual(sb.writes, [], "no immediate write while the bar is held out of the page");
+  assert.equal(sb.frames.length, 1, "one frame scheduled");
+  sb.setBar({ style: { display: "block" }, offsetHeight: 57, getAttribute: () => "1", setAttribute() {} });
+  sb.frames[0]();
+  assert.deepEqual(sb.writes, [["--crow-player-h", "57px"]], "the frame measures the bar that came back");
+});
+
+test("reserve: one turbo:load listener per window (re-runs on every visit add none), and it re-measures", async () => {
+  const sb = await reserveSandbox();
+  sb.setBar({ style: { display: "block" }, offsetHeight: 57, getAttribute: () => null, setAttribute() {} });
+  sb.run();
+  sb.run();
+  sb.run();
+  const loads = sb.docListeners.filter(([type]) => type === "turbo:load");
+  assert.equal(loads.length, 1, "installed once per window");
+  assert.equal(sb.winListeners.filter(([type]) => type === "resize").length, 1);
+  sb.setBar(null);                                  // a page without the bar, reached by a Turbo visit
+  loads[0][1]();
+  assert.equal(sb.writes.at(-1)[1], "0px", "the variable follows to 0px there");
+});

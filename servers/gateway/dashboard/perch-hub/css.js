@@ -448,7 +448,7 @@ body[data-view="chat"] #perch-chat{display:flex;flex-direction:column;flex:1;min
    the bar inside the chat tab. The chain has killed a Send button before;
    the bar joins it as a NON-SHRINKING sibling and nothing else changes. */
 #perch-tabs{display:flex;gap:4px;flex-shrink:0;order:10;border-top:1px solid var(--line);
-padding:6px 0 calc(6px + env(safe-area-inset-bottom,0px))}
+padding:6px 0 calc(6px + max(0px, env(safe-area-inset-bottom, 0px) - var(--crow-player-h,0px)))}
 /* Two ids: the base "#perch-hub-root button" rule (1,0,1) would otherwise
    paint these with card background and ink border — the selected tab owns
    its own highlight. 44px floor: a bottom bar is thumb territory. */
@@ -718,8 +718,8 @@ background:var(--card);border:1px solid var(--line);border-radius:12px;padding:1
    viewer page; the hub itself never frames the artifact origin. */
 #perch-hub-root .art-pane{position:fixed;z-index:60;background:var(--card);display:flex;flex-direction:column;
 border-left:1px solid var(--line);box-shadow:-6px 0 24px rgba(0,0,0,.14)}
-#perch-hub-root .art-pane-split{top:0;right:0;bottom:0;width:min(48vw,760px)}
-#perch-hub-root .art-pane-sheet{inset:0;border-left:0}
+#perch-hub-root .art-pane-split{top:0;right:0;bottom:var(--crow-player-h,0px);width:min(48vw,760px)}
+#perch-hub-root .art-pane-sheet{inset:0;bottom:var(--crow-player-h,0px);border-left:0}
 #perch-hub-root .art-pane-bar{display:flex;align-items:center;gap:8px;padding:8px;border-bottom:1px solid var(--line)}
 #perch-hub-root .art-pane-bar button,#perch-hub-root .art-pane-bar a{min-height:44px;display:inline-flex;align-items:center;padding:8px 14px;
 border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink);font-size:14px;text-decoration:none}
