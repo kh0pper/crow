@@ -69,6 +69,8 @@ import {
 import { getCurrentPlan, listPlans, savePlan, approvePlan } from "./board/plan-service.js";
 import { reportResult, decideResult, listResults } from "./board/result-service.js";
 import { askDecision, notifyBatch } from "./board/decision-service.js";
+import { isEnabledBot } from "./board/bot-lookup.js";
+import { isVoiceBotId } from "../shared/voice-bot.js";
 
 const TASKS_DB = tasksDbPath();
 
@@ -342,12 +344,21 @@ export function createBoardMcpServer(options = {}) {
       board_id: z.number().int().optional(),
       slug: z.string().optional(),
       bot_id: z.string().optional(),
+      assigned_bot: z.string().max(100).optional().describe("Cards only: assign the new card to an enabled bot"),
       action_needed: z.string().optional(),
       data: jsonObject().optional().describe("Tracker item fields as an object of JSON values (merged into the item's data)"),
     },
     async (fields, extra) => {
       const actor = resolveActor(extra);
-      if (fields.board_id != null || fields.slug) {
+      const isTracker = fields.board_id != null || !!fields.slug;
+      if (fields.assigned_bot != null && fields.assigned_bot !== "") {
+        if (isTracker) throw fail("assigned_bot applies to cards only, not tracker items", "bad_field", 400);
+        if (isVoiceBotId(fields.assigned_bot)) throw fail("the voice bot never takes cards", "bad_bot", 400);
+        if (!(await isEnabledBot(cdb, fields.assigned_bot))) {
+          throw fail(`assigned_bot is not an enabled bot: ${fields.assigned_bot}`, "bad_bot", 400);
+        }
+      }
+      if (isTracker) {
         let boardId = fields.board_id != null ? Number(fields.board_id) : null;
         if (boardId == null) {
           const def = await resolveSlugBoardDef(tdb, fields.slug);
