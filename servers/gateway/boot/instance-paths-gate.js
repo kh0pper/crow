@@ -39,7 +39,9 @@ export function applyEnvFile(envPath, env = process.env) {
   return keys;
 }
 
-export function runInstancePathsGate({ env = process.env, envPath = resolve(appRoot, ".env"), log = console, exit = process.exit } = {}) {
+// CROW_APP_ENV_PATH is set only by scripts/run-suite.mjs (a suite run never
+// applies a real checkout .env); prod leaves it unset.
+export function runInstancePathsGate({ env = process.env, envPath = env.CROW_APP_ENV_PATH || resolve(appRoot, ".env"), log = console, exit = process.exit } = {}) {
   const envFileKeys = applyEnvFile(envPath, env);
   const verdict = instancePathsVerdict(env, { envFileKeys });
   if (!verdict.ok) {

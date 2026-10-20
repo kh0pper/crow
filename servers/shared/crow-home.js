@@ -29,6 +29,25 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 
+/**
+ * The env keys that decide which instance a process is (instancePathsVerdict
+ * below). They are fixed at boot: nothing may change them in a running
+ * process (scheduleGatewayRestart's unsupervised .env reload skips them).
+ */
+export const INSTANCE_PATH_ENV_KEYS = Object.freeze(["CROW_HOME", "CROW_DATA_DIR", "CROW_DB_PATH", "CROW_ALLOW_SHARED_DATA_DIR"]);
+
+/**
+ * INSTANCE_PATH_ENV_KEYS plus the other per-instance file locations a process
+ * resolves once (tasks DB, instance registry, refcounts, backups, reservation
+ * file, app root, bundles dir, and the suite's .env seam). A bundle can never
+ * write, re-comment or reload any of them (routes/bundles.js).
+ */
+export const PINNED_PATH_ENV_KEYS = Object.freeze([
+  ...INSTANCE_PATH_ENV_KEYS,
+  "CROW_TASKS_DB_PATH", "CROW_INSTANCES_JSON_PATH", "CROW_REFCOUNT_PATH", "CROW_BACKUP_DIR",
+  "CROW_BOX_RESERVATION_PATH", "CROW_APP_ROOT", "CROW_BUNDLES_DIR", "CROW_APP_ENV_PATH",
+]);
+
 /** This instance's home (bundles, installed.json, skills, tokens). */
 export function resolveCrowHome(env = process.env) {
   return env.CROW_HOME || join(homedir(), ".crow");
