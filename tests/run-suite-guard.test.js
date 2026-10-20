@@ -6,7 +6,7 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -88,4 +88,22 @@ test("drifts", async () => {
   assert.match(r.stdout + r.stderr, /\[suite-guard\] DRIFT: CROW_DATA_DIR=/);
   assert.match(r.stderr, /\[run-suite\] FAIL: \d+ test process\(es\) pointed an instance path at a protected real directory/);
   assert.equal(r.sentinel, true);
+});
+
+test("deleting a symlink that points at a protected root removes the link, not the target", () => {
+  const r = runFixture(`
+test("symlink", () => {
+  const link = process.env.CROW_SUITE_SCRATCH + "/link-to-data";
+  fs.symlinkSync(FAKE, link);
+  fs.unlinkSync(link);
+  assert.equal(fs.existsSync(link), false);
+});`);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(r.sentinel, true);
+});
+
+test("realish keeps the order of several missing path components", async () => {
+  const { realish } = await import("../scripts/lib/protected-paths.mjs");
+  const base = mkdtempSync(join(SCRATCH, "realish-"));
+  assert.equal(realish(join(base, "a", "b", "c", "d")), join(realpathSync(base), "a", "b", "c", "d"));
 });

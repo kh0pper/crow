@@ -19,7 +19,7 @@
  */
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { protectedRoots, realish, within } from "./protected-paths.mjs";
 
@@ -41,7 +41,8 @@ const asPath = (p) => (p instanceof URL ? fileURLToPath(p) : Buffer.isBuffer(p) 
 function check(path, opts) {
   const p = asPath(path);
   if (p === null) return null;
-  const target = realish(p);
+  // Resolve the parent only: deleting a symlink never touches its target.
+  const target = join(realish(dirname(resolve(p))), basename(resolve(p)));
   for (const root of ROOTS) {
     if (within(target, root) || (opts && opts.recursive && within(root, target))) return refusal(target, root);
   }
