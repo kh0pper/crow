@@ -1928,7 +1928,7 @@ export async function startInstalledBundle(bundleId, { recreate = false, crossHo
     if (conflict) {
       return {
         ok: false, status: 409, code: "legacy_env_differs",
-        error: `The running container was started from ${conflict.dir}, whose .env differs from the installed one (${join(bundleDir, ".env")}) in: ${conflict.keys.join(", ")}. Starting from the installed copy would apply the installed values. Copy the settings you want into the installed .env, then start again — or, to keep the installed values, remove the old container first (docker rm, on the container from that folder).`,
+        error: `The running container was started from ${conflict.dir}, whose .env differs from the installed one (${join(bundleDir, ".env")}) in: ${conflict.keys.join(", ")}. Starting from the installed copy would apply the installed values. Copy the settings you want into the installed .env, then start again — or, to keep the installed values, stop and remove the old container first (docker rm -f <the container started from that folder>).`,
       };
     }
     const sc = startConsent(bundleId, { crossHost });
