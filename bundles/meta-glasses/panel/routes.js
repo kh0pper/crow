@@ -470,6 +470,7 @@ const glassesTurns = createGlassesTurns({
   botToolNames: async (db, device) => {
     let def = null;
     // The bot that answers the turn: the Crow voice bot (turn.js), whatever the device is bound to.
+    // Before the crow.voice row exists (turn.js creates it on its first turn), this list is empty on the very first look turn.
     try { const row = await _voiceDeps.loadBotRow(db, _voiceDeps.voiceBotId || device.bound_bot_id); def = row && row.enabled ? JSON.parse(row.definition) : null; } catch { def = null; }
     return def ? _voiceDeps.getChatTools({ botDef: def }).map((t) => t.name) : [];
   },

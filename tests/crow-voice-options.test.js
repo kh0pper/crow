@@ -34,10 +34,8 @@ test("crowVoiceTurnOptions: a cloud def never escalates; a cloud model is not ga
   assert.equal(crowVoiceTurnOptions({ surface: "phone", lang: "en", actionWhen: f, actionFollowWhen: g }).familiesOnIntent, true, "no def, no cloud flag: the default rules");
 });
 
-test("VOICE_DENY_TOOLS is the shared list, not a copy; the kiosk's own list matches it", () => {
+test("VOICE_DENY_TOOLS is the shared list, not a copy (the kiosk parity test is in kiosk-tools-truth)", () => {
   assert.equal(VOICE_DENY_TOOLS, SHARED_DENY);
-  assert.deepEqual([...KIOSK_DENY_TOOLS].sort(), [...VOICE_DENY_TOOLS].sort());
-  assert.ok(Object.isFrozen(KIOSK_DENY_TOOLS));
 });
 
 test("voiceLine: English and Spanish have the same keys, none empty; unknown language is English", () => {

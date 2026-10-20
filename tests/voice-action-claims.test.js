@@ -131,6 +131,9 @@ test("claimsBeyondMemory: a save that names a calendar, list or message is not a
 
 test("needsSpokenYes: a tool whose first verb deletes, changes or sends asks for a spoken yes; a create, a save, a play or a read does not", () => {
   for (const n of ["ws_cal_delete_event", "gmail_send_to_self", "ws_cal_update_event", "gdrive_move_file", "crow_update_memory",
-    "gdocs_find_replace", "crow_publish_post", "gdrive_trash_file", "crow_dismiss_notification", "gdrive_rename", "crow_share_post"]) assert.equal(needsSpokenYes(n), true, n);
+    "gdocs_find_replace", "crow_publish_post", "gdrive_trash_file", "crow_dismiss_notification", "gdrive_rename", "crow_share_post",
+    "sheets_write", "gdrive_upload_new_version", "gdocs_apply_comment_edit", "crow_crosspost", "crow_revoke_access"]) assert.equal(needsSpokenYes(n), true, n);
+  assert.equal(toolEffect("crow_revoke_access"), "write");
+  assert.equal(toolEffect("crow_revoke_instance"), "write");
   for (const n of ["ws_cal_create_event", "crow_store_memory", "fw_play", "ws_cal_list_events", "crow_create_schedule", "gmail_create_draft", "acme_frobnicate", "", null]) assert.equal(needsSpokenYes(n), false, String(n));
 });

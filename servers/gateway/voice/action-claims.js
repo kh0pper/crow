@@ -90,7 +90,7 @@ export function claimsReminder(text) {
 }
 
 // Effective tool names: what changes something (create, send, delete…), what only reads, and what is unknown.
-const WRITES = /(?:^|_)(?:create|add|insert|append|update|edit|set|delete|remove|trash|send|schedule|book|respond|reply|move|rename|share|upload|store|save|write|cancel|archive|label|plan|call|draft|complete|make|new|post|publish|unpublish|invite|copy|replace|rewrite|format|apply|run|restore|undo|clear|duplicate|reorder|resolve|transfer|sync|react|dismiss|memo|crosspost|change|toggle|mark|assign|attach|submit|order|play|pause|stop|start|enable|disable)(?:_|$)/;
+const WRITES = /(?:^|_)(?:create|add|insert|append|update|edit|set|delete|remove|trash|send|schedule|book|respond|reply|move|rename|share|upload|store|save|write|cancel|archive|label|plan|call|draft|complete|make|new|post|publish|unpublish|revoke|invite|copy|replace|rewrite|format|apply|run|restore|undo|clear|duplicate|reorder|resolve|transfer|sync|react|dismiss|memo|crosspost|change|toggle|mark|assign|attach|submit|order|play|pause|stop|start|enable|disable)(?:_|$)/;
 const READS = /(?:^|_)(?:list|get|search|read|find|discover|status|query|export|download|recall|stats|structure|permissions|metadata|tabs|lookup|fetch|browse|preview|check|count|show|describe|info|inbox)(?:_|$)/;
 /** "createEvent", "create-event", "crow_create_event" → "create_event". */
 export const toolNameWords = (name) => String(name || "").replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^crow_/, "").replace(/^_+|_+$/g, "");
@@ -126,7 +126,8 @@ export const changesSomething = (name) => toolEffect(name) === "write";
 
 // The verbs a voice bot asks a spoken yes for: what deletes, changes or sends (a create, a save, a play does not).
 const SPOKEN_YES_VERBS = new Set(["delete", "remove", "trash", "clear", "send", "reply", "post", "publish", "unpublish", "share",
-  "transfer", "update", "edit", "replace", "rewrite", "move", "rename", "archive", "cancel", "restore", "undo", "dismiss"]);
+  "transfer", "update", "edit", "replace", "rewrite", "move", "rename", "archive", "cancel", "restore", "undo", "dismiss",
+  "write", "upload", "apply", "crosspost", "revoke"]);
 /** Does this (effective) tool name delete, change or send something? Its first verb (as toolEffect finds it) decides. */
 export function needsSpokenYes(name) {
   const v = firstVerb(name);

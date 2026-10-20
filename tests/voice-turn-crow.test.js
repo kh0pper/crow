@@ -165,7 +165,7 @@ test("a voice bot asks before a send", async () => {
 
 test("an ordinary bot is unaffected by the voice bot's spoken yes", async () => {
   const send = { type: "tool_call", id: "s1", name: "gmail_send_to_self", arguments: { subject: "Milk" } };
-  const sched = { type: "tool_call", id: "c1", name: "crow_create_schedule", arguments: { task: "pipeline:botcron:writer", cron: "0 9 * * *" } };
+  const sched = { type: "tool_call", id: "c1", name: "crow_create_schedule", arguments: { task: "pipeline:botcron:writer", cron_expression: "0 9 * * *" } };
   const h = crowHarness({ chatTools: ["gmail_send_to_self", "crow_create_schedule"], rounds: [callRound(send), sayRound("Sent."), callRound(sched), sayRound("Scheduled.")] });
   await turn(h, { botId: "household", transcript: "email me" });
   assert.deepEqual(h.calls.executed, ["gmail_send_to_self"]);
@@ -174,7 +174,7 @@ test("an ordinary bot is unaffected by the voice bot's spoken yes", async () => 
 });
 
 test("a voice bot's schedule create waits for the yes, direct or through the memory proxy", async () => {
-  const direct = { type: "tool_call", id: "c1", name: "crow_create_schedule", arguments: { task: "Water the plants", cron: "0 9 * * *" } };
+  const direct = { type: "tool_call", id: "c1", name: "crow_create_schedule", arguments: { task: "Water the plants", cron_expression: "0 9 * * *" } };
   const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["crow_create_schedule"], rounds: [callRound(direct), sayRound("Sure?"), callRound(direct), sayRound("Scheduled.")] });
   await turn(h, { transcript: "remind me to water the plants every morning" });
   assert.deepEqual(h.calls.executed, []);
@@ -192,7 +192,7 @@ test("a voice bot's schedule create waits for the yes, direct or through the mem
 });
 
 test("a voice bot never schedules background bot work: a pipeline: task is refused and never executed", async () => {
-  const direct = { type: "tool_call", id: "c1", name: "crow_create_schedule", arguments: { task: "pipeline:botcron:writer", cron: "0 9 * * *" } };
+  const direct = { type: "tool_call", id: "c1", name: "crow_create_schedule", arguments: { task: "pipeline:botcron:writer", cron_expression: "0 9 * * *" } };
   const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["crow_create_schedule"], rounds: [callRound(direct), sayRound("I can't."), callRound(direct), sayRound("I can't.")] });
   await turn(h, { transcript: "have the writer run every morning" });
   assert.deepEqual(h.calls.executed, []);
@@ -206,4 +206,58 @@ test("a voice bot never schedules background bot work: a pipeline: task is refus
   await turn(p, { transcript: "move the writer job", memoryOn: true });
   assert.deepEqual(p.calls.executed, []);
   assert.doesNotMatch(lastToolText(p, 1), /Confirmation required/);
+});
+
+test("a Spanish yes confirms a pending send; a Spanish no declines it", async () => {
+  const send = { type: "tool_call", id: "s1", name: "gmail_send_to_self", arguments: { subject: "Leche" } };
+  for (const yes of ["sí", "Sí.", "sí, hazlo", "¡Sí!", "claro", "dale", "vale", "de acuerdo", "adelante", "si"]) {
+    const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["gmail_send_to_self"], rounds: [callRound(send), sayRound("¿Seguro?"), callRound(send), sayRound("Enviado.")] });
+    await turn(h, { transcript: "mándame un correo" });
+    assert.deepEqual(h.calls.executed, [], yes);
+    await turn(h, { transcript: yes });
+    assert.deepEqual(h.calls.executed, ["gmail_send_to_self"], yes);
+  }
+  for (const no of ["no, espera", "espera", "cancela eso", "para"]) {
+    const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["gmail_send_to_self"], rounds: [callRound(send), sayRound("¿Seguro?"), callRound(send), sayRound("Vale.")] });
+    await turn(h, { transcript: "mándame un correo" });
+    await turn(h, { transcript: no });
+    assert.deepEqual(h.calls.executed, [], no);
+  }
+});
+
+test("the remaining voice confirms: a context section add, a direct schedule update, a proxied schedule create", async () => {
+  const cases = [
+    ["crow_add_context_section", { type: "tool_call", id: "a1", name: "crow_add_context_section", arguments: { section_key: "notes", content: "x" } }],
+    ["crow_update_schedule", { type: "tool_call", id: "u1", name: "crow_update_schedule", arguments: { id: 3, cron_expression: "0 8 * * *" } }],
+    ["crow_memory", { type: "tool_call", id: "m1", name: "crow_memory", arguments: { action: "create_schedule", params: { task: "Water the plants", cron_expression: "0 9 * * *" } } }],
+  ];
+  for (const [tool, tc] of cases) {
+    const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: [tool], rounds: [callRound(tc), sayRound("Sure?"), callRound(tc), sayRound("Done.")] });
+    await turn(h, { transcript: "do the thing", memoryOn: true });
+    assert.deepEqual(h.calls.executed, [], tool);
+    assert.match(lastToolText(h, 1), /Confirmation required/, tool);
+    await turn(h, { transcript: "yes", memoryOn: true });
+    assert.deepEqual(h.calls.executed, [tool], tool);
+  }
+});
+
+test("a voice bot never re-enables a schedule or creates a pipeline: one through the proxy: refused outright", async () => {
+  const cases = [
+    ["crow_memory", { type: "tool_call", id: "m1", name: "crow_memory", arguments: { action: "create_schedule", params: { task: "pipeline:botcron:writer", cron_expression: "0 9 * * *" } } }],
+    ["crow_update_schedule", { type: "tool_call", id: "u1", name: "crow_update_schedule", arguments: { id: 3, enabled: true } }],
+    ["crow_memory", { type: "tool_call", id: "m2", name: "crow_memory", arguments: { action: "update_schedule", params: { id: 3, enabled: true } } }],
+  ];
+  for (const [tool, tc] of cases) {
+    const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: [tool], rounds: [callRound(tc), sayRound("I can't."), callRound(tc), sayRound("I can't.")] });
+    await turn(h, { transcript: "turn the writer job back on", memoryOn: true });
+    assert.deepEqual(h.calls.executed, [], JSON.stringify(tc.arguments));
+    assert.doesNotMatch(lastToolText(h, 1), /Confirmation required/);
+    await turn(h, { transcript: "yes", memoryOn: true });
+    assert.deepEqual(h.calls.executed, [], "a yes does not run it either");
+  }
+  // An ordinary bot is unaffected.
+  const tc = { type: "tool_call", id: "u1", name: "crow_update_schedule", arguments: { id: 3, enabled: true } };
+  const o = crowHarness({ chatTools: ["crow_update_schedule"], rounds: [callRound(tc), sayRound("Done.")] });
+  await turn(o, { botId: "household", transcript: "turn it back on" });
+  assert.deepEqual(o.calls.executed, ["crow_update_schedule"]);
 });

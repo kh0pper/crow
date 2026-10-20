@@ -26,11 +26,14 @@ import { CROW_VOICE_BOT_ID, normalizeVoiceSettings, isVoiceBotDef } from "../../
 export const VOICE_CONFIRM_TOOLS = Object.freeze(["crow_create_schedule", "crow_update_schedule", "crow_add_context_section", "crow_update_context_section"]);
 const VOICE_SCHEDULE_TOOLS = new Set(["crow_create_schedule", "crow_update_schedule"]);
 /** A schedule task that starts background bot work (bot_scheduler's "pipeline:botcron:<bot>" and every other "pipeline:" row). */
-const startsPipeline = (args) => {
+const scheduleArgs = (args) => {
   const a = args && typeof args === "object" ? args : {};
-  const p = a.params && typeof a.params === "object" ? a.params : {};
-  return [a.task, p.task].some((t) => typeof t === "string" && /^\s*pipeline:/i.test(t));
+  return [a, a.params && typeof a.params === "object" ? a.params : {}];
 };
+const startsPipeline = (args) => scheduleArgs(args).some((x) => typeof x.task === "string" && /^\s*pipeline:/i.test(x.task));
+/** Turning a schedule back on without naming its task: it may be a pipeline: row (the gate cannot see the stored task). */
+const reenablesUnseen = (args) => scheduleArgs(args).some((x) => (x.enabled === true || x.enabled === 1 || x.enabled === "true") && x.task === undefined);
+const VOICE_NO_REENABLE = "A schedule cannot be turned back on by voice. Tell the user to turn it on in the Crow's Nest, then end your turn — do not call another tool.";
 const VOICE_NO_PIPELINE = "Background bot work cannot be scheduled by voice. Tell the user to set it up in Bot Builder, then end your turn — do not call another tool.";
 
 export const ESCALATION_READY_TIMEOUT_MS = 8000;
@@ -773,6 +776,7 @@ export function createVoiceTurnRunner(deps) {
         // The voice bot (kind "voice"): never schedules background bot work, and asks a spoken yes
         // before anything that deletes, changes or sends, and before a schedule or a context change.
         if (voiceKind && names.some((n) => VOICE_SCHEDULE_TOOLS.has(n)) && startsPipeline(tc.arguments)) return refuse("refused_policy", VOICE_NO_PIPELINE);
+        if (voiceKind && names.includes("crow_update_schedule") && reenablesUnseen(tc.arguments)) return refuse("refused_policy", VOICE_NO_REENABLE);
         const confirmName = names.find((n) => isDestructiveTool(n) || (Array.isArray(policy.confirm) && policy.confirm.includes(n))
           || (voiceKind && (needsSpokenYes(n) || VOICE_CONFIRM_TOOLS.includes(n))));
         if (!confirmName) return null;
