@@ -356,7 +356,7 @@ test("spawn: builds the world, warms, constructs PiRpc with the FULL piRpcOpts +
   assert.ok(opts.resolved && opts.resolved.key === "crow-local/qwen3.6-35b-a3b");
   assert.ok(opts.def);
   assert.equal(opts.piSessionId, null, "a fresh spawn resumes nothing");
-  assert.deepEqual(opts.extraEnv, { PI_BOT_INTERACTIVE: "1" });
+  assert.deepEqual(opts.extraEnv, { PI_BOT_INTERACTIVE: "1", PI_BOT_INTERACTIVE_ASK_TIMEOUT_MS: "2147483647" });
   assert.equal(typeof opts.onEvent, "function");
 
   const row = rowFor(r.threadId);
@@ -899,6 +899,10 @@ test("I4: pushAttention closes its DB handle — repeated ask-card pushes do not
       notifCount = notificationCount();
     }
     assert.equal(notifCount, target, `push #${i}'s notification row must land before firing the next`);
+    // 2026-10-20: asks are grouped per session while the group is open, so
+    // answer each one (closing its group) to make the next one a new row.
+    await engine.answer(s.sessionId, "leak-check-" + i, { confirmed: true });
+    await tick(5);
   }
 
   // The notification row landing and the handle's own close() are two
@@ -1034,7 +1038,7 @@ test("wake: a message to a hibernating session rebuilds the world FRESH and resu
   const wakeOpts = state.instances[1].opts;
   assert.equal(wakeOpts.narrowedTools, '["bash","write"]', "the FRESH narrowing lands in the wake spawn");
   assert.equal(wakeOpts.piSessionId, firstPi.piSessionId, "the pi session is resumed, not restarted");
-  assert.deepEqual(wakeOpts.extraEnv, { PI_BOT_INTERACTIVE: "1" });
+  assert.deepEqual(wakeOpts.extraEnv, { PI_BOT_INTERACTIVE: "1", PI_BOT_INTERACTIVE_ASK_TIMEOUT_MS: "2147483647" });
   assert.equal((await engine.get(s.sessionId)).state, "awake");
   assert.equal(rowFor(s.threadId).status, "active");
   assert.equal(state.instances[1].turns[0].message, "back again");

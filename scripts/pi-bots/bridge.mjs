@@ -56,7 +56,8 @@ import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 // see its CYCLE NOTE.
 import { buildBotWorld, prepareSpawn } from "./bot-world.mjs";
 import { runSkillReview } from "./skill_review.mjs";
-import { botsDbPath, tasksDbPath as resolveTasksDbPath, resolveSqlitePath } from "./instance-paths.mjs";
+import { botsDbPath, tasksDbPath as resolveTasksDbPath, resolveSqlitePath, botsProjectsRoot } from "./instance-paths.mjs";
+import { botWorkspaceEnv, BOT_WORKSPACE_KEYS } from "./bot-workspace-env.mjs";
 import { remoteServersForBot, parseRemoteInvocationFlag, remoteBlockName } from "./remote-blocks.mjs";
 import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
@@ -427,6 +428,20 @@ export class PiRpc {
       // PI_BOT_INTERACTIVE:"1") — merged LAST so they win over both the
       // computed defaults above and the (already-stripped) def.spawn_env.
       opts.extraEnv || {});
+    // The bot's own project workspace (PI_BOT_WORKSPACE / _PROJECTS_ROOT /
+    // _ID) for pi-lab's bash check: commands inside it are not "sensitive"
+    // just for sitting under the instance's data dir. INTERACTIVE (Perch)
+    // children only, where an operator is present: a channel turn's model
+    // reads untrusted mail and keeps every tripwire, and a job runs bash as
+    // deny. The keys come from this computation or not at all: anything
+    // inherited (an operator env allowlist, passthrough) is dropped first, so
+    // a fail-closed {} really means "no exemption". Engine-reserved names, so
+    // def.spawn_env never reaches them, and PI_BOT_INTERACTIVE only ever
+    // comes from the engine's extraEnv.
+    for (const k of BOT_WORKSPACE_KEYS) delete env[k];
+    if (opts.extraEnv && opts.extraEnv.PI_BOT_INTERACTIVE === "1") {
+      Object.assign(env, botWorkspaceEnv({ workspaceDir: opts.projectWorkspaceDir || null, projectsRoot: botsProjectsRoot(), botId: opts.botId || null }));
+    }
     // S6-CROW: in fd mode PI_BOT_MCP_CONFIG STAYS SET, pointing at the world
     // root's .mcp.json that fd mode never writes (and removes when stale):
     //   - pi-lab >= c8bbb02 lets the fd win, and dirname() of the path keeps

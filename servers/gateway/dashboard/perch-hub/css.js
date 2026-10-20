@@ -296,6 +296,7 @@ border-collapse:collapse;margin:0 0 8px;font-size:13px}
 #perch-hub-root .ask-card{border:1px solid var(--line);border-radius:10px;padding:11px 12px;display:grid;gap:8px;background:var(--sky)}
 #perch-hub-root .ask-title{font-weight:600}
 #perch-hub-root .ask-message{white-space:pre-wrap}
+#perch-hub-root .ask-expired{font-size:.85rem;color:var(--dim);font-style:italic}
 #perch-hub-root .ask-controls{display:flex;flex-wrap:wrap;gap:6px}
 /* PR-A (audit item 5): the combined multi-question ask card. One card carries
    up to four questions, each with tappable options (bold label + dim

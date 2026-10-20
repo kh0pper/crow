@@ -66,6 +66,15 @@ export function tasksDbPath() {
   return process.env.CROW_TASKS_DB_PATH || join(botsDataDir(), "tasks.db");
 }
 
+/**
+ * This instance's project spaces root (`<data>/projects`): the SAME anchor
+ * servers/shared/project-spaces.js builds every `workspace_dir` under, so a
+ * co-hosted instance with its own data dir gets its own root.
+ */
+export function botsProjectsRoot() {
+  return join(botsDataDir(), "projects");
+}
+
 /** Per-bot workspace root: sibling of the data dir (…/pi-bots). */
 export function botsWorkspaceRoot() {
   return join(dirname(botsDataDir()), "pi-bots");

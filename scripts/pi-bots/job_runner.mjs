@@ -362,7 +362,7 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
     const pi = new bridge.PiRpc({
       def, sessionDir, resolved, selfAuthoringDir: null,
       piSessionId: null, appendSystemPromptFile: sysFile,
-      projectWorkspaceDir, mcpDelivery, mcpConfig,
+      projectWorkspaceDir, mcpDelivery, mcpConfig, botId: job.bot_id,
     });
     try {
       const st0 = await pi.getState().catch(() => null);
