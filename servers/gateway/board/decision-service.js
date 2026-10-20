@@ -206,7 +206,9 @@ async function findDecisionCards(tdb, { fingerprint, batch, decided = false } = 
   if (fingerprint != null) { where.push("json_extract(data_json,'$.decision.fingerprint')=?"); args.push(fingerprint); }
   if (batch != null) { where.push("json_extract(data_json,'$.decision.batch')=?"); args.push(batch); }
   const { rows } = await tdb.execute({
-    sql: `SELECT id, project_id, status, data_json FROM tasks_items WHERE ${where.join(" AND ")} ORDER BY id ASC`,
+    sql: `SELECT id, project_id, status, data_json FROM tasks_items
+          WHERE board_id IS NULL AND CASE WHEN json_valid(data_json) THEN (${where.filter((w) => w !== "board_id IS NULL").join(" AND ")}) ELSE 0 END
+          ORDER BY id ASC`,
     args,
   });
   if (decided) return rows.map((r) => ({ row: r, decision: parseDecision(r) })).filter((x) => x.decision);
@@ -269,7 +271,8 @@ export async function expireDecisions(tdb, cdb, now, actor = EXPIRY_ACTOR) {
 }
 
 /**
- * Ask a decision. Returns {id, deduped}. Throws bad_decision (400) or
+ * Ask a decision. Returns {id, deduped}. Throws bad_decision (400),
+ * batch_owned (409: the batch has open cards from a different actor key) or
  * batch_full (429). `now` is for tests.
  */
 export async function askDecision(tdb, cdb, { projectId, title, tags, decision } = {}, actor, { now } = {}) {
@@ -291,6 +294,12 @@ export async function askDecision(tdb, cdb, { projectId, title, tags, decision }
   }
 
   const inBatch = await findDecisionCards(tdb, { batch: v.batch });
+  // A batch belongs to whoever opened it: no one else may add to it (that
+  // would let them make the owner's notify fail authorisation).
+  const callerKey = actorKey(actor);
+  if (inBatch.some(({ decision: d }) => !d.asked_by || actorKey(d.asked_by) !== callerKey)) {
+    throw fail("this batch already has open decisions from another caller", "batch_owned", 409);
+  }
   if (inBatch.length >= MAX_OPEN_PER_BATCH) {
     throw fail(`batch already has ${MAX_OPEN_PER_BATCH} open decisions`, "batch_full", 429);
   }
@@ -446,7 +455,8 @@ export async function notifyBatch(tdb, cdb, batch, { createNotification, actor, 
   // calls cannot both pass the check: SQLite serialises writers, and the
   // uncorrelated COUNT subquery is evaluated once, against committed state.
   // Pushes are counted from the cards themselves (distinct notify_stamp per
-  // actor per UTC day), not from the notifications table.
+  // actor per UTC day), not from the notifications table. json_valid guards
+  // rows this module did not write: one malformed row must not break the count.
   const day = new Date(ms).toISOString().slice(0, 10);
   const notifyStamp = `${stamp}#${randomUUID()}`;
   const ids = open.map(({ row }) => Number(row.id));
@@ -457,8 +467,10 @@ export async function notifyBatch(tdb, cdb, batch, { createNotification, actor, 
           SET data_json=json_set(data_json,'$.decision.notified_at',?,'$.decision.notified_by',?,'$.decision.notify_stamp',?)
           WHERE id IN (${ph}) AND board_id IS NULL AND json_extract(data_json,'$.decision.notified_at') IS NULL
             AND (SELECT COUNT(DISTINCT json_extract(data_json,'$.decision.notify_stamp')) FROM tasks_items
-                 WHERE json_extract(data_json,'$.decision.notified_by')=?
-                   AND substr(json_extract(data_json,'$.decision.notified_at'),1,10)=?) < ?
+                 WHERE CASE WHEN json_valid(data_json)
+                            THEN json_extract(data_json,'$.decision.notified_by')=?
+                             AND substr(json_extract(data_json,'$.decision.notified_at'),1,10)=?
+                            ELSE 0 END) < ?
           RETURNING id`,
     args: [stamp, key, notifyStamp, ...ids, key, day, MAX_PUSHES_PER_ACTOR_PER_DAY],
   });
