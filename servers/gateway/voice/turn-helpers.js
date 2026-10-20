@@ -6,6 +6,7 @@
  * pcmStream honours an AbortSignal (barge-in), and the convo store trims to a
  * window that starts on a user message (no orphan tool result).
  */
+import { isProxyCall, executedProxyArgs, normalizeExternalParams, ADDON_PROXY } from "../ai/proxy-args.js";
 
 export const SENTENCE_END = /[.!?…。]["')\]]?\s|[\n]/;
 
@@ -159,34 +160,45 @@ export function isDestructiveTool(name) {
   return DESTRUCTIVE_EXACT.has(name) || DESTRUCTIVE_REGEX.test(name);
 }
 
-// The category proxies (tool-executor.js CATEGORY_PROXY_RE). The executor runs one with args.params ALONE:
-// every top-level field but `action` is dropped.
-const CATEGORY_PROXY_RE = /^crow_(memory|projects|blog|sharing|storage|media)$/;
-/** A category proxy call ({ action, params }): its effective tool name came from `action`. */
-export function isCategoryProxyCall(tc) {
-  return CATEGORY_PROXY_RE.test(String(tc?.name || "")) && typeof tc?.arguments?.action === "string" && tc.arguments.action !== "";
-}
+// The proxies and the arguments they really run with come from the executor's own module (one matcher).
+export { isProxyCall, executedProxyArgs };
 const objOf = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
-/** The object the executor really passes to the tool: params for a proxied call, the args themselves otherwise. */
-export const executedArgs = (args, proxied) => (proxied ? objOf(objOf(args).params) : objOf(args));
 // Every field the confirm question or a voice policy check reads.
 const DESCRIBED_FIELDS = ["id", "slug", "post_id", "memory_id", "setlist_id", "section_key", "delete", "task", "enabled", "cron_expression"];
+// Scalars compare as strings ("3" and 3 are the same id); objects by their canonical form.
+const sameValue = (a, b) => ((a === null || typeof a !== "object") && (b === null || typeof b !== "object")
+  ? String(a) === String(b) : canonicalArgsHash(a) === canonicalArgsHash(b));
 /**
- * A proxied call whose top-level copy of a described field disagrees with the params copy (the one that runs):
- * the question would name one value and the tool run another. The voice gate refuses it outright.
+ * A proxied call (isProxyCall) that carries a described field somewhere other than where it runs with a
+ * different value, or where the run never sees it: the top level, params, or params.arguments disagreeing
+ * with executedProxyArgs. The question would name one value and the tool run another; the voice gate refuses it.
  */
-export function proxyArgsConflict(args) {
-  const top = objOf(args);
-  const params = objOf(top.params);
-  return DESCRIBED_FIELDS.some((k) => top[k] !== undefined && params[k] !== undefined && canonicalArgsHash(top[k]) !== canonicalArgsHash(params[k]));
+export function proxyArgsConflict(tc) {
+  if (!isProxyCall(tc)) return false;
+  const top = { ...objOf(tc.arguments) };
+  delete top.action;   // the proxy's own selector
+  delete top.params;
+  const params = objOf(objOf(tc.arguments).params);
+  const layers = [top, params, objOf(params.arguments)];
+  const runs = objOf(executedProxyArgs(tc));
+  return DESCRIBED_FIELDS.some((k) => layers.some((l) => l !== runs && l[k] !== undefined && (runs[k] === undefined || !sameValue(l[k], runs[k]))));
+}
+/**
+ * A crow_tools call that runs on its flat top-level fields (params empty). The local executor runs those;
+ * the remote route runs args.params as given ({}), so a described value may never run. The voice gate refuses
+ * such a call when it would need a spoken yes.
+ */
+export function reliesOnFlatFallback(tc) {
+  return String(tc?.name || "") === ADDON_PROXY && isProxyCall(tc) && normalizeExternalParams(tc.arguments).flat;
 }
 
 /**
- * The action the confirm question names, read ONLY from what the executor runs (executedArgs): for a proxied
- * call ({ proxied: true }) that is params, for a direct one its own args. crow_update_schedule with delete: true deletes.
+ * The action the confirm question names, read ONLY from what the executor runs (executedProxyArgs). `via` is
+ * the tool the model really called when it was a proxy (crow_memory, crow_tools…); without it the call is direct
+ * and its own args are read. crow_update_schedule with delete: true deletes.
  */
-export function describeDestructiveAction(tc, { proxied = false } = {}) {
-  const src = executedArgs(tc.arguments, proxied);
+export function describeDestructiveAction(tc, { via = null } = {}) {
+  const src = objOf(executedProxyArgs({ name: via || tc.name, arguments: tc.arguments }));
   const has = (v) => v !== undefined && v !== null && v !== "";
   let name = String(tc.name || "");
   if (name === "crow_update_schedule" && (src.delete === true || src.delete === "true")) name = "crow_delete_schedule";

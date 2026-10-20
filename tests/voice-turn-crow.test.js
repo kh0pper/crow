@@ -387,3 +387,37 @@ test("security: a proxied call whose top-level and params values disagree is ref
   await turn(o, { botId: "household", transcript: "change schedule 9", memoryOn: true });
   assert.deepEqual(o.calls.executed, ["crow_memory"]);
 });
+
+// ── security fix round 2: the crow_tools add-on proxy ───────────────────────
+
+async function addonHarness(rounds) {
+  const { effectiveToolName } = await import("../servers/gateway/ai/tool-executor.js");
+  const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["crow_tools"], rounds });
+  h.deps.effectiveToolName = effectiveToolName;
+  return h;
+}
+
+test("security 2: a crow_tools delete names the id that runs; the spoof shape and a flat-only delete are refused, never executed", async () => {
+  const ok = { type: "tool_call", id: "t1", name: "crow_tools", arguments: { action: "trello_delete_card", params: { id: 5 } } };
+  const h = await addonHarness([callRound(ok), sayRound("Sure?"), callRound(ok), sayRound("Deleted.")]);
+  await turn(h, { transcript: "delete card 5" });
+  assert.deepEqual(h.calls.executed, []);
+  assert.match(lastToolText(h, 1), /Are you sure you want to trello delete card 5\?/);
+  await turn(h, { transcript: "yes" });
+  assert.deepEqual(h.calls.executed, ["crow_tools"]);
+
+  const unwrap = { type: "tool_call", id: "t2", name: "crow_tools", arguments: { action: "trello_delete_card", params: { arguments: { id: 7 } } } };
+  const u = await addonHarness([callRound(unwrap), sayRound("Sure?")]);
+  await turn(u, { transcript: "delete card 7" });
+  assert.match(lastToolText(u, 1), /Are you sure you want to trello delete card 7\?/);
+
+  for (const args of [{ action: "trello_delete_card", id: 9, params: { id: 5 } }, { action: "trello_delete_card", id: 8 }]) {
+    const tc = { type: "tool_call", id: "t3", name: "crow_tools", arguments: args };
+    const r = await addonHarness([callRound(tc), sayRound("I can't."), callRound(tc), sayRound("I can't.")]);
+    await turn(r, { transcript: "delete the card" });
+    assert.deepEqual(r.calls.executed, [], JSON.stringify(args));
+    assert.doesNotMatch(lastToolText(r, 1), /Confirmation required/, `${JSON.stringify(args)}: refused, never asked`);
+    await turn(r, { transcript: "yes" });
+    assert.deepEqual(r.calls.executed, [], `${JSON.stringify(args)}: a yes does not run it either`);
+  }
+});

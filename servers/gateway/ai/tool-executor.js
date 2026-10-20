@@ -21,6 +21,7 @@ import { connectedServers } from "../proxy.js";
 import { voiceCategoryFor } from "../../../scripts/pi-bots/ext_registry.mjs";
 import { createDbClient } from "../../db.js";
 import { isVoiceBotId } from "../../shared/voice-bot.js";
+import { CATEGORY_PROXY_RE, normalizeExternalParams } from "./proxy-args.js";
 import { CronExpressionParser } from "cron-parser";
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "../../../scripts/pi-bots/bot-jobs-schema.mjs";
 
@@ -59,7 +60,7 @@ function botcronNextRun(cronExpression, fromDate = new Date()) {
 
 /**
  * Category proxies the chat tool-executor can actually dispatch. Mirrors the
- * regex in executeTool() (`^crow_(memory|projects|blog|sharing|storage|media)$`).
+ * regex in executeTool() (CATEGORY_PROXY_RE, ./proxy-args.js).
  * (The old `consulting` category was moved to a private MPA-only bundle,
  * 2026-07-18.) Deep/background work instead rides the explicit
  * crow_delegate / crow_job_status schemas (the pi-backed replacement for the
@@ -264,7 +265,7 @@ export function createToolExecutor(opts = {}) {
       }
 
       // Check if it's a category-level tool (crow_memory, crow_projects, etc.)
-      const categoryMatch = name.match(/^crow_(memory|projects|blog|sharing|storage|media)$/);
+      const categoryMatch = name.match(CATEGORY_PROXY_RE);
       if (categoryMatch) {
         const category = categoryMatch[1];
         const action = args.action;
@@ -608,28 +609,13 @@ export function createToolExecutor(opts = {}) {
    *   { action: "tool", key: val, ... }                   — flat params mixed with action
    */
   async function handleExternalTool(args) {
-    let { action, params } = args;
+    const { action } = args;
     if (!action) {
       return { result: "crow_tools requires an 'action' parameter. Example: { action: 'crow_tax_get_documents', params: {} }", isError: true };
     }
 
-    // Normalize params from various formats weaker models produce
-    if (!params || typeof params !== "object") {
-      params = {};
-    }
-    // Unwrap nested { arguments: { ... } } inside params
-    if (params.arguments && typeof params.arguments === "object" && Object.keys(params).length <= 2) {
-      params = params.arguments;
-    }
-    // If model put tool params directly on args (flat), extract them
-    if (Object.keys(params).length === 0) {
-      const flat = { ...args };
-      delete flat.action;
-      delete flat.params;
-      if (Object.keys(flat).length > 0) {
-        params = flat;
-      }
-    }
+    // Normalize params from the formats weaker models produce (shared with the voice confirm gate).
+    const { params } = normalizeExternalParams(args);
 
     for (const [integrationId, entry] of connectedServers) {
       if (entry.status !== "connected" || !entry.client) continue;
@@ -688,7 +674,6 @@ function formatResult(mcpResult) {
   return { result: text, isError };
 }
 
-const CATEGORY_PROXY_RE = /^crow_(memory|projects|blog|sharing|storage|media)$/;
 
 /**
  * Slice B (B3, decision 5): resolve a tool call to the EFFECTIVE tool it will

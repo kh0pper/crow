@@ -168,7 +168,7 @@ test("the confirm gate never allows a pending delete on a negated yes", () => {
 test("the confirm question names what happens: proxied args are read, a schedule delete says delete", () => {
   const d = H.describeDestructiveAction;
   assert.equal(d({ name: "crow_update_schedule", arguments: { id: 3, delete: true } }), "delete schedule 3");
-  const P = { proxied: true };
+  const P = { via: "crow_memory" };
   assert.equal(d({ name: "crow_update_schedule", arguments: { action: "update_schedule", params: { id: 3, delete: true } } }, P), "delete schedule 3");
   assert.equal(d({ name: "crow_update_schedule", arguments: { action: "update_schedule", params: { id: 3, cron_expression: "0 8 * * *" } } }, P), "update schedule 3");
   assert.equal(d({ name: "crow_delete_memory", arguments: { action: "delete_memory", params: { id: 12 } } }, P), "delete memory 12");
@@ -180,22 +180,60 @@ test("the confirm question names what happens: proxied args are read, a schedule
 test("security: a proxied call is described ONLY from params (what the executor runs); a direct one only from its own args", () => {
   const d = H.describeDestructiveAction;
   // The executor runs a category proxy with args.params alone: a top-level id or delete is never what runs.
-  assert.equal(d({ name: "crow_update_schedule", arguments: { action: "update_schedule", id: 9, params: { id: 3, delete: true } } }, { proxied: true }), "delete schedule 3");
-  assert.equal(d({ name: "crow_update_schedule", arguments: { action: "update_schedule", id: 9, delete: true, params: { id: 3 } } }, { proxied: true }), "update schedule 3");
+  assert.equal(d({ name: "crow_update_schedule", arguments: { action: "update_schedule", id: 9, params: { id: 3, delete: true } } }, { via: "crow_memory" }), "delete schedule 3");
+  assert.equal(d({ name: "crow_update_schedule", arguments: { action: "update_schedule", id: 9, delete: true, params: { id: 3 } } }, { via: "crow_memory" }), "update schedule 3");
   // A direct tool gets its args as they are; a stray params object is not what runs.
   assert.equal(d({ name: "crow_update_schedule", arguments: { id: 3, params: { id: 9, delete: true } } }), "update schedule 3");
 });
 
 test("security: proxyArgsConflict flags a described field whose top-level and params values disagree", () => {
-  const c = H.proxyArgsConflict;
+  const c = (args) => H.proxyArgsConflict({ name: "crow_memory", arguments: args });
   assert.equal(c({ action: "update_schedule", id: 9, params: { id: 3, delete: true } }), true);
   assert.equal(c({ action: "update_schedule", delete: false, params: { id: 3, delete: true } }), true);
   assert.equal(c({ action: "update_context_section", section_key: "a", params: { section_key: "b" } }), true);
   assert.equal(c({ action: "create_schedule", task: "x", params: { task: "pipeline:botcron:writer" } }), true);
   assert.equal(c({ action: "update_schedule", id: 3, params: { id: 3, delete: true } }), false, "the same value is consistent");
   assert.equal(c({ action: "update_schedule", params: { id: 3, delete: true } }), false);
-  assert.equal(c({ action: "update_schedule", id: 9, params: {} }), false, "absent in params: nothing to disagree with");
-  assert.equal(H.isCategoryProxyCall({ name: "crow_memory", arguments: { action: "x" } }), true);
-  assert.equal(H.isCategoryProxyCall({ name: "crow_memory", arguments: {} }), false);
-  assert.equal(H.isCategoryProxyCall({ name: "crow_update_schedule", arguments: { action: "x" } }), false);
+  assert.equal(c({ action: "update_schedule", id: 9, params: {} }), true, "a top-level value the run never sees is a disagreement (round 2)");
+  assert.equal(H.isProxyCall({ name: "crow_memory", arguments: { action: "x" } }), true);
+  assert.equal(H.isProxyCall({ name: "crow_memory", arguments: {} }), false);
+  assert.equal(H.isProxyCall({ name: "crow_update_schedule", arguments: { action: "x" } }), false);
+});
+
+// ── security fix round 2: crow_tools is a proxy too ─────────────────────────
+
+test("security 2: crow_tools is described from what handleExternalTool runs (params, the arguments unwrap, the flat fallback)", () => {
+  const d = H.describeDestructiveAction;
+  const ct = (args) => ({ name: "trello_delete_card", arguments: args });
+  assert.equal(H.isProxyCall({ name: "crow_tools", arguments: { action: "trello_delete_card" } }), true);
+  assert.equal(d(ct({ action: "trello_delete_card", params: { id: 5 } }), { via: "crow_tools" }), "trello delete card 5", "the regression shape names id 5");
+  assert.equal(d(ct({ action: "trello_delete_card", params: { arguments: { id: 7 } } }), { via: "crow_tools" }), "trello delete card 7", "the arguments unwrap");
+  assert.equal(d(ct({ action: "trello_delete_card", id: 8 }), { via: "crow_tools" }), "trello delete card 8", "the flat fallback, as the local executor runs it");
+  assert.deepEqual(H.executedProxyArgs({ name: "crow_tools", arguments: { action: "x", params: { arguments: { id: 7 }, note: "n" } } }), { id: 7 });
+  assert.deepEqual(H.executedProxyArgs({ name: "crow_tools", arguments: { action: "x", params: { arguments: { id: 7 }, a: 1, b: 2 } } }), { arguments: { id: 7 }, a: 1, b: 2 }, "more than two keys: no unwrap");
+  assert.deepEqual(H.executedProxyArgs({ name: "crow_memory", arguments: { action: "x", id: 9, params: { id: 3 } } }), { id: 3 });
+});
+
+test("security 2: the conflict check covers crow_tools and every layer; \"3\" and 3 agree", () => {
+  const c = (args, name = "crow_tools") => H.proxyArgsConflict({ name, arguments: args });
+  assert.equal(c({ action: "trello_delete_card", id: 9, params: { id: 5 } }), true, "the spoof shape");
+  assert.equal(c({ action: "trello_delete_card", params: { id: 9, arguments: { id: 5 } } }), true, "params beside the unwrapped arguments");
+  assert.equal(c({ action: "trello_delete_card", params: { id: 5 } }), false);
+  assert.equal(c({ action: "trello_delete_card", id: 5, params: { id: 5 } }), false);
+  assert.equal(c({ action: "trello_delete_card", id: 8 }), false, "the flat fallback runs the top-level values");
+  assert.equal(c({ action: "update_schedule", id: "3", params: { id: 3, delete: true } }, "crow_memory"), false, "\"3\" and 3 are the same id");
+  assert.equal(c({ action: "update_schedule", id: "4", params: { id: 3 } }, "crow_memory"), true, "a true disagreement is still one");
+  assert.equal(H.reliesOnFlatFallback({ name: "crow_tools", arguments: { action: "x", id: 8 } }), true);
+  assert.equal(H.reliesOnFlatFallback({ name: "crow_tools", arguments: { action: "x", params: { id: 8 } } }), false);
+  assert.equal(H.reliesOnFlatFallback({ name: "crow_memory", arguments: { action: "x", id: 8 } }), false);
+});
+
+test("security 2: one proxy matcher — tool-executor uses the shared one", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../servers/gateway/ai/tool-executor.js", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /crow_\(memory\|projects/, "no second copy of the category regex in the executor");
+  const helpers = readFileSync(new URL("../servers/gateway/voice/turn-helpers.js", import.meta.url), "utf8");
+  assert.doesNotMatch(helpers, /crow_\(memory\|projects/, "nor in turn-helpers");
+  const shared = await import("../servers/gateway/ai/proxy-args.js");
+  assert.ok(shared.CATEGORY_PROXY_RE.test("crow_memory") && !shared.CATEGORY_PROXY_RE.test("crow_tools"));
 });
