@@ -236,15 +236,16 @@ test("CSP table: every type has a policy, scripted types match the iframe sandbo
     assert.doesNotMatch(csp, /'unsafe-eval'/, `${type}: never bare unsafe-eval`);
     const sandbox = csp.split("; ").find((d) => d.startsWith("sandbox"));
     assert.equal(sandbox.replace(/^sandbox ?/, ""), iframeSandboxFor(type), type);
-    // D2 (2026-10-17): the bot-scripted rows carry 'wasm-unsafe-eval' (WASM
-    // compilation only) for pinned WASM libs; every other row — including pdf
-    // (a fixed viewer bundle, no bot script) and the helper-only document row
-    // — carries no eval-family token.
+    // D2 (2026-10-17), narrowed 2026-10-20: only the page row carries
+    // 'wasm-unsafe-eval' (WASM compilation only), because page is the only
+    // type a WASM library (the design kit's sunvox engine) may be used in.
+    // Every other row (slides, data, map, the pdf viewer and the helper-only
+    // document row) carries no eval-family token at all.
     const scriptSrc = /(?:^|; )script-src ([^;]*)/.exec(csp)?.[1] || "";
-    if (["page", "slides", "data", "map"].includes(type)) {
-      assert.ok(scriptSrc.includes("'wasm-unsafe-eval'"), `${type}: bot-scripted row allows WASM compilation`);
+    if (type === "page") {
+      assert.ok(scriptSrc.includes("'wasm-unsafe-eval'"), `${type}: the page row allows WASM compilation`);
     } else {
-      assert.ok(!scriptSrc.includes("wasm-unsafe-eval"), `${type}: no WASM carve-out on a fixed-content row`);
+      assert.doesNotMatch(csp, /eval/, `${type}: no eval-family token outside the page row`);
     }
   }
   assert.doesNotMatch(cspFor("pdf", { tokenBase: "https://a.example/v/T/" }), /script-src[^;]*unsafe-inline/, "pdf: no inline script (§5.2a)");
