@@ -28,6 +28,7 @@ import { rowRev } from "./def-adapter.js";
 import { changeTracker } from "./ui.js";
 import { saveBasics, saveAbilities, saveSafety, saveAdvanced } from "./save-handlers.js";
 import { guardPolicyForSave } from "./policy-guard.js";
+import { isVoiceBotId } from "../../../../shared/voice-bot.js";
 import { ENGINE_CHANNELS } from "../../../bot-engine-status.js";
 import { botRuntimeActive } from "../bot-runtime-flag.js";
 import {
@@ -185,15 +186,29 @@ async function handleBoardOn(req, res, { db }) {
   return done();
 }
 
+/** The create rule for a typed bot id. It can never yield the reserved voice id
+ * (a dot becomes a dash). */
+export function sanitizeBotId(raw) {
+  return String(raw || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
+}
+
+/** Bot Builder actions allowed on the Crow voice bot. Empty for now: a later
+ * PR adds the voice editor's own actions; every generic action is refused. */
+const VOICE_BOT_ACTIONS = new Set();
+
 export async function handleBotBuilderPost(req, res, { db }) {
   const b = req.body || {};
   const action = b.action;
+
+  if (isVoiceBotId(String(b.bot_id ?? "").trim()) && !VOICE_BOT_ACTIONS.has(action)) {
+    return res.redirectAfterPost("/dashboard/bot-builder?error=voice_bot_readonly");
+  }
 
   if (action === "board_on") return handleBoardOn(req, res, { db });
 
   if (action === "create") {
     const display = (b.display_name || "").trim();
-    const botId = (b.bot_id || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
+    const botId = sanitizeBotId(b.bot_id);
     const projectId = b.project_id ? Number(b.project_id) : null;
     const model = (b.model || "").trim();
     if (!botId || !display) return res.redirectAfterPost("/dashboard/bot-builder?error=name_required");

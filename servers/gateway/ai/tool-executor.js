@@ -20,6 +20,7 @@ import { sortedServers, sortedByName } from "../../shared/stable-order.js";
 import { connectedServers } from "../proxy.js";
 import { voiceCategoryFor } from "../../../scripts/pi-bots/ext_registry.mjs";
 import { createDbClient } from "../../db.js";
+import { isVoiceBotId } from "../../shared/voice-bot.js";
 import { CronExpressionParser } from "cron-parser";
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "../../../scripts/pi-bots/bot-jobs-schema.mjs";
 
@@ -379,6 +380,7 @@ export function createToolExecutor(opts = {}) {
     if (!botId) {
       return { result: "Error: crow_delegate needs a 'bot' (no bot is bound to this conversation)", isError: true };
     }
+    if (isVoiceBotId(botId)) return { result: `Error: '${botId}' cannot take background jobs`, isError: true };
     // deliver_to: explicit arg wins; else the caller's default (turn thread); else poll.
     let deliverTo = args && args.deliver_to != null ? args.deliver_to : defaultDeliverTo;
     if (deliverTo && typeof deliverTo === "string") {
@@ -441,6 +443,7 @@ export function createToolExecutor(opts = {}) {
     if (!cron) return { result: "Error: crow_schedule_bot requires a 'cron' expression", isError: true };
     const botId = (args && args.bot) || boundBotId;
     if (!botId) return { result: "Error: crow_schedule_bot needs a 'bot'", isError: true };
+    if (isVoiceBotId(botId)) return { result: `Error: '${botId}' cannot take background jobs`, isError: true };
     const nextRun = botcronNextRun(cron);
     if (!nextRun) return { result: `Error: invalid cron expression '${cron}'`, isError: true };
 

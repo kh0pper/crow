@@ -68,6 +68,7 @@ import { renderBotMarkdown } from "../../blog/renderer.js";
 import { redactErrorText } from "../perch-error-text.js";
 import { stripTrailingDates } from "../../shared/relative-dates.js";
 import { stripContextEcho } from "../voice/context-echo.js";
+import { CROW_VOICE_BOT_ID } from "../../shared/voice-bot.js";
 
 /**
  * A user message as the operator typed it: without the [Dates] line the engine appended (perch-interactive.js).
@@ -526,8 +527,8 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
     const db = createDbClient();
     try {
       const { rows } = await db.execute({
-        sql: "SELECT bot_id, display_name, definition, enabled FROM pi_bot_defs ORDER BY bot_id",
-        args: [],
+        sql: "SELECT bot_id, display_name, definition, enabled FROM pi_bot_defs WHERE bot_id != ? ORDER BY bot_id",
+        args: [CROW_VOICE_BOT_ID],
       });
       const engine = resolveEngineStatus();
       // Instance-wide truth, reported per card: whether the bot runtime is
@@ -568,8 +569,8 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
     const db = createDbClient();
     try {
       const { rows } = await db.execute({
-        sql: "SELECT bot_id, display_name, definition FROM pi_bot_defs ORDER BY bot_id",
-        args: [],
+        sql: "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE bot_id != ? ORDER BY bot_id",
+        args: [CROW_VOICE_BOT_ID],
       });
 
       const engine = resolveRoostEngine();

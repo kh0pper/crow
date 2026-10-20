@@ -17,6 +17,7 @@
  * names them like any ticked tool.
  */
 import { withArtifactsCompanions } from "./bot-world.mjs";
+import { isVoiceBotId, isVoiceBotDef } from "../../servers/shared/voice-bot.js";
 
 export const MIGRATION_KEY = "artifacts_companions_v1";
 
@@ -71,6 +72,7 @@ export async function migrateArtifactsCompanions(db, { log = (m) => console.log(
       let def;
       try { def = JSON.parse(r.definition || "{}"); } catch { continue; }
       if (!def || typeof def !== "object") continue;
+      if (isVoiceBotId(r.bot_id) || isVoiceBotDef(def)) continue; // the voice bot's tools are its own
       const res = await addCompanionsGuarded(def, { budget: await budgetFor(def) });
       if (res.refused) {
         out.refused.push(String(r.bot_id));

@@ -12,6 +12,7 @@ import { normalizeSkillName } from "../../scripts/pi-bots/skill_proposals.mjs";
 import { readdirSync } from "node:fs";
 import { getExposedCapabilities } from "./peer-exposure.js";
 import { getPeerManagedBots } from "./bot-management-exposure.js";
+import { CROW_VOICE_BOT_ID } from "../shared/voice-bot.js";
 
 /** Canonical server id for a core manifest category (crow-memory, etc.). */
 export function canonicalForCategory(category) {
@@ -96,8 +97,8 @@ function localSkills(crowHome) {
 async function localBots(db) {
   try {
     const { rows } = await db.execute({
-      sql: "SELECT bot_id, display_name, enabled, project_id, definition FROM pi_bot_defs ORDER BY bot_id",
-      args: [],
+      sql: "SELECT bot_id, display_name, enabled, project_id, definition FROM pi_bot_defs WHERE bot_id != ? ORDER BY bot_id",
+      args: [CROW_VOICE_BOT_ID],
     });
     return rows || [];
   } catch { return []; }

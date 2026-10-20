@@ -10,6 +10,7 @@
  * independent of any UI affordance.
  */
 import { readSetting } from "./dashboard/settings/registry.js";
+import { isVoiceBotId } from "../shared/voice-bot.js";
 
 /** feature_flags key (boolean master switch). */
 export const REMOTE_BOT_MGMT_FLAG = "remote_bot_management";
@@ -47,6 +48,6 @@ export async function getPeerManagedBots(db) {
 
 /** Authoritative per-call check. */
 export async function botPeerManageable(db, botId) {
-  if (typeof botId !== "string" || !botId) return false;
+  if (typeof botId !== "string" || !botId || isVoiceBotId(botId)) return false;
   return (await getPeerManagedBots(db)).has(botId);
 }

@@ -60,6 +60,7 @@ import { resolveBoardDef, isTerminal } from "./board-defs.js";
 import { annotateAvailability } from "../model-availability.js";
 import { providerModelListWarm, pickerModels, loadPiProviderNames, referencedModelKeys } from "../perch-model-catalog.js";
 import { renderBotMarkdown } from "../../blog/renderer.js";
+import { isVoiceBotId } from "../../shared/voice-bot.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -336,7 +337,7 @@ async function dispatchCard(ctx, { row, getEng, botId, cardId, note, skipProvena
  * no_board. */
 async function loadGiveTarget(db, botId) {
   const row = await loadBotRow(db, botId);
-  if (!row || !Number(row.enabled)) throw routeFail("bot unavailable", "bot_unavailable", 400);
+  if (!row || !Number(row.enabled) || isVoiceBotId(row.bot_id)) throw routeFail("bot unavailable", "bot_unavailable", 400);
   if (boardState(row).state !== "on") throw routeFail("bot has no board", "no_board", 409);
   try {
     await assertProjectExists(db, Number(row.project_id));

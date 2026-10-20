@@ -40,3 +40,9 @@ test("the reserved id is exact", () => {
   for (const x of ["crow-voice", "", null, undefined, "CROW.VOICE"]) assert.equal(isVoiceBotId(x), false);
   assert.equal(CROW_VOICE_BOT_ID, "crow.voice");
 });
+test("Bot Builder's create rule can never mint the reserved id", async () => {
+  const { sanitizeBotId } = await import("../servers/gateway/dashboard/panels/bot-builder/api-handlers.js");
+  assert.equal(sanitizeBotId("crow.voice"), "crow-voice");
+  assert.notEqual(sanitizeBotId("crow.voice"), CROW_VOICE_BOT_ID);
+  assert.equal(sanitizeBotId("  My Bot! "), "my-bot-");
+});

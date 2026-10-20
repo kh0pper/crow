@@ -35,6 +35,7 @@ import { csrfInput } from "../../shared/csrf.js";
 import { t, fill } from "../../shared/i18n.js";
 import { readSetting, writeSetting } from "../../settings/registry.js";
 import { emitBotDefsChanged } from "./defs-changed.js";
+import { isVoiceBotId } from "../../../../shared/voice-bot.js";
 
 async function count(db, sql, args) {
   try {
@@ -135,6 +136,7 @@ export async function handleDeleteConfirm(req, res, { db }) {
   const b = req.body || {};
   const botId = (b.bot_id || "").trim();
   if (!botId) return res.redirectAfterPost("/dashboard/bot-builder");
+  if (isVoiceBotId(botId)) return res.redirectAfterPost("/dashboard/bot-builder?error=voice_bot_permanent");
   let existed = false;
   try {
     existed = !!(await db.execute({ sql: "SELECT 1 FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0];
