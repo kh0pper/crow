@@ -671,28 +671,30 @@ test("board_notify_decisions pushes once per batch; the second call pushes nothi
   await client.close();
 });
 
-test("board_notify_decisions: a bot notifies only its own batch (403 for another bot), a session can, and a notified batch reports already_notified", async () => {
+test("board_notify_decisions: batches are per caller; another bot or the session never pushes your cards", async () => {
   const owner = await connectClient("/board/mcp", state.boardToken, signedBoard("bot-owner"));
   const other = await connectClient("/board/mcp", state.boardToken, signedBoard("bot-other"));
   const session = await connectClient("/board/mcp", state.localToken);
   const unattributed = await connectClient("/board/mcp", state.boardToken);
   try {
-    await owner.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, "mcp-batch-own") });
-    const denied = await other.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-own" } });
-    assert.equal(denied.isError, true);
-    assert.match(denied.content[0].text, /^\[403 forbidden\]/);
-    const deniedAnon = await unattributed.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-own" } });
-    assert.match(deniedAnon.content[0].text, /^\[403 forbidden\]/);
+    // both bots use the same batch name; neither is refused
+    const o = payload(await owner.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, "mcp-batch-own") }));
+    const x = payload(await other.callTool({ name: "board_ask_decision", arguments: decisionArgs(2, "mcp-batch-own") }));
+    assert.equal(o.deduped, false);
+    assert.equal(x.deduped, false);
 
-    const pushed = payload(await owner.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-own" } }));
-    assert.deepEqual(pushed, { pushed: true, count: 1 });
-    const again = payload(await session.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-own" } }));
-    assert.deepEqual(again, { pushed: false, count: 0, reason: "already_notified" });
+    for (const c of [session, unattributed]) {
+      assert.deepEqual(payload(await c.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-own" } })), { pushed: false, count: 0 });
+    }
+    assert.deepEqual(payload(await owner.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-own" } })), { pushed: true, count: 1 });
+    const cardOf = async (id) => JSON.parse((await state.tdb.execute({ sql: "SELECT data_json FROM tasks_items WHERE id=?", args: [id] })).rows[0].data_json).decision;
+    assert.ok((await cardOf(o.id)).notified_at);
+    assert.equal((await cardOf(x.id)).notified_at, undefined, "the other bot's card was not pushed");
+    assert.deepEqual(payload(await owner.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-own" } })), { pushed: false, count: 0, reason: "already_notified" });
 
-    // an unattributed bot can notify its own unattributed batch
+    // an unattributed bot has its own namespace
     await unattributed.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, "mcp-batch-anon") });
-    const anon = payload(await unattributed.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-anon" } }));
-    assert.deepEqual(anon, { pushed: true, count: 1 });
+    assert.deepEqual(payload(await unattributed.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-anon" } })), { pushed: true, count: 1 });
   } finally {
     for (const c of [owner, other, session, unattributed]) await c.close();
   }
