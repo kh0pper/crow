@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.net.Uri;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
@@ -15,12 +16,15 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.provider.DocumentsContract;
+import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
+import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
@@ -28,6 +32,7 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.widget.FrameLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
@@ -46,11 +51,25 @@ import androidx.work.WorkManager;
 
 import org.json.JSONObject;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.UUID;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
+
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
+import okhttp3.ResponseBody;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -93,6 +112,47 @@ public class MainActivity extends AppCompatActivity {
      * Each MainActivity instance runs its own watcher (a second one is a no-op).
      */
     private JavaScriptReplyProxy audioReply;
+
+    // Keychain Export fix 2026-10-20: the app had no DownloadListener, so every download the
+    // dashboard started vanished. Two ways in, both ending in the system "Save to" picker
+    // (Storage Access Framework: the user picks the place, no storage permission):
+    //  - window.CrowDownloadPort, injected only into the paired gateway origin and answering
+    //    only its MAIN frame (extension UIs are framed on that origin), takes
+    //    {"op":"save","id","name","mime","text"|"b64"} and replies
+    //    {"type":"download","id","ok","reason","name"} on the frame's own reply proxy;
+    //  - the DownloadListener re-fetches an attachment on the paired origin inside the app with
+    //    the WebView's session cookie (never handed to the system download manager), and saves
+    //    it only when the response is still a 2xx attachment. Other http(s) downloads open in
+    //    the system browser without a cookie; blob:/data:/anything else is refused.
+    static final String DOWNLOAD_PORT_NAME = "CrowDownloadPort";
+    private static final Pattern DOWNLOAD_ID = Pattern.compile("^[A-Za-z0-9]{1,32}$");
+    private static final long MAX_LISTENER_BYTES = 64L * 1024 * 1024;
+    /** The allowedOriginRule currently registered for DOWNLOAD_PORT_NAME, or null. */
+    private String downloadPortRule;
+    private final ExecutorService downloadExecutor = Executors.newSingleThreadExecutor();
+    /** The one save waiting for the picker, or null. UI thread only. */
+    private PendingSave pendingSave;
+
+    /** A port save (id + reply + bytes) or a listener save (url + userAgent). */
+    private static final class PendingSave {
+        final String id;
+        final JavaScriptReplyProxy reply;
+        final byte[] bytes;
+        final String url;
+        final String userAgent;
+
+        PendingSave(String id, JavaScriptReplyProxy reply, byte[] bytes, String url, String userAgent) {
+            this.id = id;
+            this.reply = reply;
+            this.bytes = bytes;
+            this.url = url;
+            this.userAgent = userAgent;
+        }
+    }
+
+    private final ActivityResultLauncher<Intent> createDocumentLauncher =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),
+                    result -> onCreateDocumentResult(result.getResultCode(), result.getData()));
 
     /** Where a steps result goes: the reply proxy (port) or evaluateJavascript (legacy). */
     private interface StepsReply {
@@ -375,6 +435,7 @@ public class MainActivity extends AppCompatActivity {
 
         webView.setWebViewClient(new CrowWebViewClient(this));
         webView.setWebChromeClient(new CrowWebChromeClient(this));
+        webView.setDownloadListener(this::onWebViewDownload);
 
         // Expose native features to the Crow dashboard as `window.Crow.*`.
         // Panels check for these before attempting features that need
@@ -391,6 +452,7 @@ public class MainActivity extends AppCompatActivity {
             webView.addJavascriptInterface(new CrowBridge(), "Crow");
             refreshStepsPort();
             refreshAudioPort();
+            refreshDownloadPort();
         } else {
             webView.addJavascriptInterface(new CrowBridgeLegacySteps(), "Crow");
         }
@@ -463,6 +525,227 @@ public class MainActivity extends AppCompatActivity {
         if (audioWatcher == null) return;
         if (op == AudioModeGuard.PortOp.CAPTURE_STARTING) audioWatcher.noteCaptureStarting();
         else if (op == AudioModeGuard.PortOp.CAPTURE_ENDED) audioWatcher.requestCheck("page", true);
+    }
+
+    /** Keychain Export fix 2026-10-20: (re)register CrowDownloadPort for the CURRENT gateway origin (see refreshStepsPort). */
+    private void refreshDownloadPort() {
+        if (!stepsUsePort || webView == null) return;
+        String rule = OriginCheck.allowedOriginRule(getGatewayUrl());
+        if (rule == null ? downloadPortRule == null : rule.equals(downloadPortRule)) return;
+        if (downloadPortRule != null) {
+            WebViewCompat.removeWebMessageListener(webView, DOWNLOAD_PORT_NAME);
+            downloadPortRule = null;
+        }
+        if (rule == null) return;
+        try {
+            WebViewCompat.addWebMessageListener(webView, DOWNLOAD_PORT_NAME,
+                    Collections.singleton(rule), this::onDownloadMessage);
+            downloadPortRule = rule;
+        } catch (IllegalArgumentException e) {
+            // A rule WebView rejects: no save bridge (fail closed); the page then says so.
+        }
+    }
+
+    /**
+     * CrowDownloadPort messages, UI thread. Main frame only, origin re-checked against the
+     * saved gateway URL; anything that does not validate is answered "invalid" (when it
+     * carried a usable id) and otherwise ignored. One save at a time.
+     */
+    private void onDownloadMessage(WebView view, WebMessageCompat message, Uri sourceOrigin,
+                                   boolean isMainFrame, JavaScriptReplyProxy proxy) {
+        if (!isMainFrame || sourceOrigin == null || proxy == null) return;
+        if (!OriginCheck.sameOrigin(sourceOrigin.toString(), getGatewayUrl())) return;
+        if (message == null || message.getType() != WebMessageCompat.TYPE_STRING) return;
+        String data = message.getData();
+        if (data == null || data.length() > DownloadPolicy.MAX_MESSAGE_CHARS + 4096) return;
+        Map<String, Object> fields = new HashMap<>();
+        try {
+            JSONObject o = new JSONObject(data);
+            Iterator<String> keys = o.keys();
+            while (keys.hasNext()) {
+                String k = keys.next();
+                Object v = o.opt(k);
+                fields.put(k, v == JSONObject.NULL ? null : v);
+            }
+        } catch (Exception e) {
+            return;
+        }
+        DownloadPolicy.SaveRequest req = DownloadPolicy.validateSave(fields);
+        if (req == null) {
+            Object idv = fields.get("id");
+            if (idv instanceof String && DOWNLOAD_ID.matcher((String) idv).matches()) {
+                finishSave(new PendingSave((String) idv, proxy, null, null, null), false, "invalid", null);
+            }
+            return;
+        }
+        beginSave(new PendingSave(req.id, proxy, req.bytes, null, null), req.name, req.mime);
+    }
+
+    /** The WebView's DownloadListener (UI thread). */
+    private void onWebViewDownload(String url, String userAgent, String contentDisposition,
+                                   String mimetype, long contentLength) {
+        switch (DownloadPolicy.decide(url, getGatewayUrl())) {
+            case SAVE_WITH_SESSION:
+                beginSave(new PendingSave(null, null, null, url, userAgent),
+                        DownloadPolicy.fileName(contentDisposition, url), DownloadPolicy.mime(mimetype));
+                break;
+            case OPEN_EXTERNAL:
+                try {
+                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                } catch (Exception e) {
+                    toast(R.string.download_cannot_save);
+                }
+                break;
+            default:
+                toast(R.string.download_cannot_save);
+                break;
+        }
+    }
+
+    /** UI thread. Opens the system "Save to" picker for one pending save. */
+    private void beginSave(PendingSave p, String name, String mime) {
+        if (pendingSave != null) {
+            finishSave(p, false, "busy", null);
+            return;
+        }
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType(mime);
+        i.putExtra(Intent.EXTRA_TITLE, name);
+        pendingSave = p;
+        try {
+            createDocumentLauncher.launch(i);
+        } catch (Exception e) {
+            pendingSave = null;
+            finishSave(p, false, "failed", null);
+        }
+    }
+
+    /**
+     * UI thread. The picker created an EMPTY document before returning: it is deleted on every
+     * path that does not fill it, including a result that arrives after the Activity was
+     * recreated (the payload is gone with the old instance).
+     */
+    private void onCreateDocumentResult(int resultCode, Intent data) {
+        PendingSave p = pendingSave;
+        pendingSave = null;
+        Uri uri = resultCode == Activity.RESULT_OK && data != null ? data.getData() : null;
+        if (p == null) {
+            if (uri != null) deleteQuietly(uri);
+            return;
+        }
+        if (uri == null) {
+            finishSave(p, false, "cancelled", null);
+            return;
+        }
+        String cookie = null;
+        if (p.url != null) {
+            try {
+                cookie = CookieManager.getInstance().getCookie(p.url);
+            } catch (Exception ignored) { }
+        }
+        final String sessionCookie = cookie;
+        downloadExecutor.execute(() -> {
+            String reason;
+            try {
+                if (p.bytes != null) {
+                    reason = writeAll(uri, new ByteArrayInputStream(p.bytes), DownloadPolicy.MAX_BYTES) ? null : "failed";
+                } else {
+                    reason = fetchInto(p.url, p.userAgent, sessionCookie, uri);
+                }
+            } catch (Exception e) {
+                reason = "failed";
+            }
+            if (reason != null) deleteQuietly(uri);
+            final String why = reason;
+            final String name = reason == null ? displayName(uri) : null;
+            runOnUiThread(() -> finishSave(p, why == null, why == null ? "saved" : why, name));
+        });
+    }
+
+    /** Background thread. Null on success, else a reason. The cookie never follows a redirect. */
+    private String fetchInto(String url, String userAgent, String cookie, Uri uri) throws IOException {
+        OkHttpClient client = new OkHttpClient.Builder()
+                .followRedirects(false)
+                .followSslRedirects(false)
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(60, TimeUnit.SECONDS)
+                .build();
+        Request.Builder rb = new Request.Builder().url(url).get();
+        if (cookie != null && !cookie.isEmpty()) rb.header("Cookie", cookie);
+        if (userAgent != null && !userAgent.isEmpty()) rb.header("User-Agent", userAgent);
+        try (Response r = client.newCall(rb.build()).execute()) {
+            if (!DownloadPolicy.isAttachment(r.code(), r.header("Content-Disposition"))) return "not_attachment";
+            ResponseBody body = r.body();
+            if (body == null) return "failed";
+            return writeAll(uri, body.byteStream(), MAX_LISTENER_BYTES) ? null : "too_big";
+        }
+    }
+
+    /** Background thread. False when the stream ran past the cap. */
+    private boolean writeAll(Uri uri, InputStream in, long cap) throws IOException {
+        OutputStream out;
+        try {
+            out = getContentResolver().openOutputStream(uri, "wt");
+        } catch (Exception e) {
+            out = getContentResolver().openOutputStream(uri, "w"); // a provider without truncate mode
+        }
+        if (out == null) throw new IOException("no output stream");
+        try (OutputStream o = out; InputStream i = in) {
+            byte[] buf = new byte[16384];
+            long total = 0;
+            int n;
+            while ((n = i.read(buf)) > 0) {
+                total += n;
+                if (total > cap) return false;
+                o.write(buf, 0, n);
+            }
+        }
+        return true;
+    }
+
+    private String displayName(Uri uri) {
+        try (Cursor c = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) return DownloadPolicy.sanitize(c.getString(0));
+        } catch (Exception ignored) { }
+        return null;
+    }
+
+    private void deleteQuietly(Uri uri) {
+        try {
+            DocumentsContract.deleteDocument(getContentResolver(), uri);
+        } catch (Exception ignored) { }
+    }
+
+    /** UI thread. A port save answers its frame; a listener save shows a Toast. */
+    private void finishSave(PendingSave p, boolean ok, String reason, String name) {
+        if (p.reply != null) {
+            try {
+                JSONObject o = new JSONObject();
+                o.put("type", "download");
+                o.put("id", p.id);
+                o.put("ok", ok);
+                o.put("reason", reason);
+                if (name != null) o.put("name", name);
+                p.reply.postMessage(o.toString());
+            } catch (Exception ignored) {
+                // the frame is gone
+            }
+            return;
+        }
+        if (ok) {
+            Toast.makeText(getApplicationContext(), name != null ? getString(R.string.download_saved_named, name) : getString(R.string.download_saved), Toast.LENGTH_SHORT).show();
+        } else if ("not_attachment".equals(reason)) {
+            toast(R.string.download_cannot_save);
+        } else if ("busy".equals(reason)) {
+            toast(R.string.download_busy);
+        } else if (!"cancelled".equals(reason)) {
+            toast(R.string.download_failed);
+        }
+    }
+
+    private void toast(int res) {
+        Toast.makeText(getApplicationContext(), res, Toast.LENGTH_LONG).show();
     }
 
     /** One debug line to the page frame that last spoke on CrowAudioPort, if any. */
@@ -612,6 +895,16 @@ public class MainActivity extends AppCompatActivity {
          */
         @JavascriptInterface
         public String stepsStatus() {
+            return "unavailable";
+        }
+
+        /**
+         * Keychain Export fix 2026-10-20: saving goes through window.CrowDownloadPort (paired
+         * origin, main frame). Here, on every page, a constant so a page can tell "this app can
+         * save, but not from here" from an app too old to save at all.
+         */
+        @JavascriptInterface
+        public String downloadStatus() {
             return "unavailable";
         }
     }
@@ -892,6 +1185,7 @@ public class MainActivity extends AppCompatActivity {
         // listener's allowed origin with it (security fix 2026-10-04).
         refreshStepsPort();
         refreshAudioPort();
+        refreshDownloadPort();
         if (audioWatcher != null) audioWatcher.requestCheck("resume", false);
         // Restart ntfy service (handles returning from settings with new gateway URL)
         startNtfyService();
@@ -907,6 +1201,7 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        downloadExecutor.shutdown(); // a write in flight finishes; nothing new starts
         if (audioWatcher != null) {
             audioWatcher.stop();
             audioWatcher = null;
