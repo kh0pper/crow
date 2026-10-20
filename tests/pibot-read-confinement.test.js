@@ -484,47 +484,70 @@ test("federation PATCH validates permission_policy.read_paths like the Bot Build
 });
 
 // ---- the bot's own workspace, for pi-lab's bash exemption (2026-10-20) --------
+// Only an INTERACTIVE (Perch) child of a project-bound bot gets the keys;
+// channel and job children never do, and no bot def can set them.
 
-test("workspace env: a project bot's child gets its realpath'd workspace, the projects root and its id; a project-less bot gets none", async () => {
+const WS_KEYS = ["PI_BOT_WORKSPACE", "PI_BOT_PROJECTS_ROOT", "PI_BOT_ID"];
+
+async function directSpawn(leg, opts) {
+  const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
+  const world = mkdtempSync(join(dir, "ws-world-"));
+  const def = Object.assign({ tools: { pi_builtin: ["read"] }, permission_policy: { bash: "deny", write_paths: [] } }, opts.def || {});
+  const resolved = { provider: "stub", model: "m1", key: "stub/m1" };
+  arm(leg);
+  const pi = new PiRpc(Object.assign({ def, sessionDir: world, resolved, nodeBin: process.execPath, cliPath: STUB_PI, mcpDelivery: "fd", mcpConfig: {} }, opts, { def }));
+  try { await pi.getState(); } finally { await pi.close(); }
+  return readCap();
+}
+
+test("workspace env: an interactive (Perch) child of a project bot gets its realpath'd workspace, the projects root and its id", async () => {
+  const cap = await directSpawn("ws-perch", { extraEnv: { PI_BOT_INTERACTIVE: "1" }, projectWorkspaceDir: W1, botId: "bota" });
+  assert.equal(cap.env.PI_BOT_WORKSPACE, realpathSync(W1));
+  assert.equal(cap.env.PI_BOT_PROJECTS_ROOT, realpathSync(join(dir, "projects")));
+  assert.equal(cap.env.PI_BOT_ID, "bota");
+});
+
+test("workspace env: an interactive child without a project gets none", async () => {
+  const cap = await directSpawn("ws-perch-noproj", { extraEnv: { PI_BOT_INTERACTIVE: "1" }, projectWorkspaceDir: null, botId: "botb" });
+  for (const k of WS_KEYS) assert.equal(cap.env[k], undefined, k);
+});
+
+test("workspace env: channel turns never get it, even for a project bot", async () => {
   process.env.PIBOT_MCP_CONFIG_DELIVERY = "fd";
   const a = await channelTurn("bota", "ws-a");
-  const b = await channelTurn("botb", "ws-b");
-  assert.equal(a.env.PI_BOT_WORKSPACE, realpathSync(W1));
-  assert.equal(a.env.PI_BOT_PROJECTS_ROOT, realpathSync(join(dir, "projects")));
-  assert.equal(a.env.PI_BOT_ID, "bota");
-  for (const k of ["PI_BOT_WORKSPACE", "PI_BOT_PROJECTS_ROOT", "PI_BOT_ID"]) {
-    assert.equal(b.env[k], undefined, "no project => no " + k);
-  }
+  for (const k of WS_KEYS) assert.equal(a.env[k], undefined, "channel turn: no " + k);
 });
 
-test("workspace env: a bot def's spawn_env cannot set or point the workspace keys", async () => {
-  process.env.PIBOT_MCP_CONFIG_DELIVERY = "fd";
-  const c = new Database(DB_FILE);
-  const def = baseDef([]);
-  def.spawn_env = { PI_BOT_WORKSPACE: "/", PI_BOT_PROJECTS_ROOT: "/", PI_BOT_ID: "bota" };
-  c.prepare("UPDATE pi_bot_defs SET definition=? WHERE bot_id='botc'").run(JSON.stringify(def));
-  c.prepare("UPDATE pi_bot_defs SET definition=? WHERE bot_id='botb'").run(JSON.stringify(def));
-  c.close();
-  try {
-    const cc = await channelTurn("botc", "ws-c-spawnenv");
-    assert.equal(cc.env.PI_BOT_WORKSPACE, realpathSync(W2), "the bridge's value, never the def's");
-    assert.equal(cc.env.PI_BOT_ID, "botc");
-    const bb = await channelTurn("botb", "ws-b-spawnenv");
-    assert.equal(bb.env.PI_BOT_WORKSPACE, undefined, "a project-less bot cannot grant itself one");
-    assert.equal(bb.env.PI_BOT_ID, undefined);
-  } finally {
-    const c2 = new Database(DB_FILE);
-    c2.prepare("UPDATE pi_bot_defs SET definition=? WHERE bot_id IN ('botb','botc')").run(JSON.stringify(baseDef([])));
-    c2.close();
-  }
-});
-
-test("workspace env: a background job's child carries the same workspace keys", async () => {
+test("workspace env: background jobs never get it", async () => {
   process.env.PIBOT_MCP_CONFIG_DELIVERY = "fd";
   arm("job-ws");
   const r = await runJob({ job_id: "job-ws", bot_id: "bota", goal: "do it", escalate: 0 }, { log: () => {} });
   assert.equal(r.result, "ok");
   const cap = readCap();
-  assert.equal(cap.env.PI_BOT_WORKSPACE, realpathSync(W1));
-  assert.equal(cap.env.PI_BOT_ID, "bota");
+  for (const k of WS_KEYS) assert.equal(cap.env[k], undefined, "job: no " + k);
+});
+
+test("workspace env: a bot def's spawn_env can neither set the keys nor make a child interactive", async () => {
+  const spawn_env = { PI_BOT_WORKSPACE: "/", PI_BOT_PROJECTS_ROOT: "/", PI_BOT_ID: "bota", PI_BOT_INTERACTIVE: "1" };
+  const chan = await directSpawn("ws-spawnenv-chan", { def: { spawn_env }, projectWorkspaceDir: W1, botId: "bota" });
+  for (const k of WS_KEYS) assert.equal(chan.env[k], undefined, "non-interactive: no " + k);
+  assert.equal(chan.env.PI_BOT_INTERACTIVE, undefined, "spawn_env cannot flip a child interactive");
+  const perch = await directSpawn("ws-spawnenv-perch", { def: { spawn_env }, extraEnv: { PI_BOT_INTERACTIVE: "1" }, projectWorkspaceDir: W1, botId: "bota" });
+  assert.equal(perch.env.PI_BOT_WORKSPACE, realpathSync(W1), "the bridge's value, never the def's");
+  assert.equal(perch.env.PI_BOT_PROJECTS_ROOT, realpathSync(join(dir, "projects")));
+});
+
+test("workspace env: an inherited value (an operator env allowlist) never survives; only the computed one does", async () => {
+  process.env.CROW_BOT_ENV_ALLOW = "PI_BOT_WORKSPACE,PI_BOT_PROJECTS_ROOT,PI_BOT_ID";
+  process.env.PI_BOT_WORKSPACE = "/"; process.env.PI_BOT_PROJECTS_ROOT = "/"; process.env.PI_BOT_ID = "bota";
+  try {
+    const chan = await directSpawn("ws-inherit-chan", { projectWorkspaceDir: W1, botId: "bota" });
+    for (const k of WS_KEYS) assert.equal(chan.env[k], undefined, "non-interactive: inherited " + k + " dropped");
+    const noProj = await directSpawn("ws-inherit-noproj", { extraEnv: { PI_BOT_INTERACTIVE: "1" }, projectWorkspaceDir: null, botId: "bota" });
+    for (const k of WS_KEYS) assert.equal(noProj.env[k], undefined, "fail-closed {}: inherited " + k + " dropped");
+    const perch = await directSpawn("ws-inherit-perch", { extraEnv: { PI_BOT_INTERACTIVE: "1" }, projectWorkspaceDir: W1, botId: "bota" });
+    assert.equal(perch.env.PI_BOT_WORKSPACE, realpathSync(W1));
+  } finally {
+    for (const k of ["CROW_BOT_ENV_ALLOW", "PI_BOT_WORKSPACE", "PI_BOT_PROJECTS_ROOT", "PI_BOT_ID"]) delete process.env[k];
+  }
 });

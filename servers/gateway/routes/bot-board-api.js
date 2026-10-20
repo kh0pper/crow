@@ -805,7 +805,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       const eng = getInteractiveEngine({ createIfMissing: false });
       if (eng && typeof eng.waitingOnCard === "function" && eng.waitingOnCard(id)) {
         return res.status(409).json({
-          reason: "a bot session on this card is waiting for you: answer or stop it in Perch first",
+          reason: "a bot session on this card is waiting for you: answer it, send it a message or stop it in Perch first",
           code: "waiting_on_operator",
         });
       }

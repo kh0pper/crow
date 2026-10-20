@@ -120,6 +120,8 @@ function makeBridge() {
       };
     },
     async warmModel() {}, async meterTurn() { return { recorded: true }; }, appendAudit() {},
+    // card-bound first turns compose a brief (cardBriefBlock is DB-free)
+    projectContextBlock: () => "", planForCard: () => null, cardStatus: () => "todo", boardVocab: () => ({ statuses: ["todo", "done"], terminals: ["done"] }), cardText: () => "",
   };
 }
 
@@ -296,9 +298,10 @@ test("after expiry the stall watchdog re-arms (a stale card no longer pauses it)
 test("a new message clears the expired card", async () => {
   const { engine, bridge, clock } = makeEngine();
   const { s, pi } = await liveSession(engine, bridge, "bot-clear");
-  pi.emit(confirm("c1", "x", { timeout: 1000 })); await tick();
-  await clock.advance(1000);
-  pi.lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }] });
+  pi.emit(confirm("c1", "x")); await tick();
+  pi.emit({ type: "extension_ui_request", id: "pc1", method: "notify", message: 'crow-state:{"kind":"ask-parked","reason":"timeout"}' });
+  await tick();
+  pi.lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [], stopReason: "aborted" }] });
   await tick();
   assert.equal((await engine.get(s.sessionId)).pendingUi.expired, true);
   await engine.message(s.sessionId, "carry on");
@@ -368,10 +371,12 @@ test("a reconnecting client is replayed the expired card, marked expired", async
 test("abort clears an expired card (and is not refused as no_turn)", async () => {
   const { engine, bridge, clock } = makeEngine();
   const { s, pi } = await liveSession(engine, bridge, "bot-abort");
-  pi.emit(confirm("ab1", "x", { timeout: 3000 })); await tick();
-  await clock.advance(3000);
-  pi.lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "moved on" }] }] });
+  pi.emit(confirm("ab1", "x")); await tick();
+  pi.emit({ type: "extension_ui_request", id: "pab", method: "notify", message: 'crow-state:{"kind":"ask-parked","reason":"timeout"}' });
   await tick();
+  pi.lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [], stopReason: "aborted" }] });
+  await tick();
+  assert.equal((await engine.get(s.sessionId)).pendingUi.expired, true, "parked: still waiting");
   await engine.abort(s.sessionId);
   await tick();
   assert.equal((await engine.get(s.sessionId)).pendingUi, null);
@@ -434,4 +439,54 @@ test("an ask_user question aborted by the operator (pi answers 'Question cancell
   const snap = await engine.get(s.sessionId);
   assert.equal(snap.pendingUi, null, "no live and no expired card");
   await assert.rejects(() => engine.answer(s.sessionId, "au1", { value: "a" }), (e) => e.code === "no_such_request", "a late answer is refused (not expired: it was cancelled)");
+});
+
+test("a re-push held back by a snooze is retried when the snooze ends, if a card still waits", async () => {
+  const { engine, bridge, clock, pushes } = makeEngine({ PERCH_ATTENTION_REPUSH_MS: "600000" });
+  const { s, pi } = await liveSession(engine, bridge, "bot-snooze");
+  pi.emit(confirm("sz1", "one")); await tick();
+  const until = new Date(clock.now() + 3_600_000).toISOString().replace("T", " ").slice(0, 19);
+  const c = new Database(ENGINE_DB_FILE);
+  c.prepare("UPDATE notifications SET snoozed_until=? WHERE action_url=?").run(until, "/dashboard/bot-board#bird=" + s.sessionId);
+  c.close();
+  pi.emit(confirm("sz2", "two")); await tick();
+  await clock.advance(600_000);
+  assert.equal(pushes.length, 1, "snoozed: no reminder at the window");
+  await clock.advance(3_000_000);
+  assert.equal(pushes.length, 2, "the reminder goes out when the snooze ends");
+});
+
+test("a child that dies with a question open closes the group: the next question pushes", async () => {
+  const { engine, bridge, pushes } = makeEngine();
+  const { s, pi } = await liveSession(engine, bridge, "bot-dies");
+  pi.emit(confirm("d1", "one")); await tick();
+  pi.exit(1); await tick(20);
+  assert.equal(rows(s.sessionId)[0].is_read, 1, "the dead question's group is closed");
+  assert.equal(pushes.filter((p) => /needs you/.test(p.title)).length, 1);
+});
+
+test("after an old pi-lab's 'no', a normally finished turn leaves nothing waiting, so the card no longer blocks the board", async () => {
+  const { engine, bridge, clock } = makeEngine();
+  const { s, pi } = await liveSession(engine, bridge, "bot-card-end", { cardId: 77 });
+  pi.emit(confirm("ce1", "x", { timeout: 3000 })); await tick();
+  await clock.advance(3000);
+  assert.equal(engine.waitingOnCard(77), true, "expired, child awake, turn still running");
+  pi.lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "did something else" }] }] });
+  await tick();
+  assert.equal(engine.waitingOnCard(77), false);
+  assert.equal((await engine.get(s.sessionId)).pendingUi, null);
+  await assert.rejects(() => engine.answer(s.sessionId, "ce1", { confirmed: true }), (e) => e.code === "request_expired", "a late answer is still refused with the reason");
+});
+
+test("a park signal that expires no card does not silence the turn's end", async () => {
+  const { engine, bridge } = makeEngine();
+  const { s, pi } = await liveSession(engine, bridge, "bot-forged-park");
+  const frames = [];
+  await engine.subscribe(s.sessionId, (f) => frames.push(f));
+  pi.emit({ type: "extension_ui_request", id: "fp", method: "notify", message: 'crow-state:{"kind":"ask-parked","reason":"timeout"}' });
+  await tick();
+  pi.lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "the real reply" }] }] });
+  await tick();
+  assert.ok(frames.some((f) => f.type === "reply" && f.text === "the real reply"), "the reply still reaches the operator");
+  assert.ok(!frames.some((f) => f.type === "parked"));
 });

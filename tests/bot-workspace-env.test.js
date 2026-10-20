@@ -82,6 +82,6 @@ test("a bot id outside the plain charset yields nothing", () => {
   for (const bad of ["", "../x", "a/b", ".hidden", "-x", "a b", "a\nb", "x".repeat(65), null, 7]) {
     assert.deepEqual(botWorkspaceEnv({ workspaceDir: ws, projectsRoot: root, botId: bad }), {}, String(bad));
   }
-  assert.ok(BOT_ID_RE.test("grackle-assistant"));
+  assert.ok(BOT_ID_RE.test("alex-assistant"));
   assert.ok(BOT_ID_RE.test("crow.glasses_2"));
 });

@@ -17,6 +17,9 @@
  * engine-reserved (PI_BOT_ prefix): the bridge strips them from a bot def's
  * spawn_env, so a bot can never choose its own workspace.
  *
+ * Interactive (Perch) children only: the bridge decides that, and drops any
+ * inherited copy of these keys first. pi-lab keeps `<workspace>/bots/**`
+ * (every bot's engine world root, its own included) outside the exemption.
  * The interface is written down in the private engineering notes (the
  * pi-lab ask-timeout contract, 2026-10-20).
  */
@@ -24,6 +27,9 @@ import { realpathSync, statSync } from "node:fs";
 import { isAbsolute, sep } from "node:path";
 
 export const BOT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+
+/** The keys this module may set; the bridge drops any inherited copy first. */
+export const BOT_WORKSPACE_KEYS = Object.freeze(["PI_BOT_WORKSPACE", "PI_BOT_PROJECTS_ROOT", "PI_BOT_ID"]);
 
 function realDir(p) {
   if (typeof p !== "string" || !p || !isAbsolute(p)) return null;

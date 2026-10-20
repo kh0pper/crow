@@ -57,7 +57,7 @@ import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 import { buildBotWorld, prepareSpawn } from "./bot-world.mjs";
 import { runSkillReview } from "./skill_review.mjs";
 import { botsDbPath, tasksDbPath as resolveTasksDbPath, resolveSqlitePath, botsProjectsRoot } from "./instance-paths.mjs";
-import { botWorkspaceEnv } from "./bot-workspace-env.mjs";
+import { botWorkspaceEnv, BOT_WORKSPACE_KEYS } from "./bot-workspace-env.mjs";
 import { remoteServersForBot, parseRemoteInvocationFlag, remoteBlockName } from "./remote-blocks.mjs";
 import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
@@ -423,17 +423,25 @@ export class PiRpc {
         // above, so a def can never point pi at a file of its choosing.
         PI_BOT_MCP_CONFIG: join(sessionDir, ".mcp.json"),
         PI_BOT_PERMISSION_POLICY: JSON.stringify(piPolicy) },
-      // The bot's own project workspace (PI_BOT_WORKSPACE / _PROJECTS_ROOT /
-      // _ID) for pi-lab's bash check: commands inside it are not "sensitive"
-      // just for sitting under the instance's data dir. Engine-reserved keys,
-      // stripped from def.spawn_env above; {} (no exemption) unless the folder
-      // really is a directory strictly under this instance's projects root.
-      botWorkspaceEnv({ workspaceDir: opts.projectWorkspaceDir || null, projectsRoot: botsProjectsRoot(), botId: opts.botId || null }),
       spawnEnv,
       // C-12: the interactive engine's per-session overrides (e.g.
       // PI_BOT_INTERACTIVE:"1") — merged LAST so they win over both the
       // computed defaults above and the (already-stripped) def.spawn_env.
       opts.extraEnv || {});
+    // The bot's own project workspace (PI_BOT_WORKSPACE / _PROJECTS_ROOT /
+    // _ID) for pi-lab's bash check: commands inside it are not "sensitive"
+    // just for sitting under the instance's data dir. INTERACTIVE (Perch)
+    // children only, where an operator is present: a channel turn's model
+    // reads untrusted mail and keeps every tripwire, and a job runs bash as
+    // deny. The keys come from this computation or not at all: anything
+    // inherited (an operator env allowlist, passthrough) is dropped first, so
+    // a fail-closed {} really means "no exemption". Engine-reserved names, so
+    // def.spawn_env never reaches them, and PI_BOT_INTERACTIVE only ever
+    // comes from the engine's extraEnv.
+    for (const k of BOT_WORKSPACE_KEYS) delete env[k];
+    if (opts.extraEnv && opts.extraEnv.PI_BOT_INTERACTIVE === "1") {
+      Object.assign(env, botWorkspaceEnv({ workspaceDir: opts.projectWorkspaceDir || null, projectsRoot: botsProjectsRoot(), botId: opts.botId || null }));
+    }
     // S6-CROW: in fd mode PI_BOT_MCP_CONFIG STAYS SET, pointing at the world
     // root's .mcp.json that fd mode never writes (and removes when stale):
     //   - pi-lab >= c8bbb02 lets the fd win, and dirname() of the path keeps

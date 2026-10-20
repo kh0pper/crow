@@ -700,6 +700,13 @@ export function createInteractiveEngine({
     return s.currentModel || (s.resolved ? s.resolved.key : null);
   }
 
+  /** The card a client shows: the live one, or an expired one (expired:true)
+   * that still tells the operator what was asked. snapshot() and stateEvent()
+   * must agree on it. */
+  function shownCard(s) {
+    return s.pendingUi || s.expiredAsk || null;
+  }
+
   function snapshot(s) {
     return {
       sessionId: s.sessionId,
@@ -709,7 +716,7 @@ export function createInteractiveEngine({
       state: s.state,
       // A live card, or an expired one still shown (expired:true) so the
       // operator sees what was asked: either way the session waits for them.
-      pendingUi: s.pendingUi || s.expiredAsk || null,
+      pendingUi: shownCard(s),
       lastError: s.lastError,
       // Track 3 Task 4: the engine-tracked model wins over the raw
       // prepareSpawn resolution once one is known (a live model_select or a
@@ -824,7 +831,7 @@ export function createInteractiveEngine({
         if (s.attnTimer != null) { clearTimer(s.attnTimer); s.attnTimer = null; }
         return;
       }
-      if (r.count > r.pushedCount) armRepush(s, r.lastPushAt);
+      if (r.count > r.pushedCount) armRepush(s, (Number(r.lastPushAt) || now()) + repushMs());
     });
   }
 
@@ -850,21 +857,26 @@ export function createInteractiveEngine({
     return s.attnChain;
   }
 
-  /** One trailing re-push per window, timed from the group's own last push
-   * (kept on the row, so a gateway restart does not reset it). */
-  function armRepush(s, lastPushAt) {
+  /** One trailing re-push, at `atMs`: a window after the group's own last
+   * push (kept on the row, so a gateway restart does not reset it), or the
+   * end of a snooze. Only for a live session still waiting on a live card: a
+   * question that was answered, withdrawn or expired (a parked turn
+   * included) gets no reminder. */
+  function armRepush(s, atMs) {
     if (s.attnTimer != null) return;
-    const last = Number(lastPushAt);
-    const delay = Math.min(Math.max(0, (Number.isFinite(last) ? last : now()) + repushMs() - now()), MAX_TIMER_MS);
+    const at = Number(atMs);
+    const delay = Math.min(Math.max(0, (Number.isFinite(at) ? at : now()) - now()), MAX_TIMER_MS);
     s.attnTimer = timer(() => {
       s.attnTimer = null;
-      // Only for a live session still waiting on a live card: a question
-      // that was answered, withdrawn or expired needs no reminder.
       if (sessions.get(s.sessionId) !== s || s.state === "stopped" || !s.pendingUi) return;
-      chainAttention(s, (db, N) => N.repushNotificationGroup(db, {
-        groupKey: attentionKey(s), title: (n) => attentionTitle(s, n),
-        priority: "high", type: "attention", nowMs: now(),
-      }));
+      chainAttention(s, async (db, N) => {
+        const r = await N.repushNotificationGroup(db, {
+          groupKey: attentionKey(s), title: (n) => attentionTitle(s, n),
+          priority: "high", type: "attention", nowMs: now(),
+        });
+        // Snoozed: try again when the snooze ends, if a card still waits.
+        if (r && Number.isFinite(r.snoozedUntilMs) && s.pendingUi) armRepush(s, r.snoozedUntilMs);
+      });
     }, delay);
   }
 
@@ -917,6 +929,26 @@ export function createInteractiveEngine({
     if (s.askExpiryTimer != null) { clearTimer(s.askExpiryTimer); s.askExpiryTimer = null; }
   }
 
+  /** The operator dealt with the session's question (answered, cancelled,
+   * aborted, stopped, or wrote again after it expired): no expiry, no
+   * expired card, and its "needs you" group closes so the next question
+   * pushes again. */
+  function settleAsk(s) {
+    const had = !!(s.pendingUi || s.expiredAsk);
+    settleAskExpiry(s);
+    s.expiredAsk = null;
+    if (had) closeAttention(s);
+  }
+
+  /** A live question died unanswered with its child (exit, abandon): drop it
+   * and close its group, so the session's next question pushes again
+   * instead of folding silently into a row about a question that is gone. */
+  function dropAsk(s) {
+    if (s.pendingUi) closeAttention(s);
+    settleAskExpiry(s);
+    clearAsk(s);
+  }
+
   /** True while a session holding this card waits on the operator (a live
    * question, or an expired one on an awake child). The board's execute refuses such a card: a
    * second turn must not start beside one that is waiting for an answer. */
@@ -940,7 +972,7 @@ export function createInteractiveEngine({
       threadId: s.threadId,
       state: s.state,
       lastError: s.lastError || null,
-      pendingUi: s.pendingUi || s.expiredAsk || null,
+      pendingUi: shownCard(s),
       // Track 3 Task 4: same three additions as snapshot(), same rule.
       model: servingModel(s),
       label: s.label || null,
@@ -1919,7 +1951,7 @@ export function createInteractiveEngine({
       s.turn = null;
       clearStall(s);
       clearIdle(s);
-      clearAsk(s);                                   // r1 S4 (+ PR-A dance state)
+      dropAsk(s);                                    // r1 S4 (+ PR-A dance state; 2026-10-20 group)
       let message = "pi exited unexpectedly";
       try {
         if (typeof pi._exitError === "function") message = pi._exitError("responding").message;
@@ -2247,9 +2279,10 @@ export function createInteractiveEngine({
         // turn's coming aborted end is "parked", not a failure.
         if (parsed && parsed.kind === "ask-parked") {
           const reason = parsed.reason === "aborted" ? "aborted" : "timeout";
-          if (s.pendingUi) expireAsk(s, s.pendingUi.requestId, reason);
-          else clearAsk(s);
-          if (s.turn) s.turn.parked = true;
+          // Only a park that expired a real card silences the turn's end.
+          const expired = !!s.pendingUi && expireAsk(s, s.pendingUi.requestId, reason);
+          if (!expired) clearAsk(s);
+          if (expired && s.turn) s.turn.parked = true;
         }
         return;
       }
@@ -2383,6 +2416,10 @@ export function createInteractiveEngine({
     // The invariant is stated over the TURN, not over a pre-await snapshot: an
     // abort that landed during the metering awaits still silences the reply.
     if (!turn.aborted && !turn.parked) {
+      // An older pi-lab handed the bot a "no" for an expired question and the
+      // bot finished its turn: that question no longer waits on anyone (a late
+      // answer is still refused via expiredIds), and its group closes.
+      if (s.expiredAsk) settleAsk(s);
       const replyText = withoutDatesEcho(turn, replyTextOf(end));
       // Strand 1: the turn ENDED in a model error (retries, if any, are
       // spent — this is the non-retrying agent_end). One frame per turn, by
@@ -2551,7 +2588,7 @@ export function createInteractiveEngine({
     s.turn = null;
     clearStall(s);
     clearIdle(s);
-    clearAsk(s);
+    dropAsk(s);                                      // 2026-10-20: closes the group too
     if (s.state !== "stopped") s.state = "hibernating";
     if (reason) s.lastError = reason;
     if (pi) { try { await pi.close(); } catch { /* already dead */ } }
@@ -2708,7 +2745,7 @@ export function createInteractiveEngine({
     s.turn = turn;
     // 2026-10-20: the operator wrote again, so an expired question is dealt
     // with: the session is no longer waiting on it.
-    if (s.expiredAsk) { s.expiredAsk = null; closeAttention(s); }
+    if (s.expiredAsk) settleAsk(s);
     // Review M1: overflow-recovery state belongs to the PREVIOUS turn. A
     // retry that recovered leaves it set; a compaction still running (the
     // operator sent again while it summarizes) keeps it, so its failure still
@@ -3193,10 +3230,6 @@ export function createInteractiveEngine({
     // no_such_request, never PiRpc's raw _exitError as a 500.
     const alive = !!(s.pi && s.pi._exitCode == null);
     if (!card || card.requestId !== requestId || !alive) throw engineError("no_such_request");
-    // The operator answered (or cancelled): the expiry no longer applies, and
-    // the session's "needs you" group is dealt with.
-    settleAskExpiry(s);
-    closeAttention(s);
     // PR-A (audit item 5): the combined multi-question card. The operator
     // answered every question at once; drive the child's blocking runTuiFlow
     // queue by replaying scripted select/input responses. The first select is
@@ -3209,6 +3242,7 @@ export function createInteractiveEngine({
       // sequential card's cancel — respond to the pending first select.
       if (value && value.cancelled) {
         s.pi.send({ type: "extension_ui_response", id: requestId, cancelled: true });
+        settleAsk(s);
         clearAsk(s);
         armStall(s); armIdle(s); emit(s, stateEvent(s));
         return { ok: true };
@@ -3236,6 +3270,7 @@ export function createInteractiveEngine({
         return { ok: true };
       }
       s.pi.send({ type: "extension_ui_response", id: requestId, value: step0.value });
+      settleAsk(s);
       s.askDance = script.length > 1 ? { script, idx: 1 } : null;
       s.pendingUi = null;
       s.askCtx = null;
@@ -3253,6 +3288,7 @@ export function createInteractiveEngine({
       payload.value = String(value && value.value != null ? value.value : "");
     }
     s.pi.send(payload);
+    settleAsk(s);                                    // 2026-10-20: expiry off, group closed
     s.pendingUi = null;
     armStall(s);                                     // watchdog resumes
     armIdle(s);
@@ -3270,10 +3306,8 @@ export function createInteractiveEngine({
   async function abortInFlight(s) {
     const turn = s.turn;
     clearStall(s);
-    if (s.pendingUi || s.expiredAsk) closeAttention(s);
-    settleAskExpiry(s);
+    settleAsk(s);                                    // 2026-10-20
     clearAsk(s);                                     // r1 S4 (+ PR-A dance state)
-    s.expiredAsk = null;
     if (turn) {
       turn.aborted = true;
       turn.graceTimer = timer(() => {
@@ -3401,10 +3435,8 @@ export function createInteractiveEngine({
     s.turn = null;
     clearStall(s);
     clearIdle(s);
-    if (s.pendingUi || s.expiredAsk) closeAttention(s);
-    settleAskExpiry(s);
+    settleAsk(s);                                    // 2026-10-20
     clearAsk(s);
-    s.expiredAsk = null;
     s.state = "stopped";
     // Track 3 Task 6: released on stop() — a stopped session's card is free
     // for a fresh dispatch. This is the primary release path (attachExit's

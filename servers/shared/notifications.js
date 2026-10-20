@@ -232,21 +232,27 @@ export async function upsertGroupedNotification(db, opts) {
   };
 }
 
+/** snoozed_until as epoch ms (SQLite "YYYY-MM-DD HH:MM:SS" is UTC), or NaN. */
+function snoozeEndMs(snoozedUntil) {
+  if (!snoozedUntil) return NaN;
+  const v = String(snoozedUntil);
+  return Date.parse(v.includes("T") ? v : v.replace(" ", "T") + "Z");
+}
+
 function isSnoozed(snoozedUntil, nowMs) {
-  if (!snoozedUntil) return false;
-  const t = Date.parse(String(snoozedUntil).includes("T") ? snoozedUntil : String(snoozedUntil).replace(" ", "T") + "Z");
+  const t = snoozeEndMs(snoozedUntil);
   return Number.isFinite(t) && t > nowMs;
 }
 
 /**
  * Re-push an open group (no new row) when its count grew since the last
  * push and it is not snoozed. Records the push in metadata.group.
- * @returns {Promise<{pushed:boolean, count?:number}>}
+ * @returns {Promise<{pushed:boolean, count?:number, snoozedUntilMs?:number}>}
  */
 export async function repushNotificationGroup(db, { groupKey, title, priority = "high", type = "system", nowMs = Date.now(), deliver = deliverNotification }) {
   const open = (await db.execute({ sql: OPEN_GROUP_SQL, args: [groupKey] })).rows[0];
   if (!open) return { pushed: false };
-  if (isSnoozed(open.snoozed_until, nowMs)) return { pushed: false };
+  if (isSnoozed(open.snoozed_until, nowMs)) return { pushed: false, snoozedUntilMs: snoozeEndMs(open.snoozed_until) };
   const { meta, group } = groupOf(open.metadata, groupKey);
   if (group.count <= group.pushed_count) return { pushed: false, count: group.count };
   const t = typeof title === "function" ? title(group.count) : title;
