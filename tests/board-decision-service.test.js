@@ -680,17 +680,49 @@ test("notifyBatch: the 4th push of the day by one actor is 429 push_limit, claim
   await withStore(async ({ tdb, cdb }) => {
     const n = fakeNotifier();
     const now = Date.parse("2026-05-01T10:00:00Z");
+    const ask = (i, who) => askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: `fp-${i}`, batch: `b-${i}`, expires: "2026-05-20" }) }, who, { now });
     for (let i = 0; i < 3; i++) {
-      await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: `fp-${i}`, batch: `b-${i}`, expires: "2026-05-20" }) }, BOT, { now });
-      await cdb.execute({ sql: "INSERT INTO notifications (type, source, title, metadata, created_at) VALUES ('attention','board:decisions','x',?,?)", args: [JSON.stringify({ actor_key: "bot:bot-1" }), "2026-05-01 08:00:00"] });
+      await ask(i, BOT);
+      // the 3rd push claims several cards in one statement at 2 pushes used
+      if (i === 2) await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-2b", batch: "b-2", expires: "2026-05-20" }) }, BOT, { now });
+      const r = await notifyBatch(tdb, cdb, `b-${i}`, { ...n, now });
+      assert.deepEqual(r, { pushed: true, count: i === 2 ? 2 : 1 });
     }
-    const a = await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-4", batch: "b-4", expires: "2026-05-20" }) }, BOT, { now });
+    const a = await ask(4, BOT);
     await rejects(notifyBatch(tdb, cdb, "b-4", { ...n, now }), "push_limit", 429);
-    assert.equal(n.calls.length, 0);
+    assert.equal(n.calls.length, 3);
     assert.equal(dataOf(await getCard(tdb, a.id)).decision.notified_at, undefined);
     // another actor, and the next UTC day, are unaffected
-    await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-5", batch: "b-5", expires: "2026-05-20" }) }, BOT2, { now });
+    await ask(5, BOT2);
     assert.equal((await notifyBatch(tdb, cdb, "b-5", { ...n, actor: BOT2, now })).pushed, true);
     assert.equal((await notifyBatch(tdb, cdb, "b-4", { ...n, now: Date.parse("2026-05-02T00:30:00Z") })).pushed, true);
+  });
+});
+
+test("notifyBatch: six parallel calls across six batches by one actor push exactly three", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const n = fakeNotifier();
+    const now = Date.parse("2026-05-01T10:00:00Z");
+    for (let i = 0; i < 6; i++) {
+      await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: `fp-${i}`, batch: `b-${i}`, expires: "2026-05-20" }) }, BOT, { now });
+    }
+    const res = await Promise.allSettled([0, 1, 2, 3, 4, 5].map((i) => notifyBatch(tdb, cdb, `b-${i}`, { ...n, now })));
+    assert.equal(n.calls.length, 3);
+    assert.equal(res.filter((r) => r.status === "fulfilled" && r.value.pushed).length, 3);
+    const refused = res.filter((r) => r.status === "rejected");
+    assert.equal(refused.length, 3);
+    for (const r of refused) assert.equal(r.reason.code, "push_limit");
+  });
+});
+
+test("notifyBatch: a push failure clears all three notify fields", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const a = await askDecision(tdb, cdb, { projectId: 1, decision: decision() }, BOT);
+    await assert.rejects(notifyBatch(tdb, cdb, "batch-1", { createNotification: async () => { throw new Error("down"); }, actor: BOT }), /down/);
+    const d = dataOf(await getCard(tdb, a.id)).decision;
+    assert.equal(d.notified_at, undefined);
+    assert.equal(d.notified_by, undefined);
+    assert.equal(d.notify_stamp, undefined);
+    assert.equal((await notifyBatch(tdb, cdb, "batch-1", { ...fakeNotifier() })).pushed, true);
   });
 });

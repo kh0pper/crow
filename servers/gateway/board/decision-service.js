@@ -34,6 +34,7 @@
  * injectable for tests everywhere time matters; default Date.now().
  */
 
+import { randomUUID } from "node:crypto";
 import { createCard, getCard, moveCard, recordMutation } from "./card-service.js";
 import { resolveBoardDef, isTerminal } from "../routes/board-defs.js";
 import { lockState } from "../routes/board-lock.js";
@@ -413,7 +414,8 @@ function isBotActor(a) {
  *   ({pushed:false,count:0,reason:"already_notified"}); later cards only show
  *   on the board.
  * - At most MAX_PUSHES_PER_ACTOR_PER_DAY pushes per actor key per UTC day,
- *   counted from the notifications table; over it is 429 push_limit.
+ *   counted from the cards' own notify stamps, inside the claim statement;
+ *   over it is 429 push_limit.
  * The set is then claimed (notified_at set) by ONE conditional UPDATE …
  * RETURNING before the push, so concurrent calls push each card at most once.
  * If the push throws, the claims are released.
@@ -440,29 +442,39 @@ export async function notifyBatch(tdb, cdb, batch, { createNotification, actor, 
     return { pushed: false, count: 0, reason: "already_notified" };
   }
   const open = all;
-
+  // The per-actor daily cap and the claim are ONE statement, so parallel
+  // calls cannot both pass the check: SQLite serialises writers, and the
+  // uncorrelated COUNT subquery is evaluated once, against committed state.
+  // Pushes are counted from the cards themselves (distinct notify_stamp per
+  // actor per UTC day), not from the notifications table.
   const day = new Date(ms).toISOString().slice(0, 10);
-  const used = Number((await cdb.execute({
-    sql: `SELECT COUNT(*) AS n FROM notifications
-          WHERE source = ? AND date(created_at) = ? AND json_extract(metadata,'$.actor_key') = ?`,
-    args: [NOTIFY_SOURCE, day, key],
-  })).rows[0]?.n ?? 0);
-  if (used >= MAX_PUSHES_PER_ACTOR_PER_DAY) {
-    throw fail(`at most ${MAX_PUSHES_PER_ACTOR_PER_DAY} decision pushes per day`, "push_limit", 429);
-  }
-
-  // Claim the whole set in ONE statement, so one call owns the push.
+  const notifyStamp = `${stamp}#${randomUUID()}`;
   const ids = open.map(({ row }) => Number(row.id));
   const questionOf = new Map(open.map(({ row, decision }) => [Number(row.id), String(decision.question ?? "")]));
   const ph = ids.map(() => "?").join(",");
   const { rows } = await tdb.execute({
-    sql: `UPDATE tasks_items SET data_json=json_set(data_json,'$.decision.notified_at',?)
+    sql: `UPDATE tasks_items
+          SET data_json=json_set(data_json,'$.decision.notified_at',?,'$.decision.notified_by',?,'$.decision.notify_stamp',?)
           WHERE id IN (${ph}) AND board_id IS NULL AND json_extract(data_json,'$.decision.notified_at') IS NULL
+            AND (SELECT COUNT(DISTINCT json_extract(data_json,'$.decision.notify_stamp')) FROM tasks_items
+                 WHERE json_extract(data_json,'$.decision.notified_by')=?
+                   AND substr(json_extract(data_json,'$.decision.notified_at'),1,10)=?) < ?
           RETURNING id`,
-    args: [stamp, ...ids],
+    args: [stamp, key, notifyStamp, ...ids, key, day, MAX_PUSHES_PER_ACTOR_PER_DAY],
   });
   const claimed = rows.map((r) => Number(r.id)).sort((x, y) => x - y);
-  if (!claimed.length) return { pushed: false, count: 0 };
+  if (!claimed.length) {
+    // Nothing claimed: either another call took the cards, or the cap said no.
+    const left = (await tdb.execute({
+      sql: `SELECT COUNT(*) AS n FROM tasks_items WHERE id IN (${ph}) AND board_id IS NULL
+            AND json_extract(data_json,'$.decision.notified_at') IS NULL`,
+      args: ids,
+    })).rows[0];
+    if (Number(left?.n ?? 0) > 0) {
+      throw fail(`at most ${MAX_PUSHES_PER_ACTOR_PER_DAY} decision pushes per day`, "push_limit", 429);
+    }
+    return { pushed: false, count: 0 };
+  }
 
   const count = claimed.length;
   try {
@@ -479,9 +491,10 @@ export async function notifyBatch(tdb, cdb, batch, { createNotification, actor, 
     // Release this call's claims so the next notify pushes these cards.
     const cph = claimed.map(() => "?").join(",");
     await tdb.execute({
-      sql: `UPDATE tasks_items SET data_json=json_remove(data_json,'$.decision.notified_at')
-            WHERE id IN (${cph}) AND json_extract(data_json,'$.decision.notified_at')=?`,
-      args: [...claimed, stamp],
+      sql: `UPDATE tasks_items
+            SET data_json=json_remove(data_json,'$.decision.notified_at','$.decision.notified_by','$.decision.notify_stamp')
+            WHERE id IN (${cph}) AND json_extract(data_json,'$.decision.notify_stamp')=?`,
+      args: [...claimed, notifyStamp],
     });
     throw e;
   }
