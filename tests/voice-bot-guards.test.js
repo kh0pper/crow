@@ -30,7 +30,7 @@ const voiceRow = () => { const c = raw(); const r = c.prepare("SELECT * FROM pi_
 let db, CROW_VOICE_BOT_ID, VOICE_DEF_JSON, PID;
 let handleBotBuilderPost, handleDeleteConfirm, getLocalCatalog, botPeerManageable, writeSetting;
 let listAdvertisedBots, createToolExecutor, migrateArtifactsCompanions, botBoardPanel, createDbClient;
-let perchServer, perchBase, _setEngineStatusForTest;
+let perchServer, perchBase, boardBase, _setEngineStatusForTest;
 
 before(async () => {
   execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: dir }, stdio: "pipe", cwd: REPO });
@@ -67,6 +67,7 @@ before(async () => {
   // then perch-api; a session-checking stub stands in for dashboardAuth.
   const { default: perchApiRouter } = await import("../servers/gateway/routes/perch.js");
   const { default: perchInteractiveApiRouter } = await import("../servers/gateway/routes/perch-interactive-api.js");
+  const { default: botBoardApiRouter } = await import("../servers/gateway/routes/bot-board-api.js");
   const { csrfMiddleware } = await import("../servers/gateway/dashboard/shared/csrf.js");
   const { parseCookies } = await import("../servers/gateway/dashboard/auth.js");
   const { default: express } = await import("express");
@@ -80,9 +81,11 @@ before(async () => {
     engine: () => ({ async checkCardFree() {}, async spawn() { throw new Error("no spawn in this test"); }, async message() {} }),
     annotate: async (m) => m, providerModels: () => [], piProviders: () => null,
   }));
+  router.use(botBoardApiRouter(auth));
   app.use(router);
   await new Promise((r) => { perchServer = app.listen(0, "127.0.0.1", r); });
   perchBase = "http://127.0.0.1:" + perchServer.address().port + "/dashboard/perch-api";
+  boardBase = "http://127.0.0.1:" + perchServer.address().port + "/dashboard/bot-board-api";
 });
 
 after(() => {
@@ -103,11 +106,21 @@ test("delete is refused", async () => {
   assert.equal(voiceRow().definition, VOICE_DEF_JSON);
 });
 
-// Every action handleBotBuilderPost dispatches on (VOICE_BOT_ACTIONS is empty
-// in this PR, so none is allowed on the voice bot).
+test("the Bot Builder delete flow reaches the permanent refusal", async () => {
+  for (const bot_id of ["crow.voice", "  crow.voice "]) {
+    const res = fakeRes();
+    await handleBotBuilderPost({ body: { action: "delete_confirm", bot_id }, headers: {} }, res, { db });
+    assert.equal(res.redirected, "/dashboard/bot-builder?error=voice_bot_permanent", JSON.stringify(bot_id));
+  }
+  assert.equal(voiceRow().definition, VOICE_DEF_JSON, "the voice row still exists, unchanged");
+});
+
+// Every other action handleBotBuilderPost dispatches on (VOICE_BOT_ACTIONS is
+// empty in this PR, so none is allowed on the voice bot; delete_confirm is
+// covered above).
 const SAVE_TABS = ["basics", "abilities", "safety", "advanced", "ai", "tools", "gateways", "tracker", "skills", "triggers", "permissions"];
 const ACTIONS = [
-  "toggle", "board_on", "confirm_sandbox_auto", "create", "wizard_create", "delete_confirm", "toggle_peer_managed",
+  "toggle", "board_on", "confirm_sandbox_auto", "create", "wizard_create", "toggle_peer_managed",
   "gw_share", "gw_newlink", "gw_remove", "gw_advanced_add", "regen_mcp",
   ...SAVE_TABS.map((t) => "save_" + t),
 ];
@@ -233,5 +246,70 @@ test("Perch listings leave it out", async () => {
     const ids = list.map((b) => b.id);
     assert.ok(ids.includes("writer") && ids.includes("helper"), path);
     assert.ok(!ids.includes("crow.voice"), path);
+  }
+});
+
+// ---- the Bot Board API (routes/bot-board-api.js) ----
+const TASKS_SCHEMA = `CREATE TABLE IF NOT EXISTS tasks_items (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+    description TEXT, status TEXT NOT NULL DEFAULT 'pending', priority INTEGER DEFAULT 3,
+    due_date TEXT, phase TEXT, owner TEXT, tags TEXT, parent_id INTEGER, project_id INTEGER,
+    assigned_bot TEXT, board_id INTEGER, bot_id TEXT, action_needed TEXT, next_followup_date TEXT,
+    processing_lease TEXT, processing_lease_status TEXT,
+    autonomy TEXT NOT NULL DEFAULT 'gated', archived_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
+    completed_at TEXT, data_json TEXT NOT NULL DEFAULT '{}');
+  CREATE TABLE IF NOT EXISTS board_mutations (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL,
+    verb TEXT NOT NULL, actor_kind TEXT NOT NULL, actor_id TEXT, job_id TEXT,
+    detail_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (datetime('now')));`;
+const tasks = () => { const t = new Database(process.env.CROW_TASKS_DB_PATH); t.exec(TASKS_SCHEMA); return t; };
+const seedCard = (assigned) => { const t = tasks(); const id = Number(t.prepare("INSERT INTO tasks_items (title, assigned_bot) VALUES (?,?)").run("card", assigned).lastInsertRowid); t.close(); return id; };
+const cardRow = (id) => { const t = tasks(); const r = t.prepare("SELECT * FROM tasks_items WHERE id=?").get(id); t.close(); return r; };
+const voiceJobs = () => { const c = raw(); try { return c.prepare("SELECT COUNT(*) AS n FROM bot_jobs WHERE bot_id='crow.voice'").get().n; } catch { return 0; } finally { c.close(); } };
+const boardPost = async (path, body) => {
+  const r = await fetch(boardBase + path, { method: "POST", headers: { "content-type": "application/json", ...AUTHED }, body: JSON.stringify(body) });
+  return { status: r.status, body: await r.json().catch(() => null) };
+};
+
+test("the Bot Board cannot assign a card to it or run a card with it", async () => {
+  assert.ok(voiceRow(), "precondition: the voice row is seeded");
+  // Assign: refused, the card keeps its bot.
+  const id = seedCard("writer");
+  const before = cardRow(id);
+  const r = await boardPost(`/card/${id}`, { title: "card", assigned_bot: "crow.voice" });
+  assert.equal(r.status, 400, JSON.stringify(r.body));
+  assert.equal(r.body && r.body.code, "bot_unavailable");
+  assert.deepEqual(cardRow(id), before, "the card is unchanged");
+  // Sanity: an ordinary reassignment still works on the same route.
+  const ok = await boardPost(`/card/${id}`, { title: "card", assigned_bot: "helper" });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.equal(cardRow(id).assigned_bot, "helper");
+
+  // Execute a card already carrying the voice bot (assigned before this guard): refused, no job.
+  const vid = seedCard("crow.voice");
+  const vbefore = cardRow(vid);
+  const e = await boardPost(`/card/${vid}/execute`, {});
+  assert.equal(e.status, 400, JSON.stringify(e.body));
+  assert.equal(e.body && e.body.code, "bot_unavailable");
+  assert.equal(voiceJobs(), 0, "no bot_jobs row for the voice bot");
+  assert.deepEqual(cardRow(vid), vbefore);
+});
+
+test("the Bot Board cannot approve a skill onto it", async () => {
+  // A (tampered) voice def with a session dir and a staged proposal: the
+  // route would otherwise promote it and append to def.skills.
+  const { mkdirSync, writeFileSync, existsSync } = await import("node:fs");
+  const sess = join(dir, "voice-session");
+  mkdirSync(join(sess, "proposed-skills"), { recursive: true });
+  writeFileSync(join(sess, "proposed-skills", "tidy-notes.md"), "# tidy notes\nKeep notes tidy.\n");
+  const tampered = JSON.stringify({ ...JSON.parse(VOICE_DEF_JSON), session_dir: sess });
+  const c = raw(); c.prepare("UPDATE pi_bot_defs SET definition=? WHERE bot_id='crow.voice'").run(tampered); c.close();
+  try {
+    const r = await boardPost("/bot/crow.voice/proposed-skill/approve", { name: "tidy-notes", content: "# tidy notes\nKeep notes tidy.\n" });
+    assert.equal(r.status, 400, JSON.stringify(r.body));
+    assert.equal(r.body && r.body.code, "bot_unavailable");
+    assert.equal(voiceRow().definition, tampered, "the definition is byte-identical");
+    assert.equal(existsSync(join(process.env.CROW_HOME, "skills", "tidy-notes.md")), false, "no skill was promoted");
+  } finally {
+    const c2 = raw(); c2.prepare("UPDATE pi_bot_defs SET definition=? WHERE bot_id='crow.voice'").run(VOICE_DEF_JSON); c2.close();
   }
 });

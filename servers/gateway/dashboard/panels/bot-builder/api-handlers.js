@@ -192,15 +192,17 @@ export function sanitizeBotId(raw) {
   return String(raw || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
 }
 
-/** Bot Builder actions allowed on the Crow voice bot. Empty for now: a later
- * PR adds the voice editor's own actions; every generic action is refused. */
+/** Bot Builder actions allowed on the Crow voice bot (the voice editor's own).
+ * Empty for now: a later PR adds them; every generic action is refused. */
 const VOICE_BOT_ACTIONS = new Set();
 
 export async function handleBotBuilderPost(req, res, { db }) {
   const b = req.body || {};
   const action = b.action;
 
-  if (isVoiceBotId(String(b.bot_id ?? "").trim()) && !VOICE_BOT_ACTIONS.has(action)) {
+  // delete_confirm passes through so handleDeleteConfirm answers with its own
+  // voice_bot_permanent refusal; it is not a voice editor action.
+  if (isVoiceBotId(String(b.bot_id ?? "").trim()) && action !== "delete_confirm" && !VOICE_BOT_ACTIONS.has(action)) {
     return res.redirectAfterPost("/dashboard/bot-builder?error=voice_bot_readonly");
   }
 

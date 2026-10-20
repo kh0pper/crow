@@ -97,6 +97,7 @@ import {
 import { lockState, sessionRowFor, SESSION_LOCK_STATUSES } from "./board-lock.js";
 // THE single bot_jobs DDL (shared with init-db, job_runner and tool-executor).
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "../../../scripts/pi-bots/bot-jobs-schema.mjs";
+import { isVoiceBotId } from "../../shared/voice-bot.js";
 
 // Slice C: operator-approved promotion target (the PRIMARY skills dir both the
 // pi bridge and the glasses voice path search via skill_resolver).
@@ -394,6 +395,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       // pi_bot_defs is a crow.db lookup; card-service is tasks.db-only and
       // has no business making it, so this stays here too.
       if (botSet && botVal != null) {
+        if (isVoiceBotId(botVal)) return jsonError(res, 400, "assigned_bot not found or disabled", { code: "bot_unavailable" });
         const botRow = (await cdb.execute({
           sql: "SELECT bot_id FROM pi_bot_defs WHERE bot_id=? AND enabled=1", args: [botVal],
         })).rows[0];
@@ -807,6 +809,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       if (card.archived_at != null) return res.status(409).json({ reason: "card is archived", code: "archived" });
       const bot = card.assigned_bot ? String(card.assigned_bot) : "";
       if (!bot) return jsonError(res, 400, "card has no assigned_bot");
+      if (isVoiceBotId(bot)) return jsonError(res, 400, "assigned_bot not found or disabled", { code: "bot_unavailable" });
       const botRow = (await cdb.execute({
         sql: "SELECT bot_id FROM pi_bot_defs WHERE bot_id=? AND enabled=1", args: [bot],
       })).rows[0];
@@ -1478,6 +1481,7 @@ export default function botBoardApiRouter(dashboardAuth) {
     if (!name) return jsonError(res, 400, "invalid skill name"); // BEFORE any path use
     const content = typeof body.content === "string" ? body.content : "";
     if (!content.trim()) return jsonError(res, 400, "content (non-empty reviewed text) required");
+    if (isVoiceBotId(botId)) return jsonError(res, 400, "bot unavailable", { code: "bot_unavailable" });
     let cdb;
     try {
       cdb = createDbClient();
