@@ -2,8 +2,9 @@
  * /dashboard/keychain/api/* — the only door through which keychain plaintext reaches a
  * browser. Mounted after dashboardAuth + csrfMiddleware (dashboard/index.js), so every
  * request is a signed-in dashboard session with a valid CSRF echo; peer-signed requests
- * are refused here. Plaintext is returned only by /reveal and /export (re-auth grant) and
- * /first-view (one-time grant), always with Cache-Control: no-store, and is never logged.
+ * are refused here. Plaintext is returned only by /reveal (re-auth grant) and /first-view
+ * (one-time grant); the passphrase-sealed Export only by its one-time link, which a granted
+ * POST /export mints. Every response is Cache-Control: no-store; nothing secret is logged.
  */
 import { Router } from "express";
 import { createDbClient, auditLog } from "../../db.js";
@@ -19,6 +20,7 @@ import {
 } from "./store.js";
 import { vaultwardenStatus, saveToVault } from "./vault-save.js";
 import { recordKeychainExport, recordKeychainImport, exportSnapshot } from "./reminder.js";
+import { createExportTickets } from "./export-tickets.js";
 import { invalidateHealthCache } from "../dashboard/panels/nest/health-signals.js";
 
 const BASE = "/dashboard/keychain/api";
@@ -57,6 +59,7 @@ export function keychainApiRouter({
   vault = { status: vaultwardenStatus, save: saveToVault },
   audit = auditLog,
   notify = createNotification,
+  tickets = createExportTickets(),
 } = {}) {
   const router = Router();
 
@@ -174,6 +177,11 @@ export function keychainApiRouter({
     res.json({ ok: true });
   }));
 
+  // Export is two steps (2026-10-20): POST seals the file and parks it behind a one-time,
+  // 2-minute, same-session link; GET serves it once as a real attachment, which a browser and
+  // the Crow app can both save (a blob: download in the page was dropped by the app's WebView).
+  // The Nest reminder is recorded only once the file was served, or, when the page asks with
+  // ?confirm=1 (the Crow app), only once it says the file was saved (POST /export/saved).
   router.post(`${BASE}/export`, withDb(async (req, res, db) => {
     if (!(await requireGrant(req, res))) return;
     const passphrase = typeof req.body?.passphrase === "string" ? req.body.passphrase : "";
@@ -183,11 +191,57 @@ export function keychainApiRouter({
     const snapshot = await exportSnapshot(db, key.id).catch(() => null);
     const entries = await exportableEntries(db, key);
     const file = await sealExport(entries, passphrase);
-    if (snapshot) await recordKeychainExport(db, key.id, snapshot).catch(() => {}); // the Nest reminder; never blocks the download
+    const filename = `crow-keychain-${new Date().toISOString().slice(0, 10)}.json`;
+    const { token, expiresAt } = tickets.issue(req.dashboardSession, { file, filename, keyId: key.id, snapshot, count: entries.length });
+    res.json({ ok: true, count: entries.length, filename, token, download: `${BASE}/export/file/${token}`, expires_at: new Date(expiresAt).toISOString() });
+  }));
+
+  const TICKET_ERRORS = {
+    not_found: [404, "export_link_unknown", "This download link is not yours, or it was replaced by a newer Export."],
+    used: [410, "export_link_used", "This download link was already used. Export again."],
+    expired: [410, "export_link_expired", "This download link expired. Export again."],
+    not_served: [409, "export_not_fetched", "The file was not downloaded yet."],
+  };
+  const ticketError = (res, error) => {
+    const [status, code, message] = TICKET_ERRORS[error] || TICKET_ERRORS.not_found;
+    return res.status(status).json({ code, error: message });
+  };
+  const recordExport = async (record) => {
+    if (!record?.snapshot) return;
+    const db = openDb();
+    try { await recordKeychainExport(db, record.keyId, record.snapshot); } catch {} finally { try { db.close(); } catch {} }
     invalidateHealthCache();
-    await audit(db, "keychain_export", { ip: req.ip, details: { count: entries.length } });
-    res.set("Content-Disposition", `attachment; filename="crow-keychain-${new Date().toISOString().slice(0, 10)}.json"`);
-    res.json(file);
+  };
+
+  router.all(`${BASE}/export/file/:token`, withDb(async (req, res, db) => {
+    // Express runs GET handlers for HEAD too: a HEAD (a link preview, a prober) must never
+    // spend the one download.
+    if (req.method !== "GET") return res.status(405).set("Allow", "GET").json({ error: "GET only." });
+    // Nor may a prefetch (Turbo, speculation rules, a browser preloader) spend it.
+    const purpose = ["sec-purpose", "purpose", "x-sec-purpose", "x-purpose", "x-moz"].map((h) => String(req.headers[h] || "")).join(" ");
+    if (/prefetch|prerender|preview/i.test(purpose)) return res.status(409).json({ code: "export_link_prefetch", error: "Not on a prefetch." });
+    // The Crow app saves through its own bridge and then confirms; a GET from its WebView
+    // (a navigation, which an app without a download listener drops) never counts as saved.
+    const deferRecord = req.query?.confirm === "1" || String(req.headers["user-agent"] || "").includes("CrowAndroid/");
+    const out = tickets.take(req.params.token, req.dashboardSession, { deferRecord });
+    if (out.error) return ticketError(res, out.error);
+    // Every fetch is audited (the sealed file left the server). A deferred one went to the app's
+    // page and may still be cancelled there, so it does not read "Exported".
+    try { await audit(db, deferRecord ? "keychain_export_fetched" : "keychain_export", { ip: req.ip, details: { count: out.count } }); } catch {} // the ticket is spent: always deliver
+    // The reminder clears once the body was handed to the socket, never earlier.
+    if (out.record) res.once("finish", () => { recordExport(out.record); });
+    res.set("Content-Type", "application/json; charset=utf-8");
+    res.set("Content-Disposition", `attachment; filename="${out.filename}"`);
+    res.set("X-Content-Type-Options", "nosniff");
+    res.send(JSON.stringify(out.file));
+  }));
+
+  router.post(`${BASE}/export/saved`, withDb(async (req, res, db) => {
+    const out = tickets.confirm(req.body?.token, req.dashboardSession);
+    if (out.error) return ticketError(res, out.error);
+    await recordExport(out);
+    try { await audit(db, "keychain_export_saved", { ip: req.ip, details: { count: out.count } }); } catch {}
+    res.json({ ok: true });
   }));
 
   router.post(`${BASE}/import`, withDb(async (req, res, db) => {

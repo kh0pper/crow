@@ -39,4 +39,10 @@
     <string name="ssl_error_message">The server\'s SSL certificate could not be verified. This is common with self-signed certificates on home lab servers.\n\nDo you want to continue?</string>
     <string name="ssl_proceed">Continue</string>
     <string name="ssl_cancel">Cancel</string>
+    <!-- Downloads (keychain Export fix 2026-10-20) -->
+    <string name="download_saved">Saved.</string>
+    <string name="download_saved_named">Saved %1$s.</string>
+    <string name="download_failed">Could not save the file.</string>
+    <string name="download_cannot_save">This download can\'t be saved in the app. Use a desktop browser.</string>
+    <string name="download_busy">Another file is being saved. Try again in a moment.</string>
 </resources>

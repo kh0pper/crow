@@ -108,6 +108,7 @@ export function renderPasswordsPage({ entries, method, vaultAvailable, vaultNeed
         <input id="pw-export-pass" type="password" autocomplete="new-password" placeholder="${t("passwords.exportPassphrase", lang)}" aria-label="${t("passwords.exportPassphrase", lang)}">
         <input id="pw-export-confirm" type="password" autocomplete="new-password" placeholder="${t("passwords.exportConfirm", lang)}" aria-label="${t("passwords.exportConfirm", lang)}">
         <div id="pw-export-msg" role="status" style="font-size:0.8rem;min-height:1em"></div>
+        <p id="pw-export-link" style="font-size:0.8rem;margin:0.25rem 0" hidden></p>
         <button type="button" id="pw-export-go" class="btn btn-sm btn-secondary"${dis}>${t("passwords.export", lang)}</button>
       </div>
       <div class="pw-panel" id="pw-import-form">
@@ -123,7 +124,7 @@ export function renderPasswordsPage({ entries, method, vaultAvailable, vaultNeed
 }
 
 export function passwordsClientJS(lang) {
-  const eventNames = ["keychain_reveal", "keychain_copy", "keychain_delete", "keychain_add", "keychain_save", "keychain_first_view", "keychain_vault_save", "keychain_reauth_ok", "keychain_reauth_failed", "keychain_reauth_lockout", "keychain_export", "keychain_import"];
+  const eventNames = ["keychain_reveal", "keychain_copy", "keychain_delete", "keychain_add", "keychain_save", "keychain_first_view", "keychain_vault_save", "keychain_reauth_ok", "keychain_reauth_failed", "keychain_reauth_lockout", "keychain_export", "keychain_export_fetched", "keychain_export_saved", "keychain_import"];
   const eventMap = JSON.stringify(Object.fromEntries(eventNames.map((n) => [n, t(`passwords.event.${n}`, lang)])));
   return `<script>
     (function() {
@@ -263,6 +264,118 @@ export function passwordsClientJS(lang) {
         });
       });
 
+      // Export (2026-10-20): the server answers with a one-time, 2-minute download link, never
+      // the file. A browser saves it as an attachment; the Crow app 1.6.3+ fetches it and saves it
+      // through window.CrowDownloadPort (its own origin-checked bridge), then tells the server it
+      // was saved, which is what clears the Nest reminder. An older app has no way to save files.
+      var saveWaits = {};
+      var saveSeq = 0;
+      var exportLinkTimer = null;
+      function downloadPort() {
+        var p = window.CrowDownloadPort;
+        return p && typeof p.postMessage === "function" ? p : null;
+      }
+      function onPortMessage(ev) {
+        var m;
+        try { m = typeof (ev && ev.data) === "string" ? JSON.parse(ev.data) : null; } catch (e) { return; }
+        if (!m || m.type !== "download" || typeof m.id !== "string" || !saveWaits[m.id]) return;
+        var done = saveWaits[m.id];
+        delete saveWaits[m.id];
+        done(m);
+      }
+      (function wireDownloadPort() {
+        var port = downloadPort();
+        if (port) {
+          if (typeof port.addEventListener === "function") port.addEventListener("message", onPortMessage);
+          else port.onmessage = onPortMessage;
+        }
+        // The port lives as long as the document; Turbo re-runs this script on every visit.
+        document.addEventListener("turbo:before-cache", function unwire() {
+          document.removeEventListener("turbo:before-cache", unwire);
+          if (port && typeof port.removeEventListener === "function") port.removeEventListener("message", onPortMessage);
+          else if (port && port.onmessage === onPortMessage) port.onmessage = null;
+          showExportLink(null);
+        });
+      })();
+      // "app": the Crow app's save bridge is here. "elsewhere": a Crow app 1.6.3+ on a page that
+      // is not its paired server (window.Crow.downloadStatus is a constant there). "old-app": an
+      // app too old to save files. "web": a browser.
+      function exportMode() {
+        if (downloadPort()) return "app";
+        var c = window.Crow;
+        if (c && typeof c.downloadStatus === "function") {
+          var st = "";
+          try { st = String(c.downloadStatus()); } catch (e) { st = ""; }
+          return st === "unsupported" ? "no-bridge" : "elsewhere";
+        }
+        var ua = typeof navigator !== "undefined" ? String(navigator.userAgent || "") : "";
+        return ua.indexOf("CrowAndroid/") >= 0 ? "old-app" : "web";
+      }
+      function exportText(s, d) {
+        return s.split("{n}").join(String(d.count)).split("{file}").join(String(d.filename));
+      }
+      function downloadLink(href, name) {
+        var a = document.createElement("a");
+        a.href = href;
+        a.setAttribute("download", name);
+        a.setAttribute("data-turbo", "false");
+        a.setAttribute("data-turbo-prefetch", "false");
+        a.setAttribute("rel", "noreferrer");
+        return a;
+      }
+      // The link works once: it is the user's own tap (a real gesture no browser blocks), and
+      // it goes away once tapped, so a second tap can never fetch a spent link.
+      function showExportLink(d, msg) {
+        var box = document.getElementById("pw-export-link");
+        box.textContent = "";
+        if (exportLinkTimer) { clearTimeout(exportLinkTimer); exportLinkTimer = null; }
+        if (!d) { box.hidden = true; return; }
+        var a = downloadLink(d.download, d.filename);
+        a.className = "btn btn-sm btn-primary";
+        a.textContent = '${tJs("passwords.exportLink", lang)}';
+        a.addEventListener("click", function() {
+          if (exportLinkTimer) { clearTimeout(exportLinkTimer); exportLinkTimer = null; }
+          setTimeout(function() { box.textContent = ""; box.hidden = true; }, 0);
+          if (msg) msg.textContent = exportText('${tJs("passwords.exportDownloading", lang)}', d);
+        });
+        box.appendChild(a);
+        box.hidden = false;
+        exportLinkTimer = setTimeout(function() {
+          box.textContent = ""; box.hidden = true;
+          if (msg) msg.textContent = '${tJs("passwords.exportLinkExpired", lang)}';
+        }, 120000);
+      }
+      function saveInApp(port, d, msg) {
+        var notSaved = '${tJs("passwords.exportNotSaved", lang)}';
+        msg.textContent = '${tJs("passwords.exportSaving", lang)}';
+        fetch(d.download + "?confirm=1", { credentials: "same-origin" }).then(function(r) {
+          if (!r.ok) throw new Error("not fetched");
+          return r.text();
+        }).then(function(text) {
+          // The app takes at most 8 MiB; past that it could not answer, so say so here.
+          if (text.length > 8388608) { msg.textContent = notSaved; return; }
+          saveSeq += 1;
+          var id = "kc" + saveSeq + String(Date.now());
+          // No answer in 9 minutes (the app was closed while its picker was open): not saved.
+          // Shorter than the server's 10-minute confirm window, so a late answer cannot read
+          // as recorded when the server has already forgotten the link.
+          var timer = setTimeout(function() {
+            if (!saveWaits[id]) return;
+            delete saveWaits[id];
+            msg.textContent = notSaved;
+          }, 540000);
+          saveWaits[id] = function(m) {
+            clearTimeout(timer);
+            if (!m.ok) { msg.textContent = notSaved; return; }
+            var shownName = typeof m.name === "string" && m.name ? m.name : d.filename;
+            var savedText = exportText('${tJs("passwords.exportSaved", lang)}', { count: d.count, filename: shownName });
+            msg.textContent = savedText;
+            var unrecorded = function() { msg.textContent = savedText + " " + '${tJs("passwords.exportSavedUnrecorded", lang)}'; };
+            post("/export/saved", { token: d.token }).then(function(res) { if (res.status !== 200) unrecorded(); }).catch(unrecorded);
+          };
+          port.postMessage(JSON.stringify({ op: "save", id: id, name: d.filename, mime: "application/json", text: text }));
+        }).catch(function() { msg.textContent = notSaved; });
+      }
       document.getElementById("pw-export-go").addEventListener("click", function() {
         var p1 = document.getElementById("pw-export-pass");
         var p2 = document.getElementById("pw-export-confirm");
@@ -270,16 +383,20 @@ export function passwordsClientJS(lang) {
         if (p1.value.length < 12) { msg.textContent = '${tJs("passwords.passphraseShort", lang)}'; return; }
         if (p1.value !== p2.value) { msg.textContent = '${tJs("passwords.passphraseMismatch", lang)}'; return; }
         var body = { passphrase: p1.value };
+        showExportLink(null);
         guarded("/export", body, function(res) {
           p1.value = ""; p2.value = "";
-          if (res.status !== 200) { msg.textContent = res.d.error || '${tJs("passwords.error", lang)}'; return; }
-          msg.textContent = '${tJs("passwords.exportDone", lang)}'.split("{n}").join(String(res.d.count));
-          if (typeof Blob === "function" && typeof URL !== "undefined" && URL.createObjectURL) {
-            var a = document.createElement("a");
-            a.href = URL.createObjectURL(new Blob([JSON.stringify(res.d)], { type: "application/json" }));
-            a.download = "crow-keychain-" + new Date().toISOString().slice(0, 10) + ".json";
-            document.body.appendChild(a); a.click(); a.remove();
-          }
+          var d = res.d;
+          if (res.status !== 200 || typeof d.download !== "string" || d.download.indexOf(API + "/export/file/") !== 0) { msg.textContent = d.error || '${tJs("passwords.error", lang)}'; return; }
+          var mode = exportMode();
+          if (mode === "app") { saveInApp(downloadPort(), d, msg); return; }
+          // In the app away from the paired server, or in an app too old to save files, a
+          // download would be dropped: fetching the link would only spend it.
+          if (mode === "elsewhere") { msg.textContent = '${tJs("passwords.exportElsewhere", lang)}'; return; }
+          if (mode === "no-bridge") { msg.textContent = '${tJs("passwords.exportNoBridge", lang)}'; return; }
+          if (mode === "old-app") { msg.textContent = '${tJs("passwords.exportOldApp", lang)}'; return; }
+          msg.textContent = exportText('${tJs("passwords.exportReady", lang)}', d);
+          showExportLink(d, msg);
         });
       });
 
