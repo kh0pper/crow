@@ -2,6 +2,7 @@ import { t } from "../shared/i18n.js";
 import { escapeHtml } from "../shared/components.js";
 import { perchHubCss } from "./css.js";
 import { perchHubJs } from "./client.js";
+import { perchSessionsCollapseCss } from "./sessions-collapse-css.js";
 
 /** engineStatus() returns installing | absent | unhealthy | ready
  *  (bot-engine-status.js:84-101). Only "absent" means "not installed" — telling
@@ -29,7 +30,7 @@ function engineBanner(engine, lang) {
  *  versa. Static shell only — every list row and transcript line is
  *  rendered client-side, the same split birdDrawerMarkup() uses. */
 export function perchHubContent(lang = "en", engine = { state: "ready" }) {
-  return `<style>${perchHubCss()}</style>
+  return `<style>${perchHubCss()}${perchSessionsCollapseCss()}</style>
 <div id="perch-hub-root">
 ${engineBanner(engine, lang)}
 <!-- No brand block here. The shell's .content-header already renders
@@ -42,7 +43,11 @@ ${engineBanner(engine, lang)}
 <header><nav class="machines"><a href="/dashboard/bot-board">${escapeHtml(t("perch.navBoard", lang))}</a></nav></header>
 <div class="hub-split">
   <div id="perch-list">
-    <h2>${escapeHtml(t("perch.sessionsHeading", lang))}</h2>
+    <!-- Desktop only (sessions-collapse-css.js): hides this whole column
+         while a chat is open; #perch-list-reveal in the chat head brings it
+         back. aria-expanded ships "true" because without JS the list IS on
+         screen; the client corrects it from localStorage before first paint. -->
+    <div class="perch-list-head"><h2>${escapeHtml(t("perch.sessionsHeading", lang))}</h2><button type="button" id="perch-list-collapse" class="quiet perch-sessions-toggle" aria-controls="perch-list" aria-expanded="true" aria-label="${escapeHtml(t("perch.hideSessions", lang))}" title="${escapeHtml(t("perch.hideSessions", lang))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button></div>
     <!-- The launcher sits OUTSIDE #perch-list-body on purpose. renderList()
          and showListNote() both clearEl() that body, so a launch control
          living inside it would be wiped by every poll and every note — and
@@ -112,7 +117,10 @@ ${engineBanner(engine, lang)}
     <!-- Queue item 13 (2026-10-14): "← Sessions" shares the head row with the
          bot name (phones; the split view hides it). On phones the raw
          session id is hidden here — the Session tab shows it (#perch-session-id). -->
-    <div class="perch-head"><button type="button" id="perch-back" class="quiet">${escapeHtml(t("perch.back", lang))}</button><div class="perch-ident"><div class="title" id="perch-bot-name"></div>
+    <!-- #perch-list-reveal leads the head: desktop only, and only while the
+         Sessions column is collapsed (sessions-collapse-css.js). Visible text
+         "Sessions", accessible name "Show sessions". -->
+    <div class="perch-head"><button type="button" id="perch-list-reveal" class="quiet perch-sessions-toggle" aria-controls="perch-list" aria-expanded="true" aria-label="${escapeHtml(t("perch.showSessions", lang))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg>${escapeHtml(t("perch.sessionsHeading", lang))}</button><button type="button" id="perch-back" class="quiet">${escapeHtml(t("perch.back", lang))}</button><div class="perch-ident"><div class="title" id="perch-bot-name"></div>
       <div class="session-name" id="perch-session-name" hidden></div>
       <div class="meta" id="perch-session-meta"></div></div></div>
     <!-- Phase D1: the tab strip. FOUR buttons, inline SVG glyphs ported from

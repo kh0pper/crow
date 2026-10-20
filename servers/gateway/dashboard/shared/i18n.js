@@ -2909,6 +2909,8 @@ export const translations = {
   "perch.you": { en: "You:", es: "Tú:" },
   "perch.sendFailed": { en: "The message did not send.", es: "El mensaje no se envió." },
   "perch.back": { en: "← Sessions", es: "← Sesiones" },
+  "perch.hideSessions": { en: "Hide sessions", es: "Ocultar sesiones" },
+  "perch.showSessions": { en: "Show sessions", es: "Mostrar sesiones" },
   "perch.sessionIdLabel": { en: "Session id", es: "Id de la sesión" },
   "perch.composerPlaceholder": { en: "Message your bot…", es: "Escribe a tu bot…" },
   "perch.send": { en: "Send", es: "Enviar" },

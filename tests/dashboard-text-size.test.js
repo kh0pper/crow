@@ -67,7 +67,11 @@ test("Perch and the dashboard read the same key through the same runtime", async
   assert.equal(TS.TEXT_SIZE_KEY, "crow-text-size");
   // Outside the shared runtime (which names the old key only to migrate it),
   // Perch names no key and no scale of its own.
-  const own = js.split(TS.textSizeRuntimeJs()).join("");
+  // The one storage key Perch does own is the desktop Sessions-collapse
+  // choice (perch-sessions-collapse.test.js); it is not a text size, so its
+  // two accesses are taken out before the check.
+  const own = js.split(TS.textSizeRuntimeJs()).join("")
+    .replace(/window\.localStorage\.(getItem|setItem)\('crow-perch-sessions-collapsed'/g, "");
   assert.doesNotMatch(own, /localStorage|crow\.perch\.textSize|--perch-text-scale/, "Perch holds no key or scale of its own");
   assert.match(perchHubCss(), /#perch-tab-chat\{--pts:var\(--crow-text-scale,1\)/);
 });
