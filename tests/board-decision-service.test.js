@@ -63,7 +63,11 @@ function fixture() {
     CREATE TABLE bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, card_id INTEGER, status TEXT,
       pi_session_dir TEXT, kind TEXT NOT NULL DEFAULT 'chat', updated_at TEXT DEFAULT (datetime('now')));
     CREATE TABLE pi_bot_defs (bot_id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
-      definition TEXT, enabled INTEGER NOT NULL DEFAULT 1, project_id INTEGER);`);
+      definition TEXT, enabled INTEGER NOT NULL DEFAULT 1, project_id INTEGER);
+    CREATE TABLE notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL DEFAULT 'system',
+      source TEXT, title TEXT NOT NULL, body TEXT, priority TEXT DEFAULT 'normal', action_url TEXT, metadata TEXT,
+      is_read INTEGER DEFAULT 0, is_dismissed INTEGER DEFAULT 0, snoozed_until TEXT, schedule_id INTEGER,
+      expires_at TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));`);
   const ins = c.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, enabled) VALUES (?,?,?)");
   ins.run("bot-1", "Bot one", 1);
   ins.run("bot-off", "Bot off", 0);
@@ -480,7 +484,19 @@ test("askDecision expires stale cards first, freeing their batch slots", async (
 
 function fakeNotifier() {
   const calls = [];
-  return { calls, createNotification: async (db, o) => { calls.push(o); return { id: calls.length }; } };
+  return {
+    calls,
+    actor: BOT,
+    // Records the row like the real sender, so the per-day cap can count it.
+    createNotification: async (db, o) => {
+      calls.push(o);
+      await db.execute({
+        sql: "INSERT INTO notifications (type, source, title, body, metadata) VALUES (?,?,?,?,?)",
+        args: [o.type, o.source ?? null, o.title, o.body ?? null, o.metadata ? JSON.stringify(o.metadata) : null],
+      });
+      return { id: calls.length };
+    },
+  };
 }
 
 test("notifyBatch pushes once for the batch, then {pushed:false} on a second call", async () => {
@@ -504,12 +520,12 @@ test("notifyBatch pushes once for the batch, then {pushed:false} on a second cal
     for (const id of ids) assert.ok(dataOf(await getCard(tdb, id)).decision.notified_at);
 
     const r2 = await notifyBatch(tdb, cdb, "batch-1", n);
-    assert.deepEqual(r2, { pushed: false, count: 0 });
+    assert.deepEqual(r2, { pushed: false, count: 0, reason: "already_notified" });
     assert.equal(n.calls.length, 1);
   });
 });
 
-test("notifyBatch: singular title for one decision; a new card in the batch pushes once more", async () => {
+test("notifyBatch: singular title for one decision; a card added after the push stays board-only", async () => {
   await withStore(async ({ tdb, cdb }) => {
     await askDecision(tdb, cdb, { projectId: 1, decision: decision() }, BOT);
     const n = fakeNotifier();
@@ -517,8 +533,8 @@ test("notifyBatch: singular title for one decision; a new card in the batch push
     assert.equal(n.calls[0].title, "1 decision waiting");
     await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-2" }) }, BOT);
     const r = await notifyBatch(tdb, cdb, "batch-1", n);
-    assert.deepEqual(r, { pushed: true, count: 1 });
-    assert.equal(n.calls.length, 2);
+    assert.deepEqual(r, { pushed: false, count: 0, reason: "already_notified" });
+    assert.equal(n.calls.length, 1);
   });
 });
 
@@ -588,7 +604,7 @@ test("notifyBatch: a throwing createNotification releases the claims for the nex
     const ids = [];
     for (let i = 0; i < 2; i++) ids.push((await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: `fp-${i}` }) }, BOT)).id);
     const boom = async () => { throw new Error("push down"); };
-    await assert.rejects(notifyBatch(tdb, cdb, "batch-1", { createNotification: boom }), /push down/);
+    await assert.rejects(notifyBatch(tdb, cdb, "batch-1", { createNotification: boom, actor: BOT }), /push down/);
     for (const id of ids) assert.equal(dataOf(await getCard(tdb, id)).decision.notified_at, undefined);
     const n = fakeNotifier();
     assert.deepEqual(await notifyBatch(tdb, cdb, "batch-1", n), { pushed: true, count: 2 });
@@ -604,4 +620,77 @@ test("validateDecision: optional strings are measured after trimming", () => {
   assert.throws(() => validateDecision(decision({
     options: [{ ...opts()[0], value: "v".repeat(201) }, opts()[1]],
   })), (e) => e.code === "bad_decision");
+});
+
+// ---------------------------------------------------------------------------
+// notifyBatch authorization, batch idempotence and per-actor cap
+// ---------------------------------------------------------------------------
+
+const BOT2 = { kind: "bot", id: "bot-2", jobId: null };
+const SESSION = { kind: "session", id: null, jobId: null };
+const UNATTRIBUTED = { kind: "bot", id: null, jobId: null };
+
+test("askDecision stores asked_by from the actor", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const a = await askDecision(tdb, cdb, { projectId: 1, decision: decision() }, { kind: "bot", id: "bot-1", jobId: "job-9" });
+    assert.deepEqual(dataOf(await getCard(tdb, a.id)).decision.asked_by, { kind: "bot", id: "bot-1", job_id: "job-9" });
+  });
+});
+
+test("notifyBatch: a different bot cannot notify another bot's batch (403, nothing pushed or claimed)", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const a = await askDecision(tdb, cdb, { projectId: 1, decision: decision() }, BOT);
+    const n = fakeNotifier();
+    await rejects(notifyBatch(tdb, cdb, "batch-1", { ...n, actor: BOT2 }), "forbidden", 403);
+    assert.equal(n.calls.length, 0);
+    assert.equal(dataOf(await getCard(tdb, a.id)).decision.notified_at, undefined);
+  });
+});
+
+test("notifyBatch: a mixed-asker batch is refused for a bot that asked only some of it", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-1" }) }, BOT);
+    await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-2" }) }, BOT2);
+    await rejects(notifyBatch(tdb, cdb, "batch-1", { ...fakeNotifier(), actor: BOT }), "forbidden", 403);
+  });
+});
+
+test("notifyBatch: a session or human can notify any batch; a missing actor is refused", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-1" }) }, BOT);
+    await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-b", batch: "batch-2" }) }, BOT2);
+    const n = fakeNotifier();
+    await rejects(notifyBatch(tdb, cdb, "batch-1", { createNotification: n.createNotification }), "forbidden", 403);
+    assert.deepEqual(await notifyBatch(tdb, cdb, "batch-1", { ...n, actor: SESSION }), { pushed: true, count: 1 });
+    assert.deepEqual(await notifyBatch(tdb, cdb, "batch-2", { ...n, actor: HUMAN }), { pushed: true, count: 1 });
+  });
+});
+
+test("notifyBatch: an unattributed bot can notify its own unattributed batch, not an attributed one", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-u", batch: "batch-u" }) }, UNATTRIBUTED);
+    await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-a" }) }, BOT);
+    const n = fakeNotifier();
+    assert.deepEqual(await notifyBatch(tdb, cdb, "batch-u", { ...n, actor: UNATTRIBUTED }), { pushed: true, count: 1 });
+    await rejects(notifyBatch(tdb, cdb, "batch-1", { ...n, actor: UNATTRIBUTED }), "forbidden", 403);
+  });
+});
+
+test("notifyBatch: the 4th push of the day by one actor is 429 push_limit, claims untouched", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const n = fakeNotifier();
+    const now = Date.parse("2026-05-01T10:00:00Z");
+    for (let i = 0; i < 3; i++) {
+      await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: `fp-${i}`, batch: `b-${i}`, expires: "2026-05-20" }) }, BOT, { now });
+      await cdb.execute({ sql: "INSERT INTO notifications (type, source, title, metadata, created_at) VALUES ('attention','board:decisions','x',?,?)", args: [JSON.stringify({ actor_key: "bot:bot-1" }), "2026-05-01 08:00:00"] });
+    }
+    const a = await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-4", batch: "b-4", expires: "2026-05-20" }) }, BOT, { now });
+    await rejects(notifyBatch(tdb, cdb, "b-4", { ...n, now }), "push_limit", 429);
+    assert.equal(n.calls.length, 0);
+    assert.equal(dataOf(await getCard(tdb, a.id)).decision.notified_at, undefined);
+    // another actor, and the next UTC day, are unaffected
+    await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "fp-5", batch: "b-5", expires: "2026-05-20" }) }, BOT2, { now });
+    assert.equal((await notifyBatch(tdb, cdb, "b-5", { ...n, actor: BOT2, now })).pushed, true);
+    assert.equal((await notifyBatch(tdb, cdb, "b-4", { ...n, now: Date.parse("2026-05-02T00:30:00Z") })).pushed, true);
+  });
 });
