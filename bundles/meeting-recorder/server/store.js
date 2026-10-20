@@ -9,7 +9,7 @@
  *   transcript.md              the readable transcript
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -40,7 +40,10 @@ export function writeMeta(id, fields) {
   const dir = sessionDir(id);
   mkdirSync(dir, { recursive: true });
   const meta = { ...readMeta(id), ...fields };
-  writeFileSync(join(dir, "meta.json"), JSON.stringify(meta, null, 2));
+  // Write then rename, so the panel's status poll and other readers never see half a file.
+  const tmp = join(dir, `.meta.json.${process.pid}.tmp`);
+  writeFileSync(tmp, JSON.stringify(meta, null, 2));
+  renameSync(tmp, join(dir, "meta.json"));
   return meta;
 }
 
