@@ -313,3 +313,60 @@ test("the Bot Board cannot approve a skill onto it", async () => {
     const c2 = raw(); c2.prepare("UPDATE pi_bot_defs SET definition=? WHERE bot_id='crow.voice'").run(VOICE_DEF_JSON); c2.close();
   }
 });
+
+// ---- background-job producers and the runner (scripts/pi-bots) ----
+const SPAWNED = () => { throw new Error("REACHED_PI: a voice job must fail before any bot load or pi spawn"); };
+
+test("the job runner fails a queued voice job before any pi work", async () => {
+  const { runOnce, runJob, ensureBotJobsSchema } = await import("../scripts/pi-bots/job_runner.mjs");
+  const c = raw();
+  ensureBotJobsSchema(c);
+  assert.equal(c.prepare("SELECT COUNT(*) AS n FROM bot_jobs WHERE status='queued'").get().n, 0, "precondition: nothing else queued");
+  c.prepare("INSERT INTO bot_jobs (job_id, bot_id, goal, status, source) VALUES ('job-voice-1','crow.voice','x','queued','chat')").run();
+  c.close();
+  const fakeBridge = { loadBot: SPAWNED, handleInbound: SPAWNED, PiRpc: SPAWNED };
+  const out = await runOnce({ log: () => {}, bridge: fakeBridge });
+  assert.equal(out.ran, "job-voice-1");
+  assert.equal(out.status, "failed");
+  const c2 = raw();
+  const job = c2.prepare("SELECT status, error FROM bot_jobs WHERE job_id='job-voice-1'").get();
+  c2.close();
+  assert.equal(job.status, "failed");
+  assert.match(job.error, /cannot take background jobs/);
+
+  // A kind:"voice" definition under any other id is refused the same way.
+  await assert.rejects(
+    runJob({ job_id: "job-voice-2", bot_id: "helper", goal: "x", source: "chat" },
+      { log: () => {}, bridge: { loadBot: () => ({ def: JSON.parse(VOICE_DEF_JSON), project_id: null }), PiRpc: SPAWNED } }),
+    /cannot take background jobs/);
+});
+
+test("a botcron schedule for the voice bot advances without enqueuing; the schedule row stays", async () => {
+  const { tickBotSchedules } = await import("../scripts/pi-bots/bot_scheduler.mjs");
+  const c = raw();
+  const sid = Number(c.prepare("INSERT INTO schedules (task, cron_expression, description, enabled, next_run) VALUES (?,?,?,1,?)")
+    .run("pipeline:botcron:crow.voice", "*/5 * * * *", JSON.stringify({ goal: "daily digest" }), "2020-01-01T00:00:00.000Z").lastInsertRowid);
+  c.close();
+  const r = tickBotSchedules();
+  assert.equal(r.fired, 0);
+  const c2 = raw();
+  const sch = c2.prepare("SELECT next_run, last_run FROM schedules WHERE id=?").get(sid);
+  const n = c2.prepare("SELECT COUNT(*) AS n FROM bot_jobs WHERE bot_id='crow.voice' AND source='schedule'").get().n;
+  c2.close();
+  assert.equal(n, 0, "no bot_jobs row for the voice bot");
+  assert.ok(sch, "the schedule row still exists");
+  assert.ok(sch.next_run > "2020-01-01" && sch.last_run, "advanced, like any schedule that cannot enqueue");
+});
+
+test("ordinary bot schedules still enqueue", async () => {
+  const { tickBotSchedules } = await import("../scripts/pi-bots/bot_scheduler.mjs");
+  const c = raw();
+  const sid = Number(c.prepare("INSERT INTO schedules (task, cron_expression, description, enabled, next_run) VALUES (?,?,?,1,?)")
+    .run("pipeline:botcron:writer", "*/5 * * * *", JSON.stringify({ goal: "weekly notes" }), "2020-01-01T00:00:00.000Z").lastInsertRowid);
+  c.close();
+  assert.equal(tickBotSchedules().fired, 1);
+  const c2 = raw();
+  const job = c2.prepare("SELECT bot_id, goal, status FROM bot_jobs WHERE schedule_id=?").get(sid);
+  c2.close();
+  assert.deepEqual({ ...job }, { bot_id: "writer", goal: "weekly notes", status: "queued" });
+});
