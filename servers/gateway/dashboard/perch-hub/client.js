@@ -109,6 +109,53 @@ export function perchHubJs(lang = "en") {
      operator is looking at some other panel. */
   bindOnce(document,'turbo:before-render','beforeRender',function(){ if(live()) HUB.retire(); });
 
+  /* SESSIONS COLUMN COLLAPSE (desktop, 2026-10-20). At and above the split
+     breakpoint the operator can hide the session list while a chat is open
+     (#perch-list-collapse) and bring it back (#perch-list-reveal, first in
+     the chat head): the shell sidebar's pair (layout.js setSidebarCollapsed /
+     focusSidebarControl). The rules live in sessions-collapse-css.js and only
+     apply wide + chat-open, so the phone is untouched and closing the last
+     session brings the list straight back without forgetting the choice.
+     Read and applied HERE, at the top, before applyHash() can open a session
+     and ask listOnScreen() whether to poll: a direct #sid load must not poll a
+     list it is about to hide. localStorage can throw (private window, blocked
+     site data), so every access is guarded. No document or window listener:
+     the buttons use onclick slots, which Turbo replaces with the elements. */
+  function readCollapsed(){
+    try{ return window.localStorage.getItem('crow-perch-sessions-collapsed')==='1'; }
+    catch(e){ return false; }
+  }
+  var sessionsCollapsed=readCollapsed();
+  function applySessionsCollapsed(){
+    var root=el('perch-hub-root'); if(root) setToken(root,'sessions-collapsed',sessionsCollapsed);
+    var ids=['perch-list-collapse','perch-list-reveal'];
+    for(var i=0;i<ids.length;i++){
+      var b=el(ids[i]); if(b) b.setAttribute('aria-expanded',sessionsCollapsed?'false':'true');
+    }
+  }
+  /* Focus-neutral, like setSidebarCollapsed: only a user gesture moves focus. */
+  function setSessionsCollapsed(on){
+    sessionsCollapsed=!!on;
+    try{ window.localStorage.setItem('crow-perch-sessions-collapsed',sessionsCollapsed?'1':'0'); }catch(e){}
+    applySessionsCollapsed();
+    syncListPolling();            /* hidden: stop polling; revealed: poll + load now */
+  }
+  /* The button that was pressed is about to vanish (display:none blurs it and
+     focus falls back to body), so hand focus to the one that is live after
+     the change. The class goes on FIRST: focus() on a still-hidden reveal
+     button is a no-op. */
+  function toggleSessions(){
+    setSessionsCollapsed(!sessionsCollapsed);
+    var next=el(sessionsCollapsed?'perch-list-reveal':'perch-list-collapse');
+    if(next&&next.focus) next.focus();
+  }
+  applySessionsCollapsed();
+  (function(){
+    var c=el('perch-list-collapse'), r=el('perch-list-reveal');
+    if(c) c.onclick=toggleSessions;
+    if(r) r.onclick=toggleSessions;
+  })();
+
   /* The two transcript writers. Defined HERE because the error and
      empty-transcript paths call them, and those are the FIRST paths a user
      hits when something goes wrong — a ReferenceError there is invisible to a
@@ -1242,7 +1289,12 @@ export function perchHubJs(lang = "en") {
   /* ONE MediaQueryList per realm: window.matchMedia() mints a new object every
      call, so a per-instance one could never be bound once. */
   var SPLIT=HUB.split||(HUB.split=(window.matchMedia?window.matchMedia('(min-width:${PERCH_SPLIT_MIN_WIDTH}px)'):null));
-  function listOnScreen(){ return body.getAttribute('data-view')==='list'||!!(SPLIT&&SPLIT.matches); }
+  /* Collapsed on desktop (sessions-collapse-css.js) counts as hidden — but only
+     while a chat is open: the collapse rules are keyed on data-view="chat",
+     so in the list view the list is on screen whatever the stored choice. */
+  function listOnScreen(){
+    return body.getAttribute('data-view')==='list'||(!!(SPLIT&&SPLIT.matches)&&!sessionsCollapsed);
+  }
   function syncListPolling(){
     if(listOnScreen()){ startListPolling(); loadList(); }
     else stopListPolling();                    /* below the breakpoint it really is hidden */
