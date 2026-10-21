@@ -1033,6 +1033,19 @@ export const translations = {
   "skills.errorExists": { en: "A skill with that name already exists, yours or built-in. Nothing was changed: pick another name, or open the existing skill.", es: "Ya existe una habilidad con ese nombre, tuya o integrada. No se cambió nada: elige otro nombre o abre la habilidad existente." },
   "skills.errorEmpty": { en: "The skill has no content, so nothing was saved.", es: "La habilidad no tiene contenido, así que no se guardó nada." },
   "skills.deleteUserSkillConfirm": { en: "Delete this user skill? The built-in version (if one exists) will be used instead.", es: "¿Eliminar esta habilidad de usuario? Se usará la versión integrada (si existe) en su lugar." },
+  "skills.fromExt": { en: "From {ext}", es: "De {ext}" },
+  "skills.linked": { en: "linked", es: "enlazada" },
+  "skills.yoursBadge": { en: "Yours", es: "Tuya" },
+  "skills.copyOf": { en: "Yours · copy of {ext}", es: "Tuya · copia de {ext}" },
+  "skills.replacesBuiltin": { en: "replaces built-in", es: "reemplaza la integrada" },
+  "skills.experimental": { en: "Experimental", es: "En pruebas" },
+  "skills.st.update": { en: "Update ready", es: "Actualización lista" },
+  "skills.st.behind": { en: "Your copy · updates stopped", es: "Tu copia · sin actualizaciones" },
+  "skills.st.removed": { en: "Removed", es: "Quitada" },
+  "skills.st.orphan": { en: "No longer shipped", es: "Ya no se incluye" },
+  "skills.st.extRemoved": { en: "Its extension was removed", es: "Se quitó su extensión" },
+  "skills.st.replaced": { en: "Replaced by your copy", es: "Reemplazada por tu copia" },
+  "skills.st.needsKit": { en: "Needs the Design kit", es: "Necesita el kit de diseño" },
 
   // ─── Bot Builder Panel (W3-4 + W4-3 C5 i18n sweep) ───
   // JS-context keys (tJs) — pre-existing

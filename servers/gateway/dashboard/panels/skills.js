@@ -15,13 +15,15 @@
 
 import { escapeHtml, section, formField, badge, dataTable } from "../shared/components.js";
 import { t, tJs, fill } from "../shared/i18n.js";
-import { existsSync, readFileSync, unlinkSync, readdirSync, lstatSync, openSync, fstatSync, closeSync, constants as fsConstants } from "fs";
+import { existsSync, readFileSync, unlinkSync, lstatSync, openSync, fstatSync, closeSync, constants as fsConstants } from "fs";
 import { join, basename, dirname } from "path";
 import { fileURLToPath } from "url";
 import { resolveCrowHome } from "../../../shared/crow-home.js";
 import { atomicWrite, bundleShippingSkill, recordRemovedLink } from "../../bundle-skill-sync.js";
 import { normalizeSkillName } from "../../../../scripts/pi-bots/skill_proposals.mjs";
 import { invalidateContextCache } from "../../../memory/crow-context.js";
+import { classifySkills } from "../../skills-catalog.js";
+import { installedKitDir } from "../../../shared/design-kit.js";
 import { getInstanceSyncManager } from "../../../sharing/server.js";
 import { emitOrQueue } from "../../../shared/sync-emit.js";
 
@@ -94,17 +96,6 @@ const NOTICE_CODES = {
   "record-unreadable": "skills.errorRecordUnreadable",
 };
 
-function listSkillFiles(dir) {
-  try {
-    if (!existsSync(dir)) return [];
-    return readdirSync(dir)
-      .filter((f) => SKILL_FILE_RE.test(f))
-      .sort();
-  } catch {
-    return [];
-  }
-}
-
 /**
  * A skill's text, or null. Only a regular file (after following a link) of at
  * most MAX_SKILL_BYTES is read: a link to a directory, a missing target, a
@@ -126,16 +117,38 @@ function readSkillContent(filePath) {
   }
 }
 
-function parseSkillFrontmatter(content) {
-  if (!content) return { title: "", description: "" };
-  // Extract title from first # heading or filename
-  const titleMatch = content.match(/^#\s+(.+?)(?:\s*—.*)?$/m);
-  const title = titleMatch ? titleMatch[1].trim() : "";
-  // Extract description from ## Description section or first paragraph after title
-  const descMatch = content.match(/^##\s+Description\s*\n+([\s\S]*?)(?=\n##|\n$)/m);
-  const description = descMatch ? descMatch[1].trim().split("\n")[0] : "";
-  return { title, description };
+/** The Design kit's skill names (bot-world.mjs), loaded lazily: [] if it can't load. */
+let kitSkillsCache = null;
+async function kitSkills() {
+  if (kitSkillsCache) return kitSkillsCache;
+  try { kitSkillsCache = [...(await import("../../../../scripts/pi-bots/bot-world.mjs")).KIT_SKILLS]; } catch { kitSkillsCache = []; }
+  return kitSkillsCache;
 }
+
+/** Status → [i18n key, tone]. "on" shows nothing. */
+const STATUS = {
+  update: ["skills.st.update", "info"],
+  behind: ["skills.st.behind", "warning"],
+  removed: ["skills.st.removed", "error"],
+  orphan: ["skills.st.orphan", "warning"],
+  "ext-removed": ["skills.st.extRemoved", "muted"],
+  replaced: ["skills.st.replaced", "muted"],
+  "needs-kit": ["skills.st.needsKit", "muted"],
+};
+
+const SKILLS_TABLE_CSS = `<style>
+  .sk-title { font-weight: 600; }
+  .sk-purpose { color: var(--crow-text-secondary); font-size: 0.85rem; margin-top: 0.15rem; }
+  .sk-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; }
+  .sk-chip { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.75rem; border: 1px solid var(--crow-border); background: var(--crow-bg-elevated); color: var(--crow-text-secondary); }
+  .sk-chip-ext, .sk-chip-yours { background: var(--crow-accent-muted); color: var(--crow-text); border-color: transparent; }
+  .sk-st { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.75rem; }
+  .sk-st::before { content: ""; width: 0.5rem; height: 0.5rem; border-radius: 50%; background: currentColor; }
+  .sk-st-info { color: var(--crow-info); }
+  .sk-st-warning { color: var(--crow-warning); }
+  .sk-st-error { color: var(--crow-error); }
+  .sk-st-muted { color: var(--crow-text-muted); }
+</style>`;
 
 export default {
   id: "skills",
@@ -449,54 +462,49 @@ export default {
     }
 
     // --- Main skills list ---
-    const repoSkills = listSkillFiles(REPO_SKILLS_DIR);
-    const userSkills = listSkillFiles(userSkillsDir());
+    // One row per skill from the catalog: where it comes from (built-in, an
+    // extension, yours) and its sync status. Rows with no file (removed, or
+    // shipped but not installed yet) get their actions in the redesigned page.
+    const crowHome = resolveCrowHome();
+    const catalog = classifySkills({
+      crowHome, appBundles: APP_BUNDLES_DIR, repoDir: REPO_SKILLS_DIR, lang,
+      kitSkills: await kitSkills(), kitInstalled: !!installedKitDir(crowHome),
+    }).filter((r) => r.hasFile);
+    const langAttr = (l) => (l !== lang ? ` lang="${l}"` : "");
+    const chip = (text, kind = "") => `<span class="sk-chip${kind ? " sk-chip-" + kind : ""}">${escapeHtml(text)}</span>`;
 
-    // Build merged list: user skills override repo skills
-    const userSkillSet = new Set(userSkills);
-    const allSkillNames = [...new Set([...userSkills, ...repoSkills])].sort();
+    const rows = catalog.map((r) => {
+      const ext = r.bundleName || r.bundle || "";
+      const chips = [];
+      if (r.source === "builtin") chips.push(chip(t("skills.builtInBadge", lang)));
+      else if (r.source === "ext") {
+        chips.push(chip(fill(t("skills.fromExt", lang), { ext }), "ext"));
+        if (r.linked) chips.push(chip(t("skills.linked", lang)));
+      } else chips.push(chip(r.basedOn ? fill(t("skills.copyOf", lang), { ext }) : t("skills.yoursBadge", lang), "yours"));
+      if (r.replacesBuiltin) chips.push(chip(t("skills.replacesBuiltin", lang)));
+      if (r.experimental) chips.push(chip(t("skills.experimental", lang)));
+      const st = STATUS[r.status];
+      if (st) chips.push(`<span class="sk-st sk-st-${st[1]}">${escapeHtml(t(st[0], lang))}</span>`);
 
-    // Skills table
-    const rows = allSkillNames.map((filename) => {
-      const isOverridden = userSkillSet.has(filename) && repoSkills.includes(filename);
-      const isUserOnly = userSkillSet.has(filename) && !repoSkills.includes(filename);
-      const isBuiltIn = !userSkillSet.has(filename);
-
-      const source = isUserOnly ? "user" : isOverridden ? "user" : "repo";
-      const filePath = source === "user"
-        ? join(userSkillsDir(), filename)
-        : join(REPO_SKILLS_DIR, filename);
-      const content = readSkillContent(filePath);
-      const { title } = parseSkillFrontmatter(content);
-
-      const displayName = title || filename.replace(/\.md$/, "").replace(/-/g, " ");
-      const name = filename.replace(/\.md$/, "");
-
-      let statusBadge;
-      if (isOverridden) {
-        statusBadge = `${badge(t("skills.overridden", lang), "connected")} ${badge(t("skills.builtInBadge", lang), "draft")}`;
-      } else if (isUserOnly) {
-        statusBadge = badge(t("skills.customBadge", lang), "published");
-      } else {
-        statusBadge = badge(t("skills.builtInBadge", lang), "draft");
-      }
-
-      const viewBtn = `<a href="/dashboard/skills?edit=${encodeURIComponent(filename)}&source=${source}" class="btn btn-sm btn-secondary">${isBuiltIn ? t("skills.view", lang) : t("skills.edit", lang)}</a>`;
-      const deleteBtn = !isBuiltIn
-        ? ` <form method="POST" style="display:inline;margin-left:0.25rem" onsubmit="return confirm('${tJs("skills.deleteConfirm", lang)}')"><input type="hidden" name="action" value="delete"><input type="hidden" name="filename" value="${escapeHtml(filename)}"><button class="btn btn-sm btn-danger" type="submit">${t("skills.delete", lang)}</button></form>`
+      const editable = r.source !== "builtin";
+      const source = editable ? "user" : "repo";
+      const viewBtn = `<a href="/dashboard/skills?edit=${encodeURIComponent(r.file)}&source=${source}" class="btn btn-sm btn-secondary">${editable ? t("skills.edit", lang) : t("skills.view", lang)}</a>`;
+      const deleteBtn = editable
+        ? ` <form method="POST" style="display:inline;margin-left:0.25rem" onsubmit="return confirm('${tJs("skills.deleteConfirm", lang)}')"><input type="hidden" name="action" value="delete"><input type="hidden" name="filename" value="${escapeHtml(r.file)}"><button class="btn btn-sm btn-danger" type="submit">${t("skills.delete", lang)}</button></form>`
         : "";
+      const purpose = r.description ? `<div class="sk-purpose"${langAttr(r.descriptionLang)}>${escapeHtml(r.description)}</div>` : "";
 
       return [
-        escapeHtml(displayName),
-        `<span class="mono" style="font-size:0.8rem">${escapeHtml(name)}</span>`,
-        statusBadge,
+        `<span class="sk-name" data-skill="${escapeHtml(r.name)}" data-source="${r.source}"><span class="sk-title"${langAttr(r.titleLang)}>${escapeHtml(r.title)}</span></span>${purpose}`,
+        `<span class="mono" style="font-size:0.8rem">${escapeHtml(r.name)}</span>`,
+        `<span class="sk-chips">${chips.join("")}</span>`,
         `${viewBtn}${deleteBtn}`,
       ];
     });
 
-    const skillsTable = allSkillNames.length === 0
+    const skillsTable = catalog.length === 0
       ? `<div class="empty-state"><h3>${t("skills.noSkillsFound", lang)}</h3><p>${t("skills.skillsDirectory", lang)}</p></div>`
-      : dataTable([t("skills.tableName", lang), t("skills.tableFile", lang), t("skills.tableSource", lang), t("skills.tableActions", lang)], rows, { stack: true });
+      : SKILLS_TABLE_CSS + dataTable([t("skills.tableName", lang), t("skills.tableFile", lang), t("skills.tableSource", lang), t("skills.tableActions", lang)], rows, { stack: true });
 
     // Create form
     const createForm = `<form method="POST">
