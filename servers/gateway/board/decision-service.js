@@ -382,7 +382,7 @@ export async function decideOption(tdb, cdb, itemId, { index, otherText } = {}, 
         autonomy: "gated",
         assigned_bot: enabled ? bot : null,
         owner: bot && !enabled ? (cc.owner ?? bot) : (cc.owner ?? null),
-      }, actor);
+      }, actor, { createDetail: { via: "decision", decision_card_id: itemId } });
       created = r.id;
       await tdb.execute({
         sql: "UPDATE tasks_items SET data_json=json_set(data_json,'$.decision.created_card_id',?) WHERE id=? AND board_id IS NULL",
