@@ -291,3 +291,155 @@ test("Configure never overwrites tax's generated key (it is not a form field)", 
     assert.equal(parseEnvText(readFileSync(join(dir, ".env"), "utf8")).CROW_TAX_ENCRYPTION_KEY, "generated-key-0123456789");
   } finally { server.close(); }
 });
+
+// ─── Compose lint (queue item 30d): no static example or secret fallback in a compose ───
+// Every tracked bundle compose plus the repo-root one. The waiver list is frozen: adding
+// to it is a reviewed diff (same idea as SURVEY_F1/EXEMPT in bundle-form-friction).
+const COMPOSE_FALLBACK_WAIVERS = new Map([
+  // The legacy rung's only record of the password a kept database was created with.
+  ["bookstack:BOOKSTACK_DB_PASSWORD", "legacy rung: password a kept database was created with"],
+  ["miniflux:MINIFLUX_DB_PASSWORD", "legacy rung: password a kept database was created with"],
+  ["paperless:PAPERLESS_DB_PASSWORD", "legacy rung: password a kept database was created with"],
+  ["wallabag:WALLABAG_DB_PASSWORD", "legacy rung: password a kept database was created with"],
+  // `local`: a dummy key for a local model endpoint.
+  ["rookery:ROOKERY_MODEL_API_KEY", "dummy key for a local model endpoint"],
+]);
+
+function trackedComposeFiles() {
+  const out = [{ owner: "root", file: join(REPO, "docker-compose.yml"), manifest: null }];
+  const ls = execFileSync("git", ["ls-files", "bundles/*/docker-compose*.yml"], { cwd: REPO, encoding: "utf8" });
+  for (const rel of ls.split("\n").filter(Boolean).sort()) {
+    const id = rel.split("/")[1];
+    const mp = join(REPO, "bundles", id, "manifest.json");
+    out.push({ owner: id, file: join(REPO, rel), manifest: existsSync(mp) ? JSON.parse(readFileSync(mp, "utf8")) : null });
+  }
+  return out;
+}
+
+const { composeFallbacks } = await import("../servers/gateway/bundle-env-secrets.js");
+
+/**
+ * Rule (iv): on a line whose value is NOT quoted, the text after a `${…}` operator must
+ * contain neither ": " (a YAML parse error in a mapping, or a sequence entry silently
+ * turned into a mapping) nor " #" (starts a comment). Returns the offending expressions.
+ */
+function unsafeUnquotedInterpolations(text) {
+  const bad = [];
+  for (const line of String(text).split("\n")) {
+    let rest = line.trimStart();
+    if (rest.startsWith("#")) continue;
+    if (rest.startsWith("- ")) rest = rest.slice(2).trimStart();
+    const kv = /^([^\s"'${}][^:{}]*?):\s+(.*)$/.exec(rest);
+    const value = kv ? kv[2] : rest;
+    if (/^["']/.test(value)) continue;
+    const re = /\$\{[A-Za-z_][A-Za-z0-9_]*(?::?[-?])([^}]*)\}/g;
+    let m;
+    while ((m = re.exec(value)) !== null) {
+      if (m[1].includes(": ") || m[1].includes(" #")) bad.push(m[0]);
+    }
+  }
+  return bad;
+}
+
+// Every `${KEY:-value}` AND `${KEY-value}` occurrence (not only the first per key), literal
+// values only (a nested `${…}` default is not a static value); `$${…}` is an escape.
+function allComposeDefaults(text) {
+  const out = [];
+  const re = /\$\{([A-Za-z_][A-Za-z0-9_]*):?-([^}$]*)\}/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > 0 && text[m.index - 1] === "$") continue;
+    let v = m[2].trim();
+    if (/^(["']).*\1$/.test(v)) v = v.slice(1, -1);
+    if (v) out.push([m[1], v]);
+  }
+  return out;
+}
+// Plain literal values on environment lines: `KEY: value` / `- KEY=value`, no `${`.
+function plainEnvValues(text) {
+  const out = [];
+  for (const line of String(text).split("\n")) {
+    const m = /^\s*(?:-\s+["']?([A-Za-z_][A-Za-z0-9_]*)=([^"'#]*)["']?|([A-Za-z_][A-Za-z0-9_]*):\s+["']?([^"'#{}\[]*?)["']?)\s*(?:#.*)?$/.exec(line);
+    if (!m) continue;
+    const k = m[1] || m[3];
+    const v = (m[2] ?? m[4] ?? "").trim();
+    if (v && !v.includes("$")) out.push([k, v]);
+  }
+  return out;
+}
+const SECRET_KEY_RE = /(PASSWORD|PASSWD|_PASS|SECRET|_KEY|TOKEN)$/;
+const WEAK_PLAIN = new Set(["password", "secret", "admin", "changeme", "change-me", "changeit", "root", "test", "default", "pass", "passwd", "123456"]);
+
+test("compose lint: no placeholder fallback and no static secret fallback outside the frozen waiver list", () => {
+  const bad = [];
+  const usedWaivers = new Set();
+  for (const { owner, file, manifest } of trackedComposeFiles()) {
+    const specs = new Map((manifest?.env_vars || []).map((v) => [v.name, v]));
+    const secretish = (k) => specs.get(k)?.secret === true || SECRET_KEY_RE.test(k);
+    const text = readFileSync(file, "utf8");
+    for (const [k, v] of allComposeDefaults(text)) {
+      if (P.isPlaceholderValue(v)) { bad.push(`${owner}: ${k} has a placeholder fallback`); continue; }
+      if (!secretish(k)) continue;
+      const id = `${owner}:${k}`;
+      if (COMPOSE_FALLBACK_WAIVERS.has(id)) { usedWaivers.add(id); continue; }
+      bad.push(`${owner}: ${k} has a static secret fallback`);
+    }
+    // A secret-looking key set to a plain weak value in the compose itself.
+    for (const [k, v] of plainEnvValues(text)) {
+      if (secretish(k) && (WEAK_PLAIN.has(v.toLowerCase()) || P.isPlaceholderValue(v))) bad.push(`${owner}: ${k} is set to a plain example value`);
+    }
+  }
+  assert.deepEqual(bad, [], bad.join("\n"));
+  // Rule (iii): every waiver still matches a real fallback, so the list stays exact.
+  assert.deepEqual([...usedWaivers].sort(), [...COMPOSE_FALLBACK_WAIVERS.keys()].sort());
+});
+
+test("compose lint helpers: bare-dash defaults, every occurrence, and plain weak values are seen", () => {
+  assert.deepEqual(allComposeDefaults("a: ${X-one}\nb: ${X:-two}\nc: $${Y:-no}\nd: ${Z:-${W}}\ne: ${V:?msg}"), [["X", "one"], ["X", "two"]]);
+  assert.deepEqual(plainEnvValues("    environment:\n      DB_PASSWORD: changeme\n      - ADMIN_PASS=admin\n      OK: ${OK}\n"), [["DB_PASSWORD", "changeme"], ["ADMIN_PASS", "admin"]]);
+  assert.ok(SECRET_KEY_RE.test("SMTP_PASSWD") && SECRET_KEY_RE.test("ADMIN_PASS"));
+});
+
+test("compose lint: no unquoted ${…} message or default carries ': ' or ' #' (YAML-safe)", () => {
+  const bad = [];
+  for (const { owner, file } of trackedComposeFiles()) {
+    for (const expr of unsafeUnquotedInterpolations(readFileSync(file, "utf8"))) bad.push(`${owner}: ${expr}`);
+  }
+  assert.deepEqual(bad, [], bad.join("\n"));
+  // The rule catches the shape that breaks the YAML, and lets the quoted form through.
+  assert.equal(unsafeUnquotedInterpolations(
+    "      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is not set: reinstall MinIO}").length, 1);
+  assert.equal(unsafeUnquotedInterpolations("      - PASS=${PASS:-a #b}").length, 1);
+  assert.equal(unsafeUnquotedInterpolations(
+    '      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is not set: reinstall MinIO}"').length, 0);
+  assert.equal(unsafeUnquotedInterpolations('      - "PASS=${PASS:-a: b}"').length, 0);
+});
+
+test("compose lint: the repo-root compose keeps MinIO's root password on :? (no fallback)", () => {
+  const text = readFileSync(join(REPO, "docker-compose.yml"), "utf8");
+  assert.match(text, /\$\{MINIO_ROOT_PASSWORD:\?/);
+  assert.ok(!("MINIO_ROOT_PASSWORD" in composeFallbacks(text)));
+});
+
+test("plex: ADVERTISE_IP never interpolates PLEX_URL (a full URL) and comes from the optional PLEX_ADVERTISE_URL", () => {
+  const compose = readFileSync(join(REPO, "bundles", "plex", "docker-compose.yml"), "utf8");
+  const line = compose.split("\n").find((l) => l.includes("ADVERTISE_IP"));
+  assert.ok(line, "the compose sets ADVERTISE_IP");
+  assert.ok(!line.includes("PLEX_URL"), "PLEX_URL is already http://host:32400: http://${PLEX_URL}:32400/ doubles it");
+  assert.match(line, /ADVERTISE_IP=\$\{PLEX_ADVERTISE_URL:-\}\s*$/, "blank lets Plex discover it (the image skips an empty value)");
+  const spec = manifestOf("plex").env_vars.find((v) => v.name === "PLEX_ADVERTISE_URL");
+  assert.ok(spec && spec.required !== true && spec.description, "an optional, described field");
+});
+
+test("plex: PLEX_ADVERTISE_URL must be an http(s) URL; its format hint is given in en and es", async () => {
+  const { envPatternViolation } = await import("../servers/gateway/bundle-env-secrets.js");
+  const m = manifestOf("plex");
+  const spec = m.env_vars.find((v) => v.name === "PLEX_ADVERTISE_URL");
+  assert.equal(spec.pattern, "^https?://\\S+$");
+  assert.ok(spec.pattern_hint.en && spec.pattern_hint.es, "hint in en and es");
+  for (const ok of ["", "http://192.168.1.10:32400", "https://plex.crow.test"]) assert.equal(envPatternViolation(m, { PLEX_ADVERTISE_URL: ok }), null, ok);
+  const bad = envPatternViolation(m, { PLEX_ADVERTISE_URL: "192.168.1.10" });
+  assert.equal(bad.key, "PLEX_ADVERTISE_URL");
+  assert.equal(bad.why, `must be ${spec.pattern_hint.en}`);
+  assert.equal(envPatternViolation(m, { PLEX_ADVERTISE_URL: "192.168.1.10" }, "es").why, `must be ${spec.pattern_hint.es}`);
+});

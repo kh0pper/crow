@@ -130,7 +130,7 @@ function renderStarterCards(lang) {
     <div class="onboarding-action-card">
       <div class="onboarding-action-card-title">${escapeHtml(c.name || c.id)}</div>
       <div class="onboarding-action-card-body">${escapeHtml(c.description || "")}</div>
-      <div class="onboarding-action-card-count">${t("onboarding.starterMemberCount", lang).replace("{n}", String(c.members.length))}</div>
+      <div class="onboarding-action-card-count">${escapeHtml(fill(t(c.members.length === 1 ? "onboarding.starterMemberCountOne" : "onboarding.starterMemberCount", lang), { n: c.members.length }))}</div>
     </div>`).join("");
   return `${CARD_CSS}<div class="onboarding-action-cards">${cardHtml}</div>`;
 }

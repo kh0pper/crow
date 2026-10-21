@@ -1,7 +1,7 @@
 {
   "id": "frigate",
   "name": "Frigate NVR",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Self-hosted NVR with AI object detection — cameras, events, clips. RTSP/ONVIF cameras, local CPU detection, optional Coral TPU.",
   "type": "bundle",
   "author": "Crow",
@@ -20,7 +20,7 @@
     { "name": "FRIGATE_PASSWORD", "description": "Password for FRIGATE_USER.", "required": false, "secret": true },
     { "name": "FRIGATE_CONFIG_PATH", "description": "Host path for Frigate config directory.", "default": "~/.crow/data/frigate/config", "required": false },
     { "name": "FRIGATE_MEDIA_PATH", "description": "Host path for recordings and snapshots.", "default": "~/.crow/data/frigate/media", "required": false },
-    { "name": "FRIGATE_RTSP_PASSWORD", "description": "Password for Frigate's internal RTSP restreamer.", "required": false, "secret": true }
+    { "name": "FRIGATE_RTSP_PASSWORD", "description": "Your cameras' RTSP password, if your config.yml writes {FRIGATE_RTSP_PASSWORD} in a camera URL. Not the Frigate login. If config.yml uses it, set it here, or the camera login will fail. Leave blank if you don't use it.", "required": false, "secret": true }
   ],
   "ports": [8971, 8554, 8555],
   "webUI": { "port": 8971, "path": "/", "label": "Frigate" },

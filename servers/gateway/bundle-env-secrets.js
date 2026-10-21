@@ -118,6 +118,33 @@ export function writePrivateFile(path, content) {
   }
 }
 
+/**
+ * The retained copy's record of keys whose value is a compose fallback an old install ran
+ * on (a published default): `CROW_LEGACY_FALLBACK_KEYS=A:<hash>,B:<hash>`, each with a short
+ * sha256 of that value. Kept so a later install, and the boot backfill, never save that value
+ * to the keychain as if it were this install's. A mark holds only while the value is unchanged.
+ */
+export const LEGACY_FALLBACK_MARKER = "CROW_LEGACY_FALLBACK_KEYS";
+const markHash = (v) => createHash("sha256").update(String(v)).digest("hex").slice(0, 16);
+/** Keys the retained copy marks as legacy whose value is still the one that was marked. */
+export function legacyFallbackKeys(retained) {
+  const out = new Set();
+  for (const entry of String(retained?.[LEGACY_FALLBACK_MARKER] || "").split(",")) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*):([0-9a-f]{16})$/.exec(entry.trim());
+    if (m && retained[m[1]] && markHash(retained[m[1]]) === m[2]) out.add(m[1]);
+  }
+  return out;
+}
+
+/** `env` with the marker set to the union of its still-valid legacy keys and `add`. */
+function withLegacyMarker(env, add) {
+  const out = { ...env };
+  const keys = new Set([...legacyFallbackKeys(env), ...add].filter((k) => out[k]));
+  delete out[LEGACY_FALLBACK_MARKER];
+  if (keys.size > 0) out[LEGACY_FALLBACK_MARKER] = [...keys].sort().map((k) => `${k}:${markHash(out[k])}`).join(",");
+  return out;
+}
+
 export function retainedEnvPath(crowHome, bundleId) {
   return join(crowHome, "secrets", "bundle-env", `${bundleId}.env`);
 }
@@ -172,6 +199,9 @@ export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, compos
   const replaced = [];
   const replaceSkipped = [];
   const existingFor = (k) => installed[k] || retained[k] || legacy[k] || "";
+  const retainedLegacy = legacyFallbackKeys(retained);
+  const isLegacy = (k, v) => (legacy[k] && v === legacy[k]) || (retainedLegacy.has(k) && v === retained[k]);
+  const legacyKeys = new Set();
   // Private halves first, so a public half can be derived from (or minted with) its pair.
   const order = [...keys].sort((a, b) => (byName.get(a)?.generate === "vapid_public_key") - (byName.get(b)?.generate === "vapid_public_key"));
   const pairs = {};
@@ -211,8 +241,12 @@ export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, compos
     }
     if (existing) {
       env[k] = existing;
+      if (isLegacy(k, existing)) legacyKeys.add(k);
       if (spec.keychain === true && !spec.store_as) {
-        reusedPlain[k] = { plain: existing, origin: installed[k] || legacy[k] ? "typed" : "generated" };
+        // "legacy": the value is the compose fallback the old install ran on, a published
+        // default — kept so the data still opens, but never saved to the keychain.
+        const origin = isLegacy(k, existing) ? "legacy" : installed[k] ? "typed" : "generated";
+        reusedPlain[k] = { plain: existing, origin };
       }
       continue;
     }
@@ -235,7 +269,7 @@ export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, compos
       retainedPath,
       `# Crow-generated secrets for bundle '${bundleId}'. Kept across uninstall so a\n` +
         `# reinstall reuses them (the bundle's data still expects them). Do not edit.\n` +
-        formatEnvLines({ ...retained, ...env }),
+        formatEnvLines(withLegacyMarker({ ...retained, ...env }, legacyKeys)),
     );
   };
   return { env, minted, reusedPlain, restored, replaced, replaceSkipped, persist };
@@ -322,12 +356,14 @@ export function retainGeneratedForReinstall(bundleId, manifest, { destDir, crowH
     const retainedPath = retainedEnvPath(crowHome, bundleId);
     const retained = readEnvSafe(retainedPath);
     const add = {};
+    const marked = new Set();
     for (const k of keys) {
       // A library path follows the latest install (the user may have pointed it elsewhere);
       // a secret is never replaced (its kept database expects the old one).
       if (retained[k] && !(pathKeys.has(k) && installed[k] && installed[k] !== retained[k])) continue;
       const v = installed[k] || legacy[k];
       if (v) add[k] = v;
+      if (v && legacy[k] && v === legacy[k] && !pathKeys.has(k)) marked.add(k);
     }
     if (Object.keys(add).length === 0) return 0;
     const dir = dirname(retainedPath);
@@ -337,7 +373,7 @@ export function retainGeneratedForReinstall(bundleId, manifest, { destDir, crowH
       retainedPath,
       `# Crow-generated secrets for bundle '${bundleId}'. Kept across uninstall so a\n` +
         `# reinstall reuses them (the bundle's data still expects them). Do not edit.\n` +
-        formatEnvLines({ ...retained, ...add }),
+        formatEnvLines(withLegacyMarker({ ...retained, ...add }, marked)),
     );
     return Object.keys(add).length;
   } catch {
@@ -381,8 +417,11 @@ export async function breachedValueViolation(manifest, envVars, { fetchImpl = gl
   return null;
 }
 
-/** First supplied value breaking its manifest `pattern`, or null. Names the KEY, never the value. */
-export function envPatternViolation(manifest, envVars) {
+/**
+ * First supplied value breaking its manifest `pattern`, or null. Names the KEY, never the value.
+ * `pattern_hint` is a string, or `{ en, es, … }` picked by `lang` (falling back to en).
+ */
+export function envPatternViolation(manifest, envVars, lang = "en") {
   const vals = envVars && typeof envVars === "object" ? envVars : {};
   for (const v of manifest?.env_vars || []) {
     if (!v || typeof v.pattern !== "string") continue;
@@ -391,7 +430,9 @@ export function envPatternViolation(manifest, envVars) {
     let re;
     try { re = new RegExp(v.pattern); } catch { return { key: v.name, why: "has an invalid format rule in its manifest" }; }
     if (!re.test(String(val))) {
-      return { key: v.name, why: v.pattern_hint ? `must be ${v.pattern_hint}` : "does not match the allowed format" };
+      const ph = v.pattern_hint;
+      const hint = ph && typeof ph === "object" ? (ph[lang] || ph.en) : ph;
+      return { key: v.name, why: hint ? `must be ${hint}` : "does not match the allowed format" };
     }
   }
   return null;

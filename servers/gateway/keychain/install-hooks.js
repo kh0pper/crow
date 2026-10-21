@@ -76,8 +76,13 @@ export async function recordKeychainForInstall({ bundleId, manifest, env, minted
   // A keychain:true value KEPT from an earlier install (typed before the field was generated,
   // or a retained copy) whose keychain entry does not exist: the form no longer shows the
   // field, so the keychain is the only place the user can read it. Saved best-effort.
+  // A value that is the old compose's published fallback (origin "legacy") is never saved:
+  // the keychain would present a publicly known default as this install's password.
+  for (const [k, r] of Object.entries(reusedPlain || {})) {
+    if (r?.origin === "legacy") log(`${k} is running on the published default; reinstall with data deletion or rotate it`);
+  }
   const keptCandidates = Object.entries(reusedPlain || {})
-    .filter(([k, r]) => reused.includes(k) && r && typeof r.plain === "string" && r.plain !== "")
+    .filter(([k, r]) => reused.includes(k) && r && r.origin !== "legacy" && typeof r.plain === "string" && r.plain !== "")
     .map(([k, r]) => ({ k, plain: r.plain, origin: r.origin === "typed" ? "typed" : "generated", firstView: true }));
   if (mintedList.length === 0 && typedList.length === 0 && reused.length === 0) return out;
 

@@ -114,17 +114,31 @@ test("real bundles: media-path / admin-password compose hard-fail keys are requi
   try {
     const expected = {
       // jellyfin/navidrome default to a library folder inside CROW_HOME now (default_in_crow_home).
-      plex: "PLEX_MEDIA_PATH",
+      // Plex stays install-blocking on purpose (decided 2026-10-21): a Plex library is the
+      // user's real media, and the server also needs a claim token, so an empty CROW_HOME
+      // library would give no one-click value.
+      plex: ["PLEX_MEDIA_PATH"],
+      // PeerTube's public hostname and admin email (abuse reports, takedown notices) are
+      // typed by the user and compose-:? (queue item 30d), in env_vars order.
+      peertube: ["PEERTUBE_WEBSERVER_HOSTNAME", "PEERTUBE_ADMIN_EMAIL"],
       // miniflux's admin password is generated now (never install-blocking).
     };
-    for (const [id, key] of Object.entries(expected)) {
-      assert.deepEqual(installBlockingEnvKeys(id), [key], id + " blocks on " + key);
+    for (const [id, keys] of Object.entries(expected)) {
+      assert.deepEqual(installBlockingEnvKeys(id), keys, id + " blocks on " + keys.join(", "));
+      const filled = Object.fromEntries(keys.map((k) => [k, "/srv/x"]));
+      assert.deepEqual(B.missingInstallEnv(id, {}), keys);
+      assert.deepEqual(B.missingInstallEnv(id, filled), []);
+      // PeerTube's install is refused earlier on its caddy dependency in this scratch home.
+      if (id === "peertube") continue;
       const r = await validateInstall(id, { envVars: {}, requireEnv: true, forceInstall: true });
       assert.equal(r.code, "missing_required_env", id + ": " + JSON.stringify(r));
-      assert.deepEqual(r.extra.missing_env, [key]);
-      const ok = await validateInstall(id, { envVars: { [key]: "/srv/x" }, requireEnv: true, forceInstall: true });
-      assert.notEqual(ok.code, "missing_required_env", id + " with " + key + " set");
+      assert.deepEqual(r.extra.missing_env, keys);
+      const ok = await validateInstall(id, { envVars: filled, requireEnv: true, forceInstall: true });
+      assert.notEqual(ok.code, "missing_required_env", id + " with " + keys.join(", ") + " set");
     }
+    // MinIO's root password is :? in its compose but generated, so it never blocks.
+    assert.match(readFileSync(new URL("../bundles/minio/docker-compose.yml", import.meta.url), "utf8"), /\$\{MINIO_ROOT_PASSWORD:\?/);
+    assert.deepEqual(installBlockingEnvKeys("minio"), []);
   } finally {
     _setAppBundlesForTest(FIXTURES);
   }

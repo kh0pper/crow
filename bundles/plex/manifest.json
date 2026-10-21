@@ -1,7 +1,7 @@
 {
   "id": "plex",
   "name": "Plex",
-  "version": "1.0.3",
+  "version": "1.0.5",
   "privileged": true,
   "install_consent_messages": {
     "en": "Crow does not start a Plex server at install: it runs only if you start it from Extensions. If you do, the self-hosted Plex server uses host networking (Plex's own recommendation) so devices on your local network can discover it. It listens on every network interface of this machine (port 32400 and Plex's discovery ports) and mounts your media folder read-write. Until you claim it with your Plex account (PLEX_CLAIM_TOKEN), the first person who opens it can claim it.",
@@ -25,7 +25,8 @@
     { "name": "PLEX_MACHINE_ID", "description": "Plex server machine identifier (optional, for multi-server setups)", "required": false },
     { "name": "PLEX_MEDIA_PATH", "description": "Host path for media files (Docker self-host mode)", "required": true },
     { "name": "PLEX_CONFIG_PATH", "description": "Host path for Plex config/database (Docker self-host mode)", "required": false },
-    { "name": "PLEX_CLAIM_TOKEN", "description": "Plex claim token for initial server setup (Docker self-host mode, from plex.tv/claim)", "required": false, "secret": true }
+    { "name": "PLEX_CLAIM_TOKEN", "description": "Plex claim token for initial server setup (Docker self-host mode, from plex.tv/claim)", "required": false, "secret": true },
+    { "name": "PLEX_ADVERTISE_URL", "description": "URL other devices use to reach this Plex server, e.g. http://192.168.1.10:32400. Leave blank to let Plex discover it. (Docker self-host mode)", "required": false, "pattern": "^https?://\\S+$", "pattern_hint": { "en": "a URL starting with http:// or https://, e.g. http://192.168.1.10:32400", "es": "una URL que empiece por http:// o https://, p. ej. http://192.168.1.10:32400" } }
   ],
   "ports": [32400],
   "webUI": { "port": 32400, "path": "/web", "label": "Plex Web", "proxyMode": "direct" },
