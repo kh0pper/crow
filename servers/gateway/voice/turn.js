@@ -138,9 +138,22 @@ export const HINT_TEXT = "I can only add new items by voice. Try: add lunch next
 // Rides on the user message for the retry round only (restored before saving; the round's text is held as usual).
 const claimRetryNote = (names) => `[Tools] Nothing has been added yet: no tool ran on this turn. To add it, call ${names.join(" or ")} now with the title and time the user gave. Never say it is done before the tool has run.`;
 // A change, cancel or question about what was done is never retried as an add (en and es, accents dropped).
-const CHANGE_WORDS = new Set(["move", "change", "cancel", "delete", "remove", "cambia", "cambialo", "mueve", "muevelo", "cancela", "cancelalo", "borra", "borralo", "quita", "quitalo"]);
+// A change verb counts only with a referent after it ("move it", "cancel my …", "cambia la hora") or with the surface's
+// follow-up reading (actionFollowWhen); a Spanish verb with its object pronoun attached ("cámbiala") is its own referent.
+// An add verb that leads ("add move the couch…", "remind me to cancel netflix") is an add, whatever follows.
+const CHANGE_WORDS = new Set(["move", "change", "cancel", "delete", "remove", "reschedule", "cambia", "mueve", "cancela", "borra", "quita", "reprograma", "reprogramar"]);
+const CHANGE_CLITIC = new Set(["cambialo", "cambiala", "muevelo", "muevela", "cancelalo", "cancelala", "borralo", "borrala", "quitalo", "quitala", "reprogramalo", "reprogramala"]);
+const CHANGE_REFERENTS = new Set(["it", "that", "this", "them", "those", "these", "the", "my", "our", "his", "her", "their",
+  "lo", "la", "los", "las", "eso", "esa", "ese", "esto", "el", "mi", "mis", "tu", "tus"]);
+const ADD_LEADS = new Set(["add", "remind", "put", "create", "schedule", "anade", "agrega", "anademe", "agregame", "recuerdame", "pon", "apunta", "crea"]);
+const ADD_LEAD_IN = new Set(["please", "can", "could", "would", "you", "hey", "crow", "ok", "okay", "por", "favor", "puedes"]);
 const QUESTION_PHRASES = ["did you", "was it", "is it", "have you", "can you check"];
-const asksChange = (t) => phraseWords(t).some((w) => CHANGE_WORDS.has(w));
+const leadsWithAdd = (ws) => { let i = 0; while (i < ws.length && i < 4 && ADD_LEAD_IN.has(ws[i])) i++; return ADD_LEADS.has(ws[i]); };
+const asksChange = (t, followUp = false) => {
+  const ws = phraseWords(t);
+  if (leadsWithAdd(ws)) return false;
+  return ws.some((w, i) => CHANGE_CLITIC.has(w) || (CHANGE_WORDS.has(w) && (followUp || CHANGE_REFERENTS.has(ws[i + 1]))));
+};
 const asksQuestion = (t) => { const s = ` ${phraseWords(t).join(" ")} `; return QUESTION_PHRASES.some((p) => s.includes(` ${p} `)) || /¿\s*(lo|ya)\b/i.test(String(t)); };
 /** Same tool, same title (case-insensitive, trimmed), same start → one key (a forced retry never writes it twice). */
 const writeKey = (tool, title, start) => {
@@ -1160,7 +1173,10 @@ export function createVoiceTurnRunner(deps) {
       // cancel or a question about what was done), with an own tool on offer and none called, never carried-only. It
       // forces the own tool where the engine honours that (named, then required), else steps up to the larger model
       // once; its text is held as usual. A forced call that repeats a write on record writes nothing.
-      const changeAsked = asksChange(transcript);
+      let followUp = false;
+      try { followUp = typeof opts.actionFollowWhen === "function" && opts.actionFollowWhen(transcript) === true; } catch { followUp = false; }
+      // The calendar's add-matcher (intentWhen) reading the words as an add overrides a change word.
+      const changeAsked = !ownWhenAsked && asksChange(transcript, followUp);
       const addAsked = (actionAsked || ownIntent) && !changeAsked && !asksQuestion(transcript);
       let retryRound = 0;          // the round the retry runs in (0: none)
       let retryTools = null;       // what the retry round offers (the own tools the words want)
@@ -1261,18 +1277,21 @@ export function createVoiceTurnRunner(deps) {
       };
       // The claim retry is due (see changeAsked above): a claim was blocked (the full hold's held text, or the sentence
       // gate) and nothing was done, on an add request with an own tool on offer and none called.
-      const retryDue = () => addAsked && ownOnOffer && !ownCarriedOnly && !mustX && !holdEnd && !calendarFallback && !finalRound
+      const retryDue = () => addAsked && retryWanted().length > 0 && !ownCarriedOnly && !mustX && !holdEnd && !calendarFallback && !finalRound
         && !backed && !memoryBacked && !unsureBacked && !actionSent && !calledTools.some((n) => ownByName.has(n))
         && (gateHit || (actionGuard && claimsAction(guardHeld.trim())));
       // The hint instead of the not-done line: the retry was due (it ran with no call, or could not run), or the claim was
       // about a change or a cancel, with an own tool on offer (Crow's own tools only add).
-      const hintDue = () => ownOnOffer && (retryTried || changeAsked);
+      // "I can only add new items by voice" is false while another write tool is on offer: then the not-done line.
+      const otherWrite = tools.some((t) => !ownByName.has(t.name) && !extraByName.has(t.name) && !deps.isMemoryTool(t.name) && toolEffect(t.name) !== "read");
+      const hintDue = () => ownOnOffer && !otherWrite && (retryTried || changeAsked);
       const hintLine = () => { timings.claim_hint = true; return String(opts.hintText || HINT_TEXT); };
+      // Only the own tools the words want: a request no own family reads as its own ("send a text to mom") is never forced
+      // onto one, and never steps up for one.
+      const retryWanted = () => tools.filter((t) => ownByName.has(t.name) && ownWants(ownByName.get(t.name).family, transcript));
       // → true when the retry round is set up (the loop goes on), false when it cannot run (the hint ends the turn).
       const startRetry = async (claimMsg) => {
-        const own = tools.filter((t) => ownByName.has(t.name));
-        const wanted = own.filter((t) => ownWants(ownByName.get(t.name).family, transcript));
-        const pick = wanted.length ? wanted : own;
+        const pick = retryWanted();
         let rf = LEGACY_FORCING;
         if (typeof deps.toolForcing === "function") { try { rf = (await deps.toolForcing(modelKey, db)) || LEGACY_FORCING; } catch { rf = { named: true, required: false, engine: "unknown" }; } }
         const name = pick.length === 1 ? pick[0].name : null;
@@ -1418,7 +1437,7 @@ export function createVoiceTurnRunner(deps) {
           break;
         }
         if (mustX && timings.tool_choice === undefined) timings.tool_choice = choiceMode;
-        if (retrying && choiceMode !== "none") timings.claim_retry = choiceMode;
+        if (retrying && timings.claim_retry !== "step_up") timings.claim_retry = choiceMode;   // "none": a refused forced request stepped down
         // Text the gates still held (it could have been the start of tool syntax or of an echo) is decided now.
         const held = toolText.flush();
         if (toolText.cut) { timings.tool_text = true; content = stripToolSyntax(content); }

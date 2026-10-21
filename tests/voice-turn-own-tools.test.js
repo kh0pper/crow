@@ -992,3 +992,76 @@ test("claim retry: an add request with no own tool on offer never retries", asyn
   assert.equal(r.timings.claim_retry, undefined);
   assert.ok(!r.spoken.includes(HINT_TEXT));
 });
+
+// ─── Task 5 fix round 1 ───
+for (const t of ["send a text to mom saying I'm late", "reschedule my appointment to Friday"]) {
+  test(`claim retry: '${t}' with own tools on offer: no retry, no write, no step-up`, async () => {
+    const cal = calWhen(COFFEE_ADDED);
+    const rem = remTool({ ok: true, code: "set", final: true, say: "Okay." });
+    const h = ownHarness({ bot: CROW, probe: () => true, rounds: [says("Done, it's all taken care of. "), call("crow_calendar_add_event", COFFEE), call("crow_reminder_add", { text: "x" })] });
+    h.deps.toolForcing = NO_FORCING;
+    const r = await heard(h, t, { ...act, familiesOnIntent: false, ownTools: [cal, rem] });
+    assert.equal(r.rounds.length, 1, `${t}: ${r.rounds.length} rounds`);
+    assert.equal(r.timings.claim_retry, undefined);
+    assert.deepEqual(h.calls.chatKeys, [FAST], "no step-up");
+    assert.equal(cal.seen.length + rem.seen.length, 0, "no write");
+    assert.ok(!r.spoken.some((x) => /taken care/.test(x)));
+  });
+}
+
+for (const t of ["remind me to cancel netflix tomorrow", "add move the couch to my tasks", "remind me to change the oil"]) {
+  test(`claim retry: '${t}' is an add (the change word has no referent, or the add verb leads): it retries`, async () => {
+    const h = ownHarness({ bot: CROW, rounds: [says("Done, it's all set. "), says("Sure. ")] });
+    h.deps.toolForcing = VLLM;
+    const r = await heard(h, t, { ...act, ownTools: [calWhen(), remTool(), taskTool()] });
+    assert.equal(r.rounds.length, 2, `${t}: one retry round`);
+    assert.ok(r.timings.claim_retry, t);
+  });
+}
+
+test("claim retry: 'cámbiala a las nueve' after a write is a change: no retry, the hint", async () => {
+  const cal = calTool();
+  const h = ownHarness({ bot: CROW, rounds: [call("crow_calendar_add_event", LUNCH), says("Listo, la cambié. ")] });
+  h.deps.toolForcing = VLLM;
+  await heard(h, "add lunch Monday to my calendar", { ...act, ownTools: [cal] });
+  const r = await heard(h, "cámbiala a las nueve", { ...act, ownTools: [cal] });
+  assert.equal(r.rounds.length, 1);
+  assert.equal(cal.seen.length, 1);
+  assert.deepEqual(r.spoken, [HINT_TEXT]);
+});
+
+test("claim retry: no hint when a write tool that is not Crow's own is on offer (it could change things)", async () => {
+  const cal = calTool();
+  const h = ownHarness({ bot: CROW, chatTools: ["ws_cal_update_event"], rounds: [says("Moved it to 3. ")] });
+  h.deps.toolForcing = VLLM;
+  const r = await heard(h, "move it to 3", { ...act, familiesOnIntent: false, ownTools: [cal] });
+  assert.ok(h.log[0].tools.includes("ws_cal_update_event"));
+  assert.deepEqual(r.spoken, [NOT_DONE_TEXT]);
+});
+
+test("claim retry: a refused forced request that steps down to no forcing records claim_retry 'none'", async () => {
+  const cal = calTool(COFFEE_ADDED);
+  const h = ownHarness({ bot: CROW, rounds: [says("Added coffee to your calendar. "), call("crow_calendar_add_event", COFFEE)] });
+  h.deps.toolForcing = async () => ({ named: true, required: false, engine: "unknown" });
+  const inner = h.deps.createChatAdapter;
+  h.deps.createChatAdapter = async (key) => {
+    const a = await inner(key);
+    return { async *chatStream(m, t, o) { if (o.toolChoice) throw Object.assign(new Error("bad"), { code: "provider_error", status: 400 }); yield* a.chatStream(m, t, o); } };
+  };
+  const r = await heard(h, "add coffee Tuesday at 9 to my calendar", { ...act, ownTools: [cal] });
+  assert.equal(r.timings.claim_retry, "none");
+  assert.equal(cal.seen.length, 1);
+});
+
+test("claim retry: two calls in the forced round with the same title and start (other args differ): one write", async () => {
+  const cal = calTool(COFFEE_ADDED);
+  const h = ownHarness({ bot: CROW, rounds: [says("Added coffee to your calendar. "), [
+    { type: "tool_call", id: "a", name: "crow_calendar_add_event", arguments: { ...COFFEE, end: "2026-10-27T10:00:00-05:00" } },
+    { type: "tool_call", id: "b", name: "crow_calendar_add_event", arguments: { title: "Coffee", start: COFFEE.start, end: "2026-10-27T10:30:00-05:00" } },
+    { type: "done" }]] });
+  h.deps.toolForcing = VLLM;
+  const r = await heard(h, "add coffee Tuesday at 9 to my calendar", { ...act, ownTools: [cal] });
+  assert.equal(cal.seen.length, 1, "one write");
+  assert.equal(r.timings.claim_dedupe, true);
+  assert.deepEqual(r.spoken, [COFFEE_ADDED.say]);
+});
