@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import { createDbClient } from "../servers/db.js";
 import {
-  scanSlots, isUnattended, loadUnattendedContext, consumersOfRole, consumersOfModel, piConfigRefs,
+  scanSlots, isUnattended, loadUnattendedContext, consumersOfRole, consumersOfModel, piConfigRefs, openTasksStoreReadonly,
 } from "../servers/shared/model-consumers.js";
 
 let dir, db, projStore, mainStore;
@@ -128,10 +128,11 @@ test("piConfigRefs and subagent slots from a temp pi dir", async () => {
   writeFileSync(join(pi, "settings.json"), JSON.stringify({ subagent: { modelOverrides: { scout: "local-chat/m1" }, rolePins: { scout: false } } }));
   writeFileSync(join(pi, "agents", "planner.md"), "---\nname: planner\nmodel: cloud-a/m9\n---\nbody");
   const refs = piConfigRefs(pi);
-  assert.deepEqual(refs["local-chat"], ["subagent:scout"]);
-  assert.deepEqual(refs["cloud-a"], ["agent:planner"]);
-  assert.ok(Object.values(refs).some((l) => l.includes("code:LOCAL_FALLBACK")));
-  assert.ok(Object.values(refs).some((l) => l.includes("code:MULTI_AGENT_CAPABLE")));
+  assert.deepEqual(refs["local-chat"], [{ labelKey: "settings.providers.pi.subagent", labelParams: { name: "scout" } }]);
+  assert.deepEqual(refs["cloud-a"], [{ labelKey: "settings.providers.pi.agent", labelParams: { name: "planner" } }]);
+  const keys = Object.values(refs).flat().map((r) => r.labelKey);
+  assert.ok(keys.includes("settings.providers.pi.fallback"));
+  assert.ok(keys.includes("settings.providers.pi.multiAgent"));
   assert.ok(piConfigRefs(join(dir, "missing")) && typeof piConfigRefs(null) === "object");
   const slots = await scanSlots(db, { includeSubagents: true, piAgentDir: pi, tasksDbPaths: [] });
   const scout = slots.find((s) => s.kind === "subagent" && s.id === "scout");
@@ -174,4 +175,70 @@ test("job slot env precedence; the smart-router default tier is never labelled e
   } finally {
     for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
   }
+});
+
+const failing = (pattern, message) => ({
+  execute: (q) => (String(q.sql || q).includes(pattern) ? Promise.reject(new Error(message)) : db.execute(q)),
+});
+
+test("I1: a project_spaces query that fails for any reason but 'no such table' makes the bot unattended", async () => {
+  const busy = failing("FROM project_spaces", "database is locked");
+  const ctx = await loadUnattendedContext(busy, "perchy");
+  assert.equal(ctx.unknown, true);
+  assert.equal(isUnattended({ gateways: [{ type: "perch" }] }, ctx), true);
+  const noTable = failing("FROM project_spaces", "no such table: project_spaces");
+  assert.equal((await loadUnattendedContext(noTable, "perchy")).unknown, false);
+});
+
+test("I1: 'no such column' is unknown, not absent", async () => {
+  const stale = createDbClient(join(dir, "stale.db"));
+  await stale.executeMultiple(`
+    CREATE TABLE schedules (id INTEGER PRIMARY KEY, task TEXT);
+    CREATE TABLE bot_jobs (job_id TEXT PRIMARY KEY, bot_id TEXT);
+    CREATE TABLE bot_registry (bot_id TEXT PRIMARY KEY);
+  `);
+  const ctx = await loadUnattendedContext(stale, "x", { tasksDbPaths: [] });
+  assert.equal(ctx.unknown, true);
+  stale.close?.();
+});
+
+test("I1: tasks stores are opened read-only", () => {
+  const h = openTasksStoreReadonly(mainStore);
+  try {
+    assert.throws(() => h.prepare("INSERT INTO tasks_items (assigned_bot) VALUES ('x')").run(), /readonly/i);
+  } finally { h.close(); }
+});
+
+test("I2: scanSlots flags incomplete on a failing source, not on an absent table", async () => {
+  const ok = await scanSlots(db, { tasksDbPaths: [] });
+  assert.equal(ok.incomplete, false);
+  const bare = createDbClient(join(dir, "bare2.db"));
+  assert.equal((await scanSlots(bare, { tasksDbPaths: [] })).incomplete, false);
+  bare.close?.();
+  const badBots = await scanSlots(failing("FROM pi_bot_defs", "database disk image is malformed"), { tasksDbPaths: [] });
+  assert.equal(badBots.incomplete, true);
+  const badSetting = await scanSlots(failing("dashboard_settings", "database is locked"), { tasksDbPaths: [] });
+  assert.equal(badSetting.incomplete, true);
+});
+
+test("I3: job and phone slots carry a translatable labelKey", async () => {
+  const slots = await scanSlots(db, { tasksDbPaths: [] });
+  assert.equal(slots.find((s) => s.id === "llm-router:fast").labelKey, "settings.providers.job.voiceFast");
+  assert.equal(slots.find((s) => s.id === "smart-router:code").labelKey, "settings.providers.job.smart.code");
+  assert.equal(slots.find((s) => s.id === "embed").labelKey, "settings.providers.job.embed");
+  assert.equal(slots.find((s) => s.id === "safety").labelKey, "settings.providers.job.safety");
+  const phone = slots.find((s) => s.kind === "phone");
+  assert.equal(phone.labelKey, "settings.providers.phone.local");
+  assert.equal(phone.label, "Phone calls (local model)");
+});
+
+test("M1: withUnattended:false opens no tasks store and leaves unattended null", async () => {
+  let touched = false;
+  const paths = new Proxy([mainStore], { get(t, k) { touched = true; return t[k]; } });
+  const slots = await scanSlots(db, { tasksDbPaths: paths, withUnattended: false });
+  assert.equal(touched, false);
+  assert.ok(slots.filter((s) => s.kind === "bot").every((s) => s.unattended === null));
+  assert.ok(slots.some((s) => s.kind === "bot"));
+  const on = await scanSlots(db, { tasksDbPaths: [mainStore, projStore] });
+  assert.equal(on.find((s) => s.id === "perchy" && s.field === "models.default").unattended, false);
 });

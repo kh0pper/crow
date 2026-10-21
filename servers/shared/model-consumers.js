@@ -45,29 +45,38 @@ function projectStorePaths(projectUris, mainPath) {
   return out;
 }
 
+// Only a missing table means "genuinely nothing there". Anything else (busy,
+// corrupt, not a database, permissions, a missing column) is unknown, and
+// unknown counts as unattended.
+const ABSENT_RE = /no such table/i;
+const isAbsent = (e) => ABSENT_RE.test(String(e?.message || e));
+
+/** @returns {Promise<{paths:string[], unknown:boolean}>} unknown: the store list itself could not be established. */
 async function defaultTasksDbPaths(db) {
   let uris = [];
+  let unknown = false;
   try {
     const { rows } = await db.execute("SELECT tasks_db_uri FROM project_spaces");
     uris = rows.map((r) => r.tasks_db_uri).filter(Boolean);
-  } catch { /* no project_spaces: instance store only */ }
+  } catch (e) { if (!isAbsent(e)) unknown = true; } // no project_spaces table: instance store only
   let main = null;
-  try { main = tasksDbPath(); } catch { main = null; }
-  return projectStorePaths(uris, main);
+  try { main = tasksDbPath(); } catch { unknown = true; }
+  return { paths: projectStorePaths(uris, main), unknown };
 }
 
-// Only these mean "genuinely nothing there". Anything else (busy, corrupt,
-// not a database, permissions) is unknown, and unknown counts as unattended.
-const ABSENT_RE = /no such table|no such column/i;
-const isAbsent = (e) => ABSENT_RE.test(String(e?.message || e));
+/** The one way a tasks store is opened here: read-only, so a scan can never write. */
+export function openTasksStoreReadonly(path) {
+  const h = new Database(path, { readonly: true, fileMustExist: true });
+  h.pragma("busy_timeout = 2000");
+  return h;
+}
 
 /** @returns {{n:number, unknown:boolean}} */
 function countAssignedCards(path, botId) {
   if (!existsSync(path)) return { n: 0, unknown: false }; // a missing store holds no cards
   let h;
   try {
-    h = new Database(path, { readonly: true, fileMustExist: true });
-    h.pragma("busy_timeout = 2000");
+    h = openTasksStoreReadonly(path);
     const n = h.prepare("SELECT COUNT(*) AS n FROM tasks_items WHERE assigned_bot = ? AND archived_at IS NULL").get(botId).n;
     return { n, unknown: false };
   } catch (e) {
@@ -90,9 +99,10 @@ export async function loadUnattendedContext(db, botId, { tasksDbPaths } = {}) {
   const cron = await count(db, "SELECT COUNT(*) AS n FROM schedules WHERE task = ?", [BOTCRON_PREFIX + botId]);
   const jobs = await count(db, "SELECT COUNT(*) AS n FROM bot_jobs WHERE bot_id = ? AND status IN ('queued','running')", [botId]);
   const reg = await count(db, "SELECT COUNT(*) AS n FROM bot_registry WHERE bot_id = ?", [botId]);
-  const paths = tasksDbPaths ?? (await defaultTasksDbPaths(db));
+  const found = tasksDbPaths ? { paths: tasksDbPaths, unknown: false } : await defaultTasksDbPaths(db);
+  const paths = found.paths;
   let assignedCards = 0;
-  let unknown = cron.unknown || jobs.unknown || reg.unknown;
+  let unknown = cron.unknown || jobs.unknown || reg.unknown || found.unknown;
   for (const p of paths) {
     const r = countAssignedCards(p, botId);
     assignedCards += r.n;
@@ -141,49 +151,72 @@ const providerOf = (key) => {
   return i > 0 ? s.slice(0, i) : s;
 };
 
-/** Provider ids mentioned in pi config and in code constants -> where they appear. */
+/**
+ * Provider ids mentioned in pi config and in code constants -> where they
+ * appear, as translatable refs `{labelKey, labelParams?}` (plain language; the
+ * strings live in i18n.js under settings.providers.pi.*).
+ */
 export function piConfigRefs(piAgentDir) {
   const refs = {};
-  const add = (key, label) => {
+  const add = (key, labelKey, params) => {
     const p = providerOf(key);
     if (!p) return;
-    (refs[p] ||= []);
-    if (!refs[p].includes(label)) refs[p].push(label);
+    const list = (refs[p] ||= []);
+    const dup = list.some((r) => r.labelKey === labelKey && r.labelParams?.name === params?.name);
+    if (!dup) list.push(params ? { labelKey, labelParams: params } : { labelKey });
   };
   if (piAgentDir) {
     const st = readJsonFile(join(piAgentDir, "settings.json")) || {};
-    add(st.defaultModel, "setting:defaultModel");
-    for (const [k, v] of Object.entries(st.planMode || {})) if (typeof v === "string") add(v, `setting:planMode.${k}`);
-    for (const [k, v] of Object.entries(st.critic || {})) if (typeof v === "string") add(v, `setting:critic.${k}`);
-    for (const k of Object.keys(st.localModels || {})) add(k, `setting:localModels.${k}`);
-    for (const [name, v] of Object.entries(st.subagent?.modelOverrides || {})) add(v, `subagent:${name}`);
-    for (const [name, v] of Object.entries(agentModels(piAgentDir))) add(v, `agent:${name}`);
+    add(st.defaultModel, "settings.providers.pi.defaultModel");
+    for (const v of Object.values(st.planMode || {})) if (typeof v === "string") add(v, "settings.providers.pi.planMode");
+    for (const v of Object.values(st.critic || {})) if (typeof v === "string") add(v, "settings.providers.pi.critic");
+    for (const k of Object.keys(st.localModels || {})) add(k, "settings.providers.pi.localModels");
+    for (const [name, v] of Object.entries(st.subagent?.modelOverrides || {})) add(v, "settings.providers.pi.subagent", { name });
+    for (const [name, v] of Object.entries(agentModels(piAgentDir))) add(v, "settings.providers.pi.agent", { name });
   }
-  for (const k of MULTI_AGENT_CAPABLE) add(k, "code:MULTI_AGENT_CAPABLE");
-  add(LOCAL_FALLBACK, "code:LOCAL_FALLBACK");
+  for (const k of MULTI_AGENT_CAPABLE) add(k, "settings.providers.pi.multiAgent");
+  add(LOCAL_FALLBACK, "settings.providers.pi.fallback");
   return refs;
 }
 
 // ---- slot scan -----------------------------------------------------------
 
 /**
- * @returns {Promise<Array<{kind:string,id:string,label:string,field:string,value:*,unattended:boolean,peerManaged:boolean,dead?:boolean,pinnedInPi?:boolean,providerOnly?:boolean,dynamic?:boolean}>>}
+ * Every place a model key is used. The returned array carries an `incomplete`
+ * property: true when any source failed for a reason other than "table
+ * absent", i.e. the list may be missing entries (callers must not read an
+ * empty list as "nothing uses it").
+ *
+ * Slots from job/phone sources carry `labelKey` (an i18n.js key) next to the
+ * English `label`; bot slots label with the bot's display name.
+ *
+ * `withUnattended: false` skips the unattended detection entirely (no tasks
+ * store is opened) and slots carry `unattended: null`.
+ *
+ * @returns {Promise<Array<{kind:string,id:string,label:string,labelKey?:string,field:string,value:*,unattended:boolean|null,peerManaged:boolean,dead?:boolean,pinnedInPi?:boolean,providerOnly?:boolean,dynamic?:boolean}> & {incomplete:boolean}>}
  */
-export async function scanSlots(db, { includeSubagents = false, piAgentDir = null, tasksDbPaths } = {}) {
+export async function scanSlots(db, { includeSubagents = false, piAgentDir = null, tasksDbPaths, withUnattended = true } = {}) {
   const slots = [];
+  let incomplete = false;
+  const note = (e) => { if (!isAbsent(e)) incomplete = true; };
   let managed = [];
   try {
     const a = parseJson(await readSetting(db, "remote_managed_bots"), []);
     if (Array.isArray(a)) managed = a.map(String);
-  } catch { /* none */ }
+  } catch (e) { note(e); }
 
   let bots = [];
-  try { bots = (await db.execute("SELECT bot_id, display_name, definition FROM pi_bot_defs ORDER BY bot_id")).rows; } catch { /* none */ }
-  const paths = tasksDbPaths ?? (await defaultTasksDbPaths(db));
+  try { bots = (await db.execute("SELECT bot_id, display_name, definition FROM pi_bot_defs ORDER BY bot_id")).rows; } catch (e) { note(e); }
+  let found = null;
+  if (withUnattended && bots.length) found = tasksDbPaths ? { paths: tasksDbPaths, unknown: false } : await defaultTasksDbPaths(db);
   for (const b of bots) {
     const def = parseJson(b.definition, {}) || {};
-    const ctx = await loadUnattendedContext(db, b.bot_id, { tasksDbPaths: paths });
-    const unattended = isUnattended(def, ctx);
+    let unattended = null;
+    if (found) {
+      const ctx = await loadUnattendedContext(db, b.bot_id, { tasksDbPaths: found.paths });
+      if (found.unknown) ctx.unknown = true;
+      unattended = isUnattended(def, ctx);
+    }
     const peerManaged = managed.includes(b.bot_id);
     const label = b.display_name || b.bot_id;
     const push = (kind, field, value, extra = {}) => {
@@ -199,38 +232,42 @@ export async function scanSlots(db, { includeSubagents = false, piAgentDir = nul
   }
 
   // Job slots: today's effective RAW keys, read without side effects.
-  const job = (id, label, field, value, extra = {}) =>
-    slots.push({ kind: "job", id, label, field, value, unattended: true, peerManaged: false, ...extra });
-  const envOr = (name, dflt, id, label) => {
+  const job = (id, label, labelKey, field, value, extra = {}) =>
+    slots.push({ kind: "job", id, label, labelKey, field, value, unattended: true, peerManaged: false, ...extra });
+  const envOr = (name, dflt, id, label, labelKey) => {
     const e = str(process.env[name]);
-    job(id, label, e ? `env:${name}` : "default", e || dflt);
+    job(id, label, labelKey, e ? `env:${name}` : "default", e || dflt);
   };
-  envOr("COMPANION_FAST_MODEL", VOICE_ROUTE_DEFAULTS.fast, "llm-router:fast", "Voice router (fast)");
-  envOr("COMPANION_ESCALATION_MODEL", VOICE_ROUTE_DEFAULTS.escalate, "llm-router:escalate", "Voice router (escalate)");
+  envOr("COMPANION_FAST_MODEL", VOICE_ROUTE_DEFAULTS.fast, "llm-router:fast", "Voice router (fast)", "settings.providers.job.voiceFast");
+  envOr("COMPANION_ESCALATION_MODEL", VOICE_ROUTE_DEFAULTS.escalate, "llm-router:escalate", "Voice router (escalate)", "settings.providers.job.voiceEscalate");
   for (const [tier, value] of Object.entries(DEFAULT_ROUTES)) {
     if (!value) continue;
     // `default` has no env reader in smart-router.js (it is not run through tierDefault).
     const e = tier === "default" ? null : str(process.env[`CROW_SMART_ROUTER_${tier.toUpperCase()}`]);
-    job(`smart-router:${tier}`, `Smart router (${tier})`, e ? `env:CROW_SMART_ROUTER_${tier.toUpperCase()}` : "default", value, { providerOnly: true });
+    job(`smart-router:${tier}`, `Smart router (${tier})`, `settings.providers.job.smart.${tier}`, e ? `env:CROW_SMART_ROUTER_${tier.toUpperCase()}` : "default", value, { providerOnly: true });
   }
-  const setting = async (k) => { try { return str(await readSetting(db, k)); } catch { return null; } };
-  for (const [id, label, envName, key] of [
-    ["embed", "Memory embeddings", "CROW_EMBED_PROVIDER", "embed_provider"],
-    ["rerank", "Memory rerank", "CROW_RERANK_PROVIDER", "rerank_provider"],
+  const setting = async (k) => { try { return str(await readSetting(db, k)); } catch (e) { note(e); return null; } };
+  for (const [id, label, labelKey, envName, key] of [
+    ["embed", "Memory embeddings", "settings.providers.job.embed", "CROW_EMBED_PROVIDER", "embed_provider"],
+    ["rerank", "Memory rerank", "settings.providers.job.rerank", "CROW_RERANK_PROVIDER", "rerank_provider"],
   ]) {
     const e = str(process.env[envName]);
     const s = e ? null : await setting(key);
-    if (e || s) job(id, label, e ? `env:${envName}` : `setting:${key}`, e || s, { providerOnly: true });
-    else job(id, label, `setting:${key}`, null, { dynamic: true, providerOnly: true });
+    if (e || s) job(id, label, labelKey, e ? `env:${envName}` : `setting:${key}`, e || s, { providerOnly: true });
+    else job(id, label, labelKey, `setting:${key}`, null, { dynamic: true, providerOnly: true });
   }
   const cls = parseClassifierSetting(await setting(CLASSIFIER_SETTING_KEY));
   const clsValue = cls?.provider ? `${cls.provider}/${cls.model}` : cls?.url ? cls.model : null;
-  if (clsValue) job("safety", "Bot safety classifier", `setting:${CLASSIFIER_SETTING_KEY}`, clsValue);
-  else job("safety", "Bot safety classifier", `setting:${CLASSIFIER_SETTING_KEY}`, null, { dynamic: true });
+  const SAFETY = "settings.providers.job.safety";
+  if (clsValue) job("safety", "Bot safety classifier", SAFETY, `setting:${CLASSIFIER_SETTING_KEY}`, clsValue);
+  else job("safety", "Bot safety classifier", SAFETY, `setting:${CLASSIFIER_SETTING_KEY}`, null, { dynamic: true });
 
-  for (const key of ["phone_local_model", "phone_cloud_model"]) {
+  for (const [key, label, labelKey] of [
+    ["phone_local_model", "Phone calls (local model)", "settings.providers.phone.local"],
+    ["phone_cloud_model", "Phone calls (cloud model)", "settings.providers.phone.cloud"],
+  ]) {
     const v = await setting(key);
-    if (v) slots.push({ kind: "phone", id: key, label: key, field: key, value: v, unattended: false, peerManaged: false });
+    if (v) slots.push({ kind: "phone", id: key, label, labelKey, field: key, value: v, unattended: false, peerManaged: false });
   }
 
   if (includeSubagents && piAgentDir) {
@@ -248,6 +285,7 @@ export async function scanSlots(db, { includeSubagents = false, piAgentDir = nul
       });
     }
   }
+  slots.incomplete = incomplete;
   return slots;
 }
 

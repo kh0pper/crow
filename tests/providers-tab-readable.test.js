@@ -82,7 +82,8 @@ test("Used by shows bot labels (escaped) and pi config refs", async () => {
   assert.match(h, /Helper &lt;Bot&gt;/);
   assert.doesNotMatch(h, /Helper <Bot>/);
   const piRow = h.split("<tr").find((r) => r.includes(">pi-only<"));
-  assert.match(piRow, /pi config: .*subagent:scout/);
+  assert.match(piRow, /pi sub-agent scout/);
+  assert.doesNotMatch(piRow, /subagent:scout|code:|setting:/);
 });
 
 test("crow-hf-token never renders, enabled or disabled", async () => {
@@ -96,4 +97,51 @@ test("no piAgentDir shows the not-scanned hint; a failing scan still renders the
   const broken = { execute: (q) => (String(q.sql || q).includes("FROM providers") ? db.execute(q) : Promise.reject(new Error("boom"))) };
   const h = await tab.render({ db: broken, lang: "en", piAgentDir: null });
   assert.match(h, /local-chat/);
+  // I2: an incomplete scan shows "—", never "nothing found"
+  const usedBy = h.split("<tr").filter((r) => r.includes("llm-cell-usedby"));
+  assert.ok(usedBy.length > 0);
+  for (const r of usedBy) {
+    assert.match(r, /llm-cell-usedby" style="color:var\(--crow-text-muted\)">—</);
+    assert.doesNotMatch(r, /nothing found/);
+  }
+});
+
+test("I3: job labels, phone labels and pi refs are translated", async () => {
+  const saved = process.env.COMPANION_FAST_MODEL;
+  process.env.COMPANION_FAST_MODEL = "local-voice/m1";
+  try {
+    const en = await html();
+    const es = await html({ lang: "es" });
+    const rowOf = (h) => h.split("<tr").find((r) => r.includes(">local-voice<"));
+    assert.match(rowOf(en), /Voice router \(fast\)/);
+    assert.match(rowOf(es), /Enrutador de voz \(rápido\)/);
+    assert.doesNotMatch(rowOf(es), /Voice router/);
+    const piEs = es.split("<tr").find((r) => r.includes(">pi-only<"));
+    assert.match(piEs, /subagente de pi scout/);
+  } finally { if (saved === undefined) delete process.env.COMPANION_FAST_MODEL; else process.env.COMPANION_FAST_MODEL = saved; }
+});
+
+test("M2: with every provider retired the table says 'No enabled providers'; intro says enabled", async () => {
+  const only = createDbClient(join(dir, "retired-only.db"));
+  await only.executeMultiple(`
+    CREATE TABLE providers (id TEXT PRIMARY KEY, base_url TEXT NOT NULL, api_key TEXT, host TEXT, bundle_id TEXT,
+      description TEXT, models TEXT NOT NULL DEFAULT '[]', disabled INTEGER DEFAULT 0, lamport_ts INTEGER DEFAULT 0,
+      instance_id TEXT, provider_type TEXT, gpu_policy TEXT, created_at TEXT, updated_at TEXT);
+    INSERT INTO providers (id, base_url, host, disabled) VALUES ('old', 'http://192.168.1.5:1/v1', 'local', 1);
+  `);
+  const h = await tab.render({ db: only, lang: "en", piAgentDir: null, tasksDbPaths: [] });
+  assert.match(h, /No enabled providers/);
+  assert.doesNotMatch(h, /No providers registered/);
+  assert.match(h, /0 providers enabled/);
+  assert.doesNotMatch(h, /in use/);
+  assert.match(await tab.render({ db: only, lang: "es", piAgentDir: null, tasksDbPaths: [] }), /Ningún proveedor activado/);
+  only.close?.();
+  assert.match(await html(), /\d+ providers enabled/);
+});
+
+test("M1: the tab does not pay for unattended detection", async () => {
+  let touched = false;
+  const paths = new Proxy([], { get(t, k) { touched = true; return t[k]; } });
+  await tab.render({ db, lang: "en", piAgentDir: piDir, tasksDbPaths: paths });
+  assert.equal(touched, false);
 });

@@ -250,7 +250,7 @@ test("task synonyms and case come from provider-task.js", () => {
 
 test("cloudStatus locality: only IP literals, own addresses and local suffixes are local", () => {
   const st = (baseUrl, extra = {}) => cloudStatus("x/m", { providers: [prov("x", ["m"], { baseUrl })], ownAddrs: new Set(["localhost"]), ...extra });
-  assert.equal(st("https://someone.tail9999.ts.net/v1"), "unknown");
+  assert.equal(st("https://someone.example.ts.net/v1"), "unknown");
   assert.equal(st("http://openai-proxy:8000/v1"), "unknown");
   assert.equal(st("https://api.example.internal/v1"), "unknown");
   assert.equal(st("https://api.openai.com/v1"), "unknown");
@@ -260,7 +260,7 @@ test("cloudStatus locality: only IP literals, own addresses and local suffixes a
   assert.equal(st("http://100.64.20.5:8000/v1"), "local");
   assert.equal(st("http://localhost:8000/v1"), "local");
   assert.equal(st("http://203.0.113.9/v1"), "cloud");
-  assert.equal(st("https://x.tail1234.ts.net/v1"), "unknown");
-  assert.equal(st("https://x.tail1234.ts.net/v1", { localSuffixes: [".tail1234.ts.net"] }), "local");
-  assert.equal(st("http://box.local/v1", { localSuffixes: [".tail1234.ts.net"] }), "unknown");
+  assert.equal(st("https://x.tail12345.ts.net/v1"), "unknown");
+  assert.equal(st("https://x.tail12345.ts.net/v1", { localSuffixes: [".tail12345.ts.net"] }), "local");
+  assert.equal(st("http://box.local/v1", { localSuffixes: [".tail12345.ts.net"] }), "unknown");
 });

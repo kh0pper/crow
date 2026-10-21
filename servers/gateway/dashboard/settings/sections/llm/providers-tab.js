@@ -115,6 +115,8 @@ function defaultPiAgentDir() {
   try { return isDefaultCrowHome() ? join(homedir(), ".pi", "agent") : null; } catch { return null; }
 }
 
+const slotLabel = (s, lang) => (s.labelKey ? fill(t(s.labelKey, lang), s.labelParams || {}) : s.label);
+
 function usedByCell(p, { slots, piRefs, scanned, scanOk, lang }) {
   if (!scanOk) return `<td class="llm-cell-usedby" style="color:var(--crow-text-muted)">—</td>`;
   const seen = new Set();
@@ -122,18 +124,16 @@ function usedByCell(p, { slots, piRefs, scanned, scanOk, lang }) {
   const add = (l) => { if (l && !seen.has(l)) { seen.add(l); labels.push(l); } };
   for (const m of p.models || []) {
     if (!m?.id) continue;
-    for (const s of consumersOfModel(slots, `${p.id}/${m.id}`)) add(s.label);
+    for (const s of consumersOfModel(slots, `${p.id}/${m.id}`)) add(slotLabel(s, lang));
   }
-  for (const s of slots) if (s.providerOnly && s.value === p.id) add(s.label);
-  const pi = piRefs[p.id];
-  if (pi?.length) add(`pi config: ${pi.join(", ")}`);
+  for (const s of slots) if (s.providerOnly && s.value === p.id) add(slotLabel(s, lang));
+  for (const r of piRefs[p.id] || []) add(slotLabel(r, lang));
+  const hint = scanned ? "" : `<div style="font-size:0.7rem;color:var(--crow-text-muted)">${escapeHtml(t("settings.providers.piNotScanned", lang))}</div>`;
   if (!labels.length) {
-    const hint = scanned ? "" : `<div style="font-size:0.7rem;color:var(--crow-text-muted)">${escapeHtml(t("settings.providers.piNotScanned", lang))}</div>`;
     return `<td class="llm-cell-usedby"><span style="color:var(--crow-text-muted)">${escapeHtml(t("settings.providers.unused", lang))}</span>${hint}</td>`;
   }
   const shown = labels.slice(0, USED_BY_MAX).map(escapeHtml).join(", ");
   const more = labels.length > USED_BY_MAX ? ` <span style="color:var(--crow-text-muted)">${escapeHtml(fill(t("settings.providers.more", lang), { n: labels.length - USED_BY_MAX }))}</span>` : "";
-  const hint = scanned ? "" : `<div style="font-size:0.7rem;color:var(--crow-text-muted)">${escapeHtml(t("settings.providers.piNotScanned", lang))}</div>`;
   return `<td class="llm-cell-usedby" title="${escapeHtml(labels.join("\n"))}">${shown}${more}${hint}</td>`;
 }
 
@@ -146,7 +146,10 @@ export default {
     const piDir = piAgentDir === undefined ? defaultPiAgentDir() : piAgentDir;
     let slots = [], piRefs = {}, scanOk = true;
     try {
-      slots = (await scanSlots(db, { includeSubagents: false, piAgentDir: piDir, tasksDbPaths })).filter((s) => !s.dead);
+      // Unattended detection is for the role-change warning, not this list.
+      const scan = await scanSlots(db, { includeSubagents: false, piAgentDir: piDir, tasksDbPaths, withUnattended: false });
+      scanOk = !scan.incomplete;
+      slots = scan.filter((s) => !s.dead);
       piRefs = piConfigRefs(piDir);
     } catch { scanOk = false; }
     const usedCtx = { slots, piRefs, scanned: !!piDir, scanOk, lang };
@@ -268,7 +271,7 @@ export default {
     </style>
 
     <p class="llm-section-hint">
-      ${active.length} provider${active.length === 1 ? "" : "s"} in use. Bundle providers auto-appear on install. Instance-sync replicates this table across paired Crow instances.
+      ${escapeHtml(fill(t(active.length === 1 ? "settings.providers.enabledOne" : "settings.providers.enabledN", lang), { n: active.length }))} ${escapeHtml(t("settings.providers.introTail", lang))}
     </p>
 
     <div class="llm-toolbar">
@@ -282,7 +285,7 @@ export default {
     <div class="llm-card">
       <div class="table-scroll"><table class="llm-providers-table">
         ${head}
-        <tbody>${rows || `<tr><td colspan="7" style="padding:1.25rem;text-align:center;color:var(--crow-text-muted)">No providers registered.</td></tr>`}</tbody>
+        <tbody>${rows || `<tr><td colspan="7" style="padding:1.25rem;text-align:center;color:var(--crow-text-muted)">${escapeHtml(t(retired.length ? "settings.providers.noneEnabled" : "settings.providers.noneRegistered", lang))}</td></tr>`}</tbody>
       </table></div>
     </div>
     ${retiredBlock}
