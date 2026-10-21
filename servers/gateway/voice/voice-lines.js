@@ -12,6 +12,8 @@ export const VOICE_LINES = Object.freeze({
     memo_only_say: "I saved a note, but I can't set reminders from here.",
     unsure_say: "I'm not sure that went through. Please check before you ask again.",
     partly_done_say: "I did part of that, but the rest didn't go through.",
+    // After a blocked claim with no retry left, and on a change or cancel (turn.js HINT_TEXT, PR 2.1): what to say instead.
+    hint_say: "I can only add new items by voice. Try: add lunch next Tuesday at noon.",
     // Crow's own tools (own-tools.js): spoken by the server, only after the write returned ok (#499).
     calendar_added: "Added {title} to your calendar for {when}.",
     reminder_set: "Okay, I'll remind you {when}: {text}.",
@@ -37,6 +39,7 @@ export const VOICE_LINES = Object.freeze({
     memo_only_say: "Guardé una nota, pero no puedo poner recordatorios desde aquí.",
     unsure_say: "No estoy seguro de que se haya hecho. Revísalo antes de volver a pedirlo.",
     partly_done_say: "Hice una parte, pero el resto no se pudo hacer.",
+    hint_say: "Por voz solo puedo añadir cosas nuevas. Prueba: añade almuerzo el próximo martes al mediodía.",
     calendar_added: "Añadí {title} a tu calendario para el {when}.",
     reminder_set: "Vale, te lo recordaré {when}: {text}.",
     task_added: "Añadí {title} a tus tareas.",

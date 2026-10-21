@@ -123,12 +123,33 @@ const MEMORY_NOT_ASKED = "The user did not ask to remember or recall anything, s
  *  - the first-audio budget running out after such a change was sent speaks UNSURE_TEXT, not "try again".
  * The turn right after an action request is an action turn when opts.actionFollowWhen(transcript) says it
  * changes that request ("move it to 9 instead").
- * Callers pass localized lines (cantDoText, notDoneText, notReadyText, memoOnlyText, unsureText, partlyDoneText).
+ * Callers pass localized lines (cantDoText, notDoneText, notReadyText, memoOnlyText, unsureText, partlyDoneText, hintText).
  */
 /** Rides on a tool-less action turn's context block (tagged: an echo of it is never heard); never saved. */
 export const ACTION_NOTE = "[Tools] No tool is available on this turn: nothing can be added, created, scheduled, sent, changed, deleted, saved, looked up or set as a reminder. Never say you did or will do any of that, and don't offer reminders or follow-ups; if the user asks for it, say in one short sentence, in the user's language, that you can't do it from here.";
 export const CANT_DO_TEXT = "Sorry, I can't do that from here: this assistant has no tool for it.";
 export const NOT_DONE_TEXT = "Sorry, I couldn't do that from here, so nothing was changed.";
+/**
+ * No dead end after a blocked claim (PR 2.1 [r2 C3]): what can be said by voice instead. Spoken when an add request's
+ * claim was blocked and the one retry could not run or made no call, and when a change or cancel was claimed (Crow's own
+ * tools only add). Callers pass a localized one (opts.hintText).
+ */
+export const HINT_TEXT = "I can only add new items by voice. Try: add lunch next Tuesday at noon.";
+// Rides on the user message for the retry round only (restored before saving; the round's text is held as usual).
+const claimRetryNote = (names) => `[Tools] Nothing has been added yet: no tool ran on this turn. To add it, call ${names.join(" or ")} now with the title and time the user gave. Never say it is done before the tool has run.`;
+// A change, cancel or question about what was done is never retried as an add (en and es, accents dropped).
+const CHANGE_WORDS = new Set(["move", "change", "cancel", "delete", "remove", "cambia", "cambialo", "mueve", "muevelo", "cancela", "cancelalo", "borra", "borralo", "quita", "quitalo"]);
+const QUESTION_PHRASES = ["did you", "was it", "is it", "have you", "can you check"];
+const asksChange = (t) => phraseWords(t).some((w) => CHANGE_WORDS.has(w));
+const asksQuestion = (t) => { const s = ` ${phraseWords(t).join(" ")} `; return QUESTION_PHRASES.some((p) => s.includes(` ${p} `)) || /¿\s*(lo|ya)\b/i.test(String(t)); };
+/** Same tool, same title (case-insensitive, trimmed), same start → one key (a forced retry never writes it twice). */
+const writeKey = (tool, title, start) => {
+  const t = String(title ?? "").trim().toLowerCase();
+  if (!tool || !t) return null;
+  const ms = Date.parse(start);
+  return `${tool}|${t}|${Number.isFinite(ms) ? ms : String(start ?? "").trim()}`;
+};
+const argsWrite = (a) => ({ title: a?.title ?? a?.text, start: a?.start ?? a?.at ?? a?.due ?? null });
 /** Some of Crow's own calls on this turn worked and some did not (spoken after the ok calls' own lines). */
 export const PARTLY_DONE_TEXT = "I did part of that, but the rest didn't go through.";
 /**
@@ -1135,6 +1156,18 @@ export function createVoiceTurnRunner(deps) {
       const ownCarriedOnly = voiceKind && !!fam && !ownActionWords && !actionTurn && !actionAsked
         && tools.some((t) => ownByName.has(t.name) && !fam.wants(ownByName.get(t.name).family, transcript));
       const ownDone = new Map();   // name|canonical args → the result of an own call that returned ok (never run twice)
+      // The one retry after a blocked claim (PR 2.1 [r2 C3, I4]): only on an add request (the words, never a change, a
+      // cancel or a question about what was done), with an own tool on offer and none called, never carried-only. It
+      // forces the own tool where the engine honours that (named, then required), else steps up to the larger model
+      // once; its text is held as usual. A forced call that repeats a write on record writes nothing.
+      const changeAsked = asksChange(transcript);
+      const addAsked = (actionAsked || ownIntent) && !changeAsked && !asksQuestion(transcript);
+      let retryRound = 0;          // the round the retry runs in (0: none)
+      let retryTools = null;       // what the retry round offers (the own tools the words want)
+      let retryName = null;        // the named choice for it (one own tool)
+      let retryMode = "none";
+      let retryTried = false;      // the retry was due: it ran, or could not (no forcing and no step-up)
+      const turnWrites = new Map();   // writeKey → the result of an own write that returned ok this turn
       let backed = false;          // a tool really did something this turn
       let memoryBacked = false;    // only a memory call did (a saved note is not a reminder)
       let unsureBacked = false;    // an ok call to a tool that is neither a known read nor a known write
@@ -1226,6 +1259,58 @@ export function createVoiceTurnRunner(deps) {
         const foreign = words.some((x) => x.length >= 3 && !RECAP_FILLER.has(x) && !/^\d/.test(x) && !titleWords.includes(x) && !objectWord(x));
         return refers && !foreign ? lastWriteRecap(w, opts.lang || w.lang) : "";
       };
+      // The claim retry is due (see changeAsked above): a claim was blocked (the full hold's held text, or the sentence
+      // gate) and nothing was done, on an add request with an own tool on offer and none called.
+      const retryDue = () => addAsked && ownOnOffer && !ownCarriedOnly && !mustX && !holdEnd && !calendarFallback && !finalRound
+        && !backed && !memoryBacked && !unsureBacked && !actionSent && !calledTools.some((n) => ownByName.has(n))
+        && (gateHit || (actionGuard && claimsAction(guardHeld.trim())));
+      // The hint instead of the not-done line: the retry was due (it ran with no call, or could not run), or the claim was
+      // about a change or a cancel, with an own tool on offer (Crow's own tools only add).
+      const hintDue = () => ownOnOffer && (retryTried || changeAsked);
+      const hintLine = () => { timings.claim_hint = true; return String(opts.hintText || HINT_TEXT); };
+      // → true when the retry round is set up (the loop goes on), false when it cannot run (the hint ends the turn).
+      const startRetry = async (claimMsg) => {
+        const own = tools.filter((t) => ownByName.has(t.name));
+        const wanted = own.filter((t) => ownWants(ownByName.get(t.name).family, transcript));
+        const pick = wanted.length ? wanted : own;
+        let rf = LEGACY_FORCING;
+        if (typeof deps.toolForcing === "function") { try { rf = (await deps.toolForcing(modelKey, db)) || LEGACY_FORCING; } catch { rf = { named: true, required: false, engine: "unknown" }; } }
+        const name = pick.length === 1 ? pick[0].name : null;
+        const first = rf.named && name ? "named" : rf.required ? "required" : "none";
+        // The step-down this model already showed (named → required → none) is reused.
+        const seen = toolChoiceMode.get(modelKey);
+        const learned = seen && now() - seen.at < LEARNED_TTL_MS ? seen.mode : null;
+        const mode = learned && WEAKER[learned] < WEAKER[first] && (learned !== "required" || rf.required === true) ? learned : first;
+        if (mode === "none") {
+          // Nothing can be forced here (llama.cpp): the own-tool step-up, once, with its filler, where it may run.
+          if (steppedUp || result.escalated || result.degraded || noEscalate || !toolEscalationOn || budgetHit) return false;
+          steppedUp = true;
+          let fillerErr = null;
+          const filler = say.filler().catch((err) => { fillerErr = err; });
+          const ready = await readyEscalation(deps.escalateKey ?? decision.key, db, llmSignal);
+          await filler;
+          if (fillerErr && !aborted() && !mute.signal.aborted) {
+            log(`[voice-turn] ${device.id} filler TTS failed: ${fillerErr.message}`);
+            timings.filler_error = String(fillerErr.message || fillerErr);
+          }
+          if (aborted() || budgetHit || !ready.adapter) { if (!ready.adapter) timings.step_up_degraded = ready.reason; return false; }
+          chat = ready.adapter;
+          result.route = "escalate";
+          result.escalated = true;
+          timings.claim_retry = "step_up";
+        } else forcing = rf;
+        retryMode = mode;
+        retryName = name;
+        retryTools = pick;
+        retryRound = rounds + 1;
+        // The blocked claim is not what the model reads back before its retry (it was never heard either).
+        if (claimMsg && !claimMsg.tool_calls && messages.at(-1) === claimMsg) messages.pop();
+        const note = claimRetryNote(pick.map((t) => t.name));
+        echoGuard.push(note);
+        appendNote(userMsg, note);
+        log(`[voice-turn] ${device.id} bot ${bot.bot_id}: a blocked claim with no call; one retry (${mode === "none" ? "step_up" : mode})`);
+        return true;
+      };
       if (actionGuard) {
         timings.action_guard = true;
         if (actionable.length === 0) {
@@ -1251,7 +1336,8 @@ export function createVoiceTurnRunner(deps) {
         const defer = !hold && holdIntent && !finalRound;
         let deferred = "";
         let heldRound = "";
-        const roundTools = narrow && !mustDone && !finalRound ? [mustX.definition] : tools;
+        const retrying = retryRound === rounds;
+        const roundTools = retrying ? retryTools : narrow && !mustDone && !finalRound ? [mustX.definition] : tools;
         offeredNames = new Set(roundTools.map((t) => t.name));   // the offered-tools guard checks what this request really carried
         let roundText = "";
         let finalRes = null;
@@ -1282,10 +1368,12 @@ export function createVoiceTurnRunner(deps) {
         // A learned "required" is used only while the engine is still known to honour it (the model key may
         // now be served by another engine).
         const usable = learned && WEAKER[learned] < WEAKER[firstMode] && (learned !== "required" || forcing.required === true);
-        let choiceMode = !mustDone && !finalRound && roundTools.length === 1 ? (usable ? learned : firstMode) : "none";
+        let choiceMode = retrying ? retryMode : !mustDone && !finalRound && roundTools.length === 1 ? (usable ? learned : firstMode) : "none";
+        // The round's forced name: the must-run tool, or the own tool the claim retry forces.
+        const forcedName = retrying ? retryName : mustName;
         let steppedDown = false;
         for (;;) {
-          const toolChoice = choiceMode === "named" ? { name: mustName } : choiceMode === "required" ? "required" : null;
+          const toolChoice = choiceMode === "named" ? { name: forcedName } : choiceMode === "required" ? "required" : null;
           let started = false;
           try {
             for await (const ev of chat.chatStream(messages, roundTools, { temperature: 0.7, maxTokens, chatTemplateKwargs: { enable_thinking: false }, signal: llmSignal, ...(toolChoice ? { toolChoice } : {}) })) {
@@ -1330,6 +1418,7 @@ export function createVoiceTurnRunner(deps) {
           break;
         }
         if (mustX && timings.tool_choice === undefined) timings.tool_choice = choiceMode;
+        if (retrying && choiceMode !== "none") timings.claim_retry = choiceMode;
         // Text the gates still held (it could have been the start of tool syntax or of an echo) is decided now.
         const held = toolText.flush();
         if (toolText.cut) { timings.tool_text = true; content = stripToolSyntax(content); }
@@ -1372,6 +1461,11 @@ export function createVoiceTurnRunner(deps) {
           if (roundHeld > 0) heldMsgs.add(assistantMsg);
         }
         if (!calls.length) {
+          if (mustDone && !retryRound && !retryTried && retryDue()) {
+            retryTried = true;
+            if (await startRetry(assistantMsg)) continue;
+            break;
+          }
           if (mustDone) break;
           // The model's turn ended with nothing on the screen. Its text was held back and is dropped
           // (never spoken, never saved). One corrective round, then the truthful line (after the loop).
@@ -1421,6 +1515,17 @@ export function createVoiceTurnRunner(deps) {
             // re-run after a step-up — gets the earlier result back and is never executed again (no second row).
             const dupKey = `${tc.name}|${canonicalArgsHash(tc.arguments || {})}`;
             let out = ownDone.get(dupKey);
+            // From the claim retry on, a call that repeats a write on record (this turn's, or the last own write inside the
+            // window: same tool, title and start) gets that write's result back and writes nothing ([r2 I4]).
+            const wk = writeKey(tc.name, argsWrite(tc.arguments).title, argsWrite(tc.arguments).start);
+            if (out === undefined && retryRound && wk) {
+              const lw = voiceKind && device?.id ? memory.lastWrite(device.id) : null;
+              out = turnWrites.get(wk);
+              if (out === undefined && lw && writeKey(lw.tool, lw.title, lw.start) === wk) {
+                out = JSON.stringify({ ok: true, code: "duplicate", effect: false, final: true, say: lw.say || lastWriteRecap(lw, opts.lang || lw.lang) });
+              }
+              if (out !== undefined) timings.claim_dedupe = true;
+            }
             const ran = out === undefined;   // a cached result never re-asks: its question is no longer the pending one
             if (ran) {
               try { out = await own.execute(tc.arguments || {}, { transcript, executor, db, device, ...(calendarFallback ? { fallback: "calendar" } : {}), ...(ownCarriedOnly || timings.stt_rewrite != null ? { confirm: true } : {}) }); }
@@ -1433,6 +1538,7 @@ export function createVoiceTurnRunner(deps) {
             const code = outcomeCode(res?.code, ok ? "ok" : "error");
             outcome.set(tc, code);
             if (ok) ownDone.set(dupKey, out);
+            if (ran && ok && wk && res.effect !== false) turnWrites.set(wk, out);
             const resSay = typeof res?.say === "string" && res.say.trim() ? res.say.trim() : null;
             if (ok) {
               ownFails.delete(dupKey);
@@ -1556,6 +1662,8 @@ export function createVoiceTurnRunner(deps) {
             if (!ownByName.has(finalRes.name)) ownEndLead = finalRes.say;
             break;
           }
+          // A retry's text was held: it was never heard, so it is not saved either.
+          if (retryRound) dropHeld((m) => !heldMsgs.has(m));
           // A sentence the gate muted was not heard: the server's line is.
           const spokeSentence = !gateHit && roundSpoken > 0 && SENTENCE_END.test(`${roundText.trim()} `);
           if (!(spokeSentence && finalRes.effect)) {
@@ -1637,6 +1745,7 @@ export function createVoiceTurnRunner(deps) {
             } else if (!claim) line = gateAfter ? "" : said;
             else if (unsureBacked) line = String(opts.unsureText || UNSURE_TEXT);
             else if (memoryBacked && claimsReminder(said)) line = String(opts.memoOnlyText || MEMO_ONLY_TEXT);
+            else if (hintDue()) line = hintLine();
             else {
               const recap = recapFor(gateBlocked);
               if (recap) timings.claim_recap = true;
@@ -1659,7 +1768,7 @@ export function createVoiceTurnRunner(deps) {
             // After an ok call to a tool of unknown effect the truth is "not sure", never "nothing was changed".
             line = String(unsureBacked ? (opts.unsureText || UNSURE_TEXT)
               : memoryBacked && claimsReminder(said) ? (opts.memoOnlyText || MEMO_ONLY_TEXT)
-              : actionable.length === 0 ? (opts.cantDoText || CANT_DO_TEXT) : (opts.notDoneText || NOT_DONE_TEXT));
+              : actionable.length === 0 ? (opts.cantDoText || CANT_DO_TEXT) : hintDue() ? hintLine() : (opts.notDoneText || NOT_DONE_TEXT));
             timings.claim_blocked = true;
             log(`[voice-turn] ${device.id} bot ${bot.bot_id}: a reply claiming an action no tool did was replaced`);
             dropHeld(() => false);

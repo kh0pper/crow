@@ -834,3 +834,161 @@ test("'add up' is arithmetic, not an add: no tool, no hold, the answer streams",
     assert.deepEqual(h.calls.spoken, ["That comes to twelve."], t);
   }
 });
+
+// ─── PR 2.1 Task 5 [r2 C3, I4]: no dead end after a blocked claim ───
+const { HINT_TEXT } = await import("../servers/gateway/voice/turn.js");
+const LUNCH = { title: "lunch", start: "2026-10-26T12:00:00-05:00" };
+const COFFEE = { title: "coffee", start: "2026-10-27T09:00:00-05:00" };
+const COFFEE_ADDED = { ok: true, code: "added", final: true, say: "Added coffee to your calendar for Tuesday at 9:00 AM." };
+const VLLM = async () => ({ named: true, required: true, engine: "vllm" });
+const NO_FORCING = async () => ({ named: false, required: false, engine: "llamacpp" });
+/** One turn with what THIS turn captioned, spoke and saved. */
+async function heard(h, transcript, opts = {}) {
+  const e0 = h.events.length;
+  const s0 = h.calls.spoken.length;
+  const l0 = h.log.length;
+  const r = await turn(h, transcript, { tz: "America/Chicago", lang: "en", ...opts });
+  r.captions = h.events.slice(e0).filter((e) => e.type === "caption_delta").map((e) => e.text).join("").trim();
+  r.spoken = h.calls.spoken.slice(s0);
+  r.rounds = h.log.slice(l0);
+  const saved = h.runner.convo.get(h.device.id) || [];
+  r.saved = saved.at(-1);
+  r.savedText = saved.map((m) => String(m.content || "")).join("\n");
+  return r;
+}
+
+for (const [label, forcing, choice] of [["named", VLLM, { name: "crow_calendar_add_event" }], ["required", async () => ({ named: false, required: true, engine: "configured" }), "required"]]) {
+  test(`claim retry (${label}): a blocked claim, then a forced call that succeeds: the success line is heard, the claim never is`, async () => {
+    const cal = calTool(COFFEE_ADDED);
+    const h = ownHarness({ bot: CROW, rounds: [says("Added coffee to your calendar. "), call("crow_calendar_add_event", COFFEE)] });
+    h.deps.toolForcing = forcing;
+    const r = await heard(h, "add coffee Tuesday at 9 to my calendar", { ...act, ownTools: [cal] });
+    assert.equal(r.rounds.length, 2, "one retry round");
+    assert.deepEqual(r.rounds[1].opts.toolChoice, choice);
+    assert.deepEqual(r.rounds[1].tools, ["crow_calendar_add_event"]);
+    assert.equal(r.rounds[0].opts.toolChoice, undefined, "the first round is not forced");
+    assert.equal(r.timings.claim_retry, label);
+    assert.equal(cal.seen.length, 1);
+    assert.deepEqual(r.spoken, [COFFEE_ADDED.say]);
+    assert.equal(r.captions, COFFEE_ADDED.say);
+    assert.equal(r.saved.content, COFFEE_ADDED.say);
+    assert.ok(!/Added coffee to your calendar\.(?! for)/.test(r.savedText), "the blocked claim is not saved");
+    assert.ok(!r.savedText.includes("[Tools]"), "the retry note is not saved");
+    assert.equal(h.runner.convo.get(h.device.id).find((m) => m.role === "user").content, "add coffee Tuesday at 9 to my calendar");
+  });
+}
+
+test("claim retry: the retry makes no call: the hint is heard, captioned and saved", async () => {
+  const cal = calTool(COFFEE_ADDED);
+  const h = ownHarness({ bot: CROW, rounds: [says("Added coffee to your calendar. "), says("It's on your calendar now. ")] });
+  h.deps.toolForcing = VLLM;
+  const r = await heard(h, "add coffee Tuesday at 9 to my calendar", { ...act, ownTools: [cal] });
+  assert.equal(r.rounds.length, 2);
+  assert.equal(r.timings.claim_retry, "named");
+  assert.equal(cal.seen.length, 0);
+  assert.deepEqual(r.spoken, [HINT_TEXT]);
+  assert.equal(r.captions, HINT_TEXT);
+  assert.equal(r.saved.content, HINT_TEXT);
+  assert.ok(!/on your calendar now|Added coffee/.test(r.savedText));
+});
+
+test("claim retry: the hint follows the surface's language (opts.hintText)", async () => {
+  const h = ownHarness({ bot: CROW, rounds: [says("Listo, añadido. "), says("Ya está. ")] });
+  h.deps.toolForcing = VLLM;
+  const r = await heard(h, "añade café el martes a las 9", { ...act, ownTools: [calWhen()], lang: "es", hintText: "PISTA" });
+  assert.deepEqual(r.spoken, ["PISTA"]);
+});
+
+for (const [next, hint] of [["did you add it?", false], ["move it to 3", true], ["cancel it", true], ["can you check my calendar for that", false], ["¿lo añadiste?", false], ["cambia la hora a las 3", true]]) {
+  test(`claim retry: '${next}' after a write: no retry and no second write${hint ? "; the hint" : ""}`, async () => {
+    const cal = calTool();
+    const h = ownHarness({ bot: CROW, rounds: [call("crow_calendar_add_event", LUNCH), says("Done, I moved it and it's all set. "), call("crow_calendar_add_event", LUNCH, "c2")] });
+    h.deps.toolForcing = VLLM;
+    const w = await heard(h, "add lunch Monday to my calendar", { ...act, ownTools: [cal] });
+    assert.deepEqual(w.spoken, [ADDED.say]);
+    const r = await heard(h, next, { ...act, ownTools: [cal] });
+    assert.equal(r.rounds.length, 1, `${next}: no retry round`);
+    assert.equal(r.timings.claim_retry, undefined);
+    assert.equal(cal.seen.length, 1, "no second write");
+    assert.ok(!r.spoken.some((t) => /moved it|all set/.test(t)), "the claim is not heard");
+    if (hint) {
+      assert.ok(r.spoken.join(" ").endsWith(HINT_TEXT), `${next}: ${r.spoken}`);
+      assert.ok(r.captions.endsWith(HINT_TEXT), r.captions);
+      assert.equal(r.saved.content, r.spoken.join(" "), "saved = heard");
+    } else assert.ok(!r.spoken.includes(HINT_TEXT), `${next}: ${r.spoken}`);
+  });
+}
+
+test("claim retry: escalation off and no forcing available: the hint, no step-up, no second round", async () => {
+  const h = ownHarness({ bot: CROW, probe: () => true, rounds: [says("Added coffee to your calendar. "), call("crow_calendar_add_event", COFFEE)] });
+  h.deps.toolForcing = NO_FORCING;
+  const cal = calTool(COFFEE_ADDED);
+  const r = await heard(h, "add coffee Tuesday at 9 to my calendar", { ...act, noEscalate: true, ownTools: [cal] });
+  assert.equal(r.rounds.length, 1);
+  assert.deepEqual(h.calls.chatKeys, [FAST]);
+  assert.equal(r.timings.step_up, undefined);
+  assert.equal(r.timings.claim_retry, undefined);
+  assert.equal(cal.seen.length, 0);
+  assert.deepEqual(r.spoken, [HINT_TEXT]);
+  assert.equal(r.captions, HINT_TEXT);
+  assert.equal(r.saved.content, HINT_TEXT);
+});
+
+test("claim retry: no forcing available, escalation on: one step-up (the filler), then the larger model's call", async () => {
+  const cal = calTool(COFFEE_ADDED);
+  const h = ownHarness({ bot: CROW, probe: () => true, rounds: [says("Added coffee to your calendar. "), call("crow_calendar_add_event", COFFEE)] });
+  h.deps.toolForcing = NO_FORCING;
+  const r = await heard(h, "add coffee Tuesday at 9 to my calendar", { ...act, ownTools: [cal] });
+  assert.deepEqual(h.calls.chatKeys, [FAST, ESC]);
+  assert.equal(r.timings.claim_retry, "step_up");
+  assert.equal(r.rounds[1].opts.toolChoice, undefined, "nothing is forced where the engine does not honour it");
+  assert.deepEqual(r.spoken, [FILLER_TEXT, COFFEE_ADDED.say]);
+  assert.equal(r.captions, COFFEE_ADDED.say, "the filler is not captioned");
+  assert.equal(cal.seen.length, 1);
+  assert.equal(r.saved.content, COFFEE_ADDED.say);
+});
+
+test("claim retry: a forced call that repeats the last write (same tool, title and start) writes nothing", async () => {
+  const cal = calTool();
+  const h = ownHarness({ bot: CROW, rounds: [call("crow_calendar_add_event", LUNCH), says("Added lunch to your calendar. "), call("crow_calendar_add_event", { title: " Lunch ", start: LUNCH.start })] });
+  h.deps.toolForcing = VLLM;
+  await heard(h, "add lunch Monday to my calendar", { ...act, ownTools: [cal] });
+  const r = await heard(h, "add lunch Monday to my calendar", { ...act, ownTools: [cal] });
+  assert.equal(r.timings.claim_retry, "named");
+  assert.equal(cal.seen.length, 1, "no second write");
+  assert.deepEqual(r.spoken, [ADDED.say], "the earlier result's line");
+  assert.equal(r.saved.content, ADDED.say);
+});
+
+test("claim retry: a carried-only turn never retries", async () => {
+  const cal = calTool();
+  const h = ownHarness({ bot: CROW, rounds: [call("crow_calendar_add_event", LUNCH), says("Added dinner to your calendar. "), call("crow_calendar_add_event", { title: "dinner" }, "c2")] });
+  h.deps.toolForcing = VLLM;
+  await heard(h, "add lunch Monday to my calendar", { ...act, ownTools: [cal] });
+  const r = await heard(h, "sounds good, thanks", { ownTools: [cal] });
+  assert.equal(r.rounds.length, 1);
+  assert.equal(r.timings.claim_retry, undefined);
+  assert.equal(cal.seen.length, 1);
+});
+
+test("claim retry: on a rewritten turn the retry's write still asks first", async () => {
+  const ASK = { ok: true, effect: false, code: "needs_confirm", final: true, say: "Add coffee to your calendar for Tuesday at 9:00 AM?" };
+  const cal = { ...calTool((a, ctx) => (ctx.confirm ? ASK : COFFEE_ADDED)), intentWhen: calendarAddIntent };
+  const h = ownHarness({ bot: CROW, rounds: [says("Added coffee to your calendar. "), call("crow_calendar_add_event", COFFEE)] });
+  h.deps.toolForcing = VLLM;
+  const r = await heard(h, "had coffee Tuesday at 9", { ownTools: [cal] });
+  assert.equal(r.timings.stt_rewrite, "had");
+  assert.equal(r.timings.claim_retry, "named");
+  assert.equal(cal.seen.length, 1);
+  assert.equal(cal.seen[0].ctx.confirm, true, "asks before writing");
+  assert.deepEqual(r.spoken, [ASK.say]);
+  assert.equal(r.saved.content, ASK.say);
+});
+
+test("claim retry: an add request with no own tool on offer never retries", async () => {
+  const h = ownHarness({ chatTools: ["crow_memory"], rounds: [says("Added it. "), says("Done. ")] });
+  h.deps.toolForcing = VLLM;
+  const r = await heard(h, "add milk", { ...act, familiesOnIntent: false, ownTools: [] });
+  assert.equal(r.timings.claim_retry, undefined);
+  assert.ok(!r.spoken.includes(HINT_TEXT));
+});

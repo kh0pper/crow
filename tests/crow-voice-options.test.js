@@ -152,3 +152,17 @@ test("ownToolsLoaded: the voice bot with at least one routine backend resolved; 
   assert.equal(ownToolsLoaded(none, () => new Set(["ws_task_create"])), true, "a function is read");
   assert.equal(ownToolsLoaded(none, () => { throw new Error("x"); }), false, "a throwing reader is no add-on");
 });
+
+test("crowVoiceTurnOptions: the claim-retry hint (PR 2.1 Task 5) in the surface's language, word for word turn.js's default", async () => {
+  const { HINT_TEXT } = await import("../servers/gateway/voice/turn.js");
+  assert.equal(crowVoiceTurnOptions({ surface: "kiosk", lang: "en", actionWhen: f, actionFollowWhen: g }).hintText, HINT_TEXT);
+  const es = crowVoiceTurnOptions({ surface: "glasses", lang: "es", actionWhen: f, actionFollowWhen: g }).hintText;
+  assert.equal(es, VOICE_LINES.es.hint_say);
+  assert.notEqual(es, HINT_TEXT);
+});
+
+test("the kiosk passes the shared hint through unchanged (no kiosk change needed)", () => {
+  const ctx = { store: createWmStore(), deviceId: "k1", caps: { windows: ["timer"], max_windows: 2, screen: { w: 800, h: 480 }, audio: { out: true } }, lang: "es", sources: [], items: [], emit: () => {}, surface: "kiosk" };
+  const o = displayTurnOptions(ctx, { settings: { lang: "es" }, crowVoice: { turnOptions: crowVoiceTurnOptions, VOICE_DENY_TOOLS } });
+  assert.equal(o.hintText, VOICE_LINES.es.hint_say);
+});
