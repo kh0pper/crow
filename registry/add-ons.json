@@ -4740,7 +4740,7 @@
     {
       "id": "pm-workspace",
       "name": "PM Workspace",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Personal PM workspace — markdown + handwritten drawing notes with OCR, a daily digest email assembled from local boards/trackers and optional cloud adapters, and deterministic Monday.com board sync (mirror or two-way)",
       "type": "mcp-server",
       "author": "Crow",
@@ -4883,8 +4883,9 @@
         },
         {
           "name": "NTFY_TOPIC",
-          "description": "ntfy.sh topic for a short digest push notification",
-          "required": false
+          "description": "ntfy.sh topic for a short digest push notification (anyone who knows the topic can read and post to it, so it is kept like a password)",
+          "required": false,
+          "secret": true
         },
         {
           "name": "NTFY_URL",

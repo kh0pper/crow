@@ -134,9 +134,20 @@ async function withServer(fn) {
   try { return await fn(`http://127.0.0.1:${server.address().port}`); } finally { server.close(); }
 }
 
+async function challenge(id, { owner = true } = {}) {
+  B._setOwnerCheckForTest(() => owner);
+  try {
+    return await withServer(async (base) => {
+      const r = await fetch(`${base}/bundles/api/consent-challenge/${id}`);
+      return { data: await r.json(), cache: r.headers.get("cache-control") };
+    });
+  } finally { B._setOwnerCheckForTest(null); }
+}
+
 test("consent-challenge on a reinstall shows the kept values to the form, never a secret", async () => {
   seedMinio(PRIOR_MINIO);
-  const data = await withServer(async (base) => (await fetch(`${base}/bundles/api/consent-challenge/minio`)).json());
+  const { data, cache } = await challenge("minio");
+  assert.equal(cache, "no-store");
   assert.equal(data.existing_env?.MINIO_BIND_ADDR, TAILNET_ADDR);
   assert.equal(data.existing_env?.MINIO_ROOT_USER, "crowadmin");
   assert.equal(data.existing_env?.MINIO_ROOT_PASSWORD, undefined, "secret values never leave the server");
@@ -148,8 +159,71 @@ test("consent-challenge on a first install carries no existing values", async ()
   const id = "reenv-fresh";
   mkdirSync(join(FIXTURES, id), { recursive: true });
   writeFileSync(join(FIXTURES, id, "manifest.json"), JSON.stringify({ id, name: id, description: "d", type: "bundle", category: "productivity", version: "0.1.0", env_vars: [{ name: "BIND", default: "127.0.0.1" }] }));
-  const data = await withServer(async (base) => (await fetch(`${base}/bundles/api/consent-challenge/${id}`)).json());
+  const { data } = await challenge(id);
   assert.deepEqual(data.existing_env || {}, {});
+});
+
+test("consent-challenge: a non-owner session gets the kept secrets' names only, never values", async () => {
+  seedMinio(PRIOR_MINIO);
+  const { data, cache } = await challenge("minio", { owner: false });
+  assert.equal(cache, "no-store");
+  assert.equal(data.existing_env, undefined);
+  assert.ok(!JSON.stringify(data).includes(TAILNET_ADDR));
+  assert.deepEqual(data.existing_secret_set, ["MINIO_ROOT_PASSWORD"]);
+});
+
+function seedPlain(id, envVars, envText) {
+  const manifest = { id, name: id, description: "d", type: "bundle", category: "productivity", version: "0.2.0", env_vars: envVars };
+  mkdirSync(join(FIXTURES, id), { recursive: true });
+  writeFileSync(join(FIXTURES, id, "manifest.json"), JSON.stringify(manifest));
+  const dir = join(CROW_HOME, "bundles", id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify({ ...manifest, version: "0.1.0" }));
+  writeFileSync(join(dir, ".env"), envText, { mode: 0o600 });
+  return manifest;
+}
+
+test("existing values: unmarked secrets are kept back by name, by a URL's userinfo and by a URL's key-like query", () => {
+  const id = "reenv-leaky";
+  const fields = ["HA_URL", "NEXTCLOUD_URL", "KODI_URL", "HOOK_URL", "PLAIN_URL", "API_TOKEN", "DB_PASS", "ADMIN_PWD", "SENTRY_DSN",
+    "PUSH_TOPIC", "SESSION_COOKIE", "HASH_SALT", "SLACK_WEBHOOK", "BASIC_AUTH", "APP_CREDENTIALS", "ENC_KEY", "MODE"];
+  const manifest = seedPlain(id, fields.map((name) => ({ name })), [
+    "HA_URL=http://alex:hunter2@100.64.20.7:8123",
+    "NEXTCLOUD_URL=https://100.64.20.10/?token=abc123",
+    "KODI_URL=http://100.64.20.8:8080/jsonrpc?api_key=abc123",
+    "HOOK_URL=https://100.64.20.11/x?sig=abc&v=1",
+    "PLAIN_URL=http://100.64.20.9:8080/path?lang=en",
+    ...fields.slice(5, 16).map((n) => `${n}=value-${n.toLowerCase()}`),
+    "MODE=basic",
+  ].join("\n") + "\n");
+  const ex = B.existingInstallEnv(id, manifest);
+  assert.deepEqual(ex.values, { PLAIN_URL: "http://100.64.20.9:8080/path?lang=en", MODE: "basic" });
+  assert.deepEqual(ex.secretSet.sort(), fields.filter((n) => n !== "PLAIN_URL" && n !== "MODE").sort());
+});
+
+test("pm-workspace: NTFY_TOPIC (a capability secret) is marked secret and never reaches the form", () => {
+  const m = JSON.parse(readFileSync(join(REPO, "bundles", "pm-workspace", "manifest.json"), "utf8"));
+  assert.equal(m.env_vars.find((v) => v.name === "NTFY_TOPIC").secret, true);
+  const id = "reenv-ntfy";
+  const manifest = seedPlain(id, [{ name: "NTFY_TOPIC", secret: true }, { name: "NTFY_URL" }], "NTFY_TOPIC=crow-digest-k3y\nNTFY_URL=https://ntfy.sh\n");
+  const ex = B.existingInstallEnv(id, manifest);
+  assert.deepEqual(ex.values, { NTFY_URL: "https://ntfy.sh" });
+  assert.deepEqual(ex.secretSet, ["NTFY_TOPIC"]);
+});
+
+test("reinstall: a non-secret optional field the owner cleared is unset; a cleared secret or required field is kept", async () => {
+  const id = "reenv-clear";
+  const manifest = seedPlain(id, [
+    { name: "BIND", default: "127.0.0.1" }, { name: "NOTE" }, { name: "API_TOKEN", secret: true }, { name: "HOST", required: true },
+  ], `BIND=${TAILNET_ADDR}\nNOTE=hello\nAPI_TOKEN=tok-kept\nHOST=box.example.com\n`);
+  writeFileSync(join(FIXTURES, id, "docker-compose.yml"), "services:\n  app:\n    image: busybox:1.36\n");
+  writeFileSync(join(CROW_HOME, "bundles", id, "docker-compose.yml"), "services:\n  app:\n    image: busybox:1.36\n");
+  // The form drops blank fields from env_vars; env_edited names the cleared ones.
+  const env = await reinstall(id, {}, manifest, { editedEnv: ["BIND", "NOTE", "API_TOKEN", "HOST"] });
+  assert.equal(env.BIND || "", "", "cleared optional field is unset");
+  assert.equal(env.NOTE || "", "", "cleared optional field without a default is unset");
+  assert.equal(env.API_TOKEN, "tok-kept", "a blank secret field means keep it");
+  assert.equal(env.HOST, "box.example.com", "a required field is never unset by clearing it");
 });
 
 test("install form: shows kept values, marks secrets as kept, and submits which fields the owner edited", () => {
