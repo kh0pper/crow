@@ -216,3 +216,46 @@ test("loadGiveTarget and giveAudit are exported for the bots/:id/tasks route", a
     assert.deepEqual(JSON.parse(a[0].payload), { bot_id: "helper", start: true, created: true });
   });
 });
+
+test("audit actor follows the card actor when audit.actor_type is not given", async () => {
+  const forBot = seedCard();
+  await withDbs((tdb, cdb) => giveCard(tdb, cdb, { cardId: forBot, botId: "helper", actor: BOT }));
+  let a = audits(`card:${forBot}`);
+  assert.equal(a.length, 1);
+  assert.equal(a[0].actor_type, "bot", "a bot actor is never audited as the operator");
+  assert.equal(a[0].actor_id, "bot-1");
+
+  const forHuman = seedCard();
+  await withDbs((tdb, cdb) => giveCard(tdb, cdb, { cardId: forHuman, botId: "helper", actor: HUMAN }));
+  a = audits(`card:${forHuman}`);
+  assert.equal(a[0].actor_type, "local");
+  assert.equal(a[0].actor_id, null);
+
+  const forSession = seedCard();
+  const err = await refusal(withDbs((tdb, cdb) => giveCard(tdb, cdb, {
+    cardId: forSession, botId: "helper", actor: { kind: "session", id: "s-1", jobId: null },
+  })));
+  assert.equal(err.http, 400);
+  assert.equal(mutations(forSession).length, 0, "refused before anything is written");
+  assert.equal(audits(`card:${forSession}`).length, 0);
+});
+
+test("only autonomy from extraFields reaches the child writes", async () => {
+  const parent = seedCard({ title: "parent" });
+  const kid = seedCard({ title: "kid", parentId: parent });
+  const other = seedCard({ title: "elsewhere" });
+  await withDbs((tdb, cdb) => giveCard(tdb, cdb, {
+    cardId: parent, botId: "helper", actor: BOT,
+    extraFields: { autonomy: "gated", assigned_bot: "other", parent_id: other, project_id: PID2, title: "renamed" },
+  }));
+  const p = card(parent);
+  assert.equal(p.project_id, PID, "the card write keeps its project override");
+  assert.equal(p.assigned_bot, "helper", "the card write keeps its assigned_bot override");
+  assert.equal(p.parent_id, null, "the given card stays top level");
+  const k = card(kid);
+  assert.equal(k.parent_id, parent, "a child is never reparented");
+  assert.equal(k.project_id, PID);
+  assert.equal(k.assigned_bot, null, "a child is never assigned");
+  assert.equal(k.title, "kid");
+  assert.deepEqual(Object.keys(JSON.parse(mutations(kid)[0].detail_json)), ["project_id"]);
+});

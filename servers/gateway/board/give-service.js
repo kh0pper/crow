@@ -33,7 +33,7 @@ function fail(message, code, http, extra) {
 }
 
 /** The bot's pi_bot_defs row, or null. */
-async function loadBotRow(cdb, botId) {
+export async function loadBotRow(cdb, botId) {
   const { rows } = await cdb.execute({
     sql: "SELECT bot_id, display_name, definition, enabled, project_id FROM pi_bot_defs WHERE bot_id=?",
     args: [botId],
@@ -71,7 +71,7 @@ export function giveAudit(cdb, row, cardId, extra, { actor_type = "local", actor
 
 /** The card's row for a give: exists, is a CARD (`board_id IS NULL`), not
  * archived. */
-async function loadGivableCard(tdb, cardId) {
+export async function loadGivableCard(tdb, cardId) {
   const row = (await tdb.execute({
     sql: "SELECT id, board_id, archived_at, parent_id, project_id, status FROM tasks_items WHERE id=?",
     args: [cardId],
@@ -87,10 +87,10 @@ async function loadGivableCard(tdb, cardId) {
  * alone would leave its children on no board anyone renders. Every live
  * (non-archived) descendant moves to `projectId`, one updateCard (one
  * board_mutations row) each, recorded as `actor` — card-service has no
- * transaction primitive, and each write is independently valid. `fields`
- * ride in the same write. Archived descendants (and anything under them)
- * stay put. Returns how many moved. */
-async function moveDescendants(tdb, parentId, projectId, actor, fields) {
+ * transaction primitive, and each write is independently valid.
+ * `childFields` (only CHILD_FIELDS) ride in the same write. Archived
+ * descendants (and anything under them) stay put. Returns how many moved. */
+async function moveDescendants(tdb, parentId, projectId, actor, childFields) {
   const seen = new Set([parentId]);
   let frontier = [parentId], n = 0;
   while (frontier.length) {
@@ -103,12 +103,28 @@ async function moveDescendants(tdb, parentId, projectId, actor, fields) {
       const id = Number(r.id);
       if (seen.has(id)) continue;
       seen.add(id);
-      await updateCard(tdb, id, { ...fields, project_id: projectId }, actor);
+      await updateCard(tdb, id, { ...childFields, project_id: projectId }, actor);
       frontier.push(id);
       n++;
     }
   }
   return n;
+}
+
+/** The only extraFields that also reach the child writes: a child is moved
+ * with its parent, never assigned, reparented or put on another project. */
+const CHILD_FIELDS = ["autonomy"];
+
+/** The audit row's actor. An explicit audit.actor_type wins; otherwise it
+ * follows the card actor: a bot is audited as itself ("bot" + its id), a
+ * human as "local" (the dashboard). Any other actor kind must say how it is
+ * audited, so a non-human caller can never be audited as the operator. */
+function resolveAuditActor(actor, audit) {
+  if (audit.actor_type) return { actor_type: audit.actor_type, actor_id: audit.actor_id ?? null };
+  const kind = actor?.kind ?? "human";
+  if (kind === "bot") return { actor_type: "bot", actor_id: audit.actor_id ?? actor?.id ?? null };
+  if (kind === "human") return { actor_type: "local", actor_id: audit.actor_id ?? null };
+  throw fail(`no audit actor_type for a ${kind} actor`, "bad_request", 400);
 }
 
 /**
@@ -120,7 +136,7 @@ async function moveDescendants(tdb, parentId, projectId, actor, fields) {
  * (409 finished: terminal per the TARGET board's definition or the card's
  * CURRENT one). Then ONE updateCard write (project_id + assigned_bot +
  * `extraFields`, one board_mutations row), the live subtree moved with it
- * (each child gets `extraFields` too, never assigned_bot), and one
+ * (each child gets only the CHILD_FIELDS of `extraFields`), and one
  * card_given audit row (with a children count when any moved).
  *
  * @param tdb tasks.db client; @param cdb crow.db client
@@ -129,10 +145,12 @@ async function moveDescendants(tdb, parentId, projectId, actor, fields) {
  * @param {string} o.botId
  * @param {{kind,id,jobId}} o.actor recorded on every board_mutations row
  * @param {{actor_type?:string, actor_id?:string|null, extra?:object}} [o.audit]
+ *   actor_type defaults from `actor` (resolveAuditActor)
  * @param {object} [o.extraFields] more card fields for the same write
  * @returns {Promise<{row, projectId:number, children:number}>}
  */
 export async function giveCard(tdb, cdb, { cardId, botId, actor, audit = {}, extraFields = {} }) {
+  const auditActor = resolveAuditActor(actor, audit);
   const cur = await loadGivableCard(tdb, cardId);
   // A subtask lives in its parent's project — give the parent instead.
   if (cur.parent_id != null) throw fail("a subtask cannot be given on its own", "bad_request", 400);
@@ -147,12 +165,12 @@ export async function giveCard(tdb, cdb, { cardId, botId, actor, audit = {}, ext
     || isTerminal(await resolveBoardDef(tdb, { projectId: cur.project_id }), cur.status);
   if (finished) throw fail("card is finished", "finished", 409);
 
-  const fields = extraFields || {};
+  // parent_id never rides along: a given card stays top level.
+  const { parent_id: _ignored, ...fields } = extraFields || {};
+  const childFields = {};
+  for (const k of CHILD_FIELDS) if (Object.prototype.hasOwnProperty.call(fields, k)) childFields[k] = fields[k];
   await updateCard(tdb, cardId, { ...fields, project_id: projectId, assigned_bot: botId }, actor);
-  const children = await moveDescendants(tdb, cardId, projectId, actor, fields);
-  await giveAudit(cdb, row, cardId, { ...(audit.extra || {}), ...(children ? { children } : {}) }, {
-    actor_type: audit.actor_type || "local",
-    actor_id: audit.actor_id ?? null,
-  });
+  const children = await moveDescendants(tdb, cardId, projectId, actor, childFields);
+  await giveAudit(cdb, row, cardId, { ...(audit.extra || {}), ...(children ? { children } : {}) }, auditActor);
   return { row, projectId, children };
 }
