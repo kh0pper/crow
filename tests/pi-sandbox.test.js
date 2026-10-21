@@ -198,7 +198,7 @@ test("M1: the mode comes from the gateway's env, never from the child env", () =
     assert.equal(w.sandboxed, true, "a child-env CROW_PI_SANDBOX=off does not turn the sandbox off");
     assert.ok(!("CROW_PI_SANDBOX" in w.env));
     const src = readFileSync(new URL("../scripts/pi-bots/bridge.mjs", import.meta.url), "utf8");
-    assert.match(src, /k === "CROW_PI_SANDBOX" \|\| k === "CROW_PI_CONTAIN_BOTS"\) \{ strippedSpawnEnv\.push\(k\)/, "spawn_env strips CROW_PI_SANDBOX and CROW_PI_CONTAIN_BOTS");
+    assert.match(src, /k === "CROW_PI_SANDBOX" \|\| k === "CROW_PI_CONTAIN_BOTS" \|\| k === "CROW_PI_CONTAIN_DATA_KEEP"\) \{ strippedSpawnEnv\.push\(k\)/, "spawn_env strips CROW_PI_SANDBOX and CROW_PI_CONTAIN_BOTS");
   } finally {
     if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
   }

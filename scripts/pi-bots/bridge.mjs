@@ -120,6 +120,7 @@ function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts,
     appRoot: BRIDGE_APP_ROOT,
     piLabDir: findPiLabDir(), piAgentDir, shadowAgentDir: shadow.dir,
     crowHome, dataDir, botCacheDir, unmaskIdentity,
+    dataKeep: String(process.env.CROW_PI_CONTAIN_DATA_KEEP || "").split(",").map((x) => x.trim()).filter((x) => x && !x.includes("/")),
     sessionDir, cwd: spawnCwd, workspaceDir: opts.projectWorkspaceDir || null,
     writePaths: [...(piPolicy.write_paths || []), ...extraRw], readPaths: piPolicy.read_paths || [],
     mcpServers: servers, _shadow: shadow,
@@ -464,7 +465,7 @@ export class PiRpc {
     for (const k of Object.keys(def.spawn_env || {})) {
       // S3 fix round 1 (M1): CROW_PI_SANDBOX is the operator's switch for the
       // pi sandbox; a bot def must not be able to turn it off for itself.
-      if (/^PI_BOT_|^PIBOT_/.test(k) || k === "CROW_PI_SANDBOX" || k === "CROW_PI_CONTAIN_BOTS") { strippedSpawnEnv.push(k); continue; }
+      if (/^PI_BOT_|^PIBOT_/.test(k) || k === "CROW_PI_SANDBOX" || k === "CROW_PI_CONTAIN_BOTS" || k === "CROW_PI_CONTAIN_DATA_KEEP") { strippedSpawnEnv.push(k); continue; }
       // The board actor secret (and where it lives) is never a child's to hold or to choose.
       if (BOARD_SECRET_ENV_KEYS.includes(k)) { strippedSpawnEnv.push(k); continue; }
       spawnEnv[k] = def.spawn_env[k];
