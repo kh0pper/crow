@@ -1,7 +1,7 @@
 {
   "id": "peertube",
   "name": "PeerTube",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Federated video platform over ActivityPub — YouTube-alternative on the fediverse. Upload and transcode video, federate channels, stream via WebTorrent or HLS. Heaviest bundle in the federated line — video is kept on local disk, so plan for disk space and keep the transcoding/retention policy tight.",
   "type": "bundle",
   "author": "Crow",
@@ -36,7 +36,7 @@
     { "name": "PEERTUBE_SECRET", "description": "Server secret that signs federation requests. IMMUTABLE: generated once by Crow at install, kept across reinstalls, saved in Settings → Passwords (this machine only): export the keychain to keep a copy, or data encrypted with it cannot be recovered on another machine.", "required": true, "secret": true, "generate": "secret", "keychain": true, "keychain_label": "server secret" },
     { "name": "PEERTUBE_ACCESS_TOKEN", "description": "OAuth bearer token (Administration → Users → your account → Personal Access Tokens, OR POST /api/v1/users/token with username+password + client_id+client_secret from /api/v1/oauth-clients/local).", "required": false, "secret": true },
     { "name": "PEERTUBE_URL", "description": "Internal URL the MCP server uses to reach PeerTube (default http://peertube:9000 over crow-federation).", "default": "http://peertube:9000", "required": false },
-    { "name": "PEERTUBE_ADMIN_EMAIL", "description": "Admin email — where takedown notices, abuse reports, and federation alerts go.", "required": false },
+    { "name": "PEERTUBE_ADMIN_EMAIL", "description": "Admin email — where takedown notices, abuse reports, and federation alerts go.", "required": true },
     { "name": "PEERTUBE_TRANSCODING_THREADS", "description": "Worker threads per concurrent transcode (default 0 = all CPUs). Lower on multi-tenant hosts to keep latency under control.", "default": "0", "required": false },
     { "name": "PEERTUBE_TRANSCODING_CONCURRENCY", "description": "Max simultaneous transcodes. 1-2 on 16 GB hosts; 4+ on 32 GB+.", "default": "1", "required": false },
     { "name": "PEERTUBE_SIGNUP_ENABLED", "description": "Allow new user signups (true/false). Default false; opening signup without moderation tooling invites abuse.", "default": "false", "required": false },

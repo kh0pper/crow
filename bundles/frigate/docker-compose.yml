@@ -17,7 +17,7 @@ services:
       - ${FRIGATE_MEDIA_PATH:-frigate-media}:/media/frigate
       - /etc/localtime:/etc/localtime:ro
     environment:
-      - FRIGATE_RTSP_PASSWORD=${FRIGATE_RTSP_PASSWORD:-changeme}
+      - FRIGATE_RTSP_PASSWORD=${FRIGATE_RTSP_PASSWORD:-}
     shm_size: "512mb"
     mem_limit: 4g
     # NOTE: init: true breaks Frigate — its s6-overlay supervisor must run as PID 1.

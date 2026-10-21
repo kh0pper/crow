@@ -85,28 +85,15 @@ La integración de Crow funciona con o sin Plex Pass. Las funciones avanzadas co
 
 ## Opcional: Autoalojar Plex con Docker
 
-Si aún no tienes Plex funcionando, puedes instalarlo como contenedor Docker:
+Si aún no tienes Plex funcionando, Crow puede ejecutar uno por ti: abre **Extensiones → Plex** e inícialo allí. Crow lo ejecuta desde el archivo compose de la propia extensión de Plex, así que no hay nada que copiar. Lo que conviene saber:
 
-```yaml
-services:
-  plex:
-    image: plexinc/pms-docker:latest
-    container_name: crow-plex
-    ports:
-      - "32400:32400"
-    environment:
-      - PLEX_CLAIM=${PLEX_CLAIM_TOKEN}
-      - TZ=${TZ:-America/Chicago}
-    volumes:
-      - plex-config:/config
-      - ${PLEX_MEDIA_PATH:-/media}:/media:ro
-    restart: unless-stopped
+- **Red del host.** El servidor usa la red del host (lo que recomienda Plex), para que los dispositivos de tu red local puedan descubrirlo. Escucha en el puerto 32400 y en los puertos de descubrimiento de Plex en todas las interfaces de red de esta máquina.
+- **`PLEX_MEDIA_PATH` es obligatorio.** Apúntalo a la carpeta que guarda tus medios antes de instalar. Se monta en el servidor en `/data`.
+- **Reclama el servidor antes de su primer inicio.** Obtén un claim token en [plex.tv/claim](https://www.plex.tv/claim/) y configúralo como `PLEX_CLAIM_TOKEN`. Hasta que el servidor esté reclamado, la primera persona que lo abra puede reclamarlo.
+- **Dónde guarda el servidor su configuración.** En el volumen de Docker `plex-config`, salvo que configures `PLEX_CONFIG_PATH` con una carpeta.
+- **`PLEX_ADVERTISE_URL` (opcional).** La URL que usan otros dispositivos para llegar a este servidor, por ejemplo `http://192.168.1.10:32400`. Déjalo vacío para que Plex la descubra.
 
-volumes:
-  plex-config:
-```
-
-Obtiene un claim token desde [plex.tv/claim](https://www.plex.tv/claim/) y configúralo como `PLEX_CLAIM_TOKEN` en tu `.env` antes de la primera ejecución.
+Si un Plex autoalojado anterior anuncia una dirección rota `http://http://…`, borra **Custom server access URLs** (URL personalizadas de acceso al servidor) en Plex → Settings → Network.
 
 ## Solución de problemas
 

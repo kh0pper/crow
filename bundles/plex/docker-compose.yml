@@ -10,7 +10,7 @@ services:
     environment:
       - TZ=${TZ:-UTC}
       - PLEX_CLAIM=${PLEX_CLAIM_TOKEN:-}
-      - ADVERTISE_IP=http://${PLEX_URL:-localhost}:32400/
+      - ADVERTISE_IP=${PLEX_ADVERTISE_URL:-}
     init: true
     mem_limit: 4g
     restart: unless-stopped

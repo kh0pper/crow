@@ -1,7 +1,7 @@
 {
   "id": "minio",
   "name": "File Storage (MinIO)",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "S3-compatible file storage — upload, organize, and share files through Crow",
   "type": "bundle",
   "author": "Crow",

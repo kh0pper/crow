@@ -291,3 +291,102 @@ test("Configure never overwrites tax's generated key (it is not a form field)", 
     assert.equal(parseEnvText(readFileSync(join(dir, ".env"), "utf8")).CROW_TAX_ENCRYPTION_KEY, "generated-key-0123456789");
   } finally { server.close(); }
 });
+
+// ─── Compose lint (queue item 30d): no static example or secret fallback in a compose ───
+// Every tracked bundle compose plus the repo-root one. The waiver list is frozen: adding
+// to it is a reviewed diff (same idea as SURVEY_F1/EXEMPT in bundle-form-friction).
+const COMPOSE_FALLBACK_WAIVERS = new Map([
+  // The legacy rung's only record of the password a kept database was created with.
+  ["bookstack:BOOKSTACK_DB_PASSWORD", "legacy rung: password a kept database was created with"],
+  ["miniflux:MINIFLUX_DB_PASSWORD", "legacy rung: password a kept database was created with"],
+  ["paperless:PAPERLESS_DB_PASSWORD", "legacy rung: password a kept database was created with"],
+  ["wallabag:WALLABAG_DB_PASSWORD", "legacy rung: password a kept database was created with"],
+  // `local`: a dummy key for a local model endpoint.
+  ["rookery:ROOKERY_MODEL_API_KEY", "dummy key for a local model endpoint"],
+]);
+
+function trackedComposeFiles() {
+  const out = [{ owner: "root", file: join(REPO, "docker-compose.yml"), manifest: null }];
+  const ls = execFileSync("git", ["ls-files", "bundles/*/docker-compose*.yml"], { cwd: REPO, encoding: "utf8" });
+  for (const rel of ls.split("\n").filter(Boolean).sort()) {
+    const id = rel.split("/")[1];
+    const mp = join(REPO, "bundles", id, "manifest.json");
+    out.push({ owner: id, file: join(REPO, rel), manifest: existsSync(mp) ? JSON.parse(readFileSync(mp, "utf8")) : null });
+  }
+  return out;
+}
+
+const { composeFallbacks } = await import("../servers/gateway/bundle-env-secrets.js");
+
+/**
+ * Rule (iv): on a line whose value is NOT quoted, the text after a `${…}` operator must
+ * contain neither ": " (a YAML parse error in a mapping, or a sequence entry silently
+ * turned into a mapping) nor " #" (starts a comment). Returns the offending expressions.
+ */
+function unsafeUnquotedInterpolations(text) {
+  const bad = [];
+  for (const line of String(text).split("\n")) {
+    let rest = line.trimStart();
+    if (rest.startsWith("#")) continue;
+    if (rest.startsWith("- ")) rest = rest.slice(2).trimStart();
+    const kv = /^([^\s"'${}][^:{}]*?):\s+(.*)$/.exec(rest);
+    const value = kv ? kv[2] : rest;
+    if (/^["']/.test(value)) continue;
+    const re = /\$\{[A-Za-z_][A-Za-z0-9_]*(?::?[-?])([^}]*)\}/g;
+    let m;
+    while ((m = re.exec(value)) !== null) {
+      if (m[1].includes(": ") || m[1].includes(" #")) bad.push(m[0]);
+    }
+  }
+  return bad;
+}
+
+test("compose lint: no placeholder fallback and no static secret fallback outside the frozen waiver list", () => {
+  const bad = [];
+  const usedWaivers = new Set();
+  for (const { owner, file, manifest } of trackedComposeFiles()) {
+    const specs = new Map((manifest?.env_vars || []).map((v) => [v.name, v]));
+    for (const [k, v] of Object.entries(composeFallbacks(readFileSync(file, "utf8")))) {
+      if (P.isPlaceholderValue(v)) { bad.push(`${owner}: ${k} has a placeholder fallback`); continue; }
+      const secretish = specs.get(k)?.secret === true || /(PASSWORD|SECRET|_KEY|TOKEN)$/.test(k);
+      if (!secretish) continue;
+      const id = `${owner}:${k}`;
+      if (COMPOSE_FALLBACK_WAIVERS.has(id)) { usedWaivers.add(id); continue; }
+      bad.push(`${owner}: ${k} has a static secret fallback`);
+    }
+  }
+  assert.deepEqual(bad, [], bad.join("\n"));
+  // Rule (iii): every waiver still matches a real fallback, so the list stays exact.
+  assert.deepEqual([...usedWaivers].sort(), [...COMPOSE_FALLBACK_WAIVERS.keys()].sort());
+});
+
+test("compose lint: no unquoted ${…} message or default carries ': ' or ' #' (YAML-safe)", () => {
+  const bad = [];
+  for (const { owner, file } of trackedComposeFiles()) {
+    for (const expr of unsafeUnquotedInterpolations(readFileSync(file, "utf8"))) bad.push(`${owner}: ${expr}`);
+  }
+  assert.deepEqual(bad, [], bad.join("\n"));
+  // The rule catches the shape that breaks the YAML, and lets the quoted form through.
+  assert.equal(unsafeUnquotedInterpolations(
+    "      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is not set: reinstall MinIO}").length, 1);
+  assert.equal(unsafeUnquotedInterpolations("      - PASS=${PASS:-a #b}").length, 1);
+  assert.equal(unsafeUnquotedInterpolations(
+    '      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is not set: reinstall MinIO}"').length, 0);
+  assert.equal(unsafeUnquotedInterpolations('      - "PASS=${PASS:-a: b}"').length, 0);
+});
+
+test("compose lint: the repo-root compose keeps MinIO's root password on :? (no fallback)", () => {
+  const text = readFileSync(join(REPO, "docker-compose.yml"), "utf8");
+  assert.match(text, /\$\{MINIO_ROOT_PASSWORD:\?/);
+  assert.ok(!("MINIO_ROOT_PASSWORD" in composeFallbacks(text)));
+});
+
+test("plex: ADVERTISE_IP never interpolates PLEX_URL (a full URL) and comes from the optional PLEX_ADVERTISE_URL", () => {
+  const compose = readFileSync(join(REPO, "bundles", "plex", "docker-compose.yml"), "utf8");
+  const line = compose.split("\n").find((l) => l.includes("ADVERTISE_IP"));
+  assert.ok(line, "the compose sets ADVERTISE_IP");
+  assert.ok(!line.includes("PLEX_URL"), "PLEX_URL is already http://host:32400: http://${PLEX_URL}:32400/ doubles it");
+  assert.match(line, /ADVERTISE_IP=\$\{PLEX_ADVERTISE_URL:-\}\s*$/, "blank lets Plex discover it (the image skips an empty value)");
+  const spec = manifestOf("plex").env_vars.find((v) => v.name === "PLEX_ADVERTISE_URL");
+  assert.ok(spec && spec.required !== true && spec.description, "an optional, described field");
+});

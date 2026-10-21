@@ -85,28 +85,15 @@ Crow's integration works with or without Plex Pass. Advanced features like Live 
 
 ## Optional: Self-host Plex with Docker
 
-If you don't already have Plex running, you can install it as a Docker container:
+If you don't already have Plex running, Crow can run one for you: open **Extensions → Plex** and start it there. Crow runs it from the Plex extension's own compose file, so there is nothing to copy. What to know:
 
-```yaml
-services:
-  plex:
-    image: plexinc/pms-docker:latest
-    container_name: crow-plex
-    ports:
-      - "32400:32400"
-    environment:
-      - PLEX_CLAIM=${PLEX_CLAIM_TOKEN}
-      - TZ=${TZ:-America/Chicago}
-    volumes:
-      - plex-config:/config
-      - ${PLEX_MEDIA_PATH:-/media}:/media:ro
-    restart: unless-stopped
+- **Host networking.** The server uses the host's network (Plex's own recommendation), so devices on your local network can discover it. It listens on port 32400 and Plex's discovery ports on every network interface of this machine.
+- **`PLEX_MEDIA_PATH` is required.** Point it at the folder that holds your media before you install. It is mounted into the server at `/data`.
+- **Claim the server before its first start.** Get a claim token from [plex.tv/claim](https://www.plex.tv/claim/) and set it as `PLEX_CLAIM_TOKEN`. Until the server is claimed, the first person who opens it can claim it.
+- **Where the server keeps its settings.** In the Docker volume `plex-config`, unless you set `PLEX_CONFIG_PATH` to a folder.
+- **`PLEX_ADVERTISE_URL` (optional).** The URL other devices use to reach this server, for example `http://192.168.1.10:32400`. Leave it blank to let Plex discover it.
 
-volumes:
-  plex-config:
-```
-
-Get a claim token from [plex.tv/claim](https://www.plex.tv/claim/) and set it as `PLEX_CLAIM_TOKEN` in your `.env` before the first run.
+If an older self-hosted Plex advertises a broken `http://http://…` address, clear **Custom server access URLs** in Plex → Settings → Network.
 
 ## Troubleshooting
 
