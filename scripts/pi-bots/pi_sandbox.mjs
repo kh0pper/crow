@@ -245,7 +245,11 @@ function runProbe(bin, args) {
  */
 export function probePiSandbox(opts = {}) {
   const now = opts.now ?? Date.now();
-  if (probeCache && !opts.force && (probeCache.ok || now - probeCache.at < PROBE_RETRY_MS)) return probeCache;
+  // Only a FULL-tier success is kept for the life of the process. A failure,
+  // and a user-namespace-only ("active-no-pidns") success, are re-probed after
+  // PROBE_RETRY_MS, so a transient tier-1 failure (a probe timeout) does not
+  // pin the process to the weaker tier; later spawns pick up the upgrade.
+  if (probeCache && !opts.force && ((probeCache.ok && probeCache.pidns) || now - probeCache.at < PROBE_RETRY_MS)) return probeCache;
   const bwrap = opts.bwrap !== undefined ? opts.bwrap : (BWRAP_CANDIDATES.find((p) => existsSync(p)) || null);
   const setpriv = opts.setpriv !== undefined ? opts.setpriv : (SETPRIV_CANDIDATES.find((p) => existsSync(p)) || null);
   const run = opts.runProbe || runProbe;

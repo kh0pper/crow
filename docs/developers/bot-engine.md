@@ -208,12 +208,12 @@ bwrap --dev-bind / / --unshare-user --unshare-pid --proc /proc \
   --info-fd 3 -- node cli.js …
 ```
 
-If the PID-namespace flags fail but a plain user namespace works, pi starts without `--unshare-pid --proc /proc` (status `active-no-pidns`, with a one-time warning): every mask below still applies, but bots can see host processes, and the board shared secret is refused. setpriv is used only when both bwrap tiers fail.
+If the PID-namespace flags fail but a plain user namespace works, pi starts without `--unshare-pid --proc /proc` (status `active-no-pidns`, with a one-time warning): every mask below still applies, but bots can see host processes, and the board shared secret is refused. That tier is re-probed after 5 minutes like a failure, and later spawns move to the full tier once it works (a process that already refused the board secret keeps that decision until restart). setpriv is used only when both bwrap tiers fail.
 
 The session paths are masked even when nothing is running at spawn time:
 
 - `/run/user` is masked whole whenever it exists.
-- `/run/credentials` (systemd unit credentials, including the board secret) is masked whenever it exists, for every pi child whatever the spawner's env. It is root's, so it is never created here; while it is absent no credential exists.
+- `/run/credentials` (systemd unit credentials, including the board secret) is masked whenever it exists, for every bwrap-sandboxed pi child (both tiers) whatever the spawner's env; the setpriv fallback and `CROW_PI_SANDBOX=off` mask nothing. It is root's, so it is never created here; while it is absent no credential exists.
 - The tmux and cc-daemon dirs are pre-created on the host with mode 0700.
 - `/tmp/.X11-unix` is masked only when present, because it must stay root-owned for X servers. X is reachable through abstract sockets anyway.
 
@@ -230,14 +230,14 @@ The two systemd dirs are created empty when missing.
   The child env also loses `DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, `SSH_AUTH_SOCK`, `TMUX`, `TMUX_PANE`, `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY` and every `*_SOCK`, `*_SOCKET` and `*_SOCKET_PATH`.
 - **User unit dirs are not directly writable.** This is not a guarantee: a bot can rename an ancestor directory (see the remaining routes below).
 - **No privilege raises:** `no_new_privs` is set, so sudo and setuid/setgid binaries (crontab, at, pkexec) cannot raise privilege.
-- **No other processes at all:** pi runs in its own PID namespace with a fresh `/proc`, so no host process (the gateway, other bots) is even visible, and their `/proc/<pid>/{root,environ,mem}` do not exist inside. `--die-with-parent` is deliberately not used: the close's group SIGTERM ends the outer bwrap at once, and the parent-death SIGKILL would cut pi's own SIGTERM drain and MCP shutdown short.
+- **No other processes at all (full tier only):** pi runs in its own PID namespace with a fresh `/proc`, so no host process (the gateway, other bots) is even visible, and their `/proc/<pid>/{root,environ,mem}` do not exist inside. `--die-with-parent` is deliberately not used: the close's group SIGTERM ends the outer bwrap at once, and the parent-death SIGKILL would cut pi's own SIGTERM drain and MCP shutdown short.
 - **The masks are locked mounts.** The child cannot unmount them, even from a nested user namespace.
 - **Changed for bots by the PID namespace** (full tier only):
   - Bots cannot see host processes: `ps`, `pgrep`, `top` and `kill <host pid>` inside a bot shell see only the sandbox's own processes.
   - Processes a bot starts (`nohup`, `setsid`, a daemon, a backgrounded server) die when pi exits, because the namespace ends with it.
   - PIDs written by in-sandbox processes (pid files, logs) are namespace-local; a host-side `kill(pid, 0)` liveness check on them sees a different or dead process.
   - Operators with bash-enabled bots should check those bots' skills for `ps`, `pgrep`, `kill`, `nohup`, `setsid` or `tmux` use.
-- **Unchanged:** uid, network, cwd and the rest of the filesystem (read-write). Inside, files owned by other uids/gids show as `nobody`/`nogroup`, which affects owner-checking tools such as sudo and git's `safe.directory` on root-owned trees.
+- **Unchanged (both tiers):** uid, network, cwd and the rest of the filesystem (read-write). In the `active-no-pidns` tier, host processes also stay visible, and other processes' `/proc/<pid>/{root,environ,mem}` are refused only by user-namespace ptrace rules, not absent. Inside, files owned by other uids/gids show as `nobody`/`nogroup`, which affects owner-checking tools such as sudo and git's `safe.directory` on root-owned trees.
 
 **Escape routes that remain** (all of them need the dedicated user to close):
 

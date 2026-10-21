@@ -655,3 +655,31 @@ test("two-tier probe: full flags first, then user-namespace only ('active-no-pid
     _resetPiSandboxForTest();
   }
 });
+
+test("a tier-2 success is re-probed after PROBE_RETRY_MS and upgrades to the full tier", () => {
+  const prevMode = process.env.CROW_PI_SANDBOX;
+  delete process.env.CROW_PI_SANDBOX;
+  const results = ["probe timeout", null, null];
+  const calls = [];
+  const runProbe = (bin, args) => { calls.push(args.join(" ")); return results.shift(); };
+  try {
+    _resetPiSandboxForTest();
+    const t0 = 1_000_000;
+    let p = probePiSandbox({ now: t0, bwrap: "/b", setpriv: "/s", runProbe });
+    assert.deepEqual([p.ok, p.pidns], [true, false], "transient tier-1 failure: tier 2");
+    p = probePiSandbox({ now: t0 + PROBE_RETRY_MS - 1, bwrap: "/b", setpriv: "/s", runProbe });
+    assert.equal(calls.length, 2, "cached within the retry interval");
+    assert.equal(p.pidns, false);
+    p = probePiSandbox({ now: t0 + PROBE_RETRY_MS, bwrap: "/b", setpriv: "/s", runProbe });
+    assert.deepEqual([p.ok, p.pidns], [true, true], "upgraded");
+    assert.equal(calls.length, 3);
+    assert.match(calls[2], /--unshare-pid --proc \/proc/);
+    assert.equal(piSandboxStatus(), "active", "status follows the cache");
+    const w = wrapPiSpawn("/n/node", ["cli.js"], { mode: "auto", probe: probePiSandbox({ now: t0 + 10 * PROBE_RETRY_MS, runProbe }), env: {}, sockets: [], runtimeDirs: [], roDirs: [], credentialDirs: [] });
+    assert.equal(w.pidNamespace, true, "later spawns use the full tier");
+    assert.equal(calls.length, 3, "a full-tier success is kept for good");
+  } finally {
+    if (prevMode === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prevMode;
+    _resetPiSandboxForTest();
+  }
+});
