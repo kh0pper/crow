@@ -10,6 +10,7 @@ import { listInstalledExtensions, voiceCategoryFor, resolveCrowHome } from "../.
 import { skillDirs } from "../../scripts/pi-bots/skill_resolver.mjs";
 import { normalizeSkillName } from "../../scripts/pi-bots/skill_proposals.mjs";
 import { readdirSync } from "node:fs";
+import { offSkills } from "../shared/skill-state.js";
 import { getExposedCapabilities } from "./peer-exposure.js";
 import { getPeerManagedBots } from "./bot-management-exposure.js";
 import { CROW_VOICE_BOT_ID } from "../shared/voice-bot.js";
@@ -91,7 +92,9 @@ function localSkills(crowHome) {
     try { for (const f of readdirSync(dir)) if (f.endsWith(".md") && normalizeSkillName(f) === f.slice(0, -3)) names.add(f.slice(0, -3)); }
     catch { /* dir missing */ }
   }
-  return [...names].sort().map((name) => ({ name }));
+  // A skill switched off on this Crow won't load, so peers are not told about it.
+  const off = offSkills(crowHome || resolveCrowHome());
+  return [...names].filter((n) => !off.has(n)).sort().map((name) => ({ name }));
 }
 
 async function localBots(db) {
