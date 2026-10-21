@@ -1,11 +1,27 @@
 import { WsError } from "../result.js";
 
+// Methods that are safe to send twice (RFC 9110 idempotent + the read-only WebDAV methods). POST, MOVE, MKCOL,
+// PROPPATCH and LOCK are never resent.
+const RESENDABLE = new Set(["GET", "HEAD", "OPTIONS", "PROPFIND", "REPORT", "SEARCH", "PUT", "DELETE"]);
+// A pooled keep-alive socket the server already closed: fetch reuses it and the request dies with a reset. This
+// happens after the event loop was busy past the server's keep-alive timeout (a long repeat expansion, say), so
+// the client never saw the close in time. Refused connections and timeouts are real outages and are not retried.
+const STALE_SOCKET = new Set(["ECONNRESET", "EPIPE", "UND_ERR_SOCKET"]);
+const staleSocket = (e) => e?.name !== "TimeoutError" && STALE_SOCKET.has(e?.cause?.code);
+
 export async function ncFetch(cfg, method, url, { headers = {}, body, timeoutMs = 30000 } = {}) {
+  const send = () => fetch(url, {
+    method, body, redirect: "manual", signal: AbortSignal.timeout(timeoutMs),
+    headers: { Authorization: `Basic ${Buffer.from(`${cfg.user}:${cfg.appPassword}`).toString("base64")}`, "OCS-APIRequest": "true", ...headers },
+  });
   try {
-    return await fetch(url, {
-      method, body, redirect: "manual", signal: AbortSignal.timeout(timeoutMs),
-      headers: { Authorization: `Basic ${Buffer.from(`${cfg.user}:${cfg.appPassword}`).toString("base64")}`, "OCS-APIRequest": "true", ...headers },
-    });
+    try { return await send(); }
+    catch (e) {
+      // one resend, on a fresh connection, for a method that may be sent twice (a conditional PUT that did land
+      // the first time answers 412 → changed_concurrently, never a silent double write)
+      if (!staleSocket(e) || !RESENDABLE.has(method)) throw e;
+      return await send();
+    }
   } catch (e) {
     throw new WsError("workspace_unreachable", `Crow Workspace did not answer (${e?.name === "TimeoutError" ? "timed out" : "connection failed"}). Is it running?`);
   }
