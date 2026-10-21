@@ -118,7 +118,7 @@ export default {
       <p style="font-size:0.75rem;color:var(--crow-text-tertiary);word-break:break-all;text-align:center;margin-bottom:1rem">${t("login.2faManualKey", lang)}: <code>${escapeHtml(secret)}</code></p>
       <div style="background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:8px;padding:1rem;margin:1rem 0;text-align:center">
         <p style="font-size:0.8rem;font-weight:600;margin-bottom:0.5rem">${t("login.2faRecoveryCodes", lang)}</p>
-        ${recoveryCodes.map(c => `<code style="display:block;padding:0.2rem 0;font-size:0.9rem">${c}</code>`).join("")}
+        ${recoveryCodes.map(c => `<code style="display:block;padding:0.2rem 0;font-size:0.9rem">${escapeHtml(c)}</code>`).join("")}
         <p style="font-size:0.7rem;color:var(--crow-text-tertiary);margin-top:0.5rem">${t("login.2faSaveCodesWarning", lang)}</p>
       </div>
       <form method="POST">
