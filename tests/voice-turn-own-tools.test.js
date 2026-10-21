@@ -533,3 +533,19 @@ test("a plain question with own tools offered but not targeted still streams (no
   assert.equal(captions(h), "Lima is the capital of Peru. ");
   assert.deepEqual(h.calls.spoken, ["Lima is the capital of Peru."]);
 });
+
+test("a failed own call whose held text claims nothing still ends on the not-done line", async () => {
+  const t = taskOwn(BACKEND_ERR);
+  const h = ownHarness({ bot: CROW, rounds: [sameRound("Let me add that. ", "crow_task_add", { title: "buy milk" })] });
+  const r = await turn(h, "put buy milk on my tasks", { ...noAct, ownTools: [t] });
+  assert.equal(r.timings.action_guard, true);
+  const heard = h.calls.spoken.join(" ");
+  assert.ok(heard.trim().endsWith(NOT_DONE_TEXT), `spoken: ${heard}`);
+  assert.ok(captions(h).trim().endsWith(NOT_DONE_TEXT), `captions: ${captions(h)}`);
+  assert.ok(!/added/i.test(heard.replace("Let me add that.", "")) && !/added/i.test(captions(h)), `spoken: ${heard}`);
+  // The tool's own failure line wins over the not-done line.
+  const t2 = taskOwn({ ok: false, code: "backend_error", say: "Your task list is offline right now." });
+  const h2 = ownHarness({ bot: CROW, rounds: [sameRound("Let me add that. ", "crow_task_add", { title: "buy milk" })] });
+  await turn(h2, "put buy milk on my tasks", { ...noAct, ownTools: [t2] });
+  assert.ok(h2.calls.spoken.join(" ").trim().endsWith("Your task list is offline right now."), `spoken: ${h2.calls.spoken}`);
+});

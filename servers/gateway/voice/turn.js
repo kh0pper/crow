@@ -1030,6 +1030,7 @@ export function createVoiceTurnRunner(deps) {
       let memoryBacked = false;    // only a memory call did (a saved note is not a reminder)
       let unsureBacked = false;    // an ok call to a tool that is neither a known read nor a known write
       let guardHeld = "";
+      let ownFail = null;          // the last own call was not ok ({ say }); a later ok own call clears it
       let actionSent = false;      // a change was sent to a remote tool (it may still complete after a budget cut)
       let steppedUp = false;       // the own-tool step-up to the larger model (at most once per turn)
       const toolEscalationOn = typeof deps.toolEscalationEnabled !== "function" || deps.toolEscalationEnabled() === true;
@@ -1211,7 +1212,7 @@ export function createVoiceTurnRunner(deps) {
           if (tc === calls.at(-1)) finalRes = null;
           const gate = policyGate(tc);
           if (gate) {
-            if (ownByName.has(tc.name)) armGuard();   // an own call refused: the model's next words may still claim it
+            if (ownByName.has(tc.name)) { armGuard(); ownFail = { say: null }; }   // an own call refused: the model's next words may still claim it
             if (gate.neutral) neutralCalls++;
             outcome.set(tc, gate.code);
             local.push({ id: tc.id, name: tc.name, result: gate.message, neutral: gate.neutral });
@@ -1236,6 +1237,7 @@ export function createVoiceTurnRunner(deps) {
             const code = outcomeCode(res?.code, ok ? "ok" : "error");
             outcome.set(tc, code);
             if (ok) ownDone.set(dupKey, out);
+            ownFail = ok ? null : { say: typeof res?.say === "string" && res.say.trim() ? res.say.trim() : null };
             // A failed own call (no_tz, bad_args, backend_error…), or a question with no line to speak: from here on
             // the model's words are held and checked (#499). Text streamed in THIS round was already held when the
             // guard was on from the first word (a turn aimed at an own tool, above); otherwise it may have been
@@ -1399,6 +1401,9 @@ export function createVoiceTurnRunner(deps) {
           const said = guardHeld.trim();
           let line = backed ? (spokenChars === 0 ? said : "") : said;
           const claim = !backed && !!said && (memoryBacked ? claimsBeyondMemory(said) : claimsAction(said));
+          // An own call failed and nothing backed the action since: the turn ends on the failure line (the tool's own
+          // failure say, else the not-done line). Held text that claims nothing may be heard before it.
+          const failLine = ownFail && !backed ? String(ownFail.say || opts.notDoneText || NOT_DONE_TEXT) : "";
           // What is kept as said is what was heard: held text that is not heard never reaches the saved conversation.
           const dropHeld = (keep) => {
             for (let i = messages.length - 1; i > messages.indexOf(userMsg); i--) {
@@ -1411,12 +1416,17 @@ export function createVoiceTurnRunner(deps) {
           if (claim) {
             // After an ok call to a tool of unknown effect the truth is "not sure", never "nothing was changed".
             line = String(unsureBacked ? (opts.unsureText || UNSURE_TEXT)
+              : failLine ? failLine
               : memoryBacked && claimsReminder(said) ? (opts.memoOnlyText || MEMO_ONLY_TEXT)
               : actionable.length === 0 ? (opts.cantDoText || CANT_DO_TEXT) : (opts.notDoneText || NOT_DONE_TEXT));
             timings.claim_blocked = true;
             log(`[voice-turn] ${device.id} bot ${bot.bot_id}: a reply claiming an action no tool did was replaced`);
             dropHeld(() => false);
             messages.push({ role: "assistant", content: line });
+          } else if (failLine) {
+            timings.own_failed = true;
+            messages.push({ role: "assistant", content: failLine });
+            line = said ? `${said} ${failLine}` : failLine;
           } else if (!line && said) dropHeld((m) => !heldMsgs.has(m));
           if (line) {
             sink.event({ type: "caption_delta", text: spokenChars > 0 ? ` ${line}` : line });
