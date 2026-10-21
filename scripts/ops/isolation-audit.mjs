@@ -25,7 +25,8 @@ import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isolationReport, formatIsolationLine, secretEnvNames } from "../../servers/shared/isolation-check.js";
+import { isolationReport, formatIsolationLine, secretEnvNames, defaultSensitivePaths } from "../../servers/shared/isolation-check.js";
+export { defaultSensitivePaths };
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -67,30 +68,6 @@ export function auditUnits({ systemctl = defaultSystemctl, appRoot = APP_ROOT } 
     });
   }
   return out;
-}
-
-function looksLikeInstanceHome(p) {
-  try { if (!statSync(p).isDirectory()) return false; } catch { return false; }
-  for (const marker of ["installed.json", "mcp-addons.json", "data"]) {
-    try { statSync(join(p, marker)); return true; } catch {}
-  }
-  return false;
-}
-
-/** Default sensitive paths: the other ~/.crow* homes, ~/.ssh, ~/.gnupg. */
-export function defaultSensitivePaths({ home = homedir(), crowHome = process.env.CROW_HOME || join(homedir(), ".crow") } = {}) {
-  const own = resolve(crowHome);
-  const parent = dirname(own);
-  const paths = [];
-  try {
-    for (const e of readdirSync(parent)) {
-      const p = join(parent, e);
-      // An instance home, not any dir that starts with .crow (backups, flags).
-      if (/^\.crow(-|$)/.test(e) && p !== own && looksLikeInstanceHome(p)) paths.push(p);
-    }
-  } catch {}
-  for (const d of [".ssh", ".gnupg"]) paths.push(join(home, d));
-  return [...new Set(paths)];
 }
 
 /** The instance's own secret files: mode and owner only. */

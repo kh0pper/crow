@@ -12,7 +12,9 @@
  * time, so opening is the whole test. A unit with PrivateUsers=yes runs in
  * its own user namespace, where both opens fail with EACCES.
  */
-import { closeSync, constants, openSync, readFileSync, readdirSync } from "node:fs";
+import { closeSync, constants, openSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { SECRET_NAME_RE } from "./bot-env.js";
 
 /** True when `path` (file or directory) can be opened read-only by this process. */
@@ -119,4 +121,28 @@ export function formatIsolationLine(r) {
     `no_new_privs: ${yes(r.facts.noNewPrivs)}`,
     `root-equivalent groups: ${r.facts.rootEquivalentGroups.join(",") || "none"}`,
   ].join("; ");
+}
+
+function looksLikeInstanceHome(p) {
+  try { if (!statSync(p).isDirectory()) return false; } catch { return false; }
+  for (const marker of ["installed.json", "mcp-addons.json", "data"]) {
+    try { statSync(join(p, marker)); return true; } catch {}
+  }
+  return false;
+}
+
+/** Default sensitive paths: the other ~/.crow* homes, ~/.ssh, ~/.gnupg. */
+export function defaultSensitivePaths({ home = homedir(), crowHome = process.env.CROW_HOME || join(homedir(), ".crow") } = {}) {
+  const own = resolve(crowHome);
+  const parent = dirname(own);
+  const paths = [];
+  try {
+    for (const e of readdirSync(parent)) {
+      const p = join(parent, e);
+      // An instance home, not any dir that starts with .crow (backups, flags).
+      if (/^\.crow(-|$)/.test(e) && p !== own && looksLikeInstanceHome(p)) paths.push(p);
+    }
+  } catch {}
+  for (const d of [".ssh", ".gnupg"]) paths.push(join(home, d));
+  return [...new Set(paths)];
 }
