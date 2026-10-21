@@ -98,3 +98,20 @@ test("Bot Builder's one-click enable (enabled=on, no `was`) still turns the runt
   await section.handleAction({ req: { body: { action: "set_bot_runtime", enabled: "on" } }, res, db, action: "set_bot_runtime" });
   assert.equal((await flagsOf(db)).bot_runtime, true);
 });
+
+test("scope order: a local override wins over the global row, on the page and on Save", async () => {
+  const db = await freshDbAt(join(mkdtempSync(join(tmpdir(), "f3b-scope-")), "data"));
+  const { writeSetting } = await import("../servers/gateway/dashboard/settings/registry.js");
+  // feature_flags is not syncable, so writeSetting never writes it globally; a
+  // legacy global row can still exist, so insert one directly.
+  await db.execute({ sql: "INSERT OR REPLACE INTO dashboard_settings (key, value) VALUES ('feature_flags', ?)", args: [JSON.stringify({ bot_runtime: false })] });
+  await writeSetting(db, "feature_flags", JSON.stringify({ bot_runtime: true }), { scope: "local" });
+  const html = await section.render({ db, lang: "en" });
+  assert.match(html, /name="enabled" checked/);
+  const res = { redirectAfterPost() {} };
+  await section.handleAction({ req: { body: { action: "set_bot_runtime", enabled: "on", was: "on" } }, res, db, action: "set_bot_runtime" });
+  const { botRuntimeActive } = await import("../servers/gateway/dashboard/panels/bot-runtime-flag.js");
+  assert.equal(await botRuntimeActive(db), true);
+  const { rows } = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key='feature_flags'", args: [] });
+  assert.equal(JSON.parse(rows[0].value).bot_runtime, false, "the global row is untouched");
+});

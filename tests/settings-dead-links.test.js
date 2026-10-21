@@ -12,6 +12,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
@@ -23,11 +24,11 @@ test("companion settings never link to unregistered settings sections", () => {
   assert.match(src, /section=llm&(amp;)?tab=profiles&(amp;)?subtab=tts/);
 });
 
-test("no gateway code links to the non-existent /dashboard/models page", () => {
-  for (const f of ["servers/gateway/box-reservation-notify.js", "servers/gateway/dashboard/panels/bot-builder/classifier-status.js"]) {
-    const src = readFileSync(join(REPO_ROOT, f), "utf8");
-    assert.doesNotMatch(src, /["'`]\/dashboard\/models["'`?#]/, f);
-  }
+test("nothing in servers/ or bundles/ links to the non-existent /dashboard/models page", () => {
+  const out = execFileSync("git", ["grep", "-n", "-E", "[\"'`]/dashboard/models[\"'`?#]", "--", "servers", "bundles"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+  // The only hit allowed is the redirect route itself.
+  const hits = out.split("\n").filter((l) => l && !l.includes('router.get("/dashboard/models"'));
+  assert.deepEqual(hits, []);
 });
 
 test("/dashboard/models (kept in old notifications) redirects to the model catalog, behind auth", () => {

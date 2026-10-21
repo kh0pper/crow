@@ -72,10 +72,18 @@ test("menu previews get the db: LLM counts enabled providers, Data hygiene scans
   }
 });
 
-test("identity preview never renders 'undefined...'", async () => {
-  const section = (await import("../servers/gateway/dashboard/settings/sections/identity.js")).default;
-  const out = await section.getPreview({});
-  assert.ok(!String(out).includes("undefined"), `got ${out}`);
+test("identity preview shows the Crow ID prefix, never 'undefined...' (scratch data dir, own process)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "settings-identity-preview-"));
+  try {
+    const sectionPath = join(REPO_ROOT, "servers/gateway/dashboard/settings/sections/identity.js");
+    const out = execFileSync(process.execPath, ["--input-type=module", "-e",
+      `const s = (await import(${JSON.stringify(sectionPath)})).default; process.stdout.write(String(await s.getPreview({})));`],
+      { env: { ...process.env, CROW_DATA_DIR: dir, CROW_DB_PATH: join(dir, "crow.db") }, cwd: REPO_ROOT, encoding: "utf8" });
+    assert.ok(!out.includes("undefined"), `got ${out}`);
+    assert.match(out, /^crow:[0-9a-z]{7}\.\.\.$/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("previews are escaped (they can carry synced values)", async () => {

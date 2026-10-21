@@ -725,6 +725,12 @@ export async function syncProvidersFromModelsJson(db, { force = false, manual = 
         if (res) counters.reenabled++;
         continue;
       }
+      // Manual mode: re-check right before writing, so a disable or bundle
+      // uninstall that landed after the snapshot above is never undone.
+      if (manual) {
+        const { rows: now } = await dbClient.execute({ sql: "SELECT disabled FROM providers WHERE id = ?", args: [id] });
+        if (!now[0] || Number(now[0].disabled)) { counters.skipped_disabled++; continue; }
+      }
       // "seed" | "assert" — full assert from the file entry.
       let gpuPolicy = (p.mutexGroup || p.alwaysResident || p.defaultMember)
         ? { mutexGroup: p.mutexGroup ?? null, alwaysResident: !!p.alwaysResident, defaultMember: !!p.defaultMember }

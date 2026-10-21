@@ -44,7 +44,7 @@ const OWN = new Set(["localhost", "127.0.0.1", "::1"]);
 function fresh() {
   const dir = mkdtempSync(join(tmpdir(), "providers-manual-sync-"));
   execFileSync(process.execPath, ["scripts/init-db.js"], {
-    env: { ...process.env, CROW_DATA_DIR: dir, CROW_MODELS_JSON: "" },
+    env: { ...process.env, CROW_DATA_DIR: dir, CROW_DB_PATH: join(dir, "crow.db"), CROW_MODELS_JSON: "" },
     stdio: "pipe",
     cwd: join(import.meta.dirname, ".."),
   });
