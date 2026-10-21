@@ -35,7 +35,7 @@
  * scripts/build-skill-history.mjs load this file directly.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync, rmSync, chmodSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync, rmSync, chmodSync, readdirSync } from "node:fs";
 import { join, dirname, isAbsolute } from "node:path";
 
 /** sha256 of the LF-normalised text (a CRLF checkout of the same text matches). */
@@ -296,4 +296,70 @@ export function keptSkillNotification({ bundle, skill }) {
     action_url: `/dashboard/skills?edit=${encodeURIComponent(skill)}&source=user`,
     type: "system", source: "bundles",
   };
+}
+
+const BACKUPS_KEPT = 5;
+const reEscape = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** Copy an owner's file into <crowHome>/skill-backups before it is replaced; keep the newest 5 per name. */
+function backupSkill(crowHome, skill, buf) {
+  const dir = join(crowHome, "skill-backups");
+  mkdirSync(dir, { recursive: true });
+  const base = skill.replace(/\.md$/, "");
+  const stamp = new Date().toISOString().replace(/\.\d+Z$/, "").replace(/:/g, "-");
+  let name = `${base}.${stamp}Z.md`;
+  for (let k = 1; existsSync(join(dir, name)); k++) name = `${base}.${stamp}-${k}Z.md`;
+  atomicWrite(join(dir, name), buf);
+  const mine = new RegExp(`^${reEscape(base)}\\.\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}(-\\d+)?Z\\.md$`);
+  const all = readdirSync(dir).filter((f) => mine.test(f)).sort();
+  for (const old of all.slice(0, Math.max(0, all.length - BACKUPS_KEPT))) rmSync(join(dir, old), { force: true });
+  return name;
+}
+
+/**
+ * Write the extension's shipped copy of one skill on an explicit owner click
+ * (Skills panel: Apply update, Restore original, Restore). It re-runs the
+ * sync's decision for that skill (report mode) and refuses unless the action
+ * is one of `expect`, so anything that changed since the page rendered
+ * changes nothing. An existing file is backed up first. Written in every
+ * sync mode, like recordRemovedLink: it is the owner's intent, not a sync
+ * decision. Never writes through a link; refuses an unparseable record.
+ * @param {{ crowHome: string, appBundles: string, skill: string, expect: string[] }} o
+ * @returns {{ ok: true, action: string, backup?: string } | { ok: false, error: string, action?: string }}
+ */
+export function installShippedSkill({ crowHome, appBundles, skill, expect }) {
+  if (typeof skill !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test(skill)) return { ok: false, error: "not-shipped" };
+  const id = bundleShippingSkill({ crowHome, appBundles, skill });
+  if (!id || !/^[a-z0-9][a-z0-9-]*$/.test(id)) return { ok: false, error: "not-shipped" };
+  const recordPath = join(crowHome, "skill-installs.json");
+  let record = {};
+  if (existsSync(recordPath)) {
+    try {
+      const j = JSON.parse(readFileSync(recordPath, "utf8"));
+      if (!j || typeof j !== "object" || Array.isArray(j)) return { ok: false, error: "record-unreadable" };
+      record = j;
+    } catch { return { ok: false, error: "record-unreadable" }; }
+  }
+  const skillsDir = join(crowHome, "skills");
+  const dst = join(skillsDir, skill);
+  const st = lstatOrNull(dst);
+  if (st && !st.isFile()) return { ok: false, error: "link" };
+  const src = join(appBundles, id);
+  let manifest, installedManifest = null;
+  try { manifest = JSON.parse(readFileSync(join(src, "manifest.json"), "utf8")); } catch { return { ok: false, error: "not-shipped" }; }
+  try { installedManifest = JSON.parse(readFileSync(join(crowHome, "bundles", id, "manifest.json"), "utf8")); } catch { installedManifest = null; }
+  const path = manifestSkillPaths(manifest).find((p) => baseOf(p) === skill);
+  if (!path) return { ok: false, error: "not-shipped" };
+  const { lines } = syncBundleSkills({ id, src, manifest, installedManifest, mode: "report", skillsDir, recordPath, ledger: readSkillLedger(appBundles), log: () => {} });
+  const line = lines.find((l) => l.skill === skill);
+  if (!line || !expect.includes(line.action)) return { ok: false, error: "changed", action: line ? line.action : null };
+  let srcBuf;
+  try { srcBuf = readFileSync(join(src, path)); } catch { return { ok: false, error: "not-shipped" }; }
+  let backup;
+  // Only the owner's own text is backed up (an unedited copy is the shipped text).
+  if (st && (line.action === "kept-edited" || line.action === "kept-unverified")) backup = backupSkill(crowHome, skill, readFileSync(dst));
+  atomicWrite(dst, srcBuf);
+  record[skill] = { bundle: id, sha256: skillHash(srcBuf), installedAt: new Date().toISOString() };
+  atomicWrite(recordPath, JSON.stringify(record, null, 2) + "\n");
+  return backup ? { ok: true, action: line.action, backup } : { ok: true, action: line.action };
 }
