@@ -212,7 +212,10 @@ export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, compos
     if (existing) {
       env[k] = existing;
       if (spec.keychain === true && !spec.store_as) {
-        reusedPlain[k] = { plain: existing, origin: installed[k] || legacy[k] ? "typed" : "generated" };
+        // "legacy": the value is the compose fallback the old install ran on, a published
+        // default — kept so the data still opens, but never saved to the keychain.
+        const origin = legacy[k] && existing === legacy[k] ? "legacy" : installed[k] ? "typed" : "generated";
+        reusedPlain[k] = { plain: existing, origin };
       }
       continue;
     }

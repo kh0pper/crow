@@ -285,3 +285,64 @@ test("config-friction: a keychain:true value KEPT from an earlier install is sav
     assert.equal(await K.openEntrySecret(d2, ID(), mine[0].id), "typed-by-casey");
   } finally { d2.close(); }
 });
+
+// Queue item 30d (b1): a pre-generation install whose .env left a generated key blank ran
+// on its compose fallback. An in-place reinstall must read that fallback from the PRIOR
+// (installed) compose — the repo copy that replaces it has none any more (`:?`) — keep it,
+// and never save that published default to the keychain.
+test("in-place reinstall over a legacy install: the fallback comes from the PRIOR compose, is kept, and never reaches the keychain", async () => {
+  const stubs = [];
+  B._setComposeRunnerForTest(async (args) => { stubs.push(args[0]); return { stdout: "", stderr: "" }; });
+  B._setDockerRunnerForTest(async () => ({ stdout: "", stderr: "" }));
+  try {
+    for (const [id, rel] of [["demo-legacy-a", "docker-compose.yml"], ["demo-legacy-b", "deploy/compose.yml"]]) {
+      const manifest = {
+        id, name: "Demo Legacy", description: "d", type: "bundle", category: "storage", version: "0.2.0",
+        docker: { composefile: rel },
+        env_vars: [{ name: "LEG_PASSWORD", secret: true, generate: "secret", keychain: true, keychain_label: "admin password" }],
+      };
+      const src = join(FIXTURES, id);
+      mkdirSync(join(src, rel, ".."), { recursive: true });
+      writeFileSync(join(src, "manifest.json"), JSON.stringify(manifest));
+      writeFileSync(join(src, rel), 'services:\n  app:\n    image: busybox:1.36\n    environment:\n      LEG_PASSWORD: "${LEG_PASSWORD:?LEG_PASSWORD is not set}"\n');
+      const dest = join(CROW_HOME, "bundles", id);
+      mkdirSync(join(dest, rel, ".."), { recursive: true });
+      writeFileSync(join(dest, "manifest.json"), JSON.stringify({ ...manifest, version: "0.1.0" }));
+      writeFileSync(join(dest, rel), "services:\n  app:\n    image: busybox:1.36\n    environment:\n      LEG_PASSWORD: ${LEG_PASSWORD:-old-fallback-pw}\n");
+      writeFileSync(join(dest, ".env"), "LEG_PASSWORD=\n", { mode: 0o600 });
+
+      const job = B._createJobForTest(id, "install");
+      const out = await B.runInstallJob(id, {}, { job, installedSnapshot: [], consentVerified: false, manifest });
+      assert.equal(out.ok, true, `${rel}: ${out.reason}`);
+      assert.equal(parseEnvText(readFileSync(join(dest, ".env"), "utf8")).LEG_PASSWORD, "old-fallback-pw", `${rel}: the value the old install ran on is kept`);
+      assert.ok(!job.log.some((l) => /sealed with a keychain key|keychain could not be read/.test(l)), `${rel}: no keychain refusal`);
+      assert.ok(job.log.some((l) => l.includes("LEG_PASSWORD is running on the published default")), `${rel}: ${job.log.join(" | ")}`);
+      const d = db();
+      try {
+        const mine = (await K.listEntries(d)).filter((e) => e.bundle_id === id);
+        assert.deepEqual(mine, [], `${rel}: the published default is never saved to the keychain`);
+      } finally { d.close(); }
+    }
+
+    // A fresh install (no prior folder) never uses a fallback: a new value is minted and saved.
+    const id = "demo-legacy-fresh";
+    const manifest = {
+      id, name: "Demo Fresh", description: "d", type: "bundle", category: "storage", version: "0.2.0",
+      env_vars: [{ name: "LEG_PASSWORD", secret: true, generate: "secret", keychain: true, keychain_label: "admin password" }],
+    };
+    mkdirSync(join(FIXTURES, id), { recursive: true });
+    writeFileSync(join(FIXTURES, id, "manifest.json"), JSON.stringify(manifest));
+    writeFileSync(join(FIXTURES, id, "docker-compose.yml"), 'services:\n  app:\n    image: busybox:1.36\n    environment:\n      LEG_PASSWORD: "${LEG_PASSWORD:?LEG_PASSWORD is not set}"\n');
+    const job = B._createJobForTest(id, "install");
+    const out = await B.runInstallJob(id, {}, { job, installedSnapshot: [], consentVerified: false, manifest });
+    assert.equal(out.ok, true, out.reason);
+    assert.match(parseEnvText(readFileSync(join(CROW_HOME, "bundles", id, ".env"), "utf8")).LEG_PASSWORD, /^[A-Za-z0-9_-]{43}$/);
+    const d = db();
+    try {
+      assert.equal((await K.listEntries(d)).filter((e) => e.bundle_id === id).length, 1, "the minted value is saved");
+    } finally { d.close(); }
+  } finally {
+    B._setComposeRunnerForTest(null);
+    B._setDockerRunnerForTest(null);
+  }
+});

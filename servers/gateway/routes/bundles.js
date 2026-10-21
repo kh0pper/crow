@@ -2619,6 +2619,16 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     // may hold a value something other than the owner wrote), so it is never granted.
     let priorEnvValues = {};
     if (priorInstallEnv) { try { priorEnvValues = parseEnvText(readFileSync(join(destDir, ".env"), "utf8")); } catch { /* unreadable: nothing excluded beyond the rest */ } }
+    // The INSTALLED compose, read before the copy replaces it: a pre-generation install whose
+    // .env left a generated key blank ran on that compose's `${KEY:-fallback}`, and the repo
+    // copy may no longer carry it (queue item 30d: minio's is `:?` now).
+    let priorComposeText = null;
+    if (priorInstallEnv) {
+      let priorManifest = null;
+      try { priorManifest = JSON.parse(readFileSync(join(destDir, "manifest.json"), "utf8")); } catch { /* fall back to the repo manifest */ }
+      const rel = manifestComposeFile(priorManifest || manifest) || "docker-compose.yml";
+      try { priorComposeText = readFileSync(join(destDir, rel), "utf8"); } catch { priorComposeText = null; }
+    }
     installSnap = snapshotInstallDir(sourceDir, destDir, { backupRoot: join(CROW_HOME, ".install-rollback") });
     mkdirSync(destDir, { recursive: true });
     cpSync(sourceDir, destDir, { recursive: true });
@@ -2705,7 +2715,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     // retained copy: its keychain:true generated keys come back from the keychain instead of
     // being minted again (recovery keys, queue item 30). Best-effort; values never logged.
     const kcRestore = await keychainRestoreValues(bundleId, manifest);
-    const plan = planGeneratedEnv(bundleId, manifest, { destDir, crowHome: CROW_HOME, composeText: composeTextForEnv, priorInstall: priorInstallEnv, keychain: kcRestore.values });
+    const plan = planGeneratedEnv(bundleId, manifest, { destDir, crowHome: CROW_HOME, composeText: priorComposeText ?? composeTextForEnv, priorInstall: priorInstallEnv, keychain: kcRestore.values });
     // A key the keychain holds but cannot read (sealed with a keychain key this machine does
     // not have: crow.db restored, Export not imported yet) is never minted over: the new
     // value would replace that entry, and a later Import skips a bundle+key that has a
