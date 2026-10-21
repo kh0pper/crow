@@ -3,6 +3,10 @@ import { escapeHtml } from "../shared/components.js";
 import { perchHubCss } from "./css.js";
 import { perchHubJs } from "./client.js";
 import { perchSessionsCollapseCss } from "./sessions-collapse-css.js";
+import { perchDictationCss } from "./dictation-css.js";
+
+/** The composer mic glyph (dictation). */
+const MIC_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>`;
 
 /** engineStatus() returns installing | absent | unhealthy | ready
  *  (bot-engine-status.js:84-101). Only "absent" means "not installed" — telling
@@ -30,7 +34,7 @@ function engineBanner(engine, lang) {
  *  versa. Static shell only — every list row and transcript line is
  *  rendered client-side, the same split birdDrawerMarkup() uses. */
 export function perchHubContent(lang = "en", engine = { state: "ready" }) {
-  return `<style>${perchHubCss()}${perchSessionsCollapseCss()}</style>
+  return `<style>${perchHubCss()}${perchSessionsCollapseCss()}${perchDictationCss()}</style>
 <div id="perch-hub-root">
 ${engineBanner(engine, lang)}
 <!-- No brand block here. The shell's .content-header already renders
@@ -177,9 +181,29 @@ ${engineBanner(engine, lang)}
       <div class="send-row">
         <button type="button" id="perch-attach" class="quiet">${escapeHtml(t("perch.attachFile", lang))}</button>
         <input type="file" id="perch-file-input" style="display:none" accept="image/*">
+        <!-- Composer dictation (queue item 15; client: dictation.js). Ships
+             hidden: the client shows it only in a secure context with a
+             recorder, a frame that allows the microphone, and a usable STT
+             profile (the GET probe). A visible word at every width. -->
+        <button type="button" id="perch-dictate" class="quiet" hidden>${MIC_SVG}<span>${escapeHtml(t("perch.dictate", lang))}</span></button>
         <button type="button" class="primary" id="perch-send">${escapeHtml(t("perch.send", lang))}</button>
         <button type="button" id="perch-abort" style="display:none">${escapeHtml(t("perch.abort", lang))}</button>
       </div>
+      <!-- The recording bar: replaces the textarea + send row while dictating
+           (dictation-css.js keys that on #perch-composer[data-dictation]).
+           Words beside the icons at 600px and wider, icon-only below — so
+           every button carries aria-label + title = its word. The timer sits
+           OUTSIDE the live region, or a screen reader reads it every second. -->
+      <div id="perch-dictation-bar" hidden>
+        <button type="button" id="perch-dict-cancel" class="quiet dict-btn" aria-label="${escapeHtml(t("perch.dictationCancel", lang))}" title="${escapeHtml(t("perch.dictationCancel", lang))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg><span class="dict-word">${escapeHtml(t("perch.dictationCancel", lang))}</span></button>
+        <div class="dict-mid"><span class="dict-spin" aria-hidden="true"></span><span id="perch-dict-status" class="dict-status" aria-live="polite"></span><span id="perch-dict-level" class="dict-level" aria-hidden="true"></span><span id="perch-dict-time" class="dict-time">0:00</span></div>
+        <button type="button" id="perch-dict-retry" class="dict-btn" hidden>${escapeHtml(t("perch.dictationRetry", lang))}</button>
+        <button type="button" id="perch-dict-done" class="dict-btn" aria-label="${escapeHtml(t("perch.dictationDone", lang))}" title="${escapeHtml(t("perch.dictationDone", lang))}"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg><span class="dict-word">${escapeHtml(t("perch.dictationDone", lang))}</span></button>
+        <button type="button" id="perch-dict-send" class="primary dict-btn" aria-label="${escapeHtml(t("perch.dictationSend", lang))}" title="${escapeHtml(t("perch.dictationSend", lang))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg><span class="dict-word">${escapeHtml(t("perch.dictationSend", lang))}</span></button>
+      </div>
+      <!-- "Transcribed by <provider>": shown under the bar only when the probe
+           said the profile is a cloud one. Plain muted text, not a live region. -->
+      <div id="perch-dictation-hint" class="dict-hint" hidden></div>
     </div>
     </section>
     <!-- Session tab: the controls row (moved verbatim — ids unchanged, so
