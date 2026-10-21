@@ -71,6 +71,7 @@ import { runBridgeTick as defaultRunBridgeTick } from "../../scripts/pi-bots/bri
 import { superviseProcess as defaultSuperviseProcess } from "./process-supervisor.js";
 import { setBreakerSource } from "./bot-engine-status.js";
 import { initGatewayActorKey } from "../../scripts/pi-bots/actor-sig.mjs";
+import { resolvePiCli as defaultResolvePiCli } from "../../scripts/pi-bots/pi_resolver.mjs";
 
 const DISCORD_GATEWAY_PATH = fileURLToPath(
   new URL("../../scripts/pi-bots/discord_gateway.mjs", import.meta.url)
@@ -171,6 +172,9 @@ function discordSignature(configs) {
  *   without a real 30s wait.
  * @param {Function} [opts._createBotcronTicker] test seam, defaults to the
  *   real createBotcronTicker from botcron-lease.mjs.
+ * @param {Function} [opts._resolvePiCli] test seam, defaults to the real
+ *   resolvePiCli: with no pi engine a bot-cron sweep is skipped, so an
+ *   engine-less install never piles up queued jobs nobody can run.
  */
 export async function initBotRuntime({
   env = process.env,
@@ -185,6 +189,7 @@ export async function initBotRuntime({
   _bus = bus,
   _pollMs = 30000,
   _createBotcronTicker = createBotcronTicker,
+  _resolvePiCli = defaultResolvePiCli,
 } = {}) {
   if (env.CROW_DISABLE_BOT_RUNTIME === "1") {
     state.mode = "disabled";
@@ -271,12 +276,27 @@ export async function initBotRuntime({
       log: (m) => console.log("[bot-runtime] [botcron] " + m),
     });
     botcronTicker = ticker;
-    // Bound to THIS ticker: a stale fire after a re-arm can never drive the new one.
+    // Bound to THIS ticker and THIS state object: a stale fire after a re-arm
+    // (or a sweep still in flight across a test reset) never drives the new
+    // ticker or writes into a fresh state.
+    const bc = state.botcron;
+    let noEngineLogged = false;
     const sweep = async () => {
+      if (botcronTicker !== ticker) return;
+      let engine = null;
+      try { engine = _resolvePiCli(); } catch { engine = null; }
+      if (!engine) {
+        if (!noEngineLogged) {
+          noEngineLogged = true;
+          console.log("[bot-runtime] [botcron] no pi engine installed, bot-cron schedules wait until one is");
+        }
+        return;
+      }
+      noEngineLogged = false;
       const r = await ticker.sweep();
-      if (r.skipped) return;
-      state.botcron.lastTickAt = new Date().toISOString();
-      state.botcron.lastFired = r.fired;
+      if (r.skipped || botcronTicker !== ticker) return;
+      bc.lastTickAt = new Date().toISOString();
+      bc.lastFired = r.fired;
       if (r.fired) console.log(`[bot-runtime] [botcron] enqueued ${r.fired} scheduled job(s)`);
     };
     botcronTimer = _setIntervalFn(sweep, botcronMs);
