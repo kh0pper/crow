@@ -290,3 +290,80 @@ test("the drawer re-hydrates from the server after an answer, and Save sends the
   assert.ok(translations["botboard.errStale"].en && translations["botboard.errStale"].es);
   assert.notEqual(translations["botboard.errStale"].en, translations["botboard.errStale"].es);
 });
+
+// ---- the open drawer survives a live reload (follow-up card appears) ----
+
+function fnSource(src, name) {
+  const at = src.indexOf("function " + name + "(");
+  assert.ok(at >= 0, name + " present");
+  let depth = 0;
+  for (let i = src.indexOf("{", at); i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}" && --depth === 0) return src.slice(at, i + 1);
+  }
+  throw new Error("unbalanced " + name);
+}
+
+function reopenHarness(src, { open = true, curId = 7, scroll = 0, page = "/dashboard/bot-board?bot=bot-1" } = {}) {
+  const store = new Map();
+  const sessionStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+    removeItem: (k) => store.delete(k),
+  };
+  const [path, search] = page.split("?");
+  const location = { pathname: path, search: search ? "?" + search : "" };
+  const drawer = { scrollTop: scroll, classList: { contains: (c) => c === "bb-open" && open } };
+  const opened = [];
+  const make = new Function("drawer", "cur", "sessionStorage", "location", "openCardById",
+    "var REOPEN_KEY='bb-reopen-drawer', pendingDrawerScroll=0;\n" +
+    fnSource(src, "rememberOpenDrawer") + "\n" + fnSource(src, "reopenRememberedDrawer") +
+    "\nreturn { remember: rememberOpenDrawer, reopen: reopenRememberedDrawer, scroll: function(){ return pendingDrawerScroll; } };");
+  const api = make(drawer, curId == null ? null : { id: curId }, sessionStorage, location, (id) => opened.push(id));
+  return { api, store, opened, location };
+}
+
+test("a live reload remembers the open card drawer and the next load of the same board reopens it, scroll included", () => {
+  const src = scriptBody("en");
+  const a = reopenHarness(src, { curId: 12, scroll: 340 });
+  a.api.remember();
+  const saved = a.store.get("bb-reopen-drawer");
+  assert.ok(saved, "remembered");
+  // "reload": a fresh page sharing the same sessionStorage
+  const b = reopenHarness(src, { open: false, curId: null });
+  b.store.set("bb-reopen-drawer", saved);
+  b.api.reopen();
+  assert.deepEqual(b.opened, [12], "the same card's drawer opens");
+  assert.equal(b.api.scroll(), 340, "its scroll is restored once the card GET lands");
+  assert.equal(b.store.has("bb-reopen-drawer"), false, "one-shot");
+});
+
+test("nothing is remembered without an open drawer; a stale, foreign-board or junk entry reopens nothing", () => {
+  const src = scriptBody("en");
+  const closed = reopenHarness(src, { open: false });
+  closed.api.remember();
+  assert.equal(closed.store.size, 0);
+  for (const v of [
+    { id: 3, at: Date.now() - 60000, page: "/dashboard/bot-board?bot=bot-1", scroll: 0 },
+    { id: 3, at: Date.now(), page: "/dashboard/bot-board?bot=other", scroll: 0 },
+    { id: "3\"]", at: Date.now(), page: "/dashboard/bot-board?bot=bot-1", scroll: 0 },
+  ]) {
+    const h = reopenHarness(src, { open: false, curId: null });
+    h.store.set("bb-reopen-drawer", JSON.stringify(v));
+    h.api.reopen();
+    assert.deepEqual(h.opened, [], JSON.stringify(v));
+  }
+  const junk = reopenHarness(src, { open: false, curId: null });
+  junk.store.set("bb-reopen-drawer", "{not json");
+  assert.doesNotThrow(() => junk.api.reopen());
+  assert.deepEqual(junk.opened, []);
+});
+
+test("the live watcher remembers the drawer before it reloads, and page init reopens it", () => {
+  const src = scriptBody("en");
+  const g = fnSource(src, "guardedReload");
+  assert.match(g, /rememberOpenDrawer\(\);\s*reload\(\);/, "remember right before the live reload");
+  assert.ok(src.includes("if(!INCLUDE_ARCHIVED) reopenRememberedDrawer();"), "init reopens");
+  assert.ok(src.indexOf("reopenRememberedDrawer();") < src.indexOf("var es=new EventSource"), "before the live stream attaches");
+  assert.match(fnSource(src, "hydrateDrawer"), /if\(pendingDrawerScroll\)\{ drawer\.scrollTop=pendingDrawerScroll; pendingDrawerScroll=0; \}/);
+});

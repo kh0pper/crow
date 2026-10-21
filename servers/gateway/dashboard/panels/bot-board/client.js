@@ -203,6 +203,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         renderHistory(r.j.mutations||[]);
         renderResults(r.j.latest_results||[], (r.j.board&&r.j.board.terminal_values)||[]);
         if(!opts.keepDecision) renderDecision(r.j.decision);
+        if(pendingDrawerScroll){ drawer.scrollTop=pendingDrawerScroll; pendingDrawerScroll=0; }
       } else if(!r.ok){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); }
     }).catch(function(){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });
   }
@@ -210,6 +211,27 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   // card's status moved on the server, so the form must show it before Save.
   function decisionCardChanged(cardId,keepDecision){
     if(cur&&cur.id===cardId) hydrateDrawer(cardId,{keepEdits:true,keepDecision:!!keepDecision});
+  }
+  // A live update reloads the page (the board is server-rendered: rebuilding
+  // columns, lane tabs, the Unassigned lane, list view and filters in place
+  // would duplicate the renderer). The open card drawer survives it instead:
+  // guardedReload remembers the card and the drawer's scroll, and the next
+  // load of the same board reopens it. One-shot, and only for 30 s.
+  var REOPEN_KEY='bb-reopen-drawer', pendingDrawerScroll=0;
+  function rememberOpenDrawer(){
+    if(!drawer||!drawer.classList.contains('bb-open')||!cur||cur.id==null) return;
+    try{ sessionStorage.setItem(REOPEN_KEY,JSON.stringify({id:cur.id,at:Date.now(),
+      page:location.pathname+location.search,scroll:drawer.scrollTop||0})); }catch(e){}
+  }
+  function reopenRememberedDrawer(){
+    var v=null;
+    try{ v=JSON.parse(sessionStorage.getItem(REOPEN_KEY)||'null'); sessionStorage.removeItem(REOPEN_KEY); }catch(e){ v=null; }
+    if(!v||typeof v!=='object'||!(Date.now()-Number(v.at)<30000)) return;
+    if(v.page!==location.pathname+location.search) return;
+    var idNum=Number(v.id);
+    if(!isFinite(idNum)||Math.floor(idNum)!==idNum) return;
+    pendingDrawerScroll=Number(v.scroll)||0;
+    openCardById(idNum);
   }
   function loadPlan(){
     var pm=$('bb-d-plan-msg'); msg(pm,'loading\\u2026','');
@@ -1382,6 +1404,9 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     }
   });
 
+  // Reopen the card drawer a live reload closed (see rememberOpenDrawer).
+  if(!INCLUDE_ARCHIVED) reopenRememberedDrawer();
+
   // ---- EventSource live overlay ----
   if(window.EventSource && !INCLUDE_ARCHIVED){
     var esUrl=null;
@@ -1403,6 +1428,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         try{ lastReload=Number(sessionStorage.getItem('bb-live-reload'))||0; }catch(e){}
         if(now-lastReload>10000){
           try{ sessionStorage.setItem('bb-live-reload',String(now)); }catch(e){}
+          rememberOpenDrawer();
           reload();
         }
       }
