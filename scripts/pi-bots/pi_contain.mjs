@@ -38,7 +38,7 @@
  * stripped of these names): CROW_PI_SANDBOX=contain for every pi, or
  * CROW_PI_CONTAIN_BOTS=<id,id> for listed bots.
  */
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 
@@ -58,8 +58,8 @@ export function containSelected(env, botId) {
 export const AGENT_RO_SUBDIRS = Object.freeze(["pkg", "agents", "prompts", "bin", "extensions", "themes"]);
 /** Top-level agent files copied into the shadow (small config; pi writes locks beside them). */
 export const AGENT_SHADOW_FILES = Object.freeze(["auth.json", "models.json", "models-store.json", "settings.json", "mcp.json", "keybindings.json"]);
-/** Data-dir entries masked by default. */
-export const DATA_MASKS = Object.freeze(["identity.json"]);
+/** Data-dir entries a contained bot keeps: the DB files and their journals. */
+export const DB_FILE_RE = /^(crow|tasks)\.db(-wal|-shm|-journal)?$/;
 
 const under = (p, root) => p === root || p.startsWith(root.endsWith(sep) ? root : root + sep);
 
@@ -115,8 +115,15 @@ export function buildContainPlan(o) {
   const refused = [];
   const ro = new Map(); // dest -> src
   const rw = new Map();
-  const masksFile = [];
-  const masksDir = [];
+  const masks = []; // [dest, "dir"|"file"]
+  function maskPath(p) {
+    try {
+      const st = lstatSync(p);
+      if (st.isDirectory()) masks.push([p, "dir"]);
+      else if (st.isSymbolicLink()) { /* dangling inside unless its target is bound; handled below */ }
+      else masks.push([p, "file"]);
+    } catch {}
+  }
 
   for (const list of [o.writePaths || [], o.readPaths || []]) {
     if (list.some((p) => p === "/" || resolve(String(p)) === "/")) {
@@ -124,13 +131,18 @@ export function buildContainPlan(o) {
     }
   }
 
-  const never = neverBound(home).map((p) => (exists(p) ? (() => { try { return realpathSync(p); } catch { return p; } })() : p));
+  const instanceSecrets = [];
+  if (o.crowHome) {
+    for (const n of ["secrets", "env", "peer-tokens.json", "android-keystore", ".keystore-env"]) instanceSecrets.push(join(o.crowHome, n));
+    try { for (const e of readdirSync(o.crowHome)) if (/-token$/.test(e)) instanceSecrets.push(join(o.crowHome, e)); } catch {}
+  }
+  const never = [...neverBound(home), ...instanceSecrets].map((p) => (exists(p) ? (() => { try { return realpathSync(p); } catch { return p; } })() : p));
   const others = otherInstanceHomes(home, o.crowHome);
   const homesRoot = dirname(home);
   const codeRoots = [o.appRoot, o.nodeBin && dirname(dirname(o.nodeBin)), o.piLabDir].filter(Boolean)
     .map((p) => real(p, exists) || p);
 
-  function forbidden(p, { write = false } = {}) {
+  function forbidden(p, { write = false, policy = false } = {}) {
     if (p === "/") return "the whole filesystem";
     if (SHARED_ROOTS.includes(p)) return "a shared system directory (" + p + ")";
     if (p === home || p === homesRoot) return "the whole home";
@@ -139,14 +151,19 @@ export function buildContainPlan(o) {
     for (const x of others) if (under(p, x)) return "another Crow instance's home";
     if (under(p, homesRoot) && !under(p, home)) return "another user's home";
     if (write) for (const c of codeRoots) if (under(p, c) || under(c, p)) return "code (the checkout or the engine) is never writable";
+    if (write && policy && under(p, home)) {
+      const top = p.slice(home.length + 1).split(sep)[0];
+      const dataReal = o.dataDir ? (real(o.dataDir, exists) || o.dataDir) : null;
+      if (top.startsWith(".") && !(dataReal && under(p, dataReal))) return "a hidden entry of the home (rc files, config, PATH dirs) is never writable from a policy";
+    }
     return null;
   }
 
-  function add(map, p, { write = false, label = "" } = {}) {
+  function add(map, p, { write = false, label = "", policy = false } = {}) {
     if (!p) return;
     const r = real(p, exists);
     if (!r) { refused.push({ path: p, reason: "does not exist" + (label ? " (" + label + ")" : "") }); return; }
-    const why = forbidden(r, { write });
+    const why = forbidden(r, { write, policy });
     if (why) { refused.push({ path: p, reason: why }); return; }
     map.set(r, r);
   }
@@ -157,6 +174,24 @@ export function buildContainPlan(o) {
   add(ro, o.appRoot, { label: "checkout" });
   if (o.piLabDir) add(ro, o.piLabDir, { label: "pi-lab" });
   if (o.crowHome) { const sk = join(o.crowHome, "skills"); if (exists(sk)) add(ro, sk); }
+  // pi packages (settings.json packages[]): pi-lab, which holds the permission
+  // gate, is loaded this way. A package that exists on the host but cannot be
+  // bound would make pi start WITHOUT it: refuse the spawn instead.
+  if (o.piAgentDir) {
+    let pkgs = [];
+    try { pkgs = JSON.parse(readFileSync(join(o.shadowAgentDir || o.piAgentDir, "settings.json"), "utf8")).packages || []; } catch {}
+    for (const entry of Array.isArray(pkgs) ? pkgs : []) {
+      const spec = typeof entry === "string" ? entry : (entry && (entry.source || entry.path)) || "";
+      if (!spec || !(spec.startsWith(".") || spec.startsWith("/") || spec.startsWith("~"))) continue; // a registry name: lives under the agent dir
+      const abs = spec.startsWith("~") ? join(home, spec.slice(1)) : resolve(o.piAgentDir, spec);
+      if (!exists(abs)) continue; // missing on the host too: pi behaves as it does unsandboxed
+      const r = real(abs, exists);
+      if (r && under(r, o.piAgentDir)) continue; // pkg/... is bound with the agent subdirs
+      const before = refused.length;
+      add(ro, abs, { label: "pi package" });
+      if (refused.length > before) throw new ContainRefused("pi package " + spec + " cannot be bound into the contain tier (" + refused[refused.length - 1].reason + "); refusing to start pi without it");
+    }
+  }
 
   // MCP servers
   for (const s of o.mcpServers || []) {
@@ -181,10 +216,26 @@ export function buildContainPlan(o) {
     add(rw, o.dataDir, { write: true, label: "data dir" });
     const rd = real(o.dataDir, exists);
     if (rd && rw.has(rd)) {
-      for (const m of DATA_MASKS) {
-        if (m === "identity.json" && o.unmaskIdentity) continue;
-        const p = join(rd, m);
-        if (exists(p)) { try { (lstatSync(p).isDirectory() ? masksDir : masksFile).push(p); } catch {} }
+      // The directory itself must be bound (SQLite creates -wal/-shm/-journal
+      // beside the DB; a private copy of those would corrupt it), so every
+      // OTHER entry present at spawn time is masked: other projects, backups,
+      // peers, sync state, DB copies. Kept: the DBs, the bot's own project,
+      // identity.json for a sharing bot, and the operator's keep-list.
+      const keep = new Set(o.dataKeep || []);
+      if (o.unmaskIdentity) keep.add("identity.json");
+      const wsReal = o.workspaceDir ? real(o.workspaceDir, exists) : null;
+      let entries = [];
+      try { entries = readdirSync(rd); } catch {}
+      for (const e of entries) {
+        if (DB_FILE_RE.test(e) || keep.has(e)) continue;
+        const p = join(rd, e);
+        if (e === "projects" && wsReal && under(wsReal, p)) {
+          let segs = [];
+          try { segs = readdirSync(p); } catch {}
+          for (const g of segs) { const q = join(p, g); if (!under(wsReal, q)) maskPath(q); }
+          continue;
+        }
+        maskPath(p);
       }
     }
   }
@@ -194,7 +245,7 @@ export function buildContainPlan(o) {
 
   // bot paths
   for (const p of [o.sessionDir, o.cwd, o.workspaceDir]) if (p) add(rw, p, { write: true });
-  for (const p of o.writePaths || []) add(rw, String(p), { write: true, label: "write_paths" });
+  for (const p of o.writePaths || []) add(rw, String(p), { write: true, label: "write_paths", policy: true });
   for (const p of o.readPaths || []) add(ro, String(p), { label: "read_paths" });
   // read-only when also writable: writable wins
   for (const k of rw.keys()) ro.delete(k);
@@ -216,6 +267,30 @@ export function buildContainPlan(o) {
   if (exists("/etc/crow")) args.push("--tmpfs", "/etc/crow");
   args.push("--tmpfs", home);
 
+  // .env files: never readable from a bound dir (the checkout's .env holds
+  // the gateway's secrets; bundle .env files hold extension secrets). Top
+  // level of every bound dir, plus <bound>/bundles/*/ (the checkout's).
+  const boundDirs = [...ro.keys(), ...rw.keys()].filter((p) => { try { return statSync(p).isDirectory(); } catch { return false; } });
+  const isBound = (p) => boundDirs.some((d) => under(p, d)) || ro.has(p) || rw.has(p);
+  const envScan = new Set(boundDirs);
+  for (const d of boundDirs) {
+    const b = join(d, "bundles");
+    try { for (const e of readdirSync(b)) envScan.add(join(b, e)); } catch {}
+  }
+  for (const d of envScan) {
+    let names = [];
+    try { names = readdirSync(d); } catch { continue; }
+    for (const n of names) {
+      if (!/^\.env(\..*)?$/.test(n)) continue;
+      const p = join(d, n);
+      let st; try { st = lstatSync(p); } catch { continue; }
+      if (st.isSymbolicLink()) {
+        const t = real(p, exists);
+        if (t && isBound(t)) masks.push([t, "file"]);
+      } else if (st.isFile()) masks.push([p, "file"]);
+    }
+  }
+
   // binds, parents first (sorted by path), rw and ro interleaved by path
   const binds = [...[...ro.keys()].map((p) => ["--ro-bind", p]), ...[...rw.keys()].map((p) => ["--bind", p])]
     .sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
@@ -228,14 +303,19 @@ export function buildContainPlan(o) {
       if (exists(p)) agentEntries.push(["--ro-bind", p, p]);
     }
   }
-  const all = [...binds.map(([f, p]) => [f, p, p]), ...agentEntries].sort((a, b) => {
-    // stable: by dest path, shadow before its subdirs
-    if (a[2] === b[2]) return 0;
+  // One list in destination order: a dir's bind, then masks inside it, then
+  // binds of its descendants (a project workspace re-exposed under a masked
+  // projects/ entry). Same dest: the bind first, the mask after.
+  const maskOps = [...new Map(masks.map(([d, k]) => [d, k])).entries()]
+    .map(([d, k]) => (k === "dir" ? ["--tmpfs", null, d, 1] : ["--ro-bind", "/dev/null", d, 1]));
+  const all = [...binds.map(([f, p]) => [f, p, p, 0]), ...agentEntries.map((e) => [...e, 0]), ...maskOps].sort((a, b) => {
+    if (a[2] === b[2]) return a[3] - b[3];
     return a[2] < b[2] ? -1 : 1;
   });
-  for (const [f, s, d] of all) args.push(f, s, d);
-  for (const m of masksDir) args.push("--tmpfs", m);
-  for (const m of masksFile) args.push("--ro-bind", "/dev/null", m);
+  for (const [f, s, d] of all) {
+    if (f === "--tmpfs") args.push("--tmpfs", d);
+    else args.push(f, s, d);
+  }
 
   args.push("--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try", "--cap-drop", "ALL");
   const cwd = real(o.cwd || o.sessionDir, exists);
