@@ -17,6 +17,7 @@ import { spawn, spawnSync } from "node:child_process";
 import {
   wrapPiSpawn, piSandboxMode, probePiSandbox, dockerSocketPaths, isSandboxWrapperArgs,
   scrubSandboxEnv, userRuntimeDirs, PROBE_RETRY_MS, _resetPiSandboxForTest,
+  credentialMaskDirs, boardSecretFile, boardSecretDirProblem,
 } from "../scripts/pi-bots/pi_sandbox.mjs";
 import { listBridgePi, reapStalePi } from "../scripts/pi-bots/pi_lifecycle.mjs";
 
@@ -169,10 +170,12 @@ test("wrapPiSpawn: off / auto-unavailable / required / available argv", () => {
     mode: "auto", probe: good, infoFd: 3, env: { A: "1", DBUS_SESSION_BUS_ADDRESS: "x", FOO_SOCK: "y" },
     sockets: ["/run/docker.sock", "/run/user/1000/docker.sock"],
     runtimeDirs: ["/run/user/1000", "/tmp/tmux-1000"], roDirs: ["/h/.config/systemd"],
+    credentialDirs: ["/run/credentials", "/srv/board-secret"],
   });
   assert.deepEqual([w.sandboxed, w.wrapper, w.cmd], [true, "bwrap", "/usr/bin/bwrap"]);
   assert.deepEqual(w.args, ["--dev-bind", "/", "/", "--unshare-user",
     "--tmpfs", "/run/user/1000", "--tmpfs", "/tmp/tmux-1000",
+    "--tmpfs", "/run/credentials", "--tmpfs", "/srv/board-secret",
     "--ro-bind", "/dev/null", "/run/docker.sock",
     "--ro-bind", "/h/.config/systemd", "/h/.config/systemd",
     "--info-fd", "3", "--", "/n/node", "/x/cli.js", "--mode", "rpc"]);
@@ -356,5 +359,68 @@ test("I1: an OLD-style reaper (no wrapper folding) respects the dual lease on pi
     writeFileSync(leaseFile, JSON.stringify({ version: 1, leases: { "700": { sessionId: "s1", expiresAt: now + 60_000 } } }));
     const r2 = reapStalePi({ _procs: oldStyle, _kill: () => {}, leaseFiles: [leaseFile], now });
     assert.deepEqual(r2.reaped.map((v) => v.pid), [701], "control: the bug the dual lease fixes");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ---- board actor secret file (2026-10-20 fix round 1) ----
+
+test("board secret: the file path comes from CROW_BOARD_ACTOR_SECRET_FILE, else the systemd credential", () => {
+  assert.equal(boardSecretFile({}), null);
+  assert.equal(boardSecretFile({ CREDENTIALS_DIRECTORY: "/run/credentials/u.service" }), "/run/credentials/u.service/board-actor-secret");
+  assert.equal(boardSecretFile({ CROW_BOARD_ACTOR_SECRET_FILE: "/srv/s/x", CREDENTIALS_DIRECTORY: "/run/credentials/u" }), "/srv/s/x");
+});
+
+test("board secret: only a dedicated directory may hold it (the sandbox masks the whole dir)", () => {
+  const env = { HOME: "/home/alex", CROW_HOME: "/home/alex/.crow", CROW_DATA_DIR: "/srv/crow-data" };
+  for (const d of ["/", "/etc", "/tmp", "/home", "/home/alex", "/srv"]) assert.ok(boardSecretDirProblem(d, env), d);
+  for (const d of ["/etc/crow", "/run/credentials/u.service", "/srv/board-secret", "/home/alex/.board-secret"]) {
+    assert.equal(boardSecretDirProblem(d, env), null, d);
+  }
+});
+
+test("board secret: credentialMaskDirs masks /run/credentials, the credential dir and a dedicated secret dir", () => {
+  const all = () => true;
+  assert.deepEqual(credentialMaskDirs({}, { isDirFn: all }), ["/run/credentials"]);
+  assert.deepEqual(credentialMaskDirs({ CREDENTIALS_DIRECTORY: "/run/credentials/u.service" }, { isDirFn: all }), ["/run/credentials"],
+    "a dir under /run/credentials is already covered");
+  assert.deepEqual(credentialMaskDirs({ CROW_BOARD_ACTOR_SECRET_FILE: "/srv/board-secret/s" }, { isDirFn: (d) => d !== "/run/credentials" }),
+    ["/srv/board-secret"]);
+  assert.deepEqual(credentialMaskDirs({ CROW_BOARD_ACTOR_SECRET_FILE: "/etc/s", CREDENTIALS_DIRECTORY: "/opt/creds" }, { isDirFn: all }),
+    ["/run/credentials", "/opt/creds"], "a non-dedicated secret dir is never masked (and actor-sig refuses it)");
+  assert.deepEqual(credentialMaskDirs({ CROW_BOARD_ACTOR_SECRET_FILE: "/srv/board-secret/s" }, { isDirFn: () => false }), [], "missing dirs hold nothing");
+});
+
+test("board secret: by default wrapPiSpawn masks the secret dir named in the GATEWAY's env", () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-board-secret-mask-"));
+  const prev = process.env.CROW_BOARD_ACTOR_SECRET_FILE;
+  process.env.CROW_BOARD_ACTOR_SECRET_FILE = join(dir, "board-actor-secret");
+  try {
+    const good = { ok: true, bwrap: "/usr/bin/bwrap", reason: null };
+    const w = wrapPiSpawn("node", ["cli.js"], { mode: "auto", probe: good, env: {}, sockets: [], runtimeDirs: [], roDirs: [] });
+    const i = w.args.indexOf(dir);
+    assert.ok(i > 0 && w.args[i - 1] === "--tmpfs", JSON.stringify(w.args));
+    assert.ok(w.args.indexOf(dir) < w.args.indexOf("--"));
+    assert.ok(w.masked.includes(dir));
+  } finally {
+    if (prev === undefined) delete process.env.CROW_BOARD_ACTOR_SECRET_FILE; else process.env.CROW_BOARD_ACTOR_SECRET_FILE = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("integration: a sandboxed child cannot read the board secret file; the parent can", { skip: noSandbox }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-board-secret-int-"));
+  const file = join(dir, "board-actor-secret");
+  writeFileSync(file, "a".repeat(64) + "\n", { mode: 0o600 });
+  try {
+    const script = 'try{console.log("READ "+require("fs").readFileSync(process.argv[1],"utf8").length)}catch(e){console.log("ERR "+e.code)}';
+    const launch = wrapPiSpawn(process.execPath, ["-e", script, file], { mode: "auto", sockets: [], runtimeDirs: [], roDirs: [],
+      credentialDirs: credentialMaskDirs({ CROW_BOARD_ACTOR_SECRET_FILE: file }) });
+    assert.equal(launch.wrapper, "bwrap");
+    const res = await new Promise((resolve) => {
+      const c = spawn(launch.cmd, launch.args, { env: launch.env });
+      let o = ""; c.stdout.on("data", (d) => (o += d)); c.on("exit", () => resolve(o.trim()));
+    });
+    assert.match(res, /^ERR ENOENT/, "masked inside: " + res);
+    assert.equal(readFileSync(file, "utf8").length, 65, "still readable by the parent");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

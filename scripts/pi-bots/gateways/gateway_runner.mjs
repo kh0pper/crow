@@ -167,13 +167,13 @@ process.on("SIGINT", shutdown);
 (function main() {
   // S6-CROW: declare the pi-lab minimum (MIN_PI_LAB_REV) at boot — a clear
   // warning when the pi-lab that pi loads predates bot read confinement.
-  warnIfPiLabIncompatible((m) => log(m));
-  // Board actor signing, logged once (never the secret). This process never
-  // holds the gateway's per-boot key, so without the operator's shared secret
-  // its bots' board writes are unattributed.
+  // Board actor signing first, logged once (never the secret). This process
+  // never holds the gateway's per-boot key, so without the operator's shared
+  // secret file its bots' board writes are unattributed.
   const boardMode = initBoardSigning();
-  if (boardMode === "none") log("WARNING: board actor signing: none (CROW_BOARD_ACTOR_SECRET missing or invalid): board writes from this runner are unattributed");
+  if (boardMode === "none") log("WARNING: board actor signing: none (no usable board secret file, see CROW_BOARD_ACTOR_SECRET_FILE): board writes from this runner are unattributed");
   else log("board actor signing: " + boardMode);
+  warnIfPiLabIncompatible((m) => log(m));
   startReaper();
   // F3b: self-gate on feature_flags.bot_runtime — start/stop adapters on the
   // toggle without a restart. Off = idle (service up, no adapters connected).

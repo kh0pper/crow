@@ -33,6 +33,7 @@ import { nonPerchChannels, effectiveShellMode } from "../../servers/shared/bot-p
 import { createStderrDiag } from "./pi-stderr-diag.mjs";
 import { classifierPolicyBlock, normalizeStoredBashPolicy } from "../../servers/shared/bot-bash-policy.js";
 import { buildBotBaseEnv, botEnvScrubbed, BOARD_ACTOR_SECRET_ENV } from "../../servers/shared/bot-env.js";
+const BOARD_SECRET_ENV_KEYS = [BOARD_ACTOR_SECRET_ENV, "CROW_BOARD_ACTOR_SECRET_FILE", "CREDENTIALS_DIRECTORY"];
 import { appendDates } from "../../servers/shared/relative-dates.js";
 import { stripContextEcho } from "../../servers/gateway/voice/context-echo.js";
 import Database from "better-sqlite3";
@@ -60,6 +61,7 @@ import { botsDbPath, tasksDbPath as resolveTasksDbPath, resolveSqlitePath, botsP
 import { botWorkspaceEnv, BOT_WORKSPACE_KEYS } from "./bot-workspace-env.mjs";
 import { remoteServersForBot, parseRemoteInvocationFlag, remoteBlockName } from "./remote-blocks.mjs";
 import { warmModel } from "./warm.mjs";
+import { initBoardSigning } from "./actor-sig.mjs";
 import { meterBotTurn } from "./metering.mjs";
 import { getOrCreateLocalInstanceId } from "../../servers/gateway/instance-registry.js";
 
@@ -403,8 +405,9 @@ export class PiRpc {
     for (const k of Object.keys(def.spawn_env || {})) {
       // S3 fix round 1 (M1): CROW_PI_SANDBOX is the operator's switch for the
       // pi sandbox; a bot def must not be able to turn it off for itself.
-      // The board actor secret is never a child's to hold or to choose.
-      if (/^PI_BOT_|^PIBOT_/.test(k) || k === "CROW_PI_SANDBOX" || k === BOARD_ACTOR_SECRET_ENV) { strippedSpawnEnv.push(k); continue; }
+      if (/^PI_BOT_|^PIBOT_/.test(k) || k === "CROW_PI_SANDBOX") { strippedSpawnEnv.push(k); continue; }
+      // The board actor secret (and where it lives) is never a child's to hold or to choose.
+      if (BOARD_SECRET_ENV_KEYS.includes(k)) { strippedSpawnEnv.push(k); continue; }
       spawnEnv[k] = def.spawn_env[k];
     }
     if (strippedSpawnEnv.length) {
@@ -440,9 +443,10 @@ export class PiRpc {
     // def.spawn_env never reaches them, and PI_BOT_INTERACTIVE only ever
     // comes from the engine's extraEnv.
     for (const k of BOT_WORKSPACE_KEYS) delete env[k];
-    // The board actor secret never reaches pi, whatever the base env mode or
-    // the engine's extraEnv carried (buildBotBaseEnv already drops it).
-    delete env[BOARD_ACTOR_SECRET_ENV];
+    // The board actor secret (a stale env copy, which actor-sig ignores) and
+    // the pointers to its file never reach pi, whatever the base env mode or
+    // the engine's extraEnv carried. The file itself is masked by the sandbox.
+    for (const k of BOARD_SECRET_ENV_KEYS) delete env[k];
     if (opts.extraEnv && opts.extraEnv.PI_BOT_INTERACTIVE === "1") {
       Object.assign(env, botWorkspaceEnv({ workspaceDir: opts.projectWorkspaceDir || null, projectsRoot: botsProjectsRoot(), botId: opts.botId || null }));
     }
@@ -1268,6 +1272,7 @@ export function stopSession(botId, threadId) {
 }
 
 if (import.meta.url === "file://" + process.argv[1]) {
+  initBoardSigning();
   const a = process.argv.slice(2);
   if (a.includes("--stop")) {
     const bot = a[a.indexOf("--bot") + 1], thread = a[a.indexOf("--thread") + 1];

@@ -36,6 +36,7 @@
  */
 import Database from "better-sqlite3";
 import { execFile } from "node:child_process";
+import { withoutBoardActorSecret } from "../../servers/shared/bot-env.js";
 import { openSync, closeSync, existsSync, statSync, unlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -65,7 +66,7 @@ export function lockPathFor(dbPath) {
 }
 
 function gio(args, ms = 90000) {
-  return new Promise((res) => execFile(NODE, [GIO, ...args], { timeout: ms, maxBuffer: 8e6 },
+  return new Promise((res) => execFile(NODE, [GIO, ...args], { timeout: ms, maxBuffer: 8e6, env: withoutBoardActorSecret(process.env) },
     (e, so, se) => res({ code: e ? (e.code ?? 1) : 0, out: so || "", err: se || "" })));
 }
 function parseResult(out) {
