@@ -56,7 +56,9 @@ import { updateCard, createCard } from "../board/card-service.js";
 import { annotateAvailability } from "../model-availability.js";
 import { providerModelListWarm, pickerModels, loadPiProviderNames, referencedModelKeys } from "../perch-model-catalog.js";
 import { renderBotMarkdown } from "../../blog/renderer.js";
-import { giveCard, loadGiveTarget, giveAudit } from "../board/give-service.js";
+// loadGivableCard: the card is a CARD (board_id IS NULL — dispatch, attach
+// and give are cards-only), exists and is not archived (404 / 400 / 409).
+import { giveCard, loadGiveTarget, giveAudit, loadGivableCard, loadBotRow } from "../board/give-service.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -212,22 +214,6 @@ function parseCardId(body) {
   return Number.isInteger(n) ? n : null;
 }
 
-/** Load a card's row for dispatch/attach-card validation: exists, is a CARD
- * (`board_id IS NULL` — Track 3 review Q2: dispatch/attach are cards-only),
- * and is not archived. Throws a routeFail() the catch block already knows
- * how to map: not_found→404, bad_request→400 (a custom-board ITEM id),
- * archived→409. */
-async function loadDispatchableCard(tdb, cardId) {
-  const row = (await tdb.execute({
-    sql: "SELECT id, board_id, archived_at, parent_id, project_id, status FROM tasks_items WHERE id=?",
-    args: [cardId],
-  })).rows[0];
-  if (!row) throw routeFail("card not found", "not_found", 404);
-  if (row.board_id != null) throw routeFail("not a card", "bad_request", 400);
-  if (row.archived_at != null) throw routeFail("card is archived", "archived", 409);
-  return row;
-}
-
 /** POST /interactive/:sid/message + /bots/:id/dispatch's turn-1 note both
  * carry an optional `images` array — normalizes `{mime, data_b64}` wire
  * objects into pi's own ImageContent shape (`{type:"image", data, mimeType}`
@@ -259,14 +245,6 @@ function parseDef(row) {
   }
 }
 
-async function loadBotRow(db, botId) {
-  const { rows } = await db.execute({
-    sql: "SELECT bot_id, display_name, definition, enabled, project_id FROM pi_bot_defs WHERE bot_id=?",
-    args: [botId],
-  });
-  return rows[0] || null;
-}
-
 /**
  * The dispatch core — POST /bots/:id/dispatch and "Give to…" with start:true
  * both run THIS, so the two can never gate differently. Checks, in order:
@@ -292,7 +270,7 @@ async function dispatchCard(ctx, { row, getEng, botId, cardId, note, skipProvena
   const eng = getEng();
 
   if (!ctx.tdb) ctx.tdb = createDbClient(TASKS_DB);
-  await loadDispatchableCard(ctx.tdb, cardId);
+  await loadGivableCard(ctx.tdb, cardId);
 
   await eng.checkCardFree(cardId);
   const result = await eng.spawn({ botId, cardId });
@@ -802,7 +780,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     let tdb;
     try {
       tdb = createDbClient(TASKS_DB);
-      await loadDispatchableCard(tdb, cardId);
+      await loadGivableCard(tdb, cardId);
 
       const eng = resolveEngine();
       // Fix round 1 (coordinator-reported Important): exclude THIS session's
