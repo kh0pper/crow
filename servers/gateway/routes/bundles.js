@@ -1255,33 +1255,58 @@ async function runCompose(composeArgs, opts = {}) {
   return run(compose.cmd, [...compose.prefix, ...composeArgs], { ...rest, env: { ...composeEnv(opts.env), ...(extraEnv || {}) } });
 }
 
-const TEARDOWN_DUMMY = "crow-teardown-unset";
+// An absolute path: a hard-fail key is often a bind-mount source (`${MEDIA:?}:/data`), where
+// a bare word would be read as an undefined named volume and fail the retry.
+const TEARDOWN_DUMMY = "/nonexistent/crow-teardown-unset";
+// Compose v2: "required variable X is missing a value"; v1: "Missing mandatory value for …".
+const MISSING_VAR_RE = /required variable \w+ is missing a value|Missing mandatory value for/;
+
+/** The hard-fail keys blank in the bundle's .env (and not set by Crow's compose env). */
+function blankHardFailKeys(cwd, composeRel = "docker-compose.yml") {
+  const dir = join(cwd, dirname(composeRel));
+  let text = "";
+  for (const f of [join(cwd, composeRel), join(dir, "docker-compose.override.yml")]) {
+    try { text += readFileSync(f, "utf8") + "\n"; } catch { /* absent */ }
+  }
+  let envVars = {};
+  try { envVars = parseEnvText(readFileSync(join(dir, ".env"), "utf8")); } catch { /* no .env: every hard-fail key is blank */ }
+  const base = composeEnv();
+  return [...hardFailComposeKeys(text)].filter((k) => !nonBlankEnv(envVars[k]) && !nonBlankEnv(base[k]));
+}
+
 /**
  * `down` / `stop` for an installed bundle. A `${KEY:?…}` whose KEY is blank or missing in
- * the bundle's .env makes EVERY compose command fail ("required variable KEY is missing a
- * value"), teardown included — and an uninstall that cannot `down` would orphan running
- * containers. Retry once with a throwaway value for each such key: `down`/`stop` never
- * use those values, so it cannot reach a container. Keys set in .env (or by Crow's own
- * compose env) are never overridden. Never used for `up`/`pull`/`config`: those keep
- * failing loudly.
+ * the bundle's .env makes EVERY compose command fail, teardown included — and an uninstall
+ * that cannot `down` would orphan running containers. Retry once with a throwaway value for
+ * each such key: `down`/`stop` never use those values, so it cannot reach a container.
+ * Keys set in .env (or by Crow's own compose env) are never overridden. Never used for
+ * `up`/`pull`/`config`: those keep failing loudly. A final error carries `blankKeys`.
  */
 async function runComposeTeardown(args, { cwd, composeRel = "docker-compose.yml" }) {
   try {
     return await runCompose(args, { cwd });
   } catch (err) {
-    if (!/required variable \w+ is missing a value/.test(`${err?.stderr || ""}\n${err?.message || ""}`)) throw err;
-    let text;
-    try { text = readFileSync(join(cwd, composeRel), "utf8"); } catch { throw err; }
-    let envVars = {};
-    try { envVars = parseEnvText(readFileSync(join(cwd, dirname(composeRel), ".env"), "utf8")); } catch { /* no .env: every hard-fail key is blank */ }
-    const base = composeEnv();
-    const extraEnv = {};
-    for (const k of hardFailComposeKeys(text)) {
-      if (!nonBlankEnv(envVars[k]) && !nonBlankEnv(base[k])) extraEnv[k] = TEARDOWN_DUMMY;
+    if (!MISSING_VAR_RE.test(`${err?.stderr || ""}\n${err?.message || ""}`)) throw err;
+    const keys = blankHardFailKeys(cwd, composeRel);
+    if (keys.length === 0) throw err;
+    try {
+      return await runCompose(args, { cwd, extraEnv: Object.fromEntries(keys.map((k) => [k, TEARDOWN_DUMMY])) });
+    } catch (err2) {
+      err2.blankKeys = keys;
+      throw err2;
     }
-    if (Object.keys(extraEnv).length === 0) throw err;
-    return runCompose(args, { cwd, extraEnv });
   }
+}
+
+/**
+ * Whether any container of compose project `project` is running, asked of docker directly
+ * (a `docker compose ps` would fail on the same blank key that failed the teardown).
+ * Throws when docker can't be asked.
+ */
+async function composeProjectRunning(project) {
+  const runner = _dockerRunnerForTest || run;
+  const { stdout } = await runner("docker", ["ps", "--filter", `label=com.docker.compose.project=${project}`, "--filter", "status=running", "--format", "{{.ID}}"], { timeout: 15_000 });
+  return String(stdout || "").trim() !== "";
 }
 
 /**
@@ -3735,14 +3760,26 @@ export default function bundlesRouter() {
               } catch (err) {
                 appendLog(job, `Warning: docker compose down: ${err.message}`);
                 // Removing the folder now would leave running containers with no compose
-                // file to stop them from: keep the extension installed instead. With no
-                // compose command on this host at all, nothing it started can be running.
-                const noCompose = /No docker compose command found/.test(String(err?.message || ""));
-                if (!noCompose && await composeServiceRunning(bundleDir)) {
-                  appendLog(job, "Containers are still running and could not be stopped; the extension was left installed so you can stop it");
+                // file to stop them from: keep the extension installed instead.
+                const blank = err.blankKeys || (MISSING_VAR_RE.test(`${err?.stderr || ""}\n${err?.message || ""}`) ? blankHardFailKeys(bundleDir) : []);
+                const fix = blank.length ? ` Set ${blank.join(", ")} in Configure, then uninstall again.` : "";
+                const project = own.project || basename(bundleDir);
+                let running = false;
+                let checkError = null;
+                try { running = await composeProjectRunning(project); } catch (e) { checkError = String(e?.stderr || e?.message || e).trim().split("\n")[0]; }
+                if (running) {
+                  appendLog(job, `Containers are still running and could not be stopped; the extension was left installed so you can stop it.${fix}`);
                   finishJob(job, "failed");
                   return;
                 }
+                if (checkError !== null && blank.length) {
+                  // Docker answers nothing, and the compose file can't be read without these
+                  // values: keep it, so the containers can still be stopped later.
+                  appendLog(job, `Containers may still be running (could not check: ${checkError}); the extension was left installed so you can stop it.${fix}`);
+                  finishJob(job, "failed");
+                  return;
+                }
+                if (checkError !== null) appendLog(job, `Note: could not check: ${checkError}. Nothing marks the containers as running, so the uninstall continues`);
               }
             }
           }

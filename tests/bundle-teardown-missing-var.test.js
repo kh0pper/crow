@@ -44,6 +44,10 @@ after(() => {
 });
 
 const COMPOSE = 'services:\n  app:\n    image: busybox:1.36\n    environment:\n      P: "${P:?set P}"\n      Q: "${Q:?set Q}"\n';
+const DUMMY = "/nonexistent/crow-teardown-unset";
+const isRunningCheck = (args) => args[0] === "ps" && args.includes("status=running");
+// Docker answers the running-containers check with `ids` (one per line); anything else is "".
+const dockerAnswering = (ids) => async (cmd, args) => ({ stdout: isRunningCheck(args) ? ids : "", stderr: "" });
 const missingVar = (k) => Object.assign(new Error(`Command failed: docker compose down\nrequired variable ${k} is missing a value: set ${k}`), { stderr: `required variable ${k} is missing a value: set ${k}` });
 
 function seedInstalled(id, { compose = COMPOSE, envText = "P=\nQ=set-q\n", manifest = {} } = {}) {
@@ -97,27 +101,99 @@ test("uninstall: a down that fails on a blank :? key is retried once with a thro
   const job = await uninstall(id);
   const downs = calls.filter((c) => c.args[0] === "down");
   assert.equal(downs.length, 2, JSON.stringify(calls));
-  assert.deepEqual(downs[1].extraEnv, { P: "crow-teardown-unset" }, "Q is set in .env and is never given a dummy");
+  assert.deepEqual(downs[1].extraEnv, { P: DUMMY }, "Q is set in .env and is never given a dummy");
   assert.notEqual(job.status, "failed", job.log.join("\n"));
   assert.equal(existsSync(dir), false, "files removed once the containers are down");
   assert.ok(!installedIds().includes(id), "record dropped");
 });
 
-test("uninstall: when down still fails and containers may run, the extension is left installed (no orphans)", async () => {
+test("uninstall: when down still fails and containers run, the extension is left installed (no orphans)", async () => {
   const id = "td-keep";
   const dir = seedInstalled(id);
   const calls = [];
-  B._setComposeRunnerForTest(async (args, opts) => {
+  B._setComposeRunnerForTest(async (args) => {
     calls.push(args[0]);
-    if (args[0] === "down" || args[0] === "ps") throw missingVar("P");
+    if (args[0] === "down") throw missingVar("P");
+    return { stdout: "", stderr: "" };
+  });
+  B._setDockerRunnerForTest(dockerAnswering("abc123\n"));
+  try {
+    const job = await uninstall(id);
+    assert.equal(job.status, "failed");
+    assert.ok(job.log.some((l) => l.includes("Containers are still running and could not be stopped; the extension was left installed so you can stop it")), job.log.join("\n"));
+    assert.ok(job.log.some((l) => /Set P in Configure/.test(l)), job.log.join("\n"));
+    assert.equal(existsSync(join(dir, "docker-compose.yml")), true, "the compose stays so the containers can still be stopped");
+    assert.ok(installedIds().includes(id), "record kept");
+    assert.ok(!calls.includes("up"), "never brought anything up");
+  } finally { B._setDockerRunnerForTest(dockerAnswering("")); }
+});
+
+test("uninstall: down still fails but nothing of the project runs → removed", async () => {
+  const id = "td-none-running";
+  const dir = seedInstalled(id);
+  B._setComposeRunnerForTest(async (args) => { if (args[0] === "down") throw missingVar("P"); return { stdout: "", stderr: "" }; });
+  B._setDockerRunnerForTest(dockerAnswering(""));
+  const job = await uninstall(id);
+  assert.notEqual(job.status, "failed", job.log.join("\n"));
+  assert.equal(existsSync(dir), false);
+});
+
+test("uninstall: a blank key and a running-check that fails → kept, saying it could not check and which keys to set", async () => {
+  const id = "td-cannot-check";
+  const dir = seedInstalled(id);
+  B._setComposeRunnerForTest(async (args) => { if (args[0] === "down") throw missingVar("P"); return { stdout: "", stderr: "" }; });
+  B._setDockerRunnerForTest(async (cmd, args) => { if (isRunningCheck(args)) throw new Error("permission denied on the docker socket"); return { stdout: "", stderr: "" }; });
+  try {
+    const job = await uninstall(id);
+    assert.equal(job.status, "failed");
+    assert.ok(job.log.some((l) => l.includes("could not check: permission denied on the docker socket") && /Set P in Configure/.test(l)), job.log.join("\n"));
+    assert.ok(existsSync(dir) && installedIds().includes(id));
+  } finally { B._setDockerRunnerForTest(dockerAnswering("")); }
+});
+
+test("uninstall with docker unavailable (no blank keys) proceeds as before, noting it could not check", async () => {
+  const id = "td-docker-down";
+  const dir = seedInstalled(id, { envText: "P=x\nQ=y\n" });
+  B._setComposeRunnerForTest(async () => { throw new Error("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"); });
+  B._setDockerRunnerForTest(async () => { throw new Error("Cannot connect to the Docker daemon"); });
+  try {
+    const job = await uninstall(id);
+    assert.notEqual(job.status, "failed", job.log.join("\n"));
+    assert.ok(job.log.some((l) => l.includes("could not check")), job.log.join("\n"));
+    assert.equal(existsSync(dir), false);
+  } finally { B._setDockerRunnerForTest(dockerAnswering("")); }
+});
+
+test("teardown: a bind-mount :? key gets an absolute dummy path (a bare word would be a named volume)", async () => {
+  const id = "td-bind";
+  const compose = 'services:\n  app:\n    image: busybox:1.36\n    volumes:\n      - "${MEDIA:?set MEDIA}:/data"\n';
+  const dir = seedInstalled(id, { compose, envText: "MEDIA=\n" });
+  B._setComposeRunnerForTest(async (args, opts) => {
+    if (args[0] !== "down") return { stdout: "", stderr: "" };
+    if (!opts?.extraEnv) throw missingVar("MEDIA");
+    if (!opts.extraEnv.MEDIA.startsWith("/")) throw new Error(`service "app" refers to undefined volume ${opts.extraEnv.MEDIA}: invalid compose project`);
     return { stdout: "", stderr: "" };
   });
   const job = await uninstall(id);
-  assert.equal(job.status, "failed");
-  assert.ok(job.log.some((l) => l.includes("Containers are still running and could not be stopped; the extension was left installed so you can stop it")), job.log.join("\n"));
-  assert.equal(existsSync(join(dir, "docker-compose.yml")), true, "the compose stays so the containers can still be stopped");
-  assert.ok(installedIds().includes(id), "record kept");
-  assert.ok(!calls.includes("up"), "never brought anything up");
+  assert.notEqual(job.status, "failed", job.log.join("\n"));
+  assert.ok(job.log.includes("Containers stopped (data preserved)"), job.log.join("\n"));
+  assert.equal(existsSync(dir), false);
+});
+
+test("teardown: Compose v1's error text and keys from docker-compose.override.yml are handled too", async () => {
+  const id = "td-v1";
+  const dir = seedInstalled(id, { envText: "P=x\nQ=y\n" });
+  writeFileSync(join(dir, "docker-compose.override.yml"), 'services:\n  app:\n    environment:\n      R: "${R:?set R}"\n');
+  const calls = [];
+  B._setComposeRunnerForTest(async (args, opts) => {
+    calls.push({ args, extraEnv: opts?.extraEnv });
+    if (args[0] === "down" && !opts?.extraEnv) throw new Error('ERROR: Missing mandatory value for "environment" option interpolating {\'R\': \'${R:?set R}\'} in service "app": set R');
+    return { stdout: "", stderr: "" };
+  });
+  const job = await uninstall(id);
+  assert.notEqual(job.status, "failed", job.log.join("\n"));
+  assert.deepEqual(calls.filter((c) => c.args[0] === "down")[1]?.extraEnv, { R: DUMMY });
+  assert.equal(existsSync(dir), false);
 });
 
 test("uninstall: down fails for another reason but nothing runs → removed as before", async () => {
@@ -158,7 +234,7 @@ test("Stop retries the same way; Start (up) is never retried with dummies", asyn
     assert.equal(s.status, 200, JSON.stringify(s.body));
     const stops = calls.filter((c) => c.args[0] === "stop");
     assert.equal(stops.length, 2);
-    assert.deepEqual(stops[1].extraEnv, { P: "crow-teardown-unset" });
+    assert.deepEqual(stops[1].extraEnv, { P: DUMMY });
     const u = await post("/bundles/api/start", { bundle_id: id });
     assert.equal(u.status, 500, "Start keeps failing loudly");
     assert.match(u.body.error, /required variable P is missing a value/);
