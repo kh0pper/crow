@@ -397,3 +397,27 @@ test("uninstall (keep data) then install: a retained compose fallback never reac
     B._setDockerRunnerForTest(null);
   }
 });
+
+test("the legacy mark is dropped once the retained value is no longer the original fallback", () => {
+  const home = mkdtempSync(join(tmpdir(), "crow-kcwire-mark-"));
+  try {
+    const m = { env_vars: [{ name: "LEG_PASSWORD", secret: true, generate: "secret" }] };
+    const old = mkdtempSync(join(tmpdir(), "crow-kcwire-mark-old-"));
+    writeFileSync(join(old, ".env"), "LEG_PASSWORD=\n");
+    S.retainGeneratedForReinstall("mark", m, { destDir: old, crowHome: home, composeText: "x: ${LEG_PASSWORD:-old-fallback-pw}\n" });
+    rmScratch(old);
+    const path = S.retainedEnvPath(home, "mark");
+    assert.deepEqual([...S.legacyFallbackKeys(parseEnvText(readFileSync(path, "utf8")))], ["LEG_PASSWORD"]);
+    // Someone rotates the value in the retained copy: the mark no longer applies…
+    const rotated = readFileSync(path, "utf8").replace("LEG_PASSWORD=old-fallback-pw", "LEG_PASSWORD=rotated-by-hand");
+    writeFileSync(path, rotated, { mode: 0o600 });
+    assert.deepEqual([...S.legacyFallbackKeys(parseEnvText(rotated))], []);
+    // …and the next install's persist() drops it from the file.
+    const dest = mkdtempSync(join(tmpdir(), "crow-kcwire-mark-dest-"));
+    S.planGeneratedEnv("mark", m, { destDir: dest, crowHome: home }).persist();
+    rmScratch(dest);
+    const after = parseEnvText(readFileSync(path, "utf8"));
+    assert.equal(after.LEG_PASSWORD, "rotated-by-hand");
+    assert.equal(after.CROW_LEGACY_FALLBACK_KEYS, undefined);
+  } finally { rmScratch(home); }
+});

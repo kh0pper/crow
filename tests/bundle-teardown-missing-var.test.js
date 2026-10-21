@@ -128,6 +128,21 @@ test("uninstall: when down still fails and containers run, the extension is left
   } finally { B._setDockerRunnerForTest(dockerAnswering("")); }
 });
 
+for (const state of ["restarting", "paused"]) {
+  test(`uninstall: a ${state} container counts as running (never orphaned)`, async () => {
+    const id = `td-${state}`;
+    const dir = seedInstalled(id);
+    B._setComposeRunnerForTest(async (args) => { if (args[0] === "down") throw missingVar("P"); return { stdout: "", stderr: "" }; });
+    // Docker lists the container only when the check asks for its state.
+    B._setDockerRunnerForTest(async (cmd, args) => ({ stdout: args[0] === "ps" && args.includes(`status=${state}`) ? "abc123\n" : "", stderr: "" }));
+    try {
+      const job = await uninstall(id);
+      assert.equal(job.status, "failed", job.log.join("\n"));
+      assert.ok(existsSync(dir) && installedIds().includes(id));
+    } finally { B._setDockerRunnerForTest(dockerAnswering("")); }
+  });
+}
+
 test("uninstall: down still fails but nothing of the project runs → removed", async () => {
   const id = "td-none-running";
   const dir = seedInstalled(id);

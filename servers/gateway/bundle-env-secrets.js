@@ -120,14 +120,20 @@ export function writePrivateFile(path, content) {
 
 /**
  * The retained copy's record of keys whose value is a compose fallback an old install ran
- * on (a published default): `CROW_LEGACY_FALLBACK_KEYS=A,B`. Kept so a later install, and
- * the boot backfill, never save that value to the keychain as if it were this install's.
+ * on (a published default): `CROW_LEGACY_FALLBACK_KEYS=A:<hash>,B:<hash>`, each with a short
+ * sha256 of that value. Kept so a later install, and the boot backfill, never save that value
+ * to the keychain as if it were this install's. A mark holds only while the value is unchanged.
  */
 export const LEGACY_FALLBACK_MARKER = "CROW_LEGACY_FALLBACK_KEYS";
-/** Keys the retained copy marks as legacy, still holding the marked value. */
+const markHash = (v) => createHash("sha256").update(String(v)).digest("hex").slice(0, 16);
+/** Keys the retained copy marks as legacy whose value is still the one that was marked. */
 export function legacyFallbackKeys(retained) {
-  const raw = String(retained?.[LEGACY_FALLBACK_MARKER] || "");
-  return new Set(raw.split(",").map((k) => k.trim()).filter((k) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && retained[k]));
+  const out = new Set();
+  for (const entry of String(retained?.[LEGACY_FALLBACK_MARKER] || "").split(",")) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*):([0-9a-f]{16})$/.exec(entry.trim());
+    if (m && retained[m[1]] && markHash(retained[m[1]]) === m[2]) out.add(m[1]);
+  }
+  return out;
 }
 
 /** `env` with the marker set to the union of its still-valid legacy keys and `add`. */
@@ -135,7 +141,7 @@ function withLegacyMarker(env, add) {
   const out = { ...env };
   const keys = new Set([...legacyFallbackKeys(env), ...add].filter((k) => out[k]));
   delete out[LEGACY_FALLBACK_MARKER];
-  if (keys.size > 0) out[LEGACY_FALLBACK_MARKER] = [...keys].sort().join(",");
+  if (keys.size > 0) out[LEGACY_FALLBACK_MARKER] = [...keys].sort().map((k) => `${k}:${markHash(out[k])}`).join(",");
   return out;
 }
 

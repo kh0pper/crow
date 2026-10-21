@@ -1299,13 +1299,14 @@ async function runComposeTeardown(args, { cwd, composeRel = "docker-compose.yml"
 }
 
 /**
- * Whether any container of compose project `project` is running, asked of docker directly
+ * Whether any container of compose project `project` is running (or restarting, or paused:
+ * still there, and orphaned if the folder goes), asked of docker directly
  * (a `docker compose ps` would fail on the same blank key that failed the teardown).
  * Throws when docker can't be asked.
  */
 async function composeProjectRunning(project) {
   const runner = _dockerRunnerForTest || run;
-  const { stdout } = await runner("docker", ["ps", "--filter", `label=com.docker.compose.project=${project}`, "--filter", "status=running", "--format", "{{.ID}}"], { timeout: 15_000 });
+  const { stdout } = await runner("docker", ["ps", "--filter", `label=com.docker.compose.project=${project}`, "--filter", "status=running", "--filter", "status=restarting", "--filter", "status=paused", "--format", "{{.ID}}"], { timeout: 15_000 });
   return String(stdout || "").trim() !== "";
 }
 
