@@ -31,7 +31,11 @@ import { tickBotSchedules } from "../bot_scheduler.mjs";
 import { makeChannelDeliverer } from "./deliver.mjs";
 import { warnIfPiLabIncompatible } from "../pi-lab-compat.mjs";
 import { SKILL_OFF_LIST_SUPPORTED } from "../skill_resolver.mjs";
+import { applyCredentialFiles } from "../../../servers/shared/credentials-env.js";
 
+// Secrets handed to this unit as systemd credentials (LoadCredential=), the
+// same loader the gateway runs first (servers/shared/credentials-env.js).
+applyCredentialFiles(process.env);
 const CROW_DB = botsDbPath();
 const REAP_INTERVAL_MS = Number(process.env.PIBOT_REAP_INTERVAL_MS || 60000);
 // Background-job poll cadence. Coarse on purpose (S2: ≥60s, like pipeline-runner)
