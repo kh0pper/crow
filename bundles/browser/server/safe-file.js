@@ -22,6 +22,8 @@ export function fileInDir(dir, name, ext) {
   }
   const stem = raw.toLowerCase().endsWith(`.${ext}`) ? raw.slice(0, -(ext.length + 1)) : raw;
   if (!stem || stem.startsWith(".")) throw new Error(`invalid file name ${JSON.stringify(raw)}`);
+  // NAME_MAX is 255 bytes, not characters.
+  if (Buffer.byteLength(`${stem}.${ext}`) > 255) throw new Error(`invalid file name ${JSON.stringify(raw.slice(0, 60))}: too long once encoded (255 bytes at most)`);
   const root = resolve(dir);
   const full = join(root, `${stem}.${ext}`);
   if (dirname(full) !== root || basename(full) !== `${stem}.${ext}`) {

@@ -60,8 +60,9 @@ test("adminTarget: the old TCP address stands in ONLY while the socket is missin
   assert.equal(t.baseUrl, "http://127.0.0.1:2019");
   assert.equal(t.fallback, true);
   assert.equal(A.adminTarget({ env: { CADDY_ADMIN_URL: "http://127.0.0.1:2019" }, configDir: "/srv/x", state: () => "missing", source: () => legacy }).fallback, true);
-  // Migrated Caddyfile, or no Caddyfile: no fallback (another Caddy may own 127.0.0.1:2019).
-  for (const src of [migrated, ""]) assert.equal(A.adminTarget({ env: {}, configDir: "/srv/x", state: () => "missing", source: () => src }).kind, "unix");
+  // Migrated Caddyfile, no Caddyfile, or an operator's own TCP admin line that the entrypoint
+  // leaves alone: no fallback (the new compose doesn't publish 2019; another Caddy may own it).
+  for (const src of [migrated, "", "{\n\tadmin :2019 {\n\t\torigins x\n\t}\n}\n", "{\n  admin  0.0.0.0:2019 # mine\n}\n", "{\n\tadmin localhost:2019\n}\n"]) assert.equal(A.adminTarget({ env: {}, configDir: "/srv/x", state: () => "missing", source: () => src }).kind, "unix");
   // A socket we can't stat (EACCES) or a stale non-socket file: no fallback, the request says why.
   for (const st of ["unknown", "other"]) assert.equal(A.adminTarget({ env: {}, configDir: "/srv/x", state: () => st, source: () => legacy }).kind, "unix");
   // An explicit unix: target never falls back.
@@ -211,6 +212,9 @@ test("adminLineWarning: only Crow's socket line is quiet", () => {
   assert.match(C.adminLineWarning("{\n\tadmin 0.0.0.0:2019\n}\n"), /reachable from every container/);
   assert.match(C.adminLineWarning("{\n\tadmin :2019 {\n\t\torigins x\n\t}\n}\n"), /reachable from every container/);
   assert.match(C.adminLineWarning("a.example.com {\n\trespond hi\n}\n"), /no admin line/);
+  assert.equal(C.adminLineWarning("{\n\tadmin unix//srv/caddy/run/admin.sock|0222 {\n\t\torigins x\n\t}\n}\n"), null, "options after the socket are fine");
+  assert.match(C.adminLineWarning("{\n\tadmin off\n}\n"), /turns the admin API off/);
+  assert.doesNotMatch(C.adminLineWarning("{\n\tadmin off\n}\n"), /reachable/);
 });
 
 test("ensureConfigDir creates run/ 0700 next to the Caddyfile", () => {
@@ -274,6 +278,10 @@ test("panel routes reach Caddy over the socket (status + add site)", async () =>
     assert.ok(admin.seen.some((r) => r.url === "/load" && r.body.includes("p.example.com")));
     const bad = await (await fetch(`${base}/api/caddy/sites`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: 'p.example.com"#', upstream: "crow-app:80" }) })).json();
     assert.match(bad.error, /domain/i);
+    for (const upstream of ["crow-caddy:2019", "localhost:8080", "127.0.0.1:3001", "crow-app:2019", "host.example.net:80"]) {
+      const r = await (await fetch(`${base}/api/caddy/sites`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: "q.example.com", upstream }) })).json();
+      assert.match(r.error || "", /Invalid upstream/, upstream);
+    }
   } finally {
     web.close(); await admin.close(); rmSync(dir, { recursive: true, force: true });
     for (const [k, v] of [["CADDY_ADMIN_URL", saved.a], ["CADDY_CONFIG_DIR", saved.c]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }

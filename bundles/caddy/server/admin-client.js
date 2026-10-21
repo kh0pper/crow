@@ -41,9 +41,14 @@ export function isLegacyAdminUrl(raw) {
   return url.protocol === "http:" && url.port === "2019" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) && (url.pathname === "/" || url.pathname === "");
 }
 
-/** True when the Caddyfile's admin listener is still the old TCP one on port 2019. */
+/**
+ * True when the Caddyfile still has the exact old admin line the entrypoint migrates
+ * (`admin 0.0.0.0:2019`): the container has not been recreated yet. Any other TCP admin
+ * line is the operator's own and never makes Crow fall back to 127.0.0.1:2019, which
+ * the new compose file no longer publishes (another Caddy may own it).
+ */
 export function caddyfileHasTcpAdmin(source) {
-  return /^[ \t]*admin[ \t]+(?:0\.0\.0\.0|127\.0\.0\.1|localhost)?:2019\b/m.test(String(source || ""));
+  return /^[ \t]*admin[ \t]+0\.0\.0\.0:2019[ \t]*$/m.test(String(source || ""));
 }
 
 function socketState(path) {
@@ -96,7 +101,7 @@ function unreachable(target, err) {
     ? `${target.socketPath} (not there yet) or ${target.baseUrl}`
     : target.label;
   const hint = code === "EACCES"
-    ? " Permission denied: the socket's folder must belong to the user Crow runs as (recreate the caddy container: its entrypoint fixes the owner)."
+    ? " Permission denied: the socket's folder (run/ in CADDY_CONFIG_DIR) must belong to the user Crow runs as. Make the config dir that user's (chown -R), then recreate the caddy container (its entrypoint gives run/ to the config dir's owner)."
     : code === "ENOENT"
       ? " The socket is not there: is the caddy container running, and was it recreated after the bundle update (docker compose up -d --force-recreate)? Check 'docker ps' for crow-caddy and 'docker logs crow-caddy'."
       : " Is the caddy container running? Check 'docker ps' for crow-caddy and 'docker logs crow-caddy'.";

@@ -34,6 +34,7 @@ const {
 } = await import(pathToFileURL(join(BUNDLE_DIR, "server", "caddyfile.js")).href);
 
 const { adminTarget, adminRequest } = await import(pathToFileURL(join(BUNDLE_DIR, "server", "admin-client.js")).href);
+const { upstreamProblem } = await import(pathToFileURL(join(BUNDLE_DIR, "server", "federation-profiles.js")).href);
 
 const CONFIG_DIR = () => resolveConfigDir(process.env.CADDY_CONFIG_DIR);
 // The admin API is a unix socket in the config dir (admin-client.js).
@@ -114,7 +115,10 @@ export default function caddyRouter(authMiddleware) {
     try {
       const { domain, upstream } = req.body || {};
       if (!domainLike(domain)) return res.json({ error: "Invalid domain" });
-      if (!domainLike(upstream) || upstream.length > 500) return res.json({ error: "Invalid upstream" });
+      // The MCP tools' upstream rule: a container name as name:port, never Caddy itself,
+      // its old admin port, a loopback or IP literal, or a name the host DNS could resolve.
+      const upBad = typeof upstream === "string" ? upstreamProblem(upstream) : "an upstream is required";
+      if (upBad) return res.json({ error: `Invalid upstream: ${upBad}` });
 
       const source = readCaddyfile(CONFIG_DIR());
       const existing = parseSites(source);

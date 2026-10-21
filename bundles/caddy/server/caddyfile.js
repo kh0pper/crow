@@ -44,8 +44,11 @@ export const ADMIN_LINE = "admin unix//srv/caddy/run/admin.sock|0222";
 export function adminLineWarning(source) {
   const lines = String(source || "").split(/\r?\n/).map((l) => l.trim()).filter((l) => /^admin(\s|$)/.test(l));
   if (!lines.length) return String(source || "").trim() ? "the Caddyfile has no admin line: Caddy listens on its default localhost:2019 inside the container, and Crow's tools expect the socket (" + ADMIN_LINE + ")" : null;
-  const other = lines.find((l) => l !== ADMIN_LINE);
+  const want = ADMIN_LINE.split(/\s+/)[1];
+  // The address token only: an options block ({ origins ... }) after the socket is fine.
+  const other = lines.find((l) => l.split(/\s+/)[1] !== want);
   if (!other) return null;
+  if (other.split(/\s+/)[1] === "off") return `the Caddyfile turns the admin API off ("${other.slice(0, 80)}"): Crow's tools can't reload or inspect Caddy. Use ${ADMIN_LINE} to let them.`;
   return `the Caddyfile's admin line is "${other.slice(0, 80)}", not Crow's socket line (${ADMIN_LINE}): a TCP admin API is reachable from every container on crow-federation. Recreate the caddy container (its entrypoint moves the old 0.0.0.0:2019 line), or edit the global options block.`;
 }
 

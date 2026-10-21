@@ -54,6 +54,7 @@ services:
       - |
         set -e
         OWNER="$$(stat -c %u:%g /srv/caddy)"
+        [ "$$OWNER" != "0:0" ] || echo "crow-caddy: WARNING the config folder is owned by root, so Crow's tools can't open the admin socket: chown it to the user Crow runs as and recreate this container" >&2
         if [ ! -f /srv/caddy/Caddyfile ]; then
           cat > /srv/caddy/Caddyfile <<CADDYFILE_EOF
         # Crow-managed Caddyfile. The global options block is required by

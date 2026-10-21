@@ -86,8 +86,10 @@ unix socket in the config folder (`run/`, mode 0700, owned by the user Crow
 runs as); there is no admin port. Crow's tools find it from `CADDY_CONFIG_DIR`.
 `CADDY_ADMIN_URL` is only for an unusual setup (`unix:/path/to.sock`, or an
 http(s) URL). Docker Desktop on macOS or Windows (not WSL) cannot share a unix
-socket through a bind mount; there, set your own `admin` line and
-`CADDY_ADMIN_URL`.
+socket through a bind mount; there, set your own `admin` line, publish its port
+on 127.0.0.1 in a `docker-compose.override.yml` next to the bundle's compose
+file (a bundle update replaces `docker-compose.yml` itself), and set
+`CADDY_ADMIN_URL` to it.
 
 ### Remove a site
 

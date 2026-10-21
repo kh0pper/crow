@@ -14,7 +14,7 @@ const { fileInDir } = await import("../bundles/browser/server/safe-file.js");
 test("fileInDir: refuses names that leave the folder or are not plain file names", () => {
   const dir = mkdtempSync(join(tmpdir(), "crow-safe-file-"));
   try {
-    for (const bad of ["../x", "../../etc/passwd", "/etc/passwd", "a/b", "a\\b", "..", ".", ".hidden", "x\u0000y", "x\ny", "", "a".repeat(129), "..\\x", "C:\\x"]) {
+    for (const bad of ["../x", "../../etc/passwd", "/etc/passwd", "a/b", "a\\b", "..", ".", ".hidden", "x\u0000y", "x\ny", "", "a".repeat(129), "..\\x", "C:\\x", "€".repeat(100)]) {
       assert.throws(() => fileInDir(dir, bad, "csv"), /file name/, JSON.stringify(bad));
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
