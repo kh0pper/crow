@@ -75,6 +75,38 @@ then `systemctl daemon-reload` and restart the gateway. A host with no pre-exist
 
 Even in `gateway` mode, the bridge tick and Discord child only actually run while the `feature_flags.bot_runtime` flag is on (**Settings → Bot Runtime**, defaults to on for an MPA-shaped host, off otherwise). `runtimeGate()` (`scripts/pi-bots/runtime-gate.mjs`) polls that flag every 30 seconds (`pollMs`, default 30000) and calls `start()`/`stop()` on a transition, with a `busy` guard so a stop can never overlap an in-flight start. Flipping the dashboard toggle arms or disarms the runtime with **no gateway restart** — the same self-gating rule every standalone pi-bots runner already respects.
 
+## Scheduled bot runs
+
+A bot-cron schedule (a `schedules` row whose task is `pipeline:botcron:<bot_id>`, created from a bot's triggers in Bot Builder) does not run pi itself. When it is due, a ticker enqueues one `bot_jobs` row, and the job runner claims, runs and delivers it. Two processes can tick:
+
+| Where | Ticks bot cron? |
+|---|---|
+| Gateway, mode `gateway` (default), `bot_runtime` on | Yes: one sweep when the runtime arms, then every `PIBOT_BOTCRON_POLL_MS` (default 60000ms) |
+| Gateway, mode `gateway`, `bot_runtime` off | No (disarmed with the bridge tick) |
+| Gateway, mode `external` or `disabled` | Never |
+| `pibot-gateways@<instance>` runner, `bot_runtime` on | Yes: every `PIBOT_BOTCRON_POLL_MS` |
+
+**One ticker per instance.** Before each sweep a ticker takes or renews the instance's ticker lease, `botcron-ticker.lease.json` in the bots data dir (the directory holding the instance's `crow.db`; both processes resolve the same one). Only the holder ticks; any other ticker stays idle. The lease lives for `max(180 s, 3 × poll period)` and is renewed every sweep. A ticker that stops cleanly (flag off, runner SIGTERM) frees it at once. If the holder's recorded pid no longer exists, the next ticker takes the lease over without waiting out the TTL.
+
+**One job per due schedule, even with two tickers.** The lease only keeps a second ticker idle; correctness comes from the claim. A ticker advances `next_run` with a single `UPDATE … WHERE id=? AND next_run IS <the value it selected> AND enabled=1` and enqueues only when that update changed exactly one row. If two tickers race on the same due row (lease expiry, clock skew), exactly one enqueues. `next_run` is advanced before the enqueue, so a failed enqueue is not retried every tick.
+
+**Behaviour worth knowing:**
+
+- **No engine, no sweep.** The gateway skips bot-cron sweeps (and does not take the lease) while `resolvePiCli()` finds no pi engine, so an engine-less install never piles up queued jobs nobody can run.
+- **Overdue schedules fire once.** An instance that never had a ticker running fires each overdue schedule once, on the first sweep after deploy, and then moves it to its next occurrence from now. Missed runs are not replayed.
+- **A bad cron expression runs once.** An unparseable `cron_expression` still enqueues its first due run, then `next_run` becomes NULL and the schedule never ticks again.
+- **Schedules for the voice bot, or with no goal,** are advanced but enqueue nothing.
+
+**Log lines to look for** (gateway lines are prefixed `[bot-runtime] [botcron]`, runner lines `[gateways] [botcron]`):
+
+- `bot-cron ticker armed (60000ms)` (gateway) or `bot-cron scheduler armed (every 60s)` (runner): the ticker is running.
+- `lease acquired, this process ticks bot-cron schedules`: logged once when the process gains the lease.
+- `lease lost, another ticker on this instance owns bot-cron schedules`: logged once each time it loses the lease.
+- `schedule #<id> (bot=<bot_id>) → enqueued job <job_id>`, then `enqueued <n> scheduled job(s)`: a schedule fired.
+- `no pi engine installed, bot-cron schedules wait until one is`: gateway only, logged once until an engine appears.
+
+`node scripts/pi-bots/bot_scheduler.mjs` runs one tick by hand, without the lease, and prints `{"fired":<n>}`.
+
 ## Breaker semantics
 
 The bridge tick is guarded by a circuit breaker so a persistently broken bot (bad credentials, a dead model) can't spam retries forever:
