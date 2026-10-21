@@ -21,7 +21,8 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { instancePathsVerdict, INSTANCE_PATHS_EXIT_CODE } from "../../shared/crow-home.js";
+import { instancePathsVerdict, inheritedSecretsWarning, INSTANCE_PATHS_EXIT_CODE } from "../../shared/crow-home.js";
+import { SECRET_NAME_RE } from "../../shared/bot-env.js";
 import { applyCredentialFiles } from "../../shared/credentials-env.js";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -40,13 +41,16 @@ export function applyEnvFile(envPath, env = process.env) {
   return keys;
 }
 
-// CROW_APP_ENV_PATH is set only by scripts/run-suite.mjs (a suite run never
-// applies a real checkout .env); prod leaves it unset.
+// CROW_APP_ENV_PATH: the gateway's app env file (default <checkout>/.env). The
+// suite runner points it at a scratch file; a co-hosted instance in prod sets
+// it to its own file so it does not inherit the primary's secrets.
 export function runInstancePathsGate({ env = process.env, envPath = env.CROW_APP_ENV_PATH || resolve(appRoot, ".env"), log = console, exit = process.exit, credentialRoots } = {}) {
   // Systemd credentials first (servers/shared/credentials-env.js): a secret
   // moved from Environment= to LoadCredential= beats a leftover .env line.
   applyCredentialFiles(env, { roots: credentialRoots, log });
   const envFileKeys = applyEnvFile(envPath, env);
+  const inherited = inheritedSecretsWarning(env, { envFileKeys, appEnvIsDefault: !env.CROW_APP_ENV_PATH, secretNameRe: SECRET_NAME_RE });
+  if (inherited) log.warn(`[instance-paths] WARNING: ${inherited}`);
   const verdict = instancePathsVerdict(env, { envFileKeys });
   if (!verdict.ok) {
     log.error(`ERROR: ${verdict.error}`);
