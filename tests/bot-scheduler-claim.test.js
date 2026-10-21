@@ -83,3 +83,23 @@ test("tickBotSchedules still fires a due schedule once", async () => {
   assert.deepEqual(tickBotSchedules(), { fired: 0 });
   assert.equal(jobCount(), 1);
 });
+
+test("a schedule whose previous run is still queued is advanced but not enqueued again (coalesced)", async () => {
+  const { tickBotSchedules, ensure } = await load();
+  seed();
+  const e = new Database(dbPath); ensure(e); e.close();
+  assert.equal(tickBotSchedules().fired, 1);
+  const due = () => { const d = new Database(dbPath); d.prepare("UPDATE schedules SET next_run=?").run(new Date(Date.now() - 60000).toISOString()); d.close(); };
+  due();
+  const lines = [];
+  assert.equal(tickBotSchedules({ log: (m) => lines.push(m) }).fired, 0);
+  assert.equal(jobCount(), 1);
+  assert.ok(lines.some((l) => l.includes("previous run still queued")));
+  const d = new Database(dbPath);
+  assert.ok(d.prepare("SELECT next_run FROM schedules").get().next_run > new Date().toISOString(), "still advanced");
+  d.prepare("UPDATE bot_jobs SET status='running'").run(); // the previous run started
+  d.close();
+  due();
+  assert.equal(tickBotSchedules().fired, 1);
+  assert.equal(jobCount(), 2);
+});

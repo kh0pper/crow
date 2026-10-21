@@ -69,6 +69,7 @@ function seedDue() {
 }
 function makeDueAgain() {
   const d = new Database(dbPath);
+  d.prepare("UPDATE bot_jobs SET status='running' WHERE status='queued'").run(); // the previous run has started (no coalescing)
   d.prepare("UPDATE schedules SET next_run=?").run(new Date(Date.now() - 60000).toISOString());
   d.close();
 }

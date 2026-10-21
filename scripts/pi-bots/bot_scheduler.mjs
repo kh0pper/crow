@@ -65,7 +65,7 @@ const inflight = new Set();
  * INSERT failure does not undo the advance (no retry every tick).
  * Returns true only when this call enqueued a job. False means another ticker
  * claimed it, OR this call claimed and advanced it but enqueued nothing (missing
- * bot/goal, voice bot).
+ * bot/goal, voice bot, or the schedule's previous run is still queued).
  */
 export function claimAndEnqueue(d, s, nowIso, log = () => {}) {
   const next = computeNextRun(s.cron_expression, new Date(nowIso));
@@ -80,6 +80,10 @@ export function claimAndEnqueue(d, s, nowIso, log = () => {}) {
   try { spec = JSON.parse(s.description || "{}"); } catch { spec = {}; }
   if (!botId || !spec.goal) { log(`schedule #${s.id} missing bot/goal — advanced, not enqueued`); return false; }
   if (isVoiceBotId(botId)) { log(`schedule #${s.id} targets the voice bot, which cannot take background jobs — advanced, not enqueued`); return false; }
+  // Coalesce: a schedule whose previous run has not started yet gets no second
+  // queued copy (a slow drain never builds a backlog of the same run).
+  const pending = d.prepare("SELECT job_id FROM bot_jobs WHERE schedule_id=? AND status='queued' LIMIT 1").get(s.id);
+  if (pending) { log(`schedule #${s.id} (bot=${botId}) previous run still queued (${pending.job_id}), skipped — advanced, not enqueued`); return false; }
 
   const jobId = generateJobId();
   const deliver = spec.deliver_to == null ? null

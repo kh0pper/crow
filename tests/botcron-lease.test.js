@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { holdBotcronLease, releaseBotcronLease } from "../scripts/pi-bots/botcron-lease.mjs";
+import { holdBotcronLease, releaseBotcronLease, tryBotcronLease, createBotcronTicker } from "../scripts/pi-bots/botcron-lease.mjs";
+import { chmodSync, mkdirSync, unlinkSync } from "node:fs";
 
 let dir;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "botcron-lease-")); });
@@ -51,4 +52,40 @@ test("a busy lock returns false without throwing", async () => {
   try {
     assert.equal(await holdBotcronLease({ dir, holder: "a", now: 1000, lockTimeoutMs: 100 }), false);
   } finally { held.exec("COMMIT"); held.close(); }
+});
+
+test("a lock file that is not a database is an error, not \"another holder\"; the ticker logs it once and logs recovery", async () => {
+  writeFileSync(join(dir, "botcron-ticker.lock"), "this is not a sqlite database, just some text padding it out ".repeat(20));
+  const r = await tryBotcronLease({ dir, holder: "a" });
+  assert.equal(r.held, false);
+  assert.match(r.error, /not a database/);
+  assert.equal(await holdBotcronLease({ dir, holder: "a" }), false);
+
+  const lines = [];
+  const t = createBotcronTicker({ dir, holder: "a", log: (m) => lines.push(m), _tick: () => ({ fired: 0 }) });
+  assert.equal((await t.sweep()).held, false);
+  await t.sweep();
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^cannot take the bot-cron lease: .*not a database.*; scheduled bot runs are paused on this instance$/);
+  assert.ok(!lines.some((l) => l.startsWith("lease lost")));
+
+  unlinkSync(join(dir, "botcron-ticker.lock"));
+  assert.equal((await t.sweep()).held, true);
+  assert.deepEqual(lines.slice(1).map((l) => l.split(";")[0].split(",")[0]), ["the bot-cron lease can be taken again", "lease acquired"]);
+});
+
+test("a read-only data dir is an error the ticker reports, never \"lease lost\"", { skip: process.getuid && process.getuid() === 0 ? "root ignores directory modes" : false }, async () => {
+  const ro = join(dir, "ro");
+  mkdirSync(ro);
+  chmodSync(ro, 0o555);
+  try {
+    const r = await tryBotcronLease({ dir: ro, holder: "a" });
+    assert.equal(r.held, false);
+    assert.ok(r.error, "an error message is returned");
+    const lines = [];
+    const t = createBotcronTicker({ dir: ro, holder: "a", log: (m) => lines.push(m), _tick: () => ({ fired: 0 }) });
+    await t.sweep(); await t.sweep();
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /^cannot take the bot-cron lease: /);
+  } finally { chmodSync(ro, 0o755); }
 });

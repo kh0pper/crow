@@ -258,6 +258,7 @@ export async function initBotRuntime({
   }
 
   function startBridge() {
+    if (bridgeTimer) return; // already armed: never a second bridge interval
     bridgeTimer = _setIntervalFn(tick, tickMs);
     if (bridgeTimer && bridgeTimer.unref) bridgeTimer.unref();
     state.bridge.armed = true;
@@ -270,6 +271,7 @@ export async function initBotRuntime({
   }
 
   function startBotcron() {
+    if (botcronTicker) return; // already armed: never a second ticker or interval
     const ticker = _createBotcronTicker({
       dir: botsDataDir(),
       ttlMs: botcronLeaseTtl(botcronMs),
