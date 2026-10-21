@@ -718,6 +718,25 @@ test("session display answers as Crow on surface phone, even when kiosk_dashboar
   } finally { await f.close(); }
 });
 
+test("the hub's time zone reaches Crow's own tools as opts.tz (and the display's language as opts.lang)", async () => {
+  const f = await crowServe();
+  try {
+    const c = await f.open({ type: "hello", mode: "session", csrf: CSRF, caps: {}, tz: "Asia/Tokyo" });
+    await c.ask();
+    assert.equal(f.calls.at(-1).tz, "Asia/Tokyo");
+    assert.equal(f.calls.at(-1).lang, "en");
+    c.ws.close();
+    await withDb((db) => registry.writeSetting(db, "language", "es"));
+    const es = await f.open({ type: "hello", mode: "session", csrf: CSRF, caps: {}, tz: "Asia/Tokyo" });
+    await es.ask();
+    assert.equal(f.calls.at(-1).lang, "es");
+    es.ws.close();
+  } finally {
+    await withDb((db) => registry.writeSetting(db, "language", "en"));
+    await f.close();
+  }
+});
+
 test("session display: the early-STT hook transcribes with Crow's STT profile", async () => {
   const f = await crowServe({ def: await crowDef({}, { stt_profile_id: "fw-crow" }) });
   try {

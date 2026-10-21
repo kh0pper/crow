@@ -108,7 +108,7 @@ export function toolEffect(name) {
  * "crow_get_post" → get (read); "ws_cal_create_event" → create (write); find/search straight before
  * replace is one compound write, "replace" ("find_replace").
  */
-function firstVerb(name) {
+export function firstVerb(name) {
   const n = toolNameWords(name);
   if (!n) return null;
   const parts = n.split("_");

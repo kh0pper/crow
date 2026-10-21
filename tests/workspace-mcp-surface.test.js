@@ -1,4 +1,4 @@
-/** Task 14: the ws_* MCP surface is exactly spec §4's 76 tools; instructions carry the guardrails; manifest declares the server. */
+/** Task 14: the ws_* MCP surface is spec §4's 76 tools plus the 2 task tools (78); instructions carry the guardrails; manifest declares the server. */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -13,19 +13,20 @@ const EXPECTED = [
   "ws_sheets_list", "ws_sheets_get_tabs", "ws_sheets_read", "ws_sheets_write", "ws_sheets_append", "ws_sheets_create", "ws_sheets_add_tab", "ws_sheets_rename_tab", "ws_sheets_delete_tab", "ws_sheets_set_number_format", "ws_sheets_batch_update",
   "ws_slides_read", "ws_slides_get_structure", "ws_slides_read_notes", "ws_slides_find_replace", "ws_slides_create", "ws_slides_add_slide", "ws_slides_duplicate_slide", "ws_slides_delete_slide", "ws_slides_reorder_slides", "ws_slides_add_text_box", "ws_slides_add_image", "ws_slides_format_text", "ws_slides_format_paragraph", "ws_slides_edit_text", "ws_slides_edit_notes", "ws_slides_batch_update",
   "ws_cal_list_calendars", "ws_cal_list_events", "ws_cal_get_event", "ws_cal_create_event", "ws_cal_update_event", "ws_cal_delete_event", "ws_cal_respond_to_event",
+  "ws_tasks_list_lists", "ws_task_create",
   "ws_contacts_list_addressbooks", "ws_contacts_search", "ws_contacts_get", "ws_contacts_create", "ws_contacts_update", "ws_contacts_delete",
   "ws_undo_last_change", "ws_change_status", "ws_cancel_change",
 ];
-const FAMILIES = { drive: 17, docs: 16, sheets: 11, slides: 16, cal: 7, contacts: 6 };
+const FAMILIES = { drive: 17, docs: 16, sheets: 11, slides: 16, cal: 7, contacts: 6, tasks: 1, task: 1 };
 const DESTRUCTIVE = ["ws_drive_trash_file", "ws_sheets_delete_tab", "ws_slides_delete_slide", "ws_cal_delete_event", "ws_contacts_delete"];
 let fake, client, close;
 before(async () => { fake = await startFakeNextcloud(); ({ client, close } = await connectWorkspace(fake)); });
 after(async () => { await close(); fake.close(); });
 
-test("exactly the 76 spec §4 tools are registered (no internal ws__ ops)", async () => {
+test("exactly the 78 tools (spec §4 plus tasks) are registered (no internal ws__ ops)", async () => {
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
-  assert.equal(EXPECTED.length, 76);
-  assert.equal(new Set(EXPECTED).size, 76, "no duplicates in the pinned list");
+  assert.equal(EXPECTED.length, 78);
+  assert.equal(new Set(EXPECTED).size, 78, "no duplicates in the pinned list");
   for (const [fam, n] of Object.entries(FAMILIES)) assert.equal(EXPECTED.filter((x) => x.startsWith(`ws_${fam}_`)).length, n, fam);
   assert.deepEqual(names, [...EXPECTED].sort());
   assert.deepEqual(names.filter((n) => n.startsWith("ws__")), [], "internal inverse ops are never MCP tools");

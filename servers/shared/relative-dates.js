@@ -58,6 +58,20 @@ function offsetOf(ymd, tz) {
   const m = /^GMT([+-]\d{2}:\d{2})$/.exec(name);
   return m ? m[1] : "+00:00";
 }
+
+/**
+ * "[Zone] America/Chicago, UTC-05:00": the zone and its UTC offset at `now`, for a turn that offers a tool taking a
+ * date-time with an offset (Crow's own routine tools). null when the zone is not a valid one (never the server's
+ * zone: a guessed offset would write the wrong hour).
+ */
+export function zoneContext(now, tz) {
+  const zone = validTimeZone(tz);
+  if (!zone) return null;
+  const name = new Intl.DateTimeFormat("en-US", { timeZone: zone, timeZoneName: "longOffset" })
+    .formatToParts(new Date(now)).find((x) => x.type === "timeZoneName")?.value || "GMT";
+  const m = /^GMT([+-]\d{2}:\d{2})$/.exec(name);
+  return `[Zone] ${zone}, UTC${m ? m[1] : "+00:00"}`;
+}
 const isoYmd = ({ y, m, d }) => `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
 
 export function relativeDatesContext(now, tz) {

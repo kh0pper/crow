@@ -12,7 +12,8 @@ import { recordChange, settleChange } from "./journal.js";
 import { HOME_PROPFIND, ADDRESS_SET_PROPFIND, calendarQuery, uidQueryCal, uidQueryCard } from "./dav-xml.js";
 
 // ---------- collections ----------
-export async function listCollections(cfg, kind) {
+/** `component` picks which calendars count: VEVENT (default, the calendars) or VTODO (task lists). No declared component set counts for both, as CalDAV says. */
+export async function listCollections(cfg, kind, { component = "VEVENT" } = {}) {
   const r = await ncFetch(cfg, "PROPFIND", pimHomeUrl(cfg, kind), { headers: { Depth: "1", "Content-Type": "application/xml" }, body: HOME_PROPFIND });
   if (r.status !== 207) throw httpFail(r, kind === "card" ? "list address books" : "list calendars");
   const out = [];
@@ -21,7 +22,7 @@ export async function listCollections(cfg, kind) {
     const isIt = kind === "card" ? !!kid(rt, NS.card, "addressbook") : !!kid(rt, NS.cal, "calendar");
     if (!isIt) continue;
     const comps = x.props.get(`${NS.cal}|supported-calendar-component-set`);
-    if (kind !== "card" && comps && !kids(comps, NS.cal, "comp").some((c) => c.getAttribute("name") === "VEVENT")) continue;
+    if (kind !== "card" && comps && !kids(comps, NS.cal, "comp").some((c) => c.getAttribute("name") === component)) continue;
     const segs = pimHrefToSegs(cfg, kind, x.href);
     if (segs.length !== 1) continue; // the home itself (or a stray object row) is not a collection we list
     const id = segs[0];
@@ -35,16 +36,17 @@ export async function listCollections(cfg, kind) {
   return out;
 }
 export const listCalendars = (cfg) => listCollections(cfg, "cal");
+export const listTaskLists = (cfg) => listCollections(cfg, "cal", { component: "VTODO" });
 /**
  * A collection by name or id, in this order: exact display name (case-insensitive), collection id, then — for a
  * collection someone SHARED with crow-bot, which Nextcloud shows as "Menu (admin)" with id "Menu_shared_by_admin" —
  * the base name without the trailing " (owner)" when exactly one collection matches. Ambiguous → the choices.
  */
-export async function resolveCollection(cfg, kind, nameOrId) {
-  const all = await listCollections(cfg, kind);
+export async function resolveCollection(cfg, kind, nameOrId, opts) {
+  const all = await listCollections(cfg, kind, opts);
   const norm = (x) => String(x).normalize("NFC").toLowerCase();
   const want = norm(nameOrId);
-  const what = kind === "card" ? "address book" : "calendar";
+  const what = kind === "card" ? "address book" : opts?.component === "VTODO" ? "task list" : "calendar";
   const listing = () => all.map((c) => `${c.name} (${c.id})`).join(", ") || "none — ask the household to share one with Crow bot";
   const ambiguous = () => new WsError("ambiguous", `More than one ${what} is named "${nameOrId}" for Crow bot. Available: ${listing()}`);
   const shared = (c) => !!c.owner_uid && c.owner_uid !== cfg.user;
@@ -284,6 +286,18 @@ export function buildEvent({ summary, start, end, description, location, attende
     }
   }
   vcal.addSubcomponent(ve);
+  return { uid, ics: crlf(vcal.toString()) };
+}
+/** A new VTODO. due: YYYY-MM-DD becomes DUE;VALUE=DATE, a date-time with an offset becomes a UTC DUE (like new events' DTSTART). */
+export function buildTodo({ summary, due, description }) {
+  const vcal = new ICAL.Component(["vcalendar", [], []]);
+  vcal.updatePropertyWithValue("prodid", "-//Crow//Workspace W2//EN"); vcal.updatePropertyWithValue("version", "2.0");
+  const vt = new ICAL.Component("vtodo"); const uid = randomUUID();
+  vt.updatePropertyWithValue("uid", uid); stamp(vt);
+  if (due !== undefined && due !== "") vt.updatePropertyWithValue("due", timeOf(due, "due"));
+  setText(vt, "summary", summary); setText(vt, "description", description);
+  vt.updatePropertyWithValue("status", "NEEDS-ACTION");
+  vcal.addSubcomponent(vt);
   return { uid, ics: crlf(vcal.toString()) };
 }
 const masterOf = (comp) => {

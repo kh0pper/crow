@@ -8,6 +8,7 @@ import { registerSheets } from "./tools/sheets.js";
 import { registerSlides } from "./tools/slides.js";
 import { registerUndo } from "./tools/undo.js";
 import { registerCalendar } from "./tools/calendar.js";
+import { registerTasks } from "./tools/tasks.js";
 import { registerContacts } from "./tools/contacts.js";
 import { pruneJournal } from "./pim/journal.js";
 import { systemClock } from "./write-protocol.js";
@@ -34,6 +35,7 @@ export function createWorkspaceServer({ clock = realClock } = {}) {
   names.push(...registerSheets(server, ctx));
   names.push(...registerSlides(server, ctx));
   names.push(...registerCalendar(server, ctx));
+  names.push(...registerTasks(server, ctx));
   names.push(...registerContacts(server, ctx));
   names.push(...registerUndo(server, ctx));
   // K5: writes to an open/locked file become pending changes (the crow.db client opens lazily on first use)

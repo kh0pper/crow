@@ -11,13 +11,15 @@
 import {
   createThinkGate, createSentenceChunker, createConfirmGate, createConvoStore, degenerateTranscript, createToolSyntaxGate, stripToolSyntax,
   negotiatePcm, pcmStream, isDestructiveTool, describeDestructiveAction, SENTENCE_END,
-  isProxyCall, executedProxyArgs, proxyArgsConflict, reliesOnFlatFallback,
+  isProxyCall, executedProxyArgs, proxyArgsConflict, reliesOnFlatFallback, canonicalArgsHash,
 } from "./turn-helpers.js";
+import { zoneContext } from "../../shared/relative-dates.js";
 import { withTurnContext, createContextEchoGate, stripContextEcho, stripContextEchoDeep, TURN_CONTEXT_NOTE } from "./context-echo.js";
 import { estimatePromptTokens, requestFits, choosePromptFit, dropOldestExchange } from "./prompt-fit.js";
 import { claimsAction, claimsReminder, claimsBeyondMemory, toolEffect, needsSpokenYes } from "./action-claims.js";
-import { classifyTools } from "./tool-families.js";
+import { classifyTools, phraseWords, normalizeIntentLists, listMatches } from "./tool-families.js";
 import { voiceAbilities } from "./voice-abilities.js";
+import { ROUTINE_OBJECTS, namesRoutineObjects } from "./routine-objects.js";
 import { CROW_VOICE_BOT_ID, normalizeVoiceSettings, isVoiceBotDef } from "../../shared/voice-bot.js";
 
 /**
@@ -118,12 +120,16 @@ const MEMORY_NOT_ASKED = "The user did not ask to remember or recall anything, s
  *  - the first-audio budget running out after such a change was sent speaks UNSURE_TEXT, not "try again".
  * The turn right after an action request is an action turn when opts.actionFollowWhen(transcript) says it
  * changes that request ("move it to 9 instead").
- * Callers pass localized lines (cantDoText, notDoneText, notReadyText, memoOnlyText, unsureText).
+ * Callers pass localized lines (cantDoText, notDoneText, notReadyText, memoOnlyText, unsureText, partlyDoneText).
  */
 /** Rides on a tool-less action turn's context block (tagged: an echo of it is never heard); never saved. */
 export const ACTION_NOTE = "[Tools] No tool is available on this turn: nothing can be added, created, scheduled, sent, changed, deleted, saved, looked up or set as a reminder. Never say you did or will do any of that, and don't offer reminders or follow-ups; if the user asks for it, say in one short sentence, in the user's language, that you can't do it from here.";
 export const CANT_DO_TEXT = "Sorry, I can't do that from here: this assistant has no tool for it.";
 export const NOT_DONE_TEXT = "Sorry, I couldn't do that from here, so nothing was changed.";
+/** Some of Crow's own calls on this turn worked and some did not (spoken after the ok calls' own lines). */
+export const PARTLY_DONE_TEXT = "I did part of that, but the rest didn't go through.";
+/** Own-tool result codes that mean the call itself was malformed (own-tools.js validate()), not that a write failed. */
+const OWN_VALIDATION_CODES = new Set(["bad_args", "no_tz"]);
 export const NOT_READY_TEXT = "The assistant that can do that isn't ready yet. Try again in a moment.";
 /** A memory was saved, but the reply promised a reminder no tool set. */
 export const MEMO_ONLY_TEXT = "I saved a note, but I can't set reminders from here.";
@@ -144,7 +150,11 @@ const LEGACY_FORCING = Object.freeze({ named: true, required: true, engine: "leg
 const WEAKER = { named: 2, required: 1, none: 0 };
 // A step-down learned from a refused request is forgotten after this long (the server may have been replaced).
 const LEARNED_TTL_MS = 10 * 60 * 1000;
+/** How long a turn that offered (on intent) or used one of Crow's own tools keeps a vague follow-up on them (plan constant). */
+export const VOICE_MODE_WINDOW_MS = 10 * 60_000;
 const MEMORY_OFF = "Memory is turned off on this display. Tell the user you can't use saved memories here, then end your turn — do not call another tool.";
+/** Rides on the user message of a calendar-fallback turn (tagged: never heard, never saved). */
+const calendarFallbackNote = (names) => `[Tools] No calendar is installed here, so nothing can be added to a calendar. Offer the user a reminder at the time they asked for instead, by calling ${names.join(" or ")}. Never say it was added to a calendar.`;
 
 /**
  * Only a tool OFFERED on this turn may run. The model can name any tool, and a photo, a page or a
@@ -187,6 +197,9 @@ export function createVoiceTurnRunner(deps) {
   // Tool families (opts.familiesOnIntent): what the previous turn on each display used, and which
   // "no intent list" notes were already logged.
   const lastFamilies = new Map();
+  // deviceId → when its previous turn was offered one of Crow's own tools on intent (or used one): a follow-up
+  // ("move it to 3") within VOICE_MODE_WINDOW_MS may still need one, so a withheld own tool counts toward escalating it.
+  const lastOwn = new Map();
   // Displays whose previous turn was an action request (opts.actionWhen): the next turn is an action turn too.
   const lastAction = new Set();
   const famLogged = new Set();
@@ -408,6 +421,18 @@ export function createVoiceTurnRunner(deps) {
   }
 
   /**
+   * deps.voiceActions (optional; Crow voice's pending confirmations), every member optional:
+   * - fastPath({ db, device, surface, transcript, lang, tz, bot, executor }) → Promise<null | { say, verb, events? }>:
+   *   runs after STT and the TTS open, before opts.fastPaths. bot and executor are null when the bot cannot be
+   *   loaded (it is never ensured here). A non-null result is spoken and saved like a fast path. A throw is
+   *   logged and taken as null.
+   * - turnContext({ device }) → { text, pending } | string: SYNCHRONOUS (a returned Promise is logged and
+   *   ignored). The text joins the turn's context line on the user message only, never saved; write it as
+   *   "[Tag] …" lines so the echo gate recognises and strips a read-back. pending: true makes the turn an
+   *   action turn (the action guard holds the reply and replaces an unbacked claim). A throw is logged and ignored.
+   * - afterTurn({ device, calledTools }): called in finally on every outcome; calledTools lists every tool name
+   *   the model called, refused and gated calls included. A throw is logged.
+   *
    * opts (beyond the transport): maxToolRounds — tool-calling rounds before a forced, tool-free
    * final answer (default deps.maxToolRounds); firstAudioBudgetMs — wall-clock from the turn start
    * to the first ANSWER audio (the filler does not count), after which the answer is cut and the
@@ -461,8 +486,12 @@ export function createVoiceTurnRunner(deps) {
     let say = null;
     let history = null;
     let executor = null;
+    let executorBot = null;     // the bot the executor was made for
     let usedFamilies = null;
+    let ownOffered = false;   // an own tool was offered on intent this turn (arms lastOwn; an escalation offering every family does not)
     let actionAsked = false;
+    const calledTools = [];       // every tool name the model called this turn (deps.voiceActions.afterTurn)
+    const voiceActions = deps.voiceActions && typeof deps.voiceActions === "object" ? deps.voiceActions : null;
     /** Speak + caption a fixed line instead of a model call, and save the exchange (the plain transcript and the line). */
     const speakLine = async (line) => {
       sink.event({ type: "caption_delta", text: line });
@@ -523,29 +552,40 @@ export function createVoiceTurnRunner(deps) {
       if (!tts) { fail("no_tts_profile", false); return result; }
       say = makeSpeaker(tts, sink, signal, () => mark("tts_first_chunk_ms"), mute.signal);
 
-      // 2. Fast paths (no LLM)
-      if (typeof opts.fastPaths === "function") {
-        const fp = await opts.fastPaths(transcript);
-        if (fp) {
-          result.fastPath = true;
-          if (fp.tier === "t0" || fp.tier === "t1") timings.tier = fp.tier;
-          // The verb a no-model path acted on ("pause", "resume", "play"…): a fixed word, never the transcript.
-          // It is how a smoke tells "STT heard play" from a state disagreement (kiosk smoke 2026-10-06 F4).
-          if (typeof fp.verb === "string" && /^[a-z_]{1,24}$/.test(fp.verb)) timings.verb = fp.verb;
-          for (const ev of fp.events || []) sink.event(ev);
-          if (fp.say) { sink.event({ type: "caption_delta", text: fp.say }); await say(fp.say); }
-          say.end();
-          // A path with nothing to say (a transport verb) leaves no exchange behind: an empty
-          // assistant message would only confuse the next turn's chat template.
-          if (fp.say) convo.save(device.id, [...convo.get(device.id), { role: "user", content: transcript }, { role: "assistant", content: fp.say }]);
-          return result;
+      // 2. Fast paths (no LLM). deps.voiceActions.fastPath first (a pending confirmation answered by a yes or
+      // a no), then opts.fastPaths. The voice-actions path gets the bot and an executor; a bot that cannot be
+      // loaded is passed as null (it never stops the path), and nothing is ensured here.
+      const botId = typeof opts.botId === "string" && opts.botId ? opts.botId : (deps.voiceBotId || device.bound_bot_id);
+      let fp = null;
+      if (typeof voiceActions?.fastPath === "function") {
+        // Nothing here may stop "pause": a failure is logged and the path is skipped (null).
+        let vaBot = null;
+        try { vaBot = await loadBot(db, botId); } catch (err) { log(`[voice-turn] ${device.id} voice actions: bot not loaded (${err?.message || err})`); }
+        if (vaBot) {
+          try { executor = deps.createToolExecutor({ botDef: vaBot }); executorBot = vaBot; } catch (err) { executor = null; log(`[voice-turn] ${device.id} voice actions: no executor (${err?.message || err})`); }
         }
+        try { fp = await voiceActions.fastPath({ db, device, surface: timings.surface, transcript, lang: opts.lang, tz: opts.tz, bot: vaBot, executor }); } catch (err) { fp = null; log(`[voice-turn] ${device.id} voice actions fastPath failed (${err?.message || err})`); }
+      }
+      if (!fp && typeof opts.fastPaths === "function") fp = await opts.fastPaths(transcript);
+      if (fp) {
+        result.fastPath = true;
+        if (fp.tier === "t0" || fp.tier === "t1") timings.tier = fp.tier;
+        // The verb a no-model path acted on ("pause", "resume", "play"…): a fixed word, never the transcript.
+        // It is how a smoke tells "STT heard play" from a state disagreement (kiosk smoke 2026-10-06 F4).
+        if (typeof fp.verb === "string" && /^[a-z_]{1,24}$/.test(fp.verb)) timings.verb = fp.verb;
+        for (const ev of fp.events || []) sink.event(ev);
+        if (fp.say) { sink.event({ type: "caption_delta", text: fp.say }); await say(fp.say); }
+        say.end();
+        // A path with nothing to say (a transport verb) leaves no exchange behind: an empty
+        // assistant message would only confuse the next turn's chat template.
+        if (fp.say) convo.save(device.id, [...convo.get(device.id), { role: "user", content: transcript }, { role: "assistant", content: fp.say }]);
+        return result;
       }
 
       // 3. The voice bot drives the turn (ruling R11: no profile fallback): opts.botId (the kiosk's turn
       // check, the eval harness), else deps.voiceBotId (the Crow voice bot), else the device's bound bot.
-      // Loaded only after the fast paths, so a missing or disabled voice bot never stops "pause" or the clock.
-      const botId = typeof opts.botId === "string" && opts.botId ? opts.botId : (deps.voiceBotId || device.bound_bot_id);
+      // Required (and ensured) only after the fast paths, so a missing or disabled voice bot never stops "pause"
+      // or the clock. deps.voiceActions.fastPath may have read it already (cached), but never ensures or requires it.
       let bot = await loadBot(db, botId);
       if (!bot && botId === CROW_VOICE_BOT_ID && !voiceEnsured && typeof deps.ensureVoiceBot === "function") {
         voiceEnsured = true;
@@ -578,7 +618,30 @@ export function createVoiceTurnRunner(deps) {
       // needs it. Live test 2026-10-04: with the display tool on every turn the 4B answered plain
       // questions through it — two tool rounds, 7 s, and a card repeating the spoken answer.
       const offered = new Set(extra.filter((x) => typeof x.when !== "function" || x.when(transcript) === true).map((x) => x.definition.name));
-      const allTools = turnTools(bot, { memoryOn, extra, deny });
+      // Crow's own tools (PR 2): in-process routine tools (a calendar event, a reminder, a task), one tool family
+      // each. opts.ownTools (an array: tests, overrides) wins; else, for the voice bot only, deps.ownTools(...)
+      // → { tools, unavailable }. A turn with a must-run extra tool (the glasses camera, a must-run display tool)
+      // carries only what it carries today ([rev2 C2]); opts.noOwnTools forces the same. An own tool runs as
+      // execute(args, { transcript, executor, db, device, fallback? }): the device holds a strict-confirm question.
+      const mustOffered = extra.some((x) => offered.has(x.definition.name) && typeof x.must === "function" && x.must(transcript) === true);
+      const ownByName = new Map();
+      const ownUnavailable = new Set();
+      if (!mustOffered && opts.noOwnTools !== true) {
+        let src = null;
+        if (Array.isArray(opts.ownTools)) src = opts.ownTools;
+        else if (typeof deps.ownTools === "function" && isVoiceBotDef(bot)) {
+          try { src = await deps.ownTools({ db, bot, surface: timings.surface, lang: opts.lang, tz: opts.tz, now: now() }); }
+          catch (err) { log(`[voice-turn] ${device.id} own tools not loaded (${err?.message || err})`); }
+        }
+        for (const id of Array.isArray(src?.unavailable) ? src.unavailable : []) if (Object.hasOwn(ROUTINE_OBJECTS, id)) ownUnavailable.add(id);
+        const policyDeny = Array.isArray(bot.permission_policy?.deny) ? bot.permission_policy.deny : [];
+        for (const o of Array.isArray(src) ? src : Array.isArray(src?.tools) ? src.tools : []) {
+          const n = o?.definition?.name;
+          if (typeof n !== "string" || !n || typeof o.execute !== "function" || deny.has(n) || policyDeny.includes(n) || extraByName.has(n) || ownByName.has(n)) continue;
+          ownByName.set(n, { ...o, family: typeof o.family === "string" && /^own:[a-z_]{1,24}$/.test(o.family) ? o.family : "own:tools" });
+        }
+      }
+      const allTools = turnTools(bot, { memoryOn, extra, deny }).filter((t) => !ownByName.has(t.name)).concat([...ownByName.values()].map((o) => o.definition));
       // Memories on: the memory tool is offered only when the question asks to remember or recall
       // (live re-test 2026-10-04: "what's today's date" went to memory twice — 11.5 s).
       const memoryOffered = memoryOn && (typeof opts.memoryWhen !== "function" || opts.memoryWhen(transcript) === true);
@@ -586,8 +649,47 @@ export function createVoiceTurnRunner(deps) {
       // Tool families on intent: the quick model is offered a family only when the plain transcript
       // asks for it, or the previous turn used it (one follow-up). Extra (display) tools and memory
       // keep their own gates above. A plain question therefore goes out with no tools at all.
-      const fam = opts.familiesOnIntent === true && deps.toolFamilies ? deps.toolFamilies : null;
-      const prevFam = lastFamilies.get(device.id) || NO_FAMILIES;
+      // Own tools join as their own families (a per-turn wrapper; deps.toolFamilies is never changed): offered on
+      // their intent lists, withheld (and so escalated on an action request) otherwise. Families off: every round.
+      const famBase = opts.familiesOnIntent === true && deps.toolFamilies ? deps.toolFamilies : null;
+      const ownLists = new Map();
+      for (const o of ownByName.values()) ownLists.set(o.family, [...(ownLists.get(o.family) || []), ...normalizeIntentLists(o.intent)]);
+      const fam = famBase && ownByName.size ? {
+        ...famBase,
+        familyOf: (n) => ownByName.get(String(n ?? ""))?.family ?? famBase.familyOf(n),
+        hasList: (f) => ownLists.has(f) || famBase.hasList(f),
+        wants: (f, t) => (ownLists.has(f) ? listMatches(phraseWords(t), ownLists.get(f)) : famBase.wants(f, t)),
+      } : famBase;
+      actionAsked = typeof opts.actionWhen === "function" && opts.actionWhen(transcript) === true;
+      // Rule 6 ([rev2 I11], rev 2.1): an action request that names only routine objects with no backend. A calendar
+      // with a Crow reminder tool at hand is a fallback turn (the reminder is offered, no escalation); anything else
+      // is the can't-do line, below.
+      let noBackend = null;
+      let calendarFallback = false;
+      // Only when no other family is wanted for this request ("text her the meeting moved to three" is a message,
+      // not a calendar request): the turn's family classifier, on the non-own families of this turn's tools.
+      const classifier = famBase || deps.toolFamilies || null;
+      const otherWanted = () => !!classifier && baseTools.some((t) => {
+        if (ownByName.has(t.name) || extraByName.has(t.name) || deps.isMemoryTool(t.name)) return false;
+        const id = classifier.familyOf(t.name);
+        return !!id && classifier.wants(id, transcript);
+      });
+      if (actionAsked && ownUnavailable.size && !otherWanted()) {
+        // The routine objects the request names (routine-objects.js; kept in step with the kiosk's action intent).
+        const named = namesRoutineObjects(transcript);
+        if (named.length && named.every((id) => ownUnavailable.has(id))) {
+          if (named.includes("calendar") && [...ownByName.values()].some((o) => o.family === "own:reminders")) calendarFallback = true;
+          else noBackend = named[0];
+        }
+      }
+      // Offered on intent: the classifier wants an own family for this transcript (or the calendar fallback offers one).
+      // The own families' intent lists (the same test fam.wants runs for an own family, families on or off).
+      const ownIntent = [...ownLists.keys()].some((f) => listMatches(phraseWords(transcript), ownLists.get(f)));
+      if (calendarFallback || (fam && ownIntent)) ownOffered = true;
+      const fallbackNames = calendarFallback ? [...ownByName.values()].filter((o) => o.family === "own:reminders").map((o) => o.definition.name) : [];
+      const prevFam = calendarFallback
+        ? new Set([...(lastFamilies.get(device.id) || NO_FAMILIES), "own:reminders"])
+        : lastFamilies.get(device.id) || NO_FAMILIES;
       // The classification is shared with the Bot Builder's "By voice on displays" line (tool-families.js classifyTools).
       const cls = classifyTools({ baseTools, fam, transcript, prevFam, isExtraTool: (n) => extraByName.has(n), isMemoryTool: (n) => deps.isMemoryTool(n) });
       const { famWanted, famOf, quickTools, famIds, unlisted } = cls;
@@ -603,7 +705,9 @@ export function createVoiceTurnRunner(deps) {
       // A must-run tool (kiosk: crow_wm on "show me …"): see the opts doc above.
       const mustX = extra.find((x) => offered.has(x.definition.name) && typeof x.must === "function" && x.must(transcript) === true) || null;
       const mustName = mustX?.definition.name;
-      executor = deps.createToolExecutor({ botDef: bot });
+      // The voice-actions path may have made one for this bot already (a cached bot is the same object).
+      if (executor && executorBot !== bot) { try { await executor.close(); } catch {} executor = null; }
+      if (!executor) executor = deps.createToolExecutor({ botDef: bot });
       // No deviceId: generateSystemPrompt stamps it as a "glasses device_id" for
       // crow_glasses_* tools, and no kiosk tool takes a device_id.
       const system = await deps.generateSystemPrompt({ botDef: bot });
@@ -613,7 +717,21 @@ export function createVoiceTurnRunner(deps) {
       // (live 2026-10-05): echoGuard lists every injected line the echo gate removes from what is
       // spoken, captioned, saved and put on a card. opts.turnContext may be a function of the plain
       // transcript: the context STRING is computed first, then wrapped and guarded.
-      const ctxLine = typeof opts.turnContext === "function" ? String(opts.turnContext(transcript) || "") : opts.turnContext;
+      const optsCtx = typeof opts.turnContext === "function" ? String(opts.turnContext(transcript) || "") : opts.turnContext;
+      // deps.voiceActions.turnContext({ device }) → { text, pending } (a bare string is { text }): its text joins the
+      // context line (on the user message, echo-guarded, never saved); pending makes this an action turn.
+      let vaCtx = null;
+      if (typeof voiceActions?.turnContext === "function") {
+        let v = null;
+        try { v = voiceActions.turnContext({ device }); } catch (err) { log(`[voice-turn] ${device.id} voice actions turnContext failed (${err?.message || err})`); }
+        if (v && typeof v.then === "function") {
+          v.catch?.(() => {});
+          log(`[voice-turn] ${device.id} voice actions turnContext returned a Promise (it must be synchronous); ignored`);
+          v = null;
+        }
+        vaCtx = typeof v === "string" ? { text: v, pending: false } : v && typeof v === "object" ? { text: String(v.text || ""), pending: v.pending === true } : null;
+      }
+      let ctxLine = [optsCtx, vaCtx?.text].filter(Boolean).join("\n") || optsCtx;
       const userMsg = { role: "user", content: withTurnContext(ctxLine, transcript) };
       const echoGuard = [ctxLine ? TURN_CONTEXT_NOTE : null, ctxLine, mustX?.mustNote];
       const messages = [
@@ -627,9 +745,10 @@ export function createVoiceTurnRunner(deps) {
       // and send them to the (possibly cold) 35B.
       const isExtraCall = (m) => {
         if (routeNeutral.has(m)) return true;
-        if (m.role === "tool") return extraByName.has(m.tool_name);
+        // Own-tool calls are route-neutral too ([rev2 I2]): the next plain question stays on the quick model.
+        if (m.role === "tool") return extraByName.has(m.tool_name) || ownByName.has(m.tool_name);
         if (m.role !== "assistant" || !m.tool_calls) return false;
-        try { const tc = JSON.parse(m.tool_calls); return Array.isArray(tc) && tc.length > 0 && tc.every((c) => extraByName.has(c.name)); } catch { return false; }
+        try { const tc = JSON.parse(m.tool_calls); return Array.isArray(tc) && tc.length > 0 && tc.every((c) => extraByName.has(c.name) || ownByName.has(c.name)); } catch { return false; }
       };
       // The router sees the PLAIN transcript, never the turnContext prefix: "[Display] Open windows: …"
       // matched TOOL_INTENT_RE ("open") and escalated every kiosk turn to the 35B (smoke 2026-10-04).
@@ -640,8 +759,7 @@ export function createVoiceTurnRunner(deps) {
       // turn can never start a model and its result does not depend on which model is resident.
       // Action turns (see ACTION_NOTE above). The add-on wrapper (crow_tools) is never in famIds: when the quick
       // model is not offered it, the assistant still has tools, and the router must know.
-      actionAsked = typeof opts.actionWhen === "function" && opts.actionWhen(transcript) === true;
-      const actionTurn = actionAsked || (typeof opts.actionWhen === "function" && lastAction.has(device.id)
+      const actionTurn = actionAsked || vaCtx?.pending === true || (typeof opts.actionWhen === "function" && lastAction.has(device.id)
         && typeof opts.actionFollowWhen === "function" && opts.actionFollowWhen(transcript) === true);
       // A display tool offered because a window is open (or music plays) is not what this request asks for:
       // only one whose holdText/must reads the transcript as a display request is.
@@ -653,14 +771,37 @@ export function createVoiceTurnRunner(deps) {
       const wrapperWithheld = cls.wrapperWithheld;
       // Escalate an action request when the quick model got no family tool but the assistant has some — and no
       // display tool is on offer (a display command such as "add two minutes" stays on the quick model).
-      const actionWithheld = cls.actionWithheld(actionAsked, displayBacks);
+      // quickBacked ([rev2 I11]): an own tool or the hand-off tool is on offer to the quick model, which can act on it.
+      const quickBacked = quickTools.some((t) => ownByName.has(t.name) || t.name === "crow_handoff");
+      // An own tool counts only when the request names a routine object (calendar, reminder, task…) or follows a
+      // turn that was offered or used one; otherwise "email my landlord" would escalate on the reminder tool alone.
+      const ownAt = lastOwn.get(device.id);
+      const ownRecent = ownAt != null && now() - ownAt <= VOICE_MODE_WINDOW_MS;
+      const ownCounts = namesRoutineObjects(transcript).length > 0 || ownRecent || [...prevFam].some((f) => String(f).startsWith("own:"));
+      const actionWithheld = cls.actionWithheld(actionAsked, displayBacks, (t) => ownCounts || !ownByName.has(t.name)) && !quickBacked;
       if (actionAsked) timings.action_intent = true;
+      // A routine object with no backend: no model call and no escalation (a calendar falls back to a reminder instead).
+      if (noBackend) {
+        timings.action_no_backend = true;
+        await speakLine(String(opts.cantDoText || CANT_DO_TEXT));
+        return result;
+      }
+      if (calendarFallback) {
+        // Per-turn, on the user message (the system message stays byte-stable); dropped before saving.
+        timings.calendar_fallback = true;
+        const note = calendarFallbackNote(fallbackNames);
+        ctxLine = ctxLine ? `${ctxLine}\n${note}` : note;
+        userMsg.content = withTurnContext(ctxLine, transcript);
+        echoGuard.push(note, TURN_CONTEXT_NOTE);
+      }
       // A voice bot with escalation off (Bot Builder) is taken as opts.noEscalate.
       const noEscalate = opts.noEscalate === true || normalizeVoiceSettings(bot).escalation === "off";
-      const decision = mustX?.mustRoute === "fast" || noEscalate
-        ? { route: "fast", reason: noEscalate ? "no-escalate" : "must-fast", key: bot.fast_voice_model || deps.fastKey }
-        : deps.chooseVoiceRoute(routeView, { hasTools: quickTools.length > 0 || unlisted.length > 0 || wrapperWithheld, actionIntent: actionWithheld });
-      let chat = await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
+      const decision = mustX?.mustRoute === "fast" || noEscalate || calendarFallback
+        ? { route: "fast", reason: noEscalate ? "no-escalate" : calendarFallback ? "calendar-fallback" : "must-fast", key: bot.fast_voice_model || deps.fastKey }
+        : deps.chooseVoiceRoute(routeView, { hasTools: quickTools.length > 0 || unlisted.length > 0 || wrapperWithheld || actionWithheld, actionIntent: actionWithheld });
+      // A quick-model turn that will end on the no-tool can't-do below makes no adapter at all (no model is touched).
+      const noToolAhead = decision.route !== "escalate" && actionAsked && !displayBacks && !quickTools.some((t) => !extraByName.has(t.name));
+      let chat = noToolAhead ? null : await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
       result.route = "fast";
       if (decision.route === "escalate") {
         // The filler runs alongside the (real-timer) readiness wait. A handler is attached NOW
@@ -707,6 +848,15 @@ export function createVoiceTurnRunner(deps) {
         await speakLine(String(opts.cantDoText || CANT_DO_TEXT));
         return result;
       }
+      // An own tool on offer takes a date-time with the zone's UTC offset: the zone and its offset now ride on the
+      // user message (never the system message, which stays byte-stable), so the quick model can write it.
+      const zoneLine = tools.some((t) => ownByName.has(t.name)) ? zoneContext(now(), opts.tz) : null;
+      if (zoneLine) {
+        ctxLine = ctxLine ? `${ctxLine}\n${zoneLine}` : zoneLine;
+        userMsg.content = withTurnContext(ctxLine, transcript);
+        echoGuard.push(zoneLine, TURN_CONTEXT_NOTE);
+      }
+      if (!chat) chat = await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
       if (unlisted.length) {
         const once = `${bot.bot_id}|${unlisted.join(",")}`;
         if (!famLogged.has(once)) { famLogged.add(once); log(`[voice-turn] ${device.id} bot ${bot.bot_id}: tool families with no voice intent list are offered only on escalated turns: ${unlisted.join(", ")}`); }
@@ -761,6 +911,12 @@ export function createVoiceTurnRunner(deps) {
         selectedAddon: (n) => !!scope && scope.selectedToolNames.has(n) && deps.isConnectedAddonTool(n),
       };
       const policyGate = (tc) => {
+        // Crow's own tools run in-process and are offered by name: none of the remote-tool checks below (spoken
+        // yes, proxy args) apply; they confirm through the voice bot's own settings (Task 2.5).
+        if (ownByName.has(tc.name)) {
+          return wasOffered(tc, offeredNames) ? null
+            : refuse("not_offered", `"${shortName(tc.name)}" is not available here. Tell the user you can't do that here, then end your turn — do not call another tool.`, true);
+        }
         const eff = deps.effectiveToolName(tc);
         // The executor resolves a bare name (`search_memories`) to `crow_<name>`
         // (tool-executor resolveToolCategory), so every check sees both spellings.
@@ -804,6 +960,8 @@ export function createVoiceTurnRunner(deps) {
           || (voiceKind && (needsSpokenYes(n) || VOICE_CONFIRM_TOOLS.includes(n)
             || (n === VOICE_NOTIFICATION_TOOL && changesNotifications(tc)))));
         if (!confirmName) return null;
+        // A question will be asked: every field it can name (ids, the recipient) must agree with what runs too.
+        if (voiceKind && via && proxyArgsConflict(tc, { asking: true })) return refuse("refused_policy", VOICE_ARGS_CONFLICT);
         // crow_tools' flat fallback runs locally but not on its remote route: a yes could confirm values that never run.
         if (voiceKind && reliesOnFlatFallback(tc)) return refuse("refused_policy", VOICE_ARGS_FLAT);
         if (confirm.check({ deviceId: device.id, eff: confirmName, args: tc.arguments, transcript }) === "allow") return null;
@@ -861,12 +1019,48 @@ export function createVoiceTurnRunner(deps) {
       let endedFinal = false;
       timings.tools_offered = tools.length;
       // The action guard (see ACTION_NOTE above). A must-run or hold-to-end display turn has its own truth rules.
-      const actionGuard = actionTurn && !mustX && !holdEnd;
+      // Own tools are offered on turns the display's actionWhen does not read as actions ("put buy milk on my
+      // tasks", "move it to 3", families off), and a model streams its words BEFORE the round's calls run. So the
+      // guard is also on from the first word when the turn targets an own tool on offer: an own family's intent,
+      // a named routine object, or a follow-up inside the own-tool window (families on or off). A turn that is
+      // only offered the own tools ("what's the capital of Peru") is not held. It also turns on mid-turn when an
+      // own call fails or is refused (armGuard below); then only what the model says in LATER rounds is held.
+      // Once any own call has failed (and was not cleared: see ownFails below), the guard keeps holding even after
+      // another call succeeded, and the turn ends on what really happened (ownEndLine), also when the first-audio
+      // budget has run out: released held text that claims nothing, each ok own call's success line, the failure
+      // line (the failed tool's own say, else PARTLY_DONE_TEXT when something was done, else NOT_DONE_TEXT), and
+      // last a confirmation question still waiting for a yes. A held claim is never heard.
+      let actionGuard = actionTurn && !mustX && !holdEnd;
+      const armGuard = () => { if (!actionGuard && !mustX && !holdEnd) { actionGuard = true; timings.action_guard = true; } };
+      const ownOnOffer = tools.some((t) => ownByName.has(t.name));
+      if (ownOnOffer && (ownIntent || namesRoutineObjects(transcript).length > 0 || ownRecent)) armGuard();
+      const ownDone = new Map();   // name|canonical args → the result of an own call that returned ok (never run twice)
       let backed = false;          // a tool really did something this turn
       let memoryBacked = false;    // only a memory call did (a saved note is not a reminder)
       let unsureBacked = false;    // an ok call to a tool that is neither a known read nor a known write
       let guardHeld = "";
+      // Own calls that were not ok, by name|canonical args → { name, say, validation, round }. An ok own call clears
+      // the same call's failure. A validation failure (bad_args, no_tz) is also cleared by a later ok call of the
+      // SAME tool (the corrected retry) or by an own call that really RAN ok in a LATER round (the step-up picking
+      // another tool), never by another tool's ok call in the same round, nor by a replay from the turn's cache. A backend error or a refusal on other args stays.
+      const ownFails = new Map();
+      const ownOkSays = new Map(); // name|canonical args → the success line of an ok own call that changed something
+      let ownAsk = "";             // the last own confirmation question that really ran (needs_confirm): the live pending entry
+      let ownEndLead = "";         // a final display line that the own-tool ending speaks first
+      const holding = () => actionGuard && (!backed || ownFails.size > 0 || !!ownAsk);   // a pending question keeps the hold: it ends the turn
+      // The own-tool ending (an own call failed): held text that claims nothing, the ok own calls' lines, the failure
+      // line (the failed tool's own say, else partly done when something was done, else not done), and LAST the
+      // confirmation question, if one is waiting for a yes.
+      const ownEndLine = (released = "") => {
+        let failLine = null;
+        for (const f of ownFails.values()) if (!failLine && f.say) failLine = f.say;
+        if (ownFails.size > 0) failLine ||= String(backed || memoryBacked ? (opts.partlyDoneText || PARTLY_DONE_TEXT)
+          : unsureBacked ? (opts.unsureText || UNSURE_TEXT) : (opts.notDoneText || NOT_DONE_TEXT));
+        return [...new Set([released, ownEndLead, ...ownOkSays.values(), failLine, ownAsk].filter(Boolean))].join(" ");
+      };
       let actionSent = false;      // a change was sent to a remote tool (it may still complete after a budget cut)
+      let steppedUp = false;       // the own-tool step-up to the larger model (at most once per turn)
+      const toolEscalationOn = typeof deps.toolEscalationEnabled !== "function" || deps.toolEscalationEnabled() === true;
       const heldMsgs = new Set();  // assistant messages whose text was held (unheard unless released)
       if (actionGuard) {
         timings.action_guard = true;
@@ -936,7 +1130,7 @@ export function createVoiceTurnRunner(deps) {
                 mark("llm_first_token_ms");
                 content += ev.text;
                 const spoken = echo.feed(toolText.feed(think.feed(ev.text)));
-                if (spoken && actionGuard && !backed) { guardHeld += spoken; roundHeld += spoken.trim().length; }
+                if (spoken && holding()) { guardHeld += spoken; roundHeld += spoken.trim().length; }
                 else if (spoken && defer) deferred += spoken;
                 else if (spoken && holdEnd) heldRound += spoken;
                 else if (spoken && !hold) {
@@ -974,7 +1168,7 @@ export function createVoiceTurnRunner(deps) {
         const held = toolText.flush();
         if (toolText.cut) { timings.tool_text = true; content = stripToolSyntax(content); }
         const tail = (held ? echo.feed(held) : "") + echo.flush();
-        if (tail && actionGuard && !backed) { guardHeld += tail; roundHeld += tail.trim().length; }
+        if (tail && holding()) { guardHeld += tail; roundHeld += tail.trim().length; }
         else if (tail && !hold && !aborted() && !budgetHit) {
           if (tail.trim()) { roundSpoken += tail.trim().length; spokenChars += tail.trim().length; }
           sink.event({ type: "caption_delta", text: tail });
@@ -1021,6 +1215,7 @@ export function createVoiceTurnRunner(deps) {
           continue;
         }
         toolRounds++;
+        for (const c of calls) calledTools.push(String(c.name));
         const roundSig = [...new Set(calls.map((c) => String(c.name)))].sort().join("+");
         timings.tool_rounds = toolRounds;
         // Each call's OUTCOME — name:code, never arguments or result text — in the log and in
@@ -1039,13 +1234,57 @@ export function createVoiceTurnRunner(deps) {
         // display (deny list / memory off). Confirm and policy refusals still count as tool context:
         // the "yes" that follows a confirmation must keep its escalation (review I3).
         let neutralCalls = 0;
+        let ownBadArgs = false;
         for (const tc of calls) {
           if (tc === calls.at(-1)) finalRes = null;
           const gate = policyGate(tc);
           if (gate) {
+            if (ownByName.has(tc.name)) { armGuard(); ownFails.set(`${tc.name}|${canonicalArgsHash(tc.arguments || {})}`, { name: tc.name, say: null, validation: false, round: rounds }); }   // an own call refused: the model's next words may still claim it
             if (gate.neutral) neutralCalls++;
             outcome.set(tc, gate.code);
             local.push({ id: tc.id, name: tc.name, result: gate.message, neutral: gate.neutral });
+            continue;
+          }
+          // Crow's own tool: run in-process, before the remote list. Route-neutral, like a display tool.
+          const own = ownByName.get(tc.name);
+          if (own) {
+            neutralCalls++;
+            // The same call (name + canonical args) that already returned ok this turn — a parallel duplicate, or a
+            // re-run after a step-up — gets the earlier result back and is never executed again (no second row).
+            const dupKey = `${tc.name}|${canonicalArgsHash(tc.arguments || {})}`;
+            let out = ownDone.get(dupKey);
+            const ran = out === undefined;   // a cached result never re-asks: its question is no longer the pending one
+            if (ran) {
+              try { out = await own.execute(tc.arguments || {}, { transcript, executor, db, device, ...(calendarFallback ? { fallback: "calendar" } : {}) }); }
+              catch (err) { out = JSON.stringify({ ok: false, code: "error", message: String(err?.message || err) }); }
+              if (typeof out !== "string") out = JSON.stringify({ ok: false, code: "error" });
+            }
+            let res = null;
+            try { res = JSON.parse(out); } catch {}
+            const ok = res?.ok === true;
+            const code = outcomeCode(res?.code, ok ? "ok" : "error");
+            outcome.set(tc, code);
+            if (ok) ownDone.set(dupKey, out);
+            const resSay = typeof res?.say === "string" && res.say.trim() ? res.say.trim() : null;
+            if (ok) {
+              ownFails.delete(dupKey);
+              for (const [k, f] of ownFails) if (f.validation && (f.name === tc.name || (ran && f.round < rounds))) ownFails.delete(k);
+            } else ownFails.set(dupKey, { name: tc.name, say: resSay, validation: OWN_VALIDATION_CODES.has(code), round: rounds });
+            if (ok && res.effect !== false && resSay) ownOkSays.set(dupKey, resSay);
+            if (ran && ok && code === "needs_confirm" && resSay) ownAsk = resSay;
+            // A failed own call (no_tz, bad_args, backend_error…), or a question with no line to speak: from here on
+            // the model's words are held and checked (#499). Text streamed in THIS round was already held when the
+            // guard was on from the first word (a turn aimed at an own tool, above); otherwise it may have been
+            // heard, and only what the model says in later rounds is checked against what the tools really did.
+            if (!ok || code === "needs_confirm") armGuard();
+            if (ok && res.effect !== false) { backed = true; actionSent = true; }
+            if (code === "bad_args") ownBadArgs = true;
+            if (usedFamilies) usedFamilies.add(own.family);
+            ownOffered = true;   // used (families on or off): arms the follow-up window
+            // A cached question is not the pending one any more: a final question line is always the live one (ownAsk).
+            finalRes = tc === calls.at(-1) && res && res.final === true && typeof res.say === "string" && res.say.trim()
+              ? { name: tc.name, say: (code === "needs_confirm" && ownAsk) || res.say.trim(), code, effect: ok && res.effect !== false } : null;
+            local.push({ id: tc.id, name: tc.name, result: out, neutral: true });
             continue;
           }
           const x = extraByName.get(tc.name);
@@ -1135,6 +1374,12 @@ export function createVoiceTurnRunner(deps) {
           // The line is short and already known, so it is spoken even when the first-audio budget has run out.
           timings.final = `${logName(finalRes.name)}:${finalRes.code}`;
           if (budgetTimer) { (deps.clearTimeout || clearTimeout)(budgetTimer); budgetTimer = null; }
+          if (actionGuard && (ownFails.size > 0 || (ownAsk && finalRes.say !== ownAsk))) {
+            // An own call failed this turn, or a question is waiting that is not this line: not the last call's line
+            // alone, the own-tool ending after the loop (it ends on the question).
+            if (!ownByName.has(finalRes.name)) ownEndLead = finalRes.say;
+            break;
+          }
           const spokeSentence = roundSpoken > 0 && SENTENCE_END.test(`${roundText.trim()} `);
           if (!(spokeSentence && finalRes.effect)) {
             await chunker.flush();
@@ -1146,10 +1391,34 @@ export function createVoiceTurnRunner(deps) {
           endedFinal = true;
           break;
         }
+        // The step-up (the larger model as the middle step): an own tool said its arguments were bad. The next
+        // round re-runs the same messages on the larger model, once per turn, through the router's escalation path.
+        let stepped = false;
+        if (ownBadArgs && !steppedUp && !result.escalated && !result.degraded && !noEscalate && !calendarFallback && toolEscalationOn) {
+          steppedUp = true;
+          let fillerErr = null;
+          const filler = say.filler().catch((err) => { fillerErr = err; });
+          const ready = await readyEscalation(deps.escalateKey ?? decision.key, db, llmSignal);
+          await filler;
+          if (fillerErr && !aborted() && !mute.signal.aborted) {
+            log(`[voice-turn] ${device.id} filler TTS failed: ${fillerErr.message}`);
+            timings.filler_error = String(fillerErr.message || fillerErr);
+          }
+          if (aborted()) { result.aborted = true; break; }
+          if (ready.adapter) {
+            chat = ready.adapter;
+            result.route = "escalate";
+            result.escalated = true;
+            timings.step_up = "own_tool";
+            tools = baseTools;
+            if (fam) famAll = true;
+            stepped = true;
+          } else timings.step_up_degraded = ready.reason;
+        }
         // Stuck: the same tool(s) twice in a row with no user-visible progress in either round.
         const progress = roundSpoken > 0 || roundDisplay || roundHeld > 0;
-        if (!progress && roundSig === lastStuckSig) cut = "tool_repeat";
-        lastStuckSig = progress ? null : roundSig;
+        if (!progress && !stepped && roundSig === lastStuckSig) cut = "tool_repeat";
+        lastStuckSig = progress || stepped ? null : roundSig;
         if (!cut && toolRounds >= maxRounds) cut = "tool_rounds";
         if (cut) {
           // A must-run tool that failed again (or never ran before the cap): no forced answer round —
@@ -1163,6 +1432,12 @@ export function createVoiceTurnRunner(deps) {
       for (const r of restores.reverse()) r.msg.content = r.content;
       if (aborted()) {
         result.aborted = true;
+      } else if (budgetHit && !endedFinal && ((actionGuard && ownFails.size > 0) || ownAsk)) {
+        // The own outcome is known (a failure, or a question waiting for a yes): the server's own ending, spoken past
+        // the budget (say.force), never "try again". A pending question is always the last thing heard.
+        if (ownFails.size > 0) timings.own_failed = true;
+        await speakFallback("budget", spokenChars > 0, ownEndLine());
+        return result;
       } else if (budgetHit && !endedFinal) {
         await speakFallback("budget", spokenChars > 0, actionSent ? String(opts.unsureText || UNSURE_TEXT) : undefined);
         return result;
@@ -1182,7 +1457,19 @@ export function createVoiceTurnRunner(deps) {
               else messages.splice(i, 1);
             }
           };
-          if (claim) {
+          if (ownFails.size > 0 || ownAsk) {
+            // An own call failed, or a question waits for a yes (see the action guard above): held text that claims
+            // nothing, the ok own calls' lines, the failure line (if any), then the question. Saved = heard.
+            const claimed = !!said && claimsAction(said);
+            if (claimed) {
+              timings.claim_blocked = true;
+              log(`[voice-turn] ${device.id} bot ${bot.bot_id}: a reply claiming an action an own tool failed was replaced`);
+            }
+            if (ownFails.size > 0) timings.own_failed = true;
+            line = ownEndLine(said && !claimed ? said : "");
+            dropHeld((m) => !heldMsgs.has(m));
+            messages.push({ role: "assistant", content: line });
+          } else if (claim) {
             // After an ok call to a tool of unknown effect the truth is "not sure", never "nothing was changed".
             line = String(unsureBacked ? (opts.unsureText || UNSURE_TEXT)
               : memoryBacked && claimsReminder(said) ? (opts.memoOnlyText || MEMO_ONLY_TEXT)
@@ -1214,7 +1501,9 @@ export function createVoiceTurnRunner(deps) {
         }
         await chunker.flush();
         if (aborted()) result.aborted = true;
-        // The budget can fire while the last chunk is still synthesizing (the stream already ended).
+        // The budget can fire while the last chunk is still synthesizing (the stream already ended). A known own
+        // outcome (a failure, or a question waiting for a yes) is re-spoken past the budget, so the question stays last.
+        else if (budgetHit && !endedFinal && !say.answered() && ((actionGuard && ownFails.size > 0) || ownAsk)) { await speakFallback("budget", spokenChars > 0, ownEndLine()); return result; }
         else if (budgetHit && !endedFinal && !say.answered()) { await speakFallback("budget", spokenChars > 0, actionSent ? String(opts.unsureText || UNSURE_TEXT) : undefined); return result; }
         else if (overflow) { await speakFallback("context_full", spokenChars > 0); return result; }
         else if (!mustDone && !endedFinal) {
@@ -1248,9 +1537,15 @@ export function createVoiceTurnRunner(deps) {
       if (typeof opts.actionWhen === "function" && device?.id && result.transcript) {
         if (actionAsked) lastAction.add(device.id); else lastAction.delete(device.id);
       }
+      if (device?.id && result.transcript) {
+        if (ownOffered || [...(usedFamilies || [])].some((f) => String(f).startsWith("own:"))) lastOwn.set(device.id, now()); else lastOwn.delete(device.id);
+      }
       timings.total_ms = now() - t0;
       if (say) timings.spoken_chars = say.chars();
       if (executor) { try { await executor.close(); } catch {} }
+      if (typeof voiceActions?.afterTurn === "function" && device?.id) {
+        try { await voiceActions.afterTurn({ device, calledTools: calledTools.slice() }); } catch (err) { log(`[voice-turn] ${device.id} voice actions afterTurn failed (${err?.message || err})`); }
+      }
     }
   }
 
@@ -1293,9 +1588,15 @@ export async function defaultVoiceDeps() {
   const { TOOL_MANIFESTS } = await import("../tool-manifests.js");
   const { createToolForcing } = await import("./tool-forcing.js");
   const { createToolFamilies } = await import("./tool-families.js");
+  const { createPendingStore, chainVoiceActions } = await import("./pending.js");
+  const { createOwnTools } = await import("./own-tools.js");
   const ext = await import("../../../scripts/pi-bots/ext_registry.mjs");
   const proxy = await import("../proxy.js");
   const memoryTools = new Set(Object.keys(TOOL_MANIFESTS.memory?.tools || {}));
+  // One pending store and one set of Crow's own tools per runner. The own tools reach the voice bot only
+  // (turn.js asks deps.ownTools for it alone); their Workspace and Google calls go through the turn's executor.
+  const pending = createPendingStore();
+  const ownTools = createOwnTools({ pending, log: (m) => console.warn(m), connected: () => tx.connectedAddonToolNames() });
   const byId = (list, id) => list.find((p) => p.id === id) || null;
   return {
     now: () => Date.now(),
@@ -1347,6 +1648,9 @@ export async function defaultVoiceDeps() {
     isExternalSendTool: tx.isExternalSendTool,
     isConnectedAddonTool: tx.isConnectedAddonTool,
     connectedAddonTools: () => tx.connectedAddonToolNames(),
+    ownTools: ownTools.forTurn,
+    // A chain: Crow's own tools now; the hand-off joins after them (PR 3).
+    voiceActions: chainVoiceActions([ownTools]),
     botVoiceScope: tx.botVoiceScope,
     generateSystemPrompt: sp.generateSystemPrompt,
     isMemoryTool: (n) => n === "crow_memory" || memoryTools.has(n),

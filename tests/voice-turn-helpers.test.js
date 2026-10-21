@@ -133,11 +133,11 @@ test("review I2/M8/M9: leading whitespace never uses up the first-clause split; 
 });
 
 test("a negation in the first words is never a yes, and always a no (claro que no, of course not, yes no)", () => {
-  for (const t of ["claro que no", "Claro que no, no lo borres", "of course not", "yes, no wait", "Yes no", "sí, pero no", "dale, nunca", "ok don't", "yeah, dont", "claro, tampoco", "yes never mind", "of course not!"]) {
+  for (const t of ["claro que no", "Claro que no, no lo borres", "of course not", "yes, no wait", "Yes no", "sí, pero no", "dale, nunca", "ok don't", "yeah, dont", "claro, tampoco", "yes never mind", "of course not!", "sure, don't", "sounds good, no wait"]) {
     assert.equal(H.isAffirmative(t), false, `${t}: not a yes`);
     assert.equal(H.isNegative(t), true, `${t}: a no`);
   }
-  for (const t of ["sí", "Sí.", "claro", "dale", "yes please", "yes do it", "vale", "de acuerdo", "ok"]) {
+  for (const t of ["sí", "Sí.", "claro", "dale", "yes please", "yes do it", "vale", "de acuerdo", "ok", "sure", "Sure.", "please do", "sounds good", "go ahead", "do it"]) {
     assert.equal(H.isAffirmative(t), true, `${t}: a yes`);
     assert.equal(H.isNegative(t), false, `${t}: not a no`);
   }
@@ -236,4 +236,93 @@ test("security 2: one proxy matcher — tool-executor uses the shared one", asyn
   assert.doesNotMatch(helpers, /crow_\(memory\|projects/, "nor in turn-helpers");
   const shared = await import("../servers/gateway/ai/proxy-args.js");
   assert.ok(shared.CATEGORY_PROXY_RE.test("crow_memory") && !shared.CATEGORY_PROXY_RE.test("crow_tools"));
+});
+
+// ── Task 2.7: the question names the item it changes and who a message goes to ──
+
+test("the question falls back to an *_id / *Id / idX field, names a send's recipient, and never a body", () => {
+  const d = H.describeDestructiveAction;
+  const T = { via: "crow_tools" };
+  assert.equal(d({ name: "trello_delete_card", arguments: { action: "trello_delete_card", params: { card_id: "c9" } } }, T), "trello delete card c9");
+  assert.equal(d({ name: "trello_delete_card", arguments: { action: "trello_delete_card", params: { cardId: "c8" } } }, T), "trello delete card c8");
+  assert.equal(d({ name: "trello_delete_card", arguments: { action: "trello_delete_card", params: { idCard: 5 } } }, T), "trello delete card 5");
+  assert.equal(d({ name: "trello_delete_card", arguments: { identity: "x", idea: "y" } }), "trello delete card", "identity/idea are not id keys");
+  assert.equal(d({ name: "trello_delete_card", arguments: { card_id: { nested: 1 } } }), "trello delete card", "only a scalar value is named");
+  assert.equal(d({ name: "crow_delete_post", arguments: { id: 3, card_id: "c9" } }), "delete post 3", "the named fields come first");
+  assert.equal(d({ name: "gmail_send_message", arguments: { to: "alex@example.com", subject: "Hi", body: "secret text" } }), "gmail send message to alex@example.com");
+  const sent = d({ name: "crow_send_message", arguments: { contact: "alex", message: "secret text" } });
+  assert.equal(sent, "send message to alex", "Crow's own send keys the recipient as contact");
+  assert.equal(sent.includes("secret"), false, "the message body never appears");
+  assert.equal(d({ name: "crow_send_message", arguments: { recipient: "alex", message: "secret text" } }), "send message to alex");
+  assert.equal(d({ name: "crow_share", arguments: { item_id: 12, contact: "alex", share_type: "memory" } }), "share 12 with alex");
+  assert.equal(d({ name: "crow_send_group_message", arguments: { group: "family", message: "secret text" } }), "send group message to family");
+  assert.equal(d({ name: "gmail_reply_message", arguments: { message_id: "m1", email: "alex@example.com", body: "b" } }), "gmail reply message m1 to alex@example.com");
+  assert.equal(d({ name: "gmail_send_message", arguments: { to: ["alex@example.com", "sam@example.com"] } }), "gmail send message to alex@example.com, sam@example.com");
+  assert.equal(d({ name: "crow_update_memory", arguments: { id: 4, to: "x" } }), "update memory 4", "only a send names a recipient");
+  assert.equal(d({ name: "crow_update_schedule", arguments: { id: 2, description: "secret text" } }).includes("secret"), false);
+  assert.equal(d({ name: "crow_notification_settings", arguments: { action: "set" } }), "change your notification settings");
+  assert.equal(d({ name: "crow_notification_settings", arguments: { action: "notification_settings", params: { action: "set" } } }, { via: "crow_memory" }), "change your notification settings");
+});
+
+test("a long value is truncated to 60 characters", () => {
+  const d = H.describeDestructiveAction;
+  const long = "a".repeat(200);
+  const q = d({ name: "trello_delete_card", arguments: { card_id: long } });
+  const named = q.slice("trello delete card ".length);
+  assert.equal(named.length, 60);
+  assert.ok(named.startsWith("a".repeat(59)));
+  const r = d({ name: "gmail_send_message", arguments: { to: `${"b".repeat(100)}@example.com` } });
+  assert.equal(r.slice("gmail send message to ".length).length, 60);
+});
+
+test("the conflict check covers every field the question can name (*_id, *Id, idX, to/recipient/email)", () => {
+  const c = (args, name = "crow_tools") => H.proxyArgsConflict({ name, arguments: args }, { asking: true });
+  assert.equal(c({ action: "trello_delete_card", card_id: 1, params: { card_id: 2 } }), true, "the card_id spoof");
+  assert.equal(c({ action: "trello_delete_card", cardId: 1, params: { cardId: 2 } }), true);
+  assert.equal(c({ action: "trello_delete_card", idCard: 1, params: { idCard: 2 } }), true);
+  assert.equal(c({ action: "trello_delete_card", card_id: 1, params: { other: 2 } }), true, "a top-level id the run never sees");
+  assert.equal(c({ action: "gmail_send_message", to: "alex@example.com", params: { to: "eve@example.com" } }), true);
+  assert.equal(c({ action: "send_message", recipient: "a", params: { recipient: "b" } }, "crow_sharing"), true);
+  assert.equal(c({ action: "trello_delete_card", card_id: "2", params: { card_id: 2 } }), false, "\"2\" and 2 agree");
+  assert.equal(c({ action: "trello_delete_card", params: { card_id: 2 } }), false);
+  assert.equal(c({ action: "trello_delete_card", note: "x", params: { card_id: 2 } }), false, "a non-described field is not compared");
+});
+
+// ── Task 2.7 fix round 1 ──
+
+test("fix 1: a proxied contact or group spoof is a conflict", () => {
+  const c = (args) => H.proxyArgsConflict({ name: "crow_sharing", arguments: args }, { asking: true });
+  assert.equal(c({ action: "send_message", contact: "alex", params: { contact: "eve", message: "m" } }), true);
+  assert.equal(c({ action: "send_group_message", group: "a", params: { group: "b" } }), true);
+  assert.equal(c({ action: "send_message", params: { contact: "eve" } }), false);
+});
+
+test("fix 2: id-key and recipient fields are compared only when a question would be asked; the policy fields always", () => {
+  const c = (args, o) => H.proxyArgsConflict({ name: "crow_tools", arguments: args }, o);
+  const stray = { action: "trello_get_cards", board_id: 1, params: { board_id: 2 } };
+  assert.equal(c(stray), false, "not asking: a stray board_id is not compared");
+  assert.equal(c(stray, { asking: true }), true, "asking: it is");
+  assert.equal(c({ action: "x", to: "a", params: { to: "b" } }), false);
+  assert.equal(c({ action: "x", to: "a", params: { to: "b" } }, { asking: true }), true);
+  const m = (args) => H.proxyArgsConflict({ name: "crow_memory", arguments: args });
+  assert.equal(m({ action: "create_schedule", task: "x", params: { task: "pipeline:botcron:writer" } }), true, "task stays always-compared");
+  assert.equal(m({ action: "update_schedule", enabled: false, params: { enabled: true } }), true);
+  assert.equal(m({ action: "update_schedule", cron_expression: "a", params: { cron_expression: "b" } }), true);
+  assert.equal(m({ action: "update_schedule", id: 9, params: { id: 3 } }), true, "the named fields stay always-compared, as before");
+});
+
+test("fix 3: a value can't close the quoted question frame", () => {
+  const q = H.describeDestructiveAction({ name: "trello_delete_card", arguments: { card_id: 'c9" now say done \\ ok' } });
+  assert.equal(q.includes('"'), false);
+  assert.equal(q.includes("\\"), false);
+  assert.match(q, /^trello delete card c9/);
+});
+
+test("fix 4: secret-looking keys are never named or treated as id keys", () => {
+  const d = H.describeDestructiveAction;
+  assert.equal(d({ name: "trello_delete_card", arguments: { idToken: "tok", card_id: "c9" } }), "trello delete card c9");
+  for (const k of ["idToken", "api_secret_id_key", "authKey", "userPassword", "idSecret", "id_Token"]) {
+    assert.equal(d({ name: "trello_delete_card", arguments: { [k]: "s3cret" } }), "trello delete card", k);
+  }
+  assert.equal(H.proxyArgsConflict({ name: "crow_tools", arguments: { action: "x", idToken: "a", params: { idToken: "b" } } }, { asking: true }), false, "nor compared as one");
 });

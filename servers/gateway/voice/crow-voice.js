@@ -5,8 +5,10 @@
  */
 import { VOICE_DENY_TOOLS, CROW_VOICE_BOT_ID, isVoiceBotId, normalizeVoiceSettings } from "../../shared/voice-bot.js";
 import { voiceLine } from "./voice-lines.js";
+import { VOICE_OWN_TOOL_NAMES } from "./own-tools.js";
 
-export { VOICE_DENY_TOOLS, CROW_VOICE_BOT_ID, isVoiceBotId };
+// VOICE_OWN_TOOL_NAMES: Crow's own tools, for listing (Bot Builder, the editor); never a policy-gate exemption.
+export { VOICE_DENY_TOOLS, CROW_VOICE_BOT_ID, isVoiceBotId, VOICE_OWN_TOOL_NAMES };
 
 /** How long a surface keeps the loaded voice bot (as turn.js keeps a bot); a bot-defs change reloads it at once. */
 export const VOICE_BOT_CACHE_MS = 30_000;
@@ -72,8 +74,10 @@ export function createVoiceBotLoader({ now = Date.now, generation = () => 0, ttl
  *                     A cloud model is capable, so the tool-family gate (there for the small local
  *                     model's latency) is off. The lookup is the caller's.
  *   actionWhen, actionFollowWhen   the surface's action-intent tests (queue item 29)
+ *   tz                the surface's IANA time zone (kiosk: the hub's; glasses: the server's), passed on as
+ *                     opts.tz: Crow's own tools read times in it, and refuse a time without one
  */
-export function crowVoiceTurnOptions({ surface, lang, voiceDef = null, cloud = false, actionWhen, actionFollowWhen } = {}) {
+export function crowVoiceTurnOptions({ surface, lang, voiceDef = null, cloud = false, actionWhen, actionFollowWhen, tz = null } = {}) {
   const o = {
     surface,
     familiesOnIntent: cloud !== true,
@@ -85,7 +89,11 @@ export function crowVoiceTurnOptions({ surface, lang, voiceDef = null, cloud = f
     notReadyText: voiceLine("not_ready_say", lang),
     memoOnlyText: voiceLine("memo_only_say", lang),
     unsureText: voiceLine("unsure_say", lang),
+    partlyDoneText: voiceLine("partly_done_say", lang),
   };
+  // The turn's own spoken lines (Crow's own tools, their confirmations) follow the surface's language and zone.
+  if (typeof lang === "string" && lang) o.lang = lang;
+  if (typeof tz === "string" && tz) o.tz = tz;
   if (voiceDef && normalizeVoiceSettings(voiceDef).escalation === "off") o.noEscalate = true;
   return o;
 }

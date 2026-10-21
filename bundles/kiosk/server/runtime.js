@@ -185,11 +185,12 @@ export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = 
   const cfg = () => (typeof settings === "function" ? settings() : settings) || {};
   const lang = cfg().lang;
   // One set of voice rules for every surface (servers/gateway/voice/crow-voice.js, injected by the panel
-  // routes as o.crowVoice): spread first, so the display's own options and localized lines below win.
+  // routes as o.crowVoice): spread first, so the display's own options and localized lines below win. The hub's
+  // time zone rides along as opts.tz: Crow's own tools read spoken times in it (and set none without it).
   // Without it (an older caller, a test stub) the display keeps today's rules.
   const shared = crowVoice && typeof crowVoice.turnOptions === "function"
-    ? crowVoice.turnOptions({ surface: ctx.surface, lang, voiceDef, cloud, actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp })
-    : { ...(ctx.surface ? { surface: ctx.surface } : {}), familiesOnIntent: true, actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp };
+    ? crowVoice.turnOptions({ surface: ctx.surface, lang, voiceDef, cloud, actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp, tz })
+    : { ...(ctx.surface ? { surface: ctx.surface } : {}), familiesOnIntent: true, actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp, ...(tz ? { tz } : {}) };
   return {
     ...shared,
     extraTools: typeof wrapTools === "function" ? wrapTools(tools) : tools,

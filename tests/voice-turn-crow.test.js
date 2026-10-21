@@ -225,6 +225,21 @@ test("a Spanish yes confirms a pending send; a Spanish no declines it", async ()
   }
 });
 
+test("sure, please do and sounds good confirm a pending send; sure, don't declines it", async () => {
+  const send = { type: "tool_call", id: "s1", name: "gmail_send_to_self", arguments: { subject: "Milk" } };
+  for (const yes of ["sure", "Sure.", "please do", "sounds good", "go ahead", "do it"]) {
+    const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["gmail_send_to_self"], rounds: [callRound(send), sayRound("Sure?"), callRound(send), sayRound("Sent.")] });
+    await turn(h, { transcript: "email me a note" });
+    assert.deepEqual(h.calls.executed, [], yes);
+    await turn(h, { transcript: yes });
+    assert.deepEqual(h.calls.executed, ["gmail_send_to_self"], yes);
+  }
+  const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["gmail_send_to_self"], rounds: [callRound(send), sayRound("Sure?"), callRound(send), sayRound("Okay.")] });
+  await turn(h, { transcript: "email me a note" });
+  await turn(h, { transcript: "sure, don't" });
+  assert.deepEqual(h.calls.executed, []);
+});
+
 test("the remaining voice confirms: a context section add, a direct schedule update, a proxied schedule create", async () => {
   const cases = [
     ["crow_add_context_section", { type: "tool_call", id: "a1", name: "crow_add_context_section", arguments: { section_key: "notes", content: "x" } }],
@@ -420,4 +435,118 @@ test("security 2: a crow_tools delete names the id that runs; the spoof shape an
     await turn(r, { transcript: "yes" });
     assert.deepEqual(r.calls.executed, [], `${JSON.stringify(args)}: a yes does not run it either`);
   }
+});
+
+// ── Task 2.7: the question names the item it changes and who a message goes to ──
+
+test("a crow_tools delete keyed by card_id names it; a card_id spoof is refused, never asked or run", async () => {
+  const ok = { type: "tool_call", id: "t1", name: "crow_tools", arguments: { action: "trello_delete_card", params: { card_id: "c9" } } };
+  const h = await addonHarness([callRound(ok), sayRound("Sure?"), callRound(ok), sayRound("Deleted.")]);
+  await turn(h, { transcript: "delete card c9" });
+  assert.match(lastToolText(h, 1), /Are you sure you want to trello delete card c9\?/);
+  await turn(h, { transcript: "yes" });
+  assert.deepEqual(h.calls.executed, ["crow_tools"]);
+
+  const spoof = { type: "tool_call", id: "t2", name: "crow_tools", arguments: { action: "trello_delete_card", card_id: 1, params: { card_id: 2 } } };
+  const r = await addonHarness([callRound(spoof), sayRound("I can't."), callRound(spoof), sayRound("I can't.")]);
+  await turn(r, { transcript: "delete card 1" });
+  assert.doesNotMatch(lastToolText(r, 1), /Confirmation required/, "refused, never asked");
+  await turn(r, { transcript: "yes" });
+  assert.deepEqual(r.calls.executed, [], "a yes does not run it either");
+});
+
+test("a voice send names the recipient; notification settings read 'change your notification settings'", async () => {
+  const send = { type: "tool_call", id: "s1", name: "gmail_send_message", arguments: { to: "alex@example.com", subject: "Milk", body: "Buy milk" } };
+  const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["gmail_send_message"], rounds: [callRound(send), sayRound("Sure?")] });
+  await turn(h, { transcript: "email alex about milk" });
+  assert.match(lastToolText(h, 1), /Are you sure you want to gmail send message to alex@example\.com\?/);
+  assert.doesNotMatch(lastToolText(h, 1), /Buy milk/, "never the body");
+
+  const set = { type: "tool_call", id: "n1", name: "crow_notification_settings", arguments: { action: "set", types_enabled: [] } };
+  const n = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["crow_notification_settings"], rounds: [callRound(set), sayRound("Sure?")] });
+  await turn(n, { transcript: "turn off my notifications" });
+  assert.match(lastToolText(n, 1), /Are you sure you want to change your notification settings\?/);
+});
+
+test("an ordinary bot's question names the target too", async () => {
+  const tc = { type: "tool_call", id: "b1", name: "crow_remove_backend", arguments: { backend_id: "b2" } };
+  const o = crowHarness({ chatTools: ["crow_remove_backend"], rounds: [callRound(tc), sayRound("Sure?")] });
+  await turn(o, { botId: "household", transcript: "remove backend b2" });
+  assert.deepEqual(o.calls.executed, []);
+  assert.match(lastToolText(o, 1), /Are you sure you want to remove backend b2\?/);
+});
+
+// ── Task 2.7 fix round 1 ──
+
+test("fix 1: a voice bot's proxied contact spoof is refused, never asked or run", async () => {
+  const tc = { type: "tool_call", id: "c1", name: "crow_sharing", arguments: { action: "send_message", contact: "alex", params: { contact: "eve", message: "hi" } } };
+  const { effectiveToolName } = await import("../servers/gateway/ai/tool-executor.js");
+  const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["crow_sharing"], rounds: [callRound(tc), sayRound("I can't."), callRound(tc), sayRound("I can't.")] });
+  h.deps.effectiveToolName = effectiveToolName;
+  await turn(h, { transcript: "message alex" });
+  assert.deepEqual(h.calls.executed, []);
+  assert.doesNotMatch(lastToolText(h, 1), /Confirmation required/, "refused, never asked");
+  await turn(h, { transcript: "yes" });
+  assert.deepEqual(h.calls.executed, []);
+});
+
+test("fix 2: a voice proxy read with a stray board_id runs; a delete with the same disagreement is refused", async () => {
+  const read = { type: "tool_call", id: "r1", name: "crow_tools", arguments: { action: "trello_get_cards", board_id: 1, params: { board_id: 2 } } };
+  const h = await addonHarness([callRound(read), sayRound("Two cards.")]);
+  await turn(h, { transcript: "what's on the board" });
+  assert.deepEqual(h.calls.executed, ["crow_tools"], "a read asks nothing, so the stray field is not compared");
+  const del = { type: "tool_call", id: "r2", name: "crow_tools", arguments: { action: "trello_delete_card", board_id: 1, params: { board_id: 2, card_id: "c9" } } };
+  const k = await addonHarness([callRound(del), sayRound("I can't."), callRound(del), sayRound("I can't.")]);
+  await turn(k, { transcript: "delete card c9" });
+  assert.doesNotMatch(lastToolText(k, 1), /Confirmation required/, "refused, never asked");
+  await turn(k, { transcript: "yes" });
+  assert.deepEqual(k.calls.executed, []);
+});
+
+test("fix 5: an ordinary bot's proxied card_id spoof is asked, not refused", async () => {
+  const { effectiveToolName } = await import("../servers/gateway/ai/tool-executor.js");
+  const house = { ...HOUSE, permission_policy: { confirm: ["trello_delete_card"] } };
+  const tc = { type: "tool_call", id: "o1", name: "crow_tools", arguments: { action: "trello_delete_card", card_id: 1, params: { card_id: 2 } } };
+  const o = crowHarness({ rows: { "crow.voice": VOICE, household: house }, bot: house, chatTools: ["crow_tools"], rounds: [callRound(tc), sayRound("Sure?")] });
+  o.deps.effectiveToolName = effectiveToolName;
+  await turn(o, { botId: "household", transcript: "delete card 2" });
+  assert.deepEqual(o.calls.executed, []);
+  assert.match(lastToolText(o, 1), /Are you sure you want to trello delete card 2\?/, "the question names what runs");
+});
+
+// ── voice actions hook (PR 2, Task 2.2) ─────────────────────────────────────
+
+test("voiceActions fast path speaks without a model call", async () => {
+  const h = crowHarness();
+  h.deps.voiceActions = { fastPath: async () => ({ say: "Okay.", verb: "pending_yes" }) };
+  const r = await turn(h, { transcript: "yes" });
+  assert.deepEqual(h.calls.chatKeys, []);
+  assert.deepEqual(h.calls.spoken, ["Okay."]);
+  assert.equal(r.fastPath, true);
+  assert.equal(r.timings.verb, "pending_yes");
+  assert.deepEqual(h.runner.convo.get(h.device.id).map((m) => m.content), ["yes", "Okay."], "saved like a fast path");
+});
+
+test("turnContext rides on the user message only", async () => {
+  const h = crowHarness({ rounds: [sayRound("Lisbon.")] });
+  h.deps.voiceActions = { turnContext: () => "[Pending] x" };
+  await turn(h, { transcript: "What is the capital of Portugal?" });
+  const msgs = h.log[0].messages;
+  assert.ok(!msgs[0].content.includes("[Pending] x"), "never on the system message");
+  assert.ok(msgs.at(-1).content.includes("[Pending] x"), "on the user message");
+  assert.ok(msgs.at(-1).content.includes("What is the capital of Portugal?"));
+  const saved = h.runner.convo.get(h.device.id);
+  assert.equal(saved.find((m) => m.role === "user").content, "What is the capital of Portugal?", "the saved user message is the plain transcript");
+});
+
+test("the voice system message stays byte-identical with a voiceActions context and opts.turnContext both set", async () => {
+  const h = crowHarness({ rounds: [sayRound("Lisbon."), sayRound("Two.")] });
+  let n = 0;
+  h.deps.voiceActions = { turnContext: () => ({ text: `[Pending] entry ${++n}`, pending: false }) };
+  await turn(h, { transcript: "What is the capital of Portugal?", turnContext: "Open windows: none." });
+  h.c.advance(5_000);
+  await turn(h, { transcript: "How many timers?", turnContext: "Open windows: timer 1." });
+  assert.equal(h.log[1].messages[0].content, h.log[0].messages[0].content);
+  const u = h.log[1].messages.at(-1).content;
+  assert.ok(u.includes("Open windows: timer 1.") && u.includes("[Pending] entry 2"), "both ride on the user message");
 });

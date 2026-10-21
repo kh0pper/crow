@@ -525,7 +525,7 @@ test("17a: a glasses turn that names a relative day gets the kiosk's computed [D
 
 // ─── Crow's speaking voice and speech recognition on the glasses ───
 /** A session adapter on a fake runner: what transcribe and the turn were handed. */
-async function crowTurns({ loadVoiceBot, device = { id: "g", bound_bot_id: "helper", token_hash: "x", tts_profile_id: "p", stt_profile_id: "s1" }, profiles, botToolNames = async () => [], stt = "What is the capital of Portugal?" } = {}) {
+async function crowTurns({ loadVoiceBot, device = { id: "g", bound_bot_id: "helper", token_hash: "x", tts_profile_id: "p", stt_profile_id: "s1" }, profiles, botToolNames = async () => [], stt = "What is the capital of Portugal?", timeZone } = {}) {
   const cv = await import("../servers/gateway/voice/crow-voice.js");
   const seenBy = { transcribe: [], turn: [], speak: [] };
   const fakeVoice = {
@@ -539,7 +539,7 @@ async function crowTurns({ loadVoiceBot, device = { id: "g", bound_bot_id: "help
     listTtsProfiles: async () => profiles || [{ id: "p", provider: "piper" }, { id: "e", provider: "edge" }, { id: "k", provider: "kokoro" }],
     botToolNames, capture: async () => ({}), describePhoto: async () => null, readEnvelope,
     playback: { state: () => "idle", control: () => {}, start: () => {} }, log: () => {},
-    loadVoiceBot,
+    loadVoiceBot, ...(timeZone ? { timeZone } : {}),
     crowVoice: { turnOptions: cv.crowVoiceTurnOptions, withVoiceProfiles: cv.withVoiceProfiles, VOICE_DENY_TOOLS: cv.VOICE_DENY_TOOLS },
   });
   const run = () => turns.runTurn({ deviceId: device.id, audio: Buffer.alloc(4), send: { text: () => {}, binary: () => {} } });
@@ -560,6 +560,13 @@ test("a non-PCM voice-bot TTS falls back to the device's playable one", async ()
   // Say from the dashboard (speak) uses the same rule.
   await ok.turns.speak({ deviceId: "g", text: "Dinner.", send: { text: () => {}, binary: () => {} } });
   assert.equal(ok.seenBy.speak.at(-1).tts_profile_id, "k");
+});
+
+test("the server's time zone and the glasses' language reach Crow's own tools as opts.tz / opts.lang", async () => {
+  const t = await crowTurns({ loadVoiceBot: withVoice({}), timeZone: "America/Chicago", device: { id: "g", bound_bot_id: "helper", token_hash: "x", tts_profile_id: "p", stt_profile_id: "s1", voice_settings: { lang: "es" } } });
+  await t.run();
+  assert.equal(t.seenBy.turn[0].tz, "America/Chicago");
+  assert.equal(t.seenBy.turn[0].lang, "es", "and the glasses' language as opts.lang");
 });
 
 test("transcribe uses Crow's STT profile", async () => {

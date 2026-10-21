@@ -10,6 +10,7 @@ import { createNotification, cleanupNotifications } from "../shared/notification
 import { runSchedulerHooks } from "./scheduler-hooks.js";
 
 const CHECK_INTERVAL_MS = 60 * 1000; // Check every 60 seconds
+const ONCE = "@once"; // one-shot rows: next_run is an absolute ISO time, never recomputed from cron
 
 let timer = null;
 let db = null;
@@ -27,6 +28,8 @@ export function computeNextRun(cronExpression, fromDate = new Date()) {
     return null;
   }
 }
+
+let _compute = computeNextRun; // indirection so tests can observe/replace it
 
 /**
  * Check for due schedules and update them.
@@ -51,12 +54,26 @@ async function tick() {
     });
 
     for (const schedule of rows) {
-      const nextRun = computeNextRun(schedule.cron_expression);
-      await db.execute({
-        sql: "UPDATE schedules SET last_run = ?, next_run = ?, updated_at = datetime('now') WHERE id = ?",
-        args: [now, nextRun, schedule.id],
-      });
-      console.log(`[scheduler] Fired: #${schedule.id} "${schedule.task}" — next: ${nextRun || "unknown"}`);
+      let nextRun = null;
+      if (schedule.cron_expression === ONCE) {
+        // Deliberate: the UPDATE runs BEFORE delivery. A crash in between drops the reminder but
+        // can never double it (race safety over at-least-once).
+        // Fire and switch off in ONE guarded UPDATE (next_run kept for the record). Only the
+        // tick that flips enabled 1 -> 0 fires, so racing ticks cannot double-fire.
+        const res = await db.execute({
+          sql: "UPDATE schedules SET last_run = ?, enabled = 0, updated_at = datetime('now') WHERE id = ? AND enabled = 1",
+          args: [now, schedule.id],
+        });
+        if (!res.rowsAffected) continue;
+        console.log(`[scheduler] Fired one-shot: #${schedule.id} "${schedule.task}"`);
+      } else {
+        nextRun = _compute(schedule.cron_expression);
+        await db.execute({
+          sql: "UPDATE schedules SET last_run = ?, next_run = ?, updated_at = datetime('now') WHERE id = ?",
+          args: [now, nextRun, schedule.id],
+        });
+        console.log(`[scheduler] Fired: #${schedule.id} "${schedule.task}" — next: ${nextRun || "unknown"}`);
+      }
 
       // Create notification for 'reminder:' prefix schedules
       if (schedule.task.startsWith("reminder:")) {
@@ -91,12 +108,12 @@ async function tick() {
 
     // Also compute next_run for any schedules that don't have one yet
     const { rows: needsNextRun } = await db.execute({
-      sql: "SELECT id, cron_expression FROM schedules WHERE enabled = 1 AND next_run IS NULL",
+      sql: "SELECT id, cron_expression FROM schedules WHERE enabled = 1 AND next_run IS NULL AND cron_expression != '@once'",
       args: [],
     });
 
     for (const schedule of needsNextRun) {
-      const nextRun = computeNextRun(schedule.cron_expression);
+      const nextRun = _compute(schedule.cron_expression);
       if (nextRun) {
         await db.execute({
           sql: "UPDATE schedules SET next_run = ?, updated_at = datetime('now') WHERE id = ?",
@@ -107,6 +124,44 @@ async function tick() {
   } catch (err) {
     console.error("[scheduler] Error:", err.message);
   }
+}
+
+/**
+ * Compute next_run for all enabled schedules on startup. Returns false if it failed.
+ * `@once` rows are skipped: their next_run is absolute, and a due one fires at the first tick.
+ *
+ * Skip pipeline: prefix rows so we don't overwrite a manual override that
+ * was set between runs — pipeline-runner maintains its own
+ * last_run/next_run on dispatch, and recomputing here would clobber
+ * e.g. a test-fire next_run an operator set via CLI.
+ */
+async function bootRecompute() {
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT id, cron_expression FROM schedules WHERE enabled = 1 AND task NOT LIKE 'pipeline:%' AND cron_expression != '@once'",
+      args: [],
+    });
+
+    let updated = 0;
+    for (const schedule of rows) {
+      const nextRun = _compute(schedule.cron_expression);
+      if (nextRun) {
+        await db.execute({
+          sql: "UPDATE schedules SET next_run = ?, updated_at = datetime('now') WHERE id = ?",
+          args: [nextRun, schedule.id],
+        });
+        updated++;
+      }
+    }
+
+    if (rows.length > 0) {
+      console.log(`[scheduler] ${rows.length} schedule(s) loaded, ${updated} next_run(s) computed`);
+    }
+  } catch (err) {
+    console.error("[scheduler] Failed to initialize:", err.message);
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -122,36 +177,7 @@ export async function startScheduler(database) {
   _started = true;
   db = database;
 
-  // Compute next_run for all enabled schedules on startup. Skip
-  // pipeline: prefix rows so we don't overwrite a manual override that
-  // was set between runs — pipeline-runner maintains its own
-  // last_run/next_run on dispatch, and recomputing here would clobber
-  // e.g. a test-fire next_run an operator set via CLI.
-  try {
-    const { rows } = await db.execute({
-      sql: "SELECT id, cron_expression FROM schedules WHERE enabled = 1 AND task NOT LIKE 'pipeline:%'",
-      args: [],
-    });
-
-    let updated = 0;
-    for (const schedule of rows) {
-      const nextRun = computeNextRun(schedule.cron_expression);
-      if (nextRun) {
-        await db.execute({
-          sql: "UPDATE schedules SET next_run = ?, updated_at = datetime('now') WHERE id = ?",
-          args: [nextRun, schedule.id],
-        });
-        updated++;
-      }
-    }
-
-    if (rows.length > 0) {
-      console.log(`[scheduler] ${rows.length} schedule(s) loaded, ${updated} next_run(s) computed`);
-    }
-  } catch (err) {
-    console.error("[scheduler] Failed to initialize:", err.message);
-    return;
-  }
+  if (!(await bootRecompute())) return;
 
   // Start the check loop
   timer = setInterval(() => tick(), CHECK_INTERVAL_MS);
@@ -169,3 +195,9 @@ export function stopScheduler() {
   }
   _started = false;
 }
+
+// Test seams (not used in production). Each binds the module to the given db.
+export async function _tickForTest(database) { db = database; await tick(); }
+export async function _bootRecomputeForTest(database) { db = database; return bootRecompute(); }
+/** Replace the next-run computation (tests); returns a function that restores it. */
+export function _setComputeNextRunForTest(fn) { _compute = fn; return () => { _compute = computeNextRun; }; }

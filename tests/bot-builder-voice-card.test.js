@@ -423,3 +423,101 @@ test("a corrupt voice row: the editor says it can't be read and is kept, en + es
     assert.equal((await voiceRow()).definition, "{not json");
   } finally { await reset(); }
 });
+
+// ── the Routine section (Task 2.6) ──────────────────────────────────────────
+
+const routineSnapshot = async () => {
+  const { migrated_from, handoff, permission_policy, preset, fast_voice_model } = await voiceDef();
+  return { migrated_from, handoff, permission_policy, preset, fast_voice_model };
+};
+
+test("routine settings save and validate", async () => {
+  await reset();
+  await db.execute({ sql: "INSERT OR IGNORE INTO project_spaces (id, name, slug) VALUES (7, 'Home', 'home')", args: [] }).catch(() => {});
+  const others = await otherRows();
+  const policyBefore = (await voiceDef()).permission_policy;
+  const before = await routineSnapshot();
+  const url = await post(await saveBody({
+    routine_calendar_backend: "google", routine_calendar_id: "  family  ", routine_reminders_backend: "off",
+    routine_tasks_backend: "board", routine_tasks_list: " groceries ", routine_tasks_project_id: "7", confirm: "strict",
+  }));
+  assert.equal(qOf(url).get("saved"), "1", url);
+  const d = await voiceDef();
+  assert.deepEqual(d.routine, {
+    calendar: { backend: "google", calendar: "family" }, reminders: { backend: "off" },
+    tasks: { backend: "board", list: "groceries", project_id: 7 },
+  });
+  assert.equal(d.voice.confirm, "strict");
+  assert.deepEqual(d.permission_policy, policyBefore, "the permission policy is kept as stored");
+  assert.deepEqual(await otherRows(), others, "no other bot is touched");
+  assert.deepEqual(await routineSnapshot(), before, "nothing else in the definition moved");
+  // an unknown value keeps the stored one; confirm never loosens
+  const bad = await post(await saveBody({
+    routine_calendar_backend: "nope", routine_reminders_backend: "workspace", routine_tasks_backend: "x",
+    routine_tasks_project_id: "99999", confirm: "never",
+  }));
+  assert.equal(qOf(bad).get("saved"), "1", bad);
+  const d2 = await voiceDef();
+  assert.equal(d2.routine.calendar.backend, "google");
+  assert.equal(d2.routine.reminders.backend, "off");
+  assert.equal(d2.routine.tasks.backend, "board");
+  assert.equal(d2.routine.tasks.project_id, 7, "a project that does not exist keeps the stored one");
+  assert.equal(d2.voice.confirm, "strict", "an invalid confirm keeps the stored value");
+  // from a fresh row an invalid confirm stays "standard"
+  await reset();
+  await post(await saveBody({ confirm: "never" }));
+  assert.equal((await voiceDef()).voice.confirm, "standard");
+  // empty ids clear; an over-long id is capped at 200
+  await post(await saveBody({ routine_calendar_id: "c".repeat(300), routine_tasks_list: "l", routine_tasks_project_id: "7" }));
+  assert.equal((await voiceDef()).routine.calendar.calendar.length, 200);
+  await post(await saveBody({ routine_calendar_id: "", routine_tasks_list: "", routine_tasks_project_id: "" }));
+  const d3 = await voiceDef();
+  assert.deepEqual([d3.routine.calendar.calendar, d3.routine.tasks.list, d3.routine.tasks.project_id], [null, null, null]);
+  // a routine save is still compare-and-swap
+  const stale = await post(await saveBody({ rev: "0000000000000000", confirm: "strict", routine_tasks_backend: "off" }));
+  assert.equal(qOf(stale).get("error"), "stale");
+  assert.equal((await voiceDef()).voice.confirm, "standard");
+  await reset();
+});
+
+test("the editor names what auto picks", async () => {
+  const { connectedServers } = await import("../servers/gateway/proxy.js");
+  await reset();
+  connectedServers.set("t-gcal", { status: "connected", tools: [{ name: "gcal_create_event" }] });
+  try {
+    const html = await editor();
+    assert.ok(html.includes(T("botbuilder.voiceRoutineGoogle")), "calendar auto resolves to Google");
+    assert.ok(!html.includes(T("botbuilder.voiceRoutineNoCalendar")), "no no-calendar hint");
+    assert.ok(html.includes(T("botbuilder.voiceRoutineWritesWhere")), "the tools write wherever these point");
+    for (const n of ["routine_calendar_backend", "routine_calendar_id", "routine_reminders_backend", "routine_tasks_backend", "routine_tasks_list", "routine_tasks_project_id", "confirm"]) {
+      assert.ok(html.includes(`name="${n}"`), n);
+    }
+    const es = await editor({ lang: "es" });
+    assert.ok(es.includes(T("botbuilder.voiceRoutineGoogle", "es")));
+  } finally { connectedServers.delete("t-gcal"); }
+  const none = await editor();
+  assert.ok(none.includes(T("botbuilder.voiceRoutineNoCalendar")), "nothing installed: the reminder hint");
+  assert.ok(!none.includes(T("botbuilder.voiceRoutineGoogle")));
+});
+
+test("the editor's confirm wording and the no-calendar line say what really happens", async () => {
+  await reset();
+  // Standard adds at once and asks before deleting, changing or sending; strict also asks before adding.
+  assert.match(T("botbuilder.voiceConfirmStandard"), /right away/);
+  assert.match(T("botbuilder.voiceConfirmStandard"), /deleting, changing or sending/);
+  assert.ok(!/asks once/.test(T("botbuilder.voiceConfirmStandard")));
+  assert.match(T("botbuilder.voiceConfirmStrict"), /also asks before adding/);
+  const html = await editor();
+  assert.ok(html.includes(T("botbuilder.voiceConfirmStandard")) && html.includes(T("botbuilder.voiceConfirmStrict")));
+  // No calendar and reminders off: no reminder promise, the can't-add line instead.
+  await reset({ ...SEED_DEF, routine: { ...(SEED_DEF.routine || {}), reminders: { backend: "off" } } });
+  for (const lang of ["en", "es"]) {
+    const off = await editor({ lang });
+    assert.ok(!off.includes(T("botbuilder.voiceRoutineNoCalendar", lang)), `${lang}: no reminder promise`);
+    assert.ok(off.includes(T("botbuilder.voiceRoutineNoCalendarNoReminder", lang)), `${lang}: the can't-add line`);
+  }
+  await reset();
+  const on = await editor();
+  assert.ok(on.includes(T("botbuilder.voiceRoutineNoCalendar")));
+  assert.ok(!on.includes(T("botbuilder.voiceRoutineNoCalendarNoReminder")));
+});

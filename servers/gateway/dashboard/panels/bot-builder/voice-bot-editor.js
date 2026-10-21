@@ -4,7 +4,7 @@
  * surface and takes none of the generic Bot Builder actions (api-handlers.js
  * refuses them with voice_bot_readonly). Its two writes are its own:
  *
- *   voice_bot_save    the switch, model, escalation, persona and name, the
+ *   voice_bot_save    the switch, model, escalation, persona and name, the Routine section (calendar, reminders, tasks, confirm),
  *                     speaking voice and speech recognition, memory tools
  *   voice_bot_preset  rebuild the model, escalation and the preset's tool
  *                     entries from voiceBotDefinition (Memory tools stay as
@@ -29,7 +29,10 @@ import { readSetting } from "../../settings/registry.js";
 import { listProvidersAll } from "../../../../shared/providers-db.js";
 import {
   CROW_VOICE_BOT_ID, VOICE_PRESETS, DEFAULT_PERSONA, voiceBotDefinition, normalizeVoiceSettings,
+  ROUTINE_BACKENDS, CONFIRM_LEVELS,
 } from "../../../../shared/voice-bot.js";
+import { resolveRoutineBackends } from "../../../voice/own-tools.js";
+import { connectedAddonToolNames } from "../../../ai/tool-executor.js";
 import { loadModelOptions } from "./data-queries.js";
 import { rowRev, defRev } from "./def-adapter.js";
 import { emitBotDefsChanged } from "./defs-changed.js";
@@ -38,6 +41,7 @@ import { VOICE_EDITOR_HREF } from "./voice-bot-card.js";
 
 const NAME_MAX = 40;
 const PROMPT_MAX = 4000;
+const ID_MAX = 200;
 // The three memory selections the "Memory tools" switch adds back (the preset's own). Off removes
 // EVERY crow-memory/ entry: any one of them keeps the memory category, and with it the whole
 // crow_memory proxy (tool-executor.js).
@@ -106,6 +110,36 @@ async function freshRow(req, res, db) {
   return { row, def };
 }
 
+/**
+ * The Routine fields of the save, applied onto `next` (only voice.confirm and routine.* move). Every
+ * field is optional: absent, or a value that is not allowed, keeps what is stored (an invalid confirm
+ * never loosens). Ids are free text: trimmed, capped, and empty clears them. The project must exist.
+ */
+async function applyRoutine(db, b, def, next) {
+  const cur = normalizeVoiceSettings(def);
+  const pick = (v, allowed, stored) => (typeof v === "string" && allowed.includes(v) ? v : stored);
+  const text = (v, stored) => (typeof v === "string" ? (Array.from(v.trim()).slice(0, ID_MAX).join("") || null) : stored);
+  let projectId = cur.routine.tasks.project_id;
+  const pv = b.routine_tasks_project_id;
+  if (typeof pv === "string") {
+    if (pv.trim() === "") projectId = null;
+    else if (/^\d+$/.test(pv.trim())) {
+      try {
+        const id = Number(pv.trim());
+        const r = await db.execute({ sql: "SELECT id FROM project_spaces WHERE id=?", args: [id] });
+        if (r.rows[0]) projectId = id;
+      } catch { /* keep the stored one */ }
+    }
+  }
+  next.voice = { ...obj(next.voice), confirm: pick(b.confirm, CONFIRM_LEVELS, cur.confirm) };
+  next.routine = {
+    ...obj(def.routine),
+    calendar: { ...obj(obj(def.routine).calendar), backend: pick(b.routine_calendar_backend, ROUTINE_BACKENDS.calendar, cur.routine.calendar.backend), calendar: text(b.routine_calendar_id, cur.routine.calendar.calendar) },
+    reminders: { ...obj(obj(def.routine).reminders), backend: pick(b.routine_reminders_backend, ROUTINE_BACKENDS.reminders, cur.routine.reminders.backend) },
+    tasks: { ...obj(obj(def.routine).tasks), backend: pick(b.routine_tasks_backend, ROUTINE_BACKENDS.tasks, cur.routine.tasks.backend), list: text(b.routine_tasks_list, cur.routine.tasks.list), project_id: projectId },
+  };
+}
+
 export async function handleVoiceBotSave(req, res, { db }) {
   const b = req.body || {};
   const got = await freshRow(req, res, db);
@@ -139,6 +173,7 @@ export async function handleVoiceBotSave(req, res, { db }) {
     voice: { ...obj(def.voice), escalation, tts_profile_id: tts.id, stt_profile_id: stt.id },
     tools: { ...obj(def.tools), crow_mcp: tools },
   };
+  await applyRoutine(db, b, def, next);
   if (!(await casWrite(db, row, { definition: JSON.stringify(next), displayName: name, enabled: b.enabled === "on" ? 1 : 0 }))) return back(res, "error=stale");
   emitBotDefsChanged(CROW_VOICE_BOT_ID);
   return back(res, "saved=1");
@@ -203,6 +238,37 @@ function profileSelect(name, profiles, current, lang) {
   return `<select name="${name}" id="btb-v-${name}" form="btb-vsave">` +
     opt("", t("botbuilder.voiceProfileDefault", lang), !known) +
     profiles.map((p) => opt(p.id, p.name, p.id === current)).join("") + `</select>`;
+}
+
+const RESOLVED_KEY = { workspace: "botbuilder.voiceRoutineWorkspace", google: "botbuilder.voiceRoutineGoogle", crow: "botbuilder.voiceRoutineCrow", board: "botbuilder.voiceRoutineBoard" };
+
+/** The Routine section: where Crow's own calendar, reminder and task tools write, and how often it asks. */
+async function routineSection(db, v, lang, sec, hint) {
+  const resolved = resolveRoutineBackends(v, connectedAddonToolNames());
+  const nowLine = (r) => `<p class="btb-hint">${escapeHtml(fill(t("botbuilder.voiceRoutineNow", lang), { backend: t(RESOLVED_KEY[r] || "botbuilder.voiceRoutineNone", lang) }))}</p>`;
+  const optLabel = { auto: "botbuilder.voiceRoutineAuto", off: "botbuilder.voiceRoutineOff", workspace: "botbuilder.voiceRoutineOptWorkspace", google: "botbuilder.voiceRoutineOptGoogle", crow: "botbuilder.voiceRoutineOptCrow", board: "botbuilder.voiceRoutineOptBoard" };
+  const select = (name, list, cur) => `<select name="${name}" id="btb-v-${name}" form="btb-vsave">` + list.map((x) => opt(x, t(optLabel[x], lang), x === cur)).join("") + `</select>`;
+  const textIn = (name, labelKey, val) => `<label for="btb-v-${name}">${escapeHtml(t(labelKey, lang))}</label>` +
+    `<input type="text" id="btb-v-${name}" name="${name}" form="btb-vsave" maxlength="${ID_MAX}" value="${escapeHtml(val || "")}">`;
+  let projects = [];
+  try { projects = (await db.execute({ sql: "SELECT id, name FROM project_spaces WHERE archived_at IS NULL ORDER BY id", args: [] })).rows; } catch { projects = []; }
+  const curProject = v.routine.tasks.project_id;
+  const projOpts = opt("", t("botbuilder.voiceRoutineProjectNone", lang), curProject == null) +
+    (curProject != null && !projects.some((p) => String(p.id) === String(curProject)) ? opt(String(curProject), "#" + curProject, true) : "") +
+    projects.map((p) => opt(String(p.id), String(p.name || "#" + p.id), String(p.id) === String(curProject))).join("");
+  const label = (id, key) => `<label for="btb-v-${id}">${escapeHtml(t(key, lang))}</label>`;
+  return sec("botbuilder.voiceRoutineTitle",
+    hint("botbuilder.voiceRoutineWritesWhere") +
+    label("routine_calendar_backend", "botbuilder.voiceRoutineCalendar") + select("routine_calendar_backend", ROUTINE_BACKENDS.calendar, v.routine.calendar.backend) + nowLine(resolved.calendar) +
+    // The reminder offer exists only while reminders resolve somewhere; with them off, say a calendar event can't be added.
+    (resolved.calendar ? "" : hint(resolved.reminders ? "botbuilder.voiceRoutineNoCalendar" : "botbuilder.voiceRoutineNoCalendarNoReminder")) +
+    textIn("routine_calendar_id", "botbuilder.voiceRoutineCalendarId", v.routine.calendar.calendar) +
+    label("routine_reminders_backend", "botbuilder.voiceRoutineReminders") + select("routine_reminders_backend", ROUTINE_BACKENDS.reminders, v.routine.reminders.backend) + nowLine(resolved.reminders) +
+    label("routine_tasks_backend", "botbuilder.voiceRoutineTasks") + select("routine_tasks_backend", ROUTINE_BACKENDS.tasks, v.routine.tasks.backend) + nowLine(resolved.tasks) +
+    textIn("routine_tasks_list", "botbuilder.voiceRoutineTaskList", v.routine.tasks.list) +
+    label("routine_tasks_project_id", "botbuilder.voiceRoutineProject") + `<select name="routine_tasks_project_id" id="btb-v-routine_tasks_project_id" form="btb-vsave">${projOpts}</select>` +
+    label("confirm", "botbuilder.voiceRoutineConfirm") +
+    `<select name="confirm" id="btb-v-confirm" form="btb-vsave">` + opt("standard", t("botbuilder.voiceConfirmStandard", lang), v.confirm === "standard") + opt("strict", t("botbuilder.voiceConfirmStrict", lang), v.confirm === "strict") + `</select>`);
 }
 
 export async function renderVoiceBotEditor(req, res, { db, layout, lang = "en", PAGE_CSS = "", notice = "", kioskAvailable = false }) {
@@ -278,6 +344,7 @@ export async function renderVoiceBotEditor(req, res, { db, layout, lang = "en", 
   const memSec = sec("botbuilder.voiceMemoryTitle",
     `<label class="btb-vcheck"><input type="checkbox" name="memory_tools" value="on" form="btb-vsave"${memoryOn ? " checked" : ""}> ` +
     `${escapeHtml(t("botbuilder.voiceMemoryLabel", lang))}</label>`);
+  const routineSec = await routineSection(db, v, lang, sec, hint);
   const saveBar = `<p><button type="submit" class="btn btn-primary" form="btb-vsave">${escapeHtml(t("common.save", lang))}</button></p>`;
   const abilSec = kioskAvailable ? sec("botbuilder.voiceAbilTitle", abilityLineHtml(CROW_VOICE_BOT_ID)) + voiceAbilityScript(lang) : "";
 
@@ -285,6 +352,6 @@ export async function renderVoiceBotEditor(req, res, { db, layout, lang = "en", 
     title: "Bot Builder — " + name,
     content: PAGE_CSS + section(t("botbuilder.voiceEditorTitle", lang),
       backLink + notice + `<p>${escapeHtml(t("botbuilder.voiceEditorIntro", lang))}</p>` + forms +
-      onSec + presetSec + modelSec + personaSec + ttsSec + sttSec + memSec + saveBar + abilSec),
+      onSec + presetSec + modelSec + personaSec + ttsSec + sttSec + memSec + routineSec + saveBar + abilSec),
   }));
 }
