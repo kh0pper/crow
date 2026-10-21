@@ -133,6 +133,19 @@ A bot that needs you to choose between a few options can ask with a **decision c
 
 **Creating a card for a bot.** `board_create_item` accepts `assigned_bot` for cards (not tracker items). The bot must exist, be enabled and not be the voice bot, or the call is refused. The new card is **gated** by default, so it waits for your plan approval.
 
+## Handing a card to another bot
+
+A bot can pass one of its cards to another bot with `board_dispatch_item` (`item_id`, `to_bot`, optional `note`). It is narrow on purpose:
+
+- **Signed bots only.** The call must come from a bot whose signature the gateway verified; anything else is refused (`actor_unverified`).
+- **Its own top-level card only.** The card must be assigned to the calling bot (`not_assigned`) and must not be a subtask (`subtask`); subtasks move with their parent. An archived card is refused (`archived`).
+- **Your card, or one you granted.** The card must be one you created on the dashboard, or one you granted. Decision follow-ups and cards synced in from Monday do not count as yours (`not_granted`).
+- **The grant.** Open the card and tick **Let this bot hand the card to another bot** (shown when a bot is assigned). Only the card's current bot can be granted. A grant is used up by one hand-off, and it is cleared whenever the card is reassigned, by you or by a bot. Untick it to take it back.
+- **A real target.** The other bot must exist, be enabled, not be the voice bot and not be the caller (`bad_bot`), and it needs a board that is on (`no_board`, `bot_unavailable`). A locked or finished card is refused (`locked`, `finished`), as is a card whose subtasks another bot holds or a bot moved around (`subtree_blocked`). If the card changes while the hand-off is being made, the call is refused (`changed`).
+- **Nothing starts.** The card and its subtasks move to the other bot's board, **gated**, so it waits for your plan approval. No job or session starts. The card's history shows **handed to another bot**; granting and revoking show **hand-off permission changed**.
+
+What this protects: a bot cannot move your own cards, or the ones you granted, to a bot of its choosing. It does not stop bots from routing work in general: any bot can still create a new card assigned to another bot (see above).
+
 ## Permissions and safety
 
 Every agent carries a permission policy that governs what it may do without asking:

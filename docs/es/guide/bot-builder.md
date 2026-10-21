@@ -133,6 +133,19 @@ Un bot que necesita que elijas entre unas pocas opciones puede preguntarlo con u
 
 **Crear una tarjeta para un bot.** `board_create_item` acepta `assigned_bot` para tarjetas (no para elementos de seguimiento). El bot debe existir, estar habilitado y no ser el bot de voz, o la llamada se rechaza. La tarjeta nueva es **gated** por defecto, así que espera tu aprobación del plan.
 
+## Pasar una tarjeta a otro bot
+
+Un bot puede pasar una de sus tarjetas a otro bot con `board_dispatch_item` (`item_id`, `to_bot`, `note` opcional). Es limitado a propósito:
+
+- **Solo bots firmados.** La llamada debe venir de un bot cuya firma verificó el gateway; cualquier otra se rechaza (`actor_unverified`).
+- **Solo su propia tarjeta de primer nivel.** La tarjeta debe estar asignada al bot que llama (`not_assigned`) y no puede ser una subtarea (`subtask`); las subtareas se mueven con su tarjeta madre. Una tarjeta archivada se rechaza (`archived`).
+- **Tu tarjeta, o una que autorizaste.** La tarjeta debe ser una que creaste en el panel, o una que autorizaste. Las tarjetas de seguimiento de una decisión y las que llegan sincronizadas desde Monday no cuentan como tuyas (`not_granted`).
+- **La autorización.** Abre la tarjeta y marca **Permitir que este bot pase la tarjeta a otro bot** (aparece cuando hay un bot asignado). Solo se puede autorizar al bot actual de la tarjeta. Una autorización sirve para un solo traspaso y se borra cada vez que la tarjeta se reasigna, la reasignes tú o un bot. Desmárcala para retirarla.
+- **Un destino válido.** El otro bot debe existir, estar habilitado, no ser el bot de voz ni el que llama (`bad_bot`), y necesita un tablero activado (`no_board`, `bot_unavailable`). Una tarjeta bloqueada o terminada se rechaza (`locked`, `finished`), igual que una cuyas subtareas tiene otro bot o que un bot movió (`subtree_blocked`). Si la tarjeta cambia mientras se hace el traspaso, la llamada se rechaza (`changed`).
+- **Nada se inicia.** La tarjeta y sus subtareas pasan al tablero del otro bot, **gated**, así que esperan tu aprobación del plan. No se inicia ningún trabajo ni sesión. El historial de la tarjeta muestra **pasada a otro bot**; autorizar y retirar muestran **permiso de traspaso cambiado**.
+
+Qué protege esto: un bot no puede mover tus propias tarjetas, ni las que autorizaste, a un bot de su elección. No impide que los bots repartan trabajo en general: cualquier bot puede seguir creando una tarjeta nueva asignada a otro bot (ver arriba).
+
 ## Permisos y seguridad
 
 Cada agente lleva una política de permisos que gobierna lo que puede hacer sin preguntar:
