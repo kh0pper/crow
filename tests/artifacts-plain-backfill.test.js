@@ -160,3 +160,20 @@ test("backfillPlain: a thread carried forward to another version meanwhile is no
     assert.equal(a.span, undefined);
   } finally { s.close(); }
 });
+
+test("backfillPlain: a storage error is not a mismatch — nothing is marked, the pass stops, and the next run tries again", async () => {
+  const s = await scratch();
+  try {
+    const art = await store.createArtifact(s.db, s.blobs, { title: "G", type: "document", source: { markdown: MD }, actor: bot }, { markdownBlocks });
+    const { now, old } = await makePreD28(s.db, art.id, 1);
+    const down = { get: async () => { throw Object.assign(new Error("timeout"), { code: "busy" }); } };
+    assert.deepEqual(await comments.backfillPlain(s.db, down, markdownBlocks), { versions: 0, threads: 0, skipped: 0, stopped: true });
+    assert.deepEqual(await mapOf(s.db, art.id, 1), old, "unmarked");
+    const empty = { get: async () => null };
+    assert.equal((await comments.backfillPlain(s.db, empty, markdownBlocks)).stopped, true);
+    assert.deepEqual(await mapOf(s.db, art.id, 1), old, "a missing blob is not a mismatch either");
+    assert.equal((await comments.backfillPlain(s.db, s.blobs, null)).stopped, true, "no renderer: nothing judged");
+    assert.deepEqual(await comments.backfillPlain(s.db, s.blobs, markdownBlocks), { versions: 1, threads: 0, skipped: 0 }, "the store is back: done");
+    assert.deepEqual(await mapOf(s.db, art.id, 1), now);
+  } finally { s.close(); }
+});

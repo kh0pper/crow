@@ -112,7 +112,15 @@ async function tab() {
   await send("Page.enable"); await send("Network.enable");
   await send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
   const evalIn = async (expression) => { const o = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }); return o.exceptionDetails ? { threw: o.exceptionDetails.text } : o.result.value; };
-  const nav = async (url) => { await send("Page.navigate", { url }); await waitFor(async () => (await evalIn("document.readyState")) === "complete"); };
+  // Asserts arrival (code review): a timed-out navigation must never let a check pass on the previous page.
+  // Asserts the navigation committed (code review): a failed or timed-out
+  // navigation must never let a check pass on the previous page. (A page may
+  // then navigate itself, e.g. the control's meta refresh.)
+  const nav = async (url) => {
+    const r = await send("Page.navigate", { url });
+    assert.ok(!r.errorText, `navigated to ${url}: ${r.errorText || ""}`);
+    assert.ok(await waitFor(async () => (await evalIn("document.readyState")) === "complete"), `loaded ${url}`);
+  };
   /** The artifact frame's DOM, read through the DOM domain (no script runs in
    *  the frame: it has none). An in-process frame is reached through the
    *  iframe's contentDocument (pierce); an out-of-process one through its own
@@ -230,7 +238,9 @@ test("real renderer output (mermaid, d2, vega-lite) parses cleanly as XHTML in t
       assert.ok(dom, `${item.engine}: frame DOM readable`);
       assert.equal(parseErrorIn(dom), false, `${item.engine}: no parse error`);
       assert.equal(dom.find((n) => n.local === "svg").isSVG, true, `${item.engine}: SVG namespace`);
-      assert.equal((await t.evalIn("__v.state()")).tripped, false);
+      assert.ok(dom.some((n) => n.xml), `${item.engine}: an XML document`);
+      const st = await t.evalIn("__v.state()");
+      assert.deepEqual({ tripped: st.tripped, loads: st.loads }, { tripped: false, loads: 1 }, item.engine);
     }
   } finally { await t.close(); }
 });
@@ -284,8 +294,11 @@ for (const [label, make, mustBeLive] of [
       CTL.push({ body, contentType: XHTML });
       const b0 = evil.length;
       await t.nav(`http://ctl.test:${P}/doc?i=${CTL.length - 1}`);
-      await sleep(1500);
-      const live = [...new Set(evil.slice(b0).map((p) => p.split("?")[0].replace(/#.*$/, "")))].sort();
+      const liveNow = () => [...new Set(evil.slice(b0).map((p) => p.split("?")[0].replace(/#.*$/, "")))].sort();
+      // Wait for the floor (no fixed sleep: full-suite load), then a grace period for the rest.
+      await waitFor(() => mustBeLive.every((m) => liveNow().includes(m)), 15000);
+      await sleep(1000);
+      const live = liveNow();
       console.log(`[diagram-xhtml] ${label}: live in the unprotected control: ${live.join(" ") || "(none: this engine has no such channel)"}`);
       for (const m of mustBeLive) assert.ok(live.includes(m), `the control is live for ${m} (got ${live.join(", ")})`);
       const before = evil.length;
@@ -386,7 +399,9 @@ test("differential: every save-time XML refusal is a real Chrome parse error, an
   try {
     const parsesInChrome = async (svg) => {
       CTL.push({ body: Buffer.from(handWrap(svg)), contentType: XHTML });
-      await t.nav(`http://ctl.test:${P}/doc?i=${CTL.length - 1}`);
+      const url = `http://ctl.test:${P}/doc?i=${CTL.length - 1}`;
+      await t.nav(url);
+      assert.equal(await t.evalIn("location.href"), url, "the oracle reads the page it just loaded");
       return t.evalIn(`document.getElementsByTagNameNS("*", "parsererror").length === 0 && document.getElementsByTagNameNS("${SVG_NS}", "svg").length === 1`);
     };
     for (const svg of REFUSED_PARSE_ERRORS) {

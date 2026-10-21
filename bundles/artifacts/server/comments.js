@@ -158,6 +158,7 @@ export function indexBlocks(html, count) {
  */
 export async function backfillPlain(db, blobs, markdownBlocks, { artifactId = null } = {}) {
   const out = { versions: 0, threads: 0, skipped: 0 };
+  if (typeof markdownBlocks !== "function" || !blobs) return { ...out, stopped: true }; // nothing to judge with: mark nothing
   const rows = (await db.execute({
     sql: "SELECT v.artifact_id, v.n, v.anchor_map_json, v.source_json, v.files_json FROM artifact_versions v JOIN artifacts a ON a.id=v.artifact_id WHERE a.type='document' AND v.anchor_map_json IS NOT NULL AND instr(v.anchor_map_json, '\"plain')=0" + (artifactId ? " AND v.artifact_id=?" : "") + " ORDER BY v.artifact_id, v.n LIMIT 2000",
     args: artifactId ? [artifactId] : [],
@@ -168,8 +169,11 @@ export async function backfillPlain(db, blobs, markdownBlocks, { artifactId = nu
     let next = plainBackfill(map, source, markdownBlocks);
     if (next) {
       const f = Array.isArray(files) ? files.find((x) => x && x.path === "index.html") : null;
-      let body = null;
-      try { body = f ? await blobs.get(f.key) : null; } catch { body = null; }
+      // A storage error is not a mismatch (code review I2): stop the pass and
+      // leave every row unmarked, so the next process start tries again.
+      let body;
+      try { body = f ? await blobs.get(f.key) : null; } catch { out.stopped = true; break; }
+      if (f && !body) { out.stopped = true; break; }
       const stored = body ? indexBlocks(body.toString("utf8"), next.blocks.length) : null;
       if (!stored || next.blocks.some((b, i) => plainOf(stored[i]) !== b.plain)) next = null;
     }

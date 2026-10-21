@@ -60,8 +60,12 @@ test("each refusal names its rule: case, namespace, duplicate, reference, charac
   assert.equal(xmlSvgCheck("<svg><text>&#x110000;</text></svg>").reason, "ref", "checked before any clamp");
   assert.equal(xmlSvgCheck("<svg><text>\u0001</text></svg>").reason, "char");
   assert.equal(xmlSvgCheck("<svg><g></G></svg>").reason, "close", "close tags are compared byte-for-byte");
-  assert.equal(xmlSvgCheck("<svg>" + "<g>".repeat(257) + "</g>".repeat(257) + "</svg>").reason, "depth");
-  assert.ok(xmlSvgCheck("<svg>" + "<g>".repeat(255) + "</g>".repeat(255) + "</svg>").svg);
+  assert.equal(xmlSvgCheck("<svg>" + "<g>".repeat(254) + "</g>".repeat(254) + "</svg>").reason, "depth", "255 levels + the wrapper's two is over libxml2's 256");
+  assert.ok(xmlSvgCheck("<svg>" + "<g>".repeat(253) + "</g>".repeat(253) + "</svg>").svg);
+  // Code review I1: a repeated declaration is a fatal XML error (expat, libxml2), even where Chrome is lenient.
+  assert.equal(xmlSvgCheck('<svg xmlns="http://www.w3.org/2000/svg" xmlns="http://www.w3.org/2000/svg"><g/></svg>').reason, "duplicate");
+  assert.equal(xmlSvgCheck('<svg xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:xlink="http://www.w3.org/1999/xlink"><use xlink:href="#a"/></svg>').reason, "duplicate");
+  assert.equal(xmlSvgCheck('<svg><rect id="a<b"/></svg>').reason, "structure", "< in an attribute value is refused here too, not only by safeSvg");
   assert.ok(xmlSvgCheck('<svg viewBox="0 0 1 1" preserveAspectRatio="none"><linearGradient gradientUnits="userSpaceOnUse"/><filter><feGaussianBlur stdDeviation="1"/></filter><clipPath clipPathUnits="objectBoundingBox"/><text><textPath startOffset="1">a</textPath></text></svg>').svg, "canonical camelCase names pass");
 });
 
@@ -93,6 +97,7 @@ test("anything the XML parser would refuse is refused at save (bad_source, one f
     ["lone surrogate in text", "<svg><text>a\uD800b</text></svg>"],
     ["]]> in character data", "<svg><text>a ]]> b</text></svg>"],
     ["duplicate attribute", '<svg><rect width="1" width="2"/></svg>'],
+    ["duplicate xmlns", '<svg xmlns="http://www.w3.org/2000/svg" xmlns="http://www.w3.org/2000/svg"><g/></svg>'],
     ["duplicate after namespace expansion", '<svg xmlns:l="http://www.w3.org/1999/xlink"><use xlink:href="#a" l:href="#b"/></svg>'],
     ["unbound prefix", '<svg><g foo:bar="1"/></svg>'],
     ["two colons in a name", '<svg xmlns:a="urn:x"><g a:b:c="1"/></svg>'],

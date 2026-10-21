@@ -73,7 +73,7 @@ function headLinks(lib, xhtml = false) {
     const fam = (f) => `"${f.family}",${f.fallback}`;
     rule = `body{font-family:${fam(fonts[0])}}` + (fonts[1] ? `h1,h2,h3,h4,h5,h6{font-family:${fam(fonts[1])}}` : "");
   }
-  return links + (rule ? `<style>${xhtml ? rule.replace(/&/g, "&amp;").replace(/</g, "&lt;") : rule}</style>` : "");
+  return links + (rule ? `<style>${xhtml ? rule.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") : rule}</style>` : "");
 }
 const designMeta = (lib, rendered = 0, notes = []) => (lib || rendered || notes.length
   ? { libs: lib ? lib.refs : [], house_style: lib ? lib.houseStyle || null : null, ...(lib && lib.houseStyle ? { house_style_links: lib.houseStyleLinks } : {}), rendered, notes }
@@ -350,7 +350,7 @@ const CANON_ATTR = new Map(["attributeName", "attributeType", "baseFrequency", "
   "viewBox", "viewTarget", "xChannelSelector", "yChannelSelector", "zoomAndPan"].map((n) => [n.toLowerCase(), n]));
 const canonElement = (n) => { const l = n.toLowerCase(); return CANON_ELEMENT.get(l) || l; };
 const canonAttr = (n) => { const l = n.toLowerCase(); return CANON_ATTR.get(l) || l; };
-const MAX_DEPTH = 256; // libxml2's default nesting cap (plan review M7)
+const MAX_DEPTH = 254; // libxml2's default nesting cap is 256, and the wrapper adds <html><body> (plan review M7)
 
 /** Fixed, actionable texts for a bot's own SVG that is not well-formed XML
  *  (never echoing input; one per rule so a bot can correct itself). */
@@ -362,7 +362,7 @@ export const XML_MESSAGES = Object.freeze({
   case: "svg names are case-sensitive: write linearGradient, radialGradient, clipPath, textPath and feGaussianBlur (and the other fe… filters), viewBox, preserveAspectRatio, gradientUnits, stdDeviation and the other camelCase SVG attributes exactly so; everything else in lower case",
   duplicate: "svg must be well-formed XML: never repeat an attribute on one element",
   namespace: "svg namespaces: declare nothing except xmlns=\"http://www.w3.org/2000/svg\" and xmlns:xlink=\"http://www.w3.org/1999/xlink\", on the root <svg> only; the only prefixed attributes are xlink:href, xlink:title and xml:space / xml:lang",
-  depth: "svg must nest elements at most 256 deep",
+  depth: "svg must nest elements at most 254 deep",
   structure: "svg must be well-formed XML: one root <svg> element, every attribute quoted",
 });
 export const BOT_XML = XML_MESSAGES.structure;
@@ -443,6 +443,10 @@ export function xmlSvgCheck(svg) {
       // Namespaces (plan review I2): exactly two declarations, byte-exact,
       // root only; prefixes xlink: and xml: only. A raw compare, so a
       // reference inside the value (sv&#x67;) can never satisfy it.
+      // Any repeat is fatal in XML 1.0, declarations included (code review I1).
+      if (seen.has(an)) return no("duplicate");
+      seen.add(an);
+      if (v.includes("<")) return no("structure");
       if (an === "xmlns") { if (!isRoot || v !== SVG_NS) return no("namespace"); rootHasXmlns = true; continue; }
       if (an === "xmlns:xlink") { if (!isRoot || v !== XLINK_NS) return no("namespace"); rootHasXlink = true; continue; }
       const colon = an.indexOf(":");
@@ -452,8 +456,6 @@ export function xmlSvgCheck(svg) {
         if (p === "xlink") usesXlink = true;
       } else if (!/^[A-Za-z][A-Za-z0-9._-]*$/.test(an)) return no("structure");
       else if (an !== canonAttr(an)) return no("case");
-      if (seen.has(an)) return no("duplicate");
-      seen.add(an);
     }
     const selfClose = svg.charAt(j) === "/";
     if (isRoot) { if (selfClose) return no("structure"); rootTagEnd = n0 + name.length; }

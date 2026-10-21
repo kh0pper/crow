@@ -75,7 +75,7 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     S.runtime.setContentResolver(store.contentResolver(S.db, S.blobs));
     M = { store, comments, rounds, delivery, links };
     S.plainBackfill = comments.backfillPlain(S.db, S.blobs, S.renderDeps.markdownBlocks).then((r) => {
-      if (r.versions || r.skipped) console.log(`[artifacts] plain backfill: ${r.versions} version(s), ${r.threads} thread(s), ${r.skipped} left on the fallback`);
+      if (r.versions || r.skipped || r.stopped) console.log(`[artifacts] plain backfill: ${r.versions} version(s), ${r.threads} thread(s), ${r.skipped} left on the fallback${r.stopped ? "; stopped early (storage unavailable), retried at the next start" : ""}`);
     }, (e) => console.warn(`[artifacts] plain backfill failed (${(e && e.code) || "error"}); old documents stay on the markdown fallback`));
   }
   const ensure = () => (ready ??= init().catch((e) => { ready = null; throw e; }));
@@ -379,9 +379,14 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
 
   /** D28 leftover (review L-6): pre-D28 documents get their blocks' rendered
    *  `plain` (and their block threads a span) from a ONE-TIME pass started in
-   *  init (comments.backfillPlain). The first viewer load or comment waits for
-   *  it once; it never fails a request. */
-  const backfillDone = async () => { try { await S.plainBackfill; } catch { /* logged where it ran */ } };
+   *  init (comments.backfillPlain). A document view or block comment waits
+   *  for it at most 2 s; it never fails a request. */
+  const backfillDone = async () => {
+    // Bounded (code review I3): a slow store never stalls the viewer; past
+    // the cap the request goes on with whatever the map holds.
+    let t;
+    try { await Promise.race([S.plainBackfill, new Promise((r) => { t = setTimeout(r, 2000); })]); } catch { /* logged where it ran */ } finally { clearTimeout(t); }
+  };
   router.get("/api/artifacts/:id", wrap(async (req, res) => {
     const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
     if (art.type === "document") await backfillDone();
