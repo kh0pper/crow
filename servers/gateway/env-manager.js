@@ -7,6 +7,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 export const APP_ROOT = resolve(__dirname, "../..");
 
 export function resolveEnvPath() {
+  // An instance with its own app env file (CROW_APP_ENV_PATH, e.g. a hardened
+  // co-hosted instance that cannot read the shared checkout .env) reads and
+  // writes that file: the same path the boot gate applied.
+  if (process.env.CROW_APP_ENV_PATH) return process.env.CROW_APP_ENV_PATH;
   const crowEnv = join(resolveCrowHome(), ".env");
   if (existsSync(crowEnv)) return crowEnv;
   return join(APP_ROOT, ".env");
