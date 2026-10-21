@@ -66,7 +66,7 @@ import { resolveDataDir } from "../../db.js";
 import { PINNED_PATH_ENV_KEYS } from "../../shared/crow-home.js";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { isPlaceholderValue } from "../bundle-env-placeholders.js";
-import { keychainGeneratedKeys, planGeneratedEnv, retainedEnvPath, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedKeys, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
+import { keychainGeneratedKeys, planGeneratedEnv, retainedEnvPath, legacyFallbackKeys, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedKeys, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
 
 /**
  * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
@@ -1012,8 +1012,11 @@ export async function backfillBundleKeychain({ log = (m) => console.log(`[keycha
     try { retained = parseEnvText(readFileSync(retainedEnvPath(CROW_HOME, id), "utf8")); } catch { /* none */ }
     const entryEnv = addons?.[id]?.env || {};
     const values = {};
+    const legacyKeys = legacyFallbackKeys(retained);
     for (const k of keys) {
       const plain = installed[k] || retained[k] || entryEnv[k] || "";
+      // A published compose default an old install ran on is never saved (see planGeneratedEnv).
+      if (legacyKeys.has(k) && plain === retained[k]) continue;
       // The retained copy only ever holds values Crow generated; anything else was typed.
       if (plain) values[k] = { plain, origin: retained[k] && retained[k] === plain ? "generated" : "typed" };
     }

@@ -346,3 +346,54 @@ test("in-place reinstall over a legacy install: the fallback comes from the PRIO
     B._setDockerRunnerForTest(null);
   }
 });
+
+// Review I2: uninstall keeping data retains the fallback the install ran on; the NEXT install
+// reads it from the retained copy. It is still the published default: never keychained,
+// neither by that install nor by the boot backfill.
+test("uninstall (keep data) then install: a retained compose fallback never reaches the keychain", async () => {
+  B._setComposeRunnerForTest(async () => ({ stdout: "", stderr: "" }));
+  B._setDockerRunnerForTest(async () => ({ stdout: "", stderr: "" }));
+  try {
+    const id = "demo-legacy-retained";
+    const manifest = {
+      id, name: "Demo Retained", description: "d", type: "bundle", category: "storage", version: "0.2.0",
+      env_vars: [{ name: "LEG_PASSWORD", secret: true, generate: "secret", keychain: true, keychain_label: "admin password" }],
+    };
+    mkdirSync(join(FIXTURES, id), { recursive: true });
+    writeFileSync(join(FIXTURES, id, "manifest.json"), JSON.stringify(manifest));
+    writeFileSync(join(FIXTURES, id, "docker-compose.yml"), 'services:\n  app:\n    image: busybox:1.36\n    environment:\n      LEG_PASSWORD: "${LEG_PASSWORD:?LEG_PASSWORD is not set}"\n');
+    // The old install folder, as the uninstall sees it: blank key, old compose with a fallback.
+    const old = mkdtempSync(join(tmpdir(), "crow-kcwire-old-"));
+    writeFileSync(join(old, ".env"), "LEG_PASSWORD=\n");
+    const oldCompose = "services:\n  app:\n    environment:\n      LEG_PASSWORD: ${LEG_PASSWORD:-old-fallback-pw}\n";
+    assert.equal(S.retainGeneratedForReinstall(id, manifest, { destDir: old, crowHome: CROW_HOME, composeText: oldCompose }), 1);
+    rmScratch(old);
+
+    const job = B._createJobForTest(id, "install");
+    const out = await B.runInstallJob(id, {}, { job, installedSnapshot: [], consentVerified: false, manifest });
+    assert.equal(out.ok, true, out.reason);
+    assert.equal(parseEnvText(readFileSync(join(CROW_HOME, "bundles", id, ".env"), "utf8")).LEG_PASSWORD, "old-fallback-pw", "the kept data's password is reused");
+    assert.ok(job.log.some((l) => l.includes("LEG_PASSWORD is running on the published default")), job.log.join(" | "));
+    const d = db();
+    try { assert.deepEqual((await K.listEntries(d)).filter((e) => e.bundle_id === id), [], "install never keychains it"); } finally { d.close(); }
+
+    // The boot backfill (installed bundle, value in .env and the retained copy) skips it too.
+    const installedPath = join(CROW_HOME, "installed.json");
+    const list = existsSync(installedPath) ? JSON.parse(readFileSync(installedPath, "utf8")) : [];
+    writeFileSync(installedPath, JSON.stringify([...list.filter((i) => i.id !== id), { id, type: "bundle", version: "0.2.0" }]));
+    await B.backfillBundleKeychain({ log: () => {} });
+    const d2 = db();
+    try { assert.deepEqual((await K.listEntries(d2)).filter((e) => e.bundle_id === id), [], "backfill never keychains it"); } finally { d2.close(); }
+
+    // A second uninstall/reinstall cycle keeps the mark (the retained copy is rewritten by persist()).
+    const job2 = B._createJobForTest(id, "install");
+    rmScratch(join(CROW_HOME, "bundles", id));
+    const out2 = await B.runInstallJob(id, {}, { job: job2, installedSnapshot: [], consentVerified: false, manifest });
+    assert.equal(out2.ok, true, out2.reason);
+    const d3 = db();
+    try { assert.deepEqual((await K.listEntries(d3)).filter((e) => e.bundle_id === id), []); } finally { d3.close(); }
+  } finally {
+    B._setComposeRunnerForTest(null);
+    B._setDockerRunnerForTest(null);
+  }
+});

@@ -415,7 +415,8 @@ test("uninstall retention: a pre-generation install's typed or fallback values a
   const compose = "x: ${FALLBACK_DB_PASSWORD:-bookstack}\n";
   assert.equal(S.retainGeneratedForReinstall("old", m, { destDir: dest, crowHome: home, composeText: compose }), 2);
   const kept = S.parseEnvText(readFileSync(S.retainedEnvPath(home, "old"), "utf8"));
-  assert.deepEqual(kept, { TYPED_DB_PASSWORD: "typed-by-a-human", FALLBACK_DB_PASSWORD: "bookstack" });
+  // The fallback is marked as a published default, so it is never keychained later.
+  assert.deepEqual(kept, { TYPED_DB_PASSWORD: "typed-by-a-human", FALLBACK_DB_PASSWORD: "bookstack", CROW_LEGACY_FALLBACK_KEYS: "FALLBACK_DB_PASSWORD" });
   assert.equal(statSync(S.retainedEnvPath(home, "old")).mode & 0o777, 0o600);
   // Reinstall into a fresh dir: the kept values win; only the never-set key is minted.
   const re = S.resolveGeneratedEnv("old", m, { destDir: scratch("d-"), crowHome: home });

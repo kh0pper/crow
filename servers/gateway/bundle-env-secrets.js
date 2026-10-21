@@ -118,6 +118,27 @@ export function writePrivateFile(path, content) {
   }
 }
 
+/**
+ * The retained copy's record of keys whose value is a compose fallback an old install ran
+ * on (a published default): `CROW_LEGACY_FALLBACK_KEYS=A,B`. Kept so a later install, and
+ * the boot backfill, never save that value to the keychain as if it were this install's.
+ */
+export const LEGACY_FALLBACK_MARKER = "CROW_LEGACY_FALLBACK_KEYS";
+/** Keys the retained copy marks as legacy, still holding the marked value. */
+export function legacyFallbackKeys(retained) {
+  const raw = String(retained?.[LEGACY_FALLBACK_MARKER] || "");
+  return new Set(raw.split(",").map((k) => k.trim()).filter((k) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && retained[k]));
+}
+
+/** `env` with the marker set to the union of its still-valid legacy keys and `add`. */
+function withLegacyMarker(env, add) {
+  const out = { ...env };
+  const keys = new Set([...legacyFallbackKeys(env), ...add].filter((k) => out[k]));
+  delete out[LEGACY_FALLBACK_MARKER];
+  if (keys.size > 0) out[LEGACY_FALLBACK_MARKER] = [...keys].sort().join(",");
+  return out;
+}
+
 export function retainedEnvPath(crowHome, bundleId) {
   return join(crowHome, "secrets", "bundle-env", `${bundleId}.env`);
 }
@@ -172,6 +193,9 @@ export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, compos
   const replaced = [];
   const replaceSkipped = [];
   const existingFor = (k) => installed[k] || retained[k] || legacy[k] || "";
+  const retainedLegacy = legacyFallbackKeys(retained);
+  const isLegacy = (k, v) => (legacy[k] && v === legacy[k]) || (retainedLegacy.has(k) && v === retained[k]);
+  const legacyKeys = new Set();
   // Private halves first, so a public half can be derived from (or minted with) its pair.
   const order = [...keys].sort((a, b) => (byName.get(a)?.generate === "vapid_public_key") - (byName.get(b)?.generate === "vapid_public_key"));
   const pairs = {};
@@ -211,10 +235,11 @@ export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, compos
     }
     if (existing) {
       env[k] = existing;
+      if (isLegacy(k, existing)) legacyKeys.add(k);
       if (spec.keychain === true && !spec.store_as) {
         // "legacy": the value is the compose fallback the old install ran on, a published
         // default — kept so the data still opens, but never saved to the keychain.
-        const origin = legacy[k] && existing === legacy[k] ? "legacy" : installed[k] ? "typed" : "generated";
+        const origin = isLegacy(k, existing) ? "legacy" : installed[k] ? "typed" : "generated";
         reusedPlain[k] = { plain: existing, origin };
       }
       continue;
@@ -238,7 +263,7 @@ export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, compos
       retainedPath,
       `# Crow-generated secrets for bundle '${bundleId}'. Kept across uninstall so a\n` +
         `# reinstall reuses them (the bundle's data still expects them). Do not edit.\n` +
-        formatEnvLines({ ...retained, ...env }),
+        formatEnvLines(withLegacyMarker({ ...retained, ...env }, legacyKeys)),
     );
   };
   return { env, minted, reusedPlain, restored, replaced, replaceSkipped, persist };
@@ -325,12 +350,14 @@ export function retainGeneratedForReinstall(bundleId, manifest, { destDir, crowH
     const retainedPath = retainedEnvPath(crowHome, bundleId);
     const retained = readEnvSafe(retainedPath);
     const add = {};
+    const marked = new Set();
     for (const k of keys) {
       // A library path follows the latest install (the user may have pointed it elsewhere);
       // a secret is never replaced (its kept database expects the old one).
       if (retained[k] && !(pathKeys.has(k) && installed[k] && installed[k] !== retained[k])) continue;
       const v = installed[k] || legacy[k];
       if (v) add[k] = v;
+      if (v && legacy[k] && v === legacy[k] && !pathKeys.has(k)) marked.add(k);
     }
     if (Object.keys(add).length === 0) return 0;
     const dir = dirname(retainedPath);
@@ -340,7 +367,7 @@ export function retainGeneratedForReinstall(bundleId, manifest, { destDir, crowH
       retainedPath,
       `# Crow-generated secrets for bundle '${bundleId}'. Kept across uninstall so a\n` +
         `# reinstall reuses them (the bundle's data still expects them). Do not edit.\n` +
-        formatEnvLines({ ...retained, ...add }),
+        formatEnvLines(withLegacyMarker({ ...retained, ...add }, marked)),
     );
     return Object.keys(add).length;
   } catch {
