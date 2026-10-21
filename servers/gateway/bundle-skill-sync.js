@@ -106,9 +106,12 @@ function lstatOrNull(p) { try { return lstatSync(p); } catch { return null; } }
  *   they deleted is installed again (rule 2's "leave it" is for the silent boot pass)
  * @param {object} [o.ledger]
  * @param {(m: string) => void} [o.log]
- * @returns {{ lines: Array<{bundle, skill, action}>, kept: Array<{bundle, skill, reason, notify}> }}
+ * @returns {{ lines: Array<{bundle, skill, action, srcSha, rec}>, kept: Array<{bundle, skill, reason, notify}> }}
  *   action ∈ same | adopt | install | refresh | kept-edited | kept-unverified |
  *            skip-symlink | skip-deleted | skip-optout
+ *   srcSha: the shipped file's hash (null for skip-optout, which never reads
+ *   the source); rec: the record entry as it was BEFORE this decision, or
+ *   null. The Skills panel reads both (report mode) to show its statuses.
  */
 export function syncBundleSkills({ id, src, manifest, installedManifest = null, mode = "on", install = false, skillsDir, recordPath, ledger = {}, log = (m) => console.log(m) }) {
   const lines = [];
@@ -117,7 +120,7 @@ export function syncBundleSkills({ id, src, manifest, installedManifest = null, 
   const paths = manifestSkillPaths(manifest);
   if (!paths.length) return { lines, kept };
   const write = mode === "on";
-  const say = (skill, action, msg) => { lines.push({ bundle: id, skill, action }); if (msg) log(`[skills]${write ? "" : " (report)"} ${id}/${skill}: ${msg}`); };
+  const say = (skill, action, msg, srcSha = null, rec = null) => { lines.push({ bundle: id, skill, action, srcSha, rec }); if (msg) log(`[skills]${write ? "" : " (report)"} ${id}/${skill}: ${msg}`); };
   if (installedManifest && installedManifest.refresh === false) {
     for (const p of paths) say(baseOf(p), "skip-optout", null);
     log(`[skills] ${id}: installed copy opts out of refresh ("refresh": false) — skills left as installed`);
@@ -140,23 +143,23 @@ export function syncBundleSkills({ id, src, manifest, installedManifest = null, 
     const st = lstatOrNull(dst);
 
     // 0. symlink: the operator's, never ours.
-    if (st && st.isSymbolicLink()) { say(skill, "skip-symlink", "symlink, left alone (user-managed)"); continue; }
+    if (st && st.isSymbolicLink()) { say(skill, "skip-symlink", "symlink, left alone (user-managed)", hs, rec); continue; }
     // 2. missing.
     if (!st) {
-      if (rec && !install) { say(skill, "skip-deleted", null); continue; }
+      if (rec && !install) { say(skill, "skip-deleted", null, hs, rec); continue; }
       copyIn(dst, srcBuf);
       put(skill, { bundle: id, sha256: hs, installedAt: now });
-      say(skill, "install", "installed");
+      say(skill, "install", "installed", hs, rec);
       continue;
     }
     let hd;
-    try { hd = skillHash(readFileSync(dst)); } catch { say(skill, "kept-unverified", "unreadable, left alone"); continue; }
+    try { hd = skillHash(readFileSync(dst)); } catch { say(skill, "kept-unverified", "unreadable, left alone", hs, rec); continue; }
     // 1. identical.
     if (hd === hs) {
       if (!rec || rec.sha256 !== hs || rec.kept || rec.bundle !== id) {
         put(skill, { bundle: id, sha256: hs, installedAt: (rec && rec.sha256 === hs && rec.installedAt) || now });
-        say(skill, "adopt", rec && rec.sha256 === hs ? null : "already current, recorded");
-      } else say(skill, "same", null);
+        say(skill, "adopt", rec && rec.sha256 === hs ? null : "already current, recorded", hs, rec);
+      } else say(skill, "same", null, hs, rec);
       continue;
     }
     // 3. recorded with what we wrote.
@@ -164,14 +167,14 @@ export function syncBundleSkills({ id, src, manifest, installedManifest = null, 
       if (hd === rec.sha256) {
         copyIn(dst, srcBuf);
         put(skill, { bundle: id, sha256: hs, installedAt: now });
-        say(skill, "refresh", "refreshed (unedited)");
+        say(skill, "refresh", "refreshed (unedited)", hs, rec);
       } else {
         // Review 1: only a writing pass may ask for a notification — report
         // mode persists no notifiedFor, so it would repeat every boot.
         const notify = write && rec.notifiedFor !== hs;
         if (notify) put(skill, { ...rec, notifiedFor: hs });
         kept.push({ bundle: id, skill, reason: "edited", notify });
-        say(skill, "kept-edited", "edited after install, kept (the new version was not applied)");
+        say(skill, "kept-edited", "edited after install, kept (the new version was not applied)", hs, rec);
       }
       continue;
     }
@@ -180,13 +183,13 @@ export function syncBundleSkills({ id, src, manifest, installedManifest = null, 
     if (known) {
       copyIn(dst, srcBuf);
       put(skill, { bundle: id, sha256: hs, installedAt: now });
-      say(skill, "refresh", "refreshed (a past shipped version)");
+      say(skill, "refresh", "refreshed (a past shipped version)", hs, rec);
       continue;
     }
     const quiet = rec && rec.kept === true && rec.reason === "unverified" && rec.srcSha === hs;
     if (!quiet) put(skill, { bundle: id, sha256: null, kept: true, reason: "unverified", notifiedFor: null, srcSha: hs, keptAt: now });
     kept.push({ bundle: id, skill, reason: "unverified", notify: false });
-    say(skill, "kept-unverified", quiet ? null : "differs from every shipped version we know, kept (not verified as edited)");
+    say(skill, "kept-unverified", quiet ? null : "differs from every shipped version we know, kept (not verified as edited)", hs, rec);
   }
   if (dirty && write) atomicWrite(recordPath, JSON.stringify(record, null, 2) + "\n");
   return { lines, kept };
