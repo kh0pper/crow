@@ -115,7 +115,7 @@ export default {
       <div style="text-align:center;margin:1rem 0">
         <img src="${qrDataUri}" alt="QR Code" width="180" height="180" style="border-radius:8px;background:#fff;padding:6px">
       </div>
-      <p style="font-size:0.75rem;color:var(--crow-text-tertiary);word-break:break-all;text-align:center;margin-bottom:1rem">${t("login.2faManualKey", lang)}: <code>${secret}</code></p>
+      <p style="font-size:0.75rem;color:var(--crow-text-tertiary);word-break:break-all;text-align:center;margin-bottom:1rem">${t("login.2faManualKey", lang)}: <code>${escapeHtml(secret)}</code></p>
       <div style="background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:8px;padding:1rem;margin:1rem 0;text-align:center">
         <p style="font-size:0.8rem;font-weight:600;margin-bottom:0.5rem">${t("login.2faRecoveryCodes", lang)}</p>
         ${recoveryCodes.map(c => `<code style="display:block;padding:0.2rem 0;font-size:0.9rem">${c}</code>`).join("")}
@@ -123,7 +123,7 @@ export default {
       </div>
       <form method="POST">
         <input type="hidden" name="action" value="enable_2fa">
-        <input type="hidden" name="secret" value="${secret}">
+        <input type="hidden" name="secret" value="${escapeHtml(secret)}">
         <input type="hidden" name="recovery_codes" value="${encodeURIComponent(JSON.stringify(recoveryCodes))}">
         <input type="text" name="totp_code" placeholder="${t("login.2faPlaceholder", lang)}" required autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]*" maxlength="6" style="text-align:center;font-size:1.1rem;letter-spacing:0.2em;padding:0.5rem;width:100%;border:1px solid var(--crow-border);border-radius:6px;background:var(--crow-bg-deep);color:var(--crow-text-primary);margin-bottom:0.75rem">
         <button type="submit" class="btn btn-secondary" style="width:100%">${t("login.2faSetupVerifyButton", lang)}</button>

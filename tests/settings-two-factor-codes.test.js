@@ -72,7 +72,10 @@ test("regenerate: codes are rendered in the POST response, never put in a URL, s
     const res = recordingRes();
     let content = null;
     const req = { method: "POST", query: { section: "two-factor" }, body: { action: "regenerate_recovery_codes" }, csrfToken: "tok" };
-    await panel.handler(req, res, { db: (await import("../servers/db.js")).createDbClient(), lang: "en", layout: ({ content: c }) => { content = c; return c; } });
+    const db = (await import("../servers/db.js")).createDbClient();
+    try {
+      await panel.handler(req, res, { db, lang: "en", layout: ({ content: c }) => { content = c; return c; } });
+    } finally { db.close(); }
 
     assert.deepEqual(res.urls, [], "no redirect: nothing carries the codes in a Location header");
     assert.ok(content, "the section was rendered in the POST response");
