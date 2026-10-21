@@ -314,7 +314,7 @@ export function classifySkills({ crowHome, appBundles, repoDir, lang = "en", kit
       } else {
         row.source = "yours";
         // Unrecorded, but sitting in an installed extension's copy dir that its
-        // repo manifest no longer lists (capstone-research-workflow on crow).
+        // repo manifest no longer lists (a skill an extension stopped shipping).
         const orphanOf = installedIds.find((id) => lstatOrNull(join(crowHome, "bundles", id, "skills", file)) && manifestOf(id) && !shippedBy(id, file));
         if (orphanOf) Object.assign(row, { basedOn: orphanOf, bundle: orphanOf, status: "orphan" });
       }

@@ -28,9 +28,9 @@ writeFileSync(join(SKILLS, "kiosk.md"), kiosk);
 writeFileSync(join(SKILLS, "podcast.md"), podcast);
 writeFileSync(join(SKILLS, "media.md"), "# My own media notes\n");
 writeFileSync(join(SKILLS, "data-dashboard.md"), shipped("data-dashboard", "data-dashboard.md"));
-writeFileSync(join(SKILLS, "capstone-fixture.md"), "# Capstone fixture\n");
+writeFileSync(join(SKILLS, "retired-fixture.md"), "# Retired fixture\n");
 mkdirSync(join(HOME, "bundles", "data-dashboard", "skills"), { recursive: true });
-writeFileSync(join(HOME, "bundles", "data-dashboard", "skills", "capstone-fixture.md"), "# Capstone fixture\n");
+writeFileSync(join(HOME, "bundles", "data-dashboard", "skills", "retired-fixture.md"), "# Retired fixture\n");
 writeFileSync(join(SKILLS, "household-fixture.md"), "---\ndescription: Chores and lists for the house.\n---\n# Household\n");
 writeFileSync(join(HOME, "skill-installs.json"), JSON.stringify({
   "kiosk.md": { bundle: "kiosk", sha256: skillHash(kiosk), installedAt: "t" },
@@ -83,9 +83,9 @@ test("an edited copy whose extension shipped a newer version: Yours · copy of <
 });
 
 test("a copy its installed extension no longer ships reads No longer shipped", async () => {
-  const r = rowsFor(await list("en"), "capstone-fixture");
+  const r = rowsFor(await list("en"), "retired-fixture");
   assert.match(text(r.yours), /No longer shipped/);
-  assert.match(text(rowsFor(await list("es"), "capstone-fixture").yours), /Ya no se incluye/);
+  assert.match(text(rowsFor(await list("es"), "retired-fixture").yours), /Ya no se incluye/);
 });
 
 test("the purpose line comes from YAML; English text on an es page is tagged lang=en", async () => {

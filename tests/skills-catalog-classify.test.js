@@ -129,11 +129,11 @@ test("an edited copy kept when its extension was uninstalled reads 'extension re
   assert.deepEqual(pick(w.row("media")), { source: "yours", bundle: "media", status: "ext-removed", basedOn: "media", linked: false, replacesBuiltin: false, hasFile: true });
 });
 
-test("a copy its installed extension no longer ships reads 'no longer shipped' (the capstone shape)", () => {
-  const w = world().bundle("dash", { "dash.md": "# Dash\n" }).installed("dash").user("capstone.md", "# Capstone\n");
+test("a copy its installed extension no longer ships reads 'no longer shipped' (a skill its extension stopped shipping)", () => {
+  const w = world().bundle("dash", { "dash.md": "# Dash\n" }).installed("dash").user("retired.md", "# Retired\n");
   mkdirSync(join(w.home, "bundles", "dash", "skills"), { recursive: true });
-  writeFileSync(join(w.home, "bundles", "dash", "skills", "capstone.md"), "# Capstone\n");
-  assert.deepEqual(pick(w.row("capstone")), { source: "yours", bundle: "dash", status: "orphan", basedOn: "dash", linked: false, replacesBuiltin: false, hasFile: true });
+  writeFileSync(join(w.home, "bundles", "dash", "skills", "retired.md"), "# Retired\n");
+  assert.deepEqual(pick(w.row("retired")), { source: "yours", bundle: "dash", status: "orphan", basedOn: "dash", linked: false, replacesBuiltin: false, hasFile: true });
   // Recorded under that bundle, manifest dropped it: same status.
   const w2 = world().bundle("dash", { "dash.md": "# Dash\n" }).installed("dash").user("old.md", "# Old\n");
   w2.record({ "old.md": { bundle: "dash", sha256: "x", installedAt: "t" } });
