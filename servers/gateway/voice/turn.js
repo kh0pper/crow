@@ -16,7 +16,7 @@ import {
 import { withTurnContext, createContextEchoGate, stripContextEcho, stripContextEchoDeep, TURN_CONTEXT_NOTE } from "./context-echo.js";
 import { estimatePromptTokens, requestFits, choosePromptFit, dropOldestExchange } from "./prompt-fit.js";
 import { claimsAction, claimsReminder, claimsBeyondMemory, toolEffect, needsSpokenYes } from "./action-claims.js";
-import { classifyTools } from "./tool-families.js";
+import { classifyTools, phraseWords, normalizeIntentLists, listMatches } from "./tool-families.js";
 import { voiceAbilities } from "./voice-abilities.js";
 import { CROW_VOICE_BOT_ID, normalizeVoiceSettings, isVoiceBotDef } from "../../shared/voice-bot.js";
 
@@ -145,6 +145,19 @@ const WEAKER = { named: 2, required: 1, none: 0 };
 // A step-down learned from a refused request is forgotten after this long (the server may have been replaced).
 const LEARNED_TTL_MS = 10 * 60 * 1000;
 const MEMORY_OFF = "Memory is turned off on this display. Tell the user you can't use saved memories here, then end your turn — do not call another tool.";
+/**
+ * Crow's own routine objects (PR 2: deps.ownTools reports one as `unavailable` when no backend serves it).
+ * Phrase lists (tool-families.js rules: plain words, en + es), never patterns. An action request that names
+ * only objects with no backend gets CANT_DO_TEXT with no model call, except a calendar: then a Crow reminder
+ * is offered instead (rev 2.1).
+ */
+const OWN_OBJECTS = Object.freeze({
+  calendar: normalizeIntentLists({ en: ["calendar", "calendars", "agenda", "appointment", "appointments", "calendar event"], es: ["calendario", "agenda", "cita", "citas"] }),
+  reminders: normalizeIntentLists({ en: ["remind", "reminder", "reminders"], es: ["recuerdame", "recordatorio", "recordatorios"] }),
+  tasks: normalizeIntentLists({ en: ["task", "tasks", "to do", "todo", "to do list", "todo list"], es: ["tarea", "tareas"] }),
+});
+/** Rides on the user message of a calendar-fallback turn (tagged: never heard, never saved). */
+const calendarFallbackNote = (names) => `[Tools] No calendar is installed here, so nothing can be added to a calendar. Offer the user a reminder at the time they asked for instead, by calling ${names.join(" or ")}. Never say it was added to a calendar.`;
 
 /**
  * Only a tool OFFERED on this turn may run. The model can name any tool, and a photo, a page or a
@@ -578,7 +591,29 @@ export function createVoiceTurnRunner(deps) {
       // needs it. Live test 2026-10-04: with the display tool on every turn the 4B answered plain
       // questions through it — two tool rounds, 7 s, and a card repeating the spoken answer.
       const offered = new Set(extra.filter((x) => typeof x.when !== "function" || x.when(transcript) === true).map((x) => x.definition.name));
-      const allTools = turnTools(bot, { memoryOn, extra, deny });
+      // Crow's own tools (PR 2): in-process routine tools (a calendar event, a reminder, a task), one tool family
+      // each. opts.ownTools (an array: tests, overrides) wins; else, for the voice bot only, deps.ownTools(...)
+      // → { tools, unavailable }. A turn with a must-run extra tool (the glasses camera, a must-run display tool)
+      // carries only what it carries today ([rev2 C2]); opts.noOwnTools forces the same.
+      const mustOffered = extra.some((x) => offered.has(x.definition.name) && typeof x.must === "function" && x.must(transcript) === true);
+      const ownByName = new Map();
+      const ownUnavailable = new Set();
+      if (!mustOffered && opts.noOwnTools !== true) {
+        let src = null;
+        if (Array.isArray(opts.ownTools)) src = opts.ownTools;
+        else if (typeof deps.ownTools === "function" && isVoiceBotDef(bot)) {
+          try { src = await deps.ownTools({ db, bot, surface: timings.surface, lang: opts.lang, tz: opts.tz, now: now() }); }
+          catch (err) { log(`[voice-turn] ${device.id} own tools not loaded (${err?.message || err})`); }
+        }
+        for (const id of Array.isArray(src?.unavailable) ? src.unavailable : []) if (Object.hasOwn(OWN_OBJECTS, id)) ownUnavailable.add(id);
+        const policyDeny = Array.isArray(bot.permission_policy?.deny) ? bot.permission_policy.deny : [];
+        for (const o of Array.isArray(src) ? src : Array.isArray(src?.tools) ? src.tools : []) {
+          const n = o?.definition?.name;
+          if (typeof n !== "string" || !n || typeof o.execute !== "function" || deny.has(n) || policyDeny.includes(n) || extraByName.has(n) || ownByName.has(n)) continue;
+          ownByName.set(n, { ...o, family: typeof o.family === "string" && /^own:[a-z_]{1,24}$/.test(o.family) ? o.family : "own:tools" });
+        }
+      }
+      const allTools = turnTools(bot, { memoryOn, extra, deny }).filter((t) => !ownByName.has(t.name)).concat([...ownByName.values()].map((o) => o.definition));
       // Memories on: the memory tool is offered only when the question asks to remember or recall
       // (live re-test 2026-10-04: "what's today's date" went to memory twice — 11.5 s).
       const memoryOffered = memoryOn && (typeof opts.memoryWhen !== "function" || opts.memoryWhen(transcript) === true);
@@ -586,8 +621,35 @@ export function createVoiceTurnRunner(deps) {
       // Tool families on intent: the quick model is offered a family only when the plain transcript
       // asks for it, or the previous turn used it (one follow-up). Extra (display) tools and memory
       // keep their own gates above. A plain question therefore goes out with no tools at all.
-      const fam = opts.familiesOnIntent === true && deps.toolFamilies ? deps.toolFamilies : null;
-      const prevFam = lastFamilies.get(device.id) || NO_FAMILIES;
+      // Own tools join as their own families (a per-turn wrapper; deps.toolFamilies is never changed): offered on
+      // their intent lists, withheld (and so escalated on an action request) otherwise. Families off: every round.
+      const famBase = opts.familiesOnIntent === true && deps.toolFamilies ? deps.toolFamilies : null;
+      const ownLists = new Map();
+      for (const o of ownByName.values()) ownLists.set(o.family, [...(ownLists.get(o.family) || []), ...normalizeIntentLists(o.intent)]);
+      const fam = famBase && ownByName.size ? {
+        ...famBase,
+        familyOf: (n) => ownByName.get(String(n ?? ""))?.family ?? famBase.familyOf(n),
+        hasList: (f) => ownLists.has(f) || famBase.hasList(f),
+        wants: (f, t) => (ownLists.has(f) ? listMatches(phraseWords(t), ownLists.get(f)) : famBase.wants(f, t)),
+      } : famBase;
+      actionAsked = typeof opts.actionWhen === "function" && opts.actionWhen(transcript) === true;
+      // Rule 6 ([rev2 I11], rev 2.1): an action request that names only routine objects with no backend. A calendar
+      // with a Crow reminder tool at hand is a fallback turn (the reminder is offered, no escalation); anything else
+      // is the can't-do line, below.
+      let noBackend = null;
+      let calendarFallback = false;
+      if (actionAsked && ownUnavailable.size) {
+        const words = phraseWords(transcript);
+        const named = Object.keys(OWN_OBJECTS).filter((id) => listMatches(words, OWN_OBJECTS[id]));
+        if (named.length && named.every((id) => ownUnavailable.has(id))) {
+          if (named.includes("calendar") && [...ownByName.values()].some((o) => o.family === "own:reminders")) calendarFallback = true;
+          else noBackend = named[0];
+        }
+      }
+      const fallbackNames = calendarFallback ? [...ownByName.values()].filter((o) => o.family === "own:reminders").map((o) => o.definition.name) : [];
+      const prevFam = calendarFallback
+        ? new Set([...(lastFamilies.get(device.id) || NO_FAMILIES), "own:reminders"])
+        : lastFamilies.get(device.id) || NO_FAMILIES;
       // The classification is shared with the Bot Builder's "By voice on displays" line (tool-families.js classifyTools).
       const cls = classifyTools({ baseTools, fam, transcript, prevFam, isExtraTool: (n) => extraByName.has(n), isMemoryTool: (n) => deps.isMemoryTool(n) });
       const { famWanted, famOf, quickTools, famIds, unlisted } = cls;
@@ -627,9 +689,10 @@ export function createVoiceTurnRunner(deps) {
       // and send them to the (possibly cold) 35B.
       const isExtraCall = (m) => {
         if (routeNeutral.has(m)) return true;
-        if (m.role === "tool") return extraByName.has(m.tool_name);
+        // Own-tool calls are route-neutral too ([rev2 I2]): the next plain question stays on the quick model.
+        if (m.role === "tool") return extraByName.has(m.tool_name) || ownByName.has(m.tool_name);
         if (m.role !== "assistant" || !m.tool_calls) return false;
-        try { const tc = JSON.parse(m.tool_calls); return Array.isArray(tc) && tc.length > 0 && tc.every((c) => extraByName.has(c.name)); } catch { return false; }
+        try { const tc = JSON.parse(m.tool_calls); return Array.isArray(tc) && tc.length > 0 && tc.every((c) => extraByName.has(c.name) || ownByName.has(c.name)); } catch { return false; }
       };
       // The router sees the PLAIN transcript, never the turnContext prefix: "[Display] Open windows: …"
       // matched TOOL_INTENT_RE ("open") and escalated every kiosk turn to the 35B (smoke 2026-10-04).
@@ -640,7 +703,6 @@ export function createVoiceTurnRunner(deps) {
       // turn can never start a model and its result does not depend on which model is resident.
       // Action turns (see ACTION_NOTE above). The add-on wrapper (crow_tools) is never in famIds: when the quick
       // model is not offered it, the assistant still has tools, and the router must know.
-      actionAsked = typeof opts.actionWhen === "function" && opts.actionWhen(transcript) === true;
       const actionTurn = actionAsked || (typeof opts.actionWhen === "function" && lastAction.has(device.id)
         && typeof opts.actionFollowWhen === "function" && opts.actionFollowWhen(transcript) === true);
       // A display tool offered because a window is open (or music plays) is not what this request asks for:
@@ -653,13 +715,28 @@ export function createVoiceTurnRunner(deps) {
       const wrapperWithheld = cls.wrapperWithheld;
       // Escalate an action request when the quick model got no family tool but the assistant has some — and no
       // display tool is on offer (a display command such as "add two minutes" stays on the quick model).
-      const actionWithheld = cls.actionWithheld(actionAsked, displayBacks);
+      // quickBacked ([rev2 I11]): an own tool or the hand-off tool is on offer to the quick model, which can act on it.
+      const quickBacked = quickTools.some((t) => ownByName.has(t.name) || t.name === "crow_handoff");
+      const actionWithheld = cls.actionWithheld(actionAsked, displayBacks) && !quickBacked;
       if (actionAsked) timings.action_intent = true;
+      // A routine object with no backend: no model call and no escalation (a calendar falls back to a reminder instead).
+      if (noBackend) {
+        timings.action_no_backend = true;
+        await speakLine(String(opts.cantDoText || CANT_DO_TEXT));
+        return result;
+      }
+      if (calendarFallback) {
+        // Per-turn, on the user message (the system message stays byte-stable); dropped before saving.
+        timings.calendar_fallback = true;
+        const note = calendarFallbackNote(fallbackNames);
+        userMsg.content = withTurnContext(ctxLine ? `${ctxLine}\n${note}` : note, transcript);
+        echoGuard.push(note, TURN_CONTEXT_NOTE);
+      }
       // A voice bot with escalation off (Bot Builder) is taken as opts.noEscalate.
       const noEscalate = opts.noEscalate === true || normalizeVoiceSettings(bot).escalation === "off";
-      const decision = mustX?.mustRoute === "fast" || noEscalate
-        ? { route: "fast", reason: noEscalate ? "no-escalate" : "must-fast", key: bot.fast_voice_model || deps.fastKey }
-        : deps.chooseVoiceRoute(routeView, { hasTools: quickTools.length > 0 || unlisted.length > 0 || wrapperWithheld, actionIntent: actionWithheld });
+      const decision = mustX?.mustRoute === "fast" || noEscalate || calendarFallback
+        ? { route: "fast", reason: noEscalate ? "no-escalate" : calendarFallback ? "calendar-fallback" : "must-fast", key: bot.fast_voice_model || deps.fastKey }
+        : deps.chooseVoiceRoute(routeView, { hasTools: quickTools.length > 0 || unlisted.length > 0 || wrapperWithheld || actionWithheld, actionIntent: actionWithheld });
       let chat = await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
       result.route = "fast";
       if (decision.route === "escalate") {
@@ -761,6 +838,12 @@ export function createVoiceTurnRunner(deps) {
         selectedAddon: (n) => !!scope && scope.selectedToolNames.has(n) && deps.isConnectedAddonTool(n),
       };
       const policyGate = (tc) => {
+        // Crow's own tools run in-process and are offered by name: none of the remote-tool checks below (spoken
+        // yes, proxy args) apply; they confirm through the voice bot's own settings (Task 2.5).
+        if (ownByName.has(tc.name)) {
+          return wasOffered(tc, offeredNames) ? null
+            : refuse("not_offered", `"${shortName(tc.name)}" is not available here. Tell the user you can't do that here, then end your turn — do not call another tool.`, true);
+        }
         const eff = deps.effectiveToolName(tc);
         // The executor resolves a bare name (`search_memories`) to `crow_<name>`
         // (tool-executor resolveToolCategory), so every check sees both spellings.
@@ -867,6 +950,8 @@ export function createVoiceTurnRunner(deps) {
       let unsureBacked = false;    // an ok call to a tool that is neither a known read nor a known write
       let guardHeld = "";
       let actionSent = false;      // a change was sent to a remote tool (it may still complete after a budget cut)
+      let steppedUp = false;       // the own-tool step-up to the larger model (at most once per turn)
+      const toolEscalationOn = typeof deps.toolEscalationEnabled !== "function" || deps.toolEscalationEnabled() === true;
       const heldMsgs = new Set();  // assistant messages whose text was held (unheard unless released)
       if (actionGuard) {
         timings.action_guard = true;
@@ -1039,6 +1124,7 @@ export function createVoiceTurnRunner(deps) {
         // display (deny list / memory off). Confirm and policy refusals still count as tool context:
         // the "yes" that follows a confirmation must keep its escalation (review I3).
         let neutralCalls = 0;
+        let ownBadArgs = false;
         for (const tc of calls) {
           if (tc === calls.at(-1)) finalRes = null;
           const gate = policyGate(tc);
@@ -1046,6 +1132,27 @@ export function createVoiceTurnRunner(deps) {
             if (gate.neutral) neutralCalls++;
             outcome.set(tc, gate.code);
             local.push({ id: tc.id, name: tc.name, result: gate.message, neutral: gate.neutral });
+            continue;
+          }
+          // Crow's own tool: run in-process, before the remote list. Route-neutral, like a display tool.
+          const own = ownByName.get(tc.name);
+          if (own) {
+            neutralCalls++;
+            let out;
+            try { out = await own.execute(tc.arguments || {}, { transcript, executor, db, ...(calendarFallback ? { fallback: "calendar" } : {}) }); }
+            catch (err) { out = JSON.stringify({ ok: false, code: "error", message: String(err?.message || err) }); }
+            if (typeof out !== "string") out = JSON.stringify({ ok: false, code: "error" });
+            let res = null;
+            try { res = JSON.parse(out); } catch {}
+            const ok = res?.ok === true;
+            const code = outcomeCode(res?.code, ok ? "ok" : "error");
+            outcome.set(tc, code);
+            if (ok && res.effect !== false) { backed = true; actionSent = true; }
+            if (code === "bad_args") ownBadArgs = true;
+            if (usedFamilies) usedFamilies.add(own.family);
+            finalRes = tc === calls.at(-1) && res && res.final === true && typeof res.say === "string" && res.say.trim()
+              ? { name: tc.name, say: res.say.trim(), code, effect: ok && res.effect !== false } : null;
+            local.push({ id: tc.id, name: tc.name, result: out, neutral: true });
             continue;
           }
           const x = extraByName.get(tc.name);
@@ -1146,10 +1253,34 @@ export function createVoiceTurnRunner(deps) {
           endedFinal = true;
           break;
         }
+        // The step-up (the larger model as the middle step): an own tool said its arguments were bad. The next
+        // round re-runs the same messages on the larger model, once per turn, through the router's escalation path.
+        let stepped = false;
+        if (ownBadArgs && !steppedUp && !result.escalated && !result.degraded && !noEscalate && !calendarFallback && toolEscalationOn) {
+          steppedUp = true;
+          let fillerErr = null;
+          const filler = say.filler().catch((err) => { fillerErr = err; });
+          const ready = await readyEscalation(deps.escalateKey ?? decision.key, db, llmSignal);
+          await filler;
+          if (fillerErr && !aborted() && !mute.signal.aborted) {
+            log(`[voice-turn] ${device.id} filler TTS failed: ${fillerErr.message}`);
+            timings.filler_error = String(fillerErr.message || fillerErr);
+          }
+          if (aborted()) { result.aborted = true; break; }
+          if (ready.adapter) {
+            chat = ready.adapter;
+            result.route = "escalate";
+            result.escalated = true;
+            timings.step_up = "own_tool";
+            tools = baseTools;
+            if (fam) famAll = true;
+            stepped = true;
+          } else timings.step_up_degraded = ready.reason;
+        }
         // Stuck: the same tool(s) twice in a row with no user-visible progress in either round.
         const progress = roundSpoken > 0 || roundDisplay || roundHeld > 0;
-        if (!progress && roundSig === lastStuckSig) cut = "tool_repeat";
-        lastStuckSig = progress ? null : roundSig;
+        if (!progress && !stepped && roundSig === lastStuckSig) cut = "tool_repeat";
+        lastStuckSig = progress || stepped ? null : roundSig;
         if (!cut && toolRounds >= maxRounds) cut = "tool_rounds";
         if (cut) {
           // A must-run tool that failed again (or never ran before the cap): no forced answer round —
