@@ -85,6 +85,7 @@ import bundlesRouterFactory from "../routes/bundles.js";
 import { keychainApiRouter } from "../keychain/api.js";
 import perchApiRouter from "../routes/perch.js";
 import perchInteractiveApiRouter from "../routes/perch-interactive-api.js";
+import perchDictationRouter from "../routes/perch-dictation.js";
 
 /**
  * @param {Function|null} mcpAuthMiddleware - OAuth auth middleware (for unified auth)
@@ -640,6 +641,11 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // slot, same reasons — see perch.js's header above and this file's own
   // comment on the P1 mount.
   router.use(perchInteractiveApiRouter(dashboardAuth));
+
+  // Perch composer dictation (queue item 15): one-shot speech-to-text through
+  // the configured STT profile. Same slot, same reasons (session + CSRF rails,
+  // Funnel refused upstream); see routes/perch-dictation.js's header.
+  router.use(perchDictationRouter(dashboardAuth));
 
   // W3-3: "Run backup now" action — dashboard-authed, CSRF-protected
   router.post("/dashboard/nest/backup", async (req, res) => {
