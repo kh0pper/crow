@@ -198,7 +198,7 @@ export function perchDictationJs(lang = "en") {
     if(DICT.raf&&window.cancelAnimationFrame){ try{ window.cancelAnimationFrame(DICT.raf); }catch(e){} }
     DICT.raf=0;
     if(DICT.tick){ clearInterval(DICT.tick); DICT.tick=0; }
-    if(DICT.rec){ var r=DICT.rec; DICT.rec=null; r.ondataavailable=null; r.onstop=null;
+    if(DICT.rec){ var r=DICT.rec; DICT.rec=null; r.ondataavailable=null; r.onstop=null; r.onerror=null;
       try{ if(r.state!=='inactive') r.stop(); }catch(e){} }
     if(DICT.stream){ stopTracks(DICT.stream); DICT.stream=null; }
     if(DICT.ctx){ var c=DICT.ctx; DICT.ctx=null; DICT.analyser=null; try{ c.close(); }catch(e){} }
@@ -317,6 +317,9 @@ export function perchDictationJs(lang = "en") {
     DICT.rec=rec; DICT.chunks=[];
     rec.ondataavailable=function(ev){ if(token===DICT.gen&&ev.data&&ev.data.size) DICT.chunks.push(ev.data); };
     rec.onstop=function(){ dictRecorderStopped(token,rec); };
+    /* A recorder that fails mid-recording (the device went away): stop now and
+       transcribe what was captured, rather than waiting for Done or the cap. */
+    rec.onerror=function(){ if(token===DICT.gen&&DICT.state==='recording') dictStop('done'); };
     try{ rec.start(); }catch(e){ dictTeardown(); dictSet('error',DICT_MSG.failed); return; }
     DICT.capS=capSeconds(DICT.probe&&DICT.probe.maxSeconds,rec.mimeType||mime);
     if(DICT.ctx){
