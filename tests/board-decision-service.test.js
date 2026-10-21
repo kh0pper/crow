@@ -791,3 +791,14 @@ test("decideOption: if the follow-up card cannot be created, the decision is sti
     assert.ok((await verbs(tdb, a.id)).includes("decision"), "audit row exists");
   });
 });
+
+test("a follow-up card inherits the decision card's tags unchanged; an untagged decision gives none", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const tagged = await askDecision(tdb, cdb, { projectId: 1, tags: "scope-a,extra", decision: withFollowUp() }, BOT);
+    const plain = await askDecision(tdb, cdb, { projectId: 1, decision: withFollowUp({ title: "Other follow-up" }) }, BOT2);
+    const r1 = await decideOption(tdb, cdb, tagged.id, { index: 0 }, HUMAN, { isEnabledBot: yes });
+    const r2 = await decideOption(tdb, cdb, plain.id, { index: 0 }, HUMAN, { isEnabledBot: yes });
+    assert.equal((await getCard(tdb, r1.created_card_id)).tags, "scope-a,extra");
+    assert.equal((await getCard(tdb, r2.created_card_id)).tags, null);
+  });
+});
