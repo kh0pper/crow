@@ -10,6 +10,8 @@
  * - HTTP endpoint (GET /crow.md)
  */
 
+import { writingRulesBody } from "../shared/writing-rules.js";
+
 // 60s TTL cache: the full context is regenerated per crow_get_context/resource/HTTP
 // call and the condensed form per MCP handshake; content only changes on section
 // edits (invalidated in-process by the mutation handlers and instance-sync) or
@@ -90,6 +92,10 @@ export async function generateCrowContext(db, { includeDynamic = true, platform 
     parts.push(`## ${section.section_title}\n`);
 
     let content = section.content;
+
+    // The seeded writing-rules template is not a rule: never hand a client
+    // its "(Add …)" placeholders (skills panel option C, review I4).
+    if (section.section_key === "writing_style") content = writingRulesBody(content) ?? "(No writing rules set.)";
 
     // Inject platform-specific transparency formatting hint
     if (section.section_key === "transparency_rules" && platform !== "generic") {
@@ -383,15 +389,21 @@ function condenseSection(key, content, { routerStyle = false } = {}) {
     }
 
     case "writing_style": {
-      // Extract banned patterns subsection if present
-      const banIdx = content.indexOf("### Banned Patterns");
+      // Only the real rules: a template gives no line at all (A26), and
+      // placeholder lines never reach a client.
+      const body = writingRulesBody(content);
+      if (!body) return null;
+      // The banned patterns subsection, when it has any.
+      const banIdx = body.indexOf("### Banned Patterns");
       if (banIdx >= 0) {
-        const afterBan = content.slice(banIdx + 20).trim();
+        const afterBan = body.slice(banIdx + "### Banned Patterns".length).trim();
         const nextSection = afterBan.indexOf("###");
-        const banContent = nextSection >= 0 ? afterBan.slice(0, nextSection).trim() : afterBan.slice(0, 120).trim();
-        return `Writing rules: ${banContent.slice(0, 120)}`;
+        const banContent = (nextSection >= 0 ? afterBan.slice(0, nextSection) : afterBan).trim();
+        if (banContent) return `Writing rules: ${banContent.replace(/\s*\n\s*/g, " ").slice(0, 120)}`;
       }
-      return `Writing rules: ${lines.slice(0, 2).join(" ").slice(0, 120)}`;
+      // Otherwise the first real lines (never an empty "Writing rules: ").
+      const real = body.split("\n").filter((l) => l.trim() && !/^#{1,6}\s/.test(l.trim()));
+      return real.length ? `Writing rules: ${real.slice(0, 2).join(" ").slice(0, 120)}` : null;
     }
 
     default:

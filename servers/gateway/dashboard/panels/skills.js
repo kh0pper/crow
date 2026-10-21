@@ -22,6 +22,9 @@ import { resolveCrowHome } from "../../../shared/crow-home.js";
 import { atomicWrite, bundleShippingSkill, recordRemovedLink } from "../../bundle-skill-sync.js";
 import { normalizeSkillName } from "../../../../scripts/pi-bots/skill_proposals.mjs";
 import { invalidateContextCache } from "../../../memory/crow-context.js";
+import { classifySkills, parseSkillMeta, anyBundleShipping } from "../../skills-catalog.js";
+import { isWritingRulesTemplate } from "../../../shared/writing-rules.js";
+import { installedKitDir } from "../../../shared/design-kit.js";
 import { getInstanceSyncManager } from "../../../sharing/server.js";
 import { emitOrQueue } from "../../../shared/sync-emit.js";
 
@@ -56,20 +59,45 @@ function existingSkillName(raw) {
   return SKILL_FILE_RE.test(safe) ? safe : null;
 }
 
+/** Accents off ("Café" → "Cafe", "ñ" → "n"), for file names and comparisons. */
+const foldAccents = (s) => String(s).normalize("NFKD").replace(/\p{M}/gu, "");
+/** A title compared the way a person reads it: accents and case folded, spaces collapsed. */
+const titleKey = (s) => foldAccents(s).toLowerCase().replace(/\s+/g, " ").trim();
+
 /**
- * A NEW skill's file name from the create form: lowercase, whitespace runs →
- * "-", anything outside [a-z0-9_-] dropped, leading/trailing "-"/"_" trimmed,
- * then the bot resolver's own normalizeSkillName must accept it unchanged —
- * so a bot can always load what the panel made ("My Test Skill" →
- * my-test-skill.md). null when nothing valid is left.
+ * A NEW skill's file name from the create form: accents folded, lowercase,
+ * whitespace runs → "-", anything outside [a-z0-9_-] dropped, leading and
+ * trailing "-"/"_" trimmed, then the bot resolver's own normalizeSkillName
+ * must accept it unchanged, so a bot can always load what the panel made
+ * ("My Test Skill" → my-test-skill.md, "Café notes" → cafe-notes.md). A name
+ * with letters or digits only in another script ("日本") gets the first free
+ * skill-<n>.md (`isTaken(file)` says which are used); its title keeps the
+ * name as typed. null when the name has no letter or digit at all.
+ * @returns {{ file: string, title: string } | null}
  */
-function newSkillName(raw) {
+export function newSkillName(raw, isTaken = () => false) {
   if (typeof raw !== "string") return null;
-  let s = basename(raw).trim().toLowerCase();
-  if (s.endsWith(".md")) s = s.slice(0, -3);
-  s = s.replace(/\s+/g, "-").replace(/[^a-z0-9_-]/g, "").replace(/^[-_]+|[-_]+$/g, "");
-  if (!s || normalizeSkillName(s) !== s) return null;
-  return s + ".md";
+  let title = basename(raw).trim();
+  if (title.toLowerCase().endsWith(".md")) title = title.slice(0, -3).trim();
+  const s = foldAccents(title).toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9_-]/g, "").replace(/^[-_]+|[-_]+$/g, "");
+  if (s) return normalizeSkillName(s) === s ? { file: s + ".md", title } : null;
+  if (!/[\p{L}\p{N}]/u.test(title) || title.length > 80) return null;
+  for (let n = 1; n < 10000; n++) if (!isTaken(`skill-${n}.md`)) return { file: `skill-${n}.md`, title };
+  return null;
+}
+
+/** The text a create writes: an optional purpose in frontmatter, then a heading unless the instructions bring one. */
+function newSkillText({ title, purpose, content }) {
+  const p = (purpose || "").replace(/\s+/g, " ").trim();
+  const fm = p ? `---\ndescription: ${/^[\s\-?[\]{}#&*!|>'"%@`]|[:#]/.test(p) ? JSON.stringify(p) : p}\n---\n` : "";
+  const body = toLf(content);
+  if (/^\s*#\s/.test(body)) return fm + body;
+  return `${fm}# ${title}\n\n${body.replace(/^\n+/, "")}${body.endsWith("\n") ? "" : "\n"}`;
+}
+
+/** The skill files in a directory, or [] when it can't be read. */
+function readdirSafe(dir) {
+  try { return readdirSync(dir).filter((f) => SKILL_FILE_RE.test(f)).sort(); } catch { return []; }
 }
 
 function lstatOrNull(p) {
@@ -94,17 +122,6 @@ const NOTICE_CODES = {
   "record-unreadable": "skills.errorRecordUnreadable",
 };
 
-function listSkillFiles(dir) {
-  try {
-    if (!existsSync(dir)) return [];
-    return readdirSync(dir)
-      .filter((f) => SKILL_FILE_RE.test(f))
-      .sort();
-  } catch {
-    return [];
-  }
-}
-
 /**
  * A skill's text, or null. Only a regular file (after following a link) of at
  * most MAX_SKILL_BYTES is read: a link to a directory, a missing target, a
@@ -126,16 +143,38 @@ function readSkillContent(filePath) {
   }
 }
 
-function parseSkillFrontmatter(content) {
-  if (!content) return { title: "", description: "" };
-  // Extract title from first # heading or filename
-  const titleMatch = content.match(/^#\s+(.+?)(?:\s*—.*)?$/m);
-  const title = titleMatch ? titleMatch[1].trim() : "";
-  // Extract description from ## Description section or first paragraph after title
-  const descMatch = content.match(/^##\s+Description\s*\n+([\s\S]*?)(?=\n##|\n$)/m);
-  const description = descMatch ? descMatch[1].trim().split("\n")[0] : "";
-  return { title, description };
+/** The Design kit's skill names (bot-world.mjs), loaded lazily: [] if it can't load. */
+let kitSkillsCache = null;
+async function kitSkills() {
+  if (kitSkillsCache) return kitSkillsCache;
+  try { kitSkillsCache = [...(await import("../../../../scripts/pi-bots/bot-world.mjs")).KIT_SKILLS]; } catch { kitSkillsCache = []; }
+  return kitSkillsCache;
 }
+
+/** Status → [i18n key, tone]. "on" shows nothing. */
+const STATUS = {
+  update: ["skills.st.update", "info"],
+  behind: ["skills.st.behind", "warning"],
+  removed: ["skills.st.removed", "error"],
+  orphan: ["skills.st.orphan", "warning"],
+  "ext-removed": ["skills.st.extRemoved", "muted"],
+  replaced: ["skills.st.replaced", "muted"],
+  "needs-kit": ["skills.st.needsKit", "muted"],
+};
+
+const SKILLS_TABLE_CSS = `<style>
+  .sk-title { font-weight: 600; }
+  .sk-purpose { color: var(--crow-text-secondary); font-size: 0.85rem; margin-top: 0.15rem; }
+  .sk-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; }
+  .sk-chip { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.75rem; border: 1px solid var(--crow-border); background: var(--crow-bg-elevated); color: var(--crow-text-secondary); }
+  .sk-chip-ext, .sk-chip-yours { background: var(--crow-accent-muted); color: var(--crow-text); border-color: transparent; }
+  .sk-st { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.75rem; }
+  .sk-st::before { content: ""; width: 0.5rem; height: 0.5rem; border-radius: 50%; background: currentColor; }
+  .sk-st-info { color: var(--crow-info); }
+  .sk-st-warning { color: var(--crow-warning); }
+  .sk-st-error { color: var(--crow-error); }
+  .sk-st-muted { color: var(--crow-text-muted); }
+</style>`;
 
 export default {
   id: "skills",
@@ -147,12 +186,14 @@ export default {
 
   async handler(req, res, { db, layout, lang }) {
     // Handle POST actions
+    // Set by a refused create: the list renders again with the form filled in.
+    let createState = null;
     if (req.method === "POST") {
       const body = req.body || {};
       // A repeated field arrives as an array (urlencoded, extended:false) —
       // e.g. the old nested Save/Delete forms posted action=save&action=delete.
       // Refuse it outright rather than fall through to a 200 list render.
-      for (const k of ["action", "filename", "content", "sectionKey"]) {
+      for (const k of ["action", "filename", "content", "sectionKey", "purpose"]) {
         if (body[k] !== undefined && typeof body[k] !== "string") {
           // text/html so Turbo shows it (a text/plain 4xx is dropped silently).
           res.status(400);
@@ -236,16 +277,35 @@ export default {
       }
 
       if (action === "create") {
-        const safeName = newSkillName(body.filename);
-        const content = one(body.content);
-        if (!safeName) return back("invalid-name");
-        if (!content || !content.trim()) return back("empty");
-        const filePath = join(userSkillsDir(), safeName);
-        // Exists in either dir: shadowing a built-in goes through Override (A12).
-        if (lstatOrNull(filePath) || existsSync(join(REPO_SKILLS_DIR, safeName))) return back("exists");
-        writeSkill(filePath, content);
-        res.redirectAfterPost("/dashboard/skills?created=" + encodeURIComponent(safeName));
-        return;
+        // A refused create re-renders the page (422) with everything typed
+        // still in the form; a redirect would throw it away (audit A18).
+        const typed = { filename: one(body.filename) ?? "", purpose: one(body.purpose) ?? "", content: one(body.content) ?? "" };
+        const refuse = (code, existing = null, shippedBy = null) => { createState = { code, typed, existing, shippedBy }; res.status(422); };
+        const onDisk = (f) => !!lstatOrNull(join(userSkillsDir(), f)) || existsSync(join(REPO_SKILLS_DIR, f));
+        // A name any extension ships (installed or not) is taken too: the
+        // extension's copy would collide with it on install.
+        const isTaken = (f) => onDisk(f) || !!anyBundleShipping(APP_BUNDLES_DIR, f);
+        const named = newSkillName(typed.filename, isTaken);
+        const shipper = named && !onDisk(named.file) ? anyBundleShipping(APP_BUNDLES_DIR, named.file) : null;
+        if (!named) refuse("invalid-name");
+        else if (onDisk(named.file)) refuse("exists", { file: named.file, source: lstatOrNull(join(userSkillsDir(), named.file)) ? "user" : "repo" });
+        else if (shipper) refuse("shipped", null, shipper.name);
+        else {
+          // The same title under another file name is the same skill to a
+          // person: check yours and the built-ins.
+          const key = titleKey(named.title);
+          const titleOf = (dir, f) => titleKey(parseSkillMeta(readSkillContent(join(dir, f)) || "", "en", f.replace(/\.md$/, "")).title);
+          const userClash = readdirSafe(userSkillsDir()).find((f) => titleOf(userSkillsDir(), f) === key);
+          const repoClash = userClash ? null : readdirSafe(REPO_SKILLS_DIR).find((f) => titleOf(REPO_SKILLS_DIR, f) === key);
+          if (userClash) refuse("exists", { file: userClash, source: "user" });
+          else if (repoClash) refuse("exists", { file: repoClash, source: "repo" });
+          else if (!typed.content.trim()) refuse("empty");
+          else {
+            writeSkill(join(userSkillsDir(), named.file), newSkillText({ title: named.title, purpose: typed.purpose, content: typed.content }));
+            res.redirectAfterPost("/dashboard/skills?created=" + encodeURIComponent(named.file));
+            return;
+          }
+        }
       }
 
       if (action === "save-writing-rules") {
@@ -308,7 +368,7 @@ export default {
     }
 
     // Handle writing rules edit view
-    const query = req.query || {};
+    const query = createState ? {} : (req.query || {});
     const editParam = one(query.edit); // a repeated ?edit= reads as absent (was a 500)
     if (editParam === "writing-rules") {
       const result = await db.execute({
@@ -449,60 +509,76 @@ export default {
     }
 
     // --- Main skills list ---
-    const repoSkills = listSkillFiles(REPO_SKILLS_DIR);
-    const userSkills = listSkillFiles(userSkillsDir());
+    // One row per skill from the catalog: where it comes from (built-in, an
+    // extension, yours) and its sync status. Rows with no file (removed, or
+    // shipped but not installed yet) get their actions in the redesigned page.
+    const crowHome = resolveCrowHome();
+    const catalog = classifySkills({
+      crowHome, appBundles: APP_BUNDLES_DIR, repoDir: REPO_SKILLS_DIR, lang,
+      kitSkills: await kitSkills(), kitInstalled: !!installedKitDir(crowHome),
+    }).filter((r) => r.hasFile);
+    const langAttr = (l) => (l !== lang ? ` lang="${l}"` : "");
+    const chip = (text, kind = "") => `<span class="sk-chip${kind ? " sk-chip-" + kind : ""}">${escapeHtml(text)}</span>`;
 
-    // Build merged list: user skills override repo skills
-    const userSkillSet = new Set(userSkills);
-    const allSkillNames = [...new Set([...userSkills, ...repoSkills])].sort();
+    const rows = catalog.map((r) => {
+      const ext = r.bundleName || r.bundle || "";
+      const chips = [];
+      if (r.source === "builtin") chips.push(chip(t("skills.builtInBadge", lang)));
+      else if (r.source === "ext") {
+        chips.push(chip(fill(t("skills.fromExt", lang), { ext }), "ext"));
+        if (r.linked) chips.push(chip(t("skills.linked", lang)));
+      } else chips.push(chip(r.basedOn ? fill(t("skills.copyOf", lang), { ext }) : t("skills.yoursBadge", lang), "yours"));
+      if (r.replacesBuiltin) chips.push(chip(t("skills.replacesBuiltin", lang)));
+      if (r.experimental) chips.push(chip(t("skills.experimental", lang)));
+      const st = STATUS[r.status];
+      if (st) chips.push(`<span class="sk-st sk-st-${st[1]}">${escapeHtml(t(st[0], lang))}</span>`);
 
-    // Skills table
-    const rows = allSkillNames.map((filename) => {
-      const isOverridden = userSkillSet.has(filename) && repoSkills.includes(filename);
-      const isUserOnly = userSkillSet.has(filename) && !repoSkills.includes(filename);
-      const isBuiltIn = !userSkillSet.has(filename);
-
-      const source = isUserOnly ? "user" : isOverridden ? "user" : "repo";
-      const filePath = source === "user"
-        ? join(userSkillsDir(), filename)
-        : join(REPO_SKILLS_DIR, filename);
-      const content = readSkillContent(filePath);
-      const { title } = parseSkillFrontmatter(content);
-
-      const displayName = title || filename.replace(/\.md$/, "").replace(/-/g, " ");
-      const name = filename.replace(/\.md$/, "");
-
-      let statusBadge;
-      if (isOverridden) {
-        statusBadge = `${badge(t("skills.overridden", lang), "connected")} ${badge(t("skills.builtInBadge", lang), "draft")}`;
-      } else if (isUserOnly) {
-        statusBadge = badge(t("skills.customBadge", lang), "published");
-      } else {
-        statusBadge = badge(t("skills.builtInBadge", lang), "draft");
-      }
-
-      const viewBtn = `<a href="/dashboard/skills?edit=${encodeURIComponent(filename)}&source=${source}" class="btn btn-sm btn-secondary">${isBuiltIn ? t("skills.view", lang) : t("skills.edit", lang)}</a>`;
-      const deleteBtn = !isBuiltIn
-        ? ` <form method="POST" style="display:inline;margin-left:0.25rem" onsubmit="return confirm('${tJs("skills.deleteConfirm", lang)}')"><input type="hidden" name="action" value="delete"><input type="hidden" name="filename" value="${escapeHtml(filename)}"><button class="btn btn-sm btn-danger" type="submit">${t("skills.delete", lang)}</button></form>`
+      const editable = r.source !== "builtin";
+      const source = editable ? "user" : "repo";
+      const viewBtn = `<a href="/dashboard/skills?edit=${encodeURIComponent(r.file)}&source=${source}" class="btn btn-sm btn-secondary">${editable ? t("skills.edit", lang) : t("skills.view", lang)}</a>`;
+      const deleteBtn = editable
+        ? ` <form method="POST" style="display:inline;margin-left:0.25rem" onsubmit="return confirm('${tJs("skills.deleteConfirm", lang)}')"><input type="hidden" name="action" value="delete"><input type="hidden" name="filename" value="${escapeHtml(r.file)}"><button class="btn btn-sm btn-danger" type="submit">${t("skills.delete", lang)}</button></form>`
         : "";
+      const purpose = r.description ? `<div class="sk-purpose"${langAttr(r.descriptionLang)}>${escapeHtml(r.description)}</div>` : "";
 
       return [
-        escapeHtml(displayName),
-        `<span class="mono" style="font-size:0.8rem">${escapeHtml(name)}</span>`,
-        statusBadge,
+        `<span class="sk-name" data-skill="${escapeHtml(r.name)}" data-source="${r.source}"><span class="sk-title"${langAttr(r.titleLang)}>${escapeHtml(r.title)}</span></span>${purpose}`,
+        `<span class="mono" style="font-size:0.8rem">${escapeHtml(r.name)}</span>`,
+        `<span class="sk-chips">${chips.join("")}</span>`,
         `${viewBtn}${deleteBtn}`,
       ];
     });
 
-    const skillsTable = allSkillNames.length === 0
+    const skillsTable = catalog.length === 0
       ? `<div class="empty-state"><h3>${t("skills.noSkillsFound", lang)}</h3><p>${t("skills.skillsDirectory", lang)}</p></div>`
-      : dataTable([t("skills.tableName", lang), t("skills.tableFile", lang), t("skills.tableSource", lang), t("skills.tableActions", lang)], rows, { stack: true });
+      : SKILLS_TABLE_CSS + dataTable([t("skills.tableName", lang), t("skills.tableFile", lang), t("skills.tableSource", lang), t("skills.tableActions", lang)], rows, { stack: true });
 
-    // Create form
-    const createForm = `<form method="POST">
+    // Create form. After a refused create (422) it holds what was typed, the
+    // error sits inside it, and the field to fix has autofocus, so the
+    // re-rendered page lands on the form (audit A18; on a phone it is far
+    // down the page).
+    const cs = createState;
+    const typedVal = (k) => (cs ? cs.typed[k] : "");
+    let createError = "";
+    if (cs) {
+      const msg = cs.code === "exists"
+        ? fill(t("skills.errorExistsNamed", lang), { name: cs.typed.filename.trim() })
+        : cs.code === "shipped"
+          ? fill(t("skills.errorShippedName", lang), { ext: cs.shippedBy })
+          : t(NOTICE_CODES[cs.code], lang);
+      const open = cs.existing
+        ? ` <a href="/dashboard/skills?edit=${encodeURIComponent(cs.existing.file)}&amp;source=${cs.existing.source}">${escapeHtml(t("skills.openExisting", lang))}</a>`
+        : "";
+      createError = `<div class="skills-notice" role="alert" style="margin-bottom:1rem;padding:0.75rem 1rem;border:1px solid var(--crow-border);border-left:3px solid var(--crow-error);border-radius:8px;background:var(--crow-bg-elevated)">${escapeHtml(msg)}${open}</div>`;
+    }
+    const focusField = cs ? (cs.code === "empty" ? "content" : "filename") : null;
+    const withFocus = (html, name) => (focusField === name ? html.replace(`id="field-${name}"`, `id="field-${name}" autofocus`) : html);
+    const createForm = `<form method="POST" id="skill-create">
       <input type="hidden" name="action" value="create">
-      ${formField(t("skills.filenameLabel", lang), "filename", { placeholder: t("skills.filenamePlaceholder", lang), required: true })}
-      ${formField(t("skills.contentLabel", lang), "content", { type: "textarea", required: true, placeholder: t("skills.contentPlaceholder", lang), rows: 10 })}
+      ${createError}
+      ${withFocus(formField(t("skills.filenameLabel", lang), "filename", { placeholder: t("skills.filenamePlaceholder", lang), required: true, value: typedVal("filename") }), "filename")}
+      ${formField(t("skills.purposeLabel", lang), "purpose", { value: typedVal("purpose") })}
+      ${withFocus(formField(t("skills.contentLabel", lang), "content", { type: "textarea", required: true, placeholder: t("skills.contentPlaceholder", lang), rows: 10, value: typedVal("content") }), "content")}
       <button type="submit" class="btn btn-primary">${t("skills.createSkill", lang)}</button>
     </form>`;
 
@@ -512,7 +588,8 @@ export default {
       args: [],
     });
     const writingStyleContent = writingStyleResult.rows[0]?.content || "";
-    const isTemplateContent = !writingStyleContent || writingStyleContent.trim().length < 20;
+    // The seeded template (headings + "(Add …)" placeholders) is not a rule (A26).
+    const isTemplateContent = isWritingRulesTemplate(writingStyleContent);
 
     let writingRulesBody;
     if (isTemplateContent) {

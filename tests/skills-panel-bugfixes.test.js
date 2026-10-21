@@ -121,33 +121,49 @@ test("save keeps the file's mode and writes LF line endings", async () => {
   assert.equal(lstatSync(join(SKILLS, "moded.md")).mode & 0o777, 0o600);
 });
 
-test("A11: create '!!!' writes nothing and reports invalid-name", async () => {
+/** A refused create (PR 1): a 422 page with the form re-rendered, what was typed kept, the error inside the form. */
+function refused(r, errorText) {
+  assert.equal(r.status, 422);
+  assert.equal(r.redirect, null, "no redirect: a redirect would drop what was typed");
+  const form = r.body.match(/<form[^>]*id="skill-create"[\s\S]*?<\/form>/);
+  assert.ok(form, "the create form is on the page");
+  assert.match(form[0], /class="[^"]*skills-notice[^"]*" role="alert"/);
+  if (errorText) assert.ok(form[0].includes(errorText), `error text: ${errorText}`);
+  return form[0];
+}
+
+test("A11: create '!!!' writes nothing and reports invalid-name, keeping what was typed", async () => {
   const before = listFiles();
-  const r = await call({ method: "POST", body: { action: "create", filename: "!!!", content: "# x" } });
-  assert.equal(r.status, 303);
-  assert.match(r.redirect, /[?&]error=invalid-name/);
+  const r = await call({ method: "POST", body: { action: "create", filename: "!!!", purpose: "A purpose", content: "# x <b>" } });
+  const form = refused(r, "That name can't be used");
+  assert.match(form, /name="filename"[^>]*value="!!!"/);
+  assert.match(form, /name="purpose"[^>]*value="A purpose"/);
+  assert.ok(form.includes("# x &lt;b&gt;</textarea>"), "the instructions are kept, escaped");
+  assert.match(form, /id="field-filename"[^>]*autofocus/, "focus goes to the field to fix");
   assert.deepEqual(listFiles(), before);
   assert.equal(existsSync(join(SKILLS, ".md")), false);
   const list = await call({ query: { error: "invalid-name" } });
-  assert.match(list.body, /class="[^"]*skills-notice/);
+  assert.match(list.body, /class="[^"]*skills-notice/, "an old ?error= link still shows its notice");
 });
 
 test("A11: create refuses names that leave nothing valid, and never makes a dotfile", async () => {
   const before = listFiles();
-  for (const filename of [".md", "..", "../", "   ", "---", "__", "x".repeat(81)]) {
+  for (const filename of [".md", "..", "../", "   ", "---", "__", "x".repeat(81), "!!!", "😀"]) {
     const r = await call({ method: "POST", body: { action: "create", filename, content: "# x" } });
-    assert.match(r.redirect, /error=invalid-name/, JSON.stringify(filename));
+    refused(r, "That name can't be used");
   }
   assert.deepEqual(listFiles(), before);
   const r = await call({ method: "POST", body: { action: "create", filename: ".hidden", content: "# h" } });
-  assert.doesNotMatch(r.redirect, /error=/);
+  assert.equal(r.status, 303);
   assert.ok(existsSync(join(SKILLS, "hidden.md")), "the dot is dropped like any other character outside the slug set");
   assert.ok(listFiles().every((f) => !f.startsWith(".")), "no dotfile");
 });
 
 test("A11: create with empty content reports empty and writes nothing", async () => {
   const r = await call({ method: "POST", body: { action: "create", filename: "blank", content: "   \n" } });
-  assert.match(r.redirect, /error=empty/);
+  const form = refused(r, "The skill has no content");
+  assert.match(form, /id="field-content"[^>]*autofocus/);
+  assert.match(form, /name="filename"[^>]*value="blank"/);
   assert.equal(existsSync(join(SKILLS, "blank.md")), false);
 });
 
@@ -162,17 +178,72 @@ test("create slugifies to the name a bot can load: 'My Test Skill' → my-test-s
   assert.equal(r2.redirect, "/dashboard/skills?created=spaced-out.md", "whitespace runs collapse, edges trimmed");
 });
 
-test("A12: create refuses a name a built-in already has", async () => {
+test("A12: create refuses a name a built-in already has, and links to it", async () => {
   const r = await call({ method: "POST", body: { action: "create", filename: "memory-management", content: "# x" } });
-  assert.match(r.redirect, /error=exists/);
+  const form = refused(r, "You already have a skill called “memory-management”");
+  assert.match(form, /href="\/dashboard\/skills\?edit=memory-management\.md&amp;source=repo"[^>]*>Open the existing one</);
   assert.equal(existsSync(join(SKILLS, "memory-management.md")), false);
 });
 
 test("A10: create an existing name reports exists and keeps the old text", async () => {
   put("taken.md", "original\n");
   const r = await call({ method: "POST", body: { action: "create", filename: "taken.md", content: "replacement" } });
-  assert.match(r.redirect, /error=exists/);
+  const form = refused(r, "Pick another name: everything you typed is still here.");
+  assert.match(form, /href="\/dashboard\/skills\?edit=taken\.md&amp;source=user"/);
+  assert.ok(form.includes(">replacement</textarea>"));
   assert.equal(readFileSync(join(SKILLS, "taken.md"), "utf8"), "original\n");
+  const es = await call({ method: "POST", lang: "es", body: { action: "create", filename: "taken.md", content: "x" } });
+  refused(es, "Ya tienes una habilidad llamada “taken.md”");
+});
+
+test("create folds accents for the file name and keeps the name as typed in the heading", async () => {
+  const r = await call({ method: "POST", body: { action: "create", filename: "Café notes", purpose: "Notes about the café: menus", content: "Keep the menu notes short." } });
+  assert.equal(r.redirect, "/dashboard/skills?created=cafe-notes.md");
+  assert.equal(readFileSync(join(SKILLS, "cafe-notes.md"), "utf8"), '---\ndescription: "Notes about the café: menus"\n---\n# Café notes\n\nKeep the menu notes short.\n');
+  const r2 = await call({ method: "POST", body: { action: "create", filename: "canción", content: "# Canción\n\nLetra." } });
+  assert.equal(r2.redirect, "/dashboard/skills?created=cancion.md");
+  assert.equal(readFileSync(join(SKILLS, "cancion.md"), "utf8"), "# Canción\n\nLetra.", "instructions that start with a heading get no second one");
+  const r3 = await call({ method: "POST", body: { action: "create", filename: "Ñandú", purpose: "Birds", content: "Body" } });
+  assert.equal(r3.redirect, "/dashboard/skills?created=nandu.md");
+  assert.match(readFileSync(join(SKILLS, "nandu.md"), "utf8"), /^---\ndescription: Birds\n---\n# Ñandú\n/);
+  for (const f of ["cafe-notes.md", "cancion.md", "nandu.md"]) rmSync(join(SKILLS, f));
+});
+
+test("create: a name in another script gets the first free skill-<n> file and keeps its title; the same title twice is a conflict", async () => {
+  put("skill-1.md", "# Taken slot\n");
+  const r = await call({ method: "POST", body: { action: "create", filename: "日本", content: "Notes." } });
+  assert.equal(r.redirect, "/dashboard/skills?created=skill-2.md");
+  assert.equal(readFileSync(join(SKILLS, "skill-2.md"), "utf8"), "# 日本\n\nNotes.\n");
+  const again = await call({ method: "POST", body: { action: "create", filename: "日本", content: "Other." } });
+  const form = refused(again, "You already have a skill called “日本”");
+  assert.match(form, /href="\/dashboard\/skills\?edit=skill-2\.md&amp;source=user"/);
+  assert.equal(existsSync(join(SKILLS, "skill-3.md")), false);
+  const list = await call({ query: { created: "skill-2.md" } });
+  assert.match(list.body, /Created skill-2\.md\./);
+  rmSync(join(SKILLS, "skill-1.md")); rmSync(join(SKILLS, "skill-2.md"));
+});
+
+test("create refuses a file name an extension ships, installed or not, so a later install can't collide with it", async () => {
+  const r = await call({ method: "POST", body: { action: "create", filename: "Kiosk", content: "Mine." } });
+  const form = refused(r, "An extension (Kiosk display) ships a skill with that file name");
+  assert.ok(form.includes(">Mine.</textarea>"));
+  assert.equal(existsSync(join(SKILLS, "kiosk.md")), false);
+});
+
+test("create refuses a title a built-in already uses, and links to the built-in", async () => {
+  // skills/backup.md is titled "Backup & Restore"; the typed name's own file (backup--restore.md) is free.
+  const r = await call({ method: "POST", body: { action: "create", filename: "Backup & Restore", content: "x" } });
+  const form = refused(r, "You already have a skill called “Backup &amp; Restore”");
+  assert.match(form, /href="\/dashboard\/skills\?edit=backup\.md&amp;source=repo"/);
+  assert.equal(existsSync(join(SKILLS, "backup--restore.md")), false);
+});
+
+test("create: the same title under another file name is a conflict too (accents and case folded)", async () => {
+  put("kitchen-x.md", "# Café Notes\n");
+  const r = await call({ method: "POST", body: { action: "create", filename: "cafe notes", content: "x" } });
+  refused(r, "You already have a skill called “cafe notes”");
+  assert.equal(existsSync(join(SKILLS, "cafe-notes.md")), false);
+  rmSync(join(SKILLS, "kitchen-x.md"));
 });
 
 test("save / delete refuse a dot-leading or empty name", async () => {

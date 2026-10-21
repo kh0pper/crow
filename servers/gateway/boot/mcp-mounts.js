@@ -27,6 +27,7 @@ import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createNotification } from "../../shared/notifications.js";
+import { keptSkillNotification } from "../bundle-skill-sync.js";
 import { startOutboxDrain } from "../../sharing/sync-outbox-drain.js";
 
 /**
@@ -252,11 +253,7 @@ export async function mountMcpServers(app, deps) {
       const ndb = createDbClient();
       try {
         for (const k of edited) {
-          await createNotification(ndb, {
-            title: `Your edited skill "${k.skill}" was kept`,
-            body: `A newer version ships with the ${k.bundle} extension, but your copy was edited after install, so it was not replaced. Delete your copy in Skills to get the new one.`,
-            type: "system", source: "bundles",
-          }).catch(() => {});
+          await createNotification(ndb, keptSkillNotification(k)).catch(() => {});
         }
       } finally { try { ndb.close(); } catch {} }
     }

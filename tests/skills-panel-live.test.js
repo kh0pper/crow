@@ -8,7 +8,7 @@
 // a 200 render, Turbo's "Form responses must redirect", nothing saved.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import express from "express";
@@ -111,5 +111,66 @@ test("edit page: Delete in a real browser asks, then removes the file", async (c
     assert.equal(existsSync(join(SKILLS, "live-del.md")), false);
     assert.equal(s.posts.at(-1).action, "delete");
     assert.deepEqual(await t.evalIn("JSON.stringify(window.__subs)"), JSON.stringify([{ success: true, status: 200 }]));
+  } finally { await t.close(); }
+});
+
+// Skills panel option C, PR 1 (audit A18): a refused create used to redirect
+// and throw away everything typed. Now it answers 422 with the page
+// re-rendered: the form keeps all three values, the error sits in the form,
+// and the field to fix has focus and is on screen — on a phone, where the
+// form is far down the page.
+async function openList(t) {
+  await t.send("Emulation.setDeviceMetricsOverride", { width: 412, height: 915, deviceScaleFactor: 1, mobile: true });
+  await t.send("Page.navigate", { url: `http://127.0.0.1:${s.port}/login` }); await sleep(200);
+  await t.send("Page.navigate", { url: `http://127.0.0.1:${s.port}/dashboard/skills` });
+  assert.ok(await waitFor(async () => (await t.evalIn("!!document.querySelector('#skill-create') && !!window.Turbo")) === true), "list + Turbo loaded");
+  await t.evalIn("window.__subs = []; document.addEventListener('turbo:submit-end', (e) => window.__subs.push({ success: e.detail.success, status: e.detail.fetchResponse && e.detail.fetchResponse.statusCode })); true");
+}
+const fillCreate = (t, v) => t.evalIn(`(() => { const f = document.querySelector('#skill-create');
+  f.querySelector('[name=filename]').value = ${JSON.stringify(v.filename)};
+  f.querySelector('[name=purpose]').value = ${JSON.stringify(v.purpose)};
+  f.querySelector('[name=content]').value = ${JSON.stringify(v.content)};
+  f.querySelector('button[type=submit]').click(); return true; })()`);
+const formState = (t) => t.evalIn(`(() => { const f = document.querySelector('#skill-create'); if (!f) return null;
+  const a = document.activeElement; const r = a ? a.getBoundingClientRect() : null;
+  return { filename: f.querySelector('[name=filename]').value, purpose: f.querySelector('[name=purpose]').value, content: f.querySelector('[name=content]').value,
+    error: (f.querySelector('.skills-notice') || {}).textContent || "", focused: a && a.name, inView: !!r && r.top >= 0 && r.bottom <= innerHeight && r.height > 0 }; })()`);
+
+test("create conflict in a real browser (phone width): 422, everything typed kept, the name field focused and on screen", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  writeFileSync(join(SKILLS, "existing-notes.md"), "# Existing notes\n");
+  const t = await tab();
+  try {
+    await openList(t);
+    await fillCreate(t, { filename: "Existing notes", purpose: "Notes for the week", content: "Line one.\nLine two." });
+    const st = await waitFor(async () => { const v = await formState(t); return v && v.error ? v : null; });
+    assert.ok(st, "the refused form re-rendered");
+    assert.deepEqual(await t.evalIn("JSON.stringify(window.__subs)"), JSON.stringify([{ success: false, status: 422 }]));
+    assert.equal(st.filename, "Existing notes");
+    assert.equal(st.purpose, "Notes for the week");
+    assert.equal(st.content.replace(/\r\n/g, "\n"), "Line one.\nLine two.");
+    assert.match(st.error, /You already have a skill called “Existing notes”\. Pick another name: everything you typed is still here\./);
+    assert.equal(st.focused, "filename");
+    assert.equal(st.inView, true, "the focused field is inside the phone viewport");
+    assert.equal(readFileSync(join(SKILLS, "existing-notes.md"), "utf8"), "# Existing notes\n", "nothing written");
+    assert.deepEqual(readdirSync(SKILLS).filter((f) => f.startsWith("existing")), ["existing-notes.md"]);
+  } finally { await t.close(); }
+});
+
+test("create with empty instructions in a real browser: 422, values kept, the instructions field focused and on screen", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  const t = await tab();
+  try {
+    await openList(t);
+    await fillCreate(t, { filename: "Blank one", purpose: "Nothing yet", content: "   " });
+    const st = await waitFor(async () => { const v = await formState(t); return v && v.error ? v : null; });
+    assert.ok(st);
+    assert.deepEqual(await t.evalIn("JSON.stringify(window.__subs)"), JSON.stringify([{ success: false, status: 422 }]));
+    assert.equal(st.filename, "Blank one");
+    assert.equal(st.purpose, "Nothing yet");
+    assert.match(st.error, /The skill has no content/);
+    assert.equal(st.focused, "content");
+    assert.equal(st.inView, true);
+    assert.equal(existsSync(join(SKILLS, "blank-one.md")), false);
   } finally { await t.close(); }
 });
