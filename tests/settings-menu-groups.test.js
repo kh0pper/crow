@@ -129,3 +129,47 @@ test("blog settings links to the blog theme; passwords label renamed; es parity"
     assert.ok(t("settings.section.otherCrowsSharing", lang).length > 0);
   }
 });
+
+test("hasTrustedPeer: untrusted, revoked, paused and self rows are not peers; offline trusted is", async () => {
+  const { db } = await setup();
+  const { getOrCreateLocalInstanceId } = await import("../servers/gateway/instance-registry.js");
+  const { hasTrustedPeer } = await import("../servers/gateway/dashboard/settings/menu-renderer.js");
+  const ins = (id, status, trusted) => db.execute({ sql: "INSERT INTO crow_instances (id, name, crow_id, status, trusted) VALUES (?, ?, ?, ?, ?)", args: [id, id, `crow:${id}`, status, trusted] });
+  await ins(getOrCreateLocalInstanceId(), "active", 1);
+  await ins("p-untrusted", "active", 0);
+  await ins("p-revoked", "revoked", 1);
+  await ins("p-paused", "paused", 1);
+  assert.equal(await hasTrustedPeer(db), false);
+  await ins("p-offline", "offline", 1);
+  assert.equal(await hasTrustedPeer(db), true);
+});
+
+test("sections with no group or an unknown group render under Advanced", async () => {
+  const { db, reg, renderSettingsMenu } = await setup();
+  reg.registerSettingsSection({ id: "no-group-test", labelKey: "settings.section.blog", render: async () => "" });
+  reg.registerSettingsSection({ id: "bogus-group-test", group: "bogus", labelKey: "settings.section.blog", render: async () => "" });
+  const html = await renderSettingsMenu(reg.getSettingsSections(), db, "en");
+  const adv = html.slice(html.indexOf("<details"), html.indexOf("</details>"));
+  assert.ok(hasRow(adv, "no-group-test"));
+  assert.ok(hasRow(adv, "bogus-group-test"));
+});
+
+test("the companion bundle's settings section is in the voice group", async () => {
+  const { reg } = await setup();
+  const mod = (await import("../bundles/companion/settings-section.js")).default;
+  reg.registerSettingsSection(mod);
+  assert.equal(reg.getSettingsSection(mod.id).group, "voice");
+});
+
+test("POST from the combined Sharing page stays on it; POST without a section is still dispatched", async () => {
+  const { db, panel } = await setup();
+  const run = async (query) => {
+    let redirected = null;
+    const res = { redirect: (u) => { redirected = u; }, redirectAfterPost: (u) => { redirected = u; }, locals: {} };
+    const req = { method: "POST", query, body: { action: "set_remote_invocation", enabled: "on" }, headers: {}, get: () => "" };
+    await panel.handler(req, res, { db, lang: "en", layout: () => "" });
+    return redirected;
+  };
+  assert.equal(await run({ section: "other-crows-sharing" }), "/dashboard/settings?section=other-crows-sharing");
+  assert.equal(await run({}), "/dashboard/settings?section=remote-invocation");
+});

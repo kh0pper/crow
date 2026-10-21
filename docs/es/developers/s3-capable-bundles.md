@@ -4,7 +4,7 @@ Cualquier bundle de Crow que almacene medios generados por el usuario (música, 
 
 Cuando un bundle opta por participar:
 
-- El operador configura **un solo** juego de credenciales en el Nest (Configuración → Multi-instancia → Almacenamiento compartido).
+- El operador configura **un solo** juego de credenciales en el Nest (Configuración → Avanzado → Almacenamiento compartido).
 - Las credenciales se replican a cada instancia emparejada (selladas en reposo vía `secret-box`, de modo que los archivos del feed nunca contienen texto plano).
 - El flujo de instalación del bundle inyecta automáticamente las variables de entorno específicas de la app en `<bundle>/.env`, usando la capa traductora que ya conoce `AWS_*`, `S3_*`, `PEERTUBE_OBJECT_STORAGE_*` y `AWS_STORAGE_BUCKET_NAME`.
 - El panel de Almacenamiento compartido muestra una insignia de "drift" cuando la configuración en disco del bundle no coincide con la configuración actual de la base de datos, con un botón **Apply** que reescribe el bloque y ejecuta `docker compose up -d --force-recreate`.
@@ -64,7 +64,7 @@ grep -l '"translator":' bundles/*/manifest.json
 cat ~/.crow/bundles/<id>/.env | sed -n '/# crow-shared-storage BEGIN/,/# crow-shared-storage END/p'
 ```
 
-En el Nest: Configuración → Multi-instancia → Almacenamiento compartido. Los bundles con capacidad S3 instalados aparecen al final con una insignia "in sync" / "drifted" / "missing".
+En el Nest: Configuración → Avanzado → Almacenamiento compartido. Los bundles con capacidad S3 instalados aparecen al final con una insignia "in sync" / "drifted" / "missing".
 
 ## Lo que NO es automático
 

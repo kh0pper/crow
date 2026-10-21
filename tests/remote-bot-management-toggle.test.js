@@ -22,5 +22,5 @@ test("handleAction returns true for its action, false for others", async () => {
 
 test("section metadata", () => {
   assert.equal(section.id, "remote-bot-management");
-  assert.equal(section.group, "multiInstance");
+  assert.equal(section.group, "otherCrows");
 });

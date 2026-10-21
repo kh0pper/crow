@@ -118,7 +118,13 @@ export default {
     // so section AJAX handlers work from any dashboard page)
     if (req.method === "POST") {
       const { action } = req.body;
-      const handled = await dispatchAction(getSettingsSections(), { req, res, db, action, lang });
+      // The section the form was posted from handles its own action first, so a
+      // combined page (Sharing between Crows) is not pre-empted by the hidden
+      // standalone section that owns the same action.
+      let handled = false;
+      const own = req.query?.section ? getSettingsSection(req.query.section) : null;
+      if (own?.handleAction) handled = await own.handleAction({ req, res, db, action, lang });
+      if (!handled) handled = await dispatchAction(getSettingsSections(), { req, res, db, action, lang });
       // A section may ask to render itself as the POST response (a one-time
       // reveal that must never travel in a redirect URL).
       if (handled && typeof handled === "object" && handled.renderSection) sectionId = handled.renderSection;

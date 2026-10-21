@@ -69,8 +69,9 @@ export const LEGACY_GROUP_ALIASES = {
  * @param {object} manifest - Section module default export
  */
 export function registerSettingsSection(manifest) {
-  const alias = LEGACY_GROUP_ALIASES[manifest.group];
-  if (alias) manifest = { ...manifest, group: alias };
+  const group = LEGACY_GROUP_ALIASES[manifest.group] || manifest.group;
+  // A missing or unknown group lands in Advanced rather than vanishing.
+  if (group !== manifest.group || !GROUPS[group]) manifest = { ...manifest, group: GROUPS[group] ? group : "advanced" };
   sections.set(manifest.id, manifest);
 }
 

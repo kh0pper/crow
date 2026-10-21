@@ -8,13 +8,13 @@ import { escapeHtml } from "../shared/components.js";
 import { getOrCreateLocalInstanceId } from "../../instance-registry.js";
 
 /**
- * True when a trusted, active Crow other than this one is paired. Gates the
+ * True when a trusted Crow (active, or offline while restarting) other than this one is paired. Gates the
  * multi-instance pages; any failure (e.g. no table yet) reads as "no peer".
  */
 export async function hasTrustedPeer(db) {
   try {
     const r = await db.execute({
-      sql: "SELECT 1 FROM crow_instances WHERE trusted = 1 AND status = 'active' AND id != ? LIMIT 1",
+      sql: "SELECT 1 FROM crow_instances WHERE trusted = 1 AND status IN ('active','offline') AND id != ? LIMIT 1",
       args: [getOrCreateLocalInstanceId()],
     });
     return r.rows.length > 0;
@@ -44,7 +44,7 @@ export async function renderSettingsMenu(sections, db, lang) {
   for (const section of sections) {
     if (section.hidden) continue;
     if (section.hiddenUnless === "peer" && !peer) continue;
-    const group = section.group || "general";
+    const group = section.group || "advanced";
     if (!grouped[group]) grouped[group] = [];
     grouped[group].push(section);
   }
@@ -144,6 +144,10 @@ function menuFilterScript() {
     var menu = document.querySelector(".settings-menu");
     if (!menu) return;
     var anyVisible = false;
+    // Remember each <details> state when a search starts; restore it when cleared.
+    menu.querySelectorAll("details.settings-group").forEach(function (d) {
+      if (q && d.getAttribute("data-was-open") === null) d.setAttribute("data-was-open", d.open ? "1" : "0");
+    });
     menu.querySelectorAll(".settings-group").forEach(function (g) {
       var groupVisible = false;
       g.querySelectorAll(".settings-row").forEach(function (r) {
@@ -153,7 +157,10 @@ function menuFilterScript() {
         if (match) groupVisible = true;
       });
       g.style.display = groupVisible ? "" : "none";
-      if (g.tagName === "DETAILS" && q) g.open = groupVisible;
+      if (g.tagName === "DETAILS") {
+        if (q) g.open = groupVisible;
+        else if (g.getAttribute("data-was-open") !== null) { g.open = g.getAttribute("data-was-open") === "1"; g.removeAttribute("data-was-open"); }
+      }
       if (groupVisible) anyVisible = true;
     });
     var empty = document.getElementById("settings-no-results");

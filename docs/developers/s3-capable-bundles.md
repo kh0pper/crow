@@ -4,7 +4,7 @@ Any Crow bundle that stores user-generated media (music, photos, videos, documen
 
 When a bundle opts in:
 
-- The operator configures **one** set of credentials in the Nest (Settings → Multi-Instance → Shared Storage).
+- The operator configures **one** set of credentials in the Nest (Settings → Advanced → Shared Storage).
 - Credentials replicate to every paired instance (sealed at rest via `secret-box` so feed files never hold plaintext).
 - The bundle install flow injects the right app-specific env vars into `<bundle>/.env` automatically, using the translator layer that already knows `AWS_*`, `S3_*`, `PEERTUBE_OBJECT_STORAGE_*`, and `AWS_STORAGE_BUCKET_NAME`.
 - The Shared Storage panel surfaces a "drift" badge when the bundle's on-disk config doesn't match current DB config, with an **Apply** button that rewrites the block and `docker compose up -d --force-recreate`s.
@@ -64,7 +64,7 @@ grep -l '"translator":' bundles/*/manifest.json
 cat ~/.crow/bundles/<id>/.env | sed -n '/# crow-shared-storage BEGIN/,/# crow-shared-storage END/p'
 ```
 
-In the Nest: Settings → Multi-Instance → Shared Storage. Installed S3-capable bundles appear at the bottom with an "in sync" / "drifted" / "missing" badge.
+In the Nest: Settings → Advanced → Shared Storage. Installed S3-capable bundles appear at the bottom with an "in sync" / "drifted" / "missing" badge.
 
 ## What's NOT automatic
 

@@ -77,7 +77,7 @@ export function keychainApiRouter({
     crowHome,
     onNewKey: async ({ orphaned }) => {
       await audit(db, "keychain_key_created", { ip, details: { orphaned } });
-      try { await notify(db, { title: "New Crow keychain key created", body: `${orphaned} saved password(s) were sealed with a key that is no longer on this machine. Import an Export file in Settings → Passwords to recover them.`, type: "system", source: "keychain" }); } catch {}
+      try { await notify(db, { title: "New Crow keychain key created", body: `${orphaned} saved password(s) were sealed with a key that is no longer on this machine. Import an Export file in Settings → Security & passwords → Saved passwords & keys to recover them.`, type: "system", source: "keychain" }); } catch {}
     },
   });
 
@@ -147,7 +147,7 @@ export function keychainApiRouter({
     const entry = await getEntry(db, Number(req.body?.id));
     if (!entry) return res.status(404).json({ error: "No such password." });
     const secret = await consumeFirstView(db, readKey(), entry.id);
-    if (secret === null) return res.status(410).json({ code: "first_view_spent", error: "Already shown. Open Settings → Passwords to see it again." });
+    if (secret === null) return res.status(410).json({ code: "first_view_spent", error: "Already shown. Open Settings → Security & passwords → Saved passwords & keys to see it again." });
     await audit(db, "keychain_first_view", { ip: req.ip, details: auditDetails(entry) });
     res.json({ secret });
   }));
