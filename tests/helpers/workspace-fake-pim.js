@@ -16,7 +16,7 @@ export function installFakePim(fake) {
     /** Test hooks: afterPut(collection, file) runs right after a PUT is stored (a person editing in the gap);
      *  omitPutEtag drops the ETag header from PUT answers; failNext = {method, status} fails the next such request. */
     afterPut: null, omitPutEtag: false, failNext: null,
-    addCalendar(id, name, { writable = true, owner = "admin" } = {}) { calendars.set(id, { id, name, writable, owner, objects: new Map() }); },
+    addCalendar(id, name, { writable = true, owner = "admin", components = ["VEVENT"] } = {}) { calendars.set(id, { id, name, writable, owner, components, objects: new Map() }); },
     addEvent(calId, file, ics) { calendars.get(calId).objects.set(file, { text: ics, etag: etag() }); },
     addBook(id, name, { writable = true, owner = "admin" } = {}) { books.set(id, { id, name, writable, owner, objects: new Map() }); },
     addCard(bookId, file, vcf) { books.get(bookId).objects.set(file, { text: vcf, etag: etag() }); },
@@ -31,7 +31,7 @@ export function installFakePim(fake) {
     const C = coll(kind);
     if (!m[2] && req.method === "PROPFIND") {
       const self = `<d:response><d:href>${base}</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`;
-      const rows = [...C.values()].map((c) => `<d:response><d:href>${base}${encodeURIComponent(c.id)}/</d:href><d:propstat><d:prop><d:displayname>${xmlEsc(c.name)}</d:displayname><d:resourcetype><d:collection/>${kind === "calendars" ? "<cal:calendar/>" : "<card:addressbook/>"}</d:resourcetype>${kind === "calendars" ? `<cal:supported-calendar-component-set><cal:comp name="VEVENT"/></cal:supported-calendar-component-set>` : ""}<oc:owner-principal>principals/users/${c.owner || "admin"}</oc:owner-principal><d:current-user-privilege-set><d:privilege><d:read/></d:privilege>${c.writable === false ? "" : "<d:privilege><d:write/></d:privilege>"}</d:current-user-privilege-set></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`).join("");
+      const rows = [...C.values()].map((c) => `<d:response><d:href>${base}${encodeURIComponent(c.id)}/</d:href><d:propstat><d:prop><d:displayname>${xmlEsc(c.name)}</d:displayname><d:resourcetype><d:collection/>${kind === "calendars" ? "<cal:calendar/>" : "<card:addressbook/>"}</d:resourcetype>${kind === "calendars" && c.components ? `<cal:supported-calendar-component-set>${c.components.map((n) => `<cal:comp name="${n}"/>`).join("")}</cal:supported-calendar-component-set>` : ""}<oc:owner-principal>principals/users/${c.owner || "admin"}</oc:owner-principal><d:current-user-privilege-set><d:privilege><d:read/></d:privilege>${c.writable === false ? "" : "<d:privilege><d:write/></d:privilege>"}</d:current-user-privilege-set></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`).join("");
       send(207, nsFix(ms(self + rows))); return true;
     }
     const c = C.get(m[2]); if (!c) { send(404); return true; }
