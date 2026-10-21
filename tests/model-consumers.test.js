@@ -71,7 +71,7 @@ test("isUnattended: open jobs and registry rows count; missing tables and files 
   assert.equal(isUnattended({ gateways: [{ type: "perch" }] }, {}), false);
   const bare = createDbClient(join(dir, "bare.db"));
   const ctx = await loadUnattendedContext(bare, "x", { tasksDbPaths: [join(dir, "nope.db")] });
-  assert.deepEqual(ctx, { botcron: false, openJobs: 0, assignedCards: 0, registryRow: false });
+  assert.deepEqual(ctx, { botcron: false, openJobs: 0, assignedCards: 0, registryRow: false, unknown: false });
   bare.close?.();
   await db.execute("INSERT INTO bot_jobs VALUES ('j1','jobby','running')");
   assert.equal((await loadUnattendedContext(db, "jobby", { tasksDbPaths: [] })).openJobs, 1);
@@ -139,4 +139,39 @@ test("piConfigRefs and subagent slots from a temp pi dir", async () => {
   assert.equal(scout.value, "local-chat/m1");
   assert.equal(slots.find((s) => s.id === "planner").value, "cloud-a/m9");
   assert.equal((await scanSlots(db, { includeSubagents: true, tasksDbPaths: [] })).some((s) => s.kind === "subagent"), false);
+});
+
+test("loadUnattendedContext fails closed: a corrupt store is unknown and unattended; a missing store is not", async () => {
+  const junk = join(dir, "junk.db");
+  writeFileSync(junk, Buffer.from("this is definitely not a sqlite database, just garbage bytes ".repeat(40)));
+  const bad = await loadUnattendedContext(db, "perchy", { tasksDbPaths: [junk] });
+  assert.equal(bad.unknown, true);
+  assert.equal(isUnattended({ gateways: [{ type: "perch" }] }, bad), true);
+  const gone = await loadUnattendedContext(db, "perchy", { tasksDbPaths: [join(dir, "no-such-store.db")] });
+  assert.equal(gone.unknown, false);
+  assert.equal(isUnattended({ gateways: [{ type: "perch" }] }, gone), false);
+  // a store that has no tasks_items table holds no cards
+  const empty = join(dir, "empty.db");
+  new Database(empty).close();
+  assert.equal((await loadUnattendedContext(db, "perchy", { tasksDbPaths: [empty] })).unknown, false);
+});
+
+test("job slot env precedence; the smart-router default tier is never labelled env", async () => {
+  const keys = ["COMPANION_FAST_MODEL", "CROW_EMBED_PROVIDER", "CROW_SMART_ROUTER_DEFAULT"];
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  try {
+    process.env.COMPANION_FAST_MODEL = "local-voice/env-fast";
+    process.env.CROW_EMBED_PROVIDER = "local-embed";
+    process.env.CROW_SMART_ROUTER_DEFAULT = "cloud-a";
+    const slots = await scanSlots(db, { tasksDbPaths: [] });
+    const fast = slots.find((s) => s.id === "llm-router:fast");
+    assert.equal(fast.field, "env:COMPANION_FAST_MODEL");
+    assert.equal(fast.value, "local-voice/env-fast");
+    const embed = slots.find((s) => s.id === "embed");
+    assert.equal(embed.field, "env:CROW_EMBED_PROVIDER");
+    assert.equal(embed.value, "local-embed");
+    assert.equal(slots.find((s) => s.id === "smart-router:default").field, "default");
+  } finally {
+    for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+  }
 });

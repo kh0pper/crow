@@ -26,7 +26,7 @@ const parseJson = (v, fb) => { try { return v == null ? fb : JSON.parse(v); } ca
 
 /** True when the bot can act with nobody watching. In doubt, true: a false positive only adds a confirm. */
 export function isUnattended(def, ctx = {}) {
-  if (ctx.botcron || ctx.registryRow) return true;
+  if (ctx.unknown || ctx.botcron || ctx.registryRow) return true;
   if ((ctx.openJobs || 0) > 0 || (ctx.assignedCards || 0) > 0) return true;
   const gws = Array.isArray(def?.gateways) ? def.gateways : [];
   return gws.some((g) => g && g.type !== "perch");
@@ -56,28 +56,49 @@ async function defaultTasksDbPaths(db) {
   return projectStorePaths(uris, main);
 }
 
+// Only these mean "genuinely nothing there". Anything else (busy, corrupt,
+// not a database, permissions) is unknown, and unknown counts as unattended.
+const ABSENT_RE = /no such table|no such column/i;
+const isAbsent = (e) => ABSENT_RE.test(String(e?.message || e));
+
+/** @returns {{n:number, unknown:boolean}} */
 function countAssignedCards(path, botId) {
-  if (!existsSync(path)) return 0;
+  if (!existsSync(path)) return { n: 0, unknown: false }; // a missing store holds no cards
   let h;
   try {
     h = new Database(path, { readonly: true, fileMustExist: true });
-    return h.prepare("SELECT COUNT(*) AS n FROM tasks_items WHERE assigned_bot = ? AND archived_at IS NULL").get(botId).n;
-  } catch { return 0; } finally { try { h?.close(); } catch { /* ignore */ } }
+    h.pragma("busy_timeout = 2000");
+    const n = h.prepare("SELECT COUNT(*) AS n FROM tasks_items WHERE assigned_bot = ? AND archived_at IS NULL").get(botId).n;
+    return { n, unknown: false };
+  } catch (e) {
+    // A store with no tasks_items table has no cards. A missing column is
+    // ambiguous (archived_at predates every migrated store, but not a stale
+    // one), so it is unknown rather than zero.
+    if (/no such table/i.test(String(e?.message || e))) return { n: 0, unknown: false };
+    return { n: 0, unknown: true };
+  } finally { try { h?.close(); } catch { /* ignore */ } }
 }
 
+/** @returns {{n:number, unknown:boolean}} */
 async function count(db, sql, args) {
-  try { const { rows } = await db.execute({ sql, args }); return Number(rows[0]?.n) || 0; } catch { return 0; }
+  try { const { rows } = await db.execute({ sql, args }); return { n: Number(rows[0]?.n) || 0, unknown: false }; }
+  catch (e) { return isAbsent(e) ? { n: 0, unknown: false } : { n: 0, unknown: true }; }
 }
 
-/** Gather the unattended signals for one bot. Every lookup is best-effort. */
+/** Gather the unattended signals for one bot. A lookup that fails for any reason but "absent" sets ctx.unknown. */
 export async function loadUnattendedContext(db, botId, { tasksDbPaths } = {}) {
-  const botcron = (await count(db, "SELECT COUNT(*) AS n FROM schedules WHERE task = ?", [BOTCRON_PREFIX + botId])) > 0;
-  const openJobs = await count(db, "SELECT COUNT(*) AS n FROM bot_jobs WHERE bot_id = ? AND status IN ('queued','running')", [botId]);
-  const registryRow = (await count(db, "SELECT COUNT(*) AS n FROM bot_registry WHERE bot_id = ?", [botId])) > 0;
+  const cron = await count(db, "SELECT COUNT(*) AS n FROM schedules WHERE task = ?", [BOTCRON_PREFIX + botId]);
+  const jobs = await count(db, "SELECT COUNT(*) AS n FROM bot_jobs WHERE bot_id = ? AND status IN ('queued','running')", [botId]);
+  const reg = await count(db, "SELECT COUNT(*) AS n FROM bot_registry WHERE bot_id = ?", [botId]);
   const paths = tasksDbPaths ?? (await defaultTasksDbPaths(db));
   let assignedCards = 0;
-  for (const p of paths) assignedCards += countAssignedCards(p, botId);
-  return { botcron, openJobs, assignedCards, registryRow };
+  let unknown = cron.unknown || jobs.unknown || reg.unknown;
+  for (const p of paths) {
+    const r = countAssignedCards(p, botId);
+    assignedCards += r.n;
+    unknown ||= r.unknown;
+  }
+  return { botcron: cron.n > 0, openJobs: jobs.n, assignedCards, registryRow: reg.n > 0, unknown };
 }
 
 // ---- pi sub-agent / config helpers ----------------------------------------
@@ -188,7 +209,8 @@ export async function scanSlots(db, { includeSubagents = false, piAgentDir = nul
   envOr("COMPANION_ESCALATION_MODEL", VOICE_ROUTE_DEFAULTS.escalate, "llm-router:escalate", "Voice router (escalate)");
   for (const [tier, value] of Object.entries(DEFAULT_ROUTES)) {
     if (!value) continue;
-    const e = str(process.env[`CROW_SMART_ROUTER_${tier.toUpperCase()}`]);
+    // `default` has no env reader in smart-router.js (it is not run through tierDefault).
+    const e = tier === "default" ? null : str(process.env[`CROW_SMART_ROUTER_${tier.toUpperCase()}`]);
     job(`smart-router:${tier}`, `Smart router (${tier})`, e ? `env:CROW_SMART_ROUTER_${tier.toUpperCase()}` : "default", value, { providerOnly: true });
   }
   const setting = async (k) => { try { return str(await readSetting(db, k)); } catch { return null; } };
