@@ -907,10 +907,10 @@ export function createVoiceTurnRunner(deps) {
       }
       // The [Dates] line's "for something already past, it is the previous one" told the quick model to write last
       // Tuesday for a mistranscribed "had coffee Tuesday" (2026-10-21). On a turn that offers a write tool (Crow's own,
-      // or a remote one that changes something) the rule is dropped from the context and from the echo guard; the
+      // or any remote one that is not a known read: the add-on wrapper crow_tools can write) the rule is dropped from the context and from the echo guard; the
       // surfaces build the line before tools are chosen, so it is removed here, and other callers keep it.
       if (ctxLine && ctxLine.includes(PAST_DAY_RULE)
-        && tools.some((t) => ownByName.has(t.name) || (!extraByName.has(t.name) && toolEffect(t.name) === "write"))) {
+        && tools.some((t) => ownByName.has(t.name) || (!extraByName.has(t.name) && toolEffect(t.name) !== "read"))) {
         ctxLine = dropPastRule(ctxLine);
         userMsg.content = withTurnContext(ctxLine, transcript);
         for (let i = 0; i < echoGuard.length; i += 1) echoGuard[i] = dropPastRule(echoGuard[i]);

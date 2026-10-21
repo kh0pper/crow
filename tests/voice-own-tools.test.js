@@ -825,3 +825,82 @@ test("in the turn: a past reminder asks about the next day and never steps up; t
     assert.equal(h.log.length, 1, "the yes needed no model call");
   } finally { s.close(); }
 });
+
+// ─── Fix round 1 (Task 2): bounded roll-forward, the model's own clock fields, the DST edges ───
+test("a date more than a year past is bad_args, and returns quickly (no day-by-day roll-forward)", async () => {
+  const s = await stores();
+  try {
+    const { own } = make({ connected: ["ws_cal_create_event"], now: () => WED, openTasksDb: s.openTasksDb });
+    const ex = fakeExecutor();
+    const set = await own.forTurn({ db: s.db, bot: CROW({ routine: { calendar: { calendar: "cal-1" } } }), surface: "kiosk", lang: "en", tz: TZ });
+    const t0 = performance.now();
+    const ev = await run(toolOf(set, "crow_calendar_add_event"), { title: "x", start: "1900-01-02T09:00:00-06:00" }, { executor: ex, db: s.db, device: DEVICE });
+    const rem = await run(toolOf(set, "crow_reminder_add"), { text: "x", at: "1900-01-02T09:00:00-06:00" }, { executor: null, db: s.db, device: DEVICE });
+    const day = await run(toolOf(set, "crow_calendar_add_event"), { title: "x", start: "1900-01-02" }, { executor: ex, db: s.db, device: DEVICE });
+    const task = await run(toolOf(set, "crow_task_add"), { title: "x", due: "1900-01-02" }, { executor: null, db: s.db, device: DEVICE, transcript: "on Tuesday" });
+    const ms = performance.now() - t0;
+    for (const r of [ev, rem, day, task]) assert.equal(r.code, "bad_args", JSON.stringify(r));
+    assert.ok(ms < 50, `took ${ms} ms`);
+    assert.deepEqual(ex.calls, []);
+    assert.deepEqual(await s.schedules(), []);
+    assert.equal(s.cards().length, 0);
+    // Eleven months back still rolls forward (a near-year past is a slip, not an argument error).
+    const near = await run(toolOf(set, "crow_calendar_add_event"), { title: "x", start: "2025-11-25T09:00:00-06:00" }, { executor: ex, db: s.db, device: DEVICE });
+    assert.equal(near.code, "needs_confirm");
+  } finally { s.close(); }
+});
+
+test("the local time is the one the model wrote: a pre-change date with the post-change offset keeps 9:00, and the yes writes the new offset", async () => {
+  const { own, pending } = make({ connected: ["ws_cal_create_event"], now: () => Date.parse("2026-11-02T15:00:00Z") });   // Monday 2 November, CST
+  const ex = fakeExecutor();
+  const bot = CROW({ routine: { calendar: { calendar: "cal-1" } } });
+  const set = await own.forTurn({ db: {}, bot, surface: "kiosk", lang: "en", tz: TZ });
+  const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Coffee", start: "2026-10-27T09:00:00-06:00" }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(r.code, "needs_confirm");
+  assert.equal(r.say, `That time has passed. Add Coffee for ${fullWhen("2026-11-03T09:00:00-06:00")} instead?`);
+  assert.match(r.say, /9:00 AM/);
+  assert.equal(pending.get(DEVICE.id).args.start, "2026-11-03T09:00:00-06:00");
+  const yes = await own.fastPath({ db: {}, device: DEVICE, transcript: "yes", lang: "en", tz: TZ, bot, executor: ex });
+  assert.equal(yes.verb, "routine_yes");
+  assert.deepEqual(ex.calls.map((c) => [c.arguments.start, c.arguments.end]), [["2026-11-03T09:00:00-06:00", "2026-11-03T10:00:00-06:00"]]);
+  // The reminder too: 9:00 as written, the next day, in that day's offset.
+  const rem = await run(toolOf(set, "crow_reminder_add"), { text: "call", at: "2026-10-31T09:00:00-06:00" }, { executor: null, db: {}, device: DEVICE });
+  assert.equal(rem.code, "needs_confirm");
+  assert.equal(pending.get(DEVICE.id).args.at, "2026-11-03T09:00:00-06:00");
+});
+
+test("a start in the spring-forward gap (02:30 on the change day) resolves to 03:30", async () => {
+  const { own, pending } = make({ connected: ["ws_cal_create_event"], now: () => Date.parse("2026-03-04T18:00:00Z") });   // Wednesday 4 March, CST
+  const set = await own.forTurn({ db: {}, bot: CROW({ routine: { calendar: { calendar: "cal-1" } } }), surface: "kiosk", lang: "en", tz: TZ });
+  const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Run", start: "2026-03-01T02:30:00-06:00" }, { executor: fakeExecutor(), db: {}, device: DEVICE });
+  assert.equal(r.code, "needs_confirm");
+  assert.equal(pending.get(DEVICE.id).args.start, "2026-03-08T03:30:00-05:00");
+});
+
+test("a reminder a moment ago (within 5 minutes) is accepted, like an event", async () => {
+  const s = await stores();
+  try {
+    const { own } = make({ now: () => WED });
+    const set = await own.forTurn({ db: s.db, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+    const r = await run(toolOf(set, "crow_reminder_add"), { text: "call", at: "2026-10-21T14:08:00-05:00" }, { executor: null, db: s.db, device: DEVICE });
+    assert.equal(r.code, "added");
+    assert.equal((await s.schedules()).length, 1);
+  } finally { s.close(); }
+});
+
+test("a held next occurrence that has passed by the yes writes nothing and says not done", async () => {
+  const s = await stores();
+  try {
+    let t = WED;
+    const now = () => t;
+    const { own } = make({ now, pending: createPendingStore({ now, ttlMs: 1e12 }) });
+    const set = await own.forTurn({ db: s.db, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+    const r = await run(toolOf(set, "crow_reminder_add"), { text: "call", at: "2026-10-21T09:00:00-05:00" }, { executor: null, db: s.db, device: DEVICE });
+    assert.equal(r.code, "needs_confirm");
+    t = Date.parse("2026-10-23T12:00:00Z");   // the held 22 October 9:00 is past now
+    const yes = await own.fastPath({ db: s.db, device: DEVICE, transcript: "yes", lang: "en", tz: TZ, bot: CROW(), executor: null });
+    assert.equal(yes.verb, "routine_failed");
+    assert.equal(yes.say, voiceLine("not_done_say", "en"));
+    assert.deepEqual(await s.schedules(), []);
+  } finally { s.close(); }
+});

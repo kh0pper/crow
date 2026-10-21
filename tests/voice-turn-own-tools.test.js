@@ -761,3 +761,16 @@ test("a write-tool turn's user message drops the [Dates] past-day rule; a plain 
   assert.deepEqual(p.log[0].tools, []);
   assert.ok(p.log[0].messages.at(-1).content.includes(PAST_DAY_RULE));
 });
+
+test("a remote write tool, or the add-on wrapper, also drops the past-day rule", async () => {
+  const { relativeDatesContext, PAST_DAY_RULE } = await import("../servers/shared/relative-dates.js");
+  const ctx = relativeDatesContext(Date.parse("2026-10-21T19:11:00Z"), "America/Chicago");
+  for (const name of ["ws_cal_create_event", "crow_tools"]) {
+    const h = ownHarness({ familiesOnIntent: false, chatTools: [name], rounds: [says("Okay. ")] });
+    await turn(h, "add coffee Tuesday to my calendar", { familiesOnIntent: false, turnContext: ctx });
+    assert.ok(h.log[0].tools.includes(name), `${name} offered: ${h.log[0].tools}`);
+    const user = h.log[0].messages.at(-1).content;
+    assert.ok(user.includes("[Dates] To add or plan something"), name);
+    assert.ok(!user.includes(PAST_DAY_RULE), `${name}: ${user}`);
+  }
+});

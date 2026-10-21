@@ -104,18 +104,47 @@ function addDays(date, n) {
 }
 const nextDay = (date) => addDays(date, 1);
 
+// One offset formatter per zone (a formatter is costly to build; the zones in use are few).
+const OFFSET_FORMATS = new Map();
+function offsetFormat(tz) {
+  let f = OFFSET_FORMATS.get(tz);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-US", { timeZone: tz, timeZoneName: "longOffset" });
+    if (OFFSET_FORMATS.size >= 64) OFFSET_FORMATS.clear();
+    OFFSET_FORMATS.set(tz, f);
+  }
+  return f;
+}
 /** The UTC offset of `tz` (minutes east of UTC) at the moment `ms`. */
 function zoneOffsetAt(ms, tz) {
-  const name = new Intl.DateTimeFormat("en-US", { timeZone: tz, timeZoneName: "longOffset" }).formatToParts(new Date(ms)).find((x) => x.type === "timeZoneName")?.value || "GMT";
+  const name = offsetFormat(tz).formatToParts(new Date(ms)).find((x) => x.type === "timeZoneName")?.value || "GMT";
   const m = /^GMT([+-])(\d{2}):(\d{2})$/.exec(name);
   return m ? (m[1] === "-" ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3])) : 0;
 }
 /** The local wall-clock time of `ms` in `tz`, as a UTC timestamp of those fields. */
 const wallOf = (ms, tz) => ms + zoneOffsetAt(ms, tz) * 60_000;
-/** The moment a local wall-clock time (a UTC timestamp of its fields) names in `tz`: two passes settle a DST edge. */
+/**
+ * The moment a local wall-clock time (a UTC timestamp of its fields) names in `tz`. The offsets a day either side are
+ * the candidates (zone changes are months apart): the earlier moment that really shows that wall time wins (a
+ * fall-back hour happens twice); a time the clocks skip (spring-forward 02:30) is read with the offset before the
+ * change, which lands on the same distance past it (03:30).
+ */
 function momentOf(wall, tz) {
-  const first = wall - zoneOffsetAt(wall, tz) * 60_000;
-  return wall - zoneOffsetAt(first, tz) * 60_000;
+  const before = zoneOffsetAt(wall - DAY_MS, tz);
+  const after = zoneOffsetAt(wall + DAY_MS, tz);
+  const shows = [before, after].map((o) => wall - o * 60_000).filter((t) => wallOf(t, tz) === wall).sort((x, y) => x - y);
+  return shows.length ? shows[0] : wall - before * 60_000;
+}
+/**
+ * The first moment after `now` of a wall time `wall` stepped by `period` (a day or a week): a constant-time jump to
+ * about the right step, then at most a few steps either side for the DST hour.
+ */
+function nextAfter(wall, period, now, tz) {
+  let k = Math.max(1, Math.ceil((now - (wall - zoneOffsetAt(wall, tz) * 60_000)) / period));
+  while (k > 1 && momentOf(wall + (k - 1) * period, tz) > now) k -= 1;
+  let at = momentOf(wall + k * period, tz);
+  for (let i = 0; at <= now && i < 4; i += 1) { k += 1; at = momentOf(wall + k * period, tz); }
+  return at;
 }
 /** `ms` written with the offset `tz` has on that date (the offset is recomputed: DST can lie between). */
 const inZone = (ms, tz) => withOffset(ms, zoneOffsetAt(ms, tz));
@@ -124,14 +153,16 @@ const inZone = (ms, tz) => withOffset(ms, zoneOffsetAt(ms, tz));
  * everywhere, so nothing that may still be today is called past.
  */
 const todayIn = (now, tz) => new Date(tz ? wallOf(now, tz) : now - 12 * 3_600_000).toISOString().slice(0, 10);
-/** A date moved forward by whole weeks (same weekday) until it is `today` or later. */
+/** A date moved forward by whole weeks (same weekday) to the first that is `today` or later (constant time). */
 function sameWeekdayFrom(date, today) {
-  let d = date;
-  while (d < today) d = addDays(d, 7);
-  return d;
+  const days = Math.round((Date.parse(`${today}T00:00:00Z`) - Date.parse(`${date}T00:00:00Z`)) / DAY_MS);
+  return days <= 0 ? date : addDays(date, Math.ceil(days / 7) * 7);
 }
-/** Grace for a timed start a moment ago ("in a minute" said slowly, a clock a little behind): not past. */
+/** Grace for a timed start or reminder a moment ago ("in a minute" said slowly, a clock a little behind): not past. */
 const PAST_GRACE_MS = 5 * 60_000;
+/** Further back than this is not a slip of the day but a wrong argument (a wrong year): bad_args, never rolled forward. */
+const PAST_LIMIT_DAYS = 366;
+const TOO_FAR_PAST = "That date is more than a year ago. Ask the user which date they mean.";
 // A weekday named in the user's words (en, es; accents ignored): a past task due date keeps that weekday.
 const WEEKDAY_WORD = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|lunes|martes|miercoles|jueves|viernes|sabado|domingo)\b/;
 const namesWeekday = (t) => typeof t === "string" && WEEKDAY_WORD.test(t.slice(0, 400).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
@@ -173,7 +204,7 @@ function validate(tool, raw, opts) {
   const v = validateNow(tool, raw, opts);
   if (v.error || !v.next) return v;
   const n = validateNow(tool, v.next, opts);
-  if (n.error || n.next) return bad("That time has already passed. Ask the user for a time in the future.");
+  if (n.error || n.next) return bad("That time has already passed. Ask the user for a time in the future.", "past_time");
   return { ...n, past: true };
 }
 
@@ -195,6 +226,7 @@ function validateNow(tool, raw, { tz, lang, now, transcript }) {
         if (end < start) return bad("The end is before the start.");
       }
       const today = todayIn(now, tz);
+      if (start < addDays(today, -PAST_LIMIT_DAYS)) return bad(TOO_FAR_PAST);
       if (start < today) {
         const next = sameWeekdayFrom(start, today);
         const shift = Math.round((Date.parse(`${next}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / DAY_MS);
@@ -212,11 +244,11 @@ function validateNow(tool, raw, { tz, lang, now, transcript }) {
       end = String(a.end).trim();
       endMs = e.ms;
     }
+    if (startDt.ms < now - PAST_LIMIT_DAYS * DAY_MS) return bad(TOO_FAR_PAST);
     if (startDt.ms < now - PAST_GRACE_MS) {
-      // The same weekday and local time, a week on at a time, until it is ahead; the same length.
-      const wall = wallOf(startDt.ms, tz);
-      let at = startDt.ms;
-      for (let k = 1; at <= now; k += 1) at = momentOf(wall + k * 7 * DAY_MS, tz);
+      // The same weekday and the local time the model wrote (its own clock fields, not the zone's reading of them),
+      // the first week on that is ahead; the same length; the offset that date has.
+      const at = nextAfter(startDt.ms + startDt.off * 60_000, 7 * DAY_MS, now, tz);
       return { next: { title: title.value, start: inZone(at, tz), end: inZone(at + (endMs - startDt.ms), tz), all_day: false } };
     }
     return { args: { title: title.value, start: String(a.start).trim(), end, all_day: false }, when: whenAt(startDt.ms, lang, tz), nextWhen: whenOn(startDt.ms, lang, tz) };
@@ -227,11 +259,10 @@ function validateNow(tool, raw, { tz, lang, now, transcript }) {
     const at = parseDateTime(a.at);
     if (!at) return bad(`The time is not a date-time with an offset. ${NEED_OFFSET}`);
     if (!tz) return bad(NO_TZ, "no_tz");
-    if (at.ms <= now) {
-      // The same local time, a day on at a time, until it is ahead.
-      const wall = wallOf(at.ms, tz);
-      let ms = at.ms;
-      for (let k = 1; ms <= now; k += 1) ms = momentOf(wall + k * DAY_MS, tz);
+    if (at.ms < now - PAST_LIMIT_DAYS * DAY_MS) return bad(TOO_FAR_PAST);
+    if (at.ms < now - PAST_GRACE_MS) {
+      // The local time the model wrote, the first day on that is ahead, in that day's offset.
+      const ms = nextAfter(at.ms + at.off * 60_000, DAY_MS, now, tz);
       return { next: { text: text.value, at: inZone(ms, tz) } };
     }
     return { args: { text: text.value, at: String(a.at).trim() }, when: whenAt(at.ms, lang, tz), atIso: new Date(at.ms).toISOString(), nextWhen: whenOn(at.ms, lang, tz) };
@@ -244,6 +275,7 @@ function validateNow(tool, raw, { tz, lang, now, transcript }) {
       due = parseDate(a.due);
       if (!due) return bad("The due date must be YYYY-MM-DD.");
       const today = todayIn(now, tz);
+      if (due < addDays(today, -PAST_LIMIT_DAYS)) return bad(TOO_FAR_PAST);
       if (due < today) return { next: { title: title.value, due: namesWeekday(transcript) ? sameWeekdayFrom(due, today) : addDays(today, 1) } };
     }
     return { args: { title: title.value, ...(due ? { due } : {}) }, when: null, nextWhen: due ? whenDay(due, lang) : null };
