@@ -44,3 +44,25 @@ test("catalog reflects the exposure set on tool entries", async () => {
   const others = cat.tools.filter((t) => t.canonicalId !== "crow-memory");
   assert.ok(others.every((t) => t.exposed === false), "non-exposed tools are exposed:false");
 });
+
+// Skills panel option C, PR 2: peers are not advertised a skill this Crow
+// switched off (it would not load).
+test("catalog skills leave out a skill switched off on this instance", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const { setSkillOff } = await import("../servers/shared/skill-state.js");
+  const home = mkdtempSync(join(tmpdir(), "cap-skill-off-"));
+  try {
+    mkdirSync(join(home, "skills"), { recursive: true });
+    writeFileSync(join(home, "skills", "kept-on.md"), "# On\n");
+    writeFileSync(join(home, "skills", "switched-off.md"), "# Off\n");
+    setSkillOff(home, "switched-off", true);
+    setSkillOff(home, "memory-management", true);
+    const names = (await getLocalCatalog(db, { crowHome: home, instanceId: "self" })).skills.map((s) => s.name);
+    assert.ok(names.includes("kept-on"));
+    assert.ok(!names.includes("switched-off"));
+    assert.ok(!names.includes("memory-management"), "a built-in switched off is left out too");
+    assert.ok(names.includes("tutoring"));
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});

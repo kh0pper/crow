@@ -174,3 +174,31 @@ test("create with empty instructions in a real browser: 422, values kept, the in
     assert.equal(existsSync(join(SKILLS, "blank-one.md")), false);
   } finally { await t.close(); }
 });
+
+// Skills panel option C, PR 2: the on/off switch in a real browser, through
+// the real CSRF + Turbo path. After the redirect the row reads off, focus is
+// back on the same switch, and the toast's text has been put in its status
+// region (in new conversations, never "next turn").
+test("the switch in a real browser: off, focus kept, toast announced, state written; then back on", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  writeFileSync(join(SKILLS, "live-switch.md"), "# Live switch\n");
+  const t = await tab();
+  try {
+    await openList(t);
+    const swSel = "document.querySelector('[data-skill=\"live-switch\"]').closest('tr').querySelector('[role=switch]')";
+    assert.equal(await t.evalIn(`${swSel}.getAttribute('aria-checked')`), "true");
+    await t.evalIn(`${swSel}.click(); true`);
+    const st = await waitFor(async () => {
+      const v = await t.evalIn(`(() => { const b = ${swSel}; return { checked: b.getAttribute('aria-checked'), focused: document.activeElement === b, toast: (document.getElementById('skills-toast') || {}).textContent || '' }; })()`);
+      return v && v.checked === "false" && v.toast ? v : null;
+    });
+    assert.ok(st, "the row reads off after the redirect, with a toast");
+    assert.equal(st.focused, true, "focus is back on the same switch");
+    assert.match(st.toast, /Turned off: Live switch\. No bot uses it\./);
+    assert.deepEqual(JSON.parse(readFileSync(join(process.env.CROW_HOME, "skill-state.json"), "utf8")).off, ["live-switch"]);
+    assert.deepEqual(await t.evalIn("JSON.stringify(window.__subs)"), JSON.stringify([{ success: true, status: 200 }]), "Turbo followed the 303 (CSRF header accepted)");
+    await t.evalIn(`${swSel}.click(); true`);
+    assert.ok(await waitFor(async () => (await t.evalIn(`${swSel}.getAttribute('aria-checked')`)) === "true"), "back on");
+    assert.deepEqual(JSON.parse(readFileSync(join(process.env.CROW_HOME, "skill-state.json"), "utf8")).off, []);
+  } finally { await t.close(); }
+});

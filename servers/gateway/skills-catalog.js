@@ -18,7 +18,7 @@
  */
 import { readFileSync, readdirSync, lstatSync, readlinkSync, openSync, fstatSync, closeSync, constants as fsConstants } from "node:fs";
 import { join, resolve, dirname, sep } from "node:path";
-import { syncBundleSkills, readSkillLedger, manifestSkillPaths, skillSyncMode } from "./bundle-skill-sync.js";
+import { syncBundleSkills, readSkillLedger, manifestSkillPaths, skillSyncMode, skillHash } from "./bundle-skill-sync.js";
 
 const MAX_SKILL_BYTES = 1024 * 1024;
 const PURPOSE_MAX = 160;
@@ -237,15 +237,31 @@ export function anyBundleShipping(appBundles, file) {
 
 const EXT_COPY_ACTIONS = new Set(["same", "adopt", "refresh", "install", "skip-optout"]);
 /**
- * The one rule for "an extension copy" (badge, and PR 2's Save guard).
- * CAUTION: for skip-optout ("refresh": false on the installed copy) the sync
- * returns before hashing anything, so "unedited" is NOT verified there — the
- * copy may already be edited. The badge accepts that; a Save guard must not
- * treat an opted-out copy as provably unedited (it should hash it against the
- * record itself, or guard it unconditionally).
+ * The ONE rule for "an unedited extension copy": the badge ("From <ext>",
+ * read-only) and the Save guard both call it.
+ * For skip-optout ("refresh": false on the installed copy) the sync returns
+ * before hashing anything, so that action alone proves nothing: the copy
+ * counts only when its text matches the record's hash (pass `record` and
+ * `filePath`). An opted-out copy that can't be verified is treated as the
+ * owner's own (it may already be edited), never as unedited.
  */
-export function isExtensionCopy(entry) {
-  return !!entry && EXT_COPY_ACTIONS.has(entry.action);
+export function isExtensionCopy(entry, { record = null, filePath = null } = {}) {
+  if (!entry || !EXT_COPY_ACTIONS.has(entry.action)) return false;
+  if (entry.action !== "skip-optout") return true;
+  const rec = record && record[entry.skill];
+  if (!rec || typeof rec.sha256 !== "string" || !filePath) return false;
+  const text = readSkillText(filePath);
+  return text !== null && skillHash(text) === rec.sha256;
+}
+
+/** The panel's view of one user skill file: is it an unedited extension copy, and whose? */
+export function extensionCopyOf({ crowHome, appBundles, file }) {
+  const { plan } = skillSyncPlan({ crowHome, appBundles });
+  const entry = plan.get(file) || null;
+  const isCopy = isExtensionCopy(entry, { record: readRecordSafe(crowHome), filePath: join(crowHome, "skills", file) });
+  if (!isCopy) return null;
+  const m = readJson(join(appBundles, entry.bundle, "manifest.json"));
+  return { bundle: entry.bundle, bundleName: (m && typeof m.name === "string" && m.name) || entry.bundle };
 }
 
 // ---------------------------------------------------------------- classify
@@ -328,9 +344,12 @@ export function classifySkills({ crowHome, appBundles, repoDir, lang = "en", kit
         const id = (entry && entry.bundle) || linkBundle(crowHome, row.path, installedIds);
         if (id) Object.assign(row, { source: "ext", bundle: id, linked: true });
         else row.source = "yours";
-      } else if (isExtensionCopy(entry)) {
+      } else if (isExtensionCopy(entry, { record, filePath: row.path })) {
         Object.assign(row, { source: "ext", bundle: entry.bundle });
         if (entry.action === "refresh" && applies) row.status = "update";
+      } else if (entry && entry.action === "skip-optout") {
+        // Opted out of refresh and not verifiable as unedited: the owner's copy.
+        Object.assign(row, { source: "yours", basedOn: entry.bundle, bundle: entry.bundle });
       } else if (entry && (entry.action === "kept-edited" || entry.action === "kept-unverified")) {
         Object.assign(row, { source: "yours", basedOn: entry.bundle, bundle: entry.bundle });
         const acked = ack[file] && ack[file].srcSha && ack[file].srcSha === entry.srcSha;

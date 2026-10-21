@@ -75,3 +75,21 @@ test("final review M2: only the three kit skill names are dropped on a kit-less 
   assert.deepEqual(skillNamesFor(def(["memory"], picks), { crowHome, kitInstalled: false }), ["design-notes", "memory-management"]);
   assert.deepEqual(skillNamesFor(def(["memory"], picks), { crowHome, kitInstalled: true }), picks);
 });
+
+// Skills panel option C, PR 2: design-frontend switched off on this Crow is
+// not inlined, even though the kit and the Artifacts grant would attach it.
+test("off list: design-frontend switched off is not inlined", async () => {
+  const { setSkillOff } = await import("../servers/shared/skill-state.js");
+  const sessionDir = join(dir, "sessions", "design-off");
+  mkdirSync(sessionDir, { recursive: true });
+  const world = { def: def(["artifacts"]), crowHome, projectId: null, projectSpace: null, sessionDir, cwd: sessionDir,
+    mcpDelivery: "fd", mcpConfig: null, tasksDbPath: null, remoteEnabled: false, peerGatewayUrls: {}, session: null,
+    botClassifier: null, narrowedTools: null, gatewayType: "perch", kitInstalled: true, houseStyle: null };
+  const on = await prepareSpawn(world, {});
+  assert.match(readFileSync(on.sysFile, "utf8"), /# Design frontend/);
+  setSkillOff(crowHome, "design-frontend", true);
+  try {
+    const off = await prepareSpawn(world, {});
+    assert.doesNotMatch(readFileSync(off.sysFile, "utf8"), /# Design frontend/);
+  } finally { setSkillOff(crowHome, "design-frontend", false); }
+});

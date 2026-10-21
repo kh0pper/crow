@@ -133,9 +133,11 @@ export async function generateSystemPrompt(options = {}) {
     const skills = !omitSkills && Array.isArray(botDef.skills) ? botDef.skills : [];
     if (skills.length) {
       try {
-        const { text, missing } = resolveSkillText(skills, { crowHome: resolveCrowHome() });
+        const { text, missing, off = [] } = resolveSkillText(skills, { crowHome: resolveCrowHome() });
         if (text) parts.push(text);
         if (missing.length) console.warn(`[meta-glasses] bound bot skills not found: ${missing.join(", ")}`);
+        // Switched off in the Skills panel: expected, not a warning.
+        if (off.length) console.log(`[meta-glasses] bound bot skills off on this instance: ${off.join(", ")}`);
       } catch (err) {
         console.warn(`[meta-glasses] skill resolution failed: ${err.message}`);
       }

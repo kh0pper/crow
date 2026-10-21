@@ -39,6 +39,8 @@ function sandboxOfferForm({ def, req, bot, botId, lang }) {
     `<button type="submit" class="btb-btn">${escapeHtml(t("botbuilder.bashSandboxSwitch", lang))}</button></form>`;
 }
 import { segGroup, card } from "./ui.js";
+import { offSkills } from "../../../../shared/skill-state.js";
+import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposals.mjs";
 
 function sourceRow(src, selected, lang, { memory = false } = {}) {
   const key = src.server;
@@ -144,29 +146,7 @@ export async function renderAbilities(ctx) {
   const services = card(t("botbuilder.abServicesTitle", lang), servicesBody, t("botbuilder.abServicesLead", lang));
 
   // ---- skills (def.skills is the one store) ----
-  const crowHome = resolveCrowHome();
-  const allSkills = loadSkills(crowHome);
-  const selSkills = new Set(Array.isArray(def.skills) ? def.skills : []);
-  const chip = (s) => `<label class="btb-chip"><input type="checkbox" name="skills" value="${escapeHtml(s)}"${selSkills.has(s) ? " checked" : ""}> <span>${escapeHtml(s)}</span></label>`;
-  const claimed = new Set();
-  let groups = "";
-  for (const ext of listInstalledExtensions(crowHome)) {
-    const names = extensionSkills(ext).filter((n) => allSkills.includes(n));
-    if (!names.length) continue;
-    names.forEach((n) => claimed.add(n));
-    groups += `<div class="btb-group"><label>${escapeHtml(ext.group || ext.id)}</label><div class="btb-chips">${names.map(chip).join("")}</div></div>`;
-  }
-  const general = allSkills.filter((n) => !claimed.has(n));
-  // a selected skill whose file is gone stays visible (and selected) so a save keeps it
-  const missing = [...selSkills].filter((n) => !allSkills.includes(n));
-  if (general.length || missing.length) {
-    groups += `<div class="btb-group"><label>${escapeHtml(t("botbuilder.skillsGroupGeneral", lang))}</label><div class="btb-chips">` +
-      general.map(chip).join("") +
-      missing.map((s) => `<label class="btb-chip btb-chip-missing"><input type="checkbox" name="skills" value="${escapeHtml(s)}" checked> <span>${escapeHtml(s)}</span> <span class="btb-muted">${escapeHtml(t("botbuilder.abSkillMissing", lang))}</span></label>`).join("") +
-      `</div></div>`;
-  }
-  const skills = card(t("botbuilder.abSkillsTitle", lang),
-    groups + `<input type="hidden" name="skills_rendered" value="1">`, t("botbuilder.abSkillsLead", lang));
+  const skills = renderSkillsCard({ def, lang, crowHome: resolveCrowHome() });
 
   return `<form method="POST" class="btb-form" id="btb-abilities-form">${hidden("abilities")}` +
     computer + services + skills +
@@ -220,4 +200,38 @@ function abilitiesScript() {
       }); }
     })(rows[r]);}
   })();</script>`;
+}
+
+/**
+ * The Skills card. A skill switched off on this Crow (Skills panel) shows as
+ * an off chip with a link to it there; its checkbox stays, so a selection is
+ * kept through a save and comes back when the skill is switched on.
+ */
+export function renderSkillsCard({ def, lang, crowHome }) {
+  const allSkills = loadSkills(crowHome);
+  const off = offSkills(crowHome);
+  const selSkills = new Set(Array.isArray(def.skills) ? def.skills : []);
+  const offNote = (s) => ` <a href="/dashboard/skills?skill=${encodeURIComponent(s)}" class="btb-muted">${escapeHtml(t("botbuilder.abSkillOff", lang))}</a>`;
+  // The off list holds normalised names; a stored name may differ in case.
+  const isOff = (s) => off.has(normalizeSkillName(s) || s);
+  const chip = (s) => `<label class="btb-chip${isOff(s) ? " btb-chip-off" : ""}"><input type="checkbox" name="skills" value="${escapeHtml(s)}"${selSkills.has(s) ? " checked" : ""}> <span>${escapeHtml(s)}</span>${isOff(s) ? offNote(s) : ""}</label>`;
+  const claimed = new Set();
+  let groups = "";
+  for (const ext of listInstalledExtensions(crowHome)) {
+    const names = extensionSkills(ext).filter((n) => allSkills.includes(n));
+    if (!names.length) continue;
+    names.forEach((n) => claimed.add(n));
+    groups += `<div class="btb-group"><label>${escapeHtml(ext.group || ext.id)}</label><div class="btb-chips">${names.map(chip).join("")}</div></div>`;
+  }
+  const general = allSkills.filter((n) => !claimed.has(n));
+  // a selected skill whose file is gone stays visible (and selected) so a save keeps it
+  const missing = [...selSkills].filter((n) => !allSkills.includes(n));
+  if (general.length || missing.length) {
+    groups += `<div class="btb-group"><label>${escapeHtml(t("botbuilder.skillsGroupGeneral", lang))}</label><div class="btb-chips">` +
+      general.map(chip).join("") +
+      missing.map((s) => isOff(s) ? chip(s) : `<label class="btb-chip btb-chip-missing"><input type="checkbox" name="skills" value="${escapeHtml(s)}" checked> <span>${escapeHtml(s)}</span> <span class="btb-muted">${escapeHtml(t("botbuilder.abSkillMissing", lang))}</span></label>`).join("") +
+      `</div></div>`;
+  }
+  return card(t("botbuilder.abSkillsTitle", lang),
+    groups + `<input type="hidden" name="skills_rendered" value="1">`, t("botbuilder.abSkillsLead", lang));
 }

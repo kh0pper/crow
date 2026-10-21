@@ -68,3 +68,32 @@ test("Bot Builder chips list only names the resolver can load (code review M2)",
   assert.ok(!names.includes(""), "no empty chip from a dotfile");
   assert.equal(resolveSkill("MixedCase", { crowHome: other }), null);
 });
+
+// Skills panel option C, PR 2: the per-instance off list. resolveSkills is the
+// one choke point every spawn path uses; resolveSkill stays a plain lookup
+// (skill_promote uses it as a collision check, an off name still exists).
+test("off list: resolveSkills drops an off name into `off` (not `missing`), repo names too; resolveSkill still finds it", async () => {
+  const { resolveSkills, resolveSkillText, SKILL_OFF_LIST_SUPPORTED } = await import("../scripts/pi-bots/skill_resolver.mjs");
+  const { setSkillOff } = await import("../servers/shared/skill-state.js");
+  const h = join(dir, "offhome");
+  put(join(h, "skills"), "a"); put(join(h, "skills"), "b");
+  assert.equal(SKILL_OFF_LIST_SUPPORTED, true);
+  setSkillOff(h, "b", true);
+  setSkillOff(h, "memory-management", true);
+  const r = resolveSkills(["a", "b", "memory-management", "nope"], { crowHome: h });
+  assert.deepEqual(r.sections.map((s) => s.name), ["a"]);
+  assert.deepEqual(r.off, ["b", "memory-management"]);
+  assert.deepEqual(r.missing, ["nope"]);
+  assert.ok(resolveSkill("b", { crowHome: h }), "a plain lookup still sees the file");
+  const txt = resolveSkillText(["a", "b"], { crowHome: h });
+  assert.ok(txt.text.includes("# a") && !txt.text.includes("# b"));
+  assert.deepEqual(txt.off, ["b"]);
+  // skill-writing is exempt: self-authoring guidance is never switched off.
+  setSkillOff(h, "skill-writing", true);
+  assert.deepEqual(resolveSkills(["skill-writing"], { crowHome: h }).sections.map((s) => s.name), ["skill-writing"]);
+  // A garbled state file fails open.
+  writeFileSync(join(h, "skill-state.json"), "{ garbled");
+  assert.deepEqual(resolveSkills(["a", "b"], { crowHome: h }).sections.map((s) => s.name), ["a", "b"]);
+  // Another instance's list never applies here.
+  assert.deepEqual(resolveSkills(["r4-own"], { crowHome: other }).off, []);
+});

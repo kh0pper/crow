@@ -86,3 +86,25 @@ test("prepareSpawn inlines the artifacts skill into the system prompt file when 
   const without = await prepareSpawn(world(def(["memory"])), {});
   assert.doesNotMatch(readFileSync(without.sysFile, "utf8"), /# Artifacts/);
 });
+
+// Skills panel option C, PR 2: an owner who switches `artifacts` off on this
+// Crow gets it off for every bot, including the grant's auto-attach, and the
+// spawn log says why (not "file not found").
+test("off list: an off artifacts skill is not inlined even with the grant, and the log says it's off", async () => {
+  const { setSkillOff } = await import("../servers/shared/skill-state.js");
+  const sessionDir = join(dir, "sessions", "offbot");
+  mkdirSync(sessionDir, { recursive: true });
+  const world = { def: def(["artifacts"]), crowHome, projectId: null, projectSpace: null, sessionDir, cwd: sessionDir,
+    mcpDelivery: "fd", mcpConfig: null, tasksDbPath: null, remoteEnabled: false, peerGatewayUrls: {}, session: null,
+    botClassifier: null, narrowedTools: null, gatewayType: "perch" };
+  setSkillOff(crowHome, "artifacts", true);
+  try {
+    const logs = [];
+    const out = await prepareSpawn(world, { log: (m) => logs.push(m) });
+    assert.doesNotMatch(readFileSync(out.sysFile, "utf8"), /# Artifacts/);
+    assert.ok(logs.some((l) => /skill 'artifacts' is off on this instance/.test(l)), logs.join("\n"));
+    assert.ok(!logs.some((l) => /skill file not found/.test(l)));
+  } finally { setSkillOff(crowHome, "artifacts", false); }
+  const back = await prepareSpawn(world, {});
+  assert.match(readFileSync(back.sysFile, "utf8"), /# Artifacts/, "switched back on: inlined again");
+});
