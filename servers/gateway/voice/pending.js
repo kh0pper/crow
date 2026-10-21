@@ -8,9 +8,8 @@
  *
  * matchYesNo is built on PR 1's isAffirmative/isNegative (turn-helpers.js): one yes/no rule for the voice
  * turn. On top of it, a yes that names another bot or carries an action ("yes, but send it to …") is not a
- * plain yes (null: the model hears it as a correction). There is no core list of action-intent verbs as
- * plain words yet (the kiosk's is a pattern list inside its bundle, and the hand-off intent lists arrive
- * later), so the small CORRECTION_PHRASES list below stands in for them.
+ * plain yes (null: the model hears it as a correction). A correction names a new target: a bot, or one of
+ * the CORRECTION_PHRASES below ("give it to", "instead"…); a bare action verb does not make one.
  */
 import { isAffirmative, isNegative } from "./turn-helpers.js";
 import { phraseWords, normalizeIntentLists, listMatches } from "./tool-families.js";
@@ -43,7 +42,7 @@ export function createPendingStore({ now = Date.now, ttlMs = HANDOFF_PROPOSAL_TT
 // Lead-in words dropped before matching ("hey, yes", "bueno, dale"). ok/okay are PR 1 yes words: they are
 // dropped only when more words follow, so "okay, cancel" is a no and "okay what's the weather" is not a yes.
 const LEAD_INS = new Set(["hey", "ok", "okay", "so", "crow", "oye", "bueno"]);
-const LEAD_TOKEN = /^\s*([^\s,.!?¡¿;:]+)[\s,.!?¡¿;:]*/u;
+const LEAD_TOKEN = /^[\s¡¿]*([^\s,.!?¡¿;:]+)[\s,.!?¡¿;:]*/u;
 function stripLeadIns(text) {
   let rest = String(text ?? "");
   for (let i = 0; i < 4; i++) {
@@ -56,19 +55,16 @@ function stripLeadIns(text) {
   return rest;
 }
 
-// Words after a yes that make it a correction or a new request, not a plain yes (en + es; phraseWords form).
-// have/ask/get count only before a bot name, which the bot scan already catches.
+// A yes is a correction only when it names a NEW target: one of these phrases, or a bot in otherBots. A verb
+// with only a pronoun object ("yes, add it", "sí, bórralo") is a plain yes, as PR 1's confirm gate reads it.
 const CORRECTION_PHRASES = normalizeIntentLists({
-  en: ["give it to", "give this to", "hand it to", "hand this to", "pass it to", "send it to", "instead",
-    "add", "put", "create", "schedule", "reschedule", "book", "send", "delete", "remove", "change", "move",
-    "research", "look into", "find out", "write up", "draft"],
-  es: ["pasale", "pasaselo", "dale esto a", "daselo a", "pidele a", "mejor", "en vez", "anade", "agrega", "crea",
-    "programa", "agenda", "manda", "envia", "borra", "elimina", "cambia", "mueve", "investiga", "redacta"],
+  en: ["give it to", "send it to", "pass it to", "instead", "rather"],
+  es: ["en vez", "en lugar", "mejor a", "daselo a"],
 });
 
 /**
  * "yes" | "no" | null. yes: isAffirmative, and the utterance names no bot in otherBots (ids or names) and no
- * correction phrase, whatever its length. no: isNegative (a negation in the first words included).
+ * correction phrase (a new target), whatever its length. no: isNegative (a negation in the first words included).
  */
 export function matchYesNo(transcript, { otherBots = [] } = {}) {
   if (typeof transcript !== "string" || !transcript.trim()) return null;

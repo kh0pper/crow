@@ -411,6 +411,18 @@ export function createVoiceTurnRunner(deps) {
   }
 
   /**
+   * deps.voiceActions (optional; Crow voice's pending confirmations), every member optional:
+   * - fastPath({ db, device, surface, transcript, lang, tz, bot, executor }) → Promise<null | { say, verb, events? }>:
+   *   runs after STT and the TTS open, before opts.fastPaths. bot and executor are null when the bot cannot be
+   *   loaded (it is never ensured here). A non-null result is spoken and saved like a fast path. A throw is
+   *   logged and taken as null.
+   * - turnContext({ device }) → { text, pending } | string: SYNCHRONOUS (a returned Promise is logged and
+   *   ignored). The text joins the turn's context line on the user message only, never saved; write it as
+   *   "[Tag] …" lines so the echo gate recognises and strips a read-back. pending: true makes the turn an
+   *   action turn (the action guard holds the reply and replaces an unbacked claim). A throw is logged and ignored.
+   * - afterTurn({ device, calledTools }): called in finally on every outcome; calledTools lists every tool name
+   *   the model called, refused and gated calls included. A throw is logged.
+   *
    * opts (beyond the transport): maxToolRounds — tool-calling rounds before a forced, tool-free
    * final answer (default deps.maxToolRounds); firstAudioBudgetMs — wall-clock from the turn start
    * to the first ANSWER audio (the filler does not count), after which the answer is cut and the
@@ -535,10 +547,13 @@ export function createVoiceTurnRunner(deps) {
       const botId = typeof opts.botId === "string" && opts.botId ? opts.botId : (deps.voiceBotId || device.bound_bot_id);
       let fp = null;
       if (typeof voiceActions?.fastPath === "function") {
+        // Nothing here may stop "pause": a failure is logged and the path is skipped (null).
         let vaBot = null;
         try { vaBot = await loadBot(db, botId); } catch (err) { log(`[voice-turn] ${device.id} voice actions: bot not loaded (${err?.message || err})`); }
-        if (vaBot) { executor = deps.createToolExecutor({ botDef: vaBot }); executorBot = vaBot; }
-        fp = await voiceActions.fastPath({ db, device, surface: timings.surface, transcript, lang: opts.lang, tz: opts.tz, bot: vaBot, executor });
+        if (vaBot) {
+          try { executor = deps.createToolExecutor({ botDef: vaBot }); executorBot = vaBot; } catch (err) { executor = null; log(`[voice-turn] ${device.id} voice actions: no executor (${err?.message || err})`); }
+        }
+        try { fp = await voiceActions.fastPath({ db, device, surface: timings.surface, transcript, lang: opts.lang, tz: opts.tz, bot: vaBot, executor }); } catch (err) { fp = null; log(`[voice-turn] ${device.id} voice actions fastPath failed (${err?.message || err})`); }
       }
       if (!fp && typeof opts.fastPaths === "function") fp = await opts.fastPaths(transcript);
       if (fp) {
@@ -558,7 +573,8 @@ export function createVoiceTurnRunner(deps) {
 
       // 3. The voice bot drives the turn (ruling R11: no profile fallback): opts.botId (the kiosk's turn
       // check, the eval harness), else deps.voiceBotId (the Crow voice bot), else the device's bound bot.
-      // Loaded only after the fast paths, so a missing or disabled voice bot never stops "pause" or the clock.
+      // Required (and ensured) only after the fast paths, so a missing or disabled voice bot never stops "pause"
+      // or the clock. deps.voiceActions.fastPath may have read it already (cached), but never ensures or requires it.
       let bot = await loadBot(db, botId);
       if (!bot && botId === CROW_VOICE_BOT_ID && !voiceEnsured && typeof deps.ensureVoiceBot === "function") {
         voiceEnsured = true;
@@ -682,7 +698,13 @@ export function createVoiceTurnRunner(deps) {
       // context line (on the user message, echo-guarded, never saved); pending makes this an action turn.
       let vaCtx = null;
       if (typeof voiceActions?.turnContext === "function") {
-        const v = voiceActions.turnContext({ device });
+        let v = null;
+        try { v = voiceActions.turnContext({ device }); } catch (err) { log(`[voice-turn] ${device.id} voice actions turnContext failed (${err?.message || err})`); }
+        if (v && typeof v.then === "function") {
+          v.catch?.(() => {});
+          log(`[voice-turn] ${device.id} voice actions turnContext returned a Promise (it must be synchronous); ignored`);
+          v = null;
+        }
         vaCtx = typeof v === "string" ? { text: v, pending: false } : v && typeof v === "object" ? { text: String(v.text || ""), pending: v.pending === true } : null;
       }
       const ctxLine = [optsCtx, vaCtx?.text].filter(Boolean).join("\n") || optsCtx;

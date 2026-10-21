@@ -133,11 +133,11 @@ test("review I2/M8/M9: leading whitespace never uses up the first-clause split; 
 });
 
 test("a negation in the first words is never a yes, and always a no (claro que no, of course not, yes no)", () => {
-  for (const t of ["claro que no", "Claro que no, no lo borres", "of course not", "yes, no wait", "Yes no", "sí, pero no", "dale, nunca", "ok don't", "yeah, dont", "claro, tampoco", "yes never mind", "of course not!"]) {
+  for (const t of ["claro que no", "Claro que no, no lo borres", "of course not", "yes, no wait", "Yes no", "sí, pero no", "dale, nunca", "ok don't", "yeah, dont", "claro, tampoco", "yes never mind", "of course not!", "sure, don't", "sounds good, no wait"]) {
     assert.equal(H.isAffirmative(t), false, `${t}: not a yes`);
     assert.equal(H.isNegative(t), true, `${t}: a no`);
   }
-  for (const t of ["sí", "Sí.", "claro", "dale", "yes please", "yes do it", "vale", "de acuerdo", "ok"]) {
+  for (const t of ["sí", "Sí.", "claro", "dale", "yes please", "yes do it", "vale", "de acuerdo", "ok", "sure", "Sure.", "please do", "sounds good", "go ahead", "do it"]) {
     assert.equal(H.isAffirmative(t), true, `${t}: a yes`);
     assert.equal(H.isNegative(t), false, `${t}: not a no`);
   }

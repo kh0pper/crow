@@ -77,9 +77,10 @@ test("matchYesNo: lead-in words are stripped before matching", () => {
   assert.equal(matchYesNo("hey"), null);
 });
 
-test("matchYesNo: a yes that names another bot or carries an action is not a plain yes", () => {
+test("matchYesNo: a yes that names another bot or a new target is not a plain yes", () => {
   assert.equal(matchYesNo("yes, have writer do it", { otherBots: ["writer", "helper"] }), null);
-  assert.equal(matchYesNo("yes, and add milk to the list"), null);
+  // Fix round 1 ruling: a bare action verb is not a correction (only a new target is).
+  assert.equal(matchYesNo("yes, and add milk to the list"), "yes");
   assert.equal(matchYesNo("yes but send it to my sister"), null);
   assert.equal(matchYesNo("sí, pero pásale esto a helper", { otherBots: ["helper"] }), null);
   assert.equal(matchYesNo("yes", { otherBots: ["writer"] }), "yes");
@@ -163,4 +164,71 @@ test("a voiceActions fast path that returns null falls through to opts.fastPaths
   h2.deps.voiceActions = { fastPath: async () => null };
   await h2.runner.runVoiceTurn({ db: {}, device: h2.device, transcript: "What is the capital of Portugal?", sink: h2.sink });
   assert.equal(h2.calls.chatKeys.length, 1);
+});
+
+// ── fix round 1 ─────────────────────────────────────────────────────────────
+
+test("fix 1: a yes with a verb and only a pronoun object is a yes; a correction names a new target", () => {
+  for (const t of ["yes, add it", "yes delete it", "yes, send it", "sí, bórralo", "yes schedule it", "yes, change it"]) assert.equal(matchYesNo(t), "yes", t);
+  assert.equal(matchYesNo("yes but give it to helper", { otherBots: ["helper"] }), null);
+  assert.equal(matchYesNo("yes, send it to helper instead"), null);
+  assert.equal(matchYesNo("yes, but rather tomorrow"), null);
+  assert.equal(matchYesNo("sí, pero mejor a helper"), null);
+  assert.equal(matchYesNo("sí, dáselo a beta"), null);
+  assert.equal(matchYesNo("sí, en vez de eso mañana"), null);
+});
+
+test("fix 4: a leading ¡ does not stop the lead-in stripping", () => {
+  assert.equal(matchYesNo("¡oye, sí!"), "yes");
+  assert.equal(matchYesNo("¡Bueno, no!"), "no");
+});
+
+test("fix 2: a throwing voiceActions.fastPath never stops pause", async () => {
+  const h = harness();
+  h.deps.voiceActions = { fastPath: async () => { throw new Error("boom"); } };
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "pause", sink: h.sink, fastPaths: async () => ({ say: "Paused.", verb: "pause" }) });
+  assert.equal(r.timings.verb, "pause");
+  assert.equal(r.failed, null);
+  assert.ok(h.calls.logs.some((m) => /voice actions/.test(m)));
+});
+
+test("fix 2: a throwing createToolExecutor ahead of the fast paths never stops pause", async () => {
+  const h = harness();
+  h.deps.createToolExecutor = () => { throw new Error("no executor"); };
+  const got = [];
+  h.deps.voiceActions = { fastPath: async (a) => { got.push(a); return null; } };
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "pause", sink: h.sink, fastPaths: async () => ({ say: "Paused.", verb: "pause" }) });
+  assert.equal(r.timings.verb, "pause");
+  assert.equal(got[0].executor, null);
+});
+
+test("fix 2: a throwing turnContext leaves the model turn running", async () => {
+  const h = harness();
+  h.deps.voiceActions = { turnContext: () => { throw new Error("ctx boom"); } };
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "What is the capital of Portugal?", sink: h.sink });
+  assert.equal(r.failed, null);
+  assert.equal(h.calls.chatKeys.length, 1);
+  assert.deepEqual(h.calls.spoken, ["Lisbon is the capital."]);
+});
+
+test("fix 4: a turnContext that returns a Promise is logged and ignored", async () => {
+  const h = harness();
+  h.deps.voiceActions = { turnContext: async () => ({ text: "[Pending] x", pending: true }) };
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "What is the capital of Portugal?", sink: h.sink });
+  assert.equal(r.failed, null);
+  assert.ok(!h.log[0].messages.at(-1).content.includes("[Pending] x"));
+  assert.equal(r.timings.action_guard, undefined);
+  assert.ok(h.calls.logs.some((m) => /turnContext/.test(m)));
+});
+
+test("fix 4: with no bot row, fastPath gets bot null and executor null, and pause works", async () => {
+  const h = harness();
+  h.deps.loadBotRow = async () => null;
+  const got = [];
+  h.deps.voiceActions = { fastPath: async (a) => { got.push(a); return null; } };
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "pause", sink: h.sink, fastPaths: async () => ({ say: "Paused.", verb: "pause" }) });
+  assert.equal(got.length, 1);
+  assert.equal(got[0].bot, null);
+  assert.equal(got[0].executor, null);
+  assert.equal(r.timings.verb, "pause");
 });

@@ -142,7 +142,7 @@ const DESTRUCTIVE_EXACT = new Set([
 ]);
 const DESTRUCTIVE_REGEX = /^crow_(delete|remove|destroy|unpublish)_/;
 // English words end at \b; Spanish ones at a space, punctuation or the end (\b fails after "í" in JS).
-export const AFFIRMATIVE_STARTS = /^\s*(?:(?:yes|yeah|yep|yup|confirmed?|do it|go ahead|proceed|ok|okay)\b|¡?(?:s[ií]|claro|dale|hazlo|adelante|vale|de acuerdo)(?=[\s,.!?]|$))/i;
+export const AFFIRMATIVE_STARTS = /^\s*(?:(?:yes|yeah|yep|yup|sure|confirmed?|do it|go ahead|please do|sounds good|proceed|ok|okay)\b|¡?(?:s[ií]|claro|dale|hazlo|adelante|vale|de acuerdo)(?=[\s,.!?]|$))/i;
 export const NEGATIVE_STARTS = /^\s*(?:(?:no|nope|cancel|stop|wait|nevermind|never mind)\b|¡?(?:no|espera|cancela|para)(?=[\s,.!?]|$))/i;
 
 // A negation in the first few words ("claro que no", "of course not", "yes, no wait") is never a yes.

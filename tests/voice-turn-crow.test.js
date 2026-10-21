@@ -225,6 +225,21 @@ test("a Spanish yes confirms a pending send; a Spanish no declines it", async ()
   }
 });
 
+test("sure, please do and sounds good confirm a pending send; sure, don't declines it", async () => {
+  const send = { type: "tool_call", id: "s1", name: "gmail_send_to_self", arguments: { subject: "Milk" } };
+  for (const yes of ["sure", "Sure.", "please do", "sounds good", "go ahead", "do it"]) {
+    const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["gmail_send_to_self"], rounds: [callRound(send), sayRound("Sure?"), callRound(send), sayRound("Sent.")] });
+    await turn(h, { transcript: "email me a note" });
+    assert.deepEqual(h.calls.executed, [], yes);
+    await turn(h, { transcript: yes });
+    assert.deepEqual(h.calls.executed, ["gmail_send_to_self"], yes);
+  }
+  const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["gmail_send_to_self"], rounds: [callRound(send), sayRound("Sure?"), callRound(send), sayRound("Okay.")] });
+  await turn(h, { transcript: "email me a note" });
+  await turn(h, { transcript: "sure, don't" });
+  assert.deepEqual(h.calls.executed, []);
+});
+
 test("the remaining voice confirms: a context section add, a direct schedule update, a proxied schedule create", async () => {
   const cases = [
     ["crow_add_context_section", { type: "tool_call", id: "a1", name: "crow_add_context_section", arguments: { section_key: "notes", content: "x" } }],
