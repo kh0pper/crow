@@ -70,6 +70,7 @@ import { getCurrentPlan, listPlans, savePlan, approvePlan } from "./board/plan-s
 import { reportResult, decideResult, listResults } from "./board/result-service.js";
 import { askDecision, notifyBatch } from "./board/decision-service.js";
 import { isEnabledBot } from "./board/bot-lookup.js";
+import { dispatchCard } from "./board/dispatch-service.js";
 import { isVoiceBotId } from "../shared/voice-bot.js";
 
 const TASKS_DB = tasksDbPath();
@@ -505,6 +506,18 @@ export function createBoardMcpServer(options = {}) {
       const { createNotification } = await import("../shared/notifications.js");
       return notifyBatch(tdb, cdb, batch, { createNotification, actor: resolveActor(extra) });
     });
+
+  // Rules and effect live in dispatch-service.js; the caller's identity comes
+  // only from resolveActor (a bot id only with a verified signature).
+  tool(server, "board_dispatch_item",
+    "Hand one of your own top-level cards to another bot. Signed bots only. Allowed only for a card the operator created (decision follow-ups do not count) or explicitly granted you for hand-off; its live subtasks move with it and must not be locked, assigned to another bot, or moved under it by a bot. The card arrives on the target bot's board set to gated; nothing starts. Refusals: 403 actor_unverified / not_assigned / not_granted, 404 not_found, 400 subtask / bad_bot / bot_unavailable, 409 archived / subtree_blocked / locked / finished / no_board / changed.",
+    {
+      item_id: z.number().int(),
+      to_bot: z.string().min(1).max(100),
+      note: z.string().max(1000).optional().describe("Why you are handing it over (recorded on the card's history)"),
+    },
+    async ({ item_id, to_bot, note }, extra) =>
+      dispatchCard(tdb, cdb, { itemId: item_id, toBot: to_bot, note }, resolveActor(extra)));
 
   tool(server, "board_store_briefing",
     "Persist a briefing snapshot. UNIQUE on briefing_date — re-runs for the same day overwrite the prior content.",
