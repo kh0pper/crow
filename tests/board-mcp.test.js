@@ -39,6 +39,8 @@ import { createBoardMcpServer, resolveActor } from "../servers/gateway/board-mcp
 import {
   initGatewayActorKey, signBoardActor, signActor, verifyBoardActorSig,
 } from "../scripts/pi-bots/actor-sig.mjs";
+import { crowServerCatalog } from "../scripts/pi-bots/crow-server-catalog.mjs";
+import { jobActor } from "../scripts/pi-bots/job_runner.mjs";
 
 const MIGRATIONS_DIR = join(import.meta.dirname, "..", "scripts", "migrations");
 
@@ -414,6 +416,16 @@ test("signed actor headers land in board_mutations (bot + job id) on a token-aut
   assert.equal(row.actor_kind, "bot");
   assert.equal(row.actor_id, "bot-wire-test");
   assert.equal(row.job_id, "job-wire-42");
+});
+
+test("B1: the headers a generic job's catalog emits record board_mutations.job_id", async () => {
+  const headers = crowServerCatalog(scratchHome, jobActor({ bot_id: "bot-generic", job_id: "job-generic-7" })).servers.board.headers;
+  const { Authorization, ...actorHeaders } = headers;
+  assert.equal(Authorization, "Bearer " + state.boardToken);
+  const row = await createVia(state.boardToken, actorHeaders, "generic job card");
+  assert.equal(row.actor_kind, "bot");
+  assert.equal(row.actor_id, "bot-generic");
+  assert.equal(row.job_id, "job-generic-7");
 });
 
 test("a headerless call on the operator's full local token records actor_kind 'session'", async () => {

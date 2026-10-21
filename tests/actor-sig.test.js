@@ -127,7 +127,7 @@ test("M1: generic bot jobs are signed as the bot on gateway 'job' and the runner
   _resetActorKeyForTest();
   initGatewayActorKey();
   const job = { bot_id: "hank", job_id: "j123" };
-  assert.deepEqual(jobActor(job), { botId: "hank", threadId: "job-j123", gatewayType: "job" });
+  assert.deepEqual(jobActor(job), { botId: "hank", threadId: "job-j123", gatewayType: "job", jobId: "j123" });
   const home = mkdtempSync(join(tmpdir(), "actor-sig-job-"));
   writeFileSync(join(home, "phone-token"), "tok", { mode: 0o600 });
   const h = crowServerCatalog(home, jobActor(job)).servers.phone.headers;
@@ -192,6 +192,24 @@ test("S5: the catalog's board block is signed over (bot, job) and only verifies 
     const noJob = crowServerCatalog(home, { botId: "hank" }).servers.board.headers;
     assert.ok(!("X-Crow-Job-Id" in noJob));
     assert.equal(verifyBoardActorSig({ botId: "hank", jobId: null, sig: noJob["X-Crow-Actor-Sig"] }), true);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("B1: a generic job's board block carries X-Crow-Job-Id and a board signature bound to (bot, job)", () => {
+  const home = mkdtempSync(join(tmpdir(), "actor-sig-jobboard-"));
+  writeFileSync(join(home, "board-token"), "btok", { mode: 0o600 });
+  try {
+    _resetActorKeyForTest();
+    initGatewayActorKey();
+    const h = crowServerCatalog(home, jobActor({ bot_id: "hank", job_id: "j123" })).servers.board.headers;
+    assert.equal(h["X-Crow-Actor-Id"], "hank");
+    assert.equal(h["X-Crow-Job-Id"], "j123");
+    const sig = h["X-Crow-Actor-Sig"];
+    assert.equal(verifyBoardActorSig({ botId: "hank", jobId: "j123", sig }), true);
+    assert.equal(verifyBoardActorSig({ botId: "hank", jobId: "j124", sig }), false, "bound to the job");
+    assert.equal(verifyBoardActorSig({ botId: "hank", jobId: null, sig }), false);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
