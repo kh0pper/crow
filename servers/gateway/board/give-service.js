@@ -128,6 +128,32 @@ function resolveAuditActor(actor, audit) {
 }
 
 /**
+ * Every give check, in giveCard's order, with nothing written: a live card
+ * (404/400/409 archived), top level (400 bad_request), not locked (409
+ * locked, `.rail` set), the bot can take it (400 bot_unavailable / 409
+ * no_board), not finished (409 finished). Exported so a caller that must
+ * write something of its own first (the dispatch verb's claim) can refuse
+ * before that write; giveCard runs it again at write time.
+ * @returns {Promise<{cur, row, projectId:number}>}
+ */
+export async function checkGive(tdb, cdb, cardId, botId) {
+  const cur = await loadGivableCard(tdb, cardId);
+  // A subtask lives in its parent's project — give the parent instead.
+  if (cur.parent_id != null) throw fail("a subtask cannot be given on its own", "bad_request", 400);
+  const lock = await lockState(cdb, cardId);
+  if (lock.locked) throw fail("card is locked", "locked", 409, { rail: lock.rail });
+  const row = await loadGiveTarget(cdb, botId);
+  const projectId = Number(row.project_id);
+  // A finished card is not a task to give: terminal per the TARGET board's
+  // definition or the card's CURRENT one (each the builtin default when the
+  // board has none — an unassigned card's case).
+  const finished = isTerminal(await resolveBoardDef(tdb, { projectId }), cur.status)
+    || isTerminal(await resolveBoardDef(tdb, { projectId: cur.project_id }), cur.status);
+  if (finished) throw fail("card is finished", "finished", 409);
+  return { cur, row, projectId };
+}
+
+/**
  * Give an existing top-level card to a bot.
  *
  * Checks, in order: a live card (404/400/409 archived), top level (400
@@ -151,19 +177,7 @@ function resolveAuditActor(actor, audit) {
  */
 export async function giveCard(tdb, cdb, { cardId, botId, actor, audit = {}, extraFields = {} }) {
   const auditActor = resolveAuditActor(actor, audit);
-  const cur = await loadGivableCard(tdb, cardId);
-  // A subtask lives in its parent's project — give the parent instead.
-  if (cur.parent_id != null) throw fail("a subtask cannot be given on its own", "bad_request", 400);
-  const lock = await lockState(cdb, cardId);
-  if (lock.locked) throw fail("card is locked", "locked", 409, { rail: lock.rail });
-  const row = await loadGiveTarget(cdb, botId);
-  const projectId = Number(row.project_id);
-  // A finished card is not a task to give: terminal per the TARGET board's
-  // definition or the card's CURRENT one (each the builtin default when the
-  // board has none — an unassigned card's case).
-  const finished = isTerminal(await resolveBoardDef(tdb, { projectId }), cur.status)
-    || isTerminal(await resolveBoardDef(tdb, { projectId: cur.project_id }), cur.status);
-  if (finished) throw fail("card is finished", "finished", 409);
+  const { row, projectId } = await checkGive(tdb, cdb, cardId, botId);
 
   // parent_id never rides along: a given card stays top level.
   const { parent_id: _ignored, ...fields } = extraFields || {};
