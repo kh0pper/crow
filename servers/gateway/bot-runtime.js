@@ -42,6 +42,14 @@
  * breaker is published to `bot-engine-status.js` via `setBreakerSource()` so
  * the readiness UI and the attach gate see it without importing this module.
  *
+ * Bot cron (gateway mode only): the same gate also arms a bot-cron ticker, one
+ * immediate sweep on arming then every `PIBOT_BOTCRON_POLL_MS` (default
+ * 60000). Each sweep takes or renews the per-instance ticker lease
+ * (botcron-lease.mjs) and runs `tickBotSchedules()` only while it holds it, so
+ * this gateway and a pibot-gateways runner on the same instance never both
+ * tick. Disarming clears the interval and frees the lease. `disabled` and
+ * `external` modes never tick bot cron here.
+ *
  * Discord reconcile: subscribes to the shared event bus's
  * "pibots:defs-changed" event (the same bus `routes/bundles.js`'s
  * `emitJobChanged` uses for `jobs:changed`), debounced 2s so a burst of tab
@@ -56,7 +64,8 @@ import Database from "better-sqlite3";
 import { fileURLToPath } from "node:url";
 
 import bus from "../shared/event-bus.js";
-import { botsDbPath } from "../../scripts/pi-bots/instance-paths.mjs";
+import { botsDbPath, botsDataDir } from "../../scripts/pi-bots/instance-paths.mjs";
+import { createBotcronTicker, botcronLeaseTtl } from "../../scripts/pi-bots/botcron-lease.mjs";
 import { runtimeGate } from "../../scripts/pi-bots/runtime-gate.mjs";
 import { runBridgeTick as defaultRunBridgeTick } from "../../scripts/pi-bots/bridge_tick_lib.mjs";
 import { superviseProcess as defaultSuperviseProcess } from "./process-supervisor.js";
@@ -84,6 +93,7 @@ function freshState() {
     mode: "disabled",
     bridge: { armed: false, lastTickAt: null, lastResult: null, breaker: freshBreaker() },
     discord: { lastError: null },
+    botcron: { armed: false, lastTickAt: null, lastFired: 0 },
   };
 }
 
@@ -99,6 +109,8 @@ let bridgeTimer = null;
 let reconcileTimer = null;
 let busHandler = null;
 let tickInFlight = false;
+let botcronTimer = null;
+let botcronTicker = null;
 
 /** Read enabled bots' discord gateway configs (token/guild/channels/allowlist). */
 function discordBotConfigs(conn) {
@@ -157,6 +169,8 @@ function discordSignature(configs) {
  * @param {number} [opts._pollMs] test seam forwarded as runtimeGate's
  *   pollMs (default 30000) — tests shrink this to observe a flag flip
  *   without a real 30s wait.
+ * @param {Function} [opts._createBotcronTicker] test seam, defaults to the
+ *   real createBotcronTicker from botcron-lease.mjs.
  */
 export async function initBotRuntime({
   env = process.env,
@@ -170,6 +184,7 @@ export async function initBotRuntime({
   _clearTimeoutFn = clearTimeout,
   _bus = bus,
   _pollMs = 30000,
+  _createBotcronTicker = createBotcronTicker,
 } = {}) {
   if (env.CROW_DISABLE_BOT_RUNTIME === "1") {
     state.mode = "disabled";
@@ -189,6 +204,7 @@ export async function initBotRuntime({
   const threshold = Number(env.PIBOT_BREAKER_THRESHOLD) || 3;
   const cooldownMs = Number(env.PIBOT_BREAKER_COOLDOWN_MS) || 600000;
   const tickMs = Number(env.PIBOT_BRIDGE_TICK_MS) || 60000;
+  const botcronMs = Number(env.PIBOT_BOTCRON_POLL_MS) || 60000;
 
   setBreakerSource(() => ({ ...state.bridge.breaker }));
 
@@ -246,6 +262,36 @@ export async function initBotRuntime({
   function stopBridge() {
     if (bridgeTimer) { _clearIntervalFn(bridgeTimer); bridgeTimer = null; }
     state.bridge.armed = false;
+  }
+
+  function startBotcron() {
+    const ticker = _createBotcronTicker({
+      dir: botsDataDir(),
+      ttlMs: botcronLeaseTtl(botcronMs),
+      log: (m) => console.log("[bot-runtime] [botcron] " + m),
+    });
+    botcronTicker = ticker;
+    // Bound to THIS ticker: a stale fire after a re-arm can never drive the new one.
+    const sweep = async () => {
+      const r = await ticker.sweep();
+      if (r.skipped) return;
+      state.botcron.lastTickAt = new Date().toISOString();
+      state.botcron.lastFired = r.fired;
+      if (r.fired) console.log(`[bot-runtime] [botcron] enqueued ${r.fired} scheduled job(s)`);
+    };
+    botcronTimer = _setIntervalFn(sweep, botcronMs);
+    if (botcronTimer && botcronTimer.unref) botcronTimer.unref();
+    state.botcron.armed = true;
+    console.log(`[bot-runtime] bot-cron ticker armed (${botcronMs}ms)`);
+    sweep(); // one immediate sweep; never rejects
+  }
+
+  async function stopBotcron() {
+    if (botcronTimer) { _clearIntervalFn(botcronTimer); botcronTimer = null; }
+    state.botcron.armed = false;
+    const t = botcronTicker;
+    botcronTicker = null;
+    if (t) await t.stop(); // waits for an in-flight sweep, then frees the lease
   }
 
   function startDiscord() {
@@ -308,6 +354,7 @@ export async function initBotRuntime({
   }
 
   async function start() {
+    startBotcron(); // before the bridge, so the bridge interval stays the last one armed
     startBridge();
     if (discordBotConfigs(conn).length > 0) startDiscord();
     busHandler = () => scheduleReconcile();
@@ -316,6 +363,7 @@ export async function initBotRuntime({
 
   async function stop() {
     stopBridge();
+    await stopBotcron();
     if (busHandler) { _bus.off("pibots:defs-changed", busHandler); busHandler = null; }
     if (reconcileTimer) { _clearTimeoutFn(reconcileTimer); reconcileTimer = null; }
     await stopDiscord();
@@ -333,7 +381,8 @@ export async function initBotRuntime({
  * @returns {{ mode: "gateway"|"external"|"disabled",
  *   bridge: { armed: boolean, lastTickAt: string|null, lastResult: object|null,
  *             breaker: { open: boolean, failures: number, lastError: string|null, retryAt: string|null } },
- *   discord: { running: boolean, state: string, restartCount: number, lastError: string|null } }}
+ *   discord: { running: boolean, state: string, restartCount: number, lastError: string|null },
+ *   botcron: { armed: boolean, lastTickAt: string|null, lastFired: number } }}
  */
 export function botRuntimeStatus() {
   return {
@@ -350,12 +399,17 @@ export function botRuntimeStatus() {
       restartCount: discordHandle ? discordHandle.restartCount : 0,
       lastError: state.discord.lastError,
     },
+    botcron: { ...state.botcron },
   };
 }
 
 /** Test-only: tear down every module-level seam so one test can never leak
- * timers, bus listeners, or breaker state into the next. */
+ * timers, bus listeners, or breaker state into the next. Resolves once the
+ * bot-cron lease has been freed (callers that don't care may ignore it). */
 export function _resetBotRuntimeForTest() {
+  if (botcronTimer) { try { clearInterval(botcronTimer); } catch {} botcronTimer = null; }
+  const ticker = botcronTicker;
+  botcronTicker = null;
   if (gateHandle) { try { gateHandle.dispose(); } catch {} }
   gateHandle = null;
   if (busHandler) { try { bus.off("pibots:defs-changed", busHandler); } catch {} busHandler = null; }
@@ -368,4 +422,5 @@ export function _resetBotRuntimeForTest() {
   if (ownedConn) { try { ownedConn.close(); } catch {} ownedConn = null; }
   setBreakerSource(null);
   state = freshState();
+  return ticker ? ticker.stop() : Promise.resolve();
 }

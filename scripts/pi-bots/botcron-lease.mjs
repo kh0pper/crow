@@ -47,3 +47,67 @@ export async function releaseBotcronLease({ dir, holder, lockTimeoutMs = 2000 })
     }, { timeoutMs: lockTimeoutMs });
   } catch {}
 }
+
+/** Lease TTL for a poll cadence: at least 3 polls, never under the 180 s default. */
+export function botcronLeaseTtl(pollMs) {
+  const p = Number(pollMs) || 60000;
+  return Math.max(180000, 3 * p);
+}
+
+/**
+ * One bot-cron ticker for this process: each sweep() takes or renews the
+ * lease and, only while it holds it, runs one tickBotSchedules() pass.
+ * Overlapping sweeps are dropped (one in flight at a time). Logs one line when
+ * it gains the lease and one when it loses it, never per tick. stop() waits
+ * for an in-flight sweep, then frees the lease; a stopped ticker never ticks
+ * again (make a new one to re-arm). sweep() never rejects.
+ * @returns {{ sweep(): Promise<{fired:number, held:boolean, skipped?:boolean}>, stop(): Promise<void>, readonly held: boolean }}
+ */
+export function createBotcronTicker({
+  dir,
+  holder = BOTCRON_HOLDER,
+  ttlMs = 180000,
+  log = () => {},
+  _hold = holdBotcronLease,
+  _release = releaseBotcronLease,
+  _tick = null,
+}) {
+  let held = false;
+  let stopped = false;
+  let inflight = null;
+
+  async function run() {
+    const ok = await _hold({ dir, holder, ttlMs });
+    if (stopped) { // disarmed while we waited on the lock: hand the lease straight back
+      if (ok) await _release({ dir, holder });
+      held = false;
+      return { fired: 0, held: false };
+    }
+    if (ok !== held) {
+      held = ok;
+      log(ok ? "lease acquired, this process ticks bot-cron schedules"
+             : "lease lost, another ticker on this instance owns bot-cron schedules");
+    }
+    if (!ok) return { fired: 0, held: false };
+    const tick = _tick || (await import("./bot_scheduler.mjs")).tickBotSchedules;
+    const r = tick({ log });
+    return { fired: (r && r.fired) || 0, held: true };
+  }
+
+  function sweep() {
+    if (stopped || inflight) return Promise.resolve({ fired: 0, held, skipped: true });
+    inflight = run()
+      .catch((e) => { log("error (non-fatal): " + ((e && e.message) || e)); return { fired: 0, held }; })
+      .finally(() => { inflight = null; });
+    return inflight;
+  }
+
+  async function stop() {
+    stopped = true;
+    if (inflight) { try { await inflight; } catch {} }
+    await _release({ dir, holder });
+    held = false;
+  }
+
+  return { sweep, stop, get held() { return held; } };
+}

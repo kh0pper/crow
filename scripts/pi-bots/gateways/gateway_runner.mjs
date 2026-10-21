@@ -24,10 +24,11 @@
 import Database from "better-sqlite3";
 import { hostAdapters, getAdapter, isHostManaged } from "./index.mjs";
 import { reapStalePi } from "../pi_lifecycle.mjs";
-import { botsDbPath } from "../instance-paths.mjs";
+import { botsDbPath, botsDataDir } from "../instance-paths.mjs";
 import { runtimeGate } from "../runtime-gate.mjs";
 import { tickJobs } from "../job_runner.mjs";
 import { tickBotSchedules } from "../bot_scheduler.mjs";
+import { createBotcronTicker, botcronLeaseTtl } from "../botcron-lease.mjs";
 import { makeChannelDeliverer } from "./deliver.mjs";
 import { warnIfPiLabIncompatible } from "../pi-lab-compat.mjs";
 import { SKILL_OFF_LIST_SUPPORTED } from "../skill_resolver.mjs";
@@ -73,6 +74,7 @@ let _gate = null;
 let jobTimer = null;
 let jobRunning = false; // guard: never let two job ticks overlap (a job can run minutes)
 let cronTimer = null;
+let cronTicker = null; // this arming's bot-cron ticker (lease holder BOTCRON_HOLDER)
 const deliverChannel = makeChannelDeliverer({ log: (m) => log("[deliver] " + m) });
 
 async function startAll() {
@@ -139,25 +141,38 @@ function stopJobs() { if (jobTimer) { clearInterval(jobTimer); jobTimer = null; 
 
 // Bot-cron scheduler (Stage 4): enqueues a bot_jobs row for each due
 // pipeline:botcron:<bot_id> schedule; the job runner above then runs+delivers it.
-function cronSweep() {
-  try {
-    const r = tickBotSchedules({ log: (m) => log("[botcron] " + m) });
-    if (r && r.fired) log("[botcron] enqueued " + r.fired + " scheduled job(s)");
-  } catch (e) { log("[botcron] error (non-fatal): " + ((e && e.message) || e)); }
-}
+// Ticks only while this process holds the per-instance ticker lease, so a main
+// gateway in bot-runtime "gateway" mode on the same instance never ticks too.
+// The ticker drops an overlapping sweep (one in flight at a time) and never throws.
 function startSchedules() {
+  const ticker = createBotcronTicker({
+    dir: botsDataDir(),
+    ttlMs: botcronLeaseTtl(BOTCRON_POLL_MS),
+    log: (m) => log("[botcron] " + m),
+    _tick: tickBotSchedules,
+  });
+  cronTicker = ticker;
+  const cronSweep = async () => {
+    const r = await ticker.sweep();
+    if (r && r.fired) log("[botcron] enqueued " + r.fired + " scheduled job(s)");
+  };
   cronTimer = setInterval(cronSweep, BOTCRON_POLL_MS);
   if (cronTimer.unref) cronTimer.unref();
   log("bot-cron scheduler armed (every " + Math.round(BOTCRON_POLL_MS / 1000) + "s)");
 }
-function stopSchedules() { if (cronTimer) { clearInterval(cronTimer); cronTimer = null; } }
+async function stopSchedules() {
+  if (cronTimer) { clearInterval(cronTimer); cronTimer = null; }
+  const t = cronTicker;
+  cronTicker = null;
+  if (t) await t.stop(); // waits for an in-flight sweep, then frees the lease
+}
 
 async function shutdown() {
   log("SIGTERM — stopping " + handles.length + " adapter(s)");
   if (_gate) { try { _gate.dispose(); } catch {} }
   if (reaper) { clearInterval(reaper); reaper = null; }
   stopJobs();
-  stopSchedules();
+  await stopSchedules();
   for (const h of handles) { try { await h.stop(); } catch {} }
   process.exit(0);
 }
@@ -178,7 +193,7 @@ process.on("SIGINT", shutdown);
   // NOTE: this db() connection is intentionally long-lived — the gate re-reads it every poll; do not close it.
   _gate = runtimeGate(db(), {
     start: async () => { await startAll(); startJobs(); startSchedules(); },
-    stop: async () => { await stopAdapters(); stopJobs(); stopSchedules(); },
+    stop: async () => { await stopAdapters(); stopJobs(); await stopSchedules(); },
     logTag: "gateways",
   });
   setInterval(() => {}, 1 << 30); // keep the process alive across idle periods
