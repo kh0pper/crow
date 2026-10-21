@@ -318,3 +318,63 @@ test("an add-on tool with an own tool's name: only the own definition is adverti
   assert.deepEqual(h.calls.executed, []);
   assert.equal(cal.seen.length, 1);
 });
+
+// ─── Fix round 2: rule 6 yields to a wanted non-own family; the own-tool follow-up window ───
+const SHARING = { sharing: { voiceIntent: { en: ["text", "message", "send"], es: ["mensaje", "mandale"] }, tools: { crow_send_message: {} } } };
+function msgHarness(rounds) {
+  const h = ownHarness({ bot: CROW, chatTools: ["crow_sharing"], rounds });
+  h.deps.toolFamilies = createToolFamilies({ manifests: SHARING });
+  h.deps.ownTools = async () => ({ tools: [remTool()], unavailable: ["calendar"] });
+  return h;
+}
+
+test("calendar unavailable: a message that mentions a meeting is a normal messaging turn, not the calendar fallback", async () => {
+  for (const t of ["text her the meeting moved to three", "send a message to the team about the event", "mándale un mensaje a Ana sobre la reunión"]) {
+    const h = msgHarness([says("Sent. ")]);
+    const r = await turn(h, t, act);
+    assert.equal(r.timings.calendar_fallback, undefined, t);
+    assert.equal(r.timings.action_no_backend, undefined, t);
+    assert.equal(r.timings.action_no_tool, undefined, t);
+    assert.ok(h.log[0].tools.includes("crow_sharing"), `${t}: the messaging family is offered`);
+  }
+});
+
+test("calendar unavailable: 'add the meeting to my calendar' is still the fallback", async () => {
+  const h = msgHarness([call("crow_reminder_add", { text: "meeting", at: "2026-10-26T12:00:00-05:00" })]);
+  const r = await turn(h, "add the meeting to my calendar", act);
+  assert.equal(r.timings.calendar_fallback, true);
+});
+
+test("the own-tool follow-up window: an own turn 11 minutes ago no longer counts", async () => {
+  const h = ownHarness({ probe: () => true, rounds: [says("Which day? "), call("crow_calendar_add_event", { title: "lunch" })] });
+  await turn(h, "add lunch to my calendar", { ...act, ownTools: [calTool()] });
+  h.c.advance(11 * 60_000);
+  const r = await turn(h, "put it on Monday", { ...act, ownTools: [calTool()] });
+  assert.equal(r.escalated, false);
+  assert.equal(r.timings.action_no_tool, true);
+  // Inside the window it still counts.
+  const w = ownHarness({ probe: () => true, rounds: [says("Which day? "), call("crow_calendar_add_event", { title: "lunch" })] });
+  await turn(w, "add lunch to my calendar", { ...act, ownTools: [calTool()] });
+  w.c.advance(9 * 60_000);
+  assert.equal((await turn(w, "put it on Monday", { ...act, ownTools: [calTool()] })).escalated, true);
+});
+
+test("an escalated unrelated turn (offered every family) does not arm the own-tool follow-up", async () => {
+  // Turn 1 escalates on a withheld messaging family; the escalated round is offered the own tool too.
+  const h = ownHarness({ bot: CROW, probe: () => true, chatTools: ["crow_sharing"], rounds: [says("Done. "), says("Sure. ")] });
+  h.deps.toolFamilies = createToolFamilies({ manifests: SHARING });
+  h.deps.ownTools = async () => ({ tools: [calTool()], unavailable: [] });
+  const r1 = await turn(h, "email bob the report", act);
+  assert.equal(r1.escalated, true);
+  assert.ok(h.log[0].tools.includes("crow_calendar_add_event"), "every family was on offer");
+  // Turn 2 on a box with no other tool: a vague action is the instant can't-do, not an own-tool follow-up.
+  h.deps.getChatTools = () => [];
+  const r2 = await turn(h, "put it on Monday", act);
+  assert.equal(r2.escalated, false);
+  assert.equal(r2.timings.action_no_tool, true);
+});
+
+test("VOICE_MODE_WINDOW_MS is the plan constant", async () => {
+  const { VOICE_MODE_WINDOW_MS } = await import("../servers/gateway/voice/turn.js");
+  assert.equal(VOICE_MODE_WINDOW_MS, 10 * 60_000);
+});

@@ -145,6 +145,8 @@ const LEGACY_FORCING = Object.freeze({ named: true, required: true, engine: "leg
 const WEAKER = { named: 2, required: 1, none: 0 };
 // A step-down learned from a refused request is forgotten after this long (the server may have been replaced).
 const LEARNED_TTL_MS = 10 * 60 * 1000;
+/** How long a turn that offered (on intent) or used one of Crow's own tools keeps a vague follow-up on them (plan constant). */
+export const VOICE_MODE_WINDOW_MS = 10 * 60_000;
 const MEMORY_OFF = "Memory is turned off on this display. Tell the user you can't use saved memories here, then end your turn — do not call another tool.";
 /** Rides on the user message of a calendar-fallback turn (tagged: never heard, never saved). */
 const calendarFallbackNote = (names) => `[Tools] No calendar is installed here, so nothing can be added to a calendar. Offer the user a reminder at the time they asked for instead, by calling ${names.join(" or ")}. Never say it was added to a calendar.`;
@@ -190,9 +192,9 @@ export function createVoiceTurnRunner(deps) {
   // Tool families (opts.familiesOnIntent): what the previous turn on each display used, and which
   // "no intent list" notes were already logged.
   const lastFamilies = new Map();
-  // Devices whose previous turn was offered (or used) one of Crow's own tools: a follow-up ("move it to 3") there
-  // may still need one, so a withheld own tool counts toward escalating it.
-  const lastOwn = new Set();
+  // deviceId → when its previous turn was offered one of Crow's own tools on intent (or used one): a follow-up
+  // ("move it to 3") within VOICE_MODE_WINDOW_MS may still need one, so a withheld own tool counts toward escalating it.
+  const lastOwn = new Map();
   // Displays whose previous turn was an action request (opts.actionWhen): the next turn is an action turn too.
   const lastAction = new Set();
   const famLogged = new Set();
@@ -481,7 +483,7 @@ export function createVoiceTurnRunner(deps) {
     let executor = null;
     let executorBot = null;     // the bot the executor was made for
     let usedFamilies = null;
-    let ownOffered = false;   // an own tool was on offer to this turn's model (lastOwn)
+    let ownOffered = false;   // an own tool was offered on intent this turn (arms lastOwn; an escalation offering every family does not)
     let actionAsked = false;
     const calledTools = [];       // every tool name the model called this turn (deps.voiceActions.afterTurn)
     const voiceActions = deps.voiceActions && typeof deps.voiceActions === "object" ? deps.voiceActions : null;
@@ -659,7 +661,15 @@ export function createVoiceTurnRunner(deps) {
       // is the can't-do line, below.
       let noBackend = null;
       let calendarFallback = false;
-      if (actionAsked && ownUnavailable.size) {
+      // Only when no other family is wanted for this request ("text her the meeting moved to three" is a message,
+      // not a calendar request): the turn's family classifier, on the non-own families of this turn's tools.
+      const classifier = famBase || deps.toolFamilies || null;
+      const otherWanted = () => !!classifier && baseTools.some((t) => {
+        if (ownByName.has(t.name) || extraByName.has(t.name) || deps.isMemoryTool(t.name)) return false;
+        const id = classifier.familyOf(t.name);
+        return !!id && classifier.wants(id, transcript);
+      });
+      if (actionAsked && ownUnavailable.size && !otherWanted()) {
         // The routine objects the request names (routine-objects.js; kept in step with the kiosk's action intent).
         const named = namesRoutineObjects(transcript);
         if (named.length && named.every((id) => ownUnavailable.has(id))) {
@@ -667,6 +677,8 @@ export function createVoiceTurnRunner(deps) {
           else noBackend = named[0];
         }
       }
+      // Offered on intent: the classifier wants an own family for this transcript (or the calendar fallback offers one).
+      if (calendarFallback || (fam && [...ownLists.keys()].some((f) => fam.wants(f, transcript)))) ownOffered = true;
       const fallbackNames = calendarFallback ? [...ownByName.values()].filter((o) => o.family === "own:reminders").map((o) => o.definition.name) : [];
       const prevFam = calendarFallback
         ? new Set([...(lastFamilies.get(device.id) || NO_FAMILIES), "own:reminders"])
@@ -756,7 +768,9 @@ export function createVoiceTurnRunner(deps) {
       const quickBacked = quickTools.some((t) => ownByName.has(t.name) || t.name === "crow_handoff");
       // An own tool counts only when the request names a routine object (calendar, reminder, task…) or follows a
       // turn that was offered or used one; otherwise "email my landlord" would escalate on the reminder tool alone.
-      const ownCounts = namesRoutineObjects(transcript).length > 0 || lastOwn.has(device.id) || [...prevFam].some((f) => String(f).startsWith("own:"));
+      const ownAt = lastOwn.get(device.id);
+      const ownRecent = ownAt != null && now() - ownAt <= VOICE_MODE_WINDOW_MS;
+      const ownCounts = namesRoutineObjects(transcript).length > 0 || ownRecent || [...prevFam].some((f) => String(f).startsWith("own:"));
       const actionWithheld = cls.actionWithheld(actionAsked, displayBacks, (t) => ownCounts || !ownByName.has(t.name)) && !quickBacked;
       if (actionAsked) timings.action_intent = true;
       // A routine object with no backend: no model call and no escalation (a calendar falls back to a reminder instead).
@@ -820,7 +834,6 @@ export function createVoiceTurnRunner(deps) {
       // An action request on a turn with no tool at all: no model call. The quick model, given nothing to act
       // with, role-plays success ("I've added your appointment … I'll remind you", queue item 29).
       // "No tool" = nothing but display tools the request does not ask for (and no memory tool on offer).
-      if (tools.some((t) => ownByName.has(t.name))) ownOffered = true;
       const actionable = tools.filter((t) => !extraByName.has(t.name));
       if (actionAsked && actionable.length === 0 && !displayBacks) {
         timings.action_no_tool = true;
@@ -1195,6 +1208,7 @@ export function createVoiceTurnRunner(deps) {
             if (ok && res.effect !== false) { backed = true; actionSent = true; }
             if (code === "bad_args") ownBadArgs = true;
             if (usedFamilies) usedFamilies.add(own.family);
+            ownOffered = true;   // used (families on or off): arms the follow-up window
             finalRes = tc === calls.at(-1) && res && res.final === true && typeof res.say === "string" && res.say.trim()
               ? { name: tc.name, say: res.say.trim(), code, effect: ok && res.effect !== false } : null;
             local.push({ id: tc.id, name: tc.name, result: out, neutral: true });
@@ -1425,7 +1439,7 @@ export function createVoiceTurnRunner(deps) {
         if (actionAsked) lastAction.add(device.id); else lastAction.delete(device.id);
       }
       if (device?.id && result.transcript) {
-        if (ownOffered || [...(usedFamilies || [])].some((f) => String(f).startsWith("own:"))) lastOwn.add(device.id); else lastOwn.delete(device.id);
+        if (ownOffered || [...(usedFamilies || [])].some((f) => String(f).startsWith("own:"))) lastOwn.set(device.id, now()); else lastOwn.delete(device.id);
       }
       timings.total_ms = now() - t0;
       if (say) timings.spoken_chars = say.chars();
