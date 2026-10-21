@@ -301,3 +301,42 @@ test("(13) an ordinary bot: a tool-using turn 11 minutes ago is no longer carrie
   await turn(h, "move it to 3");
   assert.ok(!h.log[1].tools.includes("crow_calendar_add_event"));
 });
+
+// ─── PR 2.1 Task 4 fix round 1: a rewritten turn ("had …" heard, "add …" taken) never writes without a spoken yes ───
+test("(R1) 'had lunch with Ann on Friday' (rewritten): the question is heard and captioned, nothing is written, and a yes writes once", async () => {
+  const pending = createPendingStore({ now: () => 1_000 });
+  const own = createOwnTools({ pending, connected: () => new Set(["gcal_create_event"]) });
+  const h = gateHarness({ rounds: [call("crow_calendar_add_event", { title: "lunch with Ann", start: "2026-10-30T12:00:00-05:00" })] });
+  const writes = [];
+  h.deps.createToolExecutor = () => ({
+    executeToolCalls: async (tcs) => { writes.push(...tcs.map((t) => t.arguments.summary)); return tcs.map((t) => ({ id: t.id, name: t.name, result: JSON.stringify({ id: "e1" }) })); },
+    close: async () => {},
+  });
+  h.deps.ownTools = own.forTurn;
+  h.deps.voiceActions = chainVoiceActions([own]);
+  const r = await turn(h, "had lunch with Ann on Friday", { ownTools: undefined });
+  assert.equal(r.timings.stt_rewrite, "had");
+  assert.deepEqual(writes, [], "nothing written on the rewritten turn");
+  assert.equal(r.spoken.length, 1, String(r.spoken));
+  assert.match(r.spoken[0], /^Add lunch with Ann to your calendar for .+\?$/);
+  assert.equal(r.captions.trim(), r.spoken[0].trim(), "captioned as heard");
+  const y = await turn(h, "yes", { ownTools: undefined });
+  assert.deepEqual(writes, ["lunch with Ann"], "the yes wrote once");
+  assert.match(y.spoken[0], /^Added lunch with Ann to your calendar/);
+});
+
+test("(R2) a remote create tool on a rewritten turn needs the yes; heard as said, it runs", async () => {
+  const ARGS = { calendar: "c1", summary: "lunch with Ann", start: "2026-10-30T12:00:00-05:00", end: "2026-10-30T13:00:00-05:00" };
+  const h = gateHarness({ chatTools: ["ws_cal_create_event"], rounds: [call("ws_cal_create_event", ARGS), says("Should I add it? "), call("ws_cal_create_event", ARGS, "c2"), says("Done. ")] });
+  const r = await turn(h, "had lunch with Ann on Friday", { ownTools: [], familiesOnIntent: false });
+  assert.equal(r.timings.stt_rewrite, "had");
+  assert.ok(h.log[0].tools.includes("ws_cal_create_event"));
+  assert.deepEqual(h.calls.executed, [], "not run without a yes");
+  assert.ok(!/Added|Done/.test(r.captions) && !r.spoken.some((t) => /Added|Done/.test(t)));
+  await turn(h, "yes", { ownTools: [], familiesOnIntent: false });
+  assert.deepEqual(h.calls.executed, ["ws_cal_create_event"], "the yes ran it once");
+  const plain = gateHarness({ chatTools: ["ws_cal_create_event"], rounds: [call("ws_cal_create_event", ARGS), says("Done. ")] });
+  const p = await turn(plain, "add lunch with Ann on Friday", { ownTools: [], familiesOnIntent: false });
+  assert.equal(p.timings.stt_rewrite, undefined);
+  assert.deepEqual(plain.calls.executed, ["ws_cal_create_event"], "heard as said: no extra question");
+});

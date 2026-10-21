@@ -12,8 +12,8 @@ import { namesRoutineObjects } from "./routine-objects.js";
 
 const words = (list) => new Set(list.split(" "));
 
-/** Words that are never the item being added. */
-const STOP = words("a an the i you we it this that then so my your great good nice fun been to on in at for with what how when"
+/** Words that are never the item being added ("add up the bill" is arithmetic). */
+const STOP = words("a an the i you we it this that then so my your great good nice fun been to on in at for with what how when up"
   + " un una unos unas el la los las lo mi mis tu tus al en de del que para con eso esto esta este");
 /** Day and time words. "may" is a verb as often as a month: left out. */
 const DAY_TIME = words("monday tuesday wednesday thursday friday saturday sunday tues thurs today tonight tomorrow tmrw"
@@ -55,11 +55,13 @@ const MISHEARD_RE = /^(\s*)(had|ad|at|and)\b/i;
  *   - the first word is "had", "ad", "at" or "and", and the next word is an object word (isObjectWord);
  *   - the rest holds a routine object (a calendar, a reminder, a task) or a day or time phrase.
  * So "and tomorrow?", "and on Friday?", "at nine tomorrow add lunch", "had a great day on Tuesday" and "and then
- * what" are never touched. English only; the caller (turn.js) also skips it for any bot but the voice bot and
+ * what" are never touched, nor is anything that ends in "?". English only; the caller (turn.js) also skips it for any bot but the voice bot and
  * while a question waits for a yes.
  */
 export function sttRewrite(transcript, { lang } = {}) {
   if (typeof transcript !== "string" || (lang && !/^en\b/i.test(lang))) return null;
+  // A question ("and dinner tomorrow?") is a follow-up, never an add (fix round 1).
+  if (/\?\s*$/.test(transcript)) return null;
   const m = MISHEARD_RE.exec(transcript);
   if (!m) return null;
   const ws = phraseWords(transcript);

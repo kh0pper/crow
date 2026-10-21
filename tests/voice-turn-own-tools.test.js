@@ -797,10 +797,11 @@ test("intentWhen: 'añade café el martes a las 9' does the same", async () => {
   assert.equal(r.timings.action_guard, true);
 });
 
-test("intentWhen: a call on the matched tool runs directly (not carried-only, no confirm)", async () => {
+test("intentWhen: a call on the matched tool runs directly when the words were heard as said (not carried-only, not rewritten, no confirm)", async () => {
   const cal = calWhen();
   const h = ownHarness({ bot: CROW, rounds: [call("crow_calendar_add_event", { title: "coffee", start: "2026-10-27T09:00:00-05:00" })] });
-  await turn(h, "add coffee Tuesday at 9", { ownTools: [cal], lang: "en" });
+  const r = await turn(h, "add coffee Tuesday at 9", { ownTools: [cal], lang: "en" });
+  assert.equal(r.timings.stt_rewrite, undefined, "typed correctly: nothing was rewritten");
   assert.equal(cal.seen.length, 1);
   assert.equal(cal.seen[0].ctx.confirm, undefined);
   assert.deepEqual(h.calls.spoken, [ADDED.say]);
@@ -821,4 +822,15 @@ test("intentWhen yields to the display: 'add two minutes' stays a timer, and a d
   const r2 = await turn(h, "add coffee Tuesday at 9", { ownTools: [calWhen()], extraTools: [timer], displayObjectWhen: () => true, lang: "en" });
   assert.ok(!h.log[1].tools.includes("crow_calendar_add_event"), String(h.log[1].tools));
   assert.equal(r2.timings.action_intent, undefined);
+});
+
+test("'add up' is arithmetic, not an add: no tool, no hold, the answer streams", async () => {
+  for (const t of ["can you add up my hours for tomorrow", "add up the bill for tonight"]) {
+    const h = ownHarness({ bot: CROW, rounds: [says("That comes to twelve. ")] });
+    const r = await turn(h, t, { ownTools: [calWhen(), remTool()], lang: "en" });
+    assert.deepEqual(h.log[0].tools, [], t);
+    assert.equal(r.timings.action_intent, undefined, t);
+    assert.equal(r.timings.action_guard, undefined, t);
+    assert.deepEqual(h.calls.spoken, ["That comes to twelve."], t);
+  }
 });

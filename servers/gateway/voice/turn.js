@@ -1036,9 +1036,12 @@ export function createVoiceTurnRunner(deps) {
         if (voiceKind && via && proxyArgsConflict(tc)) return refuse("refused_policy", VOICE_ARGS_CONFLICT);
         if (voiceKind && names.some((n) => VOICE_SCHEDULE_TOOLS.has(n)) && startsPipeline(tc.arguments)) return refuse("refused_policy", VOICE_NO_PIPELINE);
         if (voiceKind && names.includes("crow_update_schedule") && reenablesUnseen(tc.arguments)) return refuse("refused_policy", VOICE_NO_REENABLE);
+        // A turn whose words were rewritten ("had …" heard, "add …" taken: timings.stt_rewrite) asks before any write too,
+        // a remote create included: the rewrite may have turned a past-tense remark into a request (fix round 1).
         const confirmName = names.find((n) => isDestructiveTool(n) || (Array.isArray(policy.confirm) && policy.confirm.includes(n))
           || (voiceKind && (needsSpokenYes(n) || VOICE_CONFIRM_TOOLS.includes(n)
-            || (n === VOICE_NOTIFICATION_TOOL && changesNotifications(tc)))));
+            || (n === VOICE_NOTIFICATION_TOOL && changesNotifications(tc))
+            || (timings.stt_rewrite != null && (toolEffect(n) === "write" || toolEffect(tc.name) === "write")))));
         if (!confirmName) return null;
         // A question will be asked: every field it can name (ids, the recipient) must agree with what runs too.
         if (voiceKind && via && proxyArgsConflict(tc, { asking: true })) return refuse("refused_policy", VOICE_ARGS_CONFLICT);
@@ -1115,9 +1118,10 @@ export function createVoiceTurnRunner(deps) {
       const armGuard = () => { if (!actionGuard && !mustX && !holdEnd) { actionGuard = true; timings.action_guard = true; } };
       const ownOnOffer = tools.some((t) => ownByName.has(t.name));
       // The full hold on an own tool: only when the transcript itself reads as one (PR 2.1 [r2 C1]). This is the one
-      // place a further reading of the words joins: ownIntent carries each own tool's intentWhen (the calendar's add-matcher). The voice bot no longer arms it on the own-
-      // tool window alone (ownRecent): a turn that only carries context gets the sentence gate below instead, so plain
-      // questions keep streaming. Any other bot keeps the window as a reason (it has no sentence gate).
+      // place a further reading of the words joins: ownIntent carries each own tool's intentWhen (the calendar's
+      // add-matcher). The voice bot no longer arms it on the own-tool window alone (ownRecent): a turn that only
+      // carries context gets the sentence gate below instead, so plain questions keep streaming. Any other bot keeps
+      // the window as a reason (it has no sentence gate).
       const ownActionWords = ownIntent || namesRoutineObjects(transcript).length > 0;
       if (ownOnOffer && (ownActionWords || (!voiceKind && ownRecent))) armGuard();
       // The voice bot, an own tool on offer only because its family carried over (the voice memory, or the previous
@@ -1415,7 +1419,7 @@ export function createVoiceTurnRunner(deps) {
             let out = ownDone.get(dupKey);
             const ran = out === undefined;   // a cached result never re-asks: its question is no longer the pending one
             if (ran) {
-              try { out = await own.execute(tc.arguments || {}, { transcript, executor, db, device, ...(calendarFallback ? { fallback: "calendar" } : {}), ...(ownCarriedOnly ? { confirm: true } : {}) }); }
+              try { out = await own.execute(tc.arguments || {}, { transcript, executor, db, device, ...(calendarFallback ? { fallback: "calendar" } : {}), ...(ownCarriedOnly || timings.stt_rewrite != null ? { confirm: true } : {}) }); }
               catch (err) { out = JSON.stringify({ ok: false, code: "error", message: String(err?.message || err) }); }
               if (typeof out !== "string") out = JSON.stringify({ ok: false, code: "error" });
             }

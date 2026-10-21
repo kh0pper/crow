@@ -20,7 +20,8 @@ test("the misheard 'add' is rewritten", () => {
 
 test("never rewritten: a plain sentence, a bare day or time, Spanish", () => {
   for (const t of ["had a great day on Tuesday", "and tomorrow?", "and on Friday?", "at nine tomorrow add lunch", "and then what",
-    "had coffee", "and coffee?", "had lunch yesterday", "add coffee Tuesday at 9", "at four", "and at five", "had 2 meetings today"]) {
+    "had coffee", "and coffee?", "had lunch yesterday", "add coffee Tuesday at 9", "at four", "and at five", "had 2 meetings today",
+    "and dinner tomorrow?", "and Ann's party on Saturday?", "had lunch on Friday?"]) {
     assert.equal(sttRewrite(t), null, t);
   }
   assert.equal(sttRewrite("Had coffee Tuesday at 9", { lang: "es" }), null, "es is never rewritten");

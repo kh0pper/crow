@@ -987,7 +987,7 @@ test("calendarAddIntent: 'add <item> <day or time>' (en) and 'añade/agrega <ite
   }
   for (const t of ["add two minutes", "add 15 and 27", "add coffee", "add a reminder Tuesday at 9", "add coffee Tuesday, remind me at 8",
     "recuérdame añadir café el martes", "add milk to my tasks tomorrow", "add eggs to the list tomorrow", "what did I add on Tuesday",
-    "had coffee Tuesday at 9", "añade dos minutos", "add the dentist", "", null]) {
+    "had coffee Tuesday at 9", "añade dos minutos", "add the dentist", "can you add up my hours for tomorrow", "add up the bill for tonight", "", null]) {
     assert.equal(calendarAddIntent(t), false, String(t));
   }
 });
