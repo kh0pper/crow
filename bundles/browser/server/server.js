@@ -13,12 +13,13 @@ import { z } from "zod";
 import { chromium } from "playwright";
 import { buildStealthScript, getContextOptions, humanType, humanClick, delay } from "./stealth.js";
 import { getRandomProfile } from "./profiles.js";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, mkdirSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { stateDir, stateRoot, containerName, cdpPort, vncPort } from "./instance.js";
 import { articleTurndown } from "./article-markdown.js";
+import { fileInDir, writeFileNoFollow, readFileNoFollow, MAX_FILE_NAME } from "./safe-file.js";
 
 /**
  * Create and configure the crow-browser MCP server.
@@ -494,10 +495,11 @@ export function createBrowserServer(options = {}) {
     "crow_browser_save_session",
     "Save cookies and local storage to a file for later restoration.",
     {
-      name: z.string().describe("Session name (used as filename)"),
+      name: z.string().min(1).max(MAX_FILE_NAME).describe("Session name (used as the file name: no \"/\", not starting with \".\")"),
     },
     async ({ name }) => {
       try {
+        const filePath = fileInDir(sessionDir, name, "json");
         const p = await getPage();
         const cookies = await context.cookies();
         const localStorage = await p.evaluate(() => {
@@ -526,8 +528,7 @@ export function createBrowserServer(options = {}) {
           sessionStorage,
         };
 
-        const filePath = join(sessionDir, `${name}.json`);
-        writeFileSync(filePath, JSON.stringify(sessionData, null, 2));
+        writeFileNoFollow(filePath, JSON.stringify(sessionData, null, 2), 0o600);
 
         return {
           content: [{
@@ -556,11 +557,11 @@ export function createBrowserServer(options = {}) {
     "crow_browser_load_session",
     "Restore a previously saved session (cookies and storage).",
     {
-      name: z.string().describe("Session name to restore"),
+      name: z.string().min(1).max(MAX_FILE_NAME).describe("Session name to restore"),
     },
     async ({ name }) => {
       try {
-        const filePath = join(sessionDir, `${name}.json`);
+        const filePath = fileInDir(sessionDir, name, "json");
         if (!existsSync(filePath)) {
           return {
             content: [{ type: "text", text: `Session not found: ${name}` }],
@@ -568,7 +569,7 @@ export function createBrowserServer(options = {}) {
           };
         }
 
-        const sessionData = JSON.parse(readFileSync(filePath, "utf-8"));
+        const sessionData = JSON.parse(readFileNoFollow(filePath));
         const p = await getPage();
 
         // Restore cookies
@@ -968,24 +969,23 @@ export function createBrowserServer(options = {}) {
       // (queue item 26). Same acceptance: any object, every key kept.
       data: z.array(z.object({}).passthrough()).describe("Array of data objects to export (one object per row)"),
       format: z.enum(["csv", "json"]).describe("Export format"),
-      filename: z.string().optional().describe("Output filename (saved to this instance's browser-exports/ directory — see crow_browser_status for the resolved path)"),
+      filename: z.string().min(1).max(MAX_FILE_NAME).optional().describe("Output file name, a plain name with no \"/\" (saved to this instance's browser-exports/ directory — see crow_browser_status for the resolved path)"),
     },
     async ({ data, format, filename }) => {
       try {
         const exportDir = stateDir("browser-exports");
-        if (!existsSync(exportDir)) mkdirSync(exportDir, { recursive: true });
-
         const ts = new Date().toISOString().replace(/[:.]/g, "-").substring(0, 19);
-        const fname = filename || `export-${ts}`;
-        const fullPath = join(exportDir, `${fname}.${format}`);
+        // Confined to exportDir (queue item 26f): `../` used to write anywhere.
+        const fullPath = fileInDir(exportDir, filename || `export-${ts}`, format);
+        if (!existsSync(exportDir)) mkdirSync(exportDir, { recursive: true });
 
         if (format === "csv") {
           const { stringify } = await import("csv-stringify/sync");
           const headers = Object.keys(data[0] || {});
           const rows = [headers, ...data.map((row) => headers.map((h) => String(row[h] ?? "")))];
-          writeFileSync(fullPath, stringify(rows));
+          writeFileNoFollow(fullPath, stringify(rows));
         } else {
-          writeFileSync(fullPath, JSON.stringify(data, null, 2));
+          writeFileNoFollow(fullPath, JSON.stringify(data, null, 2));
         }
 
         return {
