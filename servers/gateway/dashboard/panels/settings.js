@@ -110,14 +110,17 @@ export default {
   category: "system",
 
   async handler(req, res, { db, layout, lang }) {
-    const sectionId = req.query.section;
+    let sectionId = req.query.section;
 
     // POST: dispatch to sections (must happen before section check
     // so section AJAX handlers work from any dashboard page)
     if (req.method === "POST") {
       const { action } = req.body;
       const handled = await dispatchAction(getSettingsSections(), { req, res, db, action, lang });
-      if (handled) return;
+      // A section may ask to render itself as the POST response (a one-time
+      // reveal that must never travel in a redirect URL).
+      if (handled && typeof handled === "object" && handled.renderSection) sectionId = handled.renderSection;
+      else if (handled) return;
     }
 
     // Sub-page: render individual section

@@ -3,8 +3,34 @@
  */
 
 import { t } from "../../shared/i18n.js";
+import { escapeHtml } from "../../shared/components.js";
+import { csrfInput } from "../../shared/csrf.js";
 
 const isHosted = !!process.env.CROW_HOSTED;
+
+// Freshly regenerated recovery codes ride on the request object, from the
+// POST handler straight into the render of the same response. They are never
+// put in a URL, a cookie or a redirect (they used to ride in the Location
+// header's query string, which put them in browser history and logs).
+const NEW_CODES = Symbol("twoFactorNewRecoveryCodes");
+
+const RECOVERY_CODE_RE = /^[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}$/;
+
+/** The setup form's recovery codes, or null when they aren't the shape we issue. */
+function parseSubmittedCodes(raw) {
+  try {
+    const codes = JSON.parse(decodeURIComponent(String(raw ?? "")));
+    if (!Array.isArray(codes) || codes.length === 0 || codes.length > 32) return null;
+    return codes.every((c) => typeof c === "string" && RECOVERY_CODE_RE.test(c)) ? codes : null;
+  } catch {
+    return null;
+  }
+}
+
+function noStore(res) {
+  if (typeof res?.set === "function") res.set({ "Cache-Control": "no-store", Pragma: "no-cache" });
+  else if (typeof res?.setHeader === "function") { res.setHeader("Cache-Control", "no-store"); res.setHeader("Pragma", "no-cache"); }
+}
 
 export default {
   id: "two-factor",
@@ -18,7 +44,9 @@ export default {
     return enabled ? "Enabled" : "Disabled";
   },
 
-  async render({ req, db, lang }) {
+  async render({ req, res, db, lang }) {
+    // The page can show the TOTP secret and recovery codes: never cache it.
+    noStore(res);
     const {
       is2faEnabled,
       getRecoveryCodeCount,
@@ -32,8 +60,6 @@ export default {
       ? `<div class="alert alert-success">${t("settings.2faEnabled", lang)}</div>`
       : req.query.success === "2fa-disabled"
       ? `<div class="alert alert-success">${t("settings.2faDisabled", lang)}</div>`
-      : req.query.success === "2fa-codes-regenerated"
-      ? `<div class="alert alert-success">${t("settings.2faCodesRegenerated", lang)}</div>`
       : req.query.success === "2fa-devices-revoked"
       ? `<div class="alert alert-success">${t("settings.2faDevicesRevoked", lang)}</div>`
       : "";
@@ -43,23 +69,26 @@ export default {
     if (enabled) {
       const remaining = await getRecoveryCodeCount();
 
-      // Show new recovery codes if just regenerated
-      const newCodes = req.query.codes ? JSON.parse(decodeURIComponent(req.query.codes)) : null;
+      // New recovery codes, only in the response to the regenerate POST.
+      const newCodes = Array.isArray(req?.[NEW_CODES]) ? req[NEW_CODES] : null;
+      const regenerated = newCodes
+        ? `<div class="alert alert-success">${t("settings.2faCodesRegenerated", lang)}</div>` : "";
       const codesHtml = newCodes
         ? `<div style="background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:8px;padding:1rem;margin:1rem 0;text-align:center">
             <p style="font-size:0.8rem;font-weight:600;margin-bottom:0.5rem">${t("login.2faRecoveryCodes", lang)}</p>
-            ${newCodes.map(c => `<code style="display:block;padding:0.2rem 0;font-size:0.9rem">${c}</code>`).join("")}
+            ${newCodes.map(c => `<code style="display:block;padding:0.2rem 0;font-size:0.9rem">${escapeHtml(c)}</code>`).join("")}
             <p style="font-size:0.7rem;color:var(--crow-text-tertiary);margin-top:0.5rem">${t("login.2faSaveCodesWarning", lang)}</p>
           </div>`
         : "";
 
-      return `${successMsg}${errorMsg}${codesHtml}
+      return `${successMsg}${regenerated}${errorMsg}${codesHtml}
         <div style="margin-bottom:1.5rem">
           <p style="color:var(--crow-text-secondary);font-size:0.9rem">${t("settings.2faStatus", lang)}: <strong style="color:var(--crow-accent)">${t("settings.2faStatusEnabled", lang)}</strong></p>
           <p style="color:var(--crow-text-tertiary);font-size:0.85rem;margin-top:0.25rem">${t("settings.2faRecoveryRemaining", lang)}: ${remaining}</p>
         </div>
         <div style="display:flex;flex-direction:column;gap:0.75rem">
-          <form method="POST" style="margin:0">
+          <form method="POST" action="/dashboard/settings?section=two-factor" data-turbo="false" style="margin:0">
+            ${csrfInput(req)}
             <input type="hidden" name="action" value="regenerate_recovery_codes">
             <button type="submit" class="btn btn-secondary" style="width:100%">${t("settings.2faRegenerateCodes", lang)}</button>
           </form>
@@ -86,15 +115,15 @@ export default {
       <div style="text-align:center;margin:1rem 0">
         <img src="${qrDataUri}" alt="QR Code" width="180" height="180" style="border-radius:8px;background:#fff;padding:6px">
       </div>
-      <p style="font-size:0.75rem;color:var(--crow-text-tertiary);word-break:break-all;text-align:center;margin-bottom:1rem">${t("login.2faManualKey", lang)}: <code>${secret}</code></p>
+      <p style="font-size:0.75rem;color:var(--crow-text-tertiary);word-break:break-all;text-align:center;margin-bottom:1rem">${t("login.2faManualKey", lang)}: <code>${escapeHtml(secret)}</code></p>
       <div style="background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:8px;padding:1rem;margin:1rem 0;text-align:center">
         <p style="font-size:0.8rem;font-weight:600;margin-bottom:0.5rem">${t("login.2faRecoveryCodes", lang)}</p>
-        ${recoveryCodes.map(c => `<code style="display:block;padding:0.2rem 0;font-size:0.9rem">${c}</code>`).join("")}
+        ${recoveryCodes.map(c => `<code style="display:block;padding:0.2rem 0;font-size:0.9rem">${escapeHtml(c)}</code>`).join("")}
         <p style="font-size:0.7rem;color:var(--crow-text-tertiary);margin-top:0.5rem">${t("login.2faSaveCodesWarning", lang)}</p>
       </div>
       <form method="POST">
         <input type="hidden" name="action" value="enable_2fa">
-        <input type="hidden" name="secret" value="${secret}">
+        <input type="hidden" name="secret" value="${escapeHtml(secret)}">
         <input type="hidden" name="recovery_codes" value="${encodeURIComponent(JSON.stringify(recoveryCodes))}">
         <input type="text" name="totp_code" placeholder="${t("login.2faPlaceholder", lang)}" required autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]*" maxlength="6" style="text-align:center;font-size:1.1rem;letter-spacing:0.2em;padding:0.5rem;width:100%;border:1px solid var(--crow-border);border-radius:6px;background:var(--crow-bg-deep);color:var(--crow-text-primary);margin-bottom:0.75rem">
         <button type="submit" class="btn btn-secondary" style="width:100%">${t("login.2faSetupVerifyButton", lang)}</button>
@@ -114,18 +143,21 @@ export default {
     } = await import("../../totp.js");
 
     if (action === "enable_2fa") {
-      const { totp_code, secret, recovery_codes } = req.body;
-      const codes = JSON.parse(decodeURIComponent(recovery_codes));
+      // Never replace a live secret from this form.
+      if (await is2faEnabled()) {
+        res.redirectAfterPost("/dashboard/settings?section=two-factor");
+        return true;
+      }
+      const { totp_code, secret } = req.body;
+      const codes = parseSubmittedCodes(req.body.recovery_codes);
 
-      // Save setup first
-      await saveTotpSetup(secret, codes);
-
-      // Verify the code
-      if (!verifyTotp(totp_code, secret)) {
+      // Verify BEFORE saving anything: a wrong code must change nothing.
+      if (!codes || !verifyTotp(totp_code, secret)) {
         res.redirectAfterPost("/dashboard/settings?section=two-factor&error=invalid-code");
         return true;
       }
 
+      await saveTotpSetup(secret, codes);
       await enable2fa();
       res.redirectAfterPost("/dashboard/settings?section=two-factor&success=2fa-enabled");
       return true;
@@ -150,8 +182,10 @@ export default {
       }
       const newCodes = generateRecoveryCodes();
       await saveTotpSetup(secret, newCodes);
-      res.redirectAfterPost(`/dashboard/settings?section=two-factor&success=2fa-codes-regenerated&codes=${encodeURIComponent(JSON.stringify(newCodes))}`);
-      return true;
+      // Show them once, in this response (no redirect, no-store).
+      req[NEW_CODES] = newCodes;
+      noStore(res);
+      return { renderSection: "two-factor" };
     }
 
     if (action === "revoke_devices") {

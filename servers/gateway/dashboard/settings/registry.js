@@ -36,7 +36,9 @@ export const GROUPS = {
  *     - icon:      string — inline SVG markup
  *     - getPreview({ settings, db, lang }): Promise<string> — menu subtitle
  *                  (keep it to cheap reads: it runs on every menu load)
- *     - handleAction({ req, res, db, action }): Promise<boolean>
+ *     - handleAction({ req, res, db, action }): Promise<boolean | { renderSection: string }>
+ *                  — return { renderSection: id } to render a section as the
+ *                  POST response instead of redirecting (one-time reveals)
  *     - scope:     "global" | "local" | "mixed" — declares whether the
  *                  section's settings are operator-global (synced), strictly
  *                  per-instance, or a mix. Advisory metadata for the UI /
@@ -78,7 +80,9 @@ export async function dispatchAction(sectionsList, { req, res, db, action, lang 
   for (const section of sectionsList) {
     if (section.handleAction) {
       const handled = await section.handleAction({ req, res, db, action, lang });
-      if (handled) return true;
+      // `true` = the section answered; `{ renderSection }` = render that
+      // section as this POST's response (a one-time reveal, e.g. 2FA codes).
+      if (handled) return handled;
     }
   }
   return false;
