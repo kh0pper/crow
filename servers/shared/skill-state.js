@@ -3,7 +3,7 @@
  *
  * Stored in <CROW_HOME>/skill-state.json, next to skill-installs.json and
  * outside skills/ so the resolver and Bot Builder never list it. Per instance
- * by design (Kevin, Q1): instances have different extensions and bots. Not in
+ * by design (owner decision Q1): instances have different extensions and bots. Not in
  * the DB because every reader that must honour it (the skill resolver, the
  * pibot bridge, job runs, voice bots, the report CLI) is DB-free.
  *

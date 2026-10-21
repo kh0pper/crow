@@ -141,6 +141,7 @@ test("an opted-out copy is NOT trusted as unedited: with no matching record it r
   writeFileSync(RECORD, "{}");
   const list = await call();
   assert.match(row(list.body, "kiosk"), /Yours · copy of Kiosk display/);
+  assert.doesNotMatch(row(list.body, "kiosk"), /Your copy · /, "no status words next to the copy-of label");
   const view = await call({ query: { edit: "kiosk.md", source: "user" } });
   assert.match(view.body, /name="action" value="save"/);
   const r = await call({ method: "POST", body: { action: "save", filename: "kiosk.md", content: "# Edited\n" } });
@@ -169,6 +170,8 @@ test("rows show who uses a skill", async () => {
   const list = await call();
   assert.match(row(list.body, "household-notes"), /Used by 2 bots/);
   assert.match(row(list.body, "media"), /Used by 1 bot/);
+  assert.match(row(list.body, "media"), /Yours · copy of Media Hub/);
+  assert.doesNotMatch(row(list.body, "media"), /updates stopped/, "the copy-of label already says it; the strip carries the status");
   assert.match(row(list.body, "tutoring"), /Not used by a bot/);
   const es = await call({ lang: "es" });
   assert.match(row(es.body, "household-notes"), /La usan 2 bots/);

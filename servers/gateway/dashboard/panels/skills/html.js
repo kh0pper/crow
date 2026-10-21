@@ -92,9 +92,9 @@ function attentionStrip(m) {
     const bot = it.bots[0];
     const takeOff = bot ? `<a class="btn btn-secondary btn-sm sk-act" href="/dashboard/bot-builder?bot=${encodeURIComponent(bot.botId)}&amp;tab=abilities">${esc(fill(t("skills.act.takeOff", lang), { bot: bot.name }))}</a>` : "";
     let label, action;
-    if (it.kind === "update") { label = t("skills.st.update", lang); action = `<a class="btn btn-secondary btn-sm sk-act" href="${href(qs({ skill: r.name, compare: 1 }))}#skill-${esc(r.name)}">${esc(t("skills.act.review", lang))}${vh(title)}</a>`; }
+    if (it.kind === "update") { label = t(r.updateAtBoot === false ? "skills.st.updateAvailable" : "skills.st.update", lang); action = `<a class="btn btn-secondary btn-sm sk-act" href="${href(qs({ skill: r.name, compare: 1 }))}#skill-${esc(r.name)}">${esc(t("skills.act.review", lang))}${vh(title)}</a>`; }
     else if (it.kind === "behind") { label = t("skills.st.behind", lang); action = `<a class="btn btn-secondary btn-sm sk-act" href="${href(qs({ skill: r.name, compare: 1 }))}#skill-${esc(r.name)}">${esc(t("skills.act.compare", lang))}${vh(title)}</a>`; }
-    else if (it.kind === "removed") { label = t("skills.st.removedAsked", lang); action = postButton("restore-shipped", { skill: r.file }, esc(t("skills.act.restore", lang)) + vh(title), { cls: "btn btn-secondary btn-sm sk-act" }) + takeOff; }
+    else if (it.kind === "removed") { label = t("skills.st.removedAsked", lang); action = postButton("restore-shipped", { skill: r.file, srcSha: r.srcSha }, esc(t("skills.act.restore", lang)) + vh(title), { cls: "btn btn-secondary btn-sm sk-act" }) + takeOff; }
     else if (it.kind === "orphan") { label = t("skills.st.orphan", lang); action = postButton("ack", { skill: r.file, srcSha: "" }, esc(t("skills.act.keep", lang)) + vh(title), { cls: "btn btn-secondary btn-sm sk-act" }); }
     else { label = t("skills.st.missingAsked", lang); action = takeOff; }
     const av = r ? avatar(r) : `<span class="sk-av sk-av-missing" aria-hidden="true">?</span>`;
@@ -110,7 +110,7 @@ function statusNote(r, status, m) {
   const ext = r.bundleName || r.bundle || "";
   const bots = m.usage.get(r.name) || [];
   switch (status) {
-    case "update": return ["info", fill(t(r.hasFile ? "skills.note.update" : "skills.note.updateNew", lang), { ext })];
+    case "update": return ["info", fill(t(r.hasFile ? "skills.note.update" : "skills.note.updateNew", lang), { ext }) + (r.updateAtBoot === false ? " " + t("skills.note.notAutomatic", lang) : "")];
     case "behind": return ["warn", fill(t("skills.note.behind", lang), { ext })];
     case "removed": return ["err", t(bots.length ? "skills.note.removed" : "skills.note.removedQuiet", lang)];
     case "orphan": return ["warn", fill(t("skills.note.orphan", lang), { ext })];
@@ -141,10 +141,10 @@ function detailActions(r, status, m, dx) {
   const compare = (key) => `<a class="btn btn-secondary" href="${href(qs({ skill: r.name, compare: 1 }))}#skill-${esc(r.name)}">${esc(key)}</a>`;
   if (r.source === "missing") return "";
   if (r.source === "ext" && status === "removed") {
-    acts.push(postButton("restore-shipped", { skill: r.file }, esc(t("skills.act.restore", lang)) + vh(r.title), { cls: "btn btn-primary" }));
+    acts.push(postButton("restore-shipped", { skill: r.file, srcSha: r.srcSha }, esc(t("skills.act.restore", lang)) + vh(r.title), { cls: "btn btn-primary" }));
     acts.push(gotoExt);
   } else if (r.source === "ext" && !r.hasFile) {
-    acts.push(postButton("apply-update", { skill: r.file }, esc(t("skills.a.applyUpdate", lang)), { cls: "btn btn-primary" }));
+    acts.push(postButton("apply-update", { skill: r.file, srcSha: r.srcSha }, esc(t("skills.a.applyUpdate", lang)), { cls: "btn btn-primary" }));
     if (!dx.compare) acts.push(compare(t("skills.a.reviewChanges", lang)));
     acts.push(gotoExt);
   } else if (r.source === "ext" && r.linked) {
@@ -153,7 +153,7 @@ function detailActions(r, status, m, dx) {
     acts.push(gotoExt);
   } else if (r.source === "ext") {
     if (status === "update") {
-      acts.push(postButton("apply-update", { skill: r.file }, esc(t("skills.a.applyUpdate", lang)), { cls: "btn btn-primary" }));
+      acts.push(postButton("apply-update", { skill: r.file, srcSha: r.srcSha }, esc(t("skills.a.applyUpdate", lang)), { cls: "btn btn-primary" }));
       if (!dx.compare) acts.push(compare(t("skills.a.reviewChanges", lang)));
     }
     acts.push(`<a class="btn btn-secondary" href="${editHref("user", "&amp;customize=1")}">${esc(t("skills.customize", lang))}</a><small class="sk-act-warn">${esc(fill(t("skills.customizeWarn", lang), { ext }))}</small>`);
@@ -162,7 +162,7 @@ function detailActions(r, status, m, dx) {
     acts.push(`<a class="btn btn-primary" href="${editHref("user")}">${esc(t("skills.edit", lang))}</a>`);
     if (r.basedOn && r.bundle && (status === "behind" || status === "on" || status === "off") && dx.shipped) {
       if (!dx.compare) acts.push(compare(fill(t("skills.a.compareWith", lang), { ext })));
-      acts.push(postButton("restore-shipped", { skill: r.file }, esc(t("skills.a.restoreOriginal", lang)), { confirm: t("skills.a.restoreOriginalWarn", lang), extra: "" }) + `<small class="sk-act-warn">${esc(t("skills.a.restoreOriginalWarn", lang))}</small>`);
+      acts.push(postButton("restore-shipped", { skill: r.file, srcSha: dx.shipped.sha }, esc(t("skills.a.restoreOriginal", lang)), { confirm: t("skills.a.restoreOriginalWarn", lang), extra: "" }) + `<small class="sk-act-warn">${esc(t("skills.a.restoreOriginalWarn", lang))}</small>`);
       if (status === "behind") acts.push(postButton("ack", { skill: r.file, srcSha: dx.shipped.sha }, esc(t("skills.a.keepMine", lang))));
     }
     if (status === "orphan") acts.push(postButton("ack", { skill: r.file, srcSha: "" }, esc(t("skills.act.keep", lang)) + vh(r.title)));
@@ -193,7 +193,8 @@ function detail(r, m, dx) {
   const file = `<div class="sk-d-sec"><b>${esc(t("skills.d.file", lang))}</b><span class="mono">${esc(r.file)}${r.bundle && r.source !== "builtin" ? " · " + esc(r.bundleName || r.bundle) + (dx.version ? " " + esc(dx.version) : "") : ""}</span></div>`;
   return `<div class="sk-detail" id="sk-detail" role="region" aria-labelledby="sk-detail-h">
     <div class="sk-d-head">${avatar(r)}<h2 id="sk-detail-h" tabindex="-1" autofocus${langAttr(r.titleLang, lang)}>${esc(r.title)}${flags(r, lang)}</h2><a class="sk-close" href="${href(m.q ? qs({ q: m.q }) : "")}#skill-${esc(r.name)}" aria-label="${esc(t("skills.d.close", lang))}">✕</a></div>
-    <div class="sk-chips">${sourceChip(r, lang)}${stChip(status, lang)}</div>
+    ${dx.done ? `<p class="sk-note sk-note-ok" id="sk-done" role="status" tabindex="-1">${esc(dx.done)}</p>` : ""}
+    <div class="sk-chips">${sourceChip(r, lang)}${stChip(status, lang, status === "update" && r.updateAtBoot === false ? "skills.st.updateAvailable" : null)}</div>
     ${r.description ? `<p class="sk-d-purpose"${langAttr(r.descriptionLang, lang)}>${esc(r.description)}</p>` : ""}
     ${note ? `<div class="sk-note sk-note-${note[0] || "plain"}">${esc(note[1])}</div>` : ""}
     ${dx.compare ? diffBlock(dx.diff, m) : ""}
@@ -214,11 +215,13 @@ function rowHtml(r, m) {
   const ext = r.bundleName || r.bundle || "";
   if (r.source === "ext") meta.push(fill(t("skills.fromExt", lang), { ext }) + (r.linked ? " · " + t("skills.linked", lang) : ""));
   else if (r.source === "yours" && r.basedOn) meta.push(fill(t("skills.copyOf", lang), { ext }));
-  if (status !== "on") meta.push(t(status === "removed" && bots.length ? "skills.st.removedAsked" : (STATUS[status] || [])[0] || "", lang));
+  // The copy-of label already says whose copy it is; its status (behind,
+  // extension removed…) is in the strip and the detail, not repeated here.
+  if (status !== "on" && !(r.source === "yours" && r.basedOn && status !== "off")) meta.push(t(status === "removed" && bots.length ? "skills.st.removedAsked" : status === "update" && r.updateAtBoot === false ? "skills.st.updateAvailable" : (STATUS[status] || [])[0] || "", lang));
   if (!r.shadow) meta.push(usedByText(bots.length, lang));
   let right;
   if (r.shadow) right = `<span class="sk-chip sk-chip-plain">${esc(t("skills.yoursUsed", lang))}</span>`;
-  else if (status === "removed") right = postButton("restore-shipped", { skill: r.file }, esc(t("skills.act.restore", lang)) + vh(r.title), { cls: "btn btn-secondary btn-sm" });
+  else if (status === "removed") right = postButton("restore-shipped", { skill: r.file, srcSha: r.srcSha }, esc(t("skills.act.restore", lang)) + vh(r.title), { cls: "btn btn-secondary btn-sm" });
   else if (EXEMPT_FROM_OFF.includes(r.name)) right = `<span class="sk-chip sk-chip-plain" title="${esc(t("skills.alwaysSelfAuthoring", lang))}">${esc(t("skills.swAlways", lang))}</span>`;
   else right = switchForm(r.name, r.title, m.off.has(r.name), m.toggled === r.name, lang);
   const sel = m.selected && m.selected.name === r.name && !!m.selected.shadow === !!r.shadow;

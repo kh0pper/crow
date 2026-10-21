@@ -19,6 +19,7 @@
 import { readFileSync, readdirSync, lstatSync, readlinkSync, openSync, fstatSync, closeSync, constants as fsConstants } from "node:fs";
 import { join, resolve, dirname, sep } from "node:path";
 import { syncBundleSkills, readSkillLedger, manifestSkillPaths, skillSyncMode, skillHash } from "./bundle-skill-sync.js";
+import { skillStateName } from "../shared/skill-state.js";
 
 const MAX_SKILL_BYTES = 1024 * 1024;
 const PURPOSE_MAX = 160;
@@ -302,18 +303,21 @@ function readRecordSafe(crowHome) {
  * source: "builtin" | "ext" | "yours"; status: "on" | "update" | "behind" |
  * "removed" | "orphan" | "ext-removed" | "replaced" | "needs-kit".
  * Rows with hasFile:false (removed, a not-yet-installed update) have no file
- * to open; PR 1's table does not render them.
+ * to open; the panel gives them Restore / Apply update.
+ * An update (plan refresh/install) reads "update" in every sync mode, since
+ * Apply update writes in every mode (owner decision Q2); `updateAtBoot`
+ * says whether the next boot would apply it by itself (mode "on" only).
  */
 export function classifySkills({ crowHome, appBundles, repoDir, lang = "en", kitSkills = [], kitInstalled = false, ack = {}, mode = skillSyncMode() }) {
   const userDir = join(crowHome, "skills");
   const userFiles = listSkillFiles(userDir);
   const repoFiles = new Set(listSkillFiles(repoDir));
   const { plan, installedIds } = skillSyncPlan({ crowHome, appBundles, mode });
-  // "Update ready" means the next boot applies it — true only in mode "on".
-  // In report/off nothing is applied; PR 3's Apply/Restore actions will show
-  // those cases their own way. Until then a stale copy reads on and a
-  // not-yet-installed skill is not listed.
-  const applies = mode === "on";
+  // Only mode "on" applies an update at the next boot; report/off show it as
+  // "Update available" and leave it to the Apply update click.
+  const updateAtBoot = mode === "on";
+  // "Keep" acks are stored under the off list's normalised name (my-notes.md).
+  const ackFor = (file) => ack[(skillStateName(file) || file) + ".md"] || ack[file];
   const record = readRecordSafe(crowHome);
   const manifests = new Map();
   const manifestOf = (id) => {
@@ -324,7 +328,7 @@ export function classifySkills({ crowHome, appBundles, repoDir, lang = "en", kit
   const shippedBy = (id, file) => { const m = manifestOf(id); return !!m && manifestSkillPaths(m).some((p) => p.split("/").pop() === file); };
 
   const names = new Set([...userFiles, ...repoFiles]);
-  for (const [file, e] of plan) if (e.action === "skip-deleted" || (e.action === "install" && applies)) names.add(file);
+  for (const [file, e] of plan) if (e.action === "skip-deleted" || e.action === "install") names.add(file);
 
   const rows = [];
   const userSet = new Set(userFiles);
@@ -346,13 +350,14 @@ export function classifySkills({ crowHome, appBundles, repoDir, lang = "en", kit
         else row.source = "yours";
       } else if (isExtensionCopy(entry, { record, filePath: row.path })) {
         Object.assign(row, { source: "ext", bundle: entry.bundle });
-        if (entry.action === "refresh" && applies) row.status = "update";
+        if (entry.action === "refresh") Object.assign(row, { status: "update", updateAtBoot });
       } else if (entry && entry.action === "skip-optout") {
         // Opted out of refresh and not verifiable as unedited: the owner's copy.
         Object.assign(row, { source: "yours", basedOn: entry.bundle, bundle: entry.bundle });
       } else if (entry && (entry.action === "kept-edited" || entry.action === "kept-unverified")) {
         Object.assign(row, { source: "yours", basedOn: entry.bundle, bundle: entry.bundle });
-        const acked = ack[file] && ack[file].srcSha && ack[file].srcSha === entry.srcSha;
+        const a = ackFor(file);
+        const acked = a && a.srcSha && a.srcSha === entry.srcSha;
         if (entry.action === "kept-edited") row.status = entry.rec && entry.rec.sha256 !== entry.srcSha && !acked ? "behind" : "on";
         else row.status = acked ? "on" : "behind";
       } else if (rec && typeof rec.bundle === "string" && !installedIds.includes(rec.bundle)) {
@@ -369,8 +374,8 @@ export function classifySkills({ crowHome, appBundles, repoDir, lang = "en", kit
       }
     } else if (entry && entry.action === "skip-deleted") {
       Object.assign(row, { source: "ext", bundle: entry.bundle, status: "removed", hasFile: false, replacesBuiltin: repoFiles.has(file) });
-    } else if (entry && entry.action === "install" && applies) {
-      Object.assign(row, { source: "ext", bundle: entry.bundle, status: "update", hasFile: false, replacesBuiltin: repoFiles.has(file) });
+    } else if (entry && entry.action === "install") {
+      Object.assign(row, { source: "ext", bundle: entry.bundle, status: "update", updateAtBoot, hasFile: false, replacesBuiltin: repoFiles.has(file) });
     } else {
       row.path = join(repoDir, file);
     }
@@ -389,7 +394,7 @@ export function classifySkills({ crowHome, appBundles, repoDir, lang = "en", kit
     return p ? join(appBundles, id, p) : null;
   };
   // "Keep" on a skill no longer shipped quiets it for good (no version to track).
-  for (const row of rows) if (row.status === "orphan" && ack[row.file]) row.status = "on";
+  for (const row of rows) if (row.status === "orphan" && ackFor(row.file)) row.status = "on";
   for (const row of rows) {
     const p = row.hasFile ? row.path : row.bundle ? shippedPath(row.bundle, row.file) : null;
     const text = p ? readSkillText(p) : null;
@@ -420,10 +425,13 @@ export function attentionItems(rows, usage, off = new Set()) {
       items.push({ kind, name: r.name, row: r, bots });
     }
   }
-  const known = new Set(rows.map((r) => r.name));
+  // Compare names the way the resolver and the off list do (normalised).
+  const norm = (n) => skillStateName(String(n)) || String(n).trim().toLowerCase();
+  const known = new Set(rows.map((r) => norm(r.name)));
+  const offN = new Set([...off].map(norm));
   for (const [name, bots] of [...usage.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-    const key = String(name).trim().toLowerCase().replace(/\.md$/, "");
-    if (known.has(key) || off.has(key)) continue;
+    const key = norm(name);
+    if (known.has(key) || offN.has(key)) continue;
     items.push({ kind: "missing", name, row: null, bots });
   }
   return items;

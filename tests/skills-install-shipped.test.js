@@ -2,7 +2,7 @@
 // the extension's shipped skill on an explicit owner click. Each re-checks
 // what the sync would do now and refuses if that changed since the page
 // rendered (a race changes nothing), backs up an edited copy first, and
-// writes in every sync mode (Kevin, Q2).
+// writes in every sync mode (owner decision Q2).
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync, lstatSync, symlinkSync, existsSync } from "node:fs";
@@ -43,7 +43,7 @@ test("apply update: an unedited stale copy is overwritten and the record updated
 test("apply update refuses when the copy was edited since the page rendered; nothing written", () => {
   const w = world(); w.user("# Kiosk mine\n"); w.record({ "kiosk.md": { bundle: "kiosk", sha256: skillHash("# Kiosk v1\n"), installedAt: "t" } });
   const before = readFileSync(join(w.home, "skill-installs.json"), "utf8");
-  assert.deepEqual(w.run(["refresh", "install"]), { ok: false, error: "changed", action: "kept-edited" });
+  assert.deepEqual(w.run(["refresh", "install"]), { ok: false, error: "changed", action: "kept-edited", srcSha: skillHash("# Kiosk v2\n") });
   assert.equal(w.read(), "# Kiosk mine\n");
   assert.equal(readFileSync(join(w.home, "skill-installs.json"), "utf8"), before);
 });
@@ -103,4 +103,29 @@ test("keeps only the newest 5 backups per name", () => {
   assert.equal(b.filter((f) => f.startsWith("kiosk.")).length, 5);
   assert.ok(!b.includes("kiosk.2020-01-01T00-00-00Z.md"), "the oldest went");
   assert.ok(b.includes("other.2020-01-01T00-00-00Z.md"), "other names untouched");
+});
+
+
+test("apply refuses when the shipped version changed since the page rendered (srcSha), and a backups path that isn't a real directory", () => {
+  const w = world(); w.user("# Kiosk v1\n"); w.record({ "kiosk.md": { bundle: "kiosk", sha256: skillHash("# Kiosk v1\n"), installedAt: "t" } });
+  const r = installShippedSkill({ crowHome: w.home, appBundles: w.apps, skill: "kiosk.md", expect: ["refresh"], srcSha: skillHash("# some other version\n") });
+  assert.equal(r.ok, false);
+  assert.equal(r.error, "changed");
+  assert.equal(w.read(), "# Kiosk v1\n");
+  assert.equal(installShippedSkill({ crowHome: w.home, appBundles: w.apps, skill: "kiosk.md", expect: ["refresh"], srcSha: skillHash("# Kiosk v2\n") }).ok, true);
+  const again = installShippedSkill({ crowHome: w.home, appBundles: w.apps, skill: "kiosk.md", expect: ["refresh"], srcSha: skillHash("# Kiosk v2\n") });
+  assert.deepEqual([again.ok, again.error, again.action, again.srcSha], [false, "changed", "same", skillHash("# Kiosk v2\n")], "a second click reports that the shipped version is already there");
+
+  const b = world(); b.user("# mine\n"); b.record({ "kiosk.md": { bundle: "kiosk", sha256: skillHash("# v1\n"), installedAt: "t" } });
+  writeFileSync(join(scratch, "not-a-dir"), "x");
+  symlinkSync(join(scratch, "not-a-dir"), join(b.home, "skill-backups"));
+  assert.deepEqual(b.run(["kept-edited"]), { ok: false, error: "backup-dir" });
+  assert.equal(b.read(), "# mine\n", "nothing replaced without a backup");
+});
+
+test("backups are created with mode 600", async () => {
+  const { statSync } = await import("node:fs");
+  const w = world(); w.user("# mine\n"); w.record({ "kiosk.md": { bundle: "kiosk", sha256: skillHash("# v1\n"), installedAt: "t" } });
+  const r = w.run(["kept-edited"]);
+  assert.equal(statSync(join(w.home, "skill-backups", r.backup)).mode & 0o777, 0o600);
 });

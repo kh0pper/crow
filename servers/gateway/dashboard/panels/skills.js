@@ -130,6 +130,7 @@ const NOTICE_CODES = {
   "state-unreadable": "skills.errorStateUnreadable",
   changed: "skills.errorChanged",
   "not-shipped": "skills.errorNotShipped",
+  "backup-dir": "skills.errorBackupDir",
 };
 
 /** Toasts after an action (?done=<code>). */
@@ -290,8 +291,8 @@ export default {
             }
             unlinkSync(filePath); // the link only, never its target
           } else if (st && st.isFile()) {
-            // An extension's skill is switched off, never deleted (Kevin
-            // 10-16): deleting an unedited copy would just be reinstalled or
+            // An extension's skill is switched off, never deleted (owner
+            // decision, 10-16): deleting an unedited copy would just be reinstalled or
             // tombstoned behind the owner's back.
             if (extensionCopyOf({ crowHome: resolveCrowHome(), appBundles: APP_BUNDLES_DIR, file: safeName })) return back("extension-skill");
             unlinkSync(filePath);
@@ -303,14 +304,25 @@ export default {
 
       if (action === "apply-update" || action === "restore-shipped") {
         // Apply update / Restore original / Restore: the extension's shipped
-        // copy, on this explicit click, in every sync mode (Kevin, Q2). The
+        // copy, on this explicit click, in every sync mode (owner decision Q2). The
         // expected actions make a race since the page rendered a no-op.
         const file = existingSkillName(one(body.skill) ?? "");
         if (!file) return back("invalid-name");
         const expect = action === "apply-update" ? ["refresh", "install"] : ["kept-edited", "kept-unverified", "skip-deleted"];
-        const r = installShippedSkill({ crowHome: resolveCrowHome(), appBundles: APP_BUNDLES_DIR, skill: file, expect });
-        if (!r.ok) return back(r.error === "record-unreadable" ? "record-unreadable" : r.error === "not-shipped" ? "not-shipped" : "changed");
-        res.redirectAfterPost(`/dashboard/skills?done=${action === "apply-update" ? "updated" : "restored"}&about=${encodeURIComponent(file.replace(/\.md$/, ""))}`);
+        // The shipped version the page showed: required, so a checkout that
+        // moved under the page never writes a version nobody reviewed.
+        const posted = one(body.srcSha);
+        const srcSha = posted && /^[0-9a-f]{64}$/.test(posted) ? posted : null;
+        const name = file.replace(/\.md$/, "");
+        const done = `/dashboard/skills?skill=${encodeURIComponent(name)}&done=${action === "apply-update" ? "updated" : "restored"}#skill-${encodeURIComponent(name)}`;
+        if (!srcSha) return back("changed");
+        const r = installShippedSkill({ crowHome: resolveCrowHome(), appBundles: APP_BUNDLES_DIR, skill: file, expect, srcSha });
+        if (!r.ok) {
+          // A second click after it worked: that version is already in place.
+          if (r.error === "changed" && (r.action === "same" || r.action === "adopt") && r.srcSha === srcSha) { res.redirectAfterPost(done); return; }
+          return back(["record-unreadable", "not-shipped", "backup-dir"].includes(r.error) ? r.error : "changed");
+        }
+        res.redirectAfterPost(done);
         return;
       }
 
@@ -321,7 +333,8 @@ export default {
         const sha = one(body.srcSha);
         const r = ackSkill(resolveCrowHome(), file, sha && /^[0-9a-f]{64}$/.test(sha) ? sha : null);
         if (!r.ok) return back(r.error === "unreadable" ? "state-unreadable" : "invalid-name");
-        res.redirectAfterPost(`/dashboard/skills?done=${sha ? "kept-mine" : "kept"}&about=${encodeURIComponent(file.replace(/\.md$/, ""))}`);
+        const name = file.replace(/\.md$/, "");
+        res.redirectAfterPost(`/dashboard/skills?skill=${encodeURIComponent(name)}&done=${sha ? "kept-mine" : "kept"}#skill-${encodeURIComponent(name)}`);
         return;
       }
 
@@ -653,7 +666,9 @@ export default {
       toast = toggledTo === "on"
         ? fill(t("skills.toastOn", lang), { name })
         : fill(t(n === 0 ? "skills.toastOff0" : n === 1 ? "skills.toastOff1" : "skills.toastOffN", lang), { name, n });
-    } else if (DONE_TOASTS[one(query.done)]) toast = t(DONE_TOASTS[one(query.done)], lang);
+    } else if (DONE_TOASTS[one(query.done)] && !selected) toast = t(DONE_TOASTS[one(query.done)], lang);
+    // After Apply / Restore / Keep the detail stays open with the result in it.
+    if (selected && DONE_TOASTS[one(query.done)]) selected.dx.done = t(DONE_TOASTS[one(query.done)], lang);
     const noticeKey = NOTICE_CODES[one(query.error)];
     const createdName = existingSkillName(one(query.created));
     const created = createdName && lstatOrNull(join(userSkillsDir(), createdName)) ? createdName : null;

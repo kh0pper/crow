@@ -22,7 +22,8 @@ export function skillsClientJs() {
   // An opened detail takes focus (its heading), so a keyboard or screen-reader
   // user lands on what they opened; autofocus alone is not applied on every
   // Turbo render.
-  var dh = document.getElementById("sk-detail-h");
+  // After Apply / Restore / Keep, the result message takes focus instead.
+  var dh = document.getElementById("sk-done") || document.getElementById("sk-detail-h");
   if (dh && !document.querySelector("#sk-create[data-open-on-load]")) {
     var focusDetail = function () { if (document.activeElement === document.body || !document.activeElement) { try { dh.focus(); } catch (e) {} } };
     focusDetail();

@@ -303,12 +303,15 @@ const reEscape = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** Copy an owner's file into <crowHome>/skill-backups before it is replaced; keep the newest 5 per name. */
 function backupSkill(crowHome, skill, buf) {
   const dir = join(crowHome, "skill-backups");
-  mkdirSync(dir, { recursive: true });
+  // Only a real directory: a link here could send the owner's text elsewhere.
+  if (!lstatOrNull(dir)) { try { mkdirSync(dir, { recursive: true, mode: 0o700 }); } catch { return null; } }
+  const dst = lstatOrNull(dir);
+  if (!dst || !dst.isDirectory()) return null;
   const base = skill.replace(/\.md$/, "");
   const stamp = new Date().toISOString().replace(/\.\d+Z$/, "").replace(/:/g, "-");
   let name = `${base}.${stamp}Z.md`;
   for (let k = 1; existsSync(join(dir, name)); k++) name = `${base}.${stamp}-${k}Z.md`;
-  atomicWrite(join(dir, name), buf);
+  atomicWrite(join(dir, name), buf, 0o600);
   const mine = new RegExp(`^${reEscape(base)}\\.\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}(-\\d+)?Z\\.md$`);
   const all = readdirSync(dir).filter((f) => mine.test(f)).sort();
   for (const old of all.slice(0, Math.max(0, all.length - BACKUPS_KEPT))) rmSync(join(dir, old), { force: true });
@@ -323,10 +326,14 @@ function backupSkill(crowHome, skill, buf) {
  * changes nothing. An existing file is backed up first. Written in every
  * sync mode, like recordRemovedLink: it is the owner's intent, not a sync
  * decision. Never writes through a link; refuses an unparseable record.
- * @param {{ crowHome: string, appBundles: string, skill: string, expect: string[] }} o
- * @returns {{ ok: true, action: string, backup?: string } | { ok: false, error: string, action?: string }}
+ * `srcSha`, when given, is the shipped version the page showed: anything
+ * else shipping now (the checkout moved under the page) refuses too. A
+ * refusal carries the current action and shipped hash, so the caller can
+ * tell "already done" (same/adopt with that hash) from a real change.
+ * @param {{ crowHome: string, appBundles: string, skill: string, expect: string[], srcSha?: string }} o
+ * @returns {{ ok: true, action: string, backup?: string } | { ok: false, error: string, action?: string, srcSha?: string }}
  */
-export function installShippedSkill({ crowHome, appBundles, skill, expect }) {
+export function installShippedSkill({ crowHome, appBundles, skill, expect, srcSha = undefined }) {
   if (typeof skill !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test(skill)) return { ok: false, error: "not-shipped" };
   const id = bundleShippingSkill({ crowHome, appBundles, skill });
   if (!id || !/^[a-z0-9][a-z0-9-]*$/.test(id)) return { ok: false, error: "not-shipped" };
@@ -351,12 +358,17 @@ export function installShippedSkill({ crowHome, appBundles, skill, expect }) {
   if (!path) return { ok: false, error: "not-shipped" };
   const { lines } = syncBundleSkills({ id, src, manifest, installedManifest, mode: "report", skillsDir, recordPath, ledger: readSkillLedger(appBundles), log: () => {} });
   const line = lines.find((l) => l.skill === skill);
-  if (!line || !expect.includes(line.action)) return { ok: false, error: "changed", action: line ? line.action : null };
+  if (!line || !expect.includes(line.action) || (srcSha !== undefined && srcSha !== line.srcSha)) {
+    return { ok: false, error: "changed", action: line ? line.action : null, srcSha: line ? line.srcSha : null };
+  }
   let srcBuf;
   try { srcBuf = readFileSync(join(src, path)); } catch { return { ok: false, error: "not-shipped" }; }
   let backup;
   // Only the owner's own text is backed up (an unedited copy is the shipped text).
-  if (st && (line.action === "kept-edited" || line.action === "kept-unverified")) backup = backupSkill(crowHome, skill, readFileSync(dst));
+  if (st && (line.action === "kept-edited" || line.action === "kept-unverified")) {
+    backup = backupSkill(crowHome, skill, readFileSync(dst));
+    if (!backup) return { ok: false, error: "backup-dir" };
+  }
   atomicWrite(dst, srcBuf);
   record[skill] = { bundle: id, sha256: skillHash(srcBuf), installedAt: new Date().toISOString() };
   atomicWrite(recordPath, JSON.stringify(record, null, 2) + "\n");

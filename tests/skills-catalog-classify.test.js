@@ -69,15 +69,14 @@ test("an unedited copy with a newer shipped version (report mode / before boot) 
   assert.deepEqual(pick(w.row("kiosk")), { source: "ext", bundle: "kiosk", status: "update", basedOn: null, linked: false, replacesBuiltin: false, hasFile: true });
 });
 
-test("update ready only when this gateway's sync is on: report and off modes never apply it, so it reads on", () => {
+test("an update shows in every sync mode (the Apply click writes in every mode); only mode on applies it at boot", () => {
   const w = world().bundle("kiosk", { "kiosk.md": "# v2\n", "fresh.md": "# Fresh\n" }).installed("kiosk").user("kiosk.md", "# v1\n");
   w.record({ "kiosk.md": { bundle: "kiosk", sha256: skillHash("# v1\n"), installedAt: "t" } });
-  assert.equal(w.row("kiosk", { mode: "on" }).status, "update");
-  assert.equal(w.row("fresh", { mode: "on" }).status, "update");
-  for (const mode of ["report", "off"]) {
-    assert.equal(w.row("kiosk", { mode }).status, "on", mode);
+  for (const mode of ["on", "report", "off"]) {
+    assert.equal(w.row("kiosk", { mode }).status, "update", mode);
     assert.equal(w.row("kiosk", { mode }).source, "ext", mode);
-    assert.equal(w.row("fresh", { mode }), undefined, `${mode}: a not-yet-installed skill is not listed`);
+    assert.equal(w.row("fresh", { mode }).status, "update", mode);
+    assert.equal(w.row("kiosk", { mode }).updateAtBoot, mode === "on", `${mode}: the next boot applies it only in mode on`);
   }
   assert.equal(skillSyncPlan({ crowHome: w.home, appBundles: w.apps, mode: "report" }).mode, "report");
   assert.equal(skillSyncPlan({ crowHome: w.home, appBundles: w.apps }).mode, "on", "defaults to the process mode (unset → on)");
@@ -296,4 +295,20 @@ test("attentionItems: one per flagged state; removed only while a bot asks; a na
   assert.deepEqual(items.find((i) => i.kind === "missing").bots.map((b) => b.botId), ["research-desk"]);
   const offAsk = attentionItems([], new Map([["switched-off", [{ botId: "x", name: "X" }]]]), new Set(["switched-off"]));
   assert.deepEqual(offAsk, [], "a bot asking for a skill switched off is not missing");
+});
+
+
+test("case: ack and the missing check compare names the way the off list does (My-Notes.md)", async () => {
+  const { attentionItems } = await import("../servers/gateway/skills-catalog.js");
+  const { ackSkill } = await import("../servers/shared/skill-state.js");
+  const w = world().bundle("dash", { "dash.md": "# Dash\n" }).installed("dash").user("My-Notes.md", "# My notes\n");
+  mkdirSync(join(w.home, "bundles", "dash", "skills"), { recursive: true });
+  writeFileSync(join(w.home, "bundles", "dash", "skills", "My-Notes.md"), "# My notes\n");
+  assert.equal(w.row("My-Notes").status, "orphan");
+  assert.deepEqual(ackSkill(w.home, "My-Notes.md", null), { ok: true });
+  const { readSkillState } = await import("../servers/shared/skill-state.js");
+  const rows = w.rows({ ack: readSkillState(w.home).state.ack });
+  assert.equal(rows.find((r) => r.name === "My-Notes").status, "on", "the ack stored as my-notes.md applies to My-Notes.md");
+  const items = attentionItems(rows, new Map([["my-notes", [{ botId: "b", name: "B" }]], ["My-Notes", [{ botId: "c", name: "C" }]]]), new Set());
+  assert.deepEqual(items.filter((i) => i.kind === "missing"), [], "a bot asking for my-notes or My-Notes finds My-Notes.md");
 });

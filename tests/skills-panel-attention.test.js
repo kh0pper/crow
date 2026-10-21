@@ -83,26 +83,32 @@ test("the strip lists the four states with the mockup's labels and one button ea
 
 test("each action has its effect and the item leaves the strip", async () => {
   setup();
-  let r = await call({ method: "POST", body: { action: "apply-update", skill: "kiosk.md" } });
+  const sha = (id, f) => skillHash(shipped(id, f));
+  let r = await call({ method: "POST", body: { action: "apply-update", skill: "kiosk.md", srcSha: sha("kiosk", "kiosk.md") } });
   assert.equal(r.status, 303);
   assert.equal(readFileSync(join(SKILLS, "kiosk.md"), "utf8"), shipped("kiosk", "kiosk.md"));
-  assert.match(r.redirect, /done=updated/);
+  assert.equal(r.redirect, "/dashboard/skills?skill=kiosk&done=updated#skill-kiosk", "the detail stays open on the result");
+  const again = await call({ method: "POST", body: { action: "apply-update", skill: "kiosk.md", srcSha: sha("kiosk", "kiosk.md") } });
+  assert.equal(again.redirect, "/dashboard/skills?skill=kiosk&done=updated#skill-kiosk", "a second click shows the done state, not 'changed'");
+  const done = await call({ query: { skill: "kiosk", done: "updated" } });
+  assert.match(done.body, /<p class="sk-note sk-note-ok" id="sk-done" role="status" tabindex="-1">Update applied\./);
   assert.match(text(strip((await call()).body)), /Needs a look · 3/);
 
-  r = await call({ method: "POST", body: { action: "restore-shipped", skill: "media.md" } });
+  r = await call({ method: "POST", body: { action: "restore-shipped", skill: "media.md", srcSha: sha("media", "media.md") } });
   assert.equal(readFileSync(join(SKILLS, "media.md"), "utf8"), shipped("media", "media.md"));
   assert.ok(readdirSync(join(HOME, "skill-backups")).some((f) => f.startsWith("media.")), "your edit was backed up");
   assert.match(text(strip((await call()).body)), /Needs a look · 2/);
 
-  r = await call({ method: "POST", body: { action: "restore-shipped", skill: "data-dashboard.md" } });
+  r = await call({ method: "POST", body: { action: "restore-shipped", skill: "data-dashboard.md", srcSha: sha("data-dashboard", "data-dashboard.md") } });
   assert.ok(existsSync(join(SKILLS, "data-dashboard.md")));
   assert.match(text(strip((await call()).body)), /Needs a look · 1/);
 
   r = await call({ method: "POST", body: { action: "ack", skill: "retired-fixture.md", srcSha: "" } });
   assert.equal(r.status, 303);
-  const after = await call({ query: { done: "kept", about: "retired-fixture" } });
+  assert.equal(r.redirect, "/dashboard/skills?skill=retired-fixture&done=kept#skill-retired-fixture");
+  const after = await call({ query: { skill: "retired-fixture", done: "kept" } });
   assert.match(text(strip(after.body)), /All skills are up to date/);
-  assert.match(after.body, /data-skills-toast="Marked as yours\. It stops showing here\."/);
+  assert.match(after.body, /id="sk-done" role="status" tabindex="-1">Marked as yours\. It stops showing here\./);
   assert.ok(existsSync(join(SKILLS, "retired-fixture.md")), "Keep keeps the file");
 });
 
@@ -119,8 +125,10 @@ test("Keep mine on a copy behind its extension quiets it until another version s
 test("an action whose state changed since the page loaded writes nothing and says so", async () => {
   setup();
   writeFileSync(join(SKILLS, "kiosk.md"), "# edited meanwhile\n");
-  const r = await call({ method: "POST", body: { action: "apply-update", skill: "kiosk.md" } });
+  const r = await call({ method: "POST", body: { action: "apply-update", skill: "kiosk.md", srcSha: skillHash(shipped("kiosk", "kiosk.md")) } });
   assert.match(r.redirect, /error=changed/);
+  const noSha = await call({ method: "POST", body: { action: "apply-update", skill: "kiosk.md" } });
+  assert.match(noSha.redirect, /error=changed/, "without the version the page showed, nothing is written");
   assert.equal(readFileSync(join(SKILLS, "kiosk.md"), "utf8"), "# edited meanwhile\n");
   assert.match((await call({ query: { error: "changed" } })).body, /changed since the page loaded, so nothing was written/);
 });
@@ -147,3 +155,23 @@ test("nothing to look at: one line, all skills are up to date", async () => {
   assert.match(s, /class="sk-attn ok"/);
   assert.match(text(s), /^All skills are up to date$/);
 });
+
+
+for (const mode of ["report", "off"]) {
+  test(`sync mode ${mode}: an update still shows as "Update available", with Apply update in its detail, and Apply writes`, async () => {
+    setup();
+    process.env.CROW_SKILL_SYNC = mode;
+    try {
+      const s = strip((await call()).body);
+      assert.match(text(s), /An older kiosk .*Update available .*Review/);
+      const d = await call({ query: { skill: "kiosk", compare: "1" } });
+      assert.match(d.body, /name="action" value="apply-update"/);
+      assert.match(d.body, new RegExp(`name="srcSha" value="${skillHash(shipped("kiosk", "kiosk.md"))}"`));
+      assert.match(d.body, /isn’t applied automatically on this Crow/);
+      const r = await call({ method: "POST", body: { action: "apply-update", skill: "kiosk.md", srcSha: skillHash(shipped("kiosk", "kiosk.md")) } });
+      assert.equal(r.status, 303);
+      assert.equal(readFileSync(join(SKILLS, "kiosk.md"), "utf8"), shipped("kiosk", "kiosk.md"));
+      assert.match(text(strip((await call({ lang: "es" })).body)), /Actualización disponible|Necesita revisión · 3/);
+    } finally { delete process.env.CROW_SKILL_SYNC; }
+  });
+}

@@ -83,6 +83,8 @@ export const SKILLS_CSS = `<style>
   .sk-note { padding: 10px 12px; border-radius: 10px; font-size: 0.86rem; background: var(--crow-bg-surface); margin: 8px 0; }
   .sk-note-warn { background: color-mix(in srgb, var(--crow-warning) 14%, transparent); }
   .sk-note-info { background: color-mix(in srgb, var(--crow-info) 14%, transparent); }
+  .sk-note-ok { background: color-mix(in srgb, var(--crow-success) 14%, transparent); }
+  .sk-note-ok:focus { outline: 2px solid var(--crow-accent); outline-offset: 2px; }
   .sk-note-err { background: color-mix(in srgb, var(--crow-error) 14%, transparent); }
   .sk-d-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; align-items: center; }
   .sk-act-warn { flex-basis: 100%; color: var(--crow-text-muted); font-size: 0.8rem; margin-top: -4px; }
