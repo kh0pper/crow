@@ -1065,3 +1065,19 @@ test("claim retry: two calls in the forced round with the same title and start (
   assert.equal(r.timings.claim_dedupe, true);
   assert.deepEqual(r.spoken, [COFFEE_ADDED.say]);
 });
+
+// ─── Task 5 fix round 2: a change word anywhere is a change (a leading add verb or the add-matcher overrides it) ───
+for (const t of ["move lunch to 3 on my calendar", "cancel lunch on my calendar", "reschedule lunch to 3", "put it off until Friday"]) {
+  test(`claim retry: '${t}' after a write is a change: no retry, no write, the hint`, async () => {
+    const cal = calTool();
+    const h = ownHarness({ bot: CROW, probe: () => true, rounds: [call("crow_calendar_add_event", LUNCH), says("Done, I moved lunch to 3. "), call("crow_calendar_add_event", LUNCH, "c2")] });
+    h.deps.toolForcing = VLLM;
+    await heard(h, "add lunch Monday to my calendar", { ...act, ownTools: [cal] });
+    const r = await heard(h, t, { ...act, ownTools: [cal] });
+    assert.equal(r.rounds.length, 1, `${t}: no retry round`);
+    assert.equal(r.timings.claim_retry, undefined);
+    assert.equal(cal.seen.length, 1, "no second write");
+    assert.deepEqual(r.spoken, [HINT_TEXT], `${t}: ${r.spoken}`);
+    assert.equal(r.saved.content, HINT_TEXT);
+  });
+}

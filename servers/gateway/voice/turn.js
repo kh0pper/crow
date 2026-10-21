@@ -138,21 +138,19 @@ export const HINT_TEXT = "I can only add new items by voice. Try: add lunch next
 // Rides on the user message for the retry round only (restored before saving; the round's text is held as usual).
 const claimRetryNote = (names) => `[Tools] Nothing has been added yet: no tool ran on this turn. To add it, call ${names.join(" or ")} now with the title and time the user gave. Never say it is done before the tool has run.`;
 // A change, cancel or question about what was done is never retried as an add (en and es, accents dropped).
-// A change verb counts only with a referent after it ("move it", "cancel my …", "cambia la hora") or with the surface's
-// follow-up reading (actionFollowWhen); a Spanish verb with its object pronoun attached ("cámbiala") is its own referent.
-// An add verb that leads ("add move the couch…", "remind me to cancel netflix") is an add, whatever follows.
-const CHANGE_WORDS = new Set(["move", "change", "cancel", "delete", "remove", "reschedule", "cambia", "mueve", "cancela", "borra", "quita", "reprograma", "reprogramar"]);
-const CHANGE_CLITIC = new Set(["cambialo", "cambiala", "muevelo", "muevela", "cancelalo", "cancelala", "borralo", "borrala", "quitalo", "quitala", "reprogramalo", "reprogramala"]);
-const CHANGE_REFERENTS = new Set(["it", "that", "this", "them", "those", "these", "the", "my", "our", "his", "her", "their",
-  "lo", "la", "los", "las", "eso", "esa", "ese", "esto", "el", "mi", "mis", "tu", "tus"]);
-const ADD_LEADS = new Set(["add", "remind", "put", "create", "schedule", "anade", "agrega", "anademe", "agregame", "recuerdame", "pon", "apunta", "crea"]);
+// A change word anywhere makes the words a change ("move lunch to 3 on my calendar", "put it off until Friday", "cámbiala"),
+// unless an add verb leads ("add move the couch…", "remind me to cancel netflix") or the calendar's add-matcher reads an add.
+const CHANGE_WORDS = new Set(["move", "change", "cancel", "delete", "remove", "reschedule", "postpone", "cambia", "mueve", "cancela", "borra", "quita", "reprograma", "reprogramar",
+  "cambialo", "cambiala", "muevelo", "muevela", "cancelalo", "cancelala", "borralo", "borrala", "quitalo", "quitala", "reprogramalo", "reprogramala"]);
+// "put … off" ("put it off until Friday", "put lunch off"): a change, so "put" never leads an add here.
+const putsOff = (ws) => ws.some((w, i) => w === "put" && (ws[i + 1] === "off" || ws[i + 2] === "off" || ws[i + 3] === "off"));
+const ADD_LEADS = new Set(["add", "remind", "create", "schedule", "anade", "agrega", "anademe", "agregame", "recuerdame", "pon", "apunta", "crea"]);
 const ADD_LEAD_IN = new Set(["please", "can", "could", "would", "you", "hey", "crow", "ok", "okay", "por", "favor", "puedes"]);
 const QUESTION_PHRASES = ["did you", "was it", "is it", "have you", "can you check"];
 const leadsWithAdd = (ws) => { let i = 0; while (i < ws.length && i < 4 && ADD_LEAD_IN.has(ws[i])) i++; return ADD_LEADS.has(ws[i]); };
-const asksChange = (t, followUp = false) => {
+const asksChange = (t) => {
   const ws = phraseWords(t);
-  if (leadsWithAdd(ws)) return false;
-  return ws.some((w, i) => CHANGE_CLITIC.has(w) || (CHANGE_WORDS.has(w) && (followUp || CHANGE_REFERENTS.has(ws[i + 1]))));
+  return !leadsWithAdd(ws) && (ws.some((w) => CHANGE_WORDS.has(w)) || putsOff(ws));
 };
 const asksQuestion = (t) => { const s = ` ${phraseWords(t).join(" ")} `; return QUESTION_PHRASES.some((p) => s.includes(` ${p} `)) || /¿\s*(lo|ya)\b/i.test(String(t)); };
 /** Same tool, same title (case-insensitive, trimmed), same start → one key (a forced retry never writes it twice). */
@@ -1173,10 +1171,8 @@ export function createVoiceTurnRunner(deps) {
       // cancel or a question about what was done), with an own tool on offer and none called, never carried-only. It
       // forces the own tool where the engine honours that (named, then required), else steps up to the larger model
       // once; its text is held as usual. A forced call that repeats a write on record writes nothing.
-      let followUp = false;
-      try { followUp = typeof opts.actionFollowWhen === "function" && opts.actionFollowWhen(transcript) === true; } catch { followUp = false; }
       // The calendar's add-matcher (intentWhen) reading the words as an add overrides a change word.
-      const changeAsked = !ownWhenAsked && asksChange(transcript, followUp);
+      const changeAsked = !ownWhenAsked && asksChange(transcript);
       const addAsked = (actionAsked || ownIntent) && !changeAsked && !asksQuestion(transcript);
       let retryRound = 0;          // the round the retry runs in (0: none)
       let retryTools = null;       // what the retry round offers (the own tools the words want)
