@@ -26,6 +26,15 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { normalizeSkillName } from "./skill_proposals.mjs";
 import { resolveCrowHome } from "../../servers/shared/crow-home.js";
+import { offSkills } from "../../servers/shared/skill-state.js";
+
+/** This resolver honours the per-instance off list (<CROW_HOME>/skill-state.json). A
+ *  long-lived process (pibot-gateways@<inst>) logs it at boot, so a process still
+ *  running older code is visible in the journal. */
+export const SKILL_OFF_LIST_SUPPORTED = true;
+/** Never switched off: self-authoring guidance (bot-world.mjs attaches it
+ *  directly too), so a bot that selects it and one that doesn't behave alike. */
+export const EXEMPT_FROM_OFF = Object.freeze(["skill-writing"]);
 
 /** The running checkout's shipped skills directory. */
 export const REPO_SKILLS_DIR = resolve(fileURLToPath(new URL("../../skills", import.meta.url)));
@@ -48,30 +57,36 @@ export function resolveSkill(name, opts = {}) {
 }
 
 /**
- * Resolve a list of skill names.
- * @returns {{ sections: Array<{name,path,text}>, missing: string[], dirs: string[] }}
+ * Resolve a list of skill names. THE choke point for the off list: a name the
+ * owner switched off on this instance goes to `off`, not `missing`, and is not
+ * inlined (resolveSkill above stays a plain lookup on purpose).
+ * @returns {{ sections: Array<{name,path,text}>, missing: string[], off: string[], dirs: string[] }}
  */
 export function resolveSkills(names, opts = {}) {
   const sections = [];
   const missing = [];
+  const off = [];
+  const offSet = offSkills(opts.crowHome || resolveCrowHome());
   for (const name of names || []) {
+    const base = normalizeSkillName(name);
+    if (base && offSet.has(base) && !EXEMPT_FROM_OFF.includes(base)) { off.push(name); continue; }
     const r = resolveSkill(name, opts);
     if (r) sections.push(r);
     else missing.push(name);
   }
-  return { sections, missing, dirs: skillDirs(opts.crowHome) };
+  return { sections, missing, off, dirs: skillDirs(opts.crowHome) };
 }
 
 /**
  * Convenience: the concatenated skill text (each section prefixed with the
  * same "\n\n" separator the bridge used when appending to the system prompt),
  * plus the list of names that could not be resolved (callers log these).
- * @returns {{ text: string, missing: string[] }}
+ * @returns {{ text: string, missing: string[], off: string[] }}
  */
 export function resolveSkillText(names, opts = {}) {
-  const { sections, missing } = resolveSkills(names, opts);
+  const { sections, missing, off } = resolveSkills(names, opts);
   const text = sections.map((s) => "\n\n" + s.text).join("");
-  return { text, missing };
+  return { text, missing, off };
 }
 
 // CLI: resolveSkillText <name[,name...]> [--crow-home <dir>]
