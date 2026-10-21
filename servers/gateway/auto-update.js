@@ -144,6 +144,8 @@ function run(cmd, args, options = {}) {
 }
 
 const LOCK_STALE_MS = 30 * 60 * 1000;
+/** acquireCheckoutLock's return for a read-only tree: observed free, not held. */
+const OBSERVED_SUFFIX = "#observed";
 
 async function lockPath(cwd) {
   const r = await run("git", ["rev-parse", "--absolute-git-dir"], cwd ? { cwd } : {});
@@ -246,12 +248,12 @@ export async function acquireCheckoutLock({ appRoot = null, waitMs = 6 * 60 * 10
   if (!lock) return null;
   const deadline = Date.now() + waitMs;
   // A read-only (externally pulled) tree cannot take the lock, only observe
-  // it: proceed once no live, young holder exists. The returned path is not
-  // owned, so releaseCheckoutLock() (owner-checked) leaves it alone.
+  // it: proceed once no live, young holder exists. The return carries
+  // OBSERVED_SUFFIX, so releaseCheckoutLock() never removes it.
   const observeOnly = await treeIsExternal(appRoot);
   for (;;) {
     if (observeOnly) {
-      if (!existsSync(lock) || lockIsStale(readLock(lock))) return lock;
+      if (!existsSync(lock) || lockIsStale(readLock(lock))) return lock + OBSERVED_SUFFIX;
       if (Date.now() >= deadline) return null;
       await new Promise((r) => setTimeout(r, pollMs));
       continue;
@@ -264,7 +266,8 @@ export async function acquireCheckoutLock({ appRoot = null, waitMs = 6 * 60 * 10
 }
 
 export function releaseCheckoutLock(path) {
-  if (path) releaseLock(path);
+  // An observed (never held) lock is not ours to remove, whoever holds it now.
+  if (path && !path.endsWith(OBSERVED_SUFFIX)) releaseLock(path);
 }
 
 /** Test-only: the lock primitives, unit-tested directly (they are not

@@ -364,6 +364,19 @@ export async function convergeInstance({ appRoot, instance = null, pulled = fals
     baseline = p.healthSnapshot();
   } catch { /* proxy not initialized — fail open */ }
 
+  // A read-only (externally pulled) tree was only OBSERVED free above, never
+  // held: a co-hosted puller may have started since. Look again right before
+  // the restart, so this instance never restarts into a half-written
+  // node_modules (queue item 19, step 1).
+  if (await au.treeIsExternal(root)) {
+    const free = await au.acquireCheckoutLock({ appRoot: root, waitMs: 0, pollMs: 1 });
+    const now = (await git(root, ["rev-parse", "HEAD"])).stdout;
+    if (!free || now !== head) {
+      log("read-only tree changed or is being pulled — deferring the restart to the next tick");
+      return { pulled, converged: false, skipped: "tree-busy", sha: head, applied: res.applied };
+    }
+  }
+
   writePending(inst.dataDir, { sha: head, baseline });
   await restart(log, `Restarting to run ${head.slice(0, 9)}...`);
 
