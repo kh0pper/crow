@@ -293,6 +293,29 @@ test("scripts-off (D20) renditions are served byte-for-byte: safety comes from t
   } finally { FILES["index.html"] = { body: "<!doctype html><html><head><title>x</title></head><body>hi</body></html>", contentType: "text/html; charset=utf-8" }; }
 });
 
+test("item 24: an XHTML diagram is served byte-for-byte under the sealed diagram CSP (sandbox, no script-src), nosniff, no ACAO, no helper", async () => {
+  const { renderVersion } = await import("../bundles/artifacts/server/render.js");
+  const r0 = await renderVersion("diagram", { svg: '<svg viewBox="0 0 10 10"><rect id="n1" width="5" height="5"/></svg>' });
+  const f = r0.files.find((x) => x.path === "index.html");
+  assert.equal(f.contentType, "application/xhtml+xml; charset=utf-8");
+  const { token } = tokens.mint({ artifactId: "a24", versionN: 1, type: "diagram", dashboardOrigin: "https://dash.example" });
+  FILES["index.html"] = { body: f.body, contentType: f.contentType };
+  try {
+    for (const method of ["GET", "HEAD"]) {
+      const r = await req(`/v/${token}/`, { method });
+      assertBaseHeaders(r, `xhtml ${method}`);
+      assert.equal(r.status, 200);
+      assert.equal(r.headers["content-type"], "application/xhtml+xml; charset=utf-8");
+      assert.equal(r.headers["content-security-policy"], cspFor("diagram", { tokenBase: `http://localhost:${port}/v/${token}/`, frameAncestors: "https://dash.example" }));
+      assert.match(r.headers["content-security-policy"], /; sandbox$/);
+      assert.doesNotMatch(r.headers["content-security-policy"], /script-src/);
+      assert.equal(r.headers["access-control-allow-origin"], undefined);
+      assert.equal(r.body, method === "GET" ? f.body.toString("utf8") : "", "bytes unchanged: the helper is never injected into a diagram");
+    }
+    assert.equal((await req(`/v/${token}/__crow/anchor-helper.js`)).status, 404);
+  } finally { FILES["index.html"] = { body: "<!doctype html><html><head><title>x</title></head><body>hi</body></html>", contentType: "text/html; charset=utf-8" }; }
+});
+
 // ---- Task 1.2: runtime singletons and start-from-env ----
 
 async function freePort() {

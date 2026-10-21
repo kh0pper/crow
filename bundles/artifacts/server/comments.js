@@ -5,6 +5,7 @@
 // verified contact identity — step 6 wires the transport), { kind: "bot", id }.
 import { LIMITS } from "./limits.js";
 import { audit, isTainted } from "./store.js";
+import { plainBackfill, plainOf } from "./render.js";
 
 const err = (code, message) => Object.assign(new Error(message || code), { code });
 
@@ -119,6 +120,85 @@ export function withSpan(a, anchorMap) {
   if (!b || typeof b.plain !== "string" || !String(rest.quote || "").trim()) return rest;
   const sp = blockSpan(b.plain, rest.quote, rest.prefix, rest.suffix);
   return sp ? { ...rest, span: sp } : rest;
+}
+
+/** The HTML of each `<div class="blk" id="bN">` in a stored document
+ *  index.html, in order, or null when the page does not have exactly `count`
+ *  blocks in the renderer's shape. Linear (indexOf only). */
+export function indexBlocks(html, count) {
+  const out = [];
+  let at = html.indexOf('<div class="blk" id="b1">');
+  if (at < 0) return null;
+  for (let i = 1; i <= count; i++) {
+    const open = `<div class="blk" id="b${i}">`;
+    if (!html.startsWith(open, at)) return null;
+    const start = at + open.length;
+    const nextOpen = i < count ? html.indexOf(`</div>\n<div class="blk" id="b${i + 1}">`, start) : html.indexOf("</div>\n</main>", start);
+    if (nextOpen < 0) return null;
+    out.push(html.slice(start, nextOpen));
+    at = nextOpen + 7; // past "</div>\n"
+  }
+  return out;
+}
+
+/**
+ * D28 leftover (review L-6): give pre-D28 document versions their rendered
+ * `plain`, then give the block threads on those versions the span withSpan
+ * computes from it, so their pins and highlights sit on the words.
+ *  - Run ONCE per gateway process (the panel's init), never per request.
+ *  - `plain` is recomputed from the version's own stored markdown
+ *    (plainBackfill: ids, types and text must match block for block) AND must
+ *    equal the rendered text of that block in the STORED index.html — the page
+ *    the reader actually sees. Anything else marks the map
+ *    `plain_backfill: "skipped"` (compare-and-set), so it is never retried.
+ *  - Every write is compare-and-set: a concurrent writer wins. Threads are
+ *    matched on id + version_n + anchor_json, so a carry-forward that moved
+ *    the thread meanwhile is never given the old version's span.
+ * Returns how many versions and threads it changed (and how many it skipped).
+ */
+export async function backfillPlain(db, blobs, markdownBlocks, { artifactId = null } = {}) {
+  const out = { versions: 0, threads: 0, skipped: 0 };
+  if (typeof markdownBlocks !== "function" || !blobs) return { ...out, stopped: true }; // nothing to judge with: mark nothing
+  const rows = (await db.execute({
+    sql: "SELECT v.artifact_id, v.n, v.anchor_map_json, v.source_json, v.files_json FROM artifact_versions v JOIN artifacts a ON a.id=v.artifact_id WHERE a.type='document' AND v.anchor_map_json IS NOT NULL AND instr(v.anchor_map_json, '\"plain')=0" + (artifactId ? " AND v.artifact_id=?" : "") + " ORDER BY v.artifact_id, v.n LIMIT 2000",
+    args: artifactId ? [artifactId] : [],
+  })).rows;
+  for (const v of rows) {
+    let map = null, source = null, files = null;
+    try { map = JSON.parse(v.anchor_map_json); source = JSON.parse(v.source_json || "null"); files = JSON.parse(v.files_json || "[]"); } catch { continue; }
+    let next = plainBackfill(map, source, markdownBlocks);
+    if (next) {
+      const f = Array.isArray(files) ? files.find((x) => x && x.path === "index.html") : null;
+      // A storage error is not a mismatch (code review I2): stop the pass and
+      // leave every row unmarked, so the next process start tries again.
+      let body;
+      try { body = f ? await blobs.get(f.key) : null; } catch { out.stopped = true; break; }
+      if (f && !body) { out.stopped = true; break; }
+      const stored = body ? indexBlocks(body.toString("utf8"), next.blocks.length) : null;
+      if (!stored || next.blocks.some((b, i) => plainOf(stored[i]) !== b.plain)) next = null;
+    }
+    if (!next) {
+      if (map && typeof map === "object" && !Array.isArray(map) && map.kind === "blocks") {
+        const w = await db.execute({ sql: "UPDATE artifact_versions SET anchor_map_json=? WHERE artifact_id=? AND n=? AND anchor_map_json=?", args: [JSON.stringify({ ...map, plain_backfill: "skipped" }), v.artifact_id, v.n, v.anchor_map_json] });
+        if (Number(w.rowsAffected) === 1) out.skipped++;
+      }
+      continue;
+    }
+    const w = await db.execute({ sql: "UPDATE artifact_versions SET anchor_map_json=? WHERE artifact_id=? AND n=? AND anchor_map_json=?", args: [JSON.stringify(next), v.artifact_id, v.n, v.anchor_map_json] });
+    if (Number(w.rowsAffected) !== 1) continue;
+    out.versions++;
+    const threads = (await db.execute({ sql: "SELECT id, anchor_json FROM artifact_threads WHERE artifact_id=? AND version_n=?", args: [v.artifact_id, v.n] })).rows;
+    for (const t of threads) {
+      let a = null;
+      try { a = JSON.parse(t.anchor_json); } catch { continue; }
+      if (!a || a.kind !== "block" || a.span) continue;
+      const withS = withSpan(a, next);
+      if (!withS.span) continue;
+      const u = await db.execute({ sql: "UPDATE artifact_threads SET anchor_json=? WHERE id=? AND version_n=? AND anchor_json=?", args: [JSON.stringify(withS), t.id, v.n, t.anchor_json] });
+      if (Number(u.rowsAffected) === 1) out.threads++;
+    }
+  }
+  return out;
 }
 
 function cleanText(t) {

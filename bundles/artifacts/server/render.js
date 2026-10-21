@@ -61,16 +61,19 @@ async function libsFor(type, source, kit, houseStyle) {
 
 /** <head> additions for script-free types: stylesheet links for every CSS main
  *  (fonts, CSS, theme) in dependency order, then the font rule when no theme. */
-function headLinks(lib) {
+/** The libs' stylesheet links and font rule for a wrapper's <head>. `xhtml`:
+ *  for the XML-parsed diagram wrapper (item 24) — self-closed links, and the
+ *  rule's text escaped (XML decodes it before CSS sees it). */
+function headLinks(lib, xhtml = false) {
   if (!lib || !lib.entries.length) return "";
-  const links = lib.entries.filter((e) => e.main.endsWith(".css")).map((e) => `<link rel="stylesheet" href="${escAttr(e.main)}">`).join("");
+  const links = lib.entries.filter((e) => e.main.endsWith(".css")).map((e) => `<link rel="stylesheet" href="${escAttr(e.main)}"${xhtml ? "/" : ""}>`).join("");
   const fonts = lib.entries.filter((e) => e.kind === "font");
   let rule = "";
   if (fonts.length && !lib.entries.some((e) => e.kind === "theme")) {
     const fam = (f) => `"${f.family}",${f.fallback}`;
     rule = `body{font-family:${fam(fonts[0])}}` + (fonts[1] ? `h1,h2,h3,h4,h5,h6{font-family:${fam(fonts[1])}}` : "");
   }
-  return links + (rule ? `<style>${rule}</style>` : "");
+  return links + (rule ? `<style>${xhtml ? rule.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") : rule}</style>` : "");
 }
 const designMeta = (lib, rendered = 0, notes = []) => (lib || rendered || notes.length
   ? { libs: lib ? lib.refs : [], house_style: lib ? lib.houseStyle || null : null, ...(lib && lib.houseStyle ? { house_style_links: lib.houseStyleLinks } : {}), rendered, notes }
@@ -94,6 +97,7 @@ export const RENDERER_DOWN_NOTE = "renderer_unavailable: the chart and diagram r
 const UNAVAILABLE = "the chart and diagram renderer is not answering; try again in a minute";
 const TOO_LARGE = "the rendered SVG is over 2 MB; simplify the chart or diagram";
 const UNSAFE = "the rendered SVG carried scripts, links, HTML or external references and was refused";
+const NOT_XML = "the rendered SVG is not well-formed XML and was refused";
 
 // Static text only (mcp.js fail() contract): engine name from a fixed set, a
 // category from a fixed set, an integer line. Never the kit's or renderer's text.
@@ -311,6 +315,157 @@ function safeSvg(svg, bot) {
 /** Fixed, actionable text for a bot's own SVG that fails safeSvg. */
 const BOT_SVG = "svg must be plain SVG: one root <svg> holding shapes, text, gradients, filters and <style> only, every attribute quoted, <title> and <desc> as plain text; no links, HTML, CDATA outside <style>, CSS escapes or external references; no comments; write & as &amp;; no named entities such as &nbsp; (numeric &#160; is fine) (a Design kit icon is <image href=\"__lib/icons/<set>/<name>.svg\">)";
 
+// ---- Item 24: the diagram wrapper is XHTML, so the SVG must be well-formed XML ----
+// The checks above were written for the HTML tokenizer and run on lower-cased
+// text. The XML parser is stricter where the HTML parser never needed to care:
+// case, references, characters, attribute uniqueness and namespaces. And the
+// HTML tree builder silently FIXES the case of SVG names (lineargradient →
+// linearGradient, viewbox → viewBox); the XML parser does not, so a name in
+// the wrong case would save and then draw wrong with no error (plan review
+// I1). xmlSvgCheck enforces those rules on the ORIGINAL text (it runs after
+// safeSvg / checkRenderedSvg, which already proved one well-nested root of
+// allowed elements with quoted attributes) and makes the namespaces explicit.
+// The rules follow XML 1.0 + Namespaces, not one engine's leniency.
+const SVG_NS = "http://www.w3.org/2000/svg";
+const XLINK_NS = "http://www.w3.org/1999/xlink";
+const XML_REF = /^&(?:amp|lt|gt|quot|apos|#[0-9]{1,7}|#x[0-9a-fA-F]{1,6});$/;
+/** XML 1.0 Char production. */
+const xmlChar = (cp) => cp === 0x9 || cp === 0xa || cp === 0xd || (cp >= 0x20 && cp <= 0xd7ff) || (cp >= 0xe000 && cp <= 0xfffd) || (cp >= 0x10000 && cp <= 0x10ffff);
+const XWS = (c) => c === " " || c === "\t" || c === "\n" || c === "\r";
+const XNAME_CH = (c) => (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c === "-";
+const XATTR_CH = (c) => XNAME_CH(c) || c === ":" || c === "." || c === "_";
+// The camelCase names among the elements markupOk allows (the HTML spec's SVG
+// tag-name adjustments); every other allowed element is all lower case.
+const CANON_ELEMENT = new Map(["clipPath", "linearGradient", "radialGradient", "textPath", "feBlend", "feColorMatrix", "feComponentTransfer",
+  "feComposite", "feConvolveMatrix", "feDiffuseLighting", "feDisplacementMap", "feDistantLight", "feDropShadow", "feFlood", "feFuncA", "feFuncB",
+  "feFuncG", "feFuncR", "feGaussianBlur", "feMerge", "feMergeNode", "feMorphology", "feOffset", "fePointLight", "feSpecularLighting", "feSpotLight",
+  "feTile", "feTurbulence"].map((n) => [n.toLowerCase(), n]));
+// The HTML spec's SVG attribute-name adjustments; every other attribute is lower case.
+const CANON_ATTR = new Map(["attributeName", "attributeType", "baseFrequency", "baseProfile", "calcMode", "clipPathUnits", "diffuseConstant", "edgeMode",
+  "filterUnits", "glyphRef", "gradientTransform", "gradientUnits", "kernelMatrix", "kernelUnitLength", "keyPoints", "keySplines", "keyTimes",
+  "lengthAdjust", "limitingConeAngle", "markerHeight", "markerUnits", "markerWidth", "maskContentUnits", "maskUnits", "numOctaves", "pathLength",
+  "patternContentUnits", "patternTransform", "patternUnits", "pointsAtX", "pointsAtY", "pointsAtZ", "preserveAlpha", "preserveAspectRatio",
+  "primitiveUnits", "refX", "refY", "repeatCount", "repeatDur", "requiredExtensions", "requiredFeatures", "specularConstant", "specularExponent",
+  "spreadMethod", "startOffset", "stdDeviation", "stitchTiles", "surfaceScale", "systemLanguage", "tableValues", "targetX", "targetY", "textLength",
+  "viewBox", "viewTarget", "xChannelSelector", "yChannelSelector", "zoomAndPan"].map((n) => [n.toLowerCase(), n]));
+const canonElement = (n) => { const l = n.toLowerCase(); return CANON_ELEMENT.get(l) || l; };
+const canonAttr = (n) => { const l = n.toLowerCase(); return CANON_ATTR.get(l) || l; };
+const MAX_DEPTH = 254; // libxml2's default nesting cap is 256, and the wrapper adds <html><body> (plan review M7)
+
+/** Fixed, actionable texts for a bot's own SVG that is not well-formed XML
+ *  (never echoing input; one per rule so a bot can correct itself). */
+export const XML_MESSAGES = Object.freeze({
+  char: "svg must be well-formed XML: remove control characters and the non-characters U+FFFE/U+FFFF",
+  ref: "svg must be well-formed XML: the only references are &amp; &lt; &gt; &quot; &apos; and numeric ones such as &#160; or &#xA0; (lower-case x) for a real character",
+  cdata: "svg must be well-formed XML: text may not contain ]]> (CDATA is allowed only inside <style>)",
+  close: "svg must be well-formed XML: close every element with exactly the name it was opened with",
+  case: "svg names are case-sensitive: write linearGradient, radialGradient, clipPath, textPath and feGaussianBlur (and the other fe… filters), viewBox, preserveAspectRatio, gradientUnits, stdDeviation and the other camelCase SVG attributes exactly so; everything else in lower case",
+  duplicate: "svg must be well-formed XML: never repeat an attribute on one element",
+  namespace: "svg namespaces: declare nothing except xmlns=\"http://www.w3.org/2000/svg\" and xmlns:xlink=\"http://www.w3.org/1999/xlink\", on the root <svg> only; the only prefixed attributes are xlink:href, xlink:title and xml:space / xml:lang",
+  depth: "svg must nest elements at most 254 deep",
+  structure: "svg must be well-formed XML: one root <svg> element, every attribute quoted",
+});
+export const BOT_XML = XML_MESSAGES.structure;
+
+/** { svg } with xmlns (and xmlns:xlink when xlink: is used) on the root, or
+ *  { reason } (a key of XML_MESSAGES) when an XML parser would refuse it or
+ *  it would mis-render. Linear; input is size-capped by the caller. */
+export function xmlSvgCheck(svg) {
+  const no = (reason) => ({ reason });
+  if (typeof svg !== "string") return no("structure");
+  for (let i = 0; i < svg.length; i++) {
+    const c = svg.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) { const d = svg.charCodeAt(i + 1); if (!(d >= 0xdc00 && d <= 0xdfff)) return no("char"); i++; continue; }
+    if (!xmlChar(c)) return no("char"); // a lone low surrogate, U+FFFE/U+FFFF, C0 controls such as \f
+  }
+  for (let a = svg.indexOf("&"); a >= 0; a = svg.indexOf("&", a + 1)) {
+    const semi = svg.indexOf(";", a);
+    const ref = semi > a && semi - a <= 10 ? svg.slice(a, semi + 1) : "";
+    if (!XML_REF.test(ref)) return no("ref");
+    // The raw value, before any clamp (&#x110000; is an error, not U+10FFFF).
+    if (ref.charAt(1) === "#" && !xmlChar(ref.charAt(2) === "x" ? parseInt(ref.slice(3, -1), 16) : parseInt(ref.slice(2, -1), 10))) return no("ref");
+  }
+  const stack = [];
+  let rootHasXmlns = false, rootHasXlink = false, usesXlink = false, rootTagEnd = -1;
+  let i = 0;
+  for (;;) {
+    const lt = svg.indexOf("<", i);
+    if (lt < 0) return no("structure");
+    if (svg.slice(i, lt).includes("]]>")) return no("cdata");
+    if (svg.startsWith("<![CDATA[", lt)) {
+      if (stack.at(-1) !== "style") return no("structure");
+      const end = svg.indexOf("]]>", lt + 9);
+      if (end < 0) return no("structure");
+      i = end + 3;
+      continue;
+    }
+    const closing = svg.charAt(lt + 1) === "/";
+    let j = lt + (closing ? 2 : 1);
+    const n0 = j;
+    while (XNAME_CH(svg.charAt(j))) j++;
+    const name = svg.slice(n0, j);
+    if (!name) return no("structure");
+    if (closing) {
+      while (XWS(svg.charAt(j))) j++;
+      if (svg.charAt(j) !== ">") return no("structure");
+      if (stack.pop() !== name) return no("close"); // case-sensitive
+      i = j + 1;
+      if (!stack.length) {
+        if (!/^[ \t\r\n]*$/.test(svg.slice(i))) return no("structure");
+        const add = (rootHasXmlns ? "" : ` xmlns="${SVG_NS}"`) + (usesXlink && !rootHasXlink ? ` xmlns:xlink="${XLINK_NS}"` : "");
+        return { svg: add ? svg.slice(0, rootTagEnd) + add + svg.slice(rootTagEnd) : svg };
+      }
+      continue;
+    }
+    if (name !== canonElement(name)) return no("case");
+    const isRoot = lt === 0;
+    if (isRoot !== !stack.length || (isRoot && name !== "svg")) return no("structure");
+    const seen = new Set();
+    for (;;) {
+      const sep = j;
+      while (XWS(svg.charAt(j))) j++;
+      const c = svg.charAt(j);
+      if (c === ">" || (c === "/" && svg.charAt(j + 1) === ">")) break;
+      if (j === sep) return no("structure");
+      const a0 = j;
+      while (XATTR_CH(svg.charAt(j))) j++;
+      const an = svg.slice(a0, j);
+      while (XWS(svg.charAt(j))) j++;
+      if (svg.charAt(j) !== "=") return no("structure");
+      j++;
+      while (XWS(svg.charAt(j))) j++;
+      const q = svg.charAt(j);
+      if (q !== '"' && q !== "'") return no("structure");
+      const close = svg.indexOf(q, j + 1);
+      if (close < 0) return no("structure");
+      const v = svg.slice(j + 1, close);
+      j = close + 1;
+      // Namespaces (plan review I2): exactly two declarations, byte-exact,
+      // root only; prefixes xlink: and xml: only. A raw compare, so a
+      // reference inside the value (sv&#x67;) can never satisfy it.
+      // Any repeat is fatal in XML 1.0, declarations included (code review I1).
+      if (seen.has(an)) return no("duplicate");
+      seen.add(an);
+      if (v.includes("<")) return no("structure");
+      if (an === "xmlns") { if (!isRoot || v !== SVG_NS) return no("namespace"); rootHasXmlns = true; continue; }
+      if (an === "xmlns:xlink") { if (!isRoot || v !== XLINK_NS) return no("namespace"); rootHasXlink = true; continue; }
+      const colon = an.indexOf(":");
+      if (colon >= 0) {
+        const p = an.slice(0, colon), local = an.slice(colon + 1);
+        if (!((p === "xlink" && (local === "href" || local === "title")) || (p === "xml" && (local === "space" || local === "lang")))) return no("namespace");
+        if (p === "xlink") usesXlink = true;
+      } else if (!/^[A-Za-z][A-Za-z0-9._-]*$/.test(an)) return no("structure");
+      else if (an !== canonAttr(an)) return no("case");
+    }
+    const selfClose = svg.charAt(j) === "/";
+    if (isRoot) { if (selfClose) return no("structure"); rootTagEnd = n0 + name.length; }
+    if (!selfClose) { stack.push(name); if (stack.length > MAX_DEPTH) return no("depth"); }
+    i = (selfClose ? j + 1 : j) + 1;
+  }
+}
+/** The namespaced SVG, or null (tests and callers that only need yes/no). */
+export const xmlSvg = (svg) => xmlSvgCheck(svg).svg ?? null;
+
 const specKey = (engine, source) => `${engine}:${createHash("sha256").update(String(source)).digest("hex")}`;
 
 /** A cached render, re-checked (it may predate a stricter check). */
@@ -459,6 +614,25 @@ export function plainOf(html, cap = 4000) {
   return out.split(/\s+/).filter(Boolean).join(" ").replace(/ ([.,;:!?)])/g, "$1").slice(0, cap);
 }
 
+/** D28 leftover (review L-6): `plain` for a document version saved before
+ *  D28, recomputed from the version's OWN stored markdown. Only when the
+ *  re-render matches the stored map exactly (same ids, types and markdown
+ *  text, block for block) — any drift in the renderer since that save leaves
+ *  the version untouched (null), on the mdPlain fallback. Pure. */
+export function plainBackfill(anchorMap, source, markdownBlocks) {
+  const old = anchorMap && anchorMap.kind === "blocks" && Array.isArray(anchorMap.blocks) ? anchorMap.blocks : null;
+  if (!old || !old.some((b) => !b || typeof b.plain !== "string")) return null;
+  if (!source || typeof source.markdown !== "string" || typeof markdownBlocks !== "function") return null;
+  let blocks;
+  try { blocks = markdownBlocks(source.markdown); } catch { return null; }
+  if (!Array.isArray(blocks) || blocks.length !== old.length) return null;
+  for (let i = 0; i < old.length; i++) {
+    const b = old[i], r = blocks[i];
+    if (!b || !r || b.id !== `b${i + 1}` || b.type !== r.type || b.text !== r.text) return null;
+  }
+  return { ...anchorMap, blocks: old.map((b, i) => (typeof b.plain === "string" ? b : { ...b, plain: plainOf(blocks[i].html) })) };
+}
+
 /** viewBox="minx miny w h" → h/w, by splitting (no regex over the document). */
 export function svgAspect(svg) {
   const open = svg.slice(0, svg.indexOf(">") + 1);
@@ -572,14 +746,21 @@ export async function renderVersion(type, source, { markdownBlocks, design = nul
     // source honest and the anchor map meaningful.
     const low = svg.toLowerCase();
     if (low.includes("<script") || low.includes("<foreignobject") || hasEventAttr(low)) throw err("bad_source", "svg may not carry scripts, event handlers or foreignObject");
-    // Fix round 3: the SVG is inlined into HTML, so the HTML parser's
-    // break-outs apply to a bot's own SVG too. Rendered SVG passed already.
+    // Fix round 3: these checks were written for the HTML parser and stay as
+    // defence in depth (versions saved before item 24 are still served as
+    // HTML). Rendered SVG passed checkRenderedSvg already.
     if (!renderedN && !safeSvg(svg, true)) throw err("bad_source", BOT_SVG);
-    const aspect = svgAspect(svg);
-    const elements = svgElements(svg);
-    const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;background:#fff}svg{display:block;width:100%;height:auto}</style>${headLinks(lib)}</head><body>${svg}</body></html>`;
+    // Item 24: the wrapper is XHTML, so the XML parser reads the SVG (no HTML
+    // tokenizer, no integration points, no raw-text elements). What it would
+    // refuse is refused HERE, never stored as a parse-error page.
+    const xc = xmlSvgCheck(svg);
+    if (!xc.svg) throw renderedN ? err("render_failed", NOT_XML) : err("bad_source", XML_MESSAGES[xc.reason] || BOT_XML);
+    const xsvg = xc.svg;
+    const aspect = svgAspect(xsvg);
+    const elements = svgElements(xsvg);
+    const xhtml = `<!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><style>html,body{margin:0;background:#fff}svg{display:block;width:100%;height:auto}</style>${headLinks(lib, true)}</head><body>${xsvg}</body></html>`;
     return {
-      files: [{ path: "index.html", body: Buffer.from(html), contentType: "text/html; charset=utf-8" }, ...(lib ? lib.files : []), ...renderFiles],
+      files: [{ path: "index.html", body: Buffer.from(xhtml), contentType: "application/xhtml+xml; charset=utf-8" }, ...(lib ? lib.files : []), ...renderFiles],
       anchorMap: { kind: "diagram", aspect, elements },
       design: designMeta(lib, renderedN),
     };

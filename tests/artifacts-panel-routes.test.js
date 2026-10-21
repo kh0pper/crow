@@ -708,3 +708,55 @@ test("final review M4: design.js failing to import leaves the panel up without t
     assert.equal(warns.filter((w) => /Design kit seam could not be loaded/.test(w)).length, 1);
   } finally { console.warn = warn; srv.close(); }
 });
+
+test("D28 leftover (L-6): opening a pre-D28 document backfills its blocks' plain, and a thread posted on it gets its span", async () => {
+  const md = "# Grind\n\nA long paragraph " + "with many words ".repeat(40) + "and **bold** words at the end.";
+  const doc = await store.createArtifact(s.db, s.blobs, { title: "Old doc", type: "document", source: { markdown: md }, actor: { kind: "bot", id: "bobby" } }, { markdownBlocks });
+  const row = (await s.db.execute({ sql: "SELECT anchor_map_json FROM artifact_versions WHERE artifact_id=? AND n=1", args: [doc.id] })).rows[0];
+  const now = JSON.parse(row.anchor_map_json);
+  const old = { ...now, blocks: now.blocks.map(({ plain: _p, ...b }) => b) };
+  await s.db.execute({ sql: "UPDATE artifact_versions SET anchor_map_json=? WHERE artifact_id=? AND n=1", args: [JSON.stringify(old), doc.id] });
+  // The backfill runs ONCE per process, in the panel's init: a fresh router is a fresh process here.
+  const app = express();
+  app.use(artifactsRouter((rq, rs, next) => next(), { db: s.db, blobs: s.blobs, runtime, policy, csrf: (rq, rs, next) => next(), renderDeps: { markdownBlocks }, engine: { async list() { return []; } } }));
+  const srv = app.listen(0, "127.0.0.1"); await new Promise((r) => srv.once("listening", r));
+  const call = (method, path, body) => new Promise((resolve, reject) => {
+    const data = body ? JSON.stringify(body) : null;
+    const r = http.request({ host: "127.0.0.1", port: srv.address().port, path, method, headers: { "content-type": "application/json" } }, (res) => {
+      let b = ""; res.on("data", (d) => (b += d)); res.on("end", () => resolve({ status: res.statusCode, body: JSON.parse(b || "null") }));
+    });
+    r.on("error", reject); if (data) r.write(data); r.end();
+  });
+  try {
+  const g = await call("GET", `/api/artifacts/${doc.id}`);
+  assert.equal(g.status, 200);
+  assert.deepEqual(g.body.versions[0].anchor_map, now, "the viewer receives plain");
+  // Past the old 400-char markdown cap, the selection keeps its block and gets a span.
+  const t = await call("POST", `/api/artifacts/${doc.id}/threads`, { versionN: 1, anchor: { kind: "block", id: "b2", quote: "and bold words at the end" }, text: "tighten" });
+  assert.equal(t.status, 201);
+  const a = JSON.parse((await s.db.execute({ sql: "SELECT anchor_json FROM artifact_threads WHERE id=?", args: [t.body.threadId] })).rows[0].anchor_json);
+  assert.equal(a.kind, "block");
+  assert.equal(now.blocks[1].plain.slice(a.span.start, a.span.end), "and bold words at the end");
+  } finally { srv.close(); }
+});
+
+test("code review I3: a document view waits for the one-time plain backfill at most ~2 s, even when the store never answers", async () => {
+  const doc = await store.createArtifact(s.db, s.blobs, { title: "Stuck store", type: "document", source: { markdown: "# A\n\nB" }, actor: { kind: "bot", id: "bobby" } }, { markdownBlocks });
+  const row = (await s.db.execute({ sql: "SELECT anchor_map_json FROM artifact_versions WHERE artifact_id=? AND n=1", args: [doc.id] })).rows[0];
+  const now = JSON.parse(row.anchor_map_json);
+  await s.db.execute({ sql: "UPDATE artifact_versions SET anchor_map_json=? WHERE artifact_id=? AND n=1", args: [JSON.stringify({ ...now, blocks: now.blocks.map(({ plain: _p, ...b }) => b) }), doc.id] });
+  const stuck = { ...s.blobs, get: () => new Promise(() => {}) };   // a store that never answers
+  const app = express();
+  app.use(artifactsRouter((rq, rs, next) => next(), { db: s.db, blobs: stuck, runtime, policy, csrf: (rq, rs, next) => next(), renderDeps: { markdownBlocks }, engine: { async list() { return []; } } }));
+  const srv = app.listen(0, "127.0.0.1"); await new Promise((r) => srv.once("listening", r));
+  try {
+    const t0 = Date.now();
+    const status = await new Promise((resolve, reject) => {
+      const r = http.request({ host: "127.0.0.1", port: srv.address().port, path: `/api/artifacts/${doc.id}`, method: "GET" }, (res) => { res.resume(); res.on("end", () => resolve(res.statusCode)); });
+      r.on("error", reject); r.end();
+    });
+    const ms = Date.now() - t0;
+    assert.equal(status, 200);
+    assert.ok(ms >= 1500 && ms < 6000, `waited for the pass, but bounded (${ms} ms)`);
+  } finally { srv.closeAllConnections?.(); srv.close(); }
+});

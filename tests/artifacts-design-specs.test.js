@@ -117,7 +117,8 @@ test("cache: an unchanged spec is not re-rendered on the next version, nor twice
 test("a rendered diagram uses the existing diagram path and anchors", async () => {
   answer = async () => SVG;
   const r = await renderVersion("diagram", { engine: "d2", source: "a -> b" }, deps);
-  assert.match(r.files[0].body.toString(), /<svg viewBox="0 0 10 10">/);
+  // Item 24: the XHTML wrapper names the SVG namespace on the root.
+  assert.match(r.files[0].body.toString(), /<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" viewBox="0 0 10 10">/);
   assert.deepEqual(r.anchorMap.elements, [{ id: "n1", tag: "rect", title: "Node one" }]);
   assert.equal(r.anchorMap.aspect, 1);
   assert.equal((await errOf(renderVersion("diagram", { engine: "d2" }, deps))).code, "bad_source");
