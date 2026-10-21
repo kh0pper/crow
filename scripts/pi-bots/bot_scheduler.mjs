@@ -63,10 +63,12 @@ const inflight = new Set();
  * value that was selected (and enabled=1), so of N tickers racing on the same
  * stale row exactly one sees changes === 1 and enqueues. Advance FIRST: an
  * INSERT failure does not undo the advance (no retry every tick).
- * Returns true only when this call enqueued a job.
+ * Returns true only when this call enqueued a job. False means another ticker
+ * claimed it, OR this call claimed and advanced it but enqueued nothing (missing
+ * bot/goal, voice bot).
  */
 export function claimAndEnqueue(d, s, nowIso, log = () => {}) {
-  const next = computeNextRun(s.cron_expression);
+  const next = computeNextRun(s.cron_expression, new Date(nowIso));
   const res = d.prepare(
     "UPDATE schedules SET last_run=?, next_run=?, updated_at=datetime('now') " +
     "WHERE id=? AND next_run IS ? AND enabled=1"
@@ -76,7 +78,6 @@ export function claimAndEnqueue(d, s, nowIso, log = () => {}) {
   const botId = s.task.slice(BOTCRON_PREFIX.length);
   let spec = {};
   try { spec = JSON.parse(s.description || "{}"); } catch { spec = {}; }
-  if (next === null) { log(`schedule #${s.id} has an unparseable cron expression — disabled from ticking, not enqueued`); return false; }
   if (!botId || !spec.goal) { log(`schedule #${s.id} missing bot/goal — advanced, not enqueued`); return false; }
   if (isVoiceBotId(botId)) { log(`schedule #${s.id} targets the voice bot, which cannot take background jobs — advanced, not enqueued`); return false; }
 
@@ -88,6 +89,7 @@ export function claimAndEnqueue(d, s, nowIso, log = () => {}) {
     "VALUES (?,?,?,'queued',?,?,?,?)"
   ).run(jobId, botId, spec.goal, deliver, "schedule", s.id, spec.escalate ? 1 : 0);
   log(`schedule #${s.id} (bot=${botId}) → enqueued job ${jobId}`);
+  if (next === null) log(`schedule #${s.id} has an unparseable cron expression — ran once, will not tick again`);
   return true;
 }
 

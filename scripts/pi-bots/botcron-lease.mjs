@@ -6,7 +6,11 @@
  */
 import { readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { withSqliteLock } from "../../servers/shared/sqlite-lock.js";
+
+/** This process's lease holder id, fixed for its life. */
+export const BOTCRON_HOLDER = `${process.pid}:${randomUUID()}`;
 
 const leasePath = (dir) => join(dir, "botcron-ticker.lease.json");
 const lockPath = (dir) => join(dir, "botcron-ticker.lock");
@@ -28,7 +32,7 @@ export async function holdBotcronLease({ dir, holder, ttlMs = 180000, now = Date
       if (cur && cur.holder !== holder && cur.expires_at > now) return false;
       const tmp = `${leasePath(dir)}.${process.pid}.tmp`;
       writeFileSync(tmp, JSON.stringify({ holder, pid: process.pid, expires_at: now + ttlMs }));
-      renameSync(tmp, leasePath(dir));
+      try { renameSync(tmp, leasePath(dir)); } catch (e) { try { unlinkSync(tmp); } catch {} throw e; }
       return true;
     }, { timeoutMs: lockTimeoutMs });
   } catch { return false; }
