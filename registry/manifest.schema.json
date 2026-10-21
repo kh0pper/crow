@@ -91,7 +91,12 @@
           "install_required": { "type": "boolean" },
           "check": { "type": "string", "enum": ["not_breached"] },
           "pattern": { "type": "string", "pattern": "^\\^.*\\$$" },
-          "pattern_hint": { "type": "string" },
+          "pattern_hint": {
+            "oneOf": [
+              { "type": "string" },
+              { "type": "object", "required": ["en"], "properties": { "en": { "type": "string" }, "es": { "type": "string" } }, "additionalProperties": false }
+            ]
+          },
           "default": {}
         }
       }

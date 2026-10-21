@@ -411,8 +411,11 @@ export async function breachedValueViolation(manifest, envVars, { fetchImpl = gl
   return null;
 }
 
-/** First supplied value breaking its manifest `pattern`, or null. Names the KEY, never the value. */
-export function envPatternViolation(manifest, envVars) {
+/**
+ * First supplied value breaking its manifest `pattern`, or null. Names the KEY, never the value.
+ * `pattern_hint` is a string, or `{ en, es, … }` picked by `lang` (falling back to en).
+ */
+export function envPatternViolation(manifest, envVars, lang = "en") {
   const vals = envVars && typeof envVars === "object" ? envVars : {};
   for (const v of manifest?.env_vars || []) {
     if (!v || typeof v.pattern !== "string") continue;
@@ -421,7 +424,9 @@ export function envPatternViolation(manifest, envVars) {
     let re;
     try { re = new RegExp(v.pattern); } catch { return { key: v.name, why: "has an invalid format rule in its manifest" }; }
     if (!re.test(String(val))) {
-      return { key: v.name, why: v.pattern_hint ? `must be ${v.pattern_hint}` : "does not match the allowed format" };
+      const ph = v.pattern_hint;
+      const hint = ph && typeof ph === "object" ? (ph[lang] || ph.en) : ph;
+      return { key: v.name, why: hint ? `must be ${hint}` : "does not match the allowed format" };
     }
   }
   return null;
