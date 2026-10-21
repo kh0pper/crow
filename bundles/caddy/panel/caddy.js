@@ -113,6 +113,7 @@ function script() {
         card.className = 'cd-card';
 
         card.appendChild(makeRow('Admin API', data.admin_api + '  (reachable)'));
+        if (data.admin_warning) card.appendChild(errorNode('Admin API: ' + data.admin_warning));
         card.appendChild(makeRow('Caddyfile', data.caddyfile_path));
         card.appendChild(makeRow('Sites (file)', data.sites_in_caddyfile ?? 0));
         card.appendChild(makeRow('Routes (loaded)', data.routes_loaded ?? 0));

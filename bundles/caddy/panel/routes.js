@@ -19,7 +19,7 @@ const BUNDLE_DIR = [
   join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "caddy"),
   process.env.CROW_APP_ROOT ? join(process.env.CROW_APP_ROOT, "bundles", "caddy") : null,
   resolve(dirname(fileURLToPath(import.meta.url)), ".."),
-].filter(Boolean).find((p) => existsSync(join(p, "server", "caddyfile.js")));
+].filter(Boolean).find((p) => existsSync(join(p, "server", "caddyfile.js")) && existsSync(join(p, "server", "admin-client.js")));
 if (!BUNDLE_DIR) throw new Error("caddy: bundle directory not found");
 
 const {
@@ -30,45 +30,36 @@ const {
   parseSites,
   appendSite,
   removeSite,
+  adminLineWarning,
 } = await import(pathToFileURL(join(BUNDLE_DIR, "server", "caddyfile.js")).href);
 
-const CADDY_ADMIN_URL = () =>
-  (process.env.CADDY_ADMIN_URL || "http://127.0.0.1:2019").replace(/\/+$/, "");
+const { adminTarget, adminRequest } = await import(pathToFileURL(join(BUNDLE_DIR, "server", "admin-client.js")).href);
+const { upstreamProblem } = await import(pathToFileURL(join(BUNDLE_DIR, "server", "federation-profiles.js")).href);
+
 const CONFIG_DIR = () => resolveConfigDir(process.env.CADDY_CONFIG_DIR);
+// The admin API is a unix socket in the config dir (admin-client.js).
+const ADMIN = () => adminTarget({ configDir: CONFIG_DIR() });
 const TIMEOUT = 10_000;
 
 async function adminGet(path) {
-  const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), TIMEOUT);
-  try {
-    const r = await fetch(`${CADDY_ADMIN_URL()}${path}`, { signal: ctl.signal });
-    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-    const text = await r.text();
-    return text ? JSON.parse(text) : {};
-  } finally {
-    clearTimeout(t);
-  }
+  const r = await adminRequest(ADMIN(), path, { timeoutMs: TIMEOUT });
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return r.text ? JSON.parse(r.text) : {};
 }
 
 async function loadCaddyfile(source) {
-  const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), TIMEOUT);
-  try {
-    const r = await fetch(`${CADDY_ADMIN_URL()}/load`, {
-      method: "POST",
-      signal: ctl.signal,
-      headers: { "Content-Type": "text/caddyfile" },
-      body: source,
-    });
-    const text = await r.text();
-    if (!r.ok) throw new Error(`${r.status}: ${text.slice(0, 400)}`);
-  } finally {
-    clearTimeout(t);
-  }
+  const r = await adminRequest(ADMIN(), "/load", {
+    method: "POST",
+    headers: { "Content-Type": "text/caddyfile" },
+    body: source,
+    timeoutMs: TIMEOUT,
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${r.text.slice(0, 400)}`);
 }
 
+// Same allowlist as server.js domainLike (queue item 26f).
 function domainLike(s) {
-  return typeof s === "string" && s.length > 0 && s.length <= 253 && !/[\s{}\n\r]/.test(s);
+  return typeof s === "string" && s.length > 0 && s.length <= 253 && /^[A-Za-z0-9.*:_\-[\]/]+$/.test(s) && s.toLowerCase() !== "import";
 }
 
 export default function caddyRouter(authMiddleware) {
@@ -93,13 +84,14 @@ export default function caddyRouter(authMiddleware) {
       const siteCount = parseSites(source).length;
 
       res.json({
-        admin_api: CADDY_ADMIN_URL(),
+        admin_api: ADMIN().label,
         caddyfile_path: caddyfilePath(CONFIG_DIR()),
         sites_in_caddyfile: siteCount,
         http_servers: serverNames,
         routes_loaded: routeCount,
         listen: Array.from(listenAddrs),
         acme_emails: Array.from(emails),
+        ...(adminLineWarning(source) ? { admin_warning: adminLineWarning(source) } : {}),
       });
     } catch (err) {
       res.json({ error: `Cannot reach Caddy admin API: ${err.message}` });
@@ -123,7 +115,10 @@ export default function caddyRouter(authMiddleware) {
     try {
       const { domain, upstream } = req.body || {};
       if (!domainLike(domain)) return res.json({ error: "Invalid domain" });
-      if (!domainLike(upstream) || upstream.length > 500) return res.json({ error: "Invalid upstream" });
+      // The MCP tools' upstream rule: a container name as name:port, never Caddy itself,
+      // its old admin port, a loopback or IP literal, or a name the host DNS could resolve.
+      const upBad = typeof upstream === "string" ? upstreamProblem(upstream) : "an upstream is required";
+      if (upBad) return res.json({ error: `Invalid upstream: ${upBad}` });
 
       const source = readCaddyfile(CONFIG_DIR());
       const existing = parseSites(source);

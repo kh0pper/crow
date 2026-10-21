@@ -163,10 +163,11 @@ export function profileTakesBackend(profile) {
  *     `.` not allowed): no IP literal in any form (dotted, decimal, hex, IPv6, IPv4-mapped),
  *     no FQDN that public DNS could point at 127.0.0.1;
  *   - never Caddy itself (`caddy`, `crow-caddy`) or `localhost`: Caddy runs in its own
- *     container with its admin API on 0.0.0.0:2019 there, so a proxied request to it
- *     could rewrite the whole configuration (the network check in server.js also drops every
- *     other name of that container, such as its short container ID);
- *   - the port is a decimal 1-65535 without leading zeros, and never 2019.
+ *     container, and an install not yet moved to the admin socket still has its admin API
+ *     on 0.0.0.0:2019 there, so a proxied request to it could rewrite the whole
+ *     configuration (the network check in server.js also drops every other name of that
+ *     container, such as its short container ID);
+ *   - the port is a decimal 1-65535 without leading zeros, and never 2019 (the old admin port).
  * Nothing it accepts can end a line, open a block, start a comment or quote in a Caddyfile.
  */
 export function upstreamProblem(s) {
@@ -287,14 +288,63 @@ export const WELLKNOWN_PATHS = {
 };
 
 /**
+ * JSON text that Caddy passes through untouched inside `respond "..."` (queue item 26f).
+ *
+ * Caddy expands `{$NAME}` in the raw Caddyfile at parse time and `{env.*}`, `{file.*}`,
+ * `{http.*}` ... in a respond body at request time (an unknown `{key}` is skipped and the
+ * scan resumes inside it, so nesting doesn't help). A user value such as
+ * `{file./srv/caddy/caddy/...}` would otherwise publish a secret on a public path.
+ *
+ * The value is re-serialised, then inside every string literal `{`, `}`, `"` and `\` are
+ * written as {, }, " and \ (the same JSON value). What is left:
+ *  - braces only as JSON structure, each `{` followed by `"` or `}`: no placeholder key
+ *    can start with `"`, and `{$` or a `{host}`-style shorthand cannot occur;
+ *  - every `"` structural and never preceded by a backslash, so `\"` closes nothing early;
+ *  - every backslash a JSON escape followed by a letter (u, n, t, ...), which Caddy's
+ *    lexer keeps as is inside quotes (it unescapes only `\"`).
+ * Throws on invalid JSON.
+ */
+export function caddySafeJson(jsonText) {
+  const value = JSON.parse(jsonText);
+  // 1e400 parses to Infinity and would re-serialise as null: refuse rather than change it.
+  // (Integers past 2^53 lose precision in any JS JSON round-trip; well-known docs have none.)
+  const finite = (v) => (typeof v === "number" ? Number.isFinite(v) : v && typeof v === "object" ? Object.values(v).every(finite) : true);
+  if (!finite(value)) throw new Error("well-known JSON has a number too large to represent");
+  const text = JSON.stringify(value);
+  let out = "";
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (!inString) {
+      if (ch === '"') inString = true;
+      out += ch;
+      continue;
+    }
+    if (ch === "\\") {
+      const next = text[i + 1];
+      if (next === '"') out += "\\u0022";
+      else if (next === "\\") out += "\\u005c";
+      else out += ch + next; // \n, \t, \b, \f, \r, \/, \uXXXX (the hex follows as plain chars)
+      i++;
+      continue;
+    }
+    if (ch === '"') { inString = false; out += ch; continue; }
+    if (ch === "{") { out += "\\u007b"; continue; }
+    if (ch === "}") { out += "\\u007d"; continue; }
+    out += ch;
+  }
+  return out;
+}
+
+/**
  * Render a `handle <path>` block that returns a static JSON body.
  * Emitted inside the main site block. Caddy serves it with correct
  * Content-Type and lets the reverse_proxy handle everything else.
  */
 export function renderWellKnownHandle(path, jsonBody) {
-  // Caddy's respond directive needs the body on a single line or quoted.
-  // We escape embedded double quotes, then wrap the body in double quotes.
-  const escaped = jsonBody.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  // Inside a quoted Caddyfile token only `"` needs escaping (the lexer keeps every
+  // other backslash literally); caddySafeJson leaves no backslash before a quote.
+  const escaped = caddySafeJson(jsonBody).replace(/"/g, '\\"');
   return [
     `handle ${path} {`,
     `  header Content-Type application/json`,
