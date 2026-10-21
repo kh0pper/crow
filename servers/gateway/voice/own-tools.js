@@ -243,6 +243,22 @@ async function defaultOpenTasksDb() {
   return createDbClient(tasksDbPath());
 }
 
+/** settings: normalizeVoiceSettings(bot) (or anything with .routine). An explicit backend not connected → null. */
+export function resolveRoutineBackends(settings, conn) {
+  const r = normalizeVoiceSettings({ routine: settings?.routine }).routine;
+  const has = (n) => conn instanceof Set && conn.has(n);
+  const cal = r.calendar.backend;
+  const calendar = cal === "workspace" ? (has("ws_cal_create_event") ? "workspace" : null)
+    : cal === "google" ? (has("gcal_create_event") ? "google" : null)
+      : cal === "auto" ? (has("ws_cal_create_event") ? "workspace" : has("gcal_create_event") ? "google" : null) : null;
+  const reminders = r.reminders.backend === "off" ? null : "crow";
+  const tb = r.tasks.backend;
+  const tasks = tb === "workspace" ? (has("ws_task_create") ? "workspace" : null)
+    : tb === "board" ? "board"
+      : tb === "auto" ? (has("ws_task_create") ? "workspace" : "board") : null;
+  return { calendar, reminders, tasks };
+}
+
 /**
  * createOwnTools({ pending, now, log, connected, openTasksDb }):
  *   pending      createPendingStore() (pending.js): the per-device pending confirmations
@@ -255,21 +271,7 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
   const idCache = new Map();   // "calendar" | "tasks" → { id, at }
   const connectedNow = () => { try { const s = connected(); return s instanceof Set ? s : new Set(s || []); } catch { return new Set(); } };
 
-  /** settings: normalizeVoiceSettings(bot) (or anything with .routine). An explicit backend not connected → null. */
-  function resolveBackends(settings, conn) {
-    const r = normalizeVoiceSettings({ routine: settings?.routine }).routine;
-    const has = (n) => conn instanceof Set && conn.has(n);
-    const cal = r.calendar.backend;
-    const calendar = cal === "workspace" ? (has("ws_cal_create_event") ? "workspace" : null)
-      : cal === "google" ? (has("gcal_create_event") ? "google" : null)
-        : cal === "auto" ? (has("ws_cal_create_event") ? "workspace" : has("gcal_create_event") ? "google" : null) : null;
-    const reminders = r.reminders.backend === "off" ? null : "crow";
-    const tb = r.tasks.backend;
-    const tasks = tb === "workspace" ? (has("ws_task_create") ? "workspace" : null)
-      : tb === "board" ? "board"
-        : tb === "auto" ? (has("ws_task_create") ? "workspace" : "board") : null;
-    return { calendar, reminders, tasks };
-  }
+  const resolveBackends = resolveRoutineBackends;
 
   async function callTool(executor, name, args) {
     if (!executor || typeof executor.executeToolCalls !== "function") throw new Error("no tool executor");
