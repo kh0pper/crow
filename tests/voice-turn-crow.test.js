@@ -421,3 +421,40 @@ test("security 2: a crow_tools delete names the id that runs; the spoof shape an
     assert.deepEqual(r.calls.executed, [], `${JSON.stringify(args)}: a yes does not run it either`);
   }
 });
+
+// ── voice actions hook (PR 2, Task 2.2) ─────────────────────────────────────
+
+test("voiceActions fast path speaks without a model call", async () => {
+  const h = crowHarness();
+  h.deps.voiceActions = { fastPath: async () => ({ say: "Okay.", verb: "pending_yes" }) };
+  const r = await turn(h, { transcript: "yes" });
+  assert.deepEqual(h.calls.chatKeys, []);
+  assert.deepEqual(h.calls.spoken, ["Okay."]);
+  assert.equal(r.fastPath, true);
+  assert.equal(r.timings.verb, "pending_yes");
+  assert.deepEqual(h.runner.convo.get(h.device.id).map((m) => m.content), ["yes", "Okay."], "saved like a fast path");
+});
+
+test("turnContext rides on the user message only", async () => {
+  const h = crowHarness({ rounds: [sayRound("Lisbon.")] });
+  h.deps.voiceActions = { turnContext: () => "[Pending] x" };
+  await turn(h, { transcript: "What is the capital of Portugal?" });
+  const msgs = h.log[0].messages;
+  assert.ok(!msgs[0].content.includes("[Pending] x"), "never on the system message");
+  assert.ok(msgs.at(-1).content.includes("[Pending] x"), "on the user message");
+  assert.ok(msgs.at(-1).content.includes("What is the capital of Portugal?"));
+  const saved = h.runner.convo.get(h.device.id);
+  assert.equal(saved.find((m) => m.role === "user").content, "What is the capital of Portugal?", "the saved user message is the plain transcript");
+});
+
+test("the voice system message stays byte-identical with a voiceActions context and opts.turnContext both set", async () => {
+  const h = crowHarness({ rounds: [sayRound("Lisbon."), sayRound("Two.")] });
+  let n = 0;
+  h.deps.voiceActions = { turnContext: () => ({ text: `[Pending] entry ${++n}`, pending: false }) };
+  await turn(h, { transcript: "What is the capital of Portugal?", turnContext: "Open windows: none." });
+  h.c.advance(5_000);
+  await turn(h, { transcript: "How many timers?", turnContext: "Open windows: timer 1." });
+  assert.equal(h.log[1].messages[0].content, h.log[0].messages[0].content);
+  const u = h.log[1].messages.at(-1).content;
+  assert.ok(u.includes("Open windows: timer 1.") && u.includes("[Pending] entry 2"), "both ride on the user message");
+});

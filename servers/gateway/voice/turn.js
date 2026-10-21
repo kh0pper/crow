@@ -464,8 +464,11 @@ export function createVoiceTurnRunner(deps) {
     let say = null;
     let history = null;
     let executor = null;
+    let executorBot = null;     // the bot the executor was made for
     let usedFamilies = null;
     let actionAsked = false;
+    const calledTools = [];       // every tool name the model called this turn (deps.voiceActions.afterTurn)
+    const voiceActions = deps.voiceActions && typeof deps.voiceActions === "object" ? deps.voiceActions : null;
     /** Speak + caption a fixed line instead of a model call, and save the exchange (the plain transcript and the line). */
     const speakLine = async (line) => {
       sink.event({ type: "caption_delta", text: line });
@@ -526,29 +529,36 @@ export function createVoiceTurnRunner(deps) {
       if (!tts) { fail("no_tts_profile", false); return result; }
       say = makeSpeaker(tts, sink, signal, () => mark("tts_first_chunk_ms"), mute.signal);
 
-      // 2. Fast paths (no LLM)
-      if (typeof opts.fastPaths === "function") {
-        const fp = await opts.fastPaths(transcript);
-        if (fp) {
-          result.fastPath = true;
-          if (fp.tier === "t0" || fp.tier === "t1") timings.tier = fp.tier;
-          // The verb a no-model path acted on ("pause", "resume", "play"…): a fixed word, never the transcript.
-          // It is how a smoke tells "STT heard play" from a state disagreement (kiosk smoke 2026-10-06 F4).
-          if (typeof fp.verb === "string" && /^[a-z_]{1,24}$/.test(fp.verb)) timings.verb = fp.verb;
-          for (const ev of fp.events || []) sink.event(ev);
-          if (fp.say) { sink.event({ type: "caption_delta", text: fp.say }); await say(fp.say); }
-          say.end();
-          // A path with nothing to say (a transport verb) leaves no exchange behind: an empty
-          // assistant message would only confuse the next turn's chat template.
-          if (fp.say) convo.save(device.id, [...convo.get(device.id), { role: "user", content: transcript }, { role: "assistant", content: fp.say }]);
-          return result;
-        }
+      // 2. Fast paths (no LLM). deps.voiceActions.fastPath first (a pending confirmation answered by a yes or
+      // a no), then opts.fastPaths. The voice-actions path gets the bot and an executor; a bot that cannot be
+      // loaded is passed as null (it never stops the path), and nothing is ensured here.
+      const botId = typeof opts.botId === "string" && opts.botId ? opts.botId : (deps.voiceBotId || device.bound_bot_id);
+      let fp = null;
+      if (typeof voiceActions?.fastPath === "function") {
+        let vaBot = null;
+        try { vaBot = await loadBot(db, botId); } catch (err) { log(`[voice-turn] ${device.id} voice actions: bot not loaded (${err?.message || err})`); }
+        if (vaBot) { executor = deps.createToolExecutor({ botDef: vaBot }); executorBot = vaBot; }
+        fp = await voiceActions.fastPath({ db, device, surface: timings.surface, transcript, lang: opts.lang, tz: opts.tz, bot: vaBot, executor });
+      }
+      if (!fp && typeof opts.fastPaths === "function") fp = await opts.fastPaths(transcript);
+      if (fp) {
+        result.fastPath = true;
+        if (fp.tier === "t0" || fp.tier === "t1") timings.tier = fp.tier;
+        // The verb a no-model path acted on ("pause", "resume", "play"…): a fixed word, never the transcript.
+        // It is how a smoke tells "STT heard play" from a state disagreement (kiosk smoke 2026-10-06 F4).
+        if (typeof fp.verb === "string" && /^[a-z_]{1,24}$/.test(fp.verb)) timings.verb = fp.verb;
+        for (const ev of fp.events || []) sink.event(ev);
+        if (fp.say) { sink.event({ type: "caption_delta", text: fp.say }); await say(fp.say); }
+        say.end();
+        // A path with nothing to say (a transport verb) leaves no exchange behind: an empty
+        // assistant message would only confuse the next turn's chat template.
+        if (fp.say) convo.save(device.id, [...convo.get(device.id), { role: "user", content: transcript }, { role: "assistant", content: fp.say }]);
+        return result;
       }
 
       // 3. The voice bot drives the turn (ruling R11: no profile fallback): opts.botId (the kiosk's turn
       // check, the eval harness), else deps.voiceBotId (the Crow voice bot), else the device's bound bot.
       // Loaded only after the fast paths, so a missing or disabled voice bot never stops "pause" or the clock.
-      const botId = typeof opts.botId === "string" && opts.botId ? opts.botId : (deps.voiceBotId || device.bound_bot_id);
       let bot = await loadBot(db, botId);
       if (!bot && botId === CROW_VOICE_BOT_ID && !voiceEnsured && typeof deps.ensureVoiceBot === "function") {
         voiceEnsured = true;
@@ -655,7 +665,9 @@ export function createVoiceTurnRunner(deps) {
       // A must-run tool (kiosk: crow_wm on "show me …"): see the opts doc above.
       const mustX = extra.find((x) => offered.has(x.definition.name) && typeof x.must === "function" && x.must(transcript) === true) || null;
       const mustName = mustX?.definition.name;
-      executor = deps.createToolExecutor({ botDef: bot });
+      // The voice-actions path may have made one for this bot already (a cached bot is the same object).
+      if (executor && executorBot !== bot) { try { await executor.close(); } catch {} executor = null; }
+      if (!executor) executor = deps.createToolExecutor({ botDef: bot });
       // No deviceId: generateSystemPrompt stamps it as a "glasses device_id" for
       // crow_glasses_* tools, and no kiosk tool takes a device_id.
       const system = await deps.generateSystemPrompt({ botDef: bot });
@@ -665,7 +677,15 @@ export function createVoiceTurnRunner(deps) {
       // (live 2026-10-05): echoGuard lists every injected line the echo gate removes from what is
       // spoken, captioned, saved and put on a card. opts.turnContext may be a function of the plain
       // transcript: the context STRING is computed first, then wrapped and guarded.
-      const ctxLine = typeof opts.turnContext === "function" ? String(opts.turnContext(transcript) || "") : opts.turnContext;
+      const optsCtx = typeof opts.turnContext === "function" ? String(opts.turnContext(transcript) || "") : opts.turnContext;
+      // deps.voiceActions.turnContext({ device }) → { text, pending } (a bare string is { text }): its text joins the
+      // context line (on the user message, echo-guarded, never saved); pending makes this an action turn.
+      let vaCtx = null;
+      if (typeof voiceActions?.turnContext === "function") {
+        const v = voiceActions.turnContext({ device });
+        vaCtx = typeof v === "string" ? { text: v, pending: false } : v && typeof v === "object" ? { text: String(v.text || ""), pending: v.pending === true } : null;
+      }
+      const ctxLine = [optsCtx, vaCtx?.text].filter(Boolean).join("\n") || optsCtx;
       const userMsg = { role: "user", content: withTurnContext(ctxLine, transcript) };
       const echoGuard = [ctxLine ? TURN_CONTEXT_NOTE : null, ctxLine, mustX?.mustNote];
       const messages = [
@@ -693,7 +713,7 @@ export function createVoiceTurnRunner(deps) {
       // turn can never start a model and its result does not depend on which model is resident.
       // Action turns (see ACTION_NOTE above). The add-on wrapper (crow_tools) is never in famIds: when the quick
       // model is not offered it, the assistant still has tools, and the router must know.
-      const actionTurn = actionAsked || (typeof opts.actionWhen === "function" && lastAction.has(device.id)
+      const actionTurn = actionAsked || vaCtx?.pending === true || (typeof opts.actionWhen === "function" && lastAction.has(device.id)
         && typeof opts.actionFollowWhen === "function" && opts.actionFollowWhen(transcript) === true);
       // A display tool offered because a window is open (or music plays) is not what this request asks for:
       // only one whose holdText/must reads the transcript as a display request is.
@@ -1096,6 +1116,7 @@ export function createVoiceTurnRunner(deps) {
           continue;
         }
         toolRounds++;
+        for (const c of calls) calledTools.push(String(c.name));
         const roundSig = [...new Set(calls.map((c) => String(c.name)))].sort().join("+");
         timings.tool_rounds = toolRounds;
         // Each call's OUTCOME — name:code, never arguments or result text — in the log and in
@@ -1372,6 +1393,9 @@ export function createVoiceTurnRunner(deps) {
       timings.total_ms = now() - t0;
       if (say) timings.spoken_chars = say.chars();
       if (executor) { try { await executor.close(); } catch {} }
+      if (typeof voiceActions?.afterTurn === "function" && device?.id) {
+        try { await voiceActions.afterTurn({ device, calledTools: calledTools.slice() }); } catch (err) { log(`[voice-turn] ${device.id} voice actions afterTurn failed (${err?.message || err})`); }
+      }
     }
   }
 
