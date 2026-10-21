@@ -7,7 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { harness } from "./fixtures/voice-turn-harness.mjs";
 import { createToolFamilies } from "../servers/gateway/voice/tool-families.js";
-import { CANT_DO_TEXT, NOT_DONE_TEXT, FILLER_TEXT } from "../servers/gateway/voice/turn.js";
+import { CANT_DO_TEXT, NOT_DONE_TEXT, FILLER_TEXT, PARTLY_DONE_TEXT } from "../servers/gateway/voice/turn.js";
 
 const FAST = "crow-voice/qwen3.5-4b";
 const ESC = "crow-chat/qwen3.6-35b-a3b";
@@ -548,4 +548,72 @@ test("a failed own call whose held text claims nothing still ends on the not-don
   const h2 = ownHarness({ bot: CROW, rounds: [sameRound("Let me add that. ", "crow_task_add", { title: "buy milk" })] });
   await turn(h2, "put buy milk on my tasks", { ...noAct, ownTools: [t2] });
   assert.ok(h2.calls.spoken.join(" ").trim().endsWith("Your task list is offline right now."), `spoken: ${h2.calls.spoken}`);
+});
+
+// ─── #499 round 2: cloud follow-ups, partly done turns ───
+test("families off (cloud): a follow-up in the own-tool window is held and ends on the not-done line", async () => {
+  let n = 0;
+  const t = taskOwn(() => (n++ === 0 ? { ok: true, code: "added", final: true, say: "Added buy milk to your tasks." } : BACKEND_ERR));
+  const h = ownHarness({ bot: CROW, rounds: [call("crow_task_add", { title: "buy milk" }), sameRound("Done, moved it! ", "crow_task_add", { title: "buy milk", due: "15:00" }, "c2")] });
+  await turn(h, "put buy milk on my tasks", { ...noAct, familiesOnIntent: false, ownTools: [t] });
+  const before = captions(h).length;
+  h.c.advance(60_000);
+  const r = await turn(h, "move it to 3", { ...noAct, familiesOnIntent: false, ownTools: [t] });
+  assert.equal(t.seen.length, 2);
+  assert.equal(r.timings.action_guard, true);
+  assert.ok(!/Done, moved/.test(captions(h).slice(before)), `captions: ${captions(h).slice(before)}`);
+  assert.ok(h.calls.spoken.every((s) => !/Done, moved/.test(s)), `spoken: ${h.calls.spoken}`);
+  assert.equal(h.calls.spoken.at(-1), NOT_DONE_TEXT);
+});
+
+const REMINDED = { ok: true, code: "added", final: true, say: "Okay, I'll remind you at 5: milk." };
+const both = (text, order) => {
+  const ev = { task: { type: "tool_call", id: "t1", name: "crow_task_add", arguments: { title: "milk" } },
+    rem: { type: "tool_call", id: "r1", name: "crow_reminder_add", arguments: { text: "milk", at: "2026-10-26T17:00:00-05:00" } } };
+  return [...(text ? [{ type: "content_delta", text }] : []), ...order.map((k) => ev[k]), { type: "done" }];
+};
+async function partly(rounds) {
+  const t = taskOwn(BACKEND_ERR);
+  const rem = remTool(REMINDED);
+  const h = ownHarness({ bot: CROW, rounds });
+  const r = await turn(h, "add milk to my tasks and remind me at 5", { ...noAct, ownTools: [t, rem] });
+  assert.equal(t.seen.length, 1);
+  assert.equal(rem.seen.length, 1);
+  const heard = h.calls.spoken.join(" ");
+  assert.ok(!/Added both/.test(heard) && !/Added both/.test(captions(h)), `heard: ${heard} | captions: ${captions(h)}`);
+  assert.ok(heard.includes(REMINDED.say) && captions(h).includes(REMINDED.say), `heard: ${heard}`);
+  assert.ok(heard.trim().endsWith(PARTLY_DONE_TEXT) && captions(h).trim().endsWith(PARTLY_DONE_TEXT), `heard: ${heard}`);
+  assert.ok(!heard.includes(NOT_DONE_TEXT));
+  // What is saved is what was heard.
+  const saved = h.runner.convo.get(h.device.id).filter((m) => m.role === "assistant").map((m) => String(m.content)).join(" ");
+  assert.ok(!/Added both/.test(saved), `saved: ${saved}`);
+  assert.ok(saved.includes(PARTLY_DONE_TEXT), `saved: ${saved}`);
+  return r;
+}
+
+test("partly done, same round: 'Added both!' is never heard; the reminder's line and the partly-done line are", async () => {
+  await partly([both("Added both! ", ["rem", "task"])]);   // the failed call is last
+  await partly([both("Added both! ", ["task", "rem"])]);   // the ok final call is last: a later ok on another item does not clear the failure
+});
+
+test("partly done, 'Added both!' in round 2 is never heard", async () => {
+  await partly([both("", ["rem", "task"]), says("Added both! ")]);
+  const nonFinal = { ok: true, code: "added", say: REMINDED.say };   // not final: the turn goes on either way
+  const t = taskOwn(BACKEND_ERR);
+  const rem = remTool(nonFinal);
+  const h = ownHarness({ bot: CROW, rounds: [both("", ["task", "rem"]), says("Added both! ")] });
+  await turn(h, "add milk to my tasks and remind me at 5", { ...noAct, ownTools: [t, rem] });
+  const heard = h.calls.spoken.join(" ");
+  assert.ok(!/Added both/.test(heard) && !/Added both/.test(captions(h)), `heard: ${heard}`);
+  assert.ok(heard.includes(REMINDED.say) && heard.trim().endsWith(PARTLY_DONE_TEXT), `heard: ${heard}`);
+});
+
+test("a failed own call: the saved reply is what was heard (released text + the failure line)", async () => {
+  // "Let me add that." is a promise (claimsAction), so it is never heard; "One moment." claims nothing.
+  const h = ownHarness({ bot: CROW, rounds: [sameRound("One moment. ", "crow_task_add", { title: "buy milk" })] });
+  await turn(h, "put buy milk on my tasks", { ...noAct, ownTools: [taskOwn(BACKEND_ERR)] });
+  const heard = h.calls.spoken.join(" ");
+  assert.equal(captions(h), `One moment. ${NOT_DONE_TEXT}`);
+  const saved = h.runner.convo.get(h.device.id).filter((m) => m.role === "assistant" && String(m.content).trim()).map((m) => String(m.content).trim());
+  assert.deepEqual(saved, [`One moment. ${NOT_DONE_TEXT}`], `heard: ${heard}`);
 });

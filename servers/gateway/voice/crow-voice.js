@@ -89,6 +89,7 @@ export function crowVoiceTurnOptions({ surface, lang, voiceDef = null, cloud = f
     notReadyText: voiceLine("not_ready_say", lang),
     memoOnlyText: voiceLine("memo_only_say", lang),
     unsureText: voiceLine("unsure_say", lang),
+    partlyDoneText: voiceLine("partly_done_say", lang),
   };
   // The turn's own spoken lines (Crow's own tools, their confirmations) follow the surface's language and zone.
   if (typeof lang === "string" && lang) o.lang = lang;
