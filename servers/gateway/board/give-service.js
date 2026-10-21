@@ -173,9 +173,12 @@ export async function checkGive(tdb, cdb, cardId, botId) {
  * @param {{actor_type?:string, actor_id?:string|null, extra?:object}} [o.audit]
  *   actor_type defaults from `actor` (resolveAuditActor)
  * @param {object} [o.extraFields] more card fields for the same write
+ * @param {string|null} [o.expectAssigned] when given, the card write applies
+ *   only while assigned_bot is still exactly this (else 409 changed, nothing
+ *   written); the dispatch verb passes null, what its claim left
  * @returns {Promise<{row, projectId:number, children:number}>}
  */
-export async function giveCard(tdb, cdb, { cardId, botId, actor, audit = {}, extraFields = {} }) {
+export async function giveCard(tdb, cdb, { cardId, botId, actor, audit = {}, extraFields = {}, expectAssigned }) {
   const auditActor = resolveAuditActor(actor, audit);
   const { row, projectId } = await checkGive(tdb, cdb, cardId, botId);
 
@@ -183,7 +186,7 @@ export async function giveCard(tdb, cdb, { cardId, botId, actor, audit = {}, ext
   const { parent_id: _ignored, ...fields } = extraFields || {};
   const childFields = {};
   for (const k of CHILD_FIELDS) if (Object.prototype.hasOwnProperty.call(fields, k)) childFields[k] = fields[k];
-  await updateCard(tdb, cardId, { ...fields, project_id: projectId, assigned_bot: botId }, actor);
+  await updateCard(tdb, cardId, { ...fields, project_id: projectId, assigned_bot: botId }, actor, { expectAssigned });
   const children = await moveDescendants(tdb, cardId, projectId, actor, childFields);
   await giveAudit(cdb, row, cardId, { ...(audit.extra || {}), ...(children ? { children } : {}) }, auditActor);
   return { row, projectId, children };
