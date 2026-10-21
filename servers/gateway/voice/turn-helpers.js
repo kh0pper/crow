@@ -166,13 +166,16 @@ export { isProxyCall, executedProxyArgs };
 const objOf = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
 // The fields the confirm question names, in order, before its id-key fallback (ID_KEY).
 const NAMED_FIELDS = ["id", "slug", "post_id", "memory_id", "setlist_id", "section_key"];
-// The fallback: a key ending in _id or Id, or id followed by an uppercase letter (card_id, cardId, idCard).
-const ID_KEY = /(?:_id|[a-z0-9]Id)$|^id[A-Z]/;
-// Who a send goes to, named for a send (SEND_VERBS: the tool name's first verb).
-const RECIPIENT_FIELDS = ["to", "recipient", "email"];
+// The fallback: a key ending in _id or Id, or id followed by an uppercase letter (card_id, cardId, idCard),
+// never one that looks like a credential (idToken, apiKey…).
+const SECRET_KEY = /(?:token|secret|key|password)$/i;
+const isIdKey = (k) => /(?:_id|[a-z0-9]Id)$|^id[A-Z]/.test(k) && !SECRET_KEY.test(k);
+// Who a send goes to, named for a send (SEND_VERBS: the tool name's first verb). Crow's own sends key it
+// as contact (crow_send_message, crow_share) or group (crow_send_group_message).
+const RECIPIENT_FIELDS = ["to", "recipient", "email", "contact", "group"];
 const SEND_VERBS = new Set(["send", "reply", "post", "forward", "share"]);
-// Every field the confirm question can name or a voice policy check reads; any ID_KEY key is compared too.
-const DESCRIBED_FIELDS = [...NAMED_FIELDS, ...RECIPIENT_FIELDS, "delete", "task", "enabled", "cron_expression"];
+// Always compared (the voice policy checks read them, asked or not), and the named fields as before.
+const POLICY_FIELDS = [...NAMED_FIELDS, "delete", "task", "enabled", "cron_expression"];
 // Scalars compare as strings ("3" and 3 are the same id); objects by their canonical form.
 const sameValue = (a, b) => ((a === null || typeof a !== "object") && (b === null || typeof b !== "object")
   ? String(a) === String(b) : canonicalArgsHash(a) === canonicalArgsHash(b));
@@ -180,8 +183,10 @@ const sameValue = (a, b) => ((a === null || typeof a !== "object") && (b === nul
  * A proxied call (isProxyCall) that carries a described field somewhere other than where it runs with a
  * different value, or where the run never sees it: the top level, params, or params.arguments disagreeing
  * with executedProxyArgs. The question would name one value and the tool run another; the voice gate refuses it.
+ * `asking`: a confirm question will be asked, so every field it can name is compared too (each isIdKey key
+ * and RECIPIENT_FIELDS); without it only POLICY_FIELDS are.
  */
-export function proxyArgsConflict(tc) {
+export function proxyArgsConflict(tc, { asking = false } = {}) {
   if (!isProxyCall(tc)) return false;
   const top = { ...objOf(tc.arguments) };
   delete top.action;   // the proxy's own selector
@@ -189,8 +194,11 @@ export function proxyArgsConflict(tc) {
   const params = objOf(objOf(tc.arguments).params);
   const layers = [top, params, objOf(params.arguments)];
   const runs = objOf(executedProxyArgs(tc));
-  const fields = new Set(DESCRIBED_FIELDS);
-  for (const l of [...layers, runs]) for (const k of Object.keys(l)) if (ID_KEY.test(k)) fields.add(k);
+  const fields = new Set(POLICY_FIELDS);
+  if (asking) {
+    for (const k of RECIPIENT_FIELDS) fields.add(k);
+    for (const l of [...layers, runs]) for (const k of Object.keys(l)) if (isIdKey(k)) fields.add(k);
+  }
   return [...fields].some((k) => layers.some((l) => l !== runs && l[k] !== undefined && (runs[k] === undefined || !sameValue(l[k], runs[k]))));
 }
 /**
@@ -215,19 +223,21 @@ export function describeDestructiveAction(tc, { via = null } = {}) {
   if (name === "crow_notification_settings") return "change your notification settings";
   const base = name.replace(/^crow_/, "").replace(/_/g, " ");
   const scalar = (v) => (typeof v === "string" || typeof v === "number") && has(v);
-  // Named fields first, then the first id-keyed field (ID_KEY) with a scalar value. Never a free-text body.
-  const refKey = NAMED_FIELDS.find((k) => scalar(src[k])) ?? Object.keys(src).find((k) => ID_KEY.test(k) && scalar(src[k]));
+  // Named fields first, then the first id-keyed field (isIdKey) with a scalar value. Never a free-text body.
+  const refKey = NAMED_FIELDS.find((k) => scalar(src[k])) ?? Object.keys(src).find((k) => isIdKey(k) && scalar(src[k]));
   let out = refKey === undefined ? base : `${base} ${speakable(src[refKey])}`;
-  if (SEND_VERBS.has(firstVerb(name)?.verb)) {
+  const verb = firstVerb(name)?.verb;
+  if (SEND_VERBS.has(verb)) {
     const to = RECIPIENT_FIELDS.map((k) => src[k]).map((v) => (Array.isArray(v) ? v.filter(scalar).join(", ") : v)).find(scalar);
-    if (to !== undefined) out += ` to ${speakable(to)}`;
+    if (to !== undefined) out += ` ${verb === "share" ? "with" : "to"} ${speakable(to)}`;
   }
   return out;
 }
-// A value as the question speaks it: one line, at most QUESTION_VALUE_MAX characters.
+// A value as the question speaks it: one line, at most QUESTION_VALUE_MAX characters, and never a double
+// quote or backslash that could close the quoted 'Tell the user: "…"' frame around it.
 const QUESTION_VALUE_MAX = 60;
 function speakable(v) {
-  const s = String(v).replace(/\s+/g, " ").trim();
+  const s = String(v).replace(/"/g, "'").replace(/\\/g, " ").replace(/\s+/g, " ").trim();
   return s.length > QUESTION_VALUE_MAX ? `${s.slice(0, QUESTION_VALUE_MAX - 1)}…` : s;
 }
 

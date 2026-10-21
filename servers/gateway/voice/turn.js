@@ -944,6 +944,8 @@ export function createVoiceTurnRunner(deps) {
           || (voiceKind && (needsSpokenYes(n) || VOICE_CONFIRM_TOOLS.includes(n)
             || (n === VOICE_NOTIFICATION_TOOL && changesNotifications(tc)))));
         if (!confirmName) return null;
+        // A question will be asked: every field it can name (ids, the recipient) must agree with what runs too.
+        if (voiceKind && via && proxyArgsConflict(tc, { asking: true })) return refuse("refused_policy", VOICE_ARGS_CONFLICT);
         // crow_tools' flat fallback runs locally but not on its remote route: a yes could confirm values that never run.
         if (voiceKind && reliesOnFlatFallback(tc)) return refuse("refused_policy", VOICE_ARGS_FLAT);
         if (confirm.check({ deviceId: device.id, eff: confirmName, args: tc.arguments, transcript }) === "allow") return null;

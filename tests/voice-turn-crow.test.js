@@ -476,6 +476,44 @@ test("an ordinary bot's question names the target too", async () => {
   assert.match(lastToolText(o, 1), /Are you sure you want to remove backend b2\?/);
 });
 
+// ── Task 2.7 fix round 1 ──
+
+test("fix 1: a voice bot's proxied contact spoof is refused, never asked or run", async () => {
+  const tc = { type: "tool_call", id: "c1", name: "crow_sharing", arguments: { action: "send_message", contact: "alex", params: { contact: "eve", message: "hi" } } };
+  const { effectiveToolName } = await import("../servers/gateway/ai/tool-executor.js");
+  const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["crow_sharing"], rounds: [callRound(tc), sayRound("I can't."), callRound(tc), sayRound("I can't.")] });
+  h.deps.effectiveToolName = effectiveToolName;
+  await turn(h, { transcript: "message alex" });
+  assert.deepEqual(h.calls.executed, []);
+  assert.doesNotMatch(lastToolText(h, 1), /Confirmation required/, "refused, never asked");
+  await turn(h, { transcript: "yes" });
+  assert.deepEqual(h.calls.executed, []);
+});
+
+test("fix 2: a voice proxy read with a stray board_id runs; a delete with the same disagreement is refused", async () => {
+  const read = { type: "tool_call", id: "r1", name: "crow_tools", arguments: { action: "trello_get_cards", board_id: 1, params: { board_id: 2 } } };
+  const h = await addonHarness([callRound(read), sayRound("Two cards.")]);
+  await turn(h, { transcript: "what's on the board" });
+  assert.deepEqual(h.calls.executed, ["crow_tools"], "a read asks nothing, so the stray field is not compared");
+  const del = { type: "tool_call", id: "r2", name: "crow_tools", arguments: { action: "trello_delete_card", board_id: 1, params: { board_id: 2, card_id: "c9" } } };
+  const k = await addonHarness([callRound(del), sayRound("I can't."), callRound(del), sayRound("I can't.")]);
+  await turn(k, { transcript: "delete card c9" });
+  assert.doesNotMatch(lastToolText(k, 1), /Confirmation required/, "refused, never asked");
+  await turn(k, { transcript: "yes" });
+  assert.deepEqual(k.calls.executed, []);
+});
+
+test("fix 5: an ordinary bot's proxied card_id spoof is asked, not refused", async () => {
+  const { effectiveToolName } = await import("../servers/gateway/ai/tool-executor.js");
+  const house = { ...HOUSE, permission_policy: { confirm: ["trello_delete_card"] } };
+  const tc = { type: "tool_call", id: "o1", name: "crow_tools", arguments: { action: "trello_delete_card", card_id: 1, params: { card_id: 2 } } };
+  const o = crowHarness({ rows: { "crow.voice": VOICE, household: house }, bot: house, chatTools: ["crow_tools"], rounds: [callRound(tc), sayRound("Sure?")] });
+  o.deps.effectiveToolName = effectiveToolName;
+  await turn(o, { botId: "household", transcript: "delete card 2" });
+  assert.deepEqual(o.calls.executed, []);
+  assert.match(lastToolText(o, 1), /Are you sure you want to trello delete card 2\?/, "the question names what runs");
+});
+
 // ── voice actions hook (PR 2, Task 2.2) ─────────────────────────────────────
 
 test("voiceActions fast path speaks without a model call", async () => {
