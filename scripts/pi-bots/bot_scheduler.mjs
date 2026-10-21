@@ -58,6 +58,40 @@ export function computeNextRun(cronExpression, fromDate = new Date()) {
 const inflight = new Set();
 
 /**
+ * Atomically claim one due schedule row and enqueue its job. Safe across
+ * processes: the advance is a single autocommit UPDATE guarded by the next_run
+ * value that was selected (and enabled=1), so of N tickers racing on the same
+ * stale row exactly one sees changes === 1 and enqueues. Advance FIRST: an
+ * INSERT failure does not undo the advance (no retry every tick).
+ * Returns true only when this call enqueued a job.
+ */
+export function claimAndEnqueue(d, s, nowIso, log = () => {}) {
+  const next = computeNextRun(s.cron_expression);
+  const res = d.prepare(
+    "UPDATE schedules SET last_run=?, next_run=?, updated_at=datetime('now') " +
+    "WHERE id=? AND next_run IS ? AND enabled=1"
+  ).run(nowIso, next, s.id, s.next_run ?? null);
+  if (res.changes !== 1) return false; // another ticker claimed it, or it changed
+
+  const botId = s.task.slice(BOTCRON_PREFIX.length);
+  let spec = {};
+  try { spec = JSON.parse(s.description || "{}"); } catch { spec = {}; }
+  if (next === null) { log(`schedule #${s.id} has an unparseable cron expression — disabled from ticking, not enqueued`); return false; }
+  if (!botId || !spec.goal) { log(`schedule #${s.id} missing bot/goal — advanced, not enqueued`); return false; }
+  if (isVoiceBotId(botId)) { log(`schedule #${s.id} targets the voice bot, which cannot take background jobs — advanced, not enqueued`); return false; }
+
+  const jobId = generateJobId();
+  const deliver = spec.deliver_to == null ? null
+    : (typeof spec.deliver_to === "string" ? spec.deliver_to : JSON.stringify(spec.deliver_to));
+  d.prepare(
+    "INSERT INTO bot_jobs (job_id, bot_id, goal, status, deliver_to, source, schedule_id, escalate) " +
+    "VALUES (?,?,?,'queued',?,?,?,?)"
+  ).run(jobId, botId, spec.goal, deliver, "schedule", s.id, spec.escalate ? 1 : 0);
+  log(`schedule #${s.id} (bot=${botId}) → enqueued job ${jobId}`);
+  return true;
+}
+
+/**
  * One poll tick: enqueue a bot_jobs row for every due bot-cron schedule. Pure DB
  * (no pi). Returns { fired } — how many schedules enqueued a job this tick.
  */
@@ -78,27 +112,7 @@ export function tickBotSchedules({ log = () => {} } = {}) {
       if (inflight.has(s.id)) { log(`schedule #${s.id} still in-flight — skip`); continue; }
       inflight.add(s.id);
       try {
-        const botId = s.task.slice(BOTCRON_PREFIX.length);
-        let spec = {};
-        try { spec = JSON.parse(s.description || "{}"); } catch { spec = {}; }
-
-        // Advance FIRST (no-pile-up): even a bad spec must not retry every tick.
-        const next = computeNextRun(s.cron_expression);
-        d.prepare("UPDATE schedules SET last_run=?, next_run=?, updated_at=datetime('now') WHERE id=?")
-          .run(now, next, s.id);
-
-        if (!botId || !spec.goal) { log(`schedule #${s.id} missing bot/goal — advanced, not enqueued`); continue; }
-        if (isVoiceBotId(botId)) { log(`schedule #${s.id} targets the voice bot, which cannot take background jobs — advanced, not enqueued`); continue; }
-
-        const jobId = generateJobId();
-        const deliver = spec.deliver_to == null ? null
-          : (typeof spec.deliver_to === "string" ? spec.deliver_to : JSON.stringify(spec.deliver_to));
-        d.prepare(
-          "INSERT INTO bot_jobs (job_id, bot_id, goal, status, deliver_to, source, schedule_id, escalate) " +
-          "VALUES (?,?,?,'queued',?,?,?,?)"
-        ).run(jobId, botId, spec.goal, deliver, "schedule", s.id, spec.escalate ? 1 : 0);
-        fired++;
-        log(`schedule #${s.id} (bot=${botId}) → enqueued job ${jobId}`);
+        if (claimAndEnqueue(d, s, now, log)) fired++;
       } catch (e) {
         log(`schedule #${s.id} error: ${(e && e.message) || e}`);
       } finally {
