@@ -64,6 +64,10 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   function errText(r,fallback){
     if(r&&r.j&&r.j.code==='archived') return '${tJs("board.errArchived", lang)}';
     if(r&&r.j&&r.j.code==='locked') return '${tJs("board.errLocked", lang)}';
+    if(r&&r.j&&r.j.code==='already_decided') return '${tJs("botboard.decision.errAlreadyDecided", lang)}';
+    if(r&&r.j&&r.j.code==='expired') return '${tJs("botboard.decision.errExpired", lang)}';
+    if(r&&r.j&&r.j.code==='closed') return '${tJs("botboard.decision.errClosed", lang)}';
+    if(r&&r.j&&r.j.code==='bad_option') return '${tJs("botboard.decision.errBadOption", lang)}';
     return (r&&r.j&&(r.j.reason||r.j.error))||fallback;
   }
 

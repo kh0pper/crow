@@ -852,10 +852,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       const bot = card.assigned_bot ? String(card.assigned_bot) : "";
       if (!bot) return jsonError(res, 400, "card has no assigned_bot");
       if (isVoiceBotId(bot)) return jsonError(res, 400, "assigned_bot not found or disabled", { code: "bot_unavailable" });
-      const botRow = (await cdb.execute({
-        sql: "SELECT bot_id FROM pi_bot_defs WHERE bot_id=? AND enabled=1", args: [bot],
-      })).rows[0];
-      if (!botRow) return jsonError(res, 400, "assigned_bot not found or disabled");
+      if (!(await isEnabledBot(cdb, bot))) return jsonError(res, 400, "assigned_bot not found or disabled");
       const def = await resolveBoardDef(tdb, { projectId: card.project_id });
       if (isTerminal(def, card.status)) {
         return res.status(409).json({ reason: "card is in a terminal status (" + String(card.status) + ")" });

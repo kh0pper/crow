@@ -203,7 +203,7 @@ async function findDecisionCards(tdb, { fingerprint, batch, decided = false } = 
   ];
   const args = [];
   if (await hasArchivedAtColumn(tdb)) where.push("archived_at IS NULL");
-  if (fingerprint != null) { where.push("json_extract(data_json,'$.decision.fingerprint')=?"); args.push(fingerprint); }
+  if (fingerprint != null) { where.push("json_extract(data_json,'$.decision.fingerprint_key')=?"); args.push(fingerprint); }
   if (batch != null) { where.push("json_extract(data_json,'$.decision.batch_key')=?"); args.push(batch); }
   const { rows } = await tdb.execute({
     sql: `SELECT id, project_id, status, data_json FROM tasks_items
@@ -279,10 +279,13 @@ export async function askDecision(tdb, cdb, { projectId, title, tags, decision }
   const v = validateDecision(decision, { now: ms });
   await expireDecisions(tdb, cdb, ms);
 
-  const sameOpen = await findDecisionCards(tdb, { fingerprint: v.fingerprint });
+  // Fingerprints are per asker too: a squatter's card never answers for the
+  // real asker's question.
+  const fpKey = batchKeyOf(actor, v.fingerprint);
+  const sameOpen = await findDecisionCards(tdb, { fingerprint: fpKey });
   if (sameOpen.length) return { id: Number(sameOpen[0].row.id), deduped: true };
 
-  const sameDecided = await findDecisionCards(tdb, { fingerprint: v.fingerprint, decided: true });
+  const sameDecided = await findDecisionCards(tdb, { fingerprint: fpKey, decided: true });
   for (const { row, decision: d } of sameDecided.reverse()) {
     const c = d.chosen;
     const opt = c && Number.isInteger(c.index) && c.index >= 0 ? d.options?.[c.index] : null;
@@ -307,9 +310,9 @@ export async function askDecision(tdb, cdb, { projectId, title, tags, decision }
   }, actor);
   await tdb.execute({
     sql: `UPDATE tasks_items
-          SET data_json=json_set(json_set(json_set(data_json,'$.decision',json(?)),'$.decision.asked_by',json(?)),'$.decision.batch_key',?)
+          SET data_json=json_set(json_set(json_set(json_set(data_json,'$.decision',json(?)),'$.decision.asked_by',json(?)),'$.decision.batch_key',?),'$.decision.fingerprint_key',?)
           WHERE id=? AND board_id IS NULL`,
-    args: [JSON.stringify(v), JSON.stringify(askedBy(actor)), batchKey, id],
+    args: [JSON.stringify(v), JSON.stringify(askedBy(actor)), batchKey, fpKey, id],
   });
   await recordMutation(tdb, { itemId: id, verb: "decision_ask", actor, detail: { fingerprint: v.fingerprint, batch: v.batch } });
   return { id, deduped: false };
@@ -366,26 +369,30 @@ export async function decideOption(tdb, cdb, itemId, { index, otherText } = {}, 
   if (w.rowsAffected !== 1) throw fail("decision already made", "already_decided", 409);
 
   let created = null;
-  const cc = opt?.then?.create_card;
-  if (cc) {
-    const bot = cc.assign_bot || null;
-    const enabled = bot && typeof isEnabledBot === "function" ? !!(await isEnabledBot(bot)) : false;
-    const r = await createCard(tdb, {
-      title: cc.title,
-      description: cc.description ?? null,
-      project_id: card.project_id == null ? null : Number(card.project_id),
-      autonomy: "gated",
-      assigned_bot: enabled ? bot : null,
-      owner: bot && !enabled ? (cc.owner ?? bot) : (cc.owner ?? null),
-    }, actor);
-    created = r.id;
-    await tdb.execute({
-      sql: "UPDATE tasks_items SET data_json=json_set(data_json,'$.decision.created_card_id',?) WHERE id=? AND board_id IS NULL",
-      args: [created, itemId],
-    });
+  try {
+    const cc = opt?.then?.create_card;
+    if (cc) {
+      const bot = cc.assign_bot || null;
+      const enabled = bot && typeof isEnabledBot === "function" ? !!(await isEnabledBot(bot)) : false;
+      const r = await createCard(tdb, {
+        title: cc.title,
+        description: cc.description ?? null,
+        project_id: card.project_id == null ? null : Number(card.project_id),
+        autonomy: "gated",
+        assigned_bot: enabled ? bot : null,
+        owner: bot && !enabled ? (cc.owner ?? bot) : (cc.owner ?? null),
+      }, actor);
+      created = r.id;
+      await tdb.execute({
+        sql: "UPDATE tasks_items SET data_json=json_set(data_json,'$.decision.created_card_id',?) WHERE id=? AND board_id IS NULL",
+        args: [created, itemId],
+      });
+    }
+  } finally {
+    // chosen is already written, so the audit row is too, even if the
+    // follow-up card failed (the error still propagates).
+    await recordMutation(tdb, { itemId, verb: "decision", actor, detail: { chosen, created_card_id: created } });
   }
-
-  await recordMutation(tdb, { itemId, verb: "decision", actor, detail: { chosen, created_card_id: created } });
 
   const target = closeStatus(def, "done");
   if (target && target !== String(card.status)) await moveCard(tdb, cdb, itemId, target, actor);
@@ -430,6 +437,7 @@ function batchKeyOf(a, batch) {
 export async function notifyBatch(tdb, cdb, batch, { createNotification, actor, now } = {}) {
   const ms = toMs(now);
   const stamp = new Date(ms).toISOString();
+  await expireDecisions(tdb, cdb, ms);
   const key = actorKey(actor);
   const all = (await findDecisionCards(tdb, { batch: batchKeyOf(actor, String(batch ?? "")) }))
     .filter(({ decision }) => ms < expiryMs(decision.expires));
@@ -478,8 +486,18 @@ export async function notifyBatch(tdb, cdb, batch, { createNotification, actor, 
   }
 
   const count = claimed.length;
+  const release = async () => {
+    const cph = claimed.map(() => "?").join(",");
+    await tdb.execute({
+      sql: `UPDATE tasks_items
+            SET data_json=json_remove(data_json,'$.decision.notified_at','$.decision.notified_by','$.decision.notify_stamp')
+            WHERE id IN (${cph}) AND json_extract(data_json,'$.decision.notify_stamp')=?`,
+      args: [...claimed, notifyStamp],
+    });
+  };
+  let sent;
   try {
-    await createNotification(cdb, {
+    sent = await createNotification(cdb, {
       type: "attention",
       source: NOTIFY_SOURCE,
       priority: "normal",
@@ -490,14 +508,13 @@ export async function notifyBatch(tdb, cdb, batch, { createNotification, actor, 
     });
   } catch (e) {
     // Release this call's claims so the next notify pushes these cards.
-    const cph = claimed.map(() => "?").join(",");
-    await tdb.execute({
-      sql: `UPDATE tasks_items
-            SET data_json=json_remove(data_json,'$.decision.notified_at','$.decision.notified_by','$.decision.notify_stamp')
-            WHERE id IN (${cph}) AND json_extract(data_json,'$.decision.notify_stamp')=?`,
-      args: [...claimed, notifyStamp],
-    });
+    await release();
     throw e;
+  }
+  if (sent == null) {
+    // The notification type is switched off: nothing was sent, so no cap slot is used.
+    await release();
+    return { pushed: false, count: 0, reason: "notifications_off" };
   }
   return { pushed: true, count };
 }

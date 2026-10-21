@@ -183,7 +183,7 @@ test("picking an option posts its index, then shows the chosen label, a follow-u
   const box = mount.byClass("bb-decision")[0];
   assert.ok(box.textContent.includes(translations["botboard.decision.chosen"].en));
   assert.ok(box.textContent.includes("Prune old images"));
-  assert.ok(mount.byTag("button").every((b) => b.disabled), "no live option buttons after the choice");
+  assert.equal(mount.byTag("button").length, 0, "no buttons at all after the choice");
   const link = mount.byTag("a")[0];
   assert.ok(link, "follow-up link");
   assert.equal(link.href, "/dashboard/bot-board#card=77");
