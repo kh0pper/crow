@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { harness } from "./fixtures/voice-turn-harness.mjs";
 import { createToolFamilies } from "../servers/gateway/voice/tool-families.js";
 import { NOT_DONE_TEXT, ACTION_HELD_MAX_TOKENS, ACTION_NOTE, FILLER_TEXT } from "../servers/gateway/voice/turn.js";
-import { lastWriteRecap, createOwnTools } from "../servers/gateway/voice/own-tools.js";
+import { lastWriteRecap, createOwnTools, calendarAddIntent } from "../servers/gateway/voice/own-tools.js";
 import { createPendingStore, chainVoiceActions } from "../servers/gateway/voice/pending.js";
 
 const FAST = "crow-voice/qwen3.5-4b";
@@ -63,10 +63,11 @@ test("(1) after an ok add, 'add coffee next Tuesday at nine' is offered the cale
   assert.equal(r.timings.claim_blocked, true);
 });
 
-test("(1b) 'add coffee next Tuesday at nine' is fully held (Task 4's add-matcher)", { todo: "Task 4 adds the add-matcher to the full hold" }, async () => {
+test("(1b) 'add coffee next Tuesday at nine' is fully held (Task 4's add-matcher)", async () => {
   const h = gateHarness({ rounds: [call("crow_calendar_add_event", LUNCH), says("Okay. ")] });
   await addLunch(h);
-  const r = await turn(h, "add coffee next Tuesday at nine");
+  // The real calendar tool carries the add-matcher (own-tools.js calendarAddIntent) as its intentWhen.
+  const r = await turn(h, "add coffee next Tuesday at nine", { cal: { ...calTool(), intentWhen: calendarAddIntent } });
   assert.equal(r.timings.action_guard, true);
 });
 

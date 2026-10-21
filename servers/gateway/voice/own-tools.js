@@ -23,7 +23,9 @@
  * set (ownByName); VOICE_OWN_TOOL_NAMES is for listing them (Bot Builder, the editor), never for skipping a gate.
  */
 import { normalizeVoiceSettings, isVoiceBotDef } from "../../shared/voice-bot.js";
-import { ROUTINE_OBJECTS } from "./routine-objects.js";
+import { ROUTINE_OBJECTS, namesRoutineObjects } from "./routine-objects.js";
+import { isObjectWord, hasDayTime } from "./stt-rewrite.js";
+import { phraseWords } from "./tool-families.js";
 import { voiceLine } from "./voice-lines.js";
 import { matchYesNo } from "./pending.js";
 
@@ -43,6 +45,26 @@ export const OWN_TOOL_INTENTS = Object.freeze(Object.fromEntries(Object.keys(ROU
   en: Object.freeze([...ROUTINE_OBJECTS[id].en, ...(OWN_INTENT_EXTRAS[id]?.en || [])]),
   es: Object.freeze([...ROUTINE_OBJECTS[id].es, ...(OWN_INTENT_EXTRAS[id]?.es || [])]),
 })])));
+
+/**
+ * The calendar tool's intentWhen (PR 2.1 [r2 I8]; turn.js reads it beside the intent lists): "add coffee Tuesday at
+ * 9", "please add lunch tomorrow", "añade café el martes a las 9". The verb leads (after a few lead-in words), the
+ * next word is the item (stt-rewrite.js isObjectWord: never "a", "the", a day or a number, so "add two minutes" is
+ * not one), and a day or time follows. Calendar wins over a reminder unless a reminder word is said, and a request
+ * that names a task or a list is theirs. turn.js also lets the display's own objects win (displayObjectWhen).
+ */
+const ADD_VERBS = new Set(["add", "anade", "agrega", "anademe", "agregame"]);
+const ADD_LEAD = new Set(["please", "can", "could", "would", "will", "you", "ok", "okay", "hey", "crow", "so", "also", "and", "just", "go", "ahead", "i", "want", "to", "need", "lets", "oye", "por", "favor", "puedes"]);
+const NOT_CALENDAR = new Set(["list", "lists", "lista", "listas"]);
+export function calendarAddIntent(transcript) {
+  const ws = phraseWords(transcript);
+  let i = 0;
+  while (i < ws.length && i < 4 && !ADD_VERBS.has(ws[i]) && ADD_LEAD.has(ws[i])) i++;
+  if (!ADD_VERBS.has(ws[i]) || !isObjectWord(ws[i + 1]) || !hasDayTime(ws.slice(i + 2))) return false;
+  if (ws.some((w) => NOT_CALENDAR.has(w))) return false;
+  const named = namesRoutineObjects(ws.join(" "));
+  return !named.includes("reminders") && !named.includes("tasks");
+}
 
 /** How long a calendar or task list found by listing stays chosen (per process). */
 export const OWN_ID_CACHE_MS = 10 * 60 * 1000;
@@ -363,7 +385,7 @@ export function lastWriteRecap(w, lang, now = Date.now()) {
 // ─── Definitions ───
 const DEFINITIONS = Object.freeze({
   crow_calendar_add_event: {
-    family: "own:calendar", intent: OWN_TOOL_INTENTS.calendar,
+    family: "own:calendar", intent: OWN_TOOL_INTENTS.calendar, intentWhen: calendarAddIntent,
     definition: {
       name: "crow_calendar_add_event",
       description: "Add an event to the user's calendar. The server tells the user when it is done.",
@@ -535,6 +557,7 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
         definition: d.definition,
         family: d.family,
         intent: d.intent,
+        ...(d.intentWhen ? { intentWhen: d.intentWhen } : {}),
         async execute(args, ctx = {}) {
           const v = validate(name, args, { tz: zone, lang, now: now(), transcript: ctx.transcript });
           if (v.error) return JSON.stringify({ ok: false, code: v.code || "bad_args", message: v.error });

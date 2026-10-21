@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { crowVoiceTurnOptions, VOICE_DENY_TOOLS, withVoiceProfiles, createVoiceBotLoader, CROW_VOICE_BOT_ID, isVoiceBotId, VOICE_BOT_CACHE_MS } from "../servers/gateway/voice/crow-voice.js";
+import { crowVoiceTurnOptions, VOICE_DENY_TOOLS, withVoiceProfiles, createVoiceBotLoader, CROW_VOICE_BOT_ID, isVoiceBotId, VOICE_BOT_CACHE_MS, ownToolsLoaded } from "../servers/gateway/voice/crow-voice.js";
 import { voiceLine, VOICE_LINES } from "../servers/gateway/voice/voice-lines.js";
 import { VOICE_DENY_TOOLS as SHARED_DENY, voiceBotDefinition } from "../servers/shared/voice-bot.js";
 import { STRINGS } from "../bundles/kiosk/server/strings.js";
@@ -139,4 +139,16 @@ test("loadVoiceBot: cached 30 s, and a bot-defs change reloads it at once", asyn
   gen++;
   await load(db);
   assert.equal(db.reads.bot, 3, "pibots:defs-changed (a new generation) re-reads at once");
+});
+
+// PR 2.1 Task 4: does the voice bot have Crow's own tools at hand (the kiosk's command-vocabulary STT prompt)?
+test("ownToolsLoaded: the voice bot with at least one routine backend resolved; never a network call", () => {
+  assert.equal(ownToolsLoaded(null), false);
+  assert.equal(ownToolsLoaded({ bot_id: "helper" }), false, "not the voice bot");
+  assert.equal(ownToolsLoaded(fast), true, "the defaults: Crow's own reminders and the board need no add-on");
+  const none = { ...fast, routine: { calendar: { backend: "google" }, reminders: { backend: "off" }, tasks: { backend: "workspace" } } };
+  assert.equal(ownToolsLoaded(none), false, "nothing resolves without the add-ons");
+  assert.equal(ownToolsLoaded(none, new Set(["gcal_create_event"])), true, "a connected calendar");
+  assert.equal(ownToolsLoaded(none, () => new Set(["ws_task_create"])), true, "a function is read");
+  assert.equal(ownToolsLoaded(none, () => { throw new Error("x"); }), false, "a throwing reader is no add-on");
 });

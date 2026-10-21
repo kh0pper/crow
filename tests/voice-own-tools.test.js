@@ -10,7 +10,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { runMigrations } from "../scripts/migrations/runner.mjs";
 import { createDbClient } from "../servers/db.js";
-import { createOwnTools, VOICE_OWN_TOOL_NAMES, lastWriteRecap, whenOn, _whenFormatCacheSize } from "../servers/gateway/voice/own-tools.js";
+import { createOwnTools, VOICE_OWN_TOOL_NAMES, lastWriteRecap, whenOn, _whenFormatCacheSize, calendarAddIntent } from "../servers/gateway/voice/own-tools.js";
 import { createPendingStore, chainVoiceActions } from "../servers/gateway/voice/pending.js";
 import { VOICE_LINES, voiceLine } from "../servers/gateway/voice/voice-lines.js";
 import { NOT_DONE_TEXT, CANT_DO_TEXT, PARTLY_DONE_TEXT } from "../servers/gateway/voice/turn.js";
@@ -977,4 +977,25 @@ test("a recap with no zone never says today or tomorrow (full date, even for a r
   const now = Date.parse("2026-10-27T12:00:00Z");
   assert.equal(lastWriteRecap(r, "en", now), "Your reminder is set for Tuesday, October 27 at 9:00 AM: call mom.");
   assert.equal(lastWriteRecap(r, "es", now), "Tu recordatorio está puesto para el martes, 27 de octubre, 9:00: call mom.");
+});
+
+// ─── PR 2.1 Task 4 [r2 I8]: "add <item> <day/time>" reaches the calendar tool ───
+test("calendarAddIntent: 'add <item> <day or time>' (en) and 'añade/agrega <item> <day or time>' (es)", () => {
+  for (const t of ["add coffee Tuesday at 9", "Add lunch tomorrow at noon.", "please add coffee next week", "can you add dentist at 3 pm",
+    "añade café el martes a las 9", "agrega comida mañana", "Añade cena a la una"]) {
+    assert.equal(calendarAddIntent(t), true, t);
+  }
+  for (const t of ["add two minutes", "add 15 and 27", "add coffee", "add a reminder Tuesday at 9", "add coffee Tuesday, remind me at 8",
+    "recuérdame añadir café el martes", "add milk to my tasks tomorrow", "add eggs to the list tomorrow", "what did I add on Tuesday",
+    "had coffee Tuesday at 9", "añade dos minutos", "add the dentist", "", null]) {
+    assert.equal(calendarAddIntent(t), false, String(t));
+  }
+});
+
+test("the calendar tool carries intentWhen; reminders and tasks do not", async () => {
+  const { own } = make({ connected: ["ws_cal_create_event"] });
+  const set = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+  assert.equal(toolOf(set, "crow_calendar_add_event").intentWhen, calendarAddIntent);
+  assert.equal(toolOf(set, "crow_reminder_add").intentWhen, undefined);
+  assert.equal(toolOf(set, "crow_task_add").intentWhen, undefined);
 });

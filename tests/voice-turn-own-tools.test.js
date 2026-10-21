@@ -774,3 +774,51 @@ test("a remote write tool, or the add-on wrapper, also drops the past-day rule",
     assert.ok(!user.includes(PAST_DAY_RULE), `${name}: ${user}`);
   }
 });
+
+// ─── PR 2.1 Task 4 [r2 I8]: intentWhen ───
+const { calendarAddIntent } = await import("../servers/gateway/voice/own-tools.js");
+const calWhen = (result = ADDED) => ({ ...calTool(result), intentWhen: calendarAddIntent });
+
+test("intentWhen: 'add coffee Tuesday at 9' offers the calendar tool (not the reminder), is an action, and is fully held", async () => {
+  const h = ownHarness({ bot: CROW, rounds: [says("Added coffee to your calendar. ")] });
+  const r = await turn(h, "add coffee Tuesday at 9", { ownTools: [calWhen(), remTool()], lang: "en" });
+  assert.deepEqual(h.log[0].tools, ["crow_calendar_add_event"]);
+  assert.equal(r.timings.action_intent, true, "matching sets actionAsked");
+  assert.equal(r.timings.action_guard, true, "the full hold");
+  assert.equal(r.escalated, false, "the quick model has the tool");
+  assert.ok(!h.calls.spoken.some((t) => /Added coffee/.test(t)), "a claim without a call is never heard");
+});
+
+test("intentWhen: 'añade café el martes a las 9' does the same", async () => {
+  const h = ownHarness({ bot: CROW, rounds: [says("Listo. ")] });
+  const r = await turn(h, "añade café el martes a las 9", { ownTools: [calWhen(), remTool()], lang: "es" });
+  assert.deepEqual(h.log[0].tools, ["crow_calendar_add_event"]);
+  assert.equal(r.timings.action_intent, true);
+  assert.equal(r.timings.action_guard, true);
+});
+
+test("intentWhen: a call on the matched tool runs directly (not carried-only, no confirm)", async () => {
+  const cal = calWhen();
+  const h = ownHarness({ bot: CROW, rounds: [call("crow_calendar_add_event", { title: "coffee", start: "2026-10-27T09:00:00-05:00" })] });
+  await turn(h, "add coffee Tuesday at 9", { ownTools: [cal], lang: "en" });
+  assert.equal(cal.seen.length, 1);
+  assert.equal(cal.seen[0].ctx.confirm, undefined);
+  assert.deepEqual(h.calls.spoken, [ADDED.say]);
+});
+
+test("intentWhen: a remind word gives the reminder, not the calendar", async () => {
+  const h = ownHarness({ bot: CROW, rounds: [says("Okay. ")] });
+  await turn(h, "add coffee Tuesday at 9, remind me", { ownTools: [calWhen(), remTool()], lang: "en" });
+  assert.deepEqual(h.log[0].tools, ["crow_reminder_add"]);
+});
+
+test("intentWhen yields to the display: 'add two minutes' stays a timer, and a display object wins", async () => {
+  const timer = { definition: { name: "crow_wm", description: "wm", inputSchema: { type: "object" } }, execute: async () => "ok" };
+  const h = ownHarness({ bot: CROW, rounds: [says("Okay. "), says("Okay. ")] });
+  const r = await turn(h, "add two minutes", { ownTools: [calWhen()], extraTools: [timer], displayObjectWhen: () => true, lang: "en" });
+  assert.ok(!h.log[0].tools.includes("crow_calendar_add_event"), String(h.log[0].tools));
+  assert.equal(r.timings.action_intent, undefined);
+  const r2 = await turn(h, "add coffee Tuesday at 9", { ownTools: [calWhen()], extraTools: [timer], displayObjectWhen: () => true, lang: "en" });
+  assert.ok(!h.log[1].tools.includes("crow_calendar_add_event"), String(h.log[1].tools));
+  assert.equal(r2.timings.action_intent, undefined);
+});

@@ -18,6 +18,7 @@ import { withTurnContext, createContextEchoGate, stripContextEcho, stripContextE
 import { estimatePromptTokens, requestFits, choosePromptFit, dropOldestExchange } from "./prompt-fit.js";
 import { claimsAction, claimsReminder, claimsBeyondMemory, toolEffect, needsSpokenYes } from "./action-claims.js";
 import { classifyTools, phraseWords, normalizeIntentLists, listMatches } from "./tool-families.js";
+import { sttRewrite } from "./stt-rewrite.js";
 import { voiceAbilities } from "./voice-abilities.js";
 import { ROUTINE_OBJECTS, ROUTINE_OBJECT_LISTS, namesRoutineObjects } from "./routine-objects.js";
 import { createVoiceMemory, VOICE_MODE_WINDOW_MS } from "./voice-memory.js";
@@ -574,6 +575,19 @@ export function createVoiceTurnRunner(deps) {
         transcript = String(r?.text || "").trim();
         mark("stt_ms");
       }
+      // The voice bot (step 3 below loads and requires it): opts.botId, else deps.voiceBotId, else the device's bound bot.
+      const botId = typeof opts.botId === "string" && opts.botId ? opts.botId : (deps.voiceBotId || device.bound_bot_id);
+      // A misheard leading "add" ("Had coffee Tuesday at 9", PR 2.1 [r2 I6]) is put back once, here, before any reader
+      // of the words (the fast paths, actionWhen, the intent lists, the model): the caption and the saved conversation
+      // keep the rewritten text. The voice bot only, never while a question waits for a yes (stt-rewrite.js: English only).
+      const rw = transcript ? sttRewrite(transcript, { lang: opts.lang }) : null;
+      if (rw) {
+        let waiting = false;
+        try { waiting = voiceActions?.turnContext?.({ device })?.pending === true; } catch { waiting = false; }
+        let rwBot = null;
+        if (!waiting) { try { rwBot = await loadBot(db, botId); } catch { rwBot = null; } }
+        if (!waiting && isVoiceBotDef(rwBot)) { transcript = rw.text; timings.stt_rewrite = rw.from; }
+      }
       result.transcript = transcript;
       sink.event({ type: "transcript_final", text: transcript });
       if (aborted()) { result.aborted = true; return result; }
@@ -588,7 +602,6 @@ export function createVoiceTurnRunner(deps) {
       // 2. Fast paths (no LLM). deps.voiceActions.fastPath first (a pending confirmation answered by a yes or
       // a no), then opts.fastPaths. The voice-actions path gets the bot and an executor; a bot that cannot be
       // loaded is passed as null (it never stops the path), and nothing is ensured here.
-      const botId = typeof opts.botId === "string" && opts.botId ? opts.botId : (deps.voiceBotId || device.bound_bot_id);
       let fp = null;
       if (typeof voiceActions?.fastPath === "function") {
         // Nothing here may stop "pause": a failure is logged and the path is skipped (null).
@@ -693,13 +706,22 @@ export function createVoiceTurnRunner(deps) {
       const famBase = opts.familiesOnIntent === true && deps.toolFamilies ? deps.toolFamilies : null;
       const ownLists = new Map();
       for (const o of ownByName.values()) ownLists.set(o.family, [...(ownLists.get(o.family) || []), ...normalizeIntentLists(o.intent)]);
+      // An own tool's optional intentWhen(transcript) → boolean (PR 2.1 [r2 I8], the calendar's "add coffee Tuesday at 9"):
+      // read beside its intent list, here and nowhere else. It yields to the display (opts.displayObjectWhen: "add two
+      // minutes" stays a timer), and a match is an action request (actionAsked).
+      const ownWhen = new Map();
+      for (const o of ownByName.values()) if (typeof o.intentWhen === "function") ownWhen.set(o.family, [...(ownWhen.get(o.family) || []), o.intentWhen]);
+      const displayObject = (t) => { try { return typeof opts.displayObjectWhen === "function" && opts.displayObjectWhen(t) === true; } catch { return false; } };
+      const whenHit = (f, t) => { try { return (ownWhen.get(f) || []).some((fn) => fn(t) === true); } catch { return false; } };
+      const ownWants = (f, t) => listMatches(phraseWords(t), ownLists.get(f)) || (whenHit(f, t) && !displayObject(t));
       const fam = famBase && ownByName.size ? {
         ...famBase,
         familyOf: (n) => ownByName.get(String(n ?? ""))?.family ?? famBase.familyOf(n),
         hasList: (f) => ownLists.has(f) || famBase.hasList(f),
-        wants: (f, t) => (ownLists.has(f) ? listMatches(phraseWords(t), ownLists.get(f)) : famBase.wants(f, t)),
+        wants: (f, t) => (ownLists.has(f) ? ownWants(f, t) : famBase.wants(f, t)),
       } : famBase;
-      actionAsked = typeof opts.actionWhen === "function" && opts.actionWhen(transcript) === true;
+      const ownWhenAsked = [...ownWhen.keys()].some((f) => whenHit(f, transcript)) && !displayObject(transcript);
+      actionAsked = (typeof opts.actionWhen === "function" && opts.actionWhen(transcript) === true) || ownWhenAsked;
       // Rule 6 ([rev2 I11], rev 2.1): an action request that names only routine objects with no backend. A calendar
       // with a Crow reminder tool at hand is a fallback turn (the reminder is offered, no escalation); anything else
       // is the can't-do line, below.
@@ -723,13 +745,13 @@ export function createVoiceTurnRunner(deps) {
       }
       // Offered on intent: the classifier wants an own family for this transcript (or the calendar fallback offers one).
       // The own families' intent lists (the same test fam.wants runs for an own family, families on or off).
-      const ownIntent = [...ownLists.keys()].some((f) => listMatches(phraseWords(transcript), ownLists.get(f)));
+      const ownIntent = [...ownLists.keys()].some((f) => ownWants(f, transcript));
       if (calendarFallback || (fam && ownIntent)) ownOffered = true;
       const fallbackNames = calendarFallback ? [...ownByName.values()].filter((o) => o.family === "own:reminders").map((o) => o.definition.name) : [];
       const prevBase = calendarFallback
         ? new Set([...(lastFamiliesOf(device.id) || NO_FAMILIES), "own:reminders"])
         : lastFamiliesOf(device.id) || NO_FAMILIES;
-      if (fam && ownIntent) ownStamp = [...ownLists.keys()].filter((f) => listMatches(phraseWords(transcript), ownLists.get(f)));
+      if (fam && ownIntent) ownStamp = [...ownLists.keys()].filter((f) => ownWants(f, transcript));
       if (calendarFallback) ownStamp.push("own:reminders");
       // The voice bot's own families still inside the window (voice memory) are offered too: offered only, never a
       // reason to arm the full hold, to escalate or to count as tools for the router (decided on cls0 below, as before).
@@ -1093,7 +1115,7 @@ export function createVoiceTurnRunner(deps) {
       const armGuard = () => { if (!actionGuard && !mustX && !holdEnd) { actionGuard = true; timings.action_guard = true; } };
       const ownOnOffer = tools.some((t) => ownByName.has(t.name));
       // The full hold on an own tool: only when the transcript itself reads as one (PR 2.1 [r2 C1]). This is the one
-      // place a further reading of the words joins (Task 4's add-matcher). The voice bot no longer arms it on the own-
+      // place a further reading of the words joins: ownIntent carries each own tool's intentWhen (the calendar's add-matcher). The voice bot no longer arms it on the own-
       // tool window alone (ownRecent): a turn that only carries context gets the sentence gate below instead, so plain
       // questions keep streaming. Any other bot keeps the window as a reason (it has no sentence gate).
       const ownActionWords = ownIntent || namesRoutineObjects(transcript).length > 0;

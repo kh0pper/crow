@@ -650,7 +650,7 @@ test("a session display gets the same turn rules as a paired one: display tool o
 // bot-defs generation (as its pibots:defs-changed does).
 
 const CROW = "crow.voice";
-async function crowServe({ def, ensure = true, providers = [], voiceExtra = {} } = {}) {
+async function crowServe({ def, ensure = true, providers = [], voiceExtra = {}, crowVoiceExtra = {} } = {}) {
   const cv = await import("../servers/gateway/voice/crow-voice.js");
   const { voiceBotDefinition } = await import("../servers/shared/voice-bot.js");
   const voiceDef = def || voiceBotDefinition({ preset: "fast_local", fastKey: "voice-test/quick" });
@@ -667,7 +667,7 @@ async function crowServe({ def, ensure = true, providers = [], voiceExtra = {} }
     ...voiceExtra,
   };
   const f = await serve(voice, {
-    crowVoice: { turnOptions: cv.crowVoiceTurnOptions, withVoiceProfiles: cv.withVoiceProfiles, VOICE_DENY_TOOLS: cv.VOICE_DENY_TOOLS, CROW_VOICE_BOT_ID: cv.CROW_VOICE_BOT_ID, isVoiceBotId: cv.isVoiceBotId },
+    crowVoice: { turnOptions: cv.crowVoiceTurnOptions, withVoiceProfiles: cv.withVoiceProfiles, VOICE_DENY_TOOLS: cv.VOICE_DENY_TOOLS, CROW_VOICE_BOT_ID: cv.CROW_VOICE_BOT_ID, isVoiceBotId: cv.isVoiceBotId, ...crowVoiceExtra },
     loadVoiceBot: cv.createVoiceBotLoader({ generation: () => gen }),
     ensureVoiceBot: async (db) => {
       ensured.push(1);
@@ -1535,4 +1535,39 @@ test("B3 a logout inside the grace window after a stop cuts nothing that streams
     r.clock.t += 3 * 60_000; await r.sweep();
     assert.equal(r.k.media.view(id).volume, DEFAULT_VOLUME, "the ticketless entry is gone at grace end");
   } finally { r.close(); await auth.destroySession(token).catch(() => {}); }
+});
+
+// ─── PR 2.1 Task 4 [r2 I7]: the command-vocabulary STT prompt exists, and is OFF ───
+test("the command-vocabulary STT prompt: off by default; on only with the switch set and Crow's own tools loaded; es only on a profile pinned to es", () => {
+  const { STT_COMMAND_PROMPT, STT_COMMAND_VOCAB, commandSttPrompt } = kiosk;
+  assert.equal(STT_COMMAND_PROMPT, false, "off in prod (a measured loss on short commands; the bakeoff decides)");
+  assert.equal(STT_COMMAND_VOCAB.en, "Add lunch to my calendar on Tuesday at noon. Remind me to call at five. Add milk to my tasks.");
+  assert.ok(STT_COMMAND_VOCAB.es.length > 0);
+  const en = { kiosk_settings: {} };
+  const es = { kiosk_settings: { lang: "es" } };
+  assert.equal(commandSttPrompt(en, { language: "en" }, true), "", "the default switch");
+  assert.equal(commandSttPrompt(en, { language: "en" }, false, true), "", "no own tools: nothing");
+  assert.equal(commandSttPrompt(en, { language: "en" }, true, true), STT_COMMAND_VOCAB.en);
+  assert.equal(commandSttPrompt(en, { language: null }, true, true), STT_COMMAND_VOCAB.en);
+  assert.equal(commandSttPrompt(es, { language: "es" }, true, true), STT_COMMAND_VOCAB.es, "a profile that pins es");
+  assert.equal(commandSttPrompt(es, { language: null }, true, true), "", "language left to detection: no prompt");
+  assert.equal(commandSttPrompt(es, { language: "en" }, true, true), STT_COMMAND_VOCAB.en, "an English model: the English list");
+});
+
+test("a turn and the early STT send no command prompt by default, even with Crow's own tools loaded", async () => {
+  const seen = [];
+  const f = await crowServe({ crowVoiceExtra: { ownToolsLoaded: (def) => { seen.push(def?.kind); return true; } } });
+  try {
+    const c = await f.open();
+    c.ws.send(JSON.stringify({ type: "turn_start", turn_id: "p1" }));
+    c.ws.send(Buffer.alloc(8000));
+    c.ws.send(JSON.stringify({ type: "speech_pause" }));
+    await c.until(() => f.stt.length > 0);
+    c.ws.send(JSON.stringify({ type: "turn_end", vad_reason: "manual" }));
+    await c.until(() => c.msgs.some((m) => m.type === "turn_done") || c.closed);
+    assert.equal(f.stt[0].sttPrompt({ language: "en" }), "", "early STT");
+    assert.equal(f.calls.at(-1).sttPrompt({ language: "en" }), "", "the turn's own STT");
+    assert.ok(seen.includes("voice"), "asked about the voice bot");
+    c.ws.close();
+  } finally { await f.close(); }
 });

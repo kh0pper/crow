@@ -168,6 +168,25 @@ export function stationSttPrompt(device, profile, stations, on = STT_STATION_PRO
   return stationNamesHint(stations);
 }
 /**
+ * PR 2.1 [r2 I7]: a command-vocabulary STT prompt ("add" at the start of an utterance was heard as "had"), as a
+ * SWITCH that is OFF. The station prompt above cost short commands 120/126 → 106/126, so this one ships only as
+ * tested plumbing: turning it on is the operator's call after the STT bakeoff runs on the short-command set. When
+ * on, it is sent only while Crow's own tools are loaded (crowVoice.ownToolsLoaded), and the Spanish list only on an
+ * STT profile pinned to es (the kiosk's English model would be pushed the wrong way); a Spanish display whose
+ * profile leaves the language to detection gets none (review L1).
+ */
+export const STT_COMMAND_PROMPT = false;
+export const STT_COMMAND_VOCAB = Object.freeze({
+  en: "Add lunch to my calendar on Tuesday at noon. Remind me to call at five. Add milk to my tasks.",
+  es: "Añade la comida a mi calendario el martes a mediodía. Recuérdame llamar a las cinco. Añade leche a mis tareas.",
+});
+export function commandSttPrompt(device, profile, ownLoaded, on = STT_COMMAND_PROMPT) {
+  if (!on || ownLoaded !== true) return "";
+  if (profile?.language === "es") return STT_COMMAND_VOCAB.es;
+  if (device?.kiosk_settings?.lang === "es" && !profile?.language) return "";
+  return STT_COMMAND_VOCAB.en;
+}
+/**
  * r7b (review of rev 7, H2): faster-whisper `hotwords` from the operator's call signs — a SWITCH, OFF by default
  * (`CROW_KIOSK_STT_HOTWORDS=1` on the gateway turns it on; read at each turn). The reviewer's placebo showed the gain on
  * synthetic speech came from ANY short hotword (a nonsense word did as well as the call sign), so it is not evidence
@@ -391,11 +410,13 @@ export function createKioskRuntime(deps) {
    * STT profile leaves the language to detection (an English name list could tilt it); a profile that pins the
    * language (the kiosk profile pins "en") is safe. A cloud STT profile receives these names with the audio.
    */
-  const sttPromptFor = (device) => (profile) => stationSttPrompt(device, profile, stations);
+  // PR 2.1 [r2 I7]: and, behind STT_COMMAND_PROMPT (off), the command vocabulary while Crow's own tools are loaded.
+  const ownLoaded = (vb) => { try { return deps.crowVoice?.ownToolsLoaded?.(vb?.def ?? null) === true; } catch { return false; } };
+  const sttPromptFor = (device, vb = null) => (profile) => [stationSttPrompt(device, profile, stations), commandSttPrompt(device, profile, ownLoaded(vb))].filter(Boolean).join(" ");
   const sttHotwordsFor = (device) => (profile) => stationSttHotwords(device, profile, stations);
   /** A display turn's options: this display's media line, the STT hints, and the library's stream envelopes read through
    *  the voice turn's one onToolResult hook (envelope.js decides what is honoured). */
-  const turnOptions = (device, caps, tz, emit, hooks, vb = null) => displayTurnOptions(displayCtx(device, caps, emit, hooks), { now, tz, settings: () => device.kiosk_settings, mediaLine: () => media.describe(device.id), sttPrompt: sttPromptFor(device), sttHotwords: sttHotwordsFor(device),
+  const turnOptions = (device, caps, tz, emit, hooks, vb = null) => displayTurnOptions(displayCtx(device, caps, emit, hooks), { now, tz, settings: () => device.kiosk_settings, mediaLine: () => media.describe(device.id), sttPrompt: sttPromptFor(device, vb), sttHotwords: sttHotwordsFor(device),
     crowVoice: deps.crowVoice || null, voiceDef: vb?.def || null, cloud: vb?.cloud === true,
     onToolResult: music ? createEnvelopeHandler({ media, deviceId: device.id, music, meta: () => ({ maxVolume: Number(device.kiosk_settings?.max_volume) || 100 }) }) : null });
   /**
@@ -456,8 +477,9 @@ export function createKioskRuntime(deps) {
     // Early STT (lever D): same profile + per-display model as the turn's own STT.
     transcribe: deps.voice.transcribe
       ? ({ device: device0, audio, signal }) => withDb(async (db) => {
-        const device = await voicedNow(db, device0);   // Crow's STT profile from the first word
-        return deps.voice.transcribe({ db, device, audio, signal, sttModel: (p) => kioskSttModel(p, device.kiosk_settings), sttPrompt: sttPromptFor(device), sttHotwords: sttHotwordsFor(device) });
+        const vb = await loadVoiceBot(db);
+        const device = voiced(device0, vb);   // Crow's STT profile from the first word
+        return deps.voice.transcribe({ db, device, audio, signal, sttModel: (p) => kioskSttModel(p, device.kiosk_settings), sttPrompt: sttPromptFor(device, vb), sttHotwords: sttHotwordsFor(device) });
       })
       : null,
     speak: ({ device, text, sink, signal }) => withDb(async (db) => deps.voice.speakText({ db, device: await voicedNow(db, device), text, sink, signal })),
