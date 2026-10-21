@@ -281,7 +281,7 @@ export function buildExtensionsHTML({
         <span class="ext-collection-card__icon" aria-hidden="true">${collectionIcon(c.icon)}</span>
         <span class="ext-collection-card__name">${escapeHtml(c.name)}</span>
         <span class="ext-collection-card__desc">${escapeHtml(c.description)}</span>
-        <span class="ext-collection-card__count">${c.members.length} ${t("extensions.collectionMembers", lang)}</span>
+        <span class="ext-collection-card__count">${escapeHtml(fill(t(c.members.length === 1 ? "extensions.collectionMembersOne" : "extensions.collectionMembers", lang), { n: c.members.length }))}</span>
       </button>`;
 
   const collectionsHtml = collections.length > 0

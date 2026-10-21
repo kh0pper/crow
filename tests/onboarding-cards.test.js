@@ -15,12 +15,12 @@ test("the done step offers a starter-collection card that deep-links into the st
 // Drive the real handler (same seam as tests/onboarding.test.js's render()) so this
 // isn't just a string match on source: the card must actually render, with the href
 // and the TRANSLATED title text (not the raw i18n key), on the "done" step.
-async function render(query = {}) {
+async function render(query = {}, lang = "en") {
   let captured = "";
   const layout = ({ content }) => content;
   const res = { send(h) { captured = h; }, setHeader() {} };
-  const req = { method: "GET", query, headers: {} };
-  const out = await onboardingPanel.handler(req, res, { layout, lang: "en" });
+  const req = { method: "GET", query, headers: lang === "en" ? {} : { cookie: `crow_lang=${lang}` } };
+  const out = await onboardingPanel.handler(req, res, { layout, lang });
   return typeof out === "string" ? out : captured;
 }
 
@@ -30,4 +30,27 @@ test("the rendered done step contains the collections card with its translated t
   const title = i18n.t("onboarding.tryCollections.title", "en");
   assert.notEqual(title, "onboarding.tryCollections.title", "the title key must resolve to a translated string");
   assert.ok(html.includes(title), "card renders the translated title, not the raw key");
+});
+
+test("starter cards: a one-member collection reads '1 extension', never '1 extensions' (en + es)", async () => {
+  const { loadCollections } = await import("../servers/gateway/dashboard/panels/extensions/collections.js");
+  assert.ok(loadCollections().some((c) => c.members.length === 1), "the shipped registry has a one-member collection");
+  const starter = String(STEP_KEYS.indexOf("starter"));
+  const en = await render({ step: starter }, "en");
+  assert.ok(en.includes('onboarding-action-card-count">1 extension<'));
+  assert.ok(!en.includes("1 extensions"));
+  const es = await render({ step: starter }, "es");
+  assert.ok(es.includes('onboarding-action-card-count">1 extensión<'));
+  assert.ok(!es.includes("1 extensiones"));
+});
+
+test("the singular and plural member-count keys all carry {n} in en and es", () => {
+  for (const key of ["extensions.collectionMembersOne", "extensions.collectionMembers",
+    "onboarding.starterMemberCountOne", "onboarding.starterMemberCount"]) {
+    for (const lang of ["en", "es"]) {
+      const v = i18n.t(key, lang);
+      assert.notEqual(v, key, `${key} exists`);
+      assert.ok(v.includes("{n}"), `${key} (${lang}) carries {n}`);
+    }
+  }
 });

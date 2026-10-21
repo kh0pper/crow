@@ -270,3 +270,17 @@ test("no add-on card is emitted twice inside the browse groups", () => {
   const kolibri = groups.match(/data-addon-id="kolibri"/g) || [];
   assert.equal(kolibri.length, 1, "kolibri appears in exactly one group section");
 });
+
+test("collection member count: singular for one extension, plural otherwise (en + es)", () => {
+  const base = loadCollections()[0];
+  const one = { ...base, id: "one-member", members: [{ id: "jellyfin", kind: "deploys" }] };
+  const three = { ...base, id: "three-members", members: base.members.slice(0, 3) };
+  const en = render({ collections: [one, three] }).viewsHtml;
+  assert.ok(en.includes('ext-collection-card__count">1 extension<'), "one member reads '1 extension'");
+  assert.ok(!en.includes("1 extensions"), "never '1 extensions'");
+  assert.ok(en.includes('ext-collection-card__count">3 extensions<'));
+  const es = render({ collections: [one, three], lang: "es" }).viewsHtml;
+  assert.ok(es.includes('ext-collection-card__count">1 extensión<'));
+  assert.ok(!es.includes("1 extensiones"));
+  assert.ok(es.includes('ext-collection-card__count">3 extensiones<'));
+});
