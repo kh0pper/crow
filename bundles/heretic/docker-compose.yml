@@ -36,7 +36,7 @@ services:
     # Runs only when wanted: Start it from Extensions before a session.
     restart: "no"
     healthcheck:
-      test: ["CMD", "test", "-x", "/opt/heretic/bin/heretic"]
+      test: ["CMD", "/opt/heretic/bin/python", "-c", "import heretic"]
       interval: 60s
       timeout: 10s
       retries: 3

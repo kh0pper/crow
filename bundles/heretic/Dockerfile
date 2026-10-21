@@ -7,7 +7,8 @@
 #   - starts FROM Unsloth's ROCm training image, pinned by tag and digest. It carries
 #     PyTorch built for ROCm 7.2 and Unsloth's GPU pre-flight entrypoint, and shares
 #     its layers with the Unsloth Studio extension (no second 8 GB PyTorch download).
-#     The Unsloth image is Apache-2.0 (its one AGPL file is a smoke-test script);
+#     The Unsloth image is Apache-2.0 with an LGPL-3.0 helper (unsloth-zoo) and one
+#     AGPL smoke-test script;
 #   - installs the UNMODIFIED Heretic release from PyPI into its own venv. Nothing of
 #     Heretic is copied into or vendored in Crow's repository, and nothing of it is
 #     linked into Crow: Crow only builds and starts this container;
@@ -34,7 +35,7 @@ RUN set -eux; \
     cat /tmp/rocm-pins.txt; \
     grep -q '^torch==.*+rocm' /tmp/rocm-pins.txt; \
     /opt/heretic/bin/pip install --no-cache-dir -c /tmp/rocm-pins.txt "heretic-llm==${HERETIC_VERSION}"; \
-    /opt/heretic/bin/python -c "import torch, heretic; assert torch.version.hip, 'torch lost its ROCm build: ' + torch.__version__; print('heretic on torch', torch.__version__, 'hip', torch.version.hip)"; \
+    /opt/heretic/bin/python -c "import torch, heretic, heretic.main, transformers, accelerate, peft, bitsandbytes, optuna, lm_eval, numpy; assert torch.version.hip, 'torch lost its ROCm build: ' + torch.__version__; print('heretic on torch', torch.__version__, 'hip', torch.version.hip)"; \
     test -x /opt/heretic/bin/heretic; \
     rm -f /tmp/rocm-pins.txt
 

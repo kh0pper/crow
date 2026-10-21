@@ -102,6 +102,7 @@ test("unsloth: both web logins are generated, kept in the keychain and consumed 
     assert.match(c, new RegExp(`\\$\\{${name}:\\?`), `${name} is a hard-fail interpolation in compose`);
   }
   assert.match(c, /JUPYTER_PASSWORD=\$\{UNSLOTH_JUPYTER_PASSWORD:\?/, "the image reads JUPYTER_PASSWORD");
+  for (const v of m.env_vars.filter((e) => !e.generate)) assert.equal(v.propagate, false, `${v.name} stays out of the gateway .env`);
   const studio = m.env_vars.find((e) => e.name === "UNSLOTH_STUDIO_PASSWORD");
   assert.equal(studio.keychain_username, "unsloth", "Studio's admin user is named unsloth");
 });
@@ -116,7 +117,7 @@ test("unsloth: healthcheck uses Studio's own /api/health; data lives in named vo
 
 test("unsloth: licence and consent text are honest about AGPL Studio, the GPU and the download", () => {
   const m = manifest("unsloth");
-  assert.equal(m.license, "Apache-2.0 AND AGPL-3.0-only");
+  assert.equal(m.license, "Apache-2.0 AND LGPL-3.0-or-later AND AGPL-3.0-only");
   assert.equal(m.consent_required, true);
   for (const lang of ["en", "es"]) {
     const msg = m.install_consent_messages?.[lang] || "";
@@ -157,6 +158,8 @@ test("heretic: built from the unmodified PyPI release on a digest-pinned ROCm ba
   assert.match(compose("heretic"), new RegExp(`image:\\s*crow-heretic:${ver.replace(/\./g, "\\.")}\\s*$`, "m"), "the local tag names the same release");
   assert.doesNotMatch(df, /git\s+clone|git\+https?:|^\s*(COPY|ADD)\s/m, "nothing vendored, cloned or copied in");
   assert.match(df, /torch\.version\.hip/, "the build fails if pip swapped the ROCm torch out");
+  assert.match(df, /grep -q '\^torch==\.\*\+rocm'/, "the base torch is checked to be a ROCm build");
+  assert.match(df, /pip install[^\n]*-c \/tmp\/rocm-pins\.txt[^\n]*heretic-llm/, "torch is constrained to the base build during the install");
   const files = readdirSync(dir("heretic"), { recursive: true }).map(String);
   assert.equal(files.some((f) => f.endsWith(".py")), false, "no Python (Heretic code) shipped in the bundle");
 });
@@ -188,6 +191,7 @@ test("heretic: consent says plainly that it strips safety refusals, and names AG
   assert.match(m.install_consent_messages.es, /AGPL/);
   assert.match(m.description, /refusal/i, "the card says what it does");
   assert.deepEqual(m.requires.gpu_arch, ["rocm"]);
+  for (const v of m.env_vars.filter((e) => !e.generate)) assert.equal(v.propagate, false, `${v.name} stays out of the gateway .env`);
 });
 
 test("both: skills exist and say what the tools do", () => {

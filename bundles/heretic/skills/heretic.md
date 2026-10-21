@@ -54,4 +54,4 @@ Draft: the container image hasn't been built and smoke-tested on real hardware y
 
 ## Licence
 
-Heretic is **AGPL-3.0-or-later** (https://github.com/p-e-w/heretic). Crow ships only a Dockerfile that installs the unmodified PyPI release (`heretic-llm`) in its own container, and links none of its code. If a Crow host offers Heretic to other people over a network, it must offer them Heretic's source. For the unmodified release, a link to upstream is enough.
+Heretic is **AGPL-3.0-or-later** (https://github.com/p-e-w/heretic). Crow ships only a Dockerfile that installs the unmodified PyPI release (`heretic-llm`) in its own container, and links none of its code. A Crow host that distributes Heretic, or offers a modified Heretic to other people over a network, must make its source available under the AGPL.

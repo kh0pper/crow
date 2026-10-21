@@ -30,7 +30,7 @@ Unsloth is a fine-tuning library that trains open models (Llama, Qwen, Gemma, gp
 | Unsloth Studio (training and chat UI) | `http://localhost:3075/` | user `unsloth`, password in Settings → Passwords ("Studio admin password") |
 | JupyterLab with the Unsloth notebooks (the `AMD-*` set first) | `http://localhost:3076/` | password in Settings → Passwords ("JupyterLab password") |
 
-Both listen on 127.0.0.1 only. At install Crow also serves Studio over HTTPS on the private tailnet (Tailscale Serve on port 3075, never Funnel), so the Studio tile opens from the user's other devices, behind Studio's own login. JupyterLab has no tile and no tailnet route. Never set up a public tunnel or Funnel to either.
+Both listen on 127.0.0.1 only. At install Crow also serves Studio over HTTPS on the private tailnet (Tailscale Serve on port 3075, never Funnel), so the Studio tile opens from the user's other devices, behind Studio's own login. JupyterLab has no tile and no tailnet route. Its password sits in the container environment, so code run inside Studio or a notebook can read it (both already run as root in the same container). Never set up a public tunnel or Funnel to either.
 
 ## Hardware
 
@@ -63,10 +63,11 @@ For Llama or Gemma checkpoints that need a Hugging Face login, set **UNSLOTH_HF_
 - **Studio not up yet:** the first start downloads about 17 GB and loads PyTorch. The health check allows 10 minutes. Watch the container log.
 - **"/dev/kfd not found" in the log:** the host has no AMD ROCm driver loaded (`ls /dev/kfd` on the host).
 - **Bus error in a notebook data loader:** raise **UNSLOTH_SHM_SIZE** (Advanced settings) and restart.
-- **Forgot the Studio password after changing it, or reinstalled over a kept `unsloth-studio` volume** (Studio keeps the password it stored first and ignores the new one in Settings → Passwords): inside the container, `unsloth studio reset-password`.
+- **Forgot the Studio password after changing it:** `docker exec -it crow-unsloth unsloth studio reset-password`.
+- **Studio page doesn't load but JupyterLab does:** Studio refused to start (its log says why); restart the extension.
 
 ## Licences
 
-- Unsloth library and training stack: **Apache-2.0**.
+- Unsloth library: **Apache-2.0**. Its `unsloth-zoo` helper: **LGPL-3.0-or-later**.
 - Unsloth Studio (the web UI in this image): **AGPL-3.0**. The image enforces its attribution notices ("Built by the Unsloth team", the About dialog), and they must stay visible.
 - Crow runs the unmodified upstream image in its own container and links none of its code. If this Crow is ever offered to other people over a network, Studio's AGPL obligations apply to Studio (keep the notices, point to https://github.com/unslothai/unsloth). They don't extend to Crow.
