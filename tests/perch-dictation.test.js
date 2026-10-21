@@ -315,3 +315,37 @@ test("nextState: the recorder's state machine", () => {
   assert.equal(n("transcribing", "start"), "transcribing");
   assert.equal(n("idle", "stop"), "idle");
 });
+
+// ---------------------------------------------------------------------------
+// review fixes (2026-10-21)
+// ---------------------------------------------------------------------------
+
+test("closeSession (back to the list, a session ending, a kill from the list) cancels dictation first", () => {
+  const js = perchHubJs("en");
+  const body = js.slice(js.indexOf("function closeSession(){"), js.indexOf("function leaveToList("));
+  assert.match(body, /^function closeSession\(\)\{\s*dictationCancel\(\);/, "dictationCancel() is the first thing closeSession does");
+});
+
+test("the mic gate re-checks that the recording's session is still the open one", () => {
+  const gate = JS.slice(JS.indexOf("Promise.resolve(p).then(function(stream){"), JS.indexOf("dictBeginRecording(token);"));
+  assert.match(gate, /current\.sid!==DICT\.sid/);
+  assert.match(gate, /data-view/);
+  assert.match(gate, /stopTracks\(stream\)/);
+});
+
+test("the recorder runs with a timeslice, so an error mid-recording keeps what was captured", () => {
+  assert.match(JS, /rec\.start\(1000\)/);
+  assert.match(JS, /rec\.onerror=function\(\)/);
+});
+
+test("ctx.resume() rejections are swallowed", () => {
+  assert.match(JS, /DICT\.ctx\.resume\(\)\.catch\(function\(\)\{\}\)/);
+});
+
+test("focus never falls to <body>: transcribing focuses Cancel, an error Retry (or Cancel), a send the textarea", () => {
+  const set = JS.slice(JS.indexOf("function dictSet("), JS.indexOf("function dictSendLabel("));
+  assert.match(set, /state==='transcribing'/);
+  assert.match(set, /perch-dict-cancel/);
+  assert.match(set, /perch-dict-retry/);
+  assert.match(JS, /if\(action==='send'\)\{ send\(\); dictFocusInput\(input\); return; \}/);
+});

@@ -215,8 +215,9 @@ test("async continuations are guarded — a fast back button must not cross sess
   // 30 as of chat-first PR-3 (ask-first linking): loadLinkAsks' list
   // continuation and the Yes/No decide continuation.
   // 32 with the feedback cards' list continuation and expand fetch.
-  // 33 with composer dictation's transcript continuation (dictation.js).
-  assert.equal(guards, 33, "expected exactly 33 identity guards, found " + guards);
+  // 33 with composer dictation's transcript continuation, 34 with its mic
+  // gate (dictation.js): a stream resolving after the session changed.
+  assert.equal(guards, 34, "expected exactly 34 identity guards, found " + guards);
 });
 
 test("the emitted script never assigns to an innerHTML-class sink", async () => {

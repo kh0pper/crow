@@ -239,12 +239,20 @@ test("pickDictationModel: turbo only when listed, else large-v3 when listed, els
   assert.equal(pick({ provider: "whispercpp", defaultModel: "" }, [TURBO]), "");
 });
 
-test("profileTag is opaque: 16 hex, changes with provider/url/model, never echoes the url", () => {
-  const a = mod.profileTagFor("fasterwhisper", "http://localhost:8004/v1", LARGE);
+test("profileTag is opaque: 16 hex, changes with provider/url/model and the model dictation picked, never echoes the url", () => {
+  const a = mod.profileTagFor("fasterwhisper", "http://localhost:8004/v1", LARGE, LARGE);
   assert.match(a, /^[0-9a-f]{16}$/);
-  assert.notEqual(a, mod.profileTagFor("fasterwhisper", "http://localhost:8004/v1", TURBO));
-  assert.notEqual(a, mod.profileTagFor("groq", "http://localhost:8004/v1", LARGE));
-  assert.equal(a, createHash("sha256").update("fasterwhisper|http://localhost:8004/v1|" + LARGE).digest("hex").slice(0, 16));
+  assert.notEqual(a, mod.profileTagFor("fasterwhisper", "http://localhost:8004/v1", TURBO, LARGE));
+  assert.notEqual(a, mod.profileTagFor("groq", "http://localhost:8004/v1", LARGE, LARGE));
+  assert.notEqual(a, mod.profileTagFor("fasterwhisper", "http://localhost:8004/v1", LARGE, TURBO), "a turbo appearing changes the tag");
+  assert.equal(a, createHash("sha256").update("fasterwhisper|http://localhost:8004/v1|" + LARGE + "|" + LARGE).digest("hex").slice(0, 16));
+});
+
+test("isLocalSttUrl: a server addressed by NAME is treated as cloud (errs toward privacy; documented)", () => {
+  assert.equal(mod.isLocalSttUrl("http://faster-whisper:8000/v1"), false);
+  assert.equal(mod.isLocalSttUrl("http://whisper-box.example.ts.net:8004/v1"), false);
+  const src = readFileSync(join(REPO, "servers/gateway/routes/perch-dictation.js"), "utf8");
+  assert.match(src, /addressed by name/i, "the name-is-cloud rule is written down beside the function");
 });
 
 test("sniffMatches: magic bytes must match the declared type", () => {
@@ -365,6 +373,27 @@ test("probe: an unusable answer is cached only 10 s", async () => {
     assert.equal(calls, 1);
     t += 2_000; await probe(a);
     assert.equal(calls, 2);
+  } finally { await a.close(); }
+});
+
+test("a turbo model appearing changes the tag: an upload made against the old one gets 409, not a mismatched cap", async () => {
+  resetFakes(); seed([P_LOCAL()]);
+  let t = 9_000_000;
+  const a = await mkApp({ now: () => t });
+  try {
+    const before = (await probe(a)).body;
+    assert.equal(before.maxSeconds, 60);
+    local.ps = [LARGE, TURBO];
+    t += 31_000;
+    const after = (await probe(a)).body;
+    assert.equal(after.maxSeconds, 120);
+    assert.notEqual(after.profileTag, before.profileTag);
+    const r = await post(a, { tag: before.profileTag });
+    assert.equal(r.status, 409);
+    assert.equal(r.body.error, "profile_changed");
+    assert.equal(local.hits.transcribe, 0);
+    assert.equal((await post(a, { tag: after.profileTag })).status, 200);
+    assert.equal(local.last.model, TURBO);
   } finally { await a.close(); }
 });
 

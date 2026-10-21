@@ -151,6 +151,14 @@ export function perchDictationJs(lang = "en") {
     var retry=el('perch-dict-retry'); if(retry) retry.hidden=!(state==='error'&&DICT.blob);
     dictSendLabel();
     dictHint();
+    /* Keyboard focus follows the bar, so it never drops to <body> when the
+       control that had it (Done, Send, Retry) leaves the screen. */
+    var cancelBtn=el('perch-dict-cancel');
+    if(state==='transcribing'&&cancelBtn&&cancelBtn.focus) cancelBtn.focus();
+    if(state==='error'){
+      var target=(retry&&!retry.hidden)?retry:cancelBtn;
+      if(target&&target.focus) target.focus();
+    }
   }
   /* The bar's ↑ steers while a turn runs, because send() does. */
   function dictSendLabel(){
@@ -285,7 +293,7 @@ export function perchDictationJs(lang = "en") {
     if(nextState(DICT.state,'start')!=='starting') return;   /* double tap ignored */
     if(!DICT.probe||!DICT.probe.available||!current.sid) return;
     var AC=window.AudioContext||window.webkitAudioContext;
-    try{ DICT.ctx=AC?new AC():null; if(DICT.ctx&&DICT.ctx.resume) DICT.ctx.resume(); }catch(e){ DICT.ctx=null; }
+    try{ DICT.ctx=AC?new AC():null; if(DICT.ctx&&DICT.ctx.resume) DICT.ctx.resume().catch(function(){}); }catch(e){ DICT.ctx=null; }
     var token=++DICT.gen;
     DICT.sid=current.sid; DICT.blob=null; DICT.chunks=[]; DICT.action='done';
     dictSet('starting');
@@ -298,7 +306,8 @@ export function perchDictationJs(lang = "en") {
     Promise.resolve(p).then(function(stream){
       /* The mic gate: anything that moved on while the prompt was up owns
          this stream now, and it is released at once. */
-      if(token!==DICT.gen||!live()||DICT.state!=='starting'){ stopTracks(stream); return; }
+      if(token!==DICT.gen||!live()||DICT.state!=='starting'||current.sid!==DICT.sid||
+         document.body.getAttribute('data-view')!=='chat'){ stopTracks(stream); return; }
       DICT.stream=stream;
       dictBeginRecording(token);
     },function(err){
@@ -320,7 +329,9 @@ export function perchDictationJs(lang = "en") {
     /* A recorder that fails mid-recording (the device went away): stop now and
        transcribe what was captured, rather than waiting for Done or the cap. */
     rec.onerror=function(){ if(token===DICT.gen&&DICT.state==='recording') dictStop('done'); };
-    try{ rec.start(); }catch(e){ dictTeardown(); dictSet('error',DICT_MSG.failed); return; }
+    /* A 1 s timeslice: what was captured is already in DICT.chunks if the
+       recorder fails, instead of only in a final flush that may never come. */
+    try{ rec.start(1000); }catch(e){ dictTeardown(); dictSet('error',DICT_MSG.failed); return; }
     DICT.capS=capSeconds(DICT.probe&&DICT.probe.maxSeconds,rec.mimeType||mime);
     if(DICT.ctx){
       try{
@@ -355,6 +366,11 @@ export function perchDictationJs(lang = "en") {
     dictTeardown();                     /* the mic is released before the upload, not after */
     dictUpload();
   }
+  function dictFocusInput(input){
+    if(!input||!input.focus) return;
+    input.focus();
+    try{ var n=input.value.length; input.setSelectionRange(n,n); }catch(e){}
+  }
   /* The upload. XHR, not fetch, only so ✕ can abort it; the server keeps a
      local job running anyway (its lock holds until it settles) and the
      result is dropped by the generation check. */
@@ -378,11 +394,8 @@ export function perchDictationJs(lang = "en") {
           input.style.height=Math.min(input.scrollHeight||72,120)+'px';
         }
         dictSet(nextState('transcribing','done'));
-        if(action==='send'){ send(); return; }
-        if(input&&input.focus){
-          input.focus();
-          try{ var n=input.value.length; input.setSelectionRange(n,n); }catch(e){}
-        }
+        if(action==='send'){ send(); dictFocusInput(input); return; }
+        dictFocusInput(input);
         return;
       }
       /* A settings change since the probe: refresh where it goes (the hint),

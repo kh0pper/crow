@@ -84,7 +84,13 @@ function ipv4Octets(h) {
  *  network": hostname exactly `localhost`, 127/8, ::1, RFC1918, 100.64/10
  *  (tailnet CGNAT) or fc00::/7. CROW_ALLOWED_IPS is never consulted (it may
  *  hold public addresses). Decides the hint, the lock and the abort rule —
- *  not availability. */
+ *  not availability.
+ *
+ *  A server addressed by name (http://faster-whisper:8000 on a compose
+ *  network, a tailnet MagicDNS name, any LAN hostname) is NOT resolved and is
+ *  therefore treated as cloud: the operator sees "Transcribed by …", the lock
+ *  is per session and a cancel aborts upstream. That errs toward privacy (the
+ *  hint never claims a clip stays home when it might not) and is deliberate. */
 export function isLocalSttUrl(url) {
   if (!url || typeof url !== "string") return false;
   let host;
@@ -116,8 +122,12 @@ export function pickDictationModel(profile, loadedModels) {
   return own;
 }
 
-export function profileTagFor(provider, effectiveUrl, model) {
-  return createHash("sha256").update(`${provider}|${effectiveUrl}|${model}`).digest("hex").slice(0, 16);
+/** The opaque tag the probe hands out and the POST must echo. It covers the
+ *  model dictation PICKED as well as the profile's own: a turbo model
+ *  appearing (or going) in /api/ps changes the cap, so an upload recorded
+ *  under the old one takes the 409 / re-probe path instead. */
+export function profileTagFor(provider, effectiveUrl, model, picked = "") {
+  return createHash("sha256").update(`${provider}|${effectiveUrl}|${model}|${picked}`).digest("hex").slice(0, 16);
 }
 
 /** Magic bytes must match the declared container. */
@@ -184,7 +194,7 @@ export default function perchDictationRouter(dashboardAuth, opts = {}) {
   const router = Router();
   router.use(P, dashboardAuth);
 
-  /** tag → { at, ttl, reachable, loaded } */
+  /** profile key → { at, ttl, reachable, loaded } */
   const probeCache = new Map();
   let localBusy = false;                 // process-wide: one local dictation at a time
   const cloudBusy = new Set();           // sha256(session) of in-flight cloud dictations
@@ -210,9 +220,11 @@ export default function perchDictationRouter(dashboardAuth, opts = {}) {
     }
     const effectiveUrl = effectiveUrlOf(profile);
     const cloud = !isLocalUrl(effectiveUrl);
-    const tag = profileTagFor(profile.provider, effectiveUrl, profile.defaultModel || "");
+    // The probe cache is keyed on the profile alone; the tag handed out also
+    // carries the picked model (below).
+    const key = profileTagFor(profile.provider, effectiveUrl, profile.defaultModel || "");
 
-    let entry = probeCache.get(tag);
+    let entry = probeCache.get(key);
     if (!entry || now() - entry.at >= entry.ttl) {
       let reachable = true, loaded = null;
       const origin = originOf(effectiveUrl);
@@ -223,12 +235,13 @@ export default function perchDictationRouter(dashboardAuth, opts = {}) {
         if (reachable && profile.provider === "fasterwhisper") loaded = await loadedModels(origin);
       }
       entry = { at: now(), ttl: reachable ? PROBE_TTL_OK_MS : PROBE_TTL_BAD_MS, reachable, loaded };
-      probeCache.set(tag, entry);
-      for (const [k, v] of probeCache) if (now() - v.at >= v.ttl && k !== tag) probeCache.delete(k);
+      probeCache.set(key, entry);
+      for (const [k, v] of probeCache) if (now() - v.at >= v.ttl && k !== key) probeCache.delete(k);
     }
-    if (!entry.reachable) return { usable: false, reason: "unreachable", tag, cloud };
+    if (!entry.reachable) return { usable: false, reason: "unreachable", cloud };
 
     const model = pickDictationModel(profile, entry.loaded);
+    const tag = profileTagFor(profile.provider, effectiveUrl, profile.defaultModel || "", model);
     let maxSeconds = 60;
     if (cloud) maxSeconds = 120;
     else if (profile.provider === "fasterwhisper" && TURBO_MODEL_IDS.includes(model)) maxSeconds = 120;

@@ -134,6 +134,9 @@ const INSTRUMENT = `(function(){
   var RAC=window.AudioContext;
   if(RAC){ window.AudioContext=function(o){ var c=new RAC(o); D.ctxs.push(c); return c; }; window.AudioContext.prototype=RAC.prototype; }
   window.CrowAudioPort={postMessage:function(m){ D.port.push(JSON.parse(m).op); }};
+  var RMR=window.MediaRecorder;
+  if(RMR){ D.recs=[]; window.MediaRecorder=function(st,o){ var r=new RMR(st,o); D.recs.push(r); return r; };
+    window.MediaRecorder.prototype=RMR.prototype; window.MediaRecorder.isTypeSupported=RMR.isTypeSupported.bind(RMR); }
 })();`;
 
 async function tab(width, height, { hash = SID } = {}) {
@@ -556,5 +559,95 @@ test("live (phone): Send stays reachable with the mic shown and the player bar r
     const r = await s.json(`(function(){ var b=document.getElementById('perch-send').getBoundingClientRect();
       return JSON.stringify({ok:b.bottom<=innerHeight&&b.top>=0&&b.right<=innerWidth&&b.left>=0}); })()`);
     assert.equal(r.ok, true);
+  } finally { await s.close(); }
+});
+
+// ---------------------------------------------------------------------------
+// review fixes (2026-10-21)
+// ---------------------------------------------------------------------------
+
+const LIST_VIEW = "document.body.getAttribute('data-view')!=='chat'";
+
+test("live (o): back to the list while the mic is starting — the late stream is stopped, nothing uploads", async (t) => {
+  if (!available) return t.skip("no headless Chrome");
+  const s = await tab(412, 730);
+  try {
+    await s.evalIn("window.__dict.gum='defer'; 'ok'");
+    await s.waitFor(MIC_SHOWN, "the mic");
+    await s.click("perch-dictate");
+    await s.waitFor("document.getElementById('perch-composer').getAttribute('data-dictation')==='starting'&&!!window.__dict.held", "starting");
+    await s.click("perch-back");
+    await s.waitFor(LIST_VIEW, "the list");
+    assert.equal((await s.json(STATE)).state, "idle");
+    await s.evalIn("window.__dict.held(); 'ok'");
+    await s.waitFor("window.__dict.streams.length===1&&window.__dict.streams[0].getTracks().every(function(t){return t.readyState==='ended';})", "the late stream's tracks to end");
+    await sleep(400);
+    const st = await s.json(STATE);
+    assert.equal(st.state, "idle");
+    assert.equal((await s.evalIn("(window.__dict.recs||[]).length")), 0, "no recorder was ever started");
+    assert.deepEqual(st.port, ["captureStarting", "captureEnded"]);
+    assert.equal(dictPosts.length, 0);
+  } finally { await s.close(); }
+});
+
+test("live (p): back to the list while recording — the mic is released and nothing uploads", async (t) => {
+  if (!available) return t.skip("no headless Chrome");
+  const s = await tab(412, 730);
+  try {
+    await record(s);
+    await s.click("perch-back");
+    await s.waitFor(LIST_VIEW, "the list");
+    await s.waitFor(IDLE, "idle");
+    const st = await s.json(STATE);
+    assert.ok(allEnded(st), "tracks ended: " + JSON.stringify(st.tracks));
+    assert.ok(allClosed(st));
+    assert.deepEqual(st.port, ["captureStarting", "captureEnded"]);
+    await sleep(800);
+    assert.equal(dictPosts.length, 0, "a hidden composer never uploads");
+  } finally { await s.close(); }
+});
+
+test("live (q): a recorder error mid-recording still transcribes what was captured", async (t) => {
+  if (!available) return t.skip("no headless Chrome");
+  const s = await tab(1280, 900);
+  try {
+    await record(s);
+    await sleep(1300);
+    await s.evalIn("window.__dict.recs[window.__dict.recs.length-1].dispatchEvent(new Event('error')); 'ok'");
+    await s.waitFor("document.getElementById('perch-input').value==='canned words'", "the text to land");
+    assert.equal(dictPosts.length, 1);
+    assert.ok(dictPosts[0].body.length > 0);
+    assert.equal(dictPosts[0].body.subarray(0, 4).toString("hex"), "1a45dfa3");
+  } finally { await s.close(); }
+});
+
+test("live (r): keyboard focus never drops to <body> — Cancel while transcribing, Retry on error, the textarea after Send", async (t) => {
+  if (!available) return t.skip("no headless Chrome");
+  const s = await tab(1280, 900);
+  const active = () => s.evalIn("document.activeElement&&document.activeElement.id");
+  try {
+    dictDelayMs = 700;
+    await record(s);
+    await s.click("perch-dict-done");
+    await s.waitFor("document.getElementById('perch-composer').getAttribute('data-dictation')==='transcribing'", "transcribing");
+    assert.equal(await active(), "perch-dict-cancel");
+    await s.waitFor(IDLE, "idle");
+    assert.equal(await active(), "perch-input");
+
+    dictDelayMs = 0;
+    dictQueue = [{ status: 502, body: { error: "stt_failed" } }];
+    await record(s);
+    await s.click("perch-dict-done");
+    await s.waitFor("document.getElementById('perch-composer').getAttribute('data-dictation')==='error'", "the error");
+    assert.equal(await active(), "perch-dict-retry");
+    await s.click("perch-dict-cancel");
+    await s.waitFor(IDLE, "idle");
+
+    await record(s);
+    await s.click("perch-dict-send");
+    await s.waitFor(IDLE, "idle after Send");
+    for (const end = Date.now() + 3000; !sent.length && Date.now() < end;) await sleep(50);
+    assert.equal(sent.length, 1);
+    assert.equal(await active(), "perch-input");
   } finally { await s.close(); }
 });

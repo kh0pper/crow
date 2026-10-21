@@ -1473,6 +1473,7 @@ export function perchHubJs(lang = "en") {
   function afterHeader(sid,botId){ openStream(sid); loadHistory(botId,sid); loadOptions(sid); }
 
   function closeSession(){
+    dictationCancel();           /* dictation.js: a hidden composer must never keep recording or upload */
     closeStream(); current.sid=null;
     setTurnInFlight(false);      /* the list has no Steer/Stop to show */
     setView('list'); startListPolling(); loadList();
