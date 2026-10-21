@@ -75,6 +75,8 @@ test("an empty root: tmpfs /, system dirs read-only, private /tmp and /run, a fr
   assert.ok(has(args, "--tmpfs", "/run"));
   assert.ok(has(args, "--tmpfs", H), "home is an empty tmpfs");
   assert.ok(has(args, "--dev", "/dev"));
+  assert.ok(has(args, "--proc", "/proc"));
+  assert.ok(args.includes("--unshare-pid"), "own pid namespace: no signals to host processes");
   assert.ok(args.includes("--unshare-user") && args.includes("--unshare-ipc") && args.includes("--unshare-uts"));
   assert.ok(args.includes("--cap-drop"));
   assert.ok(!args.includes("--die-with-parent") && !args.includes("--new-session"));
