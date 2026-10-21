@@ -58,6 +58,8 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 3065 | 127.0.0.1 (host network) | phone (crow-phone-runner, assistant calls; binds loopback only) | Phone plan A |
 | 3070 | 127.0.0.1 | workspace (Crow Workspace: Nextcloud web; tailnet via Serve :8456) | W1 2026-10 |
 | 3071 | 127.0.0.1 | workspace (Crow Workspace: ONLYOFFICE Docs; tailnet via Serve :8457) | W1 2026-10 |
+| 3075 | 127.0.0.1 | unsloth (Unsloth Studio web UI; `webUI.proxyMode: direct`, so the installer also adds Tailscale Serve HTTPS on the same port number on the tailnet interface, never Funnel) | item 3 (store: Unsloth) |
+| 3076 | 127.0.0.1 | unsloth (JupyterLab; loopback only, no Serve route) | item 3 (store: Unsloth) |
 | 3080 | 127.0.0.1 | romm (existing) | existing |
 | 3090 | 127.0.0.1 | Crow Artifacts: main instance artifact origin (`CROW_ARTIFACT_ORIGIN_PORT=3090`). A gateway-internal listener, not a compose port; reached through its own sidecar Tailscale node's Serve (443 on its own hostname), never Funnel | Artifacts step 1 |
 | 3091 | 127.0.0.1 | Crow Artifacts: second co-hosted instance artifact origin (`CROW_ARTIFACT_ORIGIN_PORT=3091`). A gateway-internal listener, not a compose port | Artifacts step 1 |

@@ -1,0 +1,47 @@
+# Heretic: removes the safety refusals ("abliteration") of a transformer language model.
+# AGPL-3.0-or-later, run as its own container and never linked into Crow.
+#
+# Built locally from ./Dockerfile: the unmodified PyPI release of Heretic on Unsloth's
+# ROCm PyTorch image (see the Dockerfile for why and how). Heretic is an interactive
+# command-line tool, so the container idles and nothing listens on any port; the owner
+# runs `docker exec -it crow-heretic heretic <model>` in a terminal.
+#
+# GPU: the AMD device nodes only (services run as root, so no per-host group ids), and
+# a large /dev/shm instead of host IPC, which Crow's install check reserves for
+# privileged bundles.
+
+services:
+  heretic:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: crow-heretic:1.4.0
+    container_name: crow-heretic
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    shm_size: "${HERETIC_SHM_SIZE:-16gb}"
+    environment:
+      - HF_TOKEN=${HERETIC_HF_TOKEN:-}
+      - UNSLOTH_DISABLE_STATISTICS=1
+      - HF_HUB_DISABLE_TELEMETRY=1
+      - DO_NOT_TRACK=1
+    volumes:
+      # Downloaded source models (HF_HOME in the base image).
+      - heretic-hf-cache:/workspace/.cache/huggingface
+      # Working folder: study checkpoints and the models you save (answer /models/<name>
+      # when Heretic asks where to save).
+      - heretic-models:/models
+    init: true
+    # Runs only when wanted: Start it from Extensions before a session.
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "/opt/heretic/bin/python", "-c", "import heretic"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+volumes:
+  heretic-hf-cache:
+  heretic-models:

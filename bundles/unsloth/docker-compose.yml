@@ -1,0 +1,63 @@
+# Unsloth Studio on AMD ROCm: Unsloth's ROCm training image plus the Unsloth Studio web
+# UI (:8000) and JupyterLab with the Unsloth notebooks (:8888), run by supervisord.
+#
+# Image: unsloth/unsloth-rocm, the ROCm build. The plain unsloth/unsloth image is
+# CUDA-only and would not see an AMD GPU. Pinned to the v0.1.903-beta release (pushed
+# 2026-10-06, upstream commit 0aaea8b) by tag AND digest: the `studio` tag moves daily.
+# Built from upstream docker/Dockerfile.studio-rocm; the training base is
+# docker/Dockerfile.rocm (ROCm 7.2, PyTorch for ROCm 7.2, generic wheels).
+#
+# Licences: Unsloth's library is Apache-2.0; Unsloth Studio is AGPL-3.0 with section
+# 7(b) attribution notices the image enforces at start. This file runs the unmodified
+# upstream image as its own container; no Unsloth code is linked into Crow.
+#
+# GPU: AMD GPUs are reached through the kernel driver's device nodes, not a container
+# toolkit. Services in the image run as root, which can open /dev/kfd and /dev/dri
+# without the host's video/render group ids (the entrypoint only warns that they are
+# missing), so no per-host GID has to be configured. Host IPC (`ipc: host`, which
+# upstream's own run line uses) needs privileged consent in Crow's install check, so
+# PyTorch's workers get a large /dev/shm instead.
+
+services:
+  unsloth:
+    image: unsloth/unsloth-rocm:v0.1.903-beta-studio@sha256:cb6d8ac9ddaaf09eac747072ebc4a44424313a4409966582fae17dca0511825b
+    container_name: crow-unsloth
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    shm_size: "${UNSLOTH_SHM_SIZE:-16gb}"
+    ports:
+      - "127.0.0.1:3075:8000"
+      - "127.0.0.1:3076:8888"
+    environment:
+      # Initial admin password of Studio's `unsloth` user, applied only while none is
+      # stored (the launcher keeps it out of supervisord's environment).
+      - UNSLOTH_STUDIO_PASSWORD=${UNSLOTH_STUDIO_PASSWORD:?Set UNSLOTH_STUDIO_PASSWORD}
+      - JUPYTER_PASSWORD=${UNSLOTH_JUPYTER_PASSWORD:?Set UNSLOTH_JUPYTER_PASSWORD}
+      - HF_TOKEN=${UNSLOTH_HF_TOKEN:-}
+      # The image can open a public trycloudflare.com tunnel to JupyterLab. Never.
+      - UNSLOTH_JUPYTER_CLOUDFLARE=0
+      # Unsloth's environment ping (a public README fetch from Hugging Face) and HF telemetry.
+      - UNSLOTH_DISABLE_STATISTICS=1
+      - HF_HUB_DISABLE_TELEMETRY=1
+      - DO_NOT_TRACK=1
+    volumes:
+      # Studio's accounts, chats, projects and outputs.
+      - unsloth-studio:/opt/unsloth-studio
+      # Notebooks, your edits and what they save.
+      - unsloth-workspace:/workspace
+      # Downloaded models (HF_HOME inside the image), kept across re-creates.
+      - unsloth-hf-cache:/workspace/.cache/huggingface
+    restart: unless-stopped
+    healthcheck:
+      # Studio's /api/health turns 200 only once the app is serving (torch loaded).
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://127.0.0.1:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 600s
+
+volumes:
+  unsloth-studio:
+  unsloth-workspace:
+  unsloth-hf-cache:
