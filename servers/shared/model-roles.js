@@ -13,7 +13,7 @@
  *  - Chain depth is at most MAX_CHAIN_DEPTH roles.
  */
 import { validateModelKey, splitKey } from "../../scripts/pi-bots/model_resolver.mjs";
-import { isForeignInstanceHost, hostnameOf } from "./provider-host.js";
+import { isForeignInstanceHost, isInstanceIdShape, hostnameOf } from "./provider-host.js";
 import { getOwnAddresses, isPrivateHost } from "./locality.js";
 import { servingClassOf } from "../gateway/models/serving-class.js";
 import { doorKindOf, isDoorUrl } from "../gateway/models/door-resolve.js";
@@ -96,24 +96,37 @@ function defaultResolveDoor(row, providers) {
 }
 
 /**
- * The one cloud predicate. Follows a door to its upstream, then asks whether
- * the upstream's host is a public address or name that is not one of ours.
- * `host === "cloud"` is deliberately not consulted. An unknown key is false.
+ * Where does a key's traffic end up? Every row visited along the door chain
+ * (the row itself, then each upstream resolveDoor names) is classified by its
+ * base-URL host:
+ *   "cloud"   - any hop is a public address or name that is not ours;
+ *   "unknown" - no verdict: unknown provider key, unparseable baseUrl, a door
+ *               whose upstream cannot be named, or more than MAX_DOOR_HOPS hops;
+ *   "local"   - every hop is private or one of ownAddrs.
+ * `host === "cloud"` on a row is deliberately never consulted.
  */
-export function isCloudKey(key, { providers, resolveDoor = defaultResolveDoor, ownAddrs } = {}) {
+const MAX_DOOR_HOPS = 3;
+export function cloudStatus(key, { providers, resolveDoor = defaultResolveDoor, ownAddrs } = {}) {
   const { provider, model } = splitKey(key);
   let row = providerById(providers, provider);
-  if (!row || !model) return false;
-  for (let hops = 0; hops < 3; hops++) {
+  if (!row || !model) return "unknown";
+  const own = ownAddrs || getOwnAddresses();
+  for (let hops = 0; hops <= MAX_DOOR_HOPS; hops++) {
+    const h = hostnameOf(row.baseUrl);
+    if (!h) return "unknown";
+    if (!own.has(h) && !isPrivateHost(h)) return "cloud";
     const up = resolveDoor(row, providers);
-    if (!up) return false; // a door whose upstream cannot be named is not shown to be cloud
-    if (up === row) break;
+    if (up === row) return "local";
+    if (!up) return "unknown";
     row = up;
   }
-  const h = hostnameOf(row.baseUrl);
-  if (!h) return false;
-  if ((ownAddrs || getOwnAddresses()).has(h)) return false;
-  return !isPrivateHost(h);
+  return "unknown";
+}
+
+/** The one cloud predicate (voice, phone, warnings): errs toward warning, so
+ *  anything not proven local counts as cloud. */
+export function isCloudKey(key, opts) {
+  return cloudStatus(key, opts) !== "local";
 }
 
 function capabilityOk(need, p, modelId) {
@@ -128,12 +141,13 @@ function capabilityOk(need, p, modelId) {
   }
 }
 
-function classOk(p, catalog, allowHeavy) {
+function classOk(providerId, catalogId, catalog, allowHeavy, servingOverrides) {
   if (allowHeavy) return true;
-  const entry = (catalog || []).find((m) => m.id === (p?.gpuPolicy?.catalogId || p?.id)) || null;
+  const entry = (catalog || []).find((m) => m.id === catalogId) || null;
   const cls = servingClassOf(entry);
   if (cls === null || cls === "resident") return true;
-  const override = p?.gpuPolicy?.servingOverride ?? p?.servingOverride;
+  // The catalog is the ceiling; provider rows are peer-writable and never widen it.
+  const override = servingOverrides?.[providerId];
   return typeof override === "string" && override === cls;
 }
 
@@ -141,7 +155,7 @@ function classOk(p, catalog, allowHeavy) {
  * Resolve `key` (raw `provider/model` or `role:<id>`) to a usable raw key.
  * @returns {{key:string|null, role:string|null, chain:string[], reason:string}}
  */
-export function resolveRoleKey(key, { need, bindings = {}, customDefs = {}, providers = [], models, catalog = [], ownInstanceId = () => null } = {}) {
+export function resolveRoleKey(key, { need, bindings = {}, customDefs = {}, providers = [], models, catalog = [], ownInstanceId, servingOverrides = {} } = {}) {
   if (!isRoleRef(key)) return { key: key ?? null, role: null, chain: [], reason: "raw" };
   const rootId = roleIdOf(key);
   const defOf = (id) => CORE_BY_ID.get(id) || (isValidCustomRoleId(id) && customDefs?.[id]
@@ -161,10 +175,14 @@ export function resolveRoleKey(key, { need, bindings = {}, customDefs = {}, prov
     const { provider, model } = splitKey(rawKey);
     const p = providerById(providers, provider);
     if (p) {
-      if (isForeignInstanceHost(p.host, ownInstanceId)) { sawNotConfigured = true; return false; }
+      if (isInstanceIdShape(p.host)) {
+        if (typeof ownInstanceId !== "function") throw new TypeError("resolveRoleKey: ownInstanceId (a function) is required to resolve a role");
+        if (isForeignInstanceHost(p.host, ownInstanceId)) { sawNotConfigured = true; return false; }
+      }
       if (!capabilityOk(wanted, p, model)) { sawCapability = true; return false; }
-      if (!classOk(p, catalog, def.allowHeavy)) { sawNotConfigured = true; return false; }
     }
+    // Without a provider row the foreign check is not applicable, but the catalog class still is.
+    if (!classOk(provider, p?.gpuPolicy?.catalogId || provider, catalog, def.allowHeavy, servingOverrides)) { sawNotConfigured = true; return false; }
     return true;
   };
 

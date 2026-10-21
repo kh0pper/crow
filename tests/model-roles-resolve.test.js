@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   CORE_ROLES, isRoleRef, roleIdOf, isValidCustomRoleId,
-  resolveRoleKey, isConfigured, sameServer, isCloudKey,
+  resolveRoleKey, isConfigured, sameServer, isCloudKey, cloudStatus,
 } from "../servers/shared/model-roles.js";
 
 const prov = (id, modelIds, extra = {}) => ({
@@ -124,10 +124,29 @@ test("heavy refused for automatic role, allowed for deep", () => {
   assert.deepEqual({ key: deep.key, reason: deep.reason }, { key: "big/m", reason: "bound" });
 });
 
-test("a per-model serving override admits the heavy class", () => {
-  const providers = [prov("big", ["m"], { gpuPolicy: { catalogId: "big-cat", servingOverride: "windowed" } })];
+test("serving override comes only from the explicit option, never a row field", () => {
   const catalog = [{ id: "big-cat", serving: { class: "windowed" } }];
-  assert.equal(run("role:everyday", { providers, catalog, bindings: { everyday: { model: "big/m", fallback: [] } } }).key, "big/m");
+  const bindings = { everyday: { model: "big/m", fallback: [] } };
+  const rowField = [prov("big", ["m"], { gpuPolicy: { catalogId: "big-cat", servingOverride: "windowed" }, servingOverride: "windowed" })];
+  assert.equal(run("role:everyday", { providers: rowField, catalog, bindings }).key, null);
+  const providers = [prov("big", ["m"], { gpuPolicy: { catalogId: "big-cat" } })];
+  const r = resolveRoleKey("role:everyday", { bindings, providers, models: modelsOf(providers), catalog, servingOverrides: { big: "windowed" } });
+  assert.equal(r.key, "big/m");
+});
+
+test("class filter still applies when the provider row is missing", () => {
+  const catalog = [{ id: "ghost", serving: { class: "wedge-risk" } }];
+  const models = { providers: { ghost: { models: [{ id: "m" }] } } };
+  const r = resolveRoleKey("role:everyday", { bindings: { everyday: { model: "ghost/m", fallback: [] } }, providers: [], models, catalog });
+  assert.equal(r.key, null);
+  const ok = resolveRoleKey("role:everyday", { bindings: { everyday: { model: "ghost/m", fallback: [] } }, providers: [], models, catalog: [] });
+  assert.equal(ok.key, "ghost/m");
+});
+
+test("a role walk that needs the foreign check requires ownInstanceId", () => {
+  const providers = [prov("far", ["m"], { host: "b".repeat(32) })];
+  assert.throws(() => run("role:everyday", { providers, bindings: { everyday: { model: "far/m", fallback: [] } } }), TypeError);
+  assert.equal(run("far/m", { providers }).key, "far/m"); // raw keys need no option
 });
 
 test("uncurated (no catalog entry) is allowed", () => {
@@ -180,5 +199,22 @@ test("cloud through a door", () => {
   assert.equal(isCloudKey("marked/m", { providers, ownAddrs: own }), false);
   assert.equal(isCloudKey("plain/m", { providers, ownAddrs: own }), false);
   assert.equal(isCloudKey("mine/m", { providers, ownAddrs: own }), false);
-  assert.equal(isCloudKey("door/m", { providers, ownAddrs: own, resolveDoor: () => null }), false);
+  assert.equal(isCloudKey("door/m", { providers, ownAddrs: own, resolveDoor: () => null }), true); // unnamed upstream: unknown, so warn
+});
+
+test("cloudStatus classifies every hop and fails toward warning", () => {
+  const providers = [
+    prov("pub-door", ["m"], { baseUrl: "https://gw.example.com/llm/p/priv/v1", gpuPolicy: { door_forward: true } }),
+    prov("priv", ["m"], { baseUrl: "http://192.168.1.9:8000/v1" }),
+    prov("anon-door", ["m"], { baseUrl: "http://192.168.1.5:3001/llm/v1", gpuPolicy: { door_forward: true } }),
+    prov("bad", ["m"], { baseUrl: "not a url" }),
+  ];
+  const own = new Set();
+  assert.equal(cloudStatus("pub-door/m", { providers, ownAddrs: own }), "cloud");
+  assert.equal(cloudStatus("anon-door/m", { providers, ownAddrs: own }), "unknown");
+  assert.equal(isCloudKey("anon-door/m", { providers, ownAddrs: own }), true);
+  assert.equal(cloudStatus("priv/m", { providers, ownAddrs: own }), "local");
+  assert.equal(isCloudKey("priv/m", { providers, ownAddrs: own }), false);
+  assert.equal(cloudStatus("bad/m", { providers, ownAddrs: own }), "unknown");
+  assert.equal(cloudStatus("missing/m", { providers, ownAddrs: own }), "unknown");
 });
