@@ -102,6 +102,7 @@ import { BOT_JOBS_DDL, missingBotJobsColumns } from "../../../scripts/pi-bots/bo
 import { isVoiceBotId } from "../../shared/voice-bot.js";
 import { decideOption } from "../board/decision-service.js";
 import { isEnabledBot } from "../board/bot-lookup.js";
+import { cardProvenance } from "../board/dispatch-service.js";
 import { csrfMiddleware } from "../dashboard/shared/csrf.js";
 
 // Slice C: operator-approved promotion target (the PRIMARY skills dir both the
@@ -325,6 +326,9 @@ export default function botBoardApiRouter(dashboardAuth) {
       // The operator's dispatch grants (bot ids), additive like `decision`.
       const dispatch_grants = parseGrants(card.data_json);
       delete card.data_json;
+      // True when the operator created the card (its bot may hand it on
+      // without a grant); the drawer then shows a note instead of the box.
+      const { humanCreated: human_created } = await cardProvenance(tdb, id);
       // Track 1 Task 9 (additive keys only — every key above is untouched):
       // autonomy/plan_head/latest_results/mutations give the drawer (history
       // strip, autonomy select, "approve & mark done") one hydration call
@@ -350,6 +354,7 @@ export default function botBoardApiRouter(dashboardAuth) {
         mutations,
         decision,
         dispatch_grants,
+        human_created,
       });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));

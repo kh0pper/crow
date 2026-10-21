@@ -388,7 +388,7 @@ function racingTdb(beforeClaim, afterClaim) {
   return {
     execute: async (q) => {
       const sql = typeof q === "string" ? q : q.sql;
-      const isClaim = /json_remove\(data_json, '\$\.dispatch_grants'\)/.test(sql);
+      const isClaim = /SET assigned_bot = NULL,/.test(sql);
       if (isClaim && beforeClaim) await beforeClaim();
       const r = await tdb.execute(q);
       if (isClaim && afterClaim) await afterClaim();
@@ -454,6 +454,51 @@ test("a give refused after the claim does not take the card back from someone wh
   const err = await refusal(dispatchCard(rtdb, cdb, { itemId: id, toBot: "bot-b" }, BOT_A));
   assert.equal(err.code, "locked");
   assert.equal(card(id).assigned_bot, "bot-c");
+});
+
+test("race: the operator reassigns between the claim and the give: 409 changed, the operator's assignment kept, no dispatch row", async () => {
+  const id = await opCard();
+  const rtdb = racingTdb(null, () => updateCard(tdb, id, { assigned_bot: "bot-c" }, HUMAN));
+  const err = await refusal(dispatchCard(rtdb, cdb, { itemId: id, toBot: "bot-b" }, BOT_A));
+  assert.equal(err.code, "changed");
+  assert.equal(err.http, 409);
+  assert.equal(card(id).assigned_bot, "bot-c", "not overwritten by the give, not restored to the caller");
+  assert.equal(card(id).project_id, PID_A);
+  assert.deepEqual(mutations(id).map((r) => r.verb), ["create", "update"], "only the operator's row");
+  assert.equal(mutations(id)[1].actor_kind, "human");
+  assert.equal(audits(`card:${id}`).length, 0);
+});
+
+test("a failed restore never masks the give's own refusal code", async () => {
+  const id = await opCard();
+  const c0 = raw();
+  const def = c0.prepare("SELECT definition FROM pi_bot_defs WHERE bot_id='bot-b'").get().definition;
+  c0.close();
+  const setDef = (d) => { const c = raw(); c.prepare("UPDATE pi_bot_defs SET definition=? WHERE bot_id='bot-b'").run(d); c.close(); };
+  const inner = racingTdb(async () => setDef(JSON.stringify({ tracker_config: { type: "none" } })));
+  const rtdb = {
+    execute: async (q) => {
+      const sql = typeof q === "string" ? q : q.sql;
+      if (/AND assigned_bot IS NULL AND board_id IS NULL/.test(sql) && /^UPDATE/.test(sql.trim())) throw new Error("disk I/O error");
+      return inner.execute(q);
+    },
+  };
+  try {
+    const err = await refusal(dispatchCard(rtdb, cdb, { itemId: id, toBot: "bot-b" }, BOT_A));
+    assert.equal(err.code, "no_board");
+    assert.equal(err.http, 409);
+  } finally {
+    setDef(def);
+  }
+});
+
+test("a card with unparseable data_json is claimed without a raw JSON error", async () => {
+  const id = await opCard();
+  const t = rawTasks(); t.prepare("UPDATE tasks_items SET data_json='not json' WHERE id=?").run(id); t.close();
+  const out = await go(id);
+  assert.equal(out.to, "bot-b");
+  assert.equal(card(id).assigned_bot, "bot-b");
+  assert.equal(card(id).data_json, "not json");
 });
 
 test("race: an assignee change between the checks and the claim is 409 changed, nothing moved", async () => {

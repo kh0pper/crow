@@ -188,7 +188,10 @@ export async function dispatchCard(tdb, cdb, { itemId, toBot, note } = {}, actor
   // give's update row and the dispatch row record the move.
   const viaGrant = !prov.humanCreated;
   const claim = await tdb.execute({
-    sql: `UPDATE tasks_items SET assigned_bot = NULL, data_json = json_remove(data_json, '$.dispatch_grants')
+    // CASE: a card with unparseable data_json (human path) is claimed as is,
+    // never a raw SQLite JSON error.
+    sql: `UPDATE tasks_items SET assigned_bot = NULL,
+            data_json = CASE WHEN json_valid(data_json) THEN json_remove(data_json, '$.dispatch_grants') ELSE data_json END
           WHERE id = ? AND assigned_bot = ? AND parent_id IS NULL AND archived_at IS NULL AND board_id IS NULL` +
       (viaGrant
         ? ` AND json_valid(data_json) AND EXISTS (SELECT 1 FROM json_each(tasks_items.data_json, '$.dispatch_grants') WHERE value = ?)`
@@ -202,15 +205,24 @@ export async function dispatchCard(tdb, cdb, { itemId, toBot, note } = {}, actor
       cardId: itemId, botId: toBot, actor,
       audit: { actor_type: "bot", actor_id: callerId, extra: { via: "dispatch" } },
       extraFields: { autonomy: "gated" },
+      // The card write applies only while assigned_bot is still the claim's
+      // NULL: an operator reassignment after the claim wins (409 changed).
+      expectAssigned: null,
     });
   } catch (err) {
     // The give refused after the claim (a lock or a board change in the
     // window): hand the card back to the caller unless someone else has
-    // assigned it since. The grant stays spent (fails closed).
-    await tdb.execute({
-      sql: "UPDATE tasks_items SET assigned_bot = ? WHERE id = ? AND assigned_bot IS NULL AND board_id IS NULL",
-      args: [callerId, itemId],
-    });
+    // assigned it since. On 409 changed someone already did (possibly to
+    // nobody), so nothing is restored over it. The grant stays spent (fails
+    // closed). A failed restore never masks the give's own code.
+    if (err?.code !== "changed") {
+      try {
+        await tdb.execute({
+          sql: "UPDATE tasks_items SET assigned_bot = ? WHERE id = ? AND assigned_bot IS NULL AND board_id IS NULL",
+          args: [callerId, itemId],
+        });
+      } catch { /* the give's error below is the one that matters */ }
+    }
     throw err;
   }
   await recordMutation(tdb, {

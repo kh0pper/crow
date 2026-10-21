@@ -239,10 +239,19 @@ function dispatchGrantsOf(dataJson) {
   }
 }
 
-export async function updateCard(tdb, id, fields, actor, { allowArchived } = {}) {
+// `expectAssigned` (optional; undefined = no guard): the write applies only
+// while assigned_bot is still exactly this value (null allowed), checked at
+// the read and again in the UPDATE's WHERE; otherwise 409 changed and nothing
+// is written. The dispatch verb passes null (what its claim left), so an
+// operator reassignment landing after the claim is never overwritten.
+export async function updateCard(tdb, id, fields, actor, { allowArchived, expectAssigned } = {}) {
   const cur = await getCard(tdb, id);
   if (!cur) throw fail("card not found", "not_found", 404);
   if (cur.archived_at != null && !allowArchived) throw fail("card is archived", "archived", 409);
+  const guarded = expectAssigned !== undefined;
+  if (guarded && (cur.assigned_bot ?? null) !== expectAssigned) {
+    throw fail("the card's assignee changed", "changed", 409);
+  }
 
   const f = fields || {};
   const sets = [], args = [], detail = {};
@@ -297,9 +306,10 @@ export async function updateCard(tdb, id, fields, actor, { allowArchived } = {})
 
   // A dispatch grant (data_json.dispatch_grants) is the operator's word for
   // the bot that held the card at the time; it never survives an assignee
-  // change, whoever makes it (the edit route, giveCard, the MCP mount), so a
-  // card reassigned back never brings an old grant back with it. This is the
-  // one assigned_bot writer they all share.
+  // change, whoever makes it, so a card reassigned back never brings an old
+  // grant back with it. This is the one assigned_bot writer shared by the
+  // edit route, giveCard (Give, /bots/:id/tasks, dispatch) and Perch's
+  // attach. No MCP verb can change an existing card's assignee.
   if (Object.prototype.hasOwnProperty.call(detail, "assigned_bot")) {
     // Removed in SQL even when the read saw none, so a grant written after
     // that read still goes; the history row names it when the read saw one.
@@ -310,7 +320,12 @@ export async function updateCard(tdb, id, fields, actor, { allowArchived } = {})
 
   sets.push("updated_at=datetime('now')");
   args.push(id);
-  await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=? AND board_id IS NULL`, args });
+  if (guarded) args.push(expectAssigned);
+  const w = await tdb.execute({
+    sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=? AND board_id IS NULL` + (guarded ? " AND assigned_bot IS ?" : ""),
+    args,
+  });
+  if (guarded && !Number(w.rowsAffected)) throw fail("the card's assignee changed", "changed", 409);
   await recordMutation(tdb, { itemId: id, verb: "update", actor, detail });
   return { id, changed: true };
 }

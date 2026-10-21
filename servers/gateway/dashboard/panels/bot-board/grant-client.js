@@ -2,8 +2,10 @@
  * Bot Board — the card drawer's dispatch-grant checkbox (client JS).
  *
  * GET /card/:id returns the operator's grants as the additive
- * `dispatch_grants` key (bot ids); client.js calls renderGrant(card, grants)
- * right after renderDecision. Toggling posts POST /card/:id/dispatch-grant
+ * `dispatch_grants` key (bot ids) and `human_created`; client.js calls
+ * renderGrant(card, grants, humanCreated) right after renderDecision. On a
+ * card the operator created, its bot may already hand it on, so a short note
+ * shows instead of the checkbox. Toggling posts POST /card/:id/dispatch-grant
  * {bot_id, granted} for the card's current bot; the checkbox shows only for a
  * live top-level card with a bot assigned.
  *
@@ -18,10 +20,16 @@ import { tJs } from "../../shared/i18n.js";
 export function grantJs(lang) {
   return `
   // ---- Dispatch grant: may the card's bot hand it to another bot? ----
-  function renderGrant(card,grants){
+  function renderGrant(card,grants,humanCreated){
     var wrap=$('bb-d-grant'); if(!wrap) return;
     clearEl(wrap);
     if(!card||!card.assigned_bot||card.parent_id!=null||card.archived_at!=null) return;
+    if(humanCreated){
+      var own=document.createElement('div'); own.className='bb-grant-hint';
+      own.textContent='${tJs("botboard.grant.ownCard", lang)}';
+      wrap.appendChild(own);
+      return;
+    }
     var bot=String(card.assigned_bot), cardId=card.id;
     function has(list){ return Array.isArray(list)&&list.indexOf(bot)!==-1; }
     var lab=document.createElement('label'); lab.className='bb-grant';

@@ -214,7 +214,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         // The grant checkbox is server state too: refreshed on every
         // hydration, including the one after a decision.
         if(!opts.keepDecision) renderDecision(r.j.decision);
-        renderGrant(c,r.j.dispatch_grants);
+        renderGrant(c,r.j.dispatch_grants,r.j.human_created===true);
         if(pendingDrawerScroll){ drawer.scrollTop=pendingDrawerScroll; pendingDrawerScroll=0; }
       } else if(!r.ok){ pendingDrawerScroll=0; crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); }
     }).catch(function(){ pendingDrawerScroll=0; crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });

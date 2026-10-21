@@ -6,8 +6,8 @@
  * Route: dashboard-auth only, CSRF-railed, human actor, a `dispatch_grant`
  * mutation; only the card's current bot can be granted; a revoke always
  * goes through. Clearing: updateCard (the single assignee writer the edit
- * route, giveCard and the MCP mount share) drops dispatch_grants whenever
- * assigned_bot changes. UI: the emitted client parses, has no raw backtick,
+ * route, giveCard and Perch's attach share) drops dispatch_grants whenever
+ * assigned_bot changes (no MCP verb can change an existing card's assignee). UI: the emitted client parses, has no raw backtick,
  * never uses innerHTML in the grant block, and every new string has en and
  * es text.
  */
@@ -138,6 +138,7 @@ test("grant then revoke: data_json toggles, each change records a human dispatch
   assert.deepEqual(g1.dispatch_grants, ["bot-a"], "GET exposes the grants");
   assert.ok(!Object.hasOwn(g1.card, "data_json"), "the raw blob stays off the card");
   assert.equal(g1.decision, null, "the sibling decision key is unaffected");
+  assert.equal(g1.human_created, true, "an operator-created card");
 
   const r2 = await grantReq(id, { bot_id: "bot-a", granted: false });
   assert.equal(r2.status, 200);
@@ -272,7 +273,7 @@ test("the edit route's reassignment clears the grants (and records it); an edit 
   assert.equal(grantsOf(id2), null, "unassigning clears too");
 });
 
-test("updateCard (the MCP and give path) clears grants on an assignee change, from any actor", async () => {
+test("updateCard clears grants on an assignee change, from any actor", async () => {
   const id = await opCard();
   setGrants(id, ["bot-a"]);
   await updateCard(tdb, id, { assigned_bot: "bot-b" }, BOT_A);
@@ -291,6 +292,7 @@ test("giveCard clears grants when it moves the card to another bot", async () =>
 
 test("a dashboard grant is what lets a bot-created card be dispatched, once", async () => {
   const id = (await createCard(tdb, { title: "bot card", project_id: PID_A, assigned_bot: "bot-a" }, BOT_A)).id;
+  assert.equal((await (await fetch(base + "/card/" + id)).json()).human_created, false, "a bot-created card");
   await assert.rejects(dispatchCard(tdb, cdb, { itemId: id, toBot: "bot-b" }, BOT_A), (e) => e.code === "not_granted");
   assert.equal((await grantReq(id, { bot_id: "bot-a", granted: true })).status, 200);
   const out = await dispatchCard(tdb, cdb, { itemId: id, toBot: "bot-b" }, BOT_A);
@@ -301,7 +303,7 @@ test("a dashboard grant is what lets a bot-created card be dispatched, once", as
 // ---- the card drawer ----
 
 const UI_KEYS = [
-  "botboard.grant.label", "botboard.grant.hint", "botboard.grant.failed",
+  "botboard.grant.label", "botboard.grant.hint", "botboard.grant.failed", "botboard.grant.ownCard",
   "board.mutationVerb.dispatch", "board.mutationVerb.dispatch_grant",
 ];
 
@@ -326,7 +328,7 @@ test("the emitted client parses, has no raw backtick, splices renderGrant in and
     assert.ok(!src.includes("`"), "no raw backtick (" + lang + ")");
     assert.doesNotThrow(() => new Function(src), "client parses (" + lang + ")");
     assert.ok(src.includes("function renderGrant("), "renderGrant spliced in");
-    assert.match(src, /renderDecision\(r\.j\.decision\);\s*renderGrant\(c,r\.j\.dispatch_grants\);/, "hydrated off the card GET");
+    assert.match(src, /renderDecision\(r\.j\.decision\);\s*renderGrant\(c,r\.j\.dispatch_grants,r\.j\.human_created===true\);/, "hydrated off the card GET");
     assert.ok(src.includes("dispatch:'") && src.includes("dispatch_grant:'"), "history labels for the new verbs");
     assert.ok(src.includes(translations["board.mutationVerb.dispatch_grant"][lang]));
     const block = grantJs(lang);
@@ -366,7 +368,7 @@ function fakeDom() {
   return { document: { createElement: el }, $: (id) => byId[id], mountEl, find: (id) => byId[id] };
 }
 
-async function drive(card, grants, reply) {
+async function drive(card, grants, reply, humanCreated = false) {
   const { grantJs } = await import("../servers/gateway/dashboard/panels/bot-board/grant-client.js");
   const dom = fakeDom();
   const calls = [];
@@ -380,7 +382,7 @@ async function drive(card, grants, reply) {
   };
   const fn = new Function(...Object.keys(env), grantJs("en") + "; return renderGrant;");
   const renderGrant = fn(...Object.values(env));
-  renderGrant(card, grants);
+  renderGrant(card, grants, humanCreated);
   return { dom, calls, renderGrant };
 }
 
@@ -413,4 +415,15 @@ test("a refused toggle puts the checkbox back and shows the error", async () => 
   assert.equal(cb.checked, false);
   const text = JSON.stringify(dom.mountEl.children.map((c) => c.textContent));
   assert.ok(text.includes("not this bot"));
+});
+
+test("on an operator-created card the drawer shows a note instead of the checkbox", async () => {
+  const { translations } = await import("../servers/gateway/dashboard/shared/i18n.js");
+  const { dom, calls } = await drive({ id: 9, assigned_bot: "bot-a", parent_id: null, archived_at: null }, [], null, true);
+  assert.equal(dom.find("bb-d-grant-cb"), undefined, "no checkbox");
+  assert.equal(dom.mountEl.children.length, 1);
+  assert.equal(dom.mountEl.children[0].textContent, translations["botboard.grant.ownCard"].en);
+  assert.equal(calls.length, 0);
+  const none = await drive({ id: 9, assigned_bot: null, parent_id: null, archived_at: null }, [], null, true);
+  assert.equal(none.dom.mountEl.children.length, 0, "no bot, no note");
 });
