@@ -74,7 +74,7 @@ test("the emitted client script parses, has no raw backtick, and hydrates the de
     assert.ok(!src.includes("`"), "no raw backtick in the emitted client (" + lang + ")");
     assert.doesNotThrow(() => new Function(src), "client parses (" + lang + ")");
     assert.ok(src.includes("function renderDecision("), "renderDecision is spliced in");
-    assert.match(src, /renderResults\([^;]*\);\s*renderDecision\(r\.j\.decision\);/, "called right after renderResults");
+    assert.match(src, /renderResults\([^;]*\);\s*if\(!opts\.keepDecision\) renderDecision\(r\.j\.decision\);/, "called right after renderResults");
     assert.ok(src.includes("'/card/'+cardId+'/decision'"), "posts to the decision route");
     assert.ok(!src.includes("innerHTML"), "the decision block never uses innerHTML");
   }
@@ -130,10 +130,16 @@ function harness(lang = "en", { responses = [] } = {}) {
     msg: (el, txt, cls) => { if (el) { el.className = "bb-msg " + (cls || ""); el.textContent = txt || ""; } },
     errText: (r, fb) => (r && r.j && r.j.reason) || fb,
     cur: { id: 42 },
+    changed: [],
+    opened: [],
   };
+  ctx.decisionCardChanged = (id, keepDecision) => ctx.changed.push([id, !!keepDecision]);
+  ctx.openCardById = (id) => ctx.opened.push(id);
   const make = new Function("document", "location", "$", "clearEl", "api", "msg", "errText", "cur",
+    "decisionCardChanged", "openCardById",
     decisionJs(lang) + "\nreturn renderDecision;");
-  const renderDecision = make(document, location, ctx.$, ctx.clearEl, ctx.api, ctx.msg, ctx.errText, ctx.cur);
+  const renderDecision = make(document, location, ctx.$, ctx.clearEl, ctx.api, ctx.msg, ctx.errText, ctx.cur,
+    ctx.decisionCardChanged, ctx.openCardById);
   return { mount, calls, renderDecision, location, ctx };
 }
 
@@ -172,7 +178,7 @@ test("an open decision renders question, plain-text context, options in order wi
 });
 
 test("picking an option posts its index, then shows the chosen label, a follow-up link, and no live buttons", async () => {
-  const { mount, calls, renderDecision, location } = harness("en", {
+  const { mount, calls, renderDecision, location, ctx } = harness("en", {
     responses: [{ ok: true, status: 200, j: { ok: true, chosen: { index: 0, label: "Prune old images", value: "prune", other_text: null, decided_at: "2026-01-01T00:00:00Z" }, created_card_id: 77 } }],
   });
   renderDecision(OPEN());
@@ -180,6 +186,7 @@ test("picking an option posts its index, then shows the chosen label, a follow-u
   assert.ok(mount.byTag("button").every((b) => b.disabled), "buttons disabled while sending");
   await flush(); await flush();
   assert.deepEqual(calls, [{ method: "POST", path: "/card/42/decision", body: { index: 0 } }]);
+  assert.deepEqual(ctx.changed, [[42, false]], "the answer re-hydrates the drawer form (status moved on the server)");
   const box = mount.byClass("bb-decision")[0];
   assert.ok(box.textContent.includes(translations["botboard.decision.chosen"].en));
   assert.ok(box.textContent.includes("Prune old images"));
@@ -218,7 +225,7 @@ test("Other… reveals the textarea; Send posts index -1 with the text; empty te
 
 test("a 409 (answered in another tab) re-reads the card and shows the server's choice read-only", async () => {
   const decided = { ...OPEN(), chosen: { index: 1, label: "Not now", value: null, other_text: null, decided_at: "x" } };
-  const { mount, calls, renderDecision } = harness("en", {
+  const { mount, calls, renderDecision, ctx } = harness("en", {
     responses: [
       { ok: false, status: 409, j: { code: "already_decided", reason: "decision already made" } },
       { ok: true, status: 200, j: { card: { id: 42 }, decision: decided } },
@@ -228,6 +235,7 @@ test("a 409 (answered in another tab) re-reads the card and shows the server's c
   mount.byClass("bb-decision-opt")[0].click();
   for (let i = 0; i < 5; i++) await flush();
   assert.deepEqual(calls.map((c) => c.method + " " + c.path), ["POST /card/42/decision", "GET /card/42"]);
+  assert.deepEqual(ctx.changed, [[42, true]], "a refused answer refreshes the form too, keeping the decision message");
   const box = mount.byClass("bb-decision")[0];
   assert.ok(box.textContent.includes("Not now"));
   assert.ok(box.textContent.includes("decision already made"), "the reason is shown");
@@ -264,4 +272,21 @@ test("no decision (or a malformed one) leaves the mount empty, clearing the prev
   assert.equal(mount.children.length, 0);
   renderDecision({ question: "q", options: "nope" });
   assert.equal(mount.children.length, 0);
+});
+
+test("the drawer re-hydrates from the server after an answer, and Save sends the status it loaded", () => {
+  for (const lang of ["en", "es"]) {
+    const src = scriptBody(lang);
+    // decisionCardChanged refreshes server-owned state only (typed text is kept).
+    assert.match(src, /function decisionCardChanged\(cardId,keepDecision\)\{\s*if\(cur&&cur\.id===cardId\) hydrateDrawer\(cardId,\{keepEdits:true,keepDecision:!!keepDecision\}\);/);
+    // Hydration records the server status as what Save will send.
+    assert.ok(src.includes("cur.status=c.status; cur.loadedStatus=c.status; cur.hydrated=true;"));
+    assert.ok(src.includes("expected_status:cur.loadedStatus"), "Save sends expected_status");
+    assert.ok(src.includes("if(!cur||cur.locked||cur.archived||!cur.hydrated) return;"), "Save waits for the card GET");
+    // A 409 stale reloads the drawer with the translated message.
+    assert.match(src, /r\.j\.code==='stale'\)\{[^}]*hydrateDrawer\(cur\.id\);/, "stale reloads the drawer");
+    assert.ok(src.includes("'" + tJs("botboard.errStale", lang) + "'"), "stale message in " + lang);
+  }
+  assert.ok(translations["botboard.errStale"].en && translations["botboard.errStale"].es);
+  assert.notEqual(translations["botboard.errStale"].en, translations["botboard.errStale"].es);
 });

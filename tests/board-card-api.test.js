@@ -158,7 +158,7 @@ test("edit validates status against the def too", async () => {
   assert.equal(bad.status, 400, "'pending' is not on the custom board");
   const ok = await fetch(base + "/card/2", { method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ title: "custom two", status: "todo" }) });
+    body: JSON.stringify({ title: "custom two", status: "todo", expected_status: "doing" }) }); // card 2 was moved to doing above
   assert.equal(ok.status, 200);
 });
 
@@ -492,7 +492,7 @@ test("convergence: POST /card/:id (edit) records an 'update' mutation for field 
 test("convergence: POST /card/:id (edit) with a status change ALSO records a 'move' mutation", async () => {
   const { body: created } = await createTestCard({});
   const r = await fetch(base + "/card/" + created.id, { method: "POST",
-    headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "still edited", status: "in_progress" }) });
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "still edited", status: "in_progress", expected_status: "pending" }) });
   assert.equal(r.status, 200);
   const rows = mutationsFor(created.id);
   assert.deepEqual(rows.map((m) => m.verb), ["create", "update", "move"]);
@@ -844,4 +844,52 @@ test("POST /card/:id/decision: a request without the dashboard session is refuse
     assert.equal(sibling.status, 401);
     assert.equal(mine.status, sibling.status);
   } finally { srv.close(); }
+});
+
+// ---- compare-and-set on the edit route's status (PR #535 click-through) ----
+
+function cardRow(id) {
+  const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  const row = t.prepare("SELECT title, status FROM tasks_items WHERE id=?").get(id);
+  t.close();
+  return row;
+}
+function postEdit(id, body) {
+  return fetch(base + "/card/" + id, { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+}
+
+test("edit: a stale expected_status (the card was answered meanwhile) is refused 409 stale, nothing written, no move", async () => {
+  const id = await seedDecisionCard();
+  assert.equal((await postDecision(id, { index: 0 })).status, 200);
+  const before = cardRow(id);
+  assert.notEqual(before.status, "pending", "answering closed the card");
+  const verbsBefore = mutationsFor(id).map((m) => m.verb);
+  // The drawer still shows the status it loaded before the answer.
+  const r = await postEdit(id, { title: "renamed from a stale drawer", status: "pending", expected_status: "pending" });
+  assert.equal(r.status, 409);
+  const j = await r.json();
+  assert.equal(j.code, "stale");
+  assert.equal(j.status, before.status, "the current status comes back");
+  assert.deepEqual(cardRow(id), before, "no field written");
+  assert.deepEqual(mutationsFor(id).map((m) => m.verb), verbsBefore, "no update and no move mutation");
+});
+
+test("edit: a status change without expected_status is refused 409 stale (an old page cannot move a card blind)", async () => {
+  const { body: created } = await createTestCard({});
+  const r = await postEdit(created.id, { title: "blind", status: "in_progress" });
+  assert.equal(r.status, 409);
+  assert.equal((await r.json()).code, "stale");
+  assert.deepEqual(cardRow(created.id), { title: "task9 card", status: "pending" });
+  assert.deepEqual(mutationsFor(created.id).map((m) => m.verb), ["create"]);
+});
+
+test("edit: a matching expected_status saves; an unchanged status needs no expected_status", async () => {
+  const { body: created } = await createTestCard({});
+  const same = await postEdit(created.id, { title: "same status", status: "pending" });
+  assert.equal(same.status, 200, "status untouched: no precondition needed");
+  const r = await postEdit(created.id, { title: "moved", status: "in_progress", expected_status: "pending" });
+  assert.equal(r.status, 200);
+  assert.deepEqual(cardRow(created.id), { title: "moved", status: "in_progress" });
+  assert.deepEqual(mutationsFor(created.id).map((m) => m.verb), ["create", "update", "update", "move"]);
 });
