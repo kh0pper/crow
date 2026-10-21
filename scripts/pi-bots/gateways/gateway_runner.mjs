@@ -30,6 +30,7 @@ import { tickJobs } from "../job_runner.mjs";
 import { tickBotSchedules } from "../bot_scheduler.mjs";
 import { makeChannelDeliverer } from "./deliver.mjs";
 import { warnIfPiLabIncompatible } from "../pi-lab-compat.mjs";
+import { SKILL_OFF_LIST_SUPPORTED } from "../skill_resolver.mjs";
 
 const CROW_DB = botsDbPath();
 const REAP_INTERVAL_MS = Number(process.env.PIBOT_REAP_INTERVAL_MS || 60000);
@@ -167,6 +168,10 @@ process.on("SIGINT", shutdown);
   // S6-CROW: declare the pi-lab minimum (MIN_PI_LAB_REV) at boot — a clear
   // warning when the pi-lab that pi loads predates bot read confinement.
   warnIfPiLabIncompatible((m) => log(m));
+  // Skills panel on/off: this process loads the resolver once, and the fleet
+  // auto-updater restarts gateways only. The line shows in the journal that
+  // this process honours the off list (a process without it predates it).
+  if (SKILL_OFF_LIST_SUPPORTED) log("skill off-list: supported");
   startReaper();
   // F3b: self-gate on feature_flags.bot_runtime — start/stop adapters on the
   // toggle without a restart. Off = idle (service up, no adapters connected).

@@ -337,7 +337,7 @@ export async function prepareSpawn(world, { escalate = false, log = () => {} } =
   // bots with skills (e.g. pir-portal-runner: govqa-portal, oag-portal) ran
   // without them. A3: resolved per-instance via skill_resolver — first match
   // across <crowHome>/skills, then the running checkout's skills/, wins.
-  const { sections: skillSections, missing: missingSkills } =
+  const { sections: skillSections, missing: missingSkills, off: offSkillNames = [] } =
     resolveSkills(skillNamesFor(def, { crowHome, kitInstalled: !!world.kitInstalled, houseStyle: world.houseStyle || null }), { crowHome });
   for (const s of skillSections) appendFileSync(sysFile, "\n\n" + s.text);
   // Design kit (review H2): an Artifacts bot is told the kit mode in exactly
@@ -349,6 +349,8 @@ export async function prepareSpawn(world, { escalate = false, log = () => {} } =
   for (const name of missingSkills) {
     log("skill file not found for '" + name + "' in " + skillDirs(crowHome).join(", "));
   }
+  // Switched off by the owner in the Skills panel (skill-state.json): not an error.
+  for (const name of offSkillNames) log("skill '" + name + "' is off on this instance");
 
   // Slice C — opt-in self-authoring. When permission_policy.self_authoring is
   // true, the bot MAY draft a new skill into a CONFINED staging dir. The dir is
