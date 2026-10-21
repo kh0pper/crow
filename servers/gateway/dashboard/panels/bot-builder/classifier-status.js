@@ -85,6 +85,6 @@ export async function classifierStatusHtml(db, lang, opts = {}) {
     const size = st.install && st.install.sizeMb ? `${(st.install.sizeMb / 1024).toFixed(1)} GB` : "?";
     msg = fill(t("botbuilder.classifierMissing", lang), { model: (st.install && st.install.modelId) || "qwen3.5-4b", size });
   }
-  const link = st.state === "ready" ? "" : ` <a href="/dashboard/models">${escapeHtml(t("botbuilder.classifierOpenModels", lang))}</a>`;
+  const link = st.state === "ready" ? "" : ` <a href="/dashboard/model-catalog">${escapeHtml(t("botbuilder.classifierOpenModels", lang))}</a>`;
   return `<p class="btb-hint" data-testid="classifier-status" data-state="${escapeHtml(st.state)}">${escapeHtml(msg)}${link}</p>`;
 }

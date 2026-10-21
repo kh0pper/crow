@@ -60,12 +60,13 @@ test("sendReservationNotice: shapes the notification and swallows sender failure
   assert.equal(calls[0].priority, "normal");
   assert.match(calls[0].title, /Box reserved by win until 2026-09-04T23:00:00\.000Z/);
   assert.match(calls[0].body, /bench/);
-  assert.equal(calls[0].action_url, "/dashboard/models");
+  assert.equal(calls[0].action_url, "/dashboard/model-catalog");
 
   const r = await sendReservationNotice({ kind: "refused", reservation: R1, refused: { provider: "crow-chat", requester: "10.0.0.5 ua=x client=companion" } }, { notify: async (opts) => { calls.push(opts); } });
   assert.equal(r, true);
   assert.equal(calls[1].priority, "high");
   assert.match(calls[1].title, /refused a model start: crow-chat/);
+  assert.equal(calls[1].action_url, "/dashboard/model-catalog", "links to a page that exists");
   assert.match(calls[1].body, /companion/);
 
   const bad = await sendReservationNotice({ kind: "start", reservation: R1 }, { notify: async () => { throw new Error("db down"); } });

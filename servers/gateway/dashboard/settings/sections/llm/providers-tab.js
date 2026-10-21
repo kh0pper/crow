@@ -3,8 +3,9 @@
  * - Rows pulled from `listProvidersAll(db)` (same function the legacy
  *   providers section uses).
  * - "Add cloud provider" form: POSTs with provider_type set on the new row.
- * - "Sync bundle providers" button: re-runs syncProvidersFromModelsJson
- *   with force=true to re-enable any rows disabled by a prior uninstall.
+ * - "Sync bundle providers" button: re-runs syncProvidersFromModelsJson in
+ *   manual mode: refreshes ENABLED providers from models.json; never
+ *   re-enables a disabled (retired or uninstalled) provider, never adds one.
  * - Disable / enable / test buttons reuse the existing legacy actions.
  *
  * Every POST redirects back to ?section=llm&tab=providers so Turbo Drive
@@ -187,7 +188,7 @@ export default {
       <div></div>
       <form method="post">
         <input type="hidden" name="action" value="llm_provider_sync">
-        <button class="btn btn-secondary btn-sm" type="submit" title="Re-upsert every models.json entry. Re-enables rows disabled by a prior bundle uninstall.">Sync bundle providers</button>
+        <button class="btn btn-secondary btn-sm" type="submit" title="${escapeHtml(t("settings.providers.syncHint", lang))}">${escapeHtml(t("settings.providers.syncButton", lang))}</button>
       </form>
     </div>
 
@@ -279,8 +280,11 @@ export default {
       return true;
     }
     if (action === "llm_provider_sync") {
-      const result = await syncProvidersFromModelsJson(db, { force: true });
-      console.log(`[llm-providers-tab] sync force=true upserted=${result.upserted}`);
+      // Manual mode: refreshes enabled providers only. Never turns a disabled
+      // (retired or uninstalled) provider back on and never adds a row.
+      // (force:true used to resurrect every retired model in models.json.)
+      const result = await syncProvidersFromModelsJson(db, { manual: true });
+      console.log(`[llm-providers-tab] manual sync upserted=${result.upserted} skipped_disabled=${result.skipped_disabled} skipped_absent=${result.skipped_absent}`);
       invalidateProvidersCache();
       res.redirectAfterPost(BACK);
       return true;

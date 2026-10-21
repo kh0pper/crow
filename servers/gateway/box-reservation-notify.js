@@ -52,7 +52,7 @@ function shape(notice) {
       priority: "high",
       title: `Box reservation refused a model start: ${who.provider || "?"}`,
       body: `Reserved by ${r.owner || "unknown"} until ${until}. Asked by ${who.requester || "-"}. Escalations degrade to the resident fast model until the reservation ends; run \`box-reserve release\` if it is stale.`,
-      action_url: "/dashboard/models",
+      action_url: "/dashboard/model-catalog",
       metadata: { kind: "box_reservation_refused", owner: r.owner || null, expires_at: r.expires_at || null, provider: who.provider || null },
     };
   }
@@ -65,7 +65,7 @@ function shape(notice) {
     body: r.corrupt
       ? "The reservation file could not be parsed; no local model will start until it is fixed or removed (box-reserve release)."
       : `${r.reason || "(no reason given)"} — non-allowed local model starts are refused until then.`,
-    action_url: "/dashboard/models",
+    action_url: "/dashboard/model-catalog",
     metadata: { kind: "box_reservation_start", owner: r.owner || null, expires_at: r.expires_at || null, corrupt: !!r.corrupt },
   };
 }

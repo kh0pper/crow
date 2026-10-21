@@ -219,13 +219,13 @@ export default {
           <legend style="${lg}">AI Provider</legend>
           <p style="font-size:0.75rem;color:var(--crow-text-muted);margin:0 0 0.75rem">
             Which AI profile answers voice chat. Define profiles in
-            <a href="?section=ai-profiles" style="color:var(--crow-accent)">AI Profiles</a>.
+            <a href="?section=llm&amp;tab=profiles&amp;subtab=chat" style="color:var(--crow-accent)">AI Profiles</a>.
           </p>
           <input type="hidden" name="action" value="update_companion_ai">`;
 
     if (aiProfiles.length === 0) {
       html += `<p style="font-size:0.85rem;color:var(--crow-text-muted);padding:12px;border:1px solid var(--crow-border);border-radius:8px;background:var(--crow-bg-elevated)">
-        No AI profiles configured. <a href="?section=ai-profiles" style="color:var(--crow-accent)">Add one</a> first.
+        No AI profiles configured. <a href="?section=llm&amp;tab=profiles&amp;subtab=chat" style="color:var(--crow-accent)">Add one</a> first.
       </p>`;
     } else {
       const autoChecked = !aiProfileSlug ? " checked" : "";
@@ -295,7 +295,7 @@ export default {
           <legend style="${lg}">Household Profiles</legend>
           <p style="font-size:0.75rem;color:var(--crow-text-muted);margin:0 0 0.75rem">
             Each profile becomes a persona in the character selector. Voice comes from a platform-wide
-            <a href="?section=tts-profiles" style="color:var(--crow-accent)">TTS profile</a> — pick the profile first, then a voice.
+            <a href="?section=llm&amp;tab=profiles&amp;subtab=tts" style="color:var(--crow-accent)">TTS profile</a> — pick the profile first, then a voice.
           </p>
           <input type="hidden" name="action" value="update_companion_household">`;
 
