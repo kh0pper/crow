@@ -58,6 +58,12 @@ export function containSelected(env, botId) {
 export const AGENT_RO_SUBDIRS = Object.freeze(["pkg", "agents", "prompts", "bin", "extensions", "themes"]);
 /** Top-level agent files copied into the shadow (small config; pi writes locks beside them). */
 export const AGENT_SHADOW_FILES = Object.freeze(["auth.json", "models.json", "models-store.json", "settings.json", "mcp.json", "keybindings.json"]);
+/** .env scan (masking): names, skipped dirs, caps. */
+export const ENV_NAME_RE = /^\.env(\..*)?$/;
+export const ENV_SCAN_SKIP = new Set(["node_modules", ".git", ".venv", "__pycache__"]);
+export const ENV_SCAN_MAX_DEPTH = 16;
+export const ENV_SCAN_MAX_ENTRIES = 50000;
+
 /** Data-dir entries a contained bot keeps: the DB files and their journals. */
 export const DB_FILE_RE = /^(crow|tasks)\.db(-wal|-shm|-journal)?$/;
 
@@ -268,26 +274,52 @@ export function buildContainPlan(o) {
   args.push("--tmpfs", home);
 
   // .env files: never readable from a bound dir (the checkout's .env holds
-  // the gateway's secrets; bundle .env files hold extension secrets). Top
-  // level of every bound dir, plus <bound>/bundles/*/ (the checkout's).
-  const boundDirs = [...ro.keys(), ...rw.keys()].filter((p) => { try { return statSync(p).isDirectory(); } catch { return false; } });
-  const isBound = (p) => boundDirs.some((d) => under(p, d)) || ro.has(p) || rw.has(p);
-  const envScan = new Set(boundDirs);
-  for (const d of boundDirs) {
-    const b = join(d, "bundles");
-    try { for (const e of readdirSync(b)) envScan.add(join(b, e)); } catch {}
-  }
-  for (const d of envScan) {
-    let names = [];
-    try { names = readdirSync(d); } catch { continue; }
-    for (const n of names) {
-      if (!/^\.env(\..*)?$/.test(n)) continue;
-      const p = join(d, n);
-      let st; try { st = lstatSync(p); } catch { continue; }
-      if (st.isSymbolicLink()) {
-        const t = real(p, exists);
-        if (t && isBound(t)) masks.push([t, "file"]);
-      } else if (st.isFile()) masks.push([p, "file"]);
+  // the gateway's secrets; bundle .env files hold extension secrets, at any
+  // depth). Every bound dir is walked (no symlinked dirs followed; package code
+  // under node_modules/, .venv/, __pycache__/ and .git/ skipped; masked dirs skipped)
+  // with a depth and entry cap. Hitting the cap FAILS CLOSED: a policy path is
+  // not bound at all; an engine or instance dir refuses the spawn.
+  const maskedDirs = new Set(masks.filter(([, k]) => k === "dir").map(([d]) => d));
+  const policyDirs = new Set([...(o.writePaths || []), ...(o.readPaths || [])].map((p) => real(String(p), exists)).filter(Boolean));
+  const boundDirs = () => [...ro.keys(), ...rw.keys()].filter((p) => { try { return statSync(p).isDirectory(); } catch { return false; } });
+  const isBound = (p) => boundDirs().some((d) => under(p, d)) || ro.has(p) || rw.has(p);
+  const maxDepth = o.envScanMaxDepth ?? ENV_SCAN_MAX_DEPTH;
+  const maxEntries = o.envScanMaxEntries ?? ENV_SCAN_MAX_ENTRIES;
+  for (const d of boundDirs()) {
+    const found = [];
+    let seen = 0, capped = false;
+    const walk = (dir, depth) => {
+      if (capped) return;
+      let names = [];
+      try { names = readdirSync(dir); } catch { return; }
+      for (const n of names) {
+        if (++seen > maxEntries) { capped = true; return; }
+        const p = join(dir, n);
+        let st; try { st = lstatSync(p); } catch { continue; }
+        if (ENV_NAME_RE.test(n)) {
+          if (st.isSymbolicLink()) found.push(["link", p]);
+          else if (st.isFile()) found.push(["file", p]);
+          continue;
+        }
+        if (st.isDirectory() && !ENV_SCAN_SKIP.has(n) && !maskedDirs.has(p)) {
+          if (depth >= maxDepth) { capped = true; return; }
+          walk(p, depth + 1);
+          if (capped) return;
+        }
+      }
+    };
+    walk(d, 1);
+    if (capped) {
+      if (policyDirs.has(d)) {
+        ro.delete(d); rw.delete(d);
+        refused.push({ path: d, reason: "too large to scan for .env files (cap " + maxEntries + " entries / depth " + maxDepth + "); not bound" });
+        continue;
+      }
+      throw new ContainRefused(d + " is too large to scan for .env files (cap " + maxEntries + " entries / depth " + maxDepth + "); refusing to bind it unscanned");
+    }
+    for (const [kind, p] of found) {
+      if (kind === "file") masks.push([p, "file"]);
+      else { const t = real(p, exists); if (t && isBound(t)) masks.push([t, "file"]); }
     }
   }
 

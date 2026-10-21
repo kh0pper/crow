@@ -253,3 +253,40 @@ test("C5: DNS stub dir bound when present", () => {
   const { args } = buildContainPlan(base());
   if (existsSync("/run/systemd/resolve")) assert.ok(has(args, "--ro-bind", "/run/systemd/resolve"));
 });
+
+// ---- security review (MEDIUM): .env masking at any depth, fail closed ----
+
+test(".env files are masked at any depth: nested project folders and bundles/x/sub/.env", () => {
+  const appY = mk(T, "deep", "app");
+  mk(appY, "bundles", "x", "sub");
+  writeFileSync(join(appY, "bundles", "x", "sub", ".env"), "S=1");
+  mk(appY, "a", "b", "c", "d");
+  writeFileSync(join(appY, "a", "b", "c", "d", ".env.production"), "S=1");
+  mk(appY, "node_modules", "pkg"); writeFileSync(join(appY, "node_modules", "pkg", ".env"), "pkg-fixture");
+  const { args } = buildContainPlan(base({ appRoot: appY }));
+  assert.ok(has(args, "--ro-bind", "/dev/null", join(appY, "bundles", "x", "sub", ".env")));
+  assert.ok(has(args, "--ro-bind", "/dev/null", join(appY, "a", "b", "c", "d", ".env.production")));
+});
+
+test("a bound path that is itself a bundles root has every bundle's .env masked", () => {
+  const broot = mk(T, "broot", "bundles");
+  for (const b of ["minio", "workspace"]) { mk(broot, b); writeFileSync(join(broot, b, ".env"), "P=1"); }
+  mk(broot, "browser", "server"); writeFileSync(join(broot, "browser", "server", ".env.local"), "P=1");
+  const { args } = buildContainPlan(base({ readPaths: [broot] }));
+  assert.ok(has(args, "--ro-bind", broot));
+  for (const p of [join(broot, "minio", ".env"), join(broot, "workspace", ".env"), join(broot, "browser", "server", ".env.local")]) {
+    assert.ok(has(args, "--ro-bind", "/dev/null", p), p);
+  }
+});
+
+test("scan cap: a policy path too large to scan is not bound; an engine dir too large refuses the spawn", () => {
+  const big = mk(T, "big", "tree");
+  for (let i = 0; i < 30; i++) writeFileSync(join(big, "f" + i), "");
+  const r = buildContainPlan(base({ readPaths: [big], envScanMaxEntries: 25 }));
+  assert.ok(!has(r.args, "--ro-bind", big), "not bound unscanned");
+  assert.ok(r.refused.some((x) => x.path === big && /too large to scan/.test(x.reason)));
+  const deep = mk(T, "deep2", "a", "b", "c", "d");
+  const r2 = buildContainPlan(base({ readPaths: [join(T, "deep2")], envScanMaxDepth: 2 }));
+  assert.ok(!has(r2.args, "--ro-bind", join(T, "deep2")), "depth cap also fails closed");
+  assert.throws(() => buildContainPlan(base({ envScanMaxEntries: 3 })), ContainRefused, "the engine/checkout cannot be bound unscanned");
+});
