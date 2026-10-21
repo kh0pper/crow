@@ -8,13 +8,17 @@
  * placeholder reached every MCP client as "Writing rules: (Add patterns…)"
  * (skills audit A26). This is not a length check and not an exact-string
  * compare: an older seed with other whitespace, CRLF line endings or a
- * reordering of the same placeholders is still a template.
+ * reordering of the same placeholders is still a template. Only the seed's
+ * "(Add …)" lines count as placeholders; any other line is a rule.
  *
  * No imports: the gateway, the memory server and the stdio servers all load it.
  */
 
-/** A line that is only a "( … )" placeholder. */
-const isPlaceholder = (line) => /^\(.*\)$/.test(line.trim());
+/**
+ * A seed placeholder line: "(Add …)", as every line of the seed is. Only that:
+ * a rule the owner wrote in parentheses ("(no em dashes)") is a real rule.
+ */
+const isPlaceholder = (line) => /^\(Add\b.*\)$/.test(line.trim());
 const isHeading = (line) => /^#{1,6}\s/.test(line.trim());
 
 /** True when nothing but headings, placeholder lines and whitespace is left. */

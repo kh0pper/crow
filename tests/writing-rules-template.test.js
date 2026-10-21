@@ -56,6 +56,26 @@ test("one real rule makes it not a template, whatever its length", () => {
   assert.equal(isWritingRulesTemplate("(this is a real rule, in brackets) and more"), false);
 });
 
+test("a rule written in parentheses is a real rule, never a placeholder (review: only the seed's \"(Add …)\" lines are)", () => {
+  const parens = '### Banned Patterns\n(never say "delve")\n(no em dashes)';
+  assert.equal(isWritingRulesTemplate(parens), false);
+  assert.equal(writingRulesBody(parens), parens, "kept unchanged");
+  const mixed = SEED.replace("(Add patterns you want Crow to never use in any writing)", '(never say "delve")\n(no em dashes)');
+  const body = writingRulesBody(mixed);
+  assert.match(body, /### Banned Patterns\n\(never say "delve"\)\n\(no em dashes\)/);
+  assert.doesNotMatch(body, /\(Add/);
+  assert.doesNotMatch(body, /### Preferred Style/);
+});
+
+test("instructions and crow.md keep a parenthesised rule", async () => {
+  const mixed = SEED.replace("(Add patterns you want Crow to never use in any writing)", "(no em dashes)");
+  assert.match(await generateCondensedContext(db(mixed)), /Writing rules: \(no em dashes\)/);
+  invalidateContextCache();
+  const full = await generateCrowContext(db(mixed), { includeDynamic: false });
+  assert.match(full, /\(no em dashes\)/);
+  assert.doesNotMatch(full, /No writing rules set/);
+});
+
 test("writingRulesBody drops placeholder lines and empty subsections", () => {
   assert.equal(writingRulesBody(SEED), null);
   const partly = SEED.replace("(Add your style preferences: tone, register, formatting)", "Plain, short sentences.");
