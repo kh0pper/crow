@@ -174,6 +174,7 @@ export function buildExtensionsHTML({
   keychainPending = [],
   vaultSecure = false,
   localModels = null,
+  searchQuery = "",
   lang,
 }) {
   // Models plan 3a: model bundles (inference: true) leave Browse — they are
@@ -273,7 +274,7 @@ export function buildExtensionsHTML({
   // ─── Search ───
   const searchHtml = `<div class="ext-search">
       <svg class="ext-search__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-      <input class="ext-search__input" type="text" placeholder="${t("extensions.searchPlaceholder", lang)}" id="ext-search" autocomplete="off">
+      <input class="ext-search__input" type="text" placeholder="${t("extensions.searchPlaceholder", lang)}" id="ext-search" autocomplete="off" value="${escapeHtml(searchQuery)}">
     </div>`;
 
   // ─── Starter collections ───
