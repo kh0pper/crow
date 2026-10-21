@@ -48,6 +48,7 @@ test("integration: a contained PiRpc child sees only its engine, its paths and i
   const stub = join(scratch, "stub-pi.mjs");
   writeFileSync(stub, [
     'import { existsSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";',
+    'import { createRequire } from "node:module"; const require = createRequire(import.meta.url);',
     'import { homedir } from "node:os";',
     'import { join } from "node:path";',
     'const P = JSON.parse(process.env.CROW_TEST_PATHS);',
@@ -65,6 +66,7 @@ test("integration: a contained PiRpc child sees only its engine, its paths and i
     '  cache: process.env.npm_config_cache || null,',
     '  signal: (() => { try { process.kill(P.sentinel, 0); return "reached"; } catch (e) { return e.code; } })(),',
     '  resolv: existsSync("/etc/resolv.conf"),',
+    '  keyctl: (() => { try { return require("child_process").execFileSync("python3", ["-c", "import ctypes,os;l=ctypes.CDLL(None,use_errno=True);r=l.syscall(" + P.keyctlNr + ",0,0);print(\'ok\' if r>=0 else os.strerror(ctypes.get_errno()))"]).toString().trim(); } catch (e) { return "noexec:" + e.code; } })(),',
     '};',
     'process.stdout.write(JSON.stringify({ type: "report", ...r }) + "\\n");',
     'process.stdin.resume();',
@@ -78,13 +80,16 @@ test("integration: a contained PiRpc child sees only its engine, its paths and i
   const { spawn: spawnSentinel } = await import("node:child_process");
   const sentinel = spawnSentinel("sleep", ["60"], { stdio: "ignore" });
   testPaths.sentinel = sentinel.pid;
+  const { SYSCALLS } = await import("../scripts/pi-bots/pi_seccomp.mjs");
+  testPaths.keyctlNr = (SYSCALLS[process.arch] || {}).keyctl ?? -1;
   const pi = new PiRpc({
     def: { bot_id: "contain-test-bot", permission_policy: { bash: "deny", write_paths: [out], read_paths: [notes] },
       spawn_env: { CROW_TEST_PATHS: JSON.stringify(testPaths) } },
     sessionDir: session, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: process.execPath, cliPath: stub,
   });
   try {
-    assert.equal(pi.sandboxTier, "contain");
+    const { seccompSupported } = await import("../scripts/pi-bots/pi_seccomp.mjs");
+    assert.equal(pi.sandboxTier, seccompSupported() ? "contain" : "contain-noseccomp");
     const r = await pi.waitFor((m) => m.type === "report", 20000, "report");
     assert.equal(r.ssh, false, "~/.ssh is not in the sandbox");
     assert.equal(r.claude, false, "~/.claude is not in the sandbox");
@@ -108,6 +113,7 @@ test("integration: a contained PiRpc child sees only its engine, its paths and i
     assert.ok(existsSync(join(out, "o.txt")));
     assert.equal(r.signal, "ESRCH", "a same-uid host process cannot even be signalled (own pid namespace)");
     assert.equal(r.resolv, existsSync("/etc/resolv.conf"), "the resolver config resolves inside as it does outside");
+    if (existsSync("/usr/bin/python3") && pi.sandboxTier === "contain") assert.match(r.keyctl, /Operation not permitted/, "the seccomp filter is live: " + r.keyctl);
   } finally {
     try { sentinel.kill("SIGKILL"); } catch {}
     await pi.close();

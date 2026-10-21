@@ -37,7 +37,8 @@ import { appendDates } from "../../servers/shared/relative-dates.js";
 import { stripContextEcho } from "../../servers/gateway/voice/context-echo.js";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -91,6 +92,17 @@ function resolveSandboxedPiPid(rpc, initPid, tries = 0) {
 const BOARD_SECRET_ENV_KEYS = [BOARD_ACTOR_SECRET_ENV, "CROW_BOARD_ACTOR_SECRET_FILE", "CREDENTIALS_DIRECTORY"];
 
 const HOME = process.env.HOME || homedir();
+/** fd the contain tier's seccomp program reaches bwrap on (3 = --info-fd, 4 = MCP config). */
+const SECCOMP_FD = 5;
+function seccompFileFd(buf) {
+  const dir = mkdtempSync(join(tmpdir(), "crow-seccomp-"));
+  const f = join(dir, "filter.bpf");
+  writeFileSync(f, buf, { mode: 0o600 });
+  const fd = openSync(f, "r");
+  unlinkSync(f);
+  rmdirSync(dir);
+  return fd;
+}
 const BRIDGE_APP_ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /**
@@ -575,7 +587,7 @@ export class PiRpc {
         contain = containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def });
         this._containCleanups.push(...contain._cleanups);
       }
-      launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, botId: sandboxBotId, contain });
+      launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, botId: sandboxBotId, contain, seccompFd: contain ? SECCOMP_FD : null });
     } catch (e) {
       this._runContainCleanup();
       throw e;
@@ -594,11 +606,21 @@ export class PiRpc {
       stdio.push("pipe");
     }
     this.mcpDelivery = fdMode ? "fd" : "file";
+    // Contain tier: the seccomp program on fd SECCOMP_FD, from an already
+    // unlinked file (nothing to clean up, nothing a bot could find on disk).
+    let seccompFdHost = null;
     try {
+      if (launch.seccomp) {
+        seccompFdHost = seccompFileFd(launch.seccomp);
+        while (stdio.length < SECCOMP_FD) stdio.push("ignore");
+        stdio[SECCOMP_FD] = seccompFdHost;
+      }
       this.proc = spawn(launch.cmd, launch.args, { cwd: spawnCwd, env: launch.env, stdio, detached: true });
     } catch (e) {
       this._runContainCleanup();
       throw e;
+    } finally {
+      if (seccompFdHost != null) { try { closeSync(seccompFdHost); } catch {} }
     }
     // A spawn that fails asynchronously (ENOENT) emits 'error' and no 'exit'.
     this.proc.on("error", () => this._runContainCleanup());

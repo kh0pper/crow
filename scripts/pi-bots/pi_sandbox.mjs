@@ -84,6 +84,7 @@ import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { containSelected, buildContainPlan } from "./pi_contain.mjs";
+import { buildSeccompProgram, seccompSupported } from "./pi_seccomp.mjs";
 
 const BWRAP_CANDIDATES = ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
 const SETPRIV_CANDIDATES = ["/usr/bin/setpriv", "/bin/setpriv"];
@@ -316,8 +317,17 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
     for (const r of plan.refused) console.error("[pi-sandbox] contain: not bound: " + r.path + " (" + r.reason + ")");
     const pre = [...plan.args];
     if (opts.infoFd != null) pre.push("--info-fd", String(opts.infoFd));
+    // seccomp (pi_seccomp.mjs): the caller supplies the filter on opts.seccompFd
+    // (the bytes are returned as `seccomp`); without an fd, or on an arch with
+    // no table, contain runs without the filter and the tier says so.
+    let seccomp = null;
+    if (opts.seccompFd != null && seccompSupported()) {
+      seccomp = buildSeccompProgram();
+      pre.push("--seccomp", String(opts.seccompFd));
+    }
     return { cmd: probe.bwrap, args: [...pre, "--", cmd, ...args], env: { ...scrubSandboxEnv(env), ...plan.env },
-      sandboxed: true, wrapper: "bwrap", tier: "contain", pidNamespace: true, reason: null, masked: [], refused: plan.refused };
+      sandboxed: true, wrapper: "bwrap", tier: seccomp ? "contain" : "contain-noseccomp", pidNamespace: true, reason: null,
+      masked: [], refused: plan.refused, seccomp };
   }
   if (!probe.ok) {
     if (mode === "required" || mode === "contain") {
