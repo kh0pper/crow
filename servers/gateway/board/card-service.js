@@ -147,7 +147,11 @@ async function soleProjectId(tdb) {
   }
 }
 
-export async function createCard(tdb, fields, actor) {
+// `createDetail` is the create row's detail_json ({} by default). A decision
+// follow-up passes {via: "decision", decision_card_id}: the asking bot wrote
+// that card's text and assignee, so provenance checks must not read it as
+// operator-created even though the deciding actor is a human.
+export async function createCard(tdb, fields, actor, { createDetail } = {}) {
   const f = fields || {};
   let projectId = f.project_id == null ? null : Number(f.project_id);
   let parentId = f.parent_id == null ? null : Number(f.parent_id);
@@ -192,7 +196,7 @@ export async function createCard(tdb, fields, actor) {
     ],
   });
   const id = Number(r.lastInsertRowid);
-  await recordMutation(tdb, { itemId: id, verb: "create", actor, detail: {} });
+  await recordMutation(tdb, { itemId: id, verb: "create", actor, detail: createDetail || {} });
   return { id };
 }
 

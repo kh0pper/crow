@@ -802,3 +802,44 @@ test("a follow-up card inherits the decision card's tags unchanged; an untagged 
     assert.equal((await getCard(tdb, r2.created_card_id)).tags, null);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Provenance: a decision follow-up never reads as operator-created
+// ---------------------------------------------------------------------------
+
+test("decideOption: the follow-up's create row carries via:'decision' and the decision card's id", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const a = await askDecision(tdb, cdb, { projectId: 1, decision: withFollowUp() }, BOT);
+    const r = await decideOption(tdb, cdb, a.id, { index: 0 }, HUMAN, { isEnabledBot: (id) => isEnabledBot(cdb, id) });
+    const rows = (await tdb.execute({
+      sql: "SELECT verb, actor_kind, detail_json FROM board_mutations WHERE item_id=? ORDER BY id",
+      args: [r.created_card_id],
+    })).rows;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].verb, "create");
+    assert.equal(rows[0].actor_kind, "human", "the deciding actor is still recorded");
+    assert.deepEqual(JSON.parse(rows[0].detail_json), { via: "decision", decision_card_id: a.id });
+  });
+});
+
+test("createCard: the create row's detail is {} by default and createDetail when given", async () => {
+  await withStore(async ({ tdb }) => {
+    const plain = await createCard(tdb, { title: "plain", project_id: 1 }, HUMAN);
+    const marked = await createCard(tdb, { title: "marked", project_id: 1 }, HUMAN, { createDetail: { via: "decision", decision_card_id: 7 } });
+    const detail = async (id) => JSON.parse((await tdb.execute({
+      sql: "SELECT detail_json FROM board_mutations WHERE item_id=? AND verb='create'", args: [id],
+    })).rows[0].detail_json);
+    assert.deepEqual(await detail(plain.id), {});
+    assert.deepEqual(await detail(marked.id), { via: "decision", decision_card_id: 7 });
+  });
+});
+
+test("askDecision: the decision card's own create row is unmarked (only follow-ups carry via)", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const a = await askDecision(tdb, cdb, { projectId: 1, decision: decision() }, BOT);
+    const row = (await tdb.execute({
+      sql: "SELECT detail_json FROM board_mutations WHERE item_id=? AND verb='create'", args: [a.id],
+    })).rows[0];
+    assert.deepEqual(JSON.parse(row.detail_json), {});
+  });
+});
