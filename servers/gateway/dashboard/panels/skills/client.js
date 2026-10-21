@@ -19,6 +19,19 @@ export function skillsClientJs() {
     setTimeout(function () { toast.textContent = ""; }, 8000);
   }
 
+  // An opened detail takes focus (its heading), so a keyboard or screen-reader
+  // user lands on what they opened; autofocus alone is not applied on every
+  // Turbo render.
+  var dh = document.getElementById("sk-detail-h");
+  if (dh && !document.querySelector("#sk-create[data-open-on-load]")) {
+    var focusDetail = function () { if (document.activeElement === document.body || !document.activeElement) { try { dh.focus(); } catch (e) {} } };
+    focusDetail();
+    // A fragment navigation / Turbo's load handling can reset focus after this
+    // script runs; take it again once the page has settled.
+    if (document.readyState !== "complete") window.addEventListener("load", function () { setTimeout(focusDetail, 0); }, { once: true });
+    else setTimeout(focusDetail, 0);
+  }
+
   // Create dialog: a real modal (focus trap, Esc) when JS runs; ?new=1 is the no-JS path.
   var dlg = document.getElementById("sk-create");
   function openCreate(name) {
@@ -90,9 +103,9 @@ export function skillsClientJs() {
   }
   if (q && document.querySelector(".sk-sec")) q.addEventListener("input", filter);
 
-  // Wide pane: pin its top to the list's top while the list is on screen.
+  // Wide pane: pin its top to the strip's top while it is on screen.
   function pane() {
-    var d = document.querySelector(".sk-page .sk-detail"), list = document.querySelector(".sk-page .sk-list");
+    var d = document.querySelector(".sk-page .sk-detail"), list = document.querySelector(".sk-page .sk-attn") || document.querySelector(".sk-page .sk-list");
     if (!d || !list || window.innerWidth < 769) return;
     var top = Math.max(16, Math.round(list.getBoundingClientRect().top));
     document.querySelector(".sk-page").style.setProperty("--sk-pane-top", top + "px");

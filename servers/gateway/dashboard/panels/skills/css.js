@@ -71,6 +71,7 @@ export const SKILLS_CSS = `<style>
 
   .sk-detail { padding: 12px 14px 16px; background: var(--crow-bg-elevated); border-top: 1px solid var(--crow-border); font-size: 0.9rem; overflow-wrap: anywhere; }
   .sk-d-head { display: flex; gap: 12px; align-items: center; margin-bottom: 8px; }
+  #sk-detail-h:focus { outline: none; }
   .sk-d-head h2 { margin: 0; font-size: 1.1rem; flex: 1; min-width: 0; font-family: var(--crow-body-font); }
   .sk-close { display: inline-grid; place-items: center; min-width: 44px; min-height: 44px; border: 0; background: none; color: var(--crow-text-secondary); text-decoration: none; font: inherit; cursor: pointer; border-radius: 10px; }
   .sk-d-purpose { margin: 0.4rem 0 0.6rem; }
