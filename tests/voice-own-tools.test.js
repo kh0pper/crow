@@ -10,7 +10,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { runMigrations } from "../scripts/migrations/runner.mjs";
 import { createDbClient } from "../servers/db.js";
-import { createOwnTools, VOICE_OWN_TOOL_NAMES, lastWriteRecap, whenOn } from "../servers/gateway/voice/own-tools.js";
+import { createOwnTools, VOICE_OWN_TOOL_NAMES, lastWriteRecap, whenOn, _whenFormatCacheSize } from "../servers/gateway/voice/own-tools.js";
 import { createPendingStore, chainVoiceActions } from "../servers/gateway/voice/pending.js";
 import { VOICE_LINES, voiceLine } from "../servers/gateway/voice/voice-lines.js";
 import { NOT_DONE_TEXT, CANT_DO_TEXT, PARTLY_DONE_TEXT } from "../servers/gateway/voice/turn.js";
@@ -959,4 +959,22 @@ test("whenOn is bounded: many zones never grow the formatter cache past its cap 
   const zones = Intl.supportedValuesOf("timeZone");
   for (const z of zones.slice(0, 200)) assert.ok(whenOn(Date.parse("2026-10-27T14:00:00Z"), "en", z).includes("October"));
   assert.equal(whenOn(Date.parse("2026-10-27T14:00:00Z"), "es", TZ), "martes, 27 de octubre, 9:00");
+  assert.ok(_whenFormatCacheSize() <= 64, `cache size ${_whenFormatCacheSize()}`);
+});
+
+test("es: 'a la' only for 01:xx, 'a las' for every other hour (13:00 included); output has no U+202F or U+00A0", async () => {
+  const { own } = make();
+  const es = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "es", tz: TZ });
+  const rem = (at) => run(toolOf(es, "crow_reminder_add"), { text: "call", at }, { executor: null, db: {}, device: { id: "x" }, fallback: "calendar" });
+  // NOW is Tuesday 20 October, 10:00 AM in Chicago.
+  assert.match((await rem("2026-10-21T01:30:00-05:00")).say, /recordártelo mañana a la 1:30: call\./);
+  assert.match((await rem("2026-10-20T13:00:00-05:00")).say, /recordártelo hoy a las 13:00: call\./);
+  assert.ok(!/[\u202f\u00a0]/.test(whenOn(Date.parse("2026-10-27T14:00:00Z"), "en", TZ)));
+});
+
+test("a recap with no zone never says today or tomorrow (full date, even for a reminder moments away)", () => {
+  const r = { tool: "crow_reminder_add", title: "call mom", start: "2026-10-27T09:00:00-05:00" };
+  const now = Date.parse("2026-10-27T12:00:00Z");
+  assert.equal(lastWriteRecap(r, "en", now), "Your reminder is set for Tuesday, October 27 at 9:00 AM: call mom.");
+  assert.equal(lastWriteRecap(r, "es", now), "Tu recordatorio está puesto para el martes, 27 de octubre, 9:00: call mom.");
 });

@@ -185,12 +185,16 @@ function whenFormat(lang, tz, kind) {
   const key = `${locale(lang)}|${tz}|${kind}`;
   let f = WHEN_FORMATS.get(key);
   if (!f) {
-    f = new Intl.DateTimeFormat(locale(lang), { ...FORMAT_OPTS[kind], timeZone: tz });
+    const dtf = new Intl.DateTimeFormat(locale(lang), { ...FORMAT_OPTS[kind], timeZone: tz });
+    // ICU versions differ in the space before AM/PM (U+202F, U+00A0, or plain): speak a plain one.
+    f = { format: (d) => dtf.format(d).replace(/[\u202f\u00a0]/g, " ") };
     if (WHEN_FORMATS.size >= 64) WHEN_FORMATS.clear();
     WHEN_FORMATS.set(key, f);
   }
   return f;
 }
+/** Test-only: how many formatters are cached. */
+export const _whenFormatCacheSize = () => WHEN_FORMATS.size;
 /** A moment with its weekday, month and day ("Tuesday, October 27 at 9:00 AM"): the one formatter for a spoken date and time. */
 export const whenOn = (ms, lang, tz) => whenFormat(lang, tz, "timed").format(new Date(ms));
 /** An all-day date (YYYY-MM-DD) as its weekday, month and day. */
@@ -204,7 +208,7 @@ function whenReminder(ms, lang, tz, now) {
     const days = Math.round((Date.parse(`${new Date(wallOf(ms, tz)).toISOString().slice(0, 10)}T00:00:00Z`) - Date.parse(`${todayIn(now, tz)}T00:00:00Z`)) / DAY_MS);
     if (days === 0 || days === 1) {
       const time = whenFormat(lang, tz, "time").format(new Date(ms));
-      if (lang === "es") return `${days === 0 ? "hoy" : "mañana"} a ${new Date(wallOf(ms, tz)).getUTCHours() % 12 === 1 ? "la" : "las"} ${time}`;
+      if (lang === "es") return `${days === 0 ? "hoy" : "mañana"} a ${new Date(wallOf(ms, tz)).getUTCHours() === 1 ? "la" : "las"} ${time}`;
       return `${days === 0 ? "today" : "tomorrow"} at ${time}`;
     }
   }
@@ -337,7 +341,8 @@ function recapWhen(start, lang, tz, reminder, now) {
   if (!dt) return null;
   const zone = validTz(tz);
   const [ms, z, n] = zone ? [dt.ms, zone, now] : [dt.ms + dt.off * 60_000, "UTC", now + dt.off * 60_000];
-  return reminder ? whenReminder(ms, lang, z, n) : whenOn(ms, lang, z);
+  // With no zone the day is unknown, so a reminder gets the full date, never "today" or "tomorrow".
+  return reminder && zone ? whenReminder(ms, lang, z, n) : reminder ? (lang === "es" ? `el ${whenOn(ms, lang, z)}` : whenOn(ms, lang, z)) : whenOn(ms, lang, z);
 }
 
 /**
