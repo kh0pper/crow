@@ -2,6 +2,7 @@ import { tJs } from "../shared/i18n.js";
 import { PERCH_SPLIT_MIN_WIDTH } from "./css.js";
 import { perchPhoneCardJs } from "./phone-card.js";
 import { perchArtifactCardJs } from "./artifact-card.js";
+import { perchDictationJs } from "./dictation.js";
 import { textSizeRuntimeJs, TEXT_SIZES, TEXT_SIZE_DEFAULT } from "../shared/text-size.js";
 
 /** The hub's client script. Emitted INSIDE a template literal — a bare
@@ -69,6 +70,8 @@ export function perchHubJs(lang = "en") {
     /* The artifact viewer pane holds a document keydown listener while open
        (artifact-card.js): leaving the hub with it open must not strand it. */
     closeArtifactPane();
+    /* Composer dictation (dictation.js): a Turbo visit releases the mic. */
+    dictationCancel();
     /* Anything left in the registry belongs to an instance older still (or to
        a session this one never held): close it by identity — that is the
        whole point of keeping the registry. */
@@ -2273,6 +2276,9 @@ export function perchHubJs(lang = "en") {
     resetPhoneCards();
     resetArtifactCards();
     resetFacts();
+    /* Composer dictation: a switch drops the recording and frees the mic;
+       each open re-probes the server (dictation.js). */
+    dictationCancel(); dictationProbe();
   }
 
   /* routes/perch-interactive-api.js:531-540 reads permission_mode and
@@ -3255,6 +3261,8 @@ export function perchHubJs(lang = "en") {
 ${perchPhoneCardJs(lang)}
 
 ${perchArtifactCardJs(lang)}
+
+${perchDictationJs(lang)}
 
   /* ---- Wave 3: the slash-command menu ------------------------------------
      Fed by pi's OWN get_commands registry through the engine (never a

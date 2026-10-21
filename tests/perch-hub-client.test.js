@@ -215,7 +215,8 @@ test("async continuations are guarded — a fast back button must not cross sess
   // 30 as of chat-first PR-3 (ask-first linking): loadLinkAsks' list
   // continuation and the Yes/No decide continuation.
   // 32 with the feedback cards' list continuation and expand fetch.
-  assert.equal(guards, 32, "expected exactly 32 identity guards, found " + guards);
+  // 33 with composer dictation's transcript continuation (dictation.js).
+  assert.equal(guards, 33, "expected exactly 33 identity guards, found " + guards);
 });
 
 test("the emitted script never assigns to an innerHTML-class sink", async () => {
@@ -2685,6 +2686,14 @@ test("the emitted script is syntactically valid JS", async () => {
     const js = perchHubJs(lang);          // throws on its own if the literal broke
     assert.doesNotThrow(() => new Function(js), lang + " must emit parseable JS");
   }
+  // The spliced modules are emitted into the same literal: the dictation
+  // snippet (review M12) keeps the same no-backtick / no-dollar-brace rule.
+  const { perchDictationJs } = await import("../servers/gateway/dashboard/perch-hub/dictation.js");
+  for (const lang of ["en", "es"]) {
+    const d = perchDictationJs(lang);
+    assert.equal(d.includes("`"), false, "dictation.js emits a backtick");
+    assert.equal(d.includes("${"), false, "dictation.js emits a dollar-brace");
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -3961,7 +3970,9 @@ test("W1: the watchdog and revive listeners are registered once per realm and re
   // pageshow/online/visibilitychange go through bindOnce — one listener each per realm.
   assert.equal(hub.win._listenerCount("pageshow"), 1);
   assert.equal(hub.win._listenerCount("online"), 1);
-  assert.equal(hub.doc._listenerCount("visibilitychange"), 1);
+  // Two keys, each bound once per realm: the stream revive and composer
+  // dictation's hide handler (dictation.js, 'dictationHide').
+  assert.equal(hub.doc._listenerCount("visibilitychange"), 2);
   // Retire must stop the watchdog (closeStream does), leaving no interval behind.
   hub.win.__crowPerchHub.retire();
   assert.ok(![...hub.timerDelays.values()].includes(15000), "retiring stops the watchdog");

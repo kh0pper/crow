@@ -73,6 +73,12 @@ function serveApi(req, res) {
     return send(200, { events: historyEvents });
   }
   if (url.endsWith("/options")) return send(200, { models: [], thinkingLevels: [] });
+  // Composer dictation (perch-hub/dictation.js): a usable profile, so the mic
+  // shows and the leak test below can record and cancel.
+  if (url.endsWith("/dictation")) {
+    if (req.method === "GET") return send(200, { available: true, maxSeconds: 60, cloud: false, profileTag: "leak-tag" });
+    return send(200, { text: "words", language: "en", duration: 1 });
+  }
   return send(200, {});
 }
 
@@ -87,7 +93,8 @@ function broadcast(type, data) {
 }
 
 before(async () => {
-  chrome = await startHeadlessChrome();
+  // Chrome's fake microphone, auto-accepted: the dictation leak test records.
+  chrome = await startHeadlessChrome({ extraArgs: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"] });
   available = !!chrome;
   if (!available) return;
   CDP = chrome.cdp; HOST_FROM_CONTAINER = chrome.pageHost; BIND_HOST = chrome.bindHost;
@@ -551,5 +558,76 @@ test("seam live: a tool that finishes while history loads is ONE chip, and one s
       "one chip per call — the seam must not draw tc-seam twice: " + JSON.stringify(seen));
     assert.equal(seen[1].spin, false, "the call still running at flush time settles when its end arrives");
     assert.equal(seen[1].status, "done");
+  } finally { await s.close(); }
+});
+
+// ---------------------------------------------------------------------------
+// Composer dictation (perch-hub/dictation.js) across Turbo visits: the mic is
+// released, the one new document listener (visibilitychange) is bound once
+// per realm, and a snapshot taken mid-recording never comes back on Back.
+// ---------------------------------------------------------------------------
+
+test("dictation: five Turbo visits after a recording leave no listener, track or AudioContext behind; Back shows idle", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  const s = await session();
+  try {
+    // The realm survives Turbo visits, so one patch sees every instance's
+    // streams and contexts.
+    await s.evalIn(`(function(){
+      var D=window.__dictLeak={streams:[],ctxs:[]};
+      var md=navigator.mediaDevices, real=md.getUserMedia.bind(md);
+      md.getUserMedia=function(c){ return real(c).then(function(st){ D.streams.push(st); return st; }); };
+      var RAC=window.AudioContext;
+      window.AudioContext=function(o){ var c=new RAC(o); D.ctxs.push(c); return c; };
+      window.AudioContext.prototype=RAC.prototype;
+      return 'ok';
+    })()`);
+    await s.open();
+    const MIC = "getComputedStyle(document.getElementById('perch-dictate')).display!=='none'";
+    const STATE = "document.getElementById('perch-composer').getAttribute('data-dictation')";
+    const waitEval = async (expr, what) => {
+      for (const end = Date.now() + 8000; ;) {
+        let v = null; try { v = await s.evalIn(expr); } catch {}
+        if (v) return v;
+        if (Date.now() > end) throw new Error("timed out waiting for " + what);
+        await sleep(80);
+      }
+    };
+    await waitEval(MIC, "the mic");
+    await s.evalIn("document.getElementById('perch-dictate').click(); 'ok'");
+    await waitEval(STATE + "==='recording'", "recording");
+    await s.evalIn("document.getElementById('perch-dict-cancel').click(); 'ok'");
+    await waitEval(STATE + "==='idle'", "idle");
+    // Measured AFTER the first recording: the shell binds one window click
+    // listener lazily on the page's first click of any button (a tab button
+    // does it too, measured), which is not this script's and not a leak.
+    const before = await s.listenerCounts();
+    for (let i = 0; i < 4; i++) {
+      await s.visit("/dashboard/perch#" + SID);
+      await waitEval(`window.__crowPerchHub.gen===${i + 2}`, "visit " + (i + 2));
+    }
+    assert.equal(await s.evalIn("window.__crowPerchHub.gen"), 5, "five script instances really ran");
+    const after = await s.listenerCounts();
+    assert.deepEqual(after, before, "window/document listener counts are flat across instances");
+    assert.equal(after["document.visibilitychange"], before["document.visibilitychange"]);
+
+    // Mid-recording: a Turbo visit away, then Back.
+    await waitEval(MIC, "the mic on the latest instance");
+    await s.evalIn("document.getElementById('perch-dictate').click(); 'ok'");
+    await waitEval(STATE + "==='recording'", "recording again");
+    await s.visit("/dashboard/elsewhere");
+    await waitEval("!!document.getElementById('elsewhere')", "the other page");
+    await s.evalIn("history.back(); 'ok'");
+    await waitEval("!!document.getElementById('perch-composer')&&window.__crowPerchHub.gen>=6", "Back to Perch");
+    await sleep(400);
+    const back = await s.json(`JSON.stringify({state:${STATE},bar:document.getElementById('perch-dictation-bar').hidden})`);
+    assert.equal(back.state, "idle", "a snapshot of a recording never comes back");
+    assert.equal(back.bar, true, "the bar is hidden");
+    const media = await s.json(`(function(){ var D=window.__dictLeak; var live=0;
+      D.streams.forEach(function(st){ st.getTracks().forEach(function(t){ if(t.readyState!=='ended') live++; }); });
+      return JSON.stringify({streams:D.streams.length,live:live,open:D.ctxs.filter(function(c){return c.state!=='closed';}).length,ctxs:D.ctxs.length}); })()`);
+    assert.equal(media.streams, 2, "two recordings were made");
+    assert.equal(media.live, 0, "no live MediaStreamTrack");
+    assert.equal(media.open, 0, "no unclosed AudioContext (of " + media.ctxs + ")");
   } finally { await s.close(); }
 });
