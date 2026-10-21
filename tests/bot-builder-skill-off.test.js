@@ -22,7 +22,8 @@ const { default: skillsPanel } = await import("../servers/gateway/dashboard/pane
 setSkillOff(process.env.CROW_HOME, "media", true);
 setSkillOff(process.env.CROW_HOME, "tutoring", true);
 
-const chipFor = (html, name) => (html.match(new RegExp(`<label class="btb-chip[^"]*"><input type="checkbox" name="skills" value="${name}"[\\s\\S]*?</label>`)) || [""])[0];
+// A chip and, after its label (never inside it), its "Off on this Crow" link.
+const chipFor = (html, name) => (html.match(new RegExp(`<span class="btb-chip-wrap"><label class="btb-chip[^"]*"><input type="checkbox" name="skills" value="${name}"[\\s\\S]*?</label>(?:<a [^>]*>[^<]*</a>)?</span>`)) || [""])[0];
 
 test("an off skill renders as an off chip: still checked when selected, labelled, linked to the Skills panel (en and es)", () => {
   const html = renderSkillsCard({ def: { skills: ["media", "kept-on"] }, lang: "en", crowHome: process.env.CROW_HOME });
@@ -71,4 +72,47 @@ test("the off check normalises the stored name (a bot that stored 'Media' still 
   const chip = chipFor(html, "Media");
   assert.match(chip, /btb-chip-off/);
   assert.match(chip, /href="\/dashboard\/skills\?skill=Media"|href="\/dashboard\/skills\?skill=media"/);
+});
+
+
+// Skills panel option C, PR 3: Bot Builder speaks the Skills panel's language.
+test("chips show friendly titles (slug kept in title= and for screen readers); the off link sits outside the label", () => {
+  const html = renderSkillsCard({ def: { skills: ["media", "tutoring"] }, lang: "en", crowHome: process.env.CROW_HOME });
+  const tut = chipFor(html, "tutoring");
+  assert.match(tut, /<span class="btb-chip-title" title="tutoring">Tutoring<\/span><span class="btb-vh"> \(tutoring\)<\/span>/);
+  const media = chipFor(html, "media");
+  assert.match(media, /<\/label><a href="\/dashboard\/skills\?skill=media"[^>]*>Off on this Crow<\/a><\/span>$/, "the link is a sibling of the label");
+  assert.doesNotMatch(media.replace(/<\/label>[\s\S]*$/, ""), /<a /, "no anchor inside the label");
+  assert.match(html, /<a href="\/dashboard\/skills" class="btb-manage-skills">Manage skills ›<\/a>/);
+  const es = renderSkillsCard({ def: { skills: [] }, lang: "es", crowHome: process.env.CROW_HOME });
+  assert.match(es, />Gestionar habilidades ›</);
+});
+
+test("groups follow where each skill comes from: Yours, each extension by name (no capabilities.skills needed), Built-in folded unless one is selected", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { skillHash } = await import("../servers/gateway/bundle-skill-sync.js");
+  const kiosk = readFileSync(new URL("../bundles/kiosk/skills/kiosk.md", import.meta.url), "utf8");
+  const podcast = readFileSync(new URL("../bundles/podcast/skills/podcast.md", import.meta.url), "utf8");
+  writeFileSync(join(process.env.CROW_HOME, "installed.json"), JSON.stringify([{ id: "kiosk" }, { id: "podcast" }]));
+  writeFileSync(join(process.env.CROW_HOME, "skills", "kiosk.md"), kiosk);
+  writeFileSync(join(process.env.CROW_HOME, "skills", "podcast.md"), podcast);
+  writeFileSync(join(process.env.CROW_HOME, "skill-installs.json"), JSON.stringify({
+    "kiosk.md": { bundle: "kiosk", sha256: skillHash(kiosk), installedAt: "t" },
+    "podcast.md": { bundle: "podcast", sha256: skillHash(podcast), installedAt: "t" },
+  }));
+  try {
+    const manifest = JSON.parse(readFileSync(new URL("../bundles/podcast/manifest.json", import.meta.url), "utf8"));
+    assert.ok(!manifest.capabilities || !manifest.capabilities.skills, "podcast declares no capabilities.skills");
+    const html = renderSkillsCard({ def: { skills: [] }, lang: "en", crowHome: process.env.CROW_HOME });
+    const groups = [...html.matchAll(/<(?:div|details) class="btb-group[^"]*"[^>]*>(?:<summary>)?<(?:label|span) class="btb-group-h">([^<]+)</g)].map((m) => m[1]);
+    assert.deepEqual(groups, ["Yours", "Kiosk display", "Podcasts", "Built-in"]);
+    const podcastGroup = html.split('class="btb-group-h">Podcasts<')[1].split("btb-group")[0];
+    assert.match(podcastGroup, /value="podcast"/);
+    assert.match(html, /<details class="btb-group btb-group-builtin">/, "Built-in starts folded");
+    const sel = renderSkillsCard({ def: { skills: ["tutoring"] }, lang: "en", crowHome: process.env.CROW_HOME });
+    assert.match(sel, /<details class="btb-group btb-group-builtin" open>/, "open when a built-in is selected");
+  } finally {
+    rmSync(join(process.env.CROW_HOME, "skills", "kiosk.md")); rmSync(join(process.env.CROW_HOME, "skills", "podcast.md"));
+    rmSync(join(process.env.CROW_HOME, "installed.json")); rmSync(join(process.env.CROW_HOME, "skill-installs.json"));
+  }
 });

@@ -182,7 +182,14 @@ export function botBuilderStyles() {
   .btb-chips{display:flex;flex-wrap:wrap;gap:.4rem}
   .btb-chip{display:inline-flex;align-items:center;gap:.35rem;min-height:40px;padding:.25rem .7rem;border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);background:var(--crow-bg-elevated);font-size:.85rem;cursor:pointer}
   .btb-chip:has(input:checked){border-color:var(--crow-accent)}
-  .btb-chip-off>span:first-of-type{text-decoration:line-through;color:var(--crow-text-muted)}
+  .btb-chip-off .btb-chip-title{text-decoration:line-through;color:var(--crow-text-muted)}
+  .btb-chip-wrap{display:inline-flex;align-items:center;gap:.35rem;flex-wrap:wrap}
+  .btb-chip-offlink{display:inline-flex;align-items:center;min-height:40px;font-size:.8rem}
+  .btb-vh{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+  .btb-group-h{display:block;font-size:.8rem;color:var(--crow-text-muted);margin-bottom:.35rem;text-transform:uppercase;letter-spacing:.05em}
+  .btb-group-builtin>summary{display:flex;align-items:center;min-height:44px;cursor:pointer}
+  .btb-group-builtin>summary .btb-group-h{margin:0}
+  .btb-manage-skills{display:inline-flex;align-items:center;min-height:44px;color:var(--crow-accent);font-weight:600;text-decoration:none}
   .btb-check-list{display:grid;gap:.1rem}
   .btb-check-row{display:flex;gap:.55rem;align-items:flex-start;padding:.35rem 0;font-size:.88rem;min-width:0}
   .btb-check-row code{overflow-wrap:anywhere}
