@@ -2705,6 +2705,48 @@
       "official": true
     },
     {
+      "id": "llamacpp-vulkan-qwen3-vl-4b",
+      "type": "bundle",
+      "version": "0.1.0",
+      "name": "llama.cpp Qwen3-VL-4B vision (Vulkan)",
+      "category": "ai",
+      "description": "Dedicated vision model for image understanding: Qwen3-VL-4B-Instruct Q8_0 with its F16 vision projector, served by llama.cpp (Vulkan) on Strix Halo gfx1151. OpenAI-compatible /v1/chat/completions with image input on 127.0.0.1:8012. Registers as the crow-vision provider for vision profiles (Meta Glasses look turns, photo captions) and the vision role. Always on, outside the chat model's VRAM group, about 7-8 GiB of unified memory. Licences: Qwen3-VL weights Apache-2.0, llama.cpp MIT, container image kyuz0/amd-strix-halo-toolboxes (third party). Weights are downloaded separately (see the compose file).",
+      "host": "local",
+      "requires": {
+        "gpu": true,
+        "min_vram_gb": 8,
+        "platform": "linux-x86_64",
+        "gpu_arch": [
+          "gfx1151"
+        ]
+      },
+      "env_vars": [],
+      "port": 8012,
+      "inference": true,
+      "providers": [
+        {
+          "id": "crow-vision",
+          "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+          "apiKey": "none",
+          "description": "Vision-language endpoint (Qwen3-VL-4B-Instruct Q8_0 + mmproj, llama.cpp Vulkan)",
+          "models": [
+            {
+              "id": "qwen3-vl-4b-instruct",
+              "task": "vision",
+              "input": [
+                "text",
+                "image"
+              ],
+              "contextLen": 8192,
+              "warm": true,
+              "priority": "interactive"
+            }
+          ]
+        }
+      ],
+      "official": true
+    },
+    {
       "id": "llamacpp-vulkan-qwen36-35b-a3b",
       "type": "bundle",
       "name": "llama.cpp Qwen3.6-35B-A3B UD-Q6_K + Vision (Vulkan AMDVLK)",
@@ -3488,7 +3530,7 @@
     {
       "id": "meta-glasses",
       "name": "Meta Glasses",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "description": "Pair Meta Ray-Ban (Gen 2) smart glasses with your Crow BYOAI. The Crow Android app uses Meta's official Wearables Device Access Toolkit to give the glasses a voice turn powered by your configured STT + AI + TTS profiles.",
       "type": "mcp-server",
       "author": "Crow",

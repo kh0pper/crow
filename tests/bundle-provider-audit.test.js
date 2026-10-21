@@ -60,6 +60,7 @@ function composeHostPort(composeText) {
 const STATIC_PROVIDER_BUNDLES = {
   "llamacpp-vulkan-qwen36-35b-a3b": { providerId: "crow-chat", modelId: "qwen3.6-35b-a3b" },
   "vllm-rocm-qwen35-4b": { providerId: "crow-voice", modelId: "qwen3.5-4b" },
+  "llamacpp-vulkan-qwen3-vl-4b": { providerId: "crow-vision", modelId: "qwen3-vl-4b-instruct" },
 };
 
 for (const [bundleId, expect] of Object.entries(STATIC_PROVIDER_BUNDLES)) {
