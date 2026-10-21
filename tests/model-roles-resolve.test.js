@@ -93,7 +93,7 @@ test("cycle stops", () => {
   const bindings = Object.fromEntries(ids.map((i, n) => [i, { model: n < 4 ? `role:${ids[n + 1]}` : "p/m", fallback: [] }]));
   const providers = [prov("p", ["m"])];
   const r5 = run("role:c-a", { providers, customDefs, bindings });
-  assert.deepEqual({ key: r5.key, reason: r5.reason }, { key: null, reason: "cycle" });
+  assert.deepEqual({ key: r5.key, reason: r5.reason }, { key: null, reason: "too_deep" });
 });
 
 test("default mutual fallbacks are not a cycle", () => {
@@ -208,13 +208,59 @@ test("cloudStatus classifies every hop and fails toward warning", () => {
     prov("priv", ["m"], { baseUrl: "http://192.168.1.9:8000/v1" }),
     prov("anon-door", ["m"], { baseUrl: "http://192.168.1.5:3001/llm/v1", gpuPolicy: { door_forward: true } }),
     prov("bad", ["m"], { baseUrl: "not a url" }),
+    prov("pub-ip", ["m"], { baseUrl: "http://203.0.113.9:8000/v1" }),
   ];
   const own = new Set();
-  assert.equal(cloudStatus("pub-door/m", { providers, ownAddrs: own }), "cloud");
+  assert.equal(cloudStatus("pub-door/m", { providers, ownAddrs: own }), "unknown"); // a public NAME cannot be proven public
+  assert.equal(cloudStatus("pub-ip/m", { providers, ownAddrs: own }), "cloud");
   assert.equal(cloudStatus("anon-door/m", { providers, ownAddrs: own }), "unknown");
   assert.equal(isCloudKey("anon-door/m", { providers, ownAddrs: own }), true);
   assert.equal(cloudStatus("priv/m", { providers, ownAddrs: own }), "local");
   assert.equal(isCloudKey("priv/m", { providers, ownAddrs: own }), false);
   assert.equal(cloudStatus("bad/m", { providers, ownAddrs: own }), "unknown");
   assert.equal(cloudStatus("missing/m", { providers, ownAddrs: own }), "unknown");
+});
+
+test("path depth, not visit count, is capped: coordinator [deep, critic, expert] reaches expert", () => {
+  const providers = [prov("p", ["m"])];
+  const r = run("role:coordinator", {
+    providers,
+    bindings: { coordinator: { fallback: ["deep", "critic", "expert"] }, expert: { model: "p/m", fallback: [] } },
+  });
+  assert.deepEqual({ key: r.key, reason: r.reason }, { key: "p/m", reason: "fallback" });
+});
+
+test("a path deeper than MAX_CHAIN_DEPTH reports too_deep; a true cycle still reports cycle", () => {
+  const ids = ["c-a", "c-b", "c-c", "c-d", "c-e"];
+  const customDefs = Object.fromEntries(ids.map((i) => [i, { capability: "chat", allowHeavy: false }]));
+  const bindings = Object.fromEntries(ids.map((i, n) => [i, { model: n < 4 ? `role:${ids[n + 1]}` : "p/m", fallback: [] }]));
+  const r = run("role:c-a", { providers: [prov("p", ["m"])], customDefs, bindings });
+  assert.equal(r.reason, "too_deep");
+  const four = Object.fromEntries(ids.slice(0, 4).map((i, n) => [i, { model: n < 3 ? `role:${ids[n + 1]}` : "p/m", fallback: [] }]));
+  assert.equal(run("role:c-a", { providers: [prov("p", ["m"])], customDefs, bindings: four }).key, "p/m");
+});
+
+test("task synonyms and case come from provider-task.js", () => {
+  const providers = [prov("p", [{ id: "e", task: "embedding" }, { id: "s", task: "Score" }, { id: "r", task: "RERANK" }])];
+  const b = (m) => ({ embed: { model: `p/${m}`, fallback: [] }, rerank: { model: `p/${m}`, fallback: [] } });
+  assert.equal(run("role:embed", { providers, bindings: b("e"), need: "embed" }).key, "p/e");
+  assert.equal(run("role:rerank", { providers, bindings: b("s"), need: "score" }).key, "p/s");
+  assert.equal(run("role:rerank", { providers, bindings: b("r"), need: "score" }).key, "p/r");
+});
+
+test("cloudStatus locality: only IP literals, own addresses and local suffixes are local", () => {
+  const st = (baseUrl, extra = {}) => cloudStatus("x/m", { providers: [prov("x", ["m"], { baseUrl })], ownAddrs: new Set(["localhost"]), ...extra });
+  assert.equal(st("https://someone.tail9999.ts.net/v1"), "unknown");
+  assert.equal(st("http://openai-proxy:8000/v1"), "unknown");
+  assert.equal(st("https://api.example.internal/v1"), "unknown");
+  assert.equal(st("https://api.openai.com/v1"), "unknown");
+  assert.equal(st("http://box.local:8000/v1"), "local");
+  assert.equal(st("http://nas.home.arpa/v1"), "local");
+  assert.equal(st("http://192.168.1.5:8000/v1"), "local");
+  assert.equal(st("http://100.64.20.5:8000/v1"), "local");
+  assert.equal(st("http://localhost:8000/v1"), "local");
+  assert.equal(st("http://203.0.113.9/v1"), "cloud");
+  assert.equal(st("https://x.tail1234.ts.net/v1"), "unknown");
+  assert.equal(st("https://x.tail1234.ts.net/v1", { localSuffixes: [".tail1234.ts.net"] }), "local");
+  assert.equal(st("http://box.local/v1", { localSuffixes: [".tail1234.ts.net"] }), "unknown");
 });
