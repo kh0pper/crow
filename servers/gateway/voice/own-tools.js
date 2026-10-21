@@ -34,7 +34,9 @@ export const VOICE_OWN_TOOL_NAMES = Object.freeze(["crow_calendar_add_event", "c
  * that ask for the tool without naming the object. Never a bare "to do" or "todo" ("apaga todo" is Spanish).
  */
 export const OWN_INTENT_EXTRAS = Object.freeze({
-  reminders: Object.freeze({ en: Object.freeze(["wake me up"]), es: Object.freeze(["despiertame"]) }),
+  // "remember to X <time>" is a reminder request (offered beside memory; the model chooses). Never a bare
+  // "remember": "remember that …" is a memory.
+  reminders: Object.freeze({ en: Object.freeze(["wake me up", "remember to"]), es: Object.freeze(["despiertame", "acuérdate de", "acuerdate de"]) }),
 });
 export const OWN_TOOL_INTENTS = Object.freeze(Object.fromEntries(Object.keys(ROUTINE_OBJECTS).map((id) => [id, Object.freeze({
   en: Object.freeze([...ROUTINE_OBJECTS[id].en, ...(OWN_INTENT_EXTRAS[id]?.en || [])]),

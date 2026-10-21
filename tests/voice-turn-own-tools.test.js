@@ -278,15 +278,23 @@ test("'add lunch to my schedule' with no calendar is a fallback turn, not an esc
   assert.deepEqual(h.calls.chatKeys, [FAST]);
 });
 
-test("'remember to do the dishes tonight' with no task backend is not a can't-do", async () => {
+test("'remember to do the dishes tonight' with no task backend offers the reminder tool on the quick model", async () => {
+  const { OWN_TOOL_INTENTS } = await import("../servers/gateway/voice/own-tools.js");
+  const rem = () => ({ ...remTool({ ok: true, code: "added", final: true, say: "I'll remind you." }), intent: OWN_TOOL_INTENTS.reminders });
   const h = ownHarness({ bot: CROW, rounds: [call("crow_reminder_add", { text: "dishes", at: "2026-10-20T20:00:00-05:00" })] });
-  h.deps.ownTools = async () => ({ tools: [remTool({ ok: true, code: "added", final: true, say: "I'll remind you." })], unavailable: ["tasks"] });
+  h.deps.ownTools = async () => ({ tools: [rem()], unavailable: ["tasks"] });
   const r = await turn(h, "remember to do the dishes tonight", act);
-  assert.equal(r.timings.action_no_backend, undefined, "not the missing-task-backend line");
-  // Fix round 1 (controller ruling 2): it names no routine object and follows no own-tool turn, so the withheld
-  // reminder tool does not count toward escalating it: the no-tool can't-do, with no model call.
-  assert.equal(r.timings.action_no_tool, true);
-  assert.deepEqual(h.calls.chatKeys, []);
+  assert.ok(h.log[0].tools.includes("crow_reminder_add"), "offered to the quick model");
+  assert.equal(r.timings.action_no_tool, undefined);
+  assert.equal(r.timings.action_no_backend, undefined);
+  assert.equal(r.escalated, false);
+  assert.deepEqual(h.calls.chatKeys, [FAST]);
+  assert.deepEqual(h.calls.spoken, ["I'll remind you."]);
+  // "remember that …" is a memory: no reminder tool.
+  const m = ownHarness({ bot: CROW, rounds: [says("Got it. ")] });
+  m.deps.ownTools = async () => ({ tools: [rem()], unavailable: [] });
+  await turn(m, "remember that my locker is 42", {});
+  assert.ok(!m.log[0].tools.includes("crow_reminder_add"));
 });
 
 test("own-tool messages stay route-neutral on a later turn that has no own tools", async () => {

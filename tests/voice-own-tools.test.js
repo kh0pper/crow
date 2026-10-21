@@ -14,7 +14,7 @@ import { createOwnTools, VOICE_OWN_TOOL_NAMES } from "../servers/gateway/voice/o
 import { createPendingStore, chainVoiceActions } from "../servers/gateway/voice/pending.js";
 import { VOICE_LINES, voiceLine } from "../servers/gateway/voice/voice-lines.js";
 import { NOT_DONE_TEXT, CANT_DO_TEXT } from "../servers/gateway/voice/turn.js";
-import { createToolFamilies } from "../servers/gateway/voice/tool-families.js";
+import { createToolFamilies, normalizeIntentLists, listMatches, phraseWords } from "../servers/gateway/voice/tool-families.js";
 import { harness } from "./fixtures/voice-turn-harness.mjs";
 
 const MIGRATIONS = join(import.meta.dirname, "..", "scripts", "migrations");
@@ -556,4 +556,16 @@ test("a backend answer that is not JSON is a backend error, never a success", as
     const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
     assert.deepEqual(r, { ok: false, code: "backend_error" }, JSON.stringify(result));
   }
+});
+
+test("'remember to' / 'acuérdate de' offer the reminder tool; 'remember that' does not", async () => {
+  const { own } = make();
+  const set = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+  const lists = normalizeIntentLists(toolOf(set, "crow_reminder_add").intent);
+  const offered = (t) => listMatches(phraseWords(t), lists);
+  assert.equal(offered("remember to do the dishes tonight"), true);
+  assert.equal(offered("acuérdate de sacar la basura"), true);
+  assert.equal(offered("acuerdate de sacar la basura"), true);
+  assert.equal(offered("remember that my locker is 42"), false);
+  assert.equal(offered("remember my locker number"), false);
 });
