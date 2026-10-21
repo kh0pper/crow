@@ -5893,6 +5893,101 @@
       "official": true
     },
     {
+      "id": "unsloth",
+      "name": "Unsloth Studio (AMD ROCm)",
+      "version": "1.0.0",
+      "description": "Fine-tune and chat with open models on an AMD GPU: Unsloth's ROCm image with the Unsloth Studio web UI and JupyterLab notebooks. AMD ROCm hosts only.",
+      "type": "bundle",
+      "author": "Crow",
+      "license": "Apache-2.0 AND AGPL-3.0-only",
+      "category": "ai",
+      "tags": [
+        "ai",
+        "fine-tuning",
+        "training",
+        "lora",
+        "gpu",
+        "rocm",
+        "amd",
+        "jupyter"
+      ],
+      "icon": "brain",
+      "docker": {
+        "composefile": "docker-compose.yml",
+        "pull_timeout_s": 3600
+      },
+      "skills": [
+        "skills/unsloth.md"
+      ],
+      "consent_required": true,
+      "install_consent_messages": {
+        "en": "Unsloth trains and runs models on this machine's AMD GPU. A training run can use most of the GPU and memory for minutes to hours, and models already running on this machine (chat, voice) slow down or fail to start while it does: plan runs for a quiet time. The first start downloads about 17 GB (the image) plus whatever models you pick. The Unsloth training library is Apache-2.0; the Unsloth Studio web UI in this image is AGPL-3.0, runs in its own container and is never linked into Crow. If you ever let other people use Studio over a network, keep its Unsloth notices visible and point them to the source (github.com/unslothai/unsloth). Studio and JupyterLab listen on this machine only (127.0.0.1); Crow also serves Studio over HTTPS on your private tailnet (Tailscale Serve, never Funnel) so its tile opens from other devices, behind Studio's own login.",
+        "es": "Unsloth entrena y ejecuta modelos en la GPU AMD de esta máquina. Un entrenamiento puede ocupar casi toda la GPU y la memoria durante minutos u horas, y los modelos que ya funcionan aquí (chat, voz) van más lentos o no arrancan mientras tanto: programa los entrenamientos para un momento tranquilo. El primer arranque descarga unos 17 GB (la imagen) más los modelos que elijas. La biblioteca de entrenamiento de Unsloth es Apache-2.0; la interfaz web Unsloth Studio de esta imagen es AGPL-3.0, funciona en su propio contenedor y nunca se enlaza con Crow. Si alguna vez dejas que otras personas usen Studio por red, mantén visibles sus avisos de Unsloth e indícales el código fuente (github.com/unslothai/unsloth). Studio y JupyterLab solo escuchan en esta máquina (127.0.0.1); Crow además sirve Studio por HTTPS en tu tailnet privada (Tailscale Serve, nunca Funnel) para que su icono se abra desde otros dispositivos, tras el inicio de sesión propio de Studio."
+      },
+      "requires": {
+        "gpu": true,
+        "gpu_arch": [
+          "rocm"
+        ],
+        "platform": "linux-x86_64",
+        "min_ram_mb": 16000,
+        "recommended_ram_mb": 32000,
+        "min_disk_mb": 60000,
+        "recommended_disk_mb": 120000
+      },
+      "env_vars": [
+        {
+          "name": "UNSLOTH_STUDIO_PASSWORD",
+          "description": "Password of Unsloth Studio's admin user (unsloth). Crow generates it at install and saves it in Settings → Passwords (this machine only); Studio sets it as the admin password on its first start and keeps it until you change it inside Studio (the copy in Settings → Passwords is then out of date).",
+          "required": true,
+          "secret": true,
+          "generate": "secret",
+          "keychain": true,
+          "keychain_label": "Studio admin password",
+          "keychain_username": "unsloth",
+          "keychain_url": "http://localhost:3075/"
+        },
+        {
+          "name": "UNSLOTH_JUPYTER_PASSWORD",
+          "description": "Password of the JupyterLab notebooks. Crow generates it at install and saves it in Settings → Passwords (this machine only).",
+          "required": true,
+          "secret": true,
+          "generate": "secret",
+          "keychain": true,
+          "keychain_label": "JupyterLab password",
+          "keychain_url": "http://localhost:3076/"
+        },
+        {
+          "name": "UNSLOTH_HF_TOKEN",
+          "description": "Hugging Face token, only needed for gated models (Llama, Gemma). Leave blank for public models.",
+          "required": false,
+          "secret": true,
+          "propagate": false
+        },
+        {
+          "name": "UNSLOTH_SHM_SIZE",
+          "description": "Shared memory for PyTorch data-loader workers. Raise it if a notebook reports a bus error.",
+          "default": "16gb",
+          "required": false,
+          "advanced": true,
+          "propagate": false
+        }
+      ],
+      "ports": [
+        3075,
+        3076
+      ],
+      "webUI": {
+        "port": 3075,
+        "path": "/",
+        "label": "Unsloth Studio",
+        "proxyMode": "direct"
+      },
+      "no_auto_provider": "Not a model endpoint Crow routes to: Unsloth Studio is a training and chat workbench with its own login, and its GGUF chat is internal to Studio. A model fine-tuned here is exported as files (GGUF or safetensors) and served through the Model Catalog like any other model.",
+      "notes": "Image: unsloth/unsloth-rocm, the ROCm build of Unsloth, pinned to a release tag and digest (the plain unsloth/unsloth image is CUDA-only and is not used). Works on AMD RDNA2 and newer and CDNA GPUs, except the Steam Deck (gfx1033), which the image refuses. Upstream measured LoRA training and diffusion on a Strix Halo (gfx1151) with these generic ROCm wheels; AMD's per-architecture wheels fix a gfx1151 grouped-GEMM crash, so if a mixture-of-experts run crashes there, rebuild the image with ROCM_GFX=gfx1151 as the Unsloth docs describe. GGUF chat inside Studio runs on the CPU in this release. Licences: the Unsloth library and training stack are Apache-2.0; Unsloth Studio (the web UI) is AGPL-3.0 with AGPL section 7(b) attribution notices. Crow runs the unmodified upstream image as a separate container and links none of its code, so Crow's own licence is unaffected. Offering Studio to other people over a network (a hosted Crow) triggers AGPL section 13 only if the image is modified; either way its Unsloth notices must stay visible. 'Unsloth' is a trademark of the Unsloth team.",
+      "official": true
+    },
+    {
       "id": "uptime-kuma",
       "name": "Uptime Kuma",
       "version": "1.0.0",

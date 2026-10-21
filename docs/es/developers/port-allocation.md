@@ -48,6 +48,8 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 | 3030 | 127.0.0.1 | homepage | MVP PR 1 |
 | 3040 | 127.0.0.1 | gitea (web) | MVP PR 5 |
 | 3050 | 127.0.0.1 | forgejo (web) | MVP PR 5 |
+| 3075 | 127.0.0.1 | unsloth (interfaz web de Unsloth Studio; `webUI.proxyMode: direct`, así que el instalador añade también Tailscale Serve HTTPS en el mismo número de puerto en la interfaz de la tailnet, nunca Funnel) | punto 3 (tienda: Unsloth) |
+| 3076 | 127.0.0.1 | unsloth (JupyterLab; solo loopback, sin ruta de Serve) | punto 3 (tienda: Unsloth) |
 | 3080 | 127.0.0.1 | romm (existente) | existente |
 | 3456 | 127.0.0.1 | vikunja (existente) | existente |
 | 4533 | 127.0.0.1 | navidrome (existente) | existente |

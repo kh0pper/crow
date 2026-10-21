@@ -1,0 +1,64 @@
+{
+  "id": "heretic",
+  "name": "Heretic (refusal removal)",
+  "version": "0.1.0",
+  "draft": true,
+  "description": "Optional. Removes a language model's safety refusals by abliteration, automatically, and saves an uncensored copy of the model. AGPL-3.0, own container, command line only. AMD ROCm hosts only.",
+  "type": "bundle",
+  "author": "Crow",
+  "license": "AGPL-3.0-or-later",
+  "category": "ai",
+  "tags": [
+    "ai",
+    "abliteration",
+    "uncensored",
+    "model-editing",
+    "gpu",
+    "rocm",
+    "amd"
+  ],
+  "icon": "brain",
+  "docker": {
+    "composefile": "docker-compose.yml",
+    "pull_timeout_s": 3600
+  },
+  "skills": [
+    "skills/heretic.md"
+  ],
+  "consent_required": true,
+  "install_consent_messages": {
+    "en": "Heretic removes a language model's safety training. It finds the direction in the model that produces refusals and subtracts it from the weights (abliteration), then saves a copy that answers requests the original would refuse, including harmful ones. Whatever that copy says or does, and who you share it with, is your responsibility: the safety behaviour the model's makers trained in is gone, and the model's own licence still applies. Heretic is AGPL-3.0. Crow builds it unmodified from its PyPI release in its own container and never links it into Crow; if you offer a modified Heretic to others over a network, the AGPL requires you to offer them its source. A run uses the GPU heavily for tens of minutes to hours, and models already running on this machine slow down meanwhile. The build downloads about 9 GB.",
+    "es": "Heretic elimina el entrenamiento de seguridad de un modelo de lenguaje. Localiza la dirección del modelo que produce las negativas y la resta de los pesos (abliteración), y guarda una copia que responde a peticiones que el original rechazaría, incluidas las dañinas. Lo que esa copia diga o haga, y con quién la compartas, es responsabilidad tuya: el comportamiento de seguridad que le dieron sus creadores desaparece, y la licencia propia del modelo sigue vigente. Heretic es AGPL-3.0. Crow lo construye sin modificar desde su versión de PyPI en su propio contenedor y nunca lo enlaza con Crow; si ofreces un Heretic modificado a otras personas por red, la AGPL te obliga a ofrecerles su código fuente. Una ejecución usa la GPU intensamente entre decenas de minutos y horas, y los modelos que ya funcionan en esta máquina van más lentos mientras tanto. La construcción descarga unos 9 GB."
+  },
+  "requires": {
+    "gpu": true,
+    "gpu_arch": [
+      "rocm"
+    ],
+    "platform": "linux-x86_64",
+    "min_ram_mb": 16000,
+    "recommended_ram_mb": 32000,
+    "min_disk_mb": 40000,
+    "recommended_disk_mb": 100000
+  },
+  "env_vars": [
+    {
+      "name": "HERETIC_HF_TOKEN",
+      "description": "Hugging Face token, only needed to download gated models or to upload a result. Leave blank for public models.",
+      "required": false,
+      "secret": true,
+      "propagate": false
+    },
+    {
+      "name": "HERETIC_SHM_SIZE",
+      "description": "Shared memory for PyTorch. Raise it if a run reports a bus error.",
+      "default": "16gb",
+      "required": false,
+      "advanced": true,
+      "propagate": false
+    }
+  ],
+  "webUI": null,
+  "no_auto_provider": "Not a model server: Heretic is an interactive command-line tool that writes an edited copy of a model to disk. A saved result can be converted to GGUF and served through the Model Catalog like any other model, by the owner's choice.",
+  "notes": "Draft: hidden from the store until one build and a smoke run on real hardware prove the image (the Dockerfile is untested). A draft can still be installed by the owner through the install API, which is how that smoke run is done. Upstream: https://github.com/p-e-w/heretic, PyPI heretic-llm 1.4.0. What it does: directional ablation ('abliteration', Arditi et al. 2024) with an Optuna TPE search that co-minimises the model's refusal count and its KL divergence from the original, so the result keeps most of the original's ability while no longer refusing. Licensing and business note: AGPL-3.0-or-later. Crow ships only a Dockerfile that installs the unmodified PyPI release in a separate container; no Heretic code is in Crow's repository or linked into Crow, so Crow's MIT licence is unaffected. A hosted or commercial Crow that offers Heretic to customers must give them Heretic's source (unmodified: a link to the upstream release is enough; modified: the modified source). Separately, offering a refusal-removal tool, or models made with it, can carry reputational, platform-policy and model-licence risk (several model licences forbid removing safety measures or certain uses), so it stays an opt-in extension behind explicit consent and is never featured or bundled into a collection."
+}
