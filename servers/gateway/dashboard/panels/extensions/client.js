@@ -143,6 +143,9 @@ export function extensionsClientJS(lang) {
             // client has not learned about yet. configureOnly never fetches it.
             var challengeSettled = configureOnly;
             var challengeFailed = false;
+            // Fields the owner changed. On an in-place reinstall the server keeps the earlier
+            // .env's value for every other field, so a pre-filled default never overwrites it.
+            var editedNames = {};
 
             // Install-blocking env vars still blank (whitespace counts as blank — the
             // server refuses those with 400 missing_required_env). The list is the
@@ -220,6 +223,20 @@ export function extensionsClientJS(lang) {
                 challengeSettled = true;
                 if (data && Array.isArray(data.install_required)) {
                   requiredNames = data.install_required.filter(function(n) { return typeof n === "string"; });
+                }
+                // In-place reinstall: show the earlier install's values instead of the
+                // defaults. A secret is never sent; its field says it is already set.
+                if (data && data.existing_env && typeof data.existing_env === "object") {
+                  Object.keys(data.existing_env).forEach(function(n) {
+                    var inp = document.getElementById("env_" + n);
+                    if (inp && !editedNames[n] && typeof data.existing_env[n] === "string") inp.value = data.existing_env[n];
+                  });
+                }
+                if (data && Array.isArray(data.existing_secret_set)) {
+                  data.existing_secret_set.forEach(function(n) {
+                    var inp = typeof n === "string" ? document.getElementById("env_" + n) : null;
+                    if (inp && !editedNames[n]) { inp.value = ""; inp.placeholder = '${tJs("extensions.secretKept", lang)}'; }
+                  });
                 }
                 refreshInstallBtnState();
                 if (!data || data.required === false) return; // no consent required
@@ -430,7 +447,7 @@ export function extensionsClientJS(lang) {
                 input.id = "env_" + ev.name;
                 input.value = ev.default || "";
                 if (ev.required) input.setAttribute("aria-required", "true");
-                input.addEventListener("input", function() { refreshInstallBtnState(); });
+                input.addEventListener("input", function() { editedNames[ev.name] = true; refreshInstallBtnState(); });
                 input.placeholder = ev.description || "";
                 input.style.cssText = "width:100%;padding:0.5rem;border:1px solid var(--crow-border);border-radius:4px;background:var(--crow-bg-deep);color:var(--crow-text-primary);font-family:JetBrains Mono,monospace;font-size:0.85rem;box-sizing:border-box";
                 wrap.appendChild(input);
@@ -478,6 +495,7 @@ export function extensionsClientJS(lang) {
                     var pw = crowGeneratePassword(CROW_PW_LENGTH, ev.pattern || null, crowRandomUint32);
                     if (!pw) return;
                     input.value = pw;
+                    editedNames[ev.name] = true;
                     input.type = "text";
                     showBtn.textContent = '${tJs("keychain.hide", lang)}';
                     armRecache();
@@ -740,6 +758,7 @@ export function extensionsClientJS(lang) {
               });
 
               var payload = { bundle_id: id, env_vars: envData };
+              payload.env_edited = Object.keys(editedNames);
               if (consentToken) payload.consent_token = consentToken;
               var kcReq = collectKeychain(envData);
               if (kcReq) payload.keychain = kcReq;

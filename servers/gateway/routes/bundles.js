@@ -2326,6 +2326,50 @@ export function missingInstallEnv(bundleId, envVars, manifest = getManifest(bund
 }
 
 /**
+ * An in-place reinstall (the earlier install's folder and .env are still there): the
+ * install form pre-fills every field with its manifest default and submits it, so a
+ * default in the request is not a choice the owner made. Such a value is dropped when the
+ * earlier .env already holds a real (non-blank, non-placeholder) value for that key, so
+ * the kept value stays; a field the owner edited (`edited`, from the form) always wins,
+ * even when it equals the default. A first install (empty `prior`) is unchanged.
+ */
+export function keepPriorOverDefaults(manifest, envVars, prior, edited = null) {
+  if (!envVars || typeof envVars !== "object") return envVars;
+  const editedSet = new Set(Array.isArray(edited) ? edited : []);
+  const defaults = new Map((manifest?.env_vars || [])
+    .filter((v) => v && typeof v.name === "string" && v.default !== undefined && v.default !== null)
+    .map((v) => [v.name, String(v.default)]));
+  const out = {};
+  for (const [k, v] of Object.entries(envVars)) {
+    const kept = prior?.[k];
+    const isDefault = defaults.has(k) && String(v) === defaults.get(k);
+    if (isDefault && !editedSet.has(k) && nonBlankEnv(kept) && !isPlaceholderValue(kept) && String(kept) !== String(v)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * For the install form on an in-place reinstall: the earlier .env's values for the keys
+ * the manifest declares, so the form shows them instead of the defaults. Secret and
+ * generated keys never leave the server: they are only listed as already set.
+ */
+export function existingInstallEnv(bundleId, manifest = getManifest(bundleId)) {
+  const out = { values: {}, secretSet: [] };
+  if (!bundleId || !isValidBundleId(bundleId)) return out;
+  let prior;
+  try { prior = parseEnvText(readFileSync(join(BUNDLES_DIR, bundleId, ".env"), "utf8")); } catch { return out; }
+  for (const v of manifest?.env_vars || []) {
+    if (!v || typeof v.name !== "string") continue;
+    const val = prior[v.name];
+    if (!nonBlankEnv(val) || isPlaceholderValue(val)) continue;
+    if (v.secret === true || v.generate || v.store_as) out.secretSet.push(v.name);
+    else out.values[v.name] = String(val);
+  }
+  return out;
+}
+
+/**
  * The first env entry that may not be written to an .env file, or null.
  * Keys must be plain upper-case env names; a value may not carry CR, LF or
  * NUL (it would add lines to the file, and a stripped copy in one file vs a
@@ -2669,7 +2713,7 @@ export function scrubPlaceholderLines(text) {
   }).join("\n");
 }
 
-export async function runInstallJob(bundleId, envVars, { job, installedSnapshot, consentVerified, manifest, keychain = null, ownerEnv = null }) {
+export async function runInstallJob(bundleId, envVars, { job, installedSnapshot, consentVerified, manifest, keychain = null, ownerEnv = null, editedEnv = null }) {
   let needsRestart = false;
   // Set when `docker compose up` fails. The install does NOT stop there: the
   // non-container steps (gateway env, MCP registration, panel + routes,
@@ -2693,6 +2737,12 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     let priorEnvValues = {};
     let priorEnvText = null;
     if (priorInstallEnv) { try { priorEnvText = readFileSync(join(destDir, ".env"), "utf8"); priorEnvValues = parseEnvText(priorEnvText); } catch { /* unreadable: nothing excluded beyond the rest */ } }
+    // The form's pre-filled defaults never overwrite a value the earlier install's .env holds;
+    // only a field the owner edited does (keepPriorOverDefaults).
+    if (priorInstallEnv) {
+      envVars = keepPriorOverDefaults(manifest, envVars, priorEnvValues, editedEnv);
+      if (ownerEnv) ownerEnv = keepPriorOverDefaults(manifest, ownerEnv, priorEnvValues, editedEnv);
+    }
     // The INSTALLED compose, read before the copy replaces it: a pre-generation install whose
     // .env left a generated key blank ran on that compose's `${KEY:-fallback}`, and the repo
     // copy may no longer carry it (queue item 30d: minio's is `:?` now).
@@ -3481,8 +3531,11 @@ export default function bundlesRouter() {
     // The keys the install modal must gate on — the server's own list, so the
     // client can never disagree with validateInstall's 400.
     const installRequired = missingInstallEnv(bundleId, {}, manifest);
+    // In-place reinstall: the form shows the kept values (never a secret's value).
+    const existing = existingInstallEnv(bundleId, manifest);
+    const existingFields = { existing_env: existing.values, existing_secret_set: existing.secretSet };
     if (!manifestRequiresConsent(manifest)) {
-      return res.json({ required: false, install_required: installRequired });
+      return res.json({ required: false, install_required: installRequired, ...existingFields });
     }
     const composePath = join(APP_BUNDLES, bundleId, "docker-compose.yml");
     const lang = (req.query.lang || req.headers["accept-language"] || "en").toString().slice(0, 2).toLowerCase();
@@ -3507,6 +3560,7 @@ export default function bundlesRouter() {
         token,
         expires_in_seconds,
         install_required: installRequired,
+        ...existingFields,
       });
     } catch (err) {
       res.status(500).json({ error: `Failed to mint consent token: ${err.message}` });
@@ -3585,6 +3639,7 @@ export default function bundlesRouter() {
         manifest: v.manifest,
         keychain: keychainReq,
         ownerEnv: owner ? env_vars : null,
+        editedEnv: Array.isArray(req.body.env_edited) ? req.body.env_edited.filter((k) => typeof k === "string") : null,
       });
       if (!out.ok) {
         finishJob(job, "failed");
