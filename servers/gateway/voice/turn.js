@@ -32,6 +32,8 @@ import { CROW_VOICE_BOT_ID, normalizeVoiceSettings, isVoiceBotDef } from "../../
  */
 export const VOICE_CONFIRM_TOOLS = Object.freeze(["crow_create_schedule", "crow_update_schedule", "crow_add_context_section", "crow_update_context_section"]);
 const VOICE_SCHEDULE_TOOLS = new Set(["crow_create_schedule", "crow_update_schedule"]);
+/** The remote writes Crow's own routine tools wrap (own-tools.js): refused for the voice bot while that own tool is loaded. */
+const OWN_WRAPS = new Map([["ws_cal_create_event", "crow_calendar_add_event"], ["gcal_create_event", "crow_calendar_add_event"], ["ws_task_create", "crow_task_add"]]);
 const VOICE_NOTIFICATION_TOOL = "crow_notification_settings";
 /** A schedule task that starts background bot work (bot_scheduler's "pipeline:botcron:<bot>" and every other "pipeline:" row). */
 const scheduleArgs = (args) => {
@@ -1033,6 +1035,12 @@ export function createVoiceTurnRunner(deps) {
         // The executor resolves a bare name (`search_memories`) to `crow_<name>`
         // (tool-executor resolveToolCategory), so every check sees both spellings.
         const names = eff && !String(eff).startsWith("crow_") ? [eff, `crow_${eff}`] : [eff];
+        // PR 2.1 Task 6 (rule 6): while Crow's own routine tool is loaded, the remote write it wraps never runs for the
+        // voice bot (direct or through the crow_tools proxy: matched by effective name). It would skip own-tools' choice
+        // of calendar or list, and could write to a shared one nobody chose; routine adds go through the own tools only.
+        if (voiceKind && names.some((n) => OWN_WRAPS.has(n) && ownByName.has(OWN_WRAPS.get(n)))) {
+          return refuse("not_offered", `"${shortName(eff)}" is not available here. Tell the user you can't do that here, then end your turn — do not call another tool.`, true);
+        }
         const soft = SOFT_DENY[tc.name] || names.map((n) => SOFT_DENY[n]).find(Boolean);
         if (soft && (deny.has(tc.name) || names.some((n) => deny.has(n)))) return refuse("refused_policy", soft, true);
         if (names.some((n) => deny.has(n)) || deny.has(tc.name)) return refuse("refused_policy", `"${shortName(eff)}" is not available on this display. Tell the user, then end your turn — do not call another tool.`, true);
@@ -1571,7 +1579,9 @@ export function createVoiceTurnRunner(deps) {
             if (voiceKind && ran && ok && res.effect !== false) {
               const a = tc.arguments && typeof tc.arguments === "object" ? tc.arguments : {};
               const w = res.write && typeof res.write === "object" ? res.write : { title: a.title ?? a.text, start: a.start ?? a.at ?? a.due ?? null };
-              memory.noteWrite(device.id, { tool: tc.name, title: typeof w.title === "string" ? w.title : "", start: w.start ?? null, say: resSay || "", lang: opts.lang, tz: opts.tz });
+              memory.noteWrite(device.id, { tool: tc.name, title: typeof w.title === "string" ? w.title : "", start: w.start ?? null, say: resSay || "", lang: opts.lang, tz: opts.tz,
+                // Where it went (own-tools.js writeOf, Task 6): the recap says Crow's calendar or the named one, never "your" for those.
+                target: typeof w.target === "string" ? w.target : null, target_name: typeof w.target_name === "string" ? w.target_name : null });
             }
             if (code === "bad_args") ownBadArgs = true;
             if (usedFamilies) usedFamilies.add(own.family);

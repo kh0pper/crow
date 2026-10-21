@@ -31,7 +31,7 @@
 import { normalizeVoiceSettings, isVoiceBotDef } from "../../shared/voice-bot.js";
 import { ROUTINE_OBJECTS, namesRoutineObjects } from "./routine-objects.js";
 import { isObjectWord, hasDayTime } from "./stt-rewrite.js";
-import { phraseWords, listMatches } from "./tool-families.js";
+import { phraseWords } from "./tool-families.js";
 import { voiceLine } from "./voice-lines.js";
 import { matchYesNo } from "./pending.js";
 
@@ -365,9 +365,13 @@ const confirmLine = (tool, v, lang) => (tool === "crow_calendar_add_event" ? voi
   : tool === "crow_reminder_add" ? voiceLine("routine_confirm_reminder", lang, { when: v.when, text: v.args.text })
     : voiceLine("routine_confirm_task", lang, { title: v.args.title }));
 
-/** What an ok write put on record (turn.js voice memory lastWrite): { tool, title, start }. A task's start is its due date or null. */
-const writeOf = (tool, v) => ({ tool, family: DEFINITIONS[tool].family, title: tool === "crow_reminder_add" ? v.args.text : v.args.title,
-  start: tool === "crow_calendar_add_event" ? v.args.start : tool === "crow_reminder_add" ? v.args.at : (v.args.due ?? null) });
+/**
+ * What an ok write put on record (turn.js voice memory lastWrite): { tool, title, start, target, target_name }. A task's
+ * start is its due date or null; target is the success line's class ("your", "crow", "named"; null for a reminder).
+ */
+const writeOf = (tool, v, target) => ({ tool, family: DEFINITIONS[tool].family, title: tool === "crow_reminder_add" ? v.args.text : v.args.title,
+  start: tool === "crow_calendar_add_event" ? v.args.start : tool === "crow_reminder_add" ? v.args.at : (v.args.due ?? null),
+  target: target?.say ?? null, target_name: target?.name ?? null });
 
 /** A record's start as the spoken {when}: an all-day date as its day; a date-time in `tz`, else in its own UTC offset. */
 function recapWhen(start, lang, tz, reminder, now) {
@@ -389,11 +393,13 @@ export function lastWriteRecap(w, lang, now = Date.now()) {
   const title = typeof w?.title === "string" ? w.title.trim() : "";
   if (!title) return "";
   const cap = title[0].toUpperCase() + title.slice(1);
-  if (w.tool === "crow_task_add") return voiceLine("last_write_recap_task", lang, { title: cap });
+  // Where it went (Task 6): Crow's own, or the one named answering the which-question; else "your".
+  const how = w.target === "crow" ? "_crow" : w.target === "named" && typeof w.target_name === "string" && w.target_name ? "_named" : "";
+  if (w.tool === "crow_task_add") return voiceLine(`last_write_recap_task${how}`, lang, { title: cap, list: w.target_name ?? "" });
   const when = recapWhen(w.start, lang, w.tz, w.tool === "crow_reminder_add", now);
   if (!when) return "";
   if (w.tool === "crow_reminder_add") return voiceLine("last_write_recap_reminder", lang, { when, text: title });
-  return w.tool === "crow_calendar_add_event" ? voiceLine("last_write_recap", lang, { title: cap, when }) : "";
+  return w.tool === "crow_calendar_add_event" ? voiceLine(`last_write_recap${how}`, lang, { title: cap, when, calendar: w.target_name ?? "" }) : "";
 }
 
 // ─── Definitions ───
@@ -473,20 +479,32 @@ function joinOr(names, lang) {
   if (names.length <= 1) return names[0] || "";
   return voiceLine("which_or", lang, { rest: names.slice(0, -1).join(", "), last: names.at(-1) });
 }
+/** The words a short which-answer may carry besides the name ("the menu one", "el de Menu"), at most CHOICE_FILLER_MAX. */
+const CHOICE_FILLER = new Set(["the", "one", "use", "calendar", "list", "task", "tasks", "my", "that", "please", "ok", "okay",
+  "el", "la", "los", "las", "de", "del", "uno", "una", "usa", "calendario", "lista", "tareas", "mi", "por", "favor", "vale"]);
+const CHOICE_FILLER_MAX = 3;
+/** A no to the which-question is short; longer, it is something else to answer (the model hears it). */
+const WHICH_NO_MAX_WORDS = 4;
 /**
- * The option the answer names: case and accents ignored; the whole answer equal to a name beats a name inside it, and a
- * longer name beats a shorter one. Two equally good → null (never guessed).
+ * The option a SHORT answer names (case and accents ignored): the name, plus at most CHOICE_FILLER_MAX filler words and
+ * nothing else, so a name inside an unrelated sentence ("what's on the menu tonight") is no answer. A longer name beats
+ * a shorter one; two equally good → null (never guessed).
  */
 export function matchChoice(transcript, options) {
   const words = phraseWords(transcript);
   if (!words.length || !Array.isArray(options)) return null;
-  const said = words.join(" ");
   let best = null; let bestScore = 0; let tie = false;
   for (const o of options) {
     const ow = phraseWords(String(o?.name ?? ""));
-    if (!ow.length) continue;
-    const score = said === ow.join(" ") ? 1000 : listMatches(words, [ow]) ? ow.length : 0;
-    if (score > bestScore) { best = o; bestScore = score; tie = false; } else if (score && score === bestScore) tie = true;
+    if (!ow.length || ow.length > words.length) continue;
+    let ok = false;
+    for (let i = 0; !ok && i + ow.length <= words.length; i++) {
+      if (!ow.every((w, j) => words[i + j] === w)) continue;
+      const rest = [...words.slice(0, i), ...words.slice(i + ow.length)];
+      ok = rest.length <= CHOICE_FILLER_MAX && rest.every((w) => CHOICE_FILLER.has(w));
+    }
+    if (!ok) continue;
+    if (ow.length > bestScore) { best = o; bestScore = ow.length; tie = false; } else if (ow.length === bestScore) tie = true;
   }
   return best && !tie ? best : null;
 }
@@ -627,7 +645,7 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
       log(`[voice-own-tools] ${tool} not written (${String(err?.message || err).slice(0, 120)})`);
       return { ...BACKEND_ERROR };
     }
-    return { ok: true, code: "added", final: true, say: successLine(tool, v, lang, t), write: writeOf(tool, v) };
+    return { ok: true, code: "added", final: true, say: successLine(tool, v, lang, t), write: writeOf(tool, v, t) };
   }
 
   /** → { tools, unavailable } for one voice turn (turn.js deps.ownTools). */
@@ -704,23 +722,26 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
   }
 
   /**
-   * The answer to this device's which-question (any answer ends it): a no, or no single name matched, declines; a name
-   * writes the held item once to that one (validated again, under the voice bot's current settings), then the hint.
-   * Nothing is saved to the bot.
+   * The answer to this device's which-question (any answer ends it): a short no declines; a short answer naming one writes the
+   * held item once to that one (validated again, under the voice bot's current settings), then the hint; anything else
+   * → null, so the model answers what was really said (nothing written or claimed). Nothing is saved to the bot.
    */
   async function answerWhich({ id, db, transcript, lang, bot, executor }) {
     const entry = pending.take(id);
     if (!entry || entry.kind !== "which_calendar" || !Object.hasOwn(DEFINITIONS, entry.tool)) return null;
     const speak = lang || entry.lang;
-    const pick = matchYesNo(transcript) === "no" ? null : matchChoice(transcript, entry.options);
-    if (!pick) return { say: voiceLine("declined", speak), verb: "which_no" };
+    // A short no ("no", "no, not menu", "never mind") declines; a long sentence that starts with one is a new request.
+    if (matchYesNo(transcript) === "no" && phraseWords(transcript).length <= WHICH_NO_MAX_WORDS) return { say: voiceLine("declined", speak), verb: "which_no" };
+    const pick = matchChoice(transcript, entry.options);
+    if (!pick) return null;
     if (!bot || !isVoiceBotDef(bot)) return { say: voiceLine("not_done_say", speak), verb: "which_failed" };
     const settings = normalizeVoiceSettings(bot);
     const v = validate(entry.tool, entry.args, { tz: entry.tz, lang: speak, now: now() });
     // The named one is written only while this object still goes to Workspace (the settings may have changed since).
     const still = resolveBackends(settings, connectedNow())[OBJECT_OF[entry.tool]] === "workspace";
     const res = v.error || v.past || !still ? null : await perform(entry.tool, v, { db, executor, settings, lang: speak, target: { backend: "workspace", id: pick.id, name: pick.name, say: "named" } });
-    return res?.ok === true ? { say: `${res.say} ${voiceLine("which_hint", speak)}`, verb: "which_yes", write: res.write } : { say: voiceLine("not_done_say", speak), verb: "which_failed" };
+    const hint = voiceLine(entry.tool === "crow_task_add" ? "which_hint_list" : "which_hint", speak);
+    return res?.ok === true ? { say: `${res.say} ${hint}`, verb: "which_yes", write: res.write } : { say: voiceLine("not_done_say", speak), verb: "which_failed" };
   }
 
   /** deps.voiceActions.turnContext (synchronous): while a routine or which-question waits, the turn says so. */

@@ -276,21 +276,24 @@ function effectiveRoutine(resolved, kind, chosen, auto, items, conn) {
 async function routineSection(db, v, lang, sec, hint) {
   const conn = connectedAddonToolNames();
   const resolved = resolveRoutineBackends(v, conn);
-  const cals = resolved.calendar === "workspace" && conn.has("ws_cal_list_calendars") ? await listWorkspace("ws_cal_list_calendars", "calendars") : null;
-  const lists = resolved.tasks === "workspace" && conn.has("ws_tasks_list_lists") ? await listWorkspace("ws_tasks_list_lists", "lists") : null;
+  // Both listings at once: the worst case is one LIST_WAIT_MS, not two.
+  const [cals, lists] = await Promise.all([
+    resolved.calendar === "workspace" && conn.has("ws_cal_list_calendars") ? listWorkspace("ws_cal_list_calendars", "calendars") : null,
+    resolved.tasks === "workspace" && conn.has("ws_tasks_list_lists") ? listWorkspace("ws_tasks_list_lists", "lists") : null,
+  ]);
   const calNow = effectiveRoutine(resolved, "calendar", v.routine.calendar.calendar, v.routine.calendar.backend === "auto", cals, conn);
   const taskNow = effectiveRoutine(resolved, "tasks", v.routine.tasks.list, v.routine.tasks.backend === "auto", lists, conn);
-  // Each writable one, marked "yours" (Crow bot's own) or "shared by <owner>".
+  // Each writable one, marked "Crow's own" (Crow bot's, as the voice line says) or "shared by <owner>".
   const whose = (items, keys) => {
     const rows = (items || []).filter((x) => x.writable === true);
     if (!rows.length) return "";
     return `<p class="btb-hint">${escapeHtml(t(keys.head, lang))}</p><ul class="btb-hint">` + rows.map((x) => {
-      const mark = x.shared === false ? t(keys.yours, lang) : x.owner ? fill(t(keys.by, lang), { owner: String(x.owner) }) : t(keys.unknown, lang);
+      const mark = x.shared === false ? t("botbuilder.voiceRoutineCrowsOwn", lang) : x.owner ? fill(t(keys.by, lang), { owner: String(x.owner) }) : t(keys.unknown, lang);
       return `<li>${escapeHtml(String(x.name || x.id))} (${escapeHtml(x.id)}): ${escapeHtml(mark)}</li>`;
     }).join("") + `</ul>`;
   };
-  const calWhose = whose(cals, { head: "botbuilder.voiceRoutineCalendarsHere", yours: "botbuilder.voiceRoutineYoursCal", by: "botbuilder.voiceRoutineSharedBy", unknown: "botbuilder.voiceRoutineSharedUnknown" });
-  const listWhose = whose(lists, { head: "botbuilder.voiceRoutineListsHere", yours: "botbuilder.voiceRoutineYoursList", by: "botbuilder.voiceRoutineSharedListBy", unknown: "botbuilder.voiceRoutineSharedListUnknown" });
+  const calWhose = whose(cals, { head: "botbuilder.voiceRoutineCalendarsHere", by: "botbuilder.voiceRoutineSharedBy", unknown: "botbuilder.voiceRoutineSharedUnknown" });
+  const listWhose = whose(lists, { head: "botbuilder.voiceRoutineListsHere", by: "botbuilder.voiceRoutineSharedListBy", unknown: "botbuilder.voiceRoutineSharedListUnknown" });
   const nowLine = (r) => `<p class="btb-hint">${escapeHtml(fill(t("botbuilder.voiceRoutineNow", lang), { backend: t(RESOLVED_KEY[r] || "botbuilder.voiceRoutineNone", lang) }))}</p>`;
   const optLabel = { auto: "botbuilder.voiceRoutineAuto", off: "botbuilder.voiceRoutineOff", workspace: "botbuilder.voiceRoutineOptWorkspace", google: "botbuilder.voiceRoutineOptGoogle", crow: "botbuilder.voiceRoutineOptCrow", board: "botbuilder.voiceRoutineOptBoard" };
   const select = (name, list, cur) => `<select name="${name}" id="btb-v-${name}" form="btb-vsave">` + list.map((x) => opt(x, t(optLabel[x], lang), x === cur)).join("") + `</select>`;

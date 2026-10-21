@@ -523,7 +523,7 @@ test("the editor's confirm wording and the no-calendar line say what really happ
 });
 
 // ── PR 2.1 Task 6: each calendar and list says whose it is; the editor says when Crow will ask ─────────────
-test("the editor marks each calendar and list yours or shared by its owner, and says when Crow will ask", async () => {
+test("the editor marks each calendar and list Crow's own or shared by its owner, and says when Crow will ask", async () => {
   const { connectedServers } = await import("../servers/gateway/proxy.js");
   await reset();
   const reply = (data) => ({ content: [{ type: "text", text: JSON.stringify({ success: true, data }) }] });
@@ -538,12 +538,15 @@ test("the editor marks each calendar and list yours or shared by its owner, and 
     for (const lang of ["en", "es"]) {
       const html = await editor({ lang });
       assert.ok(html.includes(T("botbuilder.voiceRoutineCalendarsHere", lang)), `${lang}: the calendars are listed`);
-      assert.ok(html.includes("Personal") && html.includes(T("botbuilder.voiceRoutineYoursCal", lang)), `${lang}: yours`);
+      assert.ok(html.includes("Personal (personal): " + T("botbuilder.voiceRoutineCrowsOwn", lang)), `${lang}: Crow's own`);
+      assert.ok(!/yours|tuy[oa]/.test(html.slice(html.indexOf(T("botbuilder.voiceRoutineCalendarsHere", lang)))), `${lang}: never "yours"`);
       assert.ok(html.includes(T("botbuilder.voiceRoutineSharedBy", lang).replace("{owner}", "Robin")), `${lang}: shared by the owner`);
       assert.ok(html.includes(T("botbuilder.voiceRoutineListsHere", lang)), `${lang}: the lists are listed`);
       assert.ok(!html.includes(T("botbuilder.voiceRoutineWillAskCalendar", lang)), `${lang}: Crow has its own calendar: no question`);
       assert.ok(html.includes(T("botbuilder.voiceRoutineBoard", lang)), `${lang}: auto tasks with only a shared list go to the board`);
     }
+    assert.equal(T("botbuilder.voiceRoutineCrowsOwn"), "Crow's own");
+    assert.equal(T("botbuilder.voiceRoutineCrowsOwn", "es"), "de Crow");
     // Only shared calendars, no Google: Crow will ask.
     calendars = calendars.slice(1);
     const ask = await editor();

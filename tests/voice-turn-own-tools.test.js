@@ -1081,3 +1081,26 @@ for (const t of ["move lunch to 3 on my calendar", "cancel lunch on my calendar"
     assert.equal(r.saved.content, HINT_TEXT);
   });
 }
+
+// ─── PR 2.1 Task 6 fix 1 (rule 6): while an own routine tool is loaded, the remote write it wraps never runs ───
+test("voice bot: a direct or proxied remote calendar/task write is refused while the own tool is loaded; an ordinary bot is unchanged", async () => {
+  const { effectiveToolName } = await import("../servers/gateway/ai/tool-executor.js");
+  const shared = { calendar: "Menu_shared_by_admin", summary: "Lunch", start: "2026-10-26T12:00:00-05:00" };
+  const cases = [
+    ["ws_cal_create_event", shared, "ws_cal_create_event"],
+    ["crow_tools", { action: "ws_cal_create_event", params: shared }, "crow_tools"],
+    ["gcal_create_event", { summary: "Lunch", start: "2026-10-26T12:00:00-05:00", calendar_id: "family" }, "gcal_create_event"],
+    ["ws_task_create", { list: "Chores_shared_by_admin", summary: "Milk" }, "ws_task_create"],
+  ];
+  for (const [name, args, offered] of cases) {
+    for (const voice of [true, false]) {
+      const h = ownHarness({ bot: voice ? CROW : undefined, familiesOnIntent: false, chatTools: [offered], rounds: [call(name, args), says("Okay. ")] });
+      h.deps.effectiveToolName = effectiveToolName;
+      h.deps.isConnectedAddonTool = (n) => ["ws_cal_create_event", "gcal_create_event", "ws_task_create"].includes(n);
+      await turn(h, "add lunch Monday at noon to my calendar and a task", { familiesOnIntent: false, ownTools: [calTool(), taskTool()] });
+      const ran = h.calls.executed.includes(name);
+      if (voice) assert.equal(ran, false, `voice: ${name} must not run`);
+      else assert.equal(ran, true, `ordinary bot: ${name} runs as before`);
+    }
+  }
+});

@@ -1005,7 +1005,7 @@ test("the calendar tool carries intentWhen; reminders and tasks do not", async (
 const SHARED_ONLY = [{ id: "Personal_shared_by_casey", name: "Personal (casey)", owner: "Casey", writable: true, shared: true },
   { id: "Menu_shared_by_admin", name: "Menu (admin)", owner: "Admin", writable: true, shared: true },
   { id: "Feriados", name: "Feriados (admin)", owner: "Admin", writable: false, shared: true }];
-const HINT = "To use it every time, choose it in Bot Builder → Crow → Routine.";
+const HINT = "To use it every time, choose it in Bot Builder → Crow → Calendar, reminders and tasks.";
 const WS_CAL = ["ws_cal_create_event", "ws_cal_list_calendars"];
 const writesOf = (ex, name = "ws_cal_create_event") => ex.calls.filter((c) => c.name === name);
 
@@ -1091,13 +1091,19 @@ test("the which-answer: accents and case ignored; Spanish hint; no, no match, or
   await ask();
   const yes = await own.fastPath({ ...base, lang: "es", transcript: "MENU" });
   assert.equal(yes.verb, "which_yes");
-  assert.match(yes.say, /^Añadí Cena al calendario Menú para el .+\. Para usarlo siempre, elígelo en Bot Builder → Crow → Rutina\.$/);
+  assert.match(yes.say, /^Añadí Cena al calendario Menú para el .+\. Para usarlo siempre, elígelo en Bot Builder → Crow → Calendario, recordatorios y tareas\.$/);
   assert.equal(writesOf(ex).length, 1);
-  for (const said of ["no", "no, not menu", "the blue one", "menu or family"]) {
+  for (const said of ["no", "no, not menu", "never mind"]) {
     await ask("en");
     const out = await own.fastPath({ ...base, lang: "en", transcript: said });
     assert.equal(out.verb, "which_no", said);
     assert.equal(out.say, voiceLine("declined", "en"), said);
+  }
+  // No single short answer naming one (fix round 1): the question ends and the model hears the words; nothing is claimed.
+  for (const said of ["the blue one", "menu or family", "never mind, what's on the menu tonight"]) {
+    await ask("en");
+    assert.equal(await own.fastPath({ ...base, lang: "en", transcript: said }), null, said);
+    assert.equal(own.turnContext({ device: DEVICE }), null, `${said}: the question is gone`);
   }
   assert.equal(writesOf(ex).length, 1, "only the named answer wrote");
 });
@@ -1233,5 +1239,60 @@ test("tasks: a shared list is never auto-picked (auto → a board card); an owne
     // Spanish list question.
     const es = await w.own.forTurn({ db: s.db, bot, surface: "kiosk", lang: "es", tz: TZ });
     assert.equal((await run(toolOf(es, "crow_task_add"), { title: "Pan" }, { executor: wx, db: s.db, device: DEVICE })).say, "¿Qué lista de tareas uso: Groceries o Chores?");
+    const esOut = await w.own.fastPath({ db: s.db, device: DEVICE, transcript: "la de groceries", lang: "es", tz: TZ, bot, executor: wx });
+    assert.equal(esOut.say, "Añadí Pan a la lista Groceries. Para usarla siempre, elígela en Bot Builder → Crow → Calendario, recordatorios y tareas.", "a list is feminine");
   } finally { s.close(); }
+});
+
+test("fix round 1: a which-answer counts only when short (the name plus at most 3 filler words)", async () => {
+  const { matchChoice } = await import("../servers/gateway/voice/own-tools.js");
+  const opts = [{ id: "p", name: "Personal" }, { id: "m", name: "Menu" }];
+  for (const said of ["Menu", "the menu one", "el de Menu", "use the menu calendar", "la de menú", "Personal, please"]) assert.ok(matchChoice(said, opts), said);
+  assert.equal(matchChoice("the menu one", opts).id, "m");
+  assert.equal(matchChoice("el de Menu", opts).id, "m");
+  for (const said of ["never mind, what's on the menu tonight", "what is on the menu", "use the menu calendar for this one please", "menu or personal", "the blue one", ""]) {
+    assert.equal(matchChoice(said, opts), null, said);
+  }
+});
+
+test("fix round 1: an unrelated sentence while a which-question waits goes to the model, writes nothing", async () => {
+  const own = createOwnTools({ pending: createPendingStore(), now: () => NOW, connected: () => new Set(WS_CAL) });
+  const h = harness({ bot: CROW(), chatTools: [], rounds: [[{ type: "content_delta", text: "Tonight is tacos. " }, { type: "done" }]] });
+  h.deps.ownTools = own.forTurn;
+  h.deps.voiceActions = chainVoiceActions([own]);
+  const ex = fakeExecutor({ calendars: SHARED_ONLY });
+  h.deps.createToolExecutor = () => ex;
+  const set = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+  await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: {}, device: h.device });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, sink: h.sink, tz: TZ, lang: "en", transcript: "never mind, what's on the menu tonight" });
+  assert.ok(h.calls.spoken.join(" ").includes("Tonight is tacos"), h.calls.spoken.join(" | "));
+  assert.equal(h.log.length, 1, "one model call");
+  assert.deepEqual(writesOf(ex), []);
+});
+
+test("fix round 1: the recap says where the write went (Crow's calendar, a named one; tasks; es)", async () => {
+  const start = "2026-10-26T12:00:00-05:00";
+  const at = { tool: "crow_calendar_add_event", title: "lunch", start, tz: TZ };
+  assert.equal(lastWriteRecap({ ...at, target: "crow" }, "en"), `Lunch is on Crow's calendar for ${whenOf(start)}.`);
+  assert.equal(lastWriteRecap({ ...at, target: "named", target_name: "Menu" }, "en"), `Lunch is on the Menu calendar for ${whenOf(start)}.`);
+  assert.equal(lastWriteRecap({ ...at, target: "your" }, "en"), `Lunch is on your calendar for ${whenOf(start)}.`);
+  assert.equal(lastWriteRecap({ ...at, target: "crow" }, "es"), "Lunch está en el calendario de Crow para el lunes, 26 de octubre, 12:00.");
+  assert.equal(lastWriteRecap({ ...at, target: "named", target_name: "Menu" }, "es"), "Lunch está en el calendario Menu para el lunes, 26 de octubre, 12:00.");
+  const task = { tool: "crow_task_add", title: "milk" };
+  assert.equal(lastWriteRecap({ ...task, target: "crow" }, "en"), "Milk is on Crow's task list.");
+  assert.equal(lastWriteRecap({ ...task, target: "named", target_name: "Groceries" }, "en"), "Milk is on the Groceries list.");
+  assert.equal(lastWriteRecap({ ...task, target: "crow" }, "es"), "Milk está en la lista de tareas de Crow.");
+  assert.equal(lastWriteRecap({ ...task, target: "named", target_name: "Groceries" }, "es"), "Milk está en la lista Groceries.");
+  // The write record carries the target.
+  const { own } = make({ connected: WS_CAL });
+  const ex = fakeExecutor();
+  const set = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+  const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(r.write.target, "crow");
+  const n = make({ connected: WS_CAL });
+  const nx = fakeExecutor({ calendars: SHARED_ONLY });
+  const nset = await n.own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+  await run(toolOf(nset, "crow_calendar_add_event"), { title: "Lunch", start }, { executor: nx, db: {}, device: DEVICE });
+  const out = await n.own.fastPath({ db: {}, device: DEVICE, transcript: "menu", lang: "en", tz: TZ, bot: CROW(), executor: nx });
+  assert.deepEqual([out.write.target, out.write.target_name], ["named", "Menu"]);
 });

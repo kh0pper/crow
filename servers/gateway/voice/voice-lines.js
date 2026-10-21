@@ -27,7 +27,8 @@ export const VOICE_LINES = Object.freeze({
     which_calendar_ask: "Which calendar should I use: {options}?",
     which_list_ask: "Which task list should I use: {options}?",
     which_or: "{rest} or {last}",
-    which_hint: "To use it every time, choose it in Bot Builder → Crow → Routine.",
+    which_hint: "To use it every time, choose it in Bot Builder → Crow → Calendar, reminders and tasks.",
+    which_hint_list: "To use it every time, choose it in Bot Builder → Crow → Calendar, reminders and tasks.",
     routine_confirm_calendar: "Add {title} to your calendar for {when}?",
     routine_confirm_reminder: "Remind you {when}: {text}?",
     routine_confirm_task: "Add {title} to your tasks?",
@@ -41,6 +42,11 @@ export const VOICE_LINES = Object.freeze({
     last_write_recap: "{title} is on your calendar for {when}.",
     last_write_recap_reminder: "Your reminder is set for {when}: {text}.",
     last_write_recap_task: "{title} is on your tasks.",
+    // Task 6: a write to Crow's own calendar or list, or to the one named answering the which-question.
+    last_write_recap_crow: "{title} is on Crow's calendar for {when}.",
+    last_write_recap_named: "{title} is on the {calendar} calendar for {when}.",
+    last_write_recap_task_crow: "{title} is on Crow's task list.",
+    last_write_recap_task_named: "{title} is on the {list} list.",
   }),
   es: Object.freeze({
     cant_do_say: "Lo siento, no puedo hacer eso desde aquí: este asistente no tiene una herramienta para eso.",
@@ -60,7 +66,8 @@ export const VOICE_LINES = Object.freeze({
     which_calendar_ask: "¿Qué calendario uso: {options}?",
     which_list_ask: "¿Qué lista de tareas uso: {options}?",
     which_or: "{rest} o {last}",
-    which_hint: "Para usarlo siempre, elígelo en Bot Builder → Crow → Rutina.",
+    which_hint: "Para usarlo siempre, elígelo en Bot Builder → Crow → Calendario, recordatorios y tareas.",
+    which_hint_list: "Para usarla siempre, elígela en Bot Builder → Crow → Calendario, recordatorios y tareas.",
     routine_confirm_calendar: "¿Añado {title} a tu calendario para el {when}?",
     routine_confirm_reminder: "¿Te lo recuerdo {when}: {text}?",
     routine_confirm_task: "¿Añado {title} a tus tareas?",
@@ -72,6 +79,10 @@ export const VOICE_LINES = Object.freeze({
     last_write_recap: "{title} está en tu calendario para el {when}.",
     last_write_recap_reminder: "Tu recordatorio está puesto para {when}: {text}.",
     last_write_recap_task: "{title} está en tus tareas.",
+    last_write_recap_crow: "{title} está en el calendario de Crow para el {when}.",
+    last_write_recap_named: "{title} está en el calendario {calendar} para el {when}.",
+    last_write_recap_task_crow: "{title} está en la lista de tareas de Crow.",
+    last_write_recap_task_named: "{title} está en la lista {list}.",
   }),
 });
 

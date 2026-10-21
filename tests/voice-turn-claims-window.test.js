@@ -384,3 +384,16 @@ test("(R3b) a display tool on a rewritten turn is not held", async () => {
   assert.equal(ran.length, 1, "the display tool ran");
   assert.ok(!h.checks.some((c) => c.eff === "crow_wm"));
 });
+
+test("fix round 1 (Task 6): after a write to Crow's calendar, 'did you add it?' says it is on Crow's calendar", async () => {
+  const CROWS = { ok: true, code: "added", final: true, say: "Added lunch to Crow's calendar for Monday at noon.",
+    write: { tool: "crow_calendar_add_event", family: "own:calendar", title: "lunch", start: LUNCH.start, target: "crow", target_name: null } };
+  const h = gateHarness({ rounds: [call("crow_calendar_add_event", LUNCH), says("Yes, it's on your calendar. ")] });
+  const cal = calTool(CROWS);
+  const first = await turn(h, "add lunch Monday to my calendar", { actionWhen: () => true, cal });
+  assert.deepEqual(first.spoken, [CROWS.say]);
+  const r = await turn(h, "did you add it?", { cal });
+  const line = lastWriteRecap({ ...CROWS.write, tz: TZ }, "en");
+  assert.match(line, /^Lunch is on Crow's calendar for /);
+  assert.deepEqual(r.spoken, [line]);
+});
