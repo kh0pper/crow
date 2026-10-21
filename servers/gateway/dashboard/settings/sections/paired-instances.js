@@ -64,9 +64,10 @@ export function renderSyncLinkCell(h, lang) {
 
 export default {
   id: "paired-instances",
-  group: "multiInstance",
+  group: "otherCrows",
   icon: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="4"/><circle cx="17" cy="7" r="4" opacity="0.5"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/><path d="M13 21v-2a4 4 0 0 1 4-4h4" opacity="0.5"/></svg>`,
   labelKey: "settings.section.pairedInstances",
+  hiddenUnless: "peer",
   navOrder: 10,
 
   async getPreview({ db }) {

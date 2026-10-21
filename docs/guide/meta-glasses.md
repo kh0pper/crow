@@ -198,7 +198,7 @@ through their open-ear speakers without ever pulling out your phone.
 
 Install + configure once:
 
-1. Add MinIO config in **Settings → Multi-Instance → Shared Storage** (one
+1. Add MinIO config in **Settings → Advanced → Shared Storage** (one
    endpoint, applies to every paired Crow instance).
 2. Install the Funkwhale bundle from Extensions. The gateway auto-injects
    `AWS_*` credentials into Funkwhale's container, so audio uploads land

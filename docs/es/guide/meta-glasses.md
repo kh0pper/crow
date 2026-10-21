@@ -200,7 +200,7 @@ biblioteca por sus altavoces de oído abierto sin que jamás saques el teléfono
 
 Instala y configura una sola vez:
 
-1. Agrega la configuración de MinIO en **Configuración → Multi-instancia →
+1. Agrega la configuración de MinIO en **Configuración → Avanzado →
    Almacenamiento compartido** (un solo endpoint, aplica a cada instancia de Crow
    emparejada).
 2. Instala el complemento de Funkwhale desde Extensiones. El gateway inyecta

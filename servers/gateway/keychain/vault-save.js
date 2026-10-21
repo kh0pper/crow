@@ -36,7 +36,7 @@ export const VAULT_REASONS = Object.freeze({
   missingCli: "The Bitwarden command-line tool is not installed. Update the Vaultwarden extension, then try again.",
   badInput: "Enter your vault email and master password.",
   wrongCredentials: "Vaultwarden did not accept that email or master password.",
-  twoStep: "Your vault account uses two-step login, which Crow cannot complete. Add this password to your vault by hand (Settings → Passwords shows it).",
+  twoStep: "Your vault account uses two-step login, which Crow cannot complete. Add this password to your vault by hand (Settings → Security & passwords → Saved passwords & keys shows it).",
   unreachable: "Crow could not reach your Vaultwarden. Is it running?",
   timeout: "Vaultwarden took too long to answer.",
   createFailed: "Crow signed in to your vault but could not create the item.",

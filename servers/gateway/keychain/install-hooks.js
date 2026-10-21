@@ -29,7 +29,7 @@ function deps() {
     writeKey: (db) => ensureWriteKey(db, {
       onNewKey: async ({ orphaned }) => {
         await auditLog(db, "keychain_key_created", { details: { orphaned } });
-        try { await createNotification(db, { title: "New Crow keychain key created", body: `${orphaned} saved password(s) were sealed with a key that is no longer on this machine. Import an Export file in Settings → Passwords to recover them.`, type: "system", source: "keychain" }); } catch {}
+        try { await createNotification(db, { title: "New Crow keychain key created", body: `${orphaned} saved password(s) were sealed with a key that is no longer on this machine. Import an Export file in Settings → Security & passwords → Saved passwords & keys to recover them.`, type: "system", source: "keychain" }); } catch {}
       },
     }),
     vault: { status: vaultwardenStatus, save: saveToVault },
@@ -114,7 +114,7 @@ export async function recordKeychainForInstall({ bundleId, manifest, env, minted
       if (mintedList.length) {
         out.mintedSaved = false;
         log(err?.code === "KEYCHAIN_KEY_INVALID"
-          ? `Crow keychain key file unreadable at ${err.path}: restore it (or delete the saved passwords in Settings → Passwords), then install again. Nothing was written.`
+          ? `Crow keychain key file unreadable at ${err.path}: restore it (or delete the saved passwords in Settings → Security & passwords → Saved passwords & keys), then install again. Nothing was written.`
           : `Could not save the generated password(s) to Crow keychain (${err?.code || err?.name || "error"}); nothing was written, so retrying the install mints a new one`);
         return out;
       }
@@ -128,10 +128,10 @@ export async function recordKeychainForInstall({ bundleId, manifest, env, minted
     for (const s of key ? typedList : []) {
       try { await saveOne(key, s); } catch (err) { log(`Could not save ${s.k} to Crow keychain (${err?.code || err?.name || "error"}); the install continues`); }
     }
-    if (out.saved) log(`Saved ${out.saved} password(s) to Crow keychain (Settings → Passwords)`);
+    if (out.saved) log(`Saved ${out.saved} password(s) to Crow keychain (Settings → Security & passwords → Saved passwords & keys)`);
     if (mintedList.length && out.saved) {
       try {
-        if (key && (await unexportedCount(db, key.id)) > 0) log("This key exists only on this machine: export your keychain (Settings → Passwords → Export) so it can be recovered if the machine is lost.");
+        if (key && (await unexportedCount(db, key.id)) > 0) log("This key exists only on this machine: export your keychain (Settings → Security & passwords → Saved passwords & keys → Export) so it can be recovered if the machine is lost.");
       } catch { /* the reminder never blocks an install */ }
     }
 
@@ -155,7 +155,7 @@ export async function recordKeychainForInstall({ bundleId, manifest, env, minted
           if (!r.ok) { out.vault = { ok: false, reason: r.reason }; break; }
         }
       }
-      log(out.vault.ok ? "Vaultwarden: saved to your vault" : `Vaultwarden save did not complete: ${out.vault.reason} The password is in Crow keychain; you can retry from Settings → Passwords.`);
+      log(out.vault.ok ? "Vaultwarden: saved to your vault" : `Vaultwarden save did not complete: ${out.vault.reason} The password is in Crow keychain; you can retry from Settings → Security & passwords → Saved passwords & keys.`);
     }
   } catch (err) {
     if (mintedList.length && out.firstView.length < mintedList.length) out.mintedSaved = false;
@@ -210,7 +210,7 @@ export async function keychainRestoreValues(bundleId, manifest) {
  * saves a generated key to the keychain (campaigns/tax, mastodon/pixelfed/peertube data
  * keys) but was installed before that has the key only in its .env / retained copy / MCP
  * entry, and the field is no longer shown in Configure. Save each such value once, so it is
- * visible in Settings → Passwords and goes into the user's Export. Never overwrites an
+ * visible in Settings → Security & passwords → Saved passwords & keys and goes into the user's Export. Never overwrites an
  * entry (any status, readable or not); skips store_as keys (only a hash is on disk). No
  * first view (nothing new was minted). Best-effort; names only in `log`.
  * `values` = { envKey: { plain, origin } } gathered by the caller.
@@ -226,7 +226,7 @@ export async function backfillKeychainEntries(bundleId, manifest, values, { log 
   let saved = 0;
   try {
     db = deps().openDb();
-    // Once per bundle+key: a key the user later DELETED in Settings → Passwords is never
+    // Once per bundle+key: a key the user later DELETED in Settings → Security & passwords → Saved passwords & keys is never
     // brought back by a later boot (local setting; never synced).
     let done = {};
     try { done = JSON.parse((await readSetting(db, BACKFILL_SETTING)) || "{}") || {}; } catch { done = {}; }

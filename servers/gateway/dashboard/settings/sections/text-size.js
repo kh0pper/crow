@@ -14,7 +14,7 @@ import { TEXT_SIZES, TEXT_SIZE_DEFAULT } from "../../shared/text-size.js";
 
 export default {
   id: "text-size",
-  group: "general",
+  group: "appearance",
   icon: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 13 4 13 7"/><line x1="8.5" y1="4" x2="8.5" y2="20"/><line x1="6.5" y1="20" x2="10.5" y2="20"/><polyline points="14 13 14 11 21 11 21 13"/><line x1="17.5" y1="11" x2="17.5" y2="20"/><line x1="16" y1="20" x2="19" y2="20"/></svg>`,
   labelKey: "settings.section.textSize",
   navOrder: 15,

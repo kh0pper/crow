@@ -18,9 +18,10 @@ import { resolveFriendlyName } from "../../../fix-it/friendly-names.js";
 
 export default {
   id: "remote-exposure",
-  group: "multiInstance",
+  group: "otherCrows",
   icon: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 6v6"/><path d="M4.2 4.2l4.2 4.2m6.4 6.4l4.2 4.2"/><path d="M1 12h6m6 0h6"/></svg>`,
   labelKey: "settings.section.remoteExposure",
+  hidden: true,
   navOrder: 6,
 
   async getPreview({ settings }) {

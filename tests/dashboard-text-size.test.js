@@ -81,7 +81,7 @@ test("Settings › Text size: four radios over the shared runtime, no server sta
   const { getSettingsSection } = await import("../servers/gateway/dashboard/settings/registry.js");
   await import("../servers/gateway/dashboard/panels/settings.js");
   assert.equal(getSettingsSection("text-size"), section, "registered");
-  assert.equal(section.group, "general");
+  assert.equal(section.group, "appearance");
   for (const lang of ["en", "es"]) {
     const html = await section.render({ lang });
     const values = [...html.matchAll(/name="crow_text_size" value="([a-z]+)"/g)].map((m) => m[1]);

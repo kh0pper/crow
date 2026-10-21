@@ -2800,11 +2800,11 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       // A prior install's folder (its .env holds other generated secrets) is put back as it was.
       const reason = kcRestore.failed
         ? `Crow keychain could not be read, so ${blocked.join(", ")} was not generated (a new value could replace one saved there). Try the install again; nothing was written.`
-        : `Crow keychain holds ${blocked.join(", ")} for this extension, sealed with a keychain key this machine does not have. Import your keychain Export first (Settings → Passwords → Import), then install again. To start fresh instead, delete the old saved password(s) there (this needs a dashboard password or two-factor sign-in).`;
+        : `Crow keychain holds ${blocked.join(", ")} for this extension, sealed with a keychain key this machine does not have. Import your keychain Export first (Settings → Security & passwords → Saved passwords & keys → Import), then install again. To start fresh instead, delete the old saved password(s) there (this needs a dashboard password or two-factor sign-in).`;
       appendLog(job, reason);
       return { ok: false, reason };
     }
-    if (plan.restored.length > 0) appendLog(job, `Restored ${plan.restored.length} key(s) from Crow keychain (Settings → Passwords): ${plan.restored.join(", ")}`);
+    if (plan.restored.length > 0) appendLog(job, `Restored ${plan.restored.length} key(s) from Crow keychain (Settings → Security & passwords → Saved passwords & keys): ${plan.restored.join(", ")}`);
     if (plan.replaced.length > 0) appendLog(job, `${plan.replaced.join(", ")} was the example value once published in Crow's repository: a new key was generated, and the old one kept in its previous-key slot so data saved with it still opens`);
     if (plan.replaceSkipped?.length > 0) appendLog(job, `${plan.replaceSkipped.join(", ")} is still the example value once published in Crow's repository, but its previous-key slot already holds another key, so it was left as it is. Open that data, clear the previous-key slot in Configure, then reinstall.`);
     const generated = plan.env;
@@ -3894,7 +3894,7 @@ export default function bundlesRouter() {
         saveInstalled(installed);
         appendLog(job, "Installation record removed");
         const keptPasswords = await markBundleKeychainRemoved(bundle_id);
-        if (keptPasswords) appendLog(job, `Kept ${keptPasswords} saved password(s) in Crow keychain, marked "extension removed" (Settings → Passwords)`);
+        if (keptPasswords) appendLog(job, `Kept ${keptPasswords} saved password(s) in Crow keychain, marked "extension removed" (Settings → Security & passwords → Saved passwords & keys)`);
 
         let notifDb;
         try {

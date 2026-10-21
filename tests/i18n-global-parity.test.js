@@ -71,7 +71,6 @@ const IDENTICAL_OK = new Set([
   "settings.local",
   "settings.tailnetLan", // "Tailnet / LAN"
   "settings.url",
-  "settings.group.general",
   "syncConflicts.colOp", // "Op" — abbreviation of operación
   "contacts.typeManual", // "Manual" is Spanish too
   "contacts.fieldCrowId", // "Crow ID" — product term

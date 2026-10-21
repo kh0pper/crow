@@ -5,6 +5,23 @@
 import { GROUPS, readSettings } from "./registry.js";
 import { t } from "../shared/i18n.js";
 import { escapeHtml } from "../shared/components.js";
+import { getOrCreateLocalInstanceId } from "../../instance-registry.js";
+
+/**
+ * True when a trusted Crow (active, or offline while restarting) other than this one is paired. Gates the
+ * multi-instance pages; any failure (e.g. no table yet) reads as "no peer".
+ */
+export async function hasTrustedPeer(db) {
+  try {
+    const r = await db.execute({
+      sql: "SELECT 1 FROM crow_instances WHERE trusted = 1 AND status IN ('active','offline') AND id != ? LIMIT 1",
+      args: [getOrCreateLocalInstanceId()],
+    });
+    return r.rows.length > 0;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Render the grouped settings menu.
@@ -22,12 +39,24 @@ export async function renderSettingsMenu(sections, db, lang) {
   // Group sections (skip hidden ones — still registered and deep-linkable,
   // but not shown in the menu. Used for staged rollouts where a feature
   // bundle ships settings that shouldn't appear until the consumer lands.)
+  const peer = await hasTrustedPeer(db);
   const grouped = {};
   for (const section of sections) {
     if (section.hidden) continue;
-    const group = section.group || "general";
+    if (section.hiddenUnless === "peer" && !peer) continue;
+    const group = section.group || "advanced";
     if (!grouped[group]) grouped[group] = [];
     grouped[group].push(section);
+  }
+
+  // No second Crow yet: Other Crows is a single "Pair another Crow" row.
+  if (!peer) {
+    grouped.otherCrows = [{
+      id: "paired-instances",
+      labelKey: "settings.pairAnotherCrow",
+      group: "otherCrows",
+      icon: getSettingsIconFallback(sections),
+    }];
   }
 
   // Render groups in order
@@ -54,8 +83,14 @@ export async function renderSettingsMenu(sections, db, lang) {
 
     const groupDef = GROUPS[groupKey];
     const groupLabel = t(groupDef.labelKey, lang);
-    html += `<div class="settings-group">`;
-    html += `<div class="settings-group-label">${groupLabel}</div>`;
+    const collapsed = groupKey === "advanced";
+    if (collapsed) {
+      html += `<details class="settings-group settings-advanced">`;
+      html += `<summary class="settings-group-label">${groupLabel}</summary>`;
+    } else {
+      html += `<div class="settings-group">`;
+      html += `<div class="settings-group-label">${groupLabel}</div>`;
+    }
     html += `<div class="settings-group-card">`;
 
     for (let i = 0; i < items.length; i++) {
@@ -83,7 +118,7 @@ export async function renderSettingsMenu(sections, db, lang) {
       </a>`;
     }
 
-    html += `</div></div>`;
+    html += collapsed ? `</div></details>` : `</div></div>`;
   }
 
   html += `</div>`;
@@ -91,6 +126,10 @@ export async function renderSettingsMenu(sections, db, lang) {
   html += `<div id="settings-no-results" class="settings-no-results" style="display:none">${noResults}</div>`;
   html += menuFilterScript();
   return html;
+}
+
+function getSettingsIconFallback(sections) {
+  return sections.find((s) => s.id === "paired-instances")?.icon || "";
 }
 
 /**
@@ -105,6 +144,10 @@ function menuFilterScript() {
     var menu = document.querySelector(".settings-menu");
     if (!menu) return;
     var anyVisible = false;
+    // Remember each <details> state when a search starts; restore it when cleared.
+    menu.querySelectorAll("details.settings-group").forEach(function (d) {
+      if (q && d.getAttribute("data-was-open") === null) d.setAttribute("data-was-open", d.open ? "1" : "0");
+    });
     menu.querySelectorAll(".settings-group").forEach(function (g) {
       var groupVisible = false;
       g.querySelectorAll(".settings-row").forEach(function (r) {
@@ -114,6 +157,10 @@ function menuFilterScript() {
         if (match) groupVisible = true;
       });
       g.style.display = groupVisible ? "" : "none";
+      if (g.tagName === "DETAILS") {
+        if (q) g.open = groupVisible;
+        else if (g.getAttribute("data-was-open") !== null) { g.open = g.getAttribute("data-was-open") === "1"; g.removeAttribute("data-was-open"); }
+      }
       if (groupVisible) anyVisible = true;
     });
     var empty = document.getElementById("settings-no-results");
@@ -171,6 +218,9 @@ function menuCss() {
     margin: 1.25rem 0 0.4rem 0.25rem;
     font-weight: 600;
   }
+  .settings-advanced > summary { cursor: pointer; list-style: none; }
+  .settings-advanced > summary::-webkit-details-marker { display: none; }
+  .settings-advanced > summary::after { content: " \\25BE"; }
   .settings-menu > .settings-group-label:first-child { margin-top: 0.5rem; }
   .settings-group-card {
     background: var(--crow-bg-surface);
