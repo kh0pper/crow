@@ -2,7 +2,6 @@ package press.maestro.crow.dat
 
 import android.app.Activity
 import android.content.Context
-import android.graphics.Bitmap
 import android.util.Log
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
@@ -18,12 +17,12 @@ import com.meta.wearable.dat.core.selectors.AutoDeviceSelector
 import com.meta.wearable.dat.core.types.Permission
 import com.meta.wearable.dat.core.types.PermissionStatus
 import com.meta.wearable.dat.core.types.RegistrationState
-import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -127,19 +126,27 @@ object DatBridge {
 
                 result
                     .onSuccess { photo ->
-                        when (photo) {
-                            is PhotoData.HEIC -> {
-                                val buf = photo.data
-                                val bytes = ByteArray(buf.remaining())
-                                buf.get(bytes)
-                                listener.onPhoto(bytes, "image/heic")
+                        // HEIC → JPEG and a long-side cap (PhotoSizing), decoded off the main
+                        // thread; the listener is still called on the main thread.
+                        val encoded: ByteArray? = (photo as? PhotoData.HEIC)?.data?.let { buf ->
+                            ByteArray(buf.remaining()).also { buf.get(it) }
+                        }
+                        val bitmap = (photo as? PhotoData.Bitmap)?.bitmap
+                        if (encoded == null && bitmap == null) {
+                            listener.onError("capture_failed", "Unknown PhotoData subclass")
+                        } else {
+                            scope.launch {
+                                try {
+                                    val r = withContext(Dispatchers.Default) {
+                                        if (encoded != null) PhotoNormalizer.fromEncoded(encoded, "image/heic")
+                                        else PhotoNormalizer.fromBitmap(bitmap!!)
+                                    }
+                                    listener.onPhoto(r.bytes, r.mime)
+                                } catch (t: Throwable) {
+                                    Log.w(TAG, "photo normalize threw", t)
+                                    listener.onError("capture_failed", t.message ?: "photo processing failed")
+                                }
                             }
-                            is PhotoData.Bitmap -> {
-                                val out = ByteArrayOutputStream()
-                                photo.bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
-                                listener.onPhoto(out.toByteArray(), "image/jpeg")
-                            }
-                            else -> listener.onError("capture_failed", "Unknown PhotoData subclass")
                         }
                     }
                     .onFailure { err, _ ->
