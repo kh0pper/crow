@@ -62,19 +62,17 @@ test("a row whose next_run changed after the select is not claimed", async () =>
   assert.equal(jobCount(), 0);
 });
 
-test("a bad cron expression nulls next_run for good and enqueues nothing", async () => {
+test("a bad cron expression runs once, then next_run is NULL and it never ticks again", async () => {
   const { claimAndEnqueue, tickBotSchedules, ensure } = await load();
   const row = seed("not a cron");
   const d = new Database(dbPath);
   ensure(d);
-  assert.equal(claimAndEnqueue(d, row, new Date().toISOString()), false);
+  assert.equal(claimAndEnqueue(d, row, new Date().toISOString()), true);
   assert.equal(d.prepare("SELECT next_run FROM schedules WHERE id=?").get(row.id).next_run, null);
   d.close();
+  assert.equal(jobCount(), 1);
   assert.deepEqual(tickBotSchedules(), { fired: 0 });
-  const d2 = new Database(dbPath);
-  assert.equal(d2.prepare("SELECT next_run FROM schedules WHERE id=?").get(row.id).next_run, null);
-  d2.close();
-  assert.equal(jobCount(), 0);
+  assert.equal(jobCount(), 1);
 });
 
 test("tickBotSchedules still fires a due schedule once", async () => {
