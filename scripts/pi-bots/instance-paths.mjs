@@ -51,7 +51,7 @@ export function resolveSqlitePath(p) {
 }
 
 /** The data dir holding the crow.db this process uses. */
-function botsDataDir() {
+export function botsDataDir() {
   if (process.env.CROW_DB_PATH) return dirname(process.env.CROW_DB_PATH);
   return resolveDataDir();
 }
