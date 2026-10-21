@@ -33,6 +33,10 @@ services:
     group_add:
       - "${VIDEO_GID}"
       - "${RENDER_GID}"
+    # Same host env file as the other GPU bundles: `crow bundle install` links it as this
+    # bundle's .env, which supplies VIDEO_GID / RENDER_GID / LLM_CACHE above.
+    env_file:
+      - ${HOME}/.crow/env/rocm.env
     volumes:
       - ${LLM_CACHE}/qwen3-vl-4b-instruct:/models/qwen3-vl-4b-instruct:ro
     # Loopback only: every consumer is this host's gateway.

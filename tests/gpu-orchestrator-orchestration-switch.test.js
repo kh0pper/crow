@@ -137,10 +137,13 @@ test("switch set to \"0\" does NOT disable orchestration", async () => {
   assert.equal(started, 1);
 });
 
-test("meta-glasses: an OrchestrationDisabledError is skipped quietly (no warn)", () => {
+test("meta-glasses: an OrchestrationDisabledError is skipped quietly (no warn)", async () => {
+  // The look turn's acquire goes through the bundle's vision-acquire helper...
   const src = readFileSync(new URL("../bundles/meta-glasses/panel/routes.js", import.meta.url), "utf8");
-  const at = src.indexOf("await acquireProvider(profile.provider_id)");
-  assert.ok(at > 0, "meta-glasses acquire call not found");
-  const catchBlock = src.slice(src.indexOf("} catch (err) {", at), src.indexOf("resolveProvider", at));
-  assert.match(catchBlock, /err\?\.code !== "model_orchestration_disabled"/);
+  assert.match(src, /await acquireVisionProvider\(\{ acquire, providerId: profile\.provider_id \}\)/, "meta-glasses acquire call not found");
+  // ...which swallows the real refusal this host switch throws, without a warning.
+  const { acquireVisionProvider } = await import("../bundles/meta-glasses/server/vision-acquire.js");
+  const warnings = [];
+  await acquireVisionProvider({ acquire: async (id) => { throw new OrchestrationDisabledError(id); }, providerId: "crow-vision", warn: (m) => warnings.push(m) });
+  assert.deepEqual(warnings, []);
 });

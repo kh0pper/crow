@@ -88,6 +88,12 @@ test("compose: serves the catalog's Q8_0 file and mmproj companion under the pro
   assert.ok(c.includes(mmproj.sha256), "compose comment must carry the mmproj sha256");
 });
 
+test("compose: names the host env file, so `crow bundle install` links it as the bundle .env (GIDs, LLM_CACHE)", () => {
+  const c = compose();
+  assert.match(c, /env_file:\s*\n\s*-\s*\$\{HOME\}\/\.crow\/env\/rocm\.env/);
+  for (const v of ["VIDEO_GID", "RENDER_GID", "LLM_CACHE"]) assert.ok(c.includes("${" + v + "}"), v);
+});
+
 test("compose: bounded context and image size (one photo + a question fits; a 12 MP photo can't blow the context)", () => {
   const c = compose();
   assert.equal(commandArg(c, "-c"), "8192");
