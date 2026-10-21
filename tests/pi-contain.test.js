@@ -59,6 +59,8 @@ test("integration: a contained PiRpc child sees only its engine, its paths and i
     '  agentLock: (() => { try { mkdirSync(join(P.agent, "settings.json.lock")); return "ok"; } catch (e) { return e.code; } })(),',
     '  tmpEmpty: true, etcCrow: existsSync("/etc/crow") ? "present" : "absent",',
     '  cache: process.env.npm_config_cache || null,',
+    '  signal: (() => { try { process.kill(P.sentinel, 0); return "reached"; } catch (e) { return e.code; } })(),',
+    '  resolv: existsSync("/etc/resolv.conf"),',
     '};',
     'process.stdout.write(JSON.stringify({ type: "report", ...r }) + "\\n");',
     'process.stdin.resume();',
@@ -69,6 +71,9 @@ test("integration: a contained PiRpc child sees only its engine, its paths and i
   delete process.env.CROW_PI_SANDBOX;
   const testPaths = { hidden, boardToken: join(crowHome, "board-token"), identity: join(dataDir, "identity.json"),
     agentSessions: join(agent, "sessions", "operator-session.jsonl"), repo: REPO, out, notes, data: dataDir, session, agent };
+  const { spawn: spawnSentinel } = await import("node:child_process");
+  const sentinel = spawnSentinel("sleep", ["60"], { stdio: "ignore" });
+  testPaths.sentinel = sentinel.pid;
   const pi = new PiRpc({
     def: { bot_id: "contain-test-bot", permission_policy: { bash: "deny", write_paths: [out], read_paths: [notes] },
       spawn_env: { CROW_TEST_PATHS: JSON.stringify(testPaths) } },
@@ -97,7 +102,10 @@ test("integration: a contained PiRpc child sees only its engine, its paths and i
     assert.ok(!existsSync(join(REPO, "contain-probe.txt")));
     assert.ok(!existsSync(join(agent, "settings.json.lock")), "the lock went to the shadow, not the real agent dir");
     assert.ok(existsSync(join(out, "o.txt")));
+    assert.equal(r.signal, "ESRCH", "a same-uid host process cannot even be signalled (own pid namespace)");
+    assert.equal(r.resolv, existsSync("/etc/resolv.conf"), "the resolver config resolves inside as it does outside");
   } finally {
+    try { sentinel.kill("SIGKILL"); } catch {}
     await pi.close();
   }
   const leftovers = readdirSync(tmpdir()).filter((e) => e.startsWith("crow-pi-agent-"));
