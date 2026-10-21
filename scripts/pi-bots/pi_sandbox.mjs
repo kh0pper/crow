@@ -66,7 +66,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 
 const BWRAP_CANDIDATES = ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
 const SETPRIV_CANDIDATES = ["/usr/bin/setpriv", "/bin/setpriv"];
@@ -144,6 +144,59 @@ export function systemdUserUnitDirs(home = homedir(), { create = true } = {}) {
     if (!isDir(d) && create) { try { mkdirSync(d, { recursive: true, mode: 0o700 }); } catch {} }
     if (isDir(d)) out.push(d);
   }
+  return out;
+}
+
+/**
+ * The board actor shared-secret file (scripts/pi-bots/actor-sig.mjs), as the
+ * GATEWAY's env names it: CROW_BOARD_ACTOR_SECRET_FILE, else systemd's
+ * $CREDENTIALS_DIRECTORY/board-actor-secret (LoadCredential=). null if
+ * neither is set. The path is not secret; the file is.
+ */
+export const BOARD_SECRET_CREDENTIAL = "board-actor-secret";
+export function boardSecretFile(env = process.env) {
+  const f = String((env && env.CROW_BOARD_ACTOR_SECRET_FILE) || "").trim();
+  if (f) return resolve(f);
+  const cd = String((env && env.CREDENTIALS_DIRECTORY) || "").trim();
+  return cd ? resolve(cd, BOARD_SECRET_CREDENTIAL) : null;
+}
+
+/**
+ * Why `dir` cannot hold the board secret (it is masked with an empty tmpfs in
+ * every sandboxed pi child, so it must be a dedicated directory), or null.
+ * Refused: a top-level directory (/, /etc, /tmp, /home, ...) and any
+ * directory that is, or contains, a path bots need (home, the Crow data
+ * dirs, the app checkout, the current directory).
+ */
+export function boardSecretDirProblem(dir, env = process.env) {
+  const d = resolve(String(dir || "/"));
+  if (d.split(sep).filter(Boolean).length < 2) return "a top-level directory";
+  const needed = [homedir(), env.HOME, env.CROW_HOME, env.CROW_DATA_DIR, env.CROW_APP_ROOT, process.cwd()]
+    .filter(Boolean).map((p) => resolve(p));
+  for (const p of needed) if (p === d || p.startsWith(d + sep)) return "it is or contains a directory bots need";
+  return null;
+}
+
+/**
+ * Directories hidden behind an empty tmpfs so a sandboxed bot cannot read the
+ * board secret: /run/credentials (every systemd unit credential, when it
+ * exists; never created here, it is root's), $CREDENTIALS_DIRECTORY when it
+ * lies elsewhere, and the secret file's own directory when that is a
+ * dedicated one (boardSecretDirProblem). Only existing directories are
+ * returned: a missing one holds no secret.
+ */
+export function credentialMaskDirs(env = process.env, { isDirFn = isDir } = {}) {
+  const out = [];
+  const add = (d) => {
+    if (!d || !isDirFn(d)) return;
+    if (out.some((o) => d === o || d.startsWith(o + "/"))) return;
+    out.push(d);
+  };
+  add("/run/credentials");
+  const cd = String((env && env.CREDENTIALS_DIRECTORY) || "").trim();
+  if (cd) add(resolve(cd));
+  const f = boardSecretFile(env);
+  if (f && !boardSecretDirProblem(dirname(f), env)) add(dirname(f));
   return out;
 }
 
@@ -231,13 +284,16 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   const sockets = opts.sockets || dockerSocketPaths(process.env);
   const tmpfs = opts.runtimeDirs || userRuntimeDirs();
   const roDirs = opts.roDirs || systemdUserUnitDirs();
+  // Board secret: credential dirs masked like the IPC dirs (gateway env).
+  const credDirs = (opts.credentialDirs || credentialMaskDirs(process.env)).filter((d) => !tmpfs.includes(d));
   const pre = ["--dev-bind", "/", "/", "--unshare-user"];
   for (const d of tmpfs) pre.push("--tmpfs", d);
+  for (const d of credDirs) pre.push("--tmpfs", d);
   for (const s of sockets) if (!tmpfs.some((d) => s === d || s.startsWith(d + "/"))) pre.push("--ro-bind", "/dev/null", s);
   for (const d of roDirs) pre.push("--ro-bind", d, d);
   if (opts.infoFd != null) pre.push("--info-fd", String(opts.infoFd));
   return { cmd: probe.bwrap, args: [...pre, "--", cmd, ...args], env: scrubSandboxEnv(env),
-    sandboxed: true, wrapper: "bwrap", reason: null, masked: [...sockets, ...tmpfs, ...roDirs] };
+    sandboxed: true, wrapper: "bwrap", reason: null, masked: [...sockets, ...tmpfs, ...credDirs, ...roDirs] };
 }
 
 /** True when a ps `args` string is a bubblewrap wrapper (used by the reaper). */

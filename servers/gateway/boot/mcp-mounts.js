@@ -308,9 +308,9 @@ export async function mountMcpServers(app, deps) {
   // in-memory key, so the key must exist before any bot world is built in
   // this process (idempotent; the phone mount below reuses it).
   initGatewayActorKey();
-  // Board signing mode, logged once (never the secret). In shared-secret mode
-  // the derived key is captured and the variable leaves process.env, so no
-  // child spawned from here on can inherit it.
+  // Board signing mode, logged once (never the secret). Shared-secret mode
+  // reads the operator's secret FILE once here and keeps only the derived key
+  // in memory (refused unless the pi sandbox is active; see actor-sig.mjs).
   console.log(`[gateway] board actor signing: ${initBoardSigning()}`);
   mountMcpServer(app, "/board", () => createBoardMcpServer({ instructions, verifyActor: verifyBoardActorSig }), sessionManager, authMiddleware, peerExposureGate);
   // Phone bundle (plan A): core-mounted like /board, but only when the bundle

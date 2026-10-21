@@ -13,8 +13,10 @@
  * time a throw reaches here the lib has already cleaned up after itself.
  */
 import { runBridgeTick } from "./bridge_tick_lib.mjs";
+import { initBoardSigning } from "./actor-sig.mjs";
 
 (async () => {
+  initBoardSigning(); // board secret file, read once (actor-sig.mjs)
   const r = await runBridgeTick();
   if (r && r.skipped) console.log(`[tick] skipped: ${r.skipped}`);
   process.exit(0);

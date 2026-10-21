@@ -110,6 +110,21 @@ function headerValue(headers, key) {
 
 const UNATTRIBUTED_BOT = Object.freeze({ kind: "bot", id: null, jobId: null });
 
+// Presented-but-rejected board actor signatures: counted, and the FIRST one
+// logs a single warning (no ids, no signature, no key material), so a
+// mis-provisioned shared secret or a forgery attempt is visible once.
+let rejectedBoardSigs = 0;
+/** How many presented board actor signatures this process has rejected. */
+export function rejectedBoardSigCount() { return rejectedBoardSigs; }
+/** Test seam only. */
+export function _resetRejectedBoardSigsForTest() { rejectedBoardSigs = 0; }
+function noteRejectedBoardSig() {
+  rejectedBoardSigs += 1;
+  if (rejectedBoardSigs === 1) {
+    console.warn("[board-mcp] a board actor signature was rejected; the call runs unattributed (check the board signing mode on both processes). Later rejections are counted, not logged.");
+  }
+}
+
 /** @param verifyActor ({botId, jobId, sig}) => boolean — the gateway injects
  *  actor-sig.mjs's verifyBoardActorSig. Absent → fail closed (unattributed). */
 export function resolveActor(extra, verifyActor) {
@@ -124,6 +139,7 @@ export function resolveActor(extra, verifyActor) {
       const sig = headerValue(headers, "x-crow-actor-sig");
       let ok = false;
       try { ok = typeof verifyActor === "function" && !!id && !!sig && verifyActor({ botId: id, jobId, sig }) === true; } catch { ok = false; }
+      if (!ok && sig) noteRejectedBoardSig();
       return ok ? { kind: "bot", id: id.trim(), jobId: jobId == null || jobId.trim() === "" ? null : jobId.trim() } : { ...UNATTRIBUTED_BOT };
     }
     if (auth?.extra?.tokenScope === "board") return { ...UNATTRIBUTED_BOT };
