@@ -1041,13 +1041,13 @@ export function createVoiceTurnRunner(deps) {
       let guardHeld = "";
       // Own calls that were not ok, by name|canonical args → { name, say, validation, round }. An ok own call clears
       // the same call's failure. A validation failure (bad_args, no_tz) is also cleared by a later ok call of the
-      // SAME tool (the corrected retry) or by an ok own call in a LATER round (the step-up picking another tool),
-      // never by another tool's ok call in the same round. A backend error or a refusal on other args stays.
+      // SAME tool (the corrected retry) or by an own call that really RAN ok in a LATER round (the step-up picking
+      // another tool), never by another tool's ok call in the same round, nor by a replay from the turn's cache. A backend error or a refusal on other args stays.
       const ownFails = new Map();
       const ownOkSays = new Map(); // name|canonical args → the success line of an ok own call that changed something
       let ownAsk = "";             // the last own confirmation question that really ran (needs_confirm): the live pending entry
       let ownEndLead = "";         // a final display line that the own-tool ending speaks first
-      const holding = () => actionGuard && (!backed || ownFails.size > 0);
+      const holding = () => actionGuard && (!backed || ownFails.size > 0 || !!ownAsk);   // a pending question keeps the hold: it ends the turn
       // The own-tool ending (an own call failed): held text that claims nothing, the ok own calls' lines, the failure
       // line (the failed tool's own say, else partly done when something was done, else not done), and LAST the
       // confirmation question, if one is waiting for a yes.
@@ -1268,7 +1268,7 @@ export function createVoiceTurnRunner(deps) {
             const resSay = typeof res?.say === "string" && res.say.trim() ? res.say.trim() : null;
             if (ok) {
               ownFails.delete(dupKey);
-              for (const [k, f] of ownFails) if (f.validation && (f.name === tc.name || f.round < rounds)) ownFails.delete(k);
+              for (const [k, f] of ownFails) if (f.validation && (f.name === tc.name || (ran && f.round < rounds))) ownFails.delete(k);
             } else ownFails.set(dupKey, { name: tc.name, say: resSay, validation: OWN_VALIDATION_CODES.has(code), round: rounds });
             if (ok && res.effect !== false && resSay) ownOkSays.set(dupKey, resSay);
             if (ran && ok && code === "needs_confirm" && resSay) ownAsk = resSay;
@@ -1276,7 +1276,7 @@ export function createVoiceTurnRunner(deps) {
             // the model's words are held and checked (#499). Text streamed in THIS round was already held when the
             // guard was on from the first word (a turn aimed at an own tool, above); otherwise it may have been
             // heard, and only what the model says in later rounds is checked against what the tools really did.
-            if (!ok || (code === "needs_confirm" && !(typeof res.say === "string" && res.say.trim()))) armGuard();
+            if (!ok || code === "needs_confirm") armGuard();
             if (ok && res.effect !== false) { backed = true; actionSent = true; }
             if (code === "bad_args") ownBadArgs = true;
             if (usedFamilies) usedFamilies.add(own.family);
@@ -1374,8 +1374,9 @@ export function createVoiceTurnRunner(deps) {
           // The line is short and already known, so it is spoken even when the first-audio budget has run out.
           timings.final = `${logName(finalRes.name)}:${finalRes.code}`;
           if (budgetTimer) { (deps.clearTimeout || clearTimeout)(budgetTimer); budgetTimer = null; }
-          if (actionGuard && ownFails.size > 0) {
-            // An own call failed this turn: not the last call's line alone, the own-tool ending after the loop.
+          if (actionGuard && (ownFails.size > 0 || (ownAsk && finalRes.say !== ownAsk))) {
+            // An own call failed this turn, or a question is waiting that is not this line: not the last call's line
+            // alone, the own-tool ending after the loop (it ends on the question).
             if (!ownByName.has(finalRes.name)) ownEndLead = finalRes.say;
             break;
           }
@@ -1456,15 +1457,15 @@ export function createVoiceTurnRunner(deps) {
               else messages.splice(i, 1);
             }
           };
-          if (ownFails.size > 0) {
-            // An own call failed (see the action guard above): held text that claims nothing, the ok own calls'
-            // lines, then the failure line. What is saved is exactly what is heard.
+          if (ownFails.size > 0 || ownAsk) {
+            // An own call failed, or a question waits for a yes (see the action guard above): held text that claims
+            // nothing, the ok own calls' lines, the failure line (if any), then the question. Saved = heard.
             const claimed = !!said && claimsAction(said);
             if (claimed) {
               timings.claim_blocked = true;
               log(`[voice-turn] ${device.id} bot ${bot.bot_id}: a reply claiming an action an own tool failed was replaced`);
             }
-            timings.own_failed = true;
+            if (ownFails.size > 0) timings.own_failed = true;
             line = ownEndLine(said && !claimed ? said : "");
             dropHeld((m) => !heldMsgs.has(m));
             messages.push({ role: "assistant", content: line });
@@ -1500,7 +1501,9 @@ export function createVoiceTurnRunner(deps) {
         }
         await chunker.flush();
         if (aborted()) result.aborted = true;
-        // The budget can fire while the last chunk is still synthesizing (the stream already ended).
+        // The budget can fire while the last chunk is still synthesizing (the stream already ended). A known own
+        // outcome (a failure, or a question waiting for a yes) is re-spoken past the budget, so the question stays last.
+        else if (budgetHit && !endedFinal && !say.answered() && ((actionGuard && ownFails.size > 0) || ownAsk)) { await speakFallback("budget", spokenChars > 0, ownEndLine()); return result; }
         else if (budgetHit && !endedFinal && !say.answered()) { await speakFallback("budget", spokenChars > 0, actionSent ? String(opts.unsureText || UNSURE_TEXT) : undefined); return result; }
         else if (overflow) { await speakFallback("context_full", spokenChars > 0); return result; }
         else if (!mustDone && !endedFinal) {

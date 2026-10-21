@@ -703,3 +703,43 @@ test("the first-audio budget runs out with a question pending and no failure: th
   assert.ok(captions(h).trim().endsWith(Q.say), `captions: ${captions(h)}`);
   assert.ok(!heard.includes(NOT_DONE_TEXT) && !heard.includes(PARTLY_DONE_TEXT), `heard: ${heard}`);
 });
+
+// ─── #499 round 5: a replay never erases a failure; a held question always ends the turn ───
+test("a cached replay in the step-up round does not clear another tool's validation failure", async () => {
+  const t = taskOwn(BAD);
+  const rem = remTool(REMINDED);
+  const remCall = (id) => ({ type: "tool_call", id, name: "crow_reminder_add", arguments: { text: "milk", at: "2026-10-26T17:00:00-05:00" } });
+  const h = ownHarness({ bot: CROW, probe: () => true, rounds: [
+    [remCall("r1"), { type: "tool_call", id: "t1", name: "crow_task_add", arguments: {} }, { type: "done" }],
+    [remCall("r2"), { type: "done" }],
+  ] });
+  const r = await turn(h, "add milk to my tasks and remind me at 5", { ...noAct, ownTools: [t, rem] });
+  assert.equal(r.timings.step_up, "own_tool");
+  assert.equal(rem.seen.length, 1, "the replay came from the cache");
+  const heard = h.calls.spoken.join(" ");
+  assert.equal(r.timings.own_failed, true);
+  assert.ok(heard.includes(REMINDED.say) && heard.trim().endsWith(PARTLY_DONE_TEXT), `heard: ${heard}`);
+});
+
+const QUESTION = { ok: true, effect: false, code: "needs_confirm", final: true, say: "Remind you Monday at 5: milk?" };
+const okTaskSay = () => taskOwn({ ok: true, code: "added", say: "Added milk to your tasks." });
+
+test("a question that is not the round's last final call is still asked, last; later claims are never heard", async () => {
+  for (const text of ["Added milk and your reminder is set. ", "Done! "]) {
+    const h = ownHarness({ bot: CROW, rounds: [both("", ["rem", "task"]), says(text)] });
+    await turn(h, "add milk to my tasks and remind me at 5", { ...noAct, ownTools: [okTaskSay(), remTool(QUESTION)] });
+    const heard = h.calls.spoken.join(" ");
+    assert.ok(heard.trim().endsWith(QUESTION.say) && captions(h).trim().endsWith(QUESTION.say), `heard: ${heard} | captions: ${captions(h)}`);
+    assert.ok(heard.includes("Added milk to your tasks."), `heard: ${heard}`);
+    assert.ok(!heard.includes(text.trim()) && !captions(h).includes(text.trim()), `heard: ${heard}`);
+  }
+});
+
+test("the budget firing while the held ending is still synthesizing keeps the question last", async () => {
+  const h = ownHarness({ bot: CROW, rounds: [both("", ["rem", "task"]), says("Done! ")] });
+  h.deps.createTtsAdapter = async () => ({ name: "kokoro", async *synthesize(text) { h.calls.spoken.push(text); await new Promise((r) => setTimeout(r, 80)); yield Buffer.from(text); } });
+  const r = await turn(h, "add milk to my tasks and remind me at 5", { ...noAct, ownTools: [okTaskSay(), remTool(QUESTION)], firstAudioBudgetMs: 40 });
+  assert.equal(r.failed, "budget");
+  assert.ok(h.calls.spoken.at(-1).trim().endsWith(QUESTION.say), `spoken: ${JSON.stringify(h.calls.spoken)}`);
+  assert.ok(captions(h).trim().endsWith(QUESTION.say), `captions: ${captions(h)}`);
+});

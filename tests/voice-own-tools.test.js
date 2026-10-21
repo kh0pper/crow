@@ -659,3 +659,29 @@ test("strict: a cached question that ends the turn as its final line is the pend
     assert.equal(pending.get(h.device.id)?.args?.text, "eggs");
   } finally { s.close(); }
 });
+
+test("strict: a question before an ok non-final task is asked last over a claim, and a yes writes it once", async () => {
+  const s = await stores();
+  try {
+    const { own, pending } = make();
+    const bot = CROW({ voice: { confirm: "strict" } });
+    const okTask = { definition: { name: "crow_task_add", description: "x", inputSchema: { type: "object" } }, family: "own:tasks", intent: { en: ["task", "tasks"], es: [] },
+      execute: async () => JSON.stringify({ ok: true, code: "added", say: "Added milk to your tasks." }) };
+    const at = "2026-10-26T17:00:00-05:00";
+    const h = harness({ bot, chatTools: [], rounds: [[
+      { type: "tool_call", id: "r1", name: "crow_reminder_add", arguments: { text: "milk", at } },
+      { type: "tool_call", id: "t1", name: "crow_task_add", arguments: { title: "milk" } },
+      { type: "done" },
+    ], [{ type: "content_delta", text: "Added milk and your reminder is set. " }, { type: "done" }]] });
+    h.deps.ownTools = async (a) => { const set = await own.forTurn(a); return { ...set, tools: [okTask, ...set.tools.filter((t) => t.definition.name !== "crow_task_add")] }; };
+    h.deps.voiceActions = chainVoiceActions([own]);
+    await h.runner.runVoiceTurn({ db: s.db, device: h.device, transcript: "add milk to my tasks and remind me at 5", sink: h.sink, tz: TZ, lang: "en", actionWhen: () => false });
+    const heard = h.calls.spoken.join(" ");
+    assert.ok(heard.trim().endsWith(`Remind you ${whenOf(at)}: milk?`), `heard: ${heard}`);
+    assert.ok(heard.includes("Added milk to your tasks.") && !/reminder is set/.test(heard), `heard: ${heard}`);
+    assert.equal(pending.get(h.device.id)?.kind, "routine");
+    await h.runner.runVoiceTurn({ db: s.db, device: h.device, transcript: "yes", sink: h.sink, tz: TZ, lang: "en", actionWhen: () => false });
+    assert.equal((await s.schedules()).length, 1, "the reminder is written once");
+    assert.equal(pending.get(h.device.id), null);
+  } finally { s.close(); }
+});
