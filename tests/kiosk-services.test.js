@@ -5,11 +5,11 @@ import { ensureKioskSttProfile, pickKioskTtsProfile, KIOSK_STT_PROFILE_ID, KIOSK
 
 const read = (p) => readFileSync(new URL("../" + p, import.meta.url), "utf8");
 
-test("faster-whisper: pinned to the running digest's tag, never unloads, preloads the kiosk model, capped, loopback only", () => {
+test("faster-whisper: pinned to the running digest's tag, never unloads, preloads the kiosk model and dictation's turbo, capped, loopback only", () => {
   const y = read("bundles/faster-whisper-server/docker-compose.yml");
   assert.match(y, /^\s*image: fedirz\/faster-whisper-server:0\.5\.0-cpu\s*$/m);
   assert.match(y, /WHISPER__TTL: "-1"/);
-  assert.match(y, /PRELOAD_MODELS: '\["Systran\/faster-distil-whisper-small\.en", "Systran\/faster-whisper-tiny\.en"\]'/, "kiosk model + the tiny.en lever");
+  assert.match(y, /PRELOAD_MODELS: '\["Systran\/faster-distil-whisper-small\.en", "Systran\/faster-whisper-tiny\.en", "deepdml\/faster-whisper-large-v3-turbo-ct2"\]'/, "kiosk model + the tiny.en lever + dictation's turbo");
   assert.match(y, /^\s*mem_limit: 8g\s*$/m);
   assert.match(y, /"127\.0\.0\.1:8004:8000"/);
   assert.doesNotMatch(y, /:latest/);

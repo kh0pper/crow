@@ -23,9 +23,12 @@ services:
       # The kiosk's small English model (spec §7.3) is loaded at start, plus tiny.en
       # (~75 MB) — the per-display "Fastest" speech model (smoke 2026-10-04 lever 2) —
       # so choosing it never pays a download. The gateway warms whichever a display uses.
-      PRELOAD_MODELS: '["Systran/faster-distil-whisper-small.en", "Systran/faster-whisper-tiny.en"]'
+      # large-v3-turbo (~1.6 GB, ~1.6 GiB resident) is Perch dictation's model: dictation
+      # uses it only while /api/ps lists it, so preloading it keeps dictation off the
+      # glasses' large-v3 queue after a container recreate.
+      PRELOAD_MODELS: '["Systran/faster-distil-whisper-small.en", "Systran/faster-whisper-tiny.en", "deepdml/faster-whisper-large-v3-turbo-ct2"]'
       ENABLE_UI: "false"
-    # large-v3 int8 + distil-small resident, plus decode buffers for a 90-min
+    # large-v3 int8 + distil-small + large-v3-turbo resident, plus decode buffers for a 90-min
     # meeting recording (R4 meeting recorder) — measured headroom, not a target.
     mem_limit: 8g
     volumes:
