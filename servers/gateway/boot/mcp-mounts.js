@@ -22,7 +22,7 @@ import { enforcePeerExposure } from "../peer-exposure.js";
 import { connectedServers } from "../proxy.js";
 import { createBoardMcpServer } from "../board-mcp.js";
 import { ensureBoardToken, ensurePhoneToken, ensureModelsToken, ensureArtifactsToken } from "../local-token.js";
-import { initGatewayActorKey, verifyActorSig, verifyBoardActorSig, verifyArtifactsActorSig } from "../../../scripts/pi-bots/actor-sig.mjs";
+import { initGatewayActorKey, initBoardSigning, verifyActorSig, verifyBoardActorSig, verifyArtifactsActorSig } from "../../../scripts/pi-bots/actor-sig.mjs";
 import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -311,6 +311,10 @@ export async function mountMcpServers(app, deps) {
   // in-memory key, so the key must exist before any bot world is built in
   // this process (idempotent; the phone mount below reuses it).
   initGatewayActorKey();
+  // Board signing mode, logged once (never the secret). In shared-secret mode
+  // the derived key is captured and the variable leaves process.env, so no
+  // child spawned from here on can inherit it.
+  console.log(`[gateway] board actor signing: ${initBoardSigning()}`);
   mountMcpServer(app, "/board", () => createBoardMcpServer({ instructions, verifyActor: verifyBoardActorSig }), sessionManager, authMiddleware, peerExposureGate);
   // Phone bundle (plan A): core-mounted like /board, but only when the bundle
   // is installed. The server factory is imported by PATH from the installed

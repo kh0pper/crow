@@ -17,6 +17,7 @@
  */
 
 import { spawn as spawnCb } from "node:child_process";
+import { BOARD_ACTOR_SECRET_ENV, withoutBoardActorSecret } from "../shared/bot-env.js";
 
 /**
  * Spawn and supervise a generic child process.
@@ -135,7 +136,10 @@ export function superviseProcess({
 
   function spawnChild() {
     const spawnOpts = { detached: true, stdio: [stdinPayload ? "pipe" : "ignore", "pipe", "pipe"] };
-    if (env !== undefined) spawnOpts.env = env;
+    // No supervised child ever holds the board actor secret: strip it from an
+    // explicit env, and from the inherited one when this process still has it.
+    if (env !== undefined) spawnOpts.env = withoutBoardActorSecret(env);
+    else if (process.env[BOARD_ACTOR_SECRET_ENV] !== undefined) spawnOpts.env = withoutBoardActorSecret(process.env);
     if (cwd !== undefined) spawnOpts.cwd = cwd;
     const [cmd, cmdArgs] = setprivAvailable
       ? ["setpriv", ["--pdeathsig=SIGTERM", command, ...args]]

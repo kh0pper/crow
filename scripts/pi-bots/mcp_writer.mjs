@@ -35,6 +35,7 @@
  */
 import { resolveAddonCommand, checkLauncherArgs } from "../../servers/shared/resolve-command.js";
 import { spawn } from "node:child_process";
+import { withoutBoardActorSecret } from "../../servers/shared/bot-env.js";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -469,7 +470,7 @@ export function probeServerTools(block, opts = {}) {
     try {
       child = spawn(block.command, block.args || [], {
         cwd: block.cwd,
-        env: Object.assign({}, process.env, block.env || {}),
+        env: withoutBoardActorSecret(Object.assign({}, process.env, block.env || {})),
         stdio: ["pipe", "pipe", "pipe"],
       });
     } catch (e) {

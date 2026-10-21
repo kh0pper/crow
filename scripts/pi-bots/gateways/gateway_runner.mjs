@@ -30,6 +30,7 @@ import { tickJobs } from "../job_runner.mjs";
 import { tickBotSchedules } from "../bot_scheduler.mjs";
 import { makeChannelDeliverer } from "./deliver.mjs";
 import { warnIfPiLabIncompatible } from "../pi-lab-compat.mjs";
+import { initBoardSigning } from "../actor-sig.mjs";
 
 const CROW_DB = botsDbPath();
 const REAP_INTERVAL_MS = Number(process.env.PIBOT_REAP_INTERVAL_MS || 60000);
@@ -167,6 +168,12 @@ process.on("SIGINT", shutdown);
   // S6-CROW: declare the pi-lab minimum (MIN_PI_LAB_REV) at boot — a clear
   // warning when the pi-lab that pi loads predates bot read confinement.
   warnIfPiLabIncompatible((m) => log(m));
+  // Board actor signing, logged once (never the secret). This process never
+  // holds the gateway's per-boot key, so without the operator's shared secret
+  // its bots' board writes are unattributed.
+  const boardMode = initBoardSigning();
+  if (boardMode === "none") log("WARNING: board actor signing: none (CROW_BOARD_ACTOR_SECRET missing or invalid): board writes from this runner are unattributed");
+  else log("board actor signing: " + boardMode);
   startReaper();
   // F3b: self-gate on feature_flags.bot_runtime — start/stop adapters on the
   // toggle without a restart. Off = idle (service up, no adapters connected).

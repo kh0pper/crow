@@ -67,6 +67,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 import { createDbClient } from "../../db.js";
+import { withoutBoardActorSecret } from "../../shared/bot-env.js";
 import { jsonError } from "./_error.js";
 import { listProvidersAll } from "../../shared/providers-db.js";
 import { proposalsDir, normalizeSkillName, listProposals } from "../../../scripts/pi-bots/skill_proposals.mjs";
@@ -1029,6 +1030,7 @@ export default function botBoardApiRouter(dashboardAuth) {
     const payload = JSON.stringify({ bot_id: botId, gateway_thread_id: threadId, user_message: message });
     const child = spawn(NODE, [BRIDGE, "--inject", payload], {
       cwd: HOME, stdio: ["ignore", "pipe", "pipe"], detached: true,
+      env: withoutBoardActorSecret(process.env),
     });
     child.unref();
     return res.json({ ok: true, message: "Dispatch started (background)" });

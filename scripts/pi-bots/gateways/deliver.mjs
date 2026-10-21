@@ -25,6 +25,7 @@
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { execFile } from "node:child_process";
+import { withoutBoardActorSecret } from "../../../servers/shared/bot-env.js";
 import { chunkedSend } from "./base.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url)); // .../scripts/pi-bots/gateways
@@ -117,7 +118,7 @@ export function gioReply({ to, replyTo, subject, thread, text, log = () => {} })
     const args = ["reply", "--to", to, "--thread", thread, "--body", String(text == null ? "" : text)];
     if (replyTo) args.push("--reply-to", replyTo);
     if (subject) args.push("--subject", subject);
-    execFile(process.execPath, [GIO, ...args], { timeout: 90000, maxBuffer: 8e6 }, (e, _so, se) => {
+    execFile(process.execPath, [GIO, ...args], { timeout: 90000, maxBuffer: 8e6, env: withoutBoardActorSecret(process.env) }, (e, _so, se) => {
       if (e) { log("gmail deliver failed: " + ((e && e.message) || e) + (se ? " :: " + se : "")); resolve({ delivered: "gmail-error" }); }
       else resolve({ delivered: "gmail" });
     });

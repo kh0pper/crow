@@ -37,12 +37,24 @@ const PREFIXES = ["LC_", "PIBOT_TEST_"];
 /** Names that look like they hold a credential. Never passed. */
 export const SECRET_NAME_RE = /(KEY|TOKEN|SECRET|PASS(WORD|WD)?|CREDENTIAL|AUTH|COOKIE|SESSION|PRIVATE|SIGNING|DSN)/i;
 
+/** The board-only shared actor secret (scripts/pi-bots/actor-sig.mjs). The
+ *  gateway and the external runner may hold it; no child process ever does,
+ *  not even under CROW_BOT_ENV_PASSTHROUGH=1 or a bot def's spawn_env. */
+export const BOARD_ACTOR_SECRET_ENV = "CROW_BOARD_ACTOR_SECRET";
+
+/** A copy of `env` without the board actor secret (the input is not mutated). */
+export function withoutBoardActorSecret(env = process.env) {
+  const out = { ...(env || {}) };
+  delete out[BOARD_ACTOR_SECRET_ENV];
+  return out;
+}
+
 export function botEnvScrubbed(env = process.env) {
   return String((env && env.CROW_BOT_ENV_PASSTHROUGH) || "") !== "1";
 }
 
 export function buildBotBaseEnv(source = process.env, { extraAllow = source.CROW_BOT_ENV_ALLOW || "" } = {}) {
-  if (!botEnvScrubbed(source)) return { ...source };
+  if (!botEnvScrubbed(source)) return withoutBoardActorSecret(source);
   const extra = new Set(String(extraAllow || "").split(",").map((s) => s.trim()).filter(Boolean));
   const out = {};
   for (const [k, v] of Object.entries(source)) {

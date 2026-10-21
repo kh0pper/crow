@@ -61,7 +61,8 @@ import { runtimeGate } from "../../scripts/pi-bots/runtime-gate.mjs";
 import { runBridgeTick as defaultRunBridgeTick } from "../../scripts/pi-bots/bridge_tick_lib.mjs";
 import { superviseProcess as defaultSuperviseProcess } from "./process-supervisor.js";
 import { setBreakerSource } from "./bot-engine-status.js";
-import { initGatewayActorKey } from "../../scripts/pi-bots/actor-sig.mjs";
+import { initGatewayActorKey, boardKeyHandoff } from "../../scripts/pi-bots/actor-sig.mjs";
+import { withoutBoardActorSecret } from "../shared/bot-env.js";
 
 const DISCORD_GATEWAY_PATH = fileURLToPath(
   new URL("../../scripts/pi-bots/discord_gateway.mjs", import.meta.url)
@@ -256,8 +257,10 @@ export async function initBotRuntime({
       command: process.execPath,
       args: [DISCORD_GATEWAY_PATH],
       // S2: the actor-signing key goes over stdin, never env (see actor-sig.mjs).
-      env: { ...process.env, CROW_ACTOR_KEY_STDIN: "1" },
-      stdinPayload: () => initGatewayActorKey().toString("hex") + "\n",
+      // With a board shared secret, the DERIVED board key rides the same line;
+      // the secret itself is stripped from the child's env.
+      env: { ...withoutBoardActorSecret(process.env), CROW_ACTOR_KEY_STDIN: "1" },
+      stdinPayload: () => initGatewayActorKey().toString("hex") + boardKeyHandoff() + "\n",
       maxRestarts: 10,
       idleMinutes: 0,
       registry: discordRegistry,
