@@ -182,6 +182,7 @@ export function botBuilderStyles() {
   .btb-chips{display:flex;flex-wrap:wrap;gap:.4rem}
   .btb-chip{display:inline-flex;align-items:center;gap:.35rem;min-height:40px;padding:.25rem .7rem;border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);background:var(--crow-bg-elevated);font-size:.85rem;cursor:pointer}
   .btb-chip:has(input:checked){border-color:var(--crow-accent)}
+  .btb-chip-off>span:first-of-type{text-decoration:line-through;color:var(--crow-text-muted)}
   .btb-check-list{display:grid;gap:.1rem}
   .btb-check-row{display:flex;gap:.55rem;align-items:flex-start;padding:.35rem 0;font-size:.88rem;min-width:0}
   .btb-check-row code{overflow-wrap:anywhere}

@@ -1579,6 +1579,7 @@ export const translations = {
   "botbuilder.abSkillsTitle": { en: "Skills", es: "Habilidades" },
   "botbuilder.abSkillsLead": { en: "Extra know-how added to the bot's instructions.", es: "Conocimientos extra que se añaden a las instrucciones del bot." },
   "botbuilder.abSkillMissing": { en: "(file not found)", es: "(archivo no encontrado)" },
+  "botbuilder.abSkillOff": { en: "Off on this Crow", es: "Desactivada en este Crow" },
   "botbuilder.abSave": { en: "Save abilities", es: "Guardar capacidades" },
   "botbuilder.sfEmailTitle": { en: "Email", es: "Correo" },
   "botbuilder.sfEmailLegend": { en: "When the bot writes an email", es: "Cuando el bot escribe un correo" },

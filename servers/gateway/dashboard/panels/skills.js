@@ -370,6 +370,17 @@ export default {
     // Handle writing rules edit view
     const query = createState ? {} : (req.query || {});
     const editParam = one(query.edit); // a repeated ?edit= reads as absent (was a 500)
+
+    // ?skill=<name> (Bot Builder's off chip links here): open that skill's
+    // page — yours first, then the built-in; an unknown name opens the list.
+    const skillParam = one(query.skill);
+    if (skillParam !== null && !editParam) {
+      const base = normalizeSkillName(skillParam);
+      const file = base ? base + ".md" : null;
+      if (file && lstatOrNull(join(userSkillsDir(), file))) return res.redirect("/dashboard/skills?edit=" + encodeURIComponent(file) + "&source=user");
+      if (file && existsSync(join(REPO_SKILLS_DIR, file))) return res.redirect("/dashboard/skills?edit=" + encodeURIComponent(file) + "&source=repo");
+      return res.redirect("/dashboard/skills");
+    }
     if (editParam === "writing-rules") {
       const result = await db.execute({
         sql: "SELECT content FROM crow_context WHERE section_key = 'writing_style' AND device_id IS NULL AND project_id IS NULL",
