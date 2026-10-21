@@ -23,6 +23,7 @@ import { atomicWrite, bundleShippingSkill, recordRemovedLink } from "../../bundl
 import { normalizeSkillName } from "../../../../scripts/pi-bots/skill_proposals.mjs";
 import { invalidateContextCache } from "../../../memory/crow-context.js";
 import { classifySkills } from "../../skills-catalog.js";
+import { isWritingRulesTemplate } from "../../../shared/writing-rules.js";
 import { installedKitDir } from "../../../shared/design-kit.js";
 import { getInstanceSyncManager } from "../../../sharing/server.js";
 import { emitOrQueue } from "../../../shared/sync-emit.js";
@@ -520,7 +521,8 @@ export default {
       args: [],
     });
     const writingStyleContent = writingStyleResult.rows[0]?.content || "";
-    const isTemplateContent = !writingStyleContent || writingStyleContent.trim().length < 20;
+    // The seeded template (headings + "(Add …)" placeholders) is not a rule (A26).
+    const isTemplateContent = isWritingRulesTemplate(writingStyleContent);
 
     let writingRulesBody;
     if (isTemplateContent) {
