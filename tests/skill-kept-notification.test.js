@@ -9,16 +9,15 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { keptSkillNotification } from "../servers/gateway/bundle-skill-sync.js";
 
-test("the kept-skill notification tells the truth and links to the copy", () => {
+test("the kept-skill notification points at Compare / Restore original / Keep mine on the skill (PR 3)", () => {
   const n = keptSkillNotification({ bundle: "media", skill: "media.md" });
   assert.equal(n.title, 'Your edited skill "media.md" was kept');
-  assert.equal(n.body, "A newer version ships with the media extension, but your copy was edited after install, so it was not replaced. Open it in Skills to see your copy. To switch to the new version, delete your copy, then in Extensions uninstall media (leave \"Delete all stored data\" unchecked) and install it again.");
-  assert.doesNotMatch(n.body, /reinstall/, "an installed extension can't be installed again (409 already_installed)");
+  assert.equal(n.body, "A newer version ships with the media extension, but your copy was edited after install, so it was not replaced. Open it in Skills to compare it with the new version, restore the original or keep yours.");
   assert.doesNotMatch(n.body, /to get the new one/);
-  assert.equal(n.action_url, "/dashboard/skills?edit=media.md&source=user");
+  assert.equal(n.action_url, "/dashboard/skills?skill=media&compare=1");
   assert.equal(n.type, "system");
   assert.equal(n.source, "bundles");
-  assert.equal(keptSkillNotification({ bundle: "x", skill: "a b&c.md" }).action_url, "/dashboard/skills?edit=a%20b%26c.md&source=user");
+  assert.equal(keptSkillNotification({ bundle: "x", skill: "a b&c.md" }).action_url, "/dashboard/skills?skill=a%20b%26c&compare=1");
 });
 
 test("the boot pass posts exactly that notification", () => {

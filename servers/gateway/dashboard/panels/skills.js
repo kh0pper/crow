@@ -13,17 +13,21 @@
  * boot skill sync does not quietly re-install a copy.
  */
 
-import { escapeHtml, section, formField, badge, dataTable } from "../shared/components.js";
+import { escapeHtml, section, formField, badge } from "../shared/components.js";
 import { t, tJs, fill } from "../shared/i18n.js";
 import { existsSync, readFileSync, unlinkSync, readdirSync, lstatSync, openSync, fstatSync, closeSync, constants as fsConstants } from "fs";
 import { join, basename, dirname } from "path";
 import { fileURLToPath } from "url";
 import { resolveCrowHome } from "../../../shared/crow-home.js";
-import { atomicWrite, bundleShippingSkill, recordRemovedLink } from "../../bundle-skill-sync.js";
+import { atomicWrite, bundleShippingSkill, recordRemovedLink, installShippedSkill, skillHash, manifestSkillPaths } from "../../bundle-skill-sync.js";
 import { normalizeSkillName } from "../../../../scripts/pi-bots/skill_proposals.mjs";
 import { invalidateContextCache } from "../../../memory/crow-context.js";
-import { classifySkills, parseSkillMeta, anyBundleShipping, extensionCopyOf } from "../../skills-catalog.js";
-import { readSkillState, setSkillOff, skillStateName } from "../../../shared/skill-state.js";
+import { classifySkills, parseSkillMeta, anyBundleShipping, extensionCopyOf, attentionItems } from "../../skills-catalog.js";
+import { readSkillState, setSkillOff, skillStateName, ackSkill } from "../../../shared/skill-state.js";
+import { lineDiff } from "../../../shared/line-diff.js";
+import { renderSkillsPage, fold } from "./skills/html.js";
+import { SKILLS_CSS } from "./skills/css.js";
+import { skillsClientJs } from "./skills/client.js";
 import { EXEMPT_FROM_OFF } from "../../../../scripts/pi-bots/skill_resolver.mjs";
 import { isWritingRulesTemplate } from "../../../shared/writing-rules.js";
 import { installedKitDir } from "../../../shared/design-kit.js";
@@ -124,7 +128,13 @@ const NOTICE_CODES = {
   "record-unreadable": "skills.errorRecordUnreadable",
   "extension-skill": "skills.errorExtensionSkill",
   "state-unreadable": "skills.errorStateUnreadable",
+  changed: "skills.errorChanged",
+  "not-shipped": "skills.errorNotShipped",
+  "backup-dir": "skills.errorBackupDir",
 };
+
+/** Toasts after an action (?done=<code>). */
+const DONE_TOASTS = { updated: "skills.toast.updated", restored: "skills.toast.restored", kept: "skills.toast.kept", "kept-mine": "skills.toast.keptMine" };
 
 /**
  * A skill's text, or null. Only a regular file (after following a link) of at
@@ -155,45 +165,9 @@ async function kitSkills() {
   return kitSkillsCache;
 }
 
-/** Status → [i18n key, tone]. "on" shows nothing. */
-const STATUS = {
-  update: ["skills.st.update", "info"],
-  behind: ["skills.st.behind", "warning"],
-  removed: ["skills.st.removed", "error"],
-  orphan: ["skills.st.orphan", "warning"],
-  "ext-removed": ["skills.st.extRemoved", "muted"],
-  replaced: ["skills.st.replaced", "muted"],
-  "needs-kit": ["skills.st.needsKit", "muted"],
-};
-
-const SKILLS_TABLE_CSS = `<style>
-  .sk-title { font-weight: 600; }
-  .sk-purpose { color: var(--crow-text-secondary); font-size: 0.85rem; margin-top: 0.15rem; }
-  .sk-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; }
-  .sk-chip { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.75rem; border: 1px solid var(--crow-border); background: var(--crow-bg-elevated); color: var(--crow-text-secondary); }
-  .sk-chip-ext, .sk-chip-yours { background: var(--crow-accent-muted); color: var(--crow-text); border-color: transparent; }
-  .sk-st { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.75rem; }
-  .sk-st::before { content: ""; width: 0.5rem; height: 0.5rem; border-radius: 50%; background: currentColor; }
-  .sk-st-info { color: var(--crow-info); }
-  .sk-st-warning { color: var(--crow-warning); }
-  .sk-st-error { color: var(--crow-error); }
-  .sk-st-muted { color: var(--crow-text-muted); }
-  .sk-used { color: var(--crow-text-muted); font-size: 0.78rem; margin-top: 0.15rem; }
-  .sk-switch-form { display: inline; margin: 0; }
-  .sk-switch { display: inline-flex; align-items: center; gap: 0.45rem; min-width: 52px; min-height: 44px; padding: 0 0.25rem; background: none; border: 0; color: var(--crow-text); cursor: pointer; font: inherit; font-size: 0.8rem; }
-  .sk-switch-track { position: relative; width: 44px; height: 26px; border-radius: 13px; background: var(--crow-border); transition: background 0.15s; flex: none; }
-  .sk-switch-track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: var(--crow-bg-surface); transition: transform 0.15s; }
-  .sk-switch[aria-checked="true"] .sk-switch-track { background: var(--crow-accent); }
-  .sk-switch[aria-checked="true"] .sk-switch-track::after { transform: translateX(18px); }
-  .sk-switch:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; border-radius: 8px; }
-  .skills-toast:not(:empty) { margin-bottom: 1rem; padding: 0.6rem 1rem; border: 1px solid var(--crow-border); border-left: 3px solid var(--crow-success); border-radius: 8px; background: var(--crow-bg-elevated); }
-</style>`;
 
 /** A string for a single-quoted JS literal inside an HTML attribute. */
 const jsAttr = (str) => escapeHtml(String(str).replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/\r?\n/g, " "));
-
-/** "Used by N bots" for a row (n = number of bots). */
-const usedByText = (n, lang) => (n === 0 ? t("skills.usedBy0", lang) : n === 1 ? t("skills.usedBy1", lang) : fill(t("skills.usedByN", lang), { n }));
 
 /**
  * The delete confirm for a user skill: a copy of an extension says its
@@ -233,7 +207,7 @@ export default {
       // A repeated field arrives as an array (urlencoded, extended:false) —
       // e.g. the old nested Save/Delete forms posted action=save&action=delete.
       // Refuse it outright rather than fall through to a 200 list render.
-      for (const k of ["action", "filename", "content", "sectionKey", "purpose", "skill", "customize"]) {
+      for (const k of ["action", "filename", "content", "sectionKey", "purpose", "skill", "customize", "srcSha"]) {
         if (body[k] !== undefined && typeof body[k] !== "string") {
           // text/html so Turbo shows it (a text/plain 4xx is dropped silently).
           res.status(400);
@@ -317,14 +291,50 @@ export default {
             }
             unlinkSync(filePath); // the link only, never its target
           } else if (st && st.isFile()) {
-            // An extension's skill is switched off, never deleted (Kevin
-            // 10-16): deleting an unedited copy would just be reinstalled or
+            // An extension's skill is switched off, never deleted (owner
+            // decision, 10-16): deleting an unedited copy would just be reinstalled or
             // tombstoned behind the owner's back.
             if (extensionCopyOf({ crowHome: resolveCrowHome(), appBundles: APP_BUNDLES_DIR, file: safeName })) return back("extension-skill");
             unlinkSync(filePath);
           }
         }
         res.redirectAfterPost("/dashboard/skills");
+        return;
+      }
+
+      if (action === "apply-update" || action === "restore-shipped") {
+        // Apply update / Restore original / Restore: the extension's shipped
+        // copy, on this explicit click, in every sync mode (owner decision Q2). The
+        // expected actions make a race since the page rendered a no-op.
+        const file = existingSkillName(one(body.skill) ?? "");
+        if (!file) return back("invalid-name");
+        const expect = action === "apply-update" ? ["refresh", "install"] : ["kept-edited", "kept-unverified", "skip-deleted"];
+        // The shipped version the page showed: required, so a checkout that
+        // moved under the page never writes a version nobody reviewed.
+        const posted = one(body.srcSha);
+        const srcSha = posted && /^[0-9a-f]{64}$/.test(posted) ? posted : null;
+        const name = file.replace(/\.md$/, "");
+        const done = `/dashboard/skills?skill=${encodeURIComponent(name)}&done=${action === "apply-update" ? "updated" : "restored"}#skill-${encodeURIComponent(name)}`;
+        if (!srcSha) return back("changed");
+        const r = installShippedSkill({ crowHome: resolveCrowHome(), appBundles: APP_BUNDLES_DIR, skill: file, expect, srcSha });
+        if (!r.ok) {
+          // A second click after it worked: that version is already in place.
+          if (r.error === "changed" && (r.action === "same" || r.action === "adopt") && r.srcSha === srcSha) { res.redirectAfterPost(done); return; }
+          return back(["record-unreadable", "not-shipped", "backup-dir"].includes(r.error) ? r.error : "changed");
+        }
+        res.redirectAfterPost(done);
+        return;
+      }
+
+      if (action === "ack") {
+        // Keep mine (per shipped version) / Keep (a skill no longer shipped).
+        const file = existingSkillName(one(body.skill) ?? "");
+        if (!file) return back("invalid-name");
+        const sha = one(body.srcSha);
+        const r = ackSkill(resolveCrowHome(), file, sha && /^[0-9a-f]{64}$/.test(sha) ? sha : null);
+        if (!r.ok) return back(r.error === "unreadable" ? "state-unreadable" : "invalid-name");
+        const name = file.replace(/\.md$/, "");
+        res.redirectAfterPost(`/dashboard/skills?skill=${encodeURIComponent(name)}&done=${sha ? "kept-mine" : "kept"}#skill-${encodeURIComponent(name)}`);
         return;
       }
 
@@ -390,7 +400,7 @@ export default {
             emitOrQueue(syncMgr, db, "crow_context", "update", buildCrowContextWireRow(emitRows[0])).catch(() => {});
           }
         } catch {}
-        res.redirectAfterPost("/dashboard/skills");
+        res.redirectAfterPost("/dashboard/skills?view=behavior");
         return;
       }
 
@@ -403,7 +413,7 @@ export default {
           "writing_style",
         ];
         if (!EDITABLE_SECTIONS.includes(sectionKey)) {
-          res.redirectAfterPost("/dashboard/skills");
+          res.redirectAfterPost("/dashboard/skills?view=behavior");
           return;
         }
         await db.execute({
@@ -424,7 +434,7 @@ export default {
             emitOrQueue(syncMgr, db, "crow_context", "update", buildCrowContextWireRow(emitRows[0])).catch(() => {});
           }
         } catch {}
-        res.redirectAfterPost("/dashboard/skills");
+        res.redirectAfterPost("/dashboard/skills?view=behavior");
         return;
       }
     }
@@ -433,16 +443,6 @@ export default {
     const query = createState ? {} : (req.query || {});
     const editParam = one(query.edit); // a repeated ?edit= reads as absent (was a 500)
 
-    // ?skill=<name> (Bot Builder's off chip links here): open that skill's
-    // page — yours first, then the built-in; an unknown name opens the list.
-    const skillParam = one(query.skill);
-    if (skillParam !== null && !editParam) {
-      const base = normalizeSkillName(skillParam);
-      const file = base ? base + ".md" : null;
-      if (file && lstatOrNull(join(userSkillsDir(), file))) return res.redirect("/dashboard/skills?edit=" + encodeURIComponent(file) + "&source=user");
-      if (file && existsSync(join(REPO_SKILLS_DIR, file))) return res.redirect("/dashboard/skills?edit=" + encodeURIComponent(file) + "&source=repo");
-      return res.redirect("/dashboard/skills");
-    }
     if (editParam === "writing-rules") {
       const result = await db.execute({
         sql: "SELECT content FROM crow_context WHERE section_key = 'writing_style' AND device_id IS NULL AND project_id IS NULL",
@@ -455,7 +455,7 @@ export default {
           ${formField(t("skills.writingRules", lang), "content", { type: "textarea", value: currentContent, rows: 20, required: true })}
           <div style="display:flex;gap:0.5rem;margin-top:1rem">
             <button type="submit" class="btn btn-primary">${t("skills.save", lang)}</button>
-            <a href="/dashboard/skills" class="btn btn-secondary">${t("skills.cancel", lang)}</a>
+            <a href="/dashboard/skills?view=behavior" class="btn btn-secondary">${t("skills.cancel", lang)}</a>
           </div>
         </form>`;
       const editContent = section(t("skills.writingRules", lang), editForm);
@@ -493,7 +493,7 @@ export default {
           ${formField(row.section_title || sectionKey, "content", { type: "textarea", value: row.content || "", rows: 20, required: true })}
           <div style="display:flex;gap:0.5rem;margin-top:1rem">
             <button type="submit" class="btn btn-primary">${t("skills.save", lang)}</button>
-            <a href="/dashboard/skills" class="btn btn-secondary">${t("skills.cancel", lang)}</a>
+            <a href="/dashboard/skills?view=behavior" class="btn btn-secondary">${t("skills.cancel", lang)}</a>
           </div>
         </form>`;
       const editContent = section(row.section_title || sectionKey, editForm);
@@ -607,243 +607,140 @@ export default {
       return layout({ title: `${t("skills.skillPrefix", lang)} ${safeName}`, content: editContent });
     }
 
-    // --- Main skills list ---
-    // One row per skill from the catalog: where it comes from (built-in, an
-    // extension, yours) and its sync status. Rows with no file (removed, or
-    // shipped but not installed yet) get their actions in the redesigned page.
+    if (one(query.view) === "behavior") return layout({ title: t("skills.behaviorTitle", lang), content: await behaviorView(db, lang) });
+
+    // --- Main skills list (option C) ---
     const crowHome = resolveCrowHome();
-    const catalog = classifySkills({
-      crowHome, appBundles: APP_BUNDLES_DIR, repoDir: REPO_SKILLS_DIR, lang,
-      kitSkills: await kitSkills(), kitInstalled: !!installedKitDir(crowHome),
-    }).filter((r) => r.hasFile);
     const stateRead = readSkillState(crowHome);
     const offSet = new Set(stateRead.state.off);
+    const allRows = classifySkills({
+      crowHome, appBundles: APP_BUNDLES_DIR, repoDir: REPO_SKILLS_DIR, lang,
+      kitSkills: await kitSkills(), kitInstalled: !!installedKitDir(crowHome), ack: stateRead.state.ack || {},
+    });
     const usage = await usageMap(db, crowHome);
+    const attention = attentionItems(allRows, usage, offSet);
+    // Shown: every row with a file, a removed extension skill, and an update
+    // not installed yet (each with its own action).
+    const shown = allRows.filter((r) => r.hasFile || r.status === "removed" || r.status === "update");
+    const q = (one(query.q) ?? "").trim().slice(0, 100);
+    const qf = fold(q);
+    const match = (r) => !qf || fold([r.name, r.title, r.description, r.bundleName, r.bundle, r.file].join(" ")).includes(qf);
+    const rows = shown.filter(match);
+    const listed = new Set(allRows.map((r) => r.name));
+    const offMissing = [...offSet].filter((n) => !listed.has(n) && !EXEMPT_FROM_OFF.includes(n) && (!qf || fold(n).includes(qf))).sort();
+
+    // The one selected skill (?skill=), its text and, with &compare=1, the diff
+    // against what Restore / Apply would write.
+    let selected = null;
+    const skillParam = one(query.skill);
+    if (skillParam !== null) {
+      const base = normalizeSkillName(skillParam);
+      const wantBuiltin = one(query.builtin) === "1";
+      const r = base ? shown.find((x) => x.name === base && !!x.shadow === wantBuiltin) || shown.find((x) => x.name === base) : null;
+      if (!r) return res.redirect("/dashboard/skills");
+      const text = r.hasFile && r.path ? readSkillContent(r.path) : null;
+      const shipped = shippedCopy(r);
+      const dx = { text: text ?? (shipped ? shipped.text : null), shipped, version: shipped ? shipped.version : null, compare: one(query.compare) === "1", diff: null };
+      if (dx.compare) {
+        const builtinText = r.replacesBuiltin && r.source === "yours" ? readSkillContent(join(REPO_SKILLS_DIR, r.file)) : null;
+        const target = shipped ? shipped.text : builtinText;
+        if (target !== null && target !== undefined) {
+          const d = lineDiff(text || "", target);
+          d.fromLabel = t("skills.d.yourText", lang);
+          d.toLabel = shipped ? fill(t("skills.d.extVersion", lang), { ext: r.bundleName || r.bundle }) : t("skills.d.builtinVersion", lang);
+          dx.diff = d;
+        }
+      }
+      selected = { name: r.name, shadow: !!r.shadow, source: r.source, dx };
+      if (!rows.includes(r)) rows.push(r);
+    }
+
+    // Toast after a switch or an action; notices for errors and a create.
     const toggled = skillStateName(one(query.toggled) ?? "");
     const toggledTo = one(query.to);
-    const langAttr = (l) => (l !== lang ? ` lang="${l}"` : "");
-    const chip = (text, kind = "") => `<span class="sk-chip${kind ? " sk-chip-" + kind : ""}">${escapeHtml(text)}</span>`;
-
-    const rows = catalog.map((r) => {
-      const ext = r.bundleName || r.bundle || "";
-      const chips = [];
-      if (r.source === "builtin") chips.push(chip(t("skills.builtInBadge", lang)));
-      else if (r.source === "ext") {
-        chips.push(chip(fill(t("skills.fromExt", lang), { ext }), "ext"));
-        if (r.linked) chips.push(chip(t("skills.linked", lang)));
-      } else chips.push(chip(r.basedOn ? fill(t("skills.copyOf", lang), { ext }) : t("skills.yoursBadge", lang), "yours"));
-      if (r.replacesBuiltin) chips.push(chip(t("skills.replacesBuiltin", lang)));
-      if (r.experimental) chips.push(chip(t("skills.experimental", lang)));
-      const isOff = offSet.has(r.name) && !r.shadow;
-      const st = isOff ? ["skills.st.off", "muted"] : STATUS[r.status];
-      if (st) chips.push(`<span class="sk-st sk-st-${st[1]}">${escapeHtml(t(st[0], lang))}</span>`);
-
-      const n = (usage.get(r.name) || []).length;
-      const userFile = r.source !== "builtin";
-      const source = userFile ? "user" : "repo";
-      // An extension's skill is viewed (Customize… from there), never deleted.
-      const editable = r.source === "yours";
-      const viewBtn = `<a href="/dashboard/skills?edit=${encodeURIComponent(r.file)}&source=${source}" class="btn btn-sm btn-secondary">${editable ? t("skills.edit", lang) : t("skills.view", lang)}</a>`;
-      const deleteBtn = editable
-        ? ` <form method="POST" style="display:inline;margin-left:0.25rem" onsubmit="return confirm('${jsAttr(deleteConfirmText(r, n, lang))}')"><input type="hidden" name="action" value="delete"><input type="hidden" name="filename" value="${escapeHtml(r.file)}"><button class="btn btn-sm btn-danger" type="submit">${t("skills.delete", lang)}</button></form>`
-        : "";
-      const purpose = r.description ? `<div class="sk-purpose"${langAttr(r.descriptionLang)}>${escapeHtml(r.description)}</div>` : "";
-      const used = (r.shadow ? "" : `<div class="sk-used">${escapeHtml(usedByText(n, lang))}</div>`) +
-        // Kit skills are filtered on the chat spawn only (review I1): say so.
-        (r.status === "needs-kit" ? `<div class="sk-used">${escapeHtml(t("skills.needsKitNote", lang))}</div>` : "");
-
-      // The switch (none on a replaced built-in: the copy's switch governs the
-      // name; none on skill-writing, which self-authoring always gets).
-      let switchCell = "";
-      if (EXEMPT_FROM_OFF.includes(r.name)) switchCell = `<span class="sk-used">${escapeHtml(t("skills.alwaysSelfAuthoring", lang))}</span>`;
-      else if (!r.shadow) {
-        const focus = toggled === r.name ? " autofocus" : "";
-        switchCell = `<form method="POST" class="sk-switch-form"><input type="hidden" name="action" value="${isOff ? "set-on" : "set-off"}"><input type="hidden" name="skill" value="${escapeHtml(r.name)}"><button type="submit" class="sk-switch" role="switch" aria-checked="${isOff ? "false" : "true"}" aria-label="${escapeHtml(r.title)}"${focus}><span class="sk-switch-track" aria-hidden="true"></span><span class="sk-switch-text">${escapeHtml(t(isOff ? "skills.st.off" : "skills.swOn", lang))}</span></button></form>`;
-      }
-
-      return [
-        `<span class="sk-name" data-skill="${escapeHtml(r.name)}" data-source="${r.source}"><span class="sk-title"${langAttr(r.titleLang)}>${escapeHtml(r.title)}</span></span>${purpose}${used}`,
-        `<span class="mono" style="font-size:0.8rem">${escapeHtml(r.name)}</span>`,
-        `<span class="sk-chips">${chips.join("")}</span>`,
-        switchCell,
-        `${viewBtn}${deleteBtn}`,
-      ];
-    });
-
-    // A name switched off whose skill file is gone (uninstalled, deleted):
-    // still listed, so it can be switched back on and the list cleaned up.
-    const listed = new Set(catalog.map((r) => r.name));
-    for (const name of [...offSet].sort()) {
-      if (listed.has(name) || EXEMPT_FROM_OFF.includes(name)) continue;
-      const focus = toggled === name ? " autofocus" : "";
-      rows.push([
-        `<span class="sk-name" data-skill="${escapeHtml(name)}" data-source="missing"><span class="sk-title">${escapeHtml(name)}</span></span>`,
-        `<span class="mono" style="font-size:0.8rem">${escapeHtml(name)}</span>`,
-        `<span class="sk-chips"><span class="sk-st sk-st-muted">${escapeHtml(t("skills.st.offMissing", lang))}</span></span>`,
-        `<form method="POST" class="sk-switch-form"><input type="hidden" name="action" value="set-on"><input type="hidden" name="skill" value="${escapeHtml(name)}"><button type="submit" class="sk-switch" role="switch" aria-checked="false" aria-label="${escapeHtml(name)}"${focus}><span class="sk-switch-track" aria-hidden="true"></span><span class="sk-switch-text">${escapeHtml(t("skills.st.off", lang))}</span></button></form>`,
-        "",
-      ]);
-    }
-
-    // The toast after a switch: the status region starts empty and its text
-    // goes in after load (a status region already holding text when the page
-    // renders usually isn't announced). Counted after the write.
-    let toast = "";
+    let toast = null;
     if (toggled && (toggledTo === "off" || toggledTo === "on")) {
-      const tr = catalog.find((r) => r.name === toggled && !r.shadow);
+      const tr = allRows.find((r) => r.name === toggled && !r.shadow);
       const name = tr ? tr.title : toggled;
       const n = (usage.get(toggled) || []).length;
-      const text = toggledTo === "on"
+      toast = toggledTo === "on"
         ? fill(t("skills.toastOn", lang), { name })
         : fill(t(n === 0 ? "skills.toastOff0" : n === 1 ? "skills.toastOff1" : "skills.toastOffN", lang), { name, n });
-      toast = `<div class="skills-toast" role="status" id="skills-toast" data-skills-toast="${escapeHtml(text)}"></div>
-      <script>(function(){var e=document.getElementById("skills-toast");if(e&&e.getAttribute("data-skills-toast")){setTimeout(function(){e.textContent=e.getAttribute("data-skills-toast");},60);}})();</script>`;
-    }
-    const stateBanner = stateRead.ok ? "" : `<div class="skills-notice" role="alert" style="margin-bottom:1rem;padding:0.75rem 1rem;border:1px solid var(--crow-border);border-left:3px solid var(--crow-error);border-radius:8px;background:var(--crow-bg-elevated)">${escapeHtml(t("skills.stateUnreadableBanner", lang))}</div>`;
-
-    const skillsTable = catalog.length === 0
-      ? `<div class="empty-state"><h3>${t("skills.noSkillsFound", lang)}</h3><p>${t("skills.skillsDirectory", lang)}</p></div>`
-      : SKILLS_TABLE_CSS + stateBanner + toast + dataTable([t("skills.tableName", lang), t("skills.tableFile", lang), t("skills.tableSource", lang), t("skills.tableSwitch", lang), t("skills.tableActions", lang)], rows, { stack: true });
-
-    // Create form. After a refused create (422) it holds what was typed, the
-    // error sits inside it, and the field to fix has autofocus, so the
-    // re-rendered page lands on the form (audit A18; on a phone it is far
-    // down the page).
-    const cs = createState;
-    const typedVal = (k) => (cs ? cs.typed[k] : "");
-    let createError = "";
-    if (cs) {
-      const msg = cs.code === "exists"
-        ? fill(t("skills.errorExistsNamed", lang), { name: cs.typed.filename.trim() })
-        : cs.code === "shipped"
-          ? fill(t("skills.errorShippedName", lang), { ext: cs.shippedBy })
-          : t(NOTICE_CODES[cs.code], lang);
-      const open = cs.existing
-        ? ` <a href="/dashboard/skills?edit=${encodeURIComponent(cs.existing.file)}&amp;source=${cs.existing.source}">${escapeHtml(t("skills.openExisting", lang))}</a>`
-        : "";
-      createError = `<div class="skills-notice" role="alert" style="margin-bottom:1rem;padding:0.75rem 1rem;border:1px solid var(--crow-border);border-left:3px solid var(--crow-error);border-radius:8px;background:var(--crow-bg-elevated)">${escapeHtml(msg)}${open}</div>`;
-    }
-    const focusField = cs ? (cs.code === "empty" ? "content" : "filename") : null;
-    const withFocus = (html, name) => (focusField === name ? html.replace(`id="field-${name}"`, `id="field-${name}" autofocus`) : html);
-    const createForm = `<form method="POST" id="skill-create">
-      <input type="hidden" name="action" value="create">
-      ${createError}
-      ${withFocus(formField(t("skills.filenameLabel", lang), "filename", { placeholder: t("skills.filenamePlaceholder", lang), required: true, value: typedVal("filename") }), "filename")}
-      ${formField(t("skills.purposeLabel", lang), "purpose", { value: typedVal("purpose") })}
-      ${withFocus(formField(t("skills.contentLabel", lang), "content", { type: "textarea", required: true, placeholder: t("skills.contentPlaceholder", lang), rows: 10, value: typedVal("content") }), "content")}
-      <button type="submit" class="btn btn-primary">${t("skills.createSkill", lang)}</button>
-    </form>`;
-
-    // --- Writing Rules section ---
-    const writingStyleResult = await db.execute({
-      sql: "SELECT content FROM crow_context WHERE section_key = 'writing_style' AND device_id IS NULL AND project_id IS NULL",
-      args: [],
-    });
-    const writingStyleContent = writingStyleResult.rows[0]?.content || "";
-    // The seeded template (headings + "(Add …)" placeholders) is not a rule (A26).
-    const isTemplateContent = isWritingRulesTemplate(writingStyleContent);
-
-    let writingRulesBody;
-    if (isTemplateContent) {
-      writingRulesBody = `
-        <p style="color:var(--crow-text-secondary);font-style:italic;margin-bottom:1rem">${t("skills.writingRulesHint", lang)}</p>
-        <a href="/dashboard/skills?edit=writing-rules" class="btn btn-sm btn-primary">${t("skills.setUpWritingRules", lang)}</a>`;
-    } else {
-      writingRulesBody = `
-        <pre style="background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:8px;padding:1rem;overflow-x:auto;font-size:0.85rem;line-height:1.6;max-height:300px;overflow-y:auto;white-space:pre-wrap;word-wrap:break-word">${escapeHtml(writingStyleContent)}</pre>
-        <div style="margin-top:0.75rem">
-          <a href="/dashboard/skills?edit=writing-rules" class="btn btn-sm btn-secondary">${t("skills.edit", lang)}</a>
-        </div>`;
-    }
-
-    const writingRulesSection = `<div class="card" style="margin-bottom:1.5rem;border-left:3px solid #4caf50">
-      <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem;padding-bottom:0.5rem;border-bottom:1px solid var(--crow-border)">
-        <h3 style="font-family:var(--crow-body-font);font-size:1.1rem;margin:0">${t("skills.writingRules", lang)}</h3>
-        ${badge(t("skills.alwaysActive", lang), "connected")}
-      </div>
-      ${writingRulesBody}
-    </div>`;
-
-    // --- Crow Context section ---
-    const contextResult = await db.execute({
-      sql: "SELECT section_key, section_title, content FROM crow_context WHERE device_id IS NULL AND project_id IS NULL ORDER BY sort_order ASC",
-      args: [],
-    });
-    const contextRows = contextResult.rows || [];
-
-    const READ_ONLY_SECTIONS = ["skills_reference"];
-    const CORE_SECTIONS = ["memory_protocol", "session_protocol", "transparency_rules"];
-
-    const contextCards = contextRows
-      .filter((row) => row.section_key !== "writing_style")
-      .map((row) => {
-        const content = row.content || "";
-        const preview = content.length > 100 ? escapeHtml(content.slice(0, 100)) + "..." : escapeHtml(content);
-        const isReadOnly = READ_ONLY_SECTIONS.includes(row.section_key);
-        const isCore = CORE_SECTIONS.includes(row.section_key);
-
-        let badgeHtml = "";
-        if (isReadOnly) {
-          badgeHtml = ` ${badge(t("skills.autoGenerated", lang), "draft")}`;
-        } else if (isCore) {
-          badgeHtml = ` ${badge(t("skills.core", lang), "warning")}`;
-        }
-
-        const editBtn = isReadOnly
-          ? ""
-          : `<a href="/dashboard/skills?edit=context-${encodeURIComponent(row.section_key)}" class="btn btn-sm btn-secondary" style="margin-top:0.5rem">${t("skills.edit", lang)}</a>`;
-
-        return `<details style="margin-bottom:0.5rem;border:1px solid var(--crow-border);border-radius:6px;overflow:hidden">
-          <summary style="padding:0.75rem 1rem;cursor:pointer;background:var(--crow-bg-elevated);display:flex;align-items:center;gap:0.5rem;font-weight:500">
-            ${escapeHtml(row.section_title || row.section_key)}${badgeHtml}
-          </summary>
-          <div style="padding:0.75rem 1rem;font-size:0.85rem">
-            <pre style="background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:6px;padding:0.75rem;overflow-x:auto;font-size:0.82rem;line-height:1.5;max-height:250px;overflow-y:auto;white-space:pre-wrap;word-wrap:break-word;margin:0">${escapeHtml(content)}</pre>
-            ${editBtn}
-          </div>
-        </details>`;
-      })
-      .join("");
-
-    const crowContextBody = contextCards || `<p style="color:var(--crow-text-secondary)">${t("skills.noContextSections", lang)}</p>`;
-    const crowContextSection = `<div class="card" style="margin-bottom:1.5rem">
-      <details>
-        <summary style="cursor:pointer">
-          <h3 style="font-family:var(--crow-body-font);font-size:1.1rem;display:inline">${t("skills.crowContext", lang)}</h3>
-          <span style="color:var(--crow-text-muted);font-size:0.85rem;margin-left:0.5rem">${escapeHtml(fill(t("skills.sectionsCount", lang), { n: contextRows.filter((r) => r.section_key !== "writing_style").length }))}</span>
-        </summary>
-        <div style="margin-top:1rem">
-          ${crowContextBody}
-        </div>
-      </details>
-    </div>`;
-
-    // Marketplace link
-    const marketplaceLink = `<div style="background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:8px;padding:1rem;margin-bottom:1.5rem;display:flex;align-items:center;gap:1rem;flex-wrap:wrap">
-      <span style="font-weight:600;color:var(--crow-text)">${t("skills.wantMoreSkills", lang)}</span>
-      <span style="color:var(--crow-text-secondary);flex:1">${t("skills.browseSkillBundles", lang)}</span>
-      <a href="/dashboard/extensions" class="btn btn-sm btn-primary">${t("skills.extensionsLink", lang)}</a>
-    </div>`;
-
-    // One notice for a refused create (audit A10/A11); unknown codes show nothing.
-    // A create also names the file it made (the slug can differ from the input).
+    } else if (DONE_TOASTS[one(query.done)] && !selected) toast = t(DONE_TOASTS[one(query.done)], lang);
+    // After Apply / Restore / Keep the detail stays open with the result in it.
+    if (selected && DONE_TOASTS[one(query.done)]) selected.dx.done = t(DONE_TOASTS[one(query.done)], lang);
     const noticeKey = NOTICE_CODES[one(query.error)];
     const createdName = existingSkillName(one(query.created));
     const created = createdName && lstatOrNull(join(userSkillsDir(), createdName)) ? createdName : null;
-    const noticeBox = (role, accent, text) => `<div class="skills-notice" role="${role}" style="margin-bottom:1.5rem;padding:0.75rem 1rem;border:1px solid var(--crow-border);border-left:3px solid ${accent};border-radius:8px;background:var(--crow-bg-elevated)">${escapeHtml(text)}</div>`;
-    const notice = noticeKey
-      ? noticeBox("alert", "var(--crow-error, #c62828)", t(noticeKey, lang))
-      : created ? noticeBox("status", "var(--crow-success, #2e7d32)", fill(t("skills.created", lang), { name: created })) : "";
+    const noticeBox = (role, kind, text) => `<div class="skills-notice sk-note sk-note-${kind}" role="${role}">${escapeHtml(text)}</div>`;
+    const notice = noticeKey ? noticeBox("alert", "err", t(noticeKey, lang)) : created ? noticeBox("status", "plain", fill(t("skills.created", lang), { name: created })) : "";
+    const stateBanner = stateRead.ok ? "" : noticeBox("alert", "err", t("skills.stateUnreadableBanner", lang));
 
-    const content = `
-      ${notice}
-      ${writingRulesSection}
-      ${crowContextSection}
-      ${marketplaceLink}
-      ${section(t("skills.allSkills", lang), skillsTable, { delay: 150 })}
-      ${section(t("skills.createNewSkill", lang), createForm, { delay: 200 })}
-    `;
+    let cs = null;
+    if (createState) {
+      const message = createState.code === "exists"
+        ? fill(t("skills.errorExistsNamed", lang), { name: createState.typed.filename.trim() })
+        : createState.code === "shipped"
+          ? fill(t("skills.errorShippedName", lang), { ext: createState.shippedBy })
+          : t(NOTICE_CODES[createState.code], lang);
+      cs = { ...createState, message };
+    }
 
+    const content = SKILLS_CSS + renderSkillsPage({
+      lang, rows, off: offSet, usage, attention, offMissing, q, selected, toggled, toast, notice, stateBanner,
+      createState: cs, createOpen: one(query.new) === "1", newName: one(query.name) ?? "",
+      fileHint: (name) => { const n = newSkillName(name || ""); return n ? n.file : "…"; },
+      deleteConfirm: (row, n) => deleteConfirmText(row, n, lang),
+    }) + skillsClientJs();
     return layout({ title: t("skills.pageTitle", lang), content });
   },
 };
+
+/** The shipped copy of a skill an extension ships: {text, sha, version}, or null. */
+function shippedCopy(r) {
+  if (!r.bundle || r.source === "builtin") return null;
+  let manifest;
+  try { manifest = JSON.parse(readFileSync(join(APP_BUNDLES_DIR, r.bundle, "manifest.json"), "utf8")); } catch { return null; }
+  const p = manifestSkillPaths(manifest).find((x) => x.split("/").pop() === r.file);
+  const text = p ? readSkillContent(join(APP_BUNDLES_DIR, r.bundle, p)) : null;
+  if (text === null) return null;
+  return { text, sha: skillHash(text), version: typeof manifest.version === "string" ? manifest.version : null };
+}
+
+/** "How Crow behaves": writing rules and the crow.md sections (moved off the skills list). */
+async function behaviorView(db, lang) {
+  const writingStyleResult = await db.execute({
+    sql: "SELECT content FROM crow_context WHERE section_key = 'writing_style' AND device_id IS NULL AND project_id IS NULL",
+    args: [],
+  });
+  const writingStyleContent = writingStyleResult.rows[0]?.content || "";
+  // The seeded template (headings + "(Add …)" placeholders) is not a rule (A26).
+  const isTemplateContent = isWritingRulesTemplate(writingStyleContent);
+  const writingRulesBody = isTemplateContent
+    ? `<p class="sk-muted" style="margin-bottom:1rem">${t("skills.writingRulesHint", lang)}</p>
+        <a href="/dashboard/skills?edit=writing-rules" class="btn btn-primary">${t("skills.setUpWritingRules", lang)}</a>`
+    : `<pre class="sk-pre">${escapeHtml(writingStyleContent)}</pre>
+        <div style="margin-top:0.75rem"><a href="/dashboard/skills?edit=writing-rules" class="btn btn-secondary">${t("skills.edit", lang)}</a></div>`;
+  const writingRulesSection = `<section class="sk-sec sk-card"><div class="sk-sec-h"><b>${t("skills.writingRules", lang)}</b>${isTemplateContent ? `<span class="sk-chip sk-chip-flag">${escapeHtml(t("skills.notSetUp", lang))}</span>` : badge(t("skills.alwaysActive", lang), "connected")}</div><div class="sk-card-body">${writingRulesBody}</div></section>`;
+
+  const contextResult = await db.execute({
+    sql: "SELECT section_key, section_title, content FROM crow_context WHERE device_id IS NULL AND project_id IS NULL ORDER BY sort_order ASC",
+    args: [],
+  });
+  const contextRows = (contextResult.rows || []).filter((row) => row.section_key !== "writing_style");
+  const READ_ONLY_SECTIONS = ["skills_reference"];
+  const CORE_SECTIONS = ["memory_protocol", "session_protocol", "transparency_rules"];
+  const contextCards = contextRows.map((row) => {
+    const isReadOnly = READ_ONLY_SECTIONS.includes(row.section_key);
+    const isCore = CORE_SECTIONS.includes(row.section_key);
+    const chipHtml = isReadOnly ? ` <span class="sk-chip sk-chip-plain">${escapeHtml(t("skills.readOnlyBadge", lang))}</span>` : isCore ? ` <span class="sk-chip sk-chip-flag">${escapeHtml(t("skills.core", lang))}</span>` : "";
+    const editBtn = isReadOnly ? "" : `<a href="/dashboard/skills?edit=context-${encodeURIComponent(row.section_key)}" class="btn btn-secondary" style="margin-top:0.5rem">${t("skills.edit", lang)}</a>`;
+    return `<details class="sk-ctx"><summary class="sk-sec-h"><b>${escapeHtml(row.section_title || row.section_key)}</b>${chipHtml}</summary><div class="sk-card-body"><pre class="sk-pre">${escapeHtml(row.content || "")}</pre>${editBtn}</div></details>`;
+  }).join("");
+  const crowContextSection = `<section class="sk-sec sk-card"><div class="sk-sec-h"><b>${t("skills.crowContext", lang)}</b><span class="sk-sec-count">${escapeHtml(fill(t("skills.sectionsCount", lang), { n: contextRows.length }))}</span></div>${contextCards || `<p class="sk-muted sk-card-body">${t("skills.noContextSections", lang)}</p>`}</section>`;
+  return SKILLS_CSS + `<div class="sk-page sk-behavior">
+    <p><a class="sk-back" href="/dashboard/skills">${escapeHtml(t("skills.backToSkills", lang))}</a></p>
+    <h2 class="sk-behavior-h">${escapeHtml(t("skills.behaviorTitle", lang))}</h2>
+    ${writingRulesSection}${crowContextSection}
+  </div>`;
+}

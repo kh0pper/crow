@@ -12,7 +12,7 @@
 import { escapeHtml, actionBar } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
 import {
-  resolveCrowHome, listInstalledExtensions, extensionSkills,
+  resolveCrowHome,
 } from "../../../../../scripts/pi-bots/ext_registry.mjs";
 import { loadSkills } from "./data-queries.js";
 import { loadSources, MEMORY_SOURCE, sourceDisplay } from "./sources.js";
@@ -41,6 +41,11 @@ function sandboxOfferForm({ def, req, bot, botId, lang }) {
 import { segGroup, card } from "./ui.js";
 import { offSkills } from "../../../../shared/skill-state.js";
 import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposals.mjs";
+import { classifySkills } from "../../../skills-catalog.js";
+import { REPO_SKILLS_DIR } from "../../../../../scripts/pi-bots/skill_resolver.mjs";
+import { fileURLToPath } from "node:url";
+
+const APP_BUNDLES_DIR = fileURLToPath(new URL("../../../../../bundles", import.meta.url));
 
 function sourceRow(src, selected, lang, { memory = false } = {}) {
   const key = src.server;
@@ -203,35 +208,50 @@ function abilitiesScript() {
 }
 
 /**
- * The Skills card. A skill switched off on this Crow (Skills panel) shows as
- * an off chip with a link to it there; its checkbox stays, so a selection is
- * kept through a save and comes back when the skill is switched on.
+ * The Skills card, in the Skills panel's words (option C, PR 3): chips show
+ * each skill's friendly title (the slug stays in title= and for screen
+ * readers), grouped by where the skill comes from: Yours, each extension by
+ * its name, then Built-in (folded unless the bot uses one). A skill switched
+ * off on this Crow is struck through, with a link to it in Skills placed
+ * after its label (never inside it); its checkbox stays, so a selection is
+ * kept through a save and comes back when it is switched on.
  */
 export function renderSkillsCard({ def, lang, crowHome }) {
   const allSkills = loadSkills(crowHome);
   const off = offSkills(crowHome);
   const selSkills = new Set(Array.isArray(def.skills) ? def.skills : []);
-  const offNote = (s) => ` <a href="/dashboard/skills?skill=${encodeURIComponent(s)}" class="btb-muted">${escapeHtml(t("botbuilder.abSkillOff", lang))}</a>`;
+  let catalog = [];
+  try { catalog = classifySkills({ crowHome, appBundles: APP_BUNDLES_DIR, repoDir: REPO_SKILLS_DIR, lang }).filter((r) => !r.shadow && r.hasFile); } catch { catalog = []; }
+  const byName = new Map(catalog.map((r) => [r.name, r]));
   // The off list holds normalised names; a stored name may differ in case.
   const isOff = (s) => off.has(normalizeSkillName(s) || s);
-  const chip = (s) => `<label class="btb-chip${isOff(s) ? " btb-chip-off" : ""}"><input type="checkbox" name="skills" value="${escapeHtml(s)}"${selSkills.has(s) ? " checked" : ""}> <span>${escapeHtml(s)}</span>${isOff(s) ? offNote(s) : ""}</label>`;
-  const claimed = new Set();
-  let groups = "";
-  for (const ext of listInstalledExtensions(crowHome)) {
-    const names = extensionSkills(ext).filter((n) => allSkills.includes(n));
-    if (!names.length) continue;
-    names.forEach((n) => claimed.add(n));
-    groups += `<div class="btb-group"><label>${escapeHtml(ext.group || ext.id)}</label><div class="btb-chips">${names.map(chip).join("")}</div></div>`;
+  const titleOf = (s) => (byName.get(s) || {}).title || s;
+  const offLink = (s) => `<a href="/dashboard/skills?skill=${encodeURIComponent(normalizeSkillName(s) || s)}" class="btb-muted btb-chip-offlink">${escapeHtml(t("botbuilder.abSkillOff", lang))}</a>`;
+  const chip = (s) => `<span class="btb-chip-wrap"><label class="btb-chip${isOff(s) ? " btb-chip-off" : ""}"><input type="checkbox" name="skills" value="${escapeHtml(s)}"${selSkills.has(s) ? " checked" : ""}> <span class="btb-chip-title" title="${escapeHtml(s)}"${(byName.get(s) || {}).titleLang && byName.get(s).titleLang !== lang ? ` lang="${byName.get(s).titleLang}"` : ""}>${escapeHtml(titleOf(s))}</span><span class="btb-vh"> (${escapeHtml(s)})</span></label>${isOff(s) ? offLink(s) : ""}</span>`;
+  const sortByTitle = (a, b) => titleOf(a).localeCompare(titleOf(b), lang);
+
+  const yours = [], builtin = [];
+  const exts = new Map(); // extension name → names
+  for (const n of allSkills) {
+    const r = byName.get(n);
+    if (!r || r.source === "builtin") builtin.push(n);
+    else if (r.source === "ext") {
+      const label = r.bundleName || r.bundle || n;
+      if (!exts.has(label)) exts.set(label, []);
+      exts.get(label).push(n);
+    } else yours.push(n);
   }
-  const general = allSkills.filter((n) => !claimed.has(n));
-  // a selected skill whose file is gone stays visible (and selected) so a save keeps it
   const missing = [...selSkills].filter((n) => !allSkills.includes(n));
-  if (general.length || missing.length) {
-    groups += `<div class="btb-group"><label>${escapeHtml(t("botbuilder.skillsGroupGeneral", lang))}</label><div class="btb-chips">` +
-      general.map(chip).join("") +
-      missing.map((s) => isOff(s) ? chip(s) : `<label class="btb-chip btb-chip-missing"><input type="checkbox" name="skills" value="${escapeHtml(s)}" checked> <span>${escapeHtml(s)}</span> <span class="btb-muted">${escapeHtml(t("botbuilder.abSkillMissing", lang))}</span></label>`).join("") +
-      `</div></div>`;
+  const missingChip = (s) => isOff(s) ? chip(s) : `<span class="btb-chip-wrap"><label class="btb-chip btb-chip-missing"><input type="checkbox" name="skills" value="${escapeHtml(s)}" checked> <span>${escapeHtml(s)}</span> <span class="btb-muted">${escapeHtml(t("botbuilder.abSkillMissing", lang))}</span></label></span>`;
+  const group = (label, names, extra = "") => `<div class="btb-group"><span class="btb-group-h">${escapeHtml(label)}</span><div class="btb-chips">${names.sort(sortByTitle).map(chip).join("")}${extra}</div></div>`;
+  let groups = "";
+  if (yours.length || missing.length) groups += group(t("botbuilder.skillsGroupYours", lang), yours, missing.map(missingChip).join(""));
+  for (const [label, names] of [...exts.entries()].sort(([a], [b]) => a.localeCompare(b, lang))) groups += group(label, names);
+  if (builtin.length) {
+    const open = builtin.some((n) => selSkills.has(n));
+    groups += `<details class="btb-group btb-group-builtin"${open ? " open" : ""}><summary><span class="btb-group-h">${escapeHtml(t("botbuilder.skillsGroupBuiltin", lang))}</span></summary><div class="btb-chips">${builtin.sort(sortByTitle).map(chip).join("")}</div></details>`;
   }
+  const manage = `<p class="btb-hint"><a href="/dashboard/skills" class="btb-manage-skills">${escapeHtml(t("botbuilder.manageSkills", lang))}</a></p>`;
   return card(t("botbuilder.abSkillsTitle", lang),
-    groups + `<input type="hidden" name="skills_rendered" value="1">`, t("botbuilder.abSkillsLead", lang));
+    manage + groups + `<input type="hidden" name="skills_rendered" value="1">`, t("botbuilder.abSkillsLead", lang));
 }

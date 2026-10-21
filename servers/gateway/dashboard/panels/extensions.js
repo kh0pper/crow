@@ -71,6 +71,8 @@ export default {
 
     const { viewsHtml, addonRegistryScript, collectionsScript } = buildExtensionsHTML({
       installed, available, collections, registrySource, communityStores, bundleStatus, needsConfig, needsRepin, dockerOk, keychainPending, vaultSecure, localModels, lang,
+      // A skill's "Go to <extension>" arrives as ?q=<id>: the search box starts filled in.
+      searchQuery: typeof req.query?.q === "string" ? req.query.q.slice(0, 100) : "",
     });
 
     // ─── Modal + client-side JavaScript ───

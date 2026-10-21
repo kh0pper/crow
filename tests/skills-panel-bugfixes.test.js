@@ -424,7 +424,7 @@ test("A24: the Spanish page carries none of the old hard-coded English", async (
   ];
   const db = { execute: async ({ sql }) => (/section_title/.test(sql) ? { rows } : { rows: [{ content: "Never use the word delve in any writing." }] }) };
   const res = { redirect() {}, redirectAfterPost() {} };
-  const list = await panel.handler({ method: "GET", query: {}, body: {} }, res, { db, layout: ({ content }) => content, lang: "es" });
+  const list = await panel.handler({ method: "GET", query: { view: "behavior" }, body: {} }, res, { db, layout: ({ content }) => content, lang: "es" });
   const wr = await panel.handler({ method: "GET", query: { edit: "writing-rules" }, body: {} }, res, { db, layout: ({ content, title }) => `<title>${title}</title>${content}`, lang: "es" });
   const ctx = await panel.handler({ method: "GET", query: { edit: "context-identity" }, body: {} }, res, { db, layout: ({ content, title }) => `<title>${title}</title>${content}`, lang: "es" });
   // Literals no skill title can contain; the generic words are checked in the source below.
@@ -471,4 +471,39 @@ test("code review M8: a skill over 1 MiB is never read into the page; override k
 test("code review M4: a crafted ?created= for a file that does not exist shows no notice", async () => {
   const r = await call({ query: { created: "never-made.md" } });
   assert.doesNotMatch(r.body, /Created never-made/);
+});
+
+// Skills panel option C, PR 3: writing rules and the crow.md sections move off
+// the skills list into "How Crow behaves" (?view=behavior), inside the same panel.
+test("How Crow behaves: the list shows only skills plus a footer link; the sub-view holds writing rules and crow.md", async () => {
+  const rows = [
+    { section_key: "identity", section_title: "Identity", content: "x" },
+    { section_key: "skills_reference", section_title: "Skills reference", content: "z" },
+  ];
+  const list = await call({ rows });
+  assert.doesNotMatch(list.body, /Writing Rules|Crow Context \(crow\.md\)|Set Up Writing Rules/);
+  assert.match(list.body, /href="\/dashboard\/skills\?view=behavior">How Crow behaves ›</);
+  const view = await call({ query: { view: "behavior" }, rows });
+  assert.match(view.body, /<title>How Crow behaves<\/title>/);
+  assert.match(view.body, /Writing Rules/);
+  assert.match(view.body, /Crow Context \(crow\.md\)/);
+  assert.match(view.body, /Identity/);
+  assert.match(view.body, /Skills reference<\/b> <span class="sk-chip sk-chip-plain">Read-only</);
+  assert.doesNotMatch(view.body, /Auto-generated/);
+  const es = await call({ query: { view: "behavior" }, rows, lang: "es" });
+  assert.match(es.body, /Cómo se comporta Crow/);
+  assert.match(es.body, /Solo lectura/);
+});
+
+test("How Crow behaves: the existing edit URLs still open, and their saves and cancels come back to the sub-view", async () => {
+  const wr = await call({ query: { edit: "writing-rules" } });
+  assert.match(wr.body, /name="action" value="save-writing-rules"/);
+  assert.match(wr.body, /href="\/dashboard\/skills\?view=behavior"/);
+  const s1 = await call({ method: "POST", body: { action: "save-writing-rules", content: "No emoji." } });
+  assert.equal(s1.redirect, "/dashboard/skills?view=behavior");
+  const ctxRows = [{ section_key: "identity", section_title: "Identity", content: "x" }];
+  const ctx = await call({ query: { edit: "context-identity" }, rows: ctxRows });
+  assert.match(ctx.body, /name="action" value="save-context-section"/);
+  const s2 = await call({ method: "POST", body: { action: "save-context-section", sectionKey: "identity", content: "y" } });
+  assert.equal(s2.redirect, "/dashboard/skills?view=behavior");
 });

@@ -108,6 +108,14 @@ From the **Crow's Nest**, open the **Skills** panel to browse all available skil
 - **User skills** — Your custom or overridden skills, stored in `~/.crow/skills/`. These take precedence over built-in skills and are never overwritten by updates.
 - **Extension skills** — Installed with an extension and updated with it. They open read-only; **Customize…** makes your own copy, which then stops getting the extension's updates.
 
+### Needs a look
+
+The top of the Skills panel lists anything that needs you: an extension update ready to apply (**Review**), your customized copy of an extension skill that has fallen behind a newer version (**Compare**, then **Restore original** or **Keep mine**; restoring keeps a backup of your edit in `~/.crow/skill-backups/`), a removed skill a bot still asks for (**Restore**, or take it off that bot), and a skill its extension no longer ships (**Keep**). When nothing needs you, it says all skills are up to date.
+
+### Writing rules and crow.md
+
+Writing rules and the crow.md sections are edited under **How Crow behaves**, linked at the bottom of the Skills panel.
+
 ### Switching a skill off
 
 Each skill in the Skills panel has an on/off switch. A skill you switch off is left out for every bot on this Crow, starting with their next new conversation (a conversation already open keeps what it started with). Bots that select it keep the selection, so switching it back on restores it. The list is per Crow: a paired instance has its own. Extension skills are switched off rather than deleted.
