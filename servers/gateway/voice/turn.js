@@ -679,7 +679,9 @@ export function createVoiceTurnRunner(deps) {
         }
       }
       // Offered on intent: the classifier wants an own family for this transcript (or the calendar fallback offers one).
-      if (calendarFallback || (fam && [...ownLists.keys()].some((f) => fam.wants(f, transcript)))) ownOffered = true;
+      // The own families' intent lists (the same test fam.wants runs for an own family, families on or off).
+      const ownIntent = [...ownLists.keys()].some((f) => listMatches(phraseWords(transcript), ownLists.get(f)));
+      if (calendarFallback || (fam && ownIntent)) ownOffered = true;
       const fallbackNames = calendarFallback ? [...ownByName.values()].filter((o) => o.family === "own:reminders").map((o) => o.definition.name) : [];
       const prevFam = calendarFallback
         ? new Set([...(lastFamilies.get(device.id) || NO_FAMILIES), "own:reminders"])
@@ -1013,10 +1015,16 @@ export function createVoiceTurnRunner(deps) {
       let endedFinal = false;
       timings.tools_offered = tools.length;
       // The action guard (see ACTION_NOTE above). A must-run or hold-to-end display turn has its own truth rules.
-      // It also turns on mid-turn when one of Crow's own tools fails (armGuard below): own tools are offered on
-      // turns the display's actionWhen does not read as actions ("put buy milk on my tasks", families off).
+      // Own tools are offered on turns the display's actionWhen does not read as actions ("put buy milk on my
+      // tasks", "move it to 3", families off), and a model streams its words BEFORE the round's calls run. So the
+      // guard is also on from the first word when the turn targets an own tool on offer: an own family's intent,
+      // a named routine object, or (families on) a follow-up inside the own-tool window. A families-off turn that
+      // is only offered the own tools ("what's the capital of Peru") is not held. And it turns on mid-turn when an
+      // own call fails or is refused (armGuard below), for whatever the model says in a later round.
       let actionGuard = actionTurn && !mustX && !holdEnd;
       const armGuard = () => { if (!actionGuard && !mustX && !holdEnd) { actionGuard = true; timings.action_guard = true; } };
+      const ownOnOffer = tools.some((t) => ownByName.has(t.name));
+      if (ownOnOffer && (ownIntent || namesRoutineObjects(transcript).length > 0 || (fam && ownRecent))) armGuard();
       const ownDone = new Map();   // name|canonical args → the result of an own call that returned ok (never run twice)
       let backed = false;          // a tool really did something this turn
       let memoryBacked = false;    // only a memory call did (a saved note is not a reminder)
@@ -1229,7 +1237,9 @@ export function createVoiceTurnRunner(deps) {
             outcome.set(tc, code);
             if (ok) ownDone.set(dupKey, out);
             // A failed own call (no_tz, bad_args, backend_error…), or a question with no line to speak: from here on
-            // the model's words are held and checked (#499: "Added!" after a failed write is never heard).
+            // the model's words are held and checked (#499). Text streamed in THIS round was already held when the
+            // guard was on from the first word (a turn aimed at an own tool, above); otherwise it may have been
+            // heard, and only what the model says in later rounds is checked against what the tools really did.
             if (!ok || (code === "needs_confirm" && !(typeof res.say === "string" && res.say.trim()))) armGuard();
             if (ok && res.effect !== false) { backed = true; actionSent = true; }
             if (code === "bad_args") ownBadArgs = true;

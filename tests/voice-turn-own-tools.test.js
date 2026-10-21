@@ -468,3 +468,68 @@ test("an offered own tool puts the zone's UTC offset on the user message only", 
   assert.ok(!/\[Zone\]/.test(q.log[0].messages.at(-1).content));
   assert.equal(q.log[0].messages[0].content, h.log[0].messages[0].content, "the system message is byte-stable");
 });
+
+// ─── #499 same round: Crow's words are held from the first word on a turn aimed at its own tools ───
+const sameRound = (text, name, args, id = "c1") => [{ type: "content_delta", text }, { type: "tool_call", id, name, arguments: args }, { type: "done" }];
+const captions = (h) => h.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join("");
+const noAct = { actionWhen: () => false };
+
+test("same round: 'Added it!' with a failing own call on a non-action turn is never heard", async () => {
+  const t = taskOwn(BACKEND_ERR);
+  const h = ownHarness({ bot: CROW, rounds: [sameRound("Added it to your tasks! ", "crow_task_add", { title: "buy milk" })] });
+  const r = await turn(h, "put buy milk on my tasks", { ...noAct, ownTools: [t] });
+  assert.equal(t.seen.length, 1);
+  assert.equal(r.timings.action_guard, true);
+  assert.ok(!/Added/.test(captions(h)), `captions: ${captions(h)}`);
+  assert.ok(h.calls.spoken.every((s) => !/Added/.test(s)), `spoken: ${h.calls.spoken}`);
+  assert.equal(h.calls.spoken.at(-1), NOT_DONE_TEXT);
+  assert.equal(captions(h).trim(), NOT_DONE_TEXT);
+});
+
+test("same round: a follow-up in the own-tool window ('move it to 3') with a failing call is never heard as done", async () => {
+  let n = 0;
+  const t = taskOwn(() => (n++ === 0 ? { ok: true, code: "added", final: true, say: "Added buy milk to your tasks." } : BACKEND_ERR));
+  const h = ownHarness({ bot: CROW, rounds: [call("crow_task_add", { title: "buy milk" }), sameRound("Done, moved it! ", "crow_task_add", { title: "buy milk", due: "15:00" }, "c2")] });
+  await turn(h, "put buy milk on my tasks", { ...noAct, ownTools: [t] });
+  assert.deepEqual(h.calls.spoken, ["Added buy milk to your tasks."]);
+  const before = captions(h).length;
+  h.c.advance(60_000);
+  const r = await turn(h, "move it to 3", { ...noAct, ownTools: [t] });
+  assert.equal(t.seen.length, 2);
+  assert.equal(r.timings.action_guard, true);
+  assert.ok(!/Done, moved/.test(captions(h).slice(before)), `captions: ${captions(h).slice(before)}`);
+  assert.ok(h.calls.spoken.every((s) => !/Done, moved/.test(s)), `spoken: ${h.calls.spoken}`);
+  assert.equal(h.calls.spoken.at(-1), NOT_DONE_TEXT);
+});
+
+test("same round, families off (cloud model): 'Added it!' with a failing own call is never heard", async () => {
+  const t = taskOwn(BACKEND_ERR);
+  const h = ownHarness({ bot: CROW, rounds: [sameRound("Added it to your tasks! ", "crow_task_add", { title: "buy milk" })] });
+  const r = await turn(h, "put buy milk on my tasks", { ...noAct, familiesOnIntent: false, ownTools: [t] });
+  assert.equal(t.seen.length, 1);
+  assert.equal(r.timings.action_guard, true);
+  assert.ok(!/Added/.test(captions(h)), `captions: ${captions(h)}`);
+  assert.ok(h.calls.spoken.every((s) => !/Added/.test(s)), `spoken: ${h.calls.spoken}`);
+  assert.equal(h.calls.spoken.at(-1), NOT_DONE_TEXT);
+});
+
+test("same round, success: only the server's line is heard, nothing before the result", async () => {
+  for (const familiesOnIntent of [true, false]) {
+    const t = taskOwn({ ok: true, code: "added", final: true, say: "Added buy milk to your tasks." });
+    const h = ownHarness({ bot: CROW, rounds: [sameRound("Added it to your tasks! ", "crow_task_add", { title: "buy milk" })] });
+    const r = await turn(h, "put buy milk on my tasks", { ...noAct, familiesOnIntent, ownTools: [t] });
+    assert.equal(r.timings.action_guard, true, `families ${familiesOnIntent}`);
+    assert.deepEqual(h.calls.spoken, ["Added buy milk to your tasks."]);
+    assert.equal(captions(h), "Added buy milk to your tasks.");
+    assert.equal(r.timings.claim_blocked, undefined);
+  }
+});
+
+test("a plain question with own tools offered but not targeted still streams (no hold)", async () => {
+  const h = ownHarness({ bot: CROW, rounds: [says("Lima is the capital of Peru. ")] });
+  const r = await turn(h, "what's the capital of Peru", { ...noAct, familiesOnIntent: false, ownTools: [taskOwn(BACKEND_ERR), calTool()] });
+  assert.deepEqual(h.log[0].tools.sort(), ["crow_calendar_add_event", "crow_task_add"]);
+  assert.equal(r.timings.action_guard, undefined);
+  assert.equal(captions(h), "Lima is the capital of Peru. ");
+  assert.deepEqual(h.calls.spoken, ["Lima is the capital of Peru."]);
+});
