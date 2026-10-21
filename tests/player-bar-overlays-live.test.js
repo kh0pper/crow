@@ -143,7 +143,7 @@ async function open(w, h, path, ready, init = "") {
     send, evalIn, until,
     /** Resize the viewport the way the Android app does when the on-screen keyboard opens (the WebView's
      *  window shrinks: innerHeight and the visual viewport both drop). */
-    viewport: async (vw, vh) => { await send("Emulation.setDeviceMetricsOverride", { width: vw, height: vh, deviceScaleFactor: 2, mobile: vw < 900 }); await evalIn(TWO_FRAMES); },
+    viewport: async (vw, vh, screen) => { await send("Emulation.setDeviceMetricsOverride", { width: vw, height: vh, deviceScaleFactor: 2, mobile: vw < 900, ...(screen || {}) }); await evalIn(TWO_FRAMES); },
     json: async (expr) => JSON.parse(await evalIn(expr)),
     css: (text) => evalIn(`(function(){var s=document.createElement('style');s.textContent=${JSON.stringify(text)};document.head.appendChild(s);return 1;})()`),
     showBar: async () => { await evalIn("window.crowPlayer.load('/a.wav', 'Radio KPFT'); 1"); await evalIn(TWO_FRAMES); },
@@ -306,6 +306,47 @@ test("live @412x915: a focused composer with the keyboard open hides the bar and
     assert.equal(m5.visible, true, "keyboard closed, focus kept: the bar is back: " + JSON.stringify(m5));
     assert.equal(m5.v, m5.barH + "px");
     assert.equal(m5.paused, false);
+  } finally { await s.close(); }
+});
+
+test("live @412x915: rotating with the keyboard open keeps the bar hidden (the tallest height is kept per width, i.e. per orientation)", async (t) => {
+  if (!chrome) return t.skip("no headless Chrome");
+  const s = await open(412, 915, PERCH, PERCH_READY);
+  const PORTRAIT = { screenWidth: 412, screenHeight: 915, screenOrientation: { type: "portraitPrimary", angle: 0 } };
+  const LANDSCAPE = { screenWidth: 915, screenHeight: 412, screenOrientation: { type: "landscapePrimary", angle: 90 } };
+  const KB_LAND = 200;  // a landscape keyboard leaves ~210 px of page
+  try {
+    await s.viewport(412, 915, PORTRAIT);
+    await s.showBar();
+    await s.evalIn(FOCUS);
+    await s.viewport(412, 915 - KEYBOARD, PORTRAIT);
+    assert.equal((await s.json(KB)).visible, false, "fixture: portrait, keyboard up, hidden");
+
+    // Rotate with the keyboard still up: landscape was never seen at full height.
+    await s.viewport(915, 412 - KB_LAND, LANDSCAPE);
+    const m1 = await s.json(KB);
+    assert.equal(await s.evalIn("screen.orientation.type"), "landscape-primary", "fixture: the emulated screen rotated");
+    assert.equal(m1.focused, "perch-input");
+    assert.equal(m1.visible, false, "rotated with the keyboard up: still hidden: " + JSON.stringify(m1));
+    assert.equal(m1.v, "0px");
+
+    // The keyboard closes in landscape: back; it opens again: hidden.
+    await s.viewport(915, 412, LANDSCAPE);
+    assert.equal((await s.json(KB)).visible, true, "landscape, keyboard closed: the bar is back");
+    await s.viewport(915, 412 - KB_LAND, LANDSCAPE);
+    assert.equal((await s.json(KB)).visible, false, "landscape, keyboard up again: hidden");
+
+    // Rotate back with the keyboard up: portrait's tallest height was kept.
+    await s.viewport(412, 915 - KEYBOARD, PORTRAIT);
+    const m2 = await s.json(KB);
+    assert.equal(m2.visible, false, "back to portrait with the keyboard up: hidden: " + JSON.stringify(m2));
+    assert.equal(m2.paused, false, "the audio plays on through it all");
+
+    await s.evalIn(BLUR);
+    await s.evalIn(TWO_FRAMES);
+    const m3 = await s.json(KB);
+    assert.equal(m3.visible, true);
+    assert.equal(m3.v, m3.barH + "px");
   } finally { await s.close(); }
 });
 

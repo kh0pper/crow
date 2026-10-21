@@ -78,16 +78,28 @@ export const PLAYER_RESERVE_JS = `(function () {
     // (the Android app's WebView shrinks to the keyboard's top; the bar sat ~60 px above the composer).
     // "Keyboard up" = the viewport is over 150 px shorter than the tallest seen at this width (the app
     // shrinks innerHeight; a browser may shrink only the visual viewport, x scale so a zoom does not
-    // count). Back on blur or when the keyboard closes. Only an attribute on the bar: the player's own
-    // show/hide state is untouched and the audio never pauses. A mouse (desktop) never hides it.
-    var kbFull = 0, kbW = -1;
+    // count). The tallest is KEPT per width, never reset: each orientation has its own width, so
+    // rotating back and forth with the keyboard open keeps both. Keyed on the viewport's own width, not
+    // screen.orientation: during a rotation the two disagree for a moment and a mixed reading would
+    // poison the other orientation's height. The first width starts from the viewport; one reached
+    // later (a rotation, an iOS auto-zoom that changes innerWidth) starts from the screen's extent
+    // across it, since the keyboard may already be up.
+    // Back on blur or when the keyboard closes. Only an attribute on the bar: the player's own show/hide
+    // state is untouched and the audio never pauses. A mouse (desktop) never hides it.
+    // A split-screen window shrunk while typing also hides it (harmless: back on blur).
+    // A composer inside an iframe does not trigger it (focus events stay in the frame's document).
+    var kbFull = {}, kbAny = false;
     var kb = function () {
       var bar = document.getElementById('crow-player-bar');
       if (!bar) return;
       var vv = window.visualViewport;
       var h = window.innerHeight;
       if (vv && vv.height) h = Math.min(h, vv.height * (vv.scale || 1));
-      if (window.innerWidth !== kbW) { kbW = window.innerWidth; kbFull = h; } else if (h > kbFull) kbFull = h;
+      var w = Math.round(window.innerWidth), sc = window.screen || {};
+      var big = Math.max(sc.width || 0, sc.height || 0), small = Math.min(sc.width || 0, sc.height || 0);
+      if (!kbFull[w]) kbFull[w] = kbAny ? Math.max(h, Math.abs(w - big) < Math.abs(w - small) ? small : big) : h;
+      else if (h > kbFull[w]) kbFull[w] = h;
+      kbAny = true;
       var a = document.activeElement, typing = false;
       if (a && !a.readOnly && !a.disabled) {
         var tag = a.tagName;
@@ -96,7 +108,7 @@ export const PLAYER_RESERVE_JS = `(function () {
       }
       var coarse = false;
       try { coarse = window.matchMedia('(pointer: coarse)').matches; } catch (e) {}
-      var hide = coarse && typing && kbFull - h > 150;
+      var hide = coarse && typing && kbFull[w] - h > 150;
       if (hide === bar.hasAttribute('data-crow-kb-hidden')) return;
       if (hide) bar.setAttribute('data-crow-kb-hidden', '1'); else bar.removeAttribute('data-crow-kb-hidden');
       set();

@@ -10,7 +10,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { findFixedOverlays } from "./fixtures/fixed-overlays.mjs";
+import { findFixedOverlays, overlaysInText } from "./fixtures/fixed-overlays.mjs";
 import { Z, playerBarHtml } from "../servers/gateway/dashboard/shared/player.js";
 
 const OVERLAYS = findFixedOverlays();
@@ -22,6 +22,8 @@ const UNDER_BAR_OK = new Map([
     "a transparent click-catcher for an open picker: nothing to see, and the bar stays tappable"],
   ["servers/gateway/dashboard/panels/bot-board/drawer.js|.bb-bird-backdrop",
     "the bird drawer docks above the bar (its height leaves the bar's room), so its scrim stops at the bar too"],
+  ["servers/gateway/dashboard/shared/layout.js|.sidebar-overlay",
+    "99 on desktop, where it never shows (only the phone drawer opens it, and there it is 1090)"],
 ]);
 
 test("the scale: the bar is Z.playerBar, the phone drawer above it, modals above that, toasts on top", () => {
@@ -58,4 +60,16 @@ test("no dashboard or panel modal/backdrop sits at or under the player bar", () 
 
 test("the exceptions still exist (a stale entry would hide a new layer of the same name)", () => {
   for (const k of UNDER_BAR_OK.keys()) assert.ok(FOUND.has(k), "stale exception: " + k);
+});
+
+test("the scanner: a `${...}` inside a rule does not hide it, and an interpolated z-index counts as missing", () => {
+  const src = "const css = `.a{color:${c}} .low{position:fixed;inset:0;background:${bg({x:1})};z-index:900} " +
+    ".interp{position:fixed;inset:0;z-index:${Z.modal}} .ok{position:fixed;inset:0;z-index:1200}`;";
+  const got = Object.fromEntries(overlaysInText(src).map((o) => [o.selector, o.z]));
+  assert.deepEqual(got, { ".low": 900, ".interp": null, ".ok": 1200 });
+});
+
+test("the scanner: a selector's z-index is its LOWEST — a phone-only raise does not hide a desktop rule under the bar", () => {
+  const src = ".m{position:fixed;inset:0;z-index:99} @media(max-width:768px){.m{z-index:1090}}";
+  assert.deepEqual(overlaysInText(src), [{ selector: ".m", z: 99 }]);
 });

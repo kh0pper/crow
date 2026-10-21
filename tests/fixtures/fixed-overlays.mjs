@@ -7,8 +7,11 @@
  * finds both (rules nested in @media still match, their own braces hold no braces). A layer is
  * "full-viewport" when its rule says position:fixed and inset:0, or top/left 0 with right:0 or
  * width:100% and bottom:0 or height:100%. A layer that ends at the bar (bottom: var(--crow-player-h…))
- * does not cover it and is skipped. Its z-index is the highest one any rule with the same selector in
- * the same file gives it (a phone @media rule may raise it).
+ * does not cover it and is skipped. Its z-index is the LOWEST one any rule with the same selector in
+ * the same file gives it: a phone-only @media raise must not hide a desktop rule under the bar.
+ * A template interpolation (`${...}`) is replaced by a placeholder before parsing, so its braces do not
+ * break the rule around it; an interpolated z-index counts as missing (the guard wants a literal).
+ * Not scanned: inline style="..." attributes and z-index set from JS (el.style.zIndex, cssText).
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -54,33 +57,55 @@ function zOf(body) {
   return m ? Number(m[1]) : null;
 }
 
-/** Every flat `selector{body}` rule in a file, comments stripped. */
-function parseRules(path) {
-  const text = readFileSync(path, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+/** Replace each `${...}` (nested braces included) with a placeholder: ";" ends a selector or a declaration. */
+function stripInterpolations(text) {
+  let out = "", i = 0;
+  for (;;) {
+    const at = text.indexOf("${", i);
+    if (at < 0) return out + text.slice(i);
+    out += text.slice(i, at) + ";";
+    let depth = 0, j = at + 1;
+    for (; j < text.length; j++) {
+      if (text[j] === "{") depth++;
+      else if (text[j] === "}" && --depth === 0) break;
+    }
+    i = j + 1;
+  }
+}
+
+/** Every flat `selector{body}` rule in a source text, comments and interpolations stripped. */
+function parseRules(text) {
+  const src = stripInterpolations(text.replace(/\/\*[\s\S]*?\*\//g, ""));
   const re = /([^{};`]+)\{([^{}]*)\}/g;
   const rules = [];
   let m;
-  while ((m = re.exec(text))) rules.push({ selector: m[1].trim().replace(/\s+/g, " "), body: m[2] });
+  while ((m = re.exec(src))) rules.push({ selector: m[1].trim().replace(/\s+/g, " "), body: m[2] });
   return rules;
 }
 
-/** [{ file, selector, z }] — z is null when no rule for the selector sets one. */
+/** [{ selector, z }] for one source text — z is the lowest any rule for the selector sets, else null. */
+export function overlaysInText(text) {
+  const rules = parseRules(text);
+  const zBySel = new Map();
+  for (const r of rules) {
+    const z = zOf(r.body);
+    if (z !== null) zBySel.set(r.selector, Math.min(zBySel.get(r.selector) ?? Infinity, z));
+  }
+  const out = [], seen = new Set();
+  for (const r of rules) {
+    if (!coversViewport(r.body) || seen.has(r.selector)) continue;
+    seen.add(r.selector);
+    out.push({ selector: r.selector, z: zBySel.get(r.selector) ?? null });
+  }
+  return out;
+}
+
+/** [{ file, selector, z }] across the dashboard and every bundle panel. */
 export function findFixedOverlays() {
   const out = [];
   for (const root of roots()) {
     for (const file of walk(root, [])) {
-      const rules = parseRules(file);
-      const zBySel = new Map();
-      for (const r of rules) {
-        const z = zOf(r.body);
-        if (z !== null) zBySel.set(r.selector, Math.max(zBySel.get(r.selector) ?? -Infinity, z));
-      }
-      const seen = new Set();
-      for (const r of rules) {
-        if (!coversViewport(r.body) || seen.has(r.selector)) continue;
-        seen.add(r.selector);
-        out.push({ file: relative(REPO, file), selector: r.selector, z: zBySel.get(r.selector) ?? null });
-      }
+      for (const o of overlaysInText(readFileSync(file, "utf8"))) out.push({ file: relative(REPO, file), ...o });
     }
   }
   return out;
@@ -88,5 +113,5 @@ export function findFixedOverlays() {
 
 /** Every rule for `selector` in `file` (the live check injects these, verbatim, into a test page). */
 export function rulesFor(file, selector) {
-  return parseRules(join(REPO, file)).filter((r) => r.selector === selector).map((r) => `${selector}{${r.body}}`).join("\n");
+  return parseRules(readFileSync(join(REPO, file), "utf8")).filter((r) => r.selector === selector).map((r) => `${selector}{${r.body}}`).join("\n");
 }
