@@ -295,6 +295,10 @@ export default function perchDictationRouter(dashboardAuth, opts = {}) {
     cloudFlag = r.cloud;
     if (String(req.headers["x-crow-dictation-profile"] || "") !== r.tag) return finish(409, { error: "profile_changed" });
 
+    // A client that left while the profile resolved: its 'close' has already
+    // fired (the listener below would miss it), so send nothing anywhere.
+    if (res.destroyed || (req.socket && req.socket.destroyed)) return finish(400, { error: "client_gone" });
+
     // Only now take the lock (review C2): every earlier exit is lock-free.
     const sessKey = sha256(req.dashboardSession);
     if (r.cloud) {
