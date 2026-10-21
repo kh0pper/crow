@@ -378,6 +378,7 @@ export async function decideOption(tdb, cdb, itemId, { index, otherText } = {}, 
         title: cc.title,
         description: cc.description ?? null,
         project_id: card.project_id == null ? null : Number(card.project_id),
+        tags: card.tags ?? null, // inherited unchanged; the asker cannot choose them
         autonomy: "gated",
         assigned_bot: enabled ? bot : null,
         owner: bot && !enabled ? (cc.owner ?? bot) : (cc.owner ?? null),
