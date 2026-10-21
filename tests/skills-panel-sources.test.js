@@ -47,7 +47,7 @@ async function list(lang = "en") {
 /** The table rows for a skill name, keyed by source. */
 function rowsFor(html, name) {
   const out = {};
-  for (const tr of html.split(/<tr\b/).slice(1)) {
+  for (const tr of html.split(/<div class="sk-row\b/).slice(1)) {
     const m = tr.match(/data-skill="([^"]+)" data-source="([^"]+)"/);
     if (m && m[1] === name) out[m[2]] = tr;
   }
@@ -92,21 +92,22 @@ test("the purpose line comes from YAML; English text on an es page is tagged lan
   const r = rowsFor(await list("en"), "household-fixture");
   assert.match(text(r.yours), /Household/);
   assert.match(text(r.yours), /Chores and lists for the house\./);
-  assert.match(text(r.yours), /Yours/);
   const es = rowsFor(await list("es"), "household-fixture");
   assert.match(es.yours, /lang="en"[^>]*>Chores and lists for the house\./);
-  assert.match(text(es.yours), /Tuya/);
+
 });
 
-test("rows with no file (a shipped skill not installed yet) are not rendered in this table", async () => {
+test("a shipped skill not installed yet is listed as Update ready (PR 3 gives it Apply update)", async () => {
   const html = await list("en");
-  assert.deepEqual(rowsFor(html, "data-scraping"), {});
+  assert.match(text(rowsFor(html, "data-scraping").ext), /Update ready/);
   assert.ok(rowsFor(html, "data-dashboard").ext, "the installed sibling is listed");
 });
 
 test("a built-in reads Built-in with its cleaned title", async () => {
-  const r = rowsFor(await list("en"), "tutoring");
+  const html = await list("en");
+  const r = rowsFor(html, "tutoring");
   assert.deepEqual(Object.keys(r), ["builtin"]);
-  assert.match(text(r.builtin), /Built-in/i);
   assert.match(r.builtin, />Tutoring</);
+  const builtinSec = html.split('data-sec="builtin"')[1] || "";
+  assert.ok(builtinSec.includes('data-skill="tutoring" data-source="builtin"'), "listed under Built-in");
 });

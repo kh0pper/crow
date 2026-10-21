@@ -38,7 +38,8 @@ async function call({ method = "GET", query = {}, body = {}, lang = "en" } = {})
   if (html !== undefined) out.body = html;
   return out;
 }
-const row = (html, name) => (html.split(/<tr\b/).find((tr) => tr.includes(`data-skill="${name}" data-source=`)) || "");
+const row = (html, name) => (html.split(/<div class="sk-row\b/).find((tr) => tr.includes(`data-skill="${name}" data-source=`)) || "");
+const detailOf = async (name, lang = "en") => ((await call({ query: { skill: name }, lang })).body.match(/<div class="sk-detail"[\s\S]*$/) || [""])[0];
 const sw = (html, name) => (row(html, name).match(/<button[^>]*role="switch"[^>]*>/) || [""])[0];
 function setup() {
   writeFileSync(join(HOME, "installed.json"), JSON.stringify([{ id: "kiosk" }, { id: "media" }]));
@@ -156,9 +157,8 @@ test("delete: refused for an extension copy; yours names its bots; a copy of an 
   assert.match(yours.body, /confirm\('Delete this skill\? Used by 2 bots: they will lose it\.'\)/);
   const copy = await call({ query: { edit: "media.md", source: "user" } });
   assert.match(copy.body, /confirm\('Delete your copy\? Media Hub’s version won’t come back by itself: it stays removed until you uninstall Media Hub and install it again\. Used by 1 bot: it will lose it\.'\)/);
-  const list = await call();
-  assert.match(row(list.body, "media"), /confirm\('Delete your copy\?/);
-  assert.doesNotMatch(row(list.body, "kiosk"), /value="delete"/, "no Delete button on an extension row");
+  assert.match(await detailOf("media"), /confirm\('Delete your copy\?/, "the detail's Delete… says so too");
+  assert.doesNotMatch(await detailOf("kiosk"), /value="delete"/, "no Delete for an extension skill");
   const del = await call({ method: "POST", body: { action: "delete", filename: "household-notes.md" } });
   assert.equal(del.status, 303);
   assert.equal(existsSync(join(SKILLS, "household-notes.md")), false);
@@ -180,10 +180,9 @@ test("a Design kit skill on a kit-less Crow keeps its switch and says where it s
   const list = await call();
   const r = row(list.body, "design-frontend");
   assert.match(r, /Needs the Design kit/);
-  assert.match(r, /Chat bots skip it; voice and scheduled runs still load it if a bot selects it\./);
+  assert.match(await detailOf("design-frontend"), /Chat bots skip it; voice and scheduled runs still load it if a bot selects it\./);
   assert.match(sw(list.body, "design-frontend"), /aria-checked="true"/);
-  const es = await call({ lang: "es" });
-  assert.match(row(es.body, "design-frontend"), /Los bots de chat la omiten/);
+  assert.match(await detailOf("design-frontend", "es"), /Los bots de chat la omiten/);
   rmSync(join(SKILLS, "design-frontend.md"));
 });
 
@@ -198,10 +197,9 @@ test("an off name whose file is gone shows as Off · not installed, with its swi
   assert.match(row((await call({ lang: "es" })).body, "gone-skill"), /Desactivada · no instalada/);
 });
 
-test("the switch column header is a state in Spanish, not a verb", async () => {
+test("the Spanish switch never reads as the verb \"Activar\"", async () => {
   setup();
   const es = await call({ lang: "es" });
-  assert.match(es.body, /data-label="Estado"/);
   assert.doesNotMatch(es.body, />Activar</);
 });
 

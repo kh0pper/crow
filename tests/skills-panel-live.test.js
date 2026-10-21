@@ -185,7 +185,7 @@ test("the switch in a real browser: off, focus kept, toast announced, state writ
   const t = await tab();
   try {
     await openList(t);
-    const swSel = "document.querySelector('[data-skill=\"live-switch\"]').closest('tr').querySelector('[role=switch]')";
+    const swSel = "document.querySelector('.sk-row[data-skill=\"live-switch\"] [role=switch]')";
     assert.equal(await t.evalIn(`${swSel}.getAttribute('aria-checked')`), "true");
     await t.evalIn(`${swSel}.click(); true`);
     const st = await waitFor(async () => {

@@ -47,8 +47,10 @@ test("?skill=<name> lands on that skill's page: yours, built-in, or the list for
     const html = await skillsPanel.handler({ method: "GET", query, body: {} }, res, { db: { execute: async () => ({ rows: [] }) }, layout: ({ content }) => content, lang: "en" });
     return out.url || (html ? "rendered" : null);
   };
-  assert.equal(await go({ skill: "media" }), "/dashboard/skills?edit=media.md&source=user");
-  assert.equal(await go({ skill: "memory-management" }), "/dashboard/skills?edit=memory-management.md&source=repo");
+  const page = async (query) => skillsPanel.handler({ method: "GET", query, body: {} }, { redirect() {}, redirectAfterPost() {} }, { db: { execute: async () => ({ rows: [] }) }, layout: ({ content }) => content, lang: "en" });
+  assert.equal(await go({ skill: "media" }), "rendered");
+  assert.match(await page({ skill: "media" }), /<div class="sk-detail"[^>]*>[\s\S]*id="sk-detail-h"[^>]*>Media/, "the skill's detail opens in the list");
+  assert.match(await page({ skill: "memory-management" }), /<div class="sk-detail"/);
   assert.equal(await go({ skill: "no-such-skill" }), "/dashboard/skills");
   assert.equal(await go({ skill: "../etc/passwd" }), "/dashboard/skills");
   assert.equal(await go({ skill: ["a", "b"] }), "rendered", "a repeated ?skill= is ignored");

@@ -88,7 +88,7 @@ test("writingRulesBody drops placeholder lines and empty subsections", () => {
 
 test("the Skills panel shows Set up writing rules for the seed, and the rules once there are some", async () => {
   const res = { redirect() {}, redirectAfterPost() {} };
-  const render = (content) => panel.handler({ method: "GET", query: {}, body: {} }, res, {
+  const render = (content) => panel.handler({ method: "GET", query: { view: "behavior" }, body: {} }, res, {
     db: { execute: async ({ sql }) => (/section_title/.test(sql) ? { rows: [] } : { rows: [{ content }] }) }, layout: ({ content: c }) => c, lang: "en",
   });
   assert.match(await render(SEED), /Set Up Writing Rules/);
