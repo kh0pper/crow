@@ -28,16 +28,18 @@
  *   7. the give core's own checks (409 locked, 409 finished, 400
  *      bot_unavailable, 409 no_board), run here before any write too.
  *
- * Effect: one guarded UPDATE claims the hand-off by clearing dispatch_grants
- * (0 rows → 409 changed: the card moved, was archived, reparented or
- * reassigned since the checks, or — on the grant path — the grant was
- * revoked or already spent by a concurrent dispatch); then giveCard with the bot actor and
- * autonomy "gated" (card and children); then one `dispatch` mutation. Nothing
- * starts: no job, no session.
+ * Effect: one guarded UPDATE claims the hand-off by setting assigned_bot to
+ * NULL and clearing dispatch_grants (0 rows → 409 changed: the card moved,
+ * was archived, reparented or reassigned since the checks, another dispatch
+ * claimed it first, or — on the grant path — the grant was revoked); then
+ * giveCard with the bot actor and autonomy "gated" (card and children);
+ * then one `dispatch` mutation. Nothing starts: no job, no session.
  *
  * A grant is spent by the claim even if the give then refuses (a lock taken
  * in the window after the checks): that fails closed — the operator grants
- * again.
+ * again. The card itself goes back to the caller in that case. Because the
+ * claim nulls assigned_bot, the give's update row records assigned_bot as
+ * [null, to]; the dispatch row carries from/to.
  */
 
 import { recordMutation } from "./card-service.js";
@@ -178,12 +180,15 @@ export async function dispatchCard(tdb, cdb, { itemId, toBot, note } = {}, actor
   await checkGive(tdb, cdb, itemId, toBot);
 
   // Claim: one guarded write. 0 rows → the card changed since the checks.
-  // On the grant path the grant itself must still be there: an operator
-  // revoke after the checks wins, and two concurrent dispatches cannot both
-  // spend one grant (the first claim removes it).
+  // It always moves something: assigned_bot goes to NULL (the WHERE requires
+  // it to be the caller), so a second concurrent dispatch's claim matches 0
+  // rows on BOTH paths. On the grant path the grant itself must also still
+  // be there, so an operator revoke after the checks wins. The transient
+  // NULL is an internal claim, not an edit: no board_mutations row; the
+  // give's update row and the dispatch row record the move.
   const viaGrant = !prov.humanCreated;
   const claim = await tdb.execute({
-    sql: `UPDATE tasks_items SET data_json = json_remove(data_json, '$.dispatch_grants')
+    sql: `UPDATE tasks_items SET assigned_bot = NULL, data_json = json_remove(data_json, '$.dispatch_grants')
           WHERE id = ? AND assigned_bot = ? AND parent_id IS NULL AND archived_at IS NULL AND board_id IS NULL` +
       (viaGrant
         ? ` AND json_valid(data_json) AND EXISTS (SELECT 1 FROM json_each(tasks_items.data_json, '$.dispatch_grants') WHERE value = ?)`
@@ -192,11 +197,22 @@ export async function dispatchCard(tdb, cdb, { itemId, toBot, note } = {}, actor
   });
   if (!Number(claim.rowsAffected)) throw fail("the card changed while dispatching", "changed", 409);
 
-  await giveCard(tdb, cdb, {
-    cardId: itemId, botId: toBot, actor,
-    audit: { actor_type: "bot", actor_id: callerId, extra: { via: "dispatch" } },
-    extraFields: { autonomy: "gated" },
-  });
+  try {
+    await giveCard(tdb, cdb, {
+      cardId: itemId, botId: toBot, actor,
+      audit: { actor_type: "bot", actor_id: callerId, extra: { via: "dispatch" } },
+      extraFields: { autonomy: "gated" },
+    });
+  } catch (err) {
+    // The give refused after the claim (a lock or a board change in the
+    // window): hand the card back to the caller unless someone else has
+    // assigned it since. The grant stays spent (fails closed).
+    await tdb.execute({
+      sql: "UPDATE tasks_items SET assigned_bot = ? WHERE id = ? AND assigned_bot IS NULL AND board_id IS NULL",
+      args: [callerId, itemId],
+    });
+    throw err;
+  }
   await recordMutation(tdb, {
     itemId, verb: "dispatch", actor,
     detail: { from: callerId, to: toBot, note: note == null || note === "" ? null : String(note) },

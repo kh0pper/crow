@@ -168,6 +168,8 @@ test("an operator-created card goes to the target: gated (card and children), bo
 
   const m = mutations(id);
   assert.deepEqual(m.map((r) => r.verb), ["create", "update", "dispatch"]);
+  // The claim's transient NULL writes no row of its own; the give's row shows it.
+  assert.deepEqual(JSON.parse(m[1].detail_json).assigned_bot, [null, "bot-b"]);
   for (const r of m.slice(1)) { assert.equal(r.actor_kind, "bot"); assert.equal(r.actor_id, "bot-a"); }
   assert.deepEqual(JSON.parse(m[2].detail_json), { from: "bot-a", to: "bot-b", note: "needs a second pair of eyes" });
   const km = mutations(kid);
@@ -382,15 +384,77 @@ test("rule 7: locked 409, finished 409, no_board 409 pass through with nothing w
 // ---- races ----
 
 /** A tdb whose claim UPDATE first runs `beforeClaim` (a concurrent writer). */
-function racingTdb(beforeClaim) {
+function racingTdb(beforeClaim, afterClaim) {
   return {
     execute: async (q) => {
       const sql = typeof q === "string" ? q : q.sql;
-      if (/json_remove\(data_json, '\$\.dispatch_grants'\)/.test(sql)) await beforeClaim();
-      return tdb.execute(q);
+      const isClaim = /json_remove\(data_json, '\$\.dispatch_grants'\)/.test(sql);
+      if (isClaim && beforeClaim) await beforeClaim();
+      const r = await tdb.execute(q);
+      if (isClaim && afterClaim) await afterClaim();
+      return r;
     },
   };
 }
+function deferred() {
+  let resolve;
+  const promise = new Promise((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
+test("race: two dispatches of one operator-created card, the second claiming after the first, give exactly one success", async () => {
+  const id = await opCard();
+  const claimed = deferred(), release = deferred();
+  let second;
+  // A passes its checks; just before A's claim, B (already past its checks
+  // too) claims and parks before its give. A's claim must then match 0 rows.
+  const rtdbA = racingTdb(async () => {
+    const rtdbB = racingTdb(null, async () => { claimed.resolve(); await release.promise; });
+    second = dispatchCard(rtdbB, cdb, { itemId: id, toBot: "bot-c" }, BOT_A);
+    await claimed.promise;
+  });
+  const errA = await refusal(dispatchCard(rtdbA, cdb, { itemId: id, toBot: "bot-b" }, BOT_A));
+  assert.equal(errA.code, "changed");
+  assert.equal(errA.http, 409);
+  release.resolve();
+  assert.deepEqual(await second, { ok: true, item_id: id, from: "bot-a", to: "bot-c" });
+  assert.equal(card(id).assigned_bot, "bot-c");
+  assert.equal(mutations(id).filter((r) => r.verb === "dispatch").length, 1);
+  assert.equal(audits(`card:${id}`).length, 1);
+});
+
+test("a give refused after the claim (target board turned off) hands the card back to the caller, no dispatch row", async () => {
+  const id = await opCard();
+  const c0 = raw();
+  const def = c0.prepare("SELECT definition FROM pi_bot_defs WHERE bot_id='bot-b'").get().definition;
+  c0.close();
+  const setDef = (d) => { const c = raw(); c.prepare("UPDATE pi_bot_defs SET definition=? WHERE bot_id='bot-b'").run(d); c.close(); };
+  try {
+    const rtdb = racingTdb(async () => setDef(JSON.stringify({ tracker_config: { type: "none" } })));
+    const err = await refusal(dispatchCard(rtdb, cdb, { itemId: id, toBot: "bot-b" }, BOT_A));
+    assert.equal(err.code, "no_board");
+    assert.equal(err.http, 409);
+  } finally {
+    setDef(def);
+  }
+  assert.equal(card(id).assigned_bot, "bot-a", "back with the caller");
+  assert.equal(card(id).project_id, PID_A);
+  assert.deepEqual(mutations(id).map((r) => r.verb), ["create"], "no update or dispatch row");
+  assert.equal(audits(`card:${id}`).length, 0);
+});
+
+test("a give refused after the claim does not take the card back from someone who assigned it meanwhile", async () => {
+  const id = await opCard();
+  const rtdb = racingTdb(null, async () => {
+    const c = raw();
+    c.prepare("INSERT INTO bot_jobs (job_id, bot_id, goal, card_id, status) VALUES (?,?,?,?,?)").run("job-back-" + id, "bot-c", "work", id, "queued");
+    c.close();
+    const t = rawTasks(); t.prepare("UPDATE tasks_items SET assigned_bot='bot-c' WHERE id=?").run(id); t.close();
+  });
+  const err = await refusal(dispatchCard(rtdb, cdb, { itemId: id, toBot: "bot-b" }, BOT_A));
+  assert.equal(err.code, "locked");
+  assert.equal(card(id).assigned_bot, "bot-c");
+});
 
 test("race: an assignee change between the checks and the claim is 409 changed, nothing moved", async () => {
   const id = await opCard();
