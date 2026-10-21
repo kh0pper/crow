@@ -429,6 +429,19 @@ export default function botBoardApiRouter(dashboardAuth) {
         const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
         if (!isValidStatus(def, String(b.status))) return jsonError(res, 400, "invalid status");
       }
+      // Compare-and-set on status. The drawer sends the status it loaded as
+      // expected_status; when the card has moved since (a decision answer
+      // closed it, another tab or a bot moved it), the whole edit is refused
+      // with nothing written, so a stale form can never move the card back.
+      // A status CHANGE must name the status it changes from: a caller that
+      // sends status without expected_status (an old page) is refused rather
+      // than trusted. Edits that leave status alone still work without it.
+      if (b.expected_status != null && String(b.expected_status) !== String(cur.status)) {
+        return res.status(409).json({ reason: "card changed since it was loaded (status is now " + String(cur.status) + ")", code: "stale", status: cur.status });
+      }
+      if (b.status != null && String(b.status) !== String(cur.status) && b.expected_status == null) {
+        return res.status(409).json({ reason: "a status change must send expected_status; reload the card", code: "stale", status: cur.status });
+      }
       const fields = {
         title: typeof b.title === "string" ? b.title.trim() : (b.title == null ? null : String(b.title)),
         description: b.description == null ? null : String(b.description),

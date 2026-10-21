@@ -2195,6 +2195,7 @@ export const translations = {
   "botboard.decision.errExpired": { en: "This decision has expired.", es: "Esta decisi\u00f3n ya venci\u00f3." },
   "botboard.decision.errClosed": { en: "This card is closed.", es: "Esta tarjeta est\u00e1 cerrada." },
   "botboard.decision.errBadOption": { en: "That answer is not valid. Pick an option, or write 1-2000 characters for Other.", es: "Esa respuesta no es v\u00e1lida. Elige una opci\u00f3n, o escribe de 1 a 2000 caracteres en Otra." },
+  "botboard.errStale": { en: "This card changed since you opened it. It has been reloaded; check it and save again.", es: "Esta tarjeta cambi\u00f3 desde que la abriste. Se volvi\u00f3 a cargar; rev\u00edsala y guarda de nuevo." },
 
   // ─── Projects Panel (W3-4) ───
   "projects.confirmRevoke": { en: "Revoke {who}?", es: "¿Revocar a {who}?" },
