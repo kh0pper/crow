@@ -2,7 +2,7 @@
 // no bwrap runs here (tests/pi-contain.test.js runs real sandboxes).
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, symlinkSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -181,4 +181,75 @@ test("mount order: parents before children, masks after the dirs they sit in", (
   assert.ok(idx("--tmpfs", H) < idx("--ro-bind", app));
   assert.ok(idx("--bind", data) < idx("--bind", work));
   assert.ok(idx("--bind", data) < idx("--ro-bind", join(data, "identity.json")));
+});
+
+// ---- rev 2 (plan review C2, C3, C9) ----
+
+test("C9: the data dir keeps only the DBs, the bot's own project and the keep-list; everything else present is masked", () => {
+  const d = mk(T, "c9", "data");
+  for (const f of ["crow.db", "crow.db-wal", "tasks.db", "crow.db.CORRUPT-1", "identity.json", "notes.txt"]) writeFileSync(join(d, f), "");
+  for (const x of ["backups", "peers", "instance-sync", "artifacts", join("projects", "mine", "workspace"), join("projects", "theirs")]) mk(d, x);
+  const ws = join(d, "projects", "mine", "workspace");
+  const { args } = buildContainPlan(base({ dataDir: d, workspaceDir: ws, dataKeep: ["artifacts"] }));
+  const masked = (p) => has(args, "--tmpfs", p) || has(args, "--ro-bind", "/dev/null", p);
+  for (const p of ["crow.db.CORRUPT-1", "identity.json", "notes.txt", "backups", "peers", "instance-sync", join("projects", "theirs")]) {
+    assert.ok(masked(join(d, p)), p + " masked");
+  }
+  for (const p of ["crow.db", "crow.db-wal", "tasks.db", "artifacts", join("projects", "mine")]) assert.ok(!masked(join(d, p)), p + " kept");
+  const ps = pairs(args);
+  const iMaskTheirs = ps.findIndex((q) => q[0] === "--tmpfs" && q[1] === join(d, "projects", "theirs"));
+  const iWs = ps.findIndex((q) => q[0] === "--bind" && q[1] === ws);
+  assert.ok(iWs > 0 && iMaskTheirs > 0);
+});
+
+test("C3: .env files in bound dirs and in the checkout's bundles are masked; a symlinked .env masks its bound target", () => {
+  const appX = mk(T, "c3", "app");
+  writeFileSync(join(appX, ".env"), "SECRET=1");
+  writeFileSync(join(appX, ".env.local"), "S=1");
+  mk(appX, "bundles", "minio"); writeFileSync(join(appX, "bundles", "minio", ".env"), "P=1");
+  const addonX = mk(T, "c3", "addon"); const sharedEnv = mk(T, "c3", "envdir");
+  writeFileSync(join(sharedEnv, "rocm.env"), "R=1");
+  symlinkSync(join(sharedEnv, "rocm.env"), join(addonX, ".env"));
+  const { args } = buildContainPlan(base({ appRoot: appX, mcpServers: [{ command: "node", cwd: addonX }], readPaths: [sharedEnv] }));
+  for (const p of [join(appX, ".env"), join(appX, ".env.local"), join(appX, "bundles", "minio", ".env"), join(sharedEnv, "rocm.env")]) {
+    assert.ok(has(args, "--ro-bind", "/dev/null", p), p + " masked");
+  }
+});
+
+test("C9b: a policy write path into a hidden home entry is refused (rc files, PATH dirs, config)", () => {
+  writeFileSync(join(H, ".bashrc"), "");
+  mk(H, ".local", "bin"); mk(H, ".config", "autostart");
+  const { args, refused } = buildContainPlan(base({ writePaths: [join(H, ".bashrc"), join(H, ".local", "bin"), join(H, ".config", "autostart"), out] }));
+  for (const p of [join(H, ".bashrc"), join(H, ".local", "bin"), join(H, ".config", "autostart")]) {
+    assert.ok(!has(args, "--bind", p), p);
+    assert.ok(refused.some((r) => r.path === p && /hidden entry/.test(r.reason)), p + " refused");
+  }
+  assert.ok(has(args, "--bind", out), "a visible dir stays writable");
+});
+
+test("instance secrets: read_paths covering CROW_HOME (tokens, secrets/, env/) are refused", () => {
+  writeFileSync(join(crowHome, "board-token"), "");
+  const { args, refused } = buildContainPlan(base({ readPaths: [crowHome, join(crowHome, "secrets"), join(crowHome, "board-token")] }));
+  for (const p of [crowHome, join(crowHome, "secrets"), join(crowHome, "board-token")]) {
+    assert.ok(!has(args, "--ro-bind", p), p);
+    assert.ok(refused.some((r) => r.path === p), p + " refused");
+  }
+});
+
+test("C2: pi packages outside the agent dir are bound read-only; one that cannot be bound refuses the spawn", () => {
+  const sh = mk(T, "c2", "shadow");
+  writeFileSync(join(sh, "settings.json"), JSON.stringify({ packages: ["pkg/superpowers", "../../pi-lab", "npm-name"] }));
+  const { args } = buildContainPlan(base({ shadowAgentDir: sh }));
+  assert.ok(has(args, "--ro-bind", piLab), "relative package root bound");
+  const sh2 = mk(T, "c2", "shadow2");
+  writeFileSync(join(sh2, "settings.json"), JSON.stringify({ packages: [join(H, ".ssh")] }));
+  assert.throws(() => buildContainPlan(base({ shadowAgentDir: sh2 })), ContainRefused);
+  const sh3 = mk(T, "c2", "shadow3");
+  writeFileSync(join(sh3, "settings.json"), JSON.stringify({ packages: [join(H, "gone-pkg")] }));
+  assert.doesNotThrow(() => buildContainPlan(base({ shadowAgentDir: sh3 })), "a package missing on the host too is not a refusal");
+});
+
+test("C5: DNS stub dir bound when present", () => {
+  const { args } = buildContainPlan(base());
+  if (existsSync("/run/systemd/resolve")) assert.ok(has(args, "--ro-bind", "/run/systemd/resolve"));
 });
