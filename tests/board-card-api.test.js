@@ -158,7 +158,7 @@ test("edit validates status against the def too", async () => {
   assert.equal(bad.status, 400, "'pending' is not on the custom board");
   const ok = await fetch(base + "/card/2", { method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ title: "custom two", status: "todo" }) });
+    body: JSON.stringify({ title: "custom two", status: "todo", expected_status: "doing" }) }); // card 2 was moved to doing above
   assert.equal(ok.status, 200);
 });
 
@@ -492,7 +492,7 @@ test("convergence: POST /card/:id (edit) records an 'update' mutation for field 
 test("convergence: POST /card/:id (edit) with a status change ALSO records a 'move' mutation", async () => {
   const { body: created } = await createTestCard({});
   const r = await fetch(base + "/card/" + created.id, { method: "POST",
-    headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "still edited", status: "in_progress" }) });
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "still edited", status: "in_progress", expected_status: "pending" }) });
   assert.equal(r.status, 200);
   const rows = mutationsFor(created.id);
   assert.deepEqual(rows.map((m) => m.verb), ["create", "update", "move"]);
@@ -650,7 +650,7 @@ test("GET /card/:id gains ADDITIVE keys only: autonomy/plan_head/latest_results/
   const before = await (await fetch(base + "/card/" + created.id)).json();
   const EXISTING_KEYS = ["card", "projects", "locked", "board"];
   for (const k of EXISTING_KEYS) assert.ok(Object.hasOwn(before, k), "existing key survives: " + k);
-  assert.deepEqual(Object.keys(before).sort(), [...EXISTING_KEYS, "autonomy", "plan_head", "latest_results", "mutations"].sort(),
+  assert.deepEqual(Object.keys(before).sort(), [...EXISTING_KEYS, "autonomy", "plan_head", "latest_results", "mutations", "decision"].sort(),
     "additive-only: no existing key dropped, nothing unexpected added");
   assert.equal(before.autonomy, "gated");
   assert.equal(before.plan_head, null, "no plan saved yet");
@@ -738,4 +738,158 @@ test("\"approve & mark done\": decide + move is two writes, both recorded, and l
   assert.ok(row.completed_at, "the builtin board's 'done' is terminal — completed_at stamps");
   const rows = mutationsFor(created.id);
   assert.deepEqual(rows.map((m) => m.verb), ["create", "result_decide", "move"], "both writes recorded, in order");
+});
+
+// ---- decision cards: answer route + GET exposes the decision ----
+
+async function seedDecisionCard(over = {}) {
+  const { createDbClient } = await import("../servers/db.js");
+  const { askDecision } = await import("../servers/gateway/board/decision-service.js");
+  const tdb = createDbClient(process.env.CROW_TASKS_DB_PATH);
+  const cdb = createDbClient();
+  try {
+    const r = await askDecision(tdb, cdb, {
+      projectId: 1,
+      decision: {
+        question: "Run the cleanup?", fingerprint: "fp-" + Math.random(), batch: "b-" + Math.random(),
+        options: [
+          { label: "Yes", consequence: "It runs tonight", recommended: true, value: "yes",
+            then: { create_card: { title: "Follow up", assign_bot: "scout" } } },
+          { label: "Not now", consequence: "Asked again later", snooze_days: 7, value: "later" },
+        ],
+        ...over,
+      },
+    }, { kind: "bot", id: "scout", jobId: null });
+    return r.id ?? r.card_id ?? r.item_id;
+  } finally { tdb.close(); cdb.close(); }
+}
+
+function postDecision(id, body) {
+  return fetch(base + "/card/" + id + "/decision", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+}
+
+test("GET card exposes the decision for a decision card and null for a normal card", async () => {
+  const id = await seedDecisionCard();
+  const d = await (await fetch(base + "/card/" + id)).json();
+  assert.equal(d.decision.question, "Run the cleanup?");
+  assert.equal(d.decision.options.length, 2);
+  const n = await (await fetch(base + "/card/1")).json();
+  assert.equal(n.decision, null);
+  assert.ok(!Object.hasOwn(n.card, "data_json"), "raw data_json is not leaked on the card");
+});
+
+test("POST /card/:id/decision answers once, records a HUMAN decision mutation, creates the follow-up card", async () => {
+  const id = await seedDecisionCard();
+  const r = await postDecision(id, { index: 0 });
+  assert.equal(r.status, 200);
+  const j = await r.json();
+  assert.equal(j.ok, true);
+  assert.equal(j.chosen.index, 0);
+  assert.equal(j.chosen.label, "Yes");
+  assert.ok(Number.isInteger(j.created_card_id));
+  const m = mutationsFor(id).find((x) => x.verb === "decision");
+  assert.ok(m, "decision mutation recorded");
+  assert.equal(m.actor_kind, "human");
+  const again = await postDecision(id, { index: 1 });
+  assert.equal(again.status, 409, "second answer refused");
+  assert.equal((await again.json()).code, "already_decided");
+});
+
+test("POST /card/:id/decision: bad index 400, missing card 404, Other needs text", async () => {
+  const id = await seedDecisionCard();
+  assert.equal((await postDecision(id, { index: 9 })).status, 400);
+  assert.equal((await postDecision(id, { index: "0" })).status, 400);
+  assert.equal((await postDecision(id, {})).status, 400);
+  assert.equal((await postDecision(id, { index: -1 })).status, 400);
+  assert.equal((await postDecision(999999, { index: 0 })).status, 404);
+  const ok = await postDecision(id, { index: -1, other_text: "something else" });
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).chosen.other_text, "something else");
+});
+
+test("POST /card/:id/decision: archived, closed and locked cards answer 409", async () => {
+  const archived = await seedDecisionCard();
+  assert.equal((await fetch(base + "/card/" + archived + "/archive", { method: "POST" })).status, 200);
+  assert.equal((await postDecision(archived, { index: 0 })).status, 409);
+
+  const closed = await seedDecisionCard();
+  assert.equal((await fetch(base + "/card/" + closed + "/move", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ status: "done" }) })).status, 200);
+  const rc = await postDecision(closed, { index: 0 });
+  assert.equal(rc.status, 409);
+  assert.equal((await rc.json()).code, "closed");
+
+  const locked = await seedDecisionCard();
+  const c = new Database(process.env.CROW_DB_PATH);
+  c.prepare("INSERT INTO bot_sessions (bot_id, card_id, status) VALUES ('scout', ?, 'active')").run(locked);
+  c.close();
+  const rl = await postDecision(locked, { index: 0 });
+  assert.equal(rl.status, 409);
+  assert.equal((await rl.json()).code, "locked");
+});
+
+test("POST /card/:id/decision: a request without the dashboard session is refused like the sibling decide route", async () => {
+  const { default: express } = await import("express");
+  const { default: botBoardApiRouter } = await import("../servers/gateway/routes/bot-board-api.js");
+  const app = express();
+  app.use(express.json());
+  app.use(botBoardApiRouter((req, res) => res.status(401).json({ error: "unauthorized" })));
+  const srv = await new Promise((r) => { const s = app.listen(0, () => r(s)); });
+  try {
+    const b = "http://127.0.0.1:" + srv.address().port + "/dashboard/bot-board-api";
+    const opts = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ index: 0, decision: "approved" }) };
+    const sibling = await fetch(b + "/card/1/result/1/decide", opts);
+    const mine = await fetch(b + "/card/1/decision", opts);
+    assert.equal(sibling.status, 401);
+    assert.equal(mine.status, sibling.status);
+  } finally { srv.close(); }
+});
+
+// ---- compare-and-set on the edit route's status (PR #535 click-through) ----
+
+function cardRow(id) {
+  const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  const row = t.prepare("SELECT title, status FROM tasks_items WHERE id=?").get(id);
+  t.close();
+  return row;
+}
+function postEdit(id, body) {
+  return fetch(base + "/card/" + id, { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+}
+
+test("edit: a stale expected_status (the card was answered meanwhile) is refused 409 stale, nothing written, no move", async () => {
+  const id = await seedDecisionCard();
+  assert.equal((await postDecision(id, { index: 0 })).status, 200);
+  const before = cardRow(id);
+  assert.notEqual(before.status, "pending", "answering closed the card");
+  const verbsBefore = mutationsFor(id).map((m) => m.verb);
+  // The drawer still shows the status it loaded before the answer.
+  const r = await postEdit(id, { title: "renamed from a stale drawer", status: "pending", expected_status: "pending" });
+  assert.equal(r.status, 409);
+  const j = await r.json();
+  assert.equal(j.code, "stale");
+  assert.equal(j.status, before.status, "the current status comes back");
+  assert.deepEqual(cardRow(id), before, "no field written");
+  assert.deepEqual(mutationsFor(id).map((m) => m.verb), verbsBefore, "no update and no move mutation");
+});
+
+test("edit: a status change without expected_status is refused 409 stale (an old page cannot move a card blind)", async () => {
+  const { body: created } = await createTestCard({});
+  const r = await postEdit(created.id, { title: "blind", status: "in_progress" });
+  assert.equal(r.status, 409);
+  assert.equal((await r.json()).code, "stale");
+  assert.deepEqual(cardRow(created.id), { title: "task9 card", status: "pending" });
+  assert.deepEqual(mutationsFor(created.id).map((m) => m.verb), ["create"]);
+});
+
+test("edit: a matching expected_status saves; an unchanged status needs no expected_status", async () => {
+  const { body: created } = await createTestCard({});
+  const same = await postEdit(created.id, { title: "same status", status: "pending" });
+  assert.equal(same.status, 200, "status untouched: no precondition needed");
+  const r = await postEdit(created.id, { title: "moved", status: "in_progress", expected_status: "pending" });
+  assert.equal(r.status, 200);
+  assert.deepEqual(cardRow(created.id), { title: "moved", status: "in_progress" });
+  assert.deepEqual(mutationsFor(created.id).map((m) => m.verb), ["create", "update", "update", "move"]);
 });

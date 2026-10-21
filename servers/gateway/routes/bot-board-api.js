@@ -99,6 +99,9 @@ import { getInteractiveEngine } from "../perch-interactive.js";
 // THE single bot_jobs DDL (shared with init-db, job_runner and tool-executor).
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "../../../scripts/pi-bots/bot-jobs-schema.mjs";
 import { isVoiceBotId } from "../../shared/voice-bot.js";
+import { decideOption } from "../board/decision-service.js";
+import { isEnabledBot } from "../board/bot-lookup.js";
+import { csrfMiddleware } from "../dashboard/shared/csrf.js";
 
 // Slice C: operator-approved promotion target (the PRIMARY skills dir both the
 // pi bridge and the glasses voice path search via skill_resolver).
@@ -272,6 +275,12 @@ export default function botBoardApiRouter(dashboardAuth) {
   // FIRST statement: auth-gate the whole prefix (distinct from
   // /dashboard/streams and from the SSR panel route /dashboard/bot-board).
   router.use("/dashboard/bot-board-api", dashboardAuth);
+  // This router mounts at the app root (boot/feature-mounts.js), BEFORE the
+  // dashboard router's csrfMiddleware, so it runs the CSRF double-submit
+  // check itself on every state-changing request. Every in-repo caller is a
+  // dashboard page whose layout fetch wrapper adds X-Crow-Csrf; requests
+  // without a session cookie and peer-signed calls pass, as everywhere else.
+  router.use("/dashboard/bot-board-api", csrfMiddleware);
 
   const P = "/dashboard/bot-board-api";
 
@@ -285,7 +294,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       const card = (await tdb.execute({
         sql:
           "SELECT id,title,description,status,priority,due_date,owner,tags,parent_id,project_id," +
-          "assigned_bot,archived_at,autonomy," +
+          "assigned_bot,archived_at,autonomy,data_json," +
           "datetime(updated_at) AS updated_at, completed_at FROM tasks_items WHERE id=? AND board_id IS NULL",
         args: [id],
       })).rows[0];
@@ -297,6 +306,12 @@ export default function botBoardApiRouter(dashboardAuth) {
         projects = (await cdb.execute({ sql: "SELECT id, name, slug, repo_path FROM project_spaces WHERE archived_at IS NULL ORDER BY id", args: [] })).rows || [];
       } catch { projects = []; }
       const { locked } = await lockState(cdb, id);
+      // Decision cards carry their question/options in data_json; expose it as
+      // an additive `decision` key (null for any other card) and keep the raw
+      // blob off the card object so existing consumers see the same shape.
+      let decision = null;
+      try { decision = JSON.parse(card.data_json || "{}").decision ?? null; } catch { decision = null; }
+      delete card.data_json;
       // Track 1 Task 9 (additive keys only — every key above is untouched):
       // autonomy/plan_head/latest_results/mutations give the drawer (history
       // strip, autonomy select, "approve & mark done") one hydration call
@@ -320,6 +335,7 @@ export default function botBoardApiRouter(dashboardAuth) {
         plan_head,
         latest_results,
         mutations,
+        decision,
       });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
@@ -397,10 +413,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       // has no business making it, so this stays here too.
       if (botSet && botVal != null) {
         if (isVoiceBotId(botVal)) return jsonError(res, 400, "assigned_bot not found or disabled", { code: "bot_unavailable" });
-        const botRow = (await cdb.execute({
-          sql: "SELECT bot_id FROM pi_bot_defs WHERE bot_id=? AND enabled=1", args: [botVal],
-        })).rows[0];
-        if (!botRow) return jsonError(res, 400, "assigned_bot not found or disabled");
+        if (!(await isEnabledBot(cdb, botVal))) return jsonError(res, 400, "assigned_bot not found or disabled");
       }
       tdb = createDbClient(TASKS_DB);
       const cur = await getCard(tdb, id);
@@ -422,6 +435,19 @@ export default function botBoardApiRouter(dashboardAuth) {
       if (b.status != null) {
         const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
         if (!isValidStatus(def, String(b.status))) return jsonError(res, 400, "invalid status");
+      }
+      // Compare-and-set on status. The drawer sends the status it loaded as
+      // expected_status; when the card has moved since (a decision answer
+      // closed it, another tab or a bot moved it), the whole edit is refused
+      // with nothing written, so a stale form can never move the card back.
+      // A status CHANGE must name the status it changes from: a caller that
+      // sends status without expected_status (an old page) is refused rather
+      // than trusted. Edits that leave status alone still work without it.
+      if (b.expected_status != null && String(b.expected_status) !== String(cur.status)) {
+        return res.status(409).json({ reason: "card changed since it was loaded (status is now " + String(cur.status) + ")", code: "stale", status: cur.status });
+      }
+      if (b.status != null && String(b.status) !== String(cur.status) && b.expected_status == null) {
+        return res.status(409).json({ reason: "a status change must send expected_status; reload the card", code: "stale", status: cur.status });
       }
       const fields = {
         title: typeof b.title === "string" ? b.title.trim() : (b.title == null ? null : String(b.title)),
@@ -528,6 +554,31 @@ export default function botBoardApiRouter(dashboardAuth) {
       return serviceError(res, e);
     } finally {
       if (tdb) { try { tdb.close(); } catch {} }
+    }
+  });
+
+  // ---- answer a decision card ----
+  // The ONLY way a decision is answered (no MCP tool may): the actor is the
+  // dashboard's human actor, which is what downstream readers of the
+  // 'decision' mutation trust. Body: {index: int (-1 = Other), other_text?}.
+  router.post(P + "/card/:id/decision", async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
+    const b = req.body || {};
+    if (!Number.isInteger(b.index)) return jsonError(res, 400, "index must be an integer");
+    if (b.other_text != null && typeof b.other_text !== "string") return jsonError(res, 400, "other_text must be a string");
+    let tdb, cdb;
+    try {
+      tdb = createDbClient(TASKS_DB);
+      cdb = createDbClient();
+      const r = await decideOption(tdb, cdb, id, { index: b.index, otherText: b.other_text },
+        DASHBOARD_ACTOR, { isEnabledBot: (botId) => isEnabledBot(cdb, botId) });
+      return res.json({ ok: true, chosen: r.chosen, created_card_id: r.created_card_id });
+    } catch (e) {
+      return serviceError(res, e);
+    } finally {
+      if (tdb) { try { tdb.close(); } catch {} }
+      if (cdb) { try { cdb.close(); } catch {} }
     }
   });
 
@@ -821,10 +872,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       const bot = card.assigned_bot ? String(card.assigned_bot) : "";
       if (!bot) return jsonError(res, 400, "card has no assigned_bot");
       if (isVoiceBotId(bot)) return jsonError(res, 400, "assigned_bot not found or disabled", { code: "bot_unavailable" });
-      const botRow = (await cdb.execute({
-        sql: "SELECT bot_id FROM pi_bot_defs WHERE bot_id=? AND enabled=1", args: [bot],
-      })).rows[0];
-      if (!botRow) return jsonError(res, 400, "assigned_bot not found or disabled");
+      if (!(await isEnabledBot(cdb, bot))) return jsonError(res, 400, "assigned_bot not found or disabled");
       const def = await resolveBoardDef(tdb, { projectId: card.project_id });
       if (isTerminal(def, card.status)) {
         return res.status(409).json({ reason: "card is in a terminal status (" + String(card.status) + ")" });

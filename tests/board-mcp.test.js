@@ -87,6 +87,10 @@ function fixture() {
     CREATE TABLE dashboard_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT DEFAULT (datetime('now')));
     CREATE TABLE dashboard_settings_overrides (key TEXT NOT NULL, instance_id TEXT NOT NULL, value TEXT NOT NULL,
       updated_at TEXT DEFAULT (datetime('now')), lamport_ts INTEGER DEFAULT 0, PRIMARY KEY (key, instance_id));
+    CREATE TABLE notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL DEFAULT 'system',
+      source TEXT, title TEXT NOT NULL, body TEXT, priority TEXT DEFAULT 'normal', action_url TEXT, metadata TEXT,
+      is_read INTEGER DEFAULT 0, is_dismissed INTEGER DEFAULT 0, snoozed_until TEXT, schedule_id INTEGER,
+      expires_at TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
     INSERT INTO project_spaces (id, name, slug, archived_at) VALUES (1, 'R4 ACME', 'r4-acme', NULL);`);
   c.close();
 
@@ -567,5 +571,189 @@ test("board_save_plan / board_approve_plan / board_get_plan 404 against a nonexi
   assert.equal(get.isError, true);
   assert.match(get.content[0].text, /^\[404 not_found\]/);
 
+  await client.close();
+});
+
+// ---- decision cards: board_ask_decision / board_notify_decisions ----
+
+function decisionArgs(n, batch = "mcp-batch-a") {
+  return {
+    decision: {
+      question: `Choice ${n}?`,
+      context_md: "some context",
+      fingerprint: `mcp-fp-${batch}-${n}`,
+      batch,
+      options: [
+        { label: "Go", consequence: "It proceeds.", recommended: true, value: "go" },
+        { label: "Not now", consequence: "Asked again later.", snooze_days: 3, then: { create_card: { title: "Follow up" } } },
+      ],
+    },
+  };
+}
+
+test("decision tools are listed", async () => {
+  const client = await connectClient("/board/mcp", state.localToken);
+  const { tools } = await client.listTools();
+  assert.ok(tools.some((tl) => tl.name === "board_ask_decision"));
+  assert.ok(tools.some((tl) => tl.name === "board_notify_decisions"));
+  await client.close();
+});
+
+test("board_ask_decision returns an id, dedupes by fingerprint, and the 6th card in a batch is refused", async () => {
+  const client = await connectClient("/board/mcp", state.localToken);
+  const first = payload(await client.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, "mcp-batch-b") }));
+  assert.equal(typeof first.id, "number");
+  assert.equal(first.deduped, false);
+  const again = payload(await client.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, "mcp-batch-b") }));
+  assert.equal(again.id, first.id);
+  assert.equal(again.deduped, true);
+  for (let n = 2; n <= 5; n++) {
+    const r = payload(await client.callTool({ name: "board_ask_decision", arguments: decisionArgs(n, "mcp-batch-b") }));
+    assert.equal(r.deduped, false);
+  }
+  const sixth = await client.callTool({ name: "board_ask_decision", arguments: decisionArgs(6, "mcp-batch-b") });
+  assert.equal(sixth.isError, true);
+  assert.match(sixth.content[0].text, /^\[429 batch_full\]/);
+  await client.close();
+});
+
+test("board_ask_decision roundtrip: value, snooze_days and then.create_card (incl. assign_bot) survive into the stored card", async () => {
+  const client = await connectClient("/board/mcp", state.localToken);
+  const args = decisionArgs(1, "mcp-batch-rt");
+  args.decision.options = [
+    { label: "Go", consequence: "It proceeds.", recommended: true, value: "go" },
+    {
+      label: "Later", consequence: "Asked again later.", value: "later", snooze_days: 5,
+      then: { create_card: { title: "Follow up", description: "do it", owner: "alex", assign_bot: "bot-1" } },
+    },
+  ];
+  const r = payload(await client.callTool({ name: "board_ask_decision", arguments: args }));
+  const row = (await state.tdb.execute({ sql: "SELECT data_json FROM tasks_items WHERE id=?", args: [r.id] })).rows[0];
+  const stored = JSON.parse(row.data_json).decision;
+  assert.equal(stored.options[0].value, "go");
+  assert.equal(stored.options[1].value, "later");
+  assert.equal(stored.options[1].snooze_days, 5);
+  assert.deepEqual(stored.options[1].then.create_card, {
+    title: "Follow up", description: "do it", owner: "alex", assign_bot: "bot-1",
+  });
+  // an unknown key on an option is refused at the wire, not silently dropped
+  const bad = decisionArgs(2, "mcp-batch-rt");
+  bad.decision.options[0].surprise = true;
+  const rej = await client.callTool({ name: "board_ask_decision", arguments: bad });
+  assert.equal(rej.isError, true);
+  await client.close();
+});
+
+test("board_ask_decision surfaces a validation error as isError", async () => {
+  const client = await connectClient("/board/mcp", state.localToken);
+  const args = decisionArgs(1, "mcp-batch-bad");
+  args.decision.options[0].recommended = false;
+  const r = await client.callTool({ name: "board_ask_decision", arguments: args });
+  assert.equal(r.isError, true);
+  assert.match(r.content[0].text, /^\[400 /);
+  await client.close();
+});
+
+test("board_notify_decisions pushes once per batch; the second call pushes nothing", async () => {
+  const client = await connectClient("/board/mcp", state.localToken);
+  await client.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, "mcp-batch-c") });
+  await client.callTool({ name: "board_ask_decision", arguments: decisionArgs(2, "mcp-batch-c") });
+  const firstRaw = await client.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-c" } });
+  assert.notEqual(firstRaw.isError, true, firstRaw.content[0].text);
+  const first = payload(firstRaw);
+  assert.equal(first.pushed, true);
+  assert.equal(first.count, 2);
+  const second = payload(await client.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-c" } }));
+  assert.equal(second.pushed, false);
+  assert.equal(second.count, 0);
+  const pushes = (await state.cdb.execute("SELECT title FROM notifications WHERE title LIKE '2 decisions%'")).rows;
+  assert.equal(pushes.length, 1);
+  await client.close();
+});
+
+test("board_notify_decisions: batches are per caller; another bot or the session never pushes your cards", async () => {
+  const owner = await connectClient("/board/mcp", state.boardToken, signedBoard("bot-owner"));
+  const other = await connectClient("/board/mcp", state.boardToken, signedBoard("bot-other"));
+  const session = await connectClient("/board/mcp", state.localToken);
+  const unattributed = await connectClient("/board/mcp", state.boardToken);
+  try {
+    // both bots use the same batch name; neither is refused
+    const o = payload(await owner.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, "mcp-batch-own") }));
+    const x = payload(await other.callTool({ name: "board_ask_decision", arguments: decisionArgs(2, "mcp-batch-own") }));
+    assert.equal(o.deduped, false);
+    assert.equal(x.deduped, false);
+
+    for (const c of [session, unattributed]) {
+      assert.deepEqual(payload(await c.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-own" } })), { pushed: false, count: 0 });
+    }
+    assert.deepEqual(payload(await owner.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-own" } })), { pushed: true, count: 1 });
+    const cardOf = async (id) => JSON.parse((await state.tdb.execute({ sql: "SELECT data_json FROM tasks_items WHERE id=?", args: [id] })).rows[0].data_json).decision;
+    assert.ok((await cardOf(o.id)).notified_at);
+    assert.equal((await cardOf(x.id)).notified_at, undefined, "the other bot's card was not pushed");
+    assert.deepEqual(payload(await owner.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-own" } })), { pushed: false, count: 0, reason: "already_notified" });
+
+    // an unattributed bot has its own namespace
+    await unattributed.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, "mcp-batch-anon") });
+    assert.deepEqual(payload(await unattributed.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-batch-anon" } })), { pushed: true, count: 1 });
+  } finally {
+    for (const c of [owner, other, session, unattributed]) await c.close();
+  }
+});
+
+test("board_notify_decisions: the 4th push of the day by one caller is 429 push_limit", async () => {
+  const bot = await connectClient("/board/mcp", state.boardToken, signedBoard("bot-capped"));
+  try {
+    for (let i = 1; i <= 3; i++) {
+      await bot.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, `mcp-cap-${i}`) });
+      assert.equal(payload(await bot.callTool({ name: "board_notify_decisions", arguments: { batch: `mcp-cap-${i}` } })).pushed, true);
+    }
+    await bot.callTool({ name: "board_ask_decision", arguments: decisionArgs(1, "mcp-cap-4") });
+    const r = await bot.callTool({ name: "board_notify_decisions", arguments: { batch: "mcp-cap-4" } });
+    assert.equal(r.isError, true);
+    assert.match(r.content[0].text, /^\[429 push_limit\]/);
+  } finally {
+    await bot.close();
+  }
+});
+
+// ---- assigned_bot on board_create_item ----
+
+test("board_create_item assigned_bot: enabled bot assigns the card; refusals are 400 and nothing is created", async () => {
+  await state.cdb.execute(`CREATE TABLE IF NOT EXISTS pi_bot_defs (bot_id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
+    definition TEXT, enabled INTEGER NOT NULL DEFAULT 1, project_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  for (const [id, enabled] of [["bot-1", 1], ["bot-off", 0], ["crow.voice", 1]]) {
+    await state.cdb.execute({
+      sql: "INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, enabled) VALUES (?,?,?)",
+      args: [id, id, enabled],
+    });
+  }
+  const client = await connectClient("/board/mcp", state.boardToken, signedBoard("alex-bot", "job-assign-1"));
+  const count = async () => Number((await state.tdb.execute("SELECT COUNT(*) AS n FROM tasks_items")).rows[0].n);
+
+  const created = payload(await client.callTool({
+    name: "board_create_item", arguments: { title: "assigned card", project_id: 1, assigned_bot: "bot-1" },
+  }));
+  const row = (await state.tdb.execute({ sql: "SELECT assigned_bot, autonomy FROM tasks_items WHERE id=?", args: [created.id] })).rows[0];
+  assert.equal(row.assigned_bot, "bot-1");
+  assert.equal(row.autonomy, "gated");
+  const mut = (await state.tdb.execute({
+    sql: "SELECT actor_kind, actor_id FROM board_mutations WHERE item_id=? AND verb='create'", args: [created.id],
+  })).rows[0];
+  assert.equal(mut.actor_kind, "bot");
+  assert.equal(mut.actor_id, "alex-bot");
+
+  const before = await count();
+  for (const [args, re] of [
+    [{ assigned_bot: "bot-off" }, /^\[400 bad_bot\]/],
+    [{ assigned_bot: "no-such-bot" }, /^\[400 bad_bot\]/],
+    [{ assigned_bot: "crow.voice" }, /^\[400 bad_bot\]/],
+    [{ assigned_bot: "bot-1", slug: "intake" }, /^\[400 bad_field\]/],
+  ]) {
+    const r = await client.callTool({ name: "board_create_item", arguments: { title: "refused", project_id: 1, ...args } });
+    assert.equal(r.isError, true);
+    assert.match(r.content[0].text, re);
+  }
+  assert.equal(await count(), before, "no card created by a refused call");
   await client.close();
 });

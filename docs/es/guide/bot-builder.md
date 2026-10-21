@@ -119,6 +119,20 @@ Escribir o redirigir una sesión extiende eso de leer a conducir: cualquiera que
 
 Adjunta el canal Perch solo en un Crow cuyo inicio de sesión trates con la misma seriedad que el acceso por shell a esa máquina — una sesión en vivo puede ejecutar cualquier herramienta que la política de permisos propia del agente permita, incluyendo las que inician programas en la máquina donde corre.
 
+## Tarjetas de decisión
+
+Un bot que necesita que elijas entre unas pocas opciones puede preguntarlo con una **tarjeta de decisión** en vez de una pregunta de texto libre. Llama a `board_ask_decision` en el servidor MCP del tablero; la tarjeta aparece en el Bot Board y, al abrirla, muestra un bloque **Decisión** encima del plan.
+
+**Qué contiene una decisión.** Una pregunta (hasta 300 caracteres), un contexto opcional (se muestra como texto plano) y **de 2 a 4 opciones**. Cada opción tiene una etiqueta (hasta 120 caracteres) y una línea de consecuencia (hasta 240) que dice qué pasa si la eliges. Exactamente una opción va marcada como recomendada y debe ir primero; el panel la señala con **Recomendada**. Una opción también puede llevar `snooze_days` (de 0 a 90: tras elegirla, la misma pregunta no se repite durante esos días) y una tarjeta de seguimiento que crear. Una decisión vence en su fecha `expires` (por defecto, a los siete días); una tarjeta vencida es de solo lectura.
+
+**Responder.** Haz clic en una opción, o en **Otra…** para escribir tu propia respuesta (hasta 2000 caracteres) y **Enviar respuesta**. Solo el panel puede responder; ninguna herramienta MCP puede. La elección se registra una sola vez: un segundo clic o una segunda pestaña recibe «ya decidida» y ve la primera respuesta. Después la tarjeta se cierra. Si la opción elegida indica una tarjeta de seguimiento, se crea exactamente una, siempre **con aprobación** (espera a que apruebes su plan), lleva sin cambios las etiquetas de la tarjeta de decisión, y el panel enlaza a ella. El historial de la tarjeta muestra **decisión planteada** y **decidida**.
+
+**Sin repeticiones ni avalanchas.** Una tarjeta cuyo `fingerprint` coincide con otra que sigue abierta no se vuelve a crear; se devuelve la abierta (`deduped: true`). Lo mismo ocurre mientras dure la pausa de una opción elegida. Un bot tiene como máximo **5 tarjetas de decisión abiertas por lote**; la sexta se rechaza (`batch_full`). Preguntar nunca envía una notificación: el bot llama a `board_notify_decisions` una vez al final del lote para un único aviso agrupado, y cada tarjeta se notifica como mucho una vez, por muchas veces que se llame.
+
+**Por quien pregunta.** Los lotes y los `fingerprint` pertenecen a quien los pidió: dos bots pueden usar el mismo nombre de lote o el mismo `fingerprint` sin ver las tarjetas del otro, y un bot solo puede notificar tarjetas que él mismo preguntó. El aviso se envía una vez por lote, mientras sus tarjetas notificadas sigan abiertas; las tarjetas añadidas después solo aparecen en el tablero. Cada quien puede enviar como máximo **3 avisos al día (UTC)**; el cuarto se rechaza (`push_limit`, 429).
+
+**Crear una tarjeta para un bot.** `board_create_item` acepta `assigned_bot` para tarjetas (no para elementos de seguimiento). El bot debe existir, estar habilitado y no ser el bot de voz, o la llamada se rechaza. La tarjeta nueva es **gated** por defecto, así que espera tu aprobación del plan.
+
 ## Permisos y seguridad
 
 Cada agente lleva una política de permisos que gobierna lo que puede hacer sin preguntar:

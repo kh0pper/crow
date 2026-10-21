@@ -68,6 +68,9 @@ import {
 } from "./board/card-service.js";
 import { getCurrentPlan, listPlans, savePlan, approvePlan } from "./board/plan-service.js";
 import { reportResult, decideResult, listResults } from "./board/result-service.js";
+import { askDecision, notifyBatch } from "./board/decision-service.js";
+import { isEnabledBot } from "./board/bot-lookup.js";
+import { isVoiceBotId } from "../shared/voice-bot.js";
 
 const TASKS_DB = tasksDbPath();
 
@@ -341,12 +344,21 @@ export function createBoardMcpServer(options = {}) {
       board_id: z.number().int().optional(),
       slug: z.string().optional(),
       bot_id: z.string().optional(),
+      assigned_bot: z.string().max(100).optional().describe("Cards only: assign the new card to an enabled bot"),
       action_needed: z.string().optional(),
       data: jsonObject().optional().describe("Tracker item fields as an object of JSON values (merged into the item's data)"),
     },
     async (fields, extra) => {
       const actor = resolveActor(extra);
-      if (fields.board_id != null || fields.slug) {
+      const isTracker = fields.board_id != null || !!fields.slug;
+      if (fields.assigned_bot != null && fields.assigned_bot !== "") {
+        if (isTracker) throw fail("assigned_bot applies to cards only, not tracker items", "bad_field", 400);
+        if (isVoiceBotId(fields.assigned_bot)) throw fail("the voice bot never takes cards", "bad_bot", 400);
+        if (!(await isEnabledBot(cdb, fields.assigned_bot))) {
+          throw fail(`assigned_bot is not an enabled bot: ${fields.assigned_bot}`, "bad_bot", 400);
+        }
+      }
+      if (isTracker) {
         let boardId = fields.board_id != null ? Number(fields.board_id) : null;
         if (boardId == null) {
           const def = await resolveSlugBoardDef(tdb, fields.slug);
@@ -447,6 +459,52 @@ export function createBoardMcpServer(options = {}) {
     },
     async ({ item_id, result_id, decision, via }, extra) =>
       decideResult(tdb, item_id, result_id, decision, resolveActor(extra), via || "chat"));
+
+  // Decision cards (C1 service). Validation is authoritative in
+  // validateDecision — the zod shape below only describes the wire format.
+  const decisionOption = z.object({
+    label: z.string(),
+    consequence: z.string(),
+    recommended: z.boolean().optional(),
+    value: z.string().optional(),
+    snooze_days: z.number().int().optional(),
+    then: z.object({
+      create_card: z.object({
+        title: z.string(),
+        description: z.string().optional(),
+        owner: z.string().optional(),
+        assign_bot: z.string().optional(),
+      }).strict().optional(),
+    }).strict().optional(),
+  }).strict();
+
+  tool(server, "board_ask_decision",
+    "Ask the operator a decision as a card with 2-4 options (exactly one recommended, listed first, each with a consequence). Never pushes; call board_notify_decisions once at the end of a batch. A card with the same fingerprint already open (or snoozed after a decided option) returns that card with deduped:true; a 6th open card in a batch is refused (429 batch_full). Caps: question <=300 chars, option label <=120, consequence <=240, fingerprint <=200, batch <=100, snooze_days an integer 0-90, expires an ISO date (default today+7), at most 5 open cards per batch. Answers come only from the dashboard; no tool answers a decision.",
+    {
+      project_id: z.number().int().optional(),
+      title: z.string().optional(),
+      tags: z.string().optional(),
+      decision: z.object({
+        question: z.string(),
+        context_md: z.string().optional(),
+        fingerprint: z.string(),
+        batch: z.string(),
+        expires: z.string().optional(),
+        options: z.array(decisionOption),
+      }),
+    },
+    async ({ project_id, title, tags, decision }, extra) =>
+      askDecision(tdb, cdb, { projectId: project_id, title, tags, decision }, resolveActor(extra)));
+
+  tool(server, "board_notify_decisions",
+    "Send the one grouped push for a batch's open decision cards. Pushes at most once per batch (once any card in it was notified, later calls push nothing, and cards added later show on the board only), so repeated calls are harmless; call it once at the end of the batch. Batches are per caller: the name you pass is looked up in your own namespace, so you can only notify cards you asked; at most 3 pushes per caller per UTC day (429 push_limit).",
+    { batch: z.string().min(1) },
+    async ({ batch }, extra) => {
+      // notifications.js fails open on every downstream sender; cdb (crow.db)
+      // holds the shared notifications table (same import as result-service).
+      const { createNotification } = await import("../shared/notifications.js");
+      return notifyBatch(tdb, cdb, batch, { createNotification, actor: resolveActor(extra) });
+    });
 
   tool(server, "board_store_briefing",
     "Persist a briefing snapshot. UNIQUE on briefing_date — re-runs for the same day overwrite the prior content.",
