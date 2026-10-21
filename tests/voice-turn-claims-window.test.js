@@ -7,8 +7,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { harness } from "./fixtures/voice-turn-harness.mjs";
 import { createToolFamilies } from "../servers/gateway/voice/tool-families.js";
-import { NOT_DONE_TEXT, ACTION_HELD_MAX_TOKENS, ACTION_NOTE } from "../servers/gateway/voice/turn.js";
-import { lastWriteRecap } from "../servers/gateway/voice/own-tools.js";
+import { NOT_DONE_TEXT, ACTION_HELD_MAX_TOKENS, ACTION_NOTE, FILLER_TEXT } from "../servers/gateway/voice/turn.js";
+import { lastWriteRecap, createOwnTools } from "../servers/gateway/voice/own-tools.js";
+import { createPendingStore, chainVoiceActions } from "../servers/gateway/voice/pending.js";
 
 const FAST = "crow-voice/qwen3.5-4b";
 const ESC = "crow-chat/qwen3.6-35b-a3b";
@@ -70,11 +71,11 @@ test("(1b) 'add coffee next Tuesday at nine' is fully held (Task 4's add-matcher
 });
 
 test("(2) a no-call claim inside the window: not heard or captioned; the recap is, and saved = heard", async () => {
-  const h = gateHarness({ rounds: [call("crow_calendar_add_event", LUNCH), says("Added coffee to your calendar for Tuesday. ")] });
+  const h = gateHarness({ rounds: [call("crow_calendar_add_event", LUNCH), says("Added lunch to your calendar for Tuesday. ")] });
   await addLunch(h);
   const r = await turn(h, "what about Tuesday");
-  assert.ok(!/Added coffee/.test(r.captions), r.captions);
-  assert.ok(!r.spoken.some((t) => /Added coffee/.test(t)));
+  assert.ok(!/Added lunch/.test(r.captions), r.captions);
+  assert.ok(!r.spoken.some((t) => /Added lunch/.test(t)));
   assert.ok(RECAP(), "the recap line exists");
   assert.deepEqual(r.spoken, [RECAP()]);
   assert.equal(r.captions.trim(), RECAP());
@@ -85,7 +86,27 @@ test("(2) a no-call claim inside the window: not heard or captioned; the recap i
   assert.equal(r.timings.claim_recap, true);
   const turn2 = h.runner.convo.get(h.device.id).slice(-2);
   assert.deepEqual(turn2.map((m) => m.role), ["user", "assistant"]);
-  assert.ok(h.runner.convo.get(h.device.id).every((m) => !/Added coffee/.test(String(m.content))));
+  assert.ok(h.runner.convo.get(h.device.id).slice(-2).every((m) => !/Added lunch to your calendar for Tuesday/.test(String(m.content))));
+});
+
+test("(2c) a claim about another item ('Added coffee…' after a lunch write): not-done, never the lunch recap", async () => {
+  const h = gateHarness({ rounds: [call("crow_calendar_add_event", LUNCH), says("Added coffee to your calendar for Tuesday. ")] });
+  await addLunch(h);
+  const r = await turn(h, "what about Tuesday");
+  assert.deepEqual(r.spoken, [NOT_DONE_TEXT]);
+  assert.ok(!/Added coffee/.test(r.captions));
+  assert.equal(r.saved.content, NOT_DONE_TEXT);
+  assert.equal(r.timings.claim_recap, undefined);
+});
+
+test("(2d) Spanish: 'la'/'lo' alone never make a claim refer to the last write", async () => {
+  const h = gateHarness({ rounds: [call("crow_calendar_add_event", LUNCH), says("La he enviado. "), says("Lo he añadido a tu calendario. ")] });
+  await addLunch(h);
+  const r = await turn(h, "y el correo", { lang: "es" });
+  assert.deepEqual(r.spoken, [NOT_DONE_TEXT], "a sent message is not the calendar write");
+  const r2 = await turn(h, "y la comida", { lang: "es" });
+  const es = lastWriteRecap({ tool: "crow_calendar_add_event", ...LUNCH, tz: TZ }, "es");
+  assert.deepEqual(r2.spoken, [es], "the same object still recaps");
 });
 
 test("(2b) a claim that names nothing of the last write gets the not-done line", async () => {
@@ -216,4 +237,66 @@ test("(9) a gated turn tracks its remote writes: a claim a write backed is heard
   assert.deepEqual(h.calls.executed, ["crow_create_post"]);
   assert.deepEqual(r.spoken, ["I've created the post."]);
   assert.equal(r.timings.claim_blocked, undefined);
+});
+
+test("(10) a stray own call with bad_args on a carried-only plain turn never steps up to the larger model", async () => {
+  const bad = { ok: false, code: "bad_args", message: "The start is not a date." };
+  const cal = calTool((a) => (a.title === "lunch" ? ADDED : bad));
+  const h = gateHarness({ probe: () => true, rounds: [call("crow_calendar_add_event", LUNCH), call("crow_calendar_add_event", { title: "x", start: "soon" }, "c2"), says("It's sunny. ")] });
+  await turn(h, "add lunch Monday to my calendar", { actionWhen: () => true, cal });
+  const keys = h.calls.chatKeys.length;
+  const r = await turn(h, "what's the weather", { cal });
+  assert.ok(h.log[1].tools.includes("crow_calendar_add_event"), "carried");
+  assert.equal(r.timings.step_up, undefined);
+  assert.equal(r.escalated, false);
+  assert.deepEqual(h.calls.chatKeys.slice(keys), [FAST], "no extra chat key");
+  assert.ok(!r.spoken.includes(FILLER_TEXT));
+});
+
+test("(11) a stray own write on a carried-only turn asks first; nothing is written until a yes, which writes once", async () => {
+  const pending = createPendingStore({ now: () => 1_000 });
+  const own = createOwnTools({ pending, connected: () => new Set(["gcal_create_event"]) });
+  const h = gateHarness({ rounds: [call("crow_calendar_add_event", LUNCH), call("crow_calendar_add_event", { title: "coffee", start: "2026-10-27T09:00:00-05:00" }, "c2")] });
+  const writes = [];
+  h.deps.createToolExecutor = () => ({
+    executeToolCalls: async (tcs) => { writes.push(...tcs.map((t) => t.arguments.summary)); return tcs.map((t) => ({ id: t.id, name: t.name, result: JSON.stringify({ id: "e1" }) })); },
+    close: async () => {},
+  });
+  h.deps.ownTools = own.forTurn;
+  h.deps.voiceActions = chainVoiceActions([own]);
+  const run = (transcript, o = {}) => turn(h, transcript, { ownTools: undefined, ...o });
+  await run("add lunch Monday to my calendar", { actionWhen: () => true });
+  assert.deepEqual(writes, ["lunch"], "a real add runs at once");
+  const r = await run("what's the weather");
+  assert.deepEqual(writes, ["lunch"], "the stray call wrote nothing");
+  assert.equal(r.spoken.length, 1);
+  assert.match(r.spoken[0], /^Add coffee to your calendar for .+\?$/);
+  const y = await run("yes");
+  assert.deepEqual(writes, ["lunch", "coffee"], "the yes wrote once");
+  assert.match(y.spoken[0], /^Added coffee to your calendar/);
+});
+
+test("(12) a failed stray own call does not stamp the voice memory", async () => {
+  const bad = { ok: false, code: "backend_error" };
+  const cal = calTool((a) => (a.title === "lunch" ? ADDED : bad));
+  const h = gateHarness({ rounds: [call("crow_calendar_add_event", LUNCH), says("Lima. "), call("crow_calendar_add_event", { title: "x" }, "c2"), says("Sorry. "), says("Sunny. "), says("Tall. ")] });
+  await turn(h, "add lunch Monday to my calendar", { actionWhen: () => true, cal });
+  h.c.advance(1 * MIN);
+  await turn(h, "what's the capital of Peru", { cal });   // clears the one-turn lastFamilies follow-up
+  h.c.advance(7 * MIN);
+  await turn(h, "what's the weather", { cal });           // the failed stray call (8 minutes after the add)
+  h.c.advance(1 * MIN);
+  await turn(h, "is it sunny", { cal });                  // the one-turn follow-up of the failed call
+  h.c.advance(2 * MIN);   // 11 minutes after the ok add, 3 after the failed stray call
+  await turn(h, "how tall is Everest", { cal });
+  assert.ok(!h.log.at(-1).tools.includes("crow_calendar_add_event"), "the failed call did not renew the window");
+});
+
+test("(13) an ordinary bot: a tool-using turn 11 minutes ago is no longer carried (lastFamilies expires)", async () => {
+  const bot = { bot_id: "household", display_name: "House", fast_voice_model: FAST };
+  const h = gateHarness({ bot, rounds: [call("crow_calendar_add_event", LUNCH), says("Sure. ")] });
+  await addLunch(h);
+  h.c.advance(11 * MIN);
+  await turn(h, "move it to 3");
+  assert.ok(!h.log[1].tools.includes("crow_calendar_add_event"));
 });

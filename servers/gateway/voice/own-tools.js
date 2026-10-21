@@ -392,7 +392,8 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
           const v = validate(name, args, { tz: zone, lang, now: now() });
           if (v.error) return JSON.stringify({ ok: false, code: v.code || "bad_args", message: v.error });
           const offer = ctx.fallback === "calendar" && name === "crow_reminder_add";
-          if (offer || settings.confirm === "strict") {
+          // ctx.confirm (turn.js): a stray call on a tool offered only through carry-over asks first, as under "strict".
+          if (offer || settings.confirm === "strict" || ctx.confirm === true) {
             const deviceId = ctx.device?.id;
             if (!deviceId) return JSON.stringify(BACKEND_ERROR);   // no device to hold the question: nothing is asked or written
             const say = offer ? voiceLine("calendar_fallback_offer", lang, { when: v.when, text: v.args.text }) : confirmLine(name, v, lang);

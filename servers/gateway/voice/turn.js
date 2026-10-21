@@ -148,6 +148,21 @@ const logName = (n) => String(n ?? "").replace(/[^\w.-]/g, "_").slice(0, 48) || 
 // opts.familiesOnIntent: a tool whose family is not on offer this turn is never run; a forced call gets this.
 const FAMILY_NOT_OFFERED = "That tool is not on offer for this question: nothing was done. Answer the user aloud now from what you know, in one or two short sentences. Do not call another tool.";
 // Without deps.toolForcing (tests, other callers) the 0.1.8 behaviour stands: named, then required, then none.
+/*
+ * The words a claim about the last own write may use without naming another item (turn.js recap): pronouns,
+ * articles, claim verbs, openers, and day and time words, en and es (accents dropped, as phraseWords gives them).
+ * Any other word of three letters or more that the write's title does not hold makes the claim about something else.
+ */
+const RECAP_FILLER = new Set(("yes yeah yep okay sure great alright all right done got have has had been the and for you your yours its "
+  + "this that there here now just also already added add adding put set scheduled booked created saved noted made moved changed updated "
+  + "will can going let calendar list tasks task reminder reminders schedule agenda event appointment meeting today tomorrow tonight "
+  + "morning afternoon evening noon midnight next week day o clock oclock monday tuesday wednesday thursday friday saturday sunday "
+  + "january february march april may june july august september october november december "
+  + "una uno los las del para por con que esta esto eso ese hoy manana tarde noche semana dia ya listo lista anadido agregado "
+  + "puesto programado guardado anotado apuntado agendado anadi agregue tu tus calendario tarea tareas recordatorio cita evento "
+  + "lunes martes miercoles jueves viernes sabado domingo enero febrero marzo abril mayo junio julio agosto septiembre octubre noviembre diciembre "
+  + "las vale claro perfecto hecho").split(" "));
+const objectWord = (w) => Object.values(ROUTINE_OBJECT_LISTS).some((lists) => listMatches([w], lists));
 const LEGACY_FORCING = Object.freeze({ named: true, required: true, engine: "legacy" });
 const WEAKER = { named: 2, required: 1, none: 0 };
 // A step-down learned from a refused request is forgotten after this long (the server may have been replaced).
@@ -500,7 +515,8 @@ export function createVoiceTurnRunner(deps) {
     let ownOffered = false;   // an own tool was offered on intent this turn (arms lastOwn; an escalation offering every family does not)
     let actionAsked = false;
     let voiceKind = false;        // the turn's bot is the voice bot (kind "voice"): the voice memory and the sentence gate apply
-    let ownStamp = [];            // own families this turn offered on intent (stamped into the voice memory; a carried one never is)
+    let ownStamp = [];
+    const ownOkFams = new Set();  // own families whose call returned ok this turn (stamped into the voice memory)            // own families this turn offered on intent (stamped into the voice memory; a carried one never is)
     const calledTools = [];       // every tool name the model called this turn (deps.voiceActions.afterTurn)
     const voiceActions = deps.voiceActions && typeof deps.voiceActions === "object" ? deps.voiceActions : null;
     /** Speak + caption a fixed line instead of a model call, and save the exchange (the plain transcript and the line). */
@@ -1066,6 +1082,12 @@ export function createVoiceTurnRunner(deps) {
       // questions keep streaming. Any other bot keeps the window as a reason (it has no sentence gate).
       const ownActionWords = ownIntent || namesRoutineObjects(transcript).length > 0;
       if (ownOnOffer && (ownActionWords || (!voiceKind && ownRecent))) armGuard();
+      // The voice bot, an own tool on offer only because its family carried over (the voice memory, or the previous
+      // turn's lastFamilies), on a turn that is not an add request: a stray call on it never steps up to the larger
+      // model, and a write asks first (the routine confirm; nothing is written until a spoken yes). A real follow-up
+      // (the words, actionFollowWhen) is not carried-only and runs directly.
+      const ownCarriedOnly = voiceKind && !!fam && !ownActionWords && !actionTurn && !actionAsked
+        && tools.some((t) => ownByName.has(t.name) && !fam.wants(ownByName.get(t.name).family, transcript));
       const ownDone = new Map();   // name|canonical args → the result of an own call that returned ok (never run twice)
       let backed = false;          // a tool really did something this turn
       let memoryBacked = false;    // only a memory call did (a saved note is not a reminder)
@@ -1145,7 +1167,8 @@ export function createVoiceTurnRunner(deps) {
       // (ii) The truthful recap of the last own write, when the blocked sentence refers to it: the same object, a word
       // of its title, or "it"/"that". "" otherwise.
       const RECAP_OBJECT = { crow_calendar_add_event: "calendar", crow_reminder_add: "reminders", crow_task_add: "tasks" };
-      const RECAP_REFS = new Set(["it", "that", "lo", "la", "eso"]);
+      // Spanish "lo"/"la" are also articles and other objects' pronouns ("la he enviado"): only "eso" refers here.
+      const RECAP_REFS = new Set(["it", "that", "eso"]);
       const recapFor = (text) => {
         const w = memory.lastWrite(device.id);
         if (!w) return "";
@@ -1153,7 +1176,9 @@ export function createVoiceTurnRunner(deps) {
         const obj = RECAP_OBJECT[w.tool];
         const titleWords = phraseWords(w.title || "").filter((x) => x.length >= 3);
         const refers = (obj && listMatches(words, ROUTINE_OBJECT_LISTS[obj])) || words.some((x) => RECAP_REFS.has(x) || titleWords.includes(x));
-        return refers ? lastWriteRecap(w, opts.lang || w.lang) : "";
+        // A content word the record does not hold ("Added coffee…" after a lunch write) is another item: no recap.
+        const foreign = words.some((x) => x.length >= 3 && !RECAP_FILLER.has(x) && !/^\d/.test(x) && !titleWords.includes(x) && !objectWord(x));
+        return refers && !foreign ? lastWriteRecap(w, opts.lang || w.lang) : "";
       };
       if (actionGuard) {
         timings.action_guard = true;
@@ -1352,7 +1377,7 @@ export function createVoiceTurnRunner(deps) {
             let out = ownDone.get(dupKey);
             const ran = out === undefined;   // a cached result never re-asks: its question is no longer the pending one
             if (ran) {
-              try { out = await own.execute(tc.arguments || {}, { transcript, executor, db, device, ...(calendarFallback ? { fallback: "calendar" } : {}) }); }
+              try { out = await own.execute(tc.arguments || {}, { transcript, executor, db, device, ...(calendarFallback ? { fallback: "calendar" } : {}), ...(ownCarriedOnly ? { confirm: true } : {}) }); }
               catch (err) { out = JSON.stringify({ ok: false, code: "error", message: String(err?.message || err) }); }
               if (typeof out !== "string") out = JSON.stringify({ ok: false, code: "error" });
             }
@@ -1383,6 +1408,7 @@ export function createVoiceTurnRunner(deps) {
             }
             if (code === "bad_args") ownBadArgs = true;
             if (usedFamilies) usedFamilies.add(own.family);
+            if (ok) ownOkFams.add(own.family);   // only an ok call stamps the voice memory (a failed stray call does not)
             ownOffered = true;   // used (families on or off): arms the follow-up window
             // A cached question is not the pending one any more: a final question line is always the live one (ownAsk).
             finalRes = tc === calls.at(-1) && res && res.final === true && typeof res.say === "string" && res.say.trim()
@@ -1500,7 +1526,7 @@ export function createVoiceTurnRunner(deps) {
         // The step-up (the larger model as the middle step): an own tool said its arguments were bad. The next
         // round re-runs the same messages on the larger model, once per turn, through the router's escalation path.
         let stepped = false;
-        if (ownBadArgs && !steppedUp && !result.escalated && !result.degraded && !noEscalate && !calendarFallback && toolEscalationOn) {
+        if (ownBadArgs && !ownCarriedOnly && !steppedUp && !result.escalated && !result.degraded && !noEscalate && !calendarFallback && toolEscalationOn) {
           steppedUp = true;
           let fillerErr = null;
           const filler = say.filler().catch((err) => { fillerErr = err; });
@@ -1663,8 +1689,7 @@ export function createVoiceTurnRunner(deps) {
       // The voice memory: own families offered on intent or used are stamped (a carried-only one never is), and an
       // action request is kept for the window.
       if (voiceKind && device?.id && result.transcript) {
-        const usedOwn = [...(usedFamilies || [])].filter((f) => String(f).startsWith("own:"));
-        if (ownOffered || usedOwn.length) memory.noteOwn(device.id, [...ownStamp, ...usedOwn]);
+        if (ownStamp.length || ownOkFams.size) memory.noteOwn(device.id, [...ownStamp, ...ownOkFams]);
         if (actionAsked) memory.noteAction(device.id);
       }
       timings.total_ms = now() - t0;
