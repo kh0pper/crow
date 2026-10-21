@@ -38,7 +38,8 @@
  * stripped of these names): CROW_PI_SANDBOX=contain for every pi, or
  * CROW_PI_CONTAIN_BOTS=<id,id> for listed bots.
  */
-import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 
 export class ContainRefused extends Error {
@@ -62,10 +63,27 @@ export const DATA_MASKS = Object.freeze(["identity.json"]);
 
 const under = (p, root) => p === root || p.startsWith(root.endsWith(sep) ? root : root + sep);
 
+let _home = null;
 function real(p, exists) {
+  if (p && _home && (p === "~" || p.startsWith("~/"))) p = join(_home, p.slice(1));
   if (!p || !isAbsolute(p)) return null;
   if (!exists(p)) return null;
   try { return realpathSync(p); } catch { return null; }
+}
+
+/** Directories never bound wholesale (their contents belong to everyone). */
+const SHARED_ROOTS = ["/tmp", "/var/tmp", "/var", "/run", "/home", "/dev/shm", tmpdir()];
+
+/** The nearest ancestor (up to 4 levels) of a file holding a package.json; else the file itself. */
+export function packageRoot(file, exists = existsSync) {
+  let d = dirname(file);
+  for (let i = 0; i < 4; i++) {
+    if (exists(join(d, "package.json"))) return d;
+    const up = dirname(d);
+    if (up === d) break;
+    d = up;
+  }
+  return file;
 }
 
 /** Paths a bot may never see, for a given home. */
@@ -93,6 +111,7 @@ function otherInstanceHomes(home, crowHome) {
 export function buildContainPlan(o) {
   const exists = o.exists || existsSync;
   const home = o.home;
+  _home = home;
   const refused = [];
   const ro = new Map(); // dest -> src
   const rw = new Map();
@@ -113,6 +132,7 @@ export function buildContainPlan(o) {
 
   function forbidden(p, { write = false } = {}) {
     if (p === "/") return "the whole filesystem";
+    if (SHARED_ROOTS.includes(p)) return "a shared system directory (" + p + ")";
     if (p === home || p === homesRoot) return "the whole home";
     if (under(home, p)) return "an ancestor of the home";
     for (const n of never) if (under(p, n) || under(n, p)) return "a protected path (" + n + ")";
@@ -133,10 +153,7 @@ export function buildContainPlan(o) {
 
   // engine (read-only)
   if (o.nodeBin) add(ro, dirname(dirname(o.nodeBin)), { label: "node" });
-  if (o.cliPath) {
-    let pkg = dirname(dirname(o.cliPath)); // <pkg>/dist/cli.js
-    add(ro, pkg, { label: "pi" });
-  }
+  if (o.cliPath) add(ro, packageRoot(o.cliPath, exists), { label: "pi" });
   add(ro, o.appRoot, { label: "checkout" });
   if (o.piLabDir) add(ro, o.piLabDir, { label: "pi-lab" });
   if (o.crowHome) { const sk = join(o.crowHome, "skills"); if (exists(sk)) add(ro, sk); }
@@ -191,7 +208,10 @@ export function buildContainPlan(o) {
     if (isLink) args.push("--symlink", target, link);
     else if (exists(link) && !o.systemDirs) args.push("--ro-bind", link, link);
   }
-  args.push("--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/var/tmp", "--tmpfs", "/run");
+  // /proc: a fresh procfs of the sandbox's OWN pid namespace (--unshare-pid,
+  // required: without it a same-uid bot could signal every host process of
+  // that uid; kill(2) checks the uid, not the namespace).
+  args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/var/tmp", "--tmpfs", "/run");
   if (exists("/run/systemd/resolve")) args.push("--ro-bind", "/run/systemd/resolve", "/run/systemd/resolve");
   if (exists("/etc/crow")) args.push("--tmpfs", "/etc/crow");
   args.push("--tmpfs", home);
@@ -217,7 +237,7 @@ export function buildContainPlan(o) {
   for (const m of masksDir) args.push("--tmpfs", m);
   for (const m of masksFile) args.push("--ro-bind", "/dev/null", m);
 
-  args.push("--unshare-user", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try", "--cap-drop", "ALL");
+  args.push("--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try", "--cap-drop", "ALL");
   const cwd = real(o.cwd || o.sessionDir, exists);
   if (cwd) args.push("--chdir", cwd);
 
@@ -230,4 +250,25 @@ export function buildContainPlan(o) {
   return { args, env, refused };
 }
 
-export { basename };
+/**
+ * A per-spawn shadow of the pi agent dir: a fresh 0700 dir with copies of the
+ * small config files (AGENT_SHADOW_FILES, mode 0600) and empty mount points
+ * for AGENT_RO_SUBDIRS. Created on the SPAWNER's side (never inside a path a
+ * bot can write); cleanup() removes it with every write pi made to it.
+ */
+export function prepareAgentShadow(piAgentDir, { parent = tmpdir() } = {}) {
+  const dir = mkdtempSync(join(parent, "crow-pi-agent-"));
+  chmodSync(dir, 0o700);
+  for (const f of AGENT_SHADOW_FILES) {
+    const src = join(piAgentDir, f);
+    try {
+      if (!lstatSync(src).isFile()) continue; // never follow a symlink out of the agent dir
+      copyFileSync(src, join(dir, f));
+      chmodSync(join(dir, f), 0o600);
+    } catch { /* absent: pi uses its defaults */ }
+  }
+  for (const d of AGENT_RO_SUBDIRS) {
+    if (existsSync(join(piAgentDir, d))) mkdirSync(join(dir, d), { mode: 0o700 });
+  }
+  return { dir, cleanup: () => { try { rmSync(dir, { recursive: true, force: true }); } catch {} } };
+}

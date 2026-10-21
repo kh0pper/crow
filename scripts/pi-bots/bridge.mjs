@@ -37,9 +37,10 @@ import { appendDates } from "../../servers/shared/relative-dates.js";
 import { stripContextEcho } from "../../servers/gateway/voice/context-echo.js";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
 import { capFor, checkToolBudget, channelBudgetMessage, operatorBudgetMessage } from "./tool-budget.mjs";
@@ -47,7 +48,9 @@ import { resolveModel, escalateRequested, stripEscalateToken } from "./model_res
 import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVocab, cardText } from "./tracker.mjs";
 import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
-import { wrapPiSpawn } from "./pi_sandbox.mjs";
+import { wrapPiSpawn, piSandboxMode } from "./pi_sandbox.mjs";
+import { containSelected, prepareAgentShadow } from "./pi_contain.mjs";
+import { findPiLabDir } from "./pi-lab-compat.mjs";
 import { effectiveReadPaths } from "./bot-read-paths.mjs";
 import { MCP_CONFIG_FD } from "./mcp-delivery.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
@@ -88,6 +91,40 @@ function resolveSandboxedPiPid(rpc, initPid, tries = 0) {
 const BOARD_SECRET_ENV_KEYS = [BOARD_ACTOR_SECRET_ENV, "CROW_BOARD_ACTOR_SECRET_FILE", "CREDENTIALS_DIRECTORY"];
 
 const HOME = process.env.HOME || homedir();
+const BRIDGE_APP_ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+/**
+ * Mount inputs for the contain tier (pi_contain.mjs buildContainPlan): the
+ * engine, this spawn's own paths and policy, the instance data dir, and the
+ * MCP servers pi will start (the canonical agent mcp.json plus the bot's own
+ * config). Creates the per-instance bot cache and the per-spawn agent shadow.
+ */
+function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def }) {
+  const crowHome = process.env.CROW_HOME || join(HOME, ".crow");
+  const piAgentDir = process.env.PI_CODING_AGENT_DIR || join(HOME, ".pi", "agent");
+  const botCacheDir = join(crowHome, "bot-cache");
+  try { mkdirSync(botCacheDir, { recursive: true, mode: 0o700 }); } catch {}
+  const servers = [];
+  const addServers = (cfg) => { for (const b of Object.values((cfg && cfg.mcpServers) || {})) if (b && typeof b === "object") servers.push(b); };
+  try { addServers(JSON.parse(readFileSync(join(piAgentDir, "mcp.json"), "utf8"))); } catch {}
+  if (opts.mcpConfig) addServers(opts.mcpConfig);
+  else { try { addServers(JSON.parse(readFileSync(join(sessionDir, ".mcp.json"), "utf8"))); } catch {} }
+  // A bot with the sharing server needs the instance identity (messages, invites).
+  const unmaskIdentity = servers.some((b) => [b.command, ...(b.args || []), b.cwd].some((x) => /servers\/sharing\b/.test(String(x || ""))))
+    || ((def && def.tools && def.tools.crow_mcp) || []).some((t) => /^crow-sharing\b|^sharing\b/.test(String(t)));
+  const dataDir = dirname(CROW_DB);
+  const shadow = prepareAgentShadow(piAgentDir);
+  const extraRw = dirname(TASKS_DB) !== dataDir ? [dirname(TASKS_DB)] : [];
+  return {
+    home: HOME, uid: process.getuid(), nodeBin, cliPath,
+    appRoot: BRIDGE_APP_ROOT,
+    piLabDir: findPiLabDir(), piAgentDir, shadowAgentDir: shadow.dir,
+    crowHome, dataDir, botCacheDir, unmaskIdentity,
+    sessionDir, cwd: spawnCwd, workspaceDir: opts.projectWorkspaceDir || null,
+    writePaths: [...(piPolicy.write_paths || []), ...extraRw], readPaths: piPolicy.read_paths || [],
+    mcpServers: servers, _shadow: shadow,
+  };
+}
 // Package was renamed from @mariozechner/pi-coding-agent to
 // @earendil-works/pi-coding-agent (still 'pi' binary; v0.82.0 verified).
 // node = the process running the bridge; pi cli via the pi_resolver ladder
@@ -427,7 +464,7 @@ export class PiRpc {
     for (const k of Object.keys(def.spawn_env || {})) {
       // S3 fix round 1 (M1): CROW_PI_SANDBOX is the operator's switch for the
       // pi sandbox; a bot def must not be able to turn it off for itself.
-      if (/^PI_BOT_|^PIBOT_/.test(k) || k === "CROW_PI_SANDBOX") { strippedSpawnEnv.push(k); continue; }
+      if (/^PI_BOT_|^PIBOT_/.test(k) || k === "CROW_PI_SANDBOX" || k === "CROW_PI_CONTAIN_BOTS") { strippedSpawnEnv.push(k); continue; }
       // The board actor secret (and where it lives) is never a child's to hold or to choose.
       if (BOARD_SECRET_ENV_KEYS.includes(k)) { strippedSpawnEnv.push(k); continue; }
       spawnEnv[k] = def.spawn_env[k];
@@ -505,7 +542,24 @@ export class PiRpc {
     // is that init's child, resolved (outer PID) into this.piPid. The setpriv fallback execs in place, so
     // there proc.pid IS pi. CROW_PI_SANDBOX=required throws here, which
     // callers surface as a failed turn.
-    const launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3 });
+    // Queue item 19 step 2a: the contain tier, when the spawner's env selects
+    // it for this bot. The mount inputs come from this spawn's own policy copy;
+    // the pi agent dir is a per-spawn shadow removed when pi exits.
+    const sandboxBotId = opts.botId || (def && (def.bot_id || def.id)) || null;
+    let contain = null;
+    this._agentShadow = null;
+    if (piSandboxMode(process.env) !== "off" && containSelected(process.env, sandboxBotId)) {
+      contain = containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def });
+      this._agentShadow = contain._shadow;
+    }
+    let launch;
+    try {
+      launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, botId: sandboxBotId, contain });
+    } catch (e) {
+      if (this._agentShadow) this._agentShadow.cleanup();
+      throw e;
+    }
+    this.sandboxTier = launch.tier || (launch.wrapper === "setpriv" ? "nnp" : launch.sandboxed ? "userns" : "none");
     this.sandboxed = launch.sandboxed;
     this.sandboxWrapper = launch.wrapper;
     this.piPid = null;
@@ -586,6 +640,7 @@ export class PiRpc {
       : createStderrDiag({ label: opts.diagLabel || basename(sessionDir || "") || "bot", emit: opts.diagLog || ((l) => console.error(l)) });
     this.proc.stderr.on("data", (d) => { this.stderr += d.toString(); if (diag) { try { diag(d); } catch {} } });
     this.exited = new Promise((res) => this.proc.on("exit", (c) => {
+      if (this._agentShadow) { this._agentShadow.cleanup(); this._agentShadow = null; }
       this._exitCode = c == null ? -1 : c;
       // Fail any pending waiters NOW with the real cause instead of leaving
       // them to time out cryptically (a fresh install resolving to a model
