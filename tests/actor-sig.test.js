@@ -127,7 +127,7 @@ test("M1: generic bot jobs are signed as the bot on gateway 'job' and the runner
   _resetActorKeyForTest();
   initGatewayActorKey();
   const job = { bot_id: "hank", job_id: "j123" };
-  assert.deepEqual(jobActor(job), { botId: "hank", threadId: "job-j123", gatewayType: "job" });
+  assert.deepEqual(jobActor(job), { botId: "hank", threadId: "job-j123", gatewayType: "job", jobId: "j123" });
   const home = mkdtempSync(join(tmpdir(), "actor-sig-job-"));
   writeFileSync(join(home, "phone-token"), "tok", { mode: 0o600 });
   const h = crowServerCatalog(home, jobActor(job)).servers.phone.headers;
@@ -214,4 +214,22 @@ test("item 46 PR-B: a peer-relay signature verifies only as a peer-relay signatu
   assert.equal(verifyActorSig({ kind: "bot", ...R, sig }), false, "not a phone signature");
   assert.equal(verifyPeerRelayActorSig({ ...R, sig: signArtifactsActor(R) }), false, "an artifacts signature is not a relay one");
   assert.equal(verifyPeerRelayActorSig({ ...R, sig: undefined }), false);
+});
+
+test("B1: a generic job's board block carries X-Crow-Job-Id and a board signature bound to (bot, job)", () => {
+  const home = mkdtempSync(join(tmpdir(), "actor-sig-jobboard-"));
+  writeFileSync(join(home, "board-token"), "btok", { mode: 0o600 });
+  try {
+    _resetActorKeyForTest();
+    initGatewayActorKey();
+    const h = crowServerCatalog(home, jobActor({ bot_id: "hank", job_id: "j123" })).servers.board.headers;
+    assert.equal(h["X-Crow-Actor-Id"], "hank");
+    assert.equal(h["X-Crow-Job-Id"], "j123");
+    const sig = h["X-Crow-Actor-Sig"];
+    assert.equal(verifyBoardActorSig({ botId: "hank", jobId: "j123", sig }), true);
+    assert.equal(verifyBoardActorSig({ botId: "hank", jobId: "j124", sig }), false, "bound to the job");
+    assert.equal(verifyBoardActorSig({ botId: "hank", jobId: null, sig }), false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

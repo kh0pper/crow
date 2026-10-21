@@ -286,10 +286,12 @@ async function runCardExecute(job, { log, bridge }) {
  */
 /** S2 (M1): the actor a generic job's phone block is signed as. The bot is
  *  attributed (it can follow up on its own calls); the "job" gateway has no
- *  delivery target, so results stay notify-only. Signed only when this process
- *  holds the gateway's actor key (in-gateway); elsewhere it stays unattributed. */
+ *  delivery target, so results stay notify-only. jobId also reaches the board
+ *  block (X-Crow-Job-Id, signed over bot + job) so board_mutations.job_id
+ *  records which job made a call. Signed in-gateway with the actor key; a
+ *  key-less host presigns through POST /internal/actor-sign (presignActors). */
 export function jobActor(job) {
-  return { botId: job.bot_id, threadId: "job-" + job.job_id, gatewayType: "job" };
+  return { botId: job.bot_id, threadId: "job-" + job.job_id, gatewayType: "job", jobId: job.job_id };
 }
 
 export async function runJob(job, { log = () => {}, bridge: injectedBridge = null, repoSkillsDir = undefined } = {}) {
