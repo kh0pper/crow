@@ -33,11 +33,11 @@ import { nonPerchChannels, effectiveShellMode } from "../../servers/shared/bot-p
 import { createStderrDiag } from "./pi-stderr-diag.mjs";
 import { classifierPolicyBlock, normalizeStoredBashPolicy } from "../../servers/shared/bot-bash-policy.js";
 import { buildBotBaseEnv, botEnvScrubbed, BOARD_ACTOR_SECRET_ENV } from "../../servers/shared/bot-env.js";
-const BOARD_SECRET_ENV_KEYS = [BOARD_ACTOR_SECRET_ENV, "CROW_BOARD_ACTOR_SECRET_FILE", "CREDENTIALS_DIRECTORY"];
 import { appendDates } from "../../servers/shared/relative-dates.js";
 import { stripContextEcho } from "../../servers/gateway/voice/context-echo.js";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
@@ -64,6 +64,23 @@ import { warmModel } from "./warm.mjs";
 import { initBoardSigning } from "./actor-sig.mjs";
 import { meterBotTurn } from "./metering.mjs";
 import { getOrCreateLocalInstanceId } from "../../servers/gateway/instance-registry.js";
+
+/** pi's outer PID inside a PID-namespace sandbox: the first child of the
+ *  namespace's init. Polled briefly (init forks pi right after bwrap reports
+ *  it); falls back to the init's pid, which is still inside the sandbox. */
+function resolveSandboxedPiPid(rpc, initPid, tries = 0) {
+  let kids = "";
+  try { kids = readFileSync("/proc/" + initPid + "/task/" + initPid + "/children", "utf8").trim(); } catch { /* not yet / gone */ }
+  const first = Number(kids.split(/\s+/)[0]);
+  if (Number.isInteger(first) && first > 0) { rpc.piPid = first; return; }
+  if (tries >= 100 || rpc._exitCode != null) { if (rpc.piPid == null) rpc.piPid = initPid; return; }
+  const t = setTimeout(() => resolveSandboxedPiPid(rpc, initPid, tries + 1), 20);
+  if (t.unref) t.unref();
+}
+
+// The board actor secret (a stale env copy) and the pointers to where such a
+// secret lives are never a bot's to see or to set.
+const BOARD_SECRET_ENV_KEYS = [BOARD_ACTOR_SECRET_ENV, "CROW_BOARD_ACTOR_SECRET_FILE", "CREDENTIALS_DIRECTORY"];
 
 const HOME = process.env.HOME || homedir();
 // Package was renamed from @mariozechner/pi-coding-agent to
@@ -478,14 +495,16 @@ export class PiRpc {
     // filesystem stays writable. The mode comes from the gateway's own env,
     // never from this child env. The wrapper stays in the same process group,
     // so the group kill in close() still reaches pi and its children. Under
-    // bwrap proc.pid is the wrapper's; bwrap reports pi's own pid on fd 3
-    // (--info-fd), kept as this.piPid. The setpriv fallback execs in place, so
+    // bwrap proc.pid is the wrapper's. bwrap reports the PID namespace's init
+    // (an inner bwrap) on fd 3 (--info-fd), kept as this.sandboxInitPid; pi
+    // is that init's child, resolved (outer PID) into this.piPid. The setpriv fallback execs in place, so
     // there proc.pid IS pi. CROW_PI_SANDBOX=required throws here, which
     // callers surface as a failed turn.
     const launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3 });
     this.sandboxed = launch.sandboxed;
     this.sandboxWrapper = launch.wrapper;
     this.piPid = null;
+    this.sandboxInitPid = null;
     // S6-CROW: in fd mode the child gets one more pipe at MCP_CONFIG_FD (4;
     // 3 is the sandbox's --info-fd, "ignore" when unsandboxed). bwrap and
     // setpriv both pass inherited fds through to pi.
@@ -516,7 +535,11 @@ export class PiRpc {
       fd3.on("data", (d) => {
         info += d.toString("utf8");
         const m = info.match(/"child-pid"\s*:\s*(\d+)/);
-        if (m && this.piPid == null) this.piPid = Number(m[1]);
+        if (m && this.sandboxInitPid == null) {
+          this.sandboxInitPid = Number(m[1]);
+          if (launch.pidNamespace) resolveSandboxedPiPid(this, this.sandboxInitPid);
+          else if (this.piPid == null) this.piPid = this.sandboxInitPid;
+        }
       });
     }
     this.events = []; this.responses = []; this.stderr = ""; this._b = ""; this._w = []; this.badStdout = 0;

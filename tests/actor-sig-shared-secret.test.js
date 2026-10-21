@@ -5,9 +5,10 @@
 // without the gateway's per-boot key. Only the derived key is held, in
 // memory; the env never carries the secret; shared-secret mode needs an
 // active pi sandbox; phone and artifacts signing stay per-boot.
-import { test, afterEach } from "node:test";
+import { test, afterEach, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, symlinkSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, symlinkSync, chmodSync, realpathSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -37,14 +38,18 @@ const read = (rel) => readFileSync(new URL(rel, import.meta.url), "utf8");
 const active = () => "active";
 const dirs = [];
 
-/** A dedicated secret dir with one file; returns { dir, file, env }. */
-function secretFile(content = HEX + "\n", { mode = 0o600, name = "board-actor-secret" } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "actor-secret-"));
-  dirs.push(dir);
-  const file = join(dir, name);
+// Stand-in for /run/credentials: the accepted-roots test seam points here.
+const ROOT = realpathSync(mkdtempSync(join(tmpdir(), "actor-cred-root-")));
+after(() => rmSync(ROOT, { recursive: true, force: true }));
+const init = (o = {}) => initBoardSigning({ sandboxStatus: active, _credentialRoots: [ROOT], ...o });
+
+/** A unit's credentials dir holding board-actor-secret; returns { dir, file, env }. */
+function secretFile(content = HEX + "\n", { mode = 0o600 } = {}) {
+  const dir = mkdtempSync(join(ROOT, "unit-"));
+  const file = join(dir, "board-actor-secret");
   writeFileSync(file, content, { mode });
   chmodSync(file, mode);
-  return { dir, file, env: { CROW_BOARD_ACTOR_SECRET_FILE: file } };
+  return { dir, file, env: { CREDENTIALS_DIRECTORY: dir } };
 }
 function captureWarn() {
   const msgs = [];
@@ -59,13 +64,13 @@ afterEach(() => {
 
 test("a runner with no per-boot key signs from the file; a gateway holding the same file verifies", () => {
   const { env } = secretFile();
-  assert.equal(initBoardSigning({ env, sandboxStatus: active }), "shared-secret");
+  assert.equal(init({ env, sandboxStatus: active }), "shared-secret");
   const sig = signBoardActor(BOARD);
   assert.match(sig, /^[0-9a-f]{64}$/);
   // The gateway: its own per-boot key, plus the same secret file.
   _resetActorKeyForTest();
   initGatewayActorKey();
-  assert.equal(initBoardSigning({ env, sandboxStatus: active }), "shared-secret");
+  assert.equal(init({ env, sandboxStatus: active }), "shared-secret");
   assert.equal(verifyBoardActorSig({ ...BOARD, sig }), true);
   assert.equal(verifyBoardActorSig({ botId: "bot-2", jobId: "j-77", sig }), false, "bound to the bot");
   assert.equal(verifyBoardActorSig({ botId: "bot-1", jobId: null, sig }), false, "bound to the job");
@@ -77,13 +82,38 @@ test("a runner with no per-boot key signs from the file; a gateway holding the s
   assert.equal(verifyBoardActorSig({ ...BOARD, sig }), false);
 });
 
-test("the systemd credential is picked up automatically from CREDENTIALS_DIRECTORY (mode 0400)", () => {
-  const { dir } = secretFile(B64, { mode: 0o400 });
-  assert.equal(initBoardSigning({ env: { CREDENTIALS_DIRECTORY: dir }, sandboxStatus: active }), "shared-secret");
+test("a 0400 base64 credential works and derives the same key as the hex one", () => {
+  assert.equal(init({ env: secretFile(B64, { mode: 0o400 }).env }), "shared-secret");
   const a = signBoardActor(BOARD);
   _resetActorKeyForTest();
-  assert.equal(initBoardSigning({ env: secretFile(HEX).env, sandboxStatus: active }), "shared-secret");
-  assert.equal(signBoardActor(BOARD), a, "base64 and hex of the same bytes derive the same key");
+  assert.equal(init({ env: secretFile(HEX).env }), "shared-secret");
+  assert.equal(signBoardActor(BOARD), a);
+});
+
+test("a custom CROW_BOARD_ACTOR_SECRET_FILE is ignored with a warning (systemd credentials only)", () => {
+  const s = secretFile();
+  const w = captureWarn();
+  assert.equal(init({ env: { CROW_BOARD_ACTOR_SECRET_FILE: s.file }, warn: w.warn }), "none");
+  assert.equal(w.msgs.length, 1);
+  assert.match(w.msgs[0], /CROW_BOARD_ACTOR_SECRET_FILE is ignored/);
+  assert.equal(w.msgs[0].includes(HEX), false);
+});
+
+test("without the test seam, a CREDENTIALS_DIRECTORY outside /run/credentials and $XDG_RUNTIME_DIR/credentials is refused", () => {
+  const s = secretFile();
+  const w = captureWarn();
+  assert.equal(initBoardSigning({ env: s.env, sandboxStatus: active, warn: w.warn }), "none");
+  assert.equal(w.msgs.length, 1);
+  assert.match(w.msgs[0], /not under \/run\/credentials\//);
+});
+
+test("a FIFO in place of the credential does not hang startup", () => {
+  const dir = mkdtempSync(join(ROOT, "unit-"));
+  const r = spawnSync("mkfifo", ["-m", "600", join(dir, "board-actor-secret")]);
+  if (r.status !== 0) return; // no mkfifo here
+  const w = captureWarn();
+  assert.equal(init({ env: { CREDENTIALS_DIRECTORY: dir }, warn: w.warn }), "none");
+  assert.match(w.msgs[0], /is not a regular file/);
 });
 
 test("decoding: hex, base64, base64url; odd-length hex is refused, not read as base64", () => {
@@ -97,7 +127,7 @@ test("decoding: hex, base64, base64url; odd-length hex is refused, not read as b
 });
 
 test("phone and artifacts signatures still need the per-boot key; the secret cannot mint them", () => {
-  assert.equal(initBoardSigning({ env: secretFile().env, sandboxStatus: active }), "shared-secret");
+  assert.equal(init({ env: secretFile().env, sandboxStatus: active }), "shared-secret");
   const A = { botId: "bot-1", threadId: "perch-1", gatewayType: "perch" };
   assert.equal(signActor(A), null);
   assert.equal(signArtifactsActor(A), null);
@@ -118,65 +148,70 @@ test("refused unless the pi sandbox is active", () => {
   for (const status of ["off", "nnp-only: no bwrap", "fallback: x"]) {
     _resetActorKeyForTest();
     const w = captureWarn();
-    assert.equal(initBoardSigning({ env, sandboxStatus: () => status, warn: w.warn }), "none");
+    assert.equal(init({ env, sandboxStatus: () => status, warn: w.warn }), "none");
     assert.equal(w.msgs.length, 1);
     assert.match(w.msgs[0], /board shared secret ignored: pi sandbox not active, bots could read it/);
     initGatewayActorKey();
-    assert.equal(initBoardSigning({ env, sandboxStatus: () => status, warn: () => {} }), "per-boot");
+    assert.equal(init({ env, sandboxStatus: () => status, warn: () => {} }), "per-boot");
   }
 });
 
-test("refused: symlink, group/world-readable, too short, non-dedicated directory; warnings never show the value", () => {
+test("refused: symlink, group/world-readable, too short, not a file; warnings never show the value", () => {
   const cases = [];
-  { const s = secretFile(); const link = join(s.dir, "link"); symlinkSync(s.file, link); cases.push([{ CROW_BOARD_ACTOR_SECRET_FILE: link }, /is a symlink/]); }
+  { const s = secretFile(); const d = mkdtempSync(join(ROOT, "unit-")); symlinkSync(s.file, join(d, "board-actor-secret")); cases.push([{ CREDENTIALS_DIRECTORY: d }, /is a symlink/]); }
   cases.push([secretFile(HEX, { mode: 0o640 }).env, /group- or world-accessible/]);
   cases.push([secretFile(HEX, { mode: 0o604 }).env, /group- or world-accessible/]);
   const short = Buffer.alloc(16, 1).toString("hex");
   cases.push([secretFile(short).env, /does not decode/]);
-  { const s = secretFile(); cases.push([{ ...s.env, CROW_HOME: join(s.dir, "crow") }, /not in a dedicated directory/]); }
-  cases.push([{ CROW_BOARD_ACTOR_SECRET_FILE: join(secretFile().dir, "missing") }, /cannot be opened/]);
+  { const d = mkdtempSync(join(ROOT, "unit-")); mkdirSync(join(d, "board-actor-secret")); cases.push([{ CREDENTIALS_DIRECTORY: d }, /is not a regular file/]); }
   for (const [env, re] of cases) {
     _resetActorKeyForTest();
     const w = captureWarn();
-    assert.equal(initBoardSigning({ env, sandboxStatus: active, warn: w.warn }), "none", String(re));
+    assert.equal(init({ env, sandboxStatus: active, warn: w.warn }), "none", String(re));
     assert.equal(w.msgs.length, 1, String(re));
     assert.match(w.msgs[0], re);
     for (const v of [HEX, short]) assert.equal(w.msgs[0].includes(v), false);
   }
 });
 
+test("a unit without the board credential stays quiet", () => {
+  const w = captureWarn();
+  assert.equal(init({ env: { CREDENTIALS_DIRECTORY: mkdtempSync(join(ROOT, "unit-")) }, warn: w.warn }), "none");
+  assert.deepEqual(w.msgs, []);
+});
+
 test("a leftover CROW_BOARD_ACTOR_SECRET in the environment is ignored, with a warning", () => {
   const w = captureWarn();
-  assert.equal(initBoardSigning({ env: { CROW_BOARD_ACTOR_SECRET: HEX }, sandboxStatus: active, warn: w.warn }), "none");
+  assert.equal(init({ env: { CROW_BOARD_ACTOR_SECRET: HEX }, sandboxStatus: active, warn: w.warn }), "none");
   assert.equal(w.msgs.length, 1);
-  assert.match(w.msgs[0], /in the environment is ignored/);
+  assert.match(w.msgs[0], /CROW_BOARD_ACTOR_SECRET is ignored/);
   assert.equal(w.msgs[0].includes(HEX), false);
   assert.equal(signBoardActor(BOARD), null);
 });
 
 test("rotation: new file content (a restart) invalidates signatures made with the old secret", () => {
   const s = secretFile(HEX);
-  initBoardSigning({ env: s.env, sandboxStatus: active });
+  init({ env: s.env, sandboxStatus: active });
   const oldSig = signBoardActor(BOARD);
   // restart with rotated content
   _resetActorKeyForTest();
   writeFileSync(s.file, HEX2, { mode: 0o600 });
-  assert.equal(initBoardSigning({ env: s.env, sandboxStatus: active }), "shared-secret");
+  assert.equal(init({ env: s.env, sandboxStatus: active }), "shared-secret");
   assert.equal(verifyBoardActorSig({ ...BOARD, sig: oldSig }), false);
   assert.equal(verifyBoardActorSig({ ...BOARD, sig: signBoardActor(BOARD) }), true);
 });
 
 test("the file is read ONCE: later file changes do nothing until restart; a key from stdin is kept", () => {
   const s = secretFile(HEX);
-  initBoardSigning({ env: s.env, sandboxStatus: active });
+  init({ env: s.env, sandboxStatus: active });
   const sig = signBoardActor(BOARD);
   writeFileSync(s.file, HEX2, { mode: 0o600 });
-  assert.equal(initBoardSigning({ env: s.env, sandboxStatus: active }), "shared-secret");
+  assert.equal(init({ env: s.env, sandboxStatus: active }), "shared-secret");
   assert.equal(signBoardActor(BOARD), sig);
   _resetActorKeyForTest();
   const handed = Buffer.alloc(32, 9).toString("hex");
   setBoardKey(handed);
-  initBoardSigning({ env: s.env, sandboxStatus: active });
+  init({ env: s.env, sandboxStatus: active });
   assert.equal(boardKeyHandoff(), " " + handed);
 });
 
@@ -185,7 +220,7 @@ test("boardSigningMode: none / per-boot / shared-secret, and the secret never en
   initGatewayActorKey();
   assert.equal(boardSigningMode(), "per-boot");
   const before = { ...process.env };
-  initBoardSigning({ env: secretFile().env, sandboxStatus: active });
+  init({ env: secretFile().env, sandboxStatus: active });
   assert.equal(boardSigningMode(), "shared-secret");
   assert.deepEqual({ ...process.env }, before);
   for (const v of Object.values(process.env)) {
@@ -224,7 +259,7 @@ async function piChildEnviron({ def, extraEnv }) {
 test("a real pi child (the PiRpc spawn behind bridge, job, Perch, skill review) has no secret, no key, no pointer in its environ", async () => {
   const s = secretFile();
   const perBoot = initGatewayActorKey().toString("hex");
-  initBoardSigning({ env: s.env, sandboxStatus: active });
+  init({ env: s.env, sandboxStatus: active });
   const derived = boardKeyHandoff().trim();
   Object.assign(process.env, { CROW_BOARD_ACTOR_SECRET: HEX, CROW_BOARD_ACTOR_SECRET_FILE: s.file, CREDENTIALS_DIRECTORY: s.dir });
   const def = { permission_policy: { bash: "deny", write_paths: [] },
@@ -256,7 +291,7 @@ test("supervised children: a stale secret is stripped from an explicit env and f
 
 test("Discord child: gets the DERIVED board key on stdin (never in env) and its board signatures verify", async () => {
   const perBoot = initGatewayActorKey();
-  initBoardSigning({ env: secretFile().env, sandboxStatus: active });
+  init({ env: secretFile().env, sandboxStatus: active });
   const handoff = boardKeyHandoff();
   assert.match(handoff, /^ [0-9a-f]{64}$/);
   assert.equal(handoff.includes(HEX), false, "the derived key, not the secret");

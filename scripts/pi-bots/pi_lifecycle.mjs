@@ -90,11 +90,16 @@ export function listBridgePi(opts = {}) {
   const raw = parsePsLines(out);
   const wrappers = new Map();
   for (const p of raw) if (isSandboxWrapperArgs(p.args)) wrappers.set(p.pid, p);
+  // PID-namespace sandboxes nest: outer bwrap -> inner bwrap (the namespace's
+  // init, a fork with the same argv) -> pi. Fold the inner one into the outer
+  // (the pid PiRpc spawned, leased and group-kills), so one pi counts once.
+  const rootOf = (w) => { const seen = new Set(); while (wrappers.has(w.ppid) && !seen.has(w.pid)) { seen.add(w.pid); w = wrappers.get(w.ppid); } return w; };
   const procs = [];
   const claimed = new Set();
   for (const p of raw) {
     if (wrappers.has(p.pid)) continue;
-    const w = wrappers.get(p.ppid);
+    const parent = wrappers.get(p.ppid);
+    const w = parent ? rootOf(parent) : undefined;
     if (w && !claimed.has(w.pid)) {
       claimed.add(w.pid);
       procs.push({ pid: w.pid, ppid: w.ppid, etimes: w.etimes, rssKb: p.rssKb, args: p.args, innerPid: p.pid });
@@ -103,7 +108,7 @@ export function listBridgePi(opts = {}) {
     }
   }
   // A wrapper whose pi has not exec'd yet (or already exited) still counts.
-  for (const w of wrappers.values()) if (!claimed.has(w.pid)) procs.push(w);
+  for (const w of wrappers.values()) if (!claimed.has(w.pid) && !wrappers.has(w.ppid)) procs.push(w);
   return procs;
 }
 
