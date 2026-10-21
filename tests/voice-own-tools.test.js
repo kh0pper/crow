@@ -602,3 +602,60 @@ test("strict: a failed own call before a confirmation question still asks it, la
     assert.equal(pending.get(h.device.id), null);
   } finally { s.close(); }
 });
+
+test("strict: a question re-called from the turn's cache is not re-asked over the one the store holds", async () => {
+  const s = await stores();
+  try {
+    const { own, pending } = make();
+    const bot = CROW({ voice: { confirm: "strict" } });
+    const failingTask = { definition: { name: "crow_task_add", description: "x", inputSchema: { type: "object" } }, family: "own:tasks", intent: { en: ["task", "tasks"], es: [] },
+      execute: async () => JSON.stringify({ ok: false, code: "backend_error" }) };
+    const atA = "2026-10-26T17:00:00-05:00";
+    const atB = "2026-10-26T18:00:00-05:00";
+    const remA = { type: "tool_call", id: "a1", name: "crow_reminder_add", arguments: { text: "milk", at: atA } };
+    const h = harness({ bot, chatTools: [], rounds: [[
+      remA,
+      { type: "tool_call", id: "b1", name: "crow_reminder_add", arguments: { text: "eggs", at: atB } },
+      { type: "tool_call", id: "c1", name: "crow_task_add", arguments: { title: "bread" } },
+      { type: "done" },
+    ], [{ ...remA, id: "a2" }, { type: "done" }]] });
+    h.deps.ownTools = async (a) => { const set = await own.forTurn(a); return { ...set, tools: [failingTask, ...set.tools.filter((t) => t.definition.name !== "crow_task_add")] }; };
+    h.deps.voiceActions = chainVoiceActions([own]);
+    await h.runner.runVoiceTurn({ db: s.db, device: h.device, transcript: "remind me at 5 and at 6 and add bread to my tasks", sink: h.sink, tz: TZ, lang: "en", actionWhen: () => false });
+    const qB = `Remind you ${whenOf(atB)}: eggs?`;
+    const heard = h.calls.spoken.join(" ");
+    assert.ok(heard.trim().endsWith(qB), `heard: ${heard}`);
+    assert.ok(!heard.includes(`Remind you ${whenOf(atA)}: milk?`), `heard: ${heard}`);
+    assert.equal(pending.get(h.device.id)?.args?.text, "eggs");
+    await h.runner.runVoiceTurn({ db: s.db, device: h.device, transcript: "yes", sink: h.sink, tz: TZ, lang: "en", actionWhen: () => false });
+    const rows = await s.schedules();
+    assert.equal(rows.length, 1, "one reminder is written");
+    assert.ok(JSON.stringify(rows).includes("eggs") && !JSON.stringify(rows).includes("milk"), JSON.stringify(rows));
+  } finally { s.close(); }
+});
+
+test("strict: a cached question that ends the turn as its final line is the pending one, too", async () => {
+  const s = await stores();
+  try {
+    const { own, pending } = make();
+    const bot = CROW({ voice: { confirm: "strict" } });
+    const okTask = { definition: { name: "crow_task_add", description: "x", inputSchema: { type: "object" } }, family: "own:tasks", intent: { en: ["task", "tasks"], es: [] },
+      execute: async () => JSON.stringify({ ok: true, code: "added" }) };
+    const atA = "2026-10-26T17:00:00-05:00";
+    const atB = "2026-10-26T18:00:00-05:00";
+    const remA = { type: "tool_call", id: "a1", name: "crow_reminder_add", arguments: { text: "milk", at: atA } };
+    const h = harness({ bot, chatTools: [], rounds: [[
+      remA,
+      { type: "tool_call", id: "b1", name: "crow_reminder_add", arguments: { text: "eggs", at: atB } },
+      { type: "tool_call", id: "c1", name: "crow_task_add", arguments: { title: "bread" } },
+      { type: "done" },
+    ], [{ ...remA, id: "a2" }, { type: "done" }]] });
+    h.deps.ownTools = async (a) => { const set = await own.forTurn(a); return { ...set, tools: [okTask, ...set.tools.filter((t) => t.definition.name !== "crow_task_add")] }; };
+    h.deps.voiceActions = chainVoiceActions([own]);
+    await h.runner.runVoiceTurn({ db: s.db, device: h.device, transcript: "remind me at 5 and at 6 and add bread to my tasks", sink: h.sink, tz: TZ, lang: "en", actionWhen: () => false });
+    const heard = h.calls.spoken.join(" ");
+    assert.ok(heard.trim().endsWith(`Remind you ${whenOf(atB)}: eggs?`), `heard: ${heard}`);
+    assert.ok(!heard.includes(`Remind you ${whenOf(atA)}: milk?`), `heard: ${heard}`);
+    assert.equal(pending.get(h.device.id)?.args?.text, "eggs");
+  } finally { s.close(); }
+});

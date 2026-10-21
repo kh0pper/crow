@@ -1039,12 +1039,13 @@ export function createVoiceTurnRunner(deps) {
       let memoryBacked = false;    // only a memory call did (a saved note is not a reminder)
       let unsureBacked = false;    // an ok call to a tool that is neither a known read nor a known write
       let guardHeld = "";
-      // Own calls that were not ok, by name|canonical args → { name, say, validation }. An ok own call clears the
-      // same call's failure, and every validation failure (bad_args, no_tz: a corrected retry, or the step-up
-      // picking another tool, is the same item). A backend error or a refusal on other args stays.
+      // Own calls that were not ok, by name|canonical args → { name, say, validation, round }. An ok own call clears
+      // the same call's failure. A validation failure (bad_args, no_tz) is also cleared by a later ok call of the
+      // SAME tool (the corrected retry) or by an ok own call in a LATER round (the step-up picking another tool),
+      // never by another tool's ok call in the same round. A backend error or a refusal on other args stays.
       const ownFails = new Map();
       const ownOkSays = new Map(); // name|canonical args → the success line of an ok own call that changed something
-      let ownAsk = "";             // the last own confirmation question (needs_confirm); its pending entry is live
+      let ownAsk = "";             // the last own confirmation question that really ran (needs_confirm): the live pending entry
       let ownEndLead = "";         // a final display line that the own-tool ending speaks first
       const holding = () => actionGuard && (!backed || ownFails.size > 0);
       // The own-tool ending (an own call failed): held text that claims nothing, the ok own calls' lines, the failure
@@ -1053,7 +1054,7 @@ export function createVoiceTurnRunner(deps) {
       const ownEndLine = (released = "") => {
         let failLine = null;
         for (const f of ownFails.values()) if (!failLine && f.say) failLine = f.say;
-        failLine ||= String(backed || memoryBacked ? (opts.partlyDoneText || PARTLY_DONE_TEXT)
+        if (ownFails.size > 0) failLine ||= String(backed || memoryBacked ? (opts.partlyDoneText || PARTLY_DONE_TEXT)
           : unsureBacked ? (opts.unsureText || UNSURE_TEXT) : (opts.notDoneText || NOT_DONE_TEXT));
         return [...new Set([released, ownEndLead, ...ownOkSays.values(), failLine, ownAsk].filter(Boolean))].join(" ");
       };
@@ -1238,7 +1239,7 @@ export function createVoiceTurnRunner(deps) {
           if (tc === calls.at(-1)) finalRes = null;
           const gate = policyGate(tc);
           if (gate) {
-            if (ownByName.has(tc.name)) { armGuard(); ownFails.set(`${tc.name}|${canonicalArgsHash(tc.arguments || {})}`, { name: tc.name, say: null, validation: false }); }   // an own call refused: the model's next words may still claim it
+            if (ownByName.has(tc.name)) { armGuard(); ownFails.set(`${tc.name}|${canonicalArgsHash(tc.arguments || {})}`, { name: tc.name, say: null, validation: false, round: rounds }); }   // an own call refused: the model's next words may still claim it
             if (gate.neutral) neutralCalls++;
             outcome.set(tc, gate.code);
             local.push({ id: tc.id, name: tc.name, result: gate.message, neutral: gate.neutral });
@@ -1252,7 +1253,8 @@ export function createVoiceTurnRunner(deps) {
             // re-run after a step-up — gets the earlier result back and is never executed again (no second row).
             const dupKey = `${tc.name}|${canonicalArgsHash(tc.arguments || {})}`;
             let out = ownDone.get(dupKey);
-            if (out === undefined) {
+            const ran = out === undefined;   // a cached result never re-asks: its question is no longer the pending one
+            if (ran) {
               try { out = await own.execute(tc.arguments || {}, { transcript, executor, db, device, ...(calendarFallback ? { fallback: "calendar" } : {}) }); }
               catch (err) { out = JSON.stringify({ ok: false, code: "error", message: String(err?.message || err) }); }
               if (typeof out !== "string") out = JSON.stringify({ ok: false, code: "error" });
@@ -1266,10 +1268,10 @@ export function createVoiceTurnRunner(deps) {
             const resSay = typeof res?.say === "string" && res.say.trim() ? res.say.trim() : null;
             if (ok) {
               ownFails.delete(dupKey);
-              for (const [k, f] of ownFails) if (f.validation) ownFails.delete(k);
-            } else ownFails.set(dupKey, { name: tc.name, say: resSay, validation: OWN_VALIDATION_CODES.has(code) });
+              for (const [k, f] of ownFails) if (f.validation && (f.name === tc.name || f.round < rounds)) ownFails.delete(k);
+            } else ownFails.set(dupKey, { name: tc.name, say: resSay, validation: OWN_VALIDATION_CODES.has(code), round: rounds });
             if (ok && res.effect !== false && resSay) ownOkSays.set(dupKey, resSay);
-            if (ok && code === "needs_confirm" && resSay) ownAsk = resSay;
+            if (ran && ok && code === "needs_confirm" && resSay) ownAsk = resSay;
             // A failed own call (no_tz, bad_args, backend_error…), or a question with no line to speak: from here on
             // the model's words are held and checked (#499). Text streamed in THIS round was already held when the
             // guard was on from the first word (a turn aimed at an own tool, above); otherwise it may have been
@@ -1279,8 +1281,9 @@ export function createVoiceTurnRunner(deps) {
             if (code === "bad_args") ownBadArgs = true;
             if (usedFamilies) usedFamilies.add(own.family);
             ownOffered = true;   // used (families on or off): arms the follow-up window
+            // A cached question is not the pending one any more: a final question line is always the live one (ownAsk).
             finalRes = tc === calls.at(-1) && res && res.final === true && typeof res.say === "string" && res.say.trim()
-              ? { name: tc.name, say: res.say.trim(), code, effect: ok && res.effect !== false } : null;
+              ? { name: tc.name, say: (code === "needs_confirm" && ownAsk) || res.say.trim(), code, effect: ok && res.effect !== false } : null;
             local.push({ id: tc.id, name: tc.name, result: out, neutral: true });
             continue;
           }
@@ -1428,9 +1431,10 @@ export function createVoiceTurnRunner(deps) {
       for (const r of restores.reverse()) r.msg.content = r.content;
       if (aborted()) {
         result.aborted = true;
-      } else if (budgetHit && !endedFinal && actionGuard && ownFails.size > 0) {
-        // The own outcome is known: the server's own ending, spoken past the budget (say.force), never "try again".
-        timings.own_failed = true;
+      } else if (budgetHit && !endedFinal && ((actionGuard && ownFails.size > 0) || ownAsk)) {
+        // The own outcome is known (a failure, or a question waiting for a yes): the server's own ending, spoken past
+        // the budget (say.force), never "try again". A pending question is always the last thing heard.
+        if (ownFails.size > 0) timings.own_failed = true;
         await speakFallback("budget", spokenChars > 0, ownEndLine());
         return result;
       } else if (budgetHit && !endedFinal) {

@@ -650,3 +650,56 @@ test("the first-audio budget running out after the own outcome is known speaks t
   await turn(p, "add milk to my tasks and remind me at 5", { ...noAct, ownTools: [slowFail(80), remTool(REMINDED)], firstAudioBudgetMs: 40 });
   assert.equal(p.calls.spoken.join(" "), `${REMINDED.say} ${PARTLY_DONE_TEXT}`);
 });
+
+// ─── #499 round 4: a validation failure is cleared only by its own retry or a later round's step-up pick ───
+const BAD = { ok: false, code: "bad_args", message: "The title is required." };
+
+test("same round: bad_args on one own tool is not cleared by another tool's ok final call", async () => {
+  const t = taskOwn(BAD);
+  const rem = remTool(REMINDED);
+  const round = [{ type: "tool_call", id: "t1", name: "crow_task_add", arguments: {} },
+    { type: "tool_call", id: "r1", name: "crow_reminder_add", arguments: { text: "milk", at: "2026-10-26T17:00:00-05:00" } }, { type: "done" }];
+  const h = ownHarness({ bot: CROW, probe: () => true, rounds: [round] });
+  const r = await turn(h, "add milk to my tasks and remind me at 5", { ...noAct, ownTools: [t, rem] });
+  const heard = h.calls.spoken.join(" ");
+  assert.equal(t.seen.length, 1);
+  assert.equal(r.timings.own_failed, true);
+  assert.ok(heard.includes(REMINDED.say), `heard: ${heard}`);
+  assert.ok(heard.indexOf(REMINDED.say) < heard.indexOf(PARTLY_DONE_TEXT) && heard.trim().endsWith(PARTLY_DONE_TEXT), `heard: ${heard}`);
+  assert.ok(captions(h).trim().endsWith(PARTLY_DONE_TEXT), `captions: ${captions(h)}`);
+});
+
+test("bad_args, then the corrected same-tool call in the step-up round: a plain success", async () => {
+  const t = taskOwn((args) => (args.title ? { ok: true, code: "added", final: true, say: "Added buy milk to your tasks." } : BAD));
+  const h = ownHarness({ bot: CROW, probe: () => true, rounds: [call("crow_task_add", {}), call("crow_task_add", { title: "buy milk" }, "c2")] });
+  const r = await turn(h, "put buy milk on my tasks", { ...noAct, ownTools: [t] });
+  assert.equal(r.timings.step_up, "own_tool");
+  assert.equal(h.calls.spoken.at(-1), "Added buy milk to your tasks.");
+  const heard = h.calls.spoken.join(" ");
+  assert.ok(!heard.includes(PARTLY_DONE_TEXT) && !heard.includes(NOT_DONE_TEXT), `heard: ${heard}`);
+  assert.equal(r.timings.own_failed, undefined);
+});
+
+test("bad_args in round 1, then the step-up round's ok call of another own tool: a plain success", async () => {
+  const t = taskOwn(BAD);
+  const rem = remTool(REMINDED);
+  const h = ownHarness({ bot: CROW, probe: () => true, rounds: [call("crow_task_add", {}), call("crow_reminder_add", { text: "milk", at: "2026-10-26T17:00:00-05:00" }, "c2")] });
+  const r = await turn(h, "remind me about milk at 5, it's on my tasks", { ...noAct, ownTools: [t, rem] });
+  assert.equal(r.timings.step_up, "own_tool");
+  assert.equal(h.calls.spoken.at(-1), REMINDED.say);
+  const heard = h.calls.spoken.join(" ");
+  assert.ok(!heard.includes(PARTLY_DONE_TEXT) && !heard.includes(NOT_DONE_TEXT), `heard: ${heard}`);
+  assert.equal(r.timings.own_failed, undefined);
+});
+
+test("the first-audio budget runs out with a question pending and no failure: the question is heard, last", async () => {
+  const Q = { ok: true, effect: false, code: "needs_confirm", final: true, say: "Remind you Monday at 5: milk?" };
+  const slowOk = { ...taskOwn(null), execute: async () => { await new Promise((r) => setTimeout(r, 80)); return JSON.stringify({ ok: true, code: "added", say: "Added milk to your tasks." }); } };
+  const h = ownHarness({ bot: CROW, rounds: [both("", ["rem", "task"])] });
+  const r = await turn(h, "add milk to my tasks and remind me at 5", { ...noAct, ownTools: [slowOk, remTool(Q)], firstAudioBudgetMs: 40 });
+  assert.equal(r.failed, "budget");
+  const heard = h.calls.spoken.join(" ");
+  assert.ok(heard.trim().endsWith(Q.say), `heard: ${heard}`);
+  assert.ok(captions(h).trim().endsWith(Q.say), `captions: ${captions(h)}`);
+  assert.ok(!heard.includes(NOT_DONE_TEXT) && !heard.includes(PARTLY_DONE_TEXT), `heard: ${heard}`);
+});
