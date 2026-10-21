@@ -89,12 +89,17 @@ export const PROBE_RETRY_MS = 5 * 60 * 1000;
  *  would never run. A wrapper orphaned by a dead gateway is caught by the
  *  reaper's orphan rule (ppid 1). */
 export const BWRAP_BASE = Object.freeze(["--dev-bind", "/", "/", "--unshare-user", "--unshare-pid", "--proc", "/proc"]);
+/** Second tier, for hosts where bwrap can make a user namespace but not a PID
+ *  namespace or a fresh /proc: the pre-PID-namespace sandbox. Status
+ *  "active-no-pidns"; the board shared secret refuses it (actor-sig.mjs). */
+export const BWRAP_BASE_NO_PIDNS = Object.freeze(["--dev-bind", "/", "/", "--unshare-user"]);
 
-let probeCache = null; // { ok, bwrap, setpriv, reason, at }
+let probeCache = null; // { ok, pidns, bwrap, setpriv, reason, pidnsReason, at }
 let warnedFor = null;
+let warnedNoPidns = false;
 
 /** Test seam only. */
-export function _resetPiSandboxForTest() { probeCache = null; warnedFor = null; }
+export function _resetPiSandboxForTest() { probeCache = null; warnedFor = null; warnedNoPidns = false; }
 
 export function piSandboxMode(env = process.env) {
   const v = String(env.CROW_PI_SANDBOX || "auto").trim().toLowerCase();
@@ -243,24 +248,34 @@ export function probePiSandbox(opts = {}) {
   if (probeCache && !opts.force && (probeCache.ok || now - probeCache.at < PROBE_RETRY_MS)) return probeCache;
   const bwrap = opts.bwrap !== undefined ? opts.bwrap : (BWRAP_CANDIDATES.find((p) => existsSync(p)) || null);
   const setpriv = opts.setpriv !== undefined ? opts.setpriv : (SETPRIV_CANDIDATES.find((p) => existsSync(p)) || null);
-  let ok = false, reason;
+  const run = opts.runProbe || runProbe;
+  let ok = false, pidns = false, reason, pidnsReason = null;
   if (!bwrap) reason = "bubblewrap (bwrap) is not installed";
   else {
-    const err = runProbe(bwrap, [...BWRAP_BASE, "--", "/bin/true"]);
-    if (err == null) ok = true; else reason = "bwrap cannot create a user + PID namespace with a fresh /proc here (--unshare-user / --unshare-pid / --proc): " + err;
+    // Tier 1: user + PID namespace with a fresh /proc.
+    const err = run(bwrap, [...BWRAP_BASE, "--", "/bin/true"]);
+    if (err == null) { ok = true; pidns = true; }
+    else {
+      pidnsReason = "bwrap cannot create a PID namespace with a fresh /proc here (--unshare-pid / --proc): " + err;
+      // Tier 2: user namespace only (the pre-PID-namespace sandbox).
+      const err2 = run(bwrap, [...BWRAP_BASE_NO_PIDNS, "--", "/bin/true"]);
+      if (err2 == null) ok = true;
+      else reason = "bwrap cannot create a user namespace here (--unshare-user): " + err2;
+    }
   }
   let setprivOk = false;
-  if (!ok && setpriv) setprivOk = runProbe(setpriv, ["--no-new-privs", "/bin/true"]) == null;
-  probeCache = { ok, bwrap: ok ? bwrap : null, setpriv: setprivOk ? setpriv : null, reason: ok ? null : reason, at: now };
+  if (!ok && setpriv) setprivOk = run(setpriv, ["--no-new-privs", "/bin/true"]) == null;
+  probeCache = { ok, pidns, bwrap: ok ? bwrap : null, setpriv: setprivOk ? setpriv : null, reason: ok ? null : reason, pidnsReason: pidns ? null : pidnsReason, at: now };
   return probeCache;
 }
 
-/** Current state for status surfaces: "active" | "nnp-only: ..." | "off" | "fallback: ...". */
+/** Current state for status surfaces: "active" (full tier) | "active-no-pidns"
+ *  (user namespace only) | "nnp-only: ..." | "off" | "fallback: ...". */
 export function piSandboxStatus() {
   const mode = piSandboxMode(process.env);
   if (mode === "off") return "off";
   const p = probePiSandbox();
-  if (p.ok) return "active";
+  if (p.ok) return p.pidns === false ? "active-no-pidns" : "active";
   return (p.setpriv ? "nnp-only: " : "fallback: ") + p.reason;
 }
 
@@ -299,14 +314,21 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   const roDirs = opts.roDirs || systemdUserUnitDirs();
   // Board secret: system credential dirs masked like the IPC dirs.
   const credDirs = (opts.credentialDirs || credentialMaskDirs()).filter((d) => !tmpfs.includes(d));
-  const pre = [...BWRAP_BASE];
+  // A probe without a pidns field (older callers, test stubs) means the full tier.
+  const pidNamespace = probe.pidns !== false;
+  if (!pidNamespace && !warnedNoPidns) {
+    warnedNoPidns = true;
+    console.error("[pi-sandbox] WARNING: pi children run in the bubblewrap sandbox WITHOUT a private PID namespace (" +
+      (probe.pidnsReason || "unavailable") + "). Bots can see host processes and their /proc entries; the board shared secret is refused.");
+  }
+  const pre = [...(pidNamespace ? BWRAP_BASE : BWRAP_BASE_NO_PIDNS)];
   for (const d of tmpfs) pre.push("--tmpfs", d);
   for (const d of credDirs) pre.push("--tmpfs", d);
   for (const s of sockets) if (!tmpfs.some((d) => s === d || s.startsWith(d + "/"))) pre.push("--ro-bind", "/dev/null", s);
   for (const d of roDirs) pre.push("--ro-bind", d, d);
   if (opts.infoFd != null) pre.push("--info-fd", String(opts.infoFd));
   return { cmd: probe.bwrap, args: [...pre, "--", cmd, ...args], env: scrubSandboxEnv(env),
-    sandboxed: true, wrapper: "bwrap", pidNamespace: true, reason: null, masked: [...sockets, ...tmpfs, ...credDirs, ...roDirs] };
+    sandboxed: true, wrapper: "bwrap", pidNamespace, reason: null, masked: [...sockets, ...tmpfs, ...credDirs, ...roDirs] };
 }
 
 /** True when a ps `args` string is a bubblewrap wrapper (used by the reaper). */

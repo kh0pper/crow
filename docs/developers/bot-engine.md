@@ -176,9 +176,9 @@ The board key can instead come from an operator secret, so a runner's board sign
   LoadCredential=board-actor-secret:/etc/crow/board-actor-secret
   ```
 
-  systemd hands each unit a copy at `$CREDENTIALS_DIRECTORY/board-actor-secret`, readable by the service user only. The secret is used only when `CREDENTIALS_DIRECTORY` really lies under `/run/credentials/` or `$XDG_RUNTIME_DIR/credentials/` (under `/run/user/`), paths every sandboxed bot has masked.
+  systemd hands each unit a copy at `$CREDENTIALS_DIRECTORY/board-actor-secret`, readable by the service user only. The secret is used only when `CREDENTIALS_DIRECTORY` really lies under `/run/credentials/` or `$XDG_RUNTIME_DIR/credentials/` (under `/run/user/`), paths every sandboxed bot has masked. System units (the usual case, `User=` set) can load a root-owned source. A **user** unit's manager runs as that user, so its `LoadCredential=` source must be a file the user can read (for example mode 0600 under the user's own config, outside every Crow and bot directory); the copy then lands under `$XDG_RUNTIME_DIR/credentials/`.
 - Each process reads the file **once** at startup (no symlinks, no FIFOs, owner and mode checked on the opened file), keeps only `HMAC-SHA256(secret, "crow-board-actor-v1")` in memory and logs `board actor signing: shared-secret | per-boot | none`; the runner warns on `none`.
-- It is **refused unless the pi sandbox is active** in that process (`piSandboxStatus() === "active"`), with a warning; signing then falls back to the per-boot key (or none).
+- It is **refused unless the pi sandbox is active in its full tier** in that process (`piSandboxStatus() === "active"`; `active-no-pidns` is refused too), with a warning; signing then falls back to the per-boot key (or none). The secret is read only at startup, so if the log says `board shared secret ignored: pi sandbox not active`, fix the sandbox and restart both units once it is healthy.
 - `CROW_BOARD_ACTOR_SECRET` and `CROW_BOARD_ACTOR_SECRET_FILE` are **ignored** with a warning: an environment variable stays readable in `/proc/<pid>/environ` to every same-uid process, and a custom path would be masked only for bots whose spawner knew it.
 - **Children never inherit it.** Every bot and child env builder strips a stale `CROW_BOARD_ACTOR_SECRET` (and pi children also lose `CROW_BOARD_ACTOR_SECRET_FILE` and `CREDENTIALS_DIRECTORY`). The Discord child receives the derived board key over stdin, never the secret.
 - **One secret per instance.** Signatures made with it do not expire at a gateway restart. Rotate by replacing the source file and restarting both units; every older signature then fails.
@@ -197,7 +197,7 @@ Every pi child goes through `PiRpc` in `scripts/pi-bots/bridge.mjs`, whatever st
 
 **What it is:** defense in depth that removes the casual routes from a bot's shell to docker and sudo. **What it is not:** a containment boundary. The filesystem stays writable, so a bot with an open shell still has the escape routes listed below. A real boundary needs a dedicated unprivileged bot user, which is an operator decision.
 
-When bubblewrap can create a user and PID namespace with a fresh `/proc`, pi starts as:
+The probe has two tiers. When bubblewrap can create a user and PID namespace with a fresh `/proc` (status `active`), pi starts as:
 
 ```
 bwrap --dev-bind / / --unshare-user --unshare-pid --proc /proc \
@@ -207,6 +207,8 @@ bwrap --dev-bind / / --unshare-user --unshare-pid --proc /proc \
   --ro-bind ~/.config/systemd ~/.config/systemd --ro-bind ~/.local/share/systemd ~/.local/share/systemd \
   --info-fd 3 -- node cli.js …
 ```
+
+If the PID-namespace flags fail but a plain user namespace works, pi starts without `--unshare-pid --proc /proc` (status `active-no-pidns`, with a one-time warning): every mask below still applies, but bots can see host processes, and the board shared secret is refused. setpriv is used only when both bwrap tiers fail.
 
 The session paths are masked even when nothing is running at spawn time:
 
@@ -230,6 +232,11 @@ The two systemd dirs are created empty when missing.
 - **No privilege raises:** `no_new_privs` is set, so sudo and setuid/setgid binaries (crontab, at, pkexec) cannot raise privilege.
 - **No other processes at all:** pi runs in its own PID namespace with a fresh `/proc`, so no host process (the gateway, other bots) is even visible, and their `/proc/<pid>/{root,environ,mem}` do not exist inside. `--die-with-parent` is deliberately not used: the close's group SIGTERM ends the outer bwrap at once, and the parent-death SIGKILL would cut pi's own SIGTERM drain and MCP shutdown short.
 - **The masks are locked mounts.** The child cannot unmount them, even from a nested user namespace.
+- **Changed for bots by the PID namespace** (full tier only):
+  - Bots cannot see host processes: `ps`, `pgrep`, `top` and `kill <host pid>` inside a bot shell see only the sandbox's own processes.
+  - Processes a bot starts (`nohup`, `setsid`, a daemon, a backgrounded server) die when pi exits, because the namespace ends with it.
+  - PIDs written by in-sandbox processes (pid files, logs) are namespace-local; a host-side `kill(pid, 0)` liveness check on them sees a different or dead process.
+  - Operators with bash-enabled bots should check those bots' skills for `ps`, `pgrep`, `kill`, `nohup`, `setsid` or `tmux` use.
 - **Unchanged:** uid, network, cwd and the rest of the filesystem (read-write). Inside, files owned by other uids/gids show as `nobody`/`nogroup`, which affects owner-checking tools such as sudo and git's `safe.directory` on root-owned trees.
 
 **Escape routes that remain** (all of them need the dedicated user to close):
