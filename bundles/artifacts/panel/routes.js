@@ -74,6 +74,9 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     if (!S.policy) S.policy = await appImport("servers/gateway/artifact-origin/policy.js");
     S.runtime.setContentResolver(store.contentResolver(S.db, S.blobs));
     M = { store, comments, rounds, delivery, links };
+    S.plainBackfill = comments.backfillPlain(S.db, S.blobs, S.renderDeps.markdownBlocks).then((r) => {
+      if (r.versions || r.skipped) console.log(`[artifacts] plain backfill: ${r.versions} version(s), ${r.threads} thread(s), ${r.skipped} left on the fallback`);
+    }, (e) => console.warn(`[artifacts] plain backfill failed (${(e && e.code) || "error"}); old documents stay on the markdown fallback`));
   }
   const ensure = () => (ready ??= init().catch((e) => { ready = null; throw e; }));
   const OWNER = { kind: "session", id: null };
@@ -374,8 +377,14 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     res.json({ revoked: botId });
   }));
 
+  /** D28 leftover (review L-6): pre-D28 documents get their blocks' rendered
+   *  `plain` (and their block threads a span) from a ONE-TIME pass started in
+   *  init (comments.backfillPlain). The first viewer load or comment waits for
+   *  it once; it never fails a request. */
+  const backfillDone = async () => { try { await S.plainBackfill; } catch { /* logged where it ran */ } };
   router.get("/api/artifacts/:id", wrap(async (req, res) => {
     const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
+    if (art.type === "document") await backfillDone();
     const versions = (await S.db.execute({ sql: "SELECT n, state, made_by, made_by_bot, round_id, untrusted_input, trust_cleared_at, change_note, proposed_reason, flagged_reason, created_at, anchor_map_json FROM artifact_versions WHERE artifact_id=? ORDER BY n DESC", args: [art.id] })).rows;
     // Chat-first card (plan PR-1 Task 1.4): the card's state chip reads the
     // active round and the scripted-type flag from THIS row — the client
@@ -518,6 +527,7 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     // D28: a block anchor is resolved against THIS version's stored anchor
     // map (block text from the map; the quote must be that block's).
     if (anchor && anchor.kind === "block") {
+      await backfillDone();
       const v = await M.store.getVersion(S.db, art.id, versionN);
       let map = null; try { map = v && v.anchor_map_json ? JSON.parse(v.anchor_map_json) : null; } catch { map = null; }
       anchor = M.comments.resolveBlockAnchor(map, anchor);
