@@ -178,7 +178,7 @@ test("wrapPiSpawn: off / auto-unavailable / required / available argv", () => {
     credentialDirs: ["/run/credentials", "/srv/board-secret"],
   });
   assert.deepEqual([w.sandboxed, w.wrapper, w.cmd], [true, "bwrap", "/usr/bin/bwrap"]);
-  assert.deepEqual(w.args, ["--dev-bind", "/", "/", "--unshare-user", "--unshare-pid", "--proc", "/proc", "--die-with-parent",
+  assert.deepEqual(w.args, ["--dev-bind", "/", "/", "--unshare-user", "--unshare-pid", "--proc", "/proc",
     "--tmpfs", "/run/user/1000", "--tmpfs", "/tmp/tmux-1000",
     "--tmpfs", "/run/credentials", "--tmpfs", "/srv/board-secret",
     "--ro-bind", "/dev/null", "/run/docker.sock",
@@ -360,6 +360,25 @@ test("I1: an OLD-style reaper (no wrapper folding) respects the dual lease on pi
     const r = reapStalePi({ _procs: oldStyle, _kill: (pid, sig) => killed.push([pid, sig]), leaseFiles: [leaseFile], now });
     assert.deepEqual(r.reaped, [], "neither the wrapper nor the inner pi is reaped past hardAgeSec");
     assert.deepEqual(killed, []);
+    // PID-namespace topology (outer bwrap 800 -> inner bwrap 801 -> pi 802)
+    // as origin/main's ONE-level fold lists it: the inner bwrap carries pi's
+    // RSS and innerPid, the outer one stands alone. perch now leases all
+    // three (wrapper, sandboxInitPid, piPid).
+    writeFileSync(leaseFile, JSON.stringify({ version: 1, leases: {
+      "800": { sessionId: "s2", expiresAt: now + 60_000 },
+      "801": { sessionId: "s2", expiresAt: now + 60_000 },
+      "802": { sessionId: "s2", expiresAt: now + 60_000 },
+    } }));
+    const oneLevel = [
+      { pid: 801, ppid: 800, etimes: 4000, rssKb: 250000, args: `/usr/bin/bwrap -- /n/node ${CLI} --mode rpc`, innerPid: 802 },
+      { pid: 800, ppid: 50, etimes: 4000, rssKb: 3000, args: `/usr/bin/bwrap -- /n/node ${CLI} --mode rpc` },
+    ];
+    const r3 = reapStalePi({ _procs: oneLevel, _kill: () => {}, leaseFiles: [leaseFile], now });
+    assert.deepEqual(r3.reaped, [], "the one-level reaper leaves a leased nested sandbox alone");
+    writeFileSync(leaseFile, JSON.stringify({ version: 1, leases: {
+      "800": { sessionId: "s2", expiresAt: now + 60_000 }, "802": { sessionId: "s2", expiresAt: now + 60_000 } } }));
+    const r4 = reapStalePi({ _procs: oneLevel, _kill: () => {}, leaseFiles: [leaseFile], now });
+    assert.deepEqual(r4.reaped.map((v) => v.pid), [801], "control: without the init lease the one-level reaper kills the session");
     // Control: with only the wrapper leased (pre-fix lease file) the old reaper kills pi.
     writeFileSync(leaseFile, JSON.stringify({ version: 1, leases: { "700": { sessionId: "s1", expiresAt: now + 60_000 } } }));
     const r2 = reapStalePi({ _procs: oldStyle, _kill: () => {}, leaseFiles: [leaseFile], now });
@@ -405,13 +424,25 @@ test("every pi spawn goes through PiRpc and the central wrapPiSpawn", () => {
   const walk = (d) => { for (const n of readdirSyncFs(d)) { if (n === "node_modules" || n.startsWith(".")) continue; const p = join(d, n); if (statSync(p).isDirectory()) walk(p); else if (/\.(m?js)$/.test(n)) files.push(p); } };
   const root = new URL("..", import.meta.url).pathname;
   for (const d of ["scripts", "servers", "bundles"]) walk(join(root, d));
+  // Any call to something named like a process launcher (spawn, spawnSync,
+  // execFile, execFileFn, forkChild, ...) whose next lines name the pi CLI.
+  // Allowed: bridge.mjs (PiRpc, checked below) and pi-model-catalog's
+  // `pi --list-models` (no bot input, no tools, exits at once; returns the
+  // model list only).
+  const ALLOWED = [
+    { file: join("scripts", "pi-bots", "bridge.mjs") },
+    { file: join("scripts", "pi-bots", "pi-model-catalog.mjs"), must: /"--list-models"/ },
+  ];
   const offenders = [];
   for (const f of files) {
     const lines = readFileSync(f, "utf8").split("\n");
     lines.forEach((l, i) => {
-      if (!/\b(spawn|spawnSync|execFile|execFileSync|fork|exec)\(/.test(l) || /^\s*(\*|\/\/)/.test(l)) return;
+      if (/^\s*(\*|\/\/)/.test(l) || /\bfunction\s+\w+\s*\(/.test(l)) return;
+      if (!/\b[\w$]*(spawn|exec|fork)[\w$]*\s*\(/i.test(l)) return;
       const win = lines.slice(i, i + 4).join(" ");
-      if (/cliPath|piCli|PiCli|pi-coding-agent|"rpc"|'rpc'/.test(win) && !f.endsWith(join("scripts", "pi-bots", "bridge.mjs"))) offenders.push(f.slice(root.length) + ":" + (i + 1));
+      if (!/cliPath|piCli|PiCli|pi-coding-agent|"rpc"|'rpc'/.test(win)) return;
+      const ok = ALLOWED.find((a) => f.endsWith(a.file) && (!a.must || a.must.test(win)));
+      if (!ok) offenders.push(f.slice(root.length) + ":" + (i + 1));
     });
   }
   assert.deepEqual(offenders, [], "pi spawned outside PiRpc");
@@ -460,7 +491,7 @@ test("integration: PID namespace + fresh /proc: no host process is visible; the 
       'console.log(JSON.stringify({ root: tryRead("/proc/" + ppid + "/root" + secret), environ: tryRead("/proc/" + ppid + "/environ"), pids, self: process.pid, sub, cwdRead: fs.readFileSync("written-inside.txt", "utf8") }));',
     ].join("\n");
     const launch = wrapPiSpawn(process.execPath, ["-e", script, String(process.pid), secret], { mode: "auto", sockets: [], runtimeDirs: [], roDirs: [], credentialDirs: [] });
-    assert.ok(launch.args.includes("--unshare-pid") && launch.args.includes("--die-with-parent"));
+    assert.ok(launch.args.includes("--unshare-pid") && !launch.args.includes("--die-with-parent"));
     const res = await new Promise((resolve) => {
       const c = spawn(launch.cmd, launch.args, { env: launch.env, cwd: dir });
       let o = "", e = ""; c.stdout.on("data", (d) => (o += d)); c.stderr.on("data", (d) => (e += d));
@@ -478,8 +509,43 @@ test("integration: PID namespace + fresh /proc: no host process is visible; the 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("integration: close()'s group SIGTERM lets a sandboxed pi finish its SIGTERM drain", { skip: noSandbox }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-pi-drain-"));
+  mkdirSync(join(dir, "sessions"), { recursive: true });
+  const marker = join(dir, "drained");
+  const stub = join(dir, "stub-pi.mjs");
+  writeFileSync(stub, [
+    'import { writeFileSync } from "node:fs";',
+    `process.on("SIGTERM", () => setTimeout(() => { writeFileSync(${JSON.stringify(marker)}, "ok"); process.exit(0); }, 800));`,
+    'process.stdout.write(JSON.stringify({ type: "up" }) + "\\n");',
+    "setInterval(() => {}, 1000);",
+  ].join("\n"));
+  const prev = process.env.CROW_PI_SANDBOX;
+  delete process.env.CROW_PI_SANDBOX;
+  try {
+    const pi = new PiRpc({ def: {}, sessionDir: dir, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: process.execPath, cliPath: stub });
+    assert.equal(pi.sandboxed, true);
+    await pi.waitFor((m) => m.type === "up", 20000, "up");
+    await pi.close();
+    for (let i = 0; i < 40 && !existsSync(marker); i++) await new Promise((r) => setTimeout(r, 100));
+    assert.equal(existsSync(marker), true, "pi's SIGTERM handler ran to completion (no PDEATHSIG kill)");
+  } finally {
+    if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("countLivePi's scan counts a sandboxed pi ONCE in the nested topology", () => {
+  const W = `/usr/bin/bwrap --dev-bind / / --unshare-user --unshare-pid --proc /proc --info-fd 3 -- /n/node ${CLI} --mode rpc`;
+  const ps = [`  700    50   400   3000 ${W}`, `  701   700   400   1000 ${W}`, `  702   701   399 250000 /n/node ${CLI} --mode rpc`,
+    `  200    50    10 120000 /n/node ${CLI} --mode rpc`].join("\n");
+  assert.equal(listBridgePi({ _psOutput: ps }).length, 2, "one sandboxed + one plain pi");
+  const src = readFileSync(new URL("../scripts/pi-bots/pi_lifecycle.mjs", import.meta.url), "utf8");
+  assert.match(src, /export function countLivePi\(\) \{\n  return listBridgePi\(\)\.length;/);
+});
+
 test("listBridgePi folds a PID-namespace sandbox (outer bwrap -> inner bwrap -> pi) into ONE entry", () => {
-  const W = `/usr/bin/bwrap --dev-bind / / --unshare-user --unshare-pid --proc /proc --die-with-parent --info-fd 3 -- /n/node ${CLI} --mode rpc`;
+  const W = `/usr/bin/bwrap --dev-bind / / --unshare-user --unshare-pid --proc /proc --info-fd 3 -- /n/node ${CLI} --mode rpc`;
   const ps = [
     `  700    50   400   3000 ${W}`,
     `  701   700   400   1000 ${W}`,

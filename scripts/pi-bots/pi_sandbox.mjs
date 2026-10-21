@@ -16,7 +16,7 @@
  *  That is an operator decision, not made here.
  *
  * What this does, with no privilege, when bubblewrap is usable:
- *     bwrap --dev-bind / / --unshare-user --unshare-pid --proc /proc --die-with-parent
+ *     bwrap --dev-bind / / --unshare-user --unshare-pid --proc /proc
  *           --ro-bind /dev/null <docker.sock>...          docker API
  *           --tmpfs /run/user                             user bus, systemd
  *                                                         user manager, gnupg,
@@ -35,8 +35,8 @@
  *  *_SOCKET and *_SOCKET_PATH.
  *  - The masks are locked mounts: the child cannot unmount them, even from a
  *    nested user namespace (verified).
- *  - Its own PID namespace with a fresh /proc (--unshare-pid --proc /proc,
- *    --die-with-parent): no host process is even visible, so the gateway's
+ *  - Its own PID namespace with a fresh /proc (--unshare-pid --proc /proc;
+ *    not --die-with-parent, see BWRAP_BASE): no host process is even visible, so the gateway's
  *    and other bots' /proc/<pid>/{root,environ,mem} do not exist inside.
  *    This is structural, not a ptrace-policy outcome. (In its own user
  *    namespace those reads were already refused; PR_SET_DUMPABLE is not set:
@@ -82,9 +82,13 @@ import { basename, join } from "node:path";
 const BWRAP_CANDIDATES = ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
 const SETPRIV_CANDIDATES = ["/usr/bin/setpriv", "/bin/setpriv"];
 export const PROBE_RETRY_MS = 5 * 60 * 1000;
-/** Every sandboxed pi: own user + PID namespace, fresh /proc, dies with the
- *  wrapper. The probe uses the same flags, so "active" means all of them work. */
-export const BWRAP_BASE = Object.freeze(["--dev-bind", "/", "/", "--unshare-user", "--unshare-pid", "--proc", "/proc", "--die-with-parent"]);
+/** Every sandboxed pi: own user + PID namespace, fresh /proc. The probe uses
+ *  the same flags, so "active" means all of them work. NOT --die-with-parent:
+ *  close()'s group SIGTERM ends the outer bwrap at once, and PDEATHSIG would
+ *  then SIGKILL the namespace init, so pi's SIGTERM drain and MCP shutdown
+ *  would never run. A wrapper orphaned by a dead gateway is caught by the
+ *  reaper's orphan rule (ppid 1). */
+export const BWRAP_BASE = Object.freeze(["--dev-bind", "/", "/", "--unshare-user", "--unshare-pid", "--proc", "/proc"]);
 
 let probeCache = null; // { ok, bwrap, setpriv, reason, at }
 let warnedFor = null;
@@ -243,7 +247,7 @@ export function probePiSandbox(opts = {}) {
   if (!bwrap) reason = "bubblewrap (bwrap) is not installed";
   else {
     const err = runProbe(bwrap, [...BWRAP_BASE, "--", "/bin/true"]);
-    if (err == null) ok = true; else reason = "bwrap cannot create a user namespace here: " + err;
+    if (err == null) ok = true; else reason = "bwrap cannot create a user + PID namespace with a fresh /proc here (--unshare-user / --unshare-pid / --proc): " + err;
   }
   let setprivOk = false;
   if (!ok && setpriv) setprivOk = runProbe(setpriv, ["--no-new-privs", "/bin/true"]) == null;

@@ -165,6 +165,12 @@ export function verifyActorSig(args) {
 //    Unsandboxed bots are a KNOWN LIMIT: without bubblewrap a bot shell can
 //    read anything the service uid can, the credential copy included, which
 //    is exactly why shared-secret mode refuses to run without the sandbox.
+//    The sandbox mode is each SPAWNER's own CROW_PI_SANDBOX: this process
+//    can only check its own. A co-hosted same-uid process that spawns pi
+//    with the sandbox off runs unsandboxed bots that can read the credential
+//    copy of any unit they can reach. Known limit: keep CROW_PI_SANDBOX on
+//    (auto or required) for every Crow process on a host that holds the
+//    secret.
 //    The supervised Discord child gets the derived board key over stdin,
 //    like the per-boot key.
 // Scope: board only. Phone and artifacts signatures keep the per-boot key.
