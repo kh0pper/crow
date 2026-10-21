@@ -347,6 +347,20 @@ test("rule 6: a card a bot reparented into the subtree is 409 (deep too); a huma
   assert.equal(card(gone).project_id, PID_A, "archived kid stays put");
 });
 
+test("rule 6: an operator subtask a bot detached to top level is 409 subtree_blocked; a human detach is fine", async () => {
+  const parent = await opCard();
+  const sub = (await createCard(tdb, { title: "op sub", parent_id: parent, assigned_bot: "bot-a" }, HUMAN)).id;
+  await updateCard(tdb, sub, { parent_id: null }, BOT_A);
+  assert.equal((await cardProvenance(tdb, sub)).humanCreated, true, "provenance alone would pass");
+  await refusesCleanly(() => go(sub), [sub, parent], "subtree_blocked", 409);
+
+  const p2 = await opCard();
+  const sub2 = (await createCard(tdb, { title: "op sub 2", parent_id: p2, assigned_bot: "bot-a" }, HUMAN)).id;
+  await updateCard(tdb, sub2, { parent_id: null }, HUMAN);
+  await go(sub2);
+  assert.equal(card(sub2).assigned_bot, "bot-b");
+});
+
 // ---- rule 7: give-core checks pass through, before the claim ----
 
 test("rule 7: locked 409, finished 409, no_board 409 pass through with nothing written (grants kept)", async () => {
@@ -391,8 +405,9 @@ test("race: an assignee change between the checks and the claim is 409 changed, 
   assert.equal(audits(`card:${id}`).length, 0);
 });
 
-test("race: a lock taken between the checks and the write is 409 locked, nothing moved", async () => {
-  const id = await opCard();
+test("race: a lock taken between the checks and the write is 409 locked, nothing moved, the grant spent (fails closed)", async () => {
+  const id = (await createCard(tdb, { title: "granted", project_id: PID_A, assigned_bot: "bot-a" }, BOT_A)).id;
+  grant(id, ["bot-a"]);
   const rtdb = racingTdb(async () => {
     const c = raw();
     c.prepare("INSERT INTO bot_jobs (job_id, bot_id, goal, card_id, status) VALUES (?,?,?,?,?)").run("job-race-" + id, "bot-a", "work", id, "queued");
@@ -404,6 +419,49 @@ test("race: a lock taken between the checks and the write is 409 locked, nothing
   assert.equal(card(id).project_id, PID_A);
   assert.deepEqual(mutations(id).map((r) => r.verb), ["create"]);
   assert.equal(audits(`card:${id}`).length, 0);
+  assert.equal(JSON.parse(card(id).data_json).dispatch_grants, undefined, "the claim spent the grant; the operator grants again");
+});
+
+test("race: an operator revoke between the checks and the claim is 409 changed, nothing moved", async () => {
+  const id = (await createCard(tdb, { title: "granted", project_id: PID_A, assigned_bot: "bot-a" }, BOT_A)).id;
+  grant(id, ["bot-a", "bot-c"]);
+  const rtdb = racingTdb(async () => grant(id, ["bot-c"]));
+  const err = await refusal(dispatchCard(rtdb, cdb, { itemId: id, toBot: "bot-b" }, BOT_A));
+  assert.equal(err.code, "changed");
+  assert.equal(err.http, 409);
+  assert.equal(card(id).assigned_bot, "bot-a");
+  assert.equal(card(id).project_id, PID_A);
+  assert.deepEqual(JSON.parse(card(id).data_json).dispatch_grants, ["bot-c"], "the revoke stands, other grants untouched");
+  assert.deepEqual(mutations(id).map((r) => r.verb), ["create"]);
+  assert.equal(audits(`card:${id}`).length, 0);
+});
+
+test("race: a concurrent dispatch that already claimed the grant leaves this one 409 changed (no double spend)", async () => {
+  const id = (await createCard(tdb, { title: "granted", project_id: PID_A, assigned_bot: "bot-a" }, BOT_A)).id;
+  grant(id, ["bot-a"]);
+  // The other dispatch's claim lands first; its give has not run yet, so the
+  // assignee guard alone would still match.
+  const rtdb = racingTdb(() => tdb.execute({
+    sql: "UPDATE tasks_items SET data_json = json_remove(data_json, '$.dispatch_grants') WHERE id = ?", args: [id],
+  }));
+  const err = await refusal(dispatchCard(rtdb, cdb, { itemId: id, toBot: "bot-b" }, BOT_A));
+  assert.equal(err.code, "changed");
+  assert.equal(card(id).assigned_bot, "bot-a");
+  assert.deepEqual(mutations(id).map((r) => r.verb), ["create"]);
+});
+
+test("race: two concurrent grant-path dispatches, exactly one succeeds", async () => {
+  const id = (await createCard(tdb, { title: "granted", project_id: PID_A, assigned_bot: "bot-a" }, BOT_A)).id;
+  grant(id, ["bot-a"]);
+  const results = await Promise.allSettled([go(id, BOT_A, "bot-b"), go(id, BOT_A, "bot-c")]);
+  const ok = results.filter((r) => r.status === "fulfilled");
+  const bad = results.filter((r) => r.status === "rejected");
+  assert.equal(ok.length, 1, "exactly one succeeds");
+  assert.equal(bad.length, 1);
+  assert.ok(["changed", "not_assigned", "not_granted"].includes(bad[0].reason.code), bad[0].reason.code);
+  assert.equal(card(id).assigned_bot, ok[0].value.to);
+  assert.equal(mutations(id).filter((r) => r.verb === "dispatch").length, 1);
+  assert.equal(audits(`card:${id}`).length, 1);
 });
 
 // ---- the MCP wire ----
