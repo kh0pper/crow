@@ -284,13 +284,15 @@ export function recordRemovedLink({ recordPath, skill, bundle }) {
 /**
  * The one notification the boot pass posts for a kept, EDITED skill (once per
  * shipped version). Deleting an edited copy does NOT bring the new version
- * back (its record stays, so later boots read skip-deleted); an explicit
- * reinstall does. The text says so and links to the copy.
+ * back (its record stays, so later boots read skip-deleted). Installing an
+ * installed extension again is refused (409 already_installed), so the path
+ * that works is: delete the copy, uninstall (keeping data), install. The text
+ * says so and links to the copy.
  */
 export function keptSkillNotification({ bundle, skill }) {
   return {
     title: `Your edited skill "${skill}" was kept`,
-    body: `A newer version ships with the ${bundle} extension, but your copy was edited after install, so it was not replaced. Open it in Skills to see your copy. To switch to the new version, delete your copy and then reinstall ${bundle} from Extensions.`,
+    body: `A newer version ships with the ${bundle} extension, but your copy was edited after install, so it was not replaced. Open it in Skills to see your copy. To switch to the new version, delete your copy, then in Extensions uninstall ${bundle} (leave "Delete all stored data" unchecked) and install it again.`,
     action_url: `/dashboard/skills?edit=${encodeURIComponent(skill)}&source=user`,
     type: "system", source: "bundles",
   };

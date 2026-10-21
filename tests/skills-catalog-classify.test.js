@@ -69,6 +69,20 @@ test("an unedited copy with a newer shipped version (report mode / before boot) 
   assert.deepEqual(pick(w.row("kiosk")), { source: "ext", bundle: "kiosk", status: "update", basedOn: null, linked: false, replacesBuiltin: false, hasFile: true });
 });
 
+test("update ready only when this gateway's sync is on: report and off modes never apply it, so it reads on", () => {
+  const w = world().bundle("kiosk", { "kiosk.md": "# v2\n", "fresh.md": "# Fresh\n" }).installed("kiosk").user("kiosk.md", "# v1\n");
+  w.record({ "kiosk.md": { bundle: "kiosk", sha256: skillHash("# v1\n"), installedAt: "t" } });
+  assert.equal(w.row("kiosk", { mode: "on" }).status, "update");
+  assert.equal(w.row("fresh", { mode: "on" }).status, "update");
+  for (const mode of ["report", "off"]) {
+    assert.equal(w.row("kiosk", { mode }).status, "on", mode);
+    assert.equal(w.row("kiosk", { mode }).source, "ext", mode);
+    assert.equal(w.row("fresh", { mode }), undefined, `${mode}: a not-yet-installed skill is not listed`);
+  }
+  assert.equal(skillSyncPlan({ crowHome: w.home, appBundles: w.apps, mode: "report" }).mode, "report");
+  assert.equal(skillSyncPlan({ crowHome: w.home, appBundles: w.apps }).mode, "on", "defaults to the process mode (unset → on)");
+});
+
 test("an edited copy: behind when a newer version shipped since the edit, quiet when not", () => {
   const w = world().bundle("media", { "media.md": "# Media v2\n" }).installed("media").user("media.md", "# My media\n");
   w.record({ "media.md": { bundle: "media", sha256: skillHash("# Media v1\n"), installedAt: "t" } });
@@ -228,11 +242,13 @@ test("the report CLI prints the same lines as before it moved onto skillSyncPlan
   mkdirSync(app, { recursive: true });
   symlinkSync(w.apps, join(app, "bundles"));
   const cli = fileURLToPath(new URL("../scripts/ops/skill-sync-report.mjs", import.meta.url));
-  const r = spawnSync(process.execPath, [cli, "--home", w.home, "--app", app], { encoding: "utf8" });
+  const env = { ...process.env }; delete env.CROW_SKILL_SYNC;
+  const r = spawnSync(process.execPath, [cli, "--home", w.home, "--app", app], { encoding: "utf8", env });
   assert.equal(r.status, 0, r.stderr);
-  // Captured from the pre-change CLI (scripts/ops/skill-sync-report.mjs @ 71f3b363) on this fixture.
+  // Captured from the pre-change CLI (scripts/ops/skill-sync-report.mjs @ 71f3b363) on this
+  // fixture; only the header gained the mode it ran in.
   assert.equal(r.stdout.replace(w.home, "<home>").replace(join(app, "bundles"), "<app>/bundles"), [
-    "skill sync report — home <home>, source <app>/bundles",
+    "skill sync report — home <home>, source <app>/bundles, mode report (writes nothing; shows what a boot with CROW_SKILL_SYNC=on would do)",
     "  refresh          kiosk/kiosk.md",
     "  install          kiosk/fresh.md",
     "  kept-unverified  media/media.md",

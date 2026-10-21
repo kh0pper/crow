@@ -18,7 +18,7 @@
  */
 import { readFileSync, readdirSync, lstatSync, readlinkSync, openSync, fstatSync, closeSync, constants as fsConstants } from "node:fs";
 import { join, resolve, dirname, sep } from "node:path";
-import { syncBundleSkills, readSkillLedger, manifestSkillPaths } from "./bundle-skill-sync.js";
+import { syncBundleSkills, readSkillLedger, manifestSkillPaths, skillSyncMode } from "./bundle-skill-sync.js";
 
 const MAX_SKILL_BYTES = 1024 * 1024;
 const PURPOSE_MAX = 160;
@@ -194,9 +194,12 @@ export function installedBundleIds(crowHome) {
  * syncBundleSkills in REPORT mode (decides, writes nothing — not even the
  * record) over every installed first-party bundle, exactly like the boot
  * pass (routes/bundles.js) and the report CLI.
- * @returns {{ plan: Map<string, {bundle, skill, action, srcSha, rec}>, lines: Array, installedIds: string[] }}
+ * `mode` is THIS gateway's CROW_SKILL_SYNC (default: the process's). The plan
+ * is always computed in report mode; the mode is returned so a reader knows
+ * whether the next boot will actually apply it.
+ * @returns {{ plan: Map<string, {bundle, skill, action, srcSha, rec}>, lines: Array, installedIds: string[], mode: "on"|"report"|"off" }}
  */
-export function skillSyncPlan({ crowHome, appBundles }) {
+export function skillSyncPlan({ crowHome, appBundles, mode = skillSyncMode() }) {
   const installedIds = installedBundleIds(crowHome);
   const ledger = readSkillLedger(appBundles);
   const plan = new Map();
@@ -214,11 +217,33 @@ export function skillSyncPlan({ crowHome, appBundles }) {
       if (!plan.has(l.skill)) plan.set(l.skill, l);
     }
   }
-  return { plan, lines, installedIds };
+  return { plan, lines, installedIds, mode };
+}
+
+/**
+ * The repo bundle that ships skill basename `file` (installed or not), as
+ * {id, name}, or null. A user skill under that name would collide with the
+ * extension's copy the day it is installed.
+ */
+export function anyBundleShipping(appBundles, file) {
+  let ids;
+  try { ids = readdirSync(appBundles).filter(isValidBundleId).sort(); } catch { return null; }
+  for (const id of ids) {
+    const m = readJson(join(appBundles, id, "manifest.json"));
+    if (m && manifestSkillPaths(m).some((p) => p.split("/").pop() === file)) return { id, name: (typeof m.name === "string" && m.name) || id };
+  }
+  return null;
 }
 
 const EXT_COPY_ACTIONS = new Set(["same", "adopt", "refresh", "install", "skip-optout"]);
-/** The one rule for "an unedited extension copy" (badge + Save guard). */
+/**
+ * The one rule for "an extension copy" (badge, and PR 2's Save guard).
+ * CAUTION: for skip-optout ("refresh": false on the installed copy) the sync
+ * returns before hashing anything, so "unedited" is NOT verified there — the
+ * copy may already be edited. The badge accepts that; a Save guard must not
+ * treat an opted-out copy as provably unedited (it should hash it against the
+ * record itself, or guard it unconditionally).
+ */
 export function isExtensionCopy(entry) {
   return !!entry && EXT_COPY_ACTIONS.has(entry.action);
 }
@@ -263,11 +288,16 @@ function readRecordSafe(crowHome) {
  * Rows with hasFile:false (removed, a not-yet-installed update) have no file
  * to open; PR 1's table does not render them.
  */
-export function classifySkills({ crowHome, appBundles, repoDir, lang = "en", kitSkills = [], kitInstalled = false, ack = {} }) {
+export function classifySkills({ crowHome, appBundles, repoDir, lang = "en", kitSkills = [], kitInstalled = false, ack = {}, mode = skillSyncMode() }) {
   const userDir = join(crowHome, "skills");
   const userFiles = listSkillFiles(userDir);
   const repoFiles = new Set(listSkillFiles(repoDir));
-  const { plan, installedIds } = skillSyncPlan({ crowHome, appBundles });
+  const { plan, installedIds } = skillSyncPlan({ crowHome, appBundles, mode });
+  // "Update ready" means the next boot applies it — true only in mode "on".
+  // In report/off nothing is applied; PR 3's Apply/Restore actions will show
+  // those cases their own way. Until then a stale copy reads on and a
+  // not-yet-installed skill is not listed.
+  const applies = mode === "on";
   const record = readRecordSafe(crowHome);
   const manifests = new Map();
   const manifestOf = (id) => {
@@ -278,7 +308,7 @@ export function classifySkills({ crowHome, appBundles, repoDir, lang = "en", kit
   const shippedBy = (id, file) => { const m = manifestOf(id); return !!m && manifestSkillPaths(m).some((p) => p.split("/").pop() === file); };
 
   const names = new Set([...userFiles, ...repoFiles]);
-  for (const [file, e] of plan) if (e.action === "skip-deleted" || e.action === "install") names.add(file);
+  for (const [file, e] of plan) if (e.action === "skip-deleted" || (e.action === "install" && applies)) names.add(file);
 
   const rows = [];
   const userSet = new Set(userFiles);
@@ -300,7 +330,7 @@ export function classifySkills({ crowHome, appBundles, repoDir, lang = "en", kit
         else row.source = "yours";
       } else if (isExtensionCopy(entry)) {
         Object.assign(row, { source: "ext", bundle: entry.bundle });
-        if (entry.action === "refresh") row.status = "update";
+        if (entry.action === "refresh" && applies) row.status = "update";
       } else if (entry && (entry.action === "kept-edited" || entry.action === "kept-unverified")) {
         Object.assign(row, { source: "yours", basedOn: entry.bundle, bundle: entry.bundle });
         const acked = ack[file] && ack[file].srcSha && ack[file].srcSha === entry.srcSha;
@@ -320,7 +350,7 @@ export function classifySkills({ crowHome, appBundles, repoDir, lang = "en", kit
       }
     } else if (entry && entry.action === "skip-deleted") {
       Object.assign(row, { source: "ext", bundle: entry.bundle, status: "removed", hasFile: false, replacesBuiltin: repoFiles.has(file) });
-    } else if (entry && entry.action === "install") {
+    } else if (entry && entry.action === "install" && applies) {
       Object.assign(row, { source: "ext", bundle: entry.bundle, status: "update", hasFile: false, replacesBuiltin: repoFiles.has(file) });
     } else {
       row.path = join(repoDir, file);

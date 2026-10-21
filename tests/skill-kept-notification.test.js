@@ -12,7 +12,8 @@ import { keptSkillNotification } from "../servers/gateway/bundle-skill-sync.js";
 test("the kept-skill notification tells the truth and links to the copy", () => {
   const n = keptSkillNotification({ bundle: "media", skill: "media.md" });
   assert.equal(n.title, 'Your edited skill "media.md" was kept');
-  assert.equal(n.body, "A newer version ships with the media extension, but your copy was edited after install, so it was not replaced. Open it in Skills to see your copy. To switch to the new version, delete your copy and then reinstall media from Extensions.");
+  assert.equal(n.body, "A newer version ships with the media extension, but your copy was edited after install, so it was not replaced. Open it in Skills to see your copy. To switch to the new version, delete your copy, then in Extensions uninstall media (leave \"Delete all stored data\" unchecked) and install it again.");
+  assert.doesNotMatch(n.body, /reinstall/, "an installed extension can't be installed again (409 already_installed)");
   assert.doesNotMatch(n.body, /to get the new one/);
   assert.equal(n.action_url, "/dashboard/skills?edit=media.md&source=user");
   assert.equal(n.type, "system");

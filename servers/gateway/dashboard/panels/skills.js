@@ -22,7 +22,7 @@ import { resolveCrowHome } from "../../../shared/crow-home.js";
 import { atomicWrite, bundleShippingSkill, recordRemovedLink } from "../../bundle-skill-sync.js";
 import { normalizeSkillName } from "../../../../scripts/pi-bots/skill_proposals.mjs";
 import { invalidateContextCache } from "../../../memory/crow-context.js";
-import { classifySkills, parseSkillMeta } from "../../skills-catalog.js";
+import { classifySkills, parseSkillMeta, anyBundleShipping } from "../../skills-catalog.js";
 import { isWritingRulesTemplate } from "../../../shared/writing-rules.js";
 import { installedKitDir } from "../../../shared/design-kit.js";
 import { getInstanceSyncManager } from "../../../sharing/server.js";
@@ -280,16 +280,25 @@ export default {
         // A refused create re-renders the page (422) with everything typed
         // still in the form; a redirect would throw it away (audit A18).
         const typed = { filename: one(body.filename) ?? "", purpose: one(body.purpose) ?? "", content: one(body.content) ?? "" };
-        const refuse = (code, existing = null) => { createState = { code, typed, existing }; res.status(422); };
-        const isTaken = (f) => !!lstatOrNull(join(userSkillsDir(), f)) || existsSync(join(REPO_SKILLS_DIR, f));
+        const refuse = (code, existing = null, shippedBy = null) => { createState = { code, typed, existing, shippedBy }; res.status(422); };
+        const onDisk = (f) => !!lstatOrNull(join(userSkillsDir(), f)) || existsSync(join(REPO_SKILLS_DIR, f));
+        // A name any extension ships (installed or not) is taken too: the
+        // extension's copy would collide with it on install.
+        const isTaken = (f) => onDisk(f) || !!anyBundleShipping(APP_BUNDLES_DIR, f);
         const named = newSkillName(typed.filename, isTaken);
+        const shipper = named && !onDisk(named.file) ? anyBundleShipping(APP_BUNDLES_DIR, named.file) : null;
         if (!named) refuse("invalid-name");
-        else if (isTaken(named.file)) refuse("exists", { file: named.file, source: lstatOrNull(join(userSkillsDir(), named.file)) ? "user" : "repo" });
+        else if (onDisk(named.file)) refuse("exists", { file: named.file, source: lstatOrNull(join(userSkillsDir(), named.file)) ? "user" : "repo" });
+        else if (shipper) refuse("shipped", null, shipper.name);
         else {
-          // The same title under another file name is the same skill to a person.
+          // The same title under another file name is the same skill to a
+          // person: check yours and the built-ins.
           const key = titleKey(named.title);
-          const clash = readdirSafe(userSkillsDir()).find((f) => titleKey(parseSkillMeta(readSkillContent(join(userSkillsDir(), f)) || "", "en", f.replace(/\.md$/, "")).title) === key);
-          if (clash) refuse("exists", { file: clash, source: "user" });
+          const titleOf = (dir, f) => titleKey(parseSkillMeta(readSkillContent(join(dir, f)) || "", "en", f.replace(/\.md$/, "")).title);
+          const userClash = readdirSafe(userSkillsDir()).find((f) => titleOf(userSkillsDir(), f) === key);
+          const repoClash = userClash ? null : readdirSafe(REPO_SKILLS_DIR).find((f) => titleOf(REPO_SKILLS_DIR, f) === key);
+          if (userClash) refuse("exists", { file: userClash, source: "user" });
+          else if (repoClash) refuse("exists", { file: repoClash, source: "repo" });
           else if (!typed.content.trim()) refuse("empty");
           else {
             writeSkill(join(userSkillsDir(), named.file), newSkillText({ title: named.title, purpose: typed.purpose, content: typed.content }));
@@ -554,7 +563,9 @@ export default {
     if (cs) {
       const msg = cs.code === "exists"
         ? fill(t("skills.errorExistsNamed", lang), { name: cs.typed.filename.trim() })
-        : t(NOTICE_CODES[cs.code], lang);
+        : cs.code === "shipped"
+          ? fill(t("skills.errorShippedName", lang), { ext: cs.shippedBy })
+          : t(NOTICE_CODES[cs.code], lang);
       const open = cs.existing
         ? ` <a href="/dashboard/skills?edit=${encodeURIComponent(cs.existing.file)}&amp;source=${cs.existing.source}">${escapeHtml(t("skills.openExisting", lang))}</a>`
         : "";

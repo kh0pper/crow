@@ -1032,6 +1032,7 @@ export const translations = {
   "skills.makeOwnCopy": { en: "Make my own copy", es: "Hacer mi propia copia" },
   "skills.errorInvalidName": { en: "That name can't be used. Give it a name with at least one letter or number, up to 80 characters.", es: "Ese nombre no se puede usar. Ponle un nombre con al menos una letra o un número, de hasta 80 caracteres." },
   "skills.errorExistsNamed": { en: "You already have a skill called “{name}”. Pick another name: everything you typed is still here.", es: "Ya tienes una habilidad llamada “{name}”. Elige otro nombre: todo lo que escribiste sigue aquí." },
+  "skills.errorShippedName": { en: "An extension ({ext}) ships a skill with that file name, so it can't be used for yours. Pick another name: everything you typed is still here.", es: "Una extensión ({ext}) incluye una habilidad con ese nombre de archivo, así que no se puede usar para la tuya. Elige otro nombre: todo lo que escribiste sigue aquí." },
   "skills.openExisting": { en: "Open the existing one", es: "Abrir la existente" },
   "skills.errorExists": { en: "A skill with that name already exists, yours or built-in. Nothing was changed: pick another name, or open the existing skill.", es: "Ya existe una habilidad con ese nombre, tuya o integrada. No se cambió nada: elige otro nombre o abre la habilidad existente." },
   "skills.errorEmpty": { en: "The skill has no content, so nothing was saved.", es: "La habilidad no tiene contenido, así que no se guardó nada." },

@@ -27,8 +27,8 @@ const appBundles = join(app, "bundles");
 
 // The same report-mode pass the Skills panel reads (skills-catalog.js), so
 // this CLI and the panel can never disagree about what the next boot does.
-console.log(`skill sync report — home ${home}, source ${appBundles}`);
-const { lines } = skillSyncPlan({ crowHome: home, appBundles });
+console.log(`skill sync report — home ${home}, source ${appBundles}, mode report (writes nothing; shows what a boot with CROW_SKILL_SYNC=on would do)`);
+const { lines } = skillSyncPlan({ crowHome: home, appBundles, mode: "report" });
 const counts = {};
 for (const l of lines) {
   counts[l.action] = (counts[l.action] || 0) + 1;

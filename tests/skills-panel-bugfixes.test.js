@@ -223,6 +223,21 @@ test("create: a name in another script gets the first free skill-<n> file and ke
   rmSync(join(SKILLS, "skill-1.md")); rmSync(join(SKILLS, "skill-2.md"));
 });
 
+test("create refuses a file name an extension ships, installed or not, so a later install can't collide with it", async () => {
+  const r = await call({ method: "POST", body: { action: "create", filename: "Kiosk", content: "Mine." } });
+  const form = refused(r, "An extension (Kiosk display) ships a skill with that file name");
+  assert.ok(form.includes(">Mine.</textarea>"));
+  assert.equal(existsSync(join(SKILLS, "kiosk.md")), false);
+});
+
+test("create refuses a title a built-in already uses, and links to the built-in", async () => {
+  // skills/backup.md is titled "Backup & Restore"; the typed name's own file (backup--restore.md) is free.
+  const r = await call({ method: "POST", body: { action: "create", filename: "Backup & Restore", content: "x" } });
+  const form = refused(r, "You already have a skill called “Backup &amp; Restore”");
+  assert.match(form, /href="\/dashboard\/skills\?edit=backup\.md&amp;source=repo"/);
+  assert.equal(existsSync(join(SKILLS, "backup--restore.md")), false);
+});
+
 test("create: the same title under another file name is a conflict too (accents and case folded)", async () => {
   put("kitchen-x.md", "# Café Notes\n");
   const r = await call({ method: "POST", body: { action: "create", filename: "cafe notes", content: "x" } });
