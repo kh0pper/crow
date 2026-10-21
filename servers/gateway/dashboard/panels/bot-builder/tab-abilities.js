@@ -40,6 +40,7 @@ function sandboxOfferForm({ def, req, bot, botId, lang }) {
 }
 import { segGroup, card } from "./ui.js";
 import { offSkills } from "../../../../shared/skill-state.js";
+import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposals.mjs";
 
 function sourceRow(src, selected, lang, { memory = false } = {}) {
   const key = src.server;
@@ -211,7 +212,9 @@ export function renderSkillsCard({ def, lang, crowHome }) {
   const off = offSkills(crowHome);
   const selSkills = new Set(Array.isArray(def.skills) ? def.skills : []);
   const offNote = (s) => ` <a href="/dashboard/skills?skill=${encodeURIComponent(s)}" class="btb-muted">${escapeHtml(t("botbuilder.abSkillOff", lang))}</a>`;
-  const chip = (s) => `<label class="btb-chip${off.has(s) ? " btb-chip-off" : ""}"><input type="checkbox" name="skills" value="${escapeHtml(s)}"${selSkills.has(s) ? " checked" : ""}> <span>${escapeHtml(s)}</span>${off.has(s) ? offNote(s) : ""}</label>`;
+  // The off list holds normalised names; a stored name may differ in case.
+  const isOff = (s) => off.has(normalizeSkillName(s) || s);
+  const chip = (s) => `<label class="btb-chip${isOff(s) ? " btb-chip-off" : ""}"><input type="checkbox" name="skills" value="${escapeHtml(s)}"${selSkills.has(s) ? " checked" : ""}> <span>${escapeHtml(s)}</span>${isOff(s) ? offNote(s) : ""}</label>`;
   const claimed = new Set();
   let groups = "";
   for (const ext of listInstalledExtensions(crowHome)) {
@@ -226,7 +229,7 @@ export function renderSkillsCard({ def, lang, crowHome }) {
   if (general.length || missing.length) {
     groups += `<div class="btb-group"><label>${escapeHtml(t("botbuilder.skillsGroupGeneral", lang))}</label><div class="btb-chips">` +
       general.map(chip).join("") +
-      missing.map((s) => `<label class="btb-chip btb-chip-missing"><input type="checkbox" name="skills" value="${escapeHtml(s)}" checked> <span>${escapeHtml(s)}</span> <span class="btb-muted">${escapeHtml(t("botbuilder.abSkillMissing", lang))}</span></label>`).join("") +
+      missing.map((s) => isOff(s) ? chip(s) : `<label class="btb-chip btb-chip-missing"><input type="checkbox" name="skills" value="${escapeHtml(s)}" checked> <span>${escapeHtml(s)}</span> <span class="btb-muted">${escapeHtml(t("botbuilder.abSkillMissing", lang))}</span></label>`).join("") +
       `</div></div>`;
   }
   return card(t("botbuilder.abSkillsTitle", lang),

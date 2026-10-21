@@ -54,7 +54,7 @@ test("guard: every bot's usage equals skillNamesFor for that bot", () => {
     for (const row of BOTS.slice(0, 3)) {
       const def = JSON.parse(row.definition);
       const expect = skillNamesFor(def, { crowHome, kitInstalled, houseStyle: def.design ? { id: def.design.house_style } : null }).sort();
-      const got = [...u.entries()].filter(([, bots]) => bots.some((b) => b.botId === row.bot_id)).map(([n]) => n).sort();
+      const got = [...u.entries()].filter(([, bots]) => bots.some((b) => b.botId === row.bot_id && !b.voiceJobOnly)).map(([n]) => n).sort();
       assert.deepEqual(got, expect, `${row.bot_id} kit=${kitInstalled}`);
     }
   }
@@ -64,4 +64,13 @@ test("loadBotRows reads pi_bot_defs and survives a missing table", async () => {
   const rows = await loadBotRows({ execute: async () => ({ rows: BOTS }) });
   assert.equal(rows.length, 4);
   assert.deepEqual(await loadBotRows({ execute: async () => { throw new Error("no such table"); } }), []);
+});
+
+test("without the Design kit, a bot that selects a kit skill still counts, marked voice/job only (chat skips it, voice and jobs load it)", () => {
+  const rows = [bot("voice-desk", { skills: ["design-frontend", "media"] })];
+  const u = skillUsage({ crowHome, botRows: rows, kitInstalled: false, knownThemes: new Set() });
+  assert.deepEqual(u.get("design-frontend"), [{ botId: "voice-desk", name: "voice desk", paused: false, auto: false, voiceJobOnly: true }]);
+  assert.equal(u.get("media")[0].voiceJobOnly, undefined);
+  const withKit = skillUsage({ crowHome, botRows: rows, kitInstalled: true, knownThemes: new Set() });
+  assert.equal(withKit.get("design-frontend")[0].voiceJobOnly, undefined, "with the kit every path loads it");
 });

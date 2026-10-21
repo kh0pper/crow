@@ -186,3 +186,32 @@ test("a Design kit skill on a kit-less Crow keeps its switch and says where it s
   assert.match(row(es.body, "design-frontend"), /Los bots de chat la omiten/);
   rmSync(join(SKILLS, "design-frontend.md"));
 });
+
+test("an off name whose file is gone shows as Off · not installed, with its switch to turn it back on", async () => {
+  setup();
+  writeFileSync(STATE, JSON.stringify({ version: 1, off: ["gone-skill"] }));
+  const list = await call();
+  const r = row(list.body, "gone-skill");
+  assert.match(r, /Off · not installed/);
+  assert.match(sw(list.body, "gone-skill"), /aria-checked="false"/);
+  assert.match(r, /name="action" value="set-on"/);
+  assert.match(row((await call({ lang: "es" })).body, "gone-skill"), /Desactivada · no instalada/);
+});
+
+test("the switch column header is a state in Spanish, not a verb", async () => {
+  setup();
+  const es = await call({ lang: "es" });
+  assert.match(es.body, /data-label="Estado"/);
+  assert.doesNotMatch(es.body, />Activar</);
+});
+
+test("a kit skill a voice bot selects on a kit-less Crow is not shown as unused", async () => {
+  setup();
+  writeFileSync(join(SKILLS, "design-frontend.md"), "# Design frontend\n");
+  BOTS.push({ bot_id: "voice-desk", display_name: "Voice desk", enabled: 1, definition: JSON.stringify({ skills: ["design-frontend"] }) });
+  try {
+    const r = row((await call()).body, "design-frontend");
+    assert.doesNotMatch(r, /Not used by a bot/);
+    assert.match(r, /Used by 1 bot/);
+  } finally { BOTS.pop(); rmSync(join(SKILLS, "design-frontend.md")); }
+});

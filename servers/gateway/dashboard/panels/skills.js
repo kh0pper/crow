@@ -670,6 +670,21 @@ export default {
       ];
     });
 
+    // A name switched off whose skill file is gone (uninstalled, deleted):
+    // still listed, so it can be switched back on and the list cleaned up.
+    const listed = new Set(catalog.map((r) => r.name));
+    for (const name of [...offSet].sort()) {
+      if (listed.has(name) || EXEMPT_FROM_OFF.includes(name)) continue;
+      const focus = toggled === name ? " autofocus" : "";
+      rows.push([
+        `<span class="sk-name" data-skill="${escapeHtml(name)}" data-source="missing"><span class="sk-title">${escapeHtml(name)}</span></span>`,
+        `<span class="mono" style="font-size:0.8rem">${escapeHtml(name)}</span>`,
+        `<span class="sk-chips"><span class="sk-st sk-st-muted">${escapeHtml(t("skills.st.offMissing", lang))}</span></span>`,
+        `<form method="POST" class="sk-switch-form"><input type="hidden" name="action" value="set-on"><input type="hidden" name="skill" value="${escapeHtml(name)}"><button type="submit" class="sk-switch" role="switch" aria-checked="false" aria-label="${escapeHtml(name)}"${focus}><span class="sk-switch-track" aria-hidden="true"></span><span class="sk-switch-text">${escapeHtml(t("skills.st.off", lang))}</span></button></form>`,
+        "",
+      ]);
+    }
+
     // The toast after a switch: the status region starts empty and its text
     // goes in after load (a status region already holding text when the page
     // renders usually isn't announced). Counted after the write.

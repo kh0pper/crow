@@ -66,3 +66,24 @@ test("two homes are independent (a co-hosted instance has its own list)", () => 
   assert.deepEqual([...offSkills(a)], ["media"]);
   assert.deepEqual([...offSkills(b)], []);
 });
+
+test("a garbled file warns in the journal, once per file version (the fail-open must be visible)", async () => {
+  const { utimesSync } = await import("node:fs");
+  const h = home();
+  writeFileSync(join(h, SKILL_STATE_FILE), "{ garbled");
+  const warns = [];
+  const orig = console.warn;
+  console.warn = (...a) => warns.push(a.join(" "));
+  try {
+    readSkillState(h); readSkillState(h); offSkills(h);
+    assert.equal(warns.length, 1, warns.join("\n"));
+    assert.match(warns[0], /skill-state\.json can't be read; every skill is treated as on/);
+    const later = new Date(Date.now() + 5000);
+    utimesSync(join(h, SKILL_STATE_FILE), later, later);
+    readSkillState(h);
+    assert.equal(warns.length, 2, "a changed file warns again");
+    writeFileSync(join(h, SKILL_STATE_FILE), JSON.stringify({ version: 1, off: [] }));
+    readSkillState(h);
+    assert.equal(warns.length, 2, "a good file is quiet");
+  } finally { console.warn = orig; }
+});

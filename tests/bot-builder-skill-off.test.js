@@ -63,3 +63,10 @@ test("a save round-trip keeps an off skill the bot selected (the checkbox is pos
   await saveAbilities(def, { skills_rendered: "1", skills: posted, src_catalog: "{}" }, { lang: "en", changed: (k) => k === "skills" });
   assert.deepEqual([...def.skills].sort(), ["kept-on", "media"]);
 });
+
+test("the off check normalises the stored name (a bot that stored 'Media' still sees media as off)", () => {
+  const html = renderSkillsCard({ def: { skills: ["Media"] }, lang: "en", crowHome: process.env.CROW_HOME });
+  const chip = chipFor(html, "Media");
+  assert.match(chip, /btb-chip-off/);
+  assert.match(chip, /href="\/dashboard\/skills\?skill=Media"|href="\/dashboard\/skills\?skill=media"/);
+});

@@ -14,7 +14,7 @@
  *
  * The Skills panel imports this module lazily (it pulls bot-world.mjs in).
  */
-import { skillNamesFor } from "../../scripts/pi-bots/bot-world.mjs";
+import { skillNamesFor, KIT_SKILLS } from "../../scripts/pi-bots/bot-world.mjs";
 import { installedKitDir, readKitThemes, botThemeOf, pickHouseStyle } from "../shared/design-kit.js";
 
 /** pi_bot_defs rows, or [] when the table is missing / the query fails. */
@@ -39,11 +39,14 @@ export function skillUsage({ crowHome, botRows, kitInstalled = !!installedKitDir
     let names;
     try { names = skillNamesFor(def, { crowHome, kitInstalled, houseStyle: themeId ? { id: themeId } : null }); } catch { continue; }
     const explicit = new Set(Array.isArray(def.skills) ? def.skills : []);
-    for (const n of new Set(names)) {
-      if (typeof n !== "string") continue;
+    const add = (n, extra) => {
       if (!usage.has(n)) usage.set(n, []);
-      usage.get(n).push({ botId: row.bot_id, name: row.display_name || row.bot_id, paused: Number(row.enabled) === 0, auto: !explicit.has(n) });
-    }
+      usage.get(n).push({ botId: row.bot_id, name: row.display_name || row.bot_id, paused: Number(row.enabled) === 0, auto: !explicit.has(n), ...extra });
+    };
+    for (const n of new Set(names)) if (typeof n === "string") add(n);
+    // Without the kit, the chat spawn drops a selected kit skill, but voice
+    // and job runs load def.skills as selected: count it, marked as such.
+    if (!kitInstalled) for (const n of explicit) if (KIT_SKILLS.includes(n) && !names.includes(n)) add(n, { voiceJobOnly: true });
   }
   return usage;
 }

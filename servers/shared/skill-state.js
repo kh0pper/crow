@@ -17,7 +17,7 @@
  *
  * node: imports only — scripts/pi-bots/skill_resolver.mjs loads it.
  */
-import { readFileSync, existsSync, writeFileSync, renameSync, chmodSync, unlinkSync, mkdirSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, renameSync, chmodSync, unlinkSync, mkdirSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -34,19 +34,31 @@ export function skillStateName(raw) {
 
 const statePath = (crowHome) => join(crowHome, SKILL_STATE_FILE);
 
+// Fail-open must be visible in the journal: warn once per file version
+// (path + mtime), not on every read (the resolver reads it per spawn).
+const warnedFor = new Map();
+function warnUnreadable(p) {
+  let mtime = 0;
+  try { mtime = statSync(p).mtimeMs; } catch { /* gone meanwhile */ }
+  if (warnedFor.get(p) === mtime) return;
+  warnedFor.set(p, mtime);
+  console.warn(`[skills] ${p}: skill-state.json can't be read; every skill is treated as on until it is fixed or removed`);
+}
+
 /** @returns {{ ok: boolean, state: { version: 1, off: string[] } }} */
 export function readSkillState(crowHome) {
   const empty = { version: 1, off: [] };
   const p = statePath(crowHome);
   if (!existsSync(p)) return { ok: true, state: empty };
+  const bad = () => { warnUnreadable(p); return { ok: false, state: empty }; };
   try {
     const j = JSON.parse(readFileSync(p, "utf8"));
-    if (!j || typeof j !== "object" || Array.isArray(j)) return { ok: false, state: empty };
-    if (j.off !== undefined && !Array.isArray(j.off)) return { ok: false, state: empty };
+    if (!j || typeof j !== "object" || Array.isArray(j)) return bad();
+    if (j.off !== undefined && !Array.isArray(j.off)) return bad();
     const off = [...new Set((j.off || []).map(skillStateName).filter(Boolean))].sort();
     return { ok: true, state: { ...j, version: 1, off } };
   } catch {
-    return { ok: false, state: empty };
+    return bad();
   }
 }
 
