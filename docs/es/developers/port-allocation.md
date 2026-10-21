@@ -96,7 +96,6 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 | 11434 | 127.0.0.1 | ollama (existente) | existente |
 | 13378 | 127.0.0.1 | audiobookshelf (existente) | existente |
 | 18018 | 127.0.0.1 | design-kit, instancia de PRUEBA del renderizador (`scripts/design-kit/smoke-renderer.sh`; temporal, solo para pruebas) | Design kit v1 |
-| 18789 | 127.0.0.1 | openclaw-old-docker (proceso externo preexistente) | existente |
 | 19999 | 127.0.0.1 | netdata | MVP PR 2 |
 | 32400 | host | plex (red del host, existente) | existente |
 
