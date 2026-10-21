@@ -15,14 +15,14 @@
 
 import { escapeHtml, section, formField, badge, dataTable } from "../shared/components.js";
 import { t, tJs, fill } from "../shared/i18n.js";
-import { existsSync, readFileSync, unlinkSync, lstatSync, openSync, fstatSync, closeSync, constants as fsConstants } from "fs";
+import { existsSync, readFileSync, unlinkSync, readdirSync, lstatSync, openSync, fstatSync, closeSync, constants as fsConstants } from "fs";
 import { join, basename, dirname } from "path";
 import { fileURLToPath } from "url";
 import { resolveCrowHome } from "../../../shared/crow-home.js";
 import { atomicWrite, bundleShippingSkill, recordRemovedLink } from "../../bundle-skill-sync.js";
 import { normalizeSkillName } from "../../../../scripts/pi-bots/skill_proposals.mjs";
 import { invalidateContextCache } from "../../../memory/crow-context.js";
-import { classifySkills } from "../../skills-catalog.js";
+import { classifySkills, parseSkillMeta } from "../../skills-catalog.js";
 import { isWritingRulesTemplate } from "../../../shared/writing-rules.js";
 import { installedKitDir } from "../../../shared/design-kit.js";
 import { getInstanceSyncManager } from "../../../sharing/server.js";
@@ -59,20 +59,45 @@ function existingSkillName(raw) {
   return SKILL_FILE_RE.test(safe) ? safe : null;
 }
 
+/** Accents off ("Café" → "Cafe", "ñ" → "n"), for file names and comparisons. */
+const foldAccents = (s) => String(s).normalize("NFKD").replace(/\p{M}/gu, "");
+/** A title compared the way a person reads it: accents and case folded, spaces collapsed. */
+const titleKey = (s) => foldAccents(s).toLowerCase().replace(/\s+/g, " ").trim();
+
 /**
- * A NEW skill's file name from the create form: lowercase, whitespace runs →
- * "-", anything outside [a-z0-9_-] dropped, leading/trailing "-"/"_" trimmed,
- * then the bot resolver's own normalizeSkillName must accept it unchanged —
- * so a bot can always load what the panel made ("My Test Skill" →
- * my-test-skill.md). null when nothing valid is left.
+ * A NEW skill's file name from the create form: accents folded, lowercase,
+ * whitespace runs → "-", anything outside [a-z0-9_-] dropped, leading and
+ * trailing "-"/"_" trimmed, then the bot resolver's own normalizeSkillName
+ * must accept it unchanged, so a bot can always load what the panel made
+ * ("My Test Skill" → my-test-skill.md, "Café notes" → cafe-notes.md). A name
+ * with letters or digits only in another script ("日本") gets the first free
+ * skill-<n>.md (`isTaken(file)` says which are used); its title keeps the
+ * name as typed. null when the name has no letter or digit at all.
+ * @returns {{ file: string, title: string } | null}
  */
-function newSkillName(raw) {
+export function newSkillName(raw, isTaken = () => false) {
   if (typeof raw !== "string") return null;
-  let s = basename(raw).trim().toLowerCase();
-  if (s.endsWith(".md")) s = s.slice(0, -3);
-  s = s.replace(/\s+/g, "-").replace(/[^a-z0-9_-]/g, "").replace(/^[-_]+|[-_]+$/g, "");
-  if (!s || normalizeSkillName(s) !== s) return null;
-  return s + ".md";
+  let title = basename(raw).trim();
+  if (title.toLowerCase().endsWith(".md")) title = title.slice(0, -3).trim();
+  const s = foldAccents(title).toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9_-]/g, "").replace(/^[-_]+|[-_]+$/g, "");
+  if (s) return normalizeSkillName(s) === s ? { file: s + ".md", title } : null;
+  if (!/[\p{L}\p{N}]/u.test(title) || title.length > 80) return null;
+  for (let n = 1; n < 10000; n++) if (!isTaken(`skill-${n}.md`)) return { file: `skill-${n}.md`, title };
+  return null;
+}
+
+/** The text a create writes: an optional purpose in frontmatter, then a heading unless the instructions bring one. */
+function newSkillText({ title, purpose, content }) {
+  const p = (purpose || "").replace(/\s+/g, " ").trim();
+  const fm = p ? `---\ndescription: ${/^[\s\-?[\]{}#&*!|>'"%@`]|[:#]/.test(p) ? JSON.stringify(p) : p}\n---\n` : "";
+  const body = toLf(content);
+  if (/^\s*#\s/.test(body)) return fm + body;
+  return `${fm}# ${title}\n\n${body.replace(/^\n+/, "")}${body.endsWith("\n") ? "" : "\n"}`;
+}
+
+/** The skill files in a directory, or [] when it can't be read. */
+function readdirSafe(dir) {
+  try { return readdirSync(dir).filter((f) => SKILL_FILE_RE.test(f)).sort(); } catch { return []; }
 }
 
 function lstatOrNull(p) {
@@ -161,12 +186,14 @@ export default {
 
   async handler(req, res, { db, layout, lang }) {
     // Handle POST actions
+    // Set by a refused create: the list renders again with the form filled in.
+    let createState = null;
     if (req.method === "POST") {
       const body = req.body || {};
       // A repeated field arrives as an array (urlencoded, extended:false) —
       // e.g. the old nested Save/Delete forms posted action=save&action=delete.
       // Refuse it outright rather than fall through to a 200 list render.
-      for (const k of ["action", "filename", "content", "sectionKey"]) {
+      for (const k of ["action", "filename", "content", "sectionKey", "purpose"]) {
         if (body[k] !== undefined && typeof body[k] !== "string") {
           // text/html so Turbo shows it (a text/plain 4xx is dropped silently).
           res.status(400);
@@ -250,16 +277,26 @@ export default {
       }
 
       if (action === "create") {
-        const safeName = newSkillName(body.filename);
-        const content = one(body.content);
-        if (!safeName) return back("invalid-name");
-        if (!content || !content.trim()) return back("empty");
-        const filePath = join(userSkillsDir(), safeName);
-        // Exists in either dir: shadowing a built-in goes through Override (A12).
-        if (lstatOrNull(filePath) || existsSync(join(REPO_SKILLS_DIR, safeName))) return back("exists");
-        writeSkill(filePath, content);
-        res.redirectAfterPost("/dashboard/skills?created=" + encodeURIComponent(safeName));
-        return;
+        // A refused create re-renders the page (422) with everything typed
+        // still in the form; a redirect would throw it away (audit A18).
+        const typed = { filename: one(body.filename) ?? "", purpose: one(body.purpose) ?? "", content: one(body.content) ?? "" };
+        const refuse = (code, existing = null) => { createState = { code, typed, existing }; res.status(422); };
+        const isTaken = (f) => !!lstatOrNull(join(userSkillsDir(), f)) || existsSync(join(REPO_SKILLS_DIR, f));
+        const named = newSkillName(typed.filename, isTaken);
+        if (!named) refuse("invalid-name");
+        else if (isTaken(named.file)) refuse("exists", { file: named.file, source: lstatOrNull(join(userSkillsDir(), named.file)) ? "user" : "repo" });
+        else {
+          // The same title under another file name is the same skill to a person.
+          const key = titleKey(named.title);
+          const clash = readdirSafe(userSkillsDir()).find((f) => titleKey(parseSkillMeta(readSkillContent(join(userSkillsDir(), f)) || "", "en", f.replace(/\.md$/, "")).title) === key);
+          if (clash) refuse("exists", { file: clash, source: "user" });
+          else if (!typed.content.trim()) refuse("empty");
+          else {
+            writeSkill(join(userSkillsDir(), named.file), newSkillText({ title: named.title, purpose: typed.purpose, content: typed.content }));
+            res.redirectAfterPost("/dashboard/skills?created=" + encodeURIComponent(named.file));
+            return;
+          }
+        }
       }
 
       if (action === "save-writing-rules") {
@@ -322,7 +359,7 @@ export default {
     }
 
     // Handle writing rules edit view
-    const query = req.query || {};
+    const query = createState ? {} : (req.query || {});
     const editParam = one(query.edit); // a repeated ?edit= reads as absent (was a 500)
     if (editParam === "writing-rules") {
       const result = await db.execute({
@@ -507,11 +544,30 @@ export default {
       ? `<div class="empty-state"><h3>${t("skills.noSkillsFound", lang)}</h3><p>${t("skills.skillsDirectory", lang)}</p></div>`
       : SKILLS_TABLE_CSS + dataTable([t("skills.tableName", lang), t("skills.tableFile", lang), t("skills.tableSource", lang), t("skills.tableActions", lang)], rows, { stack: true });
 
-    // Create form
-    const createForm = `<form method="POST">
+    // Create form. After a refused create (422) it holds what was typed, the
+    // error sits inside it, and the field to fix has autofocus, so the
+    // re-rendered page lands on the form (audit A18; on a phone it is far
+    // down the page).
+    const cs = createState;
+    const typedVal = (k) => (cs ? cs.typed[k] : "");
+    let createError = "";
+    if (cs) {
+      const msg = cs.code === "exists"
+        ? fill(t("skills.errorExistsNamed", lang), { name: cs.typed.filename.trim() })
+        : t(NOTICE_CODES[cs.code], lang);
+      const open = cs.existing
+        ? ` <a href="/dashboard/skills?edit=${encodeURIComponent(cs.existing.file)}&amp;source=${cs.existing.source}">${escapeHtml(t("skills.openExisting", lang))}</a>`
+        : "";
+      createError = `<div class="skills-notice" role="alert" style="margin-bottom:1rem;padding:0.75rem 1rem;border:1px solid var(--crow-border);border-left:3px solid var(--crow-error);border-radius:8px;background:var(--crow-bg-elevated)">${escapeHtml(msg)}${open}</div>`;
+    }
+    const focusField = cs ? (cs.code === "empty" ? "content" : "filename") : null;
+    const withFocus = (html, name) => (focusField === name ? html.replace(`id="field-${name}"`, `id="field-${name}" autofocus`) : html);
+    const createForm = `<form method="POST" id="skill-create">
       <input type="hidden" name="action" value="create">
-      ${formField(t("skills.filenameLabel", lang), "filename", { placeholder: t("skills.filenamePlaceholder", lang), required: true })}
-      ${formField(t("skills.contentLabel", lang), "content", { type: "textarea", required: true, placeholder: t("skills.contentPlaceholder", lang), rows: 10 })}
+      ${createError}
+      ${withFocus(formField(t("skills.filenameLabel", lang), "filename", { placeholder: t("skills.filenamePlaceholder", lang), required: true, value: typedVal("filename") }), "filename")}
+      ${formField(t("skills.purposeLabel", lang), "purpose", { value: typedVal("purpose") })}
+      ${withFocus(formField(t("skills.contentLabel", lang), "content", { type: "textarea", required: true, placeholder: t("skills.contentPlaceholder", lang), rows: 10, value: typedVal("content") }), "content")}
       <button type="submit" class="btn btn-primary">${t("skills.createSkill", lang)}</button>
     </form>`;
 
