@@ -19,13 +19,19 @@
  *   (ctx.fallback "calendar", rev 2.1), validate, hold the call as the device's pending "routine" entry and
  *   ask; nothing is written until a spoken yes reaches fastPath. Under "standard" the adds run at once.
  *
+ * - Where a calendar event or a Workspace task goes (PR 2.1 Task 6, the operator's decision): the operator's chosen id;
+ *   else a writable calendar or list Crow bot owns (`shared: false` from the Workspace listing; a missing field counts
+ *   as shared); else, for the calendar under "auto" only, Google's primary when Google is connected; else, for tasks
+ *   under "auto", a board card; else Crow asks once which one ("which_calendar" pending entry), and the spoken name is
+ *   the answer and the yes. Crow never writes to a shared calendar or list nobody chose; the choice is never saved.
+ *
  * The own tools are exempt from the turn's policy gate only because turn.js runs them from the loaded own-tool
  * set (ownByName); VOICE_OWN_TOOL_NAMES is for listing them (Bot Builder, the editor), never for skipping a gate.
  */
 import { normalizeVoiceSettings, isVoiceBotDef } from "../../shared/voice-bot.js";
 import { ROUTINE_OBJECTS, namesRoutineObjects } from "./routine-objects.js";
 import { isObjectWord, hasDayTime } from "./stt-rewrite.js";
-import { phraseWords } from "./tool-families.js";
+import { phraseWords, listMatches } from "./tool-families.js";
 import { voiceLine } from "./voice-lines.js";
 import { matchYesNo } from "./pending.js";
 
@@ -66,7 +72,7 @@ export function calendarAddIntent(transcript) {
   return !named.includes("reminders") && !named.includes("tasks");
 }
 
-/** How long a calendar or task list found by listing stays chosen (per process). */
+/** How long a calendar or task list Crow bot owns, found by listing, stays picked (per process). Never a shared one. */
 export const OWN_ID_CACHE_MS = 10 * 60 * 1000;
 
 /** The board card's author: the owner, speaking through Crow's voice. */
@@ -341,9 +347,17 @@ function validateNow(tool, raw, { tz, lang, now, transcript }) {
   return bad("Unknown tool.");
 }
 
-const successLine = (tool, v, lang) => (tool === "crow_calendar_add_event" ? voiceLine("calendar_added", lang, { title: v.args.title, when: v.when })
-  : tool === "crow_reminder_add" ? voiceLine("reminder_set", lang, { when: v.when, text: v.args.text })
-    : voiceLine("task_added", lang, { title: v.args.title }));
+/**
+ * The success line. `target.say` (resolveTarget): "your" (Google primary, the operator's chosen one, the board), "crow"
+ * (a calendar or list Crow bot owns, picked on its own) or "named" (the one the user named answering the which-question):
+ * a write anywhere but primary or the chosen one is audible.
+ */
+function successLine(tool, v, lang, target) {
+  if (tool === "crow_reminder_add") return voiceLine("reminder_set", lang, { when: v.when, text: v.args.text });
+  const how = target?.say === "crow" ? "_crow" : target?.say === "named" ? "_named" : "";
+  if (tool === "crow_calendar_add_event") return voiceLine(`calendar_added${how}`, lang, { title: v.args.title, when: v.when, calendar: target?.name ?? "" });
+  return voiceLine(`task_added${how}`, lang, { title: v.args.title, list: target?.name ?? "" });
+}
 const pastLine = (tool, v, lang) => (tool === "crow_calendar_add_event" ? voiceLine("past_confirm_calendar", lang, { title: v.args.title, next_when: v.nextWhen })
   : tool === "crow_reminder_add" ? voiceLine("past_confirm_reminder", lang, { next_when: v.nextWhen, text: v.args.text })
     : voiceLine("past_confirm_task", lang, { title: v.args.title, next_when: v.nextWhen }));
@@ -437,6 +451,46 @@ const DEFINITIONS = Object.freeze({
 });
 const OBJECT_OF = Object.freeze({ crow_calendar_add_event: "calendar", crow_reminder_add: "reminders", crow_task_add: "tasks" });
 
+// ─── Which calendar or task list (PR 2.1 Task 6) ───
+/** At most this many choices are read out. */
+const MAX_CHOICES = 4;
+/** Only Crow bot's own calendar or list is ever picked without a choice; a missing `shared` field counts as shared. */
+const isOwned = (x) => x?.shared === false;
+const usable = (x) => x && x.writable === true && typeof x.id === "string" && x.id;
+/**
+ * The spoken name: Nextcloud shows a collection someone shared with Crow bot as "Menu (admin)"; the owner is dropped.
+ * Mirrors baseOf in the Workspace bundle (bundles/workspace/server/pim/caldav.js; same pattern): core cannot import a bundle.
+ */
+const baseName = (name) => String(name ?? "").replace(/\s+\([^()]*\)$/, "");
+/** Up to MAX_CHOICES writable entries as { id, name }; two with the same spoken name keep their full names. */
+function choicesOf(items) {
+  const picked = items.filter(usable).slice(0, MAX_CHOICES).map((x) => ({ id: x.id, full: String(x.name || x.id), name: baseName(x.name || x.id) || x.id }));
+  const key = (n) => phraseWords(n).join(" ");
+  return picked.map((c) => ({ id: c.id, name: picked.filter((o) => key(o.name) === key(c.name)).length > 1 ? c.full : c.name }));
+}
+/** "Personal or Menu" / "Personal, Menu o Familia". */
+function joinOr(names, lang) {
+  if (names.length <= 1) return names[0] || "";
+  return voiceLine("which_or", lang, { rest: names.slice(0, -1).join(", "), last: names.at(-1) });
+}
+/**
+ * The option the answer names: case and accents ignored; the whole answer equal to a name beats a name inside it, and a
+ * longer name beats a shorter one. Two equally good → null (never guessed).
+ */
+export function matchChoice(transcript, options) {
+  const words = phraseWords(transcript);
+  if (!words.length || !Array.isArray(options)) return null;
+  const said = words.join(" ");
+  let best = null; let bestScore = 0; let tie = false;
+  for (const o of options) {
+    const ow = phraseWords(String(o?.name ?? ""));
+    if (!ow.length) continue;
+    const score = said === ow.join(" ") ? 1000 : listMatches(words, [ow]) ? ow.length : 0;
+    if (score > bestScore) { best = o; bestScore = score; tie = false; } else if (score && score === bestScore) tie = true;
+  }
+  return best && !tie ? best : null;
+}
+
 async function defaultOpenTasksDb() {
   const { createDbClient } = await import("../../db.js");
   const { tasksDbPath } = await import("../../../scripts/pi-bots/instance-paths.mjs");
@@ -486,15 +540,48 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
     return body.success === true && "data" in body ? body.data : body;
   }
 
-  /** The first writable calendar or task list, by listing once (cached OWN_ID_CACHE_MS). null when none. */
-  async function firstWritable(kind, executor) {
-    const hit = idCache.get(kind);
-    if (hit && now() - hit.at < OWN_ID_CACHE_MS) return hit.id;
+  /** Every calendar or task list the Workspace listing gives (writable or not). */
+  async function listTargets(kind, executor) {
     const data = await callTool(executor, kind === "calendar" ? "ws_cal_list_calendars" : "ws_tasks_list_lists", {});
-    const items = Array.isArray(data?.[kind === "calendar" ? "calendars" : "lists"]) ? data[kind === "calendar" ? "calendars" : "lists"] : [];
-    const id = items.find((x) => x && x.writable === true && typeof x.id === "string" && x.id)?.id || null;
-    if (id) idCache.set(kind, { id, at: now() });
-    return id;
+    const items = data?.[kind === "calendar" ? "calendars" : "lists"];
+    return Array.isArray(items) ? items : [];
+  }
+
+  /**
+   * Where this add goes (the rules in the header). → { backend: "google"|"workspace"|"board", id?, name?, say } or
+   * { ask: [{ id, name }] } (nobody chose one and Crow owns none). Throws when nothing can take it (no writable one).
+   * The cache only ever holds a calendar or list Crow bot owns.
+   */
+  async function resolveTarget(tool, settings, executor) {
+    const kind = tool === "crow_calendar_add_event" ? "calendar" : "tasks";
+    const r = settings.routine;
+    const backend = resolveBackends(settings, connectedNow())[kind];
+    if (!backend) throw new Error("no backend");
+    if (backend === "board") return { backend: "board", say: "your" };
+    const chosen = kind === "calendar" ? r.calendar.calendar : r.tasks.list;
+    if (backend === "google") return { backend: "google", id: chosen || "primary", say: "your" };
+    if (chosen) return { backend: "workspace", id: chosen, say: "your" };
+    const auto = (kind === "calendar" ? r.calendar.backend : r.tasks.backend) === "auto";
+    const hit = idCache.get(kind);
+    if (hit && now() - hit.at < OWN_ID_CACHE_MS) return { backend: "workspace", id: hit.id, say: "crow" };
+    let items;
+    try { items = await listTargets(kind, executor); }
+    catch (err) { if (kind === "tasks" && auto) return { backend: "board", say: "your" }; throw err; }
+    const own = items.find((x) => usable(x) && isOwned(x));
+    if (own) { idCache.set(kind, { id: own.id, at: now() }); return { backend: "workspace", id: own.id, say: "crow" }; }
+    if (auto && kind === "calendar" && connectedNow().has("gcal_create_event")) return { backend: "google", id: "primary", say: "your" };
+    if (auto && kind === "tasks") return { backend: "board", say: "your" };   // auto: no list of Crow's own → the board
+    const ask = choicesOf(items);
+    if (!ask.length) throw new Error(`no writable ${kind === "calendar" ? "calendar" : "task list"}`);
+    return { ask };
+  }
+
+  /** Hold the add as this device's which-question and say it. No device → nothing is asked or written. */
+  function askWhich(deviceId, tool, v, options, lang, tz) {
+    if (!deviceId) return { ...BACKEND_ERROR };
+    const say = voiceLine(tool === "crow_calendar_add_event" ? "which_calendar_ask" : "which_list_ask", lang, { options: joinOr(options.map((o) => o.name), lang) });
+    pending.set(deviceId, { kind: "which_calendar", tool, args: v.args, options, say, lang, tz });
+    return { ok: true, effect: false, code: "needs_confirm", final: true, say };
   }
 
   async function boardCard(v, settings) {
@@ -505,44 +592,42 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
     } finally { try { tdb.close(); } catch {} }
   }
 
-  /** Write a validated call. → the result object; a failure is BACKEND_ERROR (logged, never spoken as success). */
-  async function perform(tool, v, { db, executor, settings, lang }) {
-    const backend = resolveBackends(settings, connectedNow())[OBJECT_OF[tool]];
+  /**
+   * Write a validated call. → the result object; a failure is BACKEND_ERROR (logged, never spoken as success); with no
+   * target given and none resolving, { ask } (nothing written: the caller asks which one).
+   */
+  async function perform(tool, v, { db, executor, settings, lang, target = null }) {
+    let t = target;
     try {
-      if (!backend) throw new Error("no backend");
-      if (tool === "crow_calendar_add_event") {
-        const a = v.args;
-        if (backend === "workspace") {
-          const calendar = settings.routine.calendar.calendar || await firstWritable("calendar", executor);
-          if (!calendar) throw new Error("no writable calendar");
-          await callTool(executor, "ws_cal_create_event", { calendar, summary: a.title, start: a.start, end: a.end });
-        } else {
-          // Google's all-day end is exclusive: a same-day end becomes the next day.
-          const end = a.all_day && a.end <= a.start ? nextDay(a.start) : a.end;
-          await callTool(executor, "gcal_create_event", { summary: a.title, start: a.start, end, calendar_id: settings.routine.calendar.calendar || "primary" });
-        }
-      } else if (tool === "crow_reminder_add") {
+      if (tool === "crow_reminder_add") {
+        if (!resolveBackends(settings, connectedNow()).reminders) throw new Error("no backend");
         await db.execute({
           sql: "INSERT INTO schedules (task, cron_expression, description, next_run) VALUES ('reminder:' || ?, '@once', 'Set by Crow''s voice', ?)",
           args: [v.args.text, v.atIso],
         });
-      } else if (backend === "workspace") {
-        let list = settings.routine.tasks.list;
-        if (!list) {
-          try { list = await firstWritable("tasks", executor); }
-          catch (err) { if (settings.routine.tasks.backend !== "auto") throw err; list = null; }
-        }
-        if (list) await callTool(executor, "ws_task_create", { list, summary: v.args.title, ...(v.args.due ? { due: v.args.due } : {}) });
-        else if (settings.routine.tasks.backend === "auto") await boardCard(v, settings);   // auto: no list resolves → the board
-        else throw new Error("no writable task list");
       } else {
-        await boardCard(v, settings);
+        if (!t) t = await resolveTarget(tool, settings, executor);
+        if (t.ask) return { ask: t.ask };
+        if (tool === "crow_calendar_add_event") {
+          const a = v.args;
+          if (t.backend === "workspace") {
+            await callTool(executor, "ws_cal_create_event", { calendar: t.id, summary: a.title, start: a.start, end: a.end });
+          } else {
+            // Google's all-day end is exclusive: a same-day end becomes the next day.
+            const end = a.all_day && a.end <= a.start ? nextDay(a.start) : a.end;
+            await callTool(executor, "gcal_create_event", { summary: a.title, start: a.start, end, calendar_id: t.id });
+          }
+        } else if (t.backend === "workspace") {
+          await callTool(executor, "ws_task_create", { list: t.id, summary: v.args.title, ...(v.args.due ? { due: v.args.due } : {}) });
+        } else {
+          await boardCard(v, settings);
+        }
       }
     } catch (err) {
       log(`[voice-own-tools] ${tool} not written (${String(err?.message || err).slice(0, 120)})`);
       return { ...BACKEND_ERROR };
     }
-    return { ok: true, code: "added", final: true, say: successLine(tool, v, lang), write: writeOf(tool, v) };
+    return { ok: true, code: "added", final: true, say: successLine(tool, v, lang, t), write: writeOf(tool, v) };
   }
 
   /** → { tools, unavailable } for one voice turn (turn.js deps.ownTools). */
@@ -562,16 +647,26 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
           const v = validate(name, args, { tz: zone, lang, now: now(), transcript: ctx.transcript });
           if (v.error) return JSON.stringify({ ok: false, code: v.code || "bad_args", message: v.error });
           const offer = ctx.fallback === "calendar" && name === "crow_reminder_add";
-          // ctx.confirm (turn.js): a stray call on a tool offered only through carry-over asks first, as under "strict".
-          // A past date always asks (PR 2.1): the held call is the next occurrence, written only on a yes.
-          if (v.past || offer || settings.confirm === "strict" || ctx.confirm === true) {
-            const deviceId = ctx.device?.id;
+          const deviceId = ctx.device?.id;
+          const hold = (say) => {
             if (!deviceId) return JSON.stringify(BACKEND_ERROR);   // no device to hold the question: nothing is asked or written
-            const say = v.past ? pastLine(name, v, lang) : offer ? voiceLine("calendar_fallback_offer", lang, { when: v.when, text: v.args.text }) : confirmLine(name, v, lang);
             pending.set(deviceId, { kind: "routine", tool: name, args: v.args, say, lang, tz: zone });
             return JSON.stringify({ ok: true, effect: false, code: "needs_confirm", final: true, say });
+          };
+          // A past date always asks (PR 2.1): the held call is the next occurrence, written only on a yes (and the
+          // which-question, when one is needed, follows that yes).
+          if (v.past || offer) return hold(v.past ? pastLine(name, v, lang) : voiceLine("calendar_fallback_offer", lang, { when: v.when, text: v.args.text }));
+          // Where it goes comes first (Task 6): with nothing chosen and nothing of Crow's own, the which-question is the
+          // only question, even under "strict" or ctx.confirm; naming one is the yes.
+          let target = null;
+          if (name !== "crow_reminder_add") {
+            try { target = await resolveTarget(name, settings, ctx.executor); }
+            catch (err) { log(`[voice-own-tools] ${name} not written (${String(err?.message || err).slice(0, 120)})`); return JSON.stringify(BACKEND_ERROR); }
+            if (target.ask) return JSON.stringify(askWhich(deviceId, name, v, target.ask, lang, zone));
           }
-          return JSON.stringify(await perform(name, v, { db: ctx.db, executor: ctx.executor, settings, lang }));
+          // ctx.confirm (turn.js): a stray call on a tool offered only through carry-over asks first, as under "strict".
+          if (settings.confirm === "strict" || ctx.confirm === true) return hold(confirmLine(name, v, lang));
+          return JSON.stringify(await perform(name, v, { db: ctx.db, executor: ctx.executor, settings, lang, target }));
         },
       };
     });
@@ -588,6 +683,7 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
     const id = device?.id;
     if (!id) return null;
     const peek = pending.get(id);
+    if (peek?.kind === "which_calendar") return answerWhich({ id, db, transcript, lang, bot, executor });
     if (!peek || peek.kind !== "routine") return null;
     const answer = matchYesNo(transcript);
     if (!answer) return null;
@@ -600,13 +696,37 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
     const settings = normalizeVoiceSettings(bot);
     const v = validate(entry.tool, entry.args, { tz: entry.tz, lang: speak, now: now() });
     const res = v.error || v.past ? null : await perform(entry.tool, v, { db, executor, settings, lang: speak });
+    if (res?.ask) {
+      const q = askWhich(id, entry.tool, v, res.ask, speak, entry.tz);
+      return q.ok ? { say: q.say, verb: "which_ask" } : { say: voiceLine("not_done_say", speak), verb: "routine_failed" };
+    }
     return res?.ok === true ? { say: res.say, verb: "routine_yes", write: res.write } : { say: voiceLine("not_done_say", speak), verb: "routine_failed" };
   }
 
-  /** deps.voiceActions.turnContext (synchronous): while a routine question waits, the turn says so. */
+  /**
+   * The answer to this device's which-question (any answer ends it): a no, or no single name matched, declines; a name
+   * writes the held item once to that one (validated again, under the voice bot's current settings), then the hint.
+   * Nothing is saved to the bot.
+   */
+  async function answerWhich({ id, db, transcript, lang, bot, executor }) {
+    const entry = pending.take(id);
+    if (!entry || entry.kind !== "which_calendar" || !Object.hasOwn(DEFINITIONS, entry.tool)) return null;
+    const speak = lang || entry.lang;
+    const pick = matchYesNo(transcript) === "no" ? null : matchChoice(transcript, entry.options);
+    if (!pick) return { say: voiceLine("declined", speak), verb: "which_no" };
+    if (!bot || !isVoiceBotDef(bot)) return { say: voiceLine("not_done_say", speak), verb: "which_failed" };
+    const settings = normalizeVoiceSettings(bot);
+    const v = validate(entry.tool, entry.args, { tz: entry.tz, lang: speak, now: now() });
+    // The named one is written only while this object still goes to Workspace (the settings may have changed since).
+    const still = resolveBackends(settings, connectedNow())[OBJECT_OF[entry.tool]] === "workspace";
+    const res = v.error || v.past || !still ? null : await perform(entry.tool, v, { db, executor, settings, lang: speak, target: { backend: "workspace", id: pick.id, name: pick.name, say: "named" } });
+    return res?.ok === true ? { say: `${res.say} ${voiceLine("which_hint", speak)}`, verb: "which_yes", write: res.write } : { say: voiceLine("not_done_say", speak), verb: "which_failed" };
+  }
+
+  /** deps.voiceActions.turnContext (synchronous): while a routine or which-question waits, the turn says so. */
   function turnContext({ device } = {}) {
     const entry = device?.id ? pending.get(device.id) : null;
-    return entry && entry.kind === "routine" ? { text: `[Pending] ${entry.say}`, pending: true } : null;
+    return entry && (entry.kind === "routine" || entry.kind === "which_calendar") ? { text: `[Pending] ${entry.say}`, pending: true } : null;
   }
 
   return { forTurn, fastPath, turnContext, resolveBackends };

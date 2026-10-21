@@ -250,3 +250,10 @@ test("matchYesNo: 'mejor', 'make it', 'at' and 'a las' with more words are a cor
   // Still a plain yes.
   for (const t of ["yes", "sí", "yes please", "sure", "yes, add it", "yes, make it", "sí, mejor"]) assert.equal(matchYesNo(t), "yes", t);
 });
+
+test("pending: which_calendar is a known kind (PR 2.1 Task 6); an unknown kind is still refused", () => {
+  const p = createPendingStore();
+  p.set("dev-w", { kind: "which_calendar", tool: "crow_calendar_add_event", args: { title: "x" }, options: [{ id: "a", name: "A" }] });
+  assert.deepEqual(p.get("dev-w").options, [{ id: "a", name: "A" }]);
+  assert.throws(() => p.set("dev-w", { kind: "which_list" }));
+});

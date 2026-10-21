@@ -2,7 +2,10 @@ import { z } from "zod";
 import { WsError } from "../result.js";
 import { defineTools } from "./define.js";
 import * as C from "../pim/caldav.js";
+import { BOT_USER } from "../config.js";
 
+/** Shared unless Crow bot owns it: an unknown owner counts as shared (the voice tools never pick a shared one on their own). */
+export const isShared = (ownerUid) => ownerUid !== BOT_USER;
 const ref = (cal, uid) => `cal:${cal.id}/${uid}`;
 const needWritable = (cal) => { if (!cal.writable) throw new WsError("read_only", `Crow bot can read "${cal.name}" but not change it. Ask the owner to share it with edit rights.`); };
 /** A window bound: absolute ms plus its own wall-clock ms (for all-day/floating events, Review Focus 4). */
@@ -16,8 +19,8 @@ const SLACK = 14 * 3600e3; // all-day items are matched by wall clock, so ask th
 const startMs = (s) => new Date(s.length === 10 ? `${s}T00:00:00Z` : s).getTime();
 
 export const calendarDefs = [
-  { name: "ws_cal_list_calendars", description: "Calendars shared with Crow bot: id, name, owner, writable, color.", schema: {},
-    run: async (_a, c) => ({ calendars: (await C.listCalendars(c.getConfig())).map(({ id, name, owner, writable, color }) => ({ id, name, owner, writable, color })) }) },
+  { name: "ws_cal_list_calendars", description: "Calendars shared with Crow bot: id, name, owner, writable, color, and shared (false only for Crow bot's own).", schema: {},
+    run: async (_a, c) => ({ calendars: (await C.listCalendars(c.getConfig())).map(({ id, name, owner, owner_uid, writable, color }) => ({ id, name, owner, writable, color, shared: isShared(owner_uid) })) }) },
   { name: "ws_cal_list_events", description: "Events in a window (default now → +30 days, max 366 days). time_min/time_max are date-times with an offset. single_events expands repeats. query matches summary/description/location.",
     schema: { calendar: z.string().min(1).max(200), time_min: z.string().max(40).optional(), time_max: z.string().max(40).optional(), max_results: z.number().int().min(1).max(250).optional().default(20), query: z.string().max(200).optional(), single_events: z.boolean().optional().default(true) },
     run: async (a, c) => {

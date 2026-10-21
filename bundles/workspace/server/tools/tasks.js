@@ -2,12 +2,13 @@ import { z } from "zod";
 import { WsError } from "../result.js";
 import { defineTools } from "./define.js";
 import * as C from "../pim/caldav.js";
+import { isShared } from "./calendar.js";
 
 const ref = (list, uid) => `cal:${list.id}/${uid}`;
 
 export const taskDefs = [
-  { name: "ws_tasks_list_lists", description: "Task lists (Nextcloud Tasks) shared with Crow bot: id, name, writable.", schema: {},
-    run: async (_a, c) => ({ lists: (await C.listTaskLists(c.getConfig())).map(({ id, name, writable }) => ({ id, name, writable })) }) },
+  { name: "ws_tasks_list_lists", description: "Task lists (Nextcloud Tasks) shared with Crow bot: id, name, owner, writable, and shared (false only for Crow bot's own).", schema: {},
+    run: async (_a, c) => ({ lists: (await C.listTaskLists(c.getConfig())).map(({ id, name, owner, owner_uid, writable }) => ({ id, name, owner, writable, shared: isShared(owner_uid) })) }) },
   { name: "ws_task_create", description: "Add a task to a task list. due: YYYY-MM-DD, or a date-time with an offset (e.g. 2026-10-22T18:00:00-05:00); optional. Undoable.",
     schema: { list: z.string().min(1).max(200), summary: z.string().min(1).max(500), due: z.string().max(40).optional(), description: z.string().max(20000).optional() },
     run: async (a, c) => {
