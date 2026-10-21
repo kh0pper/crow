@@ -237,9 +237,6 @@ dockerTest("every tracked model bundle passes the check as the gpu-orchestrator 
       const operatorRoots = G.hostGrants(manifest).pathEnv.map((k) => dot[k]).filter(Boolean);
       const r = G.checkComposeModel(loaded.model, { bundleDir: dir, manifest, consentVerified: false, ctx: { crowHome: join(home, ".crow"), dataDir: join(home, ".crow", "data"), appRoot: app, home, operatorRoots } });
       checked++;
-      // The 35B's ipc: host is removed by its own PR (#509); until that lands it is refused.
-      const ipcHost = /^\s*ipc:\s*host\s*$/m.test(readFileSync(file, "utf8"));
-      if (ipcHost) { if (r.valid || !/ipc: host/.test(r.reason)) bad.push(`${id}: expected an ipc: host refusal, got ${JSON.stringify(r)}`); continue; }
       if (!r.valid) bad.push(`${id}: ${r.reason}`);
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
