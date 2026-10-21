@@ -88,6 +88,7 @@ const { registerSchedulerHook } = await appImport("servers/gateway/scheduler-hoo
 const { readEnvelope } = await bImport("server/envelope.js");
 const { createLimiter } = await bImport("server/limits.js");
 const { fetchImagePinned, FetchRefused } = await bImport("server/net-guard.js");
+const { acquireVisionProvider } = await bImport("server/vision-acquire.js");
 const { createDbClient: openAppDb } = await appImport("servers/db.js");
 const { createVoiceTurnRunner, defaultVoiceDeps } = await appImport("servers/gateway/voice/turn.js");
 const { wrapPcmAsWav } = await appImport("servers/gateway/voice/turn-helpers.js");
@@ -280,19 +281,13 @@ async function resolveVisionProfileConfig(db, device, aiProfile) {
     if (!profile) return null;
     if (profile.provider_id) {
       // Ask the GPU orchestrator to make the provider resident before we
-      // resolve + call it. Silent best-effort — if orchestrator isn't
-      // wired or docker control fails, we fall through to the direct
-      // provider call and surface whatever error that produces.
-      try {
-        const { acquireProvider } = await import(pathToFileURL(join(gatewayDir, "gpu-orchestrator.js")).href);
-        await acquireProvider(profile.provider_id);
-      } catch (err) {
-        // Host switch (CROW_DISABLE_MODEL_ORCHESTRATION): the provider is not
-        // ours to start — dial it as-is, quietly.
-        if (err?.code !== "model_orchestration_disabled") {
-          console.warn(`[meta-glasses] gpu-orchestrator acquire(${profile.provider_id}) failed: ${err.message}`);
-        }
-      }
+      // resolve + call it. Best effort (vision-acquire.js): if the orchestrator
+      // isn't wired or refuses, we fall through to the direct provider call and
+      // surface whatever error that produces.
+      let acquire = null;
+      try { ({ acquireProvider: acquire } = await import(pathToFileURL(join(gatewayDir, "gpu-orchestrator.js")).href)); }
+      catch (err) { console.warn(`[meta-glasses] gpu-orchestrator load failed: ${err.message}`); }
+      if (acquire) await acquireVisionProvider({ acquire, providerId: profile.provider_id });
       const { resolveProvider } = await loadResolveProv();
       return await resolveProvider(profile.provider_id, profile.model_id);
     }

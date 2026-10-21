@@ -226,7 +226,7 @@
       ],
       "serving": { "class": "resident" },
       "launch": { "ctx": 32768, "ngl": 999, "flash_attn": "on" },
-      "notes": "The fleet vision specialist (grackle-vision under vLLM today). A dedicated vision-language model for turns where the image is the point \u2014 the 35B's mmproj covers casual vision, this is the tier the dashboard smart-router sends image turns to (vision \u2192 grackle-vision today). Small enough for CPU; the mmproj companion downloads beside it. Registered as task vision, so it does not join the chat mutex group and can sit next to a resident chat model.",
+      "notes": "The dedicated vision model (crow-vision). A vision-language model for turns where the image is the point: Meta Glasses look turns, photo captions and the vision role. On a Strix Halo box it ships as the llamacpp-vulkan-qwen3-vl-4b bundle (Q8_0 + this mmproj, always on, ctx 8192, images capped at 1024 tokens). Small enough for CPU; the mmproj companion downloads beside it. Registered as task vision. Register a native copy with no mutex group: the default group rule would put it in the chat group, and starting it would then evict the resident chat model.",
       "companions": [
         {
           "kind": "mmproj",
