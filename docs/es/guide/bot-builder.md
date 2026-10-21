@@ -129,6 +129,10 @@ Un bot que necesita que elijas entre unas pocas opciones puede preguntarlo con u
 
 **Sin repeticiones ni avalanchas.** Una tarjeta cuyo `fingerprint` coincide con otra que sigue abierta no se vuelve a crear; se devuelve la abierta (`deduped: true`). Lo mismo ocurre mientras dure la pausa de una opción elegida. Un bot tiene como máximo **5 tarjetas de decisión abiertas por lote**; la sexta se rechaza (`batch_full`). Preguntar nunca envía una notificación: el bot llama a `board_notify_decisions` una vez al final del lote para un único aviso agrupado, y cada tarjeta se notifica como mucho una vez, por muchas veces que se llame.
 
+**Por quien pregunta.** Los lotes y los `fingerprint` pertenecen a quien los pidió: dos bots pueden usar el mismo nombre de lote o el mismo `fingerprint` sin ver las tarjetas del otro, y un bot solo puede notificar tarjetas que él mismo preguntó. El aviso se envía una vez por lote, mientras sus tarjetas notificadas sigan abiertas; las tarjetas añadidas después solo aparecen en el tablero. Cada quien puede enviar como máximo **3 avisos al día (UTC)**; el cuarto se rechaza (`push_limit`, 429).
+
+**Crear una tarjeta para un bot.** `board_create_item` acepta `assigned_bot` para tarjetas (no para elementos de seguimiento). El bot debe existir, estar habilitado y no ser el bot de voz, o la llamada se rechaza. La tarjeta nueva es **gated** por defecto, así que espera tu aprobación del plan.
+
 ## Permisos y seguridad
 
 Cada agente lleva una política de permisos que gobierna lo que puede hacer sin preguntar:
