@@ -13,7 +13,7 @@ import { createDbClient } from "../servers/db.js";
 import { createOwnTools, VOICE_OWN_TOOL_NAMES } from "../servers/gateway/voice/own-tools.js";
 import { createPendingStore, chainVoiceActions } from "../servers/gateway/voice/pending.js";
 import { VOICE_LINES, voiceLine } from "../servers/gateway/voice/voice-lines.js";
-import { NOT_DONE_TEXT, CANT_DO_TEXT } from "../servers/gateway/voice/turn.js";
+import { NOT_DONE_TEXT, CANT_DO_TEXT, PARTLY_DONE_TEXT } from "../servers/gateway/voice/turn.js";
 import { createToolFamilies, normalizeIntentLists, listMatches, phraseWords } from "../servers/gateway/voice/tool-families.js";
 import { harness } from "./fixtures/voice-turn-harness.mjs";
 
@@ -573,4 +573,32 @@ test("'remember to' / 'acuérdate de' offer the reminder tool; 'remember that' d
   assert.equal(offered("acuerdate de sacar la basura"), true);
   assert.equal(offered("remember that my locker is 42"), false);
   assert.equal(offered("remember my locker number"), false);
+});
+
+test("strict: a failed own call before a confirmation question still asks it, last, and a yes writes it once", async () => {
+  const s = await stores();
+  try {
+    const { own, pending } = make();
+    const bot = CROW({ voice: { confirm: "strict" } });
+    const failingTask = { definition: { name: "crow_task_add", description: "x", inputSchema: { type: "object" } }, family: "own:tasks", intent: { en: ["task", "tasks"], es: [] },
+      execute: async () => JSON.stringify({ ok: false, code: "backend_error" }) };
+    const at = "2026-10-26T17:00:00-05:00";
+    const h = harness({ bot, chatTools: [], rounds: [[
+      { type: "tool_call", id: "c1", name: "crow_task_add", arguments: { title: "milk" } },
+      { type: "tool_call", id: "c2", name: "crow_reminder_add", arguments: { text: "milk", at } },
+      { type: "done" },
+    ]] });
+    h.deps.ownTools = async (a) => { const set = await own.forTurn(a); return { ...set, tools: [failingTask, ...set.tools.filter((t) => t.definition.name !== "crow_task_add")] }; };
+    h.deps.voiceActions = chainVoiceActions([own]);
+    await h.runner.runVoiceTurn({ db: s.db, device: h.device, transcript: "add milk to my tasks and remind me at 5", sink: h.sink, tz: TZ, lang: "en", actionWhen: () => false });
+    const question = `Remind you ${whenOf(at)}: milk?`;
+    const heard = h.calls.spoken.join(" ");
+    assert.ok(heard.trim().endsWith(question), `heard: ${heard}`);
+    assert.ok(heard.includes(NOT_DONE_TEXT) || heard.includes(PARTLY_DONE_TEXT), `heard: ${heard}`);
+    assert.equal(pending.get(h.device.id)?.kind, "routine");
+    assert.deepEqual(await s.schedules(), []);
+    await h.runner.runVoiceTurn({ db: s.db, device: h.device, transcript: "yes", sink: h.sink, tz: TZ, lang: "en", actionWhen: () => false });
+    assert.equal((await s.schedules()).length, 1, "the reminder is written once");
+    assert.equal(pending.get(h.device.id), null);
+  } finally { s.close(); }
 });

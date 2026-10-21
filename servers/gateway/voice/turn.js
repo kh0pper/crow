@@ -128,6 +128,8 @@ export const CANT_DO_TEXT = "Sorry, I can't do that from here: this assistant ha
 export const NOT_DONE_TEXT = "Sorry, I couldn't do that from here, so nothing was changed.";
 /** Some of Crow's own calls on this turn worked and some did not (spoken after the ok calls' own lines). */
 export const PARTLY_DONE_TEXT = "I did part of that, but the rest didn't go through.";
+/** Own-tool result codes that mean the call itself was malformed (own-tools.js validate()), not that a write failed. */
+const OWN_VALIDATION_CODES = new Set(["bad_args", "no_tz"]);
 export const NOT_READY_TEXT = "The assistant that can do that isn't ready yet. Try again in a moment.";
 /** A memory was saved, but the reply promised a reminder no tool set. */
 export const MEMO_ONLY_TEXT = "I saved a note, but I can't set reminders from here.";
@@ -1023,10 +1025,11 @@ export function createVoiceTurnRunner(deps) {
       // a named routine object, or a follow-up inside the own-tool window (families on or off). A turn that is
       // only offered the own tools ("what's the capital of Peru") is not held. It also turns on mid-turn when an
       // own call fails or is refused (armGuard below); then only what the model says in LATER rounds is held.
-      // Once any own call has failed (and no later ok call of the same tool cleared it), the guard keeps holding
-      // even after another call succeeded, and the turn ends on what really happened: released held text that
-      // claims nothing, then each ok own call's success line, then the failure line (the failed tool's own say,
-      // else PARTLY_DONE_TEXT when something was done, else NOT_DONE_TEXT). A held claim is never heard.
+      // Once any own call has failed (and was not cleared: see ownFails below), the guard keeps holding even after
+      // another call succeeded, and the turn ends on what really happened (ownEndLine), also when the first-audio
+      // budget has run out: released held text that claims nothing, each ok own call's success line, the failure
+      // line (the failed tool's own say, else PARTLY_DONE_TEXT when something was done, else NOT_DONE_TEXT), and
+      // last a confirmation question still waiting for a yes. A held claim is never heard.
       let actionGuard = actionTurn && !mustX && !holdEnd;
       const armGuard = () => { if (!actionGuard && !mustX && !holdEnd) { actionGuard = true; timings.action_guard = true; } };
       const ownOnOffer = tools.some((t) => ownByName.has(t.name));
@@ -1036,10 +1039,24 @@ export function createVoiceTurnRunner(deps) {
       let memoryBacked = false;    // only a memory call did (a saved note is not a reminder)
       let unsureBacked = false;    // an ok call to a tool that is neither a known read nor a known write
       let guardHeld = "";
-      const ownFails = new Map();  // own tool name → { say } of a call that was not ok; a later ok call of that tool clears it
+      // Own calls that were not ok, by name|canonical args → { name, say, validation }. An ok own call clears the
+      // same call's failure, and every validation failure (bad_args, no_tz: a corrected retry, or the step-up
+      // picking another tool, is the same item). A backend error or a refusal on other args stays.
+      const ownFails = new Map();
       const ownOkSays = new Map(); // name|canonical args → the success line of an ok own call that changed something
+      let ownAsk = "";             // the last own confirmation question (needs_confirm); its pending entry is live
       let ownEndLead = "";         // a final display line that the own-tool ending speaks first
       const holding = () => actionGuard && (!backed || ownFails.size > 0);
+      // The own-tool ending (an own call failed): held text that claims nothing, the ok own calls' lines, the failure
+      // line (the failed tool's own say, else partly done when something was done, else not done), and LAST the
+      // confirmation question, if one is waiting for a yes.
+      const ownEndLine = (released = "") => {
+        let failLine = null;
+        for (const f of ownFails.values()) if (!failLine && f.say) failLine = f.say;
+        failLine ||= String(backed || memoryBacked ? (opts.partlyDoneText || PARTLY_DONE_TEXT)
+          : unsureBacked ? (opts.unsureText || UNSURE_TEXT) : (opts.notDoneText || NOT_DONE_TEXT));
+        return [...new Set([released, ownEndLead, ...ownOkSays.values(), failLine, ownAsk].filter(Boolean))].join(" ");
+      };
       let actionSent = false;      // a change was sent to a remote tool (it may still complete after a budget cut)
       let steppedUp = false;       // the own-tool step-up to the larger model (at most once per turn)
       const toolEscalationOn = typeof deps.toolEscalationEnabled !== "function" || deps.toolEscalationEnabled() === true;
@@ -1221,7 +1238,7 @@ export function createVoiceTurnRunner(deps) {
           if (tc === calls.at(-1)) finalRes = null;
           const gate = policyGate(tc);
           if (gate) {
-            if (ownByName.has(tc.name)) { armGuard(); ownFails.set(tc.name, { say: null }); }   // an own call refused: the model's next words may still claim it
+            if (ownByName.has(tc.name)) { armGuard(); ownFails.set(`${tc.name}|${canonicalArgsHash(tc.arguments || {})}`, { name: tc.name, say: null, validation: false }); }   // an own call refused: the model's next words may still claim it
             if (gate.neutral) neutralCalls++;
             outcome.set(tc, gate.code);
             local.push({ id: tc.id, name: tc.name, result: gate.message, neutral: gate.neutral });
@@ -1247,8 +1264,12 @@ export function createVoiceTurnRunner(deps) {
             outcome.set(tc, code);
             if (ok) ownDone.set(dupKey, out);
             const resSay = typeof res?.say === "string" && res.say.trim() ? res.say.trim() : null;
-            if (ok) ownFails.delete(tc.name); else ownFails.set(tc.name, { say: resSay });
+            if (ok) {
+              ownFails.delete(dupKey);
+              for (const [k, f] of ownFails) if (f.validation) ownFails.delete(k);
+            } else ownFails.set(dupKey, { name: tc.name, say: resSay, validation: OWN_VALIDATION_CODES.has(code) });
             if (ok && res.effect !== false && resSay) ownOkSays.set(dupKey, resSay);
+            if (ok && code === "needs_confirm" && resSay) ownAsk = resSay;
             // A failed own call (no_tz, bad_args, backend_error…), or a question with no line to speak: from here on
             // the model's words are held and checked (#499). Text streamed in THIS round was already held when the
             // guard was on from the first word (a turn aimed at an own tool, above); otherwise it may have been
@@ -1407,6 +1428,11 @@ export function createVoiceTurnRunner(deps) {
       for (const r of restores.reverse()) r.msg.content = r.content;
       if (aborted()) {
         result.aborted = true;
+      } else if (budgetHit && !endedFinal && actionGuard && ownFails.size > 0) {
+        // The own outcome is known: the server's own ending, spoken past the budget (say.force), never "try again".
+        timings.own_failed = true;
+        await speakFallback("budget", spokenChars > 0, ownEndLine());
+        return result;
       } else if (budgetHit && !endedFinal) {
         await speakFallback("budget", spokenChars > 0, actionSent ? String(opts.unsureText || UNSURE_TEXT) : undefined);
         return result;
@@ -1435,11 +1461,7 @@ export function createVoiceTurnRunner(deps) {
               log(`[voice-turn] ${device.id} bot ${bot.bot_id}: a reply claiming an action an own tool failed was replaced`);
             }
             timings.own_failed = true;
-            let failLine = null;
-            for (const f of ownFails.values()) if (!failLine && f.say) failLine = f.say;
-            failLine ||= String(backed || memoryBacked ? (opts.partlyDoneText || PARTLY_DONE_TEXT)
-              : unsureBacked ? (opts.unsureText || UNSURE_TEXT) : (opts.notDoneText || NOT_DONE_TEXT));
-            line = [...new Set([said && !claimed ? said : "", ownEndLead, ...ownOkSays.values(), failLine].filter(Boolean))].join(" ");
+            line = ownEndLine(said && !claimed ? said : "");
             dropHeld((m) => !heldMsgs.has(m));
             messages.push({ role: "assistant", content: line });
           } else if (claim) {

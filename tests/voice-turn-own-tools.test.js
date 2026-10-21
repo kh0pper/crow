@@ -617,3 +617,36 @@ test("a failed own call: the saved reply is what was heard (released text + the 
   const saved = h.runner.convo.get(h.device.id).filter((m) => m.role === "assistant" && String(m.content).trim()).map((m) => String(m.content).trim());
   assert.deepEqual(saved, [`One moment. ${NOT_DONE_TEXT}`], `heard: ${heard}`);
 });
+
+// ─── #499 round 3: each failed item is told; the budget speaks the server's own ending ───
+const twoCalls = (a, b) => [{ type: "tool_call", id: "c1", name: "crow_task_add", arguments: a }, { type: "tool_call", id: "c2", name: "crow_task_add", arguments: b }, { type: "done" }];
+
+test("same tool: a backend failure on one item is not cleared by an ok call on another", async () => {
+  const t = taskOwn((args) => (args.title === "milk" ? BACKEND_ERR : { ok: true, code: "added", final: true, say: "Added eggs to your tasks." }));
+  const h = ownHarness({ bot: CROW, rounds: [twoCalls({ title: "milk" }, { title: "eggs" })] });
+  await turn(h, "put milk and eggs on my tasks", { ...noAct, ownTools: [t] });
+  const heard = h.calls.spoken.join(" ");
+  assert.equal(t.seen.length, 2);
+  assert.ok(heard.includes("Added eggs to your tasks."), `heard: ${heard}`);
+  assert.ok(heard.trim().endsWith(PARTLY_DONE_TEXT) && captions(h).trim().endsWith(PARTLY_DONE_TEXT), `heard: ${heard}`);
+});
+
+test("same tool: bad_args, then the corrected call is ok: a plain success, no partly-done line", async () => {
+  const t = taskOwn((args) => (args.title ? { ok: true, code: "added", final: true, say: "Added buy milk to your tasks." } : { ok: false, code: "bad_args", message: "The title is required." }));
+  const h = ownHarness({ bot: CROW, rounds: [call("crow_task_add", {}), call("crow_task_add", { title: "buy milk" }, "c2")] });
+  await turn(h, "put buy milk on my tasks", { ...noAct, noEscalate: true, ownTools: [t] });
+  assert.deepEqual(h.calls.spoken, ["Added buy milk to your tasks."]);
+  assert.equal(captions(h), "Added buy milk to your tasks.");
+});
+
+test("the first-audio budget running out after the own outcome is known speaks the server's own ending", async () => {
+  const slowFail = (ms) => ({ ...taskOwn(BACKEND_ERR), execute: async () => { await new Promise((r) => setTimeout(r, ms)); return JSON.stringify(BACKEND_ERR); } });
+  const h = ownHarness({ bot: CROW, rounds: [call("crow_task_add", { title: "buy milk" })] });
+  const r = await turn(h, "put buy milk on my tasks", { ...noAct, ownTools: [slowFail(80)], firstAudioBudgetMs: 40 });
+  assert.equal(r.failed, "budget");
+  assert.deepEqual(h.calls.spoken, [NOT_DONE_TEXT]);
+  // Partly done: the reminder's line, then the partly-done line.
+  const p = ownHarness({ bot: CROW, rounds: [both("", ["rem", "task"])] });
+  await turn(p, "add milk to my tasks and remind me at 5", { ...noAct, ownTools: [slowFail(80), remTool(REMINDED)], firstAudioBudgetMs: 40 });
+  assert.equal(p.calls.spoken.join(" "), `${REMINDED.say} ${PARTLY_DONE_TEXT}`);
+});
