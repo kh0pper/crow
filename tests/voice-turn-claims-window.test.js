@@ -10,6 +10,8 @@ import { createToolFamilies } from "../servers/gateway/voice/tool-families.js";
 import { NOT_DONE_TEXT, ACTION_HELD_MAX_TOKENS, ACTION_NOTE, FILLER_TEXT } from "../servers/gateway/voice/turn.js";
 import { lastWriteRecap, createOwnTools, calendarAddIntent } from "../servers/gateway/voice/own-tools.js";
 import { createPendingStore, chainVoiceActions } from "../servers/gateway/voice/pending.js";
+import { createVoiceTurnRunner } from "../servers/gateway/voice/turn.js";
+import { createConfirmGate } from "../servers/gateway/voice/turn-helpers.js";
 
 const FAST = "crow-voice/qwen3.5-4b";
 const ESC = "crow-chat/qwen3.6-35b-a3b";
@@ -325,9 +327,18 @@ test("(R1) 'had lunch with Ann on Friday' (rewritten): the question is heard and
   assert.match(y.spoken[0], /^Added lunch with Ann to your calendar/);
 });
 
+/** The harness with a fresh runner over a real confirm gate that records every check (the gate is read at runner creation). */
+function countedGate(h) {
+  const gate = createConfirmGate({ now: h.deps.now });
+  h.checks = [];
+  h.deps.confirm = { ...gate, check: (a) => { const out = gate.check(a); h.checks.push({ eff: a.eff, transcript: a.transcript, out }); return out; } };
+  h.runner = createVoiceTurnRunner(h.deps);
+  return h;
+}
+
 test("(R2) a remote create tool on a rewritten turn needs the yes; heard as said, it runs", async () => {
   const ARGS = { calendar: "c1", summary: "lunch with Ann", start: "2026-10-30T12:00:00-05:00", end: "2026-10-30T13:00:00-05:00" };
-  const h = gateHarness({ chatTools: ["ws_cal_create_event"], rounds: [call("ws_cal_create_event", ARGS), says("Should I add it? "), call("ws_cal_create_event", ARGS, "c2"), says("Done. ")] });
+  const h = countedGate(gateHarness({ chatTools: ["ws_cal_create_event"], rounds: [call("ws_cal_create_event", ARGS), says("Should I add it? "), call("ws_cal_create_event", ARGS, "c2"), says("Done. ")] }));
   const r = await turn(h, "had lunch with Ann on Friday", { ownTools: [], familiesOnIntent: false });
   assert.equal(r.timings.stt_rewrite, "had");
   assert.ok(h.log[0].tools.includes("ws_cal_create_event"));
@@ -335,8 +346,41 @@ test("(R2) a remote create tool on a rewritten turn needs the yes; heard as said
   assert.ok(!/Added|Done/.test(r.captions) && !r.spoken.some((t) => /Added|Done/.test(t)));
   await turn(h, "yes", { ownTools: [], familiesOnIntent: false });
   assert.deepEqual(h.calls.executed, ["ws_cal_create_event"], "the yes ran it once");
+  assert.ok(h.checks.some((c) => c.transcript === "yes" && c.eff === "ws_cal_create_event" && c.out === "allow"), "the yes went through the confirm gate");
   const plain = gateHarness({ chatTools: ["ws_cal_create_event"], rounds: [call("ws_cal_create_event", ARGS), says("Done. ")] });
   const p = await turn(plain, "add lunch with Ann on Friday", { ownTools: [], familiesOnIntent: false });
   assert.equal(p.timings.stt_rewrite, undefined);
   assert.deepEqual(plain.calls.executed, ["ws_cal_create_event"], "heard as said: no extra question");
+});
+
+for (const [label, next] of [["a no", "no"], ["a question", "what time is it?"]]) {
+  test(`(R2b) a rewritten turn's held remote create, then ${label}: the model's re-issued call does not run`, async () => {
+    const ARGS = { calendar: "c1", summary: "lunch with Ann", start: "2026-10-30T12:00:00-05:00", end: "2026-10-30T13:00:00-05:00" };
+    const h = countedGate(gateHarness({ chatTools: ["ws_cal_create_event"], rounds: [call("ws_cal_create_event", ARGS), says("Should I add it? "), call("ws_cal_create_event", ARGS, "c2"), says("Okay. ")] }));
+    await turn(h, "had lunch with Ann on Friday", { ownTools: [], familiesOnIntent: false });
+    assert.deepEqual(h.calls.executed, []);
+    const r = await turn(h, next, { ownTools: [], familiesOnIntent: false });
+    assert.equal(r.timings.stt_rewrite, undefined);
+    assert.deepEqual(h.calls.executed, [], `${next}: the held call never ran`);
+    assert.ok(h.checks.some((c) => c.transcript === next && c.out === "confirm"), "the confirm gate was consulted and asked again");
+    assert.ok(!/Added|Done/.test(r.captions) && !r.spoken.some((t) => /Added|Done/.test(t)));
+  });
+}
+
+test("(R3) a remote tool of unknown effect on a rewritten turn asks first; display tools are not held", async () => {
+  const h = countedGate(gateHarness({ chatTools: ["acme_widget"], rounds: [call("acme_widget", { x: 1 }), says("Should I? ")] }));
+  const r = await turn(h, "had lunch with Ann on Friday", { ownTools: [], familiesOnIntent: false });
+  assert.equal(r.timings.stt_rewrite, "had");
+  assert.deepEqual(h.calls.executed, [], "unknown effect: asked, not run");
+  assert.ok(h.checks.some((c) => c.eff === "acme_widget"));
+});
+
+test("(R3b) a display tool on a rewritten turn is not held", async () => {
+  const ran = [];
+  const wm = { definition: { name: "crow_wm", description: "wm", inputSchema: { type: "object" } }, execute: async (a) => { ran.push(a); return JSON.stringify({ ok: true }); } };
+  const h = countedGate(gateHarness({ rounds: [call("crow_wm", { command: "show lunch" }), says("Here it is. ")] }));
+  const r = await turn(h, "had lunch with Ann on Friday", { ownTools: [], familiesOnIntent: false, extraTools: [wm] });
+  assert.equal(r.timings.stt_rewrite, "had");
+  assert.equal(ran.length, 1, "the display tool ran");
+  assert.ok(!h.checks.some((c) => c.eff === "crow_wm"));
 });

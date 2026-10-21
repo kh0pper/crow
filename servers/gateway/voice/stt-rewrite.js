@@ -26,12 +26,18 @@ const NUMBER_WORDS = words("one two three four five six seven eight nine ten ele
   + " uno una dos tres cuatro cinco seis siete ocho nueve diez once doce quince veinte treinta media cuarto");
 const isNumber = (w) => /^\d+(st|nd|rd|th|am|pm)?$/.test(w) || NUMBER_WORDS.has(w);
 
-/** Could this word be the thing being added ("coffee", "lunch")? Not a stop word, a day or time word, or a number. */
+/**
+ * Could this word be the thing being added ("coffee", "lunch")? Not a stop word, a day or time word,
+ * or a number.
+ */
 export function isObjectWord(w) {
   return typeof w === "string" && w.length > 0 && !STOP.has(w) && !DAY_TIME.has(w) && !isNumber(w);
 }
 
-/** Do these words (phraseWords) hold a day or a time: "Tuesday", "tomorrow", "next week", "at 9", "9 am", "a las 9", "a la una"? */
+/**
+ * Do these words (phraseWords) hold a day or a time: "Tuesday", "tomorrow", "next week", "at 9",
+ * "9 am", "a las 9", "a la una"?
+ */
 export function hasDayTime(ws) {
   for (let i = 0; i < ws.length; i++) {
     const w = ws[i];

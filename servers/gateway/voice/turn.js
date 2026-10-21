@@ -1036,12 +1036,16 @@ export function createVoiceTurnRunner(deps) {
         if (voiceKind && via && proxyArgsConflict(tc)) return refuse("refused_policy", VOICE_ARGS_CONFLICT);
         if (voiceKind && names.some((n) => VOICE_SCHEDULE_TOOLS.has(n)) && startsPipeline(tc.arguments)) return refuse("refused_policy", VOICE_NO_PIPELINE);
         if (voiceKind && names.includes("crow_update_schedule") && reenablesUnseen(tc.arguments)) return refuse("refused_policy", VOICE_NO_REENABLE);
-        // A turn whose words were rewritten ("had …" heard, "add …" taken: timings.stt_rewrite) asks before any write too,
-        // a remote create included: the rewrite may have turned a past-tense remark into a request (fix round 1).
+        // A turn whose words were rewritten ("had …" heard, "add …" taken: timings.stt_rewrite) asks before anything
+        // that is not a known read, a remote create included: the rewrite may have turned a past-tense remark into a
+        // request. Display tools are never held (they are not routine writes). A call already waiting for a yes on
+        // this device (same name and args) goes through the gate on every later turn too: only a yes runs it.
+        const rewritten = timings.stt_rewrite != null && !extraByName.has(tc.name);
         const confirmName = names.find((n) => isDestructiveTool(n) || (Array.isArray(policy.confirm) && policy.confirm.includes(n))
           || (voiceKind && (needsSpokenYes(n) || VOICE_CONFIRM_TOOLS.includes(n)
             || (n === VOICE_NOTIFICATION_TOOL && changesNotifications(tc))
-            || (timings.stt_rewrite != null && (toolEffect(n) === "write" || toolEffect(tc.name) === "write")))));
+            || (rewritten && (toolEffect(n) !== "read" || toolEffect(tc.name) === "write")))))
+          || names.find((n) => typeof confirm.has === "function" && confirm.has({ deviceId: device.id, eff: n, args: tc.arguments }));
         if (!confirmName) return null;
         // A question will be asked: every field it can name (ids, the recipient) must agree with what runs too.
         if (voiceKind && via && proxyArgsConflict(tc, { asking: true })) return refuse("refused_policy", VOICE_ARGS_CONFLICT);
