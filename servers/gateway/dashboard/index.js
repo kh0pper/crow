@@ -52,6 +52,7 @@ import { registerPanel, loadExternalPanels, getAllPanels, getVisiblePanels, getP
 import { resolveNavGroups } from "./nav-registry.js";
 import { readSetting } from "./settings/registry.js";
 import { csrfMiddleware } from "./shared/csrf.js";
+import { twoFactorSetupGate } from "./two-factor-setup-gate.js";
 import federationRouterFactory from "../routes/federation.js";
 import federationCompanionRouterFactory from "../routes/federation-companion.js";
 import federationResolveRouterFactory from "../routes/federation-resolve.js";
@@ -326,6 +327,11 @@ export default function dashboardRouter(mcpAuthMiddleware) {
 
   // 2FA setup page (mandatory for managed hosting, optional access for self-hosted via settings)
   router.get("/dashboard/login/2fa/setup", async (req, res) => {
+    res.set({ "Cache-Control": "no-store", Pragma: "no-cache" });
+    // Signed in, and 2FA not already on: otherwise this GET would replace the
+    // live secret and recovery codes for anyone who can reach it.
+    const gate = await twoFactorSetupGate(req);
+    if (gate) return res.redirect(gate);
     const cookies = parseCookies(req);
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
 
@@ -341,6 +347,9 @@ export default function dashboardRouter(mcpAuthMiddleware) {
 
   // 2FA setup verification (verify first code to enable)
   router.post("/dashboard/login/2fa/setup", async (req, res) => {
+    res.set({ "Cache-Control": "no-store", Pragma: "no-cache" });
+    const gate = await twoFactorSetupGate(req);
+    if (gate) return res.redirectAfterPost(gate);
     const cookies = parseCookies(req);
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
     const { totp_code, secret } = req.body;
