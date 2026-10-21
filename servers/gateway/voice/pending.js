@@ -76,3 +76,45 @@ export function matchYesNo(transcript, { otherBots = [] } = {}) {
   if (listMatches(words, bots) || listMatches(words, CORRECTION_PHRASES)) return null;
   return "yes";
 }
+
+/**
+ * deps.voiceActions from several members (turn.js documents the hook): Crow's own tools now, the hand-off
+ * after them (PR 3). fastPath: the first member that answers (non-null) wins; later members are not asked.
+ * turnContext: SYNCHRONOUS; the members' texts joined by newlines, pending when any member is pending; null
+ * when no member has anything. afterTurn: every member's, in order (a throw in one never skips the next; it
+ * is rethrown after, so turn.js logs it).
+ */
+export function chainVoiceActions(members) {
+  const list = (Array.isArray(members) ? members : []).filter((m) => m && typeof m === "object");
+  return {
+    async fastPath(args) {
+      for (const m of list) {
+        if (typeof m.fastPath !== "function") continue;
+        const r = await m.fastPath(args);
+        if (r) return r;
+      }
+      return null;
+    },
+    turnContext(args) {
+      const texts = [];
+      let pending = false;
+      for (const m of list) {
+        if (typeof m.turnContext !== "function") continue;
+        const v = m.turnContext(args);
+        if (!v) continue;
+        const text = typeof v === "string" ? v : String(v.text || "");
+        if (text) texts.push(text);
+        if (v.pending === true) pending = true;
+      }
+      return texts.length || pending ? { text: texts.join("\n"), pending } : null;
+    },
+    async afterTurn(args) {
+      let first = null;
+      for (const m of list) {
+        if (typeof m.afterTurn !== "function") continue;
+        try { await m.afterTurn(args); } catch (err) { first ??= err; }
+      }
+      if (first) throw first;
+    },
+  };
+}

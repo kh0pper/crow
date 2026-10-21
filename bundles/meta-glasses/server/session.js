@@ -116,7 +116,7 @@ export function oneEnvelope(send) {
  *   describePhoto({ db, device, shot, question }) → Promise<string|null>
  *   readEnvelope(toolName, result)      (./envelope.js)
  *   playback: { state(deviceId), control(deviceId, action) }   (starting a stream is the caller's job: see runTurn's result)
- *   timeZone         IANA zone for [Now] and the clock answers (the server's; the phone sends none)
+ *   timeZone         IANA zone for [Now], the clock answers and Crow's own tools (opts.tz) (the server's; the phone sends none)
  *   crowVoice        { turnOptions, withVoiceProfiles, VOICE_DENY_TOOLS } (servers/gateway/voice/crow-voice.js), optional
  *   loadVoiceBot(db) → { def, cloud } | null: the Crow voice bot (its voice, STT, cloud model), optional
  *   log(line), now()
@@ -230,10 +230,11 @@ export function createGlassesTurns(deps) {
         });
       }
 
-      // One set of voice rules for every surface, first; the glasses' own options and lines below win.
+      // One set of voice rules for every surface, first; the glasses' own options and lines below win. The server's
+      // time zone rides along as opts.tz (Crow's own tools read spoken times in it).
       const shared = deps.crowVoice && typeof deps.crowVoice.turnOptions === "function"
-        ? deps.crowVoice.turnOptions({ surface: "glasses", lang: vs.lang, voiceDef: vb?.def || null, cloud: vb?.cloud === true, actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp })
-        : { surface: "glasses" };
+        ? deps.crowVoice.turnOptions({ surface: "glasses", lang: vs.lang, voiceDef: vb?.def || null, cloud: vb?.cloud === true, actionWhen: wantsAction, actionFollowWhen: wantsActionFollowUp, tz: deps.timeZone })
+        : { surface: "glasses", ...(deps.timeZone ? { tz: deps.timeZone } : {}) };
       const result = await deps.voice.runVoiceTurn({
         ...shared,
         db, device, transcript, sink: env.sink, signal, startedAt: t0,

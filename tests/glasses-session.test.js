@@ -223,9 +223,15 @@ test("no assistant bound: the device still answers as Crow", async () => {
 test("an action the voice bot has no tool for: the shared could-not-do line, no model call (the real routes wire the shared rules)", async () => {
   const { voiceLine } = await import("../servers/gateway/voice/voice-lines.js");
   reset({ stt: "Email my landlord about the heating." });
-  const c = await client("glasses-a");
-  const evs = await c.turn();
-  c.close();
+  // Crow's own tools switched off (every routine backend "off"): with them on, an action no family matches is
+  // withheld from the quick model and escalates (Task 2.1's middle step), so this test pins the no-tool case.
+  const off = { calendar: { backend: "off" }, reminders: { backend: "off" }, tasks: { backend: "off" } };
+  const evs = await withVoiceBot({ def: crowVoiceDef({ routine: off }) }, async () => {
+    const c = await client("glasses-a");
+    const got = await c.turn();
+    c.close();
+    return got;
+  });
   assert.equal(seen.chat.length, 0);
   assert.deepEqual(seen.tts.map((t) => t.input), [voiceLine("cant_do_say", "en")]);
   assert.deepEqual([count(evs, "tts_start"), count(evs, "tts_end")], [1, 1]);
@@ -525,7 +531,7 @@ test("17a: a glasses turn that names a relative day gets the kiosk's computed [D
 
 // ─── Crow's speaking voice and speech recognition on the glasses ───
 /** A session adapter on a fake runner: what transcribe and the turn were handed. */
-async function crowTurns({ loadVoiceBot, device = { id: "g", bound_bot_id: "helper", token_hash: "x", tts_profile_id: "p", stt_profile_id: "s1" }, profiles, botToolNames = async () => [], stt = "What is the capital of Portugal?" } = {}) {
+async function crowTurns({ loadVoiceBot, device = { id: "g", bound_bot_id: "helper", token_hash: "x", tts_profile_id: "p", stt_profile_id: "s1" }, profiles, botToolNames = async () => [], stt = "What is the capital of Portugal?", timeZone } = {}) {
   const cv = await import("../servers/gateway/voice/crow-voice.js");
   const seenBy = { transcribe: [], turn: [], speak: [] };
   const fakeVoice = {
@@ -539,7 +545,7 @@ async function crowTurns({ loadVoiceBot, device = { id: "g", bound_bot_id: "help
     listTtsProfiles: async () => profiles || [{ id: "p", provider: "piper" }, { id: "e", provider: "edge" }, { id: "k", provider: "kokoro" }],
     botToolNames, capture: async () => ({}), describePhoto: async () => null, readEnvelope,
     playback: { state: () => "idle", control: () => {}, start: () => {} }, log: () => {},
-    loadVoiceBot,
+    loadVoiceBot, ...(timeZone ? { timeZone } : {}),
     crowVoice: { turnOptions: cv.crowVoiceTurnOptions, withVoiceProfiles: cv.withVoiceProfiles, VOICE_DENY_TOOLS: cv.VOICE_DENY_TOOLS },
   });
   const run = () => turns.runTurn({ deviceId: device.id, audio: Buffer.alloc(4), send: { text: () => {}, binary: () => {} } });
@@ -560,6 +566,12 @@ test("a non-PCM voice-bot TTS falls back to the device's playable one", async ()
   // Say from the dashboard (speak) uses the same rule.
   await ok.turns.speak({ deviceId: "g", text: "Dinner.", send: { text: () => {}, binary: () => {} } });
   assert.equal(ok.seenBy.speak.at(-1).tts_profile_id, "k");
+});
+
+test("the server's time zone reaches Crow's own tools as opts.tz on the glasses", async () => {
+  const t = await crowTurns({ loadVoiceBot: withVoice({}), timeZone: "America/Chicago" });
+  await t.run();
+  assert.equal(t.seenBy.turn[0].tz, "America/Chicago");
 });
 
 test("transcribe uses Crow's STT profile", async () => {

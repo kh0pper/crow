@@ -610,7 +610,8 @@ export function createVoiceTurnRunner(deps) {
       // Crow's own tools (PR 2): in-process routine tools (a calendar event, a reminder, a task), one tool family
       // each. opts.ownTools (an array: tests, overrides) wins; else, for the voice bot only, deps.ownTools(...)
       // → { tools, unavailable }. A turn with a must-run extra tool (the glasses camera, a must-run display tool)
-      // carries only what it carries today ([rev2 C2]); opts.noOwnTools forces the same.
+      // carries only what it carries today ([rev2 C2]); opts.noOwnTools forces the same. An own tool runs as
+      // execute(args, { transcript, executor, db, device, fallback? }): the device holds a strict-confirm question.
       const mustOffered = extra.some((x) => offered.has(x.definition.name) && typeof x.must === "function" && x.must(transcript) === true);
       const ownByName = new Map();
       const ownUnavailable = new Set();
@@ -1172,7 +1173,7 @@ export function createVoiceTurnRunner(deps) {
           if (own) {
             neutralCalls++;
             let out;
-            try { out = await own.execute(tc.arguments || {}, { transcript, executor, db, ...(calendarFallback ? { fallback: "calendar" } : {}) }); }
+            try { out = await own.execute(tc.arguments || {}, { transcript, executor, db, device, ...(calendarFallback ? { fallback: "calendar" } : {}) }); }
             catch (err) { out = JSON.stringify({ ok: false, code: "error", message: String(err?.message || err) }); }
             if (typeof out !== "string") out = JSON.stringify({ ok: false, code: "error" });
             let res = null;
@@ -1460,9 +1461,15 @@ export async function defaultVoiceDeps() {
   const { TOOL_MANIFESTS } = await import("../tool-manifests.js");
   const { createToolForcing } = await import("./tool-forcing.js");
   const { createToolFamilies } = await import("./tool-families.js");
+  const { createPendingStore, chainVoiceActions } = await import("./pending.js");
+  const { createOwnTools } = await import("./own-tools.js");
   const ext = await import("../../../scripts/pi-bots/ext_registry.mjs");
   const proxy = await import("../proxy.js");
   const memoryTools = new Set(Object.keys(TOOL_MANIFESTS.memory?.tools || {}));
+  // One pending store and one set of Crow's own tools per runner. The own tools reach the voice bot only
+  // (turn.js asks deps.ownTools for it alone); their Workspace and Google calls go through the turn's executor.
+  const pending = createPendingStore();
+  const ownTools = createOwnTools({ pending, log: (m) => console.warn(m), connected: () => tx.connectedAddonToolNames() });
   const byId = (list, id) => list.find((p) => p.id === id) || null;
   return {
     now: () => Date.now(),
@@ -1514,6 +1521,9 @@ export async function defaultVoiceDeps() {
     isExternalSendTool: tx.isExternalSendTool,
     isConnectedAddonTool: tx.isConnectedAddonTool,
     connectedAddonTools: () => tx.connectedAddonToolNames(),
+    ownTools: ownTools.forTurn,
+    // A chain: Crow's own tools now; the hand-off joins after them (PR 3).
+    voiceActions: chainVoiceActions([ownTools]),
     botVoiceScope: tx.botVoiceScope,
     generateSystemPrompt: sp.generateSystemPrompt,
     isMemoryTool: (n) => n === "crow_memory" || memoryTools.has(n),
