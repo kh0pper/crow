@@ -9,7 +9,7 @@
 // holds in the PARENT, so each assertion proves the sandbox took it away.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, chmodSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, chmodSync, statSync, readdirSync as readdirSyncFs } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { connect, createServer } from "node:net";
@@ -17,7 +17,7 @@ import { spawn, spawnSync } from "node:child_process";
 import {
   wrapPiSpawn, piSandboxMode, probePiSandbox, dockerSocketPaths, isSandboxWrapperArgs,
   scrubSandboxEnv, userRuntimeDirs, PROBE_RETRY_MS, _resetPiSandboxForTest,
-  credentialMaskDirs, boardSecretFile, boardSecretDirProblem,
+  credentialMaskDirs, boardSecretCredential, boardSecretCredentialRoots, BWRAP_BASE,
 } from "../scripts/pi-bots/pi_sandbox.mjs";
 import { listBridgePi, reapStalePi } from "../scripts/pi-bots/pi_lifecycle.mjs";
 
@@ -106,8 +106,13 @@ test("integration: a PiRpc child loses the casual docker, user-session and sudo 
     assert.deepEqual(r.keys, [], "user-session IPC pointers and the sandbox switch are scrubbed from the child env");
     assert.notEqual(r.unitWrite, "ok", "~/.config/systemd/user is read-only inside (" + r.unitWrite + ")");
     assert.ok(!existsSync(unitProbe));
-    assert.equal(pi.piPid, r.pid, "bwrap reports pi's own pid");
-    assert.notEqual(pi.proc.pid, r.pid, "proc.pid is the wrapper");
+    // PID namespace: inside, pi sees its own pid (2, under the namespace's
+    // init); outside, PiRpc resolved pi's OUTER pid, whose NSpid ends in it.
+    for (let i = 0; i < 50 && pi.piPid == null; i++) await new Promise((res) => setTimeout(res, 20));
+    assert.ok(pi.piPid && pi.piPid !== pi.proc.pid && pi.piPid !== pi.sandboxInitPid, "piPid is pi, not a wrapper");
+    const nspid = (readFileSync("/proc/" + pi.piPid + "/status", "utf8").match(/^NSpid:\s*(.*)$/m) || [])[1].trim().split(/\s+/).map(Number);
+    assert.deepEqual([nspid[0], nspid[nspid.length - 1]], [pi.piPid, r.pid], "outer pid " + pi.piPid + " is the inner pid " + r.pid);
+    assert.equal(r.pid, 2, "pi runs under the namespace's init");
     if (PARENT_SYSTEMD_USER) {
       assert.notEqual(r.sdStatus, 0, "C1: systemd-run --user (the escape to an unsandboxed user-manager process) FAILS inside");
     }
@@ -173,7 +178,7 @@ test("wrapPiSpawn: off / auto-unavailable / required / available argv", () => {
     credentialDirs: ["/run/credentials", "/srv/board-secret"],
   });
   assert.deepEqual([w.sandboxed, w.wrapper, w.cmd], [true, "bwrap", "/usr/bin/bwrap"]);
-  assert.deepEqual(w.args, ["--dev-bind", "/", "/", "--unshare-user",
+  assert.deepEqual(w.args, ["--dev-bind", "/", "/", "--unshare-user", "--unshare-pid", "--proc", "/proc", "--die-with-parent",
     "--tmpfs", "/run/user/1000", "--tmpfs", "/tmp/tmux-1000",
     "--tmpfs", "/run/credentials", "--tmpfs", "/srv/board-secret",
     "--ro-bind", "/dev/null", "/run/docker.sock",
@@ -364,47 +369,62 @@ test("I1: an OLD-style reaper (no wrapper folding) respects the dual lease on pi
 
 // ---- board actor secret file (2026-10-20 fix round 1) ----
 
-test("board secret: the file path comes from CROW_BOARD_ACTOR_SECRET_FILE, else the systemd credential", () => {
-  assert.equal(boardSecretFile({}), null);
-  assert.equal(boardSecretFile({ CREDENTIALS_DIRECTORY: "/run/credentials/u.service" }), "/run/credentials/u.service/board-actor-secret");
-  assert.equal(boardSecretFile({ CROW_BOARD_ACTOR_SECRET_FILE: "/srv/s/x", CREDENTIALS_DIRECTORY: "/run/credentials/u" }), "/srv/s/x");
-});
-
-test("board secret: only a dedicated directory may hold it (the sandbox masks the whole dir)", () => {
-  const env = { HOME: "/home/alex", CROW_HOME: "/home/alex/.crow", CROW_DATA_DIR: "/srv/crow-data" };
-  for (const d of ["/", "/etc", "/tmp", "/home", "/home/alex", "/srv"]) assert.ok(boardSecretDirProblem(d, env), d);
-  for (const d of ["/etc/crow", "/run/credentials/u.service", "/srv/board-secret", "/home/alex/.board-secret"]) {
-    assert.equal(boardSecretDirProblem(d, env), null, d);
+test("board secret: only a systemd credential under an always-masked root is accepted", () => {
+  const real = (p) => p.replace(/^\/link\//, "/run/credentials/");
+  assert.equal(boardSecretCredential({}), null);
+  assert.deepEqual(boardSecretCredential({ CREDENTIALS_DIRECTORY: "/run/credentials/u.service" }, { realpathFn: real }),
+    { path: "/run/credentials/u.service/board-actor-secret", dir: "/run/credentials/u.service" });
+  assert.equal(boardSecretCredential({ CREDENTIALS_DIRECTORY: "/link/u.service" }, { realpathFn: real }).path,
+    "/run/credentials/u.service/board-actor-secret", "judged by real path");
+  assert.equal(boardSecretCredential({ CREDENTIALS_DIRECTORY: "/run/user/1000/credentials/u.service", XDG_RUNTIME_DIR: "/run/user/1000" }, { realpathFn: (p) => p }).path,
+    "/run/user/1000/credentials/u.service/board-actor-secret");
+  for (const cd of ["/srv/creds", "/run/credentials", "/run/credentialsX/u", "/tmp/run/credentials/u", "/home/alex/credentials/u"]) {
+    assert.match(boardSecretCredential({ CREDENTIALS_DIRECTORY: cd, XDG_RUNTIME_DIR: "/run/user/1000" }, { realpathFn: (p) => p }).problem, /not under/, cd);
   }
+  assert.match(boardSecretCredential({ CREDENTIALS_DIRECTORY: "/x" }, { realpathFn: () => { throw new Error("ENOENT"); } }).problem, /does not exist/);
+  // a runtime dir outside /run/user (not covered by the /run/user mask) adds no root
+  assert.deepEqual(boardSecretCredentialRoots({ XDG_RUNTIME_DIR: "/tmp/xdg" }, { realpathFn: (p) => p }), ["/run/credentials"]);
+  assert.deepEqual(boardSecretCredentialRoots({ XDG_RUNTIME_DIR: "/run/user/1000" }, { realpathFn: (p) => p }), ["/run/credentials", "/run/user/1000/credentials"]);
 });
 
-test("board secret: credentialMaskDirs masks /run/credentials, the credential dir and a dedicated secret dir", () => {
-  const all = () => true;
-  assert.deepEqual(credentialMaskDirs({}, { isDirFn: all }), ["/run/credentials"]);
-  assert.deepEqual(credentialMaskDirs({ CREDENTIALS_DIRECTORY: "/run/credentials/u.service" }, { isDirFn: all }), ["/run/credentials"],
-    "a dir under /run/credentials is already covered");
-  assert.deepEqual(credentialMaskDirs({ CROW_BOARD_ACTOR_SECRET_FILE: "/srv/board-secret/s" }, { isDirFn: (d) => d !== "/run/credentials" }),
-    ["/srv/board-secret"]);
-  assert.deepEqual(credentialMaskDirs({ CROW_BOARD_ACTOR_SECRET_FILE: "/etc/s", CREDENTIALS_DIRECTORY: "/opt/creds" }, { isDirFn: all }),
-    ["/run/credentials", "/opt/creds"], "a non-dedicated secret dir is never masked (and actor-sig refuses it)");
-  assert.deepEqual(credentialMaskDirs({ CROW_BOARD_ACTOR_SECRET_FILE: "/srv/board-secret/s" }, { isDirFn: () => false }), [], "missing dirs hold nothing");
-});
-
-test("board secret: by default wrapPiSpawn masks the secret dir named in the GATEWAY's env", () => {
-  const dir = mkdtempSync(join(tmpdir(), "crow-board-secret-mask-"));
-  const prev = process.env.CROW_BOARD_ACTOR_SECRET_FILE;
-  process.env.CROW_BOARD_ACTOR_SECRET_FILE = join(dir, "board-actor-secret");
-  try {
-    const good = { ok: true, bwrap: "/usr/bin/bwrap", reason: null };
-    const w = wrapPiSpawn("node", ["cli.js"], { mode: "auto", probe: good, env: {}, sockets: [], runtimeDirs: [], roDirs: [] });
-    const i = w.args.indexOf(dir);
-    assert.ok(i > 0 && w.args[i - 1] === "--tmpfs", JSON.stringify(w.args));
-    assert.ok(w.args.indexOf(dir) < w.args.indexOf("--"));
-    assert.ok(w.masked.includes(dir));
-  } finally {
-    if (prev === undefined) delete process.env.CROW_BOARD_ACTOR_SECRET_FILE; else process.env.CROW_BOARD_ACTOR_SECRET_FILE = prev;
-    rmSync(dir, { recursive: true, force: true });
+test("board secret: /run/credentials is masked for EVERY pi child, independent of the spawner's env", () => {
+  assert.deepEqual(credentialMaskDirs({ isDirFn: () => true }), ["/run/credentials"]);
+  assert.deepEqual(credentialMaskDirs({ isDirFn: () => false }), [], "absent: no credential exists, and bwrap could not create the mount point");
+  const good = { ok: true, bwrap: "/usr/bin/bwrap", reason: null };
+  const w = wrapPiSpawn("node", ["cli.js"], { mode: "auto", probe: good, env: {}, sockets: [], runtimeDirs: [], roDirs: [] });
+  if (existsSync("/run/credentials")) {
+    const i = w.args.indexOf("/run/credentials");
+    assert.ok(i > 0 && w.args[i - 1] === "--tmpfs" && i < w.args.indexOf("--"), JSON.stringify(w.args));
   }
+  const src = readFileSync(new URL("../scripts/pi-bots/pi_sandbox.mjs", import.meta.url), "utf8");
+  assert.match(src, /opts\.credentialDirs \|\| credentialMaskDirs\(\)/, "the default takes no env");
+});
+
+test("every pi spawn goes through PiRpc and the central wrapPiSpawn", () => {
+  const files = [];
+  const walk = (d) => { for (const n of readdirSyncFs(d)) { if (n === "node_modules" || n.startsWith(".")) continue; const p = join(d, n); if (statSync(p).isDirectory()) walk(p); else if (/\.(m?js)$/.test(n)) files.push(p); } };
+  const root = new URL("..", import.meta.url).pathname;
+  for (const d of ["scripts", "servers", "bundles"]) walk(join(root, d));
+  const offenders = [];
+  for (const f of files) {
+    const lines = readFileSync(f, "utf8").split("\n");
+    lines.forEach((l, i) => {
+      if (!/\b(spawn|spawnSync|execFile|execFileSync|fork|exec)\(/.test(l) || /^\s*(\*|\/\/)/.test(l)) return;
+      const win = lines.slice(i, i + 4).join(" ");
+      if (/cliPath|piCli|PiCli|pi-coding-agent|"rpc"|'rpc'/.test(win) && !f.endsWith(join("scripts", "pi-bots", "bridge.mjs"))) offenders.push(f.slice(root.length) + ":" + (i + 1));
+    });
+  }
+  assert.deepEqual(offenders, [], "pi spawned outside PiRpc");
+  const bridge = readFileSync(join(root, "scripts/pi-bots/bridge.mjs"), "utf8");
+  assert.equal((bridge.match(/\bspawn\(/g) || []).length, 1);
+  assert.match(bridge, /const launch = wrapPiSpawn\(nodeBin, args, \{ env, infoFd: 3 \}\);/);
+  assert.match(bridge, /this\.proc = spawn\(launch\.cmd, launch\.args,/);
+  assert.match(readFileSync(join(root, "scripts/pi-bots/job_runner.mjs"), "utf8"), /new bridge\.PiRpc\(/);
+  assert.match(readFileSync(join(root, "servers/gateway/perch-interactive.js"), "utf8"), /new S\.PiRpc\(/);
+  assert.match(readFileSync(join(root, "scripts/pi-bots/skill_review.mjs"), "utf8"), /new PiRpc\(/);
+  const discord = readFileSync(join(root, "scripts/pi-bots/discord_gateway.mjs"), "utf8");
+  assert.match(discord, /import \{ handleInbound \} from "\.\/bridge\.mjs";/, "Discord turns run through the bridge");
+  assert.doesNotMatch(discord, /\bspawn\(/);
 });
 
 test("integration: a sandboxed child cannot read the board secret file; the parent can", { skip: noSandbox }, async () => {
@@ -414,7 +434,7 @@ test("integration: a sandboxed child cannot read the board secret file; the pare
   try {
     const script = 'try{console.log("READ "+require("fs").readFileSync(process.argv[1],"utf8").length)}catch(e){console.log("ERR "+e.code)}';
     const launch = wrapPiSpawn(process.execPath, ["-e", script, file], { mode: "auto", sockets: [], runtimeDirs: [], roDirs: [],
-      credentialDirs: credentialMaskDirs({ CROW_BOARD_ACTOR_SECRET_FILE: file }) });
+      credentialDirs: [dir] });
     assert.equal(launch.wrapper, "bwrap");
     const res = await new Promise((resolve) => {
       const c = spawn(launch.cmd, launch.args, { env: launch.env });
@@ -423,4 +443,63 @@ test("integration: a sandboxed child cannot read the board secret file; the pare
     assert.match(res, /^ERR ENOENT/, "masked inside: " + res);
     assert.equal(readFileSync(file, "utf8").length, 65, "still readable by the parent");
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("integration: PID namespace + fresh /proc: no host process is visible; the parent's root and environ do not exist inside", { skip: noSandbox }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-pidns-"));
+  const secret = join(dir, "secret");
+  writeFileSync(secret, "s3cr3t-value-for-test", { mode: 0o600 });
+  try {
+    const script = [
+      'const fs = require("fs"); const { execFileSync } = require("child_process");',
+      'const ppid = process.argv[1], secret = process.argv[2];',
+      'const tryRead = (p) => { try { fs.readFileSync(p); return "READ"; } catch (e) { return e.code; } };',
+      'const pids = fs.readdirSync("/proc").filter((x) => /^\\d+$/.test(x)).map(Number);',
+      'const sub = execFileSync(process.execPath, ["-e", "console.log(process.pid)"], { encoding: "utf8" }).trim();',
+      'fs.writeFileSync("written-inside.txt", "ok");',
+      'console.log(JSON.stringify({ root: tryRead("/proc/" + ppid + "/root" + secret), environ: tryRead("/proc/" + ppid + "/environ"), pids, self: process.pid, sub, cwdRead: fs.readFileSync("written-inside.txt", "utf8") }));',
+    ].join("\n");
+    const launch = wrapPiSpawn(process.execPath, ["-e", script, String(process.pid), secret], { mode: "auto", sockets: [], runtimeDirs: [], roDirs: [], credentialDirs: [] });
+    assert.ok(launch.args.includes("--unshare-pid") && launch.args.includes("--die-with-parent"));
+    const res = await new Promise((resolve) => {
+      const c = spawn(launch.cmd, launch.args, { env: launch.env, cwd: dir });
+      let o = "", e = ""; c.stdout.on("data", (d) => (o += d)); c.stderr.on("data", (d) => (e += d));
+      c.on("exit", (code) => resolve({ code, o: o.trim(), e }));
+    });
+    assert.equal(res.code, 0, "the sandboxed child (with its own subprocess) exits 0: " + res.e);
+    const r = JSON.parse(res.o.split("\n").pop());
+    assert.notEqual(r.root, "READ", "the parent's /proc/<pid>/root is not reachable");
+    assert.notEqual(r.environ, "READ", "the parent's /proc/<pid>/environ is not reachable");
+    assert.ok(!r.pids.includes(process.pid), "the parent's pid is not even listed");
+    assert.ok(r.pids.length <= 4 && r.pids.every((p) => p <= 10), "only the sandbox's own pids: " + r.pids.join(","));
+    assert.ok(Number(r.sub) > r.self, "the child spawned its own subprocess");
+    assert.equal(r.cwdRead, "ok", "reads and writes its cwd");
+    assert.equal(readFileSync(join(dir, "written-inside.txt"), "utf8"), "ok", "the write is visible outside");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("listBridgePi folds a PID-namespace sandbox (outer bwrap -> inner bwrap -> pi) into ONE entry", () => {
+  const W = `/usr/bin/bwrap --dev-bind / / --unshare-user --unshare-pid --proc /proc --die-with-parent --info-fd 3 -- /n/node ${CLI} --mode rpc`;
+  const ps = [
+    `  700    50   400   3000 ${W}`,
+    `  701   700   400   1000 ${W}`,
+    `  702   701   399 250000 /n/node ${CLI} --mode rpc`,
+    // orphaned nested sandbox
+    `  800     1   500   3000 ${W}`,
+    `  801   800   500   1000 ${W}`,
+    `  802   801   499 999999 /n/node ${CLI} --mode rpc`,
+    // nested wrapper whose pi has not started
+    `  900    50     0   2000 ${W}`,
+    `  901   900     0   1000 ${W}`,
+  ].join("\n");
+  const procs = listBridgePi({ _psOutput: ps });
+  const byPid = Object.fromEntries(procs.map((p) => [p.pid, p]));
+  assert.equal(procs.length, 3, JSON.stringify(procs));
+  assert.deepEqual([byPid[700].ppid, byPid[700].rssKb, byPid[700].innerPid], [50, 250000, 702]);
+  assert.deepEqual([byPid[800].ppid, byPid[800].innerPid], [1, 802]);
+  assert.ok(byPid[900] && !byPid[901]);
+  const killed = [];
+  const r = reapStalePi({ _procs: procs, _kill: (pid, sig) => killed.push([pid, sig]), leaseFiles: [], now: Date.now() });
+  assert.deepEqual(r.reaped.map((v) => v.pid), [800]);
+  assert.ok(killed.some(([p, s2]) => p === -800 && s2 === "SIGTERM"), "the outer wrapper's group (inner bwrap, pi, its children) is signalled");
 });

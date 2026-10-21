@@ -61,9 +61,8 @@
  */
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { openSync, fstatSync, readSync, closeSync, constants as fsConstants } from "node:fs";
-import { dirname, resolve, sep } from "node:path";
 import { BOARD_ACTOR_SECRET_ENV } from "../../servers/shared/bot-env.js";
-import { piSandboxStatus, boardSecretFile, boardSecretDirProblem } from "./pi_sandbox.mjs";
+import { piSandboxStatus, boardSecretCredential, BOARD_SECRET_CREDENTIAL } from "./pi_sandbox.mjs";
 
 let key = null;
 
@@ -142,9 +141,14 @@ export function verifyActorSig(args) {
 //    board-actor-secret), which the service cannot read itself; systemd
 //    `LoadCredential=board-actor-secret:<source>` hands each unit a copy at
 //    $CREDENTIALS_DIRECTORY/board-actor-secret, readable by the service uid
-//    only. CROW_BOARD_ACTOR_SECRET_FILE may name another path (owned by the
-//    service uid, mode 0600, not a symlink, in a dedicated directory). The
-//    path is not secret; the file is.
+//    only. That systemd credential is the ONLY accepted source, and only
+//    when CREDENTIALS_DIRECTORY really lies under /run/credentials/ or
+//    $XDG_RUNTIME_DIR/credentials/ (under /run/user/): roots that every
+//    sandboxed pi child has masked, whichever process spawned it. A custom
+//    path (CROW_BOARD_ACTOR_SECRET_FILE) is ignored with a warning: its mask
+//    would depend on the spawning process's env, and a same-uid spawner
+//    without that variable (a bridge timer, a co-hosted instance) would
+//    leave the file readable to its bots.
 //  - In memory: only the DERIVED board key. initBoardSigning() reads the file
 //    once at startup, derives the key and zeroes the raw buffers (the decoded
 //    text is a JS string and cannot be wiped; it is dropped at once).
@@ -155,16 +159,21 @@ export function verifyActorSig(args) {
 //    stripped from every child env.
 //  - Hidden from bots: shared-secret mode is REFUSED unless the pi sandbox
 //    is active (pi_sandbox.mjs piSandboxStatus() === "active"), and the
-//    sandbox masks /run/credentials, $CREDENTIALS_DIRECTORY and the secret
-//    file's directory with an empty tmpfs in every pi child.
+//    sandbox masks /run/credentials and /run/user with an empty tmpfs in
+//    every pi child, which also runs in its own PID namespace with a fresh
+//    /proc (no host process, so no /proc/<pid>/root or environ, is visible).
+//    Unsandboxed bots are a KNOWN LIMIT: without bubblewrap a bot shell can
+//    read anything the service uid can, the credential copy included, which
+//    is exactly why shared-secret mode refuses to run without the sandbox.
 //    The supervised Discord child gets the derived board key over stdin,
 //    like the per-boot key.
 // Scope: board only. Phone and artifacts signatures keep the per-boot key.
 // Unlike per-boot signatures, shared-secret signatures do NOT expire at a
-// gateway restart; they stay valid until the secret is rotated (new file
+// gateway restart; they stay valid until the secret is rotated (new source
 // content, then restart both units). Rotation invalidates every older one.
-// A file that is unreadable, too short, or not hex/base64 is ignored with
-// one warning, and board signing falls back to the per-boot key.
+// A credential that is unreadable, too short, or not hex/base64 is ignored
+// with one warning, and board signing falls back to the per-boot key. A
+// unit without the credential stays quiet (per-boot or none).
 
 const BOARD_KDF_LABEL = "crow-board-actor-v1";
 const MAX_SECRET_FILE_BYTES = 4096;
@@ -184,21 +193,17 @@ export function decodeBoardSecret(raw) {
   return null;
 }
 
-function insideDir(path, dir) {
-  if (!dir) return false;
-  const d = resolve(dir);
-  return path === d || path.startsWith(d + sep);
-}
-
-/** Read the secret file once: { buf } or { problem }. O_NOFOLLOW refuses a
- *  symlink; the checks run on the opened fd, so the file cannot be swapped
- *  between the check and the read. A systemd credential copy may be owned by
- *  root with a read ACL for the service (mode then shows the ACL mask in the
- *  group bits); that shape is accepted only inside $CREDENTIALS_DIRECTORY. */
-function readSecretFile(path, env) {
+/** Read the credential once: { buf } or { problem }. O_NOFOLLOW refuses a
+ *  symlink and O_NONBLOCK keeps a FIFO from hanging boot; the checks run on
+ *  the opened fd, so the file cannot be swapped between check and read.
+ *  systemd gives the service read access either by chown (the file is then
+ *  the service uid's, mode 0400) or by a read ACL on a root-owned file (the
+ *  mode then shows the ACL mask in the group bits); both shapes pass, nothing
+ *  world-accessible does. */
+function readSecretFile(path) {
   let fd;
   try {
-    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
   } catch (e) {
     return { problem: e && e.code === "ELOOP" ? "is a symlink" : "cannot be opened (" + ((e && e.code) || "error") + ")" };
   }
@@ -206,12 +211,11 @@ function readSecretFile(path, env) {
     const st = fstatSync(fd);
     if (!st.isFile()) return { problem: "is not a regular file" };
     const uid = typeof process.getuid === "function" ? process.getuid() : -1;
-    const credential = insideDir(path, env.CREDENTIALS_DIRECTORY);
-    if (credential && st.uid === 0) {
+    if (st.uid === 0) {
       if (st.mode & 0o007) return { problem: "is world-accessible" };
     } else {
-      if (st.uid !== uid) return { problem: "is not owned by this process's user" };
-      if (st.mode & 0o077) return { problem: "is group- or world-accessible (want mode 0600 or 0400)" };
+      if (st.uid !== uid) return { problem: "is not owned by this process's user (or root)" };
+      if (st.mode & 0o077) return { problem: "is group- or world-accessible (want mode 0400 or 0600)" };
     }
     if (st.size > MAX_SECRET_FILE_BYTES) return { problem: "is too large" };
     const buf = Buffer.alloc(MAX_SECRET_FILE_BYTES);
@@ -237,43 +241,46 @@ export function boardSigningMode() {
 
 /**
  * Startup (gateway, runner, Discord child, bridge CLIs): read the board
- * secret file ONCE, keep only the derived key in memory. Returns
+ * secret credential ONCE, keep only the derived key in memory. Returns
  * boardSigningMode(). A key already installed (e.g. from the gateway over
  * stdin) is kept and the file is not read again. Every refusal warns once,
  * never with the value.
  * @param {object} [o]
- * @param {object} [o.env] where to look for the file path (default process.env)
+ * @param {object} [o.env] where to look for CREDENTIALS_DIRECTORY (default process.env)
  * @param {() => string} [o.sandboxStatus] default pi_sandbox piSandboxStatus
  * @param {(msg:string) => void} [o.warn]
+ * @param {string[]} [o._credentialRoots] test seam: the accepted real-path roots
  */
-export function initBoardSigning({ env = process.env, sandboxStatus = piSandboxStatus, warn = (m) => console.warn(m) } = {}) {
-  if (env[BOARD_ACTOR_SECRET_ENV] != null && String(env[BOARD_ACTOR_SECRET_ENV]).trim() !== "") {
-    warn("[actor-sig] " + BOARD_ACTOR_SECRET_ENV + " in the environment is ignored (use CROW_BOARD_ACTOR_SECRET_FILE or a systemd credential named " + "board-actor-secret); it is stripped from every child");
+export function initBoardSigning({ env = process.env, sandboxStatus = piSandboxStatus, warn = (m) => console.warn(m), _credentialRoots } = {}) {
+  for (const name of [BOARD_ACTOR_SECRET_ENV, "CROW_BOARD_ACTOR_SECRET_FILE"]) {
+    if (env[name] != null && String(env[name]).trim() !== "") {
+      warn("[actor-sig] " + name + " is ignored: the board secret is accepted only as a systemd credential named " + BOARD_SECRET_CREDENTIAL + " (LoadCredential=)");
+    }
   }
   if (boardSecretKey) return boardSigningMode();
-  const path = boardSecretFile(env);
-  if (!path) return boardSigningMode();
+  const cred = boardSecretCredential(env, _credentialRoots ? { roots: _credentialRoots } : {});
+  if (!cred) return boardSigningMode();
+  if (cred.problem) {
+    warn("[actor-sig] board shared secret ignored: " + cred.problem);
+    return boardSigningMode();
+  }
   let status = "";
   try { status = String(sandboxStatus()); } catch (e) { status = "error"; }
   if (status !== "active") {
     warn("[actor-sig] board shared secret ignored: pi sandbox not active, bots could read it (" + status + ")");
     return boardSigningMode();
   }
-  const dirProblem = boardSecretDirProblem(dirname(path), env);
-  if (dirProblem) {
-    warn("[actor-sig] board shared secret ignored: " + path + " is not in a dedicated directory (" + dirProblem + "); the sandbox masks that whole directory");
-    return boardSigningMode();
-  }
-  const r = readSecretFile(path, env);
+  const r = readSecretFile(cred.path);
   if (r.problem) {
-    warn("[actor-sig] board shared secret ignored: " + path + " " + r.problem);
+    if (r.problem.includes("ENOENT")) return boardSigningMode(); // a unit with other credentials, none for us
+    warn("[actor-sig] board shared secret ignored: " + cred.path + " " + r.problem);
     return boardSigningMode();
   }
   const b = decodeBoardSecret(r.buf.toString("utf8"));
   r.buf.fill(0);
   if (!b) {
     // Never the value, never its length.
-    warn("[actor-sig] board shared secret ignored: " + path + " does not decode (hex or base64) to at least 32 bytes");
+    warn("[actor-sig] board shared secret ignored: " + cred.path + " does not decode (hex or base64) to at least 32 bytes");
     return boardSigningMode();
   }
   boardSecretKey = createHmac("sha256", b).update(BOARD_KDF_LABEL).digest();

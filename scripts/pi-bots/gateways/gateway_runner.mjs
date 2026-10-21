@@ -171,7 +171,7 @@ process.on("SIGINT", shutdown);
   // never holds the gateway's per-boot key, so without the operator's shared
   // secret file its bots' board writes are unattributed.
   const boardMode = initBoardSigning();
-  if (boardMode === "none") log("WARNING: board actor signing: none (no usable board secret file, see CROW_BOARD_ACTOR_SECRET_FILE): board writes from this runner are unattributed");
+  if (boardMode === "none") log("WARNING: board actor signing: none (no usable board-actor-secret systemd credential): board writes from this runner are unattributed");
   else log("board actor signing: " + boardMode);
   warnIfPiLabIncompatible((m) => log(m));
   startReaper();

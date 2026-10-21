@@ -16,12 +16,15 @@
  *  That is an operator decision, not made here.
  *
  * What this does, with no privilege, when bubblewrap is usable:
- *     bwrap --dev-bind / / --unshare-user
+ *     bwrap --dev-bind / / --unshare-user --unshare-pid --proc /proc --die-with-parent
  *           --ro-bind /dev/null <docker.sock>...          docker API
  *           --tmpfs /run/user                             user bus, systemd
  *                                                         user manager, gnupg,
  *                                                         keyring, pipewire,
  *                                                         pulse, pk-debconf
+ *           --tmpfs /run/credentials                      systemd unit
+ *                                                         credentials (the
+ *                                                         board secret)
  *           --tmpfs /tmp/tmux-<uid>, /tmp/cc-daemon-<uid> (always),
  *                   /tmp/.X11-unix (when present)
  *           --ro-bind ~/.config/systemd ~/.config/systemd   user units not
@@ -32,8 +35,16 @@
  *  *_SOCKET and *_SOCKET_PATH.
  *  - The masks are locked mounts: the child cannot unmount them, even from a
  *    nested user namespace (verified).
- *  - In its own user namespace the child is refused other processes'
- *    /proc/<pid>/{root,environ,mem} (the gateway's and other bots').
+ *  - Its own PID namespace with a fresh /proc (--unshare-pid --proc /proc,
+ *    --die-with-parent): no host process is even visible, so the gateway's
+ *    and other bots' /proc/<pid>/{root,environ,mem} do not exist inside.
+ *    This is structural, not a ptrace-policy outcome. (In its own user
+ *    namespace those reads were already refused; PR_SET_DUMPABLE is not set:
+ *    node has no prctl.) The parent side keeps using outer PIDs: proc.pid is
+ *    the outer bwrap, bwrap's --info-fd child-pid is the namespace's init
+ *    (an inner bwrap) and PiRpc resolves pi's outer pid as its child; the
+ *    process-group kill and the reaper (which folds nested wrappers) work on
+ *    outer PIDs.
  *  - bubblewrap sets no_new_privs, so sudo and setuid/setgid binaries
  *    (crontab, at, pkexec) cannot raise privilege.
  *  - uid, network, cwd and the rest of the filesystem (read-write) are
@@ -66,11 +77,14 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, join } from "node:path";
 
 const BWRAP_CANDIDATES = ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
 const SETPRIV_CANDIDATES = ["/usr/bin/setpriv", "/bin/setpriv"];
 export const PROBE_RETRY_MS = 5 * 60 * 1000;
+/** Every sandboxed pi: own user + PID namespace, fresh /proc, dies with the
+ *  wrapper. The probe uses the same flags, so "active" means all of them work. */
+export const BWRAP_BASE = Object.freeze(["--dev-bind", "/", "/", "--unshare-user", "--unshare-pid", "--proc", "/proc", "--die-with-parent"]);
 
 let probeCache = null; // { ok, bwrap, setpriv, reason, at }
 let warnedFor = null;
@@ -148,56 +162,51 @@ export function systemdUserUnitDirs(home = homedir(), { create = true } = {}) {
 }
 
 /**
- * The board actor shared-secret file (scripts/pi-bots/actor-sig.mjs), as the
- * GATEWAY's env names it: CROW_BOARD_ACTOR_SECRET_FILE, else systemd's
- * $CREDENTIALS_DIRECTORY/board-actor-secret (LoadCredential=). null if
- * neither is set. The path is not secret; the file is.
+ * The board actor shared secret (scripts/pi-bots/actor-sig.mjs) is accepted
+ * ONLY as a systemd credential: $CREDENTIALS_DIRECTORY/board-actor-secret,
+ * and only when CREDENTIALS_DIRECTORY's real path lies under a root that
+ * EVERY sandboxed pi child has masked, whatever the env of the process that
+ * spawns it (a bridge timer or a co-hosted instance included):
+ *  - /run/credentials/ (system units; masked by credentialMaskDirs());
+ *  - $XDG_RUNTIME_DIR/credentials/ (user units), and only when the runtime
+ *    dir's real path is under /run/user/ (masked by userRuntimeDirs()).
+ * Returns { path } | { problem } | null (no CREDENTIALS_DIRECTORY).
+ * `roots` / `realpathFn` are test seams.
  */
 export const BOARD_SECRET_CREDENTIAL = "board-actor-secret";
-export function boardSecretFile(env = process.env) {
-  const f = String((env && env.CROW_BOARD_ACTOR_SECRET_FILE) || "").trim();
-  if (f) return resolve(f);
+export function boardSecretCredentialRoots(env = process.env, { realpathFn = realpathSync } = {}) {
+  const roots = ["/run/credentials"];
+  const xdg = String((env && env.XDG_RUNTIME_DIR) || "").trim();
+  if (xdg) {
+    try {
+      const r = realpathFn(xdg);
+      if (r.startsWith("/run/user/")) roots.push(join(r, "credentials"));
+    } catch { /* no runtime dir: no user-unit root */ }
+  }
+  return roots;
+}
+export function boardSecretCredential(env = process.env, { roots, realpathFn = realpathSync } = {}) {
   const cd = String((env && env.CREDENTIALS_DIRECTORY) || "").trim();
-  return cd ? resolve(cd, BOARD_SECRET_CREDENTIAL) : null;
+  if (!cd) return null;
+  let real;
+  try { real = realpathFn(cd); } catch { return { problem: "CREDENTIALS_DIRECTORY does not exist" }; }
+  const allowed = roots || boardSecretCredentialRoots(env, { realpathFn });
+  if (!allowed.some((r) => real.startsWith(r + "/"))) {
+    return { problem: "CREDENTIALS_DIRECTORY is not under /run/credentials/ or $XDG_RUNTIME_DIR/credentials/ (a path every bot sandbox masks)" };
+  }
+  return { path: join(real, BOARD_SECRET_CREDENTIAL), dir: real };
 }
 
 /**
- * Why `dir` cannot hold the board secret (it is masked with an empty tmpfs in
- * every sandboxed pi child, so it must be a dedicated directory), or null.
- * Refused: a top-level directory (/, /etc, /tmp, /home, ...) and any
- * directory that is, or contains, a path bots need (home, the Crow data
- * dirs, the app checkout, the current directory).
+ * Credential directories hidden behind an empty tmpfs in EVERY sandboxed pi
+ * child, independent of the spawning process's env: /run/credentials (all
+ * system unit credentials). User-unit credentials live under /run/user,
+ * which userRuntimeDirs() already masks. /run/credentials is masked whenever
+ * it exists; it belongs to root and cannot be created here (bwrap would fail
+ * to make the mount point), and while it is absent no credential exists.
  */
-export function boardSecretDirProblem(dir, env = process.env) {
-  const d = resolve(String(dir || "/"));
-  if (d.split(sep).filter(Boolean).length < 2) return "a top-level directory";
-  const needed = [homedir(), env.HOME, env.CROW_HOME, env.CROW_DATA_DIR, env.CROW_APP_ROOT, process.cwd()]
-    .filter(Boolean).map((p) => resolve(p));
-  for (const p of needed) if (p === d || p.startsWith(d + sep)) return "it is or contains a directory bots need";
-  return null;
-}
-
-/**
- * Directories hidden behind an empty tmpfs so a sandboxed bot cannot read the
- * board secret: /run/credentials (every systemd unit credential, when it
- * exists; never created here, it is root's), $CREDENTIALS_DIRECTORY when it
- * lies elsewhere, and the secret file's own directory when that is a
- * dedicated one (boardSecretDirProblem). Only existing directories are
- * returned: a missing one holds no secret.
- */
-export function credentialMaskDirs(env = process.env, { isDirFn = isDir } = {}) {
-  const out = [];
-  const add = (d) => {
-    if (!d || !isDirFn(d)) return;
-    if (out.some((o) => d === o || d.startsWith(o + "/"))) return;
-    out.push(d);
-  };
-  add("/run/credentials");
-  const cd = String((env && env.CREDENTIALS_DIRECTORY) || "").trim();
-  if (cd) add(resolve(cd));
-  const f = boardSecretFile(env);
-  if (f && !boardSecretDirProblem(dirname(f), env)) add(dirname(f));
-  return out;
+export function credentialMaskDirs({ isDirFn = isDir } = {}) {
+  return isDirFn("/run/credentials") ? ["/run/credentials"] : [];
 }
 
 const SCRUB_EXACT = new Set(["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "SSH_AUTH_SOCK", "SSH_AGENT_PID",
@@ -233,7 +242,7 @@ export function probePiSandbox(opts = {}) {
   let ok = false, reason;
   if (!bwrap) reason = "bubblewrap (bwrap) is not installed";
   else {
-    const err = runProbe(bwrap, ["--dev-bind", "/", "/", "--unshare-user", "--", "/bin/true"]);
+    const err = runProbe(bwrap, [...BWRAP_BASE, "--", "/bin/true"]);
     if (err == null) ok = true; else reason = "bwrap cannot create a user namespace here: " + err;
   }
   let setprivOk = false;
@@ -284,16 +293,16 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   const sockets = opts.sockets || dockerSocketPaths(process.env);
   const tmpfs = opts.runtimeDirs || userRuntimeDirs();
   const roDirs = opts.roDirs || systemdUserUnitDirs();
-  // Board secret: credential dirs masked like the IPC dirs (gateway env).
-  const credDirs = (opts.credentialDirs || credentialMaskDirs(process.env)).filter((d) => !tmpfs.includes(d));
-  const pre = ["--dev-bind", "/", "/", "--unshare-user"];
+  // Board secret: system credential dirs masked like the IPC dirs.
+  const credDirs = (opts.credentialDirs || credentialMaskDirs()).filter((d) => !tmpfs.includes(d));
+  const pre = [...BWRAP_BASE];
   for (const d of tmpfs) pre.push("--tmpfs", d);
   for (const d of credDirs) pre.push("--tmpfs", d);
   for (const s of sockets) if (!tmpfs.some((d) => s === d || s.startsWith(d + "/"))) pre.push("--ro-bind", "/dev/null", s);
   for (const d of roDirs) pre.push("--ro-bind", d, d);
   if (opts.infoFd != null) pre.push("--info-fd", String(opts.infoFd));
   return { cmd: probe.bwrap, args: [...pre, "--", cmd, ...args], env: scrubSandboxEnv(env),
-    sandboxed: true, wrapper: "bwrap", reason: null, masked: [...sockets, ...tmpfs, ...credDirs, ...roDirs] };
+    sandboxed: true, wrapper: "bwrap", pidNamespace: true, reason: null, masked: [...sockets, ...tmpfs, ...credDirs, ...roDirs] };
 }
 
 /** True when a ps `args` string is a bubblewrap wrapper (used by the reaper). */
