@@ -176,14 +176,14 @@ test("reserve (no bar at run time, a Turbo visit): no 0px write before the frame
   sb.run();
   assert.deepEqual(sb.writes, [], "no immediate write while the bar is held out of the page");
   assert.equal(sb.frames.length, 1, "one frame scheduled");
-  sb.setBar({ style: { display: "block" }, offsetHeight: 57, getAttribute: () => "1", setAttribute() {} });
+  sb.setBar({ style: { display: "block" }, offsetHeight: 57, hasAttribute: () => false, getAttribute: () => "1", setAttribute() {} });
   sb.frames[0]();
   assert.deepEqual(sb.writes, [["--crow-player-h", "57px"]], "the frame measures the bar that came back");
 });
 
 test("reserve: one turbo:load listener per window (re-runs on every visit add none), and it re-measures", async () => {
   const sb = await reserveSandbox();
-  sb.setBar({ style: { display: "block" }, offsetHeight: 57, getAttribute: () => null, setAttribute() {} });
+  sb.setBar({ style: { display: "block" }, offsetHeight: 57, hasAttribute: () => false, getAttribute: () => null, setAttribute() {} });
   sb.run();
   sb.run();
   sb.run();

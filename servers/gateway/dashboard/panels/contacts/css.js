@@ -369,7 +369,7 @@ export function contactsCss() {
     right: 0;
     bottom: 0;
     background: rgba(0, 0, 0, 0.6);
-    z-index: 1000;
+    z-index: 1200;
     align-items: center;
     justify-content: center;
   }
