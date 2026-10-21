@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
-import { _tickForTest, _bootRecomputeForTest, computeNextRun } from "../servers/gateway/scheduler.js";
+import { _tickForTest, _bootRecomputeForTest, computeNextRun, _setComputeNextRunForTest } from "../servers/gateway/scheduler.js";
 import { registerSchedulerHook, unregisterSchedulerHook } from "../servers/gateway/scheduler-hooks.js";
 
 const tmpDir = mkdtempSync(join(tmpdir(), "crow-oneshot-test-"));
@@ -71,23 +71,51 @@ test("a reminder missed while the gateway was down fires once at the next tick a
   assert.equal((await row(id)).next_run, next);
 });
 
-test("TZ does not shift it", async () => {
+// Spy on the cron computation: an @once row must never reach it (the old code did, and only
+// survived because cron-parser throws on "@once" and computeNextRun swallows that).
+function spyCompute() {
+  const calls = [];
+  const restore = _setComputeNextRunForTest((c, ...r) => { calls.push(c); return computeNextRun(c, ...r); });
+  return { calls, restore };
+}
+
+test("TZ does not shift it, and the boot recompute never computes an @once row", async () => {
   const prev = process.env.TZ;
+  const spy = spyCompute();
   try {
     process.env.TZ = "Asia/Tokyo";
     const next = iso(3_600_000);
     const id = await seed("reminder:tz", "@once", next);
+    const ord = await seed("reminder:ord", "0 9 * * *", iso(3_600_000));
     await _bootRecomputeForTest(db);
     assert.equal((await row(id)).next_run, next);
+    assert.ok(spy.calls.includes("0 9 * * *"), "positive control: ordinary rows are computed");
+    assert.ok(!spy.calls.includes("@once"), "computeNextRun never called for @once");
+    assert.ok(ord);
   } finally {
+    spy.restore();
     if (prev === undefined) delete process.env.TZ; else process.env.TZ = prev;
   }
 });
 
-test("computeNextRun is not consulted for @once rows with no next_run", async () => {
-  const id = await seed("reminder:null", "@once", null);
-  await _tickForTest(db);
-  await _bootRecomputeForTest(db);
-  assert.equal((await row(id)).next_run, null);
-  assert.equal(computeNextRun("@once"), null);
+test("firing an @once row never computes a next run", async () => {
+  const spy = spyCompute();
+  try {
+    const id = await seed("reminder:nocalc", "@once", iso(-1000));
+    await _tickForTest(db);
+    assert.equal((await notes(id)).length, 1);
+    assert.ok(!spy.calls.includes("@once"));
+  } finally { spy.restore(); }
+});
+
+test("the needsNextRun loop skips an enabled @once row with no next_run", async () => {
+  const spy = spyCompute();
+  try {
+    const id = await seed("reminder:null", "@once", null);
+    await _tickForTest(db);
+    assert.ok(!spy.calls.includes("@once"));
+    const r = await row(id);
+    assert.equal(r.next_run, null);
+    assert.equal(Number(r.enabled), 1);
+  } finally { spy.restore(); }
 });

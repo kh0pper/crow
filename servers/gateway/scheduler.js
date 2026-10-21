@@ -29,6 +29,8 @@ export function computeNextRun(cronExpression, fromDate = new Date()) {
   }
 }
 
+let _compute = computeNextRun; // indirection so tests can observe/replace it
+
 /**
  * Check for due schedules and update them.
  */
@@ -54,6 +56,8 @@ async function tick() {
     for (const schedule of rows) {
       let nextRun = null;
       if (schedule.cron_expression === ONCE) {
+        // Deliberate: the UPDATE runs BEFORE delivery. A crash in between drops the reminder but
+        // can never double it (race safety over at-least-once).
         // Fire and switch off in ONE guarded UPDATE (next_run kept for the record). Only the
         // tick that flips enabled 1 -> 0 fires, so racing ticks cannot double-fire.
         const res = await db.execute({
@@ -63,7 +67,7 @@ async function tick() {
         if (!res.rowsAffected) continue;
         console.log(`[scheduler] Fired one-shot: #${schedule.id} "${schedule.task}"`);
       } else {
-        nextRun = computeNextRun(schedule.cron_expression);
+        nextRun = _compute(schedule.cron_expression);
         await db.execute({
           sql: "UPDATE schedules SET last_run = ?, next_run = ?, updated_at = datetime('now') WHERE id = ?",
           args: [now, nextRun, schedule.id],
@@ -109,7 +113,7 @@ async function tick() {
     });
 
     for (const schedule of needsNextRun) {
-      const nextRun = computeNextRun(schedule.cron_expression);
+      const nextRun = _compute(schedule.cron_expression);
       if (nextRun) {
         await db.execute({
           sql: "UPDATE schedules SET next_run = ?, updated_at = datetime('now') WHERE id = ?",
@@ -140,7 +144,7 @@ async function bootRecompute() {
 
     let updated = 0;
     for (const schedule of rows) {
-      const nextRun = computeNextRun(schedule.cron_expression);
+      const nextRun = _compute(schedule.cron_expression);
       if (nextRun) {
         await db.execute({
           sql: "UPDATE schedules SET next_run = ?, updated_at = datetime('now') WHERE id = ?",
@@ -195,3 +199,5 @@ export function stopScheduler() {
 // Test seams (not used in production). Each binds the module to the given db.
 export async function _tickForTest(database) { db = database; await tick(); }
 export async function _bootRecomputeForTest(database) { db = database; return bootRecompute(); }
+/** Replace the next-run computation (tests); returns a function that restores it. */
+export function _setComputeNextRunForTest(fn) { _compute = fn; return () => { _compute = computeNextRun; }; }
