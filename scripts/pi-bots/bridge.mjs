@@ -65,6 +65,11 @@ import { initBoardSigning } from "./actor-sig.mjs";
 import { meterBotTurn } from "./metering.mjs";
 import { getOrCreateLocalInstanceId } from "../../servers/gateway/instance-registry.js";
 
+/** True while any process of group `pgid` exists (EPERM still means it does). */
+function processGroupAlive(pgid) {
+  try { process.kill(-pgid, 0); return true; } catch (e) { return !!(e && e.code === "EPERM"); }
+}
+
 /** pi's outer PID inside a PID-namespace sandbox: the first child of the
  *  namespace's init. Polled briefly (init forks pi right after bwrap reports
  *  it); falls back to the init's pid, which is still inside the sandbox. */
@@ -757,7 +762,18 @@ export class PiRpc {
       try { process.kill(-pid, "SIGKILL"); } catch (e) { try { this.proc.kill("SIGKILL"); } catch {} }
     }, 5000);
     await this.exited;
-    clearTimeout(k);
+    if (!this.sandboxed) { clearTimeout(k); return; }
+    // Sandboxed: the outer bwrap exits at the group SIGTERM while pi still
+    // drains inside its PID namespace (no PDEATHSIG, see pi_sandbox.mjs
+    // BWRAP_BASE). Keep the 5 s SIGKILL bound until the whole process group
+    // is gone, so a pi that ignores SIGTERM is still killed. close() does not
+    // wait for that; the timer and the poll run in the background.
+    if (k.unref) k.unref();
+    const poll = setInterval(() => {
+      if (!processGroupAlive(pid)) { clearInterval(poll); clearTimeout(k); }
+    }, 100);
+    if (poll.unref) poll.unref();
+    setTimeout(() => clearInterval(poll), 5500).unref?.();
   }
 }
 

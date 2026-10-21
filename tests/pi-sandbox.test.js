@@ -437,7 +437,12 @@ test("every pi spawn goes through PiRpc and the central wrapPiSpawn", () => {
   for (const f of files) {
     const lines = readFileSync(f, "utf8").split("\n");
     lines.forEach((l, i) => {
-      if (/^\s*(\*|\/\/)/.test(l) || /\bfunction\s+\w+\s*\(/.test(l)) return;
+      // Skip comments and declarations at line start only: a one-line helper
+      // (`const run = () => spawn(...)`, `function f() { return execFile(...) }`)
+      // is still checked for what it calls.
+      if (/^\s*(\*|\/\/)/.test(l)) return;
+      const decl = l.match(/^\s*(export\s+)?(async\s+)?function\s*\*?\s*[\w$]+\s*\([^)]*\)\s*\{?\s*$/);
+      if (decl) return;
       if (!/\b[\w$]*(spawn|exec|fork)[\w$]*\s*\(/i.test(l)) return;
       const win = lines.slice(i, i + 4).join(" ");
       if (!/cliPath|piCli|PiCli|pi-coding-agent|"rpc"|'rpc'/.test(win)) return;
@@ -530,6 +535,40 @@ test("integration: close()'s group SIGTERM lets a sandboxed pi finish its SIGTER
     for (let i = 0; i < 40 && !existsSync(marker); i++) await new Promise((r) => setTimeout(r, 100));
     assert.equal(existsSync(marker), true, "pi's SIGTERM handler ran to completion (no PDEATHSIG kill)");
   } finally {
+    if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("integration: a sandboxed pi that IGNORES SIGTERM is still gone within ~6 s of close()", { skip: noSandbox }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-pi-stubborn-"));
+  mkdirSync(join(dir, "sessions"), { recursive: true });
+  const stub = join(dir, "stub-pi.mjs");
+  writeFileSync(stub, [
+    'process.on("SIGTERM", () => {});',
+    'process.stdout.write(JSON.stringify({ type: "up" }) + "\\n");',
+    "setInterval(() => {}, 1000);",
+  ].join("\n"));
+  const prev = process.env.CROW_PI_SANDBOX;
+  delete process.env.CROW_PI_SANDBOX;
+  let pgidForCleanup = null;
+  try {
+    const pi = new PiRpc({ def: {}, sessionDir: dir, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: process.execPath, cliPath: stub });
+    assert.equal(pi.sandboxed, true);
+    await pi.waitFor((m) => m.type === "up", 20000, "up");
+    for (let i = 0; i < 50 && pi.piPid == null; i++) await new Promise((r) => setTimeout(r, 20));
+    const piPid = pi.piPid, pgid = pi.proc.pid;
+    pgidForCleanup = pgid;
+    const alive = (p) => { try { process.kill(p, 0); return true; } catch (e) { return e.code === "EPERM"; } };
+    const t0 = Date.now();
+    await pi.close();
+    assert.ok(Date.now() - t0 < 2000, "close() itself does not wait for the drain");
+    assert.equal(alive(piPid), true, "pi ignored SIGTERM and is still alive right after close()");
+    for (let i = 0; i < 70 && alive(piPid); i++) await new Promise((r) => setTimeout(r, 100));
+    assert.equal(alive(piPid), false, "SIGKILLed by the kept 5 s timer");
+    assert.throws(() => process.kill(-pgid, 0), "the process group is gone");
+  } finally {
+    try { if (pgidForCleanup) process.kill(-pgidForCleanup, "SIGKILL"); } catch { /* gone */ }
     if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
     rmSync(dir, { recursive: true, force: true });
   }
