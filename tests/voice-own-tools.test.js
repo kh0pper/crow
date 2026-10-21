@@ -10,7 +10,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { runMigrations } from "../scripts/migrations/runner.mjs";
 import { createDbClient } from "../servers/db.js";
-import { createOwnTools, VOICE_OWN_TOOL_NAMES } from "../servers/gateway/voice/own-tools.js";
+import { createOwnTools, VOICE_OWN_TOOL_NAMES, lastWriteRecap, whenOn } from "../servers/gateway/voice/own-tools.js";
 import { createPendingStore, chainVoiceActions } from "../servers/gateway/voice/pending.js";
 import { VOICE_LINES, voiceLine } from "../servers/gateway/voice/voice-lines.js";
 import { NOT_DONE_TEXT, CANT_DO_TEXT, PARTLY_DONE_TEXT } from "../servers/gateway/voice/turn.js";
@@ -22,7 +22,16 @@ const TZ = "America/Chicago";
 const NOW = Date.parse("2026-10-20T15:00:00Z");
 const DEVICE = { id: "kiosk-a" };
 const CROW = (over = {}) => ({ bot_id: "crow.voice", kind: "voice", display_name: "Crow", fast_voice_model: "crow-voice/qwen3.5-4b", ...over });
-const whenOf = (iso, lang = "en-US", tz = TZ) => new Intl.DateTimeFormat(lang, { weekday: "long", hour: "numeric", minute: "2-digit", timeZone: tz }).format(new Date(iso));
+// Spoken dates, pinned as literals (this Node 24 ICU puts a plain space before AM/PM, not U+202F).
+const SPOKEN = {
+  "2026-10-26T12:00:00-05:00": "Monday, October 26 at 12:00 PM",
+  "2026-10-26T09:30:00-05:00": "Monday, October 26 at 9:30 AM",
+  "2026-10-26T17:00:00-05:00": "Monday, October 26 at 5:00 PM",
+  "2026-10-26T18:00:00-05:00": "Monday, October 26 at 6:00 PM",
+  "2026-10-27T09:00:00-05:00": "Tuesday, October 27 at 9:00 AM",
+  "2026-11-03T09:00:00-06:00": "Tuesday, November 3 at 9:00 AM",
+};
+const whenOf = (iso) => { assert.ok(SPOKEN[iso], `no pinned string for ${iso}`); return SPOKEN[iso]; };
 
 /** A scratch crow.db (schedules) and tasks.db (the real migrations), and a cleanup. */
 async function stores() {
@@ -211,7 +220,8 @@ test("reminder writes one one-shot schedule", async () => {
 });
 
 // ─── No silent past dates (PR 2.1 Task 2): a past start asks about the next one; nothing is written before a yes ───
-const fullWhen = (iso, lang = "en-US", tz = TZ) => new Intl.DateTimeFormat(lang, { weekday: "long", month: "long", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: tz }).format(new Date(iso));
+const fullWhen = (iso, lang = "en") => (lang === "es" ? ES_SPOKEN[iso] : whenOf(iso));
+const ES_SPOKEN = { "2026-11-03T09:00:00-06:00": "martes, 3 de noviembre, 9:00" };
 const WED = Date.parse("2026-10-21T19:11:00Z");   // Wednesday 21 October, 2:11 PM in Chicago
 
 test("a past timed start asks about the next Tuesday (month and day), writes nothing; yes writes it once", async () => {
@@ -312,7 +322,7 @@ test("a reminder in the past asks about the next day (never bad_args); yes write
     const r = await run(toolOf(set, "crow_reminder_add"), { text: "call", at: "2026-10-20T09:00:00-05:00" }, { executor: null, db: s.db, device: DEVICE });
     assert.equal(r.code, "needs_confirm");
     assert.equal(r.ok, true);
-    assert.equal(r.say, `That time has passed. Remind you ${fullWhen("2026-10-21T09:00:00-05:00")} instead: call?`);
+    assert.equal(r.say, `That time has passed. Remind you tomorrow at 9:00 AM instead: call?`);
     assert.equal(pending.get(DEVICE.id).args.at, "2026-10-21T09:00:00-05:00");
     assert.deepEqual(await s.schedules(), []);
     await own.fastPath({ db: s.db, device: DEVICE, transcript: "yes", lang: "en", tz: TZ, bot: CROW(), executor: null });
@@ -814,7 +824,7 @@ test("in the turn: a past reminder asks about the next day and never steps up; t
     h.deps.voiceActions = chainVoiceActions([own]);
     const opts = { db: s.db, device: h.device, sink: h.sink, tz: TZ, lang: "en", actionWhen: (t) => /remind/.test(t) };
     const r = await h.runner.runVoiceTurn({ ...opts, transcript: "remind me at 9 to call mom" });
-    const ask = `That time has passed. Remind you ${fullWhen("2026-10-21T09:00:00-05:00")} instead: call mom?`;
+    const ask = `That time has passed. Remind you tomorrow at 9:00 AM instead: call mom?`;
     assert.deepEqual(h.calls.spoken, [ask]);
     assert.equal(r.timings.step_up, undefined, "no step-up");
     assert.equal(r.escalated, false);
@@ -903,4 +913,50 @@ test("a held next occurrence that has passed by the yes writes nothing and says 
     assert.equal(yes.say, voiceLine("not_done_say", "en"));
     assert.deepEqual(await s.schedules(), []);
   } finally { s.close(); }
+});
+
+// ─── The date is audible (PR 2.1 Task 3): one formatter, pinned literals ───
+test("every spoken date has its weekday, month and day: en timed, es timed, all-day (literals)", async () => {
+  const { own } = make({ connected: ["ws_cal_create_event", "ws_cal_list_calendars"] });
+  const ex = () => fakeExecutor({ calendars: [{ id: "cal-1", name: "Home", writable: true }] });
+  const en = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+  const es = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "es", tz: TZ });
+  const add = (set, args) => run(toolOf(set, "crow_calendar_add_event"), args, { executor: ex(), db: {}, device: DEVICE });
+  assert.equal((await add(en, { title: "Lunch", start: "2026-10-27T09:00:00-05:00" })).say, "Added Lunch to your calendar for Tuesday, October 27 at 9:00 AM.");
+  assert.equal((await add(es, { title: "Comida", start: "2026-10-27T09:00:00-05:00" })).say, "Añadí Comida a tu calendario para el martes, 27 de octubre, 9:00.");
+  assert.equal((await add(en, { title: "Holiday", start: "2026-12-25", all_day: true })).say, "Added Holiday to your calendar for Friday, December 25.");
+  assert.equal((await add(es, { title: "Fiesta", start: "2026-12-25", all_day: true })).say, "Añadí Fiesta a tu calendario para el viernes, 25 de diciembre.");
+});
+
+test("a reminder within 24 hours says today or tomorrow (in the zone); beyond that, the full date (en and es literals)", async () => {
+  // NOW is Tuesday 20 October, 10:00 AM in Chicago.
+  const { own } = make();
+  const en = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+  const es = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "es", tz: TZ });
+  const rem = (set, at) => run(toolOf(set, "crow_reminder_add"), { text: "call", at }, { executor: null, db: {}, device: { id: "x" }, fallback: "calendar" });
+  assert.equal((await rem(en, "2026-10-20T17:00:00-05:00")).say, "I can't add that to a calendar here, but I can remind you today at 5:00 PM: call. Okay?");
+  assert.equal((await rem(en, "2026-10-21T08:00:00-05:00")).say, "I can't add that to a calendar here, but I can remind you tomorrow at 8:00 AM: call. Okay?");
+  assert.equal((await rem(en, "2026-10-21T11:00:00-05:00")).say, "I can't add that to a calendar here, but I can remind you Wednesday, October 21 at 11:00 AM: call. Okay?", "25 hours ahead: the full date");
+  assert.equal((await rem(es, "2026-10-20T17:00:00-05:00")).say, "No puedo añadir eso a un calendario aquí, pero puedo recordártelo hoy a las 17:00: call. ¿Te parece?");
+  assert.equal((await rem(es, "2026-10-21T08:00:00-05:00")).say, "No puedo añadir eso a un calendario aquí, pero puedo recordártelo mañana a las 8:00: call. ¿Te parece?");
+  assert.equal((await rem(es, "2026-10-26T12:00:00-05:00")).say, "No puedo añadir eso a un calendario aquí, pero puedo recordártelo el lunes, 26 de octubre, 12:00: call. ¿Te parece?");
+  // The zone decides the day: 9 PM Chicago is already tomorrow's date in UTC, but it is still today here.
+  assert.equal((await rem(en, "2026-10-20T21:00:00-05:00")).say, "I can't add that to a calendar here, but I can remind you today at 9:00 PM: call. Okay?");
+});
+
+test("the recap says the month and day too: one literal pinned (calendar, reminder, all-day)", () => {
+  const w = { tool: "crow_calendar_add_event", title: "lunch", start: "2026-10-27T09:00:00-05:00", tz: TZ };
+  assert.equal(lastWriteRecap(w, "en"), "Lunch is on your calendar for Tuesday, October 27 at 9:00 AM.");
+  assert.equal(lastWriteRecap(w, "es"), "Lunch está en tu calendario para el martes, 27 de octubre, 9:00.");
+  assert.equal(lastWriteRecap({ ...w, start: "2026-12-25" }, "en"), "Lunch is on your calendar for Friday, December 25.");
+  const r = { tool: "crow_reminder_add", title: "call mom", start: "2026-10-27T09:00:00-05:00", tz: TZ };
+  assert.equal(lastWriteRecap(r, "en", Date.parse("2026-10-27T12:00:00Z")), "Your reminder is set for today at 9:00 AM: call mom.");
+  assert.equal(lastWriteRecap(r, "en", Date.parse("2026-10-20T15:00:00Z")), "Your reminder is set for Tuesday, October 27 at 9:00 AM: call mom.");
+  assert.equal(lastWriteRecap(r, "es", Date.parse("2026-10-27T12:00:00Z")), "Tu recordatorio está puesto para hoy a las 9:00: call mom.");
+});
+
+test("whenOn is bounded: many zones never grow the formatter cache past its cap (and keep answering)", () => {
+  const zones = Intl.supportedValuesOf("timeZone");
+  for (const z of zones.slice(0, 200)) assert.ok(whenOn(Date.parse("2026-10-27T14:00:00Z"), "en", z).includes("October"));
+  assert.equal(whenOn(Date.parse("2026-10-27T14:00:00Z"), "es", TZ), "martes, 27 de octubre, 9:00");
 });

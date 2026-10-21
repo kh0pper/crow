@@ -174,10 +174,42 @@ function validTz(tz) {
 }
 
 const locale = (lang) => (lang === "es" ? "es" : "en-US");
-const whenAt = (ms, lang, tz) => new Intl.DateTimeFormat(locale(lang), { weekday: "long", hour: "numeric", minute: "2-digit", timeZone: tz }).format(new Date(ms));
-const whenDay = (date, lang) => new Intl.DateTimeFormat(locale(lang), { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" }).format(new Date(`${date}T12:00:00Z`));
-/** A moment with its month and day ("Tuesday, October 27 at 9:00 AM"): the one formatter for a spoken date and time. */
-export const whenOn = (ms, lang, tz) => new Intl.DateTimeFormat(locale(lang), { weekday: "long", month: "long", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: tz }).format(new Date(ms));
+const FORMAT_OPTS = {
+  timed: { weekday: "long", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" },
+  day: { weekday: "long", month: "long", day: "numeric" },
+  time: { hour: "numeric", minute: "2-digit" },
+};
+// One formatter per (language, zone, kind), bounded like the offset formatters.
+const WHEN_FORMATS = new Map();
+function whenFormat(lang, tz, kind) {
+  const key = `${locale(lang)}|${tz}|${kind}`;
+  let f = WHEN_FORMATS.get(key);
+  if (!f) {
+    f = new Intl.DateTimeFormat(locale(lang), { ...FORMAT_OPTS[kind], timeZone: tz });
+    if (WHEN_FORMATS.size >= 64) WHEN_FORMATS.clear();
+    WHEN_FORMATS.set(key, f);
+  }
+  return f;
+}
+/** A moment with its weekday, month and day ("Tuesday, October 27 at 9:00 AM"): the one formatter for a spoken date and time. */
+export const whenOn = (ms, lang, tz) => whenFormat(lang, tz, "timed").format(new Date(ms));
+/** An all-day date (YYYY-MM-DD) as its weekday, month and day. */
+const whenDay = (date, lang) => whenFormat(lang, "UTC", "day").format(new Date(`${date}T12:00:00Z`));
+/**
+ * A reminder's moment: "today at ..." / "tomorrow at ..." (es "hoy a las ..." / "mañana a las ...") when it is within 24
+ * hours (the day read in `tz`), else the full date; in es the full date carries its "el" (the line has none).
+ */
+function whenReminder(ms, lang, tz, now) {
+  if (ms >= now - PAST_GRACE_MS && ms - now <= DAY_MS) {
+    const days = Math.round((Date.parse(`${new Date(wallOf(ms, tz)).toISOString().slice(0, 10)}T00:00:00Z`) - Date.parse(`${todayIn(now, tz)}T00:00:00Z`)) / DAY_MS);
+    if (days === 0 || days === 1) {
+      const time = whenFormat(lang, tz, "time").format(new Date(ms));
+      if (lang === "es") return `${days === 0 ? "hoy" : "mañana"} a ${new Date(wallOf(ms, tz)).getUTCHours() % 12 === 1 ? "la" : "las"} ${time}`;
+      return `${days === 0 ? "today" : "tomorrow"} at ${time}`;
+    }
+  }
+  return lang === "es" ? `el ${whenOn(ms, lang, tz)}` : whenOn(ms, lang, tz);
+}
 
 // ─── Validation ───
 const bad = (message, code = "bad_args") => ({ error: message, code });
@@ -251,7 +283,7 @@ function validateNow(tool, raw, { tz, lang, now, transcript }) {
       const at = nextAfter(startDt.ms + startDt.off * 60_000, 7 * DAY_MS, now, tz);
       return { next: { title: title.value, start: inZone(at, tz), end: inZone(at + (endMs - startDt.ms), tz), all_day: false } };
     }
-    return { args: { title: title.value, start: String(a.start).trim(), end, all_day: false }, when: whenAt(startDt.ms, lang, tz), nextWhen: whenOn(startDt.ms, lang, tz) };
+    return { args: { title: title.value, start: String(a.start).trim(), end, all_day: false }, when: whenOn(startDt.ms, lang, tz), nextWhen: whenOn(startDt.ms, lang, tz) };
   }
   if (tool === "crow_reminder_add") {
     const text = cleanText(a.text, "The reminder text");
@@ -265,7 +297,7 @@ function validateNow(tool, raw, { tz, lang, now, transcript }) {
       const ms = nextAfter(at.ms + at.off * 60_000, DAY_MS, now, tz);
       return { next: { text: text.value, at: inZone(ms, tz) } };
     }
-    return { args: { text: text.value, at: String(a.at).trim() }, when: whenAt(at.ms, lang, tz), atIso: new Date(at.ms).toISOString(), nextWhen: whenOn(at.ms, lang, tz) };
+    return { args: { text: text.value, at: String(a.at).trim() }, when: whenReminder(at.ms, lang, tz, now), atIso: new Date(at.ms).toISOString(), nextWhen: whenReminder(at.ms, lang, tz, now) };
   }
   if (tool === "crow_task_add") {
     const title = cleanText(a.title, "The title");
@@ -298,25 +330,26 @@ const writeOf = (tool, v) => ({ tool, family: DEFINITIONS[tool].family, title: t
   start: tool === "crow_calendar_add_event" ? v.args.start : tool === "crow_reminder_add" ? v.args.at : (v.args.due ?? null) });
 
 /** A record's start as the spoken {when}: an all-day date as its day; a date-time in `tz`, else in its own UTC offset. */
-function recapWhen(start, lang, tz) {
+function recapWhen(start, lang, tz, reminder, now) {
   const date = parseDate(start);
   if (date) return whenDay(date, lang);
   const dt = parseDateTime(start);
   if (!dt) return null;
   const zone = validTz(tz);
-  return zone ? whenAt(dt.ms, lang, zone) : whenAt(dt.ms + dt.off * 60_000, lang, "UTC");
+  const [ms, z, n] = zone ? [dt.ms, zone, now] : [dt.ms + dt.off * 60_000, "UTC", now + dt.off * 60_000];
+  return reminder ? whenReminder(ms, lang, z, n) : whenOn(ms, lang, z);
 }
 
 /**
  * The truthful recap of the last own write ({ tool, title, start, tz? }) in `lang` (voice-lines last_write_recap, with a
  * reminder and a task variant), or "" when it cannot be said (no title, or a calendar or reminder start it cannot read).
  */
-export function lastWriteRecap(w, lang) {
+export function lastWriteRecap(w, lang, now = Date.now()) {
   const title = typeof w?.title === "string" ? w.title.trim() : "";
   if (!title) return "";
   const cap = title[0].toUpperCase() + title.slice(1);
   if (w.tool === "crow_task_add") return voiceLine("last_write_recap_task", lang, { title: cap });
-  const when = recapWhen(w.start, lang, w.tz);
+  const when = recapWhen(w.start, lang, w.tz, w.tool === "crow_reminder_add", now);
   if (!when) return "";
   if (w.tool === "crow_reminder_add") return voiceLine("last_write_recap_reminder", lang, { when, text: title });
   return w.tool === "crow_calendar_add_event" ? voiceLine("last_write_recap", lang, { title: cap, when }) : "";
