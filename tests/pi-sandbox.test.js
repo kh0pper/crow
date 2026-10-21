@@ -456,7 +456,7 @@ test("every pi spawn goes through PiRpc and the central wrapPiSpawn", () => {
   assert.deepEqual(offenders, [], "pi spawned outside PiRpc");
   const bridge = readFileSync(join(root, "scripts/pi-bots/bridge.mjs"), "utf8");
   assert.equal((bridge.match(/\bspawn\(/g) || []).length, 1);
-  assert.match(bridge, /const launch = wrapPiSpawn\(nodeBin, args, \{ env, infoFd: 3 \}\);/);
+  assert.match(bridge, /launch = wrapPiSpawn\(nodeBin, args, \{ env, infoFd: 3, botId: sandboxBotId, contain \}\);/);
   assert.match(bridge, /this\.proc = spawn\(launch\.cmd, launch\.args,/);
   assert.match(readFileSync(join(root, "scripts/pi-bots/job_runner.mjs"), "utf8"), /new bridge\.PiRpc\(/);
   assert.match(readFileSync(join(root, "servers/gateway/perch-interactive.js"), "utf8"), /new S\.PiRpc\(/);
