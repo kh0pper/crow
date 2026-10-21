@@ -499,3 +499,25 @@ test("the editor names what auto picks", async () => {
   assert.ok(none.includes(T("botbuilder.voiceRoutineNoCalendar")), "nothing installed: the reminder hint");
   assert.ok(!none.includes(T("botbuilder.voiceRoutineGoogle")));
 });
+
+test("the editor's confirm wording and the no-calendar line say what really happens", async () => {
+  await reset();
+  // Standard adds at once and asks before deleting, changing or sending; strict also asks before adding.
+  assert.match(T("botbuilder.voiceConfirmStandard"), /right away/);
+  assert.match(T("botbuilder.voiceConfirmStandard"), /deleting, changing or sending/);
+  assert.ok(!/asks once/.test(T("botbuilder.voiceConfirmStandard")));
+  assert.match(T("botbuilder.voiceConfirmStrict"), /also asks before adding/);
+  const html = await editor();
+  assert.ok(html.includes(T("botbuilder.voiceConfirmStandard")) && html.includes(T("botbuilder.voiceConfirmStrict")));
+  // No calendar and reminders off: no reminder promise, the can't-add line instead.
+  await reset({ ...SEED_DEF, routine: { ...(SEED_DEF.routine || {}), reminders: { backend: "off" } } });
+  for (const lang of ["en", "es"]) {
+    const off = await editor({ lang });
+    assert.ok(!off.includes(T("botbuilder.voiceRoutineNoCalendar", lang)), `${lang}: no reminder promise`);
+    assert.ok(off.includes(T("botbuilder.voiceRoutineNoCalendarNoReminder", lang)), `${lang}: the can't-add line`);
+  }
+  await reset();
+  const on = await editor();
+  assert.ok(on.includes(T("botbuilder.voiceRoutineNoCalendar")));
+  assert.ok(!on.includes(T("botbuilder.voiceRoutineNoCalendarNoReminder")));
+});

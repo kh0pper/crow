@@ -378,3 +378,93 @@ test("VOICE_MODE_WINDOW_MS is the plan constant", async () => {
   const { VOICE_MODE_WINDOW_MS } = await import("../servers/gateway/voice/turn.js");
   assert.equal(VOICE_MODE_WINDOW_MS, 10 * 60_000);
 });
+
+// ─── Final review fixes ───
+const BACKEND_ERR = { ok: false, code: "backend_error" };
+const taskOwn = (result) => ownTool("crow_task_add", "own:tasks", ["task", "tasks"], result);
+
+test("a failed own tool on a non-action turn turns the action guard on: a later claim is not spoken", async () => {
+  for (const familiesOnIntent of [true, false]) {
+    const t = taskOwn(BACKEND_ERR);
+    const h = ownHarness({ bot: CROW, rounds: [call("crow_task_add", { title: "buy milk" }), says("Done, added it. ")] });
+    const r = await turn(h, "put buy milk on my tasks", { familiesOnIntent, ownTools: [t] });
+    assert.equal(t.seen.length, 1, `families ${familiesOnIntent}`);
+    assert.equal(r.timings.action_intent, undefined, "not an action turn by the display's words");
+    assert.equal(r.timings.action_guard, true);
+    assert.equal(r.timings.claim_blocked, true);
+    assert.deepEqual(h.calls.spoken, [NOT_DONE_TEXT]);
+  }
+});
+
+test("bad_args on a non-action turn with no step-up available: the claim is not spoken", async () => {
+  const t = taskOwn({ ok: false, code: "bad_args", message: "The title is required." });
+  const h = ownHarness({ bot: CROW, probe: () => true, rounds: [call("crow_task_add", {}), says("Done, added it. ")] });
+  const r = await turn(h, "put buy milk on my tasks", { noEscalate: true, ownTools: [t] });
+  assert.deepEqual(h.calls.chatKeys, [FAST]);
+  assert.equal(r.timings.action_guard, true);
+  assert.deepEqual(h.calls.spoken, [NOT_DONE_TEXT]);
+});
+
+test("an ok own tool with a final say on a non-action turn still speaks its line", async () => {
+  const t = taskOwn({ ok: true, code: "added", final: true, say: "Added buy milk to your tasks." });
+  const h = ownHarness({ bot: CROW, rounds: [call("crow_task_add", { title: "buy milk" })] });
+  const r = await turn(h, "put buy milk on my tasks", { ownTools: [t] });
+  assert.deepEqual(h.calls.spoken, ["Added buy milk to your tasks."]);
+  assert.equal(r.timings.claim_blocked, undefined);
+});
+
+test("two identical own calls in one round run once", async () => {
+  const t = taskOwn({ ok: true, code: "added", final: true, say: "Added buy milk to your tasks." });
+  const both = [
+    { type: "tool_call", id: "c1", name: "crow_task_add", arguments: { title: "buy milk" } },
+    { type: "tool_call", id: "c2", name: "crow_task_add", arguments: { title: "buy milk" } },
+    { type: "done" },
+  ];
+  const h = ownHarness({ bot: CROW, rounds: [both] });
+  await turn(h, "put buy milk on my tasks", { ...act, ownTools: [t] });
+  assert.equal(t.seen.length, 1, "one execute, so one row");
+  assert.deepEqual(h.calls.spoken, ["Added buy milk to your tasks."]);
+});
+
+test("a step-up after an ok own call does not run that call again", async () => {
+  const rem = remTool({ ok: true, code: "added", final: true, say: "I'll remind you." });
+  let n = 0;
+  const cal = calTool(() => (n++ === 0 ? { ok: false, code: "bad_args", message: "Give an offset." } : ADDED));
+  const round = (a, b, start) => [
+    { type: "tool_call", id: a, name: "crow_reminder_add", arguments: { text: "call", at: "2026-10-26T09:00:00-05:00" } },
+    { type: "tool_call", id: b, name: "crow_calendar_add_event", arguments: { title: "lunch", start } },
+    { type: "done" },
+  ];
+  const h = ownHarness({ bot: CROW, probe: () => true, rounds: [round("c1", "c2", "noon"), round("c3", "c4", "2026-10-26T12:00:00-05:00")] });
+  const r = await turn(h, "remind me to call and add lunch to my calendar", { ...act, ownTools: [rem, cal] });
+  assert.equal(r.timings.step_up, "own_tool");
+  assert.equal(rem.seen.length, 1, "the reminder ran once");
+  assert.equal(cal.seen.length, 2);
+  assert.deepEqual(h.calls.spoken.at(-1), ADDED.say);
+});
+
+test("no_tz never steps up to the larger model", async () => {
+  const cal = calTool({ ok: false, code: "no_tz", message: "No time zone is known on this device." });
+  const h = ownHarness({ bot: CROW, probe: () => true, rounds: [call("crow_calendar_add_event", { title: "lunch", start: "2026-10-26T12:00:00-05:00" }), says("Done, added it. ")] });
+  const r = await turn(h, "add lunch to my calendar", { ...act, ownTools: [cal] });
+  assert.deepEqual(h.calls.chatKeys, [FAST], "no chat key beyond the fast model");
+  assert.equal(r.timings.step_up, undefined);
+  assert.equal(r.escalated, false);
+  assert.deepEqual(h.calls.spoken, [NOT_DONE_TEXT]);
+});
+
+test("an offered own tool puts the zone's UTC offset on the user message only", async () => {
+  const h = ownHarness({ bot: CROW, rounds: [call("crow_calendar_add_event", { title: "lunch" }), says("Lima. ")] });
+  await turn(h, "add lunch Monday to my calendar", { ...act, tz: "America/Chicago", ownTools: [calTool()] });
+  const user = h.log[0].messages.at(-1);
+  assert.equal(user.role, "user");
+  assert.match(user.content, /\[Zone\] America\/Chicago, UTC-0[56]:00/);
+  assert.ok(!/\[Zone\]/.test(h.log[0].messages[0].content), "never on the system message");
+  assert.ok(h.runner.convo.get(h.device.id).every((m) => !/\[Zone\]/.test(String(m.content))), "never saved");
+  // Not offered (a fresh device, a plain question): no zone line, the same system message.
+  const q = ownHarness({ bot: CROW, rounds: [says("Lima. ")] });
+  await turn(q, "what's the capital of Peru", { tz: "America/Chicago", ownTools: [calTool()] });
+  assert.deepEqual(q.log[0].tools, []);
+  assert.ok(!/\[Zone\]/.test(q.log[0].messages.at(-1).content));
+  assert.equal(q.log[0].messages[0].content, h.log[0].messages[0].content, "the system message is byte-stable");
+});

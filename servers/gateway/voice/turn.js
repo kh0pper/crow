@@ -11,8 +11,9 @@
 import {
   createThinkGate, createSentenceChunker, createConfirmGate, createConvoStore, degenerateTranscript, createToolSyntaxGate, stripToolSyntax,
   negotiatePcm, pcmStream, isDestructiveTool, describeDestructiveAction, SENTENCE_END,
-  isProxyCall, executedProxyArgs, proxyArgsConflict, reliesOnFlatFallback,
+  isProxyCall, executedProxyArgs, proxyArgsConflict, reliesOnFlatFallback, canonicalArgsHash,
 } from "./turn-helpers.js";
+import { zoneContext } from "../../shared/relative-dates.js";
 import { withTurnContext, createContextEchoGate, stripContextEcho, stripContextEchoDeep, TURN_CONTEXT_NOTE } from "./context-echo.js";
 import { estimatePromptTokens, requestFits, choosePromptFit, dropOldestExchange } from "./prompt-fit.js";
 import { claimsAction, claimsReminder, claimsBeyondMemory, toolEffect, needsSpokenYes } from "./action-claims.js";
@@ -724,7 +725,7 @@ export function createVoiceTurnRunner(deps) {
         }
         vaCtx = typeof v === "string" ? { text: v, pending: false } : v && typeof v === "object" ? { text: String(v.text || ""), pending: v.pending === true } : null;
       }
-      const ctxLine = [optsCtx, vaCtx?.text].filter(Boolean).join("\n") || optsCtx;
+      let ctxLine = [optsCtx, vaCtx?.text].filter(Boolean).join("\n") || optsCtx;
       const userMsg = { role: "user", content: withTurnContext(ctxLine, transcript) };
       const echoGuard = [ctxLine ? TURN_CONTEXT_NOTE : null, ctxLine, mustX?.mustNote];
       const messages = [
@@ -783,7 +784,8 @@ export function createVoiceTurnRunner(deps) {
         // Per-turn, on the user message (the system message stays byte-stable); dropped before saving.
         timings.calendar_fallback = true;
         const note = calendarFallbackNote(fallbackNames);
-        userMsg.content = withTurnContext(ctxLine ? `${ctxLine}\n${note}` : note, transcript);
+        ctxLine = ctxLine ? `${ctxLine}\n${note}` : note;
+        userMsg.content = withTurnContext(ctxLine, transcript);
         echoGuard.push(note, TURN_CONTEXT_NOTE);
       }
       // A voice bot with escalation off (Bot Builder) is taken as opts.noEscalate.
@@ -839,6 +841,14 @@ export function createVoiceTurnRunner(deps) {
         timings.action_no_tool = true;
         await speakLine(String(opts.cantDoText || CANT_DO_TEXT));
         return result;
+      }
+      // An own tool on offer takes a date-time with the zone's UTC offset: the zone and its offset now ride on the
+      // user message (never the system message, which stays byte-stable), so the quick model can write it.
+      const zoneLine = tools.some((t) => ownByName.has(t.name)) ? zoneContext(now(), opts.tz) : null;
+      if (zoneLine) {
+        ctxLine = ctxLine ? `${ctxLine}\n${zoneLine}` : zoneLine;
+        userMsg.content = withTurnContext(ctxLine, transcript);
+        echoGuard.push(zoneLine, TURN_CONTEXT_NOTE);
       }
       if (!chat) chat = await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
       if (unlisted.length) {
@@ -1003,7 +1013,11 @@ export function createVoiceTurnRunner(deps) {
       let endedFinal = false;
       timings.tools_offered = tools.length;
       // The action guard (see ACTION_NOTE above). A must-run or hold-to-end display turn has its own truth rules.
-      const actionGuard = actionTurn && !mustX && !holdEnd;
+      // It also turns on mid-turn when one of Crow's own tools fails (armGuard below): own tools are offered on
+      // turns the display's actionWhen does not read as actions ("put buy milk on my tasks", families off).
+      let actionGuard = actionTurn && !mustX && !holdEnd;
+      const armGuard = () => { if (!actionGuard && !mustX && !holdEnd) { actionGuard = true; timings.action_guard = true; } };
+      const ownDone = new Map();   // name|canonical args → the result of an own call that returned ok (never run twice)
       let backed = false;          // a tool really did something this turn
       let memoryBacked = false;    // only a memory call did (a saved note is not a reminder)
       let unsureBacked = false;    // an ok call to a tool that is neither a known read nor a known write
@@ -1189,6 +1203,7 @@ export function createVoiceTurnRunner(deps) {
           if (tc === calls.at(-1)) finalRes = null;
           const gate = policyGate(tc);
           if (gate) {
+            if (ownByName.has(tc.name)) armGuard();   // an own call refused: the model's next words may still claim it
             if (gate.neutral) neutralCalls++;
             outcome.set(tc, gate.code);
             local.push({ id: tc.id, name: tc.name, result: gate.message, neutral: gate.neutral });
@@ -1198,15 +1213,24 @@ export function createVoiceTurnRunner(deps) {
           const own = ownByName.get(tc.name);
           if (own) {
             neutralCalls++;
-            let out;
-            try { out = await own.execute(tc.arguments || {}, { transcript, executor, db, device, ...(calendarFallback ? { fallback: "calendar" } : {}) }); }
-            catch (err) { out = JSON.stringify({ ok: false, code: "error", message: String(err?.message || err) }); }
-            if (typeof out !== "string") out = JSON.stringify({ ok: false, code: "error" });
+            // The same call (name + canonical args) that already returned ok this turn — a parallel duplicate, or a
+            // re-run after a step-up — gets the earlier result back and is never executed again (no second row).
+            const dupKey = `${tc.name}|${canonicalArgsHash(tc.arguments || {})}`;
+            let out = ownDone.get(dupKey);
+            if (out === undefined) {
+              try { out = await own.execute(tc.arguments || {}, { transcript, executor, db, device, ...(calendarFallback ? { fallback: "calendar" } : {}) }); }
+              catch (err) { out = JSON.stringify({ ok: false, code: "error", message: String(err?.message || err) }); }
+              if (typeof out !== "string") out = JSON.stringify({ ok: false, code: "error" });
+            }
             let res = null;
             try { res = JSON.parse(out); } catch {}
             const ok = res?.ok === true;
             const code = outcomeCode(res?.code, ok ? "ok" : "error");
             outcome.set(tc, code);
+            if (ok) ownDone.set(dupKey, out);
+            // A failed own call (no_tz, bad_args, backend_error…), or a question with no line to speak: from here on
+            // the model's words are held and checked (#499: "Added!" after a failed write is never heard).
+            if (!ok || (code === "needs_confirm" && !(typeof res.say === "string" && res.say.trim()))) armGuard();
             if (ok && res.effect !== false) { backed = true; actionSent = true; }
             if (code === "bad_args") ownBadArgs = true;
             if (usedFamilies) usedFamilies.add(own.family);

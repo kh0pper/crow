@@ -240,3 +240,13 @@ test("matchYesNo: 'but' / 'pero' with more words after is a correction, not a ye
   assert.equal(matchYesNo("sí"), "yes");
   assert.equal(matchYesNo("no, but thanks"), "no");
 });
+
+test("matchYesNo: 'mejor', 'make it', 'at' and 'a las' with more words are a correction", () => {
+  assert.equal(matchYesNo("sí, mejor mañana"), null);
+  assert.equal(matchYesNo("yes, make it four"), null);
+  assert.equal(matchYesNo("yes, at four"), null);
+  assert.equal(matchYesNo("sí, a las cuatro"), null);
+  assert.equal(matchYesNo("yes, but at five"), null);
+  // Still a plain yes.
+  for (const t of ["yes", "sí", "yes please", "sure", "yes, add it", "yes, make it", "sí, mejor"]) assert.equal(matchYesNo(t), "yes", t);
+});

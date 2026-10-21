@@ -169,15 +169,20 @@ test("a time without an offset is bad_args and nothing is written", async () => 
   } finally { s.close(); }
 });
 
-test("without a time zone, date-times are bad_args (never guessed)", async () => {
+test("without a time zone, date-times are no_tz (never guessed, never a step-up)", async () => {
   const s = await stores();
   try {
     const { own } = make({ connected: ["ws_cal_create_event"] });
     const ex = fakeExecutor();
     for (const tz of [undefined, null, "", "Not/AZone"]) {
       const set = await own.forTurn({ db: s.db, bot: CROW(), surface: "kiosk", lang: "en", tz });
-      assert.equal((await run(toolOf(set, "crow_reminder_add"), { text: "call", at: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: s.db, device: DEVICE })).code, "bad_args");
-      assert.equal((await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: s.db, device: DEVICE })).code, "bad_args");
+      const rem = await run(toolOf(set, "crow_reminder_add"), { text: "call", at: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: s.db, device: DEVICE });
+      assert.equal(rem.code, "no_tz");
+      assert.equal(rem.ok, false);
+      assert.ok(rem.message && !rem.say, "a message for the model, no spoken line");
+      assert.equal((await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: s.db, device: DEVICE })).code, "no_tz");
+      // A malformed date-time is still bad_args (a larger model can fix that).
+      assert.equal((await run(toolOf(set, "crow_reminder_add"), { text: "call", at: "noon" }, { executor: ex, db: s.db, device: DEVICE })).code, "bad_args");
     }
     assert.deepEqual(ex.calls, []);
     assert.deepEqual(await s.schedules(), []);

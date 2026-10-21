@@ -260,7 +260,8 @@ async function routineSection(db, v, lang, sec, hint) {
   return sec("botbuilder.voiceRoutineTitle",
     hint("botbuilder.voiceRoutineWritesWhere") +
     label("routine_calendar_backend", "botbuilder.voiceRoutineCalendar") + select("routine_calendar_backend", ROUTINE_BACKENDS.calendar, v.routine.calendar.backend) + nowLine(resolved.calendar) +
-    (resolved.calendar ? "" : hint("botbuilder.voiceRoutineNoCalendar")) +
+    // The reminder offer exists only while reminders resolve somewhere; with them off, say a calendar event can't be added.
+    (resolved.calendar ? "" : hint(resolved.reminders ? "botbuilder.voiceRoutineNoCalendar" : "botbuilder.voiceRoutineNoCalendarNoReminder")) +
     textIn("routine_calendar_id", "botbuilder.voiceRoutineCalendarId", v.routine.calendar.calendar) +
     label("routine_reminders_backend", "botbuilder.voiceRoutineReminders") + select("routine_reminders_backend", ROUTINE_BACKENDS.reminders, v.routine.reminders.backend) + nowLine(resolved.reminders) +
     label("routine_tasks_backend", "botbuilder.voiceRoutineTasks") + select("routine_tasks_backend", ROUTINE_BACKENDS.tasks, v.routine.tasks.backend) + nowLine(resolved.tasks) +

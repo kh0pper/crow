@@ -13,7 +13,8 @@
  *   guard then speaks its not-done line.
  * - Validation failures are { ok:false, code:"bad_args", message } (the model reads the message; the turn
  *   steps up once). A date-time needs its UTC offset, and a known time zone (opts.tz from the surface):
- *   without one, nothing is guessed.
+ *   without one, nothing is guessed: { ok:false, code:"no_tz" }, which never steps up (a larger model cannot
+ *   supply a zone).
  * - Strict confirm (the voice bot's voice.confirm "strict"), and the calendar-fallback reminder offer
  *   (ctx.fallback "calendar", rev 2.1), validate, hold the call as the device's pending "routine" entry and
  *   ask; nothing is written until a spoken yes reaches fastPath. Under "standard" the adds run at once.
@@ -112,7 +113,8 @@ const whenAt = (ms, lang, tz) => new Intl.DateTimeFormat(locale(lang), { weekday
 const whenDay = (date, lang) => new Intl.DateTimeFormat(locale(lang), { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" }).format(new Date(`${date}T12:00:00Z`));
 
 // ─── Validation ───
-const bad = (message) => ({ error: message });
+const bad = (message, code = "bad_args") => ({ error: message, code });
+// no_tz is its own code: a larger model cannot supply a missing zone, so the turn never steps up on it.
 const NO_TZ = "No time zone is known on this device, so a time cannot be set here. Tell the user you can't set a time from this device.";
 const NEED_OFFSET = "Give the time as a date-time with the UTC offset of the user's time zone, e.g. 2026-10-26T12:00:00-05:00.";
 
@@ -123,7 +125,7 @@ function cleanText(v, what) {
   return { value: t };
 }
 
-/** → { args, when } (args normalized; when spoken) | { error }. */
+/** → { args, when } (args normalized; when spoken) | { error, code } (code "bad_args", or "no_tz" when no zone is known). */
 function validate(tool, raw, { tz, lang, now }) {
   const a = raw && typeof raw === "object" ? raw : {};
   if (tool === "crow_calendar_add_event") {
@@ -143,7 +145,7 @@ function validate(tool, raw, { tz, lang, now }) {
       }
       return { args: { title: title.value, start, end, all_day: true }, when: whenDay(start, lang) };
     }
-    if (!tz) return bad(NO_TZ);
+    if (!tz) return bad(NO_TZ, "no_tz");
     let end = withOffset(startDt.ms + 3_600_000, startDt.off);
     if (a.end != null && a.end !== "") {
       const e = parseDateTime(a.end);
@@ -158,7 +160,7 @@ function validate(tool, raw, { tz, lang, now }) {
     if (text.error) return bad(text.error);
     const at = parseDateTime(a.at);
     if (!at) return bad(`The time is not a date-time with an offset. ${NEED_OFFSET}`);
-    if (!tz) return bad(NO_TZ);
+    if (!tz) return bad(NO_TZ, "no_tz");
     if (at.ms <= now) return bad("That time has already passed. Ask the user for a time in the future.");
     return { args: { text: text.value, at: String(a.at).trim() }, when: whenAt(at.ms, lang, tz), atIso: new Date(at.ms).toISOString() };
   }
@@ -359,7 +361,7 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
         intent: d.intent,
         async execute(args, ctx = {}) {
           const v = validate(name, args, { tz: zone, lang, now: now() });
-          if (v.error) return JSON.stringify({ ok: false, code: "bad_args", message: v.error });
+          if (v.error) return JSON.stringify({ ok: false, code: v.code || "bad_args", message: v.error });
           const offer = ctx.fallback === "calendar" && name === "crow_reminder_add";
           if (offer || settings.confirm === "strict") {
             const deviceId = ctx.device?.id;

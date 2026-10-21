@@ -62,11 +62,17 @@ const CORRECTION_PHRASES = normalizeIntentLists({
   es: ["en vez", "en lugar", "mejor a", "daselo a"],
 });
 
-const BUT_WORDS = new Set(["but", "pero"]);
+// A correction lead: "but"/"pero", or words that change the held call ("mejor mañana", "make it four",
+// "at four", "a las cuatro"), each only when more words follow it ("yes, make it" alone is still a yes).
+const CORRECTION_LEADS = [["but"], ["pero"], ["mejor"], ["make", "it"], ["at"], ["a", "las"]];
+const leadsCorrection = (words) => CORRECTION_LEADS.some((lead) => {
+  for (let i = 0; i + lead.length < words.length; i++) if (lead.every((w, j) => words[i + j] === w)) return true;
+  return false;
+});
 
 /**
  * "yes" | "no" | null. yes: isAffirmative, and the utterance names no bot in otherBots (ids or names), no
- * correction phrase (a new target) and no "but"/"pero" followed by more words, whatever its length. no: isNegative (a negation in the first words included).
+ * correction phrase (a new target) and no correction lead ("but", "pero", "mejor", "make it", "at", "a las") followed by more words, whatever its length. no: isNegative (a negation in the first words included).
  */
 export function matchYesNo(transcript, { otherBots = [] } = {}) {
   if (typeof transcript !== "string" || !transcript.trim()) return null;
@@ -76,9 +82,8 @@ export function matchYesNo(transcript, { otherBots = [] } = {}) {
   const words = phraseWords(t);
   const bots = (Array.isArray(otherBots) ? otherBots : []).map((b) => phraseWords(String(b ?? ""))).filter((w) => w.length);
   if (listMatches(words, bots) || listMatches(words, CORRECTION_PHRASES)) return null;
-  // "yes, but at four" / "sí, pero a las cuatro": a "but" with more words after it changes what was asked.
-  const but = words.findIndex((w) => BUT_WORDS.has(w));
-  if (but >= 0 && but < words.length - 1) return null;
+  // "yes, but at four" / "sí, mejor mañana" / "yes, make it four": a correction lead with more words after it changes what was asked.
+  if (leadsCorrection(words)) return null;
   return "yes";
 }
 
