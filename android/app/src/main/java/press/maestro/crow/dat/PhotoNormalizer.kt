@@ -44,11 +44,17 @@ object PhotoNormalizer {
     }
 
     fun fromBitmap(bitmap: Bitmap): Result {
-        val t = PhotoSizing.targetSize(bitmap.width, bitmap.height, PhotoSizing.MAX_LONG_SIDE)
-        val scaled = if (t[0] != bitmap.width || t[1] != bitmap.height) Bitmap.createScaledBitmap(bitmap, t[0], t[1], true) else bitmap
-        val out = toJpeg(scaled)
-        if (scaled !== bitmap) scaled.recycle()
-        return Result(out, "image/jpeg")
+        return try {
+            val t = PhotoSizing.targetSize(bitmap.width, bitmap.height, PhotoSizing.MAX_LONG_SIDE)
+            val scaled = if (t[0] != bitmap.width || t[1] != bitmap.height) Bitmap.createScaledBitmap(bitmap, t[0], t[1], true) else bitmap
+            val out = toJpeg(scaled)
+            if (scaled !== bitmap) scaled.recycle()
+            Result(out, "image/jpeg")
+        } catch (t: Throwable) {
+            // Never lose the photo: fall back to the full-size JPEG the app used to send.
+            Log.w(TAG, "scaling failed for a ${bitmap.width}x${bitmap.height} bitmap, uploading it unscaled: ${t.message}")
+            Result(toJpeg(bitmap), "image/jpeg")
+        }
     }
 
     private fun toJpeg(bitmap: Bitmap): ByteArray {

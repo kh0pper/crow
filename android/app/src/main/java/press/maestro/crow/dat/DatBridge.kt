@@ -17,6 +17,7 @@ import com.meta.wearable.dat.core.selectors.AutoDeviceSelector
 import com.meta.wearable.dat.core.types.Permission
 import com.meta.wearable.dat.core.types.PermissionStatus
 import com.meta.wearable.dat.core.types.RegistrationState
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -135,17 +136,21 @@ object DatBridge {
                         if (encoded == null && bitmap == null) {
                             listener.onError("capture_failed", "Unknown PhotoData subclass")
                         } else {
-                            scope.launch {
-                                try {
-                                    val r = withContext(Dispatchers.Default) {
+                            // A child of the capture Job: cancelling capturePhoto's Job cancels this too.
+                            launch {
+                                val r = try {
+                                    withContext(Dispatchers.Default) {
                                         if (encoded != null) PhotoNormalizer.fromEncoded(encoded, "image/heic")
                                         else PhotoNormalizer.fromBitmap(bitmap!!)
                                     }
-                                    listener.onPhoto(r.bytes, r.mime)
+                                } catch (c: CancellationException) {
+                                    throw c
                                 } catch (t: Throwable) {
                                     Log.w(TAG, "photo normalize threw", t)
                                     listener.onError("capture_failed", t.message ?: "photo processing failed")
+                                    return@launch
                                 }
+                                listener.onPhoto(r.bytes, r.mime)
                             }
                         }
                     }
