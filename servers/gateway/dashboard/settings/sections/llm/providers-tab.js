@@ -27,6 +27,10 @@ import { getOrCreateLocalInstanceId } from "../../../../instance-registry.js";
 import { isExternalEngine, externalEngineInfo } from "../../../../../shared/provider-engine.js";
 import { getProviderHealth } from "../../../../provider-health.js";
 import { t, fill } from "../../../shared/i18n.js";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { isDefaultCrowHome } from "../../../../../shared/crow-home.js";
+import { scanSlots, consumersOfModel, piConfigRefs } from "../../../../../shared/model-consumers.js";
 
 const BACK = "?section=llm&tab=providers";
 
@@ -76,9 +80,79 @@ export function statusDot(p, { external = {}, lang = "en" } = {}) {
   return `<span aria-label="${tEsc}" title="${tEsc}" style="color:${color};font-size:1.15rem;line-height:1">●</span>`;
 }
 
+/** Lowercase host, trailing "/" stripped, "/v1" kept. */
+function normBaseUrl(u) {
+  const raw = String(u || "").trim();
+  try {
+    const x = new URL(raw);
+    return `${x.protocol}//${x.host.toLowerCase()}${x.pathname}`.replace(/\/+$/, "");
+  } catch {
+    return raw.toLowerCase().replace(/\/+$/, "");
+  }
+}
+
+/** ENABLED rows sharing a normalised base URL and key-presence -> Map<id, other ids>. Display only. */
+export function duplicateClusters(providers) {
+  const groups = new Map();
+  for (const p of providers) {
+    if (p.disabled) continue;
+    const k = `${normBaseUrl(p.baseUrl)}|${p.apiKey ? 1 : 0}`;
+    (groups.get(k) || groups.set(k, []).get(k)).push(p.id);
+  }
+  const out = new Map();
+  for (const ids of groups.values()) {
+    if (ids.length < 2) continue;
+    for (const id of ids) out.set(id, ids.filter((x) => x !== id));
+  }
+  return out;
+}
+
+const HIDDEN_PROVIDERS = new Set(["crow-hf-token"]);
+const USED_BY_MAX = 4;
+
+/** pi's agent dir only when this instance owns the host-default home; else null. */
+function defaultPiAgentDir() {
+  try { return isDefaultCrowHome() ? join(homedir(), ".pi", "agent") : null; } catch { return null; }
+}
+
+const slotLabel = (s, lang) => (s.labelKey ? fill(t(s.labelKey, lang), s.labelParams || {}) : s.label);
+
+function usedByCell(p, { slots, piRefs, scanned, scanOk, lang }) {
+  if (!scanOk) return `<td class="llm-cell-usedby" style="color:var(--crow-text-muted)">—</td>`;
+  const seen = new Set();
+  const labels = [];
+  const add = (l) => { if (l && !seen.has(l)) { seen.add(l); labels.push(l); } };
+  for (const m of p.models || []) {
+    if (!m?.id) continue;
+    for (const s of consumersOfModel(slots, `${p.id}/${m.id}`)) add(slotLabel(s, lang));
+  }
+  for (const s of slots) if (s.providerOnly && s.value === p.id) add(slotLabel(s, lang));
+  for (const r of piRefs[p.id] || []) add(slotLabel(r, lang));
+  const hint = scanned ? "" : `<div style="font-size:0.7rem;color:var(--crow-text-muted)">${escapeHtml(t("settings.providers.piNotScanned", lang))}</div>`;
+  if (!labels.length) {
+    return `<td class="llm-cell-usedby"><span style="color:var(--crow-text-muted)">${escapeHtml(t("settings.providers.unused", lang))}</span>${hint}</td>`;
+  }
+  const shown = labels.slice(0, USED_BY_MAX).map(escapeHtml).join(", ");
+  const more = labels.length > USED_BY_MAX ? ` <span style="color:var(--crow-text-muted)">${escapeHtml(fill(t("settings.providers.more", lang), { n: labels.length - USED_BY_MAX }))}</span>` : "";
+  return `<td class="llm-cell-usedby" title="${escapeHtml(labels.join("\n"))}">${shown}${more}${hint}</td>`;
+}
+
 export default {
-  async render({ db, lang = "en" }) {
-    const providers = await listProvidersAll(db);
+  /** piAgentDir / tasksDbPaths are test seams; production passes neither. */
+  async render({ db, lang = "en", piAgentDir, tasksDbPaths }) {
+    const all = await listProvidersAll(db);
+    const providers = all.filter((p) => !HIDDEN_PROVIDERS.has(p.id));
+    const dups = duplicateClusters(providers);
+    const piDir = piAgentDir === undefined ? defaultPiAgentDir() : piAgentDir;
+    let slots = [], piRefs = {}, scanOk = true;
+    try {
+      // Unattended detection is for the role-change warning, not this list.
+      const scan = await scanSlots(db, { includeSubagents: false, piAgentDir: piDir, tasksDbPaths, withUnattended: false });
+      scanOk = !scan.incomplete;
+      slots = scan.filter((s) => !s.dead);
+      piRefs = piConfigRefs(piDir);
+    } catch { scanOk = false; }
+    const usedCtx = { slots, piRefs, scanned: !!piDir, scanOk, lang };
     const external = getProviderHealth().external;
     let instanceNames = new Map();
     try {
@@ -88,15 +162,21 @@ export default {
     let ownInstanceId = null;
     try { ownInstanceId = getOrCreateLocalInstanceId(); } catch {}
     const hostCtx = { ownAddrs: getOwnAddresses(), ownInstanceId, instanceNames };
-    const rows = providers.map((p) => {
+    const buildRow = (p) => {
       const models = (p.models || []).map((m) => escapeHtml(m.id || "?")).join(", ") || "—";
       const idEsc = escapeHtml(p.id);
-      return `<tr class="${p.disabled ? "llm-row-disabled" : ""}">
+      const dupOf = dups.get(p.id);
+      const dupAttr = dupOf ? ` data-dup-of="${escapeHtml(dupOf.join(","))}"` : "";
+      const dupBadge = dupOf
+        ? ` <span style="font-size:0.7rem;padding:1px 7px;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-secondary);white-space:nowrap">${escapeHtml(fill(t("settings.providers.sameService", lang), { ids: dupOf.join(", ") }))}</span>`
+        : "";
+      return `<tr class="${p.disabled ? "llm-row-disabled" : ""}"${dupAttr}>
         <td class="llm-cell-status">${statusDot(p, { external, lang })}</td>
-        <td class="llm-cell-id">${idEsc}</td>
+        <td class="llm-cell-id">${idEsc}${dupBadge}</td>
         <td>${hostBadge(p, hostCtx)}${engineBadge(p, lang)}</td>
         <td class="llm-cell-endpoint">${escapeHtml(p.baseUrl || "—")}</td>
         <td class="llm-cell-models" title="${escapeHtml(models)}">${models}</td>
+        ${usedByCell(p, usedCtx)}
         <td class="llm-cell-actions">
           <form method="post" style="display:inline">
             <input type="hidden" name="action" value="${p.disabled ? "llm_provider_enable" : "llm_provider_disable"}">
@@ -105,7 +185,17 @@ export default {
           </form>
         </td>
       </tr>`;
-    }).join("");
+    };
+    const active = providers.filter((p) => !p.disabled);
+    const retired = providers.filter((p) => p.disabled);
+    const rows = active.map(buildRow).join("");
+    const head = `<thead><tr><th></th><th>ID</th><th>Host</th><th>Endpoint</th><th>Models</th><th>${escapeHtml(t("settings.providers.usedBy", lang))}</th><th></th></tr></thead>`;
+    const retiredBlock = retired.length
+      ? `<details data-show-retired style="margin-top:1rem">
+      <summary class="llm-details-summary">${escapeHtml(fill(t("settings.providers.showRetired", lang), { n: retired.length }))}</summary>
+      <div class="llm-card"><div class="table-scroll"><table class="llm-providers-table">${head}<tbody>${retired.map(buildRow).join("")}</tbody></table></div></div>
+    </details>`
+      : "";
 
     const typeOptions = KNOWN_PROVIDER_TYPES
       .map((t) => `<option value="${t}">${t}</option>`)
@@ -181,7 +271,7 @@ export default {
     </style>
 
     <p class="llm-section-hint">
-      ${providers.length} provider${providers.length === 1 ? "" : "s"} in registry. Bundle providers auto-appear on install. Instance-sync replicates this table across paired Crow instances.
+      ${escapeHtml(fill(t(active.length === 1 ? "settings.providers.enabledOne" : "settings.providers.enabledN", lang), { n: active.length }))} ${escapeHtml(t("settings.providers.introTail", lang))}
     </p>
 
     <div class="llm-toolbar">
@@ -194,10 +284,11 @@ export default {
 
     <div class="llm-card">
       <div class="table-scroll"><table class="llm-providers-table">
-        <thead><tr><th></th><th>ID</th><th>Host</th><th>Endpoint</th><th>Models</th><th></th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="6" style="padding:1.25rem;text-align:center;color:var(--crow-text-muted)">No providers registered.</td></tr>`}</tbody>
+        ${head}
+        <tbody>${rows || `<tr><td colspan="7" style="padding:1.25rem;text-align:center;color:var(--crow-text-muted)">${escapeHtml(t(retired.length ? "settings.providers.noneEnabled" : "settings.providers.noneRegistered", lang))}</td></tr>`}</tbody>
       </table></div>
     </div>
+    ${retiredBlock}
 
     <details style="margin-top:1.25rem">
       <summary class="llm-details-summary">Add cloud provider</summary>
