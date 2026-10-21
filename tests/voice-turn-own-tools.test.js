@@ -254,3 +254,43 @@ test("system message identical with and without own tools", async () => {
   assert.equal(h.log[1].messages[0].content, h.log[0].messages[0].content);
   assert.equal(h.log[2].messages[0].content, h.log[0].messages[0].content);
 });
+
+test("'add lunch to my schedule' with no calendar is a fallback turn, not an escalation", async () => {
+  const h = ownHarness({ bot: CROW, probe: () => true, rounds: [call("crow_reminder_add", { text: "lunch", at: "2026-10-26T12:00:00-05:00" })] });
+  h.deps.ownTools = async () => ({ tools: [remTool()], unavailable: ["calendar"] });
+  const r = await turn(h, "add lunch to my schedule", act);
+  assert.equal(r.timings.calendar_fallback, true);
+  assert.equal(r.escalated, false);
+  assert.deepEqual(h.calls.routed, []);
+  assert.deepEqual(h.calls.chatKeys, [FAST]);
+});
+
+test("'remember to do the dishes tonight' with no task backend is not a can't-do", async () => {
+  const h = ownHarness({ bot: CROW, rounds: [call("crow_reminder_add", { text: "dishes", at: "2026-10-20T20:00:00-05:00" })] });
+  h.deps.ownTools = async () => ({ tools: [remTool({ ok: true, code: "added", final: true, say: "I'll remind you." })], unavailable: ["tasks"] });
+  const r = await turn(h, "remember to do the dishes tonight", act);
+  assert.equal(r.timings.action_no_backend, undefined);
+  assert.notDeepEqual(h.calls.spoken, [CANT_DO_TEXT]);
+});
+
+test("own-tool messages stay route-neutral on a later turn that has no own tools", async () => {
+  for (const later of [{ noOwnTools: true }, "throws"]) {
+    const h = ownHarness({ bot: CROW, rounds: [call("crow_calendar_add_event", { title: "lunch" }), says("Lima. ")] });
+    let n = 0;
+    h.deps.ownTools = async () => { if (n++ > 0 && later === "throws") throw new Error("down"); return { tools: [calTool()], unavailable: [] }; };
+    await turn(h, "add lunch Monday to my calendar", act);
+    const r = await turn(h, "what's the capital of Peru", later === "throws" ? {} : later);
+    assert.equal(r.route, "fast");
+    assert.ok(h.seen.at(-1).msgs.every((m) => m.role !== "tool" && !m.tool_calls), String(later));
+  }
+});
+
+test("an add-on tool with an own tool's name: only the own definition is advertised and the own tool runs", async () => {
+  const cal = calTool();
+  const h = ownHarness({ chatTools: ["crow_calendar_add_event"], rounds: [call("crow_calendar_add_event", { title: "lunch" })] });
+  await turn(h, "add lunch Monday to my calendar", { ...act, ownTools: [cal] });
+  assert.equal(h.log[0].tools.filter((n) => n === "crow_calendar_add_event").length, 1);
+  assert.equal(h.log[0].toolDefs.find((t) => t.name === "crow_calendar_add_event"), cal.definition);
+  assert.deepEqual(h.calls.executed, []);
+  assert.equal(cal.seen.length, 1);
+});

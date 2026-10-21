@@ -18,6 +18,7 @@ import { estimatePromptTokens, requestFits, choosePromptFit, dropOldestExchange 
 import { claimsAction, claimsReminder, claimsBeyondMemory, toolEffect, needsSpokenYes } from "./action-claims.js";
 import { classifyTools, phraseWords, normalizeIntentLists, listMatches } from "./tool-families.js";
 import { voiceAbilities } from "./voice-abilities.js";
+import { ROUTINE_OBJECTS, namesRoutineObjects } from "./routine-objects.js";
 import { CROW_VOICE_BOT_ID, normalizeVoiceSettings, isVoiceBotDef } from "../../shared/voice-bot.js";
 
 /**
@@ -145,17 +146,6 @@ const WEAKER = { named: 2, required: 1, none: 0 };
 // A step-down learned from a refused request is forgotten after this long (the server may have been replaced).
 const LEARNED_TTL_MS = 10 * 60 * 1000;
 const MEMORY_OFF = "Memory is turned off on this display. Tell the user you can't use saved memories here, then end your turn — do not call another tool.";
-/**
- * Crow's own routine objects (PR 2: deps.ownTools reports one as `unavailable` when no backend serves it).
- * Phrase lists (tool-families.js rules: plain words, en + es), never patterns. An action request that names
- * only objects with no backend gets CANT_DO_TEXT with no model call, except a calendar: then a Crow reminder
- * is offered instead (rev 2.1).
- */
-const OWN_OBJECTS = Object.freeze({
-  calendar: normalizeIntentLists({ en: ["calendar", "calendars", "agenda", "appointment", "appointments", "calendar event"], es: ["calendario", "agenda", "cita", "citas"] }),
-  reminders: normalizeIntentLists({ en: ["remind", "reminder", "reminders"], es: ["recuerdame", "recordatorio", "recordatorios"] }),
-  tasks: normalizeIntentLists({ en: ["task", "tasks", "to do", "todo", "to do list", "todo list"], es: ["tarea", "tareas"] }),
-});
 /** Rides on the user message of a calendar-fallback turn (tagged: never heard, never saved). */
 const calendarFallbackNote = (names) => `[Tools] No calendar is installed here, so nothing can be added to a calendar. Offer the user a reminder at the time they asked for instead, by calling ${names.join(" or ")}. Never say it was added to a calendar.`;
 
@@ -605,7 +595,7 @@ export function createVoiceTurnRunner(deps) {
           try { src = await deps.ownTools({ db, bot, surface: timings.surface, lang: opts.lang, tz: opts.tz, now: now() }); }
           catch (err) { log(`[voice-turn] ${device.id} own tools not loaded (${err?.message || err})`); }
         }
-        for (const id of Array.isArray(src?.unavailable) ? src.unavailable : []) if (Object.hasOwn(OWN_OBJECTS, id)) ownUnavailable.add(id);
+        for (const id of Array.isArray(src?.unavailable) ? src.unavailable : []) if (Object.hasOwn(ROUTINE_OBJECTS, id)) ownUnavailable.add(id);
         const policyDeny = Array.isArray(bot.permission_policy?.deny) ? bot.permission_policy.deny : [];
         for (const o of Array.isArray(src) ? src : Array.isArray(src?.tools) ? src.tools : []) {
           const n = o?.definition?.name;
@@ -639,8 +629,8 @@ export function createVoiceTurnRunner(deps) {
       let noBackend = null;
       let calendarFallback = false;
       if (actionAsked && ownUnavailable.size) {
-        const words = phraseWords(transcript);
-        const named = Object.keys(OWN_OBJECTS).filter((id) => listMatches(words, OWN_OBJECTS[id]));
+        // The routine objects the request names (routine-objects.js; kept in step with the kiosk's action intent).
+        const named = namesRoutineObjects(transcript);
         if (named.length && named.every((id) => ownUnavailable.has(id))) {
           if (named.includes("calendar") && [...ownByName.values()].some((o) => o.family === "own:reminders")) calendarFallback = true;
           else noBackend = named[0];
