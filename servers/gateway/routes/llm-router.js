@@ -55,9 +55,10 @@ import { providerDoorUrl } from "../models/door.js";
 import { nowContext, relativeDatesContext, mentionsRelativeDay } from "../../shared/relative-dates.js";
 import { withTurnContext } from "../voice/context-echo.js";
 import { createSseEchoFilter, stripJsonEcho } from "../voice/sse-echo.js";
+import { VOICE_ROUTE_DEFAULTS } from "../../shared/voice-route-defaults.js";
 
-const FAST_KEY = process.env.COMPANION_FAST_MODEL || "crow-voice/qwen3.5-4b";
-const ESC_KEY = process.env.COMPANION_ESCALATION_MODEL || "crow-chat/qwen3.6-35b-a3b";
+const FAST_KEY = process.env.COMPANION_FAST_MODEL || VOICE_ROUTE_DEFAULTS.fast;
+const ESC_KEY = process.env.COMPANION_ESCALATION_MODEL || VOICE_ROUTE_DEFAULTS.escalate;
 // Disable visible chain-of-thought on the fast voice route (set "0" to keep it).
 const FAST_DISABLE_THINKING = (process.env.COMPANION_FAST_DISABLE_THINKING || "1") !== "0";
 
