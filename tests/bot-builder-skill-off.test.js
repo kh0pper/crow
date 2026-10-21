@@ -112,7 +112,8 @@ test("groups follow where each skill comes from: Yours, each extension by name (
     const sel = renderSkillsCard({ def: { skills: ["tutoring"] }, lang: "en", crowHome: process.env.CROW_HOME });
     assert.match(sel, /<details class="btb-group btb-group-builtin" open>/, "open when a built-in is selected");
   } finally {
-    rmSync(join(process.env.CROW_HOME, "skills", "kiosk.md")); rmSync(join(process.env.CROW_HOME, "skills", "podcast.md"));
-    rmSync(join(process.env.CROW_HOME, "installed.json")); rmSync(join(process.env.CROW_HOME, "skill-installs.json"));
+    const home = join(scratch, "home"); // the scratch home set up above, never a path read from the env
+    rmSync(join(home, "skills", "kiosk.md")); rmSync(join(home, "skills", "podcast.md"));
+    rmSync(join(home, "installed.json")); rmSync(join(home, "skill-installs.json"));
   }
 });
