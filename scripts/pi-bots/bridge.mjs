@@ -122,6 +122,7 @@ function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts,
     appRoot: BRIDGE_APP_ROOT,
     piLabDir: findPiLabDir(), piAgentDir, shadowAgentDir: shadow.dir,
     crowHome, dataDir, botCacheDir, unmaskIdentity,
+    dataKeep: String(process.env.CROW_PI_CONTAIN_DATA_KEEP || "").split(",").map((x) => x.trim()).filter((x) => x && !x.includes("/")),
     sessionDir, cwd: spawnCwd, workspaceDir: opts.projectWorkspaceDir || null,
     writePaths: [...(piPolicy.write_paths || []), ...extraRw], readPaths: piPolicy.read_paths || [],
     mcpServers: servers, _shadow: shadow,
@@ -152,13 +153,13 @@ export function filterSpawnEnvWithReport(def) {
   const spawnEnv = {};
   const stripped = [];
   for (const k of Object.keys((def && def.spawn_env) || {})) {
-    // CROW_PI_SANDBOX (and CROW_PI_CONTAIN_BOTS) is the operator's switch for the pi sandbox; a bot def must
+    // CROW_PI_SANDBOX (and CROW_PI_CONTAIN_BOTS / _DATA_KEEP) is the operator's switch for the pi sandbox; a bot def must
     // not be able to turn the sandbox off for itself.
     // CROW_MODEL_ROLES_FILE names the instance's role snapshot pi reads; a def
     // must not point pi at a file of its choosing.
     // PEER_CREDENTIAL_ENV (item 46 PR-B): no bot process may be pointed at the
     // peer credential store.
-    if (/^PI_BOT_|^PIBOT_|^CROW_ACTOR_/.test(k) || k === "CROW_PI_SANDBOX" || k === "CROW_PI_CONTAIN_BOTS" || k === "CROW_MODEL_ROLES_FILE" || PEER_CREDENTIAL_ENV.includes(k)) { stripped.push(k); continue; }
+    if (/^PI_BOT_|^PIBOT_|^CROW_ACTOR_/.test(k) || k === "CROW_PI_SANDBOX" || k === "CROW_PI_CONTAIN_BOTS" || k === "CROW_PI_CONTAIN_DATA_KEEP" || k === "CROW_MODEL_ROLES_FILE" || PEER_CREDENTIAL_ENV.includes(k)) { stripped.push(k); continue; }
     spawnEnv[k] = def.spawn_env[k];
   }
   return { spawnEnv, stripped };

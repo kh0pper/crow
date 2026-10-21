@@ -180,7 +180,7 @@ export function systemdUserUnitDirs(home = homedir(), { create = true } = {}) {
 }
 
 const SCRUB_EXACT = new Set(["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "SSH_AUTH_SOCK", "SSH_AGENT_PID",
-  "TMUX", "TMUX_PANE", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "CROW_PI_SANDBOX", "CROW_PI_CONTAIN_BOTS"]);
+  "TMUX", "TMUX_PANE", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "CROW_PI_SANDBOX", "CROW_PI_CONTAIN_BOTS", "CROW_PI_CONTAIN_DATA_KEEP"]);
 
 /** Copy of env without user-session IPC pointers (and the sandbox switch). */
 export function scrubSandboxEnv(env) {
