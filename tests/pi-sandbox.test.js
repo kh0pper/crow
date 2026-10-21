@@ -9,7 +9,7 @@
 // holds in the PARENT, so each assertion proves the sandbox took it away.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, chmodSync, statSync, readdirSync as readdirSyncFs } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, chmodSync, statSync, lstatSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { connect, createServer } from "node:net";
@@ -17,7 +17,7 @@ import { spawn, spawnSync } from "node:child_process";
 import {
   wrapPiSpawn, piSandboxMode, probePiSandbox, dockerSocketPaths, isSandboxWrapperArgs,
   scrubSandboxEnv, userRuntimeDirs, PROBE_RETRY_MS, _resetPiSandboxForTest,
-  credentialMaskDirs, boardSecretCredential, boardSecretCredentialRoots, BWRAP_BASE,
+  credentialMaskDirs, boardSecretCredential, boardSecretCredentialRoots, BWRAP_BASE, BWRAP_BASE_NO_PIDNS, piSandboxStatus,
 } from "../scripts/pi-bots/pi_sandbox.mjs";
 import { listBridgePi, reapStalePi } from "../scripts/pi-bots/pi_lifecycle.mjs";
 
@@ -420,10 +420,13 @@ test("board secret: /run/credentials is masked for EVERY pi child, independent o
 });
 
 test("every pi spawn goes through PiRpc and the central wrapPiSpawn", () => {
-  const files = [];
-  const walk = (d) => { for (const n of readdirSyncFs(d)) { if (n === "node_modules" || n.startsWith(".")) continue; const p = join(d, n); if (statSync(p).isDirectory()) walk(p); else if (/\.(m?js)$/.test(n)) files.push(p); } };
+  // Tracked files only (git ls-files): never follows a symlink in the working
+  // tree, never reads untracked scratch.
   const root = new URL("..", import.meta.url).pathname;
-  for (const d of ["scripts", "servers", "bundles"]) walk(join(root, d));
+  const files = spawnSync("git", ["ls-files", "-z", "--", "scripts", "servers", "bundles"], { cwd: root, encoding: "utf8" })
+    .stdout.split("\0").filter((f) => /\.(m?js)$/.test(f) && !f.includes("node_modules/"))
+    .map((f) => join(root, f)).filter((f) => { try { return lstatSync(f).isFile(); } catch { return false; } });
+  assert.ok(files.length > 100, "git ls-files found the tree");
   // Any call to something named like a process launcher (spawn, spawnSync,
   // execFile, execFileFn, forkChild, ...) whose next lines name the pi CLI.
   // Allowed: bridge.mjs (PiRpc, checked below) and pi-model-catalog's
@@ -567,6 +570,7 @@ test("integration: a sandboxed pi that IGNORES SIGTERM is still gone within ~6 s
     for (let i = 0; i < 70 && alive(piPid); i++) await new Promise((r) => setTimeout(r, 100));
     assert.equal(alive(piPid), false, "SIGKILLed by the kept 5 s timer");
     assert.throws(() => process.kill(-pgid, 0), "the process group is gone");
+    pgidForCleanup = null; // never SIGKILL a pgid that may since have been reused
   } finally {
     try { if (pgidForCleanup) process.kill(-pgidForCleanup, "SIGKILL"); } catch { /* gone */ }
     if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
@@ -607,4 +611,47 @@ test("listBridgePi folds a PID-namespace sandbox (outer bwrap -> inner bwrap -> 
   const r = reapStalePi({ _procs: procs, _kill: (pid, sig) => killed.push([pid, sig]), leaseFiles: [], now: Date.now() });
   assert.deepEqual(r.reaped.map((v) => v.pid), [800]);
   assert.ok(killed.some(([p, s2]) => p === -800 && s2 === "SIGTERM"), "the outer wrapper's group (inner bwrap, pi, its children) is signalled");
+});
+
+test("two-tier probe: full flags first, then user-namespace only ('active-no-pidns'), setpriv only when both fail", () => {
+  const calls = [];
+  const stub = (results) => (bin, args) => { calls.push([bin, args.join(" ")]); return results.shift(); };
+  const prevMode = process.env.CROW_PI_SANDBOX;
+  delete process.env.CROW_PI_SANDBOX;
+  try {
+    // tier 1 works
+    _resetPiSandboxForTest();
+    let p = probePiSandbox({ force: true, bwrap: "/b", setpriv: "/s", runProbe: stub([null]) });
+    assert.deepEqual([p.ok, p.pidns, p.bwrap], [true, true, "/b"]);
+    assert.equal(piSandboxStatus(), "active");
+    assert.equal(calls.length, 1);
+    assert.match(calls[0][1], /--unshare-pid --proc \/proc -- \/bin\/true$/);
+    // tier 1 fails, tier 2 works
+    calls.length = 0;
+    _resetPiSandboxForTest();
+    p = probePiSandbox({ force: true, bwrap: "/b", setpriv: "/s", runProbe: stub(["no pidns", null]) });
+    assert.deepEqual([p.ok, p.pidns, p.setpriv], [true, false, null]);
+    assert.match(p.pidnsReason, /--unshare-pid \/ --proc.*no pidns/);
+    assert.equal(piSandboxStatus(), "active-no-pidns");
+    assert.deepEqual(calls.map((c) => c[1]), [[...BWRAP_BASE, "--", "/bin/true"].join(" "), [...BWRAP_BASE_NO_PIDNS, "--", "/bin/true"].join(" ")]);
+    const msgs = []; const orig = console.error; console.error = (m) => msgs.push(String(m));
+    try {
+      const w = wrapPiSpawn("/n/node", ["cli.js"], { mode: "auto", probe: p, env: {}, sockets: [], runtimeDirs: [], roDirs: [], credentialDirs: ["/run/credentials"] });
+      assert.deepEqual([w.sandboxed, w.pidNamespace], [true, false]);
+      assert.deepEqual(w.args, ["--dev-bind", "/", "/", "--unshare-user", "--tmpfs", "/run/credentials", "--", "/n/node", "cli.js"]);
+      wrapPiSpawn("/n/node", ["cli.js"], { mode: "auto", probe: p, env: {}, sockets: [], runtimeDirs: [], roDirs: [], credentialDirs: [] });
+    } finally { console.error = orig; }
+    assert.equal(msgs.filter((m) => m.includes("WITHOUT a private PID namespace")).length, 1, "warns once");
+    // both bwrap tiers fail: setpriv
+    calls.length = 0;
+    _resetPiSandboxForTest();
+    p = probePiSandbox({ force: true, bwrap: "/b", setpriv: "/s", runProbe: stub(["e1", "e2", null]) });
+    assert.deepEqual([p.ok, p.setpriv], [false, "/s"]);
+    assert.match(p.reason, /--unshare-user\): e2/);
+    assert.match(piSandboxStatus(), /^nnp-only: /);
+    assert.equal(calls[2][0], "/s");
+  } finally {
+    if (prevMode === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prevMode;
+    _resetPiSandboxForTest();
+  }
 });

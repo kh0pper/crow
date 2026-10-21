@@ -158,7 +158,9 @@ export function verifyActorSig(args) {
 //    A leftover CROW_BOARD_ACTOR_SECRET is ignored (with a warning) and
 //    stripped from every child env.
 //  - Hidden from bots: shared-secret mode is REFUSED unless the pi sandbox
-//    is active (pi_sandbox.mjs piSandboxStatus() === "active"), and the
+//    is active in its FULL tier (pi_sandbox.mjs piSandboxStatus() ===
+//    "active"; the user-namespace-only "active-no-pidns" tier is refused,
+//    since its bots can see host processes), and the
 //    sandbox masks /run/credentials and /run/user with an empty tmpfs in
 //    every pi child, which also runs in its own PID namespace with a fresh
 //    /proc (no host process, so no /proc/<pid>/root or environ, is visible).

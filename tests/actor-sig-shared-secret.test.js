@@ -145,7 +145,7 @@ test("phone and artifacts signatures still need the per-boot key; the secret can
 
 test("refused unless the pi sandbox is active", () => {
   const { env } = secretFile();
-  for (const status of ["off", "nnp-only: no bwrap", "fallback: x"]) {
+  for (const status of ["off", "active-no-pidns", "nnp-only: no bwrap", "fallback: x"]) {
     _resetActorKeyForTest();
     const w = captureWarn();
     assert.equal(init({ env, sandboxStatus: () => status, warn: w.warn }), "none");
