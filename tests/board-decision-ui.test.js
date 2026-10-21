@@ -366,18 +366,27 @@ test("the live watcher remembers the drawer before it reloads, and page init reo
   assert.ok(src.includes("if(!INCLUDE_ARCHIVED) reopenRememberedDrawer();"), "init reopens");
   assert.ok(src.indexOf("reopenRememberedDrawer();") < src.indexOf("var es=new EventSource"), "before the live stream attaches");
   assert.match(fnSource(src, "hydrateDrawer"), /if\(pendingDrawerScroll\)\{ drawer\.scrollTop=pendingDrawerScroll; pendingDrawerScroll=0; \}/);
+  const h = fnSource(src, "hydrateDrawer");
+  assert.match(h, /else if\(!r\.ok\)\{ pendingDrawerScroll=0;/, "a failed card GET drops the pending scroll");
+  assert.match(h, /\.catch\(function\(\)\{ pendingDrawerScroll=0;/, "so does a network failure");
 });
 
 test("openCardById opens a card on this board from its face, and loads any other card by id", () => {
   const src = scriptBody("en");
   const fn = fnSource(src, "openCardById");
-  const faces = { 5: { getAttribute: (k) => (k === "data-item-type" ? "kanban" : null) } };
-  const filled = [], opened = [];
-  const run = new Function("document", "fillDrawer", "openCardDrawer", fn + "\nreturn openCardById;")(
+  const faces = {
+    5: { getAttribute: (k) => (k === "data-item-type" ? "kanban" : null) },
+    6: { getAttribute: (k) => (k === "data-item-type" ? "tracker" : null) },
+  };
+  const filled = [], opened = [], tracker = [];
+  const run = new Function("document", "fillDrawer", "openCardDrawer", "fillTrackerDrawer", fn + "\nreturn openCardById;")(
     { querySelector: (sel) => { const m = sel.match(/data-card="(\d+)"/); return m ? faces[m[1]] || null : null; } },
-    (el) => filled.push(el), (data) => opened.push(data));
+    (el) => filled.push(el), (data) => opened.push(data), (el) => tracker.push(el));
   run(5);
   assert.deepEqual(filled, [faces[5]], "on the board: same path as a click on the card");
+  run(6);
+  assert.deepEqual(tracker, [faces[6]], "a tracker-item face gets the tracker drawer");
+  assert.equal(opened.length, 0, "never the card drawer by id for a tracker face");
   run(77);
   assert.equal(opened.length, 1);
   assert.equal(opened[0].id, 77, "not on the board: opened by id");

@@ -142,7 +142,13 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     var idNum=Number(id);
     if(!isFinite(idNum)||Math.floor(idNum)!==idNum) return;
     var el=document.querySelector('.bb-card[data-card="'+idNum+'"]');
-    if(el&&(el.getAttribute('data-item-type')||'kanban')!=='tracker'){ fillDrawer(el); return; }
+    if(el){
+      // A face on this board: the same path as clicking it (a tracker item
+      // gets the tracker drawer, never the card drawer).
+      if((el.getAttribute('data-item-type')||'kanban')==='tracker') fillTrackerDrawer(el);
+      else fillDrawer(el);
+      return;
+    }
     openCardDrawer({id:idNum,status:null,locked:false,archived:false,itemType:'kanban'},'');
   }
   function openCardDrawer(data,title){
@@ -204,8 +210,8 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         renderResults(r.j.latest_results||[], (r.j.board&&r.j.board.terminal_values)||[]);
         if(!opts.keepDecision) renderDecision(r.j.decision);
         if(pendingDrawerScroll){ drawer.scrollTop=pendingDrawerScroll; pendingDrawerScroll=0; }
-      } else if(!r.ok){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); }
-    }).catch(function(){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });
+      } else if(!r.ok){ pendingDrawerScroll=0; crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); }
+    }).catch(function(){ pendingDrawerScroll=0; crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });
   }
   // The decision block calls this after an answer (or a refused one): the
   // card's status moved on the server, so the form must show it before Save.
