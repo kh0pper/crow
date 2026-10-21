@@ -112,7 +112,6 @@ async function tab() {
   await send("Page.enable"); await send("Network.enable");
   await send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
   const evalIn = async (expression) => { const o = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }); return o.exceptionDetails ? { threw: o.exceptionDetails.text } : o.result.value; };
-  // Asserts arrival (code review): a timed-out navigation must never let a check pass on the previous page.
   // Asserts the navigation committed (code review): a failed or timed-out
   // navigation must never let a check pass on the previous page. (A page may
   // then navigate itself, e.g. the control's meta refresh.)

@@ -739,3 +739,24 @@ test("D28 leftover (L-6): opening a pre-D28 document backfills its blocks' plain
   assert.equal(now.blocks[1].plain.slice(a.span.start, a.span.end), "and bold words at the end");
   } finally { srv.close(); }
 });
+
+test("code review I3: a document view waits for the one-time plain backfill at most ~2 s, even when the store never answers", async () => {
+  const doc = await store.createArtifact(s.db, s.blobs, { title: "Stuck store", type: "document", source: { markdown: "# A\n\nB" }, actor: { kind: "bot", id: "bobby" } }, { markdownBlocks });
+  const row = (await s.db.execute({ sql: "SELECT anchor_map_json FROM artifact_versions WHERE artifact_id=? AND n=1", args: [doc.id] })).rows[0];
+  const now = JSON.parse(row.anchor_map_json);
+  await s.db.execute({ sql: "UPDATE artifact_versions SET anchor_map_json=? WHERE artifact_id=? AND n=1", args: [JSON.stringify({ ...now, blocks: now.blocks.map(({ plain: _p, ...b }) => b) }), doc.id] });
+  const stuck = { ...s.blobs, get: () => new Promise(() => {}) };   // a store that never answers
+  const app = express();
+  app.use(artifactsRouter((rq, rs, next) => next(), { db: s.db, blobs: stuck, runtime, policy, csrf: (rq, rs, next) => next(), renderDeps: { markdownBlocks }, engine: { async list() { return []; } } }));
+  const srv = app.listen(0, "127.0.0.1"); await new Promise((r) => srv.once("listening", r));
+  try {
+    const t0 = Date.now();
+    const status = await new Promise((resolve, reject) => {
+      const r = http.request({ host: "127.0.0.1", port: srv.address().port, path: `/api/artifacts/${doc.id}`, method: "GET" }, (res) => { res.resume(); res.on("end", () => resolve(res.statusCode)); });
+      r.on("error", reject); r.end();
+    });
+    const ms = Date.now() - t0;
+    assert.equal(status, 200);
+    assert.ok(ms >= 1500 && ms < 6000, `waited for the pass, but bounded (${ms} ms)`);
+  } finally { srv.closeAllConnections?.(); srv.close(); }
+});
