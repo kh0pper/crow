@@ -108,6 +108,14 @@ Desde el **Crow's Nest**, abre el panel de **Skills** para explorar todas las sk
 - **Skills de usuario** — Tus skills personalizadas o sobrescritas, guardadas en `~/.crow/skills/`. Tienen prioridad sobre las skills integradas y las actualizaciones nunca las sobrescriben.
 - **Skills de extensiones** — Se instalan con una extensión y se actualizan con ella. Se abren en solo lectura; **Personalizar…** crea tu propia copia, que deja de recibir las actualizaciones de la extensión.
 
+### Necesita revisión
+
+La parte de arriba del panel de Skills muestra lo que necesita tu atención: una actualización de una extensión lista para aplicar (**Revisar**), tu copia personalizada de una skill de extensión que quedó atrás de una versión más nueva (**Comparar**, luego **Restaurar original** o **Conservar la mía**; al restaurar se guarda una copia de tu edición en `~/.crow/skill-backups/`), una skill quitada que un bot aún pide (**Restaurar**, o quitársela a ese bot) y una skill que su extensión ya no incluye (**Conservar**). Cuando no hay nada, dice que todas las habilidades están al día.
+
+### Reglas de escritura y crow.md
+
+Las reglas de escritura y las secciones de crow.md se editan en **Cómo se comporta Crow**, enlazado al final del panel de Skills.
+
 ### Desactivar una skill
 
 Cada skill del panel de Skills tiene un interruptor. Una skill desactivada queda fuera para todos los bots de este Crow a partir de su próxima conversación nueva (una conversación ya abierta conserva lo que tenía al empezar). Los bots que la eligen conservan la selección, así que al activarla de nuevo la recuperan. La lista es de cada Crow: una instancia emparejada tiene la suya. Las skills de extensiones se desactivan en lugar de eliminarse.
