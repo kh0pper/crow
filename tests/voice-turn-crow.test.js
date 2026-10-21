@@ -437,6 +437,45 @@ test("security 2: a crow_tools delete names the id that runs; the spoof shape an
   }
 });
 
+// ── Task 2.7: the question names the item it changes and who a message goes to ──
+
+test("a crow_tools delete keyed by card_id names it; a card_id spoof is refused, never asked or run", async () => {
+  const ok = { type: "tool_call", id: "t1", name: "crow_tools", arguments: { action: "trello_delete_card", params: { card_id: "c9" } } };
+  const h = await addonHarness([callRound(ok), sayRound("Sure?"), callRound(ok), sayRound("Deleted.")]);
+  await turn(h, { transcript: "delete card c9" });
+  assert.match(lastToolText(h, 1), /Are you sure you want to trello delete card c9\?/);
+  await turn(h, { transcript: "yes" });
+  assert.deepEqual(h.calls.executed, ["crow_tools"]);
+
+  const spoof = { type: "tool_call", id: "t2", name: "crow_tools", arguments: { action: "trello_delete_card", card_id: 1, params: { card_id: 2 } } };
+  const r = await addonHarness([callRound(spoof), sayRound("I can't."), callRound(spoof), sayRound("I can't.")]);
+  await turn(r, { transcript: "delete card 1" });
+  assert.doesNotMatch(lastToolText(r, 1), /Confirmation required/, "refused, never asked");
+  await turn(r, { transcript: "yes" });
+  assert.deepEqual(r.calls.executed, [], "a yes does not run it either");
+});
+
+test("a voice send names the recipient; notification settings read 'change your notification settings'", async () => {
+  const send = { type: "tool_call", id: "s1", name: "gmail_send_message", arguments: { to: "alex@example.com", subject: "Milk", body: "Buy milk" } };
+  const h = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["gmail_send_message"], rounds: [callRound(send), sayRound("Sure?")] });
+  await turn(h, { transcript: "email alex about milk" });
+  assert.match(lastToolText(h, 1), /Are you sure you want to gmail send message to alex@example\.com\?/);
+  assert.doesNotMatch(lastToolText(h, 1), /Buy milk/, "never the body");
+
+  const set = { type: "tool_call", id: "n1", name: "crow_notification_settings", arguments: { action: "set", types_enabled: [] } };
+  const n = crowHarness({ rows: { "crow.voice": VOICE }, chatTools: ["crow_notification_settings"], rounds: [callRound(set), sayRound("Sure?")] });
+  await turn(n, { transcript: "turn off my notifications" });
+  assert.match(lastToolText(n, 1), /Are you sure you want to change your notification settings\?/);
+});
+
+test("an ordinary bot's question names the target too", async () => {
+  const tc = { type: "tool_call", id: "b1", name: "crow_remove_backend", arguments: { backend_id: "b2" } };
+  const o = crowHarness({ chatTools: ["crow_remove_backend"], rounds: [callRound(tc), sayRound("Sure?")] });
+  await turn(o, { botId: "household", transcript: "remove backend b2" });
+  assert.deepEqual(o.calls.executed, []);
+  assert.match(lastToolText(o, 1), /Are you sure you want to remove backend b2\?/);
+});
+
 // ── voice actions hook (PR 2, Task 2.2) ─────────────────────────────────────
 
 test("voiceActions fast path speaks without a model call", async () => {

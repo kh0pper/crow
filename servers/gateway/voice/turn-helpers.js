@@ -7,6 +7,7 @@
  * window that starts on a user message (no orphan tool result).
  */
 import { isProxyCall, executedProxyArgs, normalizeExternalParams, ADDON_PROXY } from "../ai/proxy-args.js";
+import { firstVerb } from "./action-claims.js";
 
 export const SENTENCE_END = /[.!?…。]["')\]]?\s|[\n]/;
 
@@ -163,8 +164,15 @@ export function isDestructiveTool(name) {
 // The proxies and the arguments they really run with come from the executor's own module (one matcher).
 export { isProxyCall, executedProxyArgs };
 const objOf = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
-// Every field the confirm question or a voice policy check reads.
-const DESCRIBED_FIELDS = ["id", "slug", "post_id", "memory_id", "setlist_id", "section_key", "delete", "task", "enabled", "cron_expression"];
+// The fields the confirm question names, in order, before its id-key fallback (ID_KEY).
+const NAMED_FIELDS = ["id", "slug", "post_id", "memory_id", "setlist_id", "section_key"];
+// The fallback: a key ending in _id or Id, or id followed by an uppercase letter (card_id, cardId, idCard).
+const ID_KEY = /(?:_id|[a-z0-9]Id)$|^id[A-Z]/;
+// Who a send goes to, named for a send (SEND_VERBS: the tool name's first verb).
+const RECIPIENT_FIELDS = ["to", "recipient", "email"];
+const SEND_VERBS = new Set(["send", "reply", "post", "forward", "share"]);
+// Every field the confirm question can name or a voice policy check reads; any ID_KEY key is compared too.
+const DESCRIBED_FIELDS = [...NAMED_FIELDS, ...RECIPIENT_FIELDS, "delete", "task", "enabled", "cron_expression"];
 // Scalars compare as strings ("3" and 3 are the same id); objects by their canonical form.
 const sameValue = (a, b) => ((a === null || typeof a !== "object") && (b === null || typeof b !== "object")
   ? String(a) === String(b) : canonicalArgsHash(a) === canonicalArgsHash(b));
@@ -181,7 +189,9 @@ export function proxyArgsConflict(tc) {
   const params = objOf(objOf(tc.arguments).params);
   const layers = [top, params, objOf(params.arguments)];
   const runs = objOf(executedProxyArgs(tc));
-  return DESCRIBED_FIELDS.some((k) => layers.some((l) => l !== runs && l[k] !== undefined && (runs[k] === undefined || !sameValue(l[k], runs[k]))));
+  const fields = new Set(DESCRIBED_FIELDS);
+  for (const l of [...layers, runs]) for (const k of Object.keys(l)) if (ID_KEY.test(k)) fields.add(k);
+  return [...fields].some((k) => layers.some((l) => l !== runs && l[k] !== undefined && (runs[k] === undefined || !sameValue(l[k], runs[k]))));
 }
 /**
  * A crow_tools call that runs on its flat top-level fields (params empty). The local executor runs those;
@@ -202,9 +212,23 @@ export function describeDestructiveAction(tc, { via = null } = {}) {
   const has = (v) => v !== undefined && v !== null && v !== "";
   let name = String(tc.name || "");
   if (name === "crow_update_schedule" && (src.delete === true || src.delete === "true")) name = "crow_delete_schedule";
+  if (name === "crow_notification_settings") return "change your notification settings";
   const base = name.replace(/^crow_/, "").replace(/_/g, " ");
-  const ref = ["id", "slug", "post_id", "memory_id", "setlist_id", "section_key"].map((k) => src[k]).find(has);
-  return has(ref) ? `${base} ${ref}` : base;
+  const scalar = (v) => (typeof v === "string" || typeof v === "number") && has(v);
+  // Named fields first, then the first id-keyed field (ID_KEY) with a scalar value. Never a free-text body.
+  const refKey = NAMED_FIELDS.find((k) => scalar(src[k])) ?? Object.keys(src).find((k) => ID_KEY.test(k) && scalar(src[k]));
+  let out = refKey === undefined ? base : `${base} ${speakable(src[refKey])}`;
+  if (SEND_VERBS.has(firstVerb(name)?.verb)) {
+    const to = RECIPIENT_FIELDS.map((k) => src[k]).map((v) => (Array.isArray(v) ? v.filter(scalar).join(", ") : v)).find(scalar);
+    if (to !== undefined) out += ` to ${speakable(to)}`;
+  }
+  return out;
+}
+// A value as the question speaks it: one line, at most QUESTION_VALUE_MAX characters.
+const QUESTION_VALUE_MAX = 60;
+function speakable(v) {
+  const s = String(v).replace(/\s+/g, " ").trim();
+  return s.length > QUESTION_VALUE_MAX ? `${s.slice(0, QUESTION_VALUE_MAX - 1)}…` : s;
 }
 
 export function canonicalArgsHash(args) {

@@ -237,3 +237,48 @@ test("security 2: one proxy matcher — tool-executor uses the shared one", asyn
   const shared = await import("../servers/gateway/ai/proxy-args.js");
   assert.ok(shared.CATEGORY_PROXY_RE.test("crow_memory") && !shared.CATEGORY_PROXY_RE.test("crow_tools"));
 });
+
+// ── Task 2.7: the question names the item it changes and who a message goes to ──
+
+test("the question falls back to an *_id / *Id / idX field, names a send's recipient, and never a body", () => {
+  const d = H.describeDestructiveAction;
+  const T = { via: "crow_tools" };
+  assert.equal(d({ name: "trello_delete_card", arguments: { action: "trello_delete_card", params: { card_id: "c9" } } }, T), "trello delete card c9");
+  assert.equal(d({ name: "trello_delete_card", arguments: { action: "trello_delete_card", params: { cardId: "c8" } } }, T), "trello delete card c8");
+  assert.equal(d({ name: "trello_delete_card", arguments: { action: "trello_delete_card", params: { idCard: 5 } } }, T), "trello delete card 5");
+  assert.equal(d({ name: "trello_delete_card", arguments: { identity: "x", idea: "y" } }), "trello delete card", "identity/idea are not id keys");
+  assert.equal(d({ name: "trello_delete_card", arguments: { card_id: { nested: 1 } } }), "trello delete card", "only a scalar value is named");
+  assert.equal(d({ name: "crow_delete_post", arguments: { id: 3, card_id: "c9" } }), "delete post 3", "the named fields come first");
+  assert.equal(d({ name: "gmail_send_message", arguments: { to: "alex@example.com", subject: "Hi", body: "secret text" } }), "gmail send message to alex@example.com");
+  assert.equal(d({ name: "crow_send_message", arguments: { recipient: "alex", message: "secret text" } }), "send message to alex");
+  assert.equal(d({ name: "gmail_reply_message", arguments: { message_id: "m1", email: "alex@example.com", body: "b" } }), "gmail reply message m1 to alex@example.com");
+  assert.equal(d({ name: "gmail_send_message", arguments: { to: ["alex@example.com", "sam@example.com"] } }), "gmail send message to alex@example.com, sam@example.com");
+  assert.equal(d({ name: "crow_update_memory", arguments: { id: 4, to: "x" } }), "update memory 4", "only a send names a recipient");
+  assert.equal(d({ name: "crow_update_schedule", arguments: { id: 2, description: "secret text" } }).includes("secret"), false);
+  assert.equal(d({ name: "crow_notification_settings", arguments: { action: "set" } }), "change your notification settings");
+  assert.equal(d({ name: "crow_notification_settings", arguments: { action: "notification_settings", params: { action: "set" } } }, { via: "crow_memory" }), "change your notification settings");
+});
+
+test("a long value is truncated to 60 characters", () => {
+  const d = H.describeDestructiveAction;
+  const long = "a".repeat(200);
+  const q = d({ name: "trello_delete_card", arguments: { card_id: long } });
+  const named = q.slice("trello delete card ".length);
+  assert.equal(named.length, 60);
+  assert.ok(named.startsWith("a".repeat(59)));
+  const r = d({ name: "gmail_send_message", arguments: { to: `${"b".repeat(100)}@example.com` } });
+  assert.equal(r.slice("gmail send message to ".length).length, 60);
+});
+
+test("the conflict check covers every field the question can name (*_id, *Id, idX, to/recipient/email)", () => {
+  const c = (args, name = "crow_tools") => H.proxyArgsConflict({ name, arguments: args });
+  assert.equal(c({ action: "trello_delete_card", card_id: 1, params: { card_id: 2 } }), true, "the card_id spoof");
+  assert.equal(c({ action: "trello_delete_card", cardId: 1, params: { cardId: 2 } }), true);
+  assert.equal(c({ action: "trello_delete_card", idCard: 1, params: { idCard: 2 } }), true);
+  assert.equal(c({ action: "trello_delete_card", card_id: 1, params: { other: 2 } }), true, "a top-level id the run never sees");
+  assert.equal(c({ action: "gmail_send_message", to: "alex@example.com", params: { to: "eve@example.com" } }), true);
+  assert.equal(c({ action: "send_message", recipient: "a", params: { recipient: "b" } }, "crow_sharing"), true);
+  assert.equal(c({ action: "trello_delete_card", card_id: "2", params: { card_id: 2 } }), false, "\"2\" and 2 agree");
+  assert.equal(c({ action: "trello_delete_card", params: { card_id: 2 } }), false);
+  assert.equal(c({ action: "trello_delete_card", note: "x", params: { card_id: 2 } }), false, "a non-described field is not compared");
+});
