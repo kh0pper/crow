@@ -31,14 +31,19 @@ function pidIsDead(pid) {
 }
 
 /**
- * Try to take or renew the lease. Resolves true if this holder owns it. A live
- * lease whose recorded pid no longer exists is taken over at once, so a
- * restarted ticker does not wait out the TTL.
+ * Try to take or renew the lease, telling "someone else holds it" apart from
+ * "the lease cannot be taken at all". Resolves:
+ *   { held: true }                    this holder owns it now
+ *   { held: false }                   another live holder owns it, or the lock was busy
+ *   { held: false, error: "<msg>" }   any other failure (a lock file that is not a
+ *                                     database, a WAL lock file, EACCES, EROFS, ENOSPC …)
+ * A live lease whose recorded pid no longer exists is taken over at once, so a
+ * restarted ticker does not wait out the TTL. Never throws.
  */
-export async function holdBotcronLease({ dir, holder, ttlMs = 180000, now = Date.now(), lockTimeoutMs = 2000 }) {
+export async function tryBotcronLease({ dir, holder, ttlMs = 180000, now = Date.now(), lockTimeoutMs = 2000 }) {
   try {
     mkdirSync(dir, { recursive: true });
-    return await withSqliteLock(lockPath(dir), async () => {
+    const held = await withSqliteLock(lockPath(dir), async () => {
       const cur = readLease(dir);
       if (cur && cur.holder !== holder && cur.expires_at > now && !pidIsDead(cur.pid)) return false;
       const tmp = `${leasePath(dir)}.${process.pid}.tmp`;
@@ -46,7 +51,16 @@ export async function holdBotcronLease({ dir, holder, ttlMs = 180000, now = Date
       try { renameSync(tmp, leasePath(dir)); } catch (e) { try { unlinkSync(tmp); } catch {} throw e; }
       return true;
     }, { timeoutMs: lockTimeoutMs });
-  } catch { return false; }
+    return { held };
+  } catch (e) {
+    if (e && e.code === "busy") return { held: false };
+    return { held: false, error: String((e && e.message) || e) };
+  }
+}
+
+/** Try to take or renew the lease. Resolves true if this holder owns it; never throws. */
+export async function holdBotcronLease(opts) {
+  return (await tryBotcronLease(opts)).held;
 }
 
 /** Free the lease if this holder owns it; otherwise a no-op. Never throws. */
@@ -69,7 +83,9 @@ export function botcronLeaseTtl(pollMs) {
  * One bot-cron ticker for this process: each sweep() takes or renews the
  * lease and, only while it holds it, runs one tickBotSchedules() pass.
  * Overlapping sweeps are dropped (one in flight at a time). Logs one line when
- * it gains the lease and one when it loses it, never per tick. stop() waits
+ * it gains the lease and one when it loses it, never per tick. A lease that
+ * cannot be taken at all (not "another ticker holds it") is logged once per
+ * distinct error, and once again on recovery; no ticker runs meanwhile. stop() waits
  * for an in-flight sweep, then frees the lease; a stopped ticker never ticks
  * again (make a new one to re-arm). sweep() never rejects.
  * @returns {{ sweep(): Promise<{fired:number, held:boolean, skipped?:boolean}>, stop(): Promise<void>, readonly held: boolean }}
@@ -79,20 +95,36 @@ export function createBotcronTicker({
   holder = BOTCRON_HOLDER,
   ttlMs = 180000,
   log = () => {},
-  _hold = holdBotcronLease,
+  _hold = tryBotcronLease,
   _release = releaseBotcronLease,
   _tick = null,
 }) {
   let held = false;
   let stopped = false;
   let inflight = null;
+  let lastError = null; // the lease error currently being reported, if any
 
   async function run() {
-    const ok = await _hold({ dir, holder, ttlMs });
+    const res = await _hold({ dir, holder, ttlMs });
+    // _hold may resolve a plain boolean (holdBotcronLease shape) or { held, error }.
+    const ok = typeof res === "boolean" ? res : !!(res && res.held);
+    const error = (res && typeof res === "object" && res.error) || null;
     if (stopped) { // disarmed while we waited on the lock: hand the lease straight back
       if (ok) await _release({ dir, holder });
       held = false;
       return { fired: 0, held: false };
+    }
+    if (error) {
+      if (error !== lastError) {
+        lastError = error;
+        log(`cannot take the bot-cron lease: ${error}; scheduled bot runs are paused on this instance`);
+      }
+      held = false;
+      return { fired: 0, held: false, error };
+    }
+    if (lastError) {
+      lastError = null;
+      log("the bot-cron lease can be taken again; scheduled bot runs resume");
     }
     if (ok !== held) {
       held = ok;

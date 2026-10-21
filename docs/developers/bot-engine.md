@@ -93,6 +93,7 @@ A bot-cron schedule (a `schedules` row whose task is `pipeline:botcron:<bot_id>`
 **Behaviour worth knowing:**
 
 - **No engine, no sweep.** The gateway skips bot-cron sweeps (and does not take the lease) while `resolvePiCli()` finds no pi engine, so an engine-less install never piles up queued jobs nobody can run.
+- **One queued run per schedule.** If a schedule comes due while its previous run is still `queued` (not yet started), it is advanced but no second job is enqueued, so a slow drain never builds a backlog of the same run.
 - **Overdue schedules fire once.** An instance that never had a ticker running fires each overdue schedule once, on the first sweep after deploy, and then moves it to its next occurrence from now. Missed runs are not replayed.
 - **A bad cron expression runs once.** An unparseable `cron_expression` still enqueues its first due run, then `next_run` becomes NULL and the schedule never ticks again.
 - **Schedules for the voice bot, or with no goal,** are advanced but enqueue nothing.
@@ -103,6 +104,8 @@ A bot-cron schedule (a `schedules` row whose task is `pipeline:botcron:<bot_id>`
 - `lease acquired, this process ticks bot-cron schedules`: logged once when the process gains the lease.
 - `lease lost, another ticker on this instance owns bot-cron schedules`: logged once each time it loses the lease.
 - `schedule #<id> (bot=<bot_id>) → enqueued job <job_id>`, then `enqueued <n> scheduled job(s)`: a schedule fired.
+- `schedule #<id> (bot=<bot_id>) previous run still queued (<job_id>), skipped`: the coalescing rule above.
+- `cannot take the bot-cron lease: <error>; scheduled bot runs are paused on this instance`: the lease could not be taken at all (for example a lock file that is not a database, or a read-only or full data dir). This is not "another ticker holds it", and no ticker runs on this process until it clears. It is logged once per distinct error, then `the bot-cron lease can be taken again; scheduled bot runs resume` on recovery.
 - `no pi engine installed, bot-cron schedules wait until one is`: gateway only, logged once until an engine appears.
 
 `node scripts/pi-bots/bot_scheduler.mjs` runs one tick by hand, without the lease, and prints `{"fired":<n>}`.
