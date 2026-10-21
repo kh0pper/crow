@@ -184,6 +184,35 @@ const confirmLine = (tool, v, lang) => (tool === "crow_calendar_add_event" ? voi
   : tool === "crow_reminder_add" ? voiceLine("routine_confirm_reminder", lang, { when: v.when, text: v.args.text })
     : voiceLine("routine_confirm_task", lang, { title: v.args.title }));
 
+/** What an ok write put on record (turn.js voice memory lastWrite): { tool, title, start }. A task's start is its due date or null. */
+const writeOf = (tool, v) => ({ tool, family: DEFINITIONS[tool].family, title: tool === "crow_reminder_add" ? v.args.text : v.args.title,
+  start: tool === "crow_calendar_add_event" ? v.args.start : tool === "crow_reminder_add" ? v.args.at : (v.args.due ?? null) });
+
+/** A record's start as the spoken {when}: an all-day date as its day; a date-time in `tz`, else in its own UTC offset. */
+function recapWhen(start, lang, tz) {
+  const date = parseDate(start);
+  if (date) return whenDay(date, lang);
+  const dt = parseDateTime(start);
+  if (!dt) return null;
+  const zone = validTz(tz);
+  return zone ? whenAt(dt.ms, lang, zone) : whenAt(dt.ms + dt.off * 60_000, lang, "UTC");
+}
+
+/**
+ * The truthful recap of the last own write ({ tool, title, start, tz? }) in `lang` (voice-lines last_write_recap, with a
+ * reminder and a task variant), or "" when it cannot be said (no title, or a calendar or reminder start it cannot read).
+ */
+export function lastWriteRecap(w, lang) {
+  const title = typeof w?.title === "string" ? w.title.trim() : "";
+  if (!title) return "";
+  const cap = title[0].toUpperCase() + title.slice(1);
+  if (w.tool === "crow_task_add") return voiceLine("last_write_recap_task", lang, { title: cap });
+  const when = recapWhen(w.start, lang, w.tz);
+  if (!when) return "";
+  if (w.tool === "crow_reminder_add") return voiceLine("last_write_recap_reminder", lang, { when, text: title });
+  return w.tool === "crow_calendar_add_event" ? voiceLine("last_write_recap", lang, { title: cap, when }) : "";
+}
+
 // ─── Definitions ───
 const DEFINITIONS = Object.freeze({
   crow_calendar_add_event: {
@@ -344,7 +373,7 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
       log(`[voice-own-tools] ${tool} not written (${String(err?.message || err).slice(0, 120)})`);
       return { ...BACKEND_ERROR };
     }
-    return { ok: true, code: "added", final: true, say: successLine(tool, v, lang) };
+    return { ok: true, code: "added", final: true, say: successLine(tool, v, lang), write: writeOf(tool, v) };
   }
 
   /** → { tools, unavailable } for one voice turn (turn.js deps.ownTools). */
@@ -399,7 +428,7 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
     const settings = normalizeVoiceSettings(bot);
     const v = validate(entry.tool, entry.args, { tz: entry.tz, lang: speak, now: now() });
     const res = v.error ? null : await perform(entry.tool, v, { db, executor, settings, lang: speak });
-    return res?.ok === true ? { say: res.say, verb: "routine_yes" } : { say: voiceLine("not_done_say", speak), verb: "routine_failed" };
+    return res?.ok === true ? { say: res.say, verb: "routine_yes", write: res.write } : { say: voiceLine("not_done_say", speak), verb: "routine_failed" };
   }
 
   /** deps.voiceActions.turnContext (synchronous): while a routine question waits, the turn says so. */

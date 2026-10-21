@@ -21,6 +21,10 @@ export const VOICE_LINES = Object.freeze({
     routine_confirm_task: "Add {title} to your tasks?",
     declined: "Okay, I won't.",
     calendar_fallback_offer: "I can't add that to a calendar here, but I can remind you {when}: {text}. Okay?",
+    // A later turn's claim about the last own write (turn.js sentence gate, PR 2.1): what is really on record.
+    last_write_recap: "{title} is on your calendar for {when}.",
+    last_write_recap_reminder: "Your reminder is set for {when}: {text}.",
+    last_write_recap_task: "{title} is on your tasks.",
   }),
   es: Object.freeze({
     cant_do_say: "Lo siento, no puedo hacer eso desde aquí: este asistente no tiene una herramienta para eso.",
@@ -37,6 +41,9 @@ export const VOICE_LINES = Object.freeze({
     routine_confirm_task: "¿Añado {title} a tus tareas?",
     declined: "Vale, no lo haré.",
     calendar_fallback_offer: "No puedo añadir eso a un calendario aquí, pero puedo recordártelo el {when}: {text}. ¿Te parece?",
+    last_write_recap: "{title} está en tu calendario para el {when}.",
+    last_write_recap_reminder: "Tu recordatorio está puesto para el {when}: {text}.",
+    last_write_recap_task: "{title} está en tus tareas.",
   }),
 });
 

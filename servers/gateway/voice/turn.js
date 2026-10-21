@@ -19,7 +19,9 @@ import { estimatePromptTokens, requestFits, choosePromptFit, dropOldestExchange 
 import { claimsAction, claimsReminder, claimsBeyondMemory, toolEffect, needsSpokenYes } from "./action-claims.js";
 import { classifyTools, phraseWords, normalizeIntentLists, listMatches } from "./tool-families.js";
 import { voiceAbilities } from "./voice-abilities.js";
-import { ROUTINE_OBJECTS, namesRoutineObjects } from "./routine-objects.js";
+import { ROUTINE_OBJECTS, ROUTINE_OBJECT_LISTS, namesRoutineObjects } from "./routine-objects.js";
+import { createVoiceMemory, VOICE_MODE_WINDOW_MS } from "./voice-memory.js";
+import { lastWriteRecap } from "./own-tools.js";
 import { CROW_VOICE_BOT_ID, normalizeVoiceSettings, isVoiceBotDef } from "../../shared/voice-bot.js";
 
 /**
@@ -150,8 +152,8 @@ const LEGACY_FORCING = Object.freeze({ named: true, required: true, engine: "leg
 const WEAKER = { named: 2, required: 1, none: 0 };
 // A step-down learned from a refused request is forgotten after this long (the server may have been replaced).
 const LEARNED_TTL_MS = 10 * 60 * 1000;
-/** How long a turn that offered (on intent) or used one of Crow's own tools keeps a vague follow-up on them (plan constant). */
-export const VOICE_MODE_WINDOW_MS = 10 * 60_000;
+// How long a turn that offered (on intent) or used one of Crow's own tools keeps a vague follow-up on them (voice-memory.js).
+export { VOICE_MODE_WINDOW_MS };
 const MEMORY_OFF = "Memory is turned off on this display. Tell the user you can't use saved memories here, then end your turn — do not call another tool.";
 /** Rides on the user message of a calendar-fallback turn (tagged: never heard, never saved). */
 const calendarFallbackNote = (names) => `[Tools] No calendar is installed here, so nothing can be added to a calendar. Offer the user a reminder at the time they asked for instead, by calling ${names.join(" or ")}. Never say it was added to a calendar.`;
@@ -194,9 +196,16 @@ export function createVoiceTurnRunner(deps) {
   const fitLogged = new Set();
   // Per model: the strongest tool_choice form the backend has not refused ("named" → "required" → "none"), with when it was learned.
   const toolChoiceMode = new Map();
-  // Tool families (opts.familiesOnIntent): what the previous turn on each display used, and which
-  // "no intent list" notes were already logged.
+  // Tool families (opts.familiesOnIntent): what the previous turn on each display used ({ set, at }: it expires after
+  // VOICE_MODE_WINDOW_MS, like every carry-over), and which "no intent list" notes were already logged.
   const lastFamilies = new Map();
+  const lastFamiliesOf = (id) => {
+    const e = lastFamilies.get(id);
+    return e && now() - e.at <= VOICE_MODE_WINDOW_MS ? e.set : null;
+  };
+  // The voice bot's per-device memory (voice-memory.js, PR 2.1): own families carried over for the window, the last
+  // own write, the last action request. Separate from lastOwn / lastAction / lastFamilies, whose meanings stay.
+  const memory = createVoiceMemory({ now });
   // deviceId → when its previous turn was offered one of Crow's own tools on intent (or used one): a follow-up
   // ("move it to 3") within VOICE_MODE_WINDOW_MS may still need one, so a withheld own tool counts toward escalating it.
   const lastOwn = new Map();
@@ -490,6 +499,8 @@ export function createVoiceTurnRunner(deps) {
     let usedFamilies = null;
     let ownOffered = false;   // an own tool was offered on intent this turn (arms lastOwn; an escalation offering every family does not)
     let actionAsked = false;
+    let voiceKind = false;        // the turn's bot is the voice bot (kind "voice"): the voice memory and the sentence gate apply
+    let ownStamp = [];            // own families this turn offered on intent (stamped into the voice memory; a carried one never is)
     const calledTools = [];       // every tool name the model called this turn (deps.voiceActions.afterTurn)
     const voiceActions = deps.voiceActions && typeof deps.voiceActions === "object" ? deps.voiceActions : null;
     /** Speak + caption a fixed line instead of a model call, and save the exchange (the plain transcript and the line). */
@@ -575,6 +586,11 @@ export function createVoiceTurnRunner(deps) {
         if (typeof fp.verb === "string" && /^[a-z_]{1,24}$/.test(fp.verb)) timings.verb = fp.verb;
         for (const ev of fp.events || []) sink.event(ev);
         if (fp.say) { sink.event({ type: "caption_delta", text: fp.say }); await say(fp.say); }
+        // A held own call confirmed by a spoken yes wrote something (own-tools.js fastPath): it is on record.
+        if (fp.write && typeof fp.write.tool === "string") {
+          memory.noteWrite(device.id, { ...fp.write, say: fp.say || "", lang: opts.lang, tz: opts.tz });
+          if (typeof fp.write.family === "string") memory.noteOwn(device.id, [fp.write.family]);
+        }
         say.end();
         // A path with nothing to say (a transport verb) leaves no exchange behind: an empty
         // assistant message would only confuse the next turn's chat template.
@@ -594,6 +610,7 @@ export function createVoiceTurnRunner(deps) {
         bot = await loadBot(db, botId);
       }
       if (!bot) { fail("no_bound_bot", false); return result; }
+      voiceKind = isVoiceBotDef(bot);
       history = convo.get(device.id);
       // First-audio budget (smoke 2026-10-04 #19: a 24.5 s silent tool loop). Counted from the turn
       // start; only answer audio stops it, so an escalation's "One moment." is followed by the fallback.
@@ -687,11 +704,19 @@ export function createVoiceTurnRunner(deps) {
       const ownIntent = [...ownLists.keys()].some((f) => listMatches(phraseWords(transcript), ownLists.get(f)));
       if (calendarFallback || (fam && ownIntent)) ownOffered = true;
       const fallbackNames = calendarFallback ? [...ownByName.values()].filter((o) => o.family === "own:reminders").map((o) => o.definition.name) : [];
-      const prevFam = calendarFallback
-        ? new Set([...(lastFamilies.get(device.id) || NO_FAMILIES), "own:reminders"])
-        : lastFamilies.get(device.id) || NO_FAMILIES;
+      const prevBase = calendarFallback
+        ? new Set([...(lastFamiliesOf(device.id) || NO_FAMILIES), "own:reminders"])
+        : lastFamiliesOf(device.id) || NO_FAMILIES;
+      if (fam && ownIntent) ownStamp = [...ownLists.keys()].filter((f) => listMatches(phraseWords(transcript), ownLists.get(f)));
+      if (calendarFallback) ownStamp.push("own:reminders");
+      // The voice bot's own families still inside the window (voice memory) are offered too: offered only, never a
+      // reason to arm the full hold, to escalate or to count as tools for the router (decided on cls0 below, as before).
+      const carried = voiceKind && fam ? [...memory.carried(device.id)].filter((f) => ownLists.has(f) && !prevBase.has(f)) : [];
+      const prevFam = carried.length ? new Set([...prevBase, ...carried]) : prevBase;
       // The classification is shared with the Bot Builder's "By voice on displays" line (tool-families.js classifyTools).
-      const cls = classifyTools({ baseTools, fam, transcript, prevFam, isExtraTool: (n) => extraByName.has(n), isMemoryTool: (n) => deps.isMemoryTool(n) });
+      const classify = (prev) => classifyTools({ baseTools, fam, transcript, prevFam: prev, isExtraTool: (n) => extraByName.has(n), isMemoryTool: (n) => deps.isMemoryTool(n) });
+      const cls = classify(prevFam);
+      const cls0 = carried.length ? classify(prevBase) : cls;
       const { famWanted, famOf, quickTools, famIds, unlisted } = cls;
       let tools = quickTools;
       let famAll = false;   // an escalated turn is offered every family
@@ -759,7 +784,9 @@ export function createVoiceTurnRunner(deps) {
       // turn can never start a model and its result does not depend on which model is resident.
       // Action turns (see ACTION_NOTE above). The add-on wrapper (crow_tools) is never in famIds: when the quick
       // model is not offered it, the assistant still has tools, and the router must know.
-      const actionTurn = actionAsked || vaCtx?.pending === true || (typeof opts.actionWhen === "function" && lastAction.has(device.id)
+      // The voice bot also keeps an action request inside the window (voice memory actionAt) for a follow-up phrase.
+      const actionTurn = actionAsked || vaCtx?.pending === true || (typeof opts.actionWhen === "function"
+        && (lastAction.has(device.id) || (voiceKind && memory.actionAt(device.id) != null))
         && typeof opts.actionFollowWhen === "function" && opts.actionFollowWhen(transcript) === true);
       // A display tool offered because a window is open (or music plays) is not what this request asks for:
       // only one whose holdText/must reads the transcript as a display request is.
@@ -768,17 +795,17 @@ export function createVoiceTurnRunner(deps) {
       // …or, with a display tool on offer (a card or a timer is up), the request names a thing the display holds
       // ("put eggs on the list", "add two minutes"): opts.displayObjectWhen (kiosk: list, timer, card, minutes).
       const displayBacks = displayAsked || (offered.size > 0 && typeof opts.displayObjectWhen === "function" && opts.displayObjectWhen(transcript) === true);
-      const wrapperWithheld = cls.wrapperWithheld;
+      const wrapperWithheld = cls0.wrapperWithheld;
       // Escalate an action request when the quick model got no family tool but the assistant has some — and no
       // display tool is on offer (a display command such as "add two minutes" stays on the quick model).
       // quickBacked ([rev2 I11]): an own tool or the hand-off tool is on offer to the quick model, which can act on it.
-      const quickBacked = quickTools.some((t) => ownByName.has(t.name) || t.name === "crow_handoff");
+      const quickBacked = cls0.quickTools.some((t) => ownByName.has(t.name) || t.name === "crow_handoff");
       // An own tool counts only when the request names a routine object (calendar, reminder, task…) or follows a
       // turn that was offered or used one; otherwise "email my landlord" would escalate on the reminder tool alone.
       const ownAt = lastOwn.get(device.id);
       const ownRecent = ownAt != null && now() - ownAt <= VOICE_MODE_WINDOW_MS;
-      const ownCounts = namesRoutineObjects(transcript).length > 0 || ownRecent || [...prevFam].some((f) => String(f).startsWith("own:"));
-      const actionWithheld = cls.actionWithheld(actionAsked, displayBacks, (t) => ownCounts || !ownByName.has(t.name)) && !quickBacked;
+      const ownCounts = namesRoutineObjects(transcript).length > 0 || ownRecent || [...prevBase].some((f) => String(f).startsWith("own:"));
+      const actionWithheld = cls0.actionWithheld(actionAsked, displayBacks, (t) => ownCounts || !ownByName.has(t.name)) && !quickBacked;
       if (actionAsked) timings.action_intent = true;
       // A routine object with no backend: no model call and no escalation (a calendar falls back to a reminder instead).
       if (noBackend) {
@@ -798,7 +825,7 @@ export function createVoiceTurnRunner(deps) {
       const noEscalate = opts.noEscalate === true || normalizeVoiceSettings(bot).escalation === "off";
       const decision = mustX?.mustRoute === "fast" || noEscalate || calendarFallback
         ? { route: "fast", reason: noEscalate ? "no-escalate" : calendarFallback ? "calendar-fallback" : "must-fast", key: bot.fast_voice_model || deps.fastKey }
-        : deps.chooseVoiceRoute(routeView, { hasTools: quickTools.length > 0 || unlisted.length > 0 || wrapperWithheld || actionWithheld, actionIntent: actionWithheld });
+        : deps.chooseVoiceRoute(routeView, { hasTools: cls0.quickTools.length > 0 || unlisted.length > 0 || wrapperWithheld || actionWithheld, actionIntent: actionWithheld });
       // A quick-model turn that will end on the no-tool can't-do below makes no adapter at all (no model is touched).
       const noToolAhead = decision.route !== "escalate" && actionAsked && !displayBacks && !quickTools.some((t) => !extraByName.has(t.name));
       let chat = noToolAhead ? null : await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
@@ -899,7 +926,6 @@ export function createVoiceTurnRunner(deps) {
       // 5. Streamed tool loop
       const scope = deps.botVoiceScope(bot);
       const policy = bot.permission_policy || {};
-      const voiceKind = isVoiceBotDef(bot);
       const shortName = (n) => String(n || "").replace(/^crow_/, "").replace(/_/g, " ");
       // → null (run it) or { code, message, neutral }: `code` goes to the log, `message` to the model;
       // neutral = the tool is simply not on this display / not offered (invisible to the router).
@@ -968,8 +994,9 @@ export function createVoiceTurnRunner(deps) {
         return refuse("needs_confirm", `Confirmation required. Tell the user: "Are you sure you want to ${describeDestructiveAction({ name: confirmName, arguments: tc.arguments }, { via })}? Say yes to proceed." Then end your turn — do not call another tool.`);
       };
 
-      // First chunk = first clause (latency lever 3); later chunks are whole sentences.
-      const chunker = createSentenceChunker((s) => say(s), { firstClause: opts.firstClause !== false });
+      // First chunk = first clause (latency lever 3); later chunks are whole sentences. On a sentence-gated turn
+      // (gateOn, below) every chunk passes the gate first: it is captioned and spoken only when it claims nothing.
+      const chunker = createSentenceChunker((s) => (gateOn ? gateChunk(s) : say(s)), { firstClause: opts.firstClause !== false });
       // Tool rounds are capped (kiosk: 3). When the cap is hit — or the model calls the same tool(s)
       // twice in a row with nothing user-visible in between (no speech, no display change) — one
       // final round runs with the SAME tool list (the prefix cache stays warm) and a stop note on
@@ -1033,7 +1060,12 @@ export function createVoiceTurnRunner(deps) {
       let actionGuard = actionTurn && !mustX && !holdEnd;
       const armGuard = () => { if (!actionGuard && !mustX && !holdEnd) { actionGuard = true; timings.action_guard = true; } };
       const ownOnOffer = tools.some((t) => ownByName.has(t.name));
-      if (ownOnOffer && (ownIntent || namesRoutineObjects(transcript).length > 0 || ownRecent)) armGuard();
+      // The full hold on an own tool: only when the transcript itself reads as one (PR 2.1 [r2 C1]). This is the one
+      // place a further reading of the words joins (Task 4's add-matcher). The voice bot no longer arms it on the own-
+      // tool window alone (ownRecent): a turn that only carries context gets the sentence gate below instead, so plain
+      // questions keep streaming. Any other bot keeps the window as a reason (it has no sentence gate).
+      const ownActionWords = ownIntent || namesRoutineObjects(transcript).length > 0;
+      if (ownOnOffer && (ownActionWords || (!voiceKind && ownRecent))) armGuard();
       const ownDone = new Map();   // name|canonical args → the result of an own call that returned ok (never run twice)
       let backed = false;          // a tool really did something this turn
       let memoryBacked = false;    // only a memory call did (a saved note is not a reminder)
@@ -1062,6 +1094,67 @@ export function createVoiceTurnRunner(deps) {
       let steppedUp = false;       // the own-tool step-up to the larger model (at most once per turn)
       const toolEscalationOn = typeof deps.toolEscalationEnabled !== "function" || deps.toolEscalationEnabled() === true;
       const heldMsgs = new Set();  // assistant messages whose text was held (unheard unless released)
+      // What is kept as said is what was heard: held text that is not heard never reaches the saved conversation.
+      // keep(m) → true keeps an assistant message as it is; any other loses its text (a tool-call message) or goes.
+      const dropHeld = (keep) => {
+        for (let i = messages.length - 1; i > messages.indexOf(userMsg); i--) {
+          const m = messages[i];
+          if (m.role !== "assistant" || keep(m)) continue;
+          if (m.tool_calls) messages[i] = { ...m, content: "" };
+          else messages.splice(i, 1);
+        }
+      };
+      // The sentence gate (PR 2.1 [r2 C2], #499): every other voice-bot turn while the voice memory holds an own entry
+      // inside the window. The text streams sentence by sentence; each one is captioned and spoken only after
+      // claimsAction() reads it. The first claim no tool backs mutes the rest (the guard is armed, so later rounds are
+      // held too) while the round finishes and its calls still run; the ending then says what is true (see the end).
+      const gateOn = voiceKind && !actionGuard && !mustX && !holdEnd && !!device?.id && memory.active(device.id);
+      let gateHit = false;         // a sentence was blocked this turn
+      let gateRound = 0;           // the round it was blocked in (that round's text keeps going through the chunker, in order)
+      let gateBlocked = "";        // the first blocked sentence (what a recap must refer to)
+      let gateHeard = "";          // the model text that passed the gate (heard and captioned)
+      let gatePending = "";        // the current sentence's part that already passed (a first clause)
+      let gateAfter = false;       // model text was heard after the block
+      let roundMuted = 0;          // characters the gate muted this round
+      const gateLines = [];        // the server's lines spoken after the block (saved after what was heard)
+      const gateRouting = () => gateOn && gateHit && gateRound === rounds;
+      const gateChunk = async (chunk) => {
+        if (gateHit && holding()) { guardHeld += chunk; roundMuted += chunk.trim().length; return; }
+        const sentence = gatePending + chunk;
+        if (!backed && (memoryBacked ? claimsBeyondMemory(sentence) : claimsAction(sentence))) {
+          if (!gateHit) {
+            gateHit = true;
+            gateBlocked = sentence;
+            timings.claim_blocked = true;
+            timings.claim_gate = "sentence";
+            log(`[voice-turn] ${device.id} bot ${bot.bot_id}: a sentence claiming an action no tool did was muted`);
+          }
+          gateRound = rounds;
+          armGuard();
+          guardHeld += chunk;
+          roundMuted += chunk.trim().length;
+          gatePending = "";
+          return;
+        }
+        gatePending = SENTENCE_END.test(`${chunk.trimEnd()} `) ? "" : sentence;
+        if (gateHit) gateAfter = true;
+        gateHeard += chunk;
+        sink.event({ type: "caption_delta", text: chunk });
+        await say(chunk);
+      };
+      // (ii) The truthful recap of the last own write, when the blocked sentence refers to it: the same object, a word
+      // of its title, or "it"/"that". "" otherwise.
+      const RECAP_OBJECT = { crow_calendar_add_event: "calendar", crow_reminder_add: "reminders", crow_task_add: "tasks" };
+      const RECAP_REFS = new Set(["it", "that", "lo", "la", "eso"]);
+      const recapFor = (text) => {
+        const w = memory.lastWrite(device.id);
+        if (!w) return "";
+        const words = phraseWords(text);
+        const obj = RECAP_OBJECT[w.tool];
+        const titleWords = phraseWords(w.title || "").filter((x) => x.length >= 3);
+        const refers = (obj && listMatches(words, ROUTINE_OBJECT_LISTS[obj])) || words.some((x) => RECAP_REFS.has(x) || titleWords.includes(x));
+        return refers ? lastWriteRecap(w, opts.lang || w.lang) : "";
+      };
       if (actionGuard) {
         timings.action_guard = true;
         if (actionable.length === 0) {
@@ -1079,6 +1172,7 @@ export function createVoiceTurnRunner(deps) {
         let content = "";
         let roundSpoken = 0;
         let roundHeld = 0;           // characters the action guard held this round
+        roundMuted = 0;
         let calls = [];
         // Until the must-run tool has succeeded, nothing the model says is captioned or spoken:
         // "I've displayed the list" is only true after the call.
@@ -1130,13 +1224,14 @@ export function createVoiceTurnRunner(deps) {
                 mark("llm_first_token_ms");
                 content += ev.text;
                 const spoken = echo.feed(toolText.feed(think.feed(ev.text)));
-                if (spoken && holding()) { guardHeld += spoken; roundHeld += spoken.trim().length; }
+                // The round the sentence gate muted keeps going through the chunker, so its text stays in order.
+                if (spoken && holding() && !gateRouting()) { guardHeld += spoken; roundHeld += spoken.trim().length; }
                 else if (spoken && defer) deferred += spoken;
                 else if (spoken && holdEnd) heldRound += spoken;
                 else if (spoken && !hold) {
                   roundText += spoken;
                   if (spoken.trim()) { roundSpoken += spoken.trim().length; spokenChars += spoken.trim().length; }
-                  sink.event({ type: "caption_delta", text: spoken });
+                  if (!gateOn) sink.event({ type: "caption_delta", text: spoken });   // gated: captioned sentence by sentence
                   await chunker.push(spoken);
                 }
               } else if (ev.type === "tool_call") {
@@ -1168,10 +1263,10 @@ export function createVoiceTurnRunner(deps) {
         const held = toolText.flush();
         if (toolText.cut) { timings.tool_text = true; content = stripToolSyntax(content); }
         const tail = (held ? echo.feed(held) : "") + echo.flush();
-        if (tail && holding()) { guardHeld += tail; roundHeld += tail.trim().length; }
+        if (tail && holding() && !gateRouting()) { guardHeld += tail; roundHeld += tail.trim().length; }
         else if (tail && !hold && !aborted() && !budgetHit) {
           if (tail.trim()) { roundSpoken += tail.trim().length; spokenChars += tail.trim().length; }
-          sink.event({ type: "caption_delta", text: tail });
+          if (!gateOn) sink.event({ type: "caption_delta", text: tail });
           await chunker.push(tail);
         }
         // What is kept as said is what was heard: an echo saved in the history invites the next one.
@@ -1184,9 +1279,11 @@ export function createVoiceTurnRunner(deps) {
           // No display call came with it: the deferred text is the answer after all.
           roundText += deferred;
           if (deferred.trim()) { roundSpoken += deferred.trim().length; spokenChars += deferred.trim().length; }
-          sink.event({ type: "caption_delta", text: deferred });
+          if (!gateOn) sink.event({ type: "caption_delta", text: deferred });
           await chunker.push(deferred);
         }
+        // A gated turn decides each round's text before its calls run: the last part of a sentence is read now.
+        if (gateOn && !aborted() && !budgetHit) await chunker.flush();
         if (finalRound) {
           // The forced answer: its text is kept, any call it still makes is ignored (never executed,
           // never saved — an unanswered tool call would break the next turn's template).
@@ -1278,6 +1375,12 @@ export function createVoiceTurnRunner(deps) {
             // heard, and only what the model says in later rounds is checked against what the tools really did.
             if (!ok || code === "needs_confirm") armGuard();
             if (ok && res.effect !== false) { backed = true; actionSent = true; }
+            // The voice bot keeps the last own write on record (voice memory lastWrite): what a later recap may say.
+            if (voiceKind && ran && ok && res.effect !== false) {
+              const a = tc.arguments && typeof tc.arguments === "object" ? tc.arguments : {};
+              const w = res.write && typeof res.write === "object" ? res.write : { title: a.title ?? a.text, start: a.start ?? a.at ?? a.due ?? null };
+              memory.noteWrite(device.id, { tool: tc.name, title: typeof w.title === "string" ? w.title : "", start: w.start ?? null, say: resSay || "", lang: opts.lang, tz: opts.tz });
+            }
             if (code === "bad_args") ownBadArgs = true;
             if (usedFamilies) usedFamilies.add(own.family);
             ownOffered = true;   // used (families on or off): arms the follow-up window
@@ -1314,13 +1417,14 @@ export function createVoiceTurnRunner(deps) {
         }
         // The budget also bounds a slow remote tool: the race stops waiting (the call itself runs on).
         let remoteResults = [];
-        if (actionGuard && remote.some((tc) => toolEffect(deps.effectiveToolName(tc) || tc.name) !== "read" && !deps.isMemoryTool(tc.name))) actionSent = true;
+        // A sentence-gated turn tracks what its tools did too: a later claim is checked against it.
+        if ((actionGuard || gateOn) && remote.some((tc) => toolEffect(deps.effectiveToolName(tc) || tc.name) !== "read" && !deps.isMemoryTool(tc.name))) actionSent = true;
         try { if (remote.length) remoteResults = await Promise.race([executor.executeToolCalls(remote), budgetP.then(() => null)]); }
         catch (err) { noteRound(); throw err; }   // the round is still in the log when a tool run throws
         (remoteResults || []).forEach((r, i) => {
           if (!remote[i]) return;
           outcome.set(remote[i], r?.isError ? "error" : "ok");
-          if (!r?.isError && actionGuard) {
+          if (!r?.isError && (actionGuard || gateOn)) {
             const eff = deps.effectiveToolName(remote[i]) || remote[i].name;
             const effect = toolEffect(eff);
             // A memory note is not a reminder; a scheduled job or notification is (crow_create_schedule…).
@@ -1380,12 +1484,14 @@ export function createVoiceTurnRunner(deps) {
             if (!ownByName.has(finalRes.name)) ownEndLead = finalRes.say;
             break;
           }
-          const spokeSentence = roundSpoken > 0 && SENTENCE_END.test(`${roundText.trim()} `);
+          // A sentence the gate muted was not heard: the server's line is.
+          const spokeSentence = !gateHit && roundSpoken > 0 && SENTENCE_END.test(`${roundText.trim()} `);
           if (!(spokeSentence && finalRes.effect)) {
             await chunker.flush();
-            sink.event({ type: "caption_delta", text: spokenChars > 0 ? ` ${finalRes.say}` : finalRes.say });
+            sink.event({ type: "caption_delta", text: (gateOn ? gateHeard.trim() : spokenChars > 0) ? ` ${finalRes.say}` : finalRes.say });
             await (budgetHit ? say.force(finalRes.say) : say(finalRes.say));
             spokenChars += finalRes.say.length;
+            if (gateHit) gateLines.push(finalRes.say);
           }
           messages.push({ role: "assistant", content: finalRes.say });
           endedFinal = true;
@@ -1416,7 +1522,7 @@ export function createVoiceTurnRunner(deps) {
           } else timings.step_up_degraded = ready.reason;
         }
         // Stuck: the same tool(s) twice in a row with no user-visible progress in either round.
-        const progress = roundSpoken > 0 || roundDisplay || roundHeld > 0;
+        const progress = roundSpoken > 0 || roundDisplay || roundHeld > 0 || roundMuted > 0;
         if (!progress && !stepped && roundSig === lastStuckSig) cut = "tool_repeat";
         lastStuckSig = progress || stepped ? null : roundSig;
         if (!cut && toolRounds >= maxRounds) cut = "tool_rounds";
@@ -1448,16 +1554,24 @@ export function createVoiceTurnRunner(deps) {
           const said = guardHeld.trim();
           let line = backed ? (spokenChars === 0 ? said : "") : said;
           const claim = !backed && !!said && (memoryBacked ? claimsBeyondMemory(said) : claimsAction(said));
-          // What is kept as said is what was heard: held text that is not heard never reaches the saved conversation.
-          const dropHeld = (keep) => {
-            for (let i = messages.length - 1; i > messages.indexOf(userMsg); i--) {
-              const m = messages[i];
-              if (m.role !== "assistant" || keep(m)) continue;
-              if (m.tool_calls) messages[i] = { ...m, content: "" };
-              else messages.splice(i, 1);
+          if (gateHit) {
+            // The sentence gate muted a claim. (i) a write backed it: the held text is released when nothing was heard
+            // after it (an own write's success line ended the turn already); an own failure or a waiting question: the
+            // own-tool ending. (ii) the recap of the last own write it refers to. (iii) the not-done line. Saved = heard
+            // (the gate's own save, after the loop).
+            if (ownFails.size > 0 || ownAsk) {
+              if (ownFails.size > 0) timings.own_failed = true;
+              line = ownEndLine(said && !claimsAction(said) ? said : "");
+            } else if (!claim) line = gateAfter ? "" : said;
+            else if (unsureBacked) line = String(opts.unsureText || UNSURE_TEXT);
+            else if (memoryBacked && claimsReminder(said)) line = String(opts.memoOnlyText || MEMO_ONLY_TEXT);
+            else {
+              const recap = recapFor(gateBlocked);
+              if (recap) timings.claim_recap = true;
+              line = recap || String(opts.notDoneText || NOT_DONE_TEXT);
             }
-          };
-          if (ownFails.size > 0 || ownAsk) {
+            if (line) gateLines.push(line);
+          } else if (ownFails.size > 0 || ownAsk) {
             // An own call failed, or a question waits for a yes (see the action guard above): held text that claims
             // nothing, the ok own calls' lines, the failure line (if any), then the question. Saved = heard.
             const claimed = !!said && claimsAction(said);
@@ -1480,7 +1594,7 @@ export function createVoiceTurnRunner(deps) {
             messages.push({ role: "assistant", content: line });
           } else if (!line && said) dropHeld((m) => !heldMsgs.has(m));
           if (line) {
-            sink.event({ type: "caption_delta", text: spokenChars > 0 ? ` ${line}` : line });
+            sink.event({ type: "caption_delta", text: (gateOn ? gateHeard.trim() : spokenChars > 0) ? ` ${line}` : line });
             await say(line);
             spokenChars += line.length;
             // The guard's line IS the answer: a cut turn (repeat / round cap) does not add the stuck line after it.
@@ -1516,6 +1630,12 @@ export function createVoiceTurnRunner(deps) {
         else if (spokenChars === 0 && !displayProgress) { await speakFallback("no_text", false); return result; }
       }
       say.end();
+      if (gateHit) {
+        // The sentence gate's save: what was heard, and nothing else (the muted text never reaches the conversation).
+        dropHeld(() => false);
+        const heard = [gateHeard.trim(), ...gateLines].filter(Boolean).join(" ");
+        if (heard) messages.push({ role: "assistant", content: heard });
+      }
       const userIdx = messages.indexOf(userMsg);
       if (userIdx >= 0) messages[userIdx] = { role: "user", content: transcript };
       convo.save(device.id, messages);
@@ -1532,13 +1652,20 @@ export function createVoiceTurnRunner(deps) {
     } finally {
       if (budgetTimer) (deps.clearTimeout || clearTimeout)(budgetTimer);
       if (opts.familiesOnIntent === true && device?.id && result.transcript) {
-        if (usedFamilies && usedFamilies.size) lastFamilies.set(device.id, usedFamilies); else lastFamilies.delete(device.id);
+        if (usedFamilies && usedFamilies.size) lastFamilies.set(device.id, { set: usedFamilies, at: now() }); else lastFamilies.delete(device.id);
       }
       if (typeof opts.actionWhen === "function" && device?.id && result.transcript) {
         if (actionAsked) lastAction.add(device.id); else lastAction.delete(device.id);
       }
       if (device?.id && result.transcript) {
         if (ownOffered || [...(usedFamilies || [])].some((f) => String(f).startsWith("own:"))) lastOwn.set(device.id, now()); else lastOwn.delete(device.id);
+      }
+      // The voice memory: own families offered on intent or used are stamped (a carried-only one never is), and an
+      // action request is kept for the window.
+      if (voiceKind && device?.id && result.transcript) {
+        const usedOwn = [...(usedFamilies || [])].filter((f) => String(f).startsWith("own:"));
+        if (ownOffered || usedOwn.length) memory.noteOwn(device.id, [...ownStamp, ...usedOwn]);
+        if (actionAsked) memory.noteAction(device.id);
       }
       timings.total_ms = now() - t0;
       if (say) timings.spoken_chars = say.chars();
