@@ -71,8 +71,23 @@ triggers certificate issuance (usually completes in <10 seconds).
 caddy_status
 ```
 
-Returns the admin API URL, number of site blocks in the Caddyfile, number
+Returns the admin API address (`unix:<path>`: the socket
+`~/.crow/caddy/run/admin.sock`), number of site blocks in the Caddyfile, number
 of routes Caddy actually loaded, listen addresses, and ACME account emails.
+An `admin_warning` means the Caddyfile's `admin` line is not Crow's socket line
+(for example the old `admin 0.0.0.0:2019`, which every container on
+`crow-federation` can reach): recreate the caddy container, whose entrypoint
+moves the old line to the socket.
+
+### The admin API
+
+Caddy's admin API can rewrite its whole configuration, so it listens only on a
+unix socket in the config folder (`run/`, mode 0700, owned by the user Crow
+runs as); there is no admin port. Crow's tools find it from `CADDY_CONFIG_DIR`.
+`CADDY_ADMIN_URL` is only for an unusual setup (`unix:/path/to.sock`, or an
+http(s) URL). Docker Desktop on macOS or Windows (not WSL) cannot share a unix
+socket through a bind mount; there, set your own `admin` line and
+`CADDY_ADMIN_URL`.
 
 ### Remove a site
 

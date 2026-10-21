@@ -8,14 +8,21 @@
 # Ports:
 #   80, 443 bind to 0.0.0.0 (required to answer public HTTPS traffic and
 #     complete Let's Encrypt HTTP-01 / TLS-ALPN-01 challenges).
-#   2019    binds to 127.0.0.1 (admin API used by the Crow MCP server for
-#     reload / status / site management — never expose this to the network).
+#   No admin port. The admin API (used by the Crow MCP server and panel for
+#     reload / status / site management) listens on a unix socket,
+#     run/admin.sock in the bind mount below. It used to listen on 0.0.0.0:2019
+#     inside the container, where every app on crow-federation could reach it
+#     and rewrite the whole config. The entrypoint makes run/ mode 0700, owned
+#     by the owner of the bind-mounted folder (the user Crow runs as), and
+#     moves an existing Caddyfile's old `admin 0.0.0.0:2019` line to the socket
+#     (backup: Caddyfile.bak-admin-tcp).
 #
 # Layout of the single bind mount (~/.crow/caddy/):
 #   Caddyfile         — user-editable config (Crow's MCP tools also read/write)
 #   data/             — ACME private keys and cert cache (Caddy drops it here
 #                       via XDG_DATA_HOME). We chmod 0700 on first init.
 #   config/           — Caddy's auto-save state (XDG_CONFIG_HOME)
+#   run/admin.sock    — the admin API socket (run/ is 0700)
 
 networks:
   crow-federation:
@@ -35,7 +42,6 @@ services:
       - "0.0.0.0:80:80"
       - "0.0.0.0:443:443"
       - "0.0.0.0:443:443/udp"     # HTTP/3 (QUIC)
-      - "127.0.0.1:2019:2019"     # admin API, host-local only
     volumes:
       - ${CADDY_CONFIG_DIR:-~/.crow/caddy}:/srv/caddy
     environment:
@@ -47,25 +53,39 @@ services:
       - -c
       - |
         set -e
+        OWNER="$$(stat -c %u:%g /srv/caddy)"
         if [ ! -f /srv/caddy/Caddyfile ]; then
           cat > /srv/caddy/Caddyfile <<CADDYFILE_EOF
         # Crow-managed Caddyfile. The global options block is required by
-        # Crow's MCP server/panel to reach the admin API from the host.
+        # Crow's MCP server/panel to reach the admin API (a unix socket) from the host.
         # Everything below is yours to edit. Run caddy_reload after edits.
         {
         	email {\$$CADDY_EMAIL}
-        	admin 0.0.0.0:2019
+        	admin unix//srv/caddy/run/admin.sock|0222
         }
         CADDYFILE_EOF
+          chown "$$OWNER" /srv/caddy/Caddyfile || echo "crow-caddy: WARN could not chown the Caddyfile to $$OWNER" >&2
+        elif grep -q '^[[:space:]]*admin 0\.0\.0\.0:2019[[:space:]]*$$' /srv/caddy/Caddyfile; then
+          [ -e /srv/caddy/Caddyfile.bak-admin-tcp ] || cp -p /srv/caddy/Caddyfile /srv/caddy/Caddyfile.bak-admin-tcp
+          sed -i 's#^\([[:space:]]*\)admin 0\.0\.0\.0:2019[[:space:]]*$$#\1admin unix//srv/caddy/run/admin.sock|0222#' /srv/caddy/Caddyfile
+          chown "$$OWNER" /srv/caddy/Caddyfile || echo "crow-caddy: WARN could not chown the Caddyfile to $$OWNER" >&2
+          echo "crow-caddy: moved the admin API from 0.0.0.0:2019 to /srv/caddy/run/admin.sock (backup: Caddyfile.bak-admin-tcp)" >&2
         fi
-        mkdir -p /srv/caddy/caddy /srv/caddy/config
+        if grep -E '^[[:space:]]*admin([[:space:]]|$$)' /srv/caddy/Caddyfile | grep -qv 'admin unix//srv/caddy/run/admin.sock|0222'; then
+          echo "crow-caddy: WARNING the Caddyfile's admin line is not Crow's socket line; a TCP admin API is reachable from every container on crow-federation, and Crow's tools expect /srv/caddy/run/admin.sock" >&2
+        fi
+        mkdir -p /srv/caddy/caddy /srv/caddy/config /srv/caddy/run
         chmod 0700 /srv/caddy/caddy 2>/dev/null || true
+        chown "$$OWNER" /srv/caddy/run || echo "crow-caddy: WARN could not chown run/ to $$OWNER; Crow's tools may not reach the admin socket" >&2
+        chmod 0700 /srv/caddy/run
+        # A SIGKILL or OOM leaves the old socket behind; never let the healthcheck see it.
+        rm -f /srv/caddy/run/admin.sock
         exec caddy run --config /srv/caddy/Caddyfile --adapter caddyfile
     init: true
     mem_limit: 256m
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:2019/config/"]
+      test: ["CMD-SHELL", "test -S /srv/caddy/run/admin.sock"]
       interval: 30s
       timeout: 10s
       retries: 5

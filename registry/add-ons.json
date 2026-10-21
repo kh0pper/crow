@@ -377,7 +377,7 @@
     {
       "id": "browser",
       "name": "Browser Automation",
-      "version": "1.3.7",
+      "version": "1.3.8",
       "description": "Stealth browser automation — navigate, fill forms, take screenshots, extract content via Chrome DevTools Protocol with VNC viewing",
       "type": "bundle",
       "author": "Crow",
@@ -479,7 +479,7 @@
     {
       "id": "caddy",
       "name": "Caddy Reverse Proxy",
-      "version": "1.0.3",
+      "version": "1.1.0",
       "description": "Reverse proxy with automatic HTTPS via Let's Encrypt (ACME). Foundation for publicly exposed or federated bundles.",
       "type": "bundle",
       "author": "Crow",
@@ -493,8 +493,15 @@
       ],
       "icon": "shield",
       "docker": {
-        "composefile": "docker-compose.yml"
+        "composefile": "docker-compose.yml",
+        "precreate": [
+          "caddy",
+          "caddy/run"
+        ]
       },
+      "refreshFiles": [
+        "docker-compose.yml"
+      ],
       "server": {
         "command": "node",
         "args": [
@@ -530,8 +537,7 @@
         },
         {
           "name": "CADDY_ADMIN_URL",
-          "description": "Caddy admin API URL (set automatically when running alongside the caddy container)",
-          "default": "http://127.0.0.1:2019",
+          "description": "Where Crow reaches Caddy's admin API. Leave empty: it is the unix socket run/admin.sock in CADDY_CONFIG_DIR. Set unix:/path/to.sock or an http(s) URL only for your own setup.",
           "required": false
         },
         {
@@ -543,11 +549,10 @@
       ],
       "ports": [
         80,
-        443,
-        2019
+        443
       ],
       "webUI": null,
-      "notes": "Ports 80/443 bind to 0.0.0.0 (required for ACME HTTP-01 and public request handling). Admin API bound to 127.0.0.1:2019 (host-local only). Caddyfile is mounted from ~/.crow/caddy/Caddyfile — edit it directly or use crow's MCP tools. ACME state stored in ~/.crow/caddy/data (mode 0700).",
+      "notes": "Ports 80/443 bind to 0.0.0.0 (required for ACME HTTP-01 and public request handling). No admin port: the admin API listens on the unix socket ~/.crow/caddy/run/admin.sock (folder mode 0700, owned by the user Crow runs as), which no other container can reach. Moving an existing install off the old 0.0.0.0:2019 admin listener takes a container recreate (docker compose up -d --force-recreate in the bundle folder); the entrypoint rewrites the old admin line and keeps Caddyfile.bak-admin-tcp. Caddyfile is mounted from ~/.crow/caddy/Caddyfile — edit it directly or use crow's MCP tools. ACME state stored in ~/.crow/caddy/data (mode 0700).",
       "official": true
     },
     {

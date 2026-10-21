@@ -29,6 +29,7 @@ import {
   appendSite,
   upsertRawSite,
   removeSite,
+  adminLineWarning,
 } from "./caddyfile.js";
 
 import {
@@ -44,48 +45,31 @@ import {
   WELLKNOWN_PATHS,
 } from "./federation-profiles.js";
 
-const CADDY_ADMIN_URL = () =>
-  (process.env.CADDY_ADMIN_URL || "http://127.0.0.1:2019").replace(/\/+$/, "");
+import { adminTarget, adminRequest } from "./admin-client.js";
+
 const CONFIG_DIR = () => resolveConfigDir(process.env.CADDY_CONFIG_DIR);
+const ADMIN = () => adminTarget({ configDir: CONFIG_DIR() });
 const REQUEST_TIMEOUT_MS = 10_000;
 
 /**
- * Call the Caddy admin API.
+ * Call the Caddy admin API (a unix socket in the config dir: see admin-client.js).
  */
 async function adminFetch(path, options = {}) {
-  const url = `${CADDY_ADMIN_URL()}${path}`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const res = await adminRequest(ADMIN(), path, {
+    method: options.method || "GET",
+    headers: { "Content-Type": "application/json", ...options.headers },
+    body: options.body,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) {
+    const msg = res.text ? ` — ${res.text.slice(0, 500)}` : "";
+    throw new Error(`Caddy admin ${res.status} ${res.statusText}${msg}`);
+  }
+  if (!res.text) return {};
   try {
-    const res = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-      headers: { "Content-Type": "application/json", ...options.headers },
-    });
-    const text = await res.text();
-    if (!res.ok) {
-      const msg = text ? ` — ${text.slice(0, 500)}` : "";
-      throw new Error(`Caddy admin ${res.status} ${res.statusText}${msg}`);
-    }
-    if (!text) return {};
-    try {
-      return JSON.parse(text);
-    } catch {
-      return { raw: text };
-    }
-  } catch (err) {
-    if (err.name === "AbortError") {
-      throw new Error(`Caddy admin request timed out: ${path}`);
-    }
-    if (err.cause?.code === "ECONNREFUSED" || err.message?.includes("ECONNREFUSED")) {
-      throw new Error(
-        `Cannot reach Caddy admin API at ${CADDY_ADMIN_URL()} — is the caddy container running? ` +
-          `Check 'docker ps' for crow-caddy and 'docker logs crow-caddy'.`,
-      );
-    }
-    throw err;
-  } finally {
-    clearTimeout(timer);
+    return JSON.parse(res.text);
+  } catch {
+    return { raw: res.text };
   }
 }
 
@@ -93,36 +77,25 @@ async function adminFetch(path, options = {}) {
  * Apply a Caddyfile source via the admin API.
  */
 async function loadCaddyfile(source) {
-  const url = `${CADDY_ADMIN_URL()}/load`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      signal: controller.signal,
-      headers: { "Content-Type": "text/caddyfile" },
-      body: source,
-    });
-    const text = await res.text();
-    if (!res.ok) {
-      throw new Error(`Caddy rejected config: ${res.status} ${res.statusText}${text ? " — " + text.slice(0, 800) : ""}`);
-    }
-    return { ok: true };
-  } catch (err) {
-    if (err.name === "AbortError") throw new Error("Caddy /load timed out");
-    if (err.cause?.code === "ECONNREFUSED" || err.message?.includes("ECONNREFUSED")) {
-      throw new Error(`Cannot reach Caddy admin API at ${CADDY_ADMIN_URL()}`);
-    }
-    throw err;
-  } finally {
-    clearTimeout(timer);
+  const res = await adminRequest(ADMIN(), "/load", {
+    method: "POST",
+    headers: { "Content-Type": "text/caddyfile" },
+    body: source,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) {
+    throw new Error(`Caddy rejected config: ${res.status} ${res.statusText}${res.text ? " — " + res.text.slice(0, 800) : ""}`);
   }
+  return { ok: true };
 }
 
-function domainLike(s) {
-  // Permissive: Caddy accepts hostnames, wildcards, IP:port, path matchers.
-  // We just block whitespace/newlines/braces to prevent caddyfile injection.
-  return !/[\s{}\n\r]/.test(s);
+/**
+ * A site address: an allowlist (hostnames, wildcards, :port, [IPv6], a scheme and a path),
+ * so no quote, #, $, |, backslash, brace or whitespace can reach the Caddyfile and start a
+ * comment, a placeholder or another token (queue item 26f).
+ */
+export function domainLike(s) {
+  return typeof s === "string" && s.length > 0 && s.length <= 253 && /^[A-Za-z0-9.*:_\-[\]/]+$/.test(s) && s.toLowerCase() !== "import";
 }
 
 /**
@@ -237,7 +210,7 @@ export function createCaddyServer(options = {}) {
           content: [{
             type: "text",
             text: JSON.stringify({
-              admin_api: CADDY_ADMIN_URL(),
+              admin_api: ADMIN().label,
               reachable: true,
               caddyfile_path: caddyfilePath(CONFIG_DIR()),
               sites_in_caddyfile: siteCount,
@@ -245,6 +218,7 @@ export function createCaddyServer(options = {}) {
               listen: Array.from(listenAddrs),
               routes_loaded: routeCount,
               acme_emails: Array.from(acmeEmails),
+              ...(adminLineWarning(caddyfile) ? { admin_warning: adminLineWarning(caddyfile) } : {}),
             }, null, 2),
           }],
         };
@@ -320,14 +294,14 @@ export function createCaddyServer(options = {}) {
     "caddy_add_site",
     "Add a reverse-proxy site block to the Caddyfile and reload. For anything beyond `reverse_proxy <upstream>`, edit the Caddyfile directly and call caddy_reload.",
     {
-      domain: z.string().min(1).max(253).describe("Site address (e.g., example.com, *.example.com, :8080). Must not contain whitespace or braces."),
+      domain: z.string().min(1).max(253).describe("Site address (e.g., example.com, *.example.com, :8080): letters, digits and . - _ * : [ ] / only."),
       upstream: z.string().min(1).max(500).describe("Reverse-proxy upstream: a container on Caddy's network crow-federation, as name:port (e.g., crow-gotosocial:8080). Never a loopback address (that is the Caddy container itself) or port 2019."),
       extra_directives: z.string().max(5000).optional().describe(`Optional extra directives for the site block, one per line (no leading indent), no braces or comments. Only: ${[...EXTRA_DIRECTIVES].join(", ")}. Anything else (another proxy, a nested block, import, admin): edit the Caddyfile by hand and call caddy_reload.`),
     },
     async ({ domain, upstream, extra_directives }) => {
       try {
         if (!domainLike(domain)) {
-          return { content: [{ type: "text", text: "Error: domain contains disallowed characters (whitespace, braces, or newlines)." }] };
+          return { content: [{ type: "text", text: "Error: domain may contain only letters, digits and . - _ * : [ ] /." }] };
         }
         {
           const bad = await upstreamsProblem([["upstream", upstream]]);
@@ -410,7 +384,7 @@ export function createCaddyServer(options = {}) {
     async ({ domain, upstream, profile, backend_upstream, wellknown }) => {
       try {
         if (!domainLike(domain)) {
-          return { content: [{ type: "text", text: "Error: domain contains disallowed characters (whitespace, braces, or newlines)." }] };
+          return { content: [{ type: "text", text: "Error: domain may contain only letters, digits and . - _ * : [ ] /." }] };
         }
         if (!domainLike(upstream)) {
           return { content: [{ type: "text", text: `Error: upstream: ${upstreamProblem(upstream) || "disallowed characters"}.` }] };
@@ -492,7 +466,7 @@ export function createCaddyServer(options = {}) {
     async ({ domain, kind, opts, body_json }) => {
       try {
         if (!domainLike(domain)) {
-          return { content: [{ type: "text", text: "Error: domain contains disallowed characters." }] };
+          return { content: [{ type: "text", text: "Error: domain may contain only letters, digits and . - _ * : [ ] /." }] };
         }
         const path = WELLKNOWN_PATHS[kind];
         let jsonBody;
@@ -567,7 +541,7 @@ export function createCaddyServer(options = {}) {
     async ({ domain, upstream_8448 }) => {
       try {
         if (!domainLike(domain)) {
-          return { content: [{ type: "text", text: "Error: domain contains disallowed characters." }] };
+          return { content: [{ type: "text", text: "Error: domain may contain only letters, digits and . - _ * : [ ] /." }] };
         }
         {
           const bad = await upstreamsProblem([["upstream_8448", upstream_8448]]);

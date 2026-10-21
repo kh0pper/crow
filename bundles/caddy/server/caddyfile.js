@@ -30,12 +30,31 @@ export function caddyfilePath(configDir) {
   return join(configDir, "Caddyfile");
 }
 
+// The admin API listens on a unix socket in the bind-mounted config dir
+// (<config dir>/run/admin.sock on the host), never on a TCP port another container
+// could reach. 0222: connecting needs write; the 0700 run/ folder is what limits it
+// to the host user (and root).
+export const ADMIN_LINE = "admin unix//srv/caddy/run/admin.sock|0222";
+
+/**
+ * Why the Caddyfile's admin listener is not Crow's socket, or null. A TCP admin line
+ * (the old `admin 0.0.0.0:2019`, a hand edit) is reachable from every container on
+ * crow-federation and can rewrite Caddy's whole config.
+ */
+export function adminLineWarning(source) {
+  const lines = String(source || "").split(/\r?\n/).map((l) => l.trim()).filter((l) => /^admin(\s|$)/.test(l));
+  if (!lines.length) return String(source || "").trim() ? "the Caddyfile has no admin line: Caddy listens on its default localhost:2019 inside the container, and Crow's tools expect the socket (" + ADMIN_LINE + ")" : null;
+  const other = lines.find((l) => l !== ADMIN_LINE);
+  if (!other) return null;
+  return `the Caddyfile's admin line is "${other.slice(0, 80)}", not Crow's socket line (${ADMIN_LINE}): a TCP admin API is reachable from every container on crow-federation. Recreate the caddy container (its entrypoint moves the old 0.0.0.0:2019 line), or edit the global options block.`;
+}
+
 export const DEFAULT_CADDYFILE = `# Crow-managed Caddyfile. The global options block below is required by
-# Crow's MCP server and panel to reach the admin API from the host.
+# Crow's MCP server and panel to reach the admin API (a unix socket) from the host.
 # Everything below is yours to edit. Run caddy_reload after manual edits.
 {
 \temail {$CADDY_EMAIL}
-\tadmin 0.0.0.0:2019
+\t${ADMIN_LINE}
 }
 `;
 
@@ -50,6 +69,10 @@ export function ensureConfigDir(configDir) {
   const cfgDir = join(configDir, "config");
   if (!existsSync(cfgDir)) {
     mkdirSync(cfgDir, { recursive: true });
+  }
+  const runDir = join(configDir, "run");
+  if (!existsSync(runDir)) {
+    mkdirSync(runDir, { recursive: true, mode: 0o700 });
   }
   const p = caddyfilePath(configDir);
   if (!existsSync(p)) {

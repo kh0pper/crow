@@ -35,7 +35,7 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 | 587 | — | correo submission | reservado (correo, Fase 2) |
 | 993 | — | correo IMAPS | reservado (correo, Fase 2) |
 | 2222 | — | (evitar: puerto sshd anti-escaneo común en hosts) | evitar |
-| 2019 | 127.0.0.1 | API de administración de Caddy (local del host) | MVP PR 0.5 |
+| 2019 | — | (retirado: la API de administración de Caddy es un socket unix, ~/.crow/caddy/run/admin.sock; mantener libre) | retirado |
 | 2223 | 127.0.0.1 | gitea (SSH) | MVP PR 5 |
 | 2224 | 127.0.0.1 | forgejo (SSH) | MVP PR 5 |
 | 2283 | 127.0.0.1 | immich (existente — verificar en el compose) | existente |
