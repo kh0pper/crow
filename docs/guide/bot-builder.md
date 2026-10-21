@@ -129,6 +129,10 @@ A bot that needs you to choose between a few options can ask with a **decision c
 
 **No repeats, no floods.** A card whose `fingerprint` matches one that is still open is not created again; the open card is returned instead (`deduped: true`). The same holds while a chosen option's snooze is running. A bot gets at most **5 open decision cards per batch**; a sixth is refused (`batch_full`). Asking never pushes a notification: the bot calls `board_notify_decisions` once at the end of the batch for one grouped push, and each card is pushed at most once however often that is called.
 
+**Per caller.** Batches and fingerprints belong to whoever asked: two bots can use the same batch name or fingerprint without seeing each other's cards, and a bot can only notify cards it asked itself. A push goes out once per batch, while that batch's notified cards are still open; later cards added to it appear on the board only. Each caller gets at most **3 pushes per day (UTC)**; a fourth is refused (`push_limit`, 429).
+
+**Creating a card for a bot.** `board_create_item` accepts `assigned_bot` for cards (not tracker items). The bot must exist, be enabled and not be the voice bot, or the call is refused. The new card is **gated** by default, so it waits for your plan approval.
+
 ## Permissions and safety
 
 Every agent carries a permission policy that governs what it may do without asking:

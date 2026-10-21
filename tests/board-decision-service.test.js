@@ -730,3 +730,64 @@ test("notifyBatch: a caller with no cards under that name pushes nothing; sessio
     assert.equal(n.calls.length, 3);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Final review fixes
+// ---------------------------------------------------------------------------
+
+test("fingerprints are per asker: two bots with the same fingerprint each get their own card", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const a = await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "same", batch: "x" }) }, BOT);
+    const b = await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "same", batch: "x", question: "Other wording?" }) }, BOT2);
+    assert.notEqual(a.id, b.id);
+    assert.equal(b.deduped, false);
+    assert.equal((await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "same", batch: "x" }) }, BOT)).deduped, true);
+    assert.equal(dataOf(await getCard(tdb, b.id)).decision.question, "Other wording?");
+  });
+});
+
+test("snooze is per asker too", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const t0 = Date.parse("2026-03-10T12:00:00Z");
+    const a = await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "sn" }) }, BOT, { now: t0 });
+    await decideOption(tdb, cdb, a.id, { index: 1 }, HUMAN, { isEnabledBot: yes, now: t0 }); // "Not now", snooze 7
+    assert.equal((await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "sn" }) }, BOT, { now: t0 + 1000 })).deduped, true);
+    assert.equal((await askDecision(tdb, cdb, { projectId: 1, decision: decision({ fingerprint: "sn" }) }, BOT2, { now: t0 + 1000 })).deduped, false);
+  });
+});
+
+test("notifyBatch: a disabled notification type releases the claims, uses no cap slot and reports notifications_off", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const a = await askDecision(tdb, cdb, { projectId: 1, decision: decision() }, BOT);
+    const off = async () => null;
+    for (let i = 0; i < 4; i++) {
+      assert.deepEqual(await notifyBatch(tdb, cdb, "batch-1", { createNotification: off, actor: BOT }), { pushed: false, count: 0, reason: "notifications_off" });
+    }
+    const d = dataOf(await getCard(tdb, a.id)).decision;
+    assert.equal(d.notified_at, undefined);
+    assert.equal(d.notified_by, undefined);
+    assert.equal(d.notify_stamp, undefined);
+    assert.deepEqual(await notifyBatch(tdb, cdb, "batch-1", fakeNotifier()), { pushed: true, count: 1 });
+  });
+});
+
+test("notifyBatch expires overdue decisions first, so they are not pushed", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const t0 = Date.parse("2026-03-10T12:00:00Z");
+    const a = await askDecision(tdb, cdb, { projectId: 1, decision: decision({ expires: "2026-03-11" }) }, BOT, { now: t0 });
+    const n = fakeNotifier();
+    assert.deepEqual(await notifyBatch(tdb, cdb, "batch-1", { ...n, now: Date.parse("2026-03-13T00:00:00Z") }), { pushed: false, count: 0 });
+    assert.equal(n.calls.length, 0);
+    assert.ok(dataOf(await getCard(tdb, a.id)).decision.expired_at, "expired by the notify call");
+  });
+});
+
+test("decideOption: if the follow-up card cannot be created, the decision is still audited and the error propagates", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const a = await askDecision(tdb, cdb, { projectId: 1, decision: withFollowUp() }, BOT);
+    await tdb.execute("CREATE TRIGGER boom BEFORE INSERT ON tasks_items WHEN NEW.title='Apply the fix' BEGIN SELECT RAISE(ABORT,'boom'); END");
+    await assert.rejects(decideOption(tdb, cdb, a.id, { index: 0 }, HUMAN, { isEnabledBot: yes }), /boom/);
+    assert.ok(dataOf(await getCard(tdb, a.id)).decision.chosen, "chosen was written");
+    assert.ok((await verbs(tdb, a.id)).includes("decision"), "audit row exists");
+  });
+});

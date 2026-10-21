@@ -2176,6 +2176,10 @@ export const translations = {
   "botboard.decision.chosen": { en: "Chosen:", es: "Elegida:" },
   "botboard.decision.followUp": { en: "Follow-up card", es: "Tarjeta de seguimiento" },
   "botboard.decision.expired": { en: "This decision expired without an answer.", es: "Esta decisi\u00f3n venci\u00f3 sin respuesta." },
+  "botboard.decision.errAlreadyDecided": { en: "This decision was already answered.", es: "Esta decisi\u00f3n ya fue respondida." },
+  "botboard.decision.errExpired": { en: "This decision has expired.", es: "Esta decisi\u00f3n ya venci\u00f3." },
+  "botboard.decision.errClosed": { en: "This card is closed.", es: "Esta tarjeta est\u00e1 cerrada." },
+  "botboard.decision.errBadOption": { en: "That answer is not valid. Pick an option, or write 1-2000 characters for Other.", es: "Esa respuesta no es v\u00e1lida. Elige una opci\u00f3n, o escribe de 1 a 2000 caracteres en Otra." },
 
   // ─── Projects Panel (W3-4) ───
   "projects.confirmRevoke": { en: "Revoke {who}?", es: "¿Revocar a {who}?" },
