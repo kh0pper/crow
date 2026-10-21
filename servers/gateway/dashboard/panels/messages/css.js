@@ -771,7 +771,7 @@ export function messagesCSS() {
   /* === Bot Directory Browse Entry + Modal === */
   .msg-browse-bots { padding:8px 12px; cursor:pointer; font-size:0.8rem; color:var(--crow-text-muted); border-bottom:1px solid var(--crow-border); }
   .msg-browse-cta { color:var(--crow-accent); }
-  .bot-dir-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:200; }
+  .bot-dir-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:1200; }
   .bot-dir-modal.visible { display:flex; align-items:center; justify-content:center; }
   .bot-dir-modal-card { background:var(--crow-bg-elevated); border:1px solid var(--crow-border); border-radius:10px; width:min(560px,92vw); max-height:80vh; overflow:auto; padding:16px; }
   .bot-dir-modal-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }

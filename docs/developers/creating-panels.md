@@ -154,6 +154,20 @@ window.crowPlayer.queue([
 
 See [Platform Capabilities](/developers/platform-capabilities) for the full API reference.
 
+#### Staying clear of the bar, and covering it
+
+The bar is fixed to the bottom of the page at `z-index: 1000`. It comes late in the page, so at an equal z-index it paints over your layer. Use this scale (`Z` in `servers/gateway/dashboard/shared/player.js`):
+
+| z-index | What |
+|---|---|
+| below 1000 | In-page layers. One that should stay clear of the bar ends at its top: `bottom: var(--crow-player-h, 0px)`. |
+| 1000 | The player bar. |
+| 1090 / 1100 | The phone sidebar's backdrop and drawer. |
+| 1200 | Modals, sheets and their backdrops. |
+| 9999 and up | Toasts and system overlays. |
+
+`--crow-player-h` is the bar's height while it shows, else `0px`. A full-screen modal or backdrop must use 1200 (`tests/dashboard-overlay-z-index.test.js` fails on one at or below the bar). On a phone the bar hides while a text field has focus and the on-screen keyboard is open; `--crow-player-h` drops to `0px` then and the audio keeps playing.
+
 ## Example: Memory Stats Panel
 
 A panel that shows memory storage statistics:

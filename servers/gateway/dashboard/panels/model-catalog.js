@@ -458,7 +458,7 @@ function panelStyles() {
 /* Delete-confirmation modal */
 #mcat-modal-overlay {
   display:none; position:fixed; top:0; left:0; width:100%; height:100%;
-  background:rgba(0,0,0,0.6); z-index:1000; align-items:center; justify-content:center;
+  background:rgba(0,0,0,0.6); z-index:1200; align-items:center; justify-content:center;
   backdrop-filter:blur(4px); -webkit-backdrop-filter:blur(4px);
 }
 #mcat-modal-content {

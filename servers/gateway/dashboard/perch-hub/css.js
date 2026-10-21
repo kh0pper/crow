@@ -750,7 +750,7 @@ font-size:13.5px;cursor:pointer;min-height:44px}
    verified live at both breakpoints — a transformed ancestor would make
    "fixed" resolve against it instead). The [hidden] rule must outrank the
    display:flex on the same id selector, hence the attribute on an id. */
-#perch-browse-modal{position:fixed;inset:0;z-index:60;background:rgba(10,18,24,.45);
+#perch-browse-modal{position:fixed;inset:0;z-index:1200;background:rgba(10,18,24,.45);
 display:flex;align-items:center;justify-content:center;padding:16px}
 #perch-browse-modal[hidden]{display:none}
 #perch-hub-root .browse-box{background:var(--card);border:1px solid var(--line);border-radius:14px;

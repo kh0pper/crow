@@ -30,6 +30,19 @@ export const KIOSK_OWNER_KEY = "crow-kiosk-bar-owner";
 export const KIOSK_STALL_MS = 15000;
 
 /**
+ * The dashboard's stacking scale (2026-10-20). The bar is data-turbo-permanent and comes late in the
+ * DOM, so at an EQUAL z-index it paints over a layer: everything that covers the page sits ABOVE it.
+ *   below 1000  in-page layers. One that must stay clear of the bar ends at its top
+ *               (bottom: var(--crow-player-h,0px)): Perch's artifact pane, the Bot Board drawer and sheet.
+ *   1000        the player bar.
+ *   1090 / 1100 the phone sidebar's backdrop and drawer.
+ *   1200        modals, sheets and their backdrops (confirmations, pickers, Give panels).
+ *   9999 and up toasts, the Talk to Crow overlay, the incoming-call toast.
+ * Guard: tests/dashboard-overlay-z-index.test.js scans every full-screen fixed layer.
+ */
+export const Z = Object.freeze({ playerBar: 1000, phoneDrawer: 1100, modal: 1200, toast: 9999 });
+
+/**
  * The bar's reserve (2026-10-20; one copy, run by playerBarJs on every page that carries the bar — the
  * dashboard layout and the player shell). --crow-player-h on <html> is the bar's height while it shows,
  * else 0px; layouts reserve through var(--crow-player-h,0px) only (shared/layout.js app shells and
@@ -53,18 +66,52 @@ export const PLAYER_RESERVE_JS = `(function () {
     set = window.__crowPlayerReserve = function () {
       var root = document.documentElement;
       var bar = document.getElementById('crow-player-bar');
-      var h = ((bar && bar.style.display !== 'none') ? (bar.offsetHeight || 0) : 0) + 'px';
+      var h = ((bar && bar.style.display !== 'none' && !bar.hasAttribute('data-crow-kb-hidden')) ? (bar.offsetHeight || 0) : 0) + 'px';
       if (root.style.getPropertyValue('--crow-player-h') === h) return;
       var tr = document.getElementById('perch-transcript');
       var pinned = !!tr && tr.scrollHeight - tr.scrollTop - tr.clientHeight <= 2;
       root.style.setProperty('--crow-player-h', h);
       if (pinned) tr.scrollTop = tr.scrollHeight;
     };
-    window.addEventListener('resize', function () { set(); });
+    // Keyboard rule (queue item 21): on a touch screen, while a text field has focus AND the on-screen
+    // keyboard is up, the bar hides and the reserve drops to 0px, so the composer gets the bar's room
+    // (the Android app's WebView shrinks to the keyboard's top; the bar sat ~60 px above the composer).
+    // "Keyboard up" = the viewport is over 150 px shorter than the tallest seen at this width (the app
+    // shrinks innerHeight; a browser may shrink only the visual viewport, x scale so a zoom does not
+    // count). Back on blur or when the keyboard closes. Only an attribute on the bar: the player's own
+    // show/hide state is untouched and the audio never pauses. A mouse (desktop) never hides it.
+    var kbFull = 0, kbW = -1;
+    var kb = function () {
+      var bar = document.getElementById('crow-player-bar');
+      if (!bar) return;
+      var vv = window.visualViewport;
+      var h = window.innerHeight;
+      if (vv && vv.height) h = Math.min(h, vv.height * (vv.scale || 1));
+      if (window.innerWidth !== kbW) { kbW = window.innerWidth; kbFull = h; } else if (h > kbFull) kbFull = h;
+      var a = document.activeElement, typing = false;
+      if (a && !a.readOnly && !a.disabled) {
+        var tag = a.tagName;
+        typing = !!a.isContentEditable || tag === 'TEXTAREA' ||
+          (tag === 'INPUT' && /^(text|search|email|url|tel|password|number)$/.test(a.type || 'text'));
+      }
+      var coarse = false;
+      try { coarse = window.matchMedia('(pointer: coarse)').matches; } catch (e) {}
+      var hide = coarse && typing && kbFull - h > 150;
+      if (hide === bar.hasAttribute('data-crow-kb-hidden')) return;
+      if (hide) bar.setAttribute('data-crow-kb-hidden', '1'); else bar.removeAttribute('data-crow-kb-hidden');
+      set();
+    };
+    // focusout fires before the next element gets focus: wait a tick so moving between two fields
+    // does not flash the bar.
+    document.addEventListener('focusin', function () { kb(); });
+    document.addEventListener('focusout', function () { setTimeout(kb, 0); });
+    if (window.visualViewport) window.visualViewport.addEventListener('resize', function () { kb(); });
+    window.addEventListener('resize', function () { kb(); set(); });
     // Once per window, like resize: a Turbo visit to a page WITHOUT the bar (the login page after a
     // session expiry, KB public pages) runs no copy of this script, so nothing else would drop the
     // variable back to 0px there when ResizeObserver is missing.
-    document.addEventListener('turbo:load', function () { set(); });
+    document.addEventListener('turbo:load', function () { kb(); set(); });
+    kb();
   }
   var bar = document.getElementById('crow-player-bar');
   // A Turbo visit between two bar pages runs this while Turbo holds the permanent bar out of the page:
@@ -82,8 +129,8 @@ export const PLAYER_RESERVE_JS = `(function () {
 })();`;
 
 export function playerBarHtml(lang) {
-  return `<style>@media(max-width:768px){#crow-player-bar{left:0!important}}</style>
-<div id="crow-player-bar" data-turbo-permanent style="display:none;position:fixed;bottom:0;left:var(--crow-sidebar-width,240px);right:0;background:var(--crow-bg-surface);border-top:2px solid var(--crow-accent);z-index:1000;padding:0 0 env(safe-area-inset-bottom,0px);transition:left 0.2s">
+  return `<style>@media(max-width:768px){#crow-player-bar{left:0!important}}#crow-player-bar[data-crow-kb-hidden]{display:none!important}</style>
+<div id="crow-player-bar" data-turbo-permanent style="display:none;position:fixed;bottom:0;left:var(--crow-sidebar-width,240px);right:0;background:var(--crow-bg-surface);border-top:2px solid var(--crow-accent);z-index:${Z.playerBar};padding:0 0 env(safe-area-inset-bottom,0px);transition:left 0.2s">
   <div style="display:flex;align-items:center;gap:0.5rem;padding:0.4rem 1rem">
     <button id="crow-player-prev" onclick="window.crowPlayer.prev()" title="${t("player.previous", lang)}" style="background:none;border:none;color:var(--crow-text-muted);cursor:pointer;font-size:0.9rem;padding:0.2rem;display:none">&#9198;</button>
     <button id="crow-player-toggle" onclick="window.crowPlayer.toggle()" title="${t("player.playPause", lang)}" style="background:var(--crow-accent);color:var(--crow-accent-contrast);border:none;border-radius:50%;width:32px;height:32px;cursor:pointer;font-size:1rem;display:flex;align-items:center;justify-content:center;flex-shrink:0">&#9654;</button>
