@@ -1240,11 +1240,45 @@ export async function composeOwnershipCheck(bundleId) {
   return composeOwnership(bundleId, join(BUNDLES_DIR, bundleId), getInstalledFirstManifest(bundleId));
 }
 
-/** Run a docker compose command with the detected compose variant */
+/**
+ * Run a docker compose command with the detected compose variant. `extraEnv` (teardown
+ * only, see runComposeTeardown) is merged AFTER the allowlist: Compose ranks the shell env
+ * above the .env file, so it wins over a blank line there.
+ */
 async function runCompose(composeArgs, opts = {}) {
   if (_composeRunnerForTest) return _composeRunnerForTest(composeArgs, opts);
   const compose = await getComposeCmd();
-  return run(compose.cmd, [...compose.prefix, ...composeArgs], { ...opts, env: composeEnv(opts.env) });
+  const { extraEnv, ...rest } = opts;
+  return run(compose.cmd, [...compose.prefix, ...composeArgs], { ...rest, env: { ...composeEnv(opts.env), ...(extraEnv || {}) } });
+}
+
+const TEARDOWN_DUMMY = "crow-teardown-unset";
+/**
+ * `down` / `stop` for an installed bundle. A `${KEY:?…}` whose KEY is blank or missing in
+ * the bundle's .env makes EVERY compose command fail ("required variable KEY is missing a
+ * value"), teardown included — and an uninstall that cannot `down` would orphan running
+ * containers. Retry once with a throwaway value for each such key: `down`/`stop` never
+ * use those values, so it cannot reach a container. Keys set in .env (or by Crow's own
+ * compose env) are never overridden. Never used for `up`/`pull`/`config`: those keep
+ * failing loudly.
+ */
+async function runComposeTeardown(args, { cwd, composeRel = "docker-compose.yml" }) {
+  try {
+    return await runCompose(args, { cwd });
+  } catch (err) {
+    if (!/required variable \w+ is missing a value/.test(`${err?.stderr || ""}\n${err?.message || ""}`)) throw err;
+    let text;
+    try { text = readFileSync(join(cwd, composeRel), "utf8"); } catch { throw err; }
+    let envVars = {};
+    try { envVars = parseEnvText(readFileSync(join(cwd, dirname(composeRel), ".env"), "utf8")); } catch { /* no .env: every hard-fail key is blank */ }
+    const base = composeEnv();
+    const extraEnv = {};
+    for (const k of hardFailComposeKeys(text)) {
+      if (!nonBlankEnv(envVars[k]) && !nonBlankEnv(base[k])) extraEnv[k] = TEARDOWN_DUMMY;
+    }
+    if (Object.keys(extraEnv).length === 0) throw err;
+    return runCompose(args, { cwd, extraEnv });
+  }
 }
 
 /**
@@ -2246,10 +2280,20 @@ export function installBlockingEnvKeys(bundleId, manifest = getManifest(bundleId
     .map((v) => v.name);
 }
 
-/** installBlockingEnvKeys minus those the request supplies non-blank. */
+/**
+ * installBlockingEnvKeys minus those the request supplies non-blank, or that an earlier
+ * install's .env (an in-place reinstall: the folder is still there) already holds. The
+ * install form does not pre-fill those, and the reinstall keeps the .env's lines.
+ */
 export function missingInstallEnv(bundleId, envVars, manifest = getManifest(bundleId)) {
   const provided = envVars && typeof envVars === "object" ? envVars : {};
-  return installBlockingEnvKeys(bundleId, manifest).filter((k) => !nonBlankEnv(provided[k]));
+  const blocking = installBlockingEnvKeys(bundleId, manifest);
+  let prior = {};
+  if (blocking.length > 0) {
+    try { prior = parseEnvText(readFileSync(join(BUNDLES_DIR, bundleId, ".env"), "utf8")); } catch { /* no earlier install */ }
+  }
+  const kept = (k) => nonBlankEnv(prior[k]) && !isPlaceholderValue(prior[k]);
+  return blocking.filter((k) => !nonBlankEnv(provided[k]) && !kept(k));
 }
 
 /**
@@ -2618,7 +2662,8 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     // The earlier install's values: one the request repeats is not a new choice (the .env
     // may hold a value something other than the owner wrote), so it is never granted.
     let priorEnvValues = {};
-    if (priorInstallEnv) { try { priorEnvValues = parseEnvText(readFileSync(join(destDir, ".env"), "utf8")); } catch { /* unreadable: nothing excluded beyond the rest */ } }
+    let priorEnvText = null;
+    if (priorInstallEnv) { try { priorEnvText = readFileSync(join(destDir, ".env"), "utf8"); priorEnvValues = parseEnvText(priorEnvText); } catch { /* unreadable: nothing excluded beyond the rest */ } }
     // The INSTALLED compose, read before the copy replaces it: a pre-generation install whose
     // .env left a generated key blank ran on that compose's `${KEY:-fallback}`, and the repo
     // copy may no longer carry it (queue item 30d: minio's is `:?` now).
@@ -2749,6 +2794,10 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         else if (existsSync(exP)) { baseText = scrubPlaceholderLines(readFileSync(exP, "utf8")); baseIsExample = true; }
       } catch { /* unreadable base: fall back to provided values only */ }
       if (baseText !== null) installEnv = { ...parseEnvText(baseText), ...writeEnv };
+    } else if (priorEnvText !== null) {
+      // An in-place reinstall keeps the earlier .env's lines (values the form did not ask
+      // for again, see missingInstallEnv); only the typed keys are set on top.
+      baseText = priorEnvText;
     }
     // Keychain FIRST (review C5, plan P7): a generated token's plaintext must be safely in
     // the keychain before its hash reaches .env or the retained copy; if that save fails,
@@ -3402,7 +3451,7 @@ export default function bundlesRouter() {
     }
     // The keys the install modal must gate on — the server's own list, so the
     // client can never disagree with validateInstall's 400.
-    const installRequired = installBlockingEnvKeys(bundleId, manifest);
+    const installRequired = missingInstallEnv(bundleId, {}, manifest);
     if (!manifestRequiresConsent(manifest)) {
       return res.json({ required: false, install_required: installRequired });
     }
@@ -3677,11 +3726,18 @@ export default function bundlesRouter() {
               const downArgs = ["down", "--remove-orphans"];
               if (delete_data) downArgs.push("-v");
               try {
-                await runCompose(downArgs, { cwd: bundleDir });
+                await runComposeTeardown(downArgs, { cwd: bundleDir });
                 if (delete_data) volumesRemoved = true;
                 appendLog(job, delete_data ? "Containers stopped, volumes removed" : "Containers stopped (data preserved)");
               } catch (err) {
                 appendLog(job, `Warning: docker compose down: ${err.message}`);
+                // Removing the folder now would leave running containers with no compose
+                // file to stop them from: keep the extension installed instead.
+                if (await composeServiceRunning(bundleDir)) {
+                  appendLog(job, "Containers are still running and could not be stopped; the extension was left installed so you can stop it");
+                  finishJob(job, "failed");
+                  return;
+                }
               }
             }
           }
@@ -3922,7 +3978,7 @@ export default function bundlesRouter() {
         if (req?.body?.recreate === true) upArgs.push("--force-recreate");
         await runCompose(upArgs, { cwd: bundleDir });
       } else if (action === "stop") {
-        await runCompose(["stop"], { cwd: bundleDir });
+        await runComposeTeardown(["stop"], { cwd: bundleDir });
       } else {
         return res.status(400).json({ error: `unsupported action: ${action}` });
       }
