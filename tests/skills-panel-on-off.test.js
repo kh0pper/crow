@@ -173,3 +173,16 @@ test("rows show who uses a skill", async () => {
   const es = await call({ lang: "es" });
   assert.match(row(es.body, "household-notes"), /La usan 2 bots/);
 });
+
+test("a Design kit skill on a kit-less Crow keeps its switch and says where it still loads (review I1)", async () => {
+  setup();
+  writeFileSync(join(SKILLS, "design-frontend.md"), "# Design frontend\n");
+  const list = await call();
+  const r = row(list.body, "design-frontend");
+  assert.match(r, /Needs the Design kit/);
+  assert.match(r, /Chat bots skip it; voice and scheduled runs still load it if a bot selects it\./);
+  assert.match(sw(list.body, "design-frontend"), /aria-checked="true"/);
+  const es = await call({ lang: "es" });
+  assert.match(row(es.body, "design-frontend"), /Los bots de chat la omiten/);
+  rmSync(join(SKILLS, "design-frontend.md"));
+});

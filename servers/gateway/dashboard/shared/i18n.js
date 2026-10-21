@@ -1051,6 +1051,7 @@ export const translations = {
   "skills.st.replaced": { en: "Replaced by your copy", es: "Reemplazada por tu copia" },
   "skills.st.needsKit": { en: "Needs the Design kit", es: "Necesita el kit de diseño" },
   "skills.st.off": { en: "Off", es: "Desactivada" },
+  "skills.needsKitNote": { en: "Chat bots skip it; voice and scheduled runs still load it if a bot selects it. Switch it off to stop that.", es: "Los bots de chat la omiten; la voz y las tareas programadas aún la cargan si un bot la elige. Desactívala para evitarlo." },
   "skills.swOn": { en: "On", es: "Activa" },
   "skills.tableSwitch": { en: "On/off", es: "Activar" },
   "skills.usedBy0": { en: "Not used by a bot", es: "Ningún bot la usa" },

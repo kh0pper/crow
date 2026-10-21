@@ -648,7 +648,9 @@ export default {
         ? ` <form method="POST" style="display:inline;margin-left:0.25rem" onsubmit="return confirm('${jsAttr(deleteConfirmText(r, n, lang))}')"><input type="hidden" name="action" value="delete"><input type="hidden" name="filename" value="${escapeHtml(r.file)}"><button class="btn btn-sm btn-danger" type="submit">${t("skills.delete", lang)}</button></form>`
         : "";
       const purpose = r.description ? `<div class="sk-purpose"${langAttr(r.descriptionLang)}>${escapeHtml(r.description)}</div>` : "";
-      const used = r.shadow ? "" : `<div class="sk-used">${escapeHtml(usedByText(n, lang))}</div>`;
+      const used = (r.shadow ? "" : `<div class="sk-used">${escapeHtml(usedByText(n, lang))}</div>`) +
+        // Kit skills are filtered on the chat spawn only (review I1): say so.
+        (r.status === "needs-kit" ? `<div class="sk-used">${escapeHtml(t("skills.needsKitNote", lang))}</div>` : "");
 
       // The switch (none on a replaced built-in: the copy's switch governs the
       // name; none on skill-writing, which self-authoring always gets).
