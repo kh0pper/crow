@@ -76,14 +76,27 @@ test("families off: own tools go to every round", async () => {
   assert.deepEqual(h.log[0].tools, ["crow_calendar_add_event"]);
 });
 
-test("withheld own tool escalates (the middle step)", async () => {
-  const h = ownHarness({ probe: () => true, rounds: [call("crow_calendar_add_event", { title: "lunch" })] });
+test("withheld own tool escalates on a follow-up (the middle step)", async () => {
+  // The previous turn on this device was offered the calendar tool (and only asked back): "put it on Monday" follows it.
+  const h = ownHarness({ probe: () => true, rounds: [says("Which day? "), call("crow_calendar_add_event", { title: "lunch" })] });
+  await turn(h, "add lunch to my calendar", { ...act, ownTools: [calTool()] });
+  assert.ok(h.log[0].tools.includes("crow_calendar_add_event"), "offered on the first turn");
   const r = await turn(h, "put it on Monday", { ...act, ownTools: [calTool()] });
   assert.equal(h.calls.hasTools.at(-1), true);
   assert.equal(h.seen.at(-1).actionIntent, true);
   assert.equal(r.escalated, true);
-  assert.ok(h.log[0].tools.includes("crow_calendar_add_event"), "the escalated round is offered the own tool");
-  assert.deepEqual(h.calls.chatKeys, [FAST, ESC]);
+  assert.ok(h.log[1].tools.includes("crow_calendar_add_event"), "the escalated round is offered the own tool");
+  assert.deepEqual(h.calls.chatKeys, [FAST, FAST, ESC]);
+});
+
+test("withheld own tool with no routine object and no prior own turn: can't-do, no model call", async () => {
+  const h = ownHarness({ probe: () => true, rounds: [call("crow_calendar_add_event", { title: "lunch" })] });
+  const r = await turn(h, "put it on Monday", { ...act, ownTools: [calTool()] });
+  assert.deepEqual(h.calls.spoken, [CANT_DO_TEXT]);
+  assert.equal(r.escalated, false);
+  assert.equal(r.timings.action_no_tool, true);
+  assert.deepEqual(h.calls.chatKeys, []);
+  assert.equal(h.log.length, 0);
 });
 
 test("bad_args steps up once", async () => {
@@ -269,8 +282,11 @@ test("'remember to do the dishes tonight' with no task backend is not a can't-do
   const h = ownHarness({ bot: CROW, rounds: [call("crow_reminder_add", { text: "dishes", at: "2026-10-20T20:00:00-05:00" })] });
   h.deps.ownTools = async () => ({ tools: [remTool({ ok: true, code: "added", final: true, say: "I'll remind you." })], unavailable: ["tasks"] });
   const r = await turn(h, "remember to do the dishes tonight", act);
-  assert.equal(r.timings.action_no_backend, undefined);
-  assert.notDeepEqual(h.calls.spoken, [CANT_DO_TEXT]);
+  assert.equal(r.timings.action_no_backend, undefined, "not the missing-task-backend line");
+  // Fix round 1 (controller ruling 2): it names no routine object and follows no own-tool turn, so the withheld
+  // reminder tool does not count toward escalating it: the no-tool can't-do, with no model call.
+  assert.equal(r.timings.action_no_tool, true);
+  assert.deepEqual(h.calls.chatKeys, []);
 });
 
 test("own-tool messages stay route-neutral on a later turn that has no own tools", async () => {

@@ -223,15 +223,9 @@ test("no assistant bound: the device still answers as Crow", async () => {
 test("an action the voice bot has no tool for: the shared could-not-do line, no model call (the real routes wire the shared rules)", async () => {
   const { voiceLine } = await import("../servers/gateway/voice/voice-lines.js");
   reset({ stt: "Email my landlord about the heating." });
-  // Crow's own tools switched off (every routine backend "off"): with them on, an action no family matches is
-  // withheld from the quick model and escalates (Task 2.1's middle step), so this test pins the no-tool case.
-  const off = { calendar: { backend: "off" }, reminders: { backend: "off" }, tasks: { backend: "off" } };
-  const evs = await withVoiceBot({ def: crowVoiceDef({ routine: off }) }, async () => {
-    const c = await client("glasses-a");
-    const got = await c.turn();
-    c.close();
-    return got;
-  });
+  const c = await client("glasses-a");
+  const evs = await c.turn();
+  c.close();
   assert.equal(seen.chat.length, 0);
   assert.deepEqual(seen.tts.map((t) => t.input), [voiceLine("cant_do_say", "en")]);
   assert.deepEqual([count(evs, "tts_start"), count(evs, "tts_end")], [1, 1]);
@@ -568,10 +562,11 @@ test("a non-PCM voice-bot TTS falls back to the device's playable one", async ()
   assert.equal(ok.seenBy.speak.at(-1).tts_profile_id, "k");
 });
 
-test("the server's time zone reaches Crow's own tools as opts.tz on the glasses", async () => {
-  const t = await crowTurns({ loadVoiceBot: withVoice({}), timeZone: "America/Chicago" });
+test("the server's time zone and the glasses' language reach Crow's own tools as opts.tz / opts.lang", async () => {
+  const t = await crowTurns({ loadVoiceBot: withVoice({}), timeZone: "America/Chicago", device: { id: "g", bound_bot_id: "helper", token_hash: "x", tts_profile_id: "p", stt_profile_id: "s1", voice_settings: { lang: "es" } } });
   await t.run();
   assert.equal(t.seenBy.turn[0].tz, "America/Chicago");
+  assert.equal(t.seenBy.turn[0].lang, "es", "and the glasses' language as opts.lang");
 });
 
 test("transcribe uses Crow's STT profile", async () => {

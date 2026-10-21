@@ -232,3 +232,11 @@ test("fix 4: with no bot row, fastPath gets bot null and executor null, and paus
   assert.equal(got[0].executor, null);
   assert.equal(r.timings.verb, "pause");
 });
+
+test("matchYesNo: 'but' / 'pero' with more words after is a correction, not a yes", () => {
+  assert.equal(matchYesNo("yes, but at four"), null);
+  assert.equal(matchYesNo("sí, pero a las cuatro"), null);
+  assert.equal(matchYesNo("yes"), "yes");
+  assert.equal(matchYesNo("sí"), "yes");
+  assert.equal(matchYesNo("no, but thanks"), "no");
+});

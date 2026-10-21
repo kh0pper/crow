@@ -6,18 +6,20 @@
  *
  * Keep the calendar and reminder words a superset of the kiosk's action-intent objects
  * (bundles/kiosk/server/action-intent.js ACTION_OBJECTS): tests/voice-routine-objects.test.js checks it.
- * A bare "to do" is not a task ("remember to do the dishes" is a reminder).
+ * A bare "to do" is not a task ("remember to do the dishes" is a reminder), and "todo" is everyday Spanish
+ * ("apaga todo"): en and es merge into one matcher. Crow's own tools are offered on these same words
+ * (own-tools.js OWN_TOOL_INTENTS), so there is one vocabulary.
  */
 import { phraseWords, normalizeIntentLists, listMatches } from "./tool-families.js";
 
 export const ROUTINE_OBJECTS = Object.freeze({
   calendar: Object.freeze({
-    en: Object.freeze(["calendar", "calendars", "schedule", "agenda", "appointment", "appointments", "calendar event"]),
-    es: Object.freeze(["calendario", "cita", "citas"]),
+    en: Object.freeze(["calendar", "calendars", "schedule", "agenda", "appointment", "appointments", "calendar event", "event", "events", "meeting", "meetings"]),
+    es: Object.freeze(["calendario", "cita", "citas", "evento", "eventos", "reunion", "reuniones"]),
   }),
   reminders: Object.freeze({
-    en: Object.freeze(["remind", "reminder", "reminders"]),
-    es: Object.freeze(["recuerdame", "recordatorio", "recordatorios"]),
+    en: Object.freeze(["remind", "reminder", "reminders", "alarm", "alarms"]),
+    es: Object.freeze(["recuerdame", "recordatorio", "recordatorios", "alarma", "alarmas"]),
   }),
   tasks: Object.freeze({
     en: Object.freeze(["task", "tasks", "to do list", "todo list", "to-do list"]),

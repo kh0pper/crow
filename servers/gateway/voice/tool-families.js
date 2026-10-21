@@ -106,7 +106,7 @@ const NO_FAMILIES = new Set();
  * baseTools: the turn's tools after its own gates. fam: createToolFamilies() or null (families off:
  * every tool goes to the quick model). prevFam: the families the previous turn used.
  * isExtraTool / isMemoryTool: those tools keep their own gates and are never a family tool.
- * → { famOf, famWanted, quickTools, famIds, unlisted, wrapperWithheld, actionWithheld(actionAsked, displayBacks) }
+ * → { famOf, famWanted, quickTools, famIds, unlisted, wrapperWithheld, actionWithheld(actionAsked, displayBacks, counts?) }
  */
 export function classifyTools({ baseTools, fam, transcript, prevFam = NO_FAMILIES, isExtraTool = () => false, isMemoryTool = () => false }) {
   const famWanted = (id) => prevFam.has(id) || fam.wants(id, transcript);
@@ -126,6 +126,8 @@ export function classifyTools({ baseTools, fam, transcript, prevFam = NO_FAMILIE
   const isFamTool = (t) => famOf(t) !== undefined;
   // Escalate an action request when the quick model got no family tool but the assistant has some — and no
   // display tool is on offer (a display command such as "add two minutes" stays on the quick model).
-  const actionWithheld = (actionAsked, displayBacks) => !!fam && actionAsked && !displayBacks && !quickTools.some(isFamTool) && baseTools.some(isFamTool);
+  // counts(tool) (optional): whether a withheld tool counts toward this (the voice turn leaves out Crow's own tools
+  // when the request names no routine object and follows no own-tool turn).
+  const actionWithheld = (actionAsked, displayBacks, counts = () => true) => !!fam && actionAsked && !displayBacks && !quickTools.some(isFamTool) && baseTools.some((t) => isFamTool(t) && counts(t));
   return { famOf, famWanted, quickTools, famIds, unlisted, wrapperWithheld, isFamTool, actionWithheld };
 }

@@ -21,18 +21,25 @@
  * The own tools are exempt from the turn's policy gate only because turn.js runs them from the loaded own-tool
  * set (ownByName); VOICE_OWN_TOOL_NAMES is for listing them (Bot Builder, the editor), never for skipping a gate.
  */
-import { normalizeVoiceSettings } from "../../shared/voice-bot.js";
+import { normalizeVoiceSettings, isVoiceBotDef } from "../../shared/voice-bot.js";
+import { ROUTINE_OBJECTS } from "./routine-objects.js";
 import { voiceLine } from "./voice-lines.js";
 import { matchYesNo } from "./pending.js";
 
 export const VOICE_OWN_TOOL_NAMES = Object.freeze(["crow_calendar_add_event", "crow_reminder_add", "crow_task_add"]);
 
-/** The intent lists each own tool family is offered on (turn.js tool families; plain words, en and es). */
-export const OWN_TOOL_INTENTS = Object.freeze({
-  calendar: Object.freeze({ en: Object.freeze(["calendar", "agenda", "appointment", "meeting", "event"]), es: Object.freeze(["calendario", "cita", "reunion", "evento"]) }),
-  reminders: Object.freeze({ en: Object.freeze(["remind", "reminder", "reminders", "alarm"]), es: Object.freeze(["recuerdame", "recordatorio", "alarma"]) }),
-  tasks: Object.freeze({ en: Object.freeze(["task", "tasks", "to do", "todo", "to do list"]), es: Object.freeze(["tarea", "tareas", "pendiente", "pendientes"]) }),
+/**
+ * The intent lists each own tool family is offered on (turn.js tool families): the routine-object vocabulary
+ * (routine-objects.js, one list for "is this about a calendar / reminder / task") plus these few extra phrases
+ * that ask for the tool without naming the object. Never a bare "to do" or "todo" ("apaga todo" is Spanish).
+ */
+export const OWN_INTENT_EXTRAS = Object.freeze({
+  reminders: Object.freeze({ en: Object.freeze(["wake me up"]), es: Object.freeze(["despiertame"]) }),
 });
+export const OWN_TOOL_INTENTS = Object.freeze(Object.fromEntries(Object.keys(ROUTINE_OBJECTS).map((id) => [id, Object.freeze({
+  en: Object.freeze([...ROUTINE_OBJECTS[id].en, ...(OWN_INTENT_EXTRAS[id]?.en || [])]),
+  es: Object.freeze([...ROUTINE_OBJECTS[id].es, ...(OWN_INTENT_EXTRAS[id]?.es || [])]),
+})])));
 
 /** How long a calendar or task list found by listing stays chosen (per process). */
 export const OWN_ID_CACHE_MS = 10 * 60 * 1000;
@@ -266,10 +273,13 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
     if (!executor || typeof executor.executeToolCalls !== "function") throw new Error("no tool executor");
     const [r] = await executor.executeToolCalls([{ id: `own-${name}`, name, arguments: args }]);
     if (!r || r.isError) throw new Error(`${name} failed`);
+    // Every backend called here answers a JSON object (Workspace: { success, data }; Google: the API object).
+    // Anything else (plain text, an array, null) is not a documented success: an error, never "added".
     let body = null;
     try { body = JSON.parse(String(r.result)); } catch { body = null; }
-    if (body && typeof body === "object" && (body.success === false || (body.success !== true && body.error))) throw new Error(`${name} failed`);
-    return body && typeof body === "object" && body.success === true && "data" in body ? body.data : body;
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error(`${name} answered no JSON object`);
+    if (body.success === false || (body.success !== true && body.error)) throw new Error(`${name} failed`);
+    return body.success === true && "data" in body ? body.data : body;
   }
 
   /** The first writable calendar or task list, by listing once (cached OWN_ID_CACHE_MS). null when none. */
@@ -351,7 +361,7 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
             const deviceId = ctx.device?.id;
             if (!deviceId) return JSON.stringify(BACKEND_ERROR);   // no device to hold the question: nothing is asked or written
             const say = offer ? voiceLine("calendar_fallback_offer", lang, { when: v.when, text: v.args.text }) : confirmLine(name, v, lang);
-            pending.set(deviceId, { kind: "routine", tool: name, args: v.args, say, lang, tz: zone, settings });
+            pending.set(deviceId, { kind: "routine", tool: name, args: v.args, say, lang, tz: zone });
             return JSON.stringify({ ok: true, effect: false, code: "needs_confirm", final: true, say });
           }
           return JSON.stringify(await perform(name, v, { db: ctx.db, executor: ctx.executor, settings, lang }));
@@ -363,20 +373,24 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
 
   /**
    * deps.voiceActions.fastPath: answers only this device's pending "routine" entry. yes → the held call runs
-   * (validated again) and the success line is spoken; no → declined; anything else → null (the entry waits
-   * out its TTL). No device, or nothing pending → null: nothing ever runs without a held question.
+   * (validated again, under the voice bot's current settings) and the success line is spoken; no → declined;
+   * anything else → null (the entry waits out its TTL). No device, or nothing pending → null: nothing ever runs
+   * without a held question. A yes with no voice bot (disabled) or under another bot speaks not-done, writes nothing.
    */
   async function fastPath({ db, device, transcript, lang, bot, executor } = {}) {
     const id = device?.id;
     if (!id) return null;
-    const entry = pending.get(id);
-    if (!entry || entry.kind !== "routine" || !Object.hasOwn(DEFINITIONS, entry.tool)) return null;
+    const peek = pending.get(id);
+    if (!peek || peek.kind !== "routine") return null;
     const answer = matchYesNo(transcript);
     if (!answer) return null;
-    pending.take(id);
+    const entry = pending.take(id);   // act on what take() returned, never the earlier copy
+    if (!entry || entry.kind !== "routine" || !Object.hasOwn(DEFINITIONS, entry.tool)) return null;
     const speak = lang || entry.lang;
     if (answer === "no") return { say: voiceLine("declined", speak), verb: "routine_no" };
-    const settings = bot ? normalizeVoiceSettings(bot) : entry.settings;
+    // Only the voice bot writes: a yes while it is disabled (no bot) or under another bot (opts.botId) runs nothing.
+    if (!bot || !isVoiceBotDef(bot)) return { say: voiceLine("not_done_say", speak), verb: "routine_failed" };
+    const settings = normalizeVoiceSettings(bot);
     const v = validate(entry.tool, entry.args, { tz: entry.tz, lang: speak, now: now() });
     const res = v.error ? null : await perform(entry.tool, v, { db, executor, settings, lang: speak });
     return res?.ok === true ? { say: res.say, verb: "routine_yes" } : { say: voiceLine("not_done_say", speak), verb: "routine_failed" };

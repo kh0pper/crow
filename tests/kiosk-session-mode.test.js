@@ -724,8 +724,17 @@ test("the hub's time zone reaches Crow's own tools as opts.tz (and the display's
     const c = await f.open({ type: "hello", mode: "session", csrf: CSRF, caps: {}, tz: "Asia/Tokyo" });
     await c.ask();
     assert.equal(f.calls.at(-1).tz, "Asia/Tokyo");
+    assert.equal(f.calls.at(-1).lang, "en");
     c.ws.close();
-  } finally { await f.close(); }
+    await withDb((db) => registry.writeSetting(db, "language", "es"));
+    const es = await f.open({ type: "hello", mode: "session", csrf: CSRF, caps: {}, tz: "Asia/Tokyo" });
+    await es.ask();
+    assert.equal(f.calls.at(-1).lang, "es");
+    es.ws.close();
+  } finally {
+    await withDb((db) => registry.writeSetting(db, "language", "en"));
+    await f.close();
+  }
 });
 
 test("session display: the early-STT hook transcribes with Crow's STT profile", async () => {

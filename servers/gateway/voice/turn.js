@@ -190,6 +190,9 @@ export function createVoiceTurnRunner(deps) {
   // Tool families (opts.familiesOnIntent): what the previous turn on each display used, and which
   // "no intent list" notes were already logged.
   const lastFamilies = new Map();
+  // Devices whose previous turn was offered (or used) one of Crow's own tools: a follow-up ("move it to 3") there
+  // may still need one, so a withheld own tool counts toward escalating it.
+  const lastOwn = new Set();
   // Displays whose previous turn was an action request (opts.actionWhen): the next turn is an action turn too.
   const lastAction = new Set();
   const famLogged = new Set();
@@ -478,6 +481,7 @@ export function createVoiceTurnRunner(deps) {
     let executor = null;
     let executorBot = null;     // the bot the executor was made for
     let usedFamilies = null;
+    let ownOffered = false;   // an own tool was on offer to this turn's model (lastOwn)
     let actionAsked = false;
     const calledTools = [];       // every tool name the model called this turn (deps.voiceActions.afterTurn)
     const voiceActions = deps.voiceActions && typeof deps.voiceActions === "object" ? deps.voiceActions : null;
@@ -750,7 +754,10 @@ export function createVoiceTurnRunner(deps) {
       // display tool is on offer (a display command such as "add two minutes" stays on the quick model).
       // quickBacked ([rev2 I11]): an own tool or the hand-off tool is on offer to the quick model, which can act on it.
       const quickBacked = quickTools.some((t) => ownByName.has(t.name) || t.name === "crow_handoff");
-      const actionWithheld = cls.actionWithheld(actionAsked, displayBacks) && !quickBacked;
+      // An own tool counts only when the request names a routine object (calendar, reminder, task…) or follows a
+      // turn that was offered or used one; otherwise "email my landlord" would escalate on the reminder tool alone.
+      const ownCounts = namesRoutineObjects(transcript).length > 0 || lastOwn.has(device.id) || [...prevFam].some((f) => String(f).startsWith("own:"));
+      const actionWithheld = cls.actionWithheld(actionAsked, displayBacks, (t) => ownCounts || !ownByName.has(t.name)) && !quickBacked;
       if (actionAsked) timings.action_intent = true;
       // A routine object with no backend: no model call and no escalation (a calendar falls back to a reminder instead).
       if (noBackend) {
@@ -770,7 +777,9 @@ export function createVoiceTurnRunner(deps) {
       const decision = mustX?.mustRoute === "fast" || noEscalate || calendarFallback
         ? { route: "fast", reason: noEscalate ? "no-escalate" : calendarFallback ? "calendar-fallback" : "must-fast", key: bot.fast_voice_model || deps.fastKey }
         : deps.chooseVoiceRoute(routeView, { hasTools: quickTools.length > 0 || unlisted.length > 0 || wrapperWithheld || actionWithheld, actionIntent: actionWithheld });
-      let chat = await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
+      // A quick-model turn that will end on the no-tool can't-do below makes no adapter at all (no model is touched).
+      const noToolAhead = decision.route !== "escalate" && actionAsked && !displayBacks && !quickTools.some((t) => !extraByName.has(t.name));
+      let chat = noToolAhead ? null : await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
       result.route = "fast";
       if (decision.route === "escalate") {
         // The filler runs alongside the (real-timer) readiness wait. A handler is attached NOW
@@ -811,12 +820,14 @@ export function createVoiceTurnRunner(deps) {
       // An action request on a turn with no tool at all: no model call. The quick model, given nothing to act
       // with, role-plays success ("I've added your appointment … I'll remind you", queue item 29).
       // "No tool" = nothing but display tools the request does not ask for (and no memory tool on offer).
+      if (tools.some((t) => ownByName.has(t.name))) ownOffered = true;
       const actionable = tools.filter((t) => !extraByName.has(t.name));
       if (actionAsked && actionable.length === 0 && !displayBacks) {
         timings.action_no_tool = true;
         await speakLine(String(opts.cantDoText || CANT_DO_TEXT));
         return result;
       }
+      if (!chat) chat = await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
       if (unlisted.length) {
         const once = `${bot.bot_id}|${unlisted.join(",")}`;
         if (!famLogged.has(once)) { famLogged.add(once); log(`[voice-turn] ${device.id} bot ${bot.bot_id}: tool families with no voice intent list are offered only on escalated turns: ${unlisted.join(", ")}`); }
@@ -1412,6 +1423,9 @@ export function createVoiceTurnRunner(deps) {
       }
       if (typeof opts.actionWhen === "function" && device?.id && result.transcript) {
         if (actionAsked) lastAction.add(device.id); else lastAction.delete(device.id);
+      }
+      if (device?.id && result.transcript) {
+        if (ownOffered || [...(usedFamilies || [])].some((f) => String(f).startsWith("own:"))) lastOwn.add(device.id); else lastOwn.delete(device.id);
       }
       timings.total_ms = now() - t0;
       if (say) timings.spoken_chars = say.chars();

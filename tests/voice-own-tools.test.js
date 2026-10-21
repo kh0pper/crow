@@ -13,7 +13,8 @@ import { createDbClient } from "../servers/db.js";
 import { createOwnTools, VOICE_OWN_TOOL_NAMES } from "../servers/gateway/voice/own-tools.js";
 import { createPendingStore, chainVoiceActions } from "../servers/gateway/voice/pending.js";
 import { VOICE_LINES, voiceLine } from "../servers/gateway/voice/voice-lines.js";
-import { NOT_DONE_TEXT } from "../servers/gateway/voice/turn.js";
+import { NOT_DONE_TEXT, CANT_DO_TEXT } from "../servers/gateway/voice/turn.js";
+import { createToolFamilies } from "../servers/gateway/voice/tool-families.js";
 import { harness } from "./fixtures/voice-turn-harness.mjs";
 
 const MIGRATIONS = join(import.meta.dirname, "..", "scripts", "migrations");
@@ -470,4 +471,89 @@ test("voice-lines en/es parity for the routine keys", () => {
   assert.equal(VOICE_LINES.en.routine_confirm_reminder, "Remind you {when}: {text}?");
   assert.equal(VOICE_LINES.en.routine_confirm_task, "Add {title} to your tasks?");
   assert.equal(VOICE_LINES.en.declined, "Okay, I won't.");
+});
+
+test("a yes with the voice bot gone (null) or under a non-voice bot writes nothing and says not done", async () => {
+  const s = await stores();
+  try {
+    const { own } = make();
+    const set = await own.forTurn({ db: s.db, bot: CROW({ voice: { confirm: "strict" } }), surface: "kiosk", lang: "es", tz: TZ });
+    for (const bot of [null, { bot_id: "writer", display_name: "Writer" }]) {
+      await run(toolOf(set, "crow_reminder_add"), { text: "llamar", at: "2026-10-26T12:00:00-05:00" }, { executor: null, db: s.db, device: DEVICE });
+      const out = await own.fastPath({ db: s.db, device: DEVICE, transcript: "sí", lang: "es", tz: TZ, bot, executor: null });
+      assert.deepEqual(out, { say: voiceLine("not_done_say", "es"), verb: "routine_failed" }, JSON.stringify(bot));
+      assert.equal(own.turnContext({ device: DEVICE }), null, "the entry was taken");
+    }
+    assert.deepEqual(await s.schedules(), []);
+  } finally { s.close(); }
+});
+
+test("in the turn: a yes answered under a non-voice bot (opts.botId) writes nothing", async () => {
+  const s = await stores();
+  try {
+    const { own } = make();
+    const set = await own.forTurn({ db: s.db, bot: CROW({ voice: { confirm: "strict" } }), surface: "kiosk", lang: "en", tz: TZ });
+    const writer = { bot_id: "writer", display_name: "Writer", fast_voice_model: "crow-voice/qwen3.5-4b" };
+    const h = harness({ bot: writer, chatTools: [], rounds: [] });
+    await run(toolOf(set, "crow_reminder_add"), { text: "call", at: "2026-10-26T12:00:00-05:00" }, { executor: null, db: s.db, device: h.device });
+    h.deps.ownTools = own.forTurn;
+    h.deps.voiceActions = chainVoiceActions([own]);
+    await h.runner.runVoiceTurn({ db: s.db, device: h.device, transcript: "yes", sink: h.sink, tz: TZ, lang: "en", botId: "writer" });
+    assert.deepEqual(h.calls.spoken, [voiceLine("not_done_say", "en")]);
+    assert.deepEqual(await s.schedules(), []);
+  } finally { s.close(); }
+});
+
+/** A harness on the real own tools with families on (the voice bot's quick model), escalating only an action-intent turn. */
+function familyHarness(own, rounds = []) {
+  const h = harness({ bot: CROW(), chatTools: [], rounds });
+  h.deps.toolFamilies = createToolFamilies({ manifests: {} });
+  h.deps.escalateKey = "crow-chat/qwen3.6-35b-a3b";
+  h.deps.chooseVoiceRoute = (msgs, o) => (o?.actionIntent ? { route: "escalate", reason: "action-intent", key: "crow-chat/qwen3.6-35b-a3b" } : { route: "fast", reason: null, key: "crow-voice/qwen3.5-4b" });
+  h.deps.ownTools = own.forTurn;
+  h.deps.voiceActions = chainVoiceActions([own]);
+  return h;
+}
+
+test("an action no tool matches, with the default backends: the instant can't-do, no model", async () => {
+  const s = await stores();
+  try {
+    const { own } = make();
+    const h = familyHarness(own, [[{ type: "content_delta", text: "Sent. " }, { type: "done" }]]);
+    const r = await h.runner.runVoiceTurn({ db: s.db, device: h.device, transcript: "Email my landlord about the heating.", sink: h.sink, tz: TZ, lang: "en", familiesOnIntent: true, actionWhen: () => true });
+    assert.deepEqual(h.calls.spoken, [CANT_DO_TEXT]);
+    assert.deepEqual(h.calls.chatKeys, []);
+    assert.equal(h.log.length, 0);
+    assert.equal(r.escalated, false);
+  } finally { s.close(); }
+});
+
+test("'apaga todo' offers no task tool (no bare to do / todo in the own-tool intents)", async () => {
+  const s = await stores();
+  try {
+    const { own } = make();
+    const h = familyHarness(own, [[{ type: "content_delta", text: "Vale. " }, { type: "done" }]]);
+    await h.runner.runVoiceTurn({ db: s.db, device: h.device, transcript: "apaga todo", sink: h.sink, tz: TZ, lang: "es", familiesOnIntent: true });
+    assert.deepEqual(h.log[0].tools, []);
+    const { OWN_TOOL_INTENTS } = await import("../servers/gateway/voice/own-tools.js");
+    for (const lists of Object.values(OWN_TOOL_INTENTS)) for (const w of [...lists.en, ...lists.es]) assert.ok(!["to do", "todo"].includes(w), w);
+  } finally { s.close(); }
+});
+
+test("own-tool intents are the routine-object vocabulary plus a short documented extra list", async () => {
+  const { OWN_TOOL_INTENTS, OWN_INTENT_EXTRAS } = await import("../servers/gateway/voice/own-tools.js");
+  const { ROUTINE_OBJECTS } = await import("../servers/gateway/voice/routine-objects.js");
+  for (const id of ["calendar", "reminders", "tasks"]) for (const lang of ["en", "es"]) {
+    assert.deepEqual(OWN_TOOL_INTENTS[id][lang], [...ROUTINE_OBJECTS[id][lang], ...(OWN_INTENT_EXTRAS[id]?.[lang] || [])], `${id}.${lang}`);
+  }
+});
+
+test("a backend answer that is not JSON is a backend error, never a success", async () => {
+  const { own } = make({ connected: ["ws_cal_create_event"] });
+  const set = await own.forTurn({ db: {}, bot: CROW({ routine: { calendar: { calendar: "cal-1" } } }), surface: "kiosk", lang: "en", tz: TZ });
+  for (const result of ["Created.", "", "[1,2]", "null"]) {
+    const ex = { executeToolCalls: async (tcs) => tcs.map((tc) => ({ id: tc.id, name: tc.name, result, isError: false })) };
+    const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+    assert.deepEqual(r, { ok: false, code: "backend_error" }, JSON.stringify(result));
+  }
 });

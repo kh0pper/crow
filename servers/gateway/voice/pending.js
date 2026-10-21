@@ -62,9 +62,11 @@ const CORRECTION_PHRASES = normalizeIntentLists({
   es: ["en vez", "en lugar", "mejor a", "daselo a"],
 });
 
+const BUT_WORDS = new Set(["but", "pero"]);
+
 /**
- * "yes" | "no" | null. yes: isAffirmative, and the utterance names no bot in otherBots (ids or names) and no
- * correction phrase (a new target), whatever its length. no: isNegative (a negation in the first words included).
+ * "yes" | "no" | null. yes: isAffirmative, and the utterance names no bot in otherBots (ids or names), no
+ * correction phrase (a new target) and no "but"/"pero" followed by more words, whatever its length. no: isNegative (a negation in the first words included).
  */
 export function matchYesNo(transcript, { otherBots = [] } = {}) {
   if (typeof transcript !== "string" || !transcript.trim()) return null;
@@ -74,6 +76,9 @@ export function matchYesNo(transcript, { otherBots = [] } = {}) {
   const words = phraseWords(t);
   const bots = (Array.isArray(otherBots) ? otherBots : []).map((b) => phraseWords(String(b ?? ""))).filter((w) => w.length);
   if (listMatches(words, bots) || listMatches(words, CORRECTION_PHRASES)) return null;
+  // "yes, but at four" / "sí, pero a las cuatro": a "but" with more words after it changes what was asked.
+  const but = words.findIndex((w) => BUT_WORDS.has(w));
+  if (but >= 0 && but < words.length - 1) return null;
   return "yes";
 }
 
