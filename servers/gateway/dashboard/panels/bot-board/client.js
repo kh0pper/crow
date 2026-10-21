@@ -8,6 +8,7 @@
 import { tJs } from "../../shared/i18n.js";
 import { birdDrawerJs } from "./drawer.js";
 import { decisionJs } from "./decision-client.js";
+import { grantJs } from "./grant-client.js";
 
 export function clientJs(botId, trackerType, projectId, trackerSlug, contextFields, lang, includeArchived) {
   const bi = botId == null ? "null" : JSON.stringify(String(botId));
@@ -162,8 +163,10 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     msg($('bb-d-msg'),'','');
     applyLockUi();
     applyArchivedUi($('bb-d-archive'),$('bb-d-unarchive'),DRAWER_FIELD_IDS,cur.archived,cur.locked);
-    // Clear the previous card's decision block until this card's GET lands.
+    // Clear the previous card's decision block and grant checkbox until this
+    // card's GET lands.
     renderDecision(null);
+    renderGrant(null);
     hydrateDrawer(cur.id);
     loadPlan();
     openDrawer(drawer);
@@ -208,7 +211,10 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         // response — additive keys, no extra round trip.
         renderHistory(r.j.mutations||[]);
         renderResults(r.j.latest_results||[], (r.j.board&&r.j.board.terminal_values)||[]);
+        // The grant checkbox is server state too: refreshed on every
+        // hydration, including the one after a decision.
         if(!opts.keepDecision) renderDecision(r.j.decision);
+        renderGrant(c,r.j.dispatch_grants);
         if(pendingDrawerScroll){ drawer.scrollTop=pendingDrawerScroll; pendingDrawerScroll=0; }
       } else if(!r.ok){ pendingDrawerScroll=0; crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); }
     }).catch(function(){ pendingDrawerScroll=0; crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });
@@ -276,7 +282,9 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     result_decide:'${tJs("board.mutationVerb.result_decide", lang)}',
     decision_ask:'${tJs("board.mutationVerb.decision_ask", lang)}',
     decision:'${tJs("board.mutationVerb.decision", lang)}',
-    decision_expire:'${tJs("board.mutationVerb.decision_expire", lang)}'
+    decision_expire:'${tJs("board.mutationVerb.decision_expire", lang)}',
+    dispatch:'${tJs("board.mutationVerb.dispatch", lang)}',
+    dispatch_grant:'${tJs("board.mutationVerb.dispatch_grant", lang)}'
   };
   function actorLabel(m){
     if(m.actor_kind==='bot') return m.actor_id||'bot';
@@ -395,6 +403,8 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   // in as a bare block sharing this IIFE's scope ($, clearEl, api, msg,
   // errText, cur).
   ${decisionJs(lang)}
+  // Dispatch grant checkbox (renderGrant): emitted by grant-client.js.
+  ${grantJs(lang)}
 
   // ---- Tracker item drawer ----
   function fillTrackerDrawer(cardEl){
