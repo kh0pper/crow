@@ -100,15 +100,21 @@ test("an unverified copy is behind until acked for that shipped version", () => 
   assert.equal(w.row("media").source, "yours");
 });
 
-test("a \"refresh\": false bundle's copy is still an extension copy (review I8)", () => {
+test("a \"refresh\": false bundle's copy is an extension copy only when its text matches the record (skip-optout proves nothing)", () => {
   const w = world().bundle("kiosk", { "kiosk.md": "# v2\n" }).installed("kiosk").user("kiosk.md", "# v1\n");
   mkdirSync(join(w.home, "bundles", "kiosk"), { recursive: true });
   writeFileSync(join(w.home, "bundles", "kiosk", "manifest.json"), JSON.stringify({ id: "kiosk", refresh: false }));
   const { plan } = skillSyncPlan({ crowHome: w.home, appBundles: w.apps });
-  assert.equal(plan.get("kiosk.md").action, "skip-optout");
-  assert.equal(isExtensionCopy(plan.get("kiosk.md")), true);
+  const e = plan.get("kiosk.md");
+  assert.equal(e.action, "skip-optout");
+  const filePath = join(w.home, "skills", "kiosk.md");
+  assert.equal(isExtensionCopy(e), false, "no record, no file: not verified");
+  assert.equal(isExtensionCopy(e, { record: {}, filePath }), false);
+  assert.deepEqual(pick(w.row("kiosk")), { source: "yours", bundle: "kiosk", status: "on", basedOn: "kiosk", linked: false, replacesBuiltin: false, hasFile: true });
+  w.record({ "kiosk.md": { bundle: "kiosk", sha256: skillHash("# v1\n"), installedAt: "t" } });
+  assert.equal(isExtensionCopy(e, { record: { "kiosk.md": { sha256: skillHash("# v1\n") } }, filePath }), true, "matches the record: verified");
   assert.equal(w.row("kiosk").source, "ext");
-  for (const a of ["same", "adopt", "refresh", "install", "skip-optout"]) assert.equal(isExtensionCopy({ action: a }), true, a);
+  for (const a of ["same", "adopt", "refresh", "install"]) assert.equal(isExtensionCopy({ action: a }), true, a);
   for (const a of ["kept-edited", "kept-unverified", "skip-symlink", "skip-deleted"]) assert.equal(isExtensionCopy({ action: a }), false, a);
   assert.equal(isExtensionCopy(null), false);
 });

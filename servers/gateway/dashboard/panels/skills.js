@@ -22,7 +22,9 @@ import { resolveCrowHome } from "../../../shared/crow-home.js";
 import { atomicWrite, bundleShippingSkill, recordRemovedLink } from "../../bundle-skill-sync.js";
 import { normalizeSkillName } from "../../../../scripts/pi-bots/skill_proposals.mjs";
 import { invalidateContextCache } from "../../../memory/crow-context.js";
-import { classifySkills, parseSkillMeta, anyBundleShipping } from "../../skills-catalog.js";
+import { classifySkills, parseSkillMeta, anyBundleShipping, extensionCopyOf } from "../../skills-catalog.js";
+import { readSkillState, setSkillOff, skillStateName } from "../../../shared/skill-state.js";
+import { EXEMPT_FROM_OFF } from "../../../../scripts/pi-bots/skill_resolver.mjs";
 import { isWritingRulesTemplate } from "../../../shared/writing-rules.js";
 import { installedKitDir } from "../../../shared/design-kit.js";
 import { getInstanceSyncManager } from "../../../sharing/server.js";
@@ -120,6 +122,8 @@ const NOTICE_CODES = {
   "not-found": "skills.errorNotFound",
   "link-unreadable": "skills.errorLinkUnreadable",
   "record-unreadable": "skills.errorRecordUnreadable",
+  "extension-skill": "skills.errorExtensionSkill",
+  "state-unreadable": "skills.errorStateUnreadable",
 };
 
 /**
@@ -174,7 +178,43 @@ const SKILLS_TABLE_CSS = `<style>
   .sk-st-warning { color: var(--crow-warning); }
   .sk-st-error { color: var(--crow-error); }
   .sk-st-muted { color: var(--crow-text-muted); }
+  .sk-used { color: var(--crow-text-muted); font-size: 0.78rem; margin-top: 0.15rem; }
+  .sk-switch-form { display: inline; margin: 0; }
+  .sk-switch { display: inline-flex; align-items: center; gap: 0.45rem; min-width: 52px; min-height: 44px; padding: 0 0.25rem; background: none; border: 0; color: var(--crow-text); cursor: pointer; font: inherit; font-size: 0.8rem; }
+  .sk-switch-track { position: relative; width: 44px; height: 26px; border-radius: 13px; background: var(--crow-border); transition: background 0.15s; flex: none; }
+  .sk-switch-track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: var(--crow-bg-surface); transition: transform 0.15s; }
+  .sk-switch[aria-checked="true"] .sk-switch-track { background: var(--crow-accent); }
+  .sk-switch[aria-checked="true"] .sk-switch-track::after { transform: translateX(18px); }
+  .sk-switch:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; border-radius: 8px; }
+  .skills-toast:not(:empty) { margin-bottom: 1rem; padding: 0.6rem 1rem; border: 1px solid var(--crow-border); border-left: 3px solid var(--crow-success); border-radius: 8px; background: var(--crow-bg-elevated); }
 </style>`;
+
+/** A string for a single-quoted JS literal inside an HTML attribute. */
+const jsAttr = (str) => escapeHtml(String(str).replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/\r?\n/g, " "));
+
+/** "Used by N bots" for a row (n = number of bots). */
+const usedByText = (n, lang) => (n === 0 ? t("skills.usedBy0", lang) : n === 1 ? t("skills.usedBy1", lang) : fill(t("skills.usedByN", lang), { n }));
+
+/**
+ * The delete confirm for a user skill: a copy of an extension says its
+ * extension's version won't come back by itself (review I5); every confirm
+ * names how many bots lose the skill.
+ */
+function deleteConfirmText(row, n, lang) {
+  const head = row && row.basedOn
+    ? fill(t("skills.deleteCopyConfirm", lang), { ext: row.bundleName || row.basedOn })
+    : t(row && row.replacesBuiltin ? "skills.deleteUserSkillConfirm" : "skills.deleteConfirm", lang);
+  const tail = n === 0 ? "" : n === 1 ? t("skills.deleteUsed1", lang) : fill(t("skills.deleteUsedN", lang), { n });
+  return tail ? `${head} ${tail}` : head;
+}
+
+/** Which bots use each skill (lazy: it loads bot-world.mjs). Empty on any failure. */
+async function usageMap(db, crowHome) {
+  try {
+    const { skillUsage, loadBotRows } = await import("../../skills-used-by.js");
+    return skillUsage({ crowHome, botRows: await loadBotRows(db) });
+  } catch { return new Map(); }
+}
 
 export default {
   id: "skills",
@@ -193,7 +233,7 @@ export default {
       // A repeated field arrives as an array (urlencoded, extended:false) —
       // e.g. the old nested Save/Delete forms posted action=save&action=delete.
       // Refuse it outright rather than fall through to a 200 list render.
-      for (const k of ["action", "filename", "content", "sectionKey", "purpose"]) {
+      for (const k of ["action", "filename", "content", "sectionKey", "purpose", "skill", "customize"]) {
         if (body[k] !== undefined && typeof body[k] !== "string") {
           // text/html so Turbo shows it (a text/plain 4xx is dropped silently).
           res.status(400);
@@ -219,6 +259,14 @@ export default {
           return;
         }
         if (!st || !st.isFile()) return back("not-found");
+        // Save guard (option C, review I8): an unedited extension copy is
+        // written only from the Customize editor (customize=1), so a stale or
+        // forged form can never silently stop its updates. Same rule as the
+        // "From <ext>" badge (isExtensionCopy).
+        if (one(body.customize) !== "1" && extensionCopyOf({ crowHome: resolveCrowHome(), appBundles: APP_BUNDLES_DIR, file: safeName })) {
+          res.redirectAfterPost(editUrl(safeName));
+          return;
+        }
         if (!content || !content.trim()) return back("empty");
         writeSkill(filePath, content);
         res.redirectAfterPost("/dashboard/skills");
@@ -269,10 +317,24 @@ export default {
             }
             unlinkSync(filePath); // the link only, never its target
           } else if (st && st.isFile()) {
+            // An extension's skill is switched off, never deleted (Kevin
+            // 10-16): deleting an unedited copy would just be reinstalled or
+            // tombstoned behind the owner's back.
+            if (extensionCopyOf({ crowHome: resolveCrowHome(), appBundles: APP_BUNDLES_DIR, file: safeName })) return back("extension-skill");
             unlinkSync(filePath);
           }
         }
         res.redirectAfterPost("/dashboard/skills");
+        return;
+      }
+
+      if (action === "set-off" || action === "set-on") {
+        // The on/off switch. Per instance; bots pick it up in new conversations.
+        const name = skillStateName(one(body.skill) ?? "");
+        if (!name || EXEMPT_FROM_OFF.includes(name)) return back("invalid-name");
+        const r = setSkillOff(resolveCrowHome(), name, action === "set-off");
+        if (!r.ok) return back(r.error === "unreadable" ? "state-unreadable" : "invalid-name");
+        res.redirectAfterPost(`/dashboard/skills?toggled=${encodeURIComponent(name)}&to=${action === "set-off" ? "off" : "on"}`);
         return;
       }
 
@@ -455,6 +517,19 @@ export default {
       }
       const readOnly = !isUserSkill;
       const sourceLabel = isUserSkill ? t("skills.userSkillEditable", lang) : t("skills.builtInReadOnly", lang);
+      const crowHomeNow = resolveCrowHome();
+      // An unedited extension copy is read-only until the owner picks
+      // Customize… (the same rule as its "From <ext>" badge and the Save guard).
+      const extCopy = isUserSkill && !isLink ? extensionCopyOf({ crowHome: crowHomeNow, appBundles: APP_BUNDLES_DIR, file: safeName }) : null;
+      const customizing = !!extCopy && one(query.customize) === "1";
+      const linkShipped = isLink && !!bundleShippingSkill({ crowHome: crowHomeNow, appBundles: APP_BUNDLES_DIR, skill: safeName });
+      const noticeDiv = (text) => `<div class="skills-notice" role="status" style="margin-bottom:1rem;padding:0.75rem 1rem;border:1px solid var(--crow-border);border-radius:8px;background:var(--crow-bg-elevated)">${escapeHtml(text)}</div>`;
+      let deleteText = t("skills.deleteConfirm", lang);
+      if (isUserSkill && !extCopy && !isLink) {
+        const row = classifySkills({ crowHome: crowHomeNow, appBundles: APP_BUNDLES_DIR, repoDir: REPO_SKILLS_DIR, lang }).find((r) => r.file === safeName && !r.shadow);
+        const n = ((await usageMap(db, crowHomeNow)).get(safeName.replace(/\.md$/, "")) || []).length;
+        deleteText = deleteConfirmText(row, n, lang);
+      }
 
       let editForm;
       if (isLink) {
@@ -470,11 +545,22 @@ export default {
               <button type="submit" class="btn btn-primary">${t("skills.makeOwnCopy", lang)}</button>
             </form>`}
             <a href="/dashboard/skills" class="btn btn-secondary">${t("skills.back", lang)}</a>
-            <form method="POST" style="margin-left:auto" onsubmit="return confirm('${tJs("skills.deleteConfirm", lang)}')">
+            ${linkShipped ? "" : `<form method="POST" style="margin-left:auto" onsubmit="return confirm('${tJs("skills.deleteConfirm", lang)}')">
               <input type="hidden" name="action" value="delete">
               <input type="hidden" name="filename" value="${escapeHtml(safeName)}">
               <button type="submit" class="btn btn-sm btn-danger">${t("skills.delete", lang)}</button>
-            </form>
+            </form>`}
+          </div>`;
+      } else if (extCopy && !customizing) {
+        // An extension's skill: read-only, switch it off rather than delete it.
+        const ext = extCopy.bundleName;
+        editForm = `
+          ${noticeDiv(fill(t("skills.extCopyNotice", lang), { ext }))}
+          <pre style="background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:8px;padding:1rem;overflow-x:auto;font-size:0.85rem;line-height:1.6;max-height:600px;overflow-y:auto;white-space:pre-wrap;word-wrap:break-word">${escapeHtml(content)}</pre>
+          <div style="display:flex;gap:0.5rem;margin-top:1rem;flex-wrap:wrap;align-items:center">
+            <a href="/dashboard/skills?edit=${encodeURIComponent(safeName)}&amp;source=user&amp;customize=1" class="btn btn-primary">${escapeHtml(t("skills.customize", lang))}</a>
+            <span style="color:var(--crow-text-secondary);font-size:0.85rem">${escapeHtml(fill(t("skills.customizeWarn", lang), { ext }))}</span>
+            <a href="/dashboard/skills" class="btn btn-secondary" style="margin-left:auto">${t("skills.back", lang)}</a>
           </div>`;
       } else if (readOnly) {
         // Read-only view for repo skills with "Override" button
@@ -497,21 +583,23 @@ export default {
           <div style="margin-bottom:1rem">
             ${badge(sourceLabel, "published")}
           </div>
+          ${customizing ? noticeDiv(fill(t("skills.customizeWarn", lang), { ext: extCopy.bundleName })) : ""}
           <div style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap">
             <form method="POST" style="flex:1 1 100%">
               <input type="hidden" name="action" value="save">
               <input type="hidden" name="filename" value="${escapeHtml(safeName)}">
+              ${customizing ? `<input type="hidden" name="customize" value="1">` : ""}
               ${formField(t("skills.contentLabel", lang), "content", { type: "textarea", value: content, rows: 20, required: true })}
               <div style="display:flex;gap:0.5rem;margin-top:1rem">
                 <button type="submit" class="btn btn-primary">${t("skills.save", lang)}</button>
                 <a href="/dashboard/skills" class="btn btn-secondary">${t("skills.cancel", lang)}</a>
               </div>
             </form>
-            <form method="POST" style="margin-left:auto" onsubmit="return confirm('${tJs("skills.deleteUserSkillConfirm", lang)}')">
+            ${customizing ? "" : `<form method="POST" style="margin-left:auto" onsubmit="return confirm('${jsAttr(deleteText)}')">
               <input type="hidden" name="action" value="delete">
               <input type="hidden" name="filename" value="${escapeHtml(safeName)}">
               <button type="submit" class="btn btn-sm btn-danger">${t("skills.delete", lang)}</button>
-            </form>
+            </form>`}
           </div>`;
       }
 
@@ -528,6 +616,11 @@ export default {
       crowHome, appBundles: APP_BUNDLES_DIR, repoDir: REPO_SKILLS_DIR, lang,
       kitSkills: await kitSkills(), kitInstalled: !!installedKitDir(crowHome),
     }).filter((r) => r.hasFile);
+    const stateRead = readSkillState(crowHome);
+    const offSet = new Set(stateRead.state.off);
+    const usage = await usageMap(db, crowHome);
+    const toggled = skillStateName(one(query.toggled) ?? "");
+    const toggledTo = one(query.to);
     const langAttr = (l) => (l !== lang ? ` lang="${l}"` : "");
     const chip = (text, kind = "") => `<span class="sk-chip${kind ? " sk-chip-" + kind : ""}">${escapeHtml(text)}</span>`;
 
@@ -541,28 +634,59 @@ export default {
       } else chips.push(chip(r.basedOn ? fill(t("skills.copyOf", lang), { ext }) : t("skills.yoursBadge", lang), "yours"));
       if (r.replacesBuiltin) chips.push(chip(t("skills.replacesBuiltin", lang)));
       if (r.experimental) chips.push(chip(t("skills.experimental", lang)));
-      const st = STATUS[r.status];
+      const isOff = offSet.has(r.name) && !r.shadow;
+      const st = isOff ? ["skills.st.off", "muted"] : STATUS[r.status];
       if (st) chips.push(`<span class="sk-st sk-st-${st[1]}">${escapeHtml(t(st[0], lang))}</span>`);
 
-      const editable = r.source !== "builtin";
-      const source = editable ? "user" : "repo";
+      const n = (usage.get(r.name) || []).length;
+      const userFile = r.source !== "builtin";
+      const source = userFile ? "user" : "repo";
+      // An extension's skill is viewed (Customize… from there), never deleted.
+      const editable = r.source === "yours";
       const viewBtn = `<a href="/dashboard/skills?edit=${encodeURIComponent(r.file)}&source=${source}" class="btn btn-sm btn-secondary">${editable ? t("skills.edit", lang) : t("skills.view", lang)}</a>`;
       const deleteBtn = editable
-        ? ` <form method="POST" style="display:inline;margin-left:0.25rem" onsubmit="return confirm('${tJs("skills.deleteConfirm", lang)}')"><input type="hidden" name="action" value="delete"><input type="hidden" name="filename" value="${escapeHtml(r.file)}"><button class="btn btn-sm btn-danger" type="submit">${t("skills.delete", lang)}</button></form>`
+        ? ` <form method="POST" style="display:inline;margin-left:0.25rem" onsubmit="return confirm('${jsAttr(deleteConfirmText(r, n, lang))}')"><input type="hidden" name="action" value="delete"><input type="hidden" name="filename" value="${escapeHtml(r.file)}"><button class="btn btn-sm btn-danger" type="submit">${t("skills.delete", lang)}</button></form>`
         : "";
       const purpose = r.description ? `<div class="sk-purpose"${langAttr(r.descriptionLang)}>${escapeHtml(r.description)}</div>` : "";
+      const used = r.shadow ? "" : `<div class="sk-used">${escapeHtml(usedByText(n, lang))}</div>`;
+
+      // The switch (none on a replaced built-in: the copy's switch governs the
+      // name; none on skill-writing, which self-authoring always gets).
+      let switchCell = "";
+      if (EXEMPT_FROM_OFF.includes(r.name)) switchCell = `<span class="sk-used">${escapeHtml(t("skills.alwaysSelfAuthoring", lang))}</span>`;
+      else if (!r.shadow) {
+        const focus = toggled === r.name ? " autofocus" : "";
+        switchCell = `<form method="POST" class="sk-switch-form"><input type="hidden" name="action" value="${isOff ? "set-on" : "set-off"}"><input type="hidden" name="skill" value="${escapeHtml(r.name)}"><button type="submit" class="sk-switch" role="switch" aria-checked="${isOff ? "false" : "true"}" aria-label="${escapeHtml(r.title)}"${focus}><span class="sk-switch-track" aria-hidden="true"></span><span class="sk-switch-text">${escapeHtml(t(isOff ? "skills.st.off" : "skills.swOn", lang))}</span></button></form>`;
+      }
 
       return [
-        `<span class="sk-name" data-skill="${escapeHtml(r.name)}" data-source="${r.source}"><span class="sk-title"${langAttr(r.titleLang)}>${escapeHtml(r.title)}</span></span>${purpose}`,
+        `<span class="sk-name" data-skill="${escapeHtml(r.name)}" data-source="${r.source}"><span class="sk-title"${langAttr(r.titleLang)}>${escapeHtml(r.title)}</span></span>${purpose}${used}`,
         `<span class="mono" style="font-size:0.8rem">${escapeHtml(r.name)}</span>`,
         `<span class="sk-chips">${chips.join("")}</span>`,
+        switchCell,
         `${viewBtn}${deleteBtn}`,
       ];
     });
 
+    // The toast after a switch: the status region starts empty and its text
+    // goes in after load (a status region already holding text when the page
+    // renders usually isn't announced). Counted after the write.
+    let toast = "";
+    if (toggled && (toggledTo === "off" || toggledTo === "on")) {
+      const tr = catalog.find((r) => r.name === toggled && !r.shadow);
+      const name = tr ? tr.title : toggled;
+      const n = (usage.get(toggled) || []).length;
+      const text = toggledTo === "on"
+        ? fill(t("skills.toastOn", lang), { name })
+        : fill(t(n === 0 ? "skills.toastOff0" : n === 1 ? "skills.toastOff1" : "skills.toastOffN", lang), { name, n });
+      toast = `<div class="skills-toast" role="status" id="skills-toast" data-skills-toast="${escapeHtml(text)}"></div>
+      <script>(function(){var e=document.getElementById("skills-toast");if(e&&e.getAttribute("data-skills-toast")){setTimeout(function(){e.textContent=e.getAttribute("data-skills-toast");},60);}})();</script>`;
+    }
+    const stateBanner = stateRead.ok ? "" : `<div class="skills-notice" role="alert" style="margin-bottom:1rem;padding:0.75rem 1rem;border:1px solid var(--crow-border);border-left:3px solid var(--crow-error);border-radius:8px;background:var(--crow-bg-elevated)">${escapeHtml(t("skills.stateUnreadableBanner", lang))}</div>`;
+
     const skillsTable = catalog.length === 0
       ? `<div class="empty-state"><h3>${t("skills.noSkillsFound", lang)}</h3><p>${t("skills.skillsDirectory", lang)}</p></div>`
-      : SKILLS_TABLE_CSS + dataTable([t("skills.tableName", lang), t("skills.tableFile", lang), t("skills.tableSource", lang), t("skills.tableActions", lang)], rows, { stack: true });
+      : SKILLS_TABLE_CSS + stateBanner + toast + dataTable([t("skills.tableName", lang), t("skills.tableFile", lang), t("skills.tableSource", lang), t("skills.tableSwitch", lang), t("skills.tableActions", lang)], rows, { stack: true });
 
     // Create form. After a refused create (422) it holds what was typed, the
     // error sits inside it, and the field to fix has autofocus, so the
