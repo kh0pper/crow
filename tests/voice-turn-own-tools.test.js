@@ -1104,3 +1104,44 @@ test("voice bot: a direct or proxied remote calendar/task write is refused while
     }
   }
 });
+
+// ─── PR 2.1 Task 6 fix round 2: rule 6 on voice always, and the refusal arms the claim guard (#499) ───
+const MENU = { calendar: "Menu_shared_by_admin", summary: "Lunch", start: "2026-10-26T12:00:00-05:00" };
+const asAddon = (h) => { h.deps.isConnectedAddonTool = (n) => ["ws_cal_create_event", "gcal_create_event", "ws_task_create"].includes(n); };
+
+test("voice bot: a refused remote create arms the guard; the model's claim after it is never heard, the not-done line is", async () => {
+  const h = ownHarness({ bot: CROW, familiesOnIntent: false, chatTools: ["ws_cal_create_event"], rounds: [call("ws_cal_create_event", MENU), says("Added it to the Menu calendar. ")] });
+  asAddon(h);
+  const r = await turn(h, "lunch monday", { familiesOnIntent: false, ownTools: [] });
+  assert.equal(h.calls.executed.includes("ws_cal_create_event"), false);
+  const captions = h.events.filter((e) => e.type === "caption_delta").map((e) => e.text).join("");
+  assert.ok(!/Added it/.test(captions), captions);
+  assert.ok(!h.calls.spoken.some((t) => /Added it/.test(t)), h.calls.spoken.join(" | "));
+  assert.ok(h.calls.spoken.includes(NOT_DONE_TEXT), h.calls.spoken.join(" | "));
+  assert.equal(r.timings.action_guard, true);
+});
+
+test("voice bot: the remote creates are refused even when no own tool is loaded (direct and proxied); an ordinary bot still runs them", async () => {
+  const { effectiveToolName } = await import("../servers/gateway/ai/tool-executor.js");
+  const cases = [["ws_cal_create_event", MENU, "ws_cal_create_event"], ["crow_tools", { action: "ws_cal_create_event", params: MENU }, "crow_tools"],
+    ["gcal_create_event", { summary: "Lunch", start: MENU.start }, "gcal_create_event"], ["ws_task_create", { list: "Chores_shared_by_admin", summary: "Milk" }, "ws_task_create"]];
+  for (const [name, args, offered] of cases) {
+    for (const voice of [true, false]) {
+      const h = ownHarness({ bot: voice ? CROW : undefined, familiesOnIntent: false, chatTools: [offered], rounds: [call(name, args), says("Okay. ")] });
+      h.deps.effectiveToolName = effectiveToolName;
+      asAddon(h);
+      for (const ownTools of [[], undefined]) {
+        await turn(h, "add lunch Monday at noon to my calendar and a task", { familiesOnIntent: false, ...(ownTools ? { ownTools } : {}) });
+      }
+      assert.equal(h.calls.executed.includes(name), !voice, `${voice ? "voice" : "ordinary"}: ${name}`);
+    }
+  }
+});
+
+test("families on: the own tool loaded but not offered this round, the remote create is still refused", async () => {
+  const h = ownHarness({ bot: CROW, chatTools: ["ws_cal_create_event"], rounds: [call("ws_cal_create_event", MENU), says("Okay. ")] });
+  asAddon(h);
+  await turn(h, "what's for lunch", { ownTools: [calTool()] });
+  assert.ok(!h.log[0].tools.includes("crow_calendar_add_event"), `own tool not offered: ${h.log[0].tools}`);
+  assert.equal(h.calls.executed.includes("ws_cal_create_event"), false);
+});

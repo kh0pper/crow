@@ -337,26 +337,28 @@ function countedGate(h) {
 }
 
 test("(R2) a remote create tool on a rewritten turn needs the yes; heard as said, it runs", async () => {
-  const ARGS = { calendar: "c1", summary: "lunch with Ann", start: "2026-10-30T12:00:00-05:00", end: "2026-10-30T13:00:00-05:00" };
-  const h = countedGate(gateHarness({ chatTools: ["ws_cal_create_event"], rounds: [call("ws_cal_create_event", ARGS), says("Should I add it? "), call("ws_cal_create_event", ARGS, "c2"), says("Done. ")] }));
+  // A remote create the voice bot may run (Task 6 refuses the calendar/task creates the own tools wrap on voice, always).
+  const ARGS = { addressbook: "c1", full_name: "Ann" };
+  const h = countedGate(gateHarness({ chatTools: ["ws_contacts_create"], rounds: [call("ws_contacts_create", ARGS), says("Should I add it? "), call("ws_contacts_create", ARGS, "c2"), says("Done. ")] }));
   const r = await turn(h, "had lunch with Ann on Friday", { ownTools: [], familiesOnIntent: false });
   assert.equal(r.timings.stt_rewrite, "had");
-  assert.ok(h.log[0].tools.includes("ws_cal_create_event"));
+  assert.ok(h.log[0].tools.includes("ws_contacts_create"));
   assert.deepEqual(h.calls.executed, [], "not run without a yes");
   assert.ok(!/Added|Done/.test(r.captions) && !r.spoken.some((t) => /Added|Done/.test(t)));
   await turn(h, "yes", { ownTools: [], familiesOnIntent: false });
-  assert.deepEqual(h.calls.executed, ["ws_cal_create_event"], "the yes ran it once");
-  assert.ok(h.checks.some((c) => c.transcript === "yes" && c.eff === "ws_cal_create_event" && c.out === "allow"), "the yes went through the confirm gate");
-  const plain = gateHarness({ chatTools: ["ws_cal_create_event"], rounds: [call("ws_cal_create_event", ARGS), says("Done. ")] });
+  assert.deepEqual(h.calls.executed, ["ws_contacts_create"], "the yes ran it once");
+  assert.ok(h.checks.some((c) => c.transcript === "yes" && c.eff === "ws_contacts_create" && c.out === "allow"), "the yes went through the confirm gate");
+  const plain = gateHarness({ chatTools: ["ws_contacts_create"], rounds: [call("ws_contacts_create", ARGS), says("Done. ")] });
   const p = await turn(plain, "add lunch with Ann on Friday", { ownTools: [], familiesOnIntent: false });
   assert.equal(p.timings.stt_rewrite, undefined);
-  assert.deepEqual(plain.calls.executed, ["ws_cal_create_event"], "heard as said: no extra question");
+  assert.deepEqual(plain.calls.executed, ["ws_contacts_create"], "heard as said: no extra question");
 });
 
 for (const [label, next] of [["a no", "no"], ["a question", "what time is it?"]]) {
   test(`(R2b) a rewritten turn's held remote create, then ${label}: the model's re-issued call does not run`, async () => {
-    const ARGS = { calendar: "c1", summary: "lunch with Ann", start: "2026-10-30T12:00:00-05:00", end: "2026-10-30T13:00:00-05:00" };
-    const h = countedGate(gateHarness({ chatTools: ["ws_cal_create_event"], rounds: [call("ws_cal_create_event", ARGS), says("Should I add it? "), call("ws_cal_create_event", ARGS, "c2"), says("Okay. ")] }));
+    // A remote create the voice bot may run (Task 6 refuses the calendar/task creates the own tools wrap on voice, always).
+  const ARGS = { addressbook: "c1", full_name: "Ann" };
+    const h = countedGate(gateHarness({ chatTools: ["ws_contacts_create"], rounds: [call("ws_contacts_create", ARGS), says("Should I add it? "), call("ws_contacts_create", ARGS, "c2"), says("Okay. ")] }));
     await turn(h, "had lunch with Ann on Friday", { ownTools: [], familiesOnIntent: false });
     assert.deepEqual(h.calls.executed, []);
     const r = await turn(h, next, { ownTools: [], familiesOnIntent: false });
