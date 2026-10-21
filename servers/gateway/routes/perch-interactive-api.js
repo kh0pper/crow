@@ -53,14 +53,10 @@ import { getInteractiveEngine } from "../perch-interactive.js";
 import { cwdList, cwdRead } from "../perch-files.js";
 import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 import { updateCard, createCard } from "../board/card-service.js";
-import { lockState } from "./board-lock.js";
-import { boardState } from "../dashboard/shared/bot-display.js";
-import { assertProjectExists, appendAudit } from "../../shared/project-acl.js";
-import { resolveBoardDef, isTerminal } from "./board-defs.js";
 import { annotateAvailability } from "../model-availability.js";
 import { providerModelListWarm, pickerModels, loadPiProviderNames, referencedModelKeys } from "../perch-model-catalog.js";
 import { renderBotMarkdown } from "../../blog/renderer.js";
-import { isVoiceBotId } from "../../shared/voice-bot.js";
+import { giveCard, loadGiveTarget, giveAudit } from "../board/give-service.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -178,7 +174,10 @@ function mapEngineError(res, err) {
   // Checked FIRST — an err with an explicit `.http` is authoritative over
   // whatever ERROR_MAP might otherwise guess from `.code` alone.
   if (err && Number.isInteger(err.http)) {
-    return jsonError(res, err.http, String(err.code || err.message || err));
+    // give-service's 409 locked names the lock rail (session/job), as the
+    // give route always has.
+    const extra = typeof err.rail === "string" && err.rail ? { rail: err.rail } : undefined;
+    return jsonError(res, err.http, String(err.code || err.message || err), extra);
   }
   // Object.hasOwn (fix-round F2): a bare `ERROR_MAP[err.code]` is a
   // prototype-chain lookup on an object literal — an err.code of
@@ -331,25 +330,6 @@ async function dispatchCard(ctx, { row, getEng, botId, cardId, note, skipProvena
   return result;
 }
 
-/** "Give to…" target check: the bot exists and is enabled (else 400
- * bot_unavailable), and it has a board a card can go on — kanban/task-list
- * with a linked, live project (boardState() "on", the SAME predicate the
- * Bot Builder and the Bot Board render with, so the gate and the UI cannot
- * drift). Anything else — type none, no project, a custom tracker (a card
- * cannot go onto a tracker board), an archived or missing project — is 409
- * no_board. */
-async function loadGiveTarget(db, botId) {
-  const row = await loadBotRow(db, botId);
-  if (!row || !Number(row.enabled) || isVoiceBotId(row.bot_id)) throw routeFail("bot unavailable", "bot_unavailable", 400);
-  if (boardState(row).state !== "on") throw routeFail("bot has no board", "no_board", 409);
-  try {
-    await assertProjectExists(db, Number(row.project_id));
-  } catch {
-    throw routeFail("bot's board project is gone or archived", "no_board", 409);
-  }
-  return row;
-}
-
 /** After a give: the response, and — only on an explicit boolean
  * start:true ("Start right away" defaults OFF) — the dispatch core. A start
  * that fails does NOT undo the give: the card is visibly on the bot's board
@@ -363,41 +343,6 @@ async function startAfterGive(ctx, { row, getEng, botId, cardId, start, note }) 
   } catch (err) {
     return { ...out, code: String((err && err.code) || "start_failed") };
   }
-}
-
-/** Giving a parent carries its subtree: card-service keeps a child in its
- * parent's project (createCard/updateCard re-inherit it), so a parent moved
- * alone would leave its children on no board anyone renders. Every live
- * (non-archived) descendant moves to `projectId`, one updateCard (one
- * board_mutations row) each — card-service has no transaction primitive, and
- * each write is independently valid. Archived descendants (and anything
- * under them) stay put. Returns how many moved. */
-async function moveDescendants(tdb, parentId, projectId) {
-  const seen = new Set([parentId]);
-  let frontier = [parentId], n = 0;
-  while (frontier.length) {
-    const { rows } = await tdb.execute({
-      sql: `SELECT id FROM tasks_items WHERE parent_id IN (${frontier.map(() => "?").join(",")}) AND board_id IS NULL AND archived_at IS NULL`,
-      args: frontier,
-    });
-    frontier = [];
-    for (const r of rows) {
-      const id = Number(r.id);
-      if (seen.has(id)) continue;
-      seen.add(id);
-      await updateCard(tdb, id, { project_id: projectId }, DASHBOARD_ACTOR);
-      frontier.push(id);
-      n++;
-    }
-  }
-  return n;
-}
-
-function giveAudit(db, row, cardId, extra) {
-  return appendAudit(db, {
-    project_id: Number(row.project_id), actor_type: "local", action: "card_given",
-    target: `card:${cardId}`, payload: { bot_id: String(row.bot_id), ...extra },
-  });
 }
 
 /**
@@ -781,18 +726,20 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
 
   // ---- POST /cards/:id/give — put a card on a bot's board ("Give to…") ----
   // Queue item 20, PR 2. Body {bot_id, start?, note?}. CSRF-railed (this
-  // router mounts after csrfMiddleware), session-gated, never public. Steps:
-  // the card is a live card (404/400/409 archived), top level (400
-  // bad_request for a subtask: it lives in its parent's project), not locked
-  // by a session or job (409 locked), the bot can take it (loadGiveTarget:
-  // 400 bot_unavailable / 409 no_board), not finished (409 finished:
-  // terminal on the target or current board); then ONE updateCard write
-  // (project_id + assigned_bot, one board_mutations row, autonomy untouched
-  // so it stays gated), the card's live subtree moved with it
-  // (moveDescendants), and one card_given audit row (with a children count
-  // when any moved); then, only on start:true, the dispatch core — whose
-  // engine getter is resolved only once a start can actually run. Single-operator dashboard: no project_members check, the
-  // session-authenticated operator owns the box (same as every route here).
+  // router mounts after csrfMiddleware), session-gated, never public. The
+  // checks and writes are give-service.js's giveCard() (shared with the board
+  // dispatch verb), called with the dashboard's human actor and the "local"
+  // audit actor: the card is a live card (404/400/409 archived), top level
+  // (400 bad_request for a subtask: it lives in its parent's project), not
+  // locked by a session or job (409 locked + rail), the bot can take it (400
+  // bot_unavailable / 409 no_board), not finished (409 finished: terminal on
+  // the target or current board); then ONE updateCard write (project_id +
+  // assigned_bot, one board_mutations row, autonomy untouched so it stays
+  // gated), the card's live subtree moved with it, and one card_given audit
+  // row (with a children count when any moved). Then, only on start:true,
+  // the dispatch core — whose engine getter is resolved only once a start
+  // can actually run. Single-operator dashboard: no project_members check,
+  // the session-authenticated operator owns the box (same as every route here).
   router.post(P + "/cards/:id/give", async (req, res) => {
     const cardId = /^\d+$/.test(String(req.params.id)) ? Number(req.params.id) : null;
     const body = req.body && typeof req.body === "object" ? req.body : {};
@@ -804,22 +751,10 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     const ctx = { tdb: null };
     try {
       ctx.tdb = createDbClient(TASKS_DB);
-      const cur = await loadDispatchableCard(ctx.tdb, cardId);
-      // A subtask lives in its parent's project — give the parent instead.
-      if (cur.parent_id != null) return jsonError(res, 400, "bad_request");
-      const lock = await lockState(db, cardId);
-      if (lock.locked) return jsonError(res, 409, "locked", { rail: lock.rail });
-      const row = await loadGiveTarget(db, botId);
-      const projectId = Number(row.project_id);
-      // A finished card is not a task to give: terminal per the TARGET
-      // board's definition or the card's CURRENT one (each the builtin
-      // default when the board has none — an unassigned card's case).
-      const finished = isTerminal(await resolveBoardDef(ctx.tdb, { projectId }), cur.status)
-        || isTerminal(await resolveBoardDef(ctx.tdb, { projectId: cur.project_id }), cur.status);
-      if (finished) return jsonError(res, 409, "finished");
-      await updateCard(ctx.tdb, cardId, { project_id: projectId, assigned_bot: botId }, DASHBOARD_ACTOR);
-      const children = await moveDescendants(ctx.tdb, cardId, projectId);
-      await giveAudit(db, row, cardId, { start: body.start === true, ...(children ? { children } : {}) });
+      const { row } = await giveCard(ctx.tdb, db, {
+        cardId, botId, actor: DASHBOARD_ACTOR,
+        audit: { actor_type: "local", extra: { start: body.start === true } },
+      });
       res.json(await startAfterGive(ctx, { row, getEng: resolveEngine, botId, cardId, start: body.start, note }));
     } catch (err) {
       mapEngineError(res, err);
@@ -847,7 +782,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       const row = await loadGiveTarget(db, botId);
       ctx.tdb = createDbClient(TASKS_DB);
       const { id: cardId } = await createCard(ctx.tdb, { title, project_id: Number(row.project_id), assigned_bot: botId }, DASHBOARD_ACTOR);
-      await giveAudit(db, row, cardId, { start: body.start === true, created: true });
+      await giveAudit(db, row, cardId, { start: body.start === true, created: true }, { actor_type: "local" });
       res.json(await startAfterGive(ctx, { row, getEng: resolveEngine, botId, cardId, start: body.start, note }));
     } catch (err) {
       mapEngineError(res, err);
