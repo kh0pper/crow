@@ -13,13 +13,29 @@ const sections = new Map();
 
 /** Group definitions with order and i18n label keys */
 export const GROUPS = {
-  general:       { order: 10, labelKey: "settings.group.general" },
-  ai:            { order: 20, labelKey: "settings.group.ai" },
-  connections:   { order: 30, labelKey: "settings.group.connections" },
-  content:       { order: 40, labelKey: "settings.group.content" },
-  multiInstance: { order: 45, labelKey: "settings.group.multiInstance" },
-  system:        { order: 50, labelKey: "settings.group.system" },
-  account:       { order: 60, labelKey: "settings.group.account" },
+  ai:         { order: 10, labelKey: "settings.group.ai" },
+  voice:      { order: 20, labelKey: "settings.group.voice" },
+  accounts:   { order: 30, labelKey: "settings.group.accounts" },
+  devices:    { order: 40, labelKey: "settings.group.devices" },
+  security:   { order: 50, labelKey: "settings.group.security" },
+  backup:     { order: 60, labelKey: "settings.group.backup" },
+  appearance: { order: 70, labelKey: "settings.group.appearance" },
+  blog:       { order: 80, labelKey: "settings.group.blog" },
+  otherCrows: { order: 90, labelKey: "settings.group.otherCrows" },
+  advanced:   { order: 100, labelKey: "settings.group.advanced" },
+};
+
+/**
+ * Pre-redesign group names. Third-party add-on sections may still declare
+ * them; they are mapped at registration so those sections never vanish.
+ */
+export const LEGACY_GROUP_ALIASES = {
+  general: "appearance",
+  connections: "accounts",
+  content: "blog",
+  multiInstance: "otherCrows",
+  system: "advanced",
+  account: "security",
 };
 
 /**
@@ -33,6 +49,9 @@ export const GROUPS = {
  *     - render({ req, res, db, lang }): Promise<string>
  *   Optional:
  *     - navOrder:  number — order within the group
+ *     - hidden:    boolean — registered and deep-linkable, never in the menu
+ *     - hiddenUnless: "peer" — shown in the menu only once a trusted second
+ *                  Crow is paired (see hasTrustedPeer in menu-renderer.js)
  *     - icon:      string — inline SVG markup
  *     - getPreview({ settings, db, lang }): Promise<string> — menu subtitle
  *                  (keep it to cheap reads: it runs on every menu load)
@@ -50,6 +69,8 @@ export const GROUPS = {
  * @param {object} manifest - Section module default export
  */
 export function registerSettingsSection(manifest) {
+  const alias = LEGACY_GROUP_ALIASES[manifest.group];
+  if (alias) manifest = { ...manifest, group: alias };
   sections.set(manifest.id, manifest);
 }
 

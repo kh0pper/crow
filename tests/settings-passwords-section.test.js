@@ -61,7 +61,7 @@ test("the page lists metadata only, escapes labels, marks removed extensions, an
   assert.equal((renderPasswordsPage({ entries: ENTRIES, method: "password", vaultAvailable: true, lang: "en" }).match(/class="[^"]*pw-vault[ "]/g) || []).length, 5);
   assert.match(renderPasswordsPage({ entries: [], method: "password", vaultAvailable: false, lang: "es" }), new RegExp(t("passwords.empty", "es")));
   assert.equal(section.id, "passwords");
-  assert.equal(section.group, "account");
+  assert.equal(section.group, "security");
   assert.notEqual(t("settings.section.passwords", "es"), "settings.section.passwords");
 });
 

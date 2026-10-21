@@ -51,6 +51,7 @@ import unifiedDashboardSection from "../settings/sections/unified-dashboard.js";
 import remoteExposureSection from "../settings/sections/remote-exposure.js";
 import remoteInvocationSection from "../settings/sections/remote-invocation.js";
 import remoteBotManagementSection from "../settings/sections/remote-bot-management.js";
+import otherCrowsSharingSection from "../settings/sections/other-crows-sharing.js";
 import botRuntimeSection from "../settings/sections/bot-runtime.js";
 // NOTE: ai-provider.js + providers.js deleted; their responsibilities are
 // absorbed by llmSection.providers-tab (cloud add + registry view). The
@@ -71,6 +72,7 @@ registerSettingsSection(unifiedDashboardSection);
 registerSettingsSection(remoteExposureSection);
 registerSettingsSection(remoteInvocationSection);
 registerSettingsSection(remoteBotManagementSection);
+registerSettingsSection(otherCrowsSharingSection);
 registerSettingsSection(botRuntimeSection);
 registerSettingsSection(pairedInstancesSection);
 registerSettingsSection(syncConflictsSection);

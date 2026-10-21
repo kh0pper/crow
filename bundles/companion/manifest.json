@@ -1,7 +1,7 @@
 {
   "id": "companion",
   "name": "AI Companion",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "draft": true,
   "privileged": true,
   "install_consent_messages": {

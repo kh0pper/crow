@@ -64,7 +64,9 @@ test("menu previews get the db: LLM counts enabled providers, Data hygiene scans
 
     assert.equal(previewOf(html, "llm"), "2 providers", "counts enabled providers only");
     assert.equal(previewOf(html, "data-hygiene"), "clean");
-    assert.equal(previewOf(html, "paired-instances"), "0 active", "this instance's own row is not a peer");
+    // Paired Instances is hidden from the menu until a peer exists (hiddenUnless: "peer"),
+    // so read its preview directly.
+    assert.equal(await sections[2].getPreview({ settings: {}, db, lang: "en" }), "0 active", "this instance's own row is not a peer");
     assert.equal(previewOf(html, "sync-conflicts"), "none");
     assert.equal(previewOf(html, "audit-log"), "0 in 24h");
   } finally {
@@ -88,7 +90,7 @@ test("identity preview shows the Crow ID prefix, never 'undefined...' (scratch d
 
 test("previews are escaped (they can carry synced values)", async () => {
   const { renderSettingsMenu } = await import("../servers/gateway/dashboard/settings/menu-renderer.js");
-  const evil = { id: "evil", group: "general", labelKey: "settings.section.blog", async getPreview() { return '<img src=x onerror="alert(1)">'; } };
+  const evil = { id: "evil", group: "appearance", labelKey: "settings.section.blog", async getPreview() { return '<img src=x onerror="alert(1)">'; } };
   const fakeDb = { execute: async () => ({ rows: [] }) };
   const html = await renderSettingsMenu([evil], fakeDb, "en");
   assert.doesNotMatch(html, /<img src=x/);

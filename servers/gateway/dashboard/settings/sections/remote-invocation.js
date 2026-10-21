@@ -16,9 +16,10 @@ async function readFlags(db) {
 
 export default {
   id: "remote-invocation",
-  group: "multiInstance",
+  group: "otherCrows",
   icon: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/><circle cx="4" cy="12" r="1"/></svg>`,
   labelKey: "settings.section.remoteInvocation",
+  hidden: true,
   navOrder: 7,
 
   async getPreview({ settings }) {

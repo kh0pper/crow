@@ -437,7 +437,7 @@ export function passwordsClientJS(lang) {
 
 export default {
   id: "passwords",
-  group: "account",
+  group: "security",
   icon: ICON,
   labelKey: "settings.section.passwords",
   navOrder: 12, // after Change Password (10) and Two-Factor (11)
