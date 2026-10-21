@@ -101,6 +101,7 @@ import { BOT_JOBS_DDL, missingBotJobsColumns } from "../../../scripts/pi-bots/bo
 import { isVoiceBotId } from "../../shared/voice-bot.js";
 import { decideOption } from "../board/decision-service.js";
 import { isEnabledBot } from "../board/bot-lookup.js";
+import { csrfMiddleware } from "../dashboard/shared/csrf.js";
 
 // Slice C: operator-approved promotion target (the PRIMARY skills dir both the
 // pi bridge and the glasses voice path search via skill_resolver).
@@ -274,6 +275,12 @@ export default function botBoardApiRouter(dashboardAuth) {
   // FIRST statement: auth-gate the whole prefix (distinct from
   // /dashboard/streams and from the SSR panel route /dashboard/bot-board).
   router.use("/dashboard/bot-board-api", dashboardAuth);
+  // This router mounts at the app root (boot/feature-mounts.js), BEFORE the
+  // dashboard router's csrfMiddleware, so it runs the CSRF double-submit
+  // check itself on every state-changing request. Every in-repo caller is a
+  // dashboard page whose layout fetch wrapper adds X-Crow-Csrf; requests
+  // without a session cookie and peer-signed calls pass, as everywhere else.
+  router.use("/dashboard/bot-board-api", csrfMiddleware);
 
   const P = "/dashboard/bot-board-api";
 
