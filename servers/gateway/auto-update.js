@@ -8,7 +8,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { readFileSync, writeFileSync, readdirSync, statSync, unlinkSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, readdirSync, statSync, unlinkSync, renameSync, accessSync, existsSync, constants as fsConstants } from "node:fs";
 import { dirname, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isSupervised } from "../shared/supervisor.js";
@@ -166,6 +166,26 @@ function lockIsStale(info) {
   return !alive || old; // reclaim on (dead PID) OR (age>30min) — a wedged live updater must not block forever
 }
 
+/**
+ * Is the checkout pulled by someone else? True when CROW_AUTO_UPDATE_TREE is
+ * "external", or when this process cannot write the git dir (a hardened
+ * co-hosted gateway that sees the shared checkout through a read-only bind:
+ * ProtectHome= + BindReadOnlyPaths=). Such a gateway never pulls and never
+ * takes the checkout lock; it only observes the lock and converges onto
+ * whatever the tree holds (queue item 19, migration step 1).
+ */
+export async function treeIsExternal(cwd = null) {
+  if (String(process.env.CROW_AUTO_UPDATE_TREE || "").trim().toLowerCase() === "external") return true;
+  const lock = await lockPath(cwd);
+  if (!lock) return false;
+  try {
+    accessSync(dirname(lock), fsConstants.W_OK);
+    return false;
+  } catch (err) {
+    return err.code === "EROFS" || err.code === "EACCES" || err.code === "EPERM";
+  }
+}
+
 /** Returns the lock file path on success, null when another updater holds it. */
 function acquireLock(path) {
   // Sweep crash-orphaned quarantine files older than the staleness window.
@@ -225,7 +245,17 @@ export async function acquireCheckoutLock({ appRoot = null, waitMs = 6 * 60 * 10
   const lock = await lockPath(appRoot);
   if (!lock) return null;
   const deadline = Date.now() + waitMs;
+  // A read-only (externally pulled) tree cannot take the lock, only observe
+  // it: proceed once no live, young holder exists. The returned path is not
+  // owned, so releaseCheckoutLock() (owner-checked) leaves it alone.
+  const observeOnly = await treeIsExternal(appRoot);
   for (;;) {
+    if (observeOnly) {
+      if (!existsSync(lock) || lockIsStale(readLock(lock))) return lock;
+      if (Date.now() >= deadline) return null;
+      await new Promise((r) => setTimeout(r, pollMs));
+      continue;
+    }
     const held = acquireLock(lock);
     if (held) return held;
     if (Date.now() >= deadline) return null;
@@ -259,12 +289,26 @@ export async function checkForUpdates({ instance = null } = {}) {
       await saveSetting("auto_update_last_result", msg);
       return { updated: false, skipped: "not-on-main", branch: branch.stdout, message: msg };
     }
-    const lock = await lockPath();
-    const held = lock ? acquireLock(lock) : null;
     let treeResult = { updated: false };
     let pulled = false;
+    const external = await treeIsExternal();
+    const lock = external ? null : await lockPath();
+    const held = lock ? acquireLock(lock) : null;
 
-    if (lock && !held) {
+    if (external) {
+      // Hardened co-hosted gateway: the shared checkout is read-only here and
+      // another gateway pulls it. Skip the TREE half (no fetch, no lock) and
+      // still run the INSTANCE half below.
+      const msg = "Tree pull skipped: the checkout is read-only for this instance (a co-hosted gateway pulls it)";
+      log(msg);
+      await saveSetting("auto_update_last_check", new Date().toISOString());
+      await saveSetting("auto_update_last_result", msg);
+      treeResult = { updated: false, skipped: "read-only", message: msg };
+      try {
+        const om = await run("git", ["rev-parse", "--short", "origin/main"]);
+        if (om.code === 0 && om.stdout) await saveSetting("auto_update_latest_version", om.stdout);
+      } catch {}
+    } else if (lock && !held) {
       // NOT an error, and NOT a reason to stop. The tree is shared: another
       // co-hosted gateway is pulling it, which is exactly right. This instance
       // skips the PULL and still converges itself below. Before this split it
