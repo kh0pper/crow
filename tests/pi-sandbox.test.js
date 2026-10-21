@@ -200,6 +200,7 @@ test("M1: the mode comes from the gateway's env, never from the child env", () =
     assert.equal(w.sandboxed, true, "a child-env CROW_PI_SANDBOX=off does not turn the sandbox off");
     assert.ok(!("CROW_PI_SANDBOX" in w.env));
     assert.deepEqual(filterSpawnEnv({ spawn_env: { CROW_PI_SANDBOX: "off", A: "1" } }), { A: "1" }, "spawn_env strips CROW_PI_SANDBOX");
+    assert.deepEqual(filterSpawnEnv({ spawn_env: { CROW_PI_CONTAIN_BOTS: "x", A: "1" } }), { A: "1" }, "spawn_env strips CROW_PI_CONTAIN_BOTS");
   } finally {
     if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
   }
