@@ -19,16 +19,19 @@
  *      fails closed (Monday-synced cards have none) — 403 not_granted;
  *   5. a valid target (not the caller, an enabled non-voice bot) — 400
  *      bad_bot;
- *   6. a subtree safe to move: every live descendant is unlocked, assigned
- *      to nobody or the caller, and was never reparented by a non-human — 409
- *      subtree_blocked (so a bot cannot launder someone else's card into a
- *      dispatchable card's subtree);
+ *   6. a subtree safe to move: the card itself was never reparented or
+ *      detached by a non-human, and every live descendant is unlocked,
+ *      assigned to nobody or the caller, and was never reparented by a
+ *      non-human — 409 subtree_blocked (so a bot cannot launder someone
+ *      else's card into a dispatchable card's subtree, nor detach an
+ *      operator subtask to dispatch it alone);
  *   7. the give core's own checks (409 locked, 409 finished, 400
  *      bot_unavailable, 409 no_board), run here before any write too.
  *
  * Effect: one guarded UPDATE claims the hand-off by clearing dispatch_grants
  * (0 rows → 409 changed: the card moved, was archived, reparented or
- * reassigned since the checks); then giveCard with the bot actor and
+ * reassigned since the checks, or — on the grant path — the grant was
+ * revoked or already spent by a concurrent dispatch); then giveCard with the bot actor and
  * autonomy "gated" (card and children); then one `dispatch` mutation. Nothing
  * starts: no job, no session.
  *
@@ -104,18 +107,29 @@ async function liveDescendants(tdb, rootId) {
   return out;
 }
 
-/** Rule 6: true when any live descendant blocks the move. */
-async function subtreeBlocked(tdb, cdb, rootId, callerId) {
-  const kids = await liveDescendants(tdb, rootId);
-  if (!kids.length) return false;
-  if (kids.some((k) => k.assigned_bot != null && k.assigned_bot !== callerId)) return true;
-  const ids = kids.map((k) => k.id);
-  if ((await lockedCardIds(cdb, ids)).size) return true;
+/** True when any of `ids` has an update row by a non-human actor that
+ * changed parent_id (a bot reparented or detached it). */
+async function botReparented(tdb, ids) {
+  if (!ids.length) return false;
   const { rows } = await tdb.execute({
     sql: `SELECT detail_json FROM board_mutations WHERE item_id IN (${ids.map(() => "?").join(",")}) AND verb='update' AND actor_kind != 'human'`,
     args: ids,
   });
   return rows.some((r) => Object.prototype.hasOwnProperty.call(parseJson(r.detail_json), "parent_id"));
+}
+
+/** Rule 6: true when the move is unsafe — the ROOT card was ever reparented
+ * by a non-human (a bot detached an operator subtask to dispatch it alone),
+ * or any live descendant is assigned to another bot, locked, or was
+ * reparented by a non-human. */
+async function subtreeBlocked(tdb, cdb, rootId, callerId) {
+  if (await botReparented(tdb, [rootId])) return true;
+  const kids = await liveDescendants(tdb, rootId);
+  if (!kids.length) return false;
+  if (kids.some((k) => k.assigned_bot != null && k.assigned_bot !== callerId)) return true;
+  const ids = kids.map((k) => k.id);
+  if ((await lockedCardIds(cdb, ids)).size) return true;
+  return botReparented(tdb, ids);
 }
 
 /**
@@ -157,17 +171,24 @@ export async function dispatchCard(tdb, cdb, { itemId, toBot, note } = {}, actor
 
   // 6. a subtree safe to move
   if (await subtreeBlocked(tdb, cdb, itemId, callerId)) {
-    throw fail("a subtask is locked, assigned to another bot, or was moved under this card by a bot", "subtree_blocked", 409);
+    throw fail("the card was detached by a bot, or a subtask is locked, assigned to another bot, or was moved under this card by a bot", "subtree_blocked", 409);
   }
 
   // 7. the give core's checks, before anything is written
   await checkGive(tdb, cdb, itemId, toBot);
 
   // Claim: one guarded write. 0 rows → the card changed since the checks.
+  // On the grant path the grant itself must still be there: an operator
+  // revoke after the checks wins, and two concurrent dispatches cannot both
+  // spend one grant (the first claim removes it).
+  const viaGrant = !prov.humanCreated;
   const claim = await tdb.execute({
     sql: `UPDATE tasks_items SET data_json = json_remove(data_json, '$.dispatch_grants')
-          WHERE id = ? AND assigned_bot = ? AND parent_id IS NULL AND archived_at IS NULL AND board_id IS NULL`,
-    args: [itemId, callerId],
+          WHERE id = ? AND assigned_bot = ? AND parent_id IS NULL AND archived_at IS NULL AND board_id IS NULL` +
+      (viaGrant
+        ? ` AND json_valid(data_json) AND EXISTS (SELECT 1 FROM json_each(tasks_items.data_json, '$.dispatch_grants') WHERE value = ?)`
+        : ""),
+    args: viaGrant ? [itemId, callerId, callerId] : [itemId, callerId],
   });
   if (!Number(claim.rowsAffected)) throw fail("the card changed while dispatching", "changed", 409);
 
