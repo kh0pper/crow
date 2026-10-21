@@ -17,6 +17,7 @@
  */
 
 import { spawn as spawnCb } from "node:child_process";
+import { withoutCredentialKeys, credentialKeyNames } from "../shared/credentials-env.js";
 
 /**
  * Spawn and supervise a generic child process.
@@ -135,7 +136,8 @@ export function superviseProcess({
 
   function spawnChild() {
     const spawnOpts = { detached: true, stdio: [stdinPayload ? "pipe" : "ignore", "pipe", "pipe"] };
-    if (env !== undefined) spawnOpts.env = env;
+    if (env !== undefined) spawnOpts.env = withoutCredentialKeys(env);
+    else if (credentialKeyNames().length) spawnOpts.env = withoutCredentialKeys(process.env);
     if (cwd !== undefined) spawnOpts.cwd = cwd;
     const [cmd, cmdArgs] = setprivAvailable
       ? ["setpriv", ["--pdeathsig=SIGTERM", command, ...args]]

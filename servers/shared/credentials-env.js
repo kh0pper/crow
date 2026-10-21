@@ -28,6 +28,23 @@ import { join } from "node:path";
 const KEY_RE = /^[A-Z_][A-Z0-9_]*$/;
 export const MAX_CREDENTIAL_BYTES = 64 * 1024;
 
+/** Names this process applied from credentials (values are never kept here). */
+const applied = new Set();
+export function credentialKeyNames() { return [...applied]; }
+/**
+ * A copy of `env` without the keys applied from credentials, for a child's
+ * environment. Returns `env` itself when nothing was applied, so callers that
+ * pass undefined/inherit keep their exact behaviour.
+ */
+export function withoutCredentialKeys(env) {
+  if (!applied.size || !env) return env;
+  const out = { ...env };
+  for (const k of applied) delete out[k];
+  return out;
+}
+/** Test seam. */
+export function _resetCredentialKeysForTest() { applied.clear(); }
+
 export function credentialRoots(env = process.env, { realpathFn = realpathSync } = {}) {
   const roots = ["/run/credentials"];
   const xdg = String((env && env.XDG_RUNTIME_DIR) || "").trim();
@@ -111,6 +128,7 @@ export function applyCredentialFiles(env = process.env, { dir, roots, log = cons
     }
     env[name] = r.value;
     result.applied.push(name);
+    if (env === process.env) applied.add(name);
   }
   if (result.applied.length) {
     log.log(`[credentials] applied ${result.applied.length} key(s) from systemd credentials: ${result.applied.join(", ")}`);

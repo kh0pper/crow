@@ -127,3 +127,33 @@ test("the instance-paths gate applies credentials BEFORE the checkout .env, so a
   assert.equal(env.SOME_API_TOKEN, "cred-value");
   assert.equal(env.OTHER, "1");
 });
+
+test("keys applied to process.env are dropped from the central child envs (add-on stdio, supervised children)", async () => {
+  const { withoutCredentialKeys, credentialKeyNames, _resetCredentialKeysForTest } = await import("../servers/shared/credentials-env.js");
+  const { addonStdioEnv } = await import("../servers/gateway/proxy.js");
+  const dir = credDir({ CRED_STRIP_PROBE_TOKEN: "strip-me" });
+  const prevDir = process.env.CREDENTIALS_DIRECTORY;
+  try {
+    process.env.CREDENTIALS_DIRECTORY = dir;
+    applyCredentialFiles(process.env, { roots, log: quietLog().log });
+    assert.equal(process.env.CRED_STRIP_PROBE_TOKEN, "strip-me", "this process holds it");
+    assert.ok(credentialKeyNames().includes("CRED_STRIP_PROBE_TOKEN"));
+    assert.equal(withoutCredentialKeys(process.env).CRED_STRIP_PROBE_TOKEN, undefined);
+    assert.equal(addonStdioEnv({ env: { A: "1" } }).CRED_STRIP_PROBE_TOKEN, undefined, "add-on stdio children never get it");
+    assert.equal(addonStdioEnv({ env: { A: "1" } }).A, "1");
+    assert.equal(process.env.CREDENTIALS_DIRECTORY, dir, "the directory pointer stays (the board-secret reader needs it)");
+  } finally {
+    delete process.env.CRED_STRIP_PROBE_TOKEN;
+    if (prevDir === undefined) delete process.env.CREDENTIALS_DIRECTORY; else process.env.CREDENTIALS_DIRECTORY = prevDir;
+    _resetCredentialKeysForTest();
+  }
+  const plain = { X: "1" };
+  assert.equal(withoutCredentialKeys(plain), plain, "nothing applied: the same object (inherit behaviour unchanged)");
+});
+
+test("applying to a non-process env does not mark keys for stripping", async () => {
+  const { credentialKeyNames } = await import("../servers/shared/credentials-env.js");
+  const dir = credDir({ LOCAL_ONLY_TOKEN: "v" });
+  applyCredentialFiles({ CREDENTIALS_DIRECTORY: dir }, { roots, log: quietLog().log });
+  assert.ok(!credentialKeyNames().includes("LOCAL_ONLY_TOKEN"));
+});
