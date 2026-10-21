@@ -106,6 +106,11 @@ Desde el **Crow's Nest**, abre el panel de **Skills** para explorar todas las sk
 
 - **Skills integradas** — Vienen con Crow y se actualizan cuando actualizas Crow. Son de solo lectura en el panel de Skills.
 - **Skills de usuario** — Tus skills personalizadas o sobrescritas, guardadas en `~/.crow/skills/`. Tienen prioridad sobre las skills integradas y las actualizaciones nunca las sobrescriben.
+- **Skills de extensiones** — Se instalan con una extensión y se actualizan con ella. Se abren en solo lectura; **Personalizar…** crea tu propia copia, que deja de recibir las actualizaciones de la extensión.
+
+### Desactivar una skill
+
+Cada skill del panel de Skills tiene un interruptor. Una skill desactivada queda fuera para todos los bots de este Crow a partir de su próxima conversación nueva (una conversación ya abierta conserva lo que tenía al empezar). Los bots que la eligen conservan la selección, así que al activarla de nuevo la recuperan. La lista es de cada Crow: una instancia emparejada tiene la suya. Las skills de extensiones se desactivan en lugar de eliminarse.
 
 ### Personalizar una skill integrada
 
@@ -129,7 +134,7 @@ Crow propondrá la skill, pedirá tu aprobación y luego la guardará en `~/.cro
 
 > "Crow, elimina mi skill personalizada de compartir"
 
-Esto borra la sobrescritura de `~/.crow/skills/`, restaurando la versión integrada. También puedes eliminar skills desde el panel de Skills en el Crow's Nest.
+Esto borra la sobrescritura de `~/.crow/skills/`, restaurando la versión integrada. También puedes eliminar skills desde el panel de Skills en el Crow's Nest. Eliminar tu copia de una skill de extensión no recupera por sí solo la versión de la extensión: desinstala la extensión (conservando sus datos) y vuelve a instalarla.
 
 ### Instalar skills de la comunidad
 

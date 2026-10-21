@@ -106,6 +106,11 @@ From the **Crow's Nest**, open the **Skills** panel to browse all available skil
 
 - **Built-in skills** — Ship with Crow and get updated when you update Crow. These are read-only in the Skills panel.
 - **User skills** — Your custom or overridden skills, stored in `~/.crow/skills/`. These take precedence over built-in skills and are never overwritten by updates.
+- **Extension skills** — Installed with an extension and updated with it. They open read-only; **Customize…** makes your own copy, which then stops getting the extension's updates.
+
+### Switching a skill off
+
+Each skill in the Skills panel has an on/off switch. A skill you switch off is left out for every bot on this Crow, starting with their next new conversation (a conversation already open keeps what it started with). Bots that select it keep the selection, so switching it back on restores it. The list is per Crow: a paired instance has its own. Extension skills are switched off rather than deleted.
 
 ### Customizing a built-in skill
 
@@ -129,7 +134,7 @@ Crow will propose the skill, ask for your approval, then save it to `~/.crow/ski
 
 > "Crow, remove my custom sharing skill"
 
-This deletes the override from `~/.crow/skills/`, restoring the built-in version. You can also delete skills from the Skills panel in the Crow's Nest.
+This deletes the override from `~/.crow/skills/`, restoring the built-in version. You can also delete skills from the Skills panel in the Crow's Nest. Deleting your copy of an extension's skill does not bring the extension's version back by itself: uninstall the extension (keeping its data) and install it again.
 
 ### Installing community skills
 
