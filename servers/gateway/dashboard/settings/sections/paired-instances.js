@@ -71,7 +71,11 @@ export default {
 
   async getPreview({ db }) {
     try {
-      const { rows } = await db.execute("SELECT COUNT(*) AS n FROM crow_instances WHERE status='active'");
+      // Peers only: this instance's own row is not a pairing.
+      const { rows } = await db.execute({
+        sql: "SELECT COUNT(*) AS n FROM crow_instances WHERE status='active' AND id != ?",
+        args: [localInstanceIdOrNull() || ""],
+      });
       const active = Number(rows[0]?.n || 0);
       return `${active} active`;
     } catch {

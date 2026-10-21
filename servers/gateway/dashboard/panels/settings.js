@@ -30,7 +30,6 @@ import notificationsSection from "../settings/sections/notifications.js";
 import portsSection from "../settings/sections/ports.js";
 import pairedInstancesSection from "../settings/sections/paired-instances.js";
 import syncConflictsSection from "../settings/sections/sync-conflicts.js";
-import syncProfilesSection from "../settings/sections/sync-profiles.js";
 import sharedStorageSection from "../settings/sections/shared-storage.js";
 import auditLogSection from "../settings/sections/audit-log.js";
 import sharedContextSection from "../settings/sections/shared-context.js";
@@ -75,7 +74,6 @@ registerSettingsSection(remoteBotManagementSection);
 registerSettingsSection(botRuntimeSection);
 registerSettingsSection(pairedInstancesSection);
 registerSettingsSection(syncConflictsSection);
-registerSettingsSection(syncProfilesSection);
 registerSettingsSection(sharedStorageSection);
 registerSettingsSection(auditLogSection);
 registerSettingsSection(sharedContextSection);
@@ -124,9 +122,20 @@ export default {
 
     // Sub-page: render individual section
     if (sectionId) {
+      // Old profile section ids now live as LLM Orchestrator → Profiles
+      // subtabs; send old links and bookmarks there, not to the menu.
+      const PROFILE_SUBTABS = {
+        tts: "tts",
+        "tts-profiles": "tts",
+        "ai-profiles": "chat",
+        "stt-profiles": "stt",
+        "vision-profiles": "vision",
+      };
+      if (PROFILE_SUBTABS[sectionId]) {
+        return res.redirect(`/dashboard/settings?section=llm&tab=profiles&subtab=${PROFILE_SUBTABS[sectionId]}`);
+      }
       // Alias map: resolve deprecated section ids to their replacements.
       const SECTION_ALIASES = {
-        tts: "tts-profiles",
         "companion-voice": "companion",
       };
       const resolvedId = SECTION_ALIASES[sectionId] || sectionId;

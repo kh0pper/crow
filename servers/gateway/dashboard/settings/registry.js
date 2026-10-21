@@ -34,7 +34,8 @@ export const GROUPS = {
  *   Optional:
  *     - navOrder:  number — order within the group
  *     - icon:      string — inline SVG markup
- *     - getPreview({ db, lang }): Promise<string> — menu subtitle
+ *     - getPreview({ settings, db, lang }): Promise<string> — menu subtitle
+ *                  (keep it to cheap reads: it runs on every menu load)
  *     - handleAction({ req, res, db, action }): Promise<boolean>
  *     - scope:     "global" | "local" | "mixed" — declares whether the
  *                  section's settings are operator-global (synced), strictly

@@ -2038,6 +2038,8 @@ export const translations = {
   "settings.providers.engineUp": { en: "external engine reachable from this instance", es: "motor externo accesible desde esta instancia" },
   "settings.providers.engineDown": { en: "external engine not reachable from this instance", es: "motor externo no accesible desde esta instancia" },
   "settings.providers.engineUnprobed": { en: "external engine not probed yet", es: "motor externo aún sin sondear" },
+  "settings.providers.syncButton": { en: "Sync bundle providers", es: "Sincronizar proveedores de paquetes" },
+  "settings.providers.syncHint": { en: "Refreshes the enabled providers from models.json now. Never turns a disabled provider back on and never adds one.", es: "Actualiza ahora los proveedores activados desde models.json. Nunca vuelve a activar un proveedor desactivado ni añade ninguno." },
   "settings.searchPlaceholder": { en: "Search settings", es: "Buscar ajustes" },
   "settings.searchNoResults": { en: "No settings match your search.", es: "Ningún ajuste coincide con tu búsqueda." },
   "settings.passwordUpdated": { en: "Password updated.", es: "Contraseña actualizada." },
@@ -2262,6 +2264,9 @@ export const translations = {
   "settings.section.remoteInvocation": { en: "Remote Tool Invocation", es: "Invocación de herramientas remotas" },
   "settings.section.remoteBotManagement": { en: "Remote Bot Management", es: "Gestión remota de bots" },
   "settings.section.botRuntime": { en: "Bot Runtime", es: "Ejecución de bots" },
+  "settings.botRuntimeCheckbox": { en: "Run bots on this instance", es: "Ejecutar bots en esta instancia" },
+  "settings.botRuntimeDefaultOn": { en: "On by default on this host (no setting saved yet).", es: "Activado por defecto en este equipo (aún no hay ningún ajuste guardado)." },
+  "settings.botRuntimeDefaultOff": { en: "Off by default on this host (no setting saved yet).", es: "Desactivado por defecto en este equipo (aún no hay ningún ajuste guardado)." },
   "settings.botRuntimeBody": {
     en: "When enabled, this instance <strong>runs</strong> the bots defined here — polling Gmail and " +
       "answering Telegram / Slack / Discord. The gateway supervises this itself by default: there is no " +
@@ -2345,7 +2350,6 @@ export const translations = {
   "settings.pairedRevokeRefused": { en: "That instance can't be revoked from here (it is this instance, the home instance, or no longer exists).", es: "Esa instancia no se puede revocar desde aquí (es esta instancia, la instancia principal o ya no existe)." },
   "settings.pairedRevokeDone": { en: "Instance revoked. Sync with it has stopped.", es: "Instancia revocada. La sincronización con ella se ha detenido." },
   "settings.section.syncConflicts": { en: "Sync Conflicts", es: "Conflictos de sincronización" },
-  "settings.section.syncProfiles": { en: "Sync Profiles", es: "Perfiles de sincronización" },
   "settings.section.auditLog": { en: "Cross-Host Audit", es: "Auditoría entre hosts" },
   "settings.section.sharedContext": { en: "Shared Context (crow.md)", es: "Contexto compartido (crow.md)" },
   "settings.section.tts": { en: "Text-to-Speech", es: "Texto a voz" },

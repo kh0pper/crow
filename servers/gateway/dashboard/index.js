@@ -621,6 +621,10 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // pre-auth flows (no session cookie yet), and CROW_CSRF_STRICT=0 rollback.
   router.use("/dashboard", csrfMiddleware);
 
+  // There is no /dashboard/models page (it is /dashboard/model-catalog), but
+  // older notifications stored that link in their action_url.
+  router.get("/dashboard/models", (req, res) => res.redirect("/dashboard/model-catalog"));
+
   // Crow keychain API (Settings → Passwords + the Extensions first-view banner).
   // Session-authed + CSRF-protected by the two middlewares above; the router itself
   // refuses peer-signed requests and serves every response no-store.

@@ -16,7 +16,7 @@ export default {
     try {
       const { loadOrCreateIdentity } = await import("../../../../sharing/identity.js");
       const identity = await loadOrCreateIdentity();
-      return identity.crowId?.slice(0, 12) + "..." || "";
+      return identity?.crowId ? `${identity.crowId.slice(0, 12)}...` : "";
     } catch {
       return "";
     }

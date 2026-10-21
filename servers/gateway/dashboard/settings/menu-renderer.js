@@ -60,10 +60,12 @@ export async function renderSettingsMenu(sections, db, lang) {
 
     for (let i = 0; i < items.length; i++) {
       const section = items[i];
+      // Previews are plain text and may carry synced values (blog title,
+      // shared-storage endpoint), so they are always escaped.
       let preview = "";
       try {
         if (section.getPreview) {
-          preview = await section.getPreview({ settings, lang }) || "";
+          preview = await section.getPreview({ settings, db, lang }) || "";
         }
       } catch {}
 
@@ -76,7 +78,7 @@ export async function renderSettingsMenu(sections, db, lang) {
       html += `<a href="/dashboard/settings?section=${section.id}" class="settings-row${borderClass}" data-search="${hay}">
         <span class="settings-row-icon">${section.icon || ""}</span>
         <span class="settings-row-label">${label}</span>
-        <span class="settings-row-preview">${preview}</span>
+        <span class="settings-row-preview">${escapeHtml(String(preview))}</span>
         <span class="settings-row-chevron">&rsaquo;</span>
       </a>`;
     }

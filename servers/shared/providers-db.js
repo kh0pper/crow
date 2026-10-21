@@ -649,12 +649,20 @@ export async function repairProviderHosts(db, {
  * loopback rows off the sync wire entirely (D9): each instance asserts its
  * own file's loopback rows into its own DB only.
  *
- * Disabled-row safety rule (unchanged): rows `disabled=1` are skipped unless
+ * Disabled-row safety rule: rows `disabled=1` are skipped unless
  * `force=true`, because `unregisterProvidersByBundle` uses the flag to mark
- * bundle-uninstall. Force ("Sync bundle providers" button) means "I know,
- * re-enable": owned rows get today's full re-assert; UNOWNED rows are only
+ * bundle-uninstall and operators use it to retire models. Force means "I
+ * know, re-enable": owned rows get a full re-assert; UNOWNED rows are only
  * flipped back to enabled with their DB content preserved (see
- * reenableProviderPreservingContent).
+ * reenableProviderPreservingContent). Force has NO production caller: the
+ * Settings "Sync bundle providers" button used it until 2026-10, which
+ * re-enabled every retired model still listed in models.json and
+ * replicated that to peers.
+ *
+ * `manual=true` is that button's mode: it only refreshes rows that are
+ * already ENABLED (owned → re-asserted from the file; unowned → skipped). It
+ * never re-enables, never asserts a disabled row, and never adds a missing
+ * row (counted `skipped_absent`). It refuses to combine with `force`.
  *
  * `ownAddrs` is recomputed on EVERY call (never module-cached) so the hourly
  * reconcile sees tailscale coming up after boot and tailnet/DHCP IP changes.
@@ -666,7 +674,7 @@ export async function repairProviderHosts(db, {
  * instance's own bad `host` writes (`repaired` in the returned counters).
  *
  * @param {object} db
- * @param {{ force?: boolean, ownAddrs?: Set<string> }} opts
+ * @param {{ force?: boolean, manual?: boolean, ownAddrs?: Set<string> }} opts
  * @returns {Promise<{ upserted: number, unchanged: number, skipped_disabled: number,
  *                     skipped_unowned: number, skipped_native: number, skipped_managed: number,
  *                     reenabled: number, repaired: number,
@@ -676,11 +684,12 @@ export async function repairProviderHosts(db, {
  *   refused by external-engine write validation (EXTERNAL_ENGINE_*), each
  *   logged once per row id per process (see noteEngineSkip).
  */
-export async function syncProvidersFromModelsJson(db, { force = false, ownAddrs } = {}) {
+export async function syncProvidersFromModelsJson(db, { force = false, manual = false, ownAddrs } = {}) {
+  if (manual && force) throw new Error("syncProvidersFromModelsJson: manual and force cannot be combined");
   const dbClient = db || createDbClient();
   const addrs = ownAddrs || getOwnAddresses(); // fresh every run — see doc comment
   const { path, config, managedIds } = readModelsJson();
-  const counters = { upserted: 0, unchanged: 0, skipped_disabled: 0, skipped_unowned: 0, skipped_native: 0, skipped_managed: 0, reenabled: 0, repaired: 0, failed: 0 };
+  const counters = { upserted: 0, unchanged: 0, skipped_disabled: 0, skipped_unowned: 0, skipped_native: 0, skipped_managed: 0, skipped_absent: 0, reenabled: 0, repaired: 0, failed: 0 };
   const entries = config?.providers
     ? Object.entries(config.providers).filter(([id]) => !id.startsWith("$"))
     : [];
@@ -706,6 +715,10 @@ export async function syncProvidersFromModelsJson(db, { force = false, ownAddrs 
         force,
       });
       if (decision === "skip_disabled") { counters.skipped_disabled++; continue; }
+      // Manual mode (the Settings button) never adds a row: a fresh local
+      // stamp on a row this DB lacks but a peer holds would overwrite the
+      // peer's copy fleet-wide. The boot/hourly pass seeds as before.
+      if (manual && decision === "seed") { counters.skipped_absent++; continue; }
       if (decision === "skip_unowned") { counters.skipped_unowned++; continue; }
       if (decision === "reenable") {
         const res = await reenableProviderPreservingContent(dbClient, id);

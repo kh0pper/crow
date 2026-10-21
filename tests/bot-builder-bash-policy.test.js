@@ -143,7 +143,7 @@ test("render: Auto with no safety check installed says so with the catalog size;
   let html = await render("a1");
   assert.match(html, /data-testid="classifier-status" data-state="missing"/);
   assert.match(html, /qwen3\.5-4b \(about 2\.8 GB\)/);
-  assert.match(html, /href="\/dashboard\/models"/);
+  assert.match(html, /href="\/dashboard\/model-catalog"/);
   await db.execute({ sql: "INSERT OR REPLACE INTO providers (id, base_url, host, models, disabled, instance_id) VALUES (?,?,?,?,0,?)",
     args: ["tail-box", "http://100.64.20.9:8030/v1", "cloud", JSON.stringify([{ id: "qwen3.5-4b" }]), OWN] });
   await db.execute({ sql: "INSERT OR REPLACE INTO dashboard_settings (key, value) VALUES ('bot_safety_classifier', 'tail-box/qwen3.5-4b')" });
