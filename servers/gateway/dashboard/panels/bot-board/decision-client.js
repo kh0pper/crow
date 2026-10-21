@@ -8,7 +8,8 @@
  * {index} (or {index:-1, other_text} for "Other…").
  *
  * Like drawer.js, this returns a bare block of statements spliced into
- * client.js's IIFE, sharing its scope: $, clearEl, api, msg, errText, cur.
+ * client.js's IIFE, sharing its scope: $, clearEl, api, msg, errText, cur,
+ * decisionCardChanged and openCardById.
  * The emitted string sits inside a template literal: no raw backticks, and
  * every backslash is doubled. Every bot-supplied string (question,
  * context_md, labels, consequences, other_text) goes in through textContent
@@ -90,6 +91,9 @@ export function decisionJs(lang) {
           d.chosen=r.j.chosen||{index:index,label:index>=0&&d.options[index]?d.options[index].label:'',other_text:otherText||null};
           if(r.j.created_card_id!=null) d.created_card_id=r.j.created_card_id;
           renderDecision(d);
+          // The answer moved the card on the server (it is closed now):
+          // refresh the drawer's form so Save cannot send the old status.
+          decisionCardChanged(cardId);
           return;
         }
         var note=errText(r,'failed');
@@ -98,6 +102,7 @@ export function decisionJs(lang) {
           // show the server's current state. Only a lock can clear by itself,
           // so every other refusal leaves the options read-only.
           var ro=!(r.j&&r.j.code==='locked');
+          decisionCardChanged(cardId,true);
           api('GET','/card/'+cardId).then(function(r2){
             if(!stillHere()) return;
             renderDecision(r2.ok&&r2.j&&r2.j.decision?r2.j.decision:d,{note:note,readOnly:ro});
