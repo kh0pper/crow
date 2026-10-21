@@ -650,8 +650,9 @@ test("GET /card/:id gains ADDITIVE keys only: autonomy/plan_head/latest_results/
   const before = await (await fetch(base + "/card/" + created.id)).json();
   const EXISTING_KEYS = ["card", "projects", "locked", "board"];
   for (const k of EXISTING_KEYS) assert.ok(Object.hasOwn(before, k), "existing key survives: " + k);
-  assert.deepEqual(Object.keys(before).sort(), [...EXISTING_KEYS, "autonomy", "plan_head", "latest_results", "mutations", "decision"].sort(),
+  assert.deepEqual(Object.keys(before).sort(), [...EXISTING_KEYS, "autonomy", "plan_head", "latest_results", "mutations", "decision", "dispatch_grants"].sort(),
     "additive-only: no existing key dropped, nothing unexpected added");
+  assert.deepEqual(before.dispatch_grants, [], "no grants on a fresh card");
   assert.equal(before.autonomy, "gated");
   assert.equal(before.plan_head, null, "no plan saved yet");
   assert.deepEqual(before.latest_results, []);

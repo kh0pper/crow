@@ -90,6 +90,7 @@ import { listResults, decideResult } from "../board/result-service.js";
 import {
   getCard, getItem, createCard, updateCard, moveCard,
   archiveCard, unarchiveCard, moveItem, updateItem, createItem, archiveItem, unarchiveItem,
+  recordMutation,
 } from "../board/card-service.js";
 // THE shared dual-rail lock predicate (job rail + session rail). The SSR board
 // render and the no-JS move handler import the same module — see board-lock.js
@@ -205,6 +206,16 @@ function serviceError(res, e) {
   return jsonError(res, 500, String((e && e.message) || e));
 }
 
+// data_json.dispatch_grants as a list of bot ids ([] when absent or bad).
+function parseGrants(dataJson) {
+  try {
+    const g = JSON.parse(dataJson == null ? "{}" : String(dataJson)).dispatch_grants;
+    return Array.isArray(g) ? g.filter((x) => typeof x === "string" && x) : [];
+  } catch {
+    return [];
+  }
+}
+
 // True iff the query/body carries the `include_archived` escape (D-T1.6's
 // convention: default views exclude archived_at IS NOT NULL rows; this is
 // the ONLY way to see them). Accepts "1"/"true" from either query or body —
@@ -311,6 +322,8 @@ export default function botBoardApiRouter(dashboardAuth) {
       // blob off the card object so existing consumers see the same shape.
       let decision = null;
       try { decision = JSON.parse(card.data_json || "{}").decision ?? null; } catch { decision = null; }
+      // The operator's dispatch grants (bot ids), additive like `decision`.
+      const dispatch_grants = parseGrants(card.data_json);
       delete card.data_json;
       // Track 1 Task 9 (additive keys only — every key above is untouched):
       // autonomy/plan_head/latest_results/mutations give the drawer (history
@@ -336,6 +349,7 @@ export default function botBoardApiRouter(dashboardAuth) {
         latest_results,
         mutations,
         decision,
+        dispatch_grants,
       });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
@@ -579,6 +593,66 @@ export default function botBoardApiRouter(dashboardAuth) {
     } finally {
       if (tdb) { try { tdb.close(); } catch {} }
       if (cdb) { try { cdb.close(); } catch {} }
+    }
+  });
+
+  // ---- dispatch grant: let the card's bot hand it to another bot ----
+  // The ONLY writer of data_json.dispatch_grants (no MCP tool may), recorded
+  // as the dashboard's human actor in a `dispatch_grant` mutation. Body:
+  // {bot_id, granted}. Granting needs a live top-level card and bot_id equal
+  // to its CURRENT assigned_bot (the write is guarded on it, so a
+  // reassignment racing the grant wins); revoking always goes through. Any
+  // assignee change clears the grants (card-service updateCard), and a
+  // dispatch spends them. CSRF: the router-level csrfMiddleware above.
+  router.post(P + "/card/:id/dispatch-grant", async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
+    const b = req.body || {};
+    if (typeof b.bot_id !== "string" || !b.bot_id) return jsonError(res, 400, "bot_id must be a non-empty string");
+    if (typeof b.granted !== "boolean") return jsonError(res, 400, "granted must be true or false");
+    const botId = b.bot_id, granted = b.granted;
+    let tdb;
+    try {
+      tdb = createDbClient(TASKS_DB);
+      const cur = (await tdb.execute({
+        sql: "SELECT id, archived_at, parent_id, assigned_bot, data_json FROM tasks_items WHERE id=? AND board_id IS NULL",
+        args: [id],
+      })).rows[0];
+      if (!cur) return jsonError(res, 404, "card not found");
+      const before = parseGrants(cur.data_json);
+      if (granted) {
+        if (cur.archived_at != null) return res.status(409).json({ reason: "card is archived", code: "archived" });
+        if (cur.parent_id != null) return jsonError(res, 400, "a subtask moves with its parent; grant the parent", { code: "subtask" });
+        if (cur.assigned_bot !== botId) return jsonError(res, 400, "only the card's current bot can be granted", { code: "not_assigned" });
+        if (!before.includes(botId)) {
+          const w = await tdb.execute({
+            sql: `UPDATE tasks_items SET data_json = json_set(CASE WHEN json_valid(data_json) THEN data_json ELSE '{}' END,
+                    '$.dispatch_grants', json_array(?)), updated_at = datetime('now')
+                  WHERE id = ? AND board_id IS NULL AND archived_at IS NULL AND parent_id IS NULL AND assigned_bot = ?`,
+            args: [botId, id, botId],
+          });
+          if (!Number(w.rowsAffected)) return res.status(409).json({ reason: "the card changed; reload it", code: "changed" });
+          await recordMutation(tdb, { itemId: id, verb: "dispatch_grant", actor: DASHBOARD_ACTOR, detail: { bot_id: botId, granted: true } });
+        }
+      } else if (before.includes(botId)) {
+        await tdb.execute({
+          sql: `UPDATE tasks_items SET data_json = CASE
+                    WHEN (SELECT COUNT(*) FROM json_each(tasks_items.data_json, '$.dispatch_grants') WHERE value IS NOT ?) = 0
+                      THEN json_remove(data_json, '$.dispatch_grants')
+                    ELSE json_set(data_json, '$.dispatch_grants',
+                      (SELECT json_group_array(value) FROM json_each(tasks_items.data_json, '$.dispatch_grants') WHERE value IS NOT ?))
+                  END, updated_at = datetime('now')
+                WHERE id = ? AND board_id IS NULL AND json_valid(data_json) AND json_type(data_json, '$.dispatch_grants') = 'array'`,
+          args: [botId, botId, id],
+        });
+        await recordMutation(tdb, { itemId: id, verb: "dispatch_grant", actor: DASHBOARD_ACTOR, detail: { bot_id: botId, granted: false } });
+      }
+      const after = (await tdb.execute({ sql: "SELECT data_json FROM tasks_items WHERE id=?", args: [id] })).rows[0];
+      return res.json({ ok: true, dispatch_grants: parseGrants(after && after.data_json) });
+    } catch (e) {
+      return serviceError(res, e);
+    } finally {
+      if (tdb) { try { tdb.close(); } catch {} }
     }
   });
 

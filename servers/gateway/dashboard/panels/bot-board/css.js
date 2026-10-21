@@ -251,6 +251,9 @@ export function botBoardStyles() {
   .bb-td-link{display:block;font-size:.82rem;color:var(--crow-accent);text-decoration:none;margin:.3rem 0}
   .bb-td-link:hover{text-decoration:underline}
   .bb-td-readonly{font-size:.85rem;color:var(--crow-text-secondary)}
+  .bb-drawer label.bb-grant{display:flex;gap:.5rem;align-items:center;text-transform:none;letter-spacing:0;font-size:.85rem;color:var(--crow-text-primary);margin:.7rem 0 .15rem}
+  .bb-drawer .bb-grant input{width:auto;padding:0;margin:0}
+  .bb-grant-hint{font-size:.75rem;color:var(--crow-text-muted)}
   .bb-decision{margin-top:1rem;padding:.6rem .7rem;border:1px solid var(--crow-border);border-left:3px solid var(--crow-accent);border-radius:var(--crow-radius-card);background:var(--crow-bg-elevated)}
   .bb-decision-head{font-size:.72rem;color:var(--crow-text-muted);text-transform:uppercase;letter-spacing:.05em}
   .bb-decision-q{font-weight:600;color:var(--crow-text-primary);margin:.25rem 0}

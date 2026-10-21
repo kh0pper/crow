@@ -621,6 +621,7 @@ export function drawerMarkup(lang, def = DEFAULT_BOARD_DEF) {
       <option value="gated">${t("board.autonomyGated", lang)}</option>
       <option value="auto">${t("board.autonomyAuto", lang)}</option>
     </select>
+    <div id="bb-d-grant"></div>
     <div>
       <button type="button" class="bb-btn" id="bb-d-save">${t("botboard.btnSaveCard", lang)}</button>
       <button type="button" class="bb-btn bb-sec" id="bb-d-cancel">${t("botboard.btnCancelCard", lang)}</button>

@@ -228,6 +228,17 @@ const CARD_UPDATE_FIELDS = ["title", "description", "due_date", "phase", "owner"
 // function must not silently drop that override, so it's threaded through as
 // an explicit opt-in rather than folded into the default (archived-refusing)
 // path every other caller relies on.
+/** data_json.dispatch_grants as stored (any JSON value), or undefined when
+ * the key is absent or data_json does not parse. */
+function dispatchGrantsOf(dataJson) {
+  try {
+    const v = JSON.parse(dataJson == null ? "{}" : String(dataJson));
+    return v && typeof v === "object" && !Array.isArray(v) ? v.dispatch_grants : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function updateCard(tdb, id, fields, actor, { allowArchived } = {}) {
   const cur = await getCard(tdb, id);
   if (!cur) throw fail("card not found", "not_found", 404);
@@ -283,6 +294,19 @@ export async function updateCard(tdb, id, fields, actor, { allowArchived } = {})
   }
 
   if (!sets.length) return { id, changed: false };
+
+  // A dispatch grant (data_json.dispatch_grants) is the operator's word for
+  // the bot that held the card at the time; it never survives an assignee
+  // change, whoever makes it (the edit route, giveCard, the MCP mount), so a
+  // card reassigned back never brings an old grant back with it. This is the
+  // one assigned_bot writer they all share.
+  if (Object.prototype.hasOwnProperty.call(detail, "assigned_bot")) {
+    // Removed in SQL even when the read saw none, so a grant written after
+    // that read still goes; the history row names it when the read saw one.
+    sets.push("data_json=CASE WHEN json_valid(data_json) AND json_type(data_json, '$.dispatch_grants') IS NOT NULL THEN json_remove(data_json, '$.dispatch_grants') ELSE data_json END");
+    const grants = dispatchGrantsOf(cur.data_json);
+    if (grants !== undefined) detail.dispatch_grants = [grants, null];
+  }
 
   sets.push("updated_at=datetime('now')");
   args.push(id);
