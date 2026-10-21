@@ -32,7 +32,7 @@ import { NARROWING_LOCK, ALLOW_ONLY_PREFIX, mentionsLock, allowEntryMatches } fr
 import { nonPerchChannels, effectiveShellMode } from "../../servers/shared/bot-permission-policy.js";
 import { createStderrDiag } from "./pi-stderr-diag.mjs";
 import { classifierPolicyBlock, normalizeStoredBashPolicy } from "../../servers/shared/bot-bash-policy.js";
-import { buildBotBaseEnv, botEnvScrubbed } from "../../servers/shared/bot-env.js";
+import { buildBotBaseEnv, botEnvScrubbed, BOARD_ACTOR_SECRET_ENV } from "../../servers/shared/bot-env.js";
 import { appendDates } from "../../servers/shared/relative-dates.js";
 import { stripContextEcho } from "../../servers/gateway/voice/context-echo.js";
 import Database from "better-sqlite3";
@@ -403,7 +403,8 @@ export class PiRpc {
     for (const k of Object.keys(def.spawn_env || {})) {
       // S3 fix round 1 (M1): CROW_PI_SANDBOX is the operator's switch for the
       // pi sandbox; a bot def must not be able to turn it off for itself.
-      if (/^PI_BOT_|^PIBOT_/.test(k) || k === "CROW_PI_SANDBOX") { strippedSpawnEnv.push(k); continue; }
+      // The board actor secret is never a child's to hold or to choose.
+      if (/^PI_BOT_|^PIBOT_/.test(k) || k === "CROW_PI_SANDBOX" || k === BOARD_ACTOR_SECRET_ENV) { strippedSpawnEnv.push(k); continue; }
       spawnEnv[k] = def.spawn_env[k];
     }
     if (strippedSpawnEnv.length) {
@@ -439,6 +440,9 @@ export class PiRpc {
     // def.spawn_env never reaches them, and PI_BOT_INTERACTIVE only ever
     // comes from the engine's extraEnv.
     for (const k of BOT_WORKSPACE_KEYS) delete env[k];
+    // The board actor secret never reaches pi, whatever the base env mode or
+    // the engine's extraEnv carried (buildBotBaseEnv already drops it).
+    delete env[BOARD_ACTOR_SECRET_ENV];
     if (opts.extraEnv && opts.extraEnv.PI_BOT_INTERACTIVE === "1") {
       Object.assign(env, botWorkspaceEnv({ workspaceDir: opts.projectWorkspaceDir || null, projectsRoot: botsProjectsRoot(), botId: opts.botId || null }));
     }

@@ -54,8 +54,13 @@
  *    so a shell can still persist or escape. Only a dedicated bot user closes
  *    this.
  *  - a child replaying its OWN headers (that is its own identity).
+ *
+ * Board-only shared secret (optional, operator-provisioned): see boardKey()
+ * below. It is the one deliberate exception to "never in env", and it covers
+ * board signatures only.
  */
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { BOARD_ACTOR_SECRET_ENV } from "../../servers/shared/bot-env.js";
 
 let key = null;
 
@@ -77,7 +82,7 @@ export function setActorKey(k) {
 export function hasActorKey() { return !!key; }
 
 /** Test seam only. */
-export function _resetActorKeyForTest() { key = null; }
+export function _resetActorKeyForTest() { key = null; boardSecretKey = null; warnedBadSecret = false; }
 
 function mac(k, { kind = "bot", botId, threadId, gatewayType }) {
   // JSON array, not a joined string: no field value can shift a boundary.
@@ -88,18 +93,26 @@ function mac(k, { kind = "bot", botId, threadId, gatewayType }) {
   return createHmac("sha256", k).update(msg).digest("hex");
 }
 
+function signWith(k, actor) {
+  if (!k || !actor || actor.botId == null || String(actor.botId).trim() === "") return null;
+  return mac(k, actor);
+}
+
+function verifyWith(k, { kind = "bot", botId, threadId, gatewayType, sig }) {
+  if (!k || typeof sig !== "string" || !/^[0-9a-f]{64}$/i.test(sig.trim()) || botId == null || String(botId).trim() === "") return false;
+  const want = Buffer.from(mac(k, { kind, botId, threadId, gatewayType }), "hex");
+  const got = Buffer.from(sig.trim(), "hex");
+  return got.length === want.length && timingSafeEqual(got, want);
+}
+
 /** Signature for the actor headers, or null when this process holds no key. */
 export function signActor(actor) {
-  if (!key || !actor || actor.botId == null || String(actor.botId).trim() === "") return null;
-  return mac(key, actor);
+  return signWith(key, actor);
 }
 
 /** Constant-time check of a presented signature. False without a key. */
-export function verifyActorSig({ kind = "bot", botId, threadId, gatewayType, sig }) {
-  if (!key || typeof sig !== "string" || !/^[0-9a-f]{64}$/i.test(sig.trim()) || botId == null || String(botId).trim() === "") return false;
-  const want = Buffer.from(mac(key, { kind, botId, threadId, gatewayType }), "hex");
-  const got = Buffer.from(sig.trim(), "hex");
-  return got.length === want.length && timingSafeEqual(got, want);
+export function verifyActorSig(args) {
+  return verifyWith(key, args);
 }
 
 // ---- board actor headers (S5, 2026-10-02) ----
@@ -112,14 +125,107 @@ export function verifyActorSig({ kind = "bot", botId, threadId, gatewayType, sig
 // optional (Perch and channel turns carry none); it is still bound, so a
 // signature minted without a job cannot be paired with a job id afterwards.
 
+// ---- board-only shared secret (2026-10-20) ----
+//
+// Out-of-gateway runners (the external-supervisor runner, pibot-gateways)
+// never hold the gateway's per-boot key, so their board writes were always
+// unattributed. An operator may provision CROW_BOARD_ACTOR_SECRET (hex or
+// base64, at least 32 bytes decoded) in the environment of BOTH the gateway
+// and the runner. The board key is then
+//
+//   boardKey = HMAC-SHA256(secret, "crow-board-actor-v1")
+//
+// in every process that has it, so a runner's board signature verifies at
+// the gateway and survives a gateway restart. Scope, deliberately narrow:
+//  - board only. Phone and artifacts signatures keep the per-boot in-memory
+//    key; the secret cannot mint them.
+//  - the secret never reaches a child: every bot/child env builder strips it
+//    (servers/shared/bot-env.js withoutBoardActorSecret), and
+//    initBoardSigning() captures the derived key and removes the variable
+//    from process.env so later children cannot inherit it. The supervised
+//    Discord child gets the DERIVED board key over stdin, like the per-boot
+//    key, never the secret.
+//  - it is weaker than the per-boot key against a same-uid process that can
+//    read the gateway's or runner's /proc/<pid>/environ (Yama does not guard
+//    environ reads) or the EnvironmentFile. That is the "bot with an open
+//    shell" case documented above; provision the secret in a root-owned 0600
+//    EnvironmentFile, never a world-readable one.
+// A secret that is set but too short or not hex/base64 is ignored with one
+// warning, and board signing falls back to the per-boot key.
+
+const BOARD_KDF_LABEL = "crow-board-actor-v1";
+let boardSecretKey = null; // derived board key (captured from env, or handed over a pipe)
+let warnedBadSecret = false;
+
+/** Decode an operator secret: hex first (even length, hex digits only), else
+ *  base64 / base64url. Returns a Buffer of at least 32 bytes, or null. */
+export function decodeBoardSecret(raw) {
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+  let b = null;
+  if (s.length % 2 === 0 && /^[0-9a-f]+$/i.test(s)) b = Buffer.from(s, "hex");
+  else if (/^[A-Za-z0-9+/_-]+={0,2}$/.test(s)) b = Buffer.from(s, "base64");
+  return b && b.length >= 32 ? b : null;
+}
+
+function secretKeyFromEnv() {
+  const raw = process.env.CROW_BOARD_ACTOR_SECRET;
+  if (raw == null || String(raw).trim() === "") return null;
+  const b = decodeBoardSecret(raw);
+  if (!b) {
+    if (!warnedBadSecret) {
+      warnedBadSecret = true;
+      // Never the value, never its length.
+      console.warn("[actor-sig] " + BOARD_ACTOR_SECRET_ENV + " is set but does not decode (hex or base64) to at least 32 bytes; ignored; board signing falls back to the per-boot key where this process has one");
+    }
+    return null;
+  }
+  return createHmac("sha256", b).update(BOARD_KDF_LABEL).digest();
+}
+
+function boardKey() {
+  return boardSecretKey || secretKeyFromEnv() || key;
+}
+
+/** "shared-secret" | "per-boot" | "none": which key signs and verifies board
+ *  actor headers in this process. */
+export function boardSigningMode() {
+  if (boardSecretKey || secretKeyFromEnv()) return "shared-secret";
+  return key ? "per-boot" : "none";
+}
+
+/** Startup (gateway and runner): capture the derived board key, then drop the
+ *  secret from this process's env so no child spawned later inherits it.
+ *  Returns boardSigningMode(). Idempotent. */
+export function initBoardSigning() {
+  const k = secretKeyFromEnv();
+  if (k) boardSecretKey = k;
+  delete process.env.CROW_BOARD_ACTOR_SECRET;
+  return boardSigningMode();
+}
+
+/** Install a derived board key received from the gateway over a pipe (the
+ *  supervised Discord child). 64 hex chars, else ignored. */
+export function setBoardKey(hex) {
+  if (typeof hex === "string" && /^[0-9a-f]{64}$/i.test(hex.trim())) boardSecretKey = Buffer.from(hex.trim(), "hex");
+  return !!boardSecretKey;
+}
+
+/** Gateway side of the Discord handoff: " <derived board key hex>" in
+ *  shared-secret mode, "" otherwise (the per-boot key then covers board). */
+export function boardKeyHandoff() {
+  const k = boardSecretKey || secretKeyFromEnv();
+  return k ? " " + k.toString("hex") : "";
+}
+
 /** Signature for the board actor headers, or null without a key / bot id. */
 export function signBoardActor({ botId, jobId } = {}) {
-  return signActor({ kind: "board", botId, threadId: jobId, gatewayType: null });
+  return signWith(boardKey(), { kind: "board", botId, threadId: jobId, gatewayType: null });
 }
 
 /** Constant-time check of a presented board signature. False without a key. */
 export function verifyBoardActorSig({ botId, jobId, sig } = {}) {
-  return verifyActorSig({ kind: "board", botId, threadId: jobId, gatewayType: null, sig });
+  return verifyWith(boardKey(), { kind: "board", botId, threadId: jobId, gatewayType: null, sig });
 }
 
 // ---- artifacts actor headers (Crow Artifacts, spec §7.1 / H6) ----
@@ -130,16 +236,18 @@ export function verifyBoardActorSig({ botId, jobId, sig } = {}) {
 
 /** Signature for the artifacts actor headers, or null without a key / bot id. */
 export function signArtifactsActor({ botId, threadId, gatewayType } = {}) {
-  return signActor({ kind: "artifacts", botId, threadId, gatewayType });
+  return signWith(key, { kind: "artifacts", botId, threadId, gatewayType });
 }
 
 /** Constant-time check of a presented artifacts signature. False without a key. */
 export function verifyArtifactsActorSig({ botId, threadId, gatewayType, sig } = {}) {
-  return verifyActorSig({ kind: "artifacts", botId, threadId, gatewayType, sig });
+  return verifyWith(key, { kind: "artifacts", botId, threadId, gatewayType, sig });
 }
 
-/** Child side of the handoff: read the hex key the gateway wrote on stdin.
- *  Resolves false (never throws) when stdin is empty or closed. */
+/** Child side of the handoff: read the line the gateway wrote on stdin,
+ *  "<per-boot key hex>[ <derived board key hex>]". Resolves whether the
+ *  per-boot key was installed; false (never throws) when stdin is empty or
+ *  closed. */
 export async function readActorKeyFromStdin(stream = process.stdin, timeoutMs = 2000) {
   return await new Promise((resolve) => {
     let buf = "";
@@ -149,9 +257,12 @@ export async function readActorKeyFromStdin(stream = process.stdin, timeoutMs = 
       clearTimeout(t);
       stream.removeListener("data", onData); stream.removeListener("end", finish); stream.removeListener("error", finish);
       try { stream.pause(); } catch {}
-      resolve(setActorKey(buf.split("\n")[0] || ""));
+      const [actorHex = "", boardHex = ""] = (buf.split("\n")[0] || "").trim().split(/\s+/);
+      if (boardHex) setBoardKey(boardHex);
+      resolve(setActorKey(actorHex));
     };
-    const onData = (d) => { buf += d.toString("utf8"); if (buf.includes("\n") || buf.length >= 64) finish(); };
+    // 64 hex + space + 64 hex = 129; a longer unterminated line is not ours.
+    const onData = (d) => { buf += d.toString("utf8"); if (buf.includes("\n") || buf.length >= 160) finish(); };
     const t = setTimeout(finish, timeoutMs);
     stream.on("data", onData); stream.once("end", finish); stream.once("error", finish);
     try { stream.resume(); } catch { finish(); }

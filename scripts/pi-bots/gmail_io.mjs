@@ -27,6 +27,7 @@
  * Prints the tool's JSON result (last line = RESULT <json>).
  */
 import { spawn } from "node:child_process";
+import { withoutBoardActorSecret } from "../../servers/shared/bot-env.js";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -63,7 +64,7 @@ const cmd = process.argv[2];
 
 // cwd is best-effort: PIBOT_GWS_MCP_BIN may point at a binary outside the
 // default checkout dir; never fail the spawn on a missing cwd.
-const child = spawn(BIN, [], { cwd: existsSync(GW) ? GW : undefined, env: Object.assign({}, process.env, ENV), stdio: ["pipe", "pipe", "pipe"] });
+const child = spawn(BIN, [], { cwd: existsSync(GW) ? GW : undefined, env: withoutBoardActorSecret(Object.assign({}, process.env, ENV)), stdio: ["pipe", "pipe", "pipe"] });
 let buf = "", nextId = 1; const pending = new Map(); let stderr = "";
 child.stderr.on("data", (d) => { stderr += d.toString(); });
 child.stdout.on("data", (d) => {
