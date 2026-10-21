@@ -107,15 +107,20 @@ function fakeSuperviseProcess() {
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Bot-cron ticking is covered by bot-runtime-botcron.test.js against its own
+// mkdtemp data dir. Here the ticker is always a stub: the real one resolves the
+// instance data dir, which under a raw `node --test` is the live one.
+const stubBotcronTicker = () => ({ sweep: async () => ({ fired: 0, held: false }), stop: async () => {}, held: false });
+
 let conns = [];
 function trackConn(c) { conns.push(c); return c; }
 
-beforeEach(() => {
-  _resetBotRuntimeForTest();
+beforeEach(async () => {
+  await _resetBotRuntimeForTest();
   conns = [];
 });
-afterEach(() => {
-  _resetBotRuntimeForTest();
+afterEach(async () => {
+  await _resetBotRuntimeForTest();
   for (const c of conns) { try { c.close(); } catch {} }
 });
 
@@ -158,6 +163,7 @@ test("env is read from the injected object, never process.env — a clean env wi
       _clearTimeoutFn: timers.clearTimeoutFn,
       _bus: new EventEmitter(),
       _pollMs: 10,
+      _createBotcronTicker: stubBotcronTicker,
     });
     assert.equal(r.mode, "gateway");
   } finally {
@@ -188,6 +194,7 @@ test("gateway mode: flag on arms the bridge interval and each fire calls runBrid
     _clearTimeoutFn: timers.clearTimeoutFn,
     _bus: new EventEmitter(),
     _pollMs: 10,
+    _createBotcronTicker: stubBotcronTicker,
   });
   await wait(20); // let runtimeGate's boot tick call start()
 
@@ -218,6 +225,7 @@ test("gateway mode: PIBOT_BRIDGE_TICK_MS overrides the default interval period",
     _clearTimeoutFn: timers.clearTimeoutFn,
     _bus: new EventEmitter(),
     _pollMs: 10,
+    _createBotcronTicker: stubBotcronTicker,
   });
   await wait(20);
   assert.equal(timers.lastInterval().ms, 5000);
@@ -246,6 +254,7 @@ test("busy guard: an overlapping fire while a tick is in flight is a no-op", asy
     _clearTimeoutFn: timers.clearTimeoutFn,
     _bus: new EventEmitter(),
     _pollMs: 10,
+    _createBotcronTicker: stubBotcronTicker,
   });
   await wait(20);
   const interval = timers.lastInterval();
@@ -288,6 +297,7 @@ test("breaker: opens after PIBOT_BREAKER_THRESHOLD consecutive failing ticks, th
     _clearTimeoutFn: timers.clearTimeoutFn,
     _bus: new EventEmitter(),
     _pollMs: 10,
+    _createBotcronTicker: stubBotcronTicker,
   });
   await wait(20);
   const interval = timers.lastInterval();
@@ -321,6 +331,7 @@ test("breaker: a thrown tick counts as a failure too", async () => {
     _clearTimeoutFn: timers.clearTimeoutFn,
     _bus: new EventEmitter(),
     _pollMs: 10,
+    _createBotcronTicker: stubBotcronTicker,
   });
   await wait(20);
   await timers.lastInterval().fn();
@@ -352,6 +363,7 @@ test("breaker: half-open retry after cooldown — success closes it, failure kee
     _clearTimeoutFn: timers.clearTimeoutFn,
     _bus: new EventEmitter(),
     _pollMs: 10,
+    _createBotcronTicker: stubBotcronTicker,
   });
   await wait(20);
   const interval = timers.lastInterval();
@@ -395,6 +407,7 @@ test("breaker: flag-off stop() resets it — stale failure state does not surviv
     _clearTimeoutFn: timers.clearTimeoutFn,
     _bus: new EventEmitter(),
     _pollMs: 10,
+    _createBotcronTicker: stubBotcronTicker,
   });
   await wait(20);
   await timers.lastInterval().fn();
@@ -430,6 +443,7 @@ test("discord: the child is started only when an enabled bot has a discord gatew
     _clearTimeoutFn: timers.clearTimeoutFn,
     _bus: new EventEmitter(),
     _pollMs: 10,
+    _createBotcronTicker: stubBotcronTicker,
   });
   await wait(20);
   assert.equal(sp.calls.length, 0, "no discord bots yet — child never started");
@@ -454,6 +468,7 @@ test("discord: a discord-gateway bot at boot starts the child with the expected 
     _clearTimeoutFn: timers.clearTimeoutFn,
     _bus: new EventEmitter(),
     _pollMs: 10,
+    _createBotcronTicker: stubBotcronTicker,
   });
   await wait(20);
 
@@ -487,6 +502,7 @@ test("discord: stopped when runtimeGate stops the runtime on flag-off", async ()
     _clearTimeoutFn: timers.clearTimeoutFn,
     _bus: new EventEmitter(),
     _pollMs: 10,
+    _createBotcronTicker: stubBotcronTicker,
   });
   await wait(20);
   assert.equal(botRuntimeStatus().discord.running, true);
@@ -520,6 +536,7 @@ test("defs-changed reconcile: appear -> start, config change -> restart, disappe
     _clearTimeoutFn: timers.clearTimeoutFn,
     _bus: testBus,
     _pollMs: 10,
+    _createBotcronTicker: stubBotcronTicker,
   });
   await wait(20);
   assert.equal(botRuntimeStatus().discord.running, false, "no discord bots at boot");
@@ -570,6 +587,7 @@ test("defs-changed reconcile: a burst of events within the debounce window colla
     _clearTimeoutFn: timers.clearTimeoutFn,
     _bus: testBus,
     _pollMs: 10,
+    _createBotcronTicker: stubBotcronTicker,
   });
   await wait(20);
 
@@ -607,6 +625,7 @@ test("flag-missing default: OFF on a plain (non-MPA-shaped) data dir", async () 
       _clearTimeoutFn: timers.clearTimeoutFn,
       _bus: new EventEmitter(),
       _pollMs: 10,
+      _createBotcronTicker: stubBotcronTicker,
     });
     await wait(20);
     assert.equal(botRuntimeStatus().bridge.armed, false, "plain data dir -> flag-missing resolves OFF");
@@ -635,6 +654,7 @@ test("flag-missing default: ON on a ~/.crow-mpa-shaped data dir (isMpaHost fallb
       _clearTimeoutFn: timers.clearTimeoutFn,
       _bus: new EventEmitter(),
       _pollMs: 10,
+      _createBotcronTicker: stubBotcronTicker,
     });
     await wait(20);
     assert.equal(botRuntimeStatus().bridge.armed, true, "~/.crow-mpa-shaped dir -> flag-missing resolves ON");

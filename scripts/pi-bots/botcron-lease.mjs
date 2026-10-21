@@ -23,13 +23,24 @@ function readLease(dir) {
   return null; // missing or corrupt == expired
 }
 
-/** Try to take or renew the lease. Resolves true if this holder owns it. */
+/** True when no process with this pid exists (ESRCH). EPERM means it is alive. */
+function pidIsDead(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return false; }
+  catch (e) { return !!(e && e.code === "ESRCH"); }
+}
+
+/**
+ * Try to take or renew the lease. Resolves true if this holder owns it. A live
+ * lease whose recorded pid no longer exists is taken over at once, so a
+ * restarted ticker does not wait out the TTL.
+ */
 export async function holdBotcronLease({ dir, holder, ttlMs = 180000, now = Date.now(), lockTimeoutMs = 2000 }) {
   try {
     mkdirSync(dir, { recursive: true });
     return await withSqliteLock(lockPath(dir), async () => {
       const cur = readLease(dir);
-      if (cur && cur.holder !== holder && cur.expires_at > now) return false;
+      if (cur && cur.holder !== holder && cur.expires_at > now && !pidIsDead(cur.pid)) return false;
       const tmp = `${leasePath(dir)}.${process.pid}.tmp`;
       writeFileSync(tmp, JSON.stringify({ holder, pid: process.pid, expires_at: now + ttlMs }));
       try { renameSync(tmp, leasePath(dir)); } catch (e) { try { unlinkSync(tmp); } catch {} throw e; }

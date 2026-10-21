@@ -6,7 +6,8 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -85,7 +86,9 @@ async function until(fn, ms = 2000) {
   return fn();
 }
 
-async function initGateway(env, conn, timers) {
+const engineFound = () => ({ cliPath: "/opt/pi/cli.js", source: "env" });
+
+async function initGateway(env, conn, timers, extra = {}) {
   return initBotRuntime({
     env,
     _conn: conn,
@@ -97,6 +100,8 @@ async function initGateway(env, conn, timers) {
     _clearTimeoutFn: timers.clearTimeoutFn,
     _bus: new EventEmitter(),
     _pollMs: 10,
+    _resolvePiCli: engineFound,
+    ...extra,
   });
 }
 
@@ -144,7 +149,7 @@ test("gateway mode: the bot-cron interval defaults to 60000 ms", async () => {
   await initGateway({}, makeGateConn(true), timers);
   assert.ok(await until(() => botRuntimeStatus().botcron.armed));
   // the bridge tick also defaults to 60000: both intervals are armed on it
-  assert.deepEqual(intervals.filter((ms) => ms === 60000).length, 2);
+  assert.equal(intervals.filter((ms) => ms === 60000).length, 2);
 });
 
 test("gateway mode with the flag off never ticks bot cron", async () => {
@@ -243,4 +248,64 @@ test("the ticker drops an overlapping sweep and never ticks after stop", async (
   await t.stop();
   assert.equal((await t.sweep()).skipped, true);
   assert.equal(ticks, 1);
+});
+
+test("gateway mode with no pi engine skips the sweep (no lease, no job) and logs it once", async () => {
+  seedDue();
+  const timers = fakeTimers();
+  const lines = [];
+  const orig = console.log;
+  console.log = (...a) => { lines.push(a.join(" ")); };
+  try {
+    await initGateway({ PIBOT_BOTCRON_POLL_MS: POLL }, makeGateConn(true), timers, { _resolvePiCli: () => null });
+    assert.ok(await until(() => botRuntimeStatus().botcron.armed));
+    await timers.botcron().fn();
+    await timers.botcron().fn();
+  } finally { console.log = orig; }
+  assert.equal(jobCount(), 0);
+  assert.equal(existsSync(leaseFile()), false, "the lease is not taken, so a ticker that has an engine can");
+  assert.equal(lines.filter((l) => l.includes("no pi engine")).length, 1);
+});
+
+test("a sweep still in flight across a reset never writes into the fresh state", async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const ticker = () => ({ sweep: async () => { await gate; return { fired: 1, held: true }; }, stop: async () => {}, held: false });
+  const timers = fakeTimers();
+  await initGateway({ PIBOT_BOTCRON_POLL_MS: POLL }, makeGateConn(true), timers, { _createBotcronTicker: ticker });
+  assert.ok(await until(() => botRuntimeStatus().botcron.armed));
+  await _resetBotRuntimeForTest();
+  release();
+  await wait(10);
+  assert.equal(botRuntimeStatus().botcron.lastTickAt, null);
+  assert.equal(botRuntimeStatus().botcron.lastFired, 0);
+});
+
+test("a lease whose holder pid is dead is taken over before its TTL", async () => {
+  const dead = spawnSync(process.execPath, ["-e", "0"]).pid; // exited by the time spawnSync returns
+  writeFileSync(leaseFile(), JSON.stringify({ holder: "gone", pid: dead, expires_at: Date.now() + 600000 }));
+  assert.equal(await holdBotcronLease({ dir, holder: "next" }), true);
+  assert.equal(leaseHolder(), "next");
+  // a live pid (this process) still blocks a different holder
+  writeFileSync(leaseFile(), JSON.stringify({ holder: "alive", pid: process.pid, expires_at: Date.now() + 600000 }));
+  assert.equal(await holdBotcronLease({ dir, holder: "next" }), false);
+});
+
+test("when both tickers end up holding the lease (short TTL / clock skew), the claim still gives one job per due schedule", async () => {
+  seedDue();
+  const a = createBotcronTicker({ dir, holder: "ticker-a", ttlMs: 1 });
+  const b = createBotcronTicker({ dir, holder: "ticker-b", ttlMs: 1 });
+  const forced = createBotcronTicker({ dir, holder: "ticker-c", _hold: async () => true, _release: async () => {} });
+  let aHeld = false, bHeld = false;
+  for (let round = 1; round <= 3; round++) {
+    if (round > 1) makeDueAgain();
+    const ra = await a.sweep();
+    await wait(5); // a's 1 ms lease has expired: b takes it over
+    const rb = await b.sweep();
+    const rc = await forced.sweep(); // believes it holds the lease regardless
+    aHeld ||= ra.held; bHeld ||= rb.held;
+    assert.equal(ra.fired + rb.fired + rc.fired, 1, `round ${round}: one job`);
+    assert.equal(jobCount(), round);
+  }
+  assert.ok(aHeld && bHeld, "both tickers held the lease at some point");
 });
