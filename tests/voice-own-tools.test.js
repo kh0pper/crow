@@ -210,15 +210,130 @@ test("reminder writes one one-shot schedule", async () => {
   } finally { s.close(); }
 });
 
-test("a reminder in the past is bad_args", async () => {
+// ─── No silent past dates (PR 2.1 Task 2): a past start asks about the next one; nothing is written before a yes ───
+const fullWhen = (iso, lang = "en-US", tz = TZ) => new Intl.DateTimeFormat(lang, { weekday: "long", month: "long", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: tz }).format(new Date(iso));
+const WED = Date.parse("2026-10-21T19:11:00Z");   // Wednesday 21 October, 2:11 PM in Chicago
+
+test("a past timed start asks about the next Tuesday (month and day), writes nothing; yes writes it once", async () => {
   const s = await stores();
   try {
-    const { own } = make();
+    const { own, pending } = make({ connected: ["ws_cal_create_event"], now: () => WED });
+    const ex = fakeExecutor();
+    const bot = CROW({ routine: { calendar: { calendar: "cal-1" } } });
+    const set = await own.forTurn({ db: s.db, bot, surface: "kiosk", lang: "en", tz: TZ });
+    const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Coffee", start: "2026-10-20T09:00:00-05:00" }, { executor: ex, db: s.db, device: DEVICE });
+    assert.equal(r.ok, true);
+    assert.equal(r.effect, false);
+    assert.equal(r.code, "needs_confirm");
+    assert.equal(r.final, true);
+    assert.equal(r.say, `That time has passed. Add Coffee for ${fullWhen("2026-10-27T09:00:00-05:00")} instead?`);
+    assert.match(r.say, /October 27/);
+    assert.deepEqual(ex.calls, [], "nothing written before the yes");
+    assert.deepEqual(pending.get(DEVICE.id).args, { title: "Coffee", start: "2026-10-27T09:00:00-05:00", end: "2026-10-27T10:00:00-05:00", all_day: false });
+    const base = { db: s.db, device: DEVICE, surface: "kiosk", lang: "en", tz: TZ, bot, executor: ex };
+    const yes = await own.fastPath({ ...base, transcript: "yes" });
+    assert.equal(yes.verb, "routine_yes");
+    assert.deepEqual(ex.calls, [{ name: "ws_cal_create_event", arguments: { calendar: "cal-1", summary: "Coffee", start: "2026-10-27T09:00:00-05:00", end: "2026-10-27T10:00:00-05:00" } }]);
+    assert.equal(await own.fastPath({ ...base, transcript: "yes" }), null);
+    assert.equal(ex.calls.length, 1, "written exactly once");
+  } finally { s.close(); }
+});
+
+test("a past start across the DST change gets the new offset; Spanish asks in Spanish; no declines", async () => {
+  const { own, pending } = make({ connected: ["ws_cal_create_event"], now: () => Date.parse("2026-10-28T15:00:00Z") });
+  const ex = fakeExecutor();
+  const bot = CROW({ routine: { calendar: { calendar: "cal-1" } } });
+  const set = await own.forTurn({ db: {}, bot, surface: "kiosk", lang: "es", tz: TZ });
+  const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Café", start: "2026-10-27T09:00:00-05:00", end: "2026-10-27T09:30:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(r.code, "needs_confirm");
+  assert.equal(r.say, `Esa hora ya pasó. ¿Añado Café para el ${fullWhen("2026-11-03T09:00:00-06:00", "es")}?`);
+  assert.deepEqual(pending.get(DEVICE.id).args, { title: "Café", start: "2026-11-03T09:00:00-06:00", end: "2026-11-03T09:30:00-06:00", all_day: false }, "9 AM local after DST ends, same length");
+  const base = { db: {}, device: DEVICE, surface: "kiosk", lang: "es", tz: TZ, bot, executor: ex };
+  const no = await own.fastPath({ ...base, transcript: "no" });
+  assert.equal(no.say, voiceLine("declined", "es"));
+  assert.deepEqual(ex.calls, []);
+});
+
+test("a past all-day date asks about the same weekday next week", async () => {
+  const { own, pending } = make({ connected: ["ws_cal_create_event"], now: () => WED });
+  const ex = fakeExecutor();
+  const set = await own.forTurn({ db: {}, bot: CROW({ routine: { calendar: { calendar: "cal-1" } } }), surface: "kiosk", lang: "en", tz: TZ });
+  const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Holiday", start: "2026-10-19" }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(r.code, "needs_confirm");
+  assert.equal(r.say, "That time has passed. Add Holiday for Monday, October 26 instead?");
+  assert.deepEqual(pending.get(DEVICE.id).args, { title: "Holiday", start: "2026-10-26", end: "2026-10-26", all_day: true });
+  assert.deepEqual(ex.calls, []);
+  // Today's date is not past.
+  const today = await run(toolOf(set, "crow_calendar_add_event"), { title: "Fair", start: "2026-10-21" }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(today.code, "added");
+});
+
+test("a start 3 minutes ago is accepted (grace); today at a later hour is accepted", async () => {
+  const { own } = make({ connected: ["ws_cal_create_event"], now: () => WED });
+  const ex = fakeExecutor();
+  const set = await own.forTurn({ db: {}, bot: CROW({ routine: { calendar: { calendar: "cal-1" } } }), surface: "kiosk", lang: "en", tz: TZ });
+  const grace = await run(toolOf(set, "crow_calendar_add_event"), { title: "Call", start: "2026-10-21T14:08:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(grace.code, "added");
+  const later = await run(toolOf(set, "crow_calendar_add_event"), { title: "Dinner", start: "2026-10-21T19:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(later.code, "added");
+  assert.equal(ex.calls.length, 2);
+  // Six minutes ago is past.
+  const past = await run(toolOf(set, "crow_calendar_add_event"), { title: "Call", start: "2026-10-21T14:05:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(past.code, "needs_confirm");
+  assert.equal(ex.calls.length, 2);
+});
+
+test("a past task due date asks about tomorrow, or the stated weekday next week", async () => {
+  const s = await stores();
+  try {
+    const { own, pending } = make({ openTasksDb: s.openTasksDb, now: () => WED });
+    const set = await own.forTurn({ db: s.db, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+    const r = await run(toolOf(set, "crow_task_add"), { title: "Pay rent", due: "2026-10-15" }, { executor: null, db: s.db, device: DEVICE, transcript: "add pay rent to my tasks" });
+    assert.equal(r.code, "needs_confirm");
+    assert.equal(r.say, "That date has passed. Add Pay rent to your tasks for Thursday, October 22 instead?");
+    assert.equal(pending.get(DEVICE.id).args.due, "2026-10-22");
+    const wk = await run(toolOf(set, "crow_task_add"), { title: "Pay rent", due: "2026-10-19" }, { executor: null, db: s.db, device: DEVICE, transcript: "add pay rent to my tasks for Monday" });
+    assert.equal(pending.get(DEVICE.id).args.due, "2026-10-26");
+    assert.match(wk.say, /Monday, October 26/);
+    assert.equal(s.cards().length, 0, "nothing written");
+    const yes = await own.fastPath({ db: s.db, device: DEVICE, transcript: "yes", lang: "en", tz: TZ, bot: CROW(), executor: null });
+    assert.equal(yes.verb, "routine_yes");
+    assert.deepEqual(s.cards().map((c) => c.due_date), ["2026-10-26"]);
+    // Due today is fine.
+    assert.equal((await run(toolOf(set, "crow_task_add"), { title: "Today", due: "2026-10-21" }, { executor: null, db: s.db, device: DEVICE })).code, "added");
+  } finally { s.close(); }
+});
+
+test("a reminder in the past asks about the next day (never bad_args); yes writes it once", async () => {
+  const s = await stores();
+  try {
+    const { own, pending } = make();
     const set = await own.forTurn({ db: s.db, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
     const r = await run(toolOf(set, "crow_reminder_add"), { text: "call", at: "2026-10-20T09:00:00-05:00" }, { executor: null, db: s.db, device: DEVICE });
-    assert.equal(r.code, "bad_args");
+    assert.equal(r.code, "needs_confirm");
+    assert.equal(r.ok, true);
+    assert.equal(r.say, `That time has passed. Remind you ${fullWhen("2026-10-21T09:00:00-05:00")} instead: call?`);
+    assert.equal(pending.get(DEVICE.id).args.at, "2026-10-21T09:00:00-05:00");
     assert.deepEqual(await s.schedules(), []);
+    await own.fastPath({ db: s.db, device: DEVICE, transcript: "yes", lang: "en", tz: TZ, bot: CROW(), executor: null });
+    const rows = await s.schedules();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].next_run, "2026-10-21T14:00:00.000Z");
   } finally { s.close(); }
+});
+
+test("without a time zone, a past date-time is still no_tz (before the past check)", async () => {
+  const { own } = make({ connected: ["ws_cal_create_event"], now: () => WED });
+  const set = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: null });
+  assert.equal((await run(toolOf(set, "crow_calendar_add_event"), { title: "x", start: "2026-10-20T09:00:00-05:00" }, { executor: fakeExecutor(), db: {}, device: DEVICE })).code, "no_tz");
+  assert.equal((await run(toolOf(set, "crow_reminder_add"), { text: "x", at: "2026-10-20T09:00:00-05:00" }, { executor: null, db: {}, device: DEVICE })).code, "no_tz");
+});
+
+test("voice-lines en/es parity for the past-date lines", () => {
+  for (const k of ["past_confirm_calendar", "past_confirm_reminder", "past_confirm_task"]) {
+    assert.ok(VOICE_LINES.en[k] && VOICE_LINES.es[k], k);
+    assert.ok(VOICE_LINES.en[k].includes("{next_when}") && VOICE_LINES.es[k].includes("{next_when}"), k);
+  }
 });
 
 test("an all-day event ends the same day", async () => {
@@ -683,5 +798,30 @@ test("strict: a question before an ok non-final task is asked last over a claim,
     await h.runner.runVoiceTurn({ db: s.db, device: h.device, transcript: "yes", sink: h.sink, tz: TZ, lang: "en", actionWhen: () => false });
     assert.equal((await s.schedules()).length, 1, "the reminder is written once");
     assert.equal(pending.get(h.device.id), null);
+  } finally { s.close(); }
+});
+
+test("in the turn: a past reminder asks about the next day and never steps up; the yes writes it once", async () => {
+  const s = await stores();
+  try {
+    const { own } = make();
+    const h = harness({ bot: CROW(), chatTools: [], rounds: [
+      [{ type: "tool_call", id: "c1", name: "crow_reminder_add", arguments: { text: "call mom", at: "2026-10-20T09:00:00-05:00" } }, { type: "done" }],
+      [{ type: "content_delta", text: "Okay. " }, { type: "done" }],
+    ] });
+    h.deps.escalateKey = "crow-chat/qwen3.6-35b-a3b";
+    h.deps.ownTools = own.forTurn;
+    h.deps.voiceActions = chainVoiceActions([own]);
+    const opts = { db: s.db, device: h.device, sink: h.sink, tz: TZ, lang: "en", actionWhen: (t) => /remind/.test(t) };
+    const r = await h.runner.runVoiceTurn({ ...opts, transcript: "remind me at 9 to call mom" });
+    const ask = `That time has passed. Remind you ${fullWhen("2026-10-21T09:00:00-05:00")} instead: call mom?`;
+    assert.deepEqual(h.calls.spoken, [ask]);
+    assert.equal(r.timings.step_up, undefined, "no step-up");
+    assert.equal(r.escalated, false);
+    assert.equal(h.log.length, 1, "one model round");
+    assert.deepEqual(await s.schedules(), []);
+    await h.runner.runVoiceTurn({ ...opts, transcript: "yes" });
+    assert.equal((await s.schedules()).length, 1);
+    assert.equal(h.log.length, 1, "the yes needed no model call");
   } finally { s.close(); }
 });

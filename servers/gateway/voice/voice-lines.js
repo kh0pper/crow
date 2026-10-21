@@ -21,6 +21,10 @@ export const VOICE_LINES = Object.freeze({
     routine_confirm_task: "Add {title} to your tasks?",
     declined: "Okay, I won't.",
     calendar_fallback_offer: "I can't add that to a calendar here, but I can remind you {when}: {text}. Okay?",
+    // A past start or date (own-tools.js, PR 2.1): nothing is written; Crow offers the next one ({next_when} has the month and day).
+    past_confirm_calendar: "That time has passed. Add {title} for {next_when} instead?",
+    past_confirm_reminder: "That time has passed. Remind you {next_when} instead: {text}?",
+    past_confirm_task: "That date has passed. Add {title} to your tasks for {next_when} instead?",
     // A later turn's claim about the last own write (turn.js sentence gate, PR 2.1): what is really on record.
     last_write_recap: "{title} is on your calendar for {when}.",
     last_write_recap_reminder: "Your reminder is set for {when}: {text}.",
@@ -41,6 +45,9 @@ export const VOICE_LINES = Object.freeze({
     routine_confirm_task: "¿Añado {title} a tus tareas?",
     declined: "Vale, no lo haré.",
     calendar_fallback_offer: "No puedo añadir eso a un calendario aquí, pero puedo recordártelo el {when}: {text}. ¿Te parece?",
+    past_confirm_calendar: "Esa hora ya pasó. ¿Añado {title} para el {next_when}?",
+    past_confirm_reminder: "Esa hora ya pasó. ¿Te lo recuerdo el {next_when}: {text}?",
+    past_confirm_task: "Esa fecha ya pasó. ¿Añado {title} a tus tareas para el {next_when}?",
     last_write_recap: "{title} está en tu calendario para el {when}.",
     last_write_recap_reminder: "Tu recordatorio está puesto para el {when}: {text}.",
     last_write_recap_task: "{title} está en tus tareas.",

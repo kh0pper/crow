@@ -13,7 +13,7 @@ import {
   negotiatePcm, pcmStream, isDestructiveTool, describeDestructiveAction, SENTENCE_END,
   isProxyCall, executedProxyArgs, proxyArgsConflict, reliesOnFlatFallback, canonicalArgsHash,
 } from "./turn-helpers.js";
-import { zoneContext } from "../../shared/relative-dates.js";
+import { zoneContext, PAST_DAY_RULE } from "../../shared/relative-dates.js";
 import { withTurnContext, createContextEchoGate, stripContextEcho, stripContextEchoDeep, TURN_CONTEXT_NOTE } from "./context-echo.js";
 import { estimatePromptTokens, requestFits, choosePromptFit, dropOldestExchange } from "./prompt-fit.js";
 import { claimsAction, claimsReminder, claimsBeyondMemory, toolEffect, needsSpokenYes } from "./action-claims.js";
@@ -130,8 +130,14 @@ export const CANT_DO_TEXT = "Sorry, I can't do that from here: this assistant ha
 export const NOT_DONE_TEXT = "Sorry, I couldn't do that from here, so nothing was changed.";
 /** Some of Crow's own calls on this turn worked and some did not (spoken after the ok calls' own lines). */
 export const PARTLY_DONE_TEXT = "I did part of that, but the rest didn't go through.";
-/** Own-tool result codes that mean the call itself was malformed (own-tools.js validate()), not that a write failed. */
-const OWN_VALIDATION_CODES = new Set(["bad_args", "no_tz"]);
+/**
+ * Own-tool result codes that mean the call itself was malformed or could not stand (own-tools.js validate()), not that a
+ * write failed; a later ok own call clears them. past_time: a surface or a future tool that refuses a past date (Crow's
+ * own tools ask about the next one instead). Only bad_args steps up.
+ */
+const OWN_VALIDATION_CODES = new Set(["bad_args", "no_tz", "past_time"]);
+/** The [Dates] line without its rule for the past (a write-tool turn: own-tools checks a past date and asks instead). */
+const dropPastRule = (s) => (typeof s === "string" ? s.split(` ${PAST_DAY_RULE}`).join("").split(PAST_DAY_RULE).join("") : s);
 export const NOT_READY_TEXT = "The assistant that can do that isn't ready yet. Try again in a moment.";
 /** A memory was saved, but the reply promised a reminder no tool set. */
 export const MEMO_ONLY_TEXT = "I saved a note, but I can't set reminders from here.";
@@ -898,6 +904,16 @@ export function createVoiceTurnRunner(deps) {
         ctxLine = ctxLine ? `${ctxLine}\n${zoneLine}` : zoneLine;
         userMsg.content = withTurnContext(ctxLine, transcript);
         echoGuard.push(zoneLine, TURN_CONTEXT_NOTE);
+      }
+      // The [Dates] line's "for something already past, it is the previous one" told the quick model to write last
+      // Tuesday for a mistranscribed "had coffee Tuesday" (2026-10-21). On a turn that offers a write tool (Crow's own,
+      // or a remote one that changes something) the rule is dropped from the context and from the echo guard; the
+      // surfaces build the line before tools are chosen, so it is removed here, and other callers keep it.
+      if (ctxLine && ctxLine.includes(PAST_DAY_RULE)
+        && tools.some((t) => ownByName.has(t.name) || (!extraByName.has(t.name) && toolEffect(t.name) === "write"))) {
+        ctxLine = dropPastRule(ctxLine);
+        userMsg.content = withTurnContext(ctxLine, transcript);
+        for (let i = 0; i < echoGuard.length; i += 1) echoGuard[i] = dropPastRule(echoGuard[i]);
       }
       if (!chat) chat = await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
       if (unlisted.length) {

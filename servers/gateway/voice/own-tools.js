@@ -96,11 +96,45 @@ function withOffset(ms, off) {
   return `${w.getUTCFullYear()}-${pad(w.getUTCMonth() + 1)}-${pad(w.getUTCDate())}T${pad(w.getUTCHours())}:${pad(w.getUTCMinutes())}:${pad(w.getUTCSeconds())}${o}`;
 }
 
-function nextDay(date) {
+const DAY_MS = 86_400_000;
+function addDays(date, n) {
   const t = new Date(`${date}T00:00:00Z`);
-  t.setUTCDate(t.getUTCDate() + 1);
+  t.setUTCDate(t.getUTCDate() + n);
   return t.toISOString().slice(0, 10);
 }
+const nextDay = (date) => addDays(date, 1);
+
+/** The UTC offset of `tz` (minutes east of UTC) at the moment `ms`. */
+function zoneOffsetAt(ms, tz) {
+  const name = new Intl.DateTimeFormat("en-US", { timeZone: tz, timeZoneName: "longOffset" }).formatToParts(new Date(ms)).find((x) => x.type === "timeZoneName")?.value || "GMT";
+  const m = /^GMT([+-])(\d{2}):(\d{2})$/.exec(name);
+  return m ? (m[1] === "-" ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3])) : 0;
+}
+/** The local wall-clock time of `ms` in `tz`, as a UTC timestamp of those fields. */
+const wallOf = (ms, tz) => ms + zoneOffsetAt(ms, tz) * 60_000;
+/** The moment a local wall-clock time (a UTC timestamp of its fields) names in `tz`: two passes settle a DST edge. */
+function momentOf(wall, tz) {
+  const first = wall - zoneOffsetAt(wall, tz) * 60_000;
+  return wall - zoneOffsetAt(first, tz) * 60_000;
+}
+/** `ms` written with the offset `tz` has on that date (the offset is recomputed: DST can lie between). */
+const inZone = (ms, tz) => withOffset(ms, zoneOffsetAt(ms, tz));
+/**
+ * Today's date in `tz` (YYYY-MM-DD). With no zone, the date furthest behind (UTC-12): a date before it is past
+ * everywhere, so nothing that may still be today is called past.
+ */
+const todayIn = (now, tz) => new Date(tz ? wallOf(now, tz) : now - 12 * 3_600_000).toISOString().slice(0, 10);
+/** A date moved forward by whole weeks (same weekday) until it is `today` or later. */
+function sameWeekdayFrom(date, today) {
+  let d = date;
+  while (d < today) d = addDays(d, 7);
+  return d;
+}
+/** Grace for a timed start a moment ago ("in a minute" said slowly, a clock a little behind): not past. */
+const PAST_GRACE_MS = 5 * 60_000;
+// A weekday named in the user's words (en, es; accents ignored): a past task due date keeps that weekday.
+const WEEKDAY_WORD = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|lunes|martes|miercoles|jueves|viernes|sabado|domingo)\b/;
+const namesWeekday = (t) => typeof t === "string" && WEEKDAY_WORD.test(t.slice(0, 400).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
 
 /** A usable IANA zone, or null. */
 function validTz(tz) {
@@ -111,6 +145,8 @@ function validTz(tz) {
 const locale = (lang) => (lang === "es" ? "es" : "en-US");
 const whenAt = (ms, lang, tz) => new Intl.DateTimeFormat(locale(lang), { weekday: "long", hour: "numeric", minute: "2-digit", timeZone: tz }).format(new Date(ms));
 const whenDay = (date, lang) => new Intl.DateTimeFormat(locale(lang), { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" }).format(new Date(`${date}T12:00:00Z`));
+/** A moment with its month and day ("Tuesday, October 27 at 9:00 AM"): the one formatter for a spoken date and time. */
+export const whenOn = (ms, lang, tz) => new Intl.DateTimeFormat(locale(lang), { weekday: "long", month: "long", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: tz }).format(new Date(ms));
 
 // ─── Validation ───
 const bad = (message, code = "bad_args") => ({ error: message, code });
@@ -125,8 +161,23 @@ function cleanText(v, what) {
   return { value: t };
 }
 
-/** → { args, when } (args normalized; when spoken) | { error, code } (code "bad_args", or "no_tz" when no zone is known). */
-function validate(tool, raw, { tz, lang, now }) {
+/**
+ * → { args, when } (args normalized; when spoken) | { error, code } (code "bad_args", or "no_tz" when no zone is known)
+ * | { args, when, past: true, nextWhen } for a past start or date (PR 2.1): args are already the NEXT occurrence (an
+ * event's same weekday and local time; a reminder's next day; a task's tomorrow, or its weekday next week when the user
+ * named one), with the offset recomputed for that date. Nothing past is written: the caller asks about the next one.
+ * Past: a timed start before now minus PAST_GRACE_MS, an all-day date or a due date before today in `tz`, a reminder
+ * at or before now. no_tz comes first: without a zone, no date-time is checked or moved.
+ */
+function validate(tool, raw, opts) {
+  const v = validateNow(tool, raw, opts);
+  if (v.error || !v.next) return v;
+  const n = validateNow(tool, v.next, opts);
+  if (n.error || n.next) return bad("That time has already passed. Ask the user for a time in the future.");
+  return { ...n, past: true };
+}
+
+function validateNow(tool, raw, { tz, lang, now, transcript }) {
   const a = raw && typeof raw === "object" ? raw : {};
   if (tool === "crow_calendar_add_event") {
     const title = cleanText(a.title, "The title");
@@ -143,17 +194,32 @@ function validate(tool, raw, { tz, lang, now }) {
         if (!end) return bad("The end is not a date (YYYY-MM-DD) for an all-day event.");
         if (end < start) return bad("The end is before the start.");
       }
-      return { args: { title: title.value, start, end, all_day: true }, when: whenDay(start, lang) };
+      const today = todayIn(now, tz);
+      if (start < today) {
+        const next = sameWeekdayFrom(start, today);
+        const shift = Math.round((Date.parse(`${next}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / DAY_MS);
+        return { next: { title: title.value, start: next, end: addDays(end, shift), all_day: true } };
+      }
+      return { args: { title: title.value, start, end, all_day: true }, when: whenDay(start, lang), nextWhen: whenDay(start, lang) };
     }
     if (!tz) return bad(NO_TZ, "no_tz");
     let end = withOffset(startDt.ms + 3_600_000, startDt.off);
+    let endMs = startDt.ms + 3_600_000;
     if (a.end != null && a.end !== "") {
       const e = parseDateTime(a.end);
       if (!e) return bad(`The end is not a date-time with an offset. ${NEED_OFFSET}`);
       if (e.ms <= startDt.ms) return bad("The end must be after the start.");
       end = String(a.end).trim();
+      endMs = e.ms;
     }
-    return { args: { title: title.value, start: String(a.start).trim(), end, all_day: false }, when: whenAt(startDt.ms, lang, tz) };
+    if (startDt.ms < now - PAST_GRACE_MS) {
+      // The same weekday and local time, a week on at a time, until it is ahead; the same length.
+      const wall = wallOf(startDt.ms, tz);
+      let at = startDt.ms;
+      for (let k = 1; at <= now; k += 1) at = momentOf(wall + k * 7 * DAY_MS, tz);
+      return { next: { title: title.value, start: inZone(at, tz), end: inZone(at + (endMs - startDt.ms), tz), all_day: false } };
+    }
+    return { args: { title: title.value, start: String(a.start).trim(), end, all_day: false }, when: whenAt(startDt.ms, lang, tz), nextWhen: whenOn(startDt.ms, lang, tz) };
   }
   if (tool === "crow_reminder_add") {
     const text = cleanText(a.text, "The reminder text");
@@ -161,8 +227,14 @@ function validate(tool, raw, { tz, lang, now }) {
     const at = parseDateTime(a.at);
     if (!at) return bad(`The time is not a date-time with an offset. ${NEED_OFFSET}`);
     if (!tz) return bad(NO_TZ, "no_tz");
-    if (at.ms <= now) return bad("That time has already passed. Ask the user for a time in the future.");
-    return { args: { text: text.value, at: String(a.at).trim() }, when: whenAt(at.ms, lang, tz), atIso: new Date(at.ms).toISOString() };
+    if (at.ms <= now) {
+      // The same local time, a day on at a time, until it is ahead.
+      const wall = wallOf(at.ms, tz);
+      let ms = at.ms;
+      for (let k = 1; ms <= now; k += 1) ms = momentOf(wall + k * DAY_MS, tz);
+      return { next: { text: text.value, at: inZone(ms, tz) } };
+    }
+    return { args: { text: text.value, at: String(a.at).trim() }, when: whenAt(at.ms, lang, tz), atIso: new Date(at.ms).toISOString(), nextWhen: whenOn(at.ms, lang, tz) };
   }
   if (tool === "crow_task_add") {
     const title = cleanText(a.title, "The title");
@@ -171,8 +243,10 @@ function validate(tool, raw, { tz, lang, now }) {
     if (a.due != null && a.due !== "") {
       due = parseDate(a.due);
       if (!due) return bad("The due date must be YYYY-MM-DD.");
+      const today = todayIn(now, tz);
+      if (due < today) return { next: { title: title.value, due: namesWeekday(transcript) ? sameWeekdayFrom(due, today) : addDays(today, 1) } };
     }
-    return { args: { title: title.value, ...(due ? { due } : {}) }, when: null };
+    return { args: { title: title.value, ...(due ? { due } : {}) }, when: null, nextWhen: due ? whenDay(due, lang) : null };
   }
   return bad("Unknown tool.");
 }
@@ -180,6 +254,9 @@ function validate(tool, raw, { tz, lang, now }) {
 const successLine = (tool, v, lang) => (tool === "crow_calendar_add_event" ? voiceLine("calendar_added", lang, { title: v.args.title, when: v.when })
   : tool === "crow_reminder_add" ? voiceLine("reminder_set", lang, { when: v.when, text: v.args.text })
     : voiceLine("task_added", lang, { title: v.args.title }));
+const pastLine = (tool, v, lang) => (tool === "crow_calendar_add_event" ? voiceLine("past_confirm_calendar", lang, { title: v.args.title, next_when: v.nextWhen })
+  : tool === "crow_reminder_add" ? voiceLine("past_confirm_reminder", lang, { next_when: v.nextWhen, text: v.args.text })
+    : voiceLine("past_confirm_task", lang, { title: v.args.title, next_when: v.nextWhen }));
 const confirmLine = (tool, v, lang) => (tool === "crow_calendar_add_event" ? voiceLine("routine_confirm_calendar", lang, { title: v.args.title, when: v.when })
   : tool === "crow_reminder_add" ? voiceLine("routine_confirm_reminder", lang, { when: v.when, text: v.args.text })
     : voiceLine("routine_confirm_task", lang, { title: v.args.title }));
@@ -389,14 +466,15 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
         family: d.family,
         intent: d.intent,
         async execute(args, ctx = {}) {
-          const v = validate(name, args, { tz: zone, lang, now: now() });
+          const v = validate(name, args, { tz: zone, lang, now: now(), transcript: ctx.transcript });
           if (v.error) return JSON.stringify({ ok: false, code: v.code || "bad_args", message: v.error });
           const offer = ctx.fallback === "calendar" && name === "crow_reminder_add";
           // ctx.confirm (turn.js): a stray call on a tool offered only through carry-over asks first, as under "strict".
-          if (offer || settings.confirm === "strict" || ctx.confirm === true) {
+          // A past date always asks (PR 2.1): the held call is the next occurrence, written only on a yes.
+          if (v.past || offer || settings.confirm === "strict" || ctx.confirm === true) {
             const deviceId = ctx.device?.id;
             if (!deviceId) return JSON.stringify(BACKEND_ERROR);   // no device to hold the question: nothing is asked or written
-            const say = offer ? voiceLine("calendar_fallback_offer", lang, { when: v.when, text: v.args.text }) : confirmLine(name, v, lang);
+            const say = v.past ? pastLine(name, v, lang) : offer ? voiceLine("calendar_fallback_offer", lang, { when: v.when, text: v.args.text }) : confirmLine(name, v, lang);
             pending.set(deviceId, { kind: "routine", tool: name, args: v.args, say, lang, tz: zone });
             return JSON.stringify({ ok: true, effect: false, code: "needs_confirm", final: true, say });
           }
@@ -428,7 +506,7 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
     if (!bot || !isVoiceBotDef(bot)) return { say: voiceLine("not_done_say", speak), verb: "routine_failed" };
     const settings = normalizeVoiceSettings(bot);
     const v = validate(entry.tool, entry.args, { tz: entry.tz, lang: speak, now: now() });
-    const res = v.error ? null : await perform(entry.tool, v, { db, executor, settings, lang: speak });
+    const res = v.error || v.past ? null : await perform(entry.tool, v, { db, executor, settings, lang: speak });
     return res?.ok === true ? { say: res.say, verb: "routine_yes", write: res.write } : { say: voiceLine("not_done_say", speak), verb: "routine_failed" };
   }
 

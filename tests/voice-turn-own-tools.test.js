@@ -743,3 +743,21 @@ test("the budget firing while the held ending is still synthesizing keeps the qu
   assert.ok(h.calls.spoken.at(-1).trim().endsWith(QUESTION.say), `spoken: ${JSON.stringify(h.calls.spoken)}`);
   assert.ok(captions(h).trim().endsWith(QUESTION.say), `captions: ${captions(h)}`);
 });
+
+test("a write-tool turn's user message drops the [Dates] past-day rule; a plain turn keeps it", async () => {
+  const { relativeDatesContext, PAST_DAY_RULE } = await import("../servers/shared/relative-dates.js");
+  assert.equal(PAST_DAY_RULE, "For something already past, it is the previous one.");
+  const dates = relativeDatesContext(Date.parse("2026-10-21T19:11:00Z"), "America/Chicago");
+  assert.ok(dates.includes(PAST_DAY_RULE), "other callers keep the sentence");
+  const ctx = `[Now] Wednesday, October 21, 2026, 2:11 PM (time zone America/Chicago)\n${dates}`;
+  const w = ownHarness({ rounds: [call("crow_calendar_add_event", { title: "coffee", start: "2026-10-27T09:00:00-05:00" })] });
+  await turn(w, "add coffee Tuesday to my calendar", { ...act, ownTools: [calTool()], turnContext: ctx, tz: "America/Chicago" });
+  const wUser = w.log[0].messages.at(-1).content;
+  assert.ok(w.log[0].tools.includes("crow_calendar_add_event"));
+  assert.ok(wUser.includes("[Dates] To add or plan something"), "the dates stay");
+  assert.ok(!/previous one/.test(wUser), wUser);
+  const p = ownHarness({ rounds: [says("It is on Tuesday. ")] });
+  await turn(p, "what day is the fair, Tuesday?", { ownTools: [calTool()], turnContext: ctx, tz: "America/Chicago" });
+  assert.deepEqual(p.log[0].tools, []);
+  assert.ok(p.log[0].messages.at(-1).content.includes(PAST_DAY_RULE));
+});
