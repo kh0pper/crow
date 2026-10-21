@@ -3732,8 +3732,10 @@ export default function bundlesRouter() {
               } catch (err) {
                 appendLog(job, `Warning: docker compose down: ${err.message}`);
                 // Removing the folder now would leave running containers with no compose
-                // file to stop them from: keep the extension installed instead.
-                if (await composeServiceRunning(bundleDir)) {
+                // file to stop them from: keep the extension installed instead. With no
+                // compose command on this host at all, nothing it started can be running.
+                const noCompose = /No docker compose command found/.test(String(err?.message || ""));
+                if (!noCompose && await composeServiceRunning(bundleDir)) {
                   appendLog(job, "Containers are still running and could not be stopped; the extension was left installed so you can stop it");
                   finishJob(job, "failed");
                   return;

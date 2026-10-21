@@ -17,13 +17,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-teardown-home-"));
-process.env.CROW_DATA_DIR = mkdtempSync(join(tmpdir(), "crow-teardown-data-"));
+const TMP_HOME = mkdtempSync(join(tmpdir(), "crow-teardown-home-"));
+process.env.CROW_HOME = TMP_HOME;
+const TMP_DATA = mkdtempSync(join(tmpdir(), "crow-teardown-data-"));
+process.env.CROW_DATA_DIR = TMP_DATA;
 process.env.CROW_AUTO_UPDATE = "0";
 process.env.CROW_DISABLE_HEALTH_MONITOR = "1";
 process.env.CROW_DISABLE_INSTANCE_SYNC = "1";
 process.env.CROW_DISABLE_NOSTR = "1";
-const CROW_HOME = process.env.CROW_HOME;
+const CROW_HOME = TMP_HOME;
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 
 const B = await import("../servers/gateway/routes/bundles.js");
@@ -38,7 +40,7 @@ B._setDockerRunnerForTest(async () => ({ stdout: "", stderr: "" }));
 after(() => {
   B._setComposeRunnerForTest(null); B._setDockerRunnerForTest(null);
   B._setRestartHookForTest(null); B._setAppEnvPathForTest(null);
-  for (const d of [CROW_HOME, process.env.CROW_DATA_DIR, FIXTURES, GW]) rmScratch(d);
+  for (const d of [TMP_HOME, TMP_DATA, FIXTURES, GW]) rmScratch(d);
 });
 
 const COMPOSE = 'services:\n  app:\n    image: busybox:1.36\n    environment:\n      P: "${P:?set P}"\n      Q: "${Q:?set Q}"\n';
@@ -129,6 +131,15 @@ test("uninstall: down fails for another reason but nothing runs → removed as b
   });
   const job = await uninstall(id);
   assert.equal(calls.filter((c) => c.args[0] === "down").length, 1, "no dummy retry for a non-interpolation error");
+  assert.notEqual(job.status, "failed", job.log.join("\n"));
+  assert.equal(existsSync(dir), false);
+});
+
+test("uninstall on a host with no docker compose at all still removes the extension", async () => {
+  const id = "td-nocompose";
+  const dir = seedInstalled(id, { envText: "P=x\nQ=y\n" });
+  B._setComposeRunnerForTest(async () => { throw new Error("No docker compose command found. Install docker-compose-plugin or docker-compose."); });
+  const job = await uninstall(id);
   assert.notEqual(job.status, "failed", job.log.join("\n"));
   assert.equal(existsSync(dir), false);
 });
