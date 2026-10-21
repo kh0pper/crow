@@ -196,8 +196,8 @@ test("picking an option posts its index, then shows the chosen label, a follow-u
   assert.equal(link.href, "/dashboard/bot-board#card=77");
   assert.ok(link.textContent.includes(translations["botboard.decision.followUp"].en));
   link.click();
-  assert.equal(location.hash, "card=77");
-  assert.equal(location.reloaded, 1, "reloads so the new card is on the board");
+  assert.deepEqual(ctx.opened, [77], "opens the follow-up card's drawer");
+  assert.equal(location.reloaded, 0, "no page reload");
 });
 
 test("Other… reveals the textarea; Send posts index -1 with the text; empty text sends nothing", async () => {
@@ -366,4 +366,22 @@ test("the live watcher remembers the drawer before it reloads, and page init reo
   assert.ok(src.includes("if(!INCLUDE_ARCHIVED) reopenRememberedDrawer();"), "init reopens");
   assert.ok(src.indexOf("reopenRememberedDrawer();") < src.indexOf("var es=new EventSource"), "before the live stream attaches");
   assert.match(fnSource(src, "hydrateDrawer"), /if\(pendingDrawerScroll\)\{ drawer\.scrollTop=pendingDrawerScroll; pendingDrawerScroll=0; \}/);
+});
+
+test("openCardById opens a card on this board from its face, and loads any other card by id", () => {
+  const src = scriptBody("en");
+  const fn = fnSource(src, "openCardById");
+  const faces = { 5: { getAttribute: (k) => (k === "data-item-type" ? "kanban" : null) } };
+  const filled = [], opened = [];
+  const run = new Function("document", "fillDrawer", "openCardDrawer", fn + "\nreturn openCardById;")(
+    { querySelector: (sel) => { const m = sel.match(/data-card="(\d+)"/); return m ? faces[m[1]] || null : null; } },
+    (el) => filled.push(el), (data) => opened.push(data));
+  run(5);
+  assert.deepEqual(filled, [faces[5]], "on the board: same path as a click on the card");
+  run(77);
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0].id, 77, "not on the board: opened by id");
+  assert.equal(opened[0].status, null, "status comes from the card GET, never guessed");
+  run("77\"]"); run(1.5);
+  assert.equal(filled.length + opened.length, 2, "a non-integer id opens nothing");
 });

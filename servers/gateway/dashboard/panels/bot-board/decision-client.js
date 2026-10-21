@@ -60,9 +60,10 @@ export function decisionJs(lang) {
         var idNum=Number(fid);
         var a=decisionEl('a','bb-decision-follow','${tJs("botboard.decision.followUp", lang)}'+' #'+idNum);
         a.href=location.pathname+location.search+'#card='+idNum;
-        // Same-page hash links do not reload, and the follow-up card was just
-        // created, so it is not on the board yet: reload onto its #card= link.
-        a.onclick=function(ev){ if(ev&&ev.preventDefault) ev.preventDefault(); location.hash='card='+idNum; location.reload(); };
+        // Opens the follow-up card's drawer, as clicking that card would. It
+        // was just created, so it may not be on this board yet: the drawer
+        // loads it by id. The href stays for open-in-new-tab.
+        a.onclick=function(ev){ if(ev&&ev.preventDefault) ev.preventDefault(); openCardById(idNum); };
         box.appendChild(a);
       }
       box.appendChild(dmsg);
