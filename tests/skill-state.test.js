@@ -87,3 +87,20 @@ test("a garbled file warns in the journal, once per file version (the fail-open 
     assert.equal(warns.length, 2, "a good file is quiet");
   } finally { console.warn = orig; }
 });
+
+test("ackSkill records 'keep mine' per shipped version, keeps the off list, and refuses a garbled file", async () => {
+  const { ackSkill } = await import("../servers/shared/skill-state.js");
+  const h = home();
+  setSkillOff(h, "media", true);
+  assert.deepEqual(ackSkill(h, "media.md", "abc"), { ok: true });
+  assert.deepEqual(ackSkill(h, "Retired.md", null), { ok: true }, "a file name normalises; no shipped version is fine");
+  const st = readSkillState(h).state;
+  assert.equal(st.ack["media.md"].srcSha, "abc");
+  assert.equal(st.ack["retired.md"].srcSha, null);
+  assert.match(st.ack["media.md"].at, /^\d{4}-/);
+  assert.deepEqual(st.off, ["media"]);
+  assert.equal(ackSkill(h, "../x", "a").ok, false);
+  writeFileSync(join(h, SKILL_STATE_FILE), "{ garbled");
+  const orig = console.warn; console.warn = () => {};
+  try { assert.deepEqual(ackSkill(h, "media.md", "x"), { ok: false, error: "unreadable" }); } finally { console.warn = orig; }
+});

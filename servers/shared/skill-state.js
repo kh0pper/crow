@@ -91,3 +91,20 @@ export function setSkillOff(crowHome, name, off) {
   atomicWrite600(statePath(crowHome), JSON.stringify({ ...state, version: 1, off: [...set].sort() }, null, 2) + "\n");
   return { ok: true };
 }
+
+/**
+ * "Keep mine" / "Keep" for a skill the Skills panel flags: recorded per
+ * shipped version (`srcSha`, or null for a skill no longer shipped), so the
+ * flag comes back when the extension ships another version.
+ * @returns {{ ok: true } | { ok: false, error: "invalid-name"|"unreadable" }}
+ */
+export function ackSkill(crowHome, file, srcSha) {
+  const n = skillStateName(file);
+  if (!n) return { ok: false, error: "invalid-name" };
+  const { ok, state } = readSkillState(crowHome);
+  if (!ok) return { ok: false, error: "unreadable" };
+  const ack = state.ack && typeof state.ack === "object" && !Array.isArray(state.ack) ? { ...state.ack } : {};
+  ack[n + ".md"] = { srcSha: typeof srcSha === "string" ? srcSha : null, at: new Date().toISOString() };
+  atomicWrite600(statePath(crowHome), JSON.stringify({ ...state, version: 1, ack }, null, 2) + "\n");
+  return { ok: true };
+}

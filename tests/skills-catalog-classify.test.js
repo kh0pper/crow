@@ -263,3 +263,37 @@ test("the report CLI prints the same lines as before it moved onto skillSyncPlan
     "",
   ].join("\n"));
 });
+
+// PR 3: "Keep mine" / "Keep" quiet a flagged row, per shipped version.
+test("ack: an edited copy behind its extension goes quiet when acked for that version, and comes back for a newer one", () => {
+  const w = world().bundle("media", { "media.md": "# Media v2\n" }).installed("media").user("media.md", "# My media\n");
+  w.record({ "media.md": { bundle: "media", sha256: skillHash("# Media v1\n"), installedAt: "t" } });
+  assert.equal(w.row("media").status, "behind");
+  assert.equal(w.row("media", { ack: { "media.md": { srcSha: skillHash("# Media v2\n") } } }).status, "on");
+  assert.equal(w.row("media", { ack: { "media.md": { srcSha: skillHash("# Media v1\n") } } }).status, "behind");
+});
+
+test("ack: a skill no longer shipped goes quiet once kept", () => {
+  const w = world().bundle("dash", { "dash.md": "# Dash\n" }).installed("dash").user("retired.md", "# Retired\n");
+  mkdirSync(join(w.home, "bundles", "dash", "skills"), { recursive: true });
+  writeFileSync(join(w.home, "bundles", "dash", "skills", "retired.md"), "# Retired\n");
+  assert.equal(w.row("retired").status, "orphan");
+  const kept = w.row("retired", { ack: { "retired.md": { srcSha: null } } });
+  assert.equal(kept.status, "on");
+  assert.equal(kept.source, "yours");
+});
+
+test("attentionItems: one per flagged state; removed only while a bot asks; a name a bot asks for that exists nowhere", async () => {
+  const { attentionItems } = await import("../servers/gateway/skills-catalog.js");
+  const rows = [
+    { name: "a", status: "update", hasFile: true }, { name: "b", status: "behind", hasFile: true },
+    { name: "c", status: "removed", hasFile: false }, { name: "d", status: "removed", hasFile: false },
+    { name: "e", status: "orphan", hasFile: true }, { name: "f", status: "on", hasFile: true },
+  ];
+  const usage = new Map([["c", [{ botId: "home-helper", name: "Home helper" }]], ["ghost", [{ botId: "research-desk", name: "Research desk" }]], ["f", [{ botId: "x", name: "X" }]]]);
+  const items = attentionItems(rows, usage, new Set(["switched-off"]));
+  assert.deepEqual(items.map((i) => `${i.kind}:${i.name}`), ["update:a", "behind:b", "removed:c", "orphan:e", "missing:ghost"]);
+  assert.deepEqual(items.find((i) => i.kind === "missing").bots.map((b) => b.botId), ["research-desk"]);
+  const offAsk = attentionItems([], new Map([["switched-off", [{ botId: "x", name: "X" }]]]), new Set(["switched-off"]));
+  assert.deepEqual(offAsk, [], "a bot asking for a skill switched off is not missing");
+});

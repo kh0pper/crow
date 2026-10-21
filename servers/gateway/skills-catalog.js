@@ -353,7 +353,7 @@ export function classifySkills({ crowHome, appBundles, repoDir, lang = "en", kit
       } else if (entry && (entry.action === "kept-edited" || entry.action === "kept-unverified")) {
         Object.assign(row, { source: "yours", basedOn: entry.bundle, bundle: entry.bundle });
         const acked = ack[file] && ack[file].srcSha && ack[file].srcSha === entry.srcSha;
-        if (entry.action === "kept-edited") row.status = entry.rec && entry.rec.sha256 !== entry.srcSha ? "behind" : "on";
+        if (entry.action === "kept-edited") row.status = entry.rec && entry.rec.sha256 !== entry.srcSha && !acked ? "behind" : "on";
         else row.status = acked ? "on" : "behind";
       } else if (rec && typeof rec.bundle === "string" && !installedIds.includes(rec.bundle)) {
         // An edited copy kept when its extension was uninstalled.
@@ -388,6 +388,8 @@ export function classifySkills({ crowHome, appBundles, repoDir, lang = "en", kit
     const p = m && manifestSkillPaths(m).find((x) => x.split("/").pop() === file);
     return p ? join(appBundles, id, p) : null;
   };
+  // "Keep" on a skill no longer shipped quiets it for good (no version to track).
+  for (const row of rows) if (row.status === "orphan" && ack[row.file]) row.status = "on";
   for (const row of rows) {
     const p = row.hasFile ? row.path : row.bundle ? shippedPath(row.bundle, row.file) : null;
     const text = p ? readSkillText(p) : null;
@@ -395,4 +397,34 @@ export function classifySkills({ crowHome, appBundles, repoDir, lang = "en", kit
     Object.assign(row, meta);
   }
   return rows;
+}
+
+/**
+ * The Skills panel's "Needs a look" items, in order: an update ready, a copy
+ * behind its extension, a removed skill a bot still asks for, a skill no
+ * longer shipped, then a name a bot asks for that exists nowhere. A removed
+ * skill no bot asks for is not an item (its row offers Restore), and a name
+ * switched off on purpose is not "missing".
+ * @param {Array} rows   classifySkills rows
+ * @param {Map<string, Array>} usage   skill name → bots (skills-used-by.js)
+ * @param {Set<string>} off   names switched off
+ */
+export function attentionItems(rows, usage, off = new Set()) {
+  const kinds = ["update", "behind", "removed", "orphan"];
+  const items = [];
+  for (const kind of kinds) {
+    for (const r of rows) {
+      if (r.shadow || r.status !== kind) continue;
+      const bots = usage.get(r.name) || [];
+      if (kind === "removed" && !bots.length) continue;
+      items.push({ kind, name: r.name, row: r, bots });
+    }
+  }
+  const known = new Set(rows.map((r) => r.name));
+  for (const [name, bots] of [...usage.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const key = String(name).trim().toLowerCase().replace(/\.md$/, "");
+    if (known.has(key) || off.has(key)) continue;
+    items.push({ kind: "missing", name, row: null, bots });
+  }
+  return items;
 }
