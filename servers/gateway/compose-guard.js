@@ -14,9 +14,10 @@
  *
  * Every gateway path that runs `compose up` calls checkBundleCompose first: install
  * (single and collection: both go through runInstallJob), Start/recreate, and the
- * shared-storage re-apply.
+ * shared-storage re-apply. The gpu-orchestrator checks model bundles itself
+ * (preflightBundleUp) with the same checkComposeModel.
  */
-import { existsSync, readFileSync, realpathSync, lstatSync, readlinkSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, lstatSync, readlinkSync, statSync, openSync, fstatSync, readSync, closeSync, constants as fsConstants } from "node:fs";
 import { join, resolve as resolvePath, dirname, basename, sep, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 
@@ -169,6 +170,84 @@ export const RESERVED_HOME_NAMES = new Set(["data", "secrets", "bundles", "panel
   "p4", "pi-bots", "eval", "blog", "bin", "tmp", "cache", "config", "android-keystore", "keychain", "identity", "peer",
   "mcp", "models", "board", "phone-token", "artifacts-sidecar", "browser-sessions", "instances", "installed", "live2d-models"]);
 
+/** Compose's byte sizes (b, k, m, g with an optional "b"; a bare number is bytes) → bytes, or null. */
+export function parseByteSize(v) {
+  if (typeof v === "number") return Number.isSafeInteger(v) && v >= 0 ? v : null;
+  const m = /^(\d+)\s*([bkmg]?)b?$/i.exec(String(v ?? "").trim());
+  if (!m) return null;
+  const n = Number(m[1]) * ({ "": 1, b: 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3 })[m[2].toLowerCase()];
+  return Number.isSafeInteger(n) ? n : null;
+}
+// /dev/shm a bundle may ask for without declaring it (frigate 512 MB, browser 1 GB).
+export const SHM_DEFAULT_MAX = 1024 ** 3;
+const ENV_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*\.env$/;
+
+/**
+ * What a reviewed manifest declares its containers need from the host (follow-up A),
+ * instead of a privileged grant or a loophole:
+ *   gpu        GPU device nodes (/dev/dri, /dev/kfd, /dev/nvidia*), gpus:, GPU device
+ *              reservations, runtime nvidia, NVIDIA_VISIBLE_DEVICES / NVIDIA_DRIVER_CAPABILITIES
+ *              in its environment, any NVIDIA_ mention in an env_file. (Image env is not in the compose model: on a host whose
+ *              Docker default runtime is nvidia an image's own NVIDIA_VISIBLE_DEVICES still
+ *              reaches the GPUs; the gate is complete only on hosts whose default runtime is runc.)
+ *   shm_size   the /dev/shm its compose may ask for above SHM_DEFAULT_MAX. A declaration of
+ *              need, NOT a security boundary (tmpfs mounts and container memory are not
+ *              capped): it replaces `ipc: host`, which shares the HOST's IPC namespace.
+ *   env_files  shared host env files it reads, by name, from ~/.crow/env/ or CROW_HOME/env/
+ *   path_env   .env keys whose value is a host folder the operator chose (read by the
+ *              gpu-orchestrator for ctx.operatorRoots). This check does not read
+ *              operatorRoots yet: it relaxes nothing until the host-path allowlist
+ *              (follow-up B) consumes it, and that applies its own floor to them.
+ * Never honoured for community bundles. Callers pass the REPO manifest (startConsent,
+ * the orchestrator), never an installed copy a container could rewrite.
+ */
+export function hostGrants(manifest) {
+  const none = { gpu: false, shmMax: SHM_DEFAULT_MAX, envFiles: [], pathEnv: [] };
+  const g = normalizeHostGrants(manifest?.host_grants);
+  if (!g || manifest?.origin === "community") return none;
+  const shm = g.shm_size === undefined ? null : parseByteSize(g.shm_size);
+  return { gpu: g.gpu === true, shmMax: shm !== null && shm > SHM_DEFAULT_MAX ? shm : SHM_DEFAULT_MAX, envFiles: g.env_files || [], pathEnv: g.path_env || [] };
+}
+
+/** host_grants with only the keys and value shapes this module understands, or null. */
+export function normalizeHostGrants(g) {
+  if (!g || typeof g !== "object" || Array.isArray(g)) return null;
+  const out = {};
+  if (g.gpu === true) out.gpu = true;
+  if ((typeof g.shm_size === "string" || typeof g.shm_size === "number") && parseByteSize(g.shm_size) !== null) out.shm_size = g.shm_size;
+  if (Array.isArray(g.env_files)) out.env_files = g.env_files.filter((n) => typeof n === "string" && ENV_FILE_NAME.test(n) && !n.includes(".."));
+  if (Array.isArray(g.path_env)) out.path_env = g.path_env.filter((k) => typeof k === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(k));
+  return out;
+}
+
+const NVIDIA_ENV = ["NVIDIA_VISIBLE_DEVICES", "NVIDIA_DRIVER_CAPABILITIES"];
+export const ENV_FILE_MAX_BYTES = 1024 * 1024;
+/**
+ * Read an ADMITTED env_file for the NVIDIA_* check: { missing } when there is no file,
+ * { bad } when it is not a regular file of at most ENV_FILE_MAX_BYTES, else { nvidia }.
+ *
+ * No dotenv parsing (a parser differential with Compose would be a GPU-grant bypass):
+ * ANY mention of NVIDIA_ (any case, any separator, quoting or line ending) counts.
+ * stat before open (a device or FIFO is never opened), then open non-blocking and check
+ * that the descriptor is the same regular file, and read at most the cap from it.
+ */
+export function scanEnvFile(path) {
+  let st;
+  try { st = statSync(path); } catch (e) { return e?.code === "ENOENT" || e?.code === "ENOTDIR" ? { missing: true } : { bad: true }; }
+  if (!st.isFile() || st.size > ENV_FILE_MAX_BYTES) return { bad: true };
+  let fd;
+  try { fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOCTTY); } catch { return { bad: true }; }
+  try {
+    const fst = fstatSync(fd);
+    if (!fst.isFile() || fst.dev !== st.dev || fst.ino !== st.ino || fst.size > ENV_FILE_MAX_BYTES) return { bad: true };
+    const buf = Buffer.alloc(ENV_FILE_MAX_BYTES + 1);
+    let n = 0;
+    for (let r; n <= ENV_FILE_MAX_BYTES && (r = readSync(fd, buf, n, buf.length - n, null)) > 0;) n += r;
+    if (n > ENV_FILE_MAX_BYTES) return { bad: true };
+    return { nvidia: /nvidia_/i.test(buf.subarray(0, n).toString("latin1")) };
+  } catch { return { bad: true }; } finally { closeSync(fd); }
+}
+
 /**
  * Check a Compose model (the parsed `docker compose config --format json` output).
  * @returns {{valid: true} | {valid: false, reason: string}}
@@ -181,6 +260,9 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
   const ownId = /^[a-z0-9][a-z0-9-]*$/.test(String(manifest?.id || "")) ? manifest.id : null;
   const refuse = (reason) => ({ valid: false, reason });
   const needPriv = (what) => (isPrivilegedAllowed ? null : refuse(`Compose file uses ${what} but manifest does not declare 'privileged: true' (or consent was not verified)`));
+  const grants = hostGrants(manifest);
+  // GPU access: declared by host_grants.gpu (or covered by privileged consent).
+  const needGpu = (what) => (grants.gpu ? null : needPriv(`${what} (a GPU: declare host_grants.gpu)`));
   const isObj = (v) => v && typeof v === "object" && !Array.isArray(v);
   if (!isObj(model) || !isObj(model.services)) return refuse("Docker Compose produced no services model");
   for (const k of Object.keys(model)) {
@@ -287,12 +369,28 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     const real = resolveHostPath(src);
     return checkOne(lex, { readOnly, what }) || (real !== lex ? checkOne(real, { readOnly, what }) : null);
   };
-  const insideBundle = (src, what, { allowOutside = false } = {}) => {
+  const insideBundle = (src, what) => {
     if (typeof src !== "string" || src === "") return refuse(`${what}: a path Compose could not resolve`);
     if (!isAbsolute(src)) return refuse(`${what}: a path that is not absolute after Compose resolved it`);
     const p = resolveHostPath(src);
-    if (under(p, bundleReal) || allowOutside) return null;
+    if (under(p, bundleReal)) return null;
     return refuse(`${what}: reads a host path outside the bundle`);
+  };
+  // A shared host env file the manifest declares (host_grants.env_files): it must really be
+  // <home>/.crow/env/<name> or <CROW_HOME>/env/<name> (realpath: a symlink there that leads
+  // elsewhere does not count).
+  const sharedEnvFile = (path) => {
+    if (!grants.envFiles.length || !existsSync(path)) return false;
+    let real;
+    try { real = realpathSync(path); } catch { return false; }
+    const home = ctx.home || homedir();
+    return grants.envFiles.some((n) => [join(home, ".crow", "env"), join(ctx.crowHome, "env")].some((dir) => {
+      let realDir;
+      try { realDir = realpathSync(dir); } catch { return false; }
+      // As written (no ../ tricks by name) AND where it really is: the file itself, not a
+      // symlink out of the folder.
+      return resolvePath(path) === join(resolvePath(dir), n) && real === join(realDir, n);
+    }));
   };
   const checkKeys = (obj, allowed, what) => {
     if (!isObj(obj)) return refuse(`${what}: not a mapping`);
@@ -303,11 +401,23 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
   // A bind source inside another READ-WRITE bind of this project: the container can swap it
   // for a symlink after this check, and Docker follows it at the next (re)start, which
   // nothing re-checks (restart: unless-stopped). Refused.
+  const binds = [];
+  for (const s of Object.values(model.services || {})) {
+    for (const v of (s && s.volumes) || []) if (v && v.type === "bind" && typeof v.source === "string" && isAbsolute(v.source)) binds.push({ p: resolveHostPath(v.source), rw: v.read_only !== true });
+  }
+  // Host folders a container of this project can write: read-write binds and local
+  // volumes on a bind device (not read-only). A file the gateway or Compose reads there
+  // could be swapped for a symlink or a FIFO after this check.
+  const writable = binds.filter((b) => b.rw).map((b) => b.p);
+  for (const vol of Object.values(isObj(model.volumes) ? model.volumes : {})) {
+    const dev = vol?.driver_opts?.device;
+    if (typeof dev === "string" && isAbsolute(dev) && !/(?:^|,)ro(?:,|$)/.test(String(vol.driver_opts.o || ""))) writable.push(resolveHostPath(dev));
+  }
+  const containerWritable = (path) => {
+    const p = resolveHostPath(path);
+    return writable.some((w) => under(p, w));
+  };
   {
-    const binds = [];
-    for (const s of Object.values(model.services || {})) {
-      for (const v of (s && s.volumes) || []) if (v && v.type === "bind" && typeof v.source === "string" && isAbsolute(v.source)) binds.push({ p: resolveHostPath(v.source), rw: v.read_only !== true });
-    }
     for (const a of binds) {
       for (const b of binds) {
         if (a !== b && a.rw && a.p !== b.p && under(b.p, a.p)) return refuse(`a bind mount sits inside another read-write bind mount (${b.p.slice(-60)})`);
@@ -345,14 +455,32 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     // A moderately negative score (workspace's DB: -500) only changes who the OOM killer
     // picks; below -500, down to OOM-immune -1000, needs consent.
     if (s.oom_score_adj !== undefined && !(Number(s.oom_score_adj) >= -500) && (r = needPriv("oom_score_adj below -500"))) return r;
-    if (s.runtime !== undefined && !["runc", "nvidia"].includes(String(s.runtime)) && (r = needPriv(`runtime ${s.runtime}`))) return r;
+    if (s.runtime !== undefined && String(s.runtime) !== "runc") {
+      if (String(s.runtime) === "nvidia") { if ((r = needGpu("runtime nvidia"))) return r; }
+      else if ((r = needPriv(`runtime ${s.runtime}`))) return r;
+    }
+    if (s.gpus !== undefined && s.gpus !== null && !(Array.isArray(s.gpus) && s.gpus.length === 0) && (r = needGpu("gpus"))) return r;
+    {
+      // In the service's environment (env_file contents: below, once each file is admitted).
+      const listed = (env, k) => (Array.isArray(env) ? (env.find((e) => String(e).split("=")[0] === k) || "").split("=").slice(1).join("=") : env?.[k]);
+      for (const k of NVIDIA_ENV) {
+        const v = listed(s.environment, k);
+        if (v !== undefined && v !== null && v !== "" && !["void", "none"].includes(String(v)) && (r = needGpu(`${k}`))) return r;
+      }
+    }
+    if (s.shm_size !== undefined && s.shm_size !== null) {
+      const shm = parseByteSize(s.shm_size);
+      if (shm === null) return refuse(`${tag}: a shm_size the install check can't read (${String(s.shm_size).slice(0, 40)})`);
+      if (shm > grants.shmMax && (r = needPriv(`shm_size ${shm} bytes, more than the manifest declares (host_grants.shm_size)`))) return r;
+    }
     for (const d of s.devices || []) {
       const raw = typeof d === "string" ? d.split(":")[0] : d?.source;
       // Normalized AND resolved: /dev/dri/../nvme0n1 is a raw disk.
       const isGpu = (x) => /^\/dev\/(dri(\/[A-Za-z0-9_.-]+)?|kfd|nvidia[a-z0-9-]*)$/.test(x) && !x.split("/").includes("..");
       const gpu = typeof raw === "string" && isAbsolute(raw) && isGpu(resolvePath(raw)) && isGpu(resolveHostPath(raw));
       const src = raw;
-      if (!gpu && (r = needPriv(`a host device (${String(src || "?").slice(0, 60)})`))) return r;
+      if (gpu) { if ((r = needGpu(`the device ${String(src).slice(0, 60)}`))) return r; }
+      else if ((r = needPriv(`a host device (${String(src || "?").slice(0, 60)})`))) return r;
     }
     if (s.deploy !== undefined) {
       if ((r = checkKeys(s.deploy, ["resources", "restart_policy", "replicas", "mode", "labels", "update_config", "rollback_config", "placement", "endpoint_mode"], `${tag} deploy`))) return r;
@@ -360,7 +488,7 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
         const caps = (dev.capabilities || []).flat().map(String);
         if (!(caps.length && caps.every((c) => ["gpu", "compute", "utility", "graphics", "video", "display"].includes(c)))) {
           if ((r = needPriv("a device reservation other than a GPU"))) return r;
-        }
+        } else if ((r = needGpu("a GPU device reservation"))) return r;
       }
     }
     for (const n of Object.keys(isObj(s.networks) ? s.networks : {})) {
@@ -384,7 +512,20 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     }
     for (const e of s.env_file || []) {
       const path = typeof e === "string" ? e : e?.path;
-      if ((r = insideBundle(path, `${tag} env_file`, { allowOutside: manifest?.inference === true }))) return r;
+      const shared = typeof path === "string" && isAbsolute(path) && sharedEnvFile(path);
+      if (!shared && (r = insideBundle(path, `${tag} env_file`))) return r;
+      if (containerWritable(path)) return refuse(`${tag} env_file: inside a folder a container of this bundle can write`);
+      // Admitted: now (never before) read it for NVIDIA_* (the model is built with
+      // --no-env-resolution, so env_file contents are not in it). Only a small regular file:
+      // a device, FIFO or huge file would block or exhaust the gateway.
+      const scan = scanEnvFile(path);
+      if (scan.missing) {
+        // Fail closed: a file that appears between this check and `up` is never checked.
+        if (e?.required === false) continue;
+        return refuse(`${tag} env_file: ${String(path).slice(-60)} does not exist`);
+      }
+      if (scan.bad) return refuse(`${tag} env_file: not a regular file of at most 1 MiB`);
+      if (scan.nvidia && (r = needGpu("NVIDIA_* in an env_file"))) return r;
     }
     for (const lf of [].concat(s.label_file || [])) if ((r = insideBundle(lf, `${tag} label_file`))) return r;
     if (s.build !== undefined) {
@@ -462,6 +603,23 @@ export function usesHostNetwork(model) {
   return false;
 }
 
+/**
+ * The environment every gateway-driven `docker compose` run gets: an ALLOWLIST of the
+ * gateway's variables (Compose interpolates `${ANY_VAR}` from it, so passing all of it
+ * would let a compose file copy any gateway secret into its container), plus CROW_HOME
+ * named explicitly. A bundle's own settings come from its .env, which Compose reads itself.
+ * COMPOSE_* never passes (COMPOSE_FILE / _PROJECT_NAME / _PROFILES would change the model).
+ */
+const COMPOSE_ENV_KEYS = new Set(["PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ", "TMPDIR", "XDG_RUNTIME_DIR", "CROW_GATEWAY_PORT", "CROW_GATEWAY_URL", "CROW_DB_PATH", "CROW_DATA_DIR"]);
+export function composeEnv(base, crowHome) {
+  const env = {};
+  for (const [k, v] of Object.entries(base || {})) {
+    if (COMPOSE_ENV_KEYS.has(k) || /^LC_[A-Z]+$/.test(k) || (/^DOCKER_[A-Z_]+$/.test(k) && k !== "DOCKER_DEFAULT_PLATFORM")) env[k] = v;
+  }
+  env.CROW_HOME = crowHome;
+  return env;
+}
+
 /** `${VAR:?…}` / `${VAR?…}` names in a compose text (the ones Compose refuses to leave blank). */
 export function requiredComposeVars(text) {
   const out = new Set();
@@ -491,12 +649,14 @@ export function parseDotEnv(path) {
  * model can still be checked; Start re-runs this check once the real value is set.
  * @returns {Promise<{model: object} | {error: string}>}
  */
-export async function loadComposeModel(bundleDir, { env, runConfig }) {
-  const args = ["config", "--format", "json", "--no-env-resolution"];
+export async function loadComposeModel(bundleDir, { env, runConfig, composeFile = null, cwd = bundleDir }) {
+  // composeFile: the caller's `up` names one file (`-f`, the gpu-orchestrator): the model
+  // is read the same way (no override discovery, COMPOSE_FILE ignored), from the same cwd.
+  const args = [...(composeFile ? ["-f", composeFile] : []), "config", "--format", "json", "--no-env-resolution"];
   // Every profile: a service behind an inactive profile is still in the file, and
   // `compose --profile x up` (a hook, an operator) would start it.
   const attempt = async (e) => {
-    const { stdout } = await runConfig(args, { cwd: bundleDir, env: { ...e, COMPOSE_PROFILES: "*" } });
+    const { stdout } = await runConfig(args, { cwd, env: { ...e, COMPOSE_PROFILES: "*" } });
     return JSON.parse(String(stdout));
   };
   try {
@@ -506,8 +666,8 @@ export async function loadComposeModel(bundleDir, { env, runConfig }) {
     return { model };
   } catch (first) {
     let text = "";
-    for (const f of ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]) {
-      try { if (existsSync(join(bundleDir, f))) text += readFileSync(join(bundleDir, f), "utf8") + "\n"; } catch { /* skip */ }
+    for (const f of composeFile ? [composeFile] : ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"].map((n) => join(bundleDir, n))) {
+      try { if (existsSync(f)) text += readFileSync(f, "utf8") + "\n"; } catch { /* skip */ }
     }
     const dot = parseDotEnv(join(bundleDir, ".env"));
     const filled = { ...env };

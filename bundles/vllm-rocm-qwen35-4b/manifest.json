@@ -1,5 +1,6 @@
 {
   "id": "vllm-rocm-qwen35-4b",
+  "version": "1.0.1",
   "type": "bundle",
   "name": "vLLM Qwen3.5-4B (ROCm gfx1151)",
   "category": "ai",
@@ -11,6 +12,7 @@
     "platform": "linux-x86_64",
     "gpu_arch": ["gfx1151"]
   },
+  "host_grants": {"gpu": true, "shm_size": "8g", "env_files": ["rocm.env"], "path_env": ["LLM_CACHE"]},
   "env_vars": [],
   "port": 8011,
   "inference": true,

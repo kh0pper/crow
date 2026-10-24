@@ -67,5 +67,8 @@ services:
       - --limit-mm-per-prompt
       - '{"image":0,"video":0}'
     restart: unless-stopped
-    ipc: host
+    # No ipc: host. vLLM's API server and engine core share memory INSIDE this one
+    # container, which its own IPC namespace and a private /dev/shm of shm_size cover; the
+    # host IPC namespace would only matter for sharing with other containers (none). The
+    # install security check refuses ipc: host without privileged consent.
     shm_size: 8g

@@ -31,6 +31,7 @@
       "cuda"
     ]
   },
+  "host_grants": {"gpu": true},
   "env_vars": [
     {
       "name": "SDXL_PORT",

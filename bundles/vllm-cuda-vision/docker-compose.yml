@@ -25,7 +25,10 @@ services:
       - --gpu-memory-utilization=0.75
       - --max-num-seqs=2
     restart: "no"
-    ipc: host
+    # No ipc: host. One GPU, one container: vLLM's processes share memory inside this
+    # container's own IPC namespace and /dev/shm (shm_size); the host IPC namespace would
+    # only matter for sharing with other containers (none). The install security check
+    # refuses ipc: host without privileged consent.
     shm_size: 4g
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/models', timeout=3).read()"]
