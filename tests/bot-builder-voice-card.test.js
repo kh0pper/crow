@@ -560,3 +560,26 @@ test("the editor marks each calendar and list Crow's own or shared by its owner,
     assert.ok(!(await editor()).includes(T("botbuilder.voiceRoutineWillAskCalendar")));
   } finally { connectedServers.delete("t-ws"); await reset(); }
 });
+
+// ── PR 2.1 Task 7: the opt-in transcript view, saved through the same compare-and-swap ──
+test("the transcript buffer switch: off by default, warns en + es, saves on and off through the CAS, a stale page writes nothing", async () => {
+  await reset();
+  const html = await editor();
+  assert.match(html, /name="transcript_buffer"/);
+  assert.doesNotMatch(html, /name="transcript_buffer"[^>]*checked/, "off by default");
+  assert.ok(html.includes(T("botbuilder.voiceTranscriptsWarn")));
+  assert.equal(T("botbuilder.voiceTranscriptsWarn"), "Keeps what is said to Crow on every display and phone for 15 minutes, in memory, for troubleshooting.");
+  assert.ok((await editor({ lang: "es" })).includes(T("botbuilder.voiceTranscriptsWarn", "es")));
+  for (const k of ["botbuilder.voiceTranscriptsTitle", "botbuilder.voiceTranscriptsLabel", "botbuilder.voiceTranscriptsWarn"]) {
+    assert.ok(T(k) && T(k, "es") && T(k) !== T(k, "es"), k);
+  }
+  const stale = await saveBody({ transcript_buffer: "on" });
+  assert.equal(qOf(await post(await saveBody({ transcript_buffer: "on" }))).get("saved"), "1");
+  assert.equal((await voiceDef()).voice.transcript_buffer, true);
+  assert.match(await editor(), /name="transcript_buffer"[^>]*checked/);
+  assert.equal(qOf(await post({ ...stale, transcript_buffer: "" })).get("error"), "stale", "the old rev cannot turn it off");
+  assert.equal((await voiceDef()).voice.transcript_buffer, true);
+  assert.equal(qOf(await post(await saveBody({}))).get("saved"), "1", "unticked: absent from the form");
+  assert.equal((await voiceDef()).voice.transcript_buffer, false);
+  await reset();
+});

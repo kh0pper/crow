@@ -1296,3 +1296,64 @@ test("fix round 1: the recap says where the write went (Crow's calendar, a named
   const out = await n.own.fastPath({ db: {}, device: DEVICE, transcript: "menu", lang: "en", tz: TZ, bot: CROW(), executor: nx });
   assert.deepEqual([out.write.target, out.write.target_name], ["named", "Menu"]);
 });
+
+// ── PR 2.1 Task 7: one log line per ok own write, with no title, text, email or calendar id/name ──
+const ADDED_LINE = /^\[voice-own-tools\] (crow_calendar_add_event|crow_reminder_add|crow_task_add) added \((google|workspace|board|crow) (primary|chosen|owned|named|board|crow-reminder) ([A-Za-z0-9._-]{1,128}|-) ([0-9T:+.Z-]{1,40}|-)\)$/;
+const addedLines = (logs) => logs.filter((m) => / added \(/.test(m));
+const noSecrets = (line, secrets) => { for (const x of secrets) assert.ok(!line.toLowerCase().includes(String(x).toLowerCase()), `${line} must not carry ${x}`); assert.ok(!line.includes("@"), `${line} carries no email`); };
+
+test("an ok own write logs one line: tool, backend, class, the new item's id and the start; never the title, text, email or calendar", async () => {
+  const s = await stores();
+  try {
+    // Google, the operator's chosen calendar (an email-shaped id), a title with an email in it.
+    const g = make({ connected: ["gcal_create_event"] });
+    const gset = await g.own.forTurn({ db: {}, bot: CROW({ routine: { calendar: { calendar: "alex.family@example.com" } } }), surface: "kiosk", lang: "en", tz: TZ });
+    assert.equal((await run(toolOf(gset, "crow_calendar_add_event"), { title: "Dinner with alex@example.com", start: "2026-10-26T19:00:00-05:00" }, { executor: fakeExecutor(), db: {}, device: DEVICE })).code, "added");
+    assert.deepEqual(addedLines(g.logs), ["[voice-own-tools] crow_calendar_add_event added (google chosen g1 2026-10-26T19:00:00-05:00)"]);
+    noSecrets(g.logs[0], ["Dinner", "alex", "example.com", "family"]);
+    // Google primary.
+    const p = make({ connected: ["gcal_create_event"] });
+    const pset = await p.own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+    await run(toolOf(pset, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: fakeExecutor(), db: {}, device: DEVICE });
+    assert.deepEqual(addedLines(p.logs), ["[voice-own-tools] crow_calendar_add_event added (google primary g1 2026-10-26T12:00:00-05:00)"]);
+    // Workspace, Crow's own calendar (its id and name stay out).
+    const w = make({ connected: WS_CAL });
+    const wset = await w.own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+    await run(toolOf(wset, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: fakeExecutor({ calendars: [{ id: "home-cal", name: "Home", writable: true, shared: false }] }), db: {}, device: DEVICE });
+    assert.deepEqual(addedLines(w.logs), ["[voice-own-tools] crow_calendar_add_event added (workspace owned u1 2026-10-26T12:00:00-05:00)"]);
+    noSecrets(w.logs[0], ["Lunch", "home-cal", "Home"]);
+    // Workspace, the one named answering the which-question.
+    const n = make({ connected: WS_CAL });
+    const nset = await n.own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+    const nx = fakeExecutor({ calendars: SHARED_ONLY });
+    await run(toolOf(nset, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: nx, db: {}, device: DEVICE });
+    assert.deepEqual(addedLines(n.logs), [], "nothing logged as added before the answer");
+    const named = await n.own.fastPath({ db: {}, device: DEVICE, transcript: "menu", lang: "en", bot: CROW(), executor: nx });
+    assert.equal(named.verb, "which_yes");
+    assert.deepEqual(addedLines(n.logs), ["[voice-own-tools] crow_calendar_add_event added (workspace named u1 2026-10-26T12:00:00-05:00)"]);
+    noSecrets(n.logs[0], ["Lunch", "Menu", "admin", "shared_by"]);
+    // A reminder (Crow's schedules) and a board task: the row ids, never the text or the title.
+    const r = make({ openTasksDb: s.openTasksDb });
+    const rset = await r.own.forTurn({ db: s.db, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+    assert.equal((await run(toolOf(rset, "crow_reminder_add"), { text: "call the dentist", at: "2026-10-26T12:00:00-05:00" }, { executor: null, db: s.db, device: DEVICE })).code, "added");
+    assert.equal((await run(toolOf(rset, "crow_task_add"), { title: "Pay rent", due: "2026-10-27" }, { executor: null, db: s.db, device: DEVICE })).code, "added");
+    const [rem, task] = addedLines(r.logs);
+    assert.match(rem, /^\[voice-own-tools\] crow_reminder_add added \(crow crow-reminder \d+ 2026-10-26T1\d:00:00/);
+    assert.match(task, /^\[voice-own-tools\] crow_task_add added \(board board \d+ 2026-10-27\)$/);
+    noSecrets(rem, ["dentist", "call the"]);
+    noSecrets(task, ["Pay rent", "rent"]);
+    for (const l of [...addedLines(g.logs), ...addedLines(p.logs), ...addedLines(w.logs), ...addedLines(n.logs), rem, task]) assert.match(l, ADDED_LINE, l);
+  } finally { s.close(); }
+});
+
+test("the log line never carries a backend's id when it looks like an email or is not a plain token", async () => {
+  for (const id of ["evt@example.com", "a b", "x".repeat(300)]) {
+    const g = make({ connected: ["gcal_create_event"] });
+    const ex = fakeExecutor();
+    const base = ex.executeToolCalls;
+    ex.executeToolCalls = async (tcs) => (await base(tcs)).map((r) => (r.name === "gcal_create_event" ? { ...r, result: JSON.stringify({ id }) } : r));
+    const set = await g.own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+    assert.equal((await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE })).code, "added");
+    assert.deepEqual(addedLines(g.logs), ["[voice-own-tools] crow_calendar_add_event added (google primary - 2026-10-26T12:00:00-05:00)"]);
+  }
+});

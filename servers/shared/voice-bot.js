@@ -63,6 +63,8 @@ export function voiceBotDefinition({ preset, fastKey, cloudKey = null, migratedF
     voice: {
       escalation: preset === "cloud" ? "off" : "default",
       tts_profile_id: null, stt_profile_id: null, confirm: "standard",
+      // Opt-in troubleshooting view (voice/transcript-buffer.js): in memory only, off unless explicitly true.
+      transcript_buffer: false,
     },
     routine: {
       calendar: { backend: "auto", calendar: null },
@@ -96,6 +98,7 @@ export function normalizeVoiceSettings(def) {
     tts_profile_id: nonEmptyStr(voice.tts_profile_id),
     stt_profile_id: nonEmptyStr(voice.stt_profile_id),
     confirm: oneOf(voice.confirm, CONFIRM_LEVELS, "standard"),
+    transcript_buffer: voice.transcript_buffer === true,
     routine: {
       calendar: { backend: oneOf(cal.backend, ROUTINE_BACKENDS.calendar, "auto"), calendar: nonEmptyStr(cal.calendar) },
       reminders: { backend: oneOf(rem.backend, ROUTINE_BACKENDS.reminders, "auto") },

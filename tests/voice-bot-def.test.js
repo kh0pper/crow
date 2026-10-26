@@ -14,6 +14,8 @@ test("fast_local preset: a voice bot that can never run pi work", () => {
   assert.equal(d.permission_policy.self_authoring, false); assert.equal(d.permission_policy.skill_learning, "off");
   assert.deepEqual(normalizeVoiceSettings(d).handoff, { enabled: true, allowed_bots: [] });
   assert.equal(normalizeVoiceSettings(d).confirm, "standard");
+  assert.equal(normalizeVoiceSettings(d).transcript_buffer, false, "the transcript buffer is off by default");
+  assert.equal(normalizeVoiceSettings({ ...d, voice: { ...d.voice, transcript_buffer: true } }).transcript_buffer, true, "and survives normalization when on");
   assert.ok(d.tools.crow_mcp.includes("crow-memory/crow_store_memory"));
   assert.equal("migrated_from" in d, false);
   assert.equal(voiceBotDefinition({ preset: "fast_local", fastKey: "a/b", migratedFrom: "old" }).migrated_from, "old");

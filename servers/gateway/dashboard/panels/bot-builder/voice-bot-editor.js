@@ -5,7 +5,8 @@
  * refuses them with voice_bot_readonly). Its two writes are its own:
  *
  *   voice_bot_save    the switch, model, escalation, persona and name, the Routine section (calendar, reminders, tasks, confirm),
- *                     speaking voice and speech recognition, memory tools
+ *                     speaking voice and speech recognition, memory tools, the recent-transcripts switch
+ *                     (voice.transcript_buffer: in memory only, off unless ticked; voice/transcript-buffer.js)
  *   voice_bot_preset  rebuild the model, escalation and the preset's tool
  *                     entries from voiceBotDefinition (Memory tools stay as
  *                     the operator set them); "Reset to preset"
@@ -170,7 +171,7 @@ export async function handleVoiceBotSave(req, res, { db }) {
     ...def,
     fast_voice_model: model,
     system_prompt: prompt,
-    voice: { ...obj(def.voice), escalation, tts_profile_id: tts.id, stt_profile_id: stt.id },
+    voice: { ...obj(def.voice), escalation, tts_profile_id: tts.id, stt_profile_id: stt.id, transcript_buffer: b.transcript_buffer === "on" },
     tools: { ...obj(def.tools), crow_mcp: tools },
   };
   await applyRoutine(db, b, def, next);
@@ -395,6 +396,10 @@ export async function renderVoiceBotEditor(req, res, { db, layout, lang = "en", 
   const memSec = sec("botbuilder.voiceMemoryTitle",
     `<label class="btb-vcheck"><input type="checkbox" name="memory_tools" value="on" form="btb-vsave"${memoryOn ? " checked" : ""}> ` +
     `${escapeHtml(t("botbuilder.voiceMemoryLabel", lang))}</label>`);
+  // Off unless ticked; turning it off clears the buffer on the next turn or the defs-changed reload (transcript-buffer.js).
+  const transcriptsSec = sec("botbuilder.voiceTranscriptsTitle",
+    `<label class="btb-vcheck"><input type="checkbox" name="transcript_buffer" value="on" form="btb-vsave"${v.transcript_buffer ? " checked" : ""}> ` +
+    `${escapeHtml(t("botbuilder.voiceTranscriptsLabel", lang))}</label>` + hint("botbuilder.voiceTranscriptsWarn"));
   const routineSec = await routineSection(db, v, lang, sec, hint);
   const saveBar = `<p><button type="submit" class="btn btn-primary" form="btb-vsave">${escapeHtml(t("common.save", lang))}</button></p>`;
   const abilSec = kioskAvailable ? sec("botbuilder.voiceAbilTitle", abilityLineHtml(CROW_VOICE_BOT_ID)) + voiceAbilityScript(lang) : "";
@@ -403,6 +408,6 @@ export async function renderVoiceBotEditor(req, res, { db, layout, lang = "en", 
     title: "Bot Builder — " + name,
     content: PAGE_CSS + section(t("botbuilder.voiceEditorTitle", lang),
       backLink + notice + `<p>${escapeHtml(t("botbuilder.voiceEditorIntro", lang))}</p>` + forms +
-      onSec + presetSec + modelSec + personaSec + ttsSec + sttSec + memSec + routineSec + saveBar + abilSec),
+      onSec + presetSec + modelSec + personaSec + ttsSec + sttSec + memSec + routineSec + transcriptsSec + saveBar + abilSec),
   }));
 }

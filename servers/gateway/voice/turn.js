@@ -23,6 +23,7 @@ import { voiceAbilities } from "./voice-abilities.js";
 import { ROUTINE_OBJECTS, ROUTINE_OBJECT_LISTS, namesRoutineObjects } from "./routine-objects.js";
 import { createVoiceMemory, VOICE_MODE_WINDOW_MS } from "./voice-memory.js";
 import { lastWriteRecap } from "./own-tools.js";
+import { transcriptBufferOn, reloadTranscriptSetting, voiceTranscripts } from "./transcript-buffer.js";
 import { CROW_VOICE_BOT_ID, normalizeVoiceSettings, isVoiceBotDef } from "../../shared/voice-bot.js";
 
 /**
@@ -415,10 +416,12 @@ export function createVoiceTurnRunner(deps) {
       return tts.neg ? null : Buffer.concat(parts);
     }
     let chars = 0;
+    const texts = [];
     const speak = async (text, hard) => {
       const t = String(text || "").trim();
       if (!t || off(hard)) return;
       chars += t.length;
+      texts.push(t);
       const mp3 = await collect(t, hard);
       if (mp3 && !off(hard)) { begin(); emit(mp3, hard, true); }
     };
@@ -429,6 +432,8 @@ export function createVoiceTurnRunner(deps) {
     say.answered = () => answered;
     /** Characters handed to TTS this turn (the filler excluded): a reply's length for the metrics line (kiosk r7b H3). */
     say.chars = () => chars;
+    /** The text handed to TTS this turn (the filler excluded): what was heard, for the opt-in transcript buffer only. */
+    say.text = () => texts.join(" ");
     say.filler = async () => {
       if (off(false)) return;
       const key = `${tts.profile.id}|${tts.voice}|${tts.adapter.name}`;
@@ -559,6 +564,8 @@ export function createVoiceTurnRunner(deps) {
     let ownStamp = [];
     const ownOkFams = new Set();  // own families whose call returned ok this turn (stamped into the voice memory)            // own families this turn offered on intent (stamped into the voice memory; a carried one never is)
     const calledTools = [];       // every tool name the model called this turn (deps.voiceActions.afterTurn)
+    let turnBotId = null;         // the turn's bot id (the transcript buffer records voice-bot turns only)
+    let heardBefore = null;       // the transcript as STT gave it, when the rewrite changed it (the transcript buffer only)
     const voiceActions = deps.voiceActions && typeof deps.voiceActions === "object" ? deps.voiceActions : null;
     /** Speak + caption a fixed line instead of a model call, and save the exchange (the plain transcript and the line). */
     const speakLine = async (line) => {
@@ -611,6 +618,7 @@ export function createVoiceTurnRunner(deps) {
       }
       // The voice bot (step 3 below loads and requires it): opts.botId, else deps.voiceBotId, else the device's bound bot.
       const botId = typeof opts.botId === "string" && opts.botId ? opts.botId : (deps.voiceBotId || device.bound_bot_id);
+      turnBotId = botId;
       // A misheard leading "add" ("Had coffee Tuesday at 9", PR 2.1 [r2 I6]) is put back once, here, before any reader
       // of the words (the fast paths, actionWhen, the intent lists, the model): the caption and the saved conversation
       // keep the rewritten text. The voice bot only, never while a question waits for a yes (stt-rewrite.js: English only).
@@ -620,7 +628,7 @@ export function createVoiceTurnRunner(deps) {
         try { waiting = voiceActions?.turnContext?.({ device })?.pending === true; } catch { waiting = false; }
         let rwBot = null;
         if (!waiting) { try { rwBot = await loadBot(db, botId); } catch { rwBot = null; } }
-        if (!waiting && isVoiceBotDef(rwBot)) { transcript = rw.text; timings.stt_rewrite = rw.from; }
+        if (!waiting && isVoiceBotDef(rwBot)) { heardBefore = transcript; transcript = rw.text; timings.stt_rewrite = rw.from; }
       }
       result.transcript = transcript;
       sink.event({ type: "transcript_final", text: transcript });
@@ -1877,6 +1885,21 @@ export function createVoiceTurnRunner(deps) {
       timings.total_ms = now() - t0;
       if (say) timings.spoken_chars = say.chars();
       if (executor) { try { await executor.close(); } catch {} }
+      // The opt-in transcript buffer (transcript-buffer.js): the Crow voice bot's voice.transcript_buffer decides. On, a
+      // voice-bot turn is kept in memory (what was heard, never logged); off (or the bot disabled or missing), the whole
+      // buffer is cleared.
+      if (deps.transcripts && device?.id) {
+        try {
+          const vdef = await loadBot(db, CROW_VOICE_BOT_ID);
+          if (!transcriptBufferOn(vdef)) deps.transcripts.clear();
+          else if (result.transcript && isVoiceBotDef(turnBotId === CROW_VOICE_BOT_ID ? vdef : await loadBot(db, turnBotId))) {
+            const codes = (timings.tools || []).flatMap((r) => String(r).split("+")).filter(Boolean);
+            if (timings.verb) codes.push(`verb:${timings.verb}`);
+            if (result.failed) codes.push(`failed:${result.failed}`);
+            deps.transcripts.record(device.id, { transcript: result.transcript, stt_rewrite: heardBefore, spoken: say ? say.text() : "", tools_called: calledTools.slice(), codes });
+          }
+        } catch { /* never stops a turn, never logged */ }
+      }
       if (typeof voiceActions?.afterTurn === "function" && device?.id) {
         try { await voiceActions.afterTurn({ device, calledTools: calledTools.slice() }); } catch (err) { log(`[voice-turn] ${device.id} voice actions afterTurn failed (${err?.message || err})`); }
       }
@@ -1893,7 +1916,8 @@ export function createVoiceTurnRunner(deps) {
     return true;
   }
 
-  return { runVoiceTurn, speakText, transcribe, assessBot, abilitiesOf, convo };
+  // transcripts: the opt-in transcript buffer (null without one), read by the kiosk's admin route through deps.voice.
+  return { runVoiceTurn, speakText, transcribe, assessBot, abilitiesOf, convo, get transcripts() { return deps.transcripts || null; } };
 }
 
 // One pibots:defs-changed subscription per process, however many runners defaultVoiceDeps() feeds.
@@ -1904,8 +1928,22 @@ async function subscribeBotDefsChanged() {
   botDefsSubscribed = true;
   try {
     const bus = (await import("../../shared/event-bus.js")).default;
-    bus.on("pibots:defs-changed", () => { botDefsGeneration++; });
+    bus.on("pibots:defs-changed", () => {
+      botDefsGeneration++;
+      // The transcript buffer: a save that turns it off (or disables Crow's voice) clears it now, not on the next turn.
+      reloadTranscriptSetting(voiceTranscripts, readVoiceDefFresh).catch(() => {});
+    });
   } catch { botDefsSubscribed = false; }
+}
+
+/** The Crow voice bot's def straight from the db (null when missing, disabled or unreadable): the defs-changed reload. */
+async function readVoiceDefFresh() {
+  const { createDbClient } = await import("../../db.js");
+  const db = createDbClient();
+  try {
+    const r = (await db.execute({ sql: "SELECT definition, enabled FROM pi_bot_defs WHERE bot_id = ?", args: [CROW_VOICE_BOT_ID] })).rows[0];
+    return r && Number(r.enabled) ? JSON.parse(r.definition) : null;
+  } finally { try { db.close(); } catch {} }
 }
 
 /** The real dependencies (gateway process). Lazy so tests never load them. */
@@ -1937,6 +1975,8 @@ export async function defaultVoiceDeps() {
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     // Every voice turn answers as the Crow voice bot (created on the first turn that finds it missing).
     voiceBotId: CROW_VOICE_BOT_ID,
+    // One process-wide transcript buffer (opt-in, in memory): every runner records into it, the kiosk route reads it.
+    transcripts: voiceTranscripts,
     ensureVoiceBot: async (db) => { await ensureCrowVoiceBot(db); },
     botDefsGeneration: () => botDefsGeneration,
     loadBotRow: async (db, botId) => (await db.execute({ sql: "SELECT bot_id, definition, enabled FROM pi_bot_defs WHERE bot_id = ?", args: [botId] })).rows[0] || null,

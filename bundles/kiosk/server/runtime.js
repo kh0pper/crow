@@ -736,6 +736,8 @@ export function createKioskRuntime(deps) {
     });
   }
 
+  const VOICE_TRANSCRIPTS_PATH = "/api/kiosk/admin/displays/:id/voice-transcripts";
+
   function router(dashboardAuth) {
     const r = deps.Router();
     // In the gateway the global 1 MB JSON parser runs first, so this limit only
@@ -760,6 +762,8 @@ export function createKioskRuntime(deps) {
     // The page lives at /display (ruling F1): the installed maker-lab bundle owns /kiosk/*.
     r.use("/display", gate);
     r.use("/api/kiosk/pair", gate);
+    // The voice transcripts (PR 2.1 Task 7) are what people said: never cached, whatever the answer (a refusal included).
+    r.use(VOICE_TRANSCRIPTS_PATH, (req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
     r.use("/api/kiosk/admin", gate, dashboardAuth, deps.csrfMiddleware);
     r.use("/api/kiosk/internal", internal);
     r.use(SESSION_MEDIA_PATH, gate);
@@ -998,6 +1002,15 @@ export function createKioskRuntime(deps) {
       res.json(await checkStorage(musicConfig(), deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}));
     }));
     r.get("/api/kiosk/admin/displays/:id/metrics", (req, res) => res.json({ turns: metrics.list(req.params.id), summary: metrics.summary(req.params.id) }));
+    // The opt-in voice transcripts (Bot Builder → Crow, off by default; in memory, 15 minutes): the core buffer through
+    // deps.voice.transcripts. Behind the admin gate and the dashboard session, and refused here too for any Funnel
+    // request: CROW_DASHBOARD_PUBLIC never opens it. An older core with no buffer answers an empty list.
+    r.get(VOICE_TRANSCRIPTS_PATH, (req, res) => {
+      if (req.headers["tailscale-funnel-request"]) return res.status(403).json({ error: "funnel_refused" });
+      const buf = deps.voice?.transcripts;
+      if (!buf || typeof buf.list !== "function") return res.json({ entries: [], available: false });
+      res.json({ entries: buf.list(String(req.params.id).slice(0, 200)), available: true });
+    });
 
     r.get("/api/kiosk/internal/displays", wrap(async (req, res) => {
       res.json({ displays: await withDb(async (db) => (await kioskDevices(db)).map((d) => ({ id: d.id, name: d.name, connected: hub.isConnected(d.id) }))) });

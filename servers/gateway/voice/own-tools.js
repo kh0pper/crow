@@ -402,6 +402,29 @@ export function lastWriteRecap(w, lang, now = Date.now()) {
   return w.tool === "crow_calendar_add_event" ? voiceLine(`last_write_recap${how}`, lang, { title: cap, when, calendar: w.target_name ?? "" }) : "";
 }
 
+/**
+ * The one log line of an ok own write (PR 2.1 Task 7):
+ *   [voice-own-tools] <tool> added (<backend> <class> <id> <start>)
+ * backend: google | workspace | board | crow (Crow's schedules). class: primary (Google's own), chosen (the operator's),
+ * owned (a calendar or list Crow bot owns), named (answered to the which-question), board, crow-reminder. id: the NEW
+ * item's id as the backend answered it (event or task uid, card or schedule row), "-" unless a plain token. start: the
+ * start, reminder time or due date, "-" when none. Never the title, the reminder text, an email address, or a calendar
+ * or list id or name.
+ */
+const plainToken = (v, re, max) => {
+  const x = typeof v === "bigint" || typeof v === "number" ? String(v) : typeof v === "string" ? v : "";
+  return x && x.length <= max && re.test(x) && !x.includes("@") ? x : "-";
+};
+function addedLine(tool, v, t, made) {
+  const reminder = tool === "crow_reminder_add";
+  const backend = reminder ? "crow" : t?.backend === "google" || t?.backend === "workspace" ? t.backend : "board";
+  const cls = reminder ? "crow-reminder" : backend === "board" ? "board"
+    : t.say === "named" ? "named" : t.say === "crow" ? "owned" : backend === "google" && t.id === "primary" ? "primary" : "chosen";
+  const id = reminder ? made?.lastInsertRowid : backend === "board" ? made?.id : (made?.uid ?? made?.id);
+  const start = reminder ? (v.atIso ?? v.args.at) : tool === "crow_calendar_add_event" ? v.args.start : v.args.due;
+  return `[voice-own-tools] ${tool} added (${backend} ${cls} ${plainToken(id, /^[A-Za-z0-9._-]+$/, 128)} ${plainToken(start, /^[0-9T:+.Z-]+$/, 40)})`;
+}
+
 // ─── Definitions ───
 const DEFINITIONS = Object.freeze({
   crow_calendar_add_event: {
@@ -606,7 +629,7 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
     const { createCard } = await import("../board/card-service.js");
     const tdb = await openTasksDb();
     try {
-      await createCard(tdb, { title: v.args.title, due_date: v.args.due ?? null, tags: "crow-voice", project_id: settings.routine.tasks.project_id ?? null }, VOICE_ACTOR);
+      return await createCard(tdb, { title: v.args.title, due_date: v.args.due ?? null, tags: "crow-voice", project_id: settings.routine.tasks.project_id ?? null }, VOICE_ACTOR);
     } finally { try { tdb.close(); } catch {} }
   }
 
@@ -616,10 +639,11 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
    */
   async function perform(tool, v, { db, executor, settings, lang, target = null }) {
     let t = target;
+    let made = null;   // what the backend answered (the new item's id is read from it for the log line only)
     try {
       if (tool === "crow_reminder_add") {
         if (!resolveBackends(settings, connectedNow()).reminders) throw new Error("no backend");
-        await db.execute({
+        made = await db.execute({
           sql: "INSERT INTO schedules (task, cron_expression, description, next_run) VALUES ('reminder:' || ?, '@once', 'Set by Crow''s voice', ?)",
           args: [v.args.text, v.atIso],
         });
@@ -629,22 +653,23 @@ export function createOwnTools({ pending, now = Date.now, log = () => {}, connec
         if (tool === "crow_calendar_add_event") {
           const a = v.args;
           if (t.backend === "workspace") {
-            await callTool(executor, "ws_cal_create_event", { calendar: t.id, summary: a.title, start: a.start, end: a.end });
+            made = await callTool(executor, "ws_cal_create_event", { calendar: t.id, summary: a.title, start: a.start, end: a.end });
           } else {
             // Google's all-day end is exclusive: a same-day end becomes the next day.
             const end = a.all_day && a.end <= a.start ? nextDay(a.start) : a.end;
-            await callTool(executor, "gcal_create_event", { summary: a.title, start: a.start, end, calendar_id: t.id });
+            made = await callTool(executor, "gcal_create_event", { summary: a.title, start: a.start, end, calendar_id: t.id });
           }
         } else if (t.backend === "workspace") {
-          await callTool(executor, "ws_task_create", { list: t.id, summary: v.args.title, ...(v.args.due ? { due: v.args.due } : {}) });
+          made = await callTool(executor, "ws_task_create", { list: t.id, summary: v.args.title, ...(v.args.due ? { due: v.args.due } : {}) });
         } else {
-          await boardCard(v, settings);
+          made = await boardCard(v, settings);
         }
       }
     } catch (err) {
       log(`[voice-own-tools] ${tool} not written (${String(err?.message || err).slice(0, 120)})`);
       return { ...BACKEND_ERROR };
     }
+    log(addedLine(tool, v, t, made));
     return { ok: true, code: "added", final: true, say: successLine(tool, v, lang, t), write: writeOf(tool, v, t) };
   }
 
