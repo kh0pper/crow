@@ -62,7 +62,9 @@ for (const [a, p] of [["169.254.0.0", 16], ["168.63.129.16", 32], ["100.100.100.
 const PRIVATE_V4 = new BlockList();
 for (const [a, p] of [["10.0.0.0", 8], ["172.16.0.0", 12], ["192.168.0.0", 16], ["100.64.0.0", 10], ["198.18.0.0", 15]]) PRIVATE_V4.addSubnet(a, p, "ipv4");
 /** Interfaces whose subnets are containers/VMs on this host. */
-const VIRTUAL_IF = /^(docker\d*|br-|virbr|podman|cni|veth|lxcbr|lxdbr|incusbr|flannel|cali|vxlan|vnet|tap|tun)/;
+// Not tun*: a tun device is a VPN to other hosts (the tailnet is one), which
+// the public-and-private default allows; tap/vnet are VM devices.
+const VIRTUAL_IF = /^(docker\d*|br-|virbr|podman|cni|veth|lxcbr|lxdbr|incusbr|flannel|cali|vxlan|vnet|tap)/;
 
 function expand6(a) {
   let s = String(a).toLowerCase().split("%")[0];
@@ -95,20 +97,39 @@ export function readKernelRoutes() {
   if (!ip) throw new Error("ip(8) not found");
   const run = (args) => {
     const r = spawnSync(ip, ["-j", ...args], { encoding: "utf8", timeout: 2000 });
-    if (r.status !== 0) throw new Error("ip " + args.join(" ") + ": exit " + r.status);
+    if (r.status !== 0) throw Object.assign(new Error("ip " + args.join(" ") + ": exit " + r.status), { stderr: String(r.stderr || "") });
     const v = JSON.parse(r.stdout || "null");
     if (!Array.isArray(v)) throw new Error("ip " + args.join(" ") + ": not a list");
     return v;
   };
-  // IPv6 switched off at boot (ipv6.disable=1) is a host without IPv6 tables,
-  // not a failed read.
-  const v6 = existsSync("/proc/net/if_inet6");
-  let links = [];
-  try { links = run(["-d", "link"]); } catch { /* the name list still applies */ }
+  let links = null, linksFailed = false;
+  try { links = run(["-d", "link"]); } catch { linksFailed = true; }
+  const v6 = readV6Tables((which) => run(which === "local" ? ["-6", "route", "show", "table", "local"] : ["-6", "route"]));
   return parseKernelTables({
-    local4: run(["route", "show", "table", "local"]), local6: v6 ? run(["-6", "route", "show", "table", "local"]) : null,
-    main4: run(["route"]), main6: v6 ? run(["-6", "route"]) : null, links,
+    local4: run(["route", "show", "table", "local"]), main4: run(["route"]), links, linksFailed, ...v6,
   });
+}
+
+/**
+ * The IPv6 tables. Skipped (null, not a failure) only when the kernel says
+ * the family is not supported (EAFNOSUPPORT: booted without IPv6), or when
+ * this host has no IPv6 address at all. Any other failure sets v6Failed:
+ * private IPv6 targets are refused then (IPv4 decisions are unaffected).
+ * `run(which)` with which = "local" | "main"; o.interfaces is a seam.
+ */
+export function readV6Tables(run, o = {}) {
+  try {
+    return { local6: run("local"), main6: run("main"), v6Failed: false };
+  } catch (e) {
+    const msg = String((e && (e.stderr || e.message)) || "");
+    if (/address family not supported|EAFNOSUPPORT/i.test(msg)) return { local6: null, main6: null, v6Failed: false };
+    let anyV6 = true;
+    try {
+      anyV6 = Object.values((o.interfaces || networkInterfaces)() || {}).flat()
+        .some((i) => i && (i.family === "IPv6" || i.family === 6));
+    } catch { anyV6 = true; }
+    return { local6: null, main6: null, v6Failed: anyV6 };
+  }
 }
 
 /** Device kinds that carry containers/VMs on this host. Not tun (VPNs such as the tailnet) or wireguard. */
@@ -120,23 +141,34 @@ export function deviceKindIsVirtual(kind) { return VIRTUAL_KINDS.has(String(kind
  * plausible (no `lo` entry), so an empty successful read cannot pass for a
  * host with no addresses.
  */
-export function parseKernelTables({ local4, local6, main4, main6, links }) {
+export function parseKernelTables({ local4, local6, main4, main6, links, linksFailed = false, v6Failed = false }) {
   if (!Array.isArray(local4) || !local4.some((r) => r && r.dev === "lo")) throw new Error("kernel local table has no lo entry");
+  // A bridge with a physical port (the LAN NIC enslaved to br0/vmbr0 on a VM
+  // host) carries the LAN, not containers: never counted as virtual.
+  const physicalBridges = new Set();
+  for (const l of links || []) {
+    const kind = l && l.linkinfo && l.linkinfo.info_kind;
+    if (l && l.master && !kind && l.ifname !== "lo") physicalBridges.add(l.master);
+  }
   const virtualDevs = new Set();
   for (const l of links || []) {
     const kind = l && l.linkinfo && l.linkinfo.info_kind;
-    if (l && l.ifname && deviceKindIsVirtual(kind)) virtualDevs.add(l.ifname);
+    if (l && l.ifname && deviceKindIsVirtual(kind) && !physicalBridges.has(l.ifname)) virtualDevs.add(l.ifname);
   }
-  return { local: [...local4, ...(local6 || [])], main: [...(main4 || []), ...(main6 || [])], virtualDevs };
+  return { local: [...local4, ...(local6 || [])], main: [...(main4 || []), ...(main6 || [])], virtualDevs, physicalBridges,
+    linksFailed: !!linksFailed || !Array.isArray(links), v6Failed: !!v6Failed };
 }
 
 /** Kernel tables are cached briefly (interfaces come and go; a spawn makes many decisions). */
 const ROUTES_TTL_MS = 5000;
 let routesCache = null; // { at, value } | { at, error }
+let kernelReader = null; // test seam
+/** Test seam: replace the kernel reader (null restores it). */
+export function _setKernelReaderForTest(fn) { kernelReader = fn; }
 function cachedKernelRoutes() {
   const now = Date.now();
   if (!routesCache || now - routesCache.at > ROUTES_TTL_MS) {
-    try { routesCache = { at: now, value: readKernelRoutes() }; } catch (e) { routesCache = { at: now, error: e }; }
+    try { routesCache = { at: now, value: (kernelReader || readKernelRoutes)() }; } catch (e) { routesCache = { at: now, error: e }; }
   }
   if (routesCache.error) throw routesCache.error;
   return routesCache.value;
@@ -157,7 +189,7 @@ const FALLBACK_BRIDGES_V4 = [["172.17.0.0", 16], ["192.168.122.0", 24]];
 function localView(o = {}) {
   const addrs = new Set(), bcast = new Set();
   const nets4 = new BlockList(), nets6 = new BlockList();
-  let failed = false;
+  let failed = false, failed6 = false;
   const addAddr = (a) => { const x = String(a || "").split("%")[0]; if (isIP(x)) addrs.add(isIP(x) === 6 ? key6(x) : x); };
   // A dst is an address or address/prefix; `ip -j route` prints host routes
   // without the /32 or /128. Returns false for a shape it does not know.
@@ -176,6 +208,8 @@ function localView(o = {}) {
   // 1. kernel tables
   try {
     const t = (o.routes || cachedKernelRoutes)();
+    if (t.v6Failed) failed6 = true;
+    if (t.linksFailed) failed = true; // a custom-named bridge could be missed
     for (const r of t.local || []) {
       const dst = String(r.dst || "");
       if (r.type === "local" || r.type === "anycast") {
@@ -189,7 +223,8 @@ function localView(o = {}) {
     }
     for (const r of t.main || []) {
       const dev = String(r.dev || "");
-      if (r.dst && r.dst !== "default" && (VIRTUAL_IF.test(dev) || (t.virtualDevs && t.virtualDevs.has(dev)))) addNet(r.dst);
+      const virtual = (VIRTUAL_IF.test(dev) || (t.virtualDevs && t.virtualDevs.has(dev))) && !(t.physicalBridges && t.physicalBridges.has(dev));
+      if (r.dst && r.dst !== "default" && virtual && !addNet(r.dst)) failed = true;
     }
   } catch {
     failed = true;
@@ -215,7 +250,7 @@ function localView(o = {}) {
   } catch { failed = true; }
   // 3. explicit own addresses, honoured on every path
   for (const a of o.hostAddrs || []) addAddr(a);
-  return { addrs, bcast, nets4, nets6, failed };
+  return { addrs, bcast, nets4, nets6, failed, failed6 };
 }
 
 function v4Reason(a, L) {
@@ -248,20 +283,23 @@ export function egressDenyReason(addr, o = {}) {
     return "cloud metadata / host plumbing";
   }
   // IPv4 inside IPv6: every prefix known to embed an IPv4 address is judged
-  // by that address, or refused when the embedding cannot be read reliably.
-  if (zero(0, 5) && (h[5] === 0xffff || h[5] === 0)) return v4Reason(v4From(h[6], h[7]), L);       // ::ffff:a.b.c.d, ::a.b.c.d
-  if (zero(0, 4) && h[4] === 0xffff && h[5] === 0) return v4Reason(v4From(h[6], h[7]), L);        // SIIT ::ffff:0:a.b.c.d
-  if (h[0] === 0x64 && h[1] === 0xff9b && zero(2, 6)) return v4Reason(v4From(h[6], h[7]), L);      // NAT64 64:ff9b::/96
-  if (h[0] === 0x64 && h[1] === 0xff9b && h[2] === 1) return "NAT64 local-use prefix (embedded IPv4 not reliably readable)";
-  if (h[0] === 0x2002) return v4Reason(v4From(h[1], h[2]), L);                                    // 6to4
-  if (h[0] === 0x2001 && h[1] === 0) {                                                            // Teredo: server, and client XOR ffff:ffff
-    return v4Reason(v4From(h[2], h[3]), L) || v4Reason(v4From(h[6] ^ 0xffff, h[7] ^ 0xffff), L);
-  }
-  if (h[0] === 0x100 && zero(1, 4)) return "discard-only prefix (100::/64)";
+  // by that address (and, when that is clean, still by the own-host checks
+  // below: this host may own a 6to4/Teredo/NAT64 address), or refused when
+  // the embedding cannot be read reliably.
+  let embedded = null;
+  if (zero(0, 5) && (h[5] === 0xffff || h[5] === 0)) embedded = v4Reason(v4From(h[6], h[7]), L);       // ::ffff:a.b.c.d, ::a.b.c.d
+  else if (zero(0, 4) && h[4] === 0xffff && h[5] === 0) embedded = v4Reason(v4From(h[6], h[7]), L);   // SIIT ::ffff:0:a.b.c.d
+  else if (h[0] === 0x64 && h[1] === 0xff9b && zero(2, 6)) embedded = v4Reason(v4From(h[6], h[7]), L); // NAT64 64:ff9b::/96
+  else if (h[0] === 0x64 && h[1] === 0xff9b && h[2] === 1) return "NAT64 local-use prefix (embedded IPv4 not reliably readable)";
+  else if (h[0] === 0x2002) embedded = v4Reason(v4From(h[1], h[2]), L);                                // 6to4
+  else if (h[0] === 0x2001 && h[1] === 0) {                                                            // Teredo: server, and client XOR ffff:ffff
+    embedded = v4Reason(v4From(h[2], h[3]), L) || v4Reason(v4From(h[6] ^ 0xffff, h[7] ^ 0xffff), L);
+  } else if (h[0] === 0x100 && zero(1, 4)) return "discard-only prefix (100::/64)";
+  if (embedded) return embedded;
   const isPrivate6 = (h[0] & 0xfe00) === 0xfc00 || (h[0] & 0xffc0) === 0xfe80;
   if (L.addrs.has(key6(a))) return "this host's own address";
   if (L.nets6.check(a, "ipv6")) return "a container/VM bridge on this host";
-  if (L.failed && isPrivate6) return "private target refused: this host's addresses cannot be determined";
+  if ((L.failed || L.failed6) && isPrivate6) return "private target refused: this host's addresses cannot be determined";
   return null;
 }
 

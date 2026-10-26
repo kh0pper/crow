@@ -335,7 +335,7 @@ test("local-table CIDRs (local/anycast 10.0.0.0/8) are owned subnets; a bare any
   const routes = () => ({
     local: [{ type: "local", dst: "10.200.0.0/16", dev: "lo" }, { type: "anycast", dst: "fd00:aaaa::/64", dev: "eth0" },
       { type: "anycast", dst: "10.0.0.0", dev: "eno1" }],
-    main: [{ dst: "10.244.3.17", dev: "cali123" }, { dst: "fd00:cafe::9", dev: "flannel.1" }, { dst: "10.66.0.0/24", dev: "tun0" }],
+    main: [{ dst: "10.244.3.17", dev: "cali123" }, { dst: "fd00:cafe::9", dev: "flannel.1" }, { dst: "10.66.0.0/24", dev: "tap0" }],
   });
   const o = { interfaces: () => ({}), routes };
   for (const a of ["10.200.5.5", "fd00:aaaa::7", "10.0.0.0", "10.244.3.17", "fd00:cafe::9", "10.66.0.9"]) assert.notEqual(egressDenyReason(a, o), null, a);
@@ -375,4 +375,85 @@ test("parseKernelTables: IPv6 disabled is not a failure; an IPv4 local table wit
   const ok = parseKernelTables({ local4: [{ type: "local", dst: "127.0.0.1", dev: "lo" }], local6: null, main4: [], main6: null, links: [] });
   assert.deepEqual(ok.local.length, 1);
   assert.throws(() => parseKernelTables({ local4: [], local6: [], main4: [], main6: [], links: [] }), /no lo entry/);
+});
+
+test("IPv6 tables: skipped only on EAFNOSUPPORT or when the host has no IPv6 address; any other v6 read failure refuses private IPv6", async () => {
+  const { readV6Tables } = await import("../scripts/pi-bots/pi_egress.mjs");
+  const v6If = () => ({ eno1: [{ address: "fd12::5", family: "IPv6", cidr: "fd12::5/64" }] });
+  const v4OnlyIf = () => ({ eno1: [{ address: "10.0.0.5", family: "IPv4", cidr: "10.0.0.5/24" }] });
+  const fail = (msg) => () => { throw Object.assign(new Error(msg), { stderr: msg }); };
+  const ok = readV6Tables(() => [{ type: "local", dst: "::1", dev: "lo" }], { interfaces: v6If });
+  assert.equal(ok.v6Failed, false); assert.equal(ok.local6.length, 1);
+  const eaf = readV6Tables(fail("RTNETLINK answers: Address family not supported by protocol"), { interfaces: v6If });
+  assert.deepEqual([eaf.local6, eaf.main6, eaf.v6Failed], [null, null, false], "EAFNOSUPPORT: no IPv6 on this kernel");
+  const none = readV6Tables(fail("something else"), { interfaces: v4OnlyIf });
+  assert.deepEqual([none.local6, none.v6Failed], [null, false], "no IPv6 address anywhere: nothing to protect");
+  const bad = readV6Tables(fail("something else"), { interfaces: v6If });
+  assert.equal(bad.v6Failed, true, "IPv6 present but unreadable: fail closed");
+});
+
+test("a v6-only read failure refuses private IPv6 targets, while IPv4 decisions stay normal", () => {
+  const routes = () => ({ local: [{ type: "local", dst: "10.0.0.237", dev: "eno1" }], main: [], v6Failed: true });
+  const o = { interfaces: () => ({}), routes };
+  assert.match(String(egressDenyReason("fd12::9", o)), /cannot be determined/);
+  assert.match(String(egressDenyReason("fe80::9", o)), /cannot be determined/);
+  assert.equal(egressDenyReason("2606:4700:4700::1111", o), null, "public IPv6 still allowed");
+  assert.equal(egressDenyReason("10.0.0.50", o), null, "IPv4 LAN unaffected");
+  assert.notEqual(egressDenyReason("10.0.0.237", o), null);
+});
+
+
+test("a VPN tun device (OpenVPN tun0) is a remote network, allowed under D4; tap/vnet (VM devices) are this host", () => {
+  const routes = () => ({ local: [{ type: "local", dst: "127.0.0.1", dev: "lo" }], main: [{ dst: "10.66.0.0/24", dev: "tun0" }, { dst: "10.67.0.0/24", dev: "vnet3" }] });
+  const o = { interfaces: () => ({}), routes };
+  assert.equal(egressDenyReason("10.66.0.5", o), null);
+  assert.notEqual(egressDenyReason("10.67.0.5", o), null);
+});
+
+test("a bridge with a PHYSICAL port (the LAN NIC enslaved to br0/vmbr0) is the LAN, not a container bridge", async () => {
+  const { parseKernelTables } = await import("../scripts/pi-bots/pi_egress.mjs");
+  const t = parseKernelTables({
+    local4: [{ type: "local", dst: "127.0.0.1", dev: "lo" }, { type: "local", dst: "10.0.0.237", dev: "vmbr0" }],
+    main4: [{ dst: "10.0.0.0/24", dev: "vmbr0" }, { dst: "172.18.0.0/16", dev: "br-x" }],
+    links: [{ ifname: "lo" }, { ifname: "eno1", master: "vmbr0" }, { ifname: "vmbr0", linkinfo: { info_kind: "bridge" } },
+      { ifname: "br-x", linkinfo: { info_kind: "bridge" } }, { ifname: "veth1", master: "br-x", linkinfo: { info_kind: "veth" } }],
+  });
+  assert.equal(t.virtualDevs.has("vmbr0"), false);
+  assert.equal(t.virtualDevs.has("br-x"), true);
+  const o = { interfaces: () => ({}), routes: () => t };
+  assert.equal(egressDenyReason("10.0.0.50", o), null, "the LAN behind the bridge stays allowed");
+  assert.notEqual(egressDenyReason("10.0.0.237", o), null, "the host's own address on it is still refused");
+  assert.notEqual(egressDenyReason("172.18.0.5", o), null);
+});
+
+test("the host's own 6to4 / Teredo / NAT64 address is refused even when the embedded IPv4 is clean", () => {
+  const own = ["2002:5db8:d822::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2", "64:ff9b::808:808"];
+  const routes = () => ({ local: [{ type: "local", dst: "127.0.0.1", dev: "lo" }, ...own.map((a) => ({ type: "local", dst: a, dev: "sit0" }))], main: [] });
+  for (const a of own) assert.match(String(egressDenyReason(a, { interfaces: () => ({}), routes })), /this host/, a);
+});
+
+test("a failed link read, or a virtual-device route the parser cannot read, fails the view closed", async () => {
+  const { parseKernelTables } = await import("../scripts/pi-bots/pi_egress.mjs");
+  const t = parseKernelTables({ local4: [{ type: "local", dst: "127.0.0.1", dev: "lo" }], main4: [], links: null, linksFailed: true });
+  assert.match(String(egressDenyReason("10.0.0.50", { interfaces: () => ({}), routes: () => t })), /cannot be determined/);
+  const bad = () => ({ local: [{ type: "local", dst: "127.0.0.1", dev: "lo" }], main: [{ dst: "garbage", dev: "br-x" }] });
+  assert.match(String(egressDenyReason("10.0.0.50", { interfaces: () => ({}), routes: bad })), /cannot be determined/);
+});
+
+test("the route cache never turns a failed read into a success within its TTL; a reset re-reads", async () => {
+  const { _setKernelReaderForTest, _resetRoutesCacheForTest } = await import("../scripts/pi-bots/pi_egress.mjs");
+  let fail = true;
+  _setKernelReaderForTest(() => { if (fail) throw new Error("netlink"); return { local: [{ type: "local", dst: "127.0.0.1", dev: "lo" }], main: [] }; });
+  try {
+    _resetRoutesCacheForTest();
+    const o = { interfaces: () => ({}) };
+    assert.match(String(egressDenyReason("10.0.0.50", o)), /cannot be determined/);
+    fail = false;
+    assert.match(String(egressDenyReason("10.0.0.50", o)), /cannot be determined/, "still the cached failure");
+    _resetRoutesCacheForTest();
+    assert.equal(egressDenyReason("10.0.0.50", o), null, "re-read succeeds");
+  } finally {
+    _setKernelReaderForTest(null);
+    _resetRoutesCacheForTest();
+  }
 });
