@@ -52,6 +52,11 @@ let transcriptDelayMs = 0;
 let transcriptPlan = [];
 /** Requests the transcript endpoint has seen. */
 let transcriptHits = 0;
+/** A "drop" keeps dropping for a short window: Chrome transparently re-sends
+ *  a GET whose reused keep-alive socket was reset, and that silent re-send
+ *  (measured under full-suite load: answered in ~0 ms, no rail line) must
+ *  not count as the page's own retry. */
+let dropUntil = 0;
 
 function serveApi(req, res) {
   const url = req.url.split("?")[0];
@@ -79,10 +84,11 @@ function serveApi(req, res) {
   // as completed messages (see historyEvents).
   if (url.endsWith("/transcript")) {
     transcriptHits++;
+    if (Date.now() < dropUntil) return req.socket.destroy();
     const step = transcriptPlan.length ? transcriptPlan.shift() : 200;
     const spec = typeof step === "object" ? step : { status: step };
     const answer = () => {
-      if (spec.status === "drop") return req.socket.destroy();
+      if (spec.status === "drop") { dropUntil = Date.now() + 500; return req.socket.destroy(); }
       // Read at ANSWER time: a message sent while this answer was held back
       // is in it, as it is in pi's session file.
       if (spec.status === 200) return send(200, { events: historyEvents });
@@ -169,7 +175,7 @@ before(async () => {
   port = server.address().port;
 });
 
-beforeEach(() => { openStreams = []; historyEvents = []; transcriptDelayMs = 0; transcriptPlan = []; transcriptHits = 0; });
+beforeEach(() => { openStreams = []; historyEvents = []; transcriptDelayMs = 0; transcriptPlan = []; transcriptHits = 0; dropUntil = 0; });
 after(async () => { if (server) server.close(); if (chrome) await chrome.close(); });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -752,7 +758,9 @@ test("history retry: a dropped connection is retried", async (t) => {
     await until(async () => (await s.json(PAGE_STATE)).botLines.length >= 1, 3000);
     await sleep(400);
     const seen = await s.json(PAGE_STATE);
-    assert.equal(transcriptHits, 2);
+    // Two, or three when the browser silently re-sent the dropped GET (see
+    // dropUntil); the page's own single retry is pinned by the rail line.
+    assert.ok(transcriptHits >= 2 && transcriptHits <= 3, String(transcriptHits));
     assert.deepEqual(seen.botLines, ["after the drop"]);
     assert.deepEqual(seen.notes, []);
     assert.ok(seen.activity.some((a) => a.includes("history: network (retrying)")), JSON.stringify(seen.activity));
