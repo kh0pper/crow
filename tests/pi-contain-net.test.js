@@ -41,7 +41,7 @@ const P = JSON.parse(process.env.CROW_TEST_NET);
 const tryConn = (opts) => new Promise((res) => { const s = connect(opts); let b = ""; s.on("data", (d) => b += d); s.on("end", () => res(b || "EMPTY"));
   s.on("error", (e) => res("ERR:" + e.code)); setTimeout(() => { s.destroy(); res(b || "TIMEOUT"); }, 3000); });
 const proxyTry = () => new Promise((res) => { const u = new URL(process.env.HTTPS_PROXY); const s = connect({ host: u.hostname, port: Number(u.port) });
-  let b = ""; s.on("connect", () => s.write("CONNECT 10.0.0.1:443 HTTP/1.1\\r\\nHost: 10.0.0.1:443\\r\\n\\r\\n")); s.on("data", (d) => { b += d; s.destroy(); res(b.split("\\r\\n")[0]); });
+  let b = ""; s.on("connect", () => s.write("CONNECT 169.254.169.254:443 HTTP/1.1\\r\\nHost: 169.254.169.254:443\\r\\n\\r\\n")); s.on("data", (d) => { b += d; s.destroy(); res(b.split("\\r\\n")[0]); });
   s.on("error", (e) => res("ERR:" + e.code)); setTimeout(() => res(b || "TIMEOUT"), 3000); });
 const r = {
   gw: await tryConn({ host: "127.0.0.1", port: P.gw }),
@@ -68,7 +68,7 @@ process.stdin.resume();
     assert.notEqual(r.other, "OTHER", "another host loopback port is not reachable: " + r.other);
     assert.match(r.direct, /^ERR:(ENETUNREACH|EHOSTUNREACH|ECONNREFUSED)/, "no route out of the namespace: " + r.direct);
     assert.notEqual(r.abstract, "ABSTRACT", "host abstract sockets are not reachable: " + r.abstract);
-    assert.match(r.proxy, /^HTTP\/1\.1 403/, "the proxy is the relay, and it refuses a private target");
+    assert.match(r.proxy, /^HTTP\/1\.1 403/, "the proxy is the relay, and it refuses the cloud metadata address");
     assert.equal(r.proxyEnv, true);
     await new Promise((res) => setTimeout(res, 300));
     const { readFileSync } = await import("node:fs");

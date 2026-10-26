@@ -128,7 +128,7 @@ function loopbackPortsIn(value, out) {
  * spawn may reach (its gateway, a loopback model provider, loopback URLs in
  * its own MCP config) and which hosts it may reach through the proxy (the
  * def's `egress` list plus a remote provider's host; no list = any public
- * host). CROW_PI_CONTAIN_NET=off (operator env) keeps the host network.
+ * or private host, never loopback, the host itself or cloud metadata). CROW_PI_CONTAIN_NET=off (operator env) keeps the host network.
  */
 function containNetInputs({ servers, piAgentDir, shadowDir, resolved, def }) {
   if (String(process.env.CROW_PI_CONTAIN_NET || "").toLowerCase() === "off") return null;

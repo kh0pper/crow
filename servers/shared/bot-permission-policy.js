@@ -22,7 +22,7 @@ export const POLICY_KEYS = Object.freeze([
 export const ENGINE_KEYS = Object.freeze(["classifier", "interactive_ask", "model_capable"]);
 
 const SKILL_LEARNING = ["off", "propose", "auto"];
-/** egress (contained bots, queue item 19 step 2c): host names or *.suffix. Absent = any public host. */
+/** egress (contained bots, queue item 19 step 2c): host names or *.suffix. Absent = any public or private host (never loopback, the host itself or cloud metadata). */
 const EGRESS_RE = /^(\*\.)?(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/i;
 const EXTERNAL_SEND = ["draft_only", "allow"];
 
@@ -133,7 +133,7 @@ const bashRank = (v) => (v === "deny" || v == null || !isValidBashPolicy(v) ? 0 
  * Rules: bash may only become deny (or stay); bash_allow/write_paths/
  * read_paths may only lose entries; external_send may only become
  * draft_only (absent = no restriction = allow); egress may only lose hosts
- * (absent = any public host); confirm may only gain
+ * (absent = any reachable host); confirm may only gain
  * entries; multi_agent/self_authoring/bash_allow_shell_meta may only turn
  * off; skill_learning may only move toward off.
  */
@@ -153,7 +153,7 @@ export function peerPolicyWidening(before = {}, after = {}) {
   for (const k of ["multi_agent", "self_authoring", "bash_allow_shell_meta"]) {
     if (a[k] === true && b[k] !== true) return k;
   }
-  // egress: absent = any public host; a list narrows. Dropping the list or
+  // egress: absent = any reachable host; a list narrows. Dropping the list or
   // adding a host widens.
   if (Array.isArray(b.egress)) {
     if (!Array.isArray(a.egress)) return "egress";

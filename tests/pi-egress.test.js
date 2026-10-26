@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { startEgressRelay, isPublicAddress, hostAllowed } from "../scripts/pi-bots/pi_egress.mjs";
+import { startEgressRelay, egressDenyReason, hostAllowed } from "../scripts/pi-bots/pi_egress.mjs";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "crow-egress-")));
 const closers = [];
@@ -43,14 +43,22 @@ async function relay(opts) {
   return { r, logs };
 }
 
-test("isPublicAddress: private, loopback, link-local, CGNAT, special and v6 forms are not public", () => {
-  for (const a of ["127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "100.64.0.1", "169.254.1.1", "0.0.0.0", "198.18.0.1",
-    "192.0.0.1", "240.0.0.1", "224.0.0.1", "255.255.255.255", "::1", "::", "fc00::1", "fe80::1", "ff02::1", "::ffff:127.0.0.1",
-    "::ffff:10.0.0.1", "64:ff9b::a00:1", "2002:a00:1::1", "::a00:1", "2001:db8::1", "100::1"]) {
-    assert.equal(isPublicAddress(a), false, a);
+test("egressDenyReason (D4 = public and private): LAN, tailnet, ULA and public are allowed; loopback, this host, metadata and non-unicast are not, in every v6 wrapping", () => {
+  const host = ["10.0.0.237", "100.64.20.5", "fd7a:115c:a1e0::1"];
+  for (const a of ["1.1.1.1", "93.184.216.34", "2606:4700:4700::1111", "10.1.2.3", "172.16.0.1", "192.168.1.1",
+    "100.64.0.1", "fc00::1", "fe80::1", "169.254.1.1", "198.18.0.1", "::ffff:10.0.0.5"]) {
+    assert.equal(egressDenyReason(a, { hostAddrs: host }), null, a);
   }
-  for (const a of ["1.1.1.1", "93.184.216.34", "2606:4700:4700::1111"]) assert.equal(isPublicAddress(a), true, a);
-  assert.equal(isPublicAddress("not-an-ip"), false);
+  const denied = {
+    "127.0.0.1": /loopback/, "127.9.9.9": /loopback/, "0.0.0.0": /loopback/, "::1": /loopback/, "::": /loopback/,
+    "::ffff:127.0.0.1": /loopback/, "::127.0.0.1": /loopback/, "64:ff9b::7f00:1": /loopback/, "2002:7f00:1::1": /loopback/,
+    "10.0.0.237": /this host/, "100.64.20.5": /this host/, "fd7a:115c:a1e0::1": /this host/, "::ffff:10.0.0.237": /this host/,
+    "169.254.169.254": /metadata/, "169.254.170.2": /metadata/, "100.100.100.200": /metadata/, "fd00:ec2::254": /metadata/,
+    "::ffff:169.254.169.254": /metadata/,
+    "224.0.0.1": /not unicast/, "240.0.0.1": /not unicast/, "255.255.255.255": /not unicast/, "ff02::1": /not unicast/,
+    "not-an-ip": /not an IP/,
+  };
+  for (const [a, re] of Object.entries(denied)) assert.match(String(egressDenyReason(a, { hostAddrs: host })), re, a);
 });
 
 test("hostAllowed: no list = any host; a list narrows to exact names and *.suffix", () => {
@@ -81,17 +89,33 @@ test("PROXY CONNECT: a public host (via the lookup seam) is allowed and tunnelle
   assert.ok(logs.some((l) => /bot=bot-x allow api\.example\.com:443/.test(l)));
 });
 
-test("PROXY CONNECT: refused for a name resolving to a private address (any of them), an IP literal in a private range, a disallowed port, a host off the list", async () => {
-  const mk = async (lookup, extra = {}) => (await relay({ lookup, egressPorts: [443], ...extra })).r;
+test("PROXY CONNECT: private (LAN/tailnet) targets are allowed by default; loopback, this host, metadata, a rebinding name, a disallowed port and a host off the list are refused", async () => {
+  const mk = async (lookup, extra = {}) => (await relay({ lookup, egressPorts: [443], hostAddrs: ["10.0.0.237"], ...extra })).r;
+  const up = await echoServer("LAN:");
+  const lan = await mk(async () => [{ address: "192.168.1.20", family: 4 }], { _connectOverride: () => ({ host: "127.0.0.1", port: up }) });
+  const lanOut = await talk(lan.socketPath, "PROXY\nCONNECT nas.home.arpa:443 HTTP/1.1\r\n\r\n", "ping");
+  assert.match(lanOut, /^HTTP\/1\.1 200/); assert.match(lanOut, /LAN:ping$/);
   const rebinding = await mk(async () => [{ address: "93.184.216.34", family: 4 }, { address: "127.0.0.1", family: 4 }]);
   assert.match(await talk(rebinding.socketPath, "PROXY\nCONNECT a.example.com:443 HTTP/1.1\r\n\r\n"), /^HTTP\/1\.1 403/);
   const lit = await mk(async () => { throw new Error("no lookup for literals"); });
-  assert.match(await talk(lit.socketPath, "PROXY\nCONNECT 10.0.0.5:443 HTTP/1.1\r\n\r\n"), /^HTTP\/1\.1 403/);
-  assert.match(await talk(lit.socketPath, "PROXY\nCONNECT [::1]:443 HTTP/1.1\r\n\r\n"), /^HTTP\/1\.1 403/);
+  for (const t of ["127.0.0.1:443", "[::1]:443", "10.0.0.237:443", "169.254.169.254:443", "[::ffff:127.0.0.1]:443"]) {
+    assert.match(await talk(lit.socketPath, `PROXY\nCONNECT ${t} HTTP/1.1\r\n\r\n`), /^HTTP\/1\.1 403/, t);
+  }
   const pub = await mk(async () => [{ address: "93.184.216.34", family: 4 }]);
   assert.match(await talk(pub.socketPath, "PROXY\nCONNECT a.example.com:22 HTTP/1.1\r\n\r\n"), /^HTTP\/1\.1 403/, "port 22");
   const listed = await mk(async () => [{ address: "93.184.216.34", family: 4 }], { egressAllow: ["api.example.com"] });
   assert.match(await talk(listed.socketPath, "PROXY\nCONNECT other.example.com:443 HTTP/1.1\r\n\r\n"), /^HTTP\/1\.1 403/);
+  const listedLan = await mk(async () => [{ address: "192.168.1.20", family: 4 }], { egressAllow: ["api.example.com"] });
+  assert.match(await talk(listedLan.socketPath, "PROXY\nCONNECT nas.home.arpa:443 HTTP/1.1\r\n\r\n"), /^HTTP\/1\.1 403/, "the egress list narrows private targets too");
+});
+
+test("the relay denies this host's own interface addresses by default (os.networkInterfaces)", async () => {
+  const { networkInterfaces } = await import("node:os");
+  const own = Object.values(networkInterfaces()).flat().map((i) => i.address).find((a) => !a.startsWith("127.") && a !== "::1" && !a.startsWith("fe80"));
+  if (!own) return;
+  const { r } = await relay({ lookup: async () => [] });
+  const t = own.includes(":") ? `[${own}]:443` : `${own}:443`;
+  assert.match(await talk(r.socketPath, `PROXY\nCONNECT ${t} HTTP/1.1\r\n\r\n`), /^HTTP\/1\.1 403/);
 });
 
 test("PROXY: only CONNECT; an oversize or unterminated head is refused", async () => {
@@ -182,7 +206,7 @@ test("port 80 is not proxied by default (CONNECT is for TLS)", async () => {
 });
 
 test("decision logging is bounded: distinct-host spraying cannot grow the spawner's memory", async () => {
-  const { r, logs } = await relay({ lookup: async () => [{ address: "10.0.0.1", family: 4 }] });
+  const { r, logs } = await relay({ lookup: async () => [{ address: "127.0.0.1", family: 4 }] });
   for (let i = 0; i < 1010; i++) await talk(r.socketPath, `PROXY\nCONNECT h${i}.example.com:443 HTTP/1.1\r\n\r\n`, null, { timeout: 500 });
   assert.equal(logs.filter((l) => / deny h\d+/.test(l)).length, 1000);
   assert.equal(logs.filter((l) => /further decisions are not logged/.test(l)).length, 1);

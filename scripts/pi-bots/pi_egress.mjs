@@ -15,8 +15,10 @@
  *               on loopback: other instances, unused model servers, a
  *               browser's DevTools port, adb.
  *   PROXY\n     an HTTP CONNECT request follows (the bot's HTTPS_PROXY). Only
- *               CONNECT; ports from egressPorts (default 443); the host
- *               must resolve ONLY to public addresses (every address checked,
+ *               CONNECT; ports from egressPorts (default 443); public AND
+ *               private destinations are allowed (D4), but no address the
+ *               host resolves to may be loopback, this host's own address, a
+ *               cloud metadata endpoint or non-unicast (every address checked,
  *               the checked one connected: no DNS rebinding); IP literals the
  *               same; an `egress` list (exact or *.suffix) narrows further.
  *
@@ -24,28 +26,75 @@
  * `[pi-egress] bot=<id> allow|deny <host>:<port> (<reason>)`. A per-spawn
  * connection cap bounds what one bot can open.
  */
-import { createServer, connect as netConnect, isIP, BlockList } from "node:net";
+import { createServer, connect as netConnect, isIP } from "node:net";
+import { networkInterfaces } from "node:os";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { chmodSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-// Separate lists: a BlockList also matches IPv4 addresses against IPv4-mapped
-// IPv6 rules, so ::ffff:0:0/96 in one shared list would block all of IPv4.
-const NON_PUBLIC_V4 = new BlockList();
-const NON_PUBLIC_V6 = new BlockList();
-for (const [a, p] of [["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16],
-  ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.0.2.0", 24], ["192.88.99.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15],
-  ["198.51.100.0", 24], ["203.0.113.0", 24], ["224.0.0.0", 4], ["240.0.0.0", 4]]) NON_PUBLIC_V4.addSubnet(a, p, "ipv4");
-for (const [a, p] of [["::", 96] /* :: , ::1, v4-compatible */, ["::ffff:0:0", 96] /* v4-mapped */, ["64:ff9b::", 96],
-  ["64:ff9b:1::", 48], ["100::", 64], ["2001::", 23], ["2001:db8::", 32], ["2002::", 16], ["fc00::", 7], ["fe80::", 10],
-  ["ff00::", 8]]) NON_PUBLIC_V6.addSubnet(a, p, "ipv6");
+// Default egress (Kevin, D4 2026-10-26: "public and private"): public and
+// private (LAN, tailnet, ULA, link-local) destinations are allowed; a bot's
+// `egress` list narrows. Always refused, because they are not a destination
+// class but a way around another control:
+//   - loopback (127/8, 0/8, ::, ::1): host loopback is governed by the
+//     PORT allowlist; reaching it through the proxy would skip that list;
+//   - this host's own interface addresses (its LAN/tailnet IPs): the same,
+//     for every service bound to 0.0.0.0 here;
+//   - cloud metadata endpoints (instance credentials);
+//   - multicast/reserved (not unicast; nothing to CONNECT to).
+// IPv4 embedded in IPv6 (v4-mapped, v4-compatible, NAT64 64:ff9b::/96,
+// 6to4 2002::/16) is unwrapped and judged as the IPv4 address.
+const METADATA_V4 = new Set(["169.254.169.254", "169.254.170.2", "100.100.100.200"]);
+const METADATA_V6 = new Set(["fd00:ec2:0:0:0:0:0:254"]);
 
-/** True only for a globally routable unicast address. */
-export function isPublicAddress(addr) {
+function expand6(a) {
+  let s = String(a).toLowerCase().split("%")[0];
+  const dot = s.lastIndexOf(".");
+  if (dot > 0) {
+    const lastColon = s.lastIndexOf(":");
+    const q = s.slice(lastColon + 1).split(".").map(Number);
+    s = s.slice(0, lastColon + 1) + ((q[0] << 8) | q[1]).toString(16) + ":" + ((q[2] << 8) | q[3]).toString(16);
+  }
+  const [head, tail] = s.includes("::") ? s.split("::") : [s, null];
+  const h = head ? head.split(":") : [];
+  const t = tail === null ? [] : (tail ? tail.split(":") : []);
+  const fill = tail === null ? [] : Array(8 - h.length - t.length).fill("0");
+  return [...h, ...fill, ...t].map((x) => parseInt(x || "0", 16));
+}
+const v4From = (hi, lo) => [hi >> 8, hi & 255, lo >> 8, lo & 255].join(".");
+
+function v4Reason(a, host) {
+  const o = a.split(".").map(Number);
+  if (METADATA_V4.has(a)) return "cloud metadata endpoint";
+  if (host.has(a)) return "this host's own address";
+  if (o[0] === 127 || o[0] === 0) return "loopback (use the bot's loopback ports)";
+  if (o[0] >= 224) return "not unicast";
+  return null;
+}
+
+/** null when the relay may connect to `addr`, else the reason it may not. */
+export function egressDenyReason(addr, { hostAddrs = [] } = {}) {
   const a = String(addr || "").replace(/^\[|\]$/g, "");
   const fam = isIP(a);
-  if (!fam) return false;
-  return fam === 4 ? !NON_PUBLIC_V4.check(a, "ipv4") : !NON_PUBLIC_V6.check(a, "ipv6");
+  if (!fam) return "not an IP address";
+  const host = new Set(hostAddrs.map((x) => (isIP(x) === 6 ? expand6(x).join(":") : x)));
+  if (fam === 4) return v4Reason(a, host);
+  const h = expand6(a);
+  const key = h.join(":");
+  if (h.every((x) => x === 0) || (h.slice(0, 7).every((x) => x === 0) && h[7] === 1)) return "loopback (use the bot's loopback ports)";
+  if (METADATA_V6.has(h.map((x) => x.toString(16)).join(":"))) return "cloud metadata endpoint";
+  if (host.has(key)) return "this host's own address";
+  if (h[0] >= 0xff00) return "not unicast";
+  // IPv4 inside IPv6
+  if (h.slice(0, 5).every((x) => x === 0) && (h[5] === 0xffff || h[5] === 0)) return v4Reason(v4From(h[6], h[7]), host);
+  if (h[0] === 0x64 && h[1] === 0xff9b && h.slice(2, 6).every((x) => x === 0)) return v4Reason(v4From(h[6], h[7]), host);
+  if (h[0] === 0x2002) return v4Reason(v4From(h[1], h[2]), host);
+  return null;
+}
+
+/** This host's interface addresses (refused as egress targets). */
+export function hostInterfaceAddresses() {
+  try { return Object.values(networkInterfaces()).flat().filter(Boolean).map((i) => i.address); } catch { return []; }
 }
 
 const norm = (h) => String(h || "").trim().toLowerCase().replace(/\.$/, "");
@@ -98,6 +147,7 @@ export function createEgressRelay(o) {
   // relay does not proxy. 443 by default.
   const ports = new Set((o.egressPorts || [443]).map(Number));
   const allow = Array.isArray(o.egressAllow) ? o.egressAllow : null;
+  const hostAddrs = o.hostAddrs || hostInterfaceAddresses();
   const maxConns = o.maxConns ?? 64;
   const headTimeoutMs = o.headTimeoutMs ?? 10000;
   const lookup = o.lookup || ((h) => dnsLookup(h, { all: true, verbatim: true }));
@@ -173,8 +223,9 @@ export function createEgressRelay(o) {
     else {
       try { addrs = await lookup(host); } catch { note("deny", target, "does not resolve"); return refuse(c, 502, "Bad Gateway"); }
     }
-    if (!addrs.length || addrs.some((a) => !isPublicAddress(a.address))) {
-      note("deny", target, "resolves to a non-public address");
+    const why = addrs.length ? addrs.map((a) => egressDenyReason(a.address, { hostAddrs })).find(Boolean) : "no address";
+    if (why) {
+      note("deny", target, why);
       return refuse(c, 403, "Forbidden");
     }
     // The client left during the lookup (half-open sockets see only 'end'):
