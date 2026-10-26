@@ -43,6 +43,15 @@ let historyEvents = [];
 /** Holds the transcript response back, so a test can push frames into the
  *  subscribe/fetch seam (frames arriving before the history batch lands). */
 let transcriptDelayMs = 0;
+/** Queue item 23a: per-request answers for the transcript endpoint, consumed
+ *  one per request. An entry is a status code, "drop" (the socket is destroyed,
+ *  so the browser's fetch rejects), or `{status, delayMs}` to hold THAT answer
+ *  back — the global transcriptDelayMs cannot say "the first slow, the second
+ *  fast", which is what puts two loads for one session in flight together.
+ *  An empty plan answers 200 with historyEvents. */
+let transcriptPlan = [];
+/** Requests the transcript endpoint has seen. */
+let transcriptHits = 0;
 
 function serveApi(req, res) {
   const url = req.url.split("?")[0];
@@ -69,8 +78,32 @@ function serveApi(req, res) {
   // The transcript the resync refetches: whatever this fixture has broadcast
   // as completed messages (see historyEvents).
   if (url.endsWith("/transcript")) {
-    if (transcriptDelayMs) return setTimeout(() => send(200, { events: historyEvents }), transcriptDelayMs);
-    return send(200, { events: historyEvents });
+    transcriptHits++;
+    const step = transcriptPlan.length ? transcriptPlan.shift() : 200;
+    const spec = typeof step === "object" ? step : { status: step };
+    const answer = () => {
+      if (spec.status === "drop") return req.socket.destroy();
+      // Read at ANSWER time: a message sent while this answer was held back
+      // is in it, as it is in pi's session file.
+      if (spec.status === 200) return send(200, { events: historyEvents });
+      return send(spec.status, {});
+    };
+    const delay = spec.delayMs != null ? spec.delayMs : transcriptDelayMs;
+    return delay ? setTimeout(answer, delay) : answer();
+  }
+  // pi appends the operator's message to the session file when the turn
+  // starts, so the next history load includes it.
+  if (url.endsWith("/message") && req.method === "POST") {
+    let raw = "";
+    req.on("data", (c) => { raw += c; });
+    req.on("end", () => {
+      try {
+        const b = JSON.parse(raw || "{}");
+        if (typeof b.message === "string") historyEvents.push({ type: "message", message: { role: "user", content: [{ text: b.message }] } });
+      } catch { /* not JSON: nothing persisted */ }
+      send(200, { ok: true });
+    });
+    return;
   }
   if (url.endsWith("/options")) return send(200, { models: [], thinkingLevels: [] });
   // Composer dictation (perch-hub/dictation.js): a usable profile, so the mic
@@ -103,6 +136,15 @@ before(async () => {
   const turbo = readFileSync(REPO + "/servers/gateway/public/vendor/turbo-8.0.5.umd.js");
   server = http.createServer(async (req, res) => {
     if (req.url.startsWith("/dashboard/perch-api/")) return serveApi(req, res);
+    // The phone bundle, as a non-local viewer sees it: no history, and a
+    // frame's refetch is refused, so the card is the frame's own pointer.
+    if (req.url.startsWith("/api/phone/")) {
+      const u = req.url.split("?")[0];
+      res.writeHead(u.startsWith("/api/phone/calls/") ? 403 : 200, { "content-type": "application/json" });
+      if (u === "/api/phone/whoami") return res.end(JSON.stringify({ local: false }));
+      if (u.endsWith("/calls")) return res.end(JSON.stringify({ calls: [] }));
+      return res.end(JSON.stringify({ error: "not_local" }));
+    }
     // The bit tests/perch-hub-render.test.js does not serve, and the reason
     // the leak never showed up there.
     if (req.url.startsWith("/vendor/turbo")) {
@@ -127,7 +169,7 @@ before(async () => {
   port = server.address().port;
 });
 
-beforeEach(() => { openStreams = []; historyEvents = []; transcriptDelayMs = 0; });
+beforeEach(() => { openStreams = []; historyEvents = []; transcriptDelayMs = 0; transcriptPlan = []; transcriptHits = 0; });
 after(async () => { if (server) server.close(); if (chrome) await chrome.close(); });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -199,6 +241,8 @@ async function session(width = 1900, height = 900) {
 const PAGE_STATE = `JSON.stringify({
   notes: Array.from(document.querySelectorAll('#perch-transcript .note')).map(function(n){return n.textContent;}),
   botLines: Array.from(document.querySelectorAll('#perch-transcript .entry.bot .what')).map(function(n){return n.textContent;}),
+  userLines: Array.from(document.querySelectorAll('#perch-transcript .entry.user .what')).map(function(n){return n.textContent;}),
+  activity: Array.from(document.querySelectorAll('#perch-activity-list .activity-row')).map(function(n){return n.textContent;}),
   esLive: window.__es.filter(function(e){ return e.readyState!==2; }).length,
   esBuilt: window.__es.length,
   view: document.body.getAttribute('data-view')
@@ -629,5 +673,190 @@ test("dictation: five Turbo visits after a recording leave no listener, track or
     assert.equal(media.streams, 2, "two recordings were made");
     assert.equal(media.live, 0, "no live MediaStreamTrack");
     assert.equal(media.open, 0, "no unclosed AudioContext (of " + media.ctxs + ")");
+  } finally { await s.close(); }
+});
+
+// ---------------------------------------------------------------------------
+// Queue item 23a: the history load retries ONCE on a dropped connection or a
+// 5xx, says why on the Activity rail, and a load token keeps every late or
+// overlapping answer out of the transcript. Each of these was red before the
+// client change (the overlapping-load ones through the per-request delay in
+// transcriptPlan, which holds ONE answer back while the next comes at once).
+// ---------------------------------------------------------------------------
+
+const FAILED = "Could not load this session's history.";
+const userMsg = (text) => ({ type: "message", message: { role: "user", content: [{ text }] } });
+const botMsg = (text) => ({ type: "message", message: { role: "assistant", content: [{ text }] } });
+/** Poll until fn() is truthy or the deadline passes; never throws, so the
+ *  assertions that follow say what was wrong. */
+async function until(fn, ms) {
+  for (const end = Date.now() + ms; Date.now() < end; await sleep(60)) {
+    try { if (await fn()) return true; } catch { /* page mid-navigation */ }
+  }
+  return false;
+}
+const openHash = (s) => s.evalIn(`location.hash='${SID}'; 'go'`);
+
+test("history retry: a 503 then a good answer renders the history once, with no failure note", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  historyEvents = [userMsg("hello"), botMsg("first answer"), botMsg("second answer")];
+  transcriptPlan = [503];
+  const s = await session();
+  try {
+    await openHash(s);
+    await until(() => transcriptHits >= 1 && openStreams.length === 1, 4000);
+    await sleep(300);                                  // inside the retry wait
+    // A phone frame parks during the wait and replays once the batch lands.
+    broadcast("phone_call", { call_id: "call-seam", status: "live" });
+    await until(() => transcriptHits >= 2, 5000);
+    await until(async () => (await s.json(PAGE_STATE)).botLines.length >= 2, 3000);
+    await sleep(600);
+    const seen = await s.json(PAGE_STATE);
+    assert.equal(transcriptHits, 2, "exactly one retry");
+    assert.deepEqual(seen.botLines, ["first answer", "second answer"]);
+    assert.deepEqual(seen.userLines, ["hello"]);
+    assert.deepEqual(seen.notes, [], "a blip that the retry covered is not a failure: " + JSON.stringify(seen.notes));
+    assert.equal(seen.activity.filter((a) => a.includes("history: HTTP 503 (retrying)")).length, 1,
+      "the rail says why: " + JSON.stringify(seen.activity));
+    assert.equal(await s.evalIn("document.querySelectorAll('#perch-transcript .phonecard').length"), 1,
+      "the phone frame pushed during the wait renders once");
+  } finally { await s.close(); }
+});
+
+test("history retry: two failures say so once and stop", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  historyEvents = [botMsg("unseen")];
+  transcriptPlan = [503, 502];
+  const s = await session();
+  try {
+    await openHash(s);
+    await until(() => transcriptHits >= 2, 6000);
+    await until(async () => (await s.json(PAGE_STATE)).notes.length >= 1, 3000);
+    await sleep(2500);                                  // long past a second retry's wait
+    const seen = await s.json(PAGE_STATE);
+    assert.equal(transcriptHits, 2, "one retry, never a second");
+    assert.deepEqual(seen.notes, [FAILED]);
+    assert.ok(seen.activity.some((a) => a.includes("history: HTTP 503 (retrying)")), JSON.stringify(seen.activity));
+    assert.ok(seen.activity.some((a) => a.endsWith("history: HTTP 502")), JSON.stringify(seen.activity));
+  } finally { await s.close(); }
+});
+
+test("history retry: a dropped connection is retried", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  historyEvents = [botMsg("after the drop")];
+  transcriptPlan = ["drop"];
+  const s = await session();
+  try {
+    await openHash(s);
+    await until(() => transcriptHits >= 2, 6000);
+    await until(async () => (await s.json(PAGE_STATE)).botLines.length >= 1, 3000);
+    await sleep(400);
+    const seen = await s.json(PAGE_STATE);
+    assert.equal(transcriptHits, 2);
+    assert.deepEqual(seen.botLines, ["after the drop"]);
+    assert.deepEqual(seen.notes, []);
+    assert.ok(seen.activity.some((a) => a.includes("history: network (retrying)")), JSON.stringify(seen.activity));
+  } finally { await s.close(); }
+});
+
+test("history retry: a Turbo visit back into the session during the wait — the retired instance sends nothing more", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  historyEvents = [botMsg("only once")];
+  // The first instance's load fails, and the visit lands inside its retry
+  // wait. The NEW instance's own load fails too and retries once: three
+  // requests in all. A retired instance whose timer still fired makes four
+  // (and draws its batch into the new page).
+  transcriptPlan = [503, 503];
+  const s = await session();
+  try {
+    await openHash(s);
+    await until(() => transcriptHits >= 1, 4000);
+    await sleep(300);
+    await s.evalIn(`Turbo.visit('/dashboard/perch#${SID}',{action:'replace'}); 'go'`);
+    await until(() => transcriptHits >= 3, 7000);
+    await sleep(2500);                                  // past the retired instance's would-be timer
+    const seen = await s.json(PAGE_STATE);
+    assert.equal(await s.evalIn("window.__crowPerchHub.gen"), 2, "fixture check: the visit re-ran the script");
+    assert.equal(transcriptHits, 3, "the retired instance's retry must not fire: " + transcriptHits + " requests");
+    assert.deepEqual(seen.botLines, ["only once"]);
+    assert.deepEqual(seen.notes, []);
+  } finally { await s.close(); }
+});
+
+test("history retry: a retired instance's late answer does not land in the next page", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  historyEvents = [botMsg("from the old page")];
+  transcriptPlan = [{ status: 200, delayMs: 1500 }];
+  const s = await session();
+  try {
+    await openHash(s);
+    await until(() => transcriptHits >= 1, 4000);
+    await sleep(200);
+    await s.visit("/dashboard/perch");                 // lands on the list; the old load is still in flight
+    await sleep(1500);
+    const seen = await s.json(PAGE_STATE);
+    assert.notEqual(seen.view, "chat", "precondition: the new page opened nothing");
+    assert.equal(await s.evalIn("window.__crowPerchHub.gen"), 2, "fixture check: the visit re-ran the script");
+    assert.deepEqual(seen.botLines, [], "the retired instance wrote into the new document: " + JSON.stringify(seen.botLines));
+    assert.deepEqual(seen.notes, []);
+    assert.equal(transcriptHits, 1);
+  } finally { await s.close(); }
+});
+
+test("history retry: leaving and re-entering the session while its first load is in flight renders one batch", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  historyEvents = [botMsg("one"), botMsg("two")];
+  transcriptPlan = [{ status: 200, delayMs: 1500 }];   // the first load is slow, the second answers at once
+  const s = await session();
+  try {
+    await openHash(s);
+    await until(() => transcriptHits >= 1, 4000);
+    await s.evalIn(`location.hash=''; 'go'`);
+    await sleep(200);
+    await openHash(s);
+    await until(() => transcriptHits >= 2, 4000);
+    await sleep(2000);                                  // the slow first answer has landed
+    const seen = await s.json(PAGE_STATE);
+    assert.equal(seen.view, "chat", "precondition: the session is open again");
+    assert.deepEqual(seen.botLines, ["one", "two"], "each message exactly once: " + JSON.stringify(seen.botLines));
+  } finally { await s.close(); }
+});
+
+test("history retry: a reconnect resync while the first load is in flight renders one batch", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  historyEvents = [botMsg("one"), botMsg("two")];
+  transcriptPlan = [{ status: 200, delayMs: 5000 }];   // still in flight when the stream reopens
+  const s = await session();
+  try {
+    await openHash(s);
+    await until(() => transcriptHits >= 1 && openStreams.length === 1, 4000);
+    await sleep(300);
+    dropStreams();                                      // the reconnect's onopen resyncs history
+    await until(() => transcriptHits >= 2, 6000);
+    await until(async () => (await s.json(PAGE_STATE)).botLines.length >= 2, 3000);
+    await sleep(Math.max(0, 5600 - 300));               // the slow first answer has landed
+    const seen = await s.json(PAGE_STATE);
+    assert.deepEqual(seen.botLines, ["one", "two"], "each message exactly once: " + JSON.stringify(seen.botLines));
+  } finally { await s.close(); }
+});
+
+test("history retry: a message sent during the retry wait shows once when the retried batch already has it", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  historyEvents = [userMsg("hello"), botMsg("hi")];
+  transcriptPlan = [503];
+  const s = await session();
+  try {
+    await openHash(s);
+    await until(() => transcriptHits >= 1, 4000);
+    await sleep(300);                                   // inside the retry wait
+    await s.evalIn(`(function(){ var i=document.getElementById('perch-input'); i.value='again';
+      document.getElementById('perch-send').click(); return 'sent'; })()`);
+    await until(() => transcriptHits >= 2, 5000);
+    await sleep(800);
+    const seen = await s.json(PAGE_STATE);
+    assert.deepEqual(seen.userLines, ["hello", "again"],
+      "the operator's line once, after the history it follows: " + JSON.stringify(seen.userLines));
+    assert.deepEqual(seen.botLines, ["hi"]);
+    assert.deepEqual(seen.notes, []);
   } finally { await s.close(); }
 });

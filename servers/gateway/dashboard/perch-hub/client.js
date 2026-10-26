@@ -72,6 +72,10 @@ export function perchHubJs(lang = "en") {
     closeArtifactPane();
     /* Composer dictation (dictation.js): a Turbo visit releases the mic. */
     dictationCancel();
+    /* Queue item 23a: no history retry fires from a retired instance, and
+       any load still in flight is stale (live() already covers it; the
+       token makes it explicit). */
+    cancelHistRetry(); histGen++;
     /* Anything left in the registry belongs to an instance older still (or to
        a session this one never held): close it by identity — that is the
        whole point of keeping the registry. */
@@ -314,6 +318,24 @@ export function perchHubJs(lang = "en") {
          error, with no .catch needed at each call site. */
       return {ok:false,status:0,j:null};
     });
+  }
+  /* Queue item 23a: a failed history load is retried ONCE, and only when a
+     second try can answer differently — a dropped connection (status 0) or a
+     5xx (a proxy 502 while the backend restarts). A 404 is deterministic: no
+     such session, or a deleted bot; a session with no turn yet answers an
+     empty 200, and this script is served by the same gateway as the route,
+     so no older route answers it. An auth or client error will not fix
+     itself in 1.5 s. A real restart is covered by the reconnect's resync. */
+  function historyRetryable(status){ return status===0||(status>=500&&status<=599); }
+  /* The Activity rail line for a failed history load. Only a short,
+     code-shaped error is printed, never free text (an errno message carries
+     a host path). A logged-out load follows the login redirect and arrives
+     as a 200 that is not JSON, which "HTTP 200" alone would not explain. */
+  function histFailLine(r,attempt){
+    var st=r&&r.status, j=r&&r.j;
+    var code=(j&&typeof j.error==='string'&&/^[a-z0-9_]{1,40}$/.test(j.error))?j.error:'';
+    return 'history: '+(st?'HTTP '+st:'network')+(code?' '+code:'')+((r&&r.ok&&!j)?' (not JSON)':'')+
+      ((!attempt&&historyRetryable(st))?' (retrying)':'');
   }
 
   /* One row per live session, plus one per attached bot with none. A bot with
@@ -1474,6 +1496,7 @@ export function perchHubJs(lang = "en") {
 
   function closeSession(){
     dictationCancel();           /* dictation.js: a hidden composer must never keep recording or upload */
+    cancelHistRetry(); histGen++;   /* 23a: a load or retry for the session being left must not render */
     closeStream(); current.sid=null;
     setTurnInFlight(false);      /* the list has no Steer/Stop to show */
     setView('list'); startListPolling(); loadList();
@@ -1868,10 +1891,28 @@ export function perchHubJs(lang = "en") {
     resetPhoneCards();
     resetArtifactCards();
     histSettled=false; histBuf=[];
+    seamEchoes=[];                   /* their rows died with the transcript */
     loadHistory(botId,sid);
   }
 
-  function loadHistory(botId,sid){
+  /* Queue item 23a: every load takes a token (histGen). Only the newest load
+     for the current session, in the instance that owns the document, may
+     render: a load still in flight when the operator leaves and comes back
+     (A, list, A), when a reconnect resyncs, or when a Turbo visit retires
+     this instance would otherwise draw its batch a second time, or into the
+     next page. A failed load retries once (historyRetryable) after
+     HIST_RETRY_MS WITHOUT flushing: histSettled stays false, so live frames
+     keep parking in histBuf and the seam dedupe still applies when the
+     retry lands. */
+  function cancelHistRetry(){ if(histRetryTimer){ clearTimeout(histRetryTimer); histRetryTimer=null; } }
+  function logHistFail(r,attempt){
+    var msg=histFailLine(r,attempt);
+    try{ console.warn('[perch] '+msg); }catch(e){}
+    appendActivity(msg);
+  }
+  function loadHistory(botId,sid,attempt){
+    cancelHistRetry();
+    var myGen=++histGen;
     var mySid=sid;
     histToolSeen={};
     renderedErrTurns={};
@@ -1885,16 +1926,27 @@ export function perchHubJs(lang = "en") {
       histP,
     ]).then(function(pair){
       var r=pair[0];
-      if(current.sid!==mySid) return;            /* identity guard, as everywhere */
+      if(!live()||myGen!==histGen||current.sid!==mySid) return;   /* identity guard + 23a load token */
         /* A FAILED FETCH IS NOT AN EMPTY TRANSCRIPT. The old
            \`(r.ok&&r.j&&r.j.events)||[]\` collapsed a 500, a dropped tunnel and
            a logged-out session into the same "No transcript yet." — a
            reassuring sentence about a conversation that is still there. Say
            which happened. */
-        if(!r.ok||!r.j){ appendNote(TRANSCRIPT_FAILED); flushHistBuf([], pair[1]); return; }
+        if(!r.ok||!r.j){
+          logHistFail(r,attempt);
+          if(!attempt&&historyRetryable(r.status)){
+            histRetryTimer=setTimeout(function(){
+              histRetryTimer=null;
+              if(!live()||current.sid!==mySid||myGen!==histGen) return;
+              loadHistory(botId,mySid,1);
+            },HIST_RETRY_MS);
+            return;
+          }
+          appendNote(TRANSCRIPT_FAILED); flushHistBuf([], pair[1]); return;
+        }
         var events=r.j.events||[];
-        if(!events.length){ appendNote(NO_TRANSCRIPT); flushHistBuf([], pair[1]); return; }
-        var batchTexts=[];
+        if(!events.length){ appendNote(NO_TRANSCRIPT); settleSeamEchoes([]); flushHistBuf([], pair[1]); return; }
+        var batchTexts=[], userTexts=[];
         /* Review M2: the error a buffered live frame may duplicate is only the
            snapshot's TAIL turn's (an errored message that is the batch's last
            message). An older turn's same-text error must not swallow a newer
@@ -1940,15 +1992,45 @@ export function perchHubJs(lang = "en") {
           /* An errored attempt with no text is not a bot message: drawing
              it was the empty bubble every failed turn left behind. */
           if(!(errored&&!txt)){
-            if(String(m.role||'?')!=='user') batchTexts.push(txt);
+            if(String(m.role||'?')!=='user') batchTexts.push(txt); else userTexts.push(txt);
             appendMessage(String(m.role||'?')==='user'?'user':'bot', String(m.role||'?'), txt, e.html,
               Date.parse(String(e.timestamp||''))||Number(m.timestamp)||0);
           }
           if(errored&&endsTurn(i)) drawTurnError(e.errorText, null);
           if(i===msgs.length-1) tailErr=errored?String(e.errorText||''):null;
         });
+        settleSeamEchoes(userTexts);
         flushHistBuf(batchTexts, pair[1], tailErr);
       });
+  }
+
+  /* Queue item 23a (review I2): the operator can send while the history is
+     still loading, and the retry made that window ≥1.5 s. pi appends the
+     message to the session file when its turn starts, so the batch that
+     lands can already hold the line the composer echoed — and the seam
+     dedupe (flushHistBuf) never covers user lines. Each echo drawn while the
+     seam is open is settled here, just before the flush: matched against
+     the batch's trailing user messages it is dropped (pi's copy is in its
+     right place); unmatched it moves below the history it follows. */
+  function seamEchoMatches(sent,batch){
+    if(sent==null||sent===''||batch==null) return false;
+    var b=unsentMatchText(batch);
+    /* An upload send persists behind its path header (send()). */
+    return b===sent||b.slice(-(sent.length+2))==='\\n\\n'+sent;
+  }
+  function settleSeamEchoes(userTexts){
+    var echoes=seamEchoes; seamEchoes=[];
+    if(!echoes.length) return;
+    var tr=el('perch-transcript');
+    var tail=userTexts.slice(-echoes.length);
+    echoes.forEach(function(e){
+      if(!e.row||!e.row.parentNode) return;
+      for(var i=0;i<tail.length;i++){
+        if(seamEchoMatches(e.text,tail[i])){ tail.splice(0,i+1); e.row.parentNode.removeChild(e.row); return; }
+      }
+      if(tr) tr.appendChild(e.row);
+    });
+    if(tr) tr.scrollTop=tr.scrollHeight;
   }
 
   /* Round 3 R4 — the subscribe/fetch seam. openStream subscribes BEFORE
@@ -1966,6 +2048,10 @@ export function perchHubJs(lang = "en") {
      not in the batch, and delaying them delays the composer. */
   var histSettled=false;
   var histBuf=[];
+  /* Queue item 23a: the history load token, the one pending retry, and the
+     composer echoes drawn while the seam was open (settleSeamEchoes). */
+  var histGen=0, histRetryTimer=null, seamEchoes=[];
+  var HIST_RETRY_MS=1500;
   /* toolCallIds the history batch drew as chips (flushHistBuf dedupes the
      buffered live tool frames against it). */
   var histToolSeen={};
@@ -1998,6 +2084,7 @@ export function perchHubJs(lang = "en") {
   function fileKey(d){ return String((d&&d.name)||'')+'|'+String((d&&d.stored)||''); }
   function flushHistBuf(batchTexts, sentFiles, tailErr){
     histSettled=true;
+    seamEchoes=[];   /* settled by the caller, or kept in place after a failed load */
     /* PR-E: persisted sent-file cards replay first (they are older context —
        the live buffer below can only hold TODAY's frames), deduped by
        name+stored against buffered frames so a file sent between subscribe and
@@ -2268,6 +2355,8 @@ export function perchHubJs(lang = "en") {
        batch lands, with any frames still parked in it. */
     histSettled=false;
     histBuf=[];
+    cancelHistRetry(); histGen++;   /* 23a: nor its pending history retry or in-flight load */
+    seamEchoes=[];
     pendingImages=[];            /* nor its queued-but-unsent image */
     pendingFilePaths=[];         /* nor its queued upload paths (Wave 1) */
     setAttn(false);              /* nor its unanswered-question banner */
@@ -2361,6 +2450,8 @@ export function perchHubJs(lang = "en") {
     if(!sendable(text)||!current.sid) return;
     var mySid=current.sid;
     appendMessage('user','you',text);      /* echo before the round trip */
+    /* 23a: an echo drawn before the history lands is settled against it. */
+    if(!histSettled){ var trE=el('perch-transcript'); if(trE&&trE.lastElementChild) seamEchoes.push({text:text,row:trE.lastElementChild}); }
     input.value='';
     input.style.height='auto';             /* Wave 1: the auto-grow collapses back after a send */
     var body={message:text};
