@@ -496,7 +496,7 @@ test("GET transcript (secret masking, 2026-10-26): a command and a reply that qu
   mkdirSync(sessions, { recursive: true });
   const uuid = "019eeb17-0000-7000-8000-cccccccccccc";
   const fakePw = "fake-" + "transcript-pw-" + "0000";
-  const cmd = ["echo", '"' + fakePw + '"', "|", "sudo", "-" + "S", "ls"].join(" ");
+  const cmd = "GH_TOKEN=" + fakePw + " git push";
   const file = join(sessions, "2026-06-21T16-50-50-013Z_" + uuid + ".jsonl");
   writeFileSync(file,
     JSON.stringify({ type: "message", id: "a", message: { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: cmd } }] } }) + "\n" +

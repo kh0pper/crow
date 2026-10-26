@@ -18,8 +18,7 @@ import { createNotification, upsertGroupedNotification, deliverNotification } fr
 
 const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const FAKE = "fake-" + "notif-pw-" + "0000";
-const S = "-" + "S";
-const CMD = ["echo", '"' + FAKE + '"', "|", "sudo", S, "reboot"].join(" ");
+const CMD = "GH_TOKEN=" + FAKE + " git push";   // a pattern case: no values file needed
 let dir, db;
 
 before(() => {

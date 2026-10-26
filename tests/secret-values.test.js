@@ -212,3 +212,28 @@ test("the mask path never loads a database driver or the keychain", () => {
   }
   assert.ok(existsSync(new URL("../servers/shared/secret-values-collect.js", import.meta.url)));
 });
+
+test("two writers with different process envs write the SAME file: neither drops the other's values", () => {
+  const I = scratchInstance();
+  writeFileSync(join(I.home, ".env"), "SHARED_TOKEN=" + fake("shared-disk") + "\n");
+  const a = refreshSecretValuesFile({ env: { ...I.env, ONLY_UNIT_A_TOKEN: fake("unit-a") } });
+  const first = readFileSync(a.path, "utf8");
+  const b = refreshSecretValuesFile({ env: { ...I.env, ONLY_UNIT_B_TOKEN: fake("unit-b") } });
+  assert.equal(b.written, false, "unit B's write changes nothing");
+  assert.equal(readFileSync(b.path, "utf8"), first);
+  assert.equal(first, fake("shared-disk") + "\n");
+  // each unit's own env values still mask in that unit's process
+  assert.ok(SV.getSecretValues({ env: { ...I.env, ONLY_UNIT_A_TOKEN: fake("unit-a") } }).includes(fake("unit-a")));
+});
+
+test("each instance has its own file: a co-hosted instance's write never touches another's", () => {
+  const A = scratchInstance();
+  const B = scratchInstance();
+  writeFileSync(join(A.home, ".env"), "A_TOKEN=" + fake("instance-a") + "\n");
+  writeFileSync(join(B.home, ".env"), "B_TOKEN=" + fake("instance-b") + "\n");
+  const ra = refreshSecretValuesFile({ env: A.env });
+  const rb = refreshSecretValuesFile({ env: B.env });
+  assert.notEqual(ra.path, rb.path);
+  assert.equal(readFileSync(ra.path, "utf8"), fake("instance-a") + "\n");
+  assert.equal(readFileSync(rb.path, "utf8"), fake("instance-b") + "\n");
+});

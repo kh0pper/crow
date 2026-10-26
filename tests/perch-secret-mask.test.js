@@ -170,7 +170,9 @@ before(async () => {
   secretValues = await import("../servers/shared/secret-values.js");
 });
 beforeEach(() => {
-  secretValues.writeSecretValuesFile(secretValues.secretValuesPath(process.env), [KEYCHAIN_FAKE]);
+  // The sudo password is in the instance's values (pi-lab's final rules:
+  // text fed to sudo -S is hidden ONLY by an exact value).
+  secretValues.writeSecretValuesFile(secretValues.secretValuesPath(process.env), [KEYCHAIN_FAKE, FAKE]);
   secretValues.invalidateSecretValues();
 });
 
@@ -312,4 +314,15 @@ test("a long tool command is masked before it is cut for the chip", async () => 
   await tick(30);
   const chip = frames.find((f) => f.type === "tool");
   assert.equal(/fake-sud/.test(chip.argsText), false, chip.argsText.slice(-60));
+});
+
+test("pi-lab parity: a sudo -S feed whose text is NOT a known value stays visible (it could be the command's stdin)", async () => {
+  secretValues.writeSecretValuesFile(secretValues.secretValuesPath(process.env), [KEYCHAIN_FAKE]);
+  const { engine, bridge } = makeEngine();
+  const { s, pi } = await liveSession(engine, bridge, "bot-parity");
+  const frames = await watched(engine, s.sessionId);
+  pi.emit({ type: "extension_ui_request", id: "c9", method: "confirm", title: "Destructive bash: sudo", message: CMD });
+  await tick(30);
+  const ask = frames.find((f) => f.type === "ask_user");
+  assert.equal(ask.message, CMD, "byte-identical, no note");
 });

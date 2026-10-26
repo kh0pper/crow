@@ -2,20 +2,28 @@
  * maskSecrets() — Crow's defensive second mask for text a bot controls
  * (approval/ask cards, "needs you" pushes, the log lines that print them).
  *
- * Contract with pi-lab (2026-10-26, the private engineering notes): pi-lab
- * masks where it builds a confirm card (approvalText); Crow masks again on
- * every path that turns that text into something stored or sent. The pattern
- * set here mirrors the contract's, each case-insensitive, and it works on
- * both raw text and pi-lab's escaped display text (a backslash doubled,
- * LF/CR/TAB shown as \n \r \t, anything else outside printable ASCII shown as
- * \u{hex}). On top of the patterns: exact values from the instance's secret
- * values (servers/shared/secret-values.js), in raw and escaped form.
+ * Contract with pi-lab (2026-10-26, the private engineering notes; final rules
+ * of pi-lab's secret-mask.ts): pi-lab masks where it builds a confirm card;
+ * Crow masks again on every path that turns that text into something stored
+ * or sent. The RULES below are pi-lab's, so the two masks agree, and they keep
+ * pi-lab's safety property: heuristic masking never hides anything that could
+ * execute. In particular:
+ *   - text piped or here-stringed into `sudo -S`, and heredoc bodies, have no
+ *     pattern at all (with cached sudo credentials that text is the command's
+ *     stdin, so it could be code): only exact values hide them;
+ *   - every pattern candidate must be password-like (6-256 characters of a
+ *     strict charset: no quote, backslash, whitespace, `$`, backtick or
+ *     ;&|<>()) and must not be a host or a path;
+ *   - PEM private keys only in their strict shape.
+ * Exact values (servers/shared/secret-values.js) are the trusted path and
+ * always mask, in raw, approvalText-escaped and JSON-escaped form, including
+ * the leading part of a value cut by pi-lab's "…(N more characters)" marker.
  *
  * DISPLAY-ONLY. Callers mask a copy for display. Nothing that is sent back to
  * pi (a select option, an editor prefill) is ever masked here.
  *
- * Every regex is linear or bounded: no nested quantifiers over the same
- * characters, and the "is sudo reading stdin?" test is a token scan.
+ * Every regex is linear or bounded, and the cut-prefix match is a linear
+ * prefix-function scan.
  */
 import { getSecretValues, normalizeValues } from "./secret-values.js";
 
@@ -42,156 +50,115 @@ export function displayEscape(text) {
   return out;
 }
 
-// A shell word: double-quoted (also JSON-escaped \"…\", as in a tool call's
-// stringified args), single-quoted, or bare (stops at space, quote, backslash,
-// pipe, ; and &). Quotes never span a line.
-const WORD = String.raw`(?:\\?"[^"\n]*?\\?"|'[^'\n]*'|(?:[^\s|;&'"\\]|\\(?!"))+)`;
+// ---- patterns (pi-lab's RULES) -------------------------------------------
 
-/** Mask one word, keeping its quotes. Unchanged (and not counted) when it is
- * empty, a variable reference, or already masked. */
-function maskWord(tok, hit) {
-  const q = tok.startsWith('\\"') && tok.endsWith('\\"') && tok.length >= 4 ? '\\"'
-    : (tok[0] === '"' || tok[0] === "'") && tok.length >= 2 && tok[tok.length - 1] === tok[0] ? tok[0] : "";
-  const inner = q ? tok.slice(q.length, tok.length - q.length) : tok;
-  if (!inner || inner.startsWith("$") || inner === REDACTED) return tok;
-  hit();
-  return q ? q + REDACTED + q : REDACTED;
+/** One shell word on the display text: double-quoted, single-quoted, bare. */
+const W = String.raw`"(?:[^"\\]|\\.)*"|'[^']*'|[^\s"';&|<>()]+`;
+
+const PASSWORD_LIKE = /^[A-Za-z0-9._~!@#%^&*+=,:\/_-]{6,256}$/;
+export function passwordLike(s) {
+  return PASSWORD_LIKE.test(s);
 }
 
-/** Split a command segment into words, cut at a line end (a real newline or
- * an escaped `\n`) or the next command (`;`, `&&`, `||`). */
-function segmentTokens(seg) {
-  const cut = seg.search(/\n|\\n|;|&&|\|\|/);
-  return (cut >= 0 ? seg.slice(0, cut) : seg).split(/\s+/).filter(Boolean);
+/** A token that names a path, never a secret. */
+function pathLike(s) {
+  return /^(?:\/|~|\.\.?\/)/.test(s) || s.includes("://") || /^[\w.-]+(?:\/[\w.-]*)+$/.test(s);
 }
 
-const STDIN_FLAG_RE = /^(?:-[a-z]*s[a-z]*|--stdin)$/i;
-/** True when the words run sudo with a read-password-from-stdin flag. */
-function sudoReadsStdin(tokens) {
-  const at = tokens.findIndex((t) => /(?:^|\/)sudo$/i.test(t));
-  if (at < 0) return false;
-  for (let i = at + 1; i < tokens.length; i++) {
-    if (STDIN_FLAG_RE.test(tokens[i])) return true;
-    if (!tokens[i].startsWith("-") && i > at + 4) break;
+/** Is [start,end) a host: after "://" (not user-info), after "user@", or the
+ * first operand of ssh/scp/rsync/curl? */
+function hostPosition(input, start, end) {
+  const before = input.slice(Math.max(0, start - 300), start);
+  const next = input[end] ?? "";
+  if (/:\/\/$/.test(before)) return next !== "@" && next !== ":";
+  if (/[A-Za-z0-9._-]@$/.test(before)) return true;
+  return /(?:^|[\s'"(;&|])(?:ssh|scp|rsync|curl)\s+$/.test(before);
+}
+
+/** Mask one word at input[start…] if its content is password-like and not a
+ * host or a path; quotes are kept. */
+function maskWordAt(c, word, input, start) {
+  const q = word[0];
+  const quoted = (q === '"' || q === "'") && word.length >= 2 && word.endsWith(q);
+  const inner = quoted ? word.slice(1, -1) : word;
+  if (!passwordLike(inner) || pathLike(inner) || hostPosition(input, start, start + word.length)) return word;
+  c.n++;
+  return quoted ? q + REDACTED + q : REDACTED;
+}
+
+const LINE_BREAK = /\n|\\n/;
+
+function startsLine(input, at) {
+  if (at === 0 || input[at - 1] === "\n") return true;
+  return input.slice(at - 2, at) === "\\n" && input[at - 3] !== "\\";
+}
+
+/** A PEM body as a real key file has it (see pi-lab pemShaped). */
+export function pemShaped(body) {
+  const lines = body.split(LINE_BREAK);
+  if (lines.length < 4 || lines[0] !== "" || lines[lines.length - 1] !== "") return false;
+  let rest = lines.slice(1, -1);
+  let k = 0;
+  while (k < rest.length && /^(?:Proc-Type|DEK-Info): [A-Za-z0-9,-]+$/.test(rest[k])) k++;
+  if (k > 0 && rest[k] === "") k++;
+  rest = rest.slice(k);
+  if (rest.length < 2) return false;
+  for (let i = 0; i < rest.length; i++) {
+    const last = i === rest.length - 1;
+    if (!/^[A-Za-z0-9+/=]+$/.test(rest[i])) return false;
+    if (last ? rest[i].length > 64 : rest[i].length !== 64) return false;
   }
-  return false;
+  return rest.join("").length >= 100;
 }
 
-/** The text before `offset` on the same line and command (bounded). */
-function commandBefore(text, offset) {
-  const start = Math.max(0, offset - 400);
-  const before = text.slice(start, offset);
-  const after = (needle) => { const i = before.lastIndexOf(needle); return i < 0 ? 0 : i + needle.length; };
-  return before.slice(Math.max(after("\n"), after("\\n"), after(";"), after("&&"), after("||")));
-}
+/** pre + word rules: the word is the last group and ends the match. */
+const wordRule = (re, ok = () => true) => [re, (c, mt, g, at, input) => {
+  const pre = g[0];
+  const w = g[g.length - 1];
+  return ok(pre, w) ? pre + maskWordAt(c, w, input, at + mt.length - w.length) : mt;
+}];
 
-// echo/printf [flags] [format] WORD, piped into a sudo that reads stdin (-S)
-const SUDO_PIPE_RE = new RegExp(String.raw`\b(echo|printf)((?:\s+-[a-z]+)*\s+)((?:'%s[^'\n]*'|"%s[^"\n]*")\s+)?(${WORD})(\s*\|)([^|\n]{0,400})`, "gi");
-// a here-string (three angle brackets) feeding a sudo that reads stdin
-const HERESTRING_RE = new RegExp(String.raw`<<<(\s*)(${WORD})`, "g");
-// sudo -S ... <<[-]DELIM, then the body up to a line holding only DELIM
-const HEREDOC_RE = /<<(?!<)-?[ \t]*(["']?)([A-Za-z_][A-Za-z0-9_]{0,40})\1/g;
-
-/** [regex, replacer(matchArgs, hit)] — each replaces only the secret part. */
-const SIMPLE = [
-  // sshpass [opts] -p WORD | -pWORD
-  [new RegExp(String.raw`(\bsshpass\b(?:\s+-[a-oq-z][^\s]*){0,6}\s+-p\s*)(${WORD})`, "gi"), (a, hit) => a[1] + maskWord(a[2], hit)],
-  // mysql/mysqldump/mysqladmin ... -pWORD (no space: `-p WORD` prompts)
-  [new RegExp(String.raw`(\bmysql(?:dump|admin)?\b[^|\n]{0,200}?\s-p)(?=[^\s-])(${WORD})`, "gi"), (a, hit) => a[1] + maskWord(a[2], hit)],
-  // --password=WORD | --password WORD | --passwd ...
-  [new RegExp(String.raw`(--pass(?:word|wd)(?:=|\s+))(${WORD})`, "gi"), (a, hit) => a[1] + maskWord(a[2], hit)],
-  // Authorization: Bearer|Basic|token WORD ; X-Api-Key: WORD
-  [/(\bauthorization:\s*(?:bearer|basic|token)\s+)([^\s'"]+)/gi, (a, hit) => a[1] + maskWord(a[2], hit)],
-  [/(\bx-api-key:\s*)([^\s'"]+)/gi, (a, hit) => a[1] + maskWord(a[2], hit)],
-  // ?token= &token= ?access_token= api_key= / apikey= query values
-  [/([?&](?:access_)?token=|\bapi_?key=)([^&\s'"#]+)/gi, (a, hit) => a[1] + maskWord(a[2], hit)],
-  // NAME=value where NAME names a secret (PGPASSWORD=, DB_PASS=, GH_TOKEN=, ...)
-  [new RegExp(String.raw`(\b[A-Za-z_][A-Za-z0-9_]{0,80}=)(${WORD})`, "g"), (a, hit) => {
-    const name = a[1].slice(0, -1);
-    // The contract's name set, ending the name or a `_` part: PGPASSWORD,
-    // DB_PASS, GH_TOKEN, TOKEN_FILE — but not MAX_TOKENS.
-    return /(PASS|PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY)(?:_[A-Za-z0-9_]*)?$/i.test(name) ? a[1] + maskWord(a[2], hit) : a[0];
+const RULES = [
+  // PEM private key blocks, strict shape only; never to the end of the text.
+  [/-----BEGIN ([A-Z0-9 ]*)PRIVATE KEY-----([\s\S]*?)-----END \1PRIVATE KEY-----/g, (c, mt, g, at, input) => {
+    const [label, body] = g;
+    if (!startsLine(input, at) || !pemShaped(body)) return mt;
+    const sep = body.match(LINE_BREAK)[0];
+    c.n++;
+    return `-----BEGIN ${label}PRIVATE KEY-----${sep}${REDACTED}${sep}-----END ${label}PRIVATE KEY-----`;
   }],
+  // sshpass with its password option, spaced or attached
+  wordRule(new RegExp(String.raw`(\bsshpass\b[^|;&]{0,200}?\s-p\s*)(${W})`, "gi"), (pre) => /-p\s*$/.test(pre)),
+  // mysql -pword (attached only: `-p word` makes `word` the database)
+  wordRule(new RegExp(String.raw`(\b(?:mysql|mariadb|mysqldump|mysqladmin)\b[^|;&]{0,200}?\s-p)(${W})`, "gi"), (pre) => pre.endsWith("-p")),
+  // --password=word, --password word, --passwd ...
+  wordRule(new RegExp(String.raw`(--pass(?:word|wd)(?:=|\s+))(${W})`, "gi"), (_pre, w) => !w.startsWith("-")),
+  // Authorization: Bearer|Basic|token <word>; X-Api-Key: <word>; ?token= / &token=
+  wordRule(/(\bauthorization:\s*(?:bearer|basic|token)\s+)([^\s"';&|<>()]+)/gi),
+  wordRule(/(\bx-api-key:\s*)([^\s"';&|<>()]+)/gi),
+  wordRule(/([?&]token=)([^&\s"'#;|<>()]+)/gi),
+  // NAME=value, NAME carrying PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY,
+  // or PASS as a whole _-segment, ending the name or followed by "_".
+  wordRule(new RegExp(String.raw`(?<![\w$-])((?:[A-Za-z0-9_]{0,80}?(?:PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY)|(?:[A-Za-z0-9_]{0,80}_)?PASS)(?:_[A-Za-z0-9_]{0,80})?=)(${W})`, "gi")),
   // Known token shapes.
-  [/\bgh[opsur]_[A-Za-z0-9]{20,}\b/g, (a, hit) => (hit(), REDACTED)],
-  [/\bgithub_pat_[A-Za-z0-9_]{20,}/g, (a, hit) => (hit(), REDACTED)],
-  [/\btk_[A-Za-z0-9]{20,}\b/g, (a, hit) => (hit(), REDACTED)],
-  [/\bsk-[A-Za-z0-9_-]{20,}/g, (a, hit) => (hit(), REDACTED)],
-  [/\bAKIA[0-9A-Z]{16}\b/g, (a, hit) => (hit(), REDACTED)],
-  // PEM private-key blocks (raw newlines or escaped \n), to the matching END
-  // or the end of the text.
-  [/-{5}BEGIN ([A-Z0-9 ]{0,40})PRIVATE KEY-{5}[\s\S]*?(?:-{5}END \1PRIVATE KEY-{5}|$)/g, (a, hit) => (hit(), REDACTED)],
+  [/(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|tk_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16})(?![A-Za-z0-9])/gi,
+    (c, mt, _g, at, input) => maskWordAt(c, mt, input, at)],
 ];
 
-function replaceAll(text, re, fn) {
-  re.lastIndex = 0;
-  return text.replace(re, (...args) => fn(args));
-}
-
-function maskPatterns(text, hit) {
-  let t = text;
-  t = replaceAll(t, SUDO_PIPE_RE, (a) => {
-    const [whole, cmd, flags, fmt, word, pipe, rest] = a;
-    if (!sudoReadsStdin(segmentTokens(rest))) return whole;
-    return cmd + flags + (fmt || "") + maskWord(word, hit) + pipe + rest;
-  });
-  t = replaceAll(t, HERESTRING_RE, (a) => {
-    const [whole, sp, word] = a;
-    const offset = a[a.length - 2];
-    const src = a[a.length - 1];
-    if (!sudoReadsStdin(segmentTokens(commandBefore(src, offset)))) return whole;
-    return "<<<" + sp + maskWord(word, hit);
-  });
-  t = maskHeredocs(t, hit);
-  for (const [re, fn] of SIMPLE) t = replaceAll(t, re, (a) => fn(a, hit));
-  return t;
-}
-
-/** Mask the body of a heredoc fed to `sudo -S` (raw or escaped newlines). */
-function maskHeredocs(text, hit) {
-  let out = "";
-  let pos = 0;
-  HEREDOC_RE.lastIndex = 0;
-  let mt;
-  while ((mt = HEREDOC_RE.exec(text))) {
-    const opEnd = mt.index + mt[0].length;
-    if (!sudoReadsStdin(segmentTokens(commandBefore(text, mt.index)))) continue;
-    // The body starts after the operator's line end.
-    const nl = findLineEnd(text, opEnd);
-    if (!nl) continue;
-    const delim = mt[2];
-    let bodyEnd = text.length;
-    for (let scan = nl.next; ;) {
-      const lineEnd = findLineEnd(text, scan);
-      if (text.slice(scan, lineEnd ? lineEnd.at : text.length).trim() === delim) { bodyEnd = scan; break; }
-      if (!lineEnd) break;
-      scan = lineEnd.next;
-    }
-    const body = text.slice(nl.next, bodyEnd);
-    // keep the line end that closes the body, so the delimiter stays on its line
-    const tail = findTrailingLineEnd(body);
-    if (!body || body.slice(0, body.length - tail.length) === REDACTED) continue;
-    out += text.slice(pos, nl.next) + REDACTED + tail;
-    hit();
-    pos = bodyEnd;
-    HEREDOC_RE.lastIndex = Math.max(HEREDOC_RE.lastIndex, bodyEnd);
+function maskPatterns(text, c) {
+  let out = text;
+  for (const [re, fn] of RULES) {
+    re.lastIndex = 0;
+    out = out.replace(re, (mt, ...g) => {
+      const input = g.pop();
+      const at = g.pop();
+      return fn(c, mt, g.map((x) => (typeof x === "string" ? x : "")), at, input);
+    });
   }
-  return out + text.slice(pos);
+  return out;
 }
 
-function findLineEnd(text, from) {
-  for (let i = from; i < text.length; i++) {
-    if (text[i] === "\n") return { at: i, next: i + 1 };
-    if (text[i] === "\\" && text[i + 1] === "n" && text[i - 1] !== "\\") return { at: i, next: i + 2 };
-    if (text[i] === "\\" && text[i + 1] === "\\") i++;
-  }
-  return null;
-}
-function findTrailingLineEnd(body) {
-  if (body.endsWith("\\n") && !body.endsWith("\\\\n")) return "\\n";
-  if (body.endsWith("\n")) return "\n";
-  return "";
-}
+// ---- exact values ----------------------------------------------------------
 
 /** The forms a value takes in display text: raw, approvalText-escaped, and
  * JSON-escaped (a tool call's stringified args). */
@@ -200,50 +167,61 @@ function valueForms(v) {
 }
 
 /** Exact values, longest first, in every form; split/join (no regex). */
-function maskValues(text, values, hit) {
+function maskValues(text, values, c) {
   let t = text;
   for (const v of values) {
     for (const form of valueForms(v)) {
       if (!t.includes(form)) continue;
       const parts = t.split(form);
-      for (let i = 1; i < parts.length; i++) hit();
+      c.n += parts.length - 1;
       t = parts.join(REDACTED);
     }
   }
-  return maskCutPrefixes(t, values, hit);
+  return maskCutPrefixes(t, values, c);
 }
 
 // pi-lab's sanitizeForDisplay cuts long model text and appends
 // "…(N more characters)"; a value cut there leaves only its start, which an
 // exact match cannot see.
-const CUT_MARKER_RE = /\u2026\(\d+ more characters\)/g;
+const CUT_MARKER_RE = /…\(\d+ more characters\)/g;
+
+/**
+ * Length of the longest suffix of `text` (6+ chars, shorter than `form`) that
+ * is a prefix of `form`: the KMP prefix function of form + NUL + tail, linear
+ * in their lengths, so any value length is matched in bounded time.
+ */
+function cutPrefixLength(form, text) {
+  if (form.length < 7) return 0;
+  const tail = text.slice(-(form.length - 1));
+  const s = form + "\u0000" + tail;
+  const pi = new Int32Array(s.length);
+  for (let i = 1; i < s.length; i++) {
+    let k = pi[i - 1];
+    while (k > 0 && s[i] !== s[k]) k = pi[k - 1];
+    if (s[i] === s[k]) k++;
+    pi[i] = k;
+  }
+  const k = pi[s.length - 1];
+  return k >= 6 && k < form.length ? k : 0;
+}
 
 /** A value's leading 6+ characters right before a cut marker. */
-function maskCutPrefixes(text, values, hit) {
-  if (!values.length || !text.includes("\u2026(")) return text;
+function maskCutPrefixes(text, values, c) {
+  if (!values.length || !text.includes("…(")) return text;
   let out = "";
   let pos = 0;
   CUT_MARKER_RE.lastIndex = 0;
   let mt;
   while ((mt = CUT_MARKER_RE.exec(text))) {
     let before = text.slice(pos, mt.index);
-    found: for (const v of values) {
-      for (const form of valueForms(v)) {
-        for (let k = Math.min(form.length - 1, before.length, 64); k >= 6; k--) {
-          if (before.endsWith(form.slice(0, k))) {
-            hit();
-            before = before.slice(0, before.length - k) + REDACTED;
-            break found;
-          }
-        }
-      }
-    }
+    let best = 0;
+    for (const v of values) for (const form of valueForms(v)) best = Math.max(best, cutPrefixLength(form, before));
+    if (best) { c.n++; before = before.slice(0, before.length - best) + REDACTED; }
     out += before + mt[0];
     pos = mt.index + mt[0].length;
   }
   return out + text.slice(pos);
 }
-
 
 /**
  * @param {*} text
@@ -253,13 +231,12 @@ function maskCutPrefixes(text, values, hit) {
 export function maskSecretsDetailed(text, opts = {}) {
   const src = text == null ? "" : String(text);
   if (!src) return { text: src, count: 0 };
-  let count = 0;
-  const hit = () => { count++; };
+  const c = { n: 0 };
   try {
     const values = opts.values === undefined ? currentValues() : opts.values;
-    let t = maskValues(src, normalizeValues(values).filter((v) => v !== REDACTED), hit);
-    t = maskPatterns(t, hit);
-    return { text: t, count };
+    let t = maskValues(src, normalizeValues(values).filter((v) => v !== REDACTED), c);
+    t = maskPatterns(t, c);
+    return c.n ? { text: t, count: c.n } : { text: src, count: 0 };
   } catch {
     // A masking bug must never break a card, a push or a log line, and must
     // never let the unmasked text through either: fall back to a blank.
