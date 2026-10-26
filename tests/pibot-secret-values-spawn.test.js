@@ -1,10 +1,12 @@
 /**
- * The bot engine hands every pi child PI_BOT_SECRET_VALUES_FILE (contract with
- * pi-lab, 2026-10-26): the engine alone names it (never a bot def's spawn_env,
- * never the per-session extraEnv, never an inherited value), the file is
- * refreshed at each spawn, and under the default sandbox a bot shell cannot
- * read it — not even after the file is replaced while the child runs.
- * Fake values only; the suite's scratch CROW_HOME only.
+ * The bot engine and PI_BOT_SECRET_VALUES_FILE (contract with pi-lab,
+ * 2026-10-26). Under bubblewrap: the <CROW_HOME>/secrets dir is hidden behind a
+ * tmpfs, the file is refreshed at each spawn and named to pi by the engine
+ * alone (never a bot def's spawn_env, the session extraEnv or an inherited
+ * value), and a bot shell cannot read it, not even after the file is replaced
+ * while the child runs. Without bubblewrap the file is neither written nor
+ * named: a bot shell there could read it. Fake values only; this file uses its
+ * own scratch CROW_HOME so parallel test files never race on the one file.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -13,25 +15,34 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 for (const k of Object.keys(process.env)) if (/^(PI_|PIBOT_)/.test(k)) delete process.env[k];
+const HOME = mkdtempSync(join(tmpdir(), "crow-secret-spawn-home-"));
+process.env.CROW_HOME = HOME;
+process.env.CROW_DATA_DIR = join(HOME, "data");
+delete process.env.CROW_DB_PATH;
+mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
 const FAKE = "fake-" + "spawn-" + "secret-0000";
-process.env.SPAWN_TEST_API_KEY = FAKE;
+writeFileSync(join(HOME, ".env"), "SPAWN_TEST_API_KEY=" + FAKE + "\n");
 
 const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
-const { secretValuesPath, secretsDir, writeSecretValuesFile } = await import("../servers/shared/secret-values.js");
+const { secretValuesPath, writeSecretValuesFile } = await import("../servers/shared/secret-values.js");
 const { probePiSandbox, _resetPiSandboxForTest } = await import("../scripts/pi-bots/pi_sandbox.mjs");
+
+_resetPiSandboxForTest();
+const SANDBOX = probePiSandbox({ force: true });
+const noSandbox = SANDBOX.ok ? false : "pi sandbox unavailable here: " + SANDBOX.reason;
+const PATH = secretValuesPath(process.env);
 
 function scratch() { const d = mkdtempSync(join(tmpdir(), "crow-secret-spawn-")); mkdirSync(join(d, "sessions"), { recursive: true }); return d; }
 
-/** Spawn a stub pi that reports its env var and what a shell inside sees. */
-async function spawnReport({ def = {}, extraEnv = null, mode = "off", hold = false } = {}) {
+/** Spawn a stub pi that reports its env var and what a shell inside sees at the engine's path. */
+async function spawnReport({ def = {}, extraEnv = null, mode = "auto", hold = false } = {}) {
   const dir = scratch();
   const stub = join(dir, "stub-pi.mjs");
   writeFileSync(stub, [
-    'import { readFileSync } from "node:fs";',
     'import { execFileSync } from "node:child_process";',
-    'const p = process.env.PI_BOT_SECRET_VALUES_FILE || "";',
-    'const look = () => { try { return execFileSync("/bin/sh", ["-c", "cat \\"$1\\"", "sh", p], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); } catch (e) { return "ERR"; } };',
-    'const report = (tag) => process.stdout.write(JSON.stringify({ type: "report", tag, path: p, shell: look() }) + "\\n");',
+    `const target = ${JSON.stringify(PATH)};`,
+    'const look = () => { try { return execFileSync("/bin/cat", [target], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); } catch { return "ERR"; } };',
+    'const report = (tag) => process.stdout.write(JSON.stringify({ type: "report", tag, path: process.env.PI_BOT_SECRET_VALUES_FILE || null, shell: look() }) + "\\n");',
     'report("start");',
     'process.stdin.on("data", () => report("again"));',
     hold ? "process.stdin.resume();" : "setTimeout(() => process.exit(0), 50);",
@@ -48,19 +59,34 @@ async function spawnReport({ def = {}, extraEnv = null, mode = "off", hold = fal
   }
 }
 
-test("every child gets the engine's file: fresh, 600, holding this instance's values", async () => {
-  const { pi, r } = await spawnReport();
+test("without bubblewrap (CROW_PI_SANDBOX=off) the file is neither written nor named", async () => {
+  const { pi, r } = await spawnReport({ mode: "off" });
   await pi.exited;
-  assert.equal(r.path, secretValuesPath(process.env));
-  assert.equal(r.path, join(secretsDir(process.env), "pi-bot-secret-values"));
-  const st = lstatSync(r.path);
-  assert.equal(st.isFile(), true);
-  assert.equal(st.mode & 0o777, 0o600);
-  assert.ok(readFileSync(r.path, "utf8").split("\n").includes(FAKE));
-  assert.ok(r.shell.includes(FAKE), "unsandboxed (mode off) the shell can read it, as it can every other file of this uid");
+  assert.equal(r.path, null);
+  assert.equal(existsSync(PATH), false);
 });
 
-test("a bot def's spawn_env, the session extraEnv and an inherited value cannot point pi elsewhere", async () => {
+test("sandboxed: the engine's file, fresh and 600, named to pi; a bot shell cannot read it, before or after it is replaced", { skip: noSandbox }, async () => {
+  const { pi, r } = await spawnReport({ hold: true });
+  try {
+    assert.equal(pi.sandboxed, true);
+    assert.equal(r.path, PATH);
+    const st = lstatSync(PATH);
+    assert.equal(st.isFile(), true);
+    assert.equal(st.mode & 0o777, 0o600);
+    assert.ok(readFileSync(PATH, "utf8").split("\n").includes(FAKE), "outside: the instance's values");
+    assert.equal(r.shell, "ERR", "inside: hidden");
+    writeSecretValuesFile(PATH, [FAKE, "fake-" + "rotated-" + "0000"]);    // replaced by rename mid-session
+    const seq = pi._seq;
+    pi.proc.stdin.write("x\n");
+    const again = await pi.waitFor((m) => m.type === "report" && m.tag === "again" && m._seq > seq, 10000, "again");
+    assert.equal(again.shell, "ERR", "still hidden after the rename");
+  } finally {
+    await pi.close();
+  }
+});
+
+test("sandboxed: a bot def's spawn_env, the session extraEnv and an inherited value cannot point pi elsewhere", { skip: noSandbox }, async () => {
   const planted = join(scratch(), "planted-values");
   writeFileSync(planted, "nothing\n", { mode: 0o600 });
   process.env.PI_BOT_SECRET_VALUES_FILE = planted;
@@ -71,7 +97,7 @@ test("a bot def's spawn_env, the session extraEnv and an inherited value cannot 
       extraEnv: { PI_BOT_INTERACTIVE: "1", PI_BOT_SECRET_VALUES_FILE: planted },
     });
     await pi.exited;
-    assert.equal(r.path, secretValuesPath(process.env));
+    assert.equal(r.path, PATH);
     assert.match(msgs.join("\n"), /stripped engine-reserved spawn_env keys from bot def: PI_BOT_SECRET_VALUES_FILE/);
   } finally {
     console.error = origErr;
@@ -79,35 +105,19 @@ test("a bot def's spawn_env, the session extraEnv and an inherited value cannot 
   }
 });
 
-test("the file is refreshed at each spawn (a secret added since the last spawn is in it)", async () => {
+test("sandboxed: the file is refreshed at each spawn (a secret added since the last spawn is in it)", { skip: noSandbox }, async () => {
   const later = "fake-" + "added-later-" + "0000";
-  process.env.LATER_TEST_TOKEN = later;
-  try {
-    const { pi, r } = await spawnReport();
-    await pi.exited;
-    assert.ok(readFileSync(r.path, "utf8").split("\n").includes(later));
-  } finally { delete process.env.LATER_TEST_TOKEN; }
+  writeFileSync(join(HOME, ".env"), "SPAWN_TEST_API_KEY=" + FAKE + "\nLATER_TEST_TOKEN=" + later + "\n");
+  const { pi } = await spawnReport();
+  await pi.exited;
+  assert.ok(readFileSync(PATH, "utf8").split("\n").includes(later));
 });
 
-_resetPiSandboxForTest();
-const SANDBOX = probePiSandbox({ force: true });
-const noSandbox = SANDBOX.ok ? false : "pi sandbox unavailable here: " + SANDBOX.reason;
-
-test("sandboxed: a bot shell cannot read the file, before or after it is replaced mid-session", { skip: noSandbox }, async () => {
-  const { pi, r } = await spawnReport({ mode: "auto", hold: true });
+test("off with no inherited value: the engine never leaks an inherited PI_BOT_SECRET_VALUES_FILE", async () => {
+  process.env.PI_BOT_SECRET_VALUES_FILE = "/tmp/planted";
   try {
-    assert.equal(pi.sandboxed, true);
-    assert.equal(r.path, secretValuesPath(process.env));
-    assert.equal(existsSync(r.path), true, "the file exists outside");
-    assert.equal(r.shell.includes(FAKE), false, "inside: " + r.shell.slice(0, 40));
-    // another spawn (or this test) replaces the file by rename while the child runs
-    writeSecretValuesFile(r.path, [FAKE, "fake-" + "rotated-" + "0000"]);
-    const before = pi.events.length;
-    pi.proc.stdin.write("x\n");
-    const again = await pi.waitFor((m) => m.type === "report" && m.tag === "again" && m._seq > before, 10000, "again");
-    assert.equal(again.shell.includes(FAKE), false, "still hidden after the rename");
-    assert.equal(again.shell.includes("rotated"), false);
-  } finally {
-    await pi.close();
-  }
+    const { pi, r } = await spawnReport({ mode: "off" });
+    await pi.exited;
+    assert.equal(r.path, null);
+  } finally { delete process.env.PI_BOT_SECRET_VALUES_FILE; }
 });

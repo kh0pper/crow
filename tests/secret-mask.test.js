@@ -201,3 +201,11 @@ test("a masked heredoc is not masked again", () => {
   assert.equal(once.count, 1);
   assert.equal(maskSecretsDetailed(once.text, none).count, 0);
 });
+
+test("an exact value inside JSON-escaped text (a quote in it) is masked", () => {
+  const v = 'quo"te-' + "value-1";
+  const args = JSON.stringify({ command: "login " + v });
+  const out = m(args, [v]);
+  assert.equal(out.includes("value-1"), false, out);
+  assert.equal(JSON.parse(out).command, "login " + REDACTED);
+});

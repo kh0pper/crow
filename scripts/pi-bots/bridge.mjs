@@ -38,6 +38,7 @@ import { stripContextEcho } from "../../servers/gateway/voice/context-echo.js";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
+import { mkdirSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
@@ -477,19 +478,24 @@ export class PiRpc {
     // (--info-fd), kept as this.piPid. The setpriv fallback execs in place, so
     // there proc.pid IS pi. CROW_PI_SANDBOX=required throws here, which
     // callers surface as a failed turn.
-    // Approval-card secret masking (contract with pi-lab, 2026-10-26): the
-    // instance's secret values, refreshed at every spawn so a secret added
-    // since the last one is already in the file. Set HERE, after spawn_env
-    // (whose PI_BOT_ keys were stripped above) and extraEnv merged, so only
-    // the engine ever names the file. Under the default sandbox the whole
-    // <CROW_HOME>/secrets dir is hidden behind a tmpfs (hideDirs), so a bot
-    // shell cannot read the list; pi-lab's own trust check then finds no file
-    // and masks by pattern only, and Crow's second mask (secret-mask.js)
-    // carries the exact values on every card, push and log line.
+    // Approval-card secret masking (contract with pi-lab, 2026-10-26). The
+    // whole <CROW_HOME>/secrets dir (keychain key, retained bundle secrets,
+    // the secret-values file) is hidden from a bubblewrapped pi behind a tmpfs
+    // (hideDirs). Only then is the values file written, refreshed at this
+    // spawn, and named to pi, AFTER spawn_env (PI_BOT_ keys stripped above)
+    // and extraEnv merged, so only the engine names it. Without bwrap (setpriv
+    // fallback, CROW_PI_SANDBOX=off) the bot shell could read a plaintext list,
+    // so it is neither written nor named; Crow's second mask (secret-mask.js)
+    // still carries patterns and this process's own env values. Inside bwrap
+    // pi-lab's trust check finds no file and masks by pattern only.
     delete env.PI_BOT_SECRET_VALUES_FILE;
-    const secretValues = refreshSecretValuesFile({ log: (l) => console.error("[pi-bots] " + l) });
-    if (secretValues) env.PI_BOT_SECRET_VALUES_FILE = secretValues.path;
+    try { mkdirSync(secretsDir(), { recursive: true, mode: 0o700 }); } catch { /* the tmpfs needs the dir; without it, no file either */ }
     const launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, hideDirs: [secretsDir()] });
+    delete launch.env.PI_BOT_SECRET_VALUES_FILE;
+    if (launch.wrapper === "bwrap" && launch.masked.includes(secretsDir())) {
+      const secretValues = refreshSecretValuesFile({ log: (l) => console.error("[pi-bots] " + l) });
+      if (secretValues) launch.env.PI_BOT_SECRET_VALUES_FILE = secretValues.path;
+    }
     this.sandboxed = launch.sandboxed;
     this.sandboxWrapper = launch.wrapper;
     this.piPid = null;

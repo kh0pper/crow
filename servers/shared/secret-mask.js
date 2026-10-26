@@ -193,11 +193,17 @@ function findTrailingLineEnd(body) {
   return "";
 }
 
-/** Exact values, longest first, raw and escaped; split/join (no regex). */
+/** The forms a value takes in display text: raw, approvalText-escaped, and
+ * JSON-escaped (a tool call's stringified args). */
+function valueForms(v) {
+  return new Set([v, displayEscape(v), JSON.stringify(v).slice(1, -1)]);
+}
+
+/** Exact values, longest first, in every form; split/join (no regex). */
 function maskValues(text, values, hit) {
   let t = text;
   for (const v of values) {
-    for (const form of new Set([v, displayEscape(v)])) {
+    for (const form of valueForms(v)) {
       if (!t.includes(form)) continue;
       const parts = t.split(form);
       for (let i = 1; i < parts.length; i++) hit();
@@ -222,8 +228,8 @@ function maskCutPrefixes(text, values, hit) {
   while ((mt = CUT_MARKER_RE.exec(text))) {
     let before = text.slice(pos, mt.index);
     found: for (const v of values) {
-      for (const form of new Set([v, displayEscape(v)])) {
-        for (let k = Math.min(form.length - 1, before.length); k >= 6; k--) {
+      for (const form of valueForms(v)) {
+        for (let k = Math.min(form.length - 1, before.length, 64); k >= 6; k--) {
           if (before.endsWith(form.slice(0, k))) {
             hit();
             before = before.slice(0, before.length - k) + REDACTED;
@@ -250,10 +256,7 @@ export function maskSecretsDetailed(text, opts = {}) {
   let count = 0;
   const hit = () => { count++; };
   try {
-    let values = opts.values;
-    if (values === undefined) {
-      try { values = getSecretValues(); } catch { values = []; }
-    }
+    const values = opts.values === undefined ? currentValues() : opts.values;
     let t = maskValues(src, normalizeValues(values).filter((v) => v !== REDACTED), hit);
     t = maskPatterns(t, hit);
     return { text: t, count };
@@ -269,12 +272,22 @@ export function maskSecrets(text, opts) {
   return maskSecretsDetailed(text, opts).text;
 }
 
-/** A deep copy with every string leaf masked (display copies of JSON records). */
-export function maskDeep(v, opts, depth = 0) {
-  if (typeof v === "string") return maskSecrets(v, opts);
-  if (depth > 12 || v == null || typeof v !== "object") return v;
-  if (Array.isArray(v)) return v.map((x) => maskDeep(x, opts, depth + 1));
-  const out = {};
-  for (const [k, x] of Object.entries(v)) out[k] = maskDeep(x, opts, depth + 1);
-  return out;
+/** A deep copy with every string leaf masked (display copies of JSON records).
+ * Past 64 levels a subtree is replaced whole: never returned unmasked. */
+export function maskDeep(v, opts) {
+  const o = { values: opts && opts.values !== undefined ? opts.values : currentValues() };
+  const walk = (x, depth) => {
+    if (typeof x === "string") return maskSecrets(x, o);
+    if (x == null || typeof x !== "object") return x;
+    if (depth > 64) return REDACTED;
+    if (Array.isArray(x)) return x.map((y) => walk(y, depth + 1));
+    const out = {};
+    for (const [k, y] of Object.entries(x)) out[k] = walk(y, depth + 1);
+    return out;
+  };
+  return walk(v, 0);
+}
+
+function currentValues() {
+  try { return getSecretValues(); } catch { return []; }
 }

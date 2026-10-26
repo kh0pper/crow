@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, lstatSync, readdirSync, symlinkSync, chmodSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, lstatSync, readdirSync, symlinkSync, chmodSync, existsSync, renameSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -83,8 +83,9 @@ test("collect: env, .env files, bundle generated + retained secrets, token files
   db.close();
 
   const vals = collectSecretValues({ env: { ...I.env, SOME_API_KEY: v.procEnv, LANG: "en_US.UTF-8" } });
-  for (const [k, val] of Object.entries(v)) assert.ok(vals.includes(val), k);
-  for (const not of [fake("plain"), fake("unrelated"), fake("otherkey"), "lm-studio", "3001", "none", "en_US.UTF-8"]) {
+  for (const [k, val] of Object.entries(v)) if (k !== "procEnv") assert.ok(vals.includes(val), k);
+  // every writing process must write the same file: no per-process env values
+  for (const not of [v.procEnv, fake("plain"), fake("unrelated"), fake("otherkey"), "lm-studio", "3001", "none", "en_US.UTF-8"]) {
     assert.equal(vals.includes(not), false, not);
   }
 });
@@ -166,24 +167,35 @@ test("readSecretValuesFile trust checks: mode 644, symlink and missing file are 
   assert.equal(SV.readSecretValuesFile(link), null);
 });
 
-test("getSecretValues: file + own env, cached, re-read after the TTL when the file changed, invalidate", () => {
+test("getSecretValues: file + own env; a file another process replaced is seen on the next call", () => {
   const I = scratchInstance();
   const path = SV.secretValuesPath(I.env);
-  SV.invalidateSecretValues();
   SV.writeSecretValuesFile(path, [fake("first")]);
-  SV.invalidateSecretValues();
   const env = { ...I.env, MY_TOKEN: fake("ownenv") };
-  const t0 = 1_000_000;
-  const a = SV.getSecretValues({ env, now: t0 });
+  const a = SV.getSecretValues({ env });
   assert.ok(a.includes(fake("first")) && a.includes(fake("ownenv")));
-  SV.writeSecretValuesFile(path, [fake("second-value")]);
+  assert.equal(SV.getSecretValues({ env }), a, "unchanged file: the cached list");
+  // another process: a rename to a new inode, no cache priming here
+  const tmp = path + ".other";
+  writeFileSync(tmp, fake("second-value") + "\n", { mode: 0o600 });
+  renameSync(tmp, path);
+  assert.ok(SV.getSecretValues({ env }).includes(fake("second-value")));
+  assert.equal(SV.getSecretValues({ env }).includes(fake("first")), false);
   SV.invalidateSecretValues();
-  SV.getSecretValues({ env, now: t0 });                                  // re-primes from the file
-  assert.ok(SV.getSecretValues({ env, now: t0 + 1000 }).includes(fake("second-value")));
-  writeFileSync(path, fake("third-value") + "\n", { mode: 0o600 });
-  assert.equal(SV.getSecretValues({ env, now: t0 + 2000 }).includes(fake("third-value")), false);   // cached
-  assert.ok(SV.getSecretValues({ env, now: t0 + 120_000 }).includes(fake("third-value")));         // TTL passed
-  SV.invalidateSecretValues();
+});
+
+test("the writer: a strict umask still yields 600; a looser existing dir is tightened; stale temps are swept", () => {
+  const I = scratchInstance();
+  mkdirSync(join(I.home, "secrets"), { mode: 0o755 });
+  chmodSync(join(I.home, "secrets"), 0o755);
+  const stale = join(I.home, "secrets", ".pi-bot-secret-values.tmp-1-old");
+  writeFileSync(stale, "leftover");
+  utimesSync(stale, new Date(Date.now() - 3_600_000), new Date(Date.now() - 3_600_000));
+  const old = process.umask(0o277);
+  try { SV.writeSecretValuesFile(SV.secretValuesPath(I.env), [fake("umask")]); } finally { process.umask(old); }
+  assert.equal(statSync(SV.secretValuesPath(I.env)).mode & 0o777, 0o600);
+  assert.equal(statSync(join(I.home, "secrets")).mode & 0o777, 0o700);
+  assert.equal(existsSync(stale), false);
 });
 
 test("parseEnvPairs: quotes, export, comments", () => {

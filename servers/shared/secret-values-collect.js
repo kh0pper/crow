@@ -5,9 +5,11 @@
  * last spawn is in the file before the next card can show it.
  *
  * Sources, each best-effort (a missing or unreadable source is skipped):
- *   - this process's env, <CROW_HOME>/.env, the checkout .env (or
- *     CROW_APP_ENV_PATH), <CROW_HOME>/env/*.env: secret-NAMED keys
- *     (isSecretEnvName) with a plausible value
+ *   - <CROW_HOME>/.env, the checkout .env (or CROW_APP_ENV_PATH),
+ *     <CROW_HOME>/env/*.env: secret-NAMED keys (isSecretEnvName) with a
+ *     plausible value. Not this process's env: the gateway, the pibot units and
+ *     job runners all write this one file and must write the SAME content
+ *     (each process's own env values are added in memory by getSecretValues).
  *   - bundles: <CROW_HOME>/bundles/<id>/.env — every key its manifest marks
  *     `secret: true` or `generate`, plus secret-named keys; the retained
  *     generated copies in <CROW_HOME>/secrets/bundle-env/*.env (all keys)
@@ -136,7 +138,7 @@ function dbSecrets({ dbPath, crowHome }) {
 /**
  * Every source above, normalized (6+ chars, one line, deduped, longest first).
  * @param {object} [o]
- * @param {object} [o.env] the env to resolve paths from and to scan
+ * @param {object} [o.env] the env to resolve paths from
  * @param {string} [o.appRoot] the checkout whose .env counts
  * @param {string|null} [o.dbPath] crow.db (default CROW_DB_PATH or <data>/crow.db); null skips the DB
  */
@@ -144,7 +146,7 @@ export function collectSecretValues({ env = process.env, appRoot = env.CROW_APP_
   const crowHome = resolveCrowHome(env);
   const dataDir = resolveInstanceDataDir(env);
   const db = dbPath === undefined ? (env.CROW_DB_PATH || join(dataDir, "crow.db")) : dbPath;
-  const vals = [...secretValuesFromEnv(env)];
+  const vals = [];
   const envFiles = new Set([join(crowHome, ".env"), env.CROW_APP_ENV_PATH || join(appRoot, ".env")]);
   for (const f of listDir(join(crowHome, "env"))) if (f.isFile() && f.name.endsWith(".env")) envFiles.add(join(crowHome, "env", f.name));
   for (const p of envFiles) vals.push(...envFileSecrets(p));

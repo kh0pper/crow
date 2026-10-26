@@ -166,7 +166,10 @@ function armCapture(leg) {
 function readCapture() {
   const raw = JSON.parse(readFileSync(captureFile, "utf8"));
   const env = {};
-  for (const k of Object.keys(raw.env).sort()) env[k] = normalize(raw.env[k]);
+  // PI_BOT_SECRET_VALUES_FILE is set only when the pi sandbox (bubblewrap) is
+  // usable on this host, so it is not part of the byte-stable golden; its rules
+  // are tested in pibot-secret-values-spawn.test.js.
+  for (const k of Object.keys(raw.env).sort()) if (k !== "PI_BOT_SECRET_VALUES_FILE") env[k] = normalize(raw.env[k]);
   return {
     argv: raw.argv.map(normalize),
     env,

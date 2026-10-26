@@ -18,7 +18,7 @@
  * notifications.js); collecting from those sources is
  * secret-values-collect.js, run by the bot engine at each pi spawn.
  */
-import { closeSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, writeFileSync, fsyncSync, constants as fsConstants } from "node:fs";
+import { chmodSync, closeSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, renameSync, rmSync, writeFileSync, fsyncSync, constants as fsConstants } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { resolveCrowHome } from "./crow-home.js";
@@ -26,7 +26,6 @@ import { resolveCrowHome } from "./crow-home.js";
 export const SECRET_VALUES_FILENAME = "pi-bot-secret-values";
 export const MIN_SECRET_LENGTH = 6;
 export const MAX_SECRET_VALUES_BYTES = 1024 * 1024;
-const CACHE_TTL_MS = 60_000;
 
 /** <CROW_HOME>/secrets — the instance's 700 secrets dir. */
 export function secretsDir(env = process.env) {
@@ -112,16 +111,21 @@ export function writeSecretValuesFile(path, values) {
   const content = list.length ? list.join("\n") + "\n" : "";
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // An existing dir is ours and 700, or nothing is written into it.
+  const dst = lstatSync(dir);
+  if (!dst.isDirectory() || dst.uid !== process.getuid()) throw new Error("secrets dir is not this user's directory: " + dir);
+  if ((dst.mode & 0o777) !== 0o700) chmodSync(dir, 0o700);
   let st = null;
   try { st = lstatSync(path); } catch { /* absent */ }
   if (st && (!st.isFile() || st.isSymbolicLink())) throw new Error("secret values file is not a regular file: " + path);
-  if (st && st.uid === process.getuid() && (st.mode & 0o777) === 0o600) {
-    try { if (readFileSync(path, "utf8") === content) return { path, count: list.length, written: false }; } catch { /* rewrite */ }
-  }
+  const cur = st ? readSecretValuesFile(path) : null;
+  if (cur && cur.values.join("\n") === list.join("\n")) return { path, count: list.length, written: false };
+  sweepStaleTemps(dir, basename(path));
   const tmp = join(dir, `.${basename(path)}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`);
   try {
     const fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
     try {
+      fchmodSync(fd, 0o600);                     // a strict umask must not leave it 400
       writeFileSync(fd, content);
       fsyncSync(fd);
     } finally { closeSync(fd); }
@@ -130,8 +134,19 @@ export function writeSecretValuesFile(path, values) {
     rmSync(tmp, { force: true });
     throw err;
   }
-  primeSecretValuesCache(list);
+  primeSecretValuesCache();
   return { path, count: list.length, written: true };
+}
+
+/** Temps a crashed writer left behind (plaintext), older than a minute. */
+function sweepStaleTemps(dir, base) {
+  const now = Date.now();
+  let names = [];
+  try { names = readdirSync(dir); } catch { return; }
+  for (const n of names) {
+    if (!n.startsWith("." + base + ".tmp-")) continue;
+    try { if (now - lstatSync(join(dir, n)).mtimeMs > 60_000) rmSync(join(dir, n), { force: true }); } catch { /* raced */ }
+  }
 }
 
 /**
@@ -159,29 +174,28 @@ export function readSecretValuesFile(path) {
   }
 }
 
-let cache = null;   // { values, at, key }
+let cache = null;   // { values, key, envKey }
 
-function primeSecretValuesCache(list) {
-  cache = { values: normalizeValues([...list, ...secretValuesFromEnv(process.env)]), at: Date.now(), key: null };
-}
+function primeSecretValuesCache() { cache = null; }
 
 /** Drop the cached list (the next getSecretValues() re-reads). */
 export function invalidateSecretValues() { cache = null; }
 
+function fileKey(path) {
+  try { const st = lstatSync(path); return st.ino + ":" + st.mtimeMs + ":" + st.size; } catch { return "none"; }
+}
+
 /**
  * The values maskSecrets() hides: the instance file (written by the bot engine
- * at every pi spawn) plus this process's own secret-named env values. Cached
- * for a minute; re-read sooner when the file's mtime/size changed. Never opens
- * a database; never throws (an unreadable file means patterns only).
+ * at every pi spawn, by whichever process spawns) plus this process's own
+ * secret-named env values. One lstat per call: the list is re-read the moment
+ * any process replaces the file. Never opens a database; never throws (an
+ * unreadable file means patterns only).
  */
-export function getSecretValues({ env = process.env, now = Date.now(), ttlMs = CACHE_TTL_MS } = {}) {
-  const path = secretValuesPath(env);
-  if (cache && now - cache.at < ttlMs) return cache.values;
-  let fileVals = [];
-  let key = "none";
-  const f = readSecretValuesFile(path);
-  if (f) { fileVals = f.values; key = f.mtimeMs + ":" + f.size; }
-  if (cache && cache.key === key) { cache.at = now; return cache.values; }
-  cache = { values: normalizeValues([...fileVals, ...secretValuesFromEnv(env)]), at: now, key };
+export function getSecretValues({ env = process.env } = {}) {
+  const key = fileKey(secretValuesPath(env));
+  if (cache && cache.key === key && cache.env === env) return cache.values;
+  const f = key === "none" ? null : readSecretValuesFile(secretValuesPath(env));
+  cache = { values: normalizeValues([...(f ? f.values : []), ...secretValuesFromEnv(env)]), key, env };
   return cache.values;
 }

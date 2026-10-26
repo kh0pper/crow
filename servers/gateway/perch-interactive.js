@@ -155,7 +155,7 @@ import { jobLockFor } from "./routes/board-lock.js";
 import { cardBriefBlock } from "../../scripts/pi-bots/card-brief.mjs";
 import { appendDates } from "../shared/relative-dates.js";
 import { stripContextEcho } from "./voice/context-echo.js";
-import { maskSecrets, maskSecretsDetailed, hiddenNote, HIDDEN_NOTE_RE } from "../shared/secret-mask.js";
+import { maskSecrets, maskSecretsDetailed, maskDeep, hiddenNote, HIDDEN_NOTE_RE, REDACTED } from "../shared/secret-mask.js";
 
 /** Lease file name under CROW_HOME. Consumed by C-14's reaper exemption. */
 export const LEASE_FILENAME = "perch-interactive-leases.json";
@@ -431,9 +431,14 @@ function cardFrom(m) {
   let hidden = title.count;
   const raw = {};
   if (Array.isArray(m.options)) {
-    const shown = uniqueShown(m.options.map((o) => maskSecrets(o)));
-    card.options = shown;
-    if (shown.some((o, i) => o !== m.options[i])) { raw.options = m.options.slice(); hidden += 1; }
+    const masked = m.options.map((o) => maskSecrets(o));
+    if (masked.some((o, i) => o !== String(m.options[i]))) {
+      card.options = uniqueShown(masked);
+      raw.options = m.options.slice();
+      hidden += 1;
+    } else {
+      card.options = m.options.slice();
+    }
   }
   if (m.placeholder != null) card.placeholder = maskSecrets(m.placeholder);
   if (m.message != null) {
@@ -452,6 +457,30 @@ function cardFrom(m) {
   }
   if (raw.options || raw.prefill != null) Object.defineProperty(card, RAW_CARD, { value: raw });
   return card;
+}
+
+/**
+ * An editor answer to a masked prefill: each [REDACTED] the operator left in
+ * place gets back the text it stood for, so an edit elsewhere never writes the
+ * placeholder into pi's file. The hidden spans are recovered by walking the
+ * masked prefill's visible parts through the original. When the operator
+ * removed or added a placeholder (the counts differ), the text goes as typed.
+ */
+function restorePrefill(value, shownPrefill, rawPrefill) {
+  if (value === shownPrefill) return rawPrefill;
+  const parts = String(shownPrefill).split(REDACTED);
+  const spans = [];
+  let at = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    const found = i === 0 ? (rawPrefill.startsWith(p) ? 0 : -1) : (p === "" && i === parts.length - 1 ? rawPrefill.length : rawPrefill.indexOf(p, at));
+    if (found < 0) return value;
+    if (i > 0) spans.push(rawPrefill.slice(at, found));
+    at = found + p.length;
+  }
+  const typed = String(value).split(REDACTED);
+  if (typed.length !== parts.length) return value;
+  return typed.reduce((acc, seg, i) => acc + (i ? spans[i - 1] : "") + seg, "");
 }
 
 /** What pi asked for, behind a display card (cardFrom). Not enumerable. */
@@ -2139,14 +2168,14 @@ export function createInteractiveEngine({
         // chars: enough to recognize a bash command or a file path, not
         // enough to balloon a frame on a write-tool payload).
         emit(s, { type: "tool", name: m.toolName, phase: "start", isError: false,
-          toolCallId: m.toolCallId || null, argsText: safeSnippet(m.args, 600) });
+          toolCallId: m.toolCallId || null, argsText: safeSnippet(maskDeep(m.args), 600) });
         return;
       case "tool_execution_end":
         if (s.turn && m.toolName) s.turn.toolNames.push(m.toolName);
         // Wave 3: same for the outcome — the result's TEXT blocks, pi-lab's
         // own 2000-char cap, stringified fallback for non-text payloads.
         emit(s, { type: "tool", name: m.toolName, phase: "end", isError: !!m.isError,
-          toolCallId: m.toolCallId || null, resultText: toolResultSnippet(m.result, 2000) });
+          toolCallId: m.toolCallId || null, resultText: toolResultSnippet(maskDeep(m.result), 2000) });
         return;
       case "message_end": {
         // Message-level streaming; delta-level is a recorded non-goal.
@@ -3394,7 +3423,7 @@ export function createInteractiveEngine({
         const i = card.options.indexOf(payload.value);
         if (i >= 0) payload.value = String(raw.options[i]);
       }
-      if (raw && raw.prefill != null && payload.value === card.prefill) payload.value = String(raw.prefill);
+      if (raw && raw.prefill != null) payload.value = restorePrefill(payload.value, card.prefill, String(raw.prefill));
     }
     s.pi.send(payload);
     settleAsk(s);                                    // 2026-10-20: expiry off, group closed

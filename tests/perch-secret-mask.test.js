@@ -279,3 +279,37 @@ test("tool chips, text and log frames, and the engine log are masked too", async
   assert.ok(frames.some((f) => f.type === "tool" && /REDACTED/.test(f.argsText || "")), "tool chip present, masked");
   assert.equal(leaks(frames), false);
 });
+
+test("an EDITED masked prefill keeps the hidden text where the placeholder was left", async () => {
+  const { engine, bridge } = makeEngine();
+  const { s, pi } = await liveSession(engine, bridge, "bot-editor-edit");
+  const frames = await watched(engine, s.sessionId);
+  const prefill = "DB_PASSWORD=" + FAKE + "\nPORT=1";
+  pi.emit({ type: "extension_ui_request", id: "e2", method: "editor", title: "Edit .env", prefill });
+  await tick(30);
+  const ask = frames.find((f) => f.type === "ask_user");
+  await engine.answer(s.sessionId, "e2", { value: ask.prefill.replace("PORT=1", "PORT=2") });
+  assert.equal(pi.sent[pi.sent.length - 1].value, "DB_PASSWORD=" + FAKE + "\nPORT=2");
+});
+
+test("plain duplicate options (nothing masked) are left exactly as pi sent them, with no hidden note", async () => {
+  const { engine, bridge } = makeEngine();
+  const { s, pi } = await liveSession(engine, bridge, "bot-plain-dupe");
+  const frames = await watched(engine, s.sessionId);
+  pi.emit({ type: "extension_ui_request", id: "p1", method: "select", title: "pick", options: ["same", "same"] });
+  await tick(30);
+  const ask = frames.find((f) => f.type === "ask_user");
+  assert.deepEqual(ask.options, ["same", "same"]);
+  assert.equal(/hidden from this card/.test(ask.message || ""), false);
+});
+
+test("a long tool command is masked before it is cut for the chip", async () => {
+  const { engine, bridge } = makeEngine();
+  const { s, pi } = await liveSession(engine, bridge, "bot-long-chip");
+  const frames = await watched(engine, s.sessionId);
+  const cmd = "x".repeat(560) + " GH_TOKEN=" + FAKE + " push";
+  pi.emit({ type: "tool_execution_start", toolName: "bash", toolCallId: "t9", args: { command: cmd } });
+  await tick(30);
+  const chip = frames.find((f) => f.type === "tool");
+  assert.equal(/fake-sud/.test(chip.argsText), false, chip.argsText.slice(-60));
+});
