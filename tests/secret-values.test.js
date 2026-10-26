@@ -12,13 +12,25 @@ import { randomBytes } from "node:crypto";
 import Database from "better-sqlite3";
 
 const SV = await import("../servers/shared/secret-values.js");
-const { collectSecretValues, refreshSecretValuesFile, parseEnvPairs } = await import("../servers/shared/secret-values-collect.js");
+const { collectSecretValues, collectSecretValueSets, refreshSecretValuesFile, parseEnvPairs } = await import("../servers/shared/secret-values-collect.js");
 const { sealSecret } = await import("../servers/sharing/secret-box.js");
 const { KEYCHAIN_DDL } = await import("../servers/gateway/keychain/schema.js");
 
 const fake = (tag) => "fake-" + tag + "-" + "0000";
 /** A generated-secret-shaped fake (base64url, 40+ chars), as the installer mints. */
 const gen = (tag) => "fakeGen" + tag + "Ab3x".repeat(9);
+
+/** Manual keychain entries (operator-typed) in a scratch instance's crow.db. */
+function addManual(I, values) {
+  const seed = randomBytes(32);
+  mkdirSync(join(I.home, "secrets"), { recursive: true });
+  writeFileSync(join(I.home, "secrets", "keychain.key"), JSON.stringify({ v: 1, id: "0123456789abcdef", key: seed.toString("base64") }), { mode: 0o600 });
+  const db = new Database(join(I.data, "crow.db"));
+  db.exec(KEYCHAIN_DDL);
+  db.exec("DELETE FROM crow_keychain");
+  for (const v of values) db.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual','m',?,?,'manual')").run(sealSecret(v, { seed }), "0123456789abcdef");
+  db.close();
+}
 
 function scratchInstance() {
   const root = mkdtempSync(join(tmpdir(), "crow-secret-values-"));
@@ -115,8 +127,7 @@ test("collect: a missing or damaged source is skipped, never thrown", () => {
 
 test("the file: <CROW_HOME>/secrets, 600 in a 700 dir, one value per line, atomic, unchanged content not rewritten", () => {
   const I = scratchInstance();
-  const retained = (text) => { mkdirSync(join(I.home, "secrets", "bundle-env"), { recursive: true }); writeFileSync(join(I.home, "secrets", "bundle-env", "x.env"), text); };
-  retained("A=" + gen("one") + "\nB=" + gen("twolonger") + "\n");
+  addManual(I, [gen("one"), gen("twolonger")]);
   const r = refreshSecretValuesFile({ env: I.env });
   assert.equal(r.path, join(I.home, "secrets", "pi-bot-secret-values"));
   assert.equal(r.path, SV.secretValuesPath(I.env));
@@ -134,7 +145,7 @@ test("the file: <CROW_HOME>/secrets, 600 in a 700 dir, one value per line, atomi
   assert.equal(refreshSecretValuesFile({ env: I.env }).written, false);
   assert.equal(lstatSync(r.path).ino, ino);
   // a change is a NEW inode (rename), never an in-place rewrite
-  retained("A=" + gen("three") + "\n");
+  addManual(I, [gen("three")]);
   const r2 = refreshSecretValuesFile({ env: I.env });
   assert.equal(r2.written, true);
   assert.notEqual(lstatSync(r.path).ino, ino);
@@ -147,8 +158,7 @@ test("the file: a symlink or non-regular target is refused, not followed", () =>
   const elsewhere = join(I.root, "elsewhere");
   writeFileSync(elsewhere, "untouched");
   symlinkSync(elsewhere, SV.secretValuesPath(I.env));
-  mkdirSync(join(I.home, "secrets", "bundle-env"), { recursive: true });
-  writeFileSync(join(I.home, "secrets", "bundle-env", "x.env"), "A=" + gen("one") + "\n");
+  addManual(I, [gen("one")]);
   const logs = [];
   assert.equal(refreshSecretValuesFile({ env: I.env, log: (l) => logs.push(l) }), null);
   assert.equal(readFileSync(elsewhere, "utf8"), "untouched");
@@ -233,8 +243,7 @@ test("the mask path never loads a database driver or the keychain", () => {
 
 test("two writers with different process envs write the SAME file: neither drops the other's values", () => {
   const I = scratchInstance();
-  mkdirSync(join(I.home, "secrets", "bundle-env"), { recursive: true });
-  writeFileSync(join(I.home, "secrets", "bundle-env", "x.env"), "SHARED=" + gen("shareddisk") + "\n");
+  addManual(I, [gen("shareddisk")]);
   const a = refreshSecretValuesFile({ env: { ...I.env, ONLY_UNIT_A_TOKEN: fake("unit-a") } });
   const first = readFileSync(a.path, "utf8");
   const b = refreshSecretValuesFile({ env: { ...I.env, ONLY_UNIT_B_TOKEN: fake("unit-b") } });
@@ -248,10 +257,8 @@ test("two writers with different process envs write the SAME file: neither drops
 test("each instance has its own file: a co-hosted instance's write never touches another's", () => {
   const A = scratchInstance();
   const B = scratchInstance();
-  for (const [X, tag] of [[A, "instance-a"], [B, "instance-b"]]) {
-    mkdirSync(join(X.home, "secrets", "bundle-env"), { recursive: true });
-    writeFileSync(join(X.home, "secrets", "bundle-env", "x.env"), "K=" + gen(tag.replace("-", "")) + "\n");
-  }
+  addManual(A, [gen("instancea")]);
+  addManual(B, [gen("instanceb")]);
   const ra = refreshSecretValuesFile({ env: A.env });
   const rb = refreshSecretValuesFile({ env: B.env });
   assert.notEqual(ra.path, rb.path);
@@ -294,4 +301,29 @@ test("keychain: manual entries (operator-typed) count as they are; extension ent
   assert.ok(vals.includes("reboot99"), "manual entry");
   assert.ok(vals.includes(gen("ext")), "generated-shaped extension entry");
   for (const not of ["reboot98", "{rm,-rf,~}"]) assert.equal(vals.includes(not), false, not);
+});
+
+test("two sets: display masking uses every trusted value; cards and the values file only manual keychain entries (shell-safe)", () => {
+  const I = scratchInstance();
+  const seed = randomBytes(32);
+  mkdirSync(join(I.home, "secrets", "bundle-env"), { recursive: true });
+  writeFileSync(join(I.home, "secrets", "keychain.key"), JSON.stringify({ v: 1, id: "0123456789abcdef", key: seed.toString("base64") }), { mode: 0o600 });
+  writeFileSync(join(I.home, "secrets", "bundle-env", "demo.env"), "GEN=" + gen("retained") + "\n");
+  const db = new Database(join(I.data, "crow.db"));
+  db.exec(KEYCHAIN_DDL);
+  const add = (kind, val) => db.prepare("INSERT INTO crow_keychain (kind,label,bundle_id,env_key,secret_sealed,key_id,origin) VALUES (?,?,?,?,?,?,?)")
+    .run(kind, "l", kind === "manual" ? null : "demo", kind === "manual" ? null : "K" + val.length, sealSecret(val, { seed }), "0123456789abcdef", kind === "manual" ? "manual" : "generated");
+  add("manual", "N0t_a-real_pw9");
+  add("manual", "pa$$" + " w0rd&x");
+  add("extension", gen("ext"));
+  db.close();
+  const sets = collectSecretValueSets({ env: I.env });
+  for (const v of ["N0t_a-real_pw9", "pa$$ w0rd&x", gen("ext"), gen("retained")]) assert.ok(sets.display.includes(v), "display " + v);
+  assert.deepEqual(sets.card, ["N0t_a-real_pw9"], "cards: manual and shell-safe only");
+  const r = refreshSecretValuesFile({ env: I.env });
+  assert.equal(readFileSync(r.path, "utf8"), "N0t_a-real_pw9\n", "the file pi-lab reads holds the card set");
+  SV.invalidateSecretValues();
+  assert.ok(SV.getSecretValues({ env: I.env }).includes(gen("retained")), "this process's display set (in memory)");
+  assert.equal(SV.getCardValues({ env: I.env }).includes(gen("retained")), false);
+  assert.ok(SV.getCardValues({ env: I.env }).includes("N0t_a-real_pw9"));
 });

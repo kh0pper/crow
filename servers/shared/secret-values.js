@@ -197,7 +197,8 @@ export function readSecretValuesFile(path) {
 }
 
 let cache = null;   // { values, key, env, mem }
-let memValues = [];  // the last list collected in THIS process (secret-values-collect.js)
+let memValues = [];      // the last DISPLAY set collected in THIS process (secret-values-collect.js)
+let memCardValues = [];  // the last CARD set collected in THIS process
 
 function primeSecretValuesCache() { cache = null; }
 
@@ -206,9 +207,20 @@ function primeSecretValuesCache() { cache = null; }
  * this at every spawn, file or no file: where the file is not written (no
  * bubblewrap) this is how the process's own mask still gets them.
  */
-export function primeSecretValues(values) {
+export function primeSecretValues(values, cardValues = []) {
   memValues = normalizeValues(values);
+  memCardValues = normalizeValues(cardValues).filter(safeShape);
   cache = null;
+}
+
+/**
+ * The values that may hide text on an APPROVAL CARD: the values file (the
+ * card set: manual keychain entries) plus the card set collected in this
+ * process, shell-safe only. No process env, no generated or retained values.
+ */
+export function getCardValues({ env = process.env } = {}) {
+  const f = readSecretValuesFile(secretValuesPath(env));
+  return normalizeValues([...(f ? f.values : []), ...memCardValues]).filter(safeShape);
 }
 
 /** Drop the cached list (the next getSecretValues() re-reads). */

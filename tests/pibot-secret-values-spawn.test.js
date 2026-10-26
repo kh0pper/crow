@@ -21,10 +21,22 @@ process.env.CROW_DATA_DIR = join(HOME, "data");
 delete process.env.CROW_DB_PATH;
 mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
 const FAKE = "fakeGenSpawn" + "Ab3x".repeat(9);      // generated-secret shaped
-// a trusted source: a retained bundle secret in the (sandbox-hidden) secrets dir
-const RETAINED = join(HOME, "secrets", "bundle-env", "demo.env");
-mkdirSync(join(HOME, "secrets", "bundle-env"), { recursive: true, mode: 0o700 });
-writeFileSync(RETAINED, "SPAWN_TEST_API_KEY=" + FAKE + "\n");
+// a trusted card source: a manual keychain entry (sealed under a scratch key)
+const { sealSecret } = await import("../servers/sharing/secret-box.js");
+const { KEYCHAIN_DDL } = await import("../servers/gateway/keychain/schema.js");
+const { default: Database } = await import("better-sqlite3");
+const { randomBytes } = await import("node:crypto");
+const SEED = randomBytes(32);
+mkdirSync(join(HOME, "secrets"), { recursive: true, mode: 0o700 });
+writeFileSync(join(HOME, "secrets", "keychain.key"), JSON.stringify({ v: 1, id: "0123456789abcdef", key: SEED.toString("base64") }), { mode: 0o600 });
+function setManual(values) {
+  const db = new Database(join(HOME, "data", "crow.db"));
+  db.exec(KEYCHAIN_DDL);
+  db.exec("DELETE FROM crow_keychain");
+  for (const v of values) db.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual','m',?,?,'manual')").run(sealSecret(v, { seed: SEED }), "0123456789abcdef");
+  db.close();
+}
+setManual([FAKE]);
 
 const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
 const { secretValuesPath, writeSecretValuesFile } = await import("../servers/shared/secret-values.js");
@@ -111,7 +123,7 @@ test("sandboxed: a bot def's spawn_env, the session extraEnv and an inherited va
 
 test("sandboxed: the file is refreshed at each spawn (a secret added since the last spawn is in it)", { skip: noSandbox }, async () => {
   const later = "fakeGenLater" + "Cd5y".repeat(9);
-  writeFileSync(RETAINED, "SPAWN_TEST_API_KEY=" + FAKE + "\nLATER_TEST_TOKEN=" + later + "\n");
+  setManual([FAKE, later]);
   const { pi } = await spawnReport();
   await pi.exited;
   assert.ok(readFileSync(PATH, "utf8").split("\n").includes(later));

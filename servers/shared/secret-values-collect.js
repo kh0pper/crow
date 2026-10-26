@@ -37,7 +37,7 @@ import Database from "better-sqlite3";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { resolveCrowHome, resolveInstanceDataDir } from "./crow-home.js";
-import { normalizeValues, primeSecretValues, secretValuesPath, writeSecretValuesFile } from "./secret-values.js";
+import { normalizeValues, primeSecretValues, safeShape, secretValuesPath, writeSecretValuesFile } from "./secret-values.js";
 import { loadKeychainKey } from "../gateway/keychain/key.js";
 import { readableSecretsSync } from "../gateway/keychain/store.js";
 
@@ -94,52 +94,66 @@ function retainedBundleSecrets(crowHome) {
   return out;
 }
 
-function keychainSecrets({ dbPath, crowHome }) {
+/** Readable keychain entries as { kind, secret }. */
+function keychainEntries({ dbPath, crowHome }) {
   if (!dbPath || !existsSync(dbPath)) return [];
   let db;
   try {
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
     db.pragma("busy_timeout = 2000");
-    // Manual entries are typed by the operator in the UI (a bot cannot make
-    // one: the key is in the hidden dir and the keychain API needs a session).
-    // Extension entries can be backfilled at boot from a bundle .env a bot
-    // can write, so they count only when shaped like a minted secret.
-    return readableSecretsSync(db, loadKeychainKey({ crowHome }))
-      .filter((e) => e.kind === "manual" || (GENERATED_SHAPE.test(e.secret) && /[A-Za-z]/.test(e.secret) && /\d/.test(e.secret)))
-      .map((e) => e.secret);
+    return readableSecretsSync(db, loadKeychainKey({ crowHome }));
   } catch { return []; }
   finally { if (db) { try { db.close(); } catch { /* closed */ } } }
 }
 
 /**
- * The trusted sources above, normalized (6+ chars, one line, deduped, longest
- * first). The full set: shell-shaped values are dropped only on a card, at
- * mask time (secret-mask.js), so a real password with a space or `$` is still
- * hidden in every log, notification and transcript.
+ * Two sets from the trusted sources above.
+ *   display: every trusted value (manual keychain entries, generated-shaped
+ *            extension entries, generated-shaped retained bundle secrets), for
+ *            logs, notifications and transcripts, where nothing is approved.
+ *   card:    manual keychain entries only, and only shell-safe ones
+ *            (safeShape). Extension and retained values can be steered by a
+ *            bot through a bundle .env at the next reinstall or boot backfill,
+ *            so they never hide text on what the operator approves. This is
+ *            also the set written to the values file, which pi-lab uses for
+ *            its own cards.
  * @param {object} [o]
  * @param {object} [o.env] the env to resolve paths from
  * @param {string|null} [o.dbPath] crow.db (default CROW_DB_PATH or <data>/crow.db); null skips the keychain
  */
-export function collectSecretValues({ env = process.env, dbPath } = {}) {
+export function collectSecretValueSets({ env = process.env, dbPath } = {}) {
   const crowHome = resolveCrowHome(env);
   const db = dbPath === undefined ? (env.CROW_DB_PATH || join(resolveInstanceDataDir(env), "crow.db")) : dbPath;
-  return normalizeValues([...keychainSecrets({ dbPath: db, crowHome }), ...retainedBundleSecrets(crowHome)]);
+  const entries = keychainEntries({ dbPath: db, crowHome });
+  const manual = entries.filter((e) => e.kind === "manual").map((e) => e.secret);
+  const minted = entries
+    .filter((e) => e.kind !== "manual" && GENERATED_SHAPE.test(e.secret) && /[A-Za-z]/.test(e.secret) && /\d/.test(e.secret))
+    .map((e) => e.secret);
+  return {
+    display: normalizeValues([...manual, ...minted, ...retainedBundleSecrets(crowHome)]),
+    card: normalizeValues(manual).filter(safeShape),
+  };
+}
+
+/** The display set (see collectSecretValueSets). */
+export function collectSecretValues(opts = {}) {
+  return collectSecretValueSets(opts).display;
 }
 
 /**
- * Collect the instance's values, hold them in this process's memory (its own
- * mask, file or no file) and, unless `write === false`, (re)write the values
- * file. Never throws.
+ * Collect the instance's two value sets, hold them in this process's memory
+ * (its own mask, file or no file) and, unless `write === false`, (re)write the
+ * values file with the card set. Never throws.
  * @returns {{path: string, count: number, written: boolean}|null} null when nothing was written
  */
 export function refreshSecretValuesFile(opts = {}) {
   const env = opts.env || process.env;
   const path = secretValuesPath(env);
   try {
-    const values = collectSecretValues(opts);
-    primeSecretValues(values);
+    const sets = collectSecretValueSets(opts);
+    primeSecretValues(sets.display, sets.card);
     if (opts.write === false) return null;
-    return writeSecretValuesFile(path, values);
+    return writeSecretValuesFile(path, sets.card);
   } catch (e) {
     if (typeof opts.log === "function") opts.log("secret values file not written: " + ((e && e.message) || e));
     return null;

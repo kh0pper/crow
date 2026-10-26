@@ -495,3 +495,18 @@ test("a combined questions card that hid something carries the hidden note", asy
   const ask = frames.find((f) => f.type === "ask_user");
   assert.match(ask.message || "", /^\(1 secret value\(s\) hidden from this card\)/);
 });
+
+test("a card whose assignment looks secret but is not a trusted value: shown, with a possible-secret note; the needs-you row still masks it", async () => {
+  secretValues.writeSecretValuesFile(secretValues.secretValuesPath(process.env), [KEYCHAIN_FAKE]);
+  const { engine, bridge, pushes } = makeEngine();
+  const { s, pi } = await liveSession(engine, bridge, "bot-possible");
+  const frames = await watched(engine, s.sessionId);
+  const msg = "GH_TOKEN=" + FAKE + " git push";
+  pi.emit({ type: "extension_ui_request", id: "ps", method: "confirm", title: "Destructive bash", message: msg });
+  await tick(30);
+  const ask = frames.find((f) => f.type === "ask_user");
+  assert.match(ask.message, /^\(possible secret shown/);
+  assert.ok(ask.message.endsWith(msg), "the command is shown as it is");
+  assert.equal(JSON.stringify(rows(s.sessionId)).includes(FAKE), false, "row");
+  assert.equal(JSON.stringify(pushes).includes(FAKE), false, "push");
+});

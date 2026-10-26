@@ -5399,3 +5399,31 @@ test("seam echo match: the operator's line matches pi's persisted copy, with an 
   assert.equal(match("again", "again and more"), false);
   assert.equal(match("", ""), false, "an empty send is never a match");
 });
+
+// ---------------------------------------------------------------------------
+// approval-card secret masking (2026-10-26): the combined card's message
+// ---------------------------------------------------------------------------
+
+test("a combined card shows its message (the hidden / possible-secret note)", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  FakeEventSource.instances[0]._serverFrame("ask_user", { requestId: "r1", method: "questions", title: "", questions: COMBINED_QS, message: "(1 secret value(s) hidden from this card)" });
+  await new Promise((r) => setTimeout(r, 0));
+  const card = combinedCard(hub);
+  const msg = byClass(card, "ask-message");
+  assert.equal(msg.length, 1);
+  assert.match(msg[0].textContent, /hidden from this card/);
+});
+
+test("a combined card shown without its questions (unmaskable) still says why and offers Cancel", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  FakeEventSource.instances[0]._serverFrame("ask_user", { requestId: "r2", method: "questions", title: "", questions: [], message: "This card is too long to show safely, so its text is not shown. It cannot be approved from here." });
+  await new Promise((r) => setTimeout(r, 0));
+  const card = combinedCard(hub);
+  assert.ok(card, "a card is drawn");
+  assert.match(byClass(card, "ask-message")[0].textContent, /too long to show safely/);
+  assert.equal(byClass(card, "ask-send").length, 0, "nothing to send");
+  assert.equal(byClass(card, "quiet").length, 1, "Cancel is offered");
+  assert.equal(hub.els["perch-attn"].hidden, false, "the banner says the bot waits");
+});

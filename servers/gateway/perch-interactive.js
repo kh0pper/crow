@@ -146,9 +146,9 @@ import { countCsvTools, checkToolBudget, sessionBudgetMessage } from "../../scri
 import Database from "better-sqlite3";
 import { resolveDataDir } from "../db.js";
 import { randomUUID } from "node:crypto";
-import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, sep } from "node:path";
+import { isAbsolute, join, sep } from "node:path";
 
 import { createDbClient } from "../db.js";
 import { jobLockFor } from "./routes/board-lock.js";
@@ -431,12 +431,13 @@ function cardFrom(m) {
   const title = maskSecretsDetailed(m.title == null ? "" : String(m.title), CARD);
   const card = { requestId: m.id, method: m.method, title: title.text };
   let hidden = title.count;
+  let possible = title.possible || 0;
   let failed = !!title.failed;
   let tooLong = !!title.truncated;
   const raw = {};
   if (Array.isArray(m.options)) {
     const res = m.options.map((o) => maskSecretsDetailed(o, CARD));
-    for (const r of res) { failed = failed || !!r.failed || !!r.truncated; }
+    for (const r of res) { failed = failed || !!r.failed || !!r.truncated; possible += r.possible || 0; }
     const masked = res.map((r) => r.text);
     if (masked.some((o, i) => o !== String(m.options[i]))) {
       card.options = uniqueShown(masked);
@@ -456,17 +457,22 @@ function cardFrom(m) {
     const msg = maskSecretsDetailed(m.message, CARD);
     card.message = msg.text;
     hidden += msg.count;
+    possible += msg.possible || 0;
     failed = failed || !!msg.failed;
     tooLong = tooLong || !!msg.truncated;
   }
   if (m.prefill != null) {
     const pre = maskSecretsDetailed(m.prefill, CARD);
     card.prefill = pre.text;
+    possible += pre.possible || 0;
     failed = failed || !!pre.failed;
     tooLong = tooLong || !!pre.truncated;
     if (pre.count) { raw.prefill = m.prefill; hidden += pre.count; }
   }
-  // The contract's note on the first line, unless pi-lab's own is there.
+  // A secret-looking pattern Crow does not know as a value is SHOWN on a
+  // card (it is bot-written text), with a note; then the contract's hidden
+  // note on the first line, unless pi-lab's own is there.
+  if (possible) card.message = POSSIBLE_NOTE + (card.message ? "\n" + card.message : "");
   if (hidden && !HIDDEN_NOTE_RE.test(card.title) && !HIDDEN_NOTE_RE.test(card.message || "")) {
     card.message = hiddenNote(hidden) + (card.message ? "\n" + card.message : "");
   }
@@ -518,6 +524,9 @@ function restorePrefill(value, shownPrefill, rawPrefill) {
   return typed.reduce((acc, seg, i) => acc + (i ? spans[i - 1] : "") + seg, "");
 }
 
+/** The note on a card that shows text looking like a secret Crow does not know. */
+const POSSIBLE_NOTE = "(possible secret shown: this card may contain a secret that is not a known value, so it is shown as it is)";
+
 /** The message of a card shown without its text (cardFrom, the combined card). */
 function unshownCardText(tooLong) {
   return tooLong
@@ -547,11 +556,13 @@ function maskQuestions(qs) {
   let failed = false;
   let tooLong = false;
   let hidden = 0;
+  let possible = 0;
   const one = (text) => {
     const r = maskSecretsDetailed(text, { card: true });
     failed = failed || !!r.failed;
     tooLong = tooLong || !!r.truncated;
     hidden += r.count || 0;
+    possible += r.possible || 0;
     return r.text;
   };
   const questions = qs.map((q) => {
@@ -567,7 +578,7 @@ function maskQuestions(qs) {
     }
     return out;
   });
-  return { questions, failed, tooLong, hidden };
+  return { questions, failed, tooLong, hidden, possible };
 }
 
 /** The operator answered the MASKED questions card: map each picked label back
@@ -2011,6 +2022,9 @@ export function createInteractiveEngine({
     mkdirSync(outputsDir, { recursive: true });
     mkdirSync(uploadsDir, { recursive: true });
     s.outputsDir = outputsDir;
+    // The anchor send_user_file writes against: resolved now, before this
+    // child (the bot) runs, so a later symlink swap cannot move it.
+    try { s.outputsDirReal = realpathSync(outputsDir); } catch { s.outputsDirReal = null; }
     s.uploadsDir = uploadsDir;
 
     let resume = (world.session && world.session.pi_session_id) || s.piSessionId || null;
@@ -2382,6 +2396,7 @@ export function createInteractiveEngine({
     let size = Number(meta.size);
     let mime = typeof meta.mime === "string" ? meta.mime : "application/octet-stream";
     let fd;
+    let dfd;
     try {
       // ONE open, then every check on what was opened (no check-then-copy
       // race): the last component never a symlink (O_NOFOLLOW, the existing
@@ -2408,11 +2423,18 @@ export function createInteractiveEngine({
         // user unit, an rc file). Refuse a symlinked dir or parent before and
         // after mkdir, write into the resolved dir, and re-check after the
         // write (a swap in between removes the file again).
-        const isLink = (p) => { try { return lstatSync(p).isSymbolicLink(); } catch { return false; } };
-        if (isLink(dir) || isLink(dirname(dir))) throw new Error("outputs dir is a symlink");
-        mkdirSync(dir, { recursive: true });
-        if (isLink(dir) || isLink(dirname(dir))) throw new Error("outputs dir is a symlink");
-        const dirReal = realpathSync(dir);
+        // Pre-existing escape closed here: this write runs outside the
+        // sandbox, in a dir the bot can write. Every name below resolves
+        // against ONE dir fd: opened without following a symlink, its real
+        // path (from the fd) equal to the anchor taken when the engine made
+        // the dir, before the bot ran. The file is created through that fd
+        // (O_EXCL, O_NOFOLLOW), so a swap at any moment cannot redirect it.
+        let anchor = s.outputsDirReal || null;
+        if (!anchor) { mkdirSync(dir, { recursive: true }); anchor = realpathSync(dir); }   // test seams without startChild
+        dfd = openSync(dir, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+        if (readlinkSync("/proc/self/fd/" + dfd) !== anchor) throw new Error("outputs dir moved");
+        const dirReal = anchor;
+        const viaFd = "/proc/self/fd/" + dfd;
         // Strictly-under, the workspace route's own formula: the `+ sep` is
         // what turns a string-prefix match into a containment test.
         if (srcReal.startsWith(dirReal + sep)) {
@@ -2420,7 +2442,7 @@ export function createInteractiveEngine({
           stored = srcReal.slice(dirReal.length + 1);
           servable = true;
         } else {
-          stored = resolveSentName(dir, name);
+          stored = resolveSentName(viaFd, name);
           const buf = Buffer.alloc(st.size);
           let off = 0;
           while (off < st.size) {
@@ -2428,17 +2450,16 @@ export function createInteractiveEngine({
             if (n <= 0) break;
             off += n;
           }
-          const dest = join(dirReal, stored);
-          writeFileSync(dest, buf.subarray(0, off), { flag: "wx" });
-          if (isLink(dir) || realpathSync(dir) !== dirReal) {
-            try { unlinkSync(dest); } catch { /* raced */ }
-            throw new Error("outputs dir changed during the copy");
-          }
+          const wfd = openSync(join(viaFd, stored), fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o644);
+          try { writeFileSync(wfd, buf.subarray(0, off)); } finally { closeSync(wfd); }
           servable = true;
         }
       }
     } catch { /* refused/unreachable source -> name-only card */ }
-    finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* closed */ } } }
+    finally {
+      if (fd !== undefined) { try { closeSync(fd); } catch { /* closed */ } }
+      if (dfd !== undefined) { try { closeSync(dfd); } catch { /* closed */ } }
+    }
     const frame = { type: "file", name, stored, mime, size: Number.isFinite(size) ? size : 0, caption, servable };
     emit(s, frame);
     const db = createDbClient();
@@ -2477,7 +2498,8 @@ export function createInteractiveEngine({
         const mq = maskQuestions(qs);
         s.pendingUi = mq.failed || mq.tooLong
           ? Object.defineProperty({ requestId: m.id, method: "questions", title: "", questions: [], message: unshownCardText(mq.tooLong) }, RAW_CARD, { value: { failed: true } })
-          : { requestId: m.id, method: "questions", title: "", questions: mq.questions, ...(mq.hidden ? { message: hiddenNote(mq.hidden) } : {}) };
+          : { requestId: m.id, method: "questions", title: "", questions: mq.questions,
+            ...(mq.hidden || mq.possible ? { message: [mq.hidden ? hiddenNote(mq.hidden) : "", mq.possible ? POSSIBLE_NOTE : ""].filter(Boolean).join("\n") } : {}) };
         s.expiredAsk = null;                         // a live question supersedes an expired one
         armAskExpiry(s, m);
         clearStall(s);                               // paused while a human thinks

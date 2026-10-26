@@ -469,3 +469,20 @@ test("send_user_file never writes through an outputs dir that is a symlink out o
   assert.equal(sink.ofType("file")[0].servable, false);
   assert.equal(existsSync(join(outside, "x.service")), false, "nothing written outside the world root");
 });
+
+test("send_user_file refuses when a PARENT of the outputs dir was swapped for a symlink after spawn (the fd anchor)", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  const sink = await collect(engine, s.sessionId);
+  const snap = await engine.get(s.sessionId);
+  const outputsRoot = join(snap.outputsDir, "..");
+  const elsewhere = join(dir, "parent-escape");
+  mkdirSync(join(elsewhere, s.sessionId), { recursive: true });
+  rmSync(outputsRoot, { recursive: true, force: true });
+  symlinkSync(elsewhere, outputsRoot);
+  pi.emit({ type: "extension_ui_request", method: "notify", message: crowFileFrame({ path: srcFile("y.service", "[Unit]"), name: "y.service", caption: "c" }) });
+  await tick();
+  assert.equal(sink.ofType("file")[0].servable, false);
+  assert.equal(existsSync(join(elsewhere, s.sessionId, "y.service")), false);
+});

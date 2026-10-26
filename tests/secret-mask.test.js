@@ -310,7 +310,7 @@ test("card text arrives escaped: no prefix rule crosses a displayed \\n, a $( or
 test("on a card, NAME=value stays visible when $NAME (or ${NAME}) is used later in the same text", () => {
   const card = (t) => maskSecrets(t, { values: [], card: true });
   for (const t of ["X_PASS=" + FAKE + "; sudo $X_PASS", "MY_TOKEN=" + FAKE + "; eval ${MY_TOKEN}"]) assert.equal(card(t), t, t);
-  assert.equal(card("GH_TOKEN=" + FAKE + " git push").includes(FAKE), false, "an unused assignment still masks");
+  assert.equal(card("GH_TOKEN=" + FAKE + " git push"), "GH_TOKEN=" + FAKE + " git push", "no pattern rule on a card at all");
 });
 
 test("on a card no exact value hides brace, glob, quote, backslash or slash shapes", () => {
@@ -318,4 +318,23 @@ test("on a card no exact value hides brace, glob, quote, backslash or slash shap
     assert.equal(maskSecrets("sudo " + v, { values: [v], card: true }), "sudo " + v, v);
     assert.equal(maskSecrets("log " + v, { values: [v] }), "log " + REDACTED, "display still masks " + v);
   }
+});
+
+test("card mode hides ONLY trusted exact values; every pattern stays visible and is reported as a possible secret", () => {
+  for (const t of [
+    "GH_TOKEN=" + FAKE + " git push",
+    "X=$(curl -s https://x.example/p) MY_SECRET=" + FAKE,
+    "curl -H 'Authorization: Bearer " + FAKE + "' http://x",
+    "sshpass" + " -p " + FAKE + " ssh h",
+    "use " + "gh" + "p_" + "A".repeat(36),
+  ]) {
+    const r = maskSecretsDetailed(t, { values: [], card: true });
+    assert.equal(r.text, t, t);
+    assert.equal(r.count, 0, t);
+    assert.ok(r.possible > 0, "possible secret reported: " + t);
+  }
+  const r = maskSecretsDetailed("GH_TOKEN=" + FAKE + " push", { values: [FAKE], card: true });
+  assert.equal(r.text, "GH_TOKEN=" + REDACTED + " push", "a trusted exact value still hides");
+  assert.equal(r.possible || 0, 0);
+  assert.equal(m("GH_TOKEN=" + FAKE + " git push").includes(FAKE), false, "display paths keep every pattern");
 });

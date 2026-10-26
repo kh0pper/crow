@@ -5,9 +5,16 @@
  * Contract with pi-lab (2026-10-26, the private engineering notes; final rules
  * of pi-lab's secret-mask.ts): pi-lab masks where it builds a confirm card;
  * Crow masks again on every path that turns that text into something stored
- * or sent. The RULES below are pi-lab's, so the two masks agree, and they keep
- * pi-lab's safety property: heuristic masking never hides anything that could
- * execute. In particular:
+ * or sent.
+ *
+ * Two modes. CARD mode (an approval card or an ask the operator answers):
+ * only trusted exact values that are shell-safe (safeShape) hide text; no
+ * pattern rule hides anything there (a hit is only counted, `possible`), so
+ * nothing a bot chose can be hidden on what the operator approves. DISPLAY
+ * mode (logs, notifications, transcripts, tool chips): every exact value plus
+ * the pattern RULES below. The RULES are pi-lab's, so the two masks agree,
+ * and they keep pi-lab's property that heuristic masking never hides
+ * anything that could execute. In particular:
  *   - text piped or here-stringed into `sudo -S`, and heredoc bodies, have no
  *     pattern at all (with cached sudo credentials that text is the command's
  *     stdin, so it could be code): only exact values hide them;
@@ -25,7 +32,7 @@
  * Every regex is linear or bounded, and the cut-prefix match is a linear
  * prefix-function scan.
  */
-import { getSecretValues, normalizeValues, safeShape } from "./secret-values.js";
+import { getCardValues, getSecretValues, normalizeValues, safeShape } from "./secret-values.js";
 
 export const REDACTED = "[REDACTED]";
 
@@ -319,13 +326,23 @@ export function maskSecretsDetailed(text, opts = {}) {
   if (truncated) src = src.slice(0, MAX_MASK_INPUT) + "\u2026(" + (src.length - MAX_MASK_INPUT) + " more characters)";
   const c = { n: 0 };
   try {
-    const values = opts.values === undefined ? currentValues() : opts.values;
     c.card = opts.card === true;
+    const values = opts.values !== undefined ? opts.values : c.card ? currentCardValues() : currentValues();
     // On a card only shell-safe values hide text (safeShape); display paths
     // use every value, so a password with a space or `$` is still hidden there.
     const usable = normalizeValues(values).filter((v) => v !== REDACTED && (!c.card || safeShape(v)));
     let t = maskValues(src, usable, c);
-    t = maskPatterns(t, c, opts.card === true);
+    if (c.card) {
+      // On a card only trusted exact values hide text: a pattern hit there is
+      // text the bot wrote, so it stays visible (a bot could otherwise put
+      // `X=$(curl …)` behind a secret-looking name). It is only counted, so
+      // the card can say a possible secret is shown.
+      const probe = { n: 0, card: true };
+      maskPatterns(t, probe, true);
+      if (truncated) return { text: t, count: c.n, truncated: true, possible: probe.n };
+      return c.n || src !== text ? { text: t, count: c.n, possible: probe.n } : { text: src, count: 0, possible: probe.n };
+    }
+    t = maskPatterns(t, c, false);
     if (truncated) return { text: t, count: c.n, truncated: true };
     return c.n || src !== text ? { text: t, count: c.n } : { text: src, count: 0 };
   } catch {
@@ -359,4 +376,8 @@ export function maskDeep(v, opts) {
 
 function currentValues() {
   try { return getSecretValues(); } catch { return []; }
+}
+
+function currentCardValues() {
+  try { return getCardValues(); } catch { return []; }
 }
