@@ -18,7 +18,7 @@
  * notifications.js); collecting from those sources is
  * secret-values-collect.js, run by the bot engine at each pi spawn.
  */
-import { chmodSync, closeSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, renameSync, rmSync, writeFileSync, fsyncSync, constants as fsConstants } from "node:fs";
+import { chmodSync, closeSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readlinkSync, readSync, renameSync, rmSync, statSync, writeFileSync, fsyncSync, constants as fsConstants } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { realpathSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
@@ -57,18 +57,40 @@ export function cardHashesPath(env = process.env) {
 // old path: the tmpfs moves with the renamed dir. So the dir is anchored by
 // (dev, ino) the first time this process uses it, and a dir at the path that
 // is not the anchored one is never trusted.
-const anchors = new Map();   // path -> { dev, ino }
+const anchors = new Map();   // path -> { dev, ino, path, fd }
 
-/** Create (700) and anchor this instance's secrets dir; returns the anchor. */
+/**
+ * Create (700) and anchor this instance's secrets dir; returns the anchor.
+ * The anchor keeps an fd on the dir open for the life of the process: every
+ * read and write in it goes through /proc/self/fd/<fd> (anchoredPath), so a
+ * dir renamed away is followed to where it really is, and a dir planted at
+ * the old path is never used.
+ */
 export function anchorSecretsDir(env = process.env) {
   const dir = secretsDir(env);
   if (anchors.has(dir)) return anchors.get(dir);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const st = lstatSync(dir);
-  if (!st.isDirectory() || st.isSymbolicLink() || st.uid !== process.getuid()) return null;
-  const a = { dev: st.dev, ino: st.ino, path: dir };
+  let fd;
+  try { fd = openSync(dir, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW); } catch { return null; }
+  const st = fstatSync(fd);
+  if (!st.isDirectory() || st.uid !== process.getuid()) { closeSync(fd); return null; }
+  if ((st.mode & 0o777) !== 0o700) { try { chmodSync("/proc/self/fd/" + fd, 0o700); } catch { /* best effort */ } }
+  const a = { dev: st.dev, ino: st.ino, path: dir, fd };
   anchors.set(dir, a);
   return a;
+}
+
+/** A name inside the ANCHORED secrets dir, through its fd (null: no anchor). */
+export function anchoredPath(env = process.env, ...names) {
+  const a = anchorSecretsDir(env);
+  return a ? join("/proc/self/fd/" + a.fd, ...names) : null;
+}
+
+/** Where the anchored secrets dir really is now (a real path, for hiding and for pi). */
+export function secretsDirCurrentPath(env = process.env) {
+  const a = anchorSecretsDir(env);
+  if (!a) return null;
+  try { return readlinkSync("/proc/self/fd/" + a.fd); } catch { return null; }
 }
 
 /** True when the dir at the secrets path is the anchored one. */
@@ -89,22 +111,26 @@ export function secretsDirAnchor(env = process.env) {
 function sha256(v) { return createHash("sha256").update(String(v)).digest("hex"); }
 
 /** The operator's card hashes; null when the list does not exist yet. */
+/** The operator's card hashes (empty when there is no list yet). */
 export function readCardHashes(env = process.env) {
-  if (!secretsDirTrusted(env)) return new Set();
-  const f = readSecretValuesFile(cardHashesPath(env), { raw: true });
-  if (!f) {
-    try { lstatSync(cardHashesPath(env)); return new Set(); } catch { return null; }
-  }
-  return new Set(f.lines.filter((l) => /^[0-9a-f]{64}$/.test(l)));
+  const p = anchoredPath(env, CARD_HASHES_FILENAME);
+  const f = p ? readSecretValuesFile(p, { raw: true }) : null;
+  return new Set(f ? f.lines.filter((l) => /^[0-9a-f]{64}$/.test(l)) : []);
 }
 
-/** Record values the operator saved through the UI (keychain add / import). */
+/**
+ * Record values the operator saved (keychain UI add / import, or the one-time
+ * confirm of existing entries: scripts/ops/keychain-card-secrets.mjs). Written
+ * through the anchored dir; inside the sandbox that dir is a read-only tmpfs,
+ * so a bot's shell cannot add to it.
+ */
 export function recordCardSecret(values, env = process.env) {
   const list = [].concat(values).filter((v) => typeof v === "string" && v);
-  if (!list.length || !secretsDirTrusted(env)) return;
-  const cur = readCardHashes(env) || new Set();
+  const p = anchoredPath(env, CARD_HASHES_FILENAME);
+  if (!list.length || !p) return;
+  const cur = readCardHashes(env);
   for (const v of list) cur.add(sha256(v));
-  writeSecretValuesFile(cardHashesPath(env), [...cur], { raw: true });
+  writeSecretValuesFile(p, [...cur], { raw: true });
 }
 
 export function cardHashOf(v) { return sha256(v); }
@@ -201,7 +227,8 @@ export function writeSecretValuesFile(path, values, { raw = false } = {}) {
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   // An existing dir is ours and 700, or nothing is written into it.
-  const dst = lstatSync(dir);
+  const viaFd = dir.startsWith("/proc/self/fd/");
+  const dst = viaFd ? statSync(dir) : lstatSync(dir);
   if (!dst.isDirectory() || dst.uid !== process.getuid()) throw new Error("secrets dir is not this user's directory: " + dir);
   if ((dst.mode & 0o777) !== 0o700) chmodSync(dir, 0o700);
   let st = null;
@@ -248,7 +275,8 @@ export function readSecretValuesFile(path, { raw = false } = {}) {
     // pi-lab's loader checks too: no symlink anywhere in the path, and the
     // file opened is the file checked.
     const lst = lstatSync(path);
-    if (realpathSync(path) !== resolve(path)) return null;
+    // (a /proc/self/fd/<anchored dir> path is the anchor itself, not a symlink to trust)
+    if (!path.startsWith("/proc/self/fd/") && realpathSync(path) !== resolve(path)) return null;
     fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
     const st = fstatSync(fd);
     if (st.ino !== lst.ino || st.dev !== lst.dev) return null;
@@ -311,8 +339,8 @@ function fileKey(path) {
  * never throws (an unreadable file means patterns only).
  */
 export function getSecretValues({ env = process.env } = {}) {
-  const path = secretValuesDisplayPath(env);
-  const key = secretsDirTrusted(env) ? fileKey(path) : "untrusted";
+  const path = anchoredPath(env, SECRET_VALUES_DISPLAY_FILENAME);
+  const key = path ? fileKey(path) : "untrusted";
   if (cache && cache.key === key && cache.env === env && cache.mem === memValues) return cache.values;
   const f = key === "none" || key === "untrusted" ? null : readSecretValuesFile(path);
   cache = { values: normalizeValues([...(f ? f.values : []), ...memValues, ...secretValuesFromEnv(env)]), key, env, mem: memValues };

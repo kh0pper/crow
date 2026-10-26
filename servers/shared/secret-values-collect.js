@@ -36,10 +36,10 @@
 import Database from "better-sqlite3";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { resolveCrowHome, resolveInstanceDataDir } from "./crow-home.js";
+import { resolveInstanceDataDir } from "./crow-home.js";
 import {
-  anchorSecretsDir, cardHashOf, cardHashesPath, normalizeValues, primeSecretValues, readCardHashes, safeShape,
-  secretValuesDisplayPath, secretValuesPath, secretsDirTrusted, writeSecretValuesFile,
+  SECRET_VALUES_DISPLAY_FILENAME, SECRET_VALUES_FILENAME, anchoredPath, cardHashOf, normalizeValues, plausibleSecretValue,
+  primeSecretValues, readCardHashes, recordCardSecret, safeShape, secretsDirCurrentPath, writeSecretValuesFile,
 } from "./secret-values.js";
 import { loadKeychainKey } from "../gateway/keychain/key.js";
 import { readableSecretsSync } from "../gateway/keychain/store.js";
@@ -83,10 +83,11 @@ function listDir(dir) {
  */
 const GENERATED_SHAPE = /^(?:[A-Za-z0-9_-]{32,256}={0,2}|base64:[A-Za-z0-9+/]{40,88}={0,2})$/;
 
-/** Retained generated bundle secrets, in the hidden secrets dir. */
-function retainedBundleSecrets(crowHome) {
+/** Retained generated bundle secrets, in the hidden secrets dir (through its anchor). */
+function retainedBundleSecrets(env) {
   const out = [];
-  const dir = join(crowHome, "secrets", "bundle-env");
+  const dir = anchoredPath(env, "bundle-env");
+  if (!dir) return out;
   for (const f of listDir(dir)) {
     if (!f.isFile() || !f.name.endsWith(".env")) continue;
     const pairs = parseEnvPairs(readSmall(join(dir, f.name)));
@@ -97,14 +98,15 @@ function retainedBundleSecrets(crowHome) {
   return out;
 }
 
-/** Readable keychain entries as { kind, secret }. */
-function keychainEntries({ dbPath, crowHome }) {
-  if (!dbPath || !existsSync(dbPath)) return [];
+/** Readable keychain entries as { kind, secret } (the key read through the anchored secrets dir). */
+function keychainEntries({ dbPath, env }) {
+  const keyPath = anchoredPath(env, "keychain.key");
+  if (!dbPath || !existsSync(dbPath) || !keyPath) return [];
   let db;
   try {
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
     db.pragma("busy_timeout = 2000");
-    return readableSecretsSync(db, loadKeychainKey({ crowHome }));
+    return readableSecretsSync(db, loadKeychainKey({ path: keyPath }));
   } catch { return []; }
   finally { if (db) { try { db.close(); } catch { /* closed */ } } }
 }
@@ -125,28 +127,24 @@ function keychainEntries({ dbPath, crowHome }) {
  * @param {string|null} [o.dbPath] crow.db (default CROW_DB_PATH or <data>/crow.db); null skips the keychain
  */
 export function collectSecretValueSets({ env = process.env, dbPath } = {}) {
-  const crowHome = resolveCrowHome(env);
   const db = dbPath === undefined ? (env.CROW_DB_PATH || join(resolveInstanceDataDir(env), "crow.db")) : dbPath;
-  anchorSecretsDir(env);
-  const trusted = secretsDirTrusted(env);
-  const entries = keychainEntries({ dbPath: db, crowHome });
+  const entries = keychainEntries({ dbPath: db, env });
   const manual = entries.filter((e) => e.kind === "manual").map((e) => e.secret);
-  // The card set: manual entries whose hash the operator's UI recorded in the
-  // hidden dir. The kind column and the sealed value live in crow.db, which a
-  // bot can write (flip an extension row to manual, copy ciphertext), so the
-  // column alone is not enough. A list that does not exist yet is seeded once
-  // from today's manual entries (an install that predates the list).
-  let hashes = trusted ? readCardHashes(env) : new Set();
-  if (hashes === null) {
-    hashes = new Set(manual.map(cardHashOf));
-    try { writeSecretValuesFile(cardHashesPath(env), [...hashes], { raw: true }); } catch { /* next time */ }
-  }
-  const operator = manual.filter((v) => hashes.has(cardHashOf(v)));
+  // The card set: manual entries whose hash the OPERATOR recorded in the
+  // hidden dir: the keychain UI on save or import, or the one-time confirm of
+  // entries that predate the list (confirmManualEntriesForCards). crow.db is
+  // writable by a bot's shell under the default sandbox (it can flip an
+  // extension row to manual, insert a row, copy ciphertext), so neither the
+  // kind column nor the rows present at first run are trusted: with no list,
+  // the card set is empty. Weak values (under 8 characters, a plain word) never
+  // hide text on cards either.
+  const hashes = readCardHashes(env);
+  const operator = manual.filter((v) => hashes.has(cardHashOf(v)) && v.length >= 8 && plausibleSecretValue(v));
   const minted = entries
     .filter((e) => e.kind !== "manual" && GENERATED_SHAPE.test(e.secret) && /[A-Za-z]/.test(e.secret) && /\d/.test(e.secret))
     .map((e) => e.secret);
   return {
-    display: normalizeValues([...manual, ...minted, ...retainedBundleSecrets(crowHome)]),
+    display: normalizeValues([...manual, ...minted, ...retainedBundleSecrets(env)]),
     card: normalizeValues(operator).filter(safeShape),
   };
 }
@@ -164,16 +162,34 @@ export function collectSecretValues(opts = {}) {
  */
 export function refreshSecretValuesFile(opts = {}) {
   const env = opts.env || process.env;
-  const path = secretValuesPath(env);
   try {
     const sets = collectSecretValueSets(opts);
     primeSecretValues(sets.display, sets.card);
     if (opts.write === false) return null;
-    if (!secretsDirTrusted(env)) throw new Error("secrets dir is not the anchored one");
-    writeSecretValuesFile(secretValuesDisplayPath(env), sets.display);
-    return writeSecretValuesFile(path, sets.card);
+    // Written through the anchored dir; the path returned (for pi) is where
+    // that dir really is now.
+    const card = anchoredPath(env, SECRET_VALUES_FILENAME);
+    const current = secretsDirCurrentPath(env);
+    if (!card || !current) throw new Error("no anchored secrets dir");
+    writeSecretValuesFile(anchoredPath(env, SECRET_VALUES_DISPLAY_FILENAME), sets.display);
+    const r = writeSecretValuesFile(card, sets.card);
+    return { ...r, path: join(current, SECRET_VALUES_FILENAME) };
   } catch (e) {
     if (typeof opts.log === "function") opts.log("secret values file not written: " + ((e && e.message) || e));
     return null;
   }
+}
+
+/**
+ * The one-time operator step for entries saved before the card list existed:
+ * record every readable MANUAL keychain entry as a card value. Run by the
+ * operator (scripts/ops/keychain-card-secrets.mjs), never by the engine. A bot
+ * cannot run it to effect from its sandbox: the list is in the read-only
+ * hidden dir there. Returns the number of entries confirmed (never values).
+ */
+export function confirmManualEntriesForCards({ env = process.env, dbPath } = {}) {
+  const db = dbPath === undefined ? (env.CROW_DB_PATH || join(resolveInstanceDataDir(env), "crow.db")) : dbPath;
+  const manual = keychainEntries({ dbPath: db, env }).filter((e) => e.kind === "manual").map((e) => e.secret);
+  if (manual.length) recordCardSecret(manual, env);
+  return manual.length;
 }

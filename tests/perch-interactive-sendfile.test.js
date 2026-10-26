@@ -229,7 +229,7 @@ test("a crow-file: notify jail-copies the file into outputsDir, emits a file fra
   // The copy really landed inside the jail the workspace route serves from.
   const snap = await engine.get(s.sessionId);
   assert.ok(snap.outputsDir, "spawn recorded an outputsDir");
-  assert.equal(snap.deliveredDir, join(CROW_HOME, "perch-delivered", s.sessionId), "copies go to the gateway-owned staging dir");
+  assert.equal(snap.deliveredDir, join(CROW_HOME, "secrets", "perch-delivered", s.sessionId), "copies go to the gateway-owned staging dir");
   assert.equal(readFileSync(join(snap.deliveredDir, "report.png"), "utf8"), "PNGBYTES");
   assert.equal(existsSync(join(snap.outputsDir, "report.png")), false, "never into the bot-writable outputs dir");
   assert.equal(existsSync(src), true, "the source file is never moved or removed");
@@ -497,7 +497,7 @@ test("the staging dir is created component by component and refused when any com
   const s = await spawned(engine);
   const pi = state.instances[0];
   const sink = await collect(engine, s.sessionId);
-  const root = join(CROW_HOME, "perch-delivered");
+  const root = join(CROW_HOME, "secrets", "perch-delivered");
   rmSync(root, { recursive: true, force: true });
   const elsewhere = join(dir, "delivered-escape");
   mkdirSync(join(elsewhere, s.sessionId), { recursive: true });
@@ -510,21 +510,21 @@ test("the staging dir is created component by component and refused when any com
   } finally { rmSync(root, { force: true }); }
 });
 
-test("the staging root renamed away and replaced after the engine anchored it: refused", async () => {
+test("the staging root renamed away and replaced after the engine anchored it: the copy follows the anchored dir, never the planted one", async () => {
   const { renameSync } = await import("node:fs");
   const { engine, state } = makeEngine();
   const s = await spawned(engine);
   const pi = state.instances[0];
   const sink = await collect(engine, s.sessionId);
-  const root = join(CROW_HOME, "perch-delivered");
-  mkdirSync(root, { recursive: true });
+  const root = join(CROW_HOME, "secrets", "perch-delivered");
   renameSync(root, root + "-moved");
   mkdirSync(join(root, s.sessionId), { recursive: true });
   try {
     pi.emit({ type: "extension_ui_request", method: "notify", message: crowFileFrame({ path: srcFile("w.txt", "w"), name: "w.txt", caption: "c" }) });
     await tick();
-    assert.equal(sink.ofType("file")[0].servable, false);
-    assert.equal(existsSync(join(root, s.sessionId, "w.txt")), false);
+    assert.equal(existsSync(join(root, s.sessionId, "w.txt")), false, "nothing in the planted dir");
+    assert.equal(sink.ofType("file")[0].servable, true);
+    assert.equal(readFileSync(join(root + "-moved", s.sessionId, "w.txt"), "utf8"), "w", "the anchored dir, wherever it is");
   } finally {
     rmSync(root, { recursive: true, force: true });
     renameSync(root + "-moved", root);
@@ -550,4 +550,17 @@ test("a secrets dir renamed away: a file under its new name is still refused (in
     rmSync(secrets, { recursive: true, force: true });
     renameSync(secrets + "-x", secrets);
   }
+});
+
+test("a sent copy never takes the name of a file already in the outputs dir (both are served by flat name)", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  const sink = await collect(engine, s.sessionId);
+  const snap = await engine.get(s.sessionId);
+  writeFileSync(join(snap.outputsDir, "report.pdf"), "in place");
+  pi.emit({ type: "extension_ui_request", method: "notify", message: crowFileFrame({ path: srcFile("report.pdf", "copied"), name: "report.pdf", caption: "c" }) });
+  await tick();
+  assert.equal(sink.ofType("file")[0].stored, "report-2.pdf");
+  assert.equal(readFileSync(join(snap.deliveredDir, "report-2.pdf"), "utf8"), "copied");
 });

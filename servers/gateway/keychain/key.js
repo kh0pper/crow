@@ -31,8 +31,8 @@ export function keychainKeyPath(crowHome = process.env.CROW_HOME || join(homedir
   return join(crowHome, "secrets", "keychain.key");
 }
 
-export function keychainKeyState({ crowHome } = {}) {
-  const path = keychainKeyPath(crowHome);
+export function keychainKeyState({ crowHome, path: at } = {}) {
+  const path = at || keychainKeyPath(crowHome);
   if (!existsSync(path)) return { state: "missing", path, key: null };
   try {
     const j = JSON.parse(readFileSync(path, "utf8"));
@@ -45,8 +45,8 @@ export function keychainKeyState({ crowHome } = {}) {
 }
 
 /** Read-only: `{ id, seed }`, or null when the key file is missing or invalid. Never creates. */
-export function loadKeychainKey({ crowHome } = {}) {
-  return keychainKeyState({ crowHome }).key;
+export function loadKeychainKey({ crowHome, path } = {}) {
+  return keychainKeyState({ crowHome, path }).key;
 }
 
 /**

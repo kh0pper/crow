@@ -12,7 +12,7 @@ import { randomBytes } from "node:crypto";
 import Database from "better-sqlite3";
 
 const SV = await import("../servers/shared/secret-values.js");
-const { collectSecretValues, collectSecretValueSets, refreshSecretValuesFile, parseEnvPairs } = await import("../servers/shared/secret-values-collect.js");
+const { collectSecretValues, collectSecretValueSets, confirmManualEntriesForCards, refreshSecretValuesFile, parseEnvPairs } = await import("../servers/shared/secret-values-collect.js");
 const { sealSecret } = await import("../servers/sharing/secret-box.js");
 const { KEYCHAIN_DDL } = await import("../servers/gateway/keychain/schema.js");
 
@@ -30,6 +30,7 @@ function addManual(I, values) {
   db.exec("DELETE FROM crow_keychain");
   for (const v of values) db.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual','m',?,?,'manual')").run(sealSecret(v, { seed }), "0123456789abcdef");
   db.close();
+  SV.recordCardSecret(values, I.env);                  // what the keychain UI records on save
 }
 
 function scratchInstance() {
@@ -127,7 +128,7 @@ test("collect: a missing or damaged source is skipped, never thrown", () => {
 
 test("the file: <CROW_HOME>/secrets, 600 in a 700 dir, one value per line, atomic, unchanged content not rewritten", () => {
   const I = scratchInstance();
-  addManual(I, [gen("one"), gen("twolonger")]);
+  addManual(I, [gen("first"), gen("twolonger")]);
   const r = refreshSecretValuesFile({ env: I.env });
   assert.equal(r.path, join(I.home, "secrets", "pi-bot-secret-values"));
   assert.equal(r.path, SV.secretValuesPath(I.env));
@@ -138,7 +139,7 @@ test("the file: <CROW_HOME>/secrets, 600 in a 700 dir, one value per line, atomi
   assert.equal(st.mode & 0o777, 0o600);
   assert.equal(st.uid, process.getuid());
   assert.equal(statSync(join(I.home, "secrets")).mode & 0o777, 0o700);
-  assert.equal(readFileSync(r.path, "utf8"), gen("twolonger") + "\n" + gen("one") + "\n");
+  assert.equal(readFileSync(r.path, "utf8"), gen("twolonger") + "\n" + gen("first") + "\n");
   // no temp file left beside it
   assert.deepEqual(readdirSync(join(I.home, "secrets")).filter((n) => n.includes(".tmp-")), []);
   const ino = st.ino;
@@ -159,7 +160,7 @@ test("the file: a symlink or non-regular target is refused, not followed", () =>
   const elsewhere = join(I.root, "elsewhere");
   writeFileSync(elsewhere, "untouched");
   symlinkSync(elsewhere, SV.secretValuesPath(I.env));
-  addManual(I, [gen("one")]);
+  addManual(I, [gen("first")]);
   const logs = [];
   assert.equal(refreshSecretValuesFile({ env: I.env, log: (l) => logs.push(l) }), null);
   assert.equal(readFileSync(elsewhere, "utf8"), "untouched");
@@ -318,6 +319,7 @@ test("two sets: display masking uses every trusted value; cards and the values f
   add("manual", "pa$$" + " w0rd&x");
   add("extension", gen("ext"));
   db.close();
+  SV.recordCardSecret(["N0t_a-real_pw9", "pa$$" + " w0rd&x"], I.env);
   const sets = collectSecretValueSets({ env: I.env });
   for (const v of ["N0t_a-real_pw9", "pa$$ w0rd&x", gen("ext"), gen("retained")]) assert.ok(sets.display.includes(v), "display " + v);
   assert.deepEqual(sets.card, ["N0t_a-real_pw9"], "cards: manual and shell-safe only");
@@ -344,27 +346,26 @@ test("two files: the card set (named to pi) and the display set, side by side in
   assert.equal(lstatSync(SV.secretValuesDisplayPath(I.env)).mode & 0o777, 0o600);
 });
 
-test("cards count only manual entries the operator saved through the UI (their hash is in the hidden list); a row flipped to manual or inserted directly does not", () => {
+test("cards count only manual entries the operator recorded: no list means no card values (no first-run seeding); the one-time confirm records them; a row inserted later does not count", () => {
   const I = scratchInstance();
-  addManual(I, ["Seeded_pw-1"]);
-  // no list yet: seeded once from the current manual entries
-  assert.deepEqual(collectSecretValueSets({ env: I.env }).card, ["Seeded_pw-1"]);
-  assert.ok(existsSync(join(I.home, "secrets", "card-secret-hashes")));
-  // a bot with crow.db write access inserts / flips rows: not in the list
+  const seed = randomBytes(32);
+  mkdirSync(join(I.home, "secrets"), { recursive: true });
+  writeFileSync(join(I.home, "secrets", "keychain.key"), JSON.stringify({ v: 1, id: "0123456789abcdef", key: seed.toString("base64") }), { mode: 0o600 });
   const db = new Database(join(I.data, "crow.db"));
-  const sealed = db.prepare("SELECT secret_sealed FROM crow_keychain LIMIT 1").get().secret_sealed;
-  db.close();
-  const seed = Buffer.from(JSON.parse(readFileSync(join(I.home, "secrets", "keychain.key"), "utf8")).key, "base64");
-  const db2 = new Database(join(I.data, "crow.db"));
-  db2.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual','planted',?,?,'manual')").run(sealSecret("Planted_pw-2", { seed }), "0123456789abcdef");
-  db2.close();
+  db.exec(KEYCHAIN_DDL);
+  const ins = (v) => db.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual','m',?,?,'manual')").run(sealSecret(v, { seed }), "0123456789abcdef");
+  ins("Existing_pw-1");
+  assert.deepEqual(collectSecretValueSets({ env: I.env }).card, [], "no list: nothing is trusted on cards");
+  assert.equal(confirmManualEntriesForCards({ env: I.env }), 1, "the operator's one-time confirm");
+  assert.deepEqual(collectSecretValueSets({ env: I.env }).card, ["Existing_pw-1"]);
+  ins("Planted_pw-2");                                   // a bot with crow.db write access
   const sets = collectSecretValueSets({ env: I.env });
-  assert.deepEqual(sets.card, ["Seeded_pw-1"], "the planted manual row does not hide text on cards");
-  assert.ok(sets.display.includes("Planted_pw-2"), "display paths may still mask it (over-masking a log costs nothing)");
-  assert.ok(sealed);
-  // the UI path records a value
-  SV.recordCardSecret("Planted_pw-2", I.env);
-  assert.ok(collectSecretValueSets({ env: I.env }).card.includes("Planted_pw-2"));
+  assert.deepEqual(sets.card, ["Existing_pw-1"]);
+  assert.ok(sets.display.includes("Planted_pw-2"), "display paths may still mask it");
+  ins("master");                                          // weak values never hide text on cards
+  SV.recordCardSecret("master", I.env);
+  assert.equal(collectSecretValueSets({ env: I.env }).card.includes("master"), false);
+  db.close();
 });
 
 test("getCardValues uses only this process's collected card set, never a file", () => {

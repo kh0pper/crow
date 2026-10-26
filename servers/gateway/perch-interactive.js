@@ -158,7 +158,7 @@ import { stripContextEcho } from "./voice/context-echo.js";
 import { maskSecrets, maskSecretsDetailed, maskDeep, hiddenNote, HIDDEN_NOTE_RE, REDACTED } from "../shared/secret-mask.js";
 import { userRuntimeDirs } from "../../scripts/pi-bots/pi_sandbox.mjs";
 import { anchorSecretsDir } from "../shared/secret-values.js";
-import { deliveredDirPath, deliveredRootPath, openDeliveredDir, registerDeliveredRoot } from "../shared/perch-delivered.js";
+import { deliveredDirPath, openDeliveredDir, registerDeliveredRoot } from "../shared/perch-delivered.js";
 
 /** Lease file name under CROW_HOME. Consumed by C-14's reaper exemption. */
 export const LEASE_FILENAME = "perch-interactive-leases.json";
@@ -568,7 +568,9 @@ function maskQuestions(qs) {
   let tooLong = false;
   let hidden = 0;
   let possible = 0;
+  let literal = false;
   const one = (text) => {
+    if (hasMarker(text)) literal = true;
     const r = maskSecretsDetailed(text, { card: true });
     failed = failed || !!r.failed;
     tooLong = tooLong || !!r.truncated;
@@ -589,7 +591,7 @@ function maskQuestions(qs) {
     }
     return out;
   });
-  return { questions, failed, tooLong, hidden, possible };
+  return { questions, failed, tooLong, hidden, possible, literal };
 }
 
 /** The operator answered the MASKED questions card: map each picked label back
@@ -637,12 +639,16 @@ function maskFrame(event) {
  * Pure — exported only for tests; the engine's call site does the copy.
  */
 function resolveSentName(dir, basename) {
+  // `dir` may be a list: a sent copy's name must not collide with a file in
+  // the staging dir OR in the session's outputs dir (both are served under
+  // the same flat name).
+  const dirs = [].concat(dir).filter(Boolean);
   const clean = String(basename == null ? "" : basename).replace(/[\\/]/g, "").replace(/^\.+/, "").trim() || "file";
   const dot = clean.lastIndexOf(".");
   const stem = dot > 0 ? clean.slice(0, dot) : clean;
   const ext = dot > 0 ? clean.slice(dot) : "";
   let candidate = clean;
-  for (let n = 2; existsSync(join(dir, candidate)); n++) {
+  for (let n = 2; dirs.some((d) => existsSync(join(d, candidate))); n++) {
     candidate = stem + "-" + n + ext;
   }
   return candidate;
@@ -708,7 +714,7 @@ export function createInteractiveEngine({
   const secretsEnv = { ...env, CROW_HOME: crowHome };
   let secretsAnchor = null;
   try { secretsAnchor = anchorSecretsDir(secretsEnv); } catch { secretsAnchor = null; }
-  try { registerDeliveredRoot(deliveredRootPath(crowHome)); } catch (e) { rawLog("delivered-files staging root unavailable: " + ((e && e.message) || e)); }
+  try { registerDeliveredRoot(secretsEnv); } catch (e) { rawLog("delivered-files staging root unavailable: " + ((e && e.message) || e)); }
   /** sessionId → in-flight adoption promise (fix round 2: single-flight). */
   const adopting = new Map();
   let seams = null;
@@ -2465,7 +2471,7 @@ export function createInteractiveEngine({
           // bot can write or swap.
           dfd = openDeliveredDir(s.sessionId, { create: true });
           const viaFd = "/proc/self/fd/" + dfd;
-          stored = resolveSentName(viaFd, name);
+          stored = resolveSentName([viaFd, dir], name);
           const buf = Buffer.alloc(st.size);
           let off = 0;
           while (off < st.size) {
@@ -2522,7 +2528,7 @@ export function createInteractiveEngine({
         s.pendingUi = mq.failed || mq.tooLong
           ? Object.defineProperty({ requestId: m.id, method: "questions", title: "", questions: [], message: unshownCardText(mq.tooLong) }, RAW_CARD, { value: { failed: true } })
           : { requestId: m.id, method: "questions", title: "", questions: mq.questions,
-            ...(mq.hidden || mq.possible ? { message: [mq.hidden ? hiddenNote(mq.hidden) : "", mq.possible ? POSSIBLE_NOTE : ""].filter(Boolean).join("\n") } : {}) };
+            ...(mq.hidden || mq.possible || mq.literal ? { message: [mq.hidden ? hiddenNote(mq.hidden) : "", mq.possible ? POSSIBLE_NOTE : "", mq.literal ? LITERAL_MARKER_NOTE : ""].filter(Boolean).join("\n") } : {}) };
         s.expiredAsk = null;                         // a live question supersedes an expired one
         armAskExpiry(s, m);
         clearStall(s);                               // paused while a human thinks

@@ -522,3 +522,15 @@ test("a card whose text already contains the marker [REDACTED] (pi-lab's, or lit
   await tick(30);
   assert.match(frames.find((f) => f.type === "ask_user").message, /not added by Crow/);
 });
+
+test("a combined card whose question already contains [REDACTED] carries the literal-marker note", async () => {
+  const { engine, bridge } = makeEngine();
+  const { s, pi } = await liveSession(engine, bridge, "bot-q-literal");
+  const frames = await watched(engine, s.sessionId);
+  const qs = [{ question: "Run sh [REDACTED]?", options: [{ label: "yes" }, { label: "no" }] }];
+  pi.emit({ type: "extension_ui_request", id: "nl", method: "notify", message: "crow-ask:" + JSON.stringify({ id: "q", questions: qs }) });
+  await tick();
+  pi.emit({ type: "extension_ui_request", id: "ql", method: "select", title: "Run", options: ["yes", "no", "Other\u2026"] });
+  await tick(30);
+  assert.match(frames.find((f) => f.type === "ask_user").message || "", /not added by Crow/);
+});

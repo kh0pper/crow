@@ -35,7 +35,10 @@ function setManual(values) {
   db.exec("DELETE FROM crow_keychain");
   for (const v of values) db.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual','m',?,?,'manual')").run(sealSecret(v, { seed: SEED }), "0123456789abcdef");
   db.close();
+  recordCard(values);                                  // what the keychain UI records on save
 }
+const { recordCardSecret: recordCardSecretFn } = await import("../servers/shared/secret-values.js");
+function recordCard(values) { recordCardSecretFn(values, process.env); }
 setManual([FAKE]);
 
 const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
@@ -124,8 +127,6 @@ test("sandboxed: a bot def's spawn_env, the session extraEnv and an inherited va
 test("sandboxed: the file is refreshed at each spawn (a secret added since the last spawn is in it)", { skip: noSandbox }, async () => {
   const later = "fakeGenLater" + "Cd5y".repeat(9);
   setManual([FAKE, later]);
-  const { recordCardSecret } = await import("../servers/shared/secret-values.js");
-  recordCardSecret(later, process.env);                // what the keychain UI records on save
   const { pi } = await spawnReport();
   await pi.exited;
   assert.ok(readFileSync(PATH, "utf8").split("\n").includes(later));
@@ -182,8 +183,8 @@ test("without bubblewrap a values file left by an earlier sandboxed spawn is rem
 });
 
 test("sandboxed: the gateway's delivered-files staging dir is hidden too", { skip: noSandbox }, async () => {
-  const staged = join(HOME, "perch-delivered", "sess", "f.txt");
-  mkdirSync(join(HOME, "perch-delivered", "sess"), { recursive: true });
+  const staged = join(HOME, "secrets", "perch-delivered", "sess", "f.txt");
+  mkdirSync(join(HOME, "secrets", "perch-delivered", "sess"), { recursive: true });
   writeFileSync(staged, "staged");
   const dir = mkdtempSync(join(tmpdir(), "crow-secret-staged-"));
   mkdirSync(join(dir, "sessions"), { recursive: true });
@@ -203,5 +204,57 @@ test("sandboxed: the gateway's delivered-files staging dir is hidden too", { ski
     assert.notEqual(r.r, "read");
   } finally {
     if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
+  }
+});
+
+test("sandboxed: a bot cannot add to the operator's card list (the hidden dir is read-only)", { skip: noSandbox }, async () => {
+  const list = join(HOME, "secrets", "card-secret-hashes");
+  const dir = mkdtempSync(join(tmpdir(), "crow-secret-list-"));
+  mkdirSync(join(dir, "sessions"), { recursive: true });
+  const stub = join(dir, "stub-pi.mjs");
+  writeFileSync(stub, [
+    'import { appendFileSync } from "node:fs";',
+    `let r = "written"; try { appendFileSync(${JSON.stringify(list)}, "a".repeat(64) + "\\n"); } catch (e) { r = e.code || "refused"; }`,
+    'process.stdout.write(JSON.stringify({ type: "report", tag: "list", r }) + "\\n");',
+    "setTimeout(() => process.exit(0), 50);",
+  ].join("\n"));
+  const prev = process.env.CROW_PI_SANDBOX;
+  process.env.CROW_PI_SANDBOX = "auto";
+  try {
+    const pi = new PiRpc({ def: {}, sessionDir: dir, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: process.execPath, cliPath: stub, diagLog: () => {} });
+    const r = await pi.waitFor((m) => m.type === "report", 10000, "list");
+    await pi.exited;
+    assert.notEqual(r.r, "written");
+  } finally {
+    if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
+  }
+});
+
+test("sandboxed: after the secrets dir was renamed away and a decoy planted, the NEXT bot still cannot read the real one", { skip: noSandbox }, async () => {
+  const { renameSync, rmSync: rm } = await import("node:fs");
+  const secrets = join(HOME, "secrets");
+  const moved = join(HOME, "secrets-moved");
+  renameSync(secrets, moved);
+  mkdirSync(secrets, { mode: 0o700 });
+  const dir = mkdtempSync(join(tmpdir(), "crow-secret-moved-"));
+  mkdirSync(join(dir, "sessions"), { recursive: true });
+  const stub = join(dir, "stub-pi.mjs");
+  writeFileSync(stub, [
+    'import { readFileSync } from "node:fs";',
+    `let r = "read"; try { readFileSync(${JSON.stringify(join(moved, "keychain.key"))}); } catch (e) { r = e.code || "refused"; }`,
+    'process.stdout.write(JSON.stringify({ type: "report", tag: "moved", r }) + "\\n");',
+    "setTimeout(() => process.exit(0), 50);",
+  ].join("\n"));
+  const prev = process.env.CROW_PI_SANDBOX;
+  process.env.CROW_PI_SANDBOX = "auto";
+  try {
+    const pi = new PiRpc({ def: {}, sessionDir: dir, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: process.execPath, cliPath: stub, diagLog: () => {} });
+    const r = await pi.waitFor((m) => m.type === "report", 10000, "moved");
+    await pi.exited;
+    assert.notEqual(r.r, "read", "the real (moved) dir is hidden wherever it now is");
+  } finally {
+    if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
+    rm(secrets, { recursive: true, force: true });
+    renameSync(moved, secrets);
   }
 });
