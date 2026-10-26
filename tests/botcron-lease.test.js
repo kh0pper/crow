@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { holdBotcronLease, releaseBotcronLease, tryBotcronLease, createBotcronTicker } from "../scripts/pi-bots/botcron-lease.mjs";
+import { holdBotcronLease, releaseBotcronLease, tryBotcronLease, createBotcronTicker, botcronLeaseHeld } from "../scripts/pi-bots/botcron-lease.mjs";
 import { chmodSync, mkdirSync, unlinkSync } from "node:fs";
 
 let dir;
@@ -117,4 +117,18 @@ test("the ticker passes max(2 min, its poll interval) as the heartbeat slack", a
   await mk(600000).sweep();
   await mk(undefined).sweep();
   assert.deepEqual(seen, [120000, 600000, 120000]);
+});
+
+test("botcronLeaseHeld (read-only): missing, expired or dead-pid → false; live → true", async () => {
+  const { spawnSync } = await import("node:child_process");
+  assert.equal(botcronLeaseHeld({ dir }), false, "missing");
+  writeFileSync(leaseFile(), JSON.stringify({ holder: "g", pid: process.pid, expires_at: Date.now() - 1 }));
+  assert.equal(botcronLeaseHeld({ dir }), false, "expired");
+  const dead = spawnSync(process.execPath, ["-e", "0"]).pid;
+  writeFileSync(leaseFile(), JSON.stringify({ holder: "g", pid: dead, expires_at: Date.now() + 60000 }));
+  assert.equal(botcronLeaseHeld({ dir }), false, "dead pid");
+  writeFileSync(leaseFile(), JSON.stringify({ holder: "g", pid: process.pid, expires_at: Date.now() + 60000 }));
+  assert.equal(botcronLeaseHeld({ dir }), true, "live");
+  writeFileSync(leaseFile(), "{oops");
+  assert.equal(botcronLeaseHeld({ dir }), false, "corrupt");
 });

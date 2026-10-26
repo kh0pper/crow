@@ -63,6 +63,16 @@ export async function holdBotcronLease(opts) {
   return (await tryBotcronLease(opts)).held;
 }
 
+/**
+ * Read-only: is a live ticker holding this instance's lease right now? False
+ * when the lease file is missing or unreadable, expired, or its pid is dead.
+ * Never takes the lock and never writes.
+ */
+export function botcronLeaseHeld({ dir, now = Date.now() }) {
+  const cur = readLease(dir);
+  return !!(cur && cur.expires_at > now && !pidIsDead(cur.pid));
+}
+
 /** Free the lease if this holder owns it; otherwise a no-op. Never throws. */
 export async function releaseBotcronLease({ dir, holder, lockTimeoutMs = 2000 }) {
   try {
