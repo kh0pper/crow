@@ -232,3 +232,19 @@ test("install form: shows kept values, marks secrets as kept, and submits which 
   assert.ok(src.includes("data.existing_secret_set"), "marks a kept secret without showing it");
   assert.ok(src.includes("payload.env_edited"), "sends the fields the owner changed");
 });
+
+test("isSecretEnvField: key-like URL fragments, credential strings, webhook paths and long path tokens are secrets", () => {
+  const f = { name: "SOME_URL" };
+  for (const v of [
+    "https://100.64.20.12/app#token=abc", "https://100.64.20.12/cb#access_token=abc&x=1",
+    "Server=h;Password=p", "host=h password=p", "user: u pwd: p", "api_key=abc", "API-KEY: abc", "secret=s",
+    "https://hooks.slack.com/services/T000/B000/xyz", "https://100.64.20.12/hook/AbCdEfGhIjKlMnOpQrStUvWx",
+  ]) assert.equal(B.isSecretEnvField(f, v), true, v);
+  for (const v of ["https://100.64.20.12/app#section", "http://100.64.20.9:8080/path?lang=en", "basic", "127.0.0.1",
+    "https://100.64.20.12/a/short-segment-name", "/srv/media/library"]) assert.equal(B.isSecretEnvField(f, v), false, v);
+});
+
+test("clearedInstallEnv: an install_required field is never cleared", () => {
+  const manifest = { env_vars: [{ name: "A" }, { name: "B", install_required: true }, { name: "C", required: true }] };
+  assert.deepEqual(B.clearedInstallEnv(manifest, {}, { A: "x", B: "y", C: "z" }, ["A", "B", "C"]), ["A"]);
+});

@@ -2351,7 +2351,7 @@ export function keepPriorOverDefaults(manifest, envVars, prior, edited = null) {
 
 /**
  * Fields the owner cleared in the form on a reinstall (edited, submitted blank) whose
- * earlier value should be unset: only non-secret, non-required, non-generated declared
+ * earlier value should be unset: only non-secret, non-required (nor install_required), declared
  * fields. A blank secret field means "keep it" (the form never shows its value), and a
  * required field is never unset by clearing it.
  */
@@ -2361,7 +2361,7 @@ export function clearedInstallEnv(manifest, envVars, prior, edited) {
   const byName = new Map((manifest?.env_vars || []).filter((v) => v && typeof v.name === "string").map((v) => [v.name, v]));
   return [...new Set(edited)].filter((k) => {
     const v = byName.get(k);
-    if (!v || v.required || nonBlankEnv(req[k]) || !nonBlankEnv(prior?.[k])) return false;
+    if (!v || v.required || v.install_required || nonBlankEnv(req[k]) || !nonBlankEnv(prior?.[k])) return false;
     return !isSecretEnvField(v, String(prior[k]));
   });
 }
@@ -2373,6 +2373,10 @@ export function clearedInstallEnv(manifest, envVars, prior, edited) {
  */
 const SECRET_ENV_NAME = /TOKEN|SECRET|PASS(?:WORD)?|PWD|KEY|CREDENTIAL|DSN|TOPIC|COOKIE|SALT|WEBHOOK|AUTH/i;
 const SECRET_QUERY_NAME = /key|token|secret|sig|auth|pass|credential|session/i;
+// A non-URL value carrying a credential: "Server=h;Password=p", "host=h password=p".
+const SECRET_VALUE = /(pass(word)?|pwd|secret|token|api[_-]?key)\s*[=:]/i;
+// A path segment that is itself a token (webhook URLs embed theirs in the path).
+const TOKEN_PATH_SEGMENT = /^[A-Za-z0-9_-]{24,}$/;
 /**
  * Whether an env field must be treated as a secret: marked so in the manifest, a name
  * that reads like one (an ntfy topic is a capability), or a value that is a URL carrying
@@ -2382,13 +2386,19 @@ export function isSecretEnvField(v, value) {
   if (!v) return true;
   if (v.secret === true || v.generate || v.store_as) return true;
   if (SECRET_ENV_NAME.test(String(v.name || ""))) return true;
-  if (typeof value === "string" && /^[a-z][a-z0-9+.-]*:\/\//i.test(value.trim())) {
+  if (typeof value !== "string") return false;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value.trim())) {
     let u;
-    try { u = new URL(value.trim()); } catch { return false; }
+    try { u = new URL(value.trim()); } catch { return SECRET_VALUE.test(value); }
     if (u.username || u.password) return true;
     for (const k of u.searchParams.keys()) if (SECRET_QUERY_NAME.test(k)) return true;
+    // A fragment that carries parameters (#token=…, #access_token=…: OAuth implicit flow).
+    for (const k of new URLSearchParams(u.hash.replace(/^#/, "")).keys()) if (SECRET_QUERY_NAME.test(k)) return true;
+    if (/(^|\.)hooks\.slack\.com$/i.test(u.hostname) && u.pathname.startsWith("/services/")) return true;
+    if (u.pathname.split("/").some((seg) => TOKEN_PATH_SEGMENT.test(seg))) return true;
+    return false;
   }
-  return false;
+  return SECRET_VALUE.test(value);
 }
 
 export function existingInstallEnv(bundleId, manifest = getManifest(bundleId)) {
