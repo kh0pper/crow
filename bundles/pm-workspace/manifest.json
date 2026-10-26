@@ -1,7 +1,7 @@
 {
   "id": "pm-workspace",
   "name": "PM Workspace",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Personal PM workspace — markdown + handwritten drawing notes with OCR, a daily digest email assembled from local boards/trackers and optional cloud adapters, and deterministic Monday.com board sync (mirror or two-way)",
   "type": "mcp-server",
   "author": "Crow",
@@ -63,7 +63,7 @@
     { "name": "SYNC_CRON", "description": "Cron expression for Monday sync runs (default: */15 * * * *)", "required": false },
     { "name": "MONDAY_TOKEN", "description": "Monday.com API v2 token for board sync", "required": false, "secret": true },
     { "name": "SYNC_CONFIG_FILE", "description": "Path to the sync config JSON (boards, column maps, status maps)", "required": false },
-    { "name": "NTFY_TOPIC", "description": "ntfy.sh topic for a short digest push notification", "required": false },
+    { "name": "NTFY_TOPIC", "description": "ntfy.sh topic for a short digest push notification (anyone who knows the topic can read and post to it, so it is kept like a password)", "required": false, "secret": true },
     { "name": "NTFY_URL", "description": "Alternate ntfy base URL (default https://ntfy.sh)", "required": false },
     { "name": "GOOGLE_TOKEN_FILE", "description": "Path to a Google OAuth2 authorized_user JSON for calendar/drive digest sections", "required": false },
     { "name": "CROW_GATEWAY_URL", "description": "Public gateway URL used in digest footer links", "required": false },

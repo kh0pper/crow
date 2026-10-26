@@ -2326,6 +2326,97 @@ export function missingInstallEnv(bundleId, envVars, manifest = getManifest(bund
 }
 
 /**
+ * An in-place reinstall (the earlier install's folder and .env are still there): the
+ * install form pre-fills every field with its manifest default and submits it, so a
+ * default in the request is not a choice the owner made. Such a value is dropped when the
+ * earlier .env already holds a real (non-blank, non-placeholder) value for that key, so
+ * the kept value stays; a field the owner edited (`edited`, from the form) always wins,
+ * even when it equals the default. A first install (empty `prior`) is unchanged.
+ */
+export function keepPriorOverDefaults(manifest, envVars, prior, edited = null) {
+  if (!envVars || typeof envVars !== "object") return envVars;
+  const editedSet = new Set(Array.isArray(edited) ? edited : []);
+  const defaults = new Map((manifest?.env_vars || [])
+    .filter((v) => v && typeof v.name === "string" && v.default !== undefined && v.default !== null)
+    .map((v) => [v.name, String(v.default)]));
+  const out = {};
+  for (const [k, v] of Object.entries(envVars)) {
+    const kept = prior?.[k];
+    const isDefault = defaults.has(k) && String(v) === defaults.get(k);
+    if (isDefault && !editedSet.has(k) && nonBlankEnv(kept) && !isPlaceholderValue(kept) && String(kept) !== String(v)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * Fields the owner cleared in the form on a reinstall (edited, submitted blank) whose
+ * earlier value should be unset: only non-secret, non-required (nor install_required), declared
+ * fields. A blank secret field means "keep it" (the form never shows its value), and a
+ * required field is never unset by clearing it.
+ */
+export function clearedInstallEnv(manifest, envVars, prior, edited) {
+  if (!Array.isArray(edited) || edited.length === 0) return [];
+  const req = envVars && typeof envVars === "object" ? envVars : {};
+  const byName = new Map((manifest?.env_vars || []).filter((v) => v && typeof v.name === "string").map((v) => [v.name, v]));
+  return [...new Set(edited)].filter((k) => {
+    const v = byName.get(k);
+    if (!v || v.required || v.install_required || nonBlankEnv(req[k]) || !nonBlankEnv(prior?.[k])) return false;
+    return !isSecretEnvField(v, String(prior[k]));
+  });
+}
+
+/**
+ * For the install form on an in-place reinstall: the earlier .env's values for the keys
+ * the manifest declares, so the form shows them instead of the defaults. Secret and
+ * generated keys never leave the server: they are only listed as already set.
+ */
+const SECRET_ENV_NAME = /TOKEN|SECRET|PASS(?:WORD)?|PWD|KEY|CREDENTIAL|DSN|TOPIC|COOKIE|SALT|WEBHOOK|AUTH/i;
+const SECRET_QUERY_NAME = /key|token|secret|sig|auth|pass|credential|session/i;
+// A non-URL value carrying a credential: "Server=h;Password=p", "host=h password=p".
+const SECRET_VALUE = /(pass(word)?|pwd|secret|token|api[_-]?key)\s*[=:]/i;
+// A path segment that is itself a token (webhook URLs embed theirs in the path).
+const TOKEN_PATH_SEGMENT = /^[A-Za-z0-9_-]{24,}$/;
+/**
+ * Whether an env field must be treated as a secret: marked so in the manifest, a name
+ * that reads like one (an ntfy topic is a capability), or a value that is a URL carrying
+ * credentials (user:pass@ or a key/token/signature query parameter).
+ */
+export function isSecretEnvField(v, value) {
+  if (!v) return true;
+  if (v.secret === true || v.generate || v.store_as) return true;
+  if (SECRET_ENV_NAME.test(String(v.name || ""))) return true;
+  if (typeof value !== "string") return false;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value.trim())) {
+    let u;
+    try { u = new URL(value.trim()); } catch { return SECRET_VALUE.test(value); }
+    if (u.username || u.password) return true;
+    for (const k of u.searchParams.keys()) if (SECRET_QUERY_NAME.test(k)) return true;
+    // A fragment that carries parameters (#token=…, #access_token=…: OAuth implicit flow).
+    for (const k of new URLSearchParams(u.hash.replace(/^#/, "")).keys()) if (SECRET_QUERY_NAME.test(k)) return true;
+    if (/(^|\.)hooks\.slack\.com$/i.test(u.hostname) && u.pathname.startsWith("/services/")) return true;
+    if (u.pathname.split("/").some((seg) => TOKEN_PATH_SEGMENT.test(seg))) return true;
+    return false;
+  }
+  return SECRET_VALUE.test(value);
+}
+
+export function existingInstallEnv(bundleId, manifest = getManifest(bundleId)) {
+  const out = { values: {}, secretSet: [] };
+  if (!bundleId || !isValidBundleId(bundleId)) return out;
+  let prior;
+  try { prior = parseEnvText(readFileSync(join(BUNDLES_DIR, bundleId, ".env"), "utf8")); } catch { return out; }
+  for (const v of manifest?.env_vars || []) {
+    if (!v || typeof v.name !== "string") continue;
+    const val = prior[v.name];
+    if (!nonBlankEnv(val) || isPlaceholderValue(val)) continue;
+    if (isSecretEnvField(v, String(val))) out.secretSet.push(v.name);
+    else out.values[v.name] = String(val);
+  }
+  return out;
+}
+
+/**
  * The first env entry that may not be written to an .env file, or null.
  * Keys must be plain upper-case env names; a value may not carry CR, LF or
  * NUL (it would add lines to the file, and a stripped copy in one file vs a
@@ -2585,7 +2676,7 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
  *
  * Every rung writes mode 600 — bundle .env files hold secrets.
  */
-export function writeInstallEnv(destDir, envVars, manifest, log = () => {}, { baseText = null, baseIsExample = false, crowHome = null, retained = null } = {}) {
+export function writeInstallEnv(destDir, envVars, manifest, log = () => {}, { baseText = null, baseIsExample = false, crowHome = null, retained = null, clear = [] } = {}) {
   const envPath = join(destDir, ".env");
   const examplePath = join(destDir, ".env.example");
   const usable = {};
@@ -2594,6 +2685,10 @@ export function writeInstallEnv(destDir, envVars, manifest, log = () => {}, { ba
   }
   const count = Object.keys(usable).length;
   const pathKeys = pathEnvKeys(manifest);
+  // Keys the owner emptied in the form on a reinstall (clearedInstallEnv): set blank, so
+  // compose falls back to its own default. Only meaningful over an existing .env.
+  const clearSet = new Set(Array.isArray(clear) ? clear.filter((k) => !Object.hasOwn(usable, k)) : []);
+  const cleared = Object.fromEntries([...clearSet].map((k) => [k, ""]));
   // Keys with env_vars[].default_in_crow_home that would install blank or as an example
   // value get a folder inside this instance's CROW_HOME, created now (by the gateway user,
   // so Docker never creates it as root).
@@ -2605,7 +2700,7 @@ export function writeInstallEnv(destDir, envVars, manifest, log = () => {}, { ba
     const baseEnv = parseEnvText(base || "");
     for (const v of manifest?.env_vars || []) {
       const rel = crowHomeDefaultRel(v);
-      if (!rel) continue;
+      if (!rel || clearSet.has(v.name)) continue;
       const cur = usable[v.name] ?? baseEnv[v.name];
       if (cur !== undefined && cur !== "" && !(replacePlaceholders && isPlaceholderValue(cur))) continue;
       // A reinstall over kept data: the path the earlier install used (retained at uninstall).
@@ -2621,7 +2716,7 @@ export function writeInstallEnv(destDir, envVars, manifest, log = () => {}, { ba
   if (typeof baseText === "string") {
     // Seeded from an existing .env / .env.example: line-preserving (C4) — the base's
     // own lines (comments, legacy values, ${VAR} references) stay byte-for-byte.
-    writePrivateFile(envPath, updateEnvText(baseText, { ...homeDefaults(baseText, { replacePlaceholders: baseIsExample }), ...usable }, { pathKeys }));
+    writePrivateFile(envPath, updateEnvText(baseText, { ...homeDefaults(baseText, { replacePlaceholders: baseIsExample }), ...cleared, ...usable }, { pathKeys }));
     log(`Wrote ${count} env vars`);
     return;
   }
@@ -2669,7 +2764,7 @@ export function scrubPlaceholderLines(text) {
   }).join("\n");
 }
 
-export async function runInstallJob(bundleId, envVars, { job, installedSnapshot, consentVerified, manifest, keychain = null, ownerEnv = null }) {
+export async function runInstallJob(bundleId, envVars, { job, installedSnapshot, consentVerified, manifest, keychain = null, ownerEnv = null, editedEnv = null }) {
   let needsRestart = false;
   // Set when `docker compose up` fails. The install does NOT stop there: the
   // non-container steps (gateway env, MCP registration, panel + routes,
@@ -2693,6 +2788,14 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     let priorEnvValues = {};
     let priorEnvText = null;
     if (priorInstallEnv) { try { priorEnvText = readFileSync(join(destDir, ".env"), "utf8"); priorEnvValues = parseEnvText(priorEnvText); } catch { /* unreadable: nothing excluded beyond the rest */ } }
+    // The form's pre-filled defaults never overwrite a value the earlier install's .env holds;
+    // only a field the owner edited does (keepPriorOverDefaults).
+    let clearedEnv = [];
+    if (priorInstallEnv) {
+      clearedEnv = clearedInstallEnv(manifest, envVars, priorEnvValues, editedEnv);
+      envVars = keepPriorOverDefaults(manifest, envVars, priorEnvValues, editedEnv);
+      if (ownerEnv) ownerEnv = keepPriorOverDefaults(manifest, ownerEnv, priorEnvValues, editedEnv);
+    }
     // The INSTALLED compose, read before the copy replaces it: a pre-generation install whose
     // .env left a generated key blank ran on that compose's `${KEY:-fallback}`, and the repo
     // copy may no longer carry it (queue item 30d: minio's is `:?` now).
@@ -2840,7 +2943,8 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     plan.persist();
     let retainedForPaths = null;
     try { retainedForPaths = parseEnvText(readFileSync(retainedEnvPath(CROW_HOME, bundleId), "utf8")); } catch { /* none kept */ }
-    writeInstallEnv(destDir, writeEnv, manifest, (msg) => appendLog(job, msg), { baseText, baseIsExample, crowHome: CROW_HOME, retained: retainedForPaths });
+    writeInstallEnv(destDir, writeEnv, manifest, (msg) => appendLog(job, msg), { baseText, baseIsExample, crowHome: CROW_HOME, retained: retainedForPaths, clear: clearedEnv });
+    if (clearedEnv.length > 0) appendLog(job, `Cleared ${clearedEnv.join(", ")} (emptied in the form)`);
     if (Object.keys(generated).length > 0) {
       appendLog(job, `Generated ${Object.keys(generated).length} internal secret(s) — stored at mode 600, never shown`);
     }
@@ -3478,11 +3582,19 @@ export default function bundlesRouter() {
     if (!manifest) {
       return res.status(404).json({ error: `Bundle '${bundleId}' not found` });
     }
+    // Carries kept settings and a consent token: never cached.
+    res.set("Cache-Control", "no-store");
     // The keys the install modal must gate on — the server's own list, so the
     // client can never disagree with validateInstall's 400.
     const installRequired = missingInstallEnv(bundleId, {}, manifest);
+    // In-place reinstall: the form shows the kept values (never a secret's value).
+    // Kept values go only to the owner at this machine's own dashboard; anyone else learns
+    // which secrets are set (names only), never a value.
+    const existing = existingInstallEnv(bundleId, manifest);
+    const existingFields = { existing_secret_set: existing.secretSet };
+    if (await isLocalOwner(req)) existingFields.existing_env = existing.values;
     if (!manifestRequiresConsent(manifest)) {
-      return res.json({ required: false, install_required: installRequired });
+      return res.json({ required: false, install_required: installRequired, ...existingFields });
     }
     const composePath = join(APP_BUNDLES, bundleId, "docker-compose.yml");
     const lang = (req.query.lang || req.headers["accept-language"] || "en").toString().slice(0, 2).toLowerCase();
@@ -3507,6 +3619,7 @@ export default function bundlesRouter() {
         token,
         expires_in_seconds,
         install_required: installRequired,
+        ...existingFields,
       });
     } catch (err) {
       res.status(500).json({ error: `Failed to mint consent token: ${err.message}` });
@@ -3585,6 +3698,7 @@ export default function bundlesRouter() {
         manifest: v.manifest,
         keychain: keychainReq,
         ownerEnv: owner ? env_vars : null,
+        editedEnv: Array.isArray(req.body.env_edited) ? req.body.env_edited.filter((k) => typeof k === "string") : null,
       });
       if (!out.ok) {
         finishJob(job, "failed");
