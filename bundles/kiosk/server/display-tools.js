@@ -12,7 +12,7 @@
  */
 import { wantsDisplay, newDisplayKind, createWmTool } from "./wm.js";
 import { buildToolDefinitions, WM_VERBS, MEDIA_VERBS, MUST_NOTES } from "./tools.js";
-import { mentionsOpen, mentionsPlay, mentionsPlayWord, asksOpen, asksPlay, asksCard, showIntent, windowIntent, teachTo, compound, compoundParts, asksTransport, namesMusic, transportWords } from "./patterns.js";
+import { mentionsOpen, mentionsPlay, mentionsPlayWord, asksOpen, asksPlay, asksCard, showIntent, windowIntent, teachTo, compound, compoundParts, asksTransport, namesMusic, transportWords, spelledRequest, NOT_CALL_SIGNS } from "./patterns.js";
 import { spokenWords, KIND_NOUNS, matchT0 } from "./phrases.js";
 import { executeIntent } from "./executor.js";
 import { STRINGS } from "./strings.js";
@@ -46,8 +46,6 @@ function playbackVerbOf(transcript) {
   const v = t0 ? t0.verb : transportWords(transcript);
   return v && MEDIA_VERBS.includes(v) ? v : null;
 }
-/** Review of rev 7 (L2): words with no vowel that are not call signs. */
-const NOT_CALL_SIGNS = new Set(["hmm", "hmmm", "mmm", "mrs", "shh", "shhh", "psst", "brr", "brrr", "grr", "tsk", "pfft", "nth", "pst", "zzz"]);
 const QUESTION_WORDS = new Set(["what", "whats", "who", "whos", "when", "where", "why", "how", "is", "are", "was", "were", "do", "does", "did", "can", "could", "which", "whose", "que", "quien", "como", "cuando", "donde", "cual", "por"]);
 
 /**
@@ -90,7 +88,8 @@ export function createDisplayTools(ctx) {
     if (!w.length || QUESTION_WORDS.has(w[0])) return false;
     // A call sign as STT writes one: a word with no vowel, or an all-capitals word of 3–6 letters with three consonants or more.
     const caps = (String(t).match(/\b[A-Z]{3,6}\b/g) || []).some((x) => (x.match(/[BCDFGHJKLMNPQRSTVWXZ]/g) || []).length >= 3);
-    return caps || w.some((x) => /^play(s|ed|ing)?$/.test(x) || (/^[bcdfghjklmnpqrstvwxz]{3,6}$/.test(x) && !NOT_CALL_SIGNS.has(x)));
+    // A bare spelling ("K T P F.", "No, K. T. P. F.", "Kay tee pee eff"): spaced letters are neither of those words.
+    return caps || spelledRequest(t) !== null || w.some((x) => /^play(s|ed|ing)?$/.test(x) || (/^[bcdfghjklmnpqrstvwxz]{3,6}$/.test(x) && !NOT_CALL_SIGNS.has(x)));
   };
   const playWhen = (t) => mentionsPlay(t) || asksPlay(t) || radioAsk(t);
   const openWhen = (t) => mentionsOpen(t, items);

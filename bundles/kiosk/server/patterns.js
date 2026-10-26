@@ -59,6 +59,80 @@ export function parseOpen(transcript, { pull = true } = {}) {
   return name.length <= 6 ? { name: name.join(" ") } : null;
 }
 
+// ── a spelled call sign (STT quality, first fix) ───────────────────────────────────────────────────
+// Letter names as speech-to-text writes them, en + es. Words that are also ordinary English words ("see", "you",
+// "are", "why", "oh", "tea") are left out: a run of them is a sentence, not a spelling.
+// Each maps to its letter, so a spelling by letter names is the same spelling as by letters ("kay tee pee eff" → "k t p f").
+const LETTER_NAMES = new Map(Object.entries({ kay: "k", pee: "p", bee: "b", cee: "c", dee: "d", tee: "t", gee: "g", jay: "j", eff: "f", ef: "f", el: "l", ell: "l", em: "m", en: "n",
+  ess: "s", vee: "v", zee: "z", zed: "z", cue: "q", ar: "r", aitch: "h", ex: "x",
+  be: "b", ce: "c", de: "d", efe: "f", ge: "g", hache: "h", jota: "j", ka: "k", ele: "l", eme: "m", ene: "n", pe: "p", cu: "q", erre: "r", ere: "r", ese: "s", te: "t", uve: "v", ve: "v", equis: "x", zeta: "z" }));
+// A spelled run may end with an HD number: "K T P F two", "K T P F H D 2" (h, d are letters of the run).
+const SPELL_TAILS = new Set(["hd", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "uno", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve"]);
+// What people say before a spelling, after a miss: "No, K T P F", "I said K T P F", "Dije K T P F".
+const SPELL_LEADS = runs(["no i said", "no i meant", "no its", "no dije", "no es", "i said", "i meant", "i mean", "i say", "it is", "its", "thats", "no", "nope", "nah", "um", "uh", "er", "like",
+  "dije", "digo", "he dicho", "quise decir", "es"]);
+const SPELL_MAX_WORDS = 12;
+/** Words with no vowel that are not call signs (review of rev 7, L2), and the wake word. */
+export const NOT_CALL_SIGNS = new Set(["hmm", "hmmm", "mmm", "mrs", "shh", "shhh", "psst", "brr", "brrr", "grr", "tsk", "pfft", "nth", "pst", "zzz"]);
+const NOT_SPELLED = new Set([...NOT_CALL_SIGNS, "crow"]);
+const isSpelledLetter = (x) => (x.length === 1 && x >= "a" && x <= "z") || LETTER_NAMES.has(x);
+const isTail = (x) => SPELL_TAILS.has(x) || /^\d{1,2}$/.test(x);
+/** The capitals words in what STT wrote, 3–6 letters with three consonants or more, and an optional digit or two ("KTPF", "KTP2"), lower case. */
+const capsWords = (raw) => (String(raw).match(/\b[A-Z]{3,6}[0-9]{0,2}\b/g) || []).filter((x) => (x.match(/[BCDFGHJKLMNPQRSTVWXZ]/g) || []).length >= 3).map((x) => x.toLowerCase());
+/** A word written as a call sign: in capitals in what STT wrote, or a word of 3–6 letters with no vowel. Never the wake word. */
+function callSignWord(word, raw) {
+  const m = /^([a-z]{3,6})\d{0,2}$/.exec(word);
+  if (!m || NOT_SPELLED.has(m[1])) return false;
+  if (!/[aeiouy]/.test(m[1])) return true;
+  return capsWords(raw).includes(word);
+}
+/**
+ * Was a call sign WRITTEN in this transcript: three spelled letters in a row, a capitals word (above), or a word
+ * with no vowel? The near-spelling search (stations.js spellingSearch) runs only then: "Play sock" is not "ROCK".
+ */
+export function writesCallSign(transcript) {
+  const w = spokenWords(String(transcript ?? ""));
+  if (!w) return false;
+  let run = 0;
+  for (const x of w) { run = x.length === 1 && x >= "a" && x <= "z" ? run + 1 : 0; if (run >= 3) return true; }
+  return capsWords(transcript).length > 0 || w.some((x) => /^[a-z]{3,6}$/.test(x) && !/[aeiouy]/.test(x) && !NOT_CALL_SIGNS.has(x));
+}
+/**
+ * The call-sign part of a word list: a run of three spelled letters or more, or one call-sign word; then up to two
+ * HD-number words, and nothing else. → the words joined, each letter name as its letter ("kay" → "k"), or null.
+ */
+function spelledFrom(w, raw) {
+  let j = 0;
+  while (j < w.length && isSpelledLetter(w[j])) j += 1;
+  if (j < 3) j = w.length && callSignWord(w[0], raw) ? 1 : 0;
+  if (!j) return null;
+  const tail = w.slice(j);
+  return tail.length <= 2 && tail.every(isTail) ? w.map((x, i) => (i < j && LETTER_NAMES.has(x) ? LETTER_NAMES.get(x) : x)).join(" ") : null;
+}
+/**
+ * A bare spelled call sign, with no verb: "K T P F.", "No, K T P F", "I said K. T. P. F.", "KTPF.", "Kay tee pee eff",
+ * "Ka te pe efe". The whole utterance (after a short lead-in and polite words) is the spelling, or it is not one:
+ * "K T P F is my favourite" and any question are not. → the spelled words ("k t p f"), or null. The station matcher
+ * decides what they name; this only says that they were said as a name.
+ */
+export function spelledCallSign(transcript) {
+  if (typeof transcript !== "string" || /\?\s*$/.test(transcript)) return null;
+  const all = spokenWords(transcript);
+  if (!all || all.length > SPELL_MAX_WORDS) return null;
+  let w = stripPolite(all);
+  for (;;) { const p = SPELL_LEADS.find((x) => w.length > x.length && sameAt(w, 0, x)); if (!p) break; w = w.slice(p.length); }
+  return spelledFrom(w, transcript);
+}
+/** A spelled station request with no English verb: the bare spelling, or Spanish "pon" and a spelling. → the spelled words, or null. */
+export const spelledRequest = (transcript) => spelledCallSign(transcript) || ponSpelled(transcript);
+
+/** Spanish "Pon K T P F", "Pon la K T P F": "pon" and a spelled call sign (in T1 only, with a radio; never a must-run test). */
+function ponSpelled(transcript) {
+  const w = words(transcript, SPELL_MAX_WORDS);
+  if (!w || w[0] !== "pon" || w.length < 2) return null;
+  return spelledFrom(slot(w, 1), transcript);
+}
+
 /** "play some jazz" → { what: "some jazz" }; "put on the Night Owls" → { what: "night owls" }. */
 export function parsePlay(transcript) {
   const w = words(transcript, PLAY_MAX_WORDS);
@@ -540,7 +614,15 @@ export function matchT1(transcript, ctx) {
   }
   if (!(ctx.sources || []).length) return null;
   const p = parsePlay(transcript);
-  if (p) return { verb: "play", what: p.what, source: "auto" };
+  // callSign: the request was written as a call sign, so a near spelling of one may be asked about (never played).
+  if (p) return { verb: "play", what: p.what, source: "auto", ...(writesCallSign(transcript) ? { callSign: true } : {}) };
+  // A bare spelled call sign ("K T P F.", "No, K T P F", Spanish "Pon K T P F") names a station: searched on the radio
+  // only, and `spelled`: it plays only on an exact name, never on a sound-alike (asked about instead). It is not a
+  // `choice`, so it still answers a pending "Did you mean …?" first, and is searched on its own when it names none of them.
+  if (ctx.sources.includes("radio")) {
+    const spelled = spelledRequest(transcript);
+    if (spelled) return { verb: "play", what: spelled, source: "radio", spelled: true, callSign: true };
+  }
   // "Which one? Say its name." → the next utterance may be just the name ("WXYZ two", "the second album's title").
   if (typeof ctx.pendingChoices === "function" && ctx.pendingChoices(ctx.deviceId) === true) {
     const w = words(transcript, CHOICE_MAX_WORDS);

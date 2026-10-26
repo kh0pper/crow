@@ -173,6 +173,64 @@ export function callSignShaped(key) {
   return w.length === 1 && w[0].length <= 7 && consonants(wordSound(w[0])) >= 4;
 }
 
+/**
+ * Letters apart by one, for call signs (STT quality, first fix): a letter dropped, added or written as another
+ * letter or a digit ("tpf", "atpf", "ktp2" for "ktpf"). A digit is never added, dropped or turned into another
+ * digit: "ktpf hd 2" is not "ktpf hd 1" and "ktpf 2" is not "ktpf". → true when a and b are at most one apart.
+ */
+function oneLetterOff(a, b) {
+  if (Math.abs(a.length - b.length) > 1) return false;
+  const [s, l] = a.length <= b.length ? [a, b] : [b, a];
+  let i = 0;
+  while (i < s.length && s[i] === l[i]) i += 1;
+  if (s.length === l.length) return !(isDigit(s[i]) && isDigit(l[i])) && s.slice(i + 1) === l.slice(i + 1);
+  return !isDigit(l[i]) && s.slice(i) === l.slice(i + 1);
+}
+/** The operator's call-sign words in a station's names: written in capitals, 3–6 letters with three different consonants or more ("KTPF", "WXYZ", "KQEB"; never "JAZZ" or "KISS"), lower case. */
+const callWords = (s) => new Set([s.name, ...s.aliases].flatMap((n) => String(n ?? "").split(/[^A-Za-z]+/))
+  .filter((w) => w.length >= 3 && w.length <= 6 && w === w.toUpperCase() && new Set(w.match(/[BCDFGHJKLMNPQRSTVWXZ]/g) || []).size >= 3).map((w) => w.toLowerCase()));
+/** A request shaped like a call sign: one word of letters, then at most two of "hd" and digits ("ktp 2", "tpf hd 2"). */
+const spellingShaped = (q) => { const w = q.split(" "); return /^[a-z]{2,6}$/.test(w[0]) && w.length <= 3 && w.slice(1).every((x) => x === "hd" || /^\d+$/.test(x)); };
+/**
+ * Near spellings of a call sign, ASKED about and never played (after the written form and the sound found nothing).
+ * Only against the station keys that start with one of the operator's call-sign words; never an ordinary name.
+ *   b2: three letters or more that start a bare call sign ("ktp" for the alias "KTPF"): a spelling cut short (two
+ *       letters, "wx", is too little to go on);
+ *   b3: a call-sign key one letter off ("tpf", "atpf", "ktp2");
+ *   b4: an exact name or alias followed by one or two other words ("ktpf downtown"), for any station.
+ * → the stations: one is asked about ("Did you mean …?"), two to four are offered ("Which one?"), more is nothing.
+ */
+export function spellingSearch(stations, q, keysOf, { callSign = false, explicit = false } = {}) {
+  const hits = new Set();
+  // Only a request WRITTEN as a call sign (patterns.js writesCallSign: "ATPF", "K T P", "tpf") is compared letter by
+  // letter; "Play sock" is never "ROCK". A name with a word after it also counts when the radio was named.
+  if (!callSign && !explicit) return [];
+  const cq = compact(q), bare = !q.includes(" ");
+  if (callSign && spellingShaped(q) && cq.length >= 3) {
+    for (const s of stations) {
+      const cw = callWords(s);
+      for (const k of keysOf(s)) {
+        if (!cw.has(k.split(" ")[0])) continue;
+        const ck = compact(k);
+        if ((ck.length >= 4 && oneLetterOff(cq, ck)) || (bare && !k.includes(" ") && ck.length > cq.length && ck.startsWith(cq))) hits.add(s);
+      }
+    }
+  }
+  if (!hits.size) {
+    const w = q.split(" ");
+    // The words dropped from the end are plain words: never a digit or "hd" (those name another station).
+    for (let n = 1; n <= 2 && w.length - n >= 1; n += 1) {
+      if (w.slice(-n).some((x) => x === "hd" || /\d/.test(x))) break;
+      const head = compact(w.slice(0, -n).join(" "));
+      for (const s of stations) if (keysOf(s).some((k) => compact(k) === head)) hits.add(s);
+      if (hits.size) break;
+    }
+  }
+  const list = [...hits];
+  if (list.length === 1) return [{ s: list[0], ask: true }];
+  return list.length <= 4 ? list.map((s) => ({ s })) : [];
+}
+
 /** list(): Station[] — the instance's presets as they are now (the runtime keeps them in memory). */
 export function createStationsSource({ list }) {
   const all = () => { try { const l = list(); return Array.isArray(l) ? l : []; } catch { return []; } };
@@ -192,7 +250,7 @@ export function createStationsSource({ list }) {
      * "auto" search it is a guess, and another source may have the real thing under that name.
      * explicit with no station name left ("play the radio"): the one station plays, or up to four are offered.
      */
-    search(what, { explicit = false } = {}) {
+    search(what, { explicit = false, callSign = false } = {}) {
       const stations = all();
       const q = stationKey(what);
       if (!q) return explicit ? (stations.length === 1 ? [cand(stations[0], true)] : stations.slice(0, 4).map((s) => cand(s, false))) : [];
@@ -205,7 +263,10 @@ export function createStationsSource({ list }) {
       // Nothing by its written form: how it SOUNDS (smoke 2026-10-06 F1). Never confident by itself:
       // a lone same-sound hit is `near` (the resolver may play it with no model only when no source has
       // anything else); two stations that sound alike are offered, never guessed between.
-      return soundSearch(stations, q, { explicit }).map(({ s, near, ask }) => ({ ...cand(s, false), ...(near ? { near: true } : {}), ...(ask ? { ask: true } : {}) }));
+      const bySound = soundSearch(stations, q, { explicit });
+      // Nothing by sound either: a spelling cut short, one letter off, or a name with a word after it — asked, never played.
+      const found = bySound.length ? bySound : spellingSearch(stations, q, keys, { callSign, explicit });
+      return found.map(({ s, near, ask }) => ({ ...cand(s, false), ...(near ? { near: true } : {}), ...(ask ? { ask: true } : {}) }));
     },
     resolve: (c) => playable(find(c)),
     queue: (c) => [playable(find(c))],
