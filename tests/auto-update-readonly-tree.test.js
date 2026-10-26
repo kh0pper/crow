@@ -97,7 +97,7 @@ test("a read-only checkout is never pulled: the tree half is skipped with an hon
     const r = await checkForUpdates({ instance: null });
     assert.equal(r.skipped, "read-only");
     assert.equal(r.pulled, false);
-    assert.ok("converged" in r, "the instance half ran (convergeInstance returned)");
+    assert.ok(typeof r.converged === "boolean" && r.skipped === "read-only", "the instance half ran and reported");
     assert.equal(g(fx.work, "rev-parse", "HEAD"), before, "HEAD did not move");
     assert.match(db.saved.auto_update_last_result, /read-only for this instance/);
     assert.equal(db.saved.auto_update_latest_version, g(fx.work, "rev-parse", "--short", "origin/main"));
@@ -155,4 +155,13 @@ test("acquireCheckoutLock on a read-only tree OBSERVES the lock: free → procee
   } finally {
     fx.cleanup();
   }
+});
+
+test("lock staleness: a pid-less lock younger than the write grace is held; another user's live pid (EPERM) is alive", async () => {
+  const { _lockPrimitivesForTest } = await import("../servers/gateway/auto-update.js");
+  const { lockIsStale } = _lockPrimitivesForTest;
+  assert.equal(lockIsStale({ pid: NaN, ts: NaN, mtimeMs: Date.now() }), false, "being written");
+  assert.equal(lockIsStale({ pid: NaN, ts: NaN, mtimeMs: Date.now() - 60_000 }), true, "abandoned empty lock");
+  assert.equal(lockIsStale({ pid: 1, ts: Date.now() }), false, "pid 1 exists (EPERM for a normal user, or alive as root)");
+  assert.equal(lockIsStale({ pid: 2 ** 22 + 11, ts: Date.now() }), true, "a dead pid");
 });
