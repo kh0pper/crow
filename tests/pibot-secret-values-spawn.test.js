@@ -20,8 +20,11 @@ process.env.CROW_HOME = HOME;
 process.env.CROW_DATA_DIR = join(HOME, "data");
 delete process.env.CROW_DB_PATH;
 mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
-const FAKE = "fake-" + "spawn-" + "secret-0000";
-writeFileSync(join(HOME, ".env"), "SPAWN_TEST_API_KEY=" + FAKE + "\n");
+const FAKE = "fakeGenSpawn" + "Ab3x".repeat(9);      // generated-secret shaped
+// a trusted source: a retained bundle secret in the (sandbox-hidden) secrets dir
+const RETAINED = join(HOME, "secrets", "bundle-env", "demo.env");
+mkdirSync(join(HOME, "secrets", "bundle-env"), { recursive: true, mode: 0o700 });
+writeFileSync(RETAINED, "SPAWN_TEST_API_KEY=" + FAKE + "\n");
 
 const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
 const { secretValuesPath, writeSecretValuesFile } = await import("../servers/shared/secret-values.js");
@@ -64,6 +67,7 @@ test("without bubblewrap (CROW_PI_SANDBOX=off) the file is neither written nor n
   await pi.exited;
   assert.equal(r.path, null);
   assert.equal(existsSync(PATH), false);
+  assert.equal(r.shell, "ERR");
 });
 
 test("sandboxed: the engine's file, fresh and 600, named to pi; a bot shell cannot read it, before or after it is replaced", { skip: noSandbox }, async () => {
@@ -106,8 +110,8 @@ test("sandboxed: a bot def's spawn_env, the session extraEnv and an inherited va
 });
 
 test("sandboxed: the file is refreshed at each spawn (a secret added since the last spawn is in it)", { skip: noSandbox }, async () => {
-  const later = "fake-" + "added-later-" + "0000";
-  writeFileSync(join(HOME, ".env"), "SPAWN_TEST_API_KEY=" + FAKE + "\nLATER_TEST_TOKEN=" + later + "\n");
+  const later = "fakeGenLater" + "Cd5y".repeat(9);
+  writeFileSync(RETAINED, "SPAWN_TEST_API_KEY=" + FAKE + "\nLATER_TEST_TOKEN=" + later + "\n");
   const { pi } = await spawnReport();
   await pi.exited;
   assert.ok(readFileSync(PATH, "utf8").split("\n").includes(later));

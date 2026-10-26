@@ -146,7 +146,7 @@ import { countCsvTools, checkToolBudget, sessionBudgetMessage } from "../../scri
 import Database from "better-sqlite3";
 import { resolveDataDir } from "../db.js";
 import { randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
 
@@ -156,6 +156,7 @@ import { cardBriefBlock } from "../../scripts/pi-bots/card-brief.mjs";
 import { appendDates } from "../shared/relative-dates.js";
 import { stripContextEcho } from "./voice/context-echo.js";
 import { maskSecrets, maskSecretsDetailed, maskDeep, hiddenNote, HIDDEN_NOTE_RE, REDACTED } from "../shared/secret-mask.js";
+import { userRuntimeDirs } from "../../scripts/pi-bots/pi_sandbox.mjs";
 
 /** Lease file name under CROW_HOME. Consumed by C-14's reaper exemption. */
 export const LEASE_FILENAME = "perch-interactive-leases.json";
@@ -426,13 +427,17 @@ function cardFrom(m) {
   // needs back (a select's option string, an untouched editor prefill) is
   // kept on a non-enumerable symbol (never spread into a frame, never
   // serialized) and mapped back in answer().
-  const title = maskSecretsDetailed(m.title == null ? "" : String(m.title));
+  const CARD = { card: true };
+  const title = maskSecretsDetailed(m.title == null ? "" : String(m.title), CARD);
   const card = { requestId: m.id, method: m.method, title: title.text };
   let hidden = title.count;
   let failed = !!title.failed;
+  let tooLong = !!title.truncated;
   const raw = {};
   if (Array.isArray(m.options)) {
-    const masked = m.options.map((o) => maskSecrets(o));
+    const res = m.options.map((o) => maskSecretsDetailed(o, CARD));
+    for (const r of res) { failed = failed || !!r.failed || !!r.truncated; }
+    const masked = res.map((r) => r.text);
     if (masked.some((o, i) => o !== String(m.options[i]))) {
       card.options = uniqueShown(masked);
       raw.options = m.options.slice();
@@ -441,16 +446,19 @@ function cardFrom(m) {
       card.options = m.options.slice();
     }
   }
-  if (m.placeholder != null) card.placeholder = maskSecrets(m.placeholder);
+  if (m.placeholder != null) card.placeholder = maskSecrets(m.placeholder, CARD);
   if (m.message != null) {
-    const msg = maskSecretsDetailed(m.message);
+    const msg = maskSecretsDetailed(m.message, CARD);
     card.message = msg.text;
     hidden += msg.count;
     failed = failed || !!msg.failed;
+    tooLong = tooLong || !!msg.truncated;
   }
   if (m.prefill != null) {
-    const pre = maskSecretsDetailed(m.prefill);
+    const pre = maskSecretsDetailed(m.prefill, CARD);
     card.prefill = pre.text;
+    failed = failed || !!pre.failed;
+    tooLong = tooLong || !!pre.truncated;
     if (pre.count) { raw.prefill = m.prefill; hidden += pre.count; }
   }
   // The contract's note on the first line, unless pi-lab's own is there.
@@ -459,9 +467,13 @@ function cardFrom(m) {
   }
   // The mask itself failed: the card shows a blank, and a blank must never be
   // approved (answer() turns a confirm into a "no").
-  if (failed) {
+  if (failed || tooLong) {
     raw.failed = true;
-    card.message = "This card could not be checked for secrets, so its text is not shown. It cannot be approved from here.";
+    card.message = tooLong
+      ? "This card is too long to show safely, so its text is not shown. It cannot be approved from here."
+      : "This card could not be checked for secrets, so its text is not shown. It cannot be approved from here.";
+    if (card.prefill != null) card.prefill = "";
+    if (Array.isArray(card.options)) card.options = card.options.map((o) => (String(o).length > 200 ? String(o).slice(0, 200) + "\u2026" : o));
   }
   if (raw.options || raw.prefill != null || raw.failed) Object.defineProperty(card, RAW_CARD, { value: raw });
   return card;
@@ -521,12 +533,12 @@ function maskQuestions(qs) {
   return qs.map((q) => {
     if (!q || typeof q !== "object") return q;
     const out = { ...q };
-    if (typeof q.question === "string") out.question = maskSecrets(q.question);
-    if (typeof q.header === "string") out.header = maskSecrets(q.header);
+    if (typeof q.question === "string") out.question = maskSecrets(q.question, { card: true });
+    if (typeof q.header === "string") out.header = maskSecrets(q.header, { card: true });
     if (Array.isArray(q.options)) {
-      const labels = uniqueShown(q.options.map((o) => (o && o.label != null ? maskSecrets(String(o.label)) : o && o.label)));
+      const labels = uniqueShown(q.options.map((o) => (o && o.label != null ? maskSecrets(String(o.label), { card: true }) : o && o.label)));
       out.options = q.options.map((o, i) => (o && typeof o === "object"
-        ? { ...o, label: labels[i], ...(typeof o.description === "string" ? { description: maskSecrets(o.description) } : {}) }
+        ? { ...o, label: labels[i], ...(typeof o.description === "string" ? { description: maskSecrets(o.description, { card: true }) } : {}) }
         : o));
     }
     return out;
@@ -558,9 +570,11 @@ const FRAME_TEXT_FIELDS = ["text", "argsText", "resultText", "title", "message",
 function maskFrame(event) {
   if (!event || typeof event !== "object") return event;
   let out = event;
+  // A card frame is the approval surface: card mode (no PEM heuristic).
+  const opts = event.type === "ask_user" ? { card: true } : undefined;
   for (const k of FRAME_TEXT_FIELDS) {
     if (typeof event[k] !== "string" || !event[k]) continue;
-    const v = maskSecrets(event[k]);
+    const v = maskSecrets(event[k], opts);
     if (v !== event[k]) { if (out === event) out = { ...event }; out[k] = v; }
   }
   return out;
@@ -631,6 +645,10 @@ export function createInteractiveEngine({
   clearTimer = clearTimeout,
   log: rawLog = (m) => console.log("[perch-interactive] " + m),
   notifications = null,
+  // Dirs the pi sandbox hides from a bot besides <CROW_HOME>/secrets (user
+  // runtime/session IPC): send_user_file, which copies on the host, never
+  // serves from them. A seam for tests.
+  hiddenDirs = userRuntimeDirs(process.getuid(), { create: false }),
 } = {}) {
   // Every engine log line can quote a bot's card, stderr or reply: masked.
   const log = (m) => rawLog(maskSecrets(m));
@@ -2304,6 +2322,30 @@ export function createInteractiveEngine({
    * servable:false. Never throws — the caller is a protocol branch that must
    * not break the turn.
    */
+  /** A path under, or a file sharing an inode with one under, the instance's
+   * secrets dir (one level of subdirs: keychain.key, bundle-env/*). */
+  function insideSecrets(realPath, st) {
+    for (const d of hiddenDirs || []) {
+      let r;
+      try { r = realpathSync(d); } catch { continue; }
+      if (realPath === r || realPath.startsWith(r + sep)) return true;
+    }
+    let secretsReal;
+    try { secretsReal = realpathSync(join(crowHome, "secrets")); } catch { return false; }
+    if (realPath === secretsReal || realPath.startsWith(secretsReal + sep)) return true;
+    const walk = (d, depth) => {
+      let names = [];
+      try { names = readdirSync(d, { withFileTypes: true }); } catch { return false; }
+      for (const n of names) {
+        const p = join(d, n.name);
+        if (n.isDirectory()) { if (depth < 2 && walk(p, depth + 1)) return true; continue; }
+        try { const x = lstatSync(p); if (x.ino === st.ino && x.dev === st.dev) return true; } catch { /* raced */ }
+      }
+      return false;
+    };
+    return walk(secretsReal, 0);
+  }
+
   async function handleFileNotify(s, meta) {
     if (!meta || typeof meta !== "object") return;
     const src = typeof meta.path === "string" ? meta.path : "";
@@ -2314,10 +2356,22 @@ export function createInteractiveEngine({
     let stored = null;
     let size = Number(meta.size);
     let mime = typeof meta.mime === "string" ? meta.mime : "application/octet-stream";
+    let fd;
     try {
-      const st = lstatSync(src);
+      // ONE open, then every check on what was opened (no check-then-copy
+      // race): the last component never a symlink (O_NOFOLLOW, the existing
+      // "symlinked source is refused" rule), a regular file within the cap,
+      // its real path taken from the fd itself, never the instance's secrets
+      // dir (keychain key, retained bundle secrets, the secret-values file:
+      // hidden from the bot's sandbox, while this copy runs outside it), and
+      // never the same inode as a file in there (a hard link). The copy is
+      // read from the same fd.
+      fd = openSync(src, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+      const st = fstatSync(fd);
       if (st.isFile() && st.size <= FILE_MAX_BYTES) {
         size = st.size;
+        const srcReal = readlinkSync("/proc/self/fd/" + fd);
+        if (insideSecrets(srcReal, st)) throw new Error("secrets dir");
         // A dir is only ever mkdir'd when it is ABSOLUTE: the worldRoot
         // fallback exists for test seams, and joining onto "" would produce a
         // relative path and scatter an `outputs/` tree into the gateway's cwd.
@@ -2325,13 +2379,6 @@ export function createInteractiveEngine({
         if (!isAbsolute(dir || "")) throw new Error("no absolute outputs dir");
         mkdirSync(dir, { recursive: true });
         const dirReal = realpathSync(dir);
-        const srcReal = realpathSync(src);
-        // The instance's secrets dir (keychain key, retained bundle secrets,
-        // the secret-values file) is hidden from the bot's sandbox; this copy
-        // runs outside it, so it must never serve anything from there.
-        let secretsReal = null;
-        try { secretsReal = realpathSync(join(crowHome, "secrets")); } catch { /* none */ }
-        if (secretsReal && (srcReal === secretsReal || srcReal.startsWith(secretsReal + sep))) throw new Error("secrets dir");
         // Strictly-under, the workspace route's own formula: the `+ sep` is
         // what turns a string-prefix match into a containment test.
         if (srcReal.startsWith(dirReal + sep)) {
@@ -2340,11 +2387,19 @@ export function createInteractiveEngine({
           servable = true;
         } else {
           stored = resolveSentName(dir, name);
-          copyFileSync(srcReal, join(dir, stored));
+          const buf = Buffer.alloc(st.size);
+          let off = 0;
+          while (off < st.size) {
+            const n = readSync(fd, buf, off, st.size - off, off);
+            if (n <= 0) break;
+            off += n;
+          }
+          writeFileSync(join(dir, stored), buf.subarray(0, off), { flag: "wx" });
           servable = true;
         }
       }
     } catch { /* refused/unreachable source -> name-only card */ }
+    finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* closed */ } } }
     const frame = { type: "file", name, stored, mime, size: Number.isFinite(size) ? size : 0, caption, servable };
     emit(s, frame);
     const db = createDbClient();
@@ -3441,11 +3496,15 @@ export function createInteractiveEngine({
       // A masked card (cardFrom): the shown option or untouched prefill maps
       // back to what pi offered. An edited prefill is sent as typed.
       const raw = card[RAW_CARD];
-      if (raw && raw.options && Array.isArray(card.options)) {
+      if (raw && raw.failed) {
+        payload.cancelled = true;
+        delete payload.value;
+      }
+      if (raw && !raw.failed && raw.options && Array.isArray(card.options)) {
         const i = card.options.indexOf(payload.value);
         if (i >= 0) payload.value = String(raw.options[i]);
       }
-      if (raw && raw.prefill != null) payload.value = restorePrefill(payload.value, card.prefill, String(raw.prefill));
+      if (raw && !raw.failed && raw.prefill != null) payload.value = restorePrefill(payload.value, card.prefill, String(raw.prefill));
     }
     s.pi.send(payload);
     settleAsk(s);                                    // 2026-10-20: expiry off, group closed

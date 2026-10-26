@@ -78,16 +78,13 @@ export function plausibleSecretValue(v) {
 }
 
 /**
- * A value from a source a bot shell can write (an .env, a token file, a bundle
- * file, a provider row): accepted only when it looks like a token, so a bot
- * cannot plant a word or a command that would then be hidden on every card it
- * wants approved. 12-256 characters of [A-Za-z0-9._~+=-], with a digit or 20+
- * characters. No space, quote, slash, colon or shell metacharacter.
+ * Defense in depth on every exact value, whatever its source: never one
+ * shaped like a flag (leading "-") or a domain/host name (dot-separated
+ * labels), since hiding those on a card hides what a command does.
  */
-export function tokenShaped(v) {
-  if (typeof v !== "string") return false;
-  const s = v.trim();
-  return /^[A-Za-z0-9._~+=-]{12,256}$/.test(s) && (/\d/.test(s) || s.length >= 20);
+export function safeShape(v) {
+  const s = String(v);
+  return !s.startsWith("-") && !/^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\.?$/.test(s);
 }
 
 /** One-line values of usable length; multi-line values (keys) contribute
@@ -105,11 +102,14 @@ export function normalizeValues(values) {
   return [...out].sort((a, b) => b.length - a.length || (a < b ? -1 : 1));
 }
 
-/** Secret-named values from an env-like object (a process env, a parsed .env). */
+/** Secret-named values from a process env: plausible, no dot anywhere (a
+ * version, a host, a file name), never flag- or domain-shaped. */
 export function secretValuesFromEnv(env) {
   const out = [];
   for (const [k, v] of Object.entries(env || {})) {
-    if (isSecretEnvName(k) && plausibleSecretValue(v)) out.push(String(v).trim());
+    if (!isSecretEnvName(k) || !plausibleSecretValue(v)) continue;
+    const t = String(v).trim();
+    if (!t.includes(".") && safeShape(t)) out.push(t);
   }
   return out;
 }

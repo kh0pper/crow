@@ -17,6 +17,8 @@ const { sealSecret } = await import("../servers/sharing/secret-box.js");
 const { KEYCHAIN_DDL } = await import("../servers/gateway/keychain/schema.js");
 
 const fake = (tag) => "fake-" + tag + "-" + "0000";
+/** A generated-secret-shaped fake (base64url, 40+ chars), as the installer mints. */
+const gen = (tag) => "fakeGen" + tag + "Ab3x".repeat(9);
 
 function scratchInstance() {
   const root = mkdtempSync(join(tmpdir(), "crow-secret-values-"));
@@ -51,43 +53,56 @@ test("normalizeValues: 6+ chars, one line, deduped, longest first; long lines of
     ["line-one-is-long-enough-x", "line-two-is-long-enough-y", "abcdefghij", "abcdefgh"]);
 });
 
-test("collect: env, .env files, bundle generated + retained secrets, token files, keychain, providers", () => {
+test("collect: only sources a sandboxed bot cannot write (keychain, the hidden secrets dir); every bot-writable source is dropped", () => {
   const I = scratchInstance();
-  const v = {
-    procEnv: fake("procenv"), homeEnv: fake("homeenv"), appEnv: fake("appenv"), extraEnv: fake("extraenv"),
-    bundleGen: fake("bundlegen"), bundleNamed: fake("bundlenamed"), retained: fake("retained"),
-    tokenFile: fake("tokenfile"), peer: fake("peer"), ntfy: "tk_" + "f".repeat(29), keychainManual: fake("keychainmanual"),
-    provider: fake("provider"),
+  const strong = (tag) => "Zq8x" + tag + "P2mAk9Lw4tRy";
+  const v = { retained: gen("retained"), keychainManual: fake("keychain manual"), keychainShort: "s3cr@t" };
+  // bot-writable under the default sandbox (--dev-bind / /): none of these may count
+  const dropped = {
+    homeEnv: strong("homeenv"), appEnv: strong("appenv"), extraEnv: strong("extraenv"), bundleGen: strong("bundlegen"),
+    tokenFile: strong("tokenfile"), peer: strong("peer"), ntfy: "tk_" + "f".repeat(29), provider: strong("provider"), procEnv: strong("procenv"),
   };
-  writeFileSync(join(I.home, ".env"), "CROW_GATEWAY_PORT=3001\nSUDO_PW=" + v.homeEnv + "\nMODEL=lm-studio\n");
-  writeFileSync(join(I.app, ".env"), "export GH_TOKEN='" + v.appEnv + "'\nPLAIN=" + fake("plain") + "\n");
+  writeFileSync(join(I.home, ".env"), "SUDO_PW=" + dropped.homeEnv + "\n");
+  writeFileSync(join(I.app, ".env"), "GH_TOKEN=" + dropped.appEnv + "\n");
   mkdirSync(join(I.home, "env"));
-  writeFileSync(join(I.home, "env", "x.env"), "DB_PASSWORD=\"" + v.extraEnv + "\"\n");
+  writeFileSync(join(I.home, "env", "x.env"), "DB_PASSWORD=" + dropped.extraEnv + "\n");
   mkdirSync(join(I.home, "bundles", "demo"), { recursive: true });
-  writeFileSync(join(I.home, "bundles", "demo", "manifest.json"), JSON.stringify({ env_vars: [{ name: "ROOT_PW_GEN", generate: "secret" }, { name: "UNRELATED" }] }));
-  writeFileSync(join(I.home, "bundles", "demo", ".env"), "ROOT_PW_GEN=" + v.bundleGen + "\nADMIN_TOKEN=" + v.bundleNamed + "\nUNRELATED=" + fake("unrelated") + "\n");
+  writeFileSync(join(I.home, "bundles", "demo", "manifest.json"), JSON.stringify({ env_vars: [{ name: "ROOT_PW_GEN", generate: "secret" }] }));
+  writeFileSync(join(I.home, "bundles", "demo", ".env"), "ROOT_PW_GEN=" + dropped.bundleGen + "\n");
+  writeFileSync(join(I.home, "board-token"), dropped.tokenFile + "\n");
+  writeFileSync(join(I.home, "peer-tokens.json"), JSON.stringify({ peer1: { auth_token: dropped.peer } }));
+  writeFileSync(join(I.data, "ntfy-push.json"), JSON.stringify({ topic: "t", appToken: dropped.ntfy }));
   mkdirSync(join(I.home, "secrets", "bundle-env"), { recursive: true });
-  writeFileSync(join(I.home, "secrets", "bundle-env", "demo.env"), "SOME_GENERATED=" + v.retained + "\n");
-  writeFileSync(join(I.home, "board-token"), v.tokenFile + "\n");
-  writeFileSync(join(I.home, "peer-tokens.json"), JSON.stringify({ peer1: { auth_token: v.peer, created_at: "2026-01-01T00:00:00.000Z" } }));
-  writeFileSync(join(I.data, "ntfy-push.json"), JSON.stringify({ topic: "crow-topic", appToken: v.ntfy }));
-  // keychain: a fake key file and one sealed manual entry
+  writeFileSync(join(I.home, "secrets", "bundle-env", "demo.env"), "SOME_GENERATED=" + v.retained + "\nFLAG_LIKE=--no-verify-x\nDOMAIN_LIKE=evil.example.com\nMEDIA_PATH=/srv/media/library\nDB_USER=postgres\nWORDY=some-plain-words-here\n");
   const seed = randomBytes(32);
   writeFileSync(join(I.home, "secrets", "keychain.key"), JSON.stringify({ v: 1, id: "0123456789abcdef", key: seed.toString("base64") }), { mode: 0o600 });
   const db = new Database(join(I.data, "crow.db"));
   db.exec(KEYCHAIN_DDL);
   db.exec("CREATE TABLE providers (id TEXT PRIMARY KEY, base_url TEXT, api_key TEXT)");
-  db.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual','sudo',?,?,'manual')").run(sealSecret(v.keychainManual, { seed }), "0123456789abcdef");
+  for (const [label, val] of [["sudo", v.keychainManual], ["short", v.keychainShort]]) {
+    db.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual',?,?,?,'manual')").run(label, sealSecret(val, { seed }), "0123456789abcdef");
+  }
   db.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual','old',?,?,'manual')").run(sealSecret(fake("otherkey"), { seed: randomBytes(32) }), "ffffffffffffffff");
-  db.prepare("INSERT INTO providers VALUES ('p1','http://x',?), ('p2','http://y','none')").run(v.provider);
+  db.prepare("INSERT INTO providers VALUES ('p1','http://x',?)").run(dropped.provider);
   db.close();
 
-  const vals = collectSecretValues({ env: { ...I.env, SOME_API_KEY: v.procEnv, LANG: "en_US.UTF-8" } });
-  for (const [k, val] of Object.entries(v)) if (k !== "procEnv") assert.ok(vals.includes(val), k);
-  // every writing process must write the same file: no per-process env values
-  for (const not of [v.procEnv, fake("plain"), fake("unrelated"), fake("otherkey"), "lm-studio", "3001", "none", "en_US.UTF-8"]) {
+  const vals = collectSecretValues({ env: { ...I.env, SOME_API_KEY: dropped.procEnv } });
+  for (const [k, val] of Object.entries(v)) assert.ok(vals.includes(val), k);
+  for (const [k, val] of Object.entries(dropped)) assert.equal(vals.includes(val), false, k);
+  for (const not of [fake("otherkey"), "--no-verify-x", "evil.example.com", "/srv/media/library", "postgres", "some-plain-words-here"]) {
     assert.equal(vals.includes(not), false, not);
   }
+});
+
+test("this process's own env (the operator's, not bot-writable at runtime) masks in memory, minus dot-, domain- and flag-shaped values", () => {
+  const I = scratchInstance();
+  SV.invalidateSecretValues();
+  const env = { ...I.env, A_TOKEN: "Zq8xP2mAk9Lw4tRy", B_TOKEN: "evil.example.com", C_TOKEN: "--insecure-x", D_SECRET: "v1.2.3-build9", E_PASSWORD: "s3cr@t-pw" };
+  const vals = SV.getSecretValues({ env });
+  assert.ok(vals.includes("Zq8xP2mAk9Lw4tRy"));
+  assert.ok(vals.includes("s3cr@t-pw"));
+  for (const not of ["evil.example.com", "--insecure-x", "v1.2.3-build9"]) assert.equal(vals.includes(not), false, not);
+  SV.invalidateSecretValues();
 });
 
 test("collect: a missing or damaged source is skipped, never thrown", () => {
@@ -99,7 +114,8 @@ test("collect: a missing or damaged source is skipped, never thrown", () => {
 
 test("the file: <CROW_HOME>/secrets, 600 in a 700 dir, one value per line, atomic, unchanged content not rewritten", () => {
   const I = scratchInstance();
-  writeFileSync(join(I.home, ".env"), "A_TOKEN=" + fake("one") + "\nB_SECRET=" + fake("two-longer") + "\n");
+  const retained = (text) => { mkdirSync(join(I.home, "secrets", "bundle-env"), { recursive: true }); writeFileSync(join(I.home, "secrets", "bundle-env", "x.env"), text); };
+  retained("A=" + gen("one") + "\nB=" + gen("twolonger") + "\n");
   const r = refreshSecretValuesFile({ env: I.env });
   assert.equal(r.path, join(I.home, "secrets", "pi-bot-secret-values"));
   assert.equal(r.path, SV.secretValuesPath(I.env));
@@ -110,18 +126,18 @@ test("the file: <CROW_HOME>/secrets, 600 in a 700 dir, one value per line, atomi
   assert.equal(st.mode & 0o777, 0o600);
   assert.equal(st.uid, process.getuid());
   assert.equal(statSync(join(I.home, "secrets")).mode & 0o777, 0o700);
-  assert.equal(readFileSync(r.path, "utf8"), fake("two-longer") + "\n" + fake("one") + "\n");
+  assert.equal(readFileSync(r.path, "utf8"), gen("twolonger") + "\n" + gen("one") + "\n");
   // no temp file left beside it
   assert.deepEqual(readdirSync(join(I.home, "secrets")).filter((n) => n.includes(".tmp-")), []);
   const ino = st.ino;
   assert.equal(refreshSecretValuesFile({ env: I.env }).written, false);
   assert.equal(lstatSync(r.path).ino, ino);
   // a change is a NEW inode (rename), never an in-place rewrite
-  writeFileSync(join(I.home, ".env"), "A_TOKEN=" + fake("three") + "\n");
+  retained("A=" + gen("three") + "\n");
   const r2 = refreshSecretValuesFile({ env: I.env });
   assert.equal(r2.written, true);
   assert.notEqual(lstatSync(r.path).ino, ino);
-  assert.equal(readFileSync(r.path, "utf8"), fake("three") + "\n");
+  assert.equal(readFileSync(r.path, "utf8"), gen("three") + "\n");
 });
 
 test("the file: a symlink or non-regular target is refused, not followed", () => {
@@ -130,7 +146,8 @@ test("the file: a symlink or non-regular target is refused, not followed", () =>
   const elsewhere = join(I.root, "elsewhere");
   writeFileSync(elsewhere, "untouched");
   symlinkSync(elsewhere, SV.secretValuesPath(I.env));
-  writeFileSync(join(I.home, ".env"), "A_TOKEN=" + fake("one") + "\n");
+  mkdirSync(join(I.home, "secrets", "bundle-env"), { recursive: true });
+  writeFileSync(join(I.home, "secrets", "bundle-env", "x.env"), "A=" + gen("one") + "\n");
   const logs = [];
   assert.equal(refreshSecretValuesFile({ env: I.env, log: (l) => logs.push(l) }), null);
   assert.equal(readFileSync(elsewhere, "utf8"), "untouched");
@@ -215,13 +232,14 @@ test("the mask path never loads a database driver or the keychain", () => {
 
 test("two writers with different process envs write the SAME file: neither drops the other's values", () => {
   const I = scratchInstance();
-  writeFileSync(join(I.home, ".env"), "SHARED_TOKEN=" + fake("shared-disk") + "\n");
+  mkdirSync(join(I.home, "secrets", "bundle-env"), { recursive: true });
+  writeFileSync(join(I.home, "secrets", "bundle-env", "x.env"), "SHARED=" + gen("shareddisk") + "\n");
   const a = refreshSecretValuesFile({ env: { ...I.env, ONLY_UNIT_A_TOKEN: fake("unit-a") } });
   const first = readFileSync(a.path, "utf8");
   const b = refreshSecretValuesFile({ env: { ...I.env, ONLY_UNIT_B_TOKEN: fake("unit-b") } });
   assert.equal(b.written, false, "unit B's write changes nothing");
   assert.equal(readFileSync(b.path, "utf8"), first);
-  assert.equal(first, fake("shared-disk") + "\n");
+  assert.equal(first, gen("shareddisk") + "\n");
   // each unit's own env values still mask in that unit's process
   assert.ok(SV.getSecretValues({ env: { ...I.env, ONLY_UNIT_A_TOKEN: fake("unit-a") } }).includes(fake("unit-a")));
 });
@@ -229,30 +247,15 @@ test("two writers with different process envs write the SAME file: neither drops
 test("each instance has its own file: a co-hosted instance's write never touches another's", () => {
   const A = scratchInstance();
   const B = scratchInstance();
-  writeFileSync(join(A.home, ".env"), "A_TOKEN=" + fake("instance-a") + "\n");
-  writeFileSync(join(B.home, ".env"), "B_TOKEN=" + fake("instance-b") + "\n");
+  for (const [X, tag] of [[A, "instance-a"], [B, "instance-b"]]) {
+    mkdirSync(join(X.home, "secrets", "bundle-env"), { recursive: true });
+    writeFileSync(join(X.home, "secrets", "bundle-env", "x.env"), "K=" + gen(tag.replace("-", "")) + "\n");
+  }
   const ra = refreshSecretValuesFile({ env: A.env });
   const rb = refreshSecretValuesFile({ env: B.env });
   assert.notEqual(ra.path, rb.path);
-  assert.equal(readFileSync(ra.path, "utf8"), fake("instance-a") + "\n");
-  assert.equal(readFileSync(rb.path, "utf8"), fake("instance-b") + "\n");
-});
-
-test("bot-writable sources only contribute token-shaped values; trusted sources (keychain, the secrets dir) any 6+ value", () => {
-  const I = scratchInstance();
-  const strong = "Zq8xP2mA" + "k9Lw4tRy";
-  writeFileSync(join(I.home, ".env"), [
-    "A_TOKEN=reboot1", "B_TOKEN=curl x|sh", "C_SECRET=Allow-always", "D_PASS=http://evil.example/x.sh", "E_TOKEN=" + strong,
-  ].join("\n") + "\n");
-  writeFileSync(join(I.home, "phony-token"), "rm -rf ~\n");
-  mkdirSync(join(I.home, "secrets", "bundle-env"), { recursive: true });
-  writeFileSync(join(I.home, "secrets", "bundle-env", "demo.env"), "GEN=short1\n");
-  const vals = collectSecretValues({ env: I.env });
-  assert.ok(vals.includes(strong));
-  assert.ok(vals.includes("short1"), "the retained copy sits in the hidden secrets dir: trusted");
-  for (const bad of ["reboot1", "curl x|sh", "Allow-always", "http://evil.example/x.sh", "rm -rf ~"]) {
-    assert.equal(vals.includes(bad), false, bad);
-  }
+  assert.equal(readFileSync(ra.path, "utf8"), gen("instancea") + "\n");
+  assert.equal(readFileSync(rb.path, "utf8"), gen("instanceb") + "\n");
 });
 
 test("readSecretValuesFile ignores a file reached through a symlinked directory", () => {

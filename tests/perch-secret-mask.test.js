@@ -356,3 +356,43 @@ test("an edited prefill whose visible text also occurs inside the hidden value g
   await engine.answer(s.sessionId, "e4", { value: typed });
   assert.equal(pi.sent[pi.sent.length - 1].value, typed);
 });
+
+test("an approval card too long to mask in full is shown as too long and cannot be approved", async () => {
+  const { engine, bridge } = makeEngine();
+  const { s, pi } = await liveSession(engine, bridge, "bot-oversize");
+  const frames = await watched(engine, s.sessionId);
+  const huge = "x".repeat(1024 * 1024 + 10) + " --force";
+  pi.emit({ type: "extension_ui_request", id: "o1", method: "confirm", title: "Destructive bash", message: huge });
+  await tick(30);
+  const ask = frames.find((f) => f.type === "ask_user");
+  assert.match(ask.message, /too long to show safely/);
+  assert.equal(ask.message.includes("x".repeat(100)), false, "none of the unseen command is shown");
+  await engine.answer(s.sessionId, "o1", { confirmed: true });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "o1", confirmed: false });
+});
+
+test("a select whose option could not be masked: every answer is sent as cancelled", async () => {
+  const mask = await import("../servers/shared/secret-mask.js");
+  const { engine, bridge } = makeEngine();
+  const { s, pi } = await liveSession(engine, bridge, "bot-select-fail");
+  const frames = await watched(engine, s.sessionId);
+  const huge = "y".repeat(mask.MAX_MASK_INPUT + 5);
+  pi.emit({ type: "extension_ui_request", id: "sf", method: "select", title: "Allow?", options: ["Allow once", huge] });
+  await tick(30);
+  const ask = frames.find((f) => f.type === "ask_user");
+  assert.match(ask.message, /cannot be approved/);
+  await engine.answer(s.sessionId, "sf", { value: "Allow once" });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "sf", cancelled: true });
+});
+
+test("a confirm card carrying a key-shaped block: shown as is (on a card only exact values hide it)", async () => {
+  secretValues.writeSecretValuesFile(secretValues.secretValuesPath(process.env), [KEYCHAIN_FAKE]);
+  const { engine, bridge } = makeEngine();
+  const { s, pi } = await liveSession(engine, bridge, "bot-pem-card");
+  const frames = await watched(engine, s.sessionId);
+  const dash = "-".repeat(5);
+  const msg = "run:\n" + dash + "BEGIN PRIVATE KEY" + dash + "\n/tmp/" + "a".repeat(59) + "\n" + "M".repeat(64) + "\nsh\n" + dash + "END PRIVATE KEY" + dash;
+  pi.emit({ type: "extension_ui_request", id: "pk", method: "confirm", title: "Destructive bash", message: msg });
+  await tick(30);
+  assert.equal(frames.find((f) => f.type === "ask_user").message, msg);
+});

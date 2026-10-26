@@ -1,46 +1,46 @@
 /**
- * Collect the instance's secret values from every source and (re)write the
- * values file (servers/shared/secret-values.js). Run by the bot engine at each
- * pi spawn (scripts/pi-bots/bridge.mjs PiRpc), so a secret added since the
- * last spawn is in the file before the next card can show it.
+ * Collect the instance's secret values and (re)write the values file
+ * (servers/shared/secret-values.js). Run by the bot engine at each pi spawn
+ * (scripts/pi-bots/bridge.mjs PiRpc), so a secret added since the last spawn
+ * is in the file before the next card can show it.
  *
- * Trust: the keychain (sealed under a key the sandbox hides) and the retained
- * copies in <CROW_HOME>/secrets/bundle-env (inside the hidden dir) are
- * trusted: any 6+ value counts. Every other source is writable by a bot's
- * shell, so it contributes only token-shaped values (tokenShaped): a bot must
- * not be able to plant a word or a command that would then be hidden on the
- * cards it wants approved.
+ * Exact values always mask, so a source a bot can write would let a
+ * prompt-injected bot plant a "secret" that hides part of its own approval
+ * card (a flag, a domain). Only sources the sandbox hides from bots count:
  *
- * Sources, each best-effort (a missing or unreadable source is skipped):
- *   - <CROW_HOME>/.env, the checkout .env (or CROW_APP_ENV_PATH),
- *     <CROW_HOME>/env/*.env: secret-NAMED keys (isSecretEnvName) with a
- *     plausible value. Not this process's env: the gateway, the pibot units and
- *     job runners all write this one file and must write the SAME content
- *     (each process's own env values are added in memory by getSecretValues).
- *   - bundles: <CROW_HOME>/bundles/<id>/.env — every key its manifest marks
- *     `secret: true` or `generate`, plus secret-named keys; the retained
- *     generated copies in <CROW_HOME>/secrets/bundle-env/*.env (all keys)
- *   - token files: <CROW_HOME>/*-token, peer-tokens.json (auth_token,
- *     signing_key), <data dir>/ntfy-push.json (token/password fields)
- *   - crow.db, read-only with the core better-sqlite3 build: every readable
- *     keychain entry (manual entries are where an operator keeps a sudo
- *     password) and providers.api_key
+ *   source                                     bot can write it?   used
+ *   keychain rows in crow.db (sealed with       no: the key is in   yes
+ *     <CROW_HOME>/secrets/keychain.key)          the hidden dir; a
+ *                                                forged row cannot
+ *                                                be opened
+ *   <CROW_HOME>/secrets/bundle-env/*.env        no: hidden dir       yes
+ *     (retained generated bundle secrets)        (tmpfs, read-only)
+ *   <CROW_HOME>/.env, checkout .env, env/*.env  yes                  no
+ *   <CROW_HOME>/bundles/<id>/.env, manifests    yes                  no
+ *   <CROW_HOME>/*-token, peer-tokens.json       yes                  no
+ *   <data dir>/ntfy-push.json                   yes                  no
+ *   crow.db providers.api_key                   yes (crow.db is      no
+ *                                                writable)
+ *   this process's own env (the operator's      no, not at runtime  in memory only
+ *     unit env)                                                     (getSecretValues)
+ *
+ * The dropped sources' secrets still reach masking where it matters: the
+ * gateway's own env carries its .env tokens in memory, and bundle generated
+ * secrets are in the retained copies (and the keychain for keychain keys).
+ * Defense in depth on top: a value shaped like a flag (leading "-") or a
+ * domain (dot-separated labels) never counts, from any source.
  *
  * Not imported by anything that runs inside an MCP server process: only the
  * bot engine (which already opens crow.db with better-sqlite3) loads it.
  */
 import Database from "better-sqlite3";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { resolveCrowHome, resolveInstanceDataDir } from "./crow-home.js";
-import {
-  isSecretEnvName, normalizeValues, primeSecretValues, secretValuesFromEnv, secretValuesPath, tokenShaped, writeSecretValuesFile,
-} from "./secret-values.js";
+import { normalizeValues, primeSecretValues, safeShape, secretValuesPath, writeSecretValuesFile } from "./secret-values.js";
 import { loadKeychainKey } from "../gateway/keychain/key.js";
 import { readableSecretsSync } from "../gateway/keychain/store.js";
 
-const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const MAX_SOURCE_BYTES = 256 * 1024;
 
 function readSmall(path) {
@@ -67,100 +67,55 @@ export function parseEnvPairs(text) {
   return out;
 }
 
-function envFileSecrets(path) {
-  const t = readSmall(path);
-  return t == null ? [] : secretValuesFromEnv(parseEnvPairs(t)).filter(tokenShaped);
-}
-
 function listDir(dir) {
   try { return readdirSync(dir, { withFileTypes: true }); } catch { return []; }
 }
 
-function bundleSecrets(crowHome) {
+/**
+ * What the installer mints (bundle-env-secrets.js): base64url secrets,
+ * `base64:` Laravel keys, VAPID keys. The retained copy is filled from the
+ * bundle's own .env at reinstall, which a bot can write, and also holds path
+ * and compose-fallback keys: only a value of this shape counts, so a path, a
+ * word or a planted flag/domain never does.
+ */
+const GENERATED_SHAPE = /^(?:[A-Za-z0-9_-]{32,256}={0,2}|base64:[A-Za-z0-9+/]{40,88}={0,2})$/;
+
+/** Retained generated bundle secrets, in the hidden secrets dir. */
+function retainedBundleSecrets(crowHome) {
   const out = [];
-  for (const d of listDir(join(crowHome, "bundles"))) {
-    if (!d.isDirectory()) continue;
-    const dir = join(crowHome, "bundles", d.name);
-    const envText = readSmall(join(dir, ".env"));
-    if (envText == null) continue;
-    const pairs = parseEnvPairs(envText);
-    let marked = new Set();
-    try {
-      const manifest = JSON.parse(readSmall(join(dir, "manifest.json")) || "{}");
-      marked = new Set((manifest.env_vars || []).filter((v) => v && typeof v.name === "string" && (v.secret === true || v.generate)).map((v) => v.name));
-    } catch { /* no manifest: names only */ }
-    for (const [k, v] of Object.entries(pairs)) {
-      if ((marked.has(k) || isSecretEnvName(k)) && tokenShaped(v)) out.push(v.trim());
-    }
-  }
-  for (const f of listDir(join(crowHome, "secrets", "bundle-env"))) {
+  const dir = join(crowHome, "secrets", "bundle-env");
+  for (const f of listDir(dir)) {
     if (!f.isFile() || !f.name.endsWith(".env")) continue;
-    const pairs = parseEnvPairs(readSmall(join(crowHome, "secrets", "bundle-env", f.name)));
-    for (const [k, v] of Object.entries(pairs)) if (!k.startsWith("CROW_") && typeof v === "string") out.push(v.trim());
-  }
-  return out;
-}
-
-function tokenFileSecrets(crowHome, dataDir) {
-  const out = [];
-  for (const f of listDir(crowHome)) {
-    if (!f.isFile() || !/-token$/.test(f.name)) continue;
-    const t = readSmall(join(crowHome, f.name));
-    if (t != null && tokenShaped(t)) out.push(t.trim());
-  }
-  const walk = (node, depth, pick) => {
-    if (depth > 4 || !node || typeof node !== "object") return;
-    for (const [k, v] of Object.entries(node)) {
-      if (typeof v === "string" && pick(k) && tokenShaped(v)) out.push(v);
-      else if (v && typeof v === "object") walk(v, depth + 1, pick);
+    const pairs = parseEnvPairs(readSmall(join(dir, f.name)));
+    for (const [k, v] of Object.entries(pairs)) {
+      if (!k.startsWith("CROW_") && typeof v === "string" && GENERATED_SHAPE.test(v.trim())) out.push(v.trim());
     }
-  };
-  for (const [path, pick] of [
-    [join(crowHome, "peer-tokens.json"), (k) => /^(auth_token|signing_key|token)$/i.test(k)],
-    [join(dataDir, "ntfy-push.json"), (k) => /token|password|secret/i.test(k)],
-  ]) {
-    try { walk(JSON.parse(readSmall(path) || "null"), 0, pick); } catch { /* skip */ }
   }
   return out;
 }
 
-function dbSecrets({ dbPath, crowHome }) {
+function keychainSecrets({ dbPath, crowHome }) {
   if (!dbPath || !existsSync(dbPath)) return [];
   let db;
-  const out = [];
   try {
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
     db.pragma("busy_timeout = 2000");
-    out.push(...readableSecretsSync(db, loadKeychainKey({ crowHome })));
-    try {
-      for (const r of db.prepare("SELECT api_key FROM providers WHERE api_key IS NOT NULL AND api_key != ''").all()) {
-        if (tokenShaped(r.api_key)) out.push(String(r.api_key).trim());
-      }
-    } catch { /* no providers table */ }
-  } catch { /* unreadable DB: env and file sources still count */ }
+    return readableSecretsSync(db, loadKeychainKey({ crowHome }));
+  } catch { return []; }
   finally { if (db) { try { db.close(); } catch { /* closed */ } } }
-  return out;
 }
 
 /**
- * Every source above, normalized (6+ chars, one line, deduped, longest first).
+ * The trusted sources above, normalized (6+ chars, one line, deduped, longest
+ * first), minus flag- and domain-shaped values.
  * @param {object} [o]
  * @param {object} [o.env] the env to resolve paths from
- * @param {string} [o.appRoot] the checkout whose .env counts
- * @param {string|null} [o.dbPath] crow.db (default CROW_DB_PATH or <data>/crow.db); null skips the DB
+ * @param {string|null} [o.dbPath] crow.db (default CROW_DB_PATH or <data>/crow.db); null skips the keychain
  */
-export function collectSecretValues({ env = process.env, appRoot = env.CROW_APP_ROOT || APP_ROOT, dbPath } = {}) {
+export function collectSecretValues({ env = process.env, dbPath } = {}) {
   const crowHome = resolveCrowHome(env);
-  const dataDir = resolveInstanceDataDir(env);
-  const db = dbPath === undefined ? (env.CROW_DB_PATH || join(dataDir, "crow.db")) : dbPath;
-  const vals = [];
-  const envFiles = new Set([join(crowHome, ".env"), env.CROW_APP_ENV_PATH || join(appRoot, ".env")]);
-  for (const f of listDir(join(crowHome, "env"))) if (f.isFile() && f.name.endsWith(".env")) envFiles.add(join(crowHome, "env", f.name));
-  for (const p of envFiles) vals.push(...envFileSecrets(p));
-  vals.push(...bundleSecrets(crowHome));
-  vals.push(...tokenFileSecrets(crowHome, dataDir));
-  vals.push(...dbSecrets({ dbPath: db, crowHome }));
-  return normalizeValues(vals);
+  const db = dbPath === undefined ? (env.CROW_DB_PATH || join(resolveInstanceDataDir(env), "crow.db")) : dbPath;
+  return normalizeValues([...keychainSecrets({ dbPath: db, crowHome }), ...retainedBundleSecrets(crowHome)]).filter(safeShape);
 }
 
 /**

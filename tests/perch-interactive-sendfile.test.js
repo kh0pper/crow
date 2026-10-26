@@ -147,6 +147,7 @@ function makeEngine(o = {}) {
     crowHome: CROW_HOME,
     env: Object.assign({ CROW_HOME }, o.env),
     bridge, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer, log: () => {},
+    ...(o.hiddenDirs ? { hiddenDirs: o.hiddenDirs } : {}),
   });
   return { engine, clock, bridge, state: bridge._state };
 }
@@ -415,4 +416,40 @@ test("a file frame's caption is masked (it is bot text shown and stored)", async
   await tick();
   assert.equal(JSON.stringify(sink.ofType("file")).includes(fakeTok), false);
   assert.equal(JSON.stringify(historyRows("botty", s.sessionId)).includes(fakeTok), false);
+});
+
+test("send_user_file refuses a hard link to a secrets-dir file placed outside it (the same inode)", async () => {
+  const { linkSync } = await import("node:fs");
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  const sink = await collect(engine, s.sessionId);
+  const secrets = join(CROW_HOME, "secrets");
+  mkdirSync(join(secrets, "bundle-env"), { recursive: true, mode: 0o700 });
+  const inner = join(secrets, "bundle-env", "demo.env");
+  writeFileSync(inner, "K=fake-" + "retained-0000\n", { mode: 0o600 });
+  mkdirSync(join(dir, "src"), { recursive: true });
+  const hard = join(dir, "src", "harmless.txt");
+  try { rmSync(hard, { force: true }); } catch {}
+  linkSync(inner, hard);
+  pi.emit({ type: "extension_ui_request", method: "notify", message: crowFileFrame({ path: hard, name: "h.txt", caption: "c" }) });
+  await tick();
+  const f = sink.ofType("file")[0];
+  assert.equal(f.servable, false);
+  const snap = await engine.get(s.sessionId);
+  assert.equal(existsSync(join(snap.outputsDir, "h.txt")), false);
+});
+
+test("send_user_file refuses any dir the sandbox hides (e.g. the user runtime dir), not just the secrets dir", async () => {
+  const hidden = join(dir, "fake-run-user");
+  mkdirSync(hidden, { recursive: true });
+  const inside = join(hidden, "auth.json");
+  writeFileSync(inside, "{}");
+  const { engine, state } = makeEngine({ hiddenDirs: [hidden] });
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  const sink = await collect(engine, s.sessionId);
+  pi.emit({ type: "extension_ui_request", method: "notify", message: crowFileFrame({ path: inside, name: "auth.json", caption: "c" }) });
+  await tick();
+  assert.equal(sink.ofType("file")[0].servable, false);
 });

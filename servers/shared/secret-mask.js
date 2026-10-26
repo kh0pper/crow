@@ -175,6 +175,7 @@ const wordRule = (re, ok = () => true) => [re, (c, mt, g, at, input) => {
 
 const RULES = [
   // PEM private key blocks, strict shape only; never to the end of the text.
+  // Not on a card (see maskPatterns).
   [/-----BEGIN ([A-Z0-9 ]*)PRIVATE KEY-----([\s\S]*?)-----END \1PRIVATE KEY-----/g, (c, mt, g, at, input) => {
     const [label, body] = g;
     if (!startsLine(input, at) || !pemShaped(body)) return mt;
@@ -200,9 +201,16 @@ const RULES = [
     (c, mt, _g, at, input) => maskWordAt(c, mt, input, at)],
 ];
 
-function maskPatterns(text, c) {
+/**
+ * `card`: the text is an approval card or an ask the operator answers. There
+ * no PEM heuristic applies: each row of a key-shaped block is one shell word,
+ * and a row can be a path (base64 includes "/") or a name planted in a PATH
+ * dir the bot can write, so hiding rows could hide what runs. A key on a card
+ * is hidden by exact values only. Display-only paths keep the PEM rules.
+ */
+function maskPatterns(text, c, card = false) {
   let out = text;
-  for (const [re, fn] of RULES) {
+  for (const [re, fn] of card ? RULES.slice(1) : RULES) {
     re.lastIndex = 0;
     out = out.replace(re, (mt, ...g) => {
       const input = g.pop();
@@ -210,7 +218,7 @@ function maskPatterns(text, c) {
       return fn(c, mt, g.map((x) => (typeof x === "string" ? x : "")), at, input);
     });
   }
-  return maskCutPem(out, c);
+  return card ? out : maskCutPem(out, c);
 }
 
 // ---- exact values ----------------------------------------------------------
@@ -289,12 +297,16 @@ export const MAX_MASK_INPUT = 1024 * 1024;
 export function maskSecretsDetailed(text, opts = {}) {
   let src = text == null ? "" : String(text);
   if (!src) return { text: src, count: 0 };
-  if (src.length > MAX_MASK_INPUT) src = src.slice(0, MAX_MASK_INPUT) + "\u2026(" + (src.length - MAX_MASK_INPUT) + " more characters)";
+  // Longer input is cut first. The caller is told (`truncated`): a card cut
+  // here must not be approved, since part of it was never seen.
+  const truncated = src.length > MAX_MASK_INPUT;
+  if (truncated) src = src.slice(0, MAX_MASK_INPUT) + "\u2026(" + (src.length - MAX_MASK_INPUT) + " more characters)";
   const c = { n: 0 };
   try {
     const values = opts.values === undefined ? currentValues() : opts.values;
     let t = maskValues(src, normalizeValues(values).filter((v) => v !== REDACTED), c);
-    t = maskPatterns(t, c);
+    t = maskPatterns(t, c, opts.card === true);
+    if (truncated) return { text: t, count: c.n, truncated: true };
     return c.n || src !== text ? { text: t, count: c.n } : { text: src, count: 0 };
   } catch {
     // A masking bug must never break a card, a push or a log line, and must
@@ -304,7 +316,7 @@ export function maskSecretsDetailed(text, opts = {}) {
   }
 }
 
-/** The masked string (display only). */
+/** The masked string (display only). `opts.card`: an approval card or ask (no PEM heuristic). */
 export function maskSecrets(text, opts) {
   return maskSecretsDetailed(text, opts).text;
 }

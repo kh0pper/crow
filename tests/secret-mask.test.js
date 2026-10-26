@@ -188,6 +188,7 @@ test("a masking failure is reported (failed), never the raw text; oversized inpu
   const big = "x".repeat(3 * 1024 * 1024) + " GH_TOKEN=" + FAKE;
   const out = maskSecretsDetailed(big, none);
   assert.equal(out.failed, undefined);
+  assert.equal(out.truncated, true, "the caller learns the text was cut");
   assert.equal(out.text.includes(FAKE), false);
   assert.ok(out.text.length < big.length);
 });
@@ -232,4 +233,17 @@ test("a credential context hides a value with a slash in it; only a leading path
   for (const t of ["DB_PASSWORD=/run/secrets/db", "TOKEN_FILE=~/tok", "API_KEY=./key.txt", "SECRET=../x"]) {
     assert.equal(m(t), t, t);
   }
+});
+
+test("card mode (an approval card or ask): no PEM heuristic at all, since key-shaped rows can run as commands", () => {
+  const dash = "-".repeat(5);
+  const rows = ["/tmp/" + "a".repeat(59), "M".repeat(64), "sh"];
+  const t = "k:\n" + dash + "BEGIN PRIVATE KEY" + dash + "\n" + rows.join("\n") + "\n" + dash + "END PRIVATE KEY" + dash;
+  assert.equal(maskSecrets(t, { values: [], card: true }), t);
+  const cut = "k:\n" + dash + "BEGIN PRIVATE KEY" + dash + "\n" + "/tmp/" + "a".repeat(35) + "\nreboot";
+  assert.equal(maskSecrets(cut, { values: [], card: true }), cut);
+  const real = "k:\n" + dash + "BEGIN RSA PRIVATE KEY" + dash + "\n" + ["Q".repeat(64), "Q".repeat(64), "Q".repeat(20)].join("\n") + "\n" + dash + "END RSA PRIVATE KEY" + dash;
+  assert.equal(maskSecrets(real, { values: [], card: true }), real, "even a real-looking key: exact values only on a card");
+  assert.equal(maskSecrets(real, { values: ["Q".repeat(64)], card: true }).includes("Q".repeat(64)), false);
+  assert.equal(m(real).includes("Q".repeat(64)), false, "display paths keep the PEM rule");
 });
