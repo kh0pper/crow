@@ -233,6 +233,9 @@ export function readPeerGatewayUrls(conn) {
   } catch { return {}; }
 }
 
+/** Most other-instance secrets dirs a spawn will hide; past it, it refuses. */
+const MAX_HIDDEN_INSTANCE_DIRS = 512;
+
 export class PiRpc {
   constructor(opts) {
     const def = opts.def, sessionDir = opts.sessionDir;
@@ -499,15 +502,17 @@ export class PiRpc {
     // Every OTHER Crow home on this host (found by the shape of its secrets
     // dir, whatever it is called) is a co-hosted instance under the same uid:
     // its secrets dir is hidden too.
-    const found = instanceSecretsDirs();
-    // More than any real host has: refuse to trust (fail closed) rather than
-    // build an argv bwrap rejects.
-    const others = found.length <= 64 ? found : [];
+    const others = instanceSecretsDirs();
     const launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, hideDirs: [secretsHere, ...others] });
+    // Never hide fewer than were found: past a cap no real host reaches (bwrap
+    // takes a few thousand args), the spawn is refused instead.
+    if (launch.wrapper === "bwrap" && others.length > MAX_HIDDEN_INSTANCE_DIRS) {
+      throw new Error("pi sandbox: " + others.length + " Crow instance secrets dirs to hide (more than " + MAX_HIDDEN_INSTANCE_DIRS + "); refusing to start pi with any of them visible");
+    }
     delete launch.env.PI_BOT_SECRET_VALUES_FILE;
     // Fail closed: the values file is written and card values trusted only
     // when this instance's AND every other instance's secrets dir is masked.
-    const hidden = launch.wrapper === "bwrap" && found.length <= 64 && [secretsHere, ...others].every((d) => launch.masked.includes(d));
+    const hidden = launch.wrapper === "bwrap" && [secretsHere, ...others].every((d) => launch.masked.includes(d));
     // Not hidden: the bot could read the keychain key and add its own hash to
     // the card list, so no value may hide text on cards (cardTrusted:false).
     const secretValues = refreshSecretValuesFile({ write: hidden, cardTrusted: hidden, log: (l) => console.error("[pi-bots] " + l) });

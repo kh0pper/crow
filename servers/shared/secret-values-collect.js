@@ -34,7 +34,6 @@
  * bot engine (which already opens crow.db with better-sqlite3) loads it.
  */
 import Database from "better-sqlite3";
-import { createHmac } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { resolveInstanceDataDir } from "./crow-home.js";
@@ -134,19 +133,23 @@ export function collectSecretValueSets({ env = process.env, dbPath } = {}) {
   const manual = entries.filter((e) => e.kind === "manual").map((e) => e.secret);
   // The card set: manual entries whose hash the OPERATOR recorded in the
   // hidden dir: the keychain UI on save or import, or the one-time confirm of
-  // entries that predate the list (confirmManualEntriesForCards). crow.db is
+  // entries that predate the list (confirmTypedValueForCards). crow.db is
   // writable by a bot's shell under the default sandbox (it can flip an
   // extension row to manual, insert a row, copy ciphertext), so neither the
   // kind column nor the rows present at first run are trusted: with no list,
   // the card set is empty. Weak values (under 8 characters, a plain word) never
   // hide text on cards either.
   const hashes = readCardHashes(env);
-  const operator = manual.filter((v) => hashes.has(cardHashOf(v)) && v.length >= 8 && plausibleSecretValue(v));
+  // A manual value equal to an extension or retained value is a copied sealed
+  // blob (a bot can copy ciphertext into a new manual row): never a card value.
+  const retained = retainedBundleSecrets(env);
+  const steerable = new Set([...entries.filter((e) => e.kind !== "manual").map((e) => e.secret), ...retained]);
+  const operator = manual.filter((v) => hashes.has(cardHashOf(v)) && cardStrong(v) && !steerable.has(v));
   const minted = entries
     .filter((e) => e.kind !== "manual" && GENERATED_SHAPE.test(e.secret) && /[A-Za-z]/.test(e.secret) && /\d/.test(e.secret))
     .map((e) => e.secret);
   return {
-    display: normalizeValues([...manual, ...minted, ...retainedBundleSecrets(env)]),
+    display: normalizeValues([...manual, ...minted, ...retained]),
     card: normalizeValues(operator).filter(safeShape),
   };
 }
@@ -182,54 +185,25 @@ export function refreshSecretValuesFile(opts = {}) {
   }
 }
 
-/**
- * A fingerprint of a value for the operator's confirm: 8 hex of an
- * HMAC-SHA256 under a nonce made fresh for each run and never stored. No
- * character of the value, and useless outside that run.
- */
-export function fingerprintOf(v, nonce) {
-  if (!nonce || nonce.length < 16) throw new Error("a fresh nonce is required");
-  return createHmac("sha256", nonce).update(String(v)).digest("hex").slice(0, 8);
-}
-
-/** A crow.db label as safe terminal text: no C0/C1/DEL controls, 80 chars. */
-function cleanLabel(l) {
-  return String(l == null ? "" : l).replace(/[\u0000-\u001f\u007f-\u009f]/g, "").slice(0, 80);
+/** Strong enough to hide text on a card: 8+ characters, not a plain word. */
+function cardStrong(v) {
+  return typeof v === "string" && v.length >= 8 && plausibleSecretValue(v);
 }
 
 /**
- * Manual keychain entries for the operator's confirm: id, sanitized label,
- * fingerprint, and whether the label repeats (crow.db is bot-writable, so a
- * label proves nothing; the fingerprint is checked against a fresh decrypt).
+ * The operator types a password they know (scripts/ops/keychain-card-secrets.mjs
+ * reads it with echo off): it is recorded as a card value only when a MANUAL
+ * keychain entry holds exactly that value, it is strong enough, and it is not
+ * also an extension or retained value. Labels and ids (crow.db, bot-writable)
+ * play no part. Returns the number of matching manual entries (0: nothing
+ * recorded). Never stores or prints the value.
  */
-export function listManualEntriesForCards({ env = process.env, dbPath, nonce } = {}) {
+export function confirmTypedValueForCards({ env = process.env, dbPath, value } = {}) {
+  if (typeof value !== "string" || !cardStrong(value)) return 0;
   const db = dbPath === undefined ? (env.CROW_DB_PATH || join(resolveInstanceDataDir(env), "crow.db")) : dbPath;
-  const rows = keychainEntries({ dbPath: db, env }).filter((e) => e.kind === "manual");
-  const seen = new Map();
-  for (const r of rows) seen.set(cleanLabel(r.label), (seen.get(cleanLabel(r.label)) || 0) + 1);
-  return rows.map((e) => ({ id: e.id, label: cleanLabel(e.label), fingerprint: fingerprintOf(e.secret, nonce), duplicateLabel: seen.get(cleanLabel(e.label)) > 1 }));
-}
-
-/**
- * The one-time operator step for entries saved before the card list existed:
- * record the manual entries the operator names as id + fingerprint (from
- * listManualEntriesForCards with the SAME run's nonce). The entries are
- * decrypted afresh in one read transaction and every fingerprint must match;
- * any mismatch records nothing. Run by the operator (scripts/ops/keychain-card-secrets.mjs), never
- * by the engine; from a bot's sandbox it cannot record anything (the list is
- * in the read-only hidden dir). Returns the number recorded (never values).
- */
-export function confirmManualEntriesForCards({ env = process.env, dbPath, pairs = [], nonce } = {}) {
-  const db = dbPath === undefined ? (env.CROW_DB_PATH || join(resolveInstanceDataDir(env), "crow.db")) : dbPath;
-  const want = new Map([].concat(pairs).map((p) => [Number(p && p.id), String(p && p.fingerprint)]));
-  if (!want.size) return 0;
-  const byId = new Map(keychainEntries({ dbPath: db, env, transaction: true }).filter((e) => e.kind === "manual").map((e) => [e.id, e.secret]));
-  const picked = [];
-  for (const [id, fp] of want) {
-    const v = byId.get(id);
-    if (v === undefined || fingerprintOf(v, nonce) !== fp) return 0;
-    picked.push(v);
-  }
-  recordCardSecret(picked, env);
-  return picked.length;
+  const entries = keychainEntries({ dbPath: db, env, transaction: true });
+  if (entries.some((e) => e.kind !== "manual" && e.secret === value) || retainedBundleSecrets(env).includes(value)) return 0;
+  const n = entries.filter((e) => e.kind === "manual" && e.secret === value).length;
+  if (n) recordCardSecret(value, env);
+  return n;
 }

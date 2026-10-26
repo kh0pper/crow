@@ -321,3 +321,14 @@ test("sandboxed: a co-hosted instance's secrets dir (any Crow home under $HOME, 
     if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
   }
 });
+
+test("more instance secrets dirs than the cap: the spawn is refused with a clear error, never run with fewer hidden", { skip: noSandbox }, async () => {
+  const many = [];
+  for (let i = 0; i < 520; i++) { const d = join(USER_HOME, "fake-home-" + i); mkdirSync(join(d, "secrets"), { recursive: true }); many.push(d); }
+  const { rmSync: rm } = await import("node:fs");
+  try {
+    await assert.rejects(spawnReport({ mode: "auto" }), /secrets dirs to hide/);
+  } finally {
+    for (const d of many) rm(d, { recursive: true, force: true });
+  }
+});

@@ -12,7 +12,7 @@ import { randomBytes, createHash as createHashFn } from "node:crypto";
 import Database from "better-sqlite3";
 
 const SV = await import("../servers/shared/secret-values.js");
-const { collectSecretValues, collectSecretValueSets, confirmManualEntriesForCards, listManualEntriesForCards, refreshSecretValuesFile, parseEnvPairs } = await import("../servers/shared/secret-values-collect.js");
+const { collectSecretValues, collectSecretValueSets, confirmTypedValueForCards, refreshSecretValuesFile, parseEnvPairs } = await import("../servers/shared/secret-values-collect.js");
 const { sealSecret } = await import("../servers/sharing/secret-box.js");
 const { KEYCHAIN_DDL } = await import("../servers/gateway/keychain/schema.js");
 
@@ -356,8 +356,7 @@ test("cards count only manual entries the operator recorded: no list means no ca
   const ins = (v) => db.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual','m',?,?,'manual')").run(sealSecret(v, { seed }), "0123456789abcdef");
   ins("Existing_pw-1");
   assert.deepEqual(collectSecretValueSets({ env: I.env }).card, [], "no list: nothing is trusted on cards");
-  const nonce = randomBytes(32);
-  assert.equal(confirmManualEntriesForCards({ env: I.env, nonce, pairs: listManualEntriesForCards({ env: I.env, nonce }).map((e) => ({ id: e.id, fingerprint: e.fingerprint })) }), 1, "the operator confirms each entry by id and fingerprint");
+  assert.equal(confirmTypedValueForCards({ env: I.env, value: "Existing_pw-1" }), 1, "the operator types the password they know");
   assert.deepEqual(collectSecretValueSets({ env: I.env }).card, ["Existing_pw-1"]);
   ins("Planted_pw-2");                                   // a bot with crow.db write access
   const sets = collectSecretValueSets({ env: I.env });
@@ -396,58 +395,25 @@ test("a secrets dir renamed away and replaced after it was anchored is not trust
   SV.invalidateSecretValues();
 });
 
-test("the operator confirm: an HMAC fingerprint under a per-run nonce (no character of the value); a sanitized label; confirm needs the same run's nonce and refuses any mismatch", () => {
+test("the confirm CLI reads the operator's typed password on stdin (never argv), records only an exact manual match, never prints a value", async () => {
   const I = scratchInstance();
   const seed = randomBytes(32);
   mkdirSync(join(I.home, "secrets"), { recursive: true });
   writeFileSync(join(I.home, "secrets", "keychain.key"), JSON.stringify({ v: 1, id: "0123456789abcdef", key: seed.toString("base64") }), { mode: 0o600 });
   const db = new Database(join(I.data, "crow.db"));
   db.exec(KEYCHAIN_DDL);
-  const ins = (label, v) => Number(db.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual',?,?,?,'manual')").run(label, sealSecret(v, { seed }), "0123456789abcdef").lastInsertRowid);
-  const keep = ins("sudo on crow", "Keep_this-pw1-long");
-  const evil = ins("GitHub token\u001b[2K\u009b" + "x".repeat(120), "Bot_flipped-pw2-long");
+  db.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual','sudo',?,?,'manual')").run(sealSecret("Cli_confirm-pw9", { seed }), "0123456789abcdef");
   db.close();
-  const nonce = randomBytes(32);
-  const listed = listManualEntriesForCards({ env: I.env, nonce });
-  const k = listed.find((e) => e.id === keep);
-  const e = listed.find((x) => x.id === evil);
-  assert.match(k.fingerprint, /^[0-9a-f]{8}$/, "8 hex, nothing of the value");
-  assert.notEqual(listManualEntriesForCards({ env: I.env, nonce: randomBytes(32) }).find((x) => x.id === keep).fingerprint, k.fingerprint, "a fingerprint is useless outside its run");
-  assert.equal(/[\u0000-\u001f\u007f-\u009f]/.test(e.label), false, "control characters stripped");
-  assert.ok(e.label.length <= 80, "label capped");
-  assert.equal(confirmManualEntriesForCards({ env: I.env, nonce, pairs: [{ id: keep, fingerprint: e.fingerprint }] }), 0, "a mismatch records nothing");
-  assert.equal(confirmManualEntriesForCards({ env: I.env, nonce: randomBytes(32), pairs: [{ id: keep, fingerprint: k.fingerprint }] }), 0, "another run's nonce records nothing");
-  assert.deepEqual(collectSecretValueSets({ env: I.env }).card, []);
-  assert.equal(confirmManualEntriesForCards({ env: I.env, nonce, pairs: [{ id: keep, fingerprint: k.fingerprint }] }), 1);
-  assert.deepEqual(collectSecretValueSets({ env: I.env }).card, ["Keep_this-pw1-long"]);
-});
-
-test("the confirm CLI is interactive: it lists, reads id:fingerprint picks on stdin, records them; picks in argv are refused", async () => {
-  const I = scratchInstance();
-  const seed = randomBytes(32);
-  mkdirSync(join(I.home, "secrets"), { recursive: true });
-  writeFileSync(join(I.home, "secrets", "keychain.key"), JSON.stringify({ v: 1, id: "0123456789abcdef", key: seed.toString("base64") }), { mode: 0o600 });
-  const db = new Database(join(I.data, "crow.db"));
-  db.exec(KEYCHAIN_DDL);
-  const id = Number(db.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual','sudo',?,?,'manual')").run(sealSecret("Cli_confirm-pw9", { seed }), "0123456789abcdef").lastInsertRowid);
-  db.close();
-  const { spawn, spawnSync } = await import("node:child_process");
+  const { spawnSync } = await import("node:child_process");
   const cli = new URL("../scripts/ops/keychain-card-secrets.mjs", import.meta.url).pathname;
   const env = { ...process.env, ...I.env, CROW_DB_PATH: join(I.data, "crow.db") };
-  assert.notEqual(spawnSync(process.execPath, [cli, "confirm", id + ":deadbeef"], { env }).status, 0, "argv picks refused");
-  const out = await new Promise((resolve, reject) => {
-    const c = spawn(process.execPath, [cli, "confirm"], { env });
-    let o = "";
-    let sent = false;
-    c.stdout.on("data", (d) => {
-      o += d;
-      const m = o.match(new RegExp("^\\s*" + id + "\\s+([0-9a-f]{8})", "m"));
-      if (m && !sent && /pick/i.test(o)) { sent = true; c.stdin.write(id + ":" + m[1] + "\n\n"); c.stdin.end(); }
-    });
-    c.on("exit", (code) => (code === 0 ? resolve(o) : reject(new Error("exit " + code + ": " + o))));
-  });
-  assert.match(out, /1 entry confirmed/);
-  assert.equal(out.includes("Cli_confirm"), false, "never the value");
+  assert.notEqual(spawnSync(process.execPath, [cli, "confirm", "Cli_confirm-pw9"], { env }).status, 0, "a value in argv is refused");
+  const miss = spawnSync(process.execPath, [cli, "confirm"], { env, input: "Wrong_value-xx1\n", encoding: "utf8" });
+  assert.notEqual(miss.status, 0);
+  const ok = spawnSync(process.execPath, [cli, "confirm"], { env, input: "Cli_confirm-pw9\n", encoding: "utf8" });
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /1 entry confirmed/);
+  assert.equal((ok.stdout + ok.stderr).includes("Cli_confirm"), false, "never the value");
   assert.ok(readFileSync(join(I.home, "secrets", "card-secret-hashes"), "utf8").includes(createHashFn("sha256").update("Cli_confirm-pw9").digest("hex")));
 });
 
@@ -459,7 +425,7 @@ test("every Crow home on the host is found by the shape of its secrets dir, what
   const r4 = mk(join(home, ".crow-r4"));
   const odd = mk(join(home, "crow-r4-home"));
   const elsewhere = mk(join(root, "srv", "second-user-home"));
-  mkdirSync(join(home, "not-crow", "secrets"), { recursive: true });              // no keychain.key: not a Crow home
+  mkdirSync(join(home, "not-crow", "secrets"), { recursive: true });              // no keychain.key: still hidden
   const realS = mk(join(root, "real-target"));
   mkdirSync(join(home, ".crow-linked"), { recursive: true });
   symlinkSync(join(realS, "secrets"), join(home, ".crow-linked", "secrets"));
@@ -472,8 +438,64 @@ test("every Crow home on the host is found by the shape of its secrets dir, what
   for (const d of [def, odd, elsewhere]) assert.ok(fromR4.includes(join(d, "secrets")), "R4 hides " + d);
   assert.ok(fromR4.includes(join(realS, "secrets")), "a symlinked secrets dir is hidden at its target");
   assert.equal(fromR4.includes(join(r4, "secrets")), false, "not its own (that one is hidden through its anchor)");
-  assert.equal(fromR4.some((d) => d.includes("not-crow")), false);
+  assert.ok(fromR4.some((d) => d.includes("not-crow")), "a secrets dir without keychain.key is hidden too");
   const fromDefault = SV.instanceSecretsDirs({ CROW_HOME: def }, opts);
   for (const d of [r4, odd, elsewhere]) assert.ok(fromDefault.includes(join(d, "secrets")), "default hides " + d);
   rmSync(root, { recursive: true, force: true });
+});
+
+test("discovery also merges the sibling-prefix scan, hides a secrets dir without keychain.key, and follows a symlinked $HOME child", () => {
+  const root = mkdtempSync(join(tmpdir(), "crow-homes2-"));
+  const home = join(root, "user");
+  const inst = join(home, ".crow");
+  mkdirSync(join(inst, "secrets"), { recursive: true });
+  mkdirSync(join(home, ".crow-legacy", "secrets"), { recursive: true });             // half-made: no keychain.key
+  const outside = join(root, "opt", "crow-other");
+  mkdirSync(join(outside, "secrets"), { recursive: true });
+  symlinkSync(outside, join(home, "linked-home"));                                   // a symlinked $HOME child
+  const elsewhere = join(root, "srv");
+  mkdirSync(join(elsewhere, ".crow-sib", "secrets"), { recursive: true });
+  mkdirSync(join(elsewhere, "main", "secrets"), { recursive: true });
+  const fromMain = SV.instanceSecretsDirs({ CROW_HOME: join(elsewhere, "main") }, { home, unitDirs: [], envFileDirs: [] });
+  for (const d of [join(inst, "secrets"), join(home, ".crow-legacy", "secrets"), join(outside, "secrets")]) assert.ok(fromMain.includes(d), d);
+  const fromSib = SV.instanceSecretsDirs({ CROW_HOME: join(elsewhere, ".crow-sib") }, { home, unitDirs: [], envFileDirs: [] });
+  assert.ok(fromSib.length >= 3);
+  const prefixRoot = join(root, "p");
+  mkdirSync(join(prefixRoot, "inst", "secrets"), { recursive: true });
+  mkdirSync(join(prefixRoot, "inst-two", "secrets"), { recursive: true });
+  const fromPrefix = SV.instanceSecretsDirs({ CROW_HOME: join(prefixRoot, "inst") }, { home: join(root, "nohome"), unitDirs: [], envFileDirs: [] });
+  assert.ok(fromPrefix.includes(join(prefixRoot, "inst-two", "secrets")), "a sibling named with this home's name as prefix");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("a manual entry whose value equals an extension or retained value never counts on cards (a copied sealed blob)", () => {
+  const I = scratchInstance();
+  const seed = randomBytes(32);
+  mkdirSync(join(I.home, "secrets", "bundle-env"), { recursive: true });
+  writeFileSync(join(I.home, "secrets", "keychain.key"), JSON.stringify({ v: 1, id: "0123456789abcdef", key: seed.toString("base64") }), { mode: 0o600 });
+  writeFileSync(join(I.home, "secrets", "bundle-env", "d.env"), "G=" + gen("steered") + "\n");
+  const db = new Database(join(I.data, "crow.db"));
+  db.exec(KEYCHAIN_DDL);
+  const ins = (kind, v) => db.prepare("INSERT INTO crow_keychain (kind,label,bundle_id,env_key,secret_sealed,key_id,origin) VALUES (?,?,?,?,?,?,?)").run(kind, "l", kind === "manual" ? null : "b", kind === "manual" ? null : "K" + v.length + kind, sealSecret(v, { seed }), "0123456789abcdef", kind === "manual" ? "manual" : "generated");
+  ins("extension", gen("ext1"));
+  ins("manual", gen("ext1"));
+  ins("manual", gen("steered"));
+  db.close();
+  SV.recordCardSecret([gen("ext1"), gen("steered")], I.env);
+  assert.deepEqual(collectSecretValueSets({ env: I.env }).card, []);
+});
+
+test("confirm by typed value: only a manual entry holding exactly the typed password is recorded", () => {
+  const I = scratchInstance();
+  const seed = randomBytes(32);
+  mkdirSync(join(I.home, "secrets"), { recursive: true });
+  writeFileSync(join(I.home, "secrets", "keychain.key"), JSON.stringify({ v: 1, id: "0123456789abcdef", key: seed.toString("base64") }), { mode: 0o600 });
+  const db = new Database(join(I.data, "crow.db"));
+  db.exec(KEYCHAIN_DDL);
+  db.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual','sudo',?,?,'manual')").run(sealSecret("Typed_known-pw7", { seed }), "0123456789abcdef");
+  db.close();
+  assert.equal(confirmTypedValueForCards({ env: I.env, value: "Not_the-same-pw7" }), 0);
+  assert.deepEqual(collectSecretValueSets({ env: I.env }).card, []);
+  assert.equal(confirmTypedValueForCards({ env: I.env, value: "Typed_known-pw7" }), 1);
+  assert.deepEqual(collectSecretValueSets({ env: I.env }).card, ["Typed_known-pw7"]);
 });

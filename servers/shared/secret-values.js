@@ -124,7 +124,7 @@ function declaredHomes(dirs, depth = 2) {
 
 /**
  * The secrets dirs of EVERY other Crow home on this host, found by shape (a
- * `secrets/` holding `keychain.key`), whatever the home is called: children of
+ * `secrets/` dir, keychain.key or not), whatever the home is called: children of
  * $HOME, the default ~/.crow, and every CROW_HOME declared in user/system
  * units and /etc/crow env files (homes outside $HOME are declared there). Real paths
  * (a symlinked secrets dir is hidden at its target). The pi sandbox hides them
@@ -139,17 +139,28 @@ export function instanceSecretsDirs(env = process.env, {
   let self = secretsDir(env);
   try { self = realpathSync(self); } catch { /* not there yet */ }
   const homes = new Set([join(home, ".crow"), ...declaredHomes(unitDirs), ...declaredHomes(envFileDirs, 0)]);
-  let names = [];
-  try { names = readdirSync(home, { withFileTypes: true }); } catch { names = []; }
-  for (const n of names) if (n.isDirectory()) homes.add(join(home, n.name));
+  // $HOME's children (a symlinked child followed), and the old source too:
+  // siblings of this CROW_HOME named with its name as a prefix.
+  const kids = (dir, keep = () => true) => {
+    let names = [];
+    try { names = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const n of names) {
+      if (!keep(n.name)) continue;
+      const p = join(dir, n.name);
+      try { if (statSync(p).isDirectory()) homes.add(p); } catch { /* dangling */ }
+    }
+  };
+  kids(home);
+  const crowHome = resolveCrowHome(env);
+  kids(dirname(crowHome), (name) => name !== basename(crowHome) && name.startsWith(basename(crowHome)));
+  // Any `secrets/` dir there is hidden, keychain.key or not: a half-made or
+  // legacy home still holds secrets.
   const out = new Set();
   for (const h of homes) {
-    const s = join(h, "secrets");
     try {
-      if (!statSync(join(s, "keychain.key")).isFile()) continue;
-      const r = realpathSync(s);
-      if (r !== self) out.add(r);
-    } catch { /* not a Crow home */ }
+      const r = realpathSync(join(h, "secrets"));
+      if (statSync(r).isDirectory() && r !== self) out.add(r);
+    } catch { /* no secrets dir */ }
   }
   return [...out];
 }
