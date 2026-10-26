@@ -54,8 +54,8 @@
  */
 import { NARROWING_LOCK, isSentinel, mentionsLock } from "../../../scripts/pi-bots/narrowing-lock.mjs";
 import { Router } from "express";
-import { closeSync, openSync, readSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { createDbClient } from "../../db.js";
 import { jsonError } from "./_error.js";
 import { resolveEngineStatus, resolveBotRuntimeStatus } from "../dashboard/panels/bot-builder/engine-gate.js";
@@ -325,20 +325,36 @@ async function saveNarrowing(db, botId, threadId, json) {
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve the pi session file for a row.
+ * Resolve the pi session file for a row, with the reason when there is none.
  *
  * On disk the files are `<ISO-timestamp>_<uuid>.jsonl` inside
  * `bot_sessions.pi_session_dir`, while `pi_session_id` is the BARE uuid — so
  * this is a glob on the suffix, never `join(dir, id + ".jsonl")` (that always
  * 404s). The browser never supplies a path: both halves come from the row.
+ *
+ * Returns `{ file }`, `{ none: "no_turn_yet" }`, `{ none: "no_dir" }` or
+ * `{ error }`. pi writes the session file only after the first COMPLETED turn,
+ * while the engine stamps the row's dir and id at spawn (before the start
+ * request returns), so a fresh session deterministically has a dir and no
+ * file: that is "no turn yet", not a failure. pi also creates `sessions/`
+ * lazily, so ENOENT on the dir is "no turn yet" too — unless the bot world
+ * that holds it (its parent) is gone as well, which is a stale row for a
+ * deleted bot and answers like a missing session. Any other readdir errno is
+ * a real failure.
  */
 function resolveTranscriptFile(dir, sessionId) {
-  if (!dir || !sessionId) return null;
+  if (!dir) return { none: "no_dir" };
   let names;
-  try { names = readdirSync(dir); } catch { return null; }
+  try {
+    names = readdirSync(dir);
+  } catch (err) {
+    if (err && err.code === "ENOENT") return existsSync(dirname(dir)) ? { none: "no_turn_yet" } : { none: "no_dir" };
+    return { error: err };
+  }
+  if (!sessionId) return { none: "no_turn_yet" };
   const suffix = "_" + sessionId + ".jsonl";
   const hits = names.filter((n) => n.endsWith(suffix)).sort();
-  return hits.length ? join(dir, hits[hits.length - 1]) : null;
+  return hits.length ? { file: join(dir, hits[hits.length - 1]) } : { none: "no_turn_yet" };
 }
 
 /**
@@ -806,9 +822,29 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
     const db = createDbClient();
     try {
       const row = await latestSession(db, botId, threadId);
-      const file = row ? resolveTranscriptFile(row.pi_session_dir, row.pi_session_id) : null;
-      if (!file) return jsonError(res, 404, "no_transcript");
-      res.json(readTranscript(file));
+      if (!row) return jsonError(res, 404, "no_transcript");
+      const found = resolveTranscriptFile(row.pi_session_dir, row.pi_session_id);
+      if (found.error) {
+        // The errno message carries an absolute host path: it is logged here
+        // (the only server-side record of a failed history load) and never
+        // echoed to the browser, which prints the code on its Activity rail.
+        console.warn("[perch] transcript dir unreadable:", found.error.code || "", row.pi_session_dir);
+        return jsonError(res, 500, "transcript_unreadable");
+      }
+      if (found.none === "no_turn_yet") {
+        // Additive `notStarted`: the hub renders an empty transcript as its
+        // usual empty state; the flag lets a later UI word it differently.
+        return res.json({ events: [], truncated: false, omitted: 0, notStarted: true });
+      }
+      if (!found.file) return jsonError(res, 404, "no_transcript");
+      try {
+        res.json(readTranscript(found.file));
+      } catch (err) {
+        // Same rule as an unreadable dir: the errno message carries the
+        // file's absolute path, so the code is logged and never echoed.
+        console.warn("[perch] transcript file unreadable:", (err && err.code) || "");
+        jsonError(res, 500, "transcript_unreadable");
+      }
     } catch (err) {
       jsonError(res, 500, String((err && err.message) || err));
     } finally {

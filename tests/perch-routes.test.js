@@ -703,18 +703,69 @@ test("GET transcript reads only the tail BYTES — a fat file is never slurped w
   assert.ok(body.events.every((e) => e && e.type === "message" && e.message && e.message.role === "user"));
 });
 
-test("GET transcript 404s when there is no row, no dir, or no matching file", async () => {
-  assert.equal((await getJson("/bots/chatty/sessions/never-existed/transcript")).status, 404);
+test("GET transcript: 404 only when the session or its dir is unknown; a session with no turn yet is an empty 200", async () => {
+  // A session that does not exist.
+  const gone = await getJson("/bots/chatty/sessions/never-existed/transcript");
+  assert.equal(gone.status, 404);
+  assert.equal(gone.body.error, "no_transcript");
 
+  const c = raw();
+  const ins = c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,pi_session_dir,pi_session_id,status) " +
+    "VALUES ('chatty','perch',?,?,?,'waiting-user')"
+  );
+  // A legacy row with no session dir: nothing can be said about it.
+  ins.run("t-nodir", null, "019eeb17-0000-7000-8000-dddddddddddd");
+  // pi writes the session file only after the first COMPLETED turn, while the
+  // row's dir and id are stamped at spawn: every fresh session looks like this.
+  ins.run("t-nofile", join(dir, "sessions-a"), "019eeb17-0000-7000-8000-cccccccccccc");
+  // Spawned, but pi has not reported its session id yet.
+  ins.run("t-noid", join(dir, "sessions-a"), null);
+  // pi creates sessions/ lazily: the world exists, its sessions/ does not yet.
+  mkdirSync(join(dir, "world-fresh"), { recursive: true });
+  ins.run("t-nosessionsdir", join(dir, "world-fresh", "sessions"), "019eeb17-0000-7000-8000-eeeeeeeeeeee");
+  // A stale row whose whole bot world is gone (deleted bot): not "no turn yet".
+  ins.run("t-noworld", join(dir, "world-deleted", "sessions"), "019eeb17-0000-7000-8000-ffffffffffff");
+  // The dir is a regular FILE: readdir fails with ENOTDIR (root and non-root alike).
+  writeFileSync(join(dir, "not-a-dir"), "x");
+  ins.run("t-unreadable", join(dir, "not-a-dir"), "019eeb17-0000-7000-8000-999999999999");
+  c.close();
+
+  const nodir = await getJson("/bots/chatty/sessions/t-nodir/transcript");
+  assert.equal(nodir.status, 404);
+  assert.equal(nodir.body.error, "no_transcript");
+
+  for (const t of ["t-nofile", "t-noid", "t-nosessionsdir"]) {
+    const r = await getJson("/bots/chatty/sessions/" + t + "/transcript");
+    assert.equal(r.status, 200, t + " has no turn yet, which is not a failure");
+    assert.deepEqual(r.body, { events: [], truncated: false, omitted: 0, notStarted: true }, t);
+  }
+
+  const noworld = await getJson("/bots/chatty/sessions/t-noworld/transcript");
+  assert.equal(noworld.status, 404, "a row whose bot world is gone is not a session that is starting");
+  assert.equal(noworld.body.error, "no_transcript");
+
+  const bad = await getJson("/bots/chatty/sessions/t-unreadable/transcript");
+  assert.equal(bad.status, 500);
+  // The fixed code ONLY: the errno message carries an absolute host path, and
+  // the hub prints the error code on the Activity rail.
+  assert.deepEqual(bad.body, { error: "transcript_unreadable" });
+});
+
+test("GET transcript: a session file that cannot be READ answers the fixed code, never the errno text", async () => {
+  // A directory where the session file should be: readdir finds the name, the
+  // read fails (EISDIR), on root and non-root CI alike.
+  const sdir = join(dir, "sessions-unreadable-file");
+  mkdirSync(join(sdir, "2026-10-26T00-00-00-000Z_019eeb17-0000-7000-8000-aaaaaaaaaaab.jsonl"), { recursive: true });
   const c = raw();
   c.prepare(
     "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,pi_session_dir,pi_session_id,status) " +
-    "VALUES ('chatty','perch','t-nofile',?,'019eeb17-0000-7000-8000-cccccccccccc','waiting-user')"
-  ).run(join(dir, "sessions-a"));
+    "VALUES ('chatty','perch','t-badfile',?,'019eeb17-0000-7000-8000-aaaaaaaaaaab','waiting-user')"
+  ).run(sdir);
   c.close();
-  const r = await getJson("/bots/chatty/sessions/t-nofile/transcript");
-  assert.equal(r.status, 404);
-  assert.equal(r.body.error, "no_transcript");
+  const r = await getJson("/bots/chatty/sessions/t-badfile/transcript");
+  assert.equal(r.status, 500);
+  assert.deepEqual(r.body, { error: "transcript_unreadable" }, "no errno message or host path reaches the browser");
 });
 
 // ---------------------------------------------------------------------------

@@ -217,7 +217,9 @@ test("async continuations are guarded — a fast back button must not cross sess
   // 32 with the feedback cards' list continuation and expand fetch.
   // 33 with composer dictation's transcript continuation, 34 with its mic
   // gate (dictation.js): a stream resolving after the session changed.
-  assert.equal(guards, 34, "expected exactly 34 identity guards, found " + guards);
+  // 35 with the history load's one retry timer (queue item 23a), which
+  // re-checks the session before it refetches.
+  assert.equal(guards, 35, "expected exactly 35 identity guards, found " + guards);
 });
 
 test("the emitted script never assigns to an innerHTML-class sink", async () => {
@@ -2667,8 +2669,24 @@ test("a transcript that FAILED to load says so, instead of reporting an empty on
   // that is still there. Flagged twice before this fix.
   const hub = await mountHub({ fetchImpl: stdFetch({ "/transcript": () => makeResponse(503, { error: "upstream" }) }) });
   await openChatSession(hub);
+  // Queue item 23a: a 5xx is retried once first; nothing is said until the
+  // retry has failed too.
+  assert.deepEqual(notesIn(hub.els["perch-transcript"]), [], "the first failure is retried, not reported");
+  await fireHistRetry(hub);
   assert.deepEqual(notesIn(hub.els["perch-transcript"]), ["Could not load this session's history."]);
+  assert.equal(hub.fetchCalls.filter((c) => String(c.path).endsWith("/transcript")).length, 2, "one retry, no more");
+  assert.equal([...hub.timerDelays.values()].filter((d) => d === 1500).length, 0, "and no second retry is scheduled");
 });
+
+/** Fire the history load's one pending retry timer (1500 ms) and let it settle. */
+async function fireHistRetry(hub) {
+  const ids = [...hub.timerDelays.entries()].filter(([, d]) => d === 1500).map(([id]) => id);
+  assert.equal(ids.length, 1, "exactly one history retry is pending");
+  const fn = hub.timers.get(ids[0]);
+  hub.timers.delete(ids[0]); hub.timerDelays.delete(ids[0]);
+  fn();
+  for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+}
 
 test("a genuinely empty transcript still reports empty, not failed", async () => {
   const hub = await mountHub({ fetchImpl: stdFetch() });      // 200 with events: []
@@ -3200,6 +3218,12 @@ test("R4: a FAILED history fetch flushes the buffer — frames are the only copy
   es._serverFrame("text", { text: "the only copy", turnId: "turn-11" });
   settleBatch(makeResponse(503, { error: "upstream" }));
   await new Promise((r) => setTimeout(r, 0));
+  // Queue item 23a: the first failure is retried and the frame stays parked
+  // across the wait, so the seam dedupe still applies if the retry lands.
+  assert.deepEqual(botEntries(hub), [], "parked during the retry wait");
+  const retry = fireHistRetry(hub);
+  settleBatch(makeResponse(503, { error: "upstream" }));
+  await retry;
   assert.deepEqual(botEntries(hub), ["the only copy"], "nothing to dedup against — render it");
   assert.ok(String(hub.els["perch-transcript"].children.map((c) => c.textContent).join(" "))
     .includes("Could not load"), "and the failure note still says history is missing");
@@ -5330,4 +5354,48 @@ test("QW2: any other launcher error leaves More options closed (the note sits ou
 test("QW2: Spanish strings for the row menu label", async () => {
   const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY), lang: "es" });
   assert.match(rowMore(liveRows(hub)[0]).getAttribute("aria-label"), /^Más acciones para R4 Assistant 11111111$/);
+});
+
+// ---------------------------------------------------------------------------
+// Queue item 23a: the history load retries once, on a network failure or a
+// 5xx only, and says why it failed on the Activity rail.
+// ---------------------------------------------------------------------------
+
+test("history retry rule: a dropped connection and a 5xx retry; a 404 and auth/client errors never do", async () => {
+  const retryable = await extract("historyRetryable");
+  for (const s of [0, 500, 502, 503, 599]) assert.equal(retryable(s), true, String(s));
+  // 404 is deterministic now (no such session, or a deleted bot): the route
+  // answers a session with no turn yet as an empty 200. The hub script is
+  // served by the same gateway as the route, so no older route answers it.
+  for (const s of [200, 400, 401, 403, 404, 409, 600]) assert.equal(retryable(s), false, String(s));
+});
+
+test("history failure rail line: the status or 'network', the error CODE, and whether it retries", async () => {
+  const src = (await import("../servers/gateway/dashboard/perch-hub/client.js")).perchHubJs("en");
+  const r0 = src.indexOf("function historyRetryable");
+  const lineFor = await extract("histFailLine", src.slice(r0, braceMatchEnd(src, r0) + 1) + "\n");
+  assert.equal(lineFor({ ok: false, status: 503, j: null }, 0), "history: HTTP 503 (retrying)");
+  assert.equal(lineFor({ ok: false, status: 0, j: null }, 0), "history: network (retrying)");
+  assert.equal(lineFor({ ok: false, status: 502, j: { error: "bad_gateway" } }, 1), "history: HTTP 502 bad_gateway");
+  assert.equal(lineFor({ ok: false, status: 500, j: { error: "transcript_unreadable" } }, 1),
+    "history: HTTP 500 transcript_unreadable");
+  // A logged-out load follows the login redirect and arrives as a 200 that
+  // is not JSON: "HTTP 200" alone would read as a contradiction.
+  assert.equal(lineFor({ ok: true, status: 200, j: null }, 0), "history: HTTP 200 (not JSON)");
+  // Only a short code-shaped error is printed, never free text.
+  assert.equal(lineFor({ ok: false, status: 500, j: { error: "ENOTDIR: not a directory, scandir '/x/y'" } }, 1),
+    "history: HTTP 500");
+});
+
+test("seam echo match: the operator's line matches pi's persisted copy, with an upload header or a trailing [image]", async () => {
+  const unsentSrc = (await import("../servers/gateway/dashboard/perch-hub/client.js")).perchHubJs("en");
+  const s = unsentSrc.indexOf("function unsentMatchText");
+  const helper = unsentSrc.slice(s, braceMatchEnd(unsentSrc, s) + 1);
+  const match = await extract("seamEchoMatches", helper + "\n");
+  assert.equal(match("again", "again"), true);
+  assert.equal(match("again", "again\n[image]"), true, "a text+image send persists with a trailing [image] line");
+  assert.equal(match("again", "Uploaded files:\n- /x/a.txt\n\nagain"), true, "an upload persists behind its path header");
+  assert.equal(match("again", "not again"), false);
+  assert.equal(match("again", "again and more"), false);
+  assert.equal(match("", ""), false, "an empty send is never a match");
 });
