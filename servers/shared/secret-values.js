@@ -103,6 +103,26 @@ export function secretsDirTrusted(env = process.env) {
   } catch { return false; }
 }
 
+/**
+ * Secrets dirs of co-hosted instances under the same uid: siblings of this
+ * CROW_HOME whose name starts with its name (~/.crow-r4, ~/.crow-mpa beside
+ * ~/.crow) and that hold a secrets dir. The pi sandbox hides them as well.
+ */
+export function coHostedSecretsDirs(env = process.env) {
+  const home = resolveCrowHome(env);
+  const parent = dirname(home);
+  const base = basename(home);
+  const out = [];
+  let names = [];
+  try { names = readdirSync(parent, { withFileTypes: true }); } catch { return out; }
+  for (const n of names) {
+    if (!n.isDirectory() || n.name === base || !n.name.startsWith(base)) continue;
+    const d = join(parent, n.name, "secrets");
+    try { if (lstatSync(d).isDirectory()) out.push(d); } catch { /* none */ }
+  }
+  return out;
+}
+
 /** The anchor of this instance's secrets dir (for inode checks elsewhere). */
 export function secretsDirAnchor(env = process.env) {
   return anchorSecretsDir(env);

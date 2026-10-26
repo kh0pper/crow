@@ -64,7 +64,7 @@
  * to spawn pi without bwrap), "off" (never wrap).
  */
 import { spawnSync } from "node:child_process";
-import { accessSync, constants as fsConstants, existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -89,9 +89,7 @@ function isSocket(p) {
 function isDir(p) {
   try { return statSync(p).isDirectory(); } catch { return false; }
 }
-function canWrite(p) {
-  try { accessSync(p, fsConstants.W_OK); return true; } catch { return false; }
-}
+
 
 /**
  * Docker API sockets reachable on this host, as real paths (so /var/run ->
@@ -239,15 +237,16 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   // a file: a file bind would come off the moment the file is replaced by
   // rename, while the tmpfs over its dir stays.
   const hideDirs = (opts.hideDirs || []).filter((d) => typeof d === "string" && d.startsWith("/") && isDir(d));
-  // Pin every ancestor of a hidden dir that this user could rename (its
-  // parent is writable): bound onto itself it is a mountpoint, and renaming a
-  // mountpoint fails (EBUSY). Without this a bot renames e.g. ~/.crow away,
-  // the tmpfs moves with it, and the next fresh process anchors a planted
-  // decoy at the old path while the real dir sits visible elsewhere.
+  // Pin EVERY ancestor of a hidden dir below / (bound onto itself it is a
+  // mountpoint, and renaming a mountpoint fails, EBUSY). Not only those whose
+  // parent is writable now: the bot owns ~ and can chmod it unwritable for
+  // one spawn and writable again inside the next. Without this a bot renames
+  // e.g. ~/.crow away, the tmpfs moves with it, and the next fresh process
+  // anchors a planted decoy at the old path while the real dir sits visible
+  // elsewhere. A bind costs nothing.
   const pins = [];
   for (const d of hideDirs) {
     for (let a = dirname(d); a && a !== "/" && a !== opts.pinStop; a = dirname(a)) {
-      if (!canWrite(dirname(a))) break;
       if (!pins.includes(a)) pins.push(a);
     }
   }

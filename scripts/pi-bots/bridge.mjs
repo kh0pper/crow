@@ -49,7 +49,7 @@ import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { wrapPiSpawn } from "./pi_sandbox.mjs";
 import { refreshSecretValuesFile } from "../../servers/shared/secret-values-collect.js";
-import { SECRET_VALUES_DISPLAY_FILENAME, SECRET_VALUES_FILENAME, anchoredPath, secretsDir, secretsDirCurrentPath } from "../../servers/shared/secret-values.js";
+import { SECRET_VALUES_DISPLAY_FILENAME, SECRET_VALUES_FILENAME, anchoredPath, coHostedSecretsDirs, secretsDir, secretsDirCurrentPath } from "../../servers/shared/secret-values.js";
 import { maskSecrets } from "../../servers/shared/secret-mask.js";
 import { effectiveReadPaths } from "./bot-read-paths.mjs";
 import { MCP_CONFIG_FD } from "./mcp-delivery.mjs";
@@ -496,10 +496,14 @@ export class PiRpc {
     // The gateway's delivered-files staging root lives inside it.
     try { mkdirSync(secretsDir(), { recursive: true, mode: 0o700 }); } catch { /* anchoring creates it */ }
     const secretsHere = secretsDirCurrentPath() || secretsDir();
-    const launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, hideDirs: [secretsHere] });
+    // A co-hosted instance under the same uid (a sibling home named like this
+    // one, e.g. ~/.crow-r4 beside ~/.crow) keeps its own secrets dir: hidden too.
+    const launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, hideDirs: [secretsHere, ...coHostedSecretsDirs()] });
     delete launch.env.PI_BOT_SECRET_VALUES_FILE;
     const hidden = launch.wrapper === "bwrap" && launch.masked.includes(secretsHere);
-    const secretValues = refreshSecretValuesFile({ write: hidden, log: (l) => console.error("[pi-bots] " + l) });
+    // Not hidden: the bot could read the keychain key and add its own hash to
+    // the card list, so no value may hide text on cards (cardTrusted:false).
+    const secretValues = refreshSecretValuesFile({ write: hidden, cardTrusted: hidden, log: (l) => console.error("[pi-bots] " + l) });
     // Not hidden: a file an earlier sandboxed spawn left must not sit where
     // this bot's shell can read it.
     if (!hidden) {

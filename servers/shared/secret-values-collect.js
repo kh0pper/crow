@@ -99,14 +99,15 @@ function retainedBundleSecrets(env) {
 }
 
 /** Readable keychain entries as { kind, secret } (the key read through the anchored secrets dir). */
-function keychainEntries({ dbPath, env }) {
+function keychainEntries({ dbPath, env, transaction = false }) {
   const keyPath = anchoredPath(env, "keychain.key");
   if (!dbPath || !existsSync(dbPath) || !keyPath) return [];
   let db;
   try {
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
     db.pragma("busy_timeout = 2000");
-    return readableSecretsSync(db, loadKeychainKey({ path: keyPath }));
+    const key = loadKeychainKey({ path: keyPath });
+    return transaction ? db.transaction(() => readableSecretsSync(db, key))() : readableSecretsSync(db, key);
   } catch { return []; }
   finally { if (db) { try { db.close(); } catch { /* closed */ } } }
 }
@@ -164,7 +165,7 @@ export function refreshSecretValuesFile(opts = {}) {
   const env = opts.env || process.env;
   try {
     const sets = collectSecretValueSets(opts);
-    primeSecretValues(sets.display, sets.card);
+    primeSecretValues(sets.display, opts.cardTrusted === false ? [] : sets.card);
     if (opts.write === false) return null;
     // Written through the anchored dir; the path returned (for pi) is where
     // that dir really is now.
@@ -180,25 +181,56 @@ export function refreshSecretValuesFile(opts = {}) {
   }
 }
 
-/** Manual keychain entries as { id, label } (never values), for the operator's confirm. */
+/**
+ * A short fingerprint of a value for the operator's confirm: the first and
+ * last two characters (values of 12+ characters only) and 8 hex of its
+ * sha256. Never the value.
+ */
+export function fingerprintOf(v) {
+  const h = cardHashOf(v).slice(0, 8);
+  const s = String(v);
+  return s.length >= 12 ? s.slice(0, 2) + "\u2026" + s.slice(-2) + " " + h : h;
+}
+
+/** A crow.db label as safe terminal text: no C0/C1/DEL controls, 80 chars. */
+function cleanLabel(l) {
+  return String(l == null ? "" : l).replace(/[\u0000-\u001f\u007f-\u009f]/g, "").slice(0, 80);
+}
+
+/**
+ * Manual keychain entries for the operator's confirm: id, sanitized label,
+ * fingerprint, and whether the label repeats (crow.db is bot-writable, so a
+ * label proves nothing; the fingerprint is checked against a fresh decrypt).
+ */
 export function listManualEntriesForCards({ env = process.env, dbPath } = {}) {
   const db = dbPath === undefined ? (env.CROW_DB_PATH || join(resolveInstanceDataDir(env), "crow.db")) : dbPath;
-  return keychainEntries({ dbPath: db, env }).filter((e) => e.kind === "manual").map((e) => ({ id: e.id, label: e.label }));
+  const rows = keychainEntries({ dbPath: db, env }).filter((e) => e.kind === "manual");
+  const seen = new Map();
+  for (const r of rows) seen.set(cleanLabel(r.label), (seen.get(cleanLabel(r.label)) || 0) + 1);
+  return rows.map((e) => ({ id: e.id, label: cleanLabel(e.label), fingerprint: fingerprintOf(e.secret), duplicateLabel: seen.get(cleanLabel(e.label)) > 1 }));
 }
 
 /**
  * The one-time operator step for entries saved before the card list existed:
- * record the manual keychain entries the operator names BY ID (after reading
- * the labels from listManualEntriesForCards) as card values. A bot can flip a
- * row to manual in crow.db, so nothing is recorded wholesale. Run by the
- * operator (scripts/ops/keychain-card-secrets.mjs), never by the engine; from
- * a bot's sandbox it cannot record anything (the list is in the read-only
- * hidden dir). Returns the number of entries recorded (never values).
+ * record the manual entries the operator names as id + fingerprint (from
+ * listManualEntriesForCards). The entries are decrypted afresh in one read
+ * transaction and every fingerprint must match; any mismatch records
+ * nothing. Run by the operator (scripts/ops/keychain-card-secrets.mjs), never
+ * by the engine; from a bot's sandbox it cannot record anything (the list is
+ * in the read-only hidden dir). Returns the number recorded (never values).
  */
-export function confirmManualEntriesForCards({ env = process.env, dbPath, ids = [] } = {}) {
+export function confirmManualEntriesForCards({ env = process.env, dbPath, pairs = [] } = {}) {
   const db = dbPath === undefined ? (env.CROW_DB_PATH || join(resolveInstanceDataDir(env), "crow.db")) : dbPath;
-  const want = new Set([].concat(ids).map(Number));
-  const picked = keychainEntries({ dbPath: db, env }).filter((e) => e.kind === "manual" && want.has(e.id)).map((e) => e.secret);
-  if (picked.length) recordCardSecret(picked, env);
+  const want = new Map([].concat(pairs).map((p) => [Number(p && p.id), String(p && p.fingerprint)]));
+  if (!want.size) return 0;
+  const byId = new Map(keychainEntries({ dbPath: db, env, transaction: true }).filter((e) => e.kind === "manual").map((e) => [e.id, e.secret]));
+  const picked = [];
+  for (const [id, fp] of want) {
+    const v = byId.get(id);
+    // the full fingerprint, or its 8-hex hash (what a shell argument carries)
+    if (v === undefined || (fingerprintOf(v) !== fp && fingerprintOf(v).slice(-8) !== fp)) return 0;
+    picked.push(v);
+  }
+  recordCardSecret(picked, env);
   return picked.length;
 }

@@ -283,3 +283,36 @@ test("sandboxed: the bot cannot rename the instance home (or any user-writable a
     if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
   }
 });
+
+test("without bubblewrap no value hides text on cards (a bot could have made it), the display set still masks", async () => {
+  const { getCardValues, getSecretValues } = await import("../servers/shared/secret-values.js");
+  const { pi } = await spawnReport({ mode: "off" });
+  await pi.exited;
+  assert.deepEqual(getCardValues(), []);
+  assert.ok(getSecretValues().includes(FAKE));
+});
+
+test("sandboxed: a co-hosted instance's secrets dir (a sibling home of the same name) is hidden too", { skip: noSandbox }, async () => {
+  const sibling = HOME + "-r4";
+  mkdirSync(join(sibling, "secrets"), { recursive: true, mode: 0o700 });
+  writeFileSync(join(sibling, "secrets", "keychain.key"), "{}", { mode: 0o600 });
+  const dir = mkdtempSync(join(tmpdir(), "crow-secret-cohost-"));
+  mkdirSync(join(dir, "sessions"), { recursive: true });
+  const stub = join(dir, "stub-pi.mjs");
+  writeFileSync(stub, [
+    'import { readFileSync } from "node:fs";',
+    `let r = "read"; try { readFileSync(${JSON.stringify(join(sibling, "secrets", "keychain.key"))}); } catch (e) { r = e.code || "refused"; }`,
+    'process.stdout.write(JSON.stringify({ type: "report", tag: "cohost", r }) + "\\n");',
+    "setTimeout(() => process.exit(0), 50);",
+  ].join("\n"));
+  const prev = process.env.CROW_PI_SANDBOX;
+  process.env.CROW_PI_SANDBOX = "auto";
+  try {
+    const pi = new PiRpc({ def: {}, sessionDir: dir, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: process.execPath, cliPath: stub, diagLog: () => {} });
+    const r = await pi.waitFor((m) => m.type === "report", 10000, "cohost");
+    await pi.exited;
+    assert.notEqual(r.r, "read");
+  } finally {
+    if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
+  }
+});

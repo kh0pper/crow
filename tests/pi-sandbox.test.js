@@ -377,3 +377,18 @@ test("wrapPiSpawn pins every user-writable ancestor of a hidden dir (bind onto i
   assert.equal(bindAt(root), -1, "stops at pinStop (a dir whose parent the user cannot write, in production)");
   rmSync(root, { recursive: true, force: true });
 });
+
+test("wrapPiSpawn pins EVERY ancestor below the stop, even past a parent the bot made unwritable (chmod 555 ~)", () => {
+  _resetPiSandboxForTest();
+  const root = mkdtempSync(join(tmpdir(), "crow-pin2-"));
+  const home = join(root, "home");
+  const secrets = join(home, ".crow", "secrets");
+  mkdirSync(secrets, { recursive: true });
+  chmodSync(home, 0o555);
+  try {
+    const probe = { ok: true, bwrap: "/usr/bin/bwrap", setpriv: null, reason: null };
+    const l = wrapPiSpawn("node", ["cli.js"], { mode: "auto", probe, sockets: [], runtimeDirs: [], roDirs: [], hideDirs: [secrets], pinStop: root });
+    assert.ok(l.pinned.includes(join(home, ".crow")), "pinned although its parent is not writable right now");
+    assert.ok(l.pinned.includes(home));
+  } finally { chmodSync(home, 0o755); rmSync(root, { recursive: true, force: true }); }
+});
