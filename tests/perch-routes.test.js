@@ -752,6 +752,22 @@ test("GET transcript: 404 only when the session or its dir is unknown; a session
   assert.deepEqual(bad.body, { error: "transcript_unreadable" });
 });
 
+test("GET transcript: a session file that cannot be READ answers the fixed code, never the errno text", async () => {
+  // A directory where the session file should be: readdir finds the name, the
+  // read fails (EISDIR), on root and non-root CI alike.
+  const sdir = join(dir, "sessions-unreadable-file");
+  mkdirSync(join(sdir, "2026-10-26T00-00-00-000Z_019eeb17-0000-7000-8000-aaaaaaaaaaab.jsonl"), { recursive: true });
+  const c = raw();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,pi_session_dir,pi_session_id,status) " +
+    "VALUES ('chatty','perch','t-badfile',?,'019eeb17-0000-7000-8000-aaaaaaaaaaab','waiting-user')"
+  ).run(sdir);
+  c.close();
+  const r = await getJson("/bots/chatty/sessions/t-badfile/transcript");
+  assert.equal(r.status, 500);
+  assert.deepEqual(r.body, { error: "transcript_unreadable" }, "no errno message or host path reaches the browser");
+});
+
 // ---------------------------------------------------------------------------
 // the auth gate, on a REAL route
 // ---------------------------------------------------------------------------

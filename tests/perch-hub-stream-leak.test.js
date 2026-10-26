@@ -57,6 +57,8 @@ let transcriptHits = 0;
  *  (measured under full-suite load: answered in ~0 ms, no rail line) must
  *  not count as the page's own retry. */
 let dropUntil = 0;
+/** False models a send pi has not written yet when the history is read. */
+let persistSends = true;
 
 function serveApi(req, res) {
   const url = req.url.split("?")[0];
@@ -99,13 +101,14 @@ function serveApi(req, res) {
   }
   // pi appends the operator's message to the session file when the turn
   // starts, so the next history load includes it.
+  if (url.endsWith("/message") && req.method === "POST" && !persistSends) { req.resume(); return send(200, { ok: true }); }
   if (url.endsWith("/message") && req.method === "POST") {
     let raw = "";
     req.on("data", (c) => { raw += c; });
     req.on("end", () => {
       try {
         const b = JSON.parse(raw || "{}");
-        if (typeof b.message === "string") historyEvents.push({ type: "message", message: { role: "user", content: [{ text: b.message }] } });
+        if (typeof b.message === "string") historyEvents.push(userMsg(b.message, Date.now()));
       } catch { /* not JSON: nothing persisted */ }
       send(200, { ok: true });
     });
@@ -175,7 +178,7 @@ before(async () => {
   port = server.address().port;
 });
 
-beforeEach(() => { openStreams = []; historyEvents = []; transcriptDelayMs = 0; transcriptPlan = []; transcriptHits = 0; dropUntil = 0; });
+beforeEach(() => { openStreams = []; historyEvents = []; transcriptDelayMs = 0; transcriptPlan = []; transcriptHits = 0; dropUntil = 0; persistSends = true; });
 after(async () => { if (server) server.close(); if (chrome) await chrome.close(); });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -691,7 +694,7 @@ test("dictation: five Turbo visits after a recording leave no listener, track or
 // ---------------------------------------------------------------------------
 
 const FAILED = "Could not load this session's history.";
-const userMsg = (text) => ({ type: "message", message: { role: "user", content: [{ text }] } });
+const userMsg = (text, ts = Date.now() - 60000) => ({ type: "message", timestamp: new Date(ts).toISOString(), message: { role: "user", content: [{ text }] } });
 const botMsg = (text) => ({ type: "message", message: { role: "assistant", content: [{ text }] } });
 /** Poll until fn() is truthy or the deadline passes; never throws, so the
  *  assertions that follow say what was wrong. */
@@ -868,5 +871,28 @@ test("history retry: a message sent during the retry wait shows once when the re
       "the operator's line once, after the history it follows: " + JSON.stringify(seen.userLines));
     assert.deepEqual(seen.botLines, ["hi"]);
     assert.deepEqual(seen.notes, []);
+  } finally { await s.close(); }
+});
+
+test("history retry: the operator repeating an OLDER line during the wait keeps both lines", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  // "again" is already in the history from a minute ago; the new "again" has
+  // not reached pi's file when the retried batch is read. Matching on text
+  // alone dropped the new line.
+  historyEvents = [userMsg("again"), botMsg("ok")];
+  transcriptPlan = [503];
+  persistSends = false;
+  const s = await session();
+  try {
+    await openHash(s);
+    await until(() => transcriptHits >= 1, 4000);
+    await sleep(300);
+    await s.evalIn(`(function(){ var i=document.getElementById('perch-input'); i.value='again';
+      document.getElementById('perch-send').click(); return 'sent'; })()`);
+    await until(() => transcriptHits >= 2, 5000);
+    await sleep(800);
+    const seen = await s.json(PAGE_STATE);
+    assert.deepEqual(seen.userLines, ["again", "again"], "the repeat is a new message: " + JSON.stringify(seen.userLines));
+    assert.deepEqual(seen.botLines, ["ok"]);
   } finally { await s.close(); }
 });

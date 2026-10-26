@@ -1992,9 +1992,9 @@ export function perchHubJs(lang = "en") {
           /* An errored attempt with no text is not a bot message: drawing
              it was the empty bubble every failed turn left behind. */
           if(!(errored&&!txt)){
-            if(String(m.role||'?')!=='user') batchTexts.push(txt); else userTexts.push(txt);
-            appendMessage(String(m.role||'?')==='user'?'user':'bot', String(m.role||'?'), txt, e.html,
-              Date.parse(String(e.timestamp||''))||Number(m.timestamp)||0);
+            var mts=Date.parse(String(e.timestamp||''))||Number(m.timestamp)||0;
+            if(String(m.role||'?')!=='user') batchTexts.push(txt); else userTexts.push({text:txt,ts:mts});
+            appendMessage(String(m.role||'?')==='user'?'user':'bot', String(m.role||'?'), txt, e.html, mts);
           }
           if(errored&&endsTurn(i)) drawTurnError(e.errorText, null);
           if(i===msgs.length-1) tailErr=errored?String(e.errorText||''):null;
@@ -2010,7 +2010,9 @@ export function perchHubJs(lang = "en") {
      lands can already hold the line the composer echoed — and the seam
      dedupe (flushHistBuf) never covers user lines. Each echo drawn while the
      seam is open is settled here, just before the flush: matched against
-     the batch's trailing user messages it is dropped (pi's copy is in its
+     the batch's trailing user messages — same text AND persisted no earlier
+     than 2 s before the send, so an operator repeating an older line
+     ("continue" twice) keeps both — it is dropped (pi's copy is in its
      right place); unmatched it moves below the history it follows. */
   function seamEchoMatches(sent,batch){
     if(sent==null||sent===''||batch==null) return false;
@@ -2026,7 +2028,8 @@ export function perchHubJs(lang = "en") {
     echoes.forEach(function(e){
       if(!e.row||!e.row.parentNode) return;
       for(var i=0;i<tail.length;i++){
-        if(seamEchoMatches(e.text,tail[i])){ tail.splice(0,i+1); e.row.parentNode.removeChild(e.row); return; }
+        /* No timestamp: keep the echo. A duplicate line is harmless; a lost one is not. */
+        if(tail[i].ts&&tail[i].ts>=e.sentAt-2000&&seamEchoMatches(e.text,tail[i].text)){ tail.splice(0,i+1); e.row.parentNode.removeChild(e.row); return; }
       }
       if(tr) tr.appendChild(e.row);
     });
@@ -2451,7 +2454,7 @@ export function perchHubJs(lang = "en") {
     var mySid=current.sid;
     appendMessage('user','you',text);      /* echo before the round trip */
     /* 23a: an echo drawn before the history lands is settled against it. */
-    if(!histSettled){ var trE=el('perch-transcript'); if(trE&&trE.lastElementChild) seamEchoes.push({text:text,row:trE.lastElementChild}); }
+    if(!histSettled){ var trE=el('perch-transcript'); if(trE&&trE.lastElementChild) seamEchoes.push({text:text,row:trE.lastElementChild,sentAt:Date.now()}); }
     input.value='';
     input.style.height='auto';             /* Wave 1: the auto-grow collapses back after a send */
     var body={message:text};

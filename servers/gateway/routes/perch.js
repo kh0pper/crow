@@ -837,7 +837,14 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
         return res.json({ events: [], truncated: false, omitted: 0, notStarted: true });
       }
       if (!found.file) return jsonError(res, 404, "no_transcript");
-      res.json(readTranscript(found.file));
+      try {
+        res.json(readTranscript(found.file));
+      } catch (err) {
+        // Same rule as an unreadable dir: the errno message carries the
+        // file's absolute path, so the code is logged and never echoed.
+        console.warn("[perch] transcript file unreadable:", (err && err.code) || "");
+        jsonError(res, 500, "transcript_unreadable");
+      }
     } catch (err) {
       jsonError(res, 500, String((err && err.message) || err));
     } finally {
