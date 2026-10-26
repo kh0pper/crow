@@ -24,6 +24,9 @@ import { rerank as phase4Rerank } from "./rerank.js";
 import { emitOrQueue } from "../shared/sync-emit.js";
 import { jsonObject } from "../shared/tool-schema-types.js";
 import { isVoiceBotId } from "../shared/voice-bot.js";
+import { scheduleKind, reminderText, zoneFor, cronNext, cadenceMinutes, SCHEDULE_OWNERS, ONCE, REMINDER_PREFIX } from "../shared/schedule-core.js";
+import { instanceZone, hasTzColumn, deleteSchedule, requestRun, runSummaries } from "../shared/schedule-store.js";
+import { validTimeZone } from "../shared/relative-dates.js";
 
 export function createMemoryServer(dbPath, options = {}) {
   const db = createDbClient(dbPath);
@@ -1096,40 +1099,76 @@ export function createMemoryServer(dbPath, options = {}) {
   );
 
   // --- Schedule Tools ---
+  // A schedule's type comes from its task text (servers/shared/schedule-core.js): reminders are
+  // stored as "reminder:<text>", bot routines as "pipeline:botcron:<bot>", and the daily briefing
+  // row belongs to the News app. Times run in the row's zone (tz), or the instance zone when NULL.
+
+  const TYPE_LABEL = { reminder: "Reminder", bot_routine: "Bot routine", briefing: "Briefing", system: "System" };
+  const scheduleError = (text) => ({ content: [{ type: "text", text }], isError: true });
+  const briefingError = () => scheduleError(`The daily briefing belongs to the ${SCHEDULE_OWNERS["media:briefing"].app} app: change it with ${SCHEDULE_OWNERS["media:briefing"].tool}.`);
+  const MIN_REMINDER_EVERY = 60;
+  const isoOf = (ms) => new Date(ms).toISOString();
 
   server.tool(
     "crow_create_schedule",
-    "Create a scheduled or recurring task. Uses cron expressions for timing (e.g. '0 9 * * *' for daily at 9am, '0 */6 * * *' for every 6 hours).",
+    "Create a reminder (the default type) or a bot routine. Give EITHER cron_expression for a repeating schedule ('0 9 * * *' = daily at 9:00, '0 9 * * 1-5' = weekdays) OR at (an ISO date-time) for a one-time reminder. Times are in tz, or the instance's time zone when tz is left out. Reminders repeat at most hourly. The daily news briefing is set in the News app (crow_media_schedule_briefing), not here.",
     {
-      task: z.string().max(1000).describe("The task to schedule"),
-      cron_expression: z.string().max(50).describe("Cron expression for scheduling (e.g. '0 9 * * *' for daily at 9am)"),
+      task: z.string().max(1000).describe("What to be reminded of (a reminder), or pipeline:botcron:<bot_id> (a bot routine)"),
+      cron_expression: z.string().max(50).optional().describe("Cron expression for a repeating schedule (e.g. '0 9 * * *' for daily at 9am)"),
+      at: z.string().max(40).optional().describe("ISO date-time for a one-time reminder (e.g. '2026-11-03T10:00:00-06:00')"),
+      tz: z.string().max(64).optional().describe("IANA time zone (e.g. 'America/Chicago'); default: the instance's zone"),
+      type: z.enum(["reminder", "bot_routine", "briefing"]).optional().describe("Schedule type; default: reminder (or bot_routine for a pipeline:botcron: task)"),
       description: z.string().max(500).optional().describe("Optional description of the schedule"),
     },
-    async ({ task, cron_expression, description }) => {
+    async ({ task, cron_expression, at, tz, type, description }) => {
+      const t = String(task).trim();
+      const derived = scheduleKind(t);
+      if (type === "briefing" || derived === "briefing") return briefingError();
+      if (derived === "system") return scheduleError("Tasks starting with \"pipeline:\" are reserved for bot routines (pipeline:botcron:<bot_id>).");
+      const kind = type || derived;
+      if (kind === "bot_routine" && derived !== "bot_routine") return scheduleError("A bot routine's task is pipeline:botcron:<bot_id>. Bot routines are easiest to make in Bot Builder.");
+      if (kind === "reminder" && derived !== "reminder") return scheduleError("A reminder's text cannot start with \"pipeline:\".");
       // The reserved voice bot takes no bot-cron schedule (the scheduler skips it; refuse up front).
-      const botcron = String(task).trim().match(/^pipeline:botcron:(.+)$/);
+      const botcron = t.match(/^pipeline:botcron:(.+)$/);
       if (botcron && isVoiceBotId(botcron[1])) {
-        return { content: [{ type: "text", text: "The Crow voice bot cannot take background jobs, so it cannot be scheduled." }], isError: true };
+        return scheduleError("The Crow voice bot cannot take background jobs, so it cannot be scheduled.");
       }
-      // Validate and compute next_run
-      let nextRun = null;
-      try {
-        const { CronExpressionParser } = await import("cron-parser");
-        const interval = CronExpressionParser.parse(cron_expression);
-        nextRun = interval.next().toISOString();
-      } catch {
-        return { content: [{ type: "text", text: `Invalid cron expression: "${cron_expression}". Use standard 5-field format (e.g. "0 9 * * *" for daily at 9am).` }] };
+      if ((cron_expression ? 1 : 0) + (at ? 1 : 0) !== 1) return scheduleError("Give exactly one of cron_expression (repeating) or at (one time).");
+      if (tz !== undefined && !validTimeZone(tz)) return scheduleError(`"${tz}" is not a time zone name (use one like America/Chicago).`);
+      const now = Date.now();
+      const zone = zoneFor(tz, await instanceZone(db));
+      let cron, nextRun;
+      if (at) {
+        if (kind !== "reminder") return scheduleError("Only a reminder can be one-time; give a cron_expression.");
+        const ms = Date.parse(at);
+        if (!Number.isFinite(ms)) return scheduleError(`"${at}" is not a date and time (use ISO, e.g. 2026-11-03T10:00:00-06:00).`);
+        if (ms <= now) return scheduleError("That time has already passed. Pick a time in the future.");
+        cron = ONCE;
+        nextRun = isoOf(ms);
+      } else {
+        cron = String(cron_expression).trim();
+        if (cron === ONCE) return scheduleError("For a one-time reminder, give at (an ISO date-time) instead of @once.");
+        const next = cronNext(cron, zone, now);
+        if (next === null) return scheduleError(`Invalid cron expression: "${cron}". Use standard 5-field format (e.g. "0 9 * * *" for daily at 9am).`);
+        if (kind === "reminder") {
+          const every = cadenceMinutes(cron, zone, now);
+          if (every !== null && every < MIN_REMINDER_EVERY) return scheduleError(`Reminders can repeat at most every hour; this one would repeat every ${every} minutes.`);
+        }
+        nextRun = isoOf(next);
       }
-
+      const stored = kind === "reminder" && !t.startsWith(REMINDER_PREFIX) ? REMINDER_PREFIX + t : t;
+      const withTz = await hasTzColumn(db);
       const result = await db.execute({
-        sql: "INSERT INTO schedules (task, cron_expression, description, next_run) VALUES (?, ?, ?, ?)",
-        args: [task, cron_expression, description ?? null, nextRun],
+        sql: withTz
+          ? "INSERT INTO schedules (task, cron_expression, description, next_run, tz) VALUES (?, ?, ?, ?, ?)"
+          : "INSERT INTO schedules (task, cron_expression, description, next_run) VALUES (?, ?, ?, ?)",
+        args: withTz ? [stored, cron, description ?? null, nextRun, tz ?? null] : [stored, cron, description ?? null, nextRun],
       });
       return {
         content: [
           {
             type: "text",
-            text: `Schedule created (id: ${Number(result.lastInsertRowid)}, task: ${task}, cron: ${cron_expression}, next run: ${nextRun})`,
+            text: `Schedule created (id: ${Number(result.lastInsertRowid)}, type: ${TYPE_LABEL[kind]}, task: ${stored}, ${cron === ONCE ? "once" : `cron: ${cron}`}, zone: ${zone}, next run: ${nextRun})`,
           },
         ],
       };
@@ -1138,11 +1177,12 @@ export function createMemoryServer(dbPath, options = {}) {
 
   server.tool(
     "crow_list_schedules",
-    "List all scheduled tasks, optionally filtering to only enabled schedules.",
+    "List scheduled tasks with their type (Reminder, Bot routine, Briefing), zone, next run, last run status and missed runs. Optionally only enabled ones, or one type.",
     {
       enabled_only: z.boolean().optional().describe("If true, only return enabled schedules"),
+      type: z.enum(["reminder", "bot_routine", "briefing", "system"]).optional().describe("Only schedules of this type"),
     },
-    async ({ enabled_only }) => {
+    async ({ enabled_only, type }) => {
       let sql = "SELECT * FROM schedules";
       const params = [];
 
@@ -1152,17 +1192,22 @@ export function createMemoryServer(dbPath, options = {}) {
 
       sql += " ORDER BY created_at DESC";
 
-      const { rows } = await db.execute({ sql, args: params });
+      let { rows } = await db.execute({ sql, args: params });
+      if (type) rows = rows.filter((r) => scheduleKind(r.task) === type);
 
       if (rows.length === 0) {
         return { content: [{ type: "text", text: "No schedules found." }] };
       }
 
+      const zone = await instanceZone(db);
+      const runs = await runSummaries(db, rows.map((r) => Number(r.id)));
       const formatted = rows
-        .map(
-          (r) =>
-            `[#${r.id}] ${r.enabled ? "enabled" : "disabled"} | ${r.cron_expression}\n  Task: ${r.task}${r.description ? `\n  Description: ${r.description}` : ""}${r.last_run ? `\n  Last run: ${r.last_run}` : ""}${r.next_run ? `\n  Next run: ${r.next_run}` : ""}\n  Created: ${r.created_at}`
-        )
+        .map((r) => {
+          const kind = scheduleKind(r.task);
+          const run = runs.get(Number(r.id));
+          const shown = kind === "reminder" ? reminderText(r.task) : r.task;
+          return `[#${r.id}] ${TYPE_LABEL[kind]} | ${r.enabled ? "enabled" : "disabled"} | ${r.cron_expression === ONCE ? "once" : r.cron_expression} | zone: ${zoneFor(r.tz, zone)}${r.tz ? "" : " (instance)"}\n  Task: ${shown}${r.description ? `\n  Description: ${r.description}` : ""}${r.last_run ? `\n  Last run: ${r.last_run}` : ""}${run?.lastStatus ? ` (${run.lastStatus})` : ""}${run?.openMissed ? `\n  Missed: ${run.openMissed} missed run(s) not yet dismissed` : ""}${r.next_run ? `\n  Next run: ${r.next_run}` : ""}\n  Created: ${r.created_at}`;
+        })
         .join("\n\n");
 
       return { content: [{ type: "text", text: `${rows.length} schedules:\n\n${formatted}` }] };
@@ -1171,50 +1216,77 @@ export function createMemoryServer(dbPath, options = {}) {
 
   server.tool(
     "crow_update_schedule",
-    "Update or delete a scheduled task by ID. Provide only the fields you want to change, or set delete=true to remove it.",
+    "Update, pause/resume, run now, or delete a schedule by ID. Provide only the fields you want to change. run_now=true runs a reminder within a minute without moving its next run. delete=true removes it and its run history. The type cannot change; the daily briefing is changed in the News app.",
     {
       id: z.number().describe("Schedule ID to update or delete"),
-      enabled: z.boolean().optional().describe("Enable or disable the schedule"),
-      task: z.string().max(1000).optional().describe("New task description"),
+      enabled: z.boolean().optional().describe("Enable (resume) or disable (pause) the schedule"),
+      task: z.string().max(1000).optional().describe("New text (the type must stay the same)"),
       cron_expression: z.string().max(50).optional().describe("New cron expression"),
-      delete: z.boolean().optional().describe("If true, delete the schedule entirely"),
+      tz: z.string().max(64).optional().describe("New IANA time zone"),
+      run_now: z.boolean().optional().describe("If true, run this reminder now (within a minute)"),
+      delete: z.boolean().optional().describe("If true, delete the schedule and its run history"),
     },
-    async ({ id, enabled, task, cron_expression, delete: doDelete }) => {
+    async ({ id, enabled, task, cron_expression, tz, run_now, delete: doDelete }) => {
       const { rows } = await db.execute({ sql: "SELECT * FROM schedules WHERE id = ?", args: [id] });
       if (rows.length === 0) {
         return { content: [{ type: "text", text: `Schedule #${id} not found.` }] };
       }
+      const row = rows[0];
+      const kind = scheduleKind(row.task);
+      if (kind === "briefing") return briefingError();
 
       if (doDelete) {
-        await db.execute({ sql: "DELETE FROM schedules WHERE id = ?", args: [id] });
+        await deleteSchedule(db, id);
         return { content: [{ type: "text", text: `Schedule #${id} deleted.` }] };
       }
 
+      if (run_now) {
+        if (kind !== "reminder") return scheduleError(kind === "bot_routine" ? "Bot routines are run from Bot Builder." : "This schedule cannot be run by hand.");
+        const runId = await requestRun(db, id);
+        if (runId === null) return scheduleError("This Crow has not been updated for run history yet; restart its gateway and try again.");
+        return { content: [{ type: "text", text: `Schedule #${id}: run requested (run ${runId}); Crow runs it within a minute. Its next scheduled run is unchanged.` }] };
+      }
+
+      if (tz !== undefined && !validTimeZone(tz)) return scheduleError(`"${tz}" is not a time zone name (use one like America/Chicago).`);
+      const withTz = await hasTzColumn(db);
+      const now = Date.now();
+      const zone = zoneFor(tz ?? row.tz, await instanceZone(db));
+      const cron = cron_expression !== undefined ? String(cron_expression).trim() : row.cron_expression;
+
       const updates = [];
       const params = [];
-      if (task !== undefined) { updates.push("task = ?"); params.push(task); }
+      if (task !== undefined) {
+        const t = String(task).trim();
+        if (scheduleKind(t) !== kind) return scheduleError("A schedule's type is fixed. Delete it and create a new one instead.");
+        updates.push("task = ?"); params.push(kind === "reminder" && !t.startsWith(REMINDER_PREFIX) ? REMINDER_PREFIX + t : t);
+      }
+      if (tz !== undefined && withTz) { updates.push("tz = ?"); params.push(tz); }
       if (cron_expression !== undefined) {
-        // Validate and recompute next_run
-        try {
-          const { CronExpressionParser } = await import("cron-parser");
-          const interval = CronExpressionParser.parse(cron_expression);
-          const nextRun = interval.next().toISOString();
-          updates.push("cron_expression = ?"); params.push(cron_expression);
-          updates.push("next_run = ?"); params.push(nextRun);
-        } catch {
-          return { content: [{ type: "text", text: `Invalid cron expression: "${cron_expression}". Use standard 5-field format.` }] };
+        if (cron === ONCE) return scheduleError("For a one-time reminder, create a new one with at.");
+        const next = cronNext(cron, zone, now);
+        if (next === null) return scheduleError(`Invalid cron expression: "${cron}". Use standard 5-field format.`);
+        if (kind === "reminder") {
+          const every = cadenceMinutes(cron, zone, now);
+          if (every !== null && every < MIN_REMINDER_EVERY) return scheduleError(`Reminders can repeat at most every hour; this one would repeat every ${every} minutes.`);
         }
+        updates.push("cron_expression = ?"); params.push(cron);
+        updates.push("next_run = ?"); params.push(isoOf(next));
+      } else if (tz !== undefined && cron !== ONCE) {
+        const next = cronNext(cron, zone, now);
+        if (next !== null) { updates.push("next_run = ?"); params.push(isoOf(next)); }
       }
       if (enabled !== undefined) {
         updates.push("enabled = ?"); params.push(enabled ? 1 : 0);
-        // Recompute next_run when re-enabling
+        // Resuming recomputes next_run from now in the row's zone; a one-shot keeps its time,
+        // and one whose time has passed cannot resume.
         if (enabled && cron_expression === undefined) {
-          try {
-            const { CronExpressionParser } = await import("cron-parser");
-            const existingCron = rows[0].cron_expression;
-            const interval = CronExpressionParser.parse(existingCron);
-            updates.push("next_run = ?"); params.push(interval.next().toISOString());
-          } catch {}
+          if (cron === ONCE) {
+            const at = Date.parse(row.next_run ?? "");
+            if (!Number.isFinite(at) || at <= now) return scheduleError("That one-time reminder's time has passed. Create a new one with a new time.");
+          } else if (tz === undefined) {
+            const next = cronNext(cron, zone, now);
+            if (next !== null) { updates.push("next_run = ?"); params.push(isoOf(next)); }
+          }
         }
       }
 
