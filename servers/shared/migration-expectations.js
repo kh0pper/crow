@@ -50,6 +50,7 @@ export const VOLATILE_TABLES = [
   "relay_blobs",
   "mcp_sessions",
   "crowdsec_decisions_cache",
+  "schedule_runs", // the scheduler prunes run history every tick (90 days / 500 per schedule / orphans)
 ];
 
 // Rebuild sources (DROP TABLE + recreate + copy) with per-table loss policy:
