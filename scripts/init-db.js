@@ -1432,8 +1432,36 @@ await initTable("schedules table", `
     last_run TEXT,
     next_run TEXT,
     created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now'))
+    updated_at TEXT DEFAULT (datetime('now')),
+    tz TEXT
   );
+`);
+// schedules.tz: the row's IANA zone (NULL = follow the instance zone). Additive, no generation
+// bump; scripts/migrations/0009-schedule-runs.mjs is the other rail (one shape, two rails).
+await addColumnIfMissing("schedules", "tz", "TEXT");
+
+// Run history per schedule (servers/gateway/scheduler.js): fired, late, missed (one row per
+// missed window), failed, requested (run now from the memory server), running and paused (the
+// 0009 upgrade). No FK: deleteSchedule() removes a schedule's runs in the same transaction, and
+// the scheduler prunes orphans. Byte-for-byte the DDL in 0009-schedule-runs.mjs.
+await initTable("schedule_runs table", `
+  CREATE TABLE IF NOT EXISTS schedule_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    schedule_id INTEGER NOT NULL,
+    scheduled_for TEXT,
+    ran_at TEXT,
+    status TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'clock',
+    missed_count INTEGER NOT NULL DEFAULT 0,
+    job_id TEXT,
+    detail TEXT,
+    notified_at TEXT,
+    acknowledged_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_schedule_runs_sched ON schedule_runs(schedule_id, id DESC);
+  CREATE UNIQUE INDEX IF NOT EXISTS ux_schedule_runs_occ ON schedule_runs(schedule_id, scheduled_for) WHERE scheduled_for IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS idx_schedule_runs_status ON schedule_runs(status, notified_at);
 `);
 
 // --- AI Chat Tables ---
