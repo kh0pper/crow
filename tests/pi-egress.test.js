@@ -457,3 +457,42 @@ test("the route cache never turns a failed read into a success within its TTL; a
     _resetRoutesCacheForTest();
   }
 });
+
+test("VirtualBox/VMware host-only nets (by name) and Open vSwitch bridges (by kind) are this host", () => {
+  const routes = () => ({ local: [{ type: "local", dst: "127.0.0.1", dev: "lo" }],
+    main: [{ dst: "192.168.56.0/24", dev: "vboxnet0" }, { dst: "172.16.99.0/24", dev: "vmnet8" }, { dst: "10.50.0.0/24", dev: "ovsbr1" }],
+    virtualDevs: new Set(["ovsbr1"]) });
+  const o = { interfaces: () => ({}), routes };
+  for (const a of ["192.168.56.101", "172.16.99.128", "10.50.0.5"]) assert.notEqual(egressDenyReason(a, o), null, a);
+});
+
+test("openvswitch is a virtual device kind", async () => {
+  const { deviceKindIsVirtual } = await import("../scripts/pi-bots/pi_egress.mjs");
+  assert.equal(deviceKindIsVirtual("openvswitch"), true);
+});
+
+test("routes from every table count (table all): a container subnet routed only in a VRF table is still this host; non-unicast entries are ignored", () => {
+  const routes = () => ({ local: [{ type: "local", dst: "127.0.0.1", dev: "lo" }],
+    main: [{ dst: "10.90.0.0/24", dev: "br-vrf", table: "100" }, { type: "local", dst: "10.0.0.237", dev: "eno1", table: "local" },
+      { type: "multicast", dst: "ff00::/8", dev: "veth9", table: "local" }] });
+  const o = { interfaces: () => ({}), routes };
+  assert.notEqual(egressDenyReason("10.90.0.4", o), null);
+  assert.equal(egressDenyReason("10.0.0.50", o), null);
+});
+
+test("operator-listed extra refused networks (e.g. Kubernetes ClusterIP ranges) are refused", async () => {
+  assert.notEqual(egressDenyReason("10.43.0.10", { interfaces: () => ({}), routes: NO_ROUTES_LO, denyNets: ["10.43.0.0/16", "fd00:43::/64"] }), null);
+  assert.notEqual(egressDenyReason("fd00:43::1", { interfaces: () => ({}), routes: NO_ROUTES_LO, denyNets: ["10.43.0.0/16", "fd00:43::/64"] }), null);
+  assert.equal(egressDenyReason("10.44.0.10", { interfaces: () => ({}), routes: NO_ROUTES_LO, denyNets: ["10.43.0.0/16"] }), null);
+  const { r } = await relay({ lookup: async () => [{ address: "10.43.0.10", family: 4 }], interfaces: () => ({}), routes: NO_ROUTES_LO, denyNets: ["10.43.0.0/16"] });
+  assert.match(await talk(r.socketPath, "PROXY\nCONNECT svc.cluster.local:443 HTTP/1.1\r\n\r\n"), /^HTTP\/1\.1 403/);
+});
+const NO_ROUTES_LO = () => ({ local: [{ type: "local", dst: "127.0.0.1", dev: "lo" }], main: [] });
+
+test("the name-based interface path honours the physical-port exemption too", () => {
+  const routes = () => ({ local: [{ type: "local", dst: "127.0.0.1", dev: "lo" }], main: [], physicalBridges: new Set(["br-lan"]) });
+  const ifs = () => ({ "br-lan": [{ address: "10.0.0.237", family: "IPv4", cidr: "10.0.0.237/24" }] });
+  const o = { interfaces: ifs, routes };
+  assert.equal(egressDenyReason("10.0.0.50", o), null);
+  assert.notEqual(egressDenyReason("10.0.0.237", o), null);
+});

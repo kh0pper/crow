@@ -57,6 +57,10 @@ import { join } from "node:path";
 // 6to4 2002::/16, both Teredo fields) is unwrapped and judged as the IPv4
 // address; the NAT64 local-use /48 and the discard prefix are refused.
 // Zone ids are stripped (the CONNECT parser refuses '%' anyway).
+// Not detectable from this host's tables, so an operator lists them in
+// CROW_PI_EGRESS_DENY_NETS (spawner env, comma-separated CIDRs): Kubernetes
+// service ranges, a network-specific NAT64 prefix, a router that hairpins the
+// host's public address back to it.
 const PLUMBING_V4 = new BlockList();
 for (const [a, p] of [["169.254.0.0", 16], ["168.63.129.16", 32], ["100.100.100.0", 24]]) PLUMBING_V4.addSubnet(a, p, "ipv4");
 const PRIVATE_V4 = new BlockList();
@@ -64,7 +68,7 @@ for (const [a, p] of [["10.0.0.0", 8], ["172.16.0.0", 12], ["192.168.0.0", 16], 
 /** Interfaces whose subnets are containers/VMs on this host. */
 // Not tun*: a tun device is a VPN to other hosts (the tailnet is one), which
 // the public-and-private default allows; tap/vnet are VM devices.
-const VIRTUAL_IF = /^(docker\d*|br-|virbr|podman|cni|veth|lxcbr|lxdbr|incusbr|flannel|cali|vxlan|vnet|tap)/;
+const VIRTUAL_IF = /^(docker\d*|br-|virbr|podman|cni|veth|lxcbr|lxdbr|incusbr|flannel|cali|vxlan|vnet|tap|vboxnet|vmnet)/;
 
 function expand6(a) {
   let s = String(a).toLowerCase().split("%")[0];
@@ -104,9 +108,10 @@ export function readKernelRoutes() {
   };
   let links = null, linksFailed = false;
   try { links = run(["-d", "link"]); } catch { linksFailed = true; }
-  const v6 = readV6Tables((which) => run(which === "local" ? ["-6", "route", "show", "table", "local"] : ["-6", "route"]));
+  const v6 = readV6Tables((which) => run(which === "local" ? ["-6", "route", "show", "table", "local"] : ["-6", "route", "show", "table", "all"]));
   return parseKernelTables({
-    local4: run(["route", "show", "table", "local"]), main4: run(["route"]), links, linksFailed, ...v6,
+    // every routing table (VRFs, policy tables), not only main
+    local4: run(["route", "show", "table", "local"]), main4: run(["route", "show", "table", "all"]), links, linksFailed, ...v6,
   });
 }
 
@@ -133,7 +138,9 @@ export function readV6Tables(run, o = {}) {
 }
 
 /** Device kinds that carry containers/VMs on this host. Not tun (VPNs such as the tailnet) or wireguard. */
-const VIRTUAL_KINDS = new Set(["bridge", "veth", "vxlan", "geneve", "macvlan", "ipvlan", "macvtap"]);
+// openvswitch: OVS bridges carry VMs; an OVS bridge that carries the LAN is
+// refused too (fails safe: OVS physical ports are not visible as bridge ports).
+const VIRTUAL_KINDS = new Set(["bridge", "veth", "vxlan", "geneve", "macvlan", "ipvlan", "macvtap", "openvswitch"]);
 export function deviceKindIsVirtual(kind) { return VIRTUAL_KINDS.has(String(kind || "")); }
 
 /**
@@ -190,6 +197,7 @@ function localView(o = {}) {
   const addrs = new Set(), bcast = new Set();
   const nets4 = new BlockList(), nets6 = new BlockList();
   let failed = false, failed6 = false;
+  let physicalBridges = new Set();
   const addAddr = (a) => { const x = String(a || "").split("%")[0]; if (isIP(x)) addrs.add(isIP(x) === 6 ? key6(x) : x); };
   // A dst is an address or address/prefix; `ip -j route` prints host routes
   // without the /32 or /128. Returns false for a shape it does not know.
@@ -210,6 +218,7 @@ function localView(o = {}) {
     const t = (o.routes || cachedKernelRoutes)();
     if (t.v6Failed) failed6 = true;
     if (t.linksFailed) failed = true; // a custom-named bridge could be missed
+    if (t.physicalBridges) physicalBridges = t.physicalBridges;
     for (const r of t.local || []) {
       const dst = String(r.dst || "");
       if (r.type === "local" || r.type === "anycast") {
@@ -222,6 +231,7 @@ function localView(o = {}) {
       }
     }
     for (const r of t.main || []) {
+      if (r.type && r.type !== "unicast") continue; // local/broadcast/multicast come from the local table
       const dev = String(r.dev || "");
       const virtual = (VIRTUAL_IF.test(dev) || (t.virtualDevs && t.virtualDevs.has(dev))) && !(t.physicalBridges && t.physicalBridges.has(dev));
       if (r.dst && r.dst !== "default" && virtual && !addNet(r.dst)) failed = true;
@@ -240,7 +250,7 @@ function localView(o = {}) {
         addAddr(addr);
         const plen = Number(String(i.cidr || "").split("/")[1]);
         if (!Number.isInteger(plen)) continue;
-        if (VIRTUAL_IF.test(name)) addNet(addr + "/" + plen);
+        if (VIRTUAL_IF.test(name) && !physicalBridges.has(name)) addNet(addr + "/" + plen);
         if (isIP(addr) === 4 && plen < 31) {
           const mask = plen === 0 ? 0 : (0xffffffff << (32 - plen)) >>> 0;
           bcast.add(intV4(((v4Int(addr) & mask) | (~mask >>> 0)) >>> 0));
@@ -250,6 +260,12 @@ function localView(o = {}) {
   } catch { failed = true; }
   // 3. explicit own addresses, honoured on every path
   for (const a of o.hostAddrs || []) addAddr(a);
+  // 4. operator-listed networks that lead back into this host but are not
+  //    visible in its tables (Kubernetes ClusterIP ranges DNAT'd in nat
+  //    OUTPUT, a network-specific NAT64 prefix): refused like a bridge.
+  for (const n of o.denyNets || []) {
+    if (!addNet(n)) failed = true;
+  }
   return { addrs, bcast, nets4, nets6, failed, failed6 };
 }
 
@@ -353,7 +369,8 @@ export function createEgressRelay(o) {
   // relay does not proxy. 443 by default.
   const ports = new Set((o.egressPorts || [443]).map(Number));
   const allow = Array.isArray(o.egressAllow) ? o.egressAllow : null;
-  const local = { interfaces: o.interfaces, routes: o.routes, hostAddrs: o.hostAddrs };
+  const local = { interfaces: o.interfaces, routes: o.routes, hostAddrs: o.hostAddrs,
+    denyNets: o.denyNets || String(process.env.CROW_PI_EGRESS_DENY_NETS || "").split(",").map((x) => x.trim()).filter(Boolean) };
   const maxConns = o.maxConns ?? 64;
   const headTimeoutMs = o.headTimeoutMs ?? 10000;
   const lookup = o.lookup || ((h) => dnsLookup(h, { all: true, verbatim: true }));
