@@ -6,7 +6,8 @@
  *
  *   voice_bot_save    the switch, model, escalation, persona and name, the Routine section (calendar, reminders, tasks, confirm),
  *                     speaking voice and speech recognition, memory tools, the recent-transcripts switch
- *                     (voice.transcript_buffer: in memory only, off unless ticked; voice/transcript-buffer.js)
+ *                     (voice.transcript_buffer: in memory only, off unless ticked; voice/transcript-buffer.js;
+ *                     voice.transcript_log: a one-week log on this instance's disk, off unless ticked; voice/transcript-log.js)
  *   voice_bot_preset  rebuild the model, escalation and the preset's tool
  *                     entries from voiceBotDefinition (Memory tools stay as
  *                     the operator set them); "Reset to preset"
@@ -171,7 +172,7 @@ export async function handleVoiceBotSave(req, res, { db }) {
     ...def,
     fast_voice_model: model,
     system_prompt: prompt,
-    voice: { ...obj(def.voice), escalation, tts_profile_id: tts.id, stt_profile_id: stt.id, transcript_buffer: b.transcript_buffer === "on" },
+    voice: { ...obj(def.voice), escalation, tts_profile_id: tts.id, stt_profile_id: stt.id, transcript_buffer: b.transcript_buffer === "on", transcript_log: b.transcript_log === "on" },
     tools: { ...obj(def.tools), crow_mcp: tools },
   };
   await applyRoutine(db, b, def, next);
@@ -399,7 +400,10 @@ export async function renderVoiceBotEditor(req, res, { db, layout, lang = "en", 
   // Off unless ticked; turning it off clears the buffer on the next turn or the defs-changed reload (transcript-buffer.js).
   const transcriptsSec = sec("botbuilder.voiceTranscriptsTitle",
     `<label class="btb-vcheck"><input type="checkbox" name="transcript_buffer" value="on" form="btb-vsave"${v.transcript_buffer ? " checked" : ""}> ` +
-    `${escapeHtml(t("botbuilder.voiceTranscriptsLabel", lang))}</label>` + hint("botbuilder.voiceTranscriptsWarn"));
+    `${escapeHtml(t("botbuilder.voiceTranscriptsLabel", lang))}</label>` + hint("botbuilder.voiceTranscriptsWarn") +
+    // The one-week log (voice/transcript-log.js): off unless ticked; unticking it deletes the log.
+    `<label class="btb-vcheck"><input type="checkbox" name="transcript_log" value="on" form="btb-vsave"${v.transcript_log ? " checked" : ""}> ` +
+    `${escapeHtml(t("botbuilder.voiceTranscriptLogLabel", lang))}</label>` + hint("botbuilder.voiceTranscriptLogWarn"));
   const routineSec = await routineSection(db, v, lang, sec, hint);
   const saveBar = `<p><button type="submit" class="btn btn-primary" form="btb-vsave">${escapeHtml(t("common.save", lang))}</button></p>`;
   const abilSec = kioskAvailable ? sec("botbuilder.voiceAbilTitle", abilityLineHtml(CROW_VOICE_BOT_ID)) + voiceAbilityScript(lang) : "";
