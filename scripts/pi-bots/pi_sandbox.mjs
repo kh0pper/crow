@@ -231,13 +231,19 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   const sockets = opts.sockets || dockerSocketPaths(process.env);
   const tmpfs = opts.runtimeDirs || userRuntimeDirs();
   const roDirs = opts.roDirs || systemdUserUnitDirs();
+  // Instance secret dirs (the bot engine passes <CROW_HOME>/secrets: the
+  // keychain key, retained bundle secrets, the secret-values file). A dir, not
+  // a file: a file bind would come off the moment the file is replaced by
+  // rename, while the tmpfs over its dir stays.
+  const hideDirs = (opts.hideDirs || []).filter((d) => typeof d === "string" && d.startsWith("/") && isDir(d));
   const pre = ["--dev-bind", "/", "/", "--unshare-user"];
   for (const d of tmpfs) pre.push("--tmpfs", d);
+  for (const d of hideDirs) if (!tmpfs.some((t) => d === t || d.startsWith(t + "/"))) pre.push("--tmpfs", d);
   for (const s of sockets) if (!tmpfs.some((d) => s === d || s.startsWith(d + "/"))) pre.push("--ro-bind", "/dev/null", s);
   for (const d of roDirs) pre.push("--ro-bind", d, d);
   if (opts.infoFd != null) pre.push("--info-fd", String(opts.infoFd));
   return { cmd: probe.bwrap, args: [...pre, "--", cmd, ...args], env: scrubSandboxEnv(env),
-    sandboxed: true, wrapper: "bwrap", reason: null, masked: [...sockets, ...tmpfs, ...roDirs] };
+    sandboxed: true, wrapper: "bwrap", reason: null, masked: [...sockets, ...tmpfs, ...hideDirs, ...roDirs] };
 }
 
 /** True when a ps `args` string is a bubblewrap wrapper (used by the reaper). */

@@ -155,6 +155,7 @@ import { jobLockFor } from "./routes/board-lock.js";
 import { cardBriefBlock } from "../../scripts/pi-bots/card-brief.mjs";
 import { appendDates } from "../shared/relative-dates.js";
 import { stripContextEcho } from "./voice/context-echo.js";
+import { maskSecrets, maskSecretsDetailed, hiddenNote, HIDDEN_NOTE_RE } from "../shared/secret-mask.js";
 
 /** Lease file name under CROW_HOME. Consumed by C-14's reaper exemption. */
 export const LEASE_FILENAME = "perch-interactive-leases.json";
@@ -419,12 +420,105 @@ function childMemoryMB(s) {
  * question.
  */
 function cardFrom(m) {
-  const card = { requestId: m.id, method: m.method, title: m.title == null ? "" : String(m.title) };
-  if (Array.isArray(m.options)) card.options = m.options.slice();
-  if (m.placeholder != null) card.placeholder = m.placeholder;
-  if (m.message != null) card.message = m.message;
-  if (m.prefill != null) card.prefill = m.prefill;
+  // Approval-card secret masking (2026-10-26): the card is DISPLAY text — it
+  // reaches SSE frames, the snapshot, the replay, the "needs you" row and its
+  // push — so every field a person reads goes through maskSecrets(). What pi
+  // needs back (a select's option string, an untouched editor prefill) is
+  // kept on a non-enumerable symbol (never spread into a frame, never
+  // serialized) and mapped back in answer().
+  const title = maskSecretsDetailed(m.title == null ? "" : String(m.title));
+  const card = { requestId: m.id, method: m.method, title: title.text };
+  let hidden = title.count;
+  const raw = {};
+  if (Array.isArray(m.options)) {
+    const shown = uniqueShown(m.options.map((o) => maskSecrets(o)));
+    card.options = shown;
+    if (shown.some((o, i) => o !== m.options[i])) { raw.options = m.options.slice(); hidden += 1; }
+  }
+  if (m.placeholder != null) card.placeholder = maskSecrets(m.placeholder);
+  if (m.message != null) {
+    const msg = maskSecretsDetailed(m.message);
+    card.message = msg.text;
+    hidden += msg.count;
+  }
+  if (m.prefill != null) {
+    const pre = maskSecretsDetailed(m.prefill);
+    card.prefill = pre.text;
+    if (pre.count) { raw.prefill = m.prefill; hidden += pre.count; }
+  }
+  // The contract's note on the first line, unless pi-lab's own is there.
+  if (hidden && !HIDDEN_NOTE_RE.test(card.title) && !HIDDEN_NOTE_RE.test(card.message || "")) {
+    card.message = hiddenNote(hidden) + (card.message ? "\n" + card.message : "");
+  }
+  if (raw.options || raw.prefill != null) Object.defineProperty(card, RAW_CARD, { value: raw });
   return card;
+}
+
+/** What pi asked for, behind a display card (cardFrom). Not enumerable. */
+const RAW_CARD = Symbol("perch.rawCard");
+
+/** Masked option strings that collapsed into one get a position suffix, so
+ * the operator's pick still maps to exactly one real option. */
+function uniqueShown(list) {
+  const seen = new Map();
+  return list.map((o, i) => {
+    const k = String(o);
+    if (!seen.has(k)) { seen.set(k, i); return o; }
+    return k + " (" + (i + 1) + ")";
+  });
+}
+
+/** A masked copy of an ask_user questions payload (display only): question,
+ * header, option labels and descriptions. The original stays in askCtx and
+ * is what the answer script is built from. */
+function maskQuestions(qs) {
+  if (!Array.isArray(qs)) return qs;
+  return qs.map((q) => {
+    if (!q || typeof q !== "object") return q;
+    const out = { ...q };
+    if (typeof q.question === "string") out.question = maskSecrets(q.question);
+    if (typeof q.header === "string") out.header = maskSecrets(q.header);
+    if (Array.isArray(q.options)) {
+      const labels = uniqueShown(q.options.map((o) => (o && o.label != null ? maskSecrets(String(o.label)) : o && o.label)));
+      out.options = q.options.map((o, i) => (o && typeof o === "object"
+        ? { ...o, label: labels[i], ...(typeof o.description === "string" ? { description: maskSecrets(o.description) } : {}) }
+        : o));
+    }
+    return out;
+  });
+}
+
+/** The operator answered the MASKED questions card: map each picked label back
+ * to the real option at the same position. */
+function unmaskAnswers(shownQs, rawQs, answers) {
+  if (!Array.isArray(answers) || !Array.isArray(shownQs) || !Array.isArray(rawQs)) return answers;
+  return answers.map((a, qi) => {
+    const shown = shownQs[qi] && Array.isArray(shownQs[qi].options) ? shownQs[qi].options : null;
+    const real = rawQs[qi] && Array.isArray(rawQs[qi].options) ? rawQs[qi].options : null;
+    if (!a || typeof a !== "object" || !shown || !real) return a;
+    const map = (label) => {
+      const i = shown.findIndex((o) => o && String(o.label) === String(label));
+      return i >= 0 && real[i] && real[i].label != null ? String(real[i].label) : label;
+    };
+    const out = { ...a };
+    if (Array.isArray(a.selected)) out.selected = a.selected.map(map);
+    if (Array.isArray(a.labels)) out.labels = a.labels.map(map);
+    return out;
+  });
+}
+
+/** Frame fields a person reads. */
+const FRAME_TEXT_FIELDS = ["text", "argsText", "resultText", "title", "message", "lastError"];
+/** A frame as a subscriber may see it: display text masked (2026-10-26). */
+function maskFrame(event) {
+  if (!event || typeof event !== "object") return event;
+  let out = event;
+  for (const k of FRAME_TEXT_FIELDS) {
+    if (typeof event[k] !== "string" || !event[k]) continue;
+    const v = maskSecrets(event[k]);
+    if (v !== event[k]) { if (out === event) out = { ...event }; out[k] = v; }
+  }
+  return out;
 }
 
 /**
@@ -490,9 +584,11 @@ export function createInteractiveEngine({
   now = Date.now,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
-  log = (m) => console.log("[perch-interactive] " + m),
+  log: rawLog = (m) => console.log("[perch-interactive] " + m),
   notifications = null,
 } = {}) {
+  // Every engine log line can quote a bot's card, stderr or reply: masked.
+  const log = (m) => rawLog(maskSecrets(m));
   /** sessionId (= gateway_thread_id) → session record. */
   const sessions = new Map();
   /** sessionId → in-flight adoption promise (fix round 2: single-flight). */
@@ -717,7 +813,7 @@ export function createInteractiveEngine({
       // A live card, or an expired one still shown (expired:true) so the
       // operator sees what was asked: either way the session waits for them.
       pendingUi: shownCard(s),
-      lastError: s.lastError,
+      lastError: s.lastError ? maskSecrets(s.lastError) : s.lastError,
       // Track 3 Task 4: the engine-tracked model wins over the raw
       // prepareSpawn resolution once one is known (a live model_select or a
       // control() switch), so the lens reports the model actually serving
@@ -760,8 +856,9 @@ export function createInteractiveEngine({
   }
 
   function emit(s, event) {
+    const shown = maskFrame(event);
     for (const fn of [...s.subscribers]) {
-      try { fn(event); } catch { /* a broken subscriber never breaks a turn */ }
+      try { fn(shown); } catch { /* a broken subscriber never breaks a turn */ }
     }
   }
 
@@ -786,7 +883,8 @@ export function createInteractiveEngine({
     try {
       const { createNotification } = await loadNotifications();
       db = createDbClient();
-      await createNotification(db, opts);
+      // Masked before the cut and before the row and the push (2026-10-26).
+      await createNotification(db, { ...opts, title: maskSecrets(opts.title), body: opts.body == null ? opts.body : maskSecrets(opts.body) });
     } catch (e) {
       log("attention notify failed (non-fatal): " + ((e && e.message) || e));
     } finally {
@@ -815,7 +913,7 @@ export function createInteractiveEngine({
    * Fire-and-forget, like pushAttention: a failure never breaks the card.
    */
   function attentionForAsk(s, text) {
-    const question = String(text == null ? "" : text).slice(0, 300);
+    const question = maskSecrets(String(text == null ? "" : text)).slice(0, 300);
     return chainAttention(s, async (db, N) => {
       const r = await N.upsertGroupedNotification(db, {
         type: "attention",
@@ -971,7 +1069,7 @@ export function createInteractiveEngine({
       botId: s.botId,
       threadId: s.threadId,
       state: s.state,
-      lastError: s.lastError || null,
+      lastError: s.lastError ? maskSecrets(s.lastError) : null,
       pendingUi: shownCard(s),
       // Track 3 Task 4: same three additions as snapshot(), same rule.
       model: servingModel(s),
@@ -2228,13 +2326,13 @@ export function createInteractiveEngine({
         const qs = s.pendingQuestions.questions;
         s.pendingQuestions = null;
         s.askCtx = { questions: qs, firstFrame: m };
-        s.pendingUi = { requestId: m.id, method: "questions", title: "", questions: qs };
+        s.pendingUi = { requestId: m.id, method: "questions", title: "", questions: maskQuestions(qs) };
         s.expiredAsk = null;                         // a live question supersedes an expired one
         armAskExpiry(s, m);
         clearStall(s);                               // paused while a human thinks
         emit(s, { type: "ask_user", ...s.pendingUi });
         armIdle(s);
-        attentionForAsk(s, askSummary(qs));
+        attentionForAsk(s, askSummary(s.pendingUi.questions));
         return;
       }
       s.pendingUi = cardFrom(m);
@@ -2456,7 +2554,7 @@ export function createInteractiveEngine({
             type: "attention",
             priority: "normal",
             title: s.botId + (failed ? "'s turn failed" : " replied"),
-            body: (failed ? errorText : replyText).slice(0, 140),
+            body: maskSecrets(failed ? errorText : replyText).slice(0, 140),
             action_url: "/dashboard/bot-board#bird=" + s.sessionId,
           });
         }
@@ -3248,7 +3346,9 @@ export function createInteractiveEngine({
         return { ok: true };
       }
       const answers = Array.isArray(value && value.answers) ? value.answers : [];
-      const script = buildAskScript(card.questions, answers);
+      const script = ctx.questions
+        ? buildAskScript(ctx.questions, unmaskAnswers(card.questions, ctx.questions, answers))
+        : buildAskScript(card.questions, answers);
       const step0 = script && script[0];
       // Drift guard: the first scripted response must be a value the child's
       // actual select offered. If the script is unusable OR its first step no
@@ -3287,6 +3387,14 @@ export function createInteractiveEngine({
       payload.confirmed = !!(value && value.confirmed);
     } else {
       payload.value = String(value && value.value != null ? value.value : "");
+      // A masked card (cardFrom): the shown option or untouched prefill maps
+      // back to what pi offered. An edited prefill is sent as typed.
+      const raw = card[RAW_CARD];
+      if (raw && raw.options && Array.isArray(card.options)) {
+        const i = card.options.indexOf(payload.value);
+        if (i >= 0) payload.value = String(raw.options[i]);
+      }
+      if (raw && raw.prefill != null && payload.value === card.prefill) payload.value = String(raw.prefill);
     }
     s.pi.send(payload);
     settleAsk(s);                                    // 2026-10-20: expiry off, group closed
@@ -3499,21 +3607,22 @@ export function createInteractiveEngine({
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
     s.subscribers.add(fn);
+    const replay = (e) => fn(maskFrame(e));   // the replay is display too (2026-10-26)
     try {
-      fn(stateEvent(s));
+      replay(stateEvent(s));
       // Replay the pending question, and ONLY a pending one: stop / abort /
       // hibernate / child exit all clear it, so a late subscriber can never be
       // shown a card no child is waiting on.
-      if (s.pendingUi) fn({ type: "ask_user", ...s.pendingUi });
-      else if (s.expiredAsk) fn({ type: "ask_user", ...s.expiredAsk });
+      if (s.pendingUi) replay({ type: "ask_user", ...s.pendingUi });
+      else if (s.expiredAsk) replay({ type: "ask_user", ...s.expiredAsk });
       // Track 3 Task 5: replay the last known plan-mode mirror so a late
       // subscriber's drawer opens already showing plan-mode state instead of
       // waiting for the NEXT bus tick (which may never come if nothing
       // changes).
-      if (s.planMode) fn({ type: "plan_state", state: s.planMode });
+      if (s.planMode) replay({ type: "plan_state", state: s.planMode });
       // Strand 2: the child's tool-budget notice (emitted at spawn, usually
       // before anyone was listening).
-      if (s.budgetNotice && s.pi) fn({ type: "log", text: s.budgetNotice });
+      if (s.budgetNotice && s.pi) replay({ type: "log", text: s.budgetNotice });
     } catch { /* a broken subscriber is not our problem */ }
     return () => s.subscribers.delete(fn);
   }

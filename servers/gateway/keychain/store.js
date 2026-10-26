@@ -189,6 +189,30 @@ export async function exportableEntries(db, key) {
 }
 
 /**
+ * Every readable entry's plaintext, SYNCHRONOUSLY, from a better-sqlite3 handle (the bot
+ * engine's driver). Only for the bot secret-values file (servers/shared/secret-values-collect.js),
+ * which hides these values from approval cards and pushes; never returned to a client.
+ * Rows sealed under another key, a missing table, or a row that fails to open are skipped.
+ */
+export function readableSecretsSync(rawDb, key) {
+  if (!key || typeof key.id !== "string" || !Buffer.isBuffer(key.seed)) return [];
+  let rows;
+  try {
+    rows = rawDb.prepare("SELECT secret_sealed FROM crow_keychain WHERE key_id = ?").all(key.id);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const r of rows) {
+    try {
+      const v = openSecret(r.secret_sealed, box(key));
+      if (typeof v === "string" && v) out.push(v);
+    } catch { /* damaged row: skip */ }
+  }
+  return out;
+}
+
+/**
  * Import entries from a decrypted Export. Never overwrites a READABLE entry: an extension
  * entry whose bundle+key already has a readable row is skipped, and so is a manual entry
  * with the same label+username+url as a readable one. Unreadable rows (old key) for the

@@ -69,6 +69,7 @@ import { redactErrorText } from "../perch-error-text.js";
 import { stripTrailingDates } from "../../shared/relative-dates.js";
 import { stripContextEcho } from "../voice/context-echo.js";
 import { CROW_VOICE_BOT_ID } from "../../shared/voice-bot.js";
+import { maskDeep } from "../../shared/secret-mask.js";
 
 /**
  * A user message as the operator typed it: without the [Dates] line the engine appended (perch-interactive.js).
@@ -468,7 +469,10 @@ function readTranscript(file) {
   let datesLine = null;   // the [Dates] line of the current turn (set by its user message)
   for (const line of kept) {
     try {
-      let event = JSON.parse(line);
+      // Display copy: every string masked (approval-card secret masking,
+      // 2026-10-26) — a bash command or a reply can quote a secret. The
+      // session file on disk is pi's and stays as it is.
+      let event = maskDeep(JSON.parse(line));
       const em = event && event.type === "message" ? event.message : null;
       if (em && em.role === "user") {
         const u = withoutDatesLine(em);

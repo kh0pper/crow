@@ -47,6 +47,9 @@ import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVoc
 import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { wrapPiSpawn } from "./pi_sandbox.mjs";
+import { refreshSecretValuesFile } from "../../servers/shared/secret-values-collect.js";
+import { secretsDir } from "../../servers/shared/secret-values.js";
+import { maskSecrets } from "../../servers/shared/secret-mask.js";
 import { effectiveReadPaths } from "./bot-read-paths.mjs";
 import { MCP_CONFIG_FD } from "./mcp-delivery.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
@@ -474,7 +477,19 @@ export class PiRpc {
     // (--info-fd), kept as this.piPid. The setpriv fallback execs in place, so
     // there proc.pid IS pi. CROW_PI_SANDBOX=required throws here, which
     // callers surface as a failed turn.
-    const launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3 });
+    // Approval-card secret masking (contract with pi-lab, 2026-10-26): the
+    // instance's secret values, refreshed at every spawn so a secret added
+    // since the last one is already in the file. Set HERE, after spawn_env
+    // (whose PI_BOT_ keys were stripped above) and extraEnv merged, so only
+    // the engine ever names the file. Under the default sandbox the whole
+    // <CROW_HOME>/secrets dir is hidden behind a tmpfs (hideDirs), so a bot
+    // shell cannot read the list; pi-lab's own trust check then finds no file
+    // and masks by pattern only, and Crow's second mask (secret-mask.js)
+    // carries the exact values on every card, push and log line.
+    delete env.PI_BOT_SECRET_VALUES_FILE;
+    const secretValues = refreshSecretValuesFile({ log: (l) => console.error("[pi-bots] " + l) });
+    if (secretValues) env.PI_BOT_SECRET_VALUES_FILE = secretValues.path;
+    const launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, hideDirs: [secretsDir()] });
     this.sandboxed = launch.sandboxed;
     this.sandboxWrapper = launch.wrapper;
     this.piPid = null;
@@ -547,7 +562,7 @@ export class PiRpc {
     // [pi-lab/...] diagnostics (MCP start failures, auto-bash decisions)
     // reach the gateway log; the full stderr is still kept for error text.
     const diag = (opts.stderrDiag === false) ? null
-      : createStderrDiag({ label: opts.diagLabel || basename(sessionDir || "") || "bot", emit: opts.diagLog || ((l) => console.error(l)) });
+      : createStderrDiag({ label: opts.diagLabel || basename(sessionDir || "") || "bot", emit: (l) => (opts.diagLog || ((x) => console.error(x)))(maskSecrets(l)) });
     this.proc.stderr.on("data", (d) => { this.stderr += d.toString(); if (diag) { try { diag(d); } catch {} } });
     this.exited = new Promise((res) => this.proc.on("exit", (c) => {
       this._exitCode = c == null ? -1 : c;
@@ -563,7 +578,7 @@ export class PiRpc {
     const key = this.resolved && this.resolved.key;
     return new Error("pi exited (code " + this._exitCode + ") before " + (label || "responding") +
       " — the model " + key + " may not be available on this instance" +
-      " (configure providers in Settings → AI Models). pi said: " + (this.stderr.trim().slice(-300) || "(no stderr)"));
+      " (configure providers in Settings → AI Models). pi said: " + (maskSecrets(this.stderr.trim().slice(-300)) || "(no stderr)"));
   }
   send(o) {
     if (this._exitCode != null) throw this._exitError("send");
@@ -582,7 +597,7 @@ export class PiRpc {
       // here: on the ms>0 path this setTimeout is never cleared on success —
       // ledgered separately.)
       if (ms === 0) return;
-      setTimeout(() => { const i = this._w.indexOf(w); if (i >= 0) { this._w.splice(i, 1); reject(new Error("timeout:" + label + " (stderr " + this.stderr.slice(-200) + ")")); } }, ms);
+      setTimeout(() => { const i = this._w.indexOf(w); if (i >= 0) { this._w.splice(i, 1); reject(new Error("timeout:" + label + " (stderr " + maskSecrets(this.stderr.slice(-200)) + ")")); } }, ms);
     });
   }
   async prompt(message, ms, images) {
