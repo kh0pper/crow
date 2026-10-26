@@ -157,3 +157,10 @@ test("applying to a non-process env does not mark keys for stripping", async () 
   applyCredentialFiles({ CREDENTIALS_DIRECTORY: dir }, { roots, log: quietLog().log });
   assert.ok(!credentialKeyNames().includes("LOCAL_ONLY_TOKEN"));
 });
+
+test("the bot runner applies credentials in its FIRST import, before any module reads env", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../scripts/pi-bots/gateways/gateway_runner.mjs", import.meta.url), "utf8");
+  const firstImport = src.split("\n").find((l) => /^import /.test(l));
+  assert.equal(firstImport, 'import "./apply-credentials.mjs";');
+});
