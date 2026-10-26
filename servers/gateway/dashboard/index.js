@@ -70,6 +70,7 @@ import memoryPanel from "./panels/memory.js";
 import extensionsPanel from "./panels/extensions.js";
 import modelCatalogPanel from "./panels/model-catalog.js";
 import skillsPanel from "./panels/skills.js";
+import schedulePanel, { schedulePreview } from "./panels/schedule.js";
 import projectsPanel from "./panels/projects.js";
 import settingsPanel from "./panels/settings.js";
 import contactsPanel from "./panels/contacts.js";
@@ -108,6 +109,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   registerPanel(extensionsPanel);
   registerPanel(modelCatalogPanel);
   registerPanel(skillsPanel);
+  registerPanel(schedulePanel);
   registerPanel(settingsPanel);
   registerPanel(contactsPanel);
   registerPanel(botBuilderPanel);
@@ -634,6 +636,15 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // There is no /dashboard/models page (it is /dashboard/model-catalog), but
   // older notifications stored that link in their action_url.
   router.get("/dashboard/models", (req, res) => res.redirect("/dashboard/model-catalog"));
+
+  // The Schedule panel's live preview: plain words → the read-back and the next 3 runs (JSON).
+  // Session-gated by dashboardAuth above; read-only (GET).
+  router.get("/dashboard/schedule/preview", async (req, res) => {
+    const db = createDbClient();
+    try { await schedulePreview(req, res, db); }
+    catch (err) { if (!res.headersSent) res.status(500).json({ ok: false, error: "preview failed" }); console.warn("[schedule] preview:", err.message); }
+    finally { db.close(); }
+  });
 
   // Crow keychain API (Settings → Security & passwords → Saved passwords & keys + the Extensions first-view banner).
   // Session-authed + CSRF-protected by the two middlewares above; the router itself
