@@ -37,7 +37,7 @@ import { appendDates } from "../../servers/shared/relative-dates.js";
 import { stripContextEcho } from "../../servers/gateway/voice/context-echo.js";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -106,8 +106,11 @@ function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts,
   const botCacheDir = join(crowHome, "bot-cache");
   try { mkdirSync(botCacheDir, { recursive: true, mode: 0o700 }); } catch {}
   const servers = [];
-  const addServers = (cfg) => { for (const b of Object.values((cfg && cfg.mcpServers) || {})) if (b && typeof b === "object") servers.push(b); };
-  try { addServers(JSON.parse(readFileSync(join(piAgentDir, "mcp.json"), "utf8"))); } catch {}
+  const addServers = (cfg) => { for (const b of Object.values((cfg && cfg.mcpServers) || {})) if (b && typeof b === "object" && !b.disabled) servers.push(b); };
+  // Only the bot's OWN servers (the spawner-built closed-world config, which
+  // already carries each selected canonical block). The operator's other
+  // canonical servers are not bound: pi still tries to start them and they
+  // fail closed inside the sandbox, without their files or ports.
   // Only the spawner-built config (fd delivery). The session dir's .mcp.json is
   // bot-writable, so it never decides what gets bound (a server it names that
   // is not bound fails closed inside the sandbox).
@@ -116,8 +119,13 @@ function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts,
   const unmaskIdentity = servers.some((b) => [b.command, ...(b.args || []), b.cwd].some((x) => /servers\/sharing\b/.test(String(x || ""))))
     || ((def && def.tools && def.tools.crow_mcp) || []).some((t) => /^crow-sharing\b|^sharing\b/.test(String(t)));
   const dataDir = dirname(CROW_DB);
-  if (!containSwept) { containSwept = true; sweepStaleContainDirs(); }
-  const shadow = prepareAgentShadow(piAgentDir);
+  // Per-spawn shadows (they hold a copy of the provider keys) live in the
+  // instance's own 0700 run dir, not the shared /tmp, and are never bound
+  // into a sandbox.
+  const runDir = join(crowHome, "contain-run");
+  try { mkdirSync(runDir, { recursive: true, mode: 0o700 }); chmodSync(runDir, 0o700); } catch {}
+  if (!containSwept) { containSwept = true; sweepStaleContainDirs({ parent: runDir }); sweepStaleContainDirs(); }
+  const shadow = prepareAgentShadow(piAgentDir, { parent: runDir });
   const extraRw = dirname(TASKS_DB) !== dataDir ? [dirname(TASKS_DB)] : [];
   return {
     home: HOME, uid: process.getuid(), nodeBin, cliPath,
@@ -470,6 +478,11 @@ export class PiRpc {
       // S3 fix round 1 (M1): CROW_PI_SANDBOX is the operator's switch for the
       // pi sandbox; a bot def must not be able to turn it off for itself.
       if (/^PI_BOT_|^PIBOT_/.test(k) || k === "CROW_PI_SANDBOX" || k === "CROW_PI_CONTAIN_BOTS" || k === "CROW_PI_CONTAIN_DATA_KEEP") { strippedSpawnEnv.push(k); continue; }
+      // Loader hooks run code before pi starts (and a bot can edit its own def
+      // through its DB-touching tools): never from a def. A NODE_OPTIONS made
+      // only of heap-size flags is kept.
+      if (/^LD_|^DYLD_/.test(k) || ["NODE_PATH", "NODE_V8_COVERAGE", "NODE_REPL_EXTERNAL_MODULE"].includes(k)
+        || (k === "NODE_OPTIONS" && !/^(\s*--max-old-space-size=\d+\s*)+$/.test(String(def.spawn_env[k])))) { strippedSpawnEnv.push(k); continue; }
       // The board actor secret (and where it lives) is never a child's to hold or to choose.
       if (BOARD_SECRET_ENV_KEYS.includes(k)) { strippedSpawnEnv.push(k); continue; }
       spawnEnv[k] = def.spawn_env[k];
