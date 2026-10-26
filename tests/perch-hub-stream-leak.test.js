@@ -758,9 +758,11 @@ test("history retry: a dropped connection is retried", async (t) => {
     await until(async () => (await s.json(PAGE_STATE)).botLines.length >= 1, 3000);
     await sleep(400);
     const seen = await s.json(PAGE_STATE);
-    // Two, or three when the browser silently re-sent the dropped GET (see
-    // dropUntil); the page's own single retry is pinned by the rail line.
-    assert.ok(transcriptHits >= 2 && transcriptHits <= 3, String(transcriptHits));
+    // The server count includes the browser's own silent re-sends of the
+    // dropped GET (see dropUntil), so the page's single retry is pinned by
+    // its rail: exactly one failure line, and it says it is retrying.
+    assert.ok(transcriptHits >= 2, String(transcriptHits));
+    assert.deepEqual(seen.activity.filter((a) => a.includes("history:")).length, 1, JSON.stringify(seen.activity));
     assert.deepEqual(seen.botLines, ["after the drop"]);
     assert.deepEqual(seen.notes, []);
     assert.ok(seen.activity.some((a) => a.includes("history: network (retrying)")), JSON.stringify(seen.activity));
