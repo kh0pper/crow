@@ -31,6 +31,37 @@ import { generateJobId, ensureBotJobsSchema } from "./job_runner.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
 import { isVoiceBotId } from "../../servers/shared/voice-bot.js";
 import { BOTCRON_PREFIX, settleDue, graceMs, ALIVE_SLACK_MS, missedRunInsert, cronNext } from "../../servers/shared/schedule-core.js";
+import { validTimeZone } from "../../servers/shared/relative-dates.js";
+import { getOrCreateLocalInstanceId } from "../../servers/gateway/instance-registry.js";
+
+/** The settings key schedule-store.js's instanceZone() reads (INSTANCE_ZONE_KEY; a test pins the two together). */
+export const INSTANCE_ZONE_KEY = "instance_timezone";
+
+/**
+ * The instance zone, read synchronously on this connection with the same
+ * precedence as the settings registry's readSetting (this instance's override
+ * first, then the global row). undefined when unset or invalid, so settleDue
+ * falls back to the host zone, exactly like instanceZone(). A row's own tz
+ * still wins (zoneFor). Never throws.
+ */
+export function instanceZoneSync(d) {
+  let raw = null;
+  try {
+    let localId = null;
+    try { localId = getOrCreateLocalInstanceId(); } catch {}
+    if (localId) {
+      try {
+        const ov = d.prepare("SELECT value FROM dashboard_settings_overrides WHERE key=? AND instance_id=?").get(INSTANCE_ZONE_KEY, localId);
+        if (ov && ov.value != null) raw = ov.value;
+      } catch {}
+    }
+    if (raw == null) {
+      const gl = d.prepare("SELECT value FROM dashboard_settings WHERE key=?").get(INSTANCE_ZONE_KEY);
+      if (gl && gl.value != null) raw = gl.value;
+    }
+  } catch { return undefined; }
+  return validTimeZone(raw) || undefined;
+}
 
 export { BOTCRON_PREFIX };
 
@@ -103,8 +134,10 @@ export function claimAndEnqueue(d, s, nowIso, log = () => {}, {
       const { sql, args } = missedRunInsert(s.id, m);
       d.prepare(sql).run(...args);
     } catch (e) {
+      const msg = (e && e.message) || String(e);
       // A DB that has not run the schedule_runs migration yet: the window is logged only.
-      log(`schedule #${s.id} missed window not recorded: ${(e && e.message) || e}`);
+      if (/no such table/i.test(msg)) log(`schedule #${s.id} missed window not recorded: ${msg}`);
+      else log(`schedule #${s.id} ERROR recording missed window: ${msg}`);
     }
   }
   if (settle.fire == null) {
@@ -152,13 +185,15 @@ export function tickBotSchedules({
       ).all(BOTCRON_PREFIX + "%", now);
     } catch { return { fired: 0, missed: 0 }; } // schedules table absent — nothing to do
 
+    // The instance zone, read once per tick (a caller's `zone` wins, for tests and seams).
+    const z = zone === undefined ? instanceZoneSync(d) : zone;
     let fired = 0;
     let missed = 0;
     for (const s of rows) {
       if (inflight.has(s.id)) { log(`schedule #${s.id} still in-flight — skip`); continue; }
       inflight.add(s.id);
       try {
-        if (claimAndEnqueue(d, s, now, log, { graceMs: grace, aliveAt, aliveSlackMs, zone, onMissed: () => missed++ })) fired++;
+        if (claimAndEnqueue(d, s, now, log, { graceMs: grace, aliveAt, aliveSlackMs, zone: z, onMissed: () => missed++ })) fired++;
       } catch (e) {
         log(`schedule #${s.id} error: ${(e && e.message) || e}`);
       } finally {

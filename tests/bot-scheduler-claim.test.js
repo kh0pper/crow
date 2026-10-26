@@ -5,12 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 
-let dir, dbPath, prev;
+let dir, dbPath, prev, prevDataDir;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "botcron-claim-"));
   dbPath = join(dir, "crow.db");
   prev = process.env.CROW_DB_PATH;
+  prevDataDir = process.env.CROW_DATA_DIR;
   process.env.CROW_DB_PATH = dbPath;
+  process.env.CROW_DATA_DIR = dir; // the lease check and anything resolving the data dir stay in the tmp dir
   const d = new Database(dbPath);
   d.exec(`CREATE TABLE schedules (
     id INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT, cron_expression TEXT, description TEXT,
@@ -19,6 +21,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   if (prev === undefined) delete process.env.CROW_DB_PATH; else process.env.CROW_DB_PATH = prev;
+  if (prevDataDir === undefined) delete process.env.CROW_DATA_DIR; else process.env.CROW_DATA_DIR = prevDataDir;
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -341,10 +344,11 @@ test("CLI tick with a live gateway lease leaves the notices to that gateway (no 
 });
 
 test("CLI tick with no live lease sweeps the notices once, on an async client over the instance DB", async () => {
-  const { runCliTick } = await ready();
-  seedAt(iso(Date.now() - 3 * HOUR), YEARLY_A);
+  const { runCliTick, tickBotSchedules } = await ready();
+  seedAt(iso(NOW - 3 * HOUR), YEARLY_A);
   const seen = [];
   const r = await runCliTick({
+    tick: (o) => tickBotSchedules({ ...o, now: NOW }),
     leaseHeld: async () => false,
     sweep: async (client) => {
       const { rows } = await client.execute({ sql: "SELECT status FROM schedule_runs", args: [] });
@@ -358,15 +362,15 @@ test("CLI tick with no live lease sweeps the notices once, on an async client ov
 });
 
 test("CLI default sweep is the gateway scheduler's sweepMissedNotices: it marks the row and notifies once", async () => {
-  const { runCliTick } = await ready();
+  const { runCliTick, tickBotSchedules } = await ready();
   const d = new Database(dbPath);
   d.exec(`CREATE TABLE IF NOT EXISTS notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, source TEXT, title TEXT, body TEXT,
     priority TEXT, action_url TEXT, metadata TEXT, schedule_id INTEGER, expires_at TEXT, is_read INTEGER DEFAULT 0,
     is_dismissed INTEGER DEFAULT 0, snoozed_until TEXT, created_at TEXT DEFAULT (datetime('now')));
     CREATE TABLE IF NOT EXISTS dashboard_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT)`);
   d.close();
-  seedAt(iso(Date.now() - 3 * HOUR), YEARLY_A);
-  await runCliTick({ leaseHeld: async () => false });
+  seedAt(iso(NOW - 3 * HOUR), YEARLY_A);
+  await runCliTick({ tick: (o) => tickBotSchedules({ ...o, now: NOW }), leaseHeld: async () => false });
   const c = new Database(dbPath);
   const notes = c.prepare("SELECT source, title FROM notifications").all();
   const marked = c.prepare("SELECT COUNT(*) n FROM schedule_runs WHERE notified_at IS NOT NULL").get().n;
@@ -375,4 +379,60 @@ test("CLI default sweep is the gateway scheduler's sweepMissedNotices: it marks 
   assert.equal(notes.length, 1);
   assert.equal(notes[0].source, "scheduler:missed");
   assert.equal(notes[0].title, "Missed: bot-1 routine");
+});
+
+// ---------------------------------------------------------------------------
+// Zones: rows without tz settle in the INSTANCE zone (as the memory server and
+// the gateway scheduler use), not the host's.
+// ---------------------------------------------------------------------------
+test("the ticker's instance-zone key is schedule-store's INSTANCE_ZONE_KEY", async () => {
+  const { INSTANCE_ZONE_KEY } = await load();
+  const store = await import("../servers/shared/schedule-store.js");
+  assert.equal(INSTANCE_ZONE_KEY, store.INSTANCE_ZONE_KEY);
+});
+
+test("with instance_timezone set (≠ host), a row without tz gets its next_run in the instance zone; a row tz still wins", async () => {
+  const { tickBotSchedules } = await ready();
+  const core = await import("../servers/shared/schedule-core.js");
+  const host = core.hostZone();
+  const zone = host === "Pacific/Kiritimati" ? "America/Los_Angeles" : "Pacific/Kiritimati";
+  const d = new Database(dbPath);
+  d.exec("CREATE TABLE IF NOT EXISTS dashboard_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT)");
+  d.prepare("INSERT INTO dashboard_settings (key, value) VALUES ('instance_timezone', ?)").run(zone);
+  d.exec("ALTER TABLE schedules ADD COLUMN tz TEXT");
+  d.close();
+  const cron = "0 9 * * *";
+  const a = seedAt(iso(NOW - 3 * HOUR), cron, "bot-1");
+  const b = seedAt(iso(NOW - 3 * HOUR), cron, "bot-2");
+  const own = "Asia/Kolkata";
+  const c = new Database(dbPath); c.prepare("UPDATE schedules SET tz=? WHERE id=?").run(own, b); c.close();
+  tickBotSchedules({ now: NOW });
+  const want = iso(core.cronNext(cron, zone, NOW));
+  assert.equal(nextRunOf(a), want, "computed in the instance zone");
+  assert.notEqual(want, iso(core.cronNext(cron, host, NOW)), "the instance and host zones really differ here");
+  assert.equal(nextRunOf(b), iso(core.cronNext(cron, own, NOW)), "the row's own tz wins");
+});
+
+test("an invalid instance_timezone falls back to the host zone", async () => {
+  const { instanceZoneSync } = await ready();
+  const d = new Database(dbPath);
+  d.exec("CREATE TABLE IF NOT EXISTS dashboard_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT)");
+  assert.equal(instanceZoneSync(d), undefined, "unset");
+  d.prepare("INSERT INTO dashboard_settings (key, value) VALUES ('instance_timezone', 'Not/AZone')").run();
+  assert.equal(instanceZoneSync(d), undefined, "invalid");
+  d.prepare("UPDATE dashboard_settings SET value='Europe/Madrid' WHERE key='instance_timezone'").run();
+  assert.equal(instanceZoneSync(d), "Europe/Madrid");
+  d.close();
+});
+
+test("a schedule_runs write error other than a missing table is logged as an error", async () => {
+  const { tickBotSchedules } = await ready({ withRuns: false });
+  const d = new Database(dbPath);
+  d.exec("CREATE TABLE schedule_runs (id INTEGER PRIMARY KEY, schedule_id INTEGER NOT NULL)"); // wrong shape: no such column
+  d.close();
+  seedAt(iso(NOW - 3 * HOUR), YEARLY_A);
+  const lines = [];
+  tickBotSchedules({ log: (m) => lines.push(m), now: NOW });
+  assert.ok(lines.some((l) => /ERROR recording missed window/.test(l)));
+  assert.ok(!lines.some((l) => /missed window not recorded/.test(l)));
 });
