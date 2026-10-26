@@ -258,3 +258,28 @@ test("sandboxed: after the secrets dir was renamed away and a decoy planted, the
     renameSync(moved, secrets);
   }
 });
+
+test("sandboxed: the bot cannot rename the instance home (or any user-writable ancestor of the secrets dir) away", { skip: noSandbox }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-secret-rename-"));
+  mkdirSync(join(dir, "sessions"), { recursive: true });
+  const stub = join(dir, "stub-pi.mjs");
+  writeFileSync(stub, [
+    'import { renameSync } from "node:fs";',
+    `let r = "renamed"; try { renameSync(${JSON.stringify(HOME)}, ${JSON.stringify(HOME + "-x")}); } catch (e) { r = e.code || "refused"; }`,
+    `let r2 = "renamed"; try { renameSync(${JSON.stringify(join(HOME, "secrets"))}, ${JSON.stringify(join(HOME, "secrets-x"))}); } catch (e) { r2 = e.code || "refused"; }`,
+    'process.stdout.write(JSON.stringify({ type: "report", tag: "rename", r, r2 }) + "\\n");',
+    "setTimeout(() => process.exit(0), 50);",
+  ].join("\n"));
+  const prev = process.env.CROW_PI_SANDBOX;
+  process.env.CROW_PI_SANDBOX = "auto";
+  try {
+    const pi = new PiRpc({ def: {}, sessionDir: dir, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: process.execPath, cliPath: stub, diagLog: () => {} });
+    const r = await pi.waitFor((m) => m.type === "report", 10000, "rename");
+    await pi.exited;
+    assert.notEqual(r.r, "renamed", "the instance home is pinned");
+    assert.notEqual(r.r2, "renamed", "the secrets dir is pinned");
+    assert.equal(existsSync(HOME), true);
+  } finally {
+    if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
+  }
+});

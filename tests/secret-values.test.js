@@ -12,7 +12,7 @@ import { randomBytes } from "node:crypto";
 import Database from "better-sqlite3";
 
 const SV = await import("../servers/shared/secret-values.js");
-const { collectSecretValues, collectSecretValueSets, confirmManualEntriesForCards, refreshSecretValuesFile, parseEnvPairs } = await import("../servers/shared/secret-values-collect.js");
+const { collectSecretValues, collectSecretValueSets, confirmManualEntriesForCards, listManualEntriesForCards, refreshSecretValuesFile, parseEnvPairs } = await import("../servers/shared/secret-values-collect.js");
 const { sealSecret } = await import("../servers/sharing/secret-box.js");
 const { KEYCHAIN_DDL } = await import("../servers/gateway/keychain/schema.js");
 
@@ -356,7 +356,7 @@ test("cards count only manual entries the operator recorded: no list means no ca
   const ins = (v) => db.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual','m',?,?,'manual')").run(sealSecret(v, { seed }), "0123456789abcdef");
   ins("Existing_pw-1");
   assert.deepEqual(collectSecretValueSets({ env: I.env }).card, [], "no list: nothing is trusted on cards");
-  assert.equal(confirmManualEntriesForCards({ env: I.env }), 1, "the operator's one-time confirm");
+  assert.equal(confirmManualEntriesForCards({ env: I.env, ids: listManualEntriesForCards({ env: I.env }).map((e) => e.id) }), 1, "the operator confirms each entry by id");
   assert.deepEqual(collectSecretValueSets({ env: I.env }).card, ["Existing_pw-1"]);
   ins("Planted_pw-2");                                   // a bot with crow.db write access
   const sets = collectSecretValueSets({ env: I.env });
@@ -393,4 +393,22 @@ test("a secrets dir renamed away and replaced after it was anchored is not trust
   assert.equal(vals.includes("Planted_display-2"), false);
   assert.equal(SV.secretsDirTrusted(I.env), false);
   SV.invalidateSecretValues();
+});
+
+test("the operator confirm records only the manual entries named by id; listing shows labels, never values", () => {
+  const I = scratchInstance();
+  const seed = randomBytes(32);
+  mkdirSync(join(I.home, "secrets"), { recursive: true });
+  writeFileSync(join(I.home, "secrets", "keychain.key"), JSON.stringify({ v: 1, id: "0123456789abcdef", key: seed.toString("base64") }), { mode: 0o600 });
+  const db = new Database(join(I.data, "crow.db"));
+  db.exec(KEYCHAIN_DDL);
+  const ins = (label, v) => Number(db.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual',?,?,?,'manual')").run(label, sealSecret(v, { seed }), "0123456789abcdef").lastInsertRowid);
+  const keep = ins("sudo on crow", "Keep_this-pw1");
+  ins("flipped by a bot", "Bot_flipped-pw2");
+  db.close();
+  const listed = listManualEntriesForCards({ env: I.env });
+  assert.deepEqual(listed.map((e) => e.label).sort(), ["flipped by a bot", "sudo on crow"]);
+  assert.equal(JSON.stringify(listed).includes("Keep_this"), false, "no values in the listing");
+  assert.equal(confirmManualEntriesForCards({ env: I.env, ids: [keep] }), 1);
+  assert.deepEqual(collectSecretValueSets({ env: I.env }).card, ["Keep_this-pw1"]);
 });

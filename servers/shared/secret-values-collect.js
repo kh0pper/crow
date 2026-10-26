@@ -180,16 +180,25 @@ export function refreshSecretValuesFile(opts = {}) {
   }
 }
 
+/** Manual keychain entries as { id, label } (never values), for the operator's confirm. */
+export function listManualEntriesForCards({ env = process.env, dbPath } = {}) {
+  const db = dbPath === undefined ? (env.CROW_DB_PATH || join(resolveInstanceDataDir(env), "crow.db")) : dbPath;
+  return keychainEntries({ dbPath: db, env }).filter((e) => e.kind === "manual").map((e) => ({ id: e.id, label: e.label }));
+}
+
 /**
  * The one-time operator step for entries saved before the card list existed:
- * record every readable MANUAL keychain entry as a card value. Run by the
- * operator (scripts/ops/keychain-card-secrets.mjs), never by the engine. A bot
- * cannot run it to effect from its sandbox: the list is in the read-only
- * hidden dir there. Returns the number of entries confirmed (never values).
+ * record the manual keychain entries the operator names BY ID (after reading
+ * the labels from listManualEntriesForCards) as card values. A bot can flip a
+ * row to manual in crow.db, so nothing is recorded wholesale. Run by the
+ * operator (scripts/ops/keychain-card-secrets.mjs), never by the engine; from
+ * a bot's sandbox it cannot record anything (the list is in the read-only
+ * hidden dir). Returns the number of entries recorded (never values).
  */
-export function confirmManualEntriesForCards({ env = process.env, dbPath } = {}) {
+export function confirmManualEntriesForCards({ env = process.env, dbPath, ids = [] } = {}) {
   const db = dbPath === undefined ? (env.CROW_DB_PATH || join(resolveInstanceDataDir(env), "crow.db")) : dbPath;
-  const manual = keychainEntries({ dbPath: db, env }).filter((e) => e.kind === "manual").map((e) => e.secret);
-  if (manual.length) recordCardSecret(manual, env);
-  return manual.length;
+  const want = new Set([].concat(ids).map(Number));
+  const picked = keychainEntries({ dbPath: db, env }).filter((e) => e.kind === "manual" && want.has(e.id)).map((e) => e.secret);
+  if (picked.length) recordCardSecret(picked, env);
+  return picked.length;
 }

@@ -64,9 +64,9 @@
  * to spawn pi without bwrap), "off" (never wrap).
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
+import { accessSync, constants as fsConstants, existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 const BWRAP_CANDIDATES = ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
 const SETPRIV_CANDIDATES = ["/usr/bin/setpriv", "/bin/setpriv"];
@@ -88,6 +88,9 @@ function isSocket(p) {
 }
 function isDir(p) {
   try { return statSync(p).isDirectory(); } catch { return false; }
+}
+function canWrite(p) {
+  try { accessSync(p, fsConstants.W_OK); return true; } catch { return false; }
 }
 
 /**
@@ -236,7 +239,20 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   // a file: a file bind would come off the moment the file is replaced by
   // rename, while the tmpfs over its dir stays.
   const hideDirs = (opts.hideDirs || []).filter((d) => typeof d === "string" && d.startsWith("/") && isDir(d));
+  // Pin every ancestor of a hidden dir that this user could rename (its
+  // parent is writable): bound onto itself it is a mountpoint, and renaming a
+  // mountpoint fails (EBUSY). Without this a bot renames e.g. ~/.crow away,
+  // the tmpfs moves with it, and the next fresh process anchors a planted
+  // decoy at the old path while the real dir sits visible elsewhere.
+  const pins = [];
+  for (const d of hideDirs) {
+    for (let a = dirname(d); a && a !== "/" && a !== opts.pinStop; a = dirname(a)) {
+      if (!canWrite(dirname(a))) break;
+      if (!pins.includes(a)) pins.push(a);
+    }
+  }
   const pre = ["--dev-bind", "/", "/", "--unshare-user"];
+  for (const a of pins.sort((x, y) => x.length - y.length)) pre.push("--bind", a, a);
   for (const d of tmpfs) pre.push("--tmpfs", d);
   // Read-only too: no decoy can be planted there for a host-side reader
   // (send_user_file) to resolve to the real file behind the mask.
@@ -245,7 +261,7 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   for (const d of roDirs) pre.push("--ro-bind", d, d);
   if (opts.infoFd != null) pre.push("--info-fd", String(opts.infoFd));
   return { cmd: probe.bwrap, args: [...pre, "--", cmd, ...args], env: scrubSandboxEnv(env),
-    sandboxed: true, wrapper: "bwrap", reason: null, masked: [...sockets, ...tmpfs, ...hideDirs, ...roDirs] };
+    sandboxed: true, wrapper: "bwrap", reason: null, masked: [...sockets, ...tmpfs, ...hideDirs, ...roDirs], pinned: pins };
 }
 
 /** True when a ps `args` string is a bubblewrap wrapper (used by the reaper). */
