@@ -27,8 +27,8 @@ const OPEN = "^(?:(?:ok|okay|sure|great|alright|all right|perfect|yes|yep|yeah|a
 // verb, so "what's on Tuesday", "nothing is on your calendar" and "is coffee on Tuesday" read as what they are.
 const STATE_WORD = "(?!(?:nothing|anything|what|whats|who|where|when|which|how|there|no|not|none|is|are|was|were|do|does|did|if|whether)\\b)\\w+ ";
 // A bare item name ("coffee", "lunch with sam"): no article or pronoun anywhere in it. "The final is scheduled for
-// July 19", "The game's on Tuesday" and "It's on Tuesday" state a fact; an item named bare is what was just written.
-// (The place forms keep any subject: "the meeting is on your calendar" says where it went.)
+// July 19" and "The game is set for 8pm" state a fact; an item named bare with set / scheduled / confirmed is what was
+// just written. (booked / added / saved / created / put on, and the place forms, take any subject.)
 const STATE_NOUN = "(?!(?:it|that|this|these|those|the|a|an|my|his|her|its|our|their|everything|something)\\b)" + STATE_WORD;
 const DAY = "(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow|tonight|noon)";
 const CLAIMS = [
@@ -53,11 +53,18 @@ const CLAIMS = [
   /\b(?:your|the) (?:\w+ ){0,2}(?:appointment|event|meeting|reminder|alarm|booking|reservation)s? (?:is|are) (?:now )?(?:in|on) (?:the|your) (?:calendar|agenda|schedule|list)\b/,
   /\b(?:has|have) been (?:added|created|scheduled|booked|sent|saved|deleted|removed|canceled|cancelled|moved|updated)\b/,
   /\byou re (?:all )?set\b|\byou are (?:all )?set\b/,
-  // State (#499): "Coffee is booked for Tuesday", "Lunch is set for noon", "Coffee's on Tuesday at nine" (a bare item
-  // name), "Milk is on your list" (any subject), "Your calendar now has coffee on Tuesday". "set to …" is a plain answer.
-  new RegExp(`${OPEN}(?:${STATE_NOUN}){1,5}(?:is|are|s|has been|have been) (?:now |all )?(?:booked|scheduled|rescheduled|added|saved|created|confirmed|set(?! to\\b))\\b`),
-  new RegExp(`${OPEN}(?:${STATE_WORD}){1,5}(?:is|are|s) (?:now )?(?:on|in) (?:your|the) (?:\\w+ )?(?:calendar|agenda|schedule|list)\\b`),
-  new RegExp(`${OPEN}(?:${STATE_NOUN}){1,4}s (?:now )?(?:on|for|at) ${DAY}\\b`),
+  // State (#499, re-review ruling):
+  // - booked / added / saved / created / put on|in|onto, any subject: "The coffee is booked for Tuesday", "Lunch with
+  //   the team was added for noon";
+  // - set / scheduled / confirmed, a bare item name only: "Lunch is set for noon" (never "The game is set for 8pm");
+  // - on your calendar / list, any subject: "Milk is on your list", "coffee with Sam on Tuesday at 9 is on your calendar";
+  // - "X's on <day>" / "X's at <time>" only with an add verb in the sentence ("Coffee's booked on Tuesday"); without one
+  //   it is a fact or a calendar read answer ("Your dentist's on Friday at nine", "Halloween's on Friday");
+  // - "Your calendar now has coffee on Tuesday". "set to …" is a plain answer.
+  new RegExp(`${OPEN}(?:${STATE_WORD}){1,8}(?:is|are|s|was|were|has been|have been) (?:now |all |just )?(?:booked|added|saved|created|put (?:on|in|onto))\\b`),
+  new RegExp(`${OPEN}(?:${STATE_NOUN}){1,5}(?:is|are|s|has been|have been) (?:now |all )?(?:scheduled|rescheduled|confirmed|set(?! to\\b))\\b`),
+  new RegExp(`${OPEN}(?:${STATE_WORD}){1,8}(?:is|are|s) (?:now )?(?:on|in) (?:your|the) (?:\\w+ )?(?:calendar|agenda|schedule|list)\\b`),
+  new RegExp(`${OPEN}(?=.*\\b(?:booked|added|set|scheduled|saved|put)\\b)(?:${STATE_WORD}){1,4}s (?:now )?(?:\\w+ )?(?:on|for|at) (?:${DAY}|\\d)`),
   /\b(?:your|the) (?:\w+ )?(?:calendar|agenda|schedule|list|reminders) now (?:has|includes|contains|shows|lists)\b/,
   // Spanish (accents already dropped): done, promised, offered, state, bare.
   new RegExp(`${NEG}\\b(?:ya )?(?:te |lo |la |los |las |se )*he (?:anadido|agregado|creado|programado|agendado|reservado|enviado|mandado|guardado|anotado|apuntado|puesto|borrado|eliminado|cancelado|movido|cambiado|actualizado|configurado)\\b`),

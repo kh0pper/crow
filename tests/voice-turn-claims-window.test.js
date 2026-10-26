@@ -120,6 +120,16 @@ test("(2b) a claim that names nothing of the last write gets the not-done line",
   assert.equal(r.saved.content, NOT_DONE_TEXT);
 });
 
+test("(3b) a calendar read answer inside the window ('Your dentist's on Friday at nine.') is heard, not replaced", async () => {
+  const h = gateHarness({ rounds: [call("crow_calendar_add_event", LUNCH), says("Your dentist's on Friday at nine. ")] });
+  await addLunch(h);
+  const r = await turn(h, "when is the dentist");
+  assert.equal(r.timings.claim_blocked, undefined);
+  assert.deepEqual(r.spoken, ["Your dentist's on Friday at nine."]);
+  assert.equal(r.captions, "Your dentist's on Friday at nine. ");
+  assert.ok(!r.spoken.includes(NOT_DONE_TEXT));
+});
+
 test("(3) a plain question inside the window streams: first audio before the end, no 150-token cap", async () => {
   const h = gateHarness({ rounds: [call("crow_calendar_add_event", LUNCH)] });
   await addLunch(h);
