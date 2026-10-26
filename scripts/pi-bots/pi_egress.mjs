@@ -62,7 +62,7 @@ for (const [a, p] of [["169.254.0.0", 16], ["168.63.129.16", 32], ["100.100.100.
 const PRIVATE_V4 = new BlockList();
 for (const [a, p] of [["10.0.0.0", 8], ["172.16.0.0", 12], ["192.168.0.0", 16], ["100.64.0.0", 10], ["198.18.0.0", 15]]) PRIVATE_V4.addSubnet(a, p, "ipv4");
 /** Interfaces whose subnets are containers/VMs on this host. */
-const VIRTUAL_IF = /^(docker\d*|br-|virbr|podman|cni|veth|lxcbr|lxdbr|incusbr|flannel|cali|vxlan|vnet|tap)/;
+const VIRTUAL_IF = /^(docker\d*|br-|virbr|podman|cni|veth|lxcbr|lxdbr|incusbr|flannel|cali|vxlan|vnet|tap|tun)/;
 
 function expand6(a) {
   let s = String(a).toLowerCase().split("%")[0];
@@ -96,14 +96,38 @@ export function readKernelRoutes() {
   const run = (args) => {
     const r = spawnSync(ip, ["-j", ...args], { encoding: "utf8", timeout: 2000 });
     if (r.status !== 0) throw new Error("ip " + args.join(" ") + ": exit " + r.status);
-    const v = JSON.parse(r.stdout || "[]");
+    const v = JSON.parse(r.stdout || "null");
     if (!Array.isArray(v)) throw new Error("ip " + args.join(" ") + ": not a list");
     return v;
   };
-  return {
-    local: [...run(["route", "show", "table", "local"]), ...run(["-6", "route", "show", "table", "local"])],
-    main: [...run(["route"]), ...run(["-6", "route"])],
-  };
+  // IPv6 switched off at boot (ipv6.disable=1) is a host without IPv6 tables,
+  // not a failed read.
+  const v6 = existsSync("/proc/net/if_inet6");
+  let links = [];
+  try { links = run(["-d", "link"]); } catch { /* the name list still applies */ }
+  return parseKernelTables({
+    local4: run(["route", "show", "table", "local"]), local6: v6 ? run(["-6", "route", "show", "table", "local"]) : null,
+    main4: run(["route"]), main6: v6 ? run(["-6", "route"]) : null, links,
+  });
+}
+
+/** Device kinds that carry containers/VMs on this host. Not tun (VPNs such as the tailnet) or wireguard. */
+const VIRTUAL_KINDS = new Set(["bridge", "veth", "vxlan", "geneve", "macvlan", "ipvlan", "macvtap"]);
+export function deviceKindIsVirtual(kind) { return VIRTUAL_KINDS.has(String(kind || "")); }
+
+/**
+ * Combine the raw `ip -j` outputs. Throws when the IPv4 local table is not
+ * plausible (no `lo` entry), so an empty successful read cannot pass for a
+ * host with no addresses.
+ */
+export function parseKernelTables({ local4, local6, main4, main6, links }) {
+  if (!Array.isArray(local4) || !local4.some((r) => r && r.dev === "lo")) throw new Error("kernel local table has no lo entry");
+  const virtualDevs = new Set();
+  for (const l of links || []) {
+    const kind = l && l.linkinfo && l.linkinfo.info_kind;
+    if (l && l.ifname && deviceKindIsVirtual(kind)) virtualDevs.add(l.ifname);
+  }
+  return { local: [...local4, ...(local6 || [])], main: [...(main4 || []), ...(main6 || [])], virtualDevs };
 }
 
 /** Kernel tables are cached briefly (interfaces come and go; a spawn makes many decisions). */
@@ -135,21 +159,37 @@ function localView(o = {}) {
   const nets4 = new BlockList(), nets6 = new BlockList();
   let failed = false;
   const addAddr = (a) => { const x = String(a || "").split("%")[0]; if (isIP(x)) addrs.add(isIP(x) === 6 ? key6(x) : x); };
+  // A dst is an address or address/prefix; `ip -j route` prints host routes
+  // without the /32 or /128. Returns false for a shape it does not know.
   const addNet = (cidr) => {
-    const [net, plen] = String(cidr || "").split("/");
+    const parts = String(cidr || "").split("/");
+    if (parts.length > 2) return false;
+    const [net, plen] = parts;
     const fam = isIP(net);
-    if (!fam || !/^\d+$/.test(plen || "")) return;
-    try { (fam === 4 ? nets4 : nets6).addSubnet(net, Number(plen), fam === 4 ? "ipv4" : "ipv6"); } catch {}
+    if (!fam) return false;
+    if (plen !== undefined && !/^\d+$/.test(plen)) return false;
+    const len = plen === undefined ? (fam === 4 ? 32 : 128) : Number(plen);
+    if (len > (fam === 4 ? 32 : 128)) return false;
+    try { (fam === 4 ? nets4 : nets6).addSubnet(net, len, fam === 4 ? "ipv4" : "ipv6"); } catch { return false; }
+    return true;
   };
   // 1. kernel tables
   try {
     const t = (o.routes || cachedKernelRoutes)();
     for (const r of t.local || []) {
-      if (r.type === "local") addAddr(r.dst);
-      else if (r.type === "broadcast" && isIP(r.dst) === 4) bcast.add(r.dst);
+      const dst = String(r.dst || "");
+      if (r.type === "local" || r.type === "anycast") {
+        // a CIDR here (local 10.0.0.0/8) is a whole subnet this host owns
+        if (dst.includes("/")) { if (!addNet(dst)) failed = true; }
+        else if (isIP(dst.split("%")[0])) addAddr(dst);
+        else failed = true;
+      } else if (r.type === "broadcast") {
+        if (isIP(dst) === 4) bcast.add(dst); else failed = true;
+      }
     }
     for (const r of t.main || []) {
-      if (r.dst && r.dst !== "default" && VIRTUAL_IF.test(String(r.dev || ""))) addNet(r.dst);
+      const dev = String(r.dev || "");
+      if (r.dst && r.dst !== "default" && (VIRTUAL_IF.test(dev) || (t.virtualDevs && t.virtualDevs.has(dev)))) addNet(r.dst);
     }
   } catch {
     failed = true;
@@ -198,7 +238,7 @@ export function egressDenyReason(addr, o = {}) {
   const a = String(addr || "").replace(/^\[|\]$/g, "").split("%")[0];
   const fam = isIP(a);
   if (!fam) return "not an IP address";
-  const L = localView(o);
+  const L = o.view || localView(o);
   if (fam === 4) return v4Reason(a, L);
   const h = expand6(a);
   const zero = (x, y) => h.slice(x, y).every((v) => v === 0);
@@ -351,7 +391,8 @@ export function createEgressRelay(o) {
     else {
       try { addrs = await lookup(host); } catch { note("deny", target, "does not resolve"); return refuse(c, 502, "Bad Gateway"); }
     }
-    const why = addrs.length ? addrs.map((a) => egressDenyReason(a.address, local)).find(Boolean) : "no address";
+    const view = localView(local); // one host view per CONNECT
+    const why = addrs.length ? addrs.map((a) => egressDenyReason(a.address, { view })).find(Boolean) : "no address";
     if (why) {
       note("deny", target, why);
       return refuse(c, 403, "Forbidden");

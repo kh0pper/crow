@@ -44,6 +44,9 @@ async function relay(opts) {
   return { r, logs };
 }
 
+// Note: tests pin NO_ROUTES, so fe80::1 reads as allowed here; on a real host
+// every veth/bridge carries fe80::/64 in its routes, so link-local targets are
+// refused there (over-blocking, accepted).
 test("egressDenyReason (D4 = public and private): LAN, tailnet, ULA and public are allowed; loopback, this host, metadata and non-unicast are not, in every v6 wrapping", () => {
   const host = ["10.0.0.237", "100.64.20.5", "fd7a:115c:a1e0::1"];
   for (const a of ["1.1.1.1", "93.184.216.34", "2606:4700:4700::1111", "10.1.2.3", "172.16.0.1", "192.168.1.1",
@@ -315,10 +318,61 @@ test("if the kernel routes cannot be read: every private target is refused, dock
   assert.match(String(egressDenyReason("93.184.216.99", { interfaces: () => ({}), routes: ROUTES, hostAddrs: ["93.184.216.99"] })), /this host/, "and when it works");
 });
 
-test("the default route reader reads the real kernel tables (no seam) and refuses this host's own address", async () => {
-  const { networkInterfaces } = await import("node:os");
-  const own = Object.values(networkInterfaces()).flat().map((i) => i.address).find((a) => /^\d+\./.test(a) && !a.startsWith("127."));
-  if (!own) return;
-  assert.notEqual(egressDenyReason(own), null);
+test("the real kernel reader: a non-empty local table with a lo entry, and a live bridge refused AS a bridge (not by fail-closed)", async () => {
+  const { readKernelRoutes } = await import("../scripts/pi-bots/pi_egress.mjs");
+  let t;
+  try { t = readKernelRoutes(); } catch (e) { return; } // no ip(8) here (CI containers): the seams cover the logic
+  assert.ok(t.local.length > 0 && t.local.some((r) => r.dev === "lo"), "local table read");
+  const bridge = t.main.find((r) => r.dst && r.dst.includes("/") && isIPv4Net(r.dst) && t.virtualDevs.has(r.dev));
+  if (!bridge) return; // no bridge on this host
+  const probe = bridge.dst.split("/")[0].replace(/\.0$/, ".9");
+  assert.match(String(egressDenyReason(probe)), /container\/VM bridge|this host/, probe + " via " + bridge.dev);
   assert.equal(egressDenyReason("93.184.216.34"), null);
+});
+const isIPv4Net = (c) => /^\d+\.\d+\.\d+\.\d+\/\d+$/.test(c);
+
+test("local-table CIDRs (local/anycast 10.0.0.0/8) are owned subnets; a bare anycast is an own address; host routes without a prefix count as /32 and /128", () => {
+  const routes = () => ({
+    local: [{ type: "local", dst: "10.200.0.0/16", dev: "lo" }, { type: "anycast", dst: "fd00:aaaa::/64", dev: "eth0" },
+      { type: "anycast", dst: "10.0.0.0", dev: "eno1" }],
+    main: [{ dst: "10.244.3.17", dev: "cali123" }, { dst: "fd00:cafe::9", dev: "flannel.1" }, { dst: "10.66.0.0/24", dev: "tun0" }],
+  });
+  const o = { interfaces: () => ({}), routes };
+  for (const a of ["10.200.5.5", "fd00:aaaa::7", "10.0.0.0", "10.244.3.17", "fd00:cafe::9", "10.66.0.9"]) assert.notEqual(egressDenyReason(a, o), null, a);
+  assert.equal(egressDenyReason("10.244.3.18", o), null, "a /32 host route covers only its address");
+  assert.equal(egressDenyReason("10.0.0.50", o), null);
+});
+
+test("a local-table entry with an unrecognised dst shape makes the view fail closed", () => {
+  const o = { interfaces: () => ({}), routes: () => ({ local: [{ type: "local", dst: "weird//x", dev: "lo" }], main: [] }) };
+  assert.match(String(egressDenyReason("10.0.0.50", o)), /cannot be determined/);
+  assert.equal(egressDenyReason("93.184.216.34", o), null);
+});
+
+
+test("virtual devices are found by kernel device KIND too (a Docker bridge with a custom name, cilium), but a tun VPN (the tailnet) is not a bridge", () => {
+  const routes = () => ({
+    local: [{ type: "local", dst: "127.0.0.1", dev: "lo" }],
+    main: [{ dst: "10.77.0.0/16", dev: "crowbr0" }, { dst: "10.78.0.0/16", dev: "cilium_host" }, { dst: "fd7a:115c:a1e0::5", dev: "tailscale0" },
+      { dst: "10.79.0.0/24", dev: "eno1" }],
+    virtualDevs: new Set(["crowbr0", "cilium_host"]),
+  });
+  const o = { interfaces: () => ({}), routes };
+  assert.notEqual(egressDenyReason("10.77.1.1", o), null, "custom-named bridge");
+  assert.notEqual(egressDenyReason("10.78.1.1", o), null, "cilium");
+  assert.equal(egressDenyReason("fd7a:115c:a1e0::5", o), null, "a tailnet peer stays allowed (D4)");
+  assert.equal(egressDenyReason("10.79.0.9", o), null, "a physical NIC's LAN stays allowed");
+});
+
+test("deviceKindIsVirtual: bridge/veth/vxlan/geneve/macvlan/ipvlan/macvtap are virtual; tun (VPNs), wireguard and physical are not", async () => {
+  const { deviceKindIsVirtual } = await import("../scripts/pi-bots/pi_egress.mjs");
+  for (const k of ["bridge", "veth", "vxlan", "geneve", "macvlan", "ipvlan", "macvtap"]) assert.equal(deviceKindIsVirtual(k), true, k);
+  for (const k of ["tun", "wireguard", undefined, ""]) assert.equal(deviceKindIsVirtual(k), false, String(k));
+});
+
+test("parseKernelTables: IPv6 disabled is not a failure; an IPv4 local table without lo is", async () => {
+  const { parseKernelTables } = await import("../scripts/pi-bots/pi_egress.mjs");
+  const ok = parseKernelTables({ local4: [{ type: "local", dst: "127.0.0.1", dev: "lo" }], local6: null, main4: [], main6: null, links: [] });
+  assert.deepEqual(ok.local.length, 1);
+  assert.throws(() => parseKernelTables({ local4: [], local6: [], main4: [], main6: [], links: [] }), /no lo entry/);
 });
