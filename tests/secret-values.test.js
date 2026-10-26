@@ -79,8 +79,8 @@ test("collect: only sources a sandboxed bot cannot write (keychain, the hidden s
   const db = new Database(join(I.data, "crow.db"));
   db.exec(KEYCHAIN_DDL);
   db.exec("CREATE TABLE providers (id TEXT PRIMARY KEY, base_url TEXT, api_key TEXT)");
-  // a keychain value with a space (or any shell-ish shape) does not count:
-  // the trade-off for a poisoned backfill never hiding a command
+  // a keychain value with a space still counts (masked on display paths;
+  // the card rule drops shell-shaped values at mask time)
   for (const [label, val] of [["sudo", v.keychainManual], ["short", v.keychainShort], ["spaced", "fake keychain spaced"]]) {
     db.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual',?,?,?,'manual')").run(label, sealSecret(val, { seed }), "0123456789abcdef");
   }
@@ -91,19 +91,18 @@ test("collect: only sources a sandboxed bot cannot write (keychain, the hidden s
   const vals = collectSecretValues({ env: { ...I.env, SOME_API_KEY: dropped.procEnv } });
   for (const [k, val] of Object.entries(v)) assert.ok(vals.includes(val), k);
   for (const [k, val] of Object.entries(dropped)) assert.equal(vals.includes(val), false, k);
-  for (const not of [fake("otherkey"), "--no-verify-x", "evil.example.com", "/srv/media/library", "postgres", "some-plain-words-here", "fake keychain spaced"]) {
+  assert.ok(vals.includes("fake keychain spaced"), "spaced keychain value kept for display");
+  for (const not of [fake("otherkey"), "/srv/media/library", "postgres", "some-plain-words-here"]) {
     assert.equal(vals.includes(not), false, not);
   }
 });
 
-test("this process's own env (the operator's, not bot-writable at runtime) masks in memory, minus dot-, domain- and flag-shaped values", () => {
+test("this process's own env masks in memory with its full values (the card rule is applied at mask time)", () => {
   const I = scratchInstance();
   SV.invalidateSecretValues();
-  const env = { ...I.env, A_TOKEN: "Zq8xP2mAk9Lw4tRy", B_TOKEN: "evil.example.com", C_TOKEN: "--insecure-x", D_SECRET: "v1.2.3-build9", E_PASSWORD: "s3cr@t-pw" };
+  const env = { ...I.env, A_TOKEN: "Zq8xP2mAk9Lw4tRy", B_TOKEN: "Dotted9.Token-value", E_PASSWORD: "pa$$" + " w0rd&x" };
   const vals = SV.getSecretValues({ env });
-  assert.ok(vals.includes("Zq8xP2mAk9Lw4tRy"));
-  assert.ok(vals.includes("s3cr@t-pw"));
-  for (const not of ["evil.example.com", "--insecure-x", "v1.2.3-build9"]) assert.equal(vals.includes(not), false, not);
+  for (const v of ["Zq8xP2mAk9Lw4tRy", "Dotted9.Token-value", "pa$$ w0rd&x"]) assert.ok(vals.includes(v), v);
   SV.invalidateSecretValues();
 });
 
@@ -275,4 +274,24 @@ test("no exact value from any source may contain whitespace or shell operators, 
     assert.equal(SV.safeShape(bad), false, bad);
   }
   for (const good of ["Zq8xP2mAk9Lw4tRy", "s3cr@t-pw", "N0t_a-real_pw!"]) assert.equal(SV.safeShape(good), true, good);
+});
+
+test("keychain: manual entries (operator-typed) count as they are; extension entries (backfill can seal a bot-written value) only when generated-shaped", () => {
+  const I = scratchInstance();
+  const seed = randomBytes(32);
+  mkdirSync(join(I.home, "secrets"), { recursive: true });
+  writeFileSync(join(I.home, "secrets", "keychain.key"), JSON.stringify({ v: 1, id: "0123456789abcdef", key: seed.toString("base64") }), { mode: 0o600 });
+  const db = new Database(join(I.data, "crow.db"));
+  db.exec(KEYCHAIN_DDL);
+  const add = (kind, bundle, envKey, val, origin) => db.prepare("INSERT INTO crow_keychain (kind,label,bundle_id,env_key,secret_sealed,key_id,origin) VALUES (?,?,?,?,?,?,?)")
+    .run(kind, "l", bundle, envKey, sealSecret(val, { seed }), "0123456789abcdef", origin);
+  add("manual", null, null, "reboot99", "manual");
+  add("extension", "demo", "A", "reboot98", "typed");
+  add("extension", "demo", "B", "{rm,-rf,~}", "generated");
+  add("extension", "demo", "C", gen("ext"), "generated");
+  db.close();
+  const vals = collectSecretValues({ env: I.env });
+  assert.ok(vals.includes("reboot99"), "manual entry");
+  assert.ok(vals.includes(gen("ext")), "generated-shaped extension entry");
+  for (const not of ["reboot98", "{rm,-rf,~}"]) assert.equal(vals.includes(not), false, not);
 });

@@ -78,17 +78,17 @@ export function plausibleSecretValue(v) {
 }
 
 /**
- * Defense in depth on every exact value, whatever its source: never one
- * shaped like a flag (leading "-") or a domain/host name (dot-separated
- * labels), since hiding those on a card hides what a command does.
+ * Whether an exact value may hide text on an APPROVAL CARD (secret-mask.js,
+ * card mode). Never one shaped like a flag, a domain/host name, a path, a URL
+ * or shell (whitespace, operators, substitution): hiding those on a card can
+ * hide what a command does, and even a trusted source can be fed a planted
+ * value (the keychain backfill seals values from bundle .env files at boot).
+ * Display paths (logs, notifications, transcripts) use every value.
  */
 export function safeShape(v) {
   const s = String(v);
   if (s.startsWith("-") || /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\.?$/.test(s)) return false;
-  // Nor anything that reads as shell: whitespace, operators, substitution, a
-  // path or a URL. Even a trusted source can be fed a planted value (the
-  // keychain backfill seals values from bundle .env files at boot).
-  if (/[\s;&|<>()$`]/.test(s) || /^(?:\/|~|\.\.?\/)/.test(s) || s.includes("://")) return false;
+  if (/[\s;&|<>()$`{}\[\]*?'"\\/]/.test(s) || s.startsWith("~")) return false;
   return true;
 }
 
@@ -107,14 +107,12 @@ export function normalizeValues(values) {
   return [...out].sort((a, b) => b.length - a.length || (a < b ? -1 : 1));
 }
 
-/** Secret-named values from a process env: plausible, no dot anywhere (a
- * version, a host, a file name), never flag- or domain-shaped. */
+/** Secret-named, plausible values from a process env (the card rule,
+ * safeShape, is applied at mask time). */
 export function secretValuesFromEnv(env) {
   const out = [];
   for (const [k, v] of Object.entries(env || {})) {
-    if (!isSecretEnvName(k) || !plausibleSecretValue(v)) continue;
-    const t = String(v).trim();
-    if (!t.includes(".") && safeShape(t)) out.push(t);
+    if (isSecretEnvName(k) && plausibleSecretValue(v)) out.push(String(v).trim());
   }
   return out;
 }

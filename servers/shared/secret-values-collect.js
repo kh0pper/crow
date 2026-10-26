@@ -27,8 +27,8 @@
  * The dropped sources' secrets still reach masking where it matters: the
  * gateway's own env carries its .env tokens in memory, and bundle generated
  * secrets are in the retained copies (and the keychain for keychain keys).
- * Defense in depth on top: a value shaped like a flag (leading "-") or a
- * domain (dot-separated labels) never counts, from any source.
+ * Defense in depth on cards: secret-mask.js never uses a value there that is
+ * shaped like a flag, a domain, a path, a URL or shell (safeShape).
  *
  * Not imported by anything that runs inside an MCP server process: only the
  * bot engine (which already opens crow.db with better-sqlite3) loads it.
@@ -37,7 +37,7 @@ import Database from "better-sqlite3";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { resolveCrowHome, resolveInstanceDataDir } from "./crow-home.js";
-import { normalizeValues, primeSecretValues, safeShape, secretValuesPath, writeSecretValuesFile } from "./secret-values.js";
+import { normalizeValues, primeSecretValues, secretValuesPath, writeSecretValuesFile } from "./secret-values.js";
 import { loadKeychainKey } from "../gateway/keychain/key.js";
 import { readableSecretsSync } from "../gateway/keychain/store.js";
 
@@ -100,14 +100,22 @@ function keychainSecrets({ dbPath, crowHome }) {
   try {
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
     db.pragma("busy_timeout = 2000");
-    return readableSecretsSync(db, loadKeychainKey({ crowHome }));
+    // Manual entries are typed by the operator in the UI (a bot cannot make
+    // one: the key is in the hidden dir and the keychain API needs a session).
+    // Extension entries can be backfilled at boot from a bundle .env a bot
+    // can write, so they count only when shaped like a minted secret.
+    return readableSecretsSync(db, loadKeychainKey({ crowHome }))
+      .filter((e) => e.kind === "manual" || (GENERATED_SHAPE.test(e.secret) && /[A-Za-z]/.test(e.secret) && /\d/.test(e.secret)))
+      .map((e) => e.secret);
   } catch { return []; }
   finally { if (db) { try { db.close(); } catch { /* closed */ } } }
 }
 
 /**
  * The trusted sources above, normalized (6+ chars, one line, deduped, longest
- * first), minus flag- and domain-shaped values.
+ * first). The full set: shell-shaped values are dropped only on a card, at
+ * mask time (secret-mask.js), so a real password with a space or `$` is still
+ * hidden in every log, notification and transcript.
  * @param {object} [o]
  * @param {object} [o.env] the env to resolve paths from
  * @param {string|null} [o.dbPath] crow.db (default CROW_DB_PATH or <data>/crow.db); null skips the keychain
@@ -115,7 +123,7 @@ function keychainSecrets({ dbPath, crowHome }) {
 export function collectSecretValues({ env = process.env, dbPath } = {}) {
   const crowHome = resolveCrowHome(env);
   const db = dbPath === undefined ? (env.CROW_DB_PATH || join(resolveInstanceDataDir(env), "crow.db")) : dbPath;
-  return normalizeValues([...keychainSecrets({ dbPath: db, crowHome }), ...retainedBundleSecrets(crowHome)]).filter(safeShape);
+  return normalizeValues([...keychainSecrets({ dbPath: db, crowHome }), ...retainedBundleSecrets(crowHome)]);
 }
 
 /**

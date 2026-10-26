@@ -280,3 +280,42 @@ test("card mode honours a cut marker only at the very end of the text (no forged
   const atEnd = "run x " + v.slice(0, 12) + "…(40 more characters)";
   assert.equal(maskSecrets(atEnd, { values: [v], card: true }), "run x " + REDACTED + "…(40 more characters)");
 });
+
+test("a real password with $, & and a space: masked on every display path; on a card it is not an exact value (shell-shaped)", () => {
+  const pw = "pa$$" + " w0rd&x";
+  const line = "login failed for root with " + pw + " at 10:00";
+  assert.equal(maskSecrets(line, { values: [pw] }), "login failed for root with " + REDACTED + " at 10:00", "log line");
+  const card = "echo '" + pw + "' | sudo " + S + " ls";
+  assert.equal(maskSecrets(card, { values: [pw], card: true }), card, "card: shell-shaped values never hide text there");
+  const poisoned = "&& rm -rf ~";
+  assert.equal(maskSecrets("ls " + poisoned, { values: [poisoned], card: true }), "ls " + poisoned);
+  assert.equal(maskSecrets("ls " + poisoned, { values: [poisoned] }), "ls " + REDACTED, "display: over-masking a log costs nothing");
+  const plain = "N0t_a" + "-real_pw!";
+  assert.equal(maskSecrets("x " + plain, { values: [plain], card: true }), "x " + REDACTED, "a card still hides a shell-safe value");
+});
+
+test("card text arrives escaped: no prefix rule crosses a displayed \\n, a $( or a backtick", () => {
+  const card = (t) => maskSecrets(t, { values: [], card: true });
+  for (const t of [
+    "sshpass" + " -V\\ntime -p reboot",
+    "sshpass" + " -V $(time -p reboot)",
+    "sshpass" + " -V `time -p reboot`",
+    "mysql -V\\nfoo -preboot",
+    "mysql -V $(foo -preboot)",
+  ]) {
+    assert.equal(card(t), t, t);
+  }
+});
+
+test("on a card, NAME=value stays visible when $NAME (or ${NAME}) is used later in the same text", () => {
+  const card = (t) => maskSecrets(t, { values: [], card: true });
+  for (const t of ["X_PASS=" + FAKE + "; sudo $X_PASS", "MY_TOKEN=" + FAKE + "; eval ${MY_TOKEN}"]) assert.equal(card(t), t, t);
+  assert.equal(card("GH_TOKEN=" + FAKE + " git push").includes(FAKE), false, "an unused assignment still masks");
+});
+
+test("on a card no exact value hides brace, glob, quote, backslash or slash shapes", () => {
+  for (const v of ["{rm,-rf,~}", "bin/rm-x9", "x9*abcdef", "a'b-cdef9", "rm\\x20-rf9"]) {
+    assert.equal(maskSecrets("sudo " + v, { values: [v], card: true }), "sudo " + v, v);
+    assert.equal(maskSecrets("log " + v, { values: [v] }), "log " + REDACTED, "display still masks " + v);
+  }
+});

@@ -198,7 +198,7 @@ export function readableSecretsSync(rawDb, key) {
   if (!key || typeof key.id !== "string" || !Buffer.isBuffer(key.seed)) return [];
   let rows;
   try {
-    rows = rawDb.prepare("SELECT secret_sealed FROM crow_keychain WHERE key_id = ?").all(key.id);
+    rows = rawDb.prepare("SELECT kind, secret_sealed FROM crow_keychain WHERE key_id = ?").all(key.id);
   } catch {
     return [];
   }
@@ -206,7 +206,7 @@ export function readableSecretsSync(rawDb, key) {
   for (const r of rows) {
     try {
       const v = openSecret(r.secret_sealed, box(key));
-      if (typeof v === "string" && v) out.push(v);
+      if (typeof v === "string" && v) out.push({ kind: r.kind, secret: v });
     } catch { /* damaged row: skip */ }
   }
   return out;

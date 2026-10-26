@@ -25,7 +25,7 @@
  * Every regex is linear or bounded, and the cut-prefix match is a linear
  * prefix-function scan.
  */
-import { getSecretValues, normalizeValues } from "./secret-values.js";
+import { getSecretValues, normalizeValues, safeShape } from "./secret-values.js";
 
 export const REDACTED = "[REDACTED]";
 
@@ -166,6 +166,12 @@ function maskCutPem(text, c) {
   return out + text.slice(pos);
 }
 
+/** The gap between a command name and its -p flag: one character that does
+ * not end the command. Not a real or displayed line break, a pipe or list
+ * operator, a subshell, a substitution or a brace group, so the flag is the
+ * named command's own and not the next command's. */
+const GAP = String.raw`(?:(?!\\n)[^|;&\n()\`$\{\}])`;
+
 /** pre + word rules: the word is the last group and ends the match. */
 // A credential context narrows the path exemption to a leading /, ~, ./ or
 // ../ on display paths only; on a card pi-lab's full pathLike applies (a URL
@@ -173,7 +179,7 @@ function maskCutPem(text, c) {
 const wordRule = (re, ok = () => true) => [re, (c, mt, g, at, input) => {
   const pre = g[0];
   const w = g[g.length - 1];
-  return ok(pre, w) ? pre + maskWordAt(c, w, input, at + mt.length - w.length, !c.card) : mt;
+  return ok(pre, w, c, input) ? pre + maskWordAt(c, w, input, at + mt.length - w.length, !c.card) : mt;
 }];
 
 const RULES = [
@@ -188,9 +194,9 @@ const RULES = [
   }],
   // sshpass with its password option, spaced or attached
   // (no prefix rule crosses a real newline into the next line's command)
-  wordRule(new RegExp(String.raw`(\bsshpass\b[^|;&\n]{0,200}?[ \t]-p[ \t]*)(${W})`, "gi"), (pre) => /-p[ \t]*$/.test(pre)),
+  wordRule(new RegExp(String.raw`(\bsshpass\b${GAP}{0,200}?[ \t]-p[ \t]*)(${W})`, "gi"), (pre) => /-p[ \t]*$/.test(pre)),
   // mysql -pword (attached only: `-p word` makes `word` the database)
-  wordRule(new RegExp(String.raw`(\b(?:mysql|mariadb|mysqldump|mysqladmin)\b[^|;&\n]{0,200}?[ \t]-p)(${W})`, "gi"), (pre) => pre.endsWith("-p")),
+  wordRule(new RegExp(String.raw`(\b(?:mysql|mariadb|mysqldump|mysqladmin)\b${GAP}{0,200}?[ \t]-p)(${W})`, "gi"), (pre) => pre.endsWith("-p")),
   // --password=word, --password word, --passwd ...
   wordRule(new RegExp(String.raw`(--pass(?:word|wd)(?:=|[ \t]+))(${W})`, "gi"), (_pre, w) => !w.startsWith("-")),
   // Authorization: Bearer|Basic|token <word>; X-Api-Key: <word>; ?token= / &token=
@@ -198,8 +204,11 @@ const RULES = [
   wordRule(/(\bx-api-key:[ \t]*)([^\s"';&|<>()]+)/gi),
   wordRule(/([?&]token=)([^&\s"'#;|<>()]+)/gi),
   // NAME=value, NAME carrying PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY,
-  // or PASS as a whole _-segment, ending the name or followed by "_".
-  wordRule(new RegExp(String.raw`(?<![\w$-])((?:[A-Za-z0-9_]{0,80}?(?:PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY)|(?:[A-Za-z0-9_]{0,80}_)?PASS)(?:_[A-Za-z0-9_]{0,80})?=)(${W})`, "gi")),
+  // or PASS as a whole _-segment, ending the name or followed by "_". On a
+  // card, not when $NAME / ${NAME} is used later: then the value is what runs
+  // (`X_PASS=reboot; sudo $X_PASS`).
+  wordRule(new RegExp(String.raw`(?<![\w$-])((?:[A-Za-z0-9_]{0,80}?(?:PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY)|(?:[A-Za-z0-9_]{0,80}_)?PASS)(?:_[A-Za-z0-9_]{0,80})?=)(${W})`, "gi"),
+    (pre, _w, c, input) => !(c.card && new RegExp(String.raw`\$\{?${pre.slice(0, -1)}(?![A-Za-z0-9_])`).test(input))),
   // Known token shapes.
   [/(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|tk_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16})(?![A-Za-z0-9])/gi,
     (c, mt, _g, at, input) => maskWordAt(c, mt, input, at)],
@@ -312,7 +321,10 @@ export function maskSecretsDetailed(text, opts = {}) {
   try {
     const values = opts.values === undefined ? currentValues() : opts.values;
     c.card = opts.card === true;
-    let t = maskValues(src, normalizeValues(values).filter((v) => v !== REDACTED), c);
+    // On a card only shell-safe values hide text (safeShape); display paths
+    // use every value, so a password with a space or `$` is still hidden there.
+    const usable = normalizeValues(values).filter((v) => v !== REDACTED && (!c.card || safeShape(v)));
+    let t = maskValues(src, usable, c);
     t = maskPatterns(t, c, opts.card === true);
     if (truncated) return { text: t, count: c.n, truncated: true };
     return c.n || src !== text ? { text: t, count: c.n } : { text: src, count: 0 };

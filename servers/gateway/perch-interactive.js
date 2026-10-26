@@ -146,7 +146,7 @@ import { countCsvTools, checkToolBudget, sessionBudgetMessage } from "../../scri
 import Database from "better-sqlite3";
 import { resolveDataDir } from "../db.js";
 import { randomUUID } from "node:crypto";
-import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, sep } from "node:path";
 
@@ -546,10 +546,12 @@ function maskQuestions(qs) {
   if (!Array.isArray(qs)) return { questions: qs, failed: false, tooLong: false };
   let failed = false;
   let tooLong = false;
+  let hidden = 0;
   const one = (text) => {
     const r = maskSecretsDetailed(text, { card: true });
     failed = failed || !!r.failed;
     tooLong = tooLong || !!r.truncated;
+    hidden += r.count || 0;
     return r.text;
   };
   const questions = qs.map((q) => {
@@ -565,7 +567,7 @@ function maskQuestions(qs) {
     }
     return out;
   });
-  return { questions, failed, tooLong };
+  return { questions, failed, tooLong, hidden };
 }
 
 /** The operator answered the MASKED questions card: map each picked label back
@@ -2400,12 +2402,16 @@ export function createInteractiveEngine({
         // relative path and scatter an `outputs/` tree into the gateway's cwd.
         const dir = s.outputsDir || (s.worldRoot ? join(s.worldRoot, "outputs", s.sessionId) : null);
         if (!isAbsolute(dir || "")) throw new Error("no absolute outputs dir");
-        mkdirSync(dir, { recursive: true });
         // Pre-existing escape closed here: this write runs outside the
         // sandbox, so an outputs dir (or its parent) the bot swapped for a
         // symlink would let it place a file anywhere this uid can write (a
-        // user unit, an rc file). Refuse a symlinked dir or parent.
-        if (lstatSync(dir).isSymbolicLink() || lstatSync(dirname(dir)).isSymbolicLink()) throw new Error("outputs dir is a symlink");
+        // user unit, an rc file). Refuse a symlinked dir or parent before and
+        // after mkdir, write into the resolved dir, and re-check after the
+        // write (a swap in between removes the file again).
+        const isLink = (p) => { try { return lstatSync(p).isSymbolicLink(); } catch { return false; } };
+        if (isLink(dir) || isLink(dirname(dir))) throw new Error("outputs dir is a symlink");
+        mkdirSync(dir, { recursive: true });
+        if (isLink(dir) || isLink(dirname(dir))) throw new Error("outputs dir is a symlink");
         const dirReal = realpathSync(dir);
         // Strictly-under, the workspace route's own formula: the `+ sep` is
         // what turns a string-prefix match into a containment test.
@@ -2422,7 +2428,12 @@ export function createInteractiveEngine({
             if (n <= 0) break;
             off += n;
           }
-          writeFileSync(join(dir, stored), buf.subarray(0, off), { flag: "wx" });
+          const dest = join(dirReal, stored);
+          writeFileSync(dest, buf.subarray(0, off), { flag: "wx" });
+          if (isLink(dir) || realpathSync(dir) !== dirReal) {
+            try { unlinkSync(dest); } catch { /* raced */ }
+            throw new Error("outputs dir changed during the copy");
+          }
           servable = true;
         }
       }
@@ -2466,7 +2477,7 @@ export function createInteractiveEngine({
         const mq = maskQuestions(qs);
         s.pendingUi = mq.failed || mq.tooLong
           ? Object.defineProperty({ requestId: m.id, method: "questions", title: "", questions: [], message: unshownCardText(mq.tooLong) }, RAW_CARD, { value: { failed: true } })
-          : { requestId: m.id, method: "questions", title: "", questions: mq.questions };
+          : { requestId: m.id, method: "questions", title: "", questions: mq.questions, ...(mq.hidden ? { message: hiddenNote(mq.hidden) } : {}) };
         s.expiredAsk = null;                         // a live question supersedes an expired one
         armAskExpiry(s, m);
         clearStall(s);                               // paused while a human thinks

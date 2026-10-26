@@ -159,3 +159,10 @@ test("without bubblewrap the values still reach this process's own mask (in memo
   assert.equal(existsSync(PATH), false);
   assert.ok(getSecretValues().includes(FAKE));
 });
+
+test("without bubblewrap a values file left by an earlier sandboxed spawn is removed", async () => {
+  writeSecretValuesFile(PATH, [FAKE]);
+  const { pi } = await spawnReport({ mode: "off" });
+  await pi.exited;
+  assert.equal(existsSync(PATH), false);
+});

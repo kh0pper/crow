@@ -38,7 +38,7 @@ import { stripContextEcho } from "../../servers/gateway/voice/context-echo.js";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
@@ -49,7 +49,7 @@ import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { wrapPiSpawn } from "./pi_sandbox.mjs";
 import { refreshSecretValuesFile } from "../../servers/shared/secret-values-collect.js";
-import { secretsDir } from "../../servers/shared/secret-values.js";
+import { secretsDir, secretValuesPath } from "../../servers/shared/secret-values.js";
 import { maskSecrets } from "../../servers/shared/secret-mask.js";
 import { effectiveReadPaths } from "./bot-read-paths.mjs";
 import { MCP_CONFIG_FD } from "./mcp-delivery.mjs";
@@ -495,6 +495,9 @@ export class PiRpc {
     delete launch.env.PI_BOT_SECRET_VALUES_FILE;
     const hidden = launch.wrapper === "bwrap" && launch.masked.includes(secretsDir());
     const secretValues = refreshSecretValuesFile({ write: hidden, log: (l) => console.error("[pi-bots] " + l) });
+    // Not hidden: a file an earlier sandboxed spawn left must not sit where
+    // this bot's shell can read it.
+    if (!hidden) { try { rmSync(secretValuesPath(), { force: true }); } catch { /* best effort */ } }
     if (hidden && secretValues) launch.env.PI_BOT_SECRET_VALUES_FILE = secretValues.path;
     this.sandboxed = launch.sandboxed;
     this.sandboxWrapper = launch.wrapper;

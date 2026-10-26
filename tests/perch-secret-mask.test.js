@@ -345,13 +345,13 @@ test("an edited prefill whose visible text also occurs inside the hidden value g
   const { engine, bridge } = makeEngine();
   const { s, pi } = await liveSession(engine, bridge, "bot-editor-repeat");
   const frames = await watched(engine, s.sessionId);
-  const spaced = "sec" + " tail " + "0000";             // a keychain-style value containing " tail"
-  secretValues.writeSecretValuesFile(secretValues.secretValuesPath(process.env), [KEYCHAIN_FAKE, FAKE, spaced]);
-  const prefill = "B=1\nA=" + spaced + " tail";
+  const inner = "secXtail" + "X0000";                  // a value containing the visible text "Xtail"
+  secretValues.writeSecretValuesFile(secretValues.secretValuesPath(process.env), [KEYCHAIN_FAKE, FAKE, inner]);
+  const prefill = "B=1\nA=" + inner + "Xtail";
   pi.emit({ type: "extension_ui_request", id: "e4", method: "editor", title: "Edit", prefill });
   await tick(30);
   const ask = frames.find((f) => f.type === "ask_user");
-  assert.equal(ask.prefill, "B=1\nA=[REDACTED] tail");
+  assert.equal(ask.prefill, "B=1\nA=[REDACTED]Xtail");
   const typed = ask.prefill.replace("B=1", "B=2");
   await engine.answer(s.sessionId, "e4", { value: typed });
   assert.equal(pi.sent[pi.sent.length - 1].value, typed);
@@ -467,4 +467,31 @@ test("an editor with an oversized prefill, an input with an oversized placeholde
     await engine.answer(s.sessionId, method + "1", { value: "anything" });
     assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: method + "1", cancelled: true }, method);
   }
+});
+
+test("a shell-shaped password: shown on the card (never an exact value there), masked in the needs-you row and push", async () => {
+  const pw = "pa$$" + " w0rd&x";
+  secretValues.writeSecretValuesFile(secretValues.secretValuesPath(process.env), [KEYCHAIN_FAKE, pw]);
+  const { engine, bridge, pushes } = makeEngine();
+  const { s, pi } = await liveSession(engine, bridge, "bot-shellpw");
+  const frames = await watched(engine, s.sessionId);
+  const msg = "mysql_config_editor set --password-file x; echo '" + pw + "' > /dev/null";
+  pi.emit({ type: "extension_ui_request", id: "sp", method: "confirm", title: "Destructive bash", message: msg });
+  await tick(30);
+  assert.equal(frames.find((f) => f.type === "ask_user").message, msg, "card rule");
+  assert.equal(JSON.stringify(rows(s.sessionId)).includes("w0rd&x"), false, "stored row");
+  assert.equal(JSON.stringify(pushes).includes("w0rd&x"), false, "push");
+});
+
+test("a combined questions card that hid something carries the hidden note", async () => {
+  const { engine, bridge } = makeEngine();
+  const { s, pi } = await liveSession(engine, bridge, "bot-q-note");
+  const frames = await watched(engine, s.sessionId);
+  const qs = [{ question: "Use " + KEYCHAIN_FAKE + "?", options: [{ label: "yes" }, { label: "no" }] }];
+  pi.emit({ type: "extension_ui_request", id: "nn", method: "notify", message: "crow-ask:" + JSON.stringify({ id: "q", questions: qs }) });
+  await tick();
+  pi.emit({ type: "extension_ui_request", id: "qn", method: "select", title: "Use", options: ["yes", "no", "Other\u2026"] });
+  await tick(30);
+  const ask = frames.find((f) => f.type === "ask_user");
+  assert.match(ask.message || "", /^\(1 secret value\(s\) hidden from this card\)/);
 });
