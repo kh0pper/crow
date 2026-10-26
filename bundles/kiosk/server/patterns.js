@@ -617,11 +617,11 @@ export function matchT1(transcript, ctx) {
   // callSign: the request was written as a call sign, so a near spelling of one may be asked about (never played).
   if (p) return { verb: "play", what: p.what, source: "auto", ...(writesCallSign(transcript) ? { callSign: true } : {}) };
   // A bare spelled call sign ("K T P F.", "No, K T P F", Spanish "Pon K T P F") names a station: searched on the radio
-  // only, and `spelled`: it plays only on an exact name, never on a sound-alike (asked about instead). It is not a
-  // `choice`, so it still answers a pending "Did you mean …?" first, and is searched on its own when it names none of them.
+  // only, by the same rules as "Play …" (operator ruling 2026-10-26: a sound-alike plays). It is not a `choice`, so it
+  // still answers a pending "Did you mean …?" first, and is searched on its own when it names none of them.
   if (ctx.sources.includes("radio")) {
     const spelled = spelledRequest(transcript);
-    if (spelled) return { verb: "play", what: spelled, source: "radio", spelled: true, callSign: true };
+    if (spelled) return { verb: "play", what: spelled, source: "radio", callSign: true };
   }
   // "Which one? Say its name." → the next utterance may be just the name ("WXYZ two", "the second album's title").
   if (typeof ctx.pendingChoices === "function" && ctx.pendingChoices(ctx.deviceId) === true) {

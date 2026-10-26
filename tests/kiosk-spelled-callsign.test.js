@@ -69,24 +69,25 @@ test("a bare spelled call sign with no verb plays the station with no model; the
   assert.deepEqual(await setup().say("KTPF2."), { say: "Playing KTPF HD2.", tier: "t1" });
 });
 
-test("review C2: a bare spelling plays on an exact name only — a sound-alike or an extra letter is asked about, a yes plays it", async () => {
-  for (const said of ["K D B F.", "K T P V.", "Kay dee bee eff.", "K T P F F.", "Ka de pe efe.", "Pon ka de pe efe."]) {
-    const s = setup({ lang: /^(Ka|Pon)/.test(said) ? "es" : "en" });
-    const r = await s.say(said);
-    assert.match(r?.say || "", /KTPF HD1\?/, said);
-    assert.deepEqual(s.loads(), [], `${said}: nothing plays`);
+test("operator ruling 2026-10-26: a bare sound-alike spelling plays like 'Play …' does — 'K D B F.' is KTPF; the Spanish letter-name forms ride the same path", async () => {
+  for (const said of ["K D B F.", "K T P V.", "Kay dee bee eff.", "K T P F F.", "KDBF.", "Ka de pe efe.", "Pon ka de pe efe."]) {
+    const es = /^(Ka|Pon)/.test(said);
+    const s = setup({ lang: es ? "es" : "en" });
+    assert.deepEqual(await s.say(said), es ? { say: "Reproduciendo KTPF HD1.", tier: "t1" } : PLAYING_HD1, said);
+    assert.deepEqual(s.loads(), ["KTPF HD1"], said);
   }
-  const s = setup();
-  await s.say("K D B F.");
-  assert.deepEqual(await s.say("Yes."), PLAYING_HD1);
+  // Still only asked: a spelling cut short, one letter off, a trailing word (spellingSearch), bare or not.
+  for (const said of ["K T P.", "ATPF.", "Play TPF.", "Play KTPF downtown."]) {
+    const s = setup();
+    assert.deepEqual(await s.say(said), ASK_HD1, said);
+    assert.deepEqual(s.loads(), [], said);
+  }
 });
 
 test("review C1: a misheard Spanish letter-name spelling after a verb is still only asked about", async () => {
-  for (const said of ["Play ka de pe efe.", "Pon ka de pe efe."]) {
-    const s = setup({ lang: "es" });
-    assert.match((await s.say(said))?.say || "", /^¿Quisiste decir KTPF HD1\?/, said);
-    assert.deepEqual(s.loads(), [], said);
-  }
+  const s = setup({ lang: "es" });
+  assert.match((await s.say("Play ka de pe efe."))?.say || "", /^¿Quisiste decir KTPF HD1\?/);
+  assert.deepEqual(s.loads(), []);
 });
 
 test("'No, K T P F' answers a pending 'Did you mean …?' for another station: the spelled station plays", async () => {

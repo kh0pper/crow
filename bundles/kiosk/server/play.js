@@ -75,10 +75,9 @@ export function createPlayResolver({ registry, timeoutMs = SOURCE_TIMEOUT_MS, no
      *   | { outcome: "refused", say, vars, source }           a source knows what was meant and cannot play it (its own line)
      *   | { outcome: "not_found" }
      * strict: never play a guess (a single loose candidate plays only for the model's call).
-     * spelled: a bare spelled call sign (patterns.js spelledCallSign): a lone sound-alike is asked about, never played.
      * callSign: the request was written as a call sign; a source may then look for near spellings (stations.js).
      */
-    async resolve(what, source = "auto", { strict = false, lang = "en", deviceId = null, spelled = false, callSign = false } = {}) {
+    async resolve(what, source = "auto", { strict = false, lang = "en", deviceId = null, callSign = false } = {}) {
       const all = registry.available();
       if (!all.length) return { outcome: "unavailable", code: "none" };
       const has = (kind) => all.some((s) => s.kind === kind);
@@ -102,7 +101,7 @@ export function createPlayResolver({ registry, timeoutMs = SOURCE_TIMEOUT_MS, no
       // station name and nothing else was found anywhere (F1: "Play KDBF" for the only KTPF).
       // Review M1: a lone candidate the source wants ASKED about ("Did you mean KTPF HD1?") is offered as a one-name
       // choice — with or without a model — and remembered like any "Which one?".
-      if (loose.length === 1 && (loose[0].c.ask === true || (spelled === true && loose[0].c.near === true))) {
+      if (loose.length === 1 && loose[0].c.ask === true) {
         // Re-review R3: answered only by the very next utterance (`once`; see note()).
         if (deviceId) asked.set(deviceId, { at: now(), items: loose.slice(0, 1), once: true, fresh: true });
         return { outcome: "choices", names: [cleanTitle(loose[0].c.title).slice(0, 30)] };
@@ -213,7 +212,7 @@ export function createMediaVerbs({ media, resolver, maxVolume = () => 100 }) {
     }
     if (i.choice === true) return null;                                    // a bare sentence that named none of them: the model gets it
     if (!what) return ctx.strict ? null : result(false, "not_found", S.say_play_what, { effect: false });
-    const r = await resolver.resolve(what, i.source || "auto", { strict: ctx.strict === true, lang: ctx.lang, deviceId: id, spelled: i.spelled === true, callSign: i.callSign === true || writesCallSign(i.what) });
+    const r = await resolver.resolve(what, i.source || "auto", { strict: ctx.strict === true, lang: ctx.lang, deviceId: id, callSign: i.callSign === true || writesCallSign(i.what) });
     if (r.outcome === "playing") return start(r, ctx, S);
     // A source's own refusal is a real answer, with or without a model; its line is always spoken.
     if (r.outcome === "refused") return result(false, "unavailable", fill(S[r.say] || S.say_play_unavailable, r.vars), { reason: "refused", effect: false });
