@@ -88,6 +88,7 @@ test("`when` takes plain words: a repeating one, a one-shot, and a refusal with 
   assert.equal(row.cron_expression, "0 8 * * 1-5");
   assert.equal(row.task, "reminder:standup");
   assert.match(r.text, /Every weekday at 8:00 AM/);
+  assert.equal((r.text.match(/^- .*\d:\d\d/gm) || []).length, 3, "the next 3 runs are listed");
   const es = await create({ task: "gym", when: "todos los lunes a las 18:00", tz: "Europe/Madrid" });
   assert.equal(es.isError, false, es.text);
   row = lastRow();
@@ -106,6 +107,9 @@ test("`when` takes plain words: a repeating one, a one-shot, and a refusal with 
   assert.equal(vague.isError, true);
   assert.match(vague.text, /every weekday at 8/);
   assert.equal((await create({ task: "both", when: "every day at 8", cron_expression: "0 8 * * *" })).isError, true);
+  const long = await create({ task: "x", when: "every day at 8 ".repeat(30) });
+  assert.equal(long.isError, true);
+  assert.match(long.text, /too long/, "the parser's own hint reaches the caller");
 });
 
 test("a reminder more often than hourly is refused; a bot routine may be", async () => {

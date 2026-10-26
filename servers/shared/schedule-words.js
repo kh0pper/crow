@@ -86,22 +86,23 @@ function takeTime(s, lang) {
   if (found.length === 0) return { time: null, rest: s };
   if (found.length > 1) return { error: "two_times" };
   const g = found[0];
-  let h = null, m = 0;
+  let h = null, m = 0, clock24 = false;
   if (lang === "en") {
     if (g[1]) h = g[1] === "midnight" ? 0 : 12;
-    else if (g[2] !== undefined) { h = Number(g[2]); m = Number(g[3]); if (g[4]) h = ampm(h, g[4]); else if (h > 23) h = null; }
+    else if (g[2] !== undefined) { h = Number(g[2]); m = Number(g[3]); clock24 = !g[4]; if (g[4]) h = ampm(h, g[4]); else if (h > 23) h = null; }
     else if (g[5] !== undefined) h = ampm(Number(g[5]), g[6]);
-    else { h = Number(g[7]); if (h > 23) h = null; }
+    else { h = Number(g[7]); clock24 = true; if (h > 23) h = null; }
   } else {
     const fix = (hh, period, p) => (period ? esPeriod(hh, period) : p ? ampm(hh, p) : hh <= 23 ? hh : null);
     if (g[1]) h = g[1] === "medianoche" ? 0 : 12;
-    else if (g[2] !== undefined) { m = Number(g[3]); h = fix(Number(g[2]), g[4], g[5]); }
-    else if (g[6] !== undefined) h = fix(g[6] === "una" ? 1 : Number(g[6]), g[7], g[8]);
+    else if (g[2] !== undefined) { m = Number(g[3]); h = fix(Number(g[2]), g[4], g[5]); clock24 = !g[4] && !g[5]; }
+    else if (g[6] !== undefined) { h = fix(g[6] === "una" ? 1 : Number(g[6]), g[7], g[8]); clock24 = !g[7] && !g[8]; }
     else h = ampm(Number(g[9]), g[10]);
   }
   if (h === null || !(m >= 0 && m <= 59)) return { error: "bad_time" };
   const rest = (s.slice(0, g.index) + " " + s.slice(g.index + g[0].length)).replace(/\s+/g, " ").replace(/^[\s,]+|[\s,]+$/g, "").trim();
-  return { time: { h, m }, rest };
+  // "midnight", "12am", "12 de la noche": with a day word, which night is meant is unclear.
+  return { time: { h, m, midnight: h === 0 && m === 0 && !clock24 }, rest };
 }
 
 // --- day phrases ------------------------------------------------------------------------------
@@ -301,10 +302,20 @@ function hint(code, lang, x = {}) {
       const alt = x.near.join(es ? " o " : " or ");
       return es ? `Cada ${x.n} ${unit} no reparte ${per} en partes iguales. Prueba cada ${alt} ${unit}.` : `Every ${x.n} ${unit} doesn't divide ${per} evenly. Try every ${alt} ${unit}.`;
     }
-    case "too_frequent": return es ? `Los recordatorios se repiten como mucho cada hora (esto sería cada ${x.every} minutos). Prueba "cada hora" o "cada 2 horas".` : `Reminders repeat at most once an hour (this would be every ${x.every} minutes). Try "every hour" or "every 2 hours".`;
+    case "too_frequent": {
+      const every = es ? (x.every === 1 ? "cada minuto" : `cada ${x.every} minutos`) : (x.every === 1 ? "every minute" : `every ${x.every} minutes`);
+      return es ? `Los recordatorios se repiten como mucho cada hora (esto sería ${every}). Prueba "cada hora" o "cada 2 horas".` : `Reminders repeat at most once an hour (this would be ${every}). Try "every hour" or "every 2 hours".`;
+    }
+    case "daily_step": return es ? 'Para una vez al día, di "cada día a las 9" (con tu hora).' : 'For once a day, say "every day at 9" (with your time).';
+    case "did_you_mean": return es ? `¿Quisiste decir "${x.suggest}"?` : `Did you mean "${x.suggest}"?`;
     case "day_of_month": return es ? "Elige un día del 1 al 28: los meses sin ese día se saltarían." : "Pick a day from the 1st to the 28th: months without that day would be skipped.";
     case "past": return es ? "Esa fecha y hora ya pasaron. Elige una en el futuro." : "That date and time have already passed. Pick one in the future.";
-    case "ambiguous": return es
+    case "ambiguous": if (x.midnight) {
+      return es
+        ? '"Medianoche" con un día no está claro (¿la noche antes o la noche después?). Di "mañana a las 23:59", o la fecha con la hora, como "el 2026-11-03 a las 0:00".'
+        : '"Midnight" with a day is unclear (the night before or after?). Say "tomorrow at 11:59pm", or the date with a time, like "on 2026-11-03 at 00:00".';
+    }
+    return es
       ? 'No está claro qué día es. Di "el viernes" (el próximo que llega), "cada lunes y jueves" para repetir, o una fecha como "el 2026-11-03".'
       : 'It is not clear which day that is. Say "on friday" (the next one to come), "every monday and thursday" to repeat, or a date like "on 2026-11-03".';
     case "no_such_time": return es ? "Esa hora no existe ese día (cambio de hora). Elige otra hora." : "That time does not exist that day (the clocks change). Pick another time.";
@@ -324,8 +335,31 @@ function preview(ms, lang, zone) {
   return { iso: isoInZone(ms, zone), text };
 }
 
-/** Parse one language's grammar. null = these are not this language's words. */
+/** Near misses worth a "did you mean": [pattern on the folded words, replacement]. */
+const NEAR_MISSES = {
+  en: [[/^(?:on )?(weekday|weekend)\b/, "every $1"]],
+  es: [
+    [/^(?:el |este |cada )?fin de semana\b/, "los fines de semana"],
+    [/^(?:el |cada )?dia laborable\b/, "los días laborables"],
+    [/(^|\s)(\d{1,2}(?::\d{2})? de la (?:manana|tarde|noche|madrugada))\b/, "$1a las $2"],
+  ],
+};
+
+/** Parse one language's grammar, tagging the result with that language. null = not this language's words. */
 function parseIn(s, lang, zone, now) {
+  const r = parseWords(s, lang, zone, now);
+  if (r === null) {
+    for (const [re, to] of NEAR_MISSES[lang]) {
+      if (!re.test(s)) continue;
+      const suggest = s.replace(re, to);
+      if (parseWords(suggest, lang, zone, now)) return { error: "did_you_mean", suggest, lang };
+    }
+    return null;
+  }
+  return { ...r, lang };
+}
+
+function parseWords(s, lang, zone, now) {
   const t = takeTime(s, lang);
   if (t.error) return { error: t.error };
   const d = dayPhrase(t.rest, lang);
@@ -341,6 +375,7 @@ function parseIn(s, lang, zone, now) {
       return { cron: d.n === 1 ? "* * * * *" : `*/${d.n} * * * *` };
     }
     if (d.n === 1) return { cron: "0 * * * *" };
+    if (d.n === 24) return { error: "daily_step" };
     if (!DIV24.includes(d.n)) return d.n > 24 ? { error: "unknown" } : { error: "uneven", unit: "hour", n: d.n, near: near(DIV24, d.n).filter((x) => x > 1) };
     return { cron: `0 */${d.n} * * *` };
   }
@@ -361,6 +396,7 @@ function parseIn(s, lang, zone, now) {
   }
   // One time.
   if (!time) return { error: "no_time", example: lang === "es" ? "mañana a las 9" : "tomorrow at 9" };
+  if (time.midnight && d.day !== "bare") return { error: "ambiguous", midnight: true };
   const today = localYmd(now, zone);
   const at = (ymd) => wallToMs(ymd, time.h, time.m, zone);
   const day = d.day;
@@ -417,8 +453,8 @@ export function parseWhen(text, { lang = "en", tz = null, now = Date.now(), type
     if (!known(r)) r = { error: "unknown" };
   }
   // For a reminder, any minute step is too frequent: say that first, not "pick an even gap".
-  if (r.error === "uneven" && r.unit === "minute" && type === "reminder") r = { error: "too_frequent", every: r.n };
-  if (r.error) return fail(r.error, r);
+  if (r.error === "uneven" && r.unit === "minute" && type === "reminder") r = { error: "too_frequent", every: r.n, lang: r.lang };
+  if (r.error) return { ok: false, code: r.error, hint: hint(r.error, r.lang ?? lang, r) };
 
   if (r.at !== undefined) {
     const p = preview(r.at, lang, zone);
@@ -428,7 +464,7 @@ export function parseWhen(text, { lang = "en", tz = null, now = Date.now(), type
   }
 
   const every = cadenceMinutes(r.cron, zone, now);
-  if (type === "reminder" && every !== null && every < MIN_REMINDER_EVERY) return fail("too_frequent", { every });
+  if (type === "reminder" && every !== null && every < MIN_REMINDER_EVERY) return { ok: false, code: "too_frequent", hint: hint("too_frequent", r.lang ?? lang, { every }) };
   const next3 = [];
   let t = now;
   for (let i = 0; i < 3; i++) {

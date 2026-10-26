@@ -65,7 +65,7 @@ test("every N minutes / hours (only even gaps)", () => {
   const r5 = fails("every 5 hours", "uneven");
   assert.match(r5.hint, /\b4\b.*\b6\b/);
   assert.match(fails("cada 7 minutos", "uneven", { ...bot, lang: "es" }).hint, /minutos/);
-  fails("every 24 hours", "uneven");
+  fails("every 24 hours", "daily_step");
 });
 
 test("reminders repeat at most hourly (the #560 rule); other types may go faster", () => {
@@ -275,4 +275,47 @@ test("defaults: an invalid zone falls back, the language defaults to en", () => 
   assert.ok(r.ok);
   assert.equal(r.summary, "Every day at 8:00 AM");
   assert.ok(typeof r.zone === "string" && r.zone.length > 0);
+});
+
+test("midnight with a day word is refused as ambiguous; a bare midnight is the next 00:00", () => {
+  const es = { lang: "es" };
+  for (const [words, o] of [
+    ["today at midnight"], ["tomorrow at midnight"], ["tomorrow at 12am"], ["on friday at midnight"], ["on 2026-11-03 at midnight"],
+    ["hoy a medianoche", es], ["mañana a medianoche", es], ["hoy a las 12 de la noche", es], ["mañana a las 12 de la noche", es], ["el viernes a medianoche", es],
+  ]) {
+    const r = fails(words, "ambiguous", o);
+    assert.match(r.hint, o ? /mañana a las 23:59/ : /tomorrow at 11:59pm/, words);
+  }
+  assert.equal(atOf("at midnight"), "2026-10-27T00:00:00-05:00");
+  assert.equal(atOf("a medianoche"), "2026-10-27T00:00:00-05:00");
+  assert.equal(atOf("a las 12 de la noche"), "2026-10-27T00:00:00-05:00");
+  assert.equal(atOf("tomorrow at 00:00"), "2026-10-27T00:00:00-05:00", "a 24-hour 00:00 is not the word midnight");
+  assert.equal(cronOf("every friday at midnight"), "0 0 * * 5", "repeating schedules are unaffected");
+});
+
+test("a bare time inside today's skipped hour rolls to tomorrow", () => {
+  const changeDay = T("2026-03-08T07:30:00Z"); // 01:30 CST, clocks jump at 02:00
+  assert.equal(atOf("at 2:30", { now: changeDay }), "2026-03-09T02:30:00-05:00");
+  fails("today at 2:30", "no_such_time", { now: changeDay });
+});
+
+test("hints come in the language of the words that matched", () => {
+  assert.match(fails("hoy a las 9", "past").hint, /ya pasaron/, "es words on an en instance");
+  assert.match(fails("today at 9", "past", { lang: "es" }).hint, /already passed/);
+  assert.match(fails("whenever", "unknown", { lang: "es" }).hint, /cada día laborable/, "no grammar matched: the asked language");
+  assert.match(fails("cada 30 minutos", "too_frequent").hint, /como mucho cada hora/);
+  assert.match(fails("cada 7 minutos", "too_frequent").hint, /cada 7 minutos/);
+});
+
+test("closer hints for near misses", () => {
+  assert.match(fails("12 de la noche", "did_you_mean", { lang: "es" }).hint, /"a las 12 de la noche"/);
+  assert.match(fails("fin de semana a las 10", "did_you_mean", { lang: "es" }).hint, /"los fines de semana a las 10"/);
+  assert.match(fails("weekday at 8", "did_you_mean").hint, /"every weekday at 8"/);
+  assert.match(fails("weekend at 10", "did_you_mean").hint, /"every weekend at 10"/);
+  assert.match(fails("every 24 hours", "daily_step").hint, /every day at/);
+  assert.match(fails("cada 24 horas", "daily_step", { lang: "es" }).hint, /cada día a las/);
+  const one = fails("every 1 minutes", "too_frequent");
+  assert.match(one.hint, /every minute\)/);
+  assert.doesNotMatch(one.hint, /1 minutes/);
+  assert.match(fails("cada minuto", "too_frequent", { lang: "es" }).hint, /cada minuto\)/);
 });
