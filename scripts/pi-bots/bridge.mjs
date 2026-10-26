@@ -49,7 +49,7 @@ import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { wrapPiSpawn } from "./pi_sandbox.mjs";
 import { refreshSecretValuesFile } from "../../servers/shared/secret-values-collect.js";
-import { SECRET_VALUES_DISPLAY_FILENAME, SECRET_VALUES_FILENAME, anchoredPath, instanceSecretsDirs, secretsDir, secretsDirCurrentPath } from "../../servers/shared/secret-values.js";
+import { SECRET_VALUES_DISPLAY_FILENAME, SECRET_VALUES_FILENAME, anchoredPath, checkedInstanceSecretsDirs, rememberInstanceSecretsDirs, secretsDir, secretsDirCurrentPath } from "../../servers/shared/secret-values.js";
 import { maskSecrets } from "../../servers/shared/secret-mask.js";
 import { effectiveReadPaths } from "./bot-read-paths.mjs";
 import { MCP_CONFIG_FD } from "./mcp-delivery.mjs";
@@ -502,7 +502,7 @@ export class PiRpc {
     // Every OTHER Crow home on this host (found by the shape of its secrets
     // dir, whatever it is called) is a co-hosted instance under the same uid:
     // its secrets dir is hidden too.
-    const others = instanceSecretsDirs();             // throws (refusing the spawn) when a home cannot be checked
+    const others = checkedInstanceSecretsDirs();      // throws (refusing the spawn) when a home cannot be checked or a remembered one is gone
     const launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, hideDirs: [secretsHere, ...others] });
     // Under bwrap every found dir must really be masked (wrapPiSpawn drops a
     // dir it cannot stat): otherwise refuse, never run with one visible.
@@ -514,6 +514,8 @@ export class PiRpc {
     if (launch.wrapper === "bwrap" && others.length > MAX_HIDDEN_INSTANCE_DIRS) {
       throw new Error("pi sandbox: " + others.length + " Crow instance secrets dirs to hide (more than " + MAX_HIDDEN_INSTANCE_DIRS + "); refusing to start pi with any of them visible");
     }
+    // Only now, with every one hidden, are they remembered (a refused spawn records nothing).
+    if (launch.wrapper === "bwrap") { try { rememberInstanceSecretsDirs(others); } catch { /* next spawn */ } }
     delete launch.env.PI_BOT_SECRET_VALUES_FILE;
     // Fail closed: the values file is written and card values trusted only
     // when this instance's AND every other instance's secrets dir is masked.

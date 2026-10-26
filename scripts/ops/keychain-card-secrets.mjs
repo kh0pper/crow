@@ -6,6 +6,12 @@
  * UI from now on are recorded automatically. Never prints a value.
  *
  *   node scripts/ops/keychain-card-secrets.mjs confirm
+ *   node scripts/ops/keychain-card-secrets.mjs forget-instance <secrets dir>
+ *
+ * forget-instance: bots refuse to start when another Crow instance's secrets
+ * dir that was hidden before is gone or replaced (a bot could have moved that
+ * home out of sight). If the instance was really removed or recreated, forget
+ * its old dir with this command.
  *
  * Type each password you know, one per line (echo is off on a terminal), and
  * an empty line to finish. A password is recorded only when a MANUAL keychain
@@ -20,8 +26,14 @@ import { Writable } from "node:stream";
 import { confirmTypedValueForCards } from "../../servers/shared/secret-values-collect.js";
 
 const args = process.argv.slice(2);
+if (args[0] === "forget-instance" && args.length === 2) {
+  const { forgetInstanceSecretsDir } = await import("../../servers/shared/secret-values.js");
+  forgetInstanceSecretsDir(args[1]);
+  console.log("Forgotten: " + args[1]);
+  process.exit(0);
+}
 if (args[0] !== "confirm" || args.length !== 1) {
-  console.error("usage: keychain-card-secrets.mjs confirm   (passwords are read from stdin)");
+  console.error("usage: keychain-card-secrets.mjs confirm   (passwords are read from stdin)\n       keychain-card-secrets.mjs forget-instance <secrets dir>");
   process.exit(2);
 }
 const tty = !!process.stdin.isTTY;

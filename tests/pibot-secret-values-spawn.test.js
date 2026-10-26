@@ -334,11 +334,32 @@ test("more instance secrets dirs than the cap: the spawn is refused with a clear
 });
 
 test("sandboxed: a co-hosted home made unreadable (chmod 000) refuses the spawn instead of leaving it visible", { skip: noSandbox }, async () => {
-  const other = join(USER_HOME, "crow-locked-home");
+  const other = join(USER_HOME, ".crow-locked");
   mkdirSync(join(other, "secrets"), { recursive: true, mode: 0o700 });
   const { chmodSync: chmod, rmSync: rm } = await import("node:fs");
   chmod(other, 0o000);
   try {
     await assert.rejects(spawnReport({ mode: "auto" }), /cannot be checked/);
-  } finally { chmod(other, 0o700); rm(other, { recursive: true, force: true }); }
+  } finally {
+    chmod(other, 0o700); rm(other, { recursive: true, force: true });
+    const { forgetInstanceSecretsDir } = await import("../servers/shared/secret-values.js");
+    forgetInstanceSecretsDir(join(other, "secrets"));
+  }
+});
+
+test("sandboxed: a co-hosted secrets dir hidden once and then moved away refuses the next spawn", { skip: noSandbox }, async () => {
+  const { renameSync: mv, rmSync: rm } = await import("node:fs");
+  const { forgetInstanceSecretsDir } = await import("../servers/shared/secret-values.js");
+  const other = join(USER_HOME, "crow-moving-home");
+  mkdirSync(join(other, "secrets"), { recursive: true, mode: 0o700 });
+  const first = await spawnReport({ mode: "auto" });
+  await first.pi.exited;                                // hidden once: remembered
+  mkdirSync(join(USER_HOME, "deep"), { recursive: true });
+  mv(other, join(USER_HOME, "deep", "crow-moving-home"));
+  try {
+    await assert.rejects(spawnReport({ mode: "auto" }), /was hidden before and is gone/);
+  } finally {
+    rm(join(USER_HOME, "deep"), { recursive: true, force: true });
+    forgetInstanceSecretsDir(join(other, "secrets"));
+  }
 });

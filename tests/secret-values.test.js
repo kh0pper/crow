@@ -513,3 +513,68 @@ test("discovery fails closed when a home this user owns cannot be read (a bot's 
     assert.throws(() => SV.instanceSecretsDirs({ CROW_HOME: join(home, ".crow") }, opts), /cannot be checked/);
   } finally { chmodSync(other, 0o700); rmSync(root, { recursive: true, force: true }); }
 });
+
+test("discovery fails closed when $HOME itself cannot be listed (chmod u-r ~)", () => {
+  const root = mkdtempSync(join(tmpdir(), "crow-homes4-"));
+  const home = join(root, "user");
+  mkdirSync(join(home, ".crow", "secrets"), { recursive: true });
+  chmodSync(home, 0o311);
+  try {
+    assert.throws(() => SV.instanceSecretsDirs({ CROW_HOME: join(home, ".crow") }, { home, unitDirs: [], envFileDirs: [] }), /cannot be checked/);
+  } finally { chmodSync(home, 0o755); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a co-hosted secrets dir seen once is remembered: moved away or replaced, the next check refuses until the operator forgets it", () => {
+  const root = mkdtempSync(join(tmpdir(), "crow-homes5-"));
+  const home = join(root, "user");
+  const self = join(home, ".crow");
+  mkdirSync(join(self, "secrets"), { recursive: true, mode: 0o700 });
+  const r4 = join(home, ".crow-r4");
+  mkdirSync(join(r4, "secrets"), { recursive: true });
+  const env = { CROW_HOME: self };
+  const opts = { home, unitDirs: [], envFileDirs: [] };
+  const first = SV.checkedInstanceSecretsDirs(env, opts);
+  assert.ok(first.includes(join(r4, "secrets")));
+  SV.rememberInstanceSecretsDirs(first, env);          // what the bridge does once a spawn hid them
+  // moved out of the scan's reach
+  mkdirSync(join(home, "deep", "a"), { recursive: true });
+  renameSync(r4, join(home, "deep", "a", ".crow-r4"));
+  assert.throws(() => SV.checkedInstanceSecretsDirs(env, opts), /was hidden before and is gone/);
+  // put back but as a different dir (a decoy at the old path)
+  mkdirSync(join(r4, "secrets"), { recursive: true });
+  assert.throws(() => SV.checkedInstanceSecretsDirs(env, opts), /was hidden before and is gone/);
+  SV.forgetInstanceSecretsDir(join(r4, "secrets"), env);
+  assert.ok(SV.checkedInstanceSecretsDirs(env, opts).includes(join(r4, "secrets")), "after the operator's forget, the new dir is accepted");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("an unreadable dir under $HOME that is NOT plausibly a Crow home is masked (returned for hiding), not a refusal", () => {
+  const root = mkdtempSync(join(tmpdir(), "crow-homes6-"));
+  const home = join(root, "user");
+  mkdirSync(join(home, ".crow", "secrets"), { recursive: true });
+  const junk = join(home, "some-project");
+  mkdirSync(join(junk, "secrets"), { recursive: true });
+  chmodSync(junk, 0o000);
+  try {
+    const dirs = SV.instanceSecretsDirs({ CROW_HOME: join(home, ".crow") }, { home, unitDirs: [], envFileDirs: [] });
+    assert.ok(dirs.includes(junk), "the whole unreadable dir is hidden");
+    const crowish = join(home, ".crow-locked");
+    mkdirSync(join(crowish, "secrets"), { recursive: true });
+    chmodSync(crowish, 0o000);
+    try {
+      assert.throws(() => SV.instanceSecretsDirs({ CROW_HOME: join(home, ".crow") }, { home, unitDirs: [], envFileDirs: [] }), /cannot be checked/, "a .crow* home refuses");
+    } finally { chmodSync(crowish, 0o700); }
+  } finally { chmodSync(junk, 0o700); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("an unreadable unit dir this user owns fails closed (a declared home could hide behind it)", () => {
+  const root = mkdtempSync(join(tmpdir(), "crow-homes7-"));
+  const home = join(root, "user");
+  mkdirSync(join(home, ".crow", "secrets"), { recursive: true });
+  const units = join(root, "units");
+  mkdirSync(units);
+  chmodSync(units, 0o000);
+  try {
+    assert.throws(() => SV.instanceSecretsDirs({ CROW_HOME: join(home, ".crow") }, { home, unitDirs: [units], envFileDirs: [] }), /cannot be checked/);
+  } finally { chmodSync(units, 0o755); rmSync(root, { recursive: true, force: true }); }
+});

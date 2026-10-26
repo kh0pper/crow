@@ -103,18 +103,43 @@ export function secretsDirTrusted(env = process.env) {
   } catch { return false; }
 }
 
-/** CROW_HOME=<path> values in unit files and env files (read-only scan). */
+/**
+ * True when p, or its first ancestor that can be stat'ed, belongs to this
+ * user, or when no owner can be determined: a dir a bot could have made
+ * unreadable (it owns it), so an error there must not be read as "nothing".
+ */
+function ownedOrUnknown(p) {
+  for (let q = p; ; q = dirname(q)) {
+    try { return lstatSync(q).uid === process.getuid(); } catch { /* go up */ }
+    if (q === dirname(q)) return true;
+  }
+}
+
+function cannotCheck(p, e) {
+  return new Error("Crow home scan: " + p + " cannot be checked (" + ((e && e.code) || e) + "); refusing to treat its secrets as hidden");
+}
+
+/** CROW_HOME=<path> values in unit files and env files (read-only scan). An
+ * unreadable dir or file this user owns throws (a declared home could hide
+ * behind it). */
 function declaredHomes(dirs, depth = 2) {
   const out = [];
   const scan = (d, left) => {
     let names = [];
-    try { names = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    try { names = readdirSync(d, { withFileTypes: true }); } catch (e) {
+      if (e && e.code === "ENOENT") return;
+      if (ownedOrUnknown(d)) throw cannotCheck(d, e);
+      return;
+    }
     for (const n of names) {
       const p = join(d, n.name);
       if (n.isDirectory()) { if (left > 0) scan(p, left - 1); continue; }
       if (!/\.(service|conf|env)$/.test(n.name)) continue;
       let text = "";
-      try { const st = statSync(p); if (st.size > 256 * 1024) continue; text = readFileSync(p, "utf8"); } catch { continue; }
+      try { const st = statSync(p); if (st.size > 256 * 1024) continue; text = readFileSync(p, "utf8"); } catch (e) {
+        if (e && e.code !== "ENOENT" && ownedOrUnknown(p)) throw cannotCheck(p, e);
+        continue;
+      }
       for (const m of text.matchAll(/CROW_HOME=("?)([^"\s]+)\1/g)) if (m[2].startsWith("/")) out.push(m[2]);
     }
   };
@@ -135,15 +160,28 @@ export function instanceSecretsDirs(env = process.env, {
   home = env.HOME || homedir(),
   unitDirs = [join(env.HOME || homedir(), ".config", "systemd", "user"), "/etc/systemd/system"],
   envFileDirs = ["/etc/crow"],
+  knownHomes = [],
 } = {}) {
   let self = secretsDir(env);
   try { self = realpathSync(self); } catch { /* not there yet */ }
-  const homes = new Set([join(home, ".crow"), ...declaredHomes(unitDirs), ...declaredHomes(envFileDirs, 0)]);
+  const declared = new Set([...declaredHomes(unitDirs), ...declaredHomes(envFileDirs, 0)]);
+  const homes = new Set([join(home, ".crow"), ...declared]);
+  // Plausibly a Crow home: declared, remembered, or named .crow*. Such a home
+  // that cannot be checked refuses the spawn; any other unreadable dir this
+  // user owns is hidden whole instead (a stray unreadable dir must not stop
+  // every bot).
+  const plausible = (h) => declared.has(h) || knownHomes.includes(h) || basename(h).startsWith(".crow");
   // $HOME's children (a symlinked child followed), and the old source too:
   // siblings of this CROW_HOME named with its name as a prefix.
   const kids = (dir, keep = () => true) => {
     let names = [];
-    try { names = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    try { names = readdirSync(dir, { withFileTypes: true }); } catch (e) {
+      // A dir this user owns that cannot be listed (a bot's chmod u-r ~)
+      // would hide every home in it from the scan: fail closed.
+      if (e && e.code === "ENOENT") return;
+      if (ownedOrUnknown(dir)) throw cannotCheck(dir, e);
+      return;
+    }
     for (const n of names) {
       if (!keep(n.name)) continue;
       const p = join(dir, n.name);
@@ -160,19 +198,86 @@ export function instanceSecretsDirs(env = process.env, {
   // spawn. Another user's unreadable dir cannot be chmod'ed by a bot nor hold
   // a planted dir of ours: skipped.
   const out = new Set();
-  const uid = process.getuid();
   for (const h of homes) {
     try {
       const r = realpathSync(join(h, "secrets"));
       if (statSync(r).isDirectory() && r !== self) out.add(r);
     } catch (e) {
       if (e && (e.code === "ENOENT" || e.code === "ENOTDIR")) continue;
-      let owner = -1;
-      try { owner = lstatSync(h).uid; } catch { /* gone */ }
-      if (owner === uid) throw new Error("Crow home " + h + " cannot be checked (" + ((e && e.code) || e) + "); refusing to treat its secrets as hidden");
+      if (!ownedOrUnknown(h)) continue;                 // another user's: a bot cannot touch it
+      if (plausible(h)) throw cannotCheck(h, e);
+      out.add(h);                                       // ours, not a Crow home: hide it whole
     }
   }
   return [...out];
+}
+
+/** Where this instance remembers the other-instance secrets dirs it has hidden. */
+export const KNOWN_INSTANCES_FILENAME = "known-instance-secrets";
+
+function readKnown(env) {
+  const p = anchoredPath(env, KNOWN_INSTANCES_FILENAME);
+  const f = p ? readSecretValuesFile(p, { raw: true }) : null;
+  const out = new Map();
+  for (const line of f ? f.lines : []) {
+    const m = line.match(/^(\d+):(\d+):(\/.+)$/);
+    if (m) out.set(m[3], { dev: Number(m[1]), ino: Number(m[2]) });
+  }
+  return out;
+}
+
+function writeKnown(env, known) {
+  const p = anchoredPath(env, KNOWN_INSTANCES_FILENAME);
+  if (!p) return;
+  writeSecretValuesFile(p, [...known].map(([path, k]) => k.dev + ":" + k.ino + ":" + path), { raw: true });
+}
+
+/**
+ * instanceSecretsDirs, plus memory: every other-instance secrets dir this
+ * instance has hidden before is recorded (path, dev, ino) in its OWN hidden
+ * secrets dir, which a bot cannot write. A recorded dir that is no longer
+ * found at its path, or is now a different dir there (a bot moved the real
+ * home out of the scan's reach and maybe planted a decoy), throws: the bridge
+ * refuses the spawn until the operator runs
+ *   node scripts/ops/keychain-card-secrets.mjs forget-instance <path>
+ * (when that instance was really removed). New finds are recorded by
+ * rememberInstanceSecretsDirs once a spawn has hidden them.
+ */
+export function checkedInstanceSecretsDirs(env = process.env, opts = {}) {
+  const known = readKnown(env);
+  const found = instanceSecretsDirs(env, { ...opts, knownHomes: [...known.keys()].map((p) => dirname(p)) });
+  const now = new Map();
+  for (const d of found) {
+    try { const st = statSync(d); now.set(d, { dev: st.dev, ino: st.ino }); } catch { /* raced */ }
+  }
+  for (const [path, k] of known) {
+    const cur = now.get(path);
+    if (!cur || cur.dev !== k.dev || cur.ino !== k.ino) {
+      throw new Error("Crow instance secrets dir " + path + " was hidden before and is gone or replaced; refusing to start a bot (if that instance was removed: keychain-card-secrets.mjs forget-instance " + path + ")");
+    }
+  }
+  return found;
+}
+
+/**
+ * Remember these other-instance secrets dirs as hidden (path, dev, ino). The
+ * bridge calls it only after a spawn hid every one of them, so a refused
+ * spawn (cap, unmaskable dir) never records anything.
+ */
+export function rememberInstanceSecretsDirs(dirs, env = process.env) {
+  const known = readKnown(env);
+  let changed = false;
+  for (const d of dirs) {
+    if (known.has(d)) continue;
+    try { const st = statSync(d); known.set(d, { dev: st.dev, ino: st.ino }); changed = true; } catch { /* raced */ }
+  }
+  if (changed) writeKnown(env, known);
+}
+
+/** The operator's step for an instance that was really removed or recreated. */
+export function forgetInstanceSecretsDir(path, env = process.env) {
+  const known = readKnown(env);
+  if (known.delete(path)) writeKnown(env, known);
 }
 
 /** The anchor of this instance's secrets dir (for inode checks elsewhere). */
