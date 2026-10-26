@@ -17,9 +17,12 @@ export const REMINDER_PREFIX = "reminder:";
 export const BOTCRON_PREFIX = "pipeline:botcron:";
 export const MISSED_CAP = 500; // a missed window counts at most this many occurrences ("500 or more")
 const OK_MS = 90_000; // a fire within 90 s of its time is "ok"; later (inside grace) is "late"
-// This process's previous tick STARTED before `due` and no longer than this before it: the process
-// was up at `due`, so a late settle is a stall (slow hooks, a busy event loop), not downtime.
-const ALIVE_MS = 30 * 60_000;
+/**
+ * Default heartbeat slack: a ticker whose previous sweep started at most this long before `due`
+ * (and before it) was up at `due`, so a late settle is a stall, not downtime. Each ticker passes
+ * max(this, its poll interval) — the gateway scheduler adds its last tick's length too.
+ */
+export const ALIVE_SLACK_MS = 2 * 60_000;
 
 /**
  * Rows a bundle owns: the gateway never delivers or flags them, and computes their next run in
@@ -147,10 +150,30 @@ export function cadenceMinutes(expr, zone, from) {
 }
 
 /** The tolerance that lets a run still fire after a short restart: env CROW_SCHEDULE_GRACE_MIN, 1–60, default 5. */
+// The ONE grace rule for every Crow ticker (gateway reminders and pi-bot cron alike).
 export function graceMs(env = process.env) {
-  const n = Number(env?.CROW_SCHEDULE_GRACE_MIN);
-  const min = env?.CROW_SCHEDULE_GRACE_MIN === undefined || !Number.isFinite(n) ? 5 : Math.min(60, Math.max(1, n));
+  const raw = String(env?.CROW_SCHEDULE_GRACE_MIN ?? "").trim();
+  const n = Number(raw);
+  const min = raw === "" || !Number.isFinite(n) ? 5 : Math.min(60, Math.max(1, n));
   return min * 60_000;
+}
+
+const isoOf = (t) => (typeof t === "number" ? new Date(t).toISOString() : new Date(Date.parse(t)).toISOString());
+
+/**
+ * The schedule_runs row for one missed window, as {sql, args} for either SQLite client
+ * (better-sqlite3: d.prepare(sql).run(...args); the gateway client: db.execute({sql, args})).
+ * `window` is settleDue's `missed` ({first, last, count, capped}; ms or ISO). The unique
+ * (schedule_id, scheduled_for) index makes a second write of the same window a no-op.
+ * notified_at stays NULL: the gateway scheduler sends the one notice (mark first, then notify).
+ */
+export function missedRunInsert(scheduleId, window) {
+  const detail = { last_missed: isoOf(window.last) };
+  if (window.capped) detail.capped = true;
+  return {
+    sql: "INSERT OR IGNORE INTO schedule_runs (schedule_id, scheduled_for, status, source, missed_count, detail) VALUES (?, ?, 'missed', 'clock', ?, ?)",
+    args: [scheduleId, isoOf(window.first), Math.min(Number(window.count) || 1, MISSED_CAP), JSON.stringify(detail)],
+  };
 }
 
 /**
@@ -161,13 +184,17 @@ export function graceMs(env = process.env) {
  *
  * @param {{cron_expression:string, next_run:string|null, tz?:string|null}} row
  * @param {number} now epoch ms
- * @param {{graceMs:number, zone?:string, aliveAt?:number|null}} opts zone = the fallback (instance) zone
+ * A missing or unreadable next_run counts as due now (the bot-cron rule).
+ *
+ * @param {{graceMs:number, zone?:string, aliveAt?:number|null, aliveSlackMs?:number}} opts
+ *   zone = the fallback (instance) zone; aliveAt = when this process's previous sweep started
  * @returns {null | { fire:number|null, status:'ok'|'late'|null, late:boolean,
  *   missed:{first:number,last:number,count:number,capped:boolean}|null, nextRun:number|null }}
  */
-export function settleDue(row, now, { graceMs: grace, zone, aliveAt = null } = {}) {
-  const due = Date.parse(row?.next_run ?? "");
-  if (!Number.isFinite(due) || due > now) return null;
+export function settleDue(row, now, { graceMs: grace, zone, aliveAt = null, aliveSlackMs = ALIVE_SLACK_MS } = {}) {
+  let due = Date.parse(row?.next_run ?? "");
+  if (!Number.isFinite(due)) due = now;
+  if (due > now) return null;
   const statusOf = (t) => (now - t <= OK_MS ? "ok" : "late");
 
   if (row.cron_expression === ONCE) {
@@ -178,20 +205,25 @@ export function settleDue(row, now, { graceMs: grace, zone, aliveAt = null } = {
   const z = zoneFor(row.tz, zone);
   const g = cronPrev(row.cron_expression, z, now);
   const latest = g !== null && g >= due ? g : due;
-  const grid = countGrid(row.cron_expression, z, due, now, MISSED_CAP);
+  // Count one past the cap, so "capped" means MORE than MISSED_CAP occurrences in the window.
+  const grid = countGrid(row.cron_expression, z, due, now, MISSED_CAP + 1);
   const total = 1 + grid.n;
+  const win = (first, last, k) => ({ first, last, count: Math.min(k, MISSED_CAP), capped: k > MISSED_CAP });
   const nextRun = cronNext(row.cron_expression, z, now);
   // aliveAt < due: a previous tick that started AFTER `due` (a row re-enabled with an old
   // next_run) proves nothing about `due`.
-  const alive = Number.isFinite(aliveAt) && aliveAt < due && aliveAt >= due - ALIVE_MS;
+  // A next_run whose time came before this process's previous sweep even started (a row re-enabled
+  // with an old next_run) is not a stall: it stays missed (no late catch-up for repeating runs).
+  const alive = Number.isFinite(aliveAt) && aliveAt < due && aliveAt >= due - aliveSlackMs;
+  const inGrace = now - latest <= grace;
 
-  if (now - latest <= grace || alive) {
+  if (inGrace || alive) {
     let missed = null;
     if (total > 1) {
       const before = cronPrev(row.cron_expression, z, latest - 1);
-      missed = { first: due, last: Math.max(due, before ?? due), count: grid.capped ? MISSED_CAP : total - 1, capped: grid.capped };
+      missed = win(due, Math.max(due, before ?? due), total - 1);
     }
-    return { fire: latest, status: statusOf(latest), late: false, missed, nextRun };
+    return { fire: latest, status: statusOf(latest), late: !inGrace, missed, nextRun };
   }
-  return { fire: null, status: null, late: false, missed: { first: due, last: latest, count: grid.capped ? MISSED_CAP : total, capped: grid.capped }, nextRun };
+  return { fire: null, status: null, late: false, missed: win(due, latest, total), nextRun };
 }

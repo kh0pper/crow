@@ -16,7 +16,7 @@
 
 import { createNotification, cleanupNotifications } from "../shared/notifications.js";
 import { runSchedulerHooks } from "./scheduler-hooks.js";
-import { ONCE, scheduleKind, reminderText, settleDue, graceMs, cronNext, zoneFor } from "../shared/schedule-core.js";
+import { ONCE, scheduleKind, reminderText, settleDue, graceMs, cronNext, zoneFor, missedRunInsert, ALIVE_SLACK_MS, BOTCRON_PREFIX } from "../shared/schedule-core.js";
 import { instanceZone, instanceLang, ownerZone, hasRunsTable, hasTzColumn } from "../shared/schedule-store.js";
 import { fmt } from "../shared/relative-dates.js";
 
@@ -30,6 +30,7 @@ let _started = false; // Guard: prevents orphaned duplicate intervals from a sec
 let _now = () => Date.now();
 let aliveAt = null; // when THIS process's previous tick started: a stall inside a live process is late, not missed
 let tickStartedAt = null;
+let lastTickMs = 0; // how long the previous tick took (hooks included): widens the heartbeat slack
 const RUNNING_TTL = "-10 minutes"; // a 'running' run older than this was cut off by a crash
 let ticksSinceRetention = RETENTION_EVERY;
 
@@ -50,6 +51,8 @@ const STR = {
     pausedSystem: "It belonged to a retired runner and could never run.",
     summaryMissed: (n) => `${n} schedules missed runs while Crow wasn't running`,
     summaryMixed: (n) => `${n} schedules need a look`,
+    summaryBots: (n) => `${n} bot routines missed runs while Crow wasn't running`,
+    missedBot: (b) => `Missed: ${b} routine`,
     summaryBody: "Ask Crow to list your schedules to see them.",
     deleted: "A deleted schedule",
   },
@@ -65,6 +68,8 @@ const STR = {
     pausedSystem: "Pertenecía a un ejecutor retirado y nunca podía ejecutarse.",
     summaryMissed: (n) => `${n} programaciones no se ejecutaron mientras Crow no estaba en marcha`,
     summaryMixed: (n) => `${n} programaciones necesitan revisión`,
+    summaryBots: (n) => `${n} rutinas de bot no se ejecutaron mientras Crow no estaba en marcha`,
+    missedBot: (b) => `No se ejecutó: rutina ${b}`,
     summaryBody: "Pide a Crow la lista de tus programaciones para verlas.",
     deleted: "Una programación borrada",
   },
@@ -149,7 +154,10 @@ async function advanceOwned(row, now, zone) {
 
 /** Settle one due reminder row: claim + record in one transaction, then deliver if this tick won. */
 async function settleReminder(row, now, { zone, grace, runs, lang }) {
-  const s = settleDue(row, now, { graceMs: grace, zone, aliveAt });
+  // Slack as the bot-cron ticker computes it — max(2 min, the poll interval) — plus the previous
+  // tick's own length, since this ticker runs bundle hooks inside its tick.
+  const aliveSlackMs = Math.max(ALIVE_SLACK_MS, CHECK_INTERVAL_MS + lastTickMs);
+  const s = settleDue(row, now, { graceMs: grace, zone, aliveAt, aliveSlackMs });
   if (!s) return;
   const once = row.cron_expression === ONCE;
   const claimStamp = stamp(now);
@@ -162,12 +170,11 @@ async function settleReminder(row, now, { zone, grace, runs, lang }) {
   // Each record is written only if THIS claim's state is what the row now holds.
   const ours = "EXISTS (SELECT 1 FROM schedules WHERE id = ? AND updated_at = ? AND next_run IS ?)";
   if (runs && s.missed) {
+    // The shared row shape (missedRunInsert), written only if this claim won.
+    const m = missedRunInsert(row.id, s.missed);
     stmts.push({
-      sql: `INSERT OR IGNORE INTO schedule_runs (schedule_id, scheduled_for, status, source, missed_count, detail)
-            SELECT ?, ?, 'missed', 'clock', ?, ? WHERE ${ours}`,
-      args: [row.id, iso(s.missed.first), s.missed.count,
-        JSON.stringify({ last_missed: iso(s.missed.last), capped: s.missed.capped || undefined }),
-        row.id, claimStamp, nextRun],
+      sql: m.sql.replace(/VALUES \((.*)\)$/, `SELECT $1 WHERE ${ours}`),
+      args: [...m.args, row.id, claimStamp, nextRun],
     });
   }
   if (runs && s.fire !== null) {
@@ -240,12 +247,14 @@ async function notifyOnce(now, { zone, lang }) {
   const base = { source: "scheduler:missed", priority: "normal" };
   if (claimed.length > 1) {
     const allMissed = claimed.every((c) => c.status === "missed");
+    const allBots = allMissed && claimed.every((c) => scheduleKind(c.task) === "bot_routine");
     // No action_url until the Schedule page exists (panel PR 2).
-    await createNotification(db, { ...base, type: "system", title: allMissed ? S.summaryMissed(claimed.length) : S.summaryMixed(claimed.length), body: S.summaryBody });
+    await createNotification(db, { ...base, type: "system", title: allBots ? S.summaryBots(claimed.length) : allMissed ? S.summaryMissed(claimed.length) : S.summaryMixed(claimed.length), body: S.summaryBody });
     return;
   }
   const c = claimed[0];
-  const text = c.task ? (reminderText(c.task) || S.fallback) : S.deleted;
+  const bot = scheduleKind(c.task) === "bot_routine" ? String(c.task).trim().slice(BOTCRON_PREFIX.length) : null;
+  const text = c.task ? (bot ?? (reminderText(c.task) || S.fallback)) : S.deleted;
   let detail = {};
   try { detail = JSON.parse(c.detail || "{}") || {}; } catch {}
   const z = zoneFor(c.tz, zone);
@@ -259,7 +268,7 @@ async function notifyOnce(now, { zone, lang }) {
     const last = Date.parse(detail.last_missed || c.scheduled_for);
     const count = Number(c.missed_count || 1);
     const body = count > 1 ? S.missedManyBody(detail.capped ? `${count}+` : count, whenText(first, z, lang), whenText(last, z, lang)) : S.missedBody(whenText(first, z, lang));
-    await createNotification(db, { ...one, type: "reminder", title: S.missedOne(text), body });
+    await createNotification(db, { ...one, type: bot ? "system" : "reminder", title: bot ? S.missedBot(bot) : S.missedOne(text), body });
   }
 }
 
@@ -317,6 +326,7 @@ async function tick() {
   // row that came due meanwhile look like downtime.
   aliveAt = tickStartedAt;
   tickStartedAt = _now();
+  const startedAt = tickStartedAt;
   try {
     await settlePass();
 
@@ -356,6 +366,7 @@ async function tick() {
   } catch (err) {
     console.error("[scheduler] Error:", err.message);
   }
+  lastTickMs = Math.max(0, _now() - startedAt);
 }
 
 /**
@@ -445,4 +456,4 @@ export function _setComputeNextRunForTest(fn) { _compute = fn; return () => { _c
 /** Replace the clock (tests); null restores Date.now. */
 export function _setNowForTest(fn) { _now = fn || (() => Date.now()); }
 /** Forget in-process state between tests (heartbeat, retention counter). */
-export function _resetForTest() { aliveAt = null; tickStartedAt = null; ticksSinceRetention = RETENTION_EVERY; }
+export function _resetForTest() { aliveAt = null; tickStartedAt = null; lastTickMs = 0; ticksSinceRetention = RETENTION_EVERY; }

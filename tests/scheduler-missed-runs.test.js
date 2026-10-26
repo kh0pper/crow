@@ -294,3 +294,25 @@ test("a slow tick (a hook taking ten minutes) does not turn a row that came due 
     assert.equal((await delivered()).length, 1);
   } finally { unregisterSchedulerHook("t-slow"); }
 });
+
+test("a missed bot-routine window written with missedRunInsert gets the bot-cron wording, once", async () => {
+  const { missedRunInsert } = await import("../servers/shared/schedule-core.js");
+  const a = await seed("pipeline:botcron:lab-triage", "0 9 * * *", "2026-10-27T09:00:00.000Z");
+  const w = missedRunInsert(a, { first: "2026-10-26T09:00:00.000Z", last: "2026-10-26T09:00:00.000Z", count: 1, capped: false });
+  await db.execute(w);
+  await db.execute(w); // the same window twice is one row
+  assert.equal((await runs(a)).length, 1);
+  await _tickForTest(db);
+  await _tickForTest(db);
+  const n = await notices();
+  assert.equal(n.length, 1);
+  assert.equal(n[0].title, "Missed: lab-triage routine");
+  assert.equal(n[0].type, "system");
+  const b = await seed("pipeline:botcron:writer", "0 9 * * *", "2026-10-27T09:00:00.000Z");
+  const c = await seed("pipeline:botcron:helper", "0 9 * * *", "2026-10-27T09:00:00.000Z");
+  for (const id of [b, c]) await db.execute(missedRunInsert(id, { first: Date.parse("2026-10-26T09:00:00Z"), last: Date.parse("2026-10-26T09:00:00Z"), count: 1, capped: false }));
+  await _tickForTest(db);
+  const n2 = await notices();
+  assert.equal(n2.length, 2);
+  assert.equal(n2[1].title, "2 bot routines missed runs while Crow wasn't running");
+});

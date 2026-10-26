@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   scheduleKind, reminderText, SCHEDULE_OWNERS, zoneFor, cronNext, cronPrev, countGrid,
-  cadenceMinutes, settleDue, graceMs, ONCE, MISSED_CAP,
+  cadenceMinutes, settleDue, graceMs, ONCE, MISSED_CAP, ALIVE_SLACK_MS, missedRunInsert,
 } from "../servers/shared/schedule-core.js";
 
 const T = (s) => Date.parse(s);
@@ -99,12 +99,20 @@ test("graceMs: default 5 min, env clamped 1–60", () => {
   assert.equal(graceMs({ CROW_SCHEDULE_GRACE_MIN: "0" }), 1 * MIN);
   assert.equal(graceMs({ CROW_SCHEDULE_GRACE_MIN: "999" }), 60 * MIN);
   assert.equal(graceMs({ CROW_SCHEDULE_GRACE_MIN: "nope" }), 5 * MIN);
+  assert.equal(graceMs({ CROW_SCHEDULE_GRACE_MIN: "" }), 5 * MIN, "blank is the default, as the bot-cron ticker reads it");
+  assert.equal(graceMs({ CROW_SCHEDULE_GRACE_MIN: "  " }), 5 * MIN);
 });
 
 const daily = (next_run, extra = {}) => ({ cron_expression: "0 9 * * *", next_run, tz: "UTC", ...extra });
 
-test("settleDue: nothing due → null", () => {
-  assert.equal(settleDue(daily(null), T("2026-10-26T10:00:00Z"), { graceMs: GRACE }), null);
+test("settleDue: a future time → null; a missing or unreadable next_run is due now (the bot-cron rule)", () => {
+  const now = T("2026-10-26T10:00:00Z");
+  for (const bad of [null, "garbage"]) {
+    const r = settleDue(daily(bad), now, { graceMs: GRACE });
+    assert.equal(r.fire, now);
+    assert.equal(r.missed, null);
+    assert.equal(r.nextRun, T("2026-10-27T09:00:00Z"));
+  }
   assert.equal(settleDue(daily("2026-10-26T11:00:00Z"), T("2026-10-26T10:00:00Z"), { graceMs: GRACE }), null);
 });
 
@@ -168,10 +176,14 @@ test("a live process that stalled past grace fires late instead of recording a m
   const r = settleDue(daily(due), T(due) + 20 * MIN, { graceMs: GRACE, aliveAt: T(due) - 30_000 });
   assert.equal(r.fire, T(due));
   assert.equal(r.status, "late");
+  assert.equal(r.late, true, "a late fire past grace is flagged late (the bot-cron rule)");
   assert.equal(r.missed, null);
-  const slowHook = settleDue(daily(due), T(due) + 20 * MIN, { graceMs: GRACE, aliveAt: T(due) - 10 * MIN });
-  assert.equal(slowHook.fire, T(due), "a slow tick (hooks) inside a live process is still late, not missed");
-  const cold = settleDue(daily(due), T(due) + 20 * MIN, { graceMs: GRACE, aliveAt: T(due) - 2 * HOUR });
+  assert.equal(ALIVE_SLACK_MS, 2 * MIN);
+  const beyondSlack = settleDue(daily(due), T(due) + 20 * MIN, { graceMs: GRACE, aliveAt: T(due) - 10 * MIN });
+  assert.equal(beyondSlack.fire, null, "default slack is 2 min");
+  const slowHook = settleDue(daily(due), T(due) + 20 * MIN, { graceMs: GRACE, aliveAt: T(due) - 10 * MIN, aliveSlackMs: 11 * MIN });
+  assert.equal(slowHook.fire, T(due), "the ticker widens the slack to cover its poll interval and its last tick's length");
+  const cold = settleDue(daily(due), T(due) + 20 * MIN, { graceMs: GRACE, aliveAt: T(due) - 2 * HOUR, aliveSlackMs: 11 * MIN });
   assert.equal(cold.fire, null, "a tick long before due proves nothing");
 });
 
@@ -204,4 +216,23 @@ test("the repeated fall-back hour is never a second occurrence, forwards or back
   assert.equal(cronPrev("30 1 * * *", z, T("2026-11-01T07:35:00Z")), T("2026-11-01T06:30:00Z"));
   assert.equal(countGrid("30 1 * * *", z, T("2026-10-31T12:00:00Z"), T("2026-11-01T12:00:00Z"), 500).n, 1);
   assert.equal(cronPrev("0 9 * * *", z, T("2026-11-01T16:00:00Z")), T("2026-11-01T15:00:00Z"), "an ordinary prev is untouched");
+});
+
+test("the missed count stops at the cap; capped means MORE than the cap (the bot-cron counting)", () => {
+  // a 1-min cron: due 10:00, now 18:20:30 → occurrences 10:00 … 18:20 = 501; 18:20 fires, 500 skipped
+  const row = { cron_expression: "* * * * *", next_run: "2026-10-26T10:00:00.000Z", tz: "UTC" };
+  const r = settleDue(row, T("2026-10-26T18:20:30Z"), { graceMs: GRACE });
+  assert.equal(r.fire, T("2026-10-26T18:20:00Z"));
+  assert.deepEqual({ count: r.missed.count, capped: r.missed.capped }, { count: 500, capped: false });
+  const r2 = settleDue(row, T("2026-10-26T18:21:30Z"), { graceMs: GRACE });
+  assert.deepEqual({ count: r2.missed.count, capped: r2.missed.capped }, { count: 500, capped: true });
+});
+
+test("missedRunInsert: one SQL shape for both tickers (a missed window → a schedule_runs row)", () => {
+  const w = { first: T("2026-10-26T09:00:00Z"), last: T("2026-10-26T11:00:00Z"), count: 3, capped: false };
+  const { sql, args } = missedRunInsert(42, w);
+  assert.match(sql, /^INSERT OR IGNORE INTO schedule_runs \(schedule_id, scheduled_for, status, source, missed_count, detail\)/);
+  assert.deepEqual(args, [42, "2026-10-26T09:00:00.000Z", 3, JSON.stringify({ last_missed: "2026-10-26T11:00:00.000Z" })]);
+  const iso = missedRunInsert(7, { first: "2026-10-26T09:00:00.000Z", last: "2026-10-26T09:00:00.000Z", count: 501, capped: true });
+  assert.deepEqual(iso.args, [7, "2026-10-26T09:00:00.000Z", 500, JSON.stringify({ last_missed: "2026-10-26T09:00:00.000Z", capped: true })], "ISO strings accepted; count clamped");
 });
