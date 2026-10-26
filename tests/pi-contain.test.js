@@ -125,3 +125,40 @@ test("integration: bypass mode cannot be contained: the spawn throws and leaves 
   const after_ = readdirSync(tmpdir()).filter((e) => e.startsWith("crow-pi-agent-") && !before.has(e));
   assert.deepEqual(after_, [], "the agent shadow was removed");
 });
+
+const myShadows = () => readdirSync(tmpdir()).filter((e) => e.startsWith("crow-pi-agent-" + process.pid + "-"));
+async function waitGone(ms = 20000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { if (!myShadows().length) return true; await new Promise((r) => setTimeout(r, 100)); }
+  return false;
+}
+
+test("integration: the agent shadow (it holds a copy of the provider keys) is removed after close and after a pi that fails to start", { skip, timeout: 60000 }, async () => {
+  const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
+  process.env.CROW_PI_CONTAIN_BOTS = "contain-clean-bot";
+  const agent = join(scratch, "agent-c"); mkdirSync(agent, { recursive: true }); writeFileSync(join(agent, "settings.json"), "{}");
+  process.env.PI_CODING_AGENT_DIR = agent;
+  const session = join(scratch, "session-c"); mkdirSync(join(session, "sessions"), { recursive: true });
+  const stub = join(scratch, "stub-ok.mjs"); writeFileSync(stub, 'process.stdout.write(JSON.stringify({type:"report"})+"\\n"); process.stdin.resume();');
+  const def = { bot_id: "contain-clean-bot", permission_policy: { bash: "deny", write_paths: [] } };
+  const pi = new PiRpc({ def, sessionDir: session, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: process.execPath, cliPath: stub });
+  await pi.waitFor((m) => m.type === "report", 20000, "report");
+  assert.ok(myShadows().length >= 1, "a shadow exists while pi runs");
+  await pi.close();
+  assert.equal(await waitGone(), true, "removed after close");
+  const bad = new PiRpc({ def, sessionDir: session, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: join(scratch, "no-such-node"), cliPath: stub });
+  await bad.exited;
+  assert.equal(await waitGone(), true, "removed after a failed start");
+});
+
+test("sweepStaleContainDirs removes dirs of dead spawners only", async () => {
+  const { sweepStaleContainDirs } = await import("../scripts/pi-bots/pi_contain.mjs");
+  const parent = join(scratch, "sweep"); mkdirSync(parent);
+  mkdirSync(join(parent, "crow-pi-agent-999999998-abc"));
+  mkdirSync(join(parent, "crow-pi-net-999999998-abc"));
+  mkdirSync(join(parent, `crow-pi-agent-${process.pid}-abc`));
+  mkdirSync(join(parent, "crow-pi-agent-1-abc"));
+  mkdirSync(join(parent, "unrelated-999999998"));
+  assert.equal(sweepStaleContainDirs({ parent }), 2);
+  assert.deepEqual(readdirSync(parent).sort(), [`crow-pi-agent-${process.pid}-abc`, "crow-pi-agent-1-abc", "unrelated-999999998"].sort());
+});

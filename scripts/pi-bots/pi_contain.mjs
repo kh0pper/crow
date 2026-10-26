@@ -369,7 +369,7 @@ export function buildContainPlan(o) {
  * bot can write); cleanup() removes it with every write pi made to it.
  */
 export function prepareAgentShadow(piAgentDir, { parent = tmpdir() } = {}) {
-  const dir = mkdtempSync(join(parent, "crow-pi-agent-"));
+  const dir = mkdtempSync(join(parent, "crow-pi-agent-" + process.pid + "-"));
   chmodSync(dir, 0o700);
   for (const f of AGENT_SHADOW_FILES) {
     const src = join(piAgentDir, f);
@@ -382,5 +382,34 @@ export function prepareAgentShadow(piAgentDir, { parent = tmpdir() } = {}) {
   for (const d of AGENT_RO_SUBDIRS) {
     if (existsSync(join(piAgentDir, d))) mkdirSync(join(dir, d), { mode: 0o700 });
   }
-  return { dir, cleanup: () => { try { rmSync(dir, { recursive: true, force: true }); } catch {} } };
+  return { dir, cleanup: () => { try { rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch {} } };
+}
+
+/**
+ * Remove per-spawn contain dirs (agent shadows, egress relay dirs) left in
+ * `parent` by a spawner that died before its cleanup ran. The spawner's pid
+ * is in the name; only dirs owned by this uid whose spawner is gone are
+ * removed, so a long-lived session of a running gateway is never touched.
+ */
+export function sweepStaleContainDirs({ parent = tmpdir(), uid = process.getuid() } = {}) {
+  let removed = 0;
+  let names = [];
+  try { names = readdirSync(parent); } catch { return 0; }
+  for (const n of names) {
+    const m = n.match(/^crow-pi-(?:agent|net)-(\d+)-/);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    if (pid === process.pid) continue;
+    let alive = true;
+    try { process.kill(pid, 0); } catch (e) { alive = !!(e && e.code === "EPERM"); }
+    if (alive) continue;
+    const p = join(parent, n);
+    try {
+      const st = lstatSync(p);
+      if (!st.isDirectory() || st.uid !== uid) continue;
+      rmSync(p, { recursive: true, force: true, maxRetries: 3 });
+      removed++;
+    } catch {}
+  }
+  return removed;
 }
