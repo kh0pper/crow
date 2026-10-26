@@ -16,12 +16,14 @@ import { botEnvScrubbed } from "./bot-env.js";
 /** Keys a stored policy may carry. */
 export const POLICY_KEYS = Object.freeze([
   "bash", "bash_allow", "bash_allow_shell_meta", "write_paths", "read_paths",
-  "external_send", "confirm", "multi_agent", "self_authoring", "skill_learning",
+  "external_send", "confirm", "multi_agent", "self_authoring", "skill_learning", "egress",
 ]);
 /** Computed per spawn by the bridge; never stored, never patchable. */
 export const ENGINE_KEYS = Object.freeze(["classifier", "interactive_ask", "model_capable"]);
 
 const SKILL_LEARNING = ["off", "propose", "auto"];
+/** egress (contained bots, queue item 19 step 2c): host names or *.suffix. Absent = any public host. */
+const EGRESS_RE = /^(\*\.)?(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/i;
 const EXTERNAL_SEND = ["draft_only", "allow"];
 
 function isAbsPath(p) {
@@ -110,6 +112,9 @@ export function validatePermissionPolicy(pp, { allowUnknownKeys = true, env = pr
     if (k in pp && changed(k) && typeof pp[k] !== "boolean") errors.push(`${k} must be true/false`);
   }
   if ("skill_learning" in pp && changed("skill_learning") && !SKILL_LEARNING.includes(pp.skill_learning)) errors.push(`skill_learning must be one of: ${SKILL_LEARNING.join(", ")}`);
+  if ("egress" in pp && changed("egress") && !(Array.isArray(pp.egress) && pp.egress.length <= 100 && pp.egress.every((h) => typeof h === "string" && EGRESS_RE.test(h)))) {
+    errors.push("egress must be a list of host names (or *.domain), at most 100");
+  }
   return errors;
 }
 
@@ -127,7 +132,8 @@ const bashRank = (v) => (v === "deny" || v == null || !isValidBashPolicy(v) ? 0 
  * Name the first field where `after` grants more than `before`, else null.
  * Rules: bash may only become deny (or stay); bash_allow/write_paths/
  * read_paths may only lose entries; external_send may only become
- * draft_only (absent = no restriction = allow); confirm may only gain
+ * draft_only (absent = no restriction = allow); egress may only lose hosts
+ * (absent = any public host); confirm may only gain
  * entries; multi_agent/self_authoring/bash_allow_shell_meta may only turn
  * off; skill_learning may only move toward off.
  */
@@ -146,6 +152,13 @@ export function peerPolicyWidening(before = {}, after = {}) {
   if (arr(b.confirm).some((x) => !nextConfirm.has(x))) return "confirm";
   for (const k of ["multi_agent", "self_authoring", "bash_allow_shell_meta"]) {
     if (a[k] === true && b[k] !== true) return k;
+  }
+  // egress: absent = any public host; a list narrows. Dropping the list or
+  // adding a host widens.
+  if (Array.isArray(b.egress)) {
+    if (!Array.isArray(a.egress)) return "egress";
+    const prevE = new Set(b.egress.map((h) => String(h).toLowerCase()));
+    if (a.egress.some((h) => !prevE.has(String(h).toLowerCase()))) return "egress";
   }
   const sl = (v) => Math.max(0, SKILL_LEARNING.indexOf(v));
   if (sl(a.skill_learning) > sl(b.skill_learning)) return "skill_learning";

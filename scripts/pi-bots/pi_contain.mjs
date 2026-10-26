@@ -58,6 +58,9 @@ export function containSelected(env, botId) {
 export const AGENT_RO_SUBDIRS = Object.freeze(["pkg", "agents", "prompts", "bin", "extensions", "themes"]);
 /** Top-level agent files copied into the shadow (small config; pi writes locks beside them). */
 export const AGENT_SHADOW_FILES = Object.freeze(["auth.json", "models.json", "models-store.json", "settings.json", "mcp.json", "keybindings.json"]);
+/** Where the egress relay's socket dir appears inside a contained sandbox. */
+export const NET_RELAY_MOUNT = "/run/crow-net";
+
 /** .env scan (masking): names, skipped dirs, caps. */
 export const ENV_NAME_RE = /^\.env(\..*)?$/;
 export const ENV_SCAN_SKIP = new Set(["node_modules", ".git", ".venv", "__pycache__"]);
@@ -328,6 +331,8 @@ export function buildContainPlan(o) {
     .sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
   // pi agent shadow goes in path order too
   const agentEntries = [];
+  // Network tier (2c): the relay's socket dir, read-only, at a fixed path.
+  if (o.net && o.net.relayDir) agentEntries.push(["--ro-bind", o.net.relayDir, NET_RELAY_MOUNT]);
   if (o.piAgentDir && o.shadowAgentDir) {
     agentEntries.push(["--bind", o.shadowAgentDir, o.piAgentDir]);
     for (const d of AGENT_RO_SUBDIRS) {
@@ -350,6 +355,7 @@ export function buildContainPlan(o) {
   }
 
   args.push("--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try", "--cap-drop", "ALL");
+  if (o.net) args.push("--unshare-net");
   const cwd = real(o.cwd || o.sessionDir, exists);
   if (cwd) args.push("--chdir", cwd);
 
@@ -359,7 +365,19 @@ export function buildContainPlan(o) {
     env.npm_config_cache = join(o.botCacheDir, "npm");
     env.UV_CACHE_DIR = join(o.botCacheDir, "uv");
   }
-  return { args, env, refused };
+  let net = null;
+  if (o.net) {
+    const ports = [...new Set((o.net.loopbackPorts || []).map(Number).filter((x) => x > 0 && x < 65536))];
+    let proxyPort = o.net.proxyPort || 39080;
+    while (ports.includes(proxyPort)) proxyPort++;
+    const proxy = "http://127.0.0.1:" + proxyPort;
+    Object.assign(env, {
+      HTTP_PROXY: proxy, HTTPS_PROXY: proxy, http_proxy: proxy, https_proxy: proxy, ALL_PROXY: proxy, all_proxy: proxy,
+      NO_PROXY: "127.0.0.1,localhost,::1", no_proxy: "127.0.0.1,localhost,::1", NODE_USE_ENV_PROXY: "1",
+    });
+    net = { sock: NET_RELAY_MOUNT + "/relay.sock", ports, proxyPort };
+  }
+  return { args, env, refused, net };
 }
 
 /**

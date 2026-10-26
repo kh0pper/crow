@@ -85,6 +85,10 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { containSelected, buildContainPlan } from "./pi_contain.mjs";
 import { buildSeccompProgram, seccompSupported } from "./pi_seccomp.mjs";
+import { fileURLToPath } from "node:url";
+import { dirname as _dirname } from "node:path";
+/** The in-namespace entry (network tier), run by the same node as pi. */
+const NETNS_ENTRY = join(_dirname(fileURLToPath(import.meta.url)), "pi_netns_entry.mjs");
 
 const BWRAP_CANDIDATES = ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
 const SETPRIV_CANDIDATES = ["/usr/bin/setpriv", "/bin/setpriv"];
@@ -226,7 +230,7 @@ export function credentialMaskDirs({ isDirFn = isDir } = {}) {
 }
 
 const SCRUB_EXACT = new Set(["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "SSH_AUTH_SOCK", "SSH_AGENT_PID",
-  "TMUX", "TMUX_PANE", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "CROW_PI_SANDBOX", "CROW_PI_CONTAIN_BOTS", "CROW_PI_CONTAIN_DATA_KEEP"]);
+  "TMUX", "TMUX_PANE", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "CROW_PI_SANDBOX", "CROW_PI_CONTAIN_BOTS", "CROW_PI_CONTAIN_DATA_KEEP", "CROW_PI_CONTAIN_NET"]);
 
 /** Copy of env without user-session IPC pointers (and the sandbox switch). */
 export function scrubSandboxEnv(env) {
@@ -325,9 +329,17 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
       seccomp = buildSeccompProgram();
       pre.push("--seccomp", String(opts.seccompFd));
     }
-    return { cmd: probe.bwrap, args: [...pre, "--", cmd, ...args], env: { ...scrubSandboxEnv(env), ...plan.env },
-      sandboxed: true, wrapper: "bwrap", tier: seccomp ? "contain" : "contain-noseccomp", pidNamespace: true, reason: null,
-      masked: [], refused: plan.refused, seccomp };
+    // Network tier (pi_netns_entry.mjs): pi runs under the in-namespace entry,
+    // which makes the allowed loopback ports and the proxy port exist inside.
+    let inner = [cmd, ...args];
+    if (plan.net) {
+      inner = [cmd, NETNS_ENTRY, "--sock", plan.net.sock, "--ports", plan.net.ports.join(","),
+        "--proxy-port", String(plan.net.proxyPort), "--", cmd, ...args];
+    }
+    const tier = (seccomp ? "contain" : "contain-noseccomp") + (plan.net ? "" : "-hostnet");
+    return { cmd: probe.bwrap, args: [...pre, "--", ...inner], env: { ...scrubSandboxEnv(env), ...plan.env },
+      sandboxed: true, wrapper: "bwrap", tier, pidNamespace: true, reason: null,
+      masked: [], refused: plan.refused, seccomp, net: plan.net };
   }
   if (!probe.ok) {
     if (mode === "required" || mode === "contain") {
@@ -370,6 +382,8 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
 
 /** True when a ps `args` string is a bubblewrap wrapper (used by the reaper). */
 export function isSandboxWrapperArgs(argsStr) {
-  const first = String(argsStr || "").trim().split(/\s+/)[0] || "";
-  return basename(first) === "bwrap";
+  const parts = String(argsStr || "").trim().split(/\s+/);
+  if (basename(parts[0] || "") === "bwrap") return true;
+  // The contain tier's network entry (node pi_netns_entry.mjs ... -- node cli.js ...)
+  return basename(parts[1] || "") === "pi_netns_entry.mjs";
 }

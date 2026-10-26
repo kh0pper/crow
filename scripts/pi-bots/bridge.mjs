@@ -51,6 +51,7 @@ import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { wrapPiSpawn, piSandboxMode } from "./pi_sandbox.mjs";
 import { containSelected, prepareAgentShadow, sweepStaleContainDirs } from "./pi_contain.mjs";
+import { createEgressRelay } from "./pi_egress.mjs";
 import { findPiLabDir } from "./pi-lab-compat.mjs";
 import { effectiveReadPaths } from "./bot-read-paths.mjs";
 import { MCP_CONFIG_FD } from "./mcp-delivery.mjs";
@@ -81,7 +82,13 @@ function resolveSandboxedPiPid(rpc, initPid, tries = 0) {
   let kids = "";
   try { kids = readFileSync("/proc/" + initPid + "/task/" + initPid + "/children", "utf8").trim(); } catch { /* not yet / gone */ }
   const first = Number(kids.split(/\s+/)[0]);
-  if (Number.isInteger(first) && first > 0) { rpc.piPid = first; return; }
+  if (Number.isInteger(first) && first > 0) {
+    // Contain's network tier runs pi under an entry process: step past it.
+    let cmd = "";
+    try { cmd = readFileSync("/proc/" + first + "/cmdline", "utf8"); } catch {}
+    if (cmd.includes("pi_netns_entry.mjs")) return resolveSandboxedPiPid(rpc, first, tries);
+    rpc.piPid = first; return;
+  }
   if (tries >= 100 || rpc._exitCode != null) { if (rpc.piPid == null) rpc.piPid = initPid; return; }
   const t = setTimeout(() => resolveSandboxedPiPid(rpc, initPid, tries + 1), 20);
   if (t.unref) t.unref();
@@ -111,8 +118,43 @@ const BRIDGE_APP_ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), "..
  * MCP servers pi will start (the canonical agent mcp.json plus the bot's own
  * config). Creates the per-instance bot cache and the per-spawn agent shadow.
  */
+const LOOPBACK_URL_RE = /\bhttps?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::(\d{1,5}))?/g;
+function loopbackPortsIn(value, out) {
+  for (const m of String(value || "").matchAll(LOOPBACK_URL_RE)) out.add(Number(m[1] || (m[0].startsWith("https") ? 443 : 80)));
+}
+
+/**
+ * The contain tier's network inputs (2c): which host loopback ports this
+ * spawn may reach (its gateway, a loopback model provider, loopback URLs in
+ * its own MCP config) and which hosts it may reach through the proxy (the
+ * def's `egress` list plus a remote provider's host; no list = any public
+ * host). CROW_PI_CONTAIN_NET=off (operator env) keeps the host network.
+ */
+function containNetInputs({ servers, piAgentDir, shadowDir, resolved, def }) {
+  if (String(process.env.CROW_PI_CONTAIN_NET || "").toLowerCase() === "off") return null;
+  const ports = new Set([Number(process.env.CROW_GATEWAY_PORT || process.env.PORT || 3001)]);
+  let providerHost = null;
+  try {
+    const models = JSON.parse(readFileSync(join(shadowDir || piAgentDir, "models.json"), "utf8"));
+    const prov = models && models.providers && resolved && models.providers[resolved.provider];
+    if (prov && prov.baseUrl) {
+      const u = new URL(prov.baseUrl);
+      if (["127.0.0.1", "localhost", "[::1]"].includes(u.hostname)) ports.add(Number(u.port || (u.protocol === "https:" ? 443 : 80)));
+      else providerHost = u.hostname;
+    }
+  } catch { /* no models.json: pi uses its defaults */ }
+  for (const b of servers) {
+    if (b.url) loopbackPortsIn(b.url, ports);
+    for (const v of Object.values(b.env || {})) loopbackPortsIn(v, ports);
+    for (const v of b.args || []) loopbackPortsIn(v, ports);
+  }
+  const listed = def && def.permission_policy && Array.isArray(def.permission_policy.egress) ? def.permission_policy.egress.slice() : null;
+  if (listed && providerHost) listed.push(providerHost);
+  return { loopbackPorts: [...ports].filter((x) => x > 0 && x < 65536), egressAllow: listed };
+}
+
 let containSwept = false;
-function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def }) {
+function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def, resolved }) {
   const crowHome = process.env.CROW_HOME || join(HOME, ".crow");
   const piAgentDir = process.env.PI_CODING_AGENT_DIR || join(HOME, ".pi", "agent");
   const botCacheDir = join(crowHome, "bot-cache");
@@ -139,7 +181,23 @@ function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts,
   if (!containSwept) { containSwept = true; sweepStaleContainDirs({ parent: runDir }); sweepStaleContainDirs(); }
   const shadow = prepareAgentShadow(piAgentDir, { parent: runDir });
   const extraRw = dirname(TASKS_DB) !== dataDir ? [dirname(TASKS_DB)] : [];
+  const netIn = containNetInputs({ servers, piAgentDir, shadowDir: shadow.dir, resolved, def });
+  let relay = null;
+  if (netIn) {
+    // The relay dir holds only the socket; it stays in /tmp (unix socket
+    // paths are limited to 108 bytes) and carries the spawner's pid for the
+    // stale-dir sweep.
+    try {
+      const botIdForLog = opts.botId || (def && (def.bot_id || def.id)) || null;
+      relay = createEgressRelay({ dir: mkdtempSync(join(tmpdir(), "crow-pi-net-" + process.pid + "-")), botId: botIdForLog,
+        loopbackPorts: netIn.loopbackPorts, egressAllow: netIn.egressAllow });
+    } catch (e) {
+      shadow.cleanup();
+      throw e;
+    }
+  }
   return {
+    net: relay ? { relayDir: relay.dir, loopbackPorts: netIn.loopbackPorts } : null,
     home: HOME, uid: process.getuid(), nodeBin, cliPath,
     appRoot: BRIDGE_APP_ROOT,
     piLabDir: findPiLabDir(), piAgentDir, shadowAgentDir: shadow.dir,
@@ -147,7 +205,7 @@ function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts,
     dataKeep: String(process.env.CROW_PI_CONTAIN_DATA_KEEP || "").split(",").map((x) => x.trim()).filter((x) => x && !x.includes("/")),
     sessionDir, cwd: spawnCwd, workspaceDir: opts.projectWorkspaceDir || null,
     writePaths: [...(piPolicy.write_paths || []), ...extraRw], readPaths: piPolicy.read_paths || [],
-    mcpServers: servers, _cleanups: [shadow.cleanup],
+    mcpServers: servers, _cleanups: [shadow.cleanup, ...(relay ? [() => relay.close()] : [])],
   };
 }
 // Package was renamed from @mariozechner/pi-coding-agent to
@@ -489,7 +547,7 @@ export class PiRpc {
     for (const k of Object.keys(def.spawn_env || {})) {
       // S3 fix round 1 (M1): CROW_PI_SANDBOX is the operator's switch for the
       // pi sandbox; a bot def must not be able to turn it off for itself.
-      if (/^PI_BOT_|^PIBOT_/.test(k) || k === "CROW_PI_SANDBOX" || k === "CROW_PI_CONTAIN_BOTS" || k === "CROW_PI_CONTAIN_DATA_KEEP") { strippedSpawnEnv.push(k); continue; }
+      if (/^PI_BOT_|^PIBOT_/.test(k) || k === "CROW_PI_SANDBOX" || k === "CROW_PI_CONTAIN_BOTS" || k === "CROW_PI_CONTAIN_DATA_KEEP" || k === "CROW_PI_CONTAIN_NET") { strippedSpawnEnv.push(k); continue; }
       // Loader hooks run code before pi starts (and a bot can edit its own def
       // through its DB-touching tools): never from a def. A NODE_OPTIONS made
       // only of heap-size flags is kept.
@@ -584,7 +642,7 @@ export class PiRpc {
     let launch;
     try {
       if (piSandboxMode(process.env) !== "off" && containSelected(process.env, sandboxBotId)) {
-        contain = containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def });
+        contain = containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def, resolved });
         this._containCleanups.push(...contain._cleanups);
       }
       launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, botId: sandboxBotId, contain, seccompFd: contain ? SECCOMP_FD : null });
