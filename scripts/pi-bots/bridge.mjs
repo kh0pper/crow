@@ -49,7 +49,7 @@ import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVoc
 import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { wrapPiSpawn, piSandboxMode } from "./pi_sandbox.mjs";
-import { containSelected, prepareAgentShadow } from "./pi_contain.mjs";
+import { containSelected, prepareAgentShadow, sweepStaleContainDirs } from "./pi_contain.mjs";
 import { findPiLabDir, piLabSupportsSecretValuesFd } from "./pi-lab-compat.mjs";
 import { refreshSecretValuesFile } from "../../servers/shared/secret-values-collect.js";
 import { SECRET_VALUES_DISPLAY_FILENAME, SECRET_VALUES_FILENAME, anchoredPath, checkedInstanceSecretsDirs, getCardValues, rememberInstanceSecretsDirs, secretValuesPayload, secretsDir, secretsDirCurrentPath } from "../../servers/shared/secret-values.js";
@@ -101,6 +101,7 @@ const BRIDGE_APP_ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), "..
  * MCP servers pi will start (the canonical agent mcp.json plus the bot's own
  * config). Creates the per-instance bot cache and the per-spawn agent shadow.
  */
+let containSwept = false;
 function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def }) {
   const crowHome = process.env.CROW_HOME || join(HOME, ".crow");
   const piAgentDir = process.env.PI_CODING_AGENT_DIR || join(HOME, ".pi", "agent");
@@ -109,12 +110,15 @@ function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts,
   const servers = [];
   const addServers = (cfg) => { for (const b of Object.values((cfg && cfg.mcpServers) || {})) if (b && typeof b === "object") servers.push(b); };
   try { addServers(JSON.parse(readFileSync(join(piAgentDir, "mcp.json"), "utf8"))); } catch {}
+  // Only the spawner-built config (fd delivery). The session dir's .mcp.json is
+  // bot-writable, so it never decides what gets bound (a server it names that
+  // is not bound fails closed inside the sandbox).
   if (opts.mcpConfig) addServers(opts.mcpConfig);
-  else { try { addServers(JSON.parse(readFileSync(join(sessionDir, ".mcp.json"), "utf8"))); } catch {} }
   // A bot with the sharing server needs the instance identity (messages, invites).
   const unmaskIdentity = servers.some((b) => [b.command, ...(b.args || []), b.cwd].some((x) => /servers\/sharing\b/.test(String(x || ""))))
     || ((def && def.tools && def.tools.crow_mcp) || []).some((t) => /^crow-sharing\b|^sharing\b/.test(String(t)));
   const dataDir = dirname(CROW_DB);
+  if (!containSwept) { containSwept = true; sweepStaleContainDirs(); }
   const shadow = prepareAgentShadow(piAgentDir);
   const extraRw = dirname(TASKS_DB) !== dataDir ? [dirname(TASKS_DB)] : [];
   return {
@@ -125,7 +129,7 @@ function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts,
     dataKeep: String(process.env.CROW_PI_CONTAIN_DATA_KEEP || "").split(",").map((x) => x.trim()).filter((x) => x && !x.includes("/")),
     sessionDir, cwd: spawnCwd, workspaceDir: opts.projectWorkspaceDir || null,
     writePaths: [...(piPolicy.write_paths || []), ...extraRw], readPaths: piPolicy.read_paths || [],
-    mcpServers: servers, _shadow: shadow,
+    mcpServers: servers, _cleanups: [shadow.cleanup],
   };
 }
 // Package was renamed from @mariozechner/pi-coding-agent to
@@ -613,26 +617,31 @@ export class PiRpc {
     // contains is over-mounted, and all of them are reported masked.
     const sandboxBotId = opts.botId || (def && (def.bot_id || def.id)) || null;
     let contain = null;
-    this._agentShadow = null;
-    if (piSandboxMode(process.env) !== "off" && containSelected(process.env, sandboxBotId)) {
-      contain = containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def });
-      this._agentShadow = contain._shadow;
-    }
+    // Per-spawn contain resources (agent shadow, ...), removed exactly once:
+    // on any failure before pi runs, or once pi's whole process group is gone
+    // (the outer bwrap can exit while pi still drains inside its namespace).
+    this._containCleanups = [];
     let launch;
     try {
+      if (piSandboxMode(process.env) !== "off" && containSelected(process.env, sandboxBotId)) {
+        contain = containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts, def });
+        this._containCleanups.push(...contain._cleanups);
+      }
       launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, botId: sandboxBotId, contain, hideDirs: [secretsHere, ...others] });
     } catch (e) {
-      if (this._agentShadow) this._agentShadow.cleanup();
+      this._runContainCleanup();
       throw e;
     }
     // Under bwrap every found dir must really be masked (wrapPiSpawn drops a
     // dir it cannot stat): otherwise refuse, never run with one visible.
     if (launch.wrapper === "bwrap" && others.some((d) => !launch.masked.includes(d))) {
+      this._runContainCleanup();
       throw new Error("pi sandbox: a Crow instance secrets dir could not be hidden; refusing to start pi");
     }
     // Never hide fewer than were found: past a cap no real host reaches (bwrap
     // takes a few thousand args), the spawn is refused instead.
     if (launch.wrapper === "bwrap" && others.length > MAX_HIDDEN_INSTANCE_DIRS) {
+      this._runContainCleanup();
       throw new Error("pi sandbox: " + others.length + " Crow instance secrets dirs to hide (more than " + MAX_HIDDEN_INSTANCE_DIRS + "); refusing to start pi with any of them visible");
     }
     // Only now, with every one hidden, are they remembered (a refused spawn records nothing).
@@ -688,7 +697,14 @@ export class PiRpc {
       stdio.push("pipe");
     }
     this.mcpDelivery = fdMode ? "fd" : "file";
-    this.proc = spawn(launch.cmd, launch.args, { cwd: spawnCwd, env: launch.env, stdio, detached: true });
+    try {
+      this.proc = spawn(launch.cmd, launch.args, { cwd: spawnCwd, env: launch.env, stdio, detached: true });
+    } catch (e) {
+      this._runContainCleanup();
+      throw e;
+    }
+    // A spawn that fails asynchronously (ENOENT) emits 'error' and no 'exit'.
+    this.proc.on("error", () => this._runContainCleanup());
     if (fdMode) {
       // Write the config and CLOSE our end: pi-lab reads the fd to EOF once.
       // A config that could not be built (writeBotMcp failed — logged by the
@@ -762,7 +778,7 @@ export class PiRpc {
       : createStderrDiag({ label: opts.diagLabel || basename(sessionDir || "") || "bot", emit: (l) => (opts.diagLog || ((x) => console.error(x)))(maskSecrets(l)) });
     this.proc.stderr.on("data", (d) => { this.stderr += d.toString(); if (diag) { try { diag(d); } catch {} } });
     this.exited = new Promise((res) => this.proc.on("exit", (c) => {
-      if (this._agentShadow) { this._agentShadow.cleanup(); this._agentShadow = null; }
+      if (this._containCleanups.length) this._scheduleContainCleanup();
       this._exitCode = c == null ? -1 : c;
       // Fail any pending waiters NOW with the real cause instead of leaving
       // them to time out cryptically (a fresh install resolving to a model
@@ -772,6 +788,21 @@ export class PiRpc {
       res(this._exitCode);
     }));
   }
+  /** Run every per-spawn contain cleanup once. */
+  _runContainCleanup() {
+    const list = this._containCleanups || [];
+    this._containCleanups = [];
+    for (const f of list) { try { f(); } catch {} }
+  }
+
+  /** Clean up once pi's process group is gone (bounded: 15 s). */
+  _scheduleContainCleanup(tries = 0) {
+    const pgid = this.proc && this.proc.pid;
+    if (!pgid || tries >= 75 || !processGroupAlive(pgid)) { this._runContainCleanup(); return; }
+    const t = setTimeout(() => this._scheduleContainCleanup(tries + 1), 200);
+    if (t.unref) t.unref();
+  }
+
   _exitError(label) {
     const key = this.resolved && this.resolved.key;
     return new Error("pi exited (code " + this._exitCode + ") before " + (label || "responding") +
