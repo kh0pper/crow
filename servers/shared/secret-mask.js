@@ -85,9 +85,9 @@ function commandBefore(text, offset) {
   return before.slice(Math.max(after("\n"), after("\\n"), after(";"), after("&&"), after("||")));
 }
 
-// echo|printf [flags] [format] WORD | ... sudo ... -S
+// echo/printf [flags] [format] WORD, piped into a sudo that reads stdin (-S)
 const SUDO_PIPE_RE = new RegExp(String.raw`\b(echo|printf)((?:\s+-[a-z]+)*\s+)((?:'%s[^'\n]*'|"%s[^"\n]*")\s+)?(${WORD})(\s*\|)([^|\n]{0,400})`, "gi");
-// sudo -S ... <<< WORD
+// a here-string (three angle brackets) feeding a sudo that reads stdin
 const HERESTRING_RE = new RegExp(String.raw`<<<(\s*)(${WORD})`, "g");
 // sudo -S ... <<[-]DELIM, then the body up to a line holding only DELIM
 const HEREDOC_RE = /<<(?!<)-?[ \t]*(["']?)([A-Za-z_][A-Za-z0-9_]{0,40})\1/g;

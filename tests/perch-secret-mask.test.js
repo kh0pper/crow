@@ -1,7 +1,7 @@
 /**
  * Approval-card secret masking, the Perch side (contract with pi-lab,
  * 2026-10-26). The 10-25 incident: a "Destructive bash" confirm carried
- * `echo "<pw>" | sudo -S ...`; it reached the card, the stored "needs you"
+ * an echoed password piped into sudo reading stdin; it reached the card, the stored "needs you"
  * row and the ntfy push. Here the same shape (with an obvious fake) must not
  * reach any frame, the snapshot, the replay, the row, its metadata or the
  * push, while answering the card still sends pi exactly what it offered.
