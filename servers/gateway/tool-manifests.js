@@ -26,7 +26,7 @@ export const TOOL_MANIFESTS = {
       crow_add_context_section: { params: "section_key, section_title, content, sort_order?, device_id?", desc: "Add crow.md section (device_id for per-device override)" },
       crow_list_context_sections: { params: "device_id?", desc: "List crow.md sections (device_id to filter)" },
       crow_delete_context_section: { params: "section_key, device_id?", desc: "Delete crow.md section (device_id for per-device override)" },
-      crow_create_schedule: { params: "task, cron_expression? | at?, tz?, type?, description?", desc: "Create a reminder (repeating via cron, one-time via at) or bot routine" },
+      crow_create_schedule: { params: "task, when? | cron_expression? | at?, tz?, type?, description?", desc: "Create a reminder (plain-words when, repeating via cron, one-time via at) or bot routine" },
       crow_list_schedules: { params: "enabled_only?, type?", desc: "List schedules with type, zone, last run and missed runs" },
       crow_update_schedule: { params: "id, enabled?, task?, cron_expression?, tz?, run_now?, delete?", desc: "Pause/resume, run now, update or delete a schedule" },
       crow_check_notifications: { params: "unread_only?, type?, limit?", desc: "Check pending notifications" },

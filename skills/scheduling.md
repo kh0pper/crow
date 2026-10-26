@@ -23,7 +23,11 @@ Every schedule has a type, which comes from what it does:
 ### Creating a reminder
 
 1. Clarify what the user wants and when.
-2. For a **one-time** reminder, pass `at` (an ISO date-time with the user's offset, e.g. `2026-11-03T10:00:00-06:00`).
+2. The simplest way: pass the user's own words as `when` (English or Spanish), e.g. "every weekday at 8",
+   "mondays and thursdays at 18:00", "every 2 hours", "on the 1st of every month at 9", "tomorrow at 3pm",
+   "in 20 minutes", "cada día laborable a las 8", "mañana a las 15:00". The reply says the schedule back in
+   plain words; if the words are unclear, the error says what to ask the user. Otherwise:
+   for a **one-time** reminder, pass `at` (an ISO date-time with the user's offset, e.g. `2026-11-03T10:00:00-06:00`).
    For a **repeating** one, pass `cron_expression`:
    - "every morning" → `0 8 * * *`
    - "every hour" → `0 * * * *`
