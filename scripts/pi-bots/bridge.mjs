@@ -49,7 +49,9 @@ import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { wrapPiSpawn } from "./pi_sandbox.mjs";
 import { refreshSecretValuesFile } from "../../servers/shared/secret-values-collect.js";
-import { secretsDir, secretValuesPath } from "../../servers/shared/secret-values.js";
+import { secretsDir, secretValuesPath, secretValuesDisplayPath } from "../../servers/shared/secret-values.js";
+import { deliveredRootPath } from "../../servers/shared/perch-delivered.js";
+import { resolveCrowHome } from "../../servers/shared/crow-home.js";
 import { maskSecrets } from "../../servers/shared/secret-mask.js";
 import { effectiveReadPaths } from "./bot-read-paths.mjs";
 import { MCP_CONFIG_FD } from "./mcp-delivery.mjs";
@@ -490,14 +492,21 @@ export class PiRpc {
     // keeps them. Inside bwrap pi-lab's trust check finds no file and masks
     // by pattern only.
     delete env.PI_BOT_SECRET_VALUES_FILE;
-    try { mkdirSync(secretsDir(), { recursive: true, mode: 0o700 }); } catch { /* the tmpfs needs the dir; without it, no file either */ }
-    const launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, hideDirs: [secretsDir()] });
+    // The gateway's delivered-files staging root (servers/shared/perch-delivered.js)
+    // is hidden the same way: a bot can neither read nor plant there.
+    const stagingRoot = deliveredRootPath(resolveCrowHome());
+    for (const d of [secretsDir(), stagingRoot]) {
+      try { mkdirSync(d, { recursive: true, mode: 0o700 }); } catch { /* the tmpfs needs the dir */ }
+    }
+    const launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, hideDirs: [secretsDir(), stagingRoot] });
     delete launch.env.PI_BOT_SECRET_VALUES_FILE;
     const hidden = launch.wrapper === "bwrap" && launch.masked.includes(secretsDir());
     const secretValues = refreshSecretValuesFile({ write: hidden, log: (l) => console.error("[pi-bots] " + l) });
     // Not hidden: a file an earlier sandboxed spawn left must not sit where
     // this bot's shell can read it.
-    if (!hidden) { try { rmSync(secretValuesPath(), { force: true }); } catch { /* best effort */ } }
+    if (!hidden) {
+      for (const f of [secretValuesPath(), secretValuesDisplayPath()]) { try { rmSync(f, { force: true }); } catch { /* best effort */ } }
+    }
     if (hidden && secretValues) launch.env.PI_BOT_SECRET_VALUES_FILE = secretValues.path;
     this.sandboxed = launch.sandboxed;
     this.sandboxWrapper = launch.wrapper;

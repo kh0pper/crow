@@ -37,7 +37,10 @@ import Database from "better-sqlite3";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { resolveCrowHome, resolveInstanceDataDir } from "./crow-home.js";
-import { normalizeValues, primeSecretValues, safeShape, secretValuesPath, writeSecretValuesFile } from "./secret-values.js";
+import {
+  anchorSecretsDir, cardHashOf, cardHashesPath, normalizeValues, primeSecretValues, readCardHashes, safeShape,
+  secretValuesDisplayPath, secretValuesPath, secretsDirTrusted, writeSecretValuesFile,
+} from "./secret-values.js";
 import { loadKeychainKey } from "../gateway/keychain/key.js";
 import { readableSecretsSync } from "../gateway/keychain/store.js";
 
@@ -124,14 +127,27 @@ function keychainEntries({ dbPath, crowHome }) {
 export function collectSecretValueSets({ env = process.env, dbPath } = {}) {
   const crowHome = resolveCrowHome(env);
   const db = dbPath === undefined ? (env.CROW_DB_PATH || join(resolveInstanceDataDir(env), "crow.db")) : dbPath;
+  anchorSecretsDir(env);
+  const trusted = secretsDirTrusted(env);
   const entries = keychainEntries({ dbPath: db, crowHome });
   const manual = entries.filter((e) => e.kind === "manual").map((e) => e.secret);
+  // The card set: manual entries whose hash the operator's UI recorded in the
+  // hidden dir. The kind column and the sealed value live in crow.db, which a
+  // bot can write (flip an extension row to manual, copy ciphertext), so the
+  // column alone is not enough. A list that does not exist yet is seeded once
+  // from today's manual entries (an install that predates the list).
+  let hashes = trusted ? readCardHashes(env) : new Set();
+  if (hashes === null) {
+    hashes = new Set(manual.map(cardHashOf));
+    try { writeSecretValuesFile(cardHashesPath(env), [...hashes], { raw: true }); } catch { /* next time */ }
+  }
+  const operator = manual.filter((v) => hashes.has(cardHashOf(v)));
   const minted = entries
     .filter((e) => e.kind !== "manual" && GENERATED_SHAPE.test(e.secret) && /[A-Za-z]/.test(e.secret) && /\d/.test(e.secret))
     .map((e) => e.secret);
   return {
     display: normalizeValues([...manual, ...minted, ...retainedBundleSecrets(crowHome)]),
-    card: normalizeValues(manual).filter(safeShape),
+    card: normalizeValues(operator).filter(safeShape),
   };
 }
 
@@ -153,6 +169,8 @@ export function refreshSecretValuesFile(opts = {}) {
     const sets = collectSecretValueSets(opts);
     primeSecretValues(sets.display, sets.card);
     if (opts.write === false) return null;
+    if (!secretsDirTrusted(env)) throw new Error("secrets dir is not the anchored one");
+    writeSecretValuesFile(secretValuesDisplayPath(env), sets.display);
     return writeSecretValuesFile(path, sets.card);
   } catch (e) {
     if (typeof opts.log === "function") opts.log("secret values file not written: " + ((e && e.message) || e));

@@ -124,6 +124,8 @@ test("sandboxed: a bot def's spawn_env, the session extraEnv and an inherited va
 test("sandboxed: the file is refreshed at each spawn (a secret added since the last spawn is in it)", { skip: noSandbox }, async () => {
   const later = "fakeGenLater" + "Cd5y".repeat(9);
   setManual([FAKE, later]);
+  const { recordCardSecret } = await import("../servers/shared/secret-values.js");
+  recordCardSecret(later, process.env);                // what the keychain UI records on save
   const { pi } = await spawnReport();
   await pi.exited;
   assert.ok(readFileSync(PATH, "utf8").split("\n").includes(later));
@@ -177,4 +179,29 @@ test("without bubblewrap a values file left by an earlier sandboxed spawn is rem
   const { pi } = await spawnReport({ mode: "off" });
   await pi.exited;
   assert.equal(existsSync(PATH), false);
+});
+
+test("sandboxed: the gateway's delivered-files staging dir is hidden too", { skip: noSandbox }, async () => {
+  const staged = join(HOME, "perch-delivered", "sess", "f.txt");
+  mkdirSync(join(HOME, "perch-delivered", "sess"), { recursive: true });
+  writeFileSync(staged, "staged");
+  const dir = mkdtempSync(join(tmpdir(), "crow-secret-staged-"));
+  mkdirSync(join(dir, "sessions"), { recursive: true });
+  const stub = join(dir, "stub-pi.mjs");
+  writeFileSync(stub, [
+    'import { readFileSync } from "node:fs";',
+    `let r = "read"; try { readFileSync(${JSON.stringify(staged)}); } catch (e) { r = e.code || "refused"; }`,
+    'process.stdout.write(JSON.stringify({ type: "report", tag: "staged", r }) + "\\n");',
+    "setTimeout(() => process.exit(0), 50);",
+  ].join("\n"));
+  const prev = process.env.CROW_PI_SANDBOX;
+  process.env.CROW_PI_SANDBOX = "auto";
+  try {
+    const pi = new PiRpc({ def: {}, sessionDir: dir, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: process.execPath, cliPath: stub, diagLog: () => {} });
+    const r = await pi.waitFor((m) => m.type === "report", 10000, "staged");
+    await pi.exited;
+    assert.notEqual(r.r, "read");
+  } finally {
+    if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
+  }
 });

@@ -146,6 +146,7 @@ test("the file: <CROW_HOME>/secrets, 600 in a 700 dir, one value per line, atomi
   assert.equal(lstatSync(r.path).ino, ino);
   // a change is a NEW inode (rename), never an in-place rewrite
   addManual(I, [gen("three")]);
+  SV.recordCardSecret(gen("three"), I.env);            // saved through the UI
   const r2 = refreshSecretValuesFile({ env: I.env });
   assert.equal(r2.written, true);
   assert.notEqual(lstatSync(r.path).ino, ino);
@@ -197,7 +198,7 @@ test("readSecretValuesFile trust checks: mode 644, symlink and missing file are 
 
 test("getSecretValues: file + own env; a file another process replaced is seen on the next call", () => {
   const I = scratchInstance();
-  const path = SV.secretValuesPath(I.env);
+  const path = SV.secretValuesDisplayPath(I.env);
   SV.writeSecretValuesFile(path, [fake("first")]);
   const env = { ...I.env, MY_TOKEN: fake("ownenv") };
   const a = SV.getSecretValues({ env });
@@ -326,4 +327,69 @@ test("two sets: display masking uses every trusted value; cards and the values f
   assert.ok(SV.getSecretValues({ env: I.env }).includes(gen("retained")), "this process's display set (in memory)");
   assert.equal(SV.getCardValues({ env: I.env }).includes(gen("retained")), false);
   assert.ok(SV.getCardValues({ env: I.env }).includes("N0t_a-real_pw9"));
+});
+
+// ---- two files, operator hash list, in-memory card set, secrets-dir anchor ----
+
+test("two files: the card set (named to pi) and the display set, side by side in the hidden dir", () => {
+  const I = scratchInstance();
+  addManual(I, ["N0t_a-real_pw9"]);
+  mkdirSync(join(I.home, "secrets", "bundle-env"), { recursive: true });
+  writeFileSync(join(I.home, "secrets", "bundle-env", "d.env"), "G=" + gen("display") + "\n");
+  const r = refreshSecretValuesFile({ env: I.env });
+  assert.equal(r.path, SV.secretValuesPath(I.env));
+  assert.equal(readFileSync(SV.secretValuesPath(I.env), "utf8"), "N0t_a-real_pw9\n");
+  const display = readFileSync(SV.secretValuesDisplayPath(I.env), "utf8").split("\n");
+  assert.ok(display.includes("N0t_a-real_pw9") && display.includes(gen("display")));
+  assert.equal(lstatSync(SV.secretValuesDisplayPath(I.env)).mode & 0o777, 0o600);
+});
+
+test("cards count only manual entries the operator saved through the UI (their hash is in the hidden list); a row flipped to manual or inserted directly does not", () => {
+  const I = scratchInstance();
+  addManual(I, ["Seeded_pw-1"]);
+  // no list yet: seeded once from the current manual entries
+  assert.deepEqual(collectSecretValueSets({ env: I.env }).card, ["Seeded_pw-1"]);
+  assert.ok(existsSync(join(I.home, "secrets", "card-secret-hashes")));
+  // a bot with crow.db write access inserts / flips rows: not in the list
+  const db = new Database(join(I.data, "crow.db"));
+  const sealed = db.prepare("SELECT secret_sealed FROM crow_keychain LIMIT 1").get().secret_sealed;
+  db.close();
+  const seed = Buffer.from(JSON.parse(readFileSync(join(I.home, "secrets", "keychain.key"), "utf8")).key, "base64");
+  const db2 = new Database(join(I.data, "crow.db"));
+  db2.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual','planted',?,?,'manual')").run(sealSecret("Planted_pw-2", { seed }), "0123456789abcdef");
+  db2.close();
+  const sets = collectSecretValueSets({ env: I.env });
+  assert.deepEqual(sets.card, ["Seeded_pw-1"], "the planted manual row does not hide text on cards");
+  assert.ok(sets.display.includes("Planted_pw-2"), "display paths may still mask it (over-masking a log costs nothing)");
+  assert.ok(sealed);
+  // the UI path records a value
+  SV.recordCardSecret("Planted_pw-2", I.env);
+  assert.ok(collectSecretValueSets({ env: I.env }).card.includes("Planted_pw-2"));
+});
+
+test("getCardValues uses only this process's collected card set, never a file", () => {
+  const I = scratchInstance();
+  SV.primeSecretValues([], []);
+  SV.writeSecretValuesFile(SV.secretValuesPath(I.env), ["Planted_file-9"]);
+  assert.equal(SV.getCardValues({ env: I.env }).includes("Planted_file-9"), false);
+  SV.primeSecretValues(["Known_value-9"], ["Known_value-9"]);
+  assert.ok(SV.getCardValues({ env: I.env }).includes("Known_value-9"));
+  SV.primeSecretValues([], []);
+});
+
+test("a secrets dir renamed away and replaced after it was anchored is not trusted (its files are ignored)", () => {
+  const I = scratchInstance();
+  mkdirSync(join(I.home, "secrets"), { recursive: true, mode: 0o700 });
+  SV.anchorSecretsDir(I.env);
+  SV.writeSecretValuesFile(SV.secretValuesDisplayPath(I.env), ["Real_display-1"]);
+  SV.invalidateSecretValues();
+  assert.ok(SV.getSecretValues({ env: I.env }).includes("Real_display-1"));
+  renameSync(join(I.home, "secrets"), join(I.home, "secrets-moved"));
+  mkdirSync(join(I.home, "secrets"), { mode: 0o700 });
+  writeFileSync(SV.secretValuesDisplayPath(I.env), "Planted_display-2\n", { mode: 0o600 });
+  SV.invalidateSecretValues();
+  const vals = SV.getSecretValues({ env: I.env });
+  assert.equal(vals.includes("Planted_display-2"), false);
+  assert.equal(SV.secretsDirTrusted(I.env), false);
+  SV.invalidateSecretValues();
 });

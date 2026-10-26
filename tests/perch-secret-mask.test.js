@@ -172,9 +172,12 @@ before(async () => {
 beforeEach(() => {
   // The sudo password is in the instance's values (pi-lab's final rules:
   // text fed to sudo -S is hidden ONLY by an exact value).
-  secretValues.writeSecretValuesFile(secretValues.secretValuesPath(process.env), [KEYCHAIN_FAKE, FAKE]);
+  setValues([KEYCHAIN_FAKE, FAKE]);
   secretValues.invalidateSecretValues();
 });
+
+/** The values this (gateway) process masks with: display and card sets in memory. */
+function setValues(list) { secretValues.primeSecretValues(list, list); }
 
 async function watched(engine, sessionId) {
   const frames = [];
@@ -317,7 +320,7 @@ test("a long tool command is masked before it is cut for the chip", async () => 
 });
 
 test("pi-lab parity: a sudo -S feed whose text is NOT a known value stays visible (it could be the command's stdin)", async () => {
-  secretValues.writeSecretValuesFile(secretValues.secretValuesPath(process.env), [KEYCHAIN_FAKE]);
+  setValues([KEYCHAIN_FAKE]);
   const { engine, bridge } = makeEngine();
   const { s, pi } = await liveSession(engine, bridge, "bot-parity");
   const frames = await watched(engine, s.sessionId);
@@ -346,7 +349,7 @@ test("an edited prefill whose visible text also occurs inside the hidden value g
   const { s, pi } = await liveSession(engine, bridge, "bot-editor-repeat");
   const frames = await watched(engine, s.sessionId);
   const inner = "secXtail" + "X0000";                  // a value containing the visible text "Xtail"
-  secretValues.writeSecretValuesFile(secretValues.secretValuesPath(process.env), [KEYCHAIN_FAKE, FAKE, inner]);
+  setValues([KEYCHAIN_FAKE, FAKE, inner]);
   const prefill = "B=1\nA=" + inner + "Xtail";
   pi.emit({ type: "extension_ui_request", id: "e4", method: "editor", title: "Edit", prefill });
   await tick(30);
@@ -386,7 +389,7 @@ test("a select whose option could not be masked: every answer is sent as cancell
 });
 
 test("a confirm card carrying a key-shaped block: shown as is (on a card only exact values hide it)", async () => {
-  secretValues.writeSecretValuesFile(secretValues.secretValuesPath(process.env), [KEYCHAIN_FAKE]);
+  setValues([KEYCHAIN_FAKE]);
   const { engine, bridge } = makeEngine();
   const { s, pi } = await liveSession(engine, bridge, "bot-pem-card");
   const frames = await watched(engine, s.sessionId);
@@ -471,7 +474,7 @@ test("an editor with an oversized prefill, an input with an oversized placeholde
 
 test("a shell-shaped password: shown on the card (never an exact value there), masked in the needs-you row and push", async () => {
   const pw = "pa$$" + " w0rd&x";
-  secretValues.writeSecretValuesFile(secretValues.secretValuesPath(process.env), [KEYCHAIN_FAKE, pw]);
+  setValues([KEYCHAIN_FAKE, pw]);
   const { engine, bridge, pushes } = makeEngine();
   const { s, pi } = await liveSession(engine, bridge, "bot-shellpw");
   const frames = await watched(engine, s.sessionId);
@@ -497,7 +500,7 @@ test("a combined questions card that hid something carries the hidden note", asy
 });
 
 test("a card whose assignment looks secret but is not a trusted value: shown, with a possible-secret note; the needs-you row still masks it", async () => {
-  secretValues.writeSecretValuesFile(secretValues.secretValuesPath(process.env), [KEYCHAIN_FAKE]);
+  setValues([KEYCHAIN_FAKE]);
   const { engine, bridge, pushes } = makeEngine();
   const { s, pi } = await liveSession(engine, bridge, "bot-possible");
   const frames = await watched(engine, s.sessionId);
@@ -509,4 +512,13 @@ test("a card whose assignment looks secret but is not a trusted value: shown, wi
   assert.ok(ask.message.endsWith(msg), "the command is shown as it is");
   assert.equal(JSON.stringify(rows(s.sessionId)).includes(FAKE), false, "row");
   assert.equal(JSON.stringify(pushes).includes(FAKE), false, "push");
+});
+
+test("a card whose text already contains the marker [REDACTED] (pi-lab's, or literal bot text): flagged with a note", async () => {
+  const { engine, bridge } = makeEngine();
+  const { s, pi } = await liveSession(engine, bridge, "bot-literal-marker");
+  const frames = await watched(engine, s.sessionId);
+  pi.emit({ type: "extension_ui_request", id: "lm", method: "confirm", title: "Destructive bash", message: "sh [REDACTED]" });
+  await tick(30);
+  assert.match(frames.find((f) => f.type === "ask_user").message, /not added by Crow/);
 });

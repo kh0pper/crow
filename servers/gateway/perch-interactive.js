@@ -157,6 +157,8 @@ import { appendDates } from "../shared/relative-dates.js";
 import { stripContextEcho } from "./voice/context-echo.js";
 import { maskSecrets, maskSecretsDetailed, maskDeep, hiddenNote, HIDDEN_NOTE_RE, REDACTED } from "../shared/secret-mask.js";
 import { userRuntimeDirs } from "../../scripts/pi-bots/pi_sandbox.mjs";
+import { anchorSecretsDir } from "../shared/secret-values.js";
+import { deliveredDirPath, deliveredRootPath, openDeliveredDir, registerDeliveredRoot } from "../shared/perch-delivered.js";
 
 /** Lease file name under CROW_HOME. Consumed by C-14's reaper exemption. */
 export const LEASE_FILENAME = "perch-interactive-leases.json";
@@ -473,6 +475,9 @@ function cardFrom(m) {
   // card (it is bot-written text), with a note; then the contract's hidden
   // note on the first line, unless pi-lab's own is there.
   if (possible) card.message = POSSIBLE_NOTE + (card.message ? "\n" + card.message : "");
+  if (hasMarker(m.title) || hasMarker(m.message) || hasMarker(m.prefill) || (Array.isArray(m.options) && m.options.some(hasMarker))) {
+    card.message = LITERAL_MARKER_NOTE + (card.message ? "\n" + card.message : "");
+  }
   if (hidden && !HIDDEN_NOTE_RE.test(card.title) && !HIDDEN_NOTE_RE.test(card.message || "")) {
     card.message = hiddenNote(hidden) + (card.message ? "\n" + card.message : "");
   }
@@ -523,6 +528,12 @@ function restorePrefill(value, shownPrefill, rawPrefill) {
   if (typed.length !== parts.length) return value;
   return typed.reduce((acc, seg, i) => acc + (i ? spans[i - 1] : "") + seg, "");
 }
+
+/** The note on a card whose text already carried the marker: pi-lab's mask, or
+ * literal text in the bot's command (a bracket glob that can run). Crow cannot
+ * tell them apart, so the card says so. */
+const LITERAL_MARKER_NOTE = "(this card contains the text [REDACTED] not added by Crow: pi-lab hid a value there, or it is literal text in the command)";
+const hasMarker = (v) => typeof v === "string" && v.includes(REDACTED);
 
 /** The note on a card that shows text looking like a secret Crow does not know. */
 const POSSIBLE_NOTE = "(possible secret shown: this card may contain a secret that is not a known value, so it is shown as it is)";
@@ -690,6 +701,14 @@ export function createInteractiveEngine({
   const log = (m) => rawLog(maskSecrets(m));
   /** sessionId (= gateway_thread_id) → session record. */
   const sessions = new Map();
+  // Approval-card secret masking (2026-10-26): anchor (by dev/ino) the
+  // instance's secrets dir and the delivered-files staging root NOW, before
+  // any bot of this engine runs; later checks compare against these anchors,
+  // never against a path a bot could have renamed and replaced.
+  const secretsEnv = { ...env, CROW_HOME: crowHome };
+  let secretsAnchor = null;
+  try { secretsAnchor = anchorSecretsDir(secretsEnv); } catch { secretsAnchor = null; }
+  try { registerDeliveredRoot(deliveredRootPath(crowHome)); } catch (e) { rawLog("delivered-files staging root unavailable: " + ((e && e.message) || e)); }
   /** sessionId → in-flight adoption promise (fix round 2: single-flight). */
   const adopting = new Map();
   let seams = null;
@@ -950,6 +969,8 @@ export function createInteractiveEngine({
       // that snapshot() is where it reads them from.
       cardId: s.cardId,
       outputsDir: s.outputsDir,
+      // Where send_user_file copies land (gateway-owned, hidden from bots).
+      deliveredDir: deliveredDirPath(s.sessionId),
       uploadsDir: s.uploadsDir,
     };
   }
@@ -2369,9 +2390,18 @@ export function createInteractiveEngine({
       try { r = realpathSync(d); } catch { continue; }
       if (realPath === r || realPath.startsWith(r + sep)) return true;
     }
-    let secretsReal;
-    try { secretsReal = realpathSync(join(crowHome, "secrets")); } catch { return false; }
-    if (realPath === secretsReal || realPath.startsWith(secretsReal + sep)) return true;
+    // The anchored secrets dir, by inode: the file itself, or any ancestor of
+    // it (a secrets dir renamed away keeps its inode under its new name).
+    if (secretsAnchor) {
+      if (st.dev === secretsAnchor.dev && st.ino === secretsAnchor.ino) return true;
+      for (let p = realPath; p && p !== sep; ) {
+        const up = p.slice(0, p.lastIndexOf(sep)) || sep;
+        try { const x = lstatSync(up); if (x.dev === secretsAnchor.dev && x.ino === secretsAnchor.ino) return true; } catch { /* gone */ }
+        if (up === p) break;
+        p = up;
+      }
+    }
+    // A hard link to a file in it (same inode, another path).
     const walk = (d, depth) => {
       let names = [];
       try { names = readdirSync(d, { withFileTypes: true }); } catch { return false; }
@@ -2382,6 +2412,9 @@ export function createInteractiveEngine({
       }
       return false;
     };
+    let secretsReal;
+    try { secretsReal = realpathSync(join(crowHome, "secrets")); } catch { return false; }
+    if (realPath === secretsReal || realPath.startsWith(secretsReal + sep)) return true;
     return walk(secretsReal, 0);
   }
 
@@ -2412,36 +2445,26 @@ export function createInteractiveEngine({
         size = st.size;
         const srcReal = readlinkSync("/proc/self/fd/" + fd);
         if (insideSecrets(srcReal, st)) throw new Error("secrets dir");
-        // A dir is only ever mkdir'd when it is ABSOLUTE: the worldRoot
-        // fallback exists for test seams, and joining onto "" would produce a
-        // relative path and scatter an `outputs/` tree into the gateway's cwd.
+        // Only a live session with a workspace (an outputs dir, or a world
+        // root in test seams) gets a servable card.
         const dir = s.outputsDir || (s.worldRoot ? join(s.worldRoot, "outputs", s.sessionId) : null);
         if (!isAbsolute(dir || "")) throw new Error("no absolute outputs dir");
-        // Pre-existing escape closed here: this write runs outside the
-        // sandbox, so an outputs dir (or its parent) the bot swapped for a
-        // symlink would let it place a file anywhere this uid can write (a
-        // user unit, an rc file). Refuse a symlinked dir or parent before and
-        // after mkdir, write into the resolved dir, and re-check after the
-        // write (a swap in between removes the file again).
-        // Pre-existing escape closed here: this write runs outside the
-        // sandbox, in a dir the bot can write. Every name below resolves
-        // against ONE dir fd: opened without following a symlink, its real
-        // path (from the fd) equal to the anchor taken when the engine made
-        // the dir, before the bot ran. The file is created through that fd
-        // (O_EXCL, O_NOFOLLOW), so a swap at any moment cannot redirect it.
-        let anchor = s.outputsDirReal || null;
-        if (!anchor) { mkdirSync(dir, { recursive: true }); anchor = realpathSync(dir); }   // test seams without startChild
-        dfd = openSync(dir, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
-        if (readlinkSync("/proc/self/fd/" + dfd) !== anchor) throw new Error("outputs dir moved");
-        const dirReal = anchor;
-        const viaFd = "/proc/self/fd/" + dfd;
-        // Strictly-under, the workspace route's own formula: the `+ sep` is
-        // what turns a string-prefix match into a containment test.
-        if (srcReal.startsWith(dirReal + sep)) {
-          // Already inside its own jail — nothing to copy, serve in place.
-          stored = srcReal.slice(dirReal.length + 1);
+        // Serve in place: a file the bot wrote into its OWN outputs dir is
+        // not copied anywhere (nothing is written). The check compares against
+        // the outputs dir's real path recorded at spawn.
+        const outputsReal = s.outputsDirReal || null;
+        if (outputsReal && srcReal.startsWith(outputsReal + sep)) {
+          stored = srcReal.slice(outputsReal.length + 1);
           servable = true;
         } else {
+          // Everything else is COPIED into the gateway-owned staging dir
+          // (servers/shared/perch-delivered.js): hidden from the bot's
+          // sandbox, its root anchored by inode, every component opened from
+          // that root fd without following a symlink, the file created
+          // through the dir fd with O_EXCL|O_NOFOLLOW. Never into a dir the
+          // bot can write or swap.
+          dfd = openDeliveredDir(s.sessionId, { create: true });
+          const viaFd = "/proc/self/fd/" + dfd;
           stored = resolveSentName(viaFd, name);
           const buf = Buffer.alloc(st.size);
           let off = 0;
@@ -2450,7 +2473,7 @@ export function createInteractiveEngine({
             if (n <= 0) break;
             off += n;
           }
-          const wfd = openSync(join(viaFd, stored), fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o644);
+          const wfd = openSync(join(viaFd, stored), fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
           try { writeFileSync(wfd, buf.subarray(0, off)); } finally { closeSync(wfd); }
           servable = true;
         }

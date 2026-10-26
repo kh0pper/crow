@@ -21,10 +21,16 @@
 import { chmodSync, closeSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, renameSync, rmSync, writeFileSync, fsyncSync, constants as fsConstants } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { realpathSync } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { resolveCrowHome } from "./crow-home.js";
 
 export const SECRET_VALUES_FILENAME = "pi-bot-secret-values";
+/** The display set, beside the card set (pi-lab's reader takes one plain value
+ * per line, so a second FILE, not a marked section, keeps its contract). */
+export const SECRET_VALUES_DISPLAY_FILENAME = "pi-bot-secret-values-display";
+/** sha256 (hex) of every manual keychain value the operator saved through the
+ * UI: the only values that may hide text on an approval card. */
+export const CARD_HASHES_FILENAME = "card-secret-hashes";
 export const MIN_SECRET_LENGTH = 6;
 export const MAX_SECRET_VALUES_BYTES = 1024 * 1024;
 
@@ -36,6 +42,72 @@ export function secretsDir(env = process.env) {
 export function secretValuesPath(env = process.env) {
   return join(secretsDir(env), SECRET_VALUES_FILENAME);
 }
+
+export function secretValuesDisplayPath(env = process.env) {
+  return join(secretsDir(env), SECRET_VALUES_DISPLAY_FILENAME);
+}
+
+export function cardHashesPath(env = process.env) {
+  return join(secretsDir(env), CARD_HASHES_FILENAME);
+}
+
+// ---- the secrets dir's anchor ----------------------------------------------
+// A bot whose shell can write the host (the default sandbox's --dev-bind) can
+// rename an ANCESTOR of the hidden secrets dir and put a dir of its own at the
+// old path: the tmpfs moves with the renamed dir. So the dir is anchored by
+// (dev, ino) the first time this process uses it, and a dir at the path that
+// is not the anchored one is never trusted.
+const anchors = new Map();   // path -> { dev, ino }
+
+/** Create (700) and anchor this instance's secrets dir; returns the anchor. */
+export function anchorSecretsDir(env = process.env) {
+  const dir = secretsDir(env);
+  if (anchors.has(dir)) return anchors.get(dir);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const st = lstatSync(dir);
+  if (!st.isDirectory() || st.isSymbolicLink() || st.uid !== process.getuid()) return null;
+  const a = { dev: st.dev, ino: st.ino, path: dir };
+  anchors.set(dir, a);
+  return a;
+}
+
+/** True when the dir at the secrets path is the anchored one. */
+export function secretsDirTrusted(env = process.env) {
+  const a = anchorSecretsDir(env);
+  if (!a) return false;
+  try {
+    const st = lstatSync(a.path);
+    return st.isDirectory() && !st.isSymbolicLink() && st.dev === a.dev && st.ino === a.ino;
+  } catch { return false; }
+}
+
+/** The anchor of this instance's secrets dir (for inode checks elsewhere). */
+export function secretsDirAnchor(env = process.env) {
+  return anchorSecretsDir(env);
+}
+
+function sha256(v) { return createHash("sha256").update(String(v)).digest("hex"); }
+
+/** The operator's card hashes; null when the list does not exist yet. */
+export function readCardHashes(env = process.env) {
+  if (!secretsDirTrusted(env)) return new Set();
+  const f = readSecretValuesFile(cardHashesPath(env), { raw: true });
+  if (!f) {
+    try { lstatSync(cardHashesPath(env)); return new Set(); } catch { return null; }
+  }
+  return new Set(f.lines.filter((l) => /^[0-9a-f]{64}$/.test(l)));
+}
+
+/** Record values the operator saved through the UI (keychain add / import). */
+export function recordCardSecret(values, env = process.env) {
+  const list = [].concat(values).filter((v) => typeof v === "string" && v);
+  if (!list.length || !secretsDirTrusted(env)) return;
+  const cur = readCardHashes(env) || new Set();
+  for (const v of list) cur.add(sha256(v));
+  writeSecretValuesFile(cardHashesPath(env), [...cur], { raw: true });
+}
+
+export function cardHashOf(v) { return sha256(v); }
 
 const SECRET_PARTS = new Set(["PASS", "PASSWORD", "PASSWD", "PW", "PWD", "SECRET", "SECRETS", "TOKEN", "APIKEY", "KEY",
   "CREDENTIAL", "CREDENTIALS", "DSN"]);
@@ -123,8 +195,8 @@ export function secretValuesFromEnv(env) {
  * regular file is refused (left as it is). Unchanged content is not rewritten.
  * @returns {{path: string, count: number, written: boolean}}
  */
-export function writeSecretValuesFile(path, values) {
-  const list = normalizeValues(values);
+export function writeSecretValuesFile(path, values, { raw = false } = {}) {
+  const list = raw ? [...new Set(values)].sort() : normalizeValues(values);
   const content = list.length ? list.join("\n") + "\n" : "";
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -135,8 +207,8 @@ export function writeSecretValuesFile(path, values) {
   let st = null;
   try { st = lstatSync(path); } catch { /* absent */ }
   if (st && (!st.isFile() || st.isSymbolicLink())) throw new Error("secret values file is not a regular file: " + path);
-  const cur = st ? readSecretValuesFile(path) : null;
-  if (cur && cur.values.join("\n") === list.join("\n")) return { path, count: list.length, written: false };
+  const cur = st ? readSecretValuesFile(path, { raw: true }) : null;
+  if (cur && cur.lines.join("\n") === list.join("\n")) return { path, count: list.length, written: false };
   sweepStaleTemps(dir, basename(path));
   const tmp = join(dir, `.${basename(path)}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`);
   try {
@@ -170,7 +242,7 @@ function sweepStaleTemps(dir, base) {
  * Read the values file with the contract's trust checks: a regular file (not
  * a symlink), owned by this user, mode 600, under 1 MB. Anything else is null.
  */
-export function readSecretValuesFile(path) {
+export function readSecretValuesFile(path, { raw = false } = {}) {
   let fd;
   try {
     // pi-lab's loader checks too: no symlink anywhere in the path, and the
@@ -188,7 +260,8 @@ export function readSecretValuesFile(path) {
       if (n <= 0) break;
       off += n;
     }
-    return { values: normalizeValues(buf.subarray(0, off).toString("utf8").split("\n")), mtimeMs: st.mtimeMs, size: st.size };
+    const lines = buf.subarray(0, off).toString("utf8").split("\n").filter((l) => l !== "");
+    return { values: raw ? lines : normalizeValues(lines), lines, mtimeMs: st.mtimeMs, size: st.size };
   } catch {
     return null;
   } finally {
@@ -214,13 +287,12 @@ export function primeSecretValues(values, cardValues = []) {
 }
 
 /**
- * The values that may hide text on an APPROVAL CARD: the values file (the
- * card set: manual keychain entries) plus the card set collected in this
- * process, shell-safe only. No process env, no generated or retained values.
+ * The values that may hide text on an APPROVAL CARD: the card set collected in
+ * THIS process only (operator-saved manual keychain entries, shell-safe).
+ * Never a file: a file is a path, and a path can be planted.
  */
-export function getCardValues({ env = process.env } = {}) {
-  const f = readSecretValuesFile(secretValuesPath(env));
-  return normalizeValues([...(f ? f.values : []), ...memCardValues]).filter(safeShape);
+export function getCardValues() {
+  return memCardValues.filter(safeShape);
 }
 
 /** Drop the cached list (the next getSecretValues() re-reads). */
@@ -231,16 +303,18 @@ function fileKey(path) {
 }
 
 /**
- * The values maskSecrets() hides: the instance file (written by the bot engine
- * at every pi spawn, by whichever process spawns) plus this process's own
- * secret-named env values. One lstat per call: the list is re-read the moment
- * any process replaces the file. Never opens a database; never throws (an
- * unreadable file means patterns only).
+ * The values maskSecrets() hides on DISPLAY paths: the display file (written
+ * by the bot engine at every pi spawn, read only while the secrets dir is the
+ * anchored one), the display set collected in this process, and this
+ * process's own secret-named env values. One lstat per call: the list is
+ * re-read the moment any process replaces the file. Never opens a database;
+ * never throws (an unreadable file means patterns only).
  */
 export function getSecretValues({ env = process.env } = {}) {
-  const key = fileKey(secretValuesPath(env));
+  const path = secretValuesDisplayPath(env);
+  const key = secretsDirTrusted(env) ? fileKey(path) : "untrusted";
   if (cache && cache.key === key && cache.env === env && cache.mem === memValues) return cache.values;
-  const f = key === "none" ? null : readSecretValuesFile(secretValuesPath(env));
+  const f = key === "none" || key === "untrusted" ? null : readSecretValuesFile(path);
   cache = { values: normalizeValues([...(f ? f.values : []), ...memValues, ...secretValuesFromEnv(env)]), key, env, mem: memValues };
   return cache.values;
 }

@@ -13,7 +13,7 @@ const { createDbClient } = await import("../servers/db.js");
 const { createReauthGate } = await import("../servers/gateway/keychain/reauth.js");
 const { keychainApiRouter } = await import("../servers/gateway/keychain/api.js");
 const { createKeychainKey, keychainKeyPath } = await import("../servers/gateway/keychain/key.js");
-import { writeFileSync } from "node:fs";
+import { writeFileSync, readFileSync } from "node:fs";
 const K = await import("../servers/gateway/keychain/store.js");
 
 const AUDIT_DDL = "CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL, actor TEXT, ip_address TEXT, details TEXT, created_at TEXT DEFAULT (datetime('now')))";
@@ -299,4 +299,16 @@ test("F2 — /entries vault_available is false for an insecure (http) vault, tru
     const s = await setup({ vault: { status: () => ({ installed: true, cliPath: "/x/bw.js", serverUrl: "https://v.example", secure }), save: async () => ({ ok: true }) } });
     try { assert.equal((await s.call("/entries")).body.vault_available, want, "secure=" + secure); } finally { s.close(); }
   }
+});
+
+test("adding a manual password through the UI records it for approval cards (its hash, in the hidden secrets dir)", async () => {
+  const { createHash } = await import("node:crypto");
+  const s = await setup();
+  try {
+    s.key();
+    const add = await s.call("/add", { body: { label: "sudo", secret: "Op3rator_pw-x" } });
+    assert.equal(add.status, 200);
+    const list = readFileSync(join(s.crowHome, "secrets", "card-secret-hashes"), "utf8");
+    assert.ok(list.split("\n").includes(createHash("sha256").update("Op3rator_pw-x").digest("hex")));
+  } finally { s.close(); }
 });
