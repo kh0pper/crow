@@ -21,7 +21,10 @@ test("the misheard 'add' is rewritten", () => {
 test("never rewritten: a plain sentence, a bare day or time, Spanish", () => {
   for (const t of ["had a great day on Tuesday", "and tomorrow?", "and on Friday?", "at nine tomorrow add lunch", "and then what",
     "had coffee", "and coffee?", "had lunch yesterday", "add coffee Tuesday at 9", "at four", "and at five", "had 2 meetings today",
-    "and dinner tomorrow?", "and Ann's party on Saturday?", "had lunch on Friday?"]) {
+    "and dinner tomorrow?", "and Ann's party on Saturday?", "had lunch on Friday?",
+    // A conversational follow-up: "and" starts it, a verb or a linking word follows (fix round: final review).
+    "And remind me tomorrow", "And also call mom tomorrow", "and then lunch at noon", "and text Sam tomorrow", "and email the team on Monday",
+    "and tell Sam tomorrow", "and ask Sam about it on Friday", "and call the dentist at 9 am"]) {
     assert.equal(sttRewrite(t), null, t);
   }
   assert.equal(sttRewrite("Had coffee Tuesday at 9", { lang: "es" }), null, "es is never rewritten");

@@ -562,8 +562,8 @@ export function createVoiceTurnRunner(deps) {
     let ownOffered = false;   // an own tool was offered on intent this turn (arms lastOwn; an escalation offering every family does not)
     let actionAsked = false;
     let voiceKind = false;        // the turn's bot is the voice bot (kind "voice"): the voice memory and the sentence gate apply
-    let ownStamp = [];
-    const ownOkFams = new Set();  // own families whose call returned ok this turn (stamped into the voice memory)            // own families this turn offered on intent (stamped into the voice memory; a carried one never is)
+    let ownStamp = [];            // own families this turn offered on intent (stamped into the voice memory; a carried one never is)
+    const ownOkFams = new Set();  // own families whose call returned ok this turn (stamped into the voice memory)
     const calledTools = [];       // every tool name the model called this turn (deps.voiceActions.afterTurn)
     let turnBotId = null;         // the turn's bot id (the transcript buffer records voice-bot turns only)
     let heardBefore = null;       // the transcript as STT gave it, when the rewrite changed it (the transcript buffer only)
@@ -1316,7 +1316,8 @@ export function createVoiceTurnRunner(deps) {
         const mode = learned && WEAKER[learned] < WEAKER[first] && (learned !== "required" || rf.required === true) ? learned : first;
         if (mode === "none") {
           // Nothing can be forced here (llama.cpp): the own-tool step-up, once, with its filler, where it may run.
-          if (steppedUp || result.escalated || result.degraded || noEscalate || !toolEscalationOn || budgetHit) return false;
+          // A rewritten turn (timings.stt_rewrite) never starts the larger model: it asks before writing anyway.
+          if (timings.stt_rewrite != null || steppedUp || result.escalated || result.degraded || noEscalate || !toolEscalationOn || budgetHit) return false;
           steppedUp = true;
           let fillerErr = null;
           const filler = say.filler().catch((err) => { fillerErr = err; });
@@ -1716,7 +1717,8 @@ export function createVoiceTurnRunner(deps) {
         // The step-up (the larger model as the middle step): an own tool said its arguments were bad. The next
         // round re-runs the same messages on the larger model, once per turn, through the router's escalation path.
         let stepped = false;
-        if (ownBadArgs && !ownCarriedOnly && !steppedUp && !result.escalated && !result.degraded && !noEscalate && !calendarFallback && toolEscalationOn) {
+        // A rewritten turn (timings.stt_rewrite) never steps up: it asks before writing, and never starts the larger model.
+        if (ownBadArgs && !ownCarriedOnly && timings.stt_rewrite == null && !steppedUp && !result.escalated && !result.degraded && !noEscalate && !calendarFallback && toolEscalationOn) {
           steppedUp = true;
           let fillerErr = null;
           const filler = say.filler().catch((err) => { fillerErr = err; });

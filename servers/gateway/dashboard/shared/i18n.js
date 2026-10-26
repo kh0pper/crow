@@ -1484,7 +1484,7 @@ export const translations = {
   "botbuilder.voiceRoutineTitle": { en: "Calendar, reminders and tasks", es: "Calendario, recordatorios y tareas" },
   "botbuilder.voiceRoutineWritesWhere": { en: "Crow's own calendar, reminder and task tools write wherever these settings point, whatever other tools you picked for Crow.", es: "Las herramientas propias de Crow para calendario, recordatorios y tareas escriben donde indican estos ajustes, sean cuales sean las demás herramientas que elijas para Crow." },
   "botbuilder.voiceRoutineCalendar": { en: "Calendar events go to", es: "Los eventos del calendario van a" },
-  "botbuilder.voiceRoutineCalendarId": { en: "Calendar id (optional; empty: Crow's own calendar, never a shared one)", es: "Id del calendario (opcional; vacío: el calendario propio de Crow, nunca uno compartido)" },
+  "botbuilder.voiceRoutineCalendarId": { en: "Calendar id (optional; empty: Crow picks its own calendar, else Google primary, else asks)", es: "Id del calendario (opcional; vacío: Crow usa su propio calendario; si no, el principal de Google; si no, pregunta)" },
   "botbuilder.voiceRoutineReminders": { en: "Reminders go to", es: "Los recordatorios van a" },
   "botbuilder.voiceRoutineTasks": { en: "Tasks go to", es: "Las tareas van a" },
   "botbuilder.voiceRoutineTaskList": { en: "Task list id (optional)", es: "Id de la lista de tareas (opcional)" },

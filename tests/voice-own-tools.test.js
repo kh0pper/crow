@@ -1029,6 +1029,41 @@ test("only shared calendars: Crow asks which one (names without the owner) and w
   assert.deepEqual(writesOf(ex), []);
 });
 
+test("a huge shared calendar name with newlines is spoken as one capped line; the full name still answers", async () => {
+  const long = `Family ${"plans\n\t".repeat(285)}end`;
+  assert.ok(long.length > 2000);
+  const { own, pending } = make({ connected: WS_CAL });
+  const ex = fakeExecutor({ calendars: [{ id: "big", name: `${long} (admin)`, owner: "Admin", writable: true, shared: true }, SHARED_ONLY[1]] });
+  const bot = CROW();
+  const set = await own.forTurn({ db: {}, bot, surface: "kiosk", lang: "en", tz: TZ });
+  const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  assert.ok(!/[\n\t\r]/.test(r.say), "one line");
+  const spoken = r.say.match(/^Which calendar should I use: (.*) or Menu\?$/)?.[1];
+  assert.ok(spoken, r.say);
+  assert.ok(spoken.length <= 61 && spoken.endsWith("…"), spoken);
+  assert.ok(spoken.startsWith("Family plans plans"), spoken);
+  assert.ok(!pending.get(DEVICE.id).say.includes("\n"));
+  assert.ok(!/plans pla…$|pl…$/.test(spoken), "cut at a word end");
+  // Answering with what was heard still picks it; the success line carries the capped name only.
+  const out = await own.fastPath({ db: {}, device: DEVICE, surface: "kiosk", lang: "en", tz: TZ, bot, executor: ex, transcript: `the ${spoken.slice(0, -1)} one` });
+  assert.equal(out.verb, "which_yes");
+  assert.deepEqual(writesOf(ex).map((c) => c.arguments.calendar), ["big"]);
+  assert.ok(!/[\n\t]/.test(out.say) && out.say.includes(`the ${spoken} calendar`), out.say);
+  assert.ok(out.write.target_name.length <= 61, "the record keeps the capped name");
+  // A recap of a record carrying a raw long name is capped too.
+  const recap = lastWriteRecap({ tool: "crow_task_add", title: "milk", start: null, target: "named", target_name: long }, "en");
+  assert.ok(!/[\n\t]/.test(recap) && recap.length < 200, recap);
+});
+
+test("matchChoice: a capped option still matches its full name", async () => {
+  const { matchChoice } = await import("../servers/gateway/voice/own-tools.js");
+  const full = "Family plans for the whole long summer holiday season with grandparents\nand cousins";
+  const opts = [{ id: "f", name: "Family plans for the whole long summer holiday season with…", match: full }, { id: "m", name: "Menu" }];
+  assert.equal(matchChoice(full, opts)?.id, "f");
+  assert.equal(matchChoice("family plans for the whole long summer holiday season with", opts)?.id, "f");
+  assert.equal(matchChoice("menu", opts)?.id, "m");
+});
+
 test("a calendar entry with no shared field counts as shared: never auto-picked", async () => {
   const { own } = make({ connected: WS_CAL });
   const ex = fakeExecutor({ calendars: [{ id: "old", name: "Old", writable: true }] });

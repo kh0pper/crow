@@ -23,6 +23,14 @@ const EN_DO = "add|create|schedule|reschedule|book|set up|set|send|save|store|no
 const EN_LET = "add|create|schedule|reschedule|book|set up|set|send|save|delete|remove|cancel|move|update|email|text|invite|remind";
 // Sentence openers a small model puts before a bare claim ("Okay, added!", "Sure, done.", "Vale, apuntado.").
 const OPEN = "^(?:(?:ok|okay|sure|great|alright|all right|perfect|yes|yep|yeah|absolutely|of course|no problem|vale|bueno|perfecto|claro|de acuerdo|si|venga|genial) )*";
+// A subject word of a state claim ("coffee is booked", "milk is on your list"): never a question word, a negative or a
+// verb, so "what's on Tuesday", "nothing is on your calendar" and "is coffee on Tuesday" read as what they are.
+const STATE_WORD = "(?!(?:nothing|anything|what|whats|who|where|when|which|how|there|no|not|none|is|are|was|were|do|does|did|if|whether)\\b)\\w+ ";
+// A bare item name ("coffee", "lunch with sam"): no article or pronoun anywhere in it. "The final is scheduled for
+// July 19", "The game's on Tuesday" and "It's on Tuesday" state a fact; an item named bare is what was just written.
+// (The place forms keep any subject: "the meeting is on your calendar" says where it went.)
+const STATE_NOUN = "(?!(?:it|that|this|these|those|the|a|an|my|his|her|its|our|their|everything|something)\\b)" + STATE_WORD;
+const DAY = "(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow|tonight|noon)";
 const CLAIMS = [
   // Done: "I've added", "I have scheduled", "I just set", "I added".
   new RegExp(`\\bi(?: ve| have| just| ve just| have just)? (?:${EN_DONE})\\b`),
@@ -45,6 +53,12 @@ const CLAIMS = [
   /\b(?:your|the) (?:\w+ ){0,2}(?:appointment|event|meeting|reminder|alarm|booking|reservation)s? (?:is|are) (?:now )?(?:in|on) (?:the|your) (?:calendar|agenda|schedule|list)\b/,
   /\b(?:has|have) been (?:added|created|scheduled|booked|sent|saved|deleted|removed|canceled|cancelled|moved|updated)\b/,
   /\byou re (?:all )?set\b|\byou are (?:all )?set\b/,
+  // State (#499): "Coffee is booked for Tuesday", "Lunch is set for noon", "Coffee's on Tuesday at nine" (a bare item
+  // name), "Milk is on your list" (any subject), "Your calendar now has coffee on Tuesday". "set to …" is a plain answer.
+  new RegExp(`${OPEN}(?:${STATE_NOUN}){1,5}(?:is|are|s|has been|have been) (?:now |all )?(?:booked|scheduled|rescheduled|added|saved|created|confirmed|set(?! to\\b))\\b`),
+  new RegExp(`${OPEN}(?:${STATE_WORD}){1,5}(?:is|are|s) (?:now )?(?:on|in) (?:your|the) (?:\\w+ )?(?:calendar|agenda|schedule|list)\\b`),
+  new RegExp(`${OPEN}(?:${STATE_NOUN}){1,4}s (?:now )?(?:on|for|at) ${DAY}\\b`),
+  /\b(?:your|the) (?:\w+ )?(?:calendar|agenda|schedule|list|reminders) now (?:has|includes|contains|shows|lists)\b/,
   // Spanish (accents already dropped): done, promised, offered, state, bare.
   new RegExp(`${NEG}\\b(?:ya )?(?:te |lo |la |los |las |se )*he (?:anadido|agregado|creado|programado|agendado|reservado|enviado|mandado|guardado|anotado|apuntado|puesto|borrado|eliminado|cancelado|movido|cambiado|actualizado|configurado)\\b`),
   new RegExp(`${NEG}\\b(?:anadi|agregue|programe|agende|envie|mande|guarde|anote|apunte|borre|elimine|cancele)\\b`),
@@ -52,7 +66,7 @@ const CLAIMS = [
   new RegExp(`${NEG}\\bvoy a (?:anadir|agregar|crear|programar|agendar|reservar|enviar|mandar|guardar|anotar|apuntar|recordar|avisar|borrar|eliminar|cancelar)`),
   new RegExp(`${NEG}\\bpuedo (?:anadir|agregar|crear|programar|agendar|reservar|enviar|mandar|guardar|anotar|apuntar|recordar|avisar)`),
   /\b(?:quieres|te gustaria|deseas|prefieres) que (?:te |lo |la |le )*(?:recuerde|anada|agregue|cree|programe|agende|reserve|envie|mande|guarde|anote|apunte|avise)\b/,
-  new RegExp(`${NEG}\\b(?:ya )?(?:esta|quedo|queda) (?:listo|lista|programad[oa]|agendad[oa]|anadid[oa]|agregad[oa]|guardad[oa]|reservad[oa]|en tu (?:calendario|agenda|lista))\\b`),
+  new RegExp(`${NEG}\\b(?:ya )?(?:esta|quedo|queda) (?:listo|lista|puest[oa]|configurad[oa]|programad[oa]|agendad[oa]|anadid[oa]|agregad[oa]|guardad[oa]|reservad[oa]|en tu (?:calendario|agenda|lista))\\b`),
   new RegExp(`${NEG}\\b(?:ha|han) sido (?:anadid|agregad|cread|programad|agendad|enviad|guardad|reservad|borrad|eliminad|cancelad)[oa]s?\\b`),
   new RegExp(`${NEG}\\b(?:te lo|se lo|te la|se la|lo|la) (?:recuerdo|apunto|agendo|anoto|programo|guardo|agrego|anado|pongo|mando|envio)\\b`),
   new RegExp(`${OPEN}(?:listo|lista|hecho|agendad[oa]|programad[oa]|anotad[oa]|apuntad[oa]|guardad[oa]|anadid[oa]|agregad[oa]|reservad[oa]|enviad[oa])\\b`),

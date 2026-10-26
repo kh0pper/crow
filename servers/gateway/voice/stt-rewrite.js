@@ -54,14 +54,21 @@ export function hasDayTime(ws) {
 }
 
 const MISHEARD = new Set(["had", "ad", "at", "and"]);
+/**
+ * Never the item right after a misheard "add" (the rewrite only; isObjectWord is shared and unchanged): a verb or a
+ * linking word makes it a conversational follow-up ("and remind me tomorrow", "and also call mom tomorrow").
+ * Spanish is never rewritten, so English only.
+ */
+const FOLLOW_UP = words("remind also then call text email tell ask");
 const MISHEARD_RE = /^(\s*)(had|ad|at|and)\b/i;
 
 /**
  * transcript → { text, from } when its first word is a misheard "add", else null. The rules ([r2 I6]):
  *   - the first word is "had", "ad", "at" or "and", and the next word is an object word (isObjectWord);
  *   - the rest holds a routine object (a calendar, a reminder, a task) or a day or time phrase.
- * So "and tomorrow?", "and on Friday?", "at nine tomorrow add lunch", "had a great day on Tuesday" and "and then
- * what" are never touched, nor is anything that ends in "?". English only; the caller (turn.js) also skips it for any bot but the voice bot and
+ *   - the next word is not a follow-up word (FOLLOW_UP: remind, also, then, call, text, email, tell, ask).
+ * So "and tomorrow?", "and on Friday?", "at nine tomorrow add lunch", "had a great day on Tuesday", "and then
+ * what" and "and remind me tomorrow" are never touched, nor is anything that ends in "?". English only; the caller (turn.js) also skips it for any bot but the voice bot and
  * while a question waits for a yes.
  */
 export function sttRewrite(transcript, { lang } = {}) {
@@ -71,7 +78,7 @@ export function sttRewrite(transcript, { lang } = {}) {
   const m = MISHEARD_RE.exec(transcript);
   if (!m) return null;
   const ws = phraseWords(transcript);
-  if (!MISHEARD.has(ws[0]) || !isObjectWord(ws[1])) return null;
+  if (!MISHEARD.has(ws[0]) || !isObjectWord(ws[1]) || FOLLOW_UP.has(ws[1])) return null;
   const rest = ws.slice(1);
   if (!hasDayTime(rest) && namesRoutineObjects(rest.join(" ")).length === 0) return null;
   return { text: `${m[1]}add${transcript.slice(m[0].length)}`, from: m[2].toLowerCase() };

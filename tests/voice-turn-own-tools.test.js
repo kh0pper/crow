@@ -985,6 +985,29 @@ test("claim retry: on a rewritten turn the retry's write still asks first", asyn
   assert.equal(r.saved.content, ASK.say);
 });
 
+test("claim retry: a rewritten turn with a blocked claim never steps up to the larger model", async () => {
+  const cal = { ...calTool(COFFEE_ADDED), intentWhen: calendarAddIntent };
+  const h = ownHarness({ bot: CROW, probe: () => true, rounds: [says("Added coffee to your calendar. "), call("crow_calendar_add_event", COFFEE)] });
+  h.deps.toolForcing = NO_FORCING;
+  const r = await heard(h, "had coffee Tuesday at 9", { ownTools: [cal] });
+  assert.equal(r.timings.stt_rewrite, "had");
+  assert.notEqual(r.timings.claim_retry, "step_up");
+  assert.equal(r.timings.step_up, undefined);
+  assert.deepEqual(h.calls.chatKeys, [FAST], "only the fast model");
+  assert.equal(cal.seen.length, 0, "nothing written");
+  assert.ok(!r.spoken.some((t) => /Added coffee/.test(t)), "the claim is not heard");
+});
+
+test("bad_args on a rewritten turn never steps up to the larger model", async () => {
+  const cal = { ...calTool({ ok: false, code: "bad_args" }), intentWhen: calendarAddIntent };
+  const h = ownHarness({ bot: CROW, probe: () => true, rounds: [call("crow_calendar_add_event", { start: "noon" }), says("Sorry, I couldn't add that. ")] });
+  const r = await heard(h, "had coffee Tuesday at 9", { ownTools: [cal] });
+  assert.equal(r.timings.stt_rewrite, "had");
+  assert.equal(r.timings.step_up, undefined);
+  assert.equal(r.escalated, false);
+  assert.deepEqual(h.calls.chatKeys, [FAST], "only the fast model");
+});
+
 test("claim retry: an add request with no own tool on offer never retries", async () => {
   const h = ownHarness({ chatTools: ["crow_memory"], rounds: [says("Added it. "), says("Done. ")] });
   h.deps.toolForcing = VLLM;

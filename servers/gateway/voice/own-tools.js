@@ -355,8 +355,8 @@ function validateNow(tool, raw, { tz, lang, now, transcript }) {
 function successLine(tool, v, lang, target) {
   if (tool === "crow_reminder_add") return voiceLine("reminder_set", lang, { when: v.when, text: v.args.text });
   const how = target?.say === "crow" ? "_crow" : target?.say === "named" ? "_named" : "";
-  if (tool === "crow_calendar_add_event") return voiceLine(`calendar_added${how}`, lang, { title: v.args.title, when: v.when, calendar: target?.name ?? "" });
-  return voiceLine(`task_added${how}`, lang, { title: v.args.title, list: target?.name ?? "" });
+  if (tool === "crow_calendar_add_event") return voiceLine(`calendar_added${how}`, lang, { title: v.args.title, when: v.when, calendar: spokenName(target?.name) });
+  return voiceLine(`task_added${how}`, lang, { title: v.args.title, list: spokenName(target?.name) });
 }
 const pastLine = (tool, v, lang) => (tool === "crow_calendar_add_event" ? voiceLine("past_confirm_calendar", lang, { title: v.args.title, next_when: v.nextWhen })
   : tool === "crow_reminder_add" ? voiceLine("past_confirm_reminder", lang, { next_when: v.nextWhen, text: v.args.text })
@@ -371,7 +371,7 @@ const confirmLine = (tool, v, lang) => (tool === "crow_calendar_add_event" ? voi
  */
 const writeOf = (tool, v, target) => ({ tool, family: DEFINITIONS[tool].family, title: tool === "crow_reminder_add" ? v.args.text : v.args.title,
   start: tool === "crow_calendar_add_event" ? v.args.start : tool === "crow_reminder_add" ? v.args.at : (v.args.due ?? null),
-  target: target?.say ?? null, target_name: target?.name ?? null });
+  target: target?.say ?? null, target_name: target?.name == null ? null : spokenName(target.name) });
 
 /** A record's start as the spoken {when}: an all-day date as its day; a date-time in `tz`, else in its own UTC offset. */
 function recapWhen(start, lang, tz, reminder, now) {
@@ -395,11 +395,11 @@ export function lastWriteRecap(w, lang, now = Date.now()) {
   const cap = title[0].toUpperCase() + title.slice(1);
   // Where it went (Task 6): Crow's own, or the one named answering the which-question; else "your".
   const how = w.target === "crow" ? "_crow" : w.target === "named" && typeof w.target_name === "string" && w.target_name ? "_named" : "";
-  if (w.tool === "crow_task_add") return voiceLine(`last_write_recap_task${how}`, lang, { title: cap, list: w.target_name ?? "" });
+  if (w.tool === "crow_task_add") return voiceLine(`last_write_recap_task${how}`, lang, { title: cap, list: spokenName(w.target_name) });
   const when = recapWhen(w.start, lang, w.tz, w.tool === "crow_reminder_add", now);
   if (!when) return "";
   if (w.tool === "crow_reminder_add") return voiceLine("last_write_recap_reminder", lang, { when, text: title });
-  return w.tool === "crow_calendar_add_event" ? voiceLine(`last_write_recap${how}`, lang, { title: cap, when, calendar: w.target_name ?? "" }) : "";
+  return w.tool === "crow_calendar_add_event" ? voiceLine(`last_write_recap${how}`, lang, { title: cap, when, calendar: spokenName(w.target_name) }) : "";
 }
 
 /**
@@ -491,11 +491,29 @@ const usable = (x) => x && x.writable === true && typeof x.id === "string" && x.
  * Mirrors baseOf in the Workspace bundle (bundles/workspace/server/pim/caldav.js; same pattern): core cannot import a bundle.
  */
 const baseName = (name) => String(name ?? "").replace(/\s+\([^()]*\)$/, "");
-/** Up to MAX_CHOICES writable entries as { id, name }; two with the same spoken name keep their full names. */
+/** A shared calendar or list name is someone else's text: at most this many characters are spoken or kept on record. */
+const SPOKEN_NAME_MAX = 60;
+/** One line (whitespace and control characters collapse to a space), capped at SPOKEN_NAME_MAX with an ellipsis. */
+function spokenName(name) {
+  const one = String(name ?? "").replace(/[\s\p{Cc}\p{Cf}\u2028\u2029]+/gu, " ").trim();
+  if (one.length <= SPOKEN_NAME_MAX || (one.length === SPOKEN_NAME_MAX + 1 && one.endsWith("…"))) return one;   // already capped
+  // Cut at a word end where one is near, so the words heard are whole words (a which-answer may repeat them).
+  const cut = one.slice(0, SPOKEN_NAME_MAX + 1);
+  const end = cut.lastIndexOf(" ");
+  return `${(end >= SPOKEN_NAME_MAX / 2 ? cut.slice(0, end) : one.slice(0, SPOKEN_NAME_MAX)).trimEnd()}…`;
+}
+/**
+ * Up to MAX_CHOICES writable entries as { id, name } (name: spokenName); two with the same spoken name keep their full
+ * names. When capping changed the name, `match` keeps the uncapped one: a which-answer may name either.
+ */
 function choicesOf(items) {
   const picked = items.filter(usable).slice(0, MAX_CHOICES).map((x) => ({ id: x.id, full: String(x.name || x.id), name: baseName(x.name || x.id) || x.id }));
   const key = (n) => phraseWords(n).join(" ");
-  return picked.map((c) => ({ id: c.id, name: picked.filter((o) => key(o.name) === key(c.name)).length > 1 ? c.full : c.name }));
+  return picked.map((c) => {
+    const raw = picked.filter((o) => key(o.name) === key(c.name)).length > 1 ? c.full : c.name;
+    const name = spokenName(raw) || c.id;
+    return name === raw ? { id: c.id, name } : { id: c.id, name, match: raw };
+  });
 }
 /** "Personal or Menu" / "Personal, Menu o Familia". */
 function joinOr(names, lang) {
@@ -518,13 +536,18 @@ export function matchChoice(transcript, options) {
   if (!words.length || !Array.isArray(options)) return null;
   let best = null; let bestScore = 0; let tie = false;
   for (const o of options) {
-    const ow = phraseWords(String(o?.name ?? ""));
-    if (!ow.length || ow.length > words.length) continue;
+    // The spoken name (capped, as heard) or the full one (`match`, when capping changed it).
+    let ow = [];
     let ok = false;
-    for (let i = 0; !ok && i + ow.length <= words.length; i++) {
-      if (!ow.every((w, j) => words[i + j] === w)) continue;
-      const rest = [...words.slice(0, i), ...words.slice(i + ow.length)];
-      ok = rest.length <= CHOICE_FILLER_MAX && rest.every((w) => CHOICE_FILLER.has(w));
+    for (const said of [o?.name, o?.match]) {
+      if (ok || typeof said !== "string") continue;
+      ow = phraseWords(said);
+      if (!ow.length || ow.length > words.length) continue;
+      for (let i = 0; !ok && i + ow.length <= words.length; i++) {
+        if (!ow.every((w, j) => words[i + j] === w)) continue;
+        const rest = [...words.slice(0, i), ...words.slice(i + ow.length)];
+        ok = rest.length <= CHOICE_FILLER_MAX && rest.every((w) => CHOICE_FILLER.has(w));
+      }
     }
     if (!ok) continue;
     if (ow.length > bestScore) { best = o; bestScore = ow.length; tie = false; } else if (ow.length === bestScore) tie = true;

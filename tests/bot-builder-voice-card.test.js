@@ -583,3 +583,10 @@ test("the transcript buffer switch: off by default, warns en + es, saves on and 
   assert.equal((await voiceDef()).voice.transcript_buffer, false);
   await reset();
 });
+
+test("the calendar id label says what empty means under auto: Crow's own, else Google primary, else it asks (en + es)", () => {
+  const t = translations["botbuilder.voiceRoutineCalendarId"];
+  assert.match(t.en, /empty: Crow picks its own calendar, else Google primary, else asks/);
+  assert.match(t.es, /vacío: Crow usa su propio calendario; si no, el principal de Google; si no, pregunta/);
+  assert.ok(!/never a shared one|nunca uno compartido/.test(`${t.en} ${t.es}`));
+});
