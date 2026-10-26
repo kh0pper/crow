@@ -10,7 +10,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { runMigrations } from "../scripts/migrations/runner.mjs";
 import { createDbClient } from "../servers/db.js";
-import { createOwnTools, VOICE_OWN_TOOL_NAMES } from "../servers/gateway/voice/own-tools.js";
+import { createOwnTools, VOICE_OWN_TOOL_NAMES, lastWriteRecap, whenOn, _whenFormatCacheSize, calendarAddIntent } from "../servers/gateway/voice/own-tools.js";
 import { createPendingStore, chainVoiceActions } from "../servers/gateway/voice/pending.js";
 import { VOICE_LINES, voiceLine } from "../servers/gateway/voice/voice-lines.js";
 import { NOT_DONE_TEXT, CANT_DO_TEXT, PARTLY_DONE_TEXT } from "../servers/gateway/voice/turn.js";
@@ -22,7 +22,16 @@ const TZ = "America/Chicago";
 const NOW = Date.parse("2026-10-20T15:00:00Z");
 const DEVICE = { id: "kiosk-a" };
 const CROW = (over = {}) => ({ bot_id: "crow.voice", kind: "voice", display_name: "Crow", fast_voice_model: "crow-voice/qwen3.5-4b", ...over });
-const whenOf = (iso, lang = "en-US", tz = TZ) => new Intl.DateTimeFormat(lang, { weekday: "long", hour: "numeric", minute: "2-digit", timeZone: tz }).format(new Date(iso));
+// Spoken dates, pinned as literals (this Node 24 ICU puts a plain space before AM/PM, not U+202F).
+const SPOKEN = {
+  "2026-10-26T12:00:00-05:00": "Monday, October 26 at 12:00 PM",
+  "2026-10-26T09:30:00-05:00": "Monday, October 26 at 9:30 AM",
+  "2026-10-26T17:00:00-05:00": "Monday, October 26 at 5:00 PM",
+  "2026-10-26T18:00:00-05:00": "Monday, October 26 at 6:00 PM",
+  "2026-10-27T09:00:00-05:00": "Tuesday, October 27 at 9:00 AM",
+  "2026-11-03T09:00:00-06:00": "Tuesday, November 3 at 9:00 AM",
+};
+const whenOf = (iso) => { assert.ok(SPOKEN[iso], `no pinned string for ${iso}`); return SPOKEN[iso]; };
 
 /** A scratch crow.db (schedules) and tasks.db (the real migrations), and a cleanup. */
 async function stores() {
@@ -63,7 +72,7 @@ async function stores() {
 }
 
 /** A fake executor: answers the Workspace and Google tools the way their MCP servers do (JSON text). */
-function fakeExecutor({ calendars = [{ id: "cal-1", name: "Home", writable: true }], lists = [{ id: "list-1", name: "Chores", writable: true }], fail = null } = {}) {
+function fakeExecutor({ calendars = [{ id: "cal-1", name: "Home", writable: true, shared: false }], lists = [{ id: "list-1", name: "Chores", writable: true, shared: false }], fail = null } = {}) {
   const calls = [];
   const answer = (tc) => {
     if (fail && fail === tc.name) return { result: JSON.stringify({ success: false, code: "server_error", error: "down" }), isError: true };
@@ -118,7 +127,7 @@ test("no backend is reported as unavailable", async () => {
 
 test("calendar add calls ws_cal_create_event with the resolved calendar", async () => {
   const { own } = make({ connected: ["ws_cal_create_event", "ws_cal_list_calendars"] });
-  const ex = fakeExecutor({ calendars: [{ id: "ro", name: "Shared", writable: false }, { id: "cal-1", name: "Home", writable: true }] });
+  const ex = fakeExecutor({ calendars: [{ id: "ro", name: "Shared", writable: false }, { id: "cal-1", name: "Home", writable: true, shared: false }] });
   const set = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
   const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
   const create = ex.calls.find((c) => c.name === "ws_cal_create_event");
@@ -126,7 +135,7 @@ test("calendar add calls ws_cal_create_event with the resolved calendar", async 
   assert.equal(r.ok, true);
   assert.equal(r.code, "added");
   assert.equal(r.final, true);
-  assert.equal(r.say, `Added Lunch to your calendar for ${whenOf("2026-10-26T12:00:00-05:00")}.`);
+  assert.equal(r.say, `Added Lunch to Crow's calendar for ${whenOf("2026-10-26T12:00:00-05:00")}.`, "Crow's own calendar, picked on its own, is named");
   // The resolved calendar is cached: a second add lists nothing.
   await run(toolOf(set, "crow_calendar_add_event"), { title: "Dinner", start: "2026-10-26T19:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
   assert.equal(ex.calls.filter((c) => c.name === "ws_cal_list_calendars").length, 1);
@@ -210,15 +219,131 @@ test("reminder writes one one-shot schedule", async () => {
   } finally { s.close(); }
 });
 
-test("a reminder in the past is bad_args", async () => {
+// ─── No silent past dates (PR 2.1 Task 2): a past start asks about the next one; nothing is written before a yes ───
+const fullWhen = (iso, lang = "en") => (lang === "es" ? ES_SPOKEN[iso] : whenOf(iso));
+const ES_SPOKEN = { "2026-11-03T09:00:00-06:00": "martes, 3 de noviembre, 9:00" };
+const WED = Date.parse("2026-10-21T19:11:00Z");   // Wednesday 21 October, 2:11 PM in Chicago
+
+test("a past timed start asks about the next Tuesday (month and day), writes nothing; yes writes it once", async () => {
   const s = await stores();
   try {
-    const { own } = make();
+    const { own, pending } = make({ connected: ["ws_cal_create_event"], now: () => WED });
+    const ex = fakeExecutor();
+    const bot = CROW({ routine: { calendar: { calendar: "cal-1" } } });
+    const set = await own.forTurn({ db: s.db, bot, surface: "kiosk", lang: "en", tz: TZ });
+    const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Coffee", start: "2026-10-20T09:00:00-05:00" }, { executor: ex, db: s.db, device: DEVICE });
+    assert.equal(r.ok, true);
+    assert.equal(r.effect, false);
+    assert.equal(r.code, "needs_confirm");
+    assert.equal(r.final, true);
+    assert.equal(r.say, `That time has passed. Add Coffee for ${fullWhen("2026-10-27T09:00:00-05:00")} instead?`);
+    assert.match(r.say, /October 27/);
+    assert.deepEqual(ex.calls, [], "nothing written before the yes");
+    assert.deepEqual(pending.get(DEVICE.id).args, { title: "Coffee", start: "2026-10-27T09:00:00-05:00", end: "2026-10-27T10:00:00-05:00", all_day: false });
+    const base = { db: s.db, device: DEVICE, surface: "kiosk", lang: "en", tz: TZ, bot, executor: ex };
+    const yes = await own.fastPath({ ...base, transcript: "yes" });
+    assert.equal(yes.verb, "routine_yes");
+    assert.deepEqual(ex.calls, [{ name: "ws_cal_create_event", arguments: { calendar: "cal-1", summary: "Coffee", start: "2026-10-27T09:00:00-05:00", end: "2026-10-27T10:00:00-05:00" } }]);
+    assert.equal(await own.fastPath({ ...base, transcript: "yes" }), null);
+    assert.equal(ex.calls.length, 1, "written exactly once");
+  } finally { s.close(); }
+});
+
+test("a past start across the DST change gets the new offset; Spanish asks in Spanish; no declines", async () => {
+  const { own, pending } = make({ connected: ["ws_cal_create_event"], now: () => Date.parse("2026-10-28T15:00:00Z") });
+  const ex = fakeExecutor();
+  const bot = CROW({ routine: { calendar: { calendar: "cal-1" } } });
+  const set = await own.forTurn({ db: {}, bot, surface: "kiosk", lang: "es", tz: TZ });
+  const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Café", start: "2026-10-27T09:00:00-05:00", end: "2026-10-27T09:30:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(r.code, "needs_confirm");
+  assert.equal(r.say, `Esa hora ya pasó. ¿Añado Café para el ${fullWhen("2026-11-03T09:00:00-06:00", "es")}?`);
+  assert.deepEqual(pending.get(DEVICE.id).args, { title: "Café", start: "2026-11-03T09:00:00-06:00", end: "2026-11-03T09:30:00-06:00", all_day: false }, "9 AM local after DST ends, same length");
+  const base = { db: {}, device: DEVICE, surface: "kiosk", lang: "es", tz: TZ, bot, executor: ex };
+  const no = await own.fastPath({ ...base, transcript: "no" });
+  assert.equal(no.say, voiceLine("declined", "es"));
+  assert.deepEqual(ex.calls, []);
+});
+
+test("a past all-day date asks about the same weekday next week", async () => {
+  const { own, pending } = make({ connected: ["ws_cal_create_event"], now: () => WED });
+  const ex = fakeExecutor();
+  const set = await own.forTurn({ db: {}, bot: CROW({ routine: { calendar: { calendar: "cal-1" } } }), surface: "kiosk", lang: "en", tz: TZ });
+  const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Holiday", start: "2026-10-19" }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(r.code, "needs_confirm");
+  assert.equal(r.say, "That time has passed. Add Holiday for Monday, October 26 instead?");
+  assert.deepEqual(pending.get(DEVICE.id).args, { title: "Holiday", start: "2026-10-26", end: "2026-10-26", all_day: true });
+  assert.deepEqual(ex.calls, []);
+  // Today's date is not past.
+  const today = await run(toolOf(set, "crow_calendar_add_event"), { title: "Fair", start: "2026-10-21" }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(today.code, "added");
+});
+
+test("a start 3 minutes ago is accepted (grace); today at a later hour is accepted", async () => {
+  const { own } = make({ connected: ["ws_cal_create_event"], now: () => WED });
+  const ex = fakeExecutor();
+  const set = await own.forTurn({ db: {}, bot: CROW({ routine: { calendar: { calendar: "cal-1" } } }), surface: "kiosk", lang: "en", tz: TZ });
+  const grace = await run(toolOf(set, "crow_calendar_add_event"), { title: "Call", start: "2026-10-21T14:08:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(grace.code, "added");
+  const later = await run(toolOf(set, "crow_calendar_add_event"), { title: "Dinner", start: "2026-10-21T19:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(later.code, "added");
+  assert.equal(ex.calls.length, 2);
+  // Six minutes ago is past.
+  const past = await run(toolOf(set, "crow_calendar_add_event"), { title: "Call", start: "2026-10-21T14:05:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(past.code, "needs_confirm");
+  assert.equal(ex.calls.length, 2);
+});
+
+test("a past task due date asks about tomorrow, or the stated weekday next week", async () => {
+  const s = await stores();
+  try {
+    const { own, pending } = make({ openTasksDb: s.openTasksDb, now: () => WED });
+    const set = await own.forTurn({ db: s.db, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+    const r = await run(toolOf(set, "crow_task_add"), { title: "Pay rent", due: "2026-10-15" }, { executor: null, db: s.db, device: DEVICE, transcript: "add pay rent to my tasks" });
+    assert.equal(r.code, "needs_confirm");
+    assert.equal(r.say, "That date has passed. Add Pay rent to your tasks for Thursday, October 22 instead?");
+    assert.equal(pending.get(DEVICE.id).args.due, "2026-10-22");
+    const wk = await run(toolOf(set, "crow_task_add"), { title: "Pay rent", due: "2026-10-19" }, { executor: null, db: s.db, device: DEVICE, transcript: "add pay rent to my tasks for Monday" });
+    assert.equal(pending.get(DEVICE.id).args.due, "2026-10-26");
+    assert.match(wk.say, /Monday, October 26/);
+    assert.equal(s.cards().length, 0, "nothing written");
+    const yes = await own.fastPath({ db: s.db, device: DEVICE, transcript: "yes", lang: "en", tz: TZ, bot: CROW(), executor: null });
+    assert.equal(yes.verb, "routine_yes");
+    assert.deepEqual(s.cards().map((c) => c.due_date), ["2026-10-26"]);
+    // Due today is fine.
+    assert.equal((await run(toolOf(set, "crow_task_add"), { title: "Today", due: "2026-10-21" }, { executor: null, db: s.db, device: DEVICE })).code, "added");
+  } finally { s.close(); }
+});
+
+test("a reminder in the past asks about the next day (never bad_args); yes writes it once", async () => {
+  const s = await stores();
+  try {
+    const { own, pending } = make();
     const set = await own.forTurn({ db: s.db, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
     const r = await run(toolOf(set, "crow_reminder_add"), { text: "call", at: "2026-10-20T09:00:00-05:00" }, { executor: null, db: s.db, device: DEVICE });
-    assert.equal(r.code, "bad_args");
+    assert.equal(r.code, "needs_confirm");
+    assert.equal(r.ok, true);
+    assert.equal(r.say, `That time has passed. Remind you tomorrow at 9:00 AM instead: call?`);
+    assert.equal(pending.get(DEVICE.id).args.at, "2026-10-21T09:00:00-05:00");
     assert.deepEqual(await s.schedules(), []);
+    await own.fastPath({ db: s.db, device: DEVICE, transcript: "yes", lang: "en", tz: TZ, bot: CROW(), executor: null });
+    const rows = await s.schedules();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].next_run, "2026-10-21T14:00:00.000Z");
   } finally { s.close(); }
+});
+
+test("without a time zone, a past date-time is still no_tz (before the past check)", async () => {
+  const { own } = make({ connected: ["ws_cal_create_event"], now: () => WED });
+  const set = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: null });
+  assert.equal((await run(toolOf(set, "crow_calendar_add_event"), { title: "x", start: "2026-10-20T09:00:00-05:00" }, { executor: fakeExecutor(), db: {}, device: DEVICE })).code, "no_tz");
+  assert.equal((await run(toolOf(set, "crow_reminder_add"), { text: "x", at: "2026-10-20T09:00:00-05:00" }, { executor: null, db: {}, device: DEVICE })).code, "no_tz");
+});
+
+test("voice-lines en/es parity for the past-date lines", () => {
+  for (const k of ["past_confirm_calendar", "past_confirm_reminder", "past_confirm_task"]) {
+    assert.ok(VOICE_LINES.en[k] && VOICE_LINES.es[k], k);
+    assert.ok(VOICE_LINES.en[k].includes("{next_when}") && VOICE_LINES.es[k].includes("{next_when}"), k);
+  }
 });
 
 test("an all-day event ends the same day", async () => {
@@ -261,7 +386,7 @@ test("tasks go to Workspace when it is connected and a list resolves; auto falls
   const s = await stores();
   try {
     const { own } = make({ connected: ["ws_task_create", "ws_tasks_list_lists"], openTasksDb: s.openTasksDb });
-    const ex = fakeExecutor({ lists: [{ id: "ro", name: "Theirs", writable: false }, { id: "list-1", name: "Chores", writable: true }] });
+    const ex = fakeExecutor({ lists: [{ id: "ro", name: "Theirs", writable: false }, { id: "list-1", name: "Chores", writable: true, shared: false }] });
     const set = await own.forTurn({ db: s.db, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
     const r = await run(toolOf(set, "crow_task_add"), { title: "Buy milk", due: "2026-10-21" }, { executor: ex, db: s.db, device: DEVICE });
     assert.equal(r.code, "added");
@@ -684,4 +809,586 @@ test("strict: a question before an ok non-final task is asked last over a claim,
     assert.equal((await s.schedules()).length, 1, "the reminder is written once");
     assert.equal(pending.get(h.device.id), null);
   } finally { s.close(); }
+});
+
+test("in the turn: a past reminder asks about the next day and never steps up; the yes writes it once", async () => {
+  const s = await stores();
+  try {
+    const { own } = make();
+    const h = harness({ bot: CROW(), chatTools: [], rounds: [
+      [{ type: "tool_call", id: "c1", name: "crow_reminder_add", arguments: { text: "call mom", at: "2026-10-20T09:00:00-05:00" } }, { type: "done" }],
+      [{ type: "content_delta", text: "Okay. " }, { type: "done" }],
+    ] });
+    h.deps.escalateKey = "crow-chat/qwen3.6-35b-a3b";
+    h.deps.ownTools = own.forTurn;
+    h.deps.voiceActions = chainVoiceActions([own]);
+    const opts = { db: s.db, device: h.device, sink: h.sink, tz: TZ, lang: "en", actionWhen: (t) => /remind/.test(t) };
+    const r = await h.runner.runVoiceTurn({ ...opts, transcript: "remind me at 9 to call mom" });
+    const ask = `That time has passed. Remind you tomorrow at 9:00 AM instead: call mom?`;
+    assert.deepEqual(h.calls.spoken, [ask]);
+    assert.equal(r.timings.step_up, undefined, "no step-up");
+    assert.equal(r.escalated, false);
+    assert.equal(h.log.length, 1, "one model round");
+    assert.deepEqual(await s.schedules(), []);
+    await h.runner.runVoiceTurn({ ...opts, transcript: "yes" });
+    assert.equal((await s.schedules()).length, 1);
+    assert.equal(h.log.length, 1, "the yes needed no model call");
+  } finally { s.close(); }
+});
+
+// ─── Fix round 1 (Task 2): bounded roll-forward, the model's own clock fields, the DST edges ───
+test("a date more than a year past is bad_args, and returns quickly (no day-by-day roll-forward)", async () => {
+  const s = await stores();
+  try {
+    const { own } = make({ connected: ["ws_cal_create_event"], now: () => WED, openTasksDb: s.openTasksDb });
+    const ex = fakeExecutor();
+    const set = await own.forTurn({ db: s.db, bot: CROW({ routine: { calendar: { calendar: "cal-1" } } }), surface: "kiosk", lang: "en", tz: TZ });
+    const t0 = performance.now();
+    const ev = await run(toolOf(set, "crow_calendar_add_event"), { title: "x", start: "1900-01-02T09:00:00-06:00" }, { executor: ex, db: s.db, device: DEVICE });
+    const rem = await run(toolOf(set, "crow_reminder_add"), { text: "x", at: "1900-01-02T09:00:00-06:00" }, { executor: null, db: s.db, device: DEVICE });
+    const day = await run(toolOf(set, "crow_calendar_add_event"), { title: "x", start: "1900-01-02" }, { executor: ex, db: s.db, device: DEVICE });
+    const task = await run(toolOf(set, "crow_task_add"), { title: "x", due: "1900-01-02" }, { executor: null, db: s.db, device: DEVICE, transcript: "on Tuesday" });
+    const ms = performance.now() - t0;
+    for (const r of [ev, rem, day, task]) assert.equal(r.code, "bad_args", JSON.stringify(r));
+    assert.ok(ms < 50, `took ${ms} ms`);
+    assert.deepEqual(ex.calls, []);
+    assert.deepEqual(await s.schedules(), []);
+    assert.equal(s.cards().length, 0);
+    // Eleven months back still rolls forward (a near-year past is a slip, not an argument error).
+    const near = await run(toolOf(set, "crow_calendar_add_event"), { title: "x", start: "2025-11-25T09:00:00-06:00" }, { executor: ex, db: s.db, device: DEVICE });
+    assert.equal(near.code, "needs_confirm");
+  } finally { s.close(); }
+});
+
+test("the local time is the one the model wrote: a pre-change date with the post-change offset keeps 9:00, and the yes writes the new offset", async () => {
+  const { own, pending } = make({ connected: ["ws_cal_create_event"], now: () => Date.parse("2026-11-02T15:00:00Z") });   // Monday 2 November, CST
+  const ex = fakeExecutor();
+  const bot = CROW({ routine: { calendar: { calendar: "cal-1" } } });
+  const set = await own.forTurn({ db: {}, bot, surface: "kiosk", lang: "en", tz: TZ });
+  const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Coffee", start: "2026-10-27T09:00:00-06:00" }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(r.code, "needs_confirm");
+  assert.equal(r.say, `That time has passed. Add Coffee for ${fullWhen("2026-11-03T09:00:00-06:00")} instead?`);
+  assert.match(r.say, /9:00 AM/);
+  assert.equal(pending.get(DEVICE.id).args.start, "2026-11-03T09:00:00-06:00");
+  const yes = await own.fastPath({ db: {}, device: DEVICE, transcript: "yes", lang: "en", tz: TZ, bot, executor: ex });
+  assert.equal(yes.verb, "routine_yes");
+  assert.deepEqual(ex.calls.map((c) => [c.arguments.start, c.arguments.end]), [["2026-11-03T09:00:00-06:00", "2026-11-03T10:00:00-06:00"]]);
+  // The reminder too: 9:00 as written, the next day, in that day's offset.
+  const rem = await run(toolOf(set, "crow_reminder_add"), { text: "call", at: "2026-10-31T09:00:00-06:00" }, { executor: null, db: {}, device: DEVICE });
+  assert.equal(rem.code, "needs_confirm");
+  assert.equal(pending.get(DEVICE.id).args.at, "2026-11-03T09:00:00-06:00");
+});
+
+test("a start in the spring-forward gap (02:30 on the change day) resolves to 03:30", async () => {
+  const { own, pending } = make({ connected: ["ws_cal_create_event"], now: () => Date.parse("2026-03-04T18:00:00Z") });   // Wednesday 4 March, CST
+  const set = await own.forTurn({ db: {}, bot: CROW({ routine: { calendar: { calendar: "cal-1" } } }), surface: "kiosk", lang: "en", tz: TZ });
+  const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Run", start: "2026-03-01T02:30:00-06:00" }, { executor: fakeExecutor(), db: {}, device: DEVICE });
+  assert.equal(r.code, "needs_confirm");
+  assert.equal(pending.get(DEVICE.id).args.start, "2026-03-08T03:30:00-05:00");
+});
+
+test("a reminder a moment ago (within 5 minutes) is accepted, like an event", async () => {
+  const s = await stores();
+  try {
+    const { own } = make({ now: () => WED });
+    const set = await own.forTurn({ db: s.db, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+    const r = await run(toolOf(set, "crow_reminder_add"), { text: "call", at: "2026-10-21T14:08:00-05:00" }, { executor: null, db: s.db, device: DEVICE });
+    assert.equal(r.code, "added");
+    assert.equal((await s.schedules()).length, 1);
+  } finally { s.close(); }
+});
+
+test("a held next occurrence that has passed by the yes writes nothing and says not done", async () => {
+  const s = await stores();
+  try {
+    let t = WED;
+    const now = () => t;
+    const { own } = make({ now, pending: createPendingStore({ now, ttlMs: 1e12 }) });
+    const set = await own.forTurn({ db: s.db, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+    const r = await run(toolOf(set, "crow_reminder_add"), { text: "call", at: "2026-10-21T09:00:00-05:00" }, { executor: null, db: s.db, device: DEVICE });
+    assert.equal(r.code, "needs_confirm");
+    t = Date.parse("2026-10-23T12:00:00Z");   // the held 22 October 9:00 is past now
+    const yes = await own.fastPath({ db: s.db, device: DEVICE, transcript: "yes", lang: "en", tz: TZ, bot: CROW(), executor: null });
+    assert.equal(yes.verb, "routine_failed");
+    assert.equal(yes.say, voiceLine("not_done_say", "en"));
+    assert.deepEqual(await s.schedules(), []);
+  } finally { s.close(); }
+});
+
+// ─── The date is audible (PR 2.1 Task 3): one formatter, pinned literals ───
+test("every spoken date has its weekday, month and day: en timed, es timed, all-day (literals)", async () => {
+  const { own } = make({ connected: ["ws_cal_create_event", "ws_cal_list_calendars"] });
+  const ex = () => fakeExecutor({ calendars: [{ id: "cal-1", name: "Home", writable: true }] });
+  const chosen = CROW({ routine: { calendar: { calendar: "cal-1" } } });   // the operator's own pick: "your calendar"
+  const en = await own.forTurn({ db: {}, bot: chosen, surface: "kiosk", lang: "en", tz: TZ });
+  const es = await own.forTurn({ db: {}, bot: chosen, surface: "kiosk", lang: "es", tz: TZ });
+  const add = (set, args) => run(toolOf(set, "crow_calendar_add_event"), args, { executor: ex(), db: {}, device: DEVICE });
+  assert.equal((await add(en, { title: "Lunch", start: "2026-10-27T09:00:00-05:00" })).say, "Added Lunch to your calendar for Tuesday, October 27 at 9:00 AM.");
+  assert.equal((await add(es, { title: "Comida", start: "2026-10-27T09:00:00-05:00" })).say, "Añadí Comida a tu calendario para el martes, 27 de octubre, 9:00.");
+  assert.equal((await add(en, { title: "Holiday", start: "2026-12-25", all_day: true })).say, "Added Holiday to your calendar for Friday, December 25.");
+  assert.equal((await add(es, { title: "Fiesta", start: "2026-12-25", all_day: true })).say, "Añadí Fiesta a tu calendario para el viernes, 25 de diciembre.");
+});
+
+test("a reminder within 24 hours says today or tomorrow (in the zone); beyond that, the full date (en and es literals)", async () => {
+  // NOW is Tuesday 20 October, 10:00 AM in Chicago.
+  const { own } = make();
+  const en = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+  const es = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "es", tz: TZ });
+  const rem = (set, at) => run(toolOf(set, "crow_reminder_add"), { text: "call", at }, { executor: null, db: {}, device: { id: "x" }, fallback: "calendar" });
+  assert.equal((await rem(en, "2026-10-20T17:00:00-05:00")).say, "I can't add that to a calendar here, but I can remind you today at 5:00 PM: call. Okay?");
+  assert.equal((await rem(en, "2026-10-21T08:00:00-05:00")).say, "I can't add that to a calendar here, but I can remind you tomorrow at 8:00 AM: call. Okay?");
+  assert.equal((await rem(en, "2026-10-21T11:00:00-05:00")).say, "I can't add that to a calendar here, but I can remind you Wednesday, October 21 at 11:00 AM: call. Okay?", "25 hours ahead: the full date");
+  assert.equal((await rem(es, "2026-10-20T17:00:00-05:00")).say, "No puedo añadir eso a un calendario aquí, pero puedo recordártelo hoy a las 17:00: call. ¿Te parece?");
+  assert.equal((await rem(es, "2026-10-21T08:00:00-05:00")).say, "No puedo añadir eso a un calendario aquí, pero puedo recordártelo mañana a las 8:00: call. ¿Te parece?");
+  assert.equal((await rem(es, "2026-10-26T12:00:00-05:00")).say, "No puedo añadir eso a un calendario aquí, pero puedo recordártelo el lunes, 26 de octubre, 12:00: call. ¿Te parece?");
+  // The zone decides the day: 9 PM Chicago is already tomorrow's date in UTC, but it is still today here.
+  assert.equal((await rem(en, "2026-10-20T21:00:00-05:00")).say, "I can't add that to a calendar here, but I can remind you today at 9:00 PM: call. Okay?");
+});
+
+test("the recap says the month and day too: one literal pinned (calendar, reminder, all-day)", () => {
+  const w = { tool: "crow_calendar_add_event", title: "lunch", start: "2026-10-27T09:00:00-05:00", tz: TZ };
+  assert.equal(lastWriteRecap(w, "en"), "Lunch is on your calendar for Tuesday, October 27 at 9:00 AM.");
+  assert.equal(lastWriteRecap(w, "es"), "Lunch está en tu calendario para el martes, 27 de octubre, 9:00.");
+  assert.equal(lastWriteRecap({ ...w, start: "2026-12-25" }, "en"), "Lunch is on your calendar for Friday, December 25.");
+  const r = { tool: "crow_reminder_add", title: "call mom", start: "2026-10-27T09:00:00-05:00", tz: TZ };
+  assert.equal(lastWriteRecap(r, "en", Date.parse("2026-10-27T12:00:00Z")), "Your reminder is set for today at 9:00 AM: call mom.");
+  assert.equal(lastWriteRecap(r, "en", Date.parse("2026-10-20T15:00:00Z")), "Your reminder is set for Tuesday, October 27 at 9:00 AM: call mom.");
+  assert.equal(lastWriteRecap(r, "es", Date.parse("2026-10-27T12:00:00Z")), "Tu recordatorio está puesto para hoy a las 9:00: call mom.");
+});
+
+test("whenOn is bounded: many zones never grow the formatter cache past its cap (and keep answering)", () => {
+  const zones = Intl.supportedValuesOf("timeZone");
+  for (const z of zones.slice(0, 200)) assert.ok(whenOn(Date.parse("2026-10-27T14:00:00Z"), "en", z).includes("October"));
+  assert.equal(whenOn(Date.parse("2026-10-27T14:00:00Z"), "es", TZ), "martes, 27 de octubre, 9:00");
+  assert.ok(_whenFormatCacheSize() <= 64, `cache size ${_whenFormatCacheSize()}`);
+});
+
+test("es: 'a la' only for 01:xx, 'a las' for every other hour (13:00 included); output has no U+202F or U+00A0", async () => {
+  const { own } = make();
+  const es = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "es", tz: TZ });
+  const rem = (at) => run(toolOf(es, "crow_reminder_add"), { text: "call", at }, { executor: null, db: {}, device: { id: "x" }, fallback: "calendar" });
+  // NOW is Tuesday 20 October, 10:00 AM in Chicago.
+  assert.match((await rem("2026-10-21T01:30:00-05:00")).say, /recordártelo mañana a la 1:30: call\./);
+  assert.match((await rem("2026-10-20T13:00:00-05:00")).say, /recordártelo hoy a las 13:00: call\./);
+  assert.ok(!/[\u202f\u00a0]/.test(whenOn(Date.parse("2026-10-27T14:00:00Z"), "en", TZ)));
+});
+
+test("a recap with no zone never says today or tomorrow (full date, even for a reminder moments away)", () => {
+  const r = { tool: "crow_reminder_add", title: "call mom", start: "2026-10-27T09:00:00-05:00" };
+  const now = Date.parse("2026-10-27T12:00:00Z");
+  assert.equal(lastWriteRecap(r, "en", now), "Your reminder is set for Tuesday, October 27 at 9:00 AM: call mom.");
+  assert.equal(lastWriteRecap(r, "es", now), "Tu recordatorio está puesto para el martes, 27 de octubre, 9:00: call mom.");
+});
+
+// ─── PR 2.1 Task 4 [r2 I8]: "add <item> <day/time>" reaches the calendar tool ───
+test("calendarAddIntent: 'add <item> <day or time>' (en) and 'añade/agrega <item> <day or time>' (es)", () => {
+  for (const t of ["add coffee Tuesday at 9", "Add lunch tomorrow at noon.", "please add coffee next week", "can you add dentist at 3 pm",
+    "añade café el martes a las 9", "agrega comida mañana", "Añade cena a la una"]) {
+    assert.equal(calendarAddIntent(t), true, t);
+  }
+  for (const t of ["add two minutes", "add 15 and 27", "add coffee", "add a reminder Tuesday at 9", "add coffee Tuesday, remind me at 8",
+    "recuérdame añadir café el martes", "add milk to my tasks tomorrow", "add eggs to the list tomorrow", "what did I add on Tuesday",
+    "had coffee Tuesday at 9", "añade dos minutos", "add the dentist", "can you add up my hours for tomorrow", "add up the bill for tonight", "", null]) {
+    assert.equal(calendarAddIntent(t), false, String(t));
+  }
+});
+
+test("the calendar tool carries intentWhen; reminders and tasks do not", async () => {
+  const { own } = make({ connected: ["ws_cal_create_event"] });
+  const set = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+  assert.equal(toolOf(set, "crow_calendar_add_event").intentWhen, calendarAddIntent);
+  assert.equal(toolOf(set, "crow_reminder_add").intentWhen, undefined);
+  assert.equal(toolOf(set, "crow_task_add").intentWhen, undefined);
+});
+
+// ─── PR 2.1 Task 6 [r2 I5]: "auto" never picks a shared calendar or task list; Crow asks which one ───
+const SHARED_ONLY = [{ id: "Personal_shared_by_casey", name: "Personal (casey)", owner: "Casey", writable: true, shared: true },
+  { id: "Menu_shared_by_admin", name: "Menu (admin)", owner: "Admin", writable: true, shared: true },
+  { id: "Feriados", name: "Feriados (admin)", owner: "Admin", writable: false, shared: true }];
+const HINT = "To use it every time, choose it in Bot Builder → Crow → Calendar, reminders and tasks.";
+const WS_CAL = ["ws_cal_create_event", "ws_cal_list_calendars"];
+const writesOf = (ex, name = "ws_cal_create_event") => ex.calls.filter((c) => c.name === name);
+
+test("only shared calendars: Crow asks which one (names without the owner) and writes nothing", async () => {
+  const { own, pending } = make({ connected: WS_CAL });
+  const ex = fakeExecutor({ calendars: SHARED_ONLY });
+  const set = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+  const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(r.ok, true); assert.equal(r.effect, false); assert.equal(r.code, "needs_confirm"); assert.equal(r.final, true);
+  assert.equal(r.say, "Which calendar should I use: Personal or Menu?");
+  assert.deepEqual(writesOf(ex), [], "nothing written");
+  const p = pending.get(DEVICE.id);
+  assert.equal(p.kind, "which_calendar");
+  assert.equal(p.tool, "crow_calendar_add_event");
+  assert.deepEqual(p.options, [{ id: "Personal_shared_by_casey", name: "Personal" }, { id: "Menu_shared_by_admin", name: "Menu" }], "writable ones only");
+  assert.equal(own.turnContext({ device: DEVICE }).pending, true);
+  // Spanish asks in Spanish.
+  const es = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "es", tz: TZ });
+  const e = await run(toolOf(es, "crow_calendar_add_event"), { title: "Comida", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: {}, device: { id: "es-dev" } });
+  assert.equal(e.say, "¿Qué calendario uso: Personal o Menu?");
+  assert.deepEqual(writesOf(ex), []);
+});
+
+test("a huge shared calendar name with newlines is spoken as one capped line; the full name still answers", async () => {
+  const long = `Family ${"plans\n\t".repeat(285)}end`;
+  assert.ok(long.length > 2000);
+  const { own, pending } = make({ connected: WS_CAL });
+  const ex = fakeExecutor({ calendars: [{ id: "big", name: `${long} (admin)`, owner: "Admin", writable: true, shared: true }, SHARED_ONLY[1]] });
+  const bot = CROW();
+  const set = await own.forTurn({ db: {}, bot, surface: "kiosk", lang: "en", tz: TZ });
+  const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  assert.ok(!/[\n\t\r]/.test(r.say), "one line");
+  const spoken = r.say.match(/^Which calendar should I use: (.*) or Menu\?$/)?.[1];
+  assert.ok(spoken, r.say);
+  assert.ok(spoken.length <= 61 && spoken.endsWith("…"), spoken);
+  assert.ok(spoken.startsWith("Family plans plans"), spoken);
+  assert.ok(!pending.get(DEVICE.id).say.includes("\n"));
+  assert.ok(!/plans pla…$|pl…$/.test(spoken), "cut at a word end");
+  // Answering with what was heard still picks it; the success line carries the capped name only.
+  const out = await own.fastPath({ db: {}, device: DEVICE, surface: "kiosk", lang: "en", tz: TZ, bot, executor: ex, transcript: `the ${spoken.slice(0, -1)} one` });
+  assert.equal(out.verb, "which_yes");
+  assert.deepEqual(writesOf(ex).map((c) => c.arguments.calendar), ["big"]);
+  assert.ok(!/[\n\t]/.test(out.say) && out.say.includes(`the ${spoken} calendar`), out.say);
+  assert.ok(out.write.target_name.length <= 61, "the record keeps the capped name");
+  // A recap of a record carrying a raw long name is capped too.
+  const recap = lastWriteRecap({ tool: "crow_task_add", title: "milk", start: null, target: "named", target_name: long }, "en");
+  assert.ok(!/[\n\t]/.test(recap) && recap.length < 200, recap);
+});
+
+test("matchChoice: a capped option still matches its full name", async () => {
+  const { matchChoice } = await import("../servers/gateway/voice/own-tools.js");
+  const full = "Family plans for the whole long summer holiday season with grandparents\nand cousins";
+  const opts = [{ id: "f", name: "Family plans for the whole long summer holiday season with…", match: full }, { id: "m", name: "Menu" }];
+  assert.equal(matchChoice(full, opts)?.id, "f");
+  assert.equal(matchChoice("family plans for the whole long summer holiday season with", opts)?.id, "f");
+  assert.equal(matchChoice("menu", opts)?.id, "m");
+});
+
+test("a calendar entry with no shared field counts as shared: never auto-picked", async () => {
+  const { own } = make({ connected: WS_CAL });
+  const ex = fakeExecutor({ calendars: [{ id: "old", name: "Old", writable: true }] });
+  const set = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+  const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(r.say, "Which calendar should I use: Old?");
+  assert.deepEqual(writesOf(ex), []);
+});
+
+test("an owned and a shared calendar: the owned one, and the line names it", async () => {
+  const { own } = make({ connected: WS_CAL });
+  const ex = fakeExecutor({ calendars: [SHARED_ONLY[1], { id: "personal", name: "Personal", owner: "crow-bot", writable: true, shared: false }] });
+  for (const [lang, line] of [["en", `Added Lunch to Crow's calendar for ${whenOf("2026-10-26T12:00:00-05:00")}.`], ["es", "Añadí Lunch al calendario de Crow para el lunes, 26 de octubre, 12:00."]]) {
+    const set = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang, tz: TZ });
+    const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+    assert.equal(r.code, "added");
+    assert.equal(r.say, line);
+  }
+  assert.deepEqual(writesOf(ex).map((c) => c.arguments.calendar), ["personal", "personal"]);
+});
+
+test("an operator-chosen shared calendar is used, and the line says your calendar", async () => {
+  const { own } = make({ connected: WS_CAL });
+  const ex = fakeExecutor({ calendars: SHARED_ONLY });
+  const set = await own.forTurn({ db: {}, bot: CROW({ routine: { calendar: { calendar: "Menu_shared_by_admin" } } }), surface: "kiosk", lang: "en", tz: TZ });
+  const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(r.code, "added");
+  assert.equal(r.say, `Added Lunch to your calendar for ${whenOf("2026-10-26T12:00:00-05:00")}.`);
+  assert.deepEqual(writesOf(ex).map((c) => c.arguments.calendar), ["Menu_shared_by_admin"]);
+  assert.deepEqual(ex.calls.map((c) => c.name), ["ws_cal_create_event"], "a chosen id needs no listing");
+});
+
+test("answering the which-question with a name writes the item once to that calendar, then the hint; never saved to the bot", async () => {
+  const { own, pending } = make({ connected: WS_CAL });
+  const ex = fakeExecutor({ calendars: SHARED_ONLY });
+  const bot = CROW();
+  const before = JSON.stringify(bot);
+  const set = await own.forTurn({ db: {}, bot, surface: "kiosk", lang: "en", tz: TZ });
+  await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  const base = { db: {}, device: DEVICE, surface: "kiosk", lang: "en", tz: TZ, bot, executor: ex };
+  const out = await own.fastPath({ ...base, transcript: "the menu one" });
+  assert.equal(out.verb, "which_yes");
+  assert.equal(out.say, `Added Lunch to the Menu calendar for ${whenOf("2026-10-26T12:00:00-05:00")}. ${HINT}`);
+  assert.deepEqual(writesOf(ex), [{ name: "ws_cal_create_event", arguments: { calendar: "Menu_shared_by_admin", summary: "Lunch", start: "2026-10-26T12:00:00-05:00", end: "2026-10-26T13:00:00-05:00" } }]);
+  assert.equal(out.write.tool, "crow_calendar_add_event");
+  assert.equal(pending.get(DEVICE.id), null, "the question is answered");
+  assert.equal(await own.fastPath({ ...base, transcript: "menu" }), null, "a second answer writes nothing");
+  assert.equal(writesOf(ex).length, 1);
+  assert.equal(JSON.stringify(bot), before, "the choice is not written back to the bot");
+});
+
+test("the which-answer: accents and case ignored; Spanish hint; no, no match, or a tie declines and writes nothing", async () => {
+  const { own } = make({ connected: WS_CAL });
+  const cals = [{ id: "menu-x", name: "Menú (admin)", writable: true, shared: true }, { id: "fam", name: "Family (casey)", writable: true, shared: true }];
+  const ex = fakeExecutor({ calendars: cals });
+  const bot = CROW();
+  const es = await own.forTurn({ db: {}, bot, surface: "kiosk", lang: "es", tz: TZ });
+  const ask = async (lang = "es") => run(toolOf(lang === "es" ? es : await own.forTurn({ db: {}, bot, surface: "kiosk", lang, tz: TZ }), "crow_calendar_add_event"), { title: "Cena", start: "2026-10-26T18:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  const base = { db: {}, device: DEVICE, surface: "kiosk", tz: TZ, bot, executor: ex };
+  await ask();
+  const yes = await own.fastPath({ ...base, lang: "es", transcript: "MENU" });
+  assert.equal(yes.verb, "which_yes");
+  assert.match(yes.say, /^Añadí Cena al calendario Menú para el .+\. Para usarlo siempre, elígelo en Bot Builder → Crow → Calendario, recordatorios y tareas\.$/);
+  assert.equal(writesOf(ex).length, 1);
+  for (const said of ["no", "no, not menu", "never mind"]) {
+    await ask("en");
+    const out = await own.fastPath({ ...base, lang: "en", transcript: said });
+    assert.equal(out.verb, "which_no", said);
+    assert.equal(out.say, voiceLine("declined", "en"), said);
+  }
+  // No single short answer naming one (fix round 1): the question ends and the model hears the words; nothing is claimed.
+  for (const said of ["the blue one", "menu or family", "never mind, what's on the menu tonight"]) {
+    await ask("en");
+    assert.equal(await own.fastPath({ ...base, lang: "en", transcript: said }), null, said);
+    assert.equal(own.turnContext({ device: DEVICE }), null, `${said}: the question is gone`);
+  }
+  assert.equal(writesOf(ex).length, 1, "only the named answer wrote");
+});
+
+test("a which-question answered on a different device is not taken; one that expires writes nothing", async () => {
+  let t = NOW;
+  const now = () => t;
+  const { own, pending } = make({ connected: WS_CAL, now, pending: createPendingStore({ now, ttlMs: 120_000 }) });
+  const ex = fakeExecutor({ calendars: SHARED_ONLY });
+  const bot = CROW();
+  const set = await own.forTurn({ db: {}, bot, surface: "kiosk", lang: "en", tz: TZ });
+  await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(await own.fastPath({ db: {}, device: { id: "other" }, transcript: "menu", lang: "en", tz: TZ, bot, executor: ex }), null);
+  assert.ok(pending.get(DEVICE.id), "still waiting on its own device");
+  t += 121_000;
+  assert.equal(await own.fastPath({ db: {}, device: DEVICE, transcript: "menu", lang: "en", tz: TZ, bot, executor: ex }), null);
+  assert.deepEqual(writesOf(ex), []);
+});
+
+test("under strict confirm, and on a carried-only turn, the which-question is the only question", async () => {
+  for (const [bot, ctx] of [[CROW({ voice: { confirm: "strict" } }), {}], [CROW(), { confirm: true }]]) {
+    const { own, pending } = make({ connected: WS_CAL });
+    const ex = fakeExecutor({ calendars: SHARED_ONLY });
+    const set = await own.forTurn({ db: {}, bot, surface: "kiosk", lang: "en", tz: TZ });
+    const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE, ...ctx });
+    assert.equal(r.say, "Which calendar should I use: Personal or Menu?");
+    assert.equal(pending.get(DEVICE.id).kind, "which_calendar");
+    const out = await own.fastPath({ db: {}, device: DEVICE, transcript: "personal", lang: "en", tz: TZ, bot, executor: ex });
+    assert.equal(out.verb, "which_yes", "the name is the yes");
+    assert.deepEqual(writesOf(ex).map((c) => c.arguments.calendar), ["Personal_shared_by_casey"]);
+    assert.equal(pending.get(DEVICE.id), null, "no second question");
+  }
+});
+
+test("the calendar cache never holds a shared pick: the next add lists and asks again", async () => {
+  const { own } = make({ connected: WS_CAL });
+  const ex = fakeExecutor({ calendars: SHARED_ONLY });
+  const bot = CROW();
+  const set = await own.forTurn({ db: {}, bot, surface: "kiosk", lang: "en", tz: TZ });
+  const base = { db: {}, device: DEVICE, surface: "kiosk", lang: "en", tz: TZ, bot, executor: ex };
+  await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  await own.fastPath({ ...base, transcript: "menu" });
+  const again = await run(toolOf(set, "crow_calendar_add_event"), { title: "Dinner", start: "2026-10-26T19:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(again.code, "needs_confirm");
+  assert.equal(again.say, "Which calendar should I use: Personal or Menu?");
+  assert.equal(ex.calls.filter((c) => c.name === "ws_cal_list_calendars").length, 2, "listed again");
+  assert.equal(writesOf(ex).length, 1);
+});
+
+test("Google under auto: only shared Workspace calendars → Google primary; Google alone → primary (regression)", async () => {
+  const { own } = make({ connected: [...WS_CAL, "gcal_create_event"] });
+  const ex = fakeExecutor({ calendars: SHARED_ONLY });
+  const set = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+  const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(r.code, "added");
+  assert.equal(r.say, `Added Lunch to your calendar for ${whenOf("2026-10-26T12:00:00-05:00")}.`);
+  assert.deepEqual(writesOf(ex), []);
+  assert.equal(writesOf(ex, "gcal_create_event")[0].arguments.calendar_id, "primary");
+  // An explicit Workspace backend never falls to Google: it asks.
+  const w = make({ connected: [...WS_CAL, "gcal_create_event"] }).own;
+  const wx = fakeExecutor({ calendars: SHARED_ONLY });
+  const wset = await w.forTurn({ db: {}, bot: CROW({ routine: { calendar: { backend: "workspace" } } }), surface: "kiosk", lang: "en", tz: TZ });
+  assert.equal((await run(toolOf(wset, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: wx, db: {}, device: DEVICE })).code, "needs_confirm");
+  assert.deepEqual(wx.calls.map((c) => c.name), ["ws_cal_list_calendars"]);
+  // Google alone.
+  const g = make({ connected: ["gcal_create_event"] }).own;
+  const gx = fakeExecutor();
+  const gset = await g.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+  const gr = await run(toolOf(gset, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: gx, db: {}, device: DEVICE });
+  assert.equal(gr.say, `Added Lunch to your calendar for ${whenOf("2026-10-26T12:00:00-05:00")}.`);
+  assert.equal(gx.calls[0].arguments.calendar_id, "primary");
+});
+
+test("no writable calendar at all: nothing to ask, nothing written (not done)", async () => {
+  const { own, pending } = make({ connected: WS_CAL });
+  const ex = fakeExecutor({ calendars: [SHARED_ONLY[2]] });
+  const set = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+  const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  assert.deepEqual(r, { ok: false, code: "backend_error" });
+  assert.equal(pending.get(DEVICE.id), null);
+  assert.deepEqual(writesOf(ex), []);
+});
+
+test("a past date with no owned calendar: the past question first, then on yes the which-question, then the write", async () => {
+  const { own } = make({ connected: WS_CAL, now: () => WED });
+  const ex = fakeExecutor({ calendars: SHARED_ONLY });
+  const bot = CROW();
+  const set = await own.forTurn({ db: {}, bot, surface: "kiosk", lang: "en", tz: TZ });
+  const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Coffee", start: "2026-10-20T09:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE });
+  assert.match(r.say, /^That time has passed/);
+  const base = { db: {}, device: DEVICE, surface: "kiosk", lang: "en", tz: TZ, bot, executor: ex };
+  const yes = await own.fastPath({ ...base, transcript: "yes" });
+  assert.equal(yes.verb, "which_ask");
+  assert.equal(yes.say, "Which calendar should I use: Personal or Menu?");
+  assert.deepEqual(writesOf(ex), []);
+  const out = await own.fastPath({ ...base, transcript: "menu" });
+  assert.equal(out.verb, "which_yes");
+  assert.deepEqual(writesOf(ex).map((c) => [c.arguments.calendar, c.arguments.start]), [["Menu_shared_by_admin", "2026-10-27T09:00:00-05:00"]]);
+});
+
+test("tasks: a shared list is never auto-picked (auto → a board card); an owned one is, and named; explicit Workspace asks which list", async () => {
+  const s = await stores();
+  try {
+    const WS_T = ["ws_task_create", "ws_tasks_list_lists"];
+    const shared = [{ id: "Groceries_shared_by_admin", name: "Groceries (admin)", owner: "Admin", writable: true, shared: true }, { id: "Chores_shared_by_casey", name: "Chores (casey)", writable: true }];
+    const { own } = make({ connected: WS_T, openTasksDb: s.openTasksDb });
+    const ex = fakeExecutor({ lists: shared });
+    const set = await own.forTurn({ db: s.db, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+    const r = await run(toolOf(set, "crow_task_add"), { title: "Buy milk" }, { executor: ex, db: s.db, device: DEVICE });
+    assert.equal(r.code, "added");
+    assert.equal(r.say, "Added Buy milk to your tasks.");
+    assert.deepEqual(writesOf(ex, "ws_task_create"), []);
+    assert.equal(s.cards().length, 1, "the board took it");
+    // An owned list wins and is named.
+    const o = make({ connected: WS_T, openTasksDb: s.openTasksDb }).own;
+    const ox = fakeExecutor({ lists: [...shared, { id: "mine", name: "Mine", writable: true, shared: false }] });
+    const oset = await o.forTurn({ db: s.db, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+    const or = await run(toolOf(oset, "crow_task_add"), { title: "Buy eggs" }, { executor: ox, db: s.db, device: DEVICE });
+    assert.equal(or.say, "Added Buy eggs to Crow's task list.");
+    assert.deepEqual(writesOf(ox, "ws_task_create").map((c) => c.arguments.list), ["mine"]);
+    // Explicit Workspace: asks which list; the answer writes once.
+    const w = make({ connected: WS_T, openTasksDb: s.openTasksDb });
+    const wx = fakeExecutor({ lists: shared });
+    const bot = CROW({ routine: { tasks: { backend: "workspace" } } });
+    const wset = await w.own.forTurn({ db: s.db, bot, surface: "kiosk", lang: "en", tz: TZ });
+    const wr = await run(toolOf(wset, "crow_task_add"), { title: "Buy bread" }, { executor: wx, db: s.db, device: DEVICE });
+    assert.equal(wr.say, "Which task list should I use: Groceries or Chores?");
+    assert.equal(w.pending.get(DEVICE.id).kind, "which_calendar");
+    const out = await w.own.fastPath({ db: s.db, device: DEVICE, transcript: "groceries", lang: "en", tz: TZ, bot, executor: wx });
+    assert.equal(out.say, `Added Buy bread to the Groceries list. ${HINT}`);
+    assert.deepEqual(writesOf(wx, "ws_task_create").map((c) => c.arguments.list), ["Groceries_shared_by_admin"]);
+    assert.equal(s.cards().length, 1, "no card for the Workspace answers");
+    // Spanish list question.
+    const es = await w.own.forTurn({ db: s.db, bot, surface: "kiosk", lang: "es", tz: TZ });
+    assert.equal((await run(toolOf(es, "crow_task_add"), { title: "Pan" }, { executor: wx, db: s.db, device: DEVICE })).say, "¿Qué lista de tareas uso: Groceries o Chores?");
+    const esOut = await w.own.fastPath({ db: s.db, device: DEVICE, transcript: "la de groceries", lang: "es", tz: TZ, bot, executor: wx });
+    assert.equal(esOut.say, "Añadí Pan a la lista Groceries. Para usarla siempre, elígela en Bot Builder → Crow → Calendario, recordatorios y tareas.", "a list is feminine");
+  } finally { s.close(); }
+});
+
+test("fix round 1: a which-answer counts only when short (the name plus at most 3 filler words)", async () => {
+  const { matchChoice } = await import("../servers/gateway/voice/own-tools.js");
+  const opts = [{ id: "p", name: "Personal" }, { id: "m", name: "Menu" }];
+  for (const said of ["Menu", "the menu one", "el de Menu", "use the menu calendar", "la de menú", "Personal, please"]) assert.ok(matchChoice(said, opts), said);
+  assert.equal(matchChoice("the menu one", opts).id, "m");
+  assert.equal(matchChoice("el de Menu", opts).id, "m");
+  for (const said of ["never mind, what's on the menu tonight", "what is on the menu", "use the menu calendar for this one please", "menu or personal", "the blue one", ""]) {
+    assert.equal(matchChoice(said, opts), null, said);
+  }
+});
+
+test("fix round 1: an unrelated sentence while a which-question waits goes to the model, writes nothing", async () => {
+  const own = createOwnTools({ pending: createPendingStore(), now: () => NOW, connected: () => new Set(WS_CAL) });
+  const h = harness({ bot: CROW(), chatTools: [], rounds: [[{ type: "content_delta", text: "Tonight is tacos. " }, { type: "done" }]] });
+  h.deps.ownTools = own.forTurn;
+  h.deps.voiceActions = chainVoiceActions([own]);
+  const ex = fakeExecutor({ calendars: SHARED_ONLY });
+  h.deps.createToolExecutor = () => ex;
+  const set = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+  await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: {}, device: h.device });
+  await h.runner.runVoiceTurn({ db: {}, device: h.device, sink: h.sink, tz: TZ, lang: "en", transcript: "never mind, what's on the menu tonight" });
+  assert.ok(h.calls.spoken.join(" ").includes("Tonight is tacos"), h.calls.spoken.join(" | "));
+  assert.equal(h.log.length, 1, "one model call");
+  assert.deepEqual(writesOf(ex), []);
+});
+
+test("fix round 1: the recap says where the write went (Crow's calendar, a named one; tasks; es)", async () => {
+  const start = "2026-10-26T12:00:00-05:00";
+  const at = { tool: "crow_calendar_add_event", title: "lunch", start, tz: TZ };
+  assert.equal(lastWriteRecap({ ...at, target: "crow" }, "en"), `Lunch is on Crow's calendar for ${whenOf(start)}.`);
+  assert.equal(lastWriteRecap({ ...at, target: "named", target_name: "Menu" }, "en"), `Lunch is on the Menu calendar for ${whenOf(start)}.`);
+  assert.equal(lastWriteRecap({ ...at, target: "your" }, "en"), `Lunch is on your calendar for ${whenOf(start)}.`);
+  assert.equal(lastWriteRecap({ ...at, target: "crow" }, "es"), "Lunch está en el calendario de Crow para el lunes, 26 de octubre, 12:00.");
+  assert.equal(lastWriteRecap({ ...at, target: "named", target_name: "Menu" }, "es"), "Lunch está en el calendario Menu para el lunes, 26 de octubre, 12:00.");
+  const task = { tool: "crow_task_add", title: "milk" };
+  assert.equal(lastWriteRecap({ ...task, target: "crow" }, "en"), "Milk is on Crow's task list.");
+  assert.equal(lastWriteRecap({ ...task, target: "named", target_name: "Groceries" }, "en"), "Milk is on the Groceries list.");
+  assert.equal(lastWriteRecap({ ...task, target: "crow" }, "es"), "Milk está en la lista de tareas de Crow.");
+  assert.equal(lastWriteRecap({ ...task, target: "named", target_name: "Groceries" }, "es"), "Milk está en la lista Groceries.");
+  // The write record carries the target.
+  const { own } = make({ connected: WS_CAL });
+  const ex = fakeExecutor();
+  const set = await own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+  const r = await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start }, { executor: ex, db: {}, device: DEVICE });
+  assert.equal(r.write.target, "crow");
+  const n = make({ connected: WS_CAL });
+  const nx = fakeExecutor({ calendars: SHARED_ONLY });
+  const nset = await n.own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+  await run(toolOf(nset, "crow_calendar_add_event"), { title: "Lunch", start }, { executor: nx, db: {}, device: DEVICE });
+  const out = await n.own.fastPath({ db: {}, device: DEVICE, transcript: "menu", lang: "en", tz: TZ, bot: CROW(), executor: nx });
+  assert.deepEqual([out.write.target, out.write.target_name], ["named", "Menu"]);
+});
+
+// ── PR 2.1 Task 7: one log line per ok own write, with no title, text, email or calendar id/name ──
+const ADDED_LINE = /^\[voice-own-tools\] (crow_calendar_add_event|crow_reminder_add|crow_task_add) added \((google|workspace|board|crow) (primary|chosen|owned|named|board|crow-reminder) ([A-Za-z0-9._-]{1,128}|-) ([0-9T:+.Z-]{1,40}|-)\)$/;
+const addedLines = (logs) => logs.filter((m) => / added \(/.test(m));
+const noSecrets = (line, secrets) => { for (const x of secrets) assert.ok(!line.toLowerCase().includes(String(x).toLowerCase()), `${line} must not carry ${x}`); assert.ok(!line.includes("@"), `${line} carries no email`); };
+
+test("an ok own write logs one line: tool, backend, class, the new item's id and the start; never the title, text, email or calendar", async () => {
+  const s = await stores();
+  try {
+    // Google, the operator's chosen calendar (an email-shaped id), a title with an email in it.
+    const g = make({ connected: ["gcal_create_event"] });
+    const gset = await g.own.forTurn({ db: {}, bot: CROW({ routine: { calendar: { calendar: "alex.family@example.com" } } }), surface: "kiosk", lang: "en", tz: TZ });
+    assert.equal((await run(toolOf(gset, "crow_calendar_add_event"), { title: "Dinner with alex@example.com", start: "2026-10-26T19:00:00-05:00" }, { executor: fakeExecutor(), db: {}, device: DEVICE })).code, "added");
+    assert.deepEqual(addedLines(g.logs), ["[voice-own-tools] crow_calendar_add_event added (google chosen g1 2026-10-26T19:00:00-05:00)"]);
+    noSecrets(g.logs[0], ["Dinner", "alex", "example.com", "family"]);
+    // Google primary.
+    const p = make({ connected: ["gcal_create_event"] });
+    const pset = await p.own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+    await run(toolOf(pset, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: fakeExecutor(), db: {}, device: DEVICE });
+    assert.deepEqual(addedLines(p.logs), ["[voice-own-tools] crow_calendar_add_event added (google primary g1 2026-10-26T12:00:00-05:00)"]);
+    // Workspace, Crow's own calendar (its id and name stay out).
+    const w = make({ connected: WS_CAL });
+    const wset = await w.own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+    await run(toolOf(wset, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: fakeExecutor({ calendars: [{ id: "home-cal", name: "Home", writable: true, shared: false }] }), db: {}, device: DEVICE });
+    assert.deepEqual(addedLines(w.logs), ["[voice-own-tools] crow_calendar_add_event added (workspace owned u1 2026-10-26T12:00:00-05:00)"]);
+    noSecrets(w.logs[0], ["Lunch", "home-cal", "Home"]);
+    // Workspace, the one named answering the which-question.
+    const n = make({ connected: WS_CAL });
+    const nset = await n.own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+    const nx = fakeExecutor({ calendars: SHARED_ONLY });
+    await run(toolOf(nset, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: nx, db: {}, device: DEVICE });
+    assert.deepEqual(addedLines(n.logs), [], "nothing logged as added before the answer");
+    const named = await n.own.fastPath({ db: {}, device: DEVICE, transcript: "menu", lang: "en", bot: CROW(), executor: nx });
+    assert.equal(named.verb, "which_yes");
+    assert.deepEqual(addedLines(n.logs), ["[voice-own-tools] crow_calendar_add_event added (workspace named u1 2026-10-26T12:00:00-05:00)"]);
+    noSecrets(n.logs[0], ["Lunch", "Menu", "admin", "shared_by"]);
+    // A reminder (Crow's schedules) and a board task: the row ids, never the text or the title.
+    const r = make({ openTasksDb: s.openTasksDb });
+    const rset = await r.own.forTurn({ db: s.db, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+    assert.equal((await run(toolOf(rset, "crow_reminder_add"), { text: "call the dentist", at: "2026-10-26T12:00:00-05:00" }, { executor: null, db: s.db, device: DEVICE })).code, "added");
+    assert.equal((await run(toolOf(rset, "crow_task_add"), { title: "Pay rent", due: "2026-10-27" }, { executor: null, db: s.db, device: DEVICE })).code, "added");
+    const [rem, task] = addedLines(r.logs);
+    assert.match(rem, /^\[voice-own-tools\] crow_reminder_add added \(crow crow-reminder \d+ 2026-10-26T1\d:00:00/);
+    assert.match(task, /^\[voice-own-tools\] crow_task_add added \(board board \d+ 2026-10-27\)$/);
+    noSecrets(rem, ["dentist", "call the"]);
+    noSecrets(task, ["Pay rent", "rent"]);
+    for (const l of [...addedLines(g.logs), ...addedLines(p.logs), ...addedLines(w.logs), ...addedLines(n.logs), rem, task]) assert.match(l, ADDED_LINE, l);
+  } finally { s.close(); }
+});
+
+test("the log line never carries a backend's id when it looks like an email or is not a plain token", async () => {
+  for (const id of ["evt@example.com", "a b", "x".repeat(300)]) {
+    const g = make({ connected: ["gcal_create_event"] });
+    const ex = fakeExecutor();
+    const base = ex.executeToolCalls;
+    ex.executeToolCalls = async (tcs) => (await base(tcs)).map((r) => (r.name === "gcal_create_event" ? { ...r, result: JSON.stringify({ id }) } : r));
+    const set = await g.own.forTurn({ db: {}, bot: CROW(), surface: "kiosk", lang: "en", tz: TZ });
+    assert.equal((await run(toolOf(set, "crow_calendar_add_event"), { title: "Lunch", start: "2026-10-26T12:00:00-05:00" }, { executor: ex, db: {}, device: DEVICE })).code, "added");
+    assert.deepEqual(addedLines(g.logs), ["[voice-own-tools] crow_calendar_add_event added (google primary - 2026-10-26T12:00:00-05:00)"]);
+  }
 });

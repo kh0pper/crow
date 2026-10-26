@@ -521,3 +521,72 @@ test("the editor's confirm wording and the no-calendar line say what really happ
   assert.ok(on.includes(T("botbuilder.voiceRoutineNoCalendar")));
   assert.ok(!on.includes(T("botbuilder.voiceRoutineNoCalendarNoReminder")));
 });
+
+// ── PR 2.1 Task 6: each calendar and list says whose it is; the editor says when Crow will ask ─────────────
+test("the editor marks each calendar and list Crow's own or shared by its owner, and says when Crow will ask", async () => {
+  const { connectedServers } = await import("../servers/gateway/proxy.js");
+  await reset();
+  const reply = (data) => ({ content: [{ type: "text", text: JSON.stringify({ success: true, data }) }] });
+  let calendars = [
+    { id: "personal", name: "Personal", owner: "Crow bot", writable: true, color: null, shared: false },
+    { id: "Menu_shared_by_admin", name: "Menu (admin)", owner: "Robin", writable: true, color: null, shared: true },
+  ];
+  let lists = [{ id: "Chores_shared_by_admin", name: "Chores (admin)", owner: "Robin", writable: true, shared: true }];
+  connectedServers.set("t-ws", { status: "connected", tools: ["ws_cal_create_event", "ws_cal_list_calendars", "ws_task_create", "ws_tasks_list_lists"].map((name) => ({ name })),
+    client: { callTool: async ({ name }) => (name === "ws_cal_list_calendars" ? reply({ calendars }) : reply({ lists })) } });
+  try {
+    for (const lang of ["en", "es"]) {
+      const html = await editor({ lang });
+      assert.ok(html.includes(T("botbuilder.voiceRoutineCalendarsHere", lang)), `${lang}: the calendars are listed`);
+      assert.ok(html.includes("Personal (personal): " + T("botbuilder.voiceRoutineCrowsOwn", lang)), `${lang}: Crow's own`);
+      assert.ok(!/yours|tuy[oa]/.test(html.slice(html.indexOf(T("botbuilder.voiceRoutineCalendarsHere", lang)))), `${lang}: never "yours"`);
+      assert.ok(html.includes(T("botbuilder.voiceRoutineSharedBy", lang).replace("{owner}", "Robin")), `${lang}: shared by the owner`);
+      assert.ok(html.includes(T("botbuilder.voiceRoutineListsHere", lang)), `${lang}: the lists are listed`);
+      assert.ok(!html.includes(T("botbuilder.voiceRoutineWillAskCalendar", lang)), `${lang}: Crow has its own calendar: no question`);
+      assert.ok(html.includes(T("botbuilder.voiceRoutineBoard", lang)), `${lang}: auto tasks with only a shared list go to the board`);
+    }
+    assert.equal(T("botbuilder.voiceRoutineCrowsOwn"), "Crow's own");
+    assert.equal(T("botbuilder.voiceRoutineCrowsOwn", "es"), "de Crow");
+    // Only shared calendars, no Google: Crow will ask.
+    calendars = calendars.slice(1);
+    const ask = await editor();
+    assert.ok(ask.includes(T("botbuilder.voiceRoutineWillAskCalendar")));
+    assert.ok((await editor({ lang: "es" })).includes(T("botbuilder.voiceRoutineWillAskCalendar", "es")));
+    // An explicit Workspace task backend with only shared lists asks too.
+    await reset({ ...SEED_DEF, routine: { ...(SEED_DEF.routine || {}), tasks: { backend: "workspace" } } });
+    assert.ok((await editor()).includes(T("botbuilder.voiceRoutineWillAskList")));
+    // A chosen calendar: no question.
+    await reset({ ...SEED_DEF, routine: { ...(SEED_DEF.routine || {}), calendar: { backend: "auto", calendar: "Menu_shared_by_admin" } } });
+    assert.ok(!(await editor()).includes(T("botbuilder.voiceRoutineWillAskCalendar")));
+  } finally { connectedServers.delete("t-ws"); await reset(); }
+});
+
+// ── PR 2.1 Task 7: the opt-in transcript view, saved through the same compare-and-swap ──
+test("the transcript buffer switch: off by default, warns en + es, saves on and off through the CAS, a stale page writes nothing", async () => {
+  await reset();
+  const html = await editor();
+  assert.match(html, /name="transcript_buffer"/);
+  assert.doesNotMatch(html, /name="transcript_buffer"[^>]*checked/, "off by default");
+  assert.ok(html.includes(T("botbuilder.voiceTranscriptsWarn")));
+  assert.equal(T("botbuilder.voiceTranscriptsWarn"), "Keeps what is said to Crow on every display and phone for 15 minutes, in memory, for troubleshooting.");
+  assert.ok((await editor({ lang: "es" })).includes(T("botbuilder.voiceTranscriptsWarn", "es")));
+  for (const k of ["botbuilder.voiceTranscriptsTitle", "botbuilder.voiceTranscriptsLabel", "botbuilder.voiceTranscriptsWarn"]) {
+    assert.ok(T(k) && T(k, "es") && T(k) !== T(k, "es"), k);
+  }
+  const stale = await saveBody({ transcript_buffer: "on" });
+  assert.equal(qOf(await post(await saveBody({ transcript_buffer: "on" }))).get("saved"), "1");
+  assert.equal((await voiceDef()).voice.transcript_buffer, true);
+  assert.match(await editor(), /name="transcript_buffer"[^>]*checked/);
+  assert.equal(qOf(await post({ ...stale, transcript_buffer: "" })).get("error"), "stale", "the old rev cannot turn it off");
+  assert.equal((await voiceDef()).voice.transcript_buffer, true);
+  assert.equal(qOf(await post(await saveBody({}))).get("saved"), "1", "unticked: absent from the form");
+  assert.equal((await voiceDef()).voice.transcript_buffer, false);
+  await reset();
+});
+
+test("the calendar id label says what empty means under auto: Crow's own, else Google primary, else it asks (en + es)", () => {
+  const t = translations["botbuilder.voiceRoutineCalendarId"];
+  assert.match(t.en, /empty: Crow picks its own calendar, else Google primary, else asks/);
+  assert.match(t.es, /vacío: Crow usa su propio calendario; si no, el principal de Google; si no, pregunta/);
+  assert.ok(!/never a shared one|nunca uno compartido/.test(`${t.en} ${t.es}`));
+});

@@ -3,9 +3,9 @@
  * options share, built in one place. A surface spreads these first, then its own display-only options.
  * Bundles reach this module through their panel routes' appImport (never a static import).
  */
-import { VOICE_DENY_TOOLS, CROW_VOICE_BOT_ID, isVoiceBotId, normalizeVoiceSettings } from "../../shared/voice-bot.js";
+import { VOICE_DENY_TOOLS, CROW_VOICE_BOT_ID, isVoiceBotId, isVoiceBotDef, normalizeVoiceSettings } from "../../shared/voice-bot.js";
 import { voiceLine } from "./voice-lines.js";
-import { VOICE_OWN_TOOL_NAMES } from "./own-tools.js";
+import { VOICE_OWN_TOOL_NAMES, resolveRoutineBackends } from "./own-tools.js";
 
 // VOICE_OWN_TOOL_NAMES: Crow's own tools, for listing (Bot Builder, the editor); never a policy-gate exemption.
 export { VOICE_DENY_TOOLS, CROW_VOICE_BOT_ID, isVoiceBotId, VOICE_OWN_TOOL_NAMES };
@@ -24,6 +24,23 @@ export function withVoiceProfiles(device, voiceDef) {
   const { tts_profile_id: tts, stt_profile_id: stt } = normalizeVoiceSettings(voiceDef);
   if (!tts && !stt) return device;
   return { ...device, ...(tts ? { tts_profile_id: tts } : {}), ...(stt ? { stt_profile_id: stt } : {}) };
+}
+
+/**
+ * Does the voice bot have any of Crow's own tools at hand (a calendar, reminders or tasks resolved, as own-tools.js
+ * forTurn resolves them)? `connected`: the connected add-on tool names, a Set or a function returning one (the
+ * gateway's connectedAddonToolNames); nothing else is read, never the network. false for any other bot or on doubt.
+ * The kiosk's command-vocabulary STT prompt is gated on it (PR 2.1 [r2 I7]).
+ */
+export function ownToolsLoaded(voiceDef, connected = null) {
+  if (!isVoiceBotDef(voiceDef)) return false;
+  let conn = new Set();
+  try {
+    const c = typeof connected === "function" ? connected() : connected;
+    if (c instanceof Set) conn = c;
+    else if (Array.isArray(c)) conn = new Set(c);
+  } catch { conn = new Set(); }
+  try { return Object.values(resolveRoutineBackends(normalizeVoiceSettings(voiceDef), conn)).some(Boolean); } catch { return false; }
 }
 
 /** Is the fast voice model's provider row (the id before the first "/") a cloud one? false on any doubt. */
@@ -90,6 +107,7 @@ export function crowVoiceTurnOptions({ surface, lang, voiceDef = null, cloud = f
     memoOnlyText: voiceLine("memo_only_say", lang),
     unsureText: voiceLine("unsure_say", lang),
     partlyDoneText: voiceLine("partly_done_say", lang),
+    hintText: voiceLine("hint_say", lang),
   };
   // The turn's own spoken lines (Crow's own tools, their confirmations) follow the surface's language and zone.
   if (typeof lang === "string" && lang) o.lang = lang;

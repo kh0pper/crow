@@ -232,3 +232,16 @@ test("shared collections appear as \"Name (owner)\": exact name, then id, then t
   assert.equal((await call("ws_cal_list_events", { calendar: "Recetas" })).code, "ambiguous", "own exact name vs a shared base name: never picked silently");
   assert.equal(await ok("Recetas (admin)"), true); assert.equal(await ok("recetas"), true, "the id still picks one");
 });
+
+test("each calendar says whether it is shared with Crow bot: owned by crow-bot is not; anyone else, or no owner known, is", async () => {
+  pim.addCalendar("crow-own", "Crow own", { owner: "crow-bot" });
+  pim.addCalendar("no-owner", "No owner", { owner: "" });
+  const r = await call("ws_cal_list_calendars", {});
+  const by = Object.fromEntries(r.data.calendars.map((c) => [c.id, c]));
+  assert.equal(by["crow-own"].shared, false);
+  assert.equal(by.menu_shared_by_admin.shared, true);
+  assert.equal(by.menu_shared_by_admin.owner, "Casey", "owner is unchanged");
+  assert.equal(by["no-owner"].shared, true, "an unknown owner counts as shared");
+  assert.equal(by["no-owner"].owner, null);
+  for (const c of r.data.calendars) assert.deepEqual(Object.keys(c).sort(), ["color", "id", "name", "owner", "shared", "writable"]);
+});

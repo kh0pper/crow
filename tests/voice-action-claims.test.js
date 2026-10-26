@@ -68,6 +68,57 @@ test("claimsAction: an honest refusal or a plain answer is not a claim", () => {
   assert.equal(claimsAction(42), false);
 });
 
+test("claimsAction: a state-style reply that says the item now exists is a claim (#499; en + es)", () => {
+  for (const s of [
+    "Coffee is booked for Tuesday.",
+    // Re-review ruling: booked / added / saved / created / put on take ANY subject, articles included.
+    "The coffee is booked for Tuesday.",
+    "The dentist is booked for Friday.",
+    "Lunch with the team was added for noon.",
+    "Okay, coffee with Sam on Tuesday at 9 is on your calendar.",
+    "Coffee's booked on Tuesday at nine.",
+    "Your calendar now has coffee on Tuesday.",
+    "It's on your calendar.",
+    "Lunch is set for noon.",
+    "Milk is on your list.",
+    "The reminder is set.",
+    "Okay, milk is on your list.",
+    "Está en tu calendario.",
+    "Quedó agendado.",
+    "Ya está en tu lista.",
+    "El recordatorio está puesto.",
+  ]) assert.equal(claimsAction(s), true, s);
+});
+
+test("claimsAction: a question, a read answer or a plain fact about a day is not a state claim (#499)", () => {
+  for (const s of [
+    "Is coffee on Tuesday?",
+    "What's on Tuesday?",
+    "Tuesday is a busy day.",
+    // The state half alone; the offer half ("want me to add it?") is an offer, which the guard already counts.
+    "The meeting is on Tuesday.",
+    "Nothing is on your calendar Tuesday.",
+    "Okay, nothing is on your calendar Tuesday.",
+    "What else is on your list?",
+    "Your calendar has three events on Tuesday.",
+    "It's sunny and 72 degrees today, with a light breeze.",
+    "The forecast is set to clear up by noon.",
+    "The game's on Tuesday at nine.",
+    // Re-review ruling: "X's on <day>" / "X's at <time>" with no add verb is a plain fact or a calendar read answer.
+    "Coffee's on Tuesday at nine.",
+    "Your dentist's on Friday at nine.",
+    "Halloween's on Friday.",
+    "Payday's on Friday.",
+    "Dinner's at noon.",
+    "Your meeting's on Tuesday.",
+    "Mom's birthday's on Sunday.",
+    "It's on Tuesday.",
+    "El recordatorio no está puesto.",
+  ]) assert.equal(claimsAction(s), false, s);
+  // The full sentence is still a claim, through its offer ("Want me to set a reminder?" always was).
+  assert.equal(claimsAction("The meeting is on Tuesday, want me to add it?"), true);
+});
+
 test("claimText: capped before any pattern runs; long repetitive input is fast", () => {
   assert.equal(claimText("x".repeat(CLAIM_MAX_CHARS + 500)).length, CLAIM_MAX_CHARS);
   const t0 = process.cpuUsage();

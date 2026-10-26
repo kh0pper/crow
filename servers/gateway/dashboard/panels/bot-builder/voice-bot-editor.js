@@ -5,7 +5,8 @@
  * refuses them with voice_bot_readonly). Its two writes are its own:
  *
  *   voice_bot_save    the switch, model, escalation, persona and name, the Routine section (calendar, reminders, tasks, confirm),
- *                     speaking voice and speech recognition, memory tools
+ *                     speaking voice and speech recognition, memory tools, the recent-transcripts switch
+ *                     (voice.transcript_buffer: in memory only, off unless ticked; voice/transcript-buffer.js)
  *   voice_bot_preset  rebuild the model, escalation and the preset's tool
  *                     entries from voiceBotDefinition (Memory tools stay as
  *                     the operator set them); "Reset to preset"
@@ -32,7 +33,7 @@ import {
   ROUTINE_BACKENDS, CONFIRM_LEVELS,
 } from "../../../../shared/voice-bot.js";
 import { resolveRoutineBackends } from "../../../voice/own-tools.js";
-import { connectedAddonToolNames } from "../../../ai/tool-executor.js";
+import { connectedAddonToolNames, createToolExecutor } from "../../../ai/tool-executor.js";
 import { loadModelOptions } from "./data-queries.js";
 import { rowRev, defRev } from "./def-adapter.js";
 import { emitBotDefsChanged } from "./defs-changed.js";
@@ -170,7 +171,7 @@ export async function handleVoiceBotSave(req, res, { db }) {
     ...def,
     fast_voice_model: model,
     system_prompt: prompt,
-    voice: { ...obj(def.voice), escalation, tts_profile_id: tts.id, stt_profile_id: stt.id },
+    voice: { ...obj(def.voice), escalation, tts_profile_id: tts.id, stt_profile_id: stt.id, transcript_buffer: b.transcript_buffer === "on" },
     tools: { ...obj(def.tools), crow_mcp: tools },
   };
   await applyRoutine(db, b, def, next);
@@ -242,9 +243,58 @@ function profileSelect(name, profiles, current, lang) {
 
 const RESOLVED_KEY = { workspace: "botbuilder.voiceRoutineWorkspace", google: "botbuilder.voiceRoutineGoogle", crow: "botbuilder.voiceRoutineCrow", board: "botbuilder.voiceRoutineBoard" };
 
+/** How long the editor waits for a Workspace listing before it renders without one. */
+const LIST_WAIT_MS = 4000;
+/** The Workspace calendars or task lists ({ id, name, owner, writable, shared }), or null when they can't be read now. */
+async function listWorkspace(tool, key) {
+  let ex = null;
+  try {
+    ex = createToolExecutor();
+    const call = ex.executeToolCalls([{ id: "editor-" + tool, name: tool, arguments: {} }]);
+    const [r] = await Promise.race([call, new Promise((res) => { const t = setTimeout(() => res([null]), LIST_WAIT_MS); t.unref?.(); })]);
+    if (!r || r.isError) return null;
+    const body = JSON.parse(String(r.result));
+    const items = body?.success === true ? body.data?.[key] : null;
+    return Array.isArray(items) ? items.filter((x) => x && typeof x.id === "string" && x.id) : null;
+  } catch { return null; } finally { try { await ex?.close?.(); } catch {} }
+}
+
+/**
+ * Where an unchosen "auto"/"workspace" add really goes, from the listing (own-tools.js resolveTarget, PR 2.1 Task 6):
+ * Crow's own (shared === false; a missing field counts as shared) → as resolved; else calendar auto with Google → google,
+ * task auto → board; else "ask". Unchanged when nothing is listed or an id is chosen.
+ */
+function effectiveRoutine(resolved, kind, chosen, auto, items, conn) {
+  const r = resolved[kind];
+  if (r !== "workspace" || chosen || !items) return r;
+  if (items.some((x) => x.writable === true && x.shared === false)) return r;
+  if (auto && kind === "calendar" && conn.has("gcal_create_event")) return "google";
+  if (auto && kind === "tasks") return "board";
+  return "ask";
+}
+
 /** The Routine section: where Crow's own calendar, reminder and task tools write, and how often it asks. */
 async function routineSection(db, v, lang, sec, hint) {
-  const resolved = resolveRoutineBackends(v, connectedAddonToolNames());
+  const conn = connectedAddonToolNames();
+  const resolved = resolveRoutineBackends(v, conn);
+  // Both listings at once: the worst case is one LIST_WAIT_MS, not two.
+  const [cals, lists] = await Promise.all([
+    resolved.calendar === "workspace" && conn.has("ws_cal_list_calendars") ? listWorkspace("ws_cal_list_calendars", "calendars") : null,
+    resolved.tasks === "workspace" && conn.has("ws_tasks_list_lists") ? listWorkspace("ws_tasks_list_lists", "lists") : null,
+  ]);
+  const calNow = effectiveRoutine(resolved, "calendar", v.routine.calendar.calendar, v.routine.calendar.backend === "auto", cals, conn);
+  const taskNow = effectiveRoutine(resolved, "tasks", v.routine.tasks.list, v.routine.tasks.backend === "auto", lists, conn);
+  // Each writable one, marked "Crow's own" (Crow bot's, as the voice line says) or "shared by <owner>".
+  const whose = (items, keys) => {
+    const rows = (items || []).filter((x) => x.writable === true);
+    if (!rows.length) return "";
+    return `<p class="btb-hint">${escapeHtml(t(keys.head, lang))}</p><ul class="btb-hint">` + rows.map((x) => {
+      const mark = x.shared === false ? t("botbuilder.voiceRoutineCrowsOwn", lang) : x.owner ? fill(t(keys.by, lang), { owner: String(x.owner) }) : t(keys.unknown, lang);
+      return `<li>${escapeHtml(String(x.name || x.id))} (${escapeHtml(x.id)}): ${escapeHtml(mark)}</li>`;
+    }).join("") + `</ul>`;
+  };
+  const calWhose = whose(cals, { head: "botbuilder.voiceRoutineCalendarsHere", by: "botbuilder.voiceRoutineSharedBy", unknown: "botbuilder.voiceRoutineSharedUnknown" });
+  const listWhose = whose(lists, { head: "botbuilder.voiceRoutineListsHere", by: "botbuilder.voiceRoutineSharedListBy", unknown: "botbuilder.voiceRoutineSharedListUnknown" });
   const nowLine = (r) => `<p class="btb-hint">${escapeHtml(fill(t("botbuilder.voiceRoutineNow", lang), { backend: t(RESOLVED_KEY[r] || "botbuilder.voiceRoutineNone", lang) }))}</p>`;
   const optLabel = { auto: "botbuilder.voiceRoutineAuto", off: "botbuilder.voiceRoutineOff", workspace: "botbuilder.voiceRoutineOptWorkspace", google: "botbuilder.voiceRoutineOptGoogle", crow: "botbuilder.voiceRoutineOptCrow", board: "botbuilder.voiceRoutineOptBoard" };
   const select = (name, list, cur) => `<select name="${name}" id="btb-v-${name}" form="btb-vsave">` + list.map((x) => opt(x, t(optLabel[x], lang), x === cur)).join("") + `</select>`;
@@ -259,12 +309,14 @@ async function routineSection(db, v, lang, sec, hint) {
   const label = (id, key) => `<label for="btb-v-${id}">${escapeHtml(t(key, lang))}</label>`;
   return sec("botbuilder.voiceRoutineTitle",
     hint("botbuilder.voiceRoutineWritesWhere") +
-    label("routine_calendar_backend", "botbuilder.voiceRoutineCalendar") + select("routine_calendar_backend", ROUTINE_BACKENDS.calendar, v.routine.calendar.backend) + nowLine(resolved.calendar) +
+    label("routine_calendar_backend", "botbuilder.voiceRoutineCalendar") + select("routine_calendar_backend", ROUTINE_BACKENDS.calendar, v.routine.calendar.backend) +
+    (calNow === "ask" ? nowLine(resolved.calendar) + hint("botbuilder.voiceRoutineWillAskCalendar") : nowLine(calNow)) + calWhose +
     // The reminder offer exists only while reminders resolve somewhere; with them off, say a calendar event can't be added.
     (resolved.calendar ? "" : hint(resolved.reminders ? "botbuilder.voiceRoutineNoCalendar" : "botbuilder.voiceRoutineNoCalendarNoReminder")) +
     textIn("routine_calendar_id", "botbuilder.voiceRoutineCalendarId", v.routine.calendar.calendar) +
     label("routine_reminders_backend", "botbuilder.voiceRoutineReminders") + select("routine_reminders_backend", ROUTINE_BACKENDS.reminders, v.routine.reminders.backend) + nowLine(resolved.reminders) +
-    label("routine_tasks_backend", "botbuilder.voiceRoutineTasks") + select("routine_tasks_backend", ROUTINE_BACKENDS.tasks, v.routine.tasks.backend) + nowLine(resolved.tasks) +
+    label("routine_tasks_backend", "botbuilder.voiceRoutineTasks") + select("routine_tasks_backend", ROUTINE_BACKENDS.tasks, v.routine.tasks.backend) +
+    (taskNow === "ask" ? nowLine(resolved.tasks) + hint("botbuilder.voiceRoutineWillAskList") : nowLine(taskNow)) + listWhose +
     textIn("routine_tasks_list", "botbuilder.voiceRoutineTaskList", v.routine.tasks.list) +
     label("routine_tasks_project_id", "botbuilder.voiceRoutineProject") + `<select name="routine_tasks_project_id" id="btb-v-routine_tasks_project_id" form="btb-vsave">${projOpts}</select>` +
     label("confirm", "botbuilder.voiceRoutineConfirm") +
@@ -344,6 +396,10 @@ export async function renderVoiceBotEditor(req, res, { db, layout, lang = "en", 
   const memSec = sec("botbuilder.voiceMemoryTitle",
     `<label class="btb-vcheck"><input type="checkbox" name="memory_tools" value="on" form="btb-vsave"${memoryOn ? " checked" : ""}> ` +
     `${escapeHtml(t("botbuilder.voiceMemoryLabel", lang))}</label>`);
+  // Off unless ticked; turning it off clears the buffer on the next turn or the defs-changed reload (transcript-buffer.js).
+  const transcriptsSec = sec("botbuilder.voiceTranscriptsTitle",
+    `<label class="btb-vcheck"><input type="checkbox" name="transcript_buffer" value="on" form="btb-vsave"${v.transcript_buffer ? " checked" : ""}> ` +
+    `${escapeHtml(t("botbuilder.voiceTranscriptsLabel", lang))}</label>` + hint("botbuilder.voiceTranscriptsWarn"));
   const routineSec = await routineSection(db, v, lang, sec, hint);
   const saveBar = `<p><button type="submit" class="btn btn-primary" form="btb-vsave">${escapeHtml(t("common.save", lang))}</button></p>`;
   const abilSec = kioskAvailable ? sec("botbuilder.voiceAbilTitle", abilityLineHtml(CROW_VOICE_BOT_ID)) + voiceAbilityScript(lang) : "";
@@ -352,6 +408,6 @@ export async function renderVoiceBotEditor(req, res, { db, layout, lang = "en", 
     title: "Bot Builder — " + name,
     content: PAGE_CSS + section(t("botbuilder.voiceEditorTitle", lang),
       backLink + notice + `<p>${escapeHtml(t("botbuilder.voiceEditorIntro", lang))}</p>` + forms +
-      onSec + presetSec + modelSec + personaSec + ttsSec + sttSec + memSec + routineSec + saveBar + abilSec),
+      onSec + presetSec + modelSec + personaSec + ttsSec + sttSec + memSec + routineSec + transcriptsSec + saveBar + abilSec),
   }));
 }

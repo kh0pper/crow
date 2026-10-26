@@ -1548,3 +1548,54 @@ test("same path: the Bot Builder dialog's bodies store exactly what the Kiosk pa
     await raw.execute({ sql: "DELETE FROM pi_bot_defs WHERE bot_id = 'vu-other'", args: [] });
   }
 });
+
+// ── PR 2.1 Task 7: the opt-in voice transcripts, an admin dashboard-session GET beside the metrics ──
+test("voice transcripts: a session gets the device's entries, no-store; no session is 401; Funnel is 403 even with the dashboard public", async () => {
+  const { createTranscriptBuffer } = await import("../servers/gateway/voice/transcript-buffer.js");
+  const { isAllowedNetwork } = await import("../servers/gateway/dashboard/auth.js");
+  const buffer = createTranscriptBuffer();
+  buffer.record("kiosk-a", { transcript: "add coffee Tuesday at nine", spoken: "Added Coffee.", tools_called: ["crow_calendar_add_event"], codes: ["crow_calendar_add_event:added"] });
+  // The real network check, so CROW_DASHBOARD_PUBLIC=true really opens it; the session check is a stub.
+  const r = createKioskRuntime(runtimeDeps({ isAllowedNetwork, voice: { runVoiceTurn: async () => ({ timings: {} }), speakText: async () => true, transcripts: buffer } }));
+  let authed = true;
+  const app = express(); app.use(r.router((req, res, next) => (authed ? next() : res.status(401).json({ error: "login" }))));
+  const { s: srv2, base: b } = await listen(app, r);
+  const prev = process.env.CROW_DASHBOARD_PUBLIC;
+  const path = "/api/kiosk/admin/displays/kiosk-a/voice-transcripts";
+  try {
+    process.env.CROW_DASHBOARD_PUBLIC = "true";
+    const ok = await fetch(b + path);
+    assert.equal(ok.status, 200);
+    assert.equal(ok.headers.get("cache-control"), "no-store");
+    const body = await ok.json();
+    assert.equal(body.entries.length, 1);
+    assert.equal(body.entries[0].transcript, "add coffee Tuesday at nine");
+    assert.equal(body.entries[0].spoken, "Added Coffee.");
+    assert.deepEqual((await (await fetch(b + "/api/kiosk/admin/displays/phone-b/voice-transcripts")).json()).entries, [], "per device");
+    const fun = await fetch(b + path, { headers: { "Tailscale-Funnel-Request": "?1" } });
+    assert.equal(fun.status, 403, "Funnel is refused even with CROW_DASHBOARD_PUBLIC=true");
+    assert.equal(fun.headers.get("cache-control"), "no-store");
+    assert.ok(!JSON.stringify(await fun.json()).includes("coffee"));
+    authed = false;
+    const no = await fetch(b + path);
+    assert.equal(no.status, 401);
+    assert.equal(no.headers.get("cache-control"), "no-store");
+    assert.ok(!JSON.stringify(await no.json()).includes("coffee"));
+    authed = true;
+    // An older core with no buffer: an empty list, never an error.
+    const old = createKioskRuntime(runtimeDeps({ isAllowedNetwork }));
+    const app2 = express(); app2.use(old.router((req, res, next) => next()));
+    const { s: srv3, base: b3 } = await listen(app2, old);
+    try { assert.deepEqual(await (await fetch(b3 + path)).json(), { entries: [], available: false }); } finally { old.stop(); srv3.close(); }
+  } finally {
+    if (prev === undefined) delete process.env.CROW_DASHBOARD_PUBLIC; else process.env.CROW_DASHBOARD_PUBLIC = prev;
+    r.stop(); srv2.close();
+  }
+});
+
+test("the turn check never lands in the voice transcripts: its turns carry noTranscript", async () => {
+  turnCalls.length = 0;
+  const r = await fetch(base + "/api/kiosk/internal/turn-check", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer ann-ok" }, body: "{}" });
+  assert.ok(turnCalls.length > 0, `turn check ran (${r.status})`);
+  assert.ok(turnCalls.every((o) => o.noTranscript === true && o.device.id === TURN_CHECK_DEVICE));
+});

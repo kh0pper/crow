@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { crowVoiceTurnOptions, VOICE_DENY_TOOLS, withVoiceProfiles, createVoiceBotLoader, CROW_VOICE_BOT_ID, isVoiceBotId, VOICE_BOT_CACHE_MS } from "../servers/gateway/voice/crow-voice.js";
+import { crowVoiceTurnOptions, VOICE_DENY_TOOLS, withVoiceProfiles, createVoiceBotLoader, CROW_VOICE_BOT_ID, isVoiceBotId, VOICE_BOT_CACHE_MS, ownToolsLoaded } from "../servers/gateway/voice/crow-voice.js";
 import { voiceLine, VOICE_LINES } from "../servers/gateway/voice/voice-lines.js";
 import { VOICE_DENY_TOOLS as SHARED_DENY, voiceBotDefinition } from "../servers/shared/voice-bot.js";
 import { STRINGS } from "../bundles/kiosk/server/strings.js";
@@ -139,4 +139,30 @@ test("loadVoiceBot: cached 30 s, and a bot-defs change reloads it at once", asyn
   gen++;
   await load(db);
   assert.equal(db.reads.bot, 3, "pibots:defs-changed (a new generation) re-reads at once");
+});
+
+// PR 2.1 Task 4: does the voice bot have Crow's own tools at hand (the kiosk's command-vocabulary STT prompt)?
+test("ownToolsLoaded: the voice bot with at least one routine backend resolved; never a network call", () => {
+  assert.equal(ownToolsLoaded(null), false);
+  assert.equal(ownToolsLoaded({ bot_id: "helper" }), false, "not the voice bot");
+  assert.equal(ownToolsLoaded(fast), true, "the defaults: Crow's own reminders and the board need no add-on");
+  const none = { ...fast, routine: { calendar: { backend: "google" }, reminders: { backend: "off" }, tasks: { backend: "workspace" } } };
+  assert.equal(ownToolsLoaded(none), false, "nothing resolves without the add-ons");
+  assert.equal(ownToolsLoaded(none, new Set(["gcal_create_event"])), true, "a connected calendar");
+  assert.equal(ownToolsLoaded(none, () => new Set(["ws_task_create"])), true, "a function is read");
+  assert.equal(ownToolsLoaded(none, () => { throw new Error("x"); }), false, "a throwing reader is no add-on");
+});
+
+test("crowVoiceTurnOptions: the claim-retry hint (PR 2.1 Task 5) in the surface's language, word for word turn.js's default", async () => {
+  const { HINT_TEXT } = await import("../servers/gateway/voice/turn.js");
+  assert.equal(crowVoiceTurnOptions({ surface: "kiosk", lang: "en", actionWhen: f, actionFollowWhen: g }).hintText, HINT_TEXT);
+  const es = crowVoiceTurnOptions({ surface: "glasses", lang: "es", actionWhen: f, actionFollowWhen: g }).hintText;
+  assert.equal(es, VOICE_LINES.es.hint_say);
+  assert.notEqual(es, HINT_TEXT);
+});
+
+test("the kiosk passes the shared hint through unchanged (no kiosk change needed)", () => {
+  const ctx = { store: createWmStore(), deviceId: "k1", caps: { windows: ["timer"], max_windows: 2, screen: { w: 800, h: 480 }, audio: { out: true } }, lang: "es", sources: [], items: [], emit: () => {}, surface: "kiosk" };
+  const o = displayTurnOptions(ctx, { settings: { lang: "es" }, crowVoice: { turnOptions: crowVoiceTurnOptions, VOICE_DENY_TOOLS } });
+  assert.equal(o.hintText, VOICE_LINES.es.hint_say);
 });

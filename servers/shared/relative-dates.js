@@ -72,6 +72,11 @@ export function zoneContext(now, tz) {
   const m = /^GMT([+-]\d{2}:\d{2})$/.exec(name);
   return `[Zone] ${zone}, UTC${m ? m[1] : "+00:00"}`;
 }
+/**
+ * The [Dates] line's rule for the past. A turn that offers a write tool drops it (voice turn.js, PR 2.1): a mistranscribed
+ * "had" read as the past wrote last Tuesday's event; there, Crow's own tools check a past date and ask about the next one.
+ */
+export const PAST_DAY_RULE = "For something already past, it is the previous one.";
 const isoYmd = ({ y, m, d }) => `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
 
 export function relativeDatesContext(now, tz) {
@@ -80,7 +85,7 @@ export function relativeDatesContext(now, tz) {
   const at = (i) => { const day = fromDayNum(dayNum(today) + i); const o = offsetOf(day, tz); return `${isoYmd(day)}${o !== off ? ` (${o})` : ""}`; };
   const days = [];
   for (let i = 1; i <= 6; i += 1) days.push(`${fmtYmd("en-US", fromDayNum(dayNum(today) + i), WEEKDAY)} ${at(i)}${i === 1 ? " (tomorrow)" : ""}`);
-  return `[Dates] To add or plan something, a day named without a date is the next one: ${days.join(", ")}; ${fmtYmd("en-US", today, WEEKDAY)} is today ${isoYmd(today)} or next week ${at(7)}. For something already past, it is the previous one. UTC offset ${off}.`;
+  return `[Dates] To add or plan something, a day named without a date is the next one: ${days.join(", ")}; ${fmtYmd("en-US", today, WEEKDAY)} is today ${isoYmd(today)} or next week ${at(7)}. ${PAST_DAY_RULE} UTC offset ${off}.`;
 }
 
 const RELATIVE_DAY = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|thur?s?|fri|sat|sun|tomorrow|tmrw|weekend|next week|lunes|martes|miercoles|jueves|viernes|sabado|domingo|manana|fin de semana|proxima semana|semana que viene)(s)?\b/;

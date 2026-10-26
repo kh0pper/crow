@@ -61,3 +61,16 @@ test("undo deletes it through the existing undo tool", async () => {
   assert.equal(u.success, true); assert.equal(u.data.undone, "removed");
   assert.equal([...pim.calendars.get("tareas").objects.values()].some((o) => o.text.includes("Deshacer esto")), false);
 });
+
+test("each task list says whether it is shared with Crow bot, and who owns it", async () => {
+  pim.addCalendar("mias", "Mías", { components: ["VTODO"], owner: "crow-bot" });
+  pim.addCalendar("sin-dueno", "Sin dueño", { components: ["VTODO"], owner: "" });
+  const t = await call("ws_tasks_list_lists", {});
+  const by = Object.fromEntries(t.data.lists.map((l) => [l.id, l]));
+  assert.equal(by.mias.shared, false);
+  assert.equal(by.tareas.shared, true);
+  assert.equal(typeof by.tareas.owner, "string");
+  assert.equal(by["sin-dueno"].shared, true, "an unknown owner counts as shared");
+  assert.equal(by["sin-dueno"].owner, null);
+  for (const l of t.data.lists) assert.deepEqual(Object.keys(l).sort(), ["id", "name", "owner", "shared", "writable"]);
+});

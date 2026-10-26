@@ -268,6 +268,11 @@ export function createConfirmGate({ now = Date.now, ttlMs = CONFIRM_TTL_MS } = {
       pending.set(deviceId, { toolName: eff, argsHash: hash, at: now() });
       return "confirm";
     },
+    /** Is this very call (name + canonical args) waiting for a yes on this device? A read: nothing changes. */
+    has({ deviceId, eff, args }) {
+      const p = pending.get(deviceId);
+      return !!p && p.toolName === eff && p.argsHash === canonicalArgsHash(args) && now() - p.at < ttlMs;
+    },
   };
 }
 

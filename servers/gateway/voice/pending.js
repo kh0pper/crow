@@ -17,7 +17,8 @@ import { phraseWords, normalizeIntentLists, listMatches } from "./tool-families.
 /** How long a pending proposal waits for its yes (plan constant). */
 export const HANDOFF_PROPOSAL_TTL_MS = 120_000;
 
-const PENDING_KINDS = new Set(["routine", "handoff", "which", "stop"]);
+// which_calendar (PR 2.1 Task 6): Crow asks which calendar or task list to use when none is chosen or its own (own-tools.js).
+const PENDING_KINDS = new Set(["routine", "handoff", "which", "which_calendar", "stop"]);
 
 export function createPendingStore({ now = Date.now, ttlMs = HANDOFF_PROPOSAL_TTL_MS } = {}) {
   const entries = new Map();   // deviceId → entry
