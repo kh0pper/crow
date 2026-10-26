@@ -81,6 +81,37 @@ test("`at` makes a one-shot; a past time and two timings are refused", async () 
   assert.equal((await create({ task: "raw once", cron_expression: "@once" })).isError, true);
 });
 
+test("`when` takes plain words: a repeating one, a one-shot, and a refusal with its hint", async () => {
+  const r = await create({ task: "standup", when: "every weekday at 8" });
+  assert.equal(r.isError, false, r.text);
+  let row = lastRow();
+  assert.equal(row.cron_expression, "0 8 * * 1-5");
+  assert.equal(row.task, "reminder:standup");
+  assert.match(r.text, /Every weekday at 8:00 AM/);
+  assert.equal((r.text.match(/^- .*\d:\d\d/gm) || []).length, 3, "the next 3 runs are listed");
+  const es = await create({ task: "gym", when: "todos los lunes a las 18:00", tz: "Europe/Madrid" });
+  assert.equal(es.isError, false, es.text);
+  row = lastRow();
+  assert.equal(row.cron_expression, "0 18 * * 1");
+  assert.equal(row.tz, "Europe/Madrid");
+  const once = await create({ task: "oven", when: "in 20 minutes" });
+  assert.equal(once.isError, false, once.text);
+  row = lastRow();
+  assert.equal(row.cron_expression, "@once");
+  const gap = Date.parse(row.next_run) - Date.now();
+  assert.ok(gap > 19 * 60_000 && gap <= 21 * 60_000, row.next_run);
+  const often = await create({ task: "spam", when: "every 15 minutes" });
+  assert.equal(often.isError, true);
+  assert.match(often.text, /at most once an hour/);
+  const vague = await create({ task: "x", when: "whenever" });
+  assert.equal(vague.isError, true);
+  assert.match(vague.text, /every weekday at 8/);
+  assert.equal((await create({ task: "both", when: "every day at 8", cron_expression: "0 8 * * *" })).isError, true);
+  const long = await create({ task: "x", when: "every day at 8 ".repeat(30) });
+  assert.equal(long.isError, true);
+  assert.match(long.text, /too long/, "the parser's own hint reaches the caller");
+});
+
 test("a reminder more often than hourly is refused; a bot routine may be", async () => {
   const r = await create({ task: "check logs", cron_expression: "*/5 * * * *" });
   assert.equal(r.isError, true);

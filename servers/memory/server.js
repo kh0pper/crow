@@ -25,7 +25,8 @@ import { emitOrQueue } from "../shared/sync-emit.js";
 import { jsonObject } from "../shared/tool-schema-types.js";
 import { isVoiceBotId } from "../shared/voice-bot.js";
 import { scheduleKind, reminderText, zoneFor, cronNext, cadenceMinutes, SCHEDULE_OWNERS, ONCE, REMINDER_PREFIX } from "../shared/schedule-core.js";
-import { instanceZone, hasTzColumn, deleteSchedule, requestRun, runSummaries } from "../shared/schedule-store.js";
+import { parseWhen } from "../shared/schedule-words.js";
+import { instanceZone, instanceLang, hasTzColumn, deleteSchedule, requestRun, runSummaries } from "../shared/schedule-store.js";
 import { validTimeZone } from "../shared/relative-dates.js";
 
 export function createMemoryServer(dbPath, options = {}) {
@@ -1111,16 +1112,17 @@ export function createMemoryServer(dbPath, options = {}) {
 
   server.tool(
     "crow_create_schedule",
-    "Create a reminder (the default type) or a bot routine. Give EITHER cron_expression for a repeating schedule ('0 9 * * *' = daily at 9:00, '0 9 * * 1-5' = weekdays) OR at (an ISO date-time) for a one-time reminder. Times are in tz, or the instance's time zone when tz is left out. Reminders repeat at most hourly. The daily news briefing is set in the News app (crow_media_schedule_briefing), not here.",
+    "Create a reminder (the default type) or a bot routine. Give ONE of: when (plain words in English or Spanish, e.g. 'every weekday at 8', 'tomorrow at 3pm', 'todos los lunes a las 18:00'), cron_expression for a repeating schedule ('0 9 * * *' = daily at 9:00, '0 9 * * 1-5' = weekdays), or at (an ISO date-time) for a one-time reminder. Times are in tz, or the instance's time zone when tz is left out. Reminders repeat at most hourly. The daily news briefing is set in the News app (crow_media_schedule_briefing), not here.",
     {
       task: z.string().max(1000).describe("What to be reminded of (a reminder), or pipeline:botcron:<bot_id> (a bot routine)"),
       cron_expression: z.string().max(50).optional().describe("Cron expression for a repeating schedule (e.g. '0 9 * * *' for daily at 9am)"),
       at: z.string().max(40).optional().describe("ISO date-time WITH its offset for a one-time reminder (e.g. '2026-11-03T10:00:00-06:00' or '…Z')"),
+      when: z.string().max(4000).optional().describe("Plain words for when (en or es), e.g. 'every day at 7:30pm', 'mondays and thursdays at 18:00', 'every 2 hours', 'on the 1st of every month at 9', 'in 20 minutes', 'mañana a las 15:00'. Ambiguous words are refused with a hint."),
       tz: z.string().max(64).optional().describe("IANA time zone (e.g. 'America/Chicago'); default: the instance's zone"),
       type: z.enum(["reminder", "bot_routine", "briefing"]).optional().describe("Schedule type; default: reminder (or bot_routine for a pipeline:botcron: task)"),
       description: z.string().max(500).optional().describe("Optional description of the schedule"),
     },
-    async ({ task, cron_expression, at, tz, type, description }) => {
+    async ({ task, cron_expression, at, when, tz, type, description }) => {
       const t = String(task).trim();
       const derived = scheduleKind(t);
       if (type === "briefing" || derived === "briefing") return briefingError();
@@ -1133,8 +1135,16 @@ export function createMemoryServer(dbPath, options = {}) {
       if (botcron && isVoiceBotId(botcron[1])) {
         return scheduleError("The Crow voice bot cannot take background jobs, so it cannot be scheduled.");
       }
-      if ((cron_expression ? 1 : 0) + (at ? 1 : 0) !== 1) return scheduleError("Give exactly one of cron_expression (repeating) or at (one time).");
+      if ((cron_expression ? 1 : 0) + (at ? 1 : 0) + (when ? 1 : 0) !== 1) return scheduleError("Give exactly one of when (plain words), cron_expression (repeating) or at (one time).");
       if (tz !== undefined && !validTimeZone(tz)) return scheduleError(`"${tz}" is not a time zone name (use one like America/Chicago).`);
+      let summary = null;
+      if (when) {
+        // Plain words become a cron expression or an `at`, then take the same checks as those.
+        const words = parseWhen(when, { lang: await instanceLang(db), tz: zoneFor(tz, await instanceZone(db)), now: Date.now(), type: kind });
+        if (!words.ok) return scheduleError(words.hint);
+        if (words.cron === ONCE) at = words.at; else cron_expression = words.cron;
+        summary = [words.summary, `Next ${words.next3.length === 1 ? "run" : "runs"}:`, ...words.next3.map((x) => `- ${x.text}`)].join("\n");
+      }
       // The bot ticker computes times without a zone until bot routines learn zones (panel PR 4).
       if (tz !== undefined && kind === "bot_routine") return scheduleError("Bot routines cannot take a time zone yet; they run in the instance's time zone. Leave tz out.");
       const withTz = await hasTzColumn(db);
@@ -1174,7 +1184,7 @@ export function createMemoryServer(dbPath, options = {}) {
         content: [
           {
             type: "text",
-            text: `Schedule created (id: ${Number(result.lastInsertRowid)}, type: ${TYPE_LABEL[kind]}, task: ${stored}, ${cron === ONCE ? "once" : `cron: ${cron}`}, zone: ${zone}, next run: ${nextRun})`,
+            text: `Schedule created (id: ${Number(result.lastInsertRowid)}, type: ${TYPE_LABEL[kind]}, task: ${stored}, ${cron === ONCE ? "once" : `cron: ${cron}`}, zone: ${zone}, next run: ${nextRun})${summary ? `\n${summary}` : ""}`,
           },
         ],
       };
