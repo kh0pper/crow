@@ -3,8 +3,9 @@
  * play resolver, media session and stations source. The station names are made up (KTPF), in the shape of a
  * real three-preset list: an HD1 with the bare call sign as its alias, an HD2 and an HD3 with their own.
  *
- *   - A bare spelled call sign with no verb ("K T P F.", "No, K T P F", "KTPF.") is a station request: T1 plays an
- *     exact name only (a sound-alike is asked about), and crow_play is OFFERED for it when T1 is not.
+ *   - A bare spelled call sign with no verb ("K T P F.", "No, K T P F", "KTPF.") is a station request: T1 plays it by
+ *     the same rules as "Play …" (an exact name, or a same-sound call sign: operator ruling), and crow_play is OFFERED
+ *     for it when T1 is not.
  *   - Partial or misheard spellings are ASKED about ("Did you mean …?"), never played on a guess: a spelled
  *     prefix ("Play K T P"), one letter dropped, swapped or added ("TPF", "ATPF", "KTP2"), a trailing word after
  *     an exact name ("KTPF downtown").
