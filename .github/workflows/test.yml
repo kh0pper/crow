@@ -65,17 +65,32 @@ jobs:
       # headless Chrome (tests/fixtures/headless-chrome.mjs), found under
       # ~/.cache/ms-playwright. Pinned: playwright 1.63.0 = Chrome Headless
       # Shell 153.0.8010.12 (build 1243). --with-deps installs its system libs.
-      - name: Cache the headless Chrome download
-        id: pw-cache
-        uses: actions/cache@v4
+      # Slow-mirror days (2026-10-26: ffmpeg alone hung 20 min) made setup eat
+      # the whole limit. Reuse the .deb files and the browser from earlier
+      # runs so installs rarely touch the mirror, retry apt, and cap each
+      # install step so a hung mirror fails fast with a clear message.
+      # restore + an explicit save (if: always()) instead of actions/cache,
+      # so a cache is still saved when a later step fails or the job is slow.
+      - name: Restore apt packages and the headless Chrome download
+        id: ci-cache
+        uses: actions/cache/restore@v4
         with:
-          path: ~/.cache/ms-playwright
-          key: ms-playwright-${{ runner.os }}-1.63.0-chromium-headless-shell
+          path: |
+            ~/apt-debs
+            ~/.cache/ms-playwright
+          key: ci-setup-${{ runner.os }}-pw1.63.0-${{ github.run_id }}
+          restore-keys: ci-setup-${{ runner.os }}-pw1.63.0-
+      - name: Point apt at the restored packages (retries, keep downloads)
+        run: |
+          printf '%s\n' 'Acquire::Retries "3";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'APT::Keep-Downloaded-Packages "true";' 'Binary::apt::APT::Keep-Downloaded-Packages "true";' | sudo tee /etc/apt/apt.conf.d/80-crow-ci >/dev/null
+          sudo rm -f /etc/apt/apt.conf.d/docker-clean
+          if ls ~/apt-debs/*.deb >/dev/null 2>&1; then sudo cp ~/apt-debs/*.deb /var/cache/apt/archives/ && echo "restored $(ls ~/apt-debs/*.deb | wc -l) cached packages"; fi
       # Cache miss: download the browser and its system libs. Cache hit: only
       # the system libs (the browser binary is already in ~/.cache).
       - name: Headless Chrome for the live layout tests
+        timeout-minutes: 12
         run: |
-          if [ "${{ steps.pw-cache.outputs.cache-hit }}" = "true" ]; then
+          if ls ~/.cache/ms-playwright/chromium_headless_shell-* >/dev/null 2>&1; then
             npx --yes playwright@1.63.0 install-deps chromium-headless-shell
           else
             npx --yes playwright@1.63.0 install --with-deps chromium-headless-shell
@@ -88,11 +103,23 @@ jobs:
       # need ffmpeg: installed explicitly, not left to whatever the image or an
       # earlier step happens to carry.
       - name: SunVox Studio bundle deps (engine tests)
+        timeout-minutes: 12
         # The playwright step above already refreshed the apt lists in this job,
         # so try the install first and only re-run apt-get update if it fails.
         run: |
           sudo apt-get install -y -qq ffmpeg libasound2t64 || sudo apt-get install -y -qq ffmpeg libasound2 || { sudo apt-get update -qq && { sudo apt-get install -y -qq ffmpeg libasound2t64 || sudo apt-get install -y -qq ffmpeg libasound2; }; }
           npm ci --prefix bundles/sunvox-studio --omit=optional --ignore-scripts --no-audit --no-fund
+      - name: Collect the downloaded apt packages for the cache
+        if: always()
+        run: mkdir -p ~/apt-debs && cp /var/cache/apt/archives/*.deb ~/apt-debs/ 2>/dev/null; echo "$(ls ~/apt-debs/*.deb 2>/dev/null | wc -l) packages to cache"
+      - name: Save apt packages and the headless Chrome download
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/apt-debs
+            ~/.cache/ms-playwright
+          key: ci-setup-${{ runner.os }}-pw1.63.0-${{ github.run_id }}
       # GITHUB_ACTIONS=true applies tests/ci-exclusions.json (empty today);
       # host-bound tests self-skip via in-file capability guards instead.
       # CROW_REQUIRE_TEST_CHROME: a browser that fails to start fails the live
