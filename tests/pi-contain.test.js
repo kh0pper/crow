@@ -27,9 +27,13 @@ test("integration: a contained PiRpc child sees only its engine, its paths and i
   const dataDir = dirname(CROW_DB);
   assert.ok(dataDir.startsWith(tmpdir()) || dataDir.includes("crow-suite"), "suite scratch data dir: " + dataDir);
   mkdirSync(dataDir, { recursive: true });
-  writeFileSync(join(dataDir, "identity.json"), "FAKE-IDENTITY");
+  // Probe files with unique names: the suite's scratch data dir is shared by
+  // test files running in parallel (never overwrite identity.json there).
+  const probeData = join(dataDir, `contain-probe-${process.pid}.json`);
+  writeFileSync(probeData, "FAKE-IDENTITY");
   const crowHome = process.env.CROW_HOME;
-  writeFileSync(join(crowHome, "board-token"), "FAKE-TOKEN");
+  const probeToken = join(crowHome, `contain-probe-${process.pid}-token`);
+  writeFileSync(probeToken, "FAKE-TOKEN");
 
   const agent = join(scratch, "agent");
   mkdirSync(join(agent, "pkg"), { recursive: true });
@@ -69,7 +73,7 @@ test("integration: a contained PiRpc child sees only its engine, its paths and i
   process.env.CROW_PI_CONTAIN_BOTS = "contain-test-bot";
   process.env.PI_CODING_AGENT_DIR = agent;
   delete process.env.CROW_PI_SANDBOX;
-  const testPaths = { hidden, boardToken: join(crowHome, "board-token"), identity: join(dataDir, "identity.json"),
+  const testPaths = { hidden, boardToken: probeToken, identity: probeData,
     agentSessions: join(agent, "sessions", "operator-session.jsonl"), repo: REPO, out, notes, data: dataDir, session, agent };
   const { spawn: spawnSentinel } = await import("node:child_process");
   const sentinel = spawnSentinel("sleep", ["60"], { stdio: "ignore" });
@@ -85,8 +89,8 @@ test("integration: a contained PiRpc child sees only its engine, its paths and i
     assert.equal(r.ssh, false, "~/.ssh is not in the sandbox");
     assert.equal(r.claude, false, "~/.claude is not in the sandbox");
     assert.equal(r.hidden, false, "a host dir outside the bot's paths does not exist inside");
-    assert.equal(r.boardToken, false, "CROW_HOME's token files are not bound");
-    assert.ok(r.identity === "" || r.identity === "ERR:EACCES", "identity.json is masked (empty or unreadable): " + r.identity);
+    assert.equal(r.boardToken, false, "CROW_HOME's *-token files are not bound");
+    assert.ok(r.identity === "" || r.identity === "ERR:EACCES", "a non-DB data entry is masked (empty or unreadable): " + r.identity);
     assert.notEqual(r.identity, "FAKE-IDENTITY");
     assert.equal(r.agentSessions, false, "the operator's pi sessions are not visible");
     assert.equal(r.repoReadable, true, "the checkout is readable");
@@ -107,26 +111,27 @@ test("integration: a contained PiRpc child sees only its engine, its paths and i
   } finally {
     try { sentinel.kill("SIGKILL"); } catch {}
     await pi.close();
+    rmSync(probeData, { force: true }); rmSync(probeToken, { force: true });
   }
-  const leftovers = readdirSync(tmpdir()).filter((e) => e.startsWith("crow-pi-agent-"));
-  assert.ok(!leftovers.some((e) => { try { return existsSync(join(tmpdir(), e, "settings.json")) && false; } catch { return false; } }));
 });
 
 test("integration: bypass mode cannot be contained: the spawn throws and leaves no shadow", { skip, timeout: 30000 }, async () => {
   const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
   process.env.CROW_PI_CONTAIN_BOTS = "contain-bypass-bot";
-  const before = new Set(readdirSync(tmpdir()).filter((e) => e.startsWith("crow-pi-agent-")));
+  const runDir = join(process.env.CROW_HOME, "contain-run");
+  const list = () => { try { return readdirSync(runDir).filter((e) => e.startsWith("crow-pi-agent-")); } catch { return []; } };
+  const before = new Set(list());
   const session = join(scratch, "session-b"); mkdirSync(join(session, "sessions"), { recursive: true });
   assert.throws(() => new PiRpc({
     def: { bot_id: "contain-bypass-bot", permission_policy: { bash: "deny", write_paths: [] } },
     sessionDir: session, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: process.execPath,
     cliPath: join(scratch, "nope.mjs"), permissionMode: "bypass",
   }), /cannot run in the contain tier/);
-  const after_ = readdirSync(tmpdir()).filter((e) => e.startsWith("crow-pi-agent-") && !before.has(e));
+  const after_ = list().filter((e) => !before.has(e));
   assert.deepEqual(after_, [], "the agent shadow was removed");
 });
 
-const myShadows = () => readdirSync(tmpdir()).filter((e) => e.startsWith("crow-pi-agent-" + process.pid + "-"));
+const myShadows = () => { try { return readdirSync(join(process.env.CROW_HOME, "contain-run")).filter((e) => e.startsWith("crow-pi-agent-" + process.pid + "-")); } catch { return []; } };
 async function waitGone(ms = 20000) {
   const end = Date.now() + ms;
   while (Date.now() < end) { if (!myShadows().length) return true; await new Promise((r) => setTimeout(r, 100)); }
@@ -161,4 +166,11 @@ test("sweepStaleContainDirs removes dirs of dead spawners only", async () => {
   mkdirSync(join(parent, "unrelated-999999998"));
   assert.equal(sweepStaleContainDirs({ parent }), 2);
   assert.deepEqual(readdirSync(parent).sort(), [`crow-pi-agent-${process.pid}-abc`, "crow-pi-agent-1-abc", "unrelated-999999998"].sort());
+});
+
+test("spawn_env cannot carry loader hooks (LD_*, NODE_OPTIONS beyond heap size, NODE_PATH)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../scripts/pi-bots/bridge.mjs", import.meta.url), "utf8");
+  assert.match(src, /\^LD_\|\^DYLD_/);
+  assert.match(src, /k === "NODE_OPTIONS" && !\//);
 });
