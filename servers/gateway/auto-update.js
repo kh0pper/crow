@@ -156,14 +156,23 @@ async function lockPath(cwd) {
 function readLock(path) {
   try {
     const [pidLine, tsLine] = readFileSync(path, "utf8").split("\n");
-    return { pid: parseInt(pidLine, 10), ts: Date.parse(tsLine || "") };
+    let mtimeMs = NaN;
+    try { mtimeMs = statSync(path).mtimeMs; } catch {}
+    return { pid: parseInt(pidLine, 10), ts: Date.parse(tsLine || ""), mtimeMs };
   } catch { return null; }
 }
 
+/** A lock file with no pid yet is being written (wx create, then write): young = held. */
+const LOCK_WRITE_GRACE_MS = 5000;
+
 function lockIsStale(info) {
-  if (!info || !Number.isFinite(info.pid)) return true;
+  if (!info) return true;
+  if (!Number.isFinite(info.pid)) {
+    return !(Number.isFinite(info.mtimeMs) && Date.now() - info.mtimeMs < LOCK_WRITE_GRACE_MS);
+  }
   let alive = true;
-  try { process.kill(info.pid, 0); } catch { alive = false; }
+  // EPERM: the pid exists but belongs to another user, so it is alive.
+  try { process.kill(info.pid, 0); } catch (e) { alive = !!(e && e.code === "EPERM"); }
   const old = !Number.isFinite(info.ts) || Date.now() - info.ts > LOCK_STALE_MS;
   return !alive || old; // reclaim on (dead PID) OR (age>30min) — a wedged live updater must not block forever
 }

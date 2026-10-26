@@ -316,6 +316,12 @@ export async function convergeInstance({ appRoot, instance = null, pulled = fals
     log("could not acquire the checkout lock — deferring convergence to the next tick");
     return { pulled, converged: false, skipped: "tree-busy", sha: head, applied: [] };
   }
+  // A read-only tree's lock was only observed: if HEAD moved since it was
+  // read, a pull happened in between; migrate next tick from a settled tree.
+  if (lock.endsWith("#observed") && (await git(root, ["rev-parse", "HEAD"])).stdout !== head) {
+    log("read-only tree moved while converging — deferring to the next tick");
+    return { pulled, converged: false, skipped: "tree-busy", sha: head, applied: [] };
+  }
 
   try {
     const { runMigrations } = await import("../../scripts/migrations/runner.mjs");
