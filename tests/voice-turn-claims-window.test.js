@@ -268,7 +268,7 @@ test("(10) a stray own call with bad_args on a carried-only plain turn never ste
 
 test("(11) a stray own write on a carried-only turn asks first; nothing is written until a yes, which writes once", async () => {
   const pending = createPendingStore({ now: () => 1_000 });
-  const own = createOwnTools({ pending, connected: () => new Set(["gcal_create_event"]) });
+  const own = createOwnTools({ pending, now: () => Date.parse("2026-10-26T08:00:00-05:00"), connected: () => new Set(["gcal_create_event"]) });
   const h = gateHarness({ rounds: [call("crow_calendar_add_event", LUNCH), call("crow_calendar_add_event", { title: "coffee", start: "2026-10-27T09:00:00-05:00" }, "c2")] });
   const writes = [];
   h.deps.createToolExecutor = () => ({
@@ -317,7 +317,7 @@ test("(13) an ordinary bot: a tool-using turn 11 minutes ago is no longer carrie
 // ─── PR 2.1 Task 4 fix round 1: a rewritten turn ("had …" heard, "add …" taken) never writes without a spoken yes ───
 test("(R1) 'had lunch with Ann on Friday' (rewritten): the question is heard and captioned, nothing is written, and a yes writes once", async () => {
   const pending = createPendingStore({ now: () => 1_000 });
-  const own = createOwnTools({ pending, connected: () => new Set(["gcal_create_event"]) });
+  const own = createOwnTools({ pending, now: () => Date.parse("2026-10-26T08:00:00-05:00"), connected: () => new Set(["gcal_create_event"]) });
   const h = gateHarness({ rounds: [call("crow_calendar_add_event", { title: "lunch with Ann", start: "2026-10-30T12:00:00-05:00" })] });
   const writes = [];
   h.deps.createToolExecutor = () => ({
