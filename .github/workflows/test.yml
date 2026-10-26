@@ -31,7 +31,12 @@ permissions:
 jobs:
   suite:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 30, not 15: on 2026-10-26 the runner's apt mirror and the playwright CDN
+    # were slow enough (~9.5 min browser + deps, ~5.5 min apt-get update) that
+    # setup alone used the whole 15 minutes and every suite was cancelled
+    # before a test ran. The cache below takes the browser download off the
+    # path; the margin covers a slow mirror.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -60,8 +65,21 @@ jobs:
       # headless Chrome (tests/fixtures/headless-chrome.mjs), found under
       # ~/.cache/ms-playwright. Pinned: playwright 1.63.0 = Chrome Headless
       # Shell 153.0.8010.12 (build 1243). --with-deps installs its system libs.
+      - name: Cache the headless Chrome download
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ runner.os }}-1.63.0-chromium-headless-shell
+      # Cache miss: download the browser and its system libs. Cache hit: only
+      # the system libs (the browser binary is already in ~/.cache).
       - name: Headless Chrome for the live layout tests
-        run: npx --yes playwright@1.63.0 install --with-deps chromium-headless-shell
+        run: |
+          if [ "${{ steps.pw-cache.outputs.cache-hit }}" = "true" ]; then
+            npx --yes playwright@1.63.0 install-deps chromium-headless-shell
+          else
+            npx --yes playwright@1.63.0 install --with-deps chromium-headless-shell
+          fi
       # The SunVox engine tests (tests/sunvox-studio.test.js) load the bundle's
       # vendored native library through koffi, which lives in the bundle's own
       # node_modules. Install it with exactly the flags the Extensions page
@@ -70,9 +88,10 @@ jobs:
       # need ffmpeg: installed explicitly, not left to whatever the image or an
       # earlier step happens to carry.
       - name: SunVox Studio bundle deps (engine tests)
+        # The playwright step above already refreshed the apt lists in this job,
+        # so try the install first and only re-run apt-get update if it fails.
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg libasound2t64 || sudo apt-get install -y -qq ffmpeg libasound2
+          sudo apt-get install -y -qq ffmpeg libasound2t64 || sudo apt-get install -y -qq ffmpeg libasound2 || { sudo apt-get update -qq && { sudo apt-get install -y -qq ffmpeg libasound2t64 || sudo apt-get install -y -qq ffmpeg libasound2; }; }
           npm ci --prefix bundles/sunvox-studio --omit=optional --ignore-scripts --no-audit --no-fund
       # GITHUB_ACTIONS=true applies tests/ci-exclusions.json (empty today);
       # host-bound tests self-skip via in-file capability guards instead.
