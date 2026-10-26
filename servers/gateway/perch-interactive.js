@@ -446,7 +446,12 @@ function cardFrom(m) {
       card.options = m.options.slice();
     }
   }
-  if (m.placeholder != null) card.placeholder = maskSecrets(m.placeholder, CARD);
+  if (m.placeholder != null) {
+    const ph = maskSecretsDetailed(m.placeholder, CARD);
+    card.placeholder = ph.text;
+    failed = failed || !!ph.failed;
+    tooLong = tooLong || !!ph.truncated;
+  }
   if (m.message != null) {
     const msg = maskSecretsDetailed(m.message, CARD);
     card.message = msg.text;
@@ -468,12 +473,14 @@ function cardFrom(m) {
   // The mask itself failed: the card shows a blank, and a blank must never be
   // approved (answer() turns a confirm into a "no").
   if (failed || tooLong) {
+    // Nothing of a card that could not be masked in full is shown: title,
+    // message, prefill, placeholder and options all go.
     raw.failed = true;
-    card.message = tooLong
-      ? "This card is too long to show safely, so its text is not shown. It cannot be approved from here."
-      : "This card could not be checked for secrets, so its text is not shown. It cannot be approved from here.";
+    card.title = "";
+    card.message = unshownCardText(tooLong);
     if (card.prefill != null) card.prefill = "";
-    if (Array.isArray(card.options)) card.options = card.options.map((o) => (String(o).length > 200 ? String(o).slice(0, 200) + "\u2026" : o));
+    if (card.placeholder != null) card.placeholder = "";
+    if (Array.isArray(card.options)) card.options = [];
   }
   if (raw.options || raw.prefill != null || raw.failed) Object.defineProperty(card, RAW_CARD, { value: raw });
   return card;
@@ -511,6 +518,13 @@ function restorePrefill(value, shownPrefill, rawPrefill) {
   return typed.reduce((acc, seg, i) => acc + (i ? spans[i - 1] : "") + seg, "");
 }
 
+/** The message of a card shown without its text (cardFrom, the combined card). */
+function unshownCardText(tooLong) {
+  return tooLong
+    ? "This card is too long to show safely, so its text is not shown. It cannot be approved from here."
+    : "This card could not be checked for secrets, so its text is not shown. It cannot be approved from here.";
+}
+
 /** What pi asked for, behind a display card (cardFrom). Not enumerable. */
 const RAW_CARD = Symbol("perch.rawCard");
 
@@ -529,20 +543,29 @@ function uniqueShown(list) {
  * header, option labels and descriptions. The original stays in askCtx and
  * is what the answer script is built from. */
 function maskQuestions(qs) {
-  if (!Array.isArray(qs)) return qs;
-  return qs.map((q) => {
+  if (!Array.isArray(qs)) return { questions: qs, failed: false, tooLong: false };
+  let failed = false;
+  let tooLong = false;
+  const one = (text) => {
+    const r = maskSecretsDetailed(text, { card: true });
+    failed = failed || !!r.failed;
+    tooLong = tooLong || !!r.truncated;
+    return r.text;
+  };
+  const questions = qs.map((q) => {
     if (!q || typeof q !== "object") return q;
     const out = { ...q };
-    if (typeof q.question === "string") out.question = maskSecrets(q.question, { card: true });
-    if (typeof q.header === "string") out.header = maskSecrets(q.header, { card: true });
+    if (typeof q.question === "string") out.question = one(q.question);
+    if (typeof q.header === "string") out.header = one(q.header);
     if (Array.isArray(q.options)) {
-      const labels = uniqueShown(q.options.map((o) => (o && o.label != null ? maskSecrets(String(o.label), { card: true }) : o && o.label)));
+      const labels = uniqueShown(q.options.map((o) => (o && o.label != null ? one(String(o.label)) : o && o.label)));
       out.options = q.options.map((o, i) => (o && typeof o === "object"
-        ? { ...o, label: labels[i], ...(typeof o.description === "string" ? { description: maskSecrets(o.description, { card: true }) } : {}) }
+        ? { ...o, label: labels[i], ...(typeof o.description === "string" ? { description: one(o.description) } : {}) }
         : o));
     }
     return out;
   });
+  return { questions, failed, tooLong };
 }
 
 /** The operator answered the MASKED questions card: map each picked label back
@@ -2432,7 +2455,13 @@ export function createInteractiveEngine({
         const qs = s.pendingQuestions.questions;
         s.pendingQuestions = null;
         s.askCtx = { questions: qs, firstFrame: m };
-        s.pendingUi = { requestId: m.id, method: "questions", title: "", questions: maskQuestions(qs) };
+        // Any question, header, label or description that could not be masked
+        // in full makes the WHOLE combined card unapprovable: nothing of it is
+        // shown, and answer() sends cancelled.
+        const mq = maskQuestions(qs);
+        s.pendingUi = mq.failed || mq.tooLong
+          ? Object.defineProperty({ requestId: m.id, method: "questions", title: "", questions: [], message: unshownCardText(mq.tooLong) }, RAW_CARD, { value: { failed: true } })
+          : { requestId: m.id, method: "questions", title: "", questions: mq.questions };
         s.expiredAsk = null;                         // a live question supersedes an expired one
         armAskExpiry(s, m);
         clearStall(s);                               // paused while a human thinks
@@ -3442,6 +3471,9 @@ export function createInteractiveEngine({
     if (card.method === "questions") {
       const ctx = s.askCtx || {};
       const firstFrame = ctx.firstFrame || null;
+      // A combined card that could not be masked in full was never shown:
+      // whatever came back, pi gets "cancelled".
+      if (card[RAW_CARD] && card[RAW_CARD].failed) value = { cancelled: true };
       // Cancel resolves the tool cleanly ("Question cancelled") exactly like a
       // sequential card's cancel — respond to the pending first select.
       if (value && value.cancelled) {

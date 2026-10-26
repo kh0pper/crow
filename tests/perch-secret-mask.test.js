@@ -396,3 +396,75 @@ test("a confirm card carrying a key-shaped block: shown as is (on a card only ex
   await tick(30);
   assert.equal(frames.find((f) => f.type === "ask_user").message, msg);
 });
+
+// ---- every card-building path: too long to mask in full = not approvable ----
+
+const HUGE = () => "z".repeat(1024 * 1024 + 10) + " --force";
+
+test("a combined questions card with one normal and one oversized question: not approvable, answer is cancelled", async () => {
+  const { engine, bridge } = makeEngine();
+  const { s, pi } = await liveSession(engine, bridge, "bot-q-huge");
+  const frames = await watched(engine, s.sessionId);
+  const qs = [
+    { question: "Deploy now?", header: "Deploy", options: [{ label: "yes" }, { label: "no" }] },
+    { question: HUGE(), header: "More", options: [{ label: "ok" }] },
+  ];
+  pi.emit({ type: "extension_ui_request", id: "nq", method: "notify", message: "crow-ask:" + JSON.stringify({ id: "q", questions: qs }) });
+  await tick();
+  pi.emit({ type: "extension_ui_request", id: "qh", method: "select", title: "Deploy", options: ["yes", "no", "Other…"] });
+  await tick(30);
+  const ask = frames.find((f) => f.type === "ask_user");
+  assert.equal(ask.method, "questions");
+  assert.match(ask.message || "", /too long to show safely/);
+  assert.equal(JSON.stringify(ask).includes("z".repeat(100)), false, "nothing of the unseen question is shown");
+  await engine.answer(s.sessionId, "qh", { answers: [{ selected: ["yes"] }, { selected: ["ok"] }] });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "qh", cancelled: true });
+});
+
+test("a combined card with an oversized option label or header is not approvable either", async () => {
+  for (const [field, q] of [
+    ["label", { question: "Pick", options: [{ label: HUGE() }, { label: "no" }] }],
+    ["header", { question: "Pick", header: HUGE(), options: [{ label: "a" }] }],
+    ["description", { question: "Pick", options: [{ label: "a", description: HUGE() }] }],
+  ]) {
+    const { engine, bridge } = makeEngine();
+    const { s, pi } = await liveSession(engine, bridge, "bot-q-" + field);
+    const frames = await watched(engine, s.sessionId);
+    pi.emit({ type: "extension_ui_request", id: "n" + field, method: "notify", message: "crow-ask:" + JSON.stringify({ id: "q", questions: [q] }) });
+    await tick();
+    pi.emit({ type: "extension_ui_request", id: "r" + field, method: "select", title: "Pick", options: ["a", "Other…"] });
+    await tick(30);
+    const ask = frames.find((f) => f.type === "ask_user");
+    assert.match(ask.message || "", /too long to show safely/, field);
+    await engine.answer(s.sessionId, "r" + field, { answers: [{ selected: ["a"] }] });
+    assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "r" + field, cancelled: true }, field);
+  }
+});
+
+test("the destructive-bash confirm with an oversized TITLE: not approvable", async () => {
+  const { engine, bridge } = makeEngine();
+  const { s, pi } = await liveSession(engine, bridge, "bot-title-huge");
+  const frames = await watched(engine, s.sessionId);
+  pi.emit({ type: "extension_ui_request", id: "th", method: "confirm", title: "Destructive bash: " + HUGE(), message: "Allow this once?" });
+  await tick(30);
+  const ask = frames.find((f) => f.type === "ask_user");
+  assert.match(ask.message, /too long to show safely/);
+  assert.equal(JSON.stringify(ask).includes("z".repeat(100)), false);
+  await engine.answer(s.sessionId, "th", { confirmed: true });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "th", confirmed: false });
+});
+
+test("an editor with an oversized prefill, an input with an oversized placeholder: not approvable, answers cancelled", async () => {
+  for (const [method, extra] of [["editor", { prefill: HUGE() }], ["input", { placeholder: HUGE() }]]) {
+    const { engine, bridge } = makeEngine();
+    const { s, pi } = await liveSession(engine, bridge, "bot-" + method + "-huge");
+    const frames = await watched(engine, s.sessionId);
+    pi.emit({ type: "extension_ui_request", id: method + "1", method, title: "Fill in", ...extra });
+    await tick(30);
+    const ask = frames.find((f) => f.type === "ask_user");
+    assert.match(ask.message, /too long to show safely/, method);
+    assert.equal(JSON.stringify(ask).includes("z".repeat(100)), false, method);
+    await engine.answer(s.sessionId, method + "1", { value: "anything" });
+    assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: method + "1", cancelled: true }, method);
+  }
+});
