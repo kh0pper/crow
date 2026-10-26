@@ -38,6 +38,7 @@ import { stripContextEcho } from "../../servers/gateway/voice/context-echo.js";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
+import { mkdirSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
@@ -47,6 +48,10 @@ import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVoc
 import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { wrapPiSpawn } from "./pi_sandbox.mjs";
+import { piLabSupportsSecretValuesFd } from "./pi-lab-compat.mjs";
+import { refreshSecretValuesFile } from "../../servers/shared/secret-values-collect.js";
+import { SECRET_VALUES_DISPLAY_FILENAME, SECRET_VALUES_FILENAME, anchoredPath, checkedInstanceSecretsDirs, getCardValues, rememberInstanceSecretsDirs, secretValuesPayload, secretsDir, secretsDirCurrentPath } from "../../servers/shared/secret-values.js";
+import { maskSecrets } from "../../servers/shared/secret-mask.js";
 import { effectiveReadPaths } from "./bot-read-paths.mjs";
 import { MCP_CONFIG_FD } from "./mcp-delivery.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
@@ -228,6 +233,13 @@ export function readPeerGatewayUrls(conn) {
     return map;
   } catch { return {}; }
 }
+
+/** The fd pi-lab reads the card set from (PI_BOT_SECRET_VALUES_FD): 3 is the
+ * sandbox's --info-fd, 4 the MCP config. */
+const SECRET_VALUES_FD = 5;
+
+/** Most other-instance secrets dirs a spawn will hide; past it, it refuses. */
+const MAX_HIDDEN_INSTANCE_DIRS = 512;
 
 export class PiRpc {
   constructor(opts) {
@@ -474,7 +486,68 @@ export class PiRpc {
     // (--info-fd), kept as this.piPid. The setpriv fallback execs in place, so
     // there proc.pid IS pi. CROW_PI_SANDBOX=required throws here, which
     // callers surface as a failed turn.
-    const launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3 });
+    // Approval-card secret masking (contract with pi-lab, 2026-10-26). The
+    // whole <CROW_HOME>/secrets dir (keychain key, retained bundle secrets,
+    // the secret-values file) is hidden from a bubblewrapped pi behind a tmpfs
+    // (hideDirs). Only then is the values file written, refreshed at this
+    // spawn, and named to pi, AFTER spawn_env (PI_BOT_ keys stripped above)
+    // and extraEnv merged, so only the engine names it. Without bwrap (setpriv
+    // fallback, CROW_PI_SANDBOX=off) the bot shell could read a plaintext list,
+    // so it is neither written nor named; the values are still collected and
+    // held in this process's memory, so Crow's second mask (secret-mask.js)
+    // keeps them. Inside bwrap pi-lab's trust check finds no file and masks
+    // by pattern only.
+    delete env.PI_BOT_SECRET_VALUES_FILE;
+    // Hidden where the ANCHORED secrets dir really is now (secret-values.js
+    // keeps an fd on it): a bot that renamed an ancestor and planted a new dir
+    // at the old path cannot make the next bot's tmpfs cover the wrong dir.
+    // The gateway's delivered-files staging root lives inside it.
+    try { mkdirSync(secretsDir(), { recursive: true, mode: 0o700 }); } catch { /* anchoring creates it */ }
+    const secretsHere = secretsDirCurrentPath() || secretsDir();
+    // Every OTHER Crow home on this host (found by the shape of its secrets
+    // dir, whatever it is called) is a co-hosted instance under the same uid:
+    // its secrets dir is hidden too.
+    const others = checkedInstanceSecretsDirs();      // throws (refusing the spawn) when a home cannot be checked or a remembered one is gone
+    const launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, hideDirs: [secretsHere, ...others] });
+    // Under bwrap every found dir must really be masked (wrapPiSpawn drops a
+    // dir it cannot stat): otherwise refuse, never run with one visible.
+    if (launch.wrapper === "bwrap" && others.some((d) => !launch.masked.includes(d))) {
+      throw new Error("pi sandbox: a Crow instance secrets dir could not be hidden; refusing to start pi");
+    }
+    // Never hide fewer than were found: past a cap no real host reaches (bwrap
+    // takes a few thousand args), the spawn is refused instead.
+    if (launch.wrapper === "bwrap" && others.length > MAX_HIDDEN_INSTANCE_DIRS) {
+      throw new Error("pi sandbox: " + others.length + " Crow instance secrets dirs to hide (more than " + MAX_HIDDEN_INSTANCE_DIRS + "); refusing to start pi with any of them visible");
+    }
+    // Only now, with every one hidden, are they remembered (a refused spawn records nothing).
+    if (launch.wrapper === "bwrap") { try { rememberInstanceSecretsDirs(others); } catch { /* next spawn */ } }
+    delete launch.env.PI_BOT_SECRET_VALUES_FILE;
+    // Fail closed: the values file is written and card values trusted only
+    // when this instance's AND every other instance's secrets dir is masked.
+    const hidden = launch.wrapper === "bwrap" && [secretsHere, ...others].every((d) => launch.masked.includes(d));
+    // Not hidden: the bot could read the keychain key and add its own hash to
+    // the card list, so no value may hide text on cards (cardTrusted:false).
+    const secretValues = refreshSecretValuesFile({ write: hidden, cardTrusted: hidden, log: (l) => console.error("[pi-bots] " + l) });
+    // Not hidden: a file an earlier sandboxed spawn left must not sit where
+    // this bot's shell can read it.
+    if (!hidden) {
+      for (const n of [SECRET_VALUES_FILENAME, SECRET_VALUES_DISPLAY_FILENAME]) {
+        const f = anchoredPath(process.env, n);
+        if (f) { try { rmSync(f, { force: true }); } catch { /* best effort */ } }
+      }
+    }
+    if (hidden && secretValues) launch.env.PI_BOT_SECRET_VALUES_FILE = secretValues.path;
+    // Option (a), pi-lab's fd contract: under bubblewrap the CARD set goes to
+    // pi on an inherited pipe at SECRET_VALUES_FD (pi-lab reads it to EOF at
+    // extension load, closes it and drops the variable). The variable is set
+    // here, after spawn_env (PI_BOT_ keys stripped) and extraEnv merged, so
+    // only the engine names it. The file stays named as pi-lab's fallback.
+    // Without bubblewrap there is no card set (see cardTrusted), so no fd.
+    delete launch.env.PI_BOT_SECRET_VALUES_FD;
+    // Only a pi-lab that declares it reads (and closes) the fd gets one: an
+    // older pi-lab would leave the pipe open in pi for the whole session.
+    const valuesPayload = hidden && piLabSupportsSecretValuesFd() ? secretValuesPayload(getCardValues()) : null;
+    if (valuesPayload != null) launch.env.PI_BOT_SECRET_VALUES_FD = String(SECRET_VALUES_FD);
     this.sandboxed = launch.sandboxed;
     this.sandboxWrapper = launch.wrapper;
     this.piPid = null;
@@ -484,6 +557,10 @@ export class PiRpc {
     const stdio = launch.sandboxed ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"];
     if (fdMode) {
       while (stdio.length < MCP_CONFIG_FD) stdio.push("ignore");
+      stdio.push("pipe");
+    }
+    if (valuesPayload != null) {
+      while (stdio.length < SECRET_VALUES_FD) stdio.push("ignore");
       stdio.push("pipe");
     }
     this.mcpDelivery = fdMode ? "fd" : "file";
@@ -499,6 +576,13 @@ export class PiRpc {
         cfgPipe.on("error", () => {});
         cfgPipe.end(JSON.stringify(opts.mcpConfig || { mcpServers: {} }));
       }
+    }
+    if (valuesPayload != null) {
+      // The card set, then CLOSE our end (pi-lab reads to EOF once). Node
+      // passes this pipe to the pi exec only: libuv marks every other fd it
+      // opens close-on-exec, so pi's own children never inherit it.
+      const vp = this.proc.stdio[SECRET_VALUES_FD];
+      if (vp) { vp.on("error", () => {}); vp.end(valuesPayload); }
     }
     if (!launch.sandboxed) this.piPid = this.proc.pid;
     else if (this.proc.stdio[3]) {
@@ -547,7 +631,7 @@ export class PiRpc {
     // [pi-lab/...] diagnostics (MCP start failures, auto-bash decisions)
     // reach the gateway log; the full stderr is still kept for error text.
     const diag = (opts.stderrDiag === false) ? null
-      : createStderrDiag({ label: opts.diagLabel || basename(sessionDir || "") || "bot", emit: opts.diagLog || ((l) => console.error(l)) });
+      : createStderrDiag({ label: opts.diagLabel || basename(sessionDir || "") || "bot", emit: (l) => (opts.diagLog || ((x) => console.error(x)))(maskSecrets(l)) });
     this.proc.stderr.on("data", (d) => { this.stderr += d.toString(); if (diag) { try { diag(d); } catch {} } });
     this.exited = new Promise((res) => this.proc.on("exit", (c) => {
       this._exitCode = c == null ? -1 : c;
@@ -563,7 +647,7 @@ export class PiRpc {
     const key = this.resolved && this.resolved.key;
     return new Error("pi exited (code " + this._exitCode + ") before " + (label || "responding") +
       " — the model " + key + " may not be available on this instance" +
-      " (configure providers in Settings → AI Models). pi said: " + (this.stderr.trim().slice(-300) || "(no stderr)"));
+      " (configure providers in Settings → AI Models). pi said: " + (maskSecrets(this.stderr.trim().slice(-300)) || "(no stderr)"));
   }
   send(o) {
     if (this._exitCode != null) throw this._exitError("send");
@@ -582,7 +666,7 @@ export class PiRpc {
       // here: on the ms>0 path this setTimeout is never cleared on success —
       // ledgered separately.)
       if (ms === 0) return;
-      setTimeout(() => { const i = this._w.indexOf(w); if (i >= 0) { this._w.splice(i, 1); reject(new Error("timeout:" + label + " (stderr " + this.stderr.slice(-200) + ")")); } }, ms);
+      setTimeout(() => { const i = this._w.indexOf(w); if (i >= 0) { this._w.splice(i, 1); reject(new Error("timeout:" + label + " (stderr " + maskSecrets(this.stderr.slice(-200)) + ")")); } }, ms);
     });
   }
   async prompt(message, ms, images) {

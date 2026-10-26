@@ -6,8 +6,17 @@
  */
 
 import bus from "./event-bus.js";
+import { maskSecrets, maskDeep } from "./secret-mask.js";
 
 const MAX_NOTIFICATIONS = 500;
+
+/**
+ * Approval-card secret masking (2026-10-26): a notification's text is display
+ * text that is stored, shown and pushed (web push, ntfy, email), and a bot can
+ * write one (crow_create_notification) or quote a command in one. Masked at
+ * the row write AND at delivery, so no caller has to remember. Display-only.
+ */
+const maskText = (v) => (v == null ? v : maskSecrets(v));
 
 /**
  * Create a notification, respecting user preferences.
@@ -30,8 +39,8 @@ const MAX_NOTIFICATIONS = 500;
  */
 export async function createNotification(db, opts) {
   const {
-    title,
-    body = null,
+    title: rawTitle,
+    body: rawBody = null,
     type = "system",
     source = null,
     priority = "normal",
@@ -40,6 +49,8 @@ export async function createNotification(db, opts) {
     schedule_id = null,
     expires_in_minutes = null,
   } = opts;
+  const title = maskText(rawTitle);
+  const body = maskText(rawBody);
 
   if (!(await typeEnabled(db, type))) return null;
 
@@ -47,7 +58,7 @@ export async function createNotification(db, opts) {
     ? new Date(Date.now() + expires_in_minutes * 60000).toISOString()
     : null;
 
-  const metadataJson = metadata ? JSON.stringify(metadata) : null;
+  const metadataJson = metadata ? JSON.stringify(maskDeep(metadata)) : null;
 
   const result = await db.execute({
     sql: `INSERT INTO notifications (type, source, title, body, priority, action_url, metadata, schedule_id, expires_at)
@@ -107,7 +118,9 @@ async function broadcastUnread(db) {
  * row; a grouped notification's re-push calls it on its own. Every channel
  * is optional and fails silently.
  */
-export async function deliverNotification(db, { title, body = null, action_url = null, priority = "normal", type = "system" }) {
+export async function deliverNotification(db, { title: rawTitle, body: rawBody = null, action_url = null, priority = "normal", type = "system" }) {
+  const title = maskText(rawTitle);
+  const body = maskText(rawBody);
   // Send web push notification (non-blocking, fails silently when not available)
   try {
     const { sendPushToAll } = await import("../gateway/push/web-push.js");
@@ -190,13 +203,14 @@ function groupOf(metadataText, groupKey) {
  */
 export async function upsertGroupedNotification(db, opts) {
   const {
-    title, body = null, type = "system", priority = "normal", action_url = null,
+    title, body: rawBody = null, type = "system", priority = "normal", action_url = null,
     groupKey, item = null, nowMs = Date.now(), deliver = deliverNotification,
   } = opts;
   if (!groupKey) throw new Error("upsertGroupedNotification: groupKey is required");
   if (!(await typeEnabled(db, type))) return null;
-  const titleFor = (n) => (typeof title === "function" ? title(n) : title);
-  const entry = Object.assign({ at: new Date(nowMs).toISOString() }, item || {});
+  const body = maskText(rawBody);
+  const titleFor = (n) => maskText(typeof title === "function" ? title(n) : title);
+  const entry = Object.assign({ at: new Date(nowMs).toISOString() }, maskDeep(item || {}));
 
   const open = (await db.execute({ sql: OPEN_GROUP_SQL, args: [groupKey] })).rows[0];
 
@@ -255,8 +269,8 @@ export async function repushNotificationGroup(db, { groupKey, title, priority = 
   if (isSnoozed(open.snoozed_until, nowMs)) return { pushed: false, snoozedUntilMs: snoozeEndMs(open.snoozed_until) };
   const { meta, group } = groupOf(open.metadata, groupKey);
   if (group.count <= group.pushed_count) return { pushed: false, count: group.count };
-  const t = typeof title === "function" ? title(group.count) : title;
-  await deliver(db, { title: t, body: open.body || t, action_url: open.action_url || null, priority, type });
+  const t = maskText(typeof title === "function" ? title(group.count) : title);
+  await deliver(db, { title: t, body: maskText(open.body) || t, action_url: open.action_url || null, priority, type });
   group.last_push_at = nowMs;
   group.pushed_count = group.count;
   meta.group = group;

@@ -66,7 +66,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 const BWRAP_CANDIDATES = ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
 const SETPRIV_CANDIDATES = ["/usr/bin/setpriv", "/bin/setpriv"];
@@ -89,6 +89,7 @@ function isSocket(p) {
 function isDir(p) {
   try { return statSync(p).isDirectory(); } catch { return false; }
 }
+
 
 /**
  * Docker API sockets reachable on this host, as real paths (so /var/run ->
@@ -231,13 +232,35 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   const sockets = opts.sockets || dockerSocketPaths(process.env);
   const tmpfs = opts.runtimeDirs || userRuntimeDirs();
   const roDirs = opts.roDirs || systemdUserUnitDirs();
+  // Instance secret dirs (the bot engine passes <CROW_HOME>/secrets: the
+  // keychain key, retained bundle secrets, the secret-values file). A dir, not
+  // a file: a file bind would come off the moment the file is replaced by
+  // rename, while the tmpfs over its dir stays.
+  const hideDirs = (opts.hideDirs || []).filter((d) => typeof d === "string" && d.startsWith("/") && isDir(d));
+  // Pin EVERY ancestor of a hidden dir below / (bound onto itself it is a
+  // mountpoint, and renaming a mountpoint fails, EBUSY). Not only those whose
+  // parent is writable now: the bot owns ~ and can chmod it unwritable for
+  // one spawn and writable again inside the next. Without this a bot renames
+  // e.g. ~/.crow away, the tmpfs moves with it, and the next fresh process
+  // anchors a planted decoy at the old path while the real dir sits visible
+  // elsewhere. A bind costs nothing.
+  const pins = [];
+  for (const d of hideDirs) {
+    for (let a = dirname(d); a && a !== "/" && a !== opts.pinStop; a = dirname(a)) {
+      if (!pins.includes(a)) pins.push(a);
+    }
+  }
   const pre = ["--dev-bind", "/", "/", "--unshare-user"];
+  for (const a of pins.sort((x, y) => x.length - y.length)) pre.push("--bind", a, a);
   for (const d of tmpfs) pre.push("--tmpfs", d);
+  // Read-only too: no decoy can be planted there for a host-side reader
+  // (send_user_file) to resolve to the real file behind the mask.
+  for (const d of hideDirs) if (!tmpfs.some((t) => d === t || d.startsWith(t + "/"))) pre.push("--tmpfs", d, "--remount-ro", d);
   for (const s of sockets) if (!tmpfs.some((d) => s === d || s.startsWith(d + "/"))) pre.push("--ro-bind", "/dev/null", s);
   for (const d of roDirs) pre.push("--ro-bind", d, d);
   if (opts.infoFd != null) pre.push("--info-fd", String(opts.infoFd));
   return { cmd: probe.bwrap, args: [...pre, "--", cmd, ...args], env: scrubSandboxEnv(env),
-    sandboxed: true, wrapper: "bwrap", reason: null, masked: [...sockets, ...tmpfs, ...roDirs] };
+    sandboxed: true, wrapper: "bwrap", reason: null, masked: [...sockets, ...tmpfs, ...hideDirs, ...roDirs], pinned: pins };
 }
 
 /** True when a ps `args` string is a bubblewrap wrapper (used by the reaper). */

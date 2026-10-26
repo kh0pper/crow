@@ -491,6 +491,30 @@ test("GET transcript renders assistant markdown, and ONLY assistant text", async
   assert.equal(blank.html, undefined, "and whitespace renders nothing rather than an empty block");
 });
 
+test("GET transcript (secret masking, 2026-10-26): a command and a reply that quote a secret come back masked; the file is untouched", async () => {
+  const sessions = join(dir, "sessions-secret");
+  mkdirSync(sessions, { recursive: true });
+  const uuid = "019eeb17-0000-7000-8000-cccccccccccc";
+  const fakePw = "fake-" + "transcript-pw-" + "0000";
+  const cmd = "GH_TOKEN=" + fakePw + " git push";
+  const file = join(sessions, "2026-06-21T16-50-50-013Z_" + uuid + ".jsonl");
+  writeFileSync(file,
+    JSON.stringify({ type: "message", id: "a", message: { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: cmd } }] } }) + "\n" +
+    JSON.stringify({ type: "message", id: "b", message: { role: "assistant", content: [{ type: "text", text: "I ran **" + cmd + "**" }] } }) + "\n");
+  const c = raw();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,pi_session_dir,pi_session_id,status) " +
+    "VALUES ('chatty','perch','t-secret',?,?,'waiting-user')"
+  ).run(sessions, uuid);
+  c.close();
+  const { status, body } = await getJson("/bots/chatty/sessions/t-secret/transcript");
+  assert.equal(status, 200);
+  assert.equal(JSON.stringify(body).includes(fakePw), false);
+  assert.match(body.events[0].message.content[0].arguments.command, /\[REDACTED\]/);
+  assert.match(body.events[1].html, /\[REDACTED\]/);
+  assert.ok(readFileSync(file, "utf8").includes(fakePw), "pi's own session file is not rewritten");
+});
+
 test("GET transcript strips the trailing [Dates] line the engine added to a user message (string and text-part content)", async () => {
   const sessions = join(dir, "sessions-dates");
   mkdirSync(sessions, { recursive: true });

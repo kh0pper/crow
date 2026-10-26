@@ -147,6 +147,7 @@ function makeEngine(o = {}) {
     crowHome: CROW_HOME,
     env: Object.assign({ CROW_HOME }, o.env),
     bridge, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer, log: () => {},
+    ...(o.hiddenDirs ? { hiddenDirs: o.hiddenDirs } : {}),
   });
   return { engine, clock, bridge, state: bridge._state };
 }
@@ -228,7 +229,9 @@ test("a crow-file: notify jail-copies the file into outputsDir, emits a file fra
   // The copy really landed inside the jail the workspace route serves from.
   const snap = await engine.get(s.sessionId);
   assert.ok(snap.outputsDir, "spawn recorded an outputsDir");
-  assert.equal(readFileSync(join(snap.outputsDir, "report.png"), "utf8"), "PNGBYTES");
+  assert.equal(snap.deliveredDir, join(CROW_HOME, "secrets", "perch-delivered", s.sessionId), "copies go to the gateway-owned staging dir");
+  assert.equal(readFileSync(join(snap.deliveredDir, "report.png"), "utf8"), "PNGBYTES");
+  assert.equal(existsSync(join(snap.outputsDir, "report.png")), false, "never into the bot-writable outputs dir");
   assert.equal(existsSync(src), true, "the source file is never moved or removed");
 
   const rows = historyRows("botty", s.sessionId);
@@ -254,8 +257,8 @@ test("collision policy is SUFFIX, never overwrite: the second send lands as repo
   const snap = await engine.get(s.sessionId);
   const frames = sink.ofType("file");
   assert.deepEqual(frames.map((x) => x.stored), ["chart.png", "chart-2.png"]);
-  assert.equal(readFileSync(join(snap.outputsDir, "chart.png"), "utf8"), "FIRST", "the original copy was NOT overwritten");
-  assert.equal(readFileSync(join(snap.outputsDir, "chart-2.png"), "utf8"), "SECOND");
+  assert.equal(readFileSync(join(snap.deliveredDir, "chart.png"), "utf8"), "FIRST", "the original copy was NOT overwritten");
+  assert.equal(readFileSync(join(snap.deliveredDir, "chart-2.png"), "utf8"), "SECOND");
   assert.equal(historyRows("botty", s.sessionId).length, 2);
 });
 
@@ -313,6 +316,7 @@ test("a symlinked source is refused: servable:false, nothing copied", async () =
   assert.equal(f.stored, null);
   const snap = await engine.get(s.sessionId);
   assert.equal(existsSync(join(snap.outputsDir, "link.png")), false);
+  assert.equal(existsSync(join(snap.deliveredDir, "link.png")), false);
   assert.equal(historyRows("botty", s.sessionId)[0].servable, 0, "the reload renders the same dim card");
 });
 
@@ -375,4 +379,212 @@ test("regression: crow-state and crow-ask prefixes still discriminate — a crow
 
   assert.deepEqual(sink.ofType("log").map((e) => e.text), ["plain operator note"]);
   assert.equal(sink.ofType("file").length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// secret masking (2026-10-26): the instance's secrets dir is never served
+// ---------------------------------------------------------------------------
+
+test("send_user_file never copies anything from <CROW_HOME>/secrets (values file, keychain key), even through a symlink", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  const sink = await collect(engine, s.sessionId);
+  const secrets = join(CROW_HOME, "secrets");
+  mkdirSync(secrets, { recursive: true, mode: 0o700 });
+  const values = join(secrets, "pi-bot-secret-values");
+  writeFileSync(values, "fake-" + "values-line-0000\n", { mode: 0o600 });
+  const link = join(dir, "src", "innocent.txt");
+  mkdirSync(join(dir, "src"), { recursive: true });
+  try { rmSync(link, { force: true }); } catch {}
+  symlinkSync(values, link);
+  for (const path of [values, link, join(secrets, "keychain.key")]) {
+    pi.emit({ type: "extension_ui_request", method: "notify", message: crowFileFrame({ path, name: "x.txt", caption: "c" }) });
+  }
+  await tick();
+  const frames = sink.ofType("file");
+  assert.equal(frames.length, 3);
+  for (const f of frames) assert.equal(f.servable, false);
+  const snap = await engine.get(s.sessionId);
+  assert.equal(existsSync(join(snap.outputsDir, "x.txt")), false, "nothing copied into the bot-readable outputs dir");
+  assert.equal(existsSync(join(snap.deliveredDir, "x.txt")), false);
+});
+
+test("a file frame's caption is masked (it is bot text shown and stored)", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  const sink = await collect(engine, s.sessionId);
+  const fakeTok = "fake-" + "caption-tok-0000";
+  pi.emit({ type: "extension_ui_request", method: "notify", message: crowFileFrame({ path: srcFile("c.txt"), name: "c.txt", caption: "GH_TOKEN=" + fakeTok }) });
+  await tick();
+  assert.equal(JSON.stringify(sink.ofType("file")).includes(fakeTok), false);
+  assert.equal(JSON.stringify(historyRows("botty", s.sessionId)).includes(fakeTok), false);
+});
+
+test("send_user_file refuses a hard link to a secrets-dir file placed outside it (the same inode)", async () => {
+  const { linkSync } = await import("node:fs");
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  const sink = await collect(engine, s.sessionId);
+  const secrets = join(CROW_HOME, "secrets");
+  mkdirSync(join(secrets, "bundle-env"), { recursive: true, mode: 0o700 });
+  const inner = join(secrets, "bundle-env", "demo.env");
+  writeFileSync(inner, "K=fake-" + "retained-0000\n", { mode: 0o600 });
+  mkdirSync(join(dir, "src"), { recursive: true });
+  const hard = join(dir, "src", "harmless.txt");
+  try { rmSync(hard, { force: true }); } catch {}
+  linkSync(inner, hard);
+  pi.emit({ type: "extension_ui_request", method: "notify", message: crowFileFrame({ path: hard, name: "h.txt", caption: "c" }) });
+  await tick();
+  const f = sink.ofType("file")[0];
+  assert.equal(f.servable, false);
+  const snap = await engine.get(s.sessionId);
+  assert.equal(existsSync(join(snap.outputsDir, "h.txt")), false);
+  assert.equal(existsSync(join(snap.deliveredDir, "h.txt")), false);
+});
+
+test("send_user_file refuses any dir the sandbox hides (e.g. the user runtime dir), not just the secrets dir", async () => {
+  const hidden = join(dir, "fake-run-user");
+  mkdirSync(hidden, { recursive: true });
+  const inside = join(hidden, "auth.json");
+  writeFileSync(inside, "{}");
+  const { engine, state } = makeEngine({ hiddenDirs: [hidden] });
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  const sink = await collect(engine, s.sessionId);
+  pi.emit({ type: "extension_ui_request", method: "notify", message: crowFileFrame({ path: inside, name: "auth.json", caption: "c" }) });
+  await tick();
+  assert.equal(sink.ofType("file")[0].servable, false);
+});
+
+test("send_user_file never writes through an outputs dir that is a symlink out of the world root (pre-existing escape)", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  const sink = await collect(engine, s.sessionId);
+  const snap = await engine.get(s.sessionId);
+  const outside = join(dir, "escape-target");
+  mkdirSync(outside, { recursive: true });
+  rmSync(snap.outputsDir, { recursive: true, force: true });
+  symlinkSync(outside, snap.outputsDir);
+  pi.emit({ type: "extension_ui_request", method: "notify", message: crowFileFrame({ path: srcFile("x.service", "[Unit]"), name: "x.service", caption: "c" }) });
+  await tick();
+  assert.equal(existsSync(join(outside, "x.service")), false, "nothing written outside the world root");
+  assert.equal(readFileSync(join(snap.deliveredDir, "x.service"), "utf8"), "[Unit]", "the copy lands in the gateway-owned staging dir");
+});
+
+test("send_user_file refuses when a PARENT of the outputs dir was swapped for a symlink after spawn (the fd anchor)", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  const sink = await collect(engine, s.sessionId);
+  const snap = await engine.get(s.sessionId);
+  const outputsRoot = join(snap.outputsDir, "..");
+  const elsewhere = join(dir, "parent-escape");
+  mkdirSync(join(elsewhere, s.sessionId), { recursive: true });
+  rmSync(outputsRoot, { recursive: true, force: true });
+  symlinkSync(elsewhere, outputsRoot);
+  pi.emit({ type: "extension_ui_request", method: "notify", message: crowFileFrame({ path: srcFile("y.service", "[Unit]"), name: "y.service", caption: "c" }) });
+  await tick();
+  assert.equal(existsSync(join(elsewhere, s.sessionId, "y.service")), false);
+  assert.equal(readFileSync(join(snap.deliveredDir, "y.service"), "utf8"), "[Unit]", "the copy lands in the staging dir");
+});
+
+test("the staging dir is created component by component and refused when any component is a symlink", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  const sink = await collect(engine, s.sessionId);
+  const root = join(CROW_HOME, "secrets", "perch-delivered");
+  rmSync(root, { recursive: true, force: true });
+  const elsewhere = join(dir, "delivered-escape");
+  mkdirSync(join(elsewhere, s.sessionId), { recursive: true });
+  symlinkSync(elsewhere, root);
+  try {
+    pi.emit({ type: "extension_ui_request", method: "notify", message: crowFileFrame({ path: srcFile("z.service", "[Unit]"), name: "z.service", caption: "c" }) });
+    await tick();
+    assert.equal(sink.ofType("file")[0].servable, false);
+    assert.equal(existsSync(join(elsewhere, s.sessionId, "z.service")), false);
+  } finally { rmSync(root, { force: true }); }
+});
+
+test("the staging root renamed away and replaced after the engine anchored it: the copy follows the anchored dir, never the planted one", async () => {
+  const { renameSync } = await import("node:fs");
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  const sink = await collect(engine, s.sessionId);
+  const root = join(CROW_HOME, "secrets", "perch-delivered");
+  renameSync(root, root + "-moved");
+  mkdirSync(join(root, s.sessionId), { recursive: true });
+  try {
+    pi.emit({ type: "extension_ui_request", method: "notify", message: crowFileFrame({ path: srcFile("w.txt", "w"), name: "w.txt", caption: "c" }) });
+    await tick();
+    assert.equal(existsSync(join(root, s.sessionId, "w.txt")), false, "nothing in the planted dir");
+    assert.equal(sink.ofType("file")[0].servable, true);
+    assert.equal(readFileSync(join(root + "-moved", s.sessionId, "w.txt"), "utf8"), "w", "the anchored dir, wherever it is");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    renameSync(root + "-moved", root);
+  }
+});
+
+test("a secrets dir renamed away: a file under its new name is still refused (inode anchor, not path)", async () => {
+  const { renameSync } = await import("node:fs");
+  const secrets = join(CROW_HOME, "secrets");
+  mkdirSync(secrets, { recursive: true, mode: 0o700 });
+  writeFileSync(join(secrets, "keychain.key"), "{}", { mode: 0o600 });
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  const sink = await collect(engine, s.sessionId);
+  renameSync(secrets, secrets + "-x");
+  mkdirSync(secrets, { mode: 0o700 });
+  try {
+    pi.emit({ type: "extension_ui_request", method: "notify", message: crowFileFrame({ path: join(secrets + "-x", "keychain.key"), name: "k.txt", caption: "c" }) });
+    await tick();
+    assert.equal(sink.ofType("file")[0].servable, false);
+  } finally {
+    rmSync(secrets, { recursive: true, force: true });
+    renameSync(secrets + "-x", secrets);
+  }
+});
+
+test("a sent copy never takes the name of a file already in the outputs dir (both are served by flat name)", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  const sink = await collect(engine, s.sessionId);
+  const snap = await engine.get(s.sessionId);
+  writeFileSync(join(snap.outputsDir, "report.pdf"), "in place");
+  pi.emit({ type: "extension_ui_request", method: "notify", message: crowFileFrame({ path: srcFile("report.pdf", "copied"), name: "report.pdf", caption: "c" }) });
+  await tick();
+  assert.equal(sink.ofType("file")[0].stored, "report-2.pdf");
+  assert.equal(readFileSync(join(snap.deliveredDir, "report-2.pdf"), "utf8"), "copied");
+});
+
+test("send_user_file refuses a file from ANOTHER instance's secrets dir (and a hard link to one)", async () => {
+  const { linkSync } = await import("node:fs");
+  const otherHome = CROW_HOME + "-other";
+  mkdirSync(join(otherHome, "secrets"), { recursive: true, mode: 0o700 });
+  const key = join(otherHome, "secrets", "keychain.key");
+  writeFileSync(key, "{\"v\":1}", { mode: 0o600 });
+  mkdirSync(join(dir, "src"), { recursive: true });
+  const hard = join(dir, "src", "other-key-link");
+  try { rmSync(hard, { force: true }); } catch {}
+  linkSync(key, hard);
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  const sink = await collect(engine, s.sessionId);
+  for (const path of [key, hard]) {
+    pi.emit({ type: "extension_ui_request", method: "notify", message: crowFileFrame({ path, name: "k.txt", caption: "c" }) });
+  }
+  await tick();
+  for (const f of sink.ofType("file")) assert.equal(f.servable, false);
+  const snap = await engine.get(s.sessionId);
+  assert.equal(existsSync(join(snap.deliveredDir, "k.txt")), false);
+  rmSync(otherHome, { recursive: true, force: true });
 });

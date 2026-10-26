@@ -339,3 +339,28 @@ test("barrier is a no-op by default — _setWorkspaceServeBarrierForTest(null) n
   assert.equal(r.status, 200);
   assert.equal(r.body.toString("utf8"), "hello ok");
 });
+
+// ---------------------------------------------------------------------------
+// approval-card secret masking (2026-10-26): files a bot SENT are copied into
+// a gateway-owned staging dir (hidden from the sandbox) and served from there
+// ---------------------------------------------------------------------------
+
+test("a delivered file is served from the anchored staging dir; a swapped staging root serves nothing", async () => {
+  const { registerDeliveredRoot } = await import("../servers/shared/perch-delivered.js");
+  const root = mkdtempSync(join(tmpdir(), "perch-delivered-root-"));
+  registerDeliveredRoot(root);
+  mkdirSync(join(root, "sess-1"), { recursive: true });
+  writeFileSync(join(root, "sess-1", "sent.txt"), "delivered bytes");
+  const r = await rawRequest("/dashboard/perch-api/interactive/sess-1/workspace/sent.txt");
+  assert.equal(r.status, 200);
+  assert.equal(r.body.toString("utf8"), "delivered bytes");
+  // swap the root (rename + plant): the anchor no longer matches
+  const { renameSync } = await import("node:fs");
+  renameSync(root, root + "-moved");
+  mkdirSync(join(root, "sess-1"), { recursive: true });
+  writeFileSync(join(root, "sess-1", "sent.txt"), "planted");
+  const r2 = await rawRequest("/dashboard/perch-api/interactive/sess-1/workspace/sent.txt");
+  assert.notEqual(r2.body.toString("utf8"), "planted");
+  rmSync(root, { recursive: true, force: true });
+  rmSync(root + "-moved", { recursive: true, force: true });
+});

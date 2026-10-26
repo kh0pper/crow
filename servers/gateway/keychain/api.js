@@ -6,6 +6,7 @@
  * (one-time grant); the passphrase-sealed Export only by its one-time link, which a granted
  * POST /export mints. Every response is Cache-Control: no-store; nothing secret is logged.
  */
+import { recordCardSecret } from "../../shared/secret-values.js";
 import { Router } from "express";
 import { createDbClient, auditLog } from "../../db.js";
 import { createNotification } from "../../shared/notifications.js";
@@ -62,6 +63,7 @@ export function keychainApiRouter({
   tickets = createExportTickets(),
 } = {}) {
   const router = Router();
+  const cardEnv = crowHome ? { ...process.env, CROW_HOME: crowHome } : process.env;
 
   router.use(BASE, (req, res, next) => {
     if (req.headers["x-crow-signature"]) return res.status(403).json({ error: "The keychain is not available to paired instances." });
@@ -160,6 +162,8 @@ export function keychainApiRouter({
     const url = str(req.body?.url, 2048);
     if (url && !/^https?:\/\//i.test(url)) return res.status(400).json({ error: "The address must start with http:// or https://." });
     const { id } = await addManualSecret(db, await writeKey(db, req.ip), { label, username, url, secret });
+    // The operator typed it here: it may hide text on approval cards.
+    try { recordCardSecret(secret, cardEnv); } catch { /* masking falls back to display paths */ }
     await audit(db, "keychain_add", { ip: req.ip, details: { entry_id: id, label } });
     res.json({ ok: true, id });
   }));
@@ -250,6 +254,7 @@ export function keychainApiRouter({
     if (!entries) return res.status(400).json({ error: "That passphrase does not open this file, or it is not a Crow keychain export." });
     const ikey = await writeKey(db, req.ip);
     const { ids, ...out } = await importEntries(db, ikey, entries);
+    try { recordCardSecret(entries.filter((e) => e && e.kind === "manual").map((e) => e.secret), cardEnv); } catch { /* see /add */ }
     await recordKeychainImport(db, ikey.id, ids).catch(() => {});
     invalidateHealthCache();
     await audit(db, "keychain_import", { ip: req.ip, details: out });

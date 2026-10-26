@@ -45,6 +45,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { jsonError } from "./_error.js";
+import { openDeliveredDir, openDeliveredFile } from "../../shared/perch-delivered.js";
 import { openAuthedStream } from "../streams/authed-stream.js";
 import { resolveEngineStatus } from "../dashboard/panels/bot-builder/engine-gate.js";
 import { createDbClient } from "../../db.js";
@@ -415,6 +416,57 @@ function giveAudit(db, row, cardId, extra) {
  *   (perch-model-catalog.js loadPiProviderNames); null = unknown. Injected by
  *   tests so the picker's runnable check never reads this host's ~/.pi.
  */
+/**
+ * Stream one verified fd as a workspace download (shared by the outputs-dir
+ * path and the delivered-files staging path).
+ *
+ * M1 (final review, folded into C2): quote-escape the filename before it lands
+ * in a header (an embedded `"` could otherwise inject extra header syntax), and
+ * pin off MIME sniffing. Coordinator fix-wave follow-up (C2 residual): a real
+ * Content-Type (from the verified fd's extname) and Content-Length (from the
+ * fstat already taken): inline images need the first to render, every client
+ * the second. Streams from the fd (autoClose), never re-opening a path.
+ */
+function streamWorkspaceFd(res, fd, stat, nameForHeaders) {
+  res.set("X-Content-Type-Options", "nosniff");
+  const ext = extname(nameForHeaders).toLowerCase();
+  res.set("Content-Type", WORKSPACE_MIME_BY_EXT[ext] || "application/octet-stream");
+  res.set("Content-Length", String(stat.size));
+  if (!WORKSPACE_IMAGE_EXTS.has(ext)) {
+    res.set("Content-Disposition", `attachment; filename="${basename(nameForHeaders).replace(/"/g, '\\"')}"`);
+  }
+  const stream = createReadStream(null, { fd, autoClose: true });
+  stream.on("error", () => {
+    if (!res.headersSent) jsonError(res, 404, "not_found");
+  });
+  stream.pipe(res);
+}
+
+/** Files the bot sent (copies in the gateway-owned staging dir), for the list. */
+function listDelivered(sid) {
+  let dfd;
+  try {
+    dfd = openDeliveredDir(sid);
+    const out = [];
+    for (const name of readdirSync("/proc/self/fd/" + dfd)) {
+      if (name.startsWith(".")) continue;
+      let st;
+      try { st = lstatSync("/proc/self/fd/" + dfd + "/" + name); } catch { continue; }
+      if (st.isSymbolicLink() || !st.isFile()) continue;
+      out.push({ name, size: st.size, mtime: Math.round(st.mtimeMs) });
+    }
+    return out;
+  } catch { return []; }
+  finally { if (dfd !== undefined) { try { closeSync(dfd); } catch { /* closed */ } } }
+}
+
+/** True when a sent file's copy is in the staging dir. */
+function deliveredExists(sid, name) {
+  let fd;
+  try { fd = openDeliveredFile(sid, name); return fstatSync(fd).isFile(); } catch { return false; }
+  finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* closed */ } } }
+}
+
 export default function perchInteractiveApiRouter(dashboardAuth, { engine = getInteractiveEngine, annotate = annotateAvailability, providerModels = providerModelListWarm, piProviders = loadPiProviderNames } = {}) {
   /** pi's resolvable providers, or null when that cannot be read — the
    *  picker then marks nothing unrunnable rather than guess. */
@@ -1134,6 +1186,9 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
         return jsonError(res, 404, "not_found");
       }
       const items = [];
+      // Files the bot SENT are copied to the gateway-owned staging dir
+      // (servers/shared/perch-delivered.js); they belong in this list too.
+      for (const it of listDelivered(sid)) items.push(it);
       for (const e of entries) {
         if (e.name.startsWith(".")) continue;              // dotfile: invisible here, as in the jail
         let st;
@@ -1181,8 +1236,11 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
             servable: !!Number(row.servable),
             created_at: String(row.created_at || ""),
           };
-          if (it.servable && (!snap.outputsDir || !it.stored)) { it.servable = false; return it; }
+          if (it.servable && !it.stored) { it.servable = false; return it; }
           if (it.servable) {
+            // the staging dir first (copies), then the outputs dir (in place)
+            if (deliveredExists(sid, it.stored)) return it;
+            if (!snap.outputsDir) { it.servable = false; return it; }
             try { it.servable = lstatSync(join(snap.outputsDir, it.stored)).isFile(); } catch { it.servable = false; }
           }
           return it;
@@ -1260,6 +1318,19 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       const eng = resolveEngine();
       const snap = await eng.get(sid);
       if (!snap) return jsonError(res, 404, "no_such_session");
+
+      // A file the bot SENT: its copy in the gateway-owned staging dir, opened
+      // through the anchored root fd (never by a path a bot can swap).
+      let fd;
+      if (!rel.includes("/")) {
+        try { fd = openDeliveredFile(sid, rel); } catch { fd = undefined; }
+      }
+      if (fd !== undefined) {
+        let st;
+        try { st = fstatSync(fd); } catch { closeSync(fd); return jsonError(res, 404, "not_found"); }
+        if (!st.isFile()) { closeSync(fd); return jsonError(res, 404, "not_found"); }
+        return streamWorkspaceFd(res, fd, st, rel);
+      }
       if (!snap.outputsDir) return jsonError(res, 409, "no_session_dir");
 
       let outputsReal;
@@ -1281,7 +1352,6 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       // stream itself operate on that ONE file descriptor — a fd is bound
       // to an inode, not a path, so nothing that happens to the path AFTER
       // this open can change what gets read.
-      let fd;
       try {
         fd = openSync(join(snap.outputsDir, rel), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
       } catch {
@@ -1312,40 +1382,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       // production, so this branch is never entered: no await, no timer.
       if (_workspaceServeBarrier) await _workspaceServeBarrier;
 
-      // M1 (final review, folded into C2): quote-escape the filename before
-      // it lands in a header (an embedded `"` could otherwise inject extra
-      // header syntax), and pin off MIME sniffing — a served file must never
-      // let the browser guess its way into treating attachment bytes as
-      // executable content.
-      res.set("X-Content-Type-Options", "nosniff");
-      // Coordinator fix-wave follow-up (C2 residual): res.sendFile() used to
-      // supply Content-Type/Content-Length/Accept-Ranges/ETag/Last-Modified/
-      // Cache-Control automatically; the fd-based rewrite dropped all of
-      // them. Restoring Content-Type (from the SAME verified fd's extname,
-      // via WORKSPACE_MIME_BY_EXT above) and Content-Length (from the
-      // fstat() already captured in `stat` — no second lookup) fixes the
-      // two load-bearing ones: inline images need a real Content-Type to
-      // render at all, and every client needs a real Content-Length. Range/
-      // conditional-GET (Accept-Ranges/ETag/Last-Modified/Cache-Control)
-      // were send()'s extras on top of those two — not restored here, out
-      // of this residual's scope.
-      const ext = extname(fdReal).toLowerCase();
-      res.set("Content-Type", WORKSPACE_MIME_BY_EXT[ext] || "application/octet-stream");
-      res.set("Content-Length", String(stat.size));
-      if (!WORKSPACE_IMAGE_EXTS.has(ext)) {
-        res.set(
-          "Content-Disposition",
-          `attachment; filename="${basename(fdReal).replace(/"/g, '\\"')}"`
-        );
-      }
-
-      // Stream from the fd — autoClose:true closes it once the read
-      // completes or errors, so no separate closeSync() call on this path.
-      const stream = createReadStream(null, { fd, autoClose: true });
-      stream.on("error", () => {
-        if (!res.headersSent) jsonError(res, 404, "not_found");
-      });
-      stream.pipe(res);
+      streamWorkspaceFd(res, fd, stat, fdReal);
     } catch (err) {
       mapEngineError(res, err);
     }

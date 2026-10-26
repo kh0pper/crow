@@ -2736,8 +2736,21 @@ export function perchHubJs(lang = "en") {
      already carries the mySid identity guard. */
   function renderAskCombined(pane,card){
     var qs=Array.isArray(card.questions)?card.questions:[];
-    if(!qs.length){ setAttn(false); return; }
+    if(!qs.length&&!card.message){ setAttn(false); return; }
     var frame=document.createElement('div'); frame.className='ask-card ask-combined';
+    /* The engine's note (secrets hidden / possible secret shown), or why a
+       card that could not be masked in full shows no questions. */
+    if(card.message) frame.appendChild(line('ask-message',card.message));
+    if(!qs.length){
+      var nf=document.createElement('div'); nf.className='ask-foot';
+      var nc=document.createElement('button'); nc.type='button'; nc.className='quiet'; nc.textContent=ASK_CANCEL;
+      nc.onclick=function(){ answerAsk(card,{cancelled:true}); };
+      nf.appendChild(nc); frame.appendChild(nf);
+      pane.appendChild(frame);
+      setAttn(true);
+      pinTranscript();
+      return;
+    }
     /* The questions live in their own scroller (.ask-body) so that, when the
        pane is short (a phone), the options scroll and the Send / Cancel foot
        below stays on screen — css.js's "THE ASK PANE FITS ITS SPACE". */

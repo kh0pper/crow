@@ -146,7 +146,7 @@ import { countCsvTools, checkToolBudget, sessionBudgetMessage } from "../../scri
 import Database from "better-sqlite3";
 import { resolveDataDir } from "../db.js";
 import { randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
 
@@ -155,6 +155,10 @@ import { jobLockFor } from "./routes/board-lock.js";
 import { cardBriefBlock } from "../../scripts/pi-bots/card-brief.mjs";
 import { appendDates } from "../shared/relative-dates.js";
 import { stripContextEcho } from "./voice/context-echo.js";
+import { maskSecrets, maskSecretsDetailed, maskDeep, hiddenNote, HIDDEN_NOTE_RE, REDACTED } from "../shared/secret-mask.js";
+import { userRuntimeDirs } from "../../scripts/pi-bots/pi_sandbox.mjs";
+import { anchorSecretsDir, checkedInstanceSecretsDirs } from "../shared/secret-values.js";
+import { deliveredDirPath, openDeliveredDir, registerDeliveredRoot } from "../shared/perch-delivered.js";
 
 /** Lease file name under CROW_HOME. Consumed by C-14's reaper exemption. */
 export const LEASE_FILENAME = "perch-interactive-leases.json";
@@ -419,12 +423,210 @@ function childMemoryMB(s) {
  * question.
  */
 function cardFrom(m) {
-  const card = { requestId: m.id, method: m.method, title: m.title == null ? "" : String(m.title) };
-  if (Array.isArray(m.options)) card.options = m.options.slice();
-  if (m.placeholder != null) card.placeholder = m.placeholder;
-  if (m.message != null) card.message = m.message;
-  if (m.prefill != null) card.prefill = m.prefill;
+  // Approval-card secret masking (2026-10-26): the card is DISPLAY text — it
+  // reaches SSE frames, the snapshot, the replay, the "needs you" row and its
+  // push — so every field a person reads goes through maskSecrets(). What pi
+  // needs back (a select's option string, an untouched editor prefill) is
+  // kept on a non-enumerable symbol (never spread into a frame, never
+  // serialized) and mapped back in answer().
+  const CARD = { card: true };
+  const title = maskSecretsDetailed(m.title == null ? "" : String(m.title), CARD);
+  const card = { requestId: m.id, method: m.method, title: title.text };
+  let hidden = title.count;
+  let possible = title.possible || 0;
+  let failed = !!title.failed;
+  let tooLong = !!title.truncated;
+  const raw = {};
+  if (Array.isArray(m.options)) {
+    const res = m.options.map((o) => maskSecretsDetailed(o, CARD));
+    for (const r of res) { failed = failed || !!r.failed || !!r.truncated; possible += r.possible || 0; }
+    const masked = res.map((r) => r.text);
+    if (masked.some((o, i) => o !== String(m.options[i]))) {
+      card.options = uniqueShown(masked);
+      raw.options = m.options.slice();
+      hidden += 1;
+    } else {
+      card.options = m.options.slice();
+    }
+  }
+  if (m.placeholder != null) {
+    const ph = maskSecretsDetailed(m.placeholder, CARD);
+    card.placeholder = ph.text;
+    failed = failed || !!ph.failed;
+    tooLong = tooLong || !!ph.truncated;
+  }
+  if (m.message != null) {
+    const msg = maskSecretsDetailed(m.message, CARD);
+    card.message = msg.text;
+    hidden += msg.count;
+    possible += msg.possible || 0;
+    failed = failed || !!msg.failed;
+    tooLong = tooLong || !!msg.truncated;
+  }
+  if (m.prefill != null) {
+    const pre = maskSecretsDetailed(m.prefill, CARD);
+    card.prefill = pre.text;
+    possible += pre.possible || 0;
+    failed = failed || !!pre.failed;
+    tooLong = tooLong || !!pre.truncated;
+    if (pre.count) { raw.prefill = m.prefill; hidden += pre.count; }
+  }
+  // A secret-looking pattern Crow does not know as a value is SHOWN on a
+  // card (it is bot-written text), with a note; then the contract's hidden
+  // note on the first line, unless pi-lab's own is there.
+  if (possible) card.message = POSSIBLE_NOTE + (card.message ? "\n" + card.message : "");
+  if (hasMarker(m.title) || hasMarker(m.message) || hasMarker(m.prefill) || (Array.isArray(m.options) && m.options.some(hasMarker))) {
+    card.message = LITERAL_MARKER_NOTE + (card.message ? "\n" + card.message : "");
+  }
+  if (hidden && !HIDDEN_NOTE_RE.test(card.title) && !HIDDEN_NOTE_RE.test(card.message || "")) {
+    card.message = hiddenNote(hidden) + (card.message ? "\n" + card.message : "");
+  }
+  // The mask itself failed: the card shows a blank, and a blank must never be
+  // approved (answer() turns a confirm into a "no").
+  if (failed || tooLong) {
+    // Nothing of a card that could not be masked in full is shown: title,
+    // message, prefill, placeholder and options all go.
+    raw.failed = true;
+    card.title = "";
+    card.message = unshownCardText(tooLong);
+    if (card.prefill != null) card.prefill = "";
+    if (card.placeholder != null) card.placeholder = "";
+    if (Array.isArray(card.options)) card.options = [];
+  }
+  if (raw.options || raw.prefill != null || raw.failed) Object.defineProperty(card, RAW_CARD, { value: raw });
   return card;
+}
+
+/**
+ * An editor answer to a masked prefill: each [REDACTED] the operator left in
+ * place gets back the text it stood for, so an edit elsewhere never writes the
+ * placeholder into pi's file. The hidden spans are recovered by walking the
+ * masked prefill's visible parts through the original. When the operator
+ * removed or added a placeholder (the counts differ), the text goes as typed.
+ */
+function restorePrefill(value, shownPrefill, rawPrefill) {
+  if (value === shownPrefill) return rawPrefill;
+  const parts = String(shownPrefill).split(REDACTED);
+  const spans = [];
+  let at = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    const found = i === 0 ? (rawPrefill.startsWith(p) ? 0 : -1) : (p === "" && i === parts.length - 1 ? rawPrefill.length : rawPrefill.indexOf(p, at));
+    if (found < 0) return value;
+    // A visible part that occurs again later could be where the hidden value
+    // really ends (it may contain that text): not unambiguous, send as typed.
+    if (i > 0 && p !== "" && rawPrefill.indexOf(p, found + 1) >= 0) return value;
+    if (i > 0) spans.push(rawPrefill.slice(at, found));
+    at = found + p.length;
+  }
+  // Only an unambiguous map: every hidden span sits between two visible
+  // parts (two placeholders side by side hide where one value ends), and the
+  // parts and spans rebuild the original exactly.
+  if (parts.slice(1, -1).some((p) => p === "")) return value;
+  if (parts.reduce((acc, p, i) => acc + (i ? spans[i - 1] : "") + p, "") !== rawPrefill) return value;
+  const typed = String(value).split(REDACTED);
+  if (typed.length !== parts.length) return value;
+  return typed.reduce((acc, seg, i) => acc + (i ? spans[i - 1] : "") + seg, "");
+}
+
+/** The note on a card whose text already carried the marker: pi-lab's mask, or
+ * literal text in the bot's command (a bracket glob that can run). Crow cannot
+ * tell them apart, so the card says so. */
+const LITERAL_MARKER_NOTE = "(this card contains the text [REDACTED] not added by Crow: pi-lab hid a value there, or it is literal text in the command)";
+const hasMarker = (v) => typeof v === "string" && v.includes(REDACTED);
+
+/** The note on a card that shows text looking like a secret Crow does not know. */
+const POSSIBLE_NOTE = "(possible secret shown: this card may contain a secret that is not a known value, so it is shown as it is)";
+
+/** The message of a card shown without its text (cardFrom, the combined card). */
+function unshownCardText(tooLong) {
+  return tooLong
+    ? "This card is too long to show safely, so its text is not shown. It cannot be approved from here."
+    : "This card could not be checked for secrets, so its text is not shown. It cannot be approved from here.";
+}
+
+/** What pi asked for, behind a display card (cardFrom). Not enumerable. */
+const RAW_CARD = Symbol("perch.rawCard");
+
+/** Masked option strings that collapsed into one get a position suffix, so
+ * the operator's pick still maps to exactly one real option. */
+function uniqueShown(list) {
+  const seen = new Map();
+  return list.map((o, i) => {
+    const k = String(o);
+    if (!seen.has(k)) { seen.set(k, i); return o; }
+    return k + " (" + (i + 1) + ")";
+  });
+}
+
+/** A masked copy of an ask_user questions payload (display only): question,
+ * header, option labels and descriptions. The original stays in askCtx and
+ * is what the answer script is built from. */
+function maskQuestions(qs) {
+  if (!Array.isArray(qs)) return { questions: qs, failed: false, tooLong: false };
+  let failed = false;
+  let tooLong = false;
+  let hidden = 0;
+  let possible = 0;
+  let literal = false;
+  const one = (text) => {
+    if (hasMarker(text)) literal = true;
+    const r = maskSecretsDetailed(text, { card: true });
+    failed = failed || !!r.failed;
+    tooLong = tooLong || !!r.truncated;
+    hidden += r.count || 0;
+    possible += r.possible || 0;
+    return r.text;
+  };
+  const questions = qs.map((q) => {
+    if (!q || typeof q !== "object") return q;
+    const out = { ...q };
+    if (typeof q.question === "string") out.question = one(q.question);
+    if (typeof q.header === "string") out.header = one(q.header);
+    if (Array.isArray(q.options)) {
+      const labels = uniqueShown(q.options.map((o) => (o && o.label != null ? one(String(o.label)) : o && o.label)));
+      out.options = q.options.map((o, i) => (o && typeof o === "object"
+        ? { ...o, label: labels[i], ...(typeof o.description === "string" ? { description: one(o.description) } : {}) }
+        : o));
+    }
+    return out;
+  });
+  return { questions, failed, tooLong, hidden, possible, literal };
+}
+
+/** The operator answered the MASKED questions card: map each picked label back
+ * to the real option at the same position. */
+function unmaskAnswers(shownQs, rawQs, answers) {
+  if (!Array.isArray(answers) || !Array.isArray(shownQs) || !Array.isArray(rawQs)) return answers;
+  return answers.map((a, qi) => {
+    const shown = shownQs[qi] && Array.isArray(shownQs[qi].options) ? shownQs[qi].options : null;
+    const real = rawQs[qi] && Array.isArray(rawQs[qi].options) ? rawQs[qi].options : null;
+    if (!a || typeof a !== "object" || !shown || !real) return a;
+    const map = (label) => {
+      const i = shown.findIndex((o) => o && String(o.label) === String(label));
+      return i >= 0 && real[i] && real[i].label != null ? String(real[i].label) : label;
+    };
+    const out = { ...a };
+    if (Array.isArray(a.selected)) out.selected = a.selected.map(map);
+    if (Array.isArray(a.labels)) out.labels = a.labels.map(map);
+    return out;
+  });
+}
+
+/** Frame fields a person reads. */
+const FRAME_TEXT_FIELDS = ["text", "argsText", "resultText", "title", "message", "lastError", "caption"];
+/** A frame as a subscriber may see it: display text masked (2026-10-26). */
+function maskFrame(event) {
+  if (!event || typeof event !== "object") return event;
+  let out = event;
+  // A card frame is the approval surface: card mode (no PEM heuristic).
+  const opts = event.type === "ask_user" ? { card: true } : undefined;
+  for (const k of FRAME_TEXT_FIELDS) {
+    if (typeof event[k] !== "string" || !event[k]) continue;
+    const v = maskSecrets(event[k], opts);
+    if (v !== event[k]) { if (out === event) out = { ...event }; out[k] = v; }
+  }
+  return out;
 }
 
 /**
@@ -437,12 +639,16 @@ function cardFrom(m) {
  * Pure — exported only for tests; the engine's call site does the copy.
  */
 function resolveSentName(dir, basename) {
+  // `dir` may be a list: a sent copy's name must not collide with a file in
+  // the staging dir OR in the session's outputs dir (both are served under
+  // the same flat name).
+  const dirs = [].concat(dir).filter(Boolean);
   const clean = String(basename == null ? "" : basename).replace(/[\\/]/g, "").replace(/^\.+/, "").trim() || "file";
   const dot = clean.lastIndexOf(".");
   const stem = dot > 0 ? clean.slice(0, dot) : clean;
   const ext = dot > 0 ? clean.slice(dot) : "";
   let candidate = clean;
-  for (let n = 2; existsSync(join(dir, candidate)); n++) {
+  for (let n = 2; dirs.some((d) => existsSync(join(d, candidate))); n++) {
     candidate = stem + "-" + n + ext;
   }
   return candidate;
@@ -490,11 +696,25 @@ export function createInteractiveEngine({
   now = Date.now,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
-  log = (m) => console.log("[perch-interactive] " + m),
+  log: rawLog = (m) => console.log("[perch-interactive] " + m),
   notifications = null,
+  // Dirs the pi sandbox hides from a bot besides <CROW_HOME>/secrets (user
+  // runtime/session IPC): send_user_file, which copies on the host, never
+  // serves from them. A seam for tests.
+  hiddenDirs = userRuntimeDirs(process.getuid(), { create: false }),
 } = {}) {
+  // Every engine log line can quote a bot's card, stderr or reply: masked.
+  const log = (m) => rawLog(maskSecrets(m));
   /** sessionId (= gateway_thread_id) → session record. */
   const sessions = new Map();
+  // Approval-card secret masking (2026-10-26): anchor (by dev/ino) the
+  // instance's secrets dir and the delivered-files staging root NOW, before
+  // any bot of this engine runs; later checks compare against these anchors,
+  // never against a path a bot could have renamed and replaced.
+  const secretsEnv = { ...env, CROW_HOME: crowHome };
+  let secretsAnchor = null;
+  try { secretsAnchor = anchorSecretsDir(secretsEnv); } catch { secretsAnchor = null; }
+  try { registerDeliveredRoot(secretsEnv); } catch (e) { rawLog("delivered-files staging root unavailable: " + ((e && e.message) || e)); }
   /** sessionId → in-flight adoption promise (fix round 2: single-flight). */
   const adopting = new Map();
   let seams = null;
@@ -717,7 +937,7 @@ export function createInteractiveEngine({
       // A live card, or an expired one still shown (expired:true) so the
       // operator sees what was asked: either way the session waits for them.
       pendingUi: shownCard(s),
-      lastError: s.lastError,
+      lastError: s.lastError ? maskSecrets(s.lastError) : s.lastError,
       // Track 3 Task 4: the engine-tracked model wins over the raw
       // prepareSpawn resolution once one is known (a live model_select or a
       // control() switch), so the lens reports the model actually serving
@@ -755,13 +975,16 @@ export function createInteractiveEngine({
       // that snapshot() is where it reads them from.
       cardId: s.cardId,
       outputsDir: s.outputsDir,
+      // Where send_user_file copies land (gateway-owned, hidden from bots).
+      deliveredDir: deliveredDirPath(s.sessionId),
       uploadsDir: s.uploadsDir,
     };
   }
 
   function emit(s, event) {
+    const shown = maskFrame(event);
     for (const fn of [...s.subscribers]) {
-      try { fn(event); } catch { /* a broken subscriber never breaks a turn */ }
+      try { fn(shown); } catch { /* a broken subscriber never breaks a turn */ }
     }
   }
 
@@ -786,7 +1009,8 @@ export function createInteractiveEngine({
     try {
       const { createNotification } = await loadNotifications();
       db = createDbClient();
-      await createNotification(db, opts);
+      // Masked before the cut and before the row and the push (2026-10-26).
+      await createNotification(db, { ...opts, title: maskSecrets(opts.title), body: opts.body == null ? opts.body : maskSecrets(opts.body) });
     } catch (e) {
       log("attention notify failed (non-fatal): " + ((e && e.message) || e));
     } finally {
@@ -815,7 +1039,7 @@ export function createInteractiveEngine({
    * Fire-and-forget, like pushAttention: a failure never breaks the card.
    */
   function attentionForAsk(s, text) {
-    const question = String(text == null ? "" : text).slice(0, 300);
+    const question = maskSecrets(String(text == null ? "" : text)).slice(0, 300);
     return chainAttention(s, async (db, N) => {
       const r = await N.upsertGroupedNotification(db, {
         type: "attention",
@@ -971,7 +1195,7 @@ export function createInteractiveEngine({
       botId: s.botId,
       threadId: s.threadId,
       state: s.state,
-      lastError: s.lastError || null,
+      lastError: s.lastError ? maskSecrets(s.lastError) : null,
       pendingUi: shownCard(s),
       // Track 3 Task 4: same three additions as snapshot(), same rule.
       model: servingModel(s),
@@ -1825,6 +2049,9 @@ export function createInteractiveEngine({
     mkdirSync(outputsDir, { recursive: true });
     mkdirSync(uploadsDir, { recursive: true });
     s.outputsDir = outputsDir;
+    // The anchor send_user_file writes against: resolved now, before this
+    // child (the bot) runs, so a later symlink swap cannot move it.
+    try { s.outputsDirReal = realpathSync(outputsDir); } catch { s.outputsDirReal = null; }
     s.uploadsDir = uploadsDir;
 
     let resume = (world.session && world.session.pi_session_id) || s.piSessionId || null;
@@ -2041,14 +2268,14 @@ export function createInteractiveEngine({
         // chars: enough to recognize a bash command or a file path, not
         // enough to balloon a frame on a write-tool payload).
         emit(s, { type: "tool", name: m.toolName, phase: "start", isError: false,
-          toolCallId: m.toolCallId || null, argsText: safeSnippet(m.args, 600) });
+          toolCallId: m.toolCallId || null, argsText: safeSnippet(maskDeep(m.args), 600) });
         return;
       case "tool_execution_end":
         if (s.turn && m.toolName) s.turn.toolNames.push(m.toolName);
         // Wave 3: same for the outcome — the result's TEXT blocks, pi-lab's
         // own 2000-char cap, stringified fallback for non-text payloads.
         emit(s, { type: "tool", name: m.toolName, phase: "end", isError: !!m.isError,
-          toolCallId: m.toolCallId || null, resultText: toolResultSnippet(m.result, 2000) });
+          toolCallId: m.toolCallId || null, resultText: toolResultSnippet(maskDeep(m.result), 2000) });
         return;
       case "message_end": {
         // Message-level streaming; delta-level is a recorded non-goal.
@@ -2161,41 +2388,131 @@ export function createInteractiveEngine({
    * servable:false. Never throws — the caller is a protocol branch that must
    * not break the turn.
    */
+  /** A path under, or a file sharing an inode with one under, the instance's
+   * secrets dir (one level of subdirs: keychain.key, bundle-env/*). */
+  function insideSecrets(realPath, st) {
+    // Every OTHER instance's secrets dir too (the list the bridge hides): a
+    // file there, or a hard link to one, is never copied out. A list that
+    // cannot be computed refuses (fail closed).
+    let instanceDirs;
+    try { instanceDirs = checkedInstanceSecretsDirs(secretsEnv); } catch { return true; }
+    for (const d of instanceDirs) {
+      if (realPath === d || realPath.startsWith(d + sep)) return true;
+      if (sameInodeUnder(d, st)) return true;
+    }
+    for (const d of hiddenDirs || []) {
+      let r;
+      try { r = realpathSync(d); } catch { continue; }
+      if (realPath === r || realPath.startsWith(r + sep)) return true;
+    }
+    // The anchored secrets dir, by inode: the file itself, or any ancestor of
+    // it (a secrets dir renamed away keeps its inode under its new name).
+    if (secretsAnchor) {
+      if (st.dev === secretsAnchor.dev && st.ino === secretsAnchor.ino) return true;
+      for (let p = realPath; p && p !== sep; ) {
+        const up = p.slice(0, p.lastIndexOf(sep)) || sep;
+        try { const x = lstatSync(up); if (x.dev === secretsAnchor.dev && x.ino === secretsAnchor.ino) return true; } catch { /* gone */ }
+        if (up === p) break;
+        p = up;
+      }
+    }
+    // A hard link to a file in it (same inode, another path).
+    const walk = (d, depth) => {
+      let names = [];
+      try { names = readdirSync(d, { withFileTypes: true }); } catch { return false; }
+      for (const n of names) {
+        const p = join(d, n.name);
+        if (n.isDirectory()) { if (depth < 2 && walk(p, depth + 1)) return true; continue; }
+        try { const x = lstatSync(p); if (x.ino === st.ino && x.dev === st.dev) return true; } catch { /* raced */ }
+      }
+      return false;
+    };
+    let secretsReal;
+    try { secretsReal = realpathSync(join(crowHome, "secrets")); } catch { return false; }
+    if (realPath === secretsReal || realPath.startsWith(secretsReal + sep)) return true;
+    return walk(secretsReal, 0);
+  }
+
+  /** A file under `dir` (two levels deep) with the same inode as `st`. */
+  function sameInodeUnder(dir, st) {
+    const walk = (d, depth) => {
+      let names = [];
+      try { names = readdirSync(d, { withFileTypes: true }); } catch { return false; }
+      for (const n of names) {
+        const p = join(d, n.name);
+        if (n.isDirectory()) { if (depth < 2 && walk(p, depth + 1)) return true; continue; }
+        try { const x = lstatSync(p); if (x.ino === st.ino && x.dev === st.dev) return true; } catch { /* raced */ }
+      }
+      return false;
+    };
+    return walk(dir, 0);
+  }
+
   async function handleFileNotify(s, meta) {
     if (!meta || typeof meta !== "object") return;
     const src = typeof meta.path === "string" ? meta.path : "";
     const name = typeof meta.name === "string" && meta.name ? meta.name : (src ? src.split("/").pop() : "");
     if (!src || !name) return;
-    const caption = String(meta.caption == null ? "" : meta.caption).replace(/\s+/g, " ").trim().slice(0, 300);
+    const caption = maskSecrets(String(meta.caption == null ? "" : meta.caption).replace(/\s+/g, " ").trim()).slice(0, 300);
     let servable = false;
     let stored = null;
     let size = Number(meta.size);
     let mime = typeof meta.mime === "string" ? meta.mime : "application/octet-stream";
+    let fd;
+    let dfd;
     try {
-      const st = lstatSync(src);
+      // ONE open, then every check on what was opened (no check-then-copy
+      // race): the last component never a symlink (O_NOFOLLOW, the existing
+      // "symlinked source is refused" rule), a regular file within the cap,
+      // its real path taken from the fd itself, never the instance's secrets
+      // dir (keychain key, retained bundle secrets, the secret-values file:
+      // hidden from the bot's sandbox, while this copy runs outside it), and
+      // never the same inode as a file in there (a hard link). The copy is
+      // read from the same fd.
+      fd = openSync(src, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+      const st = fstatSync(fd);
       if (st.isFile() && st.size <= FILE_MAX_BYTES) {
         size = st.size;
-        // A dir is only ever mkdir'd when it is ABSOLUTE: the worldRoot
-        // fallback exists for test seams, and joining onto "" would produce a
-        // relative path and scatter an `outputs/` tree into the gateway's cwd.
+        const srcReal = readlinkSync("/proc/self/fd/" + fd);
+        if (insideSecrets(srcReal, st)) throw new Error("secrets dir");
+        // Only a live session with a workspace (an outputs dir, or a world
+        // root in test seams) gets a servable card.
         const dir = s.outputsDir || (s.worldRoot ? join(s.worldRoot, "outputs", s.sessionId) : null);
         if (!isAbsolute(dir || "")) throw new Error("no absolute outputs dir");
-        mkdirSync(dir, { recursive: true });
-        const dirReal = realpathSync(dir);
-        const srcReal = realpathSync(src);
-        // Strictly-under, the workspace route's own formula: the `+ sep` is
-        // what turns a string-prefix match into a containment test.
-        if (srcReal.startsWith(dirReal + sep)) {
-          // Already inside its own jail — nothing to copy, serve in place.
-          stored = srcReal.slice(dirReal.length + 1);
+        // Serve in place: a file the bot wrote into its OWN outputs dir is
+        // not copied anywhere (nothing is written). The check compares against
+        // the outputs dir's real path recorded at spawn.
+        const outputsReal = s.outputsDirReal || null;
+        if (outputsReal && srcReal.startsWith(outputsReal + sep)) {
+          stored = srcReal.slice(outputsReal.length + 1);
           servable = true;
         } else {
-          stored = resolveSentName(dir, name);
-          copyFileSync(srcReal, join(dir, stored));
+          // Everything else is COPIED into the gateway-owned staging dir
+          // (servers/shared/perch-delivered.js): hidden from the bot's
+          // sandbox, its root anchored by inode, every component opened from
+          // that root fd without following a symlink, the file created
+          // through the dir fd with O_EXCL|O_NOFOLLOW. Never into a dir the
+          // bot can write or swap.
+          dfd = openDeliveredDir(s.sessionId, { create: true });
+          const viaFd = "/proc/self/fd/" + dfd;
+          stored = resolveSentName([viaFd, dir], name);
+          const buf = Buffer.alloc(st.size);
+          let off = 0;
+          while (off < st.size) {
+            const n = readSync(fd, buf, off, st.size - off, off);
+            if (n <= 0) break;
+            off += n;
+          }
+          const wfd = openSync(join(viaFd, stored), fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+          try { writeFileSync(wfd, buf.subarray(0, off)); } finally { closeSync(wfd); }
           servable = true;
         }
       }
     } catch { /* refused/unreachable source -> name-only card */ }
+    finally {
+      if (fd !== undefined) { try { closeSync(fd); } catch { /* closed */ } }
+      if (dfd !== undefined) { try { closeSync(dfd); } catch { /* closed */ } }
+    }
     const frame = { type: "file", name, stored, mime, size: Number.isFinite(size) ? size : 0, caption, servable };
     emit(s, frame);
     const db = createDbClient();
@@ -2228,13 +2545,20 @@ export function createInteractiveEngine({
         const qs = s.pendingQuestions.questions;
         s.pendingQuestions = null;
         s.askCtx = { questions: qs, firstFrame: m };
-        s.pendingUi = { requestId: m.id, method: "questions", title: "", questions: qs };
+        // Any question, header, label or description that could not be masked
+        // in full makes the WHOLE combined card unapprovable: nothing of it is
+        // shown, and answer() sends cancelled.
+        const mq = maskQuestions(qs);
+        s.pendingUi = mq.failed || mq.tooLong
+          ? Object.defineProperty({ requestId: m.id, method: "questions", title: "", questions: [], message: unshownCardText(mq.tooLong) }, RAW_CARD, { value: { failed: true } })
+          : { requestId: m.id, method: "questions", title: "", questions: mq.questions,
+            ...(mq.hidden || mq.possible || mq.literal ? { message: [mq.hidden ? hiddenNote(mq.hidden) : "", mq.possible ? POSSIBLE_NOTE : "", mq.literal ? LITERAL_MARKER_NOTE : ""].filter(Boolean).join("\n") } : {}) };
         s.expiredAsk = null;                         // a live question supersedes an expired one
         armAskExpiry(s, m);
         clearStall(s);                               // paused while a human thinks
         emit(s, { type: "ask_user", ...s.pendingUi });
         armIdle(s);
-        attentionForAsk(s, askSummary(qs));
+        attentionForAsk(s, askSummary(s.pendingUi.questions));
         return;
       }
       s.pendingUi = cardFrom(m);
@@ -2456,7 +2780,7 @@ export function createInteractiveEngine({
             type: "attention",
             priority: "normal",
             title: s.botId + (failed ? "'s turn failed" : " replied"),
-            body: (failed ? errorText : replyText).slice(0, 140),
+            body: maskSecrets(failed ? errorText : replyText).slice(0, 140),
             action_url: "/dashboard/bot-board#bird=" + s.sessionId,
           });
         }
@@ -3238,6 +3562,9 @@ export function createInteractiveEngine({
     if (card.method === "questions") {
       const ctx = s.askCtx || {};
       const firstFrame = ctx.firstFrame || null;
+      // A combined card that could not be masked in full was never shown:
+      // whatever came back, pi gets "cancelled".
+      if (card[RAW_CARD] && card[RAW_CARD].failed) value = { cancelled: true };
       // Cancel resolves the tool cleanly ("Question cancelled") exactly like a
       // sequential card's cancel — respond to the pending first select.
       if (value && value.cancelled) {
@@ -3248,7 +3575,9 @@ export function createInteractiveEngine({
         return { ok: true };
       }
       const answers = Array.isArray(value && value.answers) ? value.answers : [];
-      const script = buildAskScript(card.questions, answers);
+      const script = ctx.questions
+        ? buildAskScript(ctx.questions, unmaskAnswers(card.questions, ctx.questions, answers))
+        : buildAskScript(card.questions, answers);
       const step0 = script && script[0];
       // Drift guard: the first scripted response must be a value the child's
       // actual select offered. If the script is unusable OR its first step no
@@ -3284,9 +3613,21 @@ export function createInteractiveEngine({
       // hang is closed at the source, so a cancel is a real answer.
       payload.cancelled = true;
     } else if (card.method === "confirm") {
-      payload.confirmed = !!(value && value.confirmed);
+      payload.confirmed = !!(value && value.confirmed) && !(card[RAW_CARD] && card[RAW_CARD].failed);
     } else {
       payload.value = String(value && value.value != null ? value.value : "");
+      // A masked card (cardFrom): the shown option or untouched prefill maps
+      // back to what pi offered. An edited prefill is sent as typed.
+      const raw = card[RAW_CARD];
+      if (raw && raw.failed) {
+        payload.cancelled = true;
+        delete payload.value;
+      }
+      if (raw && !raw.failed && raw.options && Array.isArray(card.options)) {
+        const i = card.options.indexOf(payload.value);
+        if (i >= 0) payload.value = String(raw.options[i]);
+      }
+      if (raw && !raw.failed && raw.prefill != null) payload.value = restorePrefill(payload.value, card.prefill, String(raw.prefill));
     }
     s.pi.send(payload);
     settleAsk(s);                                    // 2026-10-20: expiry off, group closed
@@ -3499,21 +3840,22 @@ export function createInteractiveEngine({
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
     s.subscribers.add(fn);
+    const replay = (e) => fn(maskFrame(e));   // the replay is display too (2026-10-26)
     try {
-      fn(stateEvent(s));
+      replay(stateEvent(s));
       // Replay the pending question, and ONLY a pending one: stop / abort /
       // hibernate / child exit all clear it, so a late subscriber can never be
       // shown a card no child is waiting on.
-      if (s.pendingUi) fn({ type: "ask_user", ...s.pendingUi });
-      else if (s.expiredAsk) fn({ type: "ask_user", ...s.expiredAsk });
+      if (s.pendingUi) replay({ type: "ask_user", ...s.pendingUi });
+      else if (s.expiredAsk) replay({ type: "ask_user", ...s.expiredAsk });
       // Track 3 Task 5: replay the last known plan-mode mirror so a late
       // subscriber's drawer opens already showing plan-mode state instead of
       // waiting for the NEXT bus tick (which may never come if nothing
       // changes).
-      if (s.planMode) fn({ type: "plan_state", state: s.planMode });
+      if (s.planMode) replay({ type: "plan_state", state: s.planMode });
       // Strand 2: the child's tool-budget notice (emitted at spawn, usually
       // before anyone was listening).
-      if (s.budgetNotice && s.pi) fn({ type: "log", text: s.budgetNotice });
+      if (s.budgetNotice && s.pi) replay({ type: "log", text: s.budgetNotice });
     } catch { /* a broken subscriber is not our problem */ }
     return () => s.subscribers.delete(fn);
   }

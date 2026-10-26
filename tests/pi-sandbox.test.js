@@ -358,3 +358,37 @@ test("I1: an OLD-style reaper (no wrapper folding) respects the dual lease on pi
     assert.deepEqual(r2.reaped.map((v) => v.pid), [701], "control: the bug the dual lease fixes");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("wrapPiSpawn pins every user-writable ancestor of a hidden dir (bind onto itself, before the tmpfs)", () => {
+  _resetPiSandboxForTest();
+  const root = mkdtempSync(join(tmpdir(), "crow-pin-"));
+  const home = join(root, "home");
+  const secrets = join(home, ".crow", "secrets");
+  mkdirSync(secrets, { recursive: true });
+  const probe = { ok: true, bwrap: "/usr/bin/bwrap", setpriv: null, reason: null };
+  const l = wrapPiSpawn("node", ["cli.js"], { mode: "auto", probe, sockets: [], runtimeDirs: [], roDirs: [], hideDirs: [secrets], pinStop: root });
+  const a = l.args;
+  const bindAt = (p) => a.findIndex((x, i) => x === "--bind" && a[i + 1] === p && a[i + 2] === p);
+  const tmpfsAt = a.findIndex((x, i) => x === "--tmpfs" && a[i + 1] === secrets);
+  for (const p of [join(home, ".crow"), home]) {
+    assert.ok(bindAt(p) >= 0, "pinned: " + p);
+    assert.ok(bindAt(p) < tmpfsAt, "before the tmpfs: " + p);
+  }
+  assert.equal(bindAt(root), -1, "stops at pinStop (a dir whose parent the user cannot write, in production)");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("wrapPiSpawn pins EVERY ancestor below the stop, even past a parent the bot made unwritable (chmod 555 ~)", () => {
+  _resetPiSandboxForTest();
+  const root = mkdtempSync(join(tmpdir(), "crow-pin2-"));
+  const home = join(root, "home");
+  const secrets = join(home, ".crow", "secrets");
+  mkdirSync(secrets, { recursive: true });
+  chmodSync(home, 0o555);
+  try {
+    const probe = { ok: true, bwrap: "/usr/bin/bwrap", setpriv: null, reason: null };
+    const l = wrapPiSpawn("node", ["cli.js"], { mode: "auto", probe, sockets: [], runtimeDirs: [], roDirs: [], hideDirs: [secrets], pinStop: root });
+    assert.ok(l.pinned.includes(join(home, ".crow")), "pinned although its parent is not writable right now");
+    assert.ok(l.pinned.includes(home));
+  } finally { chmodSync(home, 0o755); rmSync(root, { recursive: true, force: true }); }
+});
