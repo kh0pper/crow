@@ -13,6 +13,7 @@ import { result, fill, flat, joinNames } from "./executor.js";
 import { spokenWords, sameAt } from "./phrases.js";
 import { cleanTitle, VOLUME_MOVE } from "./media.js";
 import { SourceUnavailable } from "./sources/index.js";
+import { writesCallSign } from "./patterns.js";
 
 /** How long "Which one?" waits for its answer. */
 export const CHOICE_TTL_MS = 30_000;
@@ -74,8 +75,9 @@ export function createPlayResolver({ registry, timeoutMs = SOURCE_TIMEOUT_MS, no
      *   | { outcome: "refused", say, vars, source }           a source knows what was meant and cannot play it (its own line)
      *   | { outcome: "not_found" }
      * strict: never play a guess (a single loose candidate plays only for the model's call).
+     * callSign: the request was written as a call sign; a source may then look for near spellings (stations.js).
      */
-    async resolve(what, source = "auto", { strict = false, lang = "en", deviceId = null } = {}) {
+    async resolve(what, source = "auto", { strict = false, lang = "en", deviceId = null, callSign = false } = {}) {
       const all = registry.available();
       if (!all.length) return { outcome: "unavailable", code: "none" };
       const has = (kind) => all.some((s) => s.kind === kind);
@@ -87,7 +89,7 @@ export function createPlayResolver({ registry, timeoutMs = SOURCE_TIMEOUT_MS, no
       const loose = [], down = [];
       for (const s of order) {
         let found = [];
-        try { found = await within(Promise.resolve().then(() => s.search(text, { explicit: !!want, lang }))); } catch (err) { note(down, s, err); continue; }
+        try { found = await within(Promise.resolve().then(() => s.search(text, { explicit: !!want, lang, callSign }))); } catch (err) { note(down, s, err); continue; }
         found = (Array.isArray(found) ? found : []).filter((c) => c && c.id != null && typeof c.title === "string");
         const sure = found.find((c) => c.confident === true);
         // "I know what you mean and cannot play it" (the news with no recent briefing): an answer, not a miss.
@@ -210,7 +212,7 @@ export function createMediaVerbs({ media, resolver, maxVolume = () => 100 }) {
     }
     if (i.choice === true) return null;                                    // a bare sentence that named none of them: the model gets it
     if (!what) return ctx.strict ? null : result(false, "not_found", S.say_play_what, { effect: false });
-    const r = await resolver.resolve(what, i.source || "auto", { strict: ctx.strict === true, lang: ctx.lang, deviceId: id });
+    const r = await resolver.resolve(what, i.source || "auto", { strict: ctx.strict === true, lang: ctx.lang, deviceId: id, callSign: i.callSign === true || writesCallSign(i.what) });
     if (r.outcome === "playing") return start(r, ctx, S);
     // A source's own refusal is a real answer, with or without a model; its line is always spoken.
     if (r.outcome === "refused") return result(false, "unavailable", fill(S[r.say] || S.say_play_unavailable, r.vars), { reason: "refused", effect: false });
