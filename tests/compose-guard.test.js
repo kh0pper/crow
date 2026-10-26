@@ -684,3 +684,9 @@ test("no tracked bundle id ends in an owned-place suffix (so the suffix rule can
   const bad = [...trackedBundleSet()].filter((id) => G.OWN_SUFFIXES.some((x) => id.endsWith(x)));
   assert.deepEqual(bad, []);
 });
+
+test("the 35B model bundle no longer asks for the host IPC namespace", () => {
+  const compose = readFileSync(join(REPO, "bundles", "llamacpp-vulkan-qwen36-35b-a3b", "docker-compose.yml"), "utf8");
+  assert.doesNotMatch(compose.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n"), /^\s*ipc:\s*host/m);
+  assert.match(compose, /^\s*shm_size:\s*16g/m);
+});

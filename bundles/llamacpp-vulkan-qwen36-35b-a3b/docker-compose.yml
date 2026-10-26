@@ -65,5 +65,8 @@ services:
     # that was running at shutdown. The two policies differ only for containers
     # that were deliberately stopped, which is exactly the window's case.
     restart: unless-stopped
-    ipc: host
+    # No ipc: host. llama-server is one process: weights load with --no-mmap into GPU
+    # memory through Vulkan, and nothing shares POSIX shared memory with another process,
+    # so the host IPC namespace buys nothing (the install security check refuses it
+    # without privileged consent). A private /dev/shm of shm_size is kept as headroom.
     shm_size: 16g
