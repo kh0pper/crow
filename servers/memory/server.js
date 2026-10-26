@@ -1115,7 +1115,7 @@ export function createMemoryServer(dbPath, options = {}) {
     {
       task: z.string().max(1000).describe("What to be reminded of (a reminder), or pipeline:botcron:<bot_id> (a bot routine)"),
       cron_expression: z.string().max(50).optional().describe("Cron expression for a repeating schedule (e.g. '0 9 * * *' for daily at 9am)"),
-      at: z.string().max(40).optional().describe("ISO date-time for a one-time reminder (e.g. '2026-11-03T10:00:00-06:00')"),
+      at: z.string().max(40).optional().describe("ISO date-time WITH its offset for a one-time reminder (e.g. '2026-11-03T10:00:00-06:00' or '…Z')"),
       tz: z.string().max(64).optional().describe("IANA time zone (e.g. 'America/Chicago'); default: the instance's zone"),
       type: z.enum(["reminder", "bot_routine", "briefing"]).optional().describe("Schedule type; default: reminder (or bot_routine for a pipeline:botcron: task)"),
       description: z.string().max(500).optional().describe("Optional description of the schedule"),
@@ -1135,11 +1135,18 @@ export function createMemoryServer(dbPath, options = {}) {
       }
       if ((cron_expression ? 1 : 0) + (at ? 1 : 0) !== 1) return scheduleError("Give exactly one of cron_expression (repeating) or at (one time).");
       if (tz !== undefined && !validTimeZone(tz)) return scheduleError(`"${tz}" is not a time zone name (use one like America/Chicago).`);
+      // The bot ticker computes times without a zone until bot routines learn zones (panel PR 4).
+      if (tz !== undefined && kind === "bot_routine") return scheduleError("Bot routines cannot take a time zone yet; they run in the instance's time zone. Leave tz out.");
+      const withTz = await hasTzColumn(db);
+      if (tz !== undefined && !withTz) return scheduleError("This Crow cannot store a time zone on a schedule until its gateway restarts onto the update. Leave tz out for now.");
       const now = Date.now();
       const zone = zoneFor(tz, await instanceZone(db));
       let cron, nextRun;
       if (at) {
         if (kind !== "reminder") return scheduleError("Only a reminder can be one-time; give a cron_expression.");
+        // An offset is required: a bare "10:00" would otherwise be read in the server process's
+        // zone, which is not necessarily the user's or the instance's.
+        if (!/(Z|[+-]\d{2}:?\d{2})$/i.test(String(at).trim())) return scheduleError(`"${at}" has no time zone offset. Add one, e.g. 2026-11-03T10:00:00-06:00 (or Z for UTC).`);
         const ms = Date.parse(at);
         if (!Number.isFinite(ms)) return scheduleError(`"${at}" is not a date and time (use ISO, e.g. 2026-11-03T10:00:00-06:00).`);
         if (ms <= now) return scheduleError("That time has already passed. Pick a time in the future.");
@@ -1157,7 +1164,6 @@ export function createMemoryServer(dbPath, options = {}) {
         nextRun = isoOf(next);
       }
       const stored = kind === "reminder" && !t.startsWith(REMINDER_PREFIX) ? REMINDER_PREFIX + t : t;
-      const withTz = await hasTzColumn(db);
       const result = await db.execute({
         sql: withTz
           ? "INSERT INTO schedules (task, cron_expression, description, next_run, tz) VALUES (?, ?, ?, ?, ?)"
@@ -1222,7 +1228,7 @@ export function createMemoryServer(dbPath, options = {}) {
       enabled: z.boolean().optional().describe("Enable (resume) or disable (pause) the schedule"),
       task: z.string().max(1000).optional().describe("New text (the type must stay the same)"),
       cron_expression: z.string().max(50).optional().describe("New cron expression"),
-      tz: z.string().max(64).optional().describe("New IANA time zone"),
+      tz: z.string().max(64).nullable().optional().describe("New IANA time zone; null clears it (the schedule then follows the instance zone)"),
       run_now: z.boolean().optional().describe("If true, run this reminder now (within a minute)"),
       delete: z.boolean().optional().describe("If true, delete the schedule and its run history"),
     },
@@ -1247,10 +1253,13 @@ export function createMemoryServer(dbPath, options = {}) {
         return { content: [{ type: "text", text: `Schedule #${id}: run requested (run ${runId}); Crow runs it within a minute. Its next scheduled run is unchanged.` }] };
       }
 
-      if (tz !== undefined && !validTimeZone(tz)) return scheduleError(`"${tz}" is not a time zone name (use one like America/Chicago).`);
+      const clearTz = tz === null || tz === "";
+      if (tz !== undefined && !clearTz && !validTimeZone(tz)) return scheduleError(`"${tz}" is not a time zone name (use one like America/Chicago).`);
+      if (tz !== undefined && !clearTz && kind === "bot_routine") return scheduleError("Bot routines cannot take a time zone yet; they run in the instance's time zone.");
       const withTz = await hasTzColumn(db);
+      if (tz !== undefined && !withTz) return scheduleError("This Crow cannot store a time zone on a schedule until its gateway restarts onto the update.");
       const now = Date.now();
-      const zone = zoneFor(tz ?? row.tz, await instanceZone(db));
+      const zone = zoneFor(clearTz ? null : (tz ?? row.tz), await instanceZone(db));
       const cron = cron_expression !== undefined ? String(cron_expression).trim() : row.cron_expression;
 
       const updates = [];
@@ -1260,7 +1269,7 @@ export function createMemoryServer(dbPath, options = {}) {
         if (scheduleKind(t) !== kind) return scheduleError("A schedule's type is fixed. Delete it and create a new one instead.");
         updates.push("task = ?"); params.push(kind === "reminder" && !t.startsWith(REMINDER_PREFIX) ? REMINDER_PREFIX + t : t);
       }
-      if (tz !== undefined && withTz) { updates.push("tz = ?"); params.push(tz); }
+      if (tz !== undefined) { updates.push("tz = ?"); params.push(clearTz ? null : tz); }
       if (cron_expression !== undefined) {
         if (cron === ONCE) return scheduleError("For a one-time reminder, create a new one with at.");
         const next = cronNext(cron, zone, now);

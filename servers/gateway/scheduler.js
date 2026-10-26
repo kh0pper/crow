@@ -28,7 +28,9 @@ let timer = null;
 let db = null;
 let _started = false; // Guard: prevents orphaned duplicate intervals from a second startScheduler() call.
 let _now = () => Date.now();
-let aliveAt = null; // the last tick of THIS process: a stall inside a live process is late, not missed
+let aliveAt = null; // when THIS process's previous tick started: a stall inside a live process is late, not missed
+let tickStartedAt = null;
+const RUNNING_TTL = "-10 minutes"; // a 'running' run older than this was cut off by a crash
 let ticksSinceRetention = RETENTION_EVERY;
 
 const iso = (ms) => new Date(ms).toISOString();
@@ -44,11 +46,11 @@ const STR = {
     missedManyBody: (n, a, b) => `Due ${n} times, ${a} → ${b}, while Crow wasn't running.`,
     failedOne: (t) => `Reminder failed: ${t}`,
     pausedOne: (t) => `Paused during the upgrade: ${t}`,
-    pausedFrequent: (m) => `It would have notified every ${m} minutes. Turn it back on in Schedule if you want it.`,
+    pausedFrequent: (m) => `It would have notified every ${m} minutes. Ask Crow to turn it back on if you want it.`,
     pausedSystem: "It belonged to a retired runner and could never run.",
     summaryMissed: (n) => `${n} schedules missed runs while Crow wasn't running`,
     summaryMixed: (n) => `${n} schedules need a look`,
-    summaryBody: "Open Schedule to see them.",
+    summaryBody: "Ask Crow to list your schedules to see them.",
     deleted: "A deleted schedule",
   },
   es: {
@@ -59,11 +61,11 @@ const STR = {
     missedManyBody: (n, a, b) => `Tocaba ${n} veces, ${a} → ${b}, mientras Crow no estaba en marcha.`,
     failedOne: (t) => `Falló el recordatorio: ${t}`,
     pausedOne: (t) => `En pausa por la actualización: ${t}`,
-    pausedFrequent: (m) => `Habría avisado cada ${m} minutos. Vuelve a activarlo en Agenda si lo quieres.`,
+    pausedFrequent: (m) => `Habría avisado cada ${m} minutos. Pide a Crow que lo reactive si lo quieres.`,
     pausedSystem: "Pertenecía a un ejecutor retirado y nunca podía ejecutarse.",
     summaryMissed: (n) => `${n} programaciones no se ejecutaron mientras Crow no estaba en marcha`,
     summaryMixed: (n) => `${n} programaciones necesitan revisión`,
-    summaryBody: "Abre Agenda para verlas.",
+    summaryBody: "Pide a Crow la lista de tus programaciones para verlas.",
     deleted: "Una programación borrada",
   },
 };
@@ -85,7 +87,7 @@ async function rowZone(row, zone) {
 }
 
 /** Notification + reminder hooks. → null, or the error message when the notification failed. */
-async function deliverReminder(schedule, { late = false, lang = "en" } = {}) {
+async function deliverReminder(db, schedule, { late = false, lang = "en" } = {}) {
   const text = reminderText(schedule.task) || STR[lang].fallback;
   let error = null;
   try {
@@ -111,7 +113,7 @@ async function deliverReminder(schedule, { late = false, lang = "en" } = {}) {
  * only for now; it never changes next_run. → { ok, runId?, error? }
  */
 export async function runNow(database, schedule, { runId = null } = {}) {
-  db = database;
+  const db = database; // local: never rebinds the scheduler's own handle
   const finish = async (status, detail) => {
     if (!(await hasRunsTable(db))) return null;
     if (runId) {
@@ -131,7 +133,7 @@ export async function runNow(database, schedule, { runId = null } = {}) {
     if (runId) await finish("failed", JSON.stringify({ error }));
     return { ok: false, error };
   }
-  const error = await deliverReminder(schedule, { lang: await instanceLang(db) });
+  const error = await deliverReminder(db, schedule, { lang: await instanceLang(db) });
   const id = await finish(error ? "failed" : "ok", error ? JSON.stringify({ error }) : null);
   return { ok: !error, runId: id, error };
 }
@@ -182,7 +184,7 @@ async function settleReminder(row, now, { zone, grace, runs, lang }) {
     return;
   }
   console.log(`[scheduler] Fired${once ? " one-shot" : ""}: #${row.id} "${row.task}"${s.late ? " (late)" : ""}${once ? "" : ` — next: ${nextRun || "unknown"}`}`);
-  const error = await deliverReminder(row, { late: s.late, lang });
+  const error = await deliverReminder(db, row, { late: s.late, lang });
   if (error && runs) {
     await db.execute({
       sql: "UPDATE schedule_runs SET status = 'failed', detail = ? WHERE schedule_id = ? AND scheduled_for = ?",
@@ -194,13 +196,18 @@ async function settleReminder(row, now, { zone, grace, runs, lang }) {
 /** Execute 'requested' runs (written by the memory server's run_now), each claimed first. */
 async function drainRequests() {
   await db.execute({
+    sql: `UPDATE schedule_runs SET status = 'failed', detail = '{"error":"interrupted"}'
+          WHERE status = 'running' AND julianday(COALESCE(ran_at, created_at)) < julianday(?, '${RUNNING_TTL}')`,
+    args: [iso(_now())],
+  });
+  await db.execute({
     sql: `UPDATE schedule_runs SET status = 'failed', detail = '{"error":"no runner"}', ran_at = ?
           WHERE status = 'requested' AND julianday(created_at) < julianday('now', '${REQUEST_TTL}')`,
     args: [iso(_now())],
   });
   const { rows } = await db.execute({ sql: "SELECT id, schedule_id FROM schedule_runs WHERE status = 'requested' ORDER BY id LIMIT 20", args: [] });
   for (const r of rows) {
-    const claim = await db.execute({ sql: "UPDATE schedule_runs SET status = 'running' WHERE id = ? AND status = 'requested'", args: [r.id] });
+    const claim = await db.execute({ sql: "UPDATE schedule_runs SET status = 'running', ran_at = ? WHERE id = ? AND status = 'requested'", args: [iso(_now()), r.id] });
     if (!claim.rowsAffected) continue;
     const s = (await db.execute({ sql: "SELECT * FROM schedules WHERE id = ?", args: [r.schedule_id] })).rows[0] || null;
     await runNow(db, s, { runId: r.id });
@@ -233,7 +240,8 @@ async function notifyOnce(now, { zone, lang }) {
   const base = { source: "scheduler:missed", priority: "normal" };
   if (claimed.length > 1) {
     const allMissed = claimed.every((c) => c.status === "missed");
-    await createNotification(db, { ...base, type: "system", title: allMissed ? S.summaryMissed(claimed.length) : S.summaryMixed(claimed.length), body: S.summaryBody, action_url: "/dashboard/schedule" });
+    // No action_url until the Schedule page exists (panel PR 2).
+    await createNotification(db, { ...base, type: "system", title: allMissed ? S.summaryMissed(claimed.length) : S.summaryMixed(claimed.length), body: S.summaryBody });
     return;
   }
   const c = claimed[0];
@@ -241,7 +249,7 @@ async function notifyOnce(now, { zone, lang }) {
   let detail = {};
   try { detail = JSON.parse(c.detail || "{}") || {}; } catch {}
   const z = zoneFor(c.tz, zone);
-  const one = { ...base, schedule_id: c.task ? Number(c.schedule_id) : null, action_url: `/dashboard/schedule?run=${c.id}` };
+  const one = { ...base, schedule_id: c.task ? Number(c.schedule_id) : null };
   if (c.status === "paused") {
     await createNotification(db, { ...one, type: "system", title: S.pausedOne(text), body: detail.reason === "frequent" ? S.pausedFrequent(detail.every_min) : S.pausedSystem });
   } else if (c.status === "failed") {
@@ -297,7 +305,6 @@ async function settlePass() {
     await drainRequests();
     await notifyOnce(now, { zone, lang });
   }
-  aliveAt = now;
 }
 
 /**
@@ -306,6 +313,10 @@ async function settlePass() {
 async function tick() {
   if (!db) return;
 
+  // The heartbeat is the START of the previous tick, so a slow hook in that tick cannot make a
+  // row that came due meanwhile look like downtime.
+  aliveAt = tickStartedAt;
+  tickStartedAt = _now();
   try {
     await settlePass();
 
@@ -434,4 +445,4 @@ export function _setComputeNextRunForTest(fn) { _compute = fn; return () => { _c
 /** Replace the clock (tests); null restores Date.now. */
 export function _setNowForTest(fn) { _now = fn || (() => Date.now()); }
 /** Forget in-process state between tests (heartbeat, retention counter). */
-export function _resetForTest() { aliveAt = null; ticksSinceRetention = RETENTION_EVERY; }
+export function _resetForTest() { aliveAt = null; tickStartedAt = null; ticksSinceRetention = RETENTION_EVERY; }

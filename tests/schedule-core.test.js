@@ -83,12 +83,14 @@ test("countGrid counts (after, to] and stops at the cap", () => {
   assert.deepEqual(countGrid("* * * * *", "UTC", from, from + 10 * HOUR, 500), { n: 500, capped: true });
 });
 
-test("cadenceMinutes is the shortest gap between the next occurrences", () => {
+test("cadenceMinutes is the average gap over the next week (the shortest gap when sub-hourly)", () => {
   const now = T("2026-10-26T20:00:00Z");
   assert.equal(cadenceMinutes("*/5 * * * *", "UTC", now), 5);
   assert.equal(cadenceMinutes("0 * * * *", "UTC", now), 60);
   assert.equal(cadenceMinutes("*/20 9-17 * * *", "UTC", now), 20, "a gap at night does not hide a 20-min day cadence");
   assert.equal(cadenceMinutes("0 9 * * *", "UTC", now), 1440);
+  assert.equal(cadenceMinutes("0,30 9 * * *", "UTC", now), 720, "twice a day, half an hour apart, is not sub-hourly");
+  assert.equal(cadenceMinutes("*/1 * * * *", "UTC", now), 1);
   assert.equal(cadenceMinutes("bad", "UTC", now), null);
 });
 
@@ -167,8 +169,17 @@ test("a live process that stalled past grace fires late instead of recording a m
   assert.equal(r.fire, T(due));
   assert.equal(r.status, "late");
   assert.equal(r.missed, null);
-  const cold = settleDue(daily(due), T(due) + 20 * MIN, { graceMs: GRACE, aliveAt: T(due) - 10 * MIN });
+  const slowHook = settleDue(daily(due), T(due) + 20 * MIN, { graceMs: GRACE, aliveAt: T(due) - 10 * MIN });
+  assert.equal(slowHook.fire, T(due), "a slow tick (hooks) inside a live process is still late, not missed");
+  const cold = settleDue(daily(due), T(due) + 20 * MIN, { graceMs: GRACE, aliveAt: T(due) - 2 * HOUR });
   assert.equal(cold.fire, null, "a tick long before due proves nothing");
+});
+
+test("a row re-enabled with an old next_run is not a stall: the previous tick came after its time", () => {
+  const due = "2026-10-20T09:00:00.000Z";
+  const r = settleDue(daily(due), T("2026-10-26T12:00:00Z"), { graceMs: GRACE, aliveAt: T("2026-10-26T11:59:00Z") });
+  assert.equal(r.fire, null);
+  assert.equal(r.missed.count, 7); // 10-20 … 10-26 at 09:00
 });
 
 test("one-shots always fire; beyond grace they are marked late (D7)", () => {

@@ -253,3 +253,44 @@ test("retention prunes orphaned runs", async () => {
   assert.equal((await all("SELECT COUNT(*) AS n FROM schedule_runs WHERE schedule_id = 99999"))[0].n, 0);
   assert.equal((await runs(id)).length, 1);
 });
+
+test("notices carry no link and no pointer to a page that does not exist yet", async () => {
+  const id = await seed("check the logs", "*/5 * * * *", null, { enabled: 0 });
+  await db.execute({ sql: "INSERT INTO schedule_runs (schedule_id, status, source, detail) VALUES (?, 'paused', 'upgrade', ?)", args: [id, JSON.stringify({ reason: "frequent", every_min: 5 })] });
+  await seed("reminder:a", "0 9 * * *", "2026-10-26T09:00:00.000Z");
+  await _tickForTest(db);
+  await seed("reminder:b", "0 10 * * *", "2026-10-26T10:00:00.000Z");
+  await seed("reminder:c", "0 11 * * *", "2026-10-26T11:00:00.000Z");
+  await _tickForTest(db);
+  const n = await notices();
+  assert.ok(n.length >= 2);
+  for (const x of n) {
+    assert.equal(x.action_url, null);
+    assert.doesNotMatch(`${x.title} ${x.body}`, /Schedule|Agenda/);
+  }
+});
+
+test("a run left 'running' by a crash is marked interrupted after ten minutes", async () => {
+  const id = await seed("reminder:crash", "0 9 * * *", "2026-10-27T09:00:00.000Z");
+  await db.execute({ sql: "INSERT INTO schedule_runs (schedule_id, status, source, ran_at) VALUES (?, 'running', 'run-now', ?)", args: [id, iso(NOW - 11 * MIN)] });
+  await db.execute({ sql: "INSERT INTO schedule_runs (schedule_id, status, source, ran_at) VALUES (?, 'running', 'run-now', ?)", args: [id, iso(NOW - 1 * MIN)] });
+  await _tickForTest(db);
+  const r = await runs(id);
+  assert.equal(r[0].status, "failed");
+  assert.equal(JSON.parse(r[0].detail).error, "interrupted");
+  assert.equal(r[1].status, "running", "a fresh one is left alone");
+});
+
+test("a slow tick (a hook taking ten minutes) does not turn a row that came due meanwhile into a miss", async () => {
+  registerSchedulerHook("t-slow", { tick: async () => { clock += 10 * MIN; } });
+  try {
+    await _tickForTest(db); // starts at NOW; its hook ends at NOW + 10 min
+    const id = await seed("reminder:during the hook", "5 15 * * *", "2026-10-26T15:05:00.000Z");
+    clock += 5 * MIN; // the next tick starts at NOW + 15 min: beyond grace for 15:05
+    await _tickForTest(db);
+    const r = await runs(id);
+    assert.equal(r.length, 1);
+    assert.equal(r[0].status, "late");
+    assert.equal((await delivered()).length, 1);
+  } finally { unregisterSchedulerHook("t-slow"); }
+});

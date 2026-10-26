@@ -176,8 +176,15 @@ test("a memory server newer than its database (no tz, no schedule_runs) still cr
     const c2 = new Client({ name: "t2", version: "1" });
     await Promise.all([server.connect(st), c2.connect(ct)]);
     try {
-      const made = await c2.callTool({ name: "crow_create_schedule", arguments: { task: "old db", cron_expression: "0 9 * * *", tz: "Europe/Madrid" } });
+      const zoned = await c2.callTool({ name: "crow_create_schedule", arguments: { task: "old db", cron_expression: "0 9 * * *", tz: "Europe/Madrid" } });
+      assert.equal(zoned.isError, true, "no tz column: a zone is refused, never silently used");
+      const made = await c2.callTool({ name: "crow_create_schedule", arguments: { task: "old db", cron_expression: "0 9 * * *" } });
       assert.ok(!made.isError, made.content[0].text);
+      const id0 = Number(/id: (\d+)/.exec(made.content[0].text)[1]);
+      const before = new Database(file).prepare("SELECT next_run FROM schedules WHERE id = ?").get(id0).next_run;
+      const tzEdit = await c2.callTool({ name: "crow_update_schedule", arguments: { id: id0, tz: "Asia/Tokyo" } });
+      assert.equal(tzEdit.isError, true);
+      assert.equal(new Database(file).prepare("SELECT next_run FROM schedules WHERE id = ?").get(id0).next_run, before, "next_run not moved to a zone it cannot store");
       const listed = await c2.callTool({ name: "crow_list_schedules", arguments: {} });
       assert.match(listed.content[0].text, /old db/);
       const id = Number(/id: (\d+)/.exec(made.content[0].text)[1]);
@@ -187,4 +194,25 @@ test("a memory server newer than its database (no tz, no schedule_runs) still cr
       assert.ok(!del.isError);
     } finally { await c2.close(); }
   } finally { rmSync(old, { recursive: true, force: true }); }
+});
+
+test("`at` needs an offset (Z or ±HH:MM); a bare local time is refused", async () => {
+  const bare = await create({ task: "no offset", at: "2030-11-03T10:00:00" });
+  assert.equal(bare.isError, true);
+  assert.match(bare.text, /offset/);
+  assert.equal((await create({ task: "with offset", at: "2030-11-03T10:00:00-06:00" })).isError, false);
+  assert.equal(lastRow().next_run, "2030-11-03T16:00:00.000Z");
+});
+
+test("bot routines take no zone until they can use one; a zone can be cleared", async () => {
+  const b = await create({ task: "pipeline:botcron:gamma", cron_expression: "0 9 * * *", tz: "Asia/Tokyo" });
+  assert.equal(b.isError, true);
+  assert.match(b.text, /zone/);
+  const bid = idOf((await create({ task: "pipeline:botcron:gamma", cron_expression: "0 9 * * *" })).text);
+  assert.equal((await update({ id: bid, tz: "Asia/Tokyo" })).isError, true);
+  const id = idOf((await create({ task: "zoned", cron_expression: "0 9 * * *", tz: "Asia/Tokyo" })).text);
+  const cleared = await update({ id, tz: null });
+  assert.equal(cleared.isError, false, cleared.text);
+  assert.equal(q("SELECT tz FROM schedules WHERE id = ?", id)[0].tz, null);
+  assert.ok(/T1[45]:00:00\.000Z$/.test(q("SELECT next_run FROM schedules WHERE id = ?", id)[0].next_run), "back on the instance zone");
 });

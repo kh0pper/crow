@@ -17,7 +17,9 @@ export const REMINDER_PREFIX = "reminder:";
 export const BOTCRON_PREFIX = "pipeline:botcron:";
 export const MISSED_CAP = 500; // a missed window counts at most this many occurrences ("500 or more")
 const OK_MS = 90_000; // a fire within 90 s of its time is "ok"; later (inside grace) is "late"
-const ALIVE_MS = 2 * 60_000; // this process ticked this close before `due`: a stall, not downtime
+// This process's previous tick STARTED before `due` and no longer than this before it: the process
+// was up at `due`, so a late settle is a stall (slow hooks, a busy event loop), not downtime.
+const ALIVE_MS = 30 * 60_000;
 
 /**
  * Rows a bundle owns: the gateway never delivers or flags them, and computes their next run in
@@ -121,17 +123,27 @@ export function countGrid(expr, zone, after, to, cap = MISSED_CAP) {
   return { n, capped: cap > 0 && more !== null && more <= to };
 }
 
-/** The shortest gap, in minutes, between the next few occurrences after `from` (null if unparseable). */
-export function cadenceMinutes(expr, zone, from, samples = 12) {
+const WEEK_MIN = 7 * 1440;
+
+/**
+ * How often a schedule runs, in minutes: the average gap over the next week, so "0,30 9 * * *"
+ * (twice a day, half an hour apart) reads 720, not 30. Under an hour on average, it is the
+ * shortest gap instead, which is the honest "every N minutes" for the usual step expressions.
+ * Null if unparseable.
+ */
+export function cadenceMinutes(expr, zone, from) {
+  const week = countGrid(expr, zone, from, from + WEEK_MIN * 60_000, 7 * 24 + 1);
+  if (week.n === 0) return cronNext(expr, zone, from) === null ? null : WEEK_MIN;
+  const avg = Math.floor(WEEK_MIN / week.n);
+  if (avg >= 60) return avg;
   let prev = cronNext(expr, zone, from), best = Infinity;
-  if (prev === null) return null;
-  for (let i = 0; i < samples; i++) {
+  for (let i = 0; i < 12 && prev !== null; i++) {
     const t = cronNext(expr, zone, prev);
     if (t === null) break;
     best = Math.min(best, t - prev);
     prev = t;
   }
-  return Number.isFinite(best) ? Math.round(best / 60_000) : null;
+  return Number.isFinite(best) ? Math.min(avg, Math.round(best / 60_000)) : avg;
 }
 
 /** The tolerance that lets a run still fire after a short restart: env CROW_SCHEDULE_GRACE_MIN, 1–60, default 5. */
@@ -169,7 +181,9 @@ export function settleDue(row, now, { graceMs: grace, zone, aliveAt = null } = {
   const grid = countGrid(row.cron_expression, z, due, now, MISSED_CAP);
   const total = 1 + grid.n;
   const nextRun = cronNext(row.cron_expression, z, now);
-  const alive = Number.isFinite(aliveAt) && aliveAt >= due - ALIVE_MS;
+  // aliveAt < due: a previous tick that started AFTER `due` (a row re-enabled with an old
+  // next_run) proves nothing about `due`.
+  const alive = Number.isFinite(aliveAt) && aliveAt < due && aliveAt >= due - ALIVE_MS;
 
   if (now - latest <= grace || alive) {
     let missed = null;
