@@ -534,3 +534,16 @@ test("a combined card whose question already contains [REDACTED] carries the lit
   await tick(30);
   assert.match(frames.find((f) => f.type === "ask_user").message || "", /not added by Crow/);
 });
+
+test("a card carrying pi-lab's ⟦REDACTED⟧ marker: shown as it is, no possible-secret note, no 'not added by Crow' note; the push keeps the marker", async () => {
+  setValues([KEYCHAIN_FAKE]);
+  const { engine, bridge, pushes } = makeEngine();
+  const { s, pi } = await liveSession(engine, bridge, "bot-pilab-marker");
+  const frames = await watched(engine, s.sessionId);
+  const msg = "(1 secret value(s) hidden from this card) This request contains a secret; approving runs it with the real, unmasked value.\nsudo -S ls <<< ⟦REDACTED⟧";
+  pi.emit({ type: "extension_ui_request", id: "pm", method: "confirm", title: "Destructive bash", message: msg });
+  await tick(30);
+  const ask = frames.find((f) => f.type === "ask_user");
+  assert.equal(ask.message, msg);
+  assert.ok(JSON.stringify(pushes).includes("⟦REDACTED⟧"));
+});

@@ -157,7 +157,7 @@ import { appendDates } from "../shared/relative-dates.js";
 import { stripContextEcho } from "./voice/context-echo.js";
 import { maskSecrets, maskSecretsDetailed, maskDeep, hiddenNote, HIDDEN_NOTE_RE, REDACTED } from "../shared/secret-mask.js";
 import { userRuntimeDirs } from "../../scripts/pi-bots/pi_sandbox.mjs";
-import { anchorSecretsDir } from "../shared/secret-values.js";
+import { anchorSecretsDir, checkedInstanceSecretsDirs } from "../shared/secret-values.js";
 import { deliveredDirPath, openDeliveredDir, registerDeliveredRoot } from "../shared/perch-delivered.js";
 
 /** Lease file name under CROW_HOME. Consumed by C-14's reaper exemption. */
@@ -2391,6 +2391,15 @@ export function createInteractiveEngine({
   /** A path under, or a file sharing an inode with one under, the instance's
    * secrets dir (one level of subdirs: keychain.key, bundle-env/*). */
   function insideSecrets(realPath, st) {
+    // Every OTHER instance's secrets dir too (the list the bridge hides): a
+    // file there, or a hard link to one, is never copied out. A list that
+    // cannot be computed refuses (fail closed).
+    let instanceDirs;
+    try { instanceDirs = checkedInstanceSecretsDirs(secretsEnv); } catch { return true; }
+    for (const d of instanceDirs) {
+      if (realPath === d || realPath.startsWith(d + sep)) return true;
+      if (sameInodeUnder(d, st)) return true;
+    }
     for (const d of hiddenDirs || []) {
       let r;
       try { r = realpathSync(d); } catch { continue; }
@@ -2422,6 +2431,21 @@ export function createInteractiveEngine({
     try { secretsReal = realpathSync(join(crowHome, "secrets")); } catch { return false; }
     if (realPath === secretsReal || realPath.startsWith(secretsReal + sep)) return true;
     return walk(secretsReal, 0);
+  }
+
+  /** A file under `dir` (two levels deep) with the same inode as `st`. */
+  function sameInodeUnder(dir, st) {
+    const walk = (d, depth) => {
+      let names = [];
+      try { names = readdirSync(d, { withFileTypes: true }); } catch { return false; }
+      for (const n of names) {
+        const p = join(d, n.name);
+        if (n.isDirectory()) { if (depth < 2 && walk(p, depth + 1)) return true; continue; }
+        try { const x = lstatSync(p); if (x.ino === st.ino && x.dev === st.dev) return true; } catch { /* raced */ }
+      }
+      return false;
+    };
+    return walk(dir, 0);
   }
 
   async function handleFileNotify(s, meta) {

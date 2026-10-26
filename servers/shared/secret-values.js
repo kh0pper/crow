@@ -280,6 +280,24 @@ export function forgetInstanceSecretsDir(path, env = process.env) {
   if (known.delete(path)) writeKnown(env, known);
 }
 
+/** Most bytes the fd payload (pi-lab's fd contract) may carry. */
+export const SECRET_VALUES_FD_MAX_BYTES = 64 * 1024;
+
+/**
+ * The payload for PI_BOT_SECRET_VALUES_FD (pi-lab's fd contract): one value
+ * per line, UTF-8, values under 6 characters dropped, at most 64 KiB (values
+ * that would not fit are left out, longest first kept).
+ */
+export function secretValuesPayload(values) {
+  let out = "";
+  for (const v of normalizeValues(values)) {
+    const line = v + "\n";
+    if (Buffer.byteLength(out) + Buffer.byteLength(line) > SECRET_VALUES_FD_MAX_BYTES) continue;
+    out += line;
+  }
+  return out;
+}
+
 /** The anchor of this instance's secrets dir (for inode checks elsewhere). */
 export function secretsDirAnchor(env = process.env) {
   return anchorSecretsDir(env);

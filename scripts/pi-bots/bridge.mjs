@@ -49,7 +49,7 @@ import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { wrapPiSpawn } from "./pi_sandbox.mjs";
 import { refreshSecretValuesFile } from "../../servers/shared/secret-values-collect.js";
-import { SECRET_VALUES_DISPLAY_FILENAME, SECRET_VALUES_FILENAME, anchoredPath, checkedInstanceSecretsDirs, rememberInstanceSecretsDirs, secretsDir, secretsDirCurrentPath } from "../../servers/shared/secret-values.js";
+import { SECRET_VALUES_DISPLAY_FILENAME, SECRET_VALUES_FILENAME, anchoredPath, checkedInstanceSecretsDirs, getCardValues, rememberInstanceSecretsDirs, secretValuesPayload, secretsDir, secretsDirCurrentPath } from "../../servers/shared/secret-values.js";
 import { maskSecrets } from "../../servers/shared/secret-mask.js";
 import { effectiveReadPaths } from "./bot-read-paths.mjs";
 import { MCP_CONFIG_FD } from "./mcp-delivery.mjs";
@@ -232,6 +232,10 @@ export function readPeerGatewayUrls(conn) {
     return map;
   } catch { return {}; }
 }
+
+/** The fd pi-lab reads the card set from (PI_BOT_SECRET_VALUES_FD): 3 is the
+ * sandbox's --info-fd, 4 the MCP config. */
+const SECRET_VALUES_FD = 5;
 
 /** Most other-instance secrets dirs a spawn will hide; past it, it refuses. */
 const MAX_HIDDEN_INSTANCE_DIRS = 512;
@@ -532,6 +536,15 @@ export class PiRpc {
       }
     }
     if (hidden && secretValues) launch.env.PI_BOT_SECRET_VALUES_FILE = secretValues.path;
+    // Option (a), pi-lab's fd contract: under bubblewrap the CARD set goes to
+    // pi on an inherited pipe at SECRET_VALUES_FD (pi-lab reads it to EOF at
+    // extension load, closes it and drops the variable). The variable is set
+    // here, after spawn_env (PI_BOT_ keys stripped) and extraEnv merged, so
+    // only the engine names it. The file stays named as pi-lab's fallback.
+    // Without bubblewrap there is no card set (see cardTrusted), so no fd.
+    delete launch.env.PI_BOT_SECRET_VALUES_FD;
+    const valuesPayload = hidden ? secretValuesPayload(getCardValues()) : null;
+    if (valuesPayload != null) launch.env.PI_BOT_SECRET_VALUES_FD = String(SECRET_VALUES_FD);
     this.sandboxed = launch.sandboxed;
     this.sandboxWrapper = launch.wrapper;
     this.piPid = null;
@@ -541,6 +554,10 @@ export class PiRpc {
     const stdio = launch.sandboxed ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"];
     if (fdMode) {
       while (stdio.length < MCP_CONFIG_FD) stdio.push("ignore");
+      stdio.push("pipe");
+    }
+    if (valuesPayload != null) {
+      while (stdio.length < SECRET_VALUES_FD) stdio.push("ignore");
       stdio.push("pipe");
     }
     this.mcpDelivery = fdMode ? "fd" : "file";
@@ -556,6 +573,13 @@ export class PiRpc {
         cfgPipe.on("error", () => {});
         cfgPipe.end(JSON.stringify(opts.mcpConfig || { mcpServers: {} }));
       }
+    }
+    if (valuesPayload != null) {
+      // The card set, then CLOSE our end (pi-lab reads to EOF once). Node
+      // passes this pipe to the pi exec only: libuv marks every other fd it
+      // opens close-on-exec, so pi's own children never inherit it.
+      const vp = this.proc.stdio[SECRET_VALUES_FD];
+      if (vp) { vp.on("error", () => {}); vp.end(valuesPayload); }
     }
     if (!launch.sandboxed) this.piPid = this.proc.pid;
     else if (this.proc.stdio[3]) {

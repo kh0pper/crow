@@ -363,3 +363,57 @@ test("sandboxed: a co-hosted secrets dir hidden once and then moved away refuses
     forgetInstanceSecretsDir(join(other, "secrets"));
   }
 });
+
+// ---- option (a): the card set on an inherited fd (pi-lab's fd contract) ----
+
+test("sandboxed: the card set arrives on PI_BOT_SECRET_VALUES_FD; a child of pi cannot see that fd; spawn_env/extraEnv/inherited values are ignored", { skip: noSandbox }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-secret-fd-"));
+  mkdirSync(join(dir, "sessions"), { recursive: true });
+  const stub = join(dir, "stub-pi.mjs");
+  writeFileSync(stub, [
+    'import { readFileSync, closeSync } from "node:fs";',
+    'import { execFileSync } from "node:child_process";',
+    'const n = Number(process.env.PI_BOT_SECRET_VALUES_FD);',
+    // a child spawned BEFORE pi drains the fd must not have it either
+    'const before = execFileSync("/bin/sh", ["-c", "ls /proc/self/fd | tr \\"\\\\n\\" \\" \\""], { encoding: "utf8" });',
+    'let values = []; try { values = readFileSync(n, "utf8").split("\\n").filter(Boolean); closeSync(n); } catch {}',
+    'const after = execFileSync("/bin/sh", ["-c", "ls /proc/self/fd | tr \\"\\\\n\\" \\" \\""], { encoding: "utf8" });',
+    'process.stdout.write(JSON.stringify({ type: "report", tag: "fd", n: process.env.PI_BOT_SECRET_VALUES_FD || null, values, before, after }) + "\\n");',
+    "setTimeout(() => process.exit(0), 50);",
+  ].join("\n"));
+  process.env.PI_BOT_SECRET_VALUES_FD = "9";
+  const prev = process.env.CROW_PI_SANDBOX;
+  process.env.CROW_PI_SANDBOX = "auto";
+  try {
+    const pi = new PiRpc({ def: { spawn_env: { PI_BOT_SECRET_VALUES_FD: "7" } }, sessionDir: dir, resolved: { provider: "p", model: "m", key: "p/m" },
+      nodeBin: process.execPath, cliPath: stub, diagLog: () => {}, extraEnv: { PI_BOT_SECRET_VALUES_FD: "8" } });
+    const r = await pi.waitFor((m) => m.type === "report" && m.tag === "fd", 10000, "fd");
+    await pi.exited;
+    assert.equal(r.n, "5", "the bridge's fd number, never a def's, the extras' or an inherited one");
+    assert.ok(r.values.includes(FAKE), "the card set arrived");
+    assert.equal(r.before.split(" ").includes("5"), false, "a child spawned before pi read it does not inherit it");
+    assert.equal(r.after.split(" ").includes("5"), false);
+  } finally {
+    delete process.env.PI_BOT_SECRET_VALUES_FD;
+    if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
+  }
+});
+
+test("without bubblewrap there is no PI_BOT_SECRET_VALUES_FD (no card set exists there)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-secret-nofd-"));
+  mkdirSync(join(dir, "sessions"), { recursive: true });
+  const stub = join(dir, "stub-pi.mjs");
+  writeFileSync(stub, 'process.stdout.write(JSON.stringify({ type: "report", tag: "nofd", n: process.env.PI_BOT_SECRET_VALUES_FD || null }) + "\\n"); setTimeout(() => process.exit(0), 50);');
+  process.env.PI_BOT_SECRET_VALUES_FD = "9";
+  const prev = process.env.CROW_PI_SANDBOX;
+  process.env.CROW_PI_SANDBOX = "off";
+  try {
+    const pi = new PiRpc({ def: {}, sessionDir: dir, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: process.execPath, cliPath: stub, diagLog: () => {} });
+    const r = await pi.waitFor((m) => m.type === "report" && m.tag === "nofd", 10000, "nofd");
+    await pi.exited;
+    assert.equal(r.n, null);
+  } finally {
+    delete process.env.PI_BOT_SECRET_VALUES_FD;
+    if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
+  }
+});

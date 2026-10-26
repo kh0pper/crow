@@ -338,3 +338,14 @@ test("card mode hides ONLY trusted exact values; every pattern stays visible and
   assert.equal(r.possible || 0, 0);
   assert.equal(m("GH_TOKEN=" + FAKE + " git push").includes(FAKE), false, "display paths keep every pattern");
 });
+
+test("pi-lab's card marker ⟦REDACTED⟧ passes through unchanged, never re-masked or counted, in both modes", () => {
+  const MARK = "⟦REDACTED⟧";
+  for (const t of ["echo " + MARK + " | sudo " + S + " ls", "GH_TOKEN=" + MARK + " push", "curl -H 'Authorization: Bearer " + MARK + "'"]) {
+    const c = maskSecretsDetailed(t, { values: [], card: true });
+    assert.equal(c.text, t);
+    assert.equal(c.count, 0);
+    assert.equal(c.possible || 0, 0, "no possible-secret count for the marker");
+    assert.equal(maskSecrets(t, { values: [] }), t, "display mode too");
+  }
+});

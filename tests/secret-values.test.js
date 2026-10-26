@@ -578,3 +578,11 @@ test("an unreadable unit dir this user owns fails closed (a declared home could 
     assert.throws(() => SV.instanceSecretsDirs({ CROW_HOME: join(home, ".crow") }, { home, unitDirs: [units], envFileDirs: [] }), /cannot be checked/);
   } finally { chmodSync(units, 0o755); rmSync(root, { recursive: true, force: true }); }
 });
+
+test("the fd payload: one value per line, at most 64 KiB, values under 6 characters dropped", () => {
+  const p = SV.secretValuesPayload(["abc", "Zq8xP2mAk9Lw4tRy", ...Array.from({ length: 5000 }, (_, i) => "Long_value-" + i + "-".repeat(20))]);
+  assert.ok(Buffer.byteLength(p) <= 64 * 1024);
+  assert.ok(p.endsWith("\n"));
+  const small = SV.secretValuesPayload(["abc", "Zq8xP2mAk9Lw4tRy"]);
+  assert.equal(small, "Zq8xP2mAk9Lw4tRy\n", "under 6 characters dropped, one per line");
+});

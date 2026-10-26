@@ -564,3 +564,27 @@ test("a sent copy never takes the name of a file already in the outputs dir (bot
   assert.equal(sink.ofType("file")[0].stored, "report-2.pdf");
   assert.equal(readFileSync(join(snap.deliveredDir, "report-2.pdf"), "utf8"), "copied");
 });
+
+test("send_user_file refuses a file from ANOTHER instance's secrets dir (and a hard link to one)", async () => {
+  const { linkSync } = await import("node:fs");
+  const otherHome = CROW_HOME + "-other";
+  mkdirSync(join(otherHome, "secrets"), { recursive: true, mode: 0o700 });
+  const key = join(otherHome, "secrets", "keychain.key");
+  writeFileSync(key, "{\"v\":1}", { mode: 0o600 });
+  mkdirSync(join(dir, "src"), { recursive: true });
+  const hard = join(dir, "src", "other-key-link");
+  try { rmSync(hard, { force: true }); } catch {}
+  linkSync(key, hard);
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  const sink = await collect(engine, s.sessionId);
+  for (const path of [key, hard]) {
+    pi.emit({ type: "extension_ui_request", method: "notify", message: crowFileFrame({ path, name: "k.txt", caption: "c" }) });
+  }
+  await tick();
+  for (const f of sink.ofType("file")) assert.equal(f.servable, false);
+  const snap = await engine.get(s.sessionId);
+  assert.equal(existsSync(join(snap.deliveredDir, "k.txt")), false);
+  rmSync(otherHome, { recursive: true, force: true });
+});
