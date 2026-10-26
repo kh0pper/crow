@@ -10,6 +10,7 @@ import { join } from "node:path";
 
 import { startEgressRelay, egressDenyReason, hostAllowed } from "../scripts/pi-bots/pi_egress.mjs";
 
+const NO_ROUTES = () => ({ local: [], main: [] });
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "crow-egress-")));
 const closers = [];
 after(async () => { for (const c of closers) await c(); rmSync(scratch, { recursive: true, force: true }); });
@@ -47,7 +48,7 @@ test("egressDenyReason (D4 = public and private): LAN, tailnet, ULA and public a
   const host = ["10.0.0.237", "100.64.20.5", "fd7a:115c:a1e0::1"];
   for (const a of ["1.1.1.1", "93.184.216.34", "2606:4700:4700::1111", "10.1.2.3", "172.16.0.1", "192.168.1.1",
     "100.64.0.1", "fc00::1", "fe80::1", "198.18.0.1", "::ffff:10.0.0.5"]) {
-    assert.equal(egressDenyReason(a, { hostAddrs: host, interfaces: () => ({}) }), null, a);
+    assert.equal(egressDenyReason(a, { hostAddrs: host, interfaces: () => ({}), routes: NO_ROUTES }), null, a);
   }
   const denied = {
     "127.0.0.1": /loopback/, "127.9.9.9": /loopback/, "0.0.0.0": /loopback/, "::1": /loopback/, "::": /loopback/,
@@ -58,7 +59,7 @@ test("egressDenyReason (D4 = public and private): LAN, tailnet, ULA and public a
     "224.0.0.1": /not unicast/, "240.0.0.1": /not unicast/, "255.255.255.255": /not unicast/, "ff02::1": /not unicast/,
     "not-an-ip": /not an IP/,
   };
-  for (const [a, re] of Object.entries(denied)) assert.match(String(egressDenyReason(a, { hostAddrs: host, interfaces: () => ({}) })), re, a);
+  for (const [a, re] of Object.entries(denied)) assert.match(String(egressDenyReason(a, { hostAddrs: host, interfaces: () => ({}), routes: NO_ROUTES })), re, a);
 });
 
 test("hostAllowed: no list = any host; a list narrows to exact names and *.suffix", () => {
@@ -90,7 +91,7 @@ test("PROXY CONNECT: a public host (via the lookup seam) is allowed and tunnelle
 });
 
 test("PROXY CONNECT: private (LAN/tailnet) targets are allowed by default; loopback, this host, metadata, a rebinding name, a disallowed port and a host off the list are refused", async () => {
-  const mk = async (lookup, extra = {}) => (await relay({ lookup, egressPorts: [443], hostAddrs: ["10.0.0.237"], interfaces: () => ({}), ...extra })).r;
+  const mk = async (lookup, extra = {}) => (await relay({ lookup, egressPorts: [443], hostAddrs: ["10.0.0.237"], interfaces: () => ({}), routes: NO_ROUTES, ...extra })).r;
   const up = await echoServer("LAN:");
   const lan = await mk(async () => [{ address: "192.168.1.20", family: 4 }], { _connectOverride: () => ({ host: "127.0.0.1", port: up }) });
   const lanOut = await talk(lan.socketPath, "PROXY\nCONNECT nas.home.arpa:443 HTTP/1.1\r\n\r\n", "ping");
@@ -229,7 +230,7 @@ test("no IPv6 wrapping gets the metadata address or loopback through", () => {
 });
 
 test("a narrowed egress list cannot be bypassed with an IP literal in any IPv6 form of a private address", async () => {
-  const { r } = await relay({ lookup: async () => [], egressAllow: ["api.example.com"], hostAddrs: [], interfaces: () => ({}) });
+  const { r } = await relay({ lookup: async () => [], egressAllow: ["api.example.com"], hostAddrs: [], interfaces: () => ({}), routes: NO_ROUTES });
   for (const lit of ["192.168.1.20", "[::ffff:192.168.1.20]", "[::ffff:0:c0a8:114]", "[64:ff9b::c0a8:114]", "[2002:c0a8:114::1]"]) {
     assert.match(await talk(r.socketPath, `PROXY\nCONNECT ${lit}:443 HTTP/1.1\r\n\r\n`), /^HTTP\/1\.1 403/, lit);
   }
@@ -246,14 +247,14 @@ const IFACES = {
 };
 
 test("local virtual bridges (containers, VMs) are this host: refused; the physical LAN and tailnet subnets are not", () => {
-  const o = { interfaces: () => IFACES };
+  const o = { interfaces: () => IFACES, routes: NO_ROUTES };
   for (const a of ["172.17.0.2", "172.30.0.9", "192.168.122.50", "::ffff:172.17.0.2"]) assert.match(String(egressDenyReason(a, o)), /container|this host/, a);
   for (const a of ["10.0.0.50", "100.64.20.9", "192.168.1.20"]) assert.equal(egressDenyReason(a, o), null, a);
   assert.match(String(egressDenyReason("10.0.0.255", o)), /broadcast/, "a local subnet broadcast");
 });
 
 test("metadata and host plumbing: all of 169.254/16, Azure WireServer, AWS fd00:ec2::/64, GCP v6, Tailscale's 100.100.100.0/24 and quad100 v6", () => {
-  const o = { interfaces: () => IFACES };
+  const o = { interfaces: () => IFACES, routes: NO_ROUTES };
   for (const a of ["169.254.169.254", "169.254.170.23", "169.254.169.253", "169.254.1.1", "168.63.129.16", "fd00:ec2::23", "fd00:ec2::254",
     "fd20:ce::254", "100.100.100.100", "100.100.100.200", "fd7a:115c:a1e0::53", "64:ff9b::a9fe:a9fe"]) {
     assert.notEqual(egressDenyReason(a, o), null, a);
@@ -261,7 +262,7 @@ test("metadata and host plumbing: all of 169.254/16, Azure WireServer, AWS fd00:
 });
 
 test("address spellings: uppercase, expanded, zone ids all judged the same", () => {
-  const o = { interfaces: () => IFACES };
+  const o = { interfaces: () => IFACES, routes: NO_ROUTES };
   for (const a of ["::FFFF:127.0.0.1", "0:0:0:0:0:ffff:7f00:1", "FD7A:115C:A1E0:0:0:0:0:1", "::ffff:10.0.0.237", "2002:0a00:00ed::1", "64:ff9b::a00:ed"]) {
     assert.notEqual(egressDenyReason(a, o), null, a);
   }
@@ -269,17 +270,55 @@ test("address spellings: uppercase, expanded, zone ids all judged the same", () 
 });
 
 test("the own-host check fails CLOSED: if the interfaces cannot be read, every private target is refused (public still allowed)", () => {
-  const o = { interfaces: () => { throw new Error("boom"); } };
+  const o = { interfaces: () => { throw new Error("boom"); }, routes: NO_ROUTES };
   assert.match(String(egressDenyReason("10.0.0.50", o)), /cannot be determined/);
   assert.match(String(egressDenyReason("fd12::1", o)), /cannot be determined/);
   assert.equal(egressDenyReason("93.184.216.34", o), null);
 });
 
 test("odd IPv4 spellings (octal, short) go through the real resolver and are refused once resolved", async () => {
-  const { r } = await relay({ interfaces: () => ({}) });
+  const { r } = await relay({ interfaces: () => ({}), routes: NO_ROUTES });
   for (const t of ["0177.0.0.1", "127.1", "0x7f.0.0.1"]) {
     const out = await talk(r.socketPath, `PROXY\nCONNECT ${t}:443 HTTP/1.1\r\n\r\n`);
     assert.match(out, /^HTTP\/1\.1 (403|502|400)/, t + " → " + out.split("\r\n")[0]);
     assert.doesNotMatch(out, /^HTTP\/1\.1 200/, t);
   }
+});
+
+
+// ---- automated security review: the own-host view comes from the kernel ----
+const ROUTES = () => ({
+  local: [
+    { type: "local", dst: "10.0.0.237", dev: "eno1" }, { type: "broadcast", dst: "10.0.0.255", dev: "eno1" },
+    { type: "local", dst: "172.18.0.1", dev: "br-down1" }, { type: "local", dst: "fd7a:115c:a1e0::9", dev: "tailscale0" },
+  ],
+  main: [
+    { dst: "default", dev: "eno1" }, { dst: "10.0.0.0/24", dev: "eno1" },
+    { dst: "172.18.0.0/16", dev: "br-down1", flags: ["linkdown"] }, { dst: "192.168.48.0/20", dev: "br-down2", flags: ["linkdown"] },
+    { dst: "fd00:dead::/64", dev: "docker0" },
+  ],
+});
+
+test("a bridge that is DOWN (only in the kernel routes, not in networkInterfaces) is still this host", () => {
+  const o = { interfaces: () => ({}), routes: ROUTES };
+  for (const a of ["172.18.0.5", "192.168.50.7", "fd00:dead::5", "10.0.0.237", "10.0.0.255", "fd7a:115c:a1e0::9", "172.18.0.1"]) {
+    assert.notEqual(egressDenyReason(a, o), null, a);
+  }
+  for (const a of ["10.0.0.50", "192.168.1.20", "93.184.216.34"]) assert.equal(egressDenyReason(a, o), null, a + " (LAN subnet on a physical NIC, other private, public)");
+});
+
+test("if the kernel routes cannot be read: every private target is refused, docker/libvirt defaults named, public still allowed, hostAddrs still honoured", () => {
+  const o = { interfaces: () => IFACES, routes: () => { throw new Error("ip: not found"); }, hostAddrs: ["93.184.216.99"] };
+  for (const a of ["10.0.0.50", "172.17.0.2", "192.168.122.5", "fd12::1"]) assert.notEqual(egressDenyReason(a, o), null, a);
+  assert.equal(egressDenyReason("93.184.216.34", o), null, "public still allowed");
+  assert.match(String(egressDenyReason("93.184.216.99", o)), /this host/, "hostAddrs honoured when the kernel read fails");
+  assert.match(String(egressDenyReason("93.184.216.99", { interfaces: () => ({}), routes: ROUTES, hostAddrs: ["93.184.216.99"] })), /this host/, "and when it works");
+});
+
+test("the default route reader reads the real kernel tables (no seam) and refuses this host's own address", async () => {
+  const { networkInterfaces } = await import("node:os");
+  const own = Object.values(networkInterfaces()).flat().map((i) => i.address).find((a) => /^\d+\./.test(a) && !a.startsWith("127."));
+  if (!own) return;
+  assert.notEqual(egressDenyReason(own), null);
+  assert.equal(egressDenyReason("93.184.216.34"), null);
 });

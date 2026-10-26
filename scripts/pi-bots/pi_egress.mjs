@@ -28,8 +28,9 @@
  */
 import { createServer, connect as netConnect, isIP, BlockList } from "node:net";
 import { networkInterfaces } from "node:os";
+import { spawnSync } from "node:child_process";
 import { lookup as dnsLookup } from "node:dns/promises";
-import { chmodSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 // Default egress (operator decision D4, 2026-10-26: "public and private"):
@@ -46,8 +47,12 @@ import { join } from "node:path";
 //   - cloud metadata and host plumbing: all of 169.254.0.0/16, Azure's
 //     168.63.129.16, AWS fd00:ec2::/64, GCP fd20:ce::254;
 //   - multicast/reserved (not unicast).
-// The local view is read per decision (interfaces come and go); if it cannot
-// be read, every private target is refused (fail closed).
+// The local view comes from the kernel route tables (local addresses and
+// broadcasts on every interface, up or down; connected subnets of virtual
+// bridges, including ones with no carrier), cached 5 s, plus
+// os.networkInterfaces() as an extra source. If either cannot be read, every
+// private target is refused (fail closed), docker0 and libvirt's default
+// subnets by name too.
 // IPv4 embedded in IPv6 (v4-mapped, v4-compatible, SIIT, NAT64 64:ff9b::/96,
 // 6to4 2002::/16, both Teredo fields) is unwrapped and judged as the IPv4
 // address; the NAT64 local-use /48 and the discard prefix are refused.
@@ -78,31 +83,99 @@ const v4From = (hi, lo) => [hi >> 8, hi & 255, lo >> 8, lo & 255].join(".");
 const v4Int = (a) => a.split(".").reduce((n, o) => n * 256 + Number(o), 0);
 const intV4 = (n) => [24, 16, 8, 0].map((b) => (n >>> b) & 255).join(".");
 
-/** This host's view, read fresh: own addresses, virtual-bridge subnets, broadcasts. */
+const IP_CANDIDATES = ["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip", "/bin/ip"];
+/**
+ * The kernel's view: the local table (every local and broadcast address, on
+ * every interface, up or down) and the main table (directly connected
+ * subnets, including bridges with no carrier, which os.networkInterfaces()
+ * does not list). Throws when it cannot be read.
+ */
+export function readKernelRoutes() {
+  const ip = IP_CANDIDATES.find((p) => existsSync(p));
+  if (!ip) throw new Error("ip(8) not found");
+  const run = (args) => {
+    const r = spawnSync(ip, ["-j", ...args], { encoding: "utf8", timeout: 2000 });
+    if (r.status !== 0) throw new Error("ip " + args.join(" ") + ": exit " + r.status);
+    const v = JSON.parse(r.stdout || "[]");
+    if (!Array.isArray(v)) throw new Error("ip " + args.join(" ") + ": not a list");
+    return v;
+  };
+  return {
+    local: [...run(["route", "show", "table", "local"]), ...run(["-6", "route", "show", "table", "local"])],
+    main: [...run(["route"]), ...run(["-6", "route"])],
+  };
+}
+
+/** Kernel tables are cached briefly (interfaces come and go; a spawn makes many decisions). */
+const ROUTES_TTL_MS = 5000;
+let routesCache = null; // { at, value } | { at, error }
+function cachedKernelRoutes() {
+  const now = Date.now();
+  if (!routesCache || now - routesCache.at > ROUTES_TTL_MS) {
+    try { routesCache = { at: now, value: readKernelRoutes() }; } catch (e) { routesCache = { at: now, error: e }; }
+  }
+  if (routesCache.error) throw routesCache.error;
+  return routesCache.value;
+}
+/** Test seam. */
+export function _resetRoutesCacheForTest() { routesCache = null; }
+
+/** Defaults refused by name when the kernel tables cannot be read (docker0, libvirt's default). */
+const FALLBACK_BRIDGES_V4 = [["172.17.0.0", 16], ["192.168.122.0", 24]];
+
+/**
+ * This host's view: own addresses, virtual-bridge subnets, broadcasts.
+ * Sources: the kernel route tables (o.routes seam), then
+ * os.networkInterfaces() (o.interfaces seam) as an extra, then o.hostAddrs.
+ * `failed` when either source cannot be read: the caller refuses every
+ * private target then.
+ */
 function localView(o = {}) {
-  let ifs;
-  try { ifs = (o.interfaces || networkInterfaces)(); } catch { return { failed: true }; }
   const addrs = new Set(), bcast = new Set();
   const nets4 = new BlockList(), nets6 = new BlockList();
-  for (const [name, list] of Object.entries(ifs || {})) {
-    for (const i of list || []) {
-      const fam = i.family === "IPv6" || i.family === 6 ? 6 : 4;
-      const addr = String(i.address || "").split("%")[0];
-      if (!isIP(addr)) continue;
-      addrs.add(fam === 6 ? key6(addr) : addr);
-      const plen = Number(String(i.cidr || "").split("/")[1]);
-      if (!Number.isInteger(plen)) continue;
-      if (VIRTUAL_IF.test(name)) {
-        try { (fam === 4 ? nets4 : nets6).addSubnet(addr, plen, fam === 4 ? "ipv4" : "ipv6"); } catch {}
-      }
-      if (fam === 4 && plen < 31) {
-        const mask = plen === 0 ? 0 : (0xffffffff << (32 - plen)) >>> 0;
-        bcast.add(intV4(((v4Int(addr) & mask) | (~mask >>> 0)) >>> 0));
+  let failed = false;
+  const addAddr = (a) => { const x = String(a || "").split("%")[0]; if (isIP(x)) addrs.add(isIP(x) === 6 ? key6(x) : x); };
+  const addNet = (cidr) => {
+    const [net, plen] = String(cidr || "").split("/");
+    const fam = isIP(net);
+    if (!fam || !/^\d+$/.test(plen || "")) return;
+    try { (fam === 4 ? nets4 : nets6).addSubnet(net, Number(plen), fam === 4 ? "ipv4" : "ipv6"); } catch {}
+  };
+  // 1. kernel tables
+  try {
+    const t = (o.routes || cachedKernelRoutes)();
+    for (const r of t.local || []) {
+      if (r.type === "local") addAddr(r.dst);
+      else if (r.type === "broadcast" && isIP(r.dst) === 4) bcast.add(r.dst);
+    }
+    for (const r of t.main || []) {
+      if (r.dst && r.dst !== "default" && VIRTUAL_IF.test(String(r.dev || ""))) addNet(r.dst);
+    }
+  } catch {
+    failed = true;
+    for (const [a, p] of FALLBACK_BRIDGES_V4) nets4.addSubnet(a, p, "ipv4");
+  }
+  // 2. interfaces (extra source; also covers a kernel table read in a namespace that hides some)
+  try {
+    const ifs = (o.interfaces || networkInterfaces)();
+    for (const [name, list] of Object.entries(ifs || {})) {
+      for (const i of list || []) {
+        const addr = String(i.address || "").split("%")[0];
+        if (!isIP(addr)) continue;
+        addAddr(addr);
+        const plen = Number(String(i.cidr || "").split("/")[1]);
+        if (!Number.isInteger(plen)) continue;
+        if (VIRTUAL_IF.test(name)) addNet(addr + "/" + plen);
+        if (isIP(addr) === 4 && plen < 31) {
+          const mask = plen === 0 ? 0 : (0xffffffff << (32 - plen)) >>> 0;
+          bcast.add(intV4(((v4Int(addr) & mask) | (~mask >>> 0)) >>> 0));
+        }
       }
     }
-  }
-  for (const a of o.hostAddrs || []) if (isIP(a)) addrs.add(isIP(a) === 6 ? key6(a) : a);
-  return { addrs, bcast, nets4, nets6 };
+  } catch { failed = true; }
+  // 3. explicit own addresses, honoured on every path
+  for (const a of o.hostAddrs || []) addAddr(a);
+  return { addrs, bcast, nets4, nets6, failed };
 }
 
 function v4Reason(a, L) {
@@ -110,10 +183,10 @@ function v4Reason(a, L) {
   if (o[0] === 127 || o[0] === 0) return "loopback (use the bot's loopback ports)";
   if (PLUMBING_V4.check(a, "ipv4")) return "cloud metadata / host plumbing";
   if (o[0] >= 224) return "not unicast";
-  if (L.failed) return PRIVATE_V4.check(a, "ipv4") ? "private target refused: this host's addresses cannot be determined" : null;
   if (L.addrs.has(a)) return "this host's own address";
   if (L.nets4.check(a, "ipv4")) return "a container/VM bridge on this host";
   if (L.bcast.has(a)) return "a local subnet broadcast";
+  if (L.failed && PRIVATE_V4.check(a, "ipv4")) return "private target refused: this host's addresses cannot be determined";
   return null;
 }
 
@@ -146,9 +219,9 @@ export function egressDenyReason(addr, o = {}) {
   }
   if (h[0] === 0x100 && zero(1, 4)) return "discard-only prefix (100::/64)";
   const isPrivate6 = (h[0] & 0xfe00) === 0xfc00 || (h[0] & 0xffc0) === 0xfe80;
-  if (L.failed) return isPrivate6 ? "private target refused: this host's addresses cannot be determined" : null;
   if (L.addrs.has(key6(a))) return "this host's own address";
   if (L.nets6.check(a, "ipv6")) return "a container/VM bridge on this host";
+  if (L.failed && isPrivate6) return "private target refused: this host's addresses cannot be determined";
   return null;
 }
 
@@ -202,7 +275,7 @@ export function createEgressRelay(o) {
   // relay does not proxy. 443 by default.
   const ports = new Set((o.egressPorts || [443]).map(Number));
   const allow = Array.isArray(o.egressAllow) ? o.egressAllow : null;
-  const local = { interfaces: o.interfaces, hostAddrs: o.hostAddrs };
+  const local = { interfaces: o.interfaces, routes: o.routes, hostAddrs: o.hostAddrs };
   const maxConns = o.maxConns ?? 64;
   const headTimeoutMs = o.headTimeoutMs ?? 10000;
   const lookup = o.lookup || ((h) => dnsLookup(h, { all: true, verbatim: true }));
