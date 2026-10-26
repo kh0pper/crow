@@ -103,6 +103,7 @@ export function createBotcronTicker({
   let stopped = false;
   let inflight = null;
   let lastError = null; // the lease error currently being reported, if any
+  let aliveAt = null;   // start time of this ticker's last successful tick (the missed-run heartbeat)
 
   async function run() {
     const res = await _hold({ dir, holder, ttlMs });
@@ -133,7 +134,9 @@ export function createBotcronTicker({
     }
     if (!ok) return { fired: 0, held: false };
     const tick = _tick || (await import("./bot_scheduler.mjs")).tickBotSchedules;
-    const r = tick({ log });
+    const startedAt = Date.now();
+    const r = tick({ log, aliveAt });
+    aliveAt = startedAt; // only after the tick returned: a failed sweep never moves the heartbeat
     return { fired: (r && r.fired) || 0, held: true };
   }
 

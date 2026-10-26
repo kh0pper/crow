@@ -280,3 +280,40 @@ test("the default notifier writes one system notification from scheduler:missed 
   assert.equal(rows[0].title, "Missed: bot-1 routine");
   assert.equal(rows[0].schedule_id, id);
 });
+
+// Heartbeat: a process that was ticking around `due` fires late, never "missed".
+test("aliveAt just before due: a run 20 min late is a late fire (1 job, 0 notifications)", async () => {
+  const { tickBotSchedules } = await ensured();
+  const due = Date.now() - 20 * MIN;
+  seedAt(new Date(due).toISOString(), YEARLY_A);
+  const calls = [];
+  const lines = [];
+  const r = tickBotSchedules({ notify: (w) => calls.push(w), log: (m) => lines.push(m), aliveAt: due - 30000 });
+  assert.equal(r.fired, 1);
+  assert.equal(r.missed, 0);
+  assert.equal(jobCount(), 1);
+  assert.equal(calls.length, 0);
+  assert.ok(lines.some((l) => /late/.test(l)));
+});
+
+test("first sweep after boot (aliveAt null): the same 20-min-late run is missed, one notification", async () => {
+  const { tickBotSchedules } = await ensured();
+  seedAt(new Date(Date.now() - 20 * MIN).toISOString(), YEARLY_A);
+  const calls = [];
+  const r = tickBotSchedules({ notify: (w) => calls.push(w), aliveAt: null });
+  assert.equal(r.fired, 0);
+  assert.equal(r.missed, 1);
+  assert.equal(jobCount(), 0);
+  assert.equal(calls.length, 1);
+});
+
+test("aliveAt older than due - 2 min does not count as alive", async () => {
+  const { settleBotcron } = await load();
+  const now = Date.now();
+  const due = now - 20 * MIN;
+  const iso = (t) => new Date(t).toISOString();
+  assert.equal(settleBotcron(YEARLY_A, iso(due), iso(now), 5 * MIN, { aliveAt: due - 3 * MIN }).fire, false);
+  const s = settleBotcron(YEARLY_A, iso(due), iso(now), 5 * MIN, { aliveAt: due - 2 * MIN });
+  assert.equal(s.fire, true);
+  assert.equal(s.late, true);
+});

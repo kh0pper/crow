@@ -89,3 +89,20 @@ test("a read-only data dir is an error the ticker reports, never \"lease lost\""
     assert.match(lines[0], /^cannot take the bot-cron lease: /);
   } finally { chmodSync(ro, 0o755); }
 });
+
+test("the ticker passes its own last successful sweep time as aliveAt (null on the first sweep)", async () => {
+  const seen = [];
+  let fail = false;
+  const t = createBotcronTicker({
+    dir, holder: "h", _hold: async () => true, _release: async () => {},
+    _tick: ({ aliveAt }) => { seen.push(aliveAt); if (fail) throw new Error("x"); return { fired: 0 }; },
+  });
+  const before = Date.now();
+  await t.sweep();
+  await t.sweep();
+  fail = true; await t.sweep();
+  fail = false; await t.sweep();
+  assert.equal(seen[0], null);
+  assert.ok(seen[1] >= before && seen[1] <= Date.now());
+  assert.equal(seen[3], seen[2], "a failed sweep does not move aliveAt");
+});
