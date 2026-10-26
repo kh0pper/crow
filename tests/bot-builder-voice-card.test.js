@@ -584,6 +584,25 @@ test("the transcript buffer switch: off by default, warns en + es, saves on and 
   await reset();
 });
 
+test("the one-week transcript log switch: off by default, says local-only / not backed up / 7 days (en + es), saves on and off, independent of the buffer", async () => {
+  await reset();
+  const html = await editor();
+  assert.match(html, /name="transcript_log"/);
+  assert.doesNotMatch(html, /name="transcript_log"[^>]*checked/, "off by default");
+  assert.ok(html.includes(T("botbuilder.voiceTranscriptLogWarn")));
+  assert.match(T("botbuilder.voiceTranscriptLogWarn"), /never audio/);
+  assert.match(T("botbuilder.voiceTranscriptLogWarn"), /not in Crow's backups, not synced/);
+  assert.match(T("botbuilder.voiceTranscriptLogWarn"), /7 days/);
+  for (const k of ["botbuilder.voiceTranscriptLogLabel", "botbuilder.voiceTranscriptLogWarn"]) assert.ok(T(k) && T(k, "es") && T(k) !== T(k, "es"), k);
+  assert.equal(qOf(await post(await saveBody({ transcript_log: "on" }))).get("saved"), "1");
+  assert.equal((await voiceDef()).voice.transcript_log, true);
+  assert.equal((await voiceDef()).voice.transcript_buffer, false, "the buffer is a separate switch");
+  assert.match(await editor(), /name="transcript_log"[^>]*checked/);
+  assert.equal(qOf(await post(await saveBody({}))).get("saved"), "1", "unticked: absent from the form");
+  assert.equal((await voiceDef()).voice.transcript_log, false);
+  await reset();
+});
+
 test("the calendar id label says what empty means under auto: Crow's own, else Google primary, else it asks (en + es)", () => {
   const t = translations["botbuilder.voiceRoutineCalendarId"];
   assert.match(t.en, /empty: Crow picks its own calendar, else Google primary, else asks/);

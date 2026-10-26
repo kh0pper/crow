@@ -441,6 +441,23 @@ export async function runPostListenSetup(server, app, deps) {
     console.log("[xhost-audit-retention] armed (24h interval, first run in 5 min)");
   }
 
+  // The opt-in one-week voice transcript log (voice/transcript-log.js): an hourly sweep deletes entries past seven days
+  // even when nothing is written, and the whole log when the setting is off — also on every bot-definition save, so
+  // unticking it deletes the log at once. Files only; never throws.
+  Promise.all([import("../voice/transcript-log.js"), import("../../shared/voice-bot.js")]).then(([{ startTranscriptLogSweep, sweepTranscriptLog, voiceTranscriptLog }, { CROW_VOICE_BOT_ID }]) => {
+    const readDef = async () => {
+      const db = createDbClient();
+      try {
+        const r = (await db.execute({ sql: "SELECT definition, enabled FROM pi_bot_defs WHERE bot_id = ?", args: [CROW_VOICE_BOT_ID] })).rows[0];
+        return r && Number(r.enabled) ? JSON.parse(r.definition) : null;
+      } finally { try { db.close(); } catch {} }
+    };
+    startTranscriptLogSweep(voiceTranscriptLog, readDef);
+    import("../../shared/event-bus.js").then(({ default: bus }) => {
+      bus.on("pibots:defs-changed", () => { sweepTranscriptLog(voiceTranscriptLog, readDef).catch(() => {}); });
+    }).catch(() => {});
+  }).catch((err) => console.warn("[voice-transcript-log] sweep not armed:", err.message));
+
   // F.13: crosspost publish/GC scheduler (no-ops on an empty crosspost_log;
   // kill switch CROW_DISABLE_CROSSPOST_SCHEDULER=1). Lazy import keeps boot
   // resilient if the crossposting module is absent.

@@ -24,6 +24,7 @@ import { ROUTINE_OBJECTS, ROUTINE_OBJECT_LISTS, namesRoutineObjects } from "./ro
 import { createVoiceMemory, VOICE_MODE_WINDOW_MS } from "./voice-memory.js";
 import { lastWriteRecap } from "./own-tools.js";
 import { transcriptBufferOn, reloadTranscriptSetting, voiceTranscripts } from "./transcript-buffer.js";
+import { transcriptLogOn, voiceTranscriptLog } from "./transcript-log.js";
 import { CROW_VOICE_BOT_ID, normalizeVoiceSettings, isVoiceBotDef } from "../../shared/voice-bot.js";
 
 /**
@@ -1903,6 +1904,17 @@ export function createVoiceTurnRunner(deps) {
           }
         } catch { /* never stops a turn, never logged */ }
       }
+      // The opt-in one-week transcript log (transcript-log.js): voice.transcript_log decides. On, what STT heard on a
+      // voice-bot turn is kept on this instance's disk for seven days (text only); off, the log is deleted.
+      if (deps.transcriptLog && device?.id) {
+        try {
+          const vdef = await loadBot(db, CROW_VOICE_BOT_ID);
+          if (!transcriptLogOn(vdef)) await deps.transcriptLog.clear();
+          else if (opts.noTranscript !== true && result.transcript && isVoiceBotDef(turnBotId === CROW_VOICE_BOT_ID ? vdef : await loadBot(db, turnBotId))) {
+            await deps.transcriptLog.record({ device: { id: device.id, name: device.name }, transcript: result.transcript, heard: heardBefore });
+          }
+        } catch { /* never stops a turn, never logged */ }
+      }
       if (typeof voiceActions?.afterTurn === "function" && device?.id) {
         try { await voiceActions.afterTurn({ device, calledTools: calledTools.slice() }); } catch (err) { log(`[voice-turn] ${device.id} voice actions afterTurn failed (${err?.message || err})`); }
       }
@@ -1981,6 +1993,8 @@ export async function defaultVoiceDeps() {
     voiceBotId: CROW_VOICE_BOT_ID,
     // One process-wide transcript buffer (opt-in, in memory): every runner records into it, the kiosk route reads it.
     transcripts: voiceTranscripts,
+    // The opt-in one-week transcript log (on disk, this instance only); its sweep is armed at boot (post-listen.js).
+    transcriptLog: voiceTranscriptLog,
     ensureVoiceBot: async (db) => { await ensureCrowVoiceBot(db); },
     botDefsGeneration: () => botDefsGeneration,
     loadBotRow: async (db, botId) => (await db.execute({ sql: "SELECT bot_id, definition, enabled FROM pi_bot_defs WHERE bot_id = ?", args: [botId] })).rows[0] || null,
