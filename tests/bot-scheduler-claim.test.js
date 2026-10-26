@@ -436,3 +436,22 @@ test("a schedule_runs write error other than a missing table is logged as an err
   assert.ok(lines.some((l) => /ERROR recording missed window/.test(l)));
   assert.ok(!lines.some((l) => /missed window not recorded/.test(l)));
 });
+
+test("instanceZoneSync: this instance's override beats the global row; another instance's override is ignored; no id file → global only", async () => {
+  const { instanceZoneSync } = await ready();
+  const { writeFileSync, unlinkSync } = await import("node:fs");
+  const d = new Database(dbPath);
+  d.exec(`CREATE TABLE IF NOT EXISTS dashboard_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT);
+    CREATE TABLE IF NOT EXISTS dashboard_settings_overrides (key TEXT, instance_id TEXT, value TEXT, updated_at TEXT,
+      lamport_ts INTEGER DEFAULT 0, PRIMARY KEY(key, instance_id))`);
+  d.prepare("INSERT INTO dashboard_settings (key, value) VALUES ('instance_timezone', 'Europe/Madrid')").run();
+  d.prepare("INSERT INTO dashboard_settings_overrides (key, instance_id, value) VALUES ('instance_timezone', 'other-instance', 'Asia/Tokyo')").run();
+  assert.equal(instanceZoneSync(d), "Europe/Madrid", "no instance-id file: global row only (and none is created)");
+  assert.equal((await import("node:fs")).existsSync(join(dir, "instance-id")), false, "the ticker never creates an instance id");
+  writeFileSync(join(dir, "instance-id"), "this-instance\n");
+  assert.equal(instanceZoneSync(d), "Europe/Madrid", "a foreign-instance override is ignored");
+  d.prepare("INSERT INTO dashboard_settings_overrides (key, instance_id, value) VALUES ('instance_timezone', 'this-instance', 'America/Chicago')").run();
+  assert.equal(instanceZoneSync(d), "America/Chicago", "this instance's override beats the global row");
+  unlinkSync(join(dir, "instance-id"));
+  d.close();
+});

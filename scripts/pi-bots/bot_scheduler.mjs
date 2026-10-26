@@ -32,7 +32,7 @@ import { botsDbPath } from "./instance-paths.mjs";
 import { isVoiceBotId } from "../../servers/shared/voice-bot.js";
 import { BOTCRON_PREFIX, settleDue, graceMs, ALIVE_SLACK_MS, missedRunInsert, cronNext } from "../../servers/shared/schedule-core.js";
 import { validTimeZone } from "../../servers/shared/relative-dates.js";
-import { getOrCreateLocalInstanceId } from "../../servers/gateway/instance-registry.js";
+import { readLocalInstanceIdOrNull } from "../../servers/shared/crow-home.js";
 
 /** The settings key schedule-store.js's instanceZone() reads (INSTANCE_ZONE_KEY; a test pins the two together). */
 export const INSTANCE_ZONE_KEY = "instance_timezone";
@@ -40,7 +40,8 @@ export const INSTANCE_ZONE_KEY = "instance_timezone";
 /**
  * The instance zone, read synchronously on this connection with the same
  * precedence as the settings registry's readSetting (this instance's override
- * first, then the global row). undefined when unset or invalid, so settleDue
+ * first, then the global row). The instance id is read, never created: with
+ * no instance-id file only the global row counts. undefined when unset or invalid, so settleDue
  * falls back to the host zone, exactly like instanceZone(). A row's own tz
  * still wins (zoneFor). Never throws.
  */
@@ -48,7 +49,7 @@ export function instanceZoneSync(d) {
   let raw = null;
   try {
     let localId = null;
-    try { localId = getOrCreateLocalInstanceId(); } catch {}
+    try { localId = readLocalInstanceIdOrNull(); } catch {}
     if (localId) {
       try {
         const ov = d.prepare("SELECT value FROM dashboard_settings_overrides WHERE key=? AND instance_id=?").get(INSTANCE_ZONE_KEY, localId);
@@ -185,8 +186,9 @@ export function tickBotSchedules({
       ).all(BOTCRON_PREFIX + "%", now);
     } catch { return { fired: 0, missed: 0 }; } // schedules table absent — nothing to do
 
-    // The instance zone, read once per tick (a caller's `zone` wins, for tests and seams).
-    const z = zone === undefined ? instanceZoneSync(d) : zone;
+    // The instance zone, read once per tick and only when something is due
+    // (a caller's `zone` wins, for tests and seams).
+    const z = zone !== undefined || rows.length === 0 ? zone : instanceZoneSync(d);
     let fired = 0;
     let missed = 0;
     for (const s of rows) {

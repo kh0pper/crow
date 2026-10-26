@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 const dir = mkdtempSync(join(tmpdir(), "botcron-test-"));
 const dbPath = join(dir, "crow.db");
 process.env.CROW_DB_PATH = dbPath;
+process.env.CROW_DATA_DIR = dir; // anything resolving the data dir (instance id, lease) stays in the tmp dir
 
 let scheduler, createToolExecutor, getChatTools;
 before(async () => {

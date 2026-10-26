@@ -26,7 +26,7 @@ import { ensureBotJobsSchema } from "../scripts/pi-bots/job_runner.mjs";
 
 const POLL = "7000"; // a distinct period, so the botcron interval is easy to find
 
-let dir, dbPath, prevDbPath, conns;
+let dir, dbPath, prevDbPath, prevDataDir, conns;
 
 function makeGateConn(flagOn) {
   const d = new Database(":memory:");
@@ -113,6 +113,8 @@ beforeEach(async () => {
   dbPath = join(dir, "crow.db");
   prevDbPath = process.env.CROW_DB_PATH;
   process.env.CROW_DB_PATH = dbPath; // the gateway's lease dir and the scheduler's DB both resolve here
+  prevDataDir = process.env.CROW_DATA_DIR;
+  process.env.CROW_DATA_DIR = dir; // anything resolving the data dir (instance id) stays in the tmp dir
   const d = new Database(dbPath);
   d.exec(`CREATE TABLE schedules (
     id INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT, cron_expression TEXT, description TEXT,
@@ -124,6 +126,7 @@ afterEach(async () => {
   await _resetBotRuntimeForTest();
   for (const c of conns) { try { c.close(); } catch {} }
   if (prevDbPath === undefined) delete process.env.CROW_DB_PATH; else process.env.CROW_DB_PATH = prevDbPath;
+  if (prevDataDir === undefined) delete process.env.CROW_DATA_DIR; else process.env.CROW_DATA_DIR = prevDataDir;
   rmSync(dir, { recursive: true, force: true });
 });
 
