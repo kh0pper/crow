@@ -33,7 +33,7 @@ Skills are markdown files in `skills/` that define behavioral prompts for the AI
 | **Peer Network** | `peer-network.md` | Manage your Crow peer network: view and manage contacts, configure relays, check identity information, block/unblock pee |
 | **Podcast** | `podcast.md` | Podcast publishing — upload audio, create episodes, iTunes-compatible RSS |
 | **Safety Guardrails** | `safety-guardrails.md` | Universal safety checkpoints — confirm before destructive, resource-heavy, or network-altering actions |
-| **Scheduling** | `scheduling.md` | Manage scheduled and recurring tasks for the user. |
+| **Scheduling** | `scheduling.md` | Manage the user's reminders and recurring schedules. |
 | **Sharing** | `sharing.md` | Share memories, research projects, sources, and notes with trusted contacts via Crow's peer-to-peer sharing layer. All d |
 | **Social** | `social.md` | Send and receive encrypted messages with Crow contacts via the Nostr protocol. All messages use NIP-44 encryption (ChaCh |
 | **Storage** | `storage.md` | File storage management — upload, organize, retrieve, quota monitoring |
