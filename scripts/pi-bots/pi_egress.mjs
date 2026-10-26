@@ -263,10 +263,16 @@ function localView(o = {}) {
   // 4. operator-listed networks that lead back into this host but are not
   //    visible in its tables (Kubernetes ClusterIP ranges DNAT'd in nat
   //    OUTPUT, a network-specific NAT64 prefix): refused like a bridge.
+  const deny4 = new BlockList(), deny6 = new BlockList();
+  let denyBroken = false;
   for (const n of o.denyNets || []) {
-    if (!addNet(n)) failed = true;
+    const [net, plen] = String(n).trim().split("/");
+    const fam = isIP(net);
+    const len = plen === undefined ? (fam === 4 ? 32 : 128) : (/^\d+$/.test(plen) ? Number(plen) : NaN);
+    if (!fam || !(len <= (fam === 4 ? 32 : 128))) { denyBroken = true; continue; }
+    try { (fam === 4 ? deny4 : deny6).addSubnet(net, len, fam === 4 ? "ipv4" : "ipv6"); } catch { denyBroken = true; }
   }
-  return { addrs, bcast, nets4, nets6, failed, failed6 };
+  return { addrs, bcast, nets4, nets6, failed, failed6, deny4, deny6, denyBroken };
 }
 
 function v4Reason(a, L) {
@@ -290,6 +296,11 @@ export function egressDenyReason(addr, o = {}) {
   const fam = isIP(a);
   if (!fam) return "not an IP address";
   const L = o.view || localView(o);
+  // The operator's deny list is a stated intent: an entry that cannot be read
+  // refuses everything rather than silently not refusing what it meant.
+  if (L.denyBroken) return "operator deny list (CROW_PI_EGRESS_DENY_NETS) has an unreadable entry: refusing all targets";
+  if (fam === 4 && L.deny4 && L.deny4.check(a, "ipv4")) return "operator-denied network";
+  if (fam === 6 && L.deny6 && L.deny6.check(a, "ipv6")) return "operator-denied network";
   if (fam === 4) return v4Reason(a, L);
   const h = expand6(a);
   const zero = (x, y) => h.slice(x, y).every((v) => v === 0);
@@ -369,12 +380,15 @@ export function createEgressRelay(o) {
   // relay does not proxy. 443 by default.
   const ports = new Set((o.egressPorts || [443]).map(Number));
   const allow = Array.isArray(o.egressAllow) ? o.egressAllow : null;
+  const log = o.log || ((l) => console.error(l));
   const local = { interfaces: o.interfaces, routes: o.routes, hostAddrs: o.hostAddrs,
     denyNets: o.denyNets || String(process.env.CROW_PI_EGRESS_DENY_NETS || "").split(",").map((x) => x.trim()).filter(Boolean) };
+  if (local.denyNets.length && localView({ interfaces: () => ({}), routes: () => ({ local: [], main: [] }), denyNets: local.denyNets }).denyBroken) {
+    log(`[pi-egress] bot=${o.botId || "?"} CROW_PI_EGRESS_DENY_NETS has an unreadable entry: this relay refuses every target until it is fixed`);
+  }
   const maxConns = o.maxConns ?? 64;
   const headTimeoutMs = o.headTimeoutMs ?? 10000;
   const lookup = o.lookup || ((h) => dnsLookup(h, { all: true, verbatim: true }));
-  const log = o.log || ((l) => console.error(l));
   // One line per (decision, target), bounded: a bot that sprays distinct
   // hosts must not grow the spawner's memory (one summary line instead).
   const logged = new Set();

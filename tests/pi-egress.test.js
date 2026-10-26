@@ -496,3 +496,13 @@ test("the name-based interface path honours the physical-port exemption too", ()
   assert.equal(egressDenyReason("10.0.0.50", o), null);
   assert.notEqual(egressDenyReason("10.0.0.237", o), null);
 });
+
+test("an unreadable operator deny entry refuses EVERY destination (public too), and a match says operator-denied", async () => {
+  const o = { interfaces: () => ({}), routes: NO_ROUTES_LO, denyNets: ["203.0.113.5/32x"] };
+  assert.match(String(egressDenyReason("203.0.113.5", o)), /operator deny list/);
+  assert.match(String(egressDenyReason("93.184.216.34", o)), /operator deny list/);
+  assert.match(String(egressDenyReason("203.0.113.5", { ...o, denyNets: ["203.0.113.5/32"] })), /operator-denied network/);
+  const { r, logs } = await relay({ lookup: async () => [{ address: "93.184.216.34", family: 4 }], interfaces: () => ({}), routes: NO_ROUTES_LO, denyNets: ["nope"] });
+  assert.match(await talk(r.socketPath, "PROXY\nCONNECT a.example.com:443 HTTP/1.1\r\n\r\n"), /^HTTP\/1\.1 403/);
+  assert.ok(logs.some((l) => /CROW_PI_EGRESS_DENY_NETS.*unreadable/.test(l)), "logged loudly at relay start");
+});
