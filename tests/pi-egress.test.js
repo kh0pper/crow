@@ -46,19 +46,19 @@ async function relay(opts) {
 test("egressDenyReason (D4 = public and private): LAN, tailnet, ULA and public are allowed; loopback, this host, metadata and non-unicast are not, in every v6 wrapping", () => {
   const host = ["10.0.0.237", "100.64.20.5", "fd7a:115c:a1e0::1"];
   for (const a of ["1.1.1.1", "93.184.216.34", "2606:4700:4700::1111", "10.1.2.3", "172.16.0.1", "192.168.1.1",
-    "100.64.0.1", "fc00::1", "fe80::1", "169.254.1.1", "198.18.0.1", "::ffff:10.0.0.5"]) {
-    assert.equal(egressDenyReason(a, { hostAddrs: host }), null, a);
+    "100.64.0.1", "fc00::1", "fe80::1", "198.18.0.1", "::ffff:10.0.0.5"]) {
+    assert.equal(egressDenyReason(a, { hostAddrs: host, interfaces: () => ({}) }), null, a);
   }
   const denied = {
     "127.0.0.1": /loopback/, "127.9.9.9": /loopback/, "0.0.0.0": /loopback/, "::1": /loopback/, "::": /loopback/,
     "::ffff:127.0.0.1": /loopback/, "::127.0.0.1": /loopback/, "64:ff9b::7f00:1": /loopback/, "2002:7f00:1::1": /loopback/,
     "10.0.0.237": /this host/, "100.64.20.5": /this host/, "fd7a:115c:a1e0::1": /this host/, "::ffff:10.0.0.237": /this host/,
     "169.254.169.254": /metadata/, "169.254.170.2": /metadata/, "100.100.100.200": /metadata/, "fd00:ec2::254": /metadata/,
-    "::ffff:169.254.169.254": /metadata/,
+    "::ffff:169.254.169.254": /metadata/, "169.254.1.1": /plumbing/,
     "224.0.0.1": /not unicast/, "240.0.0.1": /not unicast/, "255.255.255.255": /not unicast/, "ff02::1": /not unicast/,
     "not-an-ip": /not an IP/,
   };
-  for (const [a, re] of Object.entries(denied)) assert.match(String(egressDenyReason(a, { hostAddrs: host })), re, a);
+  for (const [a, re] of Object.entries(denied)) assert.match(String(egressDenyReason(a, { hostAddrs: host, interfaces: () => ({}) })), re, a);
 });
 
 test("hostAllowed: no list = any host; a list narrows to exact names and *.suffix", () => {
@@ -90,7 +90,7 @@ test("PROXY CONNECT: a public host (via the lookup seam) is allowed and tunnelle
 });
 
 test("PROXY CONNECT: private (LAN/tailnet) targets are allowed by default; loopback, this host, metadata, a rebinding name, a disallowed port and a host off the list are refused", async () => {
-  const mk = async (lookup, extra = {}) => (await relay({ lookup, egressPorts: [443], hostAddrs: ["10.0.0.237"], ...extra })).r;
+  const mk = async (lookup, extra = {}) => (await relay({ lookup, egressPorts: [443], hostAddrs: ["10.0.0.237"], interfaces: () => ({}), ...extra })).r;
   const up = await echoServer("LAN:");
   const lan = await mk(async () => [{ address: "192.168.1.20", family: 4 }], { _connectOverride: () => ({ host: "127.0.0.1", port: up }) });
   const lanOut = await talk(lan.socketPath, "PROXY\nCONNECT nas.home.arpa:443 HTTP/1.1\r\n\r\n", "ping");
@@ -210,4 +210,76 @@ test("decision logging is bounded: distinct-host spraying cannot grow the spawne
   for (let i = 0; i < 1010; i++) await talk(r.socketPath, `PROXY\nCONNECT h${i}.example.com:443 HTTP/1.1\r\n\r\n`, null, { timeout: 500 });
   assert.equal(logs.filter((l) => / deny h\d+/.test(l)).length, 1000);
   assert.equal(logs.filter((l) => /further decisions are not logged/.test(l)).length, 1);
+});
+
+// ---- automated security review: every IPv6 form that embeds IPv4 ----
+// 169.254.169.254 = a9fe:a9fe; 127.0.0.1 = 7f00:0001; Teredo stores the
+// client address XOR ffff:ffff (169.254.169.254 -> 5601:5601).
+test("no IPv6 wrapping gets the metadata address or loopback through", () => {
+  const forms = {
+    "::ffff:a9fe:a9fe": "mapped", "::a9fe:a9fe": "compatible", "::ffff:0:a9fe:a9fe": "SIIT ::ffff:0:0:0/96",
+    "64:ff9b::a9fe:a9fe": "NAT64 well-known", "64:ff9b:1::a9fe:a9fe": "NAT64 local-use /48 (embedding not reliably readable)",
+    "64:ff9b:1:a9fe:a9:fe00::": "NAT64 /48 RFC 6052 layout", "2002:a9fe:a9fe::1": "6to4",
+    "2001:0:a9fe:a9fe::1": "Teredo server field", "2001:0:4136:e378:8000:63bf:5601:5601": "Teredo client field",
+    "100::a9fe:a9fe": "discard-only 100::/64", "::ffff:0:7f00:1": "SIIT loopback", "2001:0:4136:e378:8000:63bf:80ff:fffe": "Teredo client 127.0.0.1",
+  };
+  for (const [a, label] of Object.entries(forms)) assert.notEqual(egressDenyReason(a), null, label + " " + a);
+  assert.equal(egressDenyReason("2001:0:4136:e378:8000:63bf:3fff:fdd2"), null, "a Teredo address of public endpoints is not refused");
+  assert.equal(egressDenyReason("64:ff9b::808:808"), null, "NAT64 of a public address is allowed");
+});
+
+test("a narrowed egress list cannot be bypassed with an IP literal in any IPv6 form of a private address", async () => {
+  const { r } = await relay({ lookup: async () => [], egressAllow: ["api.example.com"], hostAddrs: [], interfaces: () => ({}) });
+  for (const lit of ["192.168.1.20", "[::ffff:192.168.1.20]", "[::ffff:0:c0a8:114]", "[64:ff9b::c0a8:114]", "[2002:c0a8:114::1]"]) {
+    assert.match(await talk(r.socketPath, `PROXY\nCONNECT ${lit}:443 HTTP/1.1\r\n\r\n`), /^HTTP\/1\.1 403/, lit);
+  }
+});
+
+// ---- re-review of the public-and-private default ----
+const IFACES = {
+  lo: [{ address: "127.0.0.1", cidr: "127.0.0.1/8", family: "IPv4", internal: true }],
+  eno1: [{ address: "10.0.0.237", cidr: "10.0.0.237/24", family: "IPv4" }, { address: "fe80::1", cidr: "fe80::1/64", family: "IPv6" }],
+  tailscale0: [{ address: "100.64.20.5", cidr: "100.64.20.5/32", family: "IPv4" }, { address: "fd7a:115c:a1e0::1", cidr: "fd7a:115c:a1e0::1/128", family: "IPv6" }],
+  docker0: [{ address: "172.17.0.1", cidr: "172.17.0.1/16", family: "IPv4" }],
+  "br-abc123": [{ address: "172.30.0.1", cidr: "172.30.0.1/24", family: "IPv4" }],
+  virbr0: [{ address: "192.168.122.1", cidr: "192.168.122.1/24", family: "IPv4" }],
+};
+
+test("local virtual bridges (containers, VMs) are this host: refused; the physical LAN and tailnet subnets are not", () => {
+  const o = { interfaces: () => IFACES };
+  for (const a of ["172.17.0.2", "172.30.0.9", "192.168.122.50", "::ffff:172.17.0.2"]) assert.match(String(egressDenyReason(a, o)), /container|this host/, a);
+  for (const a of ["10.0.0.50", "100.64.20.9", "192.168.1.20"]) assert.equal(egressDenyReason(a, o), null, a);
+  assert.match(String(egressDenyReason("10.0.0.255", o)), /broadcast/, "a local subnet broadcast");
+});
+
+test("metadata and host plumbing: all of 169.254/16, Azure WireServer, AWS fd00:ec2::/64, GCP v6, Tailscale's 100.100.100.0/24 and quad100 v6", () => {
+  const o = { interfaces: () => IFACES };
+  for (const a of ["169.254.169.254", "169.254.170.23", "169.254.169.253", "169.254.1.1", "168.63.129.16", "fd00:ec2::23", "fd00:ec2::254",
+    "fd20:ce::254", "100.100.100.100", "100.100.100.200", "fd7a:115c:a1e0::53", "64:ff9b::a9fe:a9fe"]) {
+    assert.notEqual(egressDenyReason(a, o), null, a);
+  }
+});
+
+test("address spellings: uppercase, expanded, zone ids all judged the same", () => {
+  const o = { interfaces: () => IFACES };
+  for (const a of ["::FFFF:127.0.0.1", "0:0:0:0:0:ffff:7f00:1", "FD7A:115C:A1E0:0:0:0:0:1", "::ffff:10.0.0.237", "2002:0a00:00ed::1", "64:ff9b::a00:ed"]) {
+    assert.notEqual(egressDenyReason(a, o), null, a);
+  }
+  assert.notEqual(egressDenyReason("fe80::1%eno1", o), null, "the host's own link-local, with a zone id");
+});
+
+test("the own-host check fails CLOSED: if the interfaces cannot be read, every private target is refused (public still allowed)", () => {
+  const o = { interfaces: () => { throw new Error("boom"); } };
+  assert.match(String(egressDenyReason("10.0.0.50", o)), /cannot be determined/);
+  assert.match(String(egressDenyReason("fd12::1", o)), /cannot be determined/);
+  assert.equal(egressDenyReason("93.184.216.34", o), null);
+});
+
+test("odd IPv4 spellings (octal, short) go through the real resolver and are refused once resolved", async () => {
+  const { r } = await relay({ interfaces: () => ({}) });
+  for (const t of ["0177.0.0.1", "127.1", "0x7f.0.0.1"]) {
+    const out = await talk(r.socketPath, `PROXY\nCONNECT ${t}:443 HTTP/1.1\r\n\r\n`);
+    assert.match(out, /^HTTP\/1\.1 (403|502|400)/, t + " → " + out.split("\r\n")[0]);
+    assert.doesNotMatch(out, /^HTTP\/1\.1 200/, t);
+  }
 });

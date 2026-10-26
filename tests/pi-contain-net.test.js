@@ -70,7 +70,7 @@ process.stdin.resume();
     assert.notEqual(r.abstract, "ABSTRACT", "host abstract sockets are not reachable: " + r.abstract);
     assert.match(r.proxy, /^HTTP\/1\.1 403/, "the proxy is the relay, and it refuses the cloud metadata address");
     assert.equal(r.proxyEnv, true);
-    await new Promise((res) => setTimeout(res, 300));
+    for (let i = 0; i < 100 && !(pi.piPid && pi.piPid !== pi.sandboxInitPid); i++) await new Promise((res) => setTimeout(res, 50));
     const { readFileSync } = await import("node:fs");
     const piCmd = readFileSync("/proc/" + pi.piPid + "/cmdline", "utf8");
     assert.ok(piCmd.includes("stub-pi.mjs") && !piCmd.includes("pi_netns_entry.mjs"), "piPid is pi itself, past the entry: " + piCmd.replace(/\0/g, " "));

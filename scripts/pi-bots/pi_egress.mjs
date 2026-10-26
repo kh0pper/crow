@@ -26,26 +26,38 @@
  * `[pi-egress] bot=<id> allow|deny <host>:<port> (<reason>)`. A per-spawn
  * connection cap bounds what one bot can open.
  */
-import { createServer, connect as netConnect, isIP } from "node:net";
+import { createServer, connect as netConnect, isIP, BlockList } from "node:net";
 import { networkInterfaces } from "node:os";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { chmodSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-// Default egress (Kevin, D4 2026-10-26: "public and private"): public and
-// private (LAN, tailnet, ULA, link-local) destinations are allowed; a bot's
-// `egress` list narrows. Always refused, because they are not a destination
-// class but a way around another control:
-//   - loopback (127/8, 0/8, ::, ::1): host loopback is governed by the
-//     PORT allowlist; reaching it through the proxy would skip that list;
-//   - this host's own interface addresses (its LAN/tailnet IPs): the same,
-//     for every service bound to 0.0.0.0 here;
-//   - cloud metadata endpoints (instance credentials);
-//   - multicast/reserved (not unicast; nothing to CONNECT to).
-// IPv4 embedded in IPv6 (v4-mapped, v4-compatible, NAT64 64:ff9b::/96,
-// 6to4 2002::/16) is unwrapped and judged as the IPv4 address.
-const METADATA_V4 = new Set(["169.254.169.254", "169.254.170.2", "100.100.100.200"]);
-const METADATA_V6 = new Set(["fd00:ec2:0:0:0:0:0:254"]);
+// Default egress (operator decision D4, 2026-10-26: "public and private"):
+// public and private (LAN, tailnet, ULA) destinations are allowed; a bot's
+// `egress` list narrows. Always refused, because each is a way around another
+// control rather than a destination class:
+//   - loopback (127/8, 0/8, ::, ::1): host loopback is governed by the PORT
+//     allowlist; reaching it through the proxy would skip that list;
+//   - this host: its own interface addresses (every service bound to
+//     0.0.0.0), the subnets of its virtual bridges (containers and VMs, which
+//     host-originated traffic reaches without passing DOCKER-USER), its subnet
+//     broadcasts, and tailscaled's local services (100.100.100.0/24,
+//     fd7a:115c:a1e0::53);
+//   - cloud metadata and host plumbing: all of 169.254.0.0/16, Azure's
+//     168.63.129.16, AWS fd00:ec2::/64, GCP fd20:ce::254;
+//   - multicast/reserved (not unicast).
+// The local view is read per decision (interfaces come and go); if it cannot
+// be read, every private target is refused (fail closed).
+// IPv4 embedded in IPv6 (v4-mapped, v4-compatible, SIIT, NAT64 64:ff9b::/96,
+// 6to4 2002::/16, both Teredo fields) is unwrapped and judged as the IPv4
+// address; the NAT64 local-use /48 and the discard prefix are refused.
+// Zone ids are stripped (the CONNECT parser refuses '%' anyway).
+const PLUMBING_V4 = new BlockList();
+for (const [a, p] of [["169.254.0.0", 16], ["168.63.129.16", 32], ["100.100.100.0", 24]]) PLUMBING_V4.addSubnet(a, p, "ipv4");
+const PRIVATE_V4 = new BlockList();
+for (const [a, p] of [["10.0.0.0", 8], ["172.16.0.0", 12], ["192.168.0.0", 16], ["100.64.0.0", 10], ["198.18.0.0", 15]]) PRIVATE_V4.addSubnet(a, p, "ipv4");
+/** Interfaces whose subnets are containers/VMs on this host. */
+const VIRTUAL_IF = /^(docker\d*|br-|virbr|podman|cni|veth|lxcbr|lxdbr|incusbr|flannel|cali|vxlan|vnet|tap)/;
 
 function expand6(a) {
   let s = String(a).toLowerCase().split("%")[0];
@@ -61,40 +73,83 @@ function expand6(a) {
   const fill = tail === null ? [] : Array(8 - h.length - t.length).fill("0");
   return [...h, ...fill, ...t].map((x) => parseInt(x || "0", 16));
 }
+const key6 = (a) => expand6(a).join(":");
 const v4From = (hi, lo) => [hi >> 8, hi & 255, lo >> 8, lo & 255].join(".");
+const v4Int = (a) => a.split(".").reduce((n, o) => n * 256 + Number(o), 0);
+const intV4 = (n) => [24, 16, 8, 0].map((b) => (n >>> b) & 255).join(".");
 
-function v4Reason(a, host) {
+/** This host's view, read fresh: own addresses, virtual-bridge subnets, broadcasts. */
+function localView(o = {}) {
+  let ifs;
+  try { ifs = (o.interfaces || networkInterfaces)(); } catch { return { failed: true }; }
+  const addrs = new Set(), bcast = new Set();
+  const nets4 = new BlockList(), nets6 = new BlockList();
+  for (const [name, list] of Object.entries(ifs || {})) {
+    for (const i of list || []) {
+      const fam = i.family === "IPv6" || i.family === 6 ? 6 : 4;
+      const addr = String(i.address || "").split("%")[0];
+      if (!isIP(addr)) continue;
+      addrs.add(fam === 6 ? key6(addr) : addr);
+      const plen = Number(String(i.cidr || "").split("/")[1]);
+      if (!Number.isInteger(plen)) continue;
+      if (VIRTUAL_IF.test(name)) {
+        try { (fam === 4 ? nets4 : nets6).addSubnet(addr, plen, fam === 4 ? "ipv4" : "ipv6"); } catch {}
+      }
+      if (fam === 4 && plen < 31) {
+        const mask = plen === 0 ? 0 : (0xffffffff << (32 - plen)) >>> 0;
+        bcast.add(intV4(((v4Int(addr) & mask) | (~mask >>> 0)) >>> 0));
+      }
+    }
+  }
+  for (const a of o.hostAddrs || []) if (isIP(a)) addrs.add(isIP(a) === 6 ? key6(a) : a);
+  return { addrs, bcast, nets4, nets6 };
+}
+
+function v4Reason(a, L) {
   const o = a.split(".").map(Number);
-  if (METADATA_V4.has(a)) return "cloud metadata endpoint";
-  if (host.has(a)) return "this host's own address";
   if (o[0] === 127 || o[0] === 0) return "loopback (use the bot's loopback ports)";
+  if (PLUMBING_V4.check(a, "ipv4")) return "cloud metadata / host plumbing";
   if (o[0] >= 224) return "not unicast";
+  if (L.failed) return PRIVATE_V4.check(a, "ipv4") ? "private target refused: this host's addresses cannot be determined" : null;
+  if (L.addrs.has(a)) return "this host's own address";
+  if (L.nets4.check(a, "ipv4")) return "a container/VM bridge on this host";
+  if (L.bcast.has(a)) return "a local subnet broadcast";
   return null;
 }
 
-/** null when the relay may connect to `addr`, else the reason it may not. */
-export function egressDenyReason(addr, { hostAddrs = [] } = {}) {
-  const a = String(addr || "").replace(/^\[|\]$/g, "");
+/**
+ * null when the relay may connect to `addr`, else the reason it may not.
+ * o.interfaces: networkInterfaces-shaped seam; o.hostAddrs: extra own addresses.
+ */
+export function egressDenyReason(addr, o = {}) {
+  const a = String(addr || "").replace(/^\[|\]$/g, "").split("%")[0];
   const fam = isIP(a);
   if (!fam) return "not an IP address";
-  const host = new Set(hostAddrs.map((x) => (isIP(x) === 6 ? expand6(x).join(":") : x)));
-  if (fam === 4) return v4Reason(a, host);
+  const L = localView(o);
+  if (fam === 4) return v4Reason(a, L);
   const h = expand6(a);
-  const key = h.join(":");
-  if (h.every((x) => x === 0) || (h.slice(0, 7).every((x) => x === 0) && h[7] === 1)) return "loopback (use the bot's loopback ports)";
-  if (METADATA_V6.has(h.map((x) => x.toString(16)).join(":"))) return "cloud metadata endpoint";
-  if (host.has(key)) return "this host's own address";
+  const zero = (x, y) => h.slice(x, y).every((v) => v === 0);
+  if (zero(0, 8) || (zero(0, 7) && h[7] === 1)) return "loopback (use the bot's loopback ports)";
   if (h[0] >= 0xff00) return "not unicast";
-  // IPv4 inside IPv6
-  if (h.slice(0, 5).every((x) => x === 0) && (h[5] === 0xffff || h[5] === 0)) return v4Reason(v4From(h[6], h[7]), host);
-  if (h[0] === 0x64 && h[1] === 0xff9b && h.slice(2, 6).every((x) => x === 0)) return v4Reason(v4From(h[6], h[7]), host);
-  if (h[0] === 0x2002) return v4Reason(v4From(h[1], h[2]), host);
+  if ((h[0] === 0xfd00 && h[1] === 0xec2 && zero(2, 4)) || key6(a) === key6("fd20:ce::254") || key6(a) === key6("fd7a:115c:a1e0::53")) {
+    return "cloud metadata / host plumbing";
+  }
+  // IPv4 inside IPv6: every prefix known to embed an IPv4 address is judged
+  // by that address, or refused when the embedding cannot be read reliably.
+  if (zero(0, 5) && (h[5] === 0xffff || h[5] === 0)) return v4Reason(v4From(h[6], h[7]), L);       // ::ffff:a.b.c.d, ::a.b.c.d
+  if (zero(0, 4) && h[4] === 0xffff && h[5] === 0) return v4Reason(v4From(h[6], h[7]), L);        // SIIT ::ffff:0:a.b.c.d
+  if (h[0] === 0x64 && h[1] === 0xff9b && zero(2, 6)) return v4Reason(v4From(h[6], h[7]), L);      // NAT64 64:ff9b::/96
+  if (h[0] === 0x64 && h[1] === 0xff9b && h[2] === 1) return "NAT64 local-use prefix (embedded IPv4 not reliably readable)";
+  if (h[0] === 0x2002) return v4Reason(v4From(h[1], h[2]), L);                                    // 6to4
+  if (h[0] === 0x2001 && h[1] === 0) {                                                            // Teredo: server, and client XOR ffff:ffff
+    return v4Reason(v4From(h[2], h[3]), L) || v4Reason(v4From(h[6] ^ 0xffff, h[7] ^ 0xffff), L);
+  }
+  if (h[0] === 0x100 && zero(1, 4)) return "discard-only prefix (100::/64)";
+  const isPrivate6 = (h[0] & 0xfe00) === 0xfc00 || (h[0] & 0xffc0) === 0xfe80;
+  if (L.failed) return isPrivate6 ? "private target refused: this host's addresses cannot be determined" : null;
+  if (L.addrs.has(key6(a))) return "this host's own address";
+  if (L.nets6.check(a, "ipv6")) return "a container/VM bridge on this host";
   return null;
-}
-
-/** This host's interface addresses (refused as egress targets). */
-export function hostInterfaceAddresses() {
-  try { return Object.values(networkInterfaces()).flat().filter(Boolean).map((i) => i.address); } catch { return []; }
 }
 
 const norm = (h) => String(h || "").trim().toLowerCase().replace(/\.$/, "");
@@ -147,7 +202,7 @@ export function createEgressRelay(o) {
   // relay does not proxy. 443 by default.
   const ports = new Set((o.egressPorts || [443]).map(Number));
   const allow = Array.isArray(o.egressAllow) ? o.egressAllow : null;
-  const hostAddrs = o.hostAddrs || hostInterfaceAddresses();
+  const local = { interfaces: o.interfaces, hostAddrs: o.hostAddrs };
   const maxConns = o.maxConns ?? 64;
   const headTimeoutMs = o.headTimeoutMs ?? 10000;
   const lookup = o.lookup || ((h) => dnsLookup(h, { all: true, verbatim: true }));
@@ -223,7 +278,7 @@ export function createEgressRelay(o) {
     else {
       try { addrs = await lookup(host); } catch { note("deny", target, "does not resolve"); return refuse(c, 502, "Bad Gateway"); }
     }
-    const why = addrs.length ? addrs.map((a) => egressDenyReason(a.address, { hostAddrs })).find(Boolean) : "no address";
+    const why = addrs.length ? addrs.map((a) => egressDenyReason(a.address, local)).find(Boolean) : "no address";
     if (why) {
       note("deny", target, why);
       return refuse(c, 403, "Forbidden");
