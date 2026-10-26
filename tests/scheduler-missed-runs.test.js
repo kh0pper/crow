@@ -316,3 +316,49 @@ test("a missed bot-routine window written with missedRunInsert gets the bot-cron
   assert.equal(n2.length, 2);
   assert.equal(n2[1].title, "2 bot routines missed runs while Crow wasn't running");
 });
+
+test("sweepMissedNotices: two handles racing on one database deliver exactly one notice per row", async () => {
+  const { sweepMissedNotices } = await import("../servers/gateway/scheduler.js");
+  const ids = [];
+  for (const t of ["a", "b", "c"]) {
+    const id = await seed(`reminder:${t}`, "0 9 * * *", "2026-10-27T09:00:00.000Z");
+    await db.execute({ sql: "INSERT INTO schedule_runs (schedule_id, scheduled_for, status, missed_count) VALUES (?, '2026-10-26T09:00:00.000Z', 'missed', 1)", args: [id] });
+    ids.push(id);
+  }
+  const second = createDbClient(join(tmpDir, "crow.db"));
+  const sent = []; // [handle, run ids covered]
+  const notify = (who) => async (_db, note, runIds) => { sent.push([who, [...runIds]]); };
+  // Handle A reads the candidates, then handle B runs a whole sweep before A claims.
+  const first = {
+    execute: async (arg) => {
+      const res = await db.execute(arg);
+      const sql = typeof arg === "string" ? arg : arg.sql;
+      if (/^SELECT r\.id/.test(sql.trim())) await sweepMissedNotices(second, { notify: notify("B"), zone: "UTC", lang: "en" });
+      return res;
+    },
+    batch: (...a) => db.batch(...a),
+  };
+  try {
+    const a = await sweepMissedNotices(first, { notify: notify("A"), zone: "UTC", lang: "en" });
+    const covered = sent.flatMap(([, r]) => r).sort((x, y) => x - y);
+    const runIds = (await all("SELECT id FROM schedule_runs ORDER BY id")).map((r) => Number(r.id));
+    assert.deepEqual(covered, runIds, "every row is covered exactly once across both sweeps");
+    assert.equal(sent.length, 1, "one summary notice, from the sweep that claimed");
+    assert.equal(sent[0][0], "B");
+    assert.deepEqual(a.claimed, [], "the sweep that lost the claim delivers nothing");
+    assert.equal((await notices()).length, 0, "a custom notify replaces createNotification");
+    const again = await sweepMissedNotices(db, { zone: "UTC", lang: "en" });
+    assert.deepEqual(again.claimed, []);
+  } finally { second.close(); }
+});
+
+test("sweepMissedNotices defaults to createNotification, reading zone and language from the instance", async () => {
+  const { sweepMissedNotices } = await import("../servers/gateway/scheduler.js");
+  const id = await seed("pipeline:botcron:lab", "0 9 * * *", "2026-10-27T09:00:00.000Z");
+  await db.execute({ sql: "INSERT INTO schedule_runs (schedule_id, scheduled_for, status, missed_count) VALUES (?, '2026-10-26T09:00:00.000Z', 'missed', 1)", args: [id] });
+  const r = await sweepMissedNotices(db);
+  assert.equal(r.claimed.length, 1);
+  const n = await notices();
+  assert.equal(n.length, 1);
+  assert.equal(n[0].title, "Missed: lab routine");
+});

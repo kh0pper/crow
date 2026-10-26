@@ -225,8 +225,14 @@ function whenText(ms, zone, lang) {
   return fmt(lang === "es" ? "es-ES" : "en-US", { weekday: "short", hour: "numeric", minute: "2-digit" }, ms, zone);
 }
 
-/** Mark first, then notify only for the rows this tick marked (a crash loop or a second process cannot double a notice). */
-async function notifyOnce(now, { zone, lang }) {
+const defaultNotify = (db, note) => createNotification(db, note);
+
+/**
+ * Mark first, then notify only for the rows this sweep marked (a crash loop or a second process
+ * cannot double a notice). Uses only the handle it is given. `notify(db, notification, runIds)`
+ * delivers one notice covering those run ids. → { claimed: run ids this sweep marked }
+ */
+async function notifyOnce(db, now, { zone, lang, notify = defaultNotify }) {
   const tz = (await hasTzColumn(db)) ? "s.tz" : "NULL";
   const { rows: candidates } = await db.execute({
     sql: `SELECT r.id, r.schedule_id, r.status, r.scheduled_for, r.missed_count, r.detail, s.task, s.cron_expression, ${tz} AS tz
@@ -234,7 +240,7 @@ async function notifyOnce(now, { zone, lang }) {
           WHERE r.status IN ('missed', 'failed', 'paused') AND r.notified_at IS NULL ORDER BY r.id LIMIT 50`,
     args: [],
   });
-  if (!candidates.length) return;
+  if (!candidates.length) return { claimed: [] };
   const marks = candidates.map(() => "?").join(",");
   const { rows: won } = await db.execute({
     sql: `UPDATE schedule_runs SET notified_at = ? WHERE id IN (${marks}) AND notified_at IS NULL RETURNING id`,
@@ -242,15 +248,17 @@ async function notifyOnce(now, { zone, lang }) {
   });
   const mine = new Set(won.map((w) => Number(w.id)));
   const claimed = candidates.filter((c) => mine.has(Number(c.id)));
-  if (!claimed.length) return;
+  if (!claimed.length) return { claimed: [] };
+  const runIds = claimed.map((c) => Number(c.id));
+  const send = (note) => notify(db, note, runIds);
   const S = STR[lang];
   const base = { source: "scheduler:missed", priority: "normal" };
   if (claimed.length > 1) {
     const allMissed = claimed.every((c) => c.status === "missed");
     const allBots = allMissed && claimed.every((c) => scheduleKind(c.task) === "bot_routine");
     // No action_url until the Schedule page exists (panel PR 2).
-    await createNotification(db, { ...base, type: "system", title: allBots ? S.summaryBots(claimed.length) : allMissed ? S.summaryMissed(claimed.length) : S.summaryMixed(claimed.length), body: S.summaryBody });
-    return;
+    await send({ ...base, type: "system", title: allBots ? S.summaryBots(claimed.length) : allMissed ? S.summaryMissed(claimed.length) : S.summaryMixed(claimed.length), body: S.summaryBody });
+    return { claimed: runIds };
   }
   const c = claimed[0];
   const bot = scheduleKind(c.task) === "bot_routine" ? String(c.task).trim().slice(BOTCRON_PREFIX.length) : null;
@@ -260,16 +268,32 @@ async function notifyOnce(now, { zone, lang }) {
   const z = zoneFor(c.tz, zone);
   const one = { ...base, schedule_id: c.task ? Number(c.schedule_id) : null };
   if (c.status === "paused") {
-    await createNotification(db, { ...one, type: "system", title: S.pausedOne(text), body: detail.reason === "frequent" ? S.pausedFrequent(detail.every_min) : S.pausedSystem });
+    await send({ ...one, type: "system", title: S.pausedOne(text), body: detail.reason === "frequent" ? S.pausedFrequent(detail.every_min) : S.pausedSystem });
   } else if (c.status === "failed") {
-    await createNotification(db, { ...one, type: "reminder", title: S.failedOne(text), body: detail.error ? String(detail.error).slice(0, 200) : null });
+    await send({ ...one, type: "reminder", title: S.failedOne(text), body: detail.error ? String(detail.error).slice(0, 200) : null });
   } else {
     const first = Date.parse(c.scheduled_for);
     const last = Date.parse(detail.last_missed || c.scheduled_for);
     const count = Number(c.missed_count || 1);
     const body = count > 1 ? S.missedManyBody(detail.capped ? `${count}+` : count, whenText(first, z, lang), whenText(last, z, lang)) : S.missedBody(whenText(first, z, lang));
-    await createNotification(db, { ...one, type: bot ? "system" : "reminder", title: bot ? S.missedBot(bot) : S.missedOne(text), body });
+    await send({ ...one, type: bot ? "system" : "reminder", title: bot ? S.missedBot(bot) : S.missedOne(text), body });
   }
+  return { claimed: runIds };
+}
+
+/**
+ * The missed/failed/paused notice sweep on its own, for a process with no gateway scheduler (the
+ * pi-bots `botcron tick` CLI). Same atomic claim as the gateway tick: only the rows its UPDATE …
+ * RETURNING marked are delivered. zone/lang default to the instance's; notify defaults to
+ * createNotification. → { claimed: run ids } ([] on a database without schedule_runs)
+ */
+export async function sweepMissedNotices(database, { notify = defaultNotify, zone, lang } = {}) {
+  if (!(await hasRunsTable(database))) return { claimed: [] };
+  return notifyOnce(database, _now(), {
+    zone: zone ?? (await instanceZone(database)),
+    lang: lang === "es" || lang === "en" ? lang : await instanceLang(database),
+    notify,
+  });
 }
 
 /** Retention: orphans; older than 90 days beyond the newest 20; anything beyond the newest 500. */
@@ -312,7 +336,7 @@ async function settlePass() {
   }
   if (runs) {
     await drainRequests();
-    await notifyOnce(now, { zone, lang });
+    await notifyOnce(db, now, { zone, lang });
   }
 }
 
