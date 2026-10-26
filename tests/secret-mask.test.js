@@ -168,7 +168,68 @@ test("long adversarial texts stay fast (no catastrophic backtracking)", () => {
   assert.ok(Date.now() - t0 < 2000, "took " + (Date.now() - t0) + " ms");
 });
 
-test("hiddenNote: the contract's first-line wording", () => {
-  assert.equal(hiddenNote(1), "(1 secret value(s) hidden from this card)");
-  assert.equal(hiddenNote(3), "(3 secret value(s) hidden from this card)");
+test("hiddenNote: pi-lab's first-line wording, word for word", () => {
+  const tail = " This request contains a secret; approving runs it with the real, unmasked value.";
+  assert.equal(hiddenNote(1), "(1 secret value(s) hidden from this card)" + tail);
+  assert.equal(hiddenNote(3), "(3 secret value(s) hidden from this card)" + tail);
+});
+
+test("a host after ssh/scp/rsync/curl is never masked, however much whitespace follows the command", () => {
+  const tok = "s" + "k-" + "h".repeat(30);
+  const t = "ssh" + " ".repeat(400) + tok;
+  assert.equal(m(t), t);
+});
+
+test("a masking failure is reported (failed), never the raw text; oversized input is cut before masking", () => {
+  const boom = { [Symbol.iterator]() { throw new Error("boom"); } };
+  const r = maskSecretsDetailed("GH_TOKEN=" + FAKE, { values: boom });
+  assert.equal(r.failed, true);
+  assert.equal(r.text, REDACTED);
+  const big = "x".repeat(3 * 1024 * 1024) + " GH_TOKEN=" + FAKE;
+  const out = maskSecretsDetailed(big, none);
+  assert.equal(out.failed, undefined);
+  assert.equal(out.text.includes(FAKE), false);
+  assert.ok(out.text.length < big.length);
+});
+
+test("PEM: any consistent width up to 76 (OpenSSH 70, 76) and CRLF line ends", () => {
+  const dash = "-".repeat(5);
+  const block = (label, lines, eol = "\n") => dash + "BEGIN " + label + "PRIVATE KEY" + dash + eol + lines.join(eol) + eol + dash + "END " + label + "PRIVATE KEY" + dash;
+  for (const [label, w] of [["OPENSSH ", 70], ["RSA ", 76], ["", 64]]) {
+    const key = block(label, ["Q".repeat(w), "Q".repeat(w), "Q".repeat(12)]);
+    assert.equal(m("k:\n" + key).includes("Q".repeat(w)), false, label + w);
+  }
+  const crlf = block("RSA ", ["Q".repeat(64), "Q".repeat(64), "Q".repeat(10)], "\r\n");
+  assert.equal(m("k:\n" + crlf).includes("Q".repeat(64)), false, "CRLF");
+  for (const lines of [["Q".repeat(77), "Q".repeat(77), "Q"], ["Q".repeat(64), "Q".repeat(70), "Q".repeat(5)]]) {
+    const t = "k:\n" + block("RSA ", lines);
+    assert.equal(m(t), t, "wider than 76 or inconsistent widths stay visible");
+  }
+});
+
+test("PEM: a block whose END was cut off is hidden only when every visible body line is base64", () => {
+  const dash = "-".repeat(5);
+  const begin = dash + "BEGIN OPENSSH PRIVATE KEY" + dash;
+  const cut = "k:\n" + begin + "\n" + "Q".repeat(70) + "\n" + "Q".repeat(70) + "\n" + "Q".repeat(30) + "\u2026(900 more characters)";
+  const out = m(cut);
+  assert.equal(out.includes("Q".repeat(30)), false, out.slice(0, 80));
+  assert.match(out, /\u2026\(900 more characters\)$/);
+  assert.equal(m(displayEscape("k:\n" + begin + "\n" + "Q".repeat(70) + "\n" + "Q".repeat(40))).includes("Q".repeat(40)), false, "escaped, cut at the end of the text");
+  for (const t of [
+    "k:\n" + begin + "\n" + "Q".repeat(70) + "\nbash /tmp/x",
+    "k:\n" + begin + "\nreboot",
+    "k:\n" + begin + "\n" + "Q".repeat(70) + "\n\nAllow this once?",
+  ]) {
+    assert.equal(m(t), t, t.slice(-20));
+  }
+});
+
+test("a credential context hides a value with a slash in it; only a leading path stays visible", () => {
+  const v = "abc/" + "def123";
+  for (const t of ["DB_PASSWORD=" + v, 'curl -H "Authorization: Bearer ' + v + '"', "tool --password " + v, "sshpass" + " -p " + v + " ssh h"]) {
+    assert.equal(m(t).includes(v), false, t);
+  }
+  for (const t of ["DB_PASSWORD=/run/secrets/db", "TOKEN_FILE=~/tok", "API_KEY=./key.txt", "SECRET=../x"]) {
+    assert.equal(m(t), t, t);
+  }
 });

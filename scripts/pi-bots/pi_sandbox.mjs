@@ -238,7 +238,9 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   const hideDirs = (opts.hideDirs || []).filter((d) => typeof d === "string" && d.startsWith("/") && isDir(d));
   const pre = ["--dev-bind", "/", "/", "--unshare-user"];
   for (const d of tmpfs) pre.push("--tmpfs", d);
-  for (const d of hideDirs) if (!tmpfs.some((t) => d === t || d.startsWith(t + "/"))) pre.push("--tmpfs", d);
+  // Read-only too: no decoy can be planted there for a host-side reader
+  // (send_user_file) to resolve to the real file behind the mask.
+  for (const d of hideDirs) if (!tmpfs.some((t) => d === t || d.startsWith(t + "/"))) pre.push("--tmpfs", d, "--remount-ro", d);
   for (const s of sockets) if (!tmpfs.some((d) => s === d || s.startsWith(d + "/"))) pre.push("--ro-bind", "/dev/null", s);
   for (const d of roDirs) pre.push("--ro-bind", d, d);
   if (opts.infoFd != null) pre.push("--info-fd", String(opts.infoFd));

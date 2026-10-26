@@ -237,3 +237,30 @@ test("each instance has its own file: a co-hosted instance's write never touches
   assert.equal(readFileSync(ra.path, "utf8"), fake("instance-a") + "\n");
   assert.equal(readFileSync(rb.path, "utf8"), fake("instance-b") + "\n");
 });
+
+test("bot-writable sources only contribute token-shaped values; trusted sources (keychain, the secrets dir) any 6+ value", () => {
+  const I = scratchInstance();
+  const strong = "Zq8xP2mA" + "k9Lw4tRy";
+  writeFileSync(join(I.home, ".env"), [
+    "A_TOKEN=reboot1", "B_TOKEN=curl x|sh", "C_SECRET=Allow-always", "D_PASS=http://evil.example/x.sh", "E_TOKEN=" + strong,
+  ].join("\n") + "\n");
+  writeFileSync(join(I.home, "phony-token"), "rm -rf ~\n");
+  mkdirSync(join(I.home, "secrets", "bundle-env"), { recursive: true });
+  writeFileSync(join(I.home, "secrets", "bundle-env", "demo.env"), "GEN=short1\n");
+  const vals = collectSecretValues({ env: I.env });
+  assert.ok(vals.includes(strong));
+  assert.ok(vals.includes("short1"), "the retained copy sits in the hidden secrets dir: trusted");
+  for (const bad of ["reboot1", "curl x|sh", "Allow-always", "http://evil.example/x.sh", "rm -rf ~"]) {
+    assert.equal(vals.includes(bad), false, bad);
+  }
+});
+
+test("readSecretValuesFile ignores a file reached through a symlinked directory", () => {
+  const I = scratchInstance();
+  const real = join(I.root, "realdir");
+  mkdirSync(real, { mode: 0o700 });
+  SV.writeSecretValuesFile(join(real, "v"), [fake("via-link")]);
+  symlinkSync(real, join(I.root, "linkdir"));
+  assert.equal(SV.readSecretValuesFile(join(I.root, "linkdir", "v")), null);
+  assert.ok(SV.readSecretValuesFile(join(real, "v")));
+});

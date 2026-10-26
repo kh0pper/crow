@@ -485,17 +485,17 @@ export class PiRpc {
     // spawn, and named to pi, AFTER spawn_env (PI_BOT_ keys stripped above)
     // and extraEnv merged, so only the engine names it. Without bwrap (setpriv
     // fallback, CROW_PI_SANDBOX=off) the bot shell could read a plaintext list,
-    // so it is neither written nor named; Crow's second mask (secret-mask.js)
-    // still carries patterns and this process's own env values. Inside bwrap
-    // pi-lab's trust check finds no file and masks by pattern only.
+    // so it is neither written nor named; the values are still collected and
+    // held in this process's memory, so Crow's second mask (secret-mask.js)
+    // keeps them. Inside bwrap pi-lab's trust check finds no file and masks
+    // by pattern only.
     delete env.PI_BOT_SECRET_VALUES_FILE;
     try { mkdirSync(secretsDir(), { recursive: true, mode: 0o700 }); } catch { /* the tmpfs needs the dir; without it, no file either */ }
     const launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, hideDirs: [secretsDir()] });
     delete launch.env.PI_BOT_SECRET_VALUES_FILE;
-    if (launch.wrapper === "bwrap" && launch.masked.includes(secretsDir())) {
-      const secretValues = refreshSecretValuesFile({ log: (l) => console.error("[pi-bots] " + l) });
-      if (secretValues) launch.env.PI_BOT_SECRET_VALUES_FILE = secretValues.path;
-    }
+    const hidden = launch.wrapper === "bwrap" && launch.masked.includes(secretsDir());
+    const secretValues = refreshSecretValuesFile({ write: hidden, log: (l) => console.error("[pi-bots] " + l) });
+    if (hidden && secretValues) launch.env.PI_BOT_SECRET_VALUES_FILE = secretValues.path;
     this.sandboxed = launch.sandboxed;
     this.sandboxWrapper = launch.wrapper;
     this.piPid = null;

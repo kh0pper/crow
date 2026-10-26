@@ -19,7 +19,8 @@
  * secret-values-collect.js, run by the bot engine at each pi spawn.
  */
 import { chmodSync, closeSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, renameSync, rmSync, writeFileSync, fsyncSync, constants as fsConstants } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { realpathSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { resolveCrowHome } from "./crow-home.js";
 
@@ -74,6 +75,19 @@ export function plausibleSecretValue(v) {
   if (PLACEHOLDER_RE.test(s)) return false;
   if (s.startsWith("$")) return false;                                                // a reference
   return true;
+}
+
+/**
+ * A value from a source a bot shell can write (an .env, a token file, a bundle
+ * file, a provider row): accepted only when it looks like a token, so a bot
+ * cannot plant a word or a command that would then be hidden on every card it
+ * wants approved. 12-256 characters of [A-Za-z0-9._~+=-], with a digit or 20+
+ * characters. No space, quote, slash, colon or shell metacharacter.
+ */
+export function tokenShaped(v) {
+  if (typeof v !== "string") return false;
+  const s = v.trim();
+  return /^[A-Za-z0-9._~+=-]{12,256}$/.test(s) && (/\d/.test(s) || s.length >= 20);
 }
 
 /** One-line values of usable length; multi-line values (keys) contribute
@@ -156,8 +170,13 @@ function sweepStaleTemps(dir, base) {
 export function readSecretValuesFile(path) {
   let fd;
   try {
+    // pi-lab's loader checks too: no symlink anywhere in the path, and the
+    // file opened is the file checked.
+    const lst = lstatSync(path);
+    if (realpathSync(path) !== resolve(path)) return null;
     fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
     const st = fstatSync(fd);
+    if (st.ino !== lst.ino || st.dev !== lst.dev) return null;
     if (!st.isFile() || st.uid !== process.getuid() || (st.mode & 0o777) !== 0o600 || st.size > MAX_SECRET_VALUES_BYTES) return null;
     const buf = Buffer.alloc(st.size);
     let off = 0;
@@ -174,9 +193,20 @@ export function readSecretValuesFile(path) {
   }
 }
 
-let cache = null;   // { values, key, envKey }
+let cache = null;   // { values, key, env, mem }
+let memValues = [];  // the last list collected in THIS process (secret-values-collect.js)
 
 function primeSecretValuesCache() { cache = null; }
+
+/**
+ * Hold the instance's values in this process's memory. The bot engine does
+ * this at every spawn, file or no file: where the file is not written (no
+ * bubblewrap) this is how the process's own mask still gets them.
+ */
+export function primeSecretValues(values) {
+  memValues = normalizeValues(values);
+  cache = null;
+}
 
 /** Drop the cached list (the next getSecretValues() re-reads). */
 export function invalidateSecretValues() { cache = null; }
@@ -194,8 +224,8 @@ function fileKey(path) {
  */
 export function getSecretValues({ env = process.env } = {}) {
   const key = fileKey(secretValuesPath(env));
-  if (cache && cache.key === key && cache.env === env) return cache.values;
+  if (cache && cache.key === key && cache.env === env && cache.mem === memValues) return cache.values;
   const f = key === "none" ? null : readSecretValuesFile(secretValuesPath(env));
-  cache = { values: normalizeValues([...(f ? f.values : []), ...secretValuesFromEnv(env)]), key, env };
+  cache = { values: normalizeValues([...(f ? f.values : []), ...memValues, ...secretValuesFromEnv(env)]), key, env, mem: memValues };
   return cache.values;
 }

@@ -192,7 +192,7 @@ test("the 10-25 card: no frame, snapshot, replay, row, metadata or push carries 
   const ask = frames.find((f) => f.type === "ask_user");
   assert.ok(ask, "the card was shown");
   assert.equal(leaks(frames), false, "no live frame");
-  assert.match(ask.message, /^\(2 secret value\(s\) hidden from this card\)\n/);
+  assert.match(ask.message, /^\(2 secret value\(s\) hidden from this card\) This request contains a secret; approving runs it with the real, unmasked value\.\n/);
   assert.match(ask.message, /echo "\[REDACTED\]" \| sudo -S systemctl restart crow-gateway && login \[REDACTED\]/);
   const snap = await engine.get(s.sessionId);
   assert.equal(leaks(snap), false, "snapshot (the board drawer and the Perch list read this)");
@@ -325,4 +325,34 @@ test("pi-lab parity: a sudo -S feed whose text is NOT a known value stays visibl
   await tick(30);
   const ask = frames.find((f) => f.type === "ask_user");
   assert.equal(ask.message, CMD, "byte-identical, no note");
+});
+
+test("an edited prefill whose hidden spans cannot be placed unambiguously goes back exactly as typed", async () => {
+  const { engine, bridge } = makeEngine();
+  const { s, pi } = await liveSession(engine, bridge, "bot-editor-ambiguous");
+  const frames = await watched(engine, s.sessionId);
+  // two hidden values side by side: the boundary between them is not visible
+  const prefill = "A=" + FAKE + KEYCHAIN_FAKE + "\nB=1";
+  pi.emit({ type: "extension_ui_request", id: "e3", method: "editor", title: "Edit", prefill });
+  await tick(30);
+  const ask = frames.find((f) => f.type === "ask_user");
+  const typed = ask.prefill.replace("B=1", "B=2");
+  await engine.answer(s.sessionId, "e3", { value: typed });
+  assert.equal(pi.sent[pi.sent.length - 1].value, typed);
+});
+
+test("an edited prefill whose visible text also occurs inside the hidden value goes back as typed", async () => {
+  const { engine, bridge } = makeEngine();
+  const { s, pi } = await liveSession(engine, bridge, "bot-editor-repeat");
+  const frames = await watched(engine, s.sessionId);
+  const spaced = "sec" + " tail " + "0000";             // a keychain-style value containing " tail"
+  secretValues.writeSecretValuesFile(secretValues.secretValuesPath(process.env), [KEYCHAIN_FAKE, FAKE, spaced]);
+  const prefill = "B=1\nA=" + spaced + " tail";
+  pi.emit({ type: "extension_ui_request", id: "e4", method: "editor", title: "Edit", prefill });
+  await tick(30);
+  const ask = frames.find((f) => f.type === "ask_user");
+  assert.equal(ask.prefill, "B=1\nA=[REDACTED] tail");
+  const typed = ask.prefill.replace("B=1", "B=2");
+  await engine.answer(s.sessionId, "e4", { value: typed });
+  assert.equal(pi.sent[pi.sent.length - 1].value, typed);
 });

@@ -4,6 +4,13 @@
  * pi spawn (scripts/pi-bots/bridge.mjs PiRpc), so a secret added since the
  * last spawn is in the file before the next card can show it.
  *
+ * Trust: the keychain (sealed under a key the sandbox hides) and the retained
+ * copies in <CROW_HOME>/secrets/bundle-env (inside the hidden dir) are
+ * trusted: any 6+ value counts. Every other source is writable by a bot's
+ * shell, so it contributes only token-shaped values (tokenShaped): a bot must
+ * not be able to plant a word or a command that would then be hidden on the
+ * cards it wants approved.
+ *
  * Sources, each best-effort (a missing or unreadable source is skipped):
  *   - <CROW_HOME>/.env, the checkout .env (or CROW_APP_ENV_PATH),
  *     <CROW_HOME>/env/*.env: secret-NAMED keys (isSecretEnvName) with a
@@ -28,7 +35,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveCrowHome, resolveInstanceDataDir } from "./crow-home.js";
 import {
-  isSecretEnvName, normalizeValues, plausibleSecretValue, secretValuesFromEnv, secretValuesPath, writeSecretValuesFile,
+  isSecretEnvName, normalizeValues, primeSecretValues, secretValuesFromEnv, secretValuesPath, tokenShaped, writeSecretValuesFile,
 } from "./secret-values.js";
 import { loadKeychainKey } from "../gateway/keychain/key.js";
 import { readableSecretsSync } from "../gateway/keychain/store.js";
@@ -62,7 +69,7 @@ export function parseEnvPairs(text) {
 
 function envFileSecrets(path) {
   const t = readSmall(path);
-  return t == null ? [] : secretValuesFromEnv(parseEnvPairs(t));
+  return t == null ? [] : secretValuesFromEnv(parseEnvPairs(t)).filter(tokenShaped);
 }
 
 function listDir(dir) {
@@ -83,7 +90,7 @@ function bundleSecrets(crowHome) {
       marked = new Set((manifest.env_vars || []).filter((v) => v && typeof v.name === "string" && (v.secret === true || v.generate)).map((v) => v.name));
     } catch { /* no manifest: names only */ }
     for (const [k, v] of Object.entries(pairs)) {
-      if (marked.has(k) ? typeof v === "string" && v.trim().length >= 6 : isSecretEnvName(k) && plausibleSecretValue(v)) out.push(v.trim());
+      if ((marked.has(k) || isSecretEnvName(k)) && tokenShaped(v)) out.push(v.trim());
     }
   }
   for (const f of listDir(join(crowHome, "secrets", "bundle-env"))) {
@@ -99,12 +106,12 @@ function tokenFileSecrets(crowHome, dataDir) {
   for (const f of listDir(crowHome)) {
     if (!f.isFile() || !/-token$/.test(f.name)) continue;
     const t = readSmall(join(crowHome, f.name));
-    if (t != null) out.push(t.trim());
+    if (t != null && tokenShaped(t)) out.push(t.trim());
   }
   const walk = (node, depth, pick) => {
     if (depth > 4 || !node || typeof node !== "object") return;
     for (const [k, v] of Object.entries(node)) {
-      if (typeof v === "string" && pick(k)) out.push(v);
+      if (typeof v === "string" && pick(k) && tokenShaped(v)) out.push(v);
       else if (v && typeof v === "object") walk(v, depth + 1, pick);
     }
   };
@@ -127,7 +134,7 @@ function dbSecrets({ dbPath, crowHome }) {
     out.push(...readableSecretsSync(db, loadKeychainKey({ crowHome })));
     try {
       for (const r of db.prepare("SELECT api_key FROM providers WHERE api_key IS NOT NULL AND api_key != ''").all()) {
-        if (plausibleSecretValue(r.api_key)) out.push(String(r.api_key).trim());
+        if (tokenShaped(r.api_key)) out.push(String(r.api_key).trim());
       }
     } catch { /* no providers table */ }
   } catch { /* unreadable DB: env and file sources still count */ }
@@ -157,14 +164,19 @@ export function collectSecretValues({ env = process.env, appRoot = env.CROW_APP_
 }
 
 /**
- * Collect and (re)write the instance's values file. Never throws.
- * @returns {{path: string, count: number, written: boolean}|null} null when it could not be written
+ * Collect the instance's values, hold them in this process's memory (its own
+ * mask, file or no file) and, unless `write === false`, (re)write the values
+ * file. Never throws.
+ * @returns {{path: string, count: number, written: boolean}|null} null when nothing was written
  */
 export function refreshSecretValuesFile(opts = {}) {
   const env = opts.env || process.env;
   const path = secretValuesPath(env);
   try {
-    return writeSecretValuesFile(path, collectSecretValues(opts));
+    const values = collectSecretValues(opts);
+    primeSecretValues(values);
+    if (opts.write === false) return null;
+    return writeSecretValuesFile(path, values);
   } catch (e) {
     if (typeof opts.log === "function") opts.log("secret values file not written: " + ((e && e.message) || e));
     return null;

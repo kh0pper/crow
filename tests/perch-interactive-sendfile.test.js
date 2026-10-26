@@ -376,3 +376,43 @@ test("regression: crow-state and crow-ask prefixes still discriminate — a crow
   assert.deepEqual(sink.ofType("log").map((e) => e.text), ["plain operator note"]);
   assert.equal(sink.ofType("file").length, 1);
 });
+
+// ---------------------------------------------------------------------------
+// secret masking (2026-10-26): the instance's secrets dir is never served
+// ---------------------------------------------------------------------------
+
+test("send_user_file never copies anything from <CROW_HOME>/secrets (values file, keychain key), even through a symlink", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  const sink = await collect(engine, s.sessionId);
+  const secrets = join(CROW_HOME, "secrets");
+  mkdirSync(secrets, { recursive: true, mode: 0o700 });
+  const values = join(secrets, "pi-bot-secret-values");
+  writeFileSync(values, "fake-" + "values-line-0000\n", { mode: 0o600 });
+  const link = join(dir, "src", "innocent.txt");
+  mkdirSync(join(dir, "src"), { recursive: true });
+  try { rmSync(link, { force: true }); } catch {}
+  symlinkSync(values, link);
+  for (const path of [values, link, join(secrets, "keychain.key")]) {
+    pi.emit({ type: "extension_ui_request", method: "notify", message: crowFileFrame({ path, name: "x.txt", caption: "c" }) });
+  }
+  await tick();
+  const frames = sink.ofType("file");
+  assert.equal(frames.length, 3);
+  for (const f of frames) assert.equal(f.servable, false);
+  const snap = await engine.get(s.sessionId);
+  assert.equal(existsSync(join(snap.outputsDir, "x.txt")), false, "nothing copied into the bot-readable outputs dir");
+});
+
+test("a file frame's caption is masked (it is bot text shown and stored)", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  const sink = await collect(engine, s.sessionId);
+  const fakeTok = "fake-" + "caption-tok-0000";
+  pi.emit({ type: "extension_ui_request", method: "notify", message: crowFileFrame({ path: srcFile("c.txt"), name: "c.txt", caption: "GH_TOKEN=" + fakeTok }) });
+  await tick();
+  assert.equal(JSON.stringify(sink.ofType("file")).includes(fakeTok), false);
+  assert.equal(JSON.stringify(historyRows("botty", s.sessionId)).includes(fakeTok), false);
+});

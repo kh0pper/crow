@@ -121,3 +121,37 @@ test("off with no inherited value: the engine never leaks an inherited PI_BOT_SE
     assert.equal(r.path, null);
   } finally { delete process.env.PI_BOT_SECRET_VALUES_FILE; }
 });
+
+test("sandboxed: the hidden secrets dir is read-only inside (no decoy can be planted for send_user_file)", { skip: noSandbox }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-secret-decoy-"));
+  mkdirSync(join(dir, "sessions"), { recursive: true });
+  const stub = join(dir, "stub-pi.mjs");
+  writeFileSync(stub, [
+    'import { writeFileSync } from "node:fs";',
+    `let r = "written"; try { writeFileSync(${JSON.stringify(PATH)}, "decoy"); } catch (e) { r = e.code || "refused"; }`,
+    'process.stdout.write(JSON.stringify({ type: "report", tag: "decoy", r }) + "\\n");',
+    "setTimeout(() => process.exit(0), 50);",
+  ].join("\n"));
+  const prev = process.env.CROW_PI_SANDBOX;
+  process.env.CROW_PI_SANDBOX = "auto";
+  try {
+    const pi = new PiRpc({ def: {}, sessionDir: dir, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: process.execPath, cliPath: stub, diagLog: () => {} });
+    const r = await pi.waitFor((m) => m.type === "report", 10000, "decoy");
+    await pi.exited;
+    assert.notEqual(r.r, "written");
+    assert.notEqual(readFileSync(PATH, "utf8"), "decoy");
+  } finally {
+    if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
+  }
+});
+
+test("without bubblewrap the values still reach this process's own mask (in memory), with no file", async () => {
+  const { rmSync } = await import("node:fs");
+  rmSync(PATH, { force: true });
+  const { getSecretValues, invalidateSecretValues } = await import("../servers/shared/secret-values.js");
+  invalidateSecretValues();
+  const { pi } = await spawnReport({ mode: "off" });
+  await pi.exited;
+  assert.equal(existsSync(PATH), false);
+  assert.ok(getSecretValues().includes(FAKE));
+});

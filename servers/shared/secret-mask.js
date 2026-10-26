@@ -31,7 +31,7 @@ export const REDACTED = "[REDACTED]";
 
 /** The contract's first-line note on a masked card. */
 export function hiddenNote(n) {
-  return `(${n} secret value(s) hidden from this card)`;
+  return `(${n} secret value(s) hidden from this card) This request contains a secret; approving runs it with the real, unmasked value.`;
 }
 export const HIDDEN_NOTE_RE = /^\(\d+ secret value\(s\) hidden from this card\)/;
 
@@ -62,13 +62,23 @@ export function passwordLike(s) {
 
 /** A token that names a path, never a secret. */
 function pathLike(s) {
-  return /^(?:\/|~|\.\.?\/)/.test(s) || s.includes("://") || /^[\w.-]+(?:\/[\w.-]*)+$/.test(s);
+  return leadingPath(s) || s.includes("://") || /^[\w.-]+(?:\/[\w.-]*)+$/.test(s);
+}
+/** In a context that already marks a credential (a secret-named assignment,
+ * an Authorization header, --password ...) only an obvious path is exempt:
+ * `abc/def123` there is a secret, not a path. */
+function leadingPath(s) {
+  return /^(?:\/|~|\.\.?\/)/.test(s);
 }
 
 /** Is [start,end) a host: after "://" (not user-info), after "user@", or the
  * first operand of ssh/scp/rsync/curl? */
 function hostPosition(input, start, end) {
-  const before = input.slice(Math.max(0, start - 300), start);
+  // whitespace first, then a bounded window: `ssh` followed by any amount of
+  // space still names a host
+  let b = start;
+  while (b > 0 && /\s/.test(input[b - 1])) b--;
+  const before = input.slice(Math.max(0, b - 300), start);
   const next = input[end] ?? "";
   if (/:\/\/$/.test(before)) return next !== "@" && next !== ":";
   if (/[A-Za-z0-9._-]@$/.test(before)) return true;
@@ -77,11 +87,12 @@ function hostPosition(input, start, end) {
 
 /** Mask one word at input[start…] if its content is password-like and not a
  * host or a path; quotes are kept. */
-function maskWordAt(c, word, input, start) {
+function maskWordAt(c, word, input, start, credentialContext = false) {
   const q = word[0];
   const quoted = (q === '"' || q === "'") && word.length >= 2 && word.endsWith(q);
   const inner = quoted ? word.slice(1, -1) : word;
-  if (!passwordLike(inner) || pathLike(inner) || hostPosition(input, start, start + word.length)) return word;
+  const isPath = credentialContext ? leadingPath(inner) : pathLike(inner);
+  if (!passwordLike(inner) || isPath || hostPosition(input, start, start + word.length)) return word;
   c.n++;
   return quoted ? q + REDACTED + q : REDACTED;
 }
@@ -93,9 +104,31 @@ function startsLine(input, at) {
   return input.slice(at - 2, at) === "\\n" && input[at - 3] !== "\\";
 }
 
-/** A PEM body as a real key file has it (see pi-lab pemShaped). */
+/** Body lines of a PEM block, a trailing CR (raw or displayed `\r`) stripped. */
+function pemLines(body) {
+  return body.split(LINE_BREAK).map((l) => l.replace(/(?:\r|\\r)$/, ""));
+}
+
+/** Base64 lines of one consistent width W (40-76: 64 for PEM, 70 for
+ * OpenSSH, up to 76), the last 1-W. `partial` (a block cut before END): the
+ * last line may be cut anywhere. Pure base64 lines cannot be a command. */
+function base64Rows(rows, minTotal) {
+  if (!rows.length) return false;
+  const w = rows.length > 1 ? rows[0].length : 0;
+  if (rows.length > 1 && (w < 40 || w > 76)) return false;
+  for (let i = 0; i < rows.length; i++) {
+    const last = i === rows.length - 1;
+    if (!/^[A-Za-z0-9+/=]+$/.test(rows[i])) return false;
+    if (!last && rows[i].length !== w) return false;
+    if (last && rows.length > 1 && rows[i].length > w) return false;
+  }
+  return rows.join("").length >= minTotal;
+}
+
+/** A PEM body as a real key file has it (pi-lab pemShaped, widened to any
+ * consistent width up to 76 and CRLF line ends). */
 export function pemShaped(body) {
-  const lines = body.split(LINE_BREAK);
+  const lines = pemLines(body);
   if (lines.length < 4 || lines[0] !== "" || lines[lines.length - 1] !== "") return false;
   let rest = lines.slice(1, -1);
   let k = 0;
@@ -103,19 +136,41 @@ export function pemShaped(body) {
   if (k > 0 && rest[k] === "") k++;
   rest = rest.slice(k);
   if (rest.length < 2) return false;
-  for (let i = 0; i < rest.length; i++) {
-    const last = i === rest.length - 1;
-    if (!/^[A-Za-z0-9+/=]+$/.test(rest[i])) return false;
-    if (last ? rest[i].length > 64 : rest[i].length !== 64) return false;
+  return base64Rows(rest, 100);
+}
+
+/** A key block whose END was cut off (pi-lab's cut marker, or the end of the
+ * text): hidden only when every visible body line is base64 of one width. */
+function maskCutPem(text, c) {
+  const BEGIN_RE = /-----BEGIN ([A-Z0-9 ]{0,40})PRIVATE KEY-----/g;
+  let out = "";
+  let pos = 0;
+  let mt;
+  while ((mt = BEGIN_RE.exec(text))) {
+    const label = mt[1];
+    const after = mt.index + mt[0].length;
+    if (!startsLine(text, mt.index) || text.includes("-----END " + label + "PRIVATE KEY-----", after)) continue;
+    const cut = text.slice(after).search(/\u2026\(\d+ more characters\)/);
+    const end = cut < 0 ? text.length : after + cut;
+    const lines = pemLines(text.slice(after, end));
+    if (lines.length < 2 || lines[0] !== "") continue;
+    const rows = lines.slice(1);
+    if (rows[rows.length - 1] === "") rows.pop();
+    if (!base64Rows(rows, 40) || (rows.length === 1 && rows[0].length < 40)) continue;
+    const sep = text.slice(after).match(LINE_BREAK)[0];
+    out += text.slice(pos, after) + sep + REDACTED;
+    c.n++;
+    pos = end;
+    BEGIN_RE.lastIndex = end;
   }
-  return rest.join("").length >= 100;
+  return out + text.slice(pos);
 }
 
 /** pre + word rules: the word is the last group and ends the match. */
 const wordRule = (re, ok = () => true) => [re, (c, mt, g, at, input) => {
   const pre = g[0];
   const w = g[g.length - 1];
-  return ok(pre, w) ? pre + maskWordAt(c, w, input, at + mt.length - w.length) : mt;
+  return ok(pre, w) ? pre + maskWordAt(c, w, input, at + mt.length - w.length, true) : mt;
 }];
 
 const RULES = [
@@ -155,7 +210,7 @@ function maskPatterns(text, c) {
       return fn(c, mt, g.map((x) => (typeof x === "string" ? x : "")), at, input);
     });
   }
-  return out;
+  return maskCutPem(out, c);
 }
 
 // ---- exact values ----------------------------------------------------------
@@ -228,19 +283,24 @@ function maskCutPrefixes(text, values, c) {
  * @param {{values?: string[]}} [opts] values overrides the instance list (tests)
  * @returns {{text: string, count: number}} count = spans masked
  */
+/** Longest text masked in full; longer input is cut first (display only). */
+export const MAX_MASK_INPUT = 1024 * 1024;
+
 export function maskSecretsDetailed(text, opts = {}) {
-  const src = text == null ? "" : String(text);
+  let src = text == null ? "" : String(text);
   if (!src) return { text: src, count: 0 };
+  if (src.length > MAX_MASK_INPUT) src = src.slice(0, MAX_MASK_INPUT) + "\u2026(" + (src.length - MAX_MASK_INPUT) + " more characters)";
   const c = { n: 0 };
   try {
     const values = opts.values === undefined ? currentValues() : opts.values;
     let t = maskValues(src, normalizeValues(values).filter((v) => v !== REDACTED), c);
     t = maskPatterns(t, c);
-    return c.n ? { text: t, count: c.n } : { text: src, count: 0 };
+    return c.n || src !== text ? { text: t, count: c.n } : { text: src, count: 0 };
   } catch {
     // A masking bug must never break a card, a push or a log line, and must
-    // never let the unmasked text through either: fall back to a blank.
-    return { text: REDACTED, count: 1 };
+    // never let the unmasked text through either: a blank, flagged, so a card
+    // can refuse to be approved unseen.
+    return { text: REDACTED, count: 1, failed: true };
   }
 }
 

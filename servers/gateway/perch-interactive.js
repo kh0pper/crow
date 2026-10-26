@@ -429,6 +429,7 @@ function cardFrom(m) {
   const title = maskSecretsDetailed(m.title == null ? "" : String(m.title));
   const card = { requestId: m.id, method: m.method, title: title.text };
   let hidden = title.count;
+  let failed = !!title.failed;
   const raw = {};
   if (Array.isArray(m.options)) {
     const masked = m.options.map((o) => maskSecrets(o));
@@ -445,6 +446,7 @@ function cardFrom(m) {
     const msg = maskSecretsDetailed(m.message);
     card.message = msg.text;
     hidden += msg.count;
+    failed = failed || !!msg.failed;
   }
   if (m.prefill != null) {
     const pre = maskSecretsDetailed(m.prefill);
@@ -455,7 +457,13 @@ function cardFrom(m) {
   if (hidden && !HIDDEN_NOTE_RE.test(card.title) && !HIDDEN_NOTE_RE.test(card.message || "")) {
     card.message = hiddenNote(hidden) + (card.message ? "\n" + card.message : "");
   }
-  if (raw.options || raw.prefill != null) Object.defineProperty(card, RAW_CARD, { value: raw });
+  // The mask itself failed: the card shows a blank, and a blank must never be
+  // approved (answer() turns a confirm into a "no").
+  if (failed) {
+    raw.failed = true;
+    card.message = "This card could not be checked for secrets, so its text is not shown. It cannot be approved from here.";
+  }
+  if (raw.options || raw.prefill != null || raw.failed) Object.defineProperty(card, RAW_CARD, { value: raw });
   return card;
 }
 
@@ -475,9 +483,17 @@ function restorePrefill(value, shownPrefill, rawPrefill) {
     const p = parts[i];
     const found = i === 0 ? (rawPrefill.startsWith(p) ? 0 : -1) : (p === "" && i === parts.length - 1 ? rawPrefill.length : rawPrefill.indexOf(p, at));
     if (found < 0) return value;
+    // A visible part that occurs again later could be where the hidden value
+    // really ends (it may contain that text): not unambiguous, send as typed.
+    if (i > 0 && p !== "" && rawPrefill.indexOf(p, found + 1) >= 0) return value;
     if (i > 0) spans.push(rawPrefill.slice(at, found));
     at = found + p.length;
   }
+  // Only an unambiguous map: every hidden span sits between two visible
+  // parts (two placeholders side by side hide where one value ends), and the
+  // parts and spans rebuild the original exactly.
+  if (parts.slice(1, -1).some((p) => p === "")) return value;
+  if (parts.reduce((acc, p, i) => acc + (i ? spans[i - 1] : "") + p, "") !== rawPrefill) return value;
   const typed = String(value).split(REDACTED);
   if (typed.length !== parts.length) return value;
   return typed.reduce((acc, seg, i) => acc + (i ? spans[i - 1] : "") + seg, "");
@@ -537,7 +553,7 @@ function unmaskAnswers(shownQs, rawQs, answers) {
 }
 
 /** Frame fields a person reads. */
-const FRAME_TEXT_FIELDS = ["text", "argsText", "resultText", "title", "message", "lastError"];
+const FRAME_TEXT_FIELDS = ["text", "argsText", "resultText", "title", "message", "lastError", "caption"];
 /** A frame as a subscriber may see it: display text masked (2026-10-26). */
 function maskFrame(event) {
   if (!event || typeof event !== "object") return event;
@@ -2293,7 +2309,7 @@ export function createInteractiveEngine({
     const src = typeof meta.path === "string" ? meta.path : "";
     const name = typeof meta.name === "string" && meta.name ? meta.name : (src ? src.split("/").pop() : "");
     if (!src || !name) return;
-    const caption = String(meta.caption == null ? "" : meta.caption).replace(/\s+/g, " ").trim().slice(0, 300);
+    const caption = maskSecrets(String(meta.caption == null ? "" : meta.caption).replace(/\s+/g, " ").trim()).slice(0, 300);
     let servable = false;
     let stored = null;
     let size = Number(meta.size);
@@ -2310,6 +2326,12 @@ export function createInteractiveEngine({
         mkdirSync(dir, { recursive: true });
         const dirReal = realpathSync(dir);
         const srcReal = realpathSync(src);
+        // The instance's secrets dir (keychain key, retained bundle secrets,
+        // the secret-values file) is hidden from the bot's sandbox; this copy
+        // runs outside it, so it must never serve anything from there.
+        let secretsReal = null;
+        try { secretsReal = realpathSync(join(crowHome, "secrets")); } catch { /* none */ }
+        if (secretsReal && (srcReal === secretsReal || srcReal.startsWith(secretsReal + sep))) throw new Error("secrets dir");
         // Strictly-under, the workspace route's own formula: the `+ sep` is
         // what turns a string-prefix match into a containment test.
         if (srcReal.startsWith(dirReal + sep)) {
@@ -3413,7 +3435,7 @@ export function createInteractiveEngine({
       // hang is closed at the source, so a cancel is a real answer.
       payload.cancelled = true;
     } else if (card.method === "confirm") {
-      payload.confirmed = !!(value && value.confirmed);
+      payload.confirmed = !!(value && value.confirmed) && !(card[RAW_CARD] && card[RAW_CARD].failed);
     } else {
       payload.value = String(value && value.value != null ? value.value : "");
       // A masked card (cardFrom): the shown option or untouched prefill maps
