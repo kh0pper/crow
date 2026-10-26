@@ -30,8 +30,16 @@ export function transcriptBufferOn(def) {
 const text = (v) => (typeof v === "string" ? v.slice(0, TEXT_MAX) : "");
 const names = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string" && x).slice(0, LIST_MAX).map((x) => x.slice(0, 200)) : []);
 
-export function createTranscriptBuffer({ now = Date.now, max = TRANSCRIPT_BUFFER_MAX, ttlMs = TRANSCRIPT_BUFFER_TTL_MS } = {}) {
+/**
+ * sweepMs (the singleton: 60 s): while anything is held, an unref()'d interval prunes every device, so a display that
+ * goes quiet does not keep its words in the heap past the TTL. It starts on the first record and stops when the buffer
+ * empties, so a buffer nothing records into never has a timer. setInterval / clearInterval are injectable (tests).
+ */
+export function createTranscriptBuffer({ now = Date.now, max = TRANSCRIPT_BUFFER_MAX, ttlMs = TRANSCRIPT_BUFFER_TTL_MS,
+  sweepMs = 0, setInterval: setIv = globalThis.setInterval, clearInterval: clearIv = globalThis.clearInterval } = {}) {
   const byDevice = new Map();
+  let timer = null;
+  const stopSweep = () => { if (timer) { clearIv(timer); timer = null; } };
   const live = (list) => {
     const cut = now() - ttlMs;
     return list.filter((e) => e.at > cut);
@@ -44,8 +52,15 @@ export function createTranscriptBuffer({ now = Date.now, max = TRANSCRIPT_BUFFER
     return kept;
   };
 
+  /** Prune every device; drop the empty ones; stop the sweep once nothing is held. */
+  function sweep() {
+    for (const id of [...byDevice.keys()]) prune(id);
+    if (byDevice.size === 0) stopSweep();
+  }
+
   function record(deviceId, entry = {}) {
     if (typeof deviceId !== "string" || !deviceId) return;
+    sweep();
     const e = Object.freeze({
       at: now(),
       transcript: text(entry.transcript),
@@ -59,6 +74,7 @@ export function createTranscriptBuffer({ now = Date.now, max = TRANSCRIPT_BUFFER
     byDevice.delete(deviceId);   // re-insert: the map's order is least recently used first
     byDevice.set(deviceId, list.slice(-max));
     while (byDevice.size > MAX_DEVICES) byDevice.delete(byDevice.keys().next().value);
+    if (sweepMs > 0 && !timer) { timer = setIv(sweep, sweepMs); timer?.unref?.(); }
   }
 
   /** This device's live entries, oldest first (copies). */
@@ -69,6 +85,7 @@ export function createTranscriptBuffer({ now = Date.now, max = TRANSCRIPT_BUFFER
   /** Drop one device's entries, or (no id) everything. */
   function clear(deviceId) {
     if (deviceId === undefined) byDevice.clear(); else byDevice.delete(String(deviceId));
+    if (byDevice.size === 0) stopSweep();
   }
 
   /** How many entries are live across every device. */
@@ -78,7 +95,11 @@ export function createTranscriptBuffer({ now = Date.now, max = TRANSCRIPT_BUFFER
     return n;
   }
 
-  return { record, list, clear, size };
+  // Test-only: what the map really holds (no pruning), entries and devices.
+  const _rawCount = () => [...byDevice.values()].reduce((n, l) => n + l.length, 0);
+  const _deviceCount = () => byDevice.size;
+
+  return { record, list, clear, size, sweep, _rawCount, _deviceCount };
 }
 
 /**
@@ -92,4 +113,4 @@ export async function reloadTranscriptSetting(buffer, readDef) {
   if (!transcriptBufferOn(def)) buffer.clear();
 }
 
-export const voiceTranscripts = createTranscriptBuffer();
+export const voiceTranscripts = createTranscriptBuffer({ sweepMs: 60_000 });

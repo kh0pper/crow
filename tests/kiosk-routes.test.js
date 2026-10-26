@@ -1592,3 +1592,10 @@ test("voice transcripts: a session gets the device's entries, no-store; no sessi
     r.stop(); srv2.close();
   }
 });
+
+test("the turn check never lands in the voice transcripts: its turns carry noTranscript", async () => {
+  turnCalls.length = 0;
+  const r = await fetch(base + "/api/kiosk/internal/turn-check", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer ann-ok" }, body: "{}" });
+  assert.ok(turnCalls.length > 0, `turn check ran (${r.status})`);
+  assert.ok(turnCalls.every((o) => o.noTranscript === true && o.device.id === TURN_CHECK_DEVICE));
+});

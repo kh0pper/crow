@@ -136,3 +136,40 @@ test("a turn whose voice bot is disabled or missing reads the setting as off", a
   await turn(h);
   assert.equal(h.buffer.size(), 0);
 });
+
+// ── fix round 1: nothing outlives 15 minutes in the heap ──
+test("a quiet device's entries leave memory at the TTL: the sweep (injected timer) drops them with no further access", () => {
+  const c = fakeClock();
+  const timers = [];
+  const b = createTranscriptBuffer({ now: c.now, sweepMs: 60_000, setInterval: (fn, ms) => { const t = { fn, ms, unref() { t.unrefd = true; return t; }, cleared: false }; timers.push(t); return t; }, clearInterval: (t) => { t.cleared = true; } });
+  assert.equal(timers.length, 0, "no timer before anything is recorded");
+  b.record("kiosk-a", { transcript: "quiet display" });
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].ms, 60_000);
+  assert.equal(timers[0].unrefd, true, "the sweep never keeps the process alive");
+  assert.equal(b._rawCount(), 1);
+  c.advance(TRANSCRIPT_BUFFER_TTL_MS);
+  assert.equal(b._rawCount(), 1, "still held until something prunes it");
+  timers[0].fn();
+  assert.equal(b._rawCount(), 0, "the sweep emptied the map");
+  assert.equal(b._deviceCount(), 0, "and dropped the empty device");
+  assert.equal(timers[0].cleared, true, "an empty buffer stops its sweep");
+});
+
+test("record() prunes every device, not only the one recording", () => {
+  const c = fakeClock();
+  const b = createTranscriptBuffer({ now: c.now });
+  b.record("kiosk-a", { transcript: "old" });
+  c.advance(TRANSCRIPT_BUFFER_TTL_MS);
+  b.record("phone-b", { transcript: "new" });
+  assert.equal(b._rawCount(), 1);
+  assert.equal(b._deviceCount(), 1);
+});
+
+test("a turn with noTranscript (the kiosk's turn check) is never recorded", async () => {
+  const h = voiceHarness(ON);
+  await turn(h, { noTranscript: true });
+  assert.equal(h.buffer.size(), 0);
+  await turn(h);
+  assert.equal(h.buffer.size(), 1);
+});

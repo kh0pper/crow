@@ -503,6 +503,7 @@ export function createVoiceTurnRunner(deps) {
    * - afterTurn({ device, calledTools }): called in finally on every outcome; calledTools lists every tool name
    *   the model called, refused and gated calls included. A throw is logged.
    *
+   * opts.noTranscript: true keeps this turn out of the opt-in transcript buffer (the kiosk turn check).
    * opts (beyond the transport): maxToolRounds — tool-calling rounds before a forced, tool-free
    * final answer (default deps.maxToolRounds); firstAudioBudgetMs — wall-clock from the turn start
    * to the first ANSWER audio (the filler does not count), after which the answer is cut and the
@@ -1892,7 +1893,7 @@ export function createVoiceTurnRunner(deps) {
         try {
           const vdef = await loadBot(db, CROW_VOICE_BOT_ID);
           if (!transcriptBufferOn(vdef)) deps.transcripts.clear();
-          else if (result.transcript && isVoiceBotDef(turnBotId === CROW_VOICE_BOT_ID ? vdef : await loadBot(db, turnBotId))) {
+          else if (opts.noTranscript !== true && result.transcript && isVoiceBotDef(turnBotId === CROW_VOICE_BOT_ID ? vdef : await loadBot(db, turnBotId))) {
             const codes = (timings.tools || []).flatMap((r) => String(r).split("+")).filter(Boolean);
             if (timings.verb) codes.push(`verb:${timings.verb}`);
             if (result.failed) codes.push(`failed:${result.failed}`);
@@ -1938,6 +1939,7 @@ async function subscribeBotDefsChanged() {
 
 /** The Crow voice bot's def straight from the db (null when missing, disabled or unreadable): the defs-changed reload. */
 async function readVoiceDefFresh() {
+  // servers/db.js createDbClient: the gateway's own better-sqlite3 client, never a second SQLite build (no @libsql).
   const { createDbClient } = await import("../../db.js");
   const db = createDbClient();
   try {

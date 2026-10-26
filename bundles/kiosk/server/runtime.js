@@ -1043,7 +1043,9 @@ export function createKioskRuntime(deps) {
       const once = async (transcript) => {
         const events = [];
         const sink = { event: (e) => events.push(e), audio: () => {} };
-        const r = await withDb((db) => deps.voice.runVoiceTurn({ db, device, sink, transcript, ...turnOptions(device, caps, null, (ev) => sink.event(ev), undefined, vb), noEscalate: true, ...(voiceBotId ? { botId: voiceBotId } : {}) }));
+        const r = await withDb((db) => deps.voice.runVoiceTurn({ db, device, sink, transcript, ...turnOptions(device, caps, null, (ev) => sink.event(ev), undefined, vb), noEscalate: true, ...(voiceBotId ? { botId: voiceBotId } : {}),
+          // Fixed check sentences on a display that doesn't exist: never in the voice transcripts a person reads.
+          noTranscript: true }));
         const row = { transcript, failed: r.failed ?? null, fast_path: r.fastPath === true, route: r.route ?? null, tools_offered: r.timings?.tools_offered ?? null, tools: r.timings?.tools || [], tool_choice: r.timings?.tool_choice ?? null,
           final: r.timings?.final ?? null, said: events.filter((e) => e.type === "caption_delta").map((e) => e.text).join("").slice(0, 200), windows: wm.list(device.id).map((w) => w.kind) };
         out.push(row);
