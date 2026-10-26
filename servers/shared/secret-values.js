@@ -18,9 +18,9 @@
  * notifications.js); collecting from those sources is
  * secret-values-collect.js, run by the bot engine at each pi spawn.
  */
-import { chmodSync, closeSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readlinkSync, readSync, renameSync, rmSync, statSync, writeFileSync, fsyncSync, constants as fsConstants } from "node:fs";
+import { chmodSync, closeSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, fsyncSync, constants as fsConstants } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { realpathSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { resolveCrowHome } from "./crow-home.js";
 
@@ -103,24 +103,55 @@ export function secretsDirTrusted(env = process.env) {
   } catch { return false; }
 }
 
-/**
- * Secrets dirs of co-hosted instances under the same uid: siblings of this
- * CROW_HOME whose name starts with its name (~/.crow-r4, ~/.crow-mpa beside
- * ~/.crow) and that hold a secrets dir. The pi sandbox hides them as well.
- */
-export function coHostedSecretsDirs(env = process.env) {
-  const home = resolveCrowHome(env);
-  const parent = dirname(home);
-  const base = basename(home);
+/** CROW_HOME=<path> values in unit files and env files (read-only scan). */
+function declaredHomes(dirs, depth = 2) {
   const out = [];
-  let names = [];
-  try { names = readdirSync(parent, { withFileTypes: true }); } catch { return out; }
-  for (const n of names) {
-    if (!n.isDirectory() || n.name === base || !n.name.startsWith(base)) continue;
-    const d = join(parent, n.name, "secrets");
-    try { if (lstatSync(d).isDirectory()) out.push(d); } catch { /* none */ }
-  }
+  const scan = (d, left) => {
+    let names = [];
+    try { names = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const n of names) {
+      const p = join(d, n.name);
+      if (n.isDirectory()) { if (left > 0) scan(p, left - 1); continue; }
+      if (!/\.(service|conf|env)$/.test(n.name)) continue;
+      let text = "";
+      try { const st = statSync(p); if (st.size > 256 * 1024) continue; text = readFileSync(p, "utf8"); } catch { continue; }
+      for (const m of text.matchAll(/CROW_HOME=("?)([^"\s]+)\1/g)) if (m[2].startsWith("/")) out.push(m[2]);
+    }
+  };
+  for (const d of dirs) scan(d, depth);
   return out;
+}
+
+/**
+ * The secrets dirs of EVERY other Crow home on this host, found by shape (a
+ * `secrets/` holding `keychain.key`), whatever the home is called: children of
+ * $HOME, the default ~/.crow, and every CROW_HOME declared in user/system
+ * units and /etc/crow env files (homes outside $HOME are declared there). Real paths
+ * (a symlinked secrets dir is hidden at its target). The pi sandbox hides them
+ * all, and the bridge trusts card values only when every one was masked: a
+ * co-hosted instance's bot (same uid) must not read or write another's.
+ */
+export function instanceSecretsDirs(env = process.env, {
+  home = env.HOME || homedir(),
+  unitDirs = [join(env.HOME || homedir(), ".config", "systemd", "user"), "/etc/systemd/system"],
+  envFileDirs = ["/etc/crow"],
+} = {}) {
+  let self = secretsDir(env);
+  try { self = realpathSync(self); } catch { /* not there yet */ }
+  const homes = new Set([join(home, ".crow"), ...declaredHomes(unitDirs), ...declaredHomes(envFileDirs, 0)]);
+  let names = [];
+  try { names = readdirSync(home, { withFileTypes: true }); } catch { names = []; }
+  for (const n of names) if (n.isDirectory()) homes.add(join(home, n.name));
+  const out = new Set();
+  for (const h of homes) {
+    const s = join(h, "secrets");
+    try {
+      if (!statSync(join(s, "keychain.key")).isFile()) continue;
+      const r = realpathSync(s);
+      if (r !== self) out.add(r);
+    } catch { /* not a Crow home */ }
+  }
+  return [...out];
 }
 
 /** The anchor of this instance's secrets dir (for inode checks elsewhere). */

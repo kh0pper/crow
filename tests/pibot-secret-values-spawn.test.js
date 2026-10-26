@@ -15,7 +15,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 for (const k of Object.keys(process.env)) if (/^(PI_|PIBOT_)/.test(k)) delete process.env[k];
-const HOME = mkdtempSync(join(tmpdir(), "crow-secret-spawn-home-"));
+// A scratch $HOME holding this instance (.crow) and, later, a co-hosted one:
+// instance discovery scans $HOME's children.
+const USER_HOME = mkdtempSync(join(tmpdir(), "crow-secret-spawn-user-"));
+process.env.HOME = USER_HOME;
+const HOME = join(USER_HOME, ".crow");
+mkdirSync(HOME, { recursive: true });
 process.env.CROW_HOME = HOME;
 process.env.CROW_DATA_DIR = join(HOME, "data");
 delete process.env.CROW_DB_PATH;
@@ -292,8 +297,8 @@ test("without bubblewrap no value hides text on cards (a bot could have made it)
   assert.ok(getSecretValues().includes(FAKE));
 });
 
-test("sandboxed: a co-hosted instance's secrets dir (a sibling home of the same name) is hidden too", { skip: noSandbox }, async () => {
-  const sibling = HOME + "-r4";
+test("sandboxed: a co-hosted instance's secrets dir (any Crow home under $HOME, whatever its name) is hidden too", { skip: noSandbox }, async () => {
+  const sibling = join(USER_HOME, "crow-r4-home");       // no shared name prefix
   mkdirSync(join(sibling, "secrets"), { recursive: true, mode: 0o700 });
   writeFileSync(join(sibling, "secrets", "keychain.key"), "{}", { mode: 0o600 });
   const dir = mkdtempSync(join(tmpdir(), "crow-secret-cohost-"));

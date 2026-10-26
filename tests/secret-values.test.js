@@ -5,14 +5,14 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, lstatSync, readdirSync, symlinkSync, chmodSync, existsSync, renameSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, lstatSync, readdirSync, symlinkSync, chmodSync, existsSync, renameSync, utimesSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash as createHashFn } from "node:crypto";
 import Database from "better-sqlite3";
 
 const SV = await import("../servers/shared/secret-values.js");
-const { collectSecretValues, collectSecretValueSets, confirmManualEntriesForCards, fingerprintOf, listManualEntriesForCards, refreshSecretValuesFile, parseEnvPairs } = await import("../servers/shared/secret-values-collect.js");
+const { collectSecretValues, collectSecretValueSets, confirmManualEntriesForCards, listManualEntriesForCards, refreshSecretValuesFile, parseEnvPairs } = await import("../servers/shared/secret-values-collect.js");
 const { sealSecret } = await import("../servers/sharing/secret-box.js");
 const { KEYCHAIN_DDL } = await import("../servers/gateway/keychain/schema.js");
 
@@ -356,7 +356,8 @@ test("cards count only manual entries the operator recorded: no list means no ca
   const ins = (v) => db.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual','m',?,?,'manual')").run(sealSecret(v, { seed }), "0123456789abcdef");
   ins("Existing_pw-1");
   assert.deepEqual(collectSecretValueSets({ env: I.env }).card, [], "no list: nothing is trusted on cards");
-  assert.equal(confirmManualEntriesForCards({ env: I.env, pairs: listManualEntriesForCards({ env: I.env }).map((e) => ({ id: e.id, fingerprint: e.fingerprint })) }), 1, "the operator confirms each entry by id and fingerprint");
+  const nonce = randomBytes(32);
+  assert.equal(confirmManualEntriesForCards({ env: I.env, nonce, pairs: listManualEntriesForCards({ env: I.env, nonce }).map((e) => ({ id: e.id, fingerprint: e.fingerprint })) }), 1, "the operator confirms each entry by id and fingerprint");
   assert.deepEqual(collectSecretValueSets({ env: I.env }).card, ["Existing_pw-1"]);
   ins("Planted_pw-2");                                   // a bot with crow.db write access
   const sets = collectSecretValueSets({ env: I.env });
@@ -395,7 +396,7 @@ test("a secrets dir renamed away and replaced after it was anchored is not trust
   SV.invalidateSecretValues();
 });
 
-test("the operator confirm: the list shows a sanitized label and a fingerprint (never the value); confirm needs id:fingerprint and refuses a mismatch", () => {
+test("the operator confirm: an HMAC fingerprint under a per-run nonce (no character of the value); a sanitized label; confirm needs the same run's nonce and refuses any mismatch", () => {
   const I = scratchInstance();
   const seed = randomBytes(32);
   mkdirSync(join(I.home, "secrets"), { recursive: true });
@@ -406,20 +407,73 @@ test("the operator confirm: the list shows a sanitized label and a fingerprint (
   const keep = ins("sudo on crow", "Keep_this-pw1-long");
   const evil = ins("GitHub token\u001b[2K\u009b" + "x".repeat(120), "Bot_flipped-pw2-long");
   db.close();
-  const listed = listManualEntriesForCards({ env: I.env });
+  const nonce = randomBytes(32);
+  const listed = listManualEntriesForCards({ env: I.env, nonce });
   const k = listed.find((e) => e.id === keep);
   const e = listed.find((x) => x.id === evil);
-  assert.equal(JSON.stringify(listed).includes("Keep_this"), false, "no values");
-  assert.match(k.fingerprint, /^Ke\u2026g1? ?[0-9a-f]{8}$|^Ke.*ng [0-9a-f]{8}$/);
+  assert.match(k.fingerprint, /^[0-9a-f]{8}$/, "8 hex, nothing of the value");
+  assert.notEqual(listManualEntriesForCards({ env: I.env, nonce: randomBytes(32) }).find((x) => x.id === keep).fingerprint, k.fingerprint, "a fingerprint is useless outside its run");
   assert.equal(/[\u0000-\u001f\u007f-\u009f]/.test(e.label), false, "control characters stripped");
   assert.ok(e.label.length <= 80, "label capped");
-  assert.equal(confirmManualEntriesForCards({ env: I.env, pairs: [{ id: keep, fingerprint: e.fingerprint }] }), 0, "a mismatched fingerprint records nothing");
+  assert.equal(confirmManualEntriesForCards({ env: I.env, nonce, pairs: [{ id: keep, fingerprint: e.fingerprint }] }), 0, "a mismatch records nothing");
+  assert.equal(confirmManualEntriesForCards({ env: I.env, nonce: randomBytes(32), pairs: [{ id: keep, fingerprint: k.fingerprint }] }), 0, "another run's nonce records nothing");
   assert.deepEqual(collectSecretValueSets({ env: I.env }).card, []);
-  assert.equal(confirmManualEntriesForCards({ env: I.env, pairs: [{ id: keep, fingerprint: k.fingerprint }] }), 1);
+  assert.equal(confirmManualEntriesForCards({ env: I.env, nonce, pairs: [{ id: keep, fingerprint: k.fingerprint }] }), 1);
   assert.deepEqual(collectSecretValueSets({ env: I.env }).card, ["Keep_this-pw1-long"]);
 });
 
-test("a short value's fingerprint shows no characters of it, only the hash", () => {
-  assert.match(fingerprintOf("Short_pw1"), /^[0-9a-f]{8}$/);
-  assert.match(fingerprintOf("A-much-longer-value-99"), /^A-\u202699 [0-9a-f]{8}$/);
+test("the confirm CLI is interactive: it lists, reads id:fingerprint picks on stdin, records them; picks in argv are refused", async () => {
+  const I = scratchInstance();
+  const seed = randomBytes(32);
+  mkdirSync(join(I.home, "secrets"), { recursive: true });
+  writeFileSync(join(I.home, "secrets", "keychain.key"), JSON.stringify({ v: 1, id: "0123456789abcdef", key: seed.toString("base64") }), { mode: 0o600 });
+  const db = new Database(join(I.data, "crow.db"));
+  db.exec(KEYCHAIN_DDL);
+  const id = Number(db.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual','sudo',?,?,'manual')").run(sealSecret("Cli_confirm-pw9", { seed }), "0123456789abcdef").lastInsertRowid);
+  db.close();
+  const { spawn, spawnSync } = await import("node:child_process");
+  const cli = new URL("../scripts/ops/keychain-card-secrets.mjs", import.meta.url).pathname;
+  const env = { ...process.env, ...I.env, CROW_DB_PATH: join(I.data, "crow.db") };
+  assert.notEqual(spawnSync(process.execPath, [cli, "confirm", id + ":deadbeef"], { env }).status, 0, "argv picks refused");
+  const out = await new Promise((resolve, reject) => {
+    const c = spawn(process.execPath, [cli, "confirm"], { env });
+    let o = "";
+    let sent = false;
+    c.stdout.on("data", (d) => {
+      o += d;
+      const m = o.match(new RegExp("^\\s*" + id + "\\s+([0-9a-f]{8})", "m"));
+      if (m && !sent && /pick/i.test(o)) { sent = true; c.stdin.write(id + ":" + m[1] + "\n\n"); c.stdin.end(); }
+    });
+    c.on("exit", (code) => (code === 0 ? resolve(o) : reject(new Error("exit " + code + ": " + o))));
+  });
+  assert.match(out, /1 entry confirmed/);
+  assert.equal(out.includes("Cli_confirm"), false, "never the value");
+  assert.ok(readFileSync(join(I.home, "secrets", "card-secret-hashes"), "utf8").includes(createHashFn("sha256").update("Cli_confirm-pw9").digest("hex")));
+});
+
+test("every Crow home on the host is found by the shape of its secrets dir, whatever its name and from either side", () => {
+  const root = mkdtempSync(join(tmpdir(), "crow-homes-"));
+  const home = join(root, "user");
+  const mk = (dir) => { mkdirSync(join(dir, "secrets"), { recursive: true }); writeFileSync(join(dir, "secrets", "keychain.key"), "{}"); return dir; };
+  const def = mk(join(home, ".crow"));
+  const r4 = mk(join(home, ".crow-r4"));
+  const odd = mk(join(home, "crow-r4-home"));
+  const elsewhere = mk(join(root, "srv", "second-user-home"));
+  mkdirSync(join(home, "not-crow", "secrets"), { recursive: true });              // no keychain.key: not a Crow home
+  const realS = mk(join(root, "real-target"));
+  mkdirSync(join(home, ".crow-linked"), { recursive: true });
+  symlinkSync(join(realS, "secrets"), join(home, ".crow-linked", "secrets"));
+  writeFileSync(join(home, ".crow-linked", "secrets", "keychain.key"), "{}");
+  const units = join(root, "units");
+  mkdirSync(join(units, "x.service.d"), { recursive: true });
+  writeFileSync(join(units, "x.service.d", "override.conf"), "[Service]\nEnvironment=CROW_HOME=" + elsewhere + "\n");
+  const opts = { home, unitDirs: [units], envFileDirs: [] };
+  const fromR4 = SV.instanceSecretsDirs({ CROW_HOME: r4 }, opts);
+  for (const d of [def, odd, elsewhere]) assert.ok(fromR4.includes(join(d, "secrets")), "R4 hides " + d);
+  assert.ok(fromR4.includes(join(realS, "secrets")), "a symlinked secrets dir is hidden at its target");
+  assert.equal(fromR4.includes(join(r4, "secrets")), false, "not its own (that one is hidden through its anchor)");
+  assert.equal(fromR4.some((d) => d.includes("not-crow")), false);
+  const fromDefault = SV.instanceSecretsDirs({ CROW_HOME: def }, opts);
+  for (const d of [r4, odd, elsewhere]) assert.ok(fromDefault.includes(join(d, "secrets")), "default hides " + d);
+  rmSync(root, { recursive: true, force: true });
 });

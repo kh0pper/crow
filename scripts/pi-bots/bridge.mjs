@@ -49,7 +49,7 @@ import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { wrapPiSpawn } from "./pi_sandbox.mjs";
 import { refreshSecretValuesFile } from "../../servers/shared/secret-values-collect.js";
-import { SECRET_VALUES_DISPLAY_FILENAME, SECRET_VALUES_FILENAME, anchoredPath, coHostedSecretsDirs, secretsDir, secretsDirCurrentPath } from "../../servers/shared/secret-values.js";
+import { SECRET_VALUES_DISPLAY_FILENAME, SECRET_VALUES_FILENAME, anchoredPath, instanceSecretsDirs, secretsDir, secretsDirCurrentPath } from "../../servers/shared/secret-values.js";
 import { maskSecrets } from "../../servers/shared/secret-mask.js";
 import { effectiveReadPaths } from "./bot-read-paths.mjs";
 import { MCP_CONFIG_FD } from "./mcp-delivery.mjs";
@@ -496,11 +496,18 @@ export class PiRpc {
     // The gateway's delivered-files staging root lives inside it.
     try { mkdirSync(secretsDir(), { recursive: true, mode: 0o700 }); } catch { /* anchoring creates it */ }
     const secretsHere = secretsDirCurrentPath() || secretsDir();
-    // A co-hosted instance under the same uid (a sibling home named like this
-    // one, e.g. ~/.crow-r4 beside ~/.crow) keeps its own secrets dir: hidden too.
-    const launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, hideDirs: [secretsHere, ...coHostedSecretsDirs()] });
+    // Every OTHER Crow home on this host (found by the shape of its secrets
+    // dir, whatever it is called) is a co-hosted instance under the same uid:
+    // its secrets dir is hidden too.
+    const found = instanceSecretsDirs();
+    // More than any real host has: refuse to trust (fail closed) rather than
+    // build an argv bwrap rejects.
+    const others = found.length <= 64 ? found : [];
+    const launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, hideDirs: [secretsHere, ...others] });
     delete launch.env.PI_BOT_SECRET_VALUES_FILE;
-    const hidden = launch.wrapper === "bwrap" && launch.masked.includes(secretsHere);
+    // Fail closed: the values file is written and card values trusted only
+    // when this instance's AND every other instance's secrets dir is masked.
+    const hidden = launch.wrapper === "bwrap" && found.length <= 64 && [secretsHere, ...others].every((d) => launch.masked.includes(d));
     // Not hidden: the bot could read the keychain key and add its own hash to
     // the card list, so no value may hide text on cards (cardTrusted:false).
     const secretValues = refreshSecretValuesFile({ write: hidden, cardTrusted: hidden, log: (l) => console.error("[pi-bots] " + l) });
