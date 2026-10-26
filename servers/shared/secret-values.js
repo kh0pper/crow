@@ -154,13 +154,23 @@ export function instanceSecretsDirs(env = process.env, {
   const crowHome = resolveCrowHome(env);
   kids(dirname(crowHome), (name) => name !== basename(crowHome) && name.startsWith(basename(crowHome)));
   // Any `secrets/` dir there is hidden, keychain.key or not: a half-made or
-  // legacy home still holds secrets.
+  // legacy home still holds secrets. Only "no such dir" means "not a home":
+  // a home THIS user owns that cannot be checked (a bot's chmod 000 on it, so
+  // the next spawn would leave it visible) throws, and the bridge refuses the
+  // spawn. Another user's unreadable dir cannot be chmod'ed by a bot nor hold
+  // a planted dir of ours: skipped.
   const out = new Set();
+  const uid = process.getuid();
   for (const h of homes) {
     try {
       const r = realpathSync(join(h, "secrets"));
       if (statSync(r).isDirectory() && r !== self) out.add(r);
-    } catch { /* no secrets dir */ }
+    } catch (e) {
+      if (e && (e.code === "ENOENT" || e.code === "ENOTDIR")) continue;
+      let owner = -1;
+      try { owner = lstatSync(h).uid; } catch { /* gone */ }
+      if (owner === uid) throw new Error("Crow home " + h + " cannot be checked (" + ((e && e.code) || e) + "); refusing to treat its secrets as hidden");
+    }
   }
   return [...out];
 }

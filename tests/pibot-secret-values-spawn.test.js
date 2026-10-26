@@ -332,3 +332,13 @@ test("more instance secrets dirs than the cap: the spawn is refused with a clear
     for (const d of many) rm(d, { recursive: true, force: true });
   }
 });
+
+test("sandboxed: a co-hosted home made unreadable (chmod 000) refuses the spawn instead of leaving it visible", { skip: noSandbox }, async () => {
+  const other = join(USER_HOME, "crow-locked-home");
+  mkdirSync(join(other, "secrets"), { recursive: true, mode: 0o700 });
+  const { chmodSync: chmod, rmSync: rm } = await import("node:fs");
+  chmod(other, 0o000);
+  try {
+    await assert.rejects(spawnReport({ mode: "auto" }), /cannot be checked/);
+  } finally { chmod(other, 0o700); rm(other, { recursive: true, force: true }); }
+});

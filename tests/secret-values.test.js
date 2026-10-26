@@ -499,3 +499,17 @@ test("confirm by typed value: only a manual entry holding exactly the typed pass
   assert.equal(confirmTypedValueForCards({ env: I.env, value: "Typed_known-pw7" }), 1);
   assert.deepEqual(collectSecretValueSets({ env: I.env }).card, ["Typed_known-pw7"]);
 });
+
+test("discovery fails closed when a home this user owns cannot be read (a bot's chmod 000), and skips another user's", () => {
+  const root = mkdtempSync(join(tmpdir(), "crow-homes3-"));
+  const home = join(root, "user");
+  mkdirSync(join(home, ".crow", "secrets"), { recursive: true });
+  const other = join(home, ".crow-other");
+  mkdirSync(join(other, "secrets"), { recursive: true });
+  const opts = { home, unitDirs: [], envFileDirs: [] };
+  assert.ok(SV.instanceSecretsDirs({ CROW_HOME: join(home, ".crow") }, opts).includes(join(other, "secrets")));
+  chmodSync(other, 0o000);
+  try {
+    assert.throws(() => SV.instanceSecretsDirs({ CROW_HOME: join(home, ".crow") }, opts), /cannot be checked/);
+  } finally { chmodSync(other, 0o700); rmSync(root, { recursive: true, force: true }); }
+});

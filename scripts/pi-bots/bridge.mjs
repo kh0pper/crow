@@ -502,8 +502,13 @@ export class PiRpc {
     // Every OTHER Crow home on this host (found by the shape of its secrets
     // dir, whatever it is called) is a co-hosted instance under the same uid:
     // its secrets dir is hidden too.
-    const others = instanceSecretsDirs();
+    const others = instanceSecretsDirs();             // throws (refusing the spawn) when a home cannot be checked
     const launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, hideDirs: [secretsHere, ...others] });
+    // Under bwrap every found dir must really be masked (wrapPiSpawn drops a
+    // dir it cannot stat): otherwise refuse, never run with one visible.
+    if (launch.wrapper === "bwrap" && others.some((d) => !launch.masked.includes(d))) {
+      throw new Error("pi sandbox: a Crow instance secrets dir could not be hidden; refusing to start pi");
+    }
     // Never hide fewer than were found: past a cap no real host reaches (bwrap
     // takes a few thousand args), the spawn is refused instead.
     if (launch.wrapper === "bwrap" && others.length > MAX_HIDDEN_INSTANCE_DIRS) {
