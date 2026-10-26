@@ -33,11 +33,14 @@ function parse(argv) {
 }
 
 function relayServer(sock, firstLine) {
-  return createServer((c) => {
-    const u = connect(sock);
+  return createServer({ allowHalfOpen: true }, (c) => {
+    const u = connect({ path: sock, allowHalfOpen: true });
     u.on("connect", () => { u.write(firstLine); c.pipe(u); u.pipe(c); });
-    const end = () => { try { c.destroy(); } catch {} try { u.destroy(); } catch {} };
-    u.on("error", end); c.on("error", end); u.on("close", end); c.on("close", end);
+    const kill = () => { try { c.destroy(); } catch {} try { u.destroy(); } catch {} };
+    u.on("error", kill); c.on("error", kill);
+    // graceful: pipe() propagates each end; destroy once both sides closed
+    c.once("close", () => { if (!u.destroyed) u.end(); });
+    u.once("close", () => { if (!c.destroyed) c.end(); });
   });
 }
 
@@ -53,13 +56,8 @@ function listenBoth(make, port) {
 async function main() {
   const o = parse(process.argv.slice(2));
   if (!o.sock || !o.cmd) { console.error("[pi-netns-entry] usage: --sock <path> [--ports a,b] [--proxy-port p] -- <cmd> [args]"); process.exit(2); }
-  for (const p of o.ports) {
-    if (!(await listenBoth(() => relayServer(o.sock, `PORT ${p}\n`), p))) console.error(`[pi-netns-entry] could not listen on loopback port ${p}`);
-  }
-  if (o.proxyPort) {
-    if (!(await listenBoth(() => relayServer(o.sock, "PROXY\n"), o.proxyPort))) console.error(`[pi-netns-entry] could not listen on the proxy port ${o.proxyPort}`);
-  }
-  // Pass every inherited fd 0-9 that is open (stdio, pi's MCP config fd).
+  // Snapshot the inherited fds BEFORE listening, so the listeners and libuv's
+  // own fds are never handed to pi.
   const stdio = [];
   for (let fd = 0; fd < 10; fd++) {
     let open = false;
@@ -67,6 +65,12 @@ async function main() {
     stdio.push(open ? fd : "ignore");
   }
   while (stdio.length > 3 && stdio[stdio.length - 1] === "ignore") stdio.pop();
+  for (const p of o.ports) {
+    if (!(await listenBoth(() => relayServer(o.sock, `PORT ${p}\n`), p))) console.error(`[pi-netns-entry] could not listen on loopback port ${p}`);
+  }
+  if (o.proxyPort) {
+    if (!(await listenBoth(() => relayServer(o.sock, "PROXY\n"), o.proxyPort))) console.error(`[pi-netns-entry] could not listen on the proxy port ${o.proxyPort}`);
+  }
   const child = spawn(o.cmd, o.args, { stdio });
   for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(sig, () => { try { child.kill(sig); } catch {} });
   child.on("error", (e) => { console.error("[pi-netns-entry] " + e.message); process.exit(127); });

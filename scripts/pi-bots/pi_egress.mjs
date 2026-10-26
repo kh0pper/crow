@@ -15,7 +15,7 @@
  *               on loopback: other instances, unused model servers, a
  *               browser's DevTools port, adb.
  *   PROXY\n     an HTTP CONNECT request follows (the bot's HTTPS_PROXY). Only
- *               CONNECT; ports from egressPorts (default 443, 80); the host
+ *               CONNECT; ports from egressPorts (default 443); the host
  *               must resolve ONLY to public addresses (every address checked,
  *               the checked one connected: no DNS rebinding); IP literals the
  *               same; an `egress` list (exact or *.suffix) narrows further.
@@ -61,6 +61,7 @@ export function hostAllowed(host, list) {
 }
 
 const MAX_HEAD = 16 * 1024;
+const MAX_LOGGED = 1000;
 const HOSTNAME_RE = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
 
 /**
@@ -93,33 +94,64 @@ export function createEgressRelay(o) {
   chmodSync(dir, 0o700);
   const socketPath = join(dir, "relay.sock");
   const loopback = new Set((o.loopbackPorts || []).map(Number).filter((p) => p > 0 && p < 65536));
-  const ports = new Set((o.egressPorts || [443, 80]).map(Number));
+  // CONNECT is for TLS; plain http:// needs an absolute-form GET, which this
+  // relay does not proxy. 443 by default.
+  const ports = new Set((o.egressPorts || [443]).map(Number));
   const allow = Array.isArray(o.egressAllow) ? o.egressAllow : null;
   const maxConns = o.maxConns ?? 64;
   const headTimeoutMs = o.headTimeoutMs ?? 10000;
   const lookup = o.lookup || ((h) => dnsLookup(h, { all: true, verbatim: true }));
   const log = o.log || ((l) => console.error(l));
+  // One line per (decision, target), bounded: a bot that sprays distinct
+  // hosts must not grow the spawner's memory (one summary line instead).
   const logged = new Set();
+  let suppressed = 0;
   const note = (decision, target, reason) => {
     const key = decision + " " + target;
     if (logged.has(key)) return;
+    if (logged.size >= MAX_LOGGED) {
+      if (suppressed++ === 0) log(`[pi-egress] bot=${o.botId || "?"} more than ${MAX_LOGGED} distinct targets; further decisions are not logged`);
+      return;
+    }
     logged.add(key);
     log(`[pi-egress] bot=${o.botId || "?"} ${decision} ${target}${reason ? " (" + reason + ")" : ""}`);
   };
   let live = 0;
   const sockets = new Set();
 
-  const splice = (client, host, port, preface) => {
-    const target = o._connectOverride ? o._connectOverride(host, port) : { host, port };
-    const up = netConnect(target);
-    sockets.add(up);
-    up.on("connect", () => {
-      if (preface) client.write(preface);
-      client.pipe(up); up.pipe(client);
-    });
-    const end = () => { try { client.destroy(); } catch {} try { up.destroy(); } catch {} };
-    up.on("error", () => { if (preface) { try { client.end("HTTP/1.1 502 Bad Gateway\r\n\r\n"); } catch {} } end(); });
-    up.on("close", end); client.on("close", end); client.on("error", end);
+  /**
+   * Splice client <-> upstream. Candidates are already-checked addresses,
+   * tried in order (dual-stack hosts whose first address has no route). Ends
+   * are propagated gracefully (half-close kept); each side is destroyed only
+   * on error or once both directions are done.
+   */
+  const splice = (client, candidates, port, preface) => {
+    let i = 0;
+    const tryNext = () => {
+      if (client.destroyed) return;
+      const addr = candidates[i++];
+      const target = o._connectOverride ? o._connectOverride(addr, port) : { host: addr, port, allowHalfOpen: true };
+      const up = netConnect({ ...target, allowHalfOpen: true });
+      sockets.add(up);
+      up.once("close", () => sockets.delete(up));
+      let connected = false;
+      up.once("connect", () => {
+        connected = true;
+        if (client.destroyed) { up.destroy(); return; }
+        if (preface) client.write(preface);
+        client.pipe(up); up.pipe(client);
+      });
+      up.on("error", () => {
+        if (!connected && i < candidates.length && !client.destroyed) { up.destroy(); tryNext(); return; }
+        if (!connected && preface) { try { client.end("HTTP/1.1 502 Bad Gateway\r\n\r\n"); } catch {} }
+        else { try { client.destroy(); } catch {} }
+        up.destroy();
+      });
+      client.on("error", () => { try { up.destroy(); } catch {} });
+      client.once("close", () => { if (!up.destroyed) up.end(); setTimeout(() => up.destroy(), 30000).unref(); });
+      up.once("close", () => { if (connected && !client.destroyed) { client.end(); setTimeout(() => client.destroy(), 30000).unref(); } });
+    };
+    tryNext();
   };
 
   const refuse = (c, status, text) => { try { c.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\n\r\n`); } catch {} };
@@ -145,11 +177,14 @@ export function createEgressRelay(o) {
       note("deny", target, "resolves to a non-public address");
       return refuse(c, 403, "Forbidden");
     }
+    // The client left during the lookup (half-open sockets see only 'end'):
+    // no tunnel is worth opening for a client that has nothing more to send.
+    if (c.destroyed || c.readableEnded) { try { c.destroy(); } catch {} return; }
     note("allow", target);
-    splice(c, addrs[0].address, port, "HTTP/1.1 200 Connection Established\r\n\r\n");
+    splice(c, addrs.map((a) => a.address), port, "HTTP/1.1 200 Connection Established\r\n\r\n");
   }
 
-  const server = createServer((c) => {
+  const server = createServer({ allowHalfOpen: true }, (c) => {
     sockets.add(c);
     c.on("close", () => { sockets.delete(c); });
     if (live >= maxConns) { note("deny", "connection", "per-spawn connection cap " + maxConns); c.destroy(); return; }
@@ -175,7 +210,7 @@ export function createEgressRelay(o) {
           // with the header line go back on the stream first.
           c.pause();
           if (buf.length) c.unshift(buf);
-          splice(c, "127.0.0.1", port, null);
+          splice(c, ["127.0.0.1"], port, null);
           return;
         }
         if (verb !== "PROXY") { clearTimeout(timer); c.destroy(); return; }
@@ -197,13 +232,19 @@ export function createEgressRelay(o) {
     c.on("data", onData);
     c.on("error", () => {});
   });
+  let listening = false;
   const ready = new Promise((resolve, reject) => {
-    server.once("error", (e) => { log(`[pi-egress] bot=${o.botId || "?"} relay failed to listen: ${e.message}`); reject(e); });
-    server.listen(socketPath, () => { try { chmodSync(socketPath, 0o600); } catch {} resolve(); });
+    // A persistent handler: accept errors (EMFILE, ENFILE) after listening must
+    // never be unhandled, which would kill the gateway or bot runner.
+    server.on("error", (e) => {
+      if (!listening) { log(`[pi-egress] bot=${o.botId || "?"} relay failed to listen: ${e.message}`); reject(e); }
+      else log(`[pi-egress] bot=${o.botId || "?"} relay error: ${e.message}`);
+    });
+    server.listen(socketPath, () => { listening = true; try { chmodSync(socketPath, 0o600); } catch {} resolve(); });
   });
   ready.catch(() => {});
   return {
-    dir, socketPath, ready,
+    dir, socketPath, ready, _server: server, _sockets: sockets,
     close: () => new Promise((resolve) => {
       for (const s of sockets) { try { s.destroy(); } catch {} }
       server.close(() => { try { rmSync(dir, { recursive: true, force: true }); } catch {} resolve(); });

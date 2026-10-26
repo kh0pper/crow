@@ -124,3 +124,66 @@ test("the socket lives in a 0700 dir, and close() removes it", async () => {
   await r.close();
   assert.equal(existsSync(r.dir), false);
 });
+
+// ---- code/security review fixes ----
+
+test("a server error after listening is logged, never thrown (the spawner must not crash)", async () => {
+  const { r, logs } = await relay({ loopbackPorts: [] });
+  r._server.emit("error", Object.assign(new Error("accept EMFILE"), { code: "EMFILE" }));
+  r._server.emit("error", Object.assign(new Error("accept EMFILE"), { code: "EMFILE" }));
+  assert.equal(logs.filter((l) => /relay error: accept EMFILE/.test(l)).length, 2);
+});
+
+test("a client that leaves during the DNS lookup opens no upstream connection", async () => {
+  let accepted = 0;
+  const upSrv = createServer((c) => { accepted++; c.end(); });
+  const upPort = await new Promise((res) => upSrv.listen(0, "127.0.0.1", () => res(upSrv.address().port)));
+  closers.push(() => new Promise((res) => upSrv.close(() => res())));
+  const { r } = await relay({ lookup: () => new Promise((res) => setTimeout(() => res([{ address: "93.184.216.34", family: 4 }]), 300)),
+    _connectOverride: () => ({ host: "127.0.0.1", port: upPort }) });
+  const c = connect(r.socketPath);
+  await new Promise((res) => c.on("connect", res));
+  c.write("PROXY\nCONNECT a.example.com:443 HTTP/1.1\r\n\r\n");
+  c.destroy();
+  await new Promise((res) => setTimeout(res, 600));
+  assert.equal(accepted, 0);
+});
+
+test("half-close: a client that sends FIN and waits still gets the whole reply", async () => {
+  const upSrv = createServer({ allowHalfOpen: true }, (c) => { let b = ""; c.on("data", (d) => b += d); c.on("end", () => { c.end("REPLY:" + b + ":" + "x".repeat(200000).length); }); });
+  const upPort = await new Promise((res) => upSrv.listen(0, "127.0.0.1", () => res(upSrv.address().port)));
+  closers.push(() => new Promise((res) => upSrv.close(() => res())));
+  const { r } = await relay({ loopbackPorts: [upPort] });
+  const out = await new Promise((resolve) => {
+    const c = connect({ path: r.socketPath, allowHalfOpen: true });
+    let b = "";
+    c.on("connect", () => { c.write(`PORT ${upPort}\nhello`); c.end(); });
+    c.on("data", (d) => b += d);
+    c.on("end", () => resolve(b));
+    setTimeout(() => resolve(b || "TIMEOUT"), 3000);
+  });
+  assert.equal(out, "REPLY:hello:200000");
+});
+
+test("every checked address is tried in order (a dual-stack host whose first address has no route)", async () => {
+  const up = await echoServer("U:");
+  const tried = [];
+  const { r } = await relay({ lookup: async () => [{ address: "2606:4700:4700::1111", family: 6 }, { address: "93.184.216.34", family: 4 }],
+    _connectOverride: (addr) => { tried.push(addr); return addr.includes(":") ? { host: "127.0.0.1", port: 1 } : { host: "127.0.0.1", port: up }; } });
+  const out = await talk(r.socketPath, "PROXY\nCONNECT a.example.com:443 HTTP/1.1\r\n\r\n", "ping");
+  assert.match(out, /^HTTP\/1\.1 200/);
+  assert.match(out, /U:ping$/);
+  assert.deepEqual(tried, ["2606:4700:4700::1111", "93.184.216.34"]);
+});
+
+test("port 80 is not proxied by default (CONNECT is for TLS)", async () => {
+  const { r } = await relay({ lookup: async () => [{ address: "93.184.216.34", family: 4 }] });
+  assert.match(await talk(r.socketPath, "PROXY\nCONNECT a.example.com:80 HTTP/1.1\r\n\r\n"), /^HTTP\/1\.1 403/);
+});
+
+test("decision logging is bounded: distinct-host spraying cannot grow the spawner's memory", async () => {
+  const { r, logs } = await relay({ lookup: async () => [{ address: "10.0.0.1", family: 4 }] });
+  for (let i = 0; i < 1010; i++) await talk(r.socketPath, `PROXY\nCONNECT h${i}.example.com:443 HTTP/1.1\r\n\r\n`, null, { timeout: 500 });
+  assert.equal(logs.filter((l) => / deny h\d+/.test(l)).length, 1000);
+  assert.equal(logs.filter((l) => /further decisions are not logged/.test(l)).length, 1);
+});
