@@ -254,20 +254,29 @@ test("retention prunes orphaned runs", async () => {
   assert.equal((await runs(id)).length, 1);
 });
 
-test("notices carry no link and no pointer to a page that does not exist yet", async () => {
+test("notices link to the Schedule page: one run opens its schedule there, a summary opens the page", async () => {
   const id = await seed("check the logs", "*/5 * * * *", null, { enabled: 0 });
   await db.execute({ sql: "INSERT INTO schedule_runs (schedule_id, status, source, detail) VALUES (?, 'paused', 'upgrade', ?)", args: [id, JSON.stringify({ reason: "frequent", every_min: 5 })] });
-  await seed("reminder:a", "0 9 * * *", "2026-10-26T09:00:00.000Z");
   await _tickForTest(db);
+  const [paused] = await notices();
+  const runId = Number((await runs(id))[0].id);
+  assert.equal(paused.action_url, `/dashboard/schedule?run=${runId}`);
+  assert.match(paused.body, /Turn it back on in Schedule if you want it\./);
   await seed("reminder:b", "0 10 * * *", "2026-10-26T10:00:00.000Z");
   await seed("reminder:c", "0 11 * * *", "2026-10-26T11:00:00.000Z");
   await _tickForTest(db);
-  const n = await notices();
-  assert.ok(n.length >= 2);
-  for (const x of n) {
-    assert.equal(x.action_url, null);
-    assert.doesNotMatch(`${x.title} ${x.body}`, /Schedule|Agenda/);
-  }
+  const summary = (await notices()).at(-1);
+  assert.equal(summary.action_url, "/dashboard/schedule");
+  assert.match(summary.body, /Open Schedule to see them\./);
+});
+
+test("the Spanish notices point at the page by its Spanish name", async () => {
+  await db.execute({ sql: "INSERT INTO dashboard_settings (key, value) VALUES ('language', 'es')", args: [] });
+  const id = await seed("revisar", "*/5 * * * *", null, { enabled: 0 });
+  await db.execute({ sql: "INSERT INTO schedule_runs (schedule_id, status, source, detail) VALUES (?, 'paused', 'upgrade', ?)", args: [id, JSON.stringify({ reason: "frequent", every_min: 5 })] });
+  await _tickForTest(db);
+  const [n] = await notices();
+  assert.match(n.body, /Reactívalo en Agenda si lo quieres\./);
 });
 
 test("a run left 'running' by a crash is marked interrupted after ten minutes", async () => {
