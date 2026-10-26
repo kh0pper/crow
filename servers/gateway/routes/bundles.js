@@ -59,7 +59,7 @@ import { envValueProblem, encodeEnvValue, formatEnvLines, updateEnvText, pathEnv
 import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved, keychainRestoreValues, backfillKeychainEntries } from "../keychain/install-hooks.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
-import { checkComposeModel, loadComposeModel, usesHostNetwork, resolveHostPath } from "../compose-guard.js";
+import { checkComposeModel, loadComposeModel, usesHostNetwork, resolveHostPath, composeEnv as composeEnvFor, hostGrants, normalizeHostGrants } from "../compose-guard.js";
 import { grantCandidates, activeRoots, otherBundlesRoots, migrateGrants, recordGrants, dropGrants, composeReferencedKeys, readGrants, ungrantedFolderKeys } from "../folder-grants.js";
 import { isLocalPasswordSession } from "../dashboard/local-session.js";
 import { resolveDataDir } from "../../db.js";
@@ -1196,14 +1196,8 @@ async function getComposeCmd() {
  * gateway secret (API keys, tokens) into its container. A bundle's own settings come
  * from its .env, which Compose reads itself.
  */
-const COMPOSE_ENV_KEYS = new Set(["PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ", "TMPDIR", "XDG_RUNTIME_DIR", "CROW_GATEWAY_PORT", "CROW_GATEWAY_URL", "CROW_DB_PATH", "CROW_DATA_DIR"]);
 export function composeEnv(base = process.env) {
-  const env = {};
-  for (const [k, v] of Object.entries(base || {})) {
-    if (COMPOSE_ENV_KEYS.has(k) || /^LC_[A-Z]+$/.test(k) || (/^DOCKER_[A-Z_]+$/.test(k) && k !== "DOCKER_DEFAULT_PLATFORM")) env[k] = v;
-  }
-  env.CROW_HOME = CROW_HOME;
-  return env;
+  return composeEnvFor(base, CROW_HOME); // the shared allowlist (compose-guard.js), with this instance's CROW_HOME
 }
 
 // Test-only: replace every `docker compose` invocation (pull/up/down/...) with a
@@ -1621,15 +1615,15 @@ function validateComposeFile(composePath, bundleId, opts = {}) {
 
     // Host files outside the bundle can't be read in: env_file, secrets/configs `file:`,
     // and the build context must be relative paths inside the bundle (no /, ~, ..).
-    // Model bundles (inference: true; installed only by the Model Catalog, never here)
-    // read the shared GPU env file under ~/.crow/env.
+    // A manifest that declares host_grants.env_files may name a shared env file under
+    // ~/.crow/env (the model check verifies exactly which one).
     const outside = (v) => /^["']?(?:\/|~|\$\{?HOME\b)/.test(v) || /(?:^|\/)\.\.(?:\/|["']?\s*$)/.test(v.replace(/\s+#.*$/, "").trim());
     const lines = content.split("\n");
     for (let i = 0; i < lines.length; i++) {
       const l = lines[i];
       let m = l.match(/^(\s*)(?:-\s+)?(env_file|file|context|path)\s*:\s*(.*)$/) || l.match(/^(\s*)()build\s*:\s*(\S.*)$/);
       if (m && m[3] && outside(m[3].trim())) {
-        if (!(m[2] === "env_file" && manifest?.inference === true)) {
+        if (!(m[2] === "env_file" && hostGrants(manifest).envFiles.length > 0)) {
           return { valid: false, reason: `Compose file reads a host path outside the bundle (${(m[2] || "build").trim()})` };
         }
       }
@@ -1638,7 +1632,7 @@ function validateComposeFile(composePath, bundleId, opts = {}) {
         for (let j = i + 1; j < lines.length; j++) {
           const item = lines[j].match(/^(\s*)-\s+(?:path\s*:\s*)?(.*)$/);
           if (!item || item[1].length <= m[1].length) break;
-          if (outside(item[2].trim()) && manifest?.inference !== true) {
+          if (outside(item[2].trim()) && !(hostGrants(manifest).envFiles.length > 0)) {
             return { valid: false, reason: "Compose file reads a host path outside the bundle (env_file)" };
           }
         }
@@ -1740,6 +1734,9 @@ function startConsent(bundleId, { crossHost = false } = {}) {
     consent_required: repo?.consent_required === true,
     origin: repo ? repo.origin : "community",
     inference: repo?.inference === true,
+    // What the reviewed manifest declares the containers need (GPU, shm, shared env
+    // files): always set from the repo, so an installed copy's own claim never survives.
+    host_grants: repo && repo.origin !== "community" ? normalizeHostGrants(repo.host_grants) : null,
     id: bundleId,
   };
   const manifest = { ...installed, ...trust };

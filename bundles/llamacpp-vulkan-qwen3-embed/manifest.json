@@ -1,5 +1,6 @@
 {
   "id": "llamacpp-vulkan-qwen3-embed",
+  "version": "1.0.1",
   "type": "bundle",
   "name": "llama.cpp Qwen3-Embedding-0.6B (Vulkan/ROCm)",
   "category": "ai",
@@ -11,6 +12,7 @@
     "platform": "linux-x86_64",
     "gpu_arch": ["gfx1151"]
   },
+  "host_grants": {"gpu": true, "shm_size": "2g", "env_files": ["rocm.env"], "path_env": ["LLM_CACHE"]},
   "env_vars": [],
   "port": 8004,
   "inference": true,

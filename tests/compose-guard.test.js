@@ -113,8 +113,9 @@ test("model: env_file, build context, secrets/configs files and bind-device volu
   const dir = bundleDir();
   const out = "/etc/hostname";
   assert.equal(check(svc({ env_file: [{ path: join(CROW_HOME, ".env") }] }), { dir }).valid, false);
+  writeFileSync(join(dir, "app.env"), "A=1\n");
   assert.equal(check(svc({ env_file: [{ path: join(dir, "app.env") }] }), { dir }).valid, true);
-  assert.equal(check(svc({ env_file: [{ path: "/opt/gpu.env" }] }), { dir, manifest: { inference: true } }).valid, true, "model bundles' shared GPU env file");
+  assert.equal(check(svc({ env_file: [{ path: "/opt/gpu.env" }] }), { dir, manifest: { inference: true } }).valid, false, "inference alone no longer opens env_file (host_grants.env_files does)");
   assert.equal(check(svc({ build: { context: "/" } }), { dir }).valid, false);
   assert.equal(check(svc({ build: { context: dir, additional_contexts: { x: "/etc" } } }), { dir }).valid, false);
   assert.equal(check(svc({ build: { context: "https://example.invalid/repo.git" } }), { dir }).valid, false, "remote build contexts are refused (not modelled)");
@@ -201,6 +202,73 @@ dockerTest("every tracked first-party compose passes the model check (with its m
     }
   } finally { rmSync(home, { recursive: true, force: true }); }
   assert.deepEqual(bad, [], bad.join("\n"));
+});
+
+dockerTest("every tracked model bundle passes the check as the gpu-orchestrator runs it (repo folder, -f, no consent)", async () => {
+  // A host laid out like crow: the bundles live in a git checkout (the gateway's), each
+  // with an operator-written .env; the shared GPU env files sit in ~/.crow/env.
+  const { cpSync } = await import("node:fs");
+  const root = mkdtempSync(join(tmpdir(), "crow-cguard-orch-"));
+  const home = join(root, "home");
+  const app = join(root, "app");
+  mkdirSync(join(app, ".git"), { recursive: true });
+  mkdirSync(join(home, ".crow", "env"), { recursive: true });
+  for (const f of ["rocm.env", "cuda.env"]) writeFileSync(join(home, ".crow", "env", f), "X=1\n");
+  const cache = join(root, "llm", "hf-cache");
+  mkdirSync(cache, { recursive: true });
+  const dotEnv = `CROW_TAILSCALE_IP=100.64.20.1\nGRACKLE_TAILSCALE_IP=100.64.20.2\nVIDEO_GID=44\nRENDER_GID=992\nLLM_CACHE=${cache}\nGRACKLE_HF_CACHE=${cache}\n`;
+  const env = G.composeEnv({ PATH: process.env.PATH, HOME: home }, join(home, ".crow"));
+  const run = (args, { cwd, env: e }) => new Promise((resolve, reject) => execFile("docker", ["compose", ...args], { cwd, env: e }, (err, stdout, stderr) => (err ? reject(Object.assign(err, { stderr })) : resolve({ stdout }))));
+  const bad = [];
+  let checked = 0;
+  try {
+    for (const id of [...trackedBundleSet()].sort()) {
+      const src = join(REPO, "bundles", id);
+      if (!existsSync(join(src, "docker-compose.yml"))) continue;
+      const manifest = JSON.parse(readFileSync(join(src, "manifest.json"), "utf8"));
+      if (manifest.inference !== true) continue;
+      const dir = join(app, "bundles", id);
+      cpSync(src, dir, { recursive: true });
+      writeFileSync(join(dir, ".env"), dotEnv);
+      const file = join(dir, "docker-compose.yml");
+      const loaded = await G.loadComposeModel(dir, { env, runConfig: run, composeFile: file, cwd: join(app, "bundles") });
+      if (loaded.error) { bad.push(`${id}: ${loaded.error}`); continue; }
+      const dot = G.parseDotEnv(join(dir, ".env"));
+      const operatorRoots = G.hostGrants(manifest).pathEnv.map((k) => dot[k]).filter(Boolean);
+      const r = G.checkComposeModel(loaded.model, { bundleDir: dir, manifest, consentVerified: false, ctx: { crowHome: join(home, ".crow"), dataDir: join(home, ".crow", "data"), appRoot: app, home, operatorRoots } });
+      checked++;
+      if (!r.valid) bad.push(`${id}: ${r.reason}`);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+  assert.ok(checked >= 7, `checked ${checked} model bundles`);
+  assert.deepEqual(bad, [], bad.join("\n"));
+});
+
+dockerTest("the orchestrator's -f invocation ignores an override file beside the compose, as its up does", async () => {
+  const root = mkdtempSync(join(tmpdir(), "crow-cguard-orchf-"));
+  try {
+    const dir = join(root, "bundles", "fx-m");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "docker-compose.yml"), "services:\n  app:\n    image: busybox\n");
+    writeFileSync(join(dir, "docker-compose.override.yml"), "services:\n  app:\n    privileged: true\n");
+    const run = (args, { cwd, env: e }) => new Promise((resolve, reject) => execFile("docker", ["compose", ...args], { cwd, env: e }, (err, stdout, stderr) => (err ? reject(Object.assign(err, { stderr })) : resolve({ stdout }))));
+    const env = { PATH: process.env.PATH, HOME: root };
+    const withF = await G.loadComposeModel(dir, { env, runConfig: run, composeFile: join(dir, "docker-compose.yml"), cwd: join(root, "bundles") });
+    assert.equal(withF.model.services.app.privileged, undefined, "-f: the override is not part of what up applies");
+    const discovered = await G.loadComposeModel(dir, { env, runConfig: run });
+    assert.equal(discovered.model.services.app.privileged, true, "discovery (the Extensions path): it is");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("startConsent takes host_grants from the repo manifest only (a tampered installed copy can't add one)", () => {
+  seedInstalled("fx-hg1", { host_grants: { gpu: true, env_files: ["fed-gov.env"] } }, B._consentRecordForTest({}, true), { repo: {} });
+  assert.equal(B._startConsentForTest("fx-hg1").manifest.host_grants, null);
+  seedInstalled("fx-hg2", { host_grants: { gpu: true } }, B._consentRecordForTest({}, true), { repo: { host_grants: { shm_size: "2g", privileged: true } } });
+  assert.deepEqual(B._startConsentForTest("fx-hg2").manifest.host_grants, { shm_size: "2g" });
+  seedInstalled("fx-hg3", { host_grants: { gpu: true } }, B._consentRecordForTest({}, true), { repo: { origin: "community", host_grants: { gpu: true } } });
+  assert.equal(B._startConsentForTest("fx-hg3").manifest.host_grants, null);
+  seedInstalled("fx-hg4", { host_grants: { gpu: true } }, {}, { repo: null });
+  assert.equal(B._startConsentForTest("fx-hg4").manifest.host_grants, null);
 });
 
 // ---- one check on every path that runs compose up ----------------------------------
@@ -299,7 +367,128 @@ test("model: ipc host and host devices need privileged consent; GPU render nodes
     assert.equal(check(svc(extra)).valid, false, JSON.stringify(extra));
     assert.equal(check(svc(extra), { manifest: PRIV, consent: true }).valid, true, JSON.stringify(extra));
   }
-  assert.equal(check(svc({ devices: [{ source: "/dev/dri", target: "/dev/dri" }, { source: "/dev/kfd", target: "/dev/kfd" }] })).valid, true);
+  const gpuDevs = svc({ devices: [{ source: "/dev/dri", target: "/dev/dri" }, { source: "/dev/kfd", target: "/dev/kfd" }] });
+  assert.equal(check(gpuDevs).valid, false, "GPU render nodes need host_grants.gpu");
+  assert.equal(check(gpuDevs, { manifest: { host_grants: { gpu: true } } }).valid, true);
+});
+
+// ---- follow-up A: what model bundles need is declared in host_grants -------------------
+
+const GPU = { host_grants: { gpu: true } };
+test("host_grants.gpu: GPU devices, gpus, GPU reservations, the nvidia runtime and NVIDIA_* env need it", () => {
+  const cases = [
+    { devices: [{ source: "/dev/dri/renderD128", target: "/dev/dri/renderD128" }] },
+    { devices: [{ source: "/dev/kfd", target: "/dev/kfd" }] },
+    { devices: [{ source: "/dev/nvidia0", target: "/dev/nvidia0" }] },
+    { gpus: [{ count: -1 }] },
+    { runtime: "nvidia" },
+    { environment: { NVIDIA_VISIBLE_DEVICES: "all" } },
+    { environment: ["NVIDIA_DRIVER_CAPABILITIES=compute,utility"] },
+    { deploy: { resources: { reservations: { devices: [{ driver: "nvidia", count: 1, capabilities: [["gpu"]] }] } } } },
+  ];
+  for (const extra of cases) {
+    assert.equal(check(svc(extra)).valid, false, `without the grant: ${JSON.stringify(extra)}`);
+    assert.equal(check(svc(extra), { manifest: GPU }).valid, true, `with the grant: ${JSON.stringify(extra)}`);
+    assert.equal(check(svc(extra), { manifest: { ...GPU, origin: "community" } }).valid, false, `community: ${JSON.stringify(extra)}`);
+    assert.equal(check(svc(extra), { manifest: PRIV, consent: true }).valid, true, `privileged consent still covers it: ${JSON.stringify(extra)}`);
+  }
+  // The gpu grant opens GPUs only.
+  for (const extra of [{ devices: [{ source: "/dev/sda", target: "/dev/sda" }] }, { devices: ["/dev/net/tun:/dev/net/tun"] }, { runtime: "runsc" }, { ipc: "host" },
+    { deploy: { resources: { reservations: { devices: [{ driver: "x", capabilities: [["tpu"]] }] } } } }]) {
+    assert.equal(check(svc(extra), { manifest: GPU }).valid, false, JSON.stringify(extra));
+  }
+  assert.equal(check(svc({ group_add: ["44"] })).valid, true, "group_add alone grants nothing (root in the container bypasses file permissions anyway)");
+  assert.equal(check(svc({ environment: { NVIDIA_VISIBLE_DEVICES: "void" } })).valid, true, "void/none asks for no GPU");
+  // An env_file inside the bundle carrying it counts too (env_file contents are not in the model).
+  const d = bundleDir();
+  writeFileSync(join(d, "gpu.env"), "NVIDIA_VISIBLE_DEVICES=all\n");
+  assert.equal(check(svc({ env_file: [{ path: join(d, "gpu.env") }] }), { dir: d }).valid, false, "NVIDIA_* from an env_file");
+  assert.equal(check(svc({ env_file: [{ path: join(d, "gpu.env") }] }), { dir: d, manifest: { host_grants: { gpu: true } } }).valid, true);
+  writeFileSync(join(d, "colon.env"), "NVIDIA_VISIBLE_DEVICES: all\n");
+  assert.equal(check(svc({ env_file: [{ path: join(d, "colon.env") }] }), { dir: d }).valid, false, "the KEY: value form Compose accepts");
+  // Never opened before it is admitted, and never a device or FIFO: /dev/zero would hang the gateway.
+  const t0 = Date.now();
+  assert.equal(check(svc({ env_file: [{ path: "/dev/zero" }] }), { dir: d }).valid, false);
+  symlinkSync("/dev/zero", join(d, "zero.env"));
+  assert.equal(check(svc({ env_file: [{ path: join(d, "zero.env") }] }), { dir: d }).valid, false, "a symlink to a device inside the bundle");
+  execFileSync("mkfifo", [join(d, "fifo.env")]);
+  assert.equal(check(svc({ env_file: [{ path: join(d, "fifo.env") }] }), { dir: d }).valid, false, "a FIFO");
+  assert.ok(Date.now() - t0 < 2000, "refused quickly");
+  // Final security pass: no dotenv re-implementation to out-guess. ANY NVIDIA_* mention in an
+  // admitted env_file needs the gpu grant, whatever the separator, quoting, line ending or case.
+  const forms = ["A=1\rNVIDIA_VISIBLE_DEVICES=all\n", "\u0085NVIDIA_VISIBLE_DEVICES=all\n", "export\tNVIDIA_VISIBLE_DEVICES = 'all' # gpu\n",
+    "NVIDIA_VISIBLE_DEVICES=void\n", "nvidia_visible_devices=all\n", "NVIDIA_MIG_CONFIG_DEVICES=all\n", "B=\"x\\\nNVIDIA_VISIBLE_DEVICES=all\"\n"];
+  for (const [i, text] of forms.entries()) {
+    writeFileSync(join(d, `form${i}.env`), text);
+    assert.equal(check(svc({ env_file: [{ path: join(d, `form${i}.env`) }] }), { dir: d }).valid, false, JSON.stringify(text));
+    assert.equal(check(svc({ env_file: [{ path: join(d, `form${i}.env`) }] }), { dir: d, manifest: { host_grants: { gpu: true } } }).valid, true, `granted: ${JSON.stringify(text)}`);
+  }
+  writeFileSync(join(d, "plain.env"), "A=1\nB=2\n");
+  assert.equal(check(svc({ env_file: [{ path: join(d, "plain.env") }] }), { dir: d }).valid, true, "no NVIDIA_* mention: no grant needed");
+  // A missing env_file fails closed unless Compose was told it is optional.
+  assert.equal(check(svc({ env_file: [{ path: join(d, "absent.env") }] }), { dir: d }).valid, false, "missing and required");
+  assert.equal(check(svc({ env_file: [join(d, "absent.env")] }), { dir: d }).valid, false, "missing, short syntax");
+  assert.equal(check(svc({ env_file: [{ path: join(d, "absent.env"), required: false }] }), { dir: d }).valid, true, "missing and optional");
+  symlinkSync(join(d, "nowhere.env"), join(d, "dangling.env"));
+  assert.equal(check(svc({ env_file: [{ path: join(d, "dangling.env") }] }), { dir: d }).valid, false, "a dangling symlink is missing");
+  // An env_file a container can rewrite (under a read-write bind of this project, or a
+  // bind-device volume) is refused: it could become a symlink or a FIFO before Compose reads it.
+  mkdirSync(join(d, "data"), { recursive: true });
+  writeFileSync(join(d, "data", "app.env"), "A=1\n");
+  const rwBind = (extra) => ({ services: { app: { image: "busybox", env_file: [{ path: join(d, "data", "app.env") }], volumes: [{ type: "bind", source: join(d, "data"), target: "/data", ...extra }] } } });
+  assert.equal(check(rwBind({}), { dir: d }).valid, false, "under a read-write bind");
+  assert.equal(check(rwBind({ read_only: true }), { dir: d }).valid, true, "a read-only bind cannot rewrite it");
+  const other = { services: { app: { image: "busybox", env_file: [{ path: join(d, "data", "app.env") }] }, side: { image: "busybox", volumes: [{ type: "bind", source: join(d, "data"), target: "/x" }] } } };
+  assert.equal(check(other, { dir: d }).valid, false, "another service's read-write bind counts");
+  const fileBind = { services: { app: { image: "busybox", env_file: [{ path: join(d, "data", "app.env") }], volumes: [{ type: "bind", source: join(d, "data", "app.env"), target: "/app.env" }] } } };
+  assert.equal(check(fileBind, { dir: d }).valid, false, "the env_file itself bound read-write");
+  const devVol = { services: { app: { image: "busybox", env_file: [{ path: join(d, "data", "app.env") }], volumes: [{ type: "volume", source: "v", target: "/v" }] } },
+    volumes: { v: { driver_opts: { type: "none", o: "bind", device: join(d, "data") } } } };
+  assert.equal(check(devVol, { dir: d }).valid, false, "under a bind-device volume");
+  // Unknown grant keys and bad shapes are dropped.
+  assert.deepEqual(G.normalizeHostGrants({ gpu: "yes", shm_size: "lots", env_files: ["../x.env", "ok.env", 5], path_env: ["LLM_CACHE", "bad key"], privileged: true }), { env_files: ["ok.env"], path_env: ["LLM_CACHE"] });
+  assert.equal(G.normalizeHostGrants([]), null);
+});
+
+test("shm_size: up to 1 GiB without a grant; more needs host_grants.shm_size at least as large", () => {
+  const G1 = 1024 ** 3;
+  assert.equal(check(svc({ shm_size: String(G1) })).valid, true);
+  assert.equal(check(svc({ shm_size: "536870912" })).valid, true);
+  assert.equal(check(svc({ shm_size: String(G1 + 1) })).valid, false);
+  assert.equal(check(svc({ shm_size: String(16 * G1) }), { manifest: { host_grants: { shm_size: "16g" } } }).valid, true);
+  assert.equal(check(svc({ shm_size: String(16 * G1) }), { manifest: { host_grants: { shm_size: "8g" } } }).valid, false);
+  assert.equal(check(svc({ shm_size: String(16 * G1) }), { manifest: { host_grants: { shm_size: "16g" }, origin: "community" } }).valid, false);
+  assert.equal(check(svc({ shm_size: "lots" })).valid, false, "a size the check can't read");
+  for (const [txt, bytes] of [["512mb", 512 * 1024 ** 2], ["2g", 2 * G1], ["8gb", 8 * G1], ["17179869184", 16 * G1], ["1024k", 1024 * 1024], ["100b", 100], ["100", 100]]) {
+    assert.equal(G.parseByteSize(txt), bytes, txt);
+  }
+  for (const bad of ["", "g", "-1g", "1.5.2g", "1t", null]) assert.equal(G.parseByteSize(bad), null, String(bad));
+});
+
+test("host_grants.env_files: a declared shared env file in ~/.crow/env (or CROW_HOME/env), nothing else outside the bundle", () => {
+  const home = mkdtempSync(join(tmpdir(), "crow-cguard-envhome-"));
+  try {
+    mkdirSync(join(home, ".crow", "env"), { recursive: true });
+    writeFileSync(join(home, ".crow", "env", "rocm.env"), "X=1\n");
+    writeFileSync(join(home, ".crow", "env", "fed-gov.env"), "TOKEN=secret\n");
+    symlinkSync(join(REPO, "package.json"), join(home, ".crow", "env", "evil.env"));
+    const c = (path, grants) => G.checkComposeModel(svc({ env_file: [{ path }] }), { bundleDir: bundleDir(), manifest: { host_grants: grants }, consentVerified: false, ctx: { ...CTX, home } });
+    assert.equal(c(join(home, ".crow", "env", "rocm.env"), { env_files: ["rocm.env"] }).valid, true);
+    assert.equal(c(join(home, ".crow", "env", "rocm.env"), {}).valid, false, "not declared");
+    assert.equal(c(join(home, ".crow", "env", "fed-gov.env"), { env_files: ["rocm.env"] }).valid, false, "another bundle's env file");
+    assert.equal(c(join(home, ".crow", "env", "evil.env"), { env_files: ["evil.env"] }).valid, false, "a symlink out of the env folder");
+    assert.equal(c(join(CROW_HOME, "env", "rocm.env"), { env_files: ["rocm.env"] }).valid, false, "a declared name that does not exist");
+    mkdirSync(join(CROW_HOME, "env"), { recursive: true });
+    writeFileSync(join(CROW_HOME, "env", "rocm.env"), "X=1\n");
+    assert.equal(c(join(CROW_HOME, "env", "rocm.env"), { env_files: ["rocm.env"] }).valid, true, "CROW_HOME/env");
+    assert.equal(c(join(home, ".crow", "env", "..", "env", "rocm.env"), { env_files: ["rocm.env"] }).valid, true, "Compose resolves ../ before we see it; the lexical form must still be the env folder");
+    assert.equal(c(join(home, ".crow", "x", "..", "..", ".crow", "env", "rocm.env"), { env_files: ["rocm.env"] }).valid, true);
+    for (const name of ["../x.env", "/etc/x.env", "a/b.env", "x", ".env", "x.env\n"]) {
+      assert.equal(c(join(home, ".crow", "env", "x.env"), { env_files: [name] }).valid, false, JSON.stringify(name));
+    }
+    const comm = G.checkComposeModel(svc({ env_file: [{ path: join(home, ".crow", "env", "rocm.env") }] }), { bundleDir: bundleDir(), manifest: { host_grants: { env_files: ["rocm.env"] }, origin: "community" }, consentVerified: false, ctx: { ...CTX, home } });
+    assert.equal(comm.valid, false, "never for community bundles");
+  } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
 test("model: a named volume binding a relative device is refused", () => {
@@ -344,7 +533,7 @@ test("allowlist: escape-capable service keys need privileged consent", () => {
     assert.equal(check(svc(extra)).valid, false, JSON.stringify(extra));
   }
   assert.equal(check(svc({ cap_add: ["CHOWN", "NET_BIND_SERVICE"], oom_score_adj: -500, runtime: "nvidia",
-    deploy: { resources: { reservations: { devices: [{ driver: "nvidia", count: 1, capabilities: [["gpu"]] }] } } } })).valid, true);
+    deploy: { resources: { reservations: { devices: [{ driver: "nvidia", count: 1, capabilities: [["gpu"]] }] } } } }), { manifest: { host_grants: { gpu: true } } }).valid, true);
 });
 
 test("allowlist: builds can't use host network, SSH agent, build secrets, privileged builds or remote contexts", () => {
@@ -498,7 +687,10 @@ test("devices: a GPU-looking path that climbs out (/dev/dri/../nvme0n1) is a raw
   for (const src of ["/dev/dri/../nvme0n1", "/dev/dri/../../etc", "/dev/kfd/.."]) {
     assert.equal(check(svc({ devices: [{ source: src, target: "/dev/dri", permissions: "rwm" }] })).valid, false, src);
   }
-  assert.equal(check(svc({ devices: [{ source: "/dev/dri/renderD128", target: "/dev/dri/renderD128" }] })).valid, true);
+  assert.equal(check(svc({ devices: [{ source: "/dev/dri/renderD128", target: "/dev/dri/renderD128" }] }), { manifest: { host_grants: { gpu: true } } }).valid, true);
+  for (const src of ["/dev/dri/../nvme0n1", "/dev/kfd/.."]) {
+    assert.equal(check(svc({ devices: [{ source: src, target: "/dev/dri" }] }), { manifest: { host_grants: { gpu: true } } }).valid, false, `${src}, even with the gpu grant`);
+  }
 });
 
 test("inside Crow's home only the bundle's own places are mountable (peer tokens, identity, keystores are not)", () => {

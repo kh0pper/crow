@@ -1,7 +1,7 @@
 {
   "id": "llamacpp-vulkan-qwen3-vl-4b",
   "type": "bundle",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "name": "llama.cpp Qwen3-VL-4B vision (Vulkan)",
   "category": "ai",
   "description": "Dedicated vision model for image understanding: Qwen3-VL-4B-Instruct Q8_0 with its F16 vision projector, served by llama.cpp (Vulkan) on Strix Halo gfx1151. OpenAI-compatible /v1/chat/completions with image input on 127.0.0.1:8012. Registers as the crow-vision provider for vision profiles (Meta Glasses look turns, photo captions) and the vision role. Always on, outside the chat model's VRAM group, about 7-8 GiB of unified memory. Licences: Qwen3-VL weights Apache-2.0, llama.cpp MIT, container image kyuz0/amd-strix-halo-toolboxes (third party). Weights are downloaded separately (see the compose file).",
@@ -10,7 +10,9 @@
     "gpu": true,
     "min_vram_gb": 8,
     "platform": "linux-x86_64",
-    "gpu_arch": ["gfx1151"]
+    "gpu_arch": [
+      "gfx1151"
+    ]
   },
   "env_vars": [],
   "port": 8012,
@@ -25,12 +27,24 @@
         {
           "id": "qwen3-vl-4b-instruct",
           "task": "vision",
-          "input": ["text", "image"],
+          "input": [
+            "text",
+            "image"
+          ],
           "contextLen": 8192,
           "warm": true,
           "priority": "interactive"
         }
       ]
     }
-  ]
+  ],
+  "host_grants": {
+    "gpu": true,
+    "env_files": [
+      "rocm.env"
+    ],
+    "path_env": [
+      "LLM_CACHE"
+    ]
+  }
 }

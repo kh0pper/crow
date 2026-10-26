@@ -2669,6 +2669,7 @@
     },
     {
       "id": "llamacpp-vulkan-qwen3-embed",
+      "version": "1.0.1",
       "type": "bundle",
       "name": "llama.cpp Qwen3-Embedding-0.6B (Vulkan/ROCm)",
       "category": "ai",
@@ -2680,6 +2681,16 @@
         "platform": "linux-x86_64",
         "gpu_arch": [
           "gfx1151"
+        ]
+      },
+      "host_grants": {
+        "gpu": true,
+        "shm_size": "2g",
+        "env_files": [
+          "rocm.env"
+        ],
+        "path_env": [
+          "LLM_CACHE"
         ]
       },
       "env_vars": [],
@@ -2707,7 +2718,7 @@
     {
       "id": "llamacpp-vulkan-qwen3-vl-4b",
       "type": "bundle",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "name": "llama.cpp Qwen3-VL-4B vision (Vulkan)",
       "category": "ai",
       "description": "Dedicated vision model for image understanding: Qwen3-VL-4B-Instruct Q8_0 with its F16 vision projector, served by llama.cpp (Vulkan) on Strix Halo gfx1151. OpenAI-compatible /v1/chat/completions with image input on 127.0.0.1:8012. Registers as the crow-vision provider for vision profiles (Meta Glasses look turns, photo captions) and the vision role. Always on, outside the chat model's VRAM group, about 7-8 GiB of unified memory. Licences: Qwen3-VL weights Apache-2.0, llama.cpp MIT, container image kyuz0/amd-strix-halo-toolboxes (third party). Weights are downloaded separately (see the compose file).",
@@ -2744,11 +2755,20 @@
           ]
         }
       ],
+      "host_grants": {
+        "gpu": true,
+        "env_files": [
+          "rocm.env"
+        ],
+        "path_env": [
+          "LLM_CACHE"
+        ]
+      },
       "official": true
     },
     {
       "id": "llamacpp-vulkan-qwen36-35b-a3b",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "type": "bundle",
       "name": "llama.cpp Qwen3.6-35B-A3B UD-Q6_K + Vision (Vulkan AMDVLK)",
       "category": "ai",
@@ -2760,6 +2780,16 @@
         "platform": "linux-x86_64",
         "gpu_arch": [
           "gfx1151"
+        ]
+      },
+      "host_grants": {
+        "gpu": true,
+        "shm_size": "16g",
+        "env_files": [
+          "rocm.env"
+        ],
+        "path_env": [
+          "LLM_CACHE"
         ]
       },
       "env_vars": [],
@@ -2786,7 +2816,7 @@
     {
       "id": "localai",
       "name": "LocalAI",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Run local AI models with an OpenAI-compatible API. Supports chat, embeddings, and text-to-speech.",
       "type": "bundle",
       "author": "Crow",
@@ -2817,6 +2847,9 @@
           "rocm",
           "cpu"
         ]
+      },
+      "host_grants": {
+        "gpu": true
       },
       "env_vars": [
         {
@@ -4222,7 +4255,7 @@
     {
       "id": "ollama",
       "name": "Ollama (Local AI)",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Run local AI models for embeddings, summarization, and content classification via Ollama",
       "type": "bundle",
       "author": "Crow",
@@ -4252,6 +4285,9 @@
           "rocm",
           "cpu"
         ]
+      },
+      "host_grants": {
+        "gpu": true
       },
       "env_vars": [
         {
@@ -5429,6 +5465,9 @@
           "cuda"
         ]
       },
+      "host_grants": {
+        "gpu": true
+      },
       "env_vars": [
         {
           "name": "SDXL_PORT",
@@ -5939,7 +5978,7 @@
     {
       "id": "unsloth",
       "name": "Unsloth Studio (AMD ROCm)",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Fine-tune and chat with open models on an AMD GPU: Unsloth's ROCm image with the Unsloth Studio web UI and JupyterLab notebooks. AMD ROCm hosts only.",
       "type": "bundle",
       "author": "Crow",
@@ -6029,6 +6068,10 @@
       },
       "no_auto_provider": "Not a model endpoint Crow routes to: Unsloth Studio is a training and chat workbench with its own login, and its GGUF chat is internal to Studio. A model fine-tuned here is exported as files (GGUF or safetensors) and served through the Model Catalog like any other model.",
       "notes": "Image: unsloth/unsloth-rocm, the ROCm build of Unsloth, pinned to a release tag and digest (the plain unsloth/unsloth image is CUDA-only and is not used). Works on AMD RDNA2 and newer and CDNA GPUs, except the Steam Deck (gfx1033), which the image refuses. Upstream measured LoRA training and diffusion on a Strix Halo (gfx1151) with these generic ROCm wheels; AMD's per-architecture wheels fix a gfx1151 grouped-GEMM crash, so if a mixture-of-experts run crashes there, rebuild the image with ROCM_GFX=gfx1151 as the Unsloth docs describe. GGUF chat inside Studio runs on the CPU in this release. Licences: the Unsloth library is Apache-2.0 and its unsloth-zoo helper LGPL-3.0-or-later; Unsloth Studio (the web UI) is AGPL-3.0 with AGPL section 7(b) attribution notices. Crow runs the unmodified upstream image as a separate container and links none of its code, so Crow's own licence is unaffected. Offering Studio to other people over a network (a hosted Crow) triggers AGPL section 13 only if the image is modified; either way its Unsloth notices must stay visible. 'Unsloth' is a trademark of the Unsloth team. Crow's installer opens the manifest ports (3075, 3076) to the tailnet in ufw, as for every bundle; both stay bound to 127.0.0.1, and only 3075 gets a Tailscale Serve route.",
+      "host_grants": {
+        "gpu": true,
+        "shm_size": "16g"
+      },
       "official": true
     },
     {
@@ -6260,7 +6303,7 @@
     {
       "id": "vllm",
       "name": "vLLM",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "GPU-accelerated local LLM inference server — OpenAI-compatible endpoint backed by vLLM's continuous batching and PagedAttention. Recommended classroom engine for Maker Lab: the Phase 0 Ollama benchmark hit unusable p95 latencies at N=25 concurrent learners; vLLM is architecturally the right shape for that scale.",
       "type": "bundle",
       "author": "Crow",
@@ -6297,6 +6340,10 @@
         "gpu_arch": [
           "cuda"
         ]
+      },
+      "host_grants": {
+        "gpu": true,
+        "shm_size": "8g"
       },
       "env_vars": [
         {
@@ -6348,6 +6395,7 @@
     },
     {
       "id": "vllm-cuda-embed",
+      "version": "1.0.1",
       "type": "bundle",
       "name": "vLLM Embeddings — Qwen3-Embedding-0.6B",
       "category": "ai",
@@ -6359,6 +6407,16 @@
         "platform": "linux-x86_64",
         "gpu_arch": [
           "cuda"
+        ]
+      },
+      "host_grants": {
+        "gpu": true,
+        "shm_size": "2g",
+        "env_files": [
+          "cuda.env"
+        ],
+        "path_env": [
+          "GRACKLE_HF_CACHE"
         ]
       },
       "env_vars": [],
@@ -6391,6 +6449,7 @@
     },
     {
       "id": "vllm-cuda-rerank",
+      "version": "1.0.1",
       "type": "bundle",
       "name": "vLLM Reranker — Qwen3-Reranker-0.6B",
       "category": "ai",
@@ -6402,6 +6461,16 @@
         "platform": "linux-x86_64",
         "gpu_arch": [
           "cuda"
+        ]
+      },
+      "host_grants": {
+        "gpu": true,
+        "shm_size": "2g",
+        "env_files": [
+          "cuda.env"
+        ],
+        "path_env": [
+          "GRACKLE_HF_CACHE"
         ]
       },
       "env_vars": [],
@@ -6427,6 +6496,7 @@
     },
     {
       "id": "vllm-cuda-vision",
+      "version": "1.0.1",
       "type": "bundle",
       "name": "vLLM Vision — Qwen3-VL-8B-Instruct-FP8",
       "category": "ai",
@@ -6438,6 +6508,16 @@
         "platform": "linux-x86_64",
         "gpu_arch": [
           "cuda"
+        ]
+      },
+      "host_grants": {
+        "gpu": true,
+        "shm_size": "4g",
+        "env_files": [
+          "cuda.env"
+        ],
+        "path_env": [
+          "GRACKLE_HF_CACHE"
         ]
       },
       "env_vars": [],
@@ -6464,6 +6544,7 @@
     },
     {
       "id": "vllm-rocm-qwen35-4b",
+      "version": "1.0.1",
       "type": "bundle",
       "name": "vLLM Qwen3.5-4B (ROCm gfx1151)",
       "category": "ai",
@@ -6475,6 +6556,16 @@
         "platform": "linux-x86_64",
         "gpu_arch": [
           "gfx1151"
+        ]
+      },
+      "host_grants": {
+        "gpu": true,
+        "shm_size": "8g",
+        "env_files": [
+          "rocm.env"
+        ],
+        "path_env": [
+          "LLM_CACHE"
         ]
       },
       "env_vars": [],
