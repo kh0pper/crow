@@ -5,13 +5,14 @@
  *
  * The model is servers/gateway/schedule-catalog.js; the buttons are schedule-actions.js. Writes
  * are plain POST forms (CSRF field + Turbo's header, 303 after POST), refused unless the request
- * carries the owner's dashboard session. Delete takes two POSTs: the first only opens the confirm.
+ * is the owner's own password session at this Crow (never a peer sign-in or a signed peer call). Delete takes two POSTs: the first only opens the confirm.
  * The briefing's controls are links to News → Briefings, which owns that row.
  */
 import { t } from "../shared/i18n.js";
 import { escapeHtml, section } from "../shared/components.js";
 import { buildScheduleModel, scheduleOfRun } from "../../schedule-catalog.js";
-import { createReminder, previewWhen, pauseSchedule, resumeSchedule, runScheduleNow, deleteScheduleRow, ackRun } from "../../schedule-actions.js";
+import { createReminder, previewWhen, pauseSchedule, resumeSchedule, runScheduleNow, deleteScheduleRow, ackRun, claimRun, releaseRun } from "../../schedule-actions.js";
+import { isLocalPasswordSession } from "../local-session.js";
 import { engineStatus } from "../../bot-engine-status.js";
 import { botRuntimeActive } from "./bot-runtime-flag.js";
 import { getPanel } from "../panel-registry.js";
@@ -26,14 +27,25 @@ const FIELDS = ["action", "id", "run", "confirm", "text", "when", "cron", "tz", 
 const one = (v) => (typeof v === "string" ? v : null);
 const intOf = (v) => (typeof v === "string" && /^\d{1,12}$/.test(v) ? Number(v) : null);
 
-/** The owner's own dashboard session (never a signed peer call). */
-export function isOwnerRequest(req) {
-  return !!req?.dashboardSession && !req?.crossHostAuth;
-}
+/**
+ * Writes are the owner's at this machine's own dashboard: a local password session only. A
+ * session a peer sign-in minted (scopes 'dashboard sso') and a signed peer call both read only.
+ */
+export const isOwnerRequest = (req) => isLocalPasswordSession(req);
+
+/** Whether bots run here at all: the engine is installed and the bot runtime is on. */
+const BOT_GATE = {
+  engine: () => { try { return engineStatus().state; } catch { return "ready"; } },
+  runtimeOn: (db) => botRuntimeActive(db),
+};
+let botGate = BOT_GATE;
+/** Test seam: replace the bot engine / runtime probes ({engine, runtimeOn}); null restores them. */
+export function _setBotGateForTest(gate) { botGate = gate ? { ...BOT_GATE, ...gate } : BOT_GATE; }
 
 const DONE = {
   created: "schedule.toast.created", paused: "schedule.toast.paused", resumed: "schedule.toast.resumed", ran: "schedule.toast.ran",
   queued: "schedule.toast.queued", "already-queued": "schedule.toast.alreadyQueued", deleted: "schedule.toast.deleted", dismissed: "schedule.toast.dismissed",
+  "already-done": "schedule.toast.alreadyDone",
 };
 const ERRORS = {
   "not-found": "schedule.err.notFound", owned: "schedule.err.owned", "not-runnable": "schedule.err.notRunnable", "once-passed": "schedule.err.oncePassed",
@@ -66,7 +78,7 @@ export default {
     let create = null;
 
     if (req.method === "POST") {
-      if (!isOwnerRequest(req)) return refuse(403, "schedule.err.ownerOnly");
+      if (!(await isOwnerRequest(req))) return refuse(403, "schedule.err.ownerOnly");
       const body = req.body || {};
       // A repeated field arrives as an array: refuse it rather than guess.
       for (const k of FIELDS) if (body[k] !== undefined && typeof body[k] !== "string") return refuse(400, "schedule.err.badRequest");
@@ -106,11 +118,16 @@ export default {
         return refuse(400, "schedule.err.badRequest");
       } else if (action === "pause") {
         return result(id, await pauseSchedule(db, id), "paused");
-      } else if (action === "resume") {
-        return result(id, await resumeSchedule(db, id), "resumed");
-      } else if (action === "run-now") {
-        const r = await runScheduleNow(db, id);
-        return result(id, r, r.kind === "bot_routine" ? (r.already ? "already-queued" : "queued") : "ran");
+      } else if (action === "resume" || action === "run-now") {
+        // A fix from the strip names its run: claim (dismiss) it first, so the problem leaves the
+        // strip and a second click finds it claimed and sends nothing; undo the claim on failure.
+        const runId = one(body.run) === null ? null : intOf(body.run);
+        if (one(body.run) !== null && runId === null) return refuse(400, "schedule.err.badRequest");
+        if (runId !== null && !(await claimRun(db, runId, id))) return to(id, { done: "already-done" });
+        const botReady = async () => botGate.engine() !== "absent" && (await botGate.runtimeOn(db));
+        const r = action === "resume" ? await resumeSchedule(db, id) : await runScheduleNow(db, id, { botReady });
+        if (!r.ok && runId !== null) await releaseRun(db, runId);
+        return result(id, r, action === "resume" ? "resumed" : r.kind === "bot_routine" ? (r.already ? "already-queued" : "queued") : "ran");
       } else if (action === "delete") {
         // Step one only opens the confirm (real page text, no window.confirm); step two deletes.
         if (one(body.confirm) !== "1") return to(id, { confirm: "delete" });
@@ -130,11 +147,12 @@ export default {
 
     const model = await buildScheduleModel(db, {
       lang, selected,
-      engine: () => { try { return engineStatus().state; } catch { return "ready"; } },
-      runtimeOn: () => botRuntimeActive(db),
+      engine: () => botGate.engine(),
+      runtimeOn: () => botGate.runtimeOn(db),
     });
     // An id that is not (or no longer) a schedule: the plain page.
-    if (selected !== null && !model.detail && (idParam || runParam !== null) && !one(query.error) && !one(query.done)) { res.redirect(ROUTE); return; }
+    // An id or run that is not (or no longer) a schedule's: the plain page, saying so.
+    if (!model.detail && (idParam || runParam !== null) && !one(query.error) && !one(query.done)) { res.redirect(ROUTE + "?error=not-found"); return; }
 
     const done = DONE[one(query.done)] ? t(DONE[one(query.done)], lang) : null;
     const errKey = ERRORS[one(query.error)];

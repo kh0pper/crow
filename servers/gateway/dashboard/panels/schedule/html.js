@@ -8,7 +8,7 @@
  */
 import { escapeHtml } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
-import { localYmd, fromDayNum, fmtYmd } from "../../../../shared/relative-dates.js";
+import { localYmd, dayNum, fromDayNum, fmtYmd } from "../../../../shared/relative-dates.js";
 
 const esc = (v) => escapeHtml(v === null || v === undefined ? "" : String(v));
 const ROUTE = "/dashboard/schedule";
@@ -119,7 +119,7 @@ function fixButton(m, p, f, ctx) {
   const label = t(FIX_LABEL[f.act === "link" ? f.label : f.act], m.lang);
   if (f.act === "link") return `<a class="${cls}" href="${esc(f.href)}">${esc(label)}${ctx ? vh(ctx) : ""}</a>`;
   if (f.act === "ack-run") return postButton(m, "ack-run", { run: p.runId }, label, { cls, ctx });
-  return postButton(m, f.act, { id: p.scheduleId }, label, { cls, ctx });
+  return postButton(m, f.act, f.settles && p.runId ? { id: p.scheduleId, run: p.runId } : { id: p.scheduleId }, label, { cls, ctx });
 }
 
 function strip(m) {
@@ -222,7 +222,7 @@ function detail(m) {
 
 // ---------------------------------------------------------------- agenda
 
-function rowHtml(it, m, { group } = {}) {
+function rowHtml(it, m, { group, day = null } = {}) {
   const { lang } = m;
   const sel = m.detail && m.detail.item.id === it.id;
   let at = "";
@@ -230,7 +230,9 @@ function rowHtml(it, m, { group } = {}) {
     at = m.running.has(it.id) ? esc(t("schedule.runningNow", lang)) : it.nextRun !== null ? `${esc(t("schedule.dueAt", lang))} ${timeTag(it.nextRun, fmt(it.nextRun, it.zone, lang, DAY_TIME))}` : "";
   } else if (group === "later") at = it.nextRun !== null ? timeTag(it.nextRun, fmt(it.nextRun, it.zone, lang, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })) : "";
   else if (group === "done") at = it.lastRun !== null ? timeTag(it.lastRun, fmt(it.lastRun, it.zone, lang, DAY_TIME)) : "";
-  else if (group === "day") at = timeTag(it.nextRun, fmt(it.nextRun, it.zone, lang, TIME));
+  // A schedule in another zone can fall on another local date than its instance-zone day group:
+  // then its own weekday is shown with the time.
+  else if (group === "day") at = timeTag(it.nextRun, fmt(it.nextRun, it.zone, lang, day !== null && dayNum(localYmd(it.nextRun, it.zone)) !== day ? DAY_TIME : TIME));
   else if (group === "frequent") at = esc(cadenceText(it, lang));
   const meta = [cadenceText(it, lang)];
   if (it.kind === "bot_routine" && it.bot && it.title !== it.bot.display_name) meta.push(it.bot.display_name);
@@ -264,7 +266,7 @@ function agenda(m) {
   if (g.now.length) parts.push(`<section class="sc-day" aria-labelledby="sc-day-now"><h3 class="sc-day-h" id="sc-day-now">${esc(t("schedule.now", lang))}</h3><ul class="sc-list">${g.now.map((it) => rowHtml(it, m, { group: "now" })).join("")}</ul></section>`);
   for (const d of g.days) {
     const id = `sc-day-${d.offset}`;
-    parts.push(`<section class="sc-day" aria-labelledby="${id}">${dayHeading(d, m).replace("<h3 ", `<h3 id="${id}" `)}<ul class="sc-list">${d.items.map((it) => rowHtml(it, m, { group: "day" })).join("")}</ul></section>`);
+    parts.push(`<section class="sc-day" aria-labelledby="${id}">${dayHeading(d, m).replace("<h3 ", `<h3 id="${id}" `)}<ul class="sc-list">${d.items.map((it) => rowHtml(it, m, { group: "day", day: d.ymdNum })).join("")}</ul></section>`);
   }
   const anyUpcoming = g.now.length || g.days.length || g.later.length || g.frequent.length;
   if (!anyUpcoming) {

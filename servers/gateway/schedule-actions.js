@@ -113,9 +113,10 @@ export async function resumeSchedule(db, id, { now = Date.now() } = {}) {
  * Run now. A reminder is delivered now (scheduler.runNow records a run-now run). A bot routine
  * enqueues one bot_jobs row (source 'schedule'), unless one is still queued for it, and records a
  * run-now run carrying the job id; the job's own status is read at render time. Neither changes
- * next_run.
+ * next_run. `botReady()` says whether bots run here at all (engine installed, runtime on): a job
+ * nobody will ever run is refused as cant-run, never reported as queued.
  */
-export async function runScheduleNow(db, id, { now = Date.now() } = {}) {
+export async function runScheduleNow(db, id, { now = Date.now(), botReady = async () => true } = {}) {
   const row = await rowOf(db, id);
   if (!row) return { ok: false, code: "not-found" };
   const kind = scheduleKind(row.task);
@@ -132,6 +133,7 @@ export async function runScheduleNow(db, id, { now = Date.now() } = {}) {
   let def = null;
   try { def = (await db.execute({ sql: "SELECT enabled FROM pi_bot_defs WHERE bot_id = ?", args: [botId] })).rows[0] || null; } catch { def = null; }
   if (!def || !Number(def.enabled)) return { ok: false, code: "cant-run" };
+  if (!(await botReady())) return { ok: false, code: "cant-run", why: "no-runtime" };
   let queued;
   try { queued = (await db.execute({ sql: "SELECT job_id FROM bot_jobs WHERE schedule_id = ? AND status = 'queued' LIMIT 1", args: [id] })).rows[0]; } catch { return { ok: false, code: "cant-run" }; }
   if (queued) return { ok: true, kind, already: true, jobId: queued.job_id };
@@ -166,11 +168,35 @@ export async function deleteScheduleRow(db, id) {
   const kind = scheduleKind(row.task);
   if (kind === "briefing") return { ok: false, code: "owned" };
   const guard = kind === "bot_routine" ? " AND task LIKE 'pipeline:botcron:%'" : "";
+  const ours = `EXISTS (SELECT 1 FROM schedules WHERE id = ? AND task = ?${guard})`;
   const stmts = [];
-  if (await hasRunsTable(db)) stmts.push({ sql: `DELETE FROM schedule_runs WHERE schedule_id = ? AND EXISTS (SELECT 1 FROM schedules WHERE id = ? AND task = ?${guard})`, args: [id, id, row.task] });
+  if (await hasRunsTable(db)) stmts.push({ sql: `DELETE FROM schedule_runs WHERE schedule_id = ? AND ${ours}`, args: [id, id, row.task] });
+  // A routine's jobs still waiting in the queue go with it (running and finished ones stay as history).
+  if (kind === "bot_routine" && (await hasBotJobs(db))) stmts.push({ sql: `DELETE FROM bot_jobs WHERE schedule_id = ? AND status = 'queued' AND ${ours}`, args: [id, id, row.task] });
   stmts.push({ sql: `DELETE FROM schedules WHERE id = ? AND task = ?${guard}`, args: [id, row.task] });
   const res = await db.batch(stmts, "write");
   return Number(res.at(-1)?.rowsAffected || 0) > 0 ? { ok: true, row } : { ok: false, code: "not-found" };
+}
+
+async function hasBotJobs(db) {
+  try { return (await db.execute({ sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_jobs'", args: [] })).rows.length > 0; } catch { return false; }
+}
+
+/**
+ * A strip fix that settles a run (Run now on a missed or failed run, Turn back on after an
+ * upgrade pause) claims that run first: acknowledged_at is set only if it was still open and the
+ * run belongs to this schedule. → true when this request claimed it. A second click (or a
+ * second tab) finds it claimed and does nothing, so a reminder is never sent twice.
+ */
+export async function claimRun(db, runId, scheduleId, { now = Date.now() } = {}) {
+  if (!Number.isInteger(runId) || runId <= 0 || !(await hasRunsTable(db))) return false;
+  const r = await db.execute({ sql: "UPDATE schedule_runs SET acknowledged_at = ? WHERE id = ? AND schedule_id = ? AND acknowledged_at IS NULL", args: [iso(now), runId, scheduleId] });
+  return Number(r.rowsAffected || 0) === 1;
+}
+
+/** Undo a claim when the fix itself failed, so the problem stays in the strip. */
+export async function releaseRun(db, runId) {
+  await db.execute({ sql: "UPDATE schedule_runs SET acknowledged_at = NULL WHERE id = ?", args: [runId] });
 }
 
 /** Dismiss a run (a missed window, a failure, an upgrade pause): it leaves the strip. */

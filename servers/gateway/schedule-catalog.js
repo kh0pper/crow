@@ -222,8 +222,10 @@ const SEVERITY = { error: 0, warning: 1 };
 
 /**
  * The problems strip, errors before warnings. Each is
- *   { code, severity, scheduleId?, runId?, item?, run?, fixes: [{ act, href? }] }
+ *   { code, severity, scheduleId?, runId?, item?, run?, fixes: [{ act, href?, settles? }] }
  * where act is a POST action (run-now, ack-run, pause, resume, delete) or "link" (with href).
+ * A fix with `settles` also dismisses the problem's run when it works (it posts run=<runId>),
+ * so the problem leaves the strip and a second click cannot send again.
  */
 export function problemsFor(items, { now, runsBy = new Map(), jobsBy = new Map(), notifTypes = DEFAULT_TYPES, engine = "ready", botDefsTable = true, runtimeOn = true, grace = graceMs() }) {
   const out = [];
@@ -237,15 +239,15 @@ export function problemsFor(items, { now, runsBy = new Map(), jobsBy = new Map()
       if (r.acknowledged_at) return;
       if (r.status === "missed") {
         out.push({ code: "missed", severity: "warning", scheduleId: id, runId: Number(r.id), item: it, run: r,
-          fixes: [...(runnable(it) ? [{ act: "run-now" }] : []), { act: "ack-run" }] });
+          fixes: [...(runnable(it) ? [{ act: "run-now", settles: true }] : []), { act: "ack-run" }] });
       } else if (r.status === "paused" && r.source === "upgrade") {
         const fixes = [];
-        if (!it.enabled && it.kind !== "system") fixes.push({ act: "resume" });
+        if (!it.enabled && it.kind !== "system") fixes.push({ act: "resume", settles: true });
         fixes.push({ act: "delete" }, { act: "ack-run" });
         out.push({ code: "paused-upgrade", severity: "warning", scheduleId: id, runId: Number(r.id), item: it, run: r, fixes });
       } else if (idx === 0 && (r.status === "failed" || r.job_status === "failed")) {
         // The LATEST run failed (an older failure followed by a good run is not a problem).
-        const fixes = [...(runnable(it) ? [{ act: "run-now" }] : [])];
+        const fixes = [...(runnable(it) ? [{ act: "run-now", settles: true }] : [])];
         if (it.kind === "bot_routine" && r.job_id) fixes.push({ act: "link", href: `/dashboard/bot-builder?bot=${encodeURIComponent(it.botId)}&tab=activity`, label: "openJob" });
         fixes.push({ act: "ack-run" });
         out.push({ code: "failed", severity: "error", scheduleId: id, runId: Number(r.id), item: it, run: r, fixes });

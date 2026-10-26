@@ -316,6 +316,33 @@ test("run now: a bot routine enqueues one job (coalesced while queued) with a ru
   assert.equal((await all("SELECT next_run FROM schedules WHERE id = ?", [id]))[0].next_run, iso(NOW - HOUR), "next_run untouched");
 });
 
+test("run now refuses a bot routine when bots don't run here (no engine / runtime off)", async () => {
+  await bot("lab-triage");
+  const id = await seed("pipeline:botcron:lab-triage", "0 9 * * *", iso(NOW + HOUR), { description: JSON.stringify({ goal: "triage" }) });
+  const r = await runScheduleNow(db, id, { now: NOW, botReady: async () => false });
+  assert.equal(r.code, "cant-run");
+  assert.equal((await all("SELECT COUNT(*) AS n FROM bot_jobs"))[0].n, 0);
+});
+
+test("delete of a bot routine also drops its queued jobs (running and finished ones stay)", async () => {
+  await bot("lab-triage");
+  const id = await seed("pipeline:botcron:lab-triage", "0 9 * * *", iso(NOW + HOUR), { description: JSON.stringify({ goal: "triage" }) });
+  await db.execute({ sql: "INSERT INTO bot_jobs (job_id, bot_id, goal, status, source, schedule_id) VALUES ('j-q', 'lab-triage', 'g', 'queued', 'schedule', ?), ('j-d', 'lab-triage', 'g', 'completed', 'schedule', ?)", args: [id, id] });
+  assert.equal((await deleteScheduleRow(db, id)).ok, true);
+  assert.deepEqual((await all("SELECT job_id FROM bot_jobs ORDER BY job_id")).map((r) => r.job_id), ["j-d"]);
+});
+
+test("claimRun: once per open run of that schedule; releaseRun reopens it", async () => {
+  const { claimRun, releaseRun } = await import("../servers/gateway/schedule-actions.js");
+  const id = await seed("reminder:x", "0 9 * * *", "2026-10-27T09:00:00.000Z");
+  const run = Number((await db.execute({ sql: "INSERT INTO schedule_runs (schedule_id, status) VALUES (?, 'missed')", args: [id] })).lastInsertRowid);
+  assert.equal(await claimRun(db, run, id + 1, { now: NOW }), false, "another schedule's run");
+  assert.equal(await claimRun(db, run, id, { now: NOW }), true);
+  assert.equal(await claimRun(db, run, id, { now: NOW }), false);
+  await releaseRun(db, run);
+  assert.equal(await claimRun(db, run, id, { now: NOW }), true);
+});
+
 test("run now refuses a bot routine that can't run and a system row", async () => {
   const ghost = await seed("pipeline:botcron:ghost", "0 9 * * *", iso(NOW + HOUR), { description: JSON.stringify({ goal: "x" }) });
   assert.equal((await runScheduleNow(db, ghost, { now: NOW })).code, "cant-run");

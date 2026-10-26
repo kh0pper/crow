@@ -3595,6 +3595,7 @@ export const translations = {
   "schedule.toast.queued": { en: "Queued: the bot starts on it shortly.", es: "En cola: el bot empezará en breve." },
   "schedule.toast.alreadyQueued": { en: "A run is already waiting for the bot.", es: "Ya hay una ejecución esperando al bot." },
   "schedule.toast.deleted": { en: "Deleted, with its run history.", es: "Borrado, junto con su historial." },
+  "schedule.toast.alreadyDone": { en: "Already done: that fix was used a moment ago.", es: "Ya está hecho: ese arreglo se usó hace un momento." },
   "schedule.toast.dismissed": { en: "Dismissed.", es: "Descartado." },
   "schedule.err.notFound": { en: "That schedule no longer exists.", es: "Esa programación ya no existe." },
   "schedule.err.owned": { en: "The daily briefing is changed in News → Briefings.", es: "El resumen diario se cambia en Noticias → Resúmenes." },

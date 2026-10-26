@@ -16,11 +16,14 @@ execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, 
 process.env.CROW_DATA_DIR = tmpDir;
 const { createDbClient } = await import("../servers/db.js");
 const db = createDbClient(join(tmpDir, "crow.db"));
-const { default: panel, schedulePreview, isOwnerRequest } = await import("../servers/gateway/dashboard/panels/schedule.js");
+const { default: panel, schedulePreview, isOwnerRequest, _setBotGateForTest } = await import("../servers/gateway/dashboard/panels/schedule.js");
+const { createHash } = await import("node:crypto");
+const { cronNext } = await import("../servers/shared/schedule-core.js");
 const { translations } = await import("../servers/gateway/dashboard/shared/i18n.js");
 const { SCHEDULE_CSS } = await import("../servers/gateway/dashboard/panels/schedule/css.js");
 const { _setNowForTest } = await import("../servers/gateway/scheduler.js");
-after(() => { _setNowForTest(null); try { db.close(); } catch {} rmSync(tmpDir, { recursive: true, force: true }); });
+_setBotGateForTest({ engine: () => "ready", runtimeOn: async () => true });
+after(() => { _setBotGateForTest(null); _setNowForTest(null); try { db.close(); } catch {} rmSync(tmpDir, { recursive: true, force: true }); });
 
 const all = async (sql, args = []) => (await db.execute({ sql, args })).rows;
 const HOUR = 3_600_000;
@@ -34,6 +37,11 @@ beforeEach(async () => {
   ]);
   await db.execute({ sql: "INSERT INTO dashboard_settings (key, value) VALUES ('instance_timezone', 'UTC')", args: [] });
   await db.execute({ sql: "INSERT INTO dashboard_settings (key, value) VALUES ('feature_flags', ?)", args: [JSON.stringify({ bot_runtime: true })] });
+  // Sessions as dashboard/auth.js stores them: a local password login and a peer sign-in (SSO).
+  await db.execute("DELETE FROM oauth_tokens WHERE client_id = 'dashboard'");
+  const hash = (t) => createHash("sha256").update(t).digest("hex");
+  const until = new Date(Date.now() + 3_600_000).toISOString();
+  await db.execute({ sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard', ?), (?, 'access', 'dashboard', 'dashboard sso', ?)", args: [hash("sess-local"), until, hash("sess-sso"), until] });
 });
 
 async function seed(task, cron, nextRun, { tz = null, enabled = 1, description = null } = {}) {
@@ -42,9 +50,9 @@ async function seed(task, cron, nextRun, { tz = null, enabled = 1, description =
 }
 
 /** Call the handler like the dashboard router does. → { status, html, location, json } */
-async function call({ method = "GET", query = {}, body = {}, lang = "en", owner = true } = {}) {
+async function call({ method = "GET", query = {}, body = {}, lang = "en", session = "sess-local" } = {}) {
   const out = { status: 200, html: null, location: null, json: null };
-  const req = { method, query, body, csrfToken: "tok123", dashboardSession: owner ? "sess" : undefined };
+  const req = { method, query, body, csrfToken: "tok123", dashboardSession: session || undefined };
   const res = {
     headersSent: false,
     status(n) { out.status = n; return this; },
@@ -93,12 +101,16 @@ test("every POST form carries the CSRF field", async () => {
   for (const f of forms) assert.match(f, /name="_csrf" value="tok123"/, f.slice(0, 120));
 });
 
-test("writes are owner-only: a POST without the owner's session is refused and changes nothing", async () => {
+test("writes are owner-only: no session, a peer sign-in (SSO) session and a signed peer call get 403 and change nothing", async () => {
   const id = await seed("reminder:x", "0 9 * * *", iso(Date.now() + HOUR));
-  const r = await post({ action: "pause", id: String(id) }, { owner: false });
-  assert.equal(r.status, 403);
+  for (const session of [null, "sess-sso", "not-a-session"]) {
+    const r = await post({ action: "pause", id: String(id) }, { session });
+    assert.equal(r.status, 403, String(session));
+  }
   assert.equal((await all("SELECT enabled FROM schedules WHERE id = ?", [id]))[0].enabled, 1);
-  assert.equal(isOwnerRequest({ dashboardSession: "s", crossHostAuth: true }), false);
+  assert.equal(await isOwnerRequest({ dashboardSession: "sess-local", crossHostAuth: true }), false);
+  assert.equal(await isOwnerRequest({ dashboardSession: "sess-local" }), true);
+  assert.equal((await post({ action: "pause", id: String(id) })).status, 303, "the local password session may write");
 });
 
 test("a repeated field (an array) is a 400, never a guess", async () => {
@@ -237,9 +249,85 @@ test("?run=<id> (a notification's link) opens that run's schedule", async () => 
   assert.match(r.html, /Missed the .* run while Crow wasn/);
 });
 
-test("an unknown id redirects to the plain page", async () => {
-  const r = await call({ query: { id: "crow:99999" } });
-  assert.equal(r.location, "/dashboard/schedule");
+test("an unknown ?id= or ?run= redirects to the plain page with a note", async () => {
+  assert.equal((await call({ query: { id: "crow:99999" } })).location, "/dashboard/schedule?error=not-found");
+  assert.equal((await call({ query: { run: "99999" } })).location, "/dashboard/schedule?error=not-found");
+  const r = await call({ query: { error: "not-found" } });
+  assert.match(r.html, /role="alert">That schedule no longer exists\./);
+});
+
+const stripOf = (html) => (html.match(/<section class="sc-attn[\s\S]*?<\/section>/) || [""])[0];
+const reminderNotes = async () => (await all("SELECT COUNT(*) AS n FROM notifications WHERE source = 'scheduler'"))[0].n;
+
+test("Run now on a missed run: posts its run id, sends once, clears the strip; a second click sends nothing", async () => {
+  const id = await seed("reminder:stretch", "0 9 * * *", iso(Date.now() + HOUR));
+  const run = Number((await db.execute({ sql: "INSERT INTO schedule_runs (schedule_id, status, scheduled_for, missed_count) VALUES (?, 'missed', '2026-10-20T09:00:00.000Z', 1)", args: [id] })).lastInsertRowid);
+  const strip = stripOf((await call()).html);
+  assert.match(strip, new RegExp(`name="action" value="run-now"><input type="hidden" name="id" value="${id}"><input type="hidden" name="run" value="${run}">`));
+  const first = await post({ action: "run-now", id: String(id), run: String(run) });
+  assert.match(first.location, /done=ran/);
+  assert.equal(await reminderNotes(), 1);
+  assert.match(stripOf((await call()).html), /Everything is on schedule/);
+  const second = await post({ action: "run-now", id: String(id), run: String(run) });
+  assert.match(second.location, /done=already-done/);
+  assert.equal(await reminderNotes(), 1, "the second click does not send again");
+});
+
+test("Run now on a missed run that fails keeps the problem (the claim is undone)", async () => {
+  await db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES ('off-bot', 'Off', '{}', 0)", args: [] });
+  const id = await seed("pipeline:botcron:off-bot", "0 9 * * *", iso(Date.now() + HOUR), { description: JSON.stringify({ goal: "x" }) });
+  const run = Number((await db.execute({ sql: "INSERT INTO schedule_runs (schedule_id, status, scheduled_for, missed_count) VALUES (?, 'missed', '2026-10-20T09:00:00.000Z', 1)", args: [id] })).lastInsertRowid);
+  const r = await post({ action: "run-now", id: String(id), run: String(run) });
+  assert.match(r.location, /error=cant-run/);
+  assert.equal((await all("SELECT acknowledged_at FROM schedule_runs WHERE id = ?", [run]))[0].acknowledged_at, null);
+});
+
+test("Turn back on after an upgrade pause: resumes, clears the strip; a second click is a no-op", async () => {
+  const id = await seed("check the logs", "0 * * * *", null, { enabled: 0 });
+  const run = Number((await db.execute({ sql: "INSERT INTO schedule_runs (schedule_id, status, source, scheduled_for, detail) VALUES (?, 'paused', 'upgrade', 'upgrade:0009', ?)", args: [id, JSON.stringify({ reason: "frequent", every_min: 5 })] })).lastInsertRowid);
+  assert.match(stripOf((await call()).html), new RegExp(`value="resume"><input type="hidden" name="id" value="${id}"><input type="hidden" name="run" value="${run}">`));
+  assert.match((await post({ action: "resume", id: String(id), run: String(run) })).location, /done=resumed/);
+  const [row] = await all("SELECT enabled, next_run FROM schedules WHERE id = ?", [id]);
+  assert.equal(row.enabled, 1); assert.ok(row.next_run);
+  assert.match(stripOf((await call()).html), /Everything is on schedule/);
+  await db.execute({ sql: "UPDATE schedules SET enabled = 0 WHERE id = ?", args: [id] });
+  assert.match((await post({ action: "resume", id: String(id), run: String(run) })).location, /done=already-done/);
+  assert.equal((await all("SELECT enabled FROM schedules WHERE id = ?", [id]))[0].enabled, 0, "the second click changed nothing");
+});
+
+test("a run id that belongs to another schedule settles nothing", async () => {
+  const a = await seed("reminder:a", "0 9 * * *", iso(Date.now() + HOUR));
+  const b = await seed("reminder:b", "0 9 * * *", iso(Date.now() + HOUR));
+  const run = Number((await db.execute({ sql: "INSERT INTO schedule_runs (schedule_id, status) VALUES (?, 'missed')", args: [b] })).lastInsertRowid);
+  assert.match((await post({ action: "run-now", id: String(a), run: String(run) })).location, /done=already-done/);
+  assert.equal(await reminderNotes(), 0);
+  assert.equal((await all("SELECT acknowledged_at FROM schedule_runs WHERE id = ?", [run]))[0].acknowledged_at, null);
+});
+
+test("Run now on a bot routine when the bot runtime is off (or no engine) is refused, never 'Queued'", async () => {
+  await db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES ('lab-triage', 'Lab triage', '{}', 1)", args: [] });
+  const id = await seed("pipeline:botcron:lab-triage", "0 9 * * *", iso(Date.now() + HOUR), { description: JSON.stringify({ goal: "triage" }) });
+  for (const gate of [{ runtimeOn: async () => false }, { engine: () => "absent" }]) {
+    _setBotGateForTest({ engine: () => "ready", runtimeOn: async () => true, ...gate });
+    try {
+      const r = await post({ action: "run-now", id: String(id) });
+      assert.match(r.location, /error=cant-run/);
+    } finally { _setBotGateForTest({ engine: () => "ready", runtimeOn: async () => true }); }
+  }
+  assert.equal((await all("SELECT COUNT(*) AS n FROM bot_jobs"))[0].n, 0);
+});
+
+test("a day row in another zone whose local date differs from its day group shows its weekday", async () => {
+  const now = Date.now();
+  const next = cronNext("0 9 * * *", "Pacific/Kiritimati", now); // UTC+14: 09:00 there is 19:00 UTC the day before
+  const id = await seed("reminder:island call", "0 9 * * *", iso(next), { tz: "Pacific/Kiritimati" });
+  const html = (await call()).html;
+  const at = html.match(new RegExp(`id="sc-${id}"><a class="sc-hit"[^>]*><span class="sc-at">([\\s\\S]*?)</span>`))[1];
+  const weekday = new Intl.DateTimeFormat("en-US", { timeZone: "Pacific/Kiritimati", weekday: "short" }).format(new Date(next));
+  assert.match(at, new RegExp(`${weekday} 9:00 AM`), at);
+  const local = await seed("reminder:here", "0 15 * * *", iso(cronNext("0 15 * * *", "UTC", now)));
+  const at2 = (await call()).html.match(new RegExp(`id="sc-${local}"><a class="sc-hit"[^>]*><span class="sc-at">([\\s\\S]*?)</span>`))[1];
+  assert.match(at2, />3:00 PM</, "same date: time only");
 });
 
 test("every button, link-button, switch and summary sits in a ≥ 44px rule", () => {

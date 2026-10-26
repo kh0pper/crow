@@ -22,8 +22,11 @@ const { createDbClient } = await import("../servers/db.js");
 const { csrfMiddleware } = await import("../servers/gateway/dashboard/shared/csrf.js");
 const { renderLayout } = await import("../servers/gateway/dashboard/shared/layout.js");
 const { playerBarHtml } = await import("../servers/gateway/dashboard/shared/player.js");
-const { default: panel, schedulePreview } = await import("../servers/gateway/dashboard/panels/schedule.js");
-const { cronNext, cronPrev } = await import("../servers/shared/schedule-core.js");
+const { default: panel, schedulePreview, _setBotGateForTest } = await import("../servers/gateway/dashboard/panels/schedule.js");
+const { cronNext, cronPrev, hostZone } = await import("../servers/shared/schedule-core.js");
+const { createHash } = await import("node:crypto");
+// Bots run here (the strip shows the runner problem, not "engine missing" on a box without pi).
+_setBotGateForTest({ engine: () => "ready", runtimeOn: async () => true });
 const db = createDbClient(join(process.env.CROW_DATA_DIR, "crow.db"));
 
 const MIN = 60_000, HOUR = 3_600_000, DAY = 86_400_000;
@@ -36,6 +39,8 @@ async function fixture() {
     "DELETE FROM dashboard_settings WHERE key IN ('instance_timezone','feature_flags','notification_prefs')",
   ]);
   await db.execute({ sql: "INSERT INTO dashboard_settings (key, value) VALUES ('instance_timezone', 'UTC'), ('feature_flags', ?)", args: [JSON.stringify({ bot_runtime: true })] });
+  // The test login is a local password session, as dashboard/auth.js stores one.
+  await db.execute({ sql: "INSERT OR REPLACE INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard', ?)", args: [createHash("sha256").update("good").digest("hex"), new Date(Date.now() + 86_400_000).toISOString()] });
   await db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES ('lab-triage', 'Lab triage', '{}', 1), ('inbox-helper', 'Inbox helper', '{}', 1)", args: [] });
   const now = Date.now();
   const seed = async (key, task, cron, next, extra = {}) => {
@@ -52,8 +57,9 @@ async function fixture() {
   await seed("call", "reminder:Call the dentist back about Thursday", "@once", iso(now + 2 * DAY + 3 * HOUR));
   await seed("rent", "reminder:Pay the rent", "0 9 1 * *", next("0 9 1 * *"));
   await seed("briefing", "media:briefing", "0 7 * * *", next("0 7 * * *"));
-  await seed("triage", "pipeline:botcron:lab-triage", "0 8 * * *", iso(cronPrev("0 8 * * *", "UTC", now - 10 * MIN)), { description: JSON.stringify({ goal: "Sort the overnight alerts and post a summary", label: "Morning lab triage" }) });
-  await seed("inbox", "pipeline:botcron:inbox-helper", "*/30 * * * *", next("*/30 * * * *"), { description: JSON.stringify({ goal: "File new mail" }) });
+  // Bot routines run in the host zone (the bot ticker has no zone yet), so they are seeded in it.
+  await seed("triage", "pipeline:botcron:lab-triage", "0 8 * * *", iso(cronPrev("0 8 * * *", hostZone(), now - 10 * MIN)), { description: JSON.stringify({ goal: "Sort the overnight alerts and post a summary", label: "Morning lab triage" }) });
+  await seed("inbox", "pipeline:botcron:inbox-helper", "*/30 * * * *", next("*/30 * * * *", hostZone()), { description: JSON.stringify({ goal: "File new mail" }) });
   await seed("noisy", "check the logs", "*/5 * * * *", null, { enabled: 0 });
   await seed("old", "reminder:Water the balcony plants", "0 18 * * *", next("0 18 * * *"), { enabled: 0 });
   await seed("done", "reminder:Pick up the parcel", "@once", iso(now - DAY), { enabled: 0, lastRun: iso(now - DAY + 10_000) });
@@ -87,7 +93,7 @@ before(async () => {
   s.base = `http://127.0.0.1:${s.http.address().port}`;
   chrome = await startHeadlessChrome();
 });
-after(async () => { s.http?.closeAllConnections?.(); s.http?.close(); if (chrome) await chrome.close(); try { db.close(); } catch {} rmSync(scratch, { recursive: true, force: true }); });
+after(async () => { _setBotGateForTest(null); s.http?.closeAllConnections?.(); s.http?.close(); if (chrome) await chrome.close(); try { db.close(); } catch {} rmSync(scratch, { recursive: true, force: true }); });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function waitFor(fn, ms = 10000) { const end = Date.now() + ms; while (Date.now() < end) { let v; try { v = await fn(); } catch {} if (v) return v; await sleep(100); } return null; }
