@@ -48,6 +48,7 @@ import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVoc
 import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { wrapPiSpawn } from "./pi_sandbox.mjs";
+import { piLabSupportsSecretValuesFd } from "./pi-lab-compat.mjs";
 import { refreshSecretValuesFile } from "../../servers/shared/secret-values-collect.js";
 import { SECRET_VALUES_DISPLAY_FILENAME, SECRET_VALUES_FILENAME, anchoredPath, checkedInstanceSecretsDirs, getCardValues, rememberInstanceSecretsDirs, secretValuesPayload, secretsDir, secretsDirCurrentPath } from "../../servers/shared/secret-values.js";
 import { maskSecrets } from "../../servers/shared/secret-mask.js";
@@ -543,7 +544,9 @@ export class PiRpc {
     // only the engine names it. The file stays named as pi-lab's fallback.
     // Without bubblewrap there is no card set (see cardTrusted), so no fd.
     delete launch.env.PI_BOT_SECRET_VALUES_FD;
-    const valuesPayload = hidden ? secretValuesPayload(getCardValues()) : null;
+    // Only a pi-lab that declares it reads (and closes) the fd gets one: an
+    // older pi-lab would leave the pipe open in pi for the whole session.
+    const valuesPayload = hidden && piLabSupportsSecretValuesFd() ? secretValuesPayload(getCardValues()) : null;
     if (valuesPayload != null) launch.env.PI_BOT_SECRET_VALUES_FD = String(SECRET_VALUES_FD);
     this.sandboxed = launch.sandboxed;
     this.sandboxWrapper = launch.wrapper;

@@ -131,3 +131,26 @@ export function warnIfPiLabIncompatible(log = (m) => console.warn(m), { onlyProb
   }
   return r;
 }
+
+/**
+ * The capability marker for pi-lab's secret-values fd (approval-card secret
+ * masking, option (a), 2026-10-26): pi-lab's extensions/shared/secret-mask.ts
+ * contains the literal SECRET_VALUES_FD_SUPPORT (e.g. `export const
+ * SECRET_VALUES_FD_SUPPORT = 1;`) once loadSecretValues() reads
+ * PI_BOT_SECRET_VALUES_FD to EOF at extension load and closes it. A pi-lab
+ * without it would never drain or close the pipe, so the bridge sends nothing
+ * on the fd then. Never throws; unknown means no.
+ */
+export const SECRET_VALUES_FD_MARKER = "SECRET_VALUES_FD_SUPPORT";
+let fdSupportCache = null;   // { at, dir, ok }
+
+export function piLabSupportsSecretValuesFd({ env = process.env, now = Date.now() } = {}) {
+  const dir = findPiLabDir({ env });
+  if (fdSupportCache && fdSupportCache.dir === dir && now - fdSupportCache.at < PI_LAB_COMPAT_TTL_MS) return fdSupportCache.ok;
+  let ok = false;
+  if (dir) {
+    try { ok = readFileSync(join(dir, "extensions", "shared", "secret-mask.ts"), "utf8").includes(SECRET_VALUES_FD_MARKER); } catch { ok = false; }
+  }
+  fdSupportCache = { at: now, dir, ok };
+  return ok;
+}

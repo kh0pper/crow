@@ -55,6 +55,14 @@ const SANDBOX = probePiSandbox({ force: true });
 const noSandbox = SANDBOX.ok ? false : "pi sandbox unavailable here: " + SANDBOX.reason;
 const PATH = secretValuesPath(process.env);
 
+/** A pi-lab checkout stand-in, with or without the fd capability marker. */
+function fakePiLab(supports) {
+  const d = mkdtempSync(join(tmpdir(), "crow-fake-pilab-"));
+  mkdirSync(join(d, "extensions", "shared"), { recursive: true });
+  writeFileSync(join(d, "extensions", "shared", "secret-mask.ts"), supports ? "export const SECRET_VALUES_FD_SUPPORT = 1;\n" : "// an older pi-lab\n");
+  return d;
+}
+
 function scratch() { const d = mkdtempSync(join(tmpdir(), "crow-secret-spawn-")); mkdirSync(join(d, "sessions"), { recursive: true }); return d; }
 
 /** Spawn a stub pi that reports its env var and what a shell inside sees at the engine's path. */
@@ -382,6 +390,7 @@ test("sandboxed: the card set arrives on PI_BOT_SECRET_VALUES_FD; a child of pi 
     "setTimeout(() => process.exit(0), 50);",
   ].join("\n"));
   process.env.PI_BOT_SECRET_VALUES_FD = "9";
+  process.env.PIBOT_PI_LAB_DIR = fakePiLab(true);
   const prev = process.env.CROW_PI_SANDBOX;
   process.env.CROW_PI_SANDBOX = "auto";
   try {
@@ -395,6 +404,30 @@ test("sandboxed: the card set arrives on PI_BOT_SECRET_VALUES_FD; a child of pi 
     assert.equal(r.after.split(" ").includes("5"), false);
   } finally {
     delete process.env.PI_BOT_SECRET_VALUES_FD;
+    delete process.env.PIBOT_PI_LAB_DIR;
+    if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
+  }
+});
+
+test("sandboxed: a pi-lab that does not declare SECRET_VALUES_FD_SUPPORT gets no fd at all (it would never read and close it)", { skip: noSandbox }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-secret-oldpi-"));
+  mkdirSync(join(dir, "sessions"), { recursive: true });
+  const stub = join(dir, "stub-pi.mjs");
+  writeFileSync(stub, [
+    'import { readdirSync } from "node:fs";',
+    'process.stdout.write(JSON.stringify({ type: "report", tag: "oldpi", n: process.env.PI_BOT_SECRET_VALUES_FD || null, fds: readdirSync("/proc/self/fd") }) + "\\n");',
+    "setTimeout(() => process.exit(0), 50);",
+  ].join("\n"));
+  process.env.PIBOT_PI_LAB_DIR = fakePiLab(false);
+  const prev = process.env.CROW_PI_SANDBOX;
+  process.env.CROW_PI_SANDBOX = "auto";
+  try {
+    const pi = new PiRpc({ def: {}, sessionDir: dir, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: process.execPath, cliPath: stub, diagLog: () => {} });
+    const r = await pi.waitFor((m) => m.type === "report" && m.tag === "oldpi", 10000, "oldpi");
+    await pi.exited;
+    assert.equal(r.n, null, "no PI_BOT_SECRET_VALUES_FD, so no values pipe (fd 5 may be one of node's own)");
+  } finally {
+    delete process.env.PIBOT_PI_LAB_DIR;
     if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
   }
 });
