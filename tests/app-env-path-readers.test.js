@@ -9,14 +9,24 @@ import { join, resolve } from "node:path";
 
 const REPO = resolve(import.meta.dirname, "..");
 
-test("env-manager resolveEnvPath honors CROW_APP_ENV_PATH first", async () => {
-  const { resolveEnvPath } = await import("../servers/gateway/env-manager.js");
-  const prev = process.env.CROW_APP_ENV_PATH;
+test("env-manager resolveEnvPath: the instance's <CROW_HOME>/.env, else CROW_APP_ENV_PATH, never the checkout .env when that is set", async () => {
+  const { resolveEnvPath, APP_ROOT } = await import("../servers/gateway/env-manager.js");
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const prev = { a: process.env.CROW_APP_ENV_PATH, h: process.env.CROW_HOME };
+  const home = mkdtempSync(join(tmpdir(), "crow-envpath-"));
   try {
+    process.env.CROW_HOME = home;
     process.env.CROW_APP_ENV_PATH = "/srv/instance-b/app.env";
     assert.equal(resolveEnvPath(), "/srv/instance-b/app.env");
+    writeFileSync(join(home, ".env"), "X=1\n");
+    assert.equal(resolveEnvPath(), join(home, ".env"), "the instance settings env keeps priority");
+    rmSync(join(home, ".env"));
+    delete process.env.CROW_APP_ENV_PATH;
+    assert.equal(resolveEnvPath(), join(APP_ROOT, ".env"));
   } finally {
-    if (prev === undefined) delete process.env.CROW_APP_ENV_PATH; else process.env.CROW_APP_ENV_PATH = prev;
+    for (const [k, v] of [["CROW_APP_ENV_PATH", prev.a], ["CROW_HOME", prev.h]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    rmSync(home, { recursive: true, force: true });
   }
 });
 
