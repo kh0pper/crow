@@ -453,3 +453,19 @@ test("send_user_file refuses any dir the sandbox hides (e.g. the user runtime di
   await tick();
   assert.equal(sink.ofType("file")[0].servable, false);
 });
+
+test("send_user_file never writes through an outputs dir that is a symlink out of the world root (pre-existing escape)", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  const sink = await collect(engine, s.sessionId);
+  const snap = await engine.get(s.sessionId);
+  const outside = join(dir, "escape-target");
+  mkdirSync(outside, { recursive: true });
+  rmSync(snap.outputsDir, { recursive: true, force: true });
+  symlinkSync(outside, snap.outputsDir);
+  pi.emit({ type: "extension_ui_request", method: "notify", message: crowFileFrame({ path: srcFile("x.service", "[Unit]"), name: "x.service", caption: "c" }) });
+  await tick();
+  assert.equal(sink.ofType("file")[0].servable, false);
+  assert.equal(existsSync(join(outside, "x.service")), false, "nothing written outside the world root");
+});

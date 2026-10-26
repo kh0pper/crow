@@ -148,7 +148,7 @@ import { resolveDataDir } from "../db.js";
 import { randomUUID } from "node:crypto";
 import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, sep } from "node:path";
+import { dirname, isAbsolute, join, sep } from "node:path";
 
 import { createDbClient } from "../db.js";
 import { jobLockFor } from "./routes/board-lock.js";
@@ -2401,6 +2401,11 @@ export function createInteractiveEngine({
         const dir = s.outputsDir || (s.worldRoot ? join(s.worldRoot, "outputs", s.sessionId) : null);
         if (!isAbsolute(dir || "")) throw new Error("no absolute outputs dir");
         mkdirSync(dir, { recursive: true });
+        // Pre-existing escape closed here: this write runs outside the
+        // sandbox, so an outputs dir (or its parent) the bot swapped for a
+        // symlink would let it place a file anywhere this uid can write (a
+        // user unit, an rc file). Refuse a symlinked dir or parent.
+        if (lstatSync(dir).isSymbolicLink() || lstatSync(dirname(dir)).isSymbolicLink()) throw new Error("outputs dir is a symlink");
         const dirReal = realpathSync(dir);
         // Strictly-under, the workspace route's own formula: the `+ sep` is
         // what turns a string-prefix match into a containment test.

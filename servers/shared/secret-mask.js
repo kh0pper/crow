@@ -167,10 +167,13 @@ function maskCutPem(text, c) {
 }
 
 /** pre + word rules: the word is the last group and ends the match. */
+// A credential context narrows the path exemption to a leading /, ~, ./ or
+// ../ on display paths only; on a card pi-lab's full pathLike applies (a URL
+// or relative path there can be what runs: `X_TOKEN=https://…; curl $X_TOKEN | sh`).
 const wordRule = (re, ok = () => true) => [re, (c, mt, g, at, input) => {
   const pre = g[0];
   const w = g[g.length - 1];
-  return ok(pre, w) ? pre + maskWordAt(c, w, input, at + mt.length - w.length, true) : mt;
+  return ok(pre, w) ? pre + maskWordAt(c, w, input, at + mt.length - w.length, !c.card) : mt;
 }];
 
 const RULES = [
@@ -184,14 +187,15 @@ const RULES = [
     return `-----BEGIN ${label}PRIVATE KEY-----${sep}${REDACTED}${sep}-----END ${label}PRIVATE KEY-----`;
   }],
   // sshpass with its password option, spaced or attached
-  wordRule(new RegExp(String.raw`(\bsshpass\b[^|;&]{0,200}?\s-p\s*)(${W})`, "gi"), (pre) => /-p\s*$/.test(pre)),
+  // (no prefix rule crosses a real newline into the next line's command)
+  wordRule(new RegExp(String.raw`(\bsshpass\b[^|;&\n]{0,200}?[ \t]-p[ \t]*)(${W})`, "gi"), (pre) => /-p[ \t]*$/.test(pre)),
   // mysql -pword (attached only: `-p word` makes `word` the database)
-  wordRule(new RegExp(String.raw`(\b(?:mysql|mariadb|mysqldump|mysqladmin)\b[^|;&]{0,200}?\s-p)(${W})`, "gi"), (pre) => pre.endsWith("-p")),
+  wordRule(new RegExp(String.raw`(\b(?:mysql|mariadb|mysqldump|mysqladmin)\b[^|;&\n]{0,200}?[ \t]-p)(${W})`, "gi"), (pre) => pre.endsWith("-p")),
   // --password=word, --password word, --passwd ...
-  wordRule(new RegExp(String.raw`(--pass(?:word|wd)(?:=|\s+))(${W})`, "gi"), (_pre, w) => !w.startsWith("-")),
+  wordRule(new RegExp(String.raw`(--pass(?:word|wd)(?:=|[ \t]+))(${W})`, "gi"), (_pre, w) => !w.startsWith("-")),
   // Authorization: Bearer|Basic|token <word>; X-Api-Key: <word>; ?token= / &token=
-  wordRule(/(\bauthorization:\s*(?:bearer|basic|token)\s+)([^\s"';&|<>()]+)/gi),
-  wordRule(/(\bx-api-key:\s*)([^\s"';&|<>()]+)/gi),
+  wordRule(/(\bauthorization:[ \t]*(?:bearer|basic|token)[ \t]+)([^\s"';&|<>()]+)/gi),
+  wordRule(/(\bx-api-key:[ \t]*)([^\s"';&|<>()]+)/gi),
   wordRule(/([?&]token=)([^&\s"'#;|<>()]+)/gi),
   // NAME=value, NAME carrying PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY,
   // or PASS as a whole _-segment, ending the name or followed by "_".
@@ -276,6 +280,9 @@ function maskCutPrefixes(text, values, c) {
   CUT_MARKER_RE.lastIndex = 0;
   let mt;
   while ((mt = CUT_MARKER_RE.exec(text))) {
+    // On a card only a marker that ends the text counts: one a bot wrote
+    // mid-text would make a guess at a secret's start show up as [REDACTED].
+    if (c.card && mt.index + mt[0].length !== text.length) continue;
     let before = text.slice(pos, mt.index);
     let best = 0;
     for (const v of values) for (const form of valueForms(v)) best = Math.max(best, cutPrefixLength(form, before));
@@ -304,6 +311,7 @@ export function maskSecretsDetailed(text, opts = {}) {
   const c = { n: 0 };
   try {
     const values = opts.values === undefined ? currentValues() : opts.values;
+    c.card = opts.card === true;
     let t = maskValues(src, normalizeValues(values).filter((v) => v !== REDACTED), c);
     t = maskPatterns(t, c, opts.card === true);
     if (truncated) return { text: t, count: c.n, truncated: true };

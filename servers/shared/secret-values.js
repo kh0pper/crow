@@ -84,7 +84,12 @@ export function plausibleSecretValue(v) {
  */
 export function safeShape(v) {
   const s = String(v);
-  return !s.startsWith("-") && !/^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\.?$/.test(s);
+  if (s.startsWith("-") || /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\.?$/.test(s)) return false;
+  // Nor anything that reads as shell: whitespace, operators, substitution, a
+  // path or a URL. Even a trusted source can be fed a planted value (the
+  // keychain backfill seals values from bundle .env files at boot).
+  if (/[\s;&|<>()$`]/.test(s) || /^(?:\/|~|\.\.?\/)/.test(s) || s.includes("://")) return false;
+  return true;
 }
 
 /** One-line values of usable length; multi-line values (keys) contribute

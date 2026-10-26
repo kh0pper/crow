@@ -56,7 +56,7 @@ test("normalizeValues: 6+ chars, one line, deduped, longest first; long lines of
 test("collect: only sources a sandboxed bot cannot write (keychain, the hidden secrets dir); every bot-writable source is dropped", () => {
   const I = scratchInstance();
   const strong = (tag) => "Zq8x" + tag + "P2mAk9Lw4tRy";
-  const v = { retained: gen("retained"), keychainManual: fake("keychain manual"), keychainShort: "s3cr@t" };
+  const v = { retained: gen("retained"), keychainManual: fake("keychain-manual"), keychainShort: "s3cr@t" };
   // bot-writable under the default sandbox (--dev-bind / /): none of these may count
   const dropped = {
     homeEnv: strong("homeenv"), appEnv: strong("appenv"), extraEnv: strong("extraenv"), bundleGen: strong("bundlegen"),
@@ -79,7 +79,9 @@ test("collect: only sources a sandboxed bot cannot write (keychain, the hidden s
   const db = new Database(join(I.data, "crow.db"));
   db.exec(KEYCHAIN_DDL);
   db.exec("CREATE TABLE providers (id TEXT PRIMARY KEY, base_url TEXT, api_key TEXT)");
-  for (const [label, val] of [["sudo", v.keychainManual], ["short", v.keychainShort]]) {
+  // a keychain value with a space (or any shell-ish shape) does not count:
+  // the trade-off for a poisoned backfill never hiding a command
+  for (const [label, val] of [["sudo", v.keychainManual], ["short", v.keychainShort], ["spaced", "fake keychain spaced"]]) {
     db.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual',?,?,?,'manual')").run(label, sealSecret(val, { seed }), "0123456789abcdef");
   }
   db.prepare("INSERT INTO crow_keychain (kind,label,secret_sealed,key_id,origin) VALUES ('manual','old',?,?,'manual')").run(sealSecret(fake("otherkey"), { seed: randomBytes(32) }), "ffffffffffffffff");
@@ -89,7 +91,7 @@ test("collect: only sources a sandboxed bot cannot write (keychain, the hidden s
   const vals = collectSecretValues({ env: { ...I.env, SOME_API_KEY: dropped.procEnv } });
   for (const [k, val] of Object.entries(v)) assert.ok(vals.includes(val), k);
   for (const [k, val] of Object.entries(dropped)) assert.equal(vals.includes(val), false, k);
-  for (const not of [fake("otherkey"), "--no-verify-x", "evil.example.com", "/srv/media/library", "postgres", "some-plain-words-here"]) {
+  for (const not of [fake("otherkey"), "--no-verify-x", "evil.example.com", "/srv/media/library", "postgres", "some-plain-words-here", "fake keychain spaced"]) {
     assert.equal(vals.includes(not), false, not);
   }
 });
@@ -266,4 +268,11 @@ test("readSecretValuesFile ignores a file reached through a symlinked directory"
   symlinkSync(real, join(I.root, "linkdir"));
   assert.equal(SV.readSecretValuesFile(join(I.root, "linkdir", "v")), null);
   assert.ok(SV.readSecretValuesFile(join(real, "v")));
+});
+
+test("no exact value from any source may contain whitespace or shell operators, be a path or a URL (a trusted row can be poisoned at backfill)", () => {
+  for (const bad of ["&& rm -rf ~", "a b c d e f", "x;reboot9", "$(id)abc", "`id`abcd", "/tmp/evil-x", "~/evil-x", "./evil-x", "https://evil/x"]) {
+    assert.equal(SV.safeShape(bad), false, bad);
+  }
+  for (const good of ["Zq8xP2mAk9Lw4tRy", "s3cr@t-pw", "N0t_a-real_pw!"]) assert.equal(SV.safeShape(good), true, good);
 });
