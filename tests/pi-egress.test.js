@@ -535,3 +535,16 @@ test("the physical-port exemption needs a POSITIVELY physical port, and never ov
   assert.notEqual(egressDenyReason("172.30.0.5", o2), null, "docker0 stays refused even with a physical port (explicit name)");
   assert.equal(egressDenyReason("10.50.0.5", o2), null, "a bridge with a positively physical port (parentbus) is the LAN");
 });
+
+test("a deny entry written in IPv4-mapped IPv6 form covers the IPv4 network and all its other wrappings", () => {
+  const o = { interfaces: () => ({}), routes: NO_ROUTES_LO, denyNets: ["::ffff:10.9.0.0/112"] };
+  for (const a of ["10.9.1.1", "::ffff:10.9.1.1", "::10.9.1.1", "64:ff9b::a09:101", "2002:a09:101::1"]) assert.match(String(egressDenyReason(a, o)), /operator-denied/, a);
+  assert.equal(egressDenyReason("10.8.1.1", o), null);
+});
+
+test("ISATAP addresses are judged by their embedded IPv4; a deny entry with two prefixes is unreadable", () => {
+  const o = { interfaces: () => ({}), routes: NO_ROUTES_LO, denyNets: ["10.9.0.0/16"] };
+  assert.match(String(egressDenyReason("2001:db8::5efe:10.9.1.1", o)), /operator-denied/);
+  assert.match(String(egressDenyReason("2001:db8::200:5efe:a9fe:a9fe", o)), /metadata/);
+  assert.match(String(egressDenyReason("93.184.216.34", { ...o, denyNets: ["10.9.0.0/16/1"] })), /unreadable entry/);
+});

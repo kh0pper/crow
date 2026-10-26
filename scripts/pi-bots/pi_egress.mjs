@@ -54,7 +54,7 @@ import { join } from "node:path";
 // private target is refused (fail closed), docker0 and libvirt's default
 // subnets by name too.
 // IPv4 embedded in IPv6 (v4-mapped, v4-compatible, SIIT, NAT64 64:ff9b::/96,
-// 6to4 2002::/16, both Teredo fields) is unwrapped and judged as the IPv4
+// 6to4 2002::/16, both Teredo fields, ISATAP) is unwrapped and judged as the IPv4
 // address; the NAT64 local-use /48 and the discard prefix are refused.
 // Zone ids are stripped (the CONNECT parser refuses '%' anyway).
 // Not detectable from this host's tables, so an operator lists them in
@@ -273,11 +273,21 @@ function localView(o = {}) {
   const deny4 = new BlockList(), deny6 = new BlockList();
   let denyBroken = false;
   for (const n of o.denyNets || []) {
-    const [net, plen] = String(n).trim().split("/");
+    const parts = String(n).trim().split("/");
+    if (parts.length > 2) { denyBroken = true; continue; }
+    const [net, plen] = parts;
     const fam = isIP(net);
     const len = plen === undefined ? (fam === 4 ? 32 : 128) : (/^\d+$/.test(plen) ? Number(plen) : NaN);
     if (!fam || !(len <= (fam === 4 ? 32 : 128))) { denyBroken = true; continue; }
-    try { (fam === 4 ? deny4 : deny6).addSubnet(net, len, fam === 4 ? "ipv4" : "ipv6"); } catch { denyBroken = true; }
+    try { (fam === 4 ? deny4 : deny6).addSubnet(net, len, fam === 4 ? "ipv4" : "ipv6"); } catch { denyBroken = true; continue; }
+    // An entry written as IPv4-mapped IPv6 (::ffff:a.b.c.d/96+) also denies
+    // the IPv4 network, so its other wrappings and the bare address are covered.
+    if (fam === 6 && len >= 96) {
+      const h = expand6(net);
+      if (h.slice(0, 5).every((x) => x === 0) && h[5] === 0xffff) {
+        try { deny4.addSubnet(v4From(h[6], h[7]), len - 96, "ipv4"); } catch { denyBroken = true; }
+      }
+    }
   }
   return { addrs, bcast, nets4, nets6, failed, failed6, deny4, deny6, denyBroken };
 }
@@ -330,6 +340,7 @@ export function egressDenyReason(addr, o = {}) {
   else if (h[0] === 0x2001 && h[1] === 0) {                                                            // Teredo: server, and client XOR ffff:ffff
     embedded = v4Reason(v4From(h[2], h[3]), L) || v4Reason(v4From(h[6] ^ 0xffff, h[7] ^ 0xffff), L);
   } else if (h[0] === 0x100 && zero(1, 4)) return "discard-only prefix (100::/64)";
+  else if ((h[4] === 0 || h[4] === 0x200) && h[5] === 0x5efe) embedded = v4Reason(v4From(h[6], h[7]), L);   // ISATAP ::0:5efe:a.b.c.d
   if (embedded) return embedded;
   const isPrivate6 = (h[0] & 0xfe00) === 0xfc00 || (h[0] & 0xffc0) === 0xfe80;
   if (L.addrs.has(key6(a))) return "this host's own address";
