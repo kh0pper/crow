@@ -70,49 +70,69 @@ export function botcronGraceMs(env = process.env) {
 /** Cap on the occurrences counted in one missed window. */
 export const MISSED_COUNT_CAP = 500;
 
-/**
- * Settle one due repeating schedule (pure). Never assumes `next_run` sits on
- * the cron grid: `due` itself always counts as an occurrence.
- *   last  = the latest occurrence in [due, now] (cron prev() of now, or `due`)
- *   count = occurrences in [due, now], stopped at MISSED_COUNT_CAP (`capped`);
- *           the cap bounds only the count, never which occurrence is `last`
- *   fire  = now - last <= grace, OR this process was alive around `due`
- *           (`aliveAt`, its own last successful sweep, >= due - 2 min): then a
- *           run past grace is a LATE fire (`late`), since an event-loop stall,
- *           clock jump or host suspend inside a live process is not "missed
- *           while Crow wasn't running". Run once now; earlier ones are skipped.
- *   nextRun = the next occurrence strictly after now (null for a bad cron)
- * A bad cron has one occurrence (`due`) and no next run.
- */
+/** Default heartbeat slack; the ticker passes max(this, its poll interval). */
 export const ALIVE_SLACK_MS = 2 * 60000;
 
-export function settleBotcron(cronExpression, dueIso, nowIso, graceMs, { aliveAt = null } = {}) {
-  const due = Date.parse(dueIso);
+/**
+ * Settle one due repeating schedule (pure). Never assumes `next_run` sits on
+ * the cron grid: `due` itself always counts as an occurrence. An unparseable
+ * `next_run` counts as due now.
+ *   L (fireAt) = the latest occurrence in [due, now] (cron prev() of now, or `due`)
+ *   n          = occurrences in [due, now]
+ *   fire       = now - L <= grace, OR this process was alive around `due`
+ *                (`aliveAt`, its own last successful sweep, >= due - aliveSlackMs):
+ *                past grace that is a LATE fire (`late`), since a stall, clock
+ *                jump or host suspend inside a live process is not "missed
+ *                while Crow wasn't running".
+ *   missed     = the window that is not run, or null:
+ *                firing:  n > 1 ? { first: due, last: max(due, prev(L)), count: n-1 } : null
+ *                missing: { first: due, last: L, count: n }
+ *                `count` stops at MISSED_COUNT_CAP (`capped`); the cap never
+ *                changes which occurrence is L or `last`.
+ *   nextRun    = the next occurrence strictly after now (null for a bad cron,
+ *                which has one occurrence, `due`)
+ */
+export function settleBotcron(cronExpression, dueIso, nowIso, graceMs, { aliveAt = null, aliveSlackMs = ALIVE_SLACK_MS } = {}) {
   const now = Date.parse(nowIso);
+  let due = Date.parse(dueIso);
+  if (!Number.isFinite(due)) due = now;
   let last = due;
-  let count = 1;
-  let capped = false;
+  let n = 1;
   let nextRun = null;
+  let prevOfLast = null;
+  const LIMIT = MISSED_COUNT_CAP + 2; // enough to tell "more than the cap" for n and n-1
   try {
     const prev = CronExpressionParser.parse(cronExpression, { currentDate: new Date(now + 1) }).prev().getTime();
     if (prev >= due) last = prev;
     const it = CronExpressionParser.parse(cronExpression, { currentDate: new Date(due) });
-    for (;;) {
+    while (n < LIMIT) {
       const t = it.next().getTime();
       if (t > now) break;
-      if (count >= MISSED_COUNT_CAP) { capped = true; break; }
-      count++;
+      n++;
     }
+    if (last > due) prevOfLast = CronExpressionParser.parse(cronExpression, { currentDate: new Date(last) }).prev().getTime();
     nextRun = computeNextRun(cronExpression, new Date(now));
   } catch { /* unparseable: one occurrence, no next run */ }
-  const alive = aliveAt != null && (typeof aliveAt === "number" ? aliveAt : Date.parse(aliveAt)) >= due - ALIVE_SLACK_MS;
+  const aliveMs = aliveAt == null ? NaN : (typeof aliveAt === "number" ? aliveAt : Date.parse(aliveAt));
+  const alive = Number.isFinite(aliveMs) && aliveMs >= due - aliveSlackMs;
   const inGrace = now - last <= graceMs;
-  return {
-    fire: inGrace || alive,
-    late: !inGrace && alive,
+  const fire = inGrace || alive;
+  const window = (lastMs, k) => ({
     first: new Date(due).toISOString(),
-    last: new Date(last).toISOString(),
-    count, capped, nextRun,
+    last: new Date(lastMs).toISOString(),
+    count: Math.min(k, MISSED_COUNT_CAP),
+    capped: k > MISSED_COUNT_CAP,
+  });
+  let missed = null;
+  if (!fire) missed = window(last, n);
+  else if (n > 1) missed = window(Math.max(due, prevOfLast ?? due), n - 1);
+  return {
+    fire,
+    late: !inGrace && alive,
+    fireAt: new Date(last).toISOString(),
+    count: Math.min(n, MISSED_COUNT_CAP),
+    missed,
+    nextRun,
   };
 }
 
@@ -128,6 +148,8 @@ const fmtWhen = (iso) => {
  * Returns createNotification option objects (pure, for tests).
  */
 export function missedNotifications(windows) {
+  // TODO(schedule panel, PR 1 in the private engineering notes): translate these
+  // strings through instanceLang() once that helper lands.
   if (!Array.isArray(windows) || windows.length === 0) return [];
   const base = { type: "system", source: "scheduler:missed" };
   if (windows.length === 1) {
@@ -195,8 +217,8 @@ const inflight = new Set();
  * was missed: overdue beyond grace, no catch-up). A missed window is handed to
  * `opts.onMissed` (only the claimer sees it, so it is reported once).
  */
-export function claimAndEnqueue(d, s, nowIso, log = () => {}, { graceMs = botcronGraceMs(), onMissed = null, aliveAt = null } = {}) {
-  const settle = settleBotcron(s.cron_expression, s.next_run || nowIso, nowIso, graceMs, { aliveAt });
+export function claimAndEnqueue(d, s, nowIso, log = () => {}, { graceMs = botcronGraceMs(), onMissed = null, aliveAt = null, aliveSlackMs = ALIVE_SLACK_MS } = {}) {
+  const settle = settleBotcron(s.cron_expression, s.next_run || nowIso, nowIso, graceMs, { aliveAt, aliveSlackMs });
   const next = settle.nextRun;
   const res = d.prepare(
     "UPDATE schedules SET last_run=?, next_run=?, updated_at=datetime('now') " +
@@ -209,16 +231,18 @@ export function claimAndEnqueue(d, s, nowIso, log = () => {}, { graceMs = botcro
   try { spec = JSON.parse(s.description || "{}"); } catch { spec = {}; }
   if (!botId || !spec.goal) { log(`schedule #${s.id} missing bot/goal — advanced, not enqueued`); return false; }
   if (isVoiceBotId(botId)) { log(`schedule #${s.id} targets the voice bot, which cannot take background jobs — advanced, not enqueued`); return false; }
-  if (!settle.fire) {
+  if (settle.missed) {
     // TODO(schedule panel, PR 4 in the private engineering notes): record this
     // window as a `missed` row in schedule_runs once that table is on main.
-    log(`schedule #${s.id} (bot=${botId}) missed ${settle.capped ? settle.count + "+" : settle.count} run(s) ${settle.first} → ${settle.last}; not run (no catch-up)`);
+    const m = settle.missed;
+    log(`schedule #${s.id} (bot=${botId}) missed ${m.capped ? m.count + "+" : m.count} run(s) ${m.first} → ${m.last}; not run (no catch-up)`);
+    if (onMissed) onMissed({ schedule_id: s.id, bot_id: botId, ...m });
+  }
+  if (!settle.fire) {
     if (next === null) log(`schedule #${s.id} has an unparseable cron expression — will not tick again`);
-    if (onMissed) onMissed({ schedule_id: s.id, bot_id: botId, first: settle.first, last: settle.last, count: settle.count, capped: settle.capped });
     return false;
   }
-  if (settle.late) log(`schedule #${s.id} (bot=${botId}) running late: due ${settle.last}, this process was ticking around then`);
-  if (settle.count > 1) log(`schedule #${s.id} (bot=${botId}) running the occurrence of ${settle.last}; ${settle.count - 1} earlier one(s) skipped`);
+  if (settle.late) log(`schedule #${s.id} (bot=${botId}) running late: due ${settle.fireAt}, this process was ticking around then`);
   // Coalesce: a schedule whose previous run has not started yet gets no second
   // queued copy (a slow drain never builds a backlog of the same run).
   const pending = d.prepare("SELECT job_id FROM bot_jobs WHERE schedule_id=? AND status='queued' LIMIT 1").get(s.id);
@@ -245,25 +269,32 @@ export function claimAndEnqueue(d, s, nowIso, log = () => {}, { graceMs = botcro
  * means "not alive around due" (default: write the
  * notification(s)); a notifier error is logged and never undoes a claim.
  */
-export function tickBotSchedules({ log = () => {}, notify = defaultNotify, graceMs = botcronGraceMs(), aliveAt = null } = {}) {
+export function tickBotSchedules({
+  log = () => {}, notify = defaultNotify, graceMs = botcronGraceMs(),
+  aliveAt = null, aliveSlackMs = ALIVE_SLACK_MS, now: nowOpt = null,
+} = {}) {
   const d = dbConn();
   const windows = [];
+  let notified = Promise.resolve();
+  // `notified` resolves (never rejects) once the notifier is done; non-enumerable
+  // so the CLI's JSON output stays { fired, missed }.
+  const result = (r) => Object.defineProperty(r, "notified", { get: () => notified, enumerable: false });
   try {
-    const now = new Date().toISOString();
+    const now = nowOpt == null ? new Date().toISOString() : new Date(nowOpt).toISOString();
     let rows = [];
     try {
       rows = d.prepare(
         "SELECT id, task, cron_expression, description, next_run FROM schedules " +
         "WHERE enabled=1 AND task LIKE ? AND next_run IS NOT NULL AND next_run <= ?"
       ).all(BOTCRON_PREFIX + "%", now);
-    } catch { return { fired: 0, missed: 0 }; } // schedules table absent — nothing to do
+    } catch { return result({ fired: 0, missed: 0 }); } // schedules table absent — nothing to do
 
     let fired = 0;
     for (const s of rows) {
       if (inflight.has(s.id)) { log(`schedule #${s.id} still in-flight — skip`); continue; }
       inflight.add(s.id);
       try {
-        if (claimAndEnqueue(d, s, now, log, { graceMs, aliveAt, onMissed: (w) => windows.push(w) })) fired++;
+        if (claimAndEnqueue(d, s, now, log, { graceMs, aliveAt, aliveSlackMs, onMissed: (w) => windows.push(w) })) fired++;
       } catch (e) {
         log(`schedule #${s.id} error: ${(e && e.message) || e}`);
       } finally {
@@ -274,12 +305,12 @@ export function tickBotSchedules({ log = () => {}, notify = defaultNotify, grace
       try { w.bot_name = d.prepare("SELECT display_name FROM pi_bot_defs WHERE bot_id=?").get(w.bot_id)?.display_name || null; }
       catch { w.bot_name = null; }
     }
-    return { fired, missed: windows.length };
+    return result({ fired, missed: windows.length });
   } finally {
     d.close();
     if (windows.length && notify) {
       const fail = (e) => log(`missed-run notification failed (non-fatal): ${(e && e.message) || e}`);
-      try { const p = notify(windows); if (p && typeof p.catch === "function") p.catch(fail); }
+      try { notified = Promise.resolve(notify(windows)).then(() => {}, fail); }
       catch (e) { fail(e); }
     }
   }
@@ -288,7 +319,10 @@ export function tickBotSchedules({ log = () => {}, notify = defaultNotify, grace
 // CLI: one-shot tick for ops / verification.
 if (import.meta.url === "file://" + process.argv[1]) {
   const log = (m) => console.error("[bot-scheduler] " + m);
-  const r = tickBotSchedules({ log });
-  console.log(JSON.stringify(r));
-  process.exit(0);
+  (async () => {
+    const r = tickBotSchedules({ log });
+    await r.notified; // a claimed missed window is never dropped by exiting first
+    console.log(JSON.stringify(r));
+    process.exit(0);
+  })();
 }

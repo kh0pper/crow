@@ -275,6 +275,7 @@ export async function initBotRuntime({
     const ticker = _createBotcronTicker({
       dir: botsDataDir(),
       ttlMs: botcronLeaseTtl(botcronMs),
+      pollMs: botcronMs,
       log: (m) => console.log("[bot-runtime] [botcron] " + m),
     });
     botcronTicker = ticker;

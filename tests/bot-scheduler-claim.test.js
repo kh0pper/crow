@@ -107,7 +107,14 @@ test("a schedule whose previous run is still queued is advanced but not enqueued
 // ---------------------------------------------------------------------------
 // Missed runs (no catch-up for repeating bot-cron schedules)
 // ---------------------------------------------------------------------------
+// A fixed clock keeps these deterministic (no wall-clock grid or New Year's edge).
 const MIN = 60000;
+const HOUR = 60 * MIN;
+const NOW = Date.parse("2026-06-15T12:00:30.000Z");
+const iso = (t) => new Date(t).toISOString();
+const YEARLY_A = "0 0 1 1 *"; // Jan 1 / Jan 2: never inside a window near NOW
+const YEARLY_B = "0 0 2 1 *";
+
 function seedAt(nextRunIso, cron = "*/15 * * * *", botId = "bot-1", goal = "do it") {
   const d = new Database(dbPath);
   const id = Number(d.prepare("INSERT INTO schedules (task, cron_expression, description, enabled, next_run) VALUES (?,?,?,1,?)")
@@ -116,43 +123,41 @@ function seedAt(nextRunIso, cron = "*/15 * * * *", botId = "bot-1", goal = "do i
   return id;
 }
 const nextRunOf = (id) => { const d = new Database(dbPath); try { return d.prepare("SELECT next_run FROM schedules WHERE id=?").get(id).next_run; } finally { d.close(); } };
+const rowOf = (id) => { const d = new Database(dbPath); try { return d.prepare("SELECT id, task, cron_expression, description, next_run FROM schedules WHERE id=?").get(id); } finally { d.close(); } };
 const ensured = async () => { const m = await load(); const e = new Database(dbPath); m.ensure(e); e.close(); return m; };
 /** The last grid occurrence of `cron` at or before `t` (ms), via the scheduler's own computeNextRun. */
 async function gridAtOrBefore(cron, t) {
   const { computeNextRun } = await load();
-  let g = Date.parse(computeNextRun(cron, new Date(t - 24 * 3600 * 1000)));
+  let g = Date.parse(computeNextRun(cron, new Date(t - 24 * HOUR)));
   for (;;) {
     const n = Date.parse(computeNextRun(cron, new Date(g)));
     if (n > t) return g;
     g = n;
   }
 }
-// Yearly crons whose grid never falls inside a few-hours-old window (bar New Year's Day itself).
-const YEARLY_A = "0 0 1 1 *";
-const YEARLY_B = "0 0 2 1 *";
 
-test("within grace: an overdue repeating schedule enqueues one job and sends no notification", async () => {
+test("an on-time run (one occurrence) enqueues one job and sends no notification", async () => {
   const { tickBotSchedules } = await ensured();
-  const id = seedAt(new Date(Date.now() - 2 * MIN).toISOString(), YEARLY_A);
+  const id = seedAt(iso(NOW - 2 * MIN), YEARLY_A);
   const calls = [];
-  const r = tickBotSchedules({ notify: (w) => calls.push(w) });
+  const r = tickBotSchedules({ notify: (w) => calls.push(w), now: NOW });
   assert.equal(r.fired, 1);
   assert.equal(r.missed, 0);
   assert.equal(jobCount(), 1);
   assert.equal(calls.length, 0);
-  assert.ok(nextRunOf(id) > new Date().toISOString());
+  assert.ok(nextRunOf(id) > iso(NOW));
 });
 
 test("beyond grace: no job, next_run moves past now, one notification; a second sweep (or a restart) adds none", async () => {
   const { tickBotSchedules } = await ensured();
-  const id = seedAt(new Date(Date.now() - 3 * 3600 * 1000).toISOString(), YEARLY_A);
+  const id = seedAt(iso(NOW - 3 * HOUR), YEARLY_A);
   const calls = [];
   const lines = [];
-  const r = tickBotSchedules({ notify: (w) => calls.push(w), log: (m) => lines.push(m) });
+  const r = tickBotSchedules({ notify: (w) => calls.push(w), log: (m) => lines.push(m), now: NOW });
   assert.equal(r.fired, 0);
   assert.equal(r.missed, 1);
   assert.equal(jobCount(), 0);
-  assert.ok(nextRunOf(id) > new Date().toISOString(), "advanced to the next occurrence after now");
+  assert.ok(nextRunOf(id) > iso(NOW), "advanced to the next occurrence after now");
   assert.equal(calls.length, 1);
   assert.equal(calls[0].length, 1);
   assert.equal(calls[0][0].schedule_id, id);
@@ -160,19 +165,49 @@ test("beyond grace: no job, next_run moves past now, one notification; a second 
   assert.equal(calls[0][0].count, 1);
   assert.ok(lines.some((l) => /schedule #\d+ \(bot=bot-1\) missed 1 run\(s\) .* → .*; not run \(no catch-up\)/.test(l)));
 
-  const again = tickBotSchedules({ notify: (w) => calls.push(w) });
+  const again = tickBotSchedules({ notify: (w) => calls.push(w), now: NOW + MIN });
   assert.equal(again.missed, 0);
   assert.equal(calls.length, 1, "notified once per missed window");
   assert.equal(jobCount(), 0);
 });
 
+test("every-minute cron, 10 h outage, first sweep after boot: the latest run fires and the skipped ones are one missed window", async () => {
+  const { tickBotSchedules } = await ensured();
+  const due = await gridAtOrBefore("* * * * *", NOW - 10 * HOUR);
+  seedAt(iso(due), "* * * * *");
+  const calls = [];
+  const r = tickBotSchedules({ notify: (w) => calls.push(w), now: NOW, aliveAt: null });
+  assert.equal(r.fired, 1);
+  assert.equal(jobCount(), 1);
+  assert.equal(calls.length, 1);
+  const w = calls[0][0];
+  assert.equal(w.first, iso(due));
+  assert.equal(w.count, 500, "about 600 skipped, counted up to the cap");
+  assert.equal(w.capped, true);
+  assert.equal(w.last, iso(Math.floor(NOW / MIN) * MIN - MIN), "the occurrence before the one that ran");
+});
+
+test("alive heartbeat across a 10 h suspend: the latest run fires late and the skipped ones are one missed window", async () => {
+  const { tickBotSchedules } = await ensured();
+  const due = await gridAtOrBefore("15,45 * * * *", NOW - 10 * HOUR); // last one 15 min before NOW
+  seedAt(iso(due), "15,45 * * * *");
+  const calls = [];
+  const lines = [];
+  const r = tickBotSchedules({ notify: (w) => calls.push(w), log: (m) => lines.push(m), now: NOW, aliveAt: due - 30000 });
+  assert.equal(r.fired, 1);
+  assert.equal(jobCount(), 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0].count, 20, "21 occurrences, the latest ran");
+  assert.equal(calls[0][0].capped, false);
+  assert.ok(lines.some((l) => /running late/.test(l)));
+});
+
 test("two schedules missed in one sweep give one notifier call carrying both windows (one summary)", async () => {
   const { tickBotSchedules, missedNotifications } = await ensured();
-  const old = new Date(Date.now() - 3 * 3600 * 1000).toISOString();
-  seedAt(old, YEARLY_A, "bot-1");
-  seedAt(old, YEARLY_B, "bot-2");
+  seedAt(iso(NOW - 3 * HOUR), YEARLY_A, "bot-1");
+  seedAt(iso(NOW - 3 * HOUR), YEARLY_B, "bot-2");
   const calls = [];
-  tickBotSchedules({ notify: (w) => calls.push(w) });
+  tickBotSchedules({ notify: (w) => calls.push(w), now: NOW });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].length, 2);
   const notes = missedNotifications(calls[0]);
@@ -190,34 +225,35 @@ test("two schedules missed in one sweep give one notifier call carrying both win
 test("a 15-minute schedule down for a day counts 96 missed runs, first..last on the grid", async () => {
   const { settleBotcron } = await load();
   const cron = "*/15 * * * *";
-  const due = await gridAtOrBefore(cron, Date.now() - 2 * 24 * 3600 * 1000);
-  const now = due + 24 * 3600 * 1000 - MIN; // back 1 min before the day's last tick
-  const s = settleBotcron(cron, new Date(due).toISOString(), new Date(now).toISOString(), 5 * MIN);
+  const due = await gridAtOrBefore(cron, NOW - 2 * 24 * HOUR);
+  const now = due + 24 * HOUR - MIN; // back 1 min before the day's last tick
+  const s = settleBotcron(cron, iso(due), iso(now), 5 * MIN);
   assert.equal(s.fire, false);
-  assert.equal(s.count, 96);
-  assert.equal(s.capped, false);
-  assert.equal(s.first, new Date(due).toISOString());
-  assert.equal(s.last, new Date(due + 95 * 15 * MIN).toISOString());
+  assert.equal(s.missed.count, 96);
+  assert.equal(s.missed.capped, false);
+  assert.equal(s.missed.first, iso(due));
+  assert.equal(s.missed.last, iso(due + 95 * 15 * MIN));
   assert.ok(Date.parse(s.nextRun) > now);
 });
 
 test("the missed count stops at 500 (capped) but the last occurrence is still the real one", async () => {
   const { settleBotcron } = await load();
   const cron = "*/10 * * * *";
-  const due = await gridAtOrBefore(cron, Date.now() - 5 * 24 * 3600 * 1000);
-  const now = due + 4 * 24 * 3600 * 1000 + 7 * MIN; // 577 occurrences, last one 7 min ago
-  const s = settleBotcron(cron, new Date(due).toISOString(), new Date(now).toISOString(), 5 * MIN);
+  const due = await gridAtOrBefore(cron, NOW - 5 * 24 * HOUR);
+  const now = due + 4 * 24 * HOUR + 7 * MIN; // 577 occurrences, last one 7 min ago
+  const s = settleBotcron(cron, iso(due), iso(now), 5 * MIN);
   assert.equal(s.fire, false);
-  assert.equal(s.count, 500);
-  assert.equal(s.capped, true);
-  assert.equal(s.last, new Date(due + 4 * 24 * 3600 * 1000).toISOString());
+  assert.equal(s.missed.count, 500);
+  assert.equal(s.missed.capped, true);
+  assert.equal(s.missed.last, iso(due + 4 * 24 * HOUR));
 });
 
-test("an every-minute schedule after a long outage still fires the occurrence that just passed", async () => {
+test("a next_run that does not parse is treated as due now (no throw)", async () => {
   const { settleBotcron } = await load();
-  const now = Date.now();
-  const s = settleBotcron("* * * * *", new Date(now - 10 * 3600 * 1000).toISOString(), new Date(now).toISOString(), 5 * MIN);
+  const s = settleBotcron("*/15 * * * *", "not a date", iso(NOW), 5 * MIN);
   assert.equal(s.fire, true);
+  assert.equal(s.missed, null);
+  assert.ok(Date.parse(s.nextRun) > NOW);
 });
 
 test("CROW_SCHEDULE_GRACE_MIN is clamped to 1..60 minutes, default 5", async () => {
@@ -231,9 +267,9 @@ test("CROW_SCHEDULE_GRACE_MIN is clamped to 1..60 minutes, default 5", async () 
 
 test("a bad cron beyond grace is a missed run: no job, next_run NULL, one notification", async () => {
   const { tickBotSchedules } = await ensured();
-  const id = seedAt(new Date(Date.now() - 3 * 3600 * 1000).toISOString(), "not a cron");
+  const id = seedAt(iso(NOW - 3 * HOUR), "not a cron");
   const calls = [];
-  const r = tickBotSchedules({ notify: (w) => calls.push(w) });
+  const r = tickBotSchedules({ notify: (w) => calls.push(w), now: NOW });
   assert.equal(r.fired, 0);
   assert.equal(r.missed, 1);
   assert.equal(nextRunOf(id), null);
@@ -241,21 +277,50 @@ test("a bad cron beyond grace is a missed run: no job, next_run NULL, one notifi
   assert.equal(calls.length, 1);
 });
 
+test("two connections racing on one stale missed row: exactly one onMissed", async () => {
+  const { claimAndEnqueue } = await ensured();
+  const id = seedAt(iso(NOW - 3 * HOUR), YEARLY_A);
+  const row = rowOf(id);
+  const a = new Database(dbPath), b = new Database(dbPath);
+  let missed = 0;
+  const opts = { graceMs: 5 * MIN, onMissed: () => missed++ };
+  claimAndEnqueue(a, row, iso(NOW), () => {}, opts);
+  claimAndEnqueue(b, row, iso(NOW), () => {}, opts);
+  a.close(); b.close();
+  assert.equal(missed, 1);
+  assert.equal(jobCount(), 0);
+});
+
 test("a notifier that throws (or rejects) never undoes the claim or crashes the sweep", async () => {
   const { tickBotSchedules } = await ensured();
-  const old = new Date(Date.now() - 3 * 3600 * 1000).toISOString();
-  const a = seedAt(old, YEARLY_A, "bot-1");
+  const a = seedAt(iso(NOW - 3 * HOUR), YEARLY_A, "bot-1");
   const lines = [];
-  const r = tickBotSchedules({ notify: () => { throw new Error("boom"); }, log: (m) => lines.push(m) });
+  const r = tickBotSchedules({ notify: () => { throw new Error("boom"); }, log: (m) => lines.push(m), now: NOW });
   assert.equal(r.missed, 1);
-  assert.ok(nextRunOf(a) > new Date().toISOString());
+  assert.ok(nextRunOf(a) > iso(NOW));
   assert.ok(lines.some((l) => l.includes("boom")));
-  const b = seedAt(old, YEARLY_B, "bot-2");
-  const r2 = tickBotSchedules({ notify: () => Promise.reject(new Error("async boom")), log: (m) => lines.push(m) });
+  await r.notified;
+  const b = seedAt(iso(NOW - 3 * HOUR), YEARLY_B, "bot-2");
+  const r2 = tickBotSchedules({ notify: () => Promise.reject(new Error("async boom")), log: (m) => lines.push(m), now: NOW });
   assert.equal(r2.missed, 1);
-  assert.ok(nextRunOf(b) > new Date().toISOString());
-  await new Promise((res) => setTimeout(res, 10));
+  assert.ok(nextRunOf(b) > iso(NOW));
+  await r2.notified; // resolves (never rejects) once the failure is logged
   assert.ok(lines.some((l) => l.includes("async boom")));
+});
+
+test("tickBotSchedules exposes the notify promise as r.notified (non-enumerable) so a CLI can await it before exiting", async () => {
+  const { tickBotSchedules } = await ensured();
+  seedAt(iso(NOW - 3 * HOUR), YEARLY_A);
+  let done = false;
+  const r = tickBotSchedules({ notify: () => new Promise((res) => setTimeout(() => { done = true; res(); }, 30)), now: NOW });
+  assert.equal(done, false);
+  assert.ok(r.notified && typeof r.notified.then === "function");
+  assert.deepEqual(Object.keys(r).sort(), ["fired", "missed"], "JSON output stays {fired, missed}");
+  await r.notified;
+  assert.equal(done, true);
+  const empty = tickBotSchedules({ notify: () => { throw new Error("never"); }, now: NOW });
+  assert.equal(empty.missed, 0);
+  await empty.notified; // a resolved promise when nothing was missed
 });
 
 test("the default notifier writes one system notification from scheduler:missed into the instance DB", async () => {
@@ -265,15 +330,13 @@ test("the default notifier writes one system notification from scheduler:missed 
     priority TEXT, action_url TEXT, metadata TEXT, schedule_id INTEGER, expires_at TEXT, is_read INTEGER DEFAULT 0,
     is_dismissed INTEGER DEFAULT 0, snoozed_until TEXT, created_at TEXT DEFAULT (datetime('now')))`);
   d.close();
-  const id = seedAt(new Date(Date.now() - 3 * 3600 * 1000).toISOString(), YEARLY_A);
-  assert.equal(tickBotSchedules().missed, 1);
-  let rows = [];
-  for (let i = 0; i < 100 && rows.length === 0; i++) {
-    await new Promise((r) => setTimeout(r, 20));
-    const c = new Database(dbPath);
-    rows = c.prepare("SELECT type, source, title, schedule_id, action_url FROM notifications").all();
-    c.close();
-  }
+  const id = seedAt(iso(NOW - 3 * HOUR), YEARLY_A);
+  const r = tickBotSchedules({ now: NOW });
+  assert.equal(r.missed, 1);
+  await r.notified;
+  const c = new Database(dbPath);
+  const rows = c.prepare("SELECT type, source, title, schedule_id, action_url FROM notifications").all();
+  c.close();
   assert.equal(rows.length, 1);
   assert.equal(rows[0].type, "system");
   assert.equal(rows[0].source, "scheduler:missed");
@@ -284,11 +347,11 @@ test("the default notifier writes one system notification from scheduler:missed 
 // Heartbeat: a process that was ticking around `due` fires late, never "missed".
 test("aliveAt just before due: a run 20 min late is a late fire (1 job, 0 notifications)", async () => {
   const { tickBotSchedules } = await ensured();
-  const due = Date.now() - 20 * MIN;
-  seedAt(new Date(due).toISOString(), YEARLY_A);
+  const due = NOW - 20 * MIN;
+  seedAt(iso(due), YEARLY_A);
   const calls = [];
   const lines = [];
-  const r = tickBotSchedules({ notify: (w) => calls.push(w), log: (m) => lines.push(m), aliveAt: due - 30000 });
+  const r = tickBotSchedules({ notify: (w) => calls.push(w), log: (m) => lines.push(m), now: NOW, aliveAt: due - 30000 });
   assert.equal(r.fired, 1);
   assert.equal(r.missed, 0);
   assert.equal(jobCount(), 1);
@@ -298,22 +361,23 @@ test("aliveAt just before due: a run 20 min late is a late fire (1 job, 0 notifi
 
 test("first sweep after boot (aliveAt null): the same 20-min-late run is missed, one notification", async () => {
   const { tickBotSchedules } = await ensured();
-  seedAt(new Date(Date.now() - 20 * MIN).toISOString(), YEARLY_A);
+  seedAt(iso(NOW - 20 * MIN), YEARLY_A);
   const calls = [];
-  const r = tickBotSchedules({ notify: (w) => calls.push(w), aliveAt: null });
+  const r = tickBotSchedules({ notify: (w) => calls.push(w), now: NOW, aliveAt: null });
   assert.equal(r.fired, 0);
   assert.equal(r.missed, 1);
   assert.equal(jobCount(), 0);
   assert.equal(calls.length, 1);
 });
 
-test("aliveAt older than due - 2 min does not count as alive", async () => {
+test("heartbeat slack: aliveAt must be within max(2 min, the poll interval) before due", async () => {
   const { settleBotcron } = await load();
-  const now = Date.now();
-  const due = now - 20 * MIN;
-  const iso = (t) => new Date(t).toISOString();
-  assert.equal(settleBotcron(YEARLY_A, iso(due), iso(now), 5 * MIN, { aliveAt: due - 3 * MIN }).fire, false);
-  const s = settleBotcron(YEARLY_A, iso(due), iso(now), 5 * MIN, { aliveAt: due - 2 * MIN });
+  const due = NOW - 20 * MIN;
+  assert.equal(settleBotcron(YEARLY_A, iso(due), iso(NOW), 5 * MIN, { aliveAt: due - 3 * MIN }).fire, false);
+  const s = settleBotcron(YEARLY_A, iso(due), iso(NOW), 5 * MIN, { aliveAt: due - 2 * MIN });
   assert.equal(s.fire, true);
   assert.equal(s.late, true);
+  // a 10-min poll: a sweep 9 min before due still counts as alive
+  assert.equal(settleBotcron(YEARLY_A, iso(due), iso(NOW), 5 * MIN, { aliveAt: due - 9 * MIN, aliveSlackMs: 10 * MIN }).fire, true);
+  assert.equal(settleBotcron(YEARLY_A, iso(due), iso(NOW), 5 * MIN, { aliveAt: due - 11 * MIN, aliveSlackMs: 10 * MIN }).fire, false);
 });

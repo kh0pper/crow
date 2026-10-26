@@ -106,3 +106,15 @@ test("the ticker passes its own last successful sweep time as aliveAt (null on t
   assert.ok(seen[1] >= before && seen[1] <= Date.now());
   assert.equal(seen[3], seen[2], "a failed sweep does not move aliveAt");
 });
+
+test("the ticker passes max(2 min, its poll interval) as the heartbeat slack", async () => {
+  const seen = [];
+  const mk = (pollMs) => createBotcronTicker({
+    dir, holder: "h", pollMs, _hold: async () => true, _release: async () => {},
+    _tick: ({ aliveSlackMs }) => { seen.push(aliveSlackMs); return { fired: 0 }; },
+  });
+  await mk(60000).sweep();
+  await mk(600000).sweep();
+  await mk(undefined).sweep();
+  assert.deepEqual(seen, [120000, 600000, 120000]);
+});

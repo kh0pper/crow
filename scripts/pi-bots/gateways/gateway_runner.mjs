@@ -148,6 +148,7 @@ function startSchedules() {
   const ticker = createBotcronTicker({
     dir: botsDataDir(),
     ttlMs: botcronLeaseTtl(BOTCRON_POLL_MS),
+    pollMs: BOTCRON_POLL_MS,
     log: (m) => log("[botcron] " + m),
     _tick: tickBotSchedules,
   });

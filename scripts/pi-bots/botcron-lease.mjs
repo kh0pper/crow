@@ -94,6 +94,7 @@ export function createBotcronTicker({
   dir,
   holder = BOTCRON_HOLDER,
   ttlMs = 180000,
+  pollMs = 60000,
   log = () => {},
   _hold = tryBotcronLease,
   _release = releaseBotcronLease,
@@ -135,7 +136,9 @@ export function createBotcronTicker({
     if (!ok) return { fired: 0, held: false };
     const tick = _tick || (await import("./bot_scheduler.mjs")).tickBotSchedules;
     const startedAt = Date.now();
-    const r = tick({ log, aliveAt });
+    // Heartbeat slack: a sweep up to one poll interval before `due` still means
+    // "alive around due", so a long poll never reports a false miss.
+    const r = tick({ log, aliveAt, aliveSlackMs: Math.max(120000, Number(pollMs) || 60000) });
     aliveAt = startedAt; // only after the tick returned: a failed sweep never moves the heartbeat
     return { fired: (r && r.fired) || 0, held: true };
   }
