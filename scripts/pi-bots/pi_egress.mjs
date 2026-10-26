@@ -117,8 +117,8 @@ export function readKernelRoutes() {
 
 /**
  * The IPv6 tables. Skipped (null, not a failure) only when the kernel says
- * the family is not supported (EAFNOSUPPORT: booted without IPv6), or when
- * this host has no IPv6 address at all. Any other failure sets v6Failed:
+ * the family is not supported (EAFNOSUPPORT: booted without IPv6). Any other
+ * failure sets v6Failed:
  * private IPv6 targets are refused then (IPv4 decisions are unaffected).
  * `run(which)` with which = "local" | "main"; o.interfaces is a seam.
  */
@@ -128,13 +128,15 @@ export function readV6Tables(run, o = {}) {
   } catch (e) {
     const msg = String((e && (e.stderr || e.message)) || "");
     if (/address family not supported|EAFNOSUPPORT/i.test(msg)) return { local6: null, main6: null, v6Failed: false };
-    let anyV6 = true;
-    try {
-      anyV6 = Object.values((o.interfaces || networkInterfaces)() || {}).flat()
-        .some((i) => i && (i.family === "IPv6" || i.family === 6));
-    } catch { anyV6 = true; }
-    return { local6: null, main6: null, v6Failed: anyV6 };
+    // Anything else fails IPv6 closed: an interface list can miss an IPv6
+    // address that sits on a down interface.
+    return { local6: null, main6: null, v6Failed: true };
   }
+}
+
+/** True when /sys/class/net/<if>/device exists (a hardware NIC). */
+function sysfsIsPhysical(ifname) {
+  return /^[A-Za-z0-9_.:@-]{1,32}$/.test(String(ifname || "")) && existsSync("/sys/class/net/" + ifname + "/device");
 }
 
 /** Device kinds that carry containers/VMs on this host. Not tun (VPNs such as the tailnet) or wireguard. */
@@ -148,14 +150,17 @@ export function deviceKindIsVirtual(kind) { return VIRTUAL_KINDS.has(String(kind
  * plausible (no `lo` entry), so an empty successful read cannot pass for a
  * host with no addresses.
  */
-export function parseKernelTables({ local4, local6, main4, main6, links, linksFailed = false, v6Failed = false }) {
+export function parseKernelTables({ local4, local6, main4, main6, links, linksFailed = false, v6Failed = false, isPhysical = sysfsIsPhysical }) {
   if (!Array.isArray(local4) || !local4.some((r) => r && r.dev === "lo")) throw new Error("kernel local table has no lo entry");
   // A bridge with a physical port (the LAN NIC enslaved to br0/vmbr0 on a VM
   // host) carries the LAN, not containers: never counted as virtual.
+  // A port is physical only when positively identified as hardware: a
+  // parentbus in `ip -d link`, or /sys/class/net/<if>/device. A port of
+  // unknown type keeps its bridge virtual (fail safe).
   const physicalBridges = new Set();
   for (const l of links || []) {
     const kind = l && l.linkinfo && l.linkinfo.info_kind;
-    if (l && l.master && !kind && l.ifname !== "lo") physicalBridges.add(l.master);
+    if (l && l.master && !kind && l.ifname !== "lo" && (l.parentbus || isPhysical(l.ifname))) physicalBridges.add(l.master);
   }
   const virtualDevs = new Set();
   for (const l of links || []) {
@@ -233,7 +238,9 @@ function localView(o = {}) {
     for (const r of t.main || []) {
       if (r.type && r.type !== "unicast") continue; // local/broadcast/multicast come from the local table
       const dev = String(r.dev || "");
-      const virtual = (VIRTUAL_IF.test(dev) || (t.virtualDevs && t.virtualDevs.has(dev))) && !(t.physicalBridges && t.physicalBridges.has(dev));
+      // explicit virtual names (docker*, br-*, virbr*, ...) are never exempted;
+      // virtualDevs (by kind) already leaves out bridges with a physical port
+      const virtual = VIRTUAL_IF.test(dev) || !!(t.virtualDevs && t.virtualDevs.has(dev));
       if (r.dst && r.dst !== "default" && virtual && !addNet(r.dst)) failed = true;
     }
   } catch {
@@ -250,7 +257,7 @@ function localView(o = {}) {
         addAddr(addr);
         const plen = Number(String(i.cidr || "").split("/")[1]);
         if (!Number.isInteger(plen)) continue;
-        if (VIRTUAL_IF.test(name) && !physicalBridges.has(name)) addNet(addr + "/" + plen);
+        if (VIRTUAL_IF.test(name)) addNet(addr + "/" + plen); // explicit names are never exempted
         if (isIP(addr) === 4 && plen < 31) {
           const mask = plen === 0 ? 0 : (0xffffffff << (32 - plen)) >>> 0;
           bcast.add(intV4(((v4Int(addr) & mask) | (~mask >>> 0)) >>> 0));
@@ -277,6 +284,8 @@ function localView(o = {}) {
 
 function v4Reason(a, L) {
   const o = a.split(".").map(Number);
+  // the operator deny list, here so that every IPv4-in-IPv6 path gets it too
+  if (L.deny4 && L.deny4.check(a, "ipv4")) return "operator-denied network";
   if (o[0] === 127 || o[0] === 0) return "loopback (use the bot's loopback ports)";
   if (PLUMBING_V4.check(a, "ipv4")) return "cloud metadata / host plumbing";
   if (o[0] >= 224) return "not unicast";
@@ -299,7 +308,6 @@ export function egressDenyReason(addr, o = {}) {
   // The operator's deny list is a stated intent: an entry that cannot be read
   // refuses everything rather than silently not refusing what it meant.
   if (L.denyBroken) return "operator deny list (CROW_PI_EGRESS_DENY_NETS) has an unreadable entry: refusing all targets";
-  if (fam === 4 && L.deny4 && L.deny4.check(a, "ipv4")) return "operator-denied network";
   if (fam === 6 && L.deny6 && L.deny6.check(a, "ipv6")) return "operator-denied network";
   if (fam === 4) return v4Reason(a, L);
   const h = expand6(a);

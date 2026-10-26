@@ -377,7 +377,7 @@ test("parseKernelTables: IPv6 disabled is not a failure; an IPv4 local table wit
   assert.throws(() => parseKernelTables({ local4: [], local6: [], main4: [], main6: [], links: [] }), /no lo entry/);
 });
 
-test("IPv6 tables: skipped only on EAFNOSUPPORT or when the host has no IPv6 address; any other v6 read failure refuses private IPv6", async () => {
+test("IPv6 tables: skipped only on EAFNOSUPPORT; any other v6 read failure refuses private IPv6", async () => {
   const { readV6Tables } = await import("../scripts/pi-bots/pi_egress.mjs");
   const v6If = () => ({ eno1: [{ address: "fd12::5", family: "IPv6", cidr: "fd12::5/64" }] });
   const v4OnlyIf = () => ({ eno1: [{ address: "10.0.0.5", family: "IPv4", cidr: "10.0.0.5/24" }] });
@@ -387,7 +387,7 @@ test("IPv6 tables: skipped only on EAFNOSUPPORT or when the host has no IPv6 add
   const eaf = readV6Tables(fail("RTNETLINK answers: Address family not supported by protocol"), { interfaces: v6If });
   assert.deepEqual([eaf.local6, eaf.main6, eaf.v6Failed], [null, null, false], "EAFNOSUPPORT: no IPv6 on this kernel");
   const none = readV6Tables(fail("something else"), { interfaces: v4OnlyIf });
-  assert.deepEqual([none.local6, none.v6Failed], [null, false], "no IPv6 address anywhere: nothing to protect");
+  assert.deepEqual([none.local6, none.v6Failed], [null, true], "a v4-only interface list proves nothing (IPv6 can sit on a down interface): fail closed");
   const bad = readV6Tables(fail("something else"), { interfaces: v6If });
   assert.equal(bad.v6Failed, true, "IPv6 present but unreadable: fail closed");
 });
@@ -415,7 +415,7 @@ test("a bridge with a PHYSICAL port (the LAN NIC enslaved to br0/vmbr0) is the L
   const t = parseKernelTables({
     local4: [{ type: "local", dst: "127.0.0.1", dev: "lo" }, { type: "local", dst: "10.0.0.237", dev: "vmbr0" }],
     main4: [{ dst: "10.0.0.0/24", dev: "vmbr0" }, { dst: "172.18.0.0/16", dev: "br-x" }],
-    links: [{ ifname: "lo" }, { ifname: "eno1", master: "vmbr0" }, { ifname: "vmbr0", linkinfo: { info_kind: "bridge" } },
+    links: [{ ifname: "lo" }, { ifname: "eno1", master: "vmbr0", parentbus: "pci" }, { ifname: "vmbr0", linkinfo: { info_kind: "bridge" } },
       { ifname: "br-x", linkinfo: { info_kind: "bridge" } }, { ifname: "veth1", master: "br-x", linkinfo: { info_kind: "veth" } }],
   });
   assert.equal(t.virtualDevs.has("vmbr0"), false);
@@ -489,11 +489,11 @@ test("operator-listed extra refused networks (e.g. Kubernetes ClusterIP ranges) 
 });
 const NO_ROUTES_LO = () => ({ local: [{ type: "local", dst: "127.0.0.1", dev: "lo" }], main: [] });
 
-test("the name-based interface path honours the physical-port exemption too", () => {
+test("the name-based interface path never exempts an explicit virtual name, even with a physical-bridge mark", () => {
   const routes = () => ({ local: [{ type: "local", dst: "127.0.0.1", dev: "lo" }], main: [], physicalBridges: new Set(["br-lan"]) });
   const ifs = () => ({ "br-lan": [{ address: "10.0.0.237", family: "IPv4", cidr: "10.0.0.237/24" }] });
   const o = { interfaces: ifs, routes };
-  assert.equal(egressDenyReason("10.0.0.50", o), null);
+  assert.notEqual(egressDenyReason("10.0.0.50", o), null, "br-* is an explicit container-bridge name");
   assert.notEqual(egressDenyReason("10.0.0.237", o), null);
 });
 
@@ -505,4 +505,33 @@ test("an unreadable operator deny entry refuses EVERY destination (public too), 
   const { r, logs } = await relay({ lookup: async () => [{ address: "93.184.216.34", family: 4 }], interfaces: () => ({}), routes: NO_ROUTES_LO, denyNets: ["nope"] });
   assert.match(await talk(r.socketPath, "PROXY\nCONNECT a.example.com:443 HTTP/1.1\r\n\r\n"), /^HTTP\/1\.1 403/);
   assert.ok(logs.some((l) => /CROW_PI_EGRESS_DENY_NETS.*unreadable/.test(l)), "logged loudly at relay start");
+});
+
+
+// ---- automated findings on intermediate commits ----
+test("the operator deny list applies to every IPv4-in-IPv6 form too", () => {
+  const o = { interfaces: () => ({}), routes: NO_ROUTES_LO, denyNets: ["10.9.0.0/16"] };
+  for (const a of ["10.9.1.1", "::ffff:10.9.1.1", "::10.9.1.1", "::ffff:0:10.9.1.1", "64:ff9b::10.9.1.1", "2002:0a09:0101::1",
+    "2001:0:4136:e378:8000:63bf:f5f6:fefe"]) {
+    assert.match(String(egressDenyReason(a, o)), /operator-denied/, a);
+  }
+  assert.equal(egressDenyReason("::ffff:10.8.1.1", o), null);
+});
+
+test("the physical-port exemption needs a POSITIVELY physical port, and never overrides the explicit virtual names", async () => {
+  const { parseKernelTables } = await import("../scripts/pi-bots/pi_egress.mjs");
+  const base = { local4: [{ type: "local", dst: "127.0.0.1", dev: "lo" }] };
+  const unknown = parseKernelTables({ ...base, main4: [{ dst: "172.30.0.0/16", dev: "br-x" }, { dst: "10.50.0.0/24", dev: "lanbr" }],
+    links: [{ ifname: "lo" }, { ifname: "br-x", linkinfo: { info_kind: "bridge" } }, { ifname: "p1", master: "br-x" },
+      { ifname: "lanbr", linkinfo: { info_kind: "bridge" } }, { ifname: "p2", master: "lanbr" }],
+    isPhysical: () => false });
+  const o1 = { interfaces: () => ({}), routes: () => unknown };
+  assert.notEqual(egressDenyReason("172.30.0.5", o1), null, "a port of unknown type is not physical");
+  assert.notEqual(egressDenyReason("10.50.0.5", o1), null);
+  const phys = parseKernelTables({ ...base, main4: [{ dst: "172.30.0.0/16", dev: "docker0" }, { dst: "10.50.0.0/24", dev: "lanbr" }],
+    links: [{ ifname: "lo" }, { ifname: "docker0", linkinfo: { info_kind: "bridge" } }, { ifname: "eth9", master: "docker0", parentbus: "pci" },
+      { ifname: "lanbr", linkinfo: { info_kind: "bridge" } }, { ifname: "eno1", master: "lanbr", parentbus: "pci" }] });
+  const o2 = { interfaces: () => ({}), routes: () => phys };
+  assert.notEqual(egressDenyReason("172.30.0.5", o2), null, "docker0 stays refused even with a physical port (explicit name)");
+  assert.equal(egressDenyReason("10.50.0.5", o2), null, "a bridge with a positively physical port (parentbus) is the LAN");
 });
