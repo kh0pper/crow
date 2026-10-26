@@ -1,7 +1,7 @@
 {
   "id": "unsloth",
   "name": "Unsloth Studio (AMD ROCm)",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Fine-tune and chat with open models on an AMD GPU: Unsloth's ROCm image with the Unsloth Studio web UI and JupyterLab notebooks. AMD ROCm hosts only.",
   "type": "bundle",
   "author": "Crow",
@@ -90,5 +90,9 @@
     "proxyMode": "direct"
   },
   "no_auto_provider": "Not a model endpoint Crow routes to: Unsloth Studio is a training and chat workbench with its own login, and its GGUF chat is internal to Studio. A model fine-tuned here is exported as files (GGUF or safetensors) and served through the Model Catalog like any other model.",
-  "notes": "Image: unsloth/unsloth-rocm, the ROCm build of Unsloth, pinned to a release tag and digest (the plain unsloth/unsloth image is CUDA-only and is not used). Works on AMD RDNA2 and newer and CDNA GPUs, except the Steam Deck (gfx1033), which the image refuses. Upstream measured LoRA training and diffusion on a Strix Halo (gfx1151) with these generic ROCm wheels; AMD's per-architecture wheels fix a gfx1151 grouped-GEMM crash, so if a mixture-of-experts run crashes there, rebuild the image with ROCM_GFX=gfx1151 as the Unsloth docs describe. GGUF chat inside Studio runs on the CPU in this release. Licences: the Unsloth library is Apache-2.0 and its unsloth-zoo helper LGPL-3.0-or-later; Unsloth Studio (the web UI) is AGPL-3.0 with AGPL section 7(b) attribution notices. Crow runs the unmodified upstream image as a separate container and links none of its code, so Crow's own licence is unaffected. Offering Studio to other people over a network (a hosted Crow) triggers AGPL section 13 only if the image is modified; either way its Unsloth notices must stay visible. 'Unsloth' is a trademark of the Unsloth team. Crow's installer opens the manifest ports (3075, 3076) to the tailnet in ufw, as for every bundle; both stay bound to 127.0.0.1, and only 3075 gets a Tailscale Serve route."
+  "notes": "Image: unsloth/unsloth-rocm, the ROCm build of Unsloth, pinned to a release tag and digest (the plain unsloth/unsloth image is CUDA-only and is not used). Works on AMD RDNA2 and newer and CDNA GPUs, except the Steam Deck (gfx1033), which the image refuses. Upstream measured LoRA training and diffusion on a Strix Halo (gfx1151) with these generic ROCm wheels; AMD's per-architecture wheels fix a gfx1151 grouped-GEMM crash, so if a mixture-of-experts run crashes there, rebuild the image with ROCM_GFX=gfx1151 as the Unsloth docs describe. GGUF chat inside Studio runs on the CPU in this release. Licences: the Unsloth library is Apache-2.0 and its unsloth-zoo helper LGPL-3.0-or-later; Unsloth Studio (the web UI) is AGPL-3.0 with AGPL section 7(b) attribution notices. Crow runs the unmodified upstream image as a separate container and links none of its code, so Crow's own licence is unaffected. Offering Studio to other people over a network (a hosted Crow) triggers AGPL section 13 only if the image is modified; either way its Unsloth notices must stay visible. 'Unsloth' is a trademark of the Unsloth team. Crow's installer opens the manifest ports (3075, 3076) to the tailnet in ufw, as for every bundle; both stay bound to 127.0.0.1, and only 3075 gets a Tailscale Serve route.",
+  "host_grants": {
+    "gpu": true,
+    "shm_size": "16g"
+  }
 }
