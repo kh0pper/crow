@@ -11,13 +11,17 @@
  * can never disagree with the lane it labels. Rendered rows are capped per
  * lane; counts are not.
  *
- * Lane moves are a later task; edits and the drawer stay on the classic board.
+ * Lane moves: panels/board/client.js and routes/shell-api.js. Edits and the
+ * card drawer stay on the classic board, which Details opens on the card
+ * (board/html.js detailsHref). Requested outside the shell (classic mode),
+ * this page redirects to the Bot Board.
  */
 
 import { existsSync } from "node:fs";
 import { createDbClient } from "../../../db.js";
 import { t } from "../shared/i18n.js";
-import { TASKS_DB, lockMapFor, liveBirdsByCard } from "./bot-board/data-queries.js";
+import { TASKS_DB, lockMapFor, liveBirdsByCard, enabledBoardBots, cardBoardBotForProject } from "./bot-board/data-queries.js";
+import { CROW_VOICE_BOT_ID } from "../../../shared/voice-bot.js";
 import { resolveBoardDef, DEFAULT_BOARD_DEF } from "../../routes/board-defs.js";
 import { activeProjects } from "../../../shared/shell-items.js";
 import { getInteractiveEngine } from "../../perch-interactive.js";
@@ -165,11 +169,27 @@ export async function threadsByCard(db, ids) {
 }
 
 /**
+ * Map<cardId, botId>: for each shown card on a project, the card-board bot
+ * on that project (the board Details opens the card's drawer on). Cards
+ * with no project, or a project no card-board bot is on, have no entry.
+ */
+async function botsByCard(db, cards) {
+  const out = new Map();
+  if (!cards.some((c) => c.project_id != null)) return out;
+  const bots = await enabledBoardBots(db, CROW_VOICE_BOT_ID);
+  for (const c of cards) {
+    const bot = cardBoardBotForProject(bots, c.project_id);
+    if (bot) out.set(Number(c.id), String(bot.botId));
+  }
+  return out;
+}
+
+/**
  * Everything the page draws, or an empty board. tasks.db absent is normal
  * (nothing has made a card yet): it is never opened, so never created.
  */
 async function loadBoard(db, scope, engine) {
-  const empty = { counts: countsOf(Object.fromEntries(LANES.map((l) => [l, []]))), lanes: Object.fromEntries(LANES.map((l) => [l, []])), defs: new Map([[null, DEFAULT_BOARD_DEF]]), lockMap: new Map(), threads: new Map(), birds: new Map() };
+  const empty = { counts: countsOf(Object.fromEntries(LANES.map((l) => [l, []]))), lanes: Object.fromEntries(LANES.map((l) => [l, []])), defs: new Map([[null, DEFAULT_BOARD_DEF]]), lockMap: new Map(), threads: new Map(), birds: new Map(), botByCard: new Map() };
   if (!existsSync(TASKS_DB)) return empty;
   let tdb;
   try {
@@ -185,7 +205,8 @@ async function loadBoard(db, scope, engine) {
     const lanes = Object.fromEntries(LANES.map((l) => [l, grouped[l].slice(0, LANE_RENDER_CAP).map((r) => full.get(r.id)).filter(Boolean)]));
     const threads = await threadsByCard(db, shownIds);
     const birds = await liveBirdsByCard(engine, db);
-    return { counts, lanes, defs, lockMap, threads, birds };
+    const botByCard = await botsByCard(db, LANES.flatMap((l) => lanes[l]));
+    return { counts, lanes, defs, lockMap, threads, birds, botByCard };
   } catch (err) {
     if (!/no such table/i.test(String(err && err.message))) console.warn("[board] load failed:", err && err.message);
     return empty;
@@ -204,11 +225,13 @@ export default {
   hidden: true, // the new shell's Board tab; the classic nav keeps the Bot Board
 
   async handler(req, res, { db, layout, lang, engine = getInteractiveEngine({ createIfMissing: false }) }) {
+    // The Board tab is the new shell's; classic mode keeps the Bot Board.
+    if (req.crowMode && req.crowMode.mode === "classic") return res.redirect(302, "/dashboard/bot-board");
     const scope = req.crowScope || { all: true };
     const board = await loadBoard(db, scope, engine);
     return layout({
       title: t("shell.tabBoard", lang),
-      content: boardCss() + boardHtml(board, lang) + boardClientJs(),
+      content: boardCss() + boardHtml(board, lang, scope) + boardClientJs(),
     });
   },
 };

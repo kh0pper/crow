@@ -112,8 +112,18 @@ export function boardCss() {
     width: 100%; min-height: 44px; border: 0; border-radius: var(--crow-radius-control, 10px);
     background: none; color: var(--crow-accent); font: inherit; cursor: pointer;
   }
+  /* The confirm before a failed result is accepted: the sheet, two buttons. */
+  body.shell .sb-confirm-text { margin: 0 0 12px; font-weight: 600; }
+  body.shell .sb-confirm-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  body.shell .sb-confirm-btn {
+    min-height: 44px; padding: 8px 12px;
+    border: 1px solid var(--crow-border); border-radius: var(--crow-radius-control, 10px);
+    background: var(--crow-bg-surface); color: var(--crow-text-primary); font: inherit; cursor: pointer;
+  }
+  body.shell .sb-confirm-yes { border-color: var(--crow-accent); color: var(--crow-accent); font-weight: 600; }
   body.shell .sb-move:focus-visible,
   body.shell .sb-sheet-lane:focus-visible,
+  body.shell .sb-confirm-btn:focus-visible,
   body.shell .sb-sheet-cancel:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }
   /* The one tap target: a link stretched over the whole card. */
   body.shell .sb-open::after { content: ""; position: absolute; inset: 0; border-radius: var(--crow-radius-card, 12px); }

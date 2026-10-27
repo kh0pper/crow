@@ -5,10 +5,17 @@
  *   POST /dashboard/shell-api/items/:kind/:ref/project  { project_id: number | "unassigned" }
  *     -> { ok: true, project_id: number | null }
  *
- *   POST /dashboard/shell-api/cards/:id/lane  { to, from }   (lanes: panels/board/lanes.js)
+ *   POST /dashboard/shell-api/cards/:id/lane
+ *        { to, from, seen_result_id, seen_version, accept_failure? }   (lanes: panels/board/lanes.js)
  *     -> 200 { ok: true, lane }               the move's one real write is done
- *        409 { error: "stale", lane }         the card is no longer in `from`
- *        409 { error: "refused", reason }     no real write expresses this move
+ *        409 { error: "stale", lane }         the card is no longer in `from`, or it
+ *                                             is not the card the operator saw: its
+ *                                             newest result is not `seen_result_id`
+ *                                             (null = none), or its ask version
+ *                                             (cardVersion) is not `seen_version`
+ *        409 { error: "refused", reason }     no real write expresses this move, or
+ *                                             reason "confirm_failure": accepting a
+ *                                             failed result needs accept_failure: true
  *     A lane is derived state: the server recomputes it from stored card,
  *     result, decision and lock state (the panel's laneOf inputs), then runs
  *     movePlan's one write: moveCard, acceptResult (approve + done), or
@@ -37,18 +44,18 @@ import { lockMapFor } from "./board-lock.js";
 import { resolveBoardDef } from "./board-defs.js";
 import { getCard, moveCard, updateCard } from "../board/card-service.js";
 import { acceptResult } from "../board/result-service.js";
-import { LANES, laneOf, movePlan } from "../dashboard/panels/board/lanes.js";
+import { LANES, laneOf, movePlan, cardVersion, CONFIRM_OUTCOME } from "../dashboard/panels/board/lanes.js";
 
 const DASHBOARD_ACTOR = Object.freeze({ kind: "human", id: null, jobId: null });
 
-/** The card's newest board_results row as { id, status }, or null (none yet, or a pre-0004 store). */
+/** The card's newest board_results row as { id, status, outcome }, or null (none yet, or a pre-0004 store). */
 async function latestResultOf(tdb, id) {
   try {
     const r = (await tdb.execute({
-      sql: "SELECT id, status FROM board_results WHERE item_id=? ORDER BY id DESC LIMIT 1",
+      sql: "SELECT id, status, outcome FROM board_results WHERE item_id=? ORDER BY id DESC LIMIT 1",
       args: [id],
     })).rows[0];
-    return r ? { id: Number(r.id), status: String(r.status) } : null;
+    return r ? { id: Number(r.id), status: String(r.status), outcome: String(r.outcome) } : null;
   } catch (err) {
     if (noTable(err)) return null;
     throw err;
@@ -91,6 +98,19 @@ export async function applyLanePlan(tdb, cdb, id, st, plan, actor = DASHBOARD_AC
   } else if (plan.action === "clear_ask") {
     await updateCard(tdb, id, { action_needed: null }, actor, { expect: { action_needed: st.card.action_needed ?? null } });
   }
+}
+
+/**
+ * True when the move was made against the card as it is stored now (final
+ * review, finding 1): the newest result the page showed (`seen_result_id`,
+ * null for none) and the ask version it showed (`seen_version`, cardVersion).
+ * A body without them (a page from before this check) never matches.
+ */
+export function sawCurrent(st, body) {
+  const rid = body.seen_result_id;
+  const seenRid = rid === null ? null : (Number.isInteger(rid) && rid > 0 ? rid : undefined);
+  const nowRid = st.latestResult ? st.latestResult.id : null;
+  return seenRid === nowRid && typeof body.seen_version === "string" && body.seen_version === cardVersion(st.card);
 }
 
 // One lane move per card at a time in this process, so a second drop of the
@@ -185,9 +205,18 @@ export function shellApiRouter(dashboardAuth) {
         const st = await laneState(tdb, cdb, id);
         if (!st) return jsonError(res, 404, "not_found");
         if (st.lane !== b.from) return jsonError(res, 409, "stale", { lane: st.lane });
+        // Not the card the operator acted on (a newer result, a changed ask):
+        // stale, so the Board re-renders and shows them what is there now.
+        if (!sawCurrent(st, b)) return jsonError(res, 409, "stale", { lane: st.lane });
 
         const plan = movePlan(st.card, st.def, { locked: st.locked, latestResult: st.latestResult }, b.to);
         if (plan.action === "refuse") return jsonError(res, 409, "refused", { reason: plan.reason });
+        // Operator ruling: accepting a failed result is confirmed first. The
+        // accept's own write is guarded on this result id (newest-in-UPDATE),
+        // so the confirmed result is the one approved.
+        if (plan.action === "accept" && st.latestResult && st.latestResult.outcome === CONFIRM_OUTCOME && b.accept_failure !== true) {
+          return jsonError(res, 409, "refused", { reason: "confirm_failure" });
+        }
         await applyLanePlan(tdb, cdb, id, st, plan);
 
         const after = await laneState(tdb, cdb, id);

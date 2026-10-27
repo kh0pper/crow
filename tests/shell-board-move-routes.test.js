@@ -100,7 +100,24 @@ before(async () => {
 after(() => { if (server) server.close(); rmSync(dir, { recursive: true, force: true }); });
 
 const AUTHED = { cookie: "crow_session=good; crow_csrf=tok", "x-crow-csrf": "tok" };
+/**
+ * What the Board rendered for a card (finding 1): its newest result id and
+ * its ask version, read from stored state now, as the page would show them.
+ */
+async function seen(id) {
+  const { cardVersion } = await import("../servers/gateway/dashboard/panels/board/lanes.js");
+  const t = new Database(TASKS);
+  try {
+    const c = t.prepare("SELECT action_needed, updated_at FROM tasks_items WHERE id=?").get(id);
+    const r = t.prepare("SELECT id FROM board_results WHERE item_id=? ORDER BY id DESC LIMIT 1").get(id);
+    return { seen_result_id: r ? Number(r.id) : null, seen_version: c ? cardVersion(c) : null };
+  } finally { t.close(); }
+}
+/** POST a lane move. Unless the body names them, it carries what the board shows now (seen()). */
 async function move(id, body, headers = AUTHED) {
+  if (body && typeof body === "object" && !("seen_result_id" in body) && !("seen_version" in body) && Number.isInteger(Number(id))) {
+    body = { ...(await seen(id)), ...body };
+  }
   const r = await fetch(base + "/shell-api/cards/" + id + "/lane", {
     method: "POST", redirect: "manual",
     headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body),
@@ -115,10 +132,10 @@ function addCard({ status = "pending", project = null, action = null, data = "{}
   t.close();
   return id;
 }
-function addResult(itemId, status = "recorded") {
+function addResult(itemId, status = "recorded", outcome = "success") {
   const t = new Database(TASKS);
-  const id = Number(t.prepare("INSERT INTO board_results (item_id, actor_kind, actor_id, outcome, status) VALUES (?, 'bot', 'scout', 'success', ?)")
-    .run(itemId, status).lastInsertRowid);
+  const id = Number(t.prepare("INSERT INTO board_results (item_id, actor_kind, actor_id, outcome, status) VALUES (?, 'bot', 'scout', ?, ?)")
+    .run(itemId, outcome, status).lastInsertRowid);
   t.close();
   return id;
 }
@@ -422,4 +439,126 @@ test("accept racing a classic move: approved, the classic move kept, and the lan
   // The route's answer for a card in that state: its real lane, Done.
   const again = await move(id, { to: "done", from: "needs_you" });
   assert.deepEqual(again.body, { error: "stale", lane: "done" });
+});
+
+// ---- Final review finding 1: a move acts only on what the operator saw ----
+
+test("a result reported after the board was drawn is never accepted: 409 stale, nothing approved or moved", async () => {
+  const id = addCard();
+  const r1 = addResult(id);
+  const sawR1 = await seen(id);
+  assert.equal(sawR1.seen_result_id, r1);
+  const r2 = addResult(id); // a bot reports again while the board is open
+  const r = await move(id, { to: "done", from: "needs_you", ...sawR1 });
+  assert.equal(r.status, 409);
+  assert.deepEqual(r.body, { error: "stale", lane: "needs_you" });
+  assert.equal(result(r1).status, "recorded");
+  assert.equal(result(r2).status, "recorded");
+  assert.equal(card(id).status, "pending");
+  assert.deepEqual(verbs(id), [], "nothing written");
+});
+
+test("an ask-only card dropped on Done after a bot reported is stale, never an approval", async () => {
+  const id = addCard({ action: "sign off" });
+  const saw = await seen(id);
+  assert.equal(saw.seen_result_id, null);
+  const rid = addResult(id);
+  const r = await move(id, { to: "done", from: "needs_you", ...saw });
+  assert.equal(r.status, 409);
+  assert.deepEqual(r.body, { error: "stale", lane: "needs_you" });
+  assert.equal(result(rid).status, "recorded");
+  assert.equal(card(id).status, "pending");
+  assert.deepEqual(verbs(id), []);
+});
+
+test("a changed ask is stale, for clear_ask and for a move to Done", async () => {
+  const id = addCard({ action: "first ask" });
+  const saw = await seen(id);
+  const t = new Database(TASKS);
+  t.prepare("UPDATE tasks_items SET action_needed='a newer ask', updated_at=datetime('now','+1 second') WHERE id=?").run(id);
+  t.close();
+  for (const to of ["up_next", "done"]) {
+    const r = await move(id, { to, from: "needs_you", ...saw });
+    assert.equal(r.status, 409, to);
+    assert.deepEqual(r.body, { error: "stale", lane: "needs_you" }, to);
+  }
+  assert.equal(card(id).action_needed, "a newer ask");
+  assert.equal(card(id).status, "pending");
+  assert.deepEqual(verbs(id), []);
+  // The same ask re-written (same text, a later updated_at) is a new version too.
+  const id2 = addCard({ action: "same ask" });
+  const saw2 = await seen(id2);
+  const t2 = new Database(TASKS);
+  t2.prepare("UPDATE tasks_items SET updated_at=datetime('now','+5 seconds') WHERE id=?").run(id2);
+  t2.close();
+  assert.equal((await move(id2, { to: "up_next", from: "needs_you", ...saw2 })).status, 409);
+  assert.equal(card(id2).action_needed, "same ask");
+});
+
+test("a move without what the page showed (an old page) is stale, never applied", async () => {
+  const id = addCard();
+  const r = await move(id, { to: "done", from: "up_next", seen_result_id: null });
+  assert.equal(r.status, 409);
+  assert.deepEqual(r.body, { error: "stale", lane: "up_next" });
+  const bad = await move(id, { to: "done", from: "up_next", seen_result_id: "x", seen_version: 5 });
+  assert.equal(bad.status, 409);
+  assert.equal(card(id).status, "pending");
+  assert.deepEqual(verbs(id), []);
+});
+
+// ---- Final review finding 3 (operator ruling): a failure needs a confirm ----
+
+test("accepting a failed result needs accept_failure: refused without it, accepted with it", async () => {
+  const id = addCard();
+  const rid = addResult(id, "recorded", "failure");
+  const r = await move(id, { to: "done", from: "needs_you" });
+  assert.equal(r.status, 409);
+  assert.deepEqual(r.body, { error: "refused", reason: "confirm_failure" });
+  assert.equal(result(rid).status, "recorded");
+  assert.equal(card(id).status, "pending");
+  assert.deepEqual(verbs(id), []);
+  // accept_failure must be exactly true.
+  assert.deepEqual((await move(id, { to: "done", from: "needs_you", accept_failure: "yes" })).body, { error: "refused", reason: "confirm_failure" });
+
+  const ok = await move(id, { to: "done", from: "needs_you", accept_failure: true });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(ok.body, { ok: true, lane: "done" });
+  assert.deepEqual(result(rid), { status: "approved", decided_via: "dashboard" });
+  assert.equal(card(id).status, "done");
+  assert.deepEqual(verbs(id), ["result_decide", "move"]);
+
+  // A success result never asks.
+  const s = addCard();
+  addResult(s, "recorded", "success");
+  assert.equal((await move(s, { to: "done", from: "needs_you" })).status, 200);
+});
+
+// ---- Final review item 7: decideResult's UPDATE is the guard, not its SELECT ----
+
+test("decideResult: a decision landing between its read and its write wins; the loser writes nothing", async () => {
+  const id = addCard();
+  const rid = addResult(id);
+  const { decideResult } = await import("../servers/gateway/board/result-service.js");
+  const { createDbClient } = await import("../servers/db.js");
+  const a = createDbClient(TASKS), b = createDbClient(TASKS);
+  try {
+    let fired = false;
+    // The loser's SELECT has seen 'recorded'; just before its UPDATE runs,
+    // another connection rejects the result.
+    const raced = {
+      execute: async (q) => {
+        if (!fired && /^UPDATE board_results/.test(q.sql || "")) {
+          fired = true;
+          await b.execute({ sql: "UPDATE board_results SET status='rejected', decided_via='classic' WHERE id=?", args: [rid] });
+        }
+        return a.execute(q);
+      },
+    };
+    const r = await settle(decideResult(raced, id, rid, "approved", { kind: "human", id: null }, "dashboard"));
+    assert.ok(fired, "the seam fired after the SELECT passed");
+    assert.equal(r.ok, false);
+    assert.equal(r.e.code, "already_decided"); assert.equal(r.e.http, 409);
+    assert.deepEqual(result(rid), { status: "rejected", decided_via: "classic" }, "the winner's decision stands");
+    assert.deepEqual(verbs(id), [], "the loser records no result_decide");
+  } finally { a.close(); b.close(); }
 });

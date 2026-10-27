@@ -15,7 +15,9 @@
  *   - Move on the phone: the sheet shows Working disabled with its reason,
  *     and choosing Done re-renders the board with the card in Done;
  *   - drag on the desktop: a card dragged from Up next onto Done moves, and
- *     one dragged onto Working stays where it is, with the refusal shown.
+ *     one dragged onto Working stays where it is, with the refusal shown;
+ *   - a failed result moved onto Done asks first: No leaves it, Yes accepts it;
+ *   - Details opens the card's drawer on its bot's board, results included.
  *
  * Network: this process stands in for tailscaled (actAsServe), and Chrome
  * sends the headers Serve writes (serveHeaders, via Network.setExtraHTTPHeaders)
@@ -107,6 +109,10 @@ before(async () => {
   // The gateway app parses JSON bodies before the dashboard router (servers/gateway/index.js).
   app.use(express.json({ limit: "1mb" }));
   app.use(express.static(fileURLToPath(new URL("../servers/gateway/public", import.meta.url))));
+  // The Bot Board API (the card drawer's GET /card/:id), at app root before
+  // the dashboard router, as boot/feature-mounts.js mounts it.
+  const { default: botBoardApiRouter } = await import("../servers/gateway/routes/bot-board-api.js");
+  app.use(botBoardApiRouter((req, res, next) => next()));
   app.use(dashboardRouter((req, res, next) => next()));
   await new Promise((r) => { server = app.listen(0, "127.0.0.1", r); });
   base = "http://127.0.0.1:" + server.address().port;
@@ -487,4 +493,90 @@ for (const lang of ["en", "es"]) {
       assert.deepEqual(p.errors, [], "no page errors");
     } finally { await p.close(); await setLang("en"); }
   });
+
+  test(`390×844 ${lang}: a failed result dropped on Done asks first — No leaves it, Yes accepts and closes it`, async (ctx) => {
+    if (!chrome) return ctx.skip("no headless Chrome");
+    await setLang(lang);
+    const tk = new Database(TASKS);
+    const fid = Number(tk.prepare("INSERT INTO tasks_items (title, status, priority) VALUES ('Check the totals', 'pending', 0)").run().lastInsertRowid);
+    const rid = Number(tk.prepare("INSERT INTO board_results (item_id, actor_kind, actor_id, outcome, summary_md, status) VALUES (?, 'bot', 'helper', 'failure', 'The totals did not add up.', 'recorded')").run(fid).lastInsertRowid);
+    tk.close();
+    const resultStatus = () => { const d = new Database(TASKS); try { return d.prepare("SELECT status FROM board_results WHERE id=?").get(rid).status; } finally { d.close(); } };
+    const p = await open("/dashboard/board");
+    try {
+      assert.ok(await p.ev(inLane("needs_you", fid)), "the failed card needs you");
+      const toDone = async () => {
+        await p.click(`.sb-card[data-card="${fid}"] .sb-move`);
+        await p.until("document.querySelector('[data-sb-sheet]').open", "the Move sheet");
+        await p.ev(TWO_FRAMES);
+        assert.equal(await p.ev("document.querySelector('.sb-sheet-lane[data-to=done]').getAttribute('aria-disabled')"), null, "Done is offered");
+        await p.click(".sb-sheet-lane[data-to=done]");
+        await p.until("document.querySelector('[data-sb-confirm]').open", "the confirm dialog");
+        await p.ev(TWO_FRAMES);
+      };
+      await toDone();
+      const dlg = await p.ev(`(function(){ var d=document.querySelector('[data-sb-confirm]'), r=d.getBoundingClientRect();
+        return { modal: d.matches(':modal'), text: d.querySelector('[data-sb-confirm-text]').textContent, sheetOpen: document.querySelector('[data-sb-sheet]').open,
+          box: { l: r.left, r: r.right, t: r.top, b: r.bottom }, focus: document.activeElement && document.activeElement.hasAttribute('data-sb-confirm-no') }; })()`);
+      note(ctx, `${lang} confirm dialog`, dlg);
+      assert.equal(dlg.modal, true, "an in-page modal dialog");
+      assert.equal(dlg.sheetOpen, false, "the Move sheet is closed under it");
+      assert.equal(dlg.text, t("shell.confirmFailure", lang));
+      assert.equal(dlg.focus, true, "focus starts on No (the safe choice)");
+      assert.ok(dlg.box.l >= 0 && dlg.box.r <= 390 && dlg.box.t >= 0 && dlg.box.b <= 844 + 0.5, "on screen");
+      await assertTargets(p, [["[data-sb-confirm-yes]", 1, "confirm Yes"], ["[data-sb-confirm-no]", 1, "confirm No"]], `${lang} confirm`);
+      assert.equal(resultStatus(), "recorded", "nothing is accepted before Yes");
+
+      // No: the card stays where it was.
+      await p.click("[data-sb-confirm-no]");
+      await p.until("!document.querySelector('[data-sb-confirm]').open", "the confirm dialog to close");
+      await p.ev(TWO_FRAMES);
+      assert.equal(await p.ev(inLane("needs_you", fid)), true, "No leaves the card in Needs you");
+      assert.equal(statusOf(fid), "pending");
+      assert.equal(resultStatus(), "recorded");
+      assert.equal(moveRows(fid), 0);
+
+      // Yes: accepted and closed.
+      await toDone();
+      await p.click("[data-sb-confirm-yes]");
+      await p.until(inLane("done", fid), "the card in Done");
+      await p.settled();
+      assert.equal(statusOf(fid), "done");
+      assert.equal(resultStatus(), "approved");
+      assert.equal(moveRows(fid), 1, "one real move");
+      assert.deepEqual(p.errors, [], "no page errors");
+    } finally { await p.close(); await setLang("en"); }
+  });
 }
+
+test("1280×800: Details opens the card's drawer on its bot's board, with the card's results", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  const { createDbClient } = await import("../servers/db.js");
+  const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
+  const db = createDbClient();
+  let pid;
+  try {
+    const have = (await db.execute({ sql: "SELECT id FROM project_spaces WHERE name='Venues' AND archived_at IS NULL", args: [] })).rows[0];
+    pid = have ? Number(have.id) : (await createProjectSpace(db, { name: "Venues" })).id;
+    await db.execute({
+      sql: "INSERT OR IGNORE INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES ('scout', 'Scout', ?, 1, ?)",
+      args: [JSON.stringify({ gateways: [{ type: "perch" }], tracker_config: { type: "kanban" } }), pid],
+    });
+  } finally { db.close(); }
+  const tk = new Database(TASKS);
+  const cid = Number(tk.prepare("INSERT INTO tasks_items (title, status, priority, project_id) VALUES ('Find a venue', 'pending', 1, ?)").run(pid).lastInsertRowid);
+  tk.prepare("INSERT INTO board_results (item_id, actor_kind, actor_id, outcome, summary_md, status) VALUES (?, 'bot', 'scout', 'success', 'Three venues are free that night.', 'recorded')").run(cid);
+  tk.close();
+  const p = await open("/dashboard/board", { width: 1280, height: 800 });
+  try {
+    const href = await p.ev(`document.querySelector('.sb-card[data-card="${cid}"] .sb-details').getAttribute('href')`);
+    assert.equal(href, `/dashboard/bot-board?bot=scout#open=${cid}`);
+    await p.click(`.sb-card[data-card="${cid}"] .sb-details`);
+    await p.until("!!document.querySelector('#bb-drawer.bb-open')", "the card drawer");
+    await p.until(`(document.getElementById('bb-d-title').textContent||'').indexOf('${cid}')>=0`, "the drawer on this card");
+    await p.until("(document.getElementById('bb-d-result-wrap').textContent||'').indexOf('Three venues are free that night.')>=0", "the card's results in the drawer");
+    assert.equal(await p.ev("location.pathname + location.search"), "/dashboard/bot-board?bot=scout");
+    assert.equal(await p.ev("location.hash.indexOf('open=')"), -1, "the one-shot open key leaves the URL");
+    assert.deepEqual(p.errors, [], "no page errors");
+  } finally { await p.close(); }
+});

@@ -28,7 +28,7 @@ const REPO = new URL("..", import.meta.url).pathname;
 const TASKS = process.env.CROW_TASKS_DB_PATH;
 
 let db, panel, botBoard, laneCounts, resolveScope, t;
-let P1, P2, P3, P4, slug1, slug2;
+let P1, P2, P3, P4, slug1, slug2, createProjectSpace;
 const ids = {};
 
 before(async () => {
@@ -80,7 +80,7 @@ before(async () => {
 
   const { createDbClient } = await import("../servers/db.js");
   db = createDbClient();
-  const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
+  ({ createProjectSpace } = await import("../servers/shared/project-spaces.js"));
   P1 = (await createProjectSpace(db, { name: "Alpha" })).id;
   P2 = (await createProjectSpace(db, { name: "Beta" })).id;
   P3 = (await createProjectSpace(db, { name: "Gamma" })).id;
@@ -189,14 +189,87 @@ test("a card with a conversation opens it", async () => {
   const m = html.match(/<li class="sb-card" data-card="5">[\s\S]*?<\/li>/);
   assert.ok(m, "card 5 is rendered");
   assert.match(m[0], /class="sb-open" href="\/dashboard\/perch#perchlive-z"/, "the newest perch-live thread");
-  assert.match(m[0], /class="sb-details" href="\/dashboard\/bot-board\?card=5"[^>]*>Details</);
+  // Details opens the card's drawer on the board of the bot on its project
+  // (the classic client's #open=N deep link, openCardById): plan, results,
+  // history and decision, not the no-JS card view.
+  assert.match(m[0], /class="sb-details" href="\/dashboard\/bot-board\?bot=hank#open=5"[^>]*>Details</);
+});
+
+test("Details: the drawer deep link for a card on a bot's board, the card view otherwise", async () => {
+  const all = (await render({ project: "all" })).html;
+  const details = (id) => {
+    const m = all.match(new RegExp(`<li class="sb-card" data-card="${id}">[\\s\\S]*?</li>`));
+    assert.ok(m, "card " + id + " is rendered");
+    return m[0].match(/class="sb-details" href="([^"]*)"/)[1];
+  };
+  assert.equal(details(ids.betaOpen), `/dashboard/bot-board?bot=aaa#open=${ids.betaOpen}`, "Beta's card opens on aaa's board");
+  assert.equal(details(ids.needs), `/dashboard/bot-board?bot=hank#open=${ids.needs}`);
+  // Project-less (even with an assigned bot), a project no bot holds, an
+  // orphaned project: the standalone card view is the fallback.
+  assert.equal(details(ids.loose), `/dashboard/bot-board?card=${ids.loose}`);
+  assert.equal(details(ids.g0), `/dashboard/bot-board?card=${ids.g0}`);
+  assert.equal(details(ids.orphanMissing), `/dashboard/bot-board?card=${ids.orphanMissing}`);
+});
+
+test("each card carries the result and ask version it was drawn with (finding 1)", async () => {
+  const { cardVersion } = await import("../servers/gateway/dashboard/panels/board/lanes.js");
+  const { html } = await render({ project: slug1 });
+  const tr = new Database(TASKS);
+  const row = (id) => tr.prepare("SELECT action_needed, updated_at FROM tasks_items WHERE id=?").get(id);
+  const rid = tr.prepare("SELECT id FROM board_results WHERE item_id=? ORDER BY id DESC LIMIT 1").get(ids.needs).id;
+  try {
+    const mv = (id) => html.match(new RegExp(`<li class="sb-card" data-card="${id}">[\\s\\S]*?<button type="button" class="sb-move"([^>]*)>`))[1];
+    assert.match(mv(ids.needs), new RegExp(`data-seen-result="${rid}"`));
+    assert.match(mv(ids.needs), new RegExp(`data-seen-version="${cardVersion(row(ids.needs))}"`));
+    assert.match(mv(ids.six), /data-seen-result=""/, "no result yet: empty");
+    assert.match(mv(ids.six), new RegExp(`data-seen-version="${cardVersion(row(ids.six))}"`));
+  } finally { tr.close(); }
+  // The version follows the ask and the row's updated_at.
+  assert.notEqual(cardVersion({ action_needed: "a", updated_at: "2026-01-01 00:00:00" }), cardVersion({ action_needed: "b", updated_at: "2026-01-01 00:00:00" }));
+  assert.notEqual(cardVersion({ action_needed: "a", updated_at: "2026-01-01 00:00:00" }), cardVersion({ action_needed: "a", updated_at: "2026-01-01 00:00:01" }));
+  assert.equal(cardVersion({ action_needed: null, updated_at: null }), cardVersion({}));
+});
+
+test("an empty board says what is empty: the project, Unassigned or Everything (finding 4)", async () => {
+  const empty = (await createProjectSpace(db, { name: "Epsilon" }));
+  const slugE = (await db.execute({ sql: "SELECT slug FROM project_spaces WHERE id=?", args: [empty.id] })).rows[0].slug;
+  for (const lang of ["en", "es"]) {
+    const proj = (await render({ project: slugE }, lang)).html;
+    assert.ok(proj.includes(t("shell.boardEmpty", lang)), "a project scope: " + lang);
+  }
+  const moved = TASKS + ".away";
+  renameSync(TASKS, moved);
+  try {
+    for (const lang of ["en", "es"]) {
+      const all = (await render({ project: "all" }, lang)).html;
+      assert.ok(all.includes(t("shell.boardEmptyAll", lang)), "Everything: " + lang);
+      assert.ok(!all.includes(t("shell.boardEmpty", lang)), "never 'this project' outside a project");
+      const un = (await render({ project: "unassigned" }, lang)).html;
+      assert.ok(un.includes(t("shell.boardEmptyUnassigned", lang)), "Unassigned: " + lang);
+      assert.ok(!un.includes(t("shell.boardEmpty", lang)));
+    }
+  } finally { renameSync(moved, TASKS); }
+});
+
+test("/dashboard/board outside the shell (classic) redirects to the Bot Board (finding 6)", async () => {
+  let to = null, code = null;
+  const res = { redirect(c, u) { code = c; to = u; this.headersSent = true; }, headersSent: false };
+  const out = await panel.handler({ method: "GET", query: {}, headers: {}, crowMode: { mode: "classic" }, crowScope: { all: true } }, res, { db, layout: (o) => o.content, lang: "en" });
+  assert.equal(code, 302);
+  assert.equal(to, "/dashboard/bot-board");
+  assert.equal(out, undefined, "nothing rendered");
+  // In the shell it renders.
+  const res2 = { redirect() { throw new Error("no redirect in the shell"); }, headersSent: false };
+  const html = await panel.handler({ method: "GET", query: {}, headers: {}, crowMode: { mode: "new" }, crowScope: { all: true } }, res2, { db, layout: (o) => o.content, lang: "en" });
+  assert.ok(html.includes("data-sb-board"));
 });
 
 test("a card without one opens its details", async () => {
   const { html } = await render({ project: slug1 });
   const m = html.match(new RegExp(`<li class="sb-card" data-card="${ids.six}">[\\s\\S]*?</li>`));
   assert.ok(m);
-  assert.match(m[0], new RegExp(`class="sb-open" href="/dashboard/bot-board\\?card=${ids.six}"`));
+  // No conversation: the card's drawer on its bot's board (as Details).
+  assert.match(m[0], new RegExp(`class="sb-open" href="/dashboard/bot-board\\?bot=hank#open=${ids.six}"`));
 });
 
 test("lane counts are real", async () => {

@@ -121,7 +121,10 @@ function laneTabsJs() {
 
 /**
  * Lane moves (Task 3.3). Two paths to one route, POST
- * /dashboard/shell-api/cards/:id/lane { to, from }:
+ * /dashboard/shell-api/cards/:id/lane { to, from, seen_result_id, seen_version }
+ * (the last two are what the card showed when it was drawn, read off its Move
+ * button: the server refuses a move made against a card that has changed
+ * since, as stale):
  *   - the Move button on each card opens the sheet (a dialog) with the four
  *     lanes; a refused lane is aria-disabled, with its reason as its
  *     subtitle (and its description), so a keyboard or screen reader user
@@ -133,6 +136,9 @@ function laneTabsJs() {
  * optimistic moves: on success, or when the card had already moved
  * ("stale"), the board is re-rendered from the server with a Turbo visit; a
  * refusal or failure is said in the status line and nothing changes.
+ * Accepting a failed result asks first (operator ruling): the server answers
+ * 409 confirm_failure, the confirm dialog opens (No focused), and Yes sends
+ * the same move again with accept_failure: true; No leaves the card as it is.
  * The face's Accept is the same route (to Done); its Reject is the classic
  * board's decide route. CSRF rides on layout.js's fetch wrapper.
  *
@@ -154,6 +160,11 @@ function laneMovesJs() {
   // A card's lane and refusals ride on its Move button (html.js).
   function moveData(li){ return (li&&li.querySelector('[data-sb-move]'))||null; }
   function fromOf(li){ var m=moveData(li); return m?m.getAttribute('data-from'):null; }
+  // What the card showed when the board was drawn (html.js data-seen-*).
+  function seenOf(li){
+    var m=moveData(li), r=m?m.getAttribute('data-seen-result'):'';
+    return { rid: r?Number(r):null, ver: m?m.getAttribute('data-seen-version'):null };
+  }
   function refusalsOf(li){
     var m=moveData(li);
     try{ return JSON.parse((m&&m.getAttribute('data-refuse'))||'{}'); }catch(e){ return {}; }
@@ -166,15 +177,18 @@ function laneMovesJs() {
     return fetch(url,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
       .then(function(r){ return r.json().catch(function(){ return {}; }).then(function(j){ return {status:r.status,j:j}; }); });
   }
-  function send(li, to){
+  function send(li, to, acceptFailure){
     if(busy) return;
     var from=fromOf(li);
     if(to===from) return;
     busy=true; say('');
-    post('/dashboard/shell-api/cards/'+encodeURIComponent(li.getAttribute('data-card'))+'/lane',{to:to,from:from})
+    var seen=seenOf(li), body={to:to,from:from,seen_result_id:seen.rid,seen_version:seen.ver};
+    if(acceptFailure) body.accept_failure=true;
+    post('/dashboard/shell-api/cards/'+encodeURIComponent(li.getAttribute('data-card'))+'/lane',body)
       .then(function(r){
         if(r.status===200||(r.status===409&&r.j&&r.j.error==='stale')){ rerender(); return; }
         busy=false;
+        if(r.status===409&&r.j&&r.j.error==='refused'&&r.j.reason==='confirm_failure'&&!acceptFailure){ askConfirm(li, to); return; }
         if(r.status===409&&r.j&&r.j.error==='refused') say(reasons[r.j.reason]||reasons.failed);
         else say(reasons.failed);
       }, function(){ busy=false; say(reasons.failed); });
@@ -216,6 +230,35 @@ function laneMovesJs() {
       var li=current;
       closeSheet();
       send(li, b.getAttribute('data-to'));
+    });
+  }
+
+  // ---- the confirm before a failed result is accepted ----
+  var confirmEl=root.querySelector('[data-sb-confirm]'), confirmFor=null;
+  function askConfirm(li, to){
+    if(!confirmEl){ say(reasons.confirm_failure||reasons.failed); return; }
+    confirmFor={ li: li, to: to };
+    if(typeof confirmEl.showModal==='function') confirmEl.showModal(); else confirmEl.setAttribute('open','');
+    var no=confirmEl.querySelector('[data-sb-confirm-no]');
+    if(no) no.focus();
+  }
+  function closeConfirm(){
+    if(!confirmEl) return;
+    if(typeof confirmEl.close==='function'&&confirmEl.open) confirmEl.close(); else confirmEl.removeAttribute('open');
+  }
+  if(confirmEl){
+    // Closed any way but Yes (No, Escape, the backdrop): the card stays put.
+    confirmEl.addEventListener('close', function(){
+      var c=confirmFor; confirmFor=null;
+      var mv=c&&moveData(c.li);
+      if(mv&&document.contains(mv)) mv.focus();
+    });
+    confirmEl.addEventListener('click', function(e){
+      if(e.target===confirmEl||e.target.closest('[data-sb-confirm-no]')){ closeConfirm(); return; }
+      if(!e.target.closest('[data-sb-confirm-yes]')||!confirmFor) return;
+      var c=confirmFor;
+      closeConfirm();
+      send(c.li, c.to, true);
     });
   }
 
@@ -299,7 +342,7 @@ function laneMovesJs() {
   setDraggable();
 
   document.addEventListener('turbo:before-cache', function uncache(){
-    closeSheet(); clearDrag(); say('');
+    closeSheet(); closeConfirm(); clearDrag(); say('');
     root.removeAttribute('data-sb-move-init');
     document.removeEventListener('turbo:before-cache', uncache);
   });

@@ -9,7 +9,7 @@ import { escapeHtml, section } from "../shared/components.js";
 import { t } from "../shared/i18n.js";
 import { botBoardStyles } from "./bot-board/css.js";
 import {
-  gatherPeerBots, tableMissing, parseBotDef, TASKS_DB,
+  gatherPeerBots, tableMissing, TASKS_DB, cardBoardBotForProject, enabledBoardBots,
 } from "./bot-board/data-queries.js";
 
 /** Top-level, unarchived cards per project (board_id NULL = kanban cards). */
@@ -62,8 +62,7 @@ async function botForCard(bots, cardId) {
   if (!row) return null;
   if (row.project_id != null) {
     const pid = Number(row.project_id);
-    const onProject = bots.filter((b) => b.projectId != null && Number(b.projectId) === pid);
-    const match = onProject.find((b) => b.trackerType === "kanban" || b.trackerType === "task-list") || onProject[0];
+    const match = cardBoardBotForProject(bots, pid) || bots.find((b) => b.projectId != null && Number(b.projectId) === pid);
     if (match) return match;
   }
   return row.assigned_bot ? bots.find((b) => b.botId === String(row.assigned_bot)) || null : null;
@@ -98,15 +97,7 @@ export default {
     const q = req.query || {};
 
     // ---- Bot list from pi_bot_defs ----
-    let botRows = [];
-    try {
-      botRows = (await db.execute({
-        sql: "SELECT bot_id, display_name, definition, enabled, project_id FROM pi_bot_defs WHERE enabled=1 AND bot_id != ? ORDER BY bot_id",
-        args: [CROW_VOICE_BOT_ID],
-      })).rows || [];
-    } catch { botRows = []; }
-
-    const bots = botRows.map(parseBotDef);
+    const bots = await enabledBoardBots(db, CROW_VOICE_BOT_ID);
 
     // ---- Backwards compat: ?project=N -> find bot, redirect ----
     if (q.project != null && q.project !== "" && (q.bot == null || q.bot === "")) {

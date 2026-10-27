@@ -9,6 +9,7 @@
  * rows.
  */
 
+import { createHash } from "node:crypto";
 import { DEFAULT_BOARD_DEF, isTerminal } from "../../../routes/board-defs.js";
 
 export const LANES = Object.freeze(["needs_you", "working", "up_next", "done"]);
@@ -70,6 +71,25 @@ export function groupByLane(cards, defsByProject, lockMap) {
 }
 
 // ---- Task 3.3: lane moves map to real actions ----
+
+/**
+ * The version of a card's ask that a lane move was made against (final
+ * review, finding 1): a short hash of `action_needed` and `updated_at`.
+ * The ask text itself is in it, so a different ask is always a new version
+ * (whoever wrote it and however it was written); `updated_at` catches the
+ * same text written again, and every card-service write (update, move,
+ * decision answer or expiry) bumps it. The Board renders it on each card;
+ * the lane route recomputes it from the stored row and refuses a move made
+ * against another version as stale.
+ */
+export function cardVersion(card) {
+  const ask = card?.action_needed ?? null;
+  const at = card?.updated_at ?? null;
+  return createHash("sha256").update(JSON.stringify([ask == null ? null : String(ask), at == null ? null : String(at)])).digest("hex").slice(0, 16);
+}
+
+/** A result outcome the operator must confirm before accepting it (operator ruling, final review finding 3). */
+export const CONFIRM_OUTCOME = "failure";
 
 /** The status "Done" means on a board: "done" when it is terminal there, else the first terminal status. */
 export function doneStatus(def) {
