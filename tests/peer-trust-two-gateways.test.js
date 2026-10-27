@@ -301,3 +301,40 @@ test("T7 SSO: a revoke ends the peer's SSO session and refuses a new ticket", T,
     assert.notEqual(again.status, 303, "a new ticket is refused");
   } finally { await cleanup(); }
 });
+
+test("T2 mutual revoke race mid-traffic: both stores lose the other and nothing authenticates either way", { timeout: 600_000 }, async () => {
+  const ROUNDS = Number(process.env.PT1_T2_ROUNDS || 5);
+  for (let round = 0; round < ROUNDS; round++) {
+    const { A, B, cleanup } = await bootPair({ sameIdentity: round % 2 === 0 });
+    try {
+      await baseline(B, A);
+      await baseline(A, B);
+      const credsBonA = { ...B.tokens()[A.id] };
+      const credsAonB = { ...A.tokens()[B.id] };
+      let stop = false;
+      const traffic = (async () => {
+        while (!stop) {
+          await Promise.all([
+            rawSigned(B, A, { path: "/dashboard/overview", authToken: credsBonA.auth_token, signingKey: credsBonA.signing_key }),
+            rawSigned(A, B, { path: "/dashboard/overview", authToken: credsAonB.auth_token, signingKey: credsAonB.signing_key }),
+            bearerMcp(B, A, credsBonA.auth_token),
+          ]).catch(() => {});
+        }
+      })();
+      const [ra, rb] = await Promise.all([settingsRevoke(A, B.id), settingsRevoke(B, A.id)]);
+      stop = true;
+      await traffic;
+      assert.match(String(ra.location), /revoked=1/, `round ${round}`);
+      assert.match(String(rb.location), /revoked=1/, `round ${round}`);
+      assert.equal(A.tokens()[B.id], undefined, `round ${round}: A lost B`);
+      assert.equal(B.tokens()[A.id], undefined, `round ${round}: B lost A`);
+      for (const [from, to, c] of [[B, A, credsBonA], [A, B, credsAonB]]) {
+        const r = await rawSigned(from, to, { path: "/dashboard/overview", authToken: c.auth_token, signingKey: c.signing_key });
+        assert.equal(r.status, 401, `round ${round}`);
+        assert.deepEqual(r.body, UNIFORM);
+        const m = await bearerMcp(from, to, c.auth_token);
+        assert.notEqual(m.listStatus, 200, `round ${round}: bearer refused`);
+      }
+    } finally { await cleanup(); }
+  }
+});
