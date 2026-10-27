@@ -33,6 +33,17 @@ async function cardCountsFor(projectIds) {
   finally { if (tdb) { try { tdb.close(); } catch { /* already closed */ } } }
   return out;
 }
+import { clientJs } from "./bot-board/client.js";
+import { handleBotBoardPost } from "./bot-board/api-handlers.js";
+import {
+  drawerMarkup, renderKanbanBoard, renderCustomTracker,
+  botBoardState, botPickerHtml, boardCard, turnOnPanelHtml, turnOnUnassignedHtml,
+  renderStandaloneCardView,
+} from "./bot-board/html.js";
+import { createDbClient } from "../../../db.js";
+import { botRuntimeActive } from "./bot-runtime-flag.js";
+import { CROW_VOICE_BOT_ID } from "../../../shared/voice-bot.js";
+
 /**
  * The bot whose board holds a card, for a bare ?card=N (the Board tab's
  * Details link): the bot on the card's project (kanban/task-list first),
@@ -57,15 +68,6 @@ async function botForCard(bots, cardId) {
   }
   return row.assigned_bot ? bots.find((b) => b.botId === String(row.assigned_bot)) || null : null;
 }
-import { clientJs } from "./bot-board/client.js";
-import { handleBotBoardPost } from "./bot-board/api-handlers.js";
-import {
-  drawerMarkup, renderKanbanBoard, renderCustomTracker,
-  botBoardState, botPickerHtml, boardCard, turnOnPanelHtml, turnOnUnassignedHtml,
-} from "./bot-board/html.js";
-import { createDbClient } from "../../../db.js";
-import { botRuntimeActive } from "./bot-runtime-flag.js";
-import { CROW_VOICE_BOT_ID } from "../../../shared/voice-bot.js";
 
 export default {
   id: "bot-board",
@@ -125,8 +127,13 @@ export default {
       selBot = bots.find((b) => b.botId === reqBot) || null;
     }
     // A bare ?card=N opens the card on the board that holds it.
+    // When no kanban board can show it (no bot resolves, or the bot's board
+    // isn't a card board), the card view is rendered on its own so the
+    // card's full detail is always reachable.
     if (!selBot && reqBot == null && q.card != null && q.card !== "") {
       selBot = await botForCard(bots, q.card);
+      const kanban = selBot && (selBot.trackerType === "kanban" || selBot.trackerType === "task-list") && selBot.projectId != null;
+      if (!kanban) return renderStandaloneCardView({ db, layout, cardId: q.card, botId: selBot ? selBot.botId : null, lang });
     }
     if (!selBot && bots.length > 0 && reqBot == null) {
       selBot = bots[0]; // default to first enabled bot

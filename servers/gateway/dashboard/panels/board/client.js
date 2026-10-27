@@ -7,8 +7,9 @@
  * labelled regions side by side.
  *
  * Without JS the chips are plain in-page links, and everything still reads.
- * Turbo Drive re-runs this per visit; it binds to the board element it finds
- * and lets go of its media listener when Turbo swaps the page out.
+ * Turbo Drive re-runs this per visit and on a restored snapshot (the init
+ * flag is cleared before Turbo caches the page); it binds to the board element
+ * it finds and lets go of its media listener when Turbo swaps the page out.
  *
  * NOTE: this returns template-literal code: never use a backtick inside it.
  */
@@ -100,6 +101,12 @@ export function boardClientJs() {
 
   function onChange(){ apply(); }
   if(mq.addEventListener) mq.addEventListener('change', onChange); else mq.addListener(onChange);
+  // Turbo caches this page as it stands, flag included; a restored snapshot
+  // (Back) must initialise again, so the flag never goes into the cache.
+  document.addEventListener('turbo:before-cache', function uncache(){
+    root.removeAttribute('data-sb-init');
+    document.removeEventListener('turbo:before-cache', uncache);
+  });
   document.addEventListener('turbo:before-render', function release(){
     if(mq.removeEventListener) mq.removeEventListener('change', onChange); else mq.removeListener(onChange);
     document.removeEventListener('turbo:before-render', release);

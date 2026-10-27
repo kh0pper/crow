@@ -28,7 +28,7 @@ const REPO = new URL("..", import.meta.url).pathname;
 const TASKS = process.env.CROW_TASKS_DB_PATH;
 
 let db, panel, botBoard, laneCounts, resolveScope, t;
-let P1, P2, P3, slug1, slug2;
+let P1, P2, P3, P4, slug1, slug2;
 const ids = {};
 
 before(async () => {
@@ -84,6 +84,8 @@ before(async () => {
   P1 = (await createProjectSpace(db, { name: "Alpha" })).id;
   P2 = (await createProjectSpace(db, { name: "Beta" })).id;
   P3 = (await createProjectSpace(db, { name: "Gamma" })).id;
+  P4 = (await createProjectSpace(db, { name: "Delta" })).id;
+  await db.execute({ sql: "UPDATE project_spaces SET archived_at = datetime('now') WHERE id = ?", args: [P4] });
   const slugOf = async (id) => (await db.execute({ sql: "SELECT slug FROM project_spaces WHERE id=?", args: [id] })).rows[0].slug;
   slug1 = await slugOf(P1);
   slug2 = await slugOf(P2);
@@ -106,14 +108,22 @@ before(async () => {
   tw.prepare("INSERT INTO board_results (item_id, actor_kind, outcome, status) VALUES (?, 'bot', 'success', 'recorded')").run(ids.needs);
   // Not top-level or archived: never on the board.
   tw.prepare("INSERT INTO tasks_items (title, project_id, parent_id) VALUES ('alpha-subtask', ?, 1)").run(P1);
-  tw.prepare("INSERT INTO tasks_items (title, project_id, archived_at) VALUES ('alpha-archived', ?, datetime('now'))").run(P1);
+  ids.archivedCard = Number(tw.prepare("INSERT INTO tasks_items (title, project_id, archived_at) VALUES ('alpha-archived', ?, datetime('now'))").run(P1).lastInsertRowid);
   tw.prepare("INSERT INTO tasks_items (title, project_id, board_id) VALUES ('alpha-tracker-item', ?, 3)").run(P1);
+  // Cards whose project is no longer live: an archived project, and an id
+  // that names no project at all. They count as Unassigned (Chat's rule).
+  add("orphanArchived", "orphan-archived", P4, "pending", { action: "check this" });
+  add("orphanMissing", "orphan-missing", 9999);
   tw.close();
   assert.equal(ids.five, 5);
 
   await db.execute({ sql: "INSERT INTO bot_sessions (bot_id, card_id, status, kind) VALUES ('hank', ?, 'active', 'chat')", args: [ids.held] });
   await db.execute({ sql: "INSERT INTO bot_sessions (bot_id, card_id, status, kind, gateway_thread_id) VALUES ('hank', 5, 'waiting-user', 'perch-live', 'perchlive-old')", args: [] });
   await db.execute({ sql: "INSERT INTO bot_sessions (bot_id, card_id, status, kind, gateway_thread_id) VALUES ('hank', 5, 'waiting-user', 'perch-live', 'perchlive-z')", args: [] });
+
+  // Beta's <b> card: an older live conversation and a newer archived one.
+  await db.execute({ sql: "INSERT INTO bot_sessions (bot_id, card_id, status, kind, gateway_thread_id) VALUES ('aaa', ?, 'waiting-user', 'perch-live', 'perchlive-live')", args: [ids.betaOpen] });
+  await db.execute({ sql: "INSERT INTO bot_sessions (bot_id, card_id, status, kind, gateway_thread_id, archived_at) VALUES ('aaa', ?, 'waiting-user', 'perch-live', 'perchlive-arch', datetime('now'))", args: [ids.betaOpen] });
 
   // Bots for the classic card view: "aaa" sorts first (and so is the default
   // bot) but is on Beta; hank is on Alpha.
@@ -236,6 +246,52 @@ test("bot-board resolves a card's bot", async () => {
   assert.ok(html.includes("Card #5"), "the card in hank's project resolves to hank's board");
   const nf = await botBoard.handler({ method: "GET", query: { card: "999" }, headers: {} }, res, { db, layout, lang: "en" });
   assert.ok(nf.includes(t("botboard.cardNotFound", "en")), "an unknown id gives the existing not-found section");
+});
+
+test("cards in an archived or missing project are Unassigned, and counted", async () => {
+  const un = await render({ project: "unassigned" });
+  assert.ok(laneHtml(un.html, "needs_you").includes("orphan-archived"), "a waiting card in an archived project still needs you");
+  assert.ok(un.html.includes("orphan-missing"));
+  assert.deepEqual(["needs_you", "working", "up_next", "done"].map((l) => chipCount(un.html, l)), [1, 0, 2, 1]);
+  const all = await render({ project: "all" });
+  for (const s of ["orphan-archived", "orphan-missing", "gamma-0"]) assert.ok(all.html.includes(s), s);
+  assert.equal(chipCount(all.html, "needs_you"), 2);
+  const { createDbClient } = await import("../servers/db.js");
+  const { activeProjects } = await import("../servers/shared/shell-items.js");
+  const { lockMapFor } = await import("../servers/gateway/routes/board-lock.js");
+  const tdb = createDbClient(TASKS);
+  try {
+    const activeIds = (await activeProjects(db)).map((p) => p.id);
+    assert.ok(!activeIds.includes(P4), "the archived project is not live");
+    const lockMap = await lockMapFor(db, [ids.loose, ids.looseDone, ids.orphanArchived, ids.orphanMissing]);
+    assert.deepEqual(await laneCounts(tdb, { unassigned: true }, lockMap, { activeIds }), { needs_you: 1, working: 0, up_next: 2, done: 1 });
+  } finally { tdb.close(); }
+});
+
+test("a live conversation wins over a newer archived one", async () => {
+  const { html } = await render({ project: slug2 });
+  const m = html.match(new RegExp(`<li class="sb-card" data-card="${ids.betaOpen}">[\\s\\S]*?</li>`));
+  assert.ok(m);
+  assert.match(m[0], /class="sb-open" href="\/dashboard\/perch#perchlive-live"/);
+});
+
+test("a card no bot's board holds still opens its full card view", async () => {
+  const layout = (o) => (o.title || "") + "\n" + o.content;
+  const res = { redirect() {}, headersSent: false };
+  const view = (card) => botBoard.handler({ method: "GET", query: { card: String(card) }, headers: {} }, res, { db, layout, lang: "en" });
+  for (const [k, title] of [["loose", "loose-pending"], ["looseDone", "loose-done"], ["g0", "gamma-0"], ["orphanArchived", "orphan-archived"], ["orphanMissing", "orphan-missing"]]) {
+    const html = await view(ids[k]);
+    assert.ok(html.includes(`Card #${ids[k]}`), k + " renders its card view");
+    assert.ok(html.includes(title), k + " shows its title");
+    assert.ok(html.includes(t("botboard.planFileHeading", "en")), k + " shows its plan section");
+    assert.ok(!html.includes(t("botboard.cardNotFound", "en")), k);
+  }
+  // With a bot named whose project doesn't hold the card: still the card.
+  const viaBot = await botBoard.handler({ method: "GET", query: { bot: "hank", card: String(ids.g0) }, headers: {} }, res, { db, layout, lang: "en" });
+  assert.ok(viaBot.includes(`Card #${ids.g0}`));
+  // An archived card and a subtask id are not found.
+  const arch = await view(ids.archivedCard);
+  assert.ok(arch.includes(t("botboard.cardNotFound", "en")));
 });
 
 test("no tasks.db: an empty board, not an error", async () => {

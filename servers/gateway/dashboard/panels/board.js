@@ -34,17 +34,24 @@ export const LANE_RENDER_CAP = 100;
 const TOP_LEVEL = "t.board_id IS NULL AND t.parent_id IS NULL AND t.archived_at IS NULL";
 
 /**
- * The WHERE clause for a scope: { projectId } is that project's cards,
- * { unassigned } the project-less ones (the listUnassignedCards rule, Done
- * included), { all } every live project's cards plus the unassigned.
- * `activeIds` (live project ids, from crow.db) is only read for { all }.
+ * The WHERE clause for a scope, by the rule Chat uses (shell-items.js
+ * listItemRefs): a card whose project is missing, archived or a learner
+ * profile counts as Unassigned, so no card ever vanishes from every scope.
+ *   { projectId }  that project's cards
+ *   { unassigned } project_id NULL or not a live project (`activeIds`, the
+ *                  live ids from activeProjects / ACTIVE_PROJECT_WHERE in
+ *                  crow.db; an empty list means every card)
+ *   { all }        every card, no project filter
+ * Every scope is top-level, unarchived cards only.
  */
 function scopeWhere(scope, activeIds = []) {
   if (scope && scope.projectId != null) return { sql: `${TOP_LEVEL} AND t.project_id = ?`, args: [Number(scope.projectId)] };
-  if (scope && scope.unassigned) return { sql: `${TOP_LEVEL} AND t.project_id IS NULL`, args: [] };
-  const live = (activeIds || []).map(Number).filter(Number.isInteger);
-  if (!live.length) return { sql: `${TOP_LEVEL} AND t.project_id IS NULL`, args: [] };
-  return { sql: `${TOP_LEVEL} AND (t.project_id IS NULL OR t.project_id IN (${live.map(() => "?").join(",")}))`, args: live };
+  if (scope && scope.unassigned) {
+    const live = (activeIds || []).map(Number).filter(Number.isInteger);
+    if (!live.length) return { sql: TOP_LEVEL, args: [] };
+    return { sql: `${TOP_LEVEL} AND (t.project_id IS NULL OR t.project_id NOT IN (${live.map(() => "?").join(",")}))`, args: live };
+  }
+  return { sql: TOP_LEVEL, args: [] };
 }
 
 // The latest board_results row per card: renderKanbanBoard's join, same shape.
@@ -98,7 +105,9 @@ function countsOf(byLane) {
 
 /**
  * Cards per lane in a scope: laneOf over laneRows, with the caller's lock
- * map (lockMapFor's Map<Number id, boolean>). Never truncated.
+ * map (lockMapFor's Map<Number id, boolean>). Never truncated. Same scope
+ * SQL as the rendered lanes; { unassigned } needs `opts.activeIds` (the live
+ * project ids, activeProjects(db)).
  */
 export async function laneCounts(tdb, scope, lockMap, opts = {}) {
   const rows = await laneRows(tdb, scope, opts);
@@ -123,20 +132,30 @@ async function cardsByIds(tdb, ids) {
 }
 
 /**
- * Map<cardId, gateway_thread_id>: each card's newest kind='perch-live'
- * conversation. bot_sessions absent → empty (every card opens its details).
+ * Map<cardId, gateway_thread_id>: each card's kind='perch-live' conversation
+ * (unarchived first, then newest). bot_sessions absent → empty (every card opens its details).
  */
 export async function threadsByCard(db, ids) {
   const out = new Map();
   if (!ids.length) return out;
   try {
-    const { rows } = await db.execute({
-      sql: `SELECT card_id, gateway_thread_id FROM bot_sessions
-             WHERE kind = 'perch-live' AND gateway_thread_id IS NOT NULL AND gateway_thread_id != ''
-               AND card_id IN (${ids.map(() => "?").join(",")})
-             ORDER BY id DESC`,
-      args: ids,
-    });
+    // An unarchived conversation wins over a newer archived one; within
+    // each, the newest. A store without bot_sessions.archived_at (pre-0006)
+    // orders by id alone.
+    const where = `kind = 'perch-live' AND gateway_thread_id IS NOT NULL AND gateway_thread_id != ''
+               AND card_id IN (${ids.map(() => "?").join(",")})`;
+    let rows;
+    try {
+      rows = (await db.execute({
+        sql: `SELECT card_id, gateway_thread_id FROM bot_sessions WHERE ${where} ORDER BY (archived_at IS NULL) DESC, id DESC`,
+        args: ids,
+      })).rows;
+    } catch {
+      rows = (await db.execute({
+        sql: `SELECT card_id, gateway_thread_id FROM bot_sessions WHERE ${where} ORDER BY id DESC`,
+        args: ids,
+      })).rows;
+    }
     for (const r of rows || []) {
       const cid = Number(r.card_id);
       if (!out.has(cid)) out.set(cid, String(r.gateway_thread_id));
@@ -155,7 +174,7 @@ async function loadBoard(db, scope, engine) {
   let tdb;
   try {
     tdb = createDbClient(TASKS_DB);
-    const activeIds = scope && scope.all ? (await activeProjects(db)).map((p) => p.id) : [];
+    const activeIds = scope && scope.unassigned ? (await activeProjects(db)).map((p) => p.id) : [];
     const rows = await laneRows(tdb, scope, { activeIds });
     const lockMap = await lockMapFor(db, rows.map((r) => r.id));
     const defs = await defsFor(tdb, rows);

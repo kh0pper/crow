@@ -6,6 +6,7 @@
  * custom tracker, and drawer markup.
  */
 
+import { existsSync } from "node:fs";
 import { escapeHtml, section, badge } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
 import { createDbClient } from "../../../../db.js";
@@ -763,6 +764,100 @@ function archivedToggleHtml(botId, includeArchived, lang) {
   return `<a class="bb-btn bb-sec" href="${base}&include_archived=1">${escapeHtml(t("board.showArchived", lang))}</a>`;
 }
 
+/** "Back to board": the bot's board when there is one, else the board's front page. */
+function boardBackHref(botId) {
+  return botId != null ? `/dashboard/bot-board?bot=${escapeHtml(String(botId))}` : "/dashboard/bot-board";
+}
+
+/**
+ * The no-JS card view (&card=M): fields, description, a move form and the
+ * current plan. `botId` (nullable) only shapes the back link and the move
+ * form's return; the card itself comes from the instance-global tasks.db.
+ */
+export async function renderCardView({ layout, card, def, locked, botId = null, lang }) {
+  const cid = Number(card.id);
+  const backHref = boardBackHref(botId);
+  // Track 1 (carried item 2): the no-JS plan block re-points from the
+  // retired plan-FILE rail (derivePlanPath/readPlan, D-T1.7) to plan
+  // RECORDS (D-T1.4) — plan-service.getCurrentPlan against the
+  // instance-global tasks.db, the SAME store the JS drawer's Plan tab
+  // reads via GET /card/:id/plan. "Current plan" is derived there too:
+  // latest approved, else latest draft, else none.
+  let currentPlan = null;
+  let ptdb;
+  try {
+    ptdb = createDbClient(TASKS_DB);
+    currentPlan = await getCurrentPlan(ptdb, cid);
+  } catch { currentPlan = null; } finally {
+    if (ptdb) { try { ptdb.close(); } catch { /* already closed */ } }
+  }
+  const fieldRow = (lbl, val) =>
+    `<tr><td style="padding:3px 14px 3px 0;opacity:.7">${escapeHtml(lbl)}</td><td>${escapeHtml(String(val == null ? "—" : val))}</td></tr>`;
+  const planBlock = !currentPlan
+    ? `<p class="bb-msg warn">${t("botboard.planPlaceholder", lang)}</p>`
+    : `<p style="font-size:.8rem;color:var(--crow-text-muted)">v${escapeHtml(String(currentPlan.version))} (${escapeHtml(String(currentPlan.status))})</p>` +
+      `<div class="bb-pre">${escapeHtml(currentPlan.body_md || t("botboard.planFilePlaceholder", lang))}</div>` +
+      (locked
+        ? `<p class="bb-msg warn">${t("botboard.planLocked", lang)}</p>`
+        : `<p class="bb-msg">${t("botboard.planJsHint", lang)}</p>`);
+  const moveForm =
+    `<form method="POST" action="/dashboard/bot-board" style="margin:.6rem 0">` +
+    `<input type="hidden" name="action" value="move">` +
+    `<input type="hidden" name="card_id" value="${cid}">` +
+    (botId != null ? `<input type="hidden" name="bot" value="${escapeHtml(botId)}">` : "") +
+    t("botboard.moveLabel", lang) + def.status_values.filter((s) => s !== card.status).map((s) =>
+      `<button type="submit" name="status" value="${escapeHtml(s)}" class="bb-btn bb-sec" ${locked ? "disabled" : ""}>${escapeHtml(defStatusLabel(def, s, lang))}</button>`).join(" ") +
+    `</form>`;
+  return layout({
+    title: `Card #${cid}`,
+    content: botBoardStyles() + section(
+      `Card #${cid} — ${escapeHtml(String(card.title || ""))} ${badge(card.status, STATUS_BADGE[card.status] || "draft")}${locked ? " " + badge("bot working", "info") : ""}`,
+      `<p><a href="${backHref}">${t("botboard.backToBoard", lang)}</a></p>` +
+      `<div class="table-scroll"><table style="font-size:.9rem;border-collapse:collapse">` +
+      fieldRow(t("botboard.fieldPriority", lang), card.priority) + fieldRow(t("botboard.fieldDue", lang), card.due_date) +
+      fieldRow(t("botboard.fieldOwner", lang), card.owner) + fieldRow(t("botboard.fieldTags", lang), card.tags) +
+      fieldRow(t("botboard.fieldParent", lang), card.parent_id) + fieldRow(t("botboard.fieldUpdated", lang), card.updated_at) +
+      `</table></div>` +
+      (card.description ? `<p style="margin-top:.6rem">${escapeHtml(String(card.description))}</p>` : "") +
+      moveForm + `<h4 style="margin-top:1rem">${t("botboard.planFileHeading", lang)}</h4>` + planBlock),
+  });
+}
+
+/**
+ * One top-level, unarchived card by id, straight from the instance-global
+ * tasks.db, rendered in the card view whatever board (if any) holds it. An
+ * id that doesn't exist, is archived, or is not a top-level card gets the
+ * not-found section. tasks.db absent is the not-found case, never created.
+ */
+export async function renderStandaloneCardView({ db, layout, cardId, botId = null, lang }) {
+  const cid = Number(cardId);
+  let card = null;
+  let def = DEFAULT_BOARD_DEF;
+  if (Number.isInteger(cid) && existsSync(TASKS_DB)) {
+    let tdb;
+    try {
+      tdb = createDbClient(TASKS_DB);
+      card = (await tdb.execute({
+        sql: "SELECT * FROM tasks_items WHERE id = ? AND board_id IS NULL AND parent_id IS NULL AND archived_at IS NULL",
+        args: [cid],
+      })).rows[0] || null;
+      if (card && card.project_id != null) def = await resolveBoardDef(tdb, { projectId: Number(card.project_id) });
+    } catch { card = null; } finally {
+      if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
+    }
+  }
+  if (!card) {
+    return layout({
+      title: "Bot Board",
+      content: botBoardStyles() + section(t("botboard.cardNotFound", lang),
+        `<p>#${escapeHtml(String(cardId))} is not in this bot's project.</p>` +
+        `<p><a href="${boardBackHref(botId)}">${t("botboard.backToBoard", lang)}</a></p>`),
+    });
+  }
+  const locked = (await lockMapFor(db, [cid])).get(cid) === true;
+  return renderCardView({ layout, card, def, locked, botId, lang });
+}
+
 // ---- Kanban board rendering ----
 export async function renderKanbanBoard(req, res, {
   db, layout, selBot, bots, notice, switcher, q, lang,
@@ -839,59 +934,12 @@ export async function renderKanbanBoard(req, res, {
   if (q.card != null && q.card !== "") {
     const cid = Number(q.card);
     const card = cards.find((c) => Number(c.id) === cid);
-    if (!card) {
-      return layout({
-        title: "Bot Board",
-        content: botBoardStyles() + section(t("botboard.cardNotFound", lang),
-          `<p>#${escapeHtml(String(q.card))} is not in this bot's project.</p>` +
-          `<p><a href="/dashboard/bot-board?bot=${escapeHtml(selBot.botId)}">${t("botboard.backToBoard", lang)}</a></p>`),
-      });
-    }
-    const locked = !!lockMap.get(cid);
-    // Track 1 (carried item 2): the no-JS plan block re-points from the
-    // retired plan-FILE rail (derivePlanPath/readPlan, D-T1.7) to plan
-    // RECORDS (D-T1.4) — plan-service.getCurrentPlan against the
-    // instance-global tasks.db, the SAME store the JS drawer's Plan tab
-    // reads via GET /card/:id/plan. "Current plan" is derived there too:
-    // latest approved, else latest draft, else none.
-    let currentPlan = null;
-    let ptdb;
-    try {
-      ptdb = createDbClient(TASKS_DB);
-      currentPlan = await getCurrentPlan(ptdb, cid);
-    } catch { currentPlan = null; } finally {
-      if (ptdb) { try { ptdb.close(); } catch { /* already closed */ } }
-    }
-    const fieldRow = (lbl, val) =>
-      `<tr><td style="padding:3px 14px 3px 0;opacity:.7">${escapeHtml(lbl)}</td><td>${escapeHtml(String(val == null ? "—" : val))}</td></tr>`;
-    const planBlock = !currentPlan
-      ? `<p class="bb-msg warn">${t("botboard.planPlaceholder", lang)}</p>`
-      : `<p style="font-size:.8rem;color:var(--crow-text-muted)">v${escapeHtml(String(currentPlan.version))} (${escapeHtml(String(currentPlan.status))})</p>` +
-        `<div class="bb-pre">${escapeHtml(currentPlan.body_md || t("botboard.planFilePlaceholder", lang))}</div>` +
-        (locked
-          ? `<p class="bb-msg warn">${t("botboard.planLocked", lang)}</p>`
-          : `<p class="bb-msg">${t("botboard.planJsHint", lang)}</p>`);
-    const moveForm =
-      `<form method="POST" action="/dashboard/bot-board" style="margin:.6rem 0">` +
-      `<input type="hidden" name="action" value="move">` +
-      `<input type="hidden" name="card_id" value="${cid}">` +
-      `<input type="hidden" name="bot" value="${escapeHtml(selBot.botId)}">` +
-      t("botboard.moveLabel", lang) + def.status_values.filter((s) => s !== card.status).map((s) =>
-        `<button type="submit" name="status" value="${escapeHtml(s)}" class="bb-btn bb-sec" ${locked ? "disabled" : ""}>${escapeHtml(defStatusLabel(def, s, lang))}</button>`).join(" ") +
-      `</form>`;
-    return layout({
-      title: `Card #${cid}`,
-      content: botBoardStyles() + section(
-        `Card #${cid} — ${escapeHtml(String(card.title || ""))} ${badge(card.status, STATUS_BADGE[card.status] || "draft")}${locked ? " " + badge("bot working", "info") : ""}`,
-        `<p><a href="/dashboard/bot-board?bot=${escapeHtml(selBot.botId)}">${t("botboard.backToBoard", lang)}</a></p>` +
-        `<div class="table-scroll"><table style="font-size:.9rem;border-collapse:collapse">` +
-        fieldRow(t("botboard.fieldPriority", lang), card.priority) + fieldRow(t("botboard.fieldDue", lang), card.due_date) +
-        fieldRow(t("botboard.fieldOwner", lang), card.owner) + fieldRow(t("botboard.fieldTags", lang), card.tags) +
-        fieldRow(t("botboard.fieldParent", lang), card.parent_id) + fieldRow(t("botboard.fieldUpdated", lang), card.updated_at) +
-        `</table></div>` +
-        (card.description ? `<p style="margin-top:.6rem">${escapeHtml(String(card.description))}</p>` : "") +
-        moveForm + `<h4 style="margin-top:1rem">${t("botboard.planFileHeading", lang)}</h4>` + planBlock),
-    });
+    // Not on this bot's project (a project-less card, one in a project with
+    // no bot, or one in an archived project): the card view straight from
+    // tasks.db, so its full detail is always one tap away. The not-found
+    // section is only for an id that doesn't exist or is archived.
+    if (!card) return renderStandaloneCardView({ db, layout, cardId: q.card, botId: selBot.botId, lang });
+    return renderCardView({ layout, card, def, locked: !!lockMap.get(cid), botId: selBot.botId, lang });
   }
 
   // ---- full kanban board (def-driven: columns, count, labels) ----
