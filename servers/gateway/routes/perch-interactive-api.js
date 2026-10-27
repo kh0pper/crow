@@ -58,6 +58,7 @@ import { lockState } from "./board-lock.js";
 import { boardState } from "../dashboard/shared/bot-display.js";
 import { assertProjectExists, appendAudit } from "../../shared/project-acl.js";
 import { resolveBoardDef, isTerminal } from "./board-defs.js";
+import { ensureItem } from "../../shared/shell-items.js";
 import { annotateAvailability } from "../model-availability.js";
 import { providerModelListWarm, pickerModels, loadPiProviderNames, referencedModelKeys } from "../perch-model-catalog.js";
 import { renderBotMarkdown } from "../../blog/renderer.js";
@@ -573,8 +574,28 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
         cwd = c;
       }
 
+      // Shell P1: an optional project_id files the new thread. Validated here,
+      // before spawn, so a bad project never costs a session. "unassigned" files
+      // it under no project; absent means the bot's own project.
+      let projectId = row && row.project_id != null ? Number(row.project_id) : null;
+      const given = body.project_id !== undefined && body.project_id !== null && body.project_id !== "";
+      if (given) {
+        if (body.project_id === "unassigned") projectId = null;
+        else {
+          const n = typeof body.project_id === "number" ? body.project_id : (/^[1-9]\d*$/.test(String(body.project_id)) ? Number(body.project_id) : NaN);
+          if (!Number.isInteger(n) || n < 1) return jsonError(res, 400, "bad_project");
+          try { await assertProjectExists(db, n); } catch { return jsonError(res, 400, "bad_project"); }
+          projectId = n;
+        }
+      }
+
       const eng = resolveEngine();
       const result = await eng.spawn({ botId, cwd });
+      if (result && result.threadId) {
+        // The session is already running: a filing failure must not fail the spawn.
+        try { await ensureItem(db, "perch_thread", result.threadId, { projectId, setBy: given ? "operator" : "origin" }); }
+        catch (err) { console.warn("[perch] could not file the new thread:", err.message); }
+      }
       res.status(201).json(result);
     } catch (err) {
       mapEngineError(res, err);
