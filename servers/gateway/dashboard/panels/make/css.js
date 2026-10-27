@@ -9,6 +9,13 @@ export const MAKE_CSS = `<style>
   .mk-tile { display: flex; flex-direction: column; gap: var(--crow-space-2); min-height: 44px; height: 100%; padding: var(--crow-space-2); border: 1px solid var(--crow-border); border-radius: 12px; background: var(--crow-bg-surface); color: var(--crow-text-primary); text-decoration: none; }
   .mk-tile.mk-just { border-color: var(--crow-accent); box-shadow: 0 0 0 1px var(--crow-accent); }
   .mk-preview { display: flex; align-items: center; justify-content: center; aspect-ratio: 4 / 3; border-radius: 8px; background: var(--crow-bg-elevated); color: var(--crow-text-muted); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  .mk-preview { position: relative; overflow: hidden; flex-direction: column; gap: 4px; }
+  .mk-preview-img { background: var(--crow-bg-deep); }
+  .mk-preview-img img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top center; }
+  .mk-pending { font-size: 0.7rem; text-transform: none; letter-spacing: 0; }
+  .mk-previews-off { display: grid; gap: var(--crow-space-2); justify-items: start; margin: 0 0 var(--crow-space-3); padding: var(--crow-space-3); border: 1px dashed var(--crow-border); border-radius: 12px; }
+  .mk-previews-off p { margin: 0; }
+  .mk-disclosure { color: var(--crow-text-muted); font-size: 0.85rem; }
   .mk-title { font-weight: 600; overflow-wrap: anywhere; }
   .mk-meta { display: flex; gap: var(--crow-space-2); flex-wrap: wrap; align-items: center; color: var(--crow-text-muted); font-size: 0.8rem; }
   .mk-badge { padding: 1px 8px; border-radius: 999px; background: var(--crow-accent); color: var(--crow-bg-deep); font-weight: 600; }

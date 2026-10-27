@@ -17,6 +17,32 @@ import { tJs } from "../../shared/i18n.js";
 export function makeClientJs(lang) {
   return `<script>
 (function () {
+  // Previews (Task 4.5): a pending tile re-checks its image ONCE after data-mk-pv-wait ms; a
+  // Workspace tile tries Nextcloud's image at once. Only a loaded image replaces the type tile.
+  var boxes = document.querySelectorAll('[data-mk-pv-src]');
+  Array.prototype.forEach.call(boxes, function (box) {
+    var src = box.getAttribute('data-mk-pv-src');
+    if (!src || src.indexOf('/dashboard/make/preview/') !== 0) return;
+    var wait = Number(box.getAttribute('data-mk-pv-wait')) || 0;
+    setTimeout(function () {
+      if (!box.isConnected) return;
+      var img = new Image();
+      img.alt = '';
+      img.width = 640;
+      img.height = 400;
+      img.decoding = 'async';
+      img.onload = function () {
+        if (!box.isConnected) return;
+        box.textContent = '';
+        box.classList.add('mk-preview-img');
+        box.removeAttribute('data-mk-pv-src');
+        box.appendChild(img);
+      };
+      img.src = src;
+    }, wait);
+  });
+})();
+(function () {
   var dlg = document.getElementById('mk-start');
   var openBtn = document.querySelector('[data-mk-open]');
   if (!dlg || !openBtn) return;

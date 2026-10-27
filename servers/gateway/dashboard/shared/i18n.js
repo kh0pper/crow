@@ -3753,6 +3753,16 @@ export const translations = {
   "shell.moved": { en: "Moved.", es: "Movido." },
   "shell.moveFailed": { en: "That didn't move. Try again.", es: "No se pudo mover. Int\u00e9ntalo de nuevo." },
   "shell.startFailed": { en: "That didn't start. Try again.", es: "No se pudo empezar. Inténtalo de nuevo." },
+  "shell.previewPending": { en: "Preview on its way", es: "La vista previa está en camino" },
+  "shell.previewsNotEnabled": { en: "Previews are off.", es: "Las vistas previas están desactivadas." },
+  "shell.previewsEnable": { en: "Turn on previews", es: "Activar vistas previas" },
+  "shell.previewsDisclosure": { en: "Crow builds a small sandboxed browser on this machine to draw previews (a one-time download of a few hundred MB).", es: "Crow crea un pequeño navegador aislado en esta máquina para dibujar las vistas previas (una descarga única de unos cientos de MB)." },
+  "shell.previewsNoDocker": { en: "Previews are off: Docker isn't available on this machine.", es: "Las vistas previas están desactivadas: Docker no está disponible en esta máquina." },
+  "shell.previewsBuilding": { en: "Setting up previews…", es: "Preparando las vistas previas…" },
+  "shell.previewsBuildFailed": { en: "Previews are off: the preview browser couldn't be set up. Crow will try again later.", es: "Las vistas previas están desactivadas: no se pudo preparar el navegador de vistas previas. Crow lo intentará de nuevo más tarde." },
+  "shell.previewsStartFailed": { en: "Previews are off: the preview browser didn't start.", es: "Las vistas previas están desactivadas: el navegador de vistas previas no arrancó." },
+  "shell.previewsNoSandbox": { en: "Previews are off: this machine doesn't allow the preview browser's sandbox.", es: "Las vistas previas están desactivadas: esta máquina no permite el aislamiento del navegador de vistas previas." },
+  "shell.previewsOriginDown": { en: "Previews are paused: the artifact viewer isn't answering.", es: "Las vistas previas están en pausa: el visor de artefactos no responde." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

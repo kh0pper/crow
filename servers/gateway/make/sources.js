@@ -24,6 +24,9 @@ import {
  * @property {number|null} projectId
  * @property {boolean} justMade
  * @property {string} openUrl
+ * @property {"ready"|"pending"|"off"|"workspace"} previewState  "workspace": the client tries Nextcloud's image
+ * @property {string|null} previewUrl
+ * @property {string|null} previewReason  why it is "off" (make/previews.js); "not_enabled" when previews are off
  */
 
 const WEEK_MS = 7 * 24 * 3600 * 1000;
@@ -246,8 +249,12 @@ export async function listWorkspaceItems(db, scope = { all: true }, { crowHome, 
   return out;
 }
 
-/** Both sources merged, newest first. filter: all | documents | pages | shared. */
-export async function listMakeItems(db, scope = { all: true }, { crowHome, filter = "all", limit } = {}) {
+/**
+ * Both sources merged, newest first. filter: all | documents | pages | shared.
+ * previews: async (item) => { previewState, previewUrl, previewReason } (make/previews.js itemPreview),
+ * applied only to the items returned; null (previews off) leaves every item a type tile.
+ */
+export async function listMakeItems(db, scope = { all: true }, { crowHome, filter = "all", limit, previews = null } = {}) {
   const artifacts = installedBundle(crowHome, "artifacts") ? "installed" : "missing";
   let workspace = installedBundle(crowHome, "workspace") ? "installed" : "missing";
   const lists = [];
@@ -261,7 +268,12 @@ export async function listMakeItems(db, scope = { all: true }, { crowHome, filte
   if (filter === "shared") items = items.filter((i) => i.shared);
   else if (filter === "documents" || filter === "pages") items = items.filter((i) => i.filter === filter);
   items.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));
-  return { items: limit ? items.slice(0, limit) : items, artifacts, workspace };
+  if (limit) items = items.slice(0, limit);
+  for (const item of items) {
+    Object.assign(item, { previewState: "off", previewUrl: null, previewReason: "not_enabled" });
+    if (previews) Object.assign(item, await previews(item));
+  }
+  return { items, artifacts, workspace };
 }
 
 const BLANK_KINDS = {

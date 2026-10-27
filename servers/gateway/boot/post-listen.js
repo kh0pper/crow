@@ -302,6 +302,10 @@ export async function runPostListenSetup(server, app, deps) {
   // (by our three labels), then the 30 s idle tick. Skipped under --no-auth. Never throws.
   import("../preview/renderer.js").then(({ startPreviewRendererTimers }) => startPreviewRendererTimers({ noAuth }))
     .catch((err) => console.warn(`[preview] timers not started: ${err.message}`));
+  // Make's stored previews (make/previews.js): drop files for deleted, ineligible or
+  // superseded versions, at boot and hourly. Skipped under --no-auth. Never throws.
+  import("../make/previews.js").then(({ startPreviewSweep }) => startPreviewSweep({ noAuth }))
+    .catch((err) => console.warn(`[make] preview sweep not started: ${err.message}`));
 
   // C4 Task 6: gateway-supervised bot runtime (bridge tick interval + Discord
   // child, both gated on the bot_runtime feature flag via runtimeGate — see

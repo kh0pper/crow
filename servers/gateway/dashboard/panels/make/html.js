@@ -54,13 +54,40 @@ function when(iso, lang) {
   return `<time datetime="${esc(new Date(ms).toISOString())}">${esc(text)}</time>`;
 }
 
+/**
+ * The tile's picture. ready: the stored capture. pending: the type tile, "Preview on its way", and
+ * one re-check by client.js after 10 s. workspace: the type tile until Nextcloud's image loads
+ * (client.js). Anything else: the type tile, with no line. Only make/previews.js builds the URLs.
+ */
+function previewBox(item, type, typeLabel, lang) {
+  const attrs = `class="mk-preview mk-type-${esc(type)}" data-mk-preview="${esc(item.kind)}:${esc(item.ref)}" aria-hidden="true"`;
+  const url = typeof item.previewUrl === "string" && item.previewUrl.startsWith("/dashboard/make/preview/") ? item.previewUrl : null;
+  if (url && item.previewState === "ready") {
+    return `<span ${attrs.replace('class="mk-preview ', 'class="mk-preview mk-preview-img ')}><img src="${esc(url)}" alt="" width="640" height="400" loading="lazy" decoding="async"></span>`;
+  }
+  if (url && item.previewState === "pending") {
+    return `<span ${attrs} data-mk-pv-src="${esc(url)}" data-mk-pv-wait="10000">${esc(typeLabel)}<span class="mk-pending">${esc(t("shell.previewPending", lang))}</span></span>`;
+  }
+  if (url && item.previewState === "workspace") return `<span ${attrs} data-mk-pv-src="${esc(url)}" data-mk-pv-wait="0">${esc(typeLabel)}</span>`;
+  return `<span ${attrs}>${esc(typeLabel)}</span>`;
+}
+
+/** Previews off: the switch, with what turning it on does. Previews on: at most one renderer line. */
+function previewsBlock(previews, lang) {
+  if (!previews) return "";
+  if (!previews.enabled) {
+    return `<div class="mk-previews-off"><p>${esc(t("shell.previewsNotEnabled", lang))}</p><p class="mk-disclosure">${esc(t("shell.previewsDisclosure", lang))}</p><form method="post" action="/dashboard/make/previews/enable"><input type="hidden" name="_csrf" value="${esc(previews.csrf || "")}"><input type="hidden" name="back" value="${esc(previews.back || ROUTE)}"><button type="submit" class="btn btn-secondary mk-start-act">${esc(t("shell.previewsEnable", lang))}</button></form></div>`;
+  }
+  return previews.lineKey ? `<p class="mk-notice mk-previews-line" role="status">${esc(t(previews.lineKey, lang))}</p>` : "";
+}
+
 function tile(item, lang) {
   const href = `${ROUTE}/open/${encodeURIComponent(item.kind)}/${encodeURIComponent(item.ref)}`;
   const ws = item.kind === "workspace_file";
   const type = TYPES.includes(item.type) ? item.type : "other";
   const typeLabel = type === "other" ? "" : t(`shell.makeType.${type}`, lang);
   return `<li class="mk-cell" data-mk-kind="${esc(item.kind)}" data-mk-ref="${esc(item.ref)}" data-mk-title="${esc(item.title)}" data-mk-version="${esc(item.version ?? "")}" data-mk-project="${esc(item.projectId == null ? "unassigned" : item.projectId)}" data-mk-href="${esc(href)}"><a class="mk-tile${item.justMade ? " mk-just" : ""}" href="${esc(href)}"${ws ? ' target="_blank" rel="noopener"' : ""}>
-    <span class="mk-preview mk-type-${esc(type)}" data-mk-preview="${esc(item.kind)}:${esc(item.ref)}" aria-hidden="true">${esc(typeLabel)}</span>
+    ${previewBox(item, type, typeLabel, lang)}
     <span class="mk-title">${esc(item.title)}</span>
     <span class="mk-meta">${item.justMade ? `<span class="mk-badge">${esc(t("shell.justMade", lang))}</span>` : ""}${item.cardId ? `<span class="mk-card">#${esc(item.cardId)}</span>` : ""}${when(item.updatedAt, lang)}</span>
   </a><button type="button" class="mk-more" data-mk-more aria-haspopup="dialog" aria-label="${esc(t("shell.moreFor", lang).split("{title}").join(item.title))}">⋮</button></li>`;
@@ -123,7 +150,7 @@ export function renderPreviewSheet({ projects, lang }) {
 }
 
 /** @param {{items: object[], artifacts: string, workspace: string}} model */
-export function renderMakePage({ model, filter, lang, project, projects = [] }) {
+export function renderMakePage({ model, filter, lang, project, projects = [], previews = null }) {
   const { items, artifacts, workspace } = model;
   const bothMissing = artifacts === "missing" && workspace === "missing";
   const notice = workspace === "unavailable" ? `<p class="mk-notice" role="status">${esc(t("shell.workspaceUnavailable", lang))}</p>` : "";
@@ -132,5 +159,6 @@ export function renderMakePage({ model, filter, lang, project, projects = [] }) 
   else if (!items.length) body = `${offers(artifacts, workspace, lang)}<p class="mk-empty-text">${esc(t("shell.makeEmpty", lang))}</p>`;
   else body = `${offers(artifacts, workspace, lang)}<ul class="mk-grid">${items.map((i) => tile(i, lang)).join("")}</ul>`;
   const startBtn = `<button type="button" class="btn btn-primary mk-start-btn" data-mk-open aria-haspopup="dialog">+ ${esc(t("shell.start", lang))}</button>`;
-  return `<div class="mk-page"><div class="mk-bar">${chips(filter, lang)}${startBtn}</div>${notice}${body}${renderStartSheet({ artifacts, workspace, project, lang })}${renderPreviewSheet({ projects, lang })}</div>`;
+  const pv = bothMissing ? "" : previewsBlock(previews, lang);
+  return `<div class="mk-page"><div class="mk-bar">${chips(filter, lang)}${startBtn}</div>${pv}${notice}${body}${renderStartSheet({ artifacts, workspace, project, lang })}${renderPreviewSheet({ projects, lang })}</div>`;
 }

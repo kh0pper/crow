@@ -83,6 +83,7 @@ import fediversePanel from "./panels/fediverse.js";
 import meteringPanel from "./panels/metering.js";
 import perchHubPanel from "./panels/perch-hub.js";
 import makePanel, { openMakeItem } from "./panels/make.js";
+import { serveArtifactPreview, serveWorkspacePreview, enablePreviews } from "../make/previews.js";
 import { handleFixItAction } from "../fix-it/index.js";
 import bundlesRouterFactory from "../routes/bundles.js";
 import { keychainApiRouter } from "../keychain/api.js";
@@ -655,6 +656,24 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   router.get("/dashboard/make/open/:kind/:ref", async (req, res) => {
     const db = createDbClient();
     try { await openMakeItem(req, res, db); } finally { db.close(); }
+  });
+
+  // Make tab previews (Task 4.5). Session-gated by dashboardAuth above; the artifact image
+  // re-checks eligibility on every request (make/previews.js).
+  router.get("/dashboard/make/preview/artifact/:id", async (req, res) => {
+    const db = createDbClient();
+    try { await serveArtifactPreview(req, res, db); }
+    catch (err) { console.warn(`[make] preview route: ${err.message}`); if (!res.headersSent) res.status(404).type("text/plain").send("not found"); }
+    finally { db.close(); }
+  });
+  router.get("/dashboard/make/preview/workspace_file/:id", async (req, res) => {
+    try { await serveWorkspacePreview(req, res); }
+    catch (err) { console.warn(`[make] workspace preview route: ${err.message}`); if (!res.headersSent) res.status(404).type("text/plain").send("not found"); }
+  });
+  // "Turn on previews": session-authed + CSRF-protected by the two middlewares above.
+  router.post("/dashboard/make/previews/enable", async (req, res) => {
+    const db = createDbClient();
+    try { await enablePreviews(req, res, db); } finally { db.close(); }
   });
 
   // Crow keychain API (Settings → Security & passwords → Saved passwords & keys + the Extensions first-view banner).

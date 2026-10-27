@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { t } from "../shared/i18n.js";
 import { listMakeItems } from "../../make/sources.js";
+import { itemPreview, previewDeps, previewLineKey, previewsEnabled } from "../../make/previews.js";
 import { markSeen, activeProjects } from "../../../shared/shell-items.js";
 import { renderMakePage } from "./make/html.js";
 import { MAKE_CSS } from "./make/css.js";
@@ -83,7 +84,15 @@ export default {
   async handler(req, res, { db, layout, lang }) {
     const filter = FILTER_IDS.includes(req.query.filter) ? req.query.filter : "all";
     const scope = req.crowScope || { all: true };
-    const model = await lister(db, scope, { crowHome: crowHome(), filter });
+    // Previews (Task 4.5): off until the switch is on, and then only for trusted artifacts.
+    let enabled = false;
+    try { enabled = await previewsEnabled(db); } catch (err) { console.warn(`[make] previews switch unreadable: ${err.message}`); }
+    const deps = enabled ? previewDeps() : null;
+    const previews = enabled ? (item) => itemPreview(db, item, deps) : null;
+    const model = await lister(db, scope, { crowHome: crowHome(), filter, previews });
+    // One line under the chips for a renderer reason (the first one any tile met).
+    const reason = enabled ? (model.items || []).map((i) => i.previewReason).find((r) => previewLineKey(r)) || null : null;
+    const back = filter === "all" ? "/dashboard/make" : `/dashboard/make?filter=${filter}`;
     // The project a new thing starts in: the shell's chip, else Unassigned.
     let project = { id: "unassigned", name: t("shell.unassigned", lang) };
     if (scope.projectId != null) {
@@ -96,7 +105,7 @@ export default {
     try { projects = await activeProjects(db); } catch (err) { console.warn(`[make] project list failed: ${err.message}`); }
     return layout({
       title: t("shell.tabMake", lang),
-      content: MAKE_CSS + renderMakePage({ model, filter, lang, project, projects }) + makeClientJs(lang),
+      content: MAKE_CSS + renderMakePage({ model, filter, lang, project, projects, previews: { enabled, lineKey: reason ? previewLineKey(reason) : null, csrf: req.csrfToken || "", back } }) + makeClientJs(lang),
     });
   },
 };
