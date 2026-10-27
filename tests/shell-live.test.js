@@ -321,11 +321,11 @@ test("a Turbo visit between tabs keeps one shell, and aria-current moves (phone 
       await p.settled();
       assert.equal(await p.ev("document.querySelectorAll('.shell-tabs').length"), 1);
       assert.equal(await p.ev(current), "/dashboard/bot-board");
-      await p.click(".shell-tab[href='/dashboard/artifacts']");
-      await p.until("location.pathname === '/dashboard/artifacts' && !!document.getElementById('artifacts-body')", "Make");
+      await p.click(".shell-tab[href='/dashboard/make']");
+      await p.until("location.pathname === '/dashboard/make' && !!document.querySelector('.mk-page')", "Make");
       await p.settled();
       assert.equal(await p.ev("document.querySelectorAll('.shell-tabs').length"), 1);
-      assert.equal(await p.ev(current), "/dashboard/artifacts");
+      assert.equal(await p.ev(current), "/dashboard/make");
       assert.equal(await p.ev("window.__shellMark"), 1, "both were Turbo visits, not full loads");
       assert.equal(await p.ev("document.querySelectorAll('meta[name=\"crow-mode\"]').length"), 1);
       assert.equal(await p.ev("document.querySelectorAll('dialog#shell-drawer').length + document.querySelectorAll('dialog#shell-avatar').length"), 2, "one drawer and one avatar sheet");

@@ -11,6 +11,8 @@ import { renderVersion } from "./render.js";
 import { appImport } from "./app-root.js";
 // R2-H2: the OS-released cross-process lock (servers/shared/sqlite-lock.js).
 const { withSqliteLock } = await appImport("servers/shared/sqlite-lock.js");
+// The trust rule, shared with core (Task 4.5).
+const { flagUntrusted, isTainted } = await appImport("servers/shared/artifact-trust.js");
 
 const err = (code, message, extra) => Object.assign(new Error(message || code), { code }, extra || {});
 const now = () => Date.now();
@@ -232,12 +234,10 @@ export async function createArtifact(db, blobs, { title, type, source, actor, ch
   }, blobs);
 }
 
-/** Tainted = made from non-owner text (or derived from such a version) and
- *  not yet approved by the owner. */
-/** A trust flag is CLEAN only when it is exactly 0; NULL, missing, corrupt or
- *  any other value reads as untrusted (security review: no NULL-as-clean). */
-export function flagUntrusted(x) { return x == null || x === "" || Number(x) !== 0; }
-export function isTainted(v) { return !v || (flagUntrusted(v.untrusted_input) && !v.trust_cleared_at); }
+// flagUntrusted (only an explicit 0 is clean) and isTainted (untrusted and not
+// approved by the owner) live in core, so Make's previews apply the same rule:
+// servers/shared/artifact-trust.js. Re-exported here for the bundle's modules.
+export { flagUntrusted, isTainted };
 
 /** The owner's explicit approval (the Publish/approve action): the ONLY thing
  *  that clears taint. Audited. */

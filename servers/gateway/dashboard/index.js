@@ -82,11 +82,14 @@ import connectPanel from "./panels/connect.js";
 import fediversePanel from "./panels/fediverse.js";
 import meteringPanel from "./panels/metering.js";
 import perchHubPanel from "./panels/perch-hub.js";
+import makePanel, { openMakeItem } from "./panels/make.js";
+import { serveArtifactPreview, serveWorkspacePreview, enablePreviews } from "../make/previews.js";
 import { handleFixItAction } from "../fix-it/index.js";
 import bundlesRouterFactory from "../routes/bundles.js";
 import { keychainApiRouter } from "../keychain/api.js";
 import perchApiRouter from "../routes/perch.js";
 import { shellApiRouter } from "../routes/shell-api.js";
+import { makeApiRouter } from "../routes/make-api.js";
 import perchInteractiveApiRouter from "../routes/perch-interactive-api.js";
 import perchDictationRouter from "../routes/perch-dictation.js";
 import { shellRouter, resolveRequestMode, resolveShellPage } from "./shell/request.js";
@@ -122,6 +125,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   registerPanel(fediversePanel);
   registerPanel(meteringPanel);
   registerPanel(perchHubPanel);
+  registerPanel(makePanel);
 
   // Load third-party panels (async, non-blocking)
   loadExternalPanels().catch((err) => {
@@ -648,6 +652,30 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     finally { db.close(); }
   });
 
+  // Make tab: open a tile (marks it seen, then redirects). Session-gated by dashboardAuth above.
+  router.get("/dashboard/make/open/:kind/:ref", async (req, res) => {
+    const db = createDbClient();
+    try { await openMakeItem(req, res, db); } finally { db.close(); }
+  });
+
+  // Make tab previews (Task 4.5). Session-gated by dashboardAuth above; the artifact image
+  // re-checks eligibility on every request (make/previews.js).
+  router.get("/dashboard/make/preview/artifact/:id", async (req, res) => {
+    const db = createDbClient();
+    try { await serveArtifactPreview(req, res, db); }
+    catch (err) { console.warn(`[make] preview route: ${err.message}`); if (!res.headersSent) res.status(404).type("text/plain").send("not found"); }
+    finally { db.close(); }
+  });
+  router.get("/dashboard/make/preview/workspace_file/:id", async (req, res) => {
+    try { await serveWorkspacePreview(req, res); }
+    catch (err) { console.warn(`[make] workspace preview route: ${err.message}`); if (!res.headersSent) res.status(404).type("text/plain").send("not found"); }
+  });
+  // "Turn on previews": session-authed + CSRF-protected by the two middlewares above.
+  router.post("/dashboard/make/previews/enable", async (req, res) => {
+    const db = createDbClient();
+    try { await enablePreviews(req, res, db); } finally { db.close(); }
+  });
+
   // Crow keychain API (Settings → Security & passwords → Saved passwords & keys + the Extensions first-view banner).
   // Session-authed + CSRF-protected by the two middlewares above; the router itself
   // refuses peer-signed requests and serves every response no-store.
@@ -666,6 +694,9 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // Shell: move an item (thread, artifact, Workspace file) between projects.
   // Same slot and rails as the Perch API above.
   router.use(shellApiRouter(dashboardAuth));
+
+  // Make tab: create a blank Workspace file in the current project. Same slot and rails.
+  router.use(makeApiRouter(dashboardAuth));
 
   // Perch Hub P2 (C-15): the interactive ("spawn as bot") API. Same mount
   // slot, same reasons — see perch.js's header above and this file's own

@@ -89,3 +89,40 @@ export function searchNames(cfg, { scopeSegs = [], like, eq, foldersOnly = false
   }
   return search(cfg, `<d:eq><d:prop><d:displayname/></d:prop><d:literal>${xmlEscape(String(eq).normalize("NFC"))}</d:literal></d:eq>`, scopeSegs, limit, foldersOnly);
 }
+
+/** Newest-first files of the given MIME types anywhere under the bot's files root (the search orders by last modified). */
+export async function listRecent(cfg, { limit = 40, mimes = [] } = {}) {
+  if (!mimes.length) return [];
+  const eq = (m) => `<d:eq><d:prop><d:getcontenttype/></d:prop><d:literal>${xmlEscape(String(m))}</d:literal></d:eq>`;
+  const where = mimes.length === 1 ? eq(mimes[0]) : `<d:or>${mimes.map(eq).join("")}</d:or>`;
+  return search(cfg, where, [], limit);
+}
+
+const PREVIEW_MAX_BYTES = 4 * 1024 * 1024;
+const PREVIEW_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const previewSide = (n, d) => (Number.isInteger(n) && n >= 16 && n <= 2048 ? n : d);
+
+/**
+ * Nextcloud's own preview of a file (Make's tiles), fetched with the bot's credentials:
+ * `${ncUrl}/index.php/core/preview?fileId=<id>&x=<x>&y=<y>&a=1`. Anything but a 200 image
+ * (at most 4 MB) returns null, and so does a Nextcloud that doesn't answer: never throws.
+ * The Buffer carries `contentType` and the upstream `etag` (or null).
+ * @returns {Promise<Buffer|null>}
+ */
+export async function fetchPreview(cfg, fileId, { x = 640, y = 400 } = {}) {
+  if (!Number.isInteger(fileId) || fileId <= 0) return null;
+  let res;
+  try {
+    res = await ncFetch(cfg, "GET", `${cfg.ncUrl}/index.php/core/preview?fileId=${fileId}&x=${previewSide(x, 640)}&y=${previewSide(y, 400)}&a=1`, { timeoutMs: 15000 });
+  } catch {
+    return null;
+  }
+  const type = String(res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+  if (res.status !== 200 || !PREVIEW_TYPES.has(type)) {
+    try { await res.body?.cancel?.(); } catch { /* already closed */ }
+    return null;
+  }
+  let bytes;
+  try { bytes = await readCapped(res, PREVIEW_MAX_BYTES); } catch { return null; }
+  return Object.assign(Buffer.from(bytes), { contentType: type, etag: res.headers.get("etag") || null });
+}
