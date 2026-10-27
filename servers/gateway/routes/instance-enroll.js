@@ -65,7 +65,7 @@ import {
   setPeerCreds,
   getPeerCreds,
   loadPeerCreds,
-  savePeerCreds,
+  updatePeerCreds,
   generateSecret,
 } from "../../shared/peer-credentials.js";
 import {
@@ -329,10 +329,14 @@ export function instanceEnrollRouter(db, { execFileSyncImpl, now = () => Date.no
       } catch (err) {
         // Compare-and-restore: only undo OUR write — if another process has
         // since written this id's creds (and committed), leave them.
-        const all = loadPeerCreds();
-        if (all[source_instance_id]?.auth_token === peerOutboundBearer) {
-          if (hadPrev) all[source_instance_id] = prevCreds; else delete all[source_instance_id];
-          savePeerCreds(all);
+        try {
+          updatePeerCreds((all) => {
+            if (all[source_instance_id]?.auth_token !== peerOutboundBearer) return { write: false };
+            if (hadPrev) all[source_instance_id] = prevCreds; else delete all[source_instance_id];
+            return {};
+          });
+        } catch (restoreErr) {
+          console.error(`[instance-enroll] could not restore peer-tokens.json after a failed enrollment: ${restoreErr.message}`);
         }
         const msg = String(err?.message || "");
         if (/constraint/i.test(msg) && /dashboard_settings_overrides\.key/.test(msg) && /UNIQUE|PRIMARY/i.test(msg)) {

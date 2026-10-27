@@ -82,3 +82,70 @@ describe("peerTrust (one trust predicate)", () => {
     } finally { console.error = orig; }
   });
 });
+
+// ---------------------------------------------------------------------------
+// U7: the credential store is written under one lock
+// ---------------------------------------------------------------------------
+import { spawn, spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync, readdirSync, statSync, existsSync } from "node:fs";
+
+const PEER_CREDS_URL = new URL("../servers/shared/peer-credentials.js", import.meta.url).href;
+
+function runChild(code, env) {
+  return new Promise((resolve, reject) => {
+    const c = spawn(process.execPath, ["--input-type=module", "-e", code], { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+    let err = "";
+    c.stderr.on("data", (d) => { err += d; });
+    c.on("error", reject);
+    c.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`child exit ${code}: ${err}`))));
+  });
+}
+
+describe("U7: peer-tokens.json store lock", () => {
+  test("concurrent writers in separate processes lose nothing; no tmp left; mode 0600", { timeout: 120_000 }, async () => {
+    const d = mkdtempSync(join(tmpdir(), "peer-store-"));
+    const path = join(d, "peer-tokens.json");
+    const env = { CROW_PEER_TOKENS_PATH: path };
+    try {
+      // The revoked id the deleter keeps removing.
+      await runChild(`import { setPeerCreds } from ${JSON.stringify(PEER_CREDS_URL)}; setPeerCreds("revoked-x", { auth_token: "a", signing_key: "b" });`, env);
+      const N = Number(process.env.PT1_U7_WRITERS || 8);
+      const writers = Array.from({ length: N }, (_, w) => runChild(
+        `import { setPeerCreds } from ${JSON.stringify(PEER_CREDS_URL)};
+         for (let i = 0; i < 50; i++) setPeerCreds("w${w}-" + i, { auth_token: "t" + i, signing_key: "k" + i });`, env));
+      const deleter = runChild(
+        `import { deletePeerCreds } from ${JSON.stringify(PEER_CREDS_URL)};
+         for (let i = 0; i < 200; i++) deletePeerCreds("revoked-x");`, env);
+      await Promise.all([...writers, deleter]);
+      const all = JSON.parse(readFileSync(path, "utf8"));
+      for (let w = 0; w < N; w++) for (let i = 0; i < 50; i++) assert.ok(all[`w${w}-${i}`], `w${w}-${i} survived`);
+      assert.equal(all["revoked-x"], undefined);
+      assert.equal(Object.keys(all).length, N * 50);
+      assert.deepEqual(readdirSync(d).filter((f) => f !== "peer-tokens.json"), [], "no tmp or lock file remains");
+      assert.equal(statSync(path).mode & 0o777, 0o600);
+    } finally { rmSync(d, { recursive: true, force: true }); }
+  });
+
+  test("a stale lock (dead pid, older than 30 s) is broken with a warning", async () => {
+    const d = mkdtempSync(join(tmpdir(), "peer-store-"));
+    const path = join(d, "peer-tokens.json");
+    try {
+      const dead = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"]);
+      const deadPid = Number(String(dead.stdout));
+      writeFileSync(path + ".lock", JSON.stringify({ pid: deadPid, ts: Date.now() - 31_000 }));
+      await runChild(`import { setPeerCreds } from ${JSON.stringify(PEER_CREDS_URL)}; setPeerCreds("p", { auth_token: "a", signing_key: "b" });`, { CROW_PEER_TOKENS_PATH: path });
+      assert.ok(JSON.parse(readFileSync(path, "utf8")).p);
+      assert.equal(existsSync(path + ".lock"), false);
+    } finally { rmSync(d, { recursive: true, force: true }); }
+  });
+
+  test("a store with loose permissions is never overwritten by a writer", async () => {
+    const d = mkdtempSync(join(tmpdir(), "peer-store-"));
+    const path = join(d, "peer-tokens.json");
+    try {
+      writeFileSync(path, JSON.stringify({ keep: { auth_token: "a", signing_key: "b" } }), { mode: 0o644 });
+      await assert.rejects(runChild(`import { setPeerCreds } from ${JSON.stringify(PEER_CREDS_URL)}; setPeerCreds("p", { auth_token: "a", signing_key: "b" });`, { CROW_PEER_TOKENS_PATH: path }));
+      assert.deepEqual(Object.keys(JSON.parse(readFileSync(path, "utf8"))), ["keep"]);
+    } finally { rmSync(d, { recursive: true, force: true }); }
+  });
+});
