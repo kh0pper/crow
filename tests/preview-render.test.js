@@ -106,7 +106,7 @@ test("downloads are denied before navigation", async () => {
   const b = fakeCdp();
   await render(b, serve({ [MAIN]: () => okDoc() }));
   const d = b.calls.find((c) => c.method === "Browser.setDownloadBehavior");
-  assert.deepEqual(d.params, { behavior: "deny", browserContextId: "CTX" });
+  assert.deepEqual(d.params, { behavior: "deny", browserContextId: "CTX", eventsEnabled: true });
   assert.ok(b.idx("Browser.setDownloadBehavior") < b.idx("Page.navigate"));
 });
 
@@ -405,4 +405,14 @@ test("isNearBlank: a two-block document capture is not", async () => {
     ctx.fillStyle = "#cc3333"; ctx.fillRect(16, 16, 300, 200);
     ctx.fillStyle = "#3366cc"; ctx.fillRect(330, 220, 280, 150);
   })), false);
+});
+
+test("isNearBlank: one short line of 14 px dark text is not blank", async () => {
+  // A one-sentence page: thin strokes that a sampling downscale can miss.
+  assert.equal(await isNearBlank(png((ctx) => { ctx.fillStyle = "#222"; ctx.font = "14px sans-serif"; ctx.fillText("Quarterly notes: revenue up four percent", 16, 24); })), false);
+});
+
+test("isNearBlank: a 1-pixel vertical rule a sampler would skip still counts", async () => {
+  // 1-px lines every 10 px, on the columns a 10:1 bilinear sample never reads.
+  assert.equal(await isNearBlank(png((ctx) => { ctx.fillStyle = "#000"; for (let x = 11; x < 630; x += 10) ctx.fillRect(x, 8, 1, 384); })), false);
 });

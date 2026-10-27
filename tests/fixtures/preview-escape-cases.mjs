@@ -89,9 +89,11 @@ function recordingFetcher(fetcher, log) {
 }
 
 /**
- * @param {{ withCdp: (fn: (cdp: any) => Promise<any>) => Promise<any> }} o
+ * @param {{ withCdp: (fn: (cdp: any) => Promise<any>) => Promise<any>, findFiles: (fragment: string) => Promise<string[]> }} o
+ *   findFiles: every file whose name contains `fragment`, anywhere the browser could
+ *   write one (the fixture's profile and ~/Downloads; the container's /tmp).
  */
-export async function startEscapeHarness({ withCdp }) {
+export async function startEscapeHarness({ withCdp, findFiles }) {
   const tokens = createViewTokenStore();
   const content = new Map();        // artifactId -> { [path]: { body, contentType } | "hang" }
   const originHits = [];            // { artifactId, path }
@@ -114,7 +116,7 @@ export async function startEscapeHarness({ withCdp }) {
   let n = 0;
 
   const h = {
-    base, port, tokens, originHits, rawCookies, outside, standin, fetcher,
+    base, port, tokens, originHits, rawCookies, outside, standin, fetcher, findFiles,
     /** Mint a document grant for these files. */
     page(files, { type = "document" } = {}) {
       const artifactId = `esc-${++n}`;
@@ -130,19 +132,28 @@ export async function startEscapeHarness({ withCdp }) {
       return { ...s, fetcher: createOriginFetcher({ host: "127.0.0.1", port: s.port }) };
     },
     /**
-     * One render, never throwing: { png, err, ms, fetchLog, paused, sends, cookies }.
-     * `paused` is every Fetch.requestPaused URL; `sends` every CDP call made by the
-     * render; `cookies` the context's cookies just before the capture (cookiesAtCapture).
+     * One render, never throwing: { png, err, ms, fetchLog, paused, sends, cookies,
+     * downloads, attached }. `paused` is every Fetch.requestPaused ({ url, requestId,
+     * resourceType, frameId, sid }); `sends` every CDP call made by the render; `cookies`
+     * the context's cookies just before the capture (cookiesAtCapture); `downloads` the
+     * Browser.download* events; `attached` every Target.attachedToTarget.
      */
     async render({ pageOf, fetcher: f = fetcher, mainType = "text/html", timeoutMs, cookiesAtCapture = false }) {
       const fetchLog = [];
       const paused = [];
       const sends = [];
+      const downloads = [];
+      const attached = [];
       let cookies = null;
       return withCdp(async (cdp) => {
         let ctxId = null;
-        const onPaused = (p) => paused.push(p.request?.url);
-        cdp.on("Fetch.requestPaused", onPaused);
+        const watch = [
+          ["Fetch.requestPaused", (p, m) => paused.push({ url: p.request?.url, requestId: p.requestId, resourceType: p.resourceType, frameId: p.frameId, sid: m?.sessionId })],
+          ["Browser.downloadWillBegin", (p) => downloads.push({ event: "willBegin", ...p })],
+          ["Browser.downloadProgress", (p) => downloads.push({ event: "progress", ...p })],
+          ["Target.attachedToTarget", (p) => attached.push({ type: p.targetInfo?.type, url: p.targetInfo?.url })],
+        ];
+        for (const [e, fn] of watch) cdp.on(e, fn);
         const spy = {
           async send(method, params, sid) {
             sends.push({ method, params, sid });
@@ -159,8 +170,8 @@ export async function startEscapeHarness({ withCdp }) {
         try {
           png = await renderInContext(spy, { url: pageOf.url, allowPrefix: pageOf.allowPrefix, mainType, fetcher: recordingFetcher(f, fetchLog), ...(timeoutMs ? { timeoutMs } : {}) });
         } catch (e) { err = e; }
-        cdp.off("Fetch.requestPaused", onPaused);
-        return { png, err, ms: Date.now() - t0, fetchLog, paused, sends, cookies };
+        for (const [e, fn] of watch) cdp.off(e, fn);
+        return { png, err, ms: Date.now() - t0, fetchLog, paused, sends, cookies, downloads, attached };
       });
     },
     async close() {
@@ -200,7 +211,7 @@ export const ESCAPE_CASES = [
     },
   },
   {
-    name: "a cross-origin iframe is refused (preview_navigated)",
+    name: "a cross-origin iframe under the origin's CSP is refused (preview_navigated)",
     async run(h, log) {
       h.outside.hits.length = 0;
       const pg = h.page({ "index.html": doc(`<h1>x</h1><iframe src="http://127.0.0.1:${h.outside.port}/frame"></iframe>`) });
@@ -211,7 +222,9 @@ export const ESCAPE_CASES = [
     },
   },
   {
-    name: "the same iframe nested inside an allowed one is refused (preview_navigated)",
+    // The origin's frame-src 'none' stops the allowed outer frame too (inner.html is never
+    // served): this case proves the CSP layer; the no-CSP cases below prove the interception.
+    name: "an iframe inside an allowed one, under the origin's CSP: neither loads (preview_navigated)",
     async run(h, log) {
       h.outside.hits.length = 0;
       const pg = h.page({
@@ -221,6 +234,49 @@ export const ESCAPE_CASES = [
       const r = await h.render({ pageOf: pg });
       log(`nested iframe: ${r.err?.code || "captured"} in ${r.ms} ms; outside hits ${h.outside.hits.length}; inner.html served ${h.originHits.filter((x) => x.artifactId === pg.artifactId && x.path === "inner.html").length}`);
       rejects(r, "preview_navigated");
+      noEscapes(h);
+    },
+  },
+  {
+    name: "with no CSP, an outside iframe's document is paused and failed (preview_navigated)",
+    async run(h, log) {
+      // A stub origin that sends NO CSP: frame-src no longer stops the frame, so the
+      // render's own interception is all that stands between the page and the outside.
+      h.outside.hits.length = 0;
+      const stub = await h.stub((req, res) => {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(doc(`<h1>x</h1><iframe src="http://127.0.0.1:${h.outside.port}/frame"></iframe>`));
+      });
+      const r = await h.render({ pageOf: h.page({}), fetcher: stub.fetcher });
+      const out = r.paused.filter((x) => String(x.url).startsWith(`http://127.0.0.1:${h.outside.port}/`));
+      const failed = out.filter((x) => r.sends.some((c) => c.method === "Fetch.failRequest" && c.params.requestId === x.requestId));
+      log(`no-CSP iframe: ${r.err?.code || "captured"} in ${r.ms} ms; outside documents paused ${out.length} (${out.map((x) => x.resourceType).join(",")}), failed ${failed.length}; attached ${JSON.stringify(r.attached)}; outside hits ${h.outside.hits.length}`);
+      rejects(r, "preview_navigated");
+      assert.ok(out.length >= 1 && out.every((x) => x.resourceType === "Document"), "the outside document was paused");
+      assert.equal(failed.length, out.length, "and failed");
+      await new Promise((res) => setTimeout(res, 300));
+      noEscapes(h);
+    },
+  },
+  {
+    name: "with no CSP, an allowed frame that frames the outside is served, then refused (preview_navigated)",
+    async run(h, log) {
+      h.outside.hits.length = 0;
+      const stub = await h.stub((req, res) => {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        if (req.url.endsWith("/inner.html")) return res.end(doc(`<p>inner</p><iframe src="http://127.0.0.1:${h.outside.port}/frame"></iframe>`));
+        res.end(doc(`<h1>x</h1><iframe src="inner.html"></iframe>`));
+      });
+      const r = await h.render({ pageOf: h.page({}), fetcher: stub.fetcher });
+      const inner = stub.hits.filter((x) => x.url.endsWith("/inner.html")).length;
+      const out = r.paused.filter((x) => String(x.url).startsWith(`http://127.0.0.1:${h.outside.port}/`));
+      const failed = out.filter((x) => r.sends.some((c) => c.method === "Fetch.failRequest" && c.params.requestId === x.requestId));
+      log(`no-CSP nested iframe: ${r.err?.code || "captured"} in ${r.ms} ms; inner.html served ${inner}; outside documents paused ${out.length}, failed ${failed.length}; attached ${JSON.stringify(r.attached)}; outside hits ${h.outside.hits.length}`);
+      rejects(r, "preview_navigated");
+      assert.ok(inner >= 1, "the allowed inner frame was served");
+      assert.ok(out.length >= 1 && out.every((x) => x.resourceType === "Document"), "the outside document was paused");
+      assert.equal(failed.length, out.length, "and failed");
+      await new Promise((res) => setTimeout(res, 300));
       noEscapes(h);
     },
   },
@@ -282,20 +338,33 @@ export const ESCAPE_CASES = [
     },
   },
   {
-    name: "an attachment download writes no file and saves nothing",
+    name: "an attachment download reaches the browser, is denied, writes no file and saves nothing",
     async run(h, log) {
+      const FILE = `crow-preview-escape-${Date.now()}.bin`;
       const dl = join(homedir(), "Downloads");
       const list = () => { try { return readdirSync(dl).sort(); } catch { return []; } };
       const before = list();
+      // text/html passes the main-document type check, so the response is fulfilled into
+      // the browser, and only Chrome's download handling (denied per context) stands
+      // between it and a file.
       const stub = await h.stub((req, res) => {
-        res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": "attachment; filename=\"crow-preview-escape.bin\"" });
-        res.end(Buffer.alloc(1024, 1));
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "content-disposition": `attachment; filename="${FILE}"` });
+        res.end(doc("<h1>download me</h1>"));
       });
       const r = await h.render({ pageOf: h.page({}), fetcher: stub.fetcher, timeoutMs: 4000 });
-      log(`download: ${r.err?.code || "captured"} in ${r.ms} ms; Downloads entries before ${before.length}, after ${list().length}`);
+      await new Promise((res) => setTimeout(res, 500));
+      const main = r.paused.find((x) => x.resourceType === "Document");
+      const fulfilled = r.sends.filter((x) => x.method === "Fetch.fulfillRequest" && x.params.requestId === main?.requestId).length;
+      const files = await h.findFiles("crow-preview-escape-");
+      const done = r.downloads.filter((d) => d.event === "progress" && d.state === "completed");
+      log(`download: ${r.err?.code || "captured"} in ${r.ms} ms (${r.err?.message || ""}); main document fetched ${JSON.stringify(r.fetchLog.map((x) => x.status || x.reason))}, fulfilled ${fulfilled}; download events ${JSON.stringify(r.downloads.map((d) => d.event + (d.state ? ":" + d.state : "")))}; files found ${JSON.stringify(files)}; ~/Downloads before ${before.length}, after ${list().length}`);
+      assert.equal(r.fetchLog[0]?.status, 200, "the main document was fetched");
+      assert.equal(fulfilled, 1, "and fulfilled into the browser");
       assert.equal(r.png, null, "nothing to save");
-      assert.ok(["preview_bad_status", "preview_navigated", "preview_timeout"].includes(r.err?.code), r.err?.message);
-      assert.deepEqual(list(), before, "no file written");
+      assert.ok(["preview_bad_status", "preview_navigated"].includes(r.err?.code), `${r.err?.code} ${r.err?.message}`);
+      assert.deepEqual(done, [], "no download completed");
+      assert.deepEqual(files, [], "no file written where the browser can write");
+      assert.deepEqual(list(), before);
     },
   },
   {
@@ -322,7 +391,7 @@ export const ESCAPE_CASES = [
       const pg = h.page({ "index.html": doc(`${BLOCKS}<img src="${h.base}/v/${other.token}/x.png">`) });
       const r = await h.render({ pageOf: pg });
       const otherHits = h.originHits.filter((x) => x.artifactId === other.artifactId).length;
-      const otherPaused = r.paused.filter((u) => String(u).includes(other.token)).length;
+      const otherPaused = r.paused.filter((x) => String(x.url).includes(other.token)).length;
       log(`CSP img: ${r.err?.code || "captured"} in ${r.ms} ms; other token origin hits ${otherHits}, requestPaused ${otherPaused}`);
       assert.ok(r.png, `rendered: ${r.err?.code} ${r.err?.message}`);
       assert.equal(otherHits, 0);

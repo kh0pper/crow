@@ -49,22 +49,25 @@ export function createOriginFetcher({ host, port, limits = PREVIEW_LIMITS }) {
       let inFlight = 0;
       let maxInFlight = 0;
       const queue = [];
+      // One listener on the session's signal, whatever the number of requests: a
+      // listener per request would pass Node's default of 10 and warn in the log.
+      const onEnd = new Set();
+      if (!ended.aborted) ended.addEventListener("abort", () => { for (const fn of [...onEnd]) fn(); }, { once: true });
 
       // A slot for one request; resolves false when the session ended while waiting.
       function slot() {
         if (inFlight < lim.inFlight) { inFlight++; maxInFlight = Math.max(maxInFlight, inFlight); return Promise.resolve(true); }
         return new Promise((resolve) => {
           const entry = { resolve };
-          const onAbort = () => { const i = queue.indexOf(entry); if (i !== -1) queue.splice(i, 1); resolve(false); };
-          entry.onAbort = onAbort;
-          ended.addEventListener("abort", onAbort, { once: true });
+          entry.onAbort = () => { const i = queue.indexOf(entry); if (i !== -1) queue.splice(i, 1); onEnd.delete(entry.onAbort); resolve(false); };
+          onEnd.add(entry.onAbort);
           queue.push(entry);
         });
       }
       function free() {
         const next = queue.shift();
         if (next) {
-          ended.removeEventListener("abort", next.onAbort);
+          onEnd.delete(next.onAbort);
           maxInFlight = Math.max(maxInFlight, inFlight);
           next.resolve(true);
         } else inFlight--;
@@ -72,51 +75,59 @@ export function createOriginFetcher({ host, port, limits = PREVIEW_LIMITS }) {
 
       function request(path) {
         return new Promise((resolve) => {
+          // The session may have ended while this request waited for its slot.
+          if (ended.aborted) return resolve({ ok: false, reason: "aborted" });
           let settled = false;
           let req = null;
           const parts = [];
           let got = 0;
+          let timer = null;
           const done = (v) => {
             if (settled) return;
             settled = true;
             clearTimeout(timer);
-            ended.removeEventListener("abort", onAbort);
+            onEnd.delete(onAbort);
             if (!v.ok && req) req.destroy();
             resolve(v);
           };
           const onAbort = () => done({ ok: false, reason: "aborted" });
-          const timer = setTimeout(() => done({ ok: false, reason: "timeout" }), lim.requestMs);
-          ended.addEventListener("abort", onAbort, { once: true });
+          timer = setTimeout(() => done({ ok: false, reason: "timeout" }), lim.requestMs);
+          onEnd.add(onAbort);
           requests++;
-          req = http.request({
-            host: bind, port, path, method: "GET",
-            // Nothing from the paused request: the origin sees only what is written here.
-            headers: { accept: "*/*" },
-            agent: false,
-          }, (res) => {
-            const status = res.statusCode || 0;
-            if (status >= 300 && status < 400) return done({ ok: false, reason: "redirect" });
-            const declared = Number(res.headers["content-length"]);
-            if (Number.isFinite(declared) && declared > lim.responseBytes) return done({ ok: false, reason: "cap_response" });
-            res.on("data", (chunk) => {
-              if (settled) return;
-              got += chunk.length;
-              bytes += chunk.length;
-              if (got > lim.responseBytes) return done({ ok: false, reason: "cap_response" });
-              if (bytes > lim.renderBytes) return done({ ok: false, reason: "cap_render" });
-              parts.push(chunk);
+          try {
+            req = http.request({
+              host: bind, port, path, method: "GET",
+              // Nothing from the paused request: the origin sees only what is written here.
+              headers: { accept: "*/*" },
+              agent: false,
+            }, (res) => {
+              const status = res.statusCode || 0;
+              if (status >= 300 && status < 400) return done({ ok: false, reason: "redirect" });
+              const declared = Number(res.headers["content-length"]);
+              if (Number.isFinite(declared) && declared > lim.responseBytes) return done({ ok: false, reason: "cap_response" });
+              res.on("data", (chunk) => {
+                if (settled) return;
+                got += chunk.length;
+                bytes += chunk.length;
+                if (got > lim.responseBytes) return done({ ok: false, reason: "cap_response" });
+                if (bytes > lim.renderBytes) return done({ ok: false, reason: "cap_render" });
+                parts.push(chunk);
+              });
+              res.on("end", () => {
+                const headers = [];
+                const raw = res.rawHeaders || [];
+                for (let i = 0; i + 1 < raw.length; i += 2) headers.push([String(raw[i]).toLowerCase(), String(raw[i + 1])]);
+                done({ ok: true, status, headers, body: Buffer.concat(parts, got) });
+              });
+              res.on("error", () => done({ ok: false, reason: "error" }));
+              res.on("aborted", () => done({ ok: false, reason: "error" }));
             });
-            res.on("end", () => {
-              const headers = [];
-              const raw = res.rawHeaders || [];
-              for (let i = 0; i + 1 < raw.length; i += 2) headers.push([String(raw[i]).toLowerCase(), String(raw[i + 1])]);
-              done({ ok: true, status, headers, body: Buffer.concat(parts, got) });
-            });
-            res.on("error", () => done({ ok: false, reason: "error" }));
-            res.on("aborted", () => done({ ok: false, reason: "error" }));
-          });
-          req.on("error", () => done({ ok: false, reason: "error" }));
-          req.end();
+            req.on("error", () => done({ ok: false, reason: "error" }));
+            req.end();
+          } catch {
+            // A path or option http.request refuses synchronously: never a rejection.
+            done({ ok: false, reason: "error" });
+          }
         });
       }
 

@@ -230,7 +230,9 @@ async function startHeadlessChromeOrNull({ timeoutMs = 20000, extraArgs = [], pi
  * replies, NUL-delimited (servers/gateway/preview/cdp-pipe.js). Always a
  * private browser: CROW_CDP_URL is ignored.
  *
- * @returns {Promise<null | { cdp: ReturnType<typeof createPipeCdp>, close: () => Promise<void> }>}
+ * `profile` is the private user-data-dir (removed by close()), so a test can look for
+ * anything the browser wrote.
+ * @returns {Promise<null | { cdp: ReturnType<typeof createPipeCdp>, profile: string, close: () => Promise<void> }>}
  */
 async function startPipeChrome({ timeoutMs, extraArgs }) {
   const bin = findChrome();
@@ -300,5 +302,5 @@ async function startPipeChrome({ timeoutMs, extraArgs }) {
   ]);
   clearTimeout(timer);
   if (!ready) { await close(); return null; }
-  return { cdp, close };
+  return { cdp, profile, close };
 }

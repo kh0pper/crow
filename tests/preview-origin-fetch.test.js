@@ -7,6 +7,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { getEventListeners, setMaxListeners } from "node:events";
 import { createOriginFetcher, PREVIEW_LIMITS } from "../servers/gateway/preview/origin-fetch.js";
 
 const MiB = 1024 * 1024;
@@ -35,14 +36,18 @@ const fetcherFor = (st, limits) => createOriginFetcher({ host: "127.0.0.1", port
 async function stream(res, total, st) {
   const chunk = Buffer.alloc(64 * 1024, 0x61);
   let sent = 0;
-  while (sent < total && !res.destroyed) {
+  let closed = false;
+  let wake = null;
+  res.once("close", () => { closed = true; wake?.(); });
+  while (sent < total && !res.destroyed && !closed) {
     const n = Math.min(chunk.length, total - sent);
     const okw = res.write(n === chunk.length ? chunk : chunk.subarray(0, n));
     sent += n;
     st.bodyBytes = sent;
-    if (!okw) await new Promise((r) => { res.once("drain", r); res.once("close", r); });
+    if (!okw && !closed) await new Promise((r) => { wake = r; res.once("drain", r); });
+    wake = null;
   }
-  if (!res.destroyed) res.end();
+  if (!res.destroyed && !closed) res.end();
 }
 
 test("PREVIEW_LIMITS are the reviewed values", () => {
@@ -180,4 +185,50 @@ test("artifactOriginInfo exposes bindHost", async () => {
       assert.equal(r.status, 404);
     } finally { rt._resetForTest(); }
   }
+});
+
+test("a path http.request refuses is error, never a rejection", async () => {
+  const st = await stub((req, res) => { res.writeHead(200); res.end("x"); });
+  const s = fetcherFor(st).session();
+  assert.deepEqual(await s.get("/a b"), { ok: false, reason: "error" });
+  assert.deepEqual(await s.get("/v/\u0000"), { ok: false, reason: "error" });
+  assert.equal(st.hits.length, 0);
+  assert.equal((await s.get("/ok")).ok, true, "the session still works");
+});
+
+test("a request that waited for a slot is not sent once the session ended", async () => {
+  const st = await stub(async (req, res) => { await sleep(150); if (!res.destroyed) { res.writeHead(200); res.end("x"); } });
+  const ac = new AbortController();
+  const s = fetcherFor(st).session({ signal: ac.signal });
+  const all = Array.from({ length: 6 }, (_, i) => s.get(`/r${i}`));
+  await sleep(50);
+  ac.abort();
+  const out = await Promise.all(all);
+  assert.deepEqual(out.map((r) => r.reason), Array(6).fill("aborted"));
+  await sleep(250);
+  assert.equal(st.hits.length, 4, "the two queued requests were never sent");
+});
+
+test("20 sub-resources on one session emit no MaxListeners warning", async () => {
+  // Node 24 gives every AbortSignal an unlimited listener count, so the signal is held
+  // to the EventTarget default (10) here: a listener per request would then warn.
+  const warnings = [];
+  const onWarning = (w) => warnings.push(w);
+  process.on("warning", onWarning);
+  let peakListeners = 0;
+  try {
+    const ac = new AbortController();
+    setMaxListeners(10, ac.signal);
+    const st = await stub(async (req, res) => {
+      peakListeners = Math.max(peakListeners, getEventListeners(ac.signal, "abort").length);
+      await sleep(20); res.writeHead(200); res.end("x");
+    });
+    const s = fetcherFor(st).session({ signal: ac.signal });
+    const out = await Promise.all(Array.from({ length: 20 }, (_, i) => s.get(`/r${i}`)));
+    assert.ok(out.every((r) => r.ok));
+    ac.abort();
+    await sleep(50);
+  } finally { process.off("warning", onWarning); }
+  assert.deepEqual(warnings.map((w) => `${w.name}: ${w.message}`), []);
+  assert.equal(peakListeners, 1, "one listener on the session's signal, whatever the number of requests");
 });

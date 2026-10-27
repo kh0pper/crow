@@ -261,7 +261,9 @@ async function renderOnce(cdp, { url, allowPrefix, mainType, fetcher, width = 64
   try {
     // 1–2. A throwaway context; downloads denied.
     ({ browserContextId } = await race(cdp.send("Target.createBrowserContext", { disposeOnDetach: true, proxyServer: "direct://" })));
-    await race(cdp.send("Browser.setDownloadBehavior", { behavior: "deny", browserContextId }));
+    // eventsEnabled: a denied download still reports downloadWillBegin/-Progress, so a
+    // watcher (the escape tests) can see it was refused, never completed.
+    await race(cdp.send("Browser.setDownloadBehavior", { behavior: "deny", browserContextId, eventsEnabled: true }));
     // 3. The browser-level backstop.
     backstop = true;
     await race(cdp.send("Fetch.enable", FETCH_ALL));
@@ -304,11 +306,19 @@ async function renderOnce(cdp, { url, allowPrefix, mainType, fetcher, width = 64
   }
 }
 
+/** isNearBlank's grid and edge: 64×40 cells, inside a 4-pixel margin. */
+const BLANK_W = 64, BLANK_H = 40, BLANK_MARGIN = 4;
+
 /**
- * True when a capture is nearly one color (operator ruling): decoded into a 64×40
- * downscale, at least 98% of the pixels are within ±6 per channel of the most common
- * color. A page that needs scripts renders near-blank with scripts off, and is shown as
- * its type tile instead.
+ * True when a capture is nearly one color (operator ruling): averaged into a 64×40 grid
+ * of cells, at least 98% of the cells are within ±6 per channel of the most common
+ * cell color. A page that needs scripts renders near-blank with scripts off, and is
+ * shown as its type tile instead.
+ *
+ * Each cell is the AREA AVERAGE of the full-resolution pixels it covers, so a thin text
+ * stroke always counts (a bilinear downscale samples a few source pixels per cell and
+ * can miss strokes entirely). The outer 4 pixels are left out: a frame or border at the
+ * capture's edge is not content, and averaged in it would mark every edge cell.
  *
  * Async: @napi-rs/canvas decodes off the main thread (an Image's pixels read as zero
  * until decode() resolves), and it has no synchronous decode.
@@ -319,25 +329,39 @@ export async function isNearBlank(png) {
   const img = new Image();
   img.src = png;
   await img.decode();
-  const W = 64, H = 40;
-  const canvas = createCanvas(W, H);
+  const w = img.width, h = img.height;
+  const canvas = createCanvas(w, h);
   const ctx = canvas.getContext("2d");
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "low";
-  ctx.drawImage(img, 0, 0, W, H);
-  const px = ctx.getImageData(0, 0, W, H).data;
+  ctx.drawImage(img, 0, 0);
+  const px = ctx.getImageData(0, 0, w, h).data;
+  const m = w > 2 * BLANK_MARGIN + BLANK_W && h > 2 * BLANK_MARGIN + BLANK_H ? BLANK_MARGIN : 0;
+  const iw = w - 2 * m, ih = h - 2 * m;
+  const cells = [];
+  for (let cy = 0; cy < BLANK_H; cy++) {
+    const y0 = m + Math.floor((cy * ih) / BLANK_H), y1 = Math.max(y0 + 1, m + Math.floor(((cy + 1) * ih) / BLANK_H));
+    for (let cx = 0; cx < BLANK_W; cx++) {
+      const x0 = m + Math.floor((cx * iw) / BLANK_W), x1 = Math.max(x0 + 1, m + Math.floor(((cx + 1) * iw) / BLANK_W));
+      let r = 0, g = 0, b = 0, a = 0, n = 0;
+      for (let y = y0; y < y1 && y < h; y++) {
+        for (let x = x0; x < x1 && x < w; x++) {
+          const i = (y * w + x) * 4;
+          r += px[i]; g += px[i + 1]; b += px[i + 2]; a += px[i + 3]; n++;
+        }
+      }
+      cells.push(n ? [Math.round(r / n), Math.round(g / n), Math.round(b / n), Math.round(a / n)] : [0, 0, 0, 0]);
+    }
+  }
   const counts = new Map();
-  let best = 0, mode = 0;
-  for (let i = 0; i < px.length; i += 4) {
-    const key = ((px[i] << 24) | (px[i + 1] << 16) | (px[i + 2] << 8) | px[i + 3]) >>> 0;
-    const n = (counts.get(key) || 0) + 1;
-    counts.set(key, n);
-    if (n > best) { best = n; mode = key; }
+  let best = 0, mode = cells[0];
+  for (const c of cells) {
+    const key = c.join(",");
+    const k = (counts.get(key) || 0) + 1;
+    counts.set(key, k);
+    if (k > best) { best = k; mode = c; }
   }
-  const m = [mode >>> 24, (mode >>> 16) & 255, (mode >>> 8) & 255, mode & 255];
   let near = 0;
-  for (let i = 0; i < px.length; i += 4) {
-    if (Math.abs(px[i] - m[0]) <= 6 && Math.abs(px[i + 1] - m[1]) <= 6 && Math.abs(px[i + 2] - m[2]) <= 6 && Math.abs(px[i + 3] - m[3]) <= 6) near++;
+  for (const c of cells) {
+    if (Math.abs(c[0] - mode[0]) <= 6 && Math.abs(c[1] - mode[1]) <= 6 && Math.abs(c[2] - mode[2]) <= 6 && Math.abs(c[3] - mode[3]) <= 6) near++;
   }
-  return near >= 0.98 * (W * H);
+  return near >= 0.98 * cells.length;
 }

@@ -73,7 +73,18 @@ async function withCdp(fn) {
 
 before(async () => {
   if (!HAVE_DOCKER) return;
-  h = await startEscapeHarness({ withCdp });
+  // Everything writable in the container is the /tmp tmpfs (read_only root); look there
+  // while the container still runs.
+  h = await startEscapeHarness({
+    withCdp,
+    findFiles: async (frag) => {
+      const name = renderer.runName();
+      if (!name) return [`(no running container to search for ${frag})`];
+      const r = docker(["exec", name, "find", "/tmp", "-type", "f", "-name", `*${frag}*`]);
+      if (r.status !== 0) return [`(find failed: ${r.stderr.trim()})`];
+      return r.stdout.split("\n").filter(Boolean);
+    },
+  });
   renderer = createPreviewRenderer({
     crowHome: mkdtempSync(join(SCRATCH, "home-")), db: settingsDb(),
     instanceId: `escape-${randomBytes(6).toString("hex")}`,
