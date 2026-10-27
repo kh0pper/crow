@@ -15,6 +15,9 @@ import { crowTalkCss, crowTalkJs, crowTalkOverlayHtml } from "./crow-talk.js";
 import { t, SUPPORTED_LANGS } from "./i18n.js";
 import { textSizeCss, textSizeHeadScript } from "./text-size.js";
 import { appIconSvg } from "./app-icons.js";
+import { shellCss } from "../shell/css.js";
+import { shellClientJs } from "../shell/client.js";
+import { shellHeaderChip, shellAvatarButton, shellTabsNav, shellDrawer, shellAvatarSheet } from "../shell/chrome.js";
 
 // Font delivery: one manifest, one mechanism (spec §3.2, review finding 20).
 // Preconnect x2 + a single stylesheet <link> — Inter (400/500/600/700) +
@@ -142,8 +145,18 @@ function turboDiagScript() {
  * @param {string} [opts.headerIcons] - HTML rendered inside .content-header, right of title (e.g. notification bell, health icon)
  * @param {Array} [opts.navGroups] - Grouped nav: [{ id, name, collapsed, panels: [{ id, name, icon, route, navOrder }] }]
  * @param {Array|null} [opts.instanceTabs] - Unified multi-instance tabs: [{ id, name, status, isLocal }]. Only the nest handler passes this; every other page renders an empty, CSS-hidden strip (body.unified-off).
+ * @param {string} [opts.head] - Extra head HTML
+ * @param {"classic"|"shell"} [opts.variant="classic"] - "shell" renders the new
+ *   three-tab shell (shell/chrome.js) around the same .main-content chain, with
+ *   no sidebar. Both carry <meta name="crow-mode" data-turbo-track="reload">,
+ *   so Turbo does a full load whenever the mode changes between pages.
+ * @param {object|null} [opts.shell] - Shell-only: { scope, projects, tab, getPanel? }.
+ *   scope from parseScope (or { slug }), projects [{ id, slug, name }] sorted by
+ *   name, tab "chat"|"board"|"make"|null (null on a drawer page). getPanel
+ *   defaults to the panel registry's (a test seam).
+ * @param {string} [opts.tryNewCard] - Classic-only HTML shown above the content.
  */
-export function renderLayout({ title, content, activePanel, panels, scripts, afterContent, headerIcons, lang, navGroups, instanceTabs, head }) {
+export function renderLayout({ title, content, activePanel, panels, scripts, afterContent, headerIcons, lang, navGroups, instanceTabs, head, variant = "classic", shell = null, tryNewCard = "" }) {
   // Unified-off class gates the tabs strip visibility via CSS. The strip
   // is re-rendered on every page (it must NOT be data-turbo-permanent:
   // Turbo would pin the first-rendered — usually empty — strip across
@@ -217,7 +230,8 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
     }).join("\n        ");
   }
 
-  return `<!DOCTYPE html>
+  const isShell = variant === "shell";
+  const docHead = `<!DOCTYPE html>
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
@@ -236,7 +250,16 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
   ${dashboardCss()}
   ${turboHead()}
   ${head || ""}
-</head>
+  <meta name="crow-mode" content="${isShell ? "shell" : "classic"}" data-turbo-track="reload">${isShell ? `\n  ${shellCss()}` : ""}
+</head>`;
+
+  if (isShell) {
+    return renderShellDocument({
+      docHead, title, content, scripts, afterContent, headerIcons, lang, bodyClass, instanceTabsStrip, shell,
+    });
+  }
+
+  return `${docHead}
 <body class="${bodyClass}">
   <script>
     // Pre-paint sidebar-collapse restore (desktop-scoped by CSS below, see
@@ -288,13 +311,78 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
       </header>
       ${instanceTabsStrip}
       <div class="content-body">
-        ${content}
+        ${tryNewCard || ""}${content}
       </div>
     </main>
     ${afterContent || ""}
   </div>
   <script>
-    // ─── Talk to Crow (voice overlay + the header bird's long-press) ───
+${layoutListenersJs()}
+
+${sidebarJs()}
+    ${scripts || ""}
+${layoutTailJs()}
+  </script>
+  ${turboDiagScript()}
+  <div id="crow-toasts" class="crow-toasts" aria-live="polite" aria-atomic="false" data-turbo-permanent></div>
+</body>
+</html>`;
+}
+
+/**
+ * The shell variant's body: the classic .main-content chain (header with the
+ * page title and the header bird, the instance strip, .content-body), plus
+ * the project chip and avatar in the header, the Chat / Board / Make nav
+ * after </main>, and the drawer and avatar dialogs. No sidebar, no sidebar
+ * scripts; the voice, CSRF, auth-boundary, service-worker and toast code is
+ * the classic layout's own.
+ */
+function renderShellDocument({ docHead, title, content, scripts, afterContent, headerIcons, lang, bodyClass, instanceTabsStrip, shell }) {
+  const sh = shell || {};
+  const ctx = { scope: sh.scope || { all: true }, projects: Array.isArray(sh.projects) ? sh.projects : [], lang };
+  if (typeof sh.getPanel === "function") ctx.getPanel = sh.getPanel;
+  const tab = sh.tab === "chat" || sh.tab === "board" || sh.tab === "make" ? sh.tab : null;
+  return `${docHead}
+<body class="shell${bodyClass ? " " + bodyClass : ""}">
+  ${crowTalkOverlayHtml(lang)}
+  <div class="dashboard">
+    <main class="main-content">
+      <header class="content-header">
+        <h2>${escapeHtml(title)}</h2>
+        ${shellHeaderChip(ctx)}
+        ${headerIcons ? `<div class="header-icons">${headerIcons}</div>` : ""}
+        ${shellAvatarButton(ctx)}
+      </header>
+      ${instanceTabsStrip}
+      <div class="content-body">
+        ${content}
+      </div>
+    </main>
+    ${shellTabsNav({ ...ctx, tab })}
+    ${afterContent || ""}
+  </div>
+  ${shellDrawer(ctx)}
+  ${shellAvatarSheet(ctx)}
+  <script>
+    // No sidebar on shell pages: the shared Escape listener's call is a no-op.
+    function closeSidebar() {}
+${layoutListenersJs()}
+    ${scripts || ""}
+${layoutTailJs()}
+${shellClientJs()}
+  </script>
+  ${turboDiagScript()}
+  <div id="crow-toasts" class="crow-toasts" aria-live="polite" aria-atomic="false" data-turbo-permanent></div>
+</body>
+</html>`;
+}
+
+// The inline-script segments renderLayout emits, split out so the shell
+// variant can reuse the voice, CSRF, auth-boundary and toast code without
+// the sidebar's. Concatenated in the classic order they reproduce the
+// classic page byte for byte (tests/shell-layout-render.test.js snapshot).
+function layoutListenersJs() {
+  return `    // ─── Talk to Crow (voice overlay + the header bird's long-press) ───
     ${crowTalkJs()}
     // Document/window-level listeners must only attach ONCE per document
     // lifetime. Under Turbo these scripts re-execute on every nav; without
@@ -396,9 +484,11 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
           }
         };
       }
-    }
+    }`;
+}
 
-    // Desktop collapse (persisted) and mobile open/close (ephemeral,
+function sidebarJs() {
+  return `    // Desktop collapse (persisted) and mobile open/close (ephemeral,
     // unchanged from before) are two independent axes, kept apart entirely
     // by CSS breakpoint scoping — "(max-width: 768px)" and its exact
     // complement "not all and (max-width: 768px)", see dashboardCss() — so
@@ -541,9 +631,11 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
           body: 'action=toggle_nav_group&group_id=' + encodeURIComponent(id)
         });
       }
-    }
-    ${scripts || ""}
-    // Service Worker registration (PWA) — once per document lifetime
+    }`;
+}
+
+function layoutTailJs() {
+  return `    // Service Worker registration (PWA) — once per document lifetime
     if ('serviceWorker' in navigator && !window.__crowSwRegistered) {
       window.__crowSwRegistered = true;
       navigator.serviceWorker.register('/sw.js').catch(function() {});
@@ -599,12 +691,7 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
           setTimeout(function() { if (el.parentNode) el.parentNode.removeChild(el); }, 300);
         }
       };
-    }
-  </script>
-  ${turboDiagScript()}
-  <div id="crow-toasts" class="crow-toasts" aria-live="polite" aria-atomic="false" data-turbo-permanent></div>
-</body>
-</html>`;
+    }`;
 }
 
 /**
@@ -1581,8 +1668,8 @@ function dashboardCss() {
      then makes #perch-hub-root/.hub-split/#perch-chat fill that height with
      flex:1;min-height:0 so the transcript — not the page — is what scrolls. */
   body:has(#perch-chat) .main-content {
-    height: calc(100vh - var(--crow-player-h,0px));
-    height: calc(100dvh - var(--crow-player-h,0px));
+    height: calc(100vh - var(--crow-player-h,0px) - var(--shell-tabs-h,0px));
+    height: calc(100dvh - var(--crow-player-h,0px) - var(--shell-tabs-h,0px));
     min-height: 0;
     padding-bottom: 0;
     display: flex;

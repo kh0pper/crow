@@ -31,7 +31,10 @@ export default {
     // first tap fails with a raw error.
     return layout({
       title: t("perch.title", lang),
-      content: perchHubContent(lang, engineStatus()),
+      // Shell P2: in the new shell the Chat tab shows the current project's
+      // conversations. Classic Perch gets no scope and stays as it was.
+      content: perchHubContent(lang, engineStatus(),
+        req.crowMode && req.crowMode.mode === "new" ? { scope: req.crowScope || { all: true } } : {}),
     });
   },
 };

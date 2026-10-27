@@ -1,0 +1,2280 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <script>(function(){try{if(!window.crowTextSize){window.crowTextSize=(function(){var KEY="crow-text-size",OLD="crow.perch.textSize",DEF="default",IDS=["small","default","large","xlarge"],SCALE={"small":0.875,"default":1,"large":1.2,"xlarge":1.4},MAP=["small","default","large","large","xlarge"],mem=null;function store(){try{return window.localStorage||null;}catch(e){return null;}}function ok(v){return IDS.indexOf(v)>=0;}function read(){var s=store();if(!s)return null;try{var v=s.getItem(KEY),o=s.getItem(OLD);if(o!=null){var n=parseInt(o,10),id=(String(n)===String(o)&&n>=0&&n<MAP.length)?MAP[n]:null;if(id&&!ok(v)){v=id;try{s.setItem(KEY,id);}catch(e){}}try{s.removeItem(OLD);}catch(e){}}if(ok(v))return v;}catch(e){}return null;}function get(){if(mem)return mem;var v=read();mem=v||DEF;return mem;}function apply(id){var d=document.documentElement;if(d&&d.setAttribute)d.setAttribute('data-text-size',id||get());}function set(id){if(!ok(id))return false;mem=id;var s=store();if(s){try{s.setItem(KEY,id);}catch(e){}}apply(id);try{window.dispatchEvent(new CustomEvent('crow:text-size',{detail:{size:id}}));}catch(e){}return true;}function sync(){mem=null;apply(get());try{window.dispatchEvent(new CustomEvent('crow:text-size',{detail:{size:mem}}));}catch(e){}}return {get:get,set:set,apply:apply,sync:sync,ids:IDS.slice(),scale:function(id){return SCALE[id||get()];},key:KEY};})();window.addEventListener('storage',function(e){if(!e||e.key===null||e.key===window.crowTextSize.key)window.crowTextSize.sync();});}window.crowTextSize.apply();}catch(e){}})();</script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Snapshot &lt;Page&gt; — Crow's Nest</title>
+  <link rel="manifest" href="/manifest.json">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Crow">
+  <link rel="icon" type="image/svg+xml" href="/icons/crow-icon.svg">
+  <!-- iOS reads apple-touch-icon as PNG only — an SVG href lands a blank
+       home-screen tile (PR-F parity polish, 2026-09-13). -->
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  
+  :root {
+    --crow-bg-deep: #eef1f3;
+    --crow-bg-surface: #ffffff;
+    --crow-bg-elevated: #f5f7f8;
+    --crow-border: #dde4e8;
+    --crow-border-strong: #94a4ae;
+    --crow-text-primary: #22303a;
+    --crow-text-secondary: #5c6d79;
+    --crow-text-tertiary: #6b7c88;
+    --crow-text-muted: #8395a1;
+    --crow-accent: #0e6b62;
+    --crow-accent-hover: #0b574f;
+    --crow-accent-muted: #dcecea;
+    --crow-accent-contrast: #ffffff;
+    --crow-success: #1d7048;
+    --crow-error: #b04a2b;
+    --crow-warning: #8f5606;
+    --crow-info: #33688c;
+    --crow-brand-gold: #8f5606;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --crow-bg-deep: #131a1f;
+      --crow-bg-surface: #1b242b;
+      --crow-bg-elevated: #232e36;
+      --crow-border: #2a353d;
+      --crow-border-strong: #46565f;
+      --crow-text-primary: #e4ebef;
+      --crow-text-secondary: #8fa0ab;
+      --crow-text-tertiary: #7d8f9a;
+      --crow-text-muted: #5f707b;
+      --crow-accent: #4fbdb0;
+      --crow-accent-hover: #6fd0c4;
+      --crow-accent-muted: #16322f;
+      --crow-accent-contrast: #131a1f;
+      --crow-success: #2fa36b;
+      --crow-error: #d1633e;
+      --crow-warning: #d9a521;
+      --crow-info: #6aa9cc;
+      --crow-brand-gold: #d9a521;
+    }
+  }
+
+  /* Base radius tokens. --crow-radius-pill re-valued to 999px (Task 7) after
+     the pill-consumer triage: control-shaped sites moved to
+     --crow-radius-control, chip/tag/badge sites stayed on the pill token. */
+  :root {
+    --crow-radius-card: 14px;
+    --crow-radius-control: 10px;
+    --crow-radius-pill: 999px;
+  }
+
+  /* Sizing scales (theme-independent) */
+  :root {
+    /* Dashboard-wide text size multiplier (A11Y-TEXTSIZE). 1 here; the
+       <html data-text-size> rules in shared/text-size.js override it, and the
+       dashboard's rem root is calc(100% * this). */
+    --crow-text-scale: 1;
+    /* The nav sidebar's width, in rem so it grows with the text size (and the
+       browser font-size) instead of clipping the nav labels. 15rem = 240px at
+       the default 16px root. */
+    --crow-sidebar-width: 15rem;
+    /* The player bar's height while it shows, else 0 (set on <html> by the player shell's reserve script,
+       shared/player-shell.js): pages without the layout pad content and bottom sheets with it. */
+    --crow-player-h: 0px;
+    --crow-space-1: 4px;  --crow-space-2: 8px;  --crow-space-3: 12px;
+    --crow-space-4: 16px; --crow-space-5: 24px; --crow-space-6: 32px;
+    --crow-space-8: 48px; --crow-space-10: 64px;
+
+    --crow-text-xs: 0.75rem;  --crow-text-sm: 0.8125rem; --crow-text-base: 0.875rem;
+    --crow-text-md: 1rem;     --crow-text-lg: 1.125rem;  --crow-text-xl: 1.25rem;
+    --crow-text-2xl: 1.5rem;  --crow-text-3xl: 2rem;
+
+    --crow-leading-tight: 1.2; --crow-leading-normal: 1.5; --crow-leading-relaxed: 1.7;
+
+    --crow-body-font: 'Inter', system-ui, sans-serif;
+    --crow-mono-font: 'JetBrains Mono', monospace;
+
+    /* Compatibility aliases — legacy names used across panels. Prefer the
+       canonical token (right side) in NEW code. These reference the canonical
+       custom properties, so they track theme overrides automatically. */
+    --crow-bg: var(--crow-bg-deep);
+    --crow-background: var(--crow-bg-deep);
+    --crow-surface: var(--crow-bg-surface);
+    --crow-bg-card: var(--crow-bg-surface);
+    --crow-text: var(--crow-text-primary);
+    --crow-border-subtle: var(--crow-border);
+    --crow-accent-bg: var(--crow-accent-muted);
+  }
+  :root[data-text-size="small"]{--crow-text-scale:0.875}
+  :root[data-text-size="default"]{--crow-text-scale:1}
+  :root[data-text-size="large"]{--crow-text-scale:1.2}
+  :root[data-text-size="xlarge"]{--crow-text-scale:1.4}
+  html{font-size:calc(100% * var(--crow-text-scale,1))}
+  
+  /* Button */
+  .btn { display:inline-flex; align-items:center; gap:var(--crow-space-2);
+    font-family:inherit; font-size:var(--crow-text-base); font-weight:500;
+    border-radius:var(--crow-radius-control); border:1px solid transparent;
+    cursor:pointer; text-decoration:none; transition:background .15s,border-color .15s,color .15s; }
+  .btn-md { padding:var(--crow-space-2) var(--crow-space-4); }
+  .btn-sm { padding:var(--crow-space-1) var(--crow-space-3); font-size:var(--crow-text-sm); }
+  .btn-primary { background:var(--crow-accent); color:var(--crow-accent-contrast); }
+  .btn-primary:hover { background:var(--crow-accent-hover); }
+  .btn-secondary { background:var(--crow-bg-elevated); color:var(--crow-text-primary); border-color:var(--crow-border); }
+  .btn-secondary:hover { border-color:var(--crow-accent); }
+  .btn-danger { background:var(--crow-error); color:var(--crow-accent-contrast); }
+  .btn-danger:hover { filter:brightness(1.1); }
+  .btn-ghost { background:transparent; color:var(--crow-text-secondary); }
+  .btn-ghost:hover { color:var(--crow-text-primary); background:var(--crow-bg-elevated); }
+  /* Disabled: grey, not a dimmed accent. The doubled class (0,3,0+) outranks
+     the legacy .btn-primary:hover / .btn-danger:hover rules that layout.js
+     injects after this block, so hover and focus cannot recolour it. */
+  .btn.btn:disabled, .btn.btn[aria-disabled="true"],
+  .btn.btn:disabled:hover, .btn.btn[aria-disabled="true"]:hover,
+  .btn.btn:disabled:focus, .btn.btn[aria-disabled="true"]:focus {
+    background:var(--crow-bg-elevated); color:var(--crow-text-tertiary);
+    border-color:var(--crow-border); cursor:not-allowed; filter:none; }
+
+  /* Code block */
+  .code-block { border:1px solid var(--crow-border); border-radius:var(--crow-radius-card);
+    overflow:hidden; margin:var(--crow-space-4) 0; background:var(--crow-bg-deep); }
+  .code-block-bar { display:flex; align-items:center; justify-content:space-between;
+    padding:var(--crow-space-2) var(--crow-space-3); background:var(--crow-bg-elevated);
+    border-bottom:1px solid var(--crow-border); }
+  .code-lang { font-size:var(--crow-text-xs); color:var(--crow-text-muted); text-transform:uppercase; letter-spacing:0.05em; }
+  .code-copy { margin-left:auto; font-size:var(--crow-text-xs); color:var(--crow-text-secondary);
+    background:transparent; border:1px solid var(--crow-border); border-radius:var(--crow-radius-control);
+    padding:var(--crow-space-1) var(--crow-space-3); cursor:pointer; }
+  .code-copy:hover { color:var(--crow-text-primary); border-color:var(--crow-accent); }
+  .code-block pre { margin:0; padding:var(--crow-space-3); overflow:auto;
+    font-family:'JetBrains Mono',monospace; font-size:var(--crow-text-sm); line-height:var(--crow-leading-normal); }
+
+  /* Callout */
+  .callout { border-left:3px solid var(--crow-info); border-radius:var(--crow-radius-control);
+    background:var(--crow-bg-elevated); padding:var(--crow-space-3) var(--crow-space-4);
+    margin:var(--crow-space-4) 0; font-size:var(--crow-text-base); line-height:var(--crow-leading-normal); }
+  .callout-info { border-left-color:var(--crow-info); }
+  .callout-success { border-left-color:var(--crow-success); }
+  .callout-warning { border-left-color:var(--crow-warning); }
+  .callout-error { border-left-color:var(--crow-error); }
+
+  /* Stepper */
+  .stepper { display:flex; gap:var(--crow-space-4); list-style:none; padding:0; margin:var(--crow-space-4) 0; flex-wrap:wrap; }
+  .stepper .step { display:flex; align-items:center; gap:var(--crow-space-2); font-size:var(--crow-text-sm); color:var(--crow-text-tertiary); }
+  .stepper .step-num { display:inline-flex; align-items:center; justify-content:center;
+    width:24px; height:24px; border-radius:50%; border:1px solid var(--crow-border);
+    font-size:var(--crow-text-xs); }
+  .step-done { color:var(--crow-text-secondary); }
+  .step-done .step-num { background:var(--crow-accent); color:var(--crow-accent-contrast); border-color:var(--crow-accent); }
+  .step-active { color:var(--crow-text-primary); font-weight:500; }
+  .step-active .step-num { border-color:var(--crow-accent); color:var(--crow-accent); }
+  /* Compact stepper (phones): one line + a thin bar instead of the chip
+     list, which wraps to three or four rows at phone widths. The bar is
+     decorative (the wrapper is aria-hidden); the list stays in the DOM. */
+  .stepper-compact { display:none; margin:var(--crow-space-3) 0 var(--crow-space-4); }
+  .stepper-compact-text { display:block; font-size:var(--crow-text-sm); font-weight:500; color:var(--crow-text-primary); }
+  .stepper-compact-bar { display:block; height:4px; margin-top:var(--crow-space-2); border-radius:2px; background:var(--crow-border); overflow:hidden; }
+  .stepper-compact-fill { display:block; height:100%; background:var(--crow-accent); }
+  /* Same inclusive breakpoint as layout.js's phone rules. The list is made
+     sr-only (clipped), NOT display:none: screen readers keep every step and
+     the aria-current one; tests/onboarding-stepper-live.test.js guards it. */
+  @media (max-width:768px) {
+    .stepper-wrap .stepper-compact { display:block; }
+    .stepper-wrap .stepper { position:absolute; width:1px; height:1px; margin:0; padding:0; overflow:hidden;
+      clip:rect(0 0 0 0); white-space:nowrap; border:0; }
+  }
+
+  /* Tabs */
+  .tab-list { display:flex; flex-wrap:wrap; gap:var(--crow-space-1); border-bottom:1px solid var(--crow-border); margin-bottom:var(--crow-space-4); }
+  .tab-trigger { background:transparent; border:none; border-bottom:2px solid transparent;
+    color:var(--crow-text-secondary); font-family:inherit; font-size:var(--crow-text-base);
+    padding:var(--crow-space-2) var(--crow-space-4); cursor:pointer; }
+  .tab-trigger:hover { color:var(--crow-text-primary); }
+  .tab-trigger.tab-active { color:var(--crow-accent); border-bottom-color:var(--crow-accent); }
+  .tab-panel { display:none; }
+  .tab-panel.tab-active { display:block; }
+
+  /* ─── Responsive overflow (mobile overflow fix, 2026-10) ───
+     Wide content must scroll or wrap INSIDE its card, never push past it
+     (Pixel 9a: 412px portrait, ~915px landscape with the sidebar open).
+
+     .table-scroll is THE wrapper every dashboard table sits in — dataTable()
+     emits it, hand-built tables wrap themselves, renderMarkdown() wraps
+     markdown tables, and tests/dashboard-table-scroll.test.js fails on any
+     table outside it.
+
+     The scroll hint is drawn ONLY while the wrapper can actually scroll:
+     componentsJs() measures each wrapper (ResizeObserver) and toggles
+     .is-scrollable. The two "cover" gradients scroll WITH the content
+     (local) and hide the edge shadows (scroll) once that edge is reached, so
+     a shadow shows only on a side with more table. The covers must match
+     what is behind the wrapper: --table-scroll-bg follows context (page
+     background vs card) and the script refines it to the wrapper's actual
+     backdrop, so no band ever shows. */
+  .content-body { --table-scroll-bg: var(--crow-bg-deep); }
+  .card, .stat-card { --table-scroll-bg: var(--crow-bg-surface); }
+  .table-scroll {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+  }
+  .table-scroll.is-scrollable {
+    background:
+      linear-gradient(to right, var(--table-scroll-bg, var(--crow-bg-surface)) 30%, transparent) left center / 32px 100% no-repeat local,
+      linear-gradient(to left, var(--table-scroll-bg, var(--crow-bg-surface)) 30%, transparent) right center / 32px 100% no-repeat local,
+      radial-gradient(farthest-side at 0 50%, rgba(0,0,0,0.22), transparent) left center / 12px 100% no-repeat scroll,
+      radial-gradient(farthest-side at 100% 50%, rgba(0,0,0,0.22), transparent) right center / 12px 100% no-repeat scroll;
+  }
+  @media print {
+    .table-scroll, .table-scroll.is-scrollable { overflow: visible; background: none; max-width: none; }
+  }
+
+  /* Stacked variant (dataTable(..., { stack: true })): when — and only when —
+     the table genuinely does not fit a phone-sized container (<= 720px wide),
+     componentsJs() adds .is-stacked and each row renders as a small card:
+     label / value pairs, action links on one line. Measured, not a fixed
+     breakpoint: Skills fits a landscape phone and stays a table; the bot
+     list does not and stacks. min-width keeps a stacked list from
+     collapsing inside a shrink-to-fit parent. Selectors carry .table-stack
+     so they outrank layout.js's .data-table th/td rules (loaded later). */
+  .table-stack.is-stacked { min-width: 14rem; }
+  .table-stack.is-stacked .data-table--stack, .table-stack.is-stacked .data-table--stack tbody, .table-stack.is-stacked .data-table--stack tr, .table-stack.is-stacked .data-table--stack td { display: block; width: 100%; }
+  .table-stack.is-stacked .data-table--stack thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .table-stack.is-stacked .data-table--stack tr { border: 1px solid var(--crow-border); border-radius: var(--crow-radius-card);
+    padding: var(--crow-space-2) var(--crow-space-3); margin-bottom: var(--crow-space-3); }
+  .table-stack.is-stacked .data-table--stack tr:hover td { background: transparent; }
+  /* Block + floated label (not flex): a cell's mixed inline content (a
+     link plus text, a badge) stays one inline run, right-aligned. */
+  .table-stack.is-stacked .data-table--stack td { padding: var(--crow-space-1) 0; border-bottom: none; text-align: right; overflow-wrap: anywhere; }
+  .table-stack.is-stacked .data-table--stack td::after { content: ""; display: table; clear: both; }
+  .table-stack.is-stacked .data-table--stack td::before { content: attr(data-label); float: left; margin-right: var(--crow-space-3); text-align: left;
+    font-size: var(--crow-text-xs); color: var(--crow-text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .table-stack.is-stacked .data-table--stack td:empty { display: none; }
+  .table-stack.is-stacked .data-table--stack td.dt-action { display: inline-block; width: auto; margin-right: var(--crow-space-4); text-align: left; }
+  .table-stack.is-stacked .data-table--stack td.dt-action::before, .table-stack.is-stacked .data-table--stack td.dt-action::after { content: none; }
+  /* A wide free-text cell (dataTable opts.wide): label on its own line, text
+     full width and left-aligned. Unstacked, the column claims a fair share
+     of the table and wraps long tokens instead of widening the table. */
+  .table-stack.is-stacked .data-table--stack td.dt-wide { text-align: left; }
+  .table-stack.is-stacked .data-table--stack td.dt-wide::before { float: none; display: block; margin: 0 0 var(--crow-space-1); }
+  .data-table td.dt-wide { width: 45%; overflow-wrap: anywhere; }
+
+  /* Long unbreakable tokens (ids, model ids like crow-local/qwen3.6-35b-a3b,
+     hashes, URLs). break-word (inherited) wraps only what would otherwise
+     overflow and does NOT change min-content sizing, so tables and flex rows
+     size exactly as before. .cell-break / .mono opt a cell into "anywhere",
+     which also lets the column itself shrink. Inline code inside a table
+     cell is left alone: a cell keeps its tokens intact and the table
+     scrolls (Perch's markdown-table rule depends on this). */
+  .content-body { overflow-wrap: break-word; }
+  .cell-break, .data-table .mono, .content-body :not(pre, td, th) > code { overflow-wrap: anywhere; }
+
+  /* Zero-specificity safety net (:where) — any panel rule overrides it.
+     Flex/grid items default to min-width:auto (= their min-content width),
+     which is how one long id inflates a whole card. min-width:0 is a no-op
+     for every other box. Block containers + form controls only: icons,
+     buttons and badges keep their intrinsic size. */
+  :where(.content-body) :where(div, section, article, aside, form, fieldset, details, li, label, select, input, textarea) { min-width: 0; }
+  :where(.content-body) :where(select) { max-width: 100%; }
+  :where(.content-body) :where(img, video, canvas, iframe, embed, object) { max-width: 100%; }
+  :where(.content-body) :where(pre) { max-width: 100%; overflow-x: auto; }
+  /* Link cards in grids (2026-10): a 1fr track is minmax(auto, 1fr), and
+     "auto" is the item's min-content — one long name in one Contacts card (an
+     <a>, which the net above does not cover) widened every column to 1108px,
+     at phone AND desktop widths. Block containers are already netted above;
+     this adds only the <a> children of grid containers. Buttons, badges and
+     icons stay excluded, as the net above intends: they keep their intrinsic
+     size. A few "*-grid" classes are flex-wrap rows (.ag-grid, .cs-grid,
+     .nd-grid); their children are divs, so this is a no-op there. */
+  :where(.content-body) :where(.card-grid, .stat-grid, [class$="-grid"], [class*="-grid "], [style*="display:grid"], [style*="display: grid"]) > :where(a:not(.btn, .badge, [class*="btn-"], [class*="badge"])) { min-width: 0; }
+
+  /* Phone rows (2026-10): a panel's own tab / filter / action row is wider
+     than a phone once it holds a few items, and with no wrap it pans the whole
+     panel sideways (Media's "Feed, For You, Playlists, Briefings…"). On phones
+     such rows wrap, like the shared tabs() row (.tab-list) always does:
+       - an inline-style flex row whose children include two adjacent
+         links/buttons/forms;
+       - a row class named *-tabs, *-tabbar, *-nav, *-chips, *-toolbar,
+         *-filters or *-pills (the same list tests/dashboard-phone-rows.test.js
+         holds the sources to).
+     Zero specificity (:where): a row that declares its own flex-wrap keeps
+     it, and an inline row that scrolls by itself (overflow-x:auto) is left
+     alone. To keep a row on one line, set flex-wrap:nowrap AND
+     overflow-x:auto, so it scrolls itself; the source scan rejects nowrap
+     alone, which still pans the page. Known limits: a row of a title link
+     and a button also matches (on a phone the button drops to a second line
+     instead of the title truncating); and the class rule cannot see a
+     direction set in a class, so a column flex named like a row (say a
+     vertical *-toolbar) must declare flex-wrap:nowrap itself, or a bounded
+     height reflows it into extra columns. */
+  @media (max-width: 768px) {
+    :where(.content-body) :where([style*="display:flex"], [style*="display: flex"], [style*="display:inline-flex"], [style*="display: inline-flex"]):where(:has(> a + a, > button + button, > a + button, > button + a, > form + form)):where(:not([style*="flex-direction:column"], [style*="flex-direction: column"], [style*="overflow-x:auto"], [style*="overflow-x: auto"], [style*="overflow-x:scroll"], [style*="overflow-x: scroll"])) { flex-wrap: wrap; }
+    :where(.content-body) :where([class$="-tabs"], [class*="-tabs "], [class$="-tabbar"], [class*="-tabbar "], [class$="-nav"], [class*="-nav "], [class$="-chips"], [class*="-chips "], [class$="-toolbar"], [class*="-toolbar "], [class$="-filters"], [class*="-filters "], [class$="-pills"], [class*="-pills "]) { flex-wrap: wrap; }
+  }
+
+  /* ─── Focus-visible baseline (W3-5a) ─── */
+  .btn:focus-visible, .btn-primary:focus-visible, .btn-secondary:focus-visible,
+  .btn-danger:focus-visible, .btn-ghost:focus-visible, .btn-sm:focus-visible,
+  .btn-md:focus-visible {
+    outline: 2px solid var(--crow-accent);
+    outline-offset: 2px;
+  }
+  .sidebar-nav a.nav-item:focus-visible {
+    outline: 2px solid var(--crow-accent);
+    outline-offset: 2px;
+  }
+  input:focus-visible, select:focus-visible, textarea:focus-visible {
+    outline: 2px solid var(--crow-accent);
+    outline-offset: 2px;
+  }
+  
+
+  body {
+    font-family: var(--crow-body-font);
+    background: var(--crow-bg-deep);
+    color: var(--crow-text-primary);
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  a { color: var(--crow-accent); text-decoration: none; }
+  a:hover { color: var(--crow-accent-hover); }
+
+  /* Dashboard layout */
+  .dashboard { display: flex; min-height: 100vh; }
+
+  /* Sidebar */
+  .sidebar {
+    width: var(--crow-sidebar-width);
+    background: var(--crow-bg-surface);
+    border-right: 1px solid var(--crow-border);
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 100;
+    /* visibility rides along with the transform because translateX(-100%)
+       hides pixels ONLY: an off-canvas sidebar stays in the tab order and
+       in the accessibility tree, so a screen reader announces a nav that is
+       visually gone and a keyboard user tabs through invisible links. The
+       hidden states below pair visibility:hidden with a 0.2s delay so it
+       lands after the slide-out finishes; this base rule transitions it back
+       with no delay so the reveal is instant. */
+    visibility: visible;
+    transition: transform 0.2s ease-out, visibility 0s;
+  }
+  .sidebar-header {
+    padding: 1.5rem;
+    border-bottom: 1px solid var(--crow-border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  .logo {
+    font-family: var(--crow-body-font);
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--crow-text-primary);
+  }
+  /* Desktop-only collapse trigger, sitting next to the logo — the sidebar's
+     own affordance for hiding itself (the header hamburger is the reveal
+     side of this pair; see dashboardCss()'s "@media not all and
+     (max-width: 768px)" block and toggleSidebar() in renderLayout's
+     script). Hidden on mobile: the hamburger + overlay + Escape key already
+     cover close there. Note that nothing hides this button on DESKTOP once
+     the sidebar is collapsed — it rides off-canvas inside the sidebar, and
+     the sidebar's visibility:hidden is what takes it out of the tab order. */
+  .sidebar-collapse-btn {
+    background: none;
+    border: none;
+    color: var(--crow-text-secondary);
+    cursor: pointer;
+    padding: 0.25rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--crow-radius-control);
+    flex-shrink: 0;
+  }
+  .sidebar-collapse-btn:hover {
+    color: var(--crow-text-primary);
+    background: var(--crow-bg-elevated);
+  }
+  .sidebar-nav {
+    flex: 1;
+    padding: 0.75rem;
+    overflow-y: auto;
+  }
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.6rem 0.75rem;
+    border-radius: var(--crow-radius-control);
+    color: var(--crow-text-secondary);
+    font-size: 0.9rem;
+    font-weight: 500;
+    transition: all 0.15s;
+    margin-bottom: 0.15rem;
+  }
+  .nav-item:hover {
+    background: var(--crow-bg-elevated);
+    color: var(--crow-text-primary);
+  }
+  .nav-item.active {
+    background: color-mix(in srgb, var(--crow-accent) 8%, transparent);
+    color: var(--crow-accent);
+    border-left: 3px solid var(--crow-brand-gold);
+    padding-left: calc(0.75rem - 3px);
+  }
+  .nav-item svg { flex-shrink: 0; }
+
+  /* Nav groups */
+  .nav-group { margin-bottom: 0.25rem; }
+  .nav-group-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 0.35rem 0.75rem;
+    background: none;
+    border: none;
+    color: var(--crow-text-muted);
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    transition: color 0.15s;
+  }
+  .nav-group-header:hover { color: var(--crow-text-secondary); }
+  .nav-chevron {
+    transition: transform 0.2s ease;
+    flex-shrink: 0;
+  }
+  .nav-group.collapsed .nav-chevron { transform: rotate(-90deg); }
+  .nav-group-items {
+    overflow: hidden;
+    max-height: 500px;
+    transition: max-height 0.25s ease-out, opacity 0.2s ease;
+    opacity: 1;
+  }
+  .nav-group.collapsed .nav-group-items {
+    max-height: 0;
+    opacity: 0;
+  }
+  .sidebar-footer {
+    padding: 0.75rem;
+    border-top: 1px solid var(--crow-border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .logout { font-size: 0.8rem; }
+
+  /* Main content */
+  .main-content {
+    flex: 1;
+    /* Flex children default to min-width:auto, so a nowrap descendant's
+       min-content width inflates this column and the whole document
+       (the Extensions horizontal-scroll bug: doc 2555px vs viewport 1904px).
+       min-width:0 lets the column shrink and forces descendants to handle
+       their own overflow. */
+    min-width: 0;
+    margin-left: var(--crow-sidebar-width);
+    min-height: 100vh;
+    /* The player bar (fixed, bottom:0) covers the page's end unless the page
+       reserves its height: --crow-player-h is the bar's height while it
+       shows, else 0px (player.js PLAYER_RESERVE_JS). The app shells below
+       (phone, Perch) reserve through their height instead. */
+    padding-bottom: var(--crow-player-h,0px);
+    transition: margin-left 0.2s ease-out;
+  }
+  .content-header {
+    padding: 1.25rem 2rem;
+    border-bottom: 1px solid var(--crow-border);
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+  .content-header h2 {
+    font-family: var(--crow-body-font);
+    font-size: 1.25rem;
+    font-weight: 600;
+    flex: 1;
+  }
+  .header-icons {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-left: auto;
+  }
+  .hamburger {
+    display: none;
+    background: none;
+    border: none;
+    color: var(--crow-text-primary);
+    cursor: pointer;
+    padding: 0.25rem;
+  }
+  .content-body {
+    padding: 2rem;
+  }
+
+  /* Cards */
+  .card {
+    background: var(--crow-bg-surface);
+    border: 1px solid var(--crow-border);
+    border-radius: var(--crow-radius-card);
+    padding: 1.25rem;
+    animation: fadeInUp 0.4s ease-out both;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2), 0 0 0 1px color-mix(in srgb, var(--crow-accent) 5%, transparent);
+    transition: box-shadow 0.15s;
+  }
+  .card:hover {
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3), 0 0 0 1px color-mix(in srgb, var(--crow-accent) 10%, transparent);
+  }
+  .card-grid {
+    display: grid;
+    /* min(280px,100%): a container narrower than one 280px track (a phone,
+       or a grid nested in a card) gets one full-width column instead of a
+       280px column overflowing it. */
+    grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+    gap: 1rem;
+  }
+  .stat-card {
+    background: var(--crow-bg-surface);
+    border: 1px solid var(--crow-border);
+    border-radius: var(--crow-radius-card);
+    padding: 1.25rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2), 0 0 0 1px color-mix(in srgb, var(--crow-accent) 5%, transparent);
+  }
+  .stat-card .label {
+    font-size: 0.8rem;
+    color: var(--crow-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.35rem;
+  }
+  .stat-card .value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.75rem;
+    font-weight: 500;
+    color: var(--crow-accent);
+  }
+
+  /* Tables */
+  .data-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .data-table th, .data-table td {
+    padding: 0.65rem 0.75rem;
+    text-align: left;
+    border-bottom: 1px solid var(--crow-border);
+  }
+  .data-table th {
+    font-size: 0.75rem;
+    color: var(--crow-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 500;
+  }
+  .data-table tr:hover td { background: var(--crow-bg-elevated); }
+  .data-table .mono {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85rem;
+  }
+
+  /* Forms */
+  input, textarea, select {
+    font-family: var(--crow-body-font);
+    background: var(--crow-bg-elevated);
+    border: 1px solid var(--crow-border);
+    border-radius: var(--crow-radius-control);
+    padding: 0.6rem 0.75rem;
+    color: var(--crow-text-primary);
+    font-size: 0.9rem;
+    width: 100%;
+    transition: border-color 0.15s;
+  }
+  /* Checkboxes and radios keep their natural size: at width:100% a checkbox in a flex row
+     takes the whole row and crushes its label to one character per line. */
+  input[type="checkbox"], input[type="radio"] {
+    width: auto;
+  }
+  input:focus:not(:focus-visible), textarea:focus:not(:focus-visible), select:focus:not(:focus-visible) {
+    outline: none;
+    border-color: var(--crow-accent);
+  }
+  input:focus-visible, textarea:focus-visible, select:focus-visible {
+    border-color: var(--crow-accent);
+  }
+  textarea { resize: vertical; min-height: 120px; }
+
+  /* Buttons */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    border-radius: var(--crow-radius-control);
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+    border: 1px solid transparent;
+    font-family: var(--crow-body-font);
+  }
+  .btn-primary {
+    background: var(--crow-accent);
+    color: var(--crow-accent-contrast);
+  }
+  .btn-primary:hover { background: var(--crow-accent-hover); }
+  .btn-secondary {
+    background: transparent;
+    border-color: var(--crow-border);
+    color: var(--crow-text-secondary);
+  }
+  .btn-secondary:hover {
+    border-color: var(--crow-accent);
+    color: var(--crow-text-primary);
+  }
+  .btn-danger {
+    background: transparent;
+    border-color: var(--crow-error);
+    color: var(--crow-error);
+  }
+  .btn-danger:hover { background: var(--crow-error); color: white; }
+  .btn-sm { padding: 0.3rem 0.6rem; font-size: 0.8rem; }
+
+  /* Badge */
+  .badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-weight: 500;
+    text-transform: uppercase;
+  }
+  .badge-published { background: var(--crow-success); color: var(--crow-accent-contrast); }
+  .badge-draft { background: var(--crow-bg-elevated); color: var(--crow-text-muted); }
+  .badge-connected { background: var(--crow-success); color: var(--crow-accent-contrast); }
+  .badge-error { background: var(--crow-error); color: var(--crow-accent-contrast); }
+
+  /* Empty state */
+  .empty-state {
+    text-align: center;
+    padding: 3rem 1rem;
+    color: var(--crow-text-secondary);
+  }
+  .empty-state img {
+    width: 48px;
+    height: 48px;
+    margin-bottom: 1rem;
+    opacity: 0.6;
+  }
+  .empty-state h3 {
+    font-family: var(--crow-body-font);
+    font-size: 1.25rem;
+    margin-bottom: 0.5rem;
+    color: var(--crow-text-secondary);
+  }
+
+  /* Alert — status is carried by the container (tinted bg + status border-left),
+     not by coloring the sentence text (§3.2.1: body-size status text retires). */
+  .alert {
+    padding: 0.75rem 1rem;
+    border-radius: var(--crow-radius-control);
+    margin-bottom: 1rem;
+    font-size: 0.9rem;
+    color: var(--crow-text-primary);
+  }
+  .alert-success { background: color-mix(in srgb, var(--crow-success) 12%, transparent); border-left: 3px solid var(--crow-success); }
+  .alert-error { background: color-mix(in srgb, var(--crow-error) 12%, transparent); border-left: 3px solid var(--crow-error); }
+
+  /* Login page */
+  .login-page {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+  }
+  .login-card {
+    background: var(--crow-bg-surface);
+    border: 1px solid var(--crow-border);
+    border-radius: var(--crow-radius-card);
+    padding: 2.5rem;
+    width: 100%;
+    max-width: 380px;
+    text-align: center;
+    animation: fadeInUp 0.4s ease-out both;
+  }
+  .login-logo {
+    font-family: var(--crow-body-font);
+    font-size: 2.5rem;
+    font-weight: 700;
+    color: var(--crow-accent);
+    margin-bottom: 0.25rem;
+  }
+  .login-subtitle {
+    color: var(--crow-text-secondary);
+    margin-bottom: 1.5rem;
+    font-size: 0.9rem;
+  }
+  .login-error {
+    color: var(--crow-text-primary);
+    background: color-mix(in srgb, var(--crow-error) 12%, transparent);
+    border-left: 3px solid var(--crow-error);
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--crow-radius-control);
+    margin-bottom: 1rem;
+    font-size: 0.85rem;
+  }
+  .login-card form { display: flex; flex-direction: column; gap: 0.75rem; }
+  .login-card button {
+    background: var(--crow-accent);
+    color: var(--crow-accent-contrast);
+    border: none;
+    border-radius: var(--crow-radius-control);
+    padding: 0.65rem;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: var(--crow-body-font);
+    transition: background 0.15s;
+  }
+  .login-card button:hover { background: var(--crow-accent-hover); }
+
+  /* Animations */
+  @keyframes fadeInUp {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* Header icons (notifications, health) */
+  
+  .header-icon-btn {
+    position: relative;
+    background: none;
+    border: 1px solid var(--crow-border);
+    border-radius: 8px;
+    padding: 0.4rem 0.6rem;
+    color: var(--crow-text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .header-icon-btn:hover {
+    color: var(--crow-accent);
+    border-color: var(--crow-accent);
+  }
+  .health-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    font-weight: 500;
+  }
+  .health-label.health-ok { color: var(--crow-success); }
+  .health-label.health-warn { color: var(--crow-brand-gold); }
+  .health-label.health-crit { color: var(--crow-error); }
+  .notif-badge {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    background: var(--crow-brand-gold);
+    color: var(--crow-accent-contrast);
+    font-size: 0.65rem;
+    font-weight: 700;
+    min-width: 16px;
+    height: 16px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 4px;
+  }
+  .header-dropdown {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    background: var(--crow-bg-surface);
+    border: 1px solid var(--crow-border);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    min-width: 280px;
+    max-width: 360px;
+    z-index: 200;
+    animation: fadeInUp 0.15s ease-out;
+  }
+  .dropdown-title {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--crow-border);
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--crow-text-muted);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .dropdown-body {
+    padding: 0.75rem;
+    max-height: 320px;
+    overflow-y: auto;
+    font-size: 0.85rem;
+  }
+  .notif-dropdown { min-width: 320px; max-width: 400px; }
+  .notif-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.5rem;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  .notif-item:hover { background: var(--crow-bg-elevated); }
+  .notif-item + .notif-item { margin-top: 0.25rem; }
+  .notif-item-body { flex: 1; min-width: 0; }
+  .notif-item-title {
+    font-weight: 500;
+    font-size: 0.85rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .notif-item-title.high { color: var(--crow-error); }
+  .notif-item-desc {
+    font-size: 0.75rem;
+    color: var(--crow-text-muted);
+    margin-top: 2px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .notif-item-time {
+    font-size: 0.65rem;
+    color: var(--crow-text-muted);
+    font-family: 'JetBrains Mono', monospace;
+    margin-top: 2px;
+  }
+  .notif-item-dismiss {
+    background: none;
+    border: none;
+    color: var(--crow-text-muted);
+    cursor: pointer;
+    font-size: 1rem;
+    padding: 0;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .notif-item-dismiss:hover { color: var(--crow-error); }
+  .notif-type-icon {
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.8rem;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+  .notif-type-reminder { background: color-mix(in srgb, var(--crow-accent) 15%, transparent); color: var(--crow-accent); }
+  .notif-type-media { background: rgba(168,85,247,0.15); color: #a855f7; }
+  .notif-type-peer { background: rgba(34,197,94,0.15); color: var(--crow-success); }
+  .notif-type-system { background: rgba(234,179,8,0.15); color: var(--crow-brand-gold); }
+  .health-stat-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.35rem 0;
+    border-bottom: 1px solid var(--crow-border);
+  }
+  .health-stat-row:last-child { border-bottom: none; }
+  .health-stat-label { color: var(--crow-text-muted); font-size: 0.8rem; }
+  .health-stat-value { font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; }
+  /* ─── Crow PTT (glasses voice turn) ─── */
+  .crow-ptt-btn.active {
+    background: #dc2626;
+    border-color: #dc2626;
+    color: #fff;
+    animation: crow-ptt-pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes crow-ptt-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.6); }
+    50%      { box-shadow: 0 0 0 6px rgba(220,38,38,0); }
+  }
+  /* ─── Incoming Call Toast ─── */
+  .crow-call-toast {
+    position: fixed;
+    top: -80px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10001;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.75rem 1.25rem;
+    background: rgba(34,48,58,0.92);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid color-mix(in srgb, var(--crow-accent) 40%, transparent);
+    border-radius: 12px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    transition: top 0.3s ease-out;
+    max-width: 480px;
+    width: calc(100% - 2rem);
+  }
+  .crow-call-toast--visible { top: 16px; }
+  .crow-call-toast-info {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: 1;
+    min-width: 0;
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: var(--crow-text-primary, #e7e5e4);
+  }
+  .crow-call-toast-icon { font-size: 1.2rem; flex-shrink: 0; }
+  .crow-call-toast-actions { display: flex; gap: 0.5rem; flex-shrink: 0; }
+  .crow-call-toast-accept {
+    padding: 0.4rem 1rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    background: rgba(34,197,94,0.15);
+    color: #22c55e;
+    border: 1px solid rgba(34,197,94,0.3);
+    border-radius: 8px;
+    text-decoration: none;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .crow-call-toast-accept:hover { background: rgba(34,197,94,0.25); }
+  .crow-call-toast-dismiss {
+    padding: 0.4rem 0.75rem;
+    font-size: 0.8rem;
+    font-weight: 500;
+    background: none;
+    color: var(--crow-text-muted, #78716c);
+    border: 1px solid var(--crow-border, rgba(61,61,77,0.4));
+    border-radius: 8px;
+    cursor: pointer;
+    transition: color 0.15s;
+  }
+  .crow-call-toast-dismiss:hover { color: var(--crow-error, #ef4444); }
+
+  @media (max-width: 768px) {
+    .header-dropdown { position: fixed; top: auto; bottom: calc(60px + var(--crow-player-h,0px)); right: 8px; left: 8px; min-width: auto; max-width: none; }
+    .health-label { display: none; }
+    .crow-call-toast { max-width: none; width: calc(100% - 1rem); }
+  }
+
+  
+  /* ─── Talk to Crow ─── */
+  /* Above everything the dashboard stacks, including the phone drawer (1100) and its backdrop. */
+  .crow-talk-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    background: var(--crow-bg-deep);
+  }
+  .crow-talk-overlay.active { display: block; }
+  .crow-talk-overlay iframe {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border: 0;
+  }
+  /* Always visible, in the dashboard's own document: it works even when the frame fails to load. */
+  .crow-talk-close {
+    position: absolute;
+    top: calc(0.5rem + env(safe-area-inset-top, 0px));
+    right: calc(0.5rem + env(safe-area-inset-right, 0px));
+    z-index: 10001;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    border: 1px solid var(--crow-border);
+    background: var(--crow-bg-surface);
+    color: var(--crow-text-primary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+  }
+  .crow-talk-close:hover { border-color: var(--crow-accent); color: var(--crow-accent); }
+  .crow-talk-close:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }
+  body.crow-talk-open { overflow: hidden; }
+  .crow-talk-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    width: 100%;
+    min-height: 64px;
+    padding: 0.75rem 1rem;
+    border: 0;
+    border-bottom: 1px solid var(--crow-border);
+    border-radius: 10px 10px 0 0;
+    background: color-mix(in srgb, var(--crow-accent) 10%, transparent);
+    color: var(--crow-accent);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .crow-talk-row:hover { background: color-mix(in srgb, var(--crow-accent) 18%, transparent); }
+  .crow-talk-row:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: -2px; }
+  .crow-talk-row-icon { flex-shrink: 0; }
+  .crow-talk-row-text { display: flex; flex-direction: column; min-width: 0; }
+  .crow-talk-row-label { font-size: 1.05rem; font-weight: 700; line-height: 1.25; }
+  .crow-talk-row-hint { font-size: 0.72rem; color: var(--crow-text-muted); line-height: 1.3; }
+  /* A held finger must not select text, open the image callout or scroll the page under the bird. */
+  [data-crow-talk] { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; touch-action: manipulation; }
+
+
+  /* Tamagotchi crow */
+  
+  /* ─── Tamagotchi Crow ─── */
+  .crow-tama-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+  }
+  .crow-tama {
+    display: block;
+    overflow: visible;
+  }
+  /* The bird is a real button (keyboard + screen reader), with none of a button's chrome. */
+  .crow-tama-btn {
+    display: flex;
+    align-items: center;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 10px;
+    background: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    overflow: visible;
+  }
+  .crow-tama-btn:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }
+
+  /* ─ Bounce keyframes ─ */
+  @keyframes crow-bounce-happy {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-3px); }
+  }
+  @keyframes crow-bounce-tired {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-2px); }
+  }
+
+  /* ─ Blink keyframe ─ */
+  @keyframes crow-blink {
+    0%, 92%, 100% { opacity: 1; }
+    95% { opacity: 0; }
+  }
+
+  /* ─ Wing flap (alarmed) ─ */
+  @keyframes crow-flap {
+    0%, 100% { transform: rotateZ(0deg); }
+    50% { transform: rotateZ(-20deg); }
+  }
+
+  /* ─ Wing droop (tired) ─ */
+  @keyframes crow-droop {
+    0%, 100% { transform: rotateZ(5deg); }
+    50% { transform: rotateZ(10deg); }
+  }
+
+  /* ─ Bubble float ─ */
+  @keyframes crow-bubble-float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-2px); }
+  }
+
+  /* ─ Happy mood ─ */
+  .crow-happy .crow-body-group {
+    animation: crow-bounce-happy 2s ease-in-out infinite;
+  }
+  .crow-happy #crow-tama-bird {
+    animation: crow-bounce-happy 2s ease-in-out infinite;
+  }
+  .crow-happy .crow-eye {
+    animation: crow-blink 4s step-end infinite;
+  }
+  .crow-happy .crow-wing {
+    animation: none;
+  }
+  .crow-happy .crow-beak {
+    fill: #d9a521;
+  }
+
+  /* ─ Tired mood ─ */
+  .crow-tired .crow-body-group {
+    animation: crow-bounce-tired 3s ease-in-out infinite;
+  }
+  .crow-tired #crow-tama-bird {
+    animation: crow-bounce-tired 3s ease-in-out infinite;
+  }
+  .crow-tired .crow-eye {
+    animation: crow-blink 6s step-end infinite;
+  }
+  .crow-tired .crow-wing {
+    animation: crow-droop 3s ease-in-out infinite;
+  }
+  .crow-tired .crow-beak {
+    fill: #c8c864;
+  }
+
+  /* ─ Alarmed mood ─ */
+  .crow-alarmed .crow-body-group {
+    animation: crow-bounce-happy 1s ease-in-out infinite;
+  }
+  .crow-alarmed #crow-tama-bird {
+    animation: crow-bounce-happy 1s ease-in-out infinite;
+  }
+  .crow-alarmed .crow-eye {
+    animation: crow-blink 2s step-end infinite;
+  }
+  .crow-alarmed .crow-wing {
+    animation: crow-flap 0.3s ease-in-out infinite;
+  }
+  .crow-alarmed .crow-beak {
+    fill: #c8c864;
+  }
+
+  /* ─ Bubble ─ */
+  .crow-bubble {
+    animation: crow-bubble-float 3s ease-in-out infinite;
+  }
+
+  /* ─ Combined dropdown ─ */
+  .crow-dropdown {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    background: var(--crow-bg-surface);
+    border: 1px solid var(--crow-border);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    min-width: 320px;
+    max-width: 400px;
+    z-index: 200;
+    animation: fadeInUp 0.15s ease-out;
+  }
+  .crow-health-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.5rem 1rem;
+    border-bottom: 1px solid var(--crow-border);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--crow-text-secondary);
+    flex-wrap: wrap;
+  }
+  .crow-health-metric { white-space: nowrap; }
+  .crow-health-sep { color: var(--crow-text-muted); }
+  .crow-health-ok { color: var(--crow-success); }
+  .crow-health-warn { color: var(--crow-brand-gold); }
+  .crow-health-crit { color: var(--crow-error); }
+
+  @media (max-width: 768px) {
+    .crow-dropdown { position: fixed; top: auto; bottom: calc(60px + var(--crow-player-h,0px)); right: 8px; left: 8px; min-width: auto; max-width: none; }
+  }
+
+
+  /* Sidebar overlay (hidden by default, shown on mobile when sidebar is open) */
+  .sidebar-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 99;
+  }
+
+  /* Safe area insets for notched devices */
+  @supports (padding: env(safe-area-inset-top)) {
+    .content-header { padding-top: env(safe-area-inset-top); }
+    .sidebar { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+    /* Under a showing player bar the bar itself pads the inset: not twice. */
+    .content-body { padding-bottom: max(0px, env(safe-area-inset-bottom, 0px) - var(--crow-player-h,0px)); }
+  }
+
+  /* Responsive — mobile */
+  @media (max-width: 768px) {
+    /* On phones the sidebar is a drawer OVER the page, so it and its backdrop
+       must out-stack anything a panel renders. Map libraries (Leaflet: panes
+       200-700, controls 800-1000) and other widgets ship high z-indexes and
+       were drawing over the open drawer (Ramble map hid the nav). Desktop
+       keeps 100/99: there the sidebar sits beside the content, not over it. */
+    .sidebar {
+      z-index: 1100;
+      transform: translateX(-100%);
+      visibility: hidden;
+      transition: transform 0.2s ease-out, visibility 0s linear 0.2s;
+    }
+    .sidebar-overlay { z-index: 1090; }
+    .sidebar.open {
+      transform: translateX(0);
+      visibility: visible;
+      transition: transform 0.2s ease-out, visibility 0s;
+      box-shadow: 4px 0 24px rgba(0,0,0,0.5);
+    }
+    .sidebar.open ~ .sidebar-overlay {
+      display: block;
+    }
+    body.sidebar-open {
+      overflow: hidden;
+      position: fixed;
+      width: 100%;
+    }
+    /* The app shell ends at the player bar's top (0px when it is hidden),
+       so .content-body's end can always scroll clear of it. min-height:0
+       beats the base min-height:100vh, which would grow it back under. */
+    .main-content {
+      margin-left: 0;
+      display: flex;
+      flex-direction: column;
+      height: calc(100vh - var(--crow-player-h,0px));
+      height: calc(100dvh - var(--crow-player-h,0px));
+      min-height: 0;
+      padding-bottom: 0;
+      overflow: hidden;
+    }
+    .content-header {
+      flex-shrink: 0;
+    }
+    .content-body {
+      flex: 1;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      min-height: 0;
+      padding: 1rem;
+    }
+    .hamburger { display: block; }
+    .dashboard {
+      height: 100vh;
+      height: 100dvh;
+    }
+    /* The desktop collapse trigger lives in the sidebar itself; mobile
+       already has hide/reveal via the hamburger + overlay + Escape, above. */
+    .sidebar-collapse-btn { display: none; }
+  }
+
+  /* The hamburger is the reveal side of the desktop collapse pair (see
+     .sidebar-collapse-btn above + toggleSidebar() in renderLayout's script):
+     shown whenever the sidebar is collapsed, at ANY width — not just the
+     ≤768px range it already covered. On mobile this is a no-op (the block
+     above already forces display:block there unconditionally). */
+  body.sidebar-collapsed .hamburger {
+    display: block;
+  }
+
+  /* Desktop sidebar collapse — a persisted-per-viewer preference, entirely
+     separate from the ≤768px overlay above (disjoint breakpoints, so the
+     two never contend for the same .sidebar/.main-content declarations).
+     Collapsed = sidebar off-canvas, .main-content reclaims its width.
+
+     "not all and (max-width: 768px)", not "(min-width: 769px)": those are
+     NOT the same range. A width of 768.5px — reachable through browser zoom
+     and some device pixel ratios — matches neither "(max-width: 768px)" nor
+     "(min-width: 769px)", so the whole collapse axis would go dead there
+     while isMobileWidth() (which queries "(max-width: 768px)") sends the
+     click down the desktop branch: the sidebar would not move, and the
+     unscoped "body.sidebar-collapsed .hamburger" rule above would put a
+     redundant hamburger beside a still-visible sidebar. Negating the mobile
+     query makes the two ranges exact complements at every fractional width.
+
+     visibility:hidden alongside the transform for the same reason as the
+     ≤768px closed state above — off-canvas must also mean out of the tab
+     order and out of the accessibility tree. It is what actually makes the
+     in-sidebar collapse button unreachable while collapsed; no rule up here
+     hides that button. syncSidebarToggleAria() also sets inert on the aside,
+     which covers the ~400ms this rule's deliberate delay leaves open. */
+  @media not all and (max-width: 768px) {
+    body.sidebar-collapsed .sidebar {
+      transform: translateX(-100%);
+      visibility: hidden;
+      transition: transform 0.2s ease-out, visibility 0s linear 0.2s;
+    }
+    body.sidebar-collapsed .main-content {
+      margin-left: 0;
+    }
+  }
+
+  /* ─── Instance Tabs Strip (unified multi-instance; permanent across Turbo nav) ─── */
+  .crow-instance-tabs {
+    display: flex;
+    gap: 0.25rem;
+    padding: 0.5rem 1rem;
+    border-bottom: 1px solid var(--crow-border);
+    overflow-x: auto;
+    scrollbar-width: none;
+    background: var(--crow-bg-deep);
+    flex-shrink: 0;
+  }
+  .crow-instance-tabs::-webkit-scrollbar { display: none; }
+
+  .crow-instance-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.4rem 0.85rem;
+    border-radius: var(--crow-radius-control);
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--crow-text-secondary);
+    text-decoration: none;
+    cursor: pointer;
+    background: transparent;
+    border: 1px solid transparent;
+    white-space: nowrap;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+  }
+  .crow-instance-tab:hover {
+    background: color-mix(in srgb, var(--crow-accent) 8%, transparent);
+    color: var(--crow-text-primary);
+  }
+  .crow-instance-tab:focus-visible {
+    outline: 2px solid var(--crow-accent);
+    outline-offset: 2px;
+  }
+  .crow-instance-tab.active,
+  .crow-instance-tab[aria-selected="true"] {
+    background: color-mix(in srgb, var(--crow-accent) 15%, transparent);
+    border-color: color-mix(in srgb, var(--crow-accent) 30%, transparent);
+    color: var(--crow-text-primary);
+  }
+  .crow-instance-tab[aria-disabled="true"],
+  .crow-instance-tab.tab--offline {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .crow-instance-tab-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--crow-text-muted);
+  }
+  .crow-instance-tab.tab--online .crow-instance-tab-dot {
+    background: var(--crow-success);
+  }
+  .crow-instance-tab.tab--offline .crow-instance-tab-dot {
+    background: var(--crow-text-muted);
+  }
+
+  body.unified-off #crow-instance-tabs { display: none; }
+
+  /* ─── Global toast container (W3-4) ─── */
+  .crow-toasts {
+    position: fixed;
+    bottom: calc(1.5rem + var(--crow-player-h,0px));
+    right: 1.5rem;
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    max-width: 420px;
+    pointer-events: none;
+  }
+  .crow-toast {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    border-radius: var(--crow-radius-card);
+    background: var(--crow-bg-surface);
+    border: 1px solid var(--crow-border);
+    box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+    font-size: 0.88rem;
+    line-height: 1.45;
+    pointer-events: all;
+    animation: crow-toast-in 0.22s ease-out both;
+  }
+  .crow-toast--error {
+    border-color: var(--crow-error);
+    background: rgba(239,68,68,0.08);
+    color: var(--crow-text-primary);
+  }
+  .crow-toast--success {
+    border-color: var(--crow-success);
+    background: rgba(34,197,94,0.08);
+    color: var(--crow-text-primary);
+  }
+  .crow-toast--out { animation: crow-toast-out 0.28s ease-in forwards; }
+  @keyframes crow-toast-in {
+    from { opacity:0; transform:translateY(8px); }
+    to   { opacity:1; transform:translateY(0); }
+  }
+  @keyframes crow-toast-out {
+    to { opacity:0; transform:translateY(8px); }
+  }
+  .crow-toast__body { flex:1; min-width:0; }
+  .crow-toast__msg { display:block; }
+  .crow-toast__details { margin-top:0.4rem; }
+  .crow-toast__details summary { cursor:pointer; font-size:0.78rem; color:var(--crow-text-muted); }
+  .crow-toast__details-pre {
+    margin-top:0.3rem; font-family:'JetBrains Mono',monospace; font-size:0.72rem;
+    white-space:pre-wrap; word-break:break-all; max-height:120px; overflow:auto;
+    color:var(--crow-text-secondary);
+  }
+  .crow-toast__close {
+    background:none; border:none; cursor:pointer; color:var(--crow-text-muted);
+    font-size:1.1rem; line-height:1; padding:0; flex-shrink:0;
+  }
+  .crow-toast__close:hover { color:var(--crow-text-primary); }
+  .crow-toast__close:focus-visible { outline:2px solid var(--crow-accent); outline-offset:2px; border-radius:2px; }
+
+  /* ─── Perch Hub app-shell opt-in ───
+     Perch Hub (dashboard/panels/perch-hub.js) is the one panel whose chat
+     view needs the composer reachable without scrolling the page, at ANY
+     width — not just the ≤768px range the media query above already
+     app-shells. Scoping by :has(#perch-chat) — Perch's own chat root,
+     unique to this panel — means this only ever fires on that page; every
+     other panel keeps the plain scrolling .content-body it already had.
+     This mirrors the ≤768px rule above exactly (fixed-height .main-content,
+     internally-scrolling .content-body); Perch's own CSS (perch-hub/css.js)
+     then makes #perch-hub-root/.hub-split/#perch-chat fill that height with
+     flex:1;min-height:0 so the transcript — not the page — is what scrolls. */
+  body:has(#perch-chat) .main-content {
+    height: calc(100vh - var(--crow-player-h,0px));
+    height: calc(100dvh - var(--crow-player-h,0px));
+    min-height: 0;
+    padding-bottom: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  body:has(#perch-chat) .content-body {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+  }
+
+  /* primitives' delegated copy/tabs JS (componentsJs) is appended right after
+     this style block closes, so it also loads on the login/2FA/setup pages,
+     which call dashboardCss() directly and bypass renderLayout's scripts slot.
+     NOTE: never write a literal closing style tag inside this comment — the
+     HTML parser would end the style element there and render the rest as text. */
+  </style><script>
+  if (!window.__crowComponentsBound) {
+    window.__crowComponentsBound = true;
+    document.addEventListener("click", function (e) {
+      var copy = e.target.closest("[data-copy]");
+      if (copy) {
+        var text = copy.getAttribute("data-copy") || "";
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(text).then(function () {
+            var prev = copy.textContent; copy.textContent = "Copied"; setTimeout(function () { copy.textContent = prev; }, 1200);
+          }).catch(function () {});
+        }
+        return;
+      }
+      var tab = e.target.closest("[data-tab]");
+      if (tab) {
+        var id = tab.getAttribute("data-tab");
+        var root = tab.closest(".tabs");
+        if (!root) return;
+        root.querySelectorAll(".tab-trigger").forEach(function (t) { t.classList.toggle("tab-active", t.getAttribute("data-tab") === id); });
+        root.querySelectorAll(".tab-panel").forEach(function (p) { p.classList.toggle("tab-active", p.getAttribute("data-tab-panel") === id); });
+      }
+    });
+  }
+  // Table wrappers (.table-scroll): toggle .is-scrollable (draws the edge
+  // hint only when there is something to scroll) and, for stacked list
+  // tables, .is-stacked when the table genuinely does not fit a phone-sized
+  // container. Runs once per document; a MutationObserver on <html> picks up
+  // Turbo body swaps and client-built tables. Work is deferred to the next
+  // frame so a class toggle never resizes an element mid-callback.
+  if (!window.__crowTableScrollBound && "ResizeObserver" in window) {
+    window.__crowTableScrollBound = true;
+    (function () {
+      var STACK_MAX = 720;
+      var seen = new WeakSet();
+      var pending = new Set();
+      var queued = false;
+      function backdrop(el) {
+        for (var a = el.parentElement; a; a = a.parentElement) {
+          var c = getComputedStyle(a).backgroundColor;
+          if (c && c !== "transparent" && c.replace(/ /g, "").slice(-3) !== ",0)") return c;
+        }
+        return "";
+      }
+      function check(w) {
+        if (!w.isConnected) return;
+        var t = w.querySelector("table");
+        if (w.classList.contains("table-stack") && t) {
+          var was = w.classList.contains("is-stacked");
+          if (was) w.classList.remove("is-stacked");
+          var stack = w.clientWidth > 0 && w.clientWidth <= STACK_MAX && t.offsetWidth > w.clientWidth + 1;
+          if (stack) w.classList.add("is-stacked");
+        }
+        var scrollable = w.scrollWidth > w.clientWidth + 1;
+        w.classList.toggle("is-scrollable", scrollable);
+        if (scrollable) {
+          var bg = backdrop(w);
+          if (bg) w.style.setProperty("--table-scroll-bg", bg);
+        }
+      }
+      function flush() { queued = false; var list = Array.from(pending); pending.clear(); list.forEach(check); }
+      function queue(w) { pending.add(w); if (!queued) { queued = true; requestAnimationFrame(flush); } }
+      var ro = new ResizeObserver(function (entries) {
+        entries.forEach(function (en) {
+          var w = en.target.classList && en.target.classList.contains("table-scroll") ? en.target : en.target.closest(".table-scroll");
+          if (w) queue(w);
+        });
+      });
+      function watch(w) {
+        if (seen.has(w)) { queue(w); return; }
+        seen.add(w);
+        ro.observe(w);
+        var t = w.querySelector("table");
+        if (t) ro.observe(t);
+        queue(w);
+      }
+      function scan(root) {
+        if (!root || root.nodeType !== 1) return;
+        if (root.matches(".table-scroll")) watch(root);
+        root.querySelectorAll(".table-scroll").forEach(watch);
+      }
+      new MutationObserver(function (muts) {
+        muts.forEach(function (m) { m.addedNodes.forEach(scan); });
+      }).observe(document.documentElement, { childList: true, subtree: true });
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", function () { scan(document.body); });
+      } else { scan(document.body); }
+    })();
+  }
+  </script>
+  <script src="/vendor/turbo-8.0.5.umd.js" defer></script>
+  <meta name="turbo-cache-control" content="no-cache">
+  <meta name="view-transition" content="same-origin">
+  <meta name="snap-head" content="1">
+</head>
+<body class="">
+  <script>
+    // Pre-paint sidebar-collapse restore (desktop-scoped by CSS below, see
+    // dashboardCss()'s "@media not all and (max-width: 768px)" block) —
+    // applying the class here, before .dashboard is even parsed, avoids a
+    // flash of the wrong layout on load. Mobile ignores this class entirely
+    // (its own off-canvas default + .open overlay are unaffected — see the
+    // ≤768px media query, unchanged). Wrapped in try/catch: localStorage
+    // can throw (private mode, blocked storage) and must never break render.
+    try {
+      if (localStorage.getItem('crow-sidebar-collapsed') === '1') {
+        document.body.classList.add('sidebar-collapsed');
+      }
+    } catch (e) {}
+  </script>
+  <div id="crow-talk-overlay" class="crow-talk-overlay" role="dialog" aria-modal="true" aria-label="Hablar con Crow">
+    <button type="button" id="crow-talk-close" class="crow-talk-close" onclick="closeCrowTalk()" aria-label="Cerrar (Esc)" title="Cerrar (Esc)">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+  </div>
+  <div class="dashboard">
+    <!-- The aside's id exists so the two toggle controls can point
+         aria-controls at the thing they operate; the class is what CSS
+         still selects on. Both controls ship aria-expanded="false" rather
+         than "true": the real value lives in localStorage, which the server
+         cannot read, and on a phone the sidebar is genuinely closed at
+         first paint. syncSidebarToggleAria() corrects it upward in the same
+         inline script block that runs before .dashboard finishes parsing.
+         Shipping "true" would instead be a lie on every phone load, and a
+         permanent one if scripts are blocked. -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <h1 class="logo">Crow</h1>
+        <button type="button" id="sidebar-collapse-btn" class="sidebar-collapse-btn" onclick="toggleSidebar()" aria-controls="sidebar" aria-expanded="false" aria-label="Contraer panel lateral">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 19l-7-7 7-7"/><path d="M4 12h16"/></svg>
+        </button>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-group" data-group-id="core">
+          <button class="nav-group-header" onclick="toggleNavGroup('core')">
+            <span>Principal</span>
+            <svg class="nav-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          <div class="nav-group-items" id="nav-group-core">
+            <a href="/dashboard/nest" class="nav-item "><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12L12 4l9 8"/><path d="M5 10v9a1 1 0 0 0 1 1h4v-5h4v5h4a1 1 0 0 0 1-1v-9"/></svg><span>Nido del Cuervo</span></a>
+          <a href="/dashboard/memory" class="nav-item active" data-turbo-preload><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M12 2a7 7 0 0 1 7 7c0 3-1.5 5-3 6.5V18a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.5C6.5 14 5 12 5 9a7 7 0 0 1 7-7z"/><line x1="9" y1="22" x2="15" y2="22"/></svg><span>Memoria</span></a>
+          </div>
+        </div>
+        <div class="nav-group collapsed" data-group-id="extras">
+          <button class="nav-group-header" onclick="toggleNavGroup('extras')">
+            <span>Extras</span>
+            <svg class="nav-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          <div class="nav-group-items" id="nav-group-extras">
+            <a href="/dashboard/custom" class="nav-item "><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg><span>Custom Panel</span></a>
+          </div>
+        </div>
+      </nav>
+      <div class="sidebar-footer">
+        <a href="/dashboard/logout" class="nav-item logout" data-turbo="false">Cerrar sesión</a>
+      </div>
+    </aside>
+    <div class="sidebar-overlay" onclick="closeSidebar()"></div>
+    <main class="main-content">
+      <header class="content-header">
+        <button class="hamburger" id="sidebar-reveal-btn" onclick="toggleSidebar()" aria-controls="sidebar" aria-expanded="false" aria-label="Alternar menú">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+        </button>
+        <h2>Snapshot &lt;Page&gt;</h2>
+        <div class="header-icons"><button id="crow-tama" class="snap-bird">bird</button></div>
+      </header>
+      <nav id="crow-instance-tabs" class="crow-instance-tabs" role="navigation" aria-label="Instances"><a href="#" class="crow-instance-tab tab--online active" data-turbo="false" data-instance-id="local"><span class="crow-instance-tab-dot"></span>Crow</a><a href="#i/peer1" class="crow-instance-tab tab--offline" data-turbo="false" aria-disabled="true" data-instance-id="peer1"><span class="crow-instance-tab-dot"></span>Peer &lt;One&gt;</a></nav>
+      <div class="content-body">
+        <section id="snap-content"><p>Body &amp; text</p></section>
+      </div>
+    </main>
+    <div id="crow-player-bar" data-turbo-permanent></div>
+  </div>
+  <script>
+    // ─── Talk to Crow (voice overlay + the header bird's long-press) ───
+    
+(function () {
+  // Once per document: under Turbo this script re-runs on every body swap, and
+  // every listener below is delegated from document/window (which survive it).
+  if (window.__crowTalkInit) return;
+  window.__crowTalkInit = true;
+  var TALK_PATH = "/display/session";
+  var HOLD_MS = 500;
+  var MOVE_PX = 10;
+  var press = null;            // the press in progress: { el, x, y, key, touch, fired, timer }
+  var lastTouch = null;        // { el, at }: the last finger that went down on the bird
+  var swallowTap = false;      // the click that ends a long-press is not a tap
+  var deferredFocus = false;   // opened by a held key: focus Close only once the key is up
+  var lastFocus = null;
+  var barWin = null;           // the frame window the player bar is attached to (B3)
+  var KIOSK_MEDIA_V = 1;
+var FRAME_OPS = ["load","play","pause","volume","stop"];
+var TICKET_PATH_RE = /^\/display\/t\/[A-Za-z0-9_-]{22}\/stream$/;
+var ITEM_ID_RE = /^m\d{1,9}$/;
+var FRAME_TEXT_MAX = 80;
+var FRAME_SOURCE_MAX = 16;
+function validateFrameMessage(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  if (Object.getPrototypeOf(data) !== Object.prototype && Object.getPrototypeOf(data) !== null) return null;
+  if (data.crow !== "media" || data.v !== KIOSK_MEDIA_V) return null;
+  const op = data.op;
+  if (typeof op !== "string" || FRAME_OPS.indexOf(op) < 0) return null;
+  const allowed = {
+    load: ["crow", "v", "op", "id", "url", "title", "subtitle", "source", "live", "volume", "paused", "has_next", "has_previous"],
+    play: ["crow", "v", "op", "id"],
+    pause: ["crow", "v", "op", "id"],
+    volume: ["crow", "v", "op", "id", "volume"],
+    stop: ["crow", "v", "op", "id"],
+  }[op];
+  const keys = Object.getOwnPropertyNames(data);
+  for (let i = 0; i < keys.length; i++) if (allowed.indexOf(keys[i]) < 0) return null;
+  if (typeof data.id !== "string" || !ITEM_ID_RE.test(data.id)) return null;
+  const text = (v, max) => (v === undefined ? "" : typeof v === "string" && v.length <= max ? v : null);
+  const flag = (v) => (v === undefined ? false : typeof v === "boolean" ? v : null);
+  const level = (v, dflt) => (v === undefined ? dflt : typeof v === "number" && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : null);
+  if (op === "play" || op === "pause" || op === "stop") return { op: op, id: data.id };
+  if (op === "volume") {
+    if (data.volume === undefined) return null;
+    const volume = level(data.volume, 1);
+    return volume === null ? null : { op: op, id: data.id, volume: volume };
+  }
+  if (typeof data.url !== "string" || !TICKET_PATH_RE.test(data.url)) return null;
+  if (typeof data.title !== "string") return null;
+  const out = {
+    op: op, id: data.id, url: data.url,
+    title: text(data.title, FRAME_TEXT_MAX), subtitle: text(data.subtitle, FRAME_TEXT_MAX), source: text(data.source, FRAME_SOURCE_MAX),
+    live: flag(data.live), volume: level(data.volume, 1), paused: flag(data.paused), has_next: flag(data.has_next), has_previous: flag(data.has_previous),
+  };
+  for (const k in out) if (out[k] === null) return null;
+  return out;
+}
+
+  function barPlayer() {
+    var p = window.crowPlayer;
+    return p && typeof p.kioskAttach === 'function' && typeof p.kioskApply === 'function' ? p : null;
+  }
+
+  function overlay() { return document.getElementById('crow-talk-overlay'); }
+  function frameEl() { return document.getElementById('crow-talk-frame'); }
+  function isOpen() { var o = overlay(); return !!(o && o.classList.contains('active')); }
+  function focusClose() { var x = document.getElementById('crow-talk-close'); if (x && typeof x.focus === 'function') x.focus(); }
+
+  function openTalk(fromKey) {
+    var o = overlay();
+    if (!o || o.classList.contains('active')) return;
+    var trays = document.querySelectorAll('.crow-dropdown, .header-dropdown');
+    for (var i = 0; i < trays.length; i++) trays[i].style.display = 'none';
+    var owners = document.querySelectorAll('[aria-controls="crow-dropdown"], [aria-controls="notif-dropdown"]');
+    for (var j = 0; j < owners.length; j++) owners[j].setAttribute('aria-expanded', 'false');
+    lastFocus = document.activeElement || null;
+    var frame = document.createElement('iframe');
+    frame.id = 'crow-talk-frame';
+    // D1: bar mode only when this dashboard's player can take it; otherwise the page plays in itself.
+    frame.setAttribute('src', TALK_PATH + (barPlayer() ? '?bar=1' : ''));
+    frame.setAttribute('title', o.getAttribute('aria-label') || '');
+    frame.setAttribute('allow', 'microphone; autoplay');
+    o.appendChild(frame);
+    o.classList.add('active');
+    document.body.classList.add('crow-talk-open');
+    // A key still held down would land on Close as a click and shut the overlay again.
+    if (fromKey) deferredFocus = true; else focusClose();
+  }
+
+  function closeTalk() {
+    var o = overlay();
+    if (!o) return;
+    var frame = frameEl();
+    if (frame) {
+      // Stop the microphone and any audio NOW (same-origin call), then drop the frame:
+      // its document, media stream and socket are destroyed with it either way.
+      // In bar mode the page keeps its media playing and returns the bar's un-ducked level + un-hold.
+      var st = null;
+      try {
+        var w = frame.contentWindow;
+        if (w && typeof w.crowKioskRelease === 'function') st = w.crowKioskRelease();
+      } catch (e) {}
+      if (frame.parentNode) frame.parentNode.removeChild(frame);
+      var p = barPlayer();
+      if (p && typeof p.kioskDetach === 'function') {
+        try { p.kioskDetach(st && typeof st === 'object' ? { volume: st.volume, resume: st.resume === true } : null); } catch (e) {}
+      }
+    }
+    barWin = null;
+    var wasOpen = o.classList.contains('active');
+    o.classList.remove('active');
+    document.body.classList.remove('crow-talk-open');
+    deferredFocus = false;
+    try {
+      if (wasOpen && lastFocus && typeof lastFocus.focus === 'function' && document.body.contains(lastFocus)) lastFocus.focus();
+    } catch (e) {}
+    lastFocus = null;
+  }
+
+  /** The armed bird (or bell) under this node — never from inside its open tray, whose rows have their own taps. */
+  function talkTarget(node) {
+    if (!node || typeof node.closest !== 'function') return null;
+    if (node.closest('.crow-dropdown, .header-dropdown')) return null;
+    return node.closest('[data-crow-talk]');
+  }
+  function cancelPress() { if (press) { clearTimeout(press.timer); press = null; } }
+  function fire() {
+    if (!press || press.fired) return;
+    press.fired = true;
+    clearTimeout(press.timer);
+    press.timer = null;
+    if (press.key == null) swallowTap = true;
+    try { if (press.touch && navigator.vibrate) navigator.vibrate(15); } catch (e) {}
+    openTalk(press.key != null);
+  }
+  function startPress(el, info) {
+    cancelPress();
+    press = { el: el, x: info.x || 0, y: info.y || 0, key: info.key == null ? null : info.key, touch: !!info.touch, fired: false, timer: null };
+    press.timer = setTimeout(fire, HOLD_MS);
+  }
+
+  document.addEventListener('pointerdown', function (e) {
+    swallowTap = false;                       // a new gesture: whatever was pending is over
+    var el = talkTarget(e.target);
+    if (!el) return;
+    if (e.button || e.isPrimary === false) return;
+    var touch = !!e.pointerType && e.pointerType !== 'mouse';
+    if (touch) lastTouch = { el: el, at: Date.now() };
+    startPress(el, { x: e.clientX, y: e.clientY, touch: touch });
+  });
+  document.addEventListener('pointermove', function (e) {
+    if (!press || press.key != null || press.fired) return;
+    var dx = (e.clientX || 0) - press.x, dy = (e.clientY || 0) - press.y;
+    if (dx * dx + dy * dy > MOVE_PX * MOVE_PX) cancelPress();
+  });
+  function endPointer() { if (press && press.key == null) cancelPress(); }
+  document.addEventListener('pointerup', endPointer);
+  document.addEventListener('pointercancel', endPointer);
+
+  // Touch browsers have their own long-press (the context menu). On the bird it IS the
+  // long-press: suppress the menu and open now, even if it cancelled the pointer first.
+  document.addEventListener('contextmenu', function (e) {
+    var el = talkTarget(e.target);
+    if (!el) return;
+    var mine = press && press.el === el && press.touch;
+    var recent = lastTouch && lastTouch.el === el && Date.now() - lastTouch.at < 1500;
+    if (!mine && !recent) return;             // a mouse right-click keeps its menu
+    e.preventDefault();
+    lastTouch = null;
+    if (press && press.el === el) { if (!press.fired) fire(); return; }
+    if (!isOpen()) { swallowTap = true; try { if (navigator.vibrate) navigator.vibrate(15); } catch (err) {} openTalk(false); }
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') {
+      if (isOpen()) { closeTalk(); e.stopPropagation(); }
+      return;
+    }
+    if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+    var el = talkTarget(e.target);
+    if (!el) return;
+    // Decided on key-up: a tap opens the tray, a hold opens the overlay. Holding back the
+    // default also stops auto-repeat from clicking the bird over and over.
+    e.preventDefault();
+    if (e.repeat || press) return;
+    startPress(el, { key: e.key });
+  });
+  document.addEventListener('keyup', function (e) {
+    if (!press || press.key == null || e.key !== press.key) return;
+    e.preventDefault();
+    var p = press;
+    cancelPress();
+    if (p.fired) { if (deferredFocus) { deferredFocus = false; focusClose(); } return; }
+    if (p.el && typeof p.el.click === 'function') p.el.click();
+  });
+
+  // B3: the page's media ops for the player bar. S1: this origin and the live frame's window only;
+  // S2: the shared validator drops anything else whole (the bar validates again).
+  window.addEventListener('message', function (e) {
+    if (!e || !e.data || typeof e.data !== 'object' || e.data.crow !== 'media' || e.origin !== location.origin) return;
+    var frame = frameEl();
+    var w = null;
+    try { w = frame ? frame.contentWindow : null; } catch (err) { w = null; }
+    if (!frame || !w || e.source !== w) return;
+    if (!validateFrameMessage(e.data)) return;
+    var p = barPlayer();
+    if (!p) return;
+    if (barWin !== w) {
+      barWin = w;
+      p.kioskAttach(function (obj) { try { w.postMessage(obj, location.origin); } catch (err) {} }, function () {
+        var f = frameEl();
+        try { return !!f && f.contentWindow === w; } catch (err) { return false; }
+      });
+    }
+    p.kioskApply(e.data);
+  });
+  // Android Back (and any Turbo visit) swaps the body, overlay and frame with it, without a close.
+  // turbo:visit fires before the swap for every visit, Back (restore) included; not turbo:before-render, whose
+  // listener count the shell keeps at one (tests/perch-hub-stream-leak.test.js).
+  document.addEventListener('turbo:visit', function () { if (frameEl()) closeTalk(); });
+
+  // The kiosk page asks to close (Escape pressed while focus is inside the frame).
+  window.addEventListener('message', function (e) {
+    if (!e || e.data !== 'crow-talk-close' || e.origin !== location.origin) return;
+    var frame = frameEl();
+    var w = null;
+    try { w = frame ? frame.contentWindow : null; } catch (err) { w = null; }
+    if (!frame || e.source !== w) return;
+    closeTalk();
+  });
+
+  /** For the bird's own click handler: true (once) when this click only ended a long-press. */
+  window.crowTalkSwallowTap = function () { if (!swallowTap) return false; swallowTap = false; return true; };
+  window.openCrowTalk = function (e) { if (e && typeof e.stopPropagation === 'function') e.stopPropagation(); openTalk(false); };
+  window.closeCrowTalk = closeTalk;
+})();
+
+    // Document/window-level listeners must only attach ONCE per document
+    // lifetime. Under Turbo these scripts re-execute on every nav; without
+    // this guard, each nav stacks additional keydown + message listeners.
+    if (!window.__crowLayoutKeyListeners) {
+      window.__crowLayoutKeyListeners = true;
+      // Global Escape-closes-sidebar listener — also only once per document
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') closeSidebar();
+      });
+
+      // Auth-boundary interception: when a Turbo fetch lands on a 401 or
+      // crosses into /dashboard/login (session expired mid-nav), force a
+      // full reload instead of body-swapping a login page into the
+      // authenticated layout's DOM. Prevents orphaned tamagotchi/notif
+      // timers and stale sidebar scripts from continuing to poll an
+      // unauthenticated endpoint. No-op when Turbo isn't loaded.
+      document.addEventListener('turbo:before-fetch-response', function(event) {
+        var fetchResponse = event.detail && event.detail.fetchResponse;
+        if (!fetchResponse || !fetchResponse.response) return;
+        var resp = fetchResponse.response;
+        var url = resp.url || '';
+        if (resp.status === 401 || /\/dashboard\/login(\/|$|\?)/.test(url)) {
+          event.preventDefault();
+          window.location.href = url || '/dashboard/login';
+        }
+      });
+
+      // CSRF double-submit: attach the crow_csrf cookie value as
+      // X-Crow-Csrf on every state-changing same-origin request.
+      //   - Turbo form submissions: turbo:submit-start hook.
+      //   - Turbo.visit / link prefetch: turbo:before-fetch-request hook.
+      //   - Raw window.fetch() from panel code: wrapped below.
+      //   - Classic <form data-turbo="false"> submissions: carry a server-
+      //     rendered <input name="_csrf"> via csrfInput().
+      function readCookie(name) {
+        var cookies = document.cookie.split(';');
+        for (var i = 0; i < cookies.length; i++) {
+          var p = cookies[i].trim().split('=');
+          if (p[0] === name) return decodeURIComponent(p.slice(1).join('='));
+        }
+        return '';
+      }
+      document.addEventListener('turbo:submit-start', function(event) {
+        var token = readCookie('crow_csrf');
+        if (!token) return;
+        var fetchReq = event.detail && event.detail.formSubmission &&
+                       event.detail.formSubmission.fetchRequest;
+        if (fetchReq && fetchReq.headers) {
+          fetchReq.headers['X-Crow-Csrf'] = token;
+        }
+      });
+      document.addEventListener('turbo:before-fetch-request', function(event) {
+        var token = readCookie('crow_csrf');
+        if (!token) return;
+        var method = (event.detail && event.detail.fetchOptions && event.detail.fetchOptions.method || '').toUpperCase();
+        if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS' || method === '') return;
+        var headers = event.detail.fetchOptions.headers;
+        if (headers) {
+          if (typeof headers.set === 'function') headers.set('X-Crow-Csrf', token);
+          else headers['X-Crow-Csrf'] = token;
+        }
+      });
+
+      // Wrap window.fetch so raw fetch() POST/PUT/DELETE/PATCH calls also
+      // carry the CSRF header. Same-origin only (never leak token to
+      // third-party origins). Idempotent: guarded by a flag so repeated
+      // layout inclusions (Turbo page navs) don't double-wrap.
+      if (!window.__crowFetchWrapped) {
+        window.__crowFetchWrapped = true;
+        var origFetch = window.fetch.bind(window);
+        window.fetch = function(input, init) {
+          try {
+            var token = readCookie('crow_csrf');
+            if (!token) return origFetch(input, init);
+            var url = typeof input === 'string' ? input : (input && input.url) || '';
+            var method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+            if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+              return origFetch(input, init);
+            }
+            // Same-origin check: relative URL (starts with '/') OR matches current origin.
+            var sameOrigin = false;
+            if (url.charAt(0) === '/' && !url.startsWith('//')) {
+              sameOrigin = true;
+            } else {
+              try {
+                var u = new URL(url, window.location.href);
+                sameOrigin = (u.origin === window.location.origin);
+              } catch (e) { sameOrigin = false; }
+            }
+            if (!sameOrigin) return origFetch(input, init);
+            var newInit = Object.assign({}, init || {});
+            var hdrs = new Headers(newInit.headers || (typeof input !== 'string' ? input.headers : undefined) || {});
+            if (!hdrs.has('X-Crow-Csrf')) hdrs.set('X-Crow-Csrf', token);
+            newInit.headers = hdrs;
+            return origFetch(input, newInit);
+          } catch (err) {
+            return origFetch(input, init);
+          }
+        };
+      }
+    }
+
+    // Desktop collapse (persisted) and mobile open/close (ephemeral,
+    // unchanged from before) are two independent axes, kept apart entirely
+    // by CSS breakpoint scoping — "(max-width: 768px)" and its exact
+    // complement "not all and (max-width: 768px)", see dashboardCss() — so
+    // they never fight AND no fractional width (768.5px under zoom) can
+    // fall between them. isMobileWidth() below queries the same
+    // "(max-width: 768px)" text, so JS and CSS always agree on which axis a
+    // click belongs to.
+    //
+    // Both the in-sidebar collapse button and the header hamburger call
+    // toggleSidebar(); it does the right thing for each because the two
+    // controls are never usable at the same time. Note what actually
+    // achieves that on the collapse button: NO rule hides it outside the
+    // ≤768px block — it goes off-canvas with the sidebar it lives in
+    // (transform:translateX(-100%)), and it is the sidebar's
+    // visibility:hidden (see dashboardCss()) plus the inert attribute
+    // syncSidebarToggleAria() sets that take it out of the tab order and the
+    // accessibility tree with it. The hamburger, by contrast,
+    // really is display-toggled: it shows once collapsed on desktop, and is
+    // always shown on mobile.
+    function isMobileWidth() {
+      return window.matchMedia('(max-width: 768px)').matches;
+    }
+    // Single source of truth for "is the nav currently exposed", on whichever
+    // axis is live, and the only place that writes it onto the DOM.
+    function syncSidebarToggleAria() {
+      var collapsed = document.body.classList.contains('sidebar-collapsed');
+      var sidebarEl = document.querySelector('.sidebar');
+      var expanded = isMobileWidth()
+        ? !!(sidebarEl && sidebarEl.classList.contains('open'))
+        : !collapsed;
+      var collapseBtn = document.getElementById('sidebar-collapse-btn');
+      var revealBtn = document.getElementById('sidebar-reveal-btn');
+      if (collapseBtn) collapseBtn.setAttribute('aria-expanded', String(expanded));
+      if (revealBtn) revealBtn.setAttribute('aria-expanded', String(expanded));
+      // inert belongs to the same state, and it is not redundant with the
+      // visibility:hidden in dashboardCss(). That rule is deliberately
+      // delayed 0.2s so the slide-out stays visible, and measured in Chrome
+      // the inherited value reaches the nav items a further ~200ms after the
+      // aside itself flips — so for roughly 400ms after a collapse the links
+      // are still focusable. inert applies synchronously and closes that
+      // window; the CSS remains the no-JS baseline and the thing that
+      // actually removes the pixels.
+      if (sidebarEl) {
+        if (expanded) sidebarEl.removeAttribute('inert');
+        else sidebarEl.setAttribute('inert', '');
+      }
+    }
+    function setSidebarCollapsed(collapsed) {
+      document.body.classList.toggle('sidebar-collapsed', collapsed);
+      try { localStorage.setItem('crow-sidebar-collapsed', collapsed ? '1' : '0'); } catch (e) {}
+      syncSidebarToggleAria();
+    }
+    // Either half of the collapse pair strands keyboard focus if nothing
+    // moves it: collapsing leaves focus on #sidebar-collapse-btn, which has
+    // just travelled to x = -49 inside a position:fixed, unscrollable
+    // container (and, since the visibility:hidden fix, is no longer
+    // focusable at all); revealing sets the hamburger to display:none, so
+    // the browser blurs it and activeElement falls back to <body> — the next
+    // Tab restarts from the top of the document. Hand focus to whichever
+    // control is the live one after the change. Called only from
+    // toggleSidebar()'s desktop branch, i.e. only from a real user gesture:
+    // setSidebarCollapsed() itself must stay focus-neutral because the
+    // pre-paint restore and any future programmatic caller go through it.
+    function focusSidebarControl(collapsed) {
+      var next = document.getElementById(collapsed ? 'sidebar-reveal-btn' : 'sidebar-collapse-btn');
+      if (next && typeof next.focus === 'function') next.focus();
+    }
+    function toggleSidebar() {
+      if (isMobileWidth()) {
+        var sidebar = document.querySelector('.sidebar');
+        if (sidebar.classList.contains('open')) {
+          closeSidebar();
+        } else {
+          document.body._scrollY = window.scrollY;
+          sidebar.classList.add('open');
+          document.body.classList.add('sidebar-open');
+          syncSidebarToggleAria();
+        }
+      } else {
+        var nowCollapsed = !document.body.classList.contains('sidebar-collapsed');
+        setSidebarCollapsed(nowCollapsed);
+        focusSidebarControl(nowCollapsed);
+      }
+    }
+    function closeSidebar() {
+      document.querySelector('.sidebar').classList.remove('open');
+      document.body.classList.remove('sidebar-open');
+      if (document.body._scrollY !== undefined) {
+        window.scrollTo(0, document.body._scrollY);
+      }
+      syncSidebarToggleAria();
+    }
+    // Crossing the breakpoint changes which axis is live, and nothing else
+    // recomputes when it does. Two concrete failures without this:
+    //   • Phone, sidebar closed, both controls reporting aria-expanded
+    //     ="false". Rotate to landscape ≥769px: the sidebar is now expanded
+    //     (the ≤768px off-canvas rule no longer applies) and both controls
+    //     still announce "collapsed".
+    //   • Open the sidebar at ≤768px, then widen. The .open class persists,
+    //     but its transform:translateX(0) is inert up here so nothing looks
+    //     wrong; toggleSidebar() has switched to the desktop branch and will
+    //     never clear it. Narrow again and the user lands on a mobile page
+    //     with the sidebar already open and its overlay up.
+    // body.sidebar-collapsed is deliberately NOT cleared going the other
+    // way: it is a persisted desktop preference, no rule below 769px reads
+    // it, and dropping it would silently discard the user's setting on a
+    // rotation. Only the state belonging to the range being LEFT is torn
+    // down. Guarded so Turbo re-executing this script does not stack a new
+    // listener on every navigation (window survives the body swap).
+    if (!window.__crowSidebarBreakpointBound) {
+      window.__crowSidebarBreakpointBound = true;
+      var sidebarBreakpoint = window.matchMedia('(max-width: 768px)');
+      var onSidebarBreakpointChange = function () {
+        if (!isMobileWidth()) {
+          var sb = document.querySelector('.sidebar');
+          if (sb && sb.classList.contains('open')) closeSidebar();
+        }
+        syncSidebarToggleAria();
+      };
+      // addListener is the pre-2019 Safari spelling; still the only one there.
+      if (sidebarBreakpoint.addEventListener) {
+        sidebarBreakpoint.addEventListener('change', onSidebarBreakpointChange);
+      } else if (sidebarBreakpoint.addListener) {
+        sidebarBreakpoint.addListener(onSidebarBreakpointChange);
+      }
+    }
+    syncSidebarToggleAria();
+    // Sidebar nav-item click handlers are attached fresh each nav because
+    // the sidebar DOM is swapped — listeners auto-GC with old DOM.
+    document.querySelectorAll('.sidebar .nav-item').forEach(function(a) {
+      a.addEventListener('click', closeSidebar);
+    });
+    function toggleNavGroup(id) {
+      const group = document.querySelector('.nav-group[data-group-id="' + id + '"]');
+      if (group) {
+        group.classList.toggle('collapsed');
+        fetch('/dashboard/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'action=toggle_nav_group&group_id=' + encodeURIComponent(id)
+        });
+      }
+    }
+    window.__snapScript = 1;
+    // Service Worker registration (PWA) — once per document lifetime
+    if ('serviceWorker' in navigator && !window.__crowSwRegistered) {
+      window.__crowSwRegistered = true;
+      navigator.serviceWorker.register('/sw.js').catch(function() {});
+    }
+
+    // ─── Global toast helper (W3-4) ─── idempotent under Turbo Drive navs
+    if (!window.__crowToastDefined) {
+      window.__crowToastDefined = true;
+      window.crowToast = function(message, opts) {
+        opts = opts || {};
+        var type = opts.type || 'success';
+        var details = opts.details || null;
+        var container = document.getElementById('crow-toasts');
+        if (!container) return;
+        var toast = document.createElement('div');
+        toast.className = 'crow-toast crow-toast--' + type;
+        toast.setAttribute('role', 'status');
+        var body = document.createElement('div');
+        body.className = 'crow-toast__body';
+        var msg = document.createElement('span');
+        msg.className = 'crow-toast__msg';
+        msg.textContent = message;
+        body.appendChild(msg);
+        if (details) {
+          var det = document.createElement('details');
+          det.className = 'crow-toast__details';
+          var sum = document.createElement('summary');
+          sum.textContent = 'Details';
+          det.appendChild(sum);
+          var pre = document.createElement('pre');
+          pre.className = 'crow-toast__details-pre';
+          pre.textContent = details;
+          det.appendChild(pre);
+          body.appendChild(det);
+        }
+        toast.appendChild(body);
+        var closeBtn = document.createElement('button');
+        closeBtn.className = 'crow-toast__close';
+        closeBtn.setAttribute('aria-label', 'Close notification');
+        closeBtn.textContent = '\u00D7';
+        closeBtn.onclick = function() { dismiss(toast); };
+        toast.appendChild(closeBtn);
+        container.appendChild(toast);
+        var ms = type === 'error' ? 8000 : 6000;
+        var timer = setTimeout(function() { dismiss(toast); }, ms);
+        toast.addEventListener('click', function(e) {
+          if (e.target === closeBtn) return;
+          clearTimeout(timer);
+          dismiss(toast);
+        });
+        function dismiss(el) {
+          el.classList.add('crow-toast--out');
+          setTimeout(function() { if (el.parentNode) el.parentNode.removeChild(el); }, 300);
+        }
+      };
+    }
+  </script>
+  <script>
+(function() {
+  if (window.__crowDiagInit) return;
+  window.__crowDiagInit = true;
+  var urlEnabled = /(?:^|[?&])diag=turbo(?:&|$)/.test(location.search);
+  var lsEnabled = false;
+  try { lsEnabled = localStorage.getItem('crowDiagTurbo') === '1'; } catch(e) {}
+  if (urlEnabled) { try { localStorage.setItem('crowDiagTurbo', '1'); lsEnabled = true; } catch(e) {} }
+  var off = /(?:^|[?&])diag=off(?:&|$)/.test(location.search);
+  if (off) { try { localStorage.removeItem('crowDiagTurbo'); } catch(e) {} return; }
+  if (!lsEnabled) return;
+
+  var errors = [];
+  var events = [];
+
+  function stamp() {
+    var d = new Date();
+    return d.getMinutes() + ':' + String(d.getSeconds()).padStart(2,'0') + '.' + String(d.getMilliseconds()).padStart(3,'0');
+  }
+
+  window.addEventListener('error', function(e) {
+    errors.push(stamp() + ' ' + (e.message||'?') + ' @ ' + (e.filename||'?') + ':' + (e.lineno||'?'));
+    if (errors.length > 20) errors.shift();
+    render();
+  });
+  window.addEventListener('unhandledrejection', function(e) {
+    errors.push(stamp() + ' unhandled: ' + (e.reason && (e.reason.message||e.reason) || 'unknown'));
+    if (errors.length > 20) errors.shift();
+    render();
+  });
+
+  ['turbo:load','turbo:before-visit','turbo:visit','turbo:before-render','turbo:render','turbo:before-fetch-request','turbo:before-fetch-response'].forEach(function(evt) {
+    document.addEventListener(evt, function(e) {
+      var raw = e.detail && (e.detail.url || (e.detail.fetchResponse && e.detail.fetchResponse.response && e.detail.fetchResponse.response.url));
+      // e.detail.url is a URL object on turbo:before-fetch-request; coerce to
+      // string before .replace() to avoid "url.replace is not a function".
+      var url = raw ? String(raw) : '';
+      var shortUrl = url ? url.replace(/^https?:\/\/[^/]+/, '') : '';
+      events.push(stamp() + ' ' + evt + (shortUrl ? ' ' + shortUrl : ''));
+      if (events.length > 15) events.shift();
+      render();
+    });
+  });
+
+  var box;
+  function ensureBox() {
+    if (box) return box;
+    box = document.createElement('div');
+    box.id = 'crow-diag-turbo';
+    box.style.cssText = 'position:fixed;bottom:4.5rem;right:0.5rem;width:22em;max-height:60vh;overflow:auto;background:rgba(10,12,18,0.92);color:#d4e3ff;font:11px/1.35 JetBrains Mono,monospace;padding:0.5rem 0.6rem;border:1px solid rgba(127,200,255,0.4);border-radius:4px;z-index:99999;box-shadow:0 4px 14px rgba(0,0,0,0.6);';
+    document.body.appendChild(box);
+    return box;
+  }
+
+  function render() {
+    if (!document.body) return;
+    var el = ensureBox();
+    var lines = [];
+    lines.push('turbo: ' + (typeof window.Turbo === 'undefined' ? 'NOT LOADED' : (window.Turbo.session ? 'active' : 'loaded')));
+    lines.push('crowPlayer: ' + (window.crowPlayer ? (typeof window.crowPlayer.queue === 'function' ? 'ok' : 'present-but-partial') : 'MISSING'));
+    var audio = document.getElementById('crow-audio');
+    lines.push('audio: ' + (audio ? 'present (init=' + (audio.dataset.crowPlayerInitialized||'?') + ', src=' + (audio.src ? audio.src.slice(-40) : '(empty)') + ')' : 'MISSING'));
+    var root = document.getElementById('music-root');
+    if (root) lines.push('music-root: init=' + (root.dataset.initialized||'?'));
+    if (errors.length) { lines.push(''); lines.push('errors:'); errors.slice().reverse().forEach(function(x){ lines.push('  '+x); }); }
+    if (events.length) { lines.push(''); lines.push('events:'); events.slice().reverse().forEach(function(x){ lines.push('  '+x); }); }
+    lines.push('');
+    lines.push('hide: add ?diag=off to URL');
+    el.textContent = lines.join('\n');
+    el.style.whiteSpace = 'pre-wrap';
+  }
+
+  // Render once on boot, again after DOMContentLoaded, again after turbo:load.
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', render);
+  } else {
+    render();
+  }
+  document.addEventListener('turbo:load', render);
+  // Re-render periodically so player state updates stay visible.
+  setInterval(render, 2000);
+})();
+</script>
+  <div id="crow-toasts" class="crow-toasts" aria-live="polite" aria-atomic="false" data-turbo-permanent></div>
+</body>
+</html>

@@ -89,6 +89,9 @@ export function perchHubCss() {
    longer has to clear a 26px wordmark, and margin-left:auto keeps the link
    on the right now that space-between has only one child to distribute. */
 #perch-hub-root header{padding:4px 0 16px;display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;flex-shrink:0}
+/* Shell P2: in the new shell the tabs replace the Board link, so html.js ships
+   this header hidden; display:flex above would otherwise beat [hidden]. */
+#perch-hub-root header[hidden]{display:none}
 #perch-hub-root .machines{display:flex;gap:6px;font-size:13px;margin-left:auto}
 #perch-hub-root .machines a{text-decoration:none;color:var(--dim);padding:5px 12px;border-radius:999px;border:1px solid var(--line)}
 #perch-hub-root a:focus-visible,#perch-hub-root button:focus-visible,#perch-hub-root input:focus-visible,#perch-hub-root textarea:focus-visible{outline:2px solid var(--teal);outline-offset:2px}
@@ -388,6 +391,8 @@ body[data-view="chat"] #perch-chat{display:flex;flex-direction:column;flex:1;min
    ~3000px below the fold. Keep both rules; neither is dead. */
 #perch-composer{position:sticky;bottom:0;background:var(--card);border-top:1px solid var(--line);padding:10px 0;display:grid;gap:8px}
 #perch-composer .send-row{display:flex;gap:8px}
+body.shell #perch-draft-note{font-size:12.5px;color:var(--dim)}
+body.shell #perch-draft-note[hidden]{display:none}
 /* The working strip (html.js's #perch-working): a turning gear + one word,
    sitting between the ask pane and the composer as a non-shrinking flex
    child — it must never squeeze the transcript or push Send off screen, and
@@ -432,6 +437,12 @@ body[data-view="chat"] #perch-chat{display:flex;flex-direction:column;flex:1;min
    the split view (desktop) are untouched. */
 @media (max-width:${PERCH_SPLIT_MIN_WIDTH - 1}px){
   body[data-view="chat"] #perch-hub-root > header{display:none}
+  /* The new shell: an open chat takes the whole height; the back button
+     returns to the list, where the tab bar is back. */
+  body.shell[data-view="chat"] .shell-tabs{display:none}
+  body.shell[data-view="chat"]{--shell-tabs-h:0px}
+  /* The shell keeps its 16px side gutter in the compact chat header too. */
+  body.shell[data-view="chat"]:has(#perch-chat) .content-header{padding-left:16px;padding-right:16px}
   body[data-view="chat"] #perch-hub-root .perch-head{flex-wrap:nowrap;justify-content:flex-start;gap:10px}
   body[data-view="chat"] #perch-hub-root #perch-back{flex:none;align-self:center;min-height:44px;padding:6px 12px;font-size:13px}
   body[data-view="chat"] #perch-hub-root #perch-session-meta{display:none}

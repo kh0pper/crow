@@ -517,8 +517,10 @@ test("css (queue item 13): the compaction is chat-view-only and keeps the safe-a
   const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js");
   const css = typeof perchHubCss === "function" ? perchHubCss("en") : String(perchHubCss);
   const block = css.slice(css.indexOf("Queue item 13"));
-  for (const rule of block.split("\n").filter((l) => /^\s+body/.test(l)).slice(0, 8)) {
-    assert.match(rule, /^\s+body\[data-view="chat"\]/, "every compaction rule is scoped to the chat view: " + rule.trim());
+  // body.shell[data-view="chat"] (the new shell's tab bar, hidden in an
+  // open chat) is chat-view-scoped too.
+  for (const rule of block.split("\n").filter((l) => /^\s+body/.test(l)).slice(0, 10)) {
+    assert.match(rule, /^\s+body(\.shell)?\[data-view="chat"\]/, "every compaction rule is scoped to the chat view: " + rule.trim());
   }
   assert.match(block, /\.content-header\{[^}]*padding-top:calc\(env\(safe-area-inset-top, 0px\) \+ 6px\)/, "the trimmed title bar keeps the notch inset");
 });

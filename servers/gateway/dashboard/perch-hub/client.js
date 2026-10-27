@@ -340,21 +340,33 @@ export function perchHubJs(lang = "en") {
 
   /* One row per live session, plus one per attached bot with none. A bot with
      no perch gateway record is omitted: POST /bots/<id>/interactive 403s. */
-  function listRows(roost){
+  /* Shell P2: scope is the Chat tab's data-scope ("all", "unassigned" or a
+     project id); a session outside it is not a row here. null (classic Perch)
+     and "all" keep every session. A bot whose sessions are all elsewhere
+     keeps its idle row, so it stays startable from this view. */
+  function listRows(roost,scope){
     var birds=(roost&&roost.birds)||[];
     var out=[];
     birds.forEach(function(b){
       if(!b||!b.perch_attached) return;
       var ss=b.sessions||[];
       if(!ss.length){ out.push({botId:b.id,botName:b.name,sessionId:null,state:'idle',cardId:null,pendingUi:false}); return; }
-      var live=ss.filter(function(x){ return x&&x.state!=='stopped'; });
-      if(!live.length){ out.push({botId:b.id,botName:b.name,sessionId:null,state:'idle',cardId:null,pendingUi:false}); return; }
+      var running=ss.filter(function(x){ return x&&x.state!=='stopped'; });
+      var live=running.filter(function(x){
+        if(scope==null||scope==='all') return true;
+        var p=x.projectId==null?null:Number(x.projectId);
+        return scope==='unassigned'?p===null:p===Number(scope);
+      });
+      /* A bot whose live sessions are all in other projects is NOT idle: its
+         startable row carries no state rather than a false "idle". */
+      if(!live.length){ out.push({botId:b.id,botName:b.name,sessionId:null,state:running.length?'':'idle',cardId:null,pendingUi:false}); return; }
       live.forEach(function(s){
         out.push({botId:b.id,botName:b.name,sessionId:s.sessionId,state:s.state,
                   cardId:s.cardId==null?null:s.cardId,pendingUi:!!s.pendingUi,
                   /* /roost carries the operator's name alongside the id
                      (routes/perch.js) — null when there isn't one. */
-                  label:(s.label==null||s.label==='')?null:String(s.label)});
+                  label:(s.label==null||s.label==='')?null:String(s.label),
+                  projectId:s.projectId==null?null:Number(s.projectId)});
       });
     });
     /* Blocked-on-you first: those are the only rows that need you right now. */
@@ -387,6 +399,20 @@ export function perchHubJs(lang = "en") {
   }
 
   /* tJs escapes \\, ', \` and \${, so these interpolate safely. */
+  /* Shell P2: the Chat tab's scope, written by html.js only in the new shell.
+     null is classic Perch: no filter, no project on a spawn. */
+  var SCOPE=(function(){
+    var r=el('perch-hub-root');
+    var v=(r&&r.getAttribute)?r.getAttribute('data-scope'):null;
+    return (v==='all'||v==='unassigned'||/^[1-9][0-9]*$/.test(String(v)))?String(v):null;
+  })();
+  /* What a new session in this view is filed under: the project, "unassigned"
+     in the Unassigned view, and nothing (the bot's own project) otherwise. */
+  function scopeProject(){
+    if(SCOPE==='unassigned') return 'unassigned';
+    if(SCOPE&&/^[1-9][0-9]*$/.test(SCOPE)) return Number(SCOPE);
+    return null;
+  }
   var NO_SESSIONS='${tJs("perch.noSessions", lang)}';
   var WAITING_ON_YOU='${tJs("perch.waitingOnYou", lang)}';
   var OPEN_LABEL='${tJs("perch.open", lang)}';
@@ -400,6 +426,7 @@ export function perchHubJs(lang = "en") {
      are safe inside single-quoted literals. */
   var SESSION_GONE='${tJs("perch.sessionGone", lang)}';
   var SEND_FAILED='${tJs("perch.sendFailed", lang)}';
+  var DRAFT_MAYBE_SENT='${tJs("perch.draftMaybeSent", lang)}';
   var BOT_START_FAILED='${tJs("perch.botStartFailed", lang)}';
   var TURN_FAILED='${tJs("perch.turnFailed", lang)}';
   var FILE_QUEUED='${tJs("perch.fileQueued", lang)}';
@@ -1209,7 +1236,10 @@ export function perchHubJs(lang = "en") {
     var mySid=current.sid;                  /* identity guard: a spawn resolving after the
                                                 operator has opened another session must not
                                                 yank them out of it */
-    perchApi('POST','/bots/'+encodeURIComponent(botId)+'/interactive',cwd?{cwd:cwd}:undefined).then(function(r){
+    var spawnBody={}, spawnProject=scopeProject(), hasBody=false;
+    if(cwd){ spawnBody.cwd=cwd; hasBody=true; }
+    if(spawnProject!==null){ spawnBody.project_id=spawnProject; hasBody=true; }
+    perchApi('POST','/bots/'+encodeURIComponent(botId)+'/interactive',hasBody?spawnBody:undefined).then(function(r){
       if(current.sid!==mySid) return;
       /* setLaunchNote, not showListNote: a FAILED SPAWN is a fact about the
          launcher, and showListNote clears #perch-list-body — which would wipe
@@ -1258,7 +1288,7 @@ export function perchHubJs(lang = "en") {
 
   var listTimer=null;
   function loadList(){
-    return perchApi('GET','/roost').then(function(r){
+    return perchApi('GET','/roost'+(SCOPE?'?scope='+encodeURIComponent(SCOPE):'')).then(function(r){
       /* One payload, two renders: the rows AND the launcher's bot roster.
          Deriving the launcher from the same /roost response is what keeps
          this to a single request per poll. */
@@ -1266,8 +1296,8 @@ export function perchHubJs(lang = "en") {
         renderLauncher(spawnableBots(r.j));
         /* QW2: never redraw the rows under an open ⋯ menu — the operator is
            mid-choice. Park the payload; closing the menu draws it. */
-        if(openRowMenu()){ deferredList={rows:listRows(r.j),archived:(r.j.archived||[])}; return; }
-        renderList(listRows(r.j),(r.j.archived||[]));
+        if(openRowMenu()){ deferredList={rows:listRows(r.j,SCOPE),archived:(r.j.archived||[])}; return; }
+        renderList(listRows(r.j,SCOPE),(r.j.archived||[]));
         return;
       }
       /* A failed /roost is NOT an empty roost, and the old else branch said
@@ -1460,6 +1490,7 @@ export function perchHubJs(lang = "en") {
 
   function openSession(sid){
     if(current.sid===sid) return;          /* a re-entered hash is a no-op */
+    draftSave();                            /* the session being left keeps its unsent words */
     closeStream();
     current.sid=sid;
     current.botName=null;                   /* the previous bot's name must not label this one */
@@ -1476,6 +1507,7 @@ export function perchHubJs(lang = "en") {
     resetPhoneCards();
     resetArtifactCards();
     resetControls();                        /* the PREVIOUS session's picker must not bleed in */
+    draftRestore(sid);                      /* nor its composer text: this session's own draft, or empty */
     var known=rowIndex[sid];
     if(known){ showHeader(known.botId,known.botName); afterHeader(mySid,known.botId); return; }
     /* A cold deep link does not know the bot; ask /roost rather than guess. */
@@ -1497,6 +1529,7 @@ export function perchHubJs(lang = "en") {
   function closeSession(){
     dictationCancel();           /* dictation.js: a hidden composer must never keep recording or upload */
     cancelHistRetry(); histGen++;   /* 23a: a load or retry for the session being left must not render */
+    draftSave();                 /* Shell P2: its unsent words wait for it */
     closeStream(); current.sid=null;
     setTurnInFlight(false);      /* the list has no Steer/Stop to show */
     setView('list'); startListPolling(); loadList();
@@ -2447,6 +2480,94 @@ export function perchHubJs(lang = "en") {
     var w=el('perch-working'); if(w) w.hidden=!turnInFlight;
   }
 
+  /* Shell P2: an unsent composer draft survives a reload, a Turbo visit to
+     another tab and a switch to another session. Kept per session in
+     sessionStorage (this tab only), saved 300 ms after typing stops and at
+     once on turbo:before-visit and pagehide, restored when that session
+     opens, and cleared when a send succeeds. Storage that throws (blocked,
+     private mode) just means no drafts: the composer works as before. */
+  var DRAFT_PREFIX='perch-draft:';
+  /* The text of a send that has gone out and not yet been answered, per
+     session. A reload mid-send never sees the answer, so the restored draft
+     can be words the bot already has: it is restored anyway (never dropped
+     silently) with a note. Cleared on success and on a refusal; a lost
+     connection (status 0) is ambiguous, so it stays. */
+  var INFLIGHT_PREFIX='perch-inflight:';
+  var sendingNow={};                      /* sid -> true while THIS page awaits that send's answer */
+  var draftTimer=null;
+  function draftStore(){ try{ return window.sessionStorage||null; }catch(e){ return null; } }
+  function draftCancel(){ if(draftTimer){ clearTimeout(draftTimer); draftTimer=null; } }
+  function inflightGet(store,sid){ try{ return store.getItem(INFLIGHT_PREFIX+sid); }catch(e){ return null; } }
+  function inflightMark(sid,text){
+    var store=draftStore(); if(!store||!sid) return;
+    try{ store.setItem(INFLIGHT_PREFIX+sid,String(text)); }catch(e){}
+  }
+  function inflightClear(sid){
+    var store=draftStore(); if(!store||!sid) return;
+    try{ store.removeItem(INFLIGHT_PREFIX+sid); }catch(e){}
+  }
+  function draftNote(show){ var n=el('perch-draft-note'); if(n){ n.hidden=!show; n.textContent=show?DRAFT_MAYBE_SENT:''; } }
+  function draftSave(){
+    draftCancel();
+    var sid=current.sid, input=el('perch-input'), store=draftStore();
+    if(!sid||!input||!store) return;
+    var v=String(input.value==null?'':input.value);
+    try{
+      if(v.trim()) store.setItem(DRAFT_PREFIX+sid,v);
+      else {
+        /* An empty composer during a send is not an empty draft: leaving the
+           page now must keep the words that are still in flight. */
+        var fl=inflightGet(store,sid);
+        if(fl&&fl.trim()) store.setItem(DRAFT_PREFIX+sid,fl); else store.removeItem(DRAFT_PREFIX+sid);
+      }
+    }catch(e){}
+  }
+  function draftSaveSoon(){
+    draftCancel();
+    draftTimer=setTimeout(function(){ draftTimer=null; if(live()) draftSave(); },300);
+  }
+  function draftRestore(sid){
+    draftCancel();
+    var input=el('perch-input'), store=draftStore();
+    draftNote(false);
+    if(!input||!store) return;              /* no storage: leave the composer exactly as it was */
+    var v=null;
+    try{ v=store.getItem(DRAFT_PREFIX+sid); }catch(e){ return; }
+    input.value=v==null?'':String(v);
+    input.style.height='auto';
+    if(v) input.style.height=Math.min(input.scrollHeight||72,120)+'px';
+    /* A marker this page is not itself waiting on belongs to a send that was
+       cut off by a reload: if the draft is that very text, say so. */
+    if(!sendingNow[sid]){
+      var fl=inflightGet(store,sid);
+      if(fl!=null){
+        if(v!=null&&String(v)===fl) draftNote(true);
+        inflightClear(sid);
+      }
+    }
+  }
+  /* Clears only the draft that was sent: a late success must not delete
+     words typed (and saved) after the send went out. */
+  function draftClear(sid,sentText){
+    var store=draftStore(); if(!store||!sid) return;
+    try{ if(store.getItem(DRAFT_PREFIX+sid)===String(sentText)) store.removeItem(DRAFT_PREFIX+sid); }catch(e){}
+  }
+  /* A send that did not land (any non-2xx, or the network failing) gives
+     the words back: into the composer when that session is still open and
+     the composer is empty, else into its stored draft if it has none. */
+  function draftKeepUnsent(sid,text){
+    var input=el('perch-input');
+    if(current.sid===sid&&input){
+      if(!String(input.value==null?'':input.value).trim()) input.value=text;
+      draftSave();
+      return;
+    }
+    var store=draftStore(); if(!store||!sid) return;
+    try{ if(store.getItem(DRAFT_PREFIX+sid)==null) store.setItem(DRAFT_PREFIX+sid,String(text)); }catch(e){}
+  }
+  bindOnce(document,'turbo:before-visit','draftBeforeVisit',function(){ if(live()) draftSave(); });
+  bindOnce(window,'pagehide','draftPagehide',function(){ if(live()) draftSave(); });
+
   function send(){
     var input=el('perch-input'); if(!input) return;
     var text=input.value;
@@ -2456,6 +2577,14 @@ export function perchHubJs(lang = "en") {
     /* 23a: an echo drawn before the history lands is settled against it. */
     if(!histSettled){ var trE=el('perch-transcript'); if(trE&&trE.lastElementChild) seamEchoes.push({text:text,row:trE.lastElementChild,sentAt:Date.now()}); }
     input.value='';
+    draftCancel();                         /* Shell P2: the draft stays stored until the send succeeds */
+    draftNote(false);
+    /* Shell P2: the words are in flight. Stored as the draft too, so a reload
+       before the answer restores them (with a note) instead of losing them. */
+    sendingNow[mySid]=true;
+    inflightMark(mySid,text);
+    var dst=draftStore();
+    if(dst){ try{ dst.setItem(DRAFT_PREFIX+mySid,String(text)); }catch(e){} }
     input.style.height='auto';             /* Wave 1: the auto-grow collapses back after a send */
     var body={message:text};
     hideCmdMenu();                         /* Wave 3: a sent command closes its own menu */
@@ -2483,6 +2612,11 @@ export function perchHubJs(lang = "en") {
          is how replayUnsent finds its place again. Counted before the
          identity guard: it is this session's bookkeeping, viewed or not. */
       if(r.ok&&!rec.failed){ rec.counted=true; bumpUnsentAfter(mySid,1); }
+      /* Shell P2: delivered, so it is no longer a draft; refused or lost,
+         the words come back so a reload cannot drop them. */
+      delete sendingNow[mySid];
+      if(r.ok||r.status>0) inflightClear(mySid);   /* answered; a lost connection (0) stays ambiguous */
+      if(r.ok) draftClear(mySid,text); else draftKeepUnsent(mySid,text);
       if(current.sid!==mySid) return;
       var code=r.j&&r.j.error;
       /* Only a REAL turn race means "a turn is running" — every other 409
@@ -2886,6 +3020,7 @@ export function perchHubJs(lang = "en") {
       this.style.height='auto';
       this.style.height=Math.min(this.scrollHeight||72,120)+'px';
       maybeCmdMenu(this.value);            /* Wave 3: '/' opens the command menu */
+      draftSaveSoon();                     /* Shell P2: the unsent draft survives a reload */
     };
   }
   el('perch-back').onclick=function(){ location.hash=''; };
