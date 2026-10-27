@@ -448,6 +448,21 @@ describe("U8: _isPeerTrusted and fence consumption in the apply loop", () => {
     } finally { s.done(); }
   });
 
+  test("a failed applied-seq read applies nothing (the fence never fails open)", async () => {
+    const s = await setup("revoked", 1);
+    try {
+      await reactivateOnRepair(s.xdb, "u8-peer", { authTokenHash: "aa".repeat(32), localInstanceId: LOCAL });
+      const real = s.xdb;
+      s.mgr.db = { execute: async (st) => { if (/SELECT last_applied_seq_per_peer FROM sync_state/.test(st.sql)) throw new Error("SQLITE_BUSY: database is locked"); return real.execute(st); }, batch: (...a) => real.batch(...a) };
+      const feed = stubFeed(5);
+      const warn = console.warn; console.warn = () => {};
+      try { await s.mgr._processNewEntriesInner("u8-peer", feed); } finally { console.warn = warn; }
+      assert.equal(feed.got.length, 0, "nothing applied while the record cannot be read");
+      s.mgr.db = real;
+      assert.equal((await appliedBlob(real))["u8-peer"].ff, 1, "the fence is still there");
+    } finally { s.done(); }
+  });
+
   test("a fence whose remote-length update fails stays, and nothing applies", async () => {
     const s = await setup("revoked", 1);
     try {
@@ -858,5 +873,58 @@ describe("the fence covers every move into trust; pause is not fenced", () => {
       assert.equal((await getInstance(xdb, "held")).status, "paused", "a re-pair does not lift a pause");
       assert.equal(blob.live, undefined, "a live trusted re-pair (key rotation) is not fenced");
     } finally { try { xdb.close(); } catch {} rmSync(d, { recursive: true, force: true }); }
+  });
+});
+
+describe("store lock: no wedge", () => {
+  const { utimesSync } = awaitFs();
+  function awaitFs() { return { utimesSync: (p, a, m) => import("node:fs").then((f) => f.utimesSync(p, a, m)) }; }
+  test("an empty (unparsable) lockfile older than 30 s is broken", async () => {
+    const d = mkdtempSync(join(tmpdir(), "pt-lock-"));
+    const path = join(d, "peer-tokens.json");
+    try {
+      writeFileSync(path + ".lock", "");
+      const old = (Date.now() - 31_000) / 1000;
+      await utimesSync(path + ".lock", old, old);
+      await runChild(`import { setPeerCreds } from ${JSON.stringify(PEER_CREDS_URL)}; setPeerCreds("p", { auth_token: "a", signing_key: "b" });`, { CROW_PEER_TOKENS_PATH: path });
+      assert.ok(JSON.parse(readFileSync(path, "utf8")).p);
+    } finally { rmSync(d, { recursive: true, force: true }); }
+  });
+
+  test("a lock from another boot (pid reused) older than 30 s is broken", async () => {
+    const d = mkdtempSync(join(tmpdir(), "pt-lock-"));
+    const path = join(d, "peer-tokens.json");
+    try {
+      writeFileSync(path + ".lock", JSON.stringify({ pid: process.pid, ts: Date.now() - 31_000, boot: "some-other-boot", nonce: "x" }));
+      await runChild(`import { setPeerCreds } from ${JSON.stringify(PEER_CREDS_URL)}; setPeerCreds("p", { auth_token: "a", signing_key: "b" });`, { CROW_PEER_TOKENS_PATH: path });
+      assert.ok(JSON.parse(readFileSync(path, "utf8")).p);
+    } finally { rmSync(d, { recursive: true, force: true }); }
+  });
+
+  test("the reconcile takes the store lock only when a revoked peer still has an entry", async () => {
+    await withHome(async ({ xdb, store }) => {
+      await addPeerRow(xdb, "gone", { status: "revoked" });
+      writeFileSync(store, JSON.stringify({ other: { auth_token: "a", signing_key: "k" } }), { mode: 0o600 });
+      writeFileSync(store + ".lock", JSON.stringify({ pid: process.pid, ts: Date.now(), nonce: "held" }));
+      const t0 = Date.now();
+      const r = await reconcilePeerCreds(xdb);
+      assert.deepEqual(r.deleted, []);
+      assert.ok(Date.now() - t0 < 1_000, "did not wait on the held lock");
+    });
+  });
+});
+
+describe("sweeper: a failed reconcile still tears down", () => {
+  test("sweepOnce runs the teardown even when the reconcile throws", async () => {
+    const { sweepOnce } = await import("../servers/gateway/peer-trust-sweeper.js");
+    await withHome(async ({ xdb, store }) => {
+      await addPeerRow(xdb, "gone", { status: "revoked" });
+      writeFileSync(store, JSON.stringify({ gone: { auth_token: "a", signing_key: "k" } }), { mode: 0o644 }); // loose mode: the locked write refuses
+      const torn = [];
+      const mgr = { inFeeds: new Map([["gone", {}]]), outFeeds: new Map(), hasActiveStream: () => false, teardownRevokedPeer: async (id) => torn.push(id) };
+      const warn = console.warn; console.warn = () => {};
+      try { await sweepOnce(xdb, { instanceSyncManager: mgr, localInstanceId: "self" }); } finally { console.warn = warn; }
+      assert.deepEqual(torn, ["gone"]);
+    });
   });
 });

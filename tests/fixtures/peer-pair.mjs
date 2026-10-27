@@ -306,7 +306,7 @@ export async function pairInto(enroller, peer, extraArgs = []) {
   return r;
 }
 
-/** Boot two instances (same seed: the raven shape; separate seeds: r4/household) and pair B into A. */
+/** Boot two instances (one shared seed: sibling instances of one user; separate seeds: a co-hosted or household instance) and pair B into A. */
 export async function bootPair({ sameIdentity }) {
   const A = await new Instance("a", "100.64.20.11").init();
   const B = await new Instance("b", "100.64.20.12").init({ seedFrom: sameIdentity ? A : null });

@@ -125,13 +125,37 @@ function pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (err) { return err.code === "EPERM"; }
 }
 
+// This boot's id: a lock written by a pid from an EARLIER boot is stale even
+// if that pid number is alive again now (pid reuse after a reboot/OOM).
+let _bootId;
+function bootId() {
+  if (_bootId === undefined) {
+    try { _bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim() || null; } catch { _bootId = null; }
+  }
+  return _bootId;
+}
+
 function readLock(lockPath) {
   try { return JSON.parse(readFileSync(lockPath, "utf-8")); } catch { return null; }
 }
 
+function lockAgeMs(lockPath, holder) {
+  const ts = Number(holder?.ts);
+  if (Number.isFinite(ts)) return Date.now() - ts;
+  try { return Date.now() - statSync(lockPath).mtimeMs; } catch { return 0; }
+}
+
+/** A lock older than LOCK_STALE_MS whose holder is gone: dead pid, another boot, or unreadable content. */
+function isStale(lockPath, holder) {
+  if (lockAgeMs(lockPath, holder) <= LOCK_STALE_MS) return false;
+  if (!holder || typeof holder !== "object") return true; // empty or torn write
+  if (holder.boot && bootId() && holder.boot !== bootId()) return true;
+  return !pidAlive(Number(holder.pid));
+}
+
 function acquireStoreLock(lockPath) {
   const started = Date.now();
-  const me = { pid: process.pid, ts: Date.now(), nonce: randomBytes(6).toString("hex") };
+  const me = { pid: process.pid, ts: Date.now(), boot: bootId(), nonce: randomBytes(6).toString("hex") };
   let holder = null;
   for (;;) {
     try {
@@ -146,13 +170,21 @@ function acquireStoreLock(lockPath) {
       if (err.code !== "EEXIST") throw err;
     }
     holder = readLock(lockPath);
-    if (holder && Date.now() - Number(holder.ts) > LOCK_STALE_MS && !pidAlive(Number(holder.pid))) {
-      console.warn(`[peer-credentials] breaking a stale store lock (pid ${holder.pid} is gone, held ${Date.now() - Number(holder.ts)} ms)`);
-      // Only unlink the lock we judged stale (a racing breaker may have replaced it).
-      const again = readLock(lockPath);
-      if (again && again.nonce === holder.nonce && again.pid === holder.pid) {
-        try { unlinkSync(lockPath); } catch { /* someone else broke it */ }
-      }
+    if (isStale(lockPath, holder)) {
+      console.warn(`[peer-credentials] breaking a stale store lock (holder pid ${holder?.pid ?? "?"}, ${lockAgeMs(lockPath, holder)} ms old)`);
+      // Break by renaming to a unique name, then check it was the lock we
+      // judged: a racing breaker may already have replaced it with a live one.
+      const aside = `${lockPath}.${process.pid}.${randomBytes(4).toString("hex")}.stale`;
+      try {
+        renameSync(lockPath, aside);
+        const moved = readLock(aside);
+        const same = (moved === null && holder === null) || (moved && holder && moved.nonce === holder.nonce && moved.pid === holder.pid);
+        if (!same && !isStale(aside, moved)) {
+          // We moved a live holder's lock: put it back if the slot is still free.
+          try { const fd = openSync(lockPath, "wx", 0o600); try { writeSync(fd, JSON.stringify(moved)); } finally { closeSync(fd); } } catch { /* taken */ }
+        }
+        try { unlinkSync(aside); } catch { /* gone */ }
+      } catch { /* someone else broke it */ }
       continue;
     }
     if (Date.now() - started > LOCK_WAIT_MS) {

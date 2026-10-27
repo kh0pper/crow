@@ -2483,15 +2483,25 @@ export class InstanceSyncManager {
     // and a DB error fails closed (the next run retries).
     if (!(await this._isPeerTrusted(remoteInstanceId))) return;
     const feedKeyHex = feed.key ? Buffer.from(feed.key).toString("hex") : null;
-    // Re-pair fence (PT-1): the first run after a revoked→active re-pair
-    // fast-forwards past everything the peer appended before re-trust.
-    const fenceRec = await this._appliedSeqRecord(remoteInstanceId);
-    if (fenceRec && typeof fenceRec === "object" && Number(fenceRec.ff) === 1) {
+    // The applied-seq record, read STRICTLY (PT-1): the lenient reader turns
+    // a DB or JSON error into "no record", which would skip the re-pair fence
+    // and replay the feed from 0. On an error nothing is applied or consumed.
+    let rec;
+    try {
+      rec = await this._appliedSeqRecordStrict(remoteInstanceId);
+    } catch (err) {
+      console.warn(`[instance-sync] applied-seq read for ${remoteInstanceId.slice(0, 12)} failed, applying nothing: ${err.message}`);
+      return;
+    }
+    // Re-pair fence (PT-1): the first run after a move into trust
+    // fast-forwards past everything the peer appended before it.
+    if (rec && typeof rec === "object" && Number(rec.ff) === 1) {
       await this._consumeRepairFence(remoteInstanceId, feed, feedKeyHex);
       return;
     }
-    // Re-read lastSeq inside the lock — the prior chained run may have advanced it.
-    const lastSeq = await this._getLastAppliedSeq(remoteInstanceId, feed);
+    // lastSeq from that same read (inside the per-peer lock, so the prior
+    // chained run's advance is visible). Same key-gating as _getLastAppliedSeq.
+    const lastSeq = (rec && typeof rec === "object" && rec.k === feedKeyHex) ? (Number(rec.s) || 0) : 0;
 
     for (let seq = lastSeq; seq < feed.length; seq++) {
       try {
@@ -3866,6 +3876,17 @@ export class InstanceSyncManager {
       }
     } catch {}
     return null;
+  }
+
+  /** As _appliedSeqRecord, but a DB or JSON error throws instead of reading as "no record". */
+  async _appliedSeqRecordStrict(remoteInstanceId) {
+    const { rows } = await this.db.execute({
+      sql: "SELECT last_applied_seq_per_peer FROM sync_state WHERE instance_id = ?",
+      args: [this.localInstanceId],
+    });
+    if (!rows.length || !rows[0].last_applied_seq_per_peer) return null;
+    const rec = JSON.parse(rows[0].last_applied_seq_per_peer)[remoteInstanceId];
+    return rec === undefined ? null : rec;
   }
 
   /**

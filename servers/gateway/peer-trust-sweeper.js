@@ -76,7 +76,10 @@ export async function reconcilePeerCreds(db, { localInstanceId = null } = {}) {
 
   const deleted = [];
   const keptSameSecond = [];
-  if (revoked.length) {
+  // Lock the store only when a revoked peer still has an entry (an unlocked
+  // read first): the common case takes no lock and writes nothing.
+  const before = loadPeerCreds();
+  if (revoked.some((r) => Object.prototype.hasOwnProperty.call(before, r.id))) {
     updatePeerCreds((all) => {
       let changed = false;
       for (const r of revoked) {
@@ -154,6 +157,23 @@ export async function teardownUntrustedPeers(db, { instanceSyncManager = null, l
 }
 
 /**
+ * One sweep: the reconcile and the teardown, each failing on its own (a
+ * store problem must never stop a revoked peer's sockets from closing).
+ */
+export async function sweepOnce(db, { instanceSyncManager = null, localInstanceId = null } = {}) {
+  try {
+    await reconcilePeerCreds(db, { localInstanceId });
+  } catch (err) {
+    console.warn(`[peer-trust] credential reconcile failed: ${err.message}`);
+  }
+  try {
+    await teardownUntrustedPeers(db, { instanceSyncManager, localInstanceId });
+  } catch (err) {
+    console.warn(`[peer-trust] teardown sweep failed: ${err.message}`);
+  }
+}
+
+/**
  * Start the sweeper. Runs the boot reconcile (with the one-time snapshot)
  * first, then every `intervalMs` and on every row_updated bus event.
  * @returns {{ stop(): void, runNow(): Promise<void> }}
@@ -161,14 +181,7 @@ export async function teardownUntrustedPeers(db, { instanceSyncManager = null, l
 export function startPeerTrustSweeper({ db, getInstanceSyncManager = () => null, localInstanceId = null, intervalMs = SWEEP_INTERVAL_MS } = {}) {
   let running = null;
   let again = false;
-  const runOnce = async () => {
-    try {
-      await reconcilePeerCreds(db, { localInstanceId });
-      await teardownUntrustedPeers(db, { instanceSyncManager: getInstanceSyncManager(), localInstanceId });
-    } catch (err) {
-      console.warn(`[peer-trust] sweep failed: ${err.message}`);
-    }
-  };
+  const runOnce = () => sweepOnce(db, { instanceSyncManager: getInstanceSyncManager(), localInstanceId });
   const run = () => {
     if (running) { again = true; return running; }
     running = (async () => {

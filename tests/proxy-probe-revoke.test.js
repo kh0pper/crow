@@ -83,3 +83,21 @@ test("a connected peer whose /health fails is recorded as failing and its last_s
   assert.ok(getPeerProbeHealth().p4?.failingSince);
   connectedServers.delete("instance-p4");
 });
+
+test("PT-1: a paused or trusted=0 peer is probed but never gets a federated MCP client; an existing one is dropped", async () => {
+  _resetPeerProbeHealth();
+  await db.execute("INSERT INTO crow_instances (id, name, crow_id, gateway_url, status, trusted) VALUES ('p5', 'P5', 'c', 'http://127.0.0.1:19', 'paused', 1), ('p6', 'P6', 'c', 'http://127.0.0.1:19', 'active', 0)");
+  let closed = 0;
+  connectedServers.set("instance-p5", { client: { close() { closed++; } }, tools: [], status: "connected", isRemote: true, instanceId: "p5" });
+  const urls = [];
+  globalThis.fetch = async (u) => { urls.push(String(u)); return new Response("{}", { status: 200, headers: { "content-type": "application/json" } }); };
+  const warn = console.warn; const log = console.log; console.warn = () => {}; console.log = () => {};
+  try { await loadRemoteInstances(); } finally { console.warn = warn; console.log = log; }
+  assert.equal(connectedServers.has("instance-p5"), false, "a paused peer's existing client is dropped");
+  assert.equal(closed, 1);
+  assert.equal(connectedServers.get("instance-p6")?.status === "connected", false, "a trusted=0 peer is never connected");
+  assert.ok(getPeerProbeHealth().p5 && getPeerProbeHealth().p6, "both are still probed (/health)");
+  const mine = urls.filter((u) => u.startsWith("http://127.0.0.1:19/"));
+  assert.ok(mine.length >= 2, "both were probed over the network");
+  assert.ok(mine.every((u) => /\/health$/.test(u)), `only /health was fetched for them: ${mine.join(", ")}`);
+});
