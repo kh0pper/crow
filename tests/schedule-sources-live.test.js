@@ -162,9 +162,9 @@ test("copy button: hidden without the script, shown with it; it copies and says 
     await p.send("Browser.grantPermissions", { permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"], origin: s.base }).catch(() => {});
     const b = "document.querySelector('[data-sc-copy]')";
     assert.equal(await p.ev(`${b}.hidden`), false, "the script shows it");
-    assert.equal(await p.ev(`${b}.getAttribute('data-sc-copy')`), "systemctl --user status upstream-staleness.timer");
+    assert.equal(await p.ev(`${b}.getAttribute('data-sc-copy')`), "systemctl --user status -- upstream-staleness.timer");
     assert.match(await p.ev(`${b}.textContent`), /Copy the check command.*upstream-staleness on box-1/);
-    assert.equal(await p.ev("[...document.querySelectorAll('.sc-copy-text')].map((c) => c.textContent).includes('systemctl --user status upstream-staleness.timer')"), true, "the command is on the page as text too");
+    assert.equal(await p.ev("[...document.querySelectorAll('.sc-copy-text')].map((c) => c.textContent).includes('systemctl --user status -- upstream-staleness.timer')"), true, "the command is on the page as text too");
     await p.ev(`${b}.focus(); true`);
     await p.key("Enter", "Enter", 13, "\r");
     const msg = await waitFor(() => p.ev("document.getElementById('sc-toast').textContent || null"));

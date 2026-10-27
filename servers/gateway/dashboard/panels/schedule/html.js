@@ -12,7 +12,7 @@
  * too (selectable without JS).
  */
 import { escapeHtml } from "../../shared/components.js";
-import { checkCommand } from "../../../schedule-sources/host-timers.js";
+import { checkCommand, SAFE_UNIT } from "../../../schedule-sources/host-timers.js";
 import { describeCron } from "../../../../shared/schedule-words.js";
 import { t, fill } from "../../shared/i18n.js";
 import { localYmd, dayNum, fromDayNum, fmtYmd } from "../../../../shared/relative-dates.js";
@@ -148,7 +148,10 @@ function fixButton(m, p, f, ctx) {
   if (f.act === "copy") {
     // Belt and braces: a check command reaches the clipboard only if it is still the one the
     // unit-name rule builds (an untrusted timer file can't smuggle another command in).
-    if (f.label === "copyCheck" && (!p.timer || checkCommand(p.timer) !== f.text)) return "";
+    if (f.label === "copyCheck") {
+      const unit = p.timer ? String(p.timer.id).replace(/^(user|system):/, "") : "";
+      if (!SAFE_UNIT.test(unit) || checkCommand(p.timer) !== f.text) return "";
+    }
     return copyBlock(f.text, label, m, ctx);
   }
   if (f.act === "link") return `<a class="${cls}" href="${esc(f.href)}"${f.external ? ` target="_blank" rel="noopener noreferrer"` : ""}>${esc(label)}${ctx ? vh(ctx) : ""}</a>`;

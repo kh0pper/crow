@@ -4,7 +4,8 @@
  * never spawns a process and never opens a connection for this.
  *
  * Folder: CROW_HOST_TIMERS_DIR, else <CROW_HOME>/host-timers/. Absent → nothing shows (one stat).
- * At most 50 `*.json` files of ≤ 256 KB each; each entry is lstat'ed (regular files only: a
+ * At most 50 `*.json` files of ≤ 256 KB each (the listing stops there), at most 200 cron
+ * next-run computations per read (35 days ahead, 100 ms in all); each entry is lstat'ed (regular files only: a
  * symlink or a FIFO named x.json is skipped, so a read can never block), read with O_NOFOLLOW,
  * validated against the schema below and stripped of unknown fields. Results are cached 60 s.
  *
@@ -22,7 +23,7 @@
 import * as nodeFs from "node:fs";
 import { join, isAbsolute } from "node:path";
 import { resolveCrowHome } from "../../shared/crow-home.js";
-import { cronNext } from "../../shared/schedule-core.js";
+import { CronExpressionParser } from "cron-parser";
 import { validTimeZone } from "../../shared/relative-dates.js";
 
 export const SCHEMA = "crow.host-timers/1";
@@ -33,8 +34,19 @@ export const CACHE_MS = 60_000;
 /** A file whose collected_at is older than this is "old data". */
 export const STALE_DATA_MS = 3_600_000;
 export const KINDS = Object.freeze(["systemd-system", "systemd-user", "cron"]);
-/** systemd's unit-name charset: only such a name ever reaches a copyable command. */
-export const SAFE_UNIT = /^[A-Za-z0-9@._:\-]{1,255}$/;
+/**
+ * systemd's unit-name charset, starting with a letter or digit: only such a name ever reaches a
+ * copyable command (a leading "-" would be an option: `-H user@host` makes systemctl SSH out).
+ */
+export const SAFE_UNIT = /^[A-Za-z0-9][A-Za-z0-9@._:\-]{0,254}$/;
+/** At most this many cron next-run computations per read, across every file. */
+export const CRON_EVAL_CAP = 200;
+/** A cron line's next run is looked for this far ahead only (a never-soon line stays cheap). */
+export const LOOKAHEAD_MS = 35 * 86_400_000;
+/** And all of them together get at most this long; the rest show "no next run". */
+const CRON_BUDGET_MS = 100;
+/** An unchanged file's validated timers are reused this long. */
+const FILE_REUSE_MS = 15 * 60_000;
 const NAME_MAX = 80, HOST_MAX = 64, SCHEDULE_MAX = 120, RESULT_MAX = 40;
 
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/g;
@@ -74,11 +86,24 @@ export function checkCommand(t) {
   if (!t || (t.kind !== "systemd-user" && t.kind !== "systemd-system")) return null;
   const unit = String(t.id).replace(/^(user|system):/, "");
   if (!SAFE_UNIT.test(unit)) return null;
-  return `systemctl ${t.kind === "systemd-user" ? "--user " : ""}status ${unit}`;
+  return `systemctl ${t.kind === "systemd-user" ? "--user " : ""}status -- ${unit}`;
 }
 
+/** The next two runs of a cron line inside the look-ahead ([] past it, null when unparseable). */
+function cronNextTwo(expr, tz, now) {
+  try {
+    const it = CronExpressionParser.parse(String(expr), { tz, currentDate: new Date(now), endDate: new Date(now + LOOKAHEAD_MS) });
+    const out = [it.next().getTime()];
+    try { out.push(it.next().getTime()); } catch {}
+    return out;
+  } catch { return null; }
+}
+
+/** A fresh evaluation budget for one read. */
+const newBudget = () => ({ left: CRON_EVAL_CAP, until: Date.now() + CRON_BUDGET_MS });
+
 /** One timer entry, validated, unknown fields dropped; null when unusable. */
-function validTimer(raw, { tz, now }) {
+function validTimer(raw, { tz, now, budget }) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const id = str(raw.id, 255);
   const kind = KINDS.includes(raw.kind) ? raw.kind : null;
@@ -90,9 +115,12 @@ function validTimer(raw, { tz, now }) {
   let next = null;
   let cadence = null;
   if (kind === "cron" && schedule) {
-    next = cronNext(schedule, tz, now);
-    const after = next !== null ? cronNext(schedule, tz, next) : null;
-    if (after !== null) cadence = Math.round((after - next) / 60_000);
+    if (budget.left > 0 && Date.now() < budget.until) {
+      budget.left--;
+      const two = cronNextTwo(schedule, tz, now);
+      if (two && two.length) next = two[0];
+      if (two && two.length > 1) cadence = Math.round((two[1] - two[0]) / 60_000);
+    }
   } else {
     next = isoMs(raw.next);
   }
@@ -105,19 +133,18 @@ function validTimer(raw, { tz, now }) {
 }
 
 /** One host file, validated (null when it doesn't match the schema). */
-export function validHostFile(raw, { now = Date.now(), file = null } = {}) {
+export function validHostFile(raw, { now = Date.now(), file = null, budget = newBudget() } = {}) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw) || raw.schema !== SCHEMA) return null;
   const host = str(raw.host, HOST_MAX);
   const collectedAt = isoMs(raw.collected_at);
   if (!host || collectedAt === null || !Array.isArray(raw.timers)) return null;
   const tz = (typeof raw.tz === "string" && validTimeZone(raw.tz)) || "UTC";
-  const timers = raw.timers.slice(0, MAX_TIMERS).map((t) => validTimer(t, { tz, now })).filter(Boolean);
+  const timers = raw.timers.slice(0, MAX_TIMERS).map((t) => validTimer(t, { tz, now, budget })).filter(Boolean);
   return { host, tz, file, collectedAt, stale: now - collectedAt > STALE_DATA_MS, timers };
 }
 
-function readSmallRegular(fs, path) {
-  let st;
-  try { st = fs.lstatSync(path); } catch { return null; }
+/** The text of a regular file of ≤ MAX_FILE_BYTES already lstat'ed as `st`, or null. */
+function readSmallRegular(fs, path, st) {
   if (!st.isFile() || st.size > MAX_FILE_BYTES) return null;
   let fd = null;
   try {
@@ -138,12 +165,46 @@ function readSmallRegular(fs, path) {
 }
 
 const _cache = new Map(); // dir → { mtimeMs, at, value }
+const _files = new Map(); // path → { mtimeMs, size, at, host } (host null = invalid file)
 /** Test seam: forget cached reads. */
-export function _resetHostTimersCache() { _cache.clear(); }
+export function _resetHostTimersCache() { _cache.clear(); _files.clear(); }
+
+/** The first MAX_FILES `*.json` names in the folder, without ever listing it whole. */
+function listJson(fs, dir) {
+  const names = [];
+  let truncated = false;
+  const d = fs.opendirSync(dir);
+  try {
+    let e;
+    while ((e = d.readSync()) !== null) {
+      if (!/^[^.].*\.json$/.test(e.name)) continue;
+      if (names.length >= MAX_FILES) { truncated = true; break; }
+      names.push(e.name);
+    }
+  } finally { try { d.closeSync(); } catch {} }
+  return { names: names.sort(), truncated };
+}
+
+/** One file's validated host: reused while its name, mtime and size are unchanged. */
+function hostOf(fs, dir, name, now, budget) {
+  const path = join(dir, name);
+  let st;
+  try { st = fs.lstatSync(path); } catch { return null; }
+  const hit = _files.get(path);
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size && now - hit.at >= 0 && now - hit.at < FILE_REUSE_MS) {
+    if (!hit.host) return null;
+    return { ...hit.host, stale: now - hit.host.collectedAt > STALE_DATA_MS, timers: hit.host.timers.map((t) => (t.next !== null && t.next <= now ? { ...t, next: null } : t)) };
+  }
+  const text = readSmallRegular(fs, path, st);
+  let h = null;
+  if (text !== null) { try { h = validHostFile(JSON.parse(text), { now, file: name, budget }); } catch { h = null; } }
+  _files.set(path, { mtimeMs: st.mtimeMs, size: st.size, at: now, host: h });
+  return h;
+}
 
 /**
  * Every valid host file in the folder, or null when there is no folder.
- * @returns {null | {dir:string, hosts:object[], skipped:number}}
+ * @returns {null | {dir:string, hosts:object[], skipped:number, truncated:boolean}}
  */
 export function readHostTimers({ env = process.env, now = Date.now(), fs = nodeFs } = {}) {
   const dir = hostTimersDir(env);
@@ -153,18 +214,17 @@ export function readHostTimers({ env = process.env, now = Date.now(), fs = nodeF
   if (!st.isDirectory()) return null;
   const hit = _cache.get(dir);
   if (hit && hit.mtimeMs === st.mtimeMs && now - hit.at >= 0 && now - hit.at < CACHE_MS) return hit.value;
-  let names = [];
-  try { names = fs.readdirSync(dir).filter((n) => /^[^.].*\.json$/.test(n)).sort(); } catch { return null; }
-  let skipped = Math.max(0, names.length - MAX_FILES);
+  let listing;
+  try { listing = listJson(fs, dir); } catch { return null; }
+  let skipped = 0;
   const hosts = [];
-  for (const n of names.slice(0, MAX_FILES)) {
-    const text = readSmallRegular(fs, join(dir, n));
-    let h = null;
-    if (text !== null) { try { h = validHostFile(JSON.parse(text), { now, file: n }); } catch { h = null; } }
+  const budget = newBudget();
+  for (const n of listing.names) {
+    const h = hostOf(fs, dir, n, now, budget);
     if (h) hosts.push(h); else skipped++;
   }
   hosts.sort((a, b) => a.host.localeCompare(b.host));
-  const value = { dir, hosts, skipped };
+  const value = { dir, hosts, skipped, truncated: listing.truncated };
   _cache.set(dir, { mtimeMs: st.mtimeMs, at: now, value });
   return value;
 }

@@ -22,6 +22,7 @@ const { default: panel, _setBotGateForTest } = await import("../servers/gateway/
 const { readOnlySources, shellQuote, REFRESH_DOCS } = await import("../servers/gateway/schedule-sources/index.js");
 const { agendaGroups } = await import("../servers/gateway/schedule-catalog.js");
 const { _resetHostTimersCache, SCHEMA } = await import("../servers/gateway/schedule-sources/host-timers.js");
+const { renderSchedulePage } = await import("../servers/gateway/dashboard/panels/schedule/html.js");
 _setBotGateForTest({ engine: () => "ready", runtimeOn: async () => true });
 
 const saved = { ledger: process.env.CROW_BOX_LEDGER_PATH, timers: process.env.CROW_HOST_TIMERS_DIR, hold: process.env.CROW_BOX_RESERVATION_PATH, home: process.env.CROW_HOME };
@@ -92,12 +93,13 @@ beforeEach(async () => {
   ]);
   await db.execute({ sql: "INSERT INTO dashboard_settings (key, value) VALUES ('instance_timezone', 'UTC')", args: [] });
   await db.execute("DELETE FROM oauth_tokens WHERE client_id = 'dashboard'");
-  await db.execute({ sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard', ?)", args: [createHash("sha256").update("sess-local").digest("hex"), iso(Date.now() + HOUR)] });
+  const h = (x) => createHash("sha256").update(x).digest("hex");
+  await db.execute({ sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard', ?), (?, 'access', 'dashboard', 'dashboard sso', ?)", args: [h("sess-local"), iso(Date.now() + HOUR), h("sess-sso"), iso(Date.now() + HOUR)] });
 });
 
-async function call({ method = "GET", query = {}, body = {}, lang = "en" } = {}) {
+async function call({ method = "GET", query = {}, body = {}, lang = "en", session = "sess-local" } = {}) {
   const out = { status: 200, html: null, location: null };
-  const req = { method, query, body, csrfToken: "tok123", dashboardSession: "sess-local" };
+  const req = { method, query, body, csrfToken: "tok123", dashboardSession: session };
   const res = {
     headersSent: false,
     status(n) { out.status = n; return this; },
@@ -196,7 +198,7 @@ test("machines: the chip, a failed timer with its check command, an unsafe unit 
     assert.match(html, /On the machines \(4\)/);
     assert.match(html, /backup &lt;img src=x onerror=alert\(1\)&gt; on box-1/);
     assert.doesNotMatch(html, /<img src=x/);
-    assert.match(html, /data-sc-copy="systemctl --user status backup\.timer"/);
+    assert.match(html, /data-sc-copy="systemctl --user status -- backup\.timer"/);
     // The unit with shell characters: shown as text, never on a copy button.
     assert.match(html, /sneaky on box-1/);
     assert.match(html, /isn(’|')t a plain unit name/);
@@ -305,4 +307,33 @@ test("es: the read-only words are Spanish", async () => {
     assert.match(html, /Datos de máquina antiguos: box-1/);
     assert.match(html, /Copiar la orden para liberar/);
   } finally { rmSync(sc.d, { recursive: true, force: true }); }
+});
+
+test("only the owner's own session sees the read-only sources: a peer sign-in (SSO) sees none of them", async () => {
+  const sc = scratch();
+  try {
+    configured(sc);
+    const now = Date.now();
+    writeLedger(sc, now);
+    writeTimers(sc, now);
+    writeFileSync(sc.hold, JSON.stringify({ owner: "window-run", reason: "nightly benchmark", started_at: iso(now - HOUR), expires_at: iso(now + HOUR) }));
+    const own = (await call()).html;
+    assert.match(own, /window-run/);
+    const peer = (await call({ session: "sess-sso" })).html;
+    assert.doesNotMatch(peer, /window-run|Benchmark|box-1|Stale ledger|show=box|show=machines|class="sc-row sc-row-ro"/);
+  } finally { rmSync(sc.d, { recursive: true, force: true }); }
+});
+
+test("the renderer re-checks a copy command: a unit starting with '-' (an option, e.g. -H for ssh) never gets a copy button", () => {
+  const agenda = { now: [], days: [], later: [], frequent: [], paused: [], done: [], standing: [] };
+  const base = { lang: "en", agenda, sources: ["crow"], filter: "all", now: Date.now(), zone: "UTC", detail: null, running: new Map(), hosts: [], csrf: "x", items: [] };
+  const evil = { kind: "systemd-user", id: "user:-Hroot@evil.example", name: "x", lastResult: "failed" };
+  const p = (timer, text) => ({ code: "timer-failed", severity: "error", host: "h", timer: { ...timer, check: text }, fixes: [{ act: "copy", text, label: "copyCheck" }] });
+  const bad = renderSchedulePage({ ...base, problems: [p(evil, "systemctl --user status -Hroot@evil.example")] });
+  assert.doesNotMatch(bad, /data-sc-copy=/);
+  const bad2 = renderSchedulePage({ ...base, problems: [p(evil, "systemctl --user status -- -Hroot@evil.example")] });
+  assert.doesNotMatch(bad2, /data-sc-copy=/);
+  const good = { kind: "systemd-user", id: "user:backup.timer", name: "backup", lastResult: "failed" };
+  const ok = renderSchedulePage({ ...base, problems: [p(good, "systemctl --user status -- backup.timer")] });
+  assert.match(ok, /data-sc-copy="systemctl --user status -- backup\.timer"/);
 });

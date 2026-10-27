@@ -16,6 +16,9 @@ import { dayNum, fromDayNum } from "../../shared/relative-dates.js";
 
 export const LEDGER_MAX_BYTES = 1024 * 1024;
 export const LEDGER_MAX_LINES = 2000;
+/** A table line longer than this is skipped; a cell is cut to CELL_MAX before it is read. */
+export const LINE_MAX = 4096;
+export const CELL_MAX = 1024;
 /** A row is stale once it ended more than this long ago and is still open. */
 export const STALE_AFTER_MS = 3_600_000;
 const WHAT_MAX = 200, OWNER_MAX = 80, WHEN_MAX = 160;
@@ -29,7 +32,8 @@ export function ledgerPath(env = process.env) {
 /** Markdown out of a cell, for display: bold/strike/code marks, links → their text. */
 export function stripMd(s) {
   return String(s)
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    // Link text and target can't hold brackets, so a run of "[" or "(" is scanned once (linear).
+    .replace(/\[([^[\]]*)\]\([^()]*\)/g, "$1")
     .replace(/\*\*|__|~~|`/g, "")
     .replace(/\s+/g, " ")
     .trim();
@@ -144,7 +148,9 @@ export function parseLedger(text, { tz } = {}) {
     const line = leadStrike ? raw.replace(/^\s*~~/, "") : raw;
     if (!/^\s*\|/.test(line)) continue;
     if (++seen > LEDGER_MAX_LINES) break;
-    const c = cells(line);
+    if (line.length > LINE_MAX) continue;
+    // Every regex below then works on at most 1 KB, whatever the file holds.
+    const c = cells(line).map((x) => x.slice(0, CELL_MAX));
     if (c.every((x) => /^:?-{3,}:?$/.test(x))) { header = false; continue; }
     if (header) continue; // the header row sits above the separator
     const [whenRaw = "", whatRaw = "", ownerRaw = ""] = c;

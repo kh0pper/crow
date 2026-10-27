@@ -114,6 +114,32 @@ test("long cells are cut down for display", () => {
   assert.ok(r.owner.length <= 80);
 });
 
+test("timing: a 100 KB cell of [ (the link regex's worst case) finishes under 200 ms", () => {
+  const t = "## Reservations\n\n| when | what | owner |\n|---|---|---|\n" + `| 2026-10-26 10:00 → 11:00 | ${"[".repeat(100_000)} | alex |\n` + `| ${"[".repeat(3000)}](${"(".repeat(500)} | ${"[a](".repeat(250)} | alex |\n`;
+  const t0 = Date.now();
+  parseLedger(t, { now: NOW, tz: TZ });
+  const ms = Date.now() - t0;
+  assert.ok(ms < 200, `took ${ms} ms`);
+});
+
+test("timing: 2,000 lines of 1 MB worst-case cells finish under 200 ms", () => {
+  const row = `| 2026-10-26 ${"[".repeat(240)} → ${"[".repeat(240)} | ${"[(".repeat(120)} | x |`;
+  const t = "## Reservations\n\n| when | what | owner |\n|---|---|---|\n" + Array.from({ length: 2000 }, () => row).join("\n");
+  const t0 = Date.now();
+  parseLedger(t.slice(0, LEDGER_MAX_BYTES), { now: NOW, tz: TZ });
+  const ms = Date.now() - t0;
+  assert.ok(ms < 200, `took ${ms} ms`);
+});
+
+test("a line over 4 KB is skipped; a cell is cut to 1 KB before it is read", () => {
+  const head = "## Reservations\n\n| when | what | owner |\n|---|---|---|\n";
+  const long = `| 2026-10-26 10:00 → 11:00 | ${"w".repeat(5000)} | alex |`;
+  assert.deepEqual(parseLedger(head + long + "\n", { now: NOW, tz: TZ }), []);
+  const lateDate = `| ${"x".repeat(1100)} 2026-10-26 10:00 → 11:00 | thing | alex |`;
+  const [r] = parseLedger(head + lateDate + "\n", { now: NOW, tz: TZ });
+  assert.equal(r.unreadable, true, "a date past the first 1 KB of the cell is not read");
+});
+
 test("no Reservations section → no rows", () => {
   assert.deepEqual(parseLedger("# Notes\n\n| a | b |\n|---|---|\n| 1 | 2 |\n", { now: NOW, tz: TZ }), []);
 });

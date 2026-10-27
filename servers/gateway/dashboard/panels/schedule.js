@@ -10,7 +10,8 @@
  *
  * Read-only sources (schedule-sources/: the box hold, the box ledger, the machines' timers) are
  * shown with no controls. Every POST names a Crow schedule by its numeric id, so a read-only
- * ref (box:…, timer:…) is refused with 400 before any action runs.
+ * ref (box:…, timer:…) is refused with 400 before any action runs. Only the owner's own session
+ * (the rule writes use) sees these sources at all; a peer's sign-in sees Crow's schedules only.
  */
 import { t } from "../shared/i18n.js";
 import { escapeHtml, section } from "../shared/components.js";
@@ -152,6 +153,8 @@ export default {
     const show = one(query.show);
     const model = await buildScheduleModel(db, {
       lang, selected, show: show || "all",
+      // Only the owner's own session sees the box and machine data (the same rule as writes).
+      readOnly: await isOwnerRequest(req),
       engine: () => botGate.engine(),
       runtimeOn: () => botGate.runtimeOn(db),
     });

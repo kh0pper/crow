@@ -11,6 +11,8 @@ title: Schedule page
 
 At the top, a strip lists anything that needs a look, each item with a fix. With nothing to show it reads "Everything is on schedule". The chips **All · Crow · Box · Machines** narrow the agenda; Box and Machines appear only when that source exists. The strip always shows every problem.
 
+Only the owner's own session sees the read-only sources: someone signed in from a paired Crow sees Crow's schedules only.
+
 A fresh install has none of the read-only sources. Nothing about them shows until you set the variables below in the gateway's environment, for example in a systemd drop-in.
 
 ## Box hold
@@ -28,7 +30,7 @@ CROW_BOX_LEDGER_PATH=/path/to/your/ledger.md
 ```
 
 - There is **no default path**. Without the variable, no ledger is read. Set it only for the instance that should show it. Another Crow instance running as the same user doesn't see the ledger unless its own environment sets the variable too.
-- The path must be absolute and point at a **regular file**: symlinks, FIFOs and directories are refused. At most 1 MB and 2,000 table lines are read.
+- The path must be absolute and point at a **regular file**: symlinks, FIFOs and directories are refused. At most 1 MB and 2,000 table lines are read; a line over 4 KB is skipped, and only a cell's first 1 KB is read.
 - Only the table under a heading that starts `## Reservations` is read. Its first three columns are **when**, **what** and **owner**. Other columns and other sections are ignored.
 
 ```markdown
@@ -97,10 +99,10 @@ With no folder, nothing shows: a generic install costs one `stat` per page view.
 
 Rules the gateway applies:
 
-- It reads at most **50** `*.json` files of up to **256 KB** each, and up to 500 timers per file, cached for 60 seconds. Symlinks, FIFOs and files with leading dots are skipped. Unknown fields are dropped. A file that doesn't match the schema is skipped, not fatal.
+- It reads at most **50** `*.json` files of up to **256 KB** each (it stops listing the folder there), and up to 500 timers per file, cached for 60 seconds; an unchanged file is reused. It works out at most 200 cron next runs per read, looking 35 days ahead: past that, a timer shows "no next run". Symlinks, FIFOs and files with leading dots are skipped. Unknown fields are dropped. A file that doesn't match the schema is skipped, not fatal.
 - **Don't put secrets in the files.** Crontab lines can hold tokens, so emit only the schedule and the command, never its arguments. As a second guard, Crow keeps only a cron command's file name: it skips leading `VAR=value` words, `cd … &&` and wrappers such as `env` or `nice`.
 - Everything from a file is escaped on the page.
-- A timer whose `last_result` isn't `success` shows in the strip. Its fix copies a check command (`systemctl [--user] status <unit>`) only when the unit name uses systemd's own characters (`A–Z a–z 0–9 @ . _ : -`). Any other name is shown as text with no copy button. Crow never runs the command.
+- A timer whose `last_result` isn't `success` shows in the strip. Its fix copies a check command (`systemctl [--user] status -- <unit>`) only when the unit name starts with a letter or digit and uses systemd's own characters (`A–Z a–z 0–9 @ . _ : -`). Any other name is shown as text with no copy button. Crow never runs the command.
 - A file whose `collected_at` is **more than an hour old** shows in the strip as **Machine data is old**. Run your collector again, or check that it is still scheduled.
 
 Timers that run more often than hourly go in the agenda's **Runs all the time** fold. Every machine's full list is under **On the machines**, grouped by host.

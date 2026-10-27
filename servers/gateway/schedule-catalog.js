@@ -323,7 +323,7 @@ async function notifTypesOf(db) {
  * @param {{now?:number, lang?:string, selected?:number|null, engine?:()=>string, runtimeOn?:()=>Promise<boolean>}} opts
  *   engine: "ready" | "absent" | … (the bot engine's state); runtimeOn: the bot runtime flag.
  */
-export async function buildScheduleModel(db, { now = Date.now(), lang = "en", selected = null, engine = () => "ready", runtimeOn = async () => true, show = "all", readers = {} } = {}) {
+export async function buildScheduleModel(db, { now = Date.now(), lang = "en", selected = null, engine = () => "ready", runtimeOn = async () => true, show = "all", readers = {}, readOnly = false } = {}) {
   const zone = await instanceZone(db);
   const tz = (await hasTzColumn(db)) ? "tz" : "NULL AS tz";
   const rows = await safeRows(db, `SELECT id, task, cron_expression, description, enabled, last_run, next_run, updated_at, ${tz} FROM schedules ORDER BY id`);
@@ -339,7 +339,8 @@ export async function buildScheduleModel(db, { now = Date.now(), lang = "en", se
   const running = new Map();
   for (const [id, jobs] of jobsBy) { const j = jobs.find((x) => x.status === "running"); if (j) running.set(id, j); }
   const anyBots = items.some((it) => it.kind === "bot_routine" && it.enabled);
-  const ro = readOnlySources({ now, zone, readers });
+  // The box and the machines are the owner's: a peer's sign-in never reads them.
+  const ro = readOnly ? readOnlySources({ now, zone, readers }) : { items: [], problems: [], hosts: [], present: [] };
   // The strip is always complete; the filter chips narrow only the agenda.
   const problems = [...problemsFor(items, {
     now, runsBy, jobsBy, notifTypes: await notifTypesOf(db),
