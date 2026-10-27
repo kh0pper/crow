@@ -27,7 +27,7 @@ const SNAPSHOT = readFileSync(
 
 const ALL_PANELS = new Set([
   "board", "make", "messages", "bot-builder", "schedule", "memory", "media",
-  "ramble", "extensions", "model-catalog",
+  "ramble", "extensions", "model-catalog", "artifacts",
 ]);
 const stubPanels = (ids) => (id) => (ids.has(id) ? { id } : undefined);
 
@@ -148,6 +148,59 @@ test("without a make panel the Make tab falls back to artifacts", () => {
   const anchors = tabAnchors(renderLayout(shellOpts({ shell: { tab: "make", getPanel: stubPanels(ids) } })));
   assert.ok(anchors.some((a) => a.includes('href="/dashboard/artifacts"') && a.includes('aria-current="page"')));
   assert.ok(!anchors.some((a) => a.includes('href="/dashboard/make"')));
+});
+
+test("with neither make nor artifacts registered the Make tab goes to Extensions", () => {
+  const ids = new Set(ALL_PANELS);
+  ids.delete("make");
+  ids.delete("artifacts");
+  const anchors = tabAnchors(renderLayout(shellOpts({ shell: { tab: "make", getPanel: stubPanels(ids) } })));
+  assert.ok(anchors.some((a) => a.includes('href="/dashboard/extensions?q=artifacts"') && a.includes('aria-current="page"')));
+  assert.ok(!anchors.some((a) => /href="\/dashboard\/(make|artifacts)"/.test(a)));
+});
+
+test("both sheets have a 44px close button with a label", () => {
+  const html = renderLayout(shellOpts({ lang: "es" }));
+  for (const id of ["shell-drawer", "shell-avatar"]) {
+    const dlg = html.match(new RegExp('<dialog id="' + id + '"[\\s\\S]*?<\\/dialog>'))[0];
+    const btn = dlg.match(/<button[^>]*class="shell-sheet-close"[^>]*>/);
+    assert.ok(btn, id + " has a close button");
+    assert.ok(btn[0].includes('aria-label="Cerrar"'), btn[0]);
+  }
+  assert.match(shellCss(), /body\.shell \.shell-sheet-close\s*\{[^}]*width:\s*44px[^}]*height:\s*44px/);
+  const js = shellClientJs();
+  assert.ok(js.includes(".shell-sheet-close"), "the close button is wired");
+  assert.ok(js.includes("removeAttribute('open')"), "the no-showModal fallback can be dismissed");
+});
+
+test("the avatar button says what the sheet holds", () => {
+  const en = renderLayout(shellOpts()).match(/<button[^>]*class="shell-avatar"[^>]*>/)[0];
+  assert.ok(en.includes('aria-label="Settings and mode"'), en);
+  const es = renderLayout(shellOpts({ lang: "es" })).match(/<button[^>]*class="shell-avatar"[^>]*>/)[0];
+  assert.ok(es.includes('aria-label="Ajustes y modo"'), es);
+});
+
+test("open sheets are closed before Turbo caches the page", () => {
+  const js = shellClientJs();
+  assert.ok(js.includes("turbo:before-cache"));
+  assert.match(js, /if \(!window\.__crowShellCacheBound\) \{\s*window\.__crowShellCacheBound = true;\s*document\.addEventListener\('turbo:before-cache'/);
+  assert.ok(js.includes("dialog.shell-sheet[open]"));
+  // Run it: a fake document with one open sheet gets it closed, once.
+  const listeners = {};
+  const closed = [];
+  const sheet = { close() { closed.push("close"); } };
+  const fakeDoc = {
+    cookie: "",
+    querySelectorAll: (sel) => (sel === "dialog.shell-sheet[open]" ? [sheet] : []),
+    addEventListener: (type, fn) => { (listeners[type] ||= []).push(fn); },
+  };
+  const fakeWin = {};
+  const run = new Function("document", "window", "location", js);
+  run(fakeDoc, fakeWin, { pathname: "/", search: "" });
+  run(fakeDoc, fakeWin, { pathname: "/", search: "" });
+  assert.equal(listeners["turbo:before-cache"].length, 1, "bound once per document");
+  listeners["turbo:before-cache"][0]();
+  assert.deepEqual(closed, ["close"]);
 });
 
 function chipText(html) {

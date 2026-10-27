@@ -3702,6 +3702,7 @@ export const translations = {
   "shell.useClassic": { en: "Use classic Crow", es: "Usar Crow clásico" },
   "shell.useNew": { en: "Use the new Crow", es: "Usar el nuevo Crow" },
   "shell.switchScope": { en: "Switch project", es: "Cambiar de proyecto" },
+  "shell.account": { en: "Settings and mode", es: "Ajustes y modo" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

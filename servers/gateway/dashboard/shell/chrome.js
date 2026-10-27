@@ -26,6 +26,7 @@ const TAB_ICONS = {
   make: `<svg ${ICON_ATTRS}><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>`,
 };
 const AVATAR_ICON = `<svg ${ICON_ATTRS}><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>`;
+const CLOSE_ICON = `<svg ${ICON_ATTRS}><path d="M18 6L6 18M6 6l12 12"/></svg>`;
 const CHEVRON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false"><polyline points="6 9 12 15 18 9"/></svg>';
 
 /**
@@ -42,6 +43,11 @@ const MORE_ENTRIES = [
   { id: "extensions", fallback: "Extensions" },
   { id: "model-catalog", fallback: "Models" },
 ].map((e) => ({ ...e, route: `/dashboard/${e.id}`, key: `nav.${e.id}` }));
+
+/** The sheet's own close button (Escape and a backdrop tap also close it). */
+function closeButton(lang) {
+  return `<button type="button" class="shell-sheet-close" aria-label="${escapeHtml(t("common.close", lang))}">${CLOSE_ICON}</button>`;
+}
 
 function label(key, fallback, lang) {
   const v = t(key, lang);
@@ -75,12 +81,16 @@ function currentValue(scope, projects) {
   return p ? projectValue(p) : "all";
 }
 
-/** Board and Make fall back to today's panels until P3/P4 register theirs. */
+/**
+ * Board and Make fall back to today's panels until P3/P4 register theirs.
+ * Artifacts is a bundle, so with neither make nor artifacts installed the
+ * Make tab points at the Extensions page, filtered to it.
+ */
 export function tabTargets(getPanel = registryGetPanel) {
   return [
     { id: "chat", href: "/dashboard/perch", key: "shell.tabChat" },
     { id: "board", href: getPanel("board") ? "/dashboard/board" : "/dashboard/bot-board", key: "shell.tabBoard" },
-    { id: "make", href: getPanel("make") ? "/dashboard/make" : "/dashboard/artifacts", key: "shell.tabMake" },
+    { id: "make", href: getPanel("make") ? "/dashboard/make" : getPanel("artifacts") ? "/dashboard/artifacts" : "/dashboard/extensions?q=artifacts", key: "shell.tabMake" },
   ];
 }
 
@@ -93,7 +103,7 @@ export function shellHeaderChip({ scope, projects, lang }) {
 
 /** The avatar button, the header's last item; opens the avatar sheet. */
 export function shellAvatarButton({ lang }) {
-  return `<button type="button" class="shell-avatar" aria-haspopup="dialog" aria-controls="shell-avatar" aria-label="${escapeHtml(label("nav.settings", "Settings", lang))}" data-shell-open="shell-avatar">${AVATAR_ICON}</button>`;
+  return `<button type="button" class="shell-avatar" aria-haspopup="dialog" aria-controls="shell-avatar" aria-label="${escapeHtml(t("shell.account", lang))}" data-shell-open="shell-avatar">${AVATAR_ICON}</button>`;
 }
 
 /**
@@ -138,6 +148,7 @@ export function shellDrawer({ scope, projects, lang, getPanel = registryGetPanel
     `<a href="${e.route}" class="shell-more-item">${escapeHtml(label(e.key, panel.name || e.fallback, lang))}</a>`).join("");
   return `<dialog id="shell-drawer" class="shell-sheet shell-drawer" aria-labelledby="shell-drawer-title">
     <div class="shell-sheet-inner">
+      ${closeButton(lang)}
       <h3 class="shell-heading" id="shell-drawer-title">${escapeHtml(t("shell.projects", lang))}</h3>
       ${projectForm({ scope, projects, lang })}
       ${more ? `<h3 class="shell-heading">${escapeHtml(t("shell.more", lang))}</h3>
@@ -149,8 +160,9 @@ export function shellDrawer({ scope, projects, lang, getPanel = registryGetPanel
 /** The avatar sheet: Settings, What Crow can reach, and the classic switch. */
 export function shellAvatarSheet({ lang }) {
   const settings = label("nav.settings", "Settings", lang);
-  return `<dialog id="shell-avatar" class="shell-sheet shell-avatar-sheet" aria-label="${escapeHtml(settings)}">
+  return `<dialog id="shell-avatar" class="shell-sheet shell-avatar-sheet" aria-label="${escapeHtml(t("shell.account", lang))}">
     <div class="shell-sheet-inner">
+      ${closeButton(lang)}
       <a href="/dashboard/settings" class="shell-sheet-link">${escapeHtml(settings)}</a>
       <a href="/dashboard/settings?section=integrations" class="shell-sheet-link">${escapeHtml(t("shell.reach", lang))}</a>
       <form method="post" action="/dashboard/mode" class="shell-mode-form"><input type="hidden" name="_csrf" value=""><input type="hidden" name="mode" value="classic"><button type="submit" class="shell-sheet-link shell-mode-btn">${escapeHtml(t("shell.useClassic", lang))}</button></form>

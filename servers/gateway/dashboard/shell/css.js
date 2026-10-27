@@ -139,6 +139,24 @@ export function shellCss() {
     flex-direction: column;
     gap: 8px;
   }
+  body.shell .shell-sheet-close {
+    align-self: flex-end;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    margin: -8px -8px 0 0;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--crow-text-secondary);
+    cursor: pointer;
+  }
+  body.shell .shell-sheet-close:hover { background: var(--crow-bg-elevated); color: var(--crow-text-primary); }
+  body.shell .shell-sheet-close:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }
+  /* The no-showModal fallback (open attribute only): pin the sheet on top. */
+  body.shell .shell-sheet[open]:not(:modal) { position: fixed; inset: auto 0 0; z-index: 1200; }
   body.shell .shell-heading {
     margin: 8px 0 0;
     font-size: 0.75rem;

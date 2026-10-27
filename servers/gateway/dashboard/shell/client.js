@@ -1,7 +1,9 @@
 /**
  * The new shell's client JS (redesign P2): opens the drawer and the avatar
- * sheet as modal <dialog>s. Escape (native to showModal) and a tap on the
- * backdrop close them, and focus returns to the button that opened them.
+ * sheet as modal <dialog>s. Escape (native to showModal), a tap on the
+ * backdrop and the sheet's own close button close them, and focus returns to
+ * the button that opened them. Open sheets are closed before Turbo snapshots
+ * the page, so Back never restores a stale open dialog.
  *
  * Emitted inside renderLayout's inline <script>, which is itself built from a
  * template literal: this source must contain NO backticks (the panel
@@ -22,6 +24,16 @@ export function shellClientJs() {
         }
         return '';
       }
+      // Works for both paths: a modal dialog, and the open-attribute
+      // fallback where close() may be missing.
+      function closeSheet(dlg) {
+        if (!dlg) return;
+        if (typeof dlg.close === 'function') { dlg.close(); return; }
+        dlg.removeAttribute('open');
+        var opener = dlg.__shellOpener;
+        dlg.__shellOpener = null;
+        if (opener && typeof opener.focus === 'function') opener.focus();
+      }
       function openSheet(btn) {
         var dlg = document.getElementById(btn.getAttribute('data-shell-open'));
         if (!dlg || dlg.open) return;
@@ -41,7 +53,11 @@ export function shellClientJs() {
         // A click whose target is the dialog element itself landed on the
         // backdrop (the content fills .shell-sheet-inner).
         dlg.addEventListener('click', function (e) {
-          if (e.target === e.currentTarget) e.currentTarget.close();
+          if (e.target === e.currentTarget) closeSheet(e.currentTarget);
+        });
+        var closeBtn = dlg.querySelector('.shell-sheet-close');
+        if (closeBtn) closeBtn.addEventListener('click', function (e) {
+          closeSheet(e.currentTarget.closest('dialog'));
         });
         dlg.addEventListener('close', function (e) {
           var opener = e.currentTarget.__shellOpener;
@@ -52,6 +68,14 @@ export function shellClientJs() {
       // The rail's project form has no opener: fill its return path now.
       var railRet = document.querySelectorAll('.shell-projects--rail input[name="return"]');
       for (var k = 0; k < railRet.length; k++) railRet[k].value = location.pathname + location.search;
+      // Close open sheets before Turbo caches this page (once per document).
+      if (!window.__crowShellCacheBound) {
+        window.__crowShellCacheBound = true;
+        document.addEventListener('turbo:before-cache', function () {
+          var open = document.querySelectorAll('dialog.shell-sheet[open]');
+          for (var m = 0; m < open.length; m++) closeSheet(open[m]);
+        });
+      }
       // The Turbo-off path: carry the CSRF token in the body as well.
       if (!window.__crowShellSubmitBound) {
         window.__crowShellSubmitBound = true;
