@@ -4,9 +4,10 @@
  * previews) answer the same way.
  */
 
-/** A trust flag is CLEAN only when it is exactly 0; NULL, missing, corrupt or
- *  any other value reads as untrusted (security review: no NULL-as-clean). */
-export function flagUntrusted(x) { return x == null || x === "" || Number(x) !== 0; }
+/** A trust flag is CLEAN only when it is an explicit 0 (number, bigint or the string "0");
+ *  NULL, missing, corrupt or any other value, including " ", false and "0.0", reads as
+ *  untrusted (fail closed; security review: no NULL-as-clean). */
+export function flagUntrusted(x) { return !(x === 0 || x === 0n || x === "0"); }
 
 /** Tainted = made from non-owner text (or derived from such a version) and
  *  not yet approved by the owner. A missing version is tainted. */

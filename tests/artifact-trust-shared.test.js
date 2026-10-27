@@ -17,7 +17,8 @@ test("flagUntrusted: the bundle's re-export is the shared rule", () => {
   assert.equal(shared.flagUntrusted(0), false);
   assert.equal(shared.flagUntrusted(0n), false);
   assert.equal(shared.flagUntrusted("0"), false);
-  for (const x of [1, 1n, "1", null, undefined, ""]) assert.equal(shared.flagUntrusted(x), true, String(x));
+  for (const x of [1, 1n, "1", null, undefined, "", " ", false, "0.0", 0.5, -1, NaN, "x", true, "00", " 0"]) assert.equal(shared.flagUntrusted(x), true, String(x));
+  assert.equal(shared.isTainted({ untrusted_input: false }), true, "false is not an explicit 0");
 });
 
 test("isTainted: the bundle's re-export is the shared rule", () => {
