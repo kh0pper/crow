@@ -174,8 +174,8 @@ export async function createCard(tdb, fields, actor) {
   // followed by an update.
   const r = await tdb.execute({
     sql: `INSERT INTO tasks_items
-            (title, description, status, priority, due_date, phase, owner, tags, project_id, parent_id, autonomy, assigned_bot)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+            (title, description, status, priority, due_date, phase, owner, tags, project_id, parent_id, autonomy, assigned_bot, action_needed)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     args: [
       String(f.title ?? ""),
       f.description == null ? null : String(f.description),
@@ -189,6 +189,7 @@ export async function createCard(tdb, fields, actor) {
       parentId,
       autonomy,
       f.assigned_bot == null || f.assigned_bot === "" ? null : String(f.assigned_bot),
+      f.action_needed == null ? null : String(f.action_needed),
     ],
   });
   const id = Number(r.lastInsertRowid);

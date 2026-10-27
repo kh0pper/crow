@@ -716,6 +716,13 @@ test("board_notify_decisions: the 4th push of the day by one caller is 429 push_
   }
 });
 
+test("board_create_item keeps action_needed on a card", async () => {
+  const client = await connectClient("/board/mcp", state.localToken);
+  const created = payload(await client.callTool({ name: "board_create_item", arguments: { title: "flagged", project_id: 1, action_needed: "x" } }));
+  const got = payload(await client.callTool({ name: "board_get_item", arguments: { id: created.id } }));
+  assert.equal(got.item.action_needed, "x");
+});
+
 // ---- assigned_bot on board_create_item ----
 
 test("board_create_item assigned_bot: enabled bot assigns the card; refusals are 400 and nothing is created", async () => {

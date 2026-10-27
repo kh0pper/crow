@@ -129,6 +129,17 @@ test("createCard validates status against the resolved def and records a create 
   });
 });
 
+test("createCard stores action_needed (and an empty string as-is, like updateCard)", async () => {
+  await withStore(async ({ tdb }) => {
+    const a = await createCard(tdb, { title: "a", project_id: 1, action_needed: "review the doc" }, HUMAN);
+    assert.equal((await getCard(tdb, a.id)).action_needed, "review the doc");
+    const b = await createCard(tdb, { title: "b", project_id: 1, action_needed: "" }, HUMAN);
+    assert.equal((await getCard(tdb, b.id)).action_needed, "");
+    const c = await createCard(tdb, { title: "c", project_id: 1 }, HUMAN);
+    assert.equal((await getCard(tdb, c.id)).action_needed, null);
+  });
+});
+
 test("createCard rejects an off-def status", async () => {
   await withStore(async ({ tdb }) => {
     await assert.rejects(
