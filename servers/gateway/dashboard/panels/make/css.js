@@ -25,7 +25,7 @@ export const MAKE_CSS = `<style>
   .mk-offer { display: grid; gap: var(--crow-space-2); justify-items: start; margin: 0 0 var(--crow-space-3); padding: var(--crow-space-3); border: 1px dashed var(--crow-border); border-radius: 12px; }
   .mk-offer p { margin: 0; }
   .mk-offer .btn { display: inline-flex; align-items: center; min-height: 44px; }
-  .mk-bar { display: flex; gap: var(--crow-space-3); flex-wrap: wrap; align-items: center; justify-content: space-between; }
+  .mk-bar { margin-bottom: var(--crow-space-3); display: flex; gap: var(--crow-space-3); flex-wrap: wrap; align-items: center; justify-content: space-between; }
   .mk-start-btn { min-height: 44px; }
   .mk-sheet { width: min(480px, 100vw); max-width: 100vw; max-height: 90vh; margin: auto auto 0; padding: 0; border: 1px solid var(--crow-border); border-radius: 16px 16px 0 0; background: var(--crow-bg-surface); color: var(--crow-text-primary); }
   .mk-sheet::backdrop { background: rgba(0,0,0,0.4); }
