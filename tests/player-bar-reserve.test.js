@@ -108,9 +108,13 @@ test("layout.js: a scrolling page pads .main-content by the bar; the app shells 
   assert.match(ruleBody(css, ".main-content"), new RegExp(`padding-bottom: ${VAR.replace(/[()]/g, "\\$&")};`), "desktop: the last ~bar of every page can scroll clear");
   const phone = css.slice(css.indexOf("body.sidebar-open {"));     // the phone block's .main-content follows it
   const shells = [ruleBody(phone, ".main-content"), ruleBody(css, "body:has(#perch-chat) .main-content")];
+  // The new shell (redesign P2) also ends Perch above its tab bar: the
+  // optional "- var(--shell-tabs-h,0px)" term is 0px on classic pages.
+  const TABS_H = " - var(--shell-tabs-h,0px)";
   for (const r of shells) {
-    assert.ok(r.includes(`height: calc(100vh - ${VAR});`), "vh fallback: " + r);
-    assert.ok(r.includes(`height: calc(100dvh - ${VAR});`), "dvh: " + r);
+    const has = (unit) => r.includes(`height: calc(${unit} - ${VAR});`) || r.includes(`height: calc(${unit} - ${VAR}${TABS_H});`);
+    assert.ok(has("100vh"), "vh fallback: " + r);
+    assert.ok(has("100dvh"), "dvh: " + r);
     assert.ok(r.includes("min-height: 0;"), "C1: the base min-height:100vh must not win: " + r);
     assert.ok(r.includes("padding-bottom: 0;"), "the shell height already reserves: no double reserve: " + r);
   }

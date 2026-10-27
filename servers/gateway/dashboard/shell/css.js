@@ -73,6 +73,9 @@ export function shellCss() {
     color: var(--crow-accent);
     cursor: pointer;
   }
+  /* The header bird (tap → tray, long-press → Talk to Crow) is 42px wide on
+     its own; the shell's touch rule is 44 in both directions. */
+  body.shell .crow-tama-btn { min-width: 44px; min-height: 44px; justify-content: center; }
   body.shell .shell-scope:focus-visible,
   body.shell .shell-avatar:focus-visible,
   body.shell .shell-tab:focus-visible,
@@ -96,8 +99,11 @@ export function shellCss() {
     background: var(--crow-bg-surface);
     border-top: 1px solid var(--crow-border);
   }
+  /* Three flex:1 tabs of min-width 44px fit any phone; wrap only says so
+     to the phone-row guard (tests/dashboard-phone-rows.test.js). */
   body.shell .shell-tab-list {
     display: flex;
+    flex-wrap: wrap;
     height: 56px;
   }
   body.shell .shell-tab {

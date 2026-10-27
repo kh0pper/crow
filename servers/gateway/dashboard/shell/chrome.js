@@ -182,7 +182,7 @@ export function tryNewCardHtml(lang) {
   const btn = "min-height:44px;padding:0 1rem;border-radius:var(--crow-radius-control);font:inherit;cursor:pointer";
   return `<aside class="try-new-card" style="${style}">
     <div style="flex:1;min-width:200px"><strong>${escapeHtml(t("shell.tryTitle", lang))}</strong><div style="color:var(--crow-text-secondary);font-size:0.9rem">${escapeHtml(t("shell.tryBody", lang))}</div></div>
-    <form method="post" action="/dashboard/mode" onsubmit="${escapeHtml(fill)}" style="margin:0"><input type="hidden" name="_csrf" value=""><input type="hidden" name="mode" value="new"><button type="submit" style="${btn};background:var(--crow-accent);color:#fff;border:0">${escapeHtml(t("shell.tryNow", lang))}</button></form>
+    <form method="post" action="/dashboard/mode" onsubmit="${escapeHtml(fill)}" style="margin:0"><input type="hidden" name="_csrf" value=""><input type="hidden" name="mode" value="new"><button type="submit" style="${btn};background:var(--crow-accent);color:var(--crow-accent-contrast);border:0">${escapeHtml(t("shell.tryNow", lang))}</button></form>
     <form method="post" action="/dashboard/mode/try-dismiss" onsubmit="${escapeHtml(fill + "this.return.value=location.pathname+location.search;")}" style="margin:0"><input type="hidden" name="_csrf" value=""><input type="hidden" name="return" value=""><button type="submit" style="${btn};background:transparent;color:var(--crow-text-secondary);border:1px solid var(--crow-border)">${escapeHtml(t("shell.notNow", lang))}</button></form>
   </aside>`;
 }

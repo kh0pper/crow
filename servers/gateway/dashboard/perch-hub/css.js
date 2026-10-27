@@ -439,6 +439,8 @@ body[data-view="chat"] #perch-chat{display:flex;flex-direction:column;flex:1;min
      returns to the list, where the tab bar is back. */
   body.shell[data-view="chat"] .shell-tabs{display:none}
   body.shell[data-view="chat"]{--shell-tabs-h:0px}
+  /* The shell keeps its 16px side gutter in the compact chat header too. */
+  body.shell[data-view="chat"]:has(#perch-chat) .content-header{padding-left:16px;padding-right:16px}
   body[data-view="chat"] #perch-hub-root .perch-head{flex-wrap:nowrap;justify-content:flex-start;gap:10px}
   body[data-view="chat"] #perch-hub-root #perch-back{flex:none;align-self:center;min-height:44px;padding:6px 12px;font-size:13px}
   body[data-view="chat"] #perch-hub-root #perch-session-meta{display:none}
