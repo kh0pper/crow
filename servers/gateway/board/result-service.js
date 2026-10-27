@@ -110,6 +110,15 @@ export async function reportResult(tdb, cdb, itemId, { outcome, summaryMd, planI
  * explicit write, not implied by this call. Records 'result_decide'.
  */
 export async function decideResult(tdb, itemId, resultId, decision, actor, via) {
+  return decide(tdb, itemId, resultId, decision, actor, via, { newestOnly: false });
+}
+
+// The one decide write. `newestOnly` (acceptResult) folds "this is the
+// item's newest result" into the guarded UPDATE itself, so a result reported
+// between any earlier read and this write makes it change nothing; a 0-row
+// UPDATE is then told apart by re-reading the row: still recorded means a
+// newer result superseded it ('stale'), anything else 'already_decided'.
+async function decide(tdb, itemId, resultId, decision, actor, via, { newestOnly }) {
   const row = (await tdb.execute({
     sql: "SELECT * FROM board_results WHERE id=? AND item_id=?",
     args: [resultId, itemId],
@@ -120,11 +129,18 @@ export async function decideResult(tdb, itemId, resultId, decision, actor, via) 
   // The guard (C8): only a still-recorded row is decided, so of two racing
   // decisions exactly one lands; the other changes nothing and is told so.
   const stamp = nowStamp();
+  const newest = newestOnly ? " AND id=(SELECT MAX(id) FROM board_results WHERE item_id=?)" : "";
   const w = await tdb.execute({
-    sql: "UPDATE board_results SET status=?, decided_at=?, decided_via=? WHERE id=? AND item_id=? AND status='recorded'",
-    args: [String(decision), stamp, via ?? null, resultId, itemId],
+    sql: "UPDATE board_results SET status=?, decided_at=?, decided_via=? WHERE id=? AND item_id=? AND status='recorded'" + newest,
+    args: [String(decision), stamp, via ?? null, resultId, itemId, ...(newestOnly ? [itemId] : [])],
   });
-  if (w.rowsAffected !== 1) throw fail("result already decided", "already_decided", 409);
+  if (w.rowsAffected !== 1) {
+    if (newestOnly) {
+      const now = (await tdb.execute({ sql: "SELECT status FROM board_results WHERE id=? AND item_id=?", args: [resultId, itemId] })).rows[0];
+      if (now && now.status === "recorded") throw fail("result is not the card's newest", "stale", 409);
+    }
+    throw fail("result already decided", "already_decided", 409);
+  }
   await recordMutation(tdb, {
     itemId,
     verb: "result_decide",
@@ -157,8 +173,14 @@ export async function acceptResult(tdb, cdb, itemId, resultId, actor, via) {
     throw fail("result is not the card's newest", "stale", 409);
   }
 
-  await decideResult(tdb, itemId, resultId, "approved", actor, via);
+  // The read above is a fast refusal; the write re-checks "newest" itself.
+  await decide(tdb, itemId, resultId, "approved", actor, via, { newestOnly: true });
 
+  // From here the approval stands. A move refused by the lock rule returns
+  // moved:false. Any other move failure (the card archived or moved
+  // meanwhile, a bad status) propagates and leaves the result approved and
+  // the card unmoved; the lane route reports that as 409 'stale' with the
+  // card's real lane, and the Board re-renders from it.
   const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
   const now = await getCard(tdb, itemId);
   if (isTerminal(def, String(now.status))) return { status: "approved", moved: false };

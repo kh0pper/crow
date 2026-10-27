@@ -176,6 +176,10 @@ test("the lane route refuses a stale from", async () => {
   assert.deepEqual(verbs(id), [], "nothing written");
 });
 
+// The HTTP contract for a double drop: one 200, one 409 stale, one move.
+// Under the synchronous driver two requests do not interleave inside the
+// handler, so this does not exercise the write guard; the two-client tests
+// below do, by reading with both before writing with either.
 test("two parallel drops into Done make one move", async () => {
   const id = addCard();
   const out = await Promise.all([move(id, { to: "done", from: "up_next" }), move(id, { to: "done", from: "up_next" })]);
@@ -282,4 +286,108 @@ test("bad input: 400 for an unknown lane or id, 404 for a missing or archived ca
   t.prepare("UPDATE tasks_items SET archived_at=datetime('now') WHERE id=?").run(id);
   t.close();
   assert.equal((await move(id, { to: "done", from: "up_next" })).status, 404);
+});
+
+// ---- Ruling P10: the write itself is guarded on the state read ----
+// Two separate tasks.db clients on the same file (two processes' worth of
+// connections) each read the lane, then each write. The in-process
+// serializer is not involved: exactly one write lands, the other is stale.
+
+async function twoClients() {
+  const { createDbClient } = await import("../servers/db.js");
+  const { laneState, applyLanePlan } = await import("../servers/gateway/routes/shell-api.js");
+  const { movePlan } = await import("../servers/gateway/dashboard/panels/board/lanes.js");
+  const a = createDbClient(TASKS), b = createDbClient(TASKS), cdb = createDbClient(DB_FILE);
+  const plan = (st, to) => movePlan(st.card, st.def, { locked: st.locked, latestResult: st.latestResult }, to);
+  const close = () => { for (const c of [a, b, cdb]) { try { c.close(); } catch {} } };
+  return { a, b, cdb, laneState, applyLanePlan, plan, close };
+}
+const settle = (p) => p.then(() => ({ ok: true }), (e) => ({ ok: false, e }));
+
+test("two clients racing up next -> done: one move lands, the other is stale", async () => {
+  const id = addCard();
+  const k = await twoClients();
+  try {
+    const sa = await k.laneState(k.a, k.cdb, id);
+    const sb = await k.laneState(k.b, k.cdb, id);
+    assert.equal(sa.lane, "up_next"); assert.equal(sb.lane, "up_next");
+    const pa = k.plan(sa, "done"), pb = k.plan(sb, "done");
+    assert.deepEqual(pa, { action: "move", status: "done" });
+    const ra = await settle(k.applyLanePlan(k.a, k.cdb, id, sa, pa));
+    const rb = await settle(k.applyLanePlan(k.b, k.cdb, id, sb, pb));
+    assert.equal(ra.ok, true);
+    assert.equal(rb.ok, false);
+    assert.equal(rb.e.code, "stale"); assert.equal(rb.e.http, 409);
+    assert.equal(card(id).status, "done");
+    assert.deepEqual(verbs(id), ["move"], "one move recorded");
+  } finally { k.close(); }
+});
+
+test("a lane move never overwrites a classic move made after its read", async () => {
+  const id = addCard();
+  const k = await twoClients();
+  try {
+    const st = await k.laneState(k.a, k.cdb, id);
+    const t = new Database(TASKS);
+    t.prepare("UPDATE tasks_items SET status='cancelled' WHERE id=?").run(id); // the classic board, elsewhere
+    t.close();
+    const r = await settle(k.applyLanePlan(k.a, k.cdb, id, st, k.plan(st, "done")));
+    assert.equal(r.ok, false); assert.equal(r.e.code, "stale");
+    assert.equal(card(id).status, "cancelled");
+    assert.deepEqual(verbs(id), []);
+  } finally { k.close(); }
+});
+
+test("two clients racing clear_ask: one clear lands, the other is stale", async () => {
+  const id = addCard({ action: "check the numbers" });
+  const k = await twoClients();
+  try {
+    const sa = await k.laneState(k.a, k.cdb, id);
+    const sb = await k.laneState(k.b, k.cdb, id);
+    const pa = k.plan(sa, "up_next"), pb = k.plan(sb, "up_next");
+    assert.deepEqual(pa, { action: "clear_ask" });
+    const ra = await settle(k.applyLanePlan(k.a, k.cdb, id, sa, pa));
+    const rb = await settle(k.applyLanePlan(k.b, k.cdb, id, sb, pb));
+    assert.equal(ra.ok, true);
+    assert.equal(rb.ok, false); assert.equal(rb.e.code, "stale"); assert.equal(rb.e.http, 409);
+    assert.equal(card(id).action_needed, null);
+    assert.deepEqual(verbs(id), ["update"], "one clear recorded");
+  } finally { k.close(); }
+});
+
+test("clear_ask never wipes a new ask a bot wrote after the read", async () => {
+  const id = addCard({ action: "first ask" });
+  const k = await twoClients();
+  try {
+    const st = await k.laneState(k.a, k.cdb, id);
+    const t = new Database(TASKS);
+    t.prepare("UPDATE tasks_items SET action_needed='a newer ask' WHERE id=?").run(id); // a bot, elsewhere
+    t.close();
+    const r = await settle(k.applyLanePlan(k.a, k.cdb, id, st, k.plan(st, "up_next")));
+    assert.equal(r.ok, false); assert.equal(r.e.code, "stale");
+    assert.equal(card(id).action_needed, "a newer ask");
+    assert.deepEqual(verbs(id), []);
+  } finally { k.close(); }
+});
+
+test("the clear_ask UPDATE itself is guarded: a new ask between its read and its write survives", async () => {
+  const id = addCard({ action: "first ask" });
+  const k = await twoClients();
+  try {
+    const st = await k.laneState(k.a, k.cdb, id);
+    // A seam on client a: just before its UPDATE runs, another connection
+    // writes a new ask (after updateCard's own read).
+    const raced = {
+      execute: async (q) => {
+        if (/^UPDATE tasks_items/.test(q.sql || "")) {
+          await k.b.execute({ sql: "UPDATE tasks_items SET action_needed='a newer ask' WHERE id=?", args: [id] });
+        }
+        return k.a.execute(q);
+      },
+    };
+    const r = await settle(k.applyLanePlan(raced, k.cdb, id, st, k.plan(st, "up_next")));
+    assert.equal(r.ok, false); assert.equal(r.e.code, "stale");
+    assert.equal(card(id).action_needed, "a newer ask");
+    assert.deepEqual(verbs(id), []);
+  } finally { k.close(); }
 });

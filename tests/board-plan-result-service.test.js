@@ -554,3 +554,47 @@ test("acceptResult: an unknown card is 404, a result with no results at all is s
     await assert.rejects(() => acceptResult(tdb, cdb, id, 1, HUMAN, "dashboard"), (e) => e.code === "stale" && e.http === 409);
   });
 });
+
+test("acceptResult: a result reported between its read and its write wins — stale, nothing approved or moved", async () => {
+  await withStore(async ({ tdb, cdb, tasksDbPath }) => {
+    const id = await makeCard(tdb, 1, "gated");
+    const r = await reportResult(tdb, cdb, id, { outcome: "success" }, BOT);
+    const other = createDbClient(tasksDbPath);
+    let newerId = null;
+    // A seam: just before the decide UPDATE runs (after acceptResult's own
+    // newest-result read), a second connection records a newer result.
+    const raced = {
+      execute: async (q) => {
+        if (newerId == null && /^UPDATE board_results/.test(q.sql || "")) {
+          const ins = await other.execute({
+            sql: "INSERT INTO board_results (item_id, actor_kind, actor_id, outcome, summary_md) VALUES (?, 'bot', 'bot-1', 'partial', '')",
+            args: [id],
+          });
+          newerId = Number(ins.lastInsertRowid);
+        }
+        return tdb.execute(q);
+      },
+    };
+    try {
+      await assert.rejects(
+        () => acceptResult(raced, cdb, id, r.id, HUMAN, "dashboard"),
+        (e) => { assert.equal(e.code, "stale"); assert.equal(e.http, 409); return true; },
+      );
+    } finally { other.close(); }
+    assert.ok(newerId, "the seam fired");
+    const rows = (await tdb.execute({ sql: "SELECT status FROM board_results WHERE item_id=? ORDER BY id", args: [id] })).rows;
+    assert.deepEqual(rows.map((x) => x.status), ["recorded", "recorded"], "nothing approved");
+    assert.equal((await getCard(tdb, id)).status, "pending", "nothing moved");
+    assert.equal((await allMutations(tdb, id)).filter((m) => m.verb === "result_decide" || m.verb === "move").length, 0);
+  });
+});
+
+test("decideResult on a superseded result still decides it (only Accept requires the newest)", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const id = await makeCard(tdb, 1, "gated");
+    const older = await reportResult(tdb, cdb, id, { outcome: "success" }, BOT);
+    await reportResult(tdb, cdb, id, { outcome: "partial" }, BOT);
+    const out = await decideResult(tdb, id, older.id, "rejected", HUMAN, "dashboard");
+    assert.equal(out.status, "rejected");
+  });
+});

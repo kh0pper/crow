@@ -20,7 +20,7 @@ import { escapeHtml } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
 import { cardFaceHtml } from "../bot-board/html.js";
 import { DEFAULT_BOARD_DEF } from "../../../routes/board-defs.js";
-import { LANES, movePlan } from "./lanes.js";
+import { LANES, movePlan, openDecision } from "./lanes.js";
 
 export const LANE_LABEL_KEY = Object.freeze({
   needs_you: "shell.laneNeedsYou",
@@ -51,10 +51,15 @@ export function cardHref(card, threadByCard) {
     : `/dashboard/bot-board?card=${encodeURIComponent(String(card.id))}`;
 }
 
+// The face's Accept button. On a card with an open decision Accept can never
+// succeed here (answer_first wins, Ruling P2), so the Board tab drops it.
+const FACE_ACCEPT_RE = /<button type="button" class="bb-btn bb-sec" data-result-action="accept">[^<]*<\/button>/;
+
 function shellFace(card, locked, lang, def, bird) {
-  return cardFaceHtml(card, locked, lang, def, bird)
+  const face = cardFaceHtml(card, locked, lang, def, bird)
     .replace(' tabindex="0" role="button" ', " ")
     .replace('draggable="true"', 'draggable="false"');
+  return openDecision(card) ? face.replace(FACE_ACCEPT_RE, "") : face;
 }
 
 /** Reason key (movePlan) -> i18n key of the sentence the operator sees. */

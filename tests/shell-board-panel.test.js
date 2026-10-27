@@ -349,3 +349,21 @@ test("no tasks.db: an empty board, not an error", async () => {
     renameSync(moved, TASKS);
   }
 });
+
+test("the face's Accept is dropped on a card with an open decision; Reject stays", async () => {
+  const { boardHtml } = await import("../servers/gateway/dashboard/panels/board/html.js");
+  const { DEFAULT_BOARD_DEF } = await import("../servers/gateway/routes/board-defs.js");
+  const base = { id: 901, title: "with result", status: "pending", priority: 3, project_id: null, autonomy: "gated",
+    latest_result_id: 77, latest_result_outcome: "success", latest_result_status: "recorded", data_json: "{}" };
+  const asking = { ...base, id: 902, data_json: JSON.stringify({ decision: { question: "q", options: [{ label: "a" }, { label: "b" }] } }) };
+  const html = boardHtml({
+    counts: { needs_you: 2, working: 0, up_next: 0, done: 0 },
+    lanes: { needs_you: [base, asking], working: [], up_next: [], done: [] },
+    defs: new Map([[null, DEFAULT_BOARD_DEF]]), lockMap: new Map([[901, false], [902, false]]),
+    threads: new Map(), birds: new Map(),
+  }, "en");
+  const li = (id) => html.match(new RegExp(`<li class="sb-card" data-card="${id}">[\\s\\S]*?</li>`))[0];
+  assert.match(li(901), /data-result-action="accept"/, "a plain recorded result keeps Accept");
+  assert.doesNotMatch(li(902), /data-result-action="accept"/, "Accept can never succeed under an open decision");
+  assert.match(li(902), /data-result-action="reject"/);
+});

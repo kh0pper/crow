@@ -225,10 +225,19 @@ const CARD_UPDATE_FIELDS = ["title", "description", "due_date", "phase", "owner"
 // function must not silently drop that override, so it's threaded through as
 // an explicit opt-in rather than folded into the default (archived-refusing)
 // path every other caller relies on.
-export async function updateCard(tdb, id, fields, actor, { allowArchived } = {}) {
+// `expect` (redesign P3, Ruling P10): { column: value } the caller read and
+// based its write on (keys from CARD_UPDATE_FIELDS). When given, the card
+// must still hold those values, both at read time and in the UPDATE itself
+// (`AND col IS ?`, which matches NULL too), else 409 'stale' and nothing is
+// written: a lane move's clear_ask never wipes a new ask written meanwhile.
+export async function updateCard(tdb, id, fields, actor, { allowArchived, expect } = {}) {
   const cur = await getCard(tdb, id);
   if (!cur) throw fail("card not found", "not_found", 404);
   if (cur.archived_at != null && !allowArchived) throw fail("card is archived", "archived", 409);
+  const guards = Object.entries(expect || {}).filter(([k]) => CARD_UPDATE_FIELDS.includes(k));
+  for (const [k, v] of guards) {
+    if ((cur[k] ?? null) !== (v ?? null)) throw fail("card changed", "stale", 409);
+  }
 
   const f = fields || {};
   const sets = [], args = [], detail = {};
@@ -283,12 +292,20 @@ export async function updateCard(tdb, id, fields, actor, { allowArchived } = {})
 
   sets.push("updated_at=datetime('now')");
   args.push(id);
-  await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=? AND board_id IS NULL`, args });
+  let where = "id=? AND board_id IS NULL";
+  for (const [k, v] of guards) { where += ` AND ${k} IS ?`; args.push(v ?? null); }
+  const w = await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE ${where}`, args });
+  if (guards.length && w.rowsAffected !== 1) throw fail("card changed", "stale", 409);
   await recordMutation(tdb, { itemId: id, verb: "update", actor, detail });
   return { id, changed: true };
 }
 
-export async function moveCard(tdb, cdb, id, status, actor, { lockExempt } = {}) {
+// `expectStatus` (redesign P3, Ruling P10): the status the caller read and
+// based its move on. When given, the UPDATE carries `AND status=?`, so of two
+// moves raced from the same read (two drops, or a drop racing the classic
+// board in another process) exactly one lands; the other changes nothing and
+// throws 409 'stale'. Omitted, the move behaves as it always has.
+export async function moveCard(tdb, cdb, id, status, actor, { lockExempt, expectStatus } = {}) {
   const cur = await getCard(tdb, id);
   if (!cur) throw fail("card not found", "not_found", 404);
 
@@ -311,7 +328,10 @@ export async function moveCard(tdb, cdb, id, status, actor, { lockExempt } = {})
   if (String(cur.status) !== ns) detail.status = [String(cur.status), ns];
   stampTerminal(sets, args, detail, cur, wasTerminal, nowTerminal);
   args.push(id);
-  await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=? AND board_id IS NULL`, args });
+  let where = "id=? AND board_id IS NULL";
+  if (expectStatus != null) { where += " AND status=?"; args.push(String(expectStatus)); }
+  const w = await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE ${where}`, args });
+  if (expectStatus != null && w.rowsAffected !== 1) throw fail("card changed", "stale", 409);
   await recordMutation(tdb, { itemId: id, verb: "move", actor, detail });
 }
 

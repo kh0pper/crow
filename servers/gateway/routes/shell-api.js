@@ -61,7 +61,7 @@ async function latestResultOf(tdb, id) {
  * data_json, and the lock map keyed by Number id). Null for a card that is
  * missing, archived or a tracker item.
  */
-async function laneState(tdb, cdb, id) {
+export async function laneState(tdb, cdb, id) {
   const card = await getCard(tdb, id);
   if (!card || card.archived_at != null) return null;
   const def = await resolveBoardDef(tdb, { projectId: card.project_id == null ? null : Number(card.project_id) });
@@ -71,9 +71,28 @@ async function laneState(tdb, cdb, id) {
   return { card, def, latestResult, locked, lane };
 }
 
-// One lane move per card at a time in this process: the read-plan-write
-// below is then atomic against another lane move of the same card, so two
-// drops of one card make one move and the other sees a stale `from`.
+/**
+ * Run a movePlan's one write, guarded on the state `st` it was planned from
+ * (Ruling P10): a move carries the status read (moveCard expectStatus), a
+ * clear_ask the action_needed read (updateCard expect), and an accept the
+ * newest-result check inside its UPDATE (acceptResult). If the card changed
+ * after the read, in this process or another, the write changes nothing and
+ * throws 409 'stale'. A refuse or none plan writes nothing.
+ */
+export async function applyLanePlan(tdb, cdb, id, st, plan, actor = DASHBOARD_ACTOR) {
+  if (plan.action === "move") {
+    await moveCard(tdb, cdb, id, plan.status, actor, { expectStatus: String(st.card.status) });
+  } else if (plan.action === "accept") {
+    await acceptResult(tdb, cdb, id, plan.resultId, actor, "dashboard");
+  } else if (plan.action === "clear_ask") {
+    await updateCard(tdb, id, { action_needed: null }, actor, { expect: { action_needed: st.card.action_needed ?? null } });
+  }
+}
+
+// One lane move per card at a time in this process, so a second drop of the
+// same card reads the first one's result and gets a clean `stale` before any
+// write. Correctness does not rest on it: the writes themselves are guarded
+// on the state read (applyLanePlan), which also covers other processes.
 const cardQueues = new Map();
 function serialized(id, fn) {
   const prev = cardQueues.get(id) || Promise.resolve();
@@ -165,9 +184,7 @@ export function shellApiRouter(dashboardAuth) {
 
         const plan = movePlan(st.card, st.def, { locked: st.locked, latestResult: st.latestResult }, b.to);
         if (plan.action === "refuse") return jsonError(res, 409, "refused", { reason: plan.reason });
-        if (plan.action === "move") await moveCard(tdb, cdb, id, plan.status, DASHBOARD_ACTOR);
-        else if (plan.action === "accept") await acceptResult(tdb, cdb, id, plan.resultId, DASHBOARD_ACTOR, "dashboard");
-        else if (plan.action === "clear_ask") await updateCard(tdb, id, { action_needed: null }, DASHBOARD_ACTOR);
+        await applyLanePlan(tdb, cdb, id, st, plan);
 
         const after = await laneState(tdb, cdb, id);
         res.json({ ok: true, lane: after ? after.lane : b.to });
