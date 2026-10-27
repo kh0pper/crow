@@ -71,6 +71,7 @@ import { reportResult, decideResult, listResults } from "./board/result-service.
 import { askDecision, notifyBatch } from "./board/decision-service.js";
 import { isEnabledBot } from "./board/bot-lookup.js";
 import { isVoiceBotId } from "../shared/voice-bot.js";
+import { offerCard } from "./board/offer-service.js";
 
 const TASKS_DB = tasksDbPath();
 
@@ -567,6 +568,28 @@ export function createBoardMcpServer(options = {}) {
     "Compute a summary of current board state without storing it: card counts by status, due-within-7-days count, and awaiting-review results count.",
     {},
     () => briefingSnapshotImpl(tdb));
+
+  // Redesign P5: a card OFFER, never a card. Only a bot's own signed Perch thread can offer
+  // (Task 5.1's actor.thread); the offer names the bot's own board project and waits in the chat
+  // for the operator's one tap (POST /dashboard/perch-api/offers/:id/decide makes the card).
+  tool(server, "board_offer_card",
+    "Offer the operator a card for your own board, shown in this Perch chat with an Accept button. Creates no card: the operator's tap makes it (you hear about it on your next turn). Works only in a Perch chat, and only when you have a board. The same title offered again while it is still waiting returns that offer (duplicate:true); at most 3 offers wait per chat.",
+    { title: z.string().min(1).max(500).describe("The card's title, 1-500 characters") },
+    async ({ title }, extra) => {
+      const actor = resolveActor(extra);
+      if (actor.kind !== "bot" || !actor.id || !actor.thread || actor.thread.gateway !== "perch") {
+        throw fail("Offers work only in a Perch chat", "not_perch", 403);
+      }
+      let r;
+      try {
+        r = await offerCard(cdb, { botId: actor.id, threadId: actor.thread.id, title });
+      } catch (e) {
+        if (e && e.code === "no_board") throw fail("This bot has no board to put a card on", "no_board", 409);
+        throw e;
+      }
+      const p = (await cdb.execute({ sql: "SELECT name FROM project_spaces WHERE id=?", args: [r.projectId] })).rows[0];
+      return { offered: true, offer_id: r.offerId, project: { id: r.projectId, name: p ? String(p.name) : null }, duplicate: r.duplicate };
+    });
 
   return server;
 }
