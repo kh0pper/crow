@@ -22,9 +22,14 @@
  *   check-dir DIR
  *            every regular file's name is the sha256 of its content (artifacts store)
  *
+ * reverse ALWAYS carries deletes (MinIO keys missing on Garage are removed,
+ * guarded), so a forward copy/delta whose summary has ok=false (failed,
+ * refused or delete-refused keys) must block the cutover: fix it first.
+ *
  * Exit codes: 0 ok; 1 failures/refusals/verify FAIL; 2 usage; 3 interrupted.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import {
   makeMinioEndpoint, StateLog, UploadLog, copyAll, reverseAll, verifyAll, abortOpenUploads,
   checkContentAddressedDir, parseChecksums, writeJsonAtomic, DEFAULT_CONCURRENCY, PART_SIZE,
@@ -144,6 +149,12 @@ export async function main(argv = process.argv.slice(2)) {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+/** True when argv1 (possibly a symlink or a path needing URL-encoding) is this file. */
+export function isMainModule(metaUrl, argv1) {
+  if (!argv1) return false;
+  try { return pathToFileURL(realpathSync(argv1)).href === metaUrl; } catch { return false; }
+}
+
+if (isMainModule(import.meta.url, process.argv[1])) {
   main().then((code) => process.exit(code));
 }

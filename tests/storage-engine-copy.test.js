@@ -14,7 +14,10 @@ import {
   copyAll, reverseAll, verifyAll, abortOpenUploads, StateLog, UploadLog, readJsonl, carriedHeaders,
   parseChecksums, deleteLimit, checkContentAddressedDir, MIN_PART_SIZE, PART_SIZE, DEFAULT_CONCURRENCY, isMultipartEtag,
 } from "../servers/storage/engine-copy.js";
-import { parseArgs, main } from "../scripts/ops/storage-engine-copy.mjs";
+import { parseArgs, main, isMainModule } from "../scripts/ops/storage-engine-copy.mjs";
+import { spawnSync } from "node:child_process";
+import { symlinkSync, realpathSync } from "node:fs";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import { makeFakeEndpoint } from "./helpers/fake-s3-endpoint.mjs";
 
 const PS = MIN_PART_SIZE; // 5 MiB parts keep the fixtures small
@@ -191,7 +194,9 @@ test("--propagate-deletes carries deletes, guarded per bucket", async () => {
     assert.equal(s.ok, true);
     assert.equal(s.buckets.b.deleted, 5);
     assert.equal((await t.verify()).ok, true);
-    assert.equal(deleteLimit(30), 0, "1 % of a 30-object bucket rounds to 0: any delete there needs the override");
+    assert.equal(deleteLimit(30), 1, "a small bucket may always lose one key");
+    assert.equal(deleteLimit(0), 1);
+    assert.equal(deleteLimit(30, { maxDeleteKeys: 0 }), 0, "an explicit key cap of 0 still wins");
     assert.equal(deleteLimit(1_000_000), 100, "and never more than 100 keys by default");
   } finally { t.cleanup(); }
 });
@@ -404,4 +409,42 @@ test("CLI: argument parsing, usage errors, check-dir", async () => {
     rmSync(dir, { recursive: true });
   } finally { console.error = orig; console.log = origLog; }
   assert.ok(errs.some((e) => /--state FILE is required/.test(e)));
+});
+
+test("a part upload slower than the idle timeout does not kill the source stream", async () => {
+  const t = setup();
+  try {
+    t.src.seed("b", "slow", bytes(PS * 2 + 5));
+    const orig = t.dst.mpPart;
+    t.dst.mpPart = async (...a) => { await new Promise((r) => setTimeout(r, 150)); return orig(...a); };
+    const s = await t.run({ idleMs: 50, retries: 0 });
+    assert.equal(s.ok, true, JSON.stringify(s.buckets.b.failed));
+    assert.ok(t.dst.object("b", "slow").data.equals(bytes(PS * 2 + 5)));
+    // A source that really stalls still trips it.
+    t.src.seed("b", "stall", bytes(100));
+    const get = t.src.get;
+    t.src.get = async (b, k) => {
+      const r = await get(b, k);
+      if (k !== "stall") return r;
+      const { Readable } = await import("node:stream");
+      return { headers: r.headers, body: new Readable({ read() {} }) };
+    };
+    const s2 = await t.run({ idleMs: 50, retries: 0 });
+    assert.match(s2.buckets.b.failed[0].error, /idle/);
+  } finally { t.cleanup(); }
+});
+
+test("CLI main guard: runs through a symlink and through a path that needs URL-encoding", () => {
+  const cli = fileURLToPath(new URL("../scripts/ops/storage-engine-copy.mjs", import.meta.url));
+  const dir = mkdtempSync(join(tmpdir(), "engine copy %cli-"));
+  try {
+    const link = join(dir, "copy tool #1.mjs");
+    symlinkSync(cli, link);
+    assert.equal(isMainModule(pathToFileURL(realpathSync(cli)).href, link), true);
+    assert.equal(isMainModule(pathToFileURL(realpathSync(cli)).href, join(dir, "nope.mjs")), false);
+    const r = spawnSync(process.execPath, [link, "help"], { encoding: "utf8", timeout: 30_000 });
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /Commands:/, "the CLI ran instead of exiting silently");
+    assert.match(r.stdout, /reverse ALWAYS carries deletes/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

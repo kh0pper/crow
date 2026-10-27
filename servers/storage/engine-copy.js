@@ -276,7 +276,14 @@ async function* readParts(body, buffer, partSize, expected, hash, counter, idleM
         const n = Math.min(partSize - fill, chunk.length - off);
         chunk.copy(buffer, fill, off, off + n);
         fill += n; off += n;
-        if (fill === partSize) { yield buffer.subarray(0, fill); fill = 0; }
+        if (fill === partSize) {
+          // The consumer uploads the part while we are suspended here: the idle
+          // timer measures the SOURCE only, so it is off for the upload.
+          clearTimeout(timer);
+          yield buffer.subarray(0, fill);
+          fill = 0;
+          arm();
+        }
       }
     }
   } finally { clearTimeout(timer); }
@@ -374,7 +381,8 @@ export async function copyObject({ src, dst, bucket, key, buffer, partSize = PAR
 // ---------------------------------------------------------------------------
 
 export function deleteLimit(bucketCount, { maxDeletePct = DEFAULT_MAX_DELETE_PCT, maxDeleteKeys = DEFAULT_MAX_DELETE_KEYS } = {}) {
-  return Math.min(Math.floor((bucketCount * maxDeletePct) / 100), maxDeleteKeys);
+  // At least one key, so a small bucket's single legitimate delete is not refused.
+  return Math.min(Math.max(1, Math.floor((bucketCount * maxDeletePct) / 100)), maxDeleteKeys);
 }
 
 // ---------------------------------------------------------------------------

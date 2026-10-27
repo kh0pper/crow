@@ -186,10 +186,11 @@ test("live: copy MinIO -> Garage, verify, catch a corrupted and a missing object
   r = await runCli(["copy", "--from", from, "--to", to, "--all", "--state", state, "--delta"], env);
   assert.equal(r.code, 0, r.err);
   await minio.removeObject("capstone-research", "bulk/3.txt");
+  await minio.removeObject("capstone-research", "bulk/4.txt");
   r = await runCli(["copy", "--from", from, "--to", to, "--all", "--state", state, "--delta", "--propagate-deletes"], env);
-  assert.equal(r.code, 1, "1 % of 41 objects is 0: refused without the override");
+  assert.equal(r.code, 1, "2 deletes on 41 objects exceed the 1-key floor: refused without the override");
   assert.ok(await garage.statObject("capstone-research", "bulk/3.txt"));
-  r = await runCli(["copy", "--from", from, "--to", to, "--all", "--state", state, "--delta", "--propagate-deletes", "--max-delete-pct", "100", "--max-delete-keys", "1"], env);
+  r = await runCli(["copy", "--from", from, "--to", to, "--all", "--state", state, "--delta", "--propagate-deletes", "--max-delete-pct", "100", "--max-delete-keys", "2"], env);
   assert.equal(r.code, 0, r.err);
   await assert.rejects(garage.statObject("capstone-research", "bulk/3.txt"), /Not Found|NotFound|NoSuchKey/);
   r = await runCli(["verify", "--from", from, "--to", to, "--all", "--state", state, "--report", report, "--reread-source"], env);
