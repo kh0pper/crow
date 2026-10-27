@@ -23,6 +23,7 @@ import { fmt } from "../shared/relative-dates.js";
 const CHECK_INTERVAL_MS = 60 * 1000;
 const RETENTION_EVERY = 60; // ticks between run-history prunes (and at boot)
 const REQUEST_TTL = "-1 hour";
+const SCHEDULE_PAGE = "/dashboard/schedule"; // the Schedule panel, where every notice below points
 
 let timer = null;
 let db = null;
@@ -47,13 +48,13 @@ const STR = {
     missedManyBody: (n, a, b) => `Due ${n} times, ${a} → ${b}, while Crow wasn't running.`,
     failedOne: (t) => `Reminder failed: ${t}`,
     pausedOne: (t) => `Paused during the upgrade: ${t}`,
-    pausedFrequent: (m) => `It would have notified every ${m} minutes. Ask Crow to turn it back on if you want it.`,
+    pausedFrequent: (m) => `It would have notified every ${m} minutes. Turn it back on in Schedule if you want it.`,
     pausedSystem: "It belonged to a retired runner and could never run.",
     summaryMissed: (n) => `${n} schedules missed runs while Crow wasn't running`,
     summaryMixed: (n) => `${n} schedules need a look`,
     summaryBots: (n) => `${n} bot routines missed runs while Crow wasn't running`,
     missedBot: (b) => `Missed: ${b} routine`,
-    summaryBody: "Ask Crow to list your schedules to see them.",
+    summaryBody: "Open Schedule to see them.",
     deleted: "A deleted schedule",
   },
   es: {
@@ -64,13 +65,13 @@ const STR = {
     missedManyBody: (n, a, b) => `Tocaba ${n} veces, ${a} → ${b}, mientras Crow no estaba en marcha.`,
     failedOne: (t) => `Falló el recordatorio: ${t}`,
     pausedOne: (t) => `En pausa por la actualización: ${t}`,
-    pausedFrequent: (m) => `Habría avisado cada ${m} minutos. Pide a Crow que lo reactive si lo quieres.`,
+    pausedFrequent: (m) => `Habría avisado cada ${m} minutos. Reactívalo en Agenda si lo quieres.`,
     pausedSystem: "Pertenecía a un ejecutor retirado y nunca podía ejecutarse.",
     summaryMissed: (n) => `${n} programaciones no se ejecutaron mientras Crow no estaba en marcha`,
     summaryMixed: (n) => `${n} programaciones necesitan revisión`,
     summaryBots: (n) => `${n} rutinas de bot no se ejecutaron mientras Crow no estaba en marcha`,
     missedBot: (b) => `No se ejecutó: rutina ${b}`,
-    summaryBody: "Pide a Crow la lista de tus programaciones para verlas.",
+    summaryBody: "Ábrelas en Agenda para verlas.",
     deleted: "Una programación borrada",
   },
 };
@@ -256,8 +257,7 @@ async function notifyOnce(db, now, { zone, lang, notify = defaultNotify }) {
   if (claimed.length > 1) {
     const allMissed = claimed.every((c) => c.status === "missed");
     const allBots = allMissed && claimed.every((c) => scheduleKind(c.task) === "bot_routine");
-    // No action_url until the Schedule page exists (panel PR 2).
-    await send({ ...base, type: "system", title: allBots ? S.summaryBots(claimed.length) : allMissed ? S.summaryMissed(claimed.length) : S.summaryMixed(claimed.length), body: S.summaryBody });
+    await send({ ...base, type: "system", action_url: SCHEDULE_PAGE, title: allBots ? S.summaryBots(claimed.length) : allMissed ? S.summaryMissed(claimed.length) : S.summaryMixed(claimed.length), body: S.summaryBody });
     return { claimed: runIds };
   }
   const c = claimed[0];
@@ -266,7 +266,8 @@ async function notifyOnce(db, now, { zone, lang, notify = defaultNotify }) {
   let detail = {};
   try { detail = JSON.parse(c.detail || "{}") || {}; } catch {}
   const z = zoneFor(c.tz, zone);
-  const one = { ...base, schedule_id: c.task ? Number(c.schedule_id) : null };
+  // One run: the page opens on that run's schedule (dashboard/panels/schedule.js reads ?run=).
+  const one = { ...base, schedule_id: c.task ? Number(c.schedule_id) : null, action_url: c.task ? `${SCHEDULE_PAGE}?run=${Number(c.id)}` : SCHEDULE_PAGE };
   if (c.status === "paused") {
     await send({ ...one, type: "system", title: S.pausedOne(text), body: detail.reason === "frequent" ? S.pausedFrequent(detail.every_min) : S.pausedSystem });
   } else if (c.status === "failed") {
