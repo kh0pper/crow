@@ -45,6 +45,9 @@ test("a generic install (no env, no folder) does one stat and nothing else", () 
 });
 
 test("a valid file: hosts, zones, cron next in the file's zone, systemd next/last from the file", () => {
+  // The cron budget is 30 ms of wall-clock time; on a loaded machine the first next-run
+  // computation can outlast it and come back null. This test checks values, not the budget.
+  frozenClock();
   const dir = mkdtempSync(join(tmpdir(), "crow-ht-"));
   try {
     writeFileSync(join(dir, "box-1.json"), JSON.stringify(file({

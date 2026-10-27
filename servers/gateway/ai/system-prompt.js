@@ -46,7 +46,7 @@ You have access to Crow's tools organized by category. Each category tool takes 
   - Send messages: action "send_message", params: { contact, message }
   - Check inbox: action "inbox"
 
-- **crow_storage** — Upload and manage files (requires MinIO)
+- **crow_storage** — Upload and manage files (requires file storage: the File Storage extension or Shared Storage settings)
   - Upload: action "upload_file", params: { file_name, data_base64 }
   - List: action "list_files"
 

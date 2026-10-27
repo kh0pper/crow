@@ -56,7 +56,7 @@ Don't fabricate HuggingFace model IDs. If the user wants a specific model and yo
 Once vLLM is up, the OpenAI-compatible endpoint drops into Maker Lab's config:
 
 ```
-MAKER_LAB_LLM_ENDPOINT=http://<host>:8089/v1
+MAKER_LAB_LLM_ENDPOINT=http://<host>:8044/v1
 MAKER_LAB_LLM_MODEL=<same as VLLM_MODEL>
 ```
 

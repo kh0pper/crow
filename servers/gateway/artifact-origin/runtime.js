@@ -51,6 +51,18 @@ export function isolationFor(dashboardHost) {
   return h && d && h.toLowerCase() !== d.toLowerCase() ? "own-host" : "shared-host";
 }
 
+/**
+ * The address a process on this machine uses to reach the listener (suggestion 6):
+ * the bind address, with the wildcards mapped to loopback. The preview renderer's
+ * fetcher connects here, never to the host in a browser's URL.
+ */
+function loopbackFor(bind) {
+  const h = String(bind).replace(/^\[|\]$/g, "");
+  if (h === "0.0.0.0") return "127.0.0.1";
+  if (h === "::") return "::1";
+  return h;
+}
+
 export async function startArtifactOriginFromEnv(env = process.env) {
   // Idempotent (PR A review L6): a second call returns the running server
   // instead of orphaning its reference. Restart = _resetForTest (tests) or a
@@ -71,7 +83,7 @@ export async function startArtifactOriginFromEnv(env = process.env) {
     port, host, tokens, publicBase: configured,
     resolveContent: async (q) => (resolver ? resolver(q) : null),
   });
-  info = { baseUrl: configured || `http://localhost:${port}`, port, configured: !!configured };
+  info = { baseUrl: configured || `http://localhost:${port}`, port, configured: !!configured, bindHost: loopbackFor(host) };
   return server;
 }
 

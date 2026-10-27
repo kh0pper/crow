@@ -117,11 +117,12 @@ console.log(`  Core servers:  ${coreList} ${dim("(ready — no config needed)")}
 
 const storageServer = CONDITIONAL_SERVERS.find((s) => s.name === "crow-storage");
 if (storageServer) {
-  const storageConfigured = storageServer.envKeys.every((k) => !!env[k]);
-  if (storageConfigured) {
-    console.log(`  Storage:       ${green("configured")}`);
+  // The storage server reads the Shared Storage settings from the DB first; the env is
+  // only its fallback, so an empty env is not "unconfigured".
+  if (env.S3_ENDPOINT || env.MINIO_ENDPOINT) {
+    console.log(`  Storage:       ${green("configured (env fallback)")}`);
   } else {
-    console.log(`  Storage:       ${dim("not configured (needs MinIO — see .env)")}`);
+    console.log(`  Storage:       ${dim("from Shared Storage settings, if set (install File Storage (Garage) from Extensions)")}`);
   }
 }
 

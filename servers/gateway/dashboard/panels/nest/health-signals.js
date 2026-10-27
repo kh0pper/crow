@@ -8,7 +8,7 @@
  *
  * Signals:
  *   disk      — df-based free % (<10% → warn)
- *   storage   — MinIO availability (MINIO_ENDPOINT unset → info/off; unreachable → warn)
+ *   storage   — file storage availability (not configured → info/off; unreachable → warn)
  *   agents    — pi_bot_defs enabled count (always ok, count display)
  *   peers     — paired peer's gateway URL failing /health >=2h (warn, pushed);
  *               else trusted peers unseen >24h (info)
@@ -182,8 +182,14 @@ function diskSignal() {
 }
 
 async function storageSignal() {
-  const endpoint = process.env.MINIO_ENDPOINT;
-  if (!endpoint) {
+  // Set up = the Shared Storage settings in the DB (what the gateway uses) or the
+  // S3_* / MINIO_* env fallback — not MINIO_ENDPOINT alone.
+  let configured = false;
+  try {
+    const { isConfigured } = await import("../../../../storage/s3-client.js");
+    configured = isConfigured();
+  } catch {}
+  if (!configured) {
     return {
       id: "storage",
       severity: null,

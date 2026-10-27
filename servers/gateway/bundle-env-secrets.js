@@ -9,9 +9,15 @@
  *                                     key's name>` on the public one) → a P-256 Web Push
  *                                     keypair, urlsafe base64 exactly as Mastodon's
  *                                     `rake mastodon:webpush:generate_vapid_key` prints it
+ *   env_vars[].generate: "hex32"     → 32 random bytes as 64 lowercase hex chars (Garage's
+ *                                     rpc_secret shape; also used for its S3 secret key)
+ *   env_vars[].generate: "garage_key_id" → `GK` + 24 hex chars, Garage's own S3 key id shape
  *   env_vars[].propagate: true       → a generated key that gateway-side code reads from
  *                                     process.env (phone's runner secret, coturn's TURN
  *                                     secret, MinIO root): ALSO written to the gateway .env
+ *   env_vars[].propagate_as: "NAME"  → with propagate: true, the gateway .env gets the value
+ *                                     under NAME instead (Garage's default key id reaches the
+ *                                     gateway as S3_ACCESS_KEY)
  *
  *   env_vars[].keychain: true        → the minted plaintext goes to the Crow keychain BEFORE
  *                                     anything is persisted (planGeneratedEnv → persist())
@@ -33,7 +39,7 @@ import { parseEnvText, formatEnvLines } from "./bundle-env-codec.js";
 export { parseEnvText };
 import { argon2idPhc } from "./keychain/argon2-phc.js";
 
-const GENERATE_KINDS = new Set(["secret", "laravel_key", "vapid_private_key", "vapid_public_key"]);
+const GENERATE_KINDS = new Set(["secret", "laravel_key", "vapid_private_key", "vapid_public_key", "hex32", "garage_key_id"]);
 export const GENERATE_KIND_NAMES = Object.freeze([...GENERATE_KINDS]);
 
 /** Ruby's Base64.urlsafe_encode64 (padded) — the form the webpush gem reads and prints. */
@@ -79,6 +85,8 @@ export function isReplacedValue(spec, value) {
 
 export function newSecretValue(kind = "secret") {
   if (kind === "laravel_key") return `base64:${randomBytes(32).toString("base64")}`;
+  if (kind === "hex32") return randomBytes(32).toString("hex");
+  if (kind === "garage_key_id") return `GK${randomBytes(12).toString("hex")}`;
   return randomBytes(32).toString("base64url");
 }
 
@@ -331,6 +339,27 @@ export function gatewayGeneratedKeys(manifest) {
   return (manifest?.env_vars || [])
     .filter((v) => v && typeof v.name === "string" && GENERATE_KINDS.has(v.generate) && v.propagate === true && !v.store_as)
     .map((v) => v.name);
+}
+
+/**
+ * Generated values the gateway .env receives, keyed by the name it holds them under
+ * (`propagate_as`, else the var's own name). `generated` maps var name → value.
+ */
+export function gatewayGeneratedEnv(manifest, generated) {
+  const byName = new Map((manifest?.env_vars || []).filter((v) => v && typeof v.name === "string").map((v) => [v.name, v]));
+  const out = {};
+  for (const k of gatewayGeneratedKeys(manifest)) {
+    if (!generated || !generated[k]) continue;
+    out[byName.get(k)?.propagate_as || k] = generated[k];
+  }
+  return out;
+}
+
+/** Every name a bundle's vars can hold in the gateway .env (what uninstall re-comments). */
+export function gatewayEnvNames(manifest) {
+  return (manifest?.env_vars || [])
+    .filter((v) => v && typeof v.name === "string")
+    .map((v) => (v.propagate === true && v.propagate_as ? v.propagate_as : v.name));
 }
 
 /**

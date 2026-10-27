@@ -1,5 +1,6 @@
 {
   "id": "faster-whisper-server",
+  "version": "1.0.0",
   "type": "bundle",
   "name": "Faster-Whisper Server (local)",
   "category": "ai",

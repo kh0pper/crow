@@ -66,7 +66,7 @@ import { resolveDataDir } from "../../db.js";
 import { PINNED_PATH_ENV_KEYS } from "../../shared/crow-home.js";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { isPlaceholderValue } from "../bundle-env-placeholders.js";
-import { keychainGeneratedKeys, planGeneratedEnv, retainedEnvPath, legacyFallbackKeys, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedKeys, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
+import { keychainGeneratedKeys, planGeneratedEnv, retainedEnvPath, legacyFallbackKeys, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedEnv, gatewayEnvNames, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
 
 /**
  * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
@@ -2110,6 +2110,31 @@ export function declaredEnvSubset(manifest, envVars) {
   return subset;
 }
 
+const STORAGE_ENV_KEYS = ["S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY"];
+
+/**
+ * Whether Crow's file storage is already set up some other way: Shared Storage rows in
+ * the DB, a MINIO_ENDPOINT or S3_ENDPOINT in the gateway .env, or the MinIO bundle installed.
+ * An unreadable DB counts as configured (never repoint storage on a guess).
+ */
+export async function storageAlreadyConfigured(bundleId = null) {
+  if (getInstalled().some((i) => (typeof i === "string" ? i : i?.id) === "minio" && bundleId !== "minio")) return true;
+  try {
+    const env = parseEnvText(readFileSync(APP_ENV_PATH, "utf8"));
+    if (env.S3_ENDPOINT || env.MINIO_ENDPOINT) return true;
+  } catch { /* no gateway .env */ }
+  let db;
+  try {
+    db = createDbClient();
+    const { rows } = await db.execute({ sql: "SELECT 1 FROM dashboard_settings WHERE key LIKE 'storage.shared.%' AND value IS NOT NULL AND value != '' LIMIT 1", args: [] });
+    return rows.length > 0;
+  } catch {
+    return true;
+  } finally {
+    try { db?.close(); } catch { /* ignore */ }
+  }
+}
+
 /**
  * Re-comment env vars in the gateway's .env file during uninstall.
  * Turns `KEY=value` back into `# KEY=value`.
@@ -3059,9 +3084,16 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       // dependent services connect. Undeclared request keys never reach it.
       // Generated keys reach it only where the manifest says `propagate: true` (gateway-side
       // code reads them from process.env: phone's runner secret, coturn, MinIO root).
-      const gatewayGenerated = {};
-      for (const k of gatewayGeneratedKeys(manifest)) if (generated[k]) gatewayGenerated[k] = generated[k];
-      const gatewayEnv = declaredEnvSubset(manifest, { ...(reqEnv || {}), ...gatewayGenerated });
+      // propagate_as renames on the way (Garage's default key id → S3_ACCESS_KEY).
+      const gatewayEnv = { ...declaredEnvSubset(manifest, reqEnv || {}), ...gatewayGeneratedEnv(manifest, generated) };
+      // S3_* outranks MINIO_* in the storage client: on a host whose storage already works
+      // (Shared Storage rows, a MINIO_*/S3_* gateway env, or MinIO installed), installing a
+      // new engine must not repoint storage at its empty buckets on the next restart. The
+      // explicit "Upgrade storage engine" step switches it after the data is copied.
+      if (STORAGE_ENV_KEYS.some((k) => k in gatewayEnv) && (await storageAlreadyConfigured(bundleId))) {
+        for (const k of STORAGE_ENV_KEYS) delete gatewayEnv[k];
+        appendLog(job, "Crow's file storage already points at another storage engine; left as it is (switch it with Upgrade storage engine)");
+      }
       if (Object.keys(gatewayEnv).length > 0) {
         propagateEnvToGateway(gatewayEnv);
         appendLog(job, "Configuration applied to gateway");
@@ -3958,8 +3990,7 @@ export default function bundlesRouter() {
 
         // 3. Re-comment env vars in gateway .env
         if (addonType === "bundle" && manifest?.env_vars) {
-          const envKeys = manifest.env_vars.map((v) => v.name);
-          revertEnvInGateway(envKeys);
+          revertEnvInGateway(gatewayEnvNames(manifest));
           appendLog(job, "Reverted gateway configuration");
           needsRestart = true;
         }

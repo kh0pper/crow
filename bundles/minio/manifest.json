@@ -1,12 +1,13 @@
 {
   "id": "minio",
   "name": "File Storage (MinIO)",
-  "version": "1.0.2",
-  "description": "S3-compatible file storage — upload, organize, and share files through Crow",
+  "version": "1.0.3",
+  "description": "Deprecated: MinIO is no longer maintained upstream and its image can no longer be downloaded. Existing installs keep running; new installs use File Storage (Garage).",
   "type": "bundle",
   "author": "Crow",
   "category": "storage",
-  "tags": ["storage", "files", "s3", "upload", "self-hosted"],
+  "tags": ["storage", "files", "s3", "upload", "self-hosted", "deprecated"],
+  "deprecated": { "since": "2026-10-27", "superseded_by": "garage" },
   "icon": "archive",
   "docker": {
     "composefile": "docker-compose.yml"

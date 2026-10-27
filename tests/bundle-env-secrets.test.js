@@ -212,3 +212,40 @@ test("a bundle with a generated key keeps its .env.example defaults (mode 600)",
 test("resolveGeneratedEnv rejects an invalid bundle id before touching CROW_HOME", () => {
   assert.throws(() => S.resolveGeneratedEnv("../evil", MANIFEST, { destDir: scratch("d-"), crowHome: scratch("h-") }), /Invalid bundle ID/);
 });
+
+// ── Garage (PR 1): hex32 + garage_key_id kinds, and propagate_as ──
+
+test("generate: hex32 mints 64 lowercase hex chars (32 bytes); garage_key_id mints GK + 24 hex", () => {
+  for (let i = 0; i < 5; i++) {
+    assert.match(S.newSecretValue("hex32"), /^[0-9a-f]{64}$/);
+    assert.match(S.newSecretValue("garage_key_id"), /^GK[0-9a-f]{24}$/);
+  }
+  assert.notEqual(S.newSecretValue("hex32"), S.newSecretValue("hex32"));
+  assert.ok(S.GENERATE_KIND_NAMES.includes("hex32"));
+  assert.ok(S.GENERATE_KIND_NAMES.includes("garage_key_id"));
+});
+
+test("hex32 / garage_key_id are generated keys: minted once, reused on reinstall", () => {
+  const m = { env_vars: [{ name: "K_ID", generate: "garage_key_id" }, { name: "K_SECRET", generate: "hex32" }] };
+  const home = scratch("h-");
+  const dest = scratch("d-");
+  const first = S.resolveGeneratedEnv("hexdemo", m, { destDir: dest, crowHome: home });
+  assert.match(first.K_ID, /^GK[0-9a-f]{24}$/);
+  assert.match(first.K_SECRET, /^[0-9a-f]{64}$/);
+  const again = S.resolveGeneratedEnv("hexdemo", m, { destDir: scratch("d-"), crowHome: home });
+  assert.deepEqual(again, first, "the retained copy wins: never regenerated");
+});
+
+test("gatewayGeneratedEnv: propagate_as renames a generated key on its way to the gateway .env", () => {
+  const m = {
+    env_vars: [
+      { name: "G_ID", generate: "garage_key_id", propagate: true, propagate_as: "S3_ACCESS_KEY" },
+      { name: "G_SECRET", generate: "hex32", propagate: true, propagate_as: "S3_SECRET_KEY" },
+      { name: "G_PLAIN", generate: "secret", propagate: true },
+      { name: "G_MASTER", generate: "secret", propagate: false },
+    ],
+  };
+  const out = S.gatewayGeneratedEnv(m, { G_ID: "GK0123", G_SECRET: "ab", G_PLAIN: "p", G_MASTER: "never" });
+  assert.deepEqual(out, { S3_ACCESS_KEY: "GK0123", S3_SECRET_KEY: "ab", G_PLAIN: "p" });
+  assert.deepEqual(S.gatewayEnvNames(m).sort(), ["G_MASTER", "G_PLAIN", "S3_ACCESS_KEY", "S3_SECRET_KEY"].sort(), "uninstall re-comments the names the gateway .env really holds");
+});
