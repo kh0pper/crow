@@ -30,6 +30,18 @@
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
 import { getPeerCreds } from "./peer-credentials.js";
+import { peerTrust } from "./peer-trust.js";
+
+/** The one body every refused signed call gets (PT-1). */
+export const PEER_AUTH_FAILED = "peer_auth_failed";
+
+// The dashboard's exported hashToken (one sha256-hex helper, review S9),
+// imported lazily so this module stays light for stdio servers.
+let _hashToken = null;
+async function hashBearer(t) {
+  if (!_hashToken) ({ hashToken: _hashToken } = await import("../gateway/dashboard/auth.js"));
+  return _hashToken(t);
+}
 
 const DEFAULT_SKEW_MS = 60_000;  // ±60s
 const NONCE_TTL_MS = 120_000;    // entries evicted after 120s
@@ -389,7 +401,7 @@ export async function auditCrossHostCall(db, record) {
 /**
  * Express middleware that verifies an inbound cross-host signed request.
  *
- * @param {object} dbClient  libsql client used ONLY for audit writes
+ * @param {object} dbClient  libsql client: trust lookups + audit writes
  * @param {object} [opts]
  * @param {boolean} [opts.optional=false]
  *   true  → requests without X-Crow-Signature pass through (next()) so
@@ -407,8 +419,14 @@ export async function auditCrossHostCall(db, record) {
  *   signers hash "" for body-less GETs. Must match the signer or HMACs of
  *   empty-body requests fail.
  *
- * Behavior preserved exactly from both inline copies: status codes, error
- * strings, audit rows, and req.crossHostAuth = verifyRequest(...) result.
+ * PT-1: before any key lookup the source's crow_instances row must pass the
+ * one trust predicate (peer-trust.js), and after a valid HMAC the request's
+ * bearer must match the row's bearer hash. Every refusal after the
+ * X-Crow-Source check returns the same 401 {"error":"peer_auth_failed"}; the
+ * specific reason (peer_not_trusted:<reason>, no_signing_key_for_source, an
+ * HMAC failure reason, bearer_mismatch) is written to the audit row only.
+ * `dbClient` must therefore be the instance DB (it is read for trust, not
+ * only written for audit). req.crossHostAuth = verifyRequest(...) result.
  */
 export function crossHostVerifyMiddleware(dbClient, {
   optional = false,
@@ -429,16 +447,33 @@ export function crossHostVerifyMiddleware(dbClient, {
       return res.status(401).json({ error: "missing_x_crow_source" });
     }
 
+    // Every refusal from here on has ONE body (PT-1): an unauthenticated
+    // caller must not learn which instance ids exist, are revoked or paused.
+    // The specific reason is written to the cross_host_calls audit row only.
+    // An audit-write failure never turns a refusal into a 500.
+    const refuse = async (record) => {
+      try {
+        await auditCrossHostCall(dbClient, {
+          sourceInstanceId: source,
+          direction: "inbound",
+          action: actionFor(req),
+          ...record,
+        });
+      } catch { /* audit must not break the refusal */ }
+      return res.status(401).json({ error: PEER_AUTH_FAILED });
+    };
+
+    // The row first: a peer credential is accepted only while the peer's row
+    // passes the one trust predicate (trusted=1, active/offline). Revoked,
+    // paused, legacy trusted=0 and unknown ids are refused before any key is
+    // even looked up. No cache: a revoke from any process applies at once.
+    const trust = await peerTrust(dbClient, source);
+    if (!trust.ok) return refuse({ error: `peer_not_trusted:${trust.reason}` });
+
     // Load shared signing_key from peer-tokens.json
     const creds = getPeerCreds(source);
     if (!creds || !creds.signing_key) {
-      await auditCrossHostCall(dbClient, {
-        sourceInstanceId: source,
-        direction: "inbound",
-        action: actionFor(req),
-        error: "no_signing_key_for_source",
-      });
-      return res.status(401).json({ error: "unknown_peer" });
+      return refuse({ error: "no_signing_key_for_source" });
     }
 
     // Canonical body must match what the signer used. express.json() sets
@@ -462,22 +497,36 @@ export function crossHostVerifyMiddleware(dbClient, {
 
     req.crossHostAuth = result;
 
-    // Audit the validation attempt regardless of outcome. Handler path may
-    // still fail (e.g. bundle missing) but the HMAC-validity fact is what
-    // matters for the security log.
-    await auditCrossHostCall(dbClient, {
-      sourceInstanceId: source,
-      direction: "inbound",
-      action: actionFor(req),
+    const auditBase = {
       ...(auditBundleId ? { bundleId: req.body?.bundle_id, nonce: result.nonce } : {}),
       hmacValid: result.valid,
       timestampSkewMs: result.timestampSkewMs,
-      error: result.valid ? null : result.reason,
-    });
+    };
 
     if (!result.valid) {
-      return res.status(401).json({ error: result.reason });
+      return refuse({ ...auditBase, error: result.reason });
     }
+
+    // Bearer binding: the Authorization bearer every signer sends must match
+    // the row's bearer hash. Two independent factors per signed call: the
+    // HMAC key from the pairing AND the bearer the row still trusts.
+    const authz = String(req.headers.authorization || "");
+    const bearer = authz.startsWith("Bearer ") ? authz.slice(7) : "";
+    if (!bearer || !trust.row?.auth_token_hash || !safeEqHex(await hashBearer(bearer), String(trust.row.auth_token_hash))) {
+      return refuse({ ...auditBase, error: "bearer_mismatch" });
+    }
+
+    // Audit the validation attempt. Handler path may still fail (e.g. bundle
+    // missing) but the HMAC-validity fact is what matters for the security log.
+    try {
+      await auditCrossHostCall(dbClient, {
+        sourceInstanceId: source,
+        direction: "inbound",
+        action: actionFor(req),
+        ...auditBase,
+        error: null,
+      });
+    } catch { /* audit must not break the primary path */ }
 
     return next();
   };

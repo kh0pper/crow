@@ -177,3 +177,113 @@ describe("U2: validateInstanceToken", () => {
     } finally { try { xdb.close(); } catch {} rmSync(d, { recursive: true, force: true }); }
   });
 });
+
+// ---------------------------------------------------------------------------
+// U1: crossHostVerifyMiddleware checks the row, binds the bearer, and refuses
+// with one uniform body (the specific reason lands in the audit row only).
+// ---------------------------------------------------------------------------
+import express from "express";
+import { signRequest, crossHostVerifyMiddleware, _resetNonceCache } from "../servers/shared/cross-host-auth.js";
+
+describe("U1: crossHostVerifyMiddleware on real rows", () => {
+  let u1dir, u1db, server, base, storePath;
+  const KEY = "dd".repeat(32);
+  const tok = (id) => `bearer-${id}`;
+  const sha = (t) => createHash("sha256").update(t).digest("hex");
+  const ROWS = [["u1-active", "active", 1], ["u1-offline", "offline", 1], ["u1-untrusted", "active", 0], ["u1-paused", "paused", 1], ["u1-revoked", "revoked", 1]];
+
+  before(async () => {
+    u1dir = mkdtempSync(join(tmpdir(), "pt-u1-"));
+    u1db = await makeRealDb(u1dir);
+    storePath = join(u1dir, "peer-tokens.json");
+    const store = {};
+    for (const [id, status, trusted] of ROWS) {
+      await addPeerRow(u1db, id, { status, trusted });
+      await u1db.execute({ sql: "UPDATE crow_instances SET auth_token_hash = ? WHERE id = ?", args: [status === "revoked" ? null : sha(tok(id)), id] });
+      store[id] = { auth_token: tok(id), signing_key: KEY, created_at: new Date().toISOString(), rotated_at: null };
+    }
+    store["u1-missing-row"] = { auth_token: tok("u1-missing-row"), signing_key: KEY, created_at: new Date().toISOString(), rotated_at: null };
+    writeFileSync(storePath, JSON.stringify(store), { mode: 0o600 });
+    process.env.CROW_PEER_TOKENS_PATH = storePath;
+    const app = express();
+    app.use(express.json());
+    app.get("/x", crossHostVerifyMiddleware(u1db, { audit: "u1.x", emptyBodyString: "" }), (req, res) => res.json({ reached: true }));
+    await new Promise((r) => { server = app.listen(0, "127.0.0.1", r); });
+    base = `http://127.0.0.1:${server.address().port}`;
+  });
+  after(async () => {
+    server?.closeAllConnections?.();
+    await new Promise((r) => server.close(r));
+    delete process.env.CROW_PEER_TOKENS_PATH;
+    try { u1db.close(); } catch {}
+    rmSync(u1dir, { recursive: true, force: true });
+  });
+
+  async function call(id, { bearer = tok(id) } = {}) {
+    _resetNonceCache();
+    const h = signRequest({ method: "GET", path: "/x", body: "", authToken: "placeholder", signingKey: KEY, sourceInstanceId: id });
+    if (bearer === null) delete h.Authorization; else h.Authorization = `Bearer ${bearer}`;
+    const r = await fetch(`${base}/x`, { headers: h });
+    return { status: r.status, body: await r.json() };
+  }
+  async function lastAuditError(id) {
+    const { rows } = await u1db.execute({ sql: "SELECT error, hmac_valid FROM cross_host_calls WHERE source_instance_id = ? ORDER BY id DESC LIMIT 1", args: [id] });
+    return rows[0]?.error ?? null;
+  }
+
+  test("trusted active and offline rows pass (positive control)", async () => {
+    for (const id of ["u1-active", "u1-offline"]) {
+      const r = await call(id);
+      assert.equal(r.status, 200, id);
+      assert.equal(r.body.reached, true);
+    }
+  });
+
+  test("untrusted, paused, revoked and missing rows get the same 401 body; the audit row has the reason", async () => {
+    const want = { "u1-untrusted": "peer_not_trusted:untrusted", "u1-paused": "peer_not_trusted:paused", "u1-revoked": "peer_not_trusted:revoked", "u1-missing-row": "peer_not_trusted:unknown" };
+    for (const [id, reason] of Object.entries(want)) {
+      const r = await call(id);
+      assert.equal(r.status, 401, id);
+      assert.deepEqual(r.body, { error: "peer_auth_failed" }, id);
+      assert.equal(await lastAuditError(id), reason, id);
+    }
+  });
+
+  test("a valid HMAC with a wrong or missing bearer is refused (bearer binding)", async () => {
+    const wrong = await call("u1-active", { bearer: "not-the-bearer" });
+    assert.equal(wrong.status, 401);
+    assert.deepEqual(wrong.body, { error: "peer_auth_failed" });
+    assert.equal(await lastAuditError("u1-active"), "bearer_mismatch");
+    const missing = await call("u1-active", { bearer: null });
+    assert.equal(missing.status, 401);
+    assert.equal(await lastAuditError("u1-active"), "bearer_mismatch");
+  });
+
+  test("a bad HMAC and an unknown source share the uniform body", async () => {
+    _resetNonceCache();
+    const h = signRequest({ method: "GET", path: "/other", body: "", authToken: tok("u1-active"), signingKey: KEY, sourceInstanceId: "u1-active" });
+    const r = await fetch(`${base}/x`, { headers: h });
+    assert.equal(r.status, 401);
+    assert.deepEqual(await r.json(), { error: "peer_auth_failed" });
+    assert.equal(await lastAuditError("u1-active"), "hmac_mismatch");
+  });
+
+  test("an audit-write failure still yields 401, never 500", async () => {
+    const app = express();
+    const brokenAudit = {
+      execute: async (stmt) => {
+        if (/INSERT INTO cross_host_calls/.test(stmt.sql)) throw new Error("disk I/O error");
+        return u1db.execute(stmt);
+      },
+    };
+    app.get("/x", crossHostVerifyMiddleware(brokenAudit, { audit: "u1.x", emptyBodyString: "" }), (req, res) => res.json({ reached: true }));
+    let s2;
+    await new Promise((r) => { s2 = app.listen(0, "127.0.0.1", r); });
+    try {
+      _resetNonceCache();
+      const h = signRequest({ method: "GET", path: "/x", body: "", authToken: tok("u1-paused"), signingKey: KEY, sourceInstanceId: "u1-paused" });
+      const r = await fetch(`http://127.0.0.1:${s2.address().port}/x`, { headers: h });
+      assert.equal(r.status, 401);
+    } finally { s2.closeAllConnections?.(); await new Promise((r) => s2.close(r)); }
+  });
+});

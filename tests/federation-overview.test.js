@@ -32,11 +32,21 @@ const { signRequest, _resetNonceCache } = await import("../servers/shared/cross-
 const { default: federationRouterFactory } = await import("../servers/gateway/routes/federation.js");
 const { PUBLIC_FUNNEL_PREFIXES, rejectFunneledMiddleware } = await import("../servers/gateway/funnel.js");
 
+const PEER_HASH = (await import("node:crypto")).createHash("sha256").update(TEST_AUTH_TOKEN).digest("hex");
+// Audit sink: refusals share one body; the reason is the audit row's error (args[10]).
+const auditStmts = [];
+const lastAuditError = () => auditStmts[auditStmts.length - 1]?.args?.[10] ?? null;
 function fakeDb() {
   return {
-    execute: async () => ({
-      rows: [{ id: "local-123", name: "grackle", hostname: "grackle-host", is_home: 1 }],
-    }),
+    execute: async (stmt) => {
+      if (/INSERT INTO cross_host_calls/.test(stmt?.sql ?? "")) { auditStmts.push(stmt); return { rows: [] }; }
+      // PT-1: the trust lookup reads the signing peer's row — a trusted,
+      // active peer whose bearer hash matches TEST_AUTH_TOKEN.
+      if (/FROM crow_instances WHERE id = \?/.test(stmt?.sql ?? "") && stmt?.args?.[0] === TEST_SOURCE_ID) {
+        return { rows: [{ id: TEST_SOURCE_ID, status: "active", trusted: 1, auth_token_hash: PEER_HASH }] };
+      }
+      return { rows: [{ id: "local-123", name: "grackle", hostname: "grackle-host", is_home: 1 }] };
+    },
     close: () => {},
   };
 }
@@ -110,7 +120,7 @@ test("federation: signed request with missing X-Crow-Source → 401", async () =
   assert.equal(body.error, "missing_x_crow_source");
 });
 
-test("federation: signed request from unknown peer → 401 unknown_peer", async () => {
+test("federation: signed request from unknown peer → 401, audit unknown", async () => {
   const r = await fetch(`${baseUrl}/dashboard/overview`, {
     headers: {
       "X-Crow-Signature": "a".repeat(64),
@@ -121,7 +131,9 @@ test("federation: signed request from unknown peer → 401 unknown_peer", async 
   });
   assert.equal(r.status, 401);
   const body = await r.json();
-  assert.equal(body.error, "unknown_peer");
+  assert.equal(body.error, "peer_auth_failed");
+  // (this fake DB answers every id with the local row, so the reason reads untrusted)
+  assert.match(lastAuditError(), /^peer_not_trusted:/);
 });
 
 test("federation: valid signed GET /dashboard/overview → 200 + schema", async () => {
@@ -155,7 +167,7 @@ test("federation: valid signed GET /dashboard/overview → 200 + schema", async 
   }
 });
 
-test("federation: replay of same signed request → 401 nonce_replay", async () => {
+test("federation: replay of same signed request → 401, audit nonce_replay", async () => {
   const path = "/dashboard/overview";
   _resetNonceCache();
   const headers = signRequest({
@@ -173,16 +185,18 @@ test("federation: replay of same signed request → 401 nonce_replay", async () 
   const second = await fetch(`${baseUrl}${path}`, { headers });
   assert.equal(second.status, 401, "second call with same nonce should 401");
   const body = await second.json();
-  assert.equal(body.error, "nonce_replay");
+  assert.equal(body.error, "peer_auth_failed");
+  assert.equal(lastAuditError(), "nonce_replay");
 });
 
-test("federation: mismatched signature → 401 hmac_mismatch", async () => {
+test("federation: mismatched signature → 401, audit hmac_mismatch", async () => {
   const path = "/dashboard/overview";
   const headers = signedHeaders({ method: "GET", path, body: "" });
   const r = await fetch(`${baseUrl}${path}?drift=1`, { headers });
   assert.equal(r.status, 401);
   const body = await r.json();
-  assert.equal(body.error, "hmac_mismatch");
+  assert.equal(body.error, "peer_auth_failed");
+  assert.equal(lastAuditError(), "hmac_mismatch");
 });
 
 // ─── Funnel rejection invariants ─────────────────────────────────────
