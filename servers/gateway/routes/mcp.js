@@ -46,6 +46,14 @@ class InMemoryEventStore {
 }
 
 /**
+ * Who opened a session (req.auth.clientId; "instance:<id>" for a paired peer),
+ * so a revoke can close that peer's open streams (PT-1).
+ */
+function sessionOwner(req) {
+  return req.auth?.clientId || null;
+}
+
+/**
  * Create Streamable HTTP handlers for an MCP server.
  * @param {Map} sessions - Session store from SessionManager
  * @param {Function} createServer - Factory function returning McpServer
@@ -63,7 +71,7 @@ function createMcpHandler(sessions, createServer, serverName) {
           sessionIdGenerator: () => randomUUID(),
           eventStore,
           onsessioninitialized: (sid) => {
-            sessions.set(sid, { transport, server });
+            sessions.set(sid, { transport, server, owner: sessionOwner(req) });
             // Log session start
             const clientInfo = req.body?.params?.clientInfo || null;
             recordSessionStart({ sessionId: sid, serverName, transport: "streamable", clientInfo });
@@ -132,7 +140,7 @@ function createSseHandler(sessions, createServer, messagesPath, serverName) {
     try {
       const transport = new SSEServerTransport(messagesPath, res);
       const sessionId = transport.sessionId;
-      sessions.set(sessionId, { transport, server: null });
+      sessions.set(sessionId, { transport, server: null, owner: sessionOwner(req) });
       recordSessionStart({ sessionId, serverName, transport: "sse", clientInfo: null });
       res.on("close", () => {
         sessions.delete(sessionId);

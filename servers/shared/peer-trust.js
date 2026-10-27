@@ -37,6 +37,11 @@ function classify(row) {
   return null;
 }
 
+/** The predicate applied to a row already in hand (same rule as TRUSTED_PEER_SQL). */
+export function rowIsTrusted(row) {
+  return classify(row) === null;
+}
+
 /**
  * @param {object} db  libsql-shaped client ({ execute })
  * @param {string} id  crow_instances.id

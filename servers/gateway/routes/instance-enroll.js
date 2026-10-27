@@ -69,6 +69,7 @@ import {
   generateSecret,
 } from "../../shared/peer-credentials.js";
 import { fenceStatements } from "../../shared/repair-fence.js";
+import { rowIsTrusted } from "../../shared/peer-trust.js";
 import {
   ENROLL_OTC_MIN_LENGTH, MAX_REPAIR_PROOFS, sha256Hex, safeEqual, verifyRepairProofs, repairProofKey,
   hasRepairAllowance, otcFirstSeen, OTC_USED_KEY_PREFIX, REPAIR_ALLOW_KEY_PREFIX,
@@ -217,8 +218,7 @@ export function instanceEnrollRouter(db, { execFileSyncImpl, now = () => Date.no
       let usedAllowance = false;
       if (!fresh) {
         const proofOk = Boolean(existing)
-          && Number(existing.trusted) === 1
-          && (existing.status === "active" || existing.status === "offline")
+          && rowIsTrusted(existing)
           && verifyRepairProofs(
             repairProofKey(existing.auth_token_hash, existingCreds?.signing_key),
             body, repair_proofs, { targetId: localId, otcDigest: digest },

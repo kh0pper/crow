@@ -387,3 +387,458 @@ describe("U11: the re-pair fence is written in every record shape and survives c
     } finally { s.done(); }
   });
 });
+
+// ---------------------------------------------------------------------------
+// U8: the sync apply gate fails closed; the fence is consumed by fast-forward
+// ---------------------------------------------------------------------------
+describe("U8: _isPeerTrusted and fence consumption in the apply loop", () => {
+  const FEED_KEY = Buffer.alloc(32, 7);
+  function stubFeed(length, { update } = {}) {
+    const got = [];
+    return {
+      key: FEED_KEY, length, peers: [{}], got,
+      async get(seq) { got.push(seq); return { table: "nope", op: "insert", row: {} }; },
+      ...(update ? { update } : { async update() { return true; } }),
+    };
+  }
+  async function setup(status, trusted) {
+    const d = mkdtempSync(join(tmpdir(), "pt-u8-"));
+    const xdb = await makeRealDb(d);
+    await addPeerRow(xdb, "u8-peer", { status, trusted });
+    const mgr = new InstanceSyncManager(await makeSharedIdentity(), xdb, LOCAL);
+    return { d, xdb, mgr, done() { try { xdb.close(); } catch {} rmSync(d, { recursive: true, force: true }); } };
+  }
+
+  test("a trusted peer's entries apply (positive control); untrusted and paused do not", async () => {
+    for (const [status, trusted, applies] of [["active", 1, true], ["offline", 1, true], ["active", 0, false], ["paused", 1, false], ["revoked", 1, false]]) {
+      const s = await setup(status, trusted);
+      try {
+        const feed = stubFeed(3);
+        await s.mgr._processNewEntriesInner("u8-peer", feed);
+        assert.equal(feed.got.length, applies ? 3 : 0, `${status}/${trusted}`);
+        assert.equal(await s.mgr._getLastAppliedSeq("u8-peer", feed), applies ? 3 : 0);
+      } finally { s.done(); }
+    }
+  });
+
+  test("a DB error in the trust check applies nothing and does not advance the seq", async () => {
+    const s = await setup("active", 1);
+    try {
+      const real = s.xdb;
+      s.mgr.db = { execute: async (st) => { if (/FROM crow_instances/.test(st.sql)) throw new Error("database disk image is malformed"); return real.execute(st); }, batch: (...a) => real.batch(...a) };
+      const feed = stubFeed(3);
+      await s.mgr._processNewEntriesInner("u8-peer", feed);
+      assert.equal(feed.got.length, 0);
+      s.mgr.db = real;
+      assert.equal(await s.mgr._getLastAppliedSeq("u8-peer", feed), 0);
+    } finally { s.done(); }
+  });
+
+  test("a fenced record fast-forwards to the remote length without applying, then later entries apply", async () => {
+    const s = await setup("revoked", 1);
+    try {
+      await reactivateOnRepair(s.xdb, "u8-peer", { authTokenHash: "aa".repeat(32), localInstanceId: LOCAL });
+      const feed = stubFeed(5);
+      await s.mgr._processNewEntriesInner("u8-peer", feed);
+      assert.equal(feed.got.length, 0, "nothing from the revoked window is applied");
+      assert.deepEqual((await appliedBlob(s.xdb))["u8-peer"], { k: FEED_KEY.toString("hex"), s: 5 });
+      feed.length = 7;
+      await s.mgr._processNewEntriesInner("u8-peer", feed);
+      assert.deepEqual(feed.got, [5, 6], "entries after the fence apply");
+    } finally { s.done(); }
+  });
+
+  test("a fence whose remote-length update fails stays, and nothing applies", async () => {
+    const s = await setup("revoked", 1);
+    try {
+      await reactivateOnRepair(s.xdb, "u8-peer", { authTokenHash: "aa".repeat(32), localInstanceId: LOCAL });
+      const feed = stubFeed(5, { update: async () => { throw new Error("no peers"); } });
+      await s.mgr._processNewEntriesInner("u8-peer", feed);
+      assert.equal(feed.got.length, 0);
+      assert.equal((await appliedBlob(s.xdb))["u8-peer"].ff, 1);
+    } finally { s.done(); }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// U10: a revoked row is frozen (its updated_at stays the revoke time)
+// ---------------------------------------------------------------------------
+import { heartbeatInstance } from "../servers/gateway/instance-registry.js";
+import { markInstanceConnectionSeen } from "../servers/shared/instance-status.js";
+
+const REVOKED_ROW_WRITER_ALLOWLIST = [
+  // [file, a substring unique to the allowed statement]
+  ["servers/gateway/instance-registry.js", "SET status = 'revoked', auth_token_hash = NULL"], // revokeInstance
+  ["servers/gateway/instance-registry.js", "status = CASE WHEN status = 'revoked' THEN 'active' ELSE status END"], // reactivateOnRepair
+  ["servers/gateway/routes/instance-enroll.js", "status = CASE WHEN status = 'revoked' THEN 'active' ELSE status END"], // enroll CAS
+];
+
+/** Every `UPDATE crow_instances` statement in a source text (multiline, any quote). */
+function crowInstancesUpdates(src) {
+  const out = [];
+  const re = /UPDATE\s+crow_instances\b/g;
+  let m;
+  while ((m = re.exec(src))) {
+    let i = m.index - 1;
+    while (i >= 0 && !['"', "`", "'"].includes(src[i])) i--;
+    const q = src[i];
+    const end = src.indexOf(q, m.index);
+    out.push(src.slice(m.index, end === -1 ? undefined : end));
+  }
+  return out;
+}
+function unguarded(file, src) {
+  return crowInstancesUpdates(src).filter((stmt) => {
+    if (/status\s*!=\s*'revoked'/.test(stmt)) return false;
+    return !REVOKED_ROW_WRITER_ALLOWLIST.some(([f, needle]) => f === file && stmt.replace(/\s+/g, " ").includes(needle));
+  });
+}
+
+describe("U10: revoked-row writers", () => {
+  test("positive control: a planted unguarded UPDATE (template string, split lines) is caught", () => {
+    const planted = "await db.execute({\n  sql: `UPDATE crow_instances\n     SET sync_url = ?, updated_at = datetime('now')\n   WHERE id = ?`,\n});\n" +
+      "await db.execute({ sql: \"UPDATE crow_instances SET x = 1 WHERE id = ? AND status != 'revoked'\" });";
+    const bad = unguarded("servers/planted.js", planted);
+    assert.equal(bad.length, 1);
+    assert.match(bad[0], /sync_url/);
+  });
+
+  test("every UPDATE crow_instances under servers/ is guarded or allowlisted", () => {
+    const root = new URL("../", import.meta.url);
+    const files = spawnSync("git", ["ls-files", "servers"], { cwd: root, encoding: "utf8" }).stdout.split("\n").filter((f) => /\.(m?js)$/.test(f));
+    const offenders = [];
+    const allowHits = new Map();
+    let total = 0;
+    for (const f of files) {
+      const src = readFileSync(new URL(f, root), "utf8");
+      const stmts = crowInstancesUpdates(src);
+      total += stmts.length;
+      for (const [af, needle] of REVOKED_ROW_WRITER_ALLOWLIST) {
+        if (af !== f) continue;
+        const k = `${af}|${needle}`;
+        allowHits.set(k, (allowHits.get(k) || 0) + stmts.filter((s) => s.replace(/\s+/g, " ").includes(needle)).length);
+      }
+      for (const s of unguarded(f, src)) offenders.push(`${f}: ${s.replace(/\s+/g, " ").slice(0, 120)}`);
+    }
+    assert.ok(total >= 15, `scanner found ${total} statements (expected the known writers)`);
+    assert.deepEqual(offenders, []);
+    for (const [k, n] of allowHits) assert.equal(n, 1, `allowlist entry matches exactly one statement: ${k}`);
+    assert.equal(allowHits.size, REVOKED_ROW_WRITER_ALLOWLIST.length);
+  });
+
+  test("runtime: liveness writers leave a revoked row's updated_at alone", async () => {
+    const d = mkdtempSync(join(tmpdir(), "pt-u10-"));
+    const xdb = await makeRealDb(d);
+    try {
+      await addPeerRow(xdb, "u10-peer", { status: "revoked", trusted: 1 });
+      await xdb.execute({ sql: "UPDATE crow_instances SET updated_at = '2001-01-01 00:00:00' WHERE id = ?", args: ["u10-peer"] });
+      await heartbeatInstance(xdb, "u10-peer");
+      await heartbeatInstance(xdb, "u10-peer", { status: "active" });
+      await markInstanceConnectionSeen(xdb, { matchedIds: ["u10-peer"] });
+      const row = await getInstance(xdb, "u10-peer");
+      assert.equal(row.updated_at, "2001-01-01 00:00:00");
+      assert.equal(row.status, "revoked");
+    } finally { try { xdb.close(); } catch {} rmSync(d, { recursive: true, force: true }); }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The pair CLI's manual-paste path: the pasted answer must be the peer the
+// operator named, and only a named id is ever reactivated.
+// ---------------------------------------------------------------------------
+describe("pair CLI --manual-paste vets the pasted answer", () => {
+  const CLI = new URL("../scripts/cli/instance-pair.js", import.meta.url).pathname;
+  async function home() {
+    const d = mkdtempSync(join(tmpdir(), "pt-pair-"));
+    const xdb = await makeRealDb(d);
+    await addPeerRow(xdb, "peer-revoked-1", { status: "revoked", trusted: 1 });
+    await addPeerRow(xdb, "peer-other-2", { status: "revoked", trusted: 1 });
+    return { d, xdb };
+  }
+  function runPair(d, args, answer) {
+    return spawnSync(process.execPath, [CLI, "--manual-paste", ...args], {
+      input: JSON.stringify(answer),
+      env: { ...process.env, CROW_HOME: d, CROW_DATA_DIR: d, CROW_DB_PATH: join(d, "crow.db"), CROW_PEER_TOKENS_PATH: join(d, "peer-tokens.json"), CROW_DISABLE_NOSTR: "1" },
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+  }
+  const base = ["--peer-name", "n", "--peer-url", "http://100.64.20.9:3001"];
+
+  test("an answer for a different id than --peer-id is refused and writes nothing", async () => {
+    const { d, xdb } = await home();
+    try {
+      const r = runPair(d, ["--peer-id", "peer-other-2", ...base], { peer_instance_id: "peer-revoked-1", peer_outbound_bearer: "b".repeat(64) });
+      assert.notEqual(r.status, 0, r.stdout);
+      assert.match(r.stderr, /not the --peer-id/);
+      assert.equal((await getInstance(xdb, "peer-revoked-1")).status, "revoked");
+      assert.equal((await getInstance(xdb, "peer-other-2")).status, "revoked");
+      assert.equal(existsSync(join(d, "peer-tokens.json")), false);
+    } finally { try { xdb.close(); } catch {} rmSync(d, { recursive: true, force: true }); }
+  });
+
+  test("an answer with no peer_instance_id is refused", async () => {
+    const { d, xdb } = await home();
+    try {
+      const r = runPair(d, ["--peer-id", "peer-revoked-1", ...base], { peer_outbound_bearer: "b".repeat(64) });
+      assert.notEqual(r.status, 0);
+      assert.equal((await getInstance(xdb, "peer-revoked-1")).status, "revoked");
+    } finally { try { xdb.close(); } catch {} rmSync(d, { recursive: true, force: true }); }
+  });
+
+  test("positive control: the named revoked id is re-paired, with the fence", async () => {
+    const { d, xdb } = await home();
+    try {
+      const r = runPair(d, ["--peer-id", "peer-revoked-1", ...base], { peer_instance_id: "peer-revoked-1", peer_outbound_bearer: "b".repeat(64) });
+      assert.equal(r.status, 0, r.stderr);
+      const row = await getInstance(xdb, "peer-revoked-1");
+      assert.equal(row.status, "active");
+      const { rows } = await xdb.execute({ sql: "SELECT last_applied_seq_per_peer AS b FROM sync_state", args: [] });
+      assert.equal(JSON.parse(rows[0].b)["peer-revoked-1"].ff, 1);
+    } finally { try { xdb.close(); } catch {} rmSync(d, { recursive: true, force: true }); }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// U6: peer-owned MCP sessions can be closed
+// ---------------------------------------------------------------------------
+import { SessionManager, closeSessionsOwnedByEverywhere, countSessionsOwnedByEverywhere } from "../servers/gateway/session-manager.js";
+
+describe("U6: SessionManager.closeSessionsOwnedBy", () => {
+  test("closes only that owner's transports, in every store", async () => {
+    const sm = new SessionManager();
+    const closed = [];
+    const t = (name) => ({ close: async () => { closed.push(name); } });
+    sm.getStore("memory", "streamable").set("s1", { transport: t("s1"), server: null, owner: "instance:B" });
+    sm.getStore("memory", "sse").set("s2", { transport: t("s2"), server: null, owner: "instance:B" });
+    sm.getStore("tools", "streamable").set("s3", { transport: t("s3"), server: null, owner: "instance:C" });
+    sm.getStore("tools", "streamable").set("s4", { transport: t("s4"), server: null, owner: null });
+    assert.equal(sm.countSessionsOwnedBy("instance:B"), 2);
+    assert.equal(countSessionsOwnedByEverywhere("instance:B"), 2);
+    assert.equal(await closeSessionsOwnedByEverywhere("instance:B"), 2);
+    assert.deepEqual(closed.sort(), ["s1", "s2"]);
+    assert.equal(sm.getStore("memory", "streamable").size, 0);
+    assert.equal(sm.getStore("tools", "streamable").size, 2);
+    assert.equal(sm.countSessionsOwnedBy("instance:B"), 0);
+    sm.dispose();
+    assert.equal(countSessionsOwnedByEverywhere("instance:C"), 0, "a disposed manager is no longer reachable");
+  });
+
+  test("the MCP routes record the session owner", () => {
+    const src = readFileSync(new URL("../servers/gateway/routes/mcp.js", import.meta.url), "utf8");
+    assert.equal((src.match(/owner: sessionOwner\(req\)/g) || []).length, 2, "streamable and SSE both record the owner");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// U5: boot reconcile (minted-before rule) + revokePeer kills the key
+// ---------------------------------------------------------------------------
+import { reconcilePeerCreds, snapshotStoreOnce, teardownUntrustedPeers } from "../servers/gateway/peer-trust-sweeper.js";
+import { revokePeer, storeMatchesDb } from "../servers/sharing/revoke-peer.js";
+
+/** Run `fn` with this process pointed at one scratch instance home. */
+async function withHome(fn) {
+  const d = mkdtempSync(join(tmpdir(), "pt-home-"));
+  const dataDir = join(d, "data");
+  const { mkdirSync } = await import("node:fs");
+  mkdirSync(dataDir, { recursive: true });
+  const xdb = await makeRealDb(dataDir);
+  const saved = Object.fromEntries(["CROW_HOME", "CROW_DATA_DIR", "CROW_DB_PATH", "CROW_PEER_TOKENS_PATH"].map((k) => [k, process.env[k]]));
+  Object.assign(process.env, { CROW_HOME: d, CROW_DATA_DIR: dataDir, CROW_DB_PATH: join(dataDir, "crow.db"), CROW_PEER_TOKENS_PATH: join(d, "peer-tokens.json") });
+  try { return await fn({ d, dataDir, xdb, store: join(d, "peer-tokens.json") }); } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    try { xdb.close(); } catch {}
+    rmSync(d, { recursive: true, force: true });
+  }
+}
+const iso = (ms) => new Date(ms).toISOString();
+const sqliteTs = (ms) => iso(ms).replace("T", " ").slice(0, 19);
+
+describe("U5: boot reconcile", () => {
+  test("deletes a revoked peer's key minted before the revoke; keeps a re-pair's newer key and live keys byte-identical; snapshot once; idempotent", async () => {
+    await withHome(async ({ xdb, store }) => {
+      const now = Date.now();
+      await addPeerRow(xdb, "old-revoked", { status: "revoked" });
+      await addPeerRow(xdb, "repair-inflight", { status: "revoked" });
+      await addPeerRow(xdb, "same-second", { status: "revoked" });
+      await addPeerRow(xdb, "live", { status: "active" });
+      await addPeerRow(xdb, "legacy-untrusted", { status: "active", trusted: 0 });
+      const R = now - 60_000;
+      for (const id of ["old-revoked", "repair-inflight", "same-second"]) {
+        await xdb.execute({ sql: "UPDATE crow_instances SET updated_at = ? WHERE id = ?", args: [sqliteTs(R), id] });
+      }
+      const Rsec = Math.floor(R / 1000) * 1000;
+      const entries = {
+        "old-revoked": { auth_token: "a", signing_key: "k1", created_at: iso(R - 86_400_000), rotated_at: null },
+        "repair-inflight": { auth_token: "b", signing_key: "k2", created_at: iso(R - 86_400_000), rotated_at: iso(R + 5_000) },
+        "same-second": { auth_token: "c", signing_key: "k3", created_at: iso(Rsec + 400), rotated_at: null },
+        "live": { auth_token: "d", signing_key: "k4", created_at: iso(R - 86_400_000), rotated_at: null },
+        "legacy-untrusted": { auth_token: "e", signing_key: "k5" },
+        "orphan": { auth_token: "f", signing_key: "k6", created_at: iso(R), rotated_at: null },
+      };
+      writeFileSync(store, JSON.stringify(entries), { mode: 0o600 });
+      const snap = snapshotStoreOnce({ now: () => now });
+      assert.ok(snap && existsSync(snap));
+      assert.equal(statSync(snap).mode & 0o777, 0o600);
+      assert.equal(snapshotStoreOnce({ now: () => now + 1 }), null, "the snapshot is taken once per host");
+
+      const r1 = await reconcilePeerCreds(xdb);
+      assert.deepEqual(r1.deleted, ["old-revoked"]);
+      assert.deepEqual(r1.keptSameSecond, ["same-second"]);
+      assert.deepEqual(r1.orphans, ["orphan"]);
+      assert.deepEqual(r1.untrusted, ["legacy-untrusted"]);
+      const after = JSON.parse(readFileSync(store, "utf8"));
+      assert.equal(after["old-revoked"], undefined);
+      assert.ok(after["repair-inflight"], "a key minted after the revoke (re-pair in flight) survives");
+      assert.deepEqual(after.live, entries.live);
+      assert.deepEqual(after["legacy-untrusted"], entries["legacy-untrusted"], "never auto-changed");
+      assert.ok(after.orphan, "orphans are reported, never deleted");
+      const r2 = await reconcilePeerCreds(xdb);
+      assert.deepEqual(r2.deleted, []);
+      const h = getPeerTrustHealth();
+      assert.deepEqual(h.orphanKeys, ["orphan"]);
+      assert.deepEqual(h.untrustedWithCreds.map((x) => x.id), ["legacy-untrusted"]);
+    });
+  });
+});
+
+describe("revokePeer (both doors) kills the key and the SSO sessions", () => {
+  test("revoke deletes the store entry, nulls the bearer, ends tagged + legacy SSO sessions, keeps other peers", async () => {
+    await withHome(async ({ xdb, store }) => {
+      await addPeerRow(xdb, "victim", { status: "active" });
+      await addPeerRow(xdb, "other", { status: "active" });
+      writeFileSync(store, JSON.stringify({ victim: { auth_token: "a", signing_key: "k" }, other: { auth_token: "b", signing_key: "k2" } }), { mode: 0o600 });
+      const ins = (tok, scopes) => xdb.execute({ sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', ?, ?)", args: [tok, scopes, iso(Date.now() + 3_600_000)] });
+      await ins("t1", "dashboard sso src:victim");
+      await ins("t2", "dashboard sso");
+      await ins("t3", "dashboard sso src:other");
+      await ins("t4", "dashboard");
+      assert.equal(storeMatchesDb(), true);
+      const r = await revokePeer(xdb, "victim", { instanceSyncManager: null });
+      assert.equal(r.ok, true);
+      assert.equal(r.creds_deleted, true);
+      assert.deepEqual(Object.keys(JSON.parse(readFileSync(store, "utf8"))), ["other"]);
+      const { rows } = await xdb.execute({ sql: "SELECT token FROM oauth_tokens ORDER BY token", args: [] });
+      assert.deepEqual(rows.map((x) => x.token), ["t3", "t4"]);
+      const row = await getInstance(xdb, "victim");
+      assert.equal(row.status, "revoked");
+    });
+  });
+
+  test("S6: a store that does not belong to the open DB is not touched (store_mismatch)", async () => {
+    await withHome(async ({ xdb, store, d }) => {
+      await addPeerRow(xdb, "victim", { status: "active" });
+      writeFileSync(store, JSON.stringify({ victim: { auth_token: "a", signing_key: "k" } }), { mode: 0o600 });
+      const other = mkdtempSync(join(tmpdir(), "pt-otherhome-"));
+      const saved = process.env.CROW_PEER_TOKENS_PATH;
+      process.env.CROW_PEER_TOKENS_PATH = join(other, "peer-tokens.json");
+      writeFileSync(process.env.CROW_PEER_TOKENS_PATH, JSON.stringify({ victim: { auth_token: "x", signing_key: "y" } }), { mode: 0o600 });
+      try {
+        assert.equal(storeMatchesDb(), false);
+        const r = await revokePeer(xdb, "victim", { instanceSyncManager: null });
+        assert.equal(r.ok, true);
+        assert.equal(r.creds_deleted, false);
+        assert.equal(r.reason, "store_mismatch");
+        assert.ok(JSON.parse(readFileSync(process.env.CROW_PEER_TOKENS_PATH, "utf8")).victim, "the wrong store is untouched");
+      } finally { process.env.CROW_PEER_TOKENS_PATH = saved; rmSync(other, { recursive: true, force: true }); }
+      // The owning instance's reconcile then finishes the job.
+      await xdb.execute({ sql: "UPDATE crow_instances SET updated_at = datetime('now', '+2 seconds') WHERE id = 'victim'", args: [] });
+      const r2 = await reconcilePeerCreds(xdb);
+      assert.deepEqual(r2.deleted, ["victim"]);
+      assert.equal(d.length > 0, true);
+    });
+  });
+
+  test("S7: a key-only id is purged and reported as an orphan", async () => {
+    await withHome(async ({ xdb, store }) => {
+      writeFileSync(store, JSON.stringify({ ghost: { auth_token: "a", signing_key: "k" } }), { mode: 0o600 });
+      const r = await revokePeer(xdb, "ghost", { instanceSyncManager: null });
+      assert.equal(r.ok, true);
+      assert.equal(r.orphan, true);
+      assert.deepEqual(JSON.parse(readFileSync(store, "utf8")), {});
+      assert.equal((await revokePeer(xdb, "nobody", { instanceSyncManager: null })).reason, "not_found");
+    });
+  });
+
+  test("teardownUntrustedPeers closes a paused peer's sessions and feeds but not a trusted peer's", async () => {
+    await withHome(async ({ xdb }) => {
+      await addPeerRow(xdb, "paused-p", { status: "paused" });
+      await addPeerRow(xdb, "good-p", { status: "active" });
+      const sm = new SessionManager();
+      const closed = [];
+      sm.getStore("memory").set("a", { transport: { close: async () => closed.push("a") }, owner: "instance:paused-p" });
+      sm.getStore("memory").set("b", { transport: { close: async () => closed.push("b") }, owner: "instance:good-p" });
+      const torn = [];
+      const mgr = { inFeeds: new Map([["paused-p", {}], ["good-p", {}]]), outFeeds: new Map(), hasActiveStream: () => false, teardownRevokedPeer: async (id) => torn.push(id) };
+      const ids = await teardownUntrustedPeers(xdb, { instanceSyncManager: mgr, localInstanceId: "self" });
+      sm.dispose();
+      assert.deepEqual(ids, ["paused-p"]);
+      assert.deepEqual(closed, ["a"]);
+      assert.deepEqual(torn, ["paused-p"]);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SSO: every SSO session mint (accept, both 2FA completions) re-checks trust
+// immediately before minting, and tags the session with its source.
+// ---------------------------------------------------------------------------
+describe("mintSsoSession re-checks the source peer", () => {
+  test("a trusted peer mints a tagged session; paused, revoked, untrusted and unknown sources mint nothing", async () => {
+    await withHome(async ({ xdb }) => {
+      const { mintSsoSession } = await import("../servers/gateway/dashboard/auth.js");
+      await addPeerRow(xdb, "sso-good", { status: "active" });
+      await addPeerRow(xdb, "sso-paused", { status: "paused" });
+      await addPeerRow(xdb, "sso-revoked", { status: "revoked" });
+      await addPeerRow(xdb, "sso-untrusted", { status: "active", trusted: 0 });
+      const { token } = await mintSsoSession("sso-good");
+      assert.ok(token);
+      for (const id of ["sso-paused", "sso-revoked", "sso-untrusted", "sso-nobody", null]) {
+        await assert.rejects(mintSsoSession(id), (e) => e.code === "sso_refused", String(id));
+      }
+      const { rows } = await xdb.execute({ sql: "SELECT scopes FROM oauth_tokens WHERE client_id = 'dashboard'", args: [] });
+      assert.deepEqual(rows.map((r) => r.scopes), ["dashboard sso src:sso-good"]);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// U9: every peer-credential verifier applies the one trust predicate
+// ---------------------------------------------------------------------------
+const VERIFIERS = [
+  ["servers/shared/cross-host-auth.js", "export function crossHostVerifyMiddleware"],
+  ["servers/gateway/instance-registry.js", "export async function validateInstanceToken"],
+  ["servers/gateway/dashboard/auth.js", "export async function mintSsoSession"], // SSO accept + both 2FA completions mint here
+  ["servers/gateway/routes/instance-enroll.js", "const proofOk ="], // enroll re-pair proof
+  ["servers/sharing/instance-sync.js", "  async _isPeerTrusted("],
+  ["servers/shared/peer-forward.js", "export async function forwardSignedRequest"],
+];
+const TRUST_TOKENS = /\b(peerTrust|TRUSTED_PEER_SQL|rowIsTrusted)\b/;
+
+function bodyOf(src, def) {
+  const i = src.indexOf(def);
+  if (i === -1) return null;
+  const rest = src.slice(i + def.length);
+  const next = rest.search(/\n(export |async function |function |  async \w+\(|  \w+\([^)]*\) \{\n)/);
+  return def + (next === -1 ? rest : rest.slice(0, next));
+}
+
+describe("U9: verifier inventory", () => {
+  for (const [file, def] of VERIFIERS) {
+    test(`${file} :: ${def.trim()}`, () => {
+      const body = bodyOf(readFileSync(new URL(`../${file}`, import.meta.url), "utf8"), def);
+      assert.ok(body, "verifier not found (renamed? update the inventory)");
+      assert.match(body, TRUST_TOKENS);
+    });
+  }
+  test("positive control: a verifier without the predicate is caught", () => {
+    const src = "export async function fakeVerifier(db, id) {\n  return db.execute('SELECT * FROM crow_instances WHERE id = ?');\n}\nexport function other() { peerTrust(); }\n";
+    assert.doesNotMatch(bodyOf(src, "export async function fakeVerifier"), TRUST_TOKENS);
+  });
+  test("every route that mounts crossHostVerifyMiddleware passes it the instance DB", () => {
+    for (const f of ["servers/gateway/routes/federation.js", "servers/gateway/routes/bundles.js"]) {
+      const src = readFileSync(new URL(`../${f}`, import.meta.url), "utf8");
+      assert.match(src, /crossHostVerifyMiddleware\((dbForAudit|dbForXhost)/, f);
+    }
+  });
+});

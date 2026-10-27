@@ -65,6 +65,7 @@ before(async () => {
     await registry.writeSetting(db, "stt_profiles", JSON.stringify([{ id: "fw", provider: "fasterwhisper", baseUrl: "http://localhost:8004/v1" }]));
     await registry.writeSetting(db, "tts_profiles", JSON.stringify([{ id: "kk", provider: "kokoro", name: "Kokoro (local)" }]));
   });
+  await (await import("./fixtures/sso-source.mjs")).trustedSsoSource("test");
   ({ token: sessionToken } = await auth.mintSsoSession("test"));
 
   rt = kiosk.createKioskRuntime({
@@ -311,6 +312,7 @@ test("no enabled assistant → 4403 no_bot (the page links to the Kiosk panel); 
 });
 
 test("logging out ends the display: the next question is refused and the socket closes 4401", async () => {
+  await (await import("./fixtures/sso-source.mjs")).trustedSsoSource("test");
   const { token } = await auth.mintSsoSession("test");
   const c = await connect({ tok: token });
   assert.ok(c.msgs.some((m) => m.type === "ready"));
@@ -324,6 +326,7 @@ test("logging out ends the display: the next question is refused and the socket 
 });
 
 test("an idle display is closed within a sweep of logout (no turn needed)", async () => {
+  await (await import("./fixtures/sso-source.mjs")).trustedSsoSource("test");
   const { token } = await auth.mintSsoSession("test");
   const c = await connect({ tok: token });
   assert.ok(c.msgs.some((m) => m.type === "ready"));
@@ -338,6 +341,7 @@ test("the same login opening the overlay twice supersedes the first; two logins 
   const b = await connect();
   await a.until(() => a.closed);
   assert.deepEqual(a.closed, { code: 4000, reason: "superseded" });
+  await (await import("./fixtures/sso-source.mjs")).trustedSsoSource("test");
   const { token } = await auth.mintSsoSession("test");
   const other = await connect({ tok: token });
   assert.ok(other.msgs.some((m) => m.type === "ready"));
@@ -1023,6 +1027,7 @@ test("B3 endpoint: auth matrix — session cookie (401), CSRF double-submit on P
 
 test("B3 endpoint: two logins cannot see or steer each other's media (the display is the caller's own login, never taken from the body)", async () => {
   const r = await barServe();
+  await (await import("./fixtures/sso-source.mjs")).trustedSsoSource("test");
   const { token: other } = await auth.mintSsoSession("test");
   try {
     const a = await r.open();
@@ -1184,6 +1189,7 @@ test("B3 dormancy (regression guard): today's session page without bar — closi
 
 test("S5 logout ends bar media with the overlay closed: within one sweep the ticket 404s, the open stream is cut, the endpoint 401s", async () => {
   const r = await barServe();
+  await (await import("./fixtures/sso-source.mjs")).trustedSsoSource("test");
   const { token } = await auth.mintSsoSession("test");
   try {
     const c = await r.open({ tok: token });
@@ -1221,6 +1227,7 @@ test("B3 lifetime: a closed bar display whose ticket has run out (12 h) is dropp
 
 test("S6 no ticket in any log line: play, close the overlay, next, a stream that fails, error, logout", async () => {
   const r = await barServe();
+  await (await import("./fixtures/sso-source.mjs")).trustedSsoSource("test");
   const { token } = await auth.mintSsoSession("test");
   const seen = new Set();
   const note = (v) => { for (const m of JSON.stringify(v).matchAll(new RegExp(TICKET_IN.source, "g"))) seen.add(m[1]); };
@@ -1525,6 +1532,7 @@ test("B3 past the grace window the stopped bar display is gone (the grace sweep 
 test("B3 a logout inside the grace window after a stop cuts nothing that streams: no ticket answers, no login check is kept, the entry goes at grace end", async () => {
   const { DEFAULT_VOLUME } = await import("../bundles/kiosk/server/media.js");
   const r = await barServe();
+  await (await import("./fixtures/sso-source.mjs")).trustedSsoSource("test");
   const { token } = await auth.mintSsoSession("test");
   try {
     const { id, path } = await stoppedInGrace(r, token);
