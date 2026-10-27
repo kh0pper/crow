@@ -213,6 +213,19 @@ test("received never renders, whatever its type", async () => {
   assert.equal(S.acquires, 0);
 });
 
+test("no artifact origin: a type tile with no reason line, and nothing queued", async () => {
+  const a = await art({ type: "page", received: 0 });
+  for (const noOrigin of [{ fetcher: null }, { info: null }]) {
+    const deps = { ...S.deps, ...noOrigin };
+    assert.deepEqual(await P.ensureArtifactPreview(db, a.id, deps), { status: "off", reason: null });
+    const tile = await P.itemPreview(db, { kind: "artifact", ref: a.id }, deps);
+    assert.equal(tile.previewReason, null);
+    assert.equal(tile.previewState, "off");
+  }
+  assert.equal(S.queue.size?.() ?? 0, 0);
+  assert.equal(S.renders.length, 0);
+});
+
 test("only page, document and diagram render", async () => {
   for (const type of ["data", "slides", "pdf", "image", "docx", "map"]) {
     const a = await art({ type });

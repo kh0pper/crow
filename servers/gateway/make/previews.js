@@ -234,7 +234,7 @@ export async function ensureArtifactPreview(db, artifactId, deps = previewDeps()
     if (offSeen.reason !== lastOff) offSeen = { reason: lastOff, at: now() };
     if (now() - offSeen.at < OFF_RECHECK_MS) return off(lastOff);
   }
-  if (!fetcher || !info?.baseUrl) return off("start_failed"); // no artifact origin: nothing to render from
+  if (!fetcher || !info?.baseUrl) return off(null); // no artifact origin configured: type tiles, no reason line, nothing queued
   // 4. A no-save failure for this version less than an hour ago.
   const key = `${art.id}:${n}:${hash16(version.content_hash)}`;
   const failed = failures.get(key);
