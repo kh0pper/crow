@@ -110,11 +110,16 @@ function cronNextTwo(expr, tz, now) {
 }
 
 /** A fresh evaluation budget for one read. */
+// The budget's clock (wall time); a test seam so the count caps can be checked on any machine.
+let budgetClock = () => Date.now();
+/** Test seam: the clock the read budget runs on (null restores the real one). */
+export function _setBudgetClockForTest(fn) { budgetClock = fn || (() => Date.now()); }
+
 function newBudget() {
-  const t = Date.now();
+  const t = budgetClock();
   return { left: CRON_EVAL_CAP, timersLeft: MAX_TOTAL_TIMERS, until: t + READ_BUDGET_MS, cronUntil: t + CRON_BUDGET_MS };
 }
-const outOfTime = (budget) => Date.now() >= budget.until;
+const outOfTime = (budget) => budgetClock() >= budget.until;
 
 /** One timer entry, validated, unknown fields dropped; null when unusable. */
 function validTimer(raw, { tz, now, budget }) {
@@ -131,7 +136,7 @@ function validTimer(raw, { tz, now, budget }) {
   let next = null;
   let cadence = null;
   if (kind === "cron" && schedule) {
-    if (budget.left > 0 && Date.now() < budget.cronUntil) {
+    if (budget.left > 0 && budgetClock() < budget.cronUntil) {
       budget.left--;
       const two = cronNextTwo(schedule, tz, now);
       if (two && two.length) next = two[0];

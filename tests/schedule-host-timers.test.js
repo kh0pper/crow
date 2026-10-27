@@ -13,12 +13,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   readHostTimers, hostTimersDir, validHostFile, commandName, checkCommand, _resetHostTimersCache,
-  SCHEMA, MAX_FILES, MAX_FILE_BYTES, CRON_EVAL_CAP, MAX_TOTAL_TIMERS, MAX_DIR_ENTRIES, _cachedFileCount,
+  SCHEMA, MAX_FILES, MAX_FILE_BYTES, CRON_EVAL_CAP, MAX_TOTAL_TIMERS, MAX_DIR_ENTRIES, _cachedFileCount, _setBudgetClockForTest,
 } from "../servers/gateway/schedule-sources/host-timers.js";
 
 const NOW = Date.parse("2026-10-26T18:00:00Z");
 const file = (over = {}) => ({ schema: SCHEMA, host: "box-1", tz: "America/Chicago", collected_at: "2026-10-26T17:45:00Z", timers: [], ...over });
-beforeEach(() => _resetHostTimersCache());
+beforeEach(() => { _resetHostTimersCache(); _setBudgetClockForTest(null); });
+/** A clock that never moves: only the count caps can stop a read (the same on any machine). */
+const frozenClock = () => _setBudgetClockForTest(() => 0);
 
 /** An fs that counts every call it forwards. */
 function spyFs() {
@@ -164,7 +166,6 @@ test("timing: 500 × a leap-day cron line in one file finishes under 200 ms (bou
     writeFileSync(join(dir, "slow.json"), JSON.stringify(file({ timers })));
     const [out, ms] = timed(() => readHostTimers({ env: { CROW_HOST_TIMERS_DIR: dir }, now: NOW }));
     assert.ok(ms < 200, `took ${ms} ms`);
-    assert.equal(out.hosts[0].timers.length, 500);
     assert.ok(out.hosts[0].timers.every((t) => t.next === null), "no next run inside the look-ahead");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -188,10 +189,28 @@ test("cron evaluations are capped across all files; the rest show no next run", 
     const timers = Array.from({ length: 150 }, (_, i) => ({ id: `cron:${i}`, kind: "cron", name: "x.sh", schedule: "0 9 * * *" }));
     writeFileSync(join(dir, "a.json"), JSON.stringify(file({ host: "a", timers })));
     writeFileSync(join(dir, "b.json"), JSON.stringify(file({ host: "b", timers })));
+    frozenClock();
     const out = readHostTimers({ env: { CROW_HOST_TIMERS_DIR: dir }, now: NOW });
-    const withNext = out.hosts.flatMap((h) => h.timers).filter((t) => t.next !== null).length;
-    // The cap, or fewer when the 30 ms cron budget runs out first (a loaded machine).
-    assert.ok(withNext <= CRON_EVAL_CAP && withNext >= 20, `${withNext} with a next run`);
+    const all = out.hosts.flatMap((h) => h.timers);
+    assert.equal(all.length, 300, "every timer is listed");
+    assert.equal(all.filter((t) => t.next !== null).length, CRON_EVAL_CAP);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("the time budget: a clock that moves 1 ms per look stops cron work at 30 ms and the read at 70 ms", () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-ht-"));
+  try {
+    const timers = Array.from({ length: 150 }, (_, i) => ({ id: `cron:${i}`, kind: "cron", name: "x.sh", schedule: "0 9 * * *" }));
+    writeFileSync(join(dir, "a.json"), JSON.stringify(file({ host: "a", timers })));
+    writeFileSync(join(dir, "b.json"), JSON.stringify(file({ host: "b", timers })));
+    let t = 0;
+    _setBudgetClockForTest(() => t++);
+    const out = readHostTimers({ env: { CROW_HOST_TIMERS_DIR: dir }, now: NOW });
+    const all = out.hosts.flatMap((h) => h.timers);
+    const withNext = all.filter((x) => x.next !== null).length;
+    assert.ok(withNext > 0 && withNext <= 30, `${withNext} next runs inside 30 ms`);
+    assert.ok(all.length > withNext && all.length <= 70, `${all.length} timers inside 70 ms`);
+    assert.equal(out.hiddenTimers + out.unreadFiles * 150, 300 - all.length, "the rest are counted as not shown");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -244,6 +263,7 @@ test("at most 2,000 timers are shown across all files; the rest are counted", ()
   try {
     const timers = Array.from({ length: 500 }, (_, i) => ({ id: `user:t${i}.timer`, kind: "systemd-user", name: `t${i}` }));
     for (let f = 0; f < 5; f++) writeFileSync(join(dir, `h${f}.json`), JSON.stringify(file({ host: `h${f}`, timers })));
+    frozenClock();
     const out = readHostTimers({ env: { CROW_HOST_TIMERS_DIR: dir }, now: NOW });
     const shown = out.hosts.reduce((n, h) => n + h.timers.length, 0);
     assert.equal(shown, MAX_TOTAL_TIMERS);

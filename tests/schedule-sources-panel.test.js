@@ -21,13 +21,14 @@ const db = createDbClient(join(tmpDir, "crow.db"));
 const { default: panel, _setBotGateForTest } = await import("../servers/gateway/dashboard/panels/schedule.js");
 const { readOnlySources, shellQuote, REFRESH_DOCS } = await import("../servers/gateway/schedule-sources/index.js");
 const { agendaGroups } = await import("../servers/gateway/schedule-catalog.js");
-const { _resetHostTimersCache, SCHEMA } = await import("../servers/gateway/schedule-sources/host-timers.js");
+const { _resetHostTimersCache, _setBudgetClockForTest, SCHEMA } = await import("../servers/gateway/schedule-sources/host-timers.js");
 const { renderSchedulePage } = await import("../servers/gateway/dashboard/panels/schedule/html.js");
 _setBotGateForTest({ engine: () => "ready", runtimeOn: async () => true });
 
 const saved = { ledger: process.env.CROW_BOX_LEDGER_PATH, timers: process.env.CROW_HOST_TIMERS_DIR, hold: process.env.CROW_BOX_RESERVATION_PATH, home: process.env.CROW_HOME };
 after(() => {
   _setBotGateForTest(null);
+  _setBudgetClockForTest(null);
   for (const [k, v] of [["CROW_BOX_LEDGER_PATH", saved.ledger], ["CROW_HOST_TIMERS_DIR", saved.timers], ["CROW_BOX_RESERVATION_PATH", saved.hold], ["CROW_HOME", saved.home]]) {
     if (v === undefined) delete process.env[k]; else process.env[k] = v;
   }
@@ -59,6 +60,7 @@ function configured(sc) {
   process.env.CROW_HOST_TIMERS_DIR = sc.timers;
   process.env.CROW_BOX_RESERVATION_PATH = sc.hold;
   _resetHostTimersCache();
+  _setBudgetClockForTest(() => 0); // exact counts below never depend on machine speed
 }
 
 /** The ledger, in UTC (the instance zone here), relative to now. */
@@ -302,7 +304,9 @@ test("timers past the total cap: the machines list says how many aren't shown", 
     const now = Date.now();
     const many = Array.from({ length: 2300 }, (_, i) => ({ id: `user:m${i}.timer`, kind: "systemd-user", name: `m${i}` }));
     writeFileSync(join(sc.timers, "big.json"), JSON.stringify({ schema: SCHEMA, host: "big", tz: "UTC", collected_at: iso(now), timers: many }));
-    const { html } = await call();
+    _setBudgetClockForTest(() => 0); // the count cap, not machine speed, decides what shows
+    let html;
+    try { ({ html } = await call()); } finally { _setBudgetClockForTest(null); }
     assert.match(html, /On the machines \(2000\)/);
     assert.match(html, /300 more timers not shown\./);
   } finally { rmSync(sc.d, { recursive: true, force: true }); }
