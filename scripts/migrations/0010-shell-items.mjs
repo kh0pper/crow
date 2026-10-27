@@ -32,6 +32,12 @@ export const SHELL_ITEMS_DDL = `
   CREATE INDEX IF NOT EXISTS idx_shell_items_card ON shell_items(card_id) WHERE card_id IS NOT NULL;
 `;
 
+// Byte-for-byte the block in scripts/init-db.js ("bot_sessions thread index"). The readers of a
+// thread's newest perch-live session (threadCard, the backfill below) look up by these columns.
+export const BOT_SESSIONS_THREAD_INDEX_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_bot_sessions_thread ON bot_sessions(gateway_thread_id, kind, id);
+`;
+
 const hasTable = (db, name) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
 
 /**
@@ -88,7 +94,7 @@ function backfill(db, tasksDbPath, log) {
              'backfill'
         FROM bot_sessions s LEFT JOIN pi_bot_defs d ON d.bot_id = s.bot_id
        WHERE s.kind = 'perch-live' AND s.gateway_thread_id IS NOT NULL
-         AND s.id = (SELECT MAX(id) FROM bot_sessions WHERE gateway_thread_id = s.gateway_thread_id)`).run();
+         AND s.id = (SELECT MAX(id) FROM bot_sessions WHERE gateway_thread_id = s.gateway_thread_id AND kind = 'perch-live')`).run();
     results.push(`threads: ${threads.changes}`);
 
     // 2. The thread's card, when tasks.db could be read, beats the session and the bot.
@@ -96,7 +102,7 @@ function backfill(db, tasksDbPath, log) {
       const newest = db.prepare(`
         SELECT s.gateway_thread_id AS ref, s.card_id FROM bot_sessions s
          WHERE s.kind = 'perch-live' AND s.gateway_thread_id IS NOT NULL AND s.card_id IS NOT NULL
-           AND s.id = (SELECT MAX(id) FROM bot_sessions WHERE gateway_thread_id = s.gateway_thread_id)`).all();
+           AND s.id = (SELECT MAX(id) FROM bot_sessions WHERE gateway_thread_id = s.gateway_thread_id AND kind = 'perch-live')`).all();
       const set = db.prepare("UPDATE shell_items SET project_id = ? WHERE item_kind = 'perch_thread' AND item_ref = ? AND set_by = 'backfill'");
       for (const r of newest) {
         const p = cardProject(r.card_id);
@@ -139,8 +145,24 @@ export function run({ dbPath, tasksDbPath, log = () => {} }) {
     results.push("shell_items: ensured");
     log("  shell_items: ensured");
 
-    // The DDL is committed above. No backfill error ever fails the migration: a later read derives
-    // the same values.
+    // The thread index, before the backfill that reads by it. Only when bot_sessions exists with
+    // the columns it names (a very old or partial store can lack them); never fails the migration.
+    try {
+      const cols = hasTable(db, "bot_sessions")
+        ? new Set(db.prepare("PRAGMA table_info(bot_sessions)").all().map((c) => c.name)) : new Set();
+      if (cols.has("gateway_thread_id") && cols.has("kind")) {
+        db.exec(BOT_SESSIONS_THREAD_INDEX_DDL);
+        results.push("idx_bot_sessions_thread: ensured");
+      } else {
+        results.push("idx_bot_sessions_thread: skipped (no bot_sessions thread columns)");
+      }
+    } catch (e) {
+      log(`  idx_bot_sessions_thread: skipped (${e.message})`);
+      results.push(`idx_bot_sessions_thread: skipped (${e.message})`);
+    }
+
+    // The DDL is committed above. No backfill error ever fails the migration. A skipped backfill
+    // is NOT re-derived later: those items read as Unassigned until someone files them.
     try {
       const missing = ["bot_sessions", "pi_bot_defs", "project_spaces"].filter((t) => !hasTable(db, t));
       if (missing.length) {

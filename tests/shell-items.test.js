@@ -11,6 +11,7 @@ import { createProjectSpace } from "../servers/shared/project-spaces.js";
 import {
   ITEM_KINDS, getItem, threadCard, setItemProject, ensureItem, setItemCard, markSeen,
   listItemRefs, itemsForCard, activeProjects, parseScope, activeProjectWhere, ACTIVE_PROJECT_WHERE,
+  assertLiveProject, projectOfItems,
 } from "../servers/shared/shell-items.js";
 
 const dirs = [];
@@ -229,4 +230,78 @@ test("no table yet: readers are empty, writers say not_migrated", async () => {
   await assert.rejects(ensureItem(db, "artifact", "a", { projectId: null }), { code: "not_migrated" });
   await assert.rejects(setItemCard(db, "artifact", "a", 1), { code: "not_migrated" });
   await assert.rejects(markSeen(db, "artifact", "a", 1), { code: "not_migrated" });
+});
+
+// ---- final-review fix wave ----
+
+test("assertLiveProject: not_found for a missing or learner project, archived (409) for either archive marker", async () => {
+  const db = fresh();
+  const live = await createProjectSpace(db, { name: "Live" });
+  const byStatus = await createProjectSpace(db, { name: "ByStatus" });
+  const byStamp = await createProjectSpace(db, { name: "ByStamp" });
+  const kid = await createProjectSpace(db, { name: "Kid", type: "learner_profile", ownerMember: false });
+  await db.execute({ sql: "UPDATE project_spaces SET status = 'archived', archived_at = NULL WHERE id = ?", args: [byStatus.id] });
+  await db.execute({ sql: "UPDATE project_spaces SET archived_at = datetime('now') WHERE id = ?", args: [byStamp.id] });
+  assert.equal(Number((await assertLiveProject(db, live.id)).id), live.id);
+  await assert.rejects(assertLiveProject(db, 99999), { name: "AclError", code: "not_found" });
+  await assert.rejects(assertLiveProject(db, kid.id), { name: "AclError", code: "not_found" });
+  await assert.rejects(assertLiveProject(db, byStatus.id), { name: "AclError", code: "archived", http: 409 });
+  await assert.rejects(assertLiveProject(db, byStamp.id), { name: "AclError", code: "archived", http: 409 });
+});
+
+test("setItemProject refuses a status-archived project with a NULL archived_at, and a learner project", async () => {
+  const db = fresh();
+  const old = await createProjectSpace(db, { name: "Old" });
+  const kid = await createProjectSpace(db, { name: "Kid", type: "learner_profile", ownerMember: false });
+  await db.execute({ sql: "UPDATE project_spaces SET status = 'archived', archived_at = NULL WHERE id = ?", args: [old.id] });
+  await assert.rejects(setItemProject(db, "artifact", "art_x", old.id), { code: "archived" });
+  await assert.rejects(setItemProject(db, "artifact", "art_x", kid.id), { code: "not_found" });
+  assert.equal(await getItem(db, "artifact", "art_x"), null);
+});
+
+test("getItem says whether its project is live", async () => {
+  const db = fresh();
+  const p = await createProjectSpace(db, { name: "Alpha" });
+  await setItemProject(db, "artifact", "art_a", p.id);
+  await ensureItem(db, "artifact", "art_none", { projectId: null });
+  assert.equal((await getItem(db, "artifact", "art_a")).live, true);
+  assert.equal((await getItem(db, "artifact", "art_none")).live, false);
+  await db.execute({ sql: "UPDATE project_spaces SET status = 'archived' WHERE id = ?", args: [p.id] });
+  const it = await getItem(db, "artifact", "art_a");
+  assert.equal(it.projectId, p.id, "the stored filing is kept");
+  assert.equal(it.live, false);
+});
+
+test("projectOfItems: live filings keep their project; dead filings, unfiled rows and no-row refs are null", async () => {
+  const db = fresh();
+  const live = await createProjectSpace(db, { name: "Live" });
+  const old = await createProjectSpace(db, { name: "Old" });
+  const kid = await createProjectSpace(db, { name: "Kid", type: "learner_profile", ownerMember: false });
+  const gone = await createProjectSpace(db, { name: "Gone" });
+  await ensureItem(db, "workspace_file", "1", { projectId: live.id });
+  await ensureItem(db, "workspace_file", "2", { projectId: old.id });
+  await ensureItem(db, "workspace_file", "3", { projectId: kid.id });
+  await ensureItem(db, "workspace_file", "4", { projectId: gone.id });
+  await ensureItem(db, "workspace_file", "5", { projectId: null });
+  await ensureItem(db, "artifact", "7", { projectId: live.id }); // other kind, same ref: never leaks
+  await db.execute({ sql: "UPDATE project_spaces SET status = 'archived' WHERE id = ?", args: [old.id] });
+  await db.execute({ sql: "DELETE FROM project_spaces WHERE id = ?", args: [gone.id] });
+  const m = await projectOfItems(db, "workspace_file", ["1", "2", "3", "4", "5", "6", 7]);
+  assert.ok(m instanceof Map);
+  assert.deepEqual([...m.entries()], [["1", live.id], ["2", null], ["3", null], ["4", null], ["5", null], ["6", null], [7, null]]);
+  assert.deepEqual([...(await projectOfItems(db, "workspace_file", [])).entries()], []);
+});
+
+test("projectOfItems is all-null without the table", async () => {
+  const db = fresh();
+  await db.execute({ sql: "DROP TABLE shell_items", args: [] });
+  assert.deepEqual([...(await projectOfItems(db, "artifact", ["a", "b"])).entries()], [["a", null], ["b", null]]);
+});
+
+test("the module states that project_id is filing only", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../servers/shared/shell-items.js", import.meta.url), "utf8");
+  assert.match(src.split("\n").slice(0, 6).join("\n"), /project_id here is filing only: never an ACL input; never read by project-acl\.js\./);
+  const acl = readFileSync(new URL("../servers/shared/project-acl.js", import.meta.url), "utf8");
+  assert.doesNotMatch(acl, /shell_items/);
 });

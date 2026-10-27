@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import * as mod from "../scripts/migrations/0010-shell-items.mjs";
 
-const { run, id, SHELL_ITEMS_DDL } = mod;
+const { run, id, SHELL_ITEMS_DDL, BOT_SESSIONS_THREAD_INDEX_DDL } = mod;
 
 const dirs = [];
 after(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
@@ -220,4 +220,48 @@ test("an absent bot_sessions table is tolerated", () => {
   const r = run({ dbPath, log: () => {} });
   assert.equal(r.applied, true);
   assert.deepEqual(rows(dbPath), []);
+});
+
+// ---- final-review fix wave ----
+
+test("a newer non-perch-live session on the same thread id does not hide the thread from the backfill", () => {
+  const { dbPath, tasksDbPath } = world();
+  const d = new Database(dbPath);
+  d.prepare("INSERT INTO bot_sessions (bot_id, gateway_thread_id, project_id, card_id, kind) VALUES ('bot1','perchlive-a',3,NULL,'chat')").run();
+  d.close();
+  run({ dbPath, tasksDbPath, log: () => {} });
+  const t = rows(dbPath).find((x) => x.item_kind === "perch_thread");
+  assert.ok(t, "the thread is still filed");
+  assert.equal(t.project_id, 5, "from the newest perch-live session's card, not the chat row");
+});
+
+const threadIndex = (dbPath) => {
+  const d = new Database(dbPath, { readonly: true });
+  const r = d.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_bot_sessions_thread'").get();
+  const cols = r ? d.prepare("PRAGMA index_info(idx_bot_sessions_thread)").all().map((c) => c.name) : null;
+  d.close();
+  return cols;
+};
+
+test("the migration adds the bot_sessions thread index, and init-db carries the same one", () => {
+  const { dbPath, tasksDbPath } = world();
+  run({ dbPath, tasksDbPath, log: () => {} });
+  assert.deepEqual(threadIndex(dbPath), ["gateway_thread_id", "kind", "id"]);
+  const dir = tmp("shell-init-idx-");
+  execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: dir }, stdio: "pipe" });
+  assert.deepEqual(threadIndex(join(dir, "crow.db")), ["gateway_thread_id", "kind", "id"]);
+});
+
+test("the thread index DDL is byte-identical to init-db's", async () => {
+  const { readFileSync } = await import("node:fs");
+  const init = readFileSync(new URL("../scripts/init-db.js", import.meta.url), "utf8");
+  assert.match(BOT_SESSIONS_THREAD_INDEX_DDL, /CREATE INDEX IF NOT EXISTS idx_bot_sessions_thread ON bot_sessions\(gateway_thread_id, kind, id\)/);
+  assert.ok(init.includes(BOT_SESSIONS_THREAD_INDEX_DDL));
+});
+
+test("no bot_sessions table: no index, and the migration still applies", () => {
+  const dbPath = join(tmp("shell-noidx-"), "crow.db");
+  new Database(dbPath).close();
+  assert.equal(run({ dbPath, log: () => {} }).applied, true);
+  assert.equal(threadIndex(dbPath), null);
 });

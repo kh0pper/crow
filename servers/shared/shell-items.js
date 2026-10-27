@@ -1,8 +1,9 @@
 // servers/shared/shell-items.js — the pure rules for which project a shell item (a Perch thread,
 // an artifact, a Workspace file) belongs to. The derive* functions are pure (callers hand in the
 // facts); the rest of the file is the shell_items service over a createDbClient() client.
+// project_id here is filing only: never an ACL input; never read by project-acl.js.
 
-import { assertProjectExists, appendAudit } from "./project-acl.js";
+import { AclError, appendAudit } from "./project-acl.js";
 
 // A project an item may be filed under: not archived, not a learner profile. Used as a SQL
 // fragment against project_spaces (the 0010 backfill, and the readers that follow it). The columns
@@ -13,6 +14,26 @@ export function activeProjectWhere(alias = "") {
   return `${c}archived_at IS NULL AND ${c}status != 'archived' AND (${c}type IS NULL OR ${c}type != 'learner_profile')`;
 }
 export const ACTIVE_PROJECT_WHERE = activeProjectWhere();
+
+/**
+ * The project an item may be filed under, by the same rule the readers use (activeProjectWhere).
+ * Throws AclError not_found for a missing or learner_profile project, and AclError archived
+ * (http 409) for either archive marker (archived_at set, or status 'archived').
+ */
+export async function assertLiveProject(db, id) {
+  const { rows } = await db.execute({
+    sql: `SELECT id, slug, name, type, (${ACTIVE_PROJECT_WHERE}) AS live FROM project_spaces WHERE id = ? LIMIT 1`,
+    args: [Number(id)],
+  });
+  const p = rows[0];
+  if (!p || p.type === "learner_profile") throw new AclError(`Project #${id} not found`, "not_found");
+  if (!Number(p.live)) {
+    const err = new AclError(`Project #${id} is archived`, "archived");
+    err.http = 409;
+    throw err;
+  }
+  return { id: Number(p.id), slug: p.slug, name: p.name };
+}
 
 function firstLive(candidates, liveProjectIds) {
   for (const c of candidates) {
@@ -62,8 +83,9 @@ async function writer(fn) {
 
 const numOrNull = (v) => (v === null || v === undefined ? null : Number(v));
 
+/** One item's row, or null. `live` is true only when projectId names a live project. */
 export async function getItem(db, kind, ref) {
-  return reader(async () => {
+  const item = await reader(async () => {
     const { rows } = await db.execute({
       sql: `SELECT item_kind, item_ref, project_id, card_id, set_by, seen_version, seen_at
               FROM shell_items WHERE item_kind = ? AND item_ref = ?`,
@@ -76,6 +98,38 @@ export async function getItem(db, kind, ref) {
       setBy: r.set_by, seenVersion: numOrNull(r.seen_version), seenAt: r.seen_at ?? null,
     };
   }, null);
+  if (!item) return null;
+  item.live = item.projectId === null ? false : await reader(async () => {
+    const { rows } = await db.execute({
+      sql: `SELECT 1 FROM project_spaces WHERE id = ? AND ${ACTIVE_PROJECT_WHERE} LIMIT 1`,
+      args: [item.projectId],
+    });
+    return rows.length > 0;
+  }, false);
+  return item;
+}
+
+/**
+ * The live project of each ref, in one query: Map<ref, number|null>, keyed by the refs as given.
+ * A ref with no row, no project, or a project that is missing, archived or a learner profile maps
+ * to null. Without the table every ref maps to null. This is how a consumer that lists its OWN
+ * items (artifacts, Workspace files) answers Unassigned: listItemRefs only knows existing rows.
+ */
+export async function projectOfItems(db, kind, refs) {
+  const list = [...(refs || [])];
+  const out = new Map(list.map((r) => [r, null]));
+  if (!list.length) return out;
+  const found = await reader(async () => {
+    const { rows } = await db.execute({
+      sql: `SELECT s.item_ref, CASE WHEN ps.id IS NOT NULL AND ${activeProjectWhere("ps")} THEN s.project_id END AS live_project
+              FROM shell_items s LEFT JOIN project_spaces ps ON ps.id = s.project_id
+             WHERE s.item_kind = ? AND s.item_ref IN (SELECT value FROM json_each(?))`,
+      args: [kind, JSON.stringify(list.map(String))],
+    });
+    return new Map(rows.map((r) => [r.item_ref, numOrNull(r.live_project)]));
+  }, new Map());
+  for (const r of list) out.set(r, found.get(String(r)) ?? null);
+  return out;
 }
 
 /** The newest perch-live session's card for a thread. The only reader of a thread's card. */
@@ -94,7 +148,7 @@ export async function threadCard(db, threadId) {
 export async function setItemProject(db, kind, ref, projectId, { setBy = "operator" } = {}) {
   assertKind(kind);
   const pid = projectId === null || projectId === undefined ? null : Number(projectId);
-  if (pid !== null) await assertProjectExists(db, pid);
+  if (pid !== null) await assertLiveProject(db, pid);
   await writer(() => db.execute({
     sql: `INSERT INTO shell_items (item_kind, item_ref, project_id, set_by) VALUES (?, ?, ?, ?)
           ON CONFLICT (item_kind, item_ref)
@@ -140,6 +194,10 @@ export async function markSeen(db, kind, ref, version) {
 /**
  * Refs of one kind in a scope: { projectId }, { unassigned: true } or { all: true }. An item whose
  * project is missing, archived or a learner profile counts as unassigned.
+ *
+ * Only EXISTING shell_items rows are listed: { unassigned: true } never returns an item that has
+ * no row at all. A consumer listing its own items must ask projectOfItems() for each of them
+ * instead, and treat null as Unassigned.
  */
 export async function listItemRefs(db, kind, scope = { all: true }) {
   return reader(async () => {

@@ -2773,6 +2773,13 @@ await initTable("shell_items table", `
   CREATE INDEX IF NOT EXISTS idx_shell_items_card ON shell_items(card_id) WHERE card_id IS NOT NULL;
 `);
 
+// bot_sessions thread index: a thread's newest perch-live session (shell-items threadCard, the 0010
+// backfill) is looked up by these columns. Same DDL as BOT_SESSIONS_THREAD_INDEX_DDL in
+// scripts/migrations/0010-shell-items.mjs. bot_sessions and its kind column exist by this point.
+await initTable("bot_sessions thread index", `
+  CREATE INDEX IF NOT EXISTS idx_bot_sessions_thread ON bot_sessions(gateway_thread_id, kind, id);
+`);
+
 // bot_sessions.control CHECK widen, 'run'/'stop' -> 'run'/'stop'/'interrupted'
 // (Track 3 Task 7): stopAll() parks a session that was genuinely mid-turn
 // when the gateway shut down with control='interrupted' instead of 'run', so
