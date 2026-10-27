@@ -8,6 +8,7 @@ import { assertProjectExists, appendAudit } from "./project-acl.js";
 // fragment against project_spaces (the 0010 backfill, and the readers that follow it). The columns
 // are unqualified, so in a join use activeProjectWhere("alias") to keep them unambiguous.
 export function activeProjectWhere(alias = "") {
+  if (alias && !/^[A-Za-z_]\w*$/.test(alias)) throw new Error(`bad SQL alias: ${alias}`);
   const c = alias ? `${alias}.` : "";
   return `${c}archived_at IS NULL AND ${c}status != 'archived' AND (${c}type IS NULL OR ${c}type != 'learner_profile')`;
 }
@@ -159,10 +160,12 @@ export async function listItemRefs(db, kind, scope = { all: true }) {
 }
 
 export async function activeProjects(db) {
-  const { rows } = await db.execute(
-    `SELECT id, slug, name FROM project_spaces WHERE ${ACTIVE_PROJECT_WHERE} ORDER BY name COLLATE NOCASE`,
-  );
-  return rows.map((r) => ({ id: Number(r.id), slug: r.slug, name: r.name }));
+  return reader(async () => {
+    const { rows } = await db.execute(
+      `SELECT id, slug, name FROM project_spaces WHERE ${ACTIVE_PROJECT_WHERE} ORDER BY name COLLATE NOCASE`,
+    );
+    return rows.map((r) => ({ id: Number(r.id), slug: r.slug, name: r.name }));
+  }, []);
 }
 
 /** The documents (artifacts, files) linked to a card. */

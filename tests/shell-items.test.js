@@ -15,7 +15,9 @@ import {
 
 const dirs = [];
 const clients = [];
+const savedEnv = { CROW_DATA_DIR: process.env.CROW_DATA_DIR, CROW_DB_PATH: process.env.CROW_DB_PATH };
 after(() => {
+  for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   for (const c of clients) { try { c.close(); } catch {} }
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
 });
@@ -43,6 +45,16 @@ test("activeProjectWhere prefixes each column with an alias, and the bare form i
   assert.equal(activeProjectWhere(), ACTIVE_PROJECT_WHERE);
   const q = activeProjectWhere("p");
   assert.match(q, /p\.archived_at IS NULL AND p\.status != 'archived' AND \(p\.type IS NULL OR p\.type != 'learner_profile'\)/);
+});
+
+test("activeProjectWhere rejects an alias that is not a plain identifier", () => {
+  for (const bad of ["p; DROP TABLE x", "a.b", "1p", "p q", "p'"]) assert.throws(() => activeProjectWhere(bad), /bad SQL alias/);
+  assert.doesNotThrow(() => activeProjectWhere("_ps2"));
+});
+
+test("activeProjects is empty when project_spaces does not exist", async () => {
+  const db = fresh({ initDb: false });
+  assert.deepEqual(await activeProjects(db), []);
 });
 
 test("setItemProject files an item and audits it", async () => {
