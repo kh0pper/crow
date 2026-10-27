@@ -17,6 +17,7 @@ import { resolveCrowHome, resolveInstanceDataDir, readLocalInstanceIdOrNull, isD
 import bus from "../shared/event-bus.js";
 import { livenessStatusSql } from "../shared/instance-status.js";
 import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
+import { fenceStatements } from "../shared/repair-fence.js";
 import { createDbClient } from "../db.js";
 import { isPeerUsableUrl, deriveSelfDialAddress } from "../shared/self-dial-address.js";
 
@@ -196,6 +197,19 @@ export async function updateInstance(db, id, fields) {
 
   if (sets.length === 0) return;
 
+  // PT-1: revoke is one-way through revokePeer, and only a re-pair
+  // (reactivateOnRepair / the enroll CAS) un-revokes. Setting `revoked` here
+  // would skip the key deletion and teardown; editing a revoked row (status
+  // back to active, a new bearer hash, trusted) would restore a peer whose
+  // signing key is already gone and replay its revoked window.
+  if (fields.status === "revoked") {
+    throw instanceError("use_revoke", "revoke an instance with crow_revoke_instance (or Settings → Revoke), not an update");
+  }
+  const current = await getInstance(db, id);
+  if (current?.status === "revoked") {
+    throw instanceError("instance_revoked", "this instance is revoked; re-pair to restore a revoked instance");
+  }
+
   // If setting is_home, clear others first
   if (fields.is_home || fields.isHome) {
     await db.execute({
@@ -207,8 +221,10 @@ export async function updateInstance(db, id, fields) {
   sets.push("updated_at = datetime('now')");
   args.push(id);
 
+  // `status != 'revoked'` closes the window between the read above and this
+  // write (a concurrent revoke must win).
   await db.execute({
-    sql: `UPDATE crow_instances SET ${sets.join(", ")} WHERE id = ?`,
+    sql: `UPDATE crow_instances SET ${sets.join(", ")} WHERE id = ? AND status != 'revoked'`,
     args,
   });
 
@@ -228,6 +244,54 @@ export async function updateInstance(db, id, fields) {
       bus.emit("crow_instances:row_updated", { id, changed, fields });
     } catch { /* subscriber failures are not primary-write failures */ }
   }
+}
+
+function instanceError(code, message) {
+  const err = new Error(message);
+  err.code = code;
+  return err;
+}
+
+/**
+ * The CLI side of a re-pair (the counterpart of the enroll route's CAS):
+ * sets the new bearer hash and trusted=1, flips a revoked row back to
+ * active, and, when it was revoked, writes the re-pair fence in the SAME
+ * transaction (servers/shared/repair-fence.js). If the fence cannot be
+ * written the whole write aborts and the row stays revoked.
+ *
+ * @param {object} db
+ * @param {string} id
+ * @param {object} f
+ * @param {string} f.authTokenHash
+ * @param {string} f.localInstanceId  sync_state.instance_id of this instance
+ * @param {string} [f.name]
+ * @param {string} [f.gatewayUrl]
+ * @param {string} [f.tailscaleIp]
+ */
+export async function reactivateOnRepair(db, id, { authTokenHash, localInstanceId, name = null, gatewayUrl = null, tailscaleIp = null }) {
+  const existing = await getInstance(db, id);
+  if (!existing) throw instanceError("not_found", `instance ${id} not found`);
+  if (!authTokenHash) throw instanceError("bad_request", "reactivateOnRepair needs the new bearer hash");
+  const wasRevoked = existing.status === "revoked";
+  const stmts = [
+    {
+      sql: `UPDATE crow_instances
+              SET name = COALESCE(?, name), gateway_url = COALESCE(?, gateway_url), tailscale_ip = COALESCE(?, tailscale_ip),
+                  auth_token_hash = ?, trusted = 1,
+                  status = CASE WHEN status = 'revoked' THEN 'active' ELSE status END,
+                  updated_at = datetime('now')
+            WHERE id = ? AND status IS ?`,
+      args: [name, gatewayUrl, tailscaleIp, authTokenHash, id, existing.status ?? null],
+    },
+    // Abort if the row changed since it was read (a concurrent revoke).
+    { sql: "INSERT INTO dashboard_settings_overrides (key, instance_id, value) SELECT NULL, NULL, NULL WHERE changes() = 0", args: [] },
+  ];
+  if (wasRevoked) stmts.push(...fenceStatements(localInstanceId, id));
+  await db.batch(stmts, "write");
+  try {
+    bus.emit("crow_instances:row_updated", { id, changed: ["trusted", "status"], fields: { trusted: 1, status: wasRevoked ? "active" : existing.status } });
+  } catch { /* subscriber failures are not primary-write failures */ }
+  return { reactivated: wasRevoked };
 }
 
 /**

@@ -3887,7 +3887,7 @@ export class InstanceSyncManager {
    * feed-keyed — {"k": feedKeyHex, "s": seq} — so a rotated feed never
    * inherits a stale mark from its predecessor.
    */
-  async _setLastAppliedSeq(remoteInstanceId, seq, feedKeyHex) {
+  async _setLastAppliedSeq(remoteInstanceId, seq, feedKeyHex, { clearFence = false } = {}) {
     // Guard: a `"` in the id would break the json_set path literal.
     if (remoteInstanceId.includes('"')) {
       console.warn(`[instance-sync] _setLastAppliedSeq: skipping id with quote char: ${remoteInstanceId}`);
@@ -3898,12 +3898,19 @@ export class InstanceSyncManager {
       // json(?) — NOT CAST — so the object lands as JSON, not a quoted string
       // (spec C2 SQL note): json_set with a plain string param stores a string
       // and every reader's .k/.s would be undefined.
+      // PT-1 re-pair fence: while the current record carries `ff`, every
+      // rewrite keeps it (in SQL, so a fence written concurrently is never
+      // lost to a stale read). Only the fence-consume step clears it.
+      const path = `$."${remoteInstanceId}"`;
+      const rec = JSON.stringify({ k: feedKeyHex ?? null, s: Number(seq) });
       await this.db.execute({
         sql: `UPDATE sync_state
-              SET last_applied_seq_per_peer = json_set(COALESCE(last_applied_seq_per_peer, '{}'), ?, json(?)),
+              SET last_applied_seq_per_peer = json_set(COALESCE(last_applied_seq_per_peer, '{}'), ?,
+                    CASE WHEN ? = 0 AND json_extract(COALESCE(last_applied_seq_per_peer, '{}'), ?) = 1
+                         THEN json_set(json(?), '$.ff', 1) ELSE json(?) END),
                   updated_at = datetime('now')
               WHERE instance_id = ?`,
-        args: [`$."${remoteInstanceId}"`, JSON.stringify({ k: feedKeyHex ?? null, s: Number(seq) }), this.localInstanceId],
+        args: [path, clearFence ? 1 : 0, `${path}.ff`, rec, rec, this.localInstanceId],
       });
     } catch (err) {
       console.warn(`[instance-sync] Failed to update checkpoint for ${remoteInstanceId}:`, err.message);

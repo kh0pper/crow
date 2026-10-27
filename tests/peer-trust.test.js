@@ -287,3 +287,103 @@ describe("U1: crossHostVerifyMiddleware on real rows", () => {
     } finally { s2.closeAllConnections?.(); await new Promise((r) => s2.close(r)); }
   });
 });
+
+// ---------------------------------------------------------------------------
+// U3 + U11: only a re-pair un-revokes, and it writes the re-pair fence
+// ---------------------------------------------------------------------------
+import { updateInstance, reactivateOnRepair, getInstance, revokeInstance as revokeRow } from "../servers/gateway/instance-registry.js";
+import { InstanceSyncManager } from "../servers/sharing/instance-sync.js";
+import { makeSharedIdentity } from "./fixtures/sync-fleet.mjs";
+
+const LOCAL = "local-self";
+async function appliedBlob(xdb) {
+  const { rows } = await xdb.execute({ sql: "SELECT last_applied_seq_per_peer AS b FROM sync_state WHERE instance_id = ?", args: [LOCAL] });
+  return rows[0] ? JSON.parse(rows[0].b || "{}") : null;
+}
+
+describe("U3: updateInstance never un-revokes", () => {
+  test("every edit to a revoked row is refused; setting revoked is refused; reactivateOnRepair flips it and sets the fence", async () => {
+    const d = mkdtempSync(join(tmpdir(), "pt-u3-"));
+    const xdb = await makeRealDb(d);
+    try {
+      await addPeerRow(xdb, "u3-peer", { status: "active", trusted: 1 });
+      await assert.rejects(updateInstance(xdb, "u3-peer", { status: "revoked" }), (e) => e.code === "use_revoke");
+      await revokeRow(xdb, "u3-peer");
+      for (const f of [{ status: "active" }, { name: "x" }, { trusted: 1 }, { auth_token_hash: "ab" }]) {
+        await assert.rejects(updateInstance(xdb, "u3-peer", f), (e) => e.code === "instance_revoked", JSON.stringify(f));
+      }
+      assert.equal((await getInstance(xdb, "u3-peer")).status, "revoked");
+      // A live row still edits normally (positive control).
+      await addPeerRow(xdb, "u3-live", { status: "active", trusted: 1 });
+      await updateInstance(xdb, "u3-live", { name: "renamed", status: "paused" });
+      assert.equal((await getInstance(xdb, "u3-live")).status, "paused");
+
+      await reactivateOnRepair(xdb, "u3-peer", { authTokenHash: "cd".repeat(32), localInstanceId: LOCAL });
+      const row = await getInstance(xdb, "u3-peer");
+      assert.equal(row.status, "active");
+      assert.equal(Number(row.trusted), 1);
+      assert.equal(row.auth_token_hash, "cd".repeat(32));
+      assert.equal((await appliedBlob(xdb))["u3-peer"].ff, 1);
+    } finally { try { xdb.close(); } catch {} rmSync(d, { recursive: true, force: true }); }
+  });
+
+  test("crow_update_instance surfaces the re-pair error", async () => {
+    const src = readFileSync(new URL("../servers/sharing/tools/instances.js", import.meta.url), "utf8");
+    assert.match(src, /re-pair to restore a revoked instance/);
+  });
+});
+
+describe("U11: the re-pair fence is written in every record shape and survives checkpoints", () => {
+  async function scenario(prep) {
+    const d = mkdtempSync(join(tmpdir(), "pt-u11-"));
+    const xdb = await makeRealDb(d);
+    await addPeerRow(xdb, "u11-peer", { status: "revoked", trusted: 1 });
+    await prep(xdb);
+    return { d, xdb, done() { try { xdb.close(); } catch {} rmSync(d, { recursive: true, force: true }); } };
+  }
+  const shapes = {
+    "(a) NULL blob": async (xdb) => { await xdb.execute({ sql: "INSERT INTO sync_state (instance_id, local_counter, last_applied_seq_per_peer) VALUES (?, 0, NULL)", args: [LOCAL] }); },
+    "(b) no record for the peer": async (xdb) => { await xdb.execute({ sql: "INSERT INTO sync_state (instance_id, local_counter, last_applied_seq_per_peer) VALUES (?, 0, ?)", args: [LOCAL, JSON.stringify({ other: { k: "z", s: 3 } })] }); },
+    "(c) legacy bare-number record": async (xdb) => { await xdb.execute({ sql: "INSERT INTO sync_state (instance_id, local_counter, last_applied_seq_per_peer) VALUES (?, 0, ?)", args: [LOCAL, JSON.stringify({ "u11-peer": 7 })] }); },
+    "(d) no sync_state row": async () => {},
+  };
+  for (const [name, prep] of Object.entries(shapes)) {
+    test(name, async () => {
+      const s = await scenario(prep);
+      try {
+        await reactivateOnRepair(s.xdb, "u11-peer", { authTokenHash: "ef".repeat(32), localInstanceId: LOCAL });
+        const rec = (await appliedBlob(s.xdb))["u11-peer"];
+        assert.equal(rec.ff, 1, JSON.stringify(rec));
+        assert.equal((await getInstance(s.xdb, "u11-peer")).status, "active");
+        if (name.startsWith("(b)")) assert.deepEqual((await appliedBlob(s.xdb)).other, { k: "z", s: 3 });
+      } finally { s.done(); }
+    });
+  }
+
+  test("a fence write that does not land aborts reactivation; the row stays revoked", async () => {
+    const s = await scenario(async () => {});
+    try {
+      const sabotaged = {
+        execute: (st) => s.xdb.execute(st),
+        batch: (stmts, mode) => s.xdb.batch(stmts.map((st) => (/UPDATE sync_state/.test(st.sql) ? { sql: "UPDATE sync_state SET updated_at = updated_at WHERE 0", args: [] } : st)), mode),
+      };
+      await assert.rejects(reactivateOnRepair(sabotaged, "u11-peer", { authTokenHash: "ef".repeat(32), localInstanceId: LOCAL }));
+      const row = await getInstance(s.xdb, "u11-peer");
+      assert.equal(row.status, "revoked");
+      assert.equal(row.auth_token_hash, null);
+    } finally { s.done(); }
+  });
+
+  test("_setLastAppliedSeq and _reconcileAppliedSeqAtOpen carry ff forward", async () => {
+    const s = await scenario(async () => {});
+    try {
+      await reactivateOnRepair(s.xdb, "u11-peer", { authTokenHash: "ef".repeat(32), localInstanceId: LOCAL });
+      const mgr = new InstanceSyncManager(await makeSharedIdentity(), s.xdb, LOCAL);
+      await mgr._setLastAppliedSeq("u11-peer", 5, "aa");
+      assert.deepEqual((await appliedBlob(s.xdb))["u11-peer"], { k: "aa", s: 5, ff: 1 });
+      await mgr._reconcileAppliedSeqAtOpen("u11-peer", { key: Buffer.from("bb", "hex"), length: 9 });
+      assert.equal((await appliedBlob(s.xdb))["u11-peer"].ff, 1, "a feed-key change keeps the fence");
+      assert.equal((await appliedBlob(s.xdb))["u11-peer"].k, "bb");
+    } finally { s.done(); }
+  });
+});

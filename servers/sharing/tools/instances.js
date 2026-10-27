@@ -250,7 +250,17 @@ export function registerInstancesTools(server, ctx) {
         };
       }
 
-      await updateInstance(db, instance_id, updates);
+      try {
+        await updateInstance(db, instance_id, updates);
+      } catch (err) {
+        if (err?.code === "instance_revoked") {
+          return {
+            content: [{ type: "text", text: `Instance "${existing.name}" is revoked and its signing key is deleted: re-pair to restore a revoked instance (\`crow instance pair\`, with \`--allow-re-pair ${instance_id}\` on this host).` }],
+            isError: true,
+          };
+        }
+        throw err;
+      }
 
       return {
         content: [{

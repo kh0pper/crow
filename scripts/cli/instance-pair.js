@@ -30,6 +30,7 @@ import {
   registerInstance,
   getInstance,
   updateInstance,
+  reactivateOnRepair,
   getOrCreateLocalInstanceId,
   selfPairingAddress,
 } from "../../servers/gateway/instance-registry.js";
@@ -412,12 +413,15 @@ async function storePeerCredsLocally(db, {
   const tailscaleIp = typeof peerTailscaleIp === "string" && isTailnetAddress(peerTailscaleIp.trim()) ? peerTailscaleIp.trim() : null;
   const existing = await getInstance(db, peerId);
   if (existing) {
-    await updateInstance(db, peerId, {
+    // PT-1: the CLI side of a re-pair. Unlike updateInstance (which refuses
+    // any edit to a revoked row) this flips a revoked row back to active and
+    // writes the re-pair fence in the same transaction.
+    await reactivateOnRepair(db, peerId, {
       name: peerName,
-      gateway_url: peerGatewayUrl,
-      ...(tailscaleIp ? { tailscale_ip: tailscaleIp } : {}),
-      auth_token_hash: peerOutboundBearerHash,
-      trusted: 1,
+      gatewayUrl: peerGatewayUrl,
+      tailscaleIp,
+      authTokenHash: peerOutboundBearerHash,
+      localInstanceId: getOrCreateLocalInstanceId(),
     });
   } else {
     await registerInstance(db, {
