@@ -323,6 +323,7 @@ export function extensionStyles() {
 .ext-card__badge--official { color:var(--crow-accent); background:var(--crow-accent-muted); }
 .ext-card__badge--community { color:#f0ad4e; background:rgba(240,173,78,0.15); border:1px solid rgba(240,173,78,0.3); }
 .ext-card__badge--type { color:var(--crow-text-muted); background:var(--crow-bg-elevated); }
+.ext-card__badge--deprecated { color:var(--crow-text-muted); background:var(--crow-bg-elevated); border:1px dashed var(--crow-border); }
 .ext-card__resources { font-size:0.7rem; color:var(--crow-text-muted); margin-bottom:0.2rem; }
 .ext-card__version { font-size:0.7rem; color:var(--crow-text-muted); font-family:'JetBrains Mono',monospace; }
 .ext-card__footer { margin-top:auto; padding-top:0.6rem; width:100%; }

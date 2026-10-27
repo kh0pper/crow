@@ -6,9 +6,17 @@
 ## Console (admin UI): http://localhost:9001
 ## API endpoint: http://localhost:9000 (used by Crow internally)
 
+## DEPRECATED (2026-10-27): superseded by bundles/garage. The upstream project stopped
+## publishing images and minio/minio is gone from Docker Hub, so this image CANNOT be
+## pulled any more. It is pinned to the exact build existing installs already run
+## (RELEASE.2025-09-07T16-13-09Z) and is used only from the local copy
+## (pull_policy: never): an install on a host without it fails instead of fetching
+## something else. A manifest-bump refresh never copies this file to installed hosts.
+
 services:
   minio:
-    image: minio/minio:latest
+    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    pull_policy: never
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-crowadmin}
