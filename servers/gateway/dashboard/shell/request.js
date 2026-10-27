@@ -164,15 +164,6 @@ export function shellRouter({ createDbClient }) {
  */
 export async function resolveShellPage(req, res, db, panelId, lang = "en") {
   const { mode, offerTry } = await resolveRequestMode(req, res, db);
-  // Only a page render (GET/HEAD) needs the scope and the project list. A POST
-  // still gets req.crowMode (above) but reads and writes no scope: Everything,
-  // no project query, no scope cookie. Nothing on a POST reads req.crowScope
-  // (only the Chat page's GET handler does).
-  const isPageRender = !req.method || req.method === "GET" || req.method === "HEAD";
-  if (mode === "new" && !isPageRender) {
-    req.crowScope = EVERYTHING;
-    return { variant: "shell", shell: { scope: EVERYTHING, projects: [], tab: TAB_OF[panelId] ?? null } };
-  }
   if (mode !== "new") {
     req.crowScope = EVERYTHING;
     // One rule: the card shows iff crow_try_new is "pending" (this request's own

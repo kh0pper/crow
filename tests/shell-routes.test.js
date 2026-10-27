@@ -284,26 +284,6 @@ test("a broken DB falls back to classic and writes no mode cookie", async () => 
   assert.equal(res2.set.length, 0, "no mode or scope cookie");
 });
 
-test("a POST does no shell work: no scope, no project list, no scope cookie", async () => {
-  const { resolveShellPage } = await import("../servers/gateway/dashboard/shell/request.js");
-  const boom = { async execute() { throw new Error("must not be called on a POST with a mode cookie"); } };
-  const res = { set: [], headersSent: false, append(k, v) { this.set.push([k, v]); } };
-  const req = { method: "POST", headers: { cookie: `${MODE}=new` }, query: { project: "garden" }, dashboardSession: "new-sess" };
-  const page = await resolveShellPage(req, res, boom, "memory");
-  assert.equal(req.crowMode.mode, "new", "req.crowMode is still set");
-  assert.equal(page.variant, "shell");
-  assert.deepEqual(page.shell.projects, []);
-  assert.deepEqual(page.shell.scope, { all: true });
-  assert.deepEqual(req.crowScope, { all: true }, "?project= is not applied on a POST");
-  assert.equal(res.set.length, 0, "no scope cookie");
-  // A GET of the same request does the work (the DB is touched for the scope).
-  const getReq = { method: "GET", headers: { cookie: `${MODE}=new` }, query: { project: "garden" }, dashboardSession: "new-sess" };
-  const getRes = { set: [], headersSent: false, append(k, v) { this.set.push([k, v]); } };
-  const got = await resolveShellPage(getReq, getRes, { async execute() { return { rows: [] }; } }, "memory");
-  assert.equal(got.variant, "shell");
-  assert.ok(getRes.set.some(([, v]) => v.startsWith(SCOPE + "=")), "a GET still writes the scope cookie");
-});
-
 test("saving the language keeps the mode cookie beside crow_lang", async () => {
   const r = await post("/dashboard/settings?section=language", { action: "set_language", language: "es" }, { jar: NEW });
   assert.equal(r.status, 303);
