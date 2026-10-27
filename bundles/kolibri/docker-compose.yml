@@ -3,7 +3,7 @@ services:
     image: learningequality/kolibri:latest
     container_name: crow-kolibri
     ports:
-      - "127.0.0.1:${KOLIBRI_HTTP_PORT:-8085}:8080"
+      - "127.0.0.1:${KOLIBRI_HTTP_PORT:-8041}:8080"
     volumes:
       - ${KOLIBRI_DATA_PATH:-kolibri-data}:/kolibrihome
     environment:

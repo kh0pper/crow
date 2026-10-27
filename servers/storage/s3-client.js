@@ -8,7 +8,12 @@
  * Configuration precedence (DB > env):
  *   1. If initStorage({db, identity}) has been called and the DB has
  *      storage.shared.* keys, use those (sealed secrets opened with identity).
- *   2. Otherwise fall back to MINIO_* / S3_* env vars.
+ *      The gateway, the stdio storage server and bundle MCP children all do.
+ *   2. Otherwise fall back to the env: S3_ENDPOINT (+ S3_ACCESS_KEY, S3_SECRET_KEY,
+ *      S3_USE_SSL, S3_REGION), else the older MINIO_ENDPOINT (+ MINIO_PORT,
+ *      MINIO_ROOT_USER, MINIO_ROOT_PASSWORD, MINIO_USE_SSL). Port and SSL come from
+ *      the same family as the endpoint: a leftover MINIO_PORT never lands on top of
+ *      S3_ENDPOINT.
  *
  * The settings save handler + the instance-sync applier must call
  * resetStorageClient() after mutating storage.shared.* so the next
@@ -45,6 +50,25 @@ export async function initStorage({ db, identity }) {
 }
 
 /**
+ * A stdio server's boot (servers/storage/index.js, the combined crow-core server): the
+ * same initStorage the gateway runs, with this instance's identity. The identity is
+ * loaded, never created: a stdio child must not mint an instance identity, and without
+ * one there are no sealed settings to open. Never throws; returns whether it wired up.
+ */
+export async function initStorageFromInstance(db) {
+  try {
+    const { loadIdentityIfPresent } = await import("../sharing/identity.js");
+    const identity = loadIdentityIfPresent();
+    if (!identity) return false;
+    await initStorage({ db, identity });
+    return true;
+  } catch (err) {
+    console.error(`[storage] initStorage failed (env fallback remains active): ${err.message}`);
+    return false;
+  }
+}
+
+/**
  * Use a shared-storage config that the caller already opened (the result of
  * loadSharedStorageFromDb) WITHOUT keeping the identity that opened it. For
  * bundle MCP children: they need the storage credentials, not the instance's
@@ -55,6 +79,24 @@ export function useStorageConfig(cfg) {
   _boot = { db: null, identity: null };
   _cachedDbConfig = cfg || null;
   clientInstance = null;
+}
+
+/**
+ * Bundle MCP children: open the instance's Shared Storage settings once with `identity`,
+ * zero the identity's key buffers straight away, and keep only the opened config
+ * (useStorageConfig). Returns true when the DB held a full config. With none, the env
+ * fallback stays in effect.
+ */
+export async function useDbStorageConfig({ db, identity }) {
+  if (!db || !identity) return false;
+  let cfg = null;
+  try {
+    cfg = await loadSharedStorageFromDb(db, identity);
+  } finally {
+    for (const v of Object.values(identity)) if (v instanceof Uint8Array) v.fill(0);
+  }
+  if (cfg) useStorageConfig(cfg);
+  return !!cfg;
 }
 
 /**
@@ -152,12 +194,38 @@ export function getStorageOrigin() {
     const scheme = cfg.useSSL ? "https" : "http";
     return `${scheme}://${cfg.host}:${cfg.port || (cfg.useSSL ? 443 : 9000)}`;
   }
-  const envEndpoint = process.env.MINIO_ENDPOINT || process.env.S3_ENDPOINT;
-  if (!envEndpoint) return null;
-  const { host, port } = _splitHostPort(envEndpoint);
-  const useSSL = (process.env.MINIO_USE_SSL || process.env.S3_USE_SSL || "").toLowerCase() === "true";
-  const scheme = useSSL ? "https" : "http";
-  return `${scheme}://${host}:${port || (useSSL ? 443 : 9000)}`;
+  const env = envStorageConfig();
+  if (!env) return null;
+  return `${env.useSSL ? "https" : "http"}://${env.host}:${env.port}`;
+}
+
+/**
+ * The env fallback, or null when no endpoint is set. S3_* wins over MINIO_*; the port
+ * and SSL flag are read from the endpoint's own family only (MINIO_PORT applies to
+ * MINIO_ENDPOINT, never to S3_ENDPOINT). Credentials keep their old fallback order.
+ */
+export function envStorageConfig(env = process.env) {
+  const s3 = env.S3_ENDPOINT;
+  const endpoint = s3 || env.MINIO_ENDPOINT;
+  if (!endpoint) return null;
+  const parsed = _splitHostPort(endpoint);
+  const useSSL = String((s3 ? env.S3_USE_SSL : env.MINIO_USE_SSL) || "").toLowerCase() === "true";
+  return {
+    source: s3 ? "S3_ENDPOINT" : "MINIO_ENDPOINT",
+    host: parsed.host,
+    port: (!s3 && parseInt(env.MINIO_PORT, 10)) || parsed.port,
+    useSSL,
+    region: env.S3_REGION || "us-east-1",
+    accessKey: env.S3_ACCESS_KEY || env.MINIO_ROOT_USER || "crowadmin",
+    secretKey: env.S3_SECRET_KEY || env.MINIO_ROOT_PASSWORD || "",
+  };
+}
+
+/** True when storage is configured at all (DB settings, or a usable env fallback). */
+export function isConfigured() {
+  if (_cachedDbConfig) return true;
+  const env = envStorageConfig();
+  return !!(env && env.secretKey);
 }
 
 /**
@@ -167,36 +235,31 @@ export function getStorageOrigin() {
 export function getClient() {
   if (clientInstance) return clientInstance;
 
-  let host, port, useSSL, accessKey, secretKey, source;
+  let host, port, useSSL, accessKey, secretKey, region, source;
   const cfg = _cachedDbConfig;
   if (cfg) {
-    host = cfg.host;
-    port = cfg.port;
-    useSSL = cfg.useSSL;
-    accessKey = cfg.accessKey;
-    secretKey = cfg.secretKey;
+    ({ host, port, useSSL, accessKey, secretKey } = cfg);
+    region = cfg.region || "us-east-1";
     source = "db";
   } else {
-    const endpoint = process.env.S3_ENDPOINT || process.env.MINIO_ENDPOINT;
-    if (!endpoint) return null;
-    const parsed = _splitHostPort(endpoint);
-    host = parsed.host;
-    port = process.env.MINIO_PORT ? parseInt(process.env.MINIO_PORT, 10) : parsed.port;
-    useSSL = process.env.MINIO_USE_SSL === "true";
-    accessKey = process.env.S3_ACCESS_KEY || process.env.MINIO_ROOT_USER || "crowadmin";
-    secretKey = process.env.S3_SECRET_KEY || process.env.MINIO_ROOT_PASSWORD;
-    if (!secretKey) return null;
-    source = "env";
+    const env = envStorageConfig();
+    if (!env || !env.secretKey) return null;
+    ({ host, port, useSSL, accessKey, secretKey, region } = env);
+    source = `env ${env.source}`;
   }
 
+  // region explicitly: Garage refuses any region but its s3_region, and without one
+  // minio-js may first ask the server which region a bucket is in.
   clientInstance = new Minio.Client({
     endPoint: host,
     port,
     useSSL,
     accessKey,
     secretKey,
+    region,
   });
-  console.log(`[storage] client: endpoint=${host}:${port} source=${source}`);
+  // stderr, not stdout: the stdio storage server speaks MCP on stdout.
+  console.error(`[storage] client: endpoint=${host}:${port} source=${source}`);
   return clientInstance;
 }
 
@@ -220,7 +283,7 @@ export async function isAvailable() {
  */
 export async function ensureBucket(bucket) {
   const client = getClient();
-  if (!client) throw new Error("Storage not configured. Set MINIO_ENDPOINT and MINIO_ROOT_PASSWORD in .env or configure shared storage in the Nest.");
+  if (!client) throw new Error("Storage not configured. Install File Storage (Garage) from Extensions, or configure Shared Storage in the Nest.");
   const target = bucket || defaultBucket();
   const exists = await client.bucketExists(target);
   if (!exists) {

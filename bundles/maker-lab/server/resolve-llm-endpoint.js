@@ -3,7 +3,7 @@
  *
  * Resolution order:
  *   1. MAKER_LAB_LLM_ENDPOINT explicitly set  → use verbatim (operator override).
- *   2. vLLM live at http://localhost:8089/v1  → use + first served model.
+ *   2. vLLM live at http://localhost:8044/v1  → use + first served model.
  *   3. Ollama live at http://localhost:11434  → use + configured model.
  *   4. Hardcoded fallback: http://localhost:11434/v1 + llama3.2:3b.
  *
@@ -16,7 +16,7 @@
  * model is still loading for vLLM, and we need the model name anyway.
  */
 
-const VLLM_PROBE_URL = process.env.MAKER_LAB_VLLM_PROBE || "http://localhost:8089/v1/models";
+const VLLM_PROBE_URL = process.env.MAKER_LAB_VLLM_PROBE || "http://localhost:8044/v1/models";
 const OLLAMA_PROBE_URL = process.env.MAKER_LAB_OLLAMA_PROBE || "http://localhost:11434/api/tags";
 const PROBE_TIMEOUT_MS = 750;
 

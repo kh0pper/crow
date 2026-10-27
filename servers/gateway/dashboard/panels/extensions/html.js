@@ -161,6 +161,11 @@ export function renderIcon(addon, size) {
  * @returns {{viewsHtml:string, addonRegistryScript:string, collectionsScript:string}}
  */
 
+/** A deprecated bundle (manifest `deprecated`): never offered for a new install. */
+export function isDeprecatedBundle(addon) {
+  return !!(addon && addon.deprecated && (addon.type || "bundle") === "bundle");
+}
+
 export function buildExtensionsHTML({
   installed,
   available,
@@ -199,11 +204,21 @@ export function buildExtensionsHTML({
       : `<span class="ext-card__badge ext-card__badge--official">${t("extensions.official", lang)}</span>`;
     const typeBadge = `<span class="ext-card__badge ext-card__badge--type">${escapeHtml(addon.type)}</span>`;
     const resources = formatResources(addon.requires);
+    // Deprecated (manifest `deprecated: { since, superseded_by }`): badged everywhere; a
+    // not-installed deprecated BUNDLE offers no Install (its image may be gone), only the
+    // name of what replaced it. An installed one keeps every action it had.
+    const successor = addon.deprecated ? available.find((a) => a.id === addon.deprecated.superseded_by) : null;
+    const successorName = successor?.name || addon.deprecated?.superseded_by || "";
+    const deprecatedBadge = addon.deprecated
+      ? `<span class="ext-card__badge ext-card__badge--deprecated"${successorName ? ` title="${escapeHtml(fill(t("extensions.deprecatedUse", lang), { name: successorName }))}"` : ""}>${t("extensions.deprecated", lang)}</span>`
+      : "";
 
     let installButton;
     const gpuCompat = checkGpuArchCompatible(addon, hostArches, hostVramGb);
     if (isInstalled) {
       installButton = badge(t("extensions.installedBadge", lang), "published");
+    } else if (isDeprecatedBundle(addon)) {
+      installButton = `<span class="ext-card__badge ext-card__badge--deprecated ext-card__replaced">${escapeHtml(successorName ? fill(t("extensions.deprecatedUse", lang), { name: successorName }) : t("extensions.deprecated", lang))}</span>`;
     } else if (!gpuCompat.ok) {
       const tip = `${gpuCompat.reason || t("extensions.incompatibleGpuArch", lang)}`;
       const label = gpuCompat.kind === "vram" ? t("extensions.insufficientVram", lang) : t("extensions.incompatibleHost", lang);
@@ -233,6 +248,7 @@ export function buildExtensionsHTML({
             <div class="ext-card__meta">
               ${communityBadge}
               ${typeBadge}
+              ${deprecatedBadge}
             </div>
             ${resources}
             <span class="ext-card__version">v${escapeHtml(addon.version || "1.0.0")} · ${escapeHtml(addon.author || "community")}</span>
@@ -490,6 +506,8 @@ export function buildExtensionsHTML({
       _iconBg: catColor.bg,
       _iconColor: catColor.color,
       _installed: !!installed[addon.id],
+      // The detail modal offers Install only when this is false (see addonCard).
+      _noInstall: isDeprecatedBundle(addon),
     };
   }
   const addonRegistryJson = JSON.stringify(addonMap).replace(/<\//g, "<\\/");

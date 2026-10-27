@@ -4,11 +4,11 @@ title: Storage
 
 # Storage
 
-Store files, images, and attachments alongside your Crow data. Storage uses S3-compatible object storage (MinIO) so your files stay on your own infrastructure.
+Store files, images, and attachments alongside your Crow data. Storage uses S3-compatible object storage (Garage, or any S3 service) so your files stay on your own infrastructure.
 
 ## What is this?
 
-Crow Storage gives your AI assistant the ability to save and retrieve files. It connects to a MinIO instance (or any S3-compatible service) running alongside your Crow server.
+Crow Storage gives your AI assistant the ability to save and retrieve files. It connects to the File Storage (Garage) extension (or any S3-compatible service) running alongside your Crow server.
 
 Files are organized by type — images, documents, audio, attachments — and accessible through MCP tools, HTTP endpoints, or the Crow's Nest file browser.
 
@@ -21,39 +21,20 @@ Files are organized by type — images, documents, audio, attachments — and ac
 
 ## Setup
 
-Storage requires a MinIO instance. If you run Crow with Docker Compose, add the storage profile to your usual command:
+Install **File Storage (Garage)** from **Extensions** in the Crow's Nest. Crow generates every key and token it needs, saves them in **Settings → Passwords**, and connects its storage tools to it — there is nothing to type.
 
-```bash
-docker compose --profile local --profile storage up --build
-```
+- **Where the files live:** by default in a Docker volume on this machine. To keep them in a folder on another local disk, set *GARAGE_DATA_PATH* when installing (not a network share or a USB drive mounted through FUSE).
+- **Sharing with paired Crow instances:** set *GARAGE_BIND_ADDR* to this machine's tailnet IP and *S3_ENDPOINT* to the same address with port 3900. The admin API (port 3903) always stays on this machine.
+- **No web console:** browse and manage files in the Crow's Nest **Files** page.
 
-(Use `--profile cloud` instead of `local` on a cloud deployment.) For standalone MinIO:
-
-```bash
-docker run -d \
-  --name minio \
-  -p 9000:9000 \
-  -p 9001:9001 \
-  -v minio-data:/data \
-  -e MINIO_ROOT_USER=crowadmin \
-  -e MINIO_ROOT_PASSWORD=your-secure-password \
-  minio/minio server /data --console-address ":9001"
-```
-
-Then add these to your `.env`:
-
-```bash
-MINIO_ENDPOINT=localhost
-MINIO_PORT=9000
-MINIO_ROOT_USER=crowadmin
-MINIO_ROOT_PASSWORD=your-secure-password
-MINIO_USE_SSL=false
-```
-
-Crow creates and manages its bucket (`crow-files`) automatically — no bucket setup needed. Run `npm run mcp-config` to regenerate your MCP configuration, then restart the gateway.
+Crow creates and manages its bucket (`crow-files`) automatically — no bucket setup needed.
 
 ::: tip Already have S3 somewhere else?
-Any S3-compatible service works — set `S3_ENDPOINT`, `S3_ACCESS_KEY`, and `S3_SECRET_KEY` instead. You can also configure shared storage from the dashboard (Settings → Shared Storage), which takes precedence over `.env`.
+Any S3-compatible service works. Configure it in **Settings → Shared Storage** (it replicates to paired instances and takes precedence over `.env`), or set `S3_ENDPOINT`, `S3_ACCESS_KEY` and `S3_SECRET_KEY` in `.env`.
+:::
+
+::: warning MinIO is deprecated
+The MinIO extension is no longer maintained upstream and its image can no longer be downloaded, so it can't be installed any more. An existing MinIO install keeps running; the older `MINIO_*` settings are still read when no `S3_*` setting is present.
 :::
 
 ## Uploading Files

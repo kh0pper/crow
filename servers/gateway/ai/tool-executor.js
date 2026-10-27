@@ -225,7 +225,7 @@ export function createToolExecutor(opts = {}) {
         const { createStorageServer } = await import("../../storage/server.js");
         factories.storage = createStorageServer;
       } catch {
-        throw new Error("Storage server not available. Set MINIO_ENDPOINT in .env.");
+        throw new Error("Storage server not available. Install File Storage (Garage) from Extensions, or configure Shared Storage in the Nest.");
       }
     }
 

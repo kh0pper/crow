@@ -126,11 +126,12 @@ test("catalog reports an addon whose bundle dir is missing as unconfigured", () 
   assert.match(unconfigured.ghost, /not installed/);
 });
 
-test("crow-storage is catalogued as unconfigured when MinIO env is absent", () => {
+test("crow-storage is catalogued without any MinIO env: it reads the instance's Shared Storage settings from the DB", () => {
   const { home } = instanceB();
   const { servers, unconfigured } = crowServerCatalog(home, { binding: BINDING_B(home) });
-  assert.ok(!servers["crow-storage"], "not offered as spawnable without MinIO settings");
-  assert.match(unconfigured["crow-storage"], /MINIO_ENDPOINT/);
+  assert.ok(servers["crow-storage"], "offered: the env is only its fallback (Garage migration PR 1)");
+  assert.equal(unconfigured["crow-storage"], undefined);
+  assert.equal(servers["crow-storage"].env.CROW_DB_PATH, join(home, "data", "crow.db"), "bound to THIS instance's DB");
 });
 
 test("probe surface is CORE catalog servers plus NON-Crow canonical entries", () => {
@@ -181,18 +182,19 @@ test("probe surface drops a non-core canonical entry whose bundle is absent on t
     "a canonical block pinned to a bundle this instance does not have must not reach the picker");
 });
 
-test("probe surface drops an unconfigured core name rather than falling through to its canonical block", () => {
+test("probe surface: a core name's catalog block wins over a canonical block pinned elsewhere", () => {
   const { home } = instanceB();
-  // crow-storage is a CONDITIONAL core server, unconfigured here (no MinIO env)
-  // per the "catalogued as unconfigured" test above. A canonical entry under
-  // the SAME name must not leak through as a fallback.
+  // crow-storage is a core server catalogued for this instance. A canonical entry under
+  // the SAME name, pointing at another instance's storage, must not leak through.
   const canonical = { mcpServers: {
     "crow-storage": { command: "n", args: ["servers/storage/index.js"], cwd: "/repo",
       env: { MINIO_ENDPOINT: "http://elsewhere:9000" } },
   } };
   const surface = serversForProbe(canonical, home, { binding: BINDING_B(home) });
-  assert.ok(!surface["crow-storage"],
-    "crow-storage is a known core name — unconfigured must not fall through to canonical's cross-instance block");
+  assert.ok(surface["crow-storage"]);
+  assert.notEqual(surface["crow-storage"].env.MINIO_ENDPOINT, "http://elsewhere:9000",
+    "crow-storage is a known core name — the canonical cross-instance block must not be used");
+  assert.equal(surface["crow-storage"].env.CROW_DB_PATH, join(home, "data", "crow.db"));
 });
 
 test("instanceBinding honors the crowHome argument when CROW_DB_PATH and CROW_DATA_DIR are both unset", () => {

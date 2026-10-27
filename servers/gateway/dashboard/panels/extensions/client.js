@@ -1485,7 +1485,7 @@ export function extensionsClientJS(lang) {
           closeAction.addEventListener("click", hideModal);
           actions.appendChild(closeAction);
 
-          if (!addon._installed) {
+          if (!addon._installed && !addon._noInstall) {
             var installAction = document.createElement("button");
             installAction.className = "btn btn-primary";
             installAction.textContent = '${tJs("extensions.install", lang)}';

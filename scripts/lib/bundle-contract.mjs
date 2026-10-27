@@ -192,13 +192,18 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
       else if (v.keychain !== true && v.generatable !== true) errors.push(`env_vars ${v.name}: keychain_configure only applies with keychain: true or generatable: true`);
     }
     if (v.generate !== undefined) {
-      const KINDS = ["secret", "laravel_key", "vapid_private_key", "vapid_public_key"];
+      const KINDS = ["secret", "laravel_key", "vapid_private_key", "vapid_public_key", "hex32", "garage_key_id"];
       if (!KINDS.includes(v.generate)) errors.push(`env_vars ${v.name}: generate must be one of ${KINDS.join(", ")}`);
       if (v.generate === "vapid_public_key") {
         const pair = manifest.env_vars.find((o) => o && o.name === v.pair);
         if (!pair || pair.generate !== "vapid_private_key") errors.push(`env_vars ${v.name}: generate "vapid_public_key" needs pair: <the name of a generate "vapid_private_key" var>`);
       }
       if (v.propagate === true && v.store_as !== undefined) errors.push(`env_vars ${v.name}: propagate: true cannot be combined with store_as (the gateway would get a hash)`);
+    }
+    if (v.propagate_as !== undefined) {
+      if (typeof v.propagate_as !== "string" || !/^[A-Z_][A-Z0-9_]*$/.test(v.propagate_as)) errors.push(`env_vars ${v.name}: propagate_as must be an upper-case env var name`);
+      else if (v.propagate !== true || v.generate === undefined) errors.push(`env_vars ${v.name}: propagate_as needs generate and propagate: true`);
+      else if ((manifest.env_vars || []).some((o) => o && o.name === v.propagate_as)) errors.push(`env_vars ${v.name}: propagate_as names another declared var (${v.propagate_as})`);
     }
     if (v.advanced !== undefined && typeof v.advanced !== "boolean") errors.push(`env_vars ${v.name}: advanced must be a boolean`);
     if (v.previous_key !== undefined) {

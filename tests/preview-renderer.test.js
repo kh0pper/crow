@@ -1,0 +1,1069 @@
+/**
+ * The preview renderer's guard, build, lifecycle and ownership
+ * (servers/gateway/preview/renderer.js), against a fake docker, a fake pipe child and a
+ * fake clock: no real Docker, no real waits. The live behaviour is in
+ * tests/preview-renderer-live.test.js (Docker-gated).
+ */
+import { test, after } from "node:test";
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import { mkdtempSync, rmSync, realpathSync, cpSync, appendFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, isAbsolute } from "node:path";
+import { fileURLToPath } from "node:url";
+import { randomBytes } from "node:crypto";
+
+import {
+  createPreviewRenderer, setPreviewsEnabled, previewImageTag, PREVIEW_MANIFEST, SANDBOX_STDERR_RE,
+  _setPreviewRendererForTest,
+} from "../servers/gateway/preview/renderer.js";
+import { _setPreviewSeccompPathForTest } from "../servers/gateway/compose-guard.js";
+import previewsSection from "../servers/gateway/dashboard/settings/sections/previews.js";
+import onboardingPanel, { STEP_KEYS, handlePreviewsPost } from "../servers/gateway/dashboard/panels/onboarding.js";
+import { csrfMiddleware } from "../servers/gateway/dashboard/shared/csrf.js";
+import { readFileSync } from "node:fs";
+import { t } from "../servers/gateway/dashboard/shared/i18n.js";
+import { escapeHtml } from "../servers/gateway/dashboard/shared/components.js";
+
+const DIR = fileURLToPath(new URL("../servers/gateway/preview/container/", import.meta.url)).replace(/\/$/, "");
+const SECCOMP = realpathSync(join(DIR, "seccomp-chrome.json"));
+const SCRATCH = mkdtempSync(join(tmpdir(), "crow-preview-renderer-"));
+const CROW_HOME = join(SCRATCH, "home");
+after(() => {
+  _setPreviewSeccompPathForTest(null);
+  _setPreviewRendererForTest(null);
+  rmSync(SCRATCH, { recursive: true, force: true });
+});
+
+const DAY = 24 * 3600_000;
+const flush = async (n = 30) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
+
+// ---- a fake clock -----------------------------------------------------------------------
+
+function fakeClock(start = Date.UTC(2026, 9, 27)) {
+  let t = start;
+  let q = [];
+  let seq = 0;
+  return {
+    now: () => t,
+    timers: {
+      setTimeout(fn, ms) { const h = { at: t + Math.max(0, Number(ms) || 0), fn, seq: seq++, unref() { return h; } }; q.push(h); return h; },
+      clearTimeout(h) { q = q.filter((x) => x !== h); },
+    },
+    async advance(ms) {
+      const end = t + ms;
+      for (;;) {
+        await flush();
+        q.sort((a, b) => a.at - b.at || a.seq - b.seq);
+        const next = q[0];
+        if (!next || next.at > end) break;
+        q.shift();
+        t = next.at;
+        next.fn();
+      }
+      t = end;
+      await flush();
+    },
+  };
+}
+
+// ---- a fake settings db (the readSetting / upsertSetting SQL) -------------------------
+
+function settingsDb(initial = {}) {
+  const global = new Map(Object.entries(initial));
+  const local = new Map();
+  return {
+    global, local,
+    get: (k) => (local.has(k) ? local.get(k) : global.get(k) ?? null),
+    async execute(q) {
+      const sql = typeof q === "string" ? q : q.sql;
+      const args = (typeof q === "string" ? [] : q.args) || [];
+      if (/^\s*SELECT value FROM dashboard_settings_overrides/i.test(sql)) return { rows: local.has(args[0]) ? [{ value: local.get(args[0]) }] : [] };
+      if (/^\s*SELECT value FROM dashboard_settings WHERE key/i.test(sql)) return { rows: global.has(args[0]) ? [{ value: global.get(args[0]) }] : [] };
+      if (/INSERT INTO dashboard_settings_overrides/i.test(sql)) { local.set(args[0], args[2]); return { rows: [] }; }
+      if (/INSERT INTO dashboard_settings /i.test(sql)) { global.set(args[0], args[1]); return { rows: [] }; }
+      if (/DELETE FROM dashboard_settings_overrides/i.test(sql)) { local.delete(args[0]); return { rows: [] }; }
+      return { rows: [] };
+    },
+  };
+}
+
+// ---- a fake browser child --------------------------------------------------------------
+
+class FakeChild extends EventEmitter {
+  constructor(clock, { stdoutJunk = null, stderrFirst = null, exitBeforeAnswer = null, ignoreEof = false } = {}) {
+    super();
+    this.clock = clock;
+    this.stdin = new PassThrough();
+    this.stdout = new PassThrough();
+    this.stderr = new PassThrough();
+    this.exitCode = null;
+    this.signalCode = null;
+    this.killed = null;
+    this.ignoreEof = ignoreEof;
+    this.broken = stdoutJunk !== null || exitBeforeAnswer !== null; // never answers CDP
+    let buf = Buffer.alloc(0);
+    this.stdin.on("data", (c) => {
+      buf = Buffer.concat([buf, c]);
+      for (let i; (i = buf.indexOf(0)) !== -1;) {
+        const msg = JSON.parse(buf.subarray(0, i).toString("utf8"));
+        buf = buf.subarray(i + 1);
+        if (this.exitCode !== null || this.signalCode !== null || this.broken) continue;
+        const result = msg.method === "Browser.getVersion" ? { product: "HeadlessChrome/1", userAgent: "HeadlessChrome" } : { ok: msg.method };
+        this.stdout.write(JSON.stringify({ id: msg.id, result }) + "\0");
+      }
+    });
+    this.stdin.on("end", () => { if (!this.ignoreEof) this._exit(0, null); });
+    setImmediate(() => {
+      if (stderrFirst) this.stderr.write(stderrFirst);
+      if (stdoutJunk) this.stdout.write(stdoutJunk);
+      if (exitBeforeAnswer !== null) {
+        this.stderr.write(exitBeforeAnswer);
+        this._exit(1, null);
+      }
+    });
+  }
+  kill(sig = "SIGTERM") {
+    this.killed = { sig, at: this.clock.now() };
+    this._exit(null, sig);
+    return true;
+  }
+  _exit(code, sig) {
+    if (this.exitCode !== null || this.signalCode !== null) return;
+    this.exitCode = code;
+    this.signalCode = sig;
+    this.stdout.end();
+    this.stderr.end();
+    setImmediate(() => { this.emit("exit", code, sig); setImmediate(() => this.emit("close", code, sig)); });
+  }
+}
+
+// ---- a fake docker ----------------------------------------------------------------------
+
+/** The renderer's model, as `docker compose config` would print it for this env. */
+function modelFor(env, cwd) {
+  return {
+    name: "crow-preview-x",
+    services: {
+      renderer: {
+        build: { context: cwd, dockerfile: "Dockerfile" },
+        cap_drop: ["ALL"], command: null, entrypoint: null,
+        environment: { CROW_PREVIEW_ARTIFACT_HOST: env.CROW_PREVIEW_ARTIFACT_HOST },
+        image: env.CROW_PREVIEW_IMAGE, init: true,
+        labels: { "crow.component": "preview-renderer", "crow.home": env.CROW_PREVIEW_HOME, "crow.instance": env.CROW_PREVIEW_INSTANCE },
+        mem_limit: "805306368", network_mode: "none", pids_limit: 512, pull_policy: "never", read_only: true,
+        security_opt: ["no-new-privileges:true", `seccomp=${env.CROW_PREVIEW_SECCOMP}`],
+        shm_size: "268435456", stdin_open: true, tmpfs: ["/tmp:size=256m,mode=1777"], user: "10001:10001",
+      },
+    },
+  };
+}
+
+function fakeDocker(clock, opts = {}) {
+  const log = [];
+  const containers = opts.containers || []; // { name, labels, image, running }
+  const images = opts.images || {};          // tag → created ms
+  const imageIds = {};                        // tag → full image ID
+  const dangling = [];                        // { id, created } (a rebuilt tag's old image)
+  const unlabelled = new Set(opts.unlabelled || []); // tags without crow.component
+  let idSeq = 0;
+  const newId = () => `sha256:${String(++idSeq).padStart(64, "0")}`;
+  const idOf = (tag) => (imageIds[tag] ||= newId());
+  const children = [];
+  const filtersOf = (args) => args.flatMap((a, i) => (args[i - 1] === "--filter" ? [a] : []));
+  const matches = (c, filters) => filters.every((f) => {
+    const [k, v] = f.split("=", 2).length === 2 ? [f.slice(0, f.indexOf("=")), f.slice(f.indexOf("=") + 1)] : [f, ""];
+    if (k === "label") { const [lk, lv] = [v.slice(0, v.indexOf("=")), v.slice(v.indexOf("=") + 1)]; return c.labels[lk] === lv; }
+    if (k === "ancestor") return c.image === v || (v in images && c.image === imageIds[v]) || (c.image in images && imageIds[c.image] === v);
+    if (k === "name") return c.name.includes(v);
+    return false;
+  });
+  /** An image reference (tag or ID) is used by a container (any state): docker refuses rm. */
+  const usedBy = (ref) => containers.some((c) => c.image === ref || (ref in images && c.image === idOf(ref)) || (c.image in images && idOf(c.image) === ref));
+  const docker = {
+    log, containers, images, imageIds, dangling, children, idOf,
+    async exec(args, { cwd, env } = {}) {
+      log.push({ args, cwd, env });
+      if (args[0] === "info") return { code: opts.info === false ? 1 : 0, stdout: "", stderr: "" };
+      if (args[0] === "compose") {
+        const verb = args[args.indexOf("-f") + 2];
+        if (verb === "config") {
+          const m = modelFor(env, cwd);
+          if (opts.refuse) m.services.renderer.cap_add = ["SYS_ADMIN"];
+          return { code: 0, stdout: JSON.stringify(m), stderr: "" };
+        }
+        if (verb === "build") {
+          const code = opts.buildCode ? opts.buildCode() : 0;
+          if (opts.buildGate) await opts.buildGate;
+          if (code === 0) {
+            const tag = env.CROW_PREVIEW_IMAGE;
+            if (tag in images) dangling.push({ id: idOf(tag), created: images[tag] }); // the old image loses its tag
+            images[tag] = clock.now();
+            imageIds[tag] = newId();
+          }
+          return { code, stdout: "", stderr: code ? "build broke" : "" };
+        }
+      }
+      if (args[0] === "image" && args[1] === "inspect") {
+        const tag = args[args.length - 1];
+        const fmt = args[args.indexOf("--format") + 1];
+        if (!(tag in images)) return { code: 1, stdout: "", stderr: "No such image" };
+        return { code: 0, stdout: fmt.replace("{{.Created}}", new Date(images[tag]).toISOString()).replace("{{.Id}}", idOf(tag)) + "\n", stderr: "" };
+      }
+      if (args[0] === "image" && (args[1] === "ls" || args[1] === "list")) {
+        const rows = [];
+        if (filtersOf(args).includes("label=crow.component=preview-renderer")) {
+          for (const tag of Object.keys(images)) if (!unlabelled.has(tag)) rows.push(`${idOf(tag)}\t${tag}`);
+          for (const d of dangling) rows.push(`${d.id}\t<none>:<none>`);
+        }
+        return { code: 0, stdout: rows.join("\n") + (rows.length ? "\n" : ""), stderr: "" };
+      }
+      if (args[0] === "image" && args[1] === "rm") {
+        const ref = args[args.length - 1];
+        if (usedBy(ref)) return { code: 1, stdout: "", stderr: `Error response from daemon: conflict: unable to remove repository reference "${ref}" (must force) - container abc is using its referenced image` };
+        if (ref in images) { delete images[ref]; delete imageIds[ref]; return { code: 0, stdout: "", stderr: "" }; }
+        const i = dangling.findIndex((d) => d.id === ref);
+        if (i !== -1) { dangling.splice(i, 1); return { code: 0, stdout: "", stderr: "" }; }
+        return { code: 1, stdout: "", stderr: `Error response from daemon: No such image: ${ref}` };
+      }
+      if (args[0] === "rm") {
+        for (const n of args.slice(2)) { const i = containers.findIndex((c) => c.name === n); if (i !== -1) containers.splice(i, 1); }
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (args[0] === "ps") {
+        const all = args.includes("-a");
+        const rows = containers.filter((c) => (all || c.running) && matches(c, filtersOf(args)));
+        return { code: 0, stdout: rows.map((c) => c.name).join("\n") + (rows.length ? "\n" : ""), stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    },
+    spawn(args, { cwd, env } = {}) {
+      log.push({ args, cwd, env, spawn: true });
+      const child = new FakeChild(clock, (opts.child && opts.child(children.length)) || {});
+      child.args = args;
+      child.cwd = cwd;
+      children.push(child);
+      const name = args[args.indexOf("--name") + 1];
+      const c = { name, labels: { "crow.component": "preview-renderer", "crow.instance": env.CROW_PREVIEW_INSTANCE, "crow.home": env.CROW_PREVIEW_HOME }, image: env.CROW_PREVIEW_IMAGE, running: true };
+      containers.push(c);
+      child.once("exit", () => { c.running = false; });
+      return child;
+    },
+  };
+  return docker;
+}
+
+const verbs = (log) => log.map((e) => (e.args[0] === "compose" ? e.args[e.args.indexOf("-f") + 2] : e.args.slice(0, e.args[0] === "image" ? 2 : 1).join(" ")));
+const composeVerbs = (log) => log.filter((e) => e.args[0] === "compose").map((e) => e.args[e.args.indexOf("-f") + 2]);
+
+const SILENT = { log() {}, warn() {} };
+const ORIGIN = () => ({ baseUrl: "http://artifacts.example.test:3060" });
+
+/** A renderer with previews on and the image already built (unless told otherwise). */
+function setup({ enabled = true, imageReady = true, dockerOpts = {}, containerDir, ...over } = {}) {
+  const clock = fakeClock();
+  const docker = fakeDocker(clock, dockerOpts);
+  const db = settingsDb(enabled ? { previews_enabled: "true" } : {});
+  const r = createPreviewRenderer({
+    crowHome: CROW_HOME, db, docker, now: clock.now, timers: clock.timers, inContainer: () => false,
+    instanceId: "instance-under-test", originInfo: ORIGIN, log: SILENT, ...(containerDir ? { containerDir } : {}), ...over,
+  });
+  if (imageReady) docker.images[previewImageTag(containerDir)] = clock.now() - DAY;
+  return { clock, docker, db, r };
+}
+
+// ---- the invocation ---------------------------------------------------------------------
+
+test("the exact invocation", async () => {
+  const { docker, r } = setup();
+  const lease = await r.acquire();
+  assert.ok(lease.cdp, JSON.stringify(lease));
+  const spawns = docker.log.filter((e) => e.spawn);
+  assert.equal(spawns.length, 1);
+  const { args, cwd } = spawns[0];
+  const name = args[args.indexOf("--name") + 1];
+  assert.match(name, /^crow-preview-[0-9a-f]{8}-[0-9a-f]{8}$/);
+  const label = name.split("-")[2];
+  assert.deepEqual(args, ["compose", "-p", `crow-preview-${label}`, "-f", join(DIR, "compose.yml"), "run", "--rm", "-T", "-q", "--no-deps", "--pull", "never", "--name", name, "renderer"]);
+  assert.ok(isAbsolute(args[4]));
+  assert.equal(cwd, DIR);
+  for (const e of docker.log) assert.ok(!e.args.includes("--build"), `no --build: ${e.args.join(" ")}`);
+  assert.equal(r.state(), "running");
+  lease.release();
+  await r.stop();
+});
+
+test("names are unique per run", async () => {
+  const { docker, r } = setup();
+  (await r.acquire()).release();
+  await r.stop();
+  (await r.acquire()).release();
+  await r.stop();
+  const names = docker.log.filter((e) => e.spawn).map((e) => e.args[e.args.indexOf("--name") + 1]);
+  assert.equal(names.length, 2);
+  assert.notEqual(names[0], names[1]);
+});
+
+test("the guard runs before every build and run", async () => {
+  let open;
+  const buildGate = new Promise((res) => { open = res; });
+  const { docker, r } = setup({ imageReady: false, dockerOpts: { buildGate } });
+  assert.deepEqual(await r.acquire(), { off: "building" });
+  assert.equal(r.buildState(), "building");
+  open();
+  await flush();
+  assert.equal(r.buildState(), "ready");
+  const lease = await r.acquire();
+  assert.ok(lease.cdp);
+  assert.deepEqual(composeVerbs(docker.log), ["config", "build", "config", "run"]);
+  lease.release();
+  await r.stop();
+
+  // A refusal: nothing is run.
+  const refused = setup({ dockerOpts: { refuse: true } });
+  assert.deepEqual(await refused.r.acquire(), { off: "start_failed" });
+  assert.equal(refused.r.lastOff(), "start_failed");
+  assert.deepEqual(composeVerbs(refused.docker.log), ["config"]);
+  assert.equal(refused.docker.log.filter((e) => e.spawn).length, 0);
+  // …and a refused build is a failed build.
+  const refusedBuild = setup({ imageReady: false, dockerOpts: { refuse: true } });
+  assert.deepEqual(await refusedBuild.r.acquire(), { off: "building" });
+  await flush();
+  assert.equal(refusedBuild.r.buildState(), "failed");
+  assert.deepEqual(await refusedBuild.r.acquire(), { off: "build_failed" });
+  assert.deepEqual(composeVerbs(refusedBuild.docker.log), ["config"]);
+});
+
+test("CROW_PREVIEW_SECCOMP is absolute", async () => {
+  const { docker, r } = setup({ imageReady: false });
+  await r.acquire();
+  await flush();
+  const lease = await r.acquire();
+  lease.release();
+  await r.stop();
+  const composeCalls = docker.log.filter((e) => e.args[0] === "compose");
+  assert.ok(composeCalls.length >= 4);
+  for (const { env } of composeCalls) {
+    assert.equal(isAbsolute(env.CROW_PREVIEW_SECCOMP), true);
+    assert.equal(env.CROW_PREVIEW_SECCOMP, SECCOMP);
+    for (const k of ["CROW_PREVIEW_IMAGE", "CROW_PREVIEW_SECCOMP", "CROW_PREVIEW_INSTANCE", "CROW_PREVIEW_HOME", "CROW_PREVIEW_ARTIFACT_HOST", "CROW_HOME"]) {
+      assert.ok(env[k], `${k} is set`);
+    }
+    assert.match(env.CROW_PREVIEW_INSTANCE, /^[0-9a-f]{8}$/);
+    assert.match(env.CROW_PREVIEW_HOME, /^[0-9a-f]{8}$/);
+    assert.equal(env.CROW_PREVIEW_IMAGE, previewImageTag());
+    assert.equal(env.CROW_PREVIEW_ARTIFACT_HOST, "artifacts.example.test");
+    assert.equal(env.COMPOSE_FILE, undefined);
+  }
+});
+
+test("an artifact host that isn't a plain hostname is start_failed, nothing spawned", async () => {
+  for (const baseUrl of ["http://a,b.example.test:3060", "http://[::1]:3060", null]) {
+    const { docker, r } = setup({ originInfo: () => (baseUrl ? { baseUrl } : null) });
+    assert.deepEqual(await r.acquire(), { off: "start_failed" }, String(baseUrl));
+    assert.equal(docker.log.filter((e) => e.args[0] === "compose" || e.spawn).length, 0);
+  }
+});
+
+test("stdout that isn't CDP is start_failed", async () => {
+  const { docker, r } = setup({ dockerOpts: { child: () => ({ stdoutJunk: "Creating…\n", ignoreEof: true }) } });
+  assert.deepEqual(await r.acquire(), { off: "start_failed" });
+  assert.equal(r.state(), "stopped");
+  const name = docker.children[0].args[docker.children[0].args.indexOf("--name") + 1];
+  assert.ok(docker.children[0].killed, "the compose child is killed");
+  assert.ok(docker.log.some((e) => e.args[0] === "rm" && e.args.includes(name)), "and its container removed by name");
+});
+
+test("stderr is drained into a 64 KB tail", async () => {
+  const noise = randomBytes(512 * 1024).toString("hex"); // 1 MiB of ASCII
+  const { r } = setup({ dockerOpts: { child: () => ({ stderrFirst: noise }) } });
+  const lease = await r.acquire();
+  assert.ok(lease.cdp, JSON.stringify(lease));
+  await flush();
+  assert.equal(r.stderrTail().length, 65536);
+  assert.equal(r.stderrTail(), noise.slice(-65536));
+  lease.release();
+  await r.stop();
+});
+
+test("sandbox detection", async () => {
+  for (const stderr of ["Failed to move to new namespace: PID namespaces supported, Network namespace supported, but failed: errno = Operation not permitted",
+    "[1:1:FATAL:zygote_host_impl_linux.cc(128)] Check failed: . ",
+    "No usable sandbox! If you are running on Ubuntu 23.10+ …"]) {
+    assert.ok(SANDBOX_STDERR_RE.test(stderr));
+    const { docker, r } = setup({ dockerOpts: { child: () => ({ exitBeforeAnswer: stderr }) } });
+    assert.deepEqual(await r.acquire(), { off: "sandbox_unavailable" }, stderr);
+    const spawns = docker.log.filter((e) => e.spawn);
+    assert.equal(spawns.length, 1, "never retried");
+    assert.ok(!spawns[0].args.includes("--no-sandbox"));
+    assert.equal(r.lastOff(), "sandbox_unavailable");
+  }
+  const { docker, r } = setup({ dockerOpts: { child: () => ({ exitBeforeAnswer: "out of memory" }) } });
+  assert.deepEqual(await r.acquire(), { off: "start_failed" });
+  assert.equal(docker.log.filter((e) => e.spawn).length, 1);
+});
+
+test("a containerized gateway reports no_docker and runs nothing", async () => {
+  const { docker, r } = setup({ inContainer: () => true });
+  assert.deepEqual(await r.acquire(), { off: "no_docker" });
+  assert.deepEqual(await r.sweep(), { removed: [] });
+  assert.deepEqual(docker.log, []);
+});
+
+test("docker info failing is no_docker", async () => {
+  const { docker, r } = setup({ dockerOpts: { info: false } });
+  assert.deepEqual(await r.acquire(), { off: "no_docker" });
+  assert.deepEqual(verbs(docker.log), ["info"]);
+});
+
+test("acquire before start", async () => {
+  const { docker, r } = setup();
+  const [a, b] = await Promise.all([r.acquire(), r.acquire()]);
+  assert.ok(a.cdp && b.cdp);
+  assert.equal(a.cdp, b.cdp);
+  assert.equal(docker.log.filter((e) => e.spawn).length, 1);
+  a.release();
+  b.release();
+  await r.stop();
+});
+
+test("a stop in flight, then acquire: the render waits and the renderer restarts", async () => {
+  const { clock, docker, r } = setup({ dockerOpts: { child: (i) => ({ ignoreEof: i === 0 }) } });
+  (await r.acquire()).release();
+  await clock.advance(121_000);
+  const stopping = r.tick();
+  await flush();
+  assert.equal(r.state(), "stopping");
+  const later = r.acquire();
+  await clock.advance(5_000); // the first child ignores EOF: killed at 5 s
+  assert.equal(await stopping, "stopped");
+  const lease = await later;
+  assert.ok(lease.cdp, JSON.stringify(lease));
+  assert.equal(r.state(), "running");
+  assert.deepEqual(await lease.cdp.send("Page.navigate", { url: "about:blank" }), { ok: "Page.navigate" });
+  const v = verbs(docker.log);
+  const firstRm = v.indexOf("rm");
+  const secondRun = v.lastIndexOf("run");
+  assert.ok(firstRm !== -1 && secondRun > firstRm, v.join(","));
+  assert.equal(docker.log.filter((e) => e.spawn).length, 2);
+  lease.release();
+  await r.stop();
+});
+
+test("a pipe that breaks while the child lives ends the run; the next acquire starts fresh", async () => {
+  const { docker, r } = setup({ dockerOpts: { child: (i) => ({ ignoreEof: i === 0 }) } });
+  const lease = await r.acquire();
+  assert.ok(lease.cdp);
+  const child = docker.children[0];
+  const name = child.args[child.args.indexOf("--name") + 1];
+  child.stdout.write("Creating…\n"); // junk after getVersion answered
+  await flush();
+  assert.equal(r.state(), "stopped");
+  assert.equal(child.killed.sig, "SIGKILL", "the live child is killed");
+  assert.ok(docker.log.some((e) => e.args[0] === "rm" && e.args.includes(name)), "and removed by name");
+  lease.release();
+  const next = await r.acquire();
+  assert.ok(next.cdp, JSON.stringify(next));
+  assert.notEqual(next.cdp, lease.cdp);
+  assert.equal(docker.log.filter((e) => e.spawn).length, 2, "a new run");
+  assert.deepEqual(await next.cdp.send("Page.navigate", {}), { ok: "Page.navigate" });
+  next.release();
+  await r.stop();
+});
+
+test("an acquire waiting on a stop does not start a renderer once previews were switched off", async () => {
+  const { clock, docker, db, r } = setup({ dockerOpts: { child: () => ({ ignoreEof: true }) } });
+  (await r.acquire()).release();
+  const stopping = r.stop();
+  await flush();
+  assert.equal(r.state(), "stopping");
+  const later = r.acquire(); // passed the enabled check, now waits on the stop
+  await flush();
+  await setPreviewsEnabled(db, false);
+  await clock.advance(5_000);
+  await stopping;
+  assert.deepEqual(await later, { off: "not_enabled" });
+  assert.equal(docker.log.filter((e) => e.spawn).length, 1, "no second run");
+  assert.equal(r.state(), "stopped");
+});
+
+test("idle counts from the last release", async () => {
+  const { clock, r } = setup();
+  const lease = await r.acquire();
+  await clock.advance(10 * 60_000);
+  assert.equal(await r.tick(), "kept", "a held lease is never idled");
+  lease.release();
+  await clock.advance(90_000);
+  assert.equal(await r.tick(), "kept");
+  await clock.advance(31_000);
+  assert.equal(await r.tick(), "stopped");
+  assert.equal(r.state(), "stopped");
+  assert.equal(await r.tick(), "idle");
+});
+
+test("a stop closes stdin, waits 5 s, kills, then removes by name", async () => {
+  const { clock, docker, r } = setup({ dockerOpts: { child: () => ({ ignoreEof: true }) } });
+  (await r.acquire()).release();
+  const child = docker.children[0];
+  const name = child.args[child.args.indexOf("--name") + 1];
+  let stdinEnded = false;
+  child.stdin.on("finish", () => { stdinEnded = true; });
+  const t0 = clock.now();
+  const stop = r.stop();
+  await flush();
+  assert.equal(stdinEnded, true, "stdin is closed first");
+  await clock.advance(4_900);
+  assert.equal(child.killed, null, "not killed before 5 s");
+  await clock.advance(100);
+  await stop;
+  assert.equal(child.killed.sig, "SIGKILL");
+  assert.ok(Math.abs(child.killed.at - t0 - 5_000) <= 100, `killed at ${child.killed.at - t0} ms`);
+  const tail = docker.log.slice(docker.log.findIndex((e) => e.args[0] === "rm"));
+  assert.deepEqual(tail[0].args, ["rm", "-f", name]);
+  assert.equal(tail[1].args[0], "ps", "then the sweep");
+  assert.equal(r.state(), "stopped");
+});
+
+test("the sweep removes only our labels", async () => {
+  const { docker, r } = setup();
+  const lease = await r.acquire();
+  const live = docker.containers[0];
+  const ours = { ...live.labels };
+  docker.containers.push(
+    { name: "crow-preview-aaaaaaaa-00000001", labels: ours, image: live.image, running: false },
+    { name: "crow-preview-bbbbbbbb-00000002", labels: { ...ours, "crow.instance": "bbbbbbbb" }, image: live.image, running: true },
+    { name: "crow-preview-cccccccc-00000003", labels: { ...ours, "crow.home": "cccccccc" }, image: live.image, running: false },
+  );
+  assert.deepEqual(await r.sweep(), { removed: ["crow-preview-aaaaaaaa-00000001"] });
+  const ps = docker.log.filter((e) => e.args[0] === "ps").pop().args;
+  assert.ok(ps.includes("-a"));
+  assert.ok(ps.includes("label=crow.component=preview-renderer"));
+  assert.ok(ps.includes(`label=crow.instance=${ours["crow.instance"]}`));
+  assert.ok(ps.includes(`label=crow.home=${ours["crow.home"]}`));
+  assert.deepEqual(docker.containers.map((c) => c.name).sort(), [live.name, "crow-preview-bbbbbbbb-00000002", "crow-preview-cccccccc-00000003"].sort());
+  lease.release();
+  await r.stop();
+});
+
+test("the build is separate and backs off", async () => {
+  let failing = true;
+  const { clock, docker, r } = setup({ imageReady: false, dockerOpts: { buildCode: () => (failing ? 1 : 0) } });
+  assert.deepEqual(await r.acquire(), { off: "building" });
+  await flush();
+  assert.equal(r.buildState(), "failed");
+  assert.deepEqual(await r.acquire(), { off: "build_failed" });
+  await clock.advance(9 * 60_000);
+  assert.deepEqual(await r.acquire(), { off: "build_failed" });
+  assert.equal(composeVerbs(docker.log).filter((v) => v === "build").length, 1, "no rebuild inside 10 min");
+  failing = false;
+  await clock.advance(60_001);
+  assert.deepEqual(await r.acquire(), { off: "building" });
+  await flush();
+  assert.equal(composeVerbs(docker.log).filter((v) => v === "build").length, 2, "then a retry");
+  assert.equal(r.buildState(), "ready");
+  const lease = await r.acquire();
+  assert.ok(lease.cdp);
+  lease.release();
+  await r.stop();
+});
+
+test("while the build runs, acquire is building and starts nothing", async () => {
+  let open;
+  const gate = new Promise((res) => { open = res; });
+  const { docker, r } = setup({ imageReady: false, dockerOpts: { buildGate: gate } });
+  assert.deepEqual(await r.acquire(), { off: "building" });
+  assert.deepEqual(await r.acquire(), { off: "building" });
+  assert.equal(composeVerbs(docker.log).filter((v) => v === "build").length, 1);
+  open();
+  await flush();
+  assert.equal(r.buildState(), "ready");
+});
+
+test("a stale or changed image is rebuilt", async () => {
+  // 31 days old: rebuilt.
+  {
+    const { clock, docker, r } = setup({ imageReady: false });
+    const tag = previewImageTag();
+    docker.images[tag] = clock.now() - 31 * DAY;
+    const oldId = docker.idOf(tag);
+    assert.deepEqual(await r.acquire(), { off: "building" });
+    await flush();
+    const builds = docker.log.filter((e) => e.args[0] === "compose" && e.args.includes("build"));
+    assert.equal(builds.length, 1);
+    assert.ok(builds[0].args.includes("--no-cache"), `a stale rebuild skips the cache: ${builds[0].args.join(" ")}`);
+    assert.notEqual(docker.idOf(tag), oldId, "the tag now names the new image");
+    const rms = docker.log.filter((e) => e.args[0] === "image" && e.args[1] === "rm").map((e) => e.args[e.args.length - 1]);
+    assert.ok(rms.includes(oldId), `the old image is removed by ID after the build: ${rms.join(", ")}`);
+    assert.ok(!rms.includes(tag), "never the fresh tag");
+    assert.deepEqual(docker.dangling, [], "nothing dangling is left behind");
+    assert.equal(r.buildState(), "ready");
+  }
+  // A missing image builds with the cache, and removes nothing by ID.
+  {
+    const { docker, r } = setup({ imageReady: false });
+    assert.deepEqual(await r.acquire(), { off: "building" });
+    await flush();
+    const build = docker.log.find((e) => e.args[0] === "compose" && e.args.includes("build"));
+    assert.ok(!build.args.includes("--no-cache"));
+  }
+  // A changed Dockerfile is a new tag: rebuilt.
+  {
+    const copy = join(SCRATCH, "container-copy");
+    cpSync(DIR, copy, { recursive: true });
+    _setPreviewSeccompPathForTest(join(copy, "seccomp-chrome.json"));
+    try {
+      const { docker, r } = setup({ containerDir: copy });
+      const before = previewImageTag(copy);
+      const lease = await r.acquire();
+      assert.ok(lease.cdp, JSON.stringify(lease));
+      lease.release();
+      await r.stop();
+      assert.equal(composeVerbs(docker.log).filter((v) => v === "build").length, 0);
+      appendFileSync(join(copy, "Dockerfile"), "\n# changed\n");
+      assert.notEqual(previewImageTag(copy), before);
+      assert.deepEqual(await r.acquire(), { off: "building" });
+      await flush();
+      assert.equal(composeVerbs(docker.log).filter((v) => v === "build").length, 1);
+      assert.equal(docker.log.filter((e) => e.args[0] === "compose").pop().env.CROW_PREVIEW_IMAGE, previewImageTag(copy));
+    } finally {
+      _setPreviewSeccompPathForTest(null);
+    }
+  }
+});
+
+test("after a build, an old-tag preview image nobody runs is removed", async () => {
+  const OLD = "crow-preview-renderer:0123456789ab";
+  const PRE_LABEL = "crow-preview-renderer:92722e9b3b4c"; // ours, built before the label: not listed
+  const { docker, r } = setup({ imageReady: false, dockerOpts: { unlabelled: ["debian:bookworm-slim", PRE_LABEL] } });
+  docker.images[OLD] = Date.now() - 40 * DAY;
+  docker.images["debian:bookworm-slim"] = Date.now(); // another image: never touched
+  docker.images[PRE_LABEL] = Date.now();
+  assert.deepEqual(await r.acquire(), { off: "building" });
+  await flush();
+  assert.equal(r.buildState(), "ready");
+  const rms = docker.log.filter((e) => e.args[0] === "image" && e.args[1] === "rm").map((e) => e.args[e.args.length - 1]);
+  assert.ok(rms.includes(OLD), `the old tag is removed: ${rms.join(", ")}`);
+  assert.ok(!rms.includes(previewImageTag()), "never the current tag");
+  assert.ok(previewImageTag() in docker.images);
+  assert.ok("debian:bookworm-slim" in docker.images && PRE_LABEL in docker.images, "unlabelled images are never touched");
+  // The image list was read by our label only.
+  const ls = docker.log.find((e) => e.args[0] === "image" && (e.args[1] === "ls" || e.args[1] === "list"));
+  assert.ok(ls.args.includes("label=crow.component=preview-renderer"), ls.args.join(" "));
+});
+
+test("after a build, an old-tag preview image a container still runs is kept", async () => {
+  const OLD = "crow-preview-renderer:0123456789ab";
+  const { docker, r } = setup({ imageReady: false, dockerOpts: { unlabelled: ["debian:bookworm-slim"] } });
+  docker.images[OLD] = Date.now() - 40 * DAY;
+  docker.images["debian:bookworm-slim"] = Date.now();
+  // Another instance (other labels) is rendering with the old image right now.
+  docker.containers.push({ name: "crow-preview-eeeeeeee-00000005", labels: { "crow.component": "preview-renderer", "crow.instance": "eeeeeeee", "crow.home": "eeeeeeee" }, image: OLD, running: true });
+  assert.deepEqual(await r.acquire(), { off: "building" });
+  await flush();
+  assert.equal(r.buildState(), "ready");
+  const rms = docker.log.filter((e) => e.args[0] === "image" && e.args[1] === "rm").map((e) => e.args[e.args.length - 1]);
+  assert.ok(!rms.includes(OLD), "in use: not even tried");
+  assert.ok(!rms.includes("debian:bookworm-slim"));
+  assert.ok(OLD in docker.images);
+  assert.ok(docker.log.some((e) => e.args[0] === "ps" && e.args.includes(`ancestor=${OLD}`)), "checked with the off switch's rule");
+});
+
+test("a start that finds no sandbox backs off for 10 minutes, with no docker call", async () => {
+  const stderr = "No usable sandbox! If you are running on Ubuntu 23.10+ …";
+  const { clock, docker, r } = setup({ dockerOpts: { child: () => ({ exitBeforeAnswer: stderr }) } });
+  assert.deepEqual(await r.acquire(), { off: "sandbox_unavailable" });
+  const n = docker.log.length;
+  assert.deepEqual(await r.acquire(), { off: "sandbox_unavailable" });
+  assert.equal(docker.log.length, n, "the second acquire spawns nothing and calls nothing");
+  assert.equal(r.lastOff(), "sandbox_unavailable");
+  await clock.advance(9 * 60_000);
+  assert.deepEqual(await r.acquire(), { off: "sandbox_unavailable" });
+  assert.equal(docker.log.length, n);
+  await clock.advance(60_001);
+  assert.deepEqual(await r.acquire(), { off: "sandbox_unavailable" });
+  assert.equal(docker.log.filter((e) => e.spawn).length, 2, "after the backoff it tries again");
+});
+
+test("a failed start backs off for 10 minutes; the switch off then on clears it", async () => {
+  const { clock, docker, db, r } = setup({ dockerOpts: { child: () => ({ exitBeforeAnswer: "out of memory" }) } });
+  _setPreviewRendererForTest(r);
+  try {
+    assert.deepEqual(await r.acquire(), { off: "start_failed" });
+    const n = docker.log.length;
+    assert.deepEqual(await r.acquire(), { off: "start_failed" });
+    assert.equal(docker.log.length, n, "no docker call during the backoff");
+    // Off then on (the Settings switch): the next acquire tries again at once.
+    await setPreviewsEnabled(db, false);
+    await setPreviewsEnabled(db, true);
+    assert.deepEqual(await r.acquire(), { off: "start_failed" });
+    assert.equal(docker.log.filter((e) => e.spawn).length, 2);
+    // An acquire that sees the switch off clears it too.
+    const m = docker.log.length;
+    db.local.set("previews_enabled", "false");
+    assert.deepEqual(await r.acquire(), { off: "not_enabled" });
+    db.local.set("previews_enabled", "true");
+    assert.deepEqual(await r.acquire(), { off: "start_failed" });
+    assert.ok(docker.log.length > m);
+    await clock.advance(1);
+  } finally {
+    _setPreviewRendererForTest(null);
+  }
+});
+
+test("turning previews off mid-build with removal asked removes the image when the build lands", async () => {
+  let open;
+  const buildGate = new Promise((res) => { open = res; });
+  const { docker, db, r } = setup({ imageReady: false, dockerOpts: { buildGate } });
+  _setPreviewRendererForTest(r);
+  try {
+    assert.deepEqual(await r.acquire(), { off: "building" });
+    const res = fakeRes();
+    await previewsSection.handleAction({ req: { body: { action: "update_previews", previews_remove_image: "true" } }, res, db, action: "update_previews" });
+    assert.equal(db.get("previews_enabled"), "false");
+    assert.match(res.redirected, /previews_image=building/);
+    open();
+    await flush();
+    assert.ok(!(previewImageTag() in docker.images), "the image just built is removed");
+    assert.equal(r.buildState(), "absent");
+    // Switched back on before the build lands: it stays.
+    let open2;
+    const gate2 = new Promise((res2) => { open2 = res2; });
+    const again = setup({ imageReady: false, dockerOpts: { buildGate: gate2 } });
+    _setPreviewRendererForTest(again.r);
+    assert.deepEqual(await again.r.acquire(), { off: "building" });
+    await previewsSection.handleAction({ req: { body: { action: "update_previews", previews_remove_image: "true" } }, res: fakeRes(), db: again.db, action: "update_previews" });
+    await setPreviewsEnabled(again.db, true);
+    open2();
+    await flush();
+    assert.ok(previewImageTag() in again.docker.images, "on again: the image stays");
+    assert.equal(again.r.buildState(), "ready");
+  } finally {
+    _setPreviewRendererForTest(null);
+  }
+});
+
+test("three timeouts trip the breaker", async () => {
+  const { clock, r } = setup();
+  for (let i = 0; i < 2; i++) (await r.acquire()).release({ timedOut: true });
+  (await r.acquire()).release(); // any other release resets the count
+  for (let i = 0; i < 3; i++) (await r.acquire()).release({ timedOut: true });
+  assert.deepEqual(await r.acquire(), { off: "origin_unreachable" });
+  assert.equal(r.lastOff(), "origin_unreachable");
+  await clock.advance(5 * 60_000 - 1_000);
+  assert.deepEqual(await r.acquire(), { off: "origin_unreachable" });
+  await clock.advance(1_001);
+  const lease = await r.acquire();
+  assert.ok(lease.cdp, JSON.stringify(lease));
+  lease.release();
+  await r.stop();
+});
+
+test("previews not enabled is not_enabled, with no docker call at all", async () => {
+  const { docker, r } = setup({ enabled: false });
+  assert.deepEqual(await r.acquire(), { off: "not_enabled" });
+  assert.deepEqual(docker.log, []);
+});
+
+// ---- the switches -----------------------------------------------------------------------
+
+function fakeRes() {
+  return { redirected: null, redirectAfterPost(u) { this.redirected = u; }, setHeader() {}, send() {} };
+}
+
+test("the off switch stops it, and removes the image only on request", async () => {
+  const { docker, db, r } = setup();
+  _setPreviewRendererForTest(r);
+  try {
+    const html = await previewsSection.render({ db, lang: "en" });
+    assert.ok(html.includes(t("settings.previews", "en")));
+    assert.ok(html.includes(t("settings.previewsRemoveImage", "en")));
+    assert.match(html, /name="previews" value="true" checked/);
+
+    const lease = await r.acquire();
+    const name = docker.children[0].args[docker.children[0].args.indexOf("--name") + 1];
+    lease.release();
+    assert.equal(r.state(), "running");
+
+    const res = fakeRes();
+    assert.equal(await previewsSection.handleAction({ req: { body: { action: "update_previews" } }, res, db, action: "update_previews" }), true);
+    assert.equal(db.get("previews_enabled"), "false");
+    assert.equal(r.state(), "stopped");
+    assert.ok(docker.log.some((e) => e.args[0] === "rm" && e.args.includes(name)));
+    assert.ok(!verbs(docker.log).includes("image rm"), "the image stays unless asked");
+    assert.ok(res.redirected);
+    assert.deepEqual(await r.acquire(), { off: "not_enabled" });
+
+    const html2 = await previewsSection.render({ db, lang: "en" });
+    assert.doesNotMatch(html2, /name="previews" value="true" checked/);
+
+    const resRm = fakeRes();
+    await previewsSection.handleAction({ req: { body: { action: "update_previews", previews_remove_image: "true" } }, res: resRm, db, action: "update_previews" });
+    assert.match(resRm.redirected, /[?&]previews_image=removed(&|$)/);
+    const rm = docker.log.filter((e) => e.args[0] === "image" && e.args[1] === "rm");
+    assert.equal(rm.length, 1);
+    assert.equal(rm[0].args[rm[0].args.length - 1], previewImageTag());
+    assert.equal(r.buildState(), "absent");
+
+    // Not while any instance's preview container is running that image.
+    docker.images[previewImageTag()] = Date.now();
+    docker.containers.push({ name: "crow-preview-dddddddd-00000004", labels: { "crow.component": "preview-renderer", "crow.instance": "dddddddd", "crow.home": "dddddddd" }, image: previewImageTag(), running: true });
+    const out = await r.removeImage();
+    assert.equal(out.removed, false);
+    assert.equal(out.reason, "in_use");
+    const resInUse = fakeRes();
+    await previewsSection.handleAction({ req: { body: { action: "update_previews", previews_remove_image: "true" } }, res: resInUse, db, action: "update_previews" });
+    assert.match(resInUse.redirected, /[?&]previews_image=in_use(&|$)/);
+    assert.equal(docker.log.filter((e) => e.args[0] === "image" && e.args[1] === "rm").length, 1);
+
+    // Back on: written, and the build is kicked.
+    await previewsSection.handleAction({ req: { body: { action: "update_previews", previews: "true" } }, res: fakeRes(), db, action: "update_previews" });
+    assert.equal(db.get("previews_enabled"), "true");
+  } finally {
+    _setPreviewRendererForTest(null);
+  }
+});
+
+async function renderStep(query, db) {
+  let captured = "";
+  const layout = ({ content }) => content;
+  const res = { send(h) { captured = h; }, setHeader() {} };
+  const out = await onboardingPanel.handler({ method: "GET", query, headers: {} }, res, { layout, lang: "en", db, resolveStarterProviderFn: async () => null });
+  return typeof out === "string" ? out : captured;
+}
+
+const SESSION = { cookie: "crow_session=s1; crow_csrf=tok123" };
+/** The previews POST through the real csrfMiddleware, as dashboard/index.js mounts it. */
+async function postPreviews(body, db, headers = SESSION) {
+  const req = { method: "POST", headers, body, query: {} };
+  const res = { ...fakeRes(), statusCode: null, status(c) { this.statusCode = c; return this; }, type() { return this; }, send() { return this; } };
+  let passed = false;
+  csrfMiddleware(req, res, () => { passed = true; });
+  if (passed) await handlePreviewsPost(req, res, { db });
+  return res;
+}
+
+test("onboarding shows the toggle on, and finishing it writes previews_enabled=\"true\"", async () => {
+  const { docker, db, r } = setup({ enabled: false, imageReady: false });
+  _setPreviewRendererForTest(r);
+  try {
+    const starter = STEP_KEYS.indexOf("starter");
+    const done = String(STEP_KEYS.indexOf("done"));
+    const html = await renderStep({ step: String(starter) }, db);
+    assert.ok(html.includes(t("onboarding.previews", "en")));
+    assert.match(html, /<input type="checkbox" name="previews" value="on" checked/);
+    assert.match(html, /<form method="POST" action="\/dashboard\/onboarding\/previews"/);
+    assert.match(html, /name="_csrf"/);
+    assert.match(html, /form="onboarding-previews-form"/, "Next submits the toggle");
+    assert.equal(db.get("previews_enabled"), null, "showing the step writes nothing");
+
+    const res = await postPreviews({ previews: "on", _csrf: "tok123" }, db);
+    assert.equal(res.statusCode, null);
+    assert.equal(res.redirected, `/dashboard/onboarding?step=${starter + 1}`);
+    assert.equal(db.get("previews_onboarding_choice"), "on");
+    assert.equal(db.get("previews_enabled"), null, "not until onboarding is finished");
+    await renderStep({ step: done }, db);
+    assert.equal(db.get("previews_enabled"), "true");
+    await flush();
+    assert.equal(composeVerbs(docker.log).filter((v) => v === "build").length, 1, "the image builds in the background");
+
+    // A second visit to done never flips it, even after the operator turned it off.
+    await setPreviewsEnabled(db, false);
+    await renderStep({ step: done }, db);
+    assert.equal(db.get("previews_enabled"), "false");
+
+    // Turned off at the starter step: finishing leaves previews off.
+    const off = setup({ enabled: false, imageReady: false });
+    _setPreviewRendererForTest(off.r);
+    await postPreviews({ _csrf: "tok123" }, off.db);
+    assert.equal(off.db.get("previews_onboarding_choice"), "off");
+    await renderStep({ step: done }, off.db);
+    assert.notEqual(off.db.get("previews_enabled"), "true");
+    assert.deepEqual(composeVerbs(off.docker.log), []);
+  } finally {
+    _setPreviewRendererForTest(null);
+  }
+});
+
+test("onboarding: a GET never records or applies the previews choice", async () => {
+  const { docker, db, r } = setup({ enabled: false, imageReady: false });
+  _setPreviewRendererForTest(r);
+  try {
+    const starter = STEP_KEYS.indexOf("starter");
+    await renderStep({ step: String(starter + 1), previews_seen: "1", previews: "on" }, db);
+    await renderStep({ step: String(STEP_KEYS.indexOf("done")), previews_seen: "1", previews: "on" }, db);
+    assert.equal(db.get("previews_onboarding_choice"), null);
+    assert.equal(db.get("previews_enabled"), null);
+    assert.deepEqual(docker.log, []);
+  } finally {
+    _setPreviewRendererForTest(null);
+  }
+});
+
+test("onboarding: the previews POST without a valid CSRF token is refused", async () => {
+  const { db } = setup({ enabled: false, imageReady: false });
+  for (const body of [{ previews: "on" }, { previews: "on", _csrf: "wrong" }]) {
+    const res = await postPreviews(body, db);
+    assert.equal(res.statusCode, 403);
+    assert.equal(res.redirected, null);
+  }
+  assert.equal(db.get("previews_onboarding_choice"), null);
+  // Mounted behind csrfMiddleware (after router.use("/dashboard", csrfMiddleware)).
+  const src = readFileSync(new URL("../servers/gateway/dashboard/index.js", import.meta.url), "utf8");
+  const mw = src.indexOf('router.use("/dashboard", csrfMiddleware)');
+  const route = src.indexOf('router.post("/dashboard/onboarding/previews"');
+  assert.ok(mw !== -1 && route > mw, "the route is registered after csrfMiddleware");
+});
+
+test("onboarding replayed after completion shows the current switch and applies it at once", async () => {
+  const { docker, db, r } = setup({ enabled: false, imageReady: false });
+  db.global.set("onboarding_completed_at", "2026-06-11T00:00:00Z");
+  db.local.set("previews_enabled", "false");
+  _setPreviewRendererForTest(r);
+  try {
+    const starter = STEP_KEYS.indexOf("starter");
+    const html = await renderStep({ step: String(starter) }, db);
+    assert.match(html, /<input type="checkbox" name="previews" value="on" style/, "unchecked: previews are off now");
+    assert.doesNotMatch(html, /name="previews" value="on" checked/);
+
+    const res = await postPreviews({ previews: "on", _csrf: "tok123" }, db);
+    assert.equal(res.statusCode, null);
+    assert.equal(db.get("previews_enabled"), "true", "applied by the POST itself");
+    await flush();
+    assert.equal(composeVerbs(docker.log).filter((v) => v === "build").length, 1, "and the build starts");
+
+    const html2 = await renderStep({ step: String(starter) }, db);
+    assert.match(html2, /name="previews" value="on" checked/, "now shown on");
+
+    // Off: applied, and the renderer stopped.
+    await flush();
+    const lease = await r.acquire();
+    assert.ok(lease.cdp, JSON.stringify(lease));
+    lease.release();
+    assert.equal(r.state(), "running");
+    await postPreviews({ _csrf: "tok123" }, db);
+    assert.equal(db.get("previews_enabled"), "false");
+    assert.equal(r.state(), "stopped");
+    // A GET still writes nothing.
+    await renderStep({ step: String(starter + 1), previews: "on" }, db);
+    assert.equal(db.get("previews_enabled"), "false");
+  } finally {
+    _setPreviewRendererForTest(null);
+  }
+});
+
+test("onboarding on a fresh install: the toggle is on and is not applied before completion", async () => {
+  const { db, r } = setup({ enabled: false, imageReady: false });
+  _setPreviewRendererForTest(r);
+  try {
+    const html = await renderStep({ step: String(STEP_KEYS.indexOf("starter")) }, db);
+    assert.match(html, /name="previews" value="on" checked/);
+    await postPreviews({ previews: "on", _csrf: "tok123" }, db);
+    assert.equal(db.get("previews_enabled"), null);
+  } finally {
+    _setPreviewRendererForTest(null);
+  }
+});
+
+/** A renderer stand-in for the Settings status line. */
+const statusStub = (bstate, off, st = "stopped") => ({ buildState: () => bstate, lastOff: () => off, state: () => st });
+
+test("the previews section shows one status line", async () => {
+  const cases = [
+    [false, "ready", null, "settings.previewsStatusOff"],
+    [true, "absent", null, "settings.previewsStatusIdle"],
+    [true, "building", "building", "settings.previewsStatusBuilding"],
+    [true, "ready", null, "settings.previewsStatusReady"],
+    [true, "ready", "not_enabled", "settings.previewsStatusReady"],
+    [true, "failed", "build_failed", "settings.previewsStatusBuildFailed"],
+    [true, "ready", "no_docker", "settings.previewsStatusNoDocker"],
+    [true, "absent", "no_docker", "settings.previewsStatusNoDocker"],
+    [true, "ready", "sandbox_unavailable", "settings.previewsStatusSandbox"],
+    [true, "ready", "start_failed", "settings.previewsStatusStartFailed"],
+    [true, "ready", "origin_unreachable", "settings.previewsStatusPaused"],
+  ];
+  try {
+    for (const [on, bstate, off, key] of cases) {
+      const db = settingsDb(on ? { previews_enabled: "true" } : {});
+      _setPreviewRendererForTest(statusStub(bstate, off));
+      for (const lang of ["en", "es"]) {
+        const html = await previewsSection.render({ db, lang, req: { query: {} } });
+        assert.ok(t(key, lang) !== key, `${key} exists`);
+        assert.ok(html.includes(escapeHtml(t(key, lang))), `${on}/${bstate}/${off} → ${key} (${lang})`);
+        assert.match(html, /data-previews-status/);
+      }
+    }
+  } finally {
+    _setPreviewRendererForTest(null);
+  }
+});
+
+test("the previews section shows what happened to the image, from a fixed list", async () => {
+  _setPreviewRendererForTest(statusStub("absent", null));
+  try {
+    const db = settingsDb({});
+    for (const [v, key] of [["removed", "settings.previewsImageRemoved"], ["in_use", "settings.previewsImageInUse"], ["building", "settings.previewsImageBuilding"], ["failed", "settings.previewsImageFailed"]]) {
+      const html = await previewsSection.render({ db, lang: "en", req: { query: { previews_image: v } } });
+      assert.ok(html.includes(escapeHtml(t(key, "en"))), `${v} → ${key}`);
+    }
+    const html = await previewsSection.render({ db, lang: "en", req: { query: { previews_image: "<script>x</script>" } } });
+    assert.doesNotMatch(html, /<script>x/);
+    for (const key of ["settings.previewsImageRemoved", "settings.previewsImageInUse", "settings.previewsImageBuilding", "settings.previewsImageFailed"]) {
+      assert.ok(!html.includes(escapeHtml(t(key, "en"))), "no flash for an unknown value");
+    }
+  } finally {
+    _setPreviewRendererForTest(null);
+  }
+});
+
+test("prepare() logs why it can't start when the artifact origin isn't configured", async () => {
+  const warns = [];
+  const { r } = setup({ originInfo: () => null, log: { log() {}, warn: (m) => warns.push(m) } });
+  assert.equal(await r.prepare(), "start_failed");
+  assert.ok(warns.some((m) => /artifact origin is not configured/.test(m)), warns.join("\n"));
+});
+
+test("the previews section is in Appearance, not hidden, and registered", async () => {
+  assert.equal(previewsSection.group, "appearance");
+  assert.ok(!previewsSection.hidden);
+  assert.equal(previewsSection.labelKey, "settings.section.previews");
+  const src = readFileSync(new URL("../servers/gateway/dashboard/panels/settings.js", import.meta.url), "utf8");
+  assert.match(src, /import previewsSection from "\.\.\/settings\/sections\/previews\.js"/);
+  assert.match(src, /registerSettingsSection\(previewsSection\)/);
+  const theme = readFileSync(new URL("../servers/gateway/dashboard/settings/sections/theme.js", import.meta.url), "utf8");
+  assert.doesNotMatch(theme, /previews/i, "the blog theme section has no previews switch");
+});
+
+test("an existing instance after upgrade has previews off and builds nothing", async () => {
+  const { docker, db, r } = setup({ enabled: false, imageReady: false });
+  db.global.set("onboarding_completed_at", "2026-06-11T00:00:00Z");
+  _setPreviewRendererForTest(r);
+  try {
+    await r.sweep(); // the boot sweep
+    await renderStep({ step: String(STEP_KEYS.indexOf("done")) }, db); // a replayed done step changes nothing
+    assert.deepEqual(await r.acquire(), { off: "not_enabled" });
+    assert.equal(db.get("previews_enabled"), null);
+    const v = composeVerbs(docker.log);
+    assert.ok(!v.includes("build") && !v.includes("run"), v.join(","));
+    assert.equal(docker.log.filter((e) => e.spawn).length, 0);
+  } finally {
+    _setPreviewRendererForTest(null);
+  }
+});
+
+test("Turn on previews starts the build", async () => {
+  const buildGate = new Promise(() => {}); // still building
+  const { docker, db, r } = setup({ enabled: false, imageReady: false, dockerOpts: { buildGate } });
+  await setPreviewsEnabled(db, true);
+  assert.equal(db.get("previews_enabled"), "true");
+  assert.deepEqual(await r.acquire(), { off: "building" });
+  assert.deepEqual(await r.acquire(), { off: "building" });
+  assert.equal(composeVerbs(docker.log).filter((v) => v === "build").length, 1);
+  await setPreviewsEnabled(db, false);
+  assert.equal(db.get("previews_enabled"), "false");
+});
+
+test("the manifest the guard sees is the core preview one", () => {
+  assert.deepEqual(PREVIEW_MANIFEST, { id: "crow-preview", origin: "core" });
+  assert.match(previewImageTag(), /^crow-preview-renderer:[0-9a-f]{12}$/);
+});
