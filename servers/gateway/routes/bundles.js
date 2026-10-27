@@ -66,7 +66,7 @@ import { resolveDataDir } from "../../db.js";
 import { PINNED_PATH_ENV_KEYS } from "../../shared/crow-home.js";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { isPlaceholderValue } from "../bundle-env-placeholders.js";
-import { keychainGeneratedKeys, planGeneratedEnv, retainedEnvPath, legacyFallbackKeys, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedKeys, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
+import { keychainGeneratedKeys, planGeneratedEnv, retainedEnvPath, legacyFallbackKeys, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedEnv, gatewayEnvNames, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
 
 /**
  * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
@@ -3059,9 +3059,8 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       // dependent services connect. Undeclared request keys never reach it.
       // Generated keys reach it only where the manifest says `propagate: true` (gateway-side
       // code reads them from process.env: phone's runner secret, coturn, MinIO root).
-      const gatewayGenerated = {};
-      for (const k of gatewayGeneratedKeys(manifest)) if (generated[k]) gatewayGenerated[k] = generated[k];
-      const gatewayEnv = declaredEnvSubset(manifest, { ...(reqEnv || {}), ...gatewayGenerated });
+      // propagate_as renames on the way (Garage's default key id → S3_ACCESS_KEY).
+      const gatewayEnv = { ...declaredEnvSubset(manifest, reqEnv || {}), ...gatewayGeneratedEnv(manifest, generated) };
       if (Object.keys(gatewayEnv).length > 0) {
         propagateEnvToGateway(gatewayEnv);
         appendLog(job, "Configuration applied to gateway");
@@ -3958,8 +3957,7 @@ export default function bundlesRouter() {
 
         // 3. Re-comment env vars in gateway .env
         if (addonType === "bundle" && manifest?.env_vars) {
-          const envKeys = manifest.env_vars.map((v) => v.name);
-          revertEnvInGateway(envKeys);
+          revertEnvInGateway(gatewayEnvNames(manifest));
           appendLog(job, "Reverted gateway configuration");
           needsRestart = true;
         }
