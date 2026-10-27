@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   readHostTimers, hostTimersDir, validHostFile, commandName, checkCommand, _resetHostTimersCache,
-  SCHEMA, MAX_FILES, MAX_FILE_BYTES, CRON_EVAL_CAP,
+  SCHEMA, MAX_FILES, MAX_FILE_BYTES, CRON_EVAL_CAP, MAX_TOTAL_TIMERS, MAX_DIR_ENTRIES, _cachedFileCount,
 } from "../servers/gateway/schedule-sources/host-timers.js";
 
 const NOW = Date.parse("2026-10-26T18:00:00Z");
@@ -176,7 +176,9 @@ test("timing: the caps at their worst (50 files × 500 never-soon cron lines) fi
     for (let f = 0; f < MAX_FILES; f++) writeFileSync(join(dir, `h${f}.json`), JSON.stringify(file({ host: `h${f}`, timers })));
     const [out, ms] = timed(() => readHostTimers({ env: { CROW_HOST_TIMERS_DIR: dir }, now: NOW }));
     assert.ok(ms < 200, `took ${ms} ms`);
-    assert.equal(out.hosts.length, MAX_FILES);
+    const shown = out.hosts.reduce((n, h) => n + h.timers.length, 0);
+    assert.ok(shown <= MAX_TOTAL_TIMERS);
+    assert.ok(out.unreadFiles + out.hosts.length === MAX_FILES, "every file is read or counted as not read");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -188,7 +190,8 @@ test("cron evaluations are capped across all files; the rest show no next run", 
     writeFileSync(join(dir, "b.json"), JSON.stringify(file({ host: "b", timers })));
     const out = readHostTimers({ env: { CROW_HOST_TIMERS_DIR: dir }, now: NOW });
     const withNext = out.hosts.flatMap((h) => h.timers).filter((t) => t.next !== null).length;
-    assert.equal(withNext, CRON_EVAL_CAP);
+    // The cap, or fewer when the 30 ms cron budget runs out first (a loaded machine).
+    assert.ok(withNext <= CRON_EVAL_CAP && withNext >= 20, `${withNext} with a next run`);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -216,7 +219,60 @@ test("the folder listing stops at the cap (it never lists or sorts a huge folder
     } });
     const [, ms] = timed(() => readHostTimers({ env: { CROW_HOST_TIMERS_DIR: dir }, now: NOW, fs }));
     assert.ok(ms < 200, `took ${ms} ms`);
-    assert.ok(reads <= 3000 + MAX_FILES + 1, `${reads} entries read`);
+    assert.ok(reads <= MAX_DIR_ENTRIES + 1, `${reads} entries read (stops after ${MAX_DIR_ENTRIES})`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("timing: a cold read of 50 files × 500 timers with long junk names stays under 100 ms", () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-ht-"));
+  try {
+    const name = " -1".repeat(110);
+    const timers = Array.from({ length: 500 }, (_, i) => ({ id: `cron:${i}${" -1".repeat(10)}`, kind: "cron", name, schedule: "nope" }));
+    const body = JSON.stringify(file({ timers }));
+    assert.ok(body.length <= MAX_FILE_BYTES, `fixture fits the size cap (${body.length})`);
+    for (let f = 0; f < MAX_FILES; f++) writeFileSync(join(dir, `h${f}.json`), JSON.stringify(file({ host: `h${f}`, timers })));
+    const [out, ms] = timed(() => readHostTimers({ env: { CROW_HOST_TIMERS_DIR: dir }, now: NOW }));
+    assert.ok(ms < 100, `took ${ms} ms`);
+    const shown = out.hosts.reduce((n, h) => n + h.timers.length, 0);
+    assert.ok(shown <= MAX_TOTAL_TIMERS, `${shown} shown`);
+    assert.ok(out.hiddenTimers > 0 || out.unreadFiles > 0, "the rest are counted as not shown");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("at most 2,000 timers are shown across all files; the rest are counted", () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-ht-"));
+  try {
+    const timers = Array.from({ length: 500 }, (_, i) => ({ id: `user:t${i}.timer`, kind: "systemd-user", name: `t${i}` }));
+    for (let f = 0; f < 5; f++) writeFileSync(join(dir, `h${f}.json`), JSON.stringify(file({ host: `h${f}`, timers })));
+    const out = readHostTimers({ env: { CROW_HOST_TIMERS_DIR: dir }, now: NOW });
+    const shown = out.hosts.reduce((n, h) => n + h.timers.length, 0);
+    assert.equal(shown, MAX_TOTAL_TIMERS);
+    assert.equal(out.unreadFiles, 1, "the fifth file isn't read at all once the total is reached");
+    const many = Array.from({ length: 2500 }, (_, i) => ({ id: `user:m${i}.timer`, kind: "systemd-user" }));
+    writeFileSync(join(dir, "h0.json"), JSON.stringify(file({ host: "h0", timers: many })));
+    _resetHostTimersCache();
+    const two = readHostTimers({ env: { CROW_HOST_TIMERS_DIR: dir }, now: NOW });
+    assert.equal(two.hosts.reduce((n, h) => n + h.timers.length, 0), MAX_TOTAL_TIMERS);
+    assert.ok(two.hiddenTimers > 0, "a file cut short counts its rest");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("ids and names are cut before any parsing", () => {
+  const h = validHostFile(file({ timers: [{ id: "user:" + "a".repeat(5000) + ".timer", kind: "systemd-user", name: "n".repeat(5000) }, { id: "cron:1", kind: "cron", name: "/x/" + "y".repeat(5000) + " --secret", schedule: "0 9 * * *" }] }), { now: NOW });
+  assert.equal(h.timers.length, 1, "an id too long to be a unit is dropped, never cut into one");
+  assert.ok(h.timers[0].name.length <= 80);
+  assert.doesNotMatch(h.timers[0].name, /secret/);
+});
+
+test("the per-file cache forgets files that left the folder (rotating names can't grow it)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-ht-"));
+  try {
+    for (let round = 0; round < 5; round++) {
+      for (let i = 0; i < 3; i++) writeFileSync(join(dir, `r${round}-${i}.json`), JSON.stringify(file({ host: `r${round}-${i}` })));
+      if (round > 0) for (let i = 0; i < 3; i++) rmSync(join(dir, `r${round - 1}-${i}.json`));
+      readHostTimers({ env: { CROW_HOST_TIMERS_DIR: dir }, now: NOW + round * 61_000 });
+      assert.equal(_cachedFileCount(dir), 3, `round ${round}`);
+    }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

@@ -32,7 +32,7 @@ const DEFAULT_READERS = {
 
 /**
  * @param {{now:number, zone:string, readers?:object}} opts
- * @returns {{items:object[], problems:object[], hosts:object[], present:string[]}}
+ * @returns {{items:object[], problems:object[], hosts:object[], present:string[], notShown:{timers:number, files:number}}}
  */
 export function readOnlySources({ now = Date.now(), zone = "UTC", readers = {} } = {}) {
   const r = { ...DEFAULT_READERS, ...readers };
@@ -84,5 +84,5 @@ export function readOnlySources({ now = Date.now(), zone = "UTC", readers = {} }
       items.push({ ...base, ref: `timer:${h.host}:${i}`, src: "machines", kind: "host_timer", title: t.name, host: h.host, summary: t.schedule, cron: t.kind === "cron" ? t.schedule : null, once: false, nextRun: t.next, cadence: t.cadence, frequent: t.cadence !== null && t.cadence < FREQUENT_MIN, failed: t.failed });
     });
   }
-  return { items, problems, hosts, present };
+  return { items, problems, hosts, present, notShown: { timers: timers?.hiddenTimers || 0, files: timers?.unreadFiles || 0 } };
 }

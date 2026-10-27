@@ -3510,6 +3510,8 @@ export const translations = {
   "schedule.machine.ok": { en: "OK", es: "Bien" },
   "schedule.machine.failed": { en: "Failed", es: "Falló" },
   "schedule.machine.unknown": { en: "No result", es: "Sin resultado" },
+  "schedule.machine.moreTimers": { en: "{n} more timers not shown.", es: "{n} temporizadores más sin mostrar." },
+  "schedule.machine.moreFiles": { en: "{n} more files not read this time.", es: "{n} archivos más sin leer esta vez." },
   "schedule.machine.none": { en: "No timers in this file.", es: "No hay temporizadores en este archivo." },
   "schedule.p.holdCorruptTitle": { en: "Box hold unreadable", es: "No se puede leer la reserva del equipo" },
   "schedule.p.holdCorrupt": { en: "Its file can't be read, so model starts are refused until it's fixed or released. To release it, run this on this machine:", es: "Su archivo no se puede leer, así que no se arranca ningún modelo hasta que se arregle o se libere. Para liberarla, ejecuta esto en esta máquina:" },

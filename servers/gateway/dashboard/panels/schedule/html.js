@@ -348,7 +348,10 @@ function machines(m) {
     const collected = fill(t("schedule.machine.collected", lang), { when: fmt(h.collectedAt, m.zone, lang, DATE_TIME) });
     return `<section class="sc-host" aria-labelledby="${id}"><h3 class="sc-day-h sc-host-h" id="${id}"><span>${esc(h.host)}</span><span class="sc-day-date">${esc(collected)}</span></h3>${rows ? `<ul class="sc-list">${rows}</ul>` : `<p class="sc-muted sc-host-empty">${esc(t("schedule.machine.none", lang))}</p>`}</section>`;
   }).join("");
-  return `<details class="sc-fold" data-fold="machines"><summary class="sc-fold-h"><b>${esc(fill(t("schedule.machinesN", lang), { n }))}</b></summary>${body}</details>`;
+  const ns = m.notShown || { timers: 0, files: 0 };
+  const more = [ns.timers ? fill(t("schedule.machine.moreTimers", lang), { n: ns.timers }) : "", ns.files ? fill(t("schedule.machine.moreFiles", lang), { n: ns.files }) : ""].filter(Boolean);
+  const moreLine = more.length ? `<p class="sc-muted sc-host-empty">${esc(more.join(" "))}</p>` : "";
+  return `<details class="sc-fold" data-fold="machines"><summary class="sc-fold-h"><b>${esc(fill(t("schedule.machinesN", lang), { n }))}</b></summary>${body}${moreLine}</details>`;
 }
 
 function agenda(m) {

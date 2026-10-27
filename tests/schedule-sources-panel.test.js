@@ -295,6 +295,19 @@ test("agendaGroups: read-only items land in Now, days, frequent and standing", (
   assert.deepEqual(g.frequent.map((i) => i.ref), ["timer:a:0"]);
 });
 
+test("timers past the total cap: the machines list says how many aren't shown", async () => {
+  const sc = scratch();
+  try {
+    configured(sc);
+    const now = Date.now();
+    const many = Array.from({ length: 2300 }, (_, i) => ({ id: `user:m${i}.timer`, kind: "systemd-user", name: `m${i}` }));
+    writeFileSync(join(sc.timers, "big.json"), JSON.stringify({ schema: SCHEMA, host: "big", tz: "UTC", collected_at: iso(now), timers: many }));
+    const { html } = await call();
+    assert.match(html, /On the machines \(2000\)/);
+    assert.match(html, /300 more timers not shown\./);
+  } finally { rmSync(sc.d, { recursive: true, force: true }); }
+});
+
 test("es: the read-only words are Spanish", async () => {
   const sc = scratch();
   try {

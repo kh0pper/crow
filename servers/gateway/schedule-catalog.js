@@ -340,7 +340,7 @@ export async function buildScheduleModel(db, { now = Date.now(), lang = "en", se
   for (const [id, jobs] of jobsBy) { const j = jobs.find((x) => x.status === "running"); if (j) running.set(id, j); }
   const anyBots = items.some((it) => it.kind === "bot_routine" && it.enabled);
   // The box and the machines are the owner's: a peer's sign-in never reads them.
-  const ro = readOnly ? readOnlySources({ now, zone, readers }) : { items: [], problems: [], hosts: [], present: [] };
+  const ro = readOnly ? readOnlySources({ now, zone, readers }) : { items: [], problems: [], hosts: [], present: [], notShown: { timers: 0, files: 0 } };
   // The strip is always complete; the filter chips narrow only the agenda.
   const problems = [...problemsFor(items, {
     now, runsBy, jobsBy, notifTypes: await notifTypesOf(db),
@@ -351,6 +351,7 @@ export async function buildScheduleModel(db, { now = Date.now(), lang = "en", se
   const shown = [...(filter === "all" || filter === "crow" ? items : []), ...ro.items.filter((it) => filter === "all" || it.src === filter)];
   const agenda = agendaGroups(shown, { now, zone, running });
   const hosts = filter === "all" || filter === "machines" ? ro.hosts : [];
+  const notShown = hosts.length ? ro.notShown : { timers: 0, files: 0 };
 
   let detail = null;
   const it = selected !== null ? items.find((x) => x.id === selected) : null;
@@ -368,7 +369,7 @@ export async function buildScheduleModel(db, { now = Date.now(), lang = "en", se
       briefing,
     };
   }
-  return { now, zone, items, problems, agenda, detail, running, sources, filter, hosts };
+  return { now, zone, items, problems, agenda, detail, running, sources, filter, hosts, notShown };
 }
 
 /** The schedule a run belongs to (?run=<id> from a notification), or null. */
