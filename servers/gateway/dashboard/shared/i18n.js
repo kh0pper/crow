@@ -3721,6 +3721,7 @@ export const translations = {
   "shell.needWorkspace": { en: "Documents and spreadsheets need Crow Workspace.", es: "Los documentos y las hojas de cálculo necesitan Crow Workspace." },
   "shell.getWorkspace": { en: "Get Workspace", es: "Instalar Workspace" },
   "shell.finishWorkspace": { en: "Finish setting up Workspace", es: "Termina de configurar Workspace" },
+  "shell.workspaceNotReady": { en: "Workspace is installed but not set up yet.", es: "Workspace está instalado pero aún no está configurado." },
   "shell.makeEmpty": { en: "Nothing here yet. Start something.", es: "Aún no hay nada. Empieza algo." },
   "shell.workspaceUnavailable": { en: "Workspace can't be reached right now.", es: "No se puede conectar con Workspace ahora mismo." },
   "shell.makeType.document": { en: "Document", es: "Documento" },

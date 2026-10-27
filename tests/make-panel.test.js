@@ -122,7 +122,10 @@ test("Workspace missing and not_ready offers", async () => {
   assert.match(r.body, /<ul class="mk-grid"/, "artifacts still list");
   seam({ items: [item()], artifacts: "installed", workspace: "not_ready" });
   r = await get("/dashboard/make");
-  assert.match(r.body, /Finish setting up Workspace/);
+  assert.match(r.body, /Workspace is installed but not set up yet\./);
+  const offerBlock = r.body.match(/<div class="mk-offer">[\s\S]*?<\/div>/)[0];
+  assert.equal((offerBlock.match(/Finish setting up Workspace/g) || []).length, 1, "the offer's label is on the button only");
+  assert.match(offerBlock, /<p>Workspace is installed but not set up yet\.<\/p>/);
   assert.match(r.body, /href="\/dashboard\/workspace"/);
 });
 

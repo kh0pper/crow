@@ -43,7 +43,7 @@ function offers(artifacts, workspace, lang) {
   const out = [];
   if (artifacts === "missing") out.push(offer(t("shell.needArtifacts", lang), t("shell.getArtifacts", lang), "/dashboard/extensions?q=artifacts"));
   if (workspace === "missing") out.push(offer(t("shell.needWorkspace", lang), t("shell.getWorkspace", lang), "/dashboard/extensions?q=workspace"));
-  if (workspace === "not_ready") out.push(offer(t("shell.finishWorkspace", lang), t("shell.finishWorkspace", lang), "/dashboard/workspace"));
+  if (workspace === "not_ready") out.push(offer(t("shell.workspaceNotReady", lang), t("shell.finishWorkspace", lang), "/dashboard/workspace"));
   return out.join("");
 }
 
