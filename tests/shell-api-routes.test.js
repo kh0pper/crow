@@ -167,3 +167,78 @@ test("the move route needs a session and the CSRF header", async () => {
   const noCsrf = await post("/shell-api/items/artifact/art_1/project", { project_id: P1 }, { cookie: "crow_session=good; crow_csrf=tok" });
   assert.equal(noCsrf.status, 403);
 });
+
+// ---- final-review fix wave ----
+
+function mkProject(slug, { status = "active", archivedAt = null, type = "general" } = {}) {
+  const c = raw();
+  const id = Number(c.prepare("INSERT INTO project_spaces (slug, name, status, archived_at, type) VALUES (?,?,?,?,?)").run(slug, slug, status, archivedAt, type).lastInsertRowid);
+  c.close();
+  return id;
+}
+
+test("a status-archived project with a NULL archived_at is refused by both routes", async () => {
+  const pid = mkProject("statusarch", { status: "archived" });
+  const r = await post("/perch-api/bots/b1/interactive", { project_id: pid });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.error, "bad_project");
+  assert.equal(spawnCalls, 0);
+  const m = await post("/shell-api/items/artifact/art_1/project", { project_id: pid });
+  assert.equal(m.status, 409);
+  assert.equal(m.body.error, "archived");
+  assert.equal(await getItem(db, "artifact", "art_1"), null);
+});
+
+test("a learner_profile project is refused by both routes", async () => {
+  const pid = mkProject("kidroute", { type: "learner_profile" });
+  const r = await post("/perch-api/bots/b1/interactive", { project_id: pid });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.error, "bad_project");
+  assert.equal(spawnCalls, 0);
+  const m = await post("/shell-api/items/artifact/art_1/project", { project_id: pid });
+  assert.equal(m.status, 404);
+  assert.equal(await getItem(db, "artifact", "art_1"), null);
+});
+
+test("a non-ACL error while checking the project is not reported as bad_project", async () => {
+  const c = raw();
+  c.exec("ALTER TABLE project_spaces RENAME TO project_spaces_hidden");
+  c.close();
+  try {
+    const r = await post("/perch-api/bots/b1/interactive", { project_id: P2 });
+    assert.notEqual(r.body && r.body.error, "bad_project");
+    assert.equal(r.status, 500);
+    assert.equal(spawnCalls, 0);
+  } finally {
+    const c2 = raw();
+    c2.exec("ALTER TABLE project_spaces_hidden RENAME TO project_spaces");
+    c2.close();
+  }
+});
+
+test("without a project_id, a bot whose project is no longer live files the thread as Unassigned", async () => {
+  const c = raw();
+  c.prepare("UPDATE project_spaces SET status = 'archived' WHERE id = ?").run(P1);
+  c.close();
+  try {
+    const r = await post("/perch-api/bots/b1/interactive", {});
+    assert.equal(r.status, 201);
+    const it = await getItem(db, "perch_thread", "perchlive-t1");
+    assert.equal(it.projectId, null);
+    assert.equal(it.setBy, "origin");
+  } finally {
+    const c2 = raw();
+    c2.prepare("UPDATE project_spaces SET status = 'active' WHERE id = ?").run(P1);
+    c2.close();
+  }
+});
+
+test("moving a thread id that only a non-perch-live session carries is 404", async () => {
+  const c = raw();
+  c.prepare("INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, status, control, kind) VALUES ('b1','gmail','chat-thread-1','active','run','chat')").run();
+  c.close();
+  const r = await post("/shell-api/items/perch_thread/chat-thread-1/project", { project_id: P1 });
+  assert.equal(r.status, 404);
+  assert.equal(r.body.error, "not_found");
+  assert.equal(await getItem(db, "perch_thread", "chat-thread-1"), null);
+});

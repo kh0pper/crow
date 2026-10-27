@@ -9,7 +9,7 @@
  * rail) and never public. All SQL on shell_items lives in shared/shell-items.js.
  *
  * The item must exist, so a typo never leaves a phantom row: a thread needs a
- * bot_sessions row, an artifact a live artifacts row. A Workspace file is only
+ * perch-live bot_sessions row, an artifact a live artifacts row. A Workspace file is only
  * checked for the bundle being installed and the id being a positive integer;
  * the core cannot reach the bundle's own store, so the real existence check
  * lands with the Workspace work in P4.
@@ -37,7 +37,7 @@ async function exists(db, sql, args) {
 
 async function itemExists(db, kind, ref) {
   if (kind === "perch_thread") {
-    return exists(db, "SELECT 1 FROM bot_sessions WHERE gateway_thread_id = ? LIMIT 1", [ref]);
+    return exists(db, "SELECT 1 FROM bot_sessions WHERE gateway_thread_id = ? AND kind = 'perch-live' LIMIT 1", [ref]);
   }
   if (kind === "artifact") {
     return exists(db, "SELECT 1 FROM artifacts WHERE id = ? AND deleted_at IS NULL LIMIT 1", [ref]);

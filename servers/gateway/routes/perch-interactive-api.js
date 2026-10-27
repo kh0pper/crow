@@ -58,7 +58,7 @@ import { lockState } from "./board-lock.js";
 import { boardState } from "../dashboard/shared/bot-display.js";
 import { assertProjectExists, appendAudit } from "../../shared/project-acl.js";
 import { resolveBoardDef, isTerminal } from "./board-defs.js";
-import { ensureItem } from "../../shared/shell-items.js";
+import { ensureItem, assertLiveProject } from "../../shared/shell-items.js";
 import { annotateAvailability } from "../model-availability.js";
 import { providerModelListWarm, pickerModels, loadPiProviderNames, referencedModelKeys } from "../perch-model-catalog.js";
 import { renderBotMarkdown } from "../../blog/renderer.js";
@@ -576,17 +576,26 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
 
       // Shell P1: an optional project_id files the new thread. Validated here,
       // before spawn, so a bad project never costs a session. "unassigned" files
-      // it under no project; absent means the bot's own project.
-      let projectId = row && row.project_id != null ? Number(row.project_id) : null;
+      // it under no project; absent means the bot's own project, but only while
+      // that project is live (else the thread starts Unassigned). Only the
+      // project rule's own refusals (AclError) are bad_project; any other error
+      // falls through to the route's error mapping.
+      let projectId = null;
       const given = body.project_id !== undefined && body.project_id !== null && body.project_id !== "";
       if (given) {
-        if (body.project_id === "unassigned") projectId = null;
-        else {
+        if (body.project_id !== "unassigned") {
           const n = typeof body.project_id === "number" ? body.project_id : (/^[1-9]\d*$/.test(String(body.project_id)) ? Number(body.project_id) : NaN);
           if (!Number.isInteger(n) || n < 1) return jsonError(res, 400, "bad_project");
-          try { await assertProjectExists(db, n); } catch { return jsonError(res, 400, "bad_project"); }
+          try { await assertLiveProject(db, n); } catch (err) {
+            if (err && err.name === "AclError") return jsonError(res, 400, "bad_project");
+            throw err;
+          }
           projectId = n;
         }
+      } else if (row && row.project_id != null) {
+        // Filing is best effort and must never block the spawn: any failure here is Unassigned.
+        try { projectId = (await assertLiveProject(db, Number(row.project_id))).id; }
+        catch (err) { if (!(err && err.name === "AclError")) console.warn("[perch] could not check the bot's project:", err.message); }
       }
 
       const eng = resolveEngine();
