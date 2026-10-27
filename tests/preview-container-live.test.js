@@ -6,8 +6,9 @@
  * the profile, that there is no network, and that nothing in /etc/chromium.d disables
  * the sandbox.
  *
- * Skips without Docker, unless CROW_REQUIRE_DOCKER=1 (required on the box before the
- * preview renderer merges), in which case missing Docker is a failure.
+ * Runs only with CROW_REQUIRE_DOCKER=1 (required on the box before the preview renderer
+ * merges); without it every case skips, even where Docker is present. With it, missing
+ * Docker is a failure.
  *
  * Self-contained on purpose: it speaks NUL-framed CDP inline and does not use the
  * renderer's own code. Every container it starts is removed in `after` (by name, then by
@@ -42,12 +43,15 @@ const ENV = {
 };
 
 const docker = (args, opts = {}) => spawnSync("docker", args, { encoding: "utf8", env: ENV, timeout: 60_000, ...opts });
-const HAVE_DOCKER = docker(["version", "--format", "{{.Server.Version}}"]).status === 0 && docker(["compose", "version"]).status === 0;
+// Opt-in only: without CROW_REQUIRE_DOCKER=1 every case skips, even where Docker is
+// present (CI's suite job has Docker; a cold build of this image does not belong there).
+// HAVE_DOCKER is true only when the run opted in AND Docker is usable.
 const REQUIRED = process.env.CROW_REQUIRE_DOCKER === "1";
-if (!HAVE_DOCKER && REQUIRED) {
+const HAVE_DOCKER = REQUIRED && docker(["version", "--format", "{{.Server.Version}}"]).status === 0 && docker(["compose", "version"]).status === 0;
+if (REQUIRED && !HAVE_DOCKER) {
   test("Docker is available (CROW_REQUIRE_DOCKER=1)", () => assert.fail("CROW_REQUIRE_DOCKER=1 but `docker` / `docker compose` is not usable here"));
 }
-const live = (name, fn) => test(name, { skip: HAVE_DOCKER ? false : "Docker not available (set CROW_REQUIRE_DOCKER=1 to require it)" }, fn);
+const live = (name, fn) => test(name, { skip: HAVE_DOCKER ? false : (REQUIRED ? "Docker not available" : "Docker-gated: set CROW_REQUIRE_DOCKER=1 to run") }, fn);
 
 let child = null;
 let stderr = "";
@@ -83,7 +87,7 @@ function sweep() {
 
 before(async () => {
   if (!HAVE_DOCKER) return;
-  const build = docker(["compose", "-p", `crow-preview-${LABEL}`, "-f", COMPOSE, "build", "renderer"], { cwd: DIR, timeout: 15 * 60_000 });
+  const build = docker(["compose", "-p", `crow-preview-${LABEL}`, "-f", COMPOSE, "build", "renderer"], { cwd: DIR, timeout: 15 * 60_000, maxBuffer: 64 * 1024 * 1024 });
   assert.equal(build.status, 0, `docker compose build failed:\n${build.stdout}\n${build.stderr}`);
   child = spawn("docker", ["compose", "-p", `crow-preview-${LABEL}`, "-f", COMPOSE, "run", "--rm", "-T", "-q", "--no-deps", "--pull", "never", "--name", NAME, "renderer"], { cwd: DIR, env: ENV, stdio: ["pipe", "pipe", "pipe"] });
   child.stdout.on("data", onData);

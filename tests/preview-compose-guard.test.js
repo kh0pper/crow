@@ -163,29 +163,33 @@ test("the shim runs the real binary", () => {
   assert.match(DOCKERFILE, /^ENTRYPOINT \["\/usr\/local\/bin\/pipe-shim\.sh"\]$/m);
 });
 
-dockerTest("the container has no network, ports, volumes or VNC", async () => {
-  const s = renderer(await model());
-  assert.deepEqual(Object.keys((await model()).services), ["renderer"]);
-  assert.equal(s.network_mode, "none");
-  for (const k of ["ports", "expose", "volumes", "volumes_from", "devices", "networks", "env_file", "gpus", "cap_add"]) {
-    assert.equal(s[k], undefined, k);
+// Pure text checks of compose.yml (no Docker): the file is plain block YAML with no
+// anchors, merge keys or includes, which the first check pins so the line reads hold.
+const composeLines = code(COMPOSE).split("\n").filter((l) => l.trim());
+const serviceKeys = composeLines.filter((l) => /^ {4}[a-z_]+:/.test(l)).map((l) => l.trim().split(":")[0]);
+
+test("the container has no network, ports, volumes or VNC", () => {
+  assert.doesNotMatch(code(COMPOSE), /[&*<]|!\w|\binclude\b|\bextends\b/, "plain YAML: no anchors, aliases, merge keys, tags, include or extends");
+  assert.deepEqual(composeLines.filter((l) => /^\S/.test(l)), ["services:"], "only services at the top level");
+  assert.deepEqual(composeLines.filter((l) => /^ {2}\S/.test(l)), ["  renderer:"], "one service");
+  assert.ok(composeLines.includes("    network_mode: none"));
+  for (const k of ["ports", "expose", "volumes", "volumes_from", "devices", "networks", "env_file", "gpus", "cap_add", "privileged", "ipc", "pid", "extra_hosts"]) {
+    assert.ok(!serviceKeys.includes(k), k);
   }
-  assert.deepEqual(s.cap_drop, ["ALL"]);
-  assert.equal(s.read_only, true);
-  assert.equal(s.user, "10001:10001");
-  assert.deepEqual(s.security_opt, ["no-new-privileges:true", `seccomp=${SECCOMP}`]);
-  assert.deepEqual(s.labels, { "crow.component": "preview-renderer", "crow.instance": "0a1b2c3d", "crow.home": "4e5f6a7b" });
-  assert.deepEqual(s.environment, { CROW_PREVIEW_ARTIFACT_HOST: "artifacts.example.test" });
+  assert.ok(composeLines.join("\n").includes("    cap_drop:\n      - ALL\n"));
+  assert.ok(composeLines.includes("    read_only: true"));
+  assert.ok(composeLines.includes('    user: "10001:10001"'));
+  assert.ok(composeLines.join("\n").includes("    security_opt:\n      - no-new-privileges:true\n      - seccomp=${CROW_PREVIEW_SECCOMP}\n"));
+  assert.ok(composeLines.join("\n").includes("    labels:\n      crow.component: preview-renderer\n      crow.instance: ${CROW_PREVIEW_INSTANCE}\n      crow.home: ${CROW_PREVIEW_HOME}"));
+  assert.ok(composeLines.join("\n").includes("    environment:\n      CROW_PREVIEW_ARTIFACT_HOST: ${CROW_PREVIEW_ARTIFACT_HOST}\n"));
   for (const [name, text] of [["compose.yml", COMPOSE], ["Dockerfile", DOCKERFILE], ["pipe-shim.sh", SHIM]]) {
     assert.doesNotMatch(code(text), /vnc|DISPLAY|xvfb/i, name);
   }
 });
 
-dockerTest("the compose never pulls or builds on run", async () => {
-  const s = renderer(await model());
-  assert.equal(s.pull_policy, "never");
-  assert.equal(s.image, "crow-preview-renderer:000000000000");
-  assert.match(COMPOSE, /^\s+pull_policy: never$/m);
+test("the compose never pulls or builds on run", () => {
+  assert.ok(composeLines.includes("    pull_policy: never"));
+  assert.ok(composeLines.includes("    image: ${CROW_PREVIEW_IMAGE}"));
 });
 
 const rulesFor = (name) => PROFILE.syscalls.filter((r) => r.names.includes(name));
