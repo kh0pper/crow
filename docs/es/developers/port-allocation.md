@@ -3,7 +3,8 @@
 Este documento es la **única fuente de verdad** para cada puerto del host consumido por Crow mismo, por los bundles en `bundles/` y los reservados por la hoja de ruta del MVP. Cualquier PR de un bundle nuevo que introduzca un binding de puerto debe modificar este archivo en el mismo PR. El CI verifica que:
 
 1. Cada puerto del host en cualquier `bundles/<id>/docker-compose*.yml` (incluidas las capas como `docker-compose.tailnet.yml`) esté listado aquí. Un puerto escrito como `${VAR:-N}` o `${VAR-N}` cuenta como `N`, el puerto que publica una instalación nueva. Un puerto que es una variable sin valor por defecto (`${VAR}`) no tiene número que verificar.
-2. Ningún par de bundles publique el mismo puerto del host en direcciones que se solapan: la misma IP del host, o una de las dos comodín (sin IP, `0.0.0.0`, `::`). Dos direcciones concretas distintas en un mismo puerto (loopback y la IP de la tailnet) no chocan.
+2. Ningún par de bundles publique el mismo puerto del host en direcciones que se solapan: la misma IP del host, o una de las dos comodín (sin IP, `0.0.0.0`, `::`). Dos direcciones concretas distintas en un mismo puerto (loopback y la IP de la tailnet) no chocan. Una variable de IP sin valor por defecto (`${CROW_TAILSCALE_IP}`) cuenta como comodín, porque sin definir publica en todas las direcciones; escríbela como `${CROW_TAILSCALE_IP:?…}` (obligatoria) para que sea una dirección concreta. También se comparan entre sí los servicios de un mismo bundle.
+3. También se revisa el `docker-compose.yml` de la raíz del repo. Su servicio opcional `minio` es la alternativa al bundle minio (nunca corren juntos), así que su 9001 cuenta como del bundle minio. Una entrada de `ports` que el verificador no puede leer se imprime como WARNING.
 
 ## Convenciones
 
@@ -74,7 +75,7 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 | 8041 | 127.0.0.1 | kolibri (`KOLIBRI_HTTP_PORT`; el valor por defecto pasó de 8085, que ocupa miniflux) | existente (movido 2026-10) |
 | 8042 | 127.0.0.1 | nominatim (`NOMINATIM_PORT`; el valor por defecto pasó de 8088, que ocupa trilium) | existente (movido 2026-10) |
 | 8043 | 127.0.0.1 | maker-lab-advanced (JupyterHub, `MLA_HTTP_PORT`; el valor por defecto pasó de 8088, que ocupa trilium) | existente (movido 2026-10) |
-| 8044 | 127.0.0.1 | vllm (`VLLM_HTTP_PORT`; el valor por defecto pasó de 8089, que ocupa el nominatim externo de edjobs en crow; maker-lab busca vLLM en este puerto) | existente (movido 2026-10) |
+| 8044 | 127.0.0.1 | vllm (`VLLM_HTTP_PORT`; el valor por defecto pasó de 8089, que ocupa el nominatim externo de edjobs en el host principal; maker-lab busca vLLM en este puerto) | existente (movido 2026-10) |
 | 8080 | 127.0.0.1 | localai (existente) | existente |
 | 8081 | 127.0.0.1 | calibre-server (existente) | existente |
 | 8083 | 127.0.0.1 | calibre-web (existente) | existente |
@@ -102,9 +103,9 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 | 8971 | 127.0.0.1 | frigate (UI autenticada) | existente |
 | 9000 | 127.0.0.1 | minio (API S3, existente) | existente |
 | 9001 | 127.0.0.1 | minio (consola, existente) | existente |
-| 9100 | IP de tailscale de grackle | vllm-cuda-embed (`GRACKLE_TAILSCALE_IP`; un bundle de grackle, no de crow) | existente |
-| 9101 | IP de tailscale de grackle | vllm-cuda-rerank (`GRACKLE_TAILSCALE_IP`; un bundle de grackle, no de crow) | existente |
-| 9102 | IP de tailscale de grackle | vllm-cuda-vision (`GRACKLE_TAILSCALE_IP`; un bundle de grackle, no de crow) | existente |
+| 9100 | IP de tailscale del host CUDA | vllm-cuda-embed (`GRACKLE_TAILSCALE_IP`; corre en el host CUDA, no en el host principal) | existente |
+| 9101 | IP de tailscale del host CUDA | vllm-cuda-rerank (`GRACKLE_TAILSCALE_IP`; corre en el host CUDA, no en el host principal) | existente |
+| 9102 | IP de tailscale del host CUDA | vllm-cuda-vision (`GRACKLE_TAILSCALE_IP`; corre en el host CUDA, no en el host principal) | existente |
 | 9090 | 127.0.0.1 | linkding (existente) | existente |
 | 11434 | 127.0.0.1 | ollama (existente) | existente |
 | 13378 | 127.0.0.1 | audiobookshelf (existente) | existente |

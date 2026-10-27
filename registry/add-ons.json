@@ -1138,6 +1138,7 @@
     },
     {
       "id": "faster-whisper-server",
+      "version": "1.0.0",
       "type": "bundle",
       "name": "Faster-Whisper Server (local)",
       "category": "ai",
@@ -2669,7 +2670,7 @@
     },
     {
       "id": "llamacpp-vulkan-qwen3-embed",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "type": "bundle",
       "name": "llama.cpp Qwen3-Embedding-0.6B (Vulkan/ROCm)",
       "category": "ai",

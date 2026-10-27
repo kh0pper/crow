@@ -3,24 +3,28 @@
  * Port allocation check (CI).
  *
  * Verifies:
- *   1. No two bundles publish the same host port on overlapping addresses
+ *   1. No two owners publish the same host port on overlapping addresses
  *      (same host IP, or either side a wildcard), across every
- *      bundles/<id>/docker-compose*.yml (overlays included).
+ *      bundles/<id>/docker-compose*.yml (overlays included) and the
+ *      repo-root docker-compose.yml. An owner is a (bundle, service) pair, so
+ *      two services of one bundle are checked against each other too.
  *   2. Every host port is documented in docs/developers/port-allocation.md.
  *
  * Host ports written as ${VAR:-N} or ${VAR-N} count as N, the port a fresh
- * install publishes. A host port that is a variable with no default is not
- * checked (there is no number to check).
+ * install publishes. A ports entry it cannot read (a host port variable with
+ * no default, a non-numeric value) is printed as a WARNING, never skipped
+ * silently.
  *
  * Exits non-zero with a clear diff on violation.
  */
 
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const BUNDLES_DIR = join(REPO_ROOT, "bundles");
+const ROOT_COMPOSE = join(REPO_ROOT, "docker-compose.yml");
 const PORT_DOC = join(REPO_ROOT, "docs/developers/port-allocation.md");
 const KNOWN_CONFLICTS_PATH = join(REPO_ROOT, "scripts/known-port-conflicts.json");
 
@@ -41,15 +45,28 @@ function loadKnownConflicts(path = KNOWN_CONFLICTS_PATH) {
 
 // ${NAME:-default} / ${NAME-default}: Compose uses the default when NAME is
 // unset (":-" also when it is empty). A default is what a fresh install
-// publishes, so the default is what has to be unique and documented.
-const VAR_WITH_DEFAULT_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*):?-([^}]*)\}/g;
-// ${NAME}, ${NAME:?err}, ${NAME?err}: no default, nothing to check.
-const VAR_NO_DEFAULT_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?:[:]?[?+][^}]*)?\}/g;
+// publishes, so the default is what has to be unique and documented. The
+// pattern matches innermost-first (no "$", "{" or "}" in the default), and
+// resolveDefaults loops, so nested ${A:-${B:-N}} resolves to N.
+const VAR_WITH_DEFAULT_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*):?-([^${}]*)\}/g;
+// ${NAME:?err}: Compose refuses to start when NAME is unset or empty, so the
+// value is always one specific address. Kept as "$NAME".
+const VAR_REQUIRED_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*):\?[^${}]*\}/g;
+// ${NAME}, ${NAME?err}, ${NAME:+x}, ${NAME+x}: may be empty. Kept as
+// "${NAME}"; as a host IP it is a wildcard (empty publishes on every address).
+const VAR_OTHER_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?:[:]?[?+][^${}]*)?\}/g;
 
 function resolveDefaults(value) {
-  return value
-    .replace(VAR_WITH_DEFAULT_RE, (_, _name, def) => def)
-    .replace(VAR_NO_DEFAULT_RE, (_, name) => "$" + name);
+  let prev;
+  let out = value;
+  do {
+    prev = out;
+    out = out.replace(VAR_WITH_DEFAULT_RE, (_, _name, def) => def);
+  } while (out !== prev);
+  return out
+    .replace(VAR_REQUIRED_RE, (_, name) => "$" + name)
+    .replace(VAR_OTHER_RE, (_, name) => "\u0000" + name + "\u0001")
+    .replace(/\u0000([A-Za-z0-9_]+)\u0001/g, (_, name) => "${" + name + "}");
 }
 
 function stripScalar(raw) {
@@ -73,40 +90,47 @@ function expandRange(spec) {
   return out;
 }
 
+function hostPorts(host, spec) {
+  if (/\$/.test(host)) return { invalid: `"${spec}": host port ${host} has no default, so it cannot be checked` };
+  const ports = expandRange(host);
+  return ports ? { ports } : { invalid: `"${spec}": host port "${host}" is not a port number or range` };
+}
+
 /**
- * Parse one short-syntax publish ("[ip:]host:container[/proto]") into its
- * host side. Returns { ip, ports } or null when nothing is published on a
- * fixed host port (container-only entries, ephemeral "ip::80", or a host
- * port that is a variable with no default).
+ * Parse one short-syntax publish ("[ip:]host:container[/proto]").
+ * Returns { ip, ports }; null when nothing is published on a fixed host port
+ * on purpose (container-only "80", ephemeral "ip::80"); or { invalid } with a
+ * reason when the entry cannot be read (the CLI prints it as a warning).
  */
 export function parsePortSpec(spec) {
-  let s = resolveDefaults(String(spec).trim()).replace(/\/(?:tcp|udp|sctp)$/i, "");
-  let ip = "";
+  const raw = String(spec).trim();
+  const s = resolveDefaults(raw).replace(/\/(?:tcp|udp|sctp)$/i, "");
+  let ip;
+  let rest;
   if (s.startsWith("[")) {
     const close = s.indexOf("]");
-    if (close < 0) return null;
+    if (close < 0 || s[close + 1] !== ":") return { invalid: `"${raw}": unreadable IPv6 host address` };
     ip = s.slice(1, close);
-    s = s.slice(close + 1).replace(/^:/, "");
+    rest = s.slice(close + 2).split(":");
+    if (rest.length !== 2) return { invalid: `"${raw}": expected [ip]:host:container` };
+  } else {
     const parts = s.split(":");
-    if (parts.length !== 2) return null;
-    const ports = expandRange(parts[0]);
-    return ports ? { ip, ports } : null;
+    if (parts.length < 2) return /^\d{1,5}(?:-\d{1,5})?$/.test(s) ? null : { invalid: `"${raw}": not a port mapping` };
+    ip = parts.slice(0, -2).join(":");
+    rest = parts.slice(-2);
   }
-  const parts = s.split(":");
-  if (parts.length < 2) return null;
-  const host = parts[parts.length - 2];
-  ip = parts.slice(0, -2).join(":");
-  const ports = expandRange(host);
-  return ports ? { ip, ports } : null;
+  if (rest[0] === "") return null; // ephemeral host port
+  const r = hostPorts(rest[0], raw);
+  return r.invalid ? r : { ip, ports: r.ports };
 }
 
 function longSyntaxToSpec(obj) {
-  if (obj.published === undefined || obj.published === "") return null;
-  const published = resolveDefaults(stripScalar(String(obj.published)));
-  const ports = expandRange(published);
-  if (!ports) return null;
+  if (obj.published === undefined || stripScalar(String(obj.published)) === "") return null;
+  const raw = stripScalar(String(obj.published));
+  const r = hostPorts(resolveDefaults(raw), "published: " + raw);
+  if (r.invalid) return r;
   const ip = obj.host_ip !== undefined ? resolveDefaults(stripScalar(String(obj.host_ip))) : "";
-  return { ip, ports };
+  return { ip, ports: r.ports };
 }
 
 function splitFlow(inner) {
@@ -150,26 +174,55 @@ function parseFlowMapping(text) {
 const indentOf = (line) => line.length - line.trimStart().length;
 const isSkippable = (line) => line.trim() === "" || line.trim().startsWith("#");
 
+/** The service each line belongs to (top-level `services:` children), or null. */
+function serviceByLine(lines) {
+  const out = new Array(lines.length).fill(null);
+  let inServices = false;
+  let childIndent = -1;
+  let current = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!isSkippable(line)) {
+      const ind = indentOf(line);
+      if (ind === 0) {
+        inServices = /^services:\s*(?:#.*)?$/.test(line);
+        childIndent = -1;
+        current = null;
+      } else if (inServices) {
+        if (childIndent < 0) childIndent = ind;
+        const key = /^\s*["']?([\w.-]+)["']?:\s*(?:#.*)?$/.exec(line);
+        if (ind === childIndent && key) current = key[1];
+      }
+    }
+    out[i] = current;
+  }
+  return out;
+}
+
 /**
- * Every fixed host-side publish in a compose file, as { ip, port } pairs.
- * Reads the `ports:` sections only (short syntax, long syntax with
- * `published:`/`host_ip:`, and flow sequences), so volume and environment
- * lines that happen to look like "a:b" never count.
+ * Every fixed host-side publish in a compose file, as { service, ip, port },
+ * plus a warning for each ports entry that cannot be read. Reads the
+ * `ports:` sections only (short syntax, long syntax with `published:` /
+ * `host_ip:`, and flow sequences), so volume and environment lines that
+ * happen to look like "a:b" never count.
  */
-export function extractHostMappings(content) {
+export function scanCompose(content) {
   const lines = content.split(/\r?\n/);
-  const specs = [];
+  const services = serviceByLine(lines);
+  const specs = []; // { service, spec }
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (isSkippable(line)) continue;
     const head = /^(\s*)ports:\s*(.*)$/.exec(line);
     if (!head) continue;
+    const service = services[i];
+    const push = (spec) => specs.push({ service, spec });
     const keyIndent = head[1].length;
     const rest = head[2].replace(/\s+#.*$/, "").trim();
     if (rest.startsWith("[")) {
       for (const item of splitFlow(rest.replace(/^\[|\]$/g, ""))) {
-        if (item.startsWith("{")) specs.push(longSyntaxToSpec(parseFlowMapping(item)));
-        else specs.push(parsePortSpec(stripScalar(item)));
+        if (item.startsWith("{")) push(longSyntaxToSpec(parseFlowMapping(item)));
+        else push(parsePortSpec(stripScalar(item)));
       }
       continue;
     }
@@ -177,7 +230,7 @@ export function extractHostMappings(content) {
     let current = null;
     let itemIndent = -1;
     const flush = () => {
-      if (current) specs.push(longSyntaxToSpec(current));
+      if (current) push(longSyntaxToSpec(current));
       current = null;
     };
     let j = i + 1;
@@ -193,9 +246,9 @@ export function extractHostMappings(content) {
         flush();
         const body = trimmed.slice(1).trim();
         const kv = /^([A-Za-z_]+)\s*:\s*(.*)$/.exec(body);
-        if (body.startsWith("{")) specs.push(longSyntaxToSpec(parseFlowMapping(body)));
+        if (body.startsWith("{")) push(longSyntaxToSpec(parseFlowMapping(body)));
         else if (kv && !/^["']/.test(body)) current = { [kv[1]]: kv[2] };
-        else specs.push(parsePortSpec(stripScalar(body)));
+        else push(parsePortSpec(stripScalar(body)));
       } else if (current && ind > itemIndent) {
         const kv = /^([A-Za-z_]+)\s*:\s*(.*)$/.exec(trimmed);
         if (kv) current[kv[1]] = kv[2];
@@ -206,16 +259,33 @@ export function extractHostMappings(content) {
     flush();
     i = j - 1;
   }
-  const out = [];
+  const mappings = [];
+  const warnings = [];
   const seen = new Set();
-  for (const spec of specs) {
+  for (const { service, spec } of specs) {
     if (!spec) continue;
+    if (spec.invalid) {
+      warnings.push((service ? service + ": " : "") + spec.invalid);
+      continue;
+    }
     for (const port of spec.ports) {
-      const key = spec.ip + "|" + port;
+      const key = service + "|" + spec.ip + "|" + port;
       if (seen.has(key)) continue;
       seen.add(key);
-      out.push({ ip: spec.ip, port });
+      mappings.push({ service, ip: spec.ip, port });
     }
+  }
+  return { mappings, warnings };
+}
+
+/** Distinct { ip, port } publishes in a compose file (services merged). */
+export function extractHostMappings(content) {
+  const out = [];
+  const seen = new Set();
+  for (const { ip, port } of scanCompose(content).mappings) {
+    if (seen.has(ip + "|" + port)) continue;
+    seen.add(ip + "|" + port);
+    out.push({ ip, port });
   }
   return out;
 }
@@ -226,9 +296,15 @@ export function extractHostPorts(content) {
 
 const WILDCARD_IPS = new Set(["", "0.0.0.0", "::", "*"]);
 
-/** Two publishes of one port clash when they share an address or either is a wildcard. */
+/**
+ * Two publishes of one port clash when they share an address or either is a
+ * wildcard. A host-IP variable that may be unset (`${NAME}`) is a wildcard:
+ * Compose then publishes on every address. A required one (`${NAME:?err}`,
+ * kept as "$NAME") is one specific address.
+ */
 export function bindsOverlap(a, b) {
-  return a === b || WILDCARD_IPS.has(a) || WILDCARD_IPS.has(b);
+  const wild = (ip) => WILDCARD_IPS.has(ip) || ip.startsWith("${");
+  return a === b || wild(a) || wild(b);
 }
 
 function listBundleComposeFiles(bundlesDir) {
@@ -272,20 +348,42 @@ export function loadDocumentedPorts(docPath = PORT_DOC) {
  * Run the check over a bundles tree and a port doc. Returns the findings;
  * the CLI below prints them and sets the exit code.
  */
+const ROOT_LABEL = "(root compose)";
+
+/**
+ * Run the check over a bundles tree, the repo-root compose and a port doc.
+ * Returns the findings; the CLI below prints them and sets the exit code.
+ *
+ * Owners are (bundle, service). Publishes of one service merge across a
+ * bundle's compose files (overlays restate the base's ports), while two
+ * services of one bundle are checked against each other like two bundles.
+ * A repo-root service named like a bundle (the optional `minio` service) is
+ * that bundle's alternative deployment (the two never run together), so it
+ * counts as that bundle and is not checked against that bundle's own services.
+ */
 export function checkPortAllocation({
   bundlesDir = BUNDLES_DIR,
   docPath = PORT_DOC,
   knownConflictsPath = KNOWN_CONFLICTS_PATH,
+  rootComposePath = ROOT_COMPOSE,
 } = {}) {
   const files = listBundleComposeFiles(bundlesDir);
+  const bundleIds = new Set(files.map((f) => f.bundle));
+  const sources = files.map((f) => ({ ...f, root: false }));
+  if (rootComposePath && existsSync(rootComposePath)) sources.push({ bundle: ROOT_LABEL, path: rootComposePath, root: true });
   const documented = loadDocumentedPorts(docPath);
-  // port -> [{ bundle, ip }]
+  const warnings = [];
+  // port -> [{ bundle, service, ip }]
   const portToBinds = new Map();
-  for (const { bundle, path } of files) {
-    for (const { ip, port } of extractHostMappings(readFileSync(path, "utf8"))) {
+  for (const { bundle, path, root } of sources) {
+    const { mappings, warnings: w } = scanCompose(readFileSync(path, "utf8"));
+    for (const msg of w) warnings.push(relative(REPO_ROOT, path) + ": " + msg);
+    for (const { service, ip, port } of mappings) {
+      const alt = root && bundleIds.has(service); // an alternative deployment of that bundle
+      const owner = alt ? service : bundle;
       if (!portToBinds.has(port)) portToBinds.set(port, []);
       const binds = portToBinds.get(port);
-      if (!binds.some((b) => b.bundle === bundle && b.ip === ip)) binds.push({ bundle, ip });
+      if (!binds.some((b) => b.bundle === owner && b.service === service && b.ip === ip && b.alt === alt)) binds.push({ bundle: owner, service, ip, alt });
     }
   }
 
@@ -293,18 +391,19 @@ export function checkPortAllocation({
   const collisions = [];
   const grandfathered = [];
   for (const [port, binds] of [...portToBinds].sort((a, b) => a[0] - b[0])) {
-    const clashing = new Set();
+    const clashing = [];
+    const add = (b) => { if (!clashing.includes(b)) clashing.push(b); };
     for (let i = 0; i < binds.length; i++) {
       for (let j = i + 1; j < binds.length; j++) {
-        if (binds[i].bundle === binds[j].bundle) continue;
-        if (bindsOverlap(binds[i].ip, binds[j].ip)) {
-          clashing.add(binds[i].bundle);
-          clashing.add(binds[j].bundle);
-        }
+        const a = binds[i];
+        const b = binds[j];
+        if (a.bundle === b.bundle && (a.service === b.service || a.alt !== b.alt)) continue;
+        if (bindsOverlap(a.ip, b.ip)) { add(a); add(b); }
       }
     }
-    if (clashing.size === 0) continue;
-    const sorted = [...clashing].sort();
+    if (clashing.length === 0) continue;
+    const label = (b) => (clashing.some((o) => o.bundle === b.bundle && o.service !== b.service) ? b.bundle + "/" + b.service : b.bundle);
+    const sorted = [...new Set(clashing.map(label))].sort();
     const allowed = knownConflicts.get(port);
     if (allowed && allowed.length === sorted.length && allowed.every((b, i) => b === sorted[i])) {
       grandfathered.push({ port, bundles: sorted });
@@ -319,12 +418,15 @@ export function checkPortAllocation({
       undocumented.push({ port, bundles: [...new Set(binds.map((b) => b.bundle))].sort() });
     }
   }
-  const bundleCount = new Set(files.map((f) => f.bundle)).size;
-  return { collisions, grandfathered, undocumented, portCount: portToBinds.size, bundleCount };
+  return { collisions, grandfathered, undocumented, warnings, portCount: portToBinds.size, bundleCount: bundleIds.size };
 }
 
 function main() {
-  const { collisions, grandfathered, undocumented, portCount, bundleCount } = checkPortAllocation();
+  const { collisions, grandfathered, undocumented, warnings, portCount, bundleCount } = checkPortAllocation();
+  if (warnings.length > 0) {
+    console.warn("WARNING: ports entries the checker cannot read (not checked):");
+    for (const w of warnings) console.warn("  " + w);
+  }
   if (grandfathered.length > 0) {
     console.warn("WARN: Pre-existing port conflicts (allowlisted in scripts/known-port-conflicts.json):");
     for (const { port, bundles } of grandfathered) {
@@ -345,7 +447,7 @@ function main() {
   }
   const errors = collisions.length + undocumented.length;
   if (errors === 0) {
-    console.log("OK: " + portCount + " unique port(s) across " + bundleCount + " bundle(s), all documented, no collisions.");
+    console.log("OK: " + portCount + " unique port(s) across " + bundleCount + " bundle(s) and the root compose, all documented, no collisions.");
     process.exit(0);
   }
   console.error("\nFound " + errors + " port-allocation issue(s).");
