@@ -3167,6 +3167,7 @@ export const translations = {
   "perch.botStartFailed": { en: "Bot could not start:", es: "El bot no pudo iniciarse:" },
   "perch.turnFailed": { en: "This turn failed:", es: "Este turno falló:" },
   "perch.you": { en: "You:", es: "Tú:" },
+  "perch.draftMaybeSent": { en: "This may already have been sent.", es: "Puede que esto ya se haya enviado." },
   "perch.sendFailed": { en: "The message did not send.", es: "El mensaje no se envió." },
   "perch.back": { en: "← Sessions", es: "← Sesiones" },
   "perch.hideSessions": { en: "Hide sessions", es: "Ocultar sesiones" },

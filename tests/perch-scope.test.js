@@ -170,7 +170,7 @@ function makeEl(tag) {
   return node;
 }
 
-const IDS = ["perch-list-body", "perch-transcript", "perch-ask", "perch-bot-name",
+const IDS = ["perch-draft-note", "perch-list-body", "perch-transcript", "perch-ask", "perch-bot-name",
   "perch-session-meta", "perch-session-id", "perch-state", "perch-model", "perch-thinking", "perch-permission",
   "perch-plan-mode", "perch-input", "perch-send", "perch-back", "perch-abort",
   "perch-attach", "perch-file-input", "perch-chat",
@@ -375,6 +375,62 @@ test("a failed send survives a reload", async () => {
   assert.equal(store.getItem(KEY), "never debounced");
   const second = await mount({ roost: ROOST, sessionStorage: store, initialHash: "#" + sid });
   assert.equal(second.els["perch-input"].value, "never debounced");
+});
+
+test("a reload during a slow send restores the sent text with a note", async () => {
+  const store = makeStorage();
+  const sid = "perchlive-00000002";
+  const KEY = "perch-draft:" + sid;
+  const FLIGHT = "perch-inflight:" + sid;
+  const never = new Promise(() => {});
+  const first = await mount({
+    sessionStorage: store, initialHash: "#" + sid,
+    fetchImpl: (method, path) => {
+      if (path.startsWith("/roost")) return makeResponse(200, ROOST);
+      if (method === "POST" && path.endsWith("/message")) return never;
+      return makeResponse(200, {});
+    },
+  });
+  first.els["perch-input"].value = "slow words";
+  first.els["perch-send"].click();
+  assert.equal(store.getItem(FLIGHT), "slow words", "the in-flight marker holds the exact text");
+  first.win._dispatch("pagehide", {});          // the reload: the composer is empty, the send unanswered
+  assert.equal(store.getItem(KEY), "slow words", "an empty composer does not erase the in-flight words");
+
+  const second = await mount({ roost: ROOST, sessionStorage: store, initialHash: "#" + sid });
+  assert.equal(second.els["perch-input"].value, "slow words", "the words are restored, never dropped");
+  assert.equal(second.els["perch-draft-note"].hidden, false);
+  assert.equal(second.els["perch-draft-note"].textContent, "This may already have been sent.");
+  assert.equal(store.getItem(FLIGHT), null, "the marker is cleared once the note is shown");
+
+  const third = await mount({ roost: ROOST, sessionStorage: store, initialHash: "#" + sid });
+  assert.equal(third.els["perch-draft-note"].hidden, true, "no note the next time");
+});
+
+test("a send that is answered clears the in-flight marker, and unrelated drafts get no note", async () => {
+  const store = makeStorage();
+  const sid = "perchlive-00000002";
+  const ok = await mount({ roost: ROOST, sessionStorage: store, initialHash: "#" + sid });
+  ok.els["perch-input"].value = "fine";
+  ok.els["perch-send"].click();
+  await tick(); await tick();
+  assert.equal(store.getItem("perch-inflight:" + sid), null, "success clears the marker");
+
+  const bad = await mount({
+    sessionStorage: store, initialHash: "#" + sid,
+    fetchImpl: (method, path) => path.startsWith("/roost") ? makeResponse(200, ROOST)
+      : (method === "POST" && path.endsWith("/message") ? makeResponse(500, { error: "boom" }) : makeResponse(200, {})),
+  });
+  bad.els["perch-input"].value = "refused";
+  bad.els["perch-send"].click();
+  await tick(); await tick();
+  assert.equal(store.getItem("perch-inflight:" + sid), null, "a definite refusal clears the marker");
+  assert.equal(store.getItem("perch-draft:" + sid), "refused");
+
+  store.setItem("perch-draft:" + sid, "typed, never sent");
+  const plain = await mount({ roost: ROOST, sessionStorage: store, initialHash: "#" + sid });
+  assert.equal(plain.els["perch-input"].value, "typed, never sent");
+  assert.equal(plain.els["perch-draft-note"].hidden, true, "an ordinary draft gets no note");
 });
 
 test("a late success does not clear a draft typed after the send", async () => {

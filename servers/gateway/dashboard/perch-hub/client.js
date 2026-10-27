@@ -426,6 +426,7 @@ export function perchHubJs(lang = "en") {
      are safe inside single-quoted literals. */
   var SESSION_GONE='${tJs("perch.sessionGone", lang)}';
   var SEND_FAILED='${tJs("perch.sendFailed", lang)}';
+  var DRAFT_MAYBE_SENT='${tJs("perch.draftMaybeSent", lang)}';
   var BOT_START_FAILED='${tJs("perch.botStartFailed", lang)}';
   var TURN_FAILED='${tJs("perch.turnFailed", lang)}';
   var FILE_QUEUED='${tJs("perch.fileQueued", lang)}';
@@ -2486,15 +2487,40 @@ export function perchHubJs(lang = "en") {
      opens, and cleared when a send succeeds. Storage that throws (blocked,
      private mode) just means no drafts: the composer works as before. */
   var DRAFT_PREFIX='perch-draft:';
+  /* The text of a send that has gone out and not yet been answered, per
+     session. A reload mid-send never sees the answer, so the restored draft
+     can be words the bot already has: it is restored anyway (never dropped
+     silently) with a note. Cleared on success and on a refusal; a lost
+     connection (status 0) is ambiguous, so it stays. */
+  var INFLIGHT_PREFIX='perch-inflight:';
+  var sendingNow={};                      /* sid -> true while THIS page awaits that send's answer */
   var draftTimer=null;
   function draftStore(){ try{ return window.sessionStorage||null; }catch(e){ return null; } }
   function draftCancel(){ if(draftTimer){ clearTimeout(draftTimer); draftTimer=null; } }
+  function inflightGet(store,sid){ try{ return store.getItem(INFLIGHT_PREFIX+sid); }catch(e){ return null; } }
+  function inflightMark(sid,text){
+    var store=draftStore(); if(!store||!sid) return;
+    try{ store.setItem(INFLIGHT_PREFIX+sid,String(text)); }catch(e){}
+  }
+  function inflightClear(sid){
+    var store=draftStore(); if(!store||!sid) return;
+    try{ store.removeItem(INFLIGHT_PREFIX+sid); }catch(e){}
+  }
+  function draftNote(show){ var n=el('perch-draft-note'); if(n){ n.hidden=!show; n.textContent=show?DRAFT_MAYBE_SENT:''; } }
   function draftSave(){
     draftCancel();
     var sid=current.sid, input=el('perch-input'), store=draftStore();
     if(!sid||!input||!store) return;
     var v=String(input.value==null?'':input.value);
-    try{ if(v.trim()) store.setItem(DRAFT_PREFIX+sid,v); else store.removeItem(DRAFT_PREFIX+sid); }catch(e){}
+    try{
+      if(v.trim()) store.setItem(DRAFT_PREFIX+sid,v);
+      else {
+        /* An empty composer during a send is not an empty draft: leaving the
+           page now must keep the words that are still in flight. */
+        var fl=inflightGet(store,sid);
+        if(fl&&fl.trim()) store.setItem(DRAFT_PREFIX+sid,fl); else store.removeItem(DRAFT_PREFIX+sid);
+      }
+    }catch(e){}
   }
   function draftSaveSoon(){
     draftCancel();
@@ -2503,12 +2529,22 @@ export function perchHubJs(lang = "en") {
   function draftRestore(sid){
     draftCancel();
     var input=el('perch-input'), store=draftStore();
+    draftNote(false);
     if(!input||!store) return;              /* no storage: leave the composer exactly as it was */
     var v=null;
     try{ v=store.getItem(DRAFT_PREFIX+sid); }catch(e){ return; }
     input.value=v==null?'':String(v);
     input.style.height='auto';
     if(v) input.style.height=Math.min(input.scrollHeight||72,120)+'px';
+    /* A marker this page is not itself waiting on belongs to a send that was
+       cut off by a reload: if the draft is that very text, say so. */
+    if(!sendingNow[sid]){
+      var fl=inflightGet(store,sid);
+      if(fl!=null){
+        if(v!=null&&String(v)===fl) draftNote(true);
+        inflightClear(sid);
+      }
+    }
   }
   /* Clears only the draft that was sent: a late success must not delete
      words typed (and saved) after the send went out. */
@@ -2542,6 +2578,13 @@ export function perchHubJs(lang = "en") {
     if(!histSettled){ var trE=el('perch-transcript'); if(trE&&trE.lastElementChild) seamEchoes.push({text:text,row:trE.lastElementChild,sentAt:Date.now()}); }
     input.value='';
     draftCancel();                         /* Shell P2: the draft stays stored until the send succeeds */
+    draftNote(false);
+    /* Shell P2: the words are in flight. Stored as the draft too, so a reload
+       before the answer restores them (with a note) instead of losing them. */
+    sendingNow[mySid]=true;
+    inflightMark(mySid,text);
+    var dst=draftStore();
+    if(dst){ try{ dst.setItem(DRAFT_PREFIX+mySid,String(text)); }catch(e){} }
     input.style.height='auto';             /* Wave 1: the auto-grow collapses back after a send */
     var body={message:text};
     hideCmdMenu();                         /* Wave 3: a sent command closes its own menu */
@@ -2571,6 +2614,8 @@ export function perchHubJs(lang = "en") {
       if(r.ok&&!rec.failed){ rec.counted=true; bumpUnsentAfter(mySid,1); }
       /* Shell P2: delivered, so it is no longer a draft; refused or lost,
          the words come back so a reload cannot drop them. */
+      delete sendingNow[mySid];
+      if(r.ok||r.status>0) inflightClear(mySid);   /* answered; a lost connection (0) stays ambiguous */
       if(r.ok) draftClear(mySid,text); else draftKeepUnsent(mySid,text);
       if(current.sid!==mySid) return;
       var code=r.j&&r.j.error;

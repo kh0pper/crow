@@ -391,6 +391,8 @@ body[data-view="chat"] #perch-chat{display:flex;flex-direction:column;flex:1;min
    ~3000px below the fold. Keep both rules; neither is dead. */
 #perch-composer{position:sticky;bottom:0;background:var(--card);border-top:1px solid var(--line);padding:10px 0;display:grid;gap:8px}
 #perch-composer .send-row{display:flex;gap:8px}
+body.shell #perch-draft-note{font-size:12.5px;color:var(--dim)}
+body.shell #perch-draft-note[hidden]{display:none}
 /* The working strip (html.js's #perch-working): a turning gear + one word,
    sitting between the ask pane and the composer as a non-shrinking flex
    child — it must never squeeze the transcript or push Send off screen, and

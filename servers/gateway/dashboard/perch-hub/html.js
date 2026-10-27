@@ -192,6 +192,7 @@ ${engineBanner(engine, lang)}
            hardcoded list. -->
       <div id="perch-cmdmenu" hidden></div>
       <textarea id="perch-input" placeholder="${escapeHtml(t("perch.composerPlaceholder", lang))}"></textarea>
+      <div id="perch-draft-note" role="status" hidden></div>
       <div class="send-row">
         <button type="button" id="perch-attach" class="quiet">${escapeHtml(t("perch.attachFile", lang))}</button>
         <input type="file" id="perch-file-input" style="display:none" accept="image/*">
