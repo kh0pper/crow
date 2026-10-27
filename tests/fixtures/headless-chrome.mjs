@@ -37,6 +37,7 @@ import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, readdirSync, existsSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
+import { createPipeCdp } from "../../servers/gateway/preview/cdp-pipe.js";
 
 function newestDir(base, prefix) {
   try {
@@ -119,7 +120,8 @@ export async function startHeadlessChrome(opts = {}) {
   return chrome;
 }
 
-async function startHeadlessChromeOrNull({ timeoutMs = 20000, extraArgs = [] } = {}) {
+async function startHeadlessChromeOrNull({ timeoutMs = 20000, extraArgs = [], pipe = false } = {}) {
+  if (pipe) return startPipeChrome({ timeoutMs, extraArgs });
   // An external endpoint cannot take launch flags, so a caller that needs
   // extraArgs (e.g. --host-resolver-rules) always gets a private Chrome.
   if (process.env.CROW_CDP_URL && extraArgs.length === 0) {
@@ -219,4 +221,84 @@ async function startHeadlessChromeOrNull({ timeoutMs = 20000, extraArgs = [] } =
     if (!r.ok) { await close(); return null; }
   } catch { await close(); return null; }
   return { cdp, pageHost: "127.0.0.1", bindHost: "127.0.0.1", close };
+}
+
+/**
+ * Pipe mode (the preview renderer's tests): a private Chrome driven over
+ * --remote-debugging-pipe, exactly as the preview container is, so there is no
+ * DevTools port at all. fd 3 carries commands to the browser and fd 4 its
+ * replies, NUL-delimited (servers/gateway/preview/cdp-pipe.js). Always a
+ * private browser: CROW_CDP_URL is ignored.
+ *
+ * @returns {Promise<null | { cdp: ReturnType<typeof createPipeCdp>, close: () => Promise<void> }>}
+ */
+async function startPipeChrome({ timeoutMs, extraArgs }) {
+  const bin = findChrome();
+  if (!bin) return null;
+  reapStaleChromes();
+  const profile = mkdtempSync(join(tmpdir(), "crow-test-chrome-"));
+  writeFileSync(join(profile, "owner.pid"), String(process.pid));
+  const child = spawn(bin, [
+    "--headless",
+    "--remote-debugging-pipe",
+    `--user-data-dir=${profile}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    // As in port mode: AppArmor blocks the sandbox's user namespaces here.
+    "--no-sandbox",
+    "--disable-gpu",
+    "--password-store=basic",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling",
+    ...extraArgs.filter((a) => typeof a === "string" && /^--[a-z0-9-]+(=.*)?$/.test(a)),
+    "about:blank",
+  ], { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"], detached: true });
+
+  let exited = false;
+  child.on("exit", () => { exited = true; });
+  child.on("error", () => { exited = true; });
+  // Keep draining stderr so a chatty browser can never block on a full pipe.
+  child.stderr.resume();
+  const cdp = createPipeCdp({ input: child.stdio[3], output: child.stdio[4] });
+
+  const killer = () => { try { process.kill(-child.pid, "SIGKILL"); } catch {} };
+  process.once("exit", killer);
+  const onSignal = (sig) => {
+    killer();
+    try { rmSync(profile, { recursive: true, force: true }); } catch {}
+    process.removeListener("SIGTERM", onSignal);
+    process.removeListener("SIGINT", onSignal);
+    process.kill(process.pid, sig);
+  };
+  process.once("SIGTERM", onSignal);
+  process.once("SIGINT", onSignal);
+
+  const close = async () => {
+    process.removeListener("exit", killer);
+    process.removeListener("SIGTERM", onSignal);
+    process.removeListener("SIGINT", onSignal);
+    cdp.close();
+    if (!exited) {
+      const gone = new Promise((r) => child.once("exit", r));
+      try { process.kill(-child.pid, "SIGTERM"); } catch {}
+      const t = setTimeout(killer, 3000);
+      await Promise.race([gone, new Promise((r) => setTimeout(r, 4000))]);
+      clearTimeout(t);
+    }
+    try { rmSync(profile, { recursive: true, force: true }); } catch {}
+  };
+
+  let timer;
+  const ready = await Promise.race([
+    cdp.send("Browser.getVersion").then(() => true, () => false),
+    cdp.closed.then(() => false),
+    new Promise((r) => { timer = setTimeout(() => r(false), timeoutMs); }),
+  ]);
+  clearTimeout(timer);
+  if (!ready) { await close(); return null; }
+  return { cdp, close };
 }
