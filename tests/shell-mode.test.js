@@ -113,6 +113,11 @@ test("modeCookie is readable by the client, 400 days, Lax", () => {
   assert.ok(!/HttpOnly/i.test(c));
 });
 
+test("the scope and try cookies are HttpOnly; the mode cookie stays readable", () => {
+  assert.match(mode.tryCookie("pending"), /; SameSite=Lax; HttpOnly/);
+  assert.ok(!/HttpOnly/i.test(mode.modeCookie("new")));
+});
+
 test("sessionCreatedAt reads the dashboard session row", async () => {
   await db.execute({
     sql: "INSERT INTO oauth_tokens (token, token_type, client_id, expires_at, created_at) VALUES (?, 'access', 'dashboard', datetime('now','+1 day'), '2026-10-20 10:00:00')",

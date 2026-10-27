@@ -828,7 +828,11 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     const db = createDbClient();
     try {
       // New-shell devices open on Chat; classic keeps the nest / first panel.
-      if ((await resolveRequestMode(req, res, db)).mode === "new") return res.redirect("/dashboard/perch");
+      if ((await resolveRequestMode(req, res, db)).mode === "new") {
+        // Keep the query (?project= ...) on the way to Chat.
+        const q = req.url.indexOf("?");
+        return res.redirect("/dashboard/perch" + (q >= 0 ? req.url.slice(q) : ""));
+      }
 
       const unifiedEnvOn = process.env.CROW_UNIFIED_DASHBOARD !== "0";
       const setting = await readSetting(db, "unified_dashboard_enabled");

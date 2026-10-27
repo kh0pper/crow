@@ -60,7 +60,7 @@ export function resolveDeviceMode({ cookieMode, sessionCreatedAt, shellSince } =
 
 /** crow_try_new: pending (card shows), dismissed ("Not now") or used (switched to new). Same lifetime as the mode cookie. */
 export function tryCookie(value) {
-  return `${cookieName(TRY_COOKIE)}=${value}; Path=/; Max-Age=${MODE_MAX_AGE}; SameSite=Lax${cookieSecureSuffix()}`;
+  return `${cookieName(TRY_COOKIE)}=${value}; Path=/; Max-Age=${MODE_MAX_AGE}; SameSite=Lax; HttpOnly${cookieSecureSuffix()}`;
 }
 
 export function modeCookie(mode) {

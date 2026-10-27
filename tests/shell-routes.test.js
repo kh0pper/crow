@@ -159,7 +159,7 @@ test("the scope route sets the cookie and refuses an open redirect", async () =>
   assert.equal(ok.location, "/dashboard/memory?x=1");
   assert.equal(cookieValue(ok.cookies, SCOPE), "garden");
   const raw = ok.cookies.find((s) => s.startsWith(SCOPE + "="));
-  assert.match(raw, /; Path=\/; Max-Age=34560000; SameSite=Lax/);
+  assert.match(raw, /; Path=\/; Max-Age=34560000; SameSite=Lax; HttpOnly/);
 
   for (const ret of ["https://evil.example/", "//evil.example/dashboard/", "/\\evil.example", "/dashboardx", "/blog", "", "javascript:alert(1)"]) {
     const r = await post("/dashboard/scope", { scope: "all", return: ret }, { jar: NEW });
@@ -254,9 +254,11 @@ test("classic mode calls renderLayout as before", async () => {
   assert.equal(cookieValue(r.cookies, MODE), undefined);
 });
 
-test("GET /dashboard in new mode opens Chat", async () => {
+test("GET /dashboard in new mode opens Chat and keeps the query", async () => {
   const r = await get("/dashboard", { ...NEW, [MODE]: "new" });
   assert.equal(r.location, "/dashboard/perch");
+  const q = await get("/dashboard?project=garden", { ...NEW, [MODE]: "new" });
+  assert.equal(q.location, "/dashboard/perch?project=garden");
   const fresh = await get("/dashboard", NEW);
   assert.equal(fresh.location, "/dashboard/perch");
   assert.equal(cookieValue(fresh.cookies, MODE), "new");
@@ -280,6 +282,26 @@ test("a broken DB falls back to classic and writes no mode cookie", async () => 
   assert.deepEqual(page, { variant: "classic" });
   assert.deepEqual(req2.crowScope, { all: true });
   assert.equal(res2.set.length, 0, "no mode or scope cookie");
+});
+
+test("a POST does no shell work: no scope, no project list, no scope cookie", async () => {
+  const { resolveShellPage } = await import("../servers/gateway/dashboard/shell/request.js");
+  const boom = { async execute() { throw new Error("must not be called on a POST with a mode cookie"); } };
+  const res = { set: [], headersSent: false, append(k, v) { this.set.push([k, v]); } };
+  const req = { method: "POST", headers: { cookie: `${MODE}=new` }, query: { project: "garden" }, dashboardSession: "new-sess" };
+  const page = await resolveShellPage(req, res, boom, "memory");
+  assert.equal(req.crowMode.mode, "new", "req.crowMode is still set");
+  assert.equal(page.variant, "shell");
+  assert.deepEqual(page.shell.projects, []);
+  assert.deepEqual(page.shell.scope, { all: true });
+  assert.deepEqual(req.crowScope, { all: true }, "?project= is not applied on a POST");
+  assert.equal(res.set.length, 0, "no scope cookie");
+  // A GET of the same request does the work (the DB is touched for the scope).
+  const getReq = { method: "GET", headers: { cookie: `${MODE}=new` }, query: { project: "garden" }, dashboardSession: "new-sess" };
+  const getRes = { set: [], headersSent: false, append(k, v) { this.set.push([k, v]); } };
+  const got = await resolveShellPage(getReq, getRes, { async execute() { return { rows: [] }; } }, "memory");
+  assert.equal(got.variant, "shell");
+  assert.ok(getRes.set.some(([, v]) => v.startsWith(SCOPE + "=")), "a GET still writes the scope cookie");
 });
 
 test("saving the language keeps the mode cookie beside crow_lang", async () => {
@@ -309,7 +331,7 @@ test("an upgraded device sees the card once", async () => {
   assert.equal(cookieValue(dismiss.cookies, TRY), "dismissed");
   const raw = dismiss.cookies.find((s) => s.startsWith(TRY + "="));
   assert.match(raw, /Max-Age=34560000/);
-  assert.match(raw, /SameSite=Lax/);
+  assert.match(raw, /SameSite=Lax; HttpOnly/);
   const open = await post("/dashboard/mode/try-dismiss", { return: "https://evil.example/x" }, { jar: OLD });
   assert.equal(open.location, "/dashboard");
 
@@ -342,6 +364,13 @@ test("Settings offers the switch in classic", async () => {
   const r = await get("/dashboard/settings?section=crow-mode", { ...OLD, [MODE]: "classic" });
   assert.equal(r.status, 200);
   assert.match(r.body, /action="\/dashboard\/mode"[^>]*>[\s\S]*?name="mode" value="new"[\s\S]*?Use the new Crow/);
+});
+
+test("Settings offers the way back in the new shell", async () => {
+  const r = await get("/dashboard/settings?section=crow-mode", { ...NEW, [MODE]: "new" });
+  assert.equal(r.status, 200);
+  assert.match(r.body, /action="\/dashboard\/mode"[^>]*>[\s\S]*?name="mode" value="classic"[\s\S]*?Use classic Crow/);
+  assert.doesNotMatch(r.body, /Use the new Crow/);
 });
 
 test("the CSRF fill script finds crow_csrf when it is not the first cookie", async () => {

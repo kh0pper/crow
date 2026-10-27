@@ -3,8 +3,8 @@
  *
  * A classic device's way into the new three-tab shell: a "Use the new Crow"
  * form that POSTs /dashboard/mode (mode=new). The mode is per device (a
- * cookie), so there is no server state to preview. Going back is in the new
- * shell's avatar sheet.
+ * cookie), so there is no server state to preview. On a new-shell device the same form
+ * offers the way back (mode=classic); the avatar sheet has it too.
  */
 
 import { t } from "../../shared/i18n.js";
@@ -19,9 +19,13 @@ export default {
 
   async getPreview() { return ""; },
 
-  async render({ lang }) {
+  async render({ req, lang }) {
     const fill = "var f=this.querySelector('input[name=_csrf]');var m=document.cookie.match(/(?:^|;\\s*)crow_csrf=([^;]*)/);if(f&&m)f.value=decodeURIComponent(m[1]);";
-    return `<p style="color:var(--crow-text-secondary);font-size:0.9rem;margin:0 0 1rem">${escapeHtml(t("shell.tryBody", lang))}</p>
-    <form method="post" action="/dashboard/mode" onsubmit="${escapeHtml(fill)}"><input type="hidden" name="_csrf" value=""><input type="hidden" name="mode" value="new"><button type="submit" class="btn btn-primary" style="min-height:44px">${escapeHtml(t("shell.useNew", lang))}</button></form>`;
+    // On a device already in the new shell the switch goes the other way.
+    const isNew = req && req.crowMode && req.crowMode.mode === "new";
+    const target = isNew ? "classic" : "new";
+    const label = isNew ? "shell.useClassic" : "shell.useNew";
+    const intro = isNew ? "" : `<p style="color:var(--crow-text-secondary);font-size:0.9rem;margin:0 0 1rem">${escapeHtml(t("shell.tryBody", lang))}</p>\n    `;
+    return `${intro}<form method="post" action="/dashboard/mode" onsubmit="${escapeHtml(fill)}"><input type="hidden" name="_csrf" value=""><input type="hidden" name="mode" value="${target}"><button type="submit" class="btn ${isNew ? "btn-secondary" : "btn-primary"}" style="min-height:44px">${escapeHtml(t(label, lang))}</button></form>`;
   },
 };
