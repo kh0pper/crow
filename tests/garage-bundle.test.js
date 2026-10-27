@@ -238,3 +238,37 @@ test("a manifest-bump refresh never re-renders or re-copies garage.toml or docke
   assert.equal(readFileSync(join(dest, "garage.toml"), "utf8"), "# owner's two-dir layout\n");
   assert.equal(readFileSync(join(dest, "docker-compose.yml"), "utf8"), "# installed compose\n");
 });
+
+// ── installing Garage never repoints storage that already works ──
+
+async function installWith({ gwEnv = "# gateway env (test)\n", sharedRow = false, minioInstalled = false }) {
+  writeFileSync(GW_ENV, gwEnv);
+  writeFileSync(join(CROW_HOME, "installed.json"), JSON.stringify(minioInstalled ? [{ id: "minio" }] : []));
+  const d = createDbClient();
+  try {
+    await d.execute({ sql: "DELETE FROM dashboard_settings WHERE key LIKE 'storage.shared.%'", args: [] });
+    if (sharedRow) await d.execute({ sql: "INSERT INTO dashboard_settings (key, value) VALUES ('storage.shared.endpoint', '100.64.20.5:9000')", args: [] });
+  } finally { d.close(); }
+  const { job } = await install(formDefaults(manifest()));
+  return { gw: parseEnvText(readFileSync(GW_ENV, "utf8")), log: job.log.join("\n") };
+}
+
+test("no storage set up yet: installing Garage points Crow's storage at it (S3_* in the gateway .env)", async () => {
+  const { gw } = await installWith({});
+  assert.equal(gw.S3_ENDPOINT, "127.0.0.1:3900");
+  assert.equal(gw.S3_ACCESS_KEY, FIRST.GARAGE_DEFAULT_ACCESS_KEY);
+  assert.ok(gw.S3_SECRET_KEY);
+});
+
+for (const [label, state] of [
+  ["MinIO configured through the gateway env only", { gwEnv: "MINIO_ENDPOINT=localhost\nMINIO_PORT=9000\nMINIO_ROOT_PASSWORD=p\n" }],
+  ["Shared Storage rows in the DB", { sharedRow: true }],
+  ["the MinIO extension installed", { minioInstalled: true }],
+]) {
+  test(`storage already set up (${label}): installing Garage leaves it pointing where it is`, async () => {
+    const { gw, log } = await installWith(state);
+    for (const k of ["S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY"]) assert.equal(gw[k], undefined, `${k} not written`);
+    if (state.gwEnv) assert.equal(gw.MINIO_ENDPOINT, "localhost", "the MinIO env is untouched");
+    assert.match(log, /left as it is/);
+  });
+}
