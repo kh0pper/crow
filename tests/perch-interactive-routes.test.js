@@ -2226,3 +2226,10 @@ test("GET /interactive/:sid/commands relays the engine's registry and carries it
   assert.equal(r.status, 404);
   assert.equal(r.body.error, "no_such_session");
 });
+
+test("POST /bots/:id/interactive refuses an unknown project_id with 400 bad_project, before spawn", async () => {
+  const { status, body } = await postJson("/bots/chatty/interactive", { project_id: 987654 });
+  assert.equal(status, 400);
+  assert.equal(body.error, "bad_project");
+  assert.equal(engineCalls.spawn.length, 0);
+});

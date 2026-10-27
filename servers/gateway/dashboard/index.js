@@ -86,6 +86,7 @@ import { handleFixItAction } from "../fix-it/index.js";
 import bundlesRouterFactory from "../routes/bundles.js";
 import { keychainApiRouter } from "../keychain/api.js";
 import perchApiRouter from "../routes/perch.js";
+import { shellApiRouter } from "../routes/shell-api.js";
 import perchInteractiveApiRouter from "../routes/perch-interactive-api.js";
 import perchDictationRouter from "../routes/perch-dictation.js";
 
@@ -660,6 +661,10 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // The router still installs dashboardAuth on its own prefix (bot-board-api
   // idiom) so it is closed wherever it is mounted.
   router.use(perchApiRouter(dashboardAuth));
+
+  // Shell: move an item (thread, artifact, Workspace file) between projects.
+  // Same slot and rails as the Perch API above.
+  router.use(shellApiRouter(dashboardAuth));
 
   // Perch Hub P2 (C-15): the interactive ("spawn as bot") API. Same mount
   // slot, same reasons — see perch.js's header above and this file's own
