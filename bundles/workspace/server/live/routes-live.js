@@ -113,12 +113,9 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
     misses.set(key, sig, NEGATIVE_TTL_MS);
     return null;
   }
-  /** Rightmost X-Forwarded-For entry when the peer is the loopback Serve proxy, else the TCP peer (fix2 X1). */
-  const clientIp = (req) => {
-    const peer = String(req.socket?.remoteAddress || "");
-    const hops = String(req.headers["x-forwarded-for"] || "").split(",").map((x) => x.trim()).filter(Boolean);
-    return /^(127\.|::1$|::ffff:127\.)/.test(peer) && hops.length ? hops.at(-1) : peer || "unknown";
-  };
+  /** The gateway's classified client (req.crowPeer, servers/shared/peer-class.js: the tailnet client
+   *  only when tailscaled's socket said so), else the TCP peer (fix2 X1). Never a raw X-Forwarded-For. */
+  const clientIp = (req) => req.crowPeer?.client || String(req.socket?.remoteAddress || "") || "unknown";
   const deny = (res) => res.status(401).json({ error: "unauthorized" }); // N5: one answer for every auth failure
 
   /** Funnel + token signature, from the header only; failures feed the pre-auth buckets. */

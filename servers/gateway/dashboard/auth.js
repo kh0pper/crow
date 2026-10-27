@@ -11,7 +11,7 @@
 import { scrypt, randomBytes, timingSafeEqual, createHash } from "node:crypto";
 import { createDbClient, auditLog } from "../../db.js";
 import { is2faEnabled, verifyDeviceTrust, createPending2faToken } from "./totp.js";
-import { forwardedAddrs } from "../models/door-resolve.js";
+import { forwardedAddrs, classifyPeer, isOverlayAddr, normalizeAddr } from "../../shared/peer-class.js";
 
 function hashToken(t) { return createHash('sha256').update(t).digest('hex'); }
 
@@ -390,11 +390,14 @@ export async function destroySession(token) {
 }
 
 /**
- * True if ip is RFC1918 private, Tailscale CGNAT (100.64.0.0/10), or in
- * CROW_ALLOWED_IPS. Does NOT include bare loopback — callers decide whether
- * to trust localhost based on the request's Tailscale header context.
+ * True if ip is RFC1918 private, a tailnet address (100.64.0.0/10 or
+ * fd7a:115c:a1e0::/48, v4-mapped spellings included), or in CROW_ALLOWED_IPS.
+ * Does NOT include bare loopback; callers decide about loopback from the
+ * peer class (servers/shared/peer-class.js). LAN IPv6 (fc00::/7) stays out.
  */
-export function isPrivateOrAllowlistedIp(addr) {
+export function isPrivateOrAllowlistedIp(raw) {
+  const addr = normalizeAddr(raw);
+  if (isOverlayAddr(addr)) return true;
   if (/^10\./.test(addr)) return true;
   if (/^172\.(1[6-9]|2\d|3[01])\./.test(addr)) return true;
   if (/^192\.168\./.test(addr)) return true;
@@ -423,37 +426,38 @@ export function isPrivateOrAllowlistedIp(addr) {
 
 /**
  * Decide whether a request is allowed to reach private routes (/dashboard,
- * MCP endpoints, etc.).
+ * MCP endpoints, etc.). Works on Express requests and raw upgrade requests.
  *
  * INVARIANT: private routes MUST NEVER be reachable via Tailscale Funnel.
- * req.ip is 127.0.0.1 for BOTH Funnel and Serve (tailscaled proxies via
- * localhost either way), so we distinguish via headers that tailscaled
- * strips-then-re-sets based on authenticated origin. Verified against
- * tailscale/ipn/ipnlocal/serve.go:1046-1072 — Header.Del is called
- * unconditionally on Tailscale-User-Login, Tailscale-Funnel-Request, etc.
- * before re-setting, so public clients cannot forge either header.
+ * The decision is made on the TCP peer, classified once by classifyPeer()
+ * (servers/shared/peer-class.js); a header is never an allow reason by
+ * itself:
+ *   - the Funnel header always denies (tailscaled Del-then-Sets it at
+ *     serve.go:1046-1061, so a Funnel client cannot remove it);
+ *   - Serve traffic counts as the tailnet client tailscaled named only when
+ *     the loopback socket belongs to tailscaled's uid and has Serve's shape;
+ *   - a declared proxy (CROW_TRUSTED_PROXIES) or a direct peer passes only
+ *     when its own address and every address any forwarding header names are
+ *     private, tailnet or CROW_ALLOWED_IPS (a header can only take trust away);
+ *   - bare loopback, and loopback carrying headers it cannot vouch for, deny.
  */
 export function isAllowedNetwork(req) {
   if (process.env.CROW_DASHBOARD_PUBLIC === "true") return true;
-
-  // Hard reject: tailscaled marks public Funnel traffic with this. Client
-  // forgeries are Del'd upstream before the Set at serve.go:1059.
-  if (req.headers["tailscale-funnel-request"]) return false;
-
-  // Serve (tailnet) traffic carries authenticated identity headers. Clients
-  // cannot forge them (same Del-then-Set upstream).
-  if (req.headers["tailscale-user-login"]) return true;
-
-  const addr = (req.ip || req.connection?.remoteAddress || "").replace(/^::ffff:/, "");
-
-  // No Tailscale headers: direct peer connection. Reject bare loopback —
-  // any local process (including a misconfigured reverse proxy) would land
-  // here, and we can't distinguish malicious from trusted. Operators who
-  // front Crow with Caddy/nginx on the same host must use CROW_ALLOWED_IPS
-  // or CROW_DASHBOARD_PUBLIC=true (with their own ACLs at the proxy).
-  if (addr === "127.0.0.1" || addr === "::1" || addr === "localhost") return false;
-
-  return isPrivateOrAllowlistedIp(addr);
+  const headers = req.headers || {};
+  if (headers["tailscale-funnel-request"]) return false;
+  const p = classifyPeer(req);
+  if (p.hops.some((a) => a === null)) return false;
+  const trustedClient = (a) => !isLoopbackAddr(a) && isPrivateOrAllowlistedIp(a);
+  switch (p.via) {
+    case "serve":
+      return isOverlayAddr(p.client) && p.hops.every((a) => isOverlayAddr(a));
+    case "proxy":
+      return p.hops.length ? p.hops.every(trustedClient) : trustedClient(p.client);
+    case "direct":
+      return trustedClient(p.socket) && p.hops.every(trustedClient);
+    default: // local, unverified, funnel
+      return false;
+  }
 }
 
 function headerValues(h) {
@@ -523,6 +527,9 @@ export function isAllowedEnrollNetwork(req) {
   if (hops.some((a) => a === null)) return false;
   if (isLoopbackAddr(sock)) {
     if (hops.length === 0) return false;
+    // Only Serve (verified socket owner) or a declared proxy may speak for a client.
+    const via = classifyPeer(req).via;
+    if (via !== "serve" && via !== "proxy") return false;
     // A front door chained INTO Serve (public proxy → this host's Serve over
     // the tailnet) arrives with Serve's replaced X-Forwarded-For naming only
     // the front door's tailnet IP — but the Host the client asked for rides

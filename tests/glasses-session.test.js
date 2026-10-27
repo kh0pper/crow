@@ -16,6 +16,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
 import express from "express";
 import { WebSocket } from "ws";
 import { STRINGS } from "../bundles/meta-glasses/server/strings.js";
@@ -32,7 +33,9 @@ mkdirSync(join(HOME, "data"), { recursive: true });
 process.env.CROW_HOME = HOME;
 process.env.CROW_DATA_DIR = join(HOME, "data");
 delete process.env.CROW_DB_PATH;
-const TAILNET = { "tailscale-user-login": "tester@example.invalid" };
+// What Tailscale Serve adds for a tailnet user; this process's client stands in for tailscaled.
+const TAILNET = serveHeaders("tester@example.invalid");
+actAsServe();
 const L = STRINGS.en;
 
 let srv, base, db, store, svc;
@@ -613,4 +616,33 @@ test("look turn denies every voice-bot tool", async () => {
   assert.deepEqual(t.seenBy.turn[0].extraTools.map((x) => x.definition.name), [LOOK_TOOL]);
   assert.deepEqual(await voiceBotToolNames(async () => null, getChatTools)({}, { bound_bot_id: "helper" }), [], "no voice bot: nothing to deny beyond the fixed list");
   assert.deepEqual(await voiceBotToolNames(async () => { throw new Error("x"); }, getChatTools)({}, {}), []);
+});
+
+// P0 network check: the glasses session upgrade runs the real gate on the raw IncomingMessage (no Express).
+test("upgrade gate (/api/meta-glasses/session): Serve from tailscaled's uid reaches the token check; another uid, a forged login from a public socket and Funnel are 403", async () => {
+  const { setProcNetReaderForTests, procV4Hex } = await import("../servers/shared/peer-uid.js");
+  const H = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
+  const owner = (uid) => setProcNetReaderForTests((name) => name === "tcp" ? `${H}\n   0: ${procV4Hex("127.0.0.1")}:A028 ${procV4Hex("127.0.0.1")}:0BB9 01 00000000:00000000 00:00000000 00000000 ${uid} 0 1\n` : `${H}\n`);
+  const sock = (over = {}) => ({ remoteAddress: "127.0.0.1", remotePort: 41000, localAddress: "127.0.0.1", localPort: 3001, written: "", write(x) { this.written += x; }, destroy() { this.destroyed = true; }, ...over });
+  const up = async (headers, socket = sock()) => {
+    srv.emit("upgrade", { url: "/api/meta-glasses/session", headers, socket }, socket, Buffer.alloc(0));
+    for (let i = 0; i < 50 && !socket.destroyed; i++) await new Promise((r) => setTimeout(r, 5));
+    return (socket.written.match(/^HTTP\/1\.1 (\d+)/) || [])[1];
+  };
+  const prevUids = process.env.CROW_SERVE_PEER_UIDS;
+  delete process.env.CROW_SERVE_PEER_UIDS;
+  const w = console.warn; console.warn = () => {};
+  try {
+    owner(0);
+    assert.equal(await up(serveHeaders("a@example.invalid")), "400", "past the network gate: refused only for the missing device id");
+    assert.equal(await up(serveHeaders(null, "fd7a:115c:a1e0::1")), "400", "tagged node over IPv6 Serve");
+    owner(1000);
+    assert.equal(await up(serveHeaders("a@example.invalid")), "403", "Serve shape from the gateway's uid (a bot)");
+    assert.equal(await up({ "tailscale-user-login": "a@example.invalid" }, sock({ remoteAddress: "203.0.113.7" })), "403");
+    assert.equal(await up({ "tailscale-funnel-request": "?1", "x-forwarded-for": "8.8.8.8" }), "403");
+  } finally {
+    console.warn = w;
+    setProcNetReaderForTests(null);
+    if (prevUids === undefined) delete process.env.CROW_SERVE_PEER_UIDS; else process.env.CROW_SERVE_PEER_UIDS = prevUids;
+  }
 });

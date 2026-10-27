@@ -14,7 +14,18 @@
  * tier-picking (pickTier) so no fake timers are needed.
  */
 
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
+
+/**
+ * Dashboard login limiter key: the client address plus the tailnet login, but
+ * the login only when tailscaled asserted it (req.crowPeer from
+ * resolveClientMiddleware, servers/shared/peer-class.js). A client-supplied
+ * Tailscale-User-Login never changes the key, so rotating it buys no fresh
+ * buckets.
+ */
+export function dashboardLoginKey(req) {
+  return `${ipKeyGenerator(req.ip || "")}:${req.crowPeer?.tailnetLogin || ""}`;
+}
 
 /**
  * Pick the first tier whose match(req) is truthy; a tier without `match`

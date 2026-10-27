@@ -25,6 +25,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import Database from "better-sqlite3";
+import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
+actAsServe(); // this process's HTTP client stands in for tailscaled (the Serve socket owner)
 
 const dir = mkdtempSync(join(tmpdir(), "perch-routes-"));
 process.env.CROW_DATA_DIR = dir;
@@ -815,7 +817,7 @@ test("an unauthenticated request to a REAL perch route never reaches the handler
 
     // On-network but session-less → bounced to the login page.
     const noSession = await fetch(b + "/bots", {
-      headers: { "tailscale-user-login": "someone@example.com" },
+      headers: { ...serveHeaders("someone@example.com") },
       redirect: "manual",
     });
     assert.equal(noSession.status, 303);
@@ -825,7 +827,7 @@ test("an unauthenticated request to a REAL perch route never reaches the handler
     // tools.
     const narrow = await fetch(b + "/bots/chatty/sessions/unauth-thread/narrow", {
       method: "POST",
-      headers: { "content-type": "application/json", "tailscale-user-login": "someone@example.com" },
+      headers: { "content-type": "application/json", ...serveHeaders("someone@example.com") },
       body: JSON.stringify({ disabled_tools: ["bash"] }),
       redirect: "manual",
     });

@@ -35,6 +35,7 @@ import {
   listOwnBackups, readOwner, isForeignOwner, ownerPath, newestBackupOwnership,
 } from "../../shared/backup-naming.js";
 import { coHostedDataDirWarning } from "../../shared/crow-home.js";
+import { classifyPeer } from "../../shared/peer-class.js";
 
 // Kept for existing callers/tests; the logic lives in shared/backup-naming.js.
 export function getInstanceLabel() {
@@ -126,15 +127,13 @@ function foreignError(dest, owner) {
   return err;
 }
 
-function normalizeIp(req) {
-  const raw = req.ip || req.socket?.remoteAddress || "";
-  return raw.replace(/^::ffff:/, "");
-}
-
-function requireLocalhost(req, res, next) {
-  const addr = normalizeIp(req);
-  if (addr === "127.0.0.1" || addr === "::1") return next();
-  return res.status(403).json({ error: "backup endpoint is localhost-only", got: addr });
+/** Localhost only: a bare loopback peer with no forwarding or tailscale-*
+ * headers (peer class "local"). Serve traffic and a loopback caller carrying
+ * forwarding headers are refused. Exported for tests. */
+export function requireLocalhost(req, res, next) {
+  const peer = req.crowPeer || classifyPeer(req);
+  if (peer.via === "local") return next();
+  return res.status(403).json({ error: "backup endpoint is localhost-only", got: peer.client });
 }
 
 function requireToken(req, res, next) {

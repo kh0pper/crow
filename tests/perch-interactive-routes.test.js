@@ -24,6 +24,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import http from "node:http";
 import Database from "better-sqlite3";
+import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
+actAsServe(); // this process's HTTP client stands in for tailscaled (the Serve socket owner)
 
 const dir = mkdtempSync(join(tmpdir(), "perch-interactive-routes-"));
 process.env.CROW_DATA_DIR = dir;
@@ -1782,7 +1784,7 @@ test("an unauthenticated request to a REAL perch-interactive route never reaches
     // On-network but session-less → bounced to the login page, never through.
     const noSession = await fetch(b + "/bots/chatty/interactive", {
       method: "POST",
-      headers: { "tailscale-user-login": "someone@example.com" },
+      headers: { ...serveHeaders("someone@example.com") },
       redirect: "manual",
     });
     assert.equal(noSession.status, 303);
@@ -1791,7 +1793,7 @@ test("an unauthenticated request to a REAL perch-interactive route never reaches
     // Same for the SSE route — a session-less caller must not even reach
     // openAuthedStream, let alone subscribe to a real session.
     const events = await fetch(b + "/interactive/sess-1/events", {
-      headers: { "tailscale-user-login": "someone@example.com" },
+      headers: { ...serveHeaders("someone@example.com") },
       redirect: "manual",
     });
     assert.equal(events.status, 303);

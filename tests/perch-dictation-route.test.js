@@ -21,6 +21,8 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import http from "node:http";
 import Database from "better-sqlite3";
+import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
+actAsServe(); // this process's HTTP client stands in for tailscaled (the Serve socket owner)
 
 const dir = mkdtempSync(join(tmpdir(), "perch-dictation-"));
 process.env.CROW_DATA_DIR = dir;
@@ -764,7 +766,7 @@ test("rails: no session → refused; session without X-Crow-Csrf → 403; with i
   const { mintSsoSession } = await import("../servers/gateway/dashboard/auth.js");
   const { token } = await mintSsoSession("test");
   const { srv, base } = await realRailsApp();
-  const net = { "tailscale-user-login": "someone@example.com" };
+  const net = { ...serveHeaders("someone@example.com") };
   try {
     const anonGet = await fetch(base, { headers: net, redirect: "manual" });
     assert.equal(anonGet.status, 303, "no session → login");

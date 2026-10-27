@@ -13,25 +13,16 @@ import { appImport } from "./app-root.js";
 
 const { verifySession } = await appImport("servers/gateway/dashboard/auth.js");
 const { createProjectSpace } = await appImport("servers/shared/project-spaces.js");
+const { classifyPeer } = await appImport("servers/shared/peer-class.js");
 
 /**
- * Is the request coming from loopback (same-host)?
- * Handles IPv4, IPv6, and IPv4-mapped-IPv6.
+ * Is the request coming from this machine itself (same-host kiosk)?
+ * Peer class "local": a loopback socket carrying no forwarding or tailscale-*
+ * headers. Traffic proxied in through Tailscale Serve or any other same-box
+ * proxy also arrives on loopback, but it is not the local kiosk.
  */
 export function isLoopback(req) {
-  // req.ip respects the `trust proxy` setting. For a same-host request it's
-  // 127.0.0.1 or ::1. Behind Caddy/reverse-proxy, x-forwarded-for should be
-  // set correctly. Defense-in-depth: also check raw socket.
-  const candidates = [
-    req.ip,
-    req.socket?.remoteAddress,
-    req.connection?.remoteAddress,
-  ].filter(Boolean);
-  for (const addr of candidates) {
-    const a = String(addr).replace(/^::ffff:/, "");
-    if (a === "127.0.0.1" || a === "::1" || a === "localhost") return true;
-  }
-  return false;
+  return (req.crowPeer || classifyPeer(req)).via === "local";
 }
 
 /**

@@ -14,6 +14,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
 import express from "express";
 import { WebSocket } from "ws";
 
@@ -27,7 +28,9 @@ process.env.CROW_HOME = HOME;
 process.env.CROW_DATA_DIR = join(HOME, "data");
 delete process.env.CROW_DB_PATH;
 const PHOTO_DIR = join(HOME, "data", "glasses-photos");
-const TAILNET = { "tailscale-user-login": "tester@example.invalid" };
+// What Tailscale Serve adds for a tailnet user; this process's client stands in for tailscaled.
+const TAILNET = serveHeaders("tester@example.invalid");
+actAsServe();
 const SESSION = { cookie: "crow_session=test-session; crow_csrf=csrf-abc" };
 const ID = "11111111-2222-3333-4444-555555555555";
 
@@ -318,5 +321,5 @@ test("device-token routes: twenty failed tokens from one caller for one device, 
   s.ws.close();
   assert.equal((await openSession("glasses-c", { headers: { authorization: "Bearer nope" } })).status, 429, "bad tokens for that device from that caller stay held off");
   assert.equal((await call(`/api/meta-glasses/photo?device_id=glasses-b`, { method: "POST", headers: { authorization: "Bearer nope" }, body: Buffer.from("x") })).status, 401, "another device id is counted separately (behind Serve every caller is 127.0.0.1)");
-  assert.equal((await call(`/api/meta-glasses/photo?device_id=glasses-c`, { method: "POST", headers: { authorization: "Bearer nope", "tailscale-user-login": "other@example.invalid" }, body: Buffer.from("x") })).status, 401, "another tailnet caller is counted separately");
+  assert.equal((await call(`/api/meta-glasses/photo?device_id=glasses-c`, { method: "POST", headers: { ...serveHeaders("other@example.invalid"), authorization: "Bearer nope" }, body: Buffer.from("x") })).status, 401, "another tailnet caller is counted separately");
 });

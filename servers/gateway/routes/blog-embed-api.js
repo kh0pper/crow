@@ -53,8 +53,10 @@ const embedLimiter = tieredRateLimit({
   windowMs: 60 * 1000,
   tiers: [
     {
-      match: (req) => !!req.headers["tailscale-user-login"],
-      key: (req) => `tsuser:${String(req.headers["tailscale-user-login"]).toLowerCase()}`,
+      // Only a login tailscaled asserted (servers/shared/peer-class.js); a
+      // client-supplied header is not a tier and not a key.
+      match: (req) => !!req.crowPeer?.tailnetLogin,
+      key: (req) => `tsuser:${String(req.crowPeer.tailnetLogin).toLowerCase()}`,
       max: 600,
     },
     {
