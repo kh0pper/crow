@@ -89,3 +89,11 @@ export function searchNames(cfg, { scopeSegs = [], like, eq, foldersOnly = false
   }
   return search(cfg, `<d:eq><d:prop><d:displayname/></d:prop><d:literal>${xmlEscape(String(eq).normalize("NFC"))}</d:literal></d:eq>`, scopeSegs, limit, foldersOnly);
 }
+
+/** Newest-first files of the given MIME types anywhere under the bot's files root (the search orders by last modified). */
+export async function listRecent(cfg, { limit = 40, mimes = [] } = {}) {
+  if (!mimes.length) return [];
+  const eq = (m) => `<d:eq><d:prop><d:getcontenttype/></d:prop><d:literal>${xmlEscape(String(m))}</d:literal></d:eq>`;
+  const where = mimes.length === 1 ? eq(mimes[0]) : `<d:or>${mimes.map(eq).join("")}</d:or>`;
+  return search(cfg, where, [], limit);
+}
