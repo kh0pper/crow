@@ -47,6 +47,7 @@ before(async () => {
   const { initArtifactsTables } = await import("../bundles/artifacts/server/init-tables.js");
   await initArtifactsTables(db);
   await db.execute("INSERT INTO artifacts (id,title,type,current_version) VALUES ('art_1abcdef','One','page',3)");
+  await db.execute("INSERT INTO artifacts (id,title,type,current_version) VALUES ('art_norow01','NoRow','page',2)");
   await db.execute("INSERT INTO artifacts (id,title,type,current_version,deleted_at) VALUES ('art_gone123','Gone','page',1,datetime('now'))");
   db.close();
 
@@ -153,7 +154,10 @@ test("the panel follows the shell scope; an archived/missing project falls back 
   assert.deepEqual(seen.at(-1).scope, { all: true });
 });
 
-test("opening an artifact marks it seen", async () => {
+test("opening an artifact that has a row marks it seen", async () => {
+  const c = new Database(join(dir, "crow.db"));
+  c.prepare("INSERT INTO shell_items (item_kind, item_ref, set_by, seen_version) VALUES ('artifact','art_1abcdef','origin',1)").run();
+  c.close();
   const r = await get("/dashboard/make/open/artifact/art_1abcdef");
   assert.equal(r.status, 303);
   assert.equal(r.location, "/dashboard/artifacts/view/art_1abcdef?from=make");
@@ -161,6 +165,28 @@ test("opening an artifact marks it seen", async () => {
   const { getItem } = await import("../servers/shared/shell-items.js");
   const db = createDbClient();
   try { assert.equal((await getItem(db, "artifact", "art_1abcdef")).seenVersion, 3); } finally { db.close(); }
+});
+
+test("opening an artifact with no shell_items row creates none and still redirects", async () => {
+  const { createDbClient } = await import("../servers/db.js");
+  const { getItem } = await import("../servers/shared/shell-items.js");
+  const r = await get("/dashboard/make/open/artifact/art_norow01");
+  assert.equal(r.status, 303);
+  assert.equal(r.location, "/dashboard/artifacts/view/art_norow01?from=make");
+  const db = createDbClient();
+  try { assert.equal(await getItem(db, "artifact", "art_norow01"), null, "no row: the next listing files it under its origin"); } finally { db.close(); }
+});
+
+test("a missing shell_items table does not break opening", async () => {
+  make._setMakeSeamsForTest({ workspaceUrl: async () => "https://ws.example.test/f/9" });
+  const c = new Database(join(dir, "crow.db"));
+  c.exec("ALTER TABLE shell_items RENAME TO shell_items_hold");
+  try {
+    for (const path of ["/dashboard/make/open/artifact/art_1abcdef", "/dashboard/make/open/workspace_file/9"]) {
+      const r = await get(path);
+      assert.equal(r.status, 303, path);
+    }
+  } finally { c.exec("ALTER TABLE shell_items_hold RENAME TO shell_items"); c.close(); }
 });
 
 test("opening a Workspace file marks it seen and redirects to the bundle's url", async () => {
@@ -192,7 +218,8 @@ test("an unknown ref is 404, and a ref with a slash or a URL is refused", async 
 
 test("the open route sits behind dashboardAuth", async () => {
   const r = await get("/dashboard/make/open/artifact/art_1abcdef", {});
-  assert.notEqual(r.status, 303);
+  assert.equal(r.status, 302);
+  assert.equal(r.location, "/dashboard/login");
   assert.doesNotMatch(String(r.location), /artifacts\/view/);
 });
 

@@ -17,7 +17,7 @@ import { pathToFileURL } from "node:url";
 import { t } from "../shared/i18n.js";
 import { listMakeItems } from "../../make/sources.js";
 import { itemPreview, previewDeps, previewLineKey, previewsEnabled } from "../../make/previews.js";
-import { markSeen, activeProjects } from "../../../shared/shell-items.js";
+import { markSeen, getItem, activeProjects } from "../../../shared/shell-items.js";
 import { renderMakePage } from "./make/html.js";
 import { MAKE_CSS } from "./make/css.js";
 import { makeClientJs } from "./make/client.js";
@@ -45,6 +45,20 @@ async function workspaceUrl(fileId) {
   return /^https?:\/\//i.test(String(url)) ? url : null;
 }
 
+/**
+ * Mark an opened item seen. An artifact with no shell_items row is skipped (markSeen would file it
+ * as Unassigned before the listing files it under its origin); a missing table never blocks the open.
+ */
+async function seen(db, kind, ref, version, onlyIfRow) {
+  try {
+    if (onlyIfRow && !(await getItem(db, kind, ref))) return;
+    await markSeen(db, kind, ref, version);
+  } catch (err) {
+    if (err?.code === "not_migrated") return;
+    throw err;
+  }
+}
+
 /** GET /dashboard/make/open/:kind/:ref. Strict on :ref; 404 for anything unknown. */
 export async function openMakeItem(req, res, db) {
   const { kind, ref } = req.params;
@@ -54,7 +68,7 @@ export async function openMakeItem(req, res, db) {
       if (typeof ref !== "string" || !ARTIFACT_ID_RE.test(ref)) return notFound();
       const { rows } = await db.execute({ sql: "SELECT id, current_version FROM artifacts WHERE id = ? AND deleted_at IS NULL", args: [ref] });
       if (!rows[0]) return notFound();
-      await markSeen(db, "artifact", rows[0].id, Number(rows[0].current_version));
+      await seen(db, "artifact", rows[0].id, Number(rows[0].current_version), true);
       return res.redirect(303, `/dashboard/artifacts/view/${rows[0].id}?from=make`);
     }
     if (kind === "workspace_file") {
@@ -62,7 +76,7 @@ export async function openMakeItem(req, res, db) {
       let url = null;
       try { url = await workspaceUrl(ref); } catch (err) { console.warn(`[make] Workspace open failed: ${err?.message || err}`); }
       if (!url) return notFound();
-      await markSeen(db, "workspace_file", ref, null);
+      await seen(db, "workspace_file", ref, null, false);
       return res.redirect(303, url);
     }
     return notFound();
