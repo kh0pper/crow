@@ -628,6 +628,7 @@ export function drawerMarkup(lang, def = DEFAULT_BOARD_DEF) {
       <button type="button" class="bb-btn bb-sec" id="bb-d-archive" style="display:none">${t("board.archive", lang)}</button>
       <button type="button" class="bb-btn bb-sec" id="bb-d-unarchive" style="display:none">${t("board.unarchive", lang)}</button>
     </div>
+    <div id="bb-d-decision"></div>
     <h4 style="margin-top:1rem;display:flex;justify-content:space-between;align-items:center">
       <span>${t("botboard.planFileHeading", lang)}</span>
       <button type="button" class="bb-btn bb-sec" id="bb-d-plan-toggle" style="margin:0">${t("botboard.btnPreview", lang)}</button>

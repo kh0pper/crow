@@ -7,6 +7,7 @@
 
 import { tJs } from "../../shared/i18n.js";
 import { birdDrawerJs } from "./drawer.js";
+import { decisionJs } from "./decision-client.js";
 
 export function clientJs(botId, trackerType, projectId, trackerSlug, contextFields, lang, includeArchived) {
   const bi = botId == null ? "null" : JSON.stringify(String(botId));
@@ -63,6 +64,10 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   function errText(r,fallback){
     if(r&&r.j&&r.j.code==='archived') return '${tJs("board.errArchived", lang)}';
     if(r&&r.j&&r.j.code==='locked') return '${tJs("board.errLocked", lang)}';
+    if(r&&r.j&&r.j.code==='already_decided') return '${tJs("botboard.decision.errAlreadyDecided", lang)}';
+    if(r&&r.j&&r.j.code==='expired') return '${tJs("botboard.decision.errExpired", lang)}';
+    if(r&&r.j&&r.j.code==='closed') return '${tJs("botboard.decision.errClosed", lang)}';
+    if(r&&r.j&&r.j.code==='bad_option') return '${tJs("botboard.decision.errBadOption", lang)}';
     return (r&&r.j&&(r.j.reason||r.j.error))||fallback;
   }
 
@@ -120,26 +125,63 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     if(unarchiveBtn) unarchiveBtn.style.display=archived?'':'none';
     fieldIds.forEach(function(i){ var e=$(i); if(e) e.disabled=locked||archived; });
   }
-  function fillDrawer(cardEl){
-    cur=cardData(cardEl);
-    $('bb-d-title').textContent='${tJs("botboard.jsCardPrefix", lang)}'+cur.id;
-    var t0=cardEl.querySelector('.bb-title');
-    $('bb-d-title-in').value=t0?t0.textContent:'';
-    $('bb-d-status').value=cur.status;
-    msg($('bb-d-msg'),'','');
+  var DRAWER_FIELD_IDS=['bb-d-title-in','bb-d-status','bb-d-prio','bb-d-due','bb-d-owner','bb-d-tags','bb-d-desc','bb-d-project','bb-d-autonomy','bb-d-save','bb-d-cancel','bb-d-plan','bb-d-plan-save','bb-d-plan-approve'];
+  function applyLockUi(){
     var lk=$('bb-d-lock'), unlock=$('bb-d-unlock');
     if(cur.locked){ lk.textContent='\\uD83D\\uDD12 ${tJs("botboard.jsCardLockedPre", lang)}\\u2014 ${tJs("botboard.jsCardLockedPost", lang)}';
       unlock.style.display=''; } else { lk.textContent=''; unlock.style.display='none'; }
-    var d_archiveBtn=$('bb-d-archive'), d_unarchiveBtn=$('bb-d-unarchive');
-    var DRAWER_FIELD_IDS=['bb-d-title-in','bb-d-status','bb-d-prio','bb-d-due','bb-d-owner','bb-d-tags','bb-d-desc','bb-d-project','bb-d-autonomy','bb-d-save','bb-d-cancel','bb-d-plan','bb-d-plan-save','bb-d-plan-approve'];
-    applyArchivedUi(d_archiveBtn,d_unarchiveBtn,DRAWER_FIELD_IDS,cur.archived,cur.locked);
-    api('GET','/card/'+cur.id).then(function(r){
+  }
+  function fillDrawer(cardEl){
+    var t0=cardEl.querySelector('.bb-title');
+    openCardDrawer(cardData(cardEl), t0?t0.textContent:'');
+  }
+  // Open a card's drawer by id: from its face when it is on this board, else
+  // straight from GET /card/:id (a follow-up card created a moment ago, or a
+  // card on another bot's board).
+  function openCardById(id){
+    var idNum=Number(id);
+    if(!isFinite(idNum)||Math.floor(idNum)!==idNum) return;
+    var el=document.querySelector('.bb-card[data-card="'+idNum+'"]');
+    if(el){
+      // A face on this board: the same path as clicking it (a tracker item
+      // gets the tracker drawer, never the card drawer).
+      if((el.getAttribute('data-item-type')||'kanban')==='tracker') fillTrackerDrawer(el);
+      else fillDrawer(el);
+      return;
+    }
+    openCardDrawer({id:idNum,status:null,locked:false,archived:false,itemType:'kanban'},'');
+  }
+  function openCardDrawer(data,title){
+    cur=data;
+    // Save waits for the card GET: the form is only trusted once it shows
+    // server state, and loadedStatus is what Save sends as expected_status.
+    cur.loadedStatus=data.status; cur.hydrated=false;
+    $('bb-d-title').textContent='${tJs("botboard.jsCardPrefix", lang)}'+cur.id;
+    $('bb-d-title-in').value=title||'';
+    if(cur.status!=null) $('bb-d-status').value=cur.status;
+    msg($('bb-d-msg'),'','');
+    applyLockUi();
+    applyArchivedUi($('bb-d-archive'),$('bb-d-unarchive'),DRAWER_FIELD_IDS,cur.archived,cur.locked);
+    // Clear the previous card's decision block until this card's GET lands.
+    renderDecision(null);
+    hydrateDrawer(cur.id);
+    loadPlan();
+    openDrawer(drawer);
+  }
+  // Fill the drawer from GET /card/:id. opts.keepEdits refreshes only what the
+  // server owns (status, lock, archive, history, results, decision) and leaves
+  // the text the operator may be typing alone; opts.keepDecision leaves the
+  // decision block as it is (it is showing its own message).
+  function hydrateDrawer(cardId,opts){
+    opts=opts||{};
+    return api('GET','/card/'+cardId).then(function(r){
+      if(!cur||cur.id!==cardId) return;
       if(r.ok&&r.j&&r.j.card){var c=r.j.card;
-        // Server truth wins over the DOM snapshot (cur.archived came from the
-        // stale card face) — refresh cur + the Archive/Unarchive affordance.
+        // Server truth wins over the DOM snapshot (the card face can be stale).
         cur.archived=c.archived_at!=null;
-        applyArchivedUi(d_archiveBtn,d_unarchiveBtn,DRAWER_FIELD_IDS,cur.archived,cur.locked);
-        $('bb-d-title-in').value=c.title||'';
+        cur.locked=!!r.j.locked;
+        applyLockUi();
+        applyArchivedUi($('bb-d-archive'),$('bb-d-unarchive'),DRAWER_FIELD_IDS,cur.archived,cur.locked);
         // An off-def status must stay representable: inject it as an option so
         // Save cannot silently rewrite the card to the first configured value.
         var ss0=$('bb-d-status'), want=c.status||'pending';
@@ -147,25 +189,55 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
           ss0.appendChild(optEl(want, want+' (off-board)', false));
         }
         $('bb-d-status').value=want;
-        $('bb-d-prio').value=c.priority==null?'':String(c.priority);
-        $('bb-d-due').value=c.due_date||'';
-        $('bb-d-owner').value=c.owner||'';
-        $('bb-d-tags').value=c.tags||'';
-        $('bb-d-desc').value=c.description||'';
-        if($('bb-d-autonomy')) $('bb-d-autonomy').value=r.j.autonomy||c.autonomy||'gated';
-        var ps=$('bb-d-project'); clearEl(ps); ps.appendChild(optEl('','\\u2014 none \\u2014',false));
-        (r.j.projects||[]).forEach(function(p){
-          ps.appendChild(optEl(String(p.id),'#'+p.id+' \\u2014 '+(p.name||''),Number(c.project_id)===Number(p.id)));
-        });
+        cur.status=c.status; cur.loadedStatus=c.status; cur.hydrated=true;
+        if(!opts.keepEdits){
+          $('bb-d-title-in').value=c.title||'';
+          $('bb-d-prio').value=c.priority==null?'':String(c.priority);
+          $('bb-d-due').value=c.due_date||'';
+          $('bb-d-owner').value=c.owner||'';
+          $('bb-d-tags').value=c.tags||'';
+          $('bb-d-desc').value=c.description||'';
+          if($('bb-d-autonomy')) $('bb-d-autonomy').value=r.j.autonomy||c.autonomy||'gated';
+          var ps=$('bb-d-project'); clearEl(ps); ps.appendChild(optEl('','\\u2014 none \\u2014',false));
+          (r.j.projects||[]).forEach(function(p){
+            ps.appendChild(optEl(String(p.id),'#'+p.id+' \\u2014 '+(p.name||''),Number(c.project_id)===Number(p.id)));
+          });
+        }
         // Track 1 Task 9 (D-T1.3/D-T1.5): the drawer's history strip and
         // result/approve affordances hydrate off the SAME GET /card/:id
         // response — additive keys, no extra round trip.
         renderHistory(r.j.mutations||[]);
         renderResults(r.j.latest_results||[], (r.j.board&&r.j.board.terminal_values)||[]);
-      } else if(!r.ok){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); }
-    }).catch(function(){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });
-    loadPlan();
-    openDrawer(drawer);
+        if(!opts.keepDecision) renderDecision(r.j.decision);
+        if(pendingDrawerScroll){ drawer.scrollTop=pendingDrawerScroll; pendingDrawerScroll=0; }
+      } else if(!r.ok){ pendingDrawerScroll=0; crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); }
+    }).catch(function(){ pendingDrawerScroll=0; crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });
+  }
+  // The decision block calls this after an answer (or a refused one): the
+  // card's status moved on the server, so the form must show it before Save.
+  function decisionCardChanged(cardId,keepDecision){
+    if(cur&&cur.id===cardId) hydrateDrawer(cardId,{keepEdits:true,keepDecision:!!keepDecision});
+  }
+  // A live update reloads the page (the board is server-rendered: rebuilding
+  // columns, lane tabs, the Unassigned lane, list view and filters in place
+  // would duplicate the renderer). The open card drawer survives it instead:
+  // guardedReload remembers the card and the drawer's scroll, and the next
+  // load of the same board reopens it. One-shot, and only for 30 s.
+  var REOPEN_KEY='bb-reopen-drawer', pendingDrawerScroll=0;
+  function rememberOpenDrawer(){
+    if(!drawer||!drawer.classList.contains('bb-open')||!cur||cur.id==null) return;
+    try{ sessionStorage.setItem(REOPEN_KEY,JSON.stringify({id:cur.id,at:Date.now(),
+      page:location.pathname+location.search,scroll:drawer.scrollTop||0})); }catch(e){}
+  }
+  function reopenRememberedDrawer(){
+    var v=null;
+    try{ v=JSON.parse(sessionStorage.getItem(REOPEN_KEY)||'null'); sessionStorage.removeItem(REOPEN_KEY); }catch(e){ v=null; }
+    if(!v||typeof v!=='object'||!(Date.now()-Number(v.at)<30000)) return;
+    if(v.page!==location.pathname+location.search) return;
+    var idNum=Number(v.id);
+    if(!isFinite(idNum)||Math.floor(idNum)!==idNum) return;
+    pendingDrawerScroll=Number(v.scroll)||0;
+    openCardById(idNum);
   }
   function loadPlan(){
     var pm=$('bb-d-plan-msg'); msg(pm,'loading\\u2026','');
@@ -201,7 +273,10 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     plan_save:'${tJs("board.mutationVerb.plan_save", lang)}',
     plan_approve:'${tJs("board.mutationVerb.plan_approve", lang)}',
     result_report:'${tJs("board.mutationVerb.result_report", lang)}',
-    result_decide:'${tJs("board.mutationVerb.result_decide", lang)}'
+    result_decide:'${tJs("board.mutationVerb.result_decide", lang)}',
+    decision_ask:'${tJs("board.mutationVerb.decision_ask", lang)}',
+    decision:'${tJs("board.mutationVerb.decision", lang)}',
+    decision_expire:'${tJs("board.mutationVerb.decision_expire", lang)}'
   };
   function actorLabel(m){
     if(m.actor_kind==='bot') return m.actor_id||'bot';
@@ -315,6 +390,11 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     box.appendChild(btnRow);
     wrap.appendChild(box);
   }
+
+  // Decision cards (renderDecision): emitted by decision-client.js, spliced
+  // in as a bare block sharing this IIFE's scope ($, clearEl, api, msg,
+  // errText, cur).
+  ${decisionJs(lang)}
 
   // ---- Tracker item drawer ----
   function fillTrackerDrawer(cardEl){
@@ -466,14 +546,20 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   // ---- Kanban drawer events ----
   if($('bb-d-close')) $('bb-d-close').onclick=function(){ closeDrawer(drawer); cur=null; };
   if($('bb-d-save')) $('bb-d-save').onclick=function(){
-    if(!cur||cur.locked||cur.archived) return;
-    var body={title:$('bb-d-title-in').value,status:$('bb-d-status').value,
+    if(!cur||cur.locked||cur.archived||!cur.hydrated) return;
+    var body={title:$('bb-d-title-in').value,status:$('bb-d-status').value,expected_status:cur.loadedStatus,
       priority:$('bb-d-prio').value===''?null:Number($('bb-d-prio').value),
       due_date:$('bb-d-due').value||null,owner:$('bb-d-owner').value||null,
       tags:$('bb-d-tags').value||null,description:$('bb-d-desc').value||null,
       autonomy:$('bb-d-autonomy')?$('bb-d-autonomy').value:undefined};
     api('POST','/card/'+cur.id,body).then(function(r){
       if(r.ok){ msg($('bb-d-msg'),'${tJs("botboard.jsSaved", lang)}','ok'); setTimeout(reload,400); }
+      else if(r.status===409&&r.j&&r.j.code==='stale'){
+        // The card moved since the drawer loaded it: nothing was written.
+        // Reload the drawer from the server and say why.
+        msg($('bb-d-msg'),'${tJs("botboard.errStale", lang)}','err');
+        hydrateDrawer(cur.id);
+      }
       else if(r.status===409){ msg($('bb-d-msg'),'\\uD83D\\uDD12 '+errText(r,'locked by a bot'),'err'); }
       else { msg($('bb-d-msg'),errText(r,'save failed'),'err'); }
     });
@@ -1324,6 +1410,9 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     }
   });
 
+  // Reopen the card drawer a live reload closed (see rememberOpenDrawer).
+  if(!INCLUDE_ARCHIVED) reopenRememberedDrawer();
+
   // ---- EventSource live overlay ----
   if(window.EventSource && !INCLUDE_ARCHIVED){
     var esUrl=null;
@@ -1345,6 +1434,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         try{ lastReload=Number(sessionStorage.getItem('bb-live-reload'))||0; }catch(e){}
         if(now-lastReload>10000){
           try{ sessionStorage.setItem('bb-live-reload',String(now)); }catch(e){}
+          rememberOpenDrawer();
           reload();
         }
       }
