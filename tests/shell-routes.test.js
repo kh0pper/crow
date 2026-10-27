@@ -263,3 +263,29 @@ test("GET /dashboard in new mode opens Chat", async () => {
   const classic = await get("/dashboard", { ...OLD });
   assert.equal(cookieValue(classic.cookies, MODE), "classic");
 });
+
+test("a broken DB falls back to classic and writes no mode cookie", async () => {
+  const { resolveRequestMode, resolveShellPage } = await import("../servers/gateway/dashboard/shell/request.js");
+  const broken = { async execute() { throw new Error("database disk image is malformed"); } };
+  const fakeRes = () => { const set = []; return { set, headersSent: false, append(k, v) { set.push([k, v]); } }; };
+
+  const res1 = fakeRes();
+  const d = await resolveRequestMode({ headers: {}, dashboardSession: "new-sess" }, res1, broken);
+  assert.deepEqual(d, { mode: "classic", offerTry: false, persist: false });
+  assert.equal(res1.set.length, 0);
+
+  const req2 = { headers: {}, query: { project: "garden" }, dashboardSession: "new-sess" };
+  const res2 = fakeRes();
+  const page = await resolveShellPage(req2, res2, broken, "memory");
+  assert.deepEqual(page, { variant: "classic" });
+  assert.deepEqual(req2.crowScope, { all: true });
+  assert.equal(res2.set.length, 0, "no mode or scope cookie");
+});
+
+test("saving the language keeps the mode cookie beside crow_lang", async () => {
+  const r = await post("/dashboard/settings?section=language", { action: "set_language", language: "es" }, { jar: NEW });
+  assert.equal(r.status, 303);
+  assert.ok(r.cookies.some((c) => c.startsWith("crow_lang=es;")), "crow_lang is set");
+  assert.equal(cookieValue(r.cookies, MODE), "new", "the first-visit mode cookie is not overwritten");
+  await post("/dashboard/settings?section=language", { action: "set_language", language: "en" }, { jar: NEW });
+});

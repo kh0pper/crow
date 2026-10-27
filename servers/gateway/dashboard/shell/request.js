@@ -89,14 +89,16 @@ export async function resolveRequestMode(req, res, db) {
   if (cookieMode === "new" || cookieMode === "classic") {
     decision = resolveDeviceMode({ cookieMode });
   } else {
-    let shellSince = null, created = null;
     try {
-      shellSince = await ensureShellSince(db);
-      created = await sessionCreatedAt(db, req.dashboardSession);
+      const shellSince = await ensureShellSince(db);
+      const created = await sessionCreatedAt(db, req.dashboardSession);
+      decision = resolveDeviceMode({ cookieMode, sessionCreatedAt: created, shellSince });
     } catch (err) {
-      console.warn("[shell] mode lookup failed:", err.message);
+      // A DB that cannot answer must not move a device into the new shell:
+      // show classic for this request and remember nothing.
+      console.warn("[shell] mode lookup failed, showing classic:", err.message);
+      decision = { mode: "classic", offerTry: false, persist: false };
     }
-    decision = resolveDeviceMode({ cookieMode, sessionCreatedAt: created, shellSince });
   }
   req.crowMode = decision;
   if (decision.persist && !res.headersSent) res.append("Set-Cookie", modeCookie(decision.mode));

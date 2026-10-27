@@ -16,6 +16,8 @@ const MODE_MAX_AGE = 400 * 24 * 60 * 60; // seconds
 
 // Memo of the suffix per data dir: the instance id is a file, and every
 // dashboard request needs these names, so it is read once, not per request.
+// The memo is per process and lasts until restart (an instance id that
+// changes underneath a running gateway is picked up only after a restart).
 // Only a found id is remembered: before the gateway first writes it, the
 // next call looks again.
 const suffixByDataDir = new Map();
