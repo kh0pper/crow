@@ -16,6 +16,7 @@ import { hostname as osHostname, tmpdir } from "os";
 import { resolveCrowHome, resolveInstanceDataDir, readLocalInstanceIdOrNull, isDefaultCrowHome } from "../shared/crow-home.js";
 import bus from "../shared/event-bus.js";
 import { livenessStatusSql } from "../shared/instance-status.js";
+import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
 import { createDbClient } from "../db.js";
 import { isPeerUsableUrl, deriveSelfDialAddress } from "../shared/self-dial-address.js";
 
@@ -645,9 +646,10 @@ export async function validateInstanceToken(db, token, opts = {}) {
   // 'offline' (after any probe failure — a restart, network blip, or the
   // downtime that originally flipped it) could never re-authenticate to
   // prove it was back, so federated MCP calls 500'd forever. `offline` is a
-  // liveness signal, not a trust gate; trust is the token-hash match plus
-  // not being revoked. Mirrors getTrustedInstances' predicate.
-  const sql = "SELECT * FROM crow_instances WHERE auth_token_hash = ? AND status IN ('active','offline')";
+  // liveness signal, not a trust gate. Trust is the token-hash match plus the
+  // one trust predicate (PT-1): a paired-but-untrusted (legacy trusted=0) or
+  // paused row authenticates nothing.
+  const sql = `SELECT * FROM crow_instances WHERE auth_token_hash = ? AND ${TRUSTED_PEER_SQL}`;
 
   try {
     const { rows } = await db.execute({ sql, args: [tokenHash] });

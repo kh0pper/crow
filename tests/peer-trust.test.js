@@ -149,3 +149,31 @@ describe("U7: peer-tokens.json store lock", () => {
     } finally { rmSync(d, { recursive: true, force: true }); }
   });
 });
+
+// ---------------------------------------------------------------------------
+// U2: the bearer check requires a trusted, live row
+// ---------------------------------------------------------------------------
+import { createHash } from "node:crypto";
+import { validateInstanceToken } from "../servers/gateway/instance-registry.js";
+
+describe("U2: validateInstanceToken", () => {
+  const sha = (t) => createHash("sha256").update(t).digest("hex");
+  test("trusted active/offline rows authenticate; trusted=0, paused and revoked do not", async () => {
+    const d = mkdtempSync(join(tmpdir(), "pt-u2-"));
+    const xdb = await makeRealDb(d);
+    try {
+      const rows = [["u2-active", "active", 1], ["u2-offline", "offline", 1], ["u2-untrusted", "active", 0], ["u2-paused", "paused", 1]];
+      for (const [id, status, trusted] of rows) {
+        await addPeerRow(xdb, id, { status, trusted });
+        await xdb.execute({ sql: "UPDATE crow_instances SET auth_token_hash = ? WHERE id = ?", args: [sha(`tok-${id}`), id] });
+      }
+      assert.equal((await validateInstanceToken(xdb, "tok-u2-active"))?.id, "u2-active");
+      assert.equal((await validateInstanceToken(xdb, "tok-u2-offline"))?.id, "u2-offline");
+      assert.equal(await validateInstanceToken(xdb, "tok-u2-untrusted"), null);
+      assert.equal(await validateInstanceToken(xdb, "tok-u2-paused"), null);
+      const { revokeInstance } = await import("../servers/gateway/instance-registry.js");
+      await revokeInstance(xdb, "u2-active");
+      assert.equal(await validateInstanceToken(xdb, "tok-u2-active"), null);
+    } finally { try { xdb.close(); } catch {} rmSync(d, { recursive: true, force: true }); }
+  });
+});
