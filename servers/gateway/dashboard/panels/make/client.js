@@ -234,6 +234,24 @@ export function makeClientJs(lang) {
     hide(vline, false);
   }
 
+  var curProject = 'unassigned';
+  function chosenProject() {
+    var o = sel.options && sel.options[sel.selectedIndex >= 0 ? sel.selectedIndex : 0];
+    return sel.value || (o && o.value) || 'unassigned';
+  }
+  function selectProject(v) {
+    var opts = sel.options || [];
+    for (var i = 0; i < opts.length; i++) {
+      if (opts[i].value === v) { sel.selectedIndex = i; return; }
+    }
+  }
+  function syncMove() {
+    if (chosenProject() === curProject) moveBtn.setAttribute('disabled', ''); else moveBtn.removeAttribute('disabled');
+  }
+  function refresh() {
+    if (window.Turbo && typeof window.Turbo.visit === 'function') window.Turbo.visit(location.href, { action: 'replace' });
+    else location.reload();
+  }
   function openPreview(cell) {
     cur = cell;
     var kind = cell.getAttribute('data-mk-kind');
@@ -244,6 +262,9 @@ export function makeClientJs(lang) {
     if (kind === 'workspace_file') { openA.setAttribute('target', '_blank'); openA.setAttribute('rel', 'noopener'); }
     else { openA.removeAttribute('target'); openA.removeAttribute('rel'); }
     pvStatus.textContent = '';
+    curProject = cell.getAttribute('data-mk-project') || 'unassigned';
+    selectProject(curProject);
+    syncMove();
     vlist.innerHTML = '';
     hide(vlist, true);
     hide(vline, true);
@@ -284,6 +305,7 @@ export function makeClientJs(lang) {
     var more = el.closest('[data-mk-more]');
     if (more) { openPreview(more.closest('.mk-cell')); return; }
   });
+  if (sel.addEventListener) sel.addEventListener('change', syncMove);
   pv.addEventListener('click', function (e) {
     var el = e.target;
     if (el === pv || (el.closest && el.closest('[data-mk-pv-close]'))) { closePreview(); return; }
@@ -293,16 +315,17 @@ export function makeClientJs(lang) {
 
   function move() {
     if (!cur) return;
-    var o = sel.options && sel.options[sel.selectedIndex >= 0 ? sel.selectedIndex : 0];
-    var raw = sel.value || (o && o.value) || 'unassigned';
+    var raw = chosenProject();
+    if (raw === curProject) return;
     var pid = /^[1-9][0-9]*$/.test(raw) ? Number(raw) : 'unassigned';
     moveBtn.setAttribute('disabled', '');
     fetch('/dashboard/shell-api/items/' + encodeURIComponent(cur.getAttribute('data-mk-kind')) + '/' + encodeURIComponent(cur.getAttribute('data-mk-ref')) + '/project', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Crow-Csrf': csrf() }, body: JSON.stringify({ project_id: pid })
     }).then(function (r) {
-      moveBtn.removeAttribute('disabled');
-      pvStatus.textContent = r.ok ? T_MOVED : T_MOVE_FAILED;
-    }).catch(function () { moveBtn.removeAttribute('disabled'); pvStatus.textContent = T_MOVE_FAILED; });
+      if (!r.ok) { syncMove(); pvStatus.textContent = T_MOVE_FAILED; return; }
+      pvStatus.textContent = T_MOVED;
+      setTimeout(refresh, 600);
+    }).catch(function () { syncMove(); pvStatus.textContent = T_MOVE_FAILED; });
   }
   document.addEventListener('turbo:before-cache', function () { if (pv.open) closePreview(); });
 })();

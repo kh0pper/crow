@@ -59,7 +59,7 @@ function tile(item, lang) {
   const ws = item.kind === "workspace_file";
   const type = TYPES.includes(item.type) ? item.type : "other";
   const typeLabel = type === "other" ? "" : t(`shell.makeType.${type}`, lang);
-  return `<li class="mk-cell" data-mk-kind="${esc(item.kind)}" data-mk-ref="${esc(item.ref)}" data-mk-title="${esc(item.title)}" data-mk-version="${esc(item.version ?? "")}" data-mk-href="${esc(href)}"><a class="mk-tile${item.justMade ? " mk-just" : ""}" href="${esc(href)}"${ws ? ' target="_blank" rel="noopener"' : ""}>
+  return `<li class="mk-cell" data-mk-kind="${esc(item.kind)}" data-mk-ref="${esc(item.ref)}" data-mk-title="${esc(item.title)}" data-mk-version="${esc(item.version ?? "")}" data-mk-project="${esc(item.projectId == null ? "unassigned" : item.projectId)}" data-mk-href="${esc(href)}"><a class="mk-tile${item.justMade ? " mk-just" : ""}" href="${esc(href)}"${ws ? ' target="_blank" rel="noopener"' : ""}>
     <span class="mk-preview mk-type-${esc(type)}" data-mk-preview="${esc(item.kind)}:${esc(item.ref)}" aria-hidden="true">${esc(typeLabel)}</span>
     <span class="mk-title">${esc(item.title)}</span>
     <span class="mk-meta">${item.justMade ? `<span class="mk-badge">${esc(t("shell.justMade", lang))}</span>` : ""}${item.cardId ? `<span class="mk-card">#${esc(item.cardId)}</span>` : ""}${when(item.updatedAt, lang)}</span>

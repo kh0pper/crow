@@ -182,7 +182,7 @@ function bootClient(model, bots = [{ id: "b1", name: "Bee", perch_attached: true
   const { window, document } = parseHTML(`<html><body>${html}</body></html>`);
   const calls = [];
   Object.defineProperty(document, "cookie", { configurable: true, get: () => "crow_session=s; crow_csrf=tok123" });
-  const loc = { href: "/dashboard/make", hash: "" };
+  const loc = { href: "/dashboard/make", hash: "", reload() {} };
   let opened = 0;
   window.open = () => { opened += 1; };
   const ctx = vm.createContext({
@@ -327,4 +327,39 @@ test("a long press opens the sheet, but a scroll cancels it", async () => {
   ev(c, "pointermove", 10, 40);
   await new Promise((r) => setTimeout(r, 650));
   assert.equal(c.calls.length, 0, "movement cancelled it");
+});
+
+test("Move starts on the item's current project, disabled until the choice differs", async () => {
+  const c = bootClient({ artifacts: "installed", workspace: "installed", items: [{ ...ART, projectId: 3 }] });
+  c.click(c.$("[data-mk-more]"));
+  await c.settle();
+  const sel = c.$("[data-mk-pv-project]");
+  assert.equal(sel.options[sel.selectedIndex].value, "3");
+  assert.equal(c.$("[data-mk-pv-move]").hasAttribute("disabled"), true);
+  c.click(c.$("[data-mk-pv-move]"));
+  await c.settle();
+  assert.equal(c.calls.filter((x) => x.url.includes("/shell-api/")).length, 0, "no post for an unchanged choice");
+  sel.selectedIndex = [...sel.options].findIndex((o) => o.value === "2");
+  sel.dispatchEvent(new c.window.Event("change", { bubbles: true }));
+  assert.equal(c.$("[data-mk-pv-move]").hasAttribute("disabled"), false);
+  const u = bootClient({ artifacts: "installed", workspace: "installed", items: [ART] });
+  u.click(u.$("[data-mk-more]"));
+  await u.settle();
+  const us = u.$("[data-mk-pv-project]");
+  assert.equal(us.options[us.selectedIndex].value, "unassigned");
+});
+
+test("after a successful move the gallery refreshes in place", async () => {
+  const c = bootClient({ artifacts: "installed", workspace: "installed", items: [ART] });
+  const visits = [];
+  c.window.Turbo = { visit: (u, o) => visits.push([u, o]) };
+  c.click(c.$("[data-mk-more]"));
+  await c.settle();
+  const sel = c.$("[data-mk-pv-project]");
+  sel.selectedIndex = [...sel.options].findIndex((o) => o.value === "2");
+  c.click(c.$("[data-mk-pv-move]"));
+  await c.settle();
+  assert.match(c.$("[data-mk-pv-status]").textContent, /Moved/);
+  await new Promise((r) => setTimeout(r, 750));
+  assert.equal(JSON.stringify(visits), JSON.stringify([["/dashboard/make", { action: "replace" }]]));
 });
