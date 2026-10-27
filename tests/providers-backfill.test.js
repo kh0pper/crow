@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
 import { InstanceSyncManager } from "../servers/sharing/instance-sync.js";
 import * as ed from "../node_modules/@noble/ed25519/index.js";
+import { trustRemotesOnApply } from "./fixtures/trusted-apply.mjs";
 
 const TEST_PRIV = Buffer.alloc(32, 0xAB);
 const TEST_PUB_HEX = Buffer.from(await ed.getPublicKey(TEST_PRIV)).toString("hex");
@@ -30,7 +31,7 @@ function freshMgr(label, id) {
   const d = mkdtempSync(join(tmpdir(), `crow-prov-backfill-${label}-`));
   execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: d }, stdio: "pipe" });
   after(() => rmSync(d, { recursive: true, force: true }));
-  const m = new InstanceSyncManager(IDENTITY, createDbClient(join(d, "crow.db")), id);
+  const m = trustRemotesOnApply(new InstanceSyncManager(IDENTITY, createDbClient(join(d, "crow.db")), id));
   m.feedsDisabled = false;
   return m;
 }

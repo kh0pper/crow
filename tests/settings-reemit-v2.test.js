@@ -25,6 +25,7 @@ const IDENTITY = { ed25519Priv: TEST_PRIV, ed25519Pubkey: TEST_PUB_HEX };
 // _applyEntry in instance-sync.js), so signing with TEST_PRIV (== IDENTITY.ed25519Priv)
 // is sufficient; no separate peer-trust wiring exists or is needed.
 import { sign } from "../servers/sharing/identity.js";
+import { trustRemotesOnApply } from "./fixtures/trusted-apply.mjs";
 function signedEntry(table, op, row, lamport_ts) {
   const entry = { table, op, row, lamport_ts, instance_id: "peer-1" };
   entry.signature = sign(JSON.stringify(entry), IDENTITY.ed25519Priv);
@@ -36,7 +37,7 @@ function freshMgr(label, id) {
   const d = mkdtempSync(join(tmpdir(), `crow-b-reemit-${label}-`));
   execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: d }, stdio: "pipe", cwd: join(import.meta.dirname, "..") });
   after(() => rmSync(d, { recursive: true, force: true }));
-  const m = new InstanceSyncManager(IDENTITY, createDbClient(join(d, "crow.db")), id);
+  const m = trustRemotesOnApply(new InstanceSyncManager(IDENTITY, createDbClient(join(d, "crow.db")), id));
   m.feedsDisabled = false;
   m.outFeeds.set("peer-1", { append: async () => {} });
   return m;

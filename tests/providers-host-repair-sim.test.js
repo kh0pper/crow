@@ -34,6 +34,7 @@ import {
   setProviderSyncManager, syncProvidersFromModelsJson,
 } from "../servers/shared/providers-db.js";
 import * as ed from "../node_modules/@noble/ed25519/index.js";
+import { trustRemotesOnApply } from "./fixtures/trusted-apply.mjs";
 
 const A_ID = "a".repeat(32); // crow
 const B_ID = "b".repeat(32); // grackle
@@ -63,8 +64,8 @@ const IDENTITY = {
 
 const dbA = createDbClient(join(dirA, "crow.db"));
 const dbB = createDbClient(join(dirB, "crow.db"));
-const mgrA = new InstanceSyncManager(IDENTITY, dbA, A_ID);
-const mgrB = new InstanceSyncManager(IDENTITY, dbB, B_ID);
+const mgrA = trustRemotesOnApply(new InstanceSyncManager(IDENTITY, dbA, A_ID));
+const mgrB = trustRemotesOnApply(new InstanceSyncManager(IDENTITY, dbB, B_ID));
 mgrA.feedsDisabled = false;
 mgrB.feedsDisabled = false;
 

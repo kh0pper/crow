@@ -17,6 +17,7 @@ const SECP = "a".repeat(64);
 // in messages-sync.test.js; fakeFeedWith matches _processNewEntriesInner's
 // contract exactly (iterates seq < feed.length, awaits feed.get(seq)).
 import { sign } from "../servers/sharing/identity.js";
+import { trustRemotesOnApply } from "./fixtures/trusted-apply.mjs";
 function signedEntry(table, op, row, lamport_ts) {
   const entry = { table, op, row, lamport_ts, instance_id: "peer-1" };
   entry.signature = sign(JSON.stringify(entry), IDENTITY.ed25519Priv);
@@ -28,7 +29,7 @@ function freshMgr(label, id) {
   const d = mkdtempSync(join(tmpdir(), `crow-p3b-backfill-${label}-`));
   execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: d }, stdio: "pipe" });
   after(() => rmSync(d, { recursive: true, force: true }));
-  const m = new InstanceSyncManager(IDENTITY, createDbClient(join(d, "crow.db")), id);
+  const m = trustRemotesOnApply(new InstanceSyncManager(IDENTITY, createDbClient(join(d, "crow.db")), id));
   // Pretend a peer feed is open so backfill doesn't early-return "no-peers";
   // give it a fake append so the wrapped emitChange doesn't touch a real Hypercore.
   m.feedsDisabled = false;

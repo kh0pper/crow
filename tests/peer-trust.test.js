@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { makeRealDb, addPeerRow } from "./fixtures/sync-fleet.mjs";
+import { rmScratch } from "./helpers/safe-rm.js";
 import { TRUSTED_PEER_SQL, peerTrust, _resetPeerTrustLogForTest } from "../servers/shared/peer-trust.js";
 import { getPeerTrustHealth, _resetPeerTrustHealth } from "../servers/shared/peer-trust-health.js";
 
@@ -755,7 +756,10 @@ describe("revokePeer (both doors) kills the key and the SSO sessions", () => {
         assert.equal(r.creds_deleted, false);
         assert.equal(r.reason, "store_mismatch");
         assert.ok(JSON.parse(readFileSync(process.env.CROW_PEER_TOKENS_PATH, "utf8")).victim, "the wrong store is untouched");
-      } finally { process.env.CROW_PEER_TOKENS_PATH = saved; rmSync(other, { recursive: true, force: true }); }
+      } finally {
+        process.env.CROW_PEER_TOKENS_PATH = saved;
+        rmScratch(other);
+      }
       // The owning instance's reconcile then finishes the job.
       await xdb.execute({ sql: "UPDATE crow_instances SET updated_at = datetime('now', '+2 seconds') WHERE id = 'victim'", args: [] });
       const r2 = await reconcilePeerCreds(xdb);
