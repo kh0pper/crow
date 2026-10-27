@@ -24,6 +24,7 @@ const { renderLayout } = await import("../servers/gateway/dashboard/shared/layou
 const { playerBarHtml } = await import("../servers/gateway/dashboard/shared/player.js");
 const { default: panel, schedulePreview, _setBotGateForTest } = await import("../servers/gateway/dashboard/panels/schedule.js");
 const { cronNext, cronPrev, hostZone } = await import("../servers/shared/schedule-core.js");
+const { agendaGroups } = await import("../servers/gateway/schedule-catalog.js");
 const { createHash } = await import("node:crypto");
 // Bots run here (the strip shows the runner problem, not "engine missing" on a box without pi).
 _setBotGateForTest({ engine: () => "ready", runtimeOn: async () => true });
@@ -32,6 +33,10 @@ const db = createDbClient(join(process.env.CROW_DATA_DIR, "crow.db"));
 const MIN = 60_000, HOUR = 3_600_000, DAY = 86_400_000;
 const iso = (ms) => new Date(ms).toISOString();
 const ids = {};
+// The keyboard test focuses the bins row, so it must sit in a visible agenda day, never in the
+// collapsed "Later" fold (7+ days out) where focus() does nothing. A fixed weekday did that every
+// week once that day's 19:00 UTC had passed, so the weekday is picked two days after "now".
+const binsCron = (now) => `0 19 * * ${new Date(now + 2 * DAY).getUTCDay()}`;
 
 async function fixture() {
   await db.batch([
@@ -52,7 +57,7 @@ async function fixture() {
   };
   const next = (cron, zone = "UTC") => iso(cronNext(cron, zone, now));
   await seed("stretch", "reminder:Stretch and refill the water bottle", "0 9 * * *", next("0 9 * * *"));
-  await seed("bins", "reminder:Take the bins out", "0 19 * * 2", next("0 19 * * 2"));
+  await seed("bins", "reminder:Take the bins out", binsCron(now), next(binsCron(now)));
   await seed("standup", "reminder:Stand-up call with the design group", "30 8 * * 1-5", next("30 8 * * 1-5", "America/Chicago"), { tz: "America/Chicago" });
   await seed("call", "reminder:Call the dentist back about Thursday", "@once", iso(now + 2 * DAY + 3 * HOUR));
   await seed("rent", "reminder:Pay the rent", "0 9 1 * *", next("0 9 1 * *"));
@@ -199,6 +204,19 @@ test("with the player bar shown, the toast and the wide pane stay above it", asy
     const b = await w.ev("document.querySelector('.sc-detail').getBoundingClientRect().bottom");
     assert.ok(b <= 700 - bar, `pane bottom ${b} ≤ bar top ${700 - bar}`);
   } finally { await w.close(); }
+});
+
+test("fixture: the bins row is in a visible agenda day at any clock time (instance zone UTC)", () => {
+  const start = Date.UTC(2026, 9, 26); // a Monday; every weekday of one week
+  for (let d = 0; d < 7; d++) {
+    for (const [h, m] of [[0, 30], [12, 0], [18, 59], [19, 0], [19, 30], [23, 30]]) {
+      const now = start + d * DAY + h * HOUR + m * MIN;
+      const nextRun = cronNext(binsCron(now), "UTC", now);
+      const g = agendaGroups([{ id: 1, enabled: 1, cadence: DAY * 7 / MIN, nextRun, lastRun: null }], { now, zone: "UTC" });
+      assert.equal(g.later.length, 0, `not in Later at ${iso(now)}`);
+      assert.equal(g.days.length, 1, `in an agenda day at ${iso(now)}`);
+    }
+  }
 });
 
 test("keyboard: the strip's fixes come first; a row opens its detail; Escape closes it and focus returns to the row", async (ctx) => {
