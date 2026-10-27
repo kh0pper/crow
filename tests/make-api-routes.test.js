@@ -214,10 +214,11 @@ function bootClient(model, bots = [{ id: "b1", name: "Bee", perch_attached: true
     },
   });
   const m = makeClientJs("en").match(/<script>([\s\S]*)<\/script>/);
+  delete window.__mkBound; // linkedom windows share props; a real page load starts clean
   vm.runInContext(m[1], ctx);
   const settle = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
   const click = (el) => el.dispatchEvent(new window.Event("click", { bubbles: true }));
-  return { window, document, calls, loc, opened: () => opened, settle, click, $: (s) => document.querySelector(s) };
+  return { ctx, rerun: () => vm.runInContext(m[1], ctx), window, document, calls, loc, opened: () => opened, settle, click, $: (s) => document.querySelector(s) };
 }
 
 test("makeClientJs has no backticks (it is a template literal)", () => {
@@ -340,6 +341,14 @@ test("a long press opens the sheet, but a scroll cancels it", async () => {
   ev(c, "pointermove", 10, 40);
   await new Promise((r) => setTimeout(r, 650));
   assert.equal(c.calls.length, 0, "movement cancelled it");
+});
+
+test("document listeners are bound once however many Turbo visits re-run the script", async () => {
+  const c = bootClient({ artifacts: "installed", workspace: "installed", items: [ART] }, undefined, { versions: [2, 1] });
+  c.rerun(); c.rerun();
+  c.click(c.$("[data-mk-more]"));
+  await c.settle();
+  assert.equal(c.calls.filter((x) => x.url.startsWith("/api/artifacts/")).length, 1, "one click, one handler run");
 });
 
 test("Move starts on the item's current project, disabled until the choice differs", async () => {

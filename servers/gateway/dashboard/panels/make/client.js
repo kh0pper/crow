@@ -3,8 +3,9 @@
  *
  * Returned as a <script> string that panels/make.js appends to the page, so it is a TEMPLATE LITERAL:
  * it must contain NO backticks and no dollar-brace sequences. Strings are single-quoted; the starter
- * texts and labels come from i18n through tJs. It re-runs on every Turbo visit and binds fresh to the
- * swapped-in sheet (the sheet is part of the page, so nothing leaks across visits).
+ * texts and labels come from i18n through tJs. It re-runs on every Turbo visit. Element listeners bind fresh to the
+ * swapped-in sheet (they go with the page); document listeners are bound ONCE per window (window.__mkBound)
+ * and call the newest run's handler, so they never pile up across visits.
  *
  * Flow: "+ Start something" opens the sheet. A type row opens the composer (type pill, project chip,
  * Perch-attached bot picker, field pre-filled with the type's starter text). Submit POSTs
@@ -16,6 +17,15 @@ import { tJs } from "../../shared/i18n.js";
 
 export function makeClientJs(lang) {
   return `<script>
+(function () {
+  var B = window.__mkBound = window.__mkBound || { h: {}, b: {} };
+  window.__mkDoc = function (key, type, fn, cap) {
+    B.h[key] = fn;
+    if (B.b[key]) return;
+    B.b[key] = true;
+    document.addEventListener(type, function (e) { var f = B.h[key]; if (f) f(e); }, cap);
+  };
+})();
 (function () {
   // Previews (Task 4.5): a pending tile re-checks its image ONCE after data-mk-pv-wait ms; a
   // Workspace tile tries Nextcloud's image at once. Only a loaded image replaces the type tile.
@@ -203,7 +213,7 @@ export function makeClientJs(lang) {
   });
   form.addEventListener('submit', function (e) { e.preventDefault(); submit(); });
   if (botSel) botSel.addEventListener('change', label);
-  document.addEventListener('turbo:before-cache', function () { if (dlg.open) closeSheet(); });
+  window.__mkDoc('sheet-cache', 'turbo:before-cache', function () { if (dlg.open) closeSheet(); });
 })();
 (function () {
   var pv = document.getElementById('mk-preview');
@@ -304,7 +314,7 @@ export function makeClientJs(lang) {
   function closePreview() { token++; if (typeof pv.close === 'function') pv.close(); else pv.removeAttribute('open'); }
 
   function cancelPress() { if (timer) { clearTimeout(timer); timer = null; } }
-  document.addEventListener('pointerdown', function (e) {
+  window.__mkDoc('pointerdown', 'pointerdown', function (e) {
     var tile = e.target && e.target.closest ? e.target.closest('.mk-tile') : null;
     if (!tile) return;
     cancelPress();
@@ -312,18 +322,18 @@ export function makeClientJs(lang) {
     var cell = tile.closest('.mk-cell');
     timer = setTimeout(function () { timer = null; suppress = true; openPreview(cell); }, 500);
   });
-  document.addEventListener('pointermove', function (e) {
+  window.__mkDoc('pointermove', 'pointermove', function (e) {
     if (!timer) return;
     if (Math.abs(e.clientX - sx) > 10 || Math.abs(e.clientY - sy) > 10) cancelPress();
   });
-  document.addEventListener('pointerup', cancelPress);
-  document.addEventListener('pointercancel', cancelPress);
-  document.addEventListener('scroll', cancelPress, true);
-  document.addEventListener('contextmenu', function (e) {
+  window.__mkDoc('pointerup', 'pointerup', cancelPress);
+  window.__mkDoc('pointercancel', 'pointercancel', cancelPress);
+  window.__mkDoc('scroll', 'scroll', cancelPress, true);
+  window.__mkDoc('contextmenu', 'contextmenu', function (e) {
     if (e.target && e.target.closest && e.target.closest('.mk-tile') && (timer || suppress)) e.preventDefault();
   });
 
-  document.addEventListener('click', function (e) {
+  window.__mkDoc('click', 'click', function (e) {
     var el = e.target;
     if (!el || !el.closest) return;
     if (suppress && el.closest('.mk-tile')) { suppress = false; e.preventDefault(); return; }
@@ -353,7 +363,7 @@ export function makeClientJs(lang) {
       setTimeout(refresh, 600);
     }).catch(function () { syncMove(); pvStatus.textContent = T_MOVE_FAILED; });
   }
-  document.addEventListener('turbo:before-cache', function () { if (pv.open) closePreview(); });
+  window.__mkDoc('pv-cache', 'turbo:before-cache', function () { if (pv.open) closePreview(); });
 })();
 </script>`;
 }
