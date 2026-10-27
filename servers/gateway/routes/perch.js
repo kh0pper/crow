@@ -722,7 +722,11 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
         for (const s of list) { liveThreads.push(String(s.sessionId)); botIdOf.set(String(s.sessionId), botId); }
       }
       const botProjectOf = new Map(rows.map((r) => [r.bot_id, r.project_id == null ? null : Number(r.project_id)]));
-      const projectOfThread = await threadProjects(db, liveThreads, botIdOf, botProjectOf);
+      // Filing is a view filter, never a reason to fail the roost: any DB
+      // error here is logged and every session reads as Unassigned (null).
+      let projectOfThread = new Map();
+      try { projectOfThread = await threadProjects(db, liveThreads, botIdOf, botProjectOf); }
+      catch (err) { console.warn("[perch] could not read thread projects for /roost:", err?.message || err); }
 
       const birds = rows.map((row) => {
         const def = parseDef(row);

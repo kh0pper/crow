@@ -351,13 +351,15 @@ export function perchHubJs(lang = "en") {
       if(!b||!b.perch_attached) return;
       var ss=b.sessions||[];
       if(!ss.length){ out.push({botId:b.id,botName:b.name,sessionId:null,state:'idle',cardId:null,pendingUi:false}); return; }
-      var live=ss.filter(function(x){
-        if(!x||x.state==='stopped') return false;
+      var running=ss.filter(function(x){ return x&&x.state!=='stopped'; });
+      var live=running.filter(function(x){
         if(scope==null||scope==='all') return true;
         var p=x.projectId==null?null:Number(x.projectId);
         return scope==='unassigned'?p===null:p===Number(scope);
       });
-      if(!live.length){ out.push({botId:b.id,botName:b.name,sessionId:null,state:'idle',cardId:null,pendingUi:false}); return; }
+      /* A bot whose live sessions are all in other projects is NOT idle: its
+         startable row carries no state rather than a false "idle". */
+      if(!live.length){ out.push({botId:b.id,botName:b.name,sessionId:null,state:running.length?'':'idle',cardId:null,pendingUi:false}); return; }
       live.forEach(function(s){
         out.push({botId:b.id,botName:b.name,sessionId:s.sessionId,state:s.state,
                   cardId:s.cardId==null?null:s.cardId,pendingUi:!!s.pendingUi,
@@ -2508,9 +2510,24 @@ export function perchHubJs(lang = "en") {
     input.style.height='auto';
     if(v) input.style.height=Math.min(input.scrollHeight||72,120)+'px';
   }
-  function draftClear(sid){
+  /* Clears only the draft that was sent: a late success must not delete
+     words typed (and saved) after the send went out. */
+  function draftClear(sid,sentText){
     var store=draftStore(); if(!store||!sid) return;
-    try{ store.removeItem(DRAFT_PREFIX+sid); }catch(e){}
+    try{ if(store.getItem(DRAFT_PREFIX+sid)===String(sentText)) store.removeItem(DRAFT_PREFIX+sid); }catch(e){}
+  }
+  /* A send that did not land (any non-2xx, or the network failing) gives
+     the words back: into the composer when that session is still open and
+     the composer is empty, else into its stored draft if it has none. */
+  function draftKeepUnsent(sid,text){
+    var input=el('perch-input');
+    if(current.sid===sid&&input){
+      if(!String(input.value==null?'':input.value).trim()) input.value=text;
+      draftSave();
+      return;
+    }
+    var store=draftStore(); if(!store||!sid) return;
+    try{ if(store.getItem(DRAFT_PREFIX+sid)==null) store.setItem(DRAFT_PREFIX+sid,String(text)); }catch(e){}
   }
   bindOnce(document,'turbo:before-visit','draftBeforeVisit',function(){ if(live()) draftSave(); });
   bindOnce(window,'pagehide','draftPagehide',function(){ if(live()) draftSave(); });
@@ -2552,7 +2569,9 @@ export function perchHubJs(lang = "en") {
          is how replayUnsent finds its place again. Counted before the
          identity guard: it is this session's bookkeeping, viewed or not. */
       if(r.ok&&!rec.failed){ rec.counted=true; bumpUnsentAfter(mySid,1); }
-      if(r.ok) draftClear(mySid);          /* Shell P2: delivered, so it is no longer a draft */
+      /* Shell P2: delivered, so it is no longer a draft; refused or lost,
+         the words come back so a reload cannot drop them. */
+      if(r.ok) draftClear(mySid,text); else draftKeepUnsent(mySid,text);
       if(current.sid!==mySid) return;
       var code=r.j&&r.j.error;
       /* Only a REAL turn race means "a turn is running" — every other 409

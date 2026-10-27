@@ -102,6 +102,25 @@ test("/roost reports each session's own project", async () => {
   assert.equal(p["perchlive-e"], null, "a thread filed in an archived project is Unassigned");
 });
 
+test("/roost survives a broken shell_items read: 200, every projectId null", async () => {
+  const c = new Database(DB_FILE);
+  c.exec("ALTER TABLE shell_items RENAME TO shell_items_saved; CREATE TABLE shell_items (unrelated INTEGER);");
+  c.close();
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    const p = projectsBySession(await roost());
+    assert.equal(Object.keys(p).length, ENGINE_SESSIONS.length);
+    for (const v of Object.values(p)) assert.equal(v, null);
+  } finally {
+    console.warn = warn;
+    const d = new Database(DB_FILE);
+    d.exec("DROP TABLE shell_items; ALTER TABLE shell_items_saved RENAME TO shell_items;");
+    d.close();
+  }
+  assert.equal(projectsBySession(await roost())["perchlive-a"], 2, "restored");
+});
+
 test("/roost echoes ?scope= and leaves it out otherwise", async () => {
   assert.equal((await roost()).scope, undefined);
   assert.equal((await roost("?scope=2")).scope, 2);
@@ -334,6 +353,65 @@ test("a draft is saved on a Turbo visit and after the debounce, and a failed sen
   hub.els["perch-send"].click();
   await tick(); await tick();
   assert.equal(store.getItem(KEY), "second", "an unsent message stays a draft");
+  assert.equal(input.value, "second", "and its words come back into the composer");
+});
+
+test("a failed send survives a reload", async () => {
+  const store = makeStorage();
+  const sid = "perchlive-00000002";
+  const KEY = "perch-draft:" + sid;
+  const failing = (method, path) => {
+    if (path.startsWith("/roost")) return makeResponse(200, ROOST);
+    if (method === "POST" && path.endsWith("/message")) return makeResponse(0, null);   // the network failing
+    return makeResponse(200, {});
+  };
+  const first = await mount({ sessionStorage: store, initialHash: "#" + sid, fetchImpl: failing });
+  const input = first.els["perch-input"];
+  input.value = "never debounced";       // typed and sent before the 300 ms save could run
+  input.oninput.call(input);
+  first.els["perch-send"].click();
+  await tick(); await tick();
+  first.win._dispatch("pagehide", {});
+  assert.equal(store.getItem(KEY), "never debounced");
+  const second = await mount({ roost: ROOST, sessionStorage: store, initialHash: "#" + sid });
+  assert.equal(second.els["perch-input"].value, "never debounced");
+});
+
+test("a late success does not clear a draft typed after the send", async () => {
+  const store = makeStorage();
+  const sid = "perchlive-00000002";
+  const KEY = "perch-draft:" + sid;
+  let release;
+  const pending = new Promise((r) => { release = r; });
+  const hub = await mount({
+    sessionStorage: store, initialHash: "#" + sid,
+    fetchImpl: (method, path) => {
+      if (path.startsWith("/roost")) return makeResponse(200, ROOST);
+      if (method === "POST" && path.endsWith("/message")) return pending;
+      return makeResponse(200, {});
+    },
+  });
+  const input = hub.els["perch-input"];
+  input.value = "sent words";
+  hub.win._dispatch("pagehide", {});
+  hub.els["perch-send"].click();
+  input.value = "newer words";
+  hub.win._dispatch("pagehide", {});
+  assert.equal(store.getItem(KEY), "newer words");
+  release(makeResponse(200, {}));
+  await tick(); await tick(); await tick();
+  assert.equal(store.getItem(KEY), "newer words", "the late success clears only the text it sent");
+});
+
+test("a bot busy only in other projects does not claim to be idle", async () => {
+  const hub = await mount({ scope: "4", roost: ROOST });
+  const rows = hub.els["perch-list-body"].children.filter((r) => r.className === "roost-row");
+  assert.equal(rows.length, 1, "the bot stays startable");
+  const text = JSON.stringify(rows[0], (k, v) => (k === "parentNode" ? undefined : v));
+  assert.ok(!/"idle"/.test(text), "its row must not print idle");
+  const idle = await mount({ scope: "4", roost: { birds: [{ id: "b", name: "B", perch_attached: true, state: "idle", sessions: [] }] } });
+  const idleText = JSON.stringify(idle.els["perch-list-body"].children, (k, v) => (k === "parentNode" ? undefined : v));
+  assert.match(idleText, /"idle"/, "a bot with no sessions at all is really idle");
 });
 
 test("a dictated draft is saved", async () => {
