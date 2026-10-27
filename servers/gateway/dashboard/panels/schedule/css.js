@@ -59,6 +59,15 @@ export const SCHEDULE_CSS = `<style>
   .sc-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3px; }
   .sc-name { font-weight: 600; overflow-wrap: anywhere; }
   .sc-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 0.8rem; color: var(--crow-text-muted); overflow-wrap: anywhere; }
+  .sc-ro { cursor: default; }
+  .sc-row-ro .sc-name { font-weight: 500; }
+  .sc-ro-label { display: inline-flex; align-items: center; gap: 3px; color: var(--crow-text-muted); }
+  .sc-lock { flex: none; }
+  .sc-host + .sc-host { border-top: 1px solid var(--crow-border); }
+  .sc-host-h { flex-wrap: wrap; }
+  .sc-host-empty { padding: 0 14px 12px; }
+  .sc-copy { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; max-width: 100%; }
+  .sc-copy-text { display: inline-block; padding: 6px 8px; border-radius: var(--crow-radius-control); background: var(--crow-bg-elevated); border: 1px solid var(--crow-border); user-select: all; -webkit-user-select: all; max-width: 100%; box-sizing: border-box; }
   .sc-empty { display: grid; justify-items: center; text-align: center; gap: 6px; padding: 22px 16px; margin: 0 0 12px; border: 1px dashed var(--crow-border-strong); border-radius: var(--crow-radius-card); color: var(--crow-text-secondary); font-size: 0.9rem; }
   .sc-empty b { color: var(--crow-text-primary); }
   .sc-foot { margin: 16px 0 0; font-size: 0.82rem; color: var(--crow-text-muted); }
@@ -114,6 +123,7 @@ export const SCHEDULE_CSS = `<style>
   @media (max-width: 479px) {
     .sc-attn-acts { flex-basis: 100%; }
     .sc-attn-acts > *, .sc-attn-acts .sc-inline-form, .sc-attn-acts .btn { flex: 1 1 100%; width: 100%; }
+    .sc-attn-acts .sc-copy-text { flex: 1 1 100%; width: 100%; }
     .sc-hit { flex-wrap: wrap; gap: 4px 12px; }
     .sc-at { min-width: 0; max-width: 100%; }
     .sc-main { flex-basis: 100%; }

@@ -7,6 +7,10 @@
  * are plain POST forms (CSRF field + Turbo's header, 303 after POST), refused unless the request
  * is the owner's own password session at this Crow (never a peer sign-in or a signed peer call). Delete takes two POSTs: the first only opens the confirm.
  * The briefing's controls are links to News → Briefings, which owns that row.
+ *
+ * Read-only sources (schedule-sources/: the box hold, the box ledger, the machines' timers) are
+ * shown with no controls. Every POST names a Crow schedule by its numeric id, so a read-only
+ * ref (box:…, timer:…) is refused with 400 before any action runs.
  */
 import { t } from "../shared/i18n.js";
 import { escapeHtml, section } from "../shared/components.js";
@@ -145,8 +149,9 @@ export default {
     const runParam = intOf(one(query.run));
     if (selected === null && runParam !== null) selected = await scheduleOfRun(db, runParam);
 
+    const show = one(query.show);
     const model = await buildScheduleModel(db, {
-      lang, selected,
+      lang, selected, show: show || "all",
       engine: () => botGate.engine(),
       runtimeOn: () => botGate.runtimeOn(db),
     });
@@ -168,8 +173,8 @@ export default {
       create,
       createOpen: one(query.new) === "1",
       mediaInstalled: !!getPanel("media"),
-      sources: ["crow"],
-      filter: "all",
+      sources: model.sources,
+      filter: model.filter,
     }) + scheduleClientJs();
     return page(0, content);
   },
