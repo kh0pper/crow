@@ -2751,6 +2751,28 @@ await initTable("perch_session_files table", `
     ON perch_session_files (bot_id, thread_id);
 `);
 
+// shell_items: which project a Perch thread, an artifact or a Workspace file belongs to
+// (project_id NULL = Unassigned; no FK, so a deleted project never cascades an item away).
+// Same DDL as scripts/migrations/0010-shell-items.mjs — one shape, two rails; additive, no
+// SCHEMA_GENERATION bump.
+await initTable("shell_items table", `
+  CREATE TABLE IF NOT EXISTS shell_items (
+    item_kind    TEXT NOT NULL CHECK (item_kind IN ('perch_thread','artifact','workspace_file')),
+    item_ref     TEXT NOT NULL,
+    project_id   INTEGER,
+    card_id      INTEGER,
+    set_by       TEXT NOT NULL CHECK (set_by IN ('backfill','origin','operator')),
+    seen_version INTEGER,
+    seen_at      TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (item_kind, item_ref),
+    CHECK (item_kind != 'perch_thread' OR card_id IS NULL)
+  );
+  CREATE INDEX IF NOT EXISTS idx_shell_items_project ON shell_items(project_id, item_kind);
+  CREATE INDEX IF NOT EXISTS idx_shell_items_card ON shell_items(card_id) WHERE card_id IS NOT NULL;
+`);
+
 // bot_sessions.control CHECK widen, 'run'/'stop' -> 'run'/'stop'/'interrupted'
 // (Track 3 Task 7): stopAll() parks a session that was genuinely mid-turn
 // when the gateway shut down with control='interrupted' instead of 'run', so
