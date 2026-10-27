@@ -137,7 +137,7 @@ export default {
         fileGrid = `<div class="empty-state">
           <div style="margin-bottom:1rem">${ICON_INTEGRATIONS}</div>
           <h3>${t("files.storageNotConfigured", lang)}</h3>
-          <p>Set up MinIO to start storing files. Add <code>MINIO_ENDPOINT</code> to your <code>.env</code> to get started.</p>
+          <p>${t("files.storageNotConfiguredHint", lang)}</p>
         </div>`;
       }
     } else {

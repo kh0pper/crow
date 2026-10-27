@@ -4,11 +4,11 @@ title: Almacenamiento
 
 # Almacenamiento
 
-Guarda archivos, imágenes y adjuntos junto a tus datos de Crow. El almacenamiento usa almacenamiento de objetos compatible con S3 (MinIO), así que tus archivos se quedan en tu propia infraestructura.
+Guarda archivos, imágenes y adjuntos junto a tus datos de Crow. El almacenamiento usa almacenamiento de objetos compatible con S3 (Garage, o cualquier servicio S3), así que tus archivos se quedan en tu propia infraestructura.
 
 ## ¿Qué es esto?
 
-Crow Storage le da a tu asistente de IA la capacidad de guardar y recuperar archivos. Se conecta a una instancia de MinIO (o cualquier servicio compatible con S3) que corre junto a tu servidor Crow.
+Crow Storage le da a tu asistente de IA la capacidad de guardar y recuperar archivos. Se conecta a la extensión File Storage (Garage) (o a cualquier servicio compatible con S3) que corre junto a tu servidor Crow.
 
 Los archivos se organizan por tipo — imágenes, documentos, audio, adjuntos — y son accesibles a través de herramientas MCP, endpoints HTTP o el explorador de archivos del Crow's Nest.
 
@@ -21,39 +21,20 @@ Los archivos se organizan por tipo — imágenes, documentos, audio, adjuntos �
 
 ## Configuración
 
-El almacenamiento requiere una instancia de MinIO. Si ejecutas Crow con Docker Compose, agrega el perfil de almacenamiento a tu comando habitual:
+Instala **File Storage (Garage)** desde **Extensiones** en el Crow's Nest. Crow genera todas las claves y tokens que necesita, los guarda en **Ajustes → Contraseñas** y conecta a él sus herramientas de almacenamiento: no hay nada que escribir.
 
-```bash
-docker compose --profile local --profile storage up --build
-```
+- **Dónde quedan los archivos:** por defecto, en un volumen de Docker en esta máquina. Para guardarlos en una carpeta de otro disco local, define *GARAGE_DATA_PATH* al instalar (no una carpeta de red ni un disco USB montado con FUSE).
+- **Compartir con instancias de Crow emparejadas:** pon en *GARAGE_BIND_ADDR* la IP de la tailnet de esta máquina, y en *S3_ENDPOINT* esa misma dirección con el puerto 3900. La API de administración (puerto 3903) se queda siempre en esta máquina.
+- **Sin consola web:** explora y gestiona los archivos en la página **Archivos** del Crow's Nest.
 
-(Usa `--profile cloud` en lugar de `local` en un despliegue en la nube.) Para MinIO independiente:
-
-```bash
-docker run -d \
-  --name minio \
-  -p 9000:9000 \
-  -p 9001:9001 \
-  -v minio-data:/data \
-  -e MINIO_ROOT_USER=crowadmin \
-  -e MINIO_ROOT_PASSWORD=your-secure-password \
-  minio/minio server /data --console-address ":9001"
-```
-
-Luego agrega esto a tu `.env`:
-
-```bash
-MINIO_ENDPOINT=localhost
-MINIO_PORT=9000
-MINIO_ROOT_USER=crowadmin
-MINIO_ROOT_PASSWORD=your-secure-password
-MINIO_USE_SSL=false
-```
-
-Crow crea y gestiona su bucket (`crow-files`) automáticamente — no necesitas configurar ningún bucket. Ejecuta `npm run mcp-config` para regenerar tu configuración MCP y luego reinicia el gateway.
+Crow crea y gestiona su bucket (`crow-files`) automáticamente — no necesitas configurar ningún bucket.
 
 ::: tip ¿Ya tienes S3 en otro lado?
-Cualquier servicio compatible con S3 funciona — configura `S3_ENDPOINT`, `S3_ACCESS_KEY` y `S3_SECRET_KEY` en su lugar. También puedes configurar el almacenamiento compartido desde el dashboard (Configuración → Almacenamiento Compartido), que tiene prioridad sobre `.env`.
+Cualquier servicio compatible con S3 funciona. Configúralo en **Ajustes → Almacenamiento compartido** (se replica a las instancias emparejadas y tiene prioridad sobre `.env`), o define `S3_ENDPOINT`, `S3_ACCESS_KEY` y `S3_SECRET_KEY` en `.env`.
+:::
+
+::: warning MinIO está obsoleto
+La extensión MinIO ya no tiene mantenimiento upstream y su imagen ya no se puede descargar, así que ya no se puede instalar. Una instalación de MinIO existente sigue funcionando; los ajustes antiguos `MINIO_*` se siguen leyendo cuando no hay ningún ajuste `S3_*`.
 :::
 
 ## Subir archivos

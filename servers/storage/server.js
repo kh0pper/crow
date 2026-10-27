@@ -1,7 +1,7 @@
 /**
  * Crow Storage MCP Server
  *
- * S3-compatible file storage with MinIO. Provides tools for uploading,
+ * S3-compatible file storage (Garage, or any S3 endpoint). Provides tools for uploading,
  * listing, downloading (presigned URLs), and deleting files.
  *
  * Factory function: createStorageServer(dbPath?)
@@ -72,7 +72,7 @@ function notConfiguredError() {
   return {
     content: [{
       type: "text",
-      text: "Storage is not configured. To set up MinIO storage:\n\n1. Add to your .env:\n   MINIO_ENDPOINT=localhost\n   MINIO_ROOT_PASSWORD=your-secure-password\n\n2. Start MinIO:\n   docker compose --profile storage up -d\n\n3. Restart your MCP client.",
+      text: "Storage is not configured. To set it up, either:\n\n1. Install File Storage (Garage) from Extensions in the Crow's Nest, or\n2. Connect S3-compatible storage you already run in Settings → Shared Storage.\n\nThen restart your MCP client.",
     }],
     isError: true,
   };

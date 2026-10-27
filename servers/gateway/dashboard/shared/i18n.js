@@ -3686,6 +3686,9 @@ export const translations = {
   "schedule.err.textTooLong": { en: "That's too long: 1,000 characters at most.", es: "Es demasiado largo: 1.000 caracteres como máximo." },
   "schedule.err.badText": { en: "A reminder's text can't start with “pipeline:”.", es: "El texto de un recordatorio no puede empezar por “pipeline:”." },
   "schedule.err.tooFrequent": { en: "Reminders can repeat at most every hour.", es: "Los recordatorios se repiten como mucho cada hora." },
+  "extensions.deprecated": { en: "Deprecated", es: "Obsoleto" },
+  "extensions.deprecatedUse": { en: "Replaced by {name}", es: "Sustituido por {name}" },
+  "files.storageNotConfiguredHint": { en: "Install File Storage (Garage) from Extensions, or connect existing S3-compatible storage in Settings → Shared Storage.", es: "Instala File Storage (Garage) desde Extensiones, o conecta un almacenamiento compatible con S3 que ya tengas en Ajustes → Almacenamiento compartido." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

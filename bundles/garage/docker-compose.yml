@@ -1,0 +1,47 @@
+## File Storage (Garage): S3-compatible object storage for Crow
+##
+## Garage v2.4.1, pinned by its manifest-list digest (multi-arch). Moving to a newer
+## Garage is a deliberate, reviewed bump: v2.5.0 and later cannot be downgraded once a
+## node has run them.
+##
+## One node (--single-node, replication_factor = 1). --default-access-key creates the
+## gateway's S3 key from GARAGE_DEFAULT_ACCESS_KEY / GARAGE_DEFAULT_SECRET_KEY on first
+## start and refuses to start if that key was deleted or its secret changed, so both
+## live in the Crow keychain and survive a reinstall.
+##
+## S3 API: ${GARAGE_BIND_ADDR}:3900 (127.0.0.1 unless you share storage with paired
+## Crow instances). Admin API: 127.0.0.1:3903 only. RPC (3901) is never published.
+## No web console.
+
+services:
+  garage:
+    image: dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020
+    command: ["/garage", "server", "--single-node", "--default-access-key"]
+    environment:
+      GARAGE_RPC_SECRET: "${GARAGE_RPC_SECRET:?GARAGE_RPC_SECRET is not set - reinstall File Storage (Garage) from Extensions so Crow generates it}"
+      GARAGE_ADMIN_TOKEN: "${GARAGE_ADMIN_TOKEN:?GARAGE_ADMIN_TOKEN is not set - reinstall File Storage (Garage) from Extensions so Crow generates it}"
+      GARAGE_METRICS_TOKEN: "${GARAGE_METRICS_TOKEN:?GARAGE_METRICS_TOKEN is not set - reinstall File Storage (Garage) from Extensions so Crow generates it}"
+      GARAGE_DEFAULT_ACCESS_KEY: "${GARAGE_DEFAULT_ACCESS_KEY:?GARAGE_DEFAULT_ACCESS_KEY is not set - reinstall File Storage (Garage) from Extensions so Crow generates it}"
+      GARAGE_DEFAULT_SECRET_KEY: "${GARAGE_DEFAULT_SECRET_KEY:?GARAGE_DEFAULT_SECRET_KEY is not set - reinstall File Storage (Garage) from Extensions so Crow generates it}"
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      # Default: the named volume. GARAGE_DATA_PATH=/some/folder keeps the objects there
+      # instead (a local disk; never a network or FUSE mount).
+      - ${GARAGE_DATA_PATH:-garage-data}:/var/lib/garage/data
+    ports:
+      # Default 127.0.0.1. Set GARAGE_BIND_ADDR to this host's tailnet IP to share
+      # storage with paired Crow instances. Never 0.0.0.0 without a firewall.
+      - "${GARAGE_BIND_ADDR:-127.0.0.1}:3900:3900"
+      - "127.0.0.1:3903:3903"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/garage", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  garage-meta:
+  garage-data:

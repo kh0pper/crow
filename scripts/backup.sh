@@ -7,7 +7,8 @@
 #
 # Destinations (configurable via .env or environment):
 #   - Local directory (always): ~/.crow/backups/
-#   - S3/MinIO: if MINIO_ENDPOINT + MINIO_ACCESS_KEY are set
+#   - S3 (Garage or any S3 endpoint): if S3_ENDPOINT + S3_ACCESS_KEY + S3_SECRET_KEY
+#     are set (the older MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY still work)
 #   - Git repo: if CROW_BACKUP_GIT_REPO is set (SQL dumps only)
 #
 # Retention: CROW_BACKUP_KEEP_DAYS (default: 7)
@@ -114,16 +115,25 @@ if [[ -d "$ARTIFACTS_DIR" ]]; then
   fi
 fi
 
-# --- Step 3: S3/MinIO upload (if configured) ---
+# --- Step 3: S3 upload (if configured) ---
+# S3_* first; the older MINIO_* names are the fallback. An endpoint without a scheme
+# gets http:// (https:// with S3_USE_SSL=true), as `mc alias set` needs a URL.
 
-if [[ -n "${MINIO_ENDPOINT:-}" && -n "${MINIO_ACCESS_KEY:-}" && -n "${MINIO_SECRET_KEY:-}" ]]; then
+S3_EP="${S3_ENDPOINT:-${MINIO_ENDPOINT:-}}"
+S3_AK="${S3_ACCESS_KEY:-${MINIO_ACCESS_KEY:-}}"
+S3_SK="${S3_SECRET_KEY:-${MINIO_SECRET_KEY:-}}"
+if [[ -n "$S3_EP" && "$S3_EP" != http://* && "$S3_EP" != https://* ]]; then
+  if [[ "${S3_USE_SSL:-${MINIO_USE_SSL:-false}}" == "true" ]]; then S3_EP="https://$S3_EP"; else S3_EP="http://$S3_EP"; fi
+fi
+
+if [[ -n "$S3_EP" && -n "$S3_AK" && -n "$S3_SK" ]]; then
   BUCKET="${CROW_BACKUP_S3_BUCKET:-crow-backups}"
   echo ""
-  echo "Uploading to S3 ($MINIO_ENDPOINT / $BUCKET)..."
+  echo "Uploading to S3 ($S3_EP / $BUCKET)..."
 
   if command -v mc &>/dev/null; then
     if [[ "$DRY_RUN" == false ]]; then
-      mc alias set crow-backup "$MINIO_ENDPOINT" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" --quiet 2>/dev/null || true
+      mc alias set crow-backup "$S3_EP" "$S3_AK" "$S3_SK" --quiet 2>/dev/null || true
       mc mb --ignore-existing "crow-backup/$BUCKET" --quiet 2>/dev/null || true
       mc cp "$SQL_FILE" "crow-backup/$BUCKET/sql/" --quiet
       mc cp "$DB_FILE" "crow-backup/$BUCKET/db/" --quiet
@@ -132,7 +142,7 @@ if [[ -n "${MINIO_ENDPOINT:-}" && -n "${MINIO_ACCESS_KEY:-}" && -n "${MINIO_SECR
       echo "  [dry-run] Would upload $SQL_FILE and $DB_FILE to $BUCKET"
     fi
   else
-    echo "  Warning: 'mc' (MinIO client) not found. Skipping S3 upload."
+    echo "  Warning: 'mc' (an S3 client) not found. Skipping S3 upload."
     echo "  Install with: curl -O https://dl.min.io/client/mc/release/linux-amd64/mc && chmod +x mc"
   fi
 fi

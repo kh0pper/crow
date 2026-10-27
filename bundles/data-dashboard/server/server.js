@@ -21,7 +21,21 @@ import {
 // where "../../../servers" does not exist and the process died at spawn.
 const { createDbClient } = await appImport("servers/db.js");
 const { renderChart, renderMap, cacheKey, s3KeyFor } = await appImport("servers/blog/figure-renderer.js");
-const { uploadObject, getClient: getStorageClient } = await appImport("servers/storage/s3-client.js");
+const storage = await appImport("servers/storage/s3-client.js");
+const { uploadObject, getClient: getStorageClient } = storage;
+// The instance's Shared Storage settings (DB), not the MINIO_* env this child inherits
+// from the gateway (that env pointed at localhost:9000, where nothing listens). Opened
+// once per process with the identity, whose key buffers are wiped straight away.
+let storageFromDb = false;
+async function useInstanceStorage(db) {
+  if (storageFromDb || typeof storage.useDbStorageConfig !== "function") return;
+  try {
+    const { loadIdentityIfPresent } = await appImport("servers/sharing/identity.js");
+    const identity = loadIdentityIfPresent();
+    // No identity: no sealed settings exist, so the env fallback is all there is.
+    storageFromDb = identity ? await storage.useDbStorageConfig({ db, identity }) : true;
+  } catch { /* env fallback stays active; retried on the next call */ }
+}
 
 // Read per call (CROW_BLOG_FIGURES_BUCKET / BLOG_FIGURE_GATEWAY_URL, passed
 // through from the gateway's environment).
@@ -557,6 +571,7 @@ export async function createDataDashboardServer(dbPath, options = {}) {
     });
     const s3Key = s3KeyFor(section.id, key);
 
+    await useInstanceStorage(db);
     let cached = false;
     if (skipIfCached && (await figureObjectExists(s3Key))) {
       cached = true;

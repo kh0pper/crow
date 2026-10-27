@@ -93,7 +93,7 @@ export function createRouterServer(options = {}) {
         const { createStorageServer } = await import("../storage/server.js");
         factories.storage = createStorageServer;
       } catch {
-        throw new Error("Storage server is not available. Set MINIO_ENDPOINT in .env to enable it.");
+        throw new Error("Storage server is not available. Install File Storage (Garage) from Extensions, or configure Shared Storage in the Nest.");
       }
     }
     if (category === "media") {
