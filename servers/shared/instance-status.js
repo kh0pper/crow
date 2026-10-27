@@ -49,7 +49,7 @@ export async function markInstanceConnectionSeen(db, { matchedIds, remoteInstanc
     : [...matchedIds];
   for (const id of ids) {
     await db.execute({
-      sql: `UPDATE crow_instances SET last_seen_at = datetime('now'), status = ${livenessStatusSql("active")} WHERE id = ?`,
+      sql: `UPDATE crow_instances SET last_seen_at = datetime('now'), status = ${livenessStatusSql("active")} WHERE id = ? AND status != 'revoked'`,
       args: [id],
     });
   }

@@ -68,7 +68,7 @@ const IDENTITY = { ed25519Priv: TEST_PRIV, ed25519Pubkey: TEST_PUB_HEX };
 /** Register a peer row so it's part of the "currently paired" target set. */
 async function registerPeer(db, id, status = "active") {
   await db.execute({
-    sql: "INSERT INTO crow_instances (id, name, crow_id, status) VALUES (?, ?, ?, ?)",
+    sql: "INSERT INTO crow_instances (id, name, crow_id, status, trusted) VALUES (?, ?, ?, ?, 1)",
     args: [id, id, `crow:${id}`, status],
   });
 }

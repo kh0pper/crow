@@ -70,7 +70,7 @@ export async function registerInstance(db, {
   // If designating as home, clear any existing home first
   if (isHome) {
     await db.execute({
-      sql: "UPDATE crow_instances SET is_home = 0 WHERE is_home = 1",
+      sql: "UPDATE crow_instances SET is_home = 0 WHERE is_home = 1 AND status != 'revoked'",
       args: [],
     });
   }
@@ -163,12 +163,12 @@ export async function heartbeatInstance(db, id, { status } = {}) {
     // overwrite an operator's revoke/pause (livenessStatusSql throws on any
     // other value). Revoke/pause go through revokeInstance/updateInstance.
     await db.execute({
-      sql: `UPDATE crow_instances SET last_seen_at = datetime('now'), status = ${livenessStatusSql(status)}, updated_at = datetime('now') WHERE id = ?`,
+      sql: `UPDATE crow_instances SET last_seen_at = datetime('now'), status = ${livenessStatusSql(status)}, updated_at = datetime('now') WHERE id = ? AND status != 'revoked'`,
       args: [id],
     });
   } else {
     await db.execute({
-      sql: "UPDATE crow_instances SET last_seen_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
+      sql: "UPDATE crow_instances SET last_seen_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status != 'revoked'",
       args: [id],
     });
   }
@@ -213,7 +213,7 @@ export async function updateInstance(db, id, fields) {
   // If setting is_home, clear others first
   if (fields.is_home || fields.isHome) {
     await db.execute({
-      sql: "UPDATE crow_instances SET is_home = 0 WHERE is_home = 1",
+      sql: "UPDATE crow_instances SET is_home = 0 WHERE is_home = 1 AND status != 'revoked'",
       args: [],
     });
   }
@@ -317,11 +317,11 @@ export async function revokeInstance(db, id) {
  */
 export async function setHomeInstance(db, id) {
   await db.execute({
-    sql: "UPDATE crow_instances SET is_home = 0 WHERE is_home = 1",
+    sql: "UPDATE crow_instances SET is_home = 0 WHERE is_home = 1 AND status != 'revoked'",
     args: [],
   });
   await db.execute({
-    sql: "UPDATE crow_instances SET is_home = 1, updated_at = datetime('now') WHERE id = ?",
+    sql: "UPDATE crow_instances SET is_home = 1, updated_at = datetime('now') WHERE id = ? AND status != 'revoked'",
     args: [id],
   });
 }
@@ -332,7 +332,7 @@ export async function setHomeInstance(db, id) {
 export async function rotateAuthToken(db, id) {
   const { token, hash } = generateAuthToken();
   await db.execute({
-    sql: "UPDATE crow_instances SET auth_token_hash = ?, updated_at = datetime('now') WHERE id = ?",
+    sql: "UPDATE crow_instances SET auth_token_hash = ?, updated_at = datetime('now') WHERE id = ? AND status != 'revoked'",
     args: [hash, id],
   });
   return token;

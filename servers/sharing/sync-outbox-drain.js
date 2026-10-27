@@ -21,6 +21,7 @@
  */
 
 import { ensureSyncTables } from "../shared/sync-stamp.js";
+import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
 
 const CLAIM_STALE_MINUTES = 10;
 
@@ -55,7 +56,7 @@ function parseDelivered(json) {
 
 /**
  * The emit-target set a row must be delivered to before it can be deleted:
- * crow_instances rows with status IN ('active','offline') — the exact set
+ * crow_instances rows passing TRUSTED_PEER_SQL (trusted=1, active/offline) — the set
  * `InstanceSyncManager.emitChange` itself broadcasts to. An 'offline' peer
  * is still a target (it retains queued rows indefinitely, by design —
  * durability over a peer that may reconnect); only 'paused'/'revoked' peers
@@ -63,7 +64,7 @@ function parseDelivered(json) {
  */
 async function getPairedPeerIds(db, localInstanceId) {
   const { rows } = await db.execute({
-    sql: "SELECT id FROM crow_instances WHERE status IN ('active','offline') AND id != ?",
+    sql: `SELECT id FROM crow_instances WHERE ${TRUSTED_PEER_SQL} AND id != ?`,
     args: [localInstanceId ?? ""],
   });
   return rows.map((r) => r.id);

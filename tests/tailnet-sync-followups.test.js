@@ -302,6 +302,8 @@ test("repairUndialablePeerRows: fills ONLY an empty tailscale_ip, ONLY with a ta
   quiet();
   try {
     await a.db.execute("INSERT INTO crow_instances (id, name, crow_id, status, gateway_url, tailscale_ip) VALUES ('p1','p1','c','active','https://p1.example.ts.net',NULL), ('p2','p2','c','active','https://p2.example.ts.net','100.64.9.9'), ('p3','p3','c','active','https://p3.example.ts.net:8444',NULL), ('p4','p4','c','active','https://p4.example.ts.net',NULL), ('p5','p5','c','revoked','https://p5.example.ts.net',NULL)");
+    // PT-1: paired peers are trusted (the dial/repair paths gate on the trust predicate).
+    await a.db.execute("UPDATE crow_instances SET trusted = 1 WHERE id IN ('p1','p2','p3','p4','p5')");
     const answers = { "p1.example.ts.net": "100.64.1.1", "p2.example.ts.net": "100.64.2.2", "p3.example.ts.net": "100.64.3.3", "p4.example.ts.net": "10.0.0.4", "p5.example.ts.net": "100.64.5.5" };
     const repaired = await repairUndialablePeerRows({ db: a.db, instanceSyncManager: a.mgr, lookupTailnetIp: async (h) => answers[h] ?? null });
     assert.deepEqual(repaired, ["p1"]);

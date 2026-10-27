@@ -14,6 +14,7 @@
  * every LIVE same-crow_id row (active/offline; revoked and paused excluded).
  */
 import { markInstanceConnectionSeen } from "../shared/instance-status.js";
+import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
 
 /**
  * @param {object} p
@@ -29,7 +30,7 @@ export async function handleInstanceConnection({ db, instanceSyncManager, crowId
   // the signal the peer is up (an offline-but-connected peer must still
   // initialize). Revoked/paused peers stay excluded.
   const { rows } = await db.execute({
-    sql: "SELECT id FROM crow_instances WHERE crow_id = ? AND status IN ('active','offline') AND id != ?",
+    sql: `SELECT id FROM crow_instances WHERE crow_id = ? AND ${TRUSTED_PEER_SQL} AND id != ?`,
     args: [crowId, instanceSyncManager.localInstanceId],
   });
   const liveIds = rows.map((r) => r.id);

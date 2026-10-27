@@ -48,6 +48,7 @@ import {
   recordDialAttempt, recordDialFailure, recordLinkUp, recordLinkClosed,
   recordNoDialAddress, clearNoDialAddress, recordAddressBackfill, forgetPeerDialHealth,
 } from "../shared/peer-dial-health.js";
+import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
 
 const WS_PATH = "/api/instance-sync/stream";
 const HANDSHAKE_TIMEOUT_MS = 10_000;
@@ -338,7 +339,7 @@ export async function backfillPeerAddress(ctx, peerId, addr) {
   const { db } = ctx;
   try {
     const { rows } = await db.execute({
-      sql: "SELECT gateway_url, tailscale_ip FROM crow_instances WHERE id = ? AND status IN ('active','offline') LIMIT 1",
+      sql: `SELECT gateway_url, tailscale_ip FROM crow_instances WHERE id = ? AND ${TRUSTED_PEER_SQL} LIMIT 1`,
       args: [peerId],
     });
     const row = rows[0];
@@ -355,7 +356,7 @@ export async function backfillPeerAddress(ctx, peerId, addr) {
       const current = row[col] != null ? String(row[col]).trim() : "";
       if (current === "") {
         const r = await db.execute({
-          sql: `UPDATE crow_instances SET ${col} = ?, updated_at = datetime('now') WHERE id = ? AND (${col} IS NULL OR TRIM(${col}) = '')`,
+          sql: `UPDATE crow_instances SET ${col} = ?, updated_at = datetime('now') WHERE id = ? AND status != 'revoked' AND (${col} IS NULL OR TRIM(${col}) = '')`,
           args: [addr[col], peerId],
         });
         if (Number(r.rowsAffected ?? 0) > 0) written[col] = addr[col];
@@ -566,7 +567,7 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx, mar
   let peerRow;
   try {
     const { rows } = await db.execute({
-      sql: "SELECT id, sync_url FROM crow_instances WHERE id = ? AND status IN ('active','offline') LIMIT 1",
+      sql: `SELECT id, sync_url FROM crow_instances WHERE id = ? AND ${TRUSTED_PEER_SQL} LIMIT 1`,
       args: [remoteInstanceId],
     });
     if (rows.length === 0) {
@@ -664,7 +665,7 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx, mar
     if (keyBuf) {
       try {
         await db.execute({
-          sql: "UPDATE crow_instances SET sync_url = ?, updated_at = datetime('now') WHERE id = ?",
+          sql: "UPDATE crow_instances SET sync_url = ?, updated_at = datetime('now') WHERE id = ? AND status != 'revoked'",
           args: [peerKeyMsg.feed_key_hex, remoteInstanceId],
         });
         await instanceSyncManager.initInstance(remoteInstanceId, keyBuf);
@@ -678,7 +679,7 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx, mar
   // Mark peer as active now — we just had a successful authenticated connection.
   try {
     await db.execute({
-      sql: `UPDATE crow_instances SET status=${livenessStatusSql("active")}, last_seen_at=datetime('now') WHERE id = ?`,
+      sql: `UPDATE crow_instances SET status=${livenessStatusSql("active")}, last_seen_at=datetime('now') WHERE id = ? AND status != 'revoked'`,
       args: [remoteInstanceId],
     });
   } catch {}
@@ -968,7 +969,7 @@ export class PeerDialer {
         // armed — otherwise a reconnect between the revoke and the next 60 s
         // dialer rescan re-opened the revoked peer's feeds (review I2).
         const { rows: liveRows } = await db.execute({
-          sql: "SELECT 1 FROM crow_instances WHERE id = ? AND status IN ('active','offline') LIMIT 1",
+          sql: `SELECT 1 FROM crow_instances WHERE id = ? AND ${TRUSTED_PEER_SQL} LIMIT 1`,
           args: [remoteInstanceId],
         });
         if (liveRows.length === 0) {
@@ -1026,7 +1027,7 @@ export class PeerDialer {
           });
           if (rows[0]?.sync_url !== peerKeyMsg.feed_key_hex) {
             await db.execute({
-              sql: "UPDATE crow_instances SET sync_url = ?, updated_at = datetime('now') WHERE id = ?",
+              sql: "UPDATE crow_instances SET sync_url = ?, updated_at = datetime('now') WHERE id = ? AND status != 'revoked'",
               args: [peerKeyMsg.feed_key_hex, remoteInstanceId],
             });
             console.log(`[tailnet-sync] persisted feed key from peer ${remoteInstanceId.slice(0,12)}…`);
@@ -1035,7 +1036,7 @@ export class PeerDialer {
 
         // Mark peer as active.
         await db.execute({
-          sql: `UPDATE crow_instances SET status=${livenessStatusSql("active")}, last_seen_at=datetime('now') WHERE id = ?`,
+          sql: `UPDATE crow_instances SET status=${livenessStatusSql("active")}, last_seen_at=datetime('now') WHERE id = ? AND status != 'revoked'`,
           args: [remoteInstanceId],
         }).catch(() => {});
 
@@ -1133,7 +1134,7 @@ export async function repairUndialablePeerRows(ctx) {
   let rows = [];
   try {
     ({ rows } = await db.execute({
-      sql: "SELECT id, name, gateway_url, tailscale_ip FROM crow_instances WHERE status IN ('active','offline') AND id != ?",
+      sql: `SELECT id, name, gateway_url, tailscale_ip FROM crow_instances WHERE ${TRUSTED_PEER_SQL} AND id != ?`,
       args: [instanceSyncManager.localInstanceId],
     }));
   } catch { return repaired; }
@@ -1152,7 +1153,7 @@ export async function repairUndialablePeerRows(ctx) {
     }
     try {
       const u = await db.execute({
-        sql: "UPDATE crow_instances SET tailscale_ip = ?, updated_at = datetime('now') WHERE id = ? AND (tailscale_ip IS NULL OR TRIM(tailscale_ip) = '')",
+        sql: "UPDATE crow_instances SET tailscale_ip = ?, updated_at = datetime('now') WHERE id = ? AND status != 'revoked' AND (tailscale_ip IS NULL OR TRIM(tailscale_ip) = '')",
         args: [ip, r.id],
       });
       if (Number(u.rowsAffected ?? 0) > 0) {
@@ -1191,7 +1192,7 @@ export async function startTailnetSyncClients(ctx) {
     let rows;
     try {
       const r = await db.execute({
-        sql: "SELECT id, name, gateway_url, tailscale_ip, sync_url, status FROM crow_instances WHERE status IN ('active','offline') AND id != ?",
+        sql: `SELECT id, name, gateway_url, tailscale_ip, sync_url, status FROM crow_instances WHERE ${TRUSTED_PEER_SQL} AND id != ?`,
         args: [instanceSyncManager.localInstanceId],
       });
       rows = r.rows;

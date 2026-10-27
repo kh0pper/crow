@@ -685,7 +685,7 @@ export async function loadRemoteInstances() {
           await probePeerHealth(inst.gateway_url);
           recordPeerProbe(inst.id, true);
           await db.execute({
-            sql: "UPDATE crow_instances SET last_seen_at = datetime('now') WHERE id = ?",
+            sql: "UPDATE crow_instances SET last_seen_at = datetime('now') WHERE id = ? AND status != 'revoked'",
             args: [inst.id],
           });
         } catch (err) {
@@ -728,7 +728,7 @@ export async function loadRemoteInstances() {
 
         // Update last_seen
         await db.execute({
-          sql: `UPDATE crow_instances SET last_seen_at = datetime('now'), status = ${livenessStatusSql("active")}, updated_at = datetime('now') WHERE id = ?`,
+          sql: `UPDATE crow_instances SET last_seen_at = datetime('now'), status = ${livenessStatusSql("active")}, updated_at = datetime('now') WHERE id = ? AND status != 'revoked'`,
           args: [inst.id],
         });
       } catch (err) {
@@ -749,7 +749,7 @@ export async function loadRemoteInstances() {
         await db.execute({
           // Never overwrite a revoke/pause that landed while this probe was
           // in flight (MPA retirement defect 4).
-          sql: `UPDATE crow_instances SET status = ${livenessStatusSql("offline")}, updated_at = datetime('now') WHERE id = ?`,
+          sql: `UPDATE crow_instances SET status = ${livenessStatusSql("offline")}, updated_at = datetime('now') WHERE id = ? AND status != 'revoked'`,
           args: [inst.id],
         }).catch(() => {});
       }
