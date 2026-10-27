@@ -115,6 +115,16 @@ sudo systemctl restart caddy
 
 Replace `blog.yourdomain.com` with your actual domain. Caddy will detect the domain, contact Let's Encrypt, and provision a certificate automatically. This typically takes under a minute.
 
+### Behind your own reverse proxy
+
+Crow trusts `X-Forwarded-For` only from proxies you declare. If Caddy or nginx runs **on the same machine** as Crow and you reach the Crow's Nest through it from your LAN, add this to your `.env` and restart the gateway:
+
+```bash
+CROW_TRUSTED_PROXIES=loopback
+```
+
+Without it, the gateway refuses those requests and logs `[net] WARN forwarding headers from undeclared peer` once. If Crow runs in Docker behind `docker-proxy`, use the network's bridge gateway instead (find it with `docker network inspect <network> --format '{{(index .IPAM.Config 0).Gateway}}'`). Tailscale Serve and Funnel need no entry. `CROW_ALLOWED_IPS` lists trusted *clients*, not proxies.
+
 ## Step 4: Set the Public URL
 
 Tell Crow its public address so it generates correct links in blog feeds, share URLs, and the Crow's Nest:

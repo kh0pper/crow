@@ -196,16 +196,18 @@ The Crow's Nest is **private by default** — think of it like a locked back off
 
 | Network | Range | Who uses this |
 |---|---|---|
-| Localhost | `127.0.0.1`, `::1` | The server itself |
+| Tailscale Serve | loopback, opened by tailscaled on this machine | Your tailnet devices over HTTPS |
 | LAN (Class A) | `10.0.0.0/8` | Home/office networks |
 | LAN (Class B) | `172.16.0.0/12` | Docker, some corporate networks |
 | LAN (Class C) | `192.168.0.0/16` | Most home routers |
-| Tailscale | `100.64.0.0/10` | Tailscale VPN (CGNAT range) |
+| Tailscale | `100.64.0.0/10`, `fd7a:115c:a1e0::/48` | Tailscale VPN (IPv4 CGNAT range and IPv6) |
 
 If a request comes from an IP outside these ranges, the Crow's Nest returns a **403 Forbidden** response. This is intentional — the Crow's Nest has full control over your data and should not be exposed to the public internet.
 
 ::: warning
 Only set `CROW_DASHBOARD_PUBLIC=true` if the gateway is behind another authentication layer (e.g., a reverse proxy with HTTP basic auth, Cloudflare Access, or a VPN). Without an additional auth layer, anyone on the internet could access the Crow's Nest with only a password between them and your data.
+
+If your reverse proxy runs on the same machine, you usually don't need `CROW_DASHBOARD_PUBLIC` at all: declare the proxy with `CROW_TRUSTED_PROXIES=loopback` so LAN clients behind it are recognised (see [Custom Domain](/getting-started/custom-domain#behind-your-own-reverse-proxy)).
 :::
 
 For remote access without opening the Crow's Nest publicly, use [Tailscale](/getting-started/tailscale-setup). Tailscale IPs fall within the `100.64.0.0/10` range that the Crow's Nest already trusts.
