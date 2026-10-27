@@ -8,7 +8,7 @@ export const MAKE_CSS = `<style>
   .mk-grid { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--crow-space-3); grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
   .mk-tile { display: flex; flex-direction: column; gap: var(--crow-space-2); min-height: 44px; height: 100%; padding: var(--crow-space-2); border: 1px solid var(--crow-border); border-radius: 12px; background: var(--crow-bg-surface); color: var(--crow-text-primary); text-decoration: none; }
   .mk-tile.mk-just { border-color: var(--crow-accent); box-shadow: 0 0 0 1px var(--crow-accent); }
-  .mk-preview { display: flex; align-items: center; justify-content: center; aspect-ratio: 4 / 3; border-radius: 8px; background: var(--crow-bg-elevated); color: var(--crow-text-muted); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  .mk-preview { display: flex; align-items: center; justify-content: center; aspect-ratio: 5 / 4; border-radius: 8px; background: var(--crow-bg-elevated); color: var(--crow-text-muted); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; }
   .mk-preview { position: relative; overflow: hidden; flex-direction: column; gap: 4px; }
   .mk-preview-img { background: var(--crow-bg-deep); }
   .mk-preview-img img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top center; }
@@ -24,6 +24,7 @@ export const MAKE_CSS = `<style>
   .mk-empty-text { color: var(--crow-text-muted); }
   .mk-offer { display: grid; gap: var(--crow-space-2); justify-items: start; margin: 0 0 var(--crow-space-3); padding: var(--crow-space-3); border: 1px dashed var(--crow-border); border-radius: 12px; }
   .mk-offer p { margin: 0; }
+  .mk-offer .btn { display: inline-flex; align-items: center; min-height: 44px; }
   .mk-bar { display: flex; gap: var(--crow-space-3); flex-wrap: wrap; align-items: center; justify-content: space-between; }
   .mk-start-btn { min-height: 44px; }
   .mk-sheet { width: min(480px, 100vw); max-width: 100vw; max-height: 90vh; margin: auto auto 0; padding: 0; border: 1px solid var(--crow-border); border-radius: 16px 16px 0 0; background: var(--crow-bg-surface); color: var(--crow-text-primary); }
