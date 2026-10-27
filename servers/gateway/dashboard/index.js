@@ -82,6 +82,7 @@ import connectPanel from "./panels/connect.js";
 import fediversePanel from "./panels/fediverse.js";
 import meteringPanel from "./panels/metering.js";
 import perchHubPanel from "./panels/perch-hub.js";
+import makePanel, { openMakeItem } from "./panels/make.js";
 import { handleFixItAction } from "../fix-it/index.js";
 import bundlesRouterFactory from "../routes/bundles.js";
 import { keychainApiRouter } from "../keychain/api.js";
@@ -122,6 +123,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   registerPanel(fediversePanel);
   registerPanel(meteringPanel);
   registerPanel(perchHubPanel);
+  registerPanel(makePanel);
 
   // Load third-party panels (async, non-blocking)
   loadExternalPanels().catch((err) => {
@@ -646,6 +648,12 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     try { await schedulePreview(req, res, db); }
     catch (err) { if (!res.headersSent) res.status(500).json({ ok: false, error: "preview failed" }); console.warn("[schedule] preview:", err.message); }
     finally { db.close(); }
+  });
+
+  // Make tab: open a tile (marks it seen, then redirects). Session-gated by dashboardAuth above.
+  router.get("/dashboard/make/open/:kind/:ref", async (req, res) => {
+    const db = createDbClient();
+    try { await openMakeItem(req, res, db); } finally { db.close(); }
   });
 
   // Crow keychain API (Settings → Security & passwords → Saved passwords & keys + the Extensions first-view banner).

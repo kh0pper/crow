@@ -3709,6 +3709,25 @@ export const translations = {
   "shell.notNow": { en: "Not now", es: "Ahora no" },
   "settings.section.crowMode": { en: "New Crow", es: "El nuevo Crow" },
   "shell.account": { en: "Settings and mode", es: "Ajustes y modo" },
+
+  // ─── Make tab (P4) ───
+  "shell.makeAll": { en: "All", es: "Todo" },
+  "shell.makeDocs": { en: "Documents", es: "Documentos" },
+  "shell.makePages": { en: "Pages", es: "Páginas" },
+  "shell.makeShared": { en: "Shared", es: "Compartido" },
+  "shell.justMade": { en: "Just made", es: "Recién hecho" },
+  "shell.needArtifacts": { en: "Pages and diagrams need Artifacts.", es: "Las páginas y los diagramas necesitan Artifacts." },
+  "shell.getArtifacts": { en: "Get Artifacts", es: "Instalar Artifacts" },
+  "shell.needWorkspace": { en: "Documents and spreadsheets need Crow Workspace.", es: "Los documentos y las hojas de cálculo necesitan Crow Workspace." },
+  "shell.getWorkspace": { en: "Get Workspace", es: "Instalar Workspace" },
+  "shell.finishWorkspace": { en: "Finish setting up Workspace", es: "Termina de configurar Workspace" },
+  "shell.makeEmpty": { en: "Nothing here yet. Start something.", es: "Aún no hay nada. Empieza algo." },
+  "shell.workspaceUnavailable": { en: "Workspace can't be reached right now.", es: "No se puede conectar con Workspace ahora mismo." },
+  "shell.makeType.document": { en: "Document", es: "Documento" },
+  "shell.makeType.spreadsheet": { en: "Spreadsheet", es: "Hoja de cálculo" },
+  "shell.makeType.deck": { en: "Slides", es: "Diapositivas" },
+  "shell.makeType.page": { en: "Page", es: "Página" },
+  "shell.makeType.diagram": { en: "Diagram", es: "Diagrama" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
