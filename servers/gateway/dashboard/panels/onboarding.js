@@ -624,49 +624,68 @@ export async function handleCloudProviderPost(req, res, opts = {}) {
  * means the user finished the tour, and the flag must only ever be written
  * once (idempotent replay from Settings must not touch it again).
  * @param {{execute: Function}|null} db
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>} true only for the call that wrote the flag
  */
 async function stampOnboardingCompleted(db) {
-  if (!db) return;
+  if (!db) return false;
   try {
     const existing = await readSetting(db, "onboarding_completed_at");
     if (!existing) {
       await upsertSetting(db, "onboarding_completed_at", new Date().toISOString());
+      return true;
     }
   } catch {}
+  return false;
 }
 
 /**
- * "Previews in Make" (the starter step's toggle, on by default). Next on that step
- * records the choice (`previews_onboarding_choice`, local-only); finishing the tour (the
- * done step, or the meet POST) applies it to `previews_enabled` and, when on, starts the
- * image build in the background. An instance that never saw the toggle keeps previews
- * off (absent means off), so an upgrade never builds anything by itself.
+ * "Previews in Make" (the starter step's toggle, on by default). Next on that step is a
+ * CSRF-checked POST (handlePreviewsPost, below) that records the choice
+ * (`previews_onboarding_choice`, local-only); a GET never writes it. The FIRST
+ * completion of the tour (the done step, or the meet POST, whichever stamps
+ * onboarding_completed_at) applies it to `previews_enabled` and, when on, starts the
+ * image build in the background. A later visit to done never touches it, and an
+ * instance that never posted the toggle keeps previews off (absent means off), so an
+ * upgrade never builds anything by itself.
  */
-async function recordPreviewsChoice(db, query) {
-  if (!db || query.previews_seen !== "1") return;
-  try { await upsertSetting(db, "previews_onboarding_choice", query.previews === "on" ? "on" : "off"); } catch {}
-}
-
 async function applyPreviewsChoice(db) {
-  if (!db) return;
   try {
     const choice = await readSetting(db, "previews_onboarding_choice");
     if (choice !== "on" && choice !== "off") return;
     await setPreviewsEnabled(db, choice === "on");
-    await upsertSetting(db, "previews_onboarding_choice", "applied");
     if (choice === "on") previewRenderer().prepare().catch(() => {});
   } catch {}
 }
 
-function renderPreviewsToggle(lang, nextIdx) {
-  return `<form method="GET" action="/dashboard/onboarding" id="onboarding-previews-form" style="margin-top:var(--crow-space-4)">
-    <input type="hidden" name="step" value="${nextIdx}">
-    <input type="hidden" name="previews_seen" value="1">
+/** Stamp onboarding complete; on the first completion only, apply the previews choice. */
+async function finishOnboarding(db) {
+  if (await stampOnboardingCompleted(db)) await applyPreviewsChoice(db);
+}
+
+function renderPreviewsToggle(lang, req) {
+  return `<form method="POST" action="/dashboard/onboarding/previews" id="onboarding-previews-form" data-turbo="false" style="margin-top:var(--crow-space-4)">
+    ${csrfInput(req)}
     <label style="display:flex;align-items:center;gap:var(--crow-space-2);min-height:44px;cursor:pointer;color:var(--crow-text-secondary)">
       <input type="checkbox" name="previews" value="on" checked style="accent-color:var(--crow-accent);width:auto"> ${escapeHtml(t("onboarding.previews", lang))}
     </label>
   </form>`;
+}
+
+/**
+ * POST /dashboard/onboarding/previews — hand-registered in dashboard/index.js beside
+ * the meet POST, BEHIND dashboardAuth + csrfMiddleware. Records the starter step's
+ * previews toggle (an unchecked box is absent: "off") and moves on to the next step.
+ * It only records; finishing the tour applies it.
+ */
+export async function handlePreviewsPost(req, res, opts = {}) {
+  const { db = null } = opts;
+  const next = STEP_KEYS.indexOf("starter") + 1;
+  try {
+    if (db) await upsertSetting(db, "previews_onboarding_choice", req.body?.previews === "on" ? "on" : "off");
+  } catch (err) {
+    console.error("[onboarding] previews choice not saved:", err.message);
+  }
+  return res.redirectAfterPost(`/dashboard/onboarding?step=${next}`);
 }
 
 /**
@@ -717,8 +736,7 @@ export async function handleMeetPost(req, res, opts = {}) {
     if (result && result.error === "no_provider") {
       return back("no_provider");
     }
-    await stampOnboardingCompleted(db);
-    await applyPreviewsChoice(db);
+    await finishOnboarding(db);
     return res.redirectAfterPost(`/dashboard/messages?ai=${result.conversationId}`);
   } catch (err) {
     console.error("[onboarding] meet-your-crow setup failed:", err.message); // message only
@@ -795,7 +813,7 @@ function renderStepBody(stem, lang, ctx = {}) {
     case "starter":
       return body + renderStarterCards(lang)
         + linkWrap(deepLink(t("onboarding.openCollections", lang), "/dashboard/extensions#collections"))
-        + renderPreviewsToggle(lang, STEP_KEYS.indexOf("starter") + 1);
+        + renderPreviewsToggle(lang, ctx.req);
     case "integrations":
       return body + callout(t("onboarding.integrationsNote", lang), "info")
         + linkWrap(deepLink(t("onboarding.openIntegrations", lang), "/dashboard/settings?section=integrations"));
@@ -915,11 +933,7 @@ export default {
     const stem = STEP_KEYS[current];
 
     // W3-3: Reaching the "done" step marks onboarding complete (first time only).
-    await recordPreviewsChoice(db, req.query);
-    if (stem === "done") {
-      await stampOnboardingCompleted(db);
-      await applyPreviewsChoice(db);
-    }
+    if (stem === "done") await finishOnboarding(db);
 
     // The ai step's copy and the done step's dormant callout are conditional
     // on whether ANY provider is configured (providersCount); the meet step
@@ -936,6 +950,7 @@ export default {
     // ?err= query.
     const ctx = stem === "ai" ? { providersCount: await countProviders(db), req }
       : stem === "meet" ? { starterProvider: await safeResolveStarterProvider(db, resolveStarterProviderFn), req }
+      : stem === "starter" ? { req }
       : stem === "done" ? { crowId: readInstanceCrowId(), req, providersCount: await countProviders(db) }
       : {};
 

@@ -19,8 +19,10 @@ import {
   _setPreviewRendererForTest,
 } from "../servers/gateway/preview/renderer.js";
 import { _setPreviewSeccompPathForTest } from "../servers/gateway/compose-guard.js";
-import themeSection from "../servers/gateway/dashboard/settings/sections/theme.js";
-import onboardingPanel, { STEP_KEYS } from "../servers/gateway/dashboard/panels/onboarding.js";
+import previewsSection from "../servers/gateway/dashboard/settings/sections/previews.js";
+import onboardingPanel, { STEP_KEYS, handlePreviewsPost } from "../servers/gateway/dashboard/panels/onboarding.js";
+import { csrfMiddleware } from "../servers/gateway/dashboard/shared/csrf.js";
+import { readFileSync } from "node:fs";
 import { t } from "../servers/gateway/dashboard/shared/i18n.js";
 
 const DIR = fileURLToPath(new URL("../servers/gateway/preview/container/", import.meta.url)).replace(/\/$/, "");
@@ -575,7 +577,7 @@ test("the off switch stops it, and removes the image only on request", async () 
   const { docker, db, r } = setup();
   _setPreviewRendererForTest(r);
   try {
-    const html = await themeSection.render({ db, lang: "en" });
+    const html = await previewsSection.render({ db, lang: "en" });
     assert.ok(html.includes(t("settings.previews", "en")));
     assert.ok(html.includes(t("settings.previewsRemoveImage", "en")));
     assert.match(html, /name="previews" value="true" checked/);
@@ -586,7 +588,7 @@ test("the off switch stops it, and removes the image only on request", async () 
     assert.equal(r.state(), "running");
 
     const res = fakeRes();
-    assert.equal(await themeSection.handleAction({ req: { body: { action: "update_previews" } }, res, db, action: "update_previews" }), true);
+    assert.equal(await previewsSection.handleAction({ req: { body: { action: "update_previews" } }, res, db, action: "update_previews" }), true);
     assert.equal(db.get("previews_enabled"), "false");
     assert.equal(r.state(), "stopped");
     assert.ok(docker.log.some((e) => e.args[0] === "rm" && e.args.includes(name)));
@@ -594,10 +596,10 @@ test("the off switch stops it, and removes the image only on request", async () 
     assert.ok(res.redirected);
     assert.deepEqual(await r.acquire(), { off: "not_enabled" });
 
-    const html2 = await themeSection.render({ db, lang: "en" });
+    const html2 = await previewsSection.render({ db, lang: "en" });
     assert.doesNotMatch(html2, /name="previews" value="true" checked/);
 
-    await themeSection.handleAction({ req: { body: { action: "update_previews", previews_remove_image: "true" } }, res: fakeRes(), db, action: "update_previews" });
+    await previewsSection.handleAction({ req: { body: { action: "update_previews", previews_remove_image: "true" } }, res: fakeRes(), db, action: "update_previews" });
     const rm = docker.log.filter((e) => e.args[0] === "image" && e.args[1] === "rm");
     assert.equal(rm.length, 1);
     assert.equal(rm[0].args[rm[0].args.length - 1], previewImageTag());
@@ -611,7 +613,7 @@ test("the off switch stops it, and removes the image only on request", async () 
     assert.equal(docker.log.filter((e) => e.args[0] === "image" && e.args[1] === "rm").length, 1);
 
     // Back on: written, and the build is kicked.
-    await themeSection.handleAction({ req: { body: { action: "update_previews", previews: "true" } }, res: fakeRes(), db, action: "update_previews" });
+    await previewsSection.handleAction({ req: { body: { action: "update_previews", previews: "true" } }, res: fakeRes(), db, action: "update_previews" });
     assert.equal(db.get("previews_enabled"), "true");
   } finally {
     _setPreviewRendererForTest(null);
@@ -626,34 +628,98 @@ async function renderStep(query, db) {
   return typeof out === "string" ? out : captured;
 }
 
+const SESSION = { cookie: "crow_session=s1; crow_csrf=tok123" };
+/** The previews POST through the real csrfMiddleware, as dashboard/index.js mounts it. */
+async function postPreviews(body, db, headers = SESSION) {
+  const req = { method: "POST", headers, body, query: {} };
+  const res = { ...fakeRes(), statusCode: null, status(c) { this.statusCode = c; return this; }, type() { return this; }, send() { return this; } };
+  let passed = false;
+  csrfMiddleware(req, res, () => { passed = true; });
+  if (passed) await handlePreviewsPost(req, res, { db });
+  return res;
+}
+
 test("onboarding shows the toggle on, and finishing it writes previews_enabled=\"true\"", async () => {
   const { docker, db, r } = setup({ enabled: false, imageReady: false });
   _setPreviewRendererForTest(r);
   try {
     const starter = STEP_KEYS.indexOf("starter");
+    const done = String(STEP_KEYS.indexOf("done"));
     const html = await renderStep({ step: String(starter) }, db);
     assert.ok(html.includes(t("onboarding.previews", "en")));
     assert.match(html, /<input type="checkbox" name="previews" value="on" checked/);
+    assert.match(html, /<form method="POST" action="\/dashboard\/onboarding\/previews"/);
+    assert.match(html, /name="_csrf"/);
     assert.match(html, /form="onboarding-previews-form"/, "Next submits the toggle");
     assert.equal(db.get("previews_enabled"), null, "showing the step writes nothing");
 
-    await renderStep({ step: String(starter + 1), previews_seen: "1", previews: "on" }, db);
+    const res = await postPreviews({ previews: "on", _csrf: "tok123" }, db);
+    assert.equal(res.statusCode, null);
+    assert.equal(res.redirected, `/dashboard/onboarding?step=${starter + 1}`);
+    assert.equal(db.get("previews_onboarding_choice"), "on");
     assert.equal(db.get("previews_enabled"), null, "not until onboarding is finished");
-    await renderStep({ step: String(STEP_KEYS.indexOf("done")) }, db);
+    await renderStep({ step: done }, db);
     assert.equal(db.get("previews_enabled"), "true");
     await flush();
     assert.equal(composeVerbs(docker.log).filter((v) => v === "build").length, 1, "the image builds in the background");
 
+    // A second visit to done never flips it, even after the operator turned it off.
+    await setPreviewsEnabled(db, false);
+    await renderStep({ step: done }, db);
+    assert.equal(db.get("previews_enabled"), "false");
+
     // Turned off at the starter step: finishing leaves previews off.
     const off = setup({ enabled: false, imageReady: false });
     _setPreviewRendererForTest(off.r);
-    await renderStep({ step: String(starter + 1), previews_seen: "1" }, off.db);
-    await renderStep({ step: String(STEP_KEYS.indexOf("done")) }, off.db);
+    await postPreviews({ _csrf: "tok123" }, off.db);
+    assert.equal(off.db.get("previews_onboarding_choice"), "off");
+    await renderStep({ step: done }, off.db);
     assert.notEqual(off.db.get("previews_enabled"), "true");
     assert.deepEqual(composeVerbs(off.docker.log), []);
   } finally {
     _setPreviewRendererForTest(null);
   }
+});
+
+test("onboarding: a GET never records or applies the previews choice", async () => {
+  const { docker, db, r } = setup({ enabled: false, imageReady: false });
+  _setPreviewRendererForTest(r);
+  try {
+    const starter = STEP_KEYS.indexOf("starter");
+    await renderStep({ step: String(starter + 1), previews_seen: "1", previews: "on" }, db);
+    await renderStep({ step: String(STEP_KEYS.indexOf("done")), previews_seen: "1", previews: "on" }, db);
+    assert.equal(db.get("previews_onboarding_choice"), null);
+    assert.equal(db.get("previews_enabled"), null);
+    assert.deepEqual(docker.log, []);
+  } finally {
+    _setPreviewRendererForTest(null);
+  }
+});
+
+test("onboarding: the previews POST without a valid CSRF token is refused", async () => {
+  const { db } = setup({ enabled: false, imageReady: false });
+  for (const body of [{ previews: "on" }, { previews: "on", _csrf: "wrong" }]) {
+    const res = await postPreviews(body, db);
+    assert.equal(res.statusCode, 403);
+    assert.equal(res.redirected, null);
+  }
+  assert.equal(db.get("previews_onboarding_choice"), null);
+  // Mounted behind csrfMiddleware (after router.use("/dashboard", csrfMiddleware)).
+  const src = readFileSync(new URL("../servers/gateway/dashboard/index.js", import.meta.url), "utf8");
+  const mw = src.indexOf('router.use("/dashboard", csrfMiddleware)');
+  const route = src.indexOf('router.post("/dashboard/onboarding/previews"');
+  assert.ok(mw !== -1 && route > mw, "the route is registered after csrfMiddleware");
+});
+
+test("the previews section is in Appearance, not hidden, and registered", async () => {
+  assert.equal(previewsSection.group, "appearance");
+  assert.ok(!previewsSection.hidden);
+  assert.equal(previewsSection.labelKey, "settings.section.previews");
+  const src = readFileSync(new URL("../servers/gateway/dashboard/panels/settings.js", import.meta.url), "utf8");
+  assert.match(src, /import previewsSection from "\.\.\/settings\/sections\/previews\.js"/);
+  assert.match(src, /registerSettingsSection\(previewsSection\)/);
+  const theme = readFileSync(new URL("../servers/gateway/dashboard/settings/sections/theme.js", import.meta.url), "utf8");
+  assert.doesNotMatch(theme, /previews/i, "the blog theme section has no previews switch");
 });
 
 test("an existing instance after upgrade has previews off and builds nothing", async () => {

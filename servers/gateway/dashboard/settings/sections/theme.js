@@ -11,8 +11,6 @@
 
 import { formField } from "../../shared/components.js";
 import { upsertSetting, readSettings } from "../registry.js";
-import { t } from "../../shared/i18n.js";
-import { previewsEnabled, setPreviewsEnabled, previewRenderer } from "../../../preview/renderer.js";
 
 export default {
   id: "theme",
@@ -69,7 +67,6 @@ export default {
       <p style="color:var(--crow-text-muted);font-size:0.8rem;margin-bottom:1rem">Applies to the blog and songbook. The Blog Override lets the blog run in a different mode than the global setting.</p>
       <button type="submit" class="btn btn-primary">Save Theme</button>
     </form>
-    ${await renderPreviewsSwitch(db, lang)}
     <script>
     // Handle unchecked checkboxes (send "false" instead of omitting)
     document.querySelector('form [name="action"][value="update_theme"]')?.closest('form')?.addEventListener('submit', function(e) {
@@ -97,38 +94,6 @@ export default {
       return true;
     }
 
-    if (action === "update_previews") {
-      // Previews in Make (the preview renderer): off stops it at once; the image goes
-      // only when asked, and only when no preview container is running it.
-      const on = req.body.previews === "true";
-      await setPreviewsEnabled(db, on);
-      const renderer = previewRenderer();
-      if (on) {
-        renderer.prepare().catch(() => {});
-      } else {
-        await renderer.stop();
-        if (req.body.previews_remove_image === "true") await renderer.removeImage();
-      }
-      res.redirectAfterPost("/dashboard/settings?section=theme");
-      return true;
-    }
-
     return false;
   },
 };
-
-/** The "Previews in Make" switch (local-only `previews_enabled`; absent means off). */
-async function renderPreviewsSwitch(db, lang) {
-  const on = await previewsEnabled(db);
-  const row = "display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.9rem;min-height:44px";
-  return `<form method="POST" style="margin-top:1.5rem">
-      <input type="hidden" name="action" value="update_previews">
-      <label style="${row}">
-        <input type="checkbox" name="previews" value="true"${on ? " checked" : ""} style="accent-color:var(--crow-accent);width:auto"> ${t("settings.previews", lang)}
-      </label>
-      <label style="${row};color:var(--crow-text-muted)">
-        <input type="checkbox" name="previews_remove_image" value="true" style="accent-color:var(--crow-accent);width:auto"> ${t("settings.previewsRemoveImage", lang)}
-      </label>
-      <button type="submit" class="btn btn-secondary">${t("common.save", lang)}</button>
-    </form>`;
-}

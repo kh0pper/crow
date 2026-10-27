@@ -2684,6 +2684,7 @@ export const translations = {
   "settings.backToSettings": { en: "Settings", es: "Ajustes" },
   "settings.previews": { en: "Previews in Make", es: "Vistas previas en Crear" },
   "settings.previewsRemoveImage": { en: "Also remove the preview image", es: "Quitar también la imagen de vistas previas" },
+  "settings.section.previews": { en: "Previews in Make", es: "Vistas previas en Crear" },
 
   // ─── Sync Conflicts Section (W4-1) ───
   "syncConflicts.description": {
