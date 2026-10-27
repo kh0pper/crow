@@ -5,7 +5,8 @@
  * never matches one.
  *
  * Phone first (390 px): the four lanes sit in one horizontal scroll-snap
- * container inside the board (each lane 86% wide so the next one peeks in);
+ * container inside the board (each lane the column less 36 px, so the next
+ * one peeks in);
  * the page itself never scrolls sideways. From 1024 px the lanes sit side by
  * side and the chips go (each lane heading carries its count).
  *
@@ -48,7 +49,11 @@ export function boardCss() {
     -webkit-overflow-scrolling: touch;
     padding-bottom: 8px;
   }
-  body.shell .sb-lane { flex: 0 0 86%; min-width: 0; scroll-snap-align: start; }
+  /* Each lane is the column less a fixed 36 px, so the next lane always peeks
+     in by 24 px (36 less the 12 px gap). The spacer after the last lane gives
+     the scroller room to bring Done (the last lane) to the start too. */
+  body.shell .sb-lane { flex: 0 0 calc(100% - 36px); min-width: 0; scroll-snap-align: start; }
+  body.shell .sb-lanes::after { content: ""; flex: 0 0 24px; }
   body.shell .sb-lane-h {
     display: flex; align-items: baseline; gap: 0.4rem;
     margin: 0 0 8px; font-size: 0.95rem; font-weight: 600; color: var(--crow-text-primary);
@@ -138,6 +143,7 @@ export function boardCss() {
       display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
       overflow-x: visible; scroll-snap-type: none;
     }
+    body.shell .sb-lanes::after { content: none; }
   }
   @media (prefers-reduced-motion: reduce) {
     body.shell .sb-lanes { scroll-behavior: auto; }
