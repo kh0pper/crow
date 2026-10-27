@@ -3764,6 +3764,20 @@ export const translations = {
   "shell.previewsStartFailed": { en: "Previews are off: the preview browser didn't start.", es: "Las vistas previas están desactivadas: el navegador de vistas previas no arrancó." },
   "shell.previewsNoSandbox": { en: "Previews are off: this machine doesn't allow the preview browser's sandbox.", es: "Las vistas previas están desactivadas: esta máquina no permite el aislamiento del navegador de vistas previas." },
   "shell.previewsOriginDown": { en: "Previews are paused: the artifact viewer isn't answering.", es: "Las vistas previas están en pausa: el visor de artefactos no responde." },
+  // Board tab (P3)
+  "shell.laneNeedsYou": { en: "Needs you", es: "Te necesita" },
+  "shell.laneWorking": { en: "Working", es: "En marcha" },
+  "shell.laneUpNext": { en: "Up next", es: "Lo siguiente" },
+  "shell.laneDone": { en: "Done", es: "Hecho" },
+  "shell.laneMore": { en: "Showing {shown} of {n}", es: "Mostrando {shown} de {n}" },
+  "shell.laneEmptyNeedsYou": { en: "Nothing needs you right now.", es: "Ahora mismo nada te necesita." },
+  "shell.laneEmptyWorking": { en: "No bot is working on a card.", es: "Ningún bot está trabajando en una tarjeta." },
+  "shell.laneEmptyUpNext": { en: "Nothing is waiting to start.", es: "No hay nada esperando para empezar." },
+  "shell.laneEmptyDone": { en: "Nothing finished yet.", es: "Aún no hay nada terminado." },
+  "shell.boardLanes": { en: "Board lanes", es: "Carriles del tablero" },
+  "shell.cardDetails": { en: "Details", es: "Detalles" },
+  "shell.boardEmpty": { en: "No cards in this project yet.", es: "Aún no hay tarjetas en este proyecto." },
+  "shell.boardEmptyChat": { en: "Start in Chat", es: "Empieza en Chat" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

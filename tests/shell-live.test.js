@@ -316,11 +316,12 @@ test("a Turbo visit between tabs keeps one shell, and aria-current moves (phone 
     try {
       assert.equal(await p.ev(current), "/dashboard/perch");
       await p.ev("window.__shellMark = 1; true");
-      await p.click(".shell-tab[href='/dashboard/bot-board']");
-      await p.until("location.pathname === '/dashboard/bot-board'", "Board");
+      // The Board tab is the board panel (P3) once it is registered.
+      await p.click(".shell-tab[href='/dashboard/board']");
+      await p.until("location.pathname === '/dashboard/board'", "Board");
       await p.settled();
       assert.equal(await p.ev("document.querySelectorAll('.shell-tabs').length"), 1);
-      assert.equal(await p.ev(current), "/dashboard/bot-board");
+      assert.equal(await p.ev(current), "/dashboard/board");
       await p.click(".shell-tab[href='/dashboard/make']");
       await p.until("location.pathname === '/dashboard/make' && !!document.querySelector('.mk-page')", "Make");
       await p.settled();

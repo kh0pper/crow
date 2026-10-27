@@ -4,6 +4,7 @@
  * Wires bot-board/* submodules. See panels/bot-board/ for the implementation.
  */
 
+import { existsSync } from "node:fs";
 import { escapeHtml, section } from "../shared/components.js";
 import { t } from "../shared/i18n.js";
 import { botBoardStyles } from "./bot-board/css.js";
@@ -31,6 +32,30 @@ async function cardCountsFor(projectIds) {
   } catch { /* tasks.db absent: chips just carry no count */ }
   finally { if (tdb) { try { tdb.close(); } catch { /* already closed */ } } }
   return out;
+}
+/**
+ * The bot whose board holds a card, for a bare ?card=N (the Board tab's
+ * Details link): the bot on the card's project (kanban/task-list first),
+ * else the card's assigned bot, else null. Reads the instance-global
+ * tasks.db only, and never creates it.
+ */
+async function botForCard(bots, cardId) {
+  const id = Number(cardId);
+  if (!Number.isInteger(id) || !existsSync(TASKS_DB)) return null;
+  let tdb, row;
+  try {
+    tdb = createDbClient(TASKS_DB);
+    row = (await tdb.execute({ sql: "SELECT project_id, assigned_bot FROM tasks_items WHERE id = ?", args: [id] })).rows[0];
+  } catch { return null; }
+  finally { if (tdb) { try { tdb.close(); } catch { /* already closed */ } } }
+  if (!row) return null;
+  if (row.project_id != null) {
+    const pid = Number(row.project_id);
+    const onProject = bots.filter((b) => b.projectId != null && Number(b.projectId) === pid);
+    const match = onProject.find((b) => b.trackerType === "kanban" || b.trackerType === "task-list") || onProject[0];
+    if (match) return match;
+  }
+  return row.assigned_bot ? bots.find((b) => b.botId === String(row.assigned_bot)) || null : null;
 }
 import { clientJs } from "./bot-board/client.js";
 import { handleBotBoardPost } from "./bot-board/api-handlers.js";
@@ -98,6 +123,10 @@ export default {
     let selBot = null;
     if (reqBot != null) {
       selBot = bots.find((b) => b.botId === reqBot) || null;
+    }
+    // A bare ?card=N opens the card on the board that holds it.
+    if (!selBot && reqBot == null && q.card != null && q.card !== "") {
+      selBot = await botForCard(bots, q.card);
     }
     if (!selBot && bots.length > 0 && reqBot == null) {
       selBot = bots[0]; // default to first enabled bot
