@@ -42,4 +42,12 @@ export const MAKE_CSS = `<style>
   .mk-status { margin: 0; min-height: 1.2em; color: var(--crow-text-muted); font-size: 0.85rem; }
   .mk-composer-actions { display: flex; gap: var(--crow-space-2); justify-content: flex-end; }
   .mk-composer-actions .btn { min-height: 44px; }
+  .mk-cell { position: relative; }
+  .mk-more { position: absolute; top: 4px; right: 4px; min-width: 44px; min-height: 44px; border: 0; border-radius: 999px; background: var(--crow-bg-elevated); color: var(--crow-text-secondary); font-size: 1.25rem; cursor: pointer; }
+  .mk-tile { -webkit-touch-callout: none; }
+  .mk-vline { min-height: 44px; justify-self: start; padding: 0 var(--crow-space-3); border: 0; border-radius: 999px; background: var(--crow-bg-elevated); color: var(--crow-text-primary); font: inherit; cursor: pointer; }
+  .mk-vline:not(button), .mk-vline[data-plain] { cursor: default; }
+  .mk-versions { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--crow-space-2); }
+  .mk-versions[hidden], .mk-vline[hidden] { display: none; }
+  .mk-vlink { display: flex; align-items: center; min-height: 44px; padding: 0 var(--crow-space-3); border: 1px solid var(--crow-border); border-radius: 12px; color: var(--crow-text-primary); text-decoration: none; }
 </style>`;

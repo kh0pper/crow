@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { t } from "../shared/i18n.js";
 import { listMakeItems } from "../../make/sources.js";
-import { markSeen } from "../../../shared/shell-items.js";
+import { markSeen, activeProjects } from "../../../shared/shell-items.js";
 import { renderMakePage } from "./make/html.js";
 import { MAKE_CSS } from "./make/css.js";
 import { makeClientJs } from "./make/client.js";
@@ -92,9 +92,11 @@ export default {
         if (rows[0]) project = { id: Number(scope.projectId), name: String(rows[0].name || scope.slug || "") };
       } catch (err) { console.warn(`[make] project name lookup failed: ${err.message}`); }
     }
+    let projects = [];
+    try { projects = await activeProjects(db); } catch (err) { console.warn(`[make] project list failed: ${err.message}`); }
     return layout({
       title: t("shell.tabMake", lang),
-      content: MAKE_CSS + renderMakePage({ model, filter, lang, project }) + makeClientJs(lang),
+      content: MAKE_CSS + renderMakePage({ model, filter, lang, project, projects }) + makeClientJs(lang),
     });
   },
 };

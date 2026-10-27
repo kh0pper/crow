@@ -3744,6 +3744,14 @@ export const translations = {
   "shell.bot": { en: "Bot", es: "Asistente" },
   "shell.blankTitle": { en: "Title", es: "Título" },
   "shell.noBots": { en: "No bot is attached to Perch yet.", es: "Aún no hay ningún bot conectado a Perch." },
+  "shell.preview": { en: "Preview", es: "Vista previa" },
+  "shell.moreFor": { en: "More about {title}", es: "Más sobre {title}" },
+  "shell.open": { en: "Open", es: "Abrir" },
+  "shell.versionLine": { en: "v{n} \u00b7 earlier versions", es: "v{n} \u00b7 versiones anteriores" },
+  "shell.versionN": { en: "Version {n}", es: "Versi\u00f3n {n}" },
+  "shell.moveToProject": { en: "Move to project", es: "Mover a un proyecto" },
+  "shell.moved": { en: "Moved.", es: "Movido." },
+  "shell.moveFailed": { en: "That didn't move. Try again.", es: "No se pudo mover. Int\u00e9ntalo de nuevo." },
   "shell.startFailed": { en: "That didn't start. Try again.", es: "No se pudo empezar. Inténtalo de nuevo." },
 };
 

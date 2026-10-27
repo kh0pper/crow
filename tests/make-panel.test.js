@@ -83,7 +83,7 @@ test("four filter chips with the active one marked", async () => {
 test("Just made and the card number show only when true", async () => {
   seam({ items: [item({ ref: "art_aaaaaa", justMade: true, cardId: 12 }), item({ ref: "art_bbbbbb", title: "Plain" })], ...OK });
   const r = await get("/dashboard/make");
-  const tiles = r.body.split('<li class="mk-cell">').slice(1).map((x) => x.split("</li>")[0]);
+  const tiles = r.body.split('<li class="mk-cell"').slice(1).map((x) => x.split("</li>")[0]);
   assert.equal(tiles.length, 2);
   assert.match(tiles[0], /class="mk-tile mk-just"/);
   assert.match(tiles[0], /#12/);

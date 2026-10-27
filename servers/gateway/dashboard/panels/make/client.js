@@ -179,5 +179,132 @@ export function makeClientJs(lang) {
   if (botSel) botSel.addEventListener('change', label);
   document.addEventListener('turbo:before-cache', function () { if (dlg.open) closeSheet(); });
 })();
+(function () {
+  var pv = document.getElementById('mk-preview');
+  if (!pv) return;
+  var T_VLINE = '${tJs("shell.versionLine", lang)}';
+  var T_VN = '${tJs("shell.versionN", lang)}';
+  var T_MOVED = '${tJs("shell.moved", lang)}';
+  var T_MOVE_FAILED = '${tJs("shell.moveFailed", lang)}';
+  var titleEl = pv.querySelector('[data-mk-pv-title]');
+  var vline = pv.querySelector('[data-mk-vline]');
+  var vlist = pv.querySelector('[data-mk-versions]');
+  var openA = pv.querySelector('[data-mk-pv-open]');
+  var sel = pv.querySelector('[data-mk-pv-project]');
+  var moveBtn = pv.querySelector('[data-mk-pv-move]');
+  var pvStatus = pv.querySelector('[data-mk-pv-status]');
+  var cur = null;       // the cell being previewed
+  var token = 0;        // guards a slow version fetch against a newer sheet
+  var suppress = false; // a long press just fired: swallow the click that follows
+  var timer = null, sx = 0, sy = 0;
+
+  function csrf() {
+    var parts = document.cookie.split(';');
+    for (var i = 0; i < parts.length; i++) {
+      var kv = parts[i].trim().split('=');
+      if (kv[0] === 'crow_csrf') return decodeURIComponent(kv.slice(1).join('='));
+    }
+    return '';
+  }
+  function hide(el, on) { if (on) el.setAttribute('hidden', ''); else el.removeAttribute('hidden'); }
+
+  function showVersions(art, versions) {
+    var ns = [];
+    for (var i = 0; i < versions.length; i++) ns.push(Number(versions[i].n));
+    ns.sort(function (a, b) { return b - a; });
+    var now = Number(art && art.current_version) || ns[0] || 1;
+    vlist.innerHTML = '';
+    if (ns.length > 1) {
+      vline.textContent = T_VLINE.split('{n}').join(String(now));
+      vline.removeAttribute('data-plain');
+      for (var j = 0; j < ns.length; j++) {
+        var li = document.createElement('li');
+        var a = document.createElement('a');
+        a.className = 'mk-vlink';
+        a.setAttribute('data-mk-vlink', '');
+        a.setAttribute('href', '/dashboard/artifacts/view/' + encodeURIComponent(cur.getAttribute('data-mk-ref')) + '?v=' + ns[j]);
+        a.textContent = T_VN.split('{n}').join(String(ns[j]));
+        li.appendChild(a);
+        vlist.appendChild(li);
+      }
+    } else {
+      vline.textContent = 'v' + now;
+      vline.setAttribute('data-plain', '');
+    }
+    hide(vline, false);
+  }
+
+  function openPreview(cell) {
+    cur = cell;
+    var kind = cell.getAttribute('data-mk-kind');
+    var ref = cell.getAttribute('data-mk-ref');
+    var mine = ++token;
+    titleEl.textContent = cell.getAttribute('data-mk-title') || '';
+    openA.setAttribute('href', cell.getAttribute('data-mk-href') || '#');
+    if (kind === 'workspace_file') { openA.setAttribute('target', '_blank'); openA.setAttribute('rel', 'noopener'); }
+    else { openA.removeAttribute('target'); openA.removeAttribute('rel'); }
+    pvStatus.textContent = '';
+    vlist.innerHTML = '';
+    hide(vlist, true);
+    hide(vline, true);
+    if (typeof pv.showModal === 'function') pv.showModal(); else pv.setAttribute('open', '');
+    if (kind !== 'artifact') return;
+    fetch('/api/artifacts/' + encodeURIComponent(ref)).then(function (r) { return r.json(); }).then(function (d) {
+      if (mine !== token || !d || !d.versions) return;
+      showVersions(d.artifact, d.versions);
+    }).catch(function () { /* the sheet still opens; the version line just stays off */ });
+  }
+  function closePreview() { token++; if (typeof pv.close === 'function') pv.close(); else pv.removeAttribute('open'); }
+
+  function cancelPress() { if (timer) { clearTimeout(timer); timer = null; } }
+  document.addEventListener('pointerdown', function (e) {
+    var tile = e.target && e.target.closest ? e.target.closest('.mk-tile') : null;
+    if (!tile) return;
+    cancelPress();
+    sx = e.clientX; sy = e.clientY;
+    var cell = tile.closest('.mk-cell');
+    timer = setTimeout(function () { timer = null; suppress = true; openPreview(cell); }, 500);
+  });
+  document.addEventListener('pointermove', function (e) {
+    if (!timer) return;
+    if (Math.abs(e.clientX - sx) > 10 || Math.abs(e.clientY - sy) > 10) cancelPress();
+  });
+  document.addEventListener('pointerup', cancelPress);
+  document.addEventListener('pointercancel', cancelPress);
+  document.addEventListener('scroll', cancelPress, true);
+  document.addEventListener('contextmenu', function (e) {
+    if (e.target && e.target.closest && e.target.closest('.mk-tile') && (timer || suppress)) e.preventDefault();
+  });
+
+  document.addEventListener('click', function (e) {
+    var el = e.target;
+    if (!el || !el.closest) return;
+    if (suppress && el.closest('.mk-tile')) { suppress = false; e.preventDefault(); return; }
+    suppress = false;
+    var more = el.closest('[data-mk-more]');
+    if (more) { openPreview(more.closest('.mk-cell')); return; }
+  });
+  pv.addEventListener('click', function (e) {
+    var el = e.target;
+    if (el === pv || (el.closest && el.closest('[data-mk-pv-close]'))) { closePreview(); return; }
+    if (el.closest && el.closest('[data-mk-vline]') && !vline.hasAttribute('data-plain')) { hide(vlist, !vlist.hasAttribute('hidden')); return; }
+    if (el.closest && el.closest('[data-mk-pv-move]')) move();
+  });
+
+  function move() {
+    if (!cur) return;
+    var o = sel.options && sel.options[sel.selectedIndex >= 0 ? sel.selectedIndex : 0];
+    var raw = sel.value || (o && o.value) || 'unassigned';
+    var pid = /^[1-9][0-9]*$/.test(raw) ? Number(raw) : 'unassigned';
+    moveBtn.setAttribute('disabled', '');
+    fetch('/dashboard/shell-api/items/' + encodeURIComponent(cur.getAttribute('data-mk-kind')) + '/' + encodeURIComponent(cur.getAttribute('data-mk-ref')) + '/project', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Crow-Csrf': csrf() }, body: JSON.stringify({ project_id: pid })
+    }).then(function (r) {
+      moveBtn.removeAttribute('disabled');
+      pvStatus.textContent = r.ok ? T_MOVED : T_MOVE_FAILED;
+    }).catch(function () { moveBtn.removeAttribute('disabled'); pvStatus.textContent = T_MOVE_FAILED; });
+  }
+  document.addEventListener('turbo:before-cache', function () { if (pv.open) closePreview(); });
+})();
 </script>`;
 }

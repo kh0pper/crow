@@ -155,8 +155,9 @@ test("CSRF is required, and so is a session", async () => {
 const { renderMakePage } = await import("../servers/gateway/dashboard/panels/make/html.js");
 const { makeClientJs } = await import("../servers/gateway/dashboard/panels/make/client.js");
 const { tJs } = await import("../servers/gateway/dashboard/shared/i18n.js");
+const { MAKE_CSS: MAKE_CSS_FOR_TEST } = await import("../servers/gateway/dashboard/panels/make/css.js");
 
-const page = (model, project = { id: "unassigned", name: "Unassigned" }) => renderMakePage({ model: { items: [], ...model }, filter: "all", lang: "en", project });
+const page = (model, project = { id: "unassigned", name: "Unassigned" }) => renderMakePage({ model: { items: [], ...model }, filter: "all", lang: "en", project, projects: [] });
 
 test("the sheet offers install instead of actions for a missing bundle", () => {
   const html = page({ artifacts: "installed", workspace: "missing" });
@@ -176,8 +177,8 @@ test("the sheet offers install instead of actions for a missing bundle", () => {
   assert.equal(nr.querySelector('[data-mk-row="deck"] a[href]').getAttribute("href"), "/dashboard/workspace");
 });
 
-function bootClient(model, bots = [{ id: "b1", name: "Bee", perch_attached: true }, { id: "b2", name: "Off", perch_attached: false }]) {
-  const html = page(model, { id: P1, name: "Garden" });
+function bootClient(model, bots = [{ id: "b1", name: "Bee", perch_attached: true }, { id: "b2", name: "Off", perch_attached: false }], opts = {}) {
+  const html = renderMakePage({ model: { items: [], ...model }, filter: "all", lang: "en", project: { id: P1, name: "Garden" }, projects: [{ id: 2, slug: "g", name: "Garden" }, { id: 3, slug: "o", name: "Orchard" }] });
   const { window, document } = parseHTML(`<html><body>${html}</body></html>`);
   const calls = [];
   Object.defineProperty(document, "cookie", { configurable: true, get: () => "crow_session=s; crow_csrf=tok123" });
@@ -193,6 +194,8 @@ function bootClient(model, bots = [{ id: "b1", name: "Bee", perch_attached: true
       if (c.url.endsWith("/perch-api/bots")) data = { bots };
       else if (c.url.endsWith("/interactive")) data = { threadId: "perchlive-t9", sessionId: "perchlive-t9" };
       else if (c.url.endsWith("/message")) data = { turnId: "t1" };
+      else if (c.url.startsWith("/api/artifacts/")) data = { artifact: { id: "art_abc123", current_version: (opts.versions || [1])[0] }, versions: (opts.versions || [1]).map((n) => ({ n })) };
+      else if (c.url.includes("/shell-api/items/")) data = { ok: true };
       else if (c.url.endsWith("/make-api/blank")) data = { ok: true, fileId: 5, webUrl: "https://ws.example.test/f/5" };
       return { ok: true, status: 200, json: async () => data };
     },
@@ -251,4 +254,77 @@ test("Blank posts the title and project to make-api", async () => {
   assert.equal(p.headers["X-Crow-Csrf"], "tok123");
   assert.equal(c.loc.href, "https://ws.example.test/f/5", "same tab goes to the file");
   assert.equal(c.opened(), 0, "no popup");
+});
+
+// ── Task 4.4: versions stay visible ──
+const ART = { kind: "artifact", ref: "art_abc123", type: "page", title: "Garden plan", updatedAt: "2026-10-26T12:00:00Z", version: 3 };
+const WSF = { kind: "workspace_file", ref: "77", type: "document", title: "Notes", updatedAt: "2026-10-26T12:00:00Z" };
+
+test("every tile has a focusable, labelled more button and all targets are 44px", () => {
+  const { document } = parseHTML(`<html><body>${page({ artifacts: "installed", workspace: "installed", items: [ART] })}</body></html>`);
+  const b = document.querySelector("[data-mk-more]");
+  assert.ok(b);
+  assert.equal(b.tagName, "BUTTON");
+  assert.match(b.getAttribute("aria-label"), /Garden plan/);
+  assert.equal(document.querySelector("[data-mk-more]").closest("a"), null, "the button is not nested in the link");
+  assert.match(MAKE_CSS_FOR_TEST, /\.mk-more\s*\{[^}]*min-height: 44px/);
+});
+
+test("the version line links to earlier versions when there are some", async () => {
+  const c = bootClient({ artifacts: "installed", workspace: "installed", items: [ART] }, undefined, { versions: [3, 2, 1] });
+  c.click(c.$("[data-mk-more]"));
+  await c.settle();
+  assert.ok(c.calls.some((x) => x.url === "/api/artifacts/art_abc123"));
+  assert.match(c.$("[data-mk-vline]").textContent, /v3 \u00b7 earlier versions/);
+  const links = [...c.document.querySelectorAll("[data-mk-vlink]")];
+  assert.equal(links.length, 3);
+  assert.equal(links[0].getAttribute("href"), "/dashboard/artifacts/view/art_abc123?v=3");
+  assert.equal(links[2].getAttribute("href"), "/dashboard/artifacts/view/art_abc123?v=1");
+});
+
+test("a single version has no link", async () => {
+  const c = bootClient({ artifacts: "installed", workspace: "installed", items: [ART] }, undefined, { versions: [1] });
+  c.click(c.$("[data-mk-more]"));
+  await c.settle();
+  assert.equal(c.$("[data-mk-vline]").textContent.trim(), "v1");
+  assert.equal(c.document.querySelectorAll("[data-mk-vlink]").length, 0);
+  assert.equal(c.$("[data-mk-versions]").hasAttribute("hidden"), true);
+});
+
+test("a workspace tile shows Open and Move only, with no version fetch", async () => {
+  const c = bootClient({ artifacts: "installed", workspace: "installed", items: [WSF] });
+  c.click(c.$("[data-mk-more]"));
+  await c.settle();
+  assert.equal(c.calls.filter((x) => x.url.startsWith("/api/artifacts/")).length, 0);
+  assert.equal(c.$("[data-mk-vline]").hasAttribute("hidden"), true);
+  assert.equal(c.$("[data-mk-pv-open]").getAttribute("href"), "/dashboard/make/open/workspace_file/77");
+});
+
+test("Move to project posts the chosen project", async () => {
+  const c = bootClient({ artifacts: "installed", workspace: "installed", items: [ART] });
+  c.click(c.$("[data-mk-more]"));
+  await c.settle();
+  const sel = c.$("[data-mk-pv-project]");
+  [...sel.options].find((o) => o.value === "2").setAttribute("selected", "");
+  sel.selectedIndex = [...sel.options].findIndex((o) => o.value === "2");
+  c.click(c.$("[data-mk-pv-move]"));
+  await c.settle();
+  const p = c.calls.find((x) => x.url === "/dashboard/shell-api/items/artifact/art_abc123/project");
+  assert.deepEqual(p.body, { project_id: 2 });
+  assert.equal(p.headers["X-Crow-Csrf"], "tok123");
+});
+
+test("a long press opens the sheet, but a scroll cancels it", async () => {
+  const mk = () => bootClient({ artifacts: "installed", workspace: "installed", items: [ART] }, undefined, { versions: [2, 1] });
+  const ev = (c, type, x, y) => c.$(".mk-tile").dispatchEvent(Object.assign(new c.window.Event(type, { bubbles: true }), { clientX: x, clientY: y }));
+  let c = mk();
+  ev(c, "pointerdown", 10, 10);
+  await new Promise((r) => setTimeout(r, 650));
+  await c.settle();
+  assert.ok(c.calls.some((x) => x.url.startsWith("/api/artifacts/")), "long press opened the sheet");
+  c = mk();
+  ev(c, "pointerdown", 10, 10);
+  ev(c, "pointermove", 10, 40);
+  await new Promise((r) => setTimeout(r, 650));
+  assert.equal(c.calls.length, 0, "movement cancelled it");
 });

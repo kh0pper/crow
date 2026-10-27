@@ -59,11 +59,11 @@ function tile(item, lang) {
   const ws = item.kind === "workspace_file";
   const type = TYPES.includes(item.type) ? item.type : "other";
   const typeLabel = type === "other" ? "" : t(`shell.makeType.${type}`, lang);
-  return `<li class="mk-cell"><a class="mk-tile${item.justMade ? " mk-just" : ""}" href="${esc(href)}"${ws ? ' target="_blank" rel="noopener"' : ""}>
+  return `<li class="mk-cell" data-mk-kind="${esc(item.kind)}" data-mk-ref="${esc(item.ref)}" data-mk-title="${esc(item.title)}" data-mk-version="${esc(item.version ?? "")}" data-mk-href="${esc(href)}"><a class="mk-tile${item.justMade ? " mk-just" : ""}" href="${esc(href)}"${ws ? ' target="_blank" rel="noopener"' : ""}>
     <span class="mk-preview mk-type-${esc(type)}" data-mk-preview="${esc(item.kind)}:${esc(item.ref)}" aria-hidden="true">${esc(typeLabel)}</span>
     <span class="mk-title">${esc(item.title)}</span>
     <span class="mk-meta">${item.justMade ? `<span class="mk-badge">${esc(t("shell.justMade", lang))}</span>` : ""}${item.cardId ? `<span class="mk-card">#${esc(item.cardId)}</span>` : ""}${when(item.updatedAt, lang)}</span>
-  </a></li>`;
+  </a><button type="button" class="mk-more" data-mk-more aria-haspopup="dialog" aria-label="${esc(t("shell.moreFor", lang).split("{title}").join(item.title))}">&#8942;</button></li>`;
 }
 
 /** "installed" | "unavailable" count as usable (an unreachable Workspace is tried, and says so if it fails). */
@@ -106,8 +106,24 @@ export function renderStartSheet({ artifacts, workspace, project, lang }) {
   </dialog>`;
 }
 
+/** The preview sheet (opened by a long press or the more button; filled by client.js). */
+export function renderPreviewSheet({ projects, lang }) {
+  const opts = [`<option value="unassigned">${esc(t("shell.unassigned", lang))}</option>`, ...(projects || []).map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`)].join("");
+  return `<dialog id="mk-preview" class="mk-sheet" aria-label="${esc(t("shell.preview", lang))}">
+    <div class="mk-sheet-inner">
+      <div class="mk-sheet-head"><h2 class="mk-sheet-title" data-mk-pv-title></h2><button type="button" class="mk-sheet-close" data-mk-pv-close aria-label="${esc(t("common.close", lang))}">&times;</button></div>
+      <button type="button" class="mk-vline" data-mk-vline hidden></button>
+      <ul class="mk-versions" data-mk-versions hidden></ul>
+      <a class="btn btn-primary mk-start-act" data-mk-pv-open href="#">${esc(t("shell.open", lang))}</a>
+      <label class="mk-field">${esc(t("shell.moveToProject", lang))}<select data-mk-pv-project>${opts}</select></label>
+      <button type="button" class="btn btn-secondary mk-start-act" data-mk-pv-move>${esc(t("shell.moveToProject", lang))}</button>
+      <p class="mk-status" data-mk-pv-status role="status"></p>
+    </div>
+  </dialog>`;
+}
+
 /** @param {{items: object[], artifacts: string, workspace: string}} model */
-export function renderMakePage({ model, filter, lang, project }) {
+export function renderMakePage({ model, filter, lang, project, projects = [] }) {
   const { items, artifacts, workspace } = model;
   const bothMissing = artifacts === "missing" && workspace === "missing";
   const notice = workspace === "unavailable" ? `<p class="mk-notice" role="status">${esc(t("shell.workspaceUnavailable", lang))}</p>` : "";
@@ -116,5 +132,5 @@ export function renderMakePage({ model, filter, lang, project }) {
   else if (!items.length) body = `${offers(artifacts, workspace, lang)}<p class="mk-empty-text">${esc(t("shell.makeEmpty", lang))}</p>`;
   else body = `${offers(artifacts, workspace, lang)}<ul class="mk-grid">${items.map((i) => tile(i, lang)).join("")}</ul>`;
   const startBtn = `<button type="button" class="btn btn-primary mk-start-btn" data-mk-open aria-haspopup="dialog">+ ${esc(t("shell.start", lang))}</button>`;
-  return `<div class="mk-page"><div class="mk-bar">${chips(filter, lang)}${startBtn}</div>${notice}${body}${renderStartSheet({ artifacts, workspace, project, lang })}</div>`;
+  return `<div class="mk-page"><div class="mk-bar">${chips(filter, lang)}${startBtn}</div>${notice}${body}${renderStartSheet({ artifacts, workspace, project, lang })}${renderPreviewSheet({ projects, lang })}</div>`;
 }
