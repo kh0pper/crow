@@ -181,3 +181,48 @@ test("T13: a peer cannot change trust or status over sync (a forged crow_instanc
     assert.equal(self.gateway_url, null);
   } finally { link?.close(); await fleet.cleanup(); }
 });
+
+test("fence on trusted=0 → trusted: what the peer wrote while untrusted is never applied after the re-pair", { timeout: 90_000 }, async () => {
+  const fleet = await makeFleet();
+  const { a, b } = fleet;
+  let link;
+  try {
+    link = await linkPeers(a, b);
+    await writeAndEmit(b, 9700, "baseline");
+    assert.equal(await until(() => hasMemory(a.db, 9700)), true, "positive control");
+    await a.db.execute({ sql: "UPDATE crow_instances SET trusted = 0 WHERE id = ?", args: [b.id] });
+    for (let i = 0; i < 3; i++) await writeAndEmit(b, 9710 + i, `while untrusted ${i}`);
+    await sleep(QUIET_MS);
+    assert.equal(await hasMemory(a.db, 9710), false, "blocked while untrusted");
+    await reactivateOnRepair(a.db, b.id, { authTokenHash: "ab".repeat(32), localInstanceId: a.id });
+    assert.equal((await appliedRecord(a, b.id))?.ff, 1);
+    // Nudge a run on the live link: the next append triggers it.
+    await writeAndEmit(b, 9720, "nudge (may be skipped with the fence)");
+    assert.equal(await fenceConsumed(a, b.id), true);
+    await writeAndEmit(b, 9721, "after the fence");
+    assert.equal(await until(() => hasMemory(a.db, 9721), 10_000), true, "positive control: post-fence writes apply");
+    await sleep(QUIET_MS);
+    for (let i = 0; i < 3; i++) assert.equal(await hasMemory(a.db, 9710 + i), false, `untrusted-window write ${i} never applied`);
+  } finally { link?.close(); await fleet.cleanup(); }
+});
+
+test("pause is an owner's sync hold: nothing applies while paused, and the backlog catches up on resume (no fence, by design)", { timeout: 90_000 }, async () => {
+  const fleet = await makeFleet();
+  const { a, b } = fleet;
+  let link;
+  try {
+    link = await linkPeers(a, b);
+    await writeAndEmit(b, 9800, "baseline");
+    assert.equal(await until(() => hasMemory(a.db, 9800)), true, "positive control");
+    const { updateInstance } = await import("../servers/gateway/instance-registry.js");
+    await updateInstance(a.db, b.id, { status: "paused" });
+    for (let i = 0; i < 3; i++) await writeAndEmit(b, 9810 + i, `while paused ${i}`);
+    await sleep(QUIET_MS);
+    assert.equal(await hasMemory(a.db, 9810), false, "nothing applies while paused");
+    await updateInstance(a.db, b.id, { status: "active" });
+    assert.equal((await appliedRecord(a, b.id))?.ff, undefined, "resume writes no fence");
+    await writeAndEmit(b, 9820, "after resume");
+    assert.equal(await until(() => hasMemory(a.db, 9820), 10_000), true);
+    for (let i = 0; i < 3; i++) assert.equal(await until(() => hasMemory(a.db, 9810 + i), 10_000), true, `paused-window write ${i} caught up`);
+  } finally { link?.close(); await fleet.cleanup(); }
+});

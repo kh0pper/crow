@@ -93,6 +93,8 @@ for (const sameIdentity of [true, false]) {
         assert.equal(allow.code, 0, allow.out);
         const ok = await pairInto(B, A, ["--peer-id", A.id]);
         assert.equal(ok.code, 0, ok.out);
+        const fence = JSON.parse(A.sql("SELECT last_applied_seq_per_peer AS b FROM sync_state WHERE instance_id = ?", [A.id])[0]?.b || "{}");
+        assert.equal(fence[B.id]?.ff, 1, "the enroll route fenced the revoked → active move");
         assert.equal(A.row(B.id).status, "active");
         assert.equal(Number(A.row(B.id).trusted), 1);
         assert.equal(B.row(A.id).status, "active");
@@ -134,6 +136,8 @@ test("T5 untrusted but paired (legacy trusted=0): every gate refuses; probe and 
     assert.equal(allow.code, 0, allow.out);
     const ok = await pairInto(B, A, ["--peer-id", A.id]);
     assert.equal(ok.code, 0, ok.out);
+    const blob = JSON.parse(A.sql("SELECT last_applied_seq_per_peer AS b FROM sync_state WHERE instance_id = ?", [A.id])[0]?.b || "{}");
+    assert.equal(blob[B.id]?.ff, 1, "the enroll route fenced the trusted=0 → trusted move");
     await baseline(B, A);
   } finally { await cleanup(); }
 });

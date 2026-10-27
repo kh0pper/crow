@@ -842,3 +842,21 @@ describe("U9: verifier inventory", () => {
     }
   });
 });
+
+describe("the fence covers every move into trust; pause is not fenced", () => {
+  test("reactivateOnRepair from trusted=0 writes the fence; from paused it keeps paused and writes none", async () => {
+    const d = mkdtempSync(join(tmpdir(), "pt-fence-moves-"));
+    const xdb = await makeRealDb(d);
+    try {
+      await addPeerRow(xdb, "legacy", { status: "active", trusted: 0 });
+      await addPeerRow(xdb, "held", { status: "paused", trusted: 1 });
+      await addPeerRow(xdb, "live", { status: "active", trusted: 1 });
+      for (const id of ["legacy", "held", "live"]) await reactivateOnRepair(xdb, id, { authTokenHash: "ab".repeat(32), localInstanceId: LOCAL });
+      const blob = (await appliedBlob(xdb)) || {};
+      assert.equal(blob.legacy?.ff, 1, "trusted=0 → trusted is fenced");
+      assert.equal(blob.held, undefined, "a paused (trusted) peer is not fenced");
+      assert.equal((await getInstance(xdb, "held")).status, "paused", "a re-pair does not lift a pause");
+      assert.equal(blob.live, undefined, "a live trusted re-pair (key rotation) is not fenced");
+    } finally { try { xdb.close(); } catch {} rmSync(d, { recursive: true, force: true }); }
+  });
+});

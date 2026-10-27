@@ -255,8 +255,10 @@ function instanceError(code, message) {
 /**
  * The CLI side of a re-pair (the counterpart of the enroll route's CAS):
  * sets the new bearer hash and trusted=1, flips a revoked row back to
- * active, and, when it was revoked, writes the re-pair fence in the SAME
- * transaction (servers/shared/repair-fence.js). If the fence cannot be
+ * active, and, when it was revoked or not trusted, writes the re-pair fence
+ * in the SAME transaction (servers/shared/repair-fence.js). A paused row
+ * stays paused, and is not fenced: pause is an owner's reversible sync
+ * hold on a trusted peer, and catching up on resume is intended. If the fence cannot be
  * written the whole write aborts and the row stays revoked.
  *
  * @param {object} db
@@ -273,6 +275,10 @@ export async function reactivateOnRepair(db, id, { authTokenHash, localInstanceI
   if (!existing) throw instanceError("not_found", `instance ${id} not found`);
   if (!authTokenHash) throw instanceError("bad_request", "reactivateOnRepair needs the new bearer hash");
   const wasRevoked = existing.status === "revoked";
+  // Any move into trust is fenced: from revoked AND from trusted != 1 (a
+  // legacy or never-trusted row). Entries written while the peer was not
+  // trusted were never applied, and are never accepted later (fail closed).
+  const needsFence = wasRevoked || Number(existing.trusted) !== 1;
   const stmts = [
     {
       sql: `UPDATE crow_instances
@@ -286,7 +292,7 @@ export async function reactivateOnRepair(db, id, { authTokenHash, localInstanceI
     // Abort if the row changed since it was read (a concurrent revoke).
     { sql: "INSERT INTO dashboard_settings_overrides (key, instance_id, value) SELECT NULL, NULL, NULL WHERE changes() = 0", args: [] },
   ];
-  if (wasRevoked) stmts.push(...fenceStatements(localInstanceId, id));
+  if (needsFence) stmts.push(...fenceStatements(localInstanceId, id));
   await db.batch(stmts, "write");
   try {
     bus.emit("crow_instances:row_updated", { id, changed: ["trusted", "status"], fields: { trusted: 1, status: wasRevoked ? "active" : existing.status } });

@@ -297,10 +297,11 @@ export function instanceEnrollRouter(db, { execFileSyncImpl, now = () => Date.no
         // Abort (NOT NULL violation) if the CAS above matched no row: the row
         // changed since it was authorized.
         stmts.push({ sql: "INSERT INTO dashboard_settings_overrides (key, instance_id, value) SELECT NULL, NULL, NULL WHERE changes() = 0", args: [] });
-        // PT-1: un-revoking writes the re-pair fence in this same batch, so the
-        // entries the peer appended while revoked are never replayed. If the
-        // fence does not land the batch aborts and the row stays revoked.
-        if (existing.status === "revoked") stmts.push(...fenceStatements(localId, source_instance_id));
+        // PT-1: any move into trust (from revoked, or from trusted != 1) writes
+        // the re-pair fence in this same batch, so entries the peer appended
+        // while not trusted are never replayed. If the fence does not land the
+        // batch aborts and the row is unchanged. (Paused stays paused; no fence.)
+        if (existing.status === "revoked" || Number(existing.trusted) !== 1) stmts.push(...fenceStatements(localId, source_instance_id));
       } else {
         stmts.push({
           sql: `INSERT INTO crow_instances (id, name, crow_id, tailscale_ip, gateway_url, sync_profile, is_home, auth_token_hash, last_seen_at, status, trusted)
