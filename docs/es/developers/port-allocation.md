@@ -2,8 +2,9 @@
 
 Este documento es la **única fuente de verdad** para cada puerto del host consumido por Crow mismo, por los bundles en `bundles/` y los reservados por la hoja de ruta del MVP. Cualquier PR de un bundle nuevo que introduzca un binding de puerto debe modificar este archivo en el mismo PR. El CI verifica que:
 
-1. Cada puerto del host en cualquier `bundles/**/docker-compose.yml` esté listado aquí.
-2. Ningún par de bundles mapee el mismo puerto del host.
+1. Cada puerto del host en cualquier `bundles/<id>/docker-compose*.yml` (incluidas las capas como `docker-compose.tailnet.yml`) esté listado aquí. Un puerto escrito como `${VAR:-N}` o `${VAR-N}` cuenta como `N`, el puerto que publica una instalación nueva. Un puerto que es una variable sin valor por defecto (`${VAR}`) no tiene número que verificar.
+2. Ningún par de bundles publique el mismo puerto del host en direcciones que se solapan: la misma IP del host, o una de las dos comodín (sin IP, `0.0.0.0`, `::`). Dos direcciones concretas distintas en un mismo puerto (loopback y la IP de la tailnet) no chocan. Una variable de IP sin valor por defecto (`${CROW_TAILSCALE_IP}`) cuenta como comodín, porque sin definir publica en todas las direcciones; escríbela como `${CROW_TAILSCALE_IP:?…}` (obligatoria) para que sea una dirección concreta. También se comparan entre sí los servicios de un mismo bundle.
+3. También se revisa el `docker-compose.yml` de la raíz del repo. Su servicio opcional `minio` es la alternativa al bundle minio (nunca corren juntos), así que su 9001 cuenta como del bundle minio. Una entrada de `ports` que el verificador no puede leer se imprime como WARNING.
 
 ## Convenciones
 
@@ -38,6 +39,7 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 | 2019 | — | (retirado: la API de administración de Caddy es un socket unix, ~/.crow/caddy/run/admin.sock; mantener libre) | retirado |
 | 2223 | 127.0.0.1 | gitea (SSH) | MVP PR 5 |
 | 2224 | 127.0.0.1 | forgejo (SSH) | MVP PR 5 |
+| 2586 | 127.0.0.1 | ntfy (`NTFY_PORT`; la tailnet llega por `tailscale serve 2586`, nunca Funnel) | existente |
 | 2283 | 127.0.0.1 | immich (existente — verificar en el compose) | existente |
 | 3001 | 127.0.0.1 | gateway de Crow (HTTPS) | core |
 | 3002 | 127.0.0.1 | gateway de Crow (alterno) | core |
@@ -64,17 +66,24 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 | 6080 | 127.0.0.1 | browser (noVNC, existente) | existente |
 | 6875 | 127.0.0.1 | bookstack (existente) | existente |
 | 8000 | 127.0.0.1 | paperless (existente) | existente |
+| 8003 | IP de tailscale | llamacpp-vulkan-qwen36-35b-a3b (crow-chat) | existente |
 | 8004 | 127.0.0.1 | faster-whisper-server (STT local) | existente |
+| 8004 | IP de tailscale | llamacpp-vulkan-qwen3-embed (crow-embed; mismo puerto que faster-whisper, otra interfaz) | existente |
+| 8005 | IP de tailscale | capa tailnet de faster-whisper-server (`docker-compose.tailnet.yml`, STT entre instancias, opcional; se movió de 8004, que crow-embed ocupa en la IP de la tailnet) | existente |
 | 8018 | 127.0.0.1 | design-kit (puerta del renderizador: Vega-Lite / Mermaid / D2 → SVG; el contenedor de renderizado está en una red Docker interna sin salida; sin regla ufw) | Design kit v1 |
 | 8040 | 127.0.0.1 | lemmy (API para el servidor MCP y el panel de Crow, que corren en el host, `LEMMY_API_PORT`; el sitio público pasa por Caddy) | item 30 |
+| 8041 | 127.0.0.1 | kolibri (`KOLIBRI_HTTP_PORT`; el valor por defecto pasó de 8085, que ocupa miniflux) | existente (movido 2026-10) |
+| 8042 | 127.0.0.1 | nominatim (`NOMINATIM_PORT`; el valor por defecto pasó de 8088, que ocupa trilium) | existente (movido 2026-10) |
+| 8043 | 127.0.0.1 | maker-lab-advanced (JupyterHub, `MLA_HTTP_PORT`; el valor por defecto pasó de 8088, que ocupa trilium) | existente (movido 2026-10) |
+| 8044 | 127.0.0.1 | vllm (`VLLM_HTTP_PORT`; el valor por defecto pasó de 8089, que ocupa el nominatim externo de edjobs en el host principal; maker-lab busca vLLM en este puerto) | existente (movido 2026-10) |
 | 8080 | 127.0.0.1 | localai (existente) | existente |
 | 8081 | 127.0.0.1 | calibre-server (existente) | existente |
 | 8083 | 127.0.0.1 | calibre-web (existente) | existente |
 | 8084 | 127.0.0.1 | wallabag (existente) | existente |
 | 8085 | 127.0.0.1 | miniflux (existente) | existente |
 | 8086 | 127.0.0.1 | shiori (existente) | existente |
+| 8087 | 127.0.0.1 | scratch-offline (`SCRATCH_HTTP_PORT`) | existente |
 | 8088 | 127.0.0.1 | trilium (existente) | existente |
-| 8088 | 127.0.0.1 | valor por defecto de nominatim (`NOMINATIM_PORT`) — **choca con trilium**; define `NOMINATIM_PORT` si usas ambos | existente |
 | 8091 | 127.0.0.1 | crowdsec (LAPI) | MVP PR 4 |
 | 8092 | 127.0.0.1 | stirling-pdf | MVP PR 1 |
 | 8094 | 127.0.0.1 | gatus | MVP PR 2 |
@@ -85,13 +94,18 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 | 8456 | tailnet (Serve) | Tailscale Serve HTTPS → 127.0.0.1:3070 (Workspace; nunca Funnel) | W1 2026-10 |
 | 8457 | tailnet (Serve) | Tailscale Serve HTTPS → 127.0.0.1:3071 (editor de Workspace; nunca Funnel) | W1 2026-10 |
 | 8530 | 127.0.0.1 | adguard-home (DNS-over-TLS) | MVP PR 3 |
+| 8089 | 127.0.0.1 + IP de tailscale | nominatim de edjobs (externo) — herramientas GIS de R4 (ufw acotado). El valor por defecto del bundle vllm también era 8089; pasó a 8044 | externo |
 | 8554 | 127.0.0.1 | frigate (retransmisión RTSP) | existente |
+| 8600 | 127.0.0.1 | funkwhale (nginx, `FUNKWHALE_NGINX_BIND_PORT`; dirección `FUNKWHALE_NGINX_BIND_ADDR`) | existente |
 | 8555 | 127.0.0.1 | frigate (WebRTC) | existente |
 | 8765 | 127.0.0.1 | motioneye | existente |
 | 8880 | 127.0.0.1 | kokoro-tts (TTS local) | existente |
 | 8971 | 127.0.0.1 | frigate (UI autenticada) | existente |
 | 9000 | 127.0.0.1 | minio (API S3, existente) | existente |
 | 9001 | 127.0.0.1 | minio (consola, existente) | existente |
+| 9100 | IP de tailscale del host CUDA | vllm-cuda-embed (`GRACKLE_TAILSCALE_IP`; corre en el host CUDA, no en el host principal) | existente |
+| 9101 | IP de tailscale del host CUDA | vllm-cuda-rerank (`GRACKLE_TAILSCALE_IP`; corre en el host CUDA, no en el host principal) | existente |
+| 9102 | IP de tailscale del host CUDA | vllm-cuda-vision (`GRACKLE_TAILSCALE_IP`; corre en el host CUDA, no en el host principal) | existente |
 | 9090 | 127.0.0.1 | linkding (existente) | existente |
 | 11434 | 127.0.0.1 | ollama (existente) | existente |
 | 13378 | 127.0.0.1 | audiobookshelf (existente) | existente |

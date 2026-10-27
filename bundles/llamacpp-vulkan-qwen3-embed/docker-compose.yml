@@ -13,7 +13,9 @@ services:
     volumes:
       - ${LLM_CACHE}:/models
     ports:
-      - "${CROW_TAILSCALE_IP}:8004:8000"
+      # Required (:?): unset would publish crow-embed on every address and
+      # collide with faster-whisper-server on 127.0.0.1:8004.
+      - "${CROW_TAILSCALE_IP:?Set CROW_TAILSCALE_IP to the Tailscale IPv4 of this host}:8004:8000"
     entrypoint: ["llama-server"]
     command:
       # Qwen3-Embedding-0.6B Q8_0 GGUF (~640 MB).
