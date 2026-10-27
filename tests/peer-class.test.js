@@ -149,18 +149,36 @@ test("socket owner: a v4-mapped socket address finds the client's IPv4 row, or i
   assert.equal(procV6Hex("::ffff:127.0.0.1"), "0000000000000000FFFF00000100007F");
 });
 
-test("procfs unreadable: shape-only with ONE warning; CROW_SERVE_PEER_UIDS=off: shape-only, no warning", () => {
+test("fail closed: procfs unreadable → unverified (no Tailscale-* trust), with ONE warning naming the opt-in", () => {
   useTables({});
   const lines = spyWarn(() => {
-    assert.equal(classifyPeer(mk(SERVE())).via, "serve");
-    assert.equal(classifyPeer(mk(SERVE(), SOCK({ remotePort: 40002 }))).via, "serve");
+    const p = classifyPeer(mk(SERVE("100.64.20.5", { "tailscale-user-login": "owner@example.com" })));
+    assert.equal(p.via, "unverified");
+    assert.equal(p.tailnetLogin, null);
+    assert.equal(p.client, "127.0.0.1");
+    assert.equal(classifyPeer(mk(SERVE(), SOCK({ remotePort: 40002 }))).via, "unverified");
+    assert.equal(classifyPeer(mk({ "tailscale-funnel-request": "?1", "x-forwarded-for": "8.8.8.8" }, SOCK({ remotePort: 40004 }))).via, "unverified");
   });
   assert.equal(lines.filter((l) => l.includes("cannot verify the Serve peer's uid")).length, 1);
-  resetPeerWarningsForTests();
+  assert.ok(lines.some((l) => l.includes("CROW_SERVE_PEER_UIDS=off")));
+});
+
+test("fail closed: a read error (EACCES) or a missing row → unverified", () => {
+  setProcNetReaderForTests(() => { const e = new Error("EACCES"); e.code = "EACCES"; throw e; });
+  spyWarn(() => assert.equal(classifyPeer(mk(SERVE())).via, "unverified"));
+  useTables({ tcp: HEADER + "\n", tcp6: HEADER + "\n" }); // readable, but the connection is gone (race)
+  spyWarn(() => assert.equal(classifyPeer(mk(SERVE(), SOCK({ remotePort: 40005 }))).via, "unverified"));
+});
+
+test("explicit opt-in CROW_SERVE_PEER_UIDS=off: shape-only Serve accepted, with ONE warning", () => {
   process.env.CROW_SERVE_PEER_UIDS = "off";
-  useTables({ tcp: tcpTable({ clientUid: 1000 }) });
-  const quiet = spyWarn(() => assert.equal(classifyPeer(mk(SERVE(), SOCK({ remotePort: 40003 }))).via, "serve"));
-  assert.equal(quiet.length, 0);
+  useTables({});
+  const lines = spyWarn(() => {
+    assert.equal(classifyPeer(mk(SERVE("100.64.20.5", { "tailscale-user-login": "a@example.com" }))).via, "serve");
+    assert.equal(classifyPeer(mk(SERVE(), SOCK({ remotePort: 40003 }))).via, "serve");
+  });
+  assert.equal(lines.filter((l) => l.includes("CROW_SERVE_PEER_UIDS=off")).length, 1);
+  assert.equal(reads, 0, "procfs is not read when the check is off");
 });
 
 test("CROW_SERVE_PEER_UIDS parsing: list, a skipped non-numeric entry warned once", () => {

@@ -622,7 +622,7 @@ test("Express wiring: a forged XFF from loopback keeps req.ip = 127.0.0.1; Serve
       const notTs = await getJson(port, "/x", serveHeaders("owner@example.com"));
       assert.deepEqual([notTs.body.ip, notTs.body.via, notTs.body.allowed], ["127.0.0.1", "unverified", false], "this process is not uid 0: the bot case, end to end");
       actAsServe();
-      const serve = await getJson(port, "/x", serveHeaders("owner@example.com"));
+      const serve = await getJson(port, "/x", { ...serveHeaders("owner@example.com"), "x-forwarded-proto": "https" });
       assert.deepEqual([serve.body.ip, serve.body.via, serve.body.protocol, serve.body.allowed], ["100.64.20.5", "serve", "https", true]);
     } finally { s.close(); console.warn = w; }
   });

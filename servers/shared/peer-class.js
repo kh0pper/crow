@@ -24,10 +24,13 @@
  * presence can still only take trust away: the Funnel header is refused by
  * rejectFunneledMiddleware and the gate whoever sent it.
  *
+ * The uid check fails closed: an owner that cannot be verified (no
+ * /proc/net/tcp, a read error, the row gone) leaves the request unverified.
+ *
  * Residuals (also in docs/architecture/dashboard.md): a process running as
  * tailscaled's uid (root) can forge the Serve shape; so can one running as the
- * gateway's uid where the uid check cannot run (no /proc/net/tcp, or
- * CROW_SERVE_PEER_UIDS=off / the gateway's own uid — each warn-logged once);
+ * gateway's uid where the operator opted out (CROW_SERVE_PEER_UIDS=off, e.g. a
+ * host without procfs) or listed the gateway's own uid (each warn-logged once);
  * and any local process can reach a port a declared proxy fronts.
  *
  * Node built-ins only. Bundles import it through the app root.

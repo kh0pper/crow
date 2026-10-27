@@ -219,7 +219,9 @@ Before any Crow's Nest route executes, `isAllowedNetwork()` (`servers/gateway/da
 
 The first time forwarding headers arrive from an undeclared peer, the gateway logs `[net] WARN forwarding headers from undeclared peer …` once.
 
-**Residuals.** A process running as tailscaled's uid (root) can forge Serve's shape. So can a process running as the gateway's uid where the uid check cannot run (no `/proc/net/tcp`, `CROW_SERVE_PEER_UIDS=off`, or tailscaled sharing the gateway's uid; each is warn-logged once). Any local process can reach a port that a declared proxy fronts (for example a container's docker-proxy port), and is then classified by that proxy's rules.
+The uid check **fails closed**: if the socket owner cannot be verified (no `/proc/net/tcp`, a read error, or the connection already gone), the request is `unverified` and Serve's headers are not honoured. On a host without procfs (macOS, Windows native), tailnet users reaching the gateway through Serve are therefore refused unless the operator opts in with `CROW_SERVE_PEER_UIDS=off`, which accepts Serve's shape alone and logs `[net] WARN CROW_SERVE_PEER_UIDS=off …` once.
+
+**Residuals.** A process running as tailscaled's uid (root) can forge Serve's shape. So can a process running as the gateway's uid where the operator opted out (`CROW_SERVE_PEER_UIDS=off`) or tailscaled shares the gateway's uid (each is warn-logged once). Any local process can reach a port that a declared proxy fronts (for example a container's docker-proxy port), and is then classified by that proxy's rules.
 
 ## App Launcher
 

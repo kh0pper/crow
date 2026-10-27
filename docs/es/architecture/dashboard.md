@@ -200,7 +200,9 @@ Antes de que se ejecute cualquier ruta del Crow's Nest, `isAllowedNetwork()` (`s
 
 La primera vez que llegan encabezados de reenvío desde un par no declarado, el gateway registra una vez `[net] WARN forwarding headers from undeclared peer …`.
 
-**Riesgos residuales.** Un proceso que corre con el uid de tailscaled (root) puede falsificar la forma de Serve. También puede hacerlo un proceso con el uid del gateway donde la verificación de uid no puede correr (sin `/proc/net/tcp`, con `CROW_SERVE_PEER_UIDS=off`, o si tailscaled comparte el uid del gateway; cada caso se advierte una vez en el log). Cualquier proceso local puede llegar a un puerto que atiende un proxy declarado (por ejemplo, el puerto de docker-proxy de un contenedor), y entonces se clasifica según las reglas de ese proxy.
+La verificación de uid **falla en cerrado**: si no se puede verificar el dueño del socket (sin `/proc/net/tcp`, un error de lectura, o la conexión ya cerrada), la petición queda `unverified` y no se respetan los encabezados de Serve. En un host sin procfs (macOS, Windows nativo), los usuarios de la tailnet que llegan por Serve se rechazan, salvo que el operador lo active explícitamente con `CROW_SERVE_PEER_UIDS=off`, que acepta solo la forma de Serve y registra una vez `[net] WARN CROW_SERVE_PEER_UIDS=off …`.
+
+**Riesgos residuales.** Un proceso que corre con el uid de tailscaled (root) puede falsificar la forma de Serve. También puede hacerlo un proceso con el uid del gateway donde el operador desactivó la verificación (`CROW_SERVE_PEER_UIDS=off`) o si tailscaled comparte el uid del gateway (cada caso se advierte una vez en el log). Cualquier proceso local puede llegar a un puerto que atiende un proxy declarado (por ejemplo, el puerto de docker-proxy de un contenedor), y entonces se clasifica según las reglas de ese proxy.
 
 ## Lanzador de aplicaciones
 

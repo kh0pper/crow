@@ -125,6 +125,8 @@ CROW_TRUSTED_PROXIES=loopback
 
 Sin esto, el gateway rechaza esas peticiones y registra una vez `[net] WARN forwarding headers from undeclared peer`. Si Crow corre en Docker detrás de `docker-proxy`, usa en su lugar el gateway del bridge de la red (encuéntralo con `docker network inspect <red> --format '{{(index .IPAM.Config 0).Gateway}}'`). Tailscale Serve y Funnel no necesitan ninguna entrada. `CROW_ALLOWED_IPS` lista *clientes* de confianza, no proxies.
 
+En Linux, Crow respeta los encabezados de Tailscale Serve solo en conexiones abiertas por el usuario de tailscaled (`CROW_SERVE_PEER_UIDS`, por defecto `0`, leído de `/proc/net/tcp`). En un host sin `/proc` (macOS, Windows nativo) esa verificación no puede correr, así que falla en cerrado y se rechaza a los usuarios de la tailnet que llegan por Serve. Para aceptarlos de todos modos, configura `CROW_SERVE_PEER_UIDS=off` (queda registrado como advertencia: cualquier proceso local podría falsificar una identidad de la tailnet).
+
 ## Paso 4: Configura la URL Pública
 
 Dile a Crow su dirección pública para que genere enlaces correctos en los feeds del blog, las URLs de compartición y el Crow's Nest:

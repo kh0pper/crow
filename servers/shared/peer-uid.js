@@ -17,9 +17,12 @@
  *     the uid of a connection cannot change during its life.
  *
  * CROW_SERVE_PEER_UIDS: comma list of numeric uids tailscaled runs as
- * (default "0"); "off" disables the check (shape-only). Where /proc/net/tcp
- * cannot be read at all (macOS, Windows, hardened /proc), the check cannot run:
- * the shape alone is used and a one-time warning says so.
+ * (default "0"). FAIL CLOSED: when the owner cannot be verified (no
+ * /proc/net/tcp, a read error, the row not found), the request is NOT treated
+ * as Serve or Funnel; it falls through to the plain peer-address rules. Hosts
+ * without procfs (macOS, Windows native) that want Serve's headers honoured
+ * opt in explicitly with CROW_SERVE_PEER_UIDS=off (shape-only), which logs a
+ * one-time warning.
  *
  * Node built-ins only. Imported by bundles through the app root.
  */
@@ -151,14 +154,16 @@ export function servePeerUids(env = process.env) {
   return val;
 }
 
-/** May this loopback socket speak for Serve/Funnel? → { ok, uid }. */
+/** May this loopback socket speak for Serve/Funnel? → { ok, uid }. Fails closed. */
 export function servePeerVerified(socket) {
   const uids = servePeerUids();
-  if (uids === null) return { ok: true, uid: null };
+  if (uids === null) {
+    warnOnce("uid-check-off", "[net] WARN CROW_SERVE_PEER_UIDS=off: Serve/Funnel headers are accepted on their shape alone, without verifying the socket owner; local processes can forge tailnet identity");
+    return { ok: true, uid: null };
+  }
   const r = peerUid(socket);
   if (r.unavailable) {
-    warnOnce("no-procfs", "[net] WARN cannot verify the Serve peer's uid (no /proc/net/tcp); local processes can forge tailnet identity");
-    return { ok: true, uid: null };
+    warnOnce("no-procfs", "[net] WARN cannot verify the Serve peer's uid (/proc/net/tcp unreadable): Serve/Funnel-shaped requests are treated as unverified. On a host without procfs, set CROW_SERVE_PEER_UIDS=off to accept Serve's headers on their shape alone");
   }
   return { ok: r.uid !== null && uids.includes(r.uid), uid: r.uid };
 }
