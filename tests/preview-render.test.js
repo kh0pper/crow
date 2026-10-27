@@ -351,10 +351,11 @@ test("the capture waits for loadEventFired", async () => {
   assert.ok(loadAt >= 0 && b.idx("Page.captureScreenshot") >= loadAt, "no capture before the event");
 
   const never = fakeCdp({ async onNavigate(x, params) { await x.mainDoc(params.url); x.commit(params.url); } });
-  const t0 = Date.now();
+  // Same timer slack as the fetcher's timeout test: a timer can fire a little early against Date.now().
+  const t0 = performance.now();
   await assert.rejects(render(never, serve({ [MAIN]: () => okDoc() }), { timeoutMs: 300 }), { code: "preview_timeout" });
-  const ms = Date.now() - t0;
-  assert.ok(ms >= 290 && ms < 1000, `timed out after ${ms} ms`);
+  const ms = Math.round(performance.now() - t0);
+  assert.ok(ms >= 270 && ms < 1000, `timed out after ${ms} ms`);
   assert.equal(never.has("Page.captureScreenshot"), false);
 });
 
