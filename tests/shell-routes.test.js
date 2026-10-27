@@ -289,3 +289,57 @@ test("saving the language keeps the mode cookie beside crow_lang", async () => {
   assert.equal(cookieValue(r.cookies, MODE), "new", "the first-visit mode cookie is not overwritten");
   await post("/dashboard/settings?section=language", { action: "set_language", language: "en" }, { jar: NEW });
 });
+
+// ─── Task 2.4: the one-time "Try the new Crow" card ───
+
+test("an upgraded device sees the card once", async () => {
+  const TRY = mode.cookieName(mode.TRY_COOKIE);
+  const first = await get("/dashboard/memory", OLD);
+  assert.match(first.body, /Try the new Crow/);
+  assert.match(first.body, /action="\/dashboard\/mode"[^>]*>[\s\S]*?name="mode" value="new"/);
+  assert.match(first.body, /action="\/dashboard\/mode\/try-dismiss"/);
+  assert.equal(cookieValue(first.cookies, TRY), "pending");
+
+  const again = await get("/dashboard/memory", { ...OLD, [MODE]: "classic", [TRY]: "pending" });
+  assert.match(again.body, /Try the new Crow/, "stays until it is answered");
+
+  const dismiss = await post("/dashboard/mode/try-dismiss", { return: "/dashboard/memory" }, { jar: { ...OLD, [MODE]: "classic", [TRY]: "pending" } });
+  assert.equal(dismiss.status, 303);
+  assert.equal(dismiss.location, "/dashboard/memory");
+  assert.equal(cookieValue(dismiss.cookies, TRY), "dismissed");
+  const raw = dismiss.cookies.find((s) => s.startsWith(TRY + "="));
+  assert.match(raw, /Max-Age=34560000/);
+  assert.match(raw, /SameSite=Lax/);
+  const open = await post("/dashboard/mode/try-dismiss", { return: "https://evil.example/x" }, { jar: OLD });
+  assert.equal(open.location, "/dashboard");
+
+  const next = await get("/dashboard/memory", { ...OLD, [MODE]: "classic", [TRY]: "dismissed" });
+  assert.doesNotMatch(next.body, /Try the new Crow/);
+});
+
+test("a device that tried new mode and went back sees no card", async () => {
+  const TRY = mode.cookieName(mode.TRY_COOKIE);
+  const r = await get("/dashboard/memory", { ...OLD, [MODE]: "classic", [TRY]: "used" });
+  assert.doesNotMatch(r.body, /Try the new Crow/);
+  const sw = await post("/dashboard/mode", { mode: "new" }, { jar: { ...OLD, [MODE]: "classic", [TRY]: "pending" } });
+  assert.equal(cookieValue(sw.cookies, MODE), "new");
+  assert.equal(cookieValue(sw.cookies, TRY), "used");
+  const back = await post("/dashboard/mode", { mode: "classic" }, { jar: OLD });
+  assert.equal(cookieValue(back.cookies, TRY), undefined);
+});
+
+test("a new device never sees the card in classic", async () => {
+  const r = await get("/dashboard/memory", { ...NEW, [MODE]: "classic" });
+  assert.doesNotMatch(r.body, /Try the new Crow/);
+});
+
+test("the dismiss route sits behind csrf", async () => {
+  const r = await post("/dashboard/mode/try-dismiss", {}, { jar: OLD, csrfHeader: false });
+  assert.notEqual(r.status, 303);
+});
+
+test("Settings offers the switch in classic", async () => {
+  const r = await get("/dashboard/settings?section=crow-mode", { ...OLD, [MODE]: "classic" });
+  assert.equal(r.status, 200);
+  assert.match(r.body, /action="\/dashboard\/mode"[^>]*>[\s\S]*?name="mode" value="new"[\s\S]*?Use the new Crow/);
+});

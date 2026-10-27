@@ -169,3 +169,20 @@ export function shellAvatarSheet({ lang }) {
     </div>
   </dialog>`;
 }
+
+/**
+ * The one-time "Try the new Crow" card, shown above a classic page's content
+ * while crow_try_new is "pending". "Try it" switches this device to the new
+ * shell; "Not now" dismisses the card for good. The hidden _csrf is filled
+ * from the crow_csrf cookie at submit time (the Turbo-off path).
+ */
+export function tryNewCardHtml(lang) {
+  const fill = "var f=this.querySelector('input[name=_csrf]');var m=document.cookie.match(/(?:^|;\\s*)crow_csrf=([^;]*)/);if(f&&m)f.value=decodeURIComponent(m[1]);";
+  const style = "display:flex;flex-wrap:wrap;align-items:center;gap:0.75rem 1rem;padding:1rem;margin-bottom:1rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-card)";
+  const btn = "min-height:44px;padding:0 1rem;border-radius:var(--crow-radius-control);font:inherit;cursor:pointer";
+  return `<aside class="try-new-card" style="${style}">
+    <div style="flex:1;min-width:200px"><strong>${escapeHtml(t("shell.tryTitle", lang))}</strong><div style="color:var(--crow-text-secondary);font-size:0.9rem">${escapeHtml(t("shell.tryBody", lang))}</div></div>
+    <form method="post" action="/dashboard/mode" onsubmit="${escapeHtml(fill)}" style="margin:0"><input type="hidden" name="_csrf" value=""><input type="hidden" name="mode" value="new"><button type="submit" style="${btn};background:var(--crow-accent);color:#fff;border:0">${escapeHtml(t("shell.tryNow", lang))}</button></form>
+    <form method="post" action="/dashboard/mode/try-dismiss" onsubmit="${escapeHtml(fill + "this.return.value=location.pathname+location.search;")}" style="margin:0"><input type="hidden" name="_csrf" value=""><input type="hidden" name="return" value=""><button type="submit" style="${btn};background:transparent;color:var(--crow-text-secondary);border:1px solid var(--crow-border)">${escapeHtml(t("shell.notNow", lang))}</button></form>
+  </aside>`;
+}

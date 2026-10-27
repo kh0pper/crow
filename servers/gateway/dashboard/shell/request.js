@@ -16,9 +16,10 @@
 import { Router } from "express";
 import { parseCookies, cookieSecureSuffix } from "../auth.js";
 import {
-  MODE_COOKIE, SCOPE_COOKIE, cookieName, modeCookie,
+  MODE_COOKIE, SCOPE_COOKIE, TRY_COOKIE, cookieName, modeCookie, tryCookie,
   resolveDeviceMode, ensureShellSince, sessionCreatedAt,
 } from "./mode.js";
+import { tryNewCardHtml } from "./chrome.js";
 import { ACTIVE_PROJECT_WHERE, activeProjects } from "../../../shared/shell-items.js";
 
 /** The tab a panel lights up. bot-board / artifacts stand in until P3 / P4 register board / make. */
@@ -102,6 +103,8 @@ export async function resolveRequestMode(req, res, db) {
   }
   req.crowMode = decision;
   if (decision.persist && !res.headersSent) res.append("Set-Cookie", modeCookie(decision.mode));
+  // The device's first classic render also starts the one-time offer.
+  if (decision.offerTry && !res.headersSent) res.append("Set-Cookie", tryCookie("pending"));
   return decision;
 }
 
@@ -125,8 +128,17 @@ export function shellRouter({ createDbClient }) {
     const m = req.body ? req.body.mode : undefined;
     if (m !== "new" && m !== "classic") return res.status(400).type("text/plain").send("mode must be new or classic");
     res.append("Set-Cookie", modeCookie(m));
+    if (m === "new") res.append("Set-Cookie", tryCookie("used"));
     // The target's crow-mode meta differs, so Turbo does a full load.
     return res.redirect(303, m === "new" ? "/dashboard/perch" : "/dashboard");
+  });
+
+  router.post("/dashboard/mode/try-dismiss", (req, res) => {
+    res.append("Set-Cookie", tryCookie("dismissed"));
+    const raw = req.body ? req.body.return : undefined;
+    const back = safeReturnPath(raw);
+    // safeReturnPath's fallback is the shell's Chat; this route's is the classic home.
+    return res.redirect(303, back === DEFAULT_RETURN && raw !== DEFAULT_RETURN ? "/dashboard" : back);
   });
 
   router.post("/dashboard/scope", async (req, res) => {
@@ -150,11 +162,14 @@ export function shellRouter({ createDbClient }) {
  * classic page has no chip, so it never filters out of sight). New: the shell
  * with this request's scope, the live projects (read once) and the panel's tab.
  */
-export async function resolveShellPage(req, res, db, panelId) {
-  const { mode } = await resolveRequestMode(req, res, db);
+export async function resolveShellPage(req, res, db, panelId, lang = "en") {
+  const { mode, offerTry } = await resolveRequestMode(req, res, db);
   if (mode !== "new") {
     req.crowScope = EVERYTHING;
-    return { variant: "classic" };
+    // One rule: the card shows iff crow_try_new is "pending" (this request's own
+    // first render counts: its Set-Cookie is not in the request yet).
+    const pending = offerTry || parseCookies(req)[cookieName(TRY_COOKIE)] === "pending";
+    return pending ? { variant: "classic", tryNewCard: tryNewCardHtml(lang) } : { variant: "classic" };
   }
   const { scope, setCookie } = await resolveScope(req, db);
   if (setCookie && !res.headersSent) res.append("Set-Cookie", setCookie);

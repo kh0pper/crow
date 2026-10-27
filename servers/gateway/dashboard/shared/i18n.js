@@ -3702,6 +3702,11 @@ export const translations = {
   "shell.useClassic": { en: "Use classic Crow", es: "Usar Crow clásico" },
   "shell.useNew": { en: "Use the new Crow", es: "Usar el nuevo Crow" },
   "shell.switchScope": { en: "Switch project", es: "Cambiar de proyecto" },
+  "shell.tryTitle": { en: "Try the new Crow", es: "Prueba el nuevo Crow" },
+  "shell.tryBody": { en: "Chat, Board and Make in one calm view. You can switch back any time.", es: "Chat, Tablero y Crear en una vista tranquila. Puedes volver cuando quieras." },
+  "shell.tryNow": { en: "Try it", es: "Probarlo" },
+  "shell.notNow": { en: "Not now", es: "Ahora no" },
+  "settings.section.crowMode": { en: "New Crow", es: "El nuevo Crow" },
   "shell.account": { en: "Settings and mode", es: "Ajustes y modo" },
 };
 

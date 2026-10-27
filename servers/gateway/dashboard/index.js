@@ -930,7 +930,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
       const activeHeaderJs = tamaEnabled ? tamagotchiJs(lang) : headerIconsJs(lang);
 
       // New shell or classic, per device; sets req.crowMode and req.crowScope.
-      const shellOpts = await resolveShellPage(req, res, db, panelId);
+      const shellOpts = await resolveShellPage(req, res, db, panelId, lang);
 
       const result = await panel.handler(req, res, {
         db,
