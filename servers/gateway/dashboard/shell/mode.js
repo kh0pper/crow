@@ -4,7 +4,7 @@
  * classic (with an offer to try new); everything else opens new.
  */
 import { createHash } from "node:crypto";
-import { readLocalInstanceIdOrNull } from "../../../shared/crow-home.js";
+import { readLocalInstanceIdOrNull, resolveInstanceDataDir } from "../../../shared/crow-home.js";
 import { hashToken, cookieSecureSuffix } from "../auth.js";
 import { readSetting, writeSetting } from "../settings/registry.js";
 
@@ -14,10 +14,25 @@ export const SCOPE_COOKIE = "crow_scope";
 
 const MODE_MAX_AGE = 400 * 24 * 60 * 60; // seconds
 
+// Memo of the suffix per data dir: the instance id is a file, and every
+// dashboard request needs these names, so it is read once, not per request.
+// Only a found id is remembered: before the gateway first writes it, the
+// next call looks again.
+const suffixByDataDir = new Map();
+
 /** Per-instance cookie name, so co-hosted gateways never read each other's. */
 export function cookieName(base, env = process.env) {
-  const id = readLocalInstanceIdOrNull(env);
-  const suffix = id ? createHash("sha256").update(id).digest("hex").slice(0, 8) : "local";
+  const key = resolveInstanceDataDir(env);
+  let suffix = suffixByDataDir.get(key);
+  if (!suffix) {
+    const id = readLocalInstanceIdOrNull(env);
+    if (id) {
+      suffix = createHash("sha256").update(id).digest("hex").slice(0, 8);
+      suffixByDataDir.set(key, suffix);
+    } else {
+      suffix = "local";
+    }
+  }
   return `${base}_${suffix}`;
 }
 
