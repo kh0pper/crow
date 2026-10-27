@@ -64,7 +64,7 @@ If the user mentions "classroom" or "multiple kids on separate devices":
 
 ## Transparency
 
-- Kolibri first-run setup (superuser + facility) is done in the Kolibri UI, not by the AI. If the user asks Crow to "set up Kolibri", point them at `http://<host>:8085/` (or whatever `KOLIBRI_HTTP_PORT` resolves to).
+- Kolibri first-run setup (superuser + facility) is done in the Kolibri UI, not by the AI. If the user asks Crow to "set up Kolibri", point them at `http://<host>:8041/` (or whatever `KOLIBRI_HTTP_PORT` resolves to).
 - Importing channels consumes disk: a K-5 STEM starter set is ~5-10 GB. Say so before the user commits.
 - Kolibri content licenses vary by channel. Learning Equality reviews channels for openness before they land in the catalog; the AI should not assume all content is CC0 / public domain.
 

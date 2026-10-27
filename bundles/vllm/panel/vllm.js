@@ -22,7 +22,7 @@ export default {
     const componentsPath = join(appRoot, "servers/gateway/dashboard/shared/components.js");
     const { escapeHtml } = await import(pathToFileURL(componentsPath).href);
 
-    const port = process.env.VLLM_HTTP_PORT || "8089";
+    const port = process.env.VLLM_HTTP_PORT || "8044";
     const endpointUrl = `http://${req.hostname || "localhost"}:${port}`;
     const configuredModel = process.env.VLLM_MODEL || "(unset — set VLLM_MODEL in .env before starting)";
     const maxSeqs = process.env.VLLM_MAX_NUM_SEQS || "16";

@@ -14,7 +14,7 @@ services:
               count: all
               capabilities: [gpu]
     ports:
-      - "127.0.0.1:${VLLM_HTTP_PORT:-8089}:8000"
+      - "127.0.0.1:${VLLM_HTTP_PORT:-8044}:8000"
     # Shared memory for PyTorch workers. vLLM documents ipc: host OR a large shm; shm keeps
     # the host IPC namespace private (the install check refuses ipc: host without consent).
     shm_size: "${VLLM_SHM_SIZE:-8gb}"

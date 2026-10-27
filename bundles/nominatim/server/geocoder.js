@@ -5,7 +5,7 @@
  * Supports forward geocoding, reverse geocoding, and structured search.
  */
 
-const DEFAULT_URL = "http://localhost:8088";
+const DEFAULT_URL = "http://localhost:8042";
 
 function getBaseUrl() {
   return (process.env.NOMINATIM_URL || DEFAULT_URL).replace(/\/$/, "");

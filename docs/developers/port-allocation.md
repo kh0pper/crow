@@ -2,8 +2,8 @@
 
 This document is the **single source of truth** for every host port consumed by Crow itself, by bundles in `bundles/`, and reserved by the MVP roadmap. Any new bundle PR that introduces a port binding must amend this file in the same PR. CI enforces that:
 
-1. Every host port in any `bundles/**/docker-compose.yml` is listed here.
-2. No two bundles map the same host port.
+1. Every host port in any `bundles/<id>/docker-compose*.yml` (overlays such as `docker-compose.tailnet.yml` included) is listed here. A host port written as `${VAR:-N}` or `${VAR-N}` counts as `N`, the port a fresh install publishes. A host port that is a variable with no default (`${VAR}`) has no number to check.
+2. No two bundles publish the same host port on overlapping addresses: the same host IP, or either side a wildcard (no IP, `0.0.0.0`, `::`). Two different specific addresses on one port (loopback and the tailnet IP, the 8004 case below) do not clash.
 
 ## Conventions
 
@@ -43,6 +43,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 2019 | — | (retired: the Caddy admin API is a unix socket, ~/.crow/caddy/run/admin.sock; keep free) | retired |
 | 2223 | 127.0.0.1 | gitea (SSH) | MVP PR 5 |
 | 2224 | 127.0.0.1 | forgejo (SSH) | MVP PR 5 |
+| 2586 | 127.0.0.1 | ntfy (`NTFY_PORT`; tailnet reaches it through `tailscale serve 2586`, never Funnel) | existing |
 | 2283 | 127.0.0.1 | immich (existing — verify in compose) | existing |
 | 3001 | 127.0.0.1 | Crow gateway (HTTPS) | core |
 | 3002 | 127.0.0.1 | Crow gateway (alt) | core |
@@ -79,22 +80,28 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 6875 | 127.0.0.1 | bookstack (existing) | existing |
 | 8000 | 127.0.0.1 | paperless (existing) | existing |
 | 8002 | tailscale IP | ~~ed-jobs-scraper backend~~ — freed 2026-07-26 (stack migrated to grackle :8002) | external, freed |
+| 8003 | tailscale IP | llamacpp-vulkan-qwen36-35b-a3b (crow-chat) | existing |
 | 8004 | 127.0.0.1 | faster-whisper-server (local STT) | existing |
 | 8004 | tailscale IP | llamacpp-vulkan-qwen3-embed (crow-embed; same port as faster-whisper, different interface) | existing |
+| 8005 | tailscale IP | faster-whisper-server tailnet overlay (`docker-compose.tailnet.yml`, opt-in cross-instance STT; moved off 8004, which crow-embed holds on the tailnet IP) | existing |
 | 8007 | 127.0.0.1 | llamacpp-cpu-qwen3-embed (CPU embeddings) | PR #111 |
 | 8011 | tailscale IP | vllm-rocm-qwen35-4b (crow-voice classifier / fast route) | existing |
 | 8012 | 127.0.0.1 | llamacpp-vulkan-qwen3-vl-4b (crow-vision: dedicated vision model for vision profiles, Meta Glasses look turns and the vision role; loopback only, no ufw rule) | glasses vision |
 | 8018 | 127.0.0.1 | design-kit (renderer door: Vega-Lite / Mermaid / D2 → SVG; the render container itself sits on an internal-only Docker network with no egress; no ufw rule) | Design kit v1 |
 | 8040 | 127.0.0.1 | lemmy (API for Crow's host-run MCP server and panel, `LEMMY_API_PORT`; the public site goes through Caddy) | item 30 |
+| 8041 | 127.0.0.1 | kolibri (`KOLIBRI_HTTP_PORT`; default moved from 8085, which miniflux holds) | existing (moved 2026-10) |
+| 8042 | 127.0.0.1 | nominatim (`NOMINATIM_PORT`; default moved from 8088, which trilium holds) | existing (moved 2026-10) |
+| 8043 | 127.0.0.1 | maker-lab-advanced (JupyterHub, `MLA_HTTP_PORT`; default moved from 8088, which trilium holds) | existing (moved 2026-10) |
+| 8044 | 127.0.0.1 | vllm (`VLLM_HTTP_PORT`; default moved from 8089, which the external edjobs nominatim holds on crow; maker-lab probes this port for vLLM) | existing (moved 2026-10) |
 | 8080 | 127.0.0.1 | localai (existing) | existing |
 | 8081 | 127.0.0.1 | calibre-server (existing) | existing |
 | 8083 | 127.0.0.1 | calibre-web (existing) | existing |
 | 8084 | 127.0.0.1 | wallabag (existing) | existing |
 | 8085 | 127.0.0.1 | miniflux (existing) | existing |
 | 8086 | 127.0.0.1 | shiori (existing) | existing |
+| 8087 | 127.0.0.1 | scratch-offline (`SCRATCH_HTTP_PORT`) | existing |
 | 8088 | 127.0.0.1 | trilium (existing) | existing |
-| 8088 | 127.0.0.1 | nominatim default (`NOMINATIM_PORT`) — **collides with trilium**; set `NOMINATIM_PORT` if you run both | existing |
-| 8089 | 127.0.0.1 + tailscale IP | edjobs nominatim (external, ~/ed-jobs-scraper) — R4 GIS tools + grackle scraper stack (ufw-scoped) | external |
+| 8089 | 127.0.0.1 + tailscale IP | edjobs nominatim (external, ~/ed-jobs-scraper) — R4 GIS tools + grackle scraper stack (ufw-scoped). The vllm bundle's default used to be 8089 too; it moved to 8044 | external |
 | 8090 | 127.0.0.1 | (reserved — a private bundle maintained outside this repo) | reserved |
 | 8091 | 127.0.0.1 | crowdsec (LAPI) | MVP PR 4 |
 | 8092 | 127.0.0.1 | stirling-pdf | MVP PR 1 |
@@ -106,6 +113,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 8456 | tailnet (Serve) | Tailscale Serve HTTPS → 127.0.0.1:3070 (Workspace; never Funnel) | W1 2026-10 |
 | 8457 | tailnet (Serve) | Tailscale Serve HTTPS → 127.0.0.1:3071 (Workspace editor; never Funnel). Plus one Serve PATH on the same port, no new port: `/crow-live` → `http://127.0.0.1:<gateway port>/api/workspace/live` (W2 K5 live-edit plugin; set up by the operator from Office › For the admin) | W1 2026-10, W2 path |
 | 8010 | 100.64.20.1 (tailscale) | llamacpp-vulkan-qwen36-27b-copilot — co-resident critic refute/probe model, 65536 ctx, text-only (crow-addons) | existing (2026-07-06) |
+| 8600 | 127.0.0.1 | funkwhale (nginx, `FUNKWHALE_NGINX_BIND_PORT`; bind address `FUNKWHALE_NGINX_BIND_ADDR`) | existing |
 | 8530 | 127.0.0.1 | adguard-home (DNS-over-TLS) | MVP PR 3 |
 | 8554 | 127.0.0.1 | frigate (RTSP restream) | existing |
 | 8555 | 127.0.0.1 | frigate (WebRTC) | existing |
@@ -115,6 +123,9 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 9000 | 127.0.0.1 | minio (S3 API, existing) | existing |
 | 9001 | 127.0.0.1 | minio (console, existing) | existing |
 | 9090 | 127.0.0.1 | linkding (existing) | existing |
+| 9100 | grackle tailscale IP | vllm-cuda-embed (`GRACKLE_TAILSCALE_IP`; a grackle bundle, not crow) | existing |
+| 9101 | grackle tailscale IP | vllm-cuda-rerank (`GRACKLE_TAILSCALE_IP`; a grackle bundle, not crow) | existing |
+| 9102 | grackle tailscale IP | vllm-cuda-vision (`GRACKLE_TAILSCALE_IP`; a grackle bundle, not crow) | existing |
 | 11434 | 127.0.0.1 | ollama (existing) | existing |
 | 13378 | 127.0.0.1 | audiobookshelf (existing) | existing |
 | 18018 | 127.0.0.1 | design-kit renderer SMOKE instance (`scripts/design-kit/smoke-renderer.sh`; transient, tests only, never left running) | Design kit v1 |

@@ -2368,7 +2368,7 @@
     {
       "id": "kolibri",
       "name": "Kolibri",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Offline-first learning platform from Learning Equality — self-hosted STEM and literacy content for ages 5-18. Classroom-capable, LAN-sync built in, thousands of free educational channels curated by the global learning community.",
       "type": "bundle",
       "author": "Crow",
@@ -2402,7 +2402,7 @@
         {
           "name": "KOLIBRI_URL",
           "description": "Internal URL for reaching the Kolibri API.",
-          "default": "http://localhost:8085",
+          "default": "http://localhost:8041",
           "required": false
         },
         {
@@ -2412,8 +2412,8 @@
         },
         {
           "name": "KOLIBRI_HTTP_PORT",
-          "description": "Host port to expose Kolibri on. Default 8085 (Kolibri's own default 8080 is a common conflict on home servers).",
-          "default": "8085",
+          "description": "Host port to expose Kolibri on. Default 8041 (Kolibri's own default 8080 is a common conflict on home servers).",
+          "default": "8041",
           "required": false
         },
         {
@@ -2423,10 +2423,10 @@
         }
       ],
       "ports": [
-        8085
+        8041
       ],
       "webUI": {
-        "port": 8085,
+        "port": 8041,
         "path": "/",
         "label": "Kolibri"
       },
@@ -4100,7 +4100,7 @@
     {
       "id": "nominatim",
       "name": "Nominatim GIS",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "description": "Self-hosted geocoding and GIS — forward/reverse geocode, batch geocode data columns, generate GeoJSON, map visualizations",
       "type": "bundle",
       "author": "Crow",
@@ -4140,9 +4140,9 @@
       "env_vars": [
         {
           "name": "NOMINATIM_URL",
-          "description": "Nominatim API URL (default: http://localhost:8088)",
+          "description": "Nominatim API URL (default: http://localhost:8042)",
           "required": false,
-          "default": "http://localhost:8088"
+          "default": "http://localhost:8042"
         },
         {
           "name": "NOMINATIM_PBF_URL",
@@ -4152,9 +4152,9 @@
         },
         {
           "name": "NOMINATIM_PORT",
-          "description": "Port for Nominatim API (default: 8088)",
+          "description": "Port for Nominatim API (default: 8042)",
           "required": false,
-          "default": "8088"
+          "default": "8042"
         }
       ],
       "notes": "Requires significant disk space (US extract: ~30GB, full planet: ~1TB) and 4GB+ RAM. Initial import takes several hours. Depends on the Data Dashboard bundle for full integration.",
@@ -6303,7 +6303,7 @@
     {
       "id": "vllm",
       "name": "vLLM",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "GPU-accelerated local LLM inference server — OpenAI-compatible endpoint backed by vLLM's continuous batching and PagedAttention. Recommended classroom engine for Maker Lab: the Phase 0 Ollama benchmark hit unusable p95 latencies at N=25 concurrent learners; vLLM is architecturally the right shape for that scale.",
       "type": "bundle",
       "author": "Crow",
@@ -6353,8 +6353,8 @@
         },
         {
           "name": "VLLM_HTTP_PORT",
-          "description": "Host port to expose the OpenAI-compatible endpoint on. Default 8089.",
-          "default": "8089",
+          "description": "Host port to expose the OpenAI-compatible endpoint on. Default 8044.",
+          "default": "8044",
           "required": false
         },
         {
@@ -6382,14 +6382,14 @@
         }
       ],
       "ports": [
-        8089
+        8044
       ],
       "webUI": {
-        "port": 8089,
+        "port": 8044,
         "path": "/docs",
         "label": "vLLM API docs"
       },
-      "no_auto_provider": "VLLM_MODEL is a required install-time env var with no default (docker-compose.yml: `--model=${VLLM_MODEL:?Set VLLM_MODEL}`) -- the served model is whatever HuggingFace id the installer types in, so there is no fixed model id this manifest can register at build time. Manifest providers[] has no mechanism to read a resolved env var into a model id (registerProviderFromManifest only substitutes {host_ip}/{port}). After install, add the provider manually via Settings -> LLM -> Providers, pointing baseUrl at http://<host>:${VLLM_HTTP_PORT:-8089}/v1 with the same value used for VLLM_MODEL as the model id (vLLM serves it under --served-model-name=${VLLM_MODEL}).",
+      "no_auto_provider": "VLLM_MODEL is a required install-time env var with no default (docker-compose.yml: `--model=${VLLM_MODEL:?Set VLLM_MODEL}`) -- the served model is whatever HuggingFace id the installer types in, so there is no fixed model id this manifest can register at build time. Manifest providers[] has no mechanism to read a resolved env var into a model id (registerProviderFromManifest only substitutes {host_ip}/{port}). After install, add the provider manually via Settings -> LLM -> Providers, pointing baseUrl at http://<host>:${VLLM_HTTP_PORT:-8044}/v1 with the same value used for VLLM_MODEL as the model id (vLLM serves it under --served-model-name=${VLLM_MODEL}).",
       "notes": "Linux x86_64 + NVIDIA GPU required. Recommended classroom shape: Qwen2.5-3B-Instruct at VLLM_MAX_NUM_SEQS=16 on a 16 GB consumer GPU (tested in the Maker Lab Phase 0 benchmark, see bundles/maker-lab/PHASE-0-REPORT.md Spike 5). vLLM's OpenAI-compatible endpoint drops into Maker Lab's MAKER_LAB_LLM_ENDPOINT as-is.",
       "official": true
     },
