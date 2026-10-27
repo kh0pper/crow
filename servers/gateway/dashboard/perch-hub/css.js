@@ -89,6 +89,9 @@ export function perchHubCss() {
    longer has to clear a 26px wordmark, and margin-left:auto keeps the link
    on the right now that space-between has only one child to distribute. */
 #perch-hub-root header{padding:4px 0 16px;display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;flex-shrink:0}
+/* Shell P2: in the new shell the tabs replace the Board link, so html.js ships
+   this header hidden; display:flex above would otherwise beat [hidden]. */
+#perch-hub-root header[hidden]{display:none}
 #perch-hub-root .machines{display:flex;gap:6px;font-size:13px;margin-left:auto}
 #perch-hub-root .machines a{text-decoration:none;color:var(--dim);padding:5px 12px;border-radius:999px;border:1px solid var(--line)}
 #perch-hub-root a:focus-visible,#perch-hub-root button:focus-visible,#perch-hub-root input:focus-visible,#perch-hub-root textarea:focus-visible{outline:2px solid var(--teal);outline-offset:2px}
