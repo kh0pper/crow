@@ -7,10 +7,22 @@
  * tests/fixtures/shell/classic-layout-snapshot.html was captured from main's
  * renderLayout before layout.js was edited, using the options in
  * tests/fixtures/shell/classic-layout-opts.mjs.
+ *
+ * THIS IS A DELIBERATE TRIPWIRE. Any change to classic layout output (CSS,
+ * markup, scripts) fails the "classic output is unchanged" test on purpose, so
+ * it cannot slip in unnoticed. A PR that means to change classic must
+ * regenerate the snapshot in the same PR and justify the diff in its
+ * description:
+ *
+ *   UPDATE_CLASSIC_SNAPSHOT=1 node scripts/run-suite.mjs tests/shell-layout-render.test.js
+ *
+ * which rewrites tests/fixtures/shell/classic-layout-snapshot.html from the
+ * current output (minus the two intended shell-only differences handled
+ * below). Review `git diff` of the fixture before committing it.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { renderLayout } from "../servers/gateway/dashboard/shared/layout.js";
 import { shellCss } from "../servers/gateway/dashboard/shell/css.js";
 import { shellClientJs } from "../servers/gateway/dashboard/shell/client.js";
@@ -20,10 +32,8 @@ import { CLASSIC_OPTS } from "./fixtures/shell/classic-layout-opts.mjs";
 // The snapshot was taken with Turbo on (the default).
 delete process.env.CROW_ENABLE_TURBO;
 
-const SNAPSHOT = readFileSync(
-  new URL("./fixtures/shell/classic-layout-snapshot.html", import.meta.url),
-  "utf8",
-);
+const SNAPSHOT_URL = new URL("./fixtures/shell/classic-layout-snapshot.html", import.meta.url);
+let SNAPSHOT = readFileSync(SNAPSHOT_URL, "utf8");
 
 const ALL_PANELS = new Set([
   "board", "make", "messages", "bot-builder", "schedule", "memory", "media",
@@ -74,6 +84,11 @@ test("classic output is unchanged except the mode meta", () => {
   assert.equal(html.match(new RegExp(MODE_META_RE.source, "g"))?.length, 1, "exactly one crow-mode meta");
   assert.equal(html.split(TABS_H).length - 1, 2, "the only other change is the two Perch height lines");
   const stripped = html.replace(MODE_META_RE, "").split(TABS_H).join("");
+  if (process.env.UPDATE_CLASSIC_SNAPSHOT === "1") {
+    writeFileSync(SNAPSHOT_URL, stripped);
+    SNAPSHOT = stripped;
+    console.warn("[shell-layout-render] classic snapshot rewritten; review the fixture diff and justify it in the PR");
+  }
   assert.equal(stripped, SNAPSHOT, "classic renderLayout drifted from main's snapshot");
 });
 
