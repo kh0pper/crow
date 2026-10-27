@@ -1,0 +1,37 @@
+# Crow's preview renderer (a core component, not a bundle). The gateway runs it as
+#   docker compose -p crow-preview-<instance> -f <this file> run --rm -T -q --no-deps \
+#     --pull never --name crow-preview-<instance>-<8 hex> renderer
+# with cwd set to this folder; the child's stdin and stdout are the CDP pipe. It checks
+# this file with compose-guard.js (coreAllowance "preview-renderer") before every build
+# and every run. No network, no ports, no volumes, no display.
+#
+# CROW_PREVIEW_SECCOMP is the ABSOLUTE real path of seccomp-chrome.json (the compose CLI
+# reads it client-side). CROW_PREVIEW_INSTANCE and CROW_PREVIEW_HOME are 8-hex labels for
+# the instance and its CROW_HOME, used by the label sweep.
+services:
+  renderer:
+    image: ${CROW_PREVIEW_IMAGE}
+    build:
+      context: .
+    pull_policy: never
+    network_mode: none
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    shm_size: 256m
+    init: true
+    stdin_open: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=${CROW_PREVIEW_SECCOMP}
+    mem_limit: 768m
+    pids_limit: 512
+    environment:
+      CROW_PREVIEW_ARTIFACT_HOST: ${CROW_PREVIEW_ARTIFACT_HOST}
+    labels:
+      crow.component: preview-renderer
+      crow.instance: ${CROW_PREVIEW_INSTANCE}
+      crow.home: ${CROW_PREVIEW_HOME}

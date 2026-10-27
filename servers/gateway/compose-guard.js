@@ -20,6 +20,8 @@
 import { existsSync, readFileSync, realpathSync, lstatSync, readlinkSync, statSync, openSync, fstatSync, readSync, closeSync, constants as fsConstants } from "node:fs";
 import { join, resolve as resolvePath, dirname, basename, sep, isAbsolute } from "node:path";
 import { homedir } from "node:os";
+import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 // A value Compose sees for a `${VAR:?}` the install left blank (a collection member,
 // finished later with Configure): relative, so it resolves inside the bundle dir.
@@ -248,11 +250,43 @@ export function scanEnvFile(path) {
   } catch { return { bad: true }; } finally { closeSync(fd); }
 }
 
+// ---- core allowances ------------------------------------------------------------------
+// A core component (not a bundle) that the gateway itself runs may need one thing a
+// bundle never gets. Each is named, and permits exactly that one thing; the rest of its
+// compose is checked as for any bundle.
+//   "preview-renderer"  servers/gateway/preview/container/compose.yml: a security_opt
+//                       `seccomp=<path>` whose path is absolute, whose realpath is the
+//                       shipped seccomp-chrome.json, and whose bytes hash to
+//                       PREVIEW_SECCOMP_SHA256. Docker's default profile plus three
+//                       reviewed changes (chroot, the clone/unshare mask, clone3 ENOSYS)
+//                       so Chromium can build its own sandbox without CAP_SYS_ADMIN.
+//                       Update the hash only with a reviewed change to the profile.
+export const PREVIEW_SECCOMP_SHA256 = "1f5599761725d1c4bdd4a1cea1a84d5d2d203ed7e77172380ae358a65fb68414";
+const PREVIEW_SECCOMP_FILE = fileURLToPath(new URL("./preview/container/seccomp-chrome.json", import.meta.url));
+let previewSeccompFile = PREVIEW_SECCOMP_FILE;
+/** Tests only: where the shipped profile is expected (null restores it). */
+export function _setPreviewSeccompPathForTest(p) { previewSeccompFile = p || PREVIEW_SECCOMP_FILE; }
+const CORE_ALLOWANCES = new Set(["preview-renderer"]);
+
+function isShippedPreviewSeccomp(opt) {
+  const m = /^seccomp=(.+)$/.exec(String(opt));
+  if (!m || !isAbsolute(m[1])) return false;
+  try {
+    const real = realpathSync(m[1]);
+    if (real !== realpathSync(previewSeccompFile)) return false;
+    return createHash("sha256").update(readFileSync(real)).digest("hex") === PREVIEW_SECCOMP_SHA256;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Check a Compose model (the parsed `docker compose config --format json` output).
+ * `coreAllowance` names a core allowance (above); bundles never pass one.
  * @returns {{valid: true} | {valid: false, reason: string}}
  */
-export function checkComposeModel(model, { bundleDir, manifest, consentVerified = false, ctx }) {
+export function checkComposeModel(model, { bundleDir, manifest, consentVerified = false, ctx, coreAllowance }) {
+  if (coreAllowance !== undefined && !CORE_ALLOWANCES.has(coreAllowance)) return { valid: false, reason: `unknown core allowance '${String(coreAllowance).slice(0, 40)}'` };
   const isPrivilegedAllowed = !!(manifest?.privileged && consentVerified && manifest?.origin !== "community");
   const isConsentBundle = !!(manifest?.consent_required && consentVerified && manifest?.origin !== "community");
   const roots = sensitiveRoots(ctx);
@@ -448,6 +482,7 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
       if (!ok && (r = needPriv(`${k}: ${v}`))) return r;
     }
     for (const o of s.security_opt || []) {
+      if (coreAllowance === "preview-renderer" && isShippedPreviewSeccomp(o)) continue;
       if (!/^no-new-privileges(?:[:=]true)?$/.test(String(o)) && (r = needPriv(`security_opt ${o}`))) return r;
     }
     if (s.volumes_from !== undefined && (r = needPriv("volumes_from"))) return r;

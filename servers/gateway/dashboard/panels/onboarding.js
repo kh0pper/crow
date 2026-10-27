@@ -27,6 +27,7 @@ import { aiStepClientJS } from "./onboarding/ai-step-client.js";
 import { upsertProvider } from "../../../shared/providers-db.js";
 import { invalidateProvidersCache } from "../../../shared/providers.js";
 import { seedStarterMemories, createStarterArtifacts, resolveStarterProvider } from "./onboarding/starter-content.js";
+import { setPreviewsEnabled, previewsEnabled, previewRenderer } from "../../preview/renderer.js";
 
 /** Exported so tests derive step positions (indexOf/length) instead of pinning indices. */
 export const STEP_KEYS = ["welcome", "ai", "integrations", "bot", "starter", "connect", "meet", "done"];
@@ -623,16 +624,86 @@ export async function handleCloudProviderPost(req, res, opts = {}) {
  * means the user finished the tour, and the flag must only ever be written
  * once (idempotent replay from Settings must not touch it again).
  * @param {{execute: Function}|null} db
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>} true only for the call that wrote the flag
  */
 async function stampOnboardingCompleted(db) {
-  if (!db) return;
+  if (!db) return false;
   try {
     const existing = await readSetting(db, "onboarding_completed_at");
     if (!existing) {
       await upsertSetting(db, "onboarding_completed_at", new Date().toISOString());
+      return true;
     }
   } catch {}
+  return false;
+}
+
+/**
+ * "Previews in Make" (the starter step's toggle, on by default). Next on that step is a
+ * CSRF-checked POST (handlePreviewsPost, below) that records the choice
+ * (`previews_onboarding_choice`, local-only); a GET never writes it. The FIRST
+ * completion of the tour (the done step, or the meet POST, whichever stamps
+ * onboarding_completed_at) applies it to `previews_enabled` and, when on, starts the
+ * image build in the background. A later visit to done never touches it, and an
+ * instance that never posted the toggle keeps previews off (absent means off), so an
+ * upgrade never builds anything by itself.
+ *
+ * Replayed on an instance that already finished the tour, the toggle shows the current
+ * `previews_enabled` and its POST applies the choice at once (on: the background build;
+ * off: the renderer stops), since no later completion would.
+ */
+async function applyPreviewsChoice(db) {
+  try {
+    const choice = await readSetting(db, "previews_onboarding_choice");
+    if (choice !== "on" && choice !== "off") return;
+    await setPreviewsEnabled(db, choice === "on");
+    if (choice === "on") previewRenderer().prepare().catch(() => {});
+  } catch {}
+}
+
+/** Stamp onboarding complete; on the first completion only, apply the previews choice. */
+async function finishOnboarding(db) {
+  if (await stampOnboardingCompleted(db)) await applyPreviewsChoice(db);
+}
+
+async function onboardingCompleted(db) {
+  if (!db) return false;
+  try { return Boolean(await readSetting(db, "onboarding_completed_at")); } catch { return false; }
+}
+
+/** First run: shown on. Replayed after completion: the current switch. */
+function renderPreviewsToggle(lang, req, checked = true) {
+  return `<form method="POST" action="/dashboard/onboarding/previews" id="onboarding-previews-form" data-turbo="false" style="margin-top:var(--crow-space-4)">
+    ${csrfInput(req)}
+    <label style="display:flex;align-items:center;gap:var(--crow-space-2);min-height:44px;cursor:pointer;color:var(--crow-text-secondary)">
+      <input type="checkbox" name="previews" value="on"${checked ? " checked" : ""} style="accent-color:var(--crow-accent);width:auto"> ${escapeHtml(t("onboarding.previews", lang))}
+    </label>
+  </form>`;
+}
+
+/**
+ * POST /dashboard/onboarding/previews — hand-registered in dashboard/index.js beside
+ * the meet POST, BEHIND dashboardAuth + csrfMiddleware. Records the starter step's
+ * previews toggle (an unchecked box is absent: "off") and moves on to the next step.
+ * On a first run it only records; finishing the tour applies it. After the tour was
+ * finished (a replay), it applies the choice itself.
+ */
+export async function handlePreviewsPost(req, res, opts = {}) {
+  const { db = null } = opts;
+  const next = STEP_KEYS.indexOf("starter") + 1;
+  const on = req.body?.previews === "on";
+  try {
+    if (db) await upsertSetting(db, "previews_onboarding_choice", on ? "on" : "off");
+    if (await onboardingCompleted(db)) {
+      await setPreviewsEnabled(db, on);
+      const renderer = previewRenderer();
+      if (on) renderer.prepare().catch(() => {});
+      else await renderer.stop().catch(() => {});
+    }
+  } catch (err) {
+    console.error("[onboarding] previews choice not saved:", err.message);
+  }
+  return res.redirectAfterPost(`/dashboard/onboarding?step=${next}`);
 }
 
 /**
@@ -683,7 +754,7 @@ export async function handleMeetPost(req, res, opts = {}) {
     if (result && result.error === "no_provider") {
       return back("no_provider");
     }
-    await stampOnboardingCompleted(db);
+    await finishOnboarding(db);
     return res.redirectAfterPost(`/dashboard/messages?ai=${result.conversationId}`);
   } catch (err) {
     console.error("[onboarding] meet-your-crow setup failed:", err.message); // message only
@@ -759,7 +830,8 @@ function renderStepBody(stem, lang, ctx = {}) {
     }
     case "starter":
       return body + renderStarterCards(lang)
-        + linkWrap(deepLink(t("onboarding.openCollections", lang), "/dashboard/extensions#collections"));
+        + linkWrap(deepLink(t("onboarding.openCollections", lang), "/dashboard/extensions#collections"))
+        + renderPreviewsToggle(lang, ctx.req, ctx.previewsChecked !== false);
     case "integrations":
       return body + callout(t("onboarding.integrationsNote", lang), "info")
         + linkWrap(deepLink(t("onboarding.openIntegrations", lang), "/dashboard/settings?section=integrations"));
@@ -845,7 +917,10 @@ function renderNav(current, lang) {
     parts.push(button(t("onboarding.btnSkip", lang), { variant: "ghost", href: "/dashboard" }));
     // id is a hook for ai-step-client.js's highlightNext() — purely additive,
     // no other step reads it.
-    parts.push(button(t("onboarding.btnNext", lang), { variant: "primary", href: `/dashboard/onboarding?step=${current + 1}`, attrs: 'id="onboarding-next-btn"' }));
+    parts.push(STEP_KEYS[current] === "starter"
+      // Next submits the starter step's previews toggle (renderPreviewsToggle).
+      ? button(t("onboarding.btnNext", lang), { variant: "primary", type: "submit", attrs: 'id="onboarding-next-btn" form="onboarding-previews-form"' })
+      : button(t("onboarding.btnNext", lang), { variant: "primary", href: `/dashboard/onboarding?step=${current + 1}`, attrs: 'id="onboarding-next-btn"' }));
   } else {
     parts.push(button(t("onboarding.btnGoDashboard", lang), { variant: "primary", href: "/dashboard" }));
   }
@@ -876,7 +951,7 @@ export default {
     const stem = STEP_KEYS[current];
 
     // W3-3: Reaching the "done" step marks onboarding complete (first time only).
-    if (stem === "done") await stampOnboardingCompleted(db);
+    if (stem === "done") await finishOnboarding(db);
 
     // The ai step's copy and the done step's dormant callout are conditional
     // on whether ANY provider is configured (providersCount); the meet step
@@ -893,6 +968,7 @@ export default {
     // ?err= query.
     const ctx = stem === "ai" ? { providersCount: await countProviders(db), req }
       : stem === "meet" ? { starterProvider: await safeResolveStarterProvider(db, resolveStarterProviderFn), req }
+      : stem === "starter" ? { req, previewsChecked: (await onboardingCompleted(db)) ? await previewsEnabled(db) : true }
       : stem === "done" ? { crowId: readInstanceCrowId(), req, providersCount: await countProviders(db) }
       : {};
 
