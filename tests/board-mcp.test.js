@@ -721,6 +721,7 @@ test("board_create_item keeps action_needed on a card", async () => {
   const created = payload(await client.callTool({ name: "board_create_item", arguments: { title: "flagged", project_id: 1, action_needed: "x" } }));
   const got = payload(await client.callTool({ name: "board_get_item", arguments: { id: created.id } }));
   assert.equal(got.item.action_needed, "x");
+  await client.close();
 });
 
 // ---- assigned_bot on board_create_item ----
