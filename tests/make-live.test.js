@@ -345,8 +345,8 @@ test("Turbo navigation from Make to Board and back keeps the filter", async (ctx
       assert.equal(await p.ev(on), "/dashboard/make?filter=pages");
       assert.equal(await p.ev("document.querySelectorAll('.mk-grid .mk-cell[data-mk-kind=\"workspace_file\"]').length"), 0, "Pages hides the Workspace files");
       await p.ev("window.__mkMark = 1; true");
-      await p.click(".shell-tab[href='/dashboard/bot-board']");
-      await p.until("location.pathname === '/dashboard/bot-board'", "Board");
+      await p.click(".shell-tab[href='/dashboard/board']");
+      await p.until("location.pathname === '/dashboard/board' && !!document.querySelector('.sb-board')", "Board");
       await p.settled();
       await p.ev("history.back(); true");
       await p.until("location.pathname === '/dashboard/make' && location.search === '?filter=pages' && !!document.querySelector('.mk-chip-on')", "Make again");
