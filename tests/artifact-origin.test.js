@@ -359,7 +359,7 @@ test("runtime: start-from-env listens on loopback; isolation is shared-host on t
     assert.ok(srv);
     assert.equal(srv.address().address, "127.0.0.1");
     assert.equal(srv.address().port, p);
-    assert.deepEqual(rt.artifactOriginInfo(), { baseUrl: `http://localhost:${p}`, port: p, configured: false });
+    assert.deepEqual(rt.artifactOriginInfo(), { baseUrl: `http://localhost:${p}`, port: p, configured: false, bindHost: "127.0.0.1" });
     assert.equal(rt.isolationFor("localhost:3001"), "shared-host");
     // No resolver registered yet: a live token still gets a sandboxed 404.
     const { token } = rt.viewTokens().mint({ artifactId: "a", versionN: 1, type: "page" });
@@ -373,7 +373,7 @@ test("runtime: start-from-env listens on loopback; isolation is shared-host on t
   const p2 = await freePort();
   await rt.startArtifactOriginFromEnv({ CROW_ARTIFACT_ORIGIN_PORT: String(p2), CROW_ARTIFACT_ORIGIN_URL: "https://art.example" });
   try {
-    assert.deepEqual(rt.artifactOriginInfo(), { baseUrl: "https://art.example", port: p2, configured: true });
+    assert.deepEqual(rt.artifactOriginInfo(), { baseUrl: "https://art.example", port: p2, configured: true, bindHost: "127.0.0.1" });
     assert.equal(rt.isolationFor("crow.example:8444"), "own-host");
     assert.equal(rt.isolationFor("ART.example"), "shared-host", "same hostname, any case or port, is shared");
   } finally { rt._resetForTest(); }

@@ -77,7 +77,7 @@ import contactsPanel from "./panels/contacts.js";
 import botBuilderPanel from "./panels/bot-builder.js";
 import botBoardPanel from "./panels/bot-board.js";
 import designSystemPanel from "./panels/design-system.js";
-import onboardingPanel, { handleIdentityBackupPost, handleCloudProviderPost, handleMeetPost } from "./panels/onboarding.js";
+import onboardingPanel, { handleIdentityBackupPost, handleCloudProviderPost, handleMeetPost, handlePreviewsPost } from "./panels/onboarding.js";
 import connectPanel from "./panels/connect.js";
 import fediversePanel from "./panels/fediverse.js";
 import meteringPanel from "./panels/metering.js";
@@ -736,6 +736,17 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     const db = createDbClient();
     try {
       await handleMeetPost(req, res, { db });
+    } finally {
+      try { db.close(); } catch {}
+    }
+  });
+
+  // The starter step's "Previews in Make" toggle: records the choice (applied when the
+  // tour is first finished). Same slot as the meet POST (session-authed + CSRF-protected).
+  router.post("/dashboard/onboarding/previews", async (req, res) => {
+    const db = createDbClient();
+    try {
+      await handlePreviewsPost(req, res, { db });
     } finally {
       try { db.close(); } catch {}
     }

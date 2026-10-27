@@ -298,6 +298,11 @@ export async function runPostListenSetup(server, app, deps) {
     });
   });
 
+  // The preview renderer (preview/renderer.js): sweep containers an earlier process left
+  // (by our three labels), then the 30 s idle tick. Skipped under --no-auth. Never throws.
+  import("../preview/renderer.js").then(({ startPreviewRendererTimers }) => startPreviewRendererTimers({ noAuth }))
+    .catch((err) => console.warn(`[preview] timers not started: ${err.message}`));
+
   // C4 Task 6: gateway-supervised bot runtime (bridge tick interval + Discord
   // child, both gated on the bot_runtime feature flag via runtimeGate — see
   // bot-runtime.js). Kill switch: CROW_DISABLE_BOT_RUNTIME=1 (forced by

@@ -20,7 +20,7 @@ export default {
     const componentsPath = join(appRoot, "servers/gateway/dashboard/shared/components.js");
     const { escapeHtml } = await import(pathToFileURL(componentsPath).href);
 
-    const port = process.env.MLA_HTTP_PORT || "8088";
+    const port = process.env.MLA_HTTP_PORT || "8043";
     const hubUrl = `http://${req.hostname || "localhost"}:${port}`;
     const adminUser = process.env.MLA_ADMIN_USER || "admin";
 

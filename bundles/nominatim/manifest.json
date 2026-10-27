@@ -1,7 +1,7 @@
 {
   "id": "nominatim",
   "name": "Nominatim GIS",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Self-hosted geocoding and GIS — forward/reverse geocode, batch geocode data columns, generate GeoJSON, map visualizations",
   "type": "bundle",
   "author": "Crow",
@@ -30,9 +30,9 @@
   "env_vars": [
     {
       "name": "NOMINATIM_URL",
-      "description": "Nominatim API URL (default: http://localhost:8088)",
+      "description": "Nominatim API URL (default: http://localhost:8042)",
       "required": false,
-      "default": "http://localhost:8088"
+      "default": "http://localhost:8042"
     },
     {
       "name": "NOMINATIM_PBF_URL",
@@ -42,9 +42,9 @@
     },
     {
       "name": "NOMINATIM_PORT",
-      "description": "Port for Nominatim API (default: 8088)",
+      "description": "Port for Nominatim API (default: 8042)",
       "required": false,
-      "default": "8088"
+      "default": "8042"
     }
   ],
   "notes": "Requires significant disk space (US extract: ~30GB, full planet: ~1TB) and 4GB+ RAM. Initial import takes several hours. Depends on the Data Dashboard bundle for full integration."

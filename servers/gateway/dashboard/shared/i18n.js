@@ -2682,6 +2682,22 @@ export const translations = {
 
   // ─── Settings Navigation ───
   "settings.backToSettings": { en: "Settings", es: "Ajustes" },
+  "settings.previews": { en: "Previews in Make", es: "Vistas previas en Crear" },
+  "settings.previewsRemoveImage": { en: "Also remove the preview image", es: "Quitar también la imagen de vistas previas" },
+  "settings.section.previews": { en: "Previews in Make", es: "Vistas previas en Crear" },
+  "settings.previewsStatusOff": { en: "Status: off.", es: "Estado: desactivadas." },
+  "settings.previewsStatusIdle": { en: "Status: on. The preview browser gets ready the next time a preview is needed.", es: "Estado: activadas. El navegador de vistas previas se prepara la próxima vez que haga falta una vista previa." },
+  "settings.previewsStatusBuilding": { en: "Status: building the preview browser in the background. This can take a few minutes.", es: "Estado: creando el navegador de vistas previas en segundo plano. Puede tardar unos minutos." },
+  "settings.previewsStatusReady": { en: "Status: ready.", es: "Estado: listo." },
+  "settings.previewsStatusBuildFailed": { en: "Status: the preview browser didn't build. Crow tries again in 10 minutes; the gateway log says why.", es: "Estado: el navegador de vistas previas no se pudo crear. Crow lo intentará de nuevo en 10 minutos; el registro del gateway explica por qué." },
+  "settings.previewsStatusNoDocker": { en: "Status: unavailable. This gateway can't reach Docker.", es: "Estado: no disponible. Este gateway no puede usar Docker." },
+  "settings.previewsStatusSandbox": { en: "Status: unavailable. This machine can't give the preview browser a sandbox. Crow tries again in 10 minutes.", es: "Estado: no disponible. Esta máquina no puede dar un entorno aislado al navegador de vistas previas. Crow lo intentará de nuevo en 10 minutos." },
+  "settings.previewsStatusStartFailed": { en: "Status: the preview browser didn't start. Crow tries again in 10 minutes; the gateway log says why.", es: "Estado: el navegador de vistas previas no arrancó. Crow lo intentará de nuevo en 10 minutos; el registro del gateway explica por qué." },
+  "settings.previewsStatusPaused": { en: "Status: paused for 5 minutes after three previews in a row took too long.", es: "Estado: en pausa 5 minutos porque tres vistas previas seguidas tardaron demasiado." },
+  "settings.previewsImageRemoved": { en: "The preview image was removed.", es: "Se quitó la imagen de vistas previas." },
+  "settings.previewsImageInUse": { en: "The preview image was kept: a preview browser on this machine is still using it.", es: "Se mantuvo la imagen de vistas previas: un navegador de vistas previas de esta máquina todavía la usa." },
+  "settings.previewsImageBuilding": { en: "The preview image is still building. It will be removed when the build finishes.", es: "La imagen de vistas previas todavía se está creando. Se quitará cuando termine." },
+  "settings.previewsImageFailed": { en: "The preview image could not be removed. The gateway log says why.", es: "No se pudo quitar la imagen de vistas previas. El registro del gateway explica por qué." },
 
   // ─── Sync Conflicts Section (W4-1) ───
   "syncConflicts.description": {
@@ -3034,6 +3050,7 @@ export const translations = {
   "onboarding.btnSkip": { en: "Skip to dashboard", es: "Ir al panel" },
   "onboarding.btnGoDashboard": { en: "Go to the dashboard", es: "Ir al panel" },
   "onboarding.replayLink": { en: "Replay setup guide", es: "Repetir guía de configuración" },
+  "onboarding.previews": { en: "Previews in Make (builds a small sandboxed browser in the background)", es: "Vistas previas en Crear (crea un pequeño navegador aislado en segundo plano)" },
 
   // F6c-1 connect wizard
   "connect.title": { en: "Connect a client", es: "Conecta un cliente" },

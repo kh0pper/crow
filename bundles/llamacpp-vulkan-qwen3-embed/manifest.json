@@ -1,6 +1,6 @@
 {
   "id": "llamacpp-vulkan-qwen3-embed",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "bundle",
   "name": "llama.cpp Qwen3-Embedding-0.6B (Vulkan/ROCm)",
   "category": "ai",

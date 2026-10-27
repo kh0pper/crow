@@ -25,7 +25,7 @@ export default {
     const componentsPath = join(appRoot, "servers/gateway/dashboard/shared/components.js");
     const { escapeHtml } = await import(pathToFileURL(componentsPath).href);
 
-    const port = process.env.KOLIBRI_HTTP_PORT || "8085";
+    const port = process.env.KOLIBRI_HTTP_PORT || "8041";
     const kolibriUrl = process.env.KOLIBRI_URL || `http://${req.hostname || "localhost"}:${port}`;
     const tab = req.query.tab === "embed" ? "embed" : "overview";
 
