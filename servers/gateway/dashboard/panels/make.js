@@ -19,6 +19,7 @@ import { listMakeItems } from "../../make/sources.js";
 import { markSeen } from "../../../shared/shell-items.js";
 import { renderMakePage } from "./make/html.js";
 import { MAKE_CSS } from "./make/css.js";
+import { makeClientJs } from "./make/client.js";
 
 const ARTIFACT_ID_RE = /^art_[A-Za-z0-9_-]{6,40}$/; // same shape as the Artifacts bundle's ARTIFACT_ID_RE
 const WS_REF_RE = /^[1-9]\d{0,15}$/;
@@ -83,9 +84,17 @@ export default {
     const filter = FILTER_IDS.includes(req.query.filter) ? req.query.filter : "all";
     const scope = req.crowScope || { all: true };
     const model = await lister(db, scope, { crowHome: crowHome(), filter });
+    // The project a new thing starts in: the shell's chip, else Unassigned.
+    let project = { id: "unassigned", name: t("shell.unassigned", lang) };
+    if (scope.projectId != null) {
+      try {
+        const { rows } = await db.execute({ sql: "SELECT name FROM project_spaces WHERE id = ?", args: [Number(scope.projectId)] });
+        if (rows[0]) project = { id: Number(scope.projectId), name: String(rows[0].name || scope.slug || "") };
+      } catch (err) { console.warn(`[make] project name lookup failed: ${err.message}`); }
+    }
     return layout({
       title: t("shell.tabMake", lang),
-      content: MAKE_CSS + renderMakePage({ model, filter, lang }),
+      content: MAKE_CSS + renderMakePage({ model, filter, lang, project }) + makeClientJs(lang),
     });
   },
 };

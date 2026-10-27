@@ -263,3 +263,39 @@ export async function listMakeItems(db, scope = { all: true }, { crowHome, filte
   items.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));
   return { items: limit ? items.slice(0, limit) : items, artifacts, workspace };
 }
+
+const BLANK_KINDS = {
+  docx: { file: "tools/docs.js", exportName: "docsWriteDefs", tool: "ws_docs_create", args: (folder, title) => ({ folder, title, content: "", find_existing: false }) },
+  xlsx: { file: "tools/sheets.js", exportName: "sheetsDefs", tool: "ws_sheets_create", args: (folder, title) => ({ folder, title, find_existing: false }) },
+  pptx: { file: "tools/slides.js", exportName: "slidesDefs", tool: "ws_slides_create", args: (folder, title) => ({ title, folder }) },
+};
+export const BLANK_KIND_IDS = Object.keys(BLANK_KINDS);
+
+/**
+ * Create an empty office file in Crow/<project slug or "Unassigned"> by running the Workspace bundle's
+ * own create tool, with the same ctx shape createWorkspaceServer builds. Every argument is spelled out
+ * because zod defaults do not apply on a direct call; find_existing:false makes the tool pick a free
+ * name, so Blank never re-files an existing document. Throws WsError-style errors (err.code) as the
+ * bundle raises them; err.code === "workspace_missing" when the bundle is not installed.
+ * @returns {Promise<{ fileId: number, webUrl: string }>}
+ */
+export async function createBlankWorkspaceFile({ crowHome, kind, title, projectSlug }) {
+  const spec = BLANK_KINDS[kind];
+  if (!spec) throw Object.assign(new Error(`unknown kind ${kind}`), { code: "bad_kind" });
+  if (!installedBundle(crowHome, "workspace")) throw Object.assign(new Error("Workspace is not installed"), { code: "workspace_missing" });
+  const [{ getConfig }, { realClock }, tools, { mkcol }, { toPublic }] = await Promise.all([
+    workspaceImport(crowHome, "config.js"), workspaceImport(crowHome, "server.js"), workspaceImport(crowHome, spec.file),
+    workspaceImport(crowHome, "nc/dav.js"), workspaceImport(crowHome, "tools/common.js"),
+  ]);
+  const def = (tools[spec.exportName] || []).find((d) => d.name === spec.tool);
+  if (!def) throw new Error(`Workspace bundle has no ${spec.tool}`);
+  const ctx = Object.freeze({ getConfig, clock: realClock });
+  const cfg = getConfig(); // throws not_ready before anything is created
+  await mkcol(cfg, ["Crow"]);
+  const sub = projectSlug || "Unassigned";
+  await mkcol(cfg, ["Crow", sub]);
+  const out = await def.run(spec.args(`Crow/${sub}`, title), ctx);
+  const fileId = Number(out?.file_id);
+  if (!Number.isInteger(fileId) || fileId < 1) throw new Error(`${spec.tool} returned no file id`);
+  return { fileId, webUrl: toPublic({ fileId }, cfg).web_url };
+}

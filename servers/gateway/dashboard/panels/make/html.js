@@ -18,6 +18,15 @@ export const FILTERS = [
 ];
 const TYPES = ["document", "spreadsheet", "deck", "page", "diagram"];
 
+/** What each "Start something" type needs: the bundle that makes it, and (Workspace files) the Blank kind. */
+export const START_TYPES = [
+  { id: "document", needs: "workspace", blank: "docx", labelKey: "shell.typeDocument", startKey: "shell.startDocument", tool: "ws_docs_create" },
+  { id: "spreadsheet", needs: "workspace", blank: "xlsx", labelKey: "shell.typeSpreadsheet", startKey: "shell.startSpreadsheet", tool: "ws_sheets_create" },
+  { id: "deck", needs: "workspace", blank: "pptx", labelKey: "shell.typeDeck", startKey: "shell.startDeck", tool: "ws_slides_create" },
+  { id: "page", needs: "artifacts", blank: null, labelKey: "shell.typePage", startKey: "shell.startPage", tool: null },
+  { id: "diagram", needs: "artifacts", blank: null, labelKey: "shell.typeDiagram", startKey: "shell.startDiagram", tool: null },
+];
+
 function chips(active, lang) {
   return `<nav class="mk-chips" aria-label="${esc(t("shell.tabMake", lang))}">${FILTERS.map((f) => {
     const on = f.id === active;
@@ -57,8 +66,48 @@ function tile(item, lang) {
   </a></li>`;
 }
 
+/** "installed" | "unavailable" count as usable (an unreachable Workspace is tried, and says so if it fails). */
+function startState(type, artifacts, workspace) {
+  const state = type.needs === "workspace" ? workspace : artifacts;
+  if (state === "missing") return { href: `/dashboard/extensions?q=${type.needs}`, offerKey: type.needs === "workspace" ? "shell.getWorkspace" : "shell.getArtifacts" };
+  if (state === "not_ready") return { href: "/dashboard/workspace", offerKey: "shell.finishWorkspace" };
+  return null;
+}
+
+function startRow(type, artifacts, workspace, lang) {
+  const label = esc(t(type.labelKey, lang));
+  const off = startState(type, artifacts, workspace);
+  if (off) {
+    return `<li class="mk-start-row" data-mk-row="${type.id}"><span class="mk-start-name">${label}</span><a class="btn btn-secondary mk-start-act" href="${esc(off.href)}">${esc(t(off.offerKey, lang))}</a></li>`;
+  }
+  const blank = type.blank ? `<button type="button" class="btn btn-secondary mk-start-act" data-mk-blank="${type.blank}">${esc(t("shell.blank", lang))}</button>` : "";
+  return `<li class="mk-start-row" data-mk-row="${type.id}"><button type="button" class="mk-start-type" data-mk-type="${type.id}">${label}</button>${blank}</li>`;
+}
+
+/** The "Start something" sheet: one row per type, then the composer (opened by client.js). */
+export function renderStartSheet({ artifacts, workspace, project, lang }) {
+  const proj = project || { id: "unassigned", name: t("shell.unassigned", lang) };
+  const pills = START_TYPES.filter((ty) => !startState(ty, artifacts, workspace))
+    .map((ty) => `<button type="button" class="mk-pill" data-mk-pill="${ty.id}">${esc(t(ty.labelKey, lang))}</button>`).join("");
+  return `<dialog id="mk-start" class="mk-sheet" data-project="${esc(proj.id)}" aria-label="${esc(t("shell.start", lang))}">
+    <div class="mk-sheet-inner">
+      <div class="mk-sheet-head"><h2 class="mk-sheet-title">${esc(t("shell.start", lang))}</h2><button type="button" class="mk-sheet-close" data-mk-close aria-label="${esc(t("common.close", lang))}">&times;</button></div>
+      <ul class="mk-start-list" data-mk-list>${START_TYPES.map((ty) => startRow(ty, artifacts, workspace, lang)).join("")}</ul>
+      <form class="mk-composer" data-mk-composer hidden>
+        <div class="mk-pills" data-mk-pills>${pills}</div>
+        <span class="mk-project-chip" data-mk-chip>${esc(proj.name)}</span>
+        <label class="mk-field mk-bot-field" data-mk-botrow>${esc(t("shell.bot", lang))}<select data-mk-bot></select></label>
+        <label class="mk-field mk-title-field" data-mk-titlerow hidden>${esc(t("shell.blankTitle", lang))}<input type="text" maxlength="200" data-mk-title autocomplete="off"></label>
+        <textarea class="mk-text" rows="4" data-mk-field aria-label="${esc(t("shell.start", lang))}"></textarea>
+        <p class="mk-status" data-mk-status role="status"></p>
+        <div class="mk-composer-actions"><button type="button" class="btn btn-secondary" data-mk-back>${esc(t("common.cancel", lang))}</button><button type="submit" class="btn btn-primary" data-mk-submit>${esc(t("shell.start", lang))}</button></div>
+      </form>
+    </div>
+  </dialog>`;
+}
+
 /** @param {{items: object[], artifacts: string, workspace: string}} model */
-export function renderMakePage({ model, filter, lang }) {
+export function renderMakePage({ model, filter, lang, project }) {
   const { items, artifacts, workspace } = model;
   const bothMissing = artifacts === "missing" && workspace === "missing";
   const notice = workspace === "unavailable" ? `<p class="mk-notice" role="status">${esc(t("shell.workspaceUnavailable", lang))}</p>` : "";
@@ -66,5 +115,6 @@ export function renderMakePage({ model, filter, lang }) {
   if (bothMissing) body = `<div class="mk-empty">${offers(artifacts, workspace, lang)}</div>`;
   else if (!items.length) body = `${offers(artifacts, workspace, lang)}<p class="mk-empty-text">${esc(t("shell.makeEmpty", lang))}</p>`;
   else body = `${offers(artifacts, workspace, lang)}<ul class="mk-grid">${items.map((i) => tile(i, lang)).join("")}</ul>`;
-  return `<div class="mk-page">${chips(filter, lang)}${notice}${body}</div>`;
+  const startBtn = `<button type="button" class="btn btn-primary mk-start-btn" data-mk-open aria-haspopup="dialog">+ ${esc(t("shell.start", lang))}</button>`;
+  return `<div class="mk-page"><div class="mk-bar">${chips(filter, lang)}${startBtn}</div>${notice}${body}${renderStartSheet({ artifacts, workspace, project, lang })}</div>`;
 }

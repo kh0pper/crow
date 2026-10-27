@@ -3728,6 +3728,23 @@ export const translations = {
   "shell.makeType.deck": { en: "Slides", es: "Diapositivas" },
   "shell.makeType.page": { en: "Page", es: "Página" },
   "shell.makeType.diagram": { en: "Diagram", es: "Diagrama" },
+  "shell.start": { en: "Start something", es: "Empieza algo" },
+  "shell.blank": { en: "Blank", es: "En blanco" },
+  "shell.askBot": { en: "Ask {bot}", es: "Pedírselo a {bot}" },
+  "shell.typeDocument": { en: "Document", es: "Documento" },
+  "shell.typeSpreadsheet": { en: "Spreadsheet", es: "Hoja de cálculo" },
+  "shell.typeDeck": { en: "Deck", es: "Presentación" },
+  "shell.typePage": { en: "Page", es: "Página" },
+  "shell.typeDiagram": { en: "Diagram", es: "Diagrama" },
+  "shell.startDocument": { en: "Write a document about ", es: "Escribe un documento sobre " },
+  "shell.startSpreadsheet": { en: "Make a spreadsheet to ", es: "Haz una hoja de cálculo para " },
+  "shell.startDeck": { en: "Make a deck about ", es: "Haz una presentación sobre " },
+  "shell.startPage": { en: "Make a page to ", es: "Haz una página para " },
+  "shell.startDiagram": { en: "Draw a diagram of ", es: "Dibuja un diagrama de " },
+  "shell.bot": { en: "Bot", es: "Asistente" },
+  "shell.blankTitle": { en: "Title", es: "Título" },
+  "shell.noBots": { en: "No bot is attached to Perch yet.", es: "Aún no hay ningún bot conectado a Perch." },
+  "shell.startFailed": { en: "That didn't start. Try again.", es: "No se pudo empezar. Inténtalo de nuevo." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

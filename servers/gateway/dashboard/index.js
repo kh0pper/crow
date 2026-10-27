@@ -88,6 +88,7 @@ import bundlesRouterFactory from "../routes/bundles.js";
 import { keychainApiRouter } from "../keychain/api.js";
 import perchApiRouter from "../routes/perch.js";
 import { shellApiRouter } from "../routes/shell-api.js";
+import { makeApiRouter } from "../routes/make-api.js";
 import perchInteractiveApiRouter from "../routes/perch-interactive-api.js";
 import perchDictationRouter from "../routes/perch-dictation.js";
 import { shellRouter, resolveRequestMode, resolveShellPage } from "./shell/request.js";
@@ -674,6 +675,9 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // Shell: move an item (thread, artifact, Workspace file) between projects.
   // Same slot and rails as the Perch API above.
   router.use(shellApiRouter(dashboardAuth));
+
+  // Make tab: create a blank Workspace file in the current project. Same slot and rails.
+  router.use(makeApiRouter(dashboardAuth));
 
   // Perch Hub P2 (C-15): the interactive ("spawn as bot") API. Same mount
   // slot, same reasons — see perch.js's header above and this file's own
