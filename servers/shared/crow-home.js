@@ -39,13 +39,16 @@ export const INSTANCE_PATH_ENV_KEYS = Object.freeze(["CROW_HOME", "CROW_DATA_DIR
 /**
  * INSTANCE_PATH_ENV_KEYS plus the other per-instance file locations a process
  * resolves once (tasks DB, instance registry, refcounts, backups, reservation
- * file, app root, bundles dir, and the suite's .env seam). A bundle can never
+ * file, app root, bundles dir, the suite's .env seam, and the Schedule page's ledger and
+ * machine-timer folder). A bundle can never
  * write, re-comment or reload any of them (routes/bundles.js).
  */
 export const PINNED_PATH_ENV_KEYS = Object.freeze([
   ...INSTANCE_PATH_ENV_KEYS,
   "CROW_TASKS_DB_PATH", "CROW_INSTANCES_JSON_PATH", "CROW_REFCOUNT_PATH", "CROW_BACKUP_DIR",
   "CROW_BOX_RESERVATION_PATH", "CROW_APP_ROOT", "CROW_BUNDLES_DIR", "CROW_APP_ENV_PATH",
+  // The Schedule page's read-only sources: a bundle must never point them at another file.
+  "CROW_BOX_LEDGER_PATH", "CROW_HOST_TIMERS_DIR",
 ]);
 
 /** This instance's home (bundles, installed.json, skills, tokens). */
