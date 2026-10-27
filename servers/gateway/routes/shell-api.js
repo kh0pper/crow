@@ -15,7 +15,8 @@
  *                                             (cardVersion) is not `seen_version`
  *        409 { error: "refused", reason }     no real write expresses this move, or
  *                                             reason "confirm_failure": accepting a
- *                                             failed result needs accept_failure: true
+ *                                             failure or partial result needs
+ *                                             accept_failure: true
  *     A lane is derived state: the server recomputes it from stored card,
  *     result, decision and lock state (the panel's laneOf inputs), then runs
  *     movePlan's one write: moveCard, acceptResult (approve + done), or
@@ -44,7 +45,7 @@ import { lockMapFor } from "./board-lock.js";
 import { resolveBoardDef } from "./board-defs.js";
 import { getCard, moveCard, updateCard } from "../board/card-service.js";
 import { acceptResult } from "../board/result-service.js";
-import { LANES, laneOf, movePlan, cardVersion, CONFIRM_OUTCOME } from "../dashboard/panels/board/lanes.js";
+import { LANES, laneOf, movePlan, cardVersion, CONFIRM_OUTCOMES } from "../dashboard/panels/board/lanes.js";
 
 const DASHBOARD_ACTOR = Object.freeze({ kind: "human", id: null, jobId: null });
 
@@ -211,10 +212,11 @@ export function shellApiRouter(dashboardAuth) {
 
         const plan = movePlan(st.card, st.def, { locked: st.locked, latestResult: st.latestResult }, b.to);
         if (plan.action === "refuse") return jsonError(res, 409, "refused", { reason: plan.reason });
-        // Operator ruling: accepting a failed result is confirmed first. The
+        // Operator ruling (P16): accepting a result short of a full success
+        // (failure or partial) is confirmed first. The
         // accept's own write is guarded on this result id (newest-in-UPDATE),
         // so the confirmed result is the one approved.
-        if (plan.action === "accept" && st.latestResult && st.latestResult.outcome === CONFIRM_OUTCOME && b.accept_failure !== true) {
+        if (plan.action === "accept" && st.latestResult && CONFIRM_OUTCOMES.includes(st.latestResult.outcome) && b.accept_failure !== true) {
           return jsonError(res, 409, "refused", { reason: "confirm_failure" });
         }
         await applyLanePlan(tdb, cdb, id, st, plan);

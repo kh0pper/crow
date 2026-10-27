@@ -87,7 +87,7 @@ export const REFUSE_KEY = Object.freeze({
   answer_first: "shell.refuseDecision",
   // Not a movePlan refusal: the route's ask to confirm a failed result. The
   // client shows the confirm dialog; this text is its fallback.
-  confirm_failure: "shell.confirmFailure",
+  confirm_failure: "shell.confirmNotFullSuccess",
 });
 
 /** { lane: reason } for every other lane a move to is refused, from movePlan over stored state. */
@@ -191,16 +191,17 @@ function moveSheetHtml(lang) {
 }
 
 /**
- * The confirm before a failed result is accepted (operator ruling): an
+ * The confirm before a result short of a full success (failure or partial)
+ * is accepted (Ruling P16): an
  * in-page modal dialog like the Move sheet, No first (and focused), Yes
  * re-sends the move with accept_failure. Filled and opened by the client
  * when the server answers 409 confirm_failure.
  */
 function confirmHtml(lang) {
   return `<dialog class="sb-sheet sb-confirm" data-sb-confirm aria-labelledby="sb-confirm-text">` +
-    `<p class="sb-confirm-text" id="sb-confirm-text" data-sb-confirm-text>${escapeHtml(t("shell.confirmFailure", lang))}</p>` +
+    `<p class="sb-confirm-text" id="sb-confirm-text" data-sb-confirm-text>${escapeHtml(t("shell.confirmNotFullSuccess", lang))}</p>` +
     `<div class="sb-confirm-actions">` +
-    `<button type="button" class="sb-confirm-btn" data-sb-confirm-no>${escapeHtml(t("shell.confirmFailureNo", lang))}</button>` +
-    `<button type="button" class="sb-confirm-btn sb-confirm-yes" data-sb-confirm-yes>${escapeHtml(t("shell.confirmFailureYes", lang))}</button>` +
+    `<button type="button" class="sb-confirm-btn" data-sb-confirm-no>${escapeHtml(t("shell.confirmAcceptNo", lang))}</button>` +
+    `<button type="button" class="sb-confirm-btn sb-confirm-yes" data-sb-confirm-yes>${escapeHtml(t("shell.confirmAcceptYes", lang))}</button>` +
     `</div></dialog>`;
 }

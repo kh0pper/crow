@@ -3790,9 +3790,9 @@ export const translations = {
   "shell.refuseLocked": { en: "A bot is working on this card.", es: "Un bot está trabajando en esta tarjeta." },
   "shell.refuseReview": { en: "Accept it or ask for a change first.", es: "Acéptala o pide un cambio primero." },
   "shell.refuseDecision": { en: "Answer its question first.", es: "Responde primero a su pregunta." },
-  "shell.confirmFailure": { en: "Accept this failed result and close the card?", es: "¿Aceptar este resultado fallido y cerrar la tarjeta?" },
-  "shell.confirmFailureYes": { en: "Yes, accept it", es: "Sí, aceptarlo" },
-  "shell.confirmFailureNo": { en: "No, leave it", es: "No, dejarlo" },
+  "shell.confirmNotFullSuccess": { en: "This result isn't a full success. Accept it and close the card?", es: "Este resultado no es un éxito completo. ¿Aceptarlo y cerrar la tarjeta?" },
+  "shell.confirmAcceptYes": { en: "Yes, accept it", es: "Sí, aceptarlo" },
+  "shell.confirmAcceptNo": { en: "No, leave it", es: "No, dejarlo" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

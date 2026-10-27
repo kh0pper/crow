@@ -136,7 +136,7 @@ function laneTabsJs() {
  * optimistic moves: on success, or when the card had already moved
  * ("stale"), the board is re-rendered from the server with a Turbo visit; a
  * refusal or failure is said in the status line and nothing changes.
- * Accepting a failed result asks first (operator ruling): the server answers
+ * Accepting a failure or partial result asks first (Ruling P16): the server answers
  * 409 confirm_failure, the confirm dialog opens (No focused), and Yes sends
  * the same move again with accept_failure: true; No leaves the card as it is.
  * The face's Accept is the same route (to Done); its Reject is the classic
@@ -233,7 +233,7 @@ function laneMovesJs() {
     });
   }
 
-  // ---- the confirm before a failed result is accepted ----
+  // ---- the confirm before a failure or partial result is accepted ----
   var confirmEl=root.querySelector('[data-sb-confirm]'), confirmFor=null;
   function askConfirm(li, to){
     if(!confirmEl){ say(reasons.confirm_failure||reasons.failed); return; }
@@ -242,17 +242,21 @@ function laneMovesJs() {
     var no=confirmEl.querySelector('[data-sb-confirm-no]');
     if(no) no.focus();
   }
+  // Closed any way but Yes (No, Escape, the backdrop): the card stays put;
+  // focus goes back to its Move button.
+  function onConfirmClosed(){
+    var c=confirmFor; confirmFor=null;
+    var mv=c&&moveData(c.li);
+    if(mv&&document.contains(mv)) mv.focus();
+  }
   function closeConfirm(){
     if(!confirmEl) return;
-    if(typeof confirmEl.close==='function'&&confirmEl.open) confirmEl.close(); else confirmEl.removeAttribute('open');
+    if(typeof confirmEl.close==='function'){ if(confirmEl.open) confirmEl.close(); return; }
+    // No <dialog> support: no close event either, so restore focus here.
+    if(confirmEl.hasAttribute('open')){ confirmEl.removeAttribute('open'); onConfirmClosed(); }
   }
   if(confirmEl){
-    // Closed any way but Yes (No, Escape, the backdrop): the card stays put.
-    confirmEl.addEventListener('close', function(){
-      var c=confirmFor; confirmFor=null;
-      var mv=c&&moveData(c.li);
-      if(mv&&document.contains(mv)) mv.focus();
-    });
+    confirmEl.addEventListener('close', onConfirmClosed);
     confirmEl.addEventListener('click', function(e){
       if(e.target===confirmEl||e.target.closest('[data-sb-confirm-no]')){ closeConfirm(); return; }
       if(!e.target.closest('[data-sb-confirm-yes]')||!confirmFor) return;

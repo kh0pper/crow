@@ -393,4 +393,7 @@ test("openCardById opens a card on this board from its face, and loads any other
   assert.equal(opened[0].status, null, "status comes from the card GET, never guessed");
   run("77\"]"); run(1.5);
   assert.equal(filled.length + opened.length, 2, "a non-integer id opens nothing");
+  // #open= / #open=0 / #open=-1 (Number('') is 0): not a card id either.
+  run(""); run("0"); run(0); run("-1"); run(-3);
+  assert.equal(filled.length + opened.length, 2, "an empty, zero or negative id opens nothing");
 });

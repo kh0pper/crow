@@ -533,6 +533,26 @@ test("accepting a failed result needs accept_failure: refused without it, accept
   assert.equal((await move(s, { to: "done", from: "needs_you" })).status, 200);
 });
 
+test("a partial result asks too (Ruling P16): refused without accept_failure, accepted with it", async () => {
+  const id = addCard();
+  const rid = addResult(id, "recorded", "partial");
+  const r = await move(id, { to: "done", from: "needs_you" });
+  assert.equal(r.status, 409);
+  assert.deepEqual(r.body, { error: "refused", reason: "confirm_failure" });
+  assert.equal(result(rid).status, "recorded");
+  assert.equal(card(id).status, "pending");
+  assert.deepEqual(verbs(id), []);
+  const ok = await move(id, { to: "done", from: "needs_you", accept_failure: true });
+  assert.deepEqual(ok.body, { ok: true, lane: "done" });
+  assert.deepEqual(result(rid), { status: "approved", decided_via: "dashboard" });
+  assert.equal(card(id).status, "done");
+  // accept_failure on a success is harmless, and a success never needs it.
+  const s = addCard();
+  const sr = addResult(s, "recorded", "success");
+  assert.deepEqual((await move(s, { to: "done", from: "needs_you" })).body, { ok: true, lane: "done" });
+  assert.equal(result(sr).status, "approved");
+});
+
 // ---- Final review item 7: decideResult's UPDATE is the guard, not its SELECT ----
 
 test("decideResult: a decision landing between its read and its write wins; the loser writes nothing", async () => {

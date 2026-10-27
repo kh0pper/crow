@@ -140,7 +140,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   // card on another bot's board).
   function openCardById(id){
     var idNum=Number(id);
-    if(!isFinite(idNum)||Math.floor(idNum)!==idNum) return;
+    if(!isFinite(idNum)||Math.floor(idNum)!==idNum||idNum<=0) return;
     var el=document.querySelector('.bb-card[data-card="'+idNum+'"]');
     if(el){
       // A face on this board: the same path as clicking it (a tracker item

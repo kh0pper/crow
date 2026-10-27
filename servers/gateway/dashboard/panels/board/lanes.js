@@ -88,8 +88,8 @@ export function cardVersion(card) {
   return createHash("sha256").update(JSON.stringify([ask == null ? null : String(ask), at == null ? null : String(at)])).digest("hex").slice(0, 16);
 }
 
-/** A result outcome the operator must confirm before accepting it (operator ruling, final review finding 3). */
-export const CONFIRM_OUTCOME = "failure";
+/** Result outcomes the operator must confirm before accepting (anything short of a full success; Ruling P16). */
+export const CONFIRM_OUTCOMES = Object.freeze(["failure", "partial"]);
 
 /** The status "Done" means on a board: "done" when it is terminal there, else the first terminal status. */
 export function doneStatus(def) {

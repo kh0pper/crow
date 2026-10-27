@@ -521,7 +521,8 @@ for (const lang of ["en", "es"]) {
       note(ctx, `${lang} confirm dialog`, dlg);
       assert.equal(dlg.modal, true, "an in-page modal dialog");
       assert.equal(dlg.sheetOpen, false, "the Move sheet is closed under it");
-      assert.equal(dlg.text, t("shell.confirmFailure", lang));
+      assert.equal(dlg.text, t("shell.confirmNotFullSuccess", lang));
+      assert.equal(dlg.text, { en: "This result isn't a full success. Accept it and close the card?", es: "Este resultado no es un éxito completo. ¿Aceptarlo y cerrar la tarjeta?" }[lang], "Ruling P16's wording");
       assert.equal(dlg.focus, true, "focus starts on No (the safe choice)");
       assert.ok(dlg.box.l >= 0 && dlg.box.r <= 390 && dlg.box.t >= 0 && dlg.box.b <= 844 + 0.5, "on screen");
       await assertTargets(p, [["[data-sb-confirm-yes]", 1, "confirm Yes"], ["[data-sb-confirm-no]", 1, "confirm No"]], `${lang} confirm`);
