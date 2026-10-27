@@ -1,0 +1,232 @@
+/**
+ * The new shell's CSS (redesign P2). Appended to the head after the classic
+ * dashboardCss() on shell pages only, and every selector starts with
+ * body.shell, so a classic page can never match one of these rules
+ * (tests/shell-layout-render.test.js "every shell rule is scoped").
+ *
+ * Colors come from the --crow-* tokens (design-tokens.js), which already
+ * follow the OS between light and dark. Phone first: at ≤1023px the tabs are
+ * a fixed bottom bar whose height is published as --shell-tabs-h; at
+ * ≥1024px they become a left rail that also lists the projects, and
+ * --shell-tabs-h is 0. The Perch app-shell rule in layout.js subtracts
+ * --shell-tabs-h from its height, and Perch's phone chat view sets it to 0
+ * and hides the bar (perch-hub/css.js) so an open chat gets the full height.
+ *
+ * NOTE: never write a literal closing style tag inside a comment here.
+ */
+
+export const SHELL_RAIL_WIDTH = 232;
+
+export function shellCss() {
+  return `<style>
+  body.shell {
+    --shell-tabs-h: calc(56px + env(safe-area-inset-bottom, 0px));
+    --shell-rail-w: 0px;
+  }
+  /* The sidebar is not rendered: the column takes the whole width. */
+  body.shell .main-content { margin-left: var(--shell-rail-w); }
+  body.shell .content-body { padding-bottom: var(--shell-tabs-h,0px); }
+  /* Perch's app shell already ends above the bar through its height rule
+     (layout.js): reserving the bar again here would leave a gap. */
+  body.shell:has(#perch-chat) .content-body { padding-bottom: 0; }
+  /* Toasts float above the tab bar, not under it. */
+  body.shell .crow-toasts { bottom: calc(1.5rem + var(--crow-player-h,0px) + var(--shell-tabs-h,0px)); }
+  body.shell .content-header { gap: 0.5rem; padding-left: 16px; padding-right: 16px; }
+  body.shell .content-header h2 {
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* ─── Header: project chip + avatar ─── */
+  body.shell .shell-scope {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-height: 44px;
+    max-width: 40vw;
+    padding: 0 12px;
+    border: 1px solid var(--crow-border);
+    border-radius: var(--crow-radius-pill);
+    background: var(--crow-bg-surface);
+    color: var(--crow-text-primary);
+    font: inherit;
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    flex-shrink: 1;
+    min-width: 0;
+  }
+  body.shell .shell-scope-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  body.shell .shell-scope svg { flex-shrink: 0; color: var(--crow-text-secondary); }
+  body.shell .shell-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    flex-shrink: 0;
+    border: none;
+    border-radius: 50%;
+    background: var(--crow-accent-muted);
+    color: var(--crow-accent);
+    cursor: pointer;
+  }
+  body.shell .shell-scope:focus-visible,
+  body.shell .shell-avatar:focus-visible,
+  body.shell .shell-tab:focus-visible,
+  body.shell .shell-project:focus-visible,
+  body.shell .shell-sheet-link:focus-visible,
+  body.shell .shell-more-item:focus-visible {
+    outline: 2px solid var(--crow-accent);
+    outline-offset: 2px;
+  }
+
+  /* ─── Tabs: a bottom bar on phones and tablets ─── */
+  body.shell .shell-tabs {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: var(--crow-player-h,0px);
+    z-index: 900;
+    height: var(--shell-tabs-h);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    box-sizing: border-box;
+    background: var(--crow-bg-surface);
+    border-top: 1px solid var(--crow-border);
+  }
+  body.shell .shell-tab-list {
+    display: flex;
+    height: 56px;
+  }
+  body.shell .shell-tab {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    min-width: 44px;
+    min-height: 44px;
+    color: var(--crow-text-secondary);
+    font-size: 0.75rem;
+    font-weight: 500;
+    text-decoration: none;
+  }
+  body.shell .shell-tab:hover { color: var(--crow-text-primary); }
+  body.shell .shell-tab[aria-current="page"] { color: var(--crow-accent); font-weight: 600; }
+  body.shell .shell-rail-mark,
+  body.shell .shell-rail-projects { display: none; }
+
+  /* ─── Drawer + avatar sheet ─── */
+  body.shell .shell-sheet {
+    border: none;
+    padding: 0;
+    margin: auto auto 0;
+    width: 100%;
+    max-width: 480px;
+    max-height: 85dvh;
+    border-radius: var(--crow-radius-card) var(--crow-radius-card) 0 0;
+    background: var(--crow-bg-surface);
+    color: var(--crow-text-primary);
+    box-shadow: 0 -8px 32px rgba(0,0,0,0.18);
+  }
+  body.shell .shell-sheet::backdrop { background: rgba(0,0,0,0.4); }
+  body.shell .shell-sheet-inner {
+    padding: 16px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  body.shell .shell-heading {
+    margin: 8px 0 0;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--crow-text-muted);
+  }
+  body.shell .shell-projects { display: flex; flex-direction: column; gap: 4px; }
+  body.shell .shell-project,
+  body.shell .shell-sheet-link {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    width: 100%;
+    padding: 0 12px;
+    border: none;
+    border-radius: var(--crow-radius-control);
+    background: transparent;
+    color: var(--crow-text-primary);
+    font: inherit;
+    text-align: left;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  body.shell .shell-project:hover,
+  body.shell .shell-sheet-link:hover { background: var(--crow-bg-elevated); color: var(--crow-text-primary); }
+  body.shell .shell-project.is-current { background: var(--crow-accent-muted); color: var(--crow-accent); font-weight: 600; }
+  body.shell .shell-mode-form { margin: 0; }
+  body.shell .shell-more {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  body.shell .shell-more-item {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 8px 12px;
+    border: 1px solid var(--crow-border);
+    border-radius: var(--crow-radius-control);
+    color: var(--crow-text-primary);
+    text-decoration: none;
+    overflow-wrap: anywhere;
+  }
+  body.shell .shell-more-item:hover { border-color: var(--crow-accent); color: var(--crow-accent); }
+
+  /* ─── Desktop: the tabs become a left rail with the project list ─── */
+  @media (min-width: 1024px) {
+    body.shell {
+      --shell-tabs-h: 0px;
+      --shell-rail-w: ${SHELL_RAIL_WIDTH}px;
+    }
+    body.shell .shell-tabs {
+      top: 0;
+      right: auto;
+      bottom: var(--crow-player-h,0px);
+      width: var(--shell-rail-w);
+      height: auto;
+      padding: 16px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      overflow-y: auto;
+      border-top: none;
+      border-right: 1px solid var(--crow-border);
+    }
+    body.shell .shell-rail-mark {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 8px;
+      font-weight: 600;
+      font-size: 1.1rem;
+    }
+    body.shell .shell-tab-list { flex-direction: column; height: auto; gap: 2px; }
+    body.shell .shell-tab {
+      flex: none;
+      flex-direction: row;
+      justify-content: flex-start;
+      gap: 12px;
+      padding: 0 12px;
+      border-radius: var(--crow-radius-control);
+      font-size: 0.95rem;
+    }
+    body.shell .shell-tab[aria-current="page"] { background: var(--crow-accent-muted); }
+    body.shell .shell-rail-projects { display: block; }
+    body.shell .shell-sheet { margin: auto; border-radius: var(--crow-radius-card); }
+  }
+  </style>`;
+}

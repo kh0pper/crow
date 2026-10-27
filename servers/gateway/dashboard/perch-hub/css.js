@@ -432,6 +432,10 @@ body[data-view="chat"] #perch-chat{display:flex;flex-direction:column;flex:1;min
    the split view (desktop) are untouched. */
 @media (max-width:${PERCH_SPLIT_MIN_WIDTH - 1}px){
   body[data-view="chat"] #perch-hub-root > header{display:none}
+  /* The new shell: an open chat takes the whole height; the back button
+     returns to the list, where the tab bar is back. */
+  body.shell[data-view="chat"] .shell-tabs{display:none}
+  body.shell[data-view="chat"]{--shell-tabs-h:0px}
   body[data-view="chat"] #perch-hub-root .perch-head{flex-wrap:nowrap;justify-content:flex-start;gap:10px}
   body[data-view="chat"] #perch-hub-root #perch-back{flex:none;align-self:center;min-height:44px;padding:6px 12px;font-size:13px}
   body[data-view="chat"] #perch-hub-root #perch-session-meta{display:none}

@@ -3689,6 +3689,19 @@ export const translations = {
   "extensions.deprecated": { en: "Deprecated", es: "Obsoleto" },
   "extensions.deprecatedUse": { en: "Replaced by {name}", es: "Sustituido por {name}" },
   "files.storageNotConfiguredHint": { en: "Install File Storage (Garage) from Extensions, or connect existing S3-compatible storage in Settings → Shared Storage.", es: "Instala File Storage (Garage) desde Extensiones, o conecta un almacenamiento compatible con S3 que ya tengas en Ajustes → Almacenamiento compartido." },
+
+  // ─── The new shell (redesign P2: Chat / Board / Make tabs, project chip, drawer) ───
+  "shell.tabChat": { en: "Chat", es: "Chat" },
+  "shell.tabBoard": { en: "Board", es: "Tablero" },
+  "shell.tabMake": { en: "Make", es: "Crear" },
+  "shell.everything": { en: "Everything", es: "Todo" },
+  "shell.unassigned": { en: "Unassigned", es: "Sin asignar" },
+  "shell.projects": { en: "Projects", es: "Proyectos" },
+  "shell.more": { en: "More of Crow", es: "Más de Crow" },
+  "shell.reach": { en: "What Crow can reach", es: "Lo que Crow puede alcanzar" },
+  "shell.useClassic": { en: "Use classic Crow", es: "Usar Crow clásico" },
+  "shell.useNew": { en: "Use the new Crow", es: "Usar el nuevo Crow" },
+  "shell.switchScope": { en: "Switch project", es: "Cambiar de proyecto" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
