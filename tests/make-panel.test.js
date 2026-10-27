@@ -10,6 +10,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
+actAsServe(); // this process's HTTP client stands in for tailscaled (the Serve socket owner)
 
 const dir = mkdtempSync(join(tmpdir(), "make-panel-"));
 process.env.CROW_DATA_DIR = dir;
@@ -22,7 +24,7 @@ const REPO = new URL("..", import.meta.url).pathname;
 
 let server, base, make, seen = [];
 const NEW = { crow_session: "new-sess", crow_csrf: "tok" };
-const NET = { "tailscale-user-login": "operator@example.com" };
+const NET = serveHeaders("operator@example.com");
 
 const item = (o) => ({
   kind: "artifact", ref: "art_aaaaaa", title: "A page", type: "page", filter: "pages", shared: false,
