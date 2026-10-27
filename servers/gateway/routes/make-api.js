@@ -2,7 +2,7 @@
  * make-api.js — the Make tab's own routes.
  *
  *   POST /dashboard/make-api/blank  { kind: "docx"|"xlsx"|"pptx", title, project_id? }
- *     -> { ok: true, fileId, webUrl }
+ *     -> { ok: true, fileId, webUrl, filed }  (filed:false = created but left Unassigned)
  *
  * Creates an empty Workspace file in Crow/<project slug or "Unassigned"> and files it under the
  * project (project_id absent or "unassigned" = Unassigned). Errors: 400 bad_request,
@@ -60,9 +60,10 @@ export function makeApiRouter(dashboardAuth) {
         return jsonError(res, 502, "workspace_unavailable");
       }
       // The file exists; a filing failure leaves it Unassigned rather than failing the request.
+      let filed = true;
       try { await setItemProject(db, "workspace_file", String(made.fileId), projectId, { setBy: "operator" }); }
-      catch (err) { console.warn("[make-api] could not file the new file:", err?.message || err); }
-      res.json({ ok: true, fileId: made.fileId, webUrl: made.webUrl });
+      catch (err) { filed = false; console.warn("[make-api] could not file the new file:", err?.message || err); }
+      res.json({ ok: true, fileId: made.fileId, webUrl: made.webUrl, filed });
     } catch (err) {
       console.warn("[make-api] blank failed:", err?.message || err);
       if (!res.headersSent) jsonError(res, 500, "error");

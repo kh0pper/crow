@@ -79,6 +79,7 @@ test("a blank document is filed in the project", async () => {
   assert.equal(r.status, 200);
   assert.equal(r.body.ok, true);
   assert.equal(r.body.fileId, 41);
+  assert.equal(r.body.filed, true);
   assert.equal(r.body.webUrl, "https://ws.example.test/f/41");
   assert.equal((await getItem(db, "workspace_file", "41")).projectId, P1);
   const call = rec().calls[0];
@@ -96,6 +97,18 @@ test("sheets and decks spell out every argument; no project means Unassigned", a
   r = await post("/blank", { kind: "pptx", title: "Pitch", project_id: "unassigned" });
   assert.equal(r.status, 200);
   assert.deepEqual(rec().calls[1].args, { title: "Pitch", folder: "Crow/Unassigned" });
+});
+
+test("a filing failure after a successful create reports filed:false", async () => {
+  // A project archived between the check and the filing can't be simulated cheaply; drop the table instead.
+  const c = new Database(join(dir, "crow.db"));
+  c.exec("ALTER TABLE shell_items RENAME TO shell_items_off");
+  try {
+    const r = await post("/blank", { kind: "docx", title: "Orphan", project_id: P1 });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.ok, true);
+    assert.equal(r.body.filed, false);
+  } finally { c.exec("ALTER TABLE shell_items_off RENAME TO shell_items"); c.close(); }
 });
 
 test("Blank never re-files an existing document", async () => {
@@ -169,8 +182,10 @@ function bootClient(model, bots = [{ id: "b1", name: "Bee", perch_attached: true
   const calls = [];
   Object.defineProperty(document, "cookie", { configurable: true, get: () => "crow_session=s; crow_csrf=tok123" });
   const loc = { href: "/dashboard/make", hash: "" };
+  let opened = 0;
+  window.open = () => { opened += 1; };
   const ctx = vm.createContext({
-    window, document, console, location: loc, setTimeout, clearTimeout,
+    window, document, console, location: loc, open: () => { opened += 1; }, setTimeout, clearTimeout,
     fetch: async (url, init) => {
       const c = { url: String(url), method: (init && init.method) || "GET", headers: (init && init.headers) || {}, body: init && init.body ? JSON.parse(init.body) : null };
       calls.push(c);
@@ -186,7 +201,7 @@ function bootClient(model, bots = [{ id: "b1", name: "Bee", perch_attached: true
   vm.runInContext(m[1], ctx);
   const settle = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
   const click = (el) => el.dispatchEvent(new window.Event("click", { bubbles: true }));
-  return { window, document, calls, loc, settle, click, $: (s) => document.querySelector(s) };
+  return { window, document, calls, loc, opened: () => opened, settle, click, $: (s) => document.querySelector(s) };
 }
 
 test("makeClientJs has no backticks (it is a template literal)", () => {
@@ -234,4 +249,6 @@ test("Blank posts the title and project to make-api", async () => {
   const p = c.calls.find((x) => x.url === "/dashboard/make-api/blank");
   assert.deepEqual(p.body, { kind: "docx", title: "Notes", project_id: P1 });
   assert.equal(p.headers["X-Crow-Csrf"], "tok123");
+  assert.equal(c.loc.href, "https://ws.example.test/f/5", "same tab goes to the file");
+  assert.equal(c.opened(), 0, "no popup");
 });

@@ -137,8 +137,9 @@ export function makeClientJs(lang) {
         .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
         .then(function (x) {
           if (!x.ok || !x.d || !x.d.ok) return fail();
-          if (x.d.webUrl && window.open) window.open(x.d.webUrl, '_blank', 'noopener');
-          location.href = '/dashboard/make';
+          // Same tab (R-P4-9): a new tab opened after an async fetch is popup-blocked, and Workspace has its own back.
+          if (!x.d.webUrl) return fail();
+          location.href = x.d.webUrl;
         }).catch(fail);
       return;
     }
