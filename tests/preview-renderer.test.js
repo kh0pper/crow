@@ -24,6 +24,7 @@ import onboardingPanel, { STEP_KEYS, handlePreviewsPost } from "../servers/gatew
 import { csrfMiddleware } from "../servers/gateway/dashboard/shared/csrf.js";
 import { readFileSync } from "node:fs";
 import { t } from "../servers/gateway/dashboard/shared/i18n.js";
+import { escapeHtml } from "../servers/gateway/dashboard/shared/components.js";
 
 const DIR = fileURLToPath(new URL("../servers/gateway/preview/container/", import.meta.url)).replace(/\/$/, "");
 const SECCOMP = realpathSync(join(DIR, "seccomp-chrome.json"));
@@ -163,17 +164,25 @@ function fakeDocker(clock, opts = {}) {
   const log = [];
   const containers = opts.containers || []; // { name, labels, image, running }
   const images = opts.images || {};          // tag → created ms
+  const imageIds = {};                        // tag → full image ID
+  const dangling = [];                        // { id, created } (a rebuilt tag's old image)
+  const unlabelled = new Set(opts.unlabelled || []); // tags without crow.component
+  let idSeq = 0;
+  const newId = () => `sha256:${String(++idSeq).padStart(64, "0")}`;
+  const idOf = (tag) => (imageIds[tag] ||= newId());
   const children = [];
   const filtersOf = (args) => args.flatMap((a, i) => (args[i - 1] === "--filter" ? [a] : []));
   const matches = (c, filters) => filters.every((f) => {
     const [k, v] = f.split("=", 2).length === 2 ? [f.slice(0, f.indexOf("=")), f.slice(f.indexOf("=") + 1)] : [f, ""];
     if (k === "label") { const [lk, lv] = [v.slice(0, v.indexOf("=")), v.slice(v.indexOf("=") + 1)]; return c.labels[lk] === lv; }
-    if (k === "ancestor") return c.image === v;
+    if (k === "ancestor") return c.image === v || (v in images && c.image === imageIds[v]) || (c.image in images && imageIds[c.image] === v);
     if (k === "name") return c.name.includes(v);
     return false;
   });
+  /** An image reference (tag or ID) is used by a container (any state): docker refuses rm. */
+  const usedBy = (ref) => containers.some((c) => c.image === ref || (ref in images && c.image === idOf(ref)) || (c.image in images && idOf(c.image) === ref));
   const docker = {
-    log, containers, images, children,
+    log, containers, images, imageIds, dangling, children, idOf,
     async exec(args, { cwd, env } = {}) {
       log.push({ args, cwd, env });
       if (args[0] === "info") return { code: opts.info === false ? 1 : 0, stdout: "", stderr: "" };
@@ -187,15 +196,37 @@ function fakeDocker(clock, opts = {}) {
         if (verb === "build") {
           const code = opts.buildCode ? opts.buildCode() : 0;
           if (opts.buildGate) await opts.buildGate;
-          if (code === 0) images[env.CROW_PREVIEW_IMAGE] = clock.now();
+          if (code === 0) {
+            const tag = env.CROW_PREVIEW_IMAGE;
+            if (tag in images) dangling.push({ id: idOf(tag), created: images[tag] }); // the old image loses its tag
+            images[tag] = clock.now();
+            imageIds[tag] = newId();
+          }
           return { code, stdout: "", stderr: code ? "build broke" : "" };
         }
       }
       if (args[0] === "image" && args[1] === "inspect") {
         const tag = args[args.length - 1];
-        return tag in images ? { code: 0, stdout: new Date(images[tag]).toISOString() + "\n", stderr: "" } : { code: 1, stdout: "", stderr: "No such image" };
+        const fmt = args[args.indexOf("--format") + 1];
+        if (!(tag in images)) return { code: 1, stdout: "", stderr: "No such image" };
+        return { code: 0, stdout: fmt.replace("{{.Created}}", new Date(images[tag]).toISOString()).replace("{{.Id}}", idOf(tag)) + "\n", stderr: "" };
       }
-      if (args[0] === "image" && args[1] === "rm") { delete images[args[args.length - 1]]; return { code: 0, stdout: "", stderr: "" }; }
+      if (args[0] === "image" && (args[1] === "ls" || args[1] === "list")) {
+        const rows = [];
+        if (filtersOf(args).includes("label=crow.component=preview-renderer")) {
+          for (const tag of Object.keys(images)) if (!unlabelled.has(tag)) rows.push(`${idOf(tag)}\t${tag}`);
+          for (const d of dangling) rows.push(`${d.id}\t<none>:<none>`);
+        }
+        return { code: 0, stdout: rows.join("\n") + (rows.length ? "\n" : ""), stderr: "" };
+      }
+      if (args[0] === "image" && args[1] === "rm") {
+        const ref = args[args.length - 1];
+        if (usedBy(ref)) return { code: 1, stdout: "", stderr: `Error response from daemon: conflict: unable to remove repository reference "${ref}" (must force) - container abc is using its referenced image` };
+        if (ref in images) { delete images[ref]; delete imageIds[ref]; return { code: 0, stdout: "", stderr: "" }; }
+        const i = dangling.findIndex((d) => d.id === ref);
+        if (i !== -1) { dangling.splice(i, 1); return { code: 0, stdout: "", stderr: "" }; }
+        return { code: 1, stdout: "", stderr: `Error response from daemon: No such image: ${ref}` };
+      }
       if (args[0] === "rm") {
         for (const n of args.slice(2)) { const i = containers.findIndex((c) => c.name === n); if (i !== -1) containers.splice(i, 1); }
         return { code: 0, stdout: "", stderr: "" };
@@ -553,10 +584,28 @@ test("a stale or changed image is rebuilt", async () => {
   // 31 days old: rebuilt.
   {
     const { clock, docker, r } = setup({ imageReady: false });
-    docker.images[previewImageTag()] = clock.now() - 31 * DAY;
+    const tag = previewImageTag();
+    docker.images[tag] = clock.now() - 31 * DAY;
+    const oldId = docker.idOf(tag);
     assert.deepEqual(await r.acquire(), { off: "building" });
     await flush();
-    assert.equal(composeVerbs(docker.log).filter((v) => v === "build").length, 1);
+    const builds = docker.log.filter((e) => e.args[0] === "compose" && e.args.includes("build"));
+    assert.equal(builds.length, 1);
+    assert.ok(builds[0].args.includes("--no-cache"), `a stale rebuild skips the cache: ${builds[0].args.join(" ")}`);
+    assert.notEqual(docker.idOf(tag), oldId, "the tag now names the new image");
+    const rms = docker.log.filter((e) => e.args[0] === "image" && e.args[1] === "rm").map((e) => e.args[e.args.length - 1]);
+    assert.ok(rms.includes(oldId), `the old image is removed by ID after the build: ${rms.join(", ")}`);
+    assert.ok(!rms.includes(tag), "never the fresh tag");
+    assert.deepEqual(docker.dangling, [], "nothing dangling is left behind");
+    assert.equal(r.buildState(), "ready");
+  }
+  // A missing image builds with the cache, and removes nothing by ID.
+  {
+    const { docker, r } = setup({ imageReady: false });
+    assert.deepEqual(await r.acquire(), { off: "building" });
+    await flush();
+    const build = docker.log.find((e) => e.args[0] === "compose" && e.args.includes("build"));
+    assert.ok(!build.args.includes("--no-cache"));
   }
   // A changed Dockerfile is a new tag: rebuilt.
   {
@@ -580,6 +629,117 @@ test("a stale or changed image is rebuilt", async () => {
     } finally {
       _setPreviewSeccompPathForTest(null);
     }
+  }
+});
+
+test("after a build, an old-tag preview image nobody runs is removed", async () => {
+  const OLD = "crow-preview-renderer:0123456789ab";
+  const PRE_LABEL = "crow-preview-renderer:92722e9b3b4c"; // ours, built before the label: not listed
+  const { docker, r } = setup({ imageReady: false, dockerOpts: { unlabelled: ["debian:bookworm-slim", PRE_LABEL] } });
+  docker.images[OLD] = Date.now() - 40 * DAY;
+  docker.images["debian:bookworm-slim"] = Date.now(); // another image: never touched
+  docker.images[PRE_LABEL] = Date.now();
+  assert.deepEqual(await r.acquire(), { off: "building" });
+  await flush();
+  assert.equal(r.buildState(), "ready");
+  const rms = docker.log.filter((e) => e.args[0] === "image" && e.args[1] === "rm").map((e) => e.args[e.args.length - 1]);
+  assert.ok(rms.includes(OLD), `the old tag is removed: ${rms.join(", ")}`);
+  assert.ok(!rms.includes(previewImageTag()), "never the current tag");
+  assert.ok(previewImageTag() in docker.images);
+  assert.ok("debian:bookworm-slim" in docker.images && PRE_LABEL in docker.images, "unlabelled images are never touched");
+  // The image list was read by our label only.
+  const ls = docker.log.find((e) => e.args[0] === "image" && (e.args[1] === "ls" || e.args[1] === "list"));
+  assert.ok(ls.args.includes("label=crow.component=preview-renderer"), ls.args.join(" "));
+});
+
+test("after a build, an old-tag preview image a container still runs is kept", async () => {
+  const OLD = "crow-preview-renderer:0123456789ab";
+  const { docker, r } = setup({ imageReady: false, dockerOpts: { unlabelled: ["debian:bookworm-slim"] } });
+  docker.images[OLD] = Date.now() - 40 * DAY;
+  docker.images["debian:bookworm-slim"] = Date.now();
+  // Another instance (other labels) is rendering with the old image right now.
+  docker.containers.push({ name: "crow-preview-eeeeeeee-00000005", labels: { "crow.component": "preview-renderer", "crow.instance": "eeeeeeee", "crow.home": "eeeeeeee" }, image: OLD, running: true });
+  assert.deepEqual(await r.acquire(), { off: "building" });
+  await flush();
+  assert.equal(r.buildState(), "ready");
+  const rms = docker.log.filter((e) => e.args[0] === "image" && e.args[1] === "rm").map((e) => e.args[e.args.length - 1]);
+  assert.ok(!rms.includes(OLD), "in use: not even tried");
+  assert.ok(!rms.includes("debian:bookworm-slim"));
+  assert.ok(OLD in docker.images);
+  assert.ok(docker.log.some((e) => e.args[0] === "ps" && e.args.includes(`ancestor=${OLD}`)), "checked with the off switch's rule");
+});
+
+test("a start that finds no sandbox backs off for 10 minutes, with no docker call", async () => {
+  const stderr = "No usable sandbox! If you are running on Ubuntu 23.10+ …";
+  const { clock, docker, r } = setup({ dockerOpts: { child: () => ({ exitBeforeAnswer: stderr }) } });
+  assert.deepEqual(await r.acquire(), { off: "sandbox_unavailable" });
+  const n = docker.log.length;
+  assert.deepEqual(await r.acquire(), { off: "sandbox_unavailable" });
+  assert.equal(docker.log.length, n, "the second acquire spawns nothing and calls nothing");
+  assert.equal(r.lastOff(), "sandbox_unavailable");
+  await clock.advance(9 * 60_000);
+  assert.deepEqual(await r.acquire(), { off: "sandbox_unavailable" });
+  assert.equal(docker.log.length, n);
+  await clock.advance(60_001);
+  assert.deepEqual(await r.acquire(), { off: "sandbox_unavailable" });
+  assert.equal(docker.log.filter((e) => e.spawn).length, 2, "after the backoff it tries again");
+});
+
+test("a failed start backs off for 10 minutes; the switch off then on clears it", async () => {
+  const { clock, docker, db, r } = setup({ dockerOpts: { child: () => ({ exitBeforeAnswer: "out of memory" }) } });
+  _setPreviewRendererForTest(r);
+  try {
+    assert.deepEqual(await r.acquire(), { off: "start_failed" });
+    const n = docker.log.length;
+    assert.deepEqual(await r.acquire(), { off: "start_failed" });
+    assert.equal(docker.log.length, n, "no docker call during the backoff");
+    // Off then on (the Settings switch): the next acquire tries again at once.
+    await setPreviewsEnabled(db, false);
+    await setPreviewsEnabled(db, true);
+    assert.deepEqual(await r.acquire(), { off: "start_failed" });
+    assert.equal(docker.log.filter((e) => e.spawn).length, 2);
+    // An acquire that sees the switch off clears it too.
+    const m = docker.log.length;
+    db.local.set("previews_enabled", "false");
+    assert.deepEqual(await r.acquire(), { off: "not_enabled" });
+    db.local.set("previews_enabled", "true");
+    assert.deepEqual(await r.acquire(), { off: "start_failed" });
+    assert.ok(docker.log.length > m);
+    await clock.advance(1);
+  } finally {
+    _setPreviewRendererForTest(null);
+  }
+});
+
+test("turning previews off mid-build with removal asked removes the image when the build lands", async () => {
+  let open;
+  const buildGate = new Promise((res) => { open = res; });
+  const { docker, db, r } = setup({ imageReady: false, dockerOpts: { buildGate } });
+  _setPreviewRendererForTest(r);
+  try {
+    assert.deepEqual(await r.acquire(), { off: "building" });
+    const res = fakeRes();
+    await previewsSection.handleAction({ req: { body: { action: "update_previews", previews_remove_image: "true" } }, res, db, action: "update_previews" });
+    assert.equal(db.get("previews_enabled"), "false");
+    assert.match(res.redirected, /previews_image=building/);
+    open();
+    await flush();
+    assert.ok(!(previewImageTag() in docker.images), "the image just built is removed");
+    assert.equal(r.buildState(), "absent");
+    // Switched back on before the build lands: it stays.
+    let open2;
+    const gate2 = new Promise((res2) => { open2 = res2; });
+    const again = setup({ imageReady: false, dockerOpts: { buildGate: gate2 } });
+    _setPreviewRendererForTest(again.r);
+    assert.deepEqual(await again.r.acquire(), { off: "building" });
+    await previewsSection.handleAction({ req: { body: { action: "update_previews", previews_remove_image: "true" } }, res: fakeRes(), db: again.db, action: "update_previews" });
+    await setPreviewsEnabled(again.db, true);
+    open2();
+    await flush();
+    assert.ok(previewImageTag() in again.docker.images, "on again: the image stays");
+    assert.equal(again.r.buildState(), "ready");
+  } finally {
+    _setPreviewRendererForTest(null);
   }
 });
 
@@ -637,7 +797,9 @@ test("the off switch stops it, and removes the image only on request", async () 
     const html2 = await previewsSection.render({ db, lang: "en" });
     assert.doesNotMatch(html2, /name="previews" value="true" checked/);
 
-    await previewsSection.handleAction({ req: { body: { action: "update_previews", previews_remove_image: "true" } }, res: fakeRes(), db, action: "update_previews" });
+    const resRm = fakeRes();
+    await previewsSection.handleAction({ req: { body: { action: "update_previews", previews_remove_image: "true" } }, res: resRm, db, action: "update_previews" });
+    assert.match(resRm.redirected, /[?&]previews_image=removed(&|$)/);
     const rm = docker.log.filter((e) => e.args[0] === "image" && e.args[1] === "rm");
     assert.equal(rm.length, 1);
     assert.equal(rm[0].args[rm[0].args.length - 1], previewImageTag());
@@ -648,6 +810,10 @@ test("the off switch stops it, and removes the image only on request", async () 
     docker.containers.push({ name: "crow-preview-dddddddd-00000004", labels: { "crow.component": "preview-renderer", "crow.instance": "dddddddd", "crow.home": "dddddddd" }, image: previewImageTag(), running: true });
     const out = await r.removeImage();
     assert.equal(out.removed, false);
+    assert.equal(out.reason, "in_use");
+    const resInUse = fakeRes();
+    await previewsSection.handleAction({ req: { body: { action: "update_previews", previews_remove_image: "true" } }, res: resInUse, db, action: "update_previews" });
+    assert.match(resInUse.redirected, /[?&]previews_image=in_use(&|$)/);
     assert.equal(docker.log.filter((e) => e.args[0] === "image" && e.args[1] === "rm").length, 1);
 
     // Back on: written, and the build is kicked.
@@ -747,6 +913,114 @@ test("onboarding: the previews POST without a valid CSRF token is refused", asyn
   const mw = src.indexOf('router.use("/dashboard", csrfMiddleware)');
   const route = src.indexOf('router.post("/dashboard/onboarding/previews"');
   assert.ok(mw !== -1 && route > mw, "the route is registered after csrfMiddleware");
+});
+
+test("onboarding replayed after completion shows the current switch and applies it at once", async () => {
+  const { docker, db, r } = setup({ enabled: false, imageReady: false });
+  db.global.set("onboarding_completed_at", "2026-06-11T00:00:00Z");
+  db.local.set("previews_enabled", "false");
+  _setPreviewRendererForTest(r);
+  try {
+    const starter = STEP_KEYS.indexOf("starter");
+    const html = await renderStep({ step: String(starter) }, db);
+    assert.match(html, /<input type="checkbox" name="previews" value="on" style/, "unchecked: previews are off now");
+    assert.doesNotMatch(html, /name="previews" value="on" checked/);
+
+    const res = await postPreviews({ previews: "on", _csrf: "tok123" }, db);
+    assert.equal(res.statusCode, null);
+    assert.equal(db.get("previews_enabled"), "true", "applied by the POST itself");
+    await flush();
+    assert.equal(composeVerbs(docker.log).filter((v) => v === "build").length, 1, "and the build starts");
+
+    const html2 = await renderStep({ step: String(starter) }, db);
+    assert.match(html2, /name="previews" value="on" checked/, "now shown on");
+
+    // Off: applied, and the renderer stopped.
+    await flush();
+    const lease = await r.acquire();
+    assert.ok(lease.cdp, JSON.stringify(lease));
+    lease.release();
+    assert.equal(r.state(), "running");
+    await postPreviews({ _csrf: "tok123" }, db);
+    assert.equal(db.get("previews_enabled"), "false");
+    assert.equal(r.state(), "stopped");
+    // A GET still writes nothing.
+    await renderStep({ step: String(starter + 1), previews: "on" }, db);
+    assert.equal(db.get("previews_enabled"), "false");
+  } finally {
+    _setPreviewRendererForTest(null);
+  }
+});
+
+test("onboarding on a fresh install: the toggle is on and is not applied before completion", async () => {
+  const { db, r } = setup({ enabled: false, imageReady: false });
+  _setPreviewRendererForTest(r);
+  try {
+    const html = await renderStep({ step: String(STEP_KEYS.indexOf("starter")) }, db);
+    assert.match(html, /name="previews" value="on" checked/);
+    await postPreviews({ previews: "on", _csrf: "tok123" }, db);
+    assert.equal(db.get("previews_enabled"), null);
+  } finally {
+    _setPreviewRendererForTest(null);
+  }
+});
+
+/** A renderer stand-in for the Settings status line. */
+const statusStub = (bstate, off, st = "stopped") => ({ buildState: () => bstate, lastOff: () => off, state: () => st });
+
+test("the previews section shows one status line", async () => {
+  const cases = [
+    [false, "ready", null, "settings.previewsStatusOff"],
+    [true, "absent", null, "settings.previewsStatusIdle"],
+    [true, "building", "building", "settings.previewsStatusBuilding"],
+    [true, "ready", null, "settings.previewsStatusReady"],
+    [true, "ready", "not_enabled", "settings.previewsStatusReady"],
+    [true, "failed", "build_failed", "settings.previewsStatusBuildFailed"],
+    [true, "ready", "no_docker", "settings.previewsStatusNoDocker"],
+    [true, "absent", "no_docker", "settings.previewsStatusNoDocker"],
+    [true, "ready", "sandbox_unavailable", "settings.previewsStatusSandbox"],
+    [true, "ready", "start_failed", "settings.previewsStatusStartFailed"],
+    [true, "ready", "origin_unreachable", "settings.previewsStatusPaused"],
+  ];
+  try {
+    for (const [on, bstate, off, key] of cases) {
+      const db = settingsDb(on ? { previews_enabled: "true" } : {});
+      _setPreviewRendererForTest(statusStub(bstate, off));
+      for (const lang of ["en", "es"]) {
+        const html = await previewsSection.render({ db, lang, req: { query: {} } });
+        assert.ok(t(key, lang) !== key, `${key} exists`);
+        assert.ok(html.includes(escapeHtml(t(key, lang))), `${on}/${bstate}/${off} → ${key} (${lang})`);
+        assert.match(html, /data-previews-status/);
+      }
+    }
+  } finally {
+    _setPreviewRendererForTest(null);
+  }
+});
+
+test("the previews section shows what happened to the image, from a fixed list", async () => {
+  _setPreviewRendererForTest(statusStub("absent", null));
+  try {
+    const db = settingsDb({});
+    for (const [v, key] of [["removed", "settings.previewsImageRemoved"], ["in_use", "settings.previewsImageInUse"], ["building", "settings.previewsImageBuilding"], ["failed", "settings.previewsImageFailed"]]) {
+      const html = await previewsSection.render({ db, lang: "en", req: { query: { previews_image: v } } });
+      assert.ok(html.includes(escapeHtml(t(key, "en"))), `${v} → ${key}`);
+    }
+    const html = await previewsSection.render({ db, lang: "en", req: { query: { previews_image: "<script>x</script>" } } });
+    assert.doesNotMatch(html, /<script>x/);
+    for (const key of ["settings.previewsImageRemoved", "settings.previewsImageInUse", "settings.previewsImageBuilding", "settings.previewsImageFailed"]) {
+      assert.ok(!html.includes(escapeHtml(t(key, "en"))), "no flash for an unknown value");
+    }
+  } finally {
+    _setPreviewRendererForTest(null);
+  }
+});
+
+test("prepare() logs why it can't start when the artifact origin isn't configured", async () => {
+  const warns = [];
+  const { r } = setup({ originInfo: () => null, log: { log() {}, warn: (m) => warns.push(m) } });
+  assert.equal(await r.prepare(), "start_failed");
+  assert.ok(warns.some((m) => /artifact origin is not configured/.test(m)), warns.join("\n"));
 });
 
 test("the previews section is in Appearance, not hidden, and registered", async () => {

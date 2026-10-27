@@ -89,6 +89,11 @@ function mediaTypeOf(headers) {
 // One render at a time per CDP client (see the header).
 const queues = new WeakMap();
 
+// Session set-ups still running (all renders). Tests only: a render that fails before its
+// page target is known must not leave set-ups waiting forever.
+let pendingSetUps = 0;
+export const _pendingSetUpsForTest = () => pendingSetUps;
+
 /**
  * @param {{ send(method: string, params?: object, sessionId?: string): Promise<any>, on(e: string, fn: Function): void, off(e: string, fn: Function): void }} cdp
  * @param {{ url: string, allowPrefix: string, mainType: string, fetcher: { session(o: { signal: AbortSignal }): { get(p: string): Promise<any> } }, width?: number, height?: number, timeoutMs?: number }} o
@@ -119,8 +124,9 @@ async function renderOnce(cdp, { url, allowPrefix, mainType, fetcher, width = 64
 
   let browserContextId = null;
   let targetId = null;
-  let resolveTarget;
-  const targetKnown = new Promise((r) => { resolveTarget = r; });
+  let resolveTarget, rejectTarget;
+  const targetKnown = new Promise((res, rej) => { resolveTarget = res; rejectTarget = rej; });
+  targetKnown.catch(() => {});
   let resolvePage;
   const pageSession = new Promise((r) => { resolvePage = r; });
   let pageSid = null;
@@ -219,7 +225,8 @@ async function renderOnce(cdp, { url, allowPrefix, mainType, fetcher, width = 64
       return;
     }
     ours.add(sid);
-    setUp(sid, info).catch(() => {});
+    pendingSetUps++;
+    setUp(sid, info).catch(() => {}).finally(() => { pendingSetUps--; });
   }
 
   const markNavigated = (why) => { navigated = true; stop(fail("preview_navigated", why)); };
@@ -295,7 +302,10 @@ async function renderOnce(cdp, { url, allowPrefix, mainType, fetcher, width = 64
   } catch (err) {
     throw stopErr || err;
   } finally {
-    // 11. Always: abort the fetch session, then dispose of the context.
+    // 11. Always: abort the fetch session, then dispose of the context. A set-up waiting
+    // for the page's targetId (createTarget failed or timed out) gives up, and never
+    // resumes a target this render didn't place (a no-op once the target is known).
+    rejectTarget(new Error("the render ended before its page target was known"));
     clearTimeout(timer);
     ac.abort();
     const bounded = (p) => Promise.race([p.catch(() => {}), new Promise((r) => setTimeout(r, CLEANUP_MS).unref?.())]);

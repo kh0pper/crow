@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createCanvas } from "@napi-rs/canvas";
-import { renderInContext, isAllowed, fulfillHeaders, isNearBlank, MAIN_DOCUMENT_TYPES, HOP_BY_HOP } from "../servers/gateway/preview/render.js";
+import { renderInContext, isAllowed, fulfillHeaders, isNearBlank, MAIN_DOCUMENT_TYPES, HOP_BY_HOP, _pendingSetUpsForTest } from "../servers/gateway/preview/render.js";
 
 const BASE = "http://artifacts.example.test:3060";
 const T = "A".repeat(43);
@@ -383,6 +383,27 @@ test("a timeout while the fetcher hangs still rejects at timeoutMs", async () =>
   assert.equal(b.calls.filter((c) => c.method === "Target.disposeBrowserContext").length, 1);
 });
 
+test("a failed createTarget leaves no session set-up waiting", async () => {
+  const before = _pendingSetUpsForTest();
+  const b = fakeCdp();
+  const send = b.cdp.send;
+  b.cdp.send = async (method, params = {}, sid) => {
+    if (method === "Target.createTarget") {
+      b.calls.push({ method, params, sid });
+      // The page attaches (paused), then the call fails: its targetId never arrives.
+      b.emit("Target.attachedToTarget", { sessionId: "S-PAGE", targetInfo: { targetId: "PAGE", type: "page", browserContextId: params.browserContextId }, waitingForDebugger: true });
+      await tick();
+      throw new Error("Target.createTarget failed");
+    }
+    return send(method, params, sid);
+  };
+  await assert.rejects(render(b, serve({ [MAIN]: () => okDoc() })), /createTarget failed/);
+  for (let i = 0; i < 10; i++) await tick();
+  assert.equal(_pendingSetUpsForTest(), before, "the attached session's set-up settled");
+  assert.ok(!b.calls.some((c) => c.method === "Runtime.runIfWaitingForDebugger" && c.sid === "S-PAGE"), "and a page this render never knew is never resumed");
+  assert.equal(b.calls.filter((c) => c.method === "Target.disposeBrowserContext").length, 1);
+});
+
 function png(draw) {
   const c = createCanvas(640, 400);
   const ctx = c.getContext("2d");
@@ -407,9 +428,15 @@ test("isNearBlank: a two-block document capture is not", async () => {
   })), false);
 });
 
-test("isNearBlank: one short line of 14 px dark text is not blank", async () => {
-  // A one-sentence page: thin strokes that a sampling downscale can miss.
-  assert.equal(await isNearBlank(png((ctx) => { ctx.fillStyle = "#222"; ctx.font = "14px sans-serif"; ctx.fillText("Quarterly notes: revenue up four percent", 16, 24); })), false);
+test("isNearBlank: two lines of 14 px dark text are not blank", async () => {
+  // A short page: thin strokes that a sampling downscale can miss. Two full-width lines
+  // put the inked cells well past the 2% threshold whatever sans-serif the runner has
+  // (one short line sits near it, and its width depends on the installed fonts).
+  assert.equal(await isNearBlank(png((ctx) => {
+    ctx.fillStyle = "#222"; ctx.font = "14px sans-serif";
+    ctx.fillText("Quarterly notes: revenue up four percent, costs flat, two new hires in May", 16, 24);
+    ctx.fillText("Next quarter: ship the preview browser, then the board cards and the Make tab", 16, 48);
+  })), false);
 });
 
 test("isNearBlank: a 1-pixel vertical rule a sampler would skip still counts", async () => {

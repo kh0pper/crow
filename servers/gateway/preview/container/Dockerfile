@@ -7,6 +7,9 @@
 # which hashes this file).
 FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
 
+# The renderer finds its own images by this label to remove old ones after a rebuild.
+LABEL crow.component=preview-renderer
+
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       chromium fonts-dejavu-core fonts-noto-core ca-certificates \

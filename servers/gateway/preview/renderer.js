@@ -14,6 +14,11 @@
  *     meanwhile, a failed build backs off for 10 minutes, and run never builds. The tag
  *     hashes the image's inputs, so instances on the same code share one image, and an
  *     image older than 30 days is rebuilt without cache (Chromium security updates).
+ *     After a build, the image it replaced (by ID) and every other image labelled
+ *     crow.component=preview-renderer under another tag are removed, unless a container
+ *     from any instance is running them: each is about 1.2 GB.
+ *   - A start that finds no sandbox, or fails, is remembered for 10 minutes: acquire()
+ *     gives the same reason meanwhile with no docker call. Turning the switch off clears it.
  *   - stopped → starting → running → stopping → stopped. acquire() takes its lease
  *     first; tick() stops the renderer 2 minutes (idleMs) after the last release. A stop
  *     closes stdin, waits 5 s, SIGKILLs the compose child, then `docker rm -f` by this
@@ -49,6 +54,7 @@ const DAY_MS = 24 * 3600_000;
 const START_TIMEOUT_MS = 20_000;
 const STOP_GRACE_MS = 5_000;
 const BUILD_BACKOFF_MS = 10 * 60_000;
+const START_BACKOFF_MS = 10 * 60_000;
 const BUILD_TIMEOUT_MS = 60 * 60_000;
 const IMAGE_MAX_AGE_MS = 30 * DAY_MS;
 const BREAKER_TIMEOUTS = 3;
@@ -58,6 +64,8 @@ const STDERR_TAIL_BYTES = 65_536;
 // hostname or IPv4 address only (no separators, no brackets, no spaces).
 const HOST_RE = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+const IMAGE_ID_RE = /^sha256:[0-9a-f]{64}$/;
+const OUR_TAG_RE = /^crow-preview-renderer:[0-9a-f]{12}$/;
 
 /** The image tag: the first 12 hex of sha256(Dockerfile + pipe-shim.sh + seccomp-chrome.json). */
 export function previewImageTag(containerDir = CONTAINER_DIR) {
@@ -75,9 +83,13 @@ export async function previewsEnabled(db) {
   try { return (await readSetting(db, "previews_enabled")) === "true"; } catch { return false; }
 }
 
-/** Write the local-only `previews_enabled` setting ("true" / "false"). */
+/**
+ * Write the local-only `previews_enabled` setting ("true" / "false"). Off also clears the
+ * process renderer's start backoff, so turning the switch back on tries again at once.
+ */
 export async function setPreviewsEnabled(db, on) {
   await upsertSetting(db, "previews_enabled", on ? "true" : "false");
+  if (!on) singleton?.clearBackoff?.();
 }
 
 /** CROW_PREVIEW_IDLE_SEC (30–900, clamped) in ms; 2 minutes when unset. */
@@ -147,6 +159,8 @@ export function createPreviewRenderer({
   let bstate = "absent";
   let buildTag = null;
   let buildFailedAt = 0;
+  let removeAfterBuild = false; // the off switch asked to remove the image mid-build
+  let startFail = null;         // { reason, at }: a remembered sandbox_unavailable / start_failed
   let tail = Buffer.alloc(0);
 
   /** Resolves true when p settles within ms, false otherwise. */
@@ -197,24 +211,83 @@ export function createPreviewRenderer({
     return verdict.valid ? null : verdict.reason;
   }
 
-  function kickBuild(env, { noCache }) {
+  /** Is any container (any instance) running this image? null when docker can't say. */
+  async function imageInUse(ref) {
+    const ps = await docker.exec(["ps", "-q", "--filter", "label=crow.component=preview-renderer", "--filter", `ancestor=${ref}`], { env: baseEnv(), timeoutMs: 30_000 });
+    if (ps.code !== 0) return null;
+    return ps.stdout.trim() !== "";
+  }
+
+  /**
+   * After a build of `tag`: remove the image it replaced (`oldId`, a stale rebuild under
+   * the same tag), then every other image labelled crow.component=preview-renderer under
+   * another tag (an older Dockerfile, shim or profile), skipping any a container runs.
+   * Never fatal: a refusal ("in use", "no such image") leaves the image for next time.
+   */
+  async function removeOldImages(tag, oldId) {
+    const env = baseEnv();
+    const cur = await docker.exec(["image", "inspect", "--format", "{{.Id}}", tag], { env, timeoutMs: 30_000 });
+    const newId = cur.code === 0 ? cur.stdout.trim() : null;
+    if (!newId) return;
+    const removed = [];
+    const rm = async (ref) => {
+      const r = await docker.exec(["image", "rm", ref], { env, timeoutMs: 60_000 });
+      if (r.code === 0) removed.push(ref);
+    };
+    if (oldId && IMAGE_ID_RE.test(oldId) && oldId !== newId && (await imageInUse(oldId)) === false) await rm(oldId);
+    const ls = await docker.exec(["image", "ls", "--no-trunc", "--filter", "label=crow.component=preview-renderer", "--format", "{{.ID}}\t{{.Repository}}:{{.Tag}}"], { env, timeoutMs: 30_000 });
+    if (ls.code === 0) {
+      for (const line of ls.stdout.split("\n")) {
+        const [id, ref] = line.trim().split("\t");
+        if (!id || id === newId || ref === tag || removed.includes(id)) continue;
+        const target = OUR_TAG_RE.test(ref || "") ? ref : ref === "<none>:<none>" && IMAGE_ID_RE.test(id) ? id : null;
+        if (!target) continue;
+        if ((await imageInUse(target)) === false) await rm(target);
+      }
+    }
+    if (removed.length) log.log?.(`[preview] removed ${removed.length} old preview image(s)`);
+  }
+
+  /** `docker image rm` of the current tag, only when no preview container runs it. */
+  async function removeImageNow() {
+    const tag = previewImageTag(containerDir);
+    const inUse = await imageInUse(tag);
+    if (inUse === null) return { removed: false, reason: "no_docker" };
+    if (inUse) return { removed: false, reason: "in_use" };
+    const r = await docker.exec(["image", "rm", tag], { env: baseEnv(), timeoutMs: 60_000 });
+    if (r.code !== 0) return { removed: false, reason: lastLines(r.stderr) || "failed" };
+    if (buildTag === tag) bstate = "absent";
+    return { removed: true };
+  }
+
+  function kickBuild(env, { noCache, oldId = null }) {
     const { project } = ids();
     bstate = "building";
     buildTag = env.CROW_PREVIEW_IMAGE;
+    const tag = buildTag;
     (async () => {
       const refusal = await guard(env);
       if (refusal) throw new Error(`the install check refused the preview compose: ${refusal}`);
       const r = await docker.exec(["compose", "-p", project, "-f", composeFile, "build", ...(noCache ? ["--no-cache"] : []), "renderer"],
         { cwd: containerDir, env, timeoutMs: BUILD_TIMEOUT_MS });
       if (r.code !== 0) throw new Error(`docker compose build failed: ${lastLines(r.stderr || r.stdout)}`);
-    })().then(() => {
+    })().then(async () => {
       bstate = "ready";
-      log.log?.(`[preview] image ${buildTag} built`);
+      log.log?.(`[preview] image ${tag} built`);
+      await removeOldImages(tag, oldId).catch(() => { /* next build */ });
     }, (err) => {
       bstate = "failed";
       buildFailedAt = now();
       log.warn?.(`[preview] build failed (retry in 10 min): ${err.message}`);
-    });
+    }).then(async () => {
+      // Switched off with "Also remove the preview image" while this build ran: the
+      // removal waited for it (unless the switch is back on).
+      if (!removeAfterBuild) return;
+      removeAfterBuild = false;
+      if (await previewsEnabled(db)) return;
+      const out = await removeImageNow();
+      log.log?.(`[preview] previews were switched off during the build: image ${out.removed ? "removed" : `kept (${out.reason})`}`);
+    }).catch(() => { /* never fatal */ });
   }
 
   /** null when the image is ready; otherwise the reason to give (and a build may start). */
@@ -222,14 +295,17 @@ export function createPreviewRenderer({
     const tag = env.CROW_PREVIEW_IMAGE;
     if (bstate === "building") return "building";
     if (bstate === "failed" && buildTag === tag && now() - buildFailedAt < BUILD_BACKOFF_MS) return "build_failed";
-    const r = await docker.exec(["image", "inspect", "--format", "{{.Created}}", tag], { env: baseEnv(), timeoutMs: 30_000 });
-    const created = r.code === 0 ? Date.parse(r.stdout.trim()) : NaN;
+    const r = await docker.exec(["image", "inspect", "--format", "{{.Created}}|{{.Id}}", tag], { env: baseEnv(), timeoutMs: 30_000 });
+    const [createdStr, id] = r.code === 0 ? r.stdout.trim().split("|") : [];
+    const created = Date.parse(createdStr || "");
     if (Number.isFinite(created) && now() - created <= IMAGE_MAX_AGE_MS) {
       bstate = "ready";
       buildTag = tag;
       return null;
     }
-    kickBuild(env, { noCache: Number.isFinite(created) });
+    // Stale: rebuilt without cache (a cached rebuild would reproduce the old image and
+    // its old Created date), and the image it replaces is removed by ID afterwards.
+    kickBuild(env, { noCache: Number.isFinite(created), oldId: Number.isFinite(created) ? id || null : null });
     return "building";
   }
 
@@ -356,11 +432,21 @@ export function createPreviewRenderer({
 
   /** { off } or { cdp } (this run's client, read once so a lease never sees a later null). */
   async function ready() {
-    if (!(await previewsEnabled(db))) return { off: "not_enabled" };
+    if (!(await previewsEnabled(db))) {
+      startFail = null; // switched off: the next start, once back on, tries at once
+      return { off: "not_enabled" };
+    }
     if (now() < trippedUntil) return { off: "origin_unreachable" };
+    if (startFail && now() - startFail.at < START_BACKOFF_MS) return { off: startFail.reason };
     while (stopP) await stopP;
     if (st === "running" && run) return { cdp: run.cdp };
-    if (!startP) startP = startSequence().finally(() => { startP = null; });
+    if (!startP) {
+      startP = startSequence().then((off) => {
+        if (off === "sandbox_unavailable" || off === "start_failed") startFail = { reason: off, at: now() };
+        else if (!off) startFail = null;
+        return off;
+      }).finally(() => { startP = null; });
+    }
     const off = await startP;
     if (off) return { off };
     return st === "running" && run ? { cdp: run.cdp } : { off: "start_failed" };
@@ -439,21 +525,27 @@ export function createPreviewRenderer({
       const info = await docker.exec(["info", "--format", "{{.ServerVersion}}"], { env: baseEnv(), timeoutMs: 15_000 });
       if (info.code !== 0) return "no_docker";
       const h = artifactHost();
-      if (h.error) return "start_failed";
+      if (h.error) {
+        log.warn?.(`[preview] not preparing: ${h.error}`);
+        return "start_failed";
+      }
       return ensureImage(composeVars(h.host));
     },
-    /** `docker image rm` of the shared tag, only when no preview container runs it. */
+    /**
+     * `docker image rm` of the shared tag, only when no preview container runs it. During
+     * a build it waits for the build: the image is removed when it lands, unless the
+     * switch is back on by then ({ removed: false, reason: "building" }).
+     */
     async removeImage() {
       if (inContainer()) return { removed: false, reason: "no_docker" };
-      const tag = previewImageTag(containerDir);
-      const ps = await docker.exec(["ps", "-q", "--filter", "label=crow.component=preview-renderer", "--filter", `ancestor=${tag}`], { env: baseEnv(), timeoutMs: 30_000 });
-      if (ps.code !== 0) return { removed: false, reason: "no_docker" };
-      if (ps.stdout.trim()) return { removed: false, reason: "in_use" };
-      const r = await docker.exec(["image", "rm", tag], { env: baseEnv(), timeoutMs: 60_000 });
-      if (r.code !== 0) return { removed: false, reason: lastLines(r.stderr) || "failed" };
-      if (buildTag === tag) bstate = "absent";
-      return { removed: true };
+      if (bstate === "building") {
+        removeAfterBuild = true;
+        return { removed: false, reason: "building" };
+      }
+      return removeImageNow();
     },
+    /** Forget a remembered start failure (the switch went off). */
+    clearBackoff() { startFail = null; },
     state: () => st,
     lastOff: () => offReason,
     buildState: () => bstate,

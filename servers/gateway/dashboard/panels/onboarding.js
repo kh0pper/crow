@@ -27,7 +27,7 @@ import { aiStepClientJS } from "./onboarding/ai-step-client.js";
 import { upsertProvider } from "../../../shared/providers-db.js";
 import { invalidateProvidersCache } from "../../../shared/providers.js";
 import { seedStarterMemories, createStarterArtifacts, resolveStarterProvider } from "./onboarding/starter-content.js";
-import { setPreviewsEnabled, previewRenderer } from "../../preview/renderer.js";
+import { setPreviewsEnabled, previewsEnabled, previewRenderer } from "../../preview/renderer.js";
 
 /** Exported so tests derive step positions (indexOf/length) instead of pinning indices. */
 export const STEP_KEYS = ["welcome", "ai", "integrations", "bot", "starter", "connect", "meet", "done"];
@@ -647,6 +647,10 @@ async function stampOnboardingCompleted(db) {
  * image build in the background. A later visit to done never touches it, and an
  * instance that never posted the toggle keeps previews off (absent means off), so an
  * upgrade never builds anything by itself.
+ *
+ * Replayed on an instance that already finished the tour, the toggle shows the current
+ * `previews_enabled` and its POST applies the choice at once (on: the background build;
+ * off: the renderer stops), since no later completion would.
  */
 async function applyPreviewsChoice(db) {
   try {
@@ -662,11 +666,17 @@ async function finishOnboarding(db) {
   if (await stampOnboardingCompleted(db)) await applyPreviewsChoice(db);
 }
 
-function renderPreviewsToggle(lang, req) {
+async function onboardingCompleted(db) {
+  if (!db) return false;
+  try { return Boolean(await readSetting(db, "onboarding_completed_at")); } catch { return false; }
+}
+
+/** First run: shown on. Replayed after completion: the current switch. */
+function renderPreviewsToggle(lang, req, checked = true) {
   return `<form method="POST" action="/dashboard/onboarding/previews" id="onboarding-previews-form" data-turbo="false" style="margin-top:var(--crow-space-4)">
     ${csrfInput(req)}
     <label style="display:flex;align-items:center;gap:var(--crow-space-2);min-height:44px;cursor:pointer;color:var(--crow-text-secondary)">
-      <input type="checkbox" name="previews" value="on" checked style="accent-color:var(--crow-accent);width:auto"> ${escapeHtml(t("onboarding.previews", lang))}
+      <input type="checkbox" name="previews" value="on"${checked ? " checked" : ""} style="accent-color:var(--crow-accent);width:auto"> ${escapeHtml(t("onboarding.previews", lang))}
     </label>
   </form>`;
 }
@@ -675,13 +685,21 @@ function renderPreviewsToggle(lang, req) {
  * POST /dashboard/onboarding/previews — hand-registered in dashboard/index.js beside
  * the meet POST, BEHIND dashboardAuth + csrfMiddleware. Records the starter step's
  * previews toggle (an unchecked box is absent: "off") and moves on to the next step.
- * It only records; finishing the tour applies it.
+ * On a first run it only records; finishing the tour applies it. After the tour was
+ * finished (a replay), it applies the choice itself.
  */
 export async function handlePreviewsPost(req, res, opts = {}) {
   const { db = null } = opts;
   const next = STEP_KEYS.indexOf("starter") + 1;
+  const on = req.body?.previews === "on";
   try {
-    if (db) await upsertSetting(db, "previews_onboarding_choice", req.body?.previews === "on" ? "on" : "off");
+    if (db) await upsertSetting(db, "previews_onboarding_choice", on ? "on" : "off");
+    if (await onboardingCompleted(db)) {
+      await setPreviewsEnabled(db, on);
+      const renderer = previewRenderer();
+      if (on) renderer.prepare().catch(() => {});
+      else await renderer.stop().catch(() => {});
+    }
   } catch (err) {
     console.error("[onboarding] previews choice not saved:", err.message);
   }
@@ -813,7 +831,7 @@ function renderStepBody(stem, lang, ctx = {}) {
     case "starter":
       return body + renderStarterCards(lang)
         + linkWrap(deepLink(t("onboarding.openCollections", lang), "/dashboard/extensions#collections"))
-        + renderPreviewsToggle(lang, ctx.req);
+        + renderPreviewsToggle(lang, ctx.req, ctx.previewsChecked !== false);
     case "integrations":
       return body + callout(t("onboarding.integrationsNote", lang), "info")
         + linkWrap(deepLink(t("onboarding.openIntegrations", lang), "/dashboard/settings?section=integrations"));
@@ -950,7 +968,7 @@ export default {
     // ?err= query.
     const ctx = stem === "ai" ? { providersCount: await countProviders(db), req }
       : stem === "meet" ? { starterProvider: await safeResolveStarterProvider(db, resolveStarterProviderFn), req }
-      : stem === "starter" ? { req }
+      : stem === "starter" ? { req, previewsChecked: (await onboardingCompleted(db)) ? await previewsEnabled(db) : true }
       : stem === "done" ? { crowId: readInstanceCrowId(), req, providersCount: await countProviders(db) }
       : {};
 
