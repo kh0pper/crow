@@ -31,6 +31,7 @@ export function makeApiRouter(dashboardAuth) {
     const kind = typeof body.kind === "string" ? body.kind : "";
     const title = typeof body.title === "string" ? body.title.trim() : "";
     if (!BLANK_KIND_IDS.includes(kind) || title.length < 1 || title.length > 200) return jsonError(res, 400, "bad_request");
+    if (/[/\\]/.test(title)) return jsonError(res, 400, "bad_title");
 
     let projectId = null;
     const raw = body.project_id;
@@ -55,6 +56,7 @@ export function makeApiRouter(dashboardAuth) {
         made = await createBlankWorkspaceFile({ crowHome, kind, title, projectSlug: slug });
       } catch (err) {
         if (err?.code === "workspace_missing") return jsonError(res, 409, "workspace_missing");
+        if (err?.code === "bad_path") return jsonError(res, 400, "bad_title");
         if (err?.code === "not_ready") return jsonError(res, 409, "workspace_not_ready");
         console.warn("[make-api] blank create failed:", err?.message || err);
         return jsonError(res, 502, "workspace_unavailable");

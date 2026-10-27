@@ -39,7 +39,7 @@ function stubBundle() {
   w("server.js", `export const realClock = { now: () => 0 };`);
   w("tools/common.js", `export function toPublic(e, cfg) { return { file_id: e.fileId, web_url: cfg.webBase + "/f/" + e.fileId }; }`);
   w("nc/dav.js", `export async function mkcol(cfg, segs) { globalThis.__mkStub.mkcols.push(segs); return true; }`);
-  const def = (name, exportName) => `export const ${exportName} = [{ name: "${name}", run: async (args, ctx) => { const s = globalThis.__mkStub; s.calls.push({ name: "${name}", args, ctx }); s.next += 1; return { created: true, file_id: s.next }; } }];`;
+  const def = (name, exportName) => `export const ${exportName} = [{ name: "${name}", run: async (args, ctx) => { const s = globalThis.__mkStub; if (s.badPath) { const e = new Error("bad"); e.code = "bad_path"; throw e; } s.calls.push({ name: "${name}", args, ctx }); s.next += 1; return { created: true, file_id: s.next }; } }];`;
   w("tools/docs.js", def("ws_docs_create", "docsWriteDefs"));
   w("tools/sheets.js", def("ws_sheets_create", "sheetsDefs"));
   w("tools/slides.js", def("ws_slides_create", "slidesDefs"));
@@ -141,6 +141,19 @@ test("a bad kind, an empty or long title, or a bad project is 400", async () => 
   }
   assert.equal(rec().calls.length, 0);
   assert.equal((await post("/blank", { kind: "docx", title: "x".repeat(200) })).status, 200);
+});
+
+test("a title with a slash or backslash is 400 bad_title, and a tool bad_path maps to 400", async () => {
+  for (const title of ["a/b", "a\\b", "../x"]) {
+    const r = await post("/blank", { kind: "docx", title });
+    assert.equal(r.status, 400, title);
+    assert.equal(r.body.error, "bad_title");
+  }
+  assert.equal(rec().calls.length, 0);
+  rec().badPath = true;
+  const r = await post("/blank", { kind: "docx", title: "Fine" });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.error, "bad_title");
 });
 
 test("CSRF is required, and so is a session", async () => {
