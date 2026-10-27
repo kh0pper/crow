@@ -63,7 +63,7 @@ function tile(item, lang) {
     <span class="mk-preview mk-type-${esc(type)}" data-mk-preview="${esc(item.kind)}:${esc(item.ref)}" aria-hidden="true">${esc(typeLabel)}</span>
     <span class="mk-title">${esc(item.title)}</span>
     <span class="mk-meta">${item.justMade ? `<span class="mk-badge">${esc(t("shell.justMade", lang))}</span>` : ""}${item.cardId ? `<span class="mk-card">#${esc(item.cardId)}</span>` : ""}${when(item.updatedAt, lang)}</span>
-  </a><button type="button" class="mk-more" data-mk-more aria-haspopup="dialog" aria-label="${esc(t("shell.moreFor", lang).split("{title}").join(item.title))}">&#8942;</button></li>`;
+  </a><button type="button" class="mk-more" data-mk-more aria-haspopup="dialog" aria-label="${esc(t("shell.moreFor", lang).split("{title}").join(item.title))}">⋮</button></li>`;
 }
 
 /** "installed" | "unavailable" count as usable (an unreachable Workspace is tried, and says so if it fails). */
