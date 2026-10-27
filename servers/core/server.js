@@ -35,9 +35,14 @@ const SERVER_FACTORIES = {
 };
 
 // Storage loaded dynamically (may not be available)
-async function getStorageFactory() {
+async function getStorageFactory(dbPath) {
   try {
     const { createStorageServer } = await import("../storage/server.js");
+    // The instance's Shared Storage settings (DB) first, like the gateway and the
+    // stdio storage server; the env is only the fallback.
+    const { initStorageFromInstance } = await import("../storage/s3-client.js");
+    const { createDbClient } = await import("../db.js");
+    await initStorageFromInstance(createDbClient(dbPath));
     return createStorageServer;
   } catch {
     return null;
@@ -72,8 +77,8 @@ export async function createCoreServer(dbPath) {
 
     let factory = SERVER_FACTORIES[name];
     if (!factory && name === "storage") {
-      factory = await getStorageFactory();
-      if (!factory) throw new Error("Storage server not available. Set MINIO_ENDPOINT in .env.");
+      factory = await getStorageFactory(dbPath);
+      if (!factory) throw new Error("Storage server not available. Install File Storage (Garage) from Extensions, or configure Shared Storage in the Nest.");
     }
     if (!factory) throw new Error(`Unknown server: ${name}`);
 

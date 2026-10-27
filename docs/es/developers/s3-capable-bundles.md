@@ -1,6 +1,6 @@
 # Bundles con capacidad S3
 
-Cualquier bundle de Crow que almacene medios generados por el usuario (música, fotos, videos, documentos) puede optar por usar el **almacenamiento S3 compartido** de la plataforma — un MinIO (o cualquier endpoint compatible con S3) al que apuntan todas las instancias de Crow emparejadas.
+Cualquier bundle de Crow que almacene medios generados por el usuario (música, fotos, videos, documentos) puede optar por usar el **almacenamiento S3 compartido** de la plataforma — un Garage (la extensión File Storage) o cualquier endpoint compatible con S3 al que apuntan todas las instancias de Crow emparejadas.
 
 Cuando un bundle opta por participar:
 
@@ -8,6 +8,8 @@ Cuando un bundle opta por participar:
 - Las credenciales se replican a cada instancia emparejada (selladas en reposo vía `secret-box`, de modo que los archivos del feed nunca contienen texto plano).
 - El flujo de instalación del bundle inyecta automáticamente las variables de entorno específicas de la app en `<bundle>/.env`, usando la capa traductora que ya conoce `AWS_*`, `S3_*`, `PEERTUBE_OBJECT_STORAGE_*` y `AWS_STORAGE_BUCKET_NAME`.
 - El panel de Almacenamiento compartido muestra una insignia de "drift" cuando la configuración en disco del bundle no coincide con la configuración actual de la base de datos, con un botón **Apply** que reescribe el bloque y ejecuta `docker compose up -d --force-recreate`.
+
+Garage no tiene políticas de bucket ni ACL de objetos: el acceso se concede por clave y por bucket (lectura, escritura, propietario). No dependas de una política de bucket en un traductor; el nombre del bucket y las credenciales son todo el contrato.
 
 ## Lista de verificación mínima para adoptarlo
 

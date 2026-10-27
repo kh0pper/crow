@@ -31,6 +31,7 @@ test("backup.sh --dry-run lists the artifacts store rsync next to the DB dump", 
       CROW_DB_PATH: join(dataDir, "crow.db"),
       CROW_BACKUP_DIR: join(dir, "backups"),
       MINIO_ENDPOINT: "", MINIO_ACCESS_KEY: "", MINIO_SECRET_KEY: "",
+      S3_ENDPOINT: "", S3_ACCESS_KEY: "", S3_SECRET_KEY: "",
       CROW_BACKUP_GIT_REPO: "",
     },
   });
@@ -53,8 +54,42 @@ test("backup.sh --dry-run without an artifacts store copies nothing extra", (t) 
       CROW_DB_PATH: join(dataDir, "crow.db"),
       CROW_BACKUP_DIR: join(dir, "backups"),
       MINIO_ENDPOINT: "", MINIO_ACCESS_KEY: "", MINIO_SECRET_KEY: "",
+      S3_ENDPOINT: "", S3_ACCESS_KEY: "", S3_SECRET_KEY: "",
       CROW_BACKUP_GIT_REPO: "",
     },
   });
   assert.doesNotMatch(out, /Would rsync/, "no store, no rsync line");
 });
+
+// Garage migration PR 1: the S3 step reads S3_* (MINIO_* stays the fallback).
+for (const [label, s3env, want] of [
+  ["S3_*", { S3_ENDPOINT: "127.0.0.1:3900", S3_ACCESS_KEY: "GKabc", S3_SECRET_KEY: "s" }, "http://127.0.0.1:3900"],
+  ["the older MINIO_* names", { MINIO_ENDPOINT: "http://localhost:9000", MINIO_ACCESS_KEY: "a", MINIO_SECRET_KEY: "s" }, "http://localhost:9000"],
+]) {
+  test(`backup.sh --dry-run uploads to S3 configured with ${label}`, (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "artifacts-backup-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const dataDir = join(dir, "data");
+    mkdirSync(dataDir, { recursive: true });
+    mkdirSync(join(dir, "backups"), { recursive: true });
+    mkdirSync(join(dir, "bin"), { recursive: true });
+    writeFileSync(join(dataDir, "crow.db"), "not a real db");
+    writeFileSync(join(dir, "bin", "mc"), "#!/bin/sh\nexit 0\n", { mode: 0o755 }); // never run in a dry run
+    const out = execFileSync("bash", [join(ROOT, "scripts/backup.sh"), "--dry-run"], {
+      encoding: "utf8",
+      timeout: 30000,
+      env: {
+        ...process.env,
+        PATH: `${join(dir, "bin")}:${process.env.PATH}`,
+        CROW_DB_PATH: join(dataDir, "crow.db"),
+        CROW_BACKUP_DIR: join(dir, "backups"),
+        MINIO_ENDPOINT: "", MINIO_ACCESS_KEY: "", MINIO_SECRET_KEY: "",
+        S3_ENDPOINT: "", S3_ACCESS_KEY: "", S3_SECRET_KEY: "",
+        CROW_BACKUP_GIT_REPO: "",
+        ...s3env,
+      },
+    });
+    assert.match(out, new RegExp(`Uploading to S3 \\(${escRe(want)} / crow-backups\\)`));
+    assert.match(out, /\[dry-run\] Would upload/);
+  });
+}

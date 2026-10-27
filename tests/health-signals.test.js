@@ -162,12 +162,12 @@ test("backup: fresh backup, no verification record → info (gentle nudge, not w
 
 test("storage: MINIO_ENDPOINT unset → state off/info, NOT warn", async () => {
   invalidateHealthCache();
-  const originalMinio = process.env.MINIO_ENDPOINT;
-  delete process.env.MINIO_ENDPOINT;
+  const saved = {};
+  for (const k of ["MINIO_ENDPOINT", "S3_ENDPOINT"]) { saved[k] = process.env[k]; delete process.env[k]; }
 
   const result = await collectHealthSignals(makeDb());
 
-  if (originalMinio != null) process.env.MINIO_ENDPOINT = originalMinio;
+  for (const [k, v] of Object.entries(saved)) if (v != null) process.env[k] = v;
 
   const storageDetail = result.details.find(d => d.id === "storage");
   assert.ok(storageDetail, "storage detail must be present");
@@ -187,6 +187,25 @@ test("storage: MINIO_ENDPOINT unset → state off/info, NOT warn", async () => {
   // check storage itself is not the source
   const storageWarn = warnIssues.find(i => i.id === "storage");
   assert.equal(storageWarn, undefined, "MINIO unset must not appear as a warn");
+});
+
+test("storage: configured through the DB (no MINIO_ENDPOINT at all) is probed, not reported as not set up", async () => {
+  invalidateHealthCache();
+  const saved = {};
+  for (const k of ["MINIO_ENDPOINT", "S3_ENDPOINT"]) { saved[k] = process.env[k]; delete process.env[k]; }
+  const s3 = await import("../servers/storage/s3-client.js");
+  // An endpoint nothing listens on: the probe fails fast → "unreachable", which proves the
+  // signal followed the DB config instead of stopping at the missing env var.
+  s3.useStorageConfig({ endpoint: "127.0.0.1:9", host: "127.0.0.1", port: 9, useSSL: false, region: "us-east-1", bucketPrefix: "crow", accessKey: "a", secretKey: "b" });
+  try {
+    const result = await collectHealthSignals(makeDb());
+    const d = result.details.find((x) => x.id === "storage");
+    assert.notEqual(d.value, "not set up");
+  } finally {
+    s3.useStorageConfig(null);
+    for (const [k, v] of Object.entries(saved)) if (v != null) process.env[k] = v;
+    invalidateHealthCache();
+  }
 });
 
 // ─── Failing signal → 'off', not throw ────────────────────────────────────────
