@@ -301,7 +301,10 @@ export function createPreviewRenderer({
 
     if (outcome === "ok") {
       st = "running";
-      exitP.then(() => onUnexpectedExit(me));
+      // A dead child, or a pipe that broke while the child lives (junk or an oversize
+      // frame on stdout, or EOF), ends this run: the next acquire() starts a fresh one.
+      exitP.then(() => onUnexpectedExit(me, "exited"));
+      cdp.closed.then(({ reason }) => onUnexpectedExit(me, `its CDP pipe closed (${reason})`));
       return null;
     }
     if (outcome === "exit") {
@@ -316,16 +319,22 @@ export function createPreviewRenderer({
     return "start_failed";
   }
 
-  function onUnexpectedExit(me) {
+  function onUnexpectedExit(me, why) {
     if (me.stopping || run !== me) return;
     run = null;
     st = "stopped";
     me.cdp.close();
-    log.warn?.(`[preview] the renderer exited: ${lastLines(tail.toString("utf8"))}`);
+    if (me.child.exitCode === null && me.child.signalCode === null) {
+      try { me.child.kill("SIGKILL"); } catch { /* gone */ }
+    }
+    log.warn?.(`[preview] the renderer ended: ${why}: ${lastLines(tail.toString("utf8"))}`);
     removeByName(me.name).then(() => sweep()).catch(() => { /* the boot sweep catches it */ });
   }
 
   async function startSequence() {
+    // Again, after any stop wait: the switch may have gone off meanwhile. (A build already
+    // running is left to finish; it only produces the image.)
+    if (!(await previewsEnabled(db))) return "not_enabled";
     if (inContainer()) return "no_docker";
     const info = await docker.exec(["info", "--format", "{{.ServerVersion}}"], { env: baseEnv(), timeoutMs: 15_000 });
     if (info.code !== 0) return "no_docker";
@@ -345,15 +354,16 @@ export function createPreviewRenderer({
     return spawnRun(env);
   }
 
+  /** { off } or { cdp } (this run's client, read once so a lease never sees a later null). */
   async function ready() {
-    if (!(await previewsEnabled(db))) return "not_enabled";
-    if (now() < trippedUntil) return "origin_unreachable";
+    if (!(await previewsEnabled(db))) return { off: "not_enabled" };
+    if (now() < trippedUntil) return { off: "origin_unreachable" };
     while (stopP) await stopP;
-    if (st === "running" && run) return null;
+    if (st === "running" && run) return { cdp: run.cdp };
     if (!startP) startP = startSequence().finally(() => { startP = null; });
     const off = await startP;
-    if (off) return off;
-    return st === "running" && run ? null : "start_failed";
+    if (off) return { off };
+    return st === "running" && run ? { cdp: run.cdp } : { off: "start_failed" };
   }
 
   async function doStop(me) {
@@ -385,21 +395,22 @@ export function createPreviewRenderer({
       leases++;
       let held = true;
       const drop = () => { if (held) { held = false; leases--; return true; } return false; };
-      let off;
+      let off, cdp;
       try {
-        off = await ready();
+        ({ off, cdp } = await ready());
       } catch (err) {
         log.warn?.(`[preview] start failed: ${err.message}`);
         off = "start_failed";
       }
-      if (off) {
+      if (off || !cdp) {
+        off = off || "start_failed";
         drop();
         offReason = off;
         return { off };
       }
       offReason = null;
       return {
-        cdp: run.cdp,
+        cdp,
         release({ timedOut = false } = {}) {
           if (!drop()) return;
           lastRelease = now();

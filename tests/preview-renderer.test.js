@@ -226,6 +226,7 @@ function fakeDocker(clock, opts = {}) {
 const verbs = (log) => log.map((e) => (e.args[0] === "compose" ? e.args[e.args.indexOf("-f") + 2] : e.args.slice(0, e.args[0] === "image" ? 2 : 1).join(" ")));
 const composeVerbs = (log) => log.filter((e) => e.args[0] === "compose").map((e) => e.args[e.args.indexOf("-f") + 2]);
 
+const SILENT = { log() {}, warn() {} };
 const ORIGIN = () => ({ baseUrl: "http://artifacts.example.test:3060" });
 
 /** A renderer with previews on and the image already built (unless told otherwise). */
@@ -235,7 +236,7 @@ function setup({ enabled = true, imageReady = true, dockerOpts = {}, containerDi
   const db = settingsDb(enabled ? { previews_enabled: "true" } : {});
   const r = createPreviewRenderer({
     crowHome: CROW_HOME, db, docker, now: clock.now, timers: clock.timers, inContainer: () => false,
-    instanceId: "instance-under-test", originInfo: ORIGIN, ...(containerDir ? { containerDir } : {}), ...over,
+    instanceId: "instance-under-test", originInfo: ORIGIN, log: SILENT, ...(containerDir ? { containerDir } : {}), ...over,
   });
   if (imageReady) docker.images[previewImageTag(containerDir)] = clock.now() - DAY;
   return { clock, docker, db, r };
@@ -417,6 +418,43 @@ test("a stop in flight, then acquire: the render waits and the renderer restarts
   assert.equal(docker.log.filter((e) => e.spawn).length, 2);
   lease.release();
   await r.stop();
+});
+
+test("a pipe that breaks while the child lives ends the run; the next acquire starts fresh", async () => {
+  const { docker, r } = setup({ dockerOpts: { child: (i) => ({ ignoreEof: i === 0 }) } });
+  const lease = await r.acquire();
+  assert.ok(lease.cdp);
+  const child = docker.children[0];
+  const name = child.args[child.args.indexOf("--name") + 1];
+  child.stdout.write("Creating…\n"); // junk after getVersion answered
+  await flush();
+  assert.equal(r.state(), "stopped");
+  assert.equal(child.killed.sig, "SIGKILL", "the live child is killed");
+  assert.ok(docker.log.some((e) => e.args[0] === "rm" && e.args.includes(name)), "and removed by name");
+  lease.release();
+  const next = await r.acquire();
+  assert.ok(next.cdp, JSON.stringify(next));
+  assert.notEqual(next.cdp, lease.cdp);
+  assert.equal(docker.log.filter((e) => e.spawn).length, 2, "a new run");
+  assert.deepEqual(await next.cdp.send("Page.navigate", {}), { ok: "Page.navigate" });
+  next.release();
+  await r.stop();
+});
+
+test("an acquire waiting on a stop does not start a renderer once previews were switched off", async () => {
+  const { clock, docker, db, r } = setup({ dockerOpts: { child: () => ({ ignoreEof: true }) } });
+  (await r.acquire()).release();
+  const stopping = r.stop();
+  await flush();
+  assert.equal(r.state(), "stopping");
+  const later = r.acquire(); // passed the enabled check, now waits on the stop
+  await flush();
+  await setPreviewsEnabled(db, false);
+  await clock.advance(5_000);
+  await stopping;
+  assert.deepEqual(await later, { off: "not_enabled" });
+  assert.equal(docker.log.filter((e) => e.spawn).length, 1, "no second run");
+  assert.equal(r.state(), "stopped");
 });
 
 test("idle counts from the last release", async () => {
