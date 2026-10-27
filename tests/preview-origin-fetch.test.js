@@ -142,11 +142,13 @@ test("a queued request's clock starts when it is sent", async () => {
 test("a slow origin hits the per-request timeout", async () => {
   const st = await stub(async (req, res) => { await sleep(2000); if (!res.destroyed) { res.writeHead(200); res.end("late"); } });
   const s = fetcherFor(st, { requestMs: 200 }).session();
-  const t0 = Date.now();
+  // performance.now(), and a lower bound with slack: a 200 ms timer can fire
+  // a millisecond early against wall-clock rounding (seen in CI as 199 ms).
+  const t0 = performance.now();
   const r = await s.get("/slow");
-  const ms = Date.now() - t0;
+  const ms = Math.round(performance.now() - t0);
   assert.deepEqual(r, { ok: false, reason: "timeout" });
-  assert.ok(ms >= 200 && ms <= 700, `timed out after ${ms} ms`);
+  assert.ok(ms >= 180 && ms <= 700, `timed out after ${ms} ms`);
 });
 
 test("the render's end aborts what's in flight", async () => {
