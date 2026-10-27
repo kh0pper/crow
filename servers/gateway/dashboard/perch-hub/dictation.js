@@ -392,6 +392,8 @@ export function perchDictationJs(lang = "en") {
           input.value=mergeTranscript(input.value,text);
           input.style.height='auto';
           input.style.height=Math.min(input.scrollHeight||72,120)+'px';
+          /* Shell P2 (client.js): a dictated draft is saved like a typed one. */
+          if(typeof draftSave==='function') draftSave();
         }
         dictSet(nextState('transcribing','done'));
         if(action==='send'){ send(); dictFocusInput(input); return; }

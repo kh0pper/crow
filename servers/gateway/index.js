@@ -261,6 +261,16 @@ try {
 // Initialize OAuth tables
 await initOAuthTables();
 
+// Stamp the moment the new/classic shell first existed on this instance, before
+// listen, so a device whose session predates it opens classic (shell/mode.js).
+try {
+  const { stampShellSince } = await import("./dashboard/shell/mode.js");
+  const _modeDb = createDbClient();
+  try { await stampShellSince(_modeDb); } finally { _modeDb.close(); }
+} catch (e) {
+  console.warn("[shell] could not stamp shell_since:", e.message);
+}
+
 // Clean up old audit log entries (90-day retention)
 try {
   const _cleanupDb = createDbClient();

@@ -70,6 +70,7 @@ import { stripTrailingDates } from "../../shared/relative-dates.js";
 import { stripContextEcho } from "../voice/context-echo.js";
 import { CROW_VOICE_BOT_ID } from "../../shared/voice-bot.js";
 import { maskDeep } from "../../shared/secret-mask.js";
+import { activeProjects, parseScope, projectOfItems } from "../../shared/shell-items.js";
 
 /**
  * A user message as the operator typed it: without the [Dates] line the engine appended (perch-interactive.js).
@@ -505,6 +506,46 @@ function readTranscript(file) {
   };
 }
 
+/**
+ * Shell P2: the project each live perch thread belongs to, for /roost. A thread
+ * with a shell_items row reports its row's project while that project is live
+ * (else null, Unassigned). A thread with NO row reports its bot's own project,
+ * again only while that project is live. Without the shell tables (a co-hosted
+ * gateway that has not migrated) every thread falls back to its bot's project.
+ * @returns {Promise<Map<string, number|null>>}
+ */
+async function threadProjects(db, threadIds, botIdOf, botProjectOf) {
+  const ids = [...new Set(threadIds.map(String))];
+  const out = new Map();
+  if (!ids.length) return out;
+  const filed = await projectOfItems(db, "perch_thread", ids);
+  // projectOfItems maps "no row" and "no live project" both to null; the
+  // fallback to the bot's project is for the first case only.
+  let withRow = new Set();
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT item_ref FROM shell_items WHERE item_kind = 'perch_thread' AND item_ref IN (SELECT value FROM json_each(?))",
+      args: [JSON.stringify(ids)],
+    });
+    withRow = new Set(rows.map((r) => String(r.item_ref)));
+  } catch (err) {
+    if (!/no such table/i.test(String(err?.message || err))) throw err;
+  }
+  const live = new Set((await activeProjects(db)).map((p) => p.id));
+  for (const id of ids) {
+    if (withRow.has(id)) { out.set(id, filed.get(id) ?? null); continue; }
+    const botProject = botProjectOf.get(botIdOf.get(id));
+    out.set(id, botProject != null && live.has(Number(botProject)) ? Number(botProject) : null);
+  }
+  return out;
+}
+
+/** /roost's echo of ?scope=: "all", "unassigned" or the numeric project id. */
+function scopeEcho(value) {
+  const s = parseScope(typeof value === "string" ? value : undefined);
+  return s.unassigned ? "unassigned" : (s.projectId != null ? s.projectId : "all");
+}
+
 // ---------------------------------------------------------------------------
 // router
 // ---------------------------------------------------------------------------
@@ -589,7 +630,7 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
     const db = createDbClient();
     try {
       const { rows } = await db.execute({
-        sql: "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE bot_id != ? ORDER BY bot_id",
+        sql: "SELECT bot_id, display_name, definition, project_id FROM pi_bot_defs WHERE bot_id != ? ORDER BY bot_id",
         args: [CROW_VOICE_BOT_ID],
       });
 
@@ -673,6 +714,20 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
         // bot_jobs absent (primary gateway) — the job rail holds nothing.
       }
 
+      // Shell P2: which project each live thread belongs to (the Chat tab
+      // filters on it). One lookup for every thread, never a per-session query.
+      const liveThreads = [];
+      const botIdOf = new Map();
+      for (const [botId, list] of sessionsByBot) {
+        for (const s of list) { liveThreads.push(String(s.sessionId)); botIdOf.set(String(s.sessionId), botId); }
+      }
+      const botProjectOf = new Map(rows.map((r) => [r.bot_id, r.project_id == null ? null : Number(r.project_id)]));
+      // Filing is a view filter, never a reason to fail the roost: any DB
+      // error here is logged and every session reads as Unassigned (null).
+      let projectOfThread = new Map();
+      try { projectOfThread = await threadProjects(db, liveThreads, botIdOf, botProjectOf); }
+      catch (err) { console.warn("[perch] could not read thread projects for /roost:", err?.message || err); }
+
       const birds = rows.map((row) => {
         const def = parseDef(row);
         const attached = perchAttached(def);
@@ -693,6 +748,7 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
             // snapshot wins when this process holds the session, and the row
             // fills in for an entry eng.list() built from the DB alone.
             label: (s.label != null ? s.label : (dbRow && dbRow.label)) || null,
+            projectId: projectOfThread.get(String(s.sessionId)) ?? null,
           };
         });
         // spec §3.2 priority fold: waiting-on-you > working > hibernating >
@@ -710,7 +766,9 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
         };
       });
 
-      res.json({ birds, occupiedCardIds: [...occupied], archived });
+      const payload = { birds, occupiedCardIds: [...occupied], archived };
+      if (req.query && req.query.scope !== undefined) payload.scope = scopeEcho(req.query.scope);
+      res.json(payload);
     } catch (err) {
       jsonError(res, 500, String((err && err.message) || err));
     } finally {

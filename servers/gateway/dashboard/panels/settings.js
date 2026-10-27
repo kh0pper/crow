@@ -24,6 +24,7 @@ import { renderSettingsMenu } from "../settings/menu-renderer.js";
 
 // Import all built-in sections
 import themeSection from "../settings/sections/theme.js";
+import crowModeSection from "../settings/sections/crow-mode.js";
 import languageSection from "../settings/sections/language.js";
 import textSizeSection from "../settings/sections/text-size.js";
 import previewsSection from "../settings/sections/previews.js";
@@ -64,6 +65,7 @@ import botRuntimeSection from "../settings/sections/bot-runtime.js";
 // Register built-in sections
 registerSettingsSection(navGroupsSection);
 registerSettingsSection(themeSection);
+registerSettingsSection(crowModeSection);
 registerSettingsSection(languageSection);
 registerSettingsSection(textSizeSection);
 registerSettingsSection(previewsSection);

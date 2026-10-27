@@ -89,12 +89,13 @@ import perchApiRouter from "../routes/perch.js";
 import { shellApiRouter } from "../routes/shell-api.js";
 import perchInteractiveApiRouter from "../routes/perch-interactive-api.js";
 import perchDictationRouter from "../routes/perch-dictation.js";
+import { shellRouter, resolveRequestMode, resolveShellPage } from "./shell/request.js";
 
 /**
  * @param {Function|null} mcpAuthMiddleware - OAuth auth middleware (for unified auth)
  * @returns {Router}
  */
-export default function dashboardRouter(mcpAuthMiddleware) {
+export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: renderPage = renderLayout } = {}) {
   const router = Router();
 
   // URL-encoded body parsing for form submissions
@@ -676,6 +677,10 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // Funnel refused upstream); see routes/perch-dictation.js's header.
   router.use(perchDictationRouter(dashboardAuth));
 
+  // The shell's POST /dashboard/mode and /dashboard/scope (redesign P2): after
+  // dashboardAuth and csrfMiddleware, like every state-changing dashboard route.
+  router.use(shellRouter({ createDbClient }));
+
   // W3-3: "Run backup now" action — dashboard-authed, CSRF-protected
   router.post("/dashboard/nest/backup", async (req, res) => {
     try {
@@ -822,6 +827,13 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   router.get("/dashboard", async (req, res, next) => {
     const db = createDbClient();
     try {
+      // New-shell devices open on Chat; classic keeps the nest / first panel.
+      if ((await resolveRequestMode(req, res, db)).mode === "new") {
+        // Keep the query (?project= ...) on the way to Chat.
+        const q = req.url.indexOf("?");
+        return res.redirect("/dashboard/perch" + (q >= 0 ? req.url.slice(q) : ""));
+      }
+
       const unifiedEnvOn = process.env.CROW_UNIFIED_DASHBOARD !== "0";
       const setting = await readSetting(db, "unified_dashboard_enabled");
       // Default ON when the env switch is on and no explicit setting exists.
@@ -921,14 +933,18 @@ export default function dashboardRouter(mcpAuthMiddleware) {
       const activeHeaderHtml = tamaEnabled ? tamagotchiHtml(lang, headerOpts) : headerIconsHtml(lang, headerOpts);
       const activeHeaderJs = tamaEnabled ? tamagotchiJs(lang) : headerIconsJs(lang);
 
+      // New shell or classic, per device; sets req.crowMode and req.crowScope.
+      const shellOpts = await resolveShellPage(req, res, db, panelId, lang);
+
       const result = await panel.handler(req, res, {
         db,
         appRoot: resolve(import.meta.dirname, "../../.."),
         lang,
         // Bot Builder's "Use for voice…" binds through the Kiosk's own endpoints: offered only when it is there.
         kioskAvailable: talkAvailable,
-        layout: (opts) => renderLayout({
+        layout: (opts) => renderPage({
           ...opts,
+          ...shellOpts,
           activePanel: panelId,
           panels: visiblePanels,
           navGroups,

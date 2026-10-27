@@ -23,6 +23,18 @@ function engineBanner(engine, lang) {
   return `<div class="empty" id="perch-engine-banner">${escapeHtml(t(key, lang))}</div>`;
 }
 
+/** Shell P2: the resolved scope (req.crowScope) as the client reads it from
+ *  data-scope: "all", "unassigned" or the numeric project id. null (no scope
+ *  handed in) is classic Perch, which writes no attribute at all. */
+function scopeAttr(scope) {
+  if (!scope || typeof scope !== "object") return null;
+  if (scope.projectId != null && Number.isInteger(Number(scope.projectId)) && Number(scope.projectId) > 0) {
+    return String(Number(scope.projectId));
+  }
+  if (scope.unassigned) return "unassigned";
+  return "all";
+}
+
 /** Perch's markup + styles + client script, meant to be handed to a panel's
  *  `layout()` as `content` (dashboard/panels/perch-hub.js does exactly
  *  that) — NOT a standalone document. Rendering inside the dashboard shell
@@ -33,9 +45,11 @@ function engineBanner(engine, lang) {
  *  cosmetic) so it can't leak onto the sidebar or any other panel, and vice
  *  versa. Static shell only — every list row and transcript line is
  *  rendered client-side, the same split birdDrawerMarkup() uses. */
-export function perchHubContent(lang = "en", engine = { state: "ready" }) {
+export function perchHubContent(lang = "en", engine = { state: "ready" }, { scope } = {}) {
+  const scopeValue = scopeAttr(scope);
+  const scopeHtml = scopeValue === null ? "" : ` data-scope="${escapeHtml(scopeValue)}"`;
   return `<style>${perchHubCss()}${perchSessionsCollapseCss()}${perchDictationCss()}</style>
-<div id="perch-hub-root">
+<div id="perch-hub-root"${scopeHtml}>
 ${engineBanner(engine, lang)}
 <!-- No brand block here. The shell's .content-header already renders
      <h2>Perch</h2> from this panel's title (panels/perch-hub.js), and
@@ -44,7 +58,7 @@ ${engineBanner(engine, lang)}
      "your bot sessions" subtitle went with the block rather than being
      restated somewhere it would read as a second page title. This header
      survives only to carry the link back to the board. -->
-<header><nav class="machines"><a href="/dashboard/bot-board">${escapeHtml(t("perch.navBoard", lang))}</a></nav></header>
+<header${scopeValue === null ? "" : " hidden"}><nav class="machines"><a href="/dashboard/bot-board">${escapeHtml(t("perch.navBoard", lang))}</a></nav></header>
 <div class="hub-split">
   <div id="perch-list">
     <!-- Desktop only (sessions-collapse-css.js): hides this whole column
@@ -178,6 +192,7 @@ ${engineBanner(engine, lang)}
            hardcoded list. -->
       <div id="perch-cmdmenu" hidden></div>
       <textarea id="perch-input" placeholder="${escapeHtml(t("perch.composerPlaceholder", lang))}"></textarea>
+      <div id="perch-draft-note" role="status" hidden></div>
       <div class="send-row">
         <button type="button" id="perch-attach" class="quiet">${escapeHtml(t("perch.attachFile", lang))}</button>
         <input type="file" id="perch-file-input" style="display:none" accept="image/*">

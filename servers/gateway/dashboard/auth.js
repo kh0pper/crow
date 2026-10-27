@@ -13,7 +13,7 @@ import { createDbClient, auditLog } from "../../db.js";
 import { is2faEnabled, verifyDeviceTrust, createPending2faToken } from "./totp.js";
 import { forwardedAddrs, classifyPeer, isOverlayAddr, normalizeAddr } from "../../shared/peer-class.js";
 
-function hashToken(t) { return createHash('sha256').update(t).digest('hex'); }
+export function hashToken(t) { return createHash('sha256').update(t).digest('hex'); }
 
 const SESSION_COOKIE = "crow_session";
 const CSRF_COOKIE = "crow_csrf";
@@ -599,10 +599,14 @@ export async function sessionFromRequest(req) {
 /**
  * Set session cookie on response.
  */
+/** "; Secure" when cookies must be Secure (hosted / production), else "". */
+export function cookieSecureSuffix() {
+  return process.env.CROW_HOSTED || process.env.NODE_ENV === 'production' ? '; Secure' : '';
+}
+
 export function setSessionCookie(res, token, maxAgeMs = SESSION_MAX_AGE) {
   const maxAge = maxAgeMs / 1000;
-  const secure = process.env.CROW_HOSTED || process.env.NODE_ENV === 'production';
-  const secureSuffix = secure ? '; Secure' : '';
+  const secureSuffix = cookieSecureSuffix();
   res.setHeader("Set-Cookie", [
     `${SESSION_COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secureSuffix}`,
     `${CSRF_COOKIE}=${randomBytes(16).toString("hex")}; SameSite=Lax; Path=/; Max-Age=${maxAge}${secureSuffix}`,
