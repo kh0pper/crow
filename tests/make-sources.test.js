@@ -168,3 +168,58 @@ test("Workspace files map to items, filed or unassigned", async () => {
   const none = await listWorkspaceItems(s.db, { unassigned: true }, { crowHome: h });
   assert.deepEqual(none.map((i) => [i.ref, i.type]), [["12", "spreadsheet"]]);
 });
+
+// ---- the origin card leg (card -> thread -> bot) ----
+const tasksStub = (map, { fail = false } = {}) => ({
+  execute: async ({ args }) => {
+    if (fail) throw new Error("unable to open database file");
+    const ids = JSON.parse(args[0]);
+    return { rows: ids.filter((i) => map.has(i)).map((i) => ({ id: i, project_id: map.get(i) })) };
+  },
+});
+const projectRow = async (id) => (await s.db.execute({ sql: "SELECT project_id, card_id, set_by FROM shell_items WHERE item_kind='artifact' AND item_ref=?", args: [id] })).rows[0];
+
+test("the origin card's project beats the chat's project", async () => {
+  await setItemProject(s.db, "perch_thread", "perchlive-card", 2, { setBy: "operator" });
+  await addArtifact("art_card0001", { session: "perchlive-card" });
+  await s.db.execute("UPDATE artifacts SET origin_card=77 WHERE id='art_card0001'");
+  const items = await listArtifactItems(s.db, { projectId: 3 }, { tasksDb: tasksStub(new Map([[77, 3]])) });
+  const it = items.find((i) => i.ref === "art_card0001");
+  assert.ok(it, "listed under the card's project");
+  assert.equal(it.cardId, 77);
+  assert.equal(Number((await projectRow("art_card0001")).project_id), 3);
+});
+
+test("tasks.db unreadable with an origin card: nothing is filed, a later listing files it", async () => {
+  await addArtifact("art_card0002", { session: "perchlive-card" });
+  await s.db.execute("UPDATE artifacts SET origin_card=78 WHERE id='art_card0002'");
+  const warn = console.warn; console.warn = () => {};
+  let first;
+  try { first = await listArtifactItems(s.db, { all: true }, { tasksDb: tasksStub(new Map(), { fail: true }) }); } finally { console.warn = warn; }
+  assert.equal(await projectRow("art_card0002"), undefined, "no row written");
+  assert.equal(first.find((i) => i.ref === "art_card0002").projectId, null, "lists as Unassigned meanwhile");
+  await listArtifactItems(s.db, { all: true }, { tasksDb: tasksStub(new Map([[78, 3]])) });
+  assert.equal(Number((await projectRow("art_card0002")).project_id), 3);
+});
+
+test("at most `limit` fresh artifacts are filed per call", async () => {
+  for (const n of [1, 2, 3]) await addArtifact(`art_cap0000${n}`);
+  await listArtifactItems(s.db, { all: true }, { limit: 2 });
+  const filed = (await s.db.execute("SELECT COUNT(*) AS n FROM shell_items WHERE item_ref LIKE 'art_cap%'")).rows[0].n;
+  assert.equal(Number(filed), 2);
+});
+
+test("a project view overfetches Workspace files, then cuts to the limit", async () => {
+  const h = join(s.dir, "ws-over");
+  const srv = join(h, "bundles", "workspace", "server");
+  mkdirSync(join(srv, "nc"), { recursive: true });
+  install(h, ["workspace"]);
+  writeFileSync(join(srv, "config.js"), "export const getConfig = () => ({});");
+  writeFileSync(join(srv, "nc", "dav.js"), `export const listRecent = async (cfg, o) => { globalThis.__asked = o.limit; return [1,2,3,4].map((n) => ({ fileId: 100 + n, name: n + ".docx", isFolder: false, mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", modified: "2026-10-26T10:00:00.000Z" })); };`);
+  for (const n of [1, 2, 3]) await setItemProject(s.db, "workspace_file", String(100 + n), 2, { setBy: "operator" });
+  const got = await listWorkspaceItems(s.db, { projectId: 2 }, { crowHome: h, limit: 2 });
+  assert.equal(globalThis.__asked, 6);
+  assert.equal(got.length, 2);
+  await listWorkspaceItems(s.db, { all: true }, { crowHome: h, limit: 2 });
+  assert.equal(globalThis.__asked, 2);
+});
