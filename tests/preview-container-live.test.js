@@ -16,19 +16,17 @@
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
+import { previewImageTag } from "../servers/gateway/preview/renderer.js";
 
 const DIR = fileURLToPath(new URL("../servers/gateway/preview/container/", import.meta.url));
 const COMPOSE = realpathSync(join(DIR, "compose.yml"));
 const SECCOMP = realpathSync(join(DIR, "seccomp-chrome.json"));
-const TAG = createHash("sha256")
-  .update(Buffer.concat(["Dockerfile", "pipe-shim.sh", "seccomp-chrome.json"].map((f) => readFileSync(join(DIR, f)))))
-  .digest("hex").slice(0, 12);
-const IMAGE = `crow-preview-renderer:${TAG}`;
+const IMAGE = previewImageTag();
 const LABEL = randomBytes(4).toString("hex");
 const NAME = `crow-preview-${LABEL}-${randomBytes(4).toString("hex")}`;
 const ENV = {

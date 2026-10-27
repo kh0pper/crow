@@ -2682,6 +2682,8 @@ export const translations = {
 
   // ─── Settings Navigation ───
   "settings.backToSettings": { en: "Settings", es: "Ajustes" },
+  "settings.previews": { en: "Previews in Make", es: "Vistas previas en Crear" },
+  "settings.previewsRemoveImage": { en: "Also remove the preview image", es: "Quitar también la imagen de vistas previas" },
 
   // ─── Sync Conflicts Section (W4-1) ───
   "syncConflicts.description": {
@@ -3034,6 +3036,7 @@ export const translations = {
   "onboarding.btnSkip": { en: "Skip to dashboard", es: "Ir al panel" },
   "onboarding.btnGoDashboard": { en: "Go to the dashboard", es: "Ir al panel" },
   "onboarding.replayLink": { en: "Replay setup guide", es: "Repetir guía de configuración" },
+  "onboarding.previews": { en: "Previews in Make (builds a small sandboxed browser in the background)", es: "Vistas previas en Crear (crea un pequeño navegador aislado en segundo plano)" },
 
   // F6c-1 connect wizard
   "connect.title": { en: "Connect a client", es: "Conecta un cliente" },
