@@ -5,8 +5,15 @@
  *
  * Layout (the Skills page's pattern): one `.sc-detail` at most, rendered inside its row's <li>.
  * On a phone it sits under the row; at ≥ 769px CSS pins it as a side pane (css.js).
+ *
+ * Read-only rows (the box hold, box ledger windows, machine timers) render as plain text with a
+ * "read-only" label: no link, no detail, no form. Their fixes in the strip are links or copy
+ * buttons; a copy button only puts text on the clipboard, and the text is always on the page
+ * too (selectable without JS).
  */
 import { escapeHtml } from "../../shared/components.js";
+import { checkCommand, SAFE_UNIT } from "../../../schedule-sources/host-timers.js";
+import { describeCron } from "../../../../shared/schedule-words.js";
 import { t, fill } from "../../shared/i18n.js";
 import { localYmd, dayNum, fromDayNum, fmtYmd } from "../../../../shared/relative-dates.js";
 
@@ -42,7 +49,12 @@ const TYPE = {
   bot_routine: ["schedule.type.botRoutine", "info"],
   briefing: ["schedule.type.briefing", "plain"],
   system: ["schedule.type.system", "muted"],
+  box_hold: ["schedule.type.boxHold", "muted"],
+  box_window: ["schedule.type.boxWindow", "muted"],
+  host_timer: ["schedule.type.machineTimer", "muted"],
 };
+const LOCK = `<svg class="sc-lock" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" focusable="false"><path fill="currentColor" d="M5 7V5a3 3 0 0 1 6 0v2h.5A1.5 1.5 0 0 1 13 8.5v5A1.5 1.5 0 0 1 11.5 15h-7A1.5 1.5 0 0 1 3 13.5v-5A1.5 1.5 0 0 1 4.5 7H5Zm1.5 0h3V5a1.5 1.5 0 0 0-3 0v2Z"/></svg>`;
+const roLabel = (lang) => `<span class="sc-ro-label">${LOCK}${esc(t("schedule.readOnly", lang))}</span>`;
 const typeChip = (it, lang) => `<span class="sc-chip sc-chip-${TYPE[it.kind][1]}">${esc(t(TYPE[it.kind][0], lang))}</span>`;
 const zoneChip = (it, ms, lang) => (it.zoneDiffers ? `<span class="sc-chip sc-chip-plain" title="${esc(it.zone)}">${esc(zoneShort(ms ?? Date.now(), it.zone, lang))}</span>` : "");
 
@@ -105,6 +117,16 @@ function problemText(p, m) {
       return [name, d.reason === "frequent" ? fill(t("schedule.p.pausedFrequent", lang), { n: d.every_min ?? "?" }) : t("schedule.p.pausedSystem", lang)];
     }
     case "no-next": return [name, fill(t("schedule.p.noNext", lang), { cron: it.cron })];
+    case "hold-corrupt": return [t("schedule.p.holdCorruptTitle", lang), t("schedule.p.holdCorrupt", lang)];
+    case "ledger-stale": return [
+      p.count === 1 ? t("schedule.p.ledgerStale1Title", lang) : fill(t("schedule.p.ledgerStaleTitle", lang), { n: p.count }),
+      fill(t(p.count > p.rows.length ? "schedule.p.ledgerStaleMore" : "schedule.p.ledgerStale", lang), { list: p.rows.join("; "), more: p.count - p.rows.length }),
+    ];
+    case "timer-failed": return [
+      fill(t("schedule.p.timerOn", lang), { name: p.timer.name, host: p.host }),
+      fill(t(p.timer.check ? "schedule.p.timerFailed" : "schedule.p.timerFailedNoCopy", lang), { result: p.timer.lastResult, unit: p.timer.id }),
+    ];
+    case "timers-old": return [fill(t("schedule.p.timersOldTitle", lang), { host: p.host }), fill(t("schedule.p.timersOld", lang), { when: fmt(p.collectedAt, m.zone, lang, DATE_TIME) })];
   }
   return [name || "", ""];
 }
@@ -112,12 +134,27 @@ function problemText(p, m) {
 const FIX_LABEL = {
   "run-now": "schedule.runNow", "ack-run": "schedule.dismiss", pause: "schedule.pause", resume: "schedule.turnBackOn", delete: "schedule.delete",
   openJob: "schedule.openJob", notifOn: "schedule.notifOn", botRuntime: "schedule.openBotRuntime",
+  copyRelease: "schedule.copyRelease", copyPath: "schedule.copyPath", copyCheck: "schedule.copyCheck", openLedger: "schedule.openLedger", howRefresh: "schedule.howRefresh",
 };
+
+/** Copyable text: always shown (selectable without JS); the button appears once the script runs. */
+function copyBlock(text, label, m, ctx) {
+  return `<span class="sc-copy"><code class="sc-mono sc-copy-text">${esc(text)}</code><button type="button" class="btn btn-secondary btn-sm sc-act" data-sc-copy="${esc(text)}" data-l-copied="${esc(t("schedule.copied", m.lang))}" data-l-failed="${esc(t("schedule.copyFailed", m.lang))}" hidden>${esc(label)}${ctx ? vh(ctx) : ""}</button></span>`;
+}
 
 function fixButton(m, p, f, ctx) {
   const cls = "btn btn-secondary btn-sm sc-act";
-  const label = t(FIX_LABEL[f.act === "link" ? f.label : f.act], m.lang);
-  if (f.act === "link") return `<a class="${cls}" href="${esc(f.href)}">${esc(label)}${ctx ? vh(ctx) : ""}</a>`;
+  const label = t(FIX_LABEL[f.act === "link" || f.act === "copy" ? f.label : f.act], m.lang);
+  if (f.act === "copy") {
+    // Belt and braces: a check command reaches the clipboard only if it is still the one the
+    // unit-name rule builds (an untrusted timer file can't smuggle another command in).
+    if (f.label === "copyCheck") {
+      const unit = p.timer ? String(p.timer.id).replace(/^(user|system):/, "") : "";
+      if (!SAFE_UNIT.test(unit) || checkCommand(p.timer) !== f.text) return "";
+    }
+    return copyBlock(f.text, label, m, ctx);
+  }
+  if (f.act === "link") return `<a class="${cls}" href="${esc(f.href)}"${f.external ? ` target="_blank" rel="noopener noreferrer"` : ""}>${esc(label)}${ctx ? vh(ctx) : ""}</a>`;
   if (f.act === "ack-run") return postButton(m, "ack-run", { run: p.runId }, label, { cls, ctx });
   return postButton(m, f.act, f.settles && p.runId ? { id: p.scheduleId, run: p.runId } : { id: p.scheduleId }, label, { cls, ctx });
 }
@@ -222,7 +259,37 @@ function detail(m) {
 
 // ---------------------------------------------------------------- agenda
 
+/** A read-only row (box hold, box window, machine timer): text only, no link, no controls. */
+function roRowHtml(it, m, { group, day = null } = {}) {
+  const { lang } = m;
+  const z = m.zone;
+  // A machine's cron line is worded like Crow's own ("Every 15 minutes"); other text shows as is.
+  const sched = it.cron ? describeCron(it.cron, lang) || it.summary : it.summary;
+  let at = "";
+  const until = it.end ? fill(t("schedule.until", lang), { when: fmt(it.end, z, lang, it.end - m.now > 86_400_000 ? DAY_TIME : TIME) }) : null;
+  if (it.kind === "box_hold") at = esc(t("schedule.heldNow", lang));
+  else if (group === "now") at = esc(t("schedule.runningNow", lang));
+  else if (group === "standing") at = esc(t(it.unreadable ? "schedule.undated" : "schedule.ongoing", lang));
+  else if (group === "frequent") at = esc(sched || t("schedule.custom", lang));
+  else if (it.nextRun !== null) {
+    const opts = group === "later" ? { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" } : day !== null && dayNum(localYmd(it.nextRun, z)) !== day ? DAY_TIME : TIME;
+    at = timeTag(it.nextRun, fmt(it.nextRun, z, lang, opts));
+  }
+  const title = it.kind === "box_hold" ? fill(t("schedule.holdTitle", lang), { owner: it.owner || "?" }) : it.title;
+  const meta = [];
+  if (it.kind === "box_hold") { if (it.reason) meta.push(it.reason); if (until) meta.push(until); }
+  if (it.kind === "box_window") {
+    if (it.owner) meta.push(fill(t("schedule.by", lang), { owner: it.owner }));
+    if (until && !it.standing) meta.push(until);
+    if (it.standing) meta.push(it.when);
+  }
+  if (it.kind === "host_timer") { meta.push(fill(t("schedule.onHost", lang), { host: it.host })); if (sched && group !== "frequent") meta.push(sched); }
+  return `<li class="sc-row sc-row-ro" id="sc-${esc(it.ref.replace(/[^A-Za-z0-9_-]/g, "-"))}"><div class="sc-hit sc-ro"><span class="sc-at">${at}</span><span class="sc-main"><span class="sc-name">${esc(title)}</span>` +
+    `<span class="sc-meta">${typeChip(it, lang)}${roLabel(lang)}${meta.length ? `<span>${esc(meta.join(" · "))}</span>` : ""}</span></span></div></li>`;
+}
+
 function rowHtml(it, m, { group, day = null } = {}) {
+  if (it.readOnly && it.src) return roRowHtml(it, m, { group, day });
   const { lang } = m;
   const sel = m.detail && m.detail.item.id === it.id;
   let at = "";
@@ -259,6 +326,34 @@ function fold(key, label, list, m, group, open = false) {
   return `<details class="sc-fold" data-fold="${key}"${open || has ? " open" : ""}><summary class="sc-fold-h"><b>${esc(fill(label, { n: list.length }))}</b></summary><ul class="sc-list">${list.map((it) => rowHtml(it, m, { group })).join("")}</ul></details>`;
 }
 
+/** "On the machines": every host file's timers, grouped by host (collapsed). */
+function machines(m) {
+  const { lang } = m;
+  const hosts = m.hosts || [];
+  if (!hosts.length) return "";
+  const n = hosts.reduce((k, h) => k + h.timers.length, 0);
+  const body = hosts.map((h, hi) => {
+    const id = `sc-host-${hi}`;
+    const rows = h.timers.map((tm) => {
+      const bits = [];
+      if (tm.schedule) bits.push(tm.kind === "cron" ? describeCron(tm.schedule, lang) || tm.schedule : tm.schedule);
+      bits.push(tm.next !== null ? fill(t("schedule.machine.next", lang), { when: fmt(tm.next, m.zone, lang, DAY_TIME) }) : t("schedule.machine.noNext", lang));
+      if (tm.lastResult) bits.push(fill(t("schedule.machine.last", lang), { result: tm.lastResult }));
+      const tone = tm.failed ? "error" : tm.lastResult ? "ok" : "muted";
+      const status = `<span class="sc-st sc-st-${tone}"><span class="sc-dot" aria-hidden="true"></span>${esc(t(tm.failed ? "schedule.machine.failed" : tm.lastResult ? "schedule.machine.ok" : "schedule.machine.unknown", lang))}</span>`;
+      const at = tm.next !== null ? timeTag(tm.next, fmt(tm.next, m.zone, lang, DAY_TIME)) : "";
+      return `<li class="sc-row sc-row-ro"><div class="sc-hit sc-ro"><span class="sc-at">${at}</span><span class="sc-main"><span class="sc-name">${esc(tm.name)}</span>` +
+        `<span class="sc-meta">${status}${roLabel(lang)}<span>${esc(bits.join(" · "))}</span></span></span></div></li>`;
+    }).join("");
+    const collected = fill(t("schedule.machine.collected", lang), { when: fmt(h.collectedAt, m.zone, lang, DATE_TIME) });
+    return `<section class="sc-host" aria-labelledby="${id}"><h3 class="sc-day-h sc-host-h" id="${id}"><span>${esc(h.host)}</span><span class="sc-day-date">${esc(collected)}</span></h3>${rows ? `<ul class="sc-list">${rows}</ul>` : `<p class="sc-muted sc-host-empty">${esc(t("schedule.machine.none", lang))}</p>`}</section>`;
+  }).join("");
+  const ns = m.notShown || { timers: 0, files: 0 };
+  const more = [ns.timers ? fill(t("schedule.machine.moreTimers", lang), { n: ns.timers }) : "", ns.files ? fill(t("schedule.machine.moreFiles", lang), { n: ns.files }) : ""].filter(Boolean);
+  const moreLine = more.length ? `<p class="sc-muted sc-host-empty">${esc(more.join(" "))}</p>` : "";
+  return `<details class="sc-fold" data-fold="machines"><summary class="sc-fold-h"><b>${esc(fill(t("schedule.machinesN", lang), { n }))}</b></summary>${body}${moreLine}</details>`;
+}
+
 function agenda(m) {
   const { lang } = m;
   const g = m.agenda;
@@ -274,8 +369,10 @@ function agenda(m) {
   }
   parts.push(fold("later", t("schedule.laterN", lang), g.later, m, "later"));
   parts.push(fold("frequent", t("schedule.frequentN", lang), g.frequent, m, "frequent"));
+  parts.push(fold("standing", t("schedule.standingN", lang), g.standing || [], m, "standing"));
   parts.push(fold("paused", t("schedule.pausedN", lang), g.paused, m, "paused"));
   parts.push(fold("done", t("schedule.doneN", lang), g.done, m, "done"));
+  parts.push(machines(m));
   return parts.join("");
 }
 
@@ -340,7 +437,7 @@ export function renderSchedulePage(m) {
   const toast = `<div class="sc-toast" role="status" id="sc-toast"${m.toast ? ` data-sc-toast="${esc(m.toast)}"` : ""}></div>`;
   const today = localYmd(m.now, m.zone);
   return `<div class="sc-page${m.detail ? " has-detail" : ""}" data-today="${esc(`${today.y}-${today.m}-${today.d}`)}">
-    <p class="sc-lede">${esc(t("schedule.lede", lang))}</p>
+    <p class="sc-lede">${esc(t("schedule.lede", lang))}${m.sources.length > 1 ? " " + esc(t("schedule.ledeReadOnly", lang)) : ""}</p>
     ${m.pageNotice ? `<div class="sc-note sc-note-${m.pageNotice.kind}" role="${m.pageNotice.kind === "err" ? "alert" : "status"}">${esc(m.pageNotice.text)}</div>` : ""}
     ${strip(m)}
     <div class="sc-toolbar"><a class="btn btn-primary sc-new" href="${href("new=1")}" data-sc-new>${esc(t("schedule.new", lang))}</a>${chips}</div>

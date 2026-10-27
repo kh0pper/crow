@@ -3,9 +3,10 @@
  * schedule once, at its next run), the problems strip (each problem with its fixes) and the one
  * open detail (next 3 runs, last 10 runs).
  *
- * Crow-owned sources only (reminders, bot routines, the News briefing). Read-only sources (box
- * windows, machine timers) join in a later PR. No strings here: problems and runs carry codes the
- * renderer (dashboard/panels/schedule/html.js) words in en or es.
+ * Crow-owned sources (reminders, bot routines, the News briefing) are editable. The read-only
+ * sources (the box hold, the box ledger's windows, the machines' timers) come from
+ * schedule-sources/ and carry `src` + `readOnly`. No strings here: problems and runs carry codes
+ * the renderer (dashboard/panels/schedule/html.js) words in en or es.
  *
  * Zones: a reminder runs in its own zone (schedules.tz) or the instance zone; the briefing in
  * News's zone; a bot routine in the host zone, because the bot ticker computes its next run with
@@ -20,6 +21,7 @@ import { describeCron } from "../shared/schedule-words.js";
 import { localYmd, dayNum } from "../shared/relative-dates.js";
 import { isVoiceBotId } from "../shared/voice-bot.js";
 import { readSetting } from "./dashboard/settings/registry.js";
+import { readOnlySources } from "./schedule-sources/index.js";
 
 const MIN = 60_000;
 const DAY_MS = 86_400_000;
@@ -117,9 +119,24 @@ export function nextRuns(item, now, n = 3) {
  */
 export function agendaGroups(items, { now, zone, running = new Map() }) {
   const today = dayNum(localYmd(now, zone));
-  const groups = { now: [], days: [], later: [], frequent: [], paused: [], done: [] };
+  const groups = { now: [], days: [], later: [], frequent: [], paused: [], done: [], standing: [] };
   const byDay = new Map();
+  const toDay = (it) => {
+    const d = dayNum(localYmd(it.nextRun, zone)) - today;
+    if (d >= AGENDA_DAYS) { groups.later.push(it); return; }
+    if (!byDay.has(d)) byDay.set(d, []);
+    byDay.get(d).push(it);
+  };
   for (const it of items) {
+    // Read-only sources: the hold and running windows are Now; ongoing or undated ledger rows
+    // fold together; a frequent machine timer goes in the "Runs all the time" fold.
+    if (it.src && it.src !== "crow") {
+      if (it.standing) groups.standing.push(it);
+      else if (it.active) groups.now.push(it);
+      else if (it.frequent) groups.frequent.push(it);
+      else if (it.nextRun !== null) toDay(it);
+      continue;
+    }
     if (it.kind === "system") { groups.paused.push(it); continue; }
     if (!it.enabled) {
       if (it.once && it.lastRun !== null) { if (now - it.lastRun <= DONE_DAYS * DAY_MS) groups.done.push(it); continue; }
@@ -129,10 +146,7 @@ export function agendaGroups(items, { now, zone, running = new Map() }) {
     if (running.has(it.id) || (it.nextRun !== null && it.nextRun <= now)) { groups.now.push(it); continue; }
     if (it.cadence !== null && it.cadence < FREQUENT_MIN) { groups.frequent.push(it); continue; }
     if (it.nextRun === null) { groups.paused.push(it); continue; }
-    const d = dayNum(localYmd(it.nextRun, zone)) - today;
-    if (d >= AGENDA_DAYS) { groups.later.push(it); continue; }
-    if (!byDay.has(d)) byDay.set(d, []);
-    byDay.get(d).push(it);
+    toDay(it);
   }
   const byTime = (a, b) => (a.nextRun ?? Infinity) - (b.nextRun ?? Infinity) || a.id - b.id;
   for (const k of ["now", "later", "frequent"]) groups[k].sort(byTime);
@@ -309,7 +323,7 @@ async function notifTypesOf(db) {
  * @param {{now?:number, lang?:string, selected?:number|null, engine?:()=>string, runtimeOn?:()=>Promise<boolean>}} opts
  *   engine: "ready" | "absent" | … (the bot engine's state); runtimeOn: the bot runtime flag.
  */
-export async function buildScheduleModel(db, { now = Date.now(), lang = "en", selected = null, engine = () => "ready", runtimeOn = async () => true } = {}) {
+export async function buildScheduleModel(db, { now = Date.now(), lang = "en", selected = null, engine = () => "ready", runtimeOn = async () => true, show = "all", readers = {}, readOnly = false } = {}) {
   const zone = await instanceZone(db);
   const tz = (await hasTzColumn(db)) ? "tz" : "NULL AS tz";
   const rows = await safeRows(db, `SELECT id, task, cron_expression, description, enabled, last_run, next_run, updated_at, ${tz} FROM schedules ORDER BY id`);
@@ -325,11 +339,19 @@ export async function buildScheduleModel(db, { now = Date.now(), lang = "en", se
   const running = new Map();
   for (const [id, jobs] of jobsBy) { const j = jobs.find((x) => x.status === "running"); if (j) running.set(id, j); }
   const anyBots = items.some((it) => it.kind === "bot_routine" && it.enabled);
-  const problems = problemsFor(items, {
+  // The box and the machines are the owner's: a peer's sign-in never reads them.
+  const ro = readOnly ? readOnlySources({ now, zone, readers }) : { items: [], problems: [], hosts: [], present: [], notShown: { timers: 0, files: 0 } };
+  // The strip is always complete; the filter chips narrow only the agenda.
+  const problems = [...problemsFor(items, {
     now, runsBy, jobsBy, notifTypes: await notifTypesOf(db),
     engine: anyBots ? engine() : "ready", botDefsTable, runtimeOn: anyBots ? await runtimeOn() : true,
-  });
-  const agenda = agendaGroups(items, { now, zone, running });
+  }), ...ro.problems].map((p, i) => ({ ...p, order: i })).sort((a, b) => SEVERITY[a.severity] - SEVERITY[b.severity] || a.order - b.order);
+  const sources = ["crow", ...ro.present];
+  const filter = sources.includes(show) ? show : "all";
+  const shown = [...(filter === "all" || filter === "crow" ? items : []), ...ro.items.filter((it) => filter === "all" || it.src === filter)];
+  const agenda = agendaGroups(shown, { now, zone, running });
+  const hosts = filter === "all" || filter === "machines" ? ro.hosts : [];
+  const notShown = hosts.length ? ro.notShown : { timers: 0, files: 0 };
 
   let detail = null;
   const it = selected !== null ? items.find((x) => x.id === selected) : null;
@@ -347,7 +369,7 @@ export async function buildScheduleModel(db, { now = Date.now(), lang = "en", se
       briefing,
     };
   }
-  return { now, zone, items, problems, agenda, detail, running };
+  return { now, zone, items, problems, agenda, detail, running, sources, filter, hosts, notShown };
 }
 
 /** The schedule a run belongs to (?run=<id> from a notification), or null. */

@@ -158,6 +158,10 @@ env.CROW_BACKUP_DIR = join(scratch, "backups");
 // benchmark window on the host would otherwise turn every model-start test
 // into a ReservedError (2026-09-04: 25 failures during a real window).
 env.CROW_BOX_RESERVATION_PATH = join(scratch, "box-reservation.json");
+// The Schedule page's read-only sources (an operator's box ledger, the machines'
+// timer files): a suite never reads the host's real ones.
+delete env.CROW_BOX_LEDGER_PATH;
+env.CROW_HOST_TIMERS_DIR = join(scratch, "host-timers");
 // Forced unconditionally: there is no legitimate suite mode with live relay
 // or instance-sync traffic.
 env.CROW_DISABLE_NOSTR = "1";

@@ -17,6 +17,31 @@ export function scheduleClientJs() {
     setTimeout(function () { toast.textContent = ""; }, 8000);
   }
 
+  // Copy buttons (read-only sources' fixes): the text is already on the page; the button only
+  // puts it on the clipboard, and says so in the toast. Hidden until this script runs.
+  function say(msg) {
+    if (!toast || !msg) return;
+    toast.textContent = "";
+    setTimeout(function () { toast.textContent = msg; }, 30);
+    setTimeout(function () { toast.textContent = ""; }, 5000);
+  }
+  document.querySelectorAll("[data-sc-copy]").forEach(function (b) {
+    b.hidden = false;
+    b.addEventListener("click", function () {
+      var text = b.getAttribute("data-sc-copy");
+      var fallback = function () {
+        var code = b.parentNode.querySelector(".sc-copy-text");
+        try {
+          var r = document.createRange(); r.selectNodeContents(code);
+          var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+          say(b.getAttribute(document.execCommand("copy") ? "data-l-copied" : "data-l-failed"));
+        } catch (e) { say(b.getAttribute("data-l-failed")); }
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(function () { say(b.getAttribute("data-l-copied")); }, fallback);
+      else fallback();
+    });
+  });
+
   // The browser's zone rides the create form (stored only when it differs from the instance's).
   var zone = "";
   try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) {}
