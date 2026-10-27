@@ -298,7 +298,10 @@ export async function runPreviewJob(artifactId, n, contentHash, deps = previewDe
       else console.warn(`[make] preview of ${artifactId} v${n} failed: ${err?.message || err}`);
     } finally {
       // 7. Always: the token is revoked and the lease released (a timeout feeds the breaker).
-      if (minted) tokens.revokeToken(minted.tokenId);
+      // A throwing revoke must never skip the release (the lease would leak).
+      if (minted) {
+        try { tokens.revokeToken(minted.tokenId); } catch (err) { console.warn(`[make] preview token not revoked: ${err?.message || err}`); }
+      }
       if (timedOut) lease.release({ timedOut: true });
       else lease.release();
     }
@@ -367,14 +370,14 @@ export function startPreviewSweep({ noAuth = false } = {}) {
  * The preview fields of one Make item: { previewState, previewUrl, previewReason }.
  * previewState: "ready" | "pending" | "off" | "workspace" (the client tries the image).
  */
-export async function itemPreview(db, item, deps = previewDeps()) {
+export async function itemPreview(db, item, deps) {
   if (item.kind === "workspace_file") {
     if (!WS_REF_RE.test(String(item.ref))) return { previewState: "off", previewUrl: null, previewReason: "type" };
     return { previewState: "workspace", previewUrl: `/dashboard/make/preview/workspace_file/${item.ref}`, previewReason: null };
   }
   if (item.kind !== "artifact") return { previewState: "off", previewUrl: null, previewReason: "type" };
   try {
-    const r = await ensureArtifactPreview(db, item.ref, deps);
+    const r = await ensureArtifactPreview(db, item.ref, deps || previewDeps());
     if (r.status === "ready" || r.status === "pending") return { previewState: r.status, previewUrl: r.url, previewReason: null };
     return { previewState: "off", previewUrl: null, previewReason: r.reason };
   } catch (err) {

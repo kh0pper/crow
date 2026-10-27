@@ -26,7 +26,8 @@ import {
  * @property {string} openUrl
  * @property {"ready"|"pending"|"off"|"workspace"} previewState  "workspace": the client tries Nextcloud's image
  * @property {string|null} previewUrl
- * @property {string|null} previewReason  why it is "off" (make/previews.js); "not_enabled" when previews are off
+ * @property {string|null} previewReason  why it is "off" (make/previews.js); "not_enabled" for an artifact while
+ *   the previews switch is off (Workspace files keep Nextcloud's preview either way)
  */
 
 const WEEK_MS = 7 * 24 * 3600 * 1000;

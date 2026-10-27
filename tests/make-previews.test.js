@@ -440,6 +440,19 @@ test("every renderer reason has its own line", async () => {
 test("an existing instance sees the button, not previews", async () => {
   await clearSwitch();
   const a = await art({ type: "page" });
+  // A Workspace file alongside (R-P4-11): Nextcloud's preview is not behind the switch.
+  const make = await import("../servers/gateway/dashboard/panels/make.js");
+  const { listMakeItems } = await import("../servers/gateway/make/sources.js");
+  make._setMakeSeamsForTest({
+    list: async (d, scope, opts) => {
+      const model = await listMakeItems(d, scope, opts);
+      const ws = { kind: "workspace_file", ref: "4242", title: "Menu", type: "spreadsheet", filter: "documents", shared: false,
+        updatedAt: "2026-10-26T10:00:00.000Z", version: null, cardId: null, projectId: null, justMade: false, openUrl: "/dashboard/make/open/workspace_file/4242" };
+      Object.assign(ws, await opts.previews(ws));
+      return { ...model, items: [ws, ...model.items], workspace: "installed" };
+    },
+  });
+  try {
   for (const [lang, button, line] of [["en", "Turn on previews", "Previews are off."], ["es", "Activar vistas previas", "Las vistas previas están desactivadas."]]) {
     const html = (await page(lang)).body;
     assert.match(html, new RegExp(`<form[^>]*method="post"[^>]*action="/dashboard/make/previews/enable"`));
@@ -447,11 +460,49 @@ test("an existing instance sees the button, not previews", async () => {
     assert.ok(html.includes(escHtml(line)));
     assert.ok(html.includes(escHtml(t("shell.previewsDisclosure", lang))));
     assert.doesNotMatch(tileOf(html, a.id), /<img|data-mk-pv-src/);
+    assert.ok(tileOf(html, "4242").includes('data-mk-pv-src="/dashboard/make/preview/workspace_file/4242"'), `${lang}: the Workspace tile tries Nextcloud's preview`);
   }
+  } finally { make._setMakeSeamsForTest(); }
   await settle();
   assert.equal(S.renders.length, 0);
   assert.equal(S.acquires, 0);
   assert.equal(S.queue.size(), 0);
+  // The Workspace path reads no renderer deps at all.
+  assert.deepEqual(await P.itemPreview(db, { kind: "workspace_file", ref: "4242" }, null),
+    { previewState: "workspace", previewUrl: "/dashboard/make/preview/workspace_file/4242", previewReason: null });
+});
+
+test("a throwing revoke still releases the lease", async () => {
+  S.tokens.revokeToken = (id) => { S.revokes.push(id); throw new Error("revoke broke"); };
+  const a = await art({ type: "page" });
+  await ensure(a.id);
+  await settle();
+  assert.equal(S.revokes.length, 1);
+  assert.deepEqual(S.releases, [undefined]);
+  assert.equal(S.leases, 0);
+  assert.equal((await ensure(a.id)).status, "ready");
+});
+
+test("the renderer is probed again once a minute, and queued jobs behind an off return before acquiring", async () => {
+  reset({ off: "building" });
+  const a = await art({ type: "page" });
+  const b = await art({ type: "page" });
+  const c = await art({ type: "page" });
+  // Three queued at once: the first acquires and finds the renderer off; the two behind it skip.
+  for (const x of [a, b, c]) assert.equal((await ensure(x.id)).status, "pending");
+  await settle();
+  assert.equal(S.acquires, 1);
+  // Inside the minute: off, nothing queued.
+  S.clock += 59_000;
+  for (const x of [a, b, c]) assert.deepEqual(await ensure(x.id), { status: "off", reason: "building" });
+  await settle();
+  assert.equal(S.acquires, 1);
+  // After it: one probe gets through (the listing queues; the first job acquires once more).
+  S.clock += 2_000;
+  for (const x of [a, b, c]) assert.equal((await ensure(x.id)).status, "pending");
+  await settle();
+  assert.equal(S.acquires, 2);
+  assert.equal(S.renders.length, 0);
 });
 
 test("the button needs CSRF", async () => {

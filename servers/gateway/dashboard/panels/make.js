@@ -87,8 +87,13 @@ export default {
     // Previews (Task 4.5): off until the switch is on, and then only for trusted artifacts.
     let enabled = false;
     try { enabled = await previewsEnabled(db); } catch (err) { console.warn(`[make] previews switch unreadable: ${err.message}`); }
+    // Workspace files always get Nextcloud's own preview (R-P4-11): that path reads no renderer
+    // deps, so the renderer is never created while the switch is off. Artifacts only when on.
     const deps = enabled ? previewDeps() : null;
-    const previews = enabled ? (item) => itemPreview(db, item, deps) : null;
+    const previews = async (item) => {
+      if (item.kind === "workspace_file") return itemPreview(db, item, null);
+      return enabled ? itemPreview(db, item, deps) : { previewState: "off", previewUrl: null, previewReason: "not_enabled" };
+    };
     const model = await lister(db, scope, { crowHome: crowHome(), filter, previews });
     // One line under the chips for a renderer reason (the first one any tile met).
     const reason = enabled ? (model.items || []).map((i) => i.previewReason).find((r) => previewLineKey(r)) || null : null;
