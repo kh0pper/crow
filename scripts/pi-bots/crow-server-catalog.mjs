@@ -29,7 +29,7 @@ import {
   resolveEnvValue,
 } from "../server-registry.js";
 import { botsDbPath, resolveSqlitePath } from "./instance-paths.mjs";
-import { signActor, signBoardActor, signArtifactsActor } from "./actor-sig.mjs";
+import { signActor, signBoardActor, signArtifactsActor, signBoardThreadActor } from "./actor-sig.mjs";
 
 /**
  * The env vars that name an instance. r4-deploy.sh warns that a child missing
@@ -119,7 +119,7 @@ function boardTokenPath(crowHome) {
   return join(crowHome, "board-token");
 }
 
-function boardBlock(crowHome, { botId, jobId, port } = {}) {
+function boardBlock(crowHome, { botId, jobId, threadId, gatewayType, port } = {}) {
   let token;
   try {
     token = readFileSync(boardTokenPath(crowHome), "utf8").trim();
@@ -137,6 +137,14 @@ function boardBlock(crowHome, { botId, jobId, port } = {}) {
   // only when this process holds the per-boot key; see actor-sig.mjs).
   const sig = signBoardActor({ botId, jobId });
   if (sig) headers["X-Crow-Actor-Sig"] = sig;
+  // P5: when the turn belongs to a chat, bind (bot, thread, gateway) under its
+  // own kind so /board/mcp can offer a card back into that conversation.
+  if (threadId) {
+    headers["X-Crow-Actor-Thread"] = String(threadId);
+    if (gatewayType) headers["X-Crow-Actor-Gateway"] = String(gatewayType);
+    const tsig = signBoardThreadActor({ botId, threadId, gatewayType });
+    if (tsig) headers["X-Crow-Actor-Thread-Sig"] = tsig;
+  }
   return { url: `http://127.0.0.1:${gatewayPort}/board/mcp`, headers };
 }
 
@@ -287,7 +295,7 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
 
   // Board entry FIRST (Track 1 Task 7) — the one {url, headers} block in an
   // otherwise all-stdio catalog. See boardBlock() above.
-  const board = boardBlock(crowHome, { botId: opts.botId, jobId: opts.jobId, port: opts.gatewayPort });
+  const board = boardBlock(crowHome, { botId: opts.botId, jobId: opts.jobId, threadId: opts.threadId, gatewayType: opts.gatewayType, port: opts.gatewayPort });
   if (board) servers.board = board;
   else unconfigured.board = "board token not found — mint one from the dashboard (or ensureBoardToken at boot)";
   const phone = phoneBlock(crowHome, { botId: opts.botId, threadId: opts.threadId, gatewayType: opts.gatewayType, port: opts.gatewayPort });

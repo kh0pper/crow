@@ -114,8 +114,11 @@ function headerValue(headers, key) {
 const UNATTRIBUTED_BOT = Object.freeze({ kind: "bot", id: null, jobId: null });
 
 /** @param verifyActor ({botId, jobId, sig}) => boolean — the gateway injects
- *  actor-sig.mjs's verifyBoardActorSig. Absent → fail closed (unattributed). */
-export function resolveActor(extra, verifyActor) {
+ *  actor-sig.mjs's verifyBoardActorSig. Absent → fail closed (unattributed).
+ *  @param verifyThread ({botId, threadId, gatewayType, sig}) => boolean — the
+ *  board-thread verifier. A verified bot actor gets `thread: {id, gateway}`
+ *  only when that signature verifies for the SAME bot id, else `thread: null`. */
+export function resolveActor(extra, verifyActor, verifyThread) {
   const auth = extra?.authInfo;
   const tokenAuthed = auth?.clientId === "local-mcp";
   if (tokenAuthed) {
@@ -127,7 +130,19 @@ export function resolveActor(extra, verifyActor) {
       const sig = headerValue(headers, "x-crow-actor-sig");
       let ok = false;
       try { ok = typeof verifyActor === "function" && !!id && !!sig && verifyActor({ botId: id, jobId, sig }) === true; } catch { ok = false; }
-      return ok ? { kind: "bot", id: id.trim(), jobId: jobId == null || jobId.trim() === "" ? null : jobId.trim() } : { ...UNATTRIBUTED_BOT };
+      if (!ok) return { ...UNATTRIBUTED_BOT };
+      let thread = null;
+      const tid = headerValue(headers, "x-crow-actor-thread");
+      const gw = headerValue(headers, "x-crow-actor-gateway");
+      const tsig = headerValue(headers, "x-crow-actor-thread-sig");
+      if (tid && tid.trim() && tsig && typeof verifyThread === "function") {
+        try {
+          if (verifyThread({ botId: id, threadId: tid, gatewayType: gw, sig: tsig }) === true) {
+            thread = { id: tid.trim(), gateway: gw == null || gw.trim() === "" ? null : gw.trim() };
+          }
+        } catch { thread = null; }
+      }
+      return { kind: "bot", id: id.trim(), jobId: jobId == null || jobId.trim() === "" ? null : jobId.trim(), thread };
     }
     if (auth?.extra?.tokenScope === "board") return { ...UNATTRIBUTED_BOT };
   }
@@ -296,7 +311,8 @@ export function createBoardMcpServer(options = {}) {
   const cdb = options.cdb || createDbClient();
   // S5: every handler resolves its actor through the injected verifier.
   const verifyActor = options.verifyActor;
-  const resolveActor = (extra) => resolveActorWith(extra, verifyActor);
+  const verifyThread = options.verifyThread;
+  const resolveActor = (extra) => resolveActorWith(extra, verifyActor, verifyThread);
 
   const server = new McpServer(
     { name: "crow-board", version: "0.1.0" },
