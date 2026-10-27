@@ -252,12 +252,14 @@ export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = 
  * login ONLY when tailscaled asserted it: the gateway's peer class says
  * "serve" (req.crowPeer, servers/shared/peer-class.js: a loopback socket owned
  * by tailscaled, in Serve's shape). A direct hit, a local process or a relay
- * could forge the header, so there the key is the raw socket address (never
- * req.ip). No peer class (an older core): no login.
+ * could forge the header, so there the key is the classified client address
+ * (never a raw header). No peer class (an older core): no login, socket key.
  */
 export function pairRequester(req) {
-  const ip = String(req?.socket?.remoteAddress || "") || "?";
   const peer = req?.crowPeer;
+  // The classified client (the tailnet address tailscaled named for Serve), so tagged nodes with
+  // no login do not all share the 127.0.0.1 bucket; the raw socket only on an older core.
+  const ip = String(peer?.client || req?.socket?.remoteAddress || "") || "?";
   const login = peer?.via === "serve" ? (String(peer.tailnetLogin || "").slice(0, 128) || null) : null;
   return { ip, login };
 }

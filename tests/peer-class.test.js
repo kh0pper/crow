@@ -201,6 +201,33 @@ test("memoised per socket: two lookups on one socket read procfs once; a new soc
   assert.equal(reads, 2);
 });
 
+test("review risk 1: a row procfs repeated between read() chunks (same inode) still counts once", () => {
+  const client = row(0, v4("127.0.0.1", 40000), v4("127.0.0.1", 3001), "01", 0);
+  useTables({ tcp: [HEADER, client, client, row(1, v4("127.0.0.1", 3001), v4("127.0.0.1", 40000), "01", 1000)].join("\n") });
+  assert.equal(classifyPeer(mk(SERVE())).via, "serve");
+  // Two DIFFERENT live sockets on one tuple with different owners: refused.
+  useTables({ tcp: [HEADER, row(0, v4("127.0.0.1", 40000), v4("127.0.0.1", 3001), "01", 0), row(7, v4("127.0.0.1", 40000), v4("127.0.0.1", 3001), "01", 1000)].join("\n") });
+  spyWarn(() => assert.equal(classifyPeer(mk(SERVE(), SOCK())).via, "unverified"));
+});
+
+test("review risk 1: a row procfs skipped is found on the one re-read", () => {
+  let n = 0;
+  setProcNetReaderForTests((name) => (name === "tcp" ? (n++ === 0 ? HEADER + "\n" : tcpTable()) : HEADER + "\n"));
+  assert.equal(classifyPeer(mk(SERVE())).via, "serve");
+  assert.equal(n, 2);
+});
+
+test("review risk 1: a miss is never memoised — the same pooled socket is verified on its next request", () => {
+  const s = SOCK();
+  useTables({ tcp: HEADER + "\n", tcp6: HEADER + "\n" });
+  spyWarn(() => assert.equal(classifyPeer(mk(SERVE(), s)).via, "unverified"));
+  useTables({ tcp: tcpTable() });
+  assert.equal(classifyPeer(mk(SERVE(), s)).via, "serve", "a later request on the same connection recovers");
+  const before = reads;
+  assert.equal(classifyPeer(mk(SERVE(), s)).via, "serve");
+  assert.equal(reads, before, "a confirmed uid is memoised");
+});
+
 test("funnel: loopback + funnel header + one PUBLIC XFF → funnel, client = the public address, no login", () => {
   const p = classifyPeer(mk({ "tailscale-funnel-request": "?1", "x-forwarded-for": "8.8.8.8", "x-forwarded-host": "crow.example.ts.net", "tailscale-user-login": "forged@example.com" }));
   assert.equal(p.via, "funnel");

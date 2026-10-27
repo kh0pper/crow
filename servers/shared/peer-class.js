@@ -187,7 +187,7 @@ const MEMO = Symbol.for("crow.peer-class");
 const present = (v) => v != null && String(v).trim() !== "";
 
 function undeclaredHint(addr) {
-  warnOnce("undeclared-peer", `[net] WARN forwarding headers from undeclared peer ${addr}: requests refused. If this is your reverse proxy, set CROW_TRUSTED_PROXIES (see docs/getting-started/custom-domain.md)`);
+  warnOnce("undeclared-peer", `[net] WARN forwarding headers from undeclared peer ${addr}: they are not trusted for the client address (from loopback the request is refused; from another peer a public hop is refused). If this is your reverse proxy, set CROW_TRUSTED_PROXIES (see docs/getting-started/custom-domain.md)`);
 }
 
 /** Express proxy-addr semantics: walk X-Forwarded-For from the right while the

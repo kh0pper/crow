@@ -98,35 +98,47 @@ function candidates(ra, rp, la, lp) {
   return out;
 }
 
+/** One pass over the tables → { uid, unavailable }. */
+function scan(want) {
+  let failed = 0;
+  for (const { table, local, rem } of want) {
+    let text;
+    try { text = String(readTable(table)); } catch { failed++; continue; }
+    // procfs can repeat a row when sockets change between read() chunks: dedupe by inode (field 9).
+    const hits = new Map();
+    for (const line of text.split("\n")) {
+      if (!line.includes(local)) continue; // cheap prefilter before splitting
+      const f = line.trim().split(/\s+/);
+      if (f.length < 10 || !/^\d+:$/.test(f[0])) continue; // header or junk
+      if (f[1] === local && f[2] === rem && f[3] === "01" && /^\d+$/.test(f[7])) hits.set(f[9], Number(f[7]));
+    }
+    const uids = new Set(hits.values());
+    if (uids.size === 1) return { uid: [...uids][0], unavailable: false };
+    if (uids.size > 1) return { uid: null, unavailable: false }; // two live sockets on one tuple: refuse
+  }
+  return { uid: null, unavailable: failed === want.length };
+}
+
 function lookup(socket) {
   const ra = String(socket.remoteAddress || ""), la = String(socket.localAddress || "");
   const rp = socket.remotePort, lp = socket.localPort;
   if (!ra || !la || !Number.isInteger(rp) || !Number.isInteger(lp)) return { uid: null, unavailable: false };
   const want = candidates(ra, rp, la, lp);
   if (!want.length) return { uid: null, unavailable: false };
-  let failed = 0;
-  for (const { table, local, rem } of want) {
-    let text;
-    try { text = readTable(table); } catch { failed++; continue; }
-    const hits = [];
-    for (const line of String(text).split("\n")) {
-      const f = line.trim().split(/\s+/);
-      if (f.length < 8 || !/^\d+:$/.test(f[0])) continue; // header or junk
-      if (f[1].toUpperCase() === local && f[2].toUpperCase() === rem && f[3] === "01") hits.push(f);
-    }
-    if (hits.length === 1 && /^\d+$/.test(hits[0][7])) return { uid: Number(hits[0][7]), unavailable: false };
-    if (hits.length > 1) return { uid: null, unavailable: false }; // impossible for ESTABLISHED; refuse anyway
-  }
-  return { uid: null, unavailable: failed === want.length };
+  const first = scan(want);
+  // procfs can also skip a row mid-read: one re-read before a miss counts.
+  return first.uid === null && !first.unavailable ? scan(want) : first;
 }
 
-/** → { uid: number|null, unavailable: boolean }; memoised per socket object. */
+/** → { uid: number|null, unavailable: boolean }. Only a confirmed uid is memoised per socket (the
+ *  uid of a connection never changes); a miss is looked up again on the next request, so one bad
+ *  read cannot lock a long-lived pooled Serve connection out for its whole life. */
 export function peerUid(socket) {
   if (!socket || typeof socket !== "object") return { uid: null, unavailable: false };
   const hit = memo.get(socket);
   if (hit) return hit;
   const r = lookup(socket);
-  memo.set(socket, r);
+  if (r.uid !== null) memo.set(socket, r);
   return r;
 }
 

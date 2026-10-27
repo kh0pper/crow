@@ -450,6 +450,9 @@ export function isAllowedNetwork(req) {
   const trustedClient = (a) => !isLoopbackAddr(a) && isPrivateOrAllowlistedIp(a);
   switch (p.via) {
     case "serve":
+      // Serve replaces X-Forwarded-For but passes a client's X-Real-IP through untouched; one that
+      // names a non-tailnet address (e.g. added by an office proxy in front of the client) takes
+      // trust away and the request is denied (pinned in tests/auth-network.test.js).
       return isOverlayAddr(p.client) && p.hops.every((a) => isOverlayAddr(a));
     case "proxy":
       return p.hops.length ? p.hops.every(trustedClient) : trustedClient(p.client);

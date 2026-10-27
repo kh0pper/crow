@@ -187,7 +187,7 @@ export { forwardedAddrs };
 
 /** The ONE source check for /llm (door, companion /llm/v1, /llm/acquire).
  * `remoteAddr` is req.socket.remoteAddress — the TCP peer, which Express's
- * `trust proxy` setting (index.js sets 1) never changes; `req.ip` is the value
+ * `trust proxy` setting (index.js: CROW_TRUSTED_PROXIES) never changes; `req.ip` is the value
  * that setting rewrites from X-Forwarded-For, so it is never consulted here.
  * The socket must be loopback or tailnet, AND — because a same-box reverse
  * proxy (Tailscale Serve, or r4's sslip.io front door: black-swan Caddy ->

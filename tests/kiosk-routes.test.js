@@ -323,10 +323,11 @@ test("stall fix (wired): every kiosk voice turn carries the 3-round cap, the 12 
 
 // Ruling D (Task 7 carry), P0: the login is trusted only when tailscaled delivered it: the gateway's peer
 // class (req.crowPeer, servers/shared/peer-class.js) says "serve". A bare header, from any socket, is not enough.
-test("ruling D: pairRequester takes the login only from a Serve peer class; keys on the socket address, never X-Forwarded-For", () => {
+test("ruling D: pairRequester takes the login only from a Serve peer class; keys on the classified client, never a raw X-Forwarded-For", () => {
   const serve = { via: "serve", client: "100.64.20.5", tailnetLogin: "a@b" };
   for (const a of ["127.0.0.1", "::1", "::ffff:127.0.0.1"]) {
-    assert.deepEqual(pairRequester({ socket: { remoteAddress: a }, ip: "9.9.9.9", crowPeer: serve, headers: { "tailscale-user-login": "a@b", "x-forwarded-for": "9.9.9.9" } }), { ip: a, login: "a@b" }, a);
+    assert.deepEqual(pairRequester({ socket: { remoteAddress: a }, ip: "9.9.9.9", crowPeer: serve, headers: { "tailscale-user-login": "a@b", "x-forwarded-for": "9.9.9.9" } }), { ip: "100.64.20.5", login: "a@b" }, a);
+    assert.deepEqual(pairRequester({ socket: { remoteAddress: a }, crowPeer: { ...serve, client: "100.64.20.6", tailnetLogin: null }, headers: {} }), { ip: "100.64.20.6", login: null }, `${a}: a tagged node keys on its own tailnet address`);
     assert.deepEqual(pairRequester({ socket: { remoteAddress: a }, headers: { "tailscale-user-login": "forged@x" } }), { ip: a, login: null }, `${a}: no peer class → no login`);
     assert.deepEqual(pairRequester({ socket: { remoteAddress: a }, crowPeer: { via: "unverified", client: a, tailnetLogin: null }, headers: { "tailscale-user-login": "forged@x" } }), { ip: a, login: null }, `${a}: unverified`);
   }
