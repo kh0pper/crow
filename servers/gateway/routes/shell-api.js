@@ -75,15 +75,19 @@ export async function laneState(tdb, cdb, id) {
  * Run a movePlan's one write, guarded on the state `st` it was planned from
  * (Ruling P10): a move carries the status read (moveCard expectStatus), a
  * clear_ask the action_needed read (updateCard expect), and an accept the
- * newest-result check inside its UPDATE (acceptResult). If the card changed
- * after the read, in this process or another, the write changes nothing and
- * throws 409 'stale'. A refuse or none plan writes nothing.
+ * newest-result check inside its UPDATE and the status re-read on its move
+ * (acceptResult). If the card changed after the read, in this process or
+ * another, the write changes nothing and throws 409 'stale' (an accept whose
+ * approval landed keeps it, and its move is the part that is stale). A refuse or none plan writes nothing.
  */
 export async function applyLanePlan(tdb, cdb, id, st, plan, actor = DASHBOARD_ACTOR) {
   if (plan.action === "move") {
     await moveCard(tdb, cdb, id, plan.status, actor, { expectStatus: String(st.card.status) });
   } else if (plan.action === "accept") {
-    await acceptResult(tdb, cdb, id, plan.resultId, actor, "dashboard");
+    // Approved, but the card moved after the approval's re-read: the
+    // decision stands, the other move is kept, and the caller hears stale.
+    const r = await acceptResult(tdb, cdb, id, plan.resultId, actor, "dashboard");
+    if (r && r.stale) throw Object.assign(new Error("card changed"), { code: "stale", http: 409 });
   } else if (plan.action === "clear_ask") {
     await updateCard(tdb, id, { action_needed: null }, actor, { expect: { action_needed: st.card.action_needed ?? null } });
   }

@@ -598,3 +598,32 @@ test("decideResult on a superseded result still decides it (only Accept requires
     assert.equal(out.status, "rejected");
   });
 });
+
+test("acceptResult never overwrites a move made after the approval: approved, unmoved, stale", async () => {
+  await withStore(async ({ tdb, cdb, tasksDbPath }) => {
+    const id = await makeCard(tdb, 1, "gated");
+    const r = await reportResult(tdb, cdb, id, { outcome: "success" }, BOT);
+    const other = createDbClient(tasksDbPath);
+    let fired = false;
+    // A seam: once the approval has landed, just before the move's UPDATE,
+    // the classic board (another connection) moves the card to cancelled.
+    const raced = {
+      execute: async (q) => {
+        if (!fired && /^UPDATE tasks_items/.test(q.sql || "")) {
+          fired = true;
+          await other.execute({ sql: "UPDATE tasks_items SET status='cancelled' WHERE id=?", args: [id] });
+        }
+        return tdb.execute(q);
+      },
+    };
+    let out;
+    try { out = await acceptResult(raced, cdb, id, r.id, HUMAN, "dashboard"); } finally { other.close(); }
+    assert.ok(fired, "the seam fired");
+    assert.deepEqual(out, { status: "approved", moved: false, stale: true });
+    assert.equal((await getCard(tdb, id)).status, "cancelled", "the other move is kept");
+    const row = (await tdb.execute({ sql: "SELECT status FROM board_results WHERE id=?", args: [r.id] })).rows[0];
+    assert.equal(row.status, "approved", "the decision stands");
+    const verbs = (await allMutations(tdb, id)).map((m) => m.verb);
+    assert.ok(verbs.includes("result_decide") && !verbs.includes("move"), "no move recorded");
+  });
+});

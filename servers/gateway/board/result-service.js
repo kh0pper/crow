@@ -176,18 +176,25 @@ export async function acceptResult(tdb, cdb, itemId, resultId, actor, via) {
   // The read above is a fast refusal; the write re-checks "newest" itself.
   await decide(tdb, itemId, resultId, "approved", actor, via, { newestOnly: true });
 
-  // From here the approval stands. A move refused by the lock rule returns
-  // moved:false. Any other move failure (the card archived or moved
-  // meanwhile, a bad status) propagates and leaves the result approved and
-  // the card unmoved; the lane route reports that as 409 'stale' with the
-  // card's real lane, and the Board re-renders from it.
+  // From here the approval stands, and the move never overwrites anyone
+  // else's: it carries the status just re-read (expectStatus), so a move
+  // that lands in between (the classic board, another process) makes this
+  // one change nothing. Two outcomes keep the card where it is:
+  //   - the lock rule refuses the move     -> { approved, moved:false }
+  //   - the card moved meanwhile (stale)   -> { approved, moved:false, stale:true };
+  //     the lane route answers that 409 'stale' with the card's real lane,
+  //     and the Board re-renders from it.
+  // Anything else propagates with the result still approved: an archived
+  // card is a 409 (the route says 'stale'); a bad_status is a 400 (the
+  // route says 'bad_request').
   const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
   const now = await getCard(tdb, itemId);
   if (isTerminal(def, String(now.status))) return { status: "approved", moved: false };
   try {
-    await moveCard(tdb, cdb, itemId, doneStatus(def), actor);
+    await moveCard(tdb, cdb, itemId, doneStatus(def), actor, { expectStatus: String(now.status) });
   } catch (e) {
     if (e && e.code === "locked") return { status: "approved", moved: false };
+    if (e && e.code === "stale") return { status: "approved", moved: false, stale: true };
     throw e;
   }
   return { status: "approved", moved: true };

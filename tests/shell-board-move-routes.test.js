@@ -391,3 +391,35 @@ test("the clear_ask UPDATE itself is guarded: a new ask between its read and its
     assert.deepEqual(verbs(id), []);
   } finally { k.close(); }
 });
+
+test("accept racing a classic move: approved, the classic move kept, and the lane write is stale", async () => {
+  const id = addCard();
+  const rid = addResult(id);
+  const k = await twoClients();
+  try {
+    const st = await k.laneState(k.a, k.cdb, id);
+    const plan = k.plan(st, "done");
+    assert.equal(plan.action, "accept");
+    let fired = false;
+    // After the approval, just before the move's UPDATE, the classic board
+    // (client b) cancels the card.
+    const raced = {
+      execute: async (q) => {
+        if (!fired && /^UPDATE tasks_items/.test(q.sql || "")) {
+          fired = true;
+          await k.b.execute({ sql: "UPDATE tasks_items SET status='cancelled' WHERE id=?", args: [id] });
+        }
+        return k.a.execute(q);
+      },
+    };
+    const r = await settle(k.applyLanePlan(raced, k.cdb, id, st, plan));
+    assert.ok(fired, "the seam fired");
+    assert.equal(r.ok, false); assert.equal(r.e.code, "stale"); assert.equal(r.e.http, 409);
+    assert.equal(card(id).status, "cancelled");
+    assert.equal(result(rid).status, "approved");
+    assert.deepEqual(verbs(id), ["result_decide"]);
+  } finally { k.close(); }
+  // The route's answer for a card in that state: its real lane, Done.
+  const again = await move(id, { to: "done", from: "needs_you" });
+  assert.deepEqual(again.body, { error: "stale", lane: "done" });
+});
