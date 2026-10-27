@@ -212,13 +212,22 @@ async function open(path, { width = 390, height = 844, dark = false, textSize = 
 }
 
 const NO_H_SCROLL = "document.documentElement.scrollWidth <= window.innerWidth";
-/** Every visible element matching `sel` smaller than 44×44, as "class:text:w×h". */
-const small = (sel) => `(function(){ var out=[];
+/** {count, bad}: the visible elements matching `sel`, and those smaller than 44×44 as "class:text:w×h". */
+const small = (sel) => `(function(){ var bad=[], count=0;
   document.querySelectorAll(${JSON.stringify(sel)}).forEach(function(el){
     var cs=getComputedStyle(el); if(cs.display==='none'||cs.visibility==='hidden') return;
     var r=el.getBoundingClientRect(); if(!r.width&&!r.height) return;
-    if(r.width<44||r.height<44) out.push((el.className||el.tagName)+':'+(el.textContent||el.getAttribute('aria-label')||'').trim().slice(0,24)+':'+Math.round(r.width)+'x'+Math.round(r.height));
-  }); return out; })()`;
+    count++;
+    if(r.width<44||r.height<44) bad.push((el.className||el.tagName)+':'+(el.textContent||el.getAttribute('aria-label')||'').trim().slice(0,24)+':'+Math.round(r.width)+'x'+Math.round(r.height));
+  }); return { count: count, bad: bad }; })()`;
+/** Every matched group must really be on the page (a selector matching nothing proves nothing) and be ≥ 44. */
+async function assertTargets(p, groups, tag) {
+  for (const [sel, min, what] of groups) {
+    const r = await p.ev(small(sel));
+    assert.ok(r.count >= min, `${what}: found ${r.count} visible, expected at least ${min} (${tag})`);
+    assert.deepEqual(r.bad, [], `${what} ≥ 44 (${tag})`);
+  }
+}
 const OPEN_SHEET = (id) => `(function(){ return !!document.getElementById(${JSON.stringify(id)}).open; })()`;
 
 for (const [width, height] of [[390, 844], [1280, 800]]) {
@@ -235,7 +244,14 @@ for (const [width, height] of [[390, 844], [1280, 800]]) {
               assert.equal(await p.ev("document.documentElement.lang"), lang);
               assert.equal(await p.ev("document.documentElement.getAttribute('data-text-size')"), textSize || "default");
               assert.equal(await p.ev(NO_H_SCROLL), true, `no horizontal page scroll (${tag})`);
-              assert.deepEqual(await p.ev(small(".shell-tab, .shell-scope, .shell-avatar, #crow-bird-btn, .shell-rail-projects .shell-project")), [], `tabs, chip, bird, avatar, rail projects ≥ 44 (${tag})`);
+              await assertTargets(p, [
+                [".shell-tab", 3, "tabs"],
+                [".shell-scope", 1, "scope chip"],
+                [".shell-avatar", 1, "avatar"],
+                ["#crow-bird-btn", 1, "bird"],
+                // The rail (Garden, Kitchen) only exists on the desktop layout.
+                ...(width >= 900 ? [[".shell-rail-projects .shell-project", 2, "rail projects"]] : []),
+              ], tag);
               const g = await p.ev(`(function(){
                 var body=document.querySelector('.content-body'), cs=getComputedStyle(body), b=body.getBoundingClientRect();
                 var h2=document.querySelector('.content-header h2').getBoundingClientRect();
@@ -262,7 +278,11 @@ for (const [width, height] of [[390, 844], [1280, 800]]) {
               await p.click(".shell-scope");
               await p.until(OPEN_SHEET("shell-drawer"), "the drawer");
               await p.ev(TWO_FRAMES);
-              assert.deepEqual(await p.ev(small("#shell-drawer .shell-project, #shell-drawer .shell-more-item, #shell-drawer .shell-sheet-close")), [], `drawer items ≥ 44 (${tag})`);
+              await assertTargets(p, [
+                ["#shell-drawer .shell-project", 2, "drawer projects"],
+                ["#shell-drawer .shell-more-item", 3, "drawer More items"],
+                ["#shell-drawer .shell-sheet-close", 1, "drawer close"],
+              ], tag);
               assert.ok(await p.ev("document.querySelectorAll('#shell-drawer .shell-more-item').length") >= 3, "More of Crow lists panels");
               const d = await p.ev("(function(){ var r=document.getElementById('shell-drawer').getBoundingClientRect(); return {l:r.left,r:r.right,t:r.top,b:r.bottom}; })()");
               assert.ok(d.l >= 0 && d.r <= width && d.t >= 0 && d.b <= height + 0.5, `drawer on screen ${JSON.stringify(d)} (${tag})`);
@@ -272,7 +292,10 @@ for (const [width, height] of [[390, 844], [1280, 800]]) {
               await p.click(".shell-avatar");
               await p.until(OPEN_SHEET("shell-avatar"), "the avatar sheet");
               await p.ev(TWO_FRAMES);
-              assert.deepEqual(await p.ev(small("#shell-avatar .shell-sheet-link, #shell-avatar .shell-sheet-close")), [], `avatar sheet items ≥ 44 (${tag})`);
+              await assertTargets(p, [
+                ["#shell-avatar .shell-sheet-link", 1, "avatar sheet links"],
+                ["#shell-avatar .shell-sheet-close", 1, "avatar sheet close"],
+              ], tag);
               await p.key("Escape", "Escape", 27);
               await p.until("!document.getElementById('shell-avatar').open", "the avatar sheet to close");
             } finally { await p.close(); }
@@ -343,7 +366,7 @@ test("a real reload restores a Perch draft in new mode", async (ctx) => {
     await p.until("document.body.getAttribute('data-view') === 'chat'", "the chat");
     assert.equal(await p.ev("document.body.classList.contains('shell')"), true);
     await p.ev("(function(){ var i=document.getElementById('perch-input'); i.focus(); i.value='half a thought'; i.dispatchEvent(new Event('input', { bubbles: true })); return 1; })()");
-    await sleep(500);
+    await p.until("sessionStorage.getItem('perch-draft:' + " + JSON.stringify(SID) + ") === 'half a thought'", "the debounced draft to be stored");
     await p.ev("window.__beforeReload = 1; true");
     await p.send("Page.reload", { ignoreCache: false });
     await p.until("window.__beforeReload === undefined && document.readyState === 'complete'", "the reload");
@@ -486,7 +509,7 @@ test("Back after following a drawer link shows no open sheet", async (ctx) => {
     await p.ev("history.back(); true");
     await p.until("location.pathname === '/dashboard/perch' && !!document.getElementById('perch-hub-root')", "Back to Chat");
     await p.settled();
-    await sleep(200);
+    await p.until("document.documentElement.scrollWidth <= innerWidth && document.querySelectorAll('dialog[open]').length === 0", "the restored page to settle");
     assert.equal(await p.ev("window.__mark"), 1, "Turbo visits throughout");
     assert.equal(await p.ev("document.querySelectorAll('dialog[open]').length"), 0, "no sheet is open after Back");
     assert.equal(await p.ev("document.documentElement.scrollWidth <= innerWidth"), true);
@@ -505,7 +528,7 @@ test("the header bird's long-press still opens Talk to Crow in the shell; a tap 
     try {
       assert.equal(await p.ev("document.body.classList.contains('shell')"), true);
       assert.equal(await p.ev("!!document.querySelector('#crow-bird-btn[data-crow-talk]') && !!document.getElementById('crow-talk-row')"), true, "the bird is armed");
-      assert.deepEqual(await p.ev(small("#crow-bird-btn")), [], "the bird is a 44 px target");
+      await assertTargets(p, [["#crow-bird-btn", 1, "the bird"]], "talk");
       await p.hold("#crow-bird-btn", 800);
       await p.until("document.getElementById('crow-talk-overlay').classList.contains('active') && !!document.querySelector('#crow-talk-overlay iframe')", "the Talk overlay");
       assert.match(await p.ev("document.querySelector('#crow-talk-overlay iframe').getAttribute('src')"), /\/display\/session/);
@@ -532,28 +555,28 @@ test("screenshots for review (only with SHELL_SHOTS_DIR)", async (ctx) => {
       const p = await open("/dashboard/perch", { width, height, dark });
       try {
         await p.until("!!document.querySelector('#perch-list-body .perch-row, #perch-list-body [data-sid], #perch-list-body li')", "the session list", 5000).catch(() => {});
-        await sleep(300);
+        await p.settled();
         await shot(p, `shell-${name}-chat-${theme}-en.png`);
         await p.click(".shell-scope");
         await p.until(OPEN_SHEET("shell-drawer"), "the drawer");
-        await sleep(250);
+        await p.ev(TWO_FRAMES);
         await shot(p, `shell-${name}-drawer-${theme}-en.png`);
         await p.key("Escape", "Escape", 27);
         await p.click(".shell-avatar");
         await p.until(OPEN_SHEET("shell-avatar"), "the avatar sheet");
-        await sleep(250);
+        await p.ev(TWO_FRAMES);
         await shot(p, `shell-${name}-avatar-${theme}-en.png`);
       } finally { await p.close(); }
       if (width === 390) {
         const c = await open("/dashboard/perch#" + SID, { width, height, dark });
         try {
           await c.until("document.body.getAttribute('data-view') === 'chat'", "the chat");
-          await sleep(300);
+          await c.settled();
           await shot(c, `shell-${name}-open-chat-${theme}-en.png`);
         } finally { await c.close(); }
       }
       const b = await open("/dashboard/bot-board", { width, height, dark });
-      try { await sleep(300); await shot(b, `shell-${name}-board-${theme}-en.png`); } finally { await b.close(); }
+      try { await b.settled(); await shot(b, `shell-${name}-board-${theme}-en.png`); } finally { await b.close(); }
     }
   }
   assert.ok(existsSync(join(out, "shell-desktop-chat-dark-en.png")));
