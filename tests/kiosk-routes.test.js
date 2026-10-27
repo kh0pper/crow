@@ -321,28 +321,41 @@ test("stall fix (wired): every kiosk voice turn carries the 3-round cap, the 12 
   w.close();
 });
 
-// Ruling D (Task 7 carry): the login is trusted only when Serve delivered it (loopback socket).
-test("ruling D: pairRequester trusts Tailscale-User-Login only over a loopback socket; keys on the socket address, never X-Forwarded-For", () => {
+// Ruling D (Task 7 carry), P0: the login is trusted only when tailscaled delivered it: the gateway's peer
+// class (req.crowPeer, servers/shared/peer-class.js) says "serve". A bare header, from any socket, is not enough.
+test("ruling D: pairRequester takes the login only from a Serve peer class; keys on the classified client, never a raw X-Forwarded-For", () => {
+  const serve = { via: "serve", client: "100.64.20.5", tailnetLogin: "a@b" };
   for (const a of ["127.0.0.1", "::1", "::ffff:127.0.0.1"]) {
-    assert.deepEqual(pairRequester({ socket: { remoteAddress: a }, ip: "9.9.9.9", headers: { "tailscale-user-login": "a@b", "x-forwarded-for": "9.9.9.9" } }), { ip: a, login: "a@b" }, a);
+    assert.deepEqual(pairRequester({ socket: { remoteAddress: a }, ip: "9.9.9.9", crowPeer: serve, headers: { "tailscale-user-login": "a@b", "x-forwarded-for": "9.9.9.9" } }), { ip: "100.64.20.5", login: "a@b" }, a);
+    assert.deepEqual(pairRequester({ socket: { remoteAddress: a }, crowPeer: { ...serve, client: "100.64.20.6", tailnetLogin: null }, headers: {} }), { ip: "100.64.20.6", login: null }, `${a}: a tagged node keys on its own tailnet address`);
+    assert.deepEqual(pairRequester({ socket: { remoteAddress: a }, headers: { "tailscale-user-login": "forged@x" } }), { ip: a, login: null }, `${a}: no peer class → no login`);
+    assert.deepEqual(pairRequester({ socket: { remoteAddress: a }, crowPeer: { via: "unverified", client: a, tailnetLogin: null }, headers: { "tailscale-user-login": "forged@x" } }), { ip: a, login: null }, `${a}: unverified`);
   }
-  assert.deepEqual(pairRequester({ socket: { remoteAddress: "100.64.0.9" }, ip: "1.2.3.4", headers: { "tailscale-user-login": "forged@x", "x-forwarded-for": "1.2.3.4" } }), { ip: "100.64.0.9", login: null });
+  assert.deepEqual(pairRequester({ socket: { remoteAddress: "100.64.0.9" }, ip: "1.2.3.4", crowPeer: { via: "direct", client: "100.64.0.9", tailnetLogin: null }, headers: { "tailscale-user-login": "forged@x", "x-forwarded-for": "1.2.3.4" } }), { ip: "100.64.0.9", login: null });
   assert.deepEqual(pairRequester({ socket: {}, headers: {} }), { ip: "?", login: null });
 });
 
 test("ruling D (wired): pair/start keys by the Serve login over loopback — a second login is not limited by the first", async () => {
+  const { resolveClientMiddleware } = await import("../servers/shared/peer-class.js");
+  const { actAsServe, serveHeaders } = await import("./fixtures/serve-peer.mjs");
+  const prevUids = process.env.CROW_SERVE_PEER_UIDS;
+  actAsServe(); // this process stands in for tailscaled
   const k = createKioskRuntime(runtimeDeps());
   const app = express();
+  app.use(resolveClientMiddleware()); // as the gateway mounts it
   app.use(k.router((req, res, next) => next()));
   const { s, base: b } = await listen(app, k);
-  const start = (login) => fetch(b + "/api/kiosk/pair/start", { method: "POST", headers: { "Content-Type": "application/json", "Tailscale-User-Login": login }, body: "{}" });
+  const start = (login) => fetch(b + "/api/kiosk/pair/start", { method: "POST", headers: { "Content-Type": "application/json", ...serveHeaders(login) }, body: "{}" });
   try {
     const codes = [];
     for (let i = 0; i < 6; i++) codes.push((await (await start("a@b")).json()).error || "ok");
     assert.deepEqual(codes, ["ok", "ok", "ok", "too_many_pending", "too_many_pending", "rate_limited"]);
     assert.equal((await (await start("c@d")).json()).error, "too_many_pending", "other login has its own rate bucket");
     assert.ok(k.pairing.listPending().every((p) => p.login === "a@b"), "login recorded from the loopback (Serve) request");
-  } finally { k.stop(); s.close(); }
+  } finally {
+    k.stop(); s.close();
+    if (prevUids === undefined) delete process.env.CROW_SERVE_PEER_UIDS; else process.env.CROW_SERVE_PEER_UIDS = prevUids;
+  }
 });
 
 // Ruling E (Task 9 carry): speech gets the hub's abort signal all the way to speakText.
@@ -1598,4 +1611,38 @@ test("the turn check never lands in the voice transcripts: its turns carry noTra
   const r = await fetch(base + "/api/kiosk/internal/turn-check", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer ann-ok" }, body: "{}" });
   assert.ok(turnCalls.length > 0, `turn check ran (${r.status})`);
   assert.ok(turnCalls.every((o) => o.noTranscript === true && o.device.id === TURN_CHECK_DEVICE));
+});
+
+// P0 network check: the kiosk's WebSocket upgrade runs the real gate on the raw IncomingMessage (no Express).
+test("upgrade gate (/api/kiosk/session): Serve from tailscaled's uid passes; the same from another uid, a forged login from a public socket, Funnel, all 403; IPv6 tailnet passes", async () => {
+  const { EventEmitter } = await import("node:events");
+  const { isAllowedNetwork } = await import("../servers/gateway/dashboard/auth.js");
+  const { setProcNetReaderForTests, procV4Hex } = await import("../servers/shared/peer-uid.js");
+  const { serveHeaders } = await import("./fixtures/serve-peer.mjs");
+  const accepted = [];
+  class FakeWss { handleUpgrade(req) { accepted.push(req); } }
+  const k = createKioskRuntime(runtimeDeps({ isAllowedNetwork, WebSocketServer: FakeWss }));
+  const server = new EventEmitter();
+  k.attachUpgrade(server);
+  const H = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
+  const owner = (uid) => setProcNetReaderForTests((name) => name === "tcp" ? `${H}\n   0: ${procV4Hex("127.0.0.1")}:A028 ${procV4Hex("127.0.0.1")}:0BB9 01 00000000:00000000 00:00000000 00000000 ${uid} 0 1\n` : `${H}\n`);
+  const sock = (over = {}) => ({ remoteAddress: "127.0.0.1", remotePort: 41000, localAddress: "127.0.0.1", localPort: 3001, written: "", write(x) { this.written += x; }, destroy() { this.destroyed = true; }, ...over });
+  const up = (headers, socket = sock()) => { const before = accepted.length; server.emit("upgrade", { url: "/api/kiosk/session", headers, socket }, socket, Buffer.alloc(0)); return accepted.length > before ? "accepted" : (socket.written.match(/^HTTP\/1\.1 (\d+)/) || [])[1]; };
+  const prevUids = process.env.CROW_SERVE_PEER_UIDS;
+  delete process.env.CROW_SERVE_PEER_UIDS;
+  const w = console.warn; console.warn = () => {};
+  try {
+    owner(0);
+    assert.equal(up(serveHeaders("a@b")), "accepted");
+    assert.equal(up(serveHeaders(null, "fd7a:115c:a1e0::1")), "accepted", "tagged node over IPv6 Serve");
+    owner(1000);
+    assert.equal(up(serveHeaders("a@b")), "403", "Serve shape from the gateway's uid (a bot)");
+    assert.equal(up({ "tailscale-user-login": "a@b" }, sock({ remoteAddress: "203.0.113.7" })), "403");
+    assert.equal(up({ "tailscale-funnel-request": "?1", "x-forwarded-for": "8.8.8.8" }), "403");
+  } finally {
+    console.warn = w;
+    setProcNetReaderForTests(null);
+    if (prevUids === undefined) delete process.env.CROW_SERVE_PEER_UIDS; else process.env.CROW_SERVE_PEER_UIDS = prevUids;
+    k.stop();
+  }
 });

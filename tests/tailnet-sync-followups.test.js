@@ -35,6 +35,8 @@ import {
 import { ensureLocalInstanceRegistered, selfPairingAddress } from "../servers/gateway/instance-registry.js";
 import { instanceEnrollRouter } from "../servers/gateway/routes/instance-enroll.js";
 import { writeRepairAllowance } from "../servers/shared/enroll-guard.js";
+import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
+actAsServe(); // this process's HTTP client stands in for tailscaled (the Serve socket owner)
 
 const WS_PATH = "/api/instance-sync/stream";
 
@@ -183,7 +185,7 @@ test("pairing (enroll route + selfPairingAddress) advertises the tailnet dial ad
       try {
         const post = async (body) => {
           const res = await fetch(`http://127.0.0.1:${srv.address().port}/instance/enroll-request`, {
-            method: "POST", headers: { "Content-Type": "application/json", "X-Forwarded-For": "100.64.20.3" }, body: JSON.stringify(body), // as Serve forwards it
+            method: "POST", headers: { "Content-Type": "application/json", ...serveHeaders(null, "100.64.20.3") }, body: JSON.stringify(body), // as Serve forwards it
           });
           return { status: res.status, body: await res.json() };
         };

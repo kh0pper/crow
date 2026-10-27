@@ -37,6 +37,8 @@ import { createClient } from "@libsql/client";
 import modelsRouter, { requireDashboardSessionJson, HF_TOKEN_PROVIDER_ID } from "../servers/gateway/routes/models.js";
 import { setProviderSyncManager } from "../servers/shared/providers-db.js";
 import { loadState, registryKey } from "../servers/gateway/models/state.js";
+import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
+actAsServe(); // this process's HTTP client stands in for tailscaled (the Serve socket owner)
 
 const repoRoot = join(import.meta.dirname, "..");
 
@@ -82,7 +84,7 @@ async function seedSession(db, token = "test-session-token") {
  * isAllowedNetwork passes over plain loopback) + the session cookie. */
 function authHeaders(token, extra = {}) {
   return {
-    "tailscale-user-login": "test@example.com",
+    ...serveHeaders("test@example.com"),
     cookie: `crow_session=${token}`,
     ...extra,
   };
@@ -91,7 +93,7 @@ function authHeaders(token, extra = {}) {
 /** Headers for a request that passes the network check but carries no/a bad
  * session — isolates the SESSION half of the gate (see module doc). */
 function noSessionHeaders() {
-  return { "tailscale-user-login": "test@example.com" };
+  return { ...serveHeaders("test@example.com") };
 }
 
 function makeCatalog() {

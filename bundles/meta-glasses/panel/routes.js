@@ -82,6 +82,7 @@ async function loadSettingsReg()  { return import(pathToFileURL(join(gatewayDir,
 async function loadS3()           { return import(pathToFileURL(join(gatewayDir, "..", "storage", "s3-client.js")).href); }
 
 const { isAllowedNetwork } = await appImport("servers/gateway/dashboard/auth.js");
+const { classifyPeer } = await appImport("servers/shared/peer-class.js");
 const { csrfMiddleware } = await appImport("servers/gateway/dashboard/shared/csrf.js");
 const { musicUpstreamConfig, openPinnedUpstream, UpstreamRefused } = await appImport("servers/gateway/media/pinned-upstream.js");
 const { registerSchedulerHook } = await appImport("servers/gateway/scheduler-hooks.js");
@@ -105,11 +106,13 @@ const GLASSES_KIND = "glasses";
 const isGlassesRecord = (d) => !!d && (d.device_kind || GLASSES_KIND) === GLASSES_KIND;
 // Failed tokens are counted per caller AND device id: behind Tailscale Serve every request comes
 // from 127.0.0.1, so an address alone would let one stale phone lock out every device. The caller
-// is the tailnet identity Serve adds (else the socket address). A token that verifies is never
-// refused; the global ceiling only stops a flood of bad tokens from all callers together.
+// is the tailnet identity tailscaled asserted (peer class "serve"), else the classified client
+// address. A token that verifies is never refused; the global ceiling only stops a flood of bad
+// tokens from all callers together.
 const _authFailures = createLimiter({ max: 20, windowMs: 60_000 });      // per caller + device id
 const _authFailuresAll = createLimiter({ max: 300, windowMs: 60_000 });  // every caller together
-const failKey = (req, deviceId) => `${String(req.headers["tailscale-user-login"] || clientAddr(req)).slice(0, 200)}|${String(deviceId || "").slice(0, 128)}`;
+const callerOf = (req) => { const p = classifyPeer(req); return p.tailnetLogin || p.client || clientAddr(req); };
+const failKey = (req, deviceId) => `${String(callerOf(req)).slice(0, 200)}|${String(deviceId || "").slice(0, 128)}`;
 /** A bad token: 429 once this caller (or everyone) is over the limit, else counted and 401. */
 function badTokenStatus(req, deviceId) {
   const key = failKey(req, deviceId);

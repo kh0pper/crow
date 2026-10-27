@@ -51,8 +51,9 @@ import { mcpAuthMetadataRouter } from "@modelcontextprotocol/sdk/server/auth/rou
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import express from "express";
-import rateLimit, { ipKeyGenerator } from "express-rate-limit";
-import { generalLimiterSkip } from "./middleware/rate-limit.js";
+import rateLimit from "express-rate-limit";
+import { generalLimiterSkip, dashboardLoginKey } from "./middleware/rate-limit.js";
+import { trustedProxyList, resolveClientMiddleware } from "../shared/peer-class.js";
 import cors from "cors";
 import { crowdsecMiddleware } from "./middleware/crowdsec.js";
 import { rejectFunneledMiddleware } from "./funnel.js";
@@ -299,8 +300,11 @@ const sessionManager = new SessionManager();
 // Create Express app
 const app = express();
 
-// Trust reverse proxies (Tailscale Funnel, Cloudflare Tunnel, etc.)
-app.set("trust proxy", 1);
+// Trust X-Forwarded-For only from the proxies the operator declares in
+// CROW_TRUSTED_PROXIES (default: none). Tailscale Serve and Funnel need no
+// entry: resolveClientMiddleware (below) recognises them from the socket.
+// Always an array, never true/false (express-rate-limit validates both).
+app.set("trust proxy", trustedProxyList());
 
 // `res.redirectAfterPost(url)` → res.redirect(303, url). Turbo Drive treats
 // 302-after-POST as "stay on current URL" and 303 as "GET the new URL", so
@@ -394,6 +398,11 @@ app.use(async (req, res, next) => {
 // surface by accident.
 app.use(rejectFunneledMiddleware());
 
+// Classify the peer once (servers/shared/peer-class.js): req.crowPeer, and
+// for Serve/Funnel traffic req.ip = the client tailscaled named. Before
+// CrowdSec and every rate limiter, which key on req.ip.
+app.use(resolveClientMiddleware());
+
 // PR 0: CrowdSec gateway-middleware bouncer (no-op when CROW_CROWDSEC_BOUNCER_KEY is unset).
 // Mounted after security headers, before CORS/rate-limit so banned IPs get a fast 403
 // without consuming rate-limit budget. Uses synchronous LAPI lookup with 200ms timeout
@@ -443,10 +452,10 @@ app.use("/authorize", authLimiter);
 app.use("/token", authLimiter);
 app.use("/register", authLimiter);
 
-// Dashboard login rate limit. Key on req.ip + Tailscale-User-Login because
-// Funnel traffic all appears as 127.0.0.1 and would otherwise share one
-// bucket with the legit operator. rejectFunneled blocks Funnel before this
-// fires, but this is defense in depth if that middleware is ever bypassed.
+// Dashboard login rate limit. Key on req.ip + the tailnet login tailscaled
+// asserted (never a client-supplied header; see dashboardLoginKey).
+// rejectFunneled blocks Funnel before this fires, but this is defense in
+// depth if that middleware is ever bypassed.
 //
 // Only count POST requests (actual credential submissions). GET requests
 // to /dashboard/login are page loads — the browser re-fetches the form on
@@ -460,7 +469,7 @@ const dashboardLoginLimiter = rateLimit({
   // ipKeyGenerator normalizes IPv6 to its /56 so a v6 user can't rotate
   // within their prefix to dodge the limit (express-rate-limit v8 contract;
   // raw req.ip here triggered the ERR_ERL_KEY_GEN_IPV6 boot warning).
-  keyGenerator: (req) => `${ipKeyGenerator(req.ip)}:${req.headers["tailscale-user-login"] || ""}`,
+  keyGenerator: dashboardLoginKey,
   skip: (req) => req.method !== "POST",
   message: { error: "Too many login attempts, please try again later" },
 });

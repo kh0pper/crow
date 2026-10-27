@@ -47,6 +47,8 @@ import modelCatalogPanel, {
 import { dashboardAuth } from "../servers/gateway/dashboard/auth.js";
 import { translations } from "../servers/gateway/dashboard/shared/i18n.js";
 import { saveState } from "../servers/gateway/models/state.js";
+import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
+actAsServe(); // this process's HTTP client stands in for tailscaled (the Serve socket owner)
 
 const repoRoot = join(import.meta.dirname, "..");
 
@@ -400,7 +402,7 @@ test("panel route: tailnet-identified but no session cookie redirects to /dashbo
   try {
     await withPanelServer(h, async (base) => {
       const r = await fetch(base + "/dashboard/model-catalog", {
-        headers: { "tailscale-user-login": "test@example.com" },
+        headers: { ...serveHeaders("test@example.com") },
         redirect: "manual",
       });
       assert.equal(r.status, 303);
@@ -415,7 +417,7 @@ test("panel route: authenticated request renders 200 with the curated tab, runti
     const token = await seedSession(h.db);
     await withPanelServer(h, async (base) => {
       const r = await fetch(base + "/dashboard/model-catalog", {
-        headers: { "tailscale-user-login": "test@example.com", cookie: "crow_session=" + token },
+        headers: { ...serveHeaders("test@example.com"), cookie: "crow_session=" + token },
       });
       assert.equal(r.status, 200);
       const html = await r.text();
@@ -441,7 +443,7 @@ test("panel route: renders in Spanish when lang=es is passed through the layout 
     const token = await seedSession(h.db);
     await withPanelServer(h, async (base) => {
       const r = await fetch(base + "/dashboard/model-catalog", {
-        headers: { "tailscale-user-login": "test@example.com", cookie: "crow_session=" + token, "x-test-lang": "es" },
+        headers: { ...serveHeaders("test@example.com"), cookie: "crow_session=" + token, "x-test-lang": "es" },
       });
       assert.equal(r.status, 200);
       const html = await r.text();

@@ -19,6 +19,7 @@
 import { isIP } from "node:net";
 import { isExternalEngine } from "../../shared/provider-engine.js";
 import { classifyIp } from "../../shared/ip-classify.js";
+import { forwardedAddrs } from "../../shared/peer-class.js";
 
 export const DOOR_PROVIDER_HEADER = "x-crow-provider";
 export const DOOR_HOP_HEADER = "x-crow-door-hop";
@@ -180,43 +181,13 @@ export function isLocalClassTarget(url) {
   return true;
 }
 
-/** One forwarding-header value -> the bare address it names, or null when it
- * names something that is not an address ("unknown", an obfuscated token). */
-function bareForwardedAddr(v) {
-  let x = String(v || "").trim().replace(/^"|"$/g, "");
-  if (!x) return "";
-  const br = x.match(/^\[([^\]]+)\](?::\d+)?$/);
-  if (br) return br[1];
-  const v4port = x.match(/^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/);
-  if (v4port) return v4port[1];
-  if (/^[0-9a-f:.]+$/i.test(x) && (x.includes(".") || x.includes(":"))) return x;
-  return null;
-}
-
-function headerValues(h) {
-  if (h == null) return [];
-  return (Array.isArray(h) ? h : [h]).flatMap((v) => String(v).split(","));
-}
-
-/** Every address a request's forwarding headers name (X-Forwarded-For,
- * X-Real-IP, RFC 7239 Forwarded `for=`). `null` entries mark values that are
- * not addresses. Empty values are skipped. */
-export function forwardedAddrs(headers = {}) {
-  const out = [];
-  for (const v of headerValues(headers["x-forwarded-for"])) { const a = bareForwardedAddr(v); if (a !== "") out.push(a); }
-  for (const v of headerValues(headers["x-real-ip"])) { const a = bareForwardedAddr(v); if (a !== "") out.push(a); }
-  for (const el of headerValues(headers["forwarded"])) {
-    for (const pair of el.split(";")) {
-      const m = pair.trim().match(/^for=(.*)$/i);
-      if (m) { const a = bareForwardedAddr(m[1]); if (a !== "") out.push(a); }
-    }
-  }
-  return out;
-}
+// The forwarding-header parsers live with the shared peer classifier
+// (servers/shared/peer-class.js); re-exported here for existing importers.
+export { forwardedAddrs };
 
 /** The ONE source check for /llm (door, companion /llm/v1, /llm/acquire).
  * `remoteAddr` is req.socket.remoteAddress — the TCP peer, which Express's
- * `trust proxy` setting (index.js sets 1) never changes; `req.ip` is the value
+ * `trust proxy` setting (index.js: CROW_TRUSTED_PROXIES) never changes; `req.ip` is the value
  * that setting rewrites from X-Forwarded-For, so it is never consulted here.
  * The socket must be loopback or tailnet, AND — because a same-box reverse
  * proxy (Tailscale Serve, or r4's sslip.io front door: black-swan Caddy ->

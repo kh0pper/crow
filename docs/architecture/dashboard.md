@@ -204,22 +204,24 @@ Everything is a template literal — no template engine dependency. CSS is inlin
 
 ## Network Security
 
-Before any Crow's Nest route executes, middleware checks the request's source IP:
+Before any Crow's Nest route executes, `isAllowedNetwork()` (`servers/gateway/dashboard/auth.js`) decides on the **TCP peer**, classified once per request by `classifyPeer()` (`servers/shared/peer-class.js`). A header is never an allow reason on its own.
 
-```js
-const ALLOWED_RANGES = [
-  '127.0.0.1/32',       // Localhost
-  '::1/128',            // Localhost IPv6
-  '10.0.0.0/8',         // LAN Class A
-  '172.16.0.0/12',      // LAN Class B
-  '192.168.0.0/16',     // LAN Class C
-  '100.64.0.0/10',      // Tailscale CGNAT
-];
-```
+| Peer class | When | Client address | Allowed? |
+|---|---|---|---|
+| `local` | loopback socket, no forwarding or `Tailscale-*` headers | the socket | no (a bare local process) |
+| `serve` | loopback socket **opened by tailscaled's uid** (`CROW_SERVE_PEER_UIDS`, default `0`, checked in `/proc/net/tcp`), exactly one `X-Forwarded-For` in a tailnet range (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`), `X-Forwarded-Host` present, no Funnel header | the `X-Forwarded-For` address | yes |
+| `funnel` | the same, with `Tailscale-Funnel-Request` and a **public** `X-Forwarded-For` | the public client | never (public paths only) |
+| `proxy` | socket listed in `CROW_TRUSTED_PROXIES` | rightmost undeclared `X-Forwarded-For` hop | if every forwarded address is LAN, tailnet or `CROW_ALLOWED_IPS` |
+| `direct` | any other non-loopback socket | the socket | if the socket and every forwarded address are LAN, tailnet or `CROW_ALLOWED_IPS` |
+| `unverified` | any other loopback request carrying forwarding or `Tailscale-*` headers | the socket | no |
 
-Requests from outside these ranges receive a `403 Forbidden` response. To allow access from any IP (e.g., behind a reverse proxy), set `CROW_DASHBOARD_PUBLIC=true`.
+`Tailscale-User-Login` is honoured only for `serve`, and is withheld when the Serve client is itself listed in `CROW_TRUSTED_PROXIES` (a relay chained into Serve cannot vouch for its visitors). Express's `trust proxy` is set to `CROW_TRUSTED_PROXIES` (default: trust no one); for `serve` and `funnel` traffic `req.ip` is the client tailscaled named, so rate limits and the login lockout keep per-client keys. To allow access from any IP, set `CROW_DASHBOARD_PUBLIC=true` (Funnel traffic is still refused).
 
-The middleware reads `X-Forwarded-For` when the gateway is behind a reverse proxy, but only trusts it if the immediate connection comes from a known proxy IP.
+The first time forwarding headers arrive from an undeclared peer, the gateway logs `[net] WARN forwarding headers from undeclared peer …` once.
+
+The uid check **fails closed**: if the socket owner cannot be verified (no `/proc/net/tcp`, a read error, or the connection already gone), the request is `unverified` and Serve's headers are not honoured. On a host without procfs (macOS, Windows native), tailnet users reaching the gateway through Serve are therefore refused unless the operator opts in with `CROW_SERVE_PEER_UIDS=off`, which accepts Serve's shape alone and logs `[net] WARN CROW_SERVE_PEER_UIDS=off …` once. A miss is never cached: the next request on the same connection is checked again. If `/proc/net/tcp` stays unreadable on a Linux host, every Serve request is refused (public Funnel paths still answer); recover by reaching the gateway directly on its tailnet address (`http://<tailnet-ip>:3001`, a direct tailnet peer) or by setting `CROW_SERVE_PEER_UIDS=off` and restarting.
+
+**Residuals.** A process running as tailscaled's uid (root) can forge Serve's shape. That includes root processes in **host-network containers**, for example a headless browser container that bots can drive (it can add headers over DevTools); the forged login and address then reach only rate-limit keys (login limiter, kiosk pairing, blog-embed tier, glasses lockouts) and audit fields, since such a process can already pass the network gate by dialling the host's own tailnet address. So can a process running as the gateway's uid where the operator opted out (`CROW_SERVE_PEER_UIDS=off`) or tailscaled shares the gateway's uid (each is warn-logged once). Any local process can reach a port that a declared proxy fronts (for example a container's docker-proxy port), and is then classified by that proxy's rules.
 
 ## App Launcher
 

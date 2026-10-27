@@ -249,15 +249,19 @@ test("fix A: derived inverses come from the row's args + pre only (exact or null
   assert.equal(inv("ws_sheets_add_tab", { title: "X" }, {}), null);
 });
 
-test("fix C + fix2 X1: pre-auth buckets count only token FAILURES, keyed by the rightmost XFF hop; post-auth per (document, user) and per document", async () => {
+test("fix C + fix2 X1: pre-auth buckets count only token FAILURES, keyed by the gateway's classified client; post-auth per (document, user) and per document", async () => {
   const { liveRouter } = await import("../bundles/workspace/server/live/routes-live.js");
   const { getConfig } = await import("../bundles/workspace/server/config.js");
-  const mk = (limits) => { const a = express(); a.use(liveRouter({ Router: express.Router, json: express.json, db, getConfig, clock: { now: () => Date.now() }, limits })); const s = a.listen(0); return { s, b: `http://127.0.0.1:${s.address().port}` }; };
+  const { resolveClientMiddleware } = await import("../servers/shared/peer-class.js");
+  const { actAsServe } = await import("./fixtures/serve-peer.mjs");
+  actAsServe(); // this process stands in for tailscaled (Serve's socket owner)
+  const mk = (limits) => { const a = express(); a.use(resolveClientMiddleware()); a.use(liveRouter({ Router: express.Router, json: express.json, db, getConfig, clock: { now: () => Date.now() }, limits })); const s = a.listen(0); return { s, b: `http://127.0.0.1:${s.address().port}` }; };
   const { s: s2, b: b2 } = mk({ perIp: 3, global: 5, perUser: 100, perDocument: 100 });
   try {
-    const hit = (xff, jwt = "bad.token.x") => fetch(`${b2}/pending?key=${key}&${PV}`, { headers: { Authorization: `Bearer ${jwt}`, "X-Forwarded-For": xff } }).then((r) => r.status);
+    const hit = (xff, jwt = "bad.token.x") => fetch(`${b2}/pending?key=${key}&${PV}`, { headers: { Authorization: `Bearer ${jwt}`, "X-Forwarded-For": xff, "X-Forwarded-Host": "crow.example.ts.net:8457" } }).then((r) => r.status);
     const oo = fake.calls.filter((c) => c.method === "OO").length;
-    // a client rotating a spoofed FIRST hop stays in one bucket: the rightmost hop is the one the proxy added
+    // a client rotating a spoofed extra hop stays in one bucket: Serve writes exactly one XFF value, so a
+    // multi-hop XFF is not Serve's and is keyed on the socket (P0 peer classifier)
     assert.deepEqual([await hit("1.1.1.1, 100.64.0.1"), await hit("2.2.2.2, 100.64.0.1"), await hit("3.3.3.3, 100.64.0.1"), await hit("4.4.4.4, 100.64.0.1")], [401, 401, 401, 429]);
     assert.equal(fake.calls.filter((c) => c.method === "OO").length, oo, "bad tokens never reach ONLYOFFICE");
     assert.deepEqual([await hit("100.64.0.2"), await hit("100.64.0.3"), await hit("100.64.0.4")], [401, 401, 429], "the global cap on failures (3 + 2 counted, the 6th refused)");

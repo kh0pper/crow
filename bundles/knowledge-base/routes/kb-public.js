@@ -62,11 +62,20 @@ async function loadSharedModules() {
 }
 
 /**
- * Check if a request originates from a private/LAN IP range.
- * Proxy-aware: uses req.ip which Express resolves via trust proxy.
+ * Check if a request originates from this machine or a private/LAN IP range
+ * (RFC1918). Never the tailnet: Serve traffic, Funnel traffic and a public
+ * front door chained into Serve are not "lan". Uses the gateway's peer class
+ * (req.crowPeer, servers/shared/peer-class.js): local, or a direct / declared-
+ * proxy client in RFC1918. Without it (an older gateway), the socket address.
  */
-function isLanRequest(req) {
-  const ip = req.ip || req.connection?.remoteAddress || "";
+export function isLanRequest(req) {
+  const peer = req.crowPeer;
+  if (peer) {
+    if (peer.via === "local") return true;
+    if (peer.via !== "direct" && peer.via !== "proxy") return false;
+    return /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(String(peer.client || "").replace(/^::ffff:/, ""));
+  }
+  const ip = req.socket?.remoteAddress || req.connection?.remoteAddress || "";
   const normalized = ip.replace(/^::ffff:/, "");
   return /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.)/.test(normalized)
     || normalized === "::1";

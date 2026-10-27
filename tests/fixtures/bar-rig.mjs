@@ -20,6 +20,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import express from "express";
 import { WebSocketServer } from "ws";
+import { actAsServe, serveHeaders } from "./serve-peer.mjs";
+actAsServe(); // this process's HTTP client stands in for tailscaled (the Serve socket owner)
 
 const REPO = new URL("../..", import.meta.url).pathname;
 export const ART_ID = "art_barTest01";
@@ -125,8 +127,9 @@ ${turbo ? `<script>${TURBO}</script>` : ""}<style>${designTokensCss()} body{marg
   const app = express();
   app.set("trust proxy", false);
   app.use((req, res, next) => { res.redirectAfterPost = (url) => res.redirect(303, url); next(); });
-  // Tailscale Serve stand-in: tailnet requests carry a login; a Funnel request carries only its own header.
-  app.use((req, _res, next) => { if (!req.headers["tailscale-funnel-request"]) req.headers["tailscale-user-login"] = "alex@example.com"; next(); });
+  // Tailscale Serve stand-in: tailnet requests carry Serve's headers (this process plays tailscaled's uid,
+  // see serve-peer.mjs); a Funnel request carries only its own header.
+  app.use((req, _res, next) => { if (!req.headers["tailscale-funnel-request"]) Object.assign(req.headers, serveHeaders("alex@example.com")); next(); });
   app.use(rejectFunneledMiddleware());
   app.use((req, res, next) => {
     if (req.path.startsWith("/display/t/")) { streams.push({ start: true, range: req.headers.range || null }); res.on("finish", () => streams.push({ status: res.statusCode, at: Date.now() })); res.on("close", () => { if (!res.writableFinished) streams.push({ status: res.statusCode, at: Date.now(), cut: true }); }); }

@@ -14,6 +14,8 @@ import { createClient } from "@libsql/client";
 
 import modelsRouter from "../../servers/gateway/routes/models.js";
 import { setProviderSyncManager } from "../../servers/shared/providers-db.js";
+import { actAsServe, serveHeaders } from "./serve-peer.mjs";
+actAsServe(); // this process's HTTP client stands in for tailscaled (the Serve socket owner)
 
 const repoRoot = join(import.meta.dirname, "..", "..");
 
@@ -51,7 +53,7 @@ export const CSRF = "test-csrf-value";
 /** Session + tailnet identity + the double-submit CSRF pair. */
 export function authHeaders(token, extra = {}) {
   return {
-    "tailscale-user-login": "test@example.com",
+    ...serveHeaders("test@example.com"),
     cookie: `crow_session=${token}; crow_csrf=${CSRF}`,
     "x-crow-csrf": CSRF,
     "content-type": "application/json",
@@ -67,7 +69,7 @@ export function noCsrfHeaders(token) {
 }
 
 export function noSessionHeaders() {
-  return { "tailscale-user-login": "test@example.com", "content-type": "application/json" };
+  return { ...serveHeaders("test@example.com"), "content-type": "application/json" };
 }
 
 export async function withServer(opts, fn) {

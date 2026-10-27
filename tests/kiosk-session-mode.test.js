@@ -32,7 +32,9 @@ delete process.env.CROW_DASHBOARD_PUBLIC;
 delete process.env.CROW_CSRF_STRICT;
 const REPO = new URL("..", import.meta.url).pathname;
 
-const SERVE = { "Tailscale-User-Login": "alex@example.com" };   // what Tailscale Serve adds for a tailnet user
+import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
+actAsServe();   // this process's HTTP client stands in for tailscaled (the Serve socket owner)
+const SERVE = serveHeaders("alex@example.com");   // what Tailscale Serve adds for a tailnet user
 const CSRF = "c5f0c5f0c5f0c5f0c5f0c5f0c5f0c5f0";
 const PAGE = "/display/session";
 const WS_PATH = "/api/kiosk/session/dashboard";

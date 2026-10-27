@@ -185,22 +185,24 @@ Todo es un template literal — sin dependencia de motor de plantillas. El CSS v
 
 ## Seguridad de red
 
-Antes de que se ejecute cualquier ruta del Crow's Nest, un middleware verifica la IP de origen de la solicitud:
+Antes de que se ejecute cualquier ruta del Crow's Nest, `isAllowedNetwork()` (`servers/gateway/dashboard/auth.js`) decide según el **par TCP**, clasificado una vez por petición con `classifyPeer()` (`servers/shared/peer-class.js`). Un encabezado nunca es, por sí solo, motivo para permitir el acceso.
 
-```js
-const ALLOWED_RANGES = [
-  '127.0.0.1/32',       // Localhost
-  '::1/128',            // Localhost IPv6
-  '10.0.0.0/8',         // LAN Clase A
-  '172.16.0.0/12',      // LAN Clase B
-  '192.168.0.0/16',     // LAN Clase C
-  '100.64.0.0/10',      // CGNAT de Tailscale
-];
-```
+| Clase de par | Cuándo | Dirección del cliente | ¿Permitido? |
+|---|---|---|---|
+| `local` | socket de loopback, sin encabezados de reenvío ni `Tailscale-*` | el socket | no (un proceso local sin más) |
+| `serve` | socket de loopback **abierto por el uid de tailscaled** (`CROW_SERVE_PEER_UIDS`, por defecto `0`, verificado en `/proc/net/tcp`), exactamente un `X-Forwarded-For` en un rango de la tailnet (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`), con `X-Forwarded-Host` y sin el encabezado de Funnel | la dirección de `X-Forwarded-For` | sí |
+| `funnel` | lo mismo, con `Tailscale-Funnel-Request` y un `X-Forwarded-For` **público** | el cliente público | nunca (solo rutas públicas) |
+| `proxy` | socket listado en `CROW_TRUSTED_PROXIES` | el salto de `X-Forwarded-For` más a la derecha que no sea un proxy declarado | si todas las direcciones reenviadas son LAN, tailnet o `CROW_ALLOWED_IPS` |
+| `direct` | cualquier otro socket que no sea de loopback | el socket | si el socket y todas las direcciones reenviadas son LAN, tailnet o `CROW_ALLOWED_IPS` |
+| `unverified` | cualquier otra petición de loopback con encabezados de reenvío o `Tailscale-*` | el socket | no |
 
-Las solicitudes desde fuera de estos rangos reciben una respuesta `403 Forbidden`. Para permitir el acceso desde cualquier IP (p. ej., detrás de un reverse proxy), establece `CROW_DASHBOARD_PUBLIC=true`.
+`Tailscale-User-Login` solo se respeta para `serve`, y se descarta cuando el cliente de Serve está listado en `CROW_TRUSTED_PROXIES` (un relay encadenado a Serve no puede responder por sus visitantes). El `trust proxy` de Express toma el valor de `CROW_TRUSTED_PROXIES` (por defecto no confía en nadie); para el tráfico `serve` y `funnel`, `req.ip` es el cliente que nombró tailscaled, así que los límites de tasa y el bloqueo de inicio de sesión mantienen claves por cliente. Para permitir el acceso desde cualquier IP, configura `CROW_DASHBOARD_PUBLIC=true` (el tráfico de Funnel se sigue rechazando).
 
-El middleware lee `X-Forwarded-For` cuando el gateway está detrás de un reverse proxy, pero solo confía en él si la conexión inmediata proviene de una IP de proxy conocida.
+La primera vez que llegan encabezados de reenvío desde un par no declarado, el gateway registra una vez `[net] WARN forwarding headers from undeclared peer …`.
+
+La verificación de uid **falla en cerrado**: si no se puede verificar el dueño del socket (sin `/proc/net/tcp`, un error de lectura, o la conexión ya cerrada), la petición queda `unverified` y no se respetan los encabezados de Serve. En un host sin procfs (macOS, Windows nativo), los usuarios de la tailnet que llegan por Serve se rechazan, salvo que el operador lo active explícitamente con `CROW_SERVE_PEER_UIDS=off`, que acepta solo la forma de Serve y registra una vez `[net] WARN CROW_SERVE_PEER_UIDS=off …`. Un fallo nunca se guarda en caché: la siguiente petición por la misma conexión se verifica de nuevo. Si `/proc/net/tcp` sigue sin poder leerse en un host Linux, se rechaza toda petición de Serve (las rutas públicas de Funnel siguen respondiendo); para recuperar el acceso, entra al gateway directamente por su dirección de la tailnet (`http://<ip-tailnet>:3001`, un par directo de la tailnet) o configura `CROW_SERVE_PEER_UIDS=off` y reinicia.
+
+**Riesgos residuales.** Un proceso que corre con el uid de tailscaled (root) puede falsificar la forma de Serve. Eso incluye procesos root en **contenedores con red del host**, por ejemplo un contenedor de navegador headless que los bots pueden controlar (puede añadir encabezados vía DevTools); el login y la dirección falsificados solo llegan a claves de límite de tasa (límite de inicio de sesión, emparejamiento del kiosk, nivel de blog-embed, bloqueos de las gafas) y a campos de auditoría, ya que ese proceso ya puede pasar la verificación de red marcando la dirección de la tailnet del propio host. También puede hacerlo un proceso con el uid del gateway donde el operador desactivó la verificación (`CROW_SERVE_PEER_UIDS=off`) o si tailscaled comparte el uid del gateway (cada caso se advierte una vez en el log). Cualquier proceso local puede llegar a un puerto que atiende un proxy declarado (por ejemplo, el puerto de docker-proxy de un contenedor), y entonces se clasifica según las reglas de ese proxy.
 
 ## Lanzador de aplicaciones
 

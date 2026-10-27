@@ -22,12 +22,15 @@ import express from "express";
 import { makeRealDb } from "./fixtures/sync-fleet.mjs";
 import { instanceEnrollRouter, enrollSourceAllowed, acceptableAdvertisedUrl, ENROLL_FAIL_PER_SOURCE, ENROLL_FAIL_GLOBAL } from "../servers/gateway/routes/instance-enroll.js";
 import { isAllowedNetwork, isAllowedEnrollNetwork } from "../servers/gateway/dashboard/auth.js";
-import proxyaddr from "proxy-addr";
+import { trustedProxyList } from "../servers/shared/peer-class.js";
+import { actAsServe } from "./fixtures/serve-peer.mjs";
 import { rejectFunneledMiddleware } from "../servers/gateway/funnel.js";
 import { validateInstanceToken } from "../servers/gateway/instance-registry.js";
 import { repairProof, repairProofKey, writeRepairAllowance, generateEnrollOtc } from "../servers/shared/enroll-guard.js";
 
 const REPO = new URL("..", import.meta.url).pathname;
+// The Serve stand-ins below run in this process, so this process plays tailscaled's uid.
+actAsServe();
 const sha = (s) => createHash("sha256").update(s).digest("hex");
 
 function snapshotEnv() {
@@ -77,14 +80,15 @@ async function startPeer(P, { otc, now, db = P.db } = {}) {
   const app = express();
   app.use(rejectFunneledMiddleware());
   app.use(instanceEnrollRouter(db, { execFileSyncImpl: () => { throw new Error("no tailscale in tests"); }, ...(now ? { now } : {}) }));
-  app.set("trust proxy", 1); // as servers/gateway/index.js
+  app.set("trust proxy", trustedProxyList()); // as servers/gateway/index.js
   const srv = createServer(app);
   await new Promise((r) => srv.listen(0, "127.0.0.1", r));
-  // A Tailscale-Serve-like front: proxies over loopback and REPLACES
-  // X-Forwarded-For with the client's (here: a fixed tailnet) address. The
-  // real CLI dials this, as it dials a peer's Serve URL in production.
+  // A Tailscale-Serve-like front: proxies over loopback, REPLACES
+  // X-Forwarded-For with the client's (here: a fixed tailnet) address and sets
+  // X-Forwarded-Host to the Host the client used. The real CLI dials this, as
+  // it dials a peer's Serve URL in production.
   const serve = createServer((inReq, inRes) => {
-    const headers = { ...inReq.headers, "x-forwarded-for": serveClientIp };
+    const headers = { ...inReq.headers, "x-forwarded-for": serveClientIp, "x-forwarded-host": inReq.headers.host };
     const out = request({ host: "127.0.0.1", port: srv.address().port, path: inReq.url, method: inReq.method, headers }, (r) => {
       inRes.writeHead(r.statusCode, r.headers);
       r.pipe(inRes);
@@ -106,7 +110,7 @@ function post(port, body, { localAddress = "127.0.0.1", xff = "100.64.200.1", he
     const data = JSON.stringify(body);
     const req = request({
       host: "127.0.0.1", port, path: "/instance/enroll-request", method: "POST", localAddress,
-      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data), ...(xff ? { "X-Forwarded-For": xff } : {}), ...headers },
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data), ...(xff ? { "X-Forwarded-For": xff, "X-Forwarded-Host": "crow.example.ts.net:8444" } : {}), ...headers },
     }, (res) => {
       let buf = "";
       res.on("data", (c) => { buf += c; });
@@ -553,34 +557,43 @@ test("no differential: the enroll gate never allows what the dashboard gate refu
   delete process.env.CROW_ALLOWED_IPS;
   try {
     // [socket, headers, enroll expected, dashboard expected]
+    // Shape-only here (CROW_SERVE_PEER_UIDS=off): the socket-owner check is
+    // pinned in tests/peer-class.test.js and tests/auth-network.test.js.
+    process.env.CROW_SERVE_PEER_UIDS = "off";
+    delete process.env.CROW_TRUSTED_PROXIES;
+    const XFH = { "x-forwarded-host": "crow.example.ts.net:8444" };
     const cases = [
       ["127.0.0.1", {}, false, false],
       ["::ffff:127.0.0.1", {}, false, false],
-      ["127.0.0.1", { "x-forwarded-for": "100.64.0.9" }, true, true],
-      ["127.0.0.1", { "x-forwarded-for": "10.0.0.9" }, true, true],
+      ["127.0.0.1", { "x-forwarded-for": "100.64.0.9" }, false, false], // no X-Forwarded-Host: not Serve's shape
+      ["127.0.0.1", { "x-forwarded-for": "100.64.0.9", ...XFH }, true, true],
+      ["127.0.0.1", { "x-forwarded-for": "10.0.0.9", ...XFH }, false, false], // an undeclared same-box proxy
       ["127.0.0.1", { "x-forwarded-for": "203.0.113.9" }, false, false],
-      ["127.0.0.1", { "x-forwarded-for": "100.64.0.9, 203.0.113.9" }, false, false],
+      ["127.0.0.1", { "x-forwarded-for": "100.64.0.9, 203.0.113.9", ...XFH }, false, false],
       ["127.0.0.1", { "x-forwarded-for": "127.0.0.1" }, false, false],
       ["127.0.0.1", { "tailscale-funnel-request": "?1", "x-forwarded-for": "100.64.0.9" }, false, false],
-      ["127.0.0.1", { "tailscale-user-login": "a@b" }, false, true],
-      ["127.0.0.1", { "x-forwarded-for": "203.0.113.9, 100.64.0.9" }, false, true],
+      ["127.0.0.1", { "tailscale-user-login": "a@b" }, false, false],
+      ["127.0.0.1", { "x-forwarded-for": "203.0.113.9, 100.64.0.9", ...XFH }, false, false],
       ["100.64.0.9", {}, true, true],
       ["10.0.0.9", {}, true, true],
       ["192.168.1.9", {}, true, true],
       ["203.0.113.9", {}, false, false],
-      ["203.0.113.9", { "x-forwarded-for": "100.64.0.9" }, false, true],
+      ["203.0.113.9", { "x-forwarded-for": "100.64.0.9" }, false, false],
       ["100.64.0.9", { "x-forwarded-for": "203.0.113.9" }, false, false],
       ["100.64.0.9", { "tailscale-funnel-request": "?1" }, false, false],
-      ["fd7a:115c:a1e0::9", {}, false, false],
-      ["127.0.0.1", { "x-forwarded-for": "100.64.0.9", host: null }, false, true],
-      ["127.0.0.1", { "x-forwarded-for": "100.64.0.9", host: "app.example.com" }, false, true],
+      ["fd7a:115c:a1e0::9", {}, true, true],
+      ["127.0.0.1", { "x-forwarded-for": "100.64.0.9", ...XFH, host: null }, false, true],
+      ["127.0.0.1", { "x-forwarded-for": "100.64.0.9", ...XFH, host: "app.example.com" }, false, true],
+      ["127.0.0.1", { "x-forwarded-for": "10.0.0.9", __proxies: "loopback" }, true, true], // a declared same-box proxy
     ];
     for (const [sock, headers, wantEnroll, wantDash] of cases) {
       // Every real HTTP/1.1 request carries Host; default it to a tailnet name.
-      const h = { host: "crow.example.ts.net:8444", ...headers };
+      const { __proxies, ...hdrs } = headers;
+      if (__proxies) process.env.CROW_TRUSTED_PROXIES = __proxies; else delete process.env.CROW_TRUSTED_PROXIES;
+      const h = { host: "crow.example.ts.net:8444", ...hdrs };
       if (h.host === null) delete h.host;
       const req = { socket: { remoteAddress: sock }, connection: { remoteAddress: sock }, headers: h };
-      req.ip = proxyaddr(req, (_addr, i) => i < 1); // express `trust proxy` = 1
+      req.ip = "203.0.113.250"; // never read: both gates decide on the socket
       const e = isAllowedEnrollNetwork(req);
       const d = isAllowedNetwork(req);
       const label = `${sock} ${JSON.stringify(headers)}`;

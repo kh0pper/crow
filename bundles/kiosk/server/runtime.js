@@ -246,18 +246,21 @@ export function displayTurnOptions(ctx, { now = Date.now, tz = null, settings = 
   };
 }
 
-const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
 /**
  * Who is asking to pair (Task 7 carry). The rate-limit key is the Tailscale
- * login ONLY when the request arrived over the loopback socket — i.e. through
- * Tailscale Serve, which asserts that header. A direct tailnet/LAN hit on the
- * gateway port could forge it, so there the key is the raw socket address
- * (never req.ip, which may trust X-Forwarded-For).
+ * login ONLY when tailscaled asserted it: the gateway's peer class says
+ * "serve" (req.crowPeer, servers/shared/peer-class.js: a loopback socket owned
+ * by tailscaled, in Serve's shape). A direct hit, a local process or a relay
+ * could forge the header, so there the key is the classified client address
+ * (never a raw header). No peer class (an older core): no login, socket key.
  */
 export function pairRequester(req) {
-  const ip = String(req?.socket?.remoteAddress || "") || "?";
-  const login = LOOPBACK.has(ip) ? (String(req?.headers?.["tailscale-user-login"] || "").slice(0, 128) || null) : null;
+  const peer = req?.crowPeer;
+  // The classified client (the tailnet address tailscaled named for Serve), so tagged nodes with
+  // no login do not all share the 127.0.0.1 bucket; the raw socket only on an older core.
+  const ip = String(peer?.client || req?.socket?.remoteAddress || "") || "?";
+  const login = peer?.via === "serve" ? (String(peer.tailnetLogin || "").slice(0, 128) || null) : null;
   return { ip, login };
 }
 
@@ -314,6 +317,7 @@ export function kioskThemeCss(T) {
 }
 
 function directLoopback(req) {
+  if (req.crowPeer) return req.crowPeer.via === "local";
   const a = String(req.socket?.remoteAddress || "").replace(/^::ffff:/, "");
   if (a !== "127.0.0.1" && a !== "::1") return false;
   return !Object.keys(req.headers).some((h) => h.startsWith("tailscale-") || h === "x-forwarded-for" || h === "forwarded" || h === "x-forwarded-host");

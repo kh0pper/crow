@@ -29,6 +29,8 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
+import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
+actAsServe(); // this process's HTTP client stands in for tailscaled (the Serve socket owner)
 
 const dir = mkdtempSync(join(tmpdir(), "shell-live-"));
 process.env.CROW_DATA_DIR = dir;
@@ -99,7 +101,7 @@ before(async () => {
 
   const { default: express } = await import("express");
   const app = express();
-  app.use((req, res, next) => { req.headers["tailscale-user-login"] = "operator@example.com"; res.redirectAfterPost = (url) => res.redirect(303, url); next(); });
+  app.use((req, res, next) => { Object.assign(req.headers, serveHeaders("operator@example.com")); /* Serve stand-in: the headers Serve really sends */ res.redirectAfterPost = (url) => res.redirect(303, url); next(); });
   app.use(express.static(fileURLToPath(new URL("../servers/gateway/public", import.meta.url))));
   app.get("/a.wav", (req, res) => res.type("audio/wav").send(wav()));
   app.get("/display/session", (req, res) => res.type("html").send("<!doctype html><title>session</title><p>talk</p>"));

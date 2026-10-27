@@ -15,6 +15,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
+actAsServe(); // this process's HTTP client stands in for tailscaled (the Serve socket owner)
 
 const dir = mkdtempSync(join(tmpdir(), "shell-routes-"));
 process.env.CROW_DATA_DIR = dir;
@@ -70,7 +72,7 @@ before(async () => {
 
 after(() => { if (server) server.close(); rmSync(dir, { recursive: true, force: true }); });
 
-const NET = { "tailscale-user-login": "operator@example.com" };
+const NET = serveHeaders("operator@example.com"); // what Tailscale Serve sends for a tailnet user
 const cookieHeader = (jar) => Object.entries(jar).map(([k, v]) => `${k}=${v}`).join("; ");
 
 async function get(path, jar = {}) {
