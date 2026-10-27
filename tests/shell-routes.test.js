@@ -335,11 +335,25 @@ test("a new device never sees the card in classic", async () => {
 
 test("the dismiss route sits behind csrf", async () => {
   const r = await post("/dashboard/mode/try-dismiss", {}, { jar: OLD, csrfHeader: false });
-  assert.notEqual(r.status, 303);
+  assert.equal(r.status, 403);
 });
 
 test("Settings offers the switch in classic", async () => {
   const r = await get("/dashboard/settings?section=crow-mode", { ...OLD, [MODE]: "classic" });
   assert.equal(r.status, 200);
   assert.match(r.body, /action="\/dashboard\/mode"[^>]*>[\s\S]*?name="mode" value="new"[\s\S]*?Use the new Crow/);
+});
+
+test("the CSRF fill script finds crow_csrf when it is not the first cookie", async () => {
+  const pages = [
+    (await get("/dashboard/settings?section=crow-mode", { ...OLD, [MODE]: "classic" })).body,
+    (await get("/dashboard/memory", OLD)).body,
+  ];
+  for (const body of pages) {
+    const raw = body.match(/onsubmit="([^"]*)"/)[1].replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;|&#x27;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+    const re = raw.match(/document\.cookie\.match\(\/(.*?)\/\)/)[1];
+    assert.ok(!re.includes("\\\\"), "no doubled backslash in the emitted regex");
+    const m = "theme=dark; crow_csrf=abc123; other=1".match(new RegExp(re));
+    assert.equal(m && m[1], "abc123");
+  }
 });

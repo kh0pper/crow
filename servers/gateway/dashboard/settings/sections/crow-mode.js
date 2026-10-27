@@ -20,7 +20,7 @@ export default {
   async getPreview() { return ""; },
 
   async render({ lang }) {
-    const fill = "var f=this.querySelector('input[name=_csrf]');var m=document.cookie.match(/(?:^|;\\\\s*)crow_csrf=([^;]*)/);if(f&&m)f.value=decodeURIComponent(m[1]);";
+    const fill = "var f=this.querySelector('input[name=_csrf]');var m=document.cookie.match(/(?:^|;\\s*)crow_csrf=([^;]*)/);if(f&&m)f.value=decodeURIComponent(m[1]);";
     return `<p style="color:var(--crow-text-secondary);font-size:0.9rem;margin:0 0 1rem">${escapeHtml(t("shell.tryBody", lang))}</p>
     <form method="post" action="/dashboard/mode" onsubmit="${escapeHtml(fill)}"><input type="hidden" name="_csrf" value=""><input type="hidden" name="mode" value="new"><button type="submit" class="btn btn-primary" style="min-height:44px">${escapeHtml(t("shell.useNew", lang))}</button></form>`;
   },
