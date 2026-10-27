@@ -66,6 +66,10 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 3092 | 127.0.0.1 (container publish) | Crow Artifacts: household container instance artifact origin (`CROW_ARTIFACT_ORIGIN_PORT=3092`); behind the same DOCKER-USER fence rule as that container's other published ports. A gateway-internal listener, not a compose port | Artifacts step 1 |
 | 3093 | 127.0.0.1 | Crow Artifacts: main instance public-link listener (later step; the only artifacts port ever mapped to Funnel, through the sidecar node's own 8443). A gateway-internal listener, not a compose port | reserved (Artifacts step 6) |
 | 3456 | 127.0.0.1 | vikunja (existing) | existing |
+| 3900 | 127.0.0.1 (default; `GARAGE_BIND_ADDR` = the tailnet IP to share storage with paired instances) | garage (S3 API) | Garage migration PR 1 |
+| 3901 | container-internal | garage (RPC between Garage processes; never published) | Garage migration PR 1 |
+| 3902 | — | garage (web endpoint, reserved; not configured or published) | reserved (Garage) |
+| 3903 | 127.0.0.1 | garage (admin API; loopback only, never tailnet or Funnel) | Garage migration PR 1 |
 | 4533 | 127.0.0.1 | navidrome (existing) | existing |
 | 5000 | 127.0.0.1 | kavita (existing) | existing |
 | 5006 | 127.0.0.1 | actual-budget (existing) | existing |
@@ -112,7 +116,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 8765 | 127.0.0.1 | motioneye | existing |
 | 8880 | 127.0.0.1 | kokoro-tts (local TTS) | existing |
 | 8971 | 127.0.0.1 | frigate (authenticated UI) | existing |
-| 9000 | 127.0.0.1 | minio (S3 API, existing) | existing |
+| 9000 | 127.0.0.1 | minio (S3 API, existing; deprecated, superseded by garage 3900) | existing |
 | 9001 | 127.0.0.1 | minio (console, existing) | existing |
 | 9090 | 127.0.0.1 | linkding (existing) | existing |
 | 11434 | 127.0.0.1 | ollama (existing) | existing |

@@ -50,7 +50,7 @@
       "icon": "git",
       "members": [
         { "id": "gitea", "kind": "deploys" },
-        { "id": "minio", "kind": "deploys" },
+        { "id": "garage", "kind": "deploys" },
         { "id": "uptime-kuma", "kind": "deploys" },
         { "id": "data-dashboard", "kind": "builtin" }
       ]

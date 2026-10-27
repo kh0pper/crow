@@ -52,6 +52,10 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 | 3076 | 127.0.0.1 | unsloth (JupyterLab; solo loopback, sin ruta de Serve) | punto 3 (tienda: Unsloth) |
 | 3080 | 127.0.0.1 | romm (existente) | existente |
 | 3456 | 127.0.0.1 | vikunja (existente) | existente |
+| 3900 | 127.0.0.1 (por defecto; `GARAGE_BIND_ADDR` = la IP de la tailnet para compartir el almacenamiento con instancias emparejadas) | garage (API S3) | migración a Garage PR 1 |
+| 3901 | interno del contenedor | garage (RPC entre procesos de Garage; nunca publicado) | migración a Garage PR 1 |
+| 3902 | — | garage (endpoint web, reservado; ni configurado ni publicado) | reservado (Garage) |
+| 3903 | 127.0.0.1 | garage (API de administración; solo loopback, nunca tailnet ni Funnel) | migración a Garage PR 1 |
 | 4533 | 127.0.0.1 | navidrome (existente) | existente |
 | 5000 | 127.0.0.1 | kavita (existente) | existente |
 | 5006 | 127.0.0.1 | actual-budget (existente) | existente |
@@ -90,7 +94,7 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 | 8765 | 127.0.0.1 | motioneye | existente |
 | 8880 | 127.0.0.1 | kokoro-tts (TTS local) | existente |
 | 8971 | 127.0.0.1 | frigate (UI autenticada) | existente |
-| 9000 | 127.0.0.1 | minio (API S3, existente) | existente |
+| 9000 | 127.0.0.1 | minio (API S3, existente; obsoleto, sustituido por garage 3900) | existente |
 | 9001 | 127.0.0.1 | minio (consola, existente) | existente |
 | 9090 | 127.0.0.1 | linkding (existente) | existente |
 | 11434 | 127.0.0.1 | ollama (existente) | existente |
