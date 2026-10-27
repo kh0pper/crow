@@ -292,6 +292,11 @@ test("verb round trip: create -> list excludes archived -> get -> move -> archiv
   assert.equal(reported.status, "recorded");
   const decided = payload(await client.callTool({ name: "board_decide_result", arguments: { item_id: cardId, result_id: reported.id, decision: "approved" } }));
   assert.equal(decided.status, "approved");
+  // A second decision on the same result is a 409 already_decided (the
+  // guarded UPDATE), surfaced as an MCP error, never a 500.
+  const again = await client.callTool({ name: "board_decide_result", arguments: { item_id: cardId, result_id: reported.id, decision: "rejected" } });
+  assert.equal(again.isError, true);
+  assert.match(again.content[0].text, /^\[409 already_decided\]/);
 
   // get_item surfaces the result with its plan version + supersede flag
   const got2 = payload(await client.callTool({ name: "board_get_item", arguments: { id: cardId } }));

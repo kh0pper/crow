@@ -68,3 +68,62 @@ export function groupByLane(cards, defsByProject, lockMap) {
   for (const l of LANES) out[l].sort(byPrioId);
   return out;
 }
+
+// ---- Task 3.3: lane moves map to real actions ----
+
+/** The status "Done" means on a board: "done" when it is terminal there, else the first terminal status. */
+export function doneStatus(def) {
+  const d = def || DEFAULT_BOARD_DEF;
+  return d.terminal_values.includes("done") ? "done" : d.terminal_values[0];
+}
+
+/** The status a reopened card goes back to: the board's first non-terminal status. */
+export function reopenStatus(def) {
+  const d = def || DEFAULT_BOARD_DEF;
+  return d.status_values.find((s) => !isTerminal(d, s));
+}
+
+const refuse = (reason) => ({ action: "refuse", reason });
+
+/**
+ * What dropping a card on `toLane` does. A lane is derived state, so a move
+ * is exactly one real write, or a refusal with a reason:
+ *   { action: "none" }                         same lane
+ *   { action: "move", status }                 moveCard
+ *   { action: "accept", resultId, status }     acceptResult (approve + move)
+ *   { action: "clear_ask" }                    updateCard action_needed = null
+ *   { action: "refuse", reason }               needs_session | needs_reason |
+ *                                              locked | use_review |
+ *                                              answer_first | bad_lane
+ * `latestResult` is the card's newest board_results row ({ id, status }) or
+ * null; when given, it is what the lane is computed from. An open decision
+ * wins over a recorded result (Ruling P2): answer it first. A card a session
+ * holds is never moved or cleared by a lane move (the lock rule the classic
+ * board applies to moves and edits), but a recorded result on it can still
+ * be accepted: the approval stands and the move is then the lock rule's call.
+ */
+export function movePlan(card, def, { locked, latestResult } = {}, toLane) {
+  const d = def || DEFAULT_BOARD_DEF;
+  const c = latestResult === undefined
+    ? card
+    : { ...card, latest_result_status: latestResult ? latestResult.status : null };
+  if (!LANES.includes(toLane)) return refuse("bad_lane");
+  const from = laneOf(c, d, { locked });
+  if (from === toLane) return { action: "none" };
+  if (toLane === "working") return refuse("needs_session");
+  if (toLane === "needs_you") return refuse("needs_reason");
+  if (from === "working") return refuse("locked");
+  if (from === "needs_you") {
+    if (openDecision(c)) return refuse("answer_first");
+    if (c.latest_result_status === "recorded") {
+      return toLane === "done" && latestResult
+        ? { action: "accept", resultId: latestResult.id, status: doneStatus(d) }
+        : refuse("use_review");
+    }
+    if (locked === true) return refuse("locked");
+    return toLane === "done" ? { action: "move", status: doneStatus(d) } : { action: "clear_ask" };
+  }
+  if (locked === true) return refuse("locked");
+  if (from === "up_next") return { action: "move", status: doneStatus(d) }; // toLane is done
+  return { action: "move", status: reopenStatus(d) }; // done -> up_next
+}

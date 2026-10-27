@@ -1,8 +1,18 @@
 /**
- * shell-api.js — the shell's own routes. Today: move an item between projects.
+ * shell-api.js — the shell's own routes: move an item between projects, and
+ * move a Board card between lanes.
  *
  *   POST /dashboard/shell-api/items/:kind/:ref/project  { project_id: number | "unassigned" }
  *     -> { ok: true, project_id: number | null }
+ *
+ *   POST /dashboard/shell-api/cards/:id/lane  { to, from }   (lanes: panels/board/lanes.js)
+ *     -> 200 { ok: true, lane }               the move's one real write is done
+ *        409 { error: "stale", lane }         the card is no longer in `from`
+ *        409 { error: "refused", reason }     no real write expresses this move
+ *     A lane is derived state: the server recomputes it from stored card,
+ *     result, decision and lock state (the panel's laneOf inputs), then runs
+ *     movePlan's one write: moveCard, acceptResult (approve + done), or
+ *     updateCard clearing action_needed.
  *
  * MOUNT: `/dashboard/shell-api`, `router.use(P, dashboardAuth)` as the first
  * statement, mounted in dashboard/index.js AFTER csrfMiddleware (the real CSRF
@@ -21,6 +31,58 @@ import { jsonError } from "./_error.js";
 import { createDbClient } from "../../db.js";
 import { ITEM_KINDS, setItemProject } from "../../shared/shell-items.js";
 import { installedBundleIds } from "../skills-catalog.js";
+import { existsSync } from "node:fs";
+import { TASKS_DB } from "../dashboard/panels/bot-board/data-queries.js";
+import { lockMapFor } from "./board-lock.js";
+import { resolveBoardDef } from "./board-defs.js";
+import { getCard, moveCard, updateCard } from "../board/card-service.js";
+import { acceptResult } from "../board/result-service.js";
+import { LANES, laneOf, movePlan } from "../dashboard/panels/board/lanes.js";
+
+const DASHBOARD_ACTOR = Object.freeze({ kind: "human", id: null, jobId: null });
+
+/** The card's newest board_results row as { id, status }, or null (none yet, or a pre-0004 store). */
+async function latestResultOf(tdb, id) {
+  try {
+    const r = (await tdb.execute({
+      sql: "SELECT id, status FROM board_results WHERE item_id=? ORDER BY id DESC LIMIT 1",
+      args: [id],
+    })).rows[0];
+    return r ? { id: Number(r.id), status: String(r.status) } : null;
+  } catch (err) {
+    if (noTable(err)) return null;
+    throw err;
+  }
+}
+
+/**
+ * Everything a lane decision reads, from stored state: the same laneOf
+ * inputs as the Board panel (status, latest result status, action_needed,
+ * data_json, and the lock map keyed by Number id). Null for a card that is
+ * missing, archived or a tracker item.
+ */
+async function laneState(tdb, cdb, id) {
+  const card = await getCard(tdb, id);
+  if (!card || card.archived_at != null) return null;
+  const def = await resolveBoardDef(tdb, { projectId: card.project_id == null ? null : Number(card.project_id) });
+  const latestResult = await latestResultOf(tdb, id);
+  const locked = (await lockMapFor(cdb, [id])).get(id) === true;
+  const lane = laneOf({ ...card, latest_result_status: latestResult ? latestResult.status : null }, def, { locked });
+  return { card, def, latestResult, locked, lane };
+}
+
+// One lane move per card at a time in this process: the read-plan-write
+// below is then atomic against another lane move of the same card, so two
+// drops of one card make one move and the other sees a stale `from`.
+const cardQueues = new Map();
+function serialized(id, fn) {
+  const prev = cardQueues.get(id) || Promise.resolve();
+  const run = prev.then(fn, fn);
+  const tail = run.catch(() => {});
+  cardQueues.set(id, tail);
+  tail.then(() => { if (cardQueues.get(id) === tail) cardQueues.delete(id); });
+  return run;
+}
 
 const REF_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 const noTable = (err) => /no such table/i.test(String(err?.message || err));
@@ -82,6 +144,53 @@ export function shellApiRouter(dashboardAuth) {
     } finally {
       try { db.close(); } catch { /* already closed */ }
     }
+  });
+
+  router.post(P + "/cards/:id/lane", async (req, res) => {
+    const id = Number(req.params.id);
+    const b = req.body && typeof req.body === "object" ? req.body : {};
+    if (!/^[1-9]\d*$/.test(String(req.params.id)) || !LANES.includes(b.to) || !LANES.includes(b.from)) {
+      return jsonError(res, 400, "bad_request");
+    }
+    if (!existsSync(TASKS_DB)) return jsonError(res, 404, "not_found");
+
+    await serialized(id, async () => {
+      let tdb, cdb;
+      try {
+        tdb = createDbClient(TASKS_DB);
+        cdb = createDbClient();
+        const st = await laneState(tdb, cdb, id);
+        if (!st) return jsonError(res, 404, "not_found");
+        if (st.lane !== b.from) return jsonError(res, 409, "stale", { lane: st.lane });
+
+        const plan = movePlan(st.card, st.def, { locked: st.locked, latestResult: st.latestResult }, b.to);
+        if (plan.action === "refuse") return jsonError(res, 409, "refused", { reason: plan.reason });
+        if (plan.action === "move") await moveCard(tdb, cdb, id, plan.status, DASHBOARD_ACTOR);
+        else if (plan.action === "accept") await acceptResult(tdb, cdb, id, plan.resultId, DASHBOARD_ACTOR, "dashboard");
+        else if (plan.action === "clear_ask") await updateCard(tdb, id, { action_needed: null }, DASHBOARD_ACTOR);
+
+        const after = await laneState(tdb, cdb, id);
+        res.json({ ok: true, lane: after ? after.lane : b.to });
+      } catch (err) {
+        // A write the state check could not foresee: someone else got there
+        // first (a decision, a lock, an archive). Tell the client where the
+        // card is now; it re-renders from that.
+        if (err && err.http === 409) {
+          if (err.code === "locked") return jsonError(res, 409, "refused", { reason: "locked" });
+          let lane = null;
+          try { lane = (await laneState(tdb, cdb, id))?.lane ?? null; } catch { /* report without a lane */ }
+          return jsonError(res, 409, "stale", { lane });
+        }
+        if (err && err.http === 404) return jsonError(res, 404, "not_found");
+        if (err && err.http === 400) return jsonError(res, 400, "bad_request");
+        if (noTable(err)) return jsonError(res, 503, "not_migrated");
+        console.warn("[shell-api] lane move failed:", err && err.message);
+        jsonError(res, 500, "move failed");
+      } finally {
+        if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
+        if (cdb) { try { cdb.close(); } catch { /* already closed */ } }
+      }
+    });
   });
 
   return router;

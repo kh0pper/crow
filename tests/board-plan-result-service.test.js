@@ -19,7 +19,7 @@ import { runMigrations } from "../scripts/migrations/runner.mjs";
 import { createDbClient } from "../servers/db.js";
 import { createCard, getCard } from "../servers/gateway/board/card-service.js";
 import { getCurrentPlan, listPlans, savePlan, approvePlan } from "../servers/gateway/board/plan-service.js";
-import { reportResult, decideResult, listResults } from "../servers/gateway/board/result-service.js";
+import { reportResult, decideResult, listResults, acceptResult } from "../servers/gateway/board/result-service.js";
 
 const DIR = join(import.meta.dirname, "..", "scripts", "migrations");
 
@@ -460,5 +460,97 @@ test("result rows surface plan version + superseded flag (listResults join)", as
     const r2 = (await listResults(tdb, id)).find((r) => r.id === res2.id);
     assert.equal(r2.plan_version, null);
     assert.equal(r2.plan_superseded, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 3.3 (redesign P3): the guarded decide + acceptResult
+// ---------------------------------------------------------------------------
+
+const settle = (p) => p.then((v) => ({ ok: true, v }), (e) => ({ ok: false, e }));
+
+test("the guarded decide makes exactly one decision", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const id = await makeCard(tdb, 1, "gated");
+    const res = await reportResult(tdb, cdb, id, { outcome: "success" }, BOT);
+    const out = await Promise.all([
+      settle(decideResult(tdb, id, res.id, "approved", HUMAN, "dashboard")),
+      settle(decideResult(tdb, id, res.id, "approved", HUMAN, "chat")),
+    ]);
+    assert.equal(out.filter((o) => o.ok).length, 1, "one decision succeeds");
+    const lost = out.find((o) => !o.ok);
+    assert.equal(lost.e.code, "already_decided");
+    assert.equal(lost.e.http, 409);
+    const row = (await tdb.execute({ sql: "SELECT status, decided_via FROM board_results WHERE id=?", args: [res.id] })).rows[0];
+    assert.equal(row.status, "approved");
+    assert.equal(row.decided_via, out.find((o) => o.ok) === out[0] ? "dashboard" : "chat", "decided_via set once, by the winner");
+    const decides = (await allMutations(tdb, id)).filter((m) => m.verb === "result_decide");
+    assert.equal(decides.length, 1, "one result_decide row");
+  });
+});
+
+test("acceptResult refuses a superseded result", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const id = await makeCard(tdb, 1, "gated");
+    const older = await reportResult(tdb, cdb, id, { outcome: "success" }, BOT);
+    const newer = await reportResult(tdb, cdb, id, { outcome: "partial" }, BOT);
+    const before = (await allMutations(tdb, id)).length;
+    await assert.rejects(
+      () => acceptResult(tdb, cdb, id, older.id, HUMAN, "dashboard"),
+      (e) => { assert.equal(e.code, "stale"); assert.equal(e.http, 409); return true; },
+    );
+    const rows = (await tdb.execute({ sql: "SELECT id, status FROM board_results WHERE item_id=? ORDER BY id", args: [id] })).rows;
+    assert.deepEqual(rows.map((r) => r.status), ["recorded", "recorded"]);
+    assert.equal(Number(rows[1].id), newer.id);
+    assert.equal((await getCard(tdb, id)).status, "pending");
+    assert.equal((await allMutations(tdb, id)).length, before, "nothing recorded");
+  });
+});
+
+test("acceptResult approves and closes in one call", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    // A board whose terminal set has no 'done': doneStatus is its first terminal.
+    const id2 = await makeCard(tdb, 2, "gated");
+    const r2 = await reportResult(tdb, cdb, id2, { outcome: "success" }, BOT);
+    const out2 = await acceptResult(tdb, cdb, id2, r2.id, HUMAN, "dashboard");
+    assert.equal(out2.status, "approved");
+    assert.equal(out2.moved, true);
+    assert.equal((await getCard(tdb, id2)).status, "complete");
+
+    const id = await makeCard(tdb, 1, "gated");
+    const r = await reportResult(tdb, cdb, id, { outcome: "success" }, BOT);
+    const out = await acceptResult(tdb, cdb, id, r.id, HUMAN, "dashboard");
+    assert.deepEqual(out, { status: "approved", moved: true });
+    const card = await getCard(tdb, id);
+    assert.equal(card.status, "done");
+    assert.ok(card.completed_at);
+    const row = (await tdb.execute({ sql: "SELECT status, decided_via FROM board_results WHERE id=?", args: [r.id] })).rows[0];
+    assert.deepEqual({ ...row }, { status: "approved", decided_via: "dashboard" });
+    const verbs = (await allMutations(tdb, id)).map((m) => m.verb);
+    assert.deepEqual(verbs.slice(-2), ["result_decide", "move"]);
+
+    // A second accept of the same result: already decided, no second move.
+    await assert.rejects(() => acceptResult(tdb, cdb, id, r.id, HUMAN, "dashboard"), (e) => e.code === "already_decided" && e.http === 409);
+  });
+});
+
+test("acceptResult on a held card: the approval stands, the lock rule keeps the card where it is", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const id = await makeCard(tdb, 1, "gated");
+    const r = await reportResult(tdb, cdb, id, { outcome: "success" }, BOT);
+    await cdb.execute({ sql: "INSERT INTO bot_sessions (bot_id, card_id, status, kind) VALUES ('other', ?, 'active', 'chat')", args: [id] });
+    const out = await acceptResult(tdb, cdb, id, r.id, HUMAN, "dashboard");
+    assert.deepEqual(out, { status: "approved", moved: false });
+    assert.equal((await getCard(tdb, id)).status, "pending");
+    const row = (await tdb.execute({ sql: "SELECT status FROM board_results WHERE id=?", args: [r.id] })).rows[0];
+    assert.equal(row.status, "approved");
+  });
+});
+
+test("acceptResult: an unknown card is 404, a result with no results at all is stale", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    await assert.rejects(() => acceptResult(tdb, cdb, 99999, 1, HUMAN, "dashboard"), (e) => e.code === "not_found" && e.http === 404);
+    const id = await makeCard(tdb, 1, "gated");
+    await assert.rejects(() => acceptResult(tdb, cdb, id, 1, HUMAN, "dashboard"), (e) => e.code === "stale" && e.http === 409);
   });
 });

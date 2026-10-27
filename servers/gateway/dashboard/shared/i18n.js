@@ -3778,6 +3778,16 @@ export const translations = {
   "shell.cardDetails": { en: "Details", es: "Detalles" },
   "shell.boardEmpty": { en: "No cards in this project yet.", es: "Aún no hay tarjetas en este proyecto." },
   "shell.boardEmptyChat": { en: "Start in Chat", es: "Empieza en Chat" },
+  "shell.move": { en: "Move", es: "Mover" },
+  "shell.moveTo": { en: "Move to", es: "Mover a" },
+  "shell.moveCancel": { en: "Cancel", es: "Cancelar" },
+  "shell.moveHere": { en: "It's in this lane now.", es: "Ya está en este carril." },
+  "shell.moveFailed": { en: "That move didn't go through. Try again.", es: "Ese movimiento no se hizo. Inténtalo de nuevo." },
+  "shell.refuseWorking": { en: "Working means a bot is on it. Start the card from its chat or its details.", es: "En marcha significa que un bot está en ello. Inicia la tarjeta desde su chat o sus detalles." },
+  "shell.refuseNeedsYou": { en: "A card needs you when a bot asks or reports. It can't be moved there.", es: "Una tarjeta te necesita cuando un bot pregunta o informa. No se puede mover ahí." },
+  "shell.refuseLocked": { en: "A bot is working on this card.", es: "Un bot está trabajando en esta tarjeta." },
+  "shell.refuseReview": { en: "Accept it or ask for a change first.", es: "Acéptala o pide un cambio primero." },
+  "shell.refuseDecision": { en: "Answer its question first.", es: "Responde primero a su pregunta." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

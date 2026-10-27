@@ -233,6 +233,49 @@ test("bot-written text is escaped", async () => {
   assert.ok(!html.includes("<b>beta-open"));
 });
 
+// Task 3.3: every card can be moved from the Board tab; refused lanes say why.
+function moveButton(html, id) {
+  const li = html.match(new RegExp(`<li class="sb-card" data-card="${id}">[\\s\\S]*?</li>`));
+  assert.ok(li, "card " + id + " is rendered");
+  const m = li[0].match(/<button type="button" class="sb-move" data-sb-move data-from="([a-z_]+)" data-refuse="([^"]*)"[^>]*>/);
+  assert.ok(m, "card " + id + " has a Move button");
+  return { li: li[0], from: m[1], refuse: JSON.parse(m[2].replace(/&quot;/g, '"')) };
+}
+
+test("each card's Move button carries its lane and the stored-state refusals", async () => {
+  const { html } = await render({ project: slug1 });
+  const needs = moveButton(html, ids.needs);
+  assert.equal(needs.from, "needs_you");
+  assert.deepEqual(needs.refuse, { working: "needs_session", up_next: "use_review" }, "Done is open: it accepts the result");
+  assert.match(needs.li, /data-result-action="accept"/, "the face's Accept stays on the Board tab");
+  assert.match(needs.li, /data-result-action="reject"/);
+  const held = moveButton(html, ids.held);
+  assert.equal(held.from, "working");
+  assert.deepEqual(held.refuse, { needs_you: "needs_reason", up_next: "locked", done: "locked" });
+  const six = moveButton(html, ids.six);
+  assert.equal(six.from, "up_next");
+  assert.deepEqual(six.refuse, { needs_you: "needs_reason", working: "needs_session" });
+  assert.match(six.li, />Move<span class="sb-vh"> #\d+ alpha-six<\/span><\/button>/);
+
+  // One sheet, four lanes, and the reasons in the operator's language.
+  assert.equal((html.match(/<dialog class="sb-sheet"/g) || []).length, 1);
+  for (const l of ["needs_you", "working", "up_next", "done"]) assert.ok(html.includes(`class="sb-sheet-lane" data-to="${l}"`), l);
+  const reasons = JSON.parse(html.match(/data-reasons="([^"]*)"/)[1].replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&"));
+  assert.equal(reasons.use_review, t("shell.refuseReview", "en"));
+  assert.equal(reasons.answer_first, t("shell.refuseDecision", "en"));
+  assert.equal(reasons.needs_session, t("shell.refuseWorking", "en"));
+
+  // Move is a 44 px target under body.shell; the no-JS move form stays hidden.
+  assert.match(html, /body\.shell \.sb-move \{[^}]*min-height: 44px/);
+  assert.match(html, /body\.shell \.sb-card \.bb-nojs-move \{ display: none; \}/);
+  assert.ok(!/\.bb-result-actions[^{]*\{[^}]*display: none/.test(html), "Accept/Reject are not hidden");
+});
+
+test("a card title in the Move button is escaped", async () => {
+  const { html } = await render({ project: slug2 });
+  assert.ok(html.includes('Move<span class="sb-vh"> #' + ids.betaOpen + " &lt;b&gt;beta-open&lt;/b&gt;</span>"));
+});
+
 test("Spanish strings render", async () => {
   const { html } = await render({ project: slug1 }, "es");
   assert.ok(html.includes(t("shell.laneNeedsYou", "es")));
