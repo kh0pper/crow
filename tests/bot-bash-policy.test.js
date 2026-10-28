@@ -183,6 +183,81 @@ test("review F3: a NULL origin is trusted only for a loopback row", () => {
   assert.equal(sel({ setting: null, providers: [{ ...native, id: "n-empty", instance_id: "" }] }).ok, true);
 });
 
+// --- doors (2026-10-28 hotfix): an own-loopback door row can forward to a
+// cloud upstream; host === "cloud" never sees that. The caller's isCloud (the
+// door walk over the full provider list) is the gate.
+const door = row({ id: "door-cloud", base_url: "http://127.0.0.1:3001/llm/p/qwen-cloud/v1",
+  models: JSON.stringify([{ id: "qwen3.5-4b" }]), gpu_policy: JSON.stringify({ alwaysResident: true, door_forward: true }) });
+const cloudDoors = (k) => k.startsWith("door-cloud/") || k.startsWith("qwen-cloud/");
+
+test("door: auto pick skips a door to a cloud upstream and falls to the next local candidate, else none", () => {
+  // door-cloud sorts before qwen3.5-4b by id and is resident: without the gate it wins.
+  const a = sel({ setting: null, providers: [door, native], isCloud: cloudDoors });
+  assert.equal(a.ok, true);
+  assert.equal(a.providerId, "qwen3.5-4b");
+  const b = sel({ setting: null, providers: [door], isCloud: cloudDoors });
+  assert.equal(b.ok, false);
+  assert.equal(b.reason, "none");
+  // A throwing isCloud counts as cloud (fail closed).
+  assert.equal(sel({ setting: null, providers: [door], isCloud: () => { throw new Error("x"); } }).reason, "none");
+});
+
+test("door: isCloud is consulted for doors only; a local non-door row is still picked", () => {
+  const seen = [];
+  const r = sel({ setting: null, providers: [native], isCloud: (k) => { seen.push(k); return true; } });
+  assert.equal(r.ok, true);
+  assert.equal(r.providerId, "qwen3.5-4b");
+  assert.deepEqual(seen, []);
+  // A door to a LOCAL upstream stays usable.
+  assert.equal(sel({ setting: null, providers: [door], isCloud: () => false }).providerId, "door-cloud");
+});
+
+test("door: with no isCloud the behaviour is unchanged (backward compatible)", () => {
+  assert.equal(sel({ setting: null, providers: [door, native] }).providerId, "door-cloud");
+  assert.equal(sel({ setting: "door-cloud/qwen3.5-4b", providers: [door] }).ok, true);
+  assert.equal(sel({ setting: '{"url":"http://127.0.0.1:3001/llm/v1","model":"qwen3.5-4b"}', providers: [] }).ok, true);
+});
+
+test("door: an operator setting naming a cloud door is refused (setting-cloud), never silently used", () => {
+  const r = sel({ setting: "door-cloud/qwen3.5-4b", providers: [door, native], isCloud: cloudDoors });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "setting-cloud");
+  assert.equal(r.ref, "door-cloud/qwen3.5-4b");
+  assert.equal(sel({ setting: "door-cloud/qwen3.5-4b", providers: [door], isCloud: () => false }).ok, true);
+  // Endpoint form: the provider the door path names is checked; the bare door cannot name one.
+  const ep = (url) => sel({ setting: JSON.stringify({ url, model: "qwen3.5-4b" }), providers: [], isCloud: cloudDoors });
+  assert.equal(ep("http://127.0.0.1:3001/llm/p/qwen-cloud/v1").reason, "setting-cloud");
+  assert.equal(ep("http://127.0.0.1:3001/llm/v1").reason, "setting-cloud");
+  assert.equal(ep("http://127.0.0.1:3001/llm/p/crow-voice/v1").ok, true);
+  assert.equal(ep("http://100.64.20.9:8030/v1").ok, true, "a non-door endpoint is not consulted");
+});
+
+test("door (review 1): an UNMARKED door naming a .ts.net upstream is skipped and refused", async () => {
+  const { isCloudKey } = await import("../servers/shared/model-roles.js");
+  const { providerRowToObject } = await import("../servers/shared/provider-row.js");
+  // No bundle_id / runtime / door_forward: isCloudKey judges it by its own loopback URL alone.
+  const unmarked = row({ id: "a-door", base_url: "http://127.0.0.1:3001/llm/p/ts-up/v1",
+    models: JSON.stringify([{ id: "qwen3.5-4b" }]), gpu_policy: JSON.stringify({ alwaysResident: true }) });
+  const tsUp = row({ id: "ts-up", base_url: "http://box.example.ts.net:8030/v1",
+    models: JSON.stringify([{ id: "qwen3.5-4b" }]), gpu_policy: JSON.stringify({ door_forward: true }) });
+  const all = [unmarked, tsUp, native];
+  const objs = all.map(providerRowToObject);
+  const isCloud = (k) => isCloudKey(k, { providers: objs, ownAddrs: OWN });
+  assert.equal(isCloud("a-door/qwen3.5-4b"), false, "precondition: the shared walk calls the unmarked door local");
+  assert.equal(sel({ setting: null, providers: all, isCloud }).providerId, "qwen3.5-4b");
+  assert.equal(sel({ setting: "a-door/qwen3.5-4b", providers: all, isCloud }).reason, "setting-cloud");
+  assert.equal(sel({ setting: JSON.stringify({ url: unmarked.base_url, model: "qwen3.5-4b" }), providers: [], isCloud }).reason, "setting-cloud");
+});
+
+test("door (review 2): an encoded / in the door's provider id is refused", () => {
+  const local = () => false;
+  const url = "http://127.0.0.1:3001/llm/p/local-up%2F..%2Fcloud-a/v1";
+  assert.equal(sel({ setting: JSON.stringify({ url, model: "qwen3.5-4b" }), providers: [], isCloud: local }).reason, "setting-cloud");
+  const enc = { ...door, id: "enc-door", base_url: url };
+  assert.equal(sel({ setting: "enc-door/qwen3.5-4b", providers: [enc], isCloud: local }).reason, "setting-cloud");
+  assert.equal(sel({ setting: null, providers: [enc], isCloud: local }).reason, "none");
+});
+
 // --- field-mismatch hardening (2026-10-08): ONE normalised accessor for the
 // Perch-only rule, read by the save guard, the peer guard and the bridge.
 test("nonPerchChannels: every gateway shape normalises; anything not plainly Perch counts", async () => {

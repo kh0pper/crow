@@ -51,18 +51,24 @@ export async function getClassifierStatus(db, { probe = true, fetchImpl = fetch,
   try { ownInstanceId = getOrCreateLocalInstanceId(); } catch {}
   // A chosen safety role sits between the setting and the automatic pick
   // (seeded never counts). isCloud reads the camelCase role-context providers;
-  // selectBotClassifier keeps the raw rows above (N1).
-  let roleKey = null, roleProviders = [];
+  // selectBotClassifier keeps the raw rows above (N1). Every path needs the
+  // provider list: a door row on loopback can forward to a cloud upstream, so
+  // the setting and the automatic pick walk doors too. No list means every
+  // door counts as cloud (fail closed).
+  let roleKey = null, roleProviders = null;
+  try {
+    const ps = (await loadRoleContext(db)).providers;
+    if (Array.isArray(ps)) roleProviders = ps;
+  } catch { roleProviders = null; }
   if (setting == null || String(setting).trim() === "") {
     try {
       roleKey = (await resolveRole(db, "role:safety", { need: "chat", chosenOnly: true })).key;
-      if (roleKey) roleProviders = (await loadRoleContext(db)).providers;
     } catch { roleKey = null; }
   }
-  const picked = selectClassifierWithRole({
-    setting, roleKey, rows: providers, ownAddresses, ownInstanceId,
-    isCloud: (k) => isCloudKey(k, { providers: roleProviders, ownAddrs: ownAddresses }),
-  });
+  const isCloud = roleProviders
+    ? (k) => isCloudKey(k, { providers: roleProviders, ownAddrs: ownAddresses })
+    : () => true;
+  const picked = selectClassifierWithRole({ setting, roleKey, rows: providers, ownAddresses, ownInstanceId, isCloud });
   const sel = await resolveClassifierEndpoint(picked, { lookup });
   if (!sel.ok) {
     return {
@@ -97,6 +103,7 @@ export async function classifierStatusHtml(db, lang, opts = {}) {
     msg = fill(t("botbuilder.classifierNotResponding", lang), { model: st.model, provider: st.providerId, where });
   } else if (st.state === "misconfigured") {
     msg = fill(t("botbuilder.classifierMisconfigured", lang), { ref: st.ref || "?", reason: st.reason || "?" });
+    if (st.reason === "setting-cloud") msg += " " + t("botbuilder.classifierSettingCloud", lang);
   } else {
     const size = st.install && st.install.sizeMb ? `${(st.install.sizeMb / 1024).toFixed(1)} GB` : "?";
     msg = fill(t("botbuilder.classifierMissing", lang), { model: (st.install && st.install.modelId) || "qwen3.5-4b", size });
