@@ -456,3 +456,89 @@ test("verification claims: only an ability negation reaches a bare 'verify' past
     "I was not able to access the original source to verify it.", "I have no way to verify it."])
     assert.equal(verificationClaims(t).length, 0, t);
 });
+
+// ---- Task 5: session log + evidence ----
+
+const { parseSession, toolName } = await import("../scripts/research-eval/session-log.mjs");
+const { readEvidence, readFetchLog } = await import("../scripts/research-eval/evidence.mjs");
+const { default: SqliteDb } = await import("better-sqlite3");
+
+const jsonl = (msgs) => [JSON.stringify({ type: "session", version: 3, id: "s-test" }),
+  ...msgs.map((m) => JSON.stringify({ type: "message", message: m }))].join("\n") + "\n";
+const asst = (content) => ({ role: "assistant", content });
+const call = (id, name, args) => ({ type: "toolCall", id, name, arguments: args });
+const txt = (text) => ({ type: "text", text });
+const res = (id, text, extra = {}) => ({ role: "toolResult", toolCallId: id, toolName: "x", content: [{ type: "text", text }], isError: false, ...extra });
+const U = "https://glorbin-courant.example/a";
+
+test("parseSession orders calls, results and text; batch shares msg", () => {
+  const log = jsonl([asst([call("c1", "mcp__crow-projects__crow_add_source", { url: U }), call("c2", "mcp__crow-projects__crow_add_note", { content: "x" })]),
+    res("c1", "Source added (id: 1)"), res("c2", "Note added"), asst([txt("Answer.")])]);
+  const s = parseSession(log);
+  assert.equal(s.parse_ok, true);
+  assert.deepEqual(s.events.map((e) => e.kind), ["call", "call", "result", "result", "text"]);
+  assert.equal(s.events[0].msg, s.events[1].msg);
+  assert.equal(s.prose, "Answer.");
+  // X8: a result copies id/tool/server/msg from its call
+  assert.deepEqual([s.events[2].id, s.events[2].tool, s.events[2].server, s.events[2].msg], ["c1", "crow_add_source", "crow-projects", 0]);
+  assert.equal(s.events[2].text, "Source added (id: 1)");
+});
+
+test("parseSession: no text after the last result is no_prose; junk is a parse error", () => {
+  assert.equal(parseSession(jsonl([asst([txt("early")]), asst([call("c1", "crow_web_search", {})]), res("c1", "r")])).no_prose, true);
+  assert.equal(parseSession("{not json}\n").parse_ok, false);
+  assert.equal(parseSession(jsonl([res("ghost", "r")])).parse_ok, false); // result with no call
+});
+
+test("toolName handles prefixed, bare and builtin names", () => {
+  assert.deepEqual(toolName("mcp__crow-projects__crow_add_source"), { server: "crow-projects", tool: "crow_add_source" });
+  assert.deepEqual(toolName("crow_add_source"), { server: "crow-projects", tool: "crow_add_source" });
+  assert.deepEqual(toolName("bash"), { server: null, tool: "bash" });
+  assert.deepEqual(toolName("mcp__crow-memory__crow_search_memories"), { server: "crow-memory", tool: "crow_search_memories" });
+  assert.equal(toolName("mcp__other-block__crow_add_source").server, "other-block"); // block name tolerated
+});
+
+test("parseSession skips non-message lines and thinking blocks", () => {
+  const lines = [JSON.stringify({ type: "session", id: "s" }), JSON.stringify({ type: "model_change", modelId: "m" }),
+    JSON.stringify({ type: "thinking_level_change", thinkingLevel: "high" }),
+    JSON.stringify({ type: "message", message: asst([{ type: "thinking", thinking: "hmm secret" }, txt("Only this.")]) })];
+  const s = parseSession(lines.join("\n"));
+  assert.equal(s.parse_ok, true);
+  assert.equal(s.prose, "Only this.");
+  assert.deepEqual(s.events.map((e) => e.kind), ["text"]);
+});
+
+test("parseSession accepts the real toolResult key set (details, timestamp extra)", () => {
+  const s = parseSession(jsonl([asst([call("c1", "mcp__crow-projects__crow_get_source", { id: 1 })]),
+    res("c1", "Source #1: CITABLE: yes", { details: { a: 1 }, timestamp: 1730000000000, isError: true }), asst([txt("Done.")])]));
+  assert.equal(s.parse_ok, true);
+  assert.equal(s.events[1].isError, true);
+  assert.equal(s.prose, "Done.");
+});
+
+test("parseSession: unwrapped message lines are a parse error, not a vacuous empty pass", () => {
+  const bare = [JSON.stringify({ role: "assistant", content: [txt("Answer.")] })].join("\n");
+  const s = parseSession(bare);
+  assert.equal(s.parse_ok, false);
+  assert.equal(parseSession("").parse_ok, false);
+});
+
+test("readEvidence reads a scratch db read-only and drops withdrawn notes", () => {
+  const p = join(H, "evidence.db");
+  const w = new SqliteDb(p);
+  w.exec(`CREATE TABLE research_sources (id INTEGER PRIMARY KEY, url TEXT, final_url TEXT, fetch_status TEXT, fetched_text TEXT, verified INTEGER, verification_method TEXT, verified_by TEXT);
+    CREATE TABLE research_notes (id INTEGER PRIMARY KEY, source_id INTEGER, note_type TEXT, content TEXT, provenance TEXT, quote_found INTEGER, withdrawn_at TEXT, created_by TEXT);
+    CREATE TABLE project_audit_log (id INTEGER PRIMARY KEY, project_id INTEGER, actor_type TEXT, actor_id TEXT, action TEXT, target TEXT, payload TEXT);`);
+  w.prepare("INSERT INTO research_sources VALUES (1,?,?,'fetched','page text',1,'quotes_checked','bot:rr')").run(U, U);
+  w.prepare("INSERT INTO research_notes VALUES (1,1,'quote','kept','fetched',1,NULL,'bot:rr'), (2,1,'quote','gone','fetched',0,'2026-01-01','bot:rr')").run();
+  w.prepare("INSERT INTO project_audit_log VALUES (1,1,'bot','rr','source.verify','source:1',?), (2,1,'bot','rr','note.add','note:1',NULL)").run('{"verified":false}');
+  w.close();
+  const e = readEvidence(p);
+  assert.deepEqual(e.sources.map((s) => [s.id, s.fetch_status, s.verified, s.verified_by]), [[1, "fetched", 1, "bot:rr"]]);
+  assert.deepEqual(e.notes.map((n) => n.content), ["kept"]);
+  assert.deepEqual(e.withdrawn.map((n) => n.content), ["gone"]);
+  assert.equal(e.audit.length, 1); // note.add is not an evidence action
+  assert.deepEqual([e.audit[0].action, e.audit[0].target, e.audit[0].actor_type, e.audit[0].payload], ["source.verify", "source:1", "bot", { verified: false }]);
+  assert.throws(() => readEvidence(join(H, "absent.db")));
+  assert.deepEqual(readFetchLog(join(H, "no-such-log.jsonl")), []);
+});
