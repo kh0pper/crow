@@ -9,6 +9,7 @@ import { randomBytes } from "node:crypto";
 import { createNotification } from "../shared/notifications.js";
 import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
 import { getManagersOrNull } from "./managers.js";
+import { peerTrust } from "../shared/peer-trust.js";
 
 // ─── Bot Relay: AI-to-AI Task Delegation ───
 
@@ -166,4 +167,83 @@ export async function handleIncomingBotRelay(payload, db, identity, nostrManager
   } catch (err) {
     console.warn(`[sharing] Failed to send relay result: ${err.message}`);
   }
+}
+
+// ─── Inbound routing (PT-2.0) ───
+//
+// The broad Nostr subscription takes DMs from ANY author, and a bot_relay
+// task runs the local AI with the chat tools. Legitimate relays are sent by
+// sendBotRelay/handleIncomingBotRelay with sendSelfMessage, i.e. signed by
+// this Crow ID's own Nostr key (sibling instances share the seed, so they
+// share that key). A task is therefore accepted only when
+//   1. the Nostr sender is our own key, and
+//   2. the named sender/responder instance is a trusted, live paired row
+//      (PT-1's peerTrust predicate, which fails closed on DB errors).
+// Everything else is dropped with a warning and no AI run.
+
+const xOnly = (k) => (typeof k === "string" && k.length === 66 ? k.slice(2) : k);
+
+/** True when a Nostr event author is this Crow ID's own secp256k1 key (x-only compare, as nostr.js does). */
+export function isOwnNostrSender(senderPubkey, ownSecpPubkey) {
+  return typeof senderPubkey === "string" && typeof ownSecpPubkey === "string" && !!senderPubkey
+    && xOnly(senderPubkey).toLowerCase() === xOnly(ownSecpPubkey).toLowerCase();
+}
+
+async function namedInstanceTrusted(db, name, peerTrustOpts) {
+  if (typeof name !== "string" || !name) return false;
+  let rows;
+  try {
+    ({ rows } = await db.execute({ sql: "SELECT id FROM crow_instances WHERE name = ?", args: [name] }));
+  } catch {
+    return false; // fail closed
+  }
+  for (const { id } of rows) {
+    if ((await peerTrust(db, id, peerTrustOpts)).ok) return true;
+  }
+  return false;
+}
+
+/**
+ * Route an inbound `bot_relay` / `bot_relay_result` crow_social message.
+ * Seams (`localName`, `run`, `notify`, `freshClient`) default to production.
+ * @returns {Promise<'handled'|'ignored'>}
+ */
+export async function routeBotRelay({
+  subtype, payload, senderPubkey, db, identity, nostrManager,
+  localName, run = handleIncomingBotRelay, notify = (n) => createNotification(db, n), freshClient,
+}) {
+  if (!payload || typeof payload !== "object") return "ignored";
+  const name = localName ?? await resolveLocalInstanceName(db);
+  if (payload.target_instance !== name) return "ignored"; // not for us
+
+  const claimed = subtype === "bot_relay" ? payload.sender_instance : payload.responder_instance;
+  if (!isOwnNostrSender(senderPubkey, identity?.secp256k1Pubkey)) {
+    console.warn(`[sharing] ${subtype} dropped: sender is not this Crow ID's own Nostr key (claimed instance ${String(claimed).slice(0, 64)})`);
+    return "ignored";
+  }
+  if (!(await namedInstanceTrusted(db, claimed, { freshClient }))) {
+    console.warn(`[sharing] ${subtype} dropped: ${String(claimed).slice(0, 64)} is not a trusted, live paired instance`);
+    return "ignored";
+  }
+
+  if (subtype === "bot_relay") {
+    // Fire-and-forget, as before: an AI run must not hold up the Nostr handler.
+    Promise.resolve()
+      .then(() => run(payload, db, identity, nostrManager))
+      .catch((err) => console.warn(`[sharing] Bot relay run failed: ${err?.message}`));
+    return "handled";
+  }
+  resolvePendingRelay(payload.relay_id);
+  try {
+    await notify({
+      title: `${payload.responder_instance}: ${payload.status === "success" ? "Done" : "Error"}`,
+      body: payload.result || "No details",
+      type: "system",
+      source: "sharing:bot_relay_result",
+      priority: "high",
+    });
+  } catch (err) {
+    console.warn("[sharing] Failed to create relay result notification:", err.message);
+  }
+  return "handled";
 }

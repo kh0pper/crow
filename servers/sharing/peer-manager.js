@@ -20,6 +20,18 @@ import { sign, verify } from "./identity.js";
 const FLUSHED_CAP_MS = 10_000;
 
 /**
+ * PT-2.0 off switch for the Hyperswarm instance-sync path (instance topic
+ * join, feed-key piggyback, instance replication). On by default; only
+ * CROW_INSTANCE_SYNC_HYPERSWARM=0 turns it off. Contacts on Hyperswarm and
+ * the tailnet instance-sync transport are not affected.
+ */
+export function hyperswarmInstanceSyncEnabled(env = process.env) {
+  return env?.CROW_INSTANCE_SYNC_HYPERSWARM !== "0";
+}
+
+const REFUSE_LOG_EVERY_MS = 60_000;
+
+/**
  * Create a deterministic topic for a contact pair.
  * topic = sha256(sorted(myPubkey, theirPubkey))
  */
@@ -32,8 +44,10 @@ function computeTopic(myEd25519Pub, theirEd25519Pub) {
 }
 
 export class PeerManager {
-  constructor(identity) {
+  constructor(identity, { env = process.env } = {}) {
     this.identity = identity;
+    this.instanceSyncEnabled = hyperswarmInstanceSyncEnabled(env);
+    this._lastRefuseLog = 0;
     this.swarm = null;
     this.connections = new Map(); // crowId -> { conn, authenticated }
     this.topics = new Map(); // crowId -> topic buffer
@@ -131,6 +145,10 @@ export class PeerManager {
    */
   async joinInstanceSync(opts = {}) {
     if (this.p2pDisabled) return null; // --no-auth companion: no instance-sync topic
+    if (!this.instanceSyncEnabled) {
+      console.log("[peer-manager] Hyperswarm instance sync is off (CROW_INSTANCE_SYNC_HYPERSWARM=0); not joining the instance topic");
+      return null;
+    }
     if (!this.swarm) throw new Error("PeerManager not started");
     const cap = Number(opts.flushedCapMs) > 0 ? Number(opts.flushedCapMs) : FLUSHED_CAP_MS;
 
@@ -258,7 +276,13 @@ export class PeerManager {
         }
         (async () => {
           const response = sign(msg.challenge, this.identity.ed25519Priv);
-          const isInstance = state.isInstanceConn || msg.crowId === this.identity.crowId;
+          // PT-2.0: only a peer claiming OUR crowId and OUR key can be a
+          // sibling (siblings share the seed); the topic hint alone no longer
+          // qualifies. These claims are not proven yet at this point, so the
+          // piggyback stays pre-auth until PT-2a; the switch turns it off.
+          const isInstance = this.instanceSyncEnabled
+            && msg.crowId === this.identity.crowId
+            && msg.pubkey === this.identity.ed25519Pubkey;
           let feedKeyHex = null;
           if (isInstance && msg.instance_id && this.getFeedKeyForInstance) {
             try { feedKeyHex = await this.getFeedKeyForInstance(msg.instance_id); } catch {}
@@ -286,6 +310,22 @@ export class PeerManager {
           msg.pubkey
         );
 
+        // PT-2.0: a peer claiming OUR crowId is on the instance path, so it
+        // must have signed with OUR key (siblings share the seed). verify()
+        // only proves possession of the key named in the message.
+        if (valid && msg.crowId === this.identity.crowId
+            && (msg.pubkey !== this.identity.ed25519Pubkey || !this.instanceSyncEnabled)) {
+          const now = Date.now();
+          if (now - this._lastRefuseLog >= REFUSE_LOG_EVERY_MS) {
+            this._lastRefuseLog = now;
+            console.warn(this.instanceSyncEnabled
+              ? "[peer-manager] instance-sync connection refused: peer claims our Crow ID but did not prove our key"
+              : "[peer-manager] instance-sync connection dropped: Hyperswarm instance sync is off");
+          }
+          try { conn.destroy(); } catch {}
+          break;
+        }
+
         if (valid) {
           state.authenticated = true;
           state.remoteCrowId = msg.crowId;
@@ -309,10 +349,9 @@ export class PeerManager {
             break;
           }
 
-          // Same-crow_id peer is definitely an instance-sync connection
-          // (peer is one of our own paired instances), regardless of
-          // whether Hyperswarm tagged the connection with our topic.
-          const isInstance = state.isInstanceConn || msg.crowId === this.identity.crowId;
+          // A same-crow_id peer that proved our key (checked above) is one of
+          // our own instances. The topic hint alone no longer qualifies (PT-2.0).
+          const isInstance = msg.crowId === this.identity.crowId;
 
           // Peer piggybacked their outgoing Hypercore feed key on the
           // challenge-response — persist it before dispatching so the

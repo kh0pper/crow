@@ -17,11 +17,7 @@ import bus from "../shared/event-bus.js";
 import { handleInstanceConnection } from "./instance-connect.js";
 import { ensureColumn } from "../db.js";
 import { normalizePubkey, findContactByPubkey } from "./pubkey-util.js";
-import {
-  resolveLocalInstanceName,
-  resolvePendingRelay,
-  handleIncomingBotRelay,
-} from "./bot-relay.js";
+import { routeBotRelay } from "./bot-relay.js";
 import { upsertFullContact, isPlaceholderName } from "./contact-promote.js";
 import { markDelivered, DELIVERY_RECEIPT_SUBTYPE, HANDSHAKE_COMPLETE_SUBTYPE, buildHandshakeComplete } from "./retry-queue.js";
 import { setReceiveWired } from "./receive-health.js";
@@ -486,7 +482,7 @@ export async function deliverPendingShares({ db, peerManager, contact, identityC
 export async function wireNostrReceive(managers) {
   // The handler ladder references ALL of these free names (review round 1
   // critical): handleInviteAccepted uses syncManager/peerManager (boot.js:385),
-  // handleIncomingBotRelay + handleInboundRoomEnvelope use identity
+  // routeBotRelay + handleInboundRoomEnvelope use identity
   // (boot.js:477,497), handleIncomingRequest takes the whole `managers`
   // (boot.js:505). Destructuring too few silently breaks invite promotion —
   // the ReferenceError is swallowed by subscribeToIncoming's handled=true
@@ -573,34 +569,9 @@ export async function wireNostrReceive(managers) {
       } catch {}
     } else if (subtype === "group_message") {
       await handleGroupMessageNotify(db, payload, managers);
-    } else if (subtype === "bot_relay") {
-      const localName = await resolveLocalInstanceName(db);
-      if (payload.target_instance !== localName) return; // Not for us
-      // Validate sender is a known instance
-      const senderCheck = await db.execute({
-        sql: "SELECT id FROM crow_instances WHERE name = ? AND status = 'active'",
-        args: [payload.sender_instance],
-      });
-      if (senderCheck.rows.length === 0) {
-        console.warn(`[sharing] Bot relay from unknown instance: ${payload.sender_instance}`);
-        return;
-      }
-      handleIncomingBotRelay(payload, db, identity, nostrManager);
-    } else if (subtype === "bot_relay_result") {
-      const localName = await resolveLocalInstanceName(db);
-      if (payload.target_instance !== localName) return; // Not for us
-      const pending = resolvePendingRelay(payload.relay_id);
-      try {
-        await createNotification(db, {
-          title: `${payload.responder_instance}: ${payload.status === "success" ? "Done" : "Error"}`,
-          body: payload.result || "No details",
-          type: "system",
-          source: "sharing:bot_relay_result",
-          priority: "high",
-        });
-      } catch (err) {
-        console.warn("[sharing] Failed to create relay result notification:", err.message);
-      }
+    } else if (subtype === "bot_relay" || subtype === "bot_relay_result") {
+      // PT-2.0: only our own Nostr key, naming a trusted live sibling (bot-relay.js).
+      await routeBotRelay({ subtype, payload, senderPubkey, db, identity, nostrManager });
     } else if (subtype === DELIVERY_RECEIPT_SUBTYPE) {
       await handleDeliveryReceipt(db, payload.event_ids, senderPubkey);
     } else if (subtype === HANDSHAKE_COMPLETE_SUBTYPE) {

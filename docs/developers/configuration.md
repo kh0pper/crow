@@ -109,6 +109,7 @@ link here — there is no built-in fallback model list.
 |---|---|---|
 | `CROW_UNIFIED_DASHBOARD` | enabled | Federated dashboard across paired instances (`0` disables). |
 | `CROW_DISABLE_INSTANCE_SYNC` | *(unset)* | `1` disables cross-instance sync entirely (Hypercore feeds, Hyperswarm DHT, tailnet-sync dialers). `--no-auth` gateways are always sync-disabled regardless. Pair with `CROW_DISABLE_NOSTR=1` for a fully-offline scratch/test boot. |
+| `CROW_INSTANCE_SYNC_HYPERSWARM` | `1` | `0` turns off only the Hyperswarm instance-sync path (no instance-topic join, no feed-key exchange or replication with siblings over Hyperswarm). Tailnet instance sync, Hyperswarm contacts and Nostr are unaffected. Recommended for installs whose instances reach each other over a tailnet. |
 | `CROW_PEER_TOKENS_PATH` | per-`CROW_HOME` | Peer credential file override (multi-gateway hosts). |
 | `CROW_CALLS_ENABLED` | `0` | WebRTC calls feature. |
 | `CROW_CALLS_MAX_PEERS` | `4` | Max peers per call room. |
