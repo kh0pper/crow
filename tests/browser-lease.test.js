@@ -17,7 +17,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   leaseDir, readLease, acquire, beginCall, endCall, release,
-  takeOperator, handBack, heartbeat, isFree, renewIfHeld,
+  takeOperator, takeOperatorIfIdle, handBack, heartbeat, isFree, renewIfHeld,
 } from "../servers/shared/browser-lease.js";
 
 const MODULE = join(dirname(fileURLToPath(import.meta.url)), "..", "servers", "shared", "browser-lease.js");
@@ -433,4 +433,38 @@ test("concurrent acquirers: exactly one wins", async () => {
     assert.equal(lease.gen, 1);
     assert.equal(existsSync(join(dir, LOCK)), false);
   }
+});
+
+test("takeOperatorIfIdle with allowHolderSession refuses another bot's holding under the lock (other_bot, nothing written); this session's, the operator's, a free or expired lease are taken", async () => {
+  const { dir } = tmp();
+  await acquire(dir, bot("perchlive-0ther000"), { now: T0, ttlMs: 120000 });
+  const before = readFileSync(join(dir, LEASE), "utf8");
+  const r = await takeOperatorIfIdle(dir, { now: T0 + 1, isAlive: dead, allowHolderSession: "perchlive-aaaa0001" });
+  assert.equal(r.taken, false);
+  assert.equal(r.reason, "other_bot");
+  assert.equal(r.lease.holder.sessionId, "perchlive-0ther000");
+  assert.equal(readFileSync(join(dir, LEASE), "utf8"), before, "untouched: no take, no pending flag");
+  // another bot with a call in flight: refused too, and no pending flag is set
+  await beginCall(dir, bot("perchlive-0ther000"), { callId: "c1", pid: process.pid, now: T0 + 2 });
+  const r2 = await takeOperatorIfIdle(dir, { now: T0 + 3, isAlive: alive, allowHolderSession: "perchlive-aaaa0001" });
+  assert.equal(r2.reason, "other_bot");
+  assert.equal((await readLease(dir)).pendingOperator, undefined);
+  // without the option: exactly as before (a call in flight → pending, not taken)
+  const r3 = await takeOperatorIfIdle(dir, { now: T0 + 4, isAlive: alive });
+  assert.equal(r3.taken, false);
+  assert.equal(r3.reason, undefined);
+  assert.equal((await readLease(dir)).pendingOperator, T0 + 4);
+  // this session's own bot: the normal path (pending while its call runs, taken when idle)
+  const own = tmp().dir;
+  await acquire(own, bot("perchlive-aaaa0001"), { now: T0, ttlMs: 120000 });
+  assert.equal((await takeOperatorIfIdle(own, { now: T0 + 1, isAlive: dead, allowHolderSession: "perchlive-aaaa0001" })).taken, true);
+  assert.equal((await takeOperatorIfIdle(own, { now: T0 + 2, isAlive: dead, allowHolderSession: "perchlive-aaaa0001" })).taken, true, "the operator's own: renewed");
+  // expired other-bot holding: free
+  const exp = tmp().dir;
+  await acquire(exp, bot("perchlive-0ther000"), { now: T0, ttlMs: 120000 });
+  const r4 = await takeOperatorIfIdle(exp, { now: T0 + 121000, isAlive: dead, allowHolderSession: "perchlive-aaaa0001" });
+  assert.equal(r4.taken, true);
+  assert.equal(r4.lease.holder.kind, "operator");
+  // free: taken
+  assert.equal((await takeOperatorIfIdle(tmp().dir, { now: T0, allowHolderSession: "perchlive-aaaa0001" })).taken, true);
 });

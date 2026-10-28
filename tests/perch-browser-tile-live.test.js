@@ -362,7 +362,7 @@ test("live: Take over opens the sheet with the noVNC iframe; Hand back closes it
         docScroll:document.documentElement.scrollWidth };
     })()`);
     assert.deepEqual([sheet.left, sheet.top, sheet.w, sheet.h], [0, 0, sheet.vw, sheet.vh], "full screen: " + JSON.stringify(sheet));
-    assert.equal(sheet.src, "/proxy/browser/vnc.html?autoconnect=true&resize=scale");
+    assert.equal(sheet.src, "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false");
     assert.ok(sheet.fh > 300, "the viewer fills the sheet: " + sheet.fh);
     assert.equal(sheet.host, HOST);
     assert.equal(sheet.backText, "Hand back");

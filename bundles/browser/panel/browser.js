@@ -31,6 +31,17 @@ export const HAND_BACK_JS = "(function(){var b=document.getElementById('browser-
   "fetch('/dashboard/perch-api/browser/hand-back',{method:'POST',headers:{'X-Crow-Csrf':m?decodeURIComponent(m[1]):''}})" +
   ".then(function(r){if(r.ok){location.reload();}else{b.disabled=false;}},function(){b.disabled=false;});});})();";
 
+/**
+ * The noVNC viewer URLs. The bundled noVNC (Ubuntu 22.04's novnc 1:1.0.0)
+ * reads view_only from the query string and then KEEPS it in localStorage
+ * (WebUtil.writeSetting), shared by every viewer on this origin, so the
+ * interactive ones pin view_only=false; otherwise watching once would leave
+ * the Take over sheet's viewer unable to type or click.
+ */
+export const VNC_VIEW_ONLY = "/proxy/browser/vnc.html?view_only=true&autoconnect=true&resize=scale";
+export const VNC_INTERACTIVE = "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false";
+const VNC_INTERACTIVE_POPOUT = "/proxy/browser/vnc.html?view_only=false";
+
 export default {
   id: "browser",
   name: "Browser",
@@ -118,9 +129,10 @@ export default {
     // --- Live browser tile: a bot holding the lease (a lock-free read) ---
     // The viewer is not a silent bypass: while a bot drives the page, the
     // panel says so and points at Take over (the chat's sheet, which asks the
-    // bot to pause) instead of embedding a viewer that would act behind its
+    // bot to pause), and shows the page in a VIEW-ONLY viewer (noVNC 1.0's
+    // view_only setting) so the operator can watch without acting behind its
     // back. Advisory, like the lease; an older core without the module
-    // shows the viewer as before.
+    // shows the interactive viewer as before.
     let botUsing = null;
     try {
       const leaseMod = await import(pathToFileURL(join(appRoot, "servers/shared/browser-lease.js")).href);
@@ -186,15 +198,15 @@ export default {
           <input type="hidden" name="action" value="restart">
           <button type="submit" class="btn btn-sm">Restart</button>
         </form>
-        ${containerRunning && !botUsing ? `<a href="/proxy/browser/vnc.html" target="_blank" class="btn btn-sm" style="margin-left:auto;">Open VNC Viewer &#8599;</a>` : ""}
+        ${containerRunning && !botUsing ? `<a href="${VNC_INTERACTIVE_POPOUT}" target="_blank" class="btn btn-sm" style="margin-left:auto;">Open VNC Viewer &#8599;</a>` : ""}
       </div>
 
       ${operatorNotice}
       ${botNotice}
-      ${containerRunning && !botUsing ? `
+      ${containerRunning ? `
         <div style="margin-bottom:1rem;">
           <h4 style="margin-bottom:0.5rem;">Live View</h4>
-          <iframe src="/proxy/browser/vnc.html?autoconnect=true&resize=scale"
+          <iframe src="${botUsing ? VNC_VIEW_ONLY : VNC_INTERACTIVE}"
                   style="width:100%; height:500px; border:1px solid var(--border); border-radius:8px;"
                   title="VNC Viewer"></iframe>
         </div>

@@ -165,8 +165,12 @@ export function createTakeOver({
   }
 
   return {
-    /** → { state: "held" | "pending" | "no_browser" }; a lease error throws. */
-    takeOver() {
+    /**
+     * → { state: "held" | "pending" | "no_browser" | "other_bot" }; a lease error throws.
+     * allowHolderSession (a link's chat): another bot holding the lease at
+     * take time → "other_bot", nothing taken and nothing left pending.
+     */
+    takeOver({ allowHolderSession } = {}) {
       return serial(async () => {
         const d = dir();
         if (!d) return { state: "no_browser" };
@@ -177,7 +181,10 @@ export function createTakeOver({
         }
         if (state === "pending") { armLoss(); return { state: "pending" }; }
         failed = false;
-        const r = await lease.takeOperatorIfIdle(d, opts());
+        const o = opts();
+        if (typeof allowHolderSession === "string") o.allowHolderSession = allowHolderSession;
+        const r = await lease.takeOperatorIfIdle(d, o);
+        if (r && r.reason === "other_bot") return { state: "other_bot" };
         armLoss();
         if (r && r.taken) { becomeHeld(); return { state: "held" }; }
         state = "pending";
