@@ -456,6 +456,21 @@ test("verification claims: only an ability negation reaches a bare 'verify' past
     "I was not able to access the original source to verify it.", "I have no way to verify it."])
     assert.equal(verificationClaims(t).length, 0, t);
 });
+test("verification claims: perfect-tense, chance, time, manage, position and failed-to hedges are ability negations", () => {
+  for (const t of ["I have not been able to access the source to verify it.",
+    "I haven't been able to open the PDF and verify the number.",
+    "I have not been able to open the PDF and verify the number.",
+    "I haven't had time to open the PDF to verify it.",
+    "I did not have time to open the PDF and verify the figure.",
+    "I haven't had a chance to open the PDF and verify the figure.",
+    "I did not get a chance to open the PDF and verify it.",
+    "I didn't manage to load the page and verify the quote.",
+    "I was not in a position to open the PDF and verify it.",
+    "I failed to open the PDF and verify it."]) assert.equal(verificationClaims(t).length, 0, t);
+  for (const t of ["I didn't stop there and went on to verify the quote.", "I did not skip this step and took time to verify the quote.",
+    "I verified it against the page.", "I couldn't open the PDF, but I went to the source to verify the figure."])
+    assert.equal(verificationClaims(t).length, 1, t);
+});
 
 // ---- Task 5: session log + evidence ----
 

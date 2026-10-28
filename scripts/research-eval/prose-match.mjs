@@ -359,10 +359,14 @@ export function nearMarker(sentence, hit, markers, { window = NEAR_WINDOW } = {}
 /**
  * Negations of ability: the bot says it could not do something ("could not open the page and
  * verify it"), as opposed to a diligence negation that says what it did not settle for ("did not
- * trust the snippet and went to verify it").
+ * trust the snippet and went to verify it"). The chance/time/manage/position entries are the
+ * phrases a failed fetch is hedged with ("haven't had a chance to open the PDF and verify it");
+ * they read as negations on their own, so an affirming "I have been able to verify it" is not
+ * counted as a claim (a known, accepted limit: check (d) then passes vacuously).
  */
 export const ABILITY_NEGATIONS = ["cannot", "can't", "could not", "couldn't", "unable to", "unable", "not able", "wasn't able",
-  "weren't able", "no way to", "never got to"];
+  "weren't able", "no way to", "never got to", "been able", "been unable", "get a chance to", "get the chance to",
+  "had a chance to", "had time to", "have time to", "manage to", "in a position to", "failed to"];
 /** Words that negate a verification verb when they sit just before it. */
 export const VERIFY_NEGATIONS = ["not", "n't", "never", "unverified", "yet to", ...ABILITY_NEGATIONS];
 const VERIFY_RES = [/\bverif(?:y|ied|ies)\b/gi, /\b(?:confirmed|checked)\b[^.]{0,40}\bagainst\s+the\s+(?:source|page|article)\b/gi];
