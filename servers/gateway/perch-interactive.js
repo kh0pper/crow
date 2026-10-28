@@ -161,6 +161,8 @@ import { anchorSecretsDir, checkedInstanceSecretsDirs } from "../shared/secret-v
 import { deliveredDirPath, openDeliveredDir, registerDeliveredRoot, resolveSentName } from "../shared/perch-delivered.js";
 import { readLease, renewIfHeld as renewBrowserLease, release as releaseBrowserLease, leaseDir as browserLeaseDir } from "../shared/browser-lease.js";
 import { isBrowserTool, tileEventFor, doneEventFor, heldBySession, namesSession, validDomain, browserInstalled, leaseErrorText, RENEW_MS as BROWSER_RENEW_MS, FORCE_BREAK_AFTER_MS } from "./browser-tile/session-hooks.js";
+import { createWatcher as createBrowserWatcher, createFinalShotHook } from "./browser-tile/watcher.js";
+import { storeShot } from "./browser-tile/shots.js";
 
 /** Lease file name under CROW_HOME. Consumed by C-14's reaper exemption. */
 export const LEASE_FILENAME = "perch-interactive-leases.json";
@@ -679,10 +681,15 @@ export function createInteractiveEngine({
   // runtime/session IPC): send_user_file, which copies on the host, never
   // serves from them. A seam for tests.
   hiddenDirs = userRuntimeDirs(process.getuid(), { create: false }),
-  // Live browser tile seam: { installed?: boolean, dir?: string, isAlive?: fn }.
-  // Default: the lease dir under this instance's home, used only while the
-  // browser bundle is installed here (installed.json lists `browser`).
+  // Live browser tile seam: { installed?: boolean, dir?: string, isAlive?: fn,
+  // shotTimeoutMs?: number }. Default: the lease dir under this instance's
+  // home, used only while the browser bundle is installed here
+  // (installed.json lists `browser`).
   browserLease = null,
+  // The gateway's read-only CDP watcher + the final-shot hook (Task 5). Only
+  // the process singleton turns it on (getInteractiveEngine); test engines
+  // never watch a browser.
+  browserWatch = false,
 } = {}) {
   // Every engine log line can quote a bot's card, stderr or reply: masked.
   const log = (m) => rawLog(maskSecrets(m));
@@ -1338,11 +1345,15 @@ export function createInteractiveEngine({
   /** Hooks a later task fills: finalShot(ctx) → { id, url } | null. */
   const browserHooks = { finalShot: async () => null };
   /** A hung shot hook can never wedge the session's lease queue or onTurnEnd. */
-  const FINAL_SHOT_TIMEOUT_MS = 5000;
-  function withDeadline(p, ms) {
+  const FINAL_SHOT_TIMEOUT_MS = Number.isFinite(browserCfg.shotTimeoutMs) && browserCfg.shotTimeoutMs > 0 ? browserCfg.shotTimeoutMs : 5000;
+  /** `fn(signal)` raced against `ms`; at the deadline the signal aborts, so a
+   *  late-resolving hook knows to store nothing (it checks before storing). */
+  function withDeadline(fn, ms) {
+    const ac = new AbortController();
     let h = null;
-    const late = new Promise((resolve) => { h = setTimeout(() => resolve(null), ms); if (h.unref) h.unref(); });
-    return Promise.race([Promise.resolve(p), late]).finally(() => clearTimeout(h));
+    const late = new Promise((resolve) => { h = setTimeout(() => { ac.abort(); resolve(null); }, ms); if (h.unref) h.unref(); });
+    const run = Promise.resolve().then(() => fn(ac.signal));
+    return Promise.race([run, late]).finally(() => clearTimeout(h));
   }
 
   /** This instance's lease dir, or null when the browser bundle is not installed here. */
@@ -1488,12 +1499,14 @@ export function createInteractiveEngine({
       try {
         if (rec && rec.live && allowShot && !operator) {
           try {
-            shot = await withDeadline(browserHooks.finalShot({
+            shot = await withDeadline((signal) => browserHooks.finalShot({
               sessionId: s.sessionId, botId: s.botId, threadId: s.threadId,
+              outputsDir: s.outputsDir || null,
               anchor: rec.anchor, gen: rec.gen,
               genAtEnd: l ? l.gen : null,
               heldAtEnd: heldBySession(l, s.sessionId, now()),
               operatorTook: rec.operatorTook,
+              signal,
             }), FINAL_SHOT_TIMEOUT_MS);
           } catch (e) {
             log(s.sessionId + ": browser final shot failed: " + leaseErrorText(e));
@@ -1514,6 +1527,37 @@ export function createInteractiveEngine({
         if (rec && s.browser === rec) s.browser = null;
       }
     });
+  }
+
+  /**
+   * The read-only CDP watcher (Task 5): reports every bot holding of this
+   * instance's lease (so a tile lights while the first browser call is still
+   * running) with the leased page's domain from CDP, serves the frames route,
+   * and takes the final shot. Off unless `browserWatch` (the process singleton).
+   */
+  let browserWatcher = null;
+  if (browserWatch) {
+    try {
+      const dir = browserCfg.dir || browserLeaseDir((name) => join(crowHome, name));
+      browserWatcher = createBrowserWatcher({
+        crowHome,
+        leaseDir: dir,
+        log,
+        onLease: (l, extra) => browserLeaseChanged(l, extra),
+      });
+      browserHooks.finalShot = createFinalShotHook({
+        watcher: browserWatcher,
+        leaseDir: dir,
+        storeShot,
+        createDb: createDbClient,
+        operatorHeld: () => browserOperatorHeld,
+        now,
+        log,
+      });
+    } catch (e) {
+      browserWatcher = null;
+      log("browser watcher unavailable: " + leaseErrorText(e));
+    }
   }
 
   /**
@@ -4236,6 +4280,7 @@ export function createInteractiveEngine({
       if (timerHandle) clearTimeout(timerHandle);
     }));
     writeLeases();
+    if (browserWatcher) { try { browserWatcher.close(); } catch { /* closed */ } }
     return { stopped: live.length };
   }
 
@@ -4358,6 +4403,8 @@ export function createInteractiveEngine({
     browserLeaseChanged,
     browserOperator,
     browserHooks,
+    /** The frames route's watcher (null unless this engine watches a browser). */
+    get browserWatcher() { return browserWatcher; },
     /** Precondition-test surface (r1 S10) — also the internal resolver. */
     _loadSeams: loadSeams,
     /** Track 3 Task 7: test-only reach into the internal hibernate() — every
@@ -4405,7 +4452,7 @@ let singleton = null;
  *   must not mint an engine (and a lease file) on its way out.
  */
 export function getInteractiveEngine({ createIfMissing = true } = {}) {
-  if (!singleton && createIfMissing) singleton = createInteractiveEngine();
+  if (!singleton && createIfMissing) singleton = createInteractiveEngine({ browserWatch: true });
   return singleton;
 }
 
@@ -4434,6 +4481,8 @@ export async function emitExternalToResident(threadId, frame, opts) {
 /** Test-only: drop the singleton so one test can never leak an engine (or a
  * live child) into the next. */
 export function _resetInteractiveEngineForTest() {
+  const w = singleton && singleton.browserWatcher;
+  if (w) { try { w.close(); } catch { /* closed */ } }
   singleton = null;
 }
 

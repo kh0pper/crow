@@ -328,6 +328,14 @@ export async function readLease(dir) {
 }
 
 /**
+ * The current lease read UNDER the lock (no write): what the gateway checks
+ * before its final shot (spec §4.5), so no writer is mid-change while it decides.
+ */
+export async function readLeaseLocked(dir, opts = {}) {
+  return withLock(dir, opts, (cur) => ({ result: cur }));
+}
+
+/**
  * Take or renew the lease for `holder` ({ kind, sessionId, botId? }).
  * → { ok: true, lease, genChanged } | { ok: false, reason: "busy"|"operator", lease }
  * genChanged: someone else had the lease since this holder last did.

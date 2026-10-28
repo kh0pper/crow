@@ -134,7 +134,7 @@ function makeEngine(o = {}) {
     crowHome: CROW_HOME, env, bridge,
     now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
     log: (m) => lines.push(m),
-    browserLease: o.browserLease === undefined ? { installed: true, dir: leaseDir, ...(o.isAlive ? { isAlive: o.isAlive } : {}) } : o.browserLease,
+    browserLease: o.browserLease === undefined ? { installed: true, dir: leaseDir, ...(o.isAlive ? { isAlive: o.isAlive } : {}), ...(o.shotTimeoutMs ? { shotTimeoutMs: o.shotTimeoutMs } : {}) } : o.browserLease,
   });
   return { engine, clock, state: bridge._state, leaseDir, lines, renewTimers: () => clock.pendingNamed("tickRenew") };
 }
@@ -593,4 +593,140 @@ test("a locked lease never breaks a turn, and nothing logged names a URL", async
   assert.equal(sink.browser().filter((e) => e.phase === "done").length, 1, "done still emitted");
   assert.ok(h.lines.some((l) => /ELEASELOCKED/.test(l)), "logged as a code");
   assert.ok(!h.lines.some((l) => /example\.test|https?:/.test(l)), "no URL or host in the log");
+});
+
+// ---------------------------------------------------------------------------
+// Task 5: the watcher's lease watch and the final-shot hook, through the engine
+// ---------------------------------------------------------------------------
+
+const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+
+/** The real final-shot hook over a fake watcher and a fake store. */
+async function shotHook(h, { capture } = {}) {
+  const { createFinalShotHook } = await import("../servers/gateway/browser-tile/watcher.js");
+  const stored = [];
+  const captures = [];
+  h.engine.browserHooks.finalShot = createFinalShotHook({
+    watcher: {
+      hostname: () => "shop.example.test",
+      captureFinal: async (sid, opts) => { captures.push({ sid, opts }); return capture ? capture(sid, opts) : JPEG; },
+    },
+    leaseDir: h.leaseDir,
+    now: h.clock.now,
+    operatorHeld: () => false,
+    storeShot: async (db, sess, args) => { stored.push({ sess, args }); return { id: 9, name: "browser-shop.example.test-20261028-120000.jpg" }; },
+    createDb: () => ({ close() {} }),
+  });
+  return { stored, captures };
+}
+
+test("the tile lights while the first browser call is still running (the watcher's lease watch)", async () => {
+  const { createWatcher } = await import("../servers/gateway/browser-tile/watcher.js");
+  const h = makeEngine({ isAlive: (pid) => pid === 5150 });
+  const w = createWatcher({
+    crowHome: CROW_HOME, leaseDir: h.leaseDir, installed: () => true, containerized: () => false,
+    resolveCdpUrl: async () => null, watchFs: () => null,
+    now: h.clock.now, setTimer: h.clock.setTimer, clearTimer: h.clock.clearTimer,
+    onLease: (l, extra) => h.engine.browserLeaseChanged(l, extra),
+  });
+  try {
+    const s = await spawned(h.engine);
+    const sink = await collect(h.engine, s.sessionId);
+    await h.engine.message(s.sessionId, "browse");
+    const pi = h.state.instances[0];
+    pi.emit({ type: "tool_execution_start", toolName: NAV, toolCallId: "c1", args: {} });
+    // the MCP server takes the lease and starts the (long) first call; no end event yet
+    await mcpAcquire(h, s.sessionId);
+    await lease.beginCall(h.leaseDir, holderOf(s.sessionId), { callId: "c1", pid: 5150, targetId: "T1", now: h.clock.now() });
+    await tick();
+    assert.equal(sink.browser().length, 0, "nothing until the watcher sees the lease");
+    h.clock.advance(1000);
+    await tick(30);
+    const live = sink.browser().filter((e) => e.phase === "live");
+    assert.equal(live.length, 1, "lit by the 1 s lease poll while the call runs");
+    assert.equal(live[0].anchor, "c1");
+  } finally { w.close(); }
+});
+
+test("final shot only when the holder is still this session at turn end (gen unchanged) — through the engine", async () => {
+  {
+    const h = makeEngine();
+    const hk = await shotHook(h);
+    const { s, sink, pi } = await liveTurn(h);
+    pi.lastTurn().resolve(END);
+    await tick(30);
+    const done = sink.browser().filter((e) => e.phase === "done");
+    assert.equal(done.length, 1);
+    assert.deepEqual(done[0].shot, { id: 9, url: "/dashboard/perch-api/interactive/" + s.sessionId + "/workspace/browser-shop.example.test-20261028-120000.jpg" });
+    assert.equal(hk.stored.length, 1);
+    assert.equal(hk.stored[0].args.anchor, "c1");
+    assert.equal(hk.stored[0].sess.botId, "botty");
+    assert.equal((await lease.readLease(h.leaseDir)).holder, null, "released after the shot");
+  }
+  {
+    // another bot holds the browser by turn end: no capture at all
+    const h = makeEngine();
+    const hk = await shotHook(h);
+    const { s, sink, pi } = await liveTurn(h);
+    await lease.release(h.leaseDir, s.sessionId, { now: h.clock.now() });
+    await lease.acquire(h.leaseDir, holderOf("perchlive-other999", "other"), { now: h.clock.now() });
+    pi.lastTurn().resolve(END);
+    await tick(30);
+    const done = sink.browser().filter((e) => e.phase === "done");
+    assert.equal(done.length, 1);
+    assert.equal(done[0].shot, null);
+    assert.equal(hk.captures.length, 0);
+    assert.equal(hk.stored.length, 0);
+    assert.equal((await lease.readLease(h.leaseDir)).holder.sessionId, "perchlive-other999", "the other bot's holding is untouched");
+  }
+});
+
+test("operator took the browser during the turn and handed it back → no shot (B4)", async () => {
+  const h = makeEngine();
+  const hk = await shotHook(h);
+  const { sink, pi } = await liveTurn(h);
+  h.engine.browserOperator(true);
+  h.engine.browserOperator(false);
+  pi.lastTurn().resolve(END);
+  await tick(30);
+  const done = sink.browser().filter((e) => e.phase === "done");
+  assert.equal(done.length, 1);
+  assert.equal(done[0].shot, null);
+  assert.equal(hk.captures.length, 0, "never captured");
+});
+
+test("stopped turn keeps its shot", async () => {
+  const h = makeEngine();
+  const hk = await shotHook(h);
+  const { s, sink } = await liveTurn(h);
+  await h.engine.stop(s.sessionId);
+  await tick(30);
+  const done = sink.browser().filter((e) => e.phase === "done");
+  assert.equal(done.length, 1);
+  assert.equal(done[0].shot && done[0].shot.id, 9);
+  assert.equal(hk.stored.length, 1);
+});
+
+test("capture times out at the deadline → no shot, nothing stored late, the turn is not delayed", async () => {
+  const h = makeEngine({ shotTimeoutMs: 100 });
+  let resolveCapture;
+  let sawSignal = null;
+  const hk = await shotHook(h, { capture: (sid, opts) => { sawSignal = opts.signal; return new Promise((r) => { resolveCapture = r; }); } });
+  const { s, sink, pi } = await liveTurn(h);
+  pi.lastTurn().resolve(END);
+  await tick(30);
+  assert.ok(sink.events.some((e) => e.type === "reply"), "the reply went out");
+  assert.equal(h.engine._sessionRecordForTest(s.sessionId).turn, null, "s.turn is already null while the shot runs");
+  assert.equal(sink.browser().filter((e) => e.phase === "done").length, 0, "the shot is still running");
+  assert.ok(sawSignal && !sawSignal.aborted, "the hook got a live AbortSignal");
+  await new Promise((r) => setTimeout(r, 160));
+  await tick(30);
+  assert.equal(sawSignal.aborted, true, "aborted at the deadline");
+  const done = sink.browser().filter((e) => e.phase === "done");
+  assert.equal(done.length, 1);
+  assert.equal(done[0].shot, null);
+  resolveCapture(JPEG);              // the capture finally returns
+  await tick(30);
+  assert.equal(hk.stored.length, 0, "a late-resolving capture stores nothing");
+  assert.equal((await lease.readLease(h.leaseDir)).holder, null, "released");
 });

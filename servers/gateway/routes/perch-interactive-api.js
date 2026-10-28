@@ -1657,6 +1657,43 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     }
   });
 
+  // ---- GET /interactive/:sid/browser/frame?after=<seq>&vw=<px> — the live tile ----
+  // Live browser tile (spec §4.3). A long poll (≤ 2 s): the newest screencast
+  // frame after `seq`, or 204. Only while THIS session holds the browser lease
+  // (a lock-free read; atomic rename gives whole files) — otherwise 409
+  // not_holder and the tile keeps its last frame dimmed. `vw` is the viewer's
+  // width: a phone viewport (≤ 600 px) lets the watcher drop to 1 frame/s at
+  // 480 px. A closed request aborts the wait. Behind dashboardAuth like every
+  // perch-api route; never Funnel-reachable.
+  router.get(P + "/interactive/:sid/browser/frame", async (req, res) => {
+    const sid = String(req.params.sid);
+    const ac = new AbortController();
+    const gone = () => { if (!res.writableEnded) ac.abort(); };
+    req.on("close", gone);
+    res.on("close", gone);
+    try {
+      const eng = resolveEngine();
+      const snap = await eng.get(sid);
+      if (!snap) return jsonError(res, 404, "no_such_session");
+      const watcher = eng.browserWatcher || null;
+      if (!watcher || !watcher.enabled()) return jsonError(res, 404, "no_browser");
+      if (!(await watcher.isHolder(sid))) return jsonError(res, 409, "not_holder");
+      if (ac.signal.aborted) return;
+      const afterRaw = String(req.query.after ?? "");
+      const after = /^[0-9]{1,15}$/.test(afterRaw) ? Number(afterRaw) : 0;
+      const vwRaw = String(req.query.vw ?? "");
+      const vw = /^[0-9]{1,5}$/.test(vwRaw) ? Number(vwRaw) : 0;
+      const frame = await watcher.frameAfter(sid, after, { timeoutMs: 2000, signal: ac.signal, phone: vw > 0 && vw <= 600 });
+      if (ac.signal.aborted || res.writableEnded) return;
+      res.set("Cache-Control", "no-store");
+      if (!frame) return res.status(204).end();
+      res.json({ seq: frame.seq, jpeg: frame.jpegB64, w: frame.w, h: frame.h });
+    } catch (err) {
+      if (ac.signal.aborted || res.headersSent) return;
+      mapEngineError(res, err);
+    }
+  });
+
   // ---- GET /interactive/:sid/cwd/list — read-only cwd browse (PR-B, item 18) ----
   // Lists dirs + files inside the session's OWN cwd, realpath-jailed under it
   // (never the uploadsDir). The Files tab's browser: a picker/viewer, not a
