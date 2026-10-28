@@ -708,10 +708,10 @@ test("Hyperswarm handshake is no signing oracle: it signs only a 32-byte hex cha
   const fleet = await makeFleet();
   try {
     const pm = new PeerManager(fleet.identity);
-    const run = async (challenge) => {
+    const run = async (challenge, extra = { cb: 1 }) => {
       const writes = []; let destroyed = false;
-      const conn = { write: (d) => writes.push(JSON.parse(String(d))), destroy: () => { destroyed = true; } };
-      pm._handleMessage(conn, { type: "challenge", challenge }, Buffer.alloc(32), {}, () => {});
+      const conn = { handshakeHash: randomBytes(32), write: (d) => writes.push(JSON.parse(String(d))), destroy: () => { destroyed = true; } };
+      await pm._handleMessage(conn, { type: "challenge", challenge, ...extra }, Buffer.alloc(32), {}, () => {});
       await sleep(20);
       return { writes, destroyed };
     };
@@ -720,10 +720,16 @@ test("Hyperswarm handshake is no signing oracle: it signs only a 32-byte hex cha
       assert.equal(r.writes.length, 0, `nothing signed for ${String(evil).slice(0, 20)}`);
       assert.equal(r.destroyed, true);
     }
-    // Positive control: a genuine challenge is still answered.
+    // Positive control: a genuine challenge is still answered, with a
+    // connection-bound cb_sig and no bare signature (PT-3).
     const ok = await run(randomBytes(32).toString("hex"));
     assert.equal(ok.writes[0]?.type, "challenge-response");
-    assert.equal(typeof ok.writes[0].signature, "string");
+    assert.equal(typeof ok.writes[0].cb_sig, "string");
+    assert.equal("signature" in ok.writes[0], false);
+    // PT-3: without `cb`, nothing is signed until the asker proves itself.
+    const held = await run(randomBytes(32).toString("hex"), {});
+    assert.equal(held.writes.length, 0, "an unproven asker without cb gets no signature");
+    assert.equal(held.destroyed, false);
   } finally {
     await fleet.cleanup();
   }

@@ -29,6 +29,7 @@ import { withoutProvenance } from "../research/provenance-schema.js";
 import { PROFILE_SUBTYPE, handleProfileMessage, applyPeerProfile, readLocalProfile, ensurePeerProfileColumns, isEstablishedContact } from "./peer-profile.js";
 import { installBirdAvatarHooks } from "./profile-avatar.js";
 import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
+import { wireContactBinding } from "./contact-binding.js";
 
 /**
  * L6 receive-path fix — turn a decrypted DM from an unknown sender into a
@@ -796,6 +797,11 @@ export async function initSharingRuntime(managers, helpers) {
   // when all instances of one user share one crow_id).
   peerManager.localInstanceId = instanceSyncManager.localInstanceId;
 
+  // PT-3: the Hyperswarm verifier admits a contact only on the key pinned in
+  // its contact row, and records which contacts have bound (the pin, LOCAL
+  // scope). The local id is read at call time, never captured.
+  wireContactBinding(peerManager, { db, localInstanceId: () => instanceSyncManager.localInstanceId });
+
   // peer-manager asks us for OUR outgoing feed key to a specific peer
   // instance (remoteInstanceId is the peer's local id, which matches the
   // `id` column in our crow_instances table for that peer's row).
@@ -818,8 +824,9 @@ export async function initSharingRuntime(managers, helpers) {
   };
 
   // Persist a peer-advertised feed key so we can open their incoming feed.
-  // Called when the peer piggybacks (instance_id, feed_key_hex) on the
-  // challenge-response JSON message (see peer-manager.js).
+  // Called only after the sibling proved our key: from a new sibling's
+  // `instance-key` frame, or an old sibling's challenge-response piggyback
+  // (instance_id, feed_key_hex). See peer-manager.js.
   peerManager.onInstanceKeyReceived = async (remoteInstanceId, feedKeyHex) => {
     try {
       const { rows } = await db.execute({

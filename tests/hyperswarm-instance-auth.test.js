@@ -9,6 +9,8 @@
  * entirely; contacts and the tailnet transport are untouched.
  *
  * Drives the real PeerManager message handler with real ed25519 keys.
+ * PT-3: _handleMessage is async, and a new node answers a challenge without
+ * `cb` only after the asker has proven itself on that connection.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -39,32 +41,33 @@ function fakeConn() {
   return conn;
 }
 
+const newState = (isInstanceConn) => ({ authenticated: false, remoteCrowId: null, isInstanceConn });
+const ticks = async () => { for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r)); };
+
 /** Feed a challenge-response signed by `signer`, claiming `claims`. */
-function respond(pm, signer, claims, { isInstanceConn = true } = {}) {
+async function respond(pm, signer, claims, { isInstanceConn = true, conn = fakeConn(), state = newState(isInstanceConn) } = {}) {
   const ourChallenge = randomBytes(32);
-  const conn = fakeConn();
-  pm._handleMessage(conn, {
+  await pm._handleMessage(conn, {
     type: "challenge-response",
     signature: sign(ourChallenge.toString("hex"), signer.ed25519Priv),
     pubkey: signer.ed25519Pubkey,
     ...claims,
-  }, ourChallenge, { authenticated: false, remoteCrowId: null, isInstanceConn }, () => {});
+  }, ourChallenge, state, () => {});
+  await ticks();
   return conn;
 }
 
 /** Feed a challenge claiming `claims`; resolves with what we wrote back. */
-async function challenge(pm, claims, { isInstanceConn = true } = {}) {
-  const conn = fakeConn();
-  pm._handleMessage(conn, { type: "challenge", challenge: randomBytes(32).toString("hex"), ...claims },
-    randomBytes(32), { authenticated: false, remoteCrowId: null, isInstanceConn }, () => {});
-  await new Promise((r) => setImmediate(r));
-  await new Promise((r) => setImmediate(r));
+async function challenge(pm, claims, { isInstanceConn = true, conn = fakeConn(), state = newState(isInstanceConn) } = {}) {
+  await pm._handleMessage(conn, { type: "challenge", challenge: randomBytes(32).toString("hex"), ...claims },
+    randomBytes(32), state, () => {});
+  await ticks();
   return conn;
 }
 
 test("H-R1 positive control: a sibling (owner's key) gets the instance path", async () => {
   const { pm, calls } = makePm();
-  const conn = respond(pm, owner, { crowId: owner.crowId, instance_id: "instB", feed_key_hex: FEED });
+  const conn = await respond(pm, owner, { crowId: owner.crowId, instance_id: "instB", feed_key_hex: FEED });
   assert.equal(conn.destroyed, false);
   assert.deepEqual(calls.keyReceived, [["instB", FEED]]);
   assert.deepEqual(calls.instanceConnected, [[owner.crowId, "instB"]]);
@@ -72,7 +75,7 @@ test("H-R1 positive control: a sibling (owner's key) gets the instance path", as
 
 test("H-R2 a stranger's key claiming our crowId and a sibling id is destroyed, no key swap, no replication", async () => {
   const { pm, calls } = makePm();
-  const conn = respond(pm, stranger, { crowId: owner.crowId, instance_id: "instB", feed_key_hex: FEED });
+  const conn = await respond(pm, stranger, { crowId: owner.crowId, instance_id: "instB", feed_key_hex: FEED });
   assert.equal(conn.destroyed, true);
   assert.deepEqual(calls.keyReceived, []);
   assert.deepEqual(calls.instanceConnected, []);
@@ -81,32 +84,55 @@ test("H-R2 a stranger's key claiming our crowId and a sibling id is destroyed, n
 
 test("H-R3 a foreign crowId on the instance topic never reaches the instance callbacks", async () => {
   const { pm, calls } = makePm();
-  respond(pm, stranger, { crowId: stranger.crowId, instance_id: "instB", feed_key_hex: FEED }, { isInstanceConn: true });
+  await respond(pm, stranger, { crowId: stranger.crowId, instance_id: "instB", feed_key_hex: FEED }, { isInstanceConn: true });
   assert.deepEqual(calls.keyReceived, []);
   assert.deepEqual(calls.instanceConnected, []);
 
   const out = await challenge(pm, { crowId: stranger.crowId, pubkey: stranger.ed25519Pubkey, instance_id: "instB" }, { isInstanceConn: true });
   assert.deepEqual(calls.feedKeyAsked, []);
-  const reply = out.written.find((m) => m.type === "challenge-response");
-  assert.ok(reply, "the challenge is still answered (contact handshake)");
-  assert.equal(reply.feed_key_hex, undefined);
+  // PT-3: an asker without `cb` is answered only after it proves itself here.
+  assert.equal(out.written.find((m) => m.type === "challenge-response"), undefined, "an unproven asker gets no reply");
 });
 
 test("H-R4 switch off: an unauthenticated peer presenting our crowId AND our pubkey gets no feed key", async () => {
   const { pm, calls } = makePm({ CROW_INSTANCE_SYNC_HYPERSWARM: "0" });
   const out = await challenge(pm, { crowId: owner.crowId, pubkey: owner.ed25519Pubkey, instance_id: "instB" });
   assert.deepEqual(calls.feedKeyAsked, []);
-  const reply = out.written.find((m) => m.type === "challenge-response");
-  assert.ok(reply);
-  assert.equal(reply.feed_key_hex, undefined);
-  assert.equal(reply.instance_id, undefined);
+  assert.equal(out.written.find((m) => m.type === "challenge-response"), undefined, "an unproven asker gets no reply");
+  assert.equal(out.written.some((m) => "feed_key_hex" in m || "instance_id" in m), false);
 });
 
-// Known gap, closed by PT-2a (post-auth key message, a wire change): with the
-// switch ON, the challenge reply still piggybacks the feed key before the
-// peer has proved anything. Production installs that pair over a tailnet
-// should run with CROW_INSTANCE_SYNC_HYPERSWARM=0.
-test.todo("PT-2a: with the switch on, the feed key is sent only after the peer proves our key");
+// Formerly a known gap (test.todo): the challenge reply piggybacked the feed
+// key before the peer had proved anything. PT-3 holds that reply until the
+// asker proves our key on the connection.
+test("PT-2a: with the switch on, the feed key is sent only after the peer proves our key", async () => {
+  // Positive control, same connection shape: a proving sibling gets the key.
+  {
+    const { pm, calls } = makePm();
+    const conn = fakeConn();
+    const state = newState(true);
+    await challenge(pm, { crowId: owner.crowId, pubkey: owner.ed25519Pubkey, instance_id: "instB" }, { conn, state });
+    assert.deepEqual(conn.written, [], "nothing is written before the proof");
+    assert.deepEqual(calls.feedKeyAsked, []);
+    await respond(pm, owner, { crowId: owner.crowId, instance_id: "instB" }, { conn, state });
+    const types = conn.written.map((m) => m.type);
+    assert.deepEqual(types, ["authenticated", "challenge-response"], "the reply follows admission");
+    const reply = conn.written[1];
+    assert.equal(reply.feed_key_hex, FEED);
+    assert.equal(reply.instance_id, "instA");
+    assert.equal(typeof reply.signature, "string");
+    assert.deepEqual(calls.feedKeyAsked, ["instB"]);
+  }
+  // A stranger presenting our Crow ID and our pubkey never proves our key.
+  const { pm, calls } = makePm();
+  const conn = fakeConn();
+  const state = newState(true);
+  await challenge(pm, { crowId: owner.crowId, pubkey: owner.ed25519Pubkey, instance_id: "instB" }, { conn, state });
+  await respond(pm, stranger, { crowId: owner.crowId, pubkey: owner.ed25519Pubkey, instance_id: "instB" }, { conn, state });
+  assert.equal(conn.destroyed, true);
+  assert.deepEqual(calls.feedKeyAsked, []);
+  assert.equal(conn.written.some((m) => "feed_key_hex" in m), false, "no feed key");
+});
 
 test("H-K0 the switch: on by default, off only for \"0\"", () => {
   assert.equal(hyperswarmInstanceSyncEnabled({}), true);
@@ -124,7 +150,7 @@ test("H-K1 switch off: no instance-topic join, a genuine sibling is dropped, no 
   assert.equal(pm.instanceSyncTopic, null);
   assert.equal(joins.length, 0, "no Hyperswarm instance-sync topic join");
 
-  const conn = respond(pm, owner, { crowId: owner.crowId, instance_id: "instB", feed_key_hex: FEED });
+  const conn = await respond(pm, owner, { crowId: owner.crowId, instance_id: "instB", feed_key_hex: FEED });
   assert.equal(conn.destroyed, true);
   assert.deepEqual(calls.keyReceived, []);
   assert.deepEqual(calls.instanceConnected, []);

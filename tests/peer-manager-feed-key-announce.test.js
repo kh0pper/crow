@@ -10,16 +10,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { PeerManager } from "../servers/sharing/peer-manager.js";
 
-test("feed-key-announce messages do NOT invoke onInstanceKeyReceived (dead path stays dead)", () => {
+test("feed-key-announce messages do NOT invoke onInstanceKeyReceived (dead path stays dead)", async () => {
   const pm = new PeerManager({ crowId: "crow:test", ed25519Pubkey: "00".repeat(32), ed25519Priv: "00".repeat(32) });
   let called = null;
   pm.onInstanceKeyReceived = (id, key) => { called = [id, key]; };
   const conn = { write() {}, destroy() {} };
-  pm._handleMessage(
+  // An admitted instance connection (PT-3 state shape), so only the frame type is under test.
+  await pm._handleMessage(
     conn,
-    { type: "feed-key-announce", feed_key_hex: "ab".repeat(32) },
+    { type: "feed-key-announce", instance_id: "instB", feed_key_hex: "ab".repeat(32) },
     Buffer.alloc(32),
-    { authenticated: true, remoteCrowId: "crow:test", isInstanceConn: true },
+    { authenticated: true, remoteCrowId: "crow:test", remoteInstanceId: "instB", kind: "instance", isInstanceConn: true },
     () => {},
   );
   assert.equal(called, null, `feed-key-announce must be ignored; got onInstanceKeyReceived(${called?.[0]}) — a crow_id, not an instance id`);
