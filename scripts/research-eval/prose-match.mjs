@@ -357,27 +357,39 @@ export function nearMarker(sentence, hit, markers, { window = NEAR_WINDOW } = {}
 // ---- verification claims ----
 
 /** Words that negate a verification verb when they sit just before it. */
-export const VERIFY_NEGATIONS = ["not", "n't", "unable to", "unable", "could not", "cannot", "never", "unverified", "yet to"];
+export const VERIFY_NEGATIONS = ["not", "n't", "unable to", "unable", "could not", "cannot", "never", "unverified", "yet to", "no way to"];
 const VERIFY_RES = [/\bverif(?:y|ied|ies)\b/gi, /\b(?:confirmed|checked)\b[^.]{0,40}\bagainst\s+the\s+(?:source|page|article)\b/gi];
 /**
- * A negation negates a verify verb at most this many word tokens after it: "could not readily
- * verify", "did not get a chance to verify", "don't think I can verify". Known limit: a longer
- * gap ("I was not in a much better position to verify it") reads as a claim.
+ * A negation negates a past-tense or inflected verb (verified, verifies, confirmed ... against)
+ * at most this many word tokens after it: "could not readily verify", "did not get a chance to
+ * verify". Known limit: a longer gap ("I was not in a much better position to verify it") reads
+ * as a claim.
  */
 const NEGATION_GAP = 4;
 /**
- * A clause stop or an affirming conjunction between the negation and the verb ends the negation:
- * "I couldn't verify it, but I confirmed it against the source", "I didn't trust the summary and
- * verified it", "I didn't stop until I verified it".
+ * A clause stop or an affirming conjunction between the negation and an inflected verb ends the
+ * negation: "I couldn't verify it, but I confirmed it against the source", "I didn't trust the
+ * summary and verified it", "I didn't stop until I verified it".
  */
 const NEGATION_BREAK = /[,;:]|\b(?:but|and|then|until|so|before|after)\b/i;
+/**
+ * The bare base form "verify" is what a failed fetch leaves behind ("I was unable to open the
+ * PDF and verify the number", "I could not get the page to load to verify it", "I have no way to
+ * verify it"), so its negation reaches further and only a clause stop ends it: "and"/"or"/"to"
+ * continue the failed attempt rather than affirm anything.
+ */
+const BARE_NEGATION_GAP = 10;
+const BARE_NEGATION_BREAK = /[,;:]|\bbut\b/i;
+const BARE_VERB = /^verify\b/i;
 
 /**
  * Sentences that claim the bot verified something: a verify/verified/verifies, or
  * "confirmed/checked ... against the source/page/article". A sentence whose every such verb is
  * negated (a VERIFY_NEGATIONS entry at most NEGATION_GAP tokens before it, with no
  * NEGATION_BREAK between: "could not readily verify", "have not been able to verify", "yet to
- * verify"; "not only" never negates) is not a claim, and neither is ambiguous phrasing ("I checked the numbers", "I looked at the page").
+ * verify"; "not only" never negates; a bare "verify" uses the wider BARE_NEGATION_GAP and
+ * BARE_NEGATION_BREAK) is not a claim, and neither is ambiguous phrasing ("I checked the
+ * numbers", "I looked at the page").
  * @returns {Array<{sentence: {text, start, end}}>}
  */
 export function verificationClaims(text) {
@@ -387,8 +399,12 @@ export function verificationClaims(text) {
     const negations = markerSpans(s.text, VERIFY_NEGATIONS);
     // "Not only did I verify ..." affirms.
     const real = negations.filter((n) => !/^\s+only\b/i.test(s.text.slice(n.end)));
-    const negates = (n, verbAt) => n.end <= verbAt && !NEGATION_BREAK.test(s.text.slice(n.end, verbAt))
-      && tokensBetween(tokens, n.end, verbAt) <= NEGATION_GAP;
+    const negates = (n, verbAt) => {
+      if (n.end > verbAt) return false;
+      const bare = BARE_VERB.test(s.text.slice(verbAt));
+      const [stop, gap] = bare ? [BARE_NEGATION_BREAK, BARE_NEGATION_GAP] : [NEGATION_BREAK, NEGATION_GAP];
+      return !stop.test(s.text.slice(n.end, verbAt)) && tokensBetween(tokens, n.end, verbAt) <= gap;
+    };
     const claims = VERIFY_RES.some((re) => [...s.text.matchAll(re)].some((m) => !real.some((n) => negates(n, m.index))));
     if (claims) out.push({ sentence: s });
   }

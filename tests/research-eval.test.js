@@ -425,3 +425,16 @@ test("verification claims: a negation reaches 4 tokens unless an affirming conju
     "I verified it against the page.", "I verified the figure, but not the quote", "I was not able to, but later verified it."])
     assert.equal(verificationClaims(t).length, 1, t);
 });
+test("verification claims: a bare 'verify' keeps its negation past 'and' and up to 10 tokens, and 'no way to' negates", () => {
+  for (const t of ["I was unable to open the PDF and verify the number.", "I could not find the page and verify it.",
+    "I was not able to locate and verify the quote.", "Unfortunately I was unable to retrieve the page and verify the quote.",
+    "I was not able to fetch the page or verify the quote.",
+    "I was not able to access the original source to verify it.", "I was not able to load the page to verify it.",
+    "I could not get the page to load to verify it.",
+    "I have no way to verify it.", "There is no way to verify it."]) assert.equal(verificationClaims(t).length, 0, t);
+  for (const t of ["I didn't trust the summary and verified it on the page.", "Not only did I verify the figure, I also read the page.",
+    "I did not hesitate and verified it.", "I didn't stop until I verified it.", "I verified the figure, but not the quote",
+    "I was not able to, but later verified it.", "Rather than trust the snippet, I verified it",
+    "I did not rely on the snippet but verified the figure.", "I couldn't verify it, but I confirmed it against the source."])
+    assert.equal(verificationClaims(t).length, 1, t);
+});
