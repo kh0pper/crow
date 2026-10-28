@@ -387,7 +387,24 @@ export async function listThreads(db, artifactId) {
   const by = new Map();
   for (const c of comments) { const k = Number(c.thread_id); if (!by.has(k)) by.set(k, []); by.get(k).push(c); }
   const taint = await anchorTaintMap(db, artifactId);
+  const names = await botNames(db, comments);
+  for (const c of comments) if (c.author_kind === "bot" && c.author_id) c.author_name = names.get(String(c.author_id)) || String(c.author_id);
   return threads.map((t) => ({ ...t, anchor: JSON.parse(t.anchor_json), anchor_tainted: anchorTainted(t, taint), comments: by.get(Number(t.id)) || [] }));
+}
+
+/** bot_id -> sanitized display name, one query for the distinct bots. A missing
+ *  table, row or empty name simply yields no entry (callers fall back to the id). */
+async function botNames(db, comments) {
+  const ids = [...new Set(comments.filter((c) => c.author_kind === "bot" && c.author_id).map((c) => String(c.author_id)))];
+  const out = new Map();
+  if (!ids.length) return out;
+  let rows = [];
+  try { rows = (await db.execute({ sql: `SELECT bot_id, display_name FROM pi_bot_defs WHERE bot_id IN (${ids.map(() => "?").join(",")})`, args: ids })).rows; } catch { return out; }
+  for (const r of rows) {
+    const n = String(r.display_name ?? "").replace(/[\p{Cc}\p{Cf}]/gu, "").trim().slice(0, 40).trim();
+    if (n) out.set(String(r.bot_id), n);
+  }
+  return out;
 }
 
 /** n -> tainted? for every version of an artifact (one query). */

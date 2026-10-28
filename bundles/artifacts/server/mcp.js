@@ -376,7 +376,7 @@ export function createArtifactsMcpServer({ db, blobs, McpServer, z, verifyActor,
           anchor: t.author_kind === "contact" || t.anchor_tainted ? U(t.anchor, where) : t.anchor,
           comments: t.comments.map((c) => {
             const untrusted = c.author_kind === "contact" || store.flagUntrusted(c.tainted);
-            return { id: Number(c.id), author_kind: c.author_kind, author_id: untrusted ? U(c.author_id, where) : c.author_id, ts: c.ts, text: untrusted ? U(c.text, where) : c.text };
+            return { id: Number(c.id), author_kind: c.author_kind, author_id: untrusted ? U(c.author_id, where) : c.author_id, ...(c.author_name ? { author_name: c.author_name } : {}), ts: c.ts, text: untrusted ? U(c.text, where) : c.text };
           }) };
       });
     });
