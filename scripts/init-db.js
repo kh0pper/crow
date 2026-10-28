@@ -261,6 +261,65 @@ await initTable("project_members table", `
     ON project_members(project_id, contact_id) WHERE contact_id IS NOT NULL AND revoked_at IS NULL;
 `);
 
+// Crow-to-Crow: when a remote member accepted the invite (0016 adds the same column; one shape,
+// two rails). project_members.mode also gains the free-text value 'live' (no CHECK change).
+await addColumnIfMissing("project_members", "accepted_at", "TEXT");
+
+// Crow-to-Crow foundation tables. Same DDL as scripts/migrations/0016-crow-to-crow.mjs (one shape,
+// two rails). Additive, no SCHEMA_GENERATION bump. project_shared_items is created now, used in plan 2.
+await initTable("crow-to-crow tables", `
+  CREATE TABLE IF NOT EXISTS project_shared_items (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id  INTEGER NOT NULL REFERENCES project_spaces(id) ON DELETE CASCADE,
+    item_kind   TEXT NOT NULL CHECK (item_kind IN ('card','artifact','workspace_file')),
+    item_ref    TEXT NOT NULL,
+    share_ref   TEXT NOT NULL UNIQUE DEFAULT (lower(hex(randomblob(16)))),
+    added_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    removed_at  TEXT
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_project_shared_items_live
+    ON project_shared_items(project_id, item_kind, item_ref) WHERE removed_at IS NULL;
+
+  CREATE TABLE IF NOT EXISTS c2c_outbox (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    contact_id      INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+    project_uuid    TEXT NOT NULL,
+    seq             INTEGER NOT NULL,
+    kind            TEXT NOT NULL,
+    to_instance_id  TEXT,
+    frame_json      TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    last_attempt_at TEXT,
+    last_refusal    TEXT,
+    acked_at        TEXT,
+    UNIQUE (contact_id, project_uuid, seq)
+  );
+
+  CREATE TABLE IF NOT EXISTS c2c_inbound_seq (
+    contact_id         INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+    sender_instance_id TEXT NOT NULL,
+    project_uuid       TEXT NOT NULL,
+    high_water         INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (contact_id, sender_instance_id, project_uuid)
+  );
+
+  CREATE TABLE IF NOT EXISTS c2c_visits (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_contact_id  INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+    project_uuid      TEXT NOT NULL,
+    name              TEXT NOT NULL,
+    role              TEXT NOT NULL CHECK (role IN ('viewer','commenter','editor')),
+    epoch             TEXT NOT NULL,
+    owner_instance_id TEXT,
+    state             TEXT NOT NULL CHECK (state IN ('invited','active','declined','left','unshared')),
+    invited_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    accepted_at       TEXT,
+    ended_at          TEXT,
+    UNIQUE (owner_contact_id, project_uuid)
+  );
+`);
+
 await initTable("project_audit_log table", `
   CREATE TABLE IF NOT EXISTS project_audit_log (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,

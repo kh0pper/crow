@@ -115,7 +115,8 @@ export const SYNCED_TABLES = [
 
 // Tables that must NEVER leave this machine (Crow keychain: human passwords). The
 // keychain has its own key file, but its rows are still never replicated. Checked at load.
-export const LOCAL_ONLY_TABLES = Object.freeze(["crow_keychain"]);
+// Crow-to-Crow transport state (outbox, inbound high-water marks, visit records) is per-instance.
+export const LOCAL_ONLY_TABLES = Object.freeze(["crow_keychain", "c2c_outbox", "c2c_inbound_seq", "c2c_visits"]);
 export function assertLocalOnlyDisjoint(synced, localOnly) {
   for (const t of localOnly) {
     if (synced.includes(t)) throw new Error(`instance-sync: table ${t} is local-only and must never be in SYNCED_TABLES`);
