@@ -63,6 +63,12 @@ test("_meta can downgrade but never upgrade; a peer is checked first", () => {
   assert.deepEqual(resolveCallActor(UNKNOWN, { _meta: { "crow/actor": { kind: "bot", id: 7 } } }), { kind: "bot", id: "7" });
 });
 
+test("a _meta bot id that fails the id check is unknown", () => {
+  for (const id of ["a b", "x\ny", "z".repeat(129), "<b>"]) {
+    assert.equal(resolveCallActor(OWNER, { _meta: { "crow/actor": { kind: "bot", id } } }).kind, "unknown", JSON.stringify(id));
+  }
+});
+
 const hdr = (h) => ({ requestInfo: { headers: h } });
 
 test("an x-crow-actor-kind header can downgrade an owner mount but never upgrade", () => {
