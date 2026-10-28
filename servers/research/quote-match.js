@@ -19,8 +19,10 @@
  *   - the FULL normalized quote is tried first (outer matching "/' pairs stripped);
  *   - only when it is not found, a trailing tail after a dash or after a closing quote mark is
  *     cut, and only when the RAW tail looks like an attribution: it starts with a capital letter
- *     (after an optional dash or comma), its name part has at most 6 words that each start with an
- *     uppercase letter (or are one of the connectors of/de/van/von/al/the/and), optionally
+ *     (after an optional dash or comma), its name part has 2 to 6 words that each start with an
+ *     uppercase letter (or are one of the connectors of/de/van/von/al/the/and), its first word is
+ *     not one of The/A/An/Never/Always/Nothing/No/Not/None/Every/All/It/We/They/This/That/Our/Its
+ *     (as written, so the initial "A." still passes), optionally
  *     followed by ", <Title>" of at most 3 such words. "We ship weekly - and we never ship bugs"
  *     therefore keeps its fabricated clause and reads as not found;
  *   - if the cut quote is not found either, the result is the full quote's result;
@@ -58,6 +60,10 @@ const WORD_CHAR = /[\p{L}\p{N}\p{M}]/u;
 
 // Attribution tails, judged on the RAW quote.
 const CONNECTORS = new Set(["of", "de", "van", "von", "al", "the", "and"]);
+// A name never starts with one of these (case-sensitive): "We ship weekly - Never Shipped A Bug"
+// is a fabricated clause, not an attribution. "A." (with its period) is an initial, not "A".
+const NOT_A_NAME_START = new Set(["The", "A", "An", "Never", "Always", "Nothing", "No", "Not", "None",
+  "Every", "All", "It", "We", "They", "This", "That", "Our", "Its"]);
 // A dash used as a separator: em/en dash/bar with optional spaces, or a spaced hyphen / "--".
 const DASH_SPLIT = /\s*[\u2014\u2013\u2015]\s*|\s-{1,2}\s/g;
 const CLOSING_QUOTES = new Set(['"', "\u201d", "\u00bb", "'", "\u2019"]);
@@ -75,6 +81,9 @@ function looksLikeAttribution(rawTail) {
   const parts = tail.split(",");
   if (parts.length > 2) return false;
   if (!capitalizedWords(parts[0], 6)) return false;
+  const name = parts[0].trim().split(/\s+/);
+  if (name.length < 2) return false;
+  if (NOT_A_NAME_START.has(name[0].replace(/[,;:!?]+$/, ""))) return false;
   return parts.length === 1 || capitalizedWords(parts[1], 3);
 }
 

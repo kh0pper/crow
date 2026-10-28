@@ -41,6 +41,20 @@ test("a fabricated clause after a dash is not cut away", () => {
   assert.equal(matchQuote("We ship weekly \u2014 the best team in the world", p).found, 0);
 });
 
+test("a title-cased fabricated tail is not an attribution", () => {
+  const p = page("We ship weekly. Other text.");
+  for (const q of [
+    "We ship weekly \u2014 Never Shipped A Bug Ever",
+    "We ship weekly - Always Zero Defects",
+    "We ship weekly - The Company Has Never Shipped",
+    "We ship weekly \u2014 Nothing",
+    "We ship weekly - A",
+    "\"We ship weekly\" Never Shipped Bugs",
+  ]) assert.equal(matchQuote(q, p).found, 0, q);
+  assert.equal(matchQuote("We ship weekly - A. Person, Chief Executive", p).found, 1);
+  assert.equal(matchQuote("We ship weekly - Jane Doe", p).found, 1);
+});
+
 test("a real attribution tail is cut only after the full quote fails", () => {
   const p = page("Intro. We ship weekly. More text.");
   assert.equal(matchQuote("\"We ship weekly,\" \u2014 Jane Doe", p).found, 1);
