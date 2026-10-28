@@ -2,48 +2,113 @@
 // id suffix when that name is not unique, and never with anything the caller claims.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cleanPeerName, idSuffix, peerDisplayName, resolvePeerLabel, peerActorMeta } from "../servers/shared/peer-label.js";
+import { cleanPeerName, idSuffix, peerDisplayName, peerLabels, labelSkeleton, resolvePeerLabel, peerActorMeta } from "../servers/shared/peer-label.js";
 
 const A = { id: "inst-a-1a2b3c4d", name: "wren" };
+const sfx = (id) => idSuffix(id);
 
-test("cleanPeerName strips control, format and parenthesis characters and caps at 40", () => {
+test("cleanPeerName: NFKC, default-ignorables removed, allowlist letters/digits/space/._-, spaces collapsed, 40 max", () => {
   assert.equal(cleanPeerName("wr\u202een\u200b"), "wren");
+  assert.equal(cleanPeerName("wr\u200den"), "wren", "a zero-width joiner is removed");
+  assert.equal(cleanPeerName("wr\ufe0fen\u3164"), "wren", "variation selector and Hangul filler are removed");
   assert.equal(cleanPeerName("x (bot from home)"), "x bot from home");
+  assert.equal(cleanPeerName("ａｂｃ"), "abc", "NFKC folds full-width forms");
+  assert.equal(cleanPeerName("my-host_2.lan"), "my-host_2.lan");
   assert.equal(Array.from(cleanPeerName("y".repeat(60))).length, 40);
   assert.equal(cleanPeerName(null), "");
-  assert.equal(cleanPeerName("\u0000 "), "");
+  assert.equal(cleanPeerName("\u0000 \u00b7"), "");
 });
 
-test("idSuffix is the last 4 letters or digits", () => {
-  assert.equal(idSuffix("inst-a-1a2b3c4d"), "3c4d");
-  assert.equal(idSuffix("0867ac28-xx"), "28xx");
-  assert.equal(idSuffix(""), "0000");
+test("idSuffix is the first 8 hex of sha256(id) (64 with full), so ids with the same letters and digits differ", () => {
+  assert.match(idSuffix("inst-a-1a2b3c4d"), /^[0-9a-f]{8}$/);
+  assert.match(idSuffix("x", true), /^[0-9a-f]{64}$/);
+  assert.notEqual(idSuffix("ab-cd"), idSuffix("abc-d"));
+  const labels = peerLabels([{ id: "ab-cd", name: "wren" }, { id: "abc-d", name: "wren" }]);
+  assert.notEqual(labels.get("ab-cd"), labels.get("abc-d"));
 });
 
-test("a unique name is shown as is", () => {
-  assert.equal(peerDisplayName(A, { others: [{ id: "self", name: "home" }, { id: "inst-c", name: "lark" }], ownName: "home" }), "wren");
+test("a unique name is shown as is; this instance's own row counts only as its own name", () => {
+  assert.equal(peerDisplayName(A, { others: [{ id: "self", name: "home" }, { id: "inst-c", name: "lark" }], ownName: "home", ownId: "self" }), "wren");
 });
 
-test("a name another row also has gets the id suffix (case-folded), and so does the other one", () => {
+test("two rows with the same name (case-folded) are both suffixed", () => {
   const C = { id: "inst-c-99990000", name: "Wren" };
-  assert.equal(peerDisplayName(A, { others: [C], ownName: "home" }), "wren·3c4d");
-  assert.equal(peerDisplayName(C, { others: [A], ownName: "home" }), "Wren·0000");
+  assert.equal(peerDisplayName(A, { others: [C], ownName: "home" }), `wren\u00b7${sfx(A.id)}`);
+  assert.equal(peerDisplayName(C, { others: [A], ownName: "home" }), `Wren\u00b7${sfx(C.id)}`);
 });
 
-test("a peer named like this instance itself is suffixed", () => {
-  assert.equal(peerDisplayName({ id: "inst-x-abcd", name: "HOME" }, { others: [], ownName: "home" }), "HOME·abcd");
+test("a peer named like this instance itself is suffixed; an empty name is 'peer' and is suffixed only on a clash", () => {
+  assert.equal(peerDisplayName({ id: "inst-x-abcd", name: "HOME" }, { ownName: "home" }), `HOME\u00b7${sfx("inst-x-abcd")}`);
+  assert.equal(peerDisplayName({ id: "inst-x-abcd", name: "\u202e\u200b" }), "peer");
+  const l = peerLabels([{ id: "p1", name: "" }, { id: "p2", name: "\u00b7" }]);
+  assert.equal(l.get("p1"), `peer\u00b7${sfx("p1")}`);
+  assert.equal(l.get("p2"), `peer\u00b7${sfx("p2")}`);
 });
 
-test("a name that cleans to nothing becomes peer·<suffix>; a name that only differs by format characters still clashes", () => {
-  assert.equal(peerDisplayName({ id: "inst-x-abcd", name: "\u202e\u200b" }), "peer\u00b7abcd");
-  assert.equal(peerDisplayName({ id: "inst-x-abcd", name: "wr\u200ben" }, { others: [A] }), "wren\u00b7abcd");
+test("homoglyphs: Cyrillic 'а' in 'rаven' clashes with 'raven', and both are suffixed", () => {
+  const l = peerLabels([{ id: "real", name: "raven" }, { id: "fake", name: "r\u0430ven" }]);
+  assert.equal(l.get("real"), `raven\u00b7${sfx("real")}`);
+  assert.equal(l.get("fake"), `r\u0430ven\u00b7${sfx("fake")}`);
+  assert.equal(labelSkeleton("r\u0430ven"), labelSkeleton("RAVEN"));
+  assert.equal(labelSkeleton("\u03bfwl"), labelSkeleton("owl"), "Greek omicron");
+});
+
+test("separator look-alikes in a name are dropped, so a name cannot imitate another peer's suffixed label", () => {
+  const real = { id: "inst-a-1a2b3c4d", name: "wren" };
+  const twin = { id: "inst-c-0000ffff", name: "wren" };
+  const realLabel = peerDisplayName(real, { others: [twin] });
+  assert.equal(realLabel, `wren\u00b7${sfx(real.id)}`);
+  for (const sep of ["\u00b7", "\u30fb", "\u2022", "\u2219", "\u2027", "\uff65", "\u0387", "\u22c5", " \u00b7 "]) {
+    const fake = `wren${sep}${sfx(real.id)}`;
+    assert.doesNotMatch(cleanPeerName(fake), /[\u00b7\u30fb\u2022\u2219\u2027\uff65\u0387\u22c5]/u, JSON.stringify(fake));
+    const imp = { id: "inst-x-9999eeee", name: fake };
+    const labels = peerLabels([real, twin, imp]);
+    assert.notEqual(labels.get(imp.id), labels.get(real.id), JSON.stringify(fake));
+    assert.equal(new Set(labels.values()).size, 3);
+  }
+});
+
+test("the fixpoint: a suffixed label that collides with another row's bare name escalates both, to unique labels", () => {
+  // "wren <sfx>" as a bare name, after the twins "wren" are suffixed, must not equal either suffixed label;
+  // and a row named exactly like a suffixed label minus the separator still ends unique.
+  const x = { id: "inst-a-1", name: "wren" };
+  const y = { id: "inst-b-2", name: "wren" };
+  const z = { id: "inst-c-3", name: `wren ${sfx("inst-a-1")}` };
+  const l = peerLabels([x, y, z], { ownName: `wren ${sfx("inst-b-2")}` });
+  const vals = [...l.values()].map(labelSkeleton);
+  assert.equal(new Set(vals).size, 3, JSON.stringify([...l]));
+  assert.ok(!vals.includes(labelSkeleton(`wren ${sfx("inst-b-2")}`)), "never equal to the own name");
+  // Forced escalation to the full hash: a row whose own name is taken at every level but the last.
+  const own = `wren\u00b7${sfx("inst-q")}`; // the own name is cleaned: "wren" + 8 hex (the separator is dropped)
+  const m = peerLabels([{ id: "inst-q", name: "wren" }], { ownName: own });
+  assert.equal(m.get("inst-q"), "wren");
+  const m2 = peerLabels([{ id: "inst-q", name: "wren" }], { ownName: "wren" });
+  assert.equal(m2.get("inst-q"), `wren\u00b7${sfx("inst-q")}`);
+});
+
+test("the fixpoint escalates to the full 64-hex suffix when two ids share their first 8 hex", () => {
+  // Find two ids whose sha256 share the first 8 hex (a 32-bit birthday search, ~2^16 tries).
+  const seen = new Map();
+  let pair = null;
+  for (let n = 0; !pair && n < 2_000_000; n++) {
+    const id = `inst-${n}`;
+    const k = idSuffix(id);
+    if (seen.has(k)) pair = [seen.get(k), id]; else seen.set(k, id);
+  }
+  assert.ok(pair, "found a prefix collision");
+  const [p, q] = pair;
+  const l = peerLabels([{ id: p, name: "wren" }, { id: q, name: "wren" }, { id: "other", name: "lark" }]);
+  assert.equal(l.get(p), `wren\u00b7${idSuffix(p, true)}`);
+  assert.equal(l.get(q), `wren\u00b7${idSuffix(q, true)}`);
+  assert.notEqual(l.get(p), l.get(q));
+  assert.equal(l.get("other"), "lark");
 });
 
 test("resolvePeerLabel reads every other row and this instance's own name; a DB error fails toward the suffix", async () => {
   const db = (rows) => ({ execute: async ({ args }) => ({ rows: rows.filter((r) => r.id !== args[0]) }) });
   assert.equal(await resolvePeerLabel(db([A, { id: "self", name: "home" }]), A, "self"), "wren");
-  assert.equal(await resolvePeerLabel(db([A, { id: "self", name: "wren" }]), A, "self"), "wren·3c4d");
-  assert.equal(await resolvePeerLabel({ execute: async () => { throw new Error("disk I/O"); } }, A, "self"), "wren·3c4d");
+  assert.equal(await resolvePeerLabel(db([A, { id: "self", name: "wren" }]), A, "self"), `wren\u00b7${sfx(A.id)}`);
+  assert.equal(await resolvePeerLabel({ execute: async () => { throw new Error("disk I/O"); } }, A, "self"), `wren\u00b7${sfx(A.id)}`);
 });
 
 test("peerActorMeta: peers only, built from the server-side auth record", () => {
@@ -74,25 +139,3 @@ test("the research router forwards a peer in the same shape (and still never as 
   assert.equal(resolveCallActor(OWNER, forwardActorMeta(extra)).kind, "unknown");
 });
 
-test("a peer cannot imitate another peer's suffixed label with a separator in its own name", () => {
-  const real = { id: "inst-a-1a2b3c4d", name: "wren" };
-  const twin = { id: "inst-c-0000ffff", name: "wren" };
-  const realLabel = peerDisplayName(real, { others: [twin] });
-  assert.equal(realLabel, "wren\u00b73c4d");
-  for (const fake of ["wren \u00b7 3c4d", "wren\u00b73c4d", "wren\u30fb3c4d", "wren\u20223c4d", "wren\u22193c4d", "wren\u20273c4d", "wren\uff653c4d", "wren\u03873c4d"]) {
-    const imp = { id: "inst-x-9999eeee", name: fake };
-    const label = peerDisplayName(imp, { others: [real, twin] });
-    assert.notEqual(label, realLabel, fake);
-    assert.equal(label, "peer\u00b7eeee", fake);
-    assert.equal(cleanPeerName(fake), "", "look-alike separators reject the name: " + JSON.stringify(fake));
-  }
-});
-
-test("a final label that still collides (same name, same id tail) gets a longer suffix", () => {
-  const x = { id: "inst-a-11113c4d", name: "wren" };
-  const y = { id: "inst-b-22223c4d", name: "wren" };
-  assert.equal(peerDisplayName(x, { others: [y] }), "wren\u00b711113c4d");
-  // A nameless peer whose label would equal this instance's own name? Own names are cleaned the same way,
-  // so an own name holding a separator is rejected too and reserves nothing.
-  assert.equal(peerDisplayName({ id: "inst-q-abcd", name: "" }, { ownName: "peer\u00b7abcd" }), "peer\u00b7abcd");
-});

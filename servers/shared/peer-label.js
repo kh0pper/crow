@@ -3,64 +3,93 @@
  *
  * A tool call from a peer (bearer-authenticated, PT-1) carries no proof of WHICH bot or person on the
  * peer made it, so it is labelled only as coming from that instance: "Crow (via <name>)". The name is
- * this instance's own crow_instances row for the peer. The peer chose that name when it enrolled, so it
- * is not unique: when it matches another row's name or this instance's own name (case-folded), or is
- * empty after cleaning, a short id suffix is added ("wren·1a2b"). Nothing a caller claims (tool
- * arguments, `_meta`) is ever used. A signed bot actor that upgrades this to "<bot> (bot from <name>)"
- * comes later, from the sending gateway (the private engineering notes).
+ * this instance's own crow_instances row for the peer, which the peer chose when it enrolled, so:
+ *  - it is cleaned to an allowlist (NFKC, default-ignorable code points removed, then only letters,
+ *    digits, space, ".", "_" and "-"; spaces collapsed; 40 characters), and that exact string is shown;
+ *    an empty result is "peer";
+ *  - every row's final label is computed together, to a fixpoint: any two labels that are equal under
+ *    NFKC + lowercase + a homoglyph skeleton (and any label equal to this instance's own name) are all
+ *    suffixed with the first 8 hex of sha256(id), then with the full 64 hex if they still collide.
+ * Nothing a caller claims (tool arguments, `_meta`) is ever used. A signed bot actor that upgrades this
+ * to "<bot> (bot from <name>)" comes later, from the sending gateway (the private engineering notes).
  */
-import { sanitizeActorName } from "../../scripts/pi-bots/actor-env.mjs";
+import { createHash } from "node:crypto";
 
 const PEER_TOKEN = "peer-instance";
-const SEP = "·";
+const SEP = "\u00b7";
+const MAX_NAME = 40;
 
-// The suffix separator and characters that look like it. A name that contains one (after NFKC folding,
-// which maps e.g. U+0387 and U+FF65 onto these) could imitate another peer's suffixed label, so it is
-// rejected as a name (the peer is then shown as "peer·<id>").
-const SEP_LOOKALIKES = /[\u00b7\u0387\u16eb\u2022\u2027\u2219\u22c5\u2981\u2e30\u2e31\u2e33\u30fb\ua78f\uff65\u1427\u0701\u0702]/u;
-
-/** Strip control/format characters and parentheses (a name must not fake a nested label), trim, cap at 40.
- *  A name holding the suffix separator or a look-alike is rejected (""). */
+/** The cleaned, displayable name ("" when nothing allowed is left). */
 export function cleanPeerName(name) {
-  const clean = sanitizeActorName(String(name == null ? "" : name).replace(/[()]/g, ""), "");
-  return SEP_LOOKALIKES.test(clean.normalize("NFKC")) ? "" : clean;
+  const s = String(name == null ? "" : name)
+    .normalize("NFKC")
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, "")
+    .replace(/[^\p{L}\p{N} ._-]/gu, " ")
+    .replace(/ +/g, " ")
+    .trim();
+  return Array.from(s).slice(0, MAX_NAME).join("").trim();
 }
 
-/** The last `n` letters or digits of the id: stable, short, and shown in Settings next to the full id. */
-export function idSuffix(id, n = 4) {
-  const s = String(id == null ? "" : id).replace(/[^A-Za-z0-9]/g, "");
-  return (Number.isFinite(n) ? s.slice(-n) : s) || "0000";
+/** The id suffix: the first 8 hex of sha256(id), or all 64 with `full`. Distinct ids, distinct suffixes. */
+export function idSuffix(id, full = false) {
+  const h = createHash("sha256").update(String(id == null ? "" : id)).digest("hex");
+  return full ? h : h.slice(0, 8);
 }
 
-const fold = (s) => s.normalize("NFKC").toLowerCase();
+// Common Latin look-alikes in Cyrillic and Greek (lowercase), plus a few Latin digit/letter pairs.
+const HOMOGLYPHS = {
+  "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p", "\u0441": "c", "\u0443": "y", "\u0445": "x",
+  "\u0456": "i", "\u0458": "j", "\u0455": "s", "\u0501": "d", "\u051b": "q", "\u051d": "w", "\u04bb": "h",
+  "\u04cf": "l", "\u0432": "b", "\u043a": "k", "\u043c": "m", "\u043d": "h", "\u0442": "t", "\u0457": "i",
+  "\u0491": "r", "\u0261": "g",
+  "\u03b1": "a", "\u03b5": "e", "\u03bf": "o", "\u03c1": "p", "\u03bd": "v", "\u03c4": "t", "\u03b9": "i",
+  "\u03ba": "k", "\u03c7": "x", "\u03c5": "u", "\u03b7": "n", "\u03bc": "u", "\u03c9": "w", "\u03b2": "b",
+  "0": "o", "1": "l", "i": "l",
+};
+/** The comparison key for labels: NFKC, lowercase, homoglyph skeleton, "rn"→"m", "vv"→"w". */
+export function labelSkeleton(s) {
+  return Array.from(String(s).normalize("NFKC").toLowerCase()).map((c) => HOMOGLYPHS[c] ?? c).join("")
+    .replace(/rn/g, "m").replace(/vv/g, "w");
+}
 
-/** One row's label with an `n`-character suffix when it needs one (`needs`), else its bare name. */
-function labelAt(base, id, needs, n) {
-  if (!base) return `peer${SEP}${idSuffix(id, n)}`;
-  return needs ? `${base}${SEP}${idSuffix(id, n)}` : base;
+const labelAt = (base, id, level) => (level === 0 ? base : `${base}${SEP}${idSuffix(id, level === 2)}`);
+
+/**
+ * Final labels for every row (Map id → label), to a fixpoint. `ownName` is a taken label: a row whose
+ * label matches it is suffixed. Rows are deduplicated by id.
+ */
+export function peerLabels(rows, { ownName = null } = {}) {
+  const list = [];
+  const seen = new Set();
+  for (const r of rows || []) {
+    if (!r || seen.has(String(r.id))) continue;
+    seen.add(String(r.id));
+    list.push({ id: String(r.id), base: cleanPeerName(r.name) || "peer", level: 0 });
+  }
+  const own = ownName != null && cleanPeerName(ownName) ? labelSkeleton(cleanPeerName(ownName)) : null;
+  for (let changed = true; changed;) {
+    changed = false;
+    const groups = new Map();
+    for (const e of list) {
+      const k = labelSkeleton(labelAt(e.base, e.id, e.level));
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(e);
+    }
+    for (const [k, g] of groups) {
+      if (g.length < 2 && k !== own) continue;
+      for (const e of g) if (e.level < 2) { e.level += 1; changed = true; }
+    }
+  }
+  return new Map(list.map((e) => [e.id, labelAt(e.base, e.id, e.level)]));
 }
 
 /**
- * The display name for peer `row` ({id, name}), given every OTHER crow_instances row (any status, this
- * instance's own row included) and this instance's own name. Two passes: a name that matches another
- * row's name or the own name (case-folded) is suffixed; then, if the resulting FINAL label still equals
- * another row's final label or the own name, the suffix grows (8 characters, then the whole id).
+ * The display name for peer `row` ({id, name}), given the other crow_instances rows (any status) and this
+ * instance's own name. Rows with id `ownId` are this instance itself: they count only through `ownName`.
  */
-export function peerDisplayName(row, { others = [], ownName = null } = {}) {
-  const rows = [row, ...others.filter((o) => o && o.id !== row?.id)];
-  const own = ownName != null ? fold(cleanPeerName(ownName)) : null;
-  const bases = rows.map((r) => cleanPeerName(r?.name));
-  const counts = new Map();
-  for (const b of bases) if (b) counts.set(fold(b), (counts.get(fold(b)) || 0) + 1);
-  const needs = bases.map((b) => !b || counts.get(fold(b)) > 1 || (own !== null && fold(b) === own));
-  const othersFinal = new Set(rows.slice(1).map((r, i) => fold(labelAt(bases[i + 1], r.id, needs[i + 1], 4))));
-  if (own) othersFinal.add(own);
-  let label = labelAt(bases[0], row?.id, needs[0], 4);
-  for (const n of [8, Infinity]) {
-    if (!othersFinal.has(fold(label))) break;
-    label = labelAt(bases[0], row?.id, true, n);
-  }
-  return label;
+export function peerDisplayName(row, { others = [], ownName = null, ownId = null } = {}) {
+  const rows = [row, ...others.filter((o) => o && String(o.id) !== String(row?.id) && (ownId == null || String(o.id) !== String(ownId)))];
+  return peerLabels(rows, { ownName }).get(String(row?.id));
 }
 
 /**
@@ -71,10 +100,9 @@ export async function resolvePeerLabel(db, row, localId) {
   try {
     const { rows } = await db.execute({ sql: "SELECT id, name FROM crow_instances WHERE id != ?", args: [String(row.id)] });
     const own = rows.find((r) => r.id === localId);
-    return peerDisplayName(row, { others: rows, ownName: own ? own.name : null });
+    return peerDisplayName(row, { others: rows, ownName: own ? own.name : null, ownId: localId });
   } catch {
-    const base = cleanPeerName(row?.name);
-    return `${base || "peer"}${SEP}${idSuffix(row?.id)}`;
+    return labelAt(cleanPeerName(row?.name) || "peer", String(row?.id), 1);
   }
 }
 
