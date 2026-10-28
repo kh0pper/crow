@@ -20,6 +20,8 @@ import { execFileSync } from "node:child_process";
 import { stateDir, stateRoot, containerName, cdpPort, vncPort } from "./instance.js";
 import { articleTurndown } from "./article-markdown.js";
 import { fileInDir, writeFileNoFollow, readFileNoFollow, MAX_FILE_NAME } from "./safe-file.js";
+import { installLeaseGuard } from "./lease-guard.js";
+import { waitingForUserResult } from "./wait-for-user.js";
 
 /**
  * Create and configure the crow-browser MCP server.
@@ -54,6 +56,18 @@ export function createBrowserServer(options = {}) {
   // Stage B network state
   let respCapture = null;  // { buffer, onResp, onFinish }
   let blockState = null;   // { onPaused }
+
+  // Every crow_browser_* tool (but status and guide) goes through the shared
+  // browser lease: bots take turns on the page and wait for the operator.
+  // Must be installed before the first server.tool registration below.
+  installLeaseGuard(server, {
+    // The page this process drives, recorded in the lease (never connects).
+    getTargetId: async () => {
+      if (!cdpSession) return null;
+      const info = await cdpSession.send("Target.getTargetInfo");
+      return info?.targetInfo?.targetId || null;
+    },
+  });
 
   // Ensure session directory exists
   if (!existsSync(sessionDir)) {
@@ -474,17 +488,7 @@ export function createBrowserServer(options = {}) {
         };
       }
 
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            status: "waiting_for_user",
-            message,
-            vnc_url: `http://localhost:${resolvedVncPort}/vnc.html`,
-            instruction: "Complete the required action in the VNC viewer, then call crow_browser_wait_for_user with resume=true to continue.",
-          }, null, 2),
-        }],
-      };
+      return waitingForUserResult(message);
     }
   );
 

@@ -97,9 +97,10 @@ test("tools: export and session save/load with a traversal name write nothing ou
         assert.equal(r.isError, true, filename);
         assert.match(r.text, /file name/, filename);
       }
-      // Nothing was written anywhere under CROW_HOME except (maybe) the empty exports folder.
+      // Nothing was written anywhere under CROW_HOME except (maybe) the empty exports
+      // folder and the browser lease (each tool call takes it: lease-guard.js).
       const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)]));
-      assert.deepEqual(walk(home), []);
+      assert.deepEqual(walk(home).filter((f) => !f.startsWith(join(home, "browser-lease") + "/")), []);
       assert.equal(existsSync(join(tmpdir(), "escape.json")), false);
 
       const ok = await call("crow_browser_export", { data: [{ a: 1 }], format: "json", filename: "rows.json" });
