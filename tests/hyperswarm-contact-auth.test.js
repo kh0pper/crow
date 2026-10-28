@@ -995,3 +995,116 @@ test("H-C17 (R8) a peer that proves itself but never sends authenticated gets no
   assert.deepEqual(pa.spies.peerConnected, []);
   assert.equal(await hasMemoryContent(A, "c17"), false);
 });
+
+// ================================================================ fix round 2
+/**
+ * M is a full contact of a current node B (unpinned at B, never binds). It
+ * asks B, without cb, to answer A's nonce, proves itself to B with a bare
+ * signature under its own key, and forwards B's reply to A as B.
+ */
+async function contactRelay(t, pa, pb, M) {
+  const toA = await rawTo(t, pa.pm);
+  const chA = await toA.next("challenge");
+  const toB = await rawTo(t, pb.pm);
+  const chB = await toB.next("challenge");
+  toB.send(
+    { type: "challenge", challenge: chA.challenge, crowId: M.crowId, pubkey: M.ed25519Pubkey },
+    { type: "challenge-response", crowId: M.crowId, pubkey: M.ed25519Pubkey, signature: sign(chB.challenge, M.ed25519Priv) },
+    { type: "authenticated" },
+  );
+  const got = await toB.next("challenge-response", 1000);
+  if (got) toA.send({ ...got }, { type: "authenticated" });
+  return { toA, toB, got };
+}
+
+test("H-C18 a contact of a current node relays a bare reply: (a) an unpinned A admits it (documented residual), (b) A pinned for B refuses, (c) B pinned for M never replies", T, async (t) => {
+  const M = id();
+  const mk = async () => {
+    const A = await makeSide(t, "A"), B = await makeSide(t, "B");
+    await befriend(A, B);
+    await addContact(B, M);
+    return { A, B, pa: await newPeer(A), pb: await newPeer(B) };
+  };
+  {
+    const w = await mk();
+    await link(t, w.pa.pm, w.pb.pm);
+    assert.ok(await until(() => w.pa.pm.isConnected(w.B.identity.crowId), 3000), "control: the real B connects");
+  }
+  // (a)
+  {
+    const w = await mk();
+    const { got } = await contactRelay(t, w.pa, w.pb, M);
+    assert.equal(typeof got?.signature, "string", "B admitted M (legacy) and released its bare reply");
+    assert.ok(await until(() => w.pa.pm.isConnected(w.B.identity.crowId), 3000),
+      "documented residual: a node that has never seen a contact bind accepts a bare signature for it, here one relayed by another contact of that contact that never binds; pinning (the Nostr notice or one bound handshake) closes it");
+  }
+  // (b)
+  {
+    const w = await mk();
+    await markCbPinned(w.A.db, w.A.localId, w.B.identity.crowId);
+    const { toA, got } = await contactRelay(t, w.pa, w.pb, M);
+    assert.equal(typeof got?.signature, "string");
+    assert.equal(await closedWithin(toA, 3000), true);
+    assert.deepEqual(refusals(w.B.identity.crowId).slice(-1), ["cb_required_pinned"]);
+    assert.equal(w.pa.pm.isConnected(w.B.identity.crowId), false);
+  }
+  // (c)
+  {
+    const w = await mk();
+    await markCbPinned(w.B.db, w.B.localId, M.crowId);
+    const { toB, got } = await contactRelay(t, w.pa, w.pb, M);
+    assert.equal(got, null);
+    assert.equal(await closedWithin(toB, 3000), true);
+    assert.deepEqual(refusals(M.crowId).slice(-1), ["cb_required_pinned"]);
+    assert.equal(toB.pmWrites.some((f) => f.type === "challenge-response"), false, "B never writes a challenge-response to M");
+  }
+});
+
+test("H-C19 a non-string Crow ID is refused before lookup: no entry, nothing logged as legacy", T, async (t) => {
+  const A = await makeSide(t, "A"), B = await makeSide(t, "B");
+  await befriend(A, B);
+  {
+    const pa = await newPeer(A);
+    await rawLeg(t, pa.pm, { claim: B.identity, signer: B.identity });
+    assert.ok(await until(() => pa.pm.isConnected(B.identity.crowId), 3000), "control: the string id admits");
+  }
+  const C = id(); // a fresh, unpinned contact: the legacy log line would be its first
+  await addContact(A, C);
+  const pa = await newPeer(A);
+  const looked = [];
+  const real = pa.pm.contactBinding.lookupKey;
+  pa.pm.contactBinding.lookupKey = (c) => { looked.push(c); return real(c); };
+  for (const bad of [[C.crowId], { toString: () => C.crowId }, 42, "", "crow: bad id"]) {
+    const { R } = await rawLeg(t, pa.pm, { claim: { crowId: bad }, signer: C });
+    assert.equal(await closedWithin(R, 3000), true, `crowId=${JSON.stringify(bad)}: refused`);
+  }
+  assert.deepEqual(looked, [], "no lookup for a malformed id");
+  assert.equal(pa.pm.connections.size, 0, "no entry");
+  assert.deepEqual(pa.spies.peerConnected, []);
+  assert.equal(legacyLines(C.crowId).length, 0, "nothing logged as legacy");
+});
+
+test("H-C20 between our decision and the peer's authenticated, the pre-admission caps still apply", T, async (t) => {
+  const caps = { preAuthMaxLines: 4, preAuthMaxBytes: 1024, preAuthMs: 10_000 };
+  const A = await makeSide(t, "A");
+  const B = id();
+  await addContact(A, B);
+  {
+    const pa = await newPeer(A, { opts: caps });
+    // A compliant peer sends data only after our authenticated.
+    const { R } = await rawLeg(t, pa.pm, { claim: B, signer: B, mode: "cb", auth: false });
+    assert.ok(await R.next("authenticated", 2000));
+    R.send({ type: "authenticated" }, memShare("c20 a"), memShare("c20 b"), memShare("c20 c"), memShare("x".repeat(2048)));
+    assert.ok(await until(() => hasMemoryContent(A, "c20 c"), 3000), "control: once both sides admitted, frames are not capped");
+    assert.ok(await until(() => hasMemoryContent(A, "x".repeat(2048)), 3000), "control: nor bytes");
+    assert.equal(R.closed, false);
+  }
+  for (const [label, junk] of [["5 lines", '{"type":"noise"}\n'.repeat(5)], ["1025 bytes", "x".repeat(1025)]]) {
+    const pa = await newPeer(A, { opts: caps });
+    const { R } = await rawLeg(t, pa.pm, { claim: B, signer: B, mode: "cb", auth: false });
+    assert.ok(await R.next("authenticated", 2000), `${label}: we decided`);
+    R.write(junk);
+    assert.equal(await closedWithin(R, 2000), true, `${label} before the peer's authenticated: destroyed`);
+    assert.deepEqual(pa.spies.peerConnected, []);
+  }
+});

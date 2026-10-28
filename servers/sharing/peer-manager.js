@@ -54,6 +54,9 @@ function fire(fn) {
   try { Promise.resolve(fn()).catch(() => {}); } catch {}
 }
 
+/** A plausible Crow ID (checked before any lookup): a short printable token. */
+const CROW_ID_SHAPE = /^[A-Za-z0-9:._-]{1,64}$/;
+
 /** A peer-supplied id, safe for one log line. */
 function logSafe(v) {
   return String(v ?? "").replace(/[^\x20-\x7e]/g, "?").slice(0, 100);
@@ -265,7 +268,8 @@ export class PeerManager {
       refused: false,
       closed: false,
       deciding: false,
-      peerAuthed: false,   // the peer's own `authenticated` frame arrived
+      peerAuthed: false,   // the peer's own `authenticated` frame was handled
+      peerAuthSeen: false, // ...or has at least arrived on the stream (caps)
       mutual: false,       // we admitted it AND it admitted us: side effects run
       answered: false,
       handshakeHashHex: null,
@@ -314,24 +318,30 @@ export class PeerManager {
     };
     state.armTimer();
 
+    // The caps count until both sides have admitted each other. Checked per
+    // line on arrival: once we have decided and the peer's own
+    // `authenticated` has come in on the stream, what follows is post-admission.
+    const capped = () => !(state.mutual || (state.authenticated && state.peerAuthSeen));
     let buffer = "";
     conn.on("data", (data) => {
       if (state.refused || state.closed) return;
-      if (!state.authenticated) {
-        state.preBytes += data.length;
-        if (state.preBytes > this.preAuthMaxBytes) { this._kill(conn, state); return; }
-      }
       buffer += data.toString();
       const lines = buffer.split("\n");
       buffer = lines.pop(); // Keep incomplete line
 
       for (const line of lines) {
+        if (capped()) {
+          state.preBytes += Buffer.byteLength(line) + 1;
+          if (state.preBytes > this.preAuthMaxBytes
+              || (line.trim() && ++state.preLines > this.preAuthMaxLines)) { this._kill(conn, state); return; }
+        }
         if (!line.trim()) continue;
-        if (!state.authenticated && ++state.preLines > this.preAuthMaxLines) { this._kill(conn, state); return; }
         let msg;
         try { msg = JSON.parse(line); } catch { continue; } // Ignore parse errors
+        if (msg?.type === "authenticated") state.peerAuthSeen = true;
         chain = chain.then(() => this._handleMessage(conn, msg, challenge, state)).catch(() => {});
       }
+      if (capped() && state.preBytes + Buffer.byteLength(buffer) > this.preAuthMaxBytes) this._kill(conn, state);
     });
 
     // Remove only OUR entry: a refused or superseded connection closing must
@@ -436,6 +446,10 @@ export class PeerManager {
   async _onChallengeResponse(conn, msg, ourChallenge, state) {
     if (state.authenticated || state.deciding) return;
     state.deciding = true;
+    if (typeof msg.crowId !== "string" || !CROW_ID_SHAPE.test(msg.crowId)) {
+      return this._refuseContact(conn, state, msg.crowId, "not_contact");
+    }
+    state.claimedCrowId = msg.crowId;
     const nonce = Buffer.isBuffer(ourChallenge) ? ourChallenge.toString("hex") : String(ourChallenge ?? "");
     const hh = state.handshakeHashHex || hashHexOf(conn);
     if (msg.crowId === this.identity.crowId) {
@@ -473,7 +487,7 @@ export class PeerManager {
    * notes for the table).
    */
   async _onContactResponse(conn, msg, nonce, hh, state) {
-    const crowId = String(msg.crowId ?? "");
+    const crowId = state.claimedCrowId;
     const binding = this.contactBinding;
     if (!binding || typeof binding.lookupKey !== "function") return this._refuseContact(conn, state, crowId, "no_binding");
 
@@ -529,14 +543,14 @@ export class PeerManager {
       }
       if (!verdict || verdict.ok !== true) {
         const reason = `guard:${verdict?.reason ?? "refused"}`;
-        if (kind === "contact") this._refuseContact(conn, state, msg.crowId, reason);
+        if (kind === "contact") this._refuseContact(conn, state, state.claimedCrowId, reason);
         else this._refuseInstance(conn, state, reason);
         return false;
       }
     }
     if (state.refused || state.closed || conn.destroyed) return false;
 
-    const crowId = msg.crowId;
+    const crowId = state.claimedCrowId;
     const remoteInstanceId = kind === "instance"
       ? ((typeof msg.instance_id === "string" && msg.instance_id) || state.peerInstanceId || null)
       : null;
