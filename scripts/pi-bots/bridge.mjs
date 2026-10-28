@@ -88,6 +88,19 @@ const PROMPT_ACK_TIMEOUT_MS = Number(process.env.PIBOT_PROMPT_ACK_TIMEOUT_MS || 
 // resolveSqlitePath: project_spaces.tasks_db_uri is stored as a `file:` URI in
 // production and better-sqlite3 has no URI support, so the scheme is stripped
 // at the OPEN. Every card-database path in this module flows through here.
+/** C-12 spawn_env hygiene: drops engine-reserved keys (PI_BOT_*, PIBOT_*,
+ *  CROW_PI_SANDBOX) and CROW_ACTOR_* (a def must not spoof the actor). */
+export function filterSpawnEnvWithReport(def) {
+  const spawnEnv = {};
+  const stripped = [];
+  for (const k of Object.keys((def && def.spawn_env) || {})) {
+    if (/^PI_BOT_|^PIBOT_|^CROW_ACTOR_/.test(k) || k === "CROW_PI_SANDBOX") { stripped.push(k); continue; }
+    spawnEnv[k] = def.spawn_env[k];
+  }
+  return { spawnEnv, stripped };
+}
+export function filterSpawnEnv(def) { return filterSpawnEnvWithReport(def).spawnEnv; }
+
 export function db(p) { const d = new Database(resolveSqlitePath(p)); d.pragma("busy_timeout = 10000"); return d; }
 
 export function toolAllowlist(def, { remoteEnabled = false } = {}) {
@@ -412,14 +425,7 @@ export class PiRpc {
     // policy above). Strip anything that looks like an engine-reserved key
     // before merging; every other spawn_env key still passes through
     // unchanged.
-    const spawnEnv = {};
-    const strippedSpawnEnv = [];
-    for (const k of Object.keys(def.spawn_env || {})) {
-      // S3 fix round 1 (M1): CROW_PI_SANDBOX is the operator's switch for the
-      // pi sandbox; a bot def must not be able to turn it off for itself.
-      if (/^PI_BOT_|^PIBOT_/.test(k) || k === "CROW_PI_SANDBOX") { strippedSpawnEnv.push(k); continue; }
-      spawnEnv[k] = def.spawn_env[k];
-    }
+    const { spawnEnv, stripped: strippedSpawnEnv } = filterSpawnEnvWithReport(def);
     if (strippedSpawnEnv.length) {
       console.error("[pi-bots] stripped engine-reserved spawn_env keys from bot def: " + strippedSpawnEnv.join(", "));
     }

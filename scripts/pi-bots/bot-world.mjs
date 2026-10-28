@@ -263,6 +263,7 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
     // call board_report_result — ensure the board entry is minted.
     const w = writeBotMcp(def, {
       sessionDir, crowHome, remoteEnabled, peerGatewayUrls, botId, jobId, threadId, gatewayType,
+      displayName: bot.display_name,
       ensureServers: (jobId || cardBound) ? ["board"] : [],
       write: mcpDelivery === "file",
     });

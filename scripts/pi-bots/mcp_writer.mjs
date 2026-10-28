@@ -42,6 +42,7 @@ import { botsDbPath } from "./instance-paths.mjs";
 import { mintRemoteBlocks } from "./remote-blocks.mjs";
 import { crowServerCatalog, instanceBinding, rebindBlock } from "./crow-server-catalog.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
+import { applyActorEnv, actorEnvFor } from "./actor-env.mjs";
 
 const HOME = process.env.HOME || homedir();
 export const CANONICAL_MCP_PATH = HOME + "/.pi/agent/mcp.json";
@@ -263,6 +264,8 @@ export function buildBotMcp(def, canonical, opts = {}) {
     disable(name, null);
   }
 
+  if (opts.actor && opts.actor.botId) applyActorEnv(out.mcpServers, actorEnvFor(opts.actor));
+
   return { json: out, servers: active, warnings, journalGuarded, minted, rebound, disabled };
 }
 
@@ -322,6 +325,7 @@ export function writeBotMcp(def, opts = {}) {
   const built = buildBotMcp(def, canonical, {
     extraServers, catalog, unconfigured, binding, crowHome,
     ensureServers: opts.ensureServers,
+    actor: opts.botId ? { botId: opts.botId, displayName: opts.displayName } : undefined,
   });
   // F4a L2b: merge cross-instance forward-proxy blocks when the caller has
   // confirmed feature_flags.remote_invocation is on (the DB read is done by the

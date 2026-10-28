@@ -333,7 +333,7 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
     const mcpDelivery = mcpConfigDelivery();
     let mcpConfig = null;
     try {
-      const w = writeBotMcp(def, { sessionDir, crowHome, remoteEnabled: false, peerGatewayUrls: {}, ...jobActor(job),
+      const w = writeBotMcp(def, { sessionDir, crowHome, remoteEnabled: false, peerGatewayUrls: {}, ...jobActor(job), displayName: bot.display_name,
         write: mcpDelivery === "file" });
       mcpConfig = (w && w.json) || null;
     } catch (e) { log("job mcp.json write skipped (non-fatal): " + ((e && e.message) || e)); }
