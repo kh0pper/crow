@@ -643,7 +643,7 @@ export default function chatRouter(dashboardAuth) {
               currentModel: conversation.model,
               autoRules: pf.auto_rules || null,
               providers: all,
-              tierKeys: await resolveSmartTierKeys(db),
+              tierKeys: () => resolveSmartTierKeys(db),
             });
             if (smartRoute_result.provider_id) effectiveProvider = smartRoute_result.provider_id;
             if (smartRoute_result.model_id) effectiveModel = smartRoute_result.model_id;

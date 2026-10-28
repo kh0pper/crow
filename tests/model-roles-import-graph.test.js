@@ -39,3 +39,17 @@ test("voice-bot.js loads nothing besides itself", () => {
   const others = seen.filter((u) => u !== target);
   assert.equal(others.length, 0, `voice-bot.js imported ${others.length} other module(s)`);
 });
+
+test("isRawKey has one definition, exported by model-roles.js", async () => {
+  const { readFileSync } = await import("node:fs");
+  const m = await import("../servers/shared/model-roles.js");
+  assert.equal(typeof m.isRawKey, "function");
+  assert.equal(m.isRawKey("p/m"), true);
+  assert.equal(m.isRawKey("role:voice"), false);
+  assert.equal(m.isRawKey("p/"), false);
+  for (const f of ["servers/shared/model-roles-store.js", "servers/shared/model-roles-seed.js"]) {
+    const src = readFileSync(join(ROOT, f), "utf8");
+    assert.doesNotMatch(src, /(const|function)\s+isRawKey\b/, `${f} must import isRawKey, not redefine it`);
+    assert.match(src, /import \{[^}]*\bisRawKey\b[^}]*\} from "\.\/model-roles\.js"/, `${f} imports isRawKey from model-roles.js`);
+  }
+});

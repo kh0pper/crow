@@ -291,15 +291,25 @@ test("boot wiring", () => {
   const src = readFileSync(join(import.meta.dirname, "..", "servers/gateway/boot/admin-api.js"), "utf8");
   const r = src.indexOf("await reconcile();");
   assert.ok(r > 0, "reconcile call present");
-  const s = src.indexOf("seedRoleBindings(", r);
-  assert.ok(s > r, "seedRoleBindings( after await reconcile();");
-  const tryAt = src.lastIndexOf("try {", s);
-  assert.ok(tryAt > r, "inside a try { after reconcile");
-  const fin = src.indexOf("finally", s);
-  assert.ok(fin > s, "a finally follows");
-  const block = src.slice(src.lastIndexOf("createDbClient()", s), fin + 60);
-  assert.ok(src.lastIndexOf("createDbClient()", s) > r, "createDbClient() opened for the seed");
-  assert.match(block, /finally\s*\{\s*\w+\.close\(\)/);
+  const call = src.indexOf("await seedRolesAtBoot();", r);
+  assert.ok(call > r, "the role seed runs after await reconcile();");
+  assert.ok(call < src.indexOf("writeRoleSnapshot(db", r), "and before the boot snapshot");
+});
+
+test("the boot seed never throws: a client that fails to open, a seed that fails, a close that fails", async () => {
+  const { seedRolesAtBoot } = await import("../servers/gateway/boot/admin-api.js");
+  const warns = [];
+  const orig = console.warn;
+  console.warn = (...a) => warns.push(a.join(" "));
+  try {
+    await seedRolesAtBoot(() => { throw new Error("cannot open"); });
+    let closed = 0;
+    await seedRolesAtBoot(() => ({ execute: async () => { throw new Error("db gone"); }, close: () => { closed++; throw new Error("close failed"); } }));
+    assert.equal(closed, 1, "the client is closed in finally");
+  } finally { console.warn = orig; }
+  assert.equal(warns.length, 2, JSON.stringify(warns));
+  assert.match(warns[0], /\[roles\] Seed skipped: cannot open/);
+  assert.match(warns[1], /\[roles\] Seed skipped: /);
 });
 
 test("memory-side id wrap", async () => {

@@ -119,8 +119,16 @@ test("unresolvable voice role falls to raw (N2: never into quick or everyday)", 
 });
 
 test("resolveVoiceKeys never throws: a failing resolver gives the raw constants", async () => {
-  const k = await resolveVoiceKeys({}, { env: NO_ENV, resolveRoleFn: async () => { throw new Error("boom"); } });
+  const warns = [];
+  const warn = console.warn; console.warn = (...a) => warns.push(a.join(" "));
+  let k;
+  try { k = await resolveVoiceKeys({}, { env: NO_ENV, resolveRoleFn: async () => { throw new Error("boom"); } }); }
+  finally { console.warn = warn; }
   assert.deepEqual(k, { fast: FAST_KEY, escalate: ESC_KEY, fastRole: null, escalateRole: null });
+  assert.deepEqual(warns.sort(), [
+    "[llm-router] role everyday: boom; using the consumer default",
+    "[llm-router] role voice: boom; using the consumer default",
+  ]);
   const calls = [];
   await resolveVoiceKeys({}, { env: NO_ENV, resolveRoleFn: async (_db, key, opts) => { calls.push([key, opts.need, opts.chosenOnly]); return { key: null, reason: "not_chosen" }; } });
   assert.deepEqual(calls.sort(), [["role:everyday", "chat", true], ["role:voice", "chat", true]]);
@@ -272,7 +280,11 @@ test("bot role fast key", async () => {
     await baseProviders(db);
     await bind(db, "voice", "local-voice/m2");
     assert.equal(await resolveBotVoiceKey(db, "role:voice", { fallback: "x/y" }), "local-voice/m2");
-    assert.equal(await resolveBotVoiceKey(db, "role:nope", { fallback: "x/y" }), "x/y");
+    const warns = [];
+    const warn = console.warn; console.warn = (...a) => warns.push(a.join(" "));
+    try { assert.equal(await resolveBotVoiceKey(db, "role:nope", { fallback: "x/y" }), "x/y"); }
+    finally { console.warn = warn; }
+    assert.deepEqual(warns, ["[llm-router] role bot role:nope: unknown_role; using the consumer default"]);
     assert.equal(await resolveBotVoiceKey(db, "local-chat/m4", { fallback: "x/y" }), "local-chat/m4");
     assert.equal(await resolveBotVoiceKey(db, undefined, { fallback: "x/y" }), "x/y", "no key: the fallback, as `|| fastKey` did");
     assert.equal(await resolveBotVoiceKey(db, "", { fallback: "x/y" }), "x/y");
@@ -390,6 +402,15 @@ test("voice bot cloud flag via role", async () => {
   } finally { cleanup(); }
 });
 
+test("a bare \"role:\" fast model is no role: not cloud", async () => {
+  const { db, cleanup } = fresh();
+  try {
+    await baseProviders(db);
+    await seedVoiceBot(db, { kind: "voice", fast_voice_model: "role:" });
+    assert.equal((await createVoiceBotLoader()(db)).cloud, false);
+  } finally { cleanup(); }
+});
+
 test("voice bot raw key keeps the host test", async () => {
   const { db, cleanup } = fresh();
   try {
@@ -402,14 +423,14 @@ test("voice bot raw key keeps the host test", async () => {
 
 test("voice bot carries a role", async () => {
   const opts = { fastKey: FAST_KEY, readSetting: async () => null, listDevices: async () => [], log: () => {} };
-  const run = async (bound) => {
+  const run = async (bound, carried = "role:voice") => {
     const { db, cleanup } = fresh();
     try {
       await baseProviders(db);
       if (bound) await bind(db, "voice", "local-voice/m2");
       await db.execute({
         sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES ('helper', 'helper', ?, 1, NULL)",
-        args: [JSON.stringify({ fast_voice_model: "role:voice", tools: { crow_mcp: [] } })],
+        args: [JSON.stringify({ fast_voice_model: carried, tools: { crow_mcp: [] } })],
       });
       assert.deepEqual(await ensureVoiceBot(db, opts), { created: true });
       const row = (await db.execute({ sql: "SELECT definition FROM pi_bot_defs WHERE bot_id = ?", args: [CROW_VOICE_BOT_ID] })).rows[0];
@@ -418,4 +439,5 @@ test("voice bot carries a role", async () => {
   };
   assert.equal(await run(true), "role:voice");
   assert.equal(await run(false), FAST_KEY, "an unresolvable role is not carried");
+  assert.equal(await run(true, "role:"), FAST_KEY, "a bare role: is no role and is not carried");
 });

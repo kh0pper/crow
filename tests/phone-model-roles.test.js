@@ -129,6 +129,22 @@ test("local role rebound to cloud fails closed at refresh", async () => {
   assert.equal(s.disp.settings().model({ allow_cloud: false }).model, "m2", "recovers once the role is local again");
 });
 
+test("local slot judges the live row it dials, not a stale context", async () => {
+  invalidateRoleContext();
+  // Warm the memoized role context while local-voice is local.
+  assert.equal((await s.resolveModelSpec(s.db, "role:voice", { local: true })).base_url, "http://127.0.0.1:8011/v1");
+  // The row moves to a cloud URL with no change event: the context (memoized up to 1 s) still says local.
+  await s.db.execute({ sql: "UPDATE providers SET base_url = ? WHERE id = 'local-voice'", args: ["https://api.example.com/v1"] });
+  try {
+    assert.deepEqual(await s.resolveModelSpec(s.db, "role:voice", { local: true }), { error: "local_now_cloud" });
+    // The cloud slot is not fenced and dials the live row.
+    assert.equal((await s.resolveModelSpec(s.db, "role:voice")).base_url, "https://api.example.com/v1");
+  } finally {
+    await s.db.execute({ sql: "UPDATE providers SET base_url = ? WHERE id = 'local-voice'", args: ["http://127.0.0.1:8011/v1"] });
+    invalidateRoleContext();
+  }
+});
+
 test("raw keys unchanged", async () => {
   assert.deepEqual(await s.resolveModelSpec(s.db, "local-voice/m2"),
     { base_url: "http://127.0.0.1:8011/v1", api_key: "none", model: "m2", label: "local-voice/m2" });

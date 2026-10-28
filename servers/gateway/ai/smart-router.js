@@ -216,7 +216,7 @@ function resolveRouteToProvider(route, providers, rules, tierKeys = {}) {
  * @param {string} args.currentModel       conversation.model (fallback)
  * @param {object} [args.autoRules]        profile.auto_rules blob
  * @param {Array}  args.providers          listProvidersAll(db) result
- * @param {object} [args.tierKeys]         resolveSmartTierKeys(db) result
+ * @param {object|function} [args.tierKeys] resolveSmartTierKeys(db) result, or a function returning it (called once, after the flag check)
  * @returns {Promise<{ provider_id: string|null, model_id: string|null, reason: string }>}
  * @throws SmartChatDisabled when feature flag is off
  */
@@ -225,6 +225,8 @@ export async function chooseProvider({ db, convId, content, attachments, current
   let flags = null;
   try { flags = flagsRaw ? JSON.parse(flagsRaw) : null; } catch {}
   if (!flags || flags.smart_chat !== true) throw new SmartChatDisabled();
+  // A function form is read only past the flag, so a flag-off turn does no role lookups.
+  if (typeof tierKeys === "function") tierKeys = (await tierKeys()) || {};
 
   const rules = autoRules || {};
   const disabled = new Set(Array.isArray(rules.disabled) ? rules.disabled : []);

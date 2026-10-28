@@ -25,11 +25,16 @@ async function readSettings(db) {
   };
 }
 
-async function rowLookup(db, spec) {
+/** One read of the enabled provider row: the endpoint a call dials, plus the row it came from. */
+async function liveLookup(db, spec) {
   if (!spec || !spec.includes("/")) return null;
   const [providerId, ...rest] = spec.split("/");
-  const row = (await db.execute({ sql: "SELECT base_url, api_key FROM providers WHERE id = ? AND COALESCE(disabled,0)=0", args: [providerId] })).rows[0];
-  return row ? { base_url: row.base_url, api_key: row.api_key || "none", model: rest.join("/"), label: spec } : null;
+  const row = (await db.execute({ sql: "SELECT * FROM providers WHERE id = ? AND COALESCE(disabled,0)=0", args: [providerId] })).rows[0];
+  return row ? { endpoint: { base_url: row.base_url, api_key: row.api_key || "none", model: rest.join("/"), label: spec }, row } : null;
+}
+
+async function rowLookup(db, spec) {
+  return (await liveLookup(db, spec))?.endpoint ?? null;
 }
 
 /**
@@ -38,20 +43,29 @@ async function rowLookup(db, spec) {
  * instance's bindings, then the same row lookup of the resolved key. With
  * `local`, a role that lands on anything not proven local (isCloudKey: cloud
  * or unknown) gives {error:"local_now_cloud"}: the local slot fails closed.
- * Raw keys keep the host-column check in checkModel until Phase 2.
+ * The verdict is taken on the live row the call dials (the role context is
+ * memoized and can be up to a second stale), so verdict and endpoint come
+ * from one read. Raw keys keep the host-column check in checkModel until Phase 2.
  */
 export async function resolveModelSpec(db, spec, { local = false } = {}) {
   if (typeof spec !== "string" || !spec.startsWith("role:")) return rowLookup(db, spec);
-  const [{ resolveRole, loadRoleContext }, { isCloudKey }] = await Promise.all([
-    appImport("servers/shared/model-roles-store.js"), appImport("servers/shared/model-roles.js")]);
+  const [{ resolveRole, loadRoleContext }, { isCloudKey }, { providerRowToObject }] = await Promise.all([
+    appImport("servers/shared/model-roles-store.js"), appImport("servers/shared/model-roles.js"), appImport("servers/shared/provider-row.js")]);
   const { key } = await resolveRole(db, spec, { need: "chat" });
   if (!key) return null;
+  const live = await liveLookup(db, key);
+  if (!live) return null;
   if (local) {
-    let cloud = true; // an unreadable context is not proof of local
-    try { cloud = isCloudKey(key, { providers: (await loadRoleContext(db)).providers }); } catch { /* fail closed */ }
+    let cloud = true; // an unreadable context or row is not proof of local
+    try {
+      const own = providerRowToObject(live.row);
+      // The live row stands in for its context copy; the rest of the context only serves door hops.
+      const providers = [own, ...(await loadRoleContext(db)).providers.filter((p) => p.id !== own.id)];
+      cloud = isCloudKey(key, { providers });
+    } catch { /* fail closed */ }
     if (cloud) return { error: "local_now_cloud" };
   }
-  return rowLookup(db, key);
+  return live.endpoint;
 }
 
 export default function phoneRouter(authMiddleware, seams = {}) {

@@ -11,9 +11,9 @@
 import {
   CORE_ROLES, ROLE_KEY_RANGE, SUBAGENT_MAP_KEY, bindingKey,
   parseBindingRows, isRoleRef, roleIdOf, isValidCustomRoleId,
-  resolveRoleKey, resolveChosenRoleKey,
+  resolveRoleKey, resolveChosenRoleKey, isRawKey,
 } from "./model-roles.js";
-import { splitKey, modelsFromRows, loadModelsFromFile } from "../../scripts/pi-bots/model_resolver.mjs";
+import { modelsFromRows, loadModelsFromFile } from "../../scripts/pi-bots/model_resolver.mjs";
 import { providerRowToObject } from "./provider-row.js";
 import { loadCatalog, wrapOwnId } from "./model-roles-env.js";
 import { writeSetting } from "../gateway/dashboard/settings/registry.js";
@@ -75,8 +75,6 @@ function fireListeners(roleId) {
 }
 
 // ---- setBinding --------------------------------------------------------------
-
-const isRawKey = (k) => { const { provider, model } = splitKey(k); return !!(provider && model); };
 
 function knownRole(id, customDefs) {
   return CORE_IDS.has(id) || (isValidCustomRoleId(id) && !!customDefs[id]);

@@ -131,6 +131,17 @@ test("candidates filtered", () => {
   assert.deepEqual(keysOf(roleCandidates("voice", ctx3)), ["local-voice/m9"]);
 });
 
+test("candidates drop duplicate keys, keeping the first in order", () => {
+  const providers = [prov("local-voice", ["m2"]), prov("local-chat", ["m1"])];
+  const bindings = {
+    voice: { model: "local-voice/m2", fallback: ["quick", "everyday"] },
+    quick: { model: "local-chat/m1", fallback: [] },
+    everyday: { model: "local-voice/m2", fallback: ["quick"] },
+  };
+  const c = roleCandidates("voice", ctxOf({ providers, bindings }));
+  assert.deepEqual(c, [{ role: "voice", key: "local-voice/m2" }, { role: "quick", key: "local-chat/m1" }]);
+});
+
 test("candidates match resolver order", () => {
   const fixtures = [
     { providers: [prov("local-chat", ["m1"], { disabled: true }), prov("local-voice", ["m2"])],

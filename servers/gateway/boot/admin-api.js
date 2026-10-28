@@ -18,6 +18,24 @@ export function reconcileIntervalMs(env = process.env) {
   return Number.isFinite(n) && n > 0 ? n : 3600_000;
 }
 
+/**
+ * Boot step: seed the instance-owned `model_role.*` rows. Never throws, not
+ * even when the client cannot be opened (createDbClient can throw
+ * synchronously, and mountAdminApi is awaited at the top of boot).
+ */
+export async function seedRolesAtBoot(createDb = createDbClient) {
+  let db;
+  try {
+    db = createDb();
+    const { seedRoleBindings } = await import("../../shared/model-roles-seed.js");
+    await seedRoleBindings(db);
+  } catch (err) {
+    console.warn("[roles] Seed skipped:", err?.message);
+  } finally {
+    try { db?.close(); } catch {}
+  }
+}
+
 export async function mountAdminApi(app, deps) {
   const { dashboardAuth, noAuth } = deps;
 
@@ -161,17 +179,7 @@ export async function mountAdminApi(app, deps) {
 
     // --- Model roles seed: instance-owned `model_role.*` rows that track
     // today's defaults until the user edits a role. Never emitted. ---
-    {
-      const db = createDbClient();
-      try {
-        const { seedRoleBindings } = await import("../../shared/model-roles-seed.js");
-        await seedRoleBindings(db);
-      } catch (err) {
-        console.warn("[roles] Seed skipped:", err.message);
-      } finally {
-        db.close();
-      }
-    }
+    await seedRolesAtBoot();
     // --- Model roles snapshot for pi ($CROW_HOME/model-roles.json, 0600,
     // atomic). Rewritten after local provider and binding writes (debounced)
     // and on the reconcile interval, which covers replicated provider applies. ---

@@ -234,8 +234,13 @@ test("provider write reschedules", async () => {
   setProviderChangeHook(() => { hook++; });
   const off = addProviderChangeListener(() => { spy++; });
   const offBad = addProviderChangeListener(() => { throw new Error("listener boom"); });
+  const warns = [];
+  const warn = console.warn;
   try {
-    await upsertProvider(db, { id: "p1", baseUrl: "http://127.0.0.1:8099/v1", models: [{ id: "a" }] });
+    console.warn = (...a) => warns.push(a.join(" "));
+    try { await upsertProvider(db, { id: "p1", baseUrl: "http://127.0.0.1:8099/v1", models: [{ id: "a" }] }); }
+    finally { console.warn = warn; }
+    assert.deepEqual(warns, ["[providers] change listener failed: listener boom"], "a throwing listener is logged, not fatal");
     assert.equal(spy, 1);
     assert.equal(hook, 1, "the existing hook still runs");
     off(); offBad();
@@ -261,8 +266,14 @@ test("scheduleRoleSnapshot debounces, writes once, closes its client", async () 
     assert.equal(closed, 1, "closed in finally");
     assert.ok(existsSync(path));
     // A failing run never throws out of the timer.
-    scheduleRoleSnapshot(() => { throw new Error("no db"); }, { delayMs: 5, path });
-    await new Promise((r) => setTimeout(r, 100));
+    const warns = [];
+    const warn = console.warn;
+    console.warn = (...a) => warns.push(a.join(" "));
+    try {
+      scheduleRoleSnapshot(() => { throw new Error("no db"); }, { delayMs: 5, path });
+      await new Promise((r) => setTimeout(r, 100));
+    } finally { console.warn = warn; }
+    assert.deepEqual(warns, ["[roles] snapshot write failed: no db"]);
   } finally { cleanup(); }
 });
 

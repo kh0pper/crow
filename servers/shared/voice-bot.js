@@ -157,7 +157,9 @@ async function isProviderModel(db, key) {
   if (key.startsWith("role:")) {
     try {
       const { resolveRole } = await import("./model-roles-store.js");
-      return !!(await resolveRole(db, key, { need: "chat" }))?.key;
+      // A bare "role:" is no role (isRoleRef): the resolver hands it back as "raw", never a model.
+      const r = await resolveRole(db, key, { need: "chat" });
+      return !!r?.key && r.reason !== "raw";
     } catch { return false; }
   }
   const i = key.indexOf("/");

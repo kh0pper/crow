@@ -57,7 +57,7 @@ async function fastModelIsCloud(db, def) {
         import("../../shared/model-roles-store.js"), import("../../shared/model-roles.js"),
       ]);
       const r = await resolveRole(db, key, { need: "chat" });
-      if (!r?.key) return false;
+      if (!r?.key || r.reason === "raw") return false; // a bare "role:" is no role (isRoleRef)
       const { providers } = await loadRoleContext(db);
       return isCloudKey(r.key, { providers });
     } catch { return false; }

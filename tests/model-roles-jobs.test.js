@@ -183,6 +183,24 @@ test("smart-router ignores a distinct seed, honours the chosen binding", async (
   assert.deepEqual({ provider_id: r.provider_id, model_id: r.model_id }, { provider_id: "local-voice", model_id: "m2" });
 });
 
+test("smart_chat off: the tier-role lookups never run; on: a lazy tierKeys is read once", async () => {
+  addProvider("local-voice", "http://127.0.0.1:8012/v1", [{ id: "m1" }, { id: "m2" }]);
+  await setBinding(db, "quick", { model: "local-voice/m2" });
+  let calls = 0;
+  const lazy = () => { calls++; return resolveSmartTierKeys(db); };
+  const args = { db, convId: 1, content: "/fast hi", attachments: null, currentProvider: null, currentModel: null, autoRules: null, providers: routerProviders(), tierKeys: lazy };
+  await assert.rejects(chooseProvider(args), (e) => e.code === "smart_chat_disabled");
+  assert.equal(calls, 0, "flag off: no role lookup");
+  setRaw("feature_flags", JSON.stringify({ smart_chat: true }));
+  const r = await chooseProvider(args);
+  assert.equal(calls, 1);
+  assert.deepEqual({ provider_id: r.provider_id, model_id: r.model_id }, { provider_id: "local-voice", model_id: "m2" });
+  // chat.js hands the router the lazy form, so a flag-off turn does no lookups.
+  const { readFileSync } = await import("node:fs");
+  const chat = readFileSync(join(import.meta.dirname, "..", "servers/gateway/routes/chat.js"), "utf8");
+  assert.match(chat, /tierKeys: \(\) => resolveSmartTierKeys\(db\)/);
+});
+
 test("CROW_SMART_ROUTER_FAST beats role", async () => {
   addProvider("local-voice", "http://127.0.0.1:8012/v1", [{ id: "m1" }, { id: "m2" }]);
   await setBinding(db, "quick", { model: "local-voice/m2" });

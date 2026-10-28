@@ -195,7 +195,8 @@ function classOk(providerId, catalogId, catalog, allowHeavy, servingOverrides) {
   return typeof override === "string" && override === cls;
 }
 
-const isRawKey = (k) => { const { provider, model } = splitKey(k); return !!(provider && model); };
+/** A raw `provider/model` key (both halves non-empty). The one definition: the store and the seed import it. */
+export const isRawKey = (k) => { const { provider, model } = splitKey(k); return !!(provider && model); };
 const isStringArray = (a) => Array.isArray(a) && a.every((x) => typeof x === "string");
 
 /**
@@ -333,11 +334,14 @@ export function* walkRole(rootId, ctx = {}, out = {}) {
 
 const bareRoleId = (r) => (isRoleRef(r) ? roleIdOf(r) : r);
 
-/** The usable candidates of a role in resolver order: configured-or-not, never filtered. */
+/** The usable candidates of a role in resolver order: configured-or-not, never filtered, each key once (its first occurrence). */
 export function roleCandidates(roleId, ctx = {}) {
   const out = [];
+  const seen = new Set();
   for (const e of walkRole(bareRoleId(roleId), ctx)) {
-    if (e.key && !e.filtered && (e.verdict === "ok" || e.verdict === "not_configured")) out.push({ role: e.role, key: e.key });
+    if (!e.key || e.filtered || !(e.verdict === "ok" || e.verdict === "not_configured") || seen.has(e.key)) continue;
+    seen.add(e.key);
+    out.push({ role: e.role, key: e.key });
   }
   return out;
 }

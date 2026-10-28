@@ -8,8 +8,7 @@
  */
 import os from "node:os";
 import { join } from "node:path";
-import { CORE_ROLES, bindingKey, parseBindingValue } from "./model-roles.js";
-import { splitKey } from "../../scripts/pi-bots/model_resolver.mjs";
+import { CORE_ROLES, bindingKey, parseBindingValue, isRawKey } from "./model-roles.js";
 import { roleBindingAuthority, invalidateRoleContext } from "./model-roles-store.js";
 import { str, readJsonFile, effectiveAgentModel } from "./pi-agent-config.js";
 import { VOICE_ROUTE_DEFAULTS } from "./voice-route-defaults.js";
@@ -50,8 +49,6 @@ export function defaultSeedSources({ env = process.env, homeDir = os.homedir() }
   out.expert = effectiveAgentModel(piAgentDir, "adversary");
   return out;
 }
-
-const isRawKey = (k) => { const { provider, model } = splitKey(k); return !!(provider && model); };
 
 /**
  * Insert or reseed every core role with a non-null source (in `sources` key
