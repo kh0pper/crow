@@ -38,6 +38,13 @@ export async function setBlocked(db, reason) {
   await db.execute({ sql: "UPDATE workspace_comment_watch SET blocked_reason=? WHERE id=1", args: [reason ?? null] });
 }
 
+/** Clears the block only when it is `reason` (one statement); true when a block was cleared. */
+export async function clearBlocked(db, reason) {
+  await getWatch(db);
+  const r = await db.execute({ sql: "UPDATE workspace_comment_watch SET blocked_reason=NULL WHERE id=1 AND blocked_reason=?", args: [reason] });
+  return r.rowsAffected > 0;
+}
+
 export async function getState(db, fileId) {
   return (await db.execute({ sql: "SELECT * FROM workspace_comment_state WHERE file_id=?", args: [fileId] })).rows[0] ?? null;
 }

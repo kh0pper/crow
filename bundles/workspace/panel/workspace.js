@@ -191,7 +191,7 @@ async function renderCommentCard(lang, req) {
     const cfg = getConfig();
     const watch = await getWatch(await openWorkspaceDb());
     const n = String(req.query?.notice || "");
-    return renderCommentSettings({ lang, csrf: req.csrfToken, watch, blocked: watch.blocked_reason || cfg.commentLoopBlocked || "", notice: ["saved", "not_yet", "bad_mode", "error"].includes(n) ? n : "" });
+    return renderCommentSettings({ lang, csrf: req.csrfToken, watch, blocked: watch.blocked_reason || cfg.commentLoopBlocked || "", notice: ["saved", "not_yet", "bad_mode", "error", "blocked", "unblocked", "still_blocked", "recheck_failed", "env_blocked"].includes(n) ? n : "" });
   } catch (e) {
     console.warn(`[workspace] comment settings unavailable: ${e?.code || "error"}`);
     return "";

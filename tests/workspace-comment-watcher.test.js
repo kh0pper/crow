@@ -43,14 +43,16 @@ async function setup({ mode = "shadow", watchSince = T0 - HOUR, seams } = {}) {
   OO.setNcInstanceId(null); // the instance id is learnt per test, from this test's editor sessions (or the env)
   const fake = await startFakeNextcloud(); fakes.push(fake);
   const names = { admin: "admin", coworker: "coworker", "crow-bot": "Crow bot" };
-  // Crow bot's full-match autocomplete: exact display-name matches (any case), outside the owner's group too.
-  const ac = { users: [], down: false };
+  // Crow bot's full-match autocomplete, as Nextcloud does it: a case-insensitive EXACT match (no NFC, no trim),
+  // outside the owner's group too. `onCall` runs (awaited) at the start of each autocomplete request.
+  const ac = { users: [], down: false, onCall: null };
   fake.extraRoutes = async (req, res, body, { send, ms }) => {
     if (req.url.startsWith("/ocs/v2.php/core/autocomplete/get")) {
+      if (ac.onCall) await ac.onCall();
       if (ac.down) { send(503); return true; }
-      const q = (new URL(req.url, "http://x").searchParams.get("search") || "").normalize("NFC").trim().toLowerCase();
+      const q = (new URL(req.url, "http://x").searchParams.get("search") || "").toLowerCase();
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ocs: { meta: { status: "ok", statuscode: 200 }, data: ac.users.filter((u) => u.label.normalize("NFC").trim().toLowerCase() === q) } }));
+      res.end(JSON.stringify({ ocs: { meta: { status: "ok", statuscode: 200 }, data: ac.users.filter((u) => u.label.toLowerCase() === q) } }));
       return true;
     }
     const pm = req.url.match(/^\/remote\.php\/dav\/principals\/users\/([^/]+)\/$/);
@@ -700,8 +702,8 @@ test("daily duplicate-name check: a clash blocks, nothing clears it, an outage n
   assert.equal(checks(), 2); assert.equal(await blocked(), null);
   s.advance(15000); await s.tick();
   assert.equal(checks(), 2, "then once a day");
-  // a second account with the owner's name (case/space differ) → blocked, and the tick does nothing more
-  s.ac.users.push({ id: "alex", label: "Admin " });
+  // a second account with the owner's name (case differs) → blocked, and the tick does nothing more
+  s.ac.users.push({ id: "alex", label: "ADMIN" });
   s.advance(W.NAME_CHECK_MS);
   const before = s.fake.calls.length;
   const r = await s.tick();
@@ -709,13 +711,18 @@ test("daily duplicate-name check: a clash blocks, nothing clears it, an outage n
   assert.equal(s.fake.calls.length - before, 1, "the owner name is cached: one autocomplete call, and the tick stops there");
 });
 
-test("daily duplicate-name check never clears a block, and an unknown owner name means it cannot tell", async () => {
-  const s = await setup();
-  await ST.setBlocked(s.db, "duplicate_display_name");
-  s.ac.users = [];
-  s.advance(W.NAME_CHECK_MS);
-  await s.tick();
-  assert.equal((await ST.getWatch(s.db)).blocked_reason, "duplicate_display_name");
+test("daily duplicate-name check never clears a block (the check really runs while a block is present), and an unknown owner name means it cannot tell", async () => {
+  for (const [label, answer] of [["no clash (false)", { users: [], down: false }], ["could not tell (null)", { users: [], down: true }]]) {
+    const s = await setup();
+    let ran = 0;
+    // The block appears while the name check is in flight: the tick passed its blocked guard, so the check runs.
+    s.ac.onCall = async () => { ran++; await ST.setBlocked(s.db, "duplicate_display_name"); };
+    Object.assign(s.ac, answer);
+    await s.tick();
+    assert.ok(ran >= 1, `${label}: the name check ran`);
+    assert.equal((await ST.getWatch(s.db)).blocked_reason, "duplicate_display_name", `${label}: the block survives`);
+  }
+  await setup(); // a fresh fake (the env points at it): autocomplete answers with nobody
   // ownerNameClash directly: unknown owner name → null (neither true nor false)
   const cfg = { ...getConfig(), ownerUids: Object.freeze(["nobody"]) };
   assert.equal(await W.ownerNameClash(cfg), null);

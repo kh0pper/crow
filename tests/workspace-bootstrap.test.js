@@ -30,7 +30,7 @@ case "$*" in
   *"user:add "*) touch "$S/user-$last" ;;
   *"occ user:auth-tokens:list "*) if [ -f "$S/tokens" ]; then echo '[{"id":7,"name":"crow-workspace-tools"},{"id":8,"name":"phone"}]'; else echo '[]'; fi ;;
   *"user:auth-tokens:add "*) n=$(( $(cat "$S/tokens" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$S/tokens"; printf 'app password:\n%s%s\n' "$(printf 'A%.0s' $(seq 1 71))" "$n" ;;
-  *"occ user:list "*) if [ -f "$S/userlist" ]; then cat "$S/userlist"; elif [ -f "$S/userlist-fail" ]; then exit 1; else echo '{"admin":"admin","crow-bot":"Crow bot"}'; fi ;;
+  *"occ user:list "*) if [ -f "$S/userlist" ]; then cat "$S/userlist"; elif [ -f "$S/userlist-fail" ]; then exit 1; elif [ -f "$S/userlist-json-exit1" ]; then echo '{"admin":"Casey","alex":"Alex"}'; exit 1; else echo '{"admin":"admin","crow-bot":"Crow bot"}'; fi ;;
   *"occ config:system:get instanceid"*) if [ -f "$S/instanceid" ]; then cat "$S/instanceid"; else echo ocabc123xyz; fi ;;
   *"occ background:cron"*) [ -f "$S/fail-cron" ] && exit 3 ;;
   *"onlyoffice:documentserver --check"*) echo "Document server is successfully connected" ;;
@@ -399,6 +399,8 @@ test("duplicate display name (NFC/trim/case) sets WORKSPACE_COMMENT_LOOP_BLOCKED
   // the check cannot run: an existing block stays, none is invented
   assert.equal(blockedOf(null, { WORKSPACE_COMMENT_LOOP_BLOCKED: "duplicate_display_name" }, ["userlist-fail"]), "duplicate_display_name");
   assert.equal(blockedOf(null, {}, ["userlist-fail"]), undefined);
+  // valid JSON but occ exited non-zero (pipefail): still "could not tell", so the block is NOT cleared
+  assert.equal(blockedOf(null, { WORKSPACE_COMMENT_LOOP_BLOCKED: "duplicate_display_name" }, ["userlist-json-exit1"]), "duplicate_display_name");
   // owner list from WORKSPACE_OWNER_UIDS
   assert.equal(blockedOf('{"admin":"Casey","owner2":"Dana","dana2":"dana"}', { WORKSPACE_OWNER_UIDS: "admin,owner2" }), "duplicate_display_name");
 });

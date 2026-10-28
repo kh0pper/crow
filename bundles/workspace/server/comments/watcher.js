@@ -51,6 +51,9 @@ const normName = (s) => String(s ?? "").normalize("NFC").trim().toLowerCase();
  * Spec §3.3: does another account share an owner's display name? Crow bot's full-match autocomplete finds exact
  * display names outside its group (spike E12). → true (clash), false (none), null (could not tell: Nextcloud
  * failed, or an owner's name is unknown). Reads only.
+ * This live check is a backstop for EXACT and case variants only (Nextcloud's full match is a case-insensitive exact
+ * match). NFC and whitespace variants, and a clash with the bot's own name, are covered by bootstrap's
+ * `owner_name_clash --all` check plus the display-name lock.
  */
 export async function ownerNameClash(cfg) {
   try {

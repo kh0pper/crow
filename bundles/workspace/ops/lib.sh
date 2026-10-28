@@ -59,10 +59,12 @@ random_pw() {
 # the admin login. Exit 0 = clash (--all: a non-owner account has an owner's name; <name>: that name equals an
 # owner's), 1 = no clash, 2 = could not tell (occ or the owner list failed): callers must not treat 2 as "clear".
 owner_name_clash() {
-  local arg="${1:---all}" admin owners
+  local arg="${1:---all}" admin owners out
   admin="$(env_get WORKSPACE_ADMIN_USER)"; admin="${admin:-admin}"
   owners="$(env_get WORKSPACE_OWNER_UIDS)"; owners="${owners:-$admin}"
-  occ user:list --output=json 2>/dev/null | python3 -c '
+  # Capture first: a pipe would hide occ's exit status (valid-looking JSON from a failing occ is "could not tell").
+  out="$(occ user:list --output=json --limit=100000 2>/dev/null)" || return 2
+  printf '%s' "$out" | python3 -c '
 import json, sys, unicodedata
 norm = lambda s: unicodedata.normalize("NFC", str(s)).strip().casefold()
 try:
