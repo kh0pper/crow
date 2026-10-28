@@ -256,6 +256,12 @@ export async function deleteContactLocal(db, managers, row) {
     const { clearCbPin } = await loadBindingMod();
     await clearCbPin(db, localId, row.crow_id);
   } catch (e) { console.warn(`[contact-delete] channel-binding pin cleanup failed for ${row.crow_id}:`, e?.message); }
+  // PT-3: ...and gets the "I bind" advert again (the per-contact sent marker goes too).
+  try {
+    const localId = managers?.peerManager?.localInstanceId || managers?.instanceSyncManager?.localInstanceId || null;
+    const { clearCbAdvertMarker } = await loadBindingMod();
+    await clearCbAdvertMarker(db, localId, row.crow_id);
+  } catch (e) { console.warn(`[contact-delete] advert marker cleanup failed for ${row.crow_id}:`, e?.message); }
   const sync = await loadSyncMod();
   await sync.emitContactDelete(db, row.crow_id, row.lamport_ts);
   return { ok: true };

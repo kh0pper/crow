@@ -103,6 +103,24 @@ export async function clearCbPin(db, localId, crowId) {
   });
 }
 
+/**
+ * LOCAL dashboard_settings_overrides key prefix `<prefix><crowId>`: this
+ * instance has sent that contact its `hs_cb` advert (peer-profile.js). Never
+ * synced.
+ */
+export const CB_ADVERT_PREFIX = "contact_hs_cb_adv:";
+
+/**
+ * Remove the "advert sent" marker so a re-added person gets a fresh advert.
+ * Without a local id, every instance's marker for that contact in this DB is
+ * removed (a resend is harmless; a missed one is not).
+ */
+export async function clearCbAdvertMarker(db, localId, crowId) {
+  await db.execute(localId
+    ? { sql: "DELETE FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ?", args: [CB_ADVERT_PREFIX + crowId, localId] }
+    : { sql: "DELETE FROM dashboard_settings_overrides WHERE key = ?", args: [CB_ADVERT_PREFIX + crowId] });
+}
+
 /** The pinned Ed25519 key of a full, unblocked contact, or null. Throws on a DB error. */
 export async function lookupPinnedContactKey(db, crowId) {
   const { rows } = await db.execute({

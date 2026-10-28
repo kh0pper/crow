@@ -30,6 +30,7 @@ import { buildHandshakeComplete, HANDSHAKE_COMPLETE_SUBTYPE } from "../servers/s
 import { handleInboundRoomEnvelope } from "../servers/sharing/room-inbound.js";
 import { createRoom, getRoomByUid, listRoomMembers } from "../servers/gateway/dashboard/panels/messages/rooms-store.js";
 import { registerContactsTools } from "../servers/sharing/tools/contacts.js";
+import { deleteContactLocal } from "../servers/sharing/contact-delete.js";
 import { PeerManager } from "../servers/sharing/peer-manager.js";
 
 const { handleProfileMessage, buildProfileMessage, PROFILE_SUBTYPE } = peerProfile;
@@ -290,12 +291,12 @@ test("N-3c host-relay room_message: a non-member author is unattributed and labe
   await env("room_message", { room_uid: "u-h", msg_uid: "m-y", author: { kind: "human", crow_id: Y.crowId, display_name: "Payload Y" }, text: "from Y" }, H);
   const ry = await row("m-y");
   assert.equal(Number(ry.sender_contact_id), Number(ids.Y), "control: a member author is attributed");
-  assert.equal(ry.sender_label, "Yvonne via Hal");
+  assert.equal(ry.sender_label, "Yvonne via Hal", "the member's stored name, not the payload's");
 
-  await env("room_message", { room_uid: "u-h", msg_uid: "m-x", author: { kind: "human", crow_id: X.crowId, display_name: "Xavier" }, text: "claims X" }, H);
+  await env("room_message", { room_uid: "u-h", msg_uid: "m-x", author: { kind: "human", crow_id: X.crowId, display_name: "Claimed\u202E X" }, text: "claims X" }, H);
   const rx = await row("m-x");
   assert.equal(rx.sender_contact_id, null, "X is not a member: unattributed");
-  assert.equal(rx.sender_label, "Xavier via Hal");
+  assert.equal(rx.sender_label, "Claimed X via Hal", "the host's (sanitized) label, not X's stored name");
   assert.ok(gid);
 });
 
@@ -463,6 +464,17 @@ test("N-6d the OLD receiver ignores hs_cb: the base tree's handleProfileMessage 
   }
   assert.equal(results[0].applied, true, "control: the old receiver applies the profile");
   assert.deepEqual(results[1], results[0]);
+
+  // The advert-only payload R9 actually sends leaves the old receiver's row unchanged.
+  const db = await freshDb(t, "n6d-adv");
+  const cid = await addFull(db, B, "Bee");
+  await oldHandle(db, { v: 1, display_name: "Bee Peer", avatar: null }, xo(B));
+  const before = await contactRow(db, cid);
+  assert.equal(before.peer_display_name, "Bee Peer", "control: a prior profile is stored");
+  const r = await oldHandle(db, JSON.parse(peerProfile.buildBindingAdvertMessage()).payload, xo(B));
+  assert.equal(r.changed, false, "the old receiver changes nothing");
+  assert.deepEqual(await contactRow(db, cid), before, "the row is unchanged");
+  assert.equal(await pinCount(db), 0);
 });
 
 // -------- R1: a pin set ONLY by the real advert handler makes a real PeerManager refuse a legacy response
@@ -565,4 +577,70 @@ test("N-6f (R9) after an update, each existing full contact gets exactly one hs_
   assert.equal(later.sent, 1, "a zero-relay send is not marked, so it is retried");
   const noId = await advertiseBindingToContacts(db2, { sendControl: async () => { throw new Error("must not send"); } }, null, { spacingMs: 0 });
   assert.equal(noId.sent, 0);
+});
+
+// -------- fix round 1
+test("N-5c reaction emoji and group names are sanitized and capped, for contacts and strangers", T, async (t) => {
+  const db = await freshDb(t, "n5c");
+  const C = id(), S = id();
+  await addFull(db, C, "Cleo");
+  const h = await wiredHandlers(db);
+  // Control: a plain emoji and group name pass through.
+  await h.onSocial("reaction", { emoji: "👍" }, xo(C));
+  assert.equal((await notifs(db)).at(-1).title, "Cleo reacted 👍");
+  for (const who of [C, S]) {
+    await h.onSocial("reaction", { emoji: "\u202Eo\u0007k" + "x".repeat(40) }, xo(who));
+    const title = (await notifs(db)).at(-1).title;
+    assert.ok(title.endsWith(" reacted okxxxxxx"), `controls stripped, capped at 8: ${JSON.stringify(title)}`);
+    assert.equal(/[\u0000-\u001F\u202A-\u202E]/.test(title), false);
+  }
+  const before = (await notifs(db)).length;
+  await h.onSocial("reaction", { emoji: "\u0007\u202E" }, xo(S));
+  assert.equal((await notifs(db)).length, before, "an emoji that sanitizes to nothing is dropped");
+
+  const cId = (await one(db, "SELECT id FROM contacts WHERE crow_id = ?", [C.crowId])).id;
+  await handleGroupMessageNotify(db, { group_name: "Team", message: "g0" }, xo(C));
+  assert.equal((await notifs(db)).at(-1).title, "[Team] Cleo", "control: a plain group name");
+  for (const who of [C, S]) {
+    await handleGroupMessageNotify(db, { group_name: "Bad\u0000\u202EName" + "g".repeat(100), message: "g1" }, xo(who));
+    const title = (await notifs(db)).at(-1).title;
+    const group = title.slice(1, title.indexOf("]"));
+    assert.ok(group.startsWith("BadName"), JSON.stringify(title));
+    assert.equal(Array.from(group).length, 60, "group name capped at 60");
+  }
+  const stored = await all(db, "SELECT content FROM messages WHERE contact_id = ? ORDER BY id", [cId]);
+  assert.ok(stored.at(-1).content.startsWith("[BadName"), "the stored copy uses the sanitized name too");
+});
+
+test("N-6g (R13) deleting a contact clears its advert marker, so a re-added contact is advertised again", T, async (t) => {
+  const db = await freshDb(t, "n6g");
+  const localId = "inst-n6g";
+  const B = id();
+  await addFull(db, B, "Bee");
+  const ok = { sendControl: async () => ({ relays: ["r"] }) };
+  assert.equal((await advertiseBindingToContacts(db, ok, localId, { spacingMs: 0 })).sent, 1);
+  assert.equal((await advertiseBindingToContacts(db, ok, localId, { spacingMs: 0 })).sent, 0, "control: the marker stops a resend");
+  const row = await one(db, "SELECT * FROM contacts WHERE crow_id = ?", [B.crowId]);
+  const res = await deleteContactLocal(db, { instanceSyncManager: { localInstanceId: localId } }, row);
+  assert.equal(res.ok, true);
+  assert.equal(Number((await one(db, "SELECT COUNT(*) AS n FROM dashboard_settings_overrides WHERE key = ?", [HS_CB_ADVERT_PREFIX + B.crowId])).n), 0, "marker cleared");
+  await addFull(db, B, "Bee");
+  assert.equal((await advertiseBindingToContacts(db, ok, localId, { spacingMs: 0 })).sent, 1, "the re-added contact gets a fresh advert");
+});
+
+test("N-6h the advert runs follow-up batches until every contact is done, without retrying a failure in the same run", T, async (t) => {
+  const db = await freshDb(t, "n6h");
+  const ids = [id(), id(), id(), id(), id()];
+  for (const [i, x] of ids.entries()) await addFull(db, x, "P" + i);
+  const sent = [];
+  const failKey = ids[2].secp256k1Pubkey;
+  const nm = { sendControl: async (to) => { sent.push(to.secp256k1_pubkey); return { relays: to.secp256k1_pubkey === failKey ? [] : ["r"] }; } };
+  // Control: one batch of 2 leaves more.
+  const first = await advertiseBindingToContacts(db, nm, "inst-ctl", { spacingMs: 0, maxPerRun: 2 });
+  assert.deepEqual([first.sent, first.more], [2, true]);
+  sent.length = 0;
+  await peerProfile.scheduleBindingAdverts(db, nm, () => "inst-n6h", { delayMs: 0, spacingMs: 0, maxPerRun: 2 });
+  assert.deepEqual([...sent].sort(), ids.map((x) => x.secp256k1Pubkey).sort(), "every contact tried exactly once across batches");
+  const markers = Number((await one(db, "SELECT COUNT(*) AS n FROM dashboard_settings_overrides WHERE instance_id = 'inst-n6h' AND key LIKE ?", [HS_CB_ADVERT_PREFIX + "%"])).n);
+  assert.equal(markers, 4, "the failed one stays unmarked for the next boot");
 });

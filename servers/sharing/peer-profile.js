@@ -20,7 +20,7 @@ import { findContactByPubkey } from "./pubkey-util.js";
 import { sanitizeDisplayName } from "./display-name.js";
 import { validateAvatar } from "./avatar.js";
 import { emitContactChange } from "./contact-sync.js";
-import { markCbPinned } from "./contact-binding.js";
+import { markCbPinned, CB_ADVERT_PREFIX } from "./contact-binding.js";
 
 export const PROFILE_SUBTYPE = "profile";
 /** A raw dashboard_settings row (NOT in the sync allowlist, never emitted — the profile-heal flag precedent): "1" = the last fan-out did not fully succeed, resend on the next chance. */
@@ -31,7 +31,7 @@ const HEX_KEY = /^[0-9a-fA-F]{64}(?:[0-9a-fA-F]{2})?$/;
  * instance has sent the `hs_cb` advert to that contact. Never synced (the
  * overrides table is per instance).
  */
-export const HS_CB_ADVERT_PREFIX = "contact_hs_cb_adv:";
+export const HS_CB_ADVERT_PREFIX = CB_ADVERT_PREFIX;
 
 /**
  * PT-3 §2.5: apply a key-bound "this contact binds its Hyperswarm handshakes"
@@ -256,8 +256,8 @@ export async function broadcastProfile(db, nostrManager) {
  * `spacingMs` apart. No local instance id or no sender: nothing is sent.
  * Never throws.
  */
-export async function advertiseBindingToContacts(db, nostrManager, localId, { spacingMs = 2000, maxPerRun = 50 } = {}) {
-  const out = { sent: 0, failed: 0 };
+export async function advertiseBindingToContacts(db, nostrManager, localId, { spacingMs = 2000, maxPerRun = 50, attempted = null } = {}) {
+  const out = { sent: 0, failed: 0, more: false };
   try {
     if (!db || !localId || !nostrManager || typeof nostrManager.sendControl !== "function") return out;
     const recipients = (await profileRecipients(db)).filter((r) =>
@@ -266,13 +266,15 @@ export async function advertiseBindingToContacts(db, nostrManager, localId, { sp
     const content = buildBindingAdvertMessage();
     let attempts = 0;
     for (const c of recipients) {
-      if (attempts >= maxPerRun) break;
+      if (attempted?.has(c.crow_id)) continue; // already tried this boot (a failure waits for the next one)
       const key = HS_CB_ADVERT_PREFIX + c.crow_id;
       const { rows } = await db.execute({
         sql: "SELECT 1 FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ? LIMIT 1",
         args: [key, localId],
       });
       if (rows.length) continue;
+      if (attempts >= maxPerRun) { out.more = true; break; }
+      attempted?.add(c.crow_id);
       if (attempts > 0 && spacingMs > 0) await new Promise((r) => { const t = setTimeout(r, spacingMs); t.unref?.(); });
       attempts++;
       try {
@@ -292,4 +294,23 @@ export async function advertiseBindingToContacts(db, nostrManager, localId, { sp
     try { console.warn("[sharing] hs_cb advert failed:", err?.message); } catch {}
   }
   return out;
+}
+
+/**
+ * PT-3 §2.5: run advert batches until every full contact has been tried once:
+ * the first after `delayMs`, each follow-up `spacingMs` after the previous
+ * batch. The local id is read at each batch. Timers never hold the process
+ * open. Returns a promise that settles after the last batch (never rejects).
+ */
+export function scheduleBindingAdverts(db, nostrManager, getLocalId, { delayMs = 30_000, spacingMs = 2000, maxPerRun = 50 } = {}) {
+  const attempted = new Set();
+  const wait = (ms) => new Promise((r) => { const t = setTimeout(r, Math.max(0, ms)); t.unref?.(); });
+  return (async () => {
+    await wait(delayMs);
+    for (;;) {
+      const out = await advertiseBindingToContacts(db, nostrManager, getLocalId(), { spacingMs, maxPerRun, attempted });
+      if (!out.more) return;
+      await wait(spacingMs);
+    }
+  })().catch(() => {});
 }

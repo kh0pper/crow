@@ -27,7 +27,7 @@ import { sanitizeDisplayName } from "./display-name.js";
 import { emitOrQueue } from "../shared/sync-emit.js";
 import { insertSharedSource } from "./shared-source-insert.js";
 import { withoutProvenance } from "../research/provenance-schema.js";
-import { PROFILE_SUBTYPE, handleProfileMessage, applyPeerProfile, readLocalProfile, ensurePeerProfileColumns, isEstablishedContact, applyBindingAdvert, advertiseBindingToContacts } from "./peer-profile.js";
+import { PROFILE_SUBTYPE, handleProfileMessage, applyPeerProfile, readLocalProfile, ensurePeerProfileColumns, isEstablishedContact, applyBindingAdvert, scheduleBindingAdverts } from "./peer-profile.js";
 import { installBirdAvatarHooks } from "./profile-avatar.js";
 import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
 import { wireContactBinding } from "./contact-binding.js";
@@ -36,12 +36,16 @@ import { crowIdMatchesKey } from "./identity.js";
 /** PT-3 N-5: the label a non-contact's notification title carries (server titles are English). */
 export const NOT_IN_CONTACTS = "(not in your contacts)";
 
-/** A remote-chosen name for a notification title: sanitized, at most 60 code points, or null. */
-export function notifName(value) {
+/**
+ * A remote-chosen string for a notification title: sanitized (controls, bidi
+ * overrides and identity-string prefixes removed), at most `max` code points,
+ * or null.
+ */
+export function notifName(value, max = 60) {
   const s = sanitizeDisplayName(value);
   if (!s) return null;
   const points = Array.from(s);
-  return points.length > 60 ? points.slice(0, 60).join("") : s;
+  return points.length > max ? points.slice(0, max).join("") : s;
 }
 
 /**
@@ -79,9 +83,10 @@ export async function handleSocialNotify(db, subtype, payload, senderPubkey, man
       base = "sharing:voice_memo"; nameField = "sender_name";
       build = (who) => ({ title: `Voice memo from ${who}`, body: text.length > 200 ? text.slice(0, 200) + "..." : text, priority: "high" });
     } else if (subtype === "reaction") {
-      if (!p.emoji) return;
+      const emoji = notifName(p.emoji, 8);
+      if (!emoji) return;
       base = "sharing:reaction"; nameField = "sender_name";
-      build = (who) => ({ title: `${who} reacted ${p.emoji}` });
+      build = (who) => ({ title: `${who} reacted ${emoji}` });
     } else {
       return;
     }
@@ -692,7 +697,7 @@ export async function handleGroupMessageNotify(db, payload, senderPubkey, manage
   if (full && payload.sender_crow_id && payload.sender_crow_id !== full.crow_id) {
     try { console.warn(`[sharing] group_message sender_crow_id does not match the signer; attributed to ${full.crow_id}`); } catch {}
   }
-  const group = group_name || "Group";
+  const group = notifName(group_name) || "Group";
   try {
     await notify(db, {
       title: full ? `[${group}] ${full.display_name || full.crow_id}` : `[${group}] Someone ${NOT_IN_CONTACTS}`,
@@ -713,7 +718,7 @@ export async function handleGroupMessageNotify(db, payload, senderPubkey, manage
         sql: `INSERT INTO messages (contact_id, nostr_event_id, content, direction, is_read, created_at)
               VALUES (?, ?, ?, 'received', 0, datetime('now'))`,
         // The random tail keeps two items in one millisecond from colliding on the unique id.
-        args: [full.id, `grp_${Date.now()}_${randomBytes(4).toString("hex")}`, `[${group_name}] ${msgText}`],
+        args: [full.id, `grp_${Date.now()}_${randomBytes(4).toString("hex")}`, `[${group}] ${msgText}`],
       });
     }
   } catch {}
@@ -779,10 +784,7 @@ export async function initSharingRuntime(managers, helpers) {
   // once only. Never rejects; the timer never holds the process open.
   const advertDelayMs = Number.isFinite(helpers?.bindingAdvertDelayMs) ? helpers.bindingAdvertDelayMs : 30_000;
   Promise.resolve(receiveStarted).then(() => {
-    const t = setTimeout(() => {
-      advertiseBindingToContacts(db, nostrManager, localIdOf(managers)).catch(() => {});
-    }, advertDelayMs);
-    t.unref?.();
+    scheduleBindingAdverts(db, nostrManager, () => localIdOf(managers), { delayMs: advertDelayMs });
   }).catch(() => {});
 
   // 2026-09-08 §5: with the bird as profile picture, a hatch or an activation
