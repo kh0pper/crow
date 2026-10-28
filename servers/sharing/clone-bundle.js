@@ -52,8 +52,12 @@ export function createCloneBundleHelpers(ctx) {
       args: [projectId],
     })).rows.map((r) => withoutProvenance(r, "research_sources"));
 
+    // A note withdrawn here is not part of what the project claims, so it does not ship (nor does
+    // the audit row of its withdrawal, below). A pre-0015 DB has no withdrawn_at: every note is live.
+    const hasWithdrawn = (await db.execute({ sql: "PRAGMA table_info(research_notes)" }))
+      .rows.some((c) => c.name === "withdrawn_at");
     const notes = (await db.execute({
-      sql: `SELECT * FROM research_notes WHERE project_id = ?`,
+      sql: `SELECT * FROM research_notes WHERE project_id = ?${hasWithdrawn ? " AND withdrawn_at IS NULL" : ""}`,
       args: [projectId],
     })).rows.map((r) => withoutProvenance(r, "research_notes"));
 
@@ -65,7 +69,7 @@ export function createCloneBundleHelpers(ctx) {
     const auditLog = (await db.execute({
       sql: `SELECT actor_type, actor_id, action, target, payload, created_at
               FROM project_audit_log
-             WHERE project_id = ?
+             WHERE project_id = ? AND action != 'note.withdraw'
              ORDER BY created_at ASC`,
       args: [projectId],
     })).rows;

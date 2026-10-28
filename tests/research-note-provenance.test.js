@@ -108,8 +108,8 @@ test("a misquote is flagged", async () => {
   const r = await addNote({ content: "will meet every Friday at dawn", note_type: "quote", provenance: "fetched", source_id: id });
   assert.equal(noteRow(r).quote_found, 0);
   assert.ok(text(r).includes(`WARNING: this quote is NOT on the page Crow fetched (source #${id})`), text(r));
-  // the same advice as the research-pipeline skill: the note can't be fixed, so the owner hears of it
-  assert.ok(text(r).includes("Do not present it as a quote. If you need the exact words, copy them character for character in a new note. This note can't be removed, so tell the owner if it blocks verification."), text(r));
+  // the same advice as the research-pipeline skill: the note can't be fixed, so it is withdrawn
+  assert.ok(text(r).includes("Do not present it as a quote. If you need the exact words, copy them character for character in a new note, and withdraw this one with crow_withdraw_note so it does not block verification."), text(r));
   assert.ok(!text(r).includes("Fix the wording"), text(r));
 });
 

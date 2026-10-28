@@ -69,7 +69,8 @@ export function resolveCallActor(base, extra) {
   const m = metaActor(extra);
   if (m !== undefined && m !== null) {
     if (m && m.kind === "bot" && m.id !== undefined && m.id !== null && String(m.id) !== "") {
-      return { kind: "bot", id: String(m.id) };
+      const id = String(m.id);
+      return ACTOR_ID_RE.test(id) ? { kind: "bot", id } : UNKNOWN;
     }
     return UNKNOWN;
   }

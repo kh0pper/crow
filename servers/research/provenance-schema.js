@@ -36,12 +36,24 @@ export const PROVENANCE_COLUMNS = [
   { table: "research_notes", column: "locator", ddl: "TEXT", backfill: null },
 ];
 
-// A copy of a research_sources / research_notes row without its 0013 columns: fetch facts and
-// note provenance are this instance's own judgment of its copy of a page (and fetched_text can be
-// 200k chars), so no share path ever sends them. A no-op for any other table.
+// Note authorship and withdrawal (migration 0015; init-db applies the same specs right after the
+// provenance block). Local-only like the provenance columns: created_by names a local actor
+// ("owner", "bot:<id>") and a peer's value could name an unrelated local bot; a withdrawal is this
+// instance's judgment of its own copy of a note. No back-fill: a note written before 0015 has no
+// recorded author, and nothing is withdrawn until someone withdraws it.
+export const NOTE_WITHDRAWAL_COLUMNS = [
+  { table: "research_notes", column: "created_by", ddl: "TEXT", backfill: null },
+  { table: "research_notes", column: "withdrawn_at", ddl: "TEXT", backfill: null },
+  { table: "research_notes", column: "withdrawn_by", ddl: "TEXT", backfill: null },
+  { table: "research_notes", column: "withdrawn_reason", ddl: "TEXT", backfill: null },
+];
+
+// A copy of a research_sources / research_notes row without its 0013 or 0015 columns: fetch facts,
+// note provenance, authorship and withdrawal are this instance's own judgment of its copy (and
+// fetched_text can be 200k chars), so no share path ever sends them. A no-op for any other table.
 export function withoutProvenance(row, table) {
   const copy = { ...row };
-  for (const { table: t, column } of PROVENANCE_COLUMNS) {
+  for (const { table: t, column } of [...PROVENANCE_COLUMNS, ...NOTE_WITHDRAWAL_COLUMNS]) {
     if (t === table) delete copy[column];
   }
   return copy;

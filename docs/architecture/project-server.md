@@ -155,6 +155,19 @@ Add a note, optionally linked to a project or source.
 | `title` | string | No | Note title |
 | `tags` | string | No | Comma-separated tags |
 
+### crow_withdraw_note
+
+Withdraw a note that is wrong, such as a quote that is not on the page. The note is kept and marked withdrawn (when, by whom, and why); it no longer counts toward verification, quote counts or note counts. It cannot be undone, and it is audited as `note.withdraw`.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `id` | number | Yes | Note ID |
+| `reason` | string | Yes | Why the note is wrong (1 to 500 characters, kept on record) |
+
+Who may call it: the owner can withdraw any note. A bot can withdraw only a note it wrote. Peer and unknown callers never can, and a note with no recorded author counts as the owner's. The caller also needs `write_notes` on the note's project.
+
+The author is recorded by `crow_add_note` as `created_by`. For a bot that is the bot id the bot states about itself in its call; Crow accepts it as given, so it keeps well-behaved bots from withdrawing each other's notes but is not a security boundary against a bot that lies. Withdrawing the last live quote note of a source clears a `quotes_checked` verification. The withdrawal columns stay local to each instance: they are never synced to peers, and inbound notes cannot set them.
+
 ### crow_search_notes
 
 Search notes by content.
@@ -253,6 +266,8 @@ A source is **citable** when its status is `fetched`, `fetched_no_text` or `lega
 ### Note provenance
 
 Quote and summary notes state where the claim comes from: `fetched` (backed by a page Crow opened), `snippet` (only a search-result snippet, so not citable in prose yet) or `derived` (the writer's own reasoning). Analysis and insight notes default to `derived`. A quote note on a fetched source is checked against the page text and records `quote_found` (1, 0, or NULL when the check could not decide) and a `locator`. Provenance, `quote_found` and `locator` stay local: they are in `EXCLUDED_COLUMNS` (and dropped from inbound rows) in `servers/sharing/instance-sync.js`, because each is a judgment about this instance's own copy of the page.
+
+A wrong quote note is withdrawn with `crow_withdraw_note` rather than edited or deleted. A withdrawn note stays on record but is skipped by verification, by `crow_verify_source` quote checks and by the Projects panel's note and quote counts and notes list.
 
 ### Verifying a source
 
