@@ -219,7 +219,12 @@ test("async continuations are guarded — a fast back button must not cross sess
   // gate (dictation.js): a stream resolving after the session changed.
   // 35 with the history load's one retry timer (queue item 23a), which
   // re-checks the session before it refetches.
-  assert.equal(guards, 35, "expected exactly 35 identity guards, found " + guards);
+  // 38 with the P5 card offer (card-chip.js): the decide continuation and the
+  // offers and card-chip list continuations.
+  // 43 with the P5 review chips (card-chip.js, Task 5.4): the Accept, Ask for
+  // a change and decision-answer continuations, and the change message's
+  // send continuation (its success and failure branches).
+  assert.equal(guards, 43, "expected exactly 43 identity guards, found " + guards);
 });
 
 test("the emitted script never assigns to an innerHTML-class sink", async () => {

@@ -2,6 +2,7 @@ import { tJs } from "../shared/i18n.js";
 import { PERCH_SPLIT_MIN_WIDTH } from "./css.js";
 import { perchPhoneCardJs } from "./phone-card.js";
 import { perchArtifactCardJs } from "./artifact-card.js";
+import { perchCardChipJs } from "./card-chip.js";
 import { perchDictationJs } from "./dictation.js";
 import { textSizeRuntimeJs, TEXT_SIZES, TEXT_SIZE_DEFAULT } from "../shared/text-size.js";
 
@@ -1505,7 +1506,7 @@ export function perchHubJs(lang = "en") {
     toolChips={};                         /* Wave 3: the chip index dies with the transcript */
     fileSeen={};                          /* PR-E: same seam for the card dedupe */
     resetPhoneCards();
-    resetArtifactCards();
+    resetArtifactCards(); resetCardChip();
     resetControls();                        /* the PREVIOUS session's picker must not bleed in */
     draftRestore(sid);                      /* nor its composer text: this session's own draft, or empty */
     var known=rowIndex[sid];
@@ -1649,6 +1650,7 @@ export function perchHubJs(lang = "en") {
     };
     on('state',function(d){
       setTurnInFlight(turnFlagFor(d));
+      cardTurnState(d.state);                 /* P5: a turn ending may mean a card offer or a lane move */
       /* An expired card leaves once the engine drops it (the next message). */
       if(askShown&&askShown.expired&&!d.pendingUi) renderAsk(null);
       el('perch-state').textContent=d.state||'';
@@ -1708,6 +1710,7 @@ export function perchHubJs(lang = "en") {
         appendToolChip(d);            /* Wave 3: the chat gets the live chip */
       } else if(d.phase==='end'){
         finishToolChip(d);
+        if(String(d.name||'').indexOf('board_offer_card')>=0&&current.sid) loadCardOffers(current.sid);   /* P5 */
       }
     });
     on('log',function(d){ if(d.text) appendActivity(d.text); });
@@ -1922,7 +1925,7 @@ export function perchHubJs(lang = "en") {
     toolChips={};                    /* the chips just died with the transcript; a stale index would write into detached DOM */
     fileSeen={};
     resetPhoneCards();
-    resetArtifactCards();
+    resetArtifactCards(); resetCardChip();
     histSettled=false; histBuf=[];
     seamEchoes=[];                   /* their rows died with the transcript */
     loadHistory(botId,sid);
@@ -2166,6 +2169,8 @@ export function perchHubJs(lang = "en") {
     if(current.sid) replayUnsent(current.sid);
     loadPhoneCards(current.sid);   /* spec 2026-10-01: this chat's call cards, after the transcript and unsent notes */
     loadArtifactCards(current.sid);   /* spec v1.6: this chat's artifact cards, same discipline */
+    loadCardOffers(current.sid);   /* P5: pending offers and the card-made notes */
+    loadCardChip(current.sid);     /* P5: the card this chat is linked to */
   }
 
   /* Track 3 Task 4: session controls — model, thinking level, permission
@@ -2400,7 +2405,7 @@ export function perchHubJs(lang = "en") {
     planState=null; renderPlan();
     toolChips={}; fileSeen={}; commandsCache=null; hideCmdMenu();
     resetPhoneCards();
-    resetArtifactCards();
+    resetArtifactCards(); resetCardChip();
     resetFacts();
     /* Composer dictation: a switch drops the recording and frees the mic;
        each open re-probes the server (dictation.js). */
@@ -3504,6 +3509,7 @@ export function perchHubJs(lang = "en") {
 ${perchPhoneCardJs(lang)}
 
 ${perchArtifactCardJs(lang)}
+${perchCardChipJs(lang)}
 
 ${perchDictationJs(lang)}
 

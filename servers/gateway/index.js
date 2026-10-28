@@ -271,6 +271,18 @@ try {
   console.warn("[shell] could not stamp shell_since:", e.message);
 }
 
+// Card offers (redesign P5): settle or reopen any accept a crash left "accepted, no card", once
+// before listen (offer-service.js runOfferSweep; post-listen repeats it every 10 minutes). It
+// opens tasks.db only when such an offer exists, and a busy store skips this pass.
+try {
+  const { runOfferSweep } = await import("./board/offer-service.js");
+  const { tasksDbPath: _tdpOffers } = await import("../../scripts/pi-bots/instance-paths.mjs");
+  const r = await runOfferSweep(() => createDbClient(), () => createDbClient(_tdpOffers()));
+  if (r.settled || r.reopened || r.skipped) console.log(`[card-offers] boot sweep: ${JSON.stringify(r)}`);
+} catch (e) {
+  console.warn("[card-offers] boot sweep skipped:", e.message);
+}
+
 // Clean up old audit log entries (90-day retention)
 try {
   const _cleanupDb = createDbClient();

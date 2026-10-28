@@ -475,7 +475,7 @@ test("S5: resolveActor fails closed without a verifier; OAuth callers stay 'sess
   const h = { "x-crow-actor-kind": "bot", "x-crow-actor-id": "hank", "x-crow-actor-sig": signBoardActor({ botId: "hank" }) };
   assert.deepEqual(resolveActor(extra(h)), { kind: "bot", id: null, jobId: null }, "no verifier → unattributed");
   assert.deepEqual(resolveActor(extra(h), () => { throw new Error("boom"); }), { kind: "bot", id: null, jobId: null }, "throwing verifier → unattributed");
-  assert.deepEqual(resolveActor(extra(h), verifyBoardActorSig), { kind: "bot", id: "hank", jobId: null });
+  assert.deepEqual(resolveActor(extra(h), verifyBoardActorSig), { kind: "bot", id: "hank", jobId: null, thread: null });
   assert.deepEqual(resolveActor({ authInfo: { clientId: "some-oauth-client" }, requestInfo: { headers: h } }, verifyBoardActorSig),
     { kind: "session", id: null, jobId: null }, "headers never honoured off the token rail");
   assert.deepEqual(resolveActor(extra({}, "board"), verifyBoardActorSig), { kind: "bot", id: null, jobId: null });

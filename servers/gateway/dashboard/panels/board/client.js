@@ -140,7 +140,9 @@ function laneTabsJs() {
  * 409 confirm_failure, the confirm dialog opens (No focused), and Yes sends
  * the same move again with accept_failure: true; No leaves the card as it is.
  * The face's Accept is the same route (to Done); its Reject is the classic
- * board's decide route. CSRF rides on layout.js's fetch wrapper.
+ * board's decide route, carrying the newest result the card showed
+ * (seen_result_id), so a newer result makes it a 409 and a re-render.
+ * CSRF rides on layout.js's fetch wrapper.
  *
  * NOTE: template-literal code: never use a backtick inside it.
  */
@@ -277,7 +279,7 @@ function laneMovesJs() {
     if(!li||!box||busy) return;
     if(ra.getAttribute('data-result-action')==='accept'){ send(li,'done'); return; }
     busy=true; say('');
-    post('/dashboard/bot-board-api/card/'+encodeURIComponent(li.getAttribute('data-card'))+'/result/'+encodeURIComponent(box.getAttribute('data-result-id'))+'/decide',{decision:'rejected'})
+    post('/dashboard/bot-board-api/card/'+encodeURIComponent(li.getAttribute('data-card'))+'/result/'+encodeURIComponent(box.getAttribute('data-result-id'))+'/decide',{decision:'rejected',seen_result_id:seenOf(li).rid})
       .then(function(r){
         if(r.status===200||r.status===409){ rerender(); return; }
         busy=false; say(reasons.failed);

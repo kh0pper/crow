@@ -71,6 +71,7 @@ import { reportResult, decideResult, listResults } from "./board/result-service.
 import { askDecision, notifyBatch } from "./board/decision-service.js";
 import { isEnabledBot } from "./board/bot-lookup.js";
 import { isVoiceBotId } from "../shared/voice-bot.js";
+import { offerCard } from "./board/offer-service.js";
 
 const TASKS_DB = tasksDbPath();
 
@@ -114,8 +115,11 @@ function headerValue(headers, key) {
 const UNATTRIBUTED_BOT = Object.freeze({ kind: "bot", id: null, jobId: null });
 
 /** @param verifyActor ({botId, jobId, sig}) => boolean — the gateway injects
- *  actor-sig.mjs's verifyBoardActorSig. Absent → fail closed (unattributed). */
-export function resolveActor(extra, verifyActor) {
+ *  actor-sig.mjs's verifyBoardActorSig. Absent → fail closed (unattributed).
+ *  @param verifyThread ({botId, threadId, gatewayType, sig}) => boolean — the
+ *  board-thread verifier. A verified bot actor gets `thread: {id, gateway}`
+ *  only when that signature verifies for the SAME bot id, else `thread: null`. */
+export function resolveActor(extra, verifyActor, verifyThread) {
   const auth = extra?.authInfo;
   const tokenAuthed = auth?.clientId === "local-mcp";
   if (tokenAuthed) {
@@ -127,7 +131,19 @@ export function resolveActor(extra, verifyActor) {
       const sig = headerValue(headers, "x-crow-actor-sig");
       let ok = false;
       try { ok = typeof verifyActor === "function" && !!id && !!sig && verifyActor({ botId: id, jobId, sig }) === true; } catch { ok = false; }
-      return ok ? { kind: "bot", id: id.trim(), jobId: jobId == null || jobId.trim() === "" ? null : jobId.trim() } : { ...UNATTRIBUTED_BOT };
+      if (!ok) return { ...UNATTRIBUTED_BOT };
+      let thread = null;
+      const tid = headerValue(headers, "x-crow-actor-thread");
+      const gw = headerValue(headers, "x-crow-actor-gateway");
+      const tsig = headerValue(headers, "x-crow-actor-thread-sig");
+      if (tid && tid.trim() && tsig && typeof verifyThread === "function") {
+        try {
+          if (verifyThread({ botId: id, threadId: tid, gatewayType: gw, sig: tsig }) === true) {
+            thread = { id: tid.trim(), gateway: gw == null || gw.trim() === "" ? null : gw.trim() };
+          }
+        } catch { thread = null; }
+      }
+      return { kind: "bot", id: id.trim(), jobId: jobId == null || jobId.trim() === "" ? null : jobId.trim(), thread };
     }
     if (auth?.extra?.tokenScope === "board") return { ...UNATTRIBUTED_BOT };
   }
@@ -296,7 +312,8 @@ export function createBoardMcpServer(options = {}) {
   const cdb = options.cdb || createDbClient();
   // S5: every handler resolves its actor through the injected verifier.
   const verifyActor = options.verifyActor;
-  const resolveActor = (extra) => resolveActorWith(extra, verifyActor);
+  const verifyThread = options.verifyThread;
+  const resolveActor = (extra) => resolveActorWith(extra, verifyActor, verifyThread);
 
   const server = new McpServer(
     { name: "crow-board", version: "0.1.0" },
@@ -493,8 +510,14 @@ export function createBoardMcpServer(options = {}) {
         options: z.array(decisionOption),
       }),
     },
-    async ({ project_id, title, tags, decision }, extra) =>
-      askDecision(tdb, cdb, { projectId: project_id, title, tags, decision }, resolveActor(extra)));
+    async ({ project_id, title, tags, decision }, extra) => {
+      // Redesign P5: the chat a decision came from is the signed Perch thread
+      // (Task 5.1's actor.thread), never a tool argument, so a bot cannot
+      // put its question in a chat it is not in.
+      const actor = resolveActor(extra);
+      const source = actor.thread && actor.thread.gateway === "perch" ? { thread_id: actor.thread.id } : undefined;
+      return askDecision(tdb, cdb, { projectId: project_id, title, tags, decision, source }, actor);
+    });
 
   tool(server, "board_notify_decisions",
     "Send the one grouped push for a batch's open decision cards. Pushes at most once per batch (once any card in it was notified, later calls push nothing, and cards added later show on the board only), so repeated calls are harmless; call it once at the end of the batch. Batches are per caller: the name you pass is looked up in your own namespace, so you can only notify cards you asked; at most 3 pushes per caller per UTC day (429 push_limit).",
@@ -551,6 +574,29 @@ export function createBoardMcpServer(options = {}) {
     "Compute a summary of current board state without storing it: card counts by status, due-within-7-days count, and awaiting-review results count.",
     {},
     () => briefingSnapshotImpl(tdb));
+
+  // Redesign P5: a card OFFER, never a card. Only a bot's own signed Perch thread can offer
+  // (Task 5.1's actor.thread); the offer names the bot's own board project and waits in the chat
+  // for the operator's one tap (POST /dashboard/perch-api/offers/:id/decide makes the card).
+  tool(server, "board_offer_card",
+    "Offer the operator a card for your own board, shown in this Perch chat with an Accept button. Creates no card: the operator's tap makes it (you hear about it on your next turn). Works only in a Perch chat, and only when you have a board. The same title offered again while it is still waiting returns that offer (duplicate:true); at most 3 offers wait per chat.",
+    { title: z.string().min(1).max(500).describe("The card's title, 1-500 characters") },
+    async ({ title }, extra) => {
+      const actor = resolveActor(extra);
+      if (actor.kind !== "bot" || !actor.id || !actor.thread || actor.thread.gateway !== "perch") {
+        throw fail("Offers work only in a Perch chat", "not_perch", 403);
+      }
+      let r;
+      try {
+        r = await offerCard(cdb, { botId: actor.id, threadId: actor.thread.id, title });
+      } catch (e) {
+        if (e && e.code === "no_board") throw fail("This bot has no board to put a card on", "no_board", 409);
+        if (e && e.code === "not_migrated") throw fail("Card offers are not available until the store is migrated", "not_migrated", 503);
+        throw e;
+      }
+      const p = (await cdb.execute({ sql: "SELECT name FROM project_spaces WHERE id=?", args: [r.projectId] })).rows[0];
+      return { offered: true, offer_id: r.offerId, project: { id: r.projectId, name: p ? String(p.name) : null }, duplicate: r.duplicate };
+    });
 
   return server;
 }

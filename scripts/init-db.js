@@ -2780,6 +2780,28 @@ await initTable("bot_sessions thread index", `
   CREATE INDEX IF NOT EXISTS idx_bot_sessions_thread ON bot_sessions(gateway_thread_id, kind, id);
 `);
 
+// card_offers: a card a bot offered in a Perch chat, waiting for the operator's one tap (redesign
+// P5; servers/gateway/board/offer-service.js). The card goes on the bot's own board project.
+// Same DDL as CARD_OFFERS_DDL in scripts/migrations/0011-card-offers.mjs — one shape, two rails;
+// additive, no SCHEMA_GENERATION bump.
+await initTable("card_offers table", `
+  CREATE TABLE IF NOT EXISTS card_offers (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id            TEXT NOT NULL,
+    thread_id         TEXT NOT NULL,
+    title             TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 500),
+    project_id        INTEGER NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','accepted','declined')),
+    card_id           INTEGER,
+    note_delivered_at TEXT,
+    claim_token       TEXT,
+    lease_until       TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    decided_at        TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_card_offers_thread ON card_offers(thread_id, status);
+`);
+
 // bot_sessions.control CHECK widen, 'run'/'stop' -> 'run'/'stop'/'interrupted'
 // (Track 3 Task 7): stopAll() parks a session that was genuinely mid-turn
 // when the gateway shut down with control='interrupted' instead of 'run', so

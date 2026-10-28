@@ -41,6 +41,7 @@ import {
   statSync,
   lstatSync,
   constants as fsConstants,
+  existsSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
@@ -53,16 +54,23 @@ import { perchAttached } from "../shared/perch-attached.js";
 import { getInteractiveEngine } from "../perch-interactive.js";
 import { cwdList, cwdRead } from "../perch-files.js";
 import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
-import { updateCard, createCard } from "../board/card-service.js";
+import { updateCard, createCard, getCard } from "../board/card-service.js";
 import { lockState } from "./board-lock.js";
-import { boardState } from "../dashboard/shared/bot-display.js";
-import { assertProjectExists, appendAudit } from "../../shared/project-acl.js";
+import { appendAudit } from "../../shared/project-acl.js";
 import { resolveBoardDef, isTerminal } from "./board-defs.js";
-import { ensureItem, assertLiveProject } from "../../shared/shell-items.js";
+import { ensureItem, assertLiveProject, threadCard } from "../../shared/shell-items.js";
+import { acceptResult, decideResult } from "../board/result-service.js";
+import { openDecisionsForThread } from "../board/decision-service.js";
+import { laneState } from "./shell-api.js";
+import { CONFIRM_OUTCOMES, openDecision } from "../dashboard/panels/board/lanes.js";
 import { annotateAvailability } from "../model-availability.js";
 import { providerModelListWarm, pickerModels, loadPiProviderNames, referencedModelKeys } from "../perch-model-catalog.js";
 import { renderBotMarkdown } from "../../blog/renderer.js";
-import { isVoiceBotId } from "../../shared/voice-bot.js";
+import { randomBytes } from "node:crypto";
+import {
+  loadBotRow, loadGiveTarget, getOffer, listOffers, claimOffer, renewLease, releaseClaim,
+  settleOffer, findOfferCard, recoverThread, claimOfferNotes, unclaimOfferNotes, offerTag,
+} from "../board/offer-service.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -78,6 +86,17 @@ const TASKS_DB = tasksDbPath();
 /** Every provenance write this router makes is an operator action from the
  * dashboard — same shape as bot-board-api.js's own DASHBOARD_ACTOR. */
 const DASHBOARD_ACTOR = { kind: "human", id: null, jobId: null };
+
+/** Accept / Ask for a change errors: 409 'already_decided' or 'stale' (anything else someone got
+ * to first: a newer result, an archive), 404 'not_found', 400 'bad_request'. */
+function resultRouteError(res, err, what) {
+  if (err && err.http === 409) return jsonError(res, 409, err.code === "already_decided" ? "already_decided" : "stale");
+  if (err && err.http === 404) return jsonError(res, 404, "not_found");
+  if (err && err.http === 400) return jsonError(res, 400, "bad_request");
+  if (/no such table/i.test(String(err && err.message))) return jsonError(res, 503, "not_migrated");
+  console.warn("[perch-interactive-api] " + what + " failed:", err && err.message);
+  return jsonError(res, 500, what + " failed");
+}
 
 /** POST /interactive/:sid/message images: cap 3 × 2 MB post-decode. */
 const IMAGE_MESSAGE_CAP = 3;
@@ -262,14 +281,6 @@ function parseDef(row) {
   }
 }
 
-async function loadBotRow(db, botId) {
-  const { rows } = await db.execute({
-    sql: "SELECT bot_id, display_name, definition, enabled, project_id FROM pi_bot_defs WHERE bot_id=?",
-    args: [botId],
-  });
-  return rows[0] || null;
-}
-
 /**
  * The dispatch core — POST /bots/:id/dispatch and "Give to…" with start:true
  * both run THIS, so the two can never gate differently. Checks, in order:
@@ -333,24 +344,8 @@ async function dispatchCard(ctx, { row, getEng, botId, cardId, note, skipProvena
   return result;
 }
 
-/** "Give to…" target check: the bot exists and is enabled (else 400
- * bot_unavailable), and it has a board a card can go on — kanban/task-list
- * with a linked, live project (boardState() "on", the SAME predicate the
- * Bot Builder and the Bot Board render with, so the gate and the UI cannot
- * drift). Anything else — type none, no project, a custom tracker (a card
- * cannot go onto a tracker board), an archived or missing project — is 409
- * no_board. */
-async function loadGiveTarget(db, botId) {
-  const row = await loadBotRow(db, botId);
-  if (!row || !Number(row.enabled) || isVoiceBotId(row.bot_id)) throw routeFail("bot unavailable", "bot_unavailable", 400);
-  if (boardState(row).state !== "on") throw routeFail("bot has no board", "no_board", 409);
-  try {
-    await assertProjectExists(db, Number(row.project_id));
-  } catch {
-    throw routeFail("bot's board project is gone or archived", "no_board", 409);
-  }
-  return row;
-}
+// loadBotRow and loadGiveTarget ("Give to…" target check) live in board/offer-service.js, which
+// a card offer is validated by at offer time (the same rules, one copy).
 
 /** After a give: the response, and — only on an explicit boolean
  * start:true ("Start right away" defaults OFF) — the dispatch core. A start
@@ -400,6 +395,35 @@ function giveAudit(db, row, cardId, extra) {
     project_id: Number(row.project_id), actor_type: "local", action: "card_given",
     target: `card:${cardId}`, payload: { bot_id: String(row.bot_id), ...extra },
   });
+}
+
+/**
+ * A NEW task straight onto a bot's board: the core of POST /bots/:id/tasks, shared with the
+ * card-offer accept. loadGiveTarget (400 bot_unavailable / 409 no_board), then ONE createCard on
+ * the bot's project with its assigned_bot (one create row, the builtin gated autonomy), then one
+ * card_given audit row. `tdb` is the tasks client, or a getter called only once the bot passes
+ * (so a refused bot never opens the tasks store, as before). `audit` adds payload fields ahead
+ * of `created`. A failure after the create carries `err.cardId`, so a caller can tell a card was
+ * made.
+ */
+export async function createTaskForBot(db, tdb, botId, { title, tags = null, audit = {} } = {}) {
+  const row = await loadGiveTarget(db, botId);
+  const t = typeof tdb === "function" ? tdb() : tdb;
+  const { id: cardId } = await createCard(t, { title, project_id: Number(row.project_id), assigned_bot: botId, tags }, DASHBOARD_ACTOR);
+  try {
+    await giveAudit(db, row, cardId, { ...audit, created: true });
+  } catch (err) {
+    throw Object.assign(err, { cardId });
+  }
+  return { cardId, row };
+}
+
+// Test-only barrier (the _setWorkspaceServeBarrierForTest idiom): an async function the offer
+// accept awaits right after its claim and before its lease check, so a test can hold an accept
+// mid-flight across fake time. Production default null: never entered.
+let _offerAcceptBarrier = null;
+export function _setOfferAcceptBarrierForTest(fnOrNull) {
+  _offerAcceptBarrier = typeof fnOrNull === "function" ? fnOrNull : null;
 }
 
 /**
@@ -682,12 +706,33 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     // the NEXT message (see normalizeMessageImages' doc — pi's own
     // ImageContent shape, threaded verbatim to promptTurn).
     const images = normalizeMessageImages(body.images);
+    // Card offers (redesign P5): the bot learns of a card made from its offer from ONE fixed
+    // gateway line ahead of its next turn's prompt, never bot-chosen text. Each offer's line is
+    // claimed (note_delivered_at) before it is prefixed, so it goes out once; a turn that never
+    // started hands the claim back for the next message. A blank message is left blank, so the
+    // engine still refuses it. Best effort: a store error here never blocks the message.
+    let notes = { lines: [], claims: [] };
+    let ndb = null;
+    if (message.trim()) {
+      try {
+        ndb = createDbClient();
+        notes = await claimOfferNotes(ndb, sid);
+      } catch (e) {
+        console.warn("[perch-interactive-api] offer note claim failed:", e.message);
+      }
+    }
     try {
       const eng = resolveEngine();
-      const result = await eng.message(sid, message, images);
+      const text = notes.lines.length ? notes.lines.join("\n") + "\n\n" + message : message;
+      const result = await eng.message(sid, text, images);
       res.status(202).json({ turnId: result.turnId });
     } catch (err) {
+      if (notes.claims.length) {
+        try { await unclaimOfferNotes(ndb, notes.claims); } catch (e) { console.warn("[perch-interactive-api] offer note unclaim failed:", e.message); }
+      }
       mapEngineError(res, err);
+    } finally {
+      if (ndb) { try { ndb.close(); } catch { /* already closed */ } }
     }
   });
 
@@ -926,16 +971,260 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     const db = createDbClient();
     const ctx = { tdb: null };
     try {
-      const row = await loadGiveTarget(db, botId);
-      ctx.tdb = createDbClient(TASKS_DB);
-      const { id: cardId } = await createCard(ctx.tdb, { title, project_id: Number(row.project_id), assigned_bot: botId }, DASHBOARD_ACTOR);
-      await giveAudit(db, row, cardId, { start: body.start === true, created: true });
+      const { cardId, row } = await createTaskForBot(db, () => (ctx.tdb = createDbClient(TASKS_DB)), botId,
+        { title, audit: { start: body.start === true } });
       res.json(await startAfterGive(ctx, { row, getEng: resolveEngine, botId, cardId, start: body.start, note }));
     } catch (err) {
       mapEngineError(res, err);
     } finally {
       try { db.close(); } catch { /* already closed */ }
       if (ctx.tdb) { try { ctx.tdb.close(); } catch { /* already closed */ } }
+    }
+  });
+
+  // ---- GET /interactive/:sid/offers — this chat's card offers (redesign P5) ----
+  // Before answering, any of this thread's offers left "accepted, no card" (a crash between the
+  // create and the settle) goes through recoverOffer: settled to its tagged card, or reopened once
+  // its lease expired. A recovery that cannot run (tasks.db busy) never blocks the read.
+  router.get(P + "/interactive/:sid/offers", async (req, res) => {
+    const sid = String(req.params.sid);
+    const db = createDbClient();
+    let tdb = null;
+    try {
+      try {
+        // tasks.db opens only when this thread has a stranded offer (runOfferSweep's rule).
+        tdb = await recoverThread(db, () => (tdb = createDbClient(TASKS_DB)), sid);
+      } catch (e) {
+        console.warn("[perch-interactive-api] offer recovery skipped:", e.message);
+      }
+      res.json({ offers: await listOffers(db, sid) });
+    } catch (err) {
+      mapEngineError(res, err);
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+      if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
+    }
+  });
+
+  // ---- POST /offers/:id/decide — the operator's one tap on a card offer ----
+  // Body {accept: boolean}. CSRF-railed (mounted after csrfMiddleware), session-gated.
+  // Decline: one guarded UPDATE. Accept, in order:
+  //   1. claim (pending -> accepted + claim_token + a 120 s lease; 409 already_decided on a
+  //      second tap or a second device);
+  //   1b. the lease check right before the create (0 rows = a sweep or another accept took it
+  //      over: 409 already_decided, nothing created);
+  //   2. createTaskForBot on the bot's own board, tagged crow-offer-<id>;
+  //   3. settle card_id;
+  //   4. link the chat (checkCardFree + attachCard writes bot_sessions.card_id) only when the chat
+  //      has no card yet and the session is attachable right now; otherwise skip it — the card is
+  //      made either way and the chat shows the card note (there is no link-on-wake).
+  // A failure in 2 with no card made puts the offer back to pending. A failure once a card exists
+  // never resets the offer (C8): recoverOffer settles it on the next read or sweep. Accepting
+  // starts no turn and sends no message.
+  router.post(P + "/offers/:id/decide", async (req, res) => {
+    const offerId = /^\d+$/.test(String(req.params.id)) ? Number(req.params.id) : null;
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    if (offerId == null || typeof body.accept !== "boolean") return jsonError(res, 400, "bad_request");
+
+    const db = createDbClient();
+    let tdb = null;
+    try {
+      const offer = await getOffer(db, offerId);
+      if (!offer) return jsonError(res, 404, "not_found");
+      if (!body.accept) {
+        await claimOffer(db, offerId, "declined");
+        return res.json({ ok: true, status: "declined" });
+      }
+
+      const token = randomBytes(16).toString("hex");
+      await claimOffer(db, offerId, "accepted", { claimToken: token });
+      if (_offerAcceptBarrier) await _offerAcceptBarrier({ offerId });
+      if (!(await renewLease(db, offerId, token))) return jsonError(res, 409, "already_decided");
+
+      tdb = createDbClient(TASKS_DB);
+      let cardId, projectId = Number(offer.project_id);
+      try {
+        const made = await createTaskForBot(db, tdb, String(offer.bot_id), { title: String(offer.title), tags: offerTag(offerId) });
+        cardId = made.cardId;
+        projectId = Number(made.row.project_id);
+      } catch (err) {
+        // Did a card get made before the failure (createCard's insert landed, then its mutation
+        // row or the audit failed)? Then it is this offer's card. If that can't be told (tasks.db
+        // unreadable), the offer stays accepted and the lease + recovery decide it.
+        let found;
+        if (Number.isInteger(err && err.cardId)) found = err.cardId;
+        else { try { found = await findOfferCard(tdb, offerId, offer.bot_id); } catch { found = undefined; } }
+        if (found == null) {
+          if (found === null) {
+            try { await releaseClaim(db, offerId, token); } catch (e) { console.warn("[perch-interactive-api] offer release failed:", e.message); }
+          }
+          return mapEngineError(res, err);
+        }
+        console.warn(`[perch-interactive-api] offer ${offerId}: card ${found} was made, then:`, err && err.message);
+        cardId = found;
+        try {
+          const r = (await tdb.execute({ sql: "SELECT project_id FROM tasks_items WHERE id=?", args: [cardId] })).rows[0];
+          if (r && r.project_id != null) projectId = Number(r.project_id);
+        } catch { /* keep the bot's project as the best answer */ }
+      }
+
+      try {
+        await settleOffer(db, offerId, cardId, projectId);
+      } catch (e) {
+        console.warn(`[perch-interactive-api] offer ${offerId}: settle failed (recovery will settle it):`, e.message);
+      }
+
+      let attached = false;
+      try {
+        // A chat that already has a card keeps it: accepting an offer never re-links the chat.
+        if ((await threadCard(db, String(offer.thread_id))) != null) throw Object.assign(new Error("chat already has a card"), { code: "has_card" });
+        const eng = resolveEngine();
+        await eng.checkCardFree(cardId, { excludeSessionId: String(offer.thread_id) });
+        await eng.attachCard(String(offer.thread_id), cardId);
+        attached = true;
+      } catch (e) {
+        const code = e && e.code;
+        if (code !== "no_such_session" && code !== "session_stopped" && code !== "has_card") {
+          console.warn(`[perch-interactive-api] offer ${offerId}: card ${cardId} made, chat not linked:`, (e && e.message) || e);
+        }
+      }
+      res.json({ ok: true, status: "accepted", cardId, projectId, attached });
+    } catch (err) {
+      mapEngineError(res, err);
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+      if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
+    }
+  });
+
+  // ---- GET /interactive/:sid/card — this chat's card, its open result, its questions (P5) ----
+  //   { card: { id, title, status, lane, projectId, botId } | null,
+  //     result: { id, outcome, summaryMd } | null,       the card's NEWEST result, only while recorded
+  //     decisions: [{ cardId, question, options: [{ index, label, consequence, recommended }] }] }
+  // `card` is threadCard's card with the lane the Board computes (shell-api laneState); a missing or
+  // archived card is null. `decisions` are the open decision cards asked FROM this chat
+  // ($.decision.source.thread_id, written only from the signed actor.thread), newest 3.
+  // The bot whose board shows the card: the card's assigned_bot, else this chat's own bot (the
+  // classic board resolves a card only on the selected bot's board; panels/board/html.js detailsHref).
+  async function cardBotId(db, cardRow, sid) {
+    if (cardRow.assigned_bot) return String(cardRow.assigned_bot);
+    try {
+      const r = (await db.execute({
+        sql: "SELECT bot_id FROM bot_sessions WHERE gateway_thread_id=? AND kind='perch-live' ORDER BY id DESC LIMIT 1",
+        args: [String(sid)],
+      })).rows[0];
+      return r && r.bot_id ? String(r.bot_id) : null;
+    } catch { return null; }
+  }
+
+  router.get(P + "/interactive/:sid/card", async (req, res) => {
+    const sid = String(req.params.sid);
+    const db = createDbClient();
+    let tdb = null;
+    try {
+      const cardId = await threadCard(db, sid);
+      let card = null, result = null, decisions = [];
+      if (existsSync(TASKS_DB)) {
+        tdb = createDbClient(TASKS_DB);
+        if (cardId != null) {
+          const st = await laneState(tdb, db, cardId);
+          if (st) {
+            card = {
+              id: Number(st.card.id), title: String(st.card.title ?? ""), status: String(st.card.status),
+              lane: st.lane, projectId: st.card.project_id == null ? null : Number(st.card.project_id),
+              botId: await cardBotId(db, st.card, sid),
+            };
+            if (st.latestResult && st.latestResult.status === "recorded") {
+              const r = (await tdb.execute({
+                sql: "SELECT id, outcome, summary_md FROM board_results WHERE id=? AND status='recorded'",
+                args: [st.latestResult.id],
+              })).rows[0];
+              if (r) result = { id: Number(r.id), outcome: String(r.outcome), summaryMd: String(r.summary_md ?? "") };
+            }
+          }
+        }
+        try {
+          decisions = await openDecisionsForThread(tdb, sid, { limit: 3 });
+        } catch (e) {
+          if (!/no such (table|column)/i.test(String(e && e.message))) throw e;
+        }
+      }
+      res.json({ card, result, decisions });
+    } catch (err) {
+      mapEngineError(res, err);
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+      if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
+    }
+  });
+
+  // ---- POST /cards/:id/accept — Accept in the chat: approve the result AND close the card ----
+  // Body { result_id, accept_failure? }. result_id is the result the chat SHOWED: acceptResult
+  // approves it only while it is the card's newest (newest-in-UPDATE), so a newer report is 409
+  // 'stale' and a second tap (or the classic board deciding first) is 409 'already_decided'.
+  // Ruling P16: a failure or partial result needs accept_failure: true (409 'confirm_failure'
+  // without it, nothing written), the lane route's rule. The outcome checked is the shown result's
+  // own, and that is the row the guarded write approves. An open decision on the card is 409
+  // 'answer_first' (Ruling P2, R-P5-7), nothing written.
+  router.post(P + "/cards/:id/accept", async (req, res) => {
+    const b = req.body && typeof req.body === "object" ? req.body : {};
+    if (!/^[1-9]\d*$/.test(String(req.params.id)) || !Number.isInteger(b.result_id) || b.result_id < 1) {
+      return jsonError(res, 400, "bad_request");
+    }
+    const id = Number(req.params.id);
+    if (!existsSync(TASKS_DB)) return jsonError(res, 404, "not_found");
+    let tdb, cdb;
+    try {
+      tdb = createDbClient(TASKS_DB);
+      cdb = createDbClient();
+      const row = (await tdb.execute({
+        sql: "SELECT outcome FROM board_results WHERE id=? AND item_id=?",
+        args: [b.result_id, id],
+      })).rows[0];
+      if (!row) return jsonError(res, 404, "not_found");
+      // Ruling P2 / R-P5-7: an open decision on the card is answered first, as on the Board.
+      const card = await getCard(tdb, id);
+      if (!card) return jsonError(res, 404, "not_found");
+      if (openDecision(card)) return jsonError(res, 409, "answer_first", { reason: "answer_first" });
+      if (CONFIRM_OUTCOMES.includes(String(row.outcome)) && b.accept_failure !== true) {
+        return jsonError(res, 409, "confirm_failure", { reason: "confirm_failure" });
+      }
+      const r = await acceptResult(tdb, cdb, id, b.result_id, DASHBOARD_ACTOR, "perch");
+      res.json({ ok: true, status: r.status, moved: r.moved === true });
+    } catch (err) {
+      resultRouteError(res, err, "accept");
+    } finally {
+      if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
+      if (cdb) { try { cdb.close(); } catch { /* already closed */ } }
+    }
+  });
+
+  // ---- POST /cards/:id/request-change — Ask for a change: reject the shown result, move nothing ----
+  // Body { result_id, text } (text 1-4000 characters). The same newest check as Accept, inside the
+  // guarded decide (newestOnly), then decided_via 'perch'. The card stays where it is. The client
+  // sends `text` to the bot itself, as the operator's own message in this chat.
+  router.post(P + "/cards/:id/request-change", async (req, res) => {
+    const b = req.body && typeof req.body === "object" ? req.body : {};
+    if (!/^[1-9]\d*$/.test(String(req.params.id)) || !Number.isInteger(b.result_id) || b.result_id < 1) {
+      return jsonError(res, 400, "bad_request");
+    }
+    if (typeof b.text !== "string" || !b.text.trim() || b.text.length > 4000) return jsonError(res, 400, "bad_request");
+    const id = Number(req.params.id);
+    if (!existsSync(TASKS_DB)) return jsonError(res, 404, "not_found");
+    let tdb;
+    try {
+      tdb = createDbClient(TASKS_DB);
+      const card = (await tdb.execute({ sql: "SELECT archived_at FROM tasks_items WHERE id=? AND board_id IS NULL", args: [id] })).rows[0];
+      if (!card) return jsonError(res, 404, "not_found");
+      if (card.archived_at != null) return jsonError(res, 409, "stale");
+      const row = (await tdb.execute({ sql: "SELECT id FROM board_results WHERE id=? AND item_id=?", args: [b.result_id, id] })).rows[0];
+      if (!row) return jsonError(res, 404, "not_found");
+      await decideResult(tdb, id, b.result_id, "rejected", DASHBOARD_ACTOR, "perch", { newestOnly: true });
+      res.json({ ok: true });
+    } catch (err) {
+      resultRouteError(res, err, "request-change");
+    } finally {
+      if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
     }
   });
 

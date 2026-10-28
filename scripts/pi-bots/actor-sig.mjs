@@ -138,6 +138,24 @@ export function verifyArtifactsActorSig({ botId, threadId, gatewayType, sig } = 
   return verifyActorSig({ kind: "artifacts", botId, threadId, gatewayType, sig });
 }
 
+// ---- board thread binding (redesign P5, Task 5.1) ----
+//
+// Lets /board/mcp learn which chat a call came from, so a card can be offered
+// back into that conversation. Kind "board-thread": distinct from phone
+// ("bot"), board and artifacts, so none of those signatures can be replayed
+// here and this one can't be replayed there. botId is bound, so another bot's
+// thread signature never attaches to this bot's calls.
+
+/** Signature for the board thread headers, or null without a key / bot id. */
+export function signBoardThreadActor({ botId, threadId, gatewayType } = {}) {
+  return signActor({ kind: "board-thread", botId, threadId, gatewayType });
+}
+
+/** Constant-time check of a presented board-thread signature. */
+export function verifyBoardThreadActorSig({ botId, threadId, gatewayType, sig } = {}) {
+  return verifyActorSig({ kind: "board-thread", botId, threadId, gatewayType, sig });
+}
+
 /** Child side of the handoff: read the hex key the gateway wrote on stdin.
  *  Resolves false (never throws) when stdin is empty or closed. */
 export async function readActorKeyFromStdin(stream = process.stdin, timeoutMs = 2000) {

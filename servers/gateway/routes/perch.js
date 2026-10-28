@@ -67,13 +67,17 @@ import { JOB_LOCK_STATUSES } from "./board-lock.js";
 import { renderBotMarkdown } from "../../blog/renderer.js";
 import { redactErrorText } from "../perch-error-text.js";
 import { stripTrailingDates } from "../../shared/relative-dates.js";
+import { stripOfferNotes } from "../board/offer-service.js";
 import { stripContextEcho } from "../voice/context-echo.js";
 import { CROW_VOICE_BOT_ID } from "../../shared/voice-bot.js";
 import { maskDeep } from "../../shared/secret-mask.js";
 import { activeProjects, parseScope, projectOfItems } from "../../shared/shell-items.js";
 
+/* Note: stripOfferNotes would also hide an identical note-shaped prefix the operator typed by hand (accepted). */
 /**
- * A user message as the operator typed it: without the [Dates] line the engine appended (perch-interactive.js).
+ * A user message as the operator typed it: without the [Dates] line the engine appended (perch-interactive.js),
+ * and without the leading card-offer note line(s) the message route prefixed (offer-service.js stripOfferNotes;
+ * only the first text part can carry them).
  * → { message, line } — line is the removed [Dates] line (null when there was none), so the replies of that turn
  * can be echo-guarded against it.
  */
@@ -86,14 +90,16 @@ function withoutDatesLine(message) {
     return t;
   };
   if (typeof c === "string") {
-    const t = strip(c);
+    const t = stripOfferNotes(strip(c));
     return { message: t === c ? message : { ...message, content: t }, line };
   }
   if (!Array.isArray(c)) return { message, line };
   let changed = false;
+  let firstText = true;
   const content = c.map((p) => {
     if (!p || p.type !== "text" || typeof p.text !== "string") return p;
-    const t = strip(p.text);
+    let t = strip(p.text);
+    if (firstText) { t = stripOfferNotes(t); firstText = false; }
     if (t === p.text) return p;
     changed = true;
     return { ...p, text: t };

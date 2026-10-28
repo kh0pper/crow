@@ -3430,6 +3430,17 @@ export const translations = {
   "perch.phoneOutcomeNotInService": { en: "Number not in service", es: "Número fuera de servicio" },
   "perch.phoneOutcomePhoneUnreachable": { en: "Phone not reachable", es: "Teléfono no disponible" },
   "perch.phoneOutcomeNotAdmissible": { en: "Could not start", es: "No se pudo iniciar" },
+  // ─── Chat card offers (P5) ───
+  "shell.offerTitle": { en: "Make this card?", es: "¿Creo esta tarjeta?" },
+  "shell.offerMake": { en: "Make card", es: "Crear tarjeta" },
+  "shell.offerNotNow": { en: "Not now", es: "Ahora no" },
+  "shell.cardMadeNote": { en: "Card #{n} made on {project}.", es: "Tarjeta #{n} creada en {project}." },
+  "shell.offerFailed": { en: "That did not work. Try again.", es: "No funcionó. Inténtalo de nuevo." },
+  "shell.accept": { en: "Accept", es: "Aceptar" },
+  "shell.askChange": { en: "Ask for a change", es: "Pedir un cambio" },
+  "shell.changePlaceholder": { en: "What should change?", es: "¿Qué debería cambiar?" },
+  "shell.other": { en: "Other…", es: "Otra…" },
+  "shell.sendAgain": { en: "Send again", es: "Enviar de nuevo" },
   // Crow Artifacts chat card (spec v1.6, chat-first PR-1)
   "perch.artifactLabel": { en: "Artifact", es: "Artefacto" },
   "perch.artifactOpenBeside": { en: "Open beside chat", es: "Abrir junto al chat" },

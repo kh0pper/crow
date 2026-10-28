@@ -153,3 +153,18 @@ test("a held card is never moved or cleared by a lane move, but a result can sti
 test("an unknown lane is refused", () => {
   assert.deepEqual(movePlan({ status: "pending" }, DEFAULT_BOARD_DEF, { locked: false, latestResult: null }, "nowhere"), { action: "refuse", reason: "bad_lane" });
 });
+
+test("a decision answered in chat leaves Needs you: the lane comes from the card's other rules", () => {
+  const def = DEFAULT_BOARD_DEF;
+  const src = { source: { thread_id: "perchlive-q" } };
+  const open = { status: "pending", data_json: decision(src) };
+  assert.equal(laneOf(open, def, { locked: false }), "needs_you");
+  const answered = decision({ ...src, chosen: { index: 0, label: "a" } });
+  assert.equal(laneOf({ status: "pending", data_json: answered }, def, { locked: false }), "up_next");
+  assert.equal(laneOf({ status: "pending", data_json: answered }, def, { locked: true }), "working");
+  assert.equal(laneOf({ status: "done", data_json: answered }, def, { locked: false }), "done", "#535 closes the card");
+  assert.equal(laneOf({ status: "pending", data_json: answered, latest_result_status: "recorded" }, def, { locked: false }), "needs_you",
+    "a result still open keeps it in Needs you");
+  assert.equal(movePlan({ status: "pending", data_json: answered }, def, { locked: false, latestResult: null }, "done").action, "move",
+    "no answer_first once answered");
+});

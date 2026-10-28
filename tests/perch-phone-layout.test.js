@@ -147,7 +147,8 @@ async function measure(w, h, expression, { css = "", ready = "!!document.querySe
     ws.send(JSON.stringify({ id: mine, method, params }));
   });
   const evalIn = async (expr) => {
-    const out = await send("Runtime.evaluate", { expression: expr, returnByValue: true });
+    // awaitPromise: the frame and font waits below return promises.
+    const out = await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true });
     if (out.exceptionDetails) throw new Error("page threw: " + JSON.stringify(out.exceptionDetails));
     return out.result.value;
   };
@@ -161,6 +162,13 @@ async function measure(w, h, expression, { css = "", ready = "!!document.querySe
       try { ok = await evalIn(ready); } catch { ok = false; }
     }
     assert.ok(ok, "the page never reached its ready state: " + ready);
+    // The layout loads Inter from Google Fonts with display=swap, so until the
+    // webfont arrives the card is set in the fallback face — about 23px shorter
+    // at 412x760, enough to uncover Send answer in the knock-out control below
+    // (a slow font response failed it). The card is on screen by now, so its
+    // font loads have started: wait for them to settle (loaded or failed),
+    // capped, so every run measures the same face.
+    await evalIn("Promise.race([document.fonts.ready.then(function(){return 1;}),new Promise(function(r){setTimeout(function(){r(0);},10000);})])");
     if (css) await evalIn(`(function(){var s=document.createElement('style');s.textContent=${JSON.stringify(css)};document.head.appendChild(s);return 1;})()`);
     // Two frames so a class toggle or the appended style has been laid out.
     await evalIn("new Promise(function(r){requestAnimationFrame(function(){requestAnimationFrame(function(){r(1);});});})");

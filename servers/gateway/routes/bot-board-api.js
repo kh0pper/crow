@@ -586,6 +586,11 @@ export default function botBoardApiRouter(dashboardAuth) {
   // Approve/reject only — NEVER moves the card (decideResult's own contract).
   // The drawer's "approve & mark done" button is two separate writes: this
   // route, then POST /card/:id/move — both recorded, no combined endpoint.
+  // Optional `seen_result_id` (redesign P5: the Board face's Reject sends the
+  // newest result it showed): it must be this result, and the decision then
+  // lands only while it is still the card's newest, else 409 code 'stale'
+  // (null, "the card showed no result", is stale too).
+  // A body without it (MCP, the classic drawer) is decided as before.
   router.post(P + "/card/:id/result/:resultId/decide", async (req, res) => {
     const id = Number(req.params.id);
     const resultId = Number(req.params.resultId);
@@ -593,6 +598,11 @@ export default function botBoardApiRouter(dashboardAuth) {
     const decision = String((req.body || {}).decision || "");
     if (decision !== "approved" && decision !== "rejected") {
       return jsonError(res, 400, "decision must be 'approved' or 'rejected'");
+    }
+    const seen = (req.body || {}).seen_result_id;
+    if (seen !== undefined && seen !== null && !(Number.isInteger(seen) && seen > 0)) return jsonError(res, 400, "seen_result_id must be a positive integer");
+    if (seen !== undefined && seen !== resultId) {
+      return res.status(409).json({ reason: "result is not the one shown", code: "stale" });
     }
     let tdb;
     try {
@@ -602,7 +612,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       // reported it) is ever consulted for it — nothing reads by bare id.
       const card = await getCard(tdb, id);
       if (!card) return jsonError(res, 404, "card not found");
-      await decideResult(tdb, id, resultId, decision, DASHBOARD_ACTOR, "dashboard");
+      await decideResult(tdb, id, resultId, decision, DASHBOARD_ACTOR, "dashboard", { newestOnly: seen !== undefined });
       return res.json({ ok: true });
     } catch (e) {
       return serviceError(res, e);

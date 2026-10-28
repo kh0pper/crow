@@ -469,6 +469,18 @@ export async function runPostListenSetup(server, app, deps) {
     console.log("[xhost-audit-retention] armed (24h interval, first run in 5 min)");
   }
 
+  // Card offers (redesign P5): the recovery sweep, every 10 minutes after the boot pass in
+  // index.js. Idempotent; tasks.db is opened only when an accept was left with no card, and a busy
+  // store skips the pass. Never throws.
+  import("../board/offer-service.js").then(({ runOfferSweep }) => import("../../../scripts/pi-bots/instance-paths.mjs").then(({ tasksDbPath }) => {
+    const OFFER_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
+    setInterval(() => {
+      runOfferSweep(() => createDbClient(), () => createDbClient(tasksDbPath()))
+        .then((r) => { if (r.settled || r.reopened) console.log(`[card-offers] sweep: ${JSON.stringify(r)}`); })
+        .catch((e) => console.warn("[card-offers] sweep failed:", e.message));
+    }, OFFER_SWEEP_INTERVAL_MS).unref();
+  })).catch((err) => console.warn("[card-offers] sweep not armed:", err.message));
+
   // The opt-in one-week voice transcript log (voice/transcript-log.js): an hourly sweep deletes entries past seven days
   // even when nothing is written, and the whole log when the setting is off — also on every bot-definition save, so
   // unticking it deletes the log at once. Files only; never throws.

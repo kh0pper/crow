@@ -108,9 +108,12 @@ export async function reportResult(tdb, cdb, itemId, { outcome, summaryMd, planI
  * (else 'already_decided'); stamps decided_at/decided_via. NEVER moves the
  * card — an operator's "approve & mark done" affordance is a separate,
  * explicit write, not implied by this call. Records 'result_decide'.
+ * `{ newestOnly: true }` (optional; redesign P5) also requires the result to
+ * be the item's newest, inside the guarded UPDATE: a newer result makes it
+ * 409 'stale' and write nothing. Callers that omit it are unchanged.
  */
-export async function decideResult(tdb, itemId, resultId, decision, actor, via) {
-  return decide(tdb, itemId, resultId, decision, actor, via, { newestOnly: false });
+export async function decideResult(tdb, itemId, resultId, decision, actor, via, { newestOnly = false } = {}) {
+  return decide(tdb, itemId, resultId, decision, actor, via, { newestOnly: newestOnly === true });
 }
 
 // The one decide write. `newestOnly` (acceptResult) folds "this is the
