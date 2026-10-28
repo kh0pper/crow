@@ -58,7 +58,7 @@ function guardedLookup({ lookup, isAllowedAddress }) {
       const list = (Array.isArray(addrs) ? addrs : [addrs]).map((a) => (typeof a === "string" ? { address: a, family: isIP(a) } : a));
       const bad = list.find((a) => !isAllowedAddress(a.address));
       if (!list.length || bad) {
-        return callback(fail("EBLOCKED", `${hostname} resolves to a non-public address (${bad ? bad.address : "none"})`));
+        return callback(Object.assign(fail("EBLOCKED", `${hostname} resolves to a non-public address (${bad ? bad.address : "none"})`), { address: bad ? bad.address : null }));
       }
       if (options && options.all) return callback(null, list); // autoSelectFamily path
       callback(null, list[0].address, list[0].family);
@@ -74,7 +74,7 @@ function checkHop(href, isAllowedAddress, base) {
   if (url.username || url.password) throw fail("EBADURL", "URLs with credentials are refused");
   const host = url.hostname.replace(/^\[|\]$/g, "");
   if (!host) throw fail("EBADURL", "URL has no host");
-  if (isIP(host) && !isAllowedAddress(host)) throw fail("EBLOCKED", `${host} is a non-public address`);
+  if (isIP(host) && !isAllowedAddress(host)) throw Object.assign(fail("EBLOCKED", `${host} is a non-public address`), { address: host });
   return url;
 }
 

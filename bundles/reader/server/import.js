@@ -91,12 +91,21 @@ async function fetchUrl(url, config, fetchImpl) {
   if (!fetchImpl) {
     // Live path: the shared guarded request (checks every hop, connects only to the checked
     // address, one whole-call deadline). The reader keeps its own deadline and size cap.
-    const r = await guardedRequest(url, {
-      maxBytes: capBytes,
-      timeoutMs: FETCH_TIMEOUT_MS,
-      accept: "text/html, application/pdf, */*",
-      allowPrivate: config.READER_ALLOW_PRIVATE_URLS === "1",
-    });
+    let r;
+    try {
+      r = await guardedRequest(url, {
+        maxBytes: capBytes,
+        timeoutMs: FETCH_TIMEOUT_MS,
+        accept: "text/html, application/pdf, */*",
+        allowPrivate: config.READER_ALLOW_PRIVATE_URLS === "1",
+      });
+    } catch (err) {
+      // Keep the reader's own refusal, which tells the operator how to opt out.
+      if (err && err.code === "EBLOCKED") {
+        throw new Error(`URL resolves to a private address (${err.address || "unknown"}); set READER_ALLOW_PRIVATE_URLS=1 to permit`);
+      }
+      throw err;
+    }
     if (r.http_status < 200 || r.http_status > 299) throw new Error(`HTTP ${r.http_status} fetching ${url}`);
     return { contentType: r.content_type, buffer: r.buffer };
   }

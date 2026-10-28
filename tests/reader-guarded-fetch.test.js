@@ -11,7 +11,7 @@ test("the reader's live path uses the shared guarded request and the manifest is
   const src = readFileSync(new URL("../bundles/reader/server/import.js", import.meta.url), "utf8");
   assert.match(src, /guardedRequest\(/);
   const manifest = JSON.parse(readFileSync(new URL("../bundles/reader/manifest.json", import.meta.url), "utf8"));
-  assert.equal(manifest.version, "0.1.4");
+  assert.equal(manifest.version, "0.1.5");
 });
 
 test("a loopback URL with no fetchImpl is refused before any connect", async () => {
@@ -21,5 +21,6 @@ test("a loopback URL with no fetchImpl is refused before any connect", async () 
   const { id, extraction_status } = await ingestDocument(db, config, { sourceType: "url", url: "http://127.0.0.1:9/x" });
   assert.equal(extraction_status, "failed");
   const row = (await db.execute({ sql: "SELECT extraction_diagnostics FROM reader_documents WHERE id = ?", args: [id] })).rows[0];
-  assert.match(JSON.parse(String(row.extraction_diagnostics)).error, /non-public address/);
+  assert.equal(JSON.parse(String(row.extraction_diagnostics)).error,
+    "URL resolves to a private address (127.0.0.1); set READER_ALLOW_PRIVATE_URLS=1 to permit");
 });
