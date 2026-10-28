@@ -241,12 +241,14 @@ The project server decides the caller's identity when it is built, and the owner
 
 ### Quote matching
 
-`servers/research/quote-match.js` decides whether a quote is on the page.
+`servers/research/quote-match.js` decides whether a quote is on the page. A quote counts as found only when its exact wording appears on the page. Crow never reconstructs an edited quote.
 
-- **Normalization:** Unicode NFKC, curly quotes and dashes folded to plain ones, zero-width characters, soft hyphens and footnote markers (`[12]`, `[sic]`, superscripts) removed, whitespace collapsed, case ignored.
-- **Pieces:** a quote with `...` (or `. . .`) or a bracketed insertion such as `[the company]` splits into pieces. Pieces shorter than 4 characters are dropped, and all remaining pieces must appear in order.
-- **Word boundaries:** a hit must not start or end inside a word.
-- **Attribution tails:** if the full quote is not found, a trailing attribution after a dash or a closing quote mark is cut, but only when it looks like a name (two to six capitalized words, optionally followed by a short title). Clauses such as "- Never Shipped A Bug" are not cut.
-- **Result:** found, not found, or undecided (NULL) when the page text was truncated or missing, or the quote is too short to check.
+- **Normalization:** both sides are folded the same way: Unicode NFKC, whitespace, soft hyphens and zero-width characters, case, and the styles of quotes, dashes and apostrophes. Outer quote marks and a trailing `.` `,` `;` `:` on the quote are trimmed; `?` and `!` are kept, because they change what the sentence says.
+- **Word boundaries:** a match must start and end on a word boundary. Hyphenated words and numbers such as `2.5` or `1,500` count as whole words.
+- **Where it looks:** the Readability text first, then the full page body. A result reports `body` when the match came from the full body.
+- **Allowed edits in a quote:** `[sic]`, `[citation needed]`, and a single capital-letter bracket that starts a word (`[I]t`). Any ellipsis or any other bracket makes the check "couldn't check exactly": quote the passage without cuts, or verify by hand. Footnote markers such as `[3]` are ignored on the page side only.
+- **Couldn't check:** a quote over 2,000 characters, under 4 characters, or with too many possible placements on the page. A page that was cut off at the size cap and has no match is also "couldn't check", never "not on the page".
+- **Attribution:** the full quote is tried first. Only if it is not found is a trailing dash or after-quote tail dropped, and only when the tail looks like a name: two or more capitalized words, not starting with words such as The, Never or Not, with an optional `, Title`. Put the speaker or publication in your own sentence, not inside the quote.
+- **Result:** found (1), not found (0), or couldn't check (NULL).
 
-Known limits: a single-word attribution, or one that starts with "The ...", reads as not found. Put the attribution in the note's prose, outside the quote.
+Known limits: substring matching cannot tell when the page itself denies the quoted sentence, or when a match comes from page furniture such as a menu or footer (the result then reports `body`).

@@ -241,12 +241,14 @@ El servidor de proyectos decide la identidad de quien llama cuando se construye,
 
 ### Coincidencia de citas
 
-`servers/research/quote-match.js` decide si una cita está en la página.
+`servers/research/quote-match.js` decide si una cita está en la página. Una cita cuenta como encontrada solo cuando su redacción exacta aparece en la página. Crow nunca reconstruye una cita editada.
 
-- **Normalización:** Unicode NFKC, comillas y guiones tipográficos convertidos a simples, caracteres de ancho cero, guiones suaves y marcas de nota (`[12]`, `[sic]`, superíndices) eliminados, espacios colapsados, sin distinguir mayúsculas.
-- **Fragmentos:** una cita con `...` (o `. . .`) o con una inserción entre corchetes como `[la empresa]` se divide en fragmentos. Los de menos de 4 caracteres se descartan, y los restantes deben aparecer en orden.
-- **Límites de palabra:** una coincidencia no puede empezar ni terminar a mitad de una palabra.
-- **Colas de atribución:** si la cita completa no se encuentra, se recorta una atribución final tras un guion o unas comillas de cierre, pero solo cuando parece un nombre (de dos a seis palabras con mayúscula, y opcionalmente un cargo corto). Cláusulas como "- Never Shipped A Bug" no se recortan.
-- **Resultado:** encontrada, no encontrada, o indeterminada (NULL) cuando el texto de la página está truncado o falta, o la cita es demasiado corta para comprobarla.
+- **Normalización:** ambos lados se igualan del mismo modo: Unicode NFKC, espacios, guiones suaves y caracteres de ancho cero, mayúsculas y minúsculas, y los estilos de comillas, guiones y apóstrofos. En la cita se recortan las comillas exteriores y un `.` `,` `;` `:` final; `?` y `!` se conservan, porque cambian lo que dice la frase.
+- **Límites de palabra:** la coincidencia debe empezar y terminar en un límite de palabra. Las palabras con guion y los números como `2.5` o `1,500` cuentan como palabras completas.
+- **Dónde busca:** primero el texto de Readability y después el cuerpo completo de la página. El resultado indica `body` cuando la coincidencia salió del cuerpo completo.
+- **Ediciones permitidas en una cita:** `[sic]`, `[citation needed]` y un solo corchete con una letra mayúscula al inicio de una palabra (`[I]t`). Cualquier puntos suspensivos u otro corchete deja la comprobación en "no se pudo comprobar exactamente": cita el pasaje sin cortes o verifícalo a mano. Las marcas de nota como `[3]` se ignoran solo en el lado de la página.
+- **No se pudo comprobar:** una cita de más de 2,000 caracteres, de menos de 4 caracteres, o con demasiadas posiciones posibles en la página. Una página cortada por el límite de tamaño y sin coincidencia también es "no se pudo comprobar", nunca "no está en la página".
+- **Atribución:** primero se prueba la cita completa. Solo si no se encuentra se descarta una cola final tras un guion o tras las comillas de cierre, y solo cuando la cola parece un nombre: dos o más palabras con mayúscula inicial, que no empiecen por palabras como The, Never o Not, con un `, Cargo` opcional. Pon a quien habla o la publicación en tu propia frase, no dentro de la cita.
+- **Resultado:** encontrada (1), no encontrada (0) o no se pudo comprobar (NULL).
 
-Límites conocidos: una atribución de una sola palabra, o que empieza por "The ...", se lee como no encontrada. Pon la atribución en la prosa de la nota, fuera de la cita.
+Límites conocidos: la coincidencia por subcadena no distingue cuando la propia página niega la frase citada, ni cuando la coincidencia viene de elementos de la página como un menú o un pie (el resultado indica entonces `body`).
