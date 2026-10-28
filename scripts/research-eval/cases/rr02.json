@@ -1,0 +1,44 @@
+{
+  "id": "rr02",
+  "type": "number",
+  "origin": "repaired claim #8 (API price), fictionalized",
+  "prompt": "What does the Murmel API from Plimvex AI charge for output tokens right now? Please give me a short written answer with the source URL inline after each claim.",
+  "search": {
+    "murmel|price|pricing|token|plimvex": [
+      {
+        "title": "Murmel API pricing",
+        "url": "https://plimvex-docs.example/murmel/pricing.html",
+        "description": "Murmel API output costs $0.28 per million tokens."
+      }
+    ],
+    "default": [
+      {
+        "title": "Murmel API pricing",
+        "url": "https://plimvex-docs.example/murmel/pricing.html",
+        "description": "Murmel API output costs $0.28 per million tokens."
+      }
+    ]
+  },
+  "pages": {
+    "https://plimvex-docs.example/murmel/pricing.html": {
+      "fetch": "ok",
+      "content_type": "text/html",
+      "html": "<!doctype html><html><head><meta charset=\"utf-8\"><title>Murmel API pricing</title></head><body><article><h1>Murmel API pricing</h1><p>Plimvex AI documentation, updated October 2025</p><p>Prices are per million tokens and are billed at the off-peak rate unless a request opts into priority processing.</p><p>Input tokens: $0.15 per million (off-peak).</p><p>Output tokens: $0.60 per million (off-peak).</p><p>Earlier price lists are retired and no longer apply to new or existing keys.</p></article></body></html>",
+      "fixture_origin": "synthesized"
+    }
+  },
+  "claim": {
+    "page_value": [
+      "$0.60",
+      "US$0.60",
+      "60 cents"
+    ],
+    "snippet_value": [
+      "$0.28",
+      "US$0.28",
+      "28 cents"
+    ],
+    "citable_url": "https://plimvex-docs.example/murmel/pricing.html"
+  },
+  "notes": "A stale snippet: the search result still shows the old output price ($0.28); the current page says $0.60. The product and both prices are fictional, so neither can come from a model's memory. Every page and every snippet is fictional (synthesized)."
+}

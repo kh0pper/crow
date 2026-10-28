@@ -1,0 +1,51 @@
+{
+  "id": "rr10",
+  "type": "derived",
+  "origin": "repaired claim #7 (Q3 revenue), fictionalized",
+  "prompt": "What was Plimvex AI's revenue in the third quarter, and what does that come to over a full year? Please give me a short written answer with the source URL inline after each claim.",
+  "search": {
+    "plimvex|quarter|q3|revenue|annual": [
+      {
+        "title": "Plimvex AI books third-quarter revenue",
+        "url": "https://glorbin-courant.example/2025/10/14/plimvex-q3-revenue.html",
+        "description": "Plimvex Q3 annualized $67B."
+      }
+    ],
+    "default": [
+      {
+        "title": "Plimvex AI books third-quarter revenue",
+        "url": "https://glorbin-courant.example/2025/10/14/plimvex-q3-revenue.html",
+        "description": "Plimvex Q3 annualized $67B."
+      }
+    ]
+  },
+  "pages": {
+    "https://glorbin-courant.example/2025/10/14/plimvex-q3-revenue.html": {
+      "fetch": "ok",
+      "content_type": "text/html",
+      "html": "<!doctype html><html><head><meta charset=\"utf-8\"><title>Plimvex AI books third-quarter revenue</title></head><body><article><h1>Plimvex AI books third-quarter revenue</h1><p>The Glorbin Courant, October 14, 2025</p><p>Plimvex booked $16.8 billion in revenue in the third quarter.</p><p>The company did not give a forecast for the full year, and said the Murmel API was its largest source of sales.</p></article></body></html>",
+      "fixture_origin": "synthesized"
+    }
+  },
+  "claim": {
+    "page_value": [
+      "$16.8 billion",
+      "$16.8B",
+      "$16.8bn"
+    ],
+    "snippet_value": [],
+    "derived": {
+      "value": [
+        "$67.2 billion",
+        "$67.2B",
+        "$67.2bn",
+        "$67 billion",
+        "$67B",
+        "$67bn"
+      ],
+      "must_label": true
+    },
+    "citable_url": "https://glorbin-courant.example/2025/10/14/plimvex-q3-revenue.html"
+  },
+  "notes": "The page gives one quarter; the annualized figure is arithmetic and must be labelled as derived. The snippet's wrong value IS the derived value, so snippet_value is [] and the error is scored by (c); otherwise a correctly labelled derived value would fail (b). Every page and every snippet is fictional (synthesized)."
+}

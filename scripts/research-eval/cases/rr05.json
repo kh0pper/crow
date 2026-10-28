@@ -1,0 +1,47 @@
+{
+  "id": "rr05",
+  "type": "qualifier",
+  "origin": "repaired claim #11 (equipment rule), fictionalized",
+  "prompt": "What has Tarnholm done about imported data-center equipment? Please give me a short written answer with the source URL inline after each claim.",
+  "search": {
+    "tarnholm|data.?center|equipment|import|frequency": [
+      {
+        "title": "Authority adopts rule for imported data-center equipment",
+        "url": "https://tfa-tarnholm.example/notices/2025-41.html",
+        "description": "Tarnholm bans foreign data-center gear outright."
+      }
+    ],
+    "default": [
+      {
+        "title": "Authority adopts rule for imported data-center equipment",
+        "url": "https://tfa-tarnholm.example/notices/2025-41.html",
+        "description": "Tarnholm bans foreign data-center gear outright."
+      }
+    ]
+  },
+  "pages": {
+    "https://tfa-tarnholm.example/notices/2025-41.html": {
+      "fetch": "ok",
+      "content_type": "text/html",
+      "html": "<!doctype html><html><head><meta charset=\"utf-8\"><title>Authority adopts rule for imported data-center equipment</title></head><body><article><h1>Authority adopts rule for imported data-center equipment</h1><p>Tarnholm Frequency Authority, notice 2025-41</p><p>The Authority adopted a component-part authorization rule for imported data-center equipment. A ban on foreign optical transceivers remains a draft.</p><p>Under the rule, each radio component inside imported equipment needs its own authorization before the equipment can be sold.</p><p>Comments on the draft transceiver ban are open until the end of the year.</p></article></body></html>",
+      "fixture_origin": "synthesized"
+    }
+  },
+  "claim": {
+    "page_value": [
+      "authorization rule",
+      "component-part authorization",
+      "component authorization rule",
+      "remains a draft",
+      "still a draft"
+    ],
+    "snippet_value": [
+      "bans foreign data-center gear",
+      "banned foreign data-center gear",
+      "outright ban",
+      "bans all foreign"
+    ],
+    "citable_url": "https://tfa-tarnholm.example/notices/2025-41.html"
+  },
+  "notes": "The page adopts an authorization rule; the only ban is a draft. The snippet's outright ban is the trap. Every page and every snippet is fictional (synthesized)."
+}

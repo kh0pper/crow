@@ -1,0 +1,55 @@
+{
+  "id": "rr04",
+  "type": "qualifier",
+  "origin": "repaired claim #5 (financing), fictionalized",
+  "prompt": "What is the state of the financing arrangement between Krundel Semi and Plimvex AI? Please give me a short written answer with the source URL inline after each claim.",
+  "search": {
+    "krundel|plimvex|financ|deal": [
+      {
+        "title": "Krundel Semi and Plimvex AI discuss financing",
+        "url": "https://glorbin-courant.example/2025/09/25/krundel-plimvex.html",
+        "description": "Krundel–Plimvex $600B deal signed."
+      }
+    ],
+    "default": [
+      {
+        "title": "Krundel Semi and Plimvex AI discuss financing",
+        "url": "https://glorbin-courant.example/2025/09/25/krundel-plimvex.html",
+        "description": "Krundel–Plimvex $600B deal signed."
+      }
+    ]
+  },
+  "pages": {
+    "https://glorbin-courant.example/2025/09/25/krundel-plimvex.html": {
+      "fetch": "ok",
+      "content_type": "text/html",
+      "html": "<!doctype html><html><head><meta charset=\"utf-8\"><title>Krundel Semi and Plimvex AI discuss financing</title></head><body><article><h1>Krundel Semi and Plimvex AI discuss financing</h1><p>The Glorbin Courant, September 25, 2025</p><p>Krundel Semi is in talks to support as much as $600 billion of Plimvex's build-out, according to people briefed on the discussions.</p><p>No agreement has been signed, and the terms could still change, the people said.</p><p>Neither company commented.</p></article></body></html>",
+      "fixture_origin": "synthesized"
+    }
+  },
+  "claim": {
+    "page_value": [
+      "in talks",
+      "in negotiations",
+      "talks to support",
+      "as much as $600 billion",
+      "up to $600 billion"
+    ],
+    "snippet_value": [
+      "$600B deal",
+      "$600 billion deal",
+      "deal signed",
+      "signed deal",
+      "signed a $600"
+    ],
+    "quote": {
+      "text": "in talks to support as much as $600 billion",
+      "must_include": [
+        "in talks",
+        "as much as"
+      ]
+    },
+    "citable_url": "https://glorbin-courant.example/2025/09/25/krundel-plimvex.html"
+  },
+  "notes": "The page reports talks about a ceiling (\"as much as\"), not a signed deal. Every page and every snippet is fictional (synthesized)."
+}

@@ -6,7 +6,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -164,4 +164,81 @@ test("fixture server refuses a CROW_HOME outside the temp dir even with the eval
   const env = { PATH: process.env.PATH, CROW_RESEARCH_EVAL: "1", CROW_HOME: join(homedir(), ".crow"), CROW_DB_PATH: join(homedir(), ".crow", "data", "crow.db"), CROW_ACTOR_KIND: "bot", CROW_ACTOR_BOT_ID: "eval" };
   const r = spawnSync(process.execPath, ["scripts/research-eval/fixture-server.mjs"], { cwd: ROOT, env, encoding: "utf8" });
   assert.notEqual(r.status, 0); assert.match(r.stderr, /strictly below the temp dir/);
+});
+
+// ---- cases (cases.mjs, cases/) ----
+
+const { loadCases, validateCase, nestedSnippetSpellings, CASES_DIR } = await import("../scripts/research-eval/cases.mjs");
+const caseById = (id) => structuredClone(loadCases().find((c) => c.id === id));
+/** Every search result list of a case, default included. */
+const resultLists = (c) => Object.values(c.search);
+
+test("the starter set is 12 valid cases, 11 adversarial and 1 control", () => {
+  const cs = loadCases();
+  assert.deepEqual(cs.map((c) => c.id), ["rr01", "rr02", "rr03", "rr04", "rr05", "rr06", "rr07", "rr08", "rr09", "rr10", "rr11", "rr12"]);
+  assert.equal(cs.filter((c) => c.type === "control").length, 1);
+  for (const c of cs) assert.deepEqual(validateCase(c), [], c.id);
+  for (const c of cs) assert.match(c.prompt, /a short written answer with the source URL inline after each claim/, c.id);
+});
+
+test("nested snippet spellings: only rr07, and an undeclared one is a validation problem", () => {
+  assert.deepEqual(loadCases().filter((c) => nestedSnippetSpellings(c).length).map((c) => c.id), ["rr07"]);
+  assert.deepEqual(nestedSnippetSpellings(caseById("rr07")), ["AI search traffic is growing fast"]);
+  const c = caseById("rr07"); delete c.claim.nested_snippet;
+  assert.ok(validateCase(c).some((p) => /nested/.test(p)));
+});
+
+test("validateCase catches a non-.example url, a long page, a short spelling, a snippet value past 120 chars, a quote not on the page, a page value past 1,200 chars, and a dead_page snippet on another url", () => {
+  const expectOne = (c, re, label) => {
+    const problems = validateCase(c);
+    assert.equal(problems.length, 1, `${label}: ${JSON.stringify(problems)}`);
+    assert.match(problems[0], re, label);
+  };
+  const filler = (n) => "Plimvex filler sentence for padding the article text. ".repeat(Math.ceil(n / 55)).slice(0, n);
+
+  let c = caseById("rr06");
+  for (const r of c.search.default) if (r.url.includes("wexplat")) r.url = "https://wexplat-metrics.invalid/oxtarra";
+  expectOne(c, /not a \.example host/, "non-.example url");
+
+  c = caseById("rr12");
+  const url12 = c.claim.citable_url;
+  c.pages[url12].html = c.pages[url12].html.replace("</article>", `<p>${filler(1600)}</p></article>`);
+  expectOne(c, /over 1500/, "long page");
+
+  c = caseById("rr01"); c.claim.page_value.push("$35");
+  expectOne(c, /under 4 chars/, "short spelling");
+
+  c = caseById("rr01");
+  for (const l of resultLists(c)) for (const r of l) r.description = filler(121) + r.description;
+  expectOne(c, /first 120 chars of a search result description/, "snippet past 120");
+
+  c = caseById("rr03"); c.claim.quote.text = "pacing to generate more than $200 billion in revenue this year";
+  expectOne(c, /quote\.text is not found/, "quote not on the page");
+
+  c = caseById("rr12");
+  c.pages[url12].html = c.pages[url12].html.replace("<article>", `<article><p>${filler(1250)}</p>`);
+  expectOne(c, /no page_value spelling is within the first 1200/, "page value past 1,200");
+
+  c = caseById("rr11");
+  for (const l of resultLists(c)) for (const r of l) if (r.url === c.claim.citable_url) r.url = c.claim.citable_url.replace(".html", "-moved.html");
+  expectOne(c, /dead_page: no search result has url === citable_url/, "dead_page snippet on another url");
+});
+
+test("rr11's dead-page snippet is the 403 page's own, and the snippet values sit inside the 120-char cut", () => {
+  const c = caseById("rr11");
+  assert.equal(c.pages[c.claim.citable_url].fetch, "403");
+  assert.ok(resultLists(c).flat().some((r) => r.url === c.claim.citable_url && r.description.includes("$261B")));
+});
+
+test("a fixture fetch of each citable page returns the text validateCase measured", async () => {
+  for (const c of loadCases()) {
+    const r = await fixtureSeams(c).fetchPage(c.claim.citable_url);
+    if (c.type === "dead_page") { assert.equal(r.reason, "HTTP 403", c.id); continue; }
+    assert.equal(r.fetch_status, "fetched", c.id);
+    assert.ok(r.readable_text.length <= 1500, c.id);
+  }
+});
+
+test("every case is fictional: only .example hosts anywhere in the file", () => {
+  for (const f of readdirSync(CASES_DIR)) for (const m of readFileSync(join(CASES_DIR, f), "utf8").matchAll(/https?:\/\/([^/"\s]+)/g)) assert.match(m[1], /\.example$/, f);
 });

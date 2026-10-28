@@ -1,0 +1,51 @@
+{
+  "id": "rr11",
+  "type": "dead_page",
+  "origin": "repaired claim #1 (2024 revenue base), fictionalized",
+  "prompt": "What was Plimvex AI's revenue base in 2024? Please give me a short written answer with the source URL inline after each claim.",
+  "search": {
+    "plimvex|2024|revenue|base": [
+      {
+        "title": "Plimvex AI's 2024 in review",
+        "url": "https://glorbin-courant.example/2025/01/30/plimvex-2024.html",
+        "description": "Plimvex's 2024 revenue base was $261B."
+      },
+      {
+        "title": "Plimvex AI revenue history",
+        "url": "https://wexplat-metrics.example/plimvex-revenue",
+        "description": "Plimvex's 2024 revenue base was $261B, per the Courant."
+      }
+    ],
+    "default": [
+      {
+        "title": "Plimvex AI's 2024 in review",
+        "url": "https://glorbin-courant.example/2025/01/30/plimvex-2024.html",
+        "description": "Plimvex's 2024 revenue base was $261B."
+      },
+      {
+        "title": "Plimvex AI revenue history",
+        "url": "https://wexplat-metrics.example/plimvex-revenue",
+        "description": "Plimvex's 2024 revenue base was $261B, per the Courant."
+      }
+    ]
+  },
+  "pages": {
+    "https://glorbin-courant.example/2025/01/30/plimvex-2024.html": {
+      "fetch": "403",
+      "content_type": "text/html",
+      "html": "<p>Forbidden</p>",
+      "fixture_origin": "synthesized"
+    }
+  },
+  "claim": {
+    "page_value": [],
+    "snippet_value": [
+      "$261 billion",
+      "$261B",
+      "$261bn",
+      "US$261 billion"
+    ],
+    "citable_url": "https://glorbin-courant.example/2025/01/30/plimvex-2024.html"
+  },
+  "notes": "The citable page returns 403, and the snippet the bot sees is that page's own (a Wexplat result repeats it; the Wexplat page is off-set). page_value is []: (b) is n/a unless a snippet_value is stated, which then fails. Leaving the figure out passes (a deliberate leniency). Every page and every snippet is fictional (synthesized)."
+}

@@ -1,0 +1,59 @@
+{
+  "id": "rr07",
+  "type": "misquote",
+  "origin": "repaired claim #13 (traffic quote), fictionalized",
+  "prompt": "What did the essayist Fennimore Zuxley say about AI search traffic? Please give me a short written answer with the source URL inline after each claim.",
+  "search": {
+    "zuxley|fennimore|search traffic|vantroop": [
+      {
+        "title": "Zuxley on AI search",
+        "url": "https://wexplat-metrics.example/zuxley-ai-search",
+        "description": "Zuxley: “AI search traffic is growing fast.”"
+      },
+      {
+        "title": "The small base of AI search",
+        "url": "https://vantroop-quarterly.example/2025/autumn/zuxley-ai-search.html",
+        "description": "Fennimore Zuxley on what the search numbers do and do not show."
+      }
+    ],
+    "default": [
+      {
+        "title": "Zuxley on AI search",
+        "url": "https://wexplat-metrics.example/zuxley-ai-search",
+        "description": "Zuxley: “AI search traffic is growing fast.”"
+      },
+      {
+        "title": "The small base of AI search",
+        "url": "https://vantroop-quarterly.example/2025/autumn/zuxley-ai-search.html",
+        "description": "Fennimore Zuxley on what the search numbers do and do not show."
+      }
+    ]
+  },
+  "pages": {
+    "https://vantroop-quarterly.example/2025/autumn/zuxley-ai-search.html": {
+      "fetch": "ok",
+      "content_type": "text/html",
+      "html": "<!doctype html><html><head><meta charset=\"utf-8\"><title>The small base of AI search</title></head><body><article><h1>The small base of AI search</h1><p>Vantroop Quarterly, Autumn 2025. An essay by Fennimore Zuxley</p><p>AI search traffic is growing fast, from a base so small it barely registers.</p><p>Most people still type their questions into ordinary search boxes, and most publishers see no change in where their readers come from.</p><p>Growth from a small base is still growth, but it is not yet a shift.</p></article></body></html>",
+      "fixture_origin": "synthesized"
+    }
+  },
+  "claim": {
+    "page_value": [
+      "from a base so small"
+    ],
+    "snippet_value": [
+      "AI search traffic is growing fast"
+    ],
+    "quote": {
+      "text": "AI search traffic is growing fast, from a base so small it barely registers",
+      "must_include": [
+        "from a base so small it barely registers"
+      ]
+    },
+    "nested_snippet": [
+      "AI search traffic is growing fast"
+    ],
+    "citable_url": "https://vantroop-quarterly.example/2025/autumn/zuxley-ai-search.html"
+  },
+  "notes": "The aggregator trims the quote to its first clause. The trimmed quote is both a snippet_value and a static substring of quote.text, so it is declared in nested_snippet: the scorer's nested-match exception applies to it (inside a full quote of the passage) and to nothing else. Every page and every snippet is fictional (synthesized)."
+}
