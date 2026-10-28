@@ -23,9 +23,9 @@ import Database from "better-sqlite3";
 import { createDbClient } from "../servers/db.js";
 import { InstanceSyncManager, EXCLUDED_COLUMNS, INBOUND_DROPPED_COLUMNS } from "../servers/sharing/instance-sync.js";
 import { sign } from "../servers/sharing/identity.js";
-import { insertSharedSource, SHARED_SUMMARY_MAX } from "../servers/sharing/shared-source-insert.js";
+import { insertSharedSource, SHARED_SUMMARY_MAX, SHARED_CITATION_MAX } from "../servers/sharing/shared-source-insert.js";
 import { createCloneBundleHelpers } from "../servers/sharing/clone-bundle.js";
-import { deliverPendingShares } from "../servers/sharing/boot.js";
+import { deliverPendingShares, initSharingRuntime } from "../servers/sharing/boot.js";
 import { registerShareInboxTools } from "../servers/sharing/tools/share-inbox.js";
 import { SOURCE_TYPES } from "../servers/research/source-types.js";
 import { PROVENANCE_COLUMNS, NOTE_WITHDRAWAL_COLUMNS } from "../servers/research/provenance-schema.js";
@@ -593,5 +593,124 @@ test("a queued plain share of a source or note redelivers none of the 0013 colum
     assertNo0013(bySType.source, "research_sources");
     assert.equal(bySType.note.content, "q");
     assertNo0013(bySType.note, "research_notes");
+  } finally { bs.close(); }
+});
+
+// ── share import: citation and summary arrive (D7) ──────────────────────────
+
+function stubSharingManagers(db) {
+  return {
+    db,
+    identity: { crowId: "crow:local-test", secp256k1Pubkey: "a".repeat(64), secp256k1Priv: new Uint8Array(32) },
+    peerManager: {
+      start: () => Promise.resolve(),
+      joinContact: async () => {},
+      joinInstanceSync: async () => {},
+    },
+    syncManager: { initContact: async () => {} },
+    instanceSyncManager: { localInstanceId: "inst-test", feedsDisabled: true },
+    nostrManager: {
+      subscribeToContact: async () => {},
+      subscribeToIncoming: async () => {},
+    },
+  };
+}
+
+const CITE = "Doe, J. (2026). Title. example.com.";
+const SUMMARY = "What the page says.";
+
+async function receiveShare(msg) {
+  const rdir = tmp("peer-rows-recv-");
+  execFileSync(process.execPath, ["scripts/init-db.js"], {
+    env: { ...process.env, CROW_DATA_DIR: rdir }, stdio: "pipe", cwd: REPO,
+  });
+  const rdb = createDbClient(join(rdir, "crow.db"));
+  await rdb.execute({
+    sql: "INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey, is_blocked) VALUES ('crow:self', 'Self', 'ed-s', ?, 0)",
+    args: ["b".repeat(64)],
+  });
+  const managers = stubSharingManagers(rdb);
+  await initSharingRuntime(managers, { applyProjectCloneBundle: async () => {}, buildProjectCloneBundle: async () => {} });
+  await managers.peerManager.onPeerData("crow:self", msg);
+  const row = (await rdb.execute("SELECT * FROM research_sources ORDER BY id DESC LIMIT 1")).rows[0];
+  const hit = (await rdb.execute({ sql: "SELECT rowid FROM sources_fts WHERE sources_fts MATCH 'Doe'", args: [] })).rows;
+  return { row, hit };
+}
+
+function assertArrived({ row, hit }) {
+  assert.ok(row, "a source row arrived");
+  assert.equal(row.citation_apa, CITE);
+  assert.equal(row.content_summary, SUMMARY);
+  assert.equal(row.project_id, null);
+  assert.equal(row.verified, 0);
+  assert.equal(row.fetch_status, null);
+  assert.ok(hit.some((h) => Number(h.rowid) === Number(row.id)), "findable through sources_fts");
+}
+
+test("a plain source share arrives with its citation and summary (live send → receive)", async () => {
+  const { bs, sid } = seedPlainShare("peer-rows-arrive-live");
+  try {
+    bs.prepare("UPDATE research_sources SET citation_apa = ?, content_summary = ? WHERE id = ?").run(CITE, SUMMARY, sid);
+    const sent = [];
+    const handlers = {};
+    registerShareInboxTools({ tool: (name, _d, _s, h) => { handlers[name] = h; } }, {
+      db: wrapDb(bs),
+      identity: { crowId: "crow:self" },
+      peerManager: { isConnected: () => true, send: (_to, msg) => { sent.push(msg); } },
+      buildProjectCloneBundle: async () => { throw new Error("not a clone"); },
+    });
+    const args = { contact: "crow:plainpeer", share_type: "source", item_id: sid, permissions: "read" };
+    const preview = await handlers.crow_share({ ...args, confirm_token: "" });
+    const token = preview.content[0].text.match(/confirm_token: "([^"]+)"/)[1];
+    const res = await handlers.crow_share({ ...args, confirm_token: token });
+    assert.ok(!res.isError, res.content[0].text);
+    assert.equal(sent.length, 1);
+    assertArrived(await receiveShare(sent[0]));
+  } finally { bs.close(); }
+});
+
+test("a queued source share arrives with its citation and summary (deliverPendingShares → receive)", async () => {
+  const { bs, sid, cid } = seedPlainShare("peer-rows-arrive-queued");
+  try {
+    bs.prepare("UPDATE research_sources SET citation_apa = ?, content_summary = ? WHERE id = ?").run(CITE, SUMMARY, sid);
+    bs.prepare(
+      "INSERT INTO shared_items (contact_id, share_type, item_id, permissions, direction, delivery_status) VALUES (?, 'source', ?, 'read', 'sent', 'pending')",
+    ).run(cid, sid);
+    const sent = [];
+    await deliverPendingShares({
+      db: wrapDb(bs),
+      peerManager: { send: (_to, msg) => { sent.push(msg); } },
+      contact: { id: cid, crow_id: "crow:plainpeer" },
+      identityCrowId: "crow:self",
+      buildProjectCloneBundle: async () => { throw new Error("not a clone"); },
+    });
+    assert.equal(sent.length, 1);
+    assertArrived(await receiveShare(sent[0]));
+  } finally { bs.close(); }
+});
+
+test("insertSharedSource prefers the real fields, keeps the legacy ones, and caps both", async () => {
+  const bs = new Database(initDb("peer-rows-fields-"));
+  const db = wrapDb(bs);
+  const MARK = (n) => `\n[truncated at share import: original ${n} chars]`;
+  const get = async (p) => bs.prepare("SELECT * FROM research_sources WHERE id = ?").get(await insertSharedSource(db, p));
+  try {
+    assert.equal(SHARED_CITATION_MAX, 2000);
+    assert.equal((await get({ citation_apa: "A", citation: "B" })).citation_apa, "A");
+    assert.equal((await get({ citation_apa: "", citation: "B" })).citation_apa, "B");
+    assert.equal((await get({ citation_apa: 42 })).citation_apa, "(no citation)");
+    assert.equal((await get({ content_summary: "S", notes: "N" })).content_summary, "S");
+    assert.equal((await get({ notes: "N" })).content_summary, "N");
+
+    const big = await get({ citation_apa: "c".repeat(10000) });
+    assert.equal(big.citation_apa, "c".repeat(SHARED_CITATION_MAX) + MARK(10000));
+    const fts = bs.prepare("SELECT citation_apa FROM sources_fts WHERE rowid = ?").get(big.id);
+    assert.equal(fts.citation_apa.length, big.citation_apa.length, "the FTS row is capped too");
+
+    const sum = await get({ content_summary: "s".repeat(SHARED_SUMMARY_MAX + 10) });
+    assert.equal(sum.content_summary, "s".repeat(SHARED_SUMMARY_MAX) + MARK(SHARED_SUMMARY_MAX + 10));
+
+    const legacy = await get({ citation: "l".repeat(SHARED_CITATION_MAX + 5) });
+    assert.equal(legacy.citation_apa, "l".repeat(SHARED_CITATION_MAX) + MARK(SHARED_CITATION_MAX + 5));
   } finally { bs.close(); }
 });

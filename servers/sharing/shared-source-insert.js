@@ -11,10 +11,25 @@ const TITLE_MAX = 1000;
 // abstract / content_summary cap for peer-supplied rows (content_summary is FTS-indexed); the
 // project clone import uses the same value.
 export const SHARED_SUMMARY_MAX = 50000;
+// citation_apa cap for peer-supplied rows (also indexed in sources_fts).
+export const SHARED_CITATION_MAX = 2000;
+
+/** The first non-empty string among the values, else null. */
+function firstString(...values) {
+  for (const v of values) if (typeof v === "string" && v) return v;
+  return null;
+}
+
+/** Cap a peer-supplied string at max chars, marking the cut. */
+function capShared(value, max) {
+  return value && value.length > max
+    ? `${value.slice(0, max)}\n[truncated at share import: original ${value.length} chars]`
+    : value;
+}
 
 /**
  * @param {{execute: Function}} db
- * @param {{title?: string, url?: string, source_type?: string, citation?: string, notes?: string}} payload
+ * @param {{title?, url?, source_type?, citation_apa?, content_summary?, citation?, notes?}} payload
  * @returns {Promise<number>} the new row id
  */
 export async function insertSharedSource(db, payload = {}) {
@@ -24,11 +39,8 @@ export async function insertSharedSource(db, payload = {}) {
   const rawTitle = typeof p.title === "string" && p.title ? p.title : "Shared source";
   const title = rawTitle.length > TITLE_MAX ? rawTitle.slice(0, TITLE_MAX) : rawTitle;
   const sourceType = SOURCE_TYPES.includes(p.source_type) ? p.source_type : "other";
-  const citation = typeof p.citation === "string" && p.citation ? p.citation : "(no citation)";
-  const rawNotes = typeof p.notes === "string" && p.notes ? p.notes : null;
-  const notes = rawNotes && rawNotes.length > SHARED_SUMMARY_MAX
-    ? `${rawNotes.slice(0, SHARED_SUMMARY_MAX)}\n[truncated at share import: original ${rawNotes.length} chars]`
-    : rawNotes;
+  const citation = capShared(firstString(p.citation_apa, p.citation), SHARED_CITATION_MAX) ?? "(no citation)";
+  const notes = capShared(firstString(p.content_summary, p.notes), SHARED_SUMMARY_MAX);
   const url = typeof p.url === "string" && p.url ? p.url : null;
 
   const result = await db.execute({
