@@ -6,10 +6,11 @@
  *
  * One tick: mode / block check (mode off → no Nextcloud call at all) → back-off → lease → prune → session sweep →
  * for changed etags (≤ MAX_DOWNLOADS downloads; over MAX_BYTES by listing size → skipped until the etag changes):
- * download, snapshot, diff, classify, log → putState per file. A Nextcloud error (NcError: no answer or an HTTP
- * error) ends the tick (files already done keep their state), backs off BACKOFF_MS and widens the next listing to
- * OUTAGE_LIMIT. Any other error while scanning one file is that file's alone: it is marked skip_reason "error"
- * (retried when its etag changes), a scan_error event is logged (no comment text), and the tick goes on.
+ * download, snapshot, diff, classify, log → putState per file. A Nextcloud outage (NcError: no answer, or an HTTP
+ * error other than 403/404/423, e.g. 5xx) ends the tick (files already done keep their state), backs off BACKOFF_MS
+ * and widens the next listing to OUTAGE_LIMIT. A 403, 404 or 423 while scanning one file, or any non-Nextcloud error,
+ * is that file's alone: it is marked skip_reason "error" (retried when its etag changes), a scan_error event is
+ * logged (no comment text), and the tick goes on.
  */
 import { randomUUID } from "node:crypto";
 import { appImport } from "../app-root.js";
@@ -34,6 +35,8 @@ export const BACKOFF_MS = 60000;
 export const RECENT_LIMIT = 60;
 export const OUTAGE_LIMIT = 200;
 const WINDOW_SLACK_MS = 30000; // the same ±30 s soleOwnerWindowAt uses
+/** Nextcloud answers that concern one file (forbidden, gone, locked): that file is skipped, the tick goes on. */
+const PER_FILE_STATUS = new Set([403, 404, 423]);
 
 let mentionsP = null;
 const mentions = () => (mentionsP ??= appImport("servers/shared/bot-mention.js").catch((e) => { mentionsP = null; throw e; }));
@@ -71,7 +74,7 @@ export function makeCommentTick({ db, getConfig, clock, seams = {} }) {
         if (downloads >= MAX_DOWNLOADS) continue; // the rest wait for the next tick (oversized ones are still marked)
         downloads++;
         try { await scanFile(ctx, e, st); } catch (err) {
-          if (err instanceof NcError) throw err;
+          if (err instanceof NcError && !PER_FILE_STATUS.has(err.status)) throw err;
           await skip(ctx, e, st, { etag: e.etag, mtime: e.mtime }, "error");
           await logEvent(db, { at: now, fileId: e.fileId, kind: "scan_error", detail: { source: "saved", code: errCode(err) } });
           console.warn(`[workspace] comment watcher: file ${Number(e.fileId)} skipped (${errCode(err)})`);

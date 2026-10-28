@@ -618,3 +618,59 @@ test("savedOwner: exact-prefix people uid maps; version author compared as-is; u
   assert.equal((await I.savedOwner({ ...base, peopleUid: "ocinst_coworker" })).reason, "non_owner_author");
   assert.equal((await I.savedOwner({ ...base, newestVersion: { ...base.newestVersion, author: "ocx_admin" } })).reason, "non_owner_version", "version author: no prefix strip");
 });
+
+test("a file whose GET always answers 403 (or 404/423) is skipped alone: scan_error, the next file still scanned, no back-off", async () => {
+  for (const status of [403, 404, 423]) {
+    const s = await setup();
+    s.advance(1000);
+    const good = s.doc(`ok${status}.docx`, [hankRoot(s.clock.t - 500, "@hank fine")]);
+    s.advance(1000);
+    const bad = s.doc(`no${status}.docx`, [hankRoot(s.clock.t - 500, "@hank secret words")]); // newest: listed first
+    const badGets = () => s.fake.calls.filter((c) => c.method === "GET" && c.url.endsWith(`no${status}.docx`)).length;
+    s.fake.failRoute = (req, res, send) => { if (req.method === "GET" && req.url.endsWith(`no${status}.docx`)) { send(status); return true; } return false; };
+    s.advance(1000);
+    const r = await s.tick();
+    assert.equal(r.ran, true); assert.notEqual(r.error, true, `${status}: no whole-tick back-off`);
+    assert.equal((await ST.getState(s.db, bad.fileId)).skip_reason, "error");
+    assert.ok((await ST.getState(s.db, good.fileId))?.scanned_at, `${status}: the second file was still scanned`);
+    const errs = await s.events("scan_error", bad.fileId);
+    assert.equal(errs.length, 1);
+    assert.deepEqual(errs[0], { kind: "scan_error", fileId: bad.fileId, source: "saved", code: { 403: "forbidden", 404: "not_found", 423: "locked" }[status] });
+    assert.equal(badGets(), 1);
+    s.advance(15_000);
+    const n1 = s.fake.calls.length;
+    await s.tick();
+    assert.ok(s.fake.calls.length > n1, "the next tick runs (no 60 s back-off)");
+    assert.equal(badGets(), 1, "not re-fetched until its etag changes");
+  }
+});
+
+test("hash contract: a live report and the saved .docx comment built from the same text share fp, hash, snippet and pair", async () => {
+  const { handleLiveReport, validateReport } = await import("../bundles/workspace/server/comments/live-report.js");
+  const s = await setup();
+  const f = s.doc("hc.docx"); const k = s.open(f);
+  s.advance(2000);
+  await s.tick(); // samples the session (first_seen)
+  s.advance(5000);
+  const time = s.clock.t - 1234; // ms that floor to the saved w:date second
+  // spike E11: live text and quote use \r\n (the quote with a trailing one); the saved side has paragraphs
+  const live = { Id: "1_1", Text: "@hank tidy\r\nthis section, ünïcode", Time: String(time), UserName: "admin", QuoteText: "con\r\n", Solved: false, Replies: [] };
+  const v = validateReport({ key: k, pv: "0.3.0", kind: "add", thread: live, occ: [0] });
+  assert.equal(v.ok, true);
+  const out = await handleLiveReport({ db: s.db, getConfig, clock: s.clock, live: { editor: { userName: "admin" }, fileId: f.fileId, key: k, uid: "admin", uids: ["admin"], at: s.clock.t, path: f.path }, body: v.r });
+  assert.deepEqual(out, { state: "shadow" });
+  const [lr] = await s.events("live_report", f.fileId);
+  s.save(f, [hankRoot(time, "@hank tidy\nthis section, ünïcode".normalize("NFD"), { quoted: "con" })]);
+  s.advance(1000);
+  await s.tick();
+  const [sn] = await s.events("scan_new", f.fileId);
+  assert.ok(lr && sn);
+  for (const x of ["fp", "hash", "snippet", "pair", "bot"]) assert.equal(lr[x], sn[x], x);
+  assert.equal(lr.hash, ST.textHash(K.normText("@hank tidy\r\nthis section, ünïcode")));
+  assert.equal((await s.events("fp_mismatch")).length, 0);
+  // the live verdict uses the watcher's reason names and detail schema
+  const lv = (await s.events(undefined, f.fileId)).find((e) => e.source === "live" && e.kind !== "live_report");
+  const sv = (await s.verdicts(f.fileId)).find((e) => e.source === "saved");
+  assert.deepEqual(Object.keys(lv).sort(), Object.keys(sv).sort());
+  assert.ok(Object.values((await import("../bundles/workspace/server/comments/identity.js")).VERDICT_REASONS).includes(lv.reason));
+});

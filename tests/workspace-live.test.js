@@ -393,3 +393,187 @@ test("latency: a non-live session, a key that matched nothing and a user who joi
     assert.equal(await pend(kv), 200, "seen within ~5 s");
   } finally { s5.close(); }
 });
+
+// ---- Comment loop Phase 1, Task 7: POST /comments (shadow mode: log only) -------------------------------------
+const HOUR_MS = 3600_000;
+const ST_ = () => import("../bundles/workspace/server/comments/store.js");
+const ownerJwt = (k, name = "Casey") => editorJwt(k, { editorConfig: { user: { id: "ocinst_admin", name } } });
+const thread = ({ text = "@hank please tidy this", userName = "Casey", time = Date.now(), replies = [] } = {}) =>
+  ({ Id: "1_1", Text: text, Time: String(time), UserName: userName, QuoteText: "con\r\n", Solved: false, Replies: replies });
+const reportTo = (k, { jwt = ownerJwt(k), hint, kind = "add", th = thread(), occ, key: bodyKey = k } = {}) =>
+  post("/api/workspace/live/v1/comments", jwt, { key: bodyKey, pv: "0.3.0", kind, thread: th, occ: occ ?? [0, ...(th.Replies || []).map(() => 0)] }, hint !== undefined ? { "X-Crow-File-Hint": String(hint) } : {});
+const commentEvents = async (kind) => (await db.execute("SELECT * FROM workspace_comment_events ORDER BY id")).rows
+  .filter((r) => !kind || r.kind === kind).map((r) => ({ kind: r.kind, fileId: r.file_id === null ? null : Number(r.file_id), raw: r.detail_json, ...JSON.parse(r.detail_json) }));
+const hankBot = () => db.execute("INSERT OR REPLACE INTO pi_bot_defs(bot_id, display_name, enabled) VALUES ('hank', 'Hank', 1)");
+const shadowOn = async () => { await hankBot(); const S = await ST_(); await S.setMode(db, "shadow", Date.now() - HOUR_MS); };
+const commentOff = async () => { await hankBot(); const S = await ST_(); await S.setMode(db, "off", Date.now()); };
+const clearEvents = () => db.execute("DELETE FROM workspace_comment_events");
+
+test("/comments: same 401 for bad token, unknown key, viewer, read-only sharee; unresolved valid token logs unresolved_key", async () => {
+  await shadowOn(); await clearEvents();
+  doc("cv.docx"); const f = fake.node("S/cv.docx");
+  fake.state.shares.push({ id: "cv1", path: "/S/cv.docx", share_with: "vic", share_type: 0, permissions: 1 });
+  const k = fake.openInEditor("S/cv.docx", ["admin", "vic"], { releaseAfterMs: 10 ** 9 });
+  // sampled once by the owner's editor, so a view token (whose hint is ignored) still reaches the session
+  assert.equal((await get(`/api/workspace/live/v1/pending?key=${k}&${PV}`, editorJwt(k), { "X-Crow-File-Hint": String(f.fileId) })).status, 200);
+  const answers = [
+    await reportTo(k, { jwt: "bad.token.x", hint: f.fileId }),
+    await reportTo(k, { jwt: sign({ document: { key: k }, editorConfig: { user: { id: "ocinst_admin" } }, exp: 9e9 }, "wrong"), hint: f.fileId }),
+    await reportTo(k, { jwt: editorJwt(k, { editorConfig: { mode: "view", user: { id: "ocinst_admin", name: "Casey" } } }), hint: f.fileId }),
+    await reportTo(k, { jwt: editorJwt(k, {}, "vic"), hint: f.fileId }),
+    await reportTo(k, { jwt: editorJwt(k, {}, "mallory"), hint: f.fileId }),
+  ];
+  assert.equal((await commentEvents("unresolved_key")).length, 0, "a key that resolved is not 'unresolved'");
+  answers.push(await reportTo("no-such-key-7", { jwt: ownerJwt("no-such-key-7") }));
+  for (const a of answers) { assert.equal(a.status, 401); assert.deepEqual(await a.json(), { error: "unauthorized" }); }
+  const un = await commentEvents("unresolved_key");
+  assert.equal(un.length, 1);
+  assert.equal(un[0].fileId, null, "no file id");
+  assert.deepEqual({ source: un[0].source, hinted: un[0].hinted }, { source: "live", hinted: false });
+  assert.doesNotMatch(un[0].raw, /no-such-key/, "the key is not stored");
+  assert.equal((await commentEvents()).filter((e) => e.kind !== "unresolved_key").length, 0, "nothing else logged");
+  // mode off: an unresolved report logs nothing
+  await commentOff();
+  assert.equal((await reportTo("no-such-key-8", { jwt: ownerJwt("no-such-key-8") })).status, 401);
+  assert.equal((await commentEvents("unresolved_key")).length, 1);
+});
+
+test("/comments: mode off → {state:'off'}, nothing logged; shadow → live_report + verdict", async () => {
+  await commentOff(); await clearEvents();
+  doc("cs.docx"); const f = fake.node("S/cs.docx");
+  const k = fake.openInEditor("S/cs.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const off = await reportTo(k, { hint: f.fileId });
+  assert.equal(off.status, 200); assert.deepEqual(await off.json(), { state: "off" });
+  assert.equal((await commentEvents()).length, 0);
+  const S = await ST_();
+  await S.setMode(db, "shadow", Date.now() - HOUR_MS); await S.setBlocked(db, "duplicate_display_name");
+  assert.deepEqual(await (await reportTo(k, { hint: f.fileId })).json(), { state: "off" }, "blocked is off");
+  assert.equal((await commentEvents()).length, 0);
+  await S.setBlocked(db, null);
+  const t0 = Date.now() - 800;
+  const r = await reportTo(k, { hint: f.fileId, th: thread({ time: t0 }) });
+  assert.deepEqual(await r.json(), { state: "shadow" });
+  const ev = await commentEvents();
+  assert.deepEqual(ev.map((e) => e.kind), ["live_report", "would_fire"]);
+  const [lr, v] = ev;
+  assert.equal(lr.fileId, f.fileId); assert.equal(lr.source, "live"); assert.equal(lr.bot, "hank");
+  assert.ok(lr.latency_ms >= 800 && lr.latency_ms < 60000, `latency ${lr.latency_ms}`);
+  for (const x of ["pair", "fp", "hash", "snippet", "bot"]) assert.equal(v[x], lr[x], x);
+  assert.deepEqual({ source: v.source, reason: v.reason, sole: v.sole }, { source: "live", reason: "owner_verified", sole: true });
+  assert.equal(typeof v.age_s, "number");
+  // a "change" (a reply) carries no latency; a report with no bot mention logs nothing
+  await clearEvents();
+  const th = thread({ time: t0, replies: [{ Text: "@hank and this", Time: String(Date.now()), UserName: "Casey" }] });
+  await reportTo(k, { hint: f.fileId, kind: "change", th });
+  const ch = await commentEvents("live_report");
+  assert.equal(ch.length, 1); assert.equal(ch[0].latency_ms, null); assert.equal(ch[0].snippet, "@hank and this", "the newest comment naming a bot");
+  await clearEvents();
+  assert.deepEqual(await (await reportTo(k, { hint: f.fileId, th: thread({ text: "@nobody here" }) })).json(), { state: "shadow" });
+  assert.deepEqual(await (await reportTo(k, { hint: f.fileId, th: thread({ userName: "hank-p (bot)" }) })).json(), { state: "shadow" });
+  assert.equal((await commentEvents()).length, 0, "unknown bot, or a bot's own comment: nothing");
+  // the report's key must be the token's
+  assert.equal((await reportTo(k, { hint: f.fileId, key: "someone-else" })).status, 401);
+});
+
+test("/comments: sole owner add → would_fire; coworker in info.users → unverified coworker_in_session; payload UserName ≠ token name → unverified_author", async () => {
+  await shadowOn(); await clearEvents();
+  doc("co1.docx"); doc("co2.docx");
+  const solo = fake.node("S/co1.docx"), shared = fake.node("S/co2.docx");
+  const ks = fake.openInEditor("S/co1.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const kc = fake.openInEditor("S/co2.docx", ["admin", "alex"], { releaseAfterMs: 10 ** 9 });
+  const verdict = async () => (await commentEvents()).filter((e) => ["would_fire", "unverified", "history"].includes(e.kind)).at(-1);
+  assert.equal((await reportTo(ks, { hint: solo.fileId })).status, 200);
+  assert.deepEqual([(await verdict()).kind, (await verdict()).reason], ["would_fire", "owner_verified"]);
+  assert.equal((await reportTo(kc, { hint: shared.fileId })).status, 200);
+  const v2 = await verdict();
+  assert.deepEqual([v2.kind, v2.reason, v2.sole], ["unverified", "coworker_in_session", false]);
+  assert.equal((await reportTo(ks, { hint: solo.fileId, jwt: ownerJwt(ks, "admin"), th: thread({ text: "@hank second one" }) })).status, 200);
+  const v3 = await verdict();
+  assert.deepEqual([v3.kind, v3.reason, v3.sole], ["unverified", "unverified_author", true]);
+});
+
+test("/comments: Text > 4096 or 51 replies → 400; a body never stored in full", async () => {
+  await shadowOn(); await clearEvents();
+  doc("big.docx"); const f = fake.node("S/big.docx");
+  const k = fake.openInEditor("S/big.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const long = `@hank ${"x".repeat(4100)}`;
+  const bad = [
+    await reportTo(k, { hint: f.fileId, th: thread({ text: long.slice(0, 4097) }) }),
+    await reportTo(k, { hint: f.fileId, th: thread({ replies: Array.from({ length: 51 }, () => ({ Text: "ok", Time: String(Date.now()), UserName: "Casey" })) }) }),
+    await reportTo(k, { hint: f.fileId, occ: [0, 0] }),
+    await reportTo(k, { hint: f.fileId, kind: "remove" }),
+  ];
+  for (const r of bad) { assert.equal(r.status, 400); assert.deepEqual(await r.json(), { error: "bad_report" }); }
+  assert.equal((await commentEvents()).length, 0);
+  const fifty = Array.from({ length: 50 }, (_, i) => ({ Text: `reply ${i}`, Time: String(Date.now()), UserName: "Casey" }));
+  assert.equal((await reportTo(k, { hint: f.fileId, kind: "change", th: thread({ text: long.slice(0, 4096), replies: fifty }) })).status, 200, "at the limits: accepted");
+  const ev = await commentEvents();
+  assert.ok(ev.length >= 2);
+  for (const e of ev) { assert.ok(e.raw.length < 600, "hash + snippet only"); assert.doesNotMatch(e.raw, /x{41}/); assert.equal(e.snippet.length, 40); }
+});
+
+test("plugin 0.3.0 still claims and acks a queued change (existing live apply path)", async () => {
+  doc("pz.docx");
+  const k = fake.openInEditor("S/pz.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const id = (await call("ws_docs_find_replace", { path: "S/pz.docx", find: "Tortillas", replace: "Totopos" })).data.change_id;
+  assert.deepEqual((await (await get(`/api/workspace/live/v1/pending?key=${k}&pv=0.3.0`, editorJwt(k))).json()).map((x) => x.change_id), [id]);
+  const c = await claim(id, editorJwt(k), "0.3.0");
+  assert.equal(c.status, 200);
+  const { apply_token } = await c.json();
+  assert.equal((await ack({ change_id: id, apply_token, outcome: "applied" }, editorJwt(k))).status, 200);
+  const r = await row(id);
+  assert.equal(r.state, "applied_live"); assert.equal(Number(r.verified), 0);
+});
+
+test("MIN_PLUGIN_VERSION stays 0.2.0", async () => {
+  const { MIN_PLUGIN_VERSION } = await import("../bundles/workspace/server/live/routes-live.js");
+  assert.equal(MIN_PLUGIN_VERSION, "0.2.0");
+});
+
+test("a hint never lets a token reach another file's queue: hint B with key K_A on /pending → [] while B has a queued change", async () => {
+  doc("ha.docx"); doc("hb.docx");
+  const A = fake.node("S/ha.docx"), B = fake.node("S/hb.docx");
+  const kA = fake.openInEditor("S/ha.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const kB = fake.openInEditor("S/hb.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  assert.deepEqual(await (await get(`/api/workspace/live/v1/pending?key=${kA}&${PV}`, editorJwt(kA), { "X-Crow-File-Hint": String(A.fileId) })).json(), [], "A is sampled");
+  const idB = (await call("ws_docs_append", { path: "S/hb.docx", markdown: "Solo B" })).data.change_id;
+  const viaB = await get(`/api/workspace/live/v1/pending?key=${kA}&${PV}`, editorJwt(kA), { "X-Crow-File-Hint": String(B.fileId) });
+  assert.equal(viaB.status, 200);
+  assert.deepEqual(await viaB.json(), [], "K_A stays on file A");
+  assert.notEqual((await post("/api/workspace/live/v1/claim", editorJwt(kA), { change_id: idB, pv: "0.3.0" }, { "X-Crow-File-Hint": String(B.fileId) })).status, 200);
+  assert.equal((await row(idB)).state, "pending");
+  assert.deepEqual((await (await get(`/api/workspace/live/v1/pending?key=${kB}&${PV}`, editorJwt(kB))).json()).map((x) => x.change_id), [idB], "control: B's own editor sees it");
+});
+
+test("hints: honoured only for an edit-capable token; at most 10 uncached hint lookups per key per minute; unchanged samples skipped within 15 s", async () => {
+  const { liveRouter, HINT_LOOKUPS_PER_MIN, SAMPLE_SKIP_MS } = await import("../bundles/workspace/server/live/routes-live.js");
+  const { getConfig } = await import("../bundles/workspace/server/config.js");
+  const { sessionByKey } = await import("../bundles/workspace/server/comments/sessions.js");
+  assert.equal(HINT_LOOKUPS_PER_MIN, 10); assert.equal(SAMPLE_SKIP_MS, 15000);
+  let now = Date.now();
+  const a = express(); a.use(liveRouter({ Router: express.Router, json: express.json, db, getConfig, clock: { now: () => now } }));
+  const s6 = a.listen(0); const b6 = `http://127.0.0.1:${s6.address().port}`;
+  const pend = (k, hint, jwt = editorJwt(k)) => fetch(`${b6}/pending?key=${k}&${PV}`, { headers: { Authorization: `Bearer ${jwt}`, "X-Crow-File-Hint": String(hint) } }).then((r) => r.status);
+  const configCalls = (id) => fake.calls.filter((c) => c.url.includes(`/apps/onlyoffice/api/v1/config/${id}`)).length;
+  try {
+    doc("hv.docx"); const v = fake.node("S/hv.docx");
+    const kv = fake.openInEditor("S/hv.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+    const n0 = configCalls(v.fileId);
+    assert.equal(await pend(kv, v.fileId, editorJwt(kv, { document: { key: kv, permissions: { edit: false } } })), 401);
+    assert.equal(configCalls(v.fileId), n0, "a view token's hint is never looked up");
+    // ten uncached lookups (files that do not exist), then the right hint is ignored until the minute passes
+    doc("hl.docx"); const l = fake.node("S/hl.docx");
+    const kl = fake.openInEditor("S/hl.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+    for (let i = 0; i < 10; i++) assert.equal(await pend(kl, 900100 + i), 401);
+    assert.equal(await pend(kl, l.fileId), 401, "over the hint limit: behaves as an unresolved hint");
+    assert.equal(configCalls(l.fileId), 0);
+    now += 61_000;
+    assert.equal(await pend(kl, l.fileId), 200, "a new minute");
+    // samples: an unchanged one is not re-written within 15 s
+    const first = Number((await sessionByKey(db, kl)).last_seen);
+    now += 5000; assert.equal(await pend(kl, l.fileId), 200);
+    assert.equal(Number((await sessionByKey(db, kl)).last_seen), first, "skipped within 15 s");
+    now += 11_000; assert.equal(await pend(kl, l.fileId), 200);
+    assert.equal(Number((await sessionByKey(db, kl)).last_seen), now, "written again after 15 s");
+  } finally { s6.close(); }
+});

@@ -43,5 +43,7 @@ export async function readCapped(res, maxBytes) {
 export function httpFail(res, what) {
   const map = { 401: ["not_ready", "Crow bot's Workspace app password was rejected; re-run Workspace setup"], 403: ["forbidden", `Crow bot is not allowed to ${what}`], 404: ["not_found", `Not found while trying to ${what}`], 409: ["conflict", `The parent folder does not exist (${what})`], 412: ["changed_concurrently", `Someone changed it first (${what})`], 423: ["locked", `It is locked (${what})`], 507: ["quota", "The Workspace is out of space"] };
   const [code, msg] = map[res.status] || ["workspace_error", `Workspace answered HTTP ${res.status} while trying to ${what}`];
-  return new NcError(code, msg);
+  const e = new NcError(code, msg);
+  e.status = res.status; // the watcher tells a per-file refusal (403/404/423) from an outage by it
+  return e;
 }

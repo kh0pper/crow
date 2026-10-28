@@ -10,17 +10,18 @@ const SRC = readFileSync(join(import.meta.dirname, "..", "bundles", "workspace",
 const flush = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
 
 /** answer(path, opts) → {status, body}. Returns the harness: advance(ms), log of requests and indicator calls. */
-function editor(answer, { focus = true, visibility = "visible", parentReadable = true } = {}) {
+/** method(name, args, cb): an optional answer for executeMethod (e.g. GetAllComments). */
+function editor(answer, { focus = true, visibility = "visible", parentReadable = true, method = null, callbackUrl = null } = {}) {
   let now = 1_000_000, nextId = 1; const timers = new Map();
   const state = { focus, visibility };
   const requests = [], methods = [], commands = [];
   const doc = { get visibilityState() { return state.visibility; }, addEventListener() {} };
   const ctx = {
-    Date: { now: () => now }, Math, JSON, encodeURIComponent, Error,
+    Date: { now: () => now }, Math, JSON, encodeURIComponent, decodeURIComponent, Error, atob,
     setTimeout: (fn, ms) => { const id = nextId++; timers.set(id, { at: now + Math.max(0, ms || 0), fn }); return id; },
     clearTimeout: (id) => { timers.delete(id); },
     fetch: async (url, opts = {}) => {
-      requests.push({ at: now, url, method: opts.method || "GET", body: opts.body ? JSON.parse(opts.body) : null });
+      requests.push({ at: now, url, method: opts.method || "GET", headers: { ...(opts.headers || {}) }, body: opts.body ? JSON.parse(opts.body) : null });
       const r = await answer(url, opts);
       return { ok: r.status >= 200 && r.status < 300, status: r.status, json: async () => r.body };
     },
@@ -28,8 +29,8 @@ function editor(answer, { focus = true, visibility = "visible", parentReadable =
     Asc: {
       scope: {},
       plugin: {
-        info: { jwt: "tok", documentId: "doc-key", isViewMode: false },
-        executeMethod: (name, args) => methods.push({ at: now, name, args }),
+        info: { jwt: "tok", documentId: "doc-key", isViewMode: false, ...(callbackUrl ? { documentCallbackUrl: callbackUrl } : {}) },
+        executeMethod: (name, args, cb) => { methods.push({ at: now, name, args }); if (method) method(name, args, cb); },
         callCommand: (fn, close, recalc, cb) => { commands.push({ at: now }); Promise.resolve().then(() => cb({ ok: true })); },
       },
     },
@@ -153,4 +154,121 @@ test("callCommand throwing: the claim is acked failed (not applied_nothing), the
   assert.ok(e.methods.some((m) => m.name === "EndAction"));
   const n = e.polls().length; await e.advance(10000);
   assert.ok(e.polls().length > n, "still polling at the normal cadence");
+});
+
+// ---- 0.3.0: comment reports (comment loop Phase 1, shadow mode) ---------------------------------------------
+const b64u = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+const CALLBACK = `/apps/onlyoffice/track?doc=${b64u({ alg: "HS256" })}.${b64u({ userId: "admin", fileId: 4242, action: "track" })}.sig`;
+const cm = (Id, Text, { UserName = "admin", Time = "1793157691225", QuoteText = "con", Replies = [] } = {}) => ({ Id, Data: { Text, Time, UserName, QuoteText, Solved: false, UserData: "", Replies } });
+/** An editor whose GetAllComments answers from `doc` (mutable), synchronously like the editor does. */
+function commentEditor(answer = none, doc = []) {
+  const e = editor(answer, { callbackUrl: CALLBACK, method: (name, args, cb) => { if (name === "GetAllComments" && cb) cb(JSON.parse(JSON.stringify(doc))); } });
+  e.doc = doc;
+  e.fire = (kind, ev) => e.ctx.Asc.plugin[kind === "add" ? "event_onAddComment" : "event_onChangeCommentData"](JSON.parse(JSON.stringify(ev)));
+  e.reports = () => e.requests.filter((r) => r.url === "/crow-live/v1/comments");
+  return e;
+}
+const okComments = async (url) => (url === "/crow-live/v1/comments" ? { status: 200, body: { state: "shadow" } } : { status: 401, body: {} });
+
+test("baseline at ready: loaded comments and pre-ready events never report", async () => {
+  const loaded = cm("1_1", "@hank an old request");
+  const e = commentEditor(okComments, [loaded]);
+  const early = cm("1_2", "@hank arrived before ready");
+  e.doc.push(early); e.fire("add", early); // queued by waitEvents, delivered before ready
+  e.start(); await e.advance(100);
+  e.fire("add", loaded); e.fire("add", early); e.fire("change", loaded); // a DS that re-announces on load
+  await e.advance(1000);
+  assert.equal(e.reports().length, 0);
+  assert.equal(e.methods.filter((m) => m.name === "GetAllComments").length, 1, "one baseline read");
+  assert.ok(!e.methods.some((m) => m.name === "StartAction"), "no indicator");
+});
+
+test("a new @hank comment reports once within the event turn; plain text never reports", async () => {
+  const e = commentEditor(okComments, []);
+  e.start(); await e.advance(100);
+  const plain = cm("1_3", "just a note about the menu");
+  e.doc.push(plain); e.fire("add", plain);
+  const hank = cm("1_4", "@hank please tidy this", { QuoteText: "p1\r\np2\r\n" });
+  e.doc.push(hank); e.fire("add", hank);
+  assert.equal(e.reports().length, 1, "sent in the same turn as the event");
+  e.fire("add", hank); e.fire("change", hank);
+  await e.advance(30000);
+  assert.equal(e.reports().length, 1, "once");
+  const [r] = e.reports();
+  assert.equal(r.method, "POST");
+  assert.equal(r.headers["X-Crow-File-Hint"], "4242", "the documentCallbackUrl doc token's fileId");
+  assert.deepEqual(r.body, { key: "doc-key", pv: "0.3.0", kind: "add", occ: [0],
+    thread: { Id: "1_4", Text: "@hank please tidy this", Time: "1793157691225", UserName: "admin", QuoteText: "p1\r\np2\r\n", Solved: false, Replies: [] } });
+  // a reply without a mention on that thread: nothing new names anyone → no report; a reply with one → "change"
+  const withReply = cm("1_4", hank.Data.Text, { QuoteText: hank.Data.QuoteText, Replies: [{ Text: "thanks", Time: "1793157699000", UserName: "admin" }] });
+  e.doc[1] = withReply; e.fire("change", withReply);
+  assert.equal(e.reports().length, 1);
+  const withMention = cm("1_4", hank.Data.Text, { QuoteText: hank.Data.QuoteText, Replies: [...withReply.Data.Replies, { Text: "@hank also this", Time: "1793157700000", UserName: "admin" }] });
+  e.doc[1] = withMention; e.fire("change", withMention);
+  assert.equal(e.reports().length, 2);
+  assert.equal(e.reports()[1].body.kind, "change"); assert.deepEqual(e.reports()[1].body.occ, [0, 0, 0]);
+  // over the server's limits: never sent
+  const huge = cm("1_9", `@hank ${"x".repeat(4096)}`);
+  e.doc.push(huge); e.fire("add", huge);
+  const many = cm("1_10", "@hank many", { Replies: Array.from({ length: 51 }, (_, i) => ({ Text: `r${i}`, Time: "1793157700000", UserName: "admin" })) });
+  e.doc.push(many); e.fire("add", many);
+  assert.equal(e.reports().length, 2);
+});
+
+test("plugin occ matches saved occ for two pasted duplicates", async () => {
+  const { commentDocx } = await import("./helpers/workspace-comment-docx.js");
+  const { openDocx } = await import("../bundles/workspace/server/ooxml/docx-model.js");
+  const { readCommentThreads } = await import("../bundles/workspace/server/ooxml/docx-comments.js");
+  const K = await import("../bundles/workspace/server/comments/keys.js");
+  const time = 1793157691225, iso = new Date(Math.floor(time / 1000) * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const e = commentEditor(okComments, []);
+  e.start(); await e.advance(100);
+  const a = cm("1_6", "@hank dup", { Time: String(time) }), b = cm("1_11", "@hank dup", { Time: String(time) });
+  e.doc.push(a, b); e.fire("add", a); e.fire("add", b);
+  const occs = e.reports().map((r) => r.body.occ);
+  assert.deepEqual(occs, [[0], [1]]);
+  const saved = readCommentThreads(openDocx(commentDocx({ threads: [0, 1].map(() => ({ author: "admin", date: iso, text: "@hank dup", quoted: "con" })) }))).threads;
+  const savedFps = K.flatten(saved).map(K.fingerprint);
+  const liveFps = e.reports().map((r) => K.fingerprint(K.flatten(K.fromLive(r.body.thread, r.body.occ))[0]));
+  assert.deepEqual(K.flatten(saved).map((c) => c.occ), [0, 1]);
+  assert.deepEqual(liveFps, savedFps, "the same two fingerprints");
+});
+
+test("401 retry: re-sent at +5 s and +15 s, then dropped; polling cadence unchanged", async () => {
+  const e = commentEditor(none, []);
+  const control = editor(none);
+  e.start(); control.start(); await e.advance(100); await control.advance(100);
+  const t0 = e.requests.at(-1)?.at ?? 0;
+  const hank = cm("1_5", "@hank are you there");
+  e.doc.push(hank); e.fire("add", hank);
+  const sentAt = e.reports()[0].at;
+  assert.ok(sentAt >= t0);
+  await e.advance(120000); await control.advance(120000);
+  assert.deepEqual(e.reports().map((r) => r.at - sentAt), [0, 5000, 15000]);
+  assert.equal(e.polls().length, control.polls().length, "the same poll cadence as an editor with no reports");
+  const d = commentEditor(async (url) => (url === "/crow-live/v1/comments" ? { status: 429, body: {} } : { status: 401, body: {} }), []);
+  d.start(); await d.advance(100);
+  const h2 = cm("1_7", "@hank again"); d.doc.push(h2); d.fire("add", h2);
+  await d.advance(60000);
+  assert.equal(d.reports().length, 1, "429: dropped, no retry");
+});
+
+test("the existing /pending→claim→callCommand→ack loop is unchanged with 0.3.0", async () => {
+  const e = commentEditor(queueOf([{ change_id: "pc_c", tool: "ws_docs_append", args: { markdown: "x" }, pre: null }]), []);
+  e.start(); await e.advance(1000); await e.advance(4000);
+  assert.match(e.polls()[0].url, /&pv=0\.3\.0$/);
+  assert.equal(e.polls()[0].headers["X-Crow-File-Hint"], "4242");
+  const claim = e.requests.find((r) => r.url === "/crow-live/v1/claim");
+  assert.equal(claim.body.pv, "0.3.0");
+  assert.equal(e.commands.length, 1);
+  const ack = e.requests.find((r) => r.url === "/crow-live/v1/ack");
+  assert.equal(ack.body.outcome, "applied");
+  assert.equal(e.reports().length, 0);
+});
+
+test("no documentCallbackUrl (or a malformed one): no hint header", async () => {
+  const e = editor(none); e.start(); await e.advance(1000);
+  assert.equal(e.polls()[0].headers["X-Crow-File-Hint"], undefined);
+  const bad = editor(none, { callbackUrl: "/track?doc=not-a-jwt" }); bad.start(); await bad.advance(1000);
+  assert.equal(bad.polls()[0].headers["X-Crow-File-Hint"], undefined);
 });

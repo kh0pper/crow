@@ -19,7 +19,8 @@
  *  3. its document.key must be the CURRENT live session key of a candidate file, and its user must be in that
  *     session's ONLYOFFICE info.users (command service). Candidates, in order (I-6): the file a sampled session row
  *     (workspace_editor_sessions) recorded for this key, the plugin's X-Crow-File-Hint header (an UNTRUSTED positive
- *     integer: spike E10, the session token carries no file id), then files with queued (or unverified live) work.
+ *     integer: spike E10, the session token carries no file id; honoured only for an edit-capable token, and at most
+ *     HINT_LOOKUPS_PER_MIN uncached hint lookups per key), then files with queued (or unverified live) work.
  *     Every candidate is confirmed by asking ONLYOFFICE for that file's current key — a hint or a stored row never
  *     authorises alone. A key that matched no file is remembered for 5 s against the same candidate set (fix2 N6),
  *     and at most 20 queued-work files are asked;
@@ -36,6 +37,8 @@
  * (5 s), so a document opened — or a change queued for it — right after a poll is seen within ~5 s (+ the plugin's
  * poll interval: 5 s while the editor has focus). Claims and acks always check fresh. Every lookup is still behind
  * the per-(document, user) and per-document limits above.
+ * POST /comments (comment loop, Phase 1 shadow mode, comments/live-report.js) only logs: a report whose key resolves
+ * to no file logs unresolved_key before the usual 401.
  * A claim returns a per-change apply token (per-boot secret) that the ack must present. An ack is never proof of
  * application (R-LIVE): applied_live rows stay unverified until the close-time worker checks the saved file, and the
  * undo of a live change is derived server-side (live/derive-inverse.js) — the ack carries no inverse (fix A).
@@ -49,6 +52,8 @@ import { liveEligible } from "../queue/conditions.js";
 import { docSession } from "../nc/onlyoffice.js";
 import { notifyChange } from "../queue/notify.js";
 import { sessionByKey, recordSession } from "../comments/sessions.js";
+import { getWatch, logEvent } from "../comments/store.js";
+import { validateReport, handleLiveReport } from "../comments/live-report.js";
 
 export const MIN_PLUGIN_VERSION = "0.2.0";
 export const LEASE_MS = 60000;
@@ -57,6 +62,10 @@ const SESSION_TTL_MS = 30000;
 export const NEGATIVE_TTL_MS = 5000;
 const CACHE_MAX = 2000;
 const MAX_CANDIDATES = 20;
+/** Uncached file-hint lookups (each costs a docSession call) per document key per minute; over it the hint is ignored. */
+export const HINT_LOOKUPS_PER_MIN = 10;
+/** An unchanged session sample (same key, file and uids) is not re-written within this window. */
+export const SAMPLE_SKIP_MS = 15000;
 const HIDDEN_ARGS = new Set(["path", "file_id", "if_open", "wait_s"]);
 const REASON_RE = /^[a-z_]{1,40}$/;
 /** X-Crow-File-Hint: a positive integer or nothing (a malformed hint is ignored, never an error). */
@@ -80,6 +89,7 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
   const lim = (max, maxKeys = 1000) => windowLimiter({ max, windowMs: 60000, maxKeys, now });
   const perIp = lim(limits.perIp), global = lim(limits.global, 1), perUser = lim(limits.perUser), perDoc = lim(limits.perDocument);
   const rawDoc = lim(limits.perDocumentRaw ?? limits.perDocument * 4); // every valid token on the document, before authorization
+  const hintLookups = lim(limits.hintLookups ?? HINT_LOOKUPS_PER_MIN);
   // bounded caches (oldest evicted): fileId → ONLYOFFICE session; "fileId\0uid" → write permission. Each entry keeps
   // its own lifetime: 30 s, or NEGATIVE_TTL_MS for an answer that cannot authorize anyone.
   const cache = () => {
@@ -89,7 +99,7 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
       set: (k, v, ttl = SESSION_TTL_MS) => { m.delete(k); m.set(k, { at: now(), ttl, v }); while (m.size > CACHE_MAX) m.delete(m.keys().next().value); return v; },
     };
   };
-  const sessions = cache(), writes = cache();
+  const sessions = cache(), writes = cache(), samples = cache();
   const sessionOf = async (fileId, force) => {
     const c = sessions.get(fileId, force); if (c) return c.v;
     const s = await docSession(getConfig(), fileId).catch(() => null);
@@ -106,6 +116,8 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
    * the file a sampled session row recorded for this key, then the plugin's untrusted file hint, then files with
    * queued work or a live change not yet verified (bounded; the key the change was queued under is tried first).
    * Each is confirmed by its live session's key. `path` is null for a file reached only through a row or the hint.
+   * A hint that is not already a candidate and whose session is not cached costs a docSession call: at most
+   * HINT_LOOKUPS_PER_MIN of those per key; over it the hint is ignored (the request behaves as if it had none).
    */
   const misses = cache(); // key → candidate-set signature it matched none of (N6), for NEGATIVE_TTL_MS
   async function liveSession(key, force, userId, hint = null) {
@@ -113,6 +125,7 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
       WHERE state IN ('pending','claimed_live','unknown_after_claim') OR (state='applied_live' AND verified=0) GROUP BY file_id ORDER BY hinted DESC, file_id LIMIT ?`, args: [key, MAX_CANDIDATES] })).rows;
     const sampled = Number((await sessionByKey(db, key))?.file_id) || null;
     const paths = new Map(rows.map((r) => [Number(r.file_id), r.path]));
+    if (hint !== null && hint !== sampled && !paths.has(hint) && !sessions.get(hint, force) && !hintLookups.hit(key)) hint = null;
     const ids = [...new Set([sampled, hint, ...rows.map((r) => Number(r.file_id))].filter((id) => Number.isSafeInteger(id) && id > 0))];
     const sig = ids.join(",");
     if (misses.get(key)?.v === sig) return null; // asked these same files < 5 s ago: none had this key
@@ -152,7 +165,10 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
     if (req.query.key !== undefined && String(req.query.key) !== t.key) return deny(res);
     const force = req.method !== "GET";
     let live;
-    try { live = await liveSession(t.key, force, t.userId ? String(t.userId) : "", fileHintOf(req.headers["x-crow-file-hint"])); } catch { return res.status(503).json({ error: "editor unavailable" }); }
+    // Task 5 review: only an edit-capable token's hint is honoured (a view token is refused below anyway)
+    const hint = t.canEdit ? fileHintOf(req.headers["x-crow-file-hint"]) : null;
+    try { live = await liveSession(t.key, force, t.userId ? String(t.userId) : "", hint); } catch { return res.status(503).json({ error: "editor unavailable" }); }
+    if (!live && req.path === "/comments") await logUnresolved(hint !== null);
     const idx = live && t.userId ? live.users.indexOf(t.userId) : -1;
     if (idx < 0) return deny(res);
     // fix B: edit rights are checked server-side for every endpoint (a viewer sees no change content either)
@@ -161,11 +177,26 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
     if (req.path !== "/ack" && !versionAtLeast(req.query.pv ?? req.body?.pv)) return res.status(426).json({ error: "the Crow plugin in this editor is outdated; reload the document" });
     // I-6: an authorised request records the confirmed session (key → file, prefix-stripped uids), so this key
     // resolves later without the hint. A failed write never fails the request.
+    // An unchanged sample (same file and uids) is skipped within SAMPLE_SKIP_MS (last_seen lags by at most that;
+    // soleOwnerWindowAt allows ±30 s).
     const at = now();
-    await recordSession(db, { key: t.key, fileId: live.fileId, uids: live.uids, at }).catch((e) => console.warn(`[workspace] live: session sample not recorded: ${String(e?.message).slice(0, 200)}`));
-    req.live = { editor: t, fileId: live.fileId, key: t.key, uids: live.uids, at, path: live.path };
+    const sig = `${live.fileId}\u0000${[...live.uids].sort().join(",")}`;
+    if (samples.get(t.key)?.v !== sig) {
+      await recordSession(db, { key: t.key, fileId: live.fileId, uids: live.uids, at })
+        .then(() => samples.set(t.key, sig, SAMPLE_SKIP_MS))
+        .catch((e) => console.warn(`[workspace] live: session sample not recorded: ${String(e?.message).slice(0, 200)}`));
+    }
+    req.live = { editor: t, fileId: live.fileId, key: t.key, uid: live.uids[idx], uids: live.uids, at, path: live.path };
     next();
   };
+  /** Shadow mode counts /comments reports whose key resolved to no file (I-6, E10). No file id, no key. */
+  async function logUnresolved(hinted) {
+    try {
+      const w = await getWatch(db);
+      if (w.mode === "off" || w.blocked_reason) return;
+      await logEvent(db, { at: now(), fileId: null, kind: "unresolved_key", detail: { source: "live", hinted } });
+    } catch (e) { console.warn(`[workspace] live: unresolved_key not logged: ${String(e?.message).slice(0, 200)}`); }
+  }
   const wrap = (fn) => (req, res) => fn(req, res).catch((e) => { console.warn(`[workspace] live: ${e.code || ""} ${String(e.message).slice(0, 200)}`); if (!res.headersSent) res.status(500).json({ error: "internal" }); });
 
   // N4: the body is parsed only after the token passed (the gateway's own JSON parser may already have run)
@@ -203,6 +234,14 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
       if (!(await cas(db, r.id, "claimed_live", to, { lease_until: null, lease_owner: null, result_json: JSON.stringify({ ...resultOf(r), live_failed: reason }) }))) return res.status(409).json({ error: "not claimed" });
     } else return res.status(400).json({ error: "outcome must be applied or failed" });
     res.json({ ok: true });
+  }));
+
+  // Comment loop fast path, Phase 1: log only (live-report.js). The report's key must be the token's.
+  router.post("/comments", wrap(async (req, res) => {
+    const v = validateReport(req.body);
+    if (!v.ok) return res.status(400).json({ error: "bad_report" });
+    if (v.r.key !== req.live.key) return deny(res);
+    res.json(await handleLiveReport({ db, getConfig, clock, live: req.live, body: v.r }));
   }));
   return router;
 }
