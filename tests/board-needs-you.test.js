@@ -97,6 +97,33 @@ test("a waiting session filed elsewhere doesn't count here", async () => {
   assert.equal(m.get(C), 1);
 });
 
+test("an engine cardId of null still finds the DB row's card, counted once", async () => {
+  await file("t-dbcard", C);
+  await db.execute({ sql: "INSERT INTO bot_sessions (bot_id, kind, status, gateway_thread_id, card_id) VALUES (?,?,?,?,?)",
+    args: ["hank", "perch-live", "active", "t-dbcard", ids.c_ask] });
+  const m = await counts(db, [{ id: C }], { engine: engineOf([{ sessionId: "t-dbcard", botId: "hank", pendingUi: true, cardId: null }]) });
+  assert.equal(m.get(C), 1);
+});
+
+test("an unfiled thread falls back to its bot's live project", async () => {
+  await db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?,?,?,1,?)",
+    args: ["bobby", "Bobby", "{}", B] });
+  const engine = engineOf([{ sessionId: "t-legacy", botId: "bobby", pendingUi: true, cardId: null }]);
+  const m = await counts(db, [{ id: A }, { id: B }], { engine });
+  assert.equal(m.get(B), 2); // b_ask + the legacy thread
+  assert.equal(m.get(A), 3);
+});
+
+test("no engine, an idle session or a stopped one adds nothing", async () => {
+  await file("t-quiet", A);
+  assert.equal((await counts(db, [{ id: A }])).get(A), 3);
+  const engine = engineOf([
+    { sessionId: "t-quiet", botId: "hank", pendingUi: false, cardId: null },
+    { sessionId: "t-quiet", botId: "hank", pendingUi: true, state: "stopped", cardId: null },
+  ]);
+  assert.equal((await counts(db, [{ id: A }], { engine })).get(A), 3);
+});
+
 test("missing tasks.db is zero for all", async () => {
   const m = await counts(db, [{ id: A }, { id: B }], { tasksDbPath: join(dir, "nope.db") });
   assert.deepEqual([...m], [[A, 0], [B, 0]]);

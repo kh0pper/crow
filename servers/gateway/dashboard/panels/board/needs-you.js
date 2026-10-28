@@ -14,7 +14,7 @@ import { createDbClient } from "../../../../db.js";
 import { resolveSqlitePath } from "../../../../../scripts/pi-bots/instance-paths.mjs";
 import { t } from "../../shared/i18n.js";
 import { TASKS_DB, lockMapFor } from "../bot-board/data-queries.js";
-import { projectOfItems } from "../../../../shared/shell-items.js";
+import { threadProjects } from "../../../routes/perch.js";
 import { laneRows, defsFor, cardsByIds } from "../board.js";
 import { groupByLane, openDecision } from "./lanes.js";
 
@@ -43,32 +43,46 @@ async function asProjects(db, projects) {
   return out;
 }
 
-/** Map<projectId, Set<sessionId>> of engine sessions waiting on a person, by project filing. */
+/**
+ * Map<projectId, [{ sid, cardId }]> of engine sessions waiting on a person, read
+ * the way /roost reads them (routes/perch.js): the filing comes from
+ * threadProjects (an unfiled thread falls back to its bot's live project), and a
+ * session's card is the live bot_sessions row's card_id first, then the engine's.
+ */
 async function waitingByProject(db, engine) {
   const out = new Map();
   if (!engine) return out;
   let sessions = [];
   try { sessions = (await engine.list()) || []; } catch { return out; }
-  const waiting = sessions.filter((s) => s && s.pendingUi);
+  const waiting = sessions.filter((s) => s && s.pendingUi && s.state !== "stopped");
   if (!waiting.length) return out;
-  const filed = await projectOfItems(db, "perch_thread", waiting.map((s) => String(s.sessionId)));
-  // Same fallback /roost uses: the engine snapshot's cardId wins, else the bot_sessions row.
-  const missing = waiting.filter((s) => s.cardId === undefined).map((s) => String(s.sessionId));
+  const ids = waiting.map((s) => String(s.sessionId));
+
   const rowCard = new Map();
-  if (missing.length) {
-    try {
-      const { rows } = await db.execute({
-        sql: `SELECT gateway_thread_id, card_id FROM bot_sessions WHERE kind='perch-live' AND gateway_thread_id IN (${missing.map(() => "?").join(",")})`,
-        args: missing,
-      });
-      for (const r of rows) rowCard.set(String(r.gateway_thread_id), r.card_id);
-    } catch { /* bot_sessions absent: no card ids */ }
-  }
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT gateway_thread_id, card_id FROM bot_sessions WHERE kind='perch-live' AND status != 'stopped' AND gateway_thread_id IN (SELECT value FROM json_each(?))`,
+      args: [JSON.stringify(ids)],
+    });
+    for (const r of rows) rowCard.set(String(r.gateway_thread_id), r.card_id);
+  } catch { /* bot_sessions absent: the engine's card ids stand */ }
+
+  const botIdOf = new Map(waiting.map((s) => [String(s.sessionId), s.botId]));
+  const botProjectOf = new Map();
+  try {
+    const { rows } = await db.execute("SELECT bot_id, project_id FROM pi_bot_defs");
+    for (const r of rows) botProjectOf.set(r.bot_id, r.project_id == null ? null : Number(r.project_id));
+  } catch { /* pi_bot_defs absent: no bot fallback */ }
+  let filed = new Map();
+  try { filed = await threadProjects(db, ids, botIdOf, botProjectOf); }
+  catch (err) { console.warn("[needs-you] could not read thread projects:", err?.message || err); return out; }
+
   for (const s of waiting) {
     const sid = String(s.sessionId);
     const pid = filed.get(sid);
     if (pid == null) continue;
-    const raw = s.cardId !== undefined ? s.cardId : rowCard.get(sid);
+    const dbCard = rowCard.get(sid);
+    const raw = dbCard != null ? dbCard : s.cardId;
     if (!out.has(pid)) out.set(pid, []);
     out.get(pid).push({ sid, cardId: raw == null ? null : Number(raw) });
   }
@@ -81,13 +95,17 @@ async function waitingByProject(db, engine) {
 export async function needsYouCounts(db, projects, { engine, tasksDbPath = TASKS_DB } = {}) {
   const list = await asProjects(db, projects);
   const result = new Map();
+  // No tasks.db: nothing has made a card, so every count is 0. Waiting sessions are
+  // skipped on purpose here (the brief says 0), not an oversight.
   if (!existsSync(tasksDbPath)) { for (const p of list) result.set(p.id, 0); return result; }
 
   let tdb;
   try {
     tdb = createDbClient(tasksDbPath);
-    const shared = list.filter((p) => inSharedStore(p, tasksDbPath));
-    for (const p of list) if (!shared.includes(p)) result.set(p.id, null);
+    const shared = [];
+    for (const p of list) {
+      if (inSharedStore(p, tasksDbPath)) shared.push(p); else result.set(p.id, null);
+    }
 
     const rowsBy = new Map();
     const all = [];
@@ -128,7 +146,7 @@ export function needsYouLabel(n, lang = "en") {
  * of ask: a decision (open decision), a review (recorded result) or a question.
  * An own-store project, or no tasks.db, has none to show here.
  */
-export async function needsYouCards(db, project, { engine, tasksDbPath = TASKS_DB, limit = 3 } = {}) { // eslint-disable-line no-unused-vars
+export async function needsYouCards(db, project, { tasksDbPath = TASKS_DB, limit = 3 } = {}) {
   if (!project || !inSharedStore(project, tasksDbPath) || !existsSync(tasksDbPath)) return [];
   let tdb;
   try {
