@@ -111,8 +111,20 @@ test("media role refused", async () => {
 test("unresolvable escalation role sets the R12 flag", async () => {
   reset();
   const r = await resolveModel({ models: { default: "local-chat/m1", escalation: "role:deep" } }, { escalate: true });
-  assert.deepEqual(pick(r, ["key", "source", "escalated", "escalationRequestedButUnavailable"]),
-    { key: "local-chat/m1", source: "fallback", escalated: false, escalationRequestedButUnavailable: true });
+  assert.deepEqual(pick(r, ["key", "source", "escalated", "escalationRequestedButUnavailable", "escalationRole", "escalationReason"]),
+    { key: "local-chat/m1", source: "fallback", escalated: false, escalationRequestedButUnavailable: true,
+      escalationRole: "deep", escalationReason: "unset" });
+  // The raw default is not the role's model: the result carries no role tag.
+  assert.equal("role" in r, false);
+  assert.equal("roleReason" in r, false);
+});
+
+test("role default with an unresolvable escalation role keeps both apart", async () => {
+  reset({ bindings: { everyday: { model: "local-chat/m1" } } });
+  const r = await resolveModel({ models: { default: "role:everyday", escalation: "role:tts" } }, { escalate: true });
+  assert.deepEqual(pick(r, ["key", "source", "role", "roleReason", "escalationRole", "escalationReason", "escalationRequestedButUnavailable"]),
+    { key: "local-chat/m1", source: "fallback", role: "everyday", roleReason: "bound",
+      escalationRole: "tts", escalationReason: "capability", escalationRequestedButUnavailable: true });
 });
 
 test("raw keys match the frozen copy", async () => {
@@ -145,6 +157,24 @@ test("spawn env reserved: CROW_MODEL_ROLES_FILE stripped, and set after opts.ext
   const assign = src.indexOf("CROW_MODEL_ROLES_FILE: roleSnapshotPath()");
   assert.ok(extra > 0, "opts.extraEnv merge found");
   assert.ok(assign > extra, "CROW_MODEL_ROLES_FILE is assigned after opts.extraEnv");
+  assert.match(src, /" escalation-role=" \+ resolved\.escalationRole/, "the log line names a failed escalation role");
+});
+
+test("the bridge's snapshot path is the gateway writer's path", async () => {
+  const env = await import("../servers/shared/model-roles-env.js");
+  const snap = await import("../servers/shared/model-roles-snapshot.js");
+  // One definition: the writer module re-exports the leaf's function.
+  assert.equal(snap.roleSnapshotPath, env.roleSnapshotPath);
+  const bridgeSrc = readFileSync(join(import.meta.dirname, "../scripts/pi-bots/bridge.mjs"), "utf8");
+  assert.match(bridgeSrc, /import \{ roleSnapshotPath \} from "\.\.\/\.\.\/servers\/shared\/model-roles-env\.js";/);
+  const writerSrc = readFileSync(join(import.meta.dirname, "../servers/shared/model-roles-snapshot.js"), "utf8");
+  assert.match(writerSrc, /writeRoleSnapshot\(db, \{ path = roleSnapshotPath\(\)/, "the writer defaults to the same function");
+  // CROW_HOME decides it; CROW_DATA_DIR and CROW_DB_PATH do not move it.
+  const home = join(scratch, "inst-home");
+  assert.equal(env.roleSnapshotPath({ env: { CROW_HOME: home } }), join(home, "model-roles.json"));
+  assert.equal(env.roleSnapshotPath({ env: { CROW_HOME: home, CROW_DATA_DIR: join(scratch, "elsewhere"), CROW_DB_PATH: join(scratch, "x.db") } }),
+    join(home, "model-roles.json"));
+  assert.equal(env.roleSnapshotPath(), join(process.env.CROW_HOME || join((await import("node:os")).homedir(), ".crow"), "model-roles.json"));
 });
 
 test("loadRoleContextSync: a throwing own-id function gives null, logged once", async () => {
@@ -164,4 +194,21 @@ test("loadRoleContextSync: a throwing own-id function gives null, logged once", 
     console.warn = orig;
   }
   assert.deepEqual(warns.filter((w) => w.includes("own instance id unavailable")).length, 1);
+});
+
+test("bridge.mjs loads neither the role store, the settings registry nor the snapshot writer", () => {
+  const script = `
+    import { registerHooks } from "node:module";
+    const seen = [];
+    registerHooks({ resolve(s, c, n) { const r = n(s, c); seen.push(r.url); return r; } });
+    await import(${JSON.stringify(new URL("../scripts/pi-bots/bridge.mjs", import.meta.url).href)});
+    process.stdout.write(JSON.stringify(seen));
+    process.exit(0);`;
+  const seen = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+    cwd: join(import.meta.dirname, ".."), env: { ...process.env }, stdio: ["ignore", "pipe", "pipe"],
+  }).toString());
+  for (const banned of ["servers/shared/model-roles-store.js", "servers/gateway/dashboard/settings/registry.js", "servers/shared/model-roles-snapshot.js"]) {
+    assert.equal(seen.filter((u) => u.endsWith(banned)).length, 0, banned);
+  }
+  assert.ok(seen.some((u) => u.endsWith("servers/shared/model-roles-env.js")));
 });

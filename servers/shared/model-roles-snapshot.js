@@ -14,18 +14,17 @@
  */
 import { open, rename, unlink } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { CORE_ROLES, MEDIA_CAPABILITIES, SUBAGENT_MAP_KEY, resolveRoleKey, roleCandidates, isCloudKey } from "./model-roles.js";
 import { loadRoleContext } from "./model-roles-store.js";
-import { resolveCrowHome, isDefaultCrowHome } from "./crow-home.js";
+import { isDefaultCrowHome } from "./crow-home.js";
+import { roleSnapshotPath } from "./model-roles-env.js";
 import { readSetting } from "../gateway/dashboard/settings/registry.js";
 
-export const ROLE_SNAPSHOT_VERSION = 1;
+/** Where pi looks for the snapshot: one definition, shared with the bridge. */
+export { roleSnapshotPath };
 
-/** Where pi looks for the snapshot. */
-export function roleSnapshotPath({ env = process.env } = {}) {
-  return join(resolveCrowHome(env), "model-roles.json");
-}
+export const ROLE_SNAPSHOT_VERSION = 1;
 
 const EMPTY = Object.freeze({ resolved: null, chain: [], candidates: [], cloud: false });
 

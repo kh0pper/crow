@@ -116,13 +116,15 @@ export function validateModelKey(models, key) {
  * @returns {{provider:string, model:string, key:string, escalated:boolean,
  *            source:"default"|"escalation"|"fallback",
  *            escalationRequestedButUnavailable:boolean,
- *            role?:string, chain?:string[], roleReason?:string}}
+ *            role?:string, chain?:string[], roleReason?:string,
+ *            escalationRole?:string, escalationReason?:string}}
  *
  * `role:<id>` (default or escalation): the role is walked in full against
  * this instance's bindings (need "chat"), its raw key substituted, and the
  * validation below runs unchanged against the same `models`. An unresolvable
  * role is an invalid key. role/chain/roleReason are added only for a role
- * input, naming the role behind the returned model (or the one that failed).
+ * input, naming the role behind the returned model; a failed escalation role
+ * on a fallback result is reported as escalationRole/escalationReason.
  * A raw key never opens the role path.
  */
 export async function resolveModel(def, opts) {
@@ -147,8 +149,11 @@ export async function resolveModel(def, opts) {
     if (r[0]) { defRole = r[0]; defaultKey = r[0].key; }
     if (r[1]) { escRole = r[1]; escKey = r[1].key; }
   }
-  // The role behind each outcome: the key it came from, else the role that failed.
+  // role/chain/roleReason: the role behind the default or escalation key the
+  // result came from. A failed escalation role never tags a default result:
+  // it is reported apart, as escalationRole/escalationReason.
   const withRole = (res, info) => (info ? Object.assign(res, { role: info.role, chain: info.chain, roleReason: info.reason }) : res);
+  const withFailedEsc = (res) => (escRole ? Object.assign(res, { escalationRole: escRole.role, escalationReason: escRole.reason }) : res);
 
   if (escalate) {
     const e = validateModelKey(models, escKey);
@@ -156,8 +161,8 @@ export async function resolveModel(def, opts) {
     // R12: escalation explicitly requested but unset/invalid → fall to default,
     // flag it so the bridge can post an in-band notice.
     const d = validateModelKey(models, defaultKey);
-    if (d.ok) return withRole(out(d.provider, d.model, false, "fallback", true), defRole || escRole);
-    return withRole(out(fb.provider, fb.model, false, "fallback", true), defRole || escRole);
+    if (d.ok) return withFailedEsc(withRole(out(d.provider, d.model, false, "fallback", true), defRole));
+    return withFailedEsc(withRole(out(fb.provider, fb.model, false, "fallback", true), defRole));
   }
 
   const d = validateModelKey(models, defaultKey);
@@ -165,7 +170,11 @@ export async function resolveModel(def, opts) {
   return withRole(out(fb.provider, fb.model, false, "fallback", false), defRole);
 }
 
-/** Same test as model-roles.js isRoleRef (not imported: that module imports this one). */
+/**
+ * Same test as model-roles.js isRoleRef (not imported: that module imports this one).
+ * Accepted break: a raw key that starts with `role:` (a provider named `role:x`)
+ * is now a role ref, never a provider/model pair.
+ */
 function isRoleRefKey(key) {
   return typeof key === "string" && key.startsWith("role:") && key.length > "role:".length;
 }

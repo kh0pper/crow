@@ -8,8 +8,6 @@
  * Import hygiene (I4): never import model-consumers.js, ai/smart-router.js or
  * model-roles-seed.js from here (tests/model-roles-import-graph.test.js).
  */
-import { readFileSync, statSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import {
   CORE_ROLES, ROLE_KEY_RANGE, SUBAGENT_MAP_KEY, bindingKey,
   parseBindingRows, isRoleRef, roleIdOf, isValidCustomRoleId,
@@ -17,6 +15,7 @@ import {
 } from "./model-roles.js";
 import { splitKey, modelsFromRows, loadModelsFromFile } from "../../scripts/pi-bots/model_resolver.mjs";
 import { providerRowToObject } from "./provider-row.js";
+import { loadCatalog, wrapOwnId } from "./model-roles-env.js";
 import { writeSetting } from "../gateway/dashboard/settings/registry.js";
 import { getOrCreateLocalInstanceId as defaultGetOwnId } from "../gateway/instance-registry.js";
 
@@ -115,39 +114,6 @@ export async function setBinding(db, roleId, { model = null, fallback } = {}, { 
 }
 
 // ---- RoleContext ------------------------------------------------------------
-
-const CATALOG_PATH = fileURLToPath(new URL("../../registry/model-catalog.json", import.meta.url));
-let catalogCache = { mtimeMs: -1, models: [] };
-
-function loadCatalog() {
-  try {
-    const { mtimeMs } = statSync(CATALOG_PATH);
-    if (mtimeMs !== catalogCache.mtimeMs) {
-      const j = JSON.parse(readFileSync(CATALOG_PATH, "utf8"));
-      catalogCache = { mtimeMs, models: Array.isArray(j?.models) ? j.models : [] };
-    }
-  } catch {
-    catalogCache = { mtimeMs: -1, models: [] };
-  }
-  return catalogCache.models;
-}
-
-let idWarned = false;
-
-/** ownInstanceId for walkRole: a throw gives null (every instance-owned row counts as foreign), logged once. */
-function wrapOwnId(getId) {
-  return () => {
-    try {
-      return getId();
-    } catch {
-      if (!idWarned) {
-        idWarned = true;
-        console.warn("[roles] own instance id unavailable; instance-owned rows treated as foreign");
-      }
-      return null;
-    }
-  };
-}
 
 /** The loadModels() rule: the DB's enabled rows when any parse, else models.json. Never a union. */
 function modelsFor(enabledRows) {

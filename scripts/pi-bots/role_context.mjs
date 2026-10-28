@@ -14,43 +14,9 @@
  *
  * Synchronous and never throws: a failed read leaves that part empty.
  */
-import { readFileSync, statSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { parseBindingRows, ROLE_KEY_RANGE } from "../../servers/shared/model-roles.js";
 import { providerRowToObject } from "../../servers/shared/provider-row.js";
-
-const CATALOG_PATH = fileURLToPath(new URL("../../registry/model-catalog.json", import.meta.url));
-let catalogCache = { mtimeMs: -1, models: [] };
-
-function loadCatalog() {
-  try {
-    const { mtimeMs } = statSync(CATALOG_PATH);
-    if (mtimeMs !== catalogCache.mtimeMs) {
-      const j = JSON.parse(readFileSync(CATALOG_PATH, "utf8"));
-      catalogCache = { mtimeMs, models: Array.isArray(j?.models) ? j.models : [] };
-    }
-  } catch {
-    catalogCache = { mtimeMs: -1, models: [] };
-  }
-  return catalogCache.models;
-}
-
-let idWarned = false;
-
-function wrapOwnId(getId) {
-  return () => {
-    try {
-      if (typeof getId !== "function") throw new TypeError("no ownInstanceId");
-      return getId();
-    } catch {
-      if (!idWarned) {
-        idWarned = true;
-        console.warn("[roles] own instance id unavailable; instance-owned rows treated as foreign");
-      }
-      return null;
-    }
-  };
-}
+import { loadCatalog, wrapOwnId } from "../../servers/shared/model-roles-env.js";
 
 /**
  * @param {import("better-sqlite3").Database} conn

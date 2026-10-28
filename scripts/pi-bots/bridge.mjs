@@ -68,7 +68,7 @@ import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
 import { getOrCreateLocalInstanceId } from "../../servers/gateway/instance-registry.js";
 import { TRUSTED_PEER_SQL } from "../../servers/shared/peer-trust.js";
-import { roleSnapshotPath } from "../../servers/shared/model-roles-snapshot.js";
+import { roleSnapshotPath } from "../../servers/shared/model-roles-env.js";
 
 const HOME = process.env.HOME || homedir();
 // Package was renamed from @mariozechner/pi-coding-agent to
@@ -1194,7 +1194,8 @@ export async function handleInbound(opts) {
   log("model-resolve bot=" + bot_id + " provider=" + resolved.provider + " model=" + resolved.model +
     " escalated=" + resolved.escalated + " source=" + resolved.source +
     " session=" + (effectiveResume ? "resume" : "new") + (forceNew ? " (forced-new: model changed)" : "") +
-    (resolved.role ? " role=" + resolved.role + " via=" + (resolved.chain || []).join(">") : ""));
+    (resolved.role ? " role=" + resolved.role + " via=" + (resolved.chain || []).join(">") : "") +
+    (resolved.escalationRole ? " escalation-role=" + resolved.escalationRole + " unresolved=" + resolved.escalationReason : ""));
 
   // C-6 `kind` plumb: an adapter that declares one (perch does) tags the row;
   // one that does not is left EXACTLY as before — the INSERT path defaults
