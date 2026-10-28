@@ -174,6 +174,8 @@ for (const lang of ["en", "es"]) {
         assert.equal(await p.ev("document.body.classList.contains('shell')"), true, "the new shell");
         assert.equal(await p.ev("document.querySelector('[data-ph-start]').textContent"), t("shell.startSession", lang));
         assert.deepEqual(await p.ev(NO_H_SCROLL), { doc: 0, body: 0 }, "no sideways scroll");
+        assert.deepEqual(await p.ev("(function(){ var h=document.querySelector('.content-header h2'), r=h.getBoundingClientRect(); return { text: h.textContent, small: r.width <= 1 && r.height <= 1 }; })()"),
+          { text: "A community garden with a fairly long name", small: true }, "the title is there for screen readers but not shown");
         // Before "change": Start, change, two Needs-you rows, All on Board, four sessions.
         const closed = await p.ev(small(TARGETS));
         assert.ok(closed.count >= 9, `targets on the page: ${closed.count}`);

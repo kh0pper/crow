@@ -7,8 +7,11 @@
  *            filter: a complete perch gateway, never the voice bot), by name.
  *   lead     no storage yet: the only bot; else the first whose default model
  *            is role:coordinator; else the first by name; null with none.
- *   needsYou the project's Needs-you lane (needsYouCards, the Board's order),
- *            each with its kind and its card link (drawerHrefs).
+ *   needsYou the project's Needs-you lane (needsYouItems, the Board's order),
+ *            each with its kind and the Board's own link (cardHref: its
+ *            conversation, else its drawer), then the project's waiting
+ *            sessions that hold no such card; at most 3 rows in all.
+ *            needsYouCount is the shell's count when the caller has it.
  *   sessions kind='perch-live' threads FILED to this project in shell_items
  *            (the filing, not the bot's home project), unarchived, stopped
  *            ones included, newest first, at most 10.
@@ -17,7 +20,9 @@
 import { CROW_VOICE_BOT_ID } from "../../../../shared/voice-bot.js";
 import { perchAttached } from "../../../shared/perch-attached.js";
 import { drawerHrefs } from "../../../board/card-link.js";
-import { needsYouCounts, needsYouCards } from "../board/needs-you.js";
+import { needsYouCounts, needsYouItems } from "../board/needs-you.js";
+import { threadsByCard } from "../board.js";
+import { cardHref } from "../board/html.js";
 
 export const SESSION_LIMIT = 10;
 const COORDINATOR = "role:coordinator";
@@ -94,27 +99,59 @@ export async function earlierSessions(db, projectId, { limit = SESSION_LIMIT } =
   }));
 }
 
+/** Map<threadId, label> for the given perch-live threads (the newest row's label; none when unset). */
+async function sessionLabels(db, sids) {
+  const out = new Map();
+  if (!sids.length) return out;
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT gateway_thread_id, label FROM bot_sessions WHERE kind = 'perch-live'
+              AND gateway_thread_id IN (SELECT value FROM json_each(?)) ORDER BY id`,
+      args: [JSON.stringify(sids)],
+    });
+    for (const r of rows) {
+      const l = r.label != null && String(r.label).trim() !== "" ? String(r.label) : null;
+      if (l) out.set(String(r.gateway_thread_id), l);
+    }
+  } catch (err) {
+    if (!ABSENT_RE.test(String(err && err.message))) throw err;
+  }
+  return out;
+}
+
 /**
  * Everything the home draws.
  * @param project { id, slug, name, tasks_db_uri }
  */
-export async function loadProjectHome(db, project, { engine = null, tasksDbPath } = {}) {
+export async function loadProjectHome(db, project, { engine = null, tasksDbPath, counts = null } = {}) {
   const id = Number(project.id);
   const bots = await projectBots(db, id);
   const lead = leadOf(bots);
 
   const opts = tasksDbPath ? { tasksDbPath } : {};
-  const counts = await needsYouCounts(db, [project], { engine, ...opts });
-  const needsYouCount = counts.has(id) ? counts.get(id) : null;
-  const cards = await needsYouCards(db, project, { ...opts, limit: 3 });
+  let needsYouCount;
+  if (counts instanceof Map && counts.has(id)) needsYouCount = counts.get(id);
+  else {
+    const m = await needsYouCounts(db, [project], { engine, ...opts });
+    needsYouCount = m.has(id) ? m.get(id) : null;
+  }
+  const items = await needsYouItems(db, project, { engine, ...opts, limit: 3 });
+  const ids = items.cards.map((c) => Number(c.id));
+  let threads = new Map();
   let hrefs = new Map();
-  try { hrefs = await drawerHrefs(db, cards); } catch (err) { console.warn("[project-home] card links failed:", err && err.message); }
-  const needsYou = cards.map((c) => ({
-    id: Number(c.id),
+  try {
+    threads = await threadsByCard(db, ids);
+    hrefs = await drawerHrefs(db, items.cards);
+  } catch (err) { console.warn("[project-home] card links failed:", err && err.message); }
+  const needsYou = items.cards.map((c) => ({
     title: String(c.title || ""),
     kind: c.kind,
-    href: hrefs.get(Number(c.id)) || `/dashboard/bot-board?card=${Number(c.id)}`,
+    href: cardHref(c, threads, hrefs),
   }));
+  const labels = await sessionLabels(db, items.waiting.map((w) => w.sid));
+  for (const w of items.waiting) {
+    needsYou.push({ title: labels.get(w.sid) || null, kind: null, href: `/dashboard/perch#${encodeURIComponent(w.sid)}` });
+  }
 
   const sessions = await earlierSessions(db, id);
   return { lead, bots, needsYou, needsYouCount, sessions };

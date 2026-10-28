@@ -47,15 +47,17 @@ function decode(v) {
 }
 
 /** "all" | "unassigned" | a slug → the scope it means on this instance, and the value to store. */
-async function scopeFromValue(db, value) {
+async function scopeFromValue(db, value, { slugOnly = false } = {}) {
   const v = typeof value === "string" ? value.trim() : "";
-  if (v === "unassigned") return { scope: { unassigned: true }, value: "unassigned" };
-  if (!v || v === "all") return { scope: EVERYTHING, value: "all" };
+  // slugOnly (a project home's path): the value is a slug and nothing else, no
+  // keyword and no id; anything that is no live slug is Everything.
+  if (!slugOnly && v === "unassigned") return { scope: { unassigned: true }, value: "unassigned" };
+  if (!v || (!slugOnly && v === "all")) return { scope: EVERYTHING, value: "all" };
   try {
     // By slug first; a bare positive integer that is no slug is a project id
     // (older links, e.g. the bot board's ?project=<id>). Either way the
     // stored value is the slug.
-    const byId = /^[1-9]\d*$/.test(v);
+    const byId = !slugOnly && /^[1-9]\d*$/.test(v);
     const { rows } = await db.execute({
       sql: `SELECT id, slug FROM project_spaces WHERE (slug = ?${byId ? " OR id = ?" : ""}) AND ${ACTIVE_PROJECT_WHERE}
             ORDER BY (slug = ?) DESC LIMIT 1`,
@@ -181,7 +183,7 @@ export async function resolveShellPage(req, res, db, panelId, lang = "en") {
   const homeSlug = panelId === "project-home" && req.params && typeof req.params.slug === "string" ? req.params.slug : null;
   let scope;
   if (panelId === "project-home") {
-    scope = homeSlug ? (await scopeFromValue(db, homeSlug)).scope : EVERYTHING;
+    scope = homeSlug ? (await scopeFromValue(db, homeSlug, { slugOnly: true })).scope : EVERYTHING;
   } else {
     const r = await resolveScope(req, db);
     scope = r.scope;
@@ -193,5 +195,7 @@ export async function resolveShellPage(req, res, db, panelId, lang = "en") {
   let counts = new Map();
   try { counts = await needsYouCounts(db, projects, { engine: getInteractiveEngine({ createIfMissing: false }) }); }
   catch (err) { console.warn("[shell] needs-you counts failed:", err.message); }
+  // The project home reads the same Map rather than counting again.
+  req.crowShellCounts = counts;
   return { variant: "shell", shell: { scope, projects, counts, homeSlug, tab: TAB_OF[panelId] ?? null } };
 }

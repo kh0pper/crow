@@ -48,6 +48,8 @@ before(async () => {
   P.solo = Number(proj.run("solo", "Solo", "general", "active", null, null).lastInsertRowid);
   P.named = Number(proj.run("named", "Named", "general", "active", null, null).lastInsertRowid);
   P.empty = Number(proj.run("empty", "Empty", "general", "active", null, null).lastInsertRowid);
+  P.waits = Number(proj.run("waits", "Waits", "general", "active", null, null).lastInsertRowid);
+  P.numeric = Number(proj.run("4242", "Numeric slug", "general", "active", null, null).lastInsertRowid);
   c.prepare("INSERT INTO oauth_tokens (token, token_type, client_id, expires_at, created_at) VALUES (?, 'access', 'dashboard', datetime('now','+1 day'), ?)")
     .run(hashToken("new-sess"), "2026-06-01 00:00:00");
 
@@ -77,6 +79,15 @@ before(async () => {
   file.run("perchlive-cccccccc", P.garden);
   file.run("perchlive-dddddddd", P.kitchen);
   file.run("perchlive-ffffffff", P.garden);
+  // A conversation on Garden's review card (card 2), never filed: the card opens it.
+  sess.run("hank", "perch-live", "active", "perchlive-abababab", "On the soil card", null, P.garden, "2026-10-01 00:00:00", "2026-10-01 00:00:00");
+  c.prepare("UPDATE bot_sessions SET card_id = 2 WHERE gateway_thread_id = 'perchlive-abababab'").run();
+  // Waits: three sessions waiting on a person, filed to it; one holds its Needs-you card (card 6).
+  for (const [sid, label] of [["perchlive-0a0a0a0a", "Waiting on you"], ["perchlive-0b0b0b0b", null], ["perchlive-0c0c0c0c", "Holds the card"], ["perchlive-0d0d0d0d", "Third waiter"]]) {
+    sess.run("ivy", "perch-live", "waiting-user", sid, label, null, P.waits, "2026-10-01 00:00:00", "2026-10-01 00:00:00");
+    file.run(sid, P.waits);
+  }
+  c.prepare("UPDATE bot_sessions SET card_id = 6 WHERE gateway_thread_id = 'perchlive-0c0c0c0c'").run();
   c.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, sha TEXT)");
   for (const id of ["0001-board-stages", "0002-board-defs", "0003-tracker-convergence"]) {
     c.prepare("INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, datetime('now'))").run(id);
@@ -118,6 +129,7 @@ before(async () => {
   add.run("Where does the hose go?", P.garden, "pending", 3, "Front or back?", "{}");
   add.run("Order more mulch?", P.garden, "pending", 4, "How many bags?", "{}");
   add.run("Rake the leaves", P.garden, "pending", 5, null, "{}");
+  add.run("Which shed?", P.waits, "pending", 1, "Pick one", "{}"); // card 6
   tw.prepare("INSERT INTO board_results (item_id, actor_kind, outcome, status) VALUES (?, 'bot', 'success', 'recorded')").run(review);
   tw.close();
 
@@ -182,13 +194,15 @@ test("the home renders start, needs-you and earlier sessions for the slug", asyn
     ["question", "Question", "Where does the hose go?"],
   ], "three rows, in the Board's order, each with its kind");
   assert.match(needs, /4 need you/);
-  // Each row opens its card's drawer by the one card-link rule (the project's card-board bot).
+  // Each row opens its card the way the Board does: its conversation, else its drawer.
   const { drawerHrefs } = await import("../servers/gateway/board/card-link.js");
   const { createDbClient } = await import("../servers/db.js");
   const db = createDbClient();
   try {
-    const hrefs = await drawerHrefs(db, [1, 2, 3]);
-    for (const id of [1, 2, 3]) assert.ok(needs.includes(`href="${hrefs.get(id)}"`), `card ${id} links to ${hrefs.get(id)}`);
+    const hrefs = await drawerHrefs(db, [1, 3]);
+    const links = [...needs.matchAll(/class="ph-row" href="([^"]+)"/g)].map((m) => m[1]);
+    assert.deepEqual(links, [hrefs.get(1), "/dashboard/perch#perchlive-abababab", hrefs.get(3)]);
+    assert.match(hrefs.get(1), /^\/dashboard\/bot-board\?bot=hank#open=1$/, "a card without a conversation opens its drawer");
   } finally { db.close(); }
   assert.match(needs, /href="\/dashboard\/board\?project=garden">All on Board</);
 
@@ -208,12 +222,52 @@ test("the home renders start, needs-you and earlier sessions for the slug", asyn
 test("a project whose cards live elsewhere shows it can't count them; a project with none says so", async () => {
   const k = await get("/dashboard/project/kitchen", jarNew());
   assert.equal(k.status, 200);
+  // The shell's own count (an activeProjects row, no tasks_db_uri on it) still knows Kitchen keeps its own store.
+  assert.match(k.body, /<a href="\/dashboard\/project\/kitchen" class="shell-project is-current" aria-current="page">[\s\S]*?<span class="shell-project-sub">\?<\/span>/);
   assert.match(section(k.body, "ph-needs"), /Can&#39;t count this project&#39;s cards here|Can't count this project's cards here/);
   const e = await get("/dashboard/project/empty", jarNew());
   assert.match(section(e.body, "ph-needs"), /Nothing needs you/);
   assert.match(section(e.body, "ph-start"), /This project has no bots yet/);
   assert.match(section(e.body, "ph-start"), /href="\/dashboard\/bot-builder"/);
   assert.match(section(e.body, "ph-earlier"), /No sessions yet/);
+});
+
+test("the home's title is visually hidden, not removed (the chip names the project)", async () => {
+  const r = await get("/dashboard/project/garden", jarNew());
+  assert.match(r.body, /<h2>Garden<\/h2>/, "still in the page for screen readers");
+  assert.match(r.body, /body\.shell:has\(\[data-ph\]\) \.content-header h2 \{[^}]*clip-path: inset\(50%\)/);
+  assert.doesNotMatch(r.body, /:has\(\[data-ph\]\) \.content-header h2 \{[^}]*display: none/);
+});
+
+test("waiting sessions that hold no Needs-you card are rows too, three rows at most", async () => {
+  const { createDbClient } = await import("../servers/db.js");
+  const db = createDbClient();
+  const waiting = (ids) => ({ list: async () => ids.map((sid) => ({ sessionId: sid, botId: "ivy", state: "waiting", pendingUi: { kind: "ask" } })) });
+  try {
+    const project = { id: P.waits, slug: "waits", name: "Waits", tasks_db_uri: null };
+    const all = ["perchlive-0a0a0a0a", "perchlive-0b0b0b0b", "perchlive-0c0c0c0c", "perchlive-0d0d0d0d"];
+    const h = await data.loadProjectHome(db, project, { engine: waiting(all) });
+    assert.deepEqual(h.needsYou.map((r) => [r.kind, r.title, r.href.startsWith("/dashboard/perch#") ? r.href : "card"]), [
+      ["question", "Which shed?", "/dashboard/perch#perchlive-0c0c0c0c"], // the card opens the conversation that holds it
+      [null, "Waiting on you", "/dashboard/perch#perchlive-0a0a0a0a"],
+      [null, null, "/dashboard/perch#perchlive-0b0b0b0b"],
+    ], "the card, then waiting sessions (not the one holding the card), capped at 3");
+    assert.equal(h.needsYouCount, 4, "1 card + 3 sessions that hold none of its cards");
+    // The shell's Map is used as is when the caller has it.
+    const reused = await data.loadProjectHome(db, project, { engine: waiting([]), counts: new Map([[P.waits, 42]]) });
+    assert.equal(reused.needsYouCount, 42);
+  } finally { db.close(); }
+});
+
+test("a waiting row renders with its label, or Untitled, and no chip", async () => {
+  const { projectHomeHtml } = await import("../servers/gateway/dashboard/panels/project-home/html.js");
+  const html = projectHomeHtml({ lead: null, bots: [], needsYouCount: 2, sessions: [], needsYou: [
+    { kind: null, title: "Waiting on you", href: "/dashboard/perch#perchlive-0a0a0a0a" },
+    { kind: null, title: null, href: "/dashboard/perch#perchlive-0b0b0b0b" },
+  ] }, { id: P.waits, slug: "waits" }, "en");
+  assert.match(html, /<a class="ph-row" href="\/dashboard\/perch#perchlive-0a0a0a0a"><span class="ph-row-title">Waiting on you</);
+  assert.match(html, /<a class="ph-row" href="\/dashboard\/perch#perchlive-0b0b0b0b"><span class="ph-row-title">Untitled session</);
+  assert.doesNotMatch(html, /ph-kind/);
 });
 
 test("the lead rule: one bot; coordinator; by name; none", async () => {
@@ -243,13 +297,19 @@ test("earlier sessions follow the shell_items filing", async () => {
 });
 
 test("unknown slug 404s without a cookie", async () => {
-  for (const slug of ["nope", "attic", "unassigned", "all", String(P.garden)]) {
+  for (const slug of ["nope", "attic", "unassigned", "all", String(P.garden), String(P.kitchen)]) {
     const r = await get("/dashboard/project/" + slug, jarNew());
     assert.equal(r.status, 404, slug);
     assert.match(r.body, /This project isn(&#39;|')t here/, slug);
     assert.match(r.body, /<button type="button" class="ph-start-btn" data-shell-open="shell-drawer"[^>]*>Back to projects</, slug);
     assert.deepEqual(scopeCookies(r.cookies), [], `no scope cookie for ${slug}`);
+    assert.equal((r.body.match(/class="shell-scope-name">([^<]*)</) || [])[1], "Everything", `${slug}: the header shows Everything`);
+    assert.match(r.body, /<h2>Project<\/h2>/, `${slug}: the layout title is the neutral panel name`);
   }
+  // A slug that looks like a number is still a slug.
+  const num = await get("/dashboard/project/4242", jarNew());
+  assert.equal(num.status, 200);
+  assert.equal((num.body.match(/class="shell-scope-name">([^<]*)</) || [])[1], "Numeric slug");
   // /dashboard/project-home (the panel id, no slug) is no page either.
   assert.equal((await get("/dashboard/project-home", jarNew())).status, 404);
 });
@@ -310,7 +370,7 @@ test("relative day: today, yesterday, a weekday, a date", () => {
 test("en and es strings exist for every new key", () => {
   const keys = ["startSession", "with", "changeLead", "leadPick", "noProjectBots", "makeBot", "allOnBoard", "nothingNeedsYou",
     "countUnknown", "kindDecision", "kindReview", "kindQuestion", "earlierSessions", "untitledSession", "noSessions",
-    "today", "yesterday", "projectMissing", "backToProjects"].map((k) => "shell." + k);
+    "today", "yesterday", "projectPage", "projectMissing", "backToProjects"].map((k) => "shell." + k);
   for (const k of keys) {
     const e = i18n.translations[k];
     assert.ok(e && e.en && e.es, k);

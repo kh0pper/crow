@@ -3873,6 +3873,7 @@ export const translations = {
   "shell.noSessions": { en: "No sessions yet", es: "Aún no hay sesiones" },
   "shell.today": { en: "Today", es: "Hoy" },
   "shell.yesterday": { en: "Yesterday", es: "Ayer" },
+  "shell.projectPage": { en: "Project", es: "Proyecto" },
   "shell.projectMissing": { en: "This project isn't here", es: "Este proyecto no está aquí" },
   "shell.backToProjects": { en: "Back to projects", es: "Volver a los proyectos" },
 

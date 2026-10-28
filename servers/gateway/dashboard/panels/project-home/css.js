@@ -60,5 +60,11 @@ export function projectHomeCss() {
   body.shell .ph-row:focus-visible, body.shell .ph-link:focus-visible,
   body.shell .ph-pick select:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }
   body.shell .ph-missing { align-items: flex-start; gap: 12px; }
+  /* The chip already names the project: the header title stays for screen
+     readers only (visually hidden, never display:none). */
+  body.shell:has([data-ph]) .content-header h2 {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0;
+  }
 </style>`;
 }

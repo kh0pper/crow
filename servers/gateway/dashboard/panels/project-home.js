@@ -46,9 +46,10 @@ export default {
     const project = await projectFor(db, req);
     if (!project) {
       res.status(404);
-      return layout({ title: t("shell.projectMissing", lang), content: projectHomeCss() + projectMissingHtml(lang) });
+      return layout({ title: t("shell.projectPage", lang), content: projectHomeCss() + projectMissingHtml(lang) });
     }
-    const data = await loadProjectHome(db, project, { engine });
+    // The shell already counted every project for the drawer (resolveShellPage).
+    const data = await loadProjectHome(db, project, { engine, counts: req.crowShellCounts || null });
     return layout({
       title: project.name,
       content: projectHomeCss() + projectHomeHtml(data, project, lang) + projectHomeClientJs(lang),

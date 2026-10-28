@@ -32,13 +32,17 @@ async function asProjects(db, projects) {
   const list = [...(projects || [])];
   const out = [];
   for (const p of list) {
-    if (p && typeof p === "object") { out.push({ id: Number(p.id), tasks_db_uri: p.tasks_db_uri ?? null }); continue; }
+    // A row that carries tasks_db_uri is trusted; one without the key (e.g. an
+    // activeProjects row: id, slug, name) has its store read here, so a project
+    // with its own store is never counted against the shared one.
+    if (p && typeof p === "object" && "tasks_db_uri" in p) { out.push({ id: Number(p.id), tasks_db_uri: p.tasks_db_uri ?? null }); continue; }
+    const id = Number(p && typeof p === "object" ? p.id : p);
     let uri = null;
     try {
-      const { rows } = await db.execute({ sql: "SELECT tasks_db_uri FROM project_spaces WHERE id = ?", args: [Number(p)] });
+      const { rows } = await db.execute({ sql: "SELECT tasks_db_uri FROM project_spaces WHERE id = ?", args: [id] });
       uri = rows[0] ? rows[0].tasks_db_uri : null;
     } catch { /* no project_spaces: treat as the shared store */ }
-    out.push({ id: Number(p), tasks_db_uri: uri });
+    out.push({ id, tasks_db_uri: uri });
   }
   return out;
 }
@@ -141,29 +145,61 @@ export function needsYouLabel(n, lang = "en") {
   return t("shell.needYou", lang).replace("{n}", String(n));
 }
 
+/** The kind of ask a Needs-you card is, or null when it carries none of the three. */
+function kindOf(c) {
+  if (openDecision(c)) return "decision";
+  if (c.latest_result_status === "recorded") return "review";
+  if (String(c.action_needed ?? "").trim() !== "") return "question";
+  return null;
+}
+
+/** The project's whole Needs-you lane (Board order), read from an open tasks.db. */
+async function needsLane(db, tdb, projectId) {
+  const rows = await laneRows(tdb, { projectId: Number(projectId) });
+  const lockMap = await lockMapFor(db, rows.map((r) => r.id));
+  const defs = await defsFor(tdb, rows);
+  return groupByLane(rows, defs, lockMap).needs_you;
+}
+
 /**
- * The project's Needs-you cards in the Board's own order, each with the kind
- * of ask: a decision (open decision), a review (recorded result) or a question.
- * An own-store project, or no tasks.db, has none to show here.
+ * The project's Needs-you items: its cards in the Board's own order, each with
+ * the kind of ask (a decision, a review, a question, or null), then its
+ * waiting sessions that hold none of those cards (read the way the count reads
+ * them), [{ sid }]. At most `limit` items in all, cards first. An own-store
+ * project, or no tasks.db, has no cards to show here (its waiting sessions
+ * are still listed when the tasks.db exists).
  */
-export async function needsYouCards(db, project, { tasksDbPath = TASKS_DB, limit = 3 } = {}) {
-  if (!project || !inSharedStore(project, tasksDbPath) || !existsSync(tasksDbPath)) return [];
+export async function needsYouItems(db, project, { engine = null, tasksDbPath = TASKS_DB, limit = 3 } = {}) {
+  const none = { cards: [], waiting: [] };
+  if (!project || !existsSync(tasksDbPath)) return none;
+  const shared = inSharedStore(project, tasksDbPath);
   let tdb;
   try {
-    tdb = createDbClient(tasksDbPath);
-    const rows = await laneRows(tdb, { projectId: Number(project.id) });
-    const lockMap = await lockMapFor(db, rows.map((r) => r.id));
-    const defs = await defsFor(tdb, rows);
-    const top = groupByLane(rows, defs, lockMap).needs_you.slice(0, limit);
-    const full = await cardsByIds(tdb, top.map((r) => r.id));
-    return top.map((r) => full.get(r.id)).filter(Boolean).map((c) => ({
-      ...c,
-      kind: openDecision(c) ? "decision" : c.latest_result_status === "recorded" ? "review" : "question",
-    }));
+    let cards = [];
+    let held = new Set();
+    if (shared) {
+      tdb = createDbClient(tasksDbPath);
+      const needs = await needsLane(db, tdb, project.id);
+      held = new Set(needs.map((c) => c.id));
+      const top = needs.slice(0, limit);
+      const full = await cardsByIds(tdb, top.map((r) => r.id));
+      cards = top.map((r) => full.get(r.id)).filter(Boolean).map((c) => ({ ...c, kind: kindOf(c) }));
+    }
+    const room = Math.max(0, limit - cards.length);
+    const waiting = room && shared
+      ? ((await waitingByProject(db, engine)).get(Number(project.id)) || [])
+        .filter((w) => !(w.cardId != null && held.has(w.cardId))).slice(0, room).map((w) => ({ sid: w.sid }))
+      : [];
+    return { cards, waiting };
   } catch (err) {
-    if (!ABSENT_RE.test(String(err && err.message))) console.warn("[needs-you] cards failed:", err && err.message);
-    return [];
+    if (!ABSENT_RE.test(String(err && err.message))) console.warn("[needs-you] items failed:", err && err.message);
+    return none;
   } finally {
     if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
   }
+}
+
+/** The project's Needs-you cards alone (needsYouItems without its waiting sessions). */
+export async function needsYouCards(db, project, { tasksDbPath = TASKS_DB, limit = 3 } = {}) {
+  return (await needsYouItems(db, project, { tasksDbPath, limit })).cards;
 }

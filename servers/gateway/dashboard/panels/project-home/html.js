@@ -45,7 +45,11 @@ function needsSection(data, project, lang) {
   if (!n && !data.needsYou.length) {
     return `<section class="ph-section ph-needs">${head}<p class="ph-line">${escapeHtml(t("shell.nothingNeedsYou", lang))}</p></section>`;
   }
-  const rows = data.needsYou.map((c) => `<li><a class="ph-row" href="${escapeHtml(c.href)}"><span class="ph-kind ph-kind--${escapeHtml(c.kind)}">${escapeHtml(t(KIND_KEY[c.kind] || KIND_KEY.question, lang))}</span><span class="ph-row-title">${escapeHtml(c.title)}</span></a></li>`).join("");
+  // A card's chip names its kind of ask; a waiting session (or a card with none) has no chip.
+  const rows = data.needsYou.map((c) => {
+    const chip = KIND_KEY[c.kind] ? `<span class="ph-kind ph-kind--${escapeHtml(c.kind)}">${escapeHtml(t(KIND_KEY[c.kind], lang))}</span>` : "";
+    return `<li><a class="ph-row" href="${escapeHtml(c.href)}">${chip}<span class="ph-row-title">${escapeHtml(c.title || t("shell.untitledSession", lang))}</span></a></li>`;
+  }).join("");
   const label = needsYouLabel(n, lang);
   return `<section class="ph-section ph-needs">${head}
       ${label ? `<p class="ph-sub">${escapeHtml(label)}</p>` : ""}
