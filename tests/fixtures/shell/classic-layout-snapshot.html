@@ -907,17 +907,6 @@
   .health-stat-row:last-child { border-bottom: none; }
   .health-stat-label { color: var(--crow-text-muted); font-size: 0.8rem; }
   .health-stat-value { font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; }
-  /* ─── Crow PTT (glasses voice turn) ─── */
-  .crow-ptt-btn.active {
-    background: #dc2626;
-    border-color: #dc2626;
-    color: #fff;
-    animation: crow-ptt-pulse 1.2s ease-in-out infinite;
-  }
-  @keyframes crow-ptt-pulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.6); }
-    50%      { box-shadow: 0 0 0 6px rgba(220,38,38,0); }
-  }
   /* ─── Incoming Call Toast ─── */
   .crow-call-toast {
     position: fixed;
