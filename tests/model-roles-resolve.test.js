@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   CORE_ROLES, isRoleRef, roleIdOf, isValidCustomRoleId,
-  resolveRoleKey, isConfigured, sameServer, isCloudKey, cloudStatus,
+  resolveRoleKey, resolveChosenRoleKey, isConfigured, sameServer, isCloudKey, cloudStatus,
 } from "../servers/shared/model-roles.js";
 
 const prov = (id, modelIds, extra = {}) => ({
@@ -19,7 +19,7 @@ const run = (key, o) => {
 };
 
 test("vocabulary matches the spec table", () => {
-  assert.deepEqual(CORE_ROLES.map((r) => r.id), ["quick", "everyday", "deep", "coordinator", "critic", "expert", "vision", "embed", "rerank", "safety"]);
+  // the full id list is pinned in tests/model-roles-vocabulary.test.js
   const by = Object.fromEntries(CORE_ROLES.map((r) => [r.id, r]));
   assert.deepEqual(by.coordinator.defaultFallback, ["deep", "everyday"]);
   assert.equal(by.deep.allowHeavy, true);
@@ -263,4 +263,41 @@ test("cloudStatus locality: only IP literals, own addresses and local suffixes a
   assert.equal(st("https://x.tail12345.ts.net/v1"), "unknown");
   assert.equal(st("https://x.tail12345.ts.net/v1", { localSuffixes: [".tail12345.ts.net"] }), "local");
   assert.equal(st("http://box.local/v1", { localSuffixes: [".tail12345.ts.net"] }), "unknown");
+});
+
+test("media role refused", () => {
+  const providers = [prov("local-tts", ["k"])];
+  const r = run("role:tts", { providers, bindings: { tts: { model: "local-tts/k" } } });
+  assert.deepEqual({ key: r.key, role: r.role, chain: r.chain, reason: r.reason }, { key: null, role: "tts", chain: [], reason: "capability" });
+  const c = resolveChosenRoleKey("role:tts", { bindings: { tts: { model: "local-tts/k" } }, providers, models: modelsOf(providers) });
+  assert.deepEqual({ key: c.key, reason: c.reason }, { key: null, reason: "capability" });
+});
+
+test("broken chosen voice does not walk to quick", () => {
+  const providers = [prov("local-chat", ["m1"])];
+  const bindings = { voice: { model: "local-voice/m2" }, quick: { model: "local-chat/m1" } };
+  const r = run("role:voice", { providers, bindings });
+  assert.deepEqual({ key: r.key, role: r.role, chain: r.chain, reason: r.reason }, { key: null, role: "voice", chain: ["voice"], reason: "not_configured" });
+  const r2 = run("role:voice", { providers, bindings: { ...bindings, voice: { model: "local-voice/m2", fallback: ["quick"] } } });
+  assert.deepEqual({ key: r2.key, reason: r2.reason }, { key: "local-chat/m1", reason: "fallback" });
+});
+
+test("safety has no default chain", () => {
+  const providers = [prov("local-chat", ["m1"])];
+  const r = run("role:safety", { providers, bindings: { safety: { model: "local-cls/x" }, quick: { model: "local-chat/m1" } } });
+  assert.equal(r.key, null);
+});
+
+test("chosen-only", () => {
+  const providers = [prov("local-chat", ["m1"])];
+  const base = { providers, models: modelsOf(providers), catalog: [] };
+  const seeded = { quick: { model: "local-chat/m1", seeded: true } };
+  assert.equal(resolveChosenRoleKey("role:safety", { ...base, bindings: seeded }).reason, "not_chosen");
+  const q = resolveChosenRoleKey("role:quick", { ...base, bindings: seeded });
+  assert.deepEqual({ key: q.key, role: q.role, chain: q.chain, reason: q.reason }, { key: null, role: "quick", chain: [], reason: "not_chosen" });
+  assert.equal(resolveChosenRoleKey("role:quick", { ...base, bindings: { quick: { model: null } } }).reason, "not_chosen");
+  const v = resolveChosenRoleKey("role:voice", { ...base, bindings: { ...seeded, voice: { model: "role:quick" } } });
+  assert.equal(v.key, "local-chat/m1");
+  const raw = resolveChosenRoleKey("local-chat/m1", base);
+  assert.deepEqual({ key: raw.key, reason: raw.reason }, { key: "local-chat/m1", reason: "raw" });
 });
