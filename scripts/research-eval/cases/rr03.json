@@ -32,7 +32,9 @@
       "pacing to generate",
       "on pace to generate",
       "on track to generate",
-      "pacing to bring in"
+      "pacing to bring in",
+      "on pace to bring in",
+      "on track to bring in"
     ],
     "snippet_value": [
       "run rate",

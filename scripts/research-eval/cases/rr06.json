@@ -8,7 +8,7 @@
       {
         "title": "Oxtarra Cloud's inference bill",
         "url": "https://wexplat-metrics.example/oxtarra-inference",
-        "description": "Glorbin Courant-leaked Oxtarra data: $2 spent per $1 earned."
+        "description": "Glorbin Courant-leaked Oxtarra data: $4 spent for every $1 earned."
       },
       {
         "title": "Inside Oxtarra Cloud's inference costs",
@@ -20,7 +20,7 @@
       {
         "title": "Oxtarra Cloud's inference bill",
         "url": "https://wexplat-metrics.example/oxtarra-inference",
-        "description": "Glorbin Courant-leaked Oxtarra data: $2 spent per $1 earned."
+        "description": "Glorbin Courant-leaked Oxtarra data: $4 spent for every $1 earned."
       },
       {
         "title": "Inside Oxtarra Cloud's inference costs",
@@ -44,10 +44,14 @@
       "$5.02bn"
     ],
     "snippet_value": [
-      "$2 per $1",
-      "$2 for every $1",
-      "$2 spent per $1",
-      "two dollars for every dollar"
+      "$4 spent for every $1",
+      "$4 for every $1",
+      "$4 per $1",
+      "$4 spent per $1",
+      "US$4 for every US$1",
+      "four dollars for every dollar",
+      "4-to-1",
+      "4 to 1"
     ],
     "attribution": {
       "right": [
