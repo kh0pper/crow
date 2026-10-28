@@ -28,7 +28,7 @@ import { resolveDatasetPath } from "../shared/sqlite-datasets.js";
 import { SOURCE_TYPES } from "./source-types.js";
 import { statusLabel, UNFETCHED_LABEL } from "./fetch-labels.js";
 import { UNKNOWN, resolveCallActor, auditActor, actorLabel } from "./actor.js";
-import { ensureProvenanceSchema } from "./ensure-schema.js";
+import { ensureProvenanceSchema, ensureWithdrawalSchema } from "./ensure-schema.js";
 import { fetchPage as defaultFetchPage, splitFetchedText, storedTextMaybeTruncated, PREVIEW_CHARS, FETCHED_TEXT_MAX, REFETCH_AFTER_DAYS } from "../shared/fetch-page.js";
 import { matchQuote } from "./quote-match.js";
 import { braveSearch } from "../shared/brave-search.js";
@@ -204,6 +204,30 @@ function readySchema(path, now = Date.now) {
   return r;
 }
 
+// The same backoff for 0015's note withdrawal columns, kept apart so a path whose withdrawal
+// columns fail to land stays provenance-ready (only crow_withdraw_note degrades).
+const withdrawReadyPaths = new Set();
+const withdrawAttempts = new Map(); // path -> { at, result }
+
+function readyWithdrawal(path, now = Date.now) {
+  if (!path) return { ready: false, state: "error", reason: "no database path" };
+  if (withdrawReadyPaths.has(path)) return { ready: true, state: "ready" };
+  if (path === ":memory:" || !existsSync(path)) {
+    return { ready: false, state: "error", reason: "not a database file" };
+  }
+  const t = now();
+  const last = withdrawAttempts.get(path);
+  if (last && t - last.at < SCHEMA_RETRY_MS) return { ...last.result };
+  const r = ensureWithdrawalSchema(path);
+  if (r.ready) {
+    withdrawReadyPaths.add(path);
+    withdrawAttempts.delete(path);
+  } else {
+    withdrawAttempts.set(path, { at: t, result: r });
+  }
+  return r;
+}
+
 // --- Fetch-before-cite helpers (crow_add_source, crow_fetch_source; also used by the note,
 // verify and bibliography tools) ---
 
@@ -242,11 +266,12 @@ const FETCH_COLUMN_NAMES = ["fetch_status", "fetched_at", "final_url", "http_sta
 
 /**
  * Check every quote note on a source against `text` (stored fetched_text form). Writes nothing.
+ * `liveSql` narrows the notes (the server passes its live-note filter, which skips withdrawn notes).
  * @returns {Promise<Array<{note_id: number, found: 1|0|null}>>}
  */
-export async function recheckQuotes(db, sourceId, text) {
+export async function recheckQuotes(db, sourceId, text, liveSql = "") {
   const { rows } = await db.execute({
-    sql: "SELECT id, content FROM research_notes WHERE source_id = ? AND note_type = 'quote' ORDER BY id",
+    sql: `SELECT id, content FROM research_notes WHERE source_id = ? AND note_type = 'quote'${liveSql} ORDER BY id`,
     args: [sourceId],
   });
   const t = String(text || "");
@@ -408,10 +433,23 @@ export function createProjectServer(dbPath, options = {}) {
   const schemaPath = dbPath || resolveDbPath();
   const now = typeof options.now === "function" ? options.now : Date.now;
   const schema = { ...readySchema(schemaPath, now) };
+  // 0015's withdrawal columns are readied separately: when they are missing only
+  // crow_withdraw_note refuses (and crow_add_note skips created_by); every other tool runs.
+  schema.withdrawReady = readyWithdrawal(schemaPath, now).ready;
   const refreshSchema = () => {
-    if (!schema.ready) Object.assign(schema, { reason: undefined }, readySchema(schemaPath, now));
+    if (!schema.ready) {
+      const { withdrawReady } = schema;
+      Object.assign(schema, { reason: undefined }, readySchema(schemaPath, now), { withdrawReady });
+    }
+    if (!schema.withdrawReady) schema.withdrawReady = readyWithdrawal(schemaPath, now).ready;
     return schema;
   };
+  const withdrawalReady = () => schema.withdrawReady || refreshSchema().withdrawReady;
+  // The live-note filter: " AND <alias.>withdrawn_at IS NULL" once the withdrawal columns exist,
+  // else "" (no note can be withdrawn before then). Every note count and quote check uses it. It
+  // retries readiness (under the same backoff), so a server built before another one landed the
+  // columns never counts a note that was withdrawn since.
+  const liveNote = (alias = "") => (withdrawalReady() ? ` AND ${alias ? `${alias}.` : ""}withdrawn_at IS NULL` : "");
 
   const server = new McpServer(
     { name: "crow-projects", version: "0.1.0" },
@@ -461,7 +499,7 @@ export function createProjectServer(dbPath, options = {}) {
     async ({ status, type, limit, offset }) => {
       let sql = `
         SELECT p.*, COUNT(s.id) as source_count,
-               (SELECT COUNT(*) FROM research_notes n WHERE n.project_id = p.id) as note_count
+               (SELECT COUNT(*) FROM research_notes n WHERE n.project_id = p.id${liveNote("n")}) as note_count
         FROM project_spaces p
         LEFT JOIN research_sources s ON s.project_id = p.id
         WHERE p.archived_at IS NULL
@@ -760,7 +798,7 @@ export function createProjectServer(dbPath, options = {}) {
       }
 
       const { rows: relied } = await db.execute({
-        sql: "SELECT id FROM research_notes WHERE source_id = ? AND note_type = 'quote' AND quote_found = 1 ORDER BY id",
+        sql: `SELECT id FROM research_notes WHERE source_id = ? AND note_type = 'quote' AND quote_found = 1${liveNote()} ORDER BY id`,
         args: [id],
       });
       if (relied.length > 0 && src.fetched_text != null && !(force && actor.kind === "owner")) {
@@ -778,9 +816,9 @@ export function createProjectServer(dbPath, options = {}) {
         sql: `UPDATE research_sources SET ${FETCH_COLUMN_NAMES.map((c) => `${c} = ?`).join(", ")} WHERE id = ?`,
         args: [...FETCH_COLUMN_NAMES.map((c) => cols[c]), id],
       });
-      const checks = await recheckQuotes(db, id, cols.fetched_text);
+      const checks = await recheckQuotes(db, id, cols.fetched_text, liveNote());
       for (const c of checks) {
-        await db.execute({ sql: "UPDATE research_notes SET quote_found = ? WHERE id = ?", args: [c.found, c.note_id] });
+        await db.execute({ sql: `UPDATE research_notes SET quote_found = ? WHERE id = ?${liveNote()}`, args: [c.found, c.note_id] });
       }
       // New text that a quote no longer matches breaks a quotes_checked verification: clear it.
       let invalidated = false;
@@ -865,8 +903,9 @@ export function createProjectServer(dbPath, options = {}) {
       }
       const source = sourceRows[0];
 
+      const wReady = withdrawalReady();
       const { rows: notes } = await db.execute({
-        sql: `SELECT id, note_type, content${ready ? ", provenance, quote_found, locator" : ""} FROM research_notes WHERE source_id = ? ORDER BY created_at DESC`,
+        sql: `SELECT id, note_type, content${ready ? ", provenance, quote_found, locator" : ""}${wReady ? ", withdrawn_at, withdrawn_by, withdrawn_reason" : ""} FROM research_notes WHERE source_id = ? ORDER BY created_at DESC`,
         args: [id],
       });
 
@@ -915,11 +954,19 @@ export function createProjectServer(dbPath, options = {}) {
       if (source.abstract) text += `\nAbstract:\n${storedBlock(source.abstract)}\n`;
       if (source.content_summary) text += `\nSummary:\n${storedBlock(source.content_summary)}\n`;
       if (notes.length > 0) {
-        text += `\nNotes (${notes.length}):\n`;
+        const withdrawnCount = notes.filter((n) => n.withdrawn_at != null).length;
+        const liveCount = notes.length - withdrawnCount;
+        text += withdrawnCount > 0
+          ? `\nNotes (${liveCount}, plus ${withdrawnCount} withdrawn):\n`
+          : `\nNotes (${notes.length}):\n`;
         text += notes.map((n) => {
           let head = `  [${n.note_type}]`;
-          if (ready) {
-            head += ` provenance: ${noteProvLabel(n.provenance)}`;
+          if (ready) head += ` provenance: ${noteProvLabel(n.provenance)}`;
+          if (n.withdrawn_at != null) {
+            // The reason is caller-written: it goes inside the stored-content markers.
+            head += `\n  ${n.note_type} #${n.id}: WITHDRAWN ${oneLine(n.withdrawn_at, 40)} by ${oneLine(n.withdrawn_by || "unknown", 60)}`;
+            if (n.withdrawn_reason) head += `\n  reason:\n${storedBlock(n.withdrawn_reason)}`;
+          } else if (ready) {
             if (n.note_type === "quote") {
               const q = n.quote_found === 1 ? "found" : n.quote_found === 0 ? "NOT FOUND on the fetched page" : "not checked";
               head += `\n  quote #${n.id}: ${q}`;
@@ -998,12 +1045,18 @@ export function createProjectServer(dbPath, options = {}) {
         // On the stale path the notes' quote_found still describes the old copy, so only the
         // note set is guarded there; the found values are written after.
         const foundGuard = extraSet ? "" : " OR quote_found IS NOT 1";
+        // Withdrawn notes neither block nor count; a withdrawal since the check that leaves no live
+        // quote note means there is nothing left to rest the verification on.
+        const live = liveNote();
+        const liveExists = live
+          ? ` AND EXISTS (SELECT 1 FROM research_notes WHERE source_id = ? AND note_type = 'quote'${live})`
+          : "";
         const r = await db.execute({
           sql: `UPDATE research_sources SET ${set.join(", ")}
                  WHERE id = ? AND content_sha256 IS ? AND fetched_at IS ? AND fetched_text IS ?
-                   AND NOT EXISTS (SELECT 1 FROM research_notes WHERE source_id = ? AND note_type = 'quote'
-                                   AND (id NOT IN (${idList})${foundGuard}))`,
-          args: [...args, id, src.content_sha256 ?? null, src.fetched_at ?? null, src.fetched_text ?? null, id, ...checkedIds],
+                   AND NOT EXISTS (SELECT 1 FROM research_notes WHERE source_id = ? AND note_type = 'quote'${live}
+                                   AND (id NOT IN (${idList})${foundGuard}))${liveExists}`,
+          args: [...args, id, src.content_sha256 ?? null, src.fetched_at ?? null, src.fetched_text ?? null, id, ...checkedIds, ...(live ? [id] : [])],
         });
         return Number(r.rowsAffected) > 0;
       };
@@ -1060,7 +1113,7 @@ export function createProjectServer(dbPath, options = {}) {
         return notVerified(`Crow has no fetched page text for source #${id} (fetch status: ${status}), so its quotes cannot be checked. ${next}`);
       }
       const { rows: quoteRows } = await db.execute({
-        sql: "SELECT COUNT(*) AS n FROM research_notes WHERE source_id = ? AND note_type = 'quote'",
+        sql: `SELECT COUNT(*) AS n FROM research_notes WHERE source_id = ? AND note_type = 'quote'${liveNote()}`,
         args: [id],
       });
       if (Number(quoteRows[0].n) === 0) {
@@ -1090,7 +1143,7 @@ export function createProjectServer(dbPath, options = {}) {
           const reason = !r.ok ? clip(cols.fetch_error, 200) : "the page has no text Crow can read now";
           return notVerified(`could not re-open the page (${reason}). Kept the copy from ${src.fetched_at}.`, { refetched: true });
         }
-        const checks = await recheckQuotes(db, id, cols.fetched_text);
+        const checks = await recheckQuotes(db, id, cols.fetched_text, liveNote());
         if (!checks.every((c) => c.found === 1)) {
           return notVerified(
             `the page has changed since Crow stored it (${listFailures(checks)} on the current page). Kept the copy from ${src.fetched_at}.`,
@@ -1102,18 +1155,18 @@ export function createProjectServer(dbPath, options = {}) {
         const adopted = Object.fromEntries(FETCH_COLUMN_NAMES.map((c) => [c, cols[c]]));
         if (!(await guardedVerify(checks.map((c) => c.note_id), adopted))) return raced({ refetched: true });
         for (const c of checks) {
-          await db.execute({ sql: "UPDATE research_notes SET quote_found = ? WHERE id = ?", args: [c.found, c.note_id] });
+          await db.execute({ sql: `UPDATE research_notes SET quote_found = ? WHERE id = ?${liveNote()}`, args: [c.found, c.note_id] });
         }
         await audit({ method: "quotes_checked", verified: true, refetched: true, adopted: true, quotes: checks.length });
         return ok(`Source #${id} verified: Crow re-opened the page and found all ${checks.length} quote note(s) on it.${noAudit}`);
       }
 
-      const checks = await recheckQuotes(db, id, src.fetched_text);
+      const checks = await recheckQuotes(db, id, src.fetched_text, liveNote());
       for (const c of checks) {
-        await db.execute({ sql: "UPDATE research_notes SET quote_found = ? WHERE id = ?", args: [c.found, c.note_id] });
+        await db.execute({ sql: `UPDATE research_notes SET quote_found = ? WHERE id = ?${liveNote()}`, args: [c.found, c.note_id] });
       }
       if (!checks.every((c) => c.found === 1)) {
-        return notVerified(`${listFailures(checks)} on the page Crow fetched (${src.fetched_at}). Notes can't be removed, so tell the owner; add correct quotes copied character for character in new notes for later sources.`, {}, true);
+        return notVerified(`${listFailures(checks)} on the page Crow fetched (${src.fetched_at}). Withdraw each wrong quote note with crow_withdraw_note (its author or the owner can), then verify again.`, {}, true);
       }
       if (beforeVerifyWrite) await beforeVerifyWrite({ id, stale: false });
       if (!(await guardedVerify(checks.map((c) => c.note_id)))) return raced();
@@ -1171,7 +1224,7 @@ export function createProjectServer(dbPath, options = {}) {
         header = `Fetch status: ${parts.join(" · ")}\n\n`;
         const ids = rows.map((r) => Number(r.id));
         const { rows: pRows } = await db.execute({
-          sql: `SELECT source_id, provenance, COUNT(*) AS n FROM research_notes WHERE source_id IN (${ids.map(() => "?").join(",")}) GROUP BY source_id, provenance`,
+          sql: `SELECT source_id, provenance, COUNT(*) AS n FROM research_notes WHERE source_id IN (${ids.map(() => "?").join(",")})${liveNote()} GROUP BY source_id, provenance`,
           args: ids,
         });
         for (const r of pRows) {
@@ -1260,7 +1313,7 @@ export function createProjectServer(dbPath, options = {}) {
         if (ft === "") return { found: null, line: `\nQuote not checked: Crow has no page text for source #${source_id}.` };
         const m = matchQuote(content, { ...splitFetchedText(ft), truncated: storedTextMaybeTruncated(ft) });
         if (m.found === 1) return { found: 1, line: "\nQuote checked: found on the page Crow fetched." };
-        if (m.found === 0) return { found: 0, line: `\nWARNING: this quote is NOT on the page Crow fetched (source #${source_id}). Do not present it as a quote. If you need the exact words, copy them character for character in a new note. This note can't be removed, so tell the owner if it blocks verification.` };
+        if (m.found === 0) return { found: 0, line: `\nWARNING: this quote is NOT on the page Crow fetched (source #${source_id}). Do not present it as a quote. If you need the exact words, copy them character for character in a new note, and withdraw this one with crow_withdraw_note so it does not block verification.` };
         return { found: null, line: `\nQuote not checked: ${m.reason || "the page text was truncated"}.` };
       };
       let { found: quoteFound, line: quoteLine } = checkQuote(src);
@@ -1271,6 +1324,11 @@ export function createProjectServer(dbPath, options = {}) {
       if (ready) {
         sql += ", provenance, quote_found, locator";
         args.push(prov, quoteFound, locator ?? null);
+      }
+      // Who wrote it (local only; decides who may withdraw it). Skipped while 0015 is pending.
+      if (withdrawalReady()) {
+        sql += ", created_by";
+        args.push(actorLabel(actor));
       }
       sql += `) VALUES (${args.map(() => "?").join(", ")})`;
       const result = await db.execute({ sql, args });
@@ -1336,6 +1394,91 @@ export function createProjectServer(dbPath, options = {}) {
   );
 
   server.tool(
+    "crow_withdraw_note",
+    "Withdraw a note that is wrong, such as a quote that is not on the page. The note is kept, marked withdrawn with who withdrew it and why, and no longer counts toward verification or note counts. Only the owner, or the bot that wrote the note, can withdraw it. It cannot be undone.",
+    {
+      id: z.number().describe("Note ID"),
+      reason: z.string().min(1).max(500).describe("Why the note is wrong (kept on record)"),
+    },
+    async ({ id, reason }, extra) => {
+      const actor = callActor(extra);
+      const fail = (t) => ({ content: [{ type: "text", text: t }], isError: true });
+      if (!withdrawalReady()) {
+        return fail("This Crow is waiting for a schema upgrade, so it cannot withdraw notes yet. Try again after the upgrade.");
+      }
+      const ready = schema.ready || refreshSchema().ready;
+      const { rows } = await db.execute({
+        sql: `SELECT id, project_id, source_id, note_type, created_by${ready ? ", quote_found" : ""} FROM research_notes WHERE id = ?`,
+        args: [id],
+      });
+      const n = rows[0];
+      if (!n) return fail(`Note #${id} not found.`);
+
+      // Who may withdraw it: the owner any note; a bot only a note it wrote. Unknown and peer
+      // callers never, and a note with no recorded author is the owner's to judge.
+      const label = actorLabel(actor);
+      const allowed = actor.kind === "owner" || (actor.kind === "bot" && n.created_by != null && n.created_by === label);
+      if (!allowed) return fail(`Only the owner or the bot that wrote note #${id} can withdraw it. Tell the owner.`);
+
+      const projectId = n.project_id == null ? null : Number(n.project_id);
+      if (projectId != null) {
+        try {
+          await assertLocalCapability(db, projectId, "write_notes");
+        } catch (err) {
+          if (err instanceof AclError) return aclErrorToToolResult(err);
+          throw err;
+        }
+      }
+
+      const upd = await db.execute({
+        sql: "UPDATE research_notes SET withdrawn_at = ?, withdrawn_by = ?, withdrawn_reason = ? WHERE id = ? AND withdrawn_at IS NULL",
+        args: [new Date().toISOString(), label, reason, id],
+      });
+      if (Number(upd.rowsAffected) === 0) {
+        const { rows: cur } = await db.execute({ sql: "SELECT withdrawn_at FROM research_notes WHERE id = ?", args: [id] });
+        return { content: [{ type: "text", text: `Note #${id} was already withdrawn (${cur[0] ? cur[0].withdrawn_at : "unknown"}).` }] };
+      }
+
+      const sourceId = n.source_id == null ? null : Number(n.source_id);
+      if (projectId != null) {
+        await appendAudit(db, {
+          project_id: projectId, ...auditActor(actor), action: "note.withdraw", target: `note:${id}`,
+          payload: { reason, note_type: n.note_type, source_id: sourceId, quote_found: n.quote_found ?? null },
+        });
+      }
+
+      // A quotes_checked verification needs at least one live quote note: withdrawing the last one
+      // clears it (the NOT EXISTS keeps that true against a quote note added meanwhile).
+      let cleared = false;
+      if (n.note_type === "quote" && sourceId != null && ready) {
+        const inv = await db.execute({
+          sql: `UPDATE research_sources SET verified = 0, verification_method = NULL, verified_by = NULL
+                 WHERE id = ? AND verification_method = 'quotes_checked'
+                   AND NOT EXISTS (SELECT 1 FROM research_notes WHERE source_id = ? AND note_type = 'quote' AND withdrawn_at IS NULL)`,
+          args: [sourceId, sourceId],
+        });
+        cleared = Number(inv.rowsAffected) > 0;
+        if (cleared) {
+          const { rows: srows } = await db.execute({ sql: "SELECT project_id FROM research_sources WHERE id = ?", args: [sourceId] });
+          const sp = srows[0] && srows[0].project_id != null ? Number(srows[0].project_id) : null;
+          if (sp != null) {
+            await appendAudit(db, {
+              project_id: sp, ...auditActor(actor), action: "source.verify", target: `source:${sourceId}`,
+              payload: { method: "invalidated", verified: false, note_id: id, reason: "no quote notes left" },
+            });
+          }
+        }
+      }
+
+      let out = `Note #${id} withdrawn. It stays on record, marked withdrawn, and no longer counts toward verification.`;
+      if (sourceId != null) out += ` Run crow_verify_source on source #${sourceId} to check its remaining quotes.`;
+      if (cleared) out += ` Source #${sourceId} is no longer verified: it has no quote notes left.`;
+      if (projectId == null) out += " (No audit entry: the note is not in a project.)";
+      return { content: [{ type: "text", text: out }] };
+    }
+  );
+
+  server.tool(
     "crow_search_notes",
     "Search notes by content.",
     {
@@ -1346,7 +1489,7 @@ export function createProjectServer(dbPath, options = {}) {
     },
     async ({ query, project_id, note_type, limit }) => {
       const escaped = escapeLikePattern(query);
-      let sql = "SELECT * FROM research_notes WHERE content LIKE ? ESCAPE '\\'";
+      let sql = `SELECT * FROM research_notes WHERE content LIKE ? ESCAPE '\\'${liveNote()}`;
       const params = [`%${escaped}%`];
 
       if (project_id) { sql += " AND project_id = ?"; params.push(project_id); }
@@ -1444,8 +1587,12 @@ export function createProjectServer(dbPath, options = {}) {
       const sources = (await db.execute("SELECT COUNT(*) as count FROM research_sources")).rows[0];
       const verified = (await db.execute("SELECT COUNT(*) as count FROM research_sources WHERE verified = 1")).rows[0];
       const byType = (await db.execute("SELECT source_type, COUNT(*) as count FROM research_sources GROUP BY source_type ORDER BY count DESC")).rows;
-      const notes = (await db.execute("SELECT COUNT(*) as count FROM research_notes")).rows[0];
-      const byNoteType = (await db.execute("SELECT note_type, COUNT(*) as count FROM research_notes GROUP BY note_type ORDER BY count DESC")).rows;
+      const live = liveNote();
+      const notes = (await db.execute(`SELECT COUNT(*) as count FROM research_notes WHERE 1=1${live}`)).rows[0];
+      const byNoteType = (await db.execute(`SELECT note_type, COUNT(*) as count FROM research_notes WHERE 1=1${live} GROUP BY note_type ORDER BY count DESC`)).rows;
+      const withdrawnNotes = live
+        ? Number((await db.execute("SELECT COUNT(*) as count FROM research_notes WHERE withdrawn_at IS NOT NULL")).rows[0].count)
+        : 0;
       const byProjectType = (await db.execute("SELECT COALESCE(type, 'research') as type, COUNT(*) as count FROM project_spaces WHERE archived_at IS NULL GROUP BY type ORDER BY count DESC")).rows;
 
       let backends = { count: 0 };
@@ -1460,7 +1607,7 @@ export function createProjectServer(dbPath, options = {}) {
       let text = `Project Database Statistics:\n`;
       text += `  Projects: ${projects.count}\n`;
       text += `  Sources: ${sources.count} (${verified.count} verified)\n`;
-      text += `  Notes: ${notes.count}\n`;
+      text += `  Notes: ${notes.count}${withdrawnNotes > 0 ? ` (${withdrawnNotes} withdrawn)` : ""}\n`;
       text += `  Data Backends: ${backends.count} (${connectedBackends.count} connected)\n\n`;
       text += `Projects by Type:\n${byProjectType.map((r) => `  ${r.type}: ${r.count}`).join("\n")}\n\n`;
       text += `Sources by Type:\n${byType.map((r) => `  ${r.source_type}: ${r.count}`).join("\n")}\n\n`;
@@ -1751,7 +1898,7 @@ export function createProjectServer(dbPath, options = {}) {
             args: [project_id],
           })).rows[0]?.n ?? 0,
           notes: (await db.execute({
-            sql: "SELECT COUNT(*) AS n FROM research_notes WHERE project_id = ?",
+            sql: `SELECT COUNT(*) AS n FROM research_notes WHERE project_id = ?${liveNote()}`,
             args: [project_id],
           })).rows[0]?.n ?? 0,
           files: (await db.execute({

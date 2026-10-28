@@ -56,6 +56,7 @@ export const TOOL_MANIFESTS = {
       crow_verify_source: { params: "id, verified?, method?, notes?", desc: "Verify a source: quotes checked against the fetched page (or owner by hand)" },
       crow_list_sources: { params: "project_id?, backend_id?, source_type?, verified_only?, sort_by?, limit?", desc: "List sources" },
       crow_add_note: { params: "content, note_type?, provenance?, locator?, project_id?, source_id?, title?, tags?", desc: "Add note" },
+      crow_withdraw_note: { params: "id, reason", desc: "Withdraw a wrong note (kept for audit; stops counting toward verification)" },
       crow_search_notes: { params: "query, project_id?, note_type?, limit?", desc: "Search notes" },
       crow_generate_bibliography: { params: "project_id?, tag?, verified_only?, format?, include_unfetched?", desc: "Generate APA bibliography" },
       crow_project_stats: { params: "", desc: "Project statistics" },

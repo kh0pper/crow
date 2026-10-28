@@ -43,9 +43,16 @@ export function ensureProvenanceSchema(dbPath) {
  * ensureWithdrawalSchema: the same contract for 0015's note authorship and withdrawal columns,
  * kept separate so a DB where they fail to land leaves provenance readiness (and every
  * fetch-before-cite tool) alone; only note withdrawal degrades.
+ *
+ * Test-only seam: CROW_TEST_SKIP_WITHDRAWAL_SCHEMA=1 makes it report an error without touching the
+ * file, so a test can build a server whose withdrawal columns are missing. Nothing in the product
+ * sets it.
  * @returns {{ready: boolean, state: "ready"|"deferred"|"error", reason?: string}}
  */
 export function ensureWithdrawalSchema(dbPath) {
+  if (process.env.CROW_TEST_SKIP_WITHDRAWAL_SCHEMA === "1") {
+    return { ready: false, state: "error", reason: "skipped (CROW_TEST_SKIP_WITHDRAWAL_SCHEMA)" };
+  }
   try {
     const outcome = run0015({ dbPath, log: () => {} });
     if (outcome && outcome.deferred) {

@@ -22,6 +22,7 @@ test("research-pipeline declares its tools", () => {
     "crow-projects/crow_list_sources",
     "crow-projects/crow_search_sources",
     "crow-projects/crow_add_note",
+    "crow-projects/crow_withdraw_note",
     "crow-projects/crow_search_notes",
     "crow-projects/crow_verify_source",
     "crow-projects/crow_generate_bibliography",

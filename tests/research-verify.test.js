@@ -588,7 +588,7 @@ test("crow_add_note: page text replaced between the match and the insert is re-m
   assert.equal(source(sid2).verified, 1);
 });
 
-test("the not-found message does not tell bots to edit or remove notes (they cannot)", async () => {
+test("the not-found message tells bots to withdraw a wrong quote, never to edit or remove it", async () => {
   const client = await clientFor(BOT);
   const pid = await newProject(client);
   const sid = insertSource({ project_id: pid });
@@ -596,6 +596,6 @@ test("the not-found message does not tell bots to edit or remove notes (they can
   const r = await verify(client, { id: sid });
   assert.ok(text(r).startsWith("NOT verified:"), text(r));
   assert.match(text(r), new RegExp(`#${bad}\\b`));
-  assert.match(text(r), /Notes can't be removed, so tell the owner; add correct quotes copied character for character in new notes for later sources\./);
+  assert.match(text(r), /on the page Crow fetched \([^)]*\)\. Withdraw each wrong quote note with crow_withdraw_note \(its author or the owner can\), then verify again\./);
   assert.doesNotMatch(text(r), /Fix or remove/);
 });

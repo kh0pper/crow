@@ -9,6 +9,7 @@ tools:
   - crow-projects/crow_list_sources
   - crow-projects/crow_search_sources
   - crow-projects/crow_add_note
+  - crow-projects/crow_withdraw_note
   - crow-projects/crow_search_notes
   - crow-projects/crow_verify_source
   - crow-projects/crow_generate_bibliography
@@ -57,7 +58,7 @@ Crow checks a quote note against the page text it fetched.
 - If you are not sure of the exact words, write a `summary` note with provenance `fetched` instead of a quote.
 - Any `…` or `...`, or any `[ ]` edit, makes the check "couldn't check exactly". The only allowed brackets are `[sic]`, `[citation needed]` and one capital letter starting a word, like `[I]t`.
 - Name the speaker or publication in your own sentence, never inside the quote and never as a tail after a dash.
-- A quote note cannot be edited or removed, and one wrong quote blocks verification. If a wrong quote note is blocking verification, tell the owner.
+- A quote note cannot be edited, and one wrong quote blocks verification. Withdraw a wrong quote note with `crow_withdraw_note` (`id` and a short `reason`): it stays on record, marked withdrawn, and stops counting toward verification. You can withdraw only notes you wrote; if a wrong quote note is someone else's, tell the owner. Then add the correct words, copied character for character, in a new note and verify again.
 
 ## Verifying Sources
 1. Add at least one quote note to the source (step 4, `note_type: "quote"`).
