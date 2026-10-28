@@ -211,6 +211,17 @@ test("Details: the drawer deep link for a card on a bot's board, the card view o
   assert.equal(details(ids.orphanMissing), `/dashboard/bot-board?card=${ids.orphanMissing}`);
 });
 
+test("Details and tap links come from card-link's one rule, batched (R1 follow-ups Task 1)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const board = readFileSync(new URL("../servers/gateway/dashboard/panels/board.js", import.meta.url), "utf8");
+  const html = readFileSync(new URL("../servers/gateway/dashboard/panels/board/html.js", import.meta.url), "utf8");
+  assert.match(board, /drawerHrefs\(db, /, "one batched lookup for the rendered cards");
+  assert.doesNotMatch(html, /bot-board\?bot=/, "html.js builds no drawer URL of its own");
+  const { detailsHref } = await import("../servers/gateway/dashboard/panels/board/html.js");
+  assert.equal(detailsHref({ id: 3 }, new Map([[3, "/dashboard/bot-board?bot=x#open=3"]])), "/dashboard/bot-board?bot=x#open=3");
+  assert.equal(detailsHref({ id: 3 }, new Map()), "/dashboard/bot-board?card=3", "no entry: the standalone card view");
+});
+
 test("each card carries the result and ask version it was drawn with (finding 1)", async () => {
   const { cardVersion } = await import("../servers/gateway/dashboard/panels/board/lanes.js");
   const { html } = await render({ project: slug1 });

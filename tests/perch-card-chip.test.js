@@ -642,3 +642,11 @@ test("P5 final: a reload after request-change succeeded and /message failed stil
   assert.equal(byClass(r.transcript, "review-resend").length, 1);
   assert.equal(byClass(r.transcript, "review-input")[0].value, "Use the blue one.");
 });
+
+test("R1 follow-ups: Details uses the server's href; the client form is only for an older server", async () => {
+  const h = mount({ card: { id: 9, title: "T", lane: "working", projectId: 2, botId: "chat-bot", href: "/dashboard/bot-board?card=9" } });
+  h.api.loadCardChip(SID); await tick();
+  assert.equal(byClass(h.transcript, "cardchip-details")[0].href, "/dashboard/bot-board?card=9", "the server's rule wins over the chat's bot");
+  const src = readFileSync(new URL("../servers/gateway/dashboard/perch-hub/card-chip.js", import.meta.url), "utf8");
+  assert.match(src, /typeof c\.href==='string'/, "the chip reads c.href");
+});

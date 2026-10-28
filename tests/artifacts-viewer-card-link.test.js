@@ -195,7 +195,7 @@ test("cardSummary: when the drawer link can't be worked out, the bare drawer for
   // The lane query works; cardDrawerHref's own card read fails.
   const tasksDb = {
     execute(q) {
-      if (/^SELECT project_id FROM tasks_items/.test(q.sql)) throw new Error("drawer read failed");
+      if (/^SELECT project_id(, id)? FROM tasks_items/.test(q.sql)) throw new Error("drawer read failed");
       return real.execute(q);
     },
   };

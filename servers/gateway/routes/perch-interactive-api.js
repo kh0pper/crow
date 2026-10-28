@@ -62,6 +62,7 @@ import { ensureItem, assertLiveProject, threadCard } from "../../shared/shell-it
 import { acceptResult, decideResult } from "../board/result-service.js";
 import { openDecisionsForThread } from "../board/decision-service.js";
 import { laneState } from "./shell-api.js";
+import { cardDrawerHref, drawerHref } from "../board/card-link.js";
 import { CONFIRM_OUTCOMES, openDecision } from "../dashboard/panels/board/lanes.js";
 import { annotateAvailability } from "../model-availability.js";
 import { providerModelListWarm, pickerModels, loadPiProviderNames, referencedModelKeys } from "../perch-model-catalog.js";
@@ -1098,14 +1099,16 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
   });
 
   // ---- GET /interactive/:sid/card — this chat's card, its open result, its questions (P5) ----
-  //   { card: { id, title, status, lane, projectId, botId } | null,
+  //   { card: { id, title, status, lane, projectId, botId, href } | null,
   //     result: { id, outcome, summaryMd } | null,       the card's NEWEST result, only while recorded
   //     decisions: [{ cardId, question, options: [{ index, label, consequence, recommended }] }] }
   // `card` is threadCard's card with the lane the Board computes (shell-api laneState); a missing or
   // archived card is null. `decisions` are the open decision cards asked FROM this chat
   // ($.decision.source.thread_id, written only from the signed actor.thread), newest 3.
   // The bot whose board shows the card: the card's assigned_bot, else this chat's own bot (the
-  // classic board resolves a card only on the selected bot's board; panels/board/html.js detailsHref).
+  // classic board resolves a card only on the selected bot's board). Kept for an older client; the
+  // chip's Details now follows `href`, the one "open this card" rule (board/card-link.js
+  // cardDrawerHref, Ruling Q14: the card's own project's board bot, never this chat's on another).
   async function cardBotId(db, cardRow, sid) {
     if (cardRow.assigned_bot) return String(cardRow.assigned_bot);
     try {
@@ -1133,6 +1136,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
               id: Number(st.card.id), title: String(st.card.title ?? ""), status: String(st.card.status),
               lane: st.lane, projectId: st.card.project_id == null ? null : Number(st.card.project_id),
               botId: await cardBotId(db, st.card, sid),
+              href: (await cardDrawerHref(db, Number(st.card.id), { tasksDb: tdb })) || drawerHref(st.card.id, null),
             };
             if (st.latestResult && st.latestResult.status === "recorded") {
               const r = (await tdb.execute({
