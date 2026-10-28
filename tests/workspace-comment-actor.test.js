@@ -134,14 +134,17 @@ test("alter race: initWorkspaceTables on an old-shape table succeeds twice, even
   assert.ok(cols.includes("actor_json"));
 });
 
-test("resolveActor: env beats _meta; _meta of kind owner is ignored; authorFor values", async () => {
+test("resolveActor: env bot beats _meta; _meta of kind owner is ignored; authorFor values", async () => {
   const { resolveActor, authorFor } = await import("../bundles/workspace/server/actor.js");
   const meta = (a) => ({ _meta: { "crow/actor": a } });
   assert.deepEqual(resolveActor({ CROW_ACTOR_KIND: "bot", CROW_ACTOR_BOT_ID: "alex", CROW_ACTOR_BOT_NAME: "alex" }, meta(HANK)), { kind: "bot", id: "alex", name: "alex" });
   assert.deepEqual(resolveActor({}, meta(HANK)), HANK);
   assert.equal(resolveActor({}, meta({ kind: "owner", name: "alex" })), null);
   assert.equal(resolveActor({}, undefined), null);
-  assert.deepEqual(resolveActor({ CROW_ACTOR_KIND: "owner", CROW_OWNER_NAME: "Alex" }, meta(HANK)), { kind: "owner", name: "Alex" });
+  assert.deepEqual(resolveActor({ CROW_ACTOR_KIND: "owner", CROW_OWNER_NAME: "Alex" }, meta(HANK)), HANK, "env owner + _meta bot -> the bot");
+  assert.deepEqual(resolveActor({ CROW_ACTOR_KIND: "owner", CROW_OWNER_NAME: "Alex" }, undefined), { kind: "owner", name: "Alex" });
+  assert.deepEqual(resolveActor({ CROW_ACTOR_KIND: "owner", CROW_OWNER_NAME: "Alex" }, meta({ kind: "owner", name: "x" })), { kind: "owner", name: "Alex" });
+  assert.deepEqual(resolveActor({}, meta({ kind: "bot", id: "", name: "​" })), { kind: "bot", id: "", name: "bot" }, "empty name and id still label as a bot");
   assert.deepEqual(resolveActor({}, meta({ kind: "bot", id: "h1", name: "‮hank​ " })), { kind: "bot", id: "h1", name: "hank" }, "the name is sanitized");
   assert.deepEqual(resolveActor({}, meta({ kind: "bot", id: "h1", name: "" })), { kind: "bot", id: "h1", name: "h1" }, "falls back to the id");
   assert.deepEqual(authorFor(HANK), { author: "hank (bot)", initials: "HAB" });

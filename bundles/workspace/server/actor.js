@@ -1,7 +1,7 @@
 /**
  * Who is acting on a Workspace document, for the w:author of the comments Crow writes. Sources, in order:
- * the process env (a pi bot's stdio server: CROW_ACTOR_KIND/_BOT_ID/_BOT_NAME, or the owner's CROW_OWNER_NAME), then
- * the MCP request's `_meta["crow/actor"]` (a gateway-run bot call; kind "bot" only). Never the tool arguments.
+ * the process env of a pi bot's stdio server (CROW_ACTOR_KIND/_BOT_ID/_BOT_NAME), then the MCP request's
+ * `_meta["crow/actor"]` (a gateway-run bot call; kind "bot" only), then the owner's env (CROW_OWNER_NAME). Never the tool arguments.
  */
 import { appImport } from "./app-root.js";
 
@@ -9,16 +9,16 @@ const { sanitizeActorName } = await appImport("scripts/pi-bots/actor-env.mjs");
 
 const botActor = (id, name) => {
   const clean = sanitizeActorName(name, id);
-  return clean ? { kind: "bot", id: String(id ?? ""), name: clean } : null;
+  // A bot that sanitizes to nothing must still read as a bot, never fall through to the owner or "Crow".
+  return { kind: "bot", id: String(id ?? ""), name: clean || "bot" };
 };
 
-/** → {kind:"bot", id, name} | {kind:"owner", name} | null. An env that names a kind decides alone. */
+/** → {kind:"bot", id, name} | {kind:"owner", name} | null. Order: env bot, `_meta` bot, env owner. A bot is never shadowed by an owner env. */
 export function resolveActor(env = {}, extra) {
-  const kind = env?.CROW_ACTOR_KIND;
-  if (kind === "bot") return botActor(env.CROW_ACTOR_BOT_ID, env.CROW_ACTOR_BOT_NAME);
-  if (kind === "owner") { const name = sanitizeActorName(env.CROW_OWNER_NAME, ""); return name ? { kind: "owner", name } : null; }
+  if (env?.CROW_ACTOR_KIND === "bot") return botActor(env.CROW_ACTOR_BOT_ID, env.CROW_ACTOR_BOT_NAME);
   const m = extra?._meta?.["crow/actor"];
   if (m && typeof m === "object" && m.kind === "bot") return botActor(m.id, m.name);
+  if (env?.CROW_ACTOR_KIND === "owner") { const name = sanitizeActorName(env.CROW_OWNER_NAME, ""); return name ? { kind: "owner", name } : null; }
   return null;
 }
 
