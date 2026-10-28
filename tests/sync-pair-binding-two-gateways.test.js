@@ -82,9 +82,19 @@ async function flowsBoth(a, b, label) {
 
 /** A marker written on `from` is drained into its out-feed for `to`, and still never reaches `to`. */
 async function blocked(from, to, label) {
-  const text = `pt2a ${label} ${from.name}->${to.name} ${tag()}`;
-  const { queued } = await writeMarker(from, text);
-  assert.ok(queued, `${label}: ${from.name}'s marker was never seen queued in sync_outbox (the drain check would be vacuous)`);
+  // The drain only counts once this marker's outbox row was SEEN queued
+  // (otherwise an outbox query that never matches would read as "drained").
+  // writeMarker looks right after the store, but the gateway's once-a-minute
+  // drain can still land in that gap: such a marker is inconclusive, not a
+  // pass, so write a fresh one. Every assertion below is on a marker that was
+  // seen queued; a query that never matches fails all attempts.
+  const ATTEMPTS = 3;
+  let text = null;
+  for (let i = 0; i < ATTEMPTS && !text; i++) {
+    const t = `pt2a ${label} ${from.name}->${to.name} ${tag()}`;
+    if ((await writeMarker(from, t)).queued) text = t;
+  }
+  assert.ok(text, `${label}: none of ${ATTEMPTS} markers on ${from.name} was seen queued in sync_outbox (the drain check would be vacuous)`);
   assert.ok(await until(() => markerDrained(from, text), FLOW_MS, 500), `${label}: ${from.name} never drained its marker (no out-feed for ${to.name}?)`);
   await new Promise((r) => setTimeout(r, QUIET_MS));
   assert.equal(hasMarker(to, text), false, `${label}: ${from.name}'s marker reached ${to.name} over a refused link`);
