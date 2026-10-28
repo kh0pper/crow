@@ -204,7 +204,7 @@ test("offers, notes and the chip come back on reload: flushHistBuf calls both lo
 
 test("i18n: the P5 keys exist in en and es", () => {
   for (const k of ["shell.offerTitle", "shell.offerMake", "shell.offerNotNow", "shell.cardMadeNote", "shell.cardDetails", "shell.offerFailed",
-    "shell.accept", "shell.askChange", "shell.changePlaceholder", "shell.other"]) {
+    "shell.accept", "shell.askChange", "shell.changePlaceholder", "shell.other", "shell.sendAgain"]) {
     assert.ok(translations[k].en && translations[k].es, k);
   }
   assert.equal(translations["shell.cardMadeNote"].en, "Card #{n} made on {project}.");
@@ -229,8 +229,9 @@ test("i18n: the 5.4 strings, and the reused P3 confirm", () => {
   assert.deepEqual(translations["shell.askChange"], { en: "Ask for a change", es: "Pedir un cambio" });
   assert.deepEqual(translations["shell.changePlaceholder"], { en: "What should change?", es: "¿Qué debería cambiar?" });
   assert.deepEqual(translations["shell.other"], { en: "Other…", es: "Otra…" });
+  assert.deepEqual(translations["shell.sendAgain"], { en: "Send again", es: "Enviar de nuevo" });
   const chip = readFileSync(new URL("../servers/gateway/dashboard/perch-hub/card-chip.js", import.meta.url), "utf8");
-  for (const k of ["shell.confirmNotFullSuccess", "shell.confirmAcceptYes", "shell.confirmAcceptNo"]) {
+  for (const k of ["shell.confirmNotFullSuccess", "shell.confirmAcceptYes", "shell.confirmAcceptNo", "shell.refuseDecision"]) {
     assert.ok(chip.includes('tJs("' + k + '", lang)'), "P3's " + k + " is reused");
   }
   const src = readFileSync(new URL("../servers/gateway/dashboard/shared/i18n.js", import.meta.url), "utf8");
@@ -334,8 +335,18 @@ test("a stale Accept redraws; a failed one says so and can be tried again", asyn
   assert.ok(allText(review(bad)[0]).includes("That did not work. Try again."));
 });
 
-test("Ask for a change rejects the shown result, then sends the words as the operator's message", async () => {
+const MSG = "/dashboard/perch-api/interactive/" + SID + "/message";
+const CHANGE = "/dashboard/perch-api/cards/9/request-change";
+async function askChange(h, words) {
+  const box = review(h)[0];
+  byClass(box, "review-change")[0].onclick();
+  byClass(box, "review-input")[0].value = words;
+  byClass(box, "review-send")[0].onclick(); await tick();
+}
+
+test("Ask for a change rejects the shown result, then sends the words straight to this chat", async () => {
   const h = mount({ card: CARD, result: RESULT });
+  h.sandbox.pendingImages = ["img"]; h.sandbox.pendingFilePaths = ["/tmp/x"];
   h.api.loadCardChip(SID); await tick();
   const box = review(h)[0];
   const field = byClass(box, "review-field")[0];
@@ -344,27 +355,85 @@ test("Ask for a change rejects the shown result, then sends the words as the ope
   assert.equal(field.hidden, false);
   const ta = byClass(field, "review-input")[0];
   assert.equal(ta["attr:placeholder"], "What should change?");
+  assert.equal(ta.maxLength, 4000);
   byClass(field, "review-send")[0].onclick(); await tick();
   assert.equal(posts(h).length, 0, "an empty change sends nothing");
   ta.value = "  Use the blue one. ";
   h.input.value = "my draft";
   h.state.result = null;
   byClass(field, "review-send")[0].onclick(); await tick();
-  assert.deepEqual(posts(h), [["/dashboard/perch-api/cards/9/request-change", { result_id: 31, text: "Use the blue one." }]]);
-  assert.deepEqual(h.state.sent, ["Use the blue one."], "one ordinary message, the operator's own words");
-  assert.equal(h.input.value, "my draft", "the composer's draft survives");
-  assert.equal(review(h).length, 0);
+  assert.deepEqual(posts(h), [
+    [CHANGE, { result_id: 31, text: "Use the blue one." }],
+    [MSG, { message: "Use the blue one." }],
+  ], "the rejection, then one ordinary message with no attachments");
+  assert.deepEqual(h.state.sent, [], "the composer's send() is never used");
+  assert.equal(h.input.value, "my draft", "the composer's draft is untouched");
+  assert.deepEqual(h.sandbox.pendingImages, ["img"], "pending attachments are not consumed");
+  assert.deepEqual(h.sandbox.pendingFilePaths, ["/tmp/x"]);
+  assert.equal(review(h).length, 0, "refreshed only after the send succeeded");
+});
+
+for (const draft of ["", "my own draft"]) {
+  test("R-P5-8: a failed send keeps the words and offers Send again (composer draft " + (draft ? "present" : "empty") + ")", async () => {
+    let msgOk = false;
+    const h = mount({ card: CARD, result: RESULT, review: (u) => (u === MSG ? (msgOk ? json({ ok: true }) : json({ error: "pi_gone" }, 409)) : json({ ok: true })) });
+    h.input.value = draft;
+    h.api.loadCardChip(SID); await tick();
+    h.state.result = null;   // the rejection landed: the server no longer offers the result
+    await askChange(h, "Use the blue one.");
+    assert.deepEqual(posts(h).map((p) => p[0]), [CHANGE, MSG]);
+    let box = review(h);
+    assert.equal(box.length, 1, "the review stays on screen");
+    assert.equal(byClass(box[0], "review-input")[0].value, "Use the blue one.", "the words are still in the field");
+    assert.ok(allText(box[0]).includes("That did not work. Try again."));
+    const again = byClass(box[0], "review-resend")[0];
+    assert.equal(again.textContent, "Send again");
+    assert.equal(h.input.value, draft, "the composer draft is untouched");
+
+    h.api.loadCardChip(SID); await tick();
+    assert.equal(review(h).length, 1, "a reload does not drop unsent words");
+    h.transcript.children.splice(0); h.api.reset();   // a transcript redraw clears the DOM and the state
+    h.api.loadCardChip(SID); await tick();
+    box = review(h);
+    assert.equal(box.length, 1, "nor does a transcript redraw");
+    assert.equal(byClass(box[0], "review-input")[0].value, "Use the blue one.");
+
+    msgOk = true;
+    byClass(box[0], "review-resend")[0].onclick(); await tick();
+    assert.deepEqual(posts(h).map((p) => p[0]), [CHANGE, MSG, MSG], "Send again resends only the message");
+    assert.deepEqual(posts(h)[2][1], { message: "Use the blue one." });
+    assert.equal(review(h).length, 0, "delivered: the chips go");
+    assert.equal(h.input.value, draft);
+    assert.deepEqual(h.state.sent, []);
+  });
+}
+
+test("a lost connection on the send also keeps the words", async () => {
+  const h = mount({ card: CARD, result: RESULT, review: (u) => (u === MSG ? Promise.reject(new Error("socket")) : json({ ok: true })) });
+  h.api.loadCardChip(SID); await tick();
+  h.state.result = null;
+  await askChange(h, "x");
+  assert.equal(byClass(review(h)[0], "review-input")[0].value, "x");
+  assert.equal(byClass(review(h)[0], "review-resend").length, 1);
 });
 
 test("a refused change sends nothing to the bot", async () => {
   const h = mount({ card: CARD, result: RESULT, review: () => json({ error: "stale" }, 409) });
   h.api.loadCardChip(SID); await tick();
-  const box = review(h)[0];
-  byClass(box, "review-change")[0].onclick();
-  byClass(box, "review-input")[0].value = "x";
-  byClass(box, "review-send")[0].onclick(); await tick();
-  assert.equal(posts(h).length, 1);
+  await askChange(h, "x");
+  assert.deepEqual(posts(h).map((p) => p[0]), [CHANGE]);
   assert.deepEqual(h.state.sent, []);
+});
+
+test("R-P5-7: Accept on a card with an open question says to answer it first", async () => {
+  const h = mount({ card: CARD, result: RESULT, review: () => json({ error: "answer_first", reason: "answer_first" }, 409) });
+  h.api.loadCardChip(SID); await tick();
+  const box = review(h)[0];
+  byClass(box, "review-accept")[0].onclick(); await tick();
+  assert.equal(posts(h).length, 1);
+  assert.ok(allText(review(h)[0]).includes("Answer its question first."));
+  assert.equal(review(h)[0], box, "not silently redrawn");
+  assert.equal(byClass(box, "review-accept")[0].disabled, false);
 });
 
 test("answering a decision goes through #535's route", async () => {
@@ -384,6 +453,7 @@ test("Other… opens a field for other_text", async () => {
   const box = review(h)[0];
   const fields = byClass(box, "review-field");
   assert.equal(fields.length, 1);
+  assert.equal(byClass(fields[0], "review-input")[0].maxLength, 2000, "decideOption's cap");
   byClass(box, "review-other")[0].onclick();
   assert.equal(fields[0].hidden, false);
   byClass(fields[0], "review-input")[0].value = "Neither, go up.";

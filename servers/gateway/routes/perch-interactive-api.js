@@ -54,7 +54,7 @@ import { perchAttached } from "../shared/perch-attached.js";
 import { getInteractiveEngine } from "../perch-interactive.js";
 import { cwdList, cwdRead } from "../perch-files.js";
 import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
-import { updateCard, createCard } from "../board/card-service.js";
+import { updateCard, createCard, getCard } from "../board/card-service.js";
 import { lockState } from "./board-lock.js";
 import { appendAudit } from "../../shared/project-acl.js";
 import { resolveBoardDef, isTerminal } from "./board-defs.js";
@@ -62,7 +62,7 @@ import { ensureItem, assertLiveProject, threadCard } from "../../shared/shell-it
 import { acceptResult, decideResult } from "../board/result-service.js";
 import { openDecisionsForThread } from "../board/decision-service.js";
 import { laneState } from "./shell-api.js";
-import { CONFIRM_OUTCOMES } from "../dashboard/panels/board/lanes.js";
+import { CONFIRM_OUTCOMES, openDecision } from "../dashboard/panels/board/lanes.js";
 import { annotateAvailability } from "../model-availability.js";
 import { providerModelListWarm, pickerModels, loadPiProviderNames, referencedModelKeys } from "../perch-model-catalog.js";
 import { renderBotMarkdown } from "../../blog/renderer.js";
@@ -1147,7 +1147,8 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
   // 'stale' and a second tap (or the classic board deciding first) is 409 'already_decided'.
   // Ruling P16: a failure or partial result needs accept_failure: true (409 'confirm_failure'
   // without it, nothing written), the lane route's rule. The outcome checked is the shown result's
-  // own, and that is the row the guarded write approves.
+  // own, and that is the row the guarded write approves. An open decision on the card is 409
+  // 'answer_first' (Ruling P2, R-P5-7), nothing written.
   router.post(P + "/cards/:id/accept", async (req, res) => {
     const b = req.body && typeof req.body === "object" ? req.body : {};
     if (!/^[1-9]\d*$/.test(String(req.params.id)) || !Number.isInteger(b.result_id) || b.result_id < 1) {
@@ -1164,6 +1165,10 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
         args: [b.result_id, id],
       })).rows[0];
       if (!row) return jsonError(res, 404, "not_found");
+      // Ruling P2 / R-P5-7: an open decision on the card is answered first, as on the Board.
+      const card = await getCard(tdb, id);
+      if (!card) return jsonError(res, 404, "not_found");
+      if (openDecision(card)) return jsonError(res, 409, "answer_first", { reason: "answer_first" });
       if (CONFIRM_OUTCOMES.includes(String(row.outcome)) && b.accept_failure !== true) {
         return jsonError(res, 409, "confirm_failure", { reason: "confirm_failure" });
       }

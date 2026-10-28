@@ -281,6 +281,23 @@ test("R-P5-4: a failure or partial result needs accept_failure", async () => {
   }
 });
 
+test("R-P5-7: Accept on a card with an open decision is 409 answer_first, nothing written", async () => {
+  const id = addCard();
+  const t = new Database(TASKS);
+  t.prepare("UPDATE tasks_items SET data_json=? WHERE id=?").run(JSON.stringify({ decision: { question: "q?", options: [{ label: "a" }, { label: "b" }] } }), id);
+  t.close();
+  const rid = addResult(id);
+  for (const body of [{ result_id: rid }, { result_id: rid, accept_failure: true }]) {
+    const r = await accept(id, body);
+    assert.equal(r.status, 409);
+    assert.equal(r.body.error, "answer_first");
+  }
+  assert.equal(result(rid).status, "recorded");
+  assert.equal(card(id).status, "todo");
+  assert.equal(muts(id, "result_decide").length, 0);
+  assert.equal(muts(id, "move").length, 0);
+});
+
 // ---- Ask for a change ----
 
 test("Ask for a change rejects and moves nothing", async () => {

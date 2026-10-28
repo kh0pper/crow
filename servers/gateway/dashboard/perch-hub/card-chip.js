@@ -22,7 +22,9 @@ import { tJs } from "../shared/i18n.js";
  *  - Accept posts the result id the chat SHOWED (409 = stale or decided: redraw from the server).
  *    A failure or partial result asks first (P3's confirm string), then sends accept_failure.
  *  - Ask for a change rejects that same result, then sends the operator's words to the bot as an
- *    ordinary message through the composer's own send().
+ *    ordinary message on this chat's /message (never through the composer). Until that send
+ *    succeeds the words stay on screen with Send again, which resends only the message.
+ *  - Accept on a card with an open decision is refused (answer_first) and says so.
  *  - A decision's options post #535's /dashboard/bot-board-api/card/:id/decision {index};
  *    Other... opens a field for other_text.
  *  - Not now writes nothing: the chips stay collapsed for this page view until something new
@@ -46,6 +48,8 @@ export function perchCardChipJs(lang = "en") {
   var CC_CONFIRM_YES='${tJs("shell.confirmAcceptYes", lang)}';
   var CC_CONFIRM_NO='${tJs("shell.confirmAcceptNo", lang)}';
   var CC_CONFIRM_OUTCOMES=['failure','partial'];
+  var CC_REFUSE_DECISION='${tJs("shell.refuseDecision", lang)}';
+  var CC_SEND_AGAIN='${tJs("shell.sendAgain", lang)}';
   var CC_LANES={ needs_you:'${tJs("shell.laneNeedsYou", lang)}', working:'${tJs("shell.laneWorking", lang)}',
     up_next:'${tJs("shell.laneUpNext", lang)}', done:'${tJs("shell.laneDone", lang)}' };
 
@@ -56,6 +60,7 @@ export function perchCardChipJs(lang = "en") {
   var ccPrevState='';
   var ccReview=null;      /* {node,key}: the review chips drawn in THIS transcript */
   var ccDismissed={};     /* sid -> key the operator said Not now to; lives for the page view */
+  var ccUnsent={};        /* sid -> change words the bot has not received yet; lives for the page view */
 
   function resetCardChip(){ ccOffers={}; ccChip=null; ccReview=null; ccGen++; ccPrevState=''; }
 
@@ -185,22 +190,55 @@ export function perchCardChipJs(lang = "en") {
   }
   /* The server's answer is the truth: forget what is drawn, so the next draw starts clean. */
   function ccRefresh(sid){ if(ccReview) ccReview.key=''; loadCardChip(sid); }
-  /* The operator's own words to the bot: an ordinary message, through the composer's send(). */
-  function ccSay(text){
-    var input=el('perch-input');
-    if(!input||typeof send!=='function') return false;
-    var keep=input.value;
-    input.value=text; send();
-    if(keep&&!input.value) input.value=keep;
-    return true;
+  /* The operator's own words to the bot (R-P5-8): an ordinary message on this chat's /message,
+     sent here and never through the composer, so its draft and pending files are not touched.
+     The words stay in ccUnsent until a 2xx; any failure redraws them with Send again, which
+     resends only the message (the rejection already landed and is never sent twice). */
+  function ccDeliver(sid,btn){
+    var text=ccUnsent[sid];
+    if(text==null||(btn&&btn.disabled)) return;
+    if(btn) btn.disabled=true;
+    ccApi('POST','/interactive/'+encodeURIComponent(sid)+'/message',{message:String(text)}).then(function(r){
+      if(r.ok){
+        if(ccUnsent[sid]===text) delete ccUnsent[sid];
+        if(!live()||current.sid!==sid) return;
+        if(typeof appendMessage==='function') appendMessage('user','you',String(text));
+        ccRefresh(sid);
+        return;
+      }
+      if(!live()||current.sid!==sid) return;
+      ccShowUnsent(sid);
+    });
   }
-  function ccField(ph,label,onSubmit){
-    var box=document.createElement('div'); box.className='review-field'; box.hidden=true;
+  function ccUnsentCard(sid){
+    var wrap=document.createElement('div'); wrap.className='perch-review';
+    var card=document.createElement('div'); card.className='artcard perch-review-unsent';
     var ta=document.createElement('textarea'); ta.className='review-input'; ta.maxLength=4000;
+    ta.setAttribute('placeholder',CC_CHANGE_PH); ta.setAttribute('aria-label',CC_CHANGE_PH);
+    ta.value=String(ccUnsent[sid]);
+    ta.oninput=function(){ var v=String(ta.value||'').trim(); if(v) ccUnsent[sid]=v; };
+    var acts=document.createElement('div'); acts.className='art-actions';
+    var again=ccButton('review-resend',CC_SEND_AGAIN,function(){ ccDeliver(sid,again); });
+    acts.appendChild(again);
+    card.appendChild(ta); card.appendChild(line('review-msg',CC_FAILED)); card.appendChild(acts);
+    wrap.appendChild(card);
+    return wrap;
+  }
+  function ccShowUnsent(sid){
+    var tr=el('perch-transcript'); if(!tr||ccUnsent[sid]==null) return;
+    var node=ccUnsentCard(sid);
+    if(ccReview) ccDrop(ccReview.node);
+    tr.appendChild(node);
+    ccReview={node:node,key:'unsent'};
+  }
+  function ccField(ph,label,onSubmit,max){
+    var cap=max||4000;
+    var box=document.createElement('div'); box.className='review-field'; box.hidden=true;
+    var ta=document.createElement('textarea'); ta.className='review-input'; ta.maxLength=cap;
     ta.setAttribute('placeholder',ph); ta.setAttribute('aria-label',ph);
     var go=ccButton('review-send',label,function(){
       var text=String(ta.value||'').trim();
-      if(!text||text.length>4000||go.disabled) return;
+      if(!text||text.length>cap||go.disabled) return;
       onSubmit(text,go);
     });
     box.appendChild(ta); box.appendChild(go);
@@ -229,6 +267,7 @@ export function perchCardChipJs(lang = "en") {
       ccApi('POST','/cards/'+encodeURIComponent(String(card.id))+'/accept',body).then(function(r){
         if(!live()||current.sid!==sid||gen!==ccGen) return;
         if(r.status===409&&r.j&&r.j.error==='confirm_failure'&&!confirmed){ confirm.hidden=false; return; }
+        if(r.status===409&&r.j&&r.j.error==='answer_first'){ busy(false); msg.textContent=CC_REFUSE_DECISION; return; }
         if(r.ok||r.status===409){ ccRefresh(sid); return; }
         busy(false); msg.textContent=CC_FAILED;
       });
@@ -238,8 +277,9 @@ export function perchCardChipJs(lang = "en") {
       busy(true); go.disabled=true; msg.textContent='';
       var gen=ccGen;
       ccApi('POST','/cards/'+encodeURIComponent(String(card.id))+'/request-change',{result_id:result.id,text:text}).then(function(r){
+        /* Rejected: from here the words are owed to the bot, even if the operator left this chat. */
+        if(r.ok){ ccUnsent[sid]=text; if(ccReview&&ccReview.node===wrap.parentNode) ccReview.key='unsent'; ccDeliver(sid); return; }
         if(!live()||current.sid!==sid||gen!==ccGen) return;
-        if(r.ok){ ccSay(text); ccRefresh(sid); return; }
         if(r.status===409){ ccRefresh(sid); return; }
         busy(false); go.disabled=false; msg.textContent=CC_FAILED;
       });
@@ -281,7 +321,7 @@ export function perchCardChipJs(lang = "en") {
       if(o.consequence) opt.appendChild(line('review-consequence',String(o.consequence)));
       acts.appendChild(opt);
     });
-    var field=ccField(CC_OTHER,CC_SEND,function(text,go){ answer({index:-1,other_text:text},go); });
+    var field=ccField(CC_OTHER,CC_SEND,function(text,go){ answer({index:-1,other_text:text},go); },2000);
     var other=ccButton('review-other',CC_OTHER,function(){
       if(other.disabled) return;
       field.hidden=!field.hidden;
@@ -299,6 +339,12 @@ export function perchCardChipJs(lang = "en") {
     var card=j&&j.card&&Number.isInteger(j.card.id)?j.card:null;
     var result=card&&j.result&&Number.isInteger(j.result.id)?j.result:null;
     var decs=(j&&Array.isArray(j.decisions)?j.decisions:[]).filter(function(d){ return d&&Number.isInteger(d.cardId); });
+    /* Words the bot has not received stay on screen, whatever else the server says (R-P5-8). */
+    if(ccUnsent[sid]!=null){
+      if(ccReview&&ccReview.key==='unsent'&&ccReview.node.parentNode===tr){ ccDrop(ccReview.node); tr.appendChild(ccReview.node); }
+      else ccShowUnsent(sid);
+      return;
+    }
     var key=ccReviewKey(card,result,decs);
     if((!result&&!decs.length)||ccDismissed[sid]===key){ if(ccReview) ccDrop(ccReview.node); ccReview=null; return; }
     if(ccReview&&ccReview.key===key&&ccReview.node.parentNode===tr){

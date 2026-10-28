@@ -3440,6 +3440,7 @@ export const translations = {
   "shell.askChange": { en: "Ask for a change", es: "Pedir un cambio" },
   "shell.changePlaceholder": { en: "What should change?", es: "¿Qué debería cambiar?" },
   "shell.other": { en: "Other…", es: "Otra…" },
+  "shell.sendAgain": { en: "Send again", es: "Enviar de nuevo" },
   // Crow Artifacts chat card (spec v1.6, chat-first PR-1)
   "perch.artifactLabel": { en: "Artifact", es: "Artefacto" },
   "perch.artifactOpenBeside": { en: "Open beside chat", es: "Abrir junto al chat" },

@@ -589,6 +589,39 @@ test("acceptResult: a result reported between its read and its write wins — st
   });
 });
 
+test("decideResult newestOnly: a result reported between its read and its write wins — stale, nothing decided", async () => {
+  await withStore(async ({ tdb, cdb, tasksDbPath }) => {
+    const id = await makeCard(tdb, 1, "gated");
+    const r = await reportResult(tdb, cdb, id, { outcome: "success" }, BOT);
+    const other = createDbClient(tasksDbPath);
+    let newerId = null;
+    // The same seam as acceptResult's: just before the guarded UPDATE (after the row's own read),
+    // a second connection records a newer result.
+    const raced = {
+      execute: async (q) => {
+        if (newerId == null && /^UPDATE board_results/.test(q.sql || "")) {
+          const ins = await other.execute({
+            sql: "INSERT INTO board_results (item_id, actor_kind, actor_id, outcome, summary_md) VALUES (?, 'bot', 'bot-1', 'partial', '')",
+            args: [id],
+          });
+          newerId = Number(ins.lastInsertRowid);
+        }
+        return tdb.execute(q);
+      },
+    };
+    try {
+      await assert.rejects(
+        () => decideResult(raced, id, r.id, "rejected", HUMAN, "perch", { newestOnly: true }),
+        (e) => { assert.equal(e.code, "stale"); assert.equal(e.http, 409); return true; },
+      );
+    } finally { other.close(); }
+    assert.ok(newerId, "the seam fired");
+    const rows = (await tdb.execute({ sql: "SELECT status FROM board_results WHERE item_id=? ORDER BY id", args: [id] })).rows;
+    assert.deepEqual(rows.map((x) => x.status), ["recorded", "recorded"], "nothing decided");
+    assert.equal((await allMutations(tdb, id)).filter((m) => m.verb === "result_decide").length, 0);
+  });
+});
+
 test("decideResult on a superseded result still decides it (only Accept requires the newest)", async () => {
   await withStore(async ({ tdb, cdb }) => {
     const id = await makeCard(tdb, 1, "gated");
