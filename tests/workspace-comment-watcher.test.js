@@ -80,7 +80,7 @@ async function setup({ mode = "shadow", watchSince = T0 - HOUR, seams } = {}) {
     .map((r) => ({ kind: r.kind, fileId: Number(r.file_id), ...JSON.parse(r.detail_json) }));
   const verdicts = async (fileId) => (await events(undefined, fileId)).filter((e) => ["would_fire", "unverified", "history"].includes(e.kind));
   const advance = (ms) => { clock.t += ms; };
-  return { ac, fake, db, clock, tick, doc, save, open, events, verdicts, advance };
+  return { ac, names, fake, db, clock, tick, doc, save, open, events, verdicts, advance };
 }
 const hankRoot = (date, text = "@hank please tidy this section", extra = {}) => ({ author: "admin", date: iso(date), text, quoted: "con", durableId: "1A2B3C4D", ...extra });
 
@@ -708,7 +708,8 @@ test("daily duplicate-name check: a clash blocks, nothing clears it, an outage n
   const before = s.fake.calls.length;
   const r = await s.tick();
   assert.equal(r.why, "blocked"); assert.equal(await blocked(), "duplicate_display_name");
-  assert.equal(s.fake.calls.length - before, 1, "the owner name is cached: one autocomplete call, and the tick stops there");
+  // M4: the owner's name is read fresh (no cache) for the check: one name PROPFIND + one autocomplete, then it stops
+  assert.equal(s.fake.calls.length - before, 2, "a fresh name lookup and one autocomplete call, and the tick stops there");
 });
 
 test("daily duplicate-name check never clears a block (the check really runs while a block is present), and an unknown owner name means it cannot tell", async () => {
@@ -727,4 +728,125 @@ test("daily duplicate-name check never clears a block (the check really runs whi
   const cfg = { ...getConfig(), ownerUids: Object.freeze(["nobody"]) };
   assert.equal(await W.ownerNameClash(cfg), null);
   assert.equal(await W.ownerNameClash(getConfig()), false);
+});
+
+// ---- final fix wave -----------------------------------------------------------------------------------------------
+test("I1: editing the anchored text of an old @hank comment never fires it again (same author, second and text = known)", async () => {
+  const s = await setup();
+  const f = s.doc("q.docx"); s.open(f);
+  s.advance(2000); await s.tick();
+  s.advance(5000);
+  const c = hankRoot(s.clock.t - 1000); // anchored on "con"
+  s.save(f, [c]); s.advance(1000); await s.tick();
+  assert.equal((await s.events("would_fire", f.fileId)).length, 1, "control: the fresh comment fires once");
+  s.advance(5000);
+  s.save(f, [{ ...c, quoted: "pastor con piña" }]); // the anchored text grew; the comment did not change
+  s.advance(1000); await s.tick();
+  const v = await s.verdicts(f.fileId);
+  assert.equal(v.filter((e) => e.kind === "would_fire").length, 1, JSON.stringify(v));
+  assert.equal(v.at(-1).kind, "history");
+});
+
+test("I1: deleting an earlier same-second duplicate shifts occ, and the remaining @hank comment does not re-fire", async () => {
+  const s = await setup();
+  const f = s.doc("o.docx"); s.open(f);
+  s.advance(2000); await s.tick();
+  s.advance(5000);
+  const date = iso(s.clock.t - 1000);
+  const a = { author: "admin", date, text: "a plain note", quoted: "con", durableId: "0A0A0A0A" };
+  const b = { author: "admin", date, text: "@hank two", quoted: "con", durableId: "0B0B0B0B" };
+  s.save(f, [a, b]); s.advance(1000); await s.tick();
+  assert.equal((await s.events("would_fire", f.fileId)).length, 1, "control: b fires once");
+  s.advance(5000);
+  s.save(f, [b]); // a deleted: b moves from occ 1 to occ 0
+  s.advance(1000); await s.tick();
+  const v = await s.verdicts(f.fileId);
+  assert.equal(v.filter((e) => e.kind === "would_fire").length, 1, JSON.stringify(v));
+});
+
+test("I1: a snapshot written before content keys existed falls back to the fingerprint rule", async () => {
+  const s = await setup();
+  const f = s.doc("bc.docx"); s.open(f);
+  s.advance(2000); await s.tick();
+  s.advance(5000);
+  const c = hankRoot(s.clock.t - 1000);
+  s.save(f, [c]); s.advance(1000); await s.tick();
+  // strip the content keys, as an older build wrote the snapshot
+  const st = await ST.getState(s.db, f.fileId);
+  const old = JSON.parse(st.threads_json).map((t) => ({ ...t, comments: t.comments.map(({ ck, ...rest }) => rest) }));
+  await ST.putState(s.db, { ...st, threads_json: JSON.stringify(old) });
+  s.advance(5000);
+  s.save(f, [c]); // same comments, new bytes: no new verdict
+  s.advance(1000); await s.tick();
+  assert.equal((await s.verdicts(f.fileId)).length, 1, "an unchanged comment stays known by its fingerprint");
+  assert.ok(JSON.parse((await ST.getState(s.db, f.fileId)).threads_json)[0].comments[0].ck, "the rewritten snapshot carries content keys");
+});
+
+test("I3: a skipped version keeps the last scanned mtime, so the next scan counts every version since (multi_version)", async () => {
+  const s = await setup();
+  const f = s.doc("sk.docx"); s.open(f);
+  s.advance(2000); await s.tick();
+  const m1 = Number((await ST.getState(s.db, f.fileId)).mtime);
+  s.advance(5000);
+  s.fake.editorSave(f.path, Buffer.from("not a zip"), { author: "admin" });
+  s.advance(1000); await s.tick();
+  const st = await ST.getState(s.db, f.fileId);
+  assert.equal(st.skip_reason, "unreadable");
+  assert.equal(Number(st.mtime), m1, "a skip moves the etag only");
+  s.advance(5000);
+  s.save(f, [hankRoot(s.clock.t - 1000)]);
+  s.advance(1000); await s.tick();
+  const v = await s.verdicts(f.fileId);
+  assert.equal(v.length, 1);
+  assert.deepEqual([v[0].kind, v[0].reason], ["unverified", "multi_version"]);
+});
+
+test("I2: the session prune runs while the loop is off or blocked (DB only), at most hourly", async () => {
+  const s = await setup({ mode: "off" });
+  const keys = async () => (await s.db.execute("SELECT doc_key FROM workspace_editor_sessions ORDER BY doc_key")).rows.map((r) => r.doc_key);
+  await S.recordSession(s.db, { key: "old1", fileId: 1, uids: ["admin"], at: T0 - 8 * DAY });
+  await S.recordSession(s.db, { key: "new1", fileId: 1, uids: ["admin"], at: T0 });
+  const before = s.fake.calls.length;
+  assert.equal((await s.tick()).ran, false);
+  assert.deepEqual(await keys(), ["new1"], "pruned while off");
+  assert.equal(s.fake.calls.length, before, "still no Nextcloud call");
+  await S.recordSession(s.db, { key: "old2", fileId: 1, uids: ["admin"], at: T0 - 8 * DAY });
+  s.advance(60_000); await s.tick();
+  assert.deepEqual(await keys(), ["new1", "old2"], "not again within the hour");
+  await ST.setMode(s.db, "shadow", T0); await ST.setBlocked(s.db, "duplicate_display_name");
+  s.advance(W.PRUNE_MS); await s.tick();
+  assert.deepEqual(await keys(), ["new1"], "pruned while blocked");
+  assert.equal(s.fake.calls.length, before);
+});
+
+test("M5: the lease is renewed after each file, so a slow tick keeps it", async () => {
+  const s = await setup();
+  for (const p of ["r1.docx", "r2.docx", "r3.docx"]) { s.advance(1000); s.doc(p, [hankRoot(s.clock.t - 500, `@hank ${p}`)]); }
+  s.fake.failRoute = (req) => { if (req.method === "GET" && req.url.includes("/remote.php/dav/files/")) s.advance(50_000); return false; };
+  s.advance(1000);
+  assert.equal((await s.tick()).ran, true);
+  const w = await ST.getWatch(s.db);
+  assert.ok(Number(w.lease_until) > s.clock.t, `lease_until ${w.lease_until} is still ahead of ${s.clock.t}`);
+});
+
+test("M4: ownerNameClash asks Nextcloud for the owner's current name (no cache); displayName's cache lasts an hour", async () => {
+  const s = await setup();
+  const { displayName } = await import("../bundles/workspace/server/nc/ocs.js");
+  const cfg = getConfig();
+  s.names.admin = "admin";
+  assert.equal(await displayName(cfg, "admin"), "admin"); // cached
+  s.names.admin = "Zed Owner"; s.ac.users = [{ id: "other", label: "Zed Owner" }];
+  assert.equal(await W.ownerNameClash(cfg), true, "the renamed owner's clash is seen");
+  // the cache entry expires after an hour
+  s.names.coworker = "Co One";
+  const realNow = Date.now;
+  try {
+    assert.equal(await displayName(cfg, "coworker"), "Co One");
+    s.names.coworker = "Co Two";
+    assert.equal(await displayName(cfg, "coworker"), "Co One", "cached");
+    const t = realNow(); Date.now = () => t + 3600_000 + 1000;
+    assert.equal(await displayName(cfg, "coworker"), "Co Two", "expired after an hour");
+  } finally { Date.now = realNow; }
+  s.names.admin = "admin"; s.ac.users = [];
+  await W.ownerNameClash(cfg); // re-reads (and re-caches) the owner's real name
 });

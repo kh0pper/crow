@@ -127,6 +127,20 @@ test("recheck route: CSRF/session required; clears a duplicate_display_name bloc
   await ST.setBlocked(db, null);
 });
 
+test("recheck route: clearing a block while the mode is shadow moves watch_since to now", async () => {
+  await ST.setMode(db, "off", t); await ST.setMode(db, "shadow", t);
+  const since = t;
+  await ST.setBlocked(db, "duplicate_display_name");
+  t += 60_000;
+  ncState.down = false; ncState.users = [];
+  const r = await postTo("recheck", { _csrf: "tok" });
+  assert.equal(notice(r), "unblocked");
+  const w = await ST.getWatch(db);
+  assert.equal(w.blocked_reason, null);
+  assert.equal(Number(w.watch_since), t, `watch_since moved from ${since} to the clear time`);
+  await ST.setMode(db, "off", t);
+});
+
 test("card: the Check again button and remedy show only for a duplicate-name block, en and es", () => {
   const en = V.renderCommentSettings({ lang: "en", csrf: "t", watch: { mode: "off" }, blocked: "duplicate_display_name" });
   assert.ok(en.includes("Change that account&#39;s display name, then press Check again."));

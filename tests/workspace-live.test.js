@@ -438,16 +438,16 @@ test("/comments: same 401 for bad token, unknown key, viewer, read-only sharee; 
   assert.equal((await commentEvents("unresolved_key")).length, 1);
 });
 
-test("/comments: mode off → {state:'off'}, nothing logged; shadow → live_report + verdict", async () => {
+test("/comments: mode off or blocked → the hint is not honoured (401), nothing logged; shadow → live_report + verdict", async () => {
   await commentOff(); await clearEvents();
   doc("cs.docx"); const f = fake.node("S/cs.docx");
   const k = fake.openInEditor("S/cs.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
   const off = await reportTo(k, { hint: f.fileId });
-  assert.equal(off.status, 200); assert.deepEqual(await off.json(), { state: "off" });
+  assert.equal(off.status, 401, "off: candidates come from queued work only (the pre-loop K5 path)");
   assert.equal((await commentEvents()).length, 0);
   const S = await ST_();
   await S.setMode(db, "shadow", Date.now() - HOUR_MS); await S.setBlocked(db, "duplicate_display_name");
-  assert.deepEqual(await (await reportTo(k, { hint: f.fileId })).json(), { state: "off" }, "blocked is off");
+  assert.equal((await reportTo(k, { hint: f.fileId })).status, 401, "blocked is off");
   assert.equal((await commentEvents()).length, 0);
   await S.setBlocked(db, null);
   const t0 = Date.now() - 800;
@@ -531,6 +531,7 @@ test("MIN_PLUGIN_VERSION stays 0.2.0", async () => {
 });
 
 test("a hint never lets a token reach another file's queue: hint B with key K_A on /pending → [] while B has a queued change", async () => {
+  await shadowOn(); // hints are honoured only while the comment loop runs
   doc("ha.docx"); doc("hb.docx");
   const A = fake.node("S/ha.docx"), B = fake.node("S/hb.docx");
   const kA = fake.openInEditor("S/ha.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
@@ -546,6 +547,7 @@ test("a hint never lets a token reach another file's queue: hint B with key K_A 
 });
 
 test("hints: honoured only for an edit-capable token; at most 10 uncached hint lookups per key per minute; unchanged samples skipped within 15 s", async () => {
+  await shadowOn();
   const { liveRouter, HINT_LOOKUPS_PER_MIN, SAMPLE_SKIP_MS } = await import("../bundles/workspace/server/live/routes-live.js");
   const { getConfig } = await import("../bundles/workspace/server/config.js");
   const { sessionByKey } = await import("../bundles/workspace/server/comments/sessions.js");
@@ -626,6 +628,7 @@ test("fix2: reporting the SECOND of two pasted duplicates with occ [1] logs the 
 });
 
 test("fix3: a global budget of FAILED hint lookups; successful hints never spend it; once spent, uncached hints are ignored", async () => {
+  await shadowOn();
   const { liveRouter, LIMITS, HINT_FAILURES_PER_MIN } = await import("../bundles/workspace/server/live/routes-live.js");
   const { getConfig } = await import("../bundles/workspace/server/config.js");
   assert.equal(HINT_FAILURES_PER_MIN, 120);
@@ -657,6 +660,7 @@ test("fix3: a global budget of FAILED hint lookups; successful hints never spend
 });
 
 test("fix4: each editor user gets a share of the failed-hint budget, so one account cannot spend everyone's", async () => {
+  await shadowOn();
   const { liveRouter, LIMITS, HINT_FAILURES_PER_USER_PER_MIN } = await import("../bundles/workspace/server/live/routes-live.js");
   const { getConfig } = await import("../bundles/workspace/server/config.js");
   assert.equal(HINT_FAILURES_PER_USER_PER_MIN, 20);
@@ -677,4 +681,86 @@ test("fix4: each editor user gets a share of the failed-hint budget, so one acco
     assert.ok(configCalls(900600) > 0, "another user's hint is still looked up");
     assert.equal(await pend(k1, p1.fileId, "vic"), 200);
   } finally { s.close(); }
+});
+
+// ---- final fix wave ---------------------------------------------------------------------------------------------
+const configCallsOf = (id) => fake.calls.filter((c) => c.url.includes(`/apps/onlyoffice/api/v1/config/${id}`)).length;
+const sessionRow = async (k) => (await db.execute({ sql: "SELECT * FROM workspace_editor_sessions WHERE doc_key=?", args: [k] })).rows[0] ?? null;
+
+test("I2: mode off → a hinted /pending records no editor session and makes no docSession call for the hint; shadow → it does", async () => {
+  await commentOff();
+  doc("io.docx"); const f = fake.node("S/io.docx");
+  const k = fake.openInEditor("S/io.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const n0 = configCallsOf(f.fileId);
+  assert.equal((await get(`/api/workspace/live/v1/pending?key=${k}&${PV}`, editorJwt(k), { "X-Crow-File-Hint": String(f.fileId) })).status, 401);
+  assert.equal(await sessionRow(k), null, "no workspace_editor_sessions row");
+  assert.equal(configCallsOf(f.fileId), n0, "the hint was never looked up");
+  // blocked is the same as off
+  const S = await ST_();
+  await S.setMode(db, "shadow", Date.now() - HOUR_MS); await S.setBlocked(db, "duplicate_display_name");
+  assert.equal((await get(`/api/workspace/live/v1/pending?key=${k}&${PV}`, editorJwt(k), { "X-Crow-File-Hint": String(f.fileId) })).status, 401);
+  assert.equal(await sessionRow(k), null); assert.equal(configCallsOf(f.fileId), n0);
+  await S.setBlocked(db, null);
+  // shadow (a mode change in this process is seen at once)
+  assert.equal((await get(`/api/workspace/live/v1/pending?key=${k}&${PV}`, editorJwt(k), { "X-Crow-File-Hint": String(f.fileId) })).status, 200);
+  assert.ok(await sessionRow(k), "recorded in shadow mode");
+  // a queued change still reaches its editor while off (the pre-loop K5 path)
+  await commentOff();
+  doc("iq.docx"); const kq = fake.openInEditor("S/iq.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const id = (await call("ws_docs_append", { path: "S/iq.docx", markdown: "Hola." })).data.change_id;
+  assert.deepEqual((await (await get(`/api/workspace/live/v1/pending?key=${kq}&${PV}`, editorJwt(kq))).json()).map((x) => x.change_id), [id]);
+  assert.equal(await sessionRow(kq), null, "off: no session recorded even for an authorised editor");
+});
+
+test("I2: the watch row is read through a ~5 s cache (a change made by another gateway is seen within 5 s)", async () => {
+  const { liveRouter, LIMITS, WATCH_TTL_MS } = await import("../bundles/workspace/server/live/routes-live.js");
+  const { getConfig } = await import("../bundles/workspace/server/config.js");
+  assert.equal(WATCH_TTL_MS, 5000);
+  await shadowOn();
+  let now = Date.now();
+  const a = express(); a.use(liveRouter({ Router: express.Router, json: express.json, db, getConfig, clock: { now: () => now }, limits: { ...LIMITS, perUser: 10000, perDocument: 10000, perDocumentRaw: 10000 } }));
+  const s = a.listen(0); const b = `http://127.0.0.1:${s.address().port}`;
+  try {
+    const open = (name) => { doc(name); const f = fake.node(`S/${name}`); return { f, k: fake.openInEditor(`S/${name}`, ["admin"], { releaseAfterMs: 10 ** 9 }) }; };
+    const pend = ({ f, k }) => fetch(`${b}/pending?key=${k}&${PV}`, { headers: { Authorization: `Bearer ${editorJwt(k)}`, "X-Crow-File-Hint": String(f.fileId) } }).then((r) => r.status);
+    assert.equal(await pend(open("wc1.docx")), 200);
+    await db.execute("UPDATE workspace_comment_watch SET mode='off' WHERE id=1"); // another process: no in-process notice
+    now += 1000; assert.equal(await pend(open("wc2.docx")), 200, "cached row: still shadow");
+    now += 5000;
+    const third = open("wc3.docx");
+    assert.equal(await pend(third), 401, "re-read after 5 s: off");
+    assert.equal(await sessionRow(third.k), null);
+  } finally { s.close(); }
+});
+
+test("M2: at most 10 /comments reports per key per minute; over it 429 and nothing logged", async () => {
+  const { liveRouter, LIMITS, COMMENT_REPORTS_PER_MIN } = await import("../bundles/workspace/server/live/routes-live.js");
+  const { getConfig } = await import("../bundles/workspace/server/config.js");
+  assert.equal(COMMENT_REPORTS_PER_MIN, 10);
+  await shadowOn(); await clearEvents();
+  let now = Date.now();
+  const a = express(); a.use(liveRouter({ Router: express.Router, json: express.json, db, getConfig, clock: { now: () => now } }));
+  const s = a.listen(0); const b = `http://127.0.0.1:${s.address().port}`;
+  try {
+    doc("rl.docx"); const f = fake.node("S/rl.docx");
+    const k = fake.openInEditor("S/rl.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+    const rep = () => fetch(`${b}/comments`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${ownerJwt(k)}`, "X-Crow-File-Hint": String(f.fileId) }, body: JSON.stringify({ key: k, pv: "0.3.0", kind: "add", thread: thread(), occ: [0] }) }).then((r) => r.status);
+    for (let i = 0; i < 10; i++) assert.equal(await rep(), 200);
+    const n = (await commentEvents()).length;
+    assert.ok(n >= 10);
+    assert.equal(await rep(), 429);
+    assert.equal((await commentEvents()).length, n, "nothing logged over the limit");
+    now += 61_000;
+    assert.equal(await rep(), 200, "a new minute");
+  } finally { s.close(); }
+});
+
+test("M3: an unresolved /comments report logs unresolved_key only on attempt 0 (or none, or an invalid attempt)", async () => {
+  await shadowOn(); await clearEvents();
+  const send = (k, attempt) => post("/api/workspace/live/v1/comments", ownerJwt(k), { key: k, pv: "0.3.0", kind: "add", thread: thread(), occ: [0], ...(attempt === undefined ? {} : { attempt }) });
+  for (const at of [1, 2]) assert.equal((await send(`no-such-key-m3-${at}`, at)).status, 401);
+  assert.equal((await commentEvents("unresolved_key")).length, 0, "retries (attempt 1, 2) are not counted again");
+  const counted = [0, undefined, 3, -1, 1.5, "1"];
+  for (const [i, at] of counted.entries()) assert.equal((await send(`no-such-key-m3c-${i}`, at)).status, 401);
+  assert.equal((await commentEvents("unresolved_key")).length, counted.length, "attempt 0, missing or invalid → logged");
 });

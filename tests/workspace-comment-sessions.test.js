@@ -27,6 +27,8 @@ before(async () => {
   execFileSync(process.execPath, [join(ROOT, "scripts", "init-db.js")], { cwd: ROOT, env: { ...process.env, CROW_HOME: home, CROW_DATA_DIR: join(home, "data"), CROW_DB_PATH: dbPath, CROW_DISABLE_NOSTR: "1", CROW_DISABLE_INSTANCE_SYNC: "1" }, stdio: "pipe" });
   db = await (await import("../bundles/workspace/server/db.js")).openWorkspaceDb(dbPath);
   S = await import("../bundles/workspace/server/comments/sessions.js");
+  // hints and sampled rows are comment-loop candidates: honoured only while the loop runs (mode shadow)
+  await (await import("../bundles/workspace/server/comments/store.js")).setMode(db, "shadow", Date.now());
   ({ getConfig } = await import("../bundles/workspace/server/config.js"));
   const { liveRouter } = await import("../bundles/workspace/server/live/routes-live.js");
   const app = express(); app.use(liveRouter({ Router: express.Router, json: express.json, db, getConfig, clock: { now: () => Date.now() } }));

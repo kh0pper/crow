@@ -22,8 +22,10 @@
  *     integer: spike E10, the session token carries no file id; honoured only for an edit-capable token, and at most
  *     HINT_LOOKUPS_PER_MIN uncached hint lookups per key), then files with queued (or unverified live) work.
  *     Every candidate is confirmed by asking ONLYOFFICE for that file's current key — a hint or a stored row never
- *     authorises alone. A key that matched no file is remembered for 5 s against the same candidate set (fix2 N6),
- *     and at most 20 queued-work files are asked;
+ *     authorises alone. The sampled row and the hint are comment-loop candidates: while the loop is off or blocked
+ *     (the watch row, read through a WATCH_TTL_MS cache, or the config) they are skipped and no session is recorded,
+ *     so candidates come from queued work only, exactly as before the loop existed. A key that matched no file is
+ *     remembered for 5 s against the same candidate set (fix2 N6), and at most 20 queued-work files are asked;
  *  4. 60/min per (document, user) and a raw 720/min per document, for every VALID token, right after the signature
  *     check and before the session lookup or body parse (fix3 R1) — a viewer cannot drive Nextcloud/ONLYOFFICE calls;
  *  5. WRITE permission (fix B), server-side on /pending, /claim and /ack alike: the user owns the file or holds a user
@@ -38,7 +40,8 @@
  * poll interval: 5 s while the editor has focus). Claims and acks always check fresh. Every lookup is still behind
  * the per-(document, user) and per-document limits above.
  * POST /comments (comment loop, Phase 1 shadow mode, comments/live-report.js) only logs: a report whose key resolves
- * to no file logs unresolved_key before the usual 401.
+ * to no file logs unresolved_key before the usual 401 (only on the plugin's first attempt: its 401 retries carry
+ * attempt 1 and 2). At most COMMENT_REPORTS_PER_MIN reports per document key are handled; over it 429, nothing logged.
  * A claim returns a per-change apply token (per-boot secret) that the ack must present. An ack is never proof of
  * application (R-LIVE): applied_live rows stay unverified until the close-time worker checks the saved file, and the
  * undo of a live change is derived server-side (live/derive-inverse.js) — the ack carries no inverse (fix A).
@@ -52,7 +55,7 @@ import { liveEligible } from "../queue/conditions.js";
 import { docSession } from "../nc/onlyoffice.js";
 import { notifyChange } from "../queue/notify.js";
 import { sessionByKey, recordSession } from "../comments/sessions.js";
-import { getWatch, logEvent } from "../comments/store.js";
+import { getWatch, watchGeneration, logEvent } from "../comments/store.js";
 import { validateReport, handleLiveReport } from "../comments/live-report.js";
 
 export const MIN_PLUGIN_VERSION = "0.2.0";
@@ -70,6 +73,10 @@ export const HINT_FAILURES_PER_MIN = 120;
 export const HINT_FAILURES_PER_USER_PER_MIN = 20;
 /** An unchanged session sample (same key, file and uids) is not re-written within this window. */
 export const SAMPLE_SKIP_MS = 15000;
+/** The comment-loop watch row (mode, block) is re-read at most this often; a change in this process is seen at once. */
+export const WATCH_TTL_MS = 5000;
+/** POST /comments reports handled per document key per minute (the plugin drops a 429). */
+export const COMMENT_REPORTS_PER_MIN = 10;
 const HIDDEN_ARGS = new Set(["path", "file_id", "if_open", "wait_s"]);
 const REASON_RE = /^[a-z_]{1,40}$/;
 /** X-Crow-File-Hint: a positive integer or nothing (a malformed hint is ignored, never an error). */
@@ -98,6 +105,19 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
   const hintFailures = lim(hintFailureMax, 1); // counts failed lookups only
   const userFailureMax = limits.hintFailuresPerUser ?? HINT_FAILURES_PER_USER_PER_MIN;
   const userHintFailures = lim(userFailureMax);
+  const commentReports = lim(limits.commentReports ?? COMMENT_REPORTS_PER_MIN);
+  let watchCache = null; // {at, gen, row}
+  const watchRow = async () => {
+    const gen = watchGeneration();
+    if (watchCache && watchCache.gen === gen && now() - watchCache.at < WATCH_TTL_MS) return watchCache.row;
+    const row = await getWatch(db);
+    watchCache = { at: now(), gen, row };
+    return row;
+  };
+  /** Does the comment loop run (mode not off, not blocked by the watch row or the config)? Unreadable → no. */
+  const loopRuns = async () => {
+    try { const w = await watchRow(); return w.mode !== "off" && !w.blocked_reason && !getConfig().commentLoopBlocked; } catch { return false; }
+  };
   // bounded caches (oldest evicted): fileId → ONLYOFFICE session; "fileId\0uid" → write permission. Each entry keeps
   // its own lifetime: 30 s, or NEGATIVE_TTL_MS for an answer that cannot authorize anyone.
   const cache = () => {
@@ -128,10 +148,11 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
    * HINT_LOOKUPS_PER_MIN of those per key; over it the hint is ignored (the request behaves as if it had none).
    */
   const misses = cache(); // key → candidate-set signature it matched none of (N6), for NEGATIVE_TTL_MS
-  async function liveSession(key, force, userId, hint = null) {
+  async function liveSession(key, force, userId, hint = null, loop = true) {
     const rows = (await db.execute({ sql: `SELECT file_id, MIN(path) AS path, MAX(CASE WHEN doc_key=? THEN 1 ELSE 0 END) AS hinted FROM workspace_pending_changes
       WHERE state IN ('pending','claimed_live','unknown_after_claim') OR (state='applied_live' AND verified=0) GROUP BY file_id ORDER BY hinted DESC, file_id LIMIT ?`, args: [key, MAX_CANDIDATES] })).rows;
-    const sampled = Number((await sessionByKey(db, key))?.file_id) || null;
+    const sampled = loop ? Number((await sessionByKey(db, key))?.file_id) || null : null;
+    if (!loop) hint = null;
     const paths = new Map(rows.map((r) => [Number(r.file_id), r.path]));
     let hintLooked = false; // this request spends a docSession call on the hint
     if (hint !== null && hint !== sampled && !paths.has(hint) && !sessions.get(hint, force)) {
@@ -180,9 +201,11 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
     const force = req.method !== "GET";
     let live;
     // Task 5 review: only an edit-capable token's hint is honoured (a view token is refused below anyway)
-    const hint = t.canEdit ? fileHintOf(req.headers["x-crow-file-hint"]) : null;
-    try { live = await liveSession(t.key, force, t.userId ? String(t.userId) : "", hint); } catch { return res.status(503).json({ error: "editor unavailable" }); }
-    if (!live && req.path === "/comments") await logUnresolved(hint !== null);
+    // I2: the sampled row and the hint exist for the comment loop; while it is off or blocked, neither is used
+    const loop = await loopRuns();
+    const hint = loop && t.canEdit ? fileHintOf(req.headers["x-crow-file-hint"]) : null;
+    try { live = await liveSession(t.key, force, t.userId ? String(t.userId) : "", hint, loop); } catch { return res.status(503).json({ error: "editor unavailable" }); }
+    if (!live && req.path === "/comments" && firstAttempt(req.body)) await logUnresolved(hint !== null);
     const idx = live && t.userId ? live.users.indexOf(t.userId) : -1;
     if (idx < 0) return deny(res);
     // fix B: edit rights are checked server-side for every endpoint (a viewer sees no change content either)
@@ -193,9 +216,10 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
     // resolves later without the hint. A failed write never fails the request.
     // An unchanged sample (same file and uids) is skipped within SAMPLE_SKIP_MS (last_seen lags by at most that;
     // soleOwnerWindowAt allows ±30 s).
+    // Only while the loop runs (I2).
     const at = now();
     const sig = `${live.fileId}\u0000${[...live.uids].sort().join(",")}`;
-    if (samples.get(t.key)?.v !== sig) {
+    if (loop && samples.get(t.key)?.v !== sig) {
       await recordSession(db, { key: t.key, fileId: live.fileId, uids: live.uids, at })
         .then(() => samples.set(t.key, sig, SAMPLE_SKIP_MS))
         .catch((e) => console.warn(`[workspace] live: session sample not recorded: ${String(e?.message).slice(0, 200)}`));
@@ -203,6 +227,8 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
     req.live = { editor: t, fileId: live.fileId, key: t.key, uid: live.uids[idx], uids: live.uids, at, path: live.path };
     next();
   };
+  /** The plugin's 401 retries carry attempt 1 or 2; 0, none or anything invalid is a first attempt. */
+  const firstAttempt = (b) => { const a = b?.attempt; return !(Number.isInteger(a) && a >= 1 && a <= 2); };
   /** Shadow mode counts /comments reports whose key resolved to no file (I-6, E10). No file id, no key. */
   async function logUnresolved(hinted) {
     try {
@@ -252,6 +278,7 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
 
   // Comment loop fast path, Phase 1: log only (live-report.js). The report's key must be the token's.
   router.post("/comments", wrap(async (req, res) => {
+    if (!commentReports.hit(req.live.key)) return res.status(429).json({ error: "too many requests" }); // nothing logged
     const v = validateReport(req.body);
     if (!v.ok) return res.status(400).json({ error: "bad_report" });
     if (v.r.key !== req.live.key) return deny(res);

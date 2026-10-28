@@ -130,7 +130,7 @@ export default function workspaceRouter(authMiddleware, seams = {}) {
       const clash = await ownerNameClash(cfg);
       if (clash === null) return go("recheck_failed");
       if (clash === true) return go("still_blocked");
-      await clearBlocked(db, "duplicate_display_name");
+      await clearBlocked(db, "duplicate_display_name", clock.now()); // mode not off → watch_since = now
       return go(cfg.commentLoopBlocked ? "env_blocked" : "unblocked");
     } catch (e) { commentFail(e); return go("error"); }
   });

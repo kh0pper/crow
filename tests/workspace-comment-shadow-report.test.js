@@ -59,12 +59,12 @@ test("a second would_fire for the same fp → refires 1, exit.reopen false", asy
 
 test("latency p95 from live_report add events only; 3001 ms p95 fails", async () => {
   let db = await fresh();
-  for (let i = 0; i < 20; i++) await rep(db, i, { latency: i === 19 ? 3001 : 100 });
+  for (let i = 0; i < 20; i++) { await rep(db, i, { latency: i === 19 ? 3001 : 100 }); await scan(db, i); }
   await ev(db, "live_report", 1, { source: "live", pair: "x", fp: "chg", latency_ms: null }); // a change: no latency
   let r = await run(db);
   assert.equal(r.latency.p95, 100); assert.equal(r.latency.max, 3001); assert.equal(r.exit.latency, true);
   db = await fresh();
-  for (let i = 0; i < 20; i++) await rep(db, i, { latency: i >= 18 ? 3001 : 100 });
+  for (let i = 0; i < 20; i++) { await rep(db, i, { latency: i >= 18 ? 3001 : 100 }); await scan(db, i); }
   r = await run(db);
   assert.equal(r.latency.p95, 3001); assert.equal(r.exit.latency, false);
 });
@@ -115,4 +115,37 @@ test("live reports that disagree within a pair count as a mismatch; unverifiedSo
   assert.equal(r.fpMatchPct, 0); assert.equal(r.unverifiedSoleRate, 0.5);
   assert.equal(r.oldWouldFire.length, 1); assert.equal(r.oldWouldFire[0].snippet, "hi");
   assert.equal((await run(await fresh())).unverifiedSoleRate, null);
+});
+
+// ---- final fix wave ---------------------------------------------------------------------------------------------
+test("I1: saved refires are keyed by (file_id, pair, hash): an anchored-text edit (new fp, same pair and text) is a refire", async () => {
+  const db = await fresh();
+  const d = { source: "saved", pair: "p", hash: "h1", reason: ID.VERDICT_REASONS.OWNER_VERIFIED, sole: true, age_s: 5 };
+  await ev(db, "would_fire", 1, { ...d, fp: "f1" }); await ev(db, "would_fire", 1, { ...d, fp: "f2" }, T0 + 1);
+  let r = await run(db);
+  assert.equal(r.refires, 1); assert.equal(r.exit.reopen, false);
+  // the same pair with another text (an edit that added a mention) is not a refire; nor is another file
+  const db2 = await fresh();
+  await ev(db2, "would_fire", 1, { ...d, fp: "f1" }); await ev(db2, "would_fire", 1, { ...d, fp: "f2", hash: "h2" }, T0 + 1);
+  await ev(db2, "would_fire", 2, { ...d, fp: "f1" }, T0 + 2);
+  r = await run(db2);
+  assert.equal(r.refires, 0); assert.equal(r.exit.reopen, true);
+});
+
+test("I1: exit.reopen also needs zero old would_fire (spec I-7), with zero refires", async () => {
+  const db = await fresh();
+  await ev(db, "would_fire", 1, { source: "saved", pair: "p", hash: "h", fp: "f", sole: true, reason: ID.VERDICT_REASONS.OWNER_VERIFIED, age_s: 3600, snippet: "old" });
+  const r = await run(db);
+  assert.equal(r.refires, 0); assert.equal(r.oldWouldFire.length, 1);
+  assert.equal(r.exit.reopen, false);
+});
+
+test("M1: latency counts only live reports whose fp a saved scan_new of the same pair also has", async () => {
+  const db = await fresh();
+  for (let i = 0; i < 5; i++) { await rep(db, i, { latency: 100 }); await scan(db, i); }
+  await rep(db, 10, { latency: 9000 }); // never saved
+  await rep(db, 11, { latency: 8000 }); await scan(db, 11, { fp: "other" }); // saved with another fp
+  const r = await run(db);
+  assert.equal(r.latency.max, 100); assert.equal(r.exit.latency, true);
+  assert.equal((await run(await fresh())).latency.p95, null);
 });

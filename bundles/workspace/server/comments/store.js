@@ -6,6 +6,11 @@ export const MODES = ["off", "shadow", "on"];
 export const EVENT_KINDS = ["live_report", "scan_new", "scan_edit", "rekey", "would_fire", "unverified", "fp_mismatch", "history", "unresolved_key", "scan_error"];
 const DAY = 86400000;
 
+// Bumped by every watch-row write in this process, so a cache of the row (the live router's) sees a Settings change
+// at once; a write by another gateway process is seen when that cache expires.
+let watchGen = 0;
+export const watchGeneration = () => watchGen;
+
 export async function getWatch(db) {
   await db.execute("INSERT OR IGNORE INTO workspace_comment_watch(id, mode) VALUES (1, 'off')");
   return (await db.execute("SELECT * FROM workspace_comment_watch WHERE id=1")).rows[0];
@@ -20,6 +25,7 @@ export async function setMode(db, mode, nowMs) {
     sql: "UPDATE workspace_comment_watch SET watch_since = CASE WHEN mode='off' AND ?<>'off' THEN ? ELSE watch_since END, mode=? WHERE id=1",
     args: [mode, nowMs, mode],
   });
+  watchGen++;
   return getWatch(db);
 }
 
@@ -33,15 +39,27 @@ export async function takeLease(db, owner, nowMs, ttlMs = 60000) {
   return r.rowsAffected > 0;
 }
 
+/** The owner extends its own lease; false when another owner holds it (the caller stops). */
+export async function renewLease(db, owner, nowMs, ttlMs = 60000) {
+  const r = await db.execute({ sql: "UPDATE workspace_comment_watch SET lease_until=? WHERE id=1 AND lease_owner=?", args: [nowMs + ttlMs, owner] });
+  return r.rowsAffected > 0;
+}
+
 export async function setBlocked(db, reason) {
   await getWatch(db);
   await db.execute({ sql: "UPDATE workspace_comment_watch SET blocked_reason=? WHERE id=1", args: [reason ?? null] });
+  watchGen++;
 }
 
-/** Clears the block only when it is `reason` (one statement); true when a block was cleared. */
-export async function clearBlocked(db, reason) {
+/**
+ * Clears the block only when it is `reason` (one statement); true when a block was cleared. When the mode is not off,
+ * watch_since moves to nowMs, so comments written while the loop was blocked never count as new.
+ */
+export async function clearBlocked(db, reason, nowMs) {
   await getWatch(db);
-  const r = await db.execute({ sql: "UPDATE workspace_comment_watch SET blocked_reason=NULL WHERE id=1 AND blocked_reason=?", args: [reason] });
+  if (!Number.isFinite(Number(nowMs))) throw new Error("clearBlocked needs nowMs");
+  const r = await db.execute({ sql: "UPDATE workspace_comment_watch SET blocked_reason=NULL, watch_since = CASE WHEN mode<>'off' THEN ? ELSE watch_since END WHERE id=1 AND blocked_reason=?", args: [Number(nowMs), reason] });
+  watchGen++;
   return r.rowsAffected > 0;
 }
 

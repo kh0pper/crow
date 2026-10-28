@@ -49,6 +49,14 @@ export function fingerprint(c) {
   return sha([nfc(c.author), isoSecond(c.date), normText(c.text), normQuote(c.quoted), c.occ ?? 0].join("|"));
 }
 
+/**
+ * Quote- and occurrence-free identity: author, second and text. A comment whose anchored text was edited, or whose
+ * occ shifted when an earlier same-second duplicate was deleted, keeps it (its slot and fingerprint do not).
+ */
+export function contentKeyOf(c) {
+  return sha([nfc(c.author), isoSecond(c.date), normText(c.text)].join("|"));
+}
+
 /** Edit-stable identity: everything but the text. */
 export function slotOf(c) {
   return sha([nfc(c.author), isoSecond(c.date), normQuote(c.quoted), c.occ ?? 0].join("|"));
@@ -69,7 +77,7 @@ export function snapshot(threads, parseMentions) {
   const parse = typeof parseMentions === "function" ? parseMentions : () => [];
   return (threads || []).map((th, t) => {
     const mine = flat.filter((c) => c.t === t);
-    const comments = mine.map((c) => ({ slot: slotOf(c), fp: fingerprint(c), tokens: toTokens(parse(c.text)) }));
+    const comments = mine.map((c) => ({ slot: slotOf(c), fp: fingerprint(c), ck: contentKeyOf(c), tokens: toTokens(parse(c.text)) }));
     const rootFp = comments[0].fp;
     const r = mine[0];
     return {

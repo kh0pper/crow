@@ -15,18 +15,21 @@ export async function ocsPost(cfg, path, form) {
   if (!r.ok || (j?.ocs?.meta && j.ocs.meta.status !== "ok")) throw new WsError("share_failed", j?.ocs?.meta?.message || `Workspace refused (HTTP ${r.status})`);
   return j.ocs.data;
 }
-const nameCache = new Map();
+const nameCache = new Map(); // uid → {name, at}
+export const NAME_CACHE_TTL_MS = 3600 * 1000;
 /**
  * A Nextcloud user's display name, or null when Nextcloud gave no real answer (a non-207 status, or no displayname
- * in it). Only real answers are cached, so an outage never pins a uid as someone's "name"; callers that only show
- * the name fall back to the uid themselves (`?? uid`), and the comment loop fails closed on null.
+ * in it). Only real answers are cached (for NAME_CACHE_TTL_MS), so an outage never pins a uid as someone's "name";
+ * callers that only show the name fall back to the uid themselves (`?? uid`), and the comment loop fails closed on
+ * null. `fresh` skips the cache (the answer still refreshes it).
  */
-export async function displayName(cfg, uid) {
-  if (nameCache.has(uid)) return nameCache.get(uid);
+export async function displayName(cfg, uid, { fresh = false } = {}) {
+  const c = nameCache.get(uid);
+  if (!fresh && c && Date.now() - c.at < NAME_CACHE_TTL_MS) return c.name;
   const r = await ncFetch(cfg, "PROPFIND", principalUrl(cfg, uid), { headers: { Depth: "0", "Content-Type": "application/xml" }, body: `<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:displayname/></d:prop></d:propfind>` });
   if (r.status !== 207) { r.body?.cancel?.(); return null; }
   const name = propText(parseMultistatus(await r.text())[0]?.props || new Map(), NS.d, "displayname") || null;
-  if (name !== null) nameCache.set(uid, name);
+  if (name !== null) nameCache.set(uid, { name, at: Date.now() });
   return name;
 }
 export const myShares = (cfg, segs) => ocsGet(cfg, `/ocs/v2.php/apps/files_sharing/api/v1/shares?path=${encodeURIComponent(`/${joinPath(segs)}`)}`);

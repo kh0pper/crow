@@ -197,7 +197,7 @@ test("a new @hank comment reports once within the event turn; plain text never r
   const [r] = e.reports();
   assert.equal(r.method, "POST");
   assert.equal(r.headers["X-Crow-File-Hint"], "4242", "the documentCallbackUrl doc token's fileId");
-  assert.deepEqual(r.body, { key: "doc-key", pv: "0.3.0", kind: "add", occ: [0],
+  assert.deepEqual(r.body, { key: "doc-key", pv: "0.3.0", kind: "add", occ: [0], attempt: 0,
     thread: { Id: "1_4", Text: "@hank please tidy this", Time: "1793157691225", UserName: "admin", QuoteText: "p1\r\np2\r\n", Solved: false, Replies: [] } });
   // a reply without a mention on that thread: nothing new names anyone → no report; a reply with one → "change"
   const withReply = cm("1_4", hank.Data.Text, { QuoteText: hank.Data.QuoteText, Replies: [{ Text: "thanks", Time: "1793157699000", UserName: "admin" }] });
@@ -245,6 +245,7 @@ test("401 retry: re-sent at +5 s and +15 s, then dropped; polling cadence unchan
   assert.ok(sentAt >= t0);
   await e.advance(120000); await control.advance(120000);
   assert.deepEqual(e.reports().map((r) => r.at - sentAt), [0, 5000, 15000]);
+  assert.deepEqual(e.reports().map((r) => r.body.attempt), [0, 1, 2], "each send carries its attempt number");
   assert.equal(e.polls().length, control.polls().length, "the same poll cadence as an editor with no reports");
   const d = commentEditor(async (url) => (url === "/crow-live/v1/comments" ? { status: 429, body: {} } : { status: 401, body: {} }), []);
   d.start(); await d.advance(100);

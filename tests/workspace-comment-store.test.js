@@ -84,3 +84,28 @@ test("logEvent refuses full text at any depth and long strings under any key", a
   await assert.rejects(S.logEvent(db, { at: 1, kind: "would_fire", detail: { note: "y".repeat(201) } }));
   await S.logEvent(db, { at: 1, kind: "would_fire", detail: { hash: "abc", snippet: "short" } });
 });
+
+test("clearBlocked: mode not off → watch_since = now (comments made while blocked never count); mode off keeps it", async () => {
+  await S.setMode(db, "off", 0);
+  await S.setMode(db, "shadow", 1000);
+  await S.setBlocked(db, "duplicate_display_name");
+  assert.equal(await S.clearBlocked(db, "duplicate_display_name", 9000), true);
+  let w = await S.getWatch(db);
+  assert.equal(w.blocked_reason, null); assert.equal(Number(w.watch_since), 9000);
+  assert.equal(await S.clearBlocked(db, "duplicate_display_name", 12000), false, "nothing to clear");
+  assert.equal(Number((await S.getWatch(db)).watch_since), 9000, "no block cleared → watch_since untouched");
+  await S.setMode(db, "off", 13000);
+  await S.setBlocked(db, "duplicate_display_name");
+  assert.equal(await S.clearBlocked(db, "duplicate_display_name", 15000), true);
+  w = await S.getWatch(db);
+  assert.equal(w.mode, "off"); assert.equal(Number(w.watch_since), 9000, "off keeps it");
+});
+
+test("renewLease: only the holder extends its lease", async () => {
+  await db.execute("UPDATE workspace_comment_watch SET lease_owner=NULL, lease_until=NULL WHERE id=1");
+  assert.equal(await S.takeLease(db, "a", 0), true);
+  assert.equal(await S.renewLease(db, "a", 50_000), true);
+  assert.equal(Number((await S.getWatch(db)).lease_until), 110_000);
+  assert.equal(await S.takeLease(db, "b", 70_000), false, "renewed: not expired");
+  assert.equal(await S.renewLease(db, "b", 70_000), false, "not the holder");
+});

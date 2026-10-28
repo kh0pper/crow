@@ -15,7 +15,7 @@
 import { appImport } from "../app-root.js";
 import { stat } from "../nc/dav.js";
 import { displayName } from "../nc/ocs.js";
-import { fromLive, flatten, fingerprint, pairKey } from "./keys.js";
+import { fromLive, flatten, fingerprint, contentKeyOf, pairKey } from "./keys.js";
 import { sessionByKey } from "./sessions.js";
 import { getWatch, getState, logEvent, textHash, snippetOf } from "./store.js";
 import { isBotAuthor, liveOwner, historyOf, verdictOf } from "./identity.js";
@@ -88,7 +88,10 @@ export async function handleLiveReport({ db, getConfig, clock, live, body }) {
   await logEvent(db, { at: receivedAt, fileId, kind: "live_report", detail: { ...common, latency_ms: r.kind === "add" ? receivedAt - Number(r.thread.Time) : null } });
 
   const st = await getState(db, fileId);
-  const knownFp = new Set(parseJson(st?.threads_json, []).flatMap((t) => (t.comments || []).map((x) => x.fp))).has(fp);
+  // known: the last scan held this fingerprint, or (the watcher's rule) a comment with the same author, second and text
+  const held = parseJson(st?.threads_json, []).flatMap((t) => t.comments || []);
+  const ck = contentKeyOf(c);
+  const knownFp = held.some((x) => x.fp === fp || (x.ck && x.ck === ck));
   const firstSighting = !st?.scanned_at;
   const row = await sessionByKey(db, live.key);
   let prevVersionMtimeS = null;

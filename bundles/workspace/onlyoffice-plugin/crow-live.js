@@ -18,8 +18,9 @@
  * that only fill the baseline. A later event whose thread gained or changed a comment whose text has an @mention is
  * POSTed to /comments with occ (computed over every comment the way keys.flatten counts identical
  * author/second/quote tuples). Threads over the server's limits are not sent. A 401 is re-sent at +5 s and +15 s,
- * then dropped; 429 and network errors are dropped. Every request carries X-Crow-File-Hint: the fileId claim of the
- * documentCallbackUrl's doc token (spike E10), read but never verified here; the gateway treats it as a hint only.
+ * then dropped (each send carries its attempt number, 0-2); 429 and network errors are dropped. Every request
+ * carries X-Crow-File-Hint: the fileId claim of the documentCallbackUrl's doc token (spike E10), read but never
+ * verified here; the gateway treats it as a hint only.
  */
 (function (window) {
   var VERSION = "0.3.0", BASE = "/crow-live/v1";
@@ -154,6 +155,7 @@
     return false;
   }
   function send(body, attempt) {
+    body.attempt = attempt; // 0, then 1 and 2 on the 401 retries: the server counts an unresolved key once
     api("/comments", { method: "POST", body: JSON.stringify(body) }).catch(function (e) {
       if (e && e.status === 401 && attempt < REPORT_RETRY_MS.length) {
         var wait = REPORT_RETRY_MS[attempt] - (attempt ? REPORT_RETRY_MS[attempt - 1] : 0);

@@ -4,7 +4,8 @@
  * OCS config + command-service `info` (through sweepSessions). It never PUTs, PROPPATCHes, MOVEs or forcesaves, and
  * it logs verdicts (hash + snippet, never the comment text) instead of acting on them.
  *
- * One tick: mode / block check (mode off → no Nextcloud call at all) → back-off → lease → prune → session sweep →
+ * One tick: prune (DB only, at most hourly, in every mode) → mode / block check (mode off → no Nextcloud call at all)
+ * → back-off → lease → session sweep →
  * for changed etags (≤ MAX_DOWNLOADS downloads; over MAX_BYTES by listing size → skipped until the etag changes):
  * download, snapshot, diff, classify, log → putState per file. A Nextcloud outage (NcError: no answer, or an HTTP
  * error other than 403/404/423, e.g. 5xx) ends the tick (files already done keep their state), backs off BACKOFF_MS
@@ -22,9 +23,9 @@ import { getNcInstanceId } from "../nc/onlyoffice.js";
 import { NcError } from "../result.js";
 import { openDocx } from "../ooxml/docx-model.js";
 import { readCommentThreads } from "../ooxml/docx-comments.js";
-import { flatten, fingerprint, snapshot as snapshotOf, diff, pairKey } from "./keys.js";
+import { flatten, fingerprint, contentKeyOf, snapshot as snapshotOf, diff, pairKey } from "./keys.js";
 import { DOCX_MIME, sweepSessions } from "./sessions.js";
-import { getWatch, setBlocked, takeLease, prune, getState, putState, logEvent, textHash, snippetOf } from "./store.js";
+import { getWatch, setBlocked, takeLease, renewLease, prune, getState, putState, logEvent, textHash, snippetOf } from "./store.js";
 import { isBotAuthor, historyOf, savedOwner, verdictOf } from "./identity.js";
 
 export const TICK_MS = 15000;
@@ -36,6 +37,8 @@ export const RECENT_LIMIT = 60;
 export const OUTAGE_LIMIT = 200;
 export const NAME_CHECK_MS = 24 * 3600 * 1000;
 export const NAME_RETRY_MS = 3600 * 1000;
+/** The DB-only prune (old events, old editor sessions) runs at most this often, whatever the mode. */
+export const PRUNE_MS = 3600 * 1000;
 const WINDOW_SLACK_MS = 30000; // the same ±30 s soleOwnerWindowAt uses
 /** Nextcloud answers that concern one file (forbidden, gone, locked): that file is skipped, the tick goes on. */
 const PER_FILE_STATUS = new Set([403, 404, 423]);
@@ -59,7 +62,7 @@ export async function ownerNameClash(cfg) {
   try {
     const owners = new Set(cfg.ownerUids);
     for (const uid of cfg.ownerUids) {
-      const name = await displayName(cfg, uid);
+      const name = await displayName(cfg, uid, { fresh: true }); // a rename must be seen now, not after the cache
       if (!name || !normName(name)) return null;
       const q = new URLSearchParams({ search: name, itemType: "", itemId: "", limit: "200" });
       q.append("shareTypes[]", "0");
@@ -74,10 +77,13 @@ export async function ownerNameClash(cfg) {
 /** seams.snapshot: tests only (a failure inside one file's scan). */
 export function makeCommentTick({ db, getConfig, clock, seams = {} }) {
   const owner = `comment-watch:${randomUUID()}`;
-  let backoffUntil = 0, outage = false, nextNameCheck = 0;
+  let backoffUntil = 0, outage = false, nextNameCheck = 0, nextPrune = 0;
 
   return async function tick() {
     const now = clock.now();
+    // Editor sessions are recorded only while the loop runs, but old ones (and old events) must still go when it is
+    // off or blocked: DB only, no lease needed (deleting old rows twice is harmless).
+    if (now >= nextPrune) { await prune(db, now); nextPrune = now + PRUNE_MS; }
     const watch = await getWatch(db);
     if (watch.mode === "off") return { ran: false, why: "off", nextMs: TICK_MS };
     let cfg;
@@ -85,7 +91,6 @@ export function makeCommentTick({ db, getConfig, clock, seams = {} }) {
     if (cfg.commentLoopBlocked || watch.blocked_reason) return { ran: false, why: "blocked", nextMs: TICK_MS };
     if (now < backoffUntil) return { ran: false, why: "backoff", nextMs: backoffUntil - now };
     if (!(await takeLease(db, owner, now))) return { ran: false, why: "lease", nextMs: TICK_MS };
-    await prune(db, now);
 
     // At start and then daily (retried hourly when it could not run). It only ever SETS a block: clearing one is
     // bootstrap's job (through the env) or an operator's.
@@ -115,6 +120,8 @@ export function makeCommentTick({ db, getConfig, clock, seams = {} }) {
           await logEvent(db, { at: now, fileId: e.fileId, kind: "scan_error", detail: { source: "saved", code: errCode(err) } });
           console.warn(`[workspace] comment watcher: file ${Number(e.fileId)} skipped (${errCode(err)})`);
         }
+        // a slow tick (large files, a slow Nextcloud) keeps its lease; lost to another gateway → stop here
+        if (!(await renewLease(db, owner, clock.now()))) break;
       }
       outage = false;
     } catch (err) {
@@ -129,9 +136,12 @@ export function makeCommentTick({ db, getConfig, clock, seams = {} }) {
 
 const baseRow = (e, st, now) => ({ file_id: e.fileId, first_seen_at: st?.first_seen_at ?? now, own_put_etag: st?.own_put_etag ?? null });
 
-/** Remember the etag so the file is not retried until it changes; the last parsed snapshot is kept. */
+/**
+ * Remember the etag so the file is not retried until it changes; the last parsed snapshot is kept, and so is its
+ * mtime: the next scan then counts every version since that snapshot (the skipped ones too) for multi_version.
+ */
 function skip(ctx, e, st, { etag, mtime }, reason) {
-  return putState(ctx.db, { ...baseRow(e, st, ctx.now), etag, mtime, threads_json: st?.threads_json ?? "[]", scanned_at: st?.scanned_at ?? null, skip_reason: reason });
+  return putState(ctx.db, { ...baseRow(e, st, ctx.now), etag, mtime: st?.scanned_at ? st.mtime : mtime, threads_json: st?.threads_json ?? "[]", scanned_at: st?.scanned_at ?? null, skip_reason: reason });
 }
 
 async function scanFile(ctx, e, st) {
@@ -156,6 +166,9 @@ async function scanFile(ctx, e, st) {
   const byFp = new Map(flat.map((c) => [fingerprint(c), c]));
   const people = new Map([...parsed.people].map(([a, u]) => [String(a).normalize("NFC"), u]));
   const prevFps = new Set((prev || []).flatMap((t) => t.comments.map((c) => c.fp)));
+  // Content keys (author, second, text): a comment whose anchored text was edited, or whose occ shifted, is still
+  // the one the last scan held. A snapshot written before content keys has none: the fingerprint rule alone applies.
+  const prevCks = new Set((prev || []).flatMap((t) => t.comments.map((c) => c.ck).filter(Boolean)));
 
   // Pass 1 (no Nextcloud): which new / edited comments name an enabled bot and were not written by a bot.
   const cands = [];
@@ -198,7 +211,7 @@ async function scanFile(ctx, e, st) {
     const common = { source: "saved", pair, fp: x.fp, hash: textHash(c.text), snippet: snippetOf(c.text), bot: bot.botId };
     await logEvent(db, { at: now, fileId: e.fileId, kind, detail: common });
     await checkLiveFp(db, now, e.fileId, pair, x.fp, flat, bot.botId);
-    const history = historyOf({ date: c.date, watchSince: watch.watch_since, knownFp: prevFps.has(x.fp), firstSighting: !prev, sessionFirstSeenMs: facts.sessionFirstSeenMs, prevVersionMtimeS: facts.prevVersionMtimeS });
+    const history = historyOf({ date: c.date, watchSince: watch.watch_since, knownFp: prevFps.has(x.fp) || prevCks.has(contentKeyOf(c)), firstSighting: !prev, sessionFirstSeenMs: facts.sessionFirstSeenMs, prevVersionMtimeS: facts.prevVersionMtimeS });
     const identity = await savedOwner({ author: c.author, peopleUid, instanceId: ctx.instanceId, newestVersion: facts.newest, versionsSince: facts.versionsSince, db, fileId: e.fileId, sinceMs: facts.sinceMs, ownerUids: cfg.ownerUids, ownerNames: ctx.names });
     const v = verdictOf(history, identity);
     const age = Date.parse(c.date);

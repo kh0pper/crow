@@ -4,6 +4,11 @@
  *
  * Counting rules: several editor tabs each log their own live_report and live verdict for one comment, so every
  * count of comments is by distinct (file_id, fp); pairs and fpMatchPct are by distinct pair.
+ * Saved-side refires are keyed by (file_id, pair, hash) instead: pair = (file, author, second) and hash = the text,
+ * neither of which includes the anchored quote or occ, so a comment that comes back under a new fp after its anchored
+ * text was edited (or an earlier same-second duplicate was deleted) still counts as a refire.
+ * Latency is scored only over live reports whose fp a saved scan_new of the same pair also has (the live comment is
+ * the saved one). Live-report events carry no owner flag, so the reporter is not filtered.
  *
  * CLI: node shadow-report.js [--days N]   (default 7) prints the report as JSON.
  */
@@ -19,6 +24,7 @@ const EXIT = Object.freeze({ pairs: 30, fpMatchPct: 99, p95Ms: 3000 });
 
 const parse = (s) => { try { return JSON.parse(s) ?? {}; } catch { return {}; } };
 const fpKey = (e) => `${e.fileId}\u0000${e.d.fp}`;
+const refireKey = (e) => `${e.fileId}\u0000${e.d.pair}\u0000${e.d.hash}`;
 
 /** Nearest-rank percentile of an ascending array. */
 function pct(sorted, p) {
@@ -60,7 +66,8 @@ export async function shadowReport(db, { sinceMs = 0, nowMs = Date.now() } = {})
     if (e.kind !== K.would_fire) continue;
     const key = fpKey(e);
     if (e.d.source === SAVED) {
-      if (firedSaved.has(key)) refires++; else firedSaved.add(key);
+      const rk = refireKey(e);
+      if (firedSaved.has(rk)) refires++; else firedSaved.add(rk);
     } else if (e.d.source === LIVE) {
       liveFired.set(key, (liveFired.get(key) ?? 0) + 1);
     }
@@ -81,10 +88,11 @@ export async function shadowReport(db, { sinceMs = 0, nowMs = Date.now() } = {})
   const denom = sole[K.unverified].size + sole[K.would_fire].size;
   const unverifiedSoleRate = denom ? sole[K.unverified].size / denom : null;
 
-  // latency: live_report kind=add, earliest report per distinct (file_id, fp)
+  // latency: live_report kind=add whose fp the saved scan_new of its pair also has, earliest per distinct (file_id, fp)
   const lat = new Map();
   for (const e of ev) {
     if (e.kind !== K.live_report || typeof e.d.latency_ms !== "number" || !Number.isFinite(e.d.latency_ms)) continue;
+    if (!savedPairs.get(e.d.pair)?.has(e.d.fp)) continue;
     const k = fpKey(e);
     if (!lat.has(k)) lat.set(k, e.d.latency_ms);
   }
@@ -96,7 +104,7 @@ export async function shadowReport(db, { sinceMs = 0, nowMs = Date.now() } = {})
     exit: {
       pairs: pairs >= EXIT.pairs,
       fpMatch: fpMatchPct !== null && fpMatchPct >= EXIT.fpMatchPct,
-      reopen: refires === 0,
+      reopen: refires === 0 && oldWouldFire.length === 0, // I-7: zero would_fire when old mentions are reopened
       latency: latency.p95 !== null && latency.p95 <= EXIT.p95Ms,
       liveReport: liveReports > 0,
     },
