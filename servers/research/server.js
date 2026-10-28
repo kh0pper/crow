@@ -30,6 +30,7 @@ import { UNKNOWN, resolveCallActor, auditActor, actorLabel } from "./actor.js";
 import { ensureProvenanceSchema } from "./ensure-schema.js";
 import { fetchPage as defaultFetchPage, splitFetchedText, PREVIEW_CHARS, FETCHED_TEXT_MAX, REFETCH_AFTER_DAYS } from "../shared/fetch-page.js";
 import { matchQuote } from "./quote-match.js";
+import { PROVENANCE_COLUMNS } from "./provenance-schema.js";
 
 // publication_date is free-form TEXT ("1993", "2005-07", "2023-05-14",
 // occasionally prose like "May 14, 2023"). new Date() parses the ISO
@@ -295,6 +296,43 @@ function fetchOutcomeText(r, budget = RESULT_MAX) {
 
 /** Clip a value echoed into a tool result. */
 const clip = (s, n) => { const t = String(s ?? ""); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
+
+// --- What is citable (bibliography, list, get) ---
+
+// A source is citable when Crow opened its page (or it predates fetching, shown as legacy), or the
+// owner verified a non-web source by hand. NULL fetch_status (a share or clone from a peer) is NOT
+// citable: wherever this is negated it must be wrapped as NOT COALESCE(CITABLE_SQL, 0).
+export const CITABLE_SQL = "(fetch_status IN ('fetched','fetched_no_text','legacy') OR (fetch_status = 'not_applicable' AND verified = 1 AND verification_method = 'manual_owner'))";
+
+// Every research_sources column except the two large text ones: list paths never pull page text.
+export const SOURCE_LIST_COLUMNS = [
+  "id", "project_id", "title", "source_type", "url", "authors", "publication_date", "publisher", "doi", "isbn",
+  "abstract", "content_summary", "citation_apa", "retrieval_date", "retrieval_method", "verified",
+  "verification_notes", "tags", "relevance_score", "created_at", "backend_id", "uuid", "origin_instance_id",
+  "fetch_status", "fetched_at", "final_url", "http_status", "content_sha256", "fetch_error",
+  "verification_method", "verified_by",
+].join(", ");
+const SOURCE_0013_NAMES = new Set(PROVENANCE_COLUMNS.filter((c) => c.table === "research_sources").map((c) => c.column));
+const SOURCE_LIST_COLUMNS_PRE0013 = SOURCE_LIST_COLUMNS.split(", ").filter((c) => !SOURCE_0013_NAMES.has(c)).join(", ");
+/** The named column list for a list path, optionally table-aliased. */
+function sourceColumns(ready, alias = "") {
+  const list = ready ? SOURCE_LIST_COLUMNS : SOURCE_LIST_COLUMNS_PRE0013;
+  return alias ? list.split(", ").map((c) => `${alias}.${c}`).join(", ") : list;
+}
+
+const FETCH_STATUS_ORDER = ["fetched", "fetched_no_text", "failed", "legacy", "not_applicable", null];
+const FETCH_STATUS_LABEL = {
+  fetched: "fetched", fetched_no_text: "fetched (no text)", failed: "FAILED",
+  legacy: "legacy, unchecked", not_applicable: "not a web page",
+};
+/** The label for a fetch_status; NULL (or anything unrecognized) reads as unknown. */
+const statusLabel = (st) => FETCH_STATUS_LABEL[st] || "unknown";
+const NOTE_PROVENANCE_ORDER = ["fetched", "snippet", "derived", null];
+const noteProvLabel = (p) => (["fetched", "snippet", "derived"].includes(p) ? p : "unknown");
+const UPGRADE_PENDING = "Fetch status is unavailable until the database upgrade finishes.";
+/** Verified marker: a legacy_flag verification was never checked against a page. */
+const verifiedTag = (r) => (r.verified && r.verification_method !== "legacy_flag" ? "[V] " : "");
+const oneLine = (s, n) => clip(String(s ?? "").replace(/\s+/g, " "), n);
 
 /** Call the fetch seam with the url alone (never the private-address opt-out); a throwing seam reads as a failed fetch. */
 async function safeFetch(fetchImpl, url) {
@@ -725,8 +763,9 @@ export function createProjectServer(dbPath, options = {}) {
         return { content: [{ type: "text", text: "No sources found." }] };
       }
 
+      const ready = schema.ready || refreshSchema().ready;
       let sql = `
-        SELECT s.*, rank FROM sources_fts fts
+        SELECT ${sourceColumns(ready, "s")}, rank FROM sources_fts fts
         JOIN research_sources s ON s.id = fts.rowid
         WHERE sources_fts MATCH ?
       `;
@@ -748,7 +787,7 @@ export function createProjectServer(dbPath, options = {}) {
       const formatted = rows
         .map(
           (r) =>
-            `[#${r.id}] ${r.verified ? "[VERIFIED] " : ""}${r.title}\n  Type: ${r.source_type} | Relevance: ${r.relevance_score}/10\n  APA: ${r.citation_apa}${r.url ? `\n  URL: ${r.url}` : ""}${r.content_summary ? `\n  --- stored content ---\n  ${r.content_summary.substring(0, 200)}...\n  --- end stored content ---` : ""}`
+            `[#${r.id}] ${verifiedTag(r) ? "[VERIFIED] " : ""}${r.title}\n  Type: ${r.source_type} | Relevance: ${r.relevance_score}/10${ready ? ` | Fetch: ${statusLabel(r.fetch_status)}` : ""}\n  APA: ${r.citation_apa}${r.url ? `\n  URL: ${r.url}` : ""}${r.content_summary ? `\n  --- stored content ---\n  ${r.content_summary.substring(0, 200)}...\n  --- end stored content ---` : ""}`
         )
         .join("\n\n");
 
@@ -761,14 +800,18 @@ export function createProjectServer(dbPath, options = {}) {
     "Get full details of a specific source by ID.",
     { id: z.number().describe("Source ID") },
     async ({ id }) => {
-      const { rows: sourceRows } = await db.execute({ sql: "SELECT * FROM research_sources WHERE id = ?", args: [id] });
+      const ready = schema.ready || refreshSchema().ready;
+      const { rows: sourceRows } = await db.execute({
+        sql: `SELECT ${sourceColumns(ready)}${ready ? ", length(fetched_text) AS fetched_len" : ""} FROM research_sources WHERE id = ?`,
+        args: [id],
+      });
       if (sourceRows.length === 0) {
         return { content: [{ type: "text", text: `Source #${id} not found.` }] };
       }
       const source = sourceRows[0];
 
       const { rows: notes } = await db.execute({
-        sql: "SELECT * FROM research_notes WHERE source_id = ? ORDER BY created_at DESC",
+        sql: `SELECT id, note_type, content${ready ? ", provenance, quote_found, locator" : ""} FROM research_notes WHERE source_id = ? ORDER BY created_at DESC`,
         args: [id],
       });
 
@@ -781,7 +824,32 @@ export function createProjectServer(dbPath, options = {}) {
       text += `URL: ${source.url || "N/A"}\n`;
       text += `DOI: ${source.doi || "N/A"}\n`;
       text += `Retrieved: ${source.retrieval_date} via ${source.retrieval_method || "unknown"}\n`;
-      text += `Verified: ${source.verified ? "Yes" : "No"}${source.verification_notes ? ` - ${source.verification_notes}` : ""}\n`;
+      if (!ready) {
+        text += `Fetch: ${UPGRADE_PENDING}\n`;
+        text += `Verified: ${source.verified ? "Yes" : "No"}${source.verification_notes ? ` - ${source.verification_notes}` : ""}\n`;
+      } else {
+        const st = source.fetch_status;
+        if (st === "fetched" || st === "fetched_no_text") {
+          const label = st === "fetched" ? "fetched" : "fetched (no text)";
+          text += `Fetch: ${label} ${source.fetched_at || "(date unknown)"} (HTTP ${source.http_status ?? "?"})${source.final_url ? ` final URL ${source.final_url}` : ""}\n`;
+          if (source.fetched_len) text += `Stored page text: ${source.fetched_len} characters\n`;
+        } else if (st === "failed") {
+          text += `Fetch: FAILED ${source.fetched_at || ""} - Crow could not open this page: ${oneLine(source.fetch_error || "no reason recorded", 300)}\n`;
+        } else if (st === "legacy") {
+          text += "Fetch: legacy, unchecked (added before Crow opened pages)\n";
+        } else if (st === "not_applicable") {
+          text += "Fetch: not a web page\n";
+        } else {
+          text += "Fetch: unknown (shared or cloned from another instance; not citable here)\n";
+        }
+        const viaLegacy = source.verification_method === "legacy_flag";
+        text += `Verified: ${source.verified ? (viaLegacy ? "legacy flag, unchecked" : `Yes (${source.verification_method || "method unknown"}${source.verified_by ? `, by ${oneLine(source.verified_by, 60)}` : ""})`) : "No"}\n`;
+        if (source.verification_notes) {
+          text += st == null
+            ? `Notes from the sharing instance (not a verification claim): ${source.verification_notes}\n`
+            : `Verification notes: ${source.verification_notes}\n`;
+        }
+      }
       text += `Relevance: ${source.relevance_score}/10\n`;
       text += `Tags: ${source.tags || "none"}\n`;
       if (source.backend_id) text += `Backend: #${source.backend_id}\n`;
@@ -791,7 +859,17 @@ export function createProjectServer(dbPath, options = {}) {
       if (source.content_summary) text += `\nSummary:\n--- stored content ---\n${source.content_summary}\n--- end stored content ---\n`;
       if (notes.length > 0) {
         text += `\nNotes (${notes.length}):\n`;
-        text += notes.map((n) => `  [${n.note_type}]\n  --- stored content ---\n  ${n.content.substring(0, 150)}\n  --- end stored content ---`).join("\n");
+        text += notes.map((n) => {
+          let head = `  [${n.note_type}]`;
+          if (ready) {
+            head += ` provenance: ${noteProvLabel(n.provenance)}`;
+            if (n.note_type === "quote") {
+              const q = n.quote_found === 1 ? "found" : n.quote_found === 0 ? "NOT FOUND on the fetched page" : "not checked";
+              head += `\n  quote #${n.id}: ${q}`;
+            }
+          }
+          return `${head}\n  --- stored content ---\n  ${n.content.substring(0, 150)}\n  --- end stored content ---`;
+        }).join("\n");
       }
 
       return { content: [{ type: "text", text }] };
@@ -999,7 +1077,8 @@ export function createProjectServer(dbPath, options = {}) {
       limit: z.number().max(100).default(20),
     },
     async ({ project_id, backend_id, source_type, verified_only, sort_by, limit }) => {
-      let sql = "SELECT * FROM research_sources WHERE 1=1";
+      const ready = schema.ready || refreshSchema().ready;
+      let sql = `SELECT ${sourceColumns(ready)} FROM research_sources WHERE 1=1`;
       const params = [];
 
       if (project_id) { sql += " AND project_id = ?"; params.push(project_id); }
@@ -1012,6 +1091,9 @@ export function createProjectServer(dbPath, options = {}) {
         relevance: "relevance_score DESC",
         title: "title ASC",
       };
+      // The header counts every source matching the filters, not just the listed page.
+      const filterSql = sql.slice(sql.indexOf(" WHERE "));
+      const filterParams = [...params];
       sql += ` ORDER BY ${sortMap[sort_by]} LIMIT ?`;
       params.push(limit);
 
@@ -1020,14 +1102,43 @@ export function createProjectServer(dbPath, options = {}) {
         return { content: [{ type: "text", text: "No sources found." }] };
       }
 
+      let header = "";
+      const noteCounts = new Map();
+      if (ready) {
+        const { rows: stRows } = await db.execute({
+          sql: `SELECT fetch_status, COUNT(*) AS n FROM research_sources${filterSql} GROUP BY fetch_status`,
+          args: filterParams,
+        });
+        const byStatus = new Map(stRows.map((r) => [r.fetch_status ?? null, Number(r.n)]));
+        const parts = FETCH_STATUS_ORDER.filter((k) => byStatus.has(k)).map((k) => `${byStatus.get(k)} ${k === "failed" ? "failed" : k === "legacy" ? "legacy" : statusLabel(k)}`);
+        header = `Fetch status: ${parts.join(", ")}\n\n`;
+        const ids = rows.map((r) => Number(r.id));
+        const { rows: pRows } = await db.execute({
+          sql: `SELECT source_id, provenance, COUNT(*) AS n FROM research_notes WHERE source_id IN (${ids.map(() => "?").join(",")}) GROUP BY source_id, provenance`,
+          args: ids,
+        });
+        for (const r of pRows) {
+          const m = noteCounts.get(Number(r.source_id)) || new Map();
+          m.set(r.provenance ?? null, Number(r.n));
+          noteCounts.set(Number(r.source_id), m);
+        }
+      } else {
+        header = `${UPGRADE_PENDING}\n\n`;
+      }
+
       const formatted = rows
-        .map(
-          (r) =>
-            `[#${r.id}] ${r.verified ? "[V] " : ""}${r.title} (${r.source_type})\n  APA: ${r.citation_apa}`
-        )
+        .map((r) => {
+          let line = `[#${r.id}] ${verifiedTag(r)}${r.title} (${r.source_type})${ready ? ` [${statusLabel(r.fetch_status)}]` : ""}\n  APA: ${r.citation_apa}`;
+          const m = noteCounts.get(Number(r.id));
+          if (m) {
+            const parts = NOTE_PROVENANCE_ORDER.filter((k) => m.has(k)).map((k) => `${m.get(k)} ${noteProvLabel(k)}`);
+            line += `\n  notes: ${parts.join(", ")}`;
+          }
+          return line;
+        })
         .join("\n\n");
 
-      return { content: [{ type: "text", text: `${rows.length} sources:\n\n${formatted}` }] };
+      return { content: [{ type: "text", text: `${header}${rows.length} sources:\n\n${formatted}` }] };
     }
   );
 
@@ -1185,37 +1296,58 @@ export function createProjectServer(dbPath, options = {}) {
       tag: z.string().max(500).optional().describe("Filter by tag"),
       verified_only: z.boolean().default(false),
       format: z.enum(["apa", "mla", "chicago", "web", "all"]).default("apa").describe("Citation format (or 'all' for every format)"),
+      include_unfetched: z.boolean().default(false).describe("Also list sources Crow never fetched, marked [NOT FETCHED]"),
     },
-    async ({ project_id, tag, verified_only, format }) => {
-      let sql = "SELECT * FROM research_sources WHERE 1=1";
+    async ({ project_id, tag, verified_only, format, include_unfetched }) => {
+      const ready = schema.ready || refreshSchema().ready;
+      let where = " WHERE 1=1";
       const params = [];
+      if (project_id) { where += " AND project_id = ?"; params.push(project_id); }
+      if (tag) { where += " AND tags LIKE ? ESCAPE '\\'"; params.push(`%${escapeLikePattern(tag)}%`); }
+      if (verified_only) { where += " AND verified = 1"; }
 
-      if (project_id) { sql += " AND project_id = ?"; params.push(project_id); }
-      if (tag) { sql += " AND tags LIKE ? ESCAPE '\\'"; params.push(`%${escapeLikePattern(tag)}%`); }
-      if (verified_only) { sql += " AND verified = 1"; }
-      sql += " ORDER BY authors ASC, title ASC";
-
-      const { rows } = await db.execute({ sql, args: params });
-      if (rows.length === 0) {
-        return { content: [{ type: "text", text: "No sources found for bibliography." }] };
+      // Only citable sources unless asked; while the schema upgrade is pending nothing can be judged.
+      const citableOnly = ready && !include_unfetched;
+      const { rows } = await db.execute({
+        sql: `SELECT ${sourceColumns(ready)}${ready ? `, COALESCE(${CITABLE_SQL}, 0) AS citable` : ""} FROM research_sources${where}${citableOnly ? ` AND ${CITABLE_SQL}` : ""} ORDER BY authors ASC, title ASC`,
+        args: params,
+      });
+      let omitted = 0;
+      if (citableOnly) {
+        const { rows: o } = await db.execute({
+          sql: `SELECT COUNT(*) AS n FROM research_sources${where} AND NOT COALESCE(${CITABLE_SQL}, 0)`,
+          args: params,
+        });
+        omitted = Number(o[0].n);
       }
+      const footer = omitted > 0 ? `\n\n${omitted} sources omitted: never fetched` : "";
+      const notice = ready ? "" : `${UPGRADE_PENDING} These sources are not checked.\n\n`;
+      if (rows.length === 0) {
+        return { content: [{ type: "text", text: `No ${citableOnly ? "citable " : ""}sources found for bibliography.${footer}` }] };
+      }
+
+      const mark = (r, entry) => {
+        if (!ready) return entry;
+        if (!Number(r.citable)) return `[NOT FETCHED: ${statusLabel(r.fetch_status)}] ${entry}`;
+        return r.fetch_status === "legacy" ? `${entry} [legacy, unchecked]` : entry;
+      };
 
       if (format === "all") {
         const sections = ["apa", "mla", "chicago", "web"].map((fmt) => {
           const generator = CITATION_GENERATORS[fmt];
-          const entries = rows.map((r) => generator(r)).join("\n\n");
+          const entries = rows.map((r) => mark(r, generator(r))).join("\n\n");
           return `## ${fmt.toUpperCase()} Format\n\n${entries}`;
         });
         return {
-          content: [{ type: "text", text: `References (${rows.length} sources):\n\n${sections.join("\n\n---\n\n")}` }],
+          content: [{ type: "text", text: `${notice}References (${rows.length} sources):\n\n${sections.join("\n\n---\n\n")}${footer}` }],
         };
       }
 
       const generator = CITATION_GENERATORS[format] || generateAPA;
-      const bib = rows.map((r) => generator(r)).join("\n\n");
+      const bib = rows.map((r) => mark(r, generator(r))).join("\n\n");
       const label = format.toUpperCase();
       return {
-        content: [{ type: "text", text: `References — ${label} (${rows.length} sources):\n\n${bib}` }],
+        content: [{ type: "text", text: `${notice}References — ${label} (${rows.length} sources):\n\n${bib}${footer}` }],
       };
     }
   );
