@@ -88,6 +88,8 @@ test("parse rows", () => {
   assert.equal(bindings.everyday.model, "local-chat/m1");
   assert.deepEqual(Object.keys(customDefs), ["c-coder"]);
   assert.equal(customDefs["c-coder"].capability, "chat");
+  const extra = parseBindingRows([{ key: "model_role_def.c-x", value: '{"label":"Coder","job":"writes code","capability":"vision","allowHeavy":true,"fallback":["deep"],"evil":1}' }]);
+  assert.deepEqual(extra.customDefs["c-x"], { capability: "vision", label: "Coder", job: "writes code" });
   assert.deepEqual(parseBindingRows(null), { bindings: {}, customDefs: {} });
 });
 

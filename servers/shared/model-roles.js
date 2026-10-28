@@ -221,8 +221,10 @@ function parseCustomDef(raw) {
   let v;
   try { v = typeof raw === "string" ? JSON.parse(raw) : raw; } catch { return null; }
   if (!v || typeof v !== "object" || Array.isArray(v) || !CUSTOM_CAPABILITIES.includes(v.capability)) return null;
-  const def = { ...v, capability: v.capability, allowHeavy: v.allowHeavy === true };
-  if (isStringArray(v.fallback)) def.fallback = [...v.fallback]; else delete def.fallback;
+  // Spec 10-21 §3.2: a definition is {label, job, capability}; anything else is dropped.
+  const def = { capability: v.capability };
+  if (typeof v.label === "string") def.label = v.label;
+  if (typeof v.job === "string") def.job = v.job;
   return def;
 }
 
@@ -299,6 +301,7 @@ export function* walkRole(rootId, ctx = {}, out = {}) {
       capability = !capabilityOk(wanted, p, model);
     }
     // Without a provider row the foreign check is not applicable, but the catalog class still is.
+    // An automatic root never lands on a windowed/wedge-risk model through a chain (10-21 §5): root AND binder must allow heavy.
     const heavy = !classOk(provider, p?.gpuPolicy?.catalogId || provider, catalog, root.allowHeavy && def.allowHeavy, servingOverrides);
     const verdict = !configured ? "not_configured" : foreign ? "foreign" : capability ? "capability" : heavy ? "class" : "ok";
     return { role: id, key: rawKey, verdict, filtered: foreign || capability || heavy };
@@ -374,6 +377,7 @@ export function resolveRoleKey(key, ctx = {}) {
 export function resolveChosenRoleKey(key, ctx = {}) {
   if (!isRoleRef(key)) return resolveRoleKey(key, ctx);
   const rootId = roleIdOf(key);
+  if (!makeDefOf(ctx.customDefs)(rootId)) return { key: null, role: rootId, chain: [], reason: "unknown_role" };
   const b = ctx.bindings?.[rootId];
   if (!b || b.model == null || b.seeded === true) return { key: null, role: rootId, chain: [], reason: "not_chosen" };
   return resolveRoleKey(key, ctx);

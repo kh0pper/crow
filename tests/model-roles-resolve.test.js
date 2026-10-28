@@ -301,3 +301,20 @@ test("chosen-only", () => {
   const raw = resolveChosenRoleKey("local-chat/m1", base);
   assert.deepEqual({ key: raw.key, reason: raw.reason }, { key: "local-chat/m1", reason: "raw" });
 });
+
+test("an automatic root never reaches a heavy model through a role ref; a heavy root does", () => {
+  const providers = [prov("big", ["m"], { gpuPolicy: { catalogId: "big-cat" } })];
+  const catalog = [{ id: "big-cat", serving: { class: "windowed" } }];
+  const bindings = { everyday: { model: "role:deep", fallback: [] }, deep: { model: "big/m", fallback: [] }, coordinator: { model: "role:deep", fallback: [] } };
+  const every = run("role:everyday", { providers, catalog, bindings });
+  assert.deepEqual({ key: every.key, reason: every.reason }, { key: null, reason: "not_configured" });
+  const coord = run("role:coordinator", { providers, catalog, bindings });
+  assert.deepEqual({ key: coord.key, reason: coord.reason }, { key: "big/m", reason: "fallback" });
+  assert.equal(run("role:deep", { providers, catalog, bindings }).key, "big/m");
+});
+
+test("chosen-only: an unknown root is unknown_role, not not_chosen", () => {
+  const r = resolveChosenRoleKey("role:nope", { bindings: {}, providers: [], models: { providers: {} } });
+  assert.deepEqual({ key: r.key, role: r.role, reason: r.reason }, { key: null, role: "nope", reason: "unknown_role" });
+  assert.equal(resolveChosenRoleKey("role:c-gone", { bindings: { "c-gone": { model: "p/m" } }, providers: [] }).reason, "unknown_role");
+});
