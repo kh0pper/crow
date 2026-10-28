@@ -154,7 +154,7 @@ export function perchTakeOverJs(lang = "en") {
     if(s.frame) return;
     var f=document.createElement('iframe'); f.className='to-vnc';
     f.setAttribute('title','VNC');
-    /* view_only pinned off: noVNC keeps that setting in localStorage, and the
+    /* view_only pinned off: noVNC keeps that setting in its own browser storage, and the
        Browser panel's watch-only viewer sets it on the same origin */
     f.setAttribute('src','/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false');
     s.view.appendChild(f); s.frame=f;
