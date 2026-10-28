@@ -9,12 +9,13 @@
  * task|settingKey|roleId; the env is consulted before the cache on every call.
  */
 import { createDbClient } from "../db.js";
+import { splitKey } from "../../scripts/pi-bots/model_resolver.mjs";
 
 export const EMBED_TASKS = Object.freeze(["embed", "embedding"]);
 export const RERANK_TASKS = Object.freeze(["rerank", "score"]);
 
 const TTL_MS = 30_000;
-const _cache = new Map(); // `${tasks}|${settingKey}` -> { value, at }
+const _cache = new Map(); // `${tasks}|${settingKey}|${roleId}` -> { value, at }
 
 /** Test seam: forget cached resolutions. */
 export function _resetProviderTaskCacheForTest() { _cache.clear(); }
@@ -61,9 +62,8 @@ async function roleProvider(db, roleId, tasks, rows) {
   const need = list.some((t) => RERANK_TASKS.includes(t)) ? "score" : "embed";
   const r = await resolveRole(db, "role:" + roleId, { need, chosenOnly: true });
   if (!r?.key) return null;
-  const cut = r.key.indexOf("/");
-  const provider = r.key.slice(0, cut), model = r.key.slice(cut + 1);
-  if (!provider) return null;
+  const { provider, model } = splitKey(r.key);
+  if (!provider || !model) return null;
   const first = firstTaskModel((rows || []).find((p) => p.id === provider), list);
   if (first && first !== model) {
     const msg = `[roles] ${roleId} names ${model}, but ${provider} serves ${first} for this task`;

@@ -131,6 +131,35 @@ test("operator setting beats role", async () => {
   assert.equal(gw.source, "setting"); assert.equal(gw.providerId, "local-cls");
 });
 
+// Kevin's ruling: safety's fallback is []. A broken chosen classifier falls to
+// the automatic pick, never to everyday. `everyday` is bound to a model the
+// classifier WOULD accept (local-cls2), so any leak through it shows up.
+const PEER = "b".repeat(32);
+for (const [name, setup, model] of [
+  ["(a) an unconfigured model", () => {}, "local-cls/not-served"],
+  ["(b) an own row off the tailnet", () => addProvider("local-lan", "http://192.168.200.7:8099/v1", CLS), "local-lan/qwen3.5-4b"],
+  ["(c) a foreign-instance row (host is the peer id)", () => addProvider("peer-cls", "http://127.0.0.1:8097/v1", CLS, { host: PEER, instanceId: PEER }), "peer-cls/qwen3.5-4b"],
+  ["(c') a peer-written row (instance_id only)", () => addProvider("peer-cls", "http://127.0.0.1:8097/v1", CLS, { instanceId: PEER }), "peer-cls/qwen3.5-4b"],
+]) {
+  test(`broken chosen safety falls to the auto pick, never everyday: ${name}`, async () => {
+    addProvider("local-cls", "http://127.0.0.1:8099/v1", CLS);
+    addProvider("local-cls2", "http://127.0.0.1:8098/v1", CLS);
+    setup();
+    assert.deepEqual(await setBinding(db, "everyday", { model: "local-cls2/qwen3.5-4b" }), { ok: true });
+    assert.deepEqual(await setBinding(db, "safety", { model }), { ok: true });
+    const want = autoPick();
+    assert.equal(want.providerId, "local-cls");
+    const bot = readBotClassifierSync(conn);
+    assert.notEqual(bot.source, "role");
+    assert.notEqual(bot.providerId, "local-cls2");
+    assert.deepEqual(bot, want);
+    const gw = await getClassifierStatus(db, { probe: false });
+    assert.notEqual(gw.source, "role");
+    assert.notEqual(gw.providerId, "local-cls2");
+    assert.deepEqual(gw, statusOf(want));
+  });
+}
+
 // ---- smart-router ----------------------------------------------------------
 
 const routerProviders = () => [
