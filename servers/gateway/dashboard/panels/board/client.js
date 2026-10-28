@@ -1,12 +1,15 @@
 /**
  * Board tab client: on the phone the lanes are a tab view (chips are the
- * tabs, one lane in view at a time), so the chips get role=tablist/tab and
- * the lanes role=tabpanel, with aria-selected following the lane in view.
- * Those roles exist only while matchMedia("(max-width: 1023px)") matches and
- * are removed when it stops matching: on the desktop the four lanes are plain
- * labelled regions side by side.
+ * tabs, one lane on screen at a time, the others display:none), so the chips
+ * get role=tablist/tab and the lanes role=tabpanel, with aria-selected on the
+ * chip of the lane on screen. The board carries data-sb-tabs and the lane on
+ * screen data-sb-active (the CSS hides the rest only under data-sb-tabs).
+ * Those roles and attributes exist only while matchMedia("(max-width:
+ * 1023px)") matches and are removed when it stops matching: on the desktop
+ * the four lanes are plain labelled regions side by side.
  *
- * Without JS the chips are plain in-page links, and everything still reads.
+ * Without JS the chips are plain in-page links and the lanes stack, and
+ * everything still reads.
  * Turbo Drive re-runs this per visit and on a restored snapshot (the init
  * flag is cleared before Turbo caches the page); it binds to the board element
  * it finds and lets go of its media listener when Turbo swaps the page out.
@@ -30,23 +33,21 @@ function laneTabsJs() {
   var lanes=[].slice.call(lanesBox.querySelectorAll('.sb-lane'));
   var mq=window.matchMedia('(max-width: 1023px)');
 
-  function inView(){
-    var x=lanesBox.scrollLeft, best=0, bestD=Infinity;
-    for(var i=0;i<lanes.length;i++){
-      var d=Math.abs(lanes[i].offsetLeft-x);
-      if(d<bestD){ bestD=d; best=i; }
-    }
-    return best;
-  }
+  var current=0;
   function select(idx){
     if(!mq.matches) return;
+    current=idx;
     for(var i=0;i<chips.length;i++){
       chips[i].setAttribute('aria-selected', i===idx ? 'true' : 'false');
       chips[i].setAttribute('tabindex', i===idx ? '0' : '-1');
     }
+    for(var j=0;j<lanes.length;j++){
+      if(j===idx) lanes[j].setAttribute('data-sb-active',''); else lanes[j].removeAttribute('data-sb-active');
+    }
   }
   function apply(){
     if(mq.matches){
+      root.setAttribute('data-sb-tabs','');
       chipsBox.setAttribute('role','tablist');
       for(var i=0;i<chips.length;i++){
         chips[i].setAttribute('role','tab');
@@ -56,8 +57,9 @@ function laneTabsJs() {
         lanes[j].setAttribute('role','tabpanel');
         lanes[j].setAttribute('tabindex','0');
       }
-      select(inView());
+      select(current);
     } else {
+      root.removeAttribute('data-sb-tabs');
       chipsBox.removeAttribute('role');
       for(var k=0;k<chips.length;k++){
         chips[k].removeAttribute('role');
@@ -68,13 +70,12 @@ function laneTabsJs() {
       for(var m=0;m<lanes.length;m++){
         lanes[m].removeAttribute('role');
         lanes[m].removeAttribute('tabindex');
+        lanes[m].removeAttribute('data-sb-active');
       }
     }
   }
   function show(idx, focus){
-    var lane=lanes[idx];
-    if(!lane) return;
-    lanesBox.scrollTo({ left: lane.offsetLeft, behavior: 'smooth' });
+    if(!lanes[idx]) return;
     select(idx);
     if(focus&&chips[idx]) chips[idx].focus();
   }
@@ -96,13 +97,6 @@ function laneTabsJs() {
       show(to, true);
     });
   });
-  var pending=false;
-  lanesBox.addEventListener('scroll', function(){
-    if(pending) return;
-    pending=true;
-    requestAnimationFrame(function(){ pending=false; select(inView()); });
-  }, { passive: true });
-
   function onChange(){ apply(); }
   if(mq.addEventListener) mq.addEventListener('change', onChange); else mq.addListener(onChange);
   // Turbo caches this page as it stands, flag included; a restored snapshot
