@@ -394,6 +394,39 @@ test("SOURCE_TYPES matches the research_sources CHECK constraint", () => {
   } finally { bs.close(); }
 });
 
+test("a multi-line shared citation is flattened to one line, marker included", async () => {
+  const bs = new Database(initDb("peer-rows-oneline-"));
+  const db = wrapDb(bs);
+  try {
+    const long = `Line one\n\nLine two\r\n${"c".repeat(SHARED_CITATION_MAX + 500)}`;
+    const id = await insertSharedSource(db, { citation_apa: long, content_summary: "keep\nlines" });
+    const row = bs.prepare("SELECT citation_apa, content_summary FROM research_sources WHERE id = ?").get(id);
+    assert.ok(!/[\r\n]/.test(row.citation_apa), "no newline in the citation");
+    assert.ok(row.citation_apa.startsWith("Line one Line two "));
+    assert.match(row.citation_apa, / \[truncated at share import: original \d+ chars\]$/);
+    assert.equal(row.content_summary, "keep\nlines", "the summary keeps its lines");
+  } finally { bs.close(); }
+});
+
+test("a share preview note count skips withdrawn notes", async () => {
+  const { bs, sid } = seedPlainShare("peer-rows-notecount");
+  try {
+    const pid = Number(bs.prepare("INSERT INTO project_spaces (uuid, slug, name, type) VALUES ('u-nc', 'nc-proj', 'NC', 'general')").run().lastInsertRowid);
+    bs.prepare("INSERT INTO project_members (project_id, contact_id, role) VALUES (?, NULL, 'owner')").run(pid);
+    bs.prepare("INSERT INTO research_notes (project_id, content, note_type) VALUES (?, 'live', 'note')").run(pid);
+    bs.prepare("INSERT INTO research_notes (project_id, content, note_type, withdrawn_at) VALUES (?, 'gone', 'note', '2026-10-28T00:00:00Z')").run(pid);
+    bs.prepare("INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES ('crow:ncpeer', 'NC', 'ed-n', 'secp-n')").run();
+    const handlers = {};
+    registerShareInboxTools({ tool: (name, _d, _s, h) => { handlers[name] = h; } }, {
+      db: wrapDb(bs), identity: { crowId: "crow:self" },
+      peerManager: { isConnected: () => true, send: () => {} },
+      buildProjectCloneBundle: async () => { throw new Error("not a clone"); },
+    });
+    const preview = await handlers.crow_share({ contact: "crow:ncpeer", share_type: "project", item_id: pid, permissions: "read", confirm_token: "", sharing_mode: "clone" });
+    assert.match(preview.content[0].text, /Bundle: \d+ sources, 1 notes,/, preview.content[0].text);
+  } finally { bs.close(); }
+});
+
 test("boot.js imports through insertSharedSource", () => {
   const src = readFileSync(join(REPO, "servers/sharing/boot.js"), "utf8");
   assert.ok(src.includes("insertSharedSource("), "boot.js calls insertSharedSource");
@@ -703,7 +736,7 @@ test("insertSharedSource prefers the real fields, keeps the legacy ones, and cap
     assert.equal((await get({ notes: "N" })).content_summary, "N");
 
     const big = await get({ citation_apa: "c".repeat(10000) });
-    assert.equal(big.citation_apa, "c".repeat(SHARED_CITATION_MAX) + MARK(10000));
+    assert.equal(big.citation_apa, "c".repeat(SHARED_CITATION_MAX) + MARK(10000).replace("\n", " "));
     const fts = bs.prepare("SELECT citation_apa FROM sources_fts WHERE rowid = ?").get(big.id);
     assert.equal(fts.citation_apa.length, big.citation_apa.length, "the FTS row is capped too");
 
@@ -711,6 +744,6 @@ test("insertSharedSource prefers the real fields, keeps the legacy ones, and cap
     assert.equal(sum.content_summary, "s".repeat(SHARED_SUMMARY_MAX) + MARK(SHARED_SUMMARY_MAX + 10));
 
     const legacy = await get({ citation: "l".repeat(SHARED_CITATION_MAX + 5) });
-    assert.equal(legacy.citation_apa, "l".repeat(SHARED_CITATION_MAX) + MARK(SHARED_CITATION_MAX + 5));
+    assert.equal(legacy.citation_apa, "l".repeat(SHARED_CITATION_MAX) + MARK(SHARED_CITATION_MAX + 5).replace("\n", " "));
   } finally { bs.close(); }
 });

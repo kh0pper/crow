@@ -880,7 +880,7 @@ export function createProjectServer(dbPath, options = {}) {
       const formatted = rows
         .map(
           (r) =>
-            `[#${r.id}] ${verifiedTag(r, ready) ? "[VERIFIED] " : ""}${r.title}\n  Type: ${r.source_type} | Relevance: ${r.relevance_score}/10${ready ? ` | Fetch: ${statusLabel(r.fetch_status)}` : ""}\n  APA: ${r.citation_apa}${r.url ? `\n  URL: ${r.url}` : ""}${r.content_summary ? `\n  --- stored content ---\n  ${r.content_summary.substring(0, 200)}...\n  --- end stored content ---` : ""}`
+            `[#${r.id}] ${verifiedTag(r, ready) ? "[VERIFIED] " : ""}${r.title}\n  Type: ${r.source_type} | Relevance: ${r.relevance_score}/10${ready ? ` | Fetch: ${statusLabel(r.fetch_status)}` : ""}\n  APA: ${oneLine(r.citation_apa, 300)}${r.url ? `\n  URL: ${r.url}` : ""}${r.content_summary ? `\n  --- stored content ---\n  ${r.content_summary.substring(0, 200)}...\n  --- end stored content ---` : ""}`
         )
         .join("\n\n");
 
@@ -1238,7 +1238,7 @@ export function createProjectServer(dbPath, options = {}) {
 
       const formatted = rows
         .map((r) => {
-          let line = `[#${r.id}] ${verifiedTag(r, ready)}${r.title} (${r.source_type})${ready ? ` [${statusLabel(r.fetch_status)}]` : ""}\n  APA: ${r.citation_apa}`;
+          let line = `[#${r.id}] ${verifiedTag(r, ready)}${r.title} (${r.source_type})${ready ? ` [${statusLabel(r.fetch_status)}]` : ""}\n  APA: ${oneLine(r.citation_apa, 300)}`;
           const m = noteCounts.get(Number(r.id));
           if (m) {
             const parts = NOTE_PROVENANCE_ORDER.filter((k) => m.has(k)).map((k) => `${m.get(k)} ${noteProvLabel(k)}`);
@@ -1344,7 +1344,7 @@ export function createProjectServer(dbPath, options = {}) {
         const cur = now2[0];
         if (cur && (cur.content_sha256 !== src.content_sha256 || cur.fetched_text !== src.fetched_text || cur.fetch_status !== src.fetch_status)) {
           ({ found: quoteFound, line: quoteLine } = checkQuote(cur));
-          await db.execute({ sql: "UPDATE research_notes SET quote_found = ? WHERE id = ?", args: [quoteFound, noteId] });
+          await db.execute({ sql: `UPDATE research_notes SET quote_found = ? WHERE id = ?${liveNote()}`, args: [quoteFound, noteId] });
         }
       }
       // A quote note that is not found on the page breaks a verification that rests on a quote
@@ -1471,7 +1471,7 @@ export function createProjectServer(dbPath, options = {}) {
       }
 
       let out = `Note #${id} withdrawn. It stays on record, marked withdrawn, and no longer counts toward verification.`;
-      if (sourceId != null) out += ` Run crow_verify_source on source #${sourceId} to check its remaining quotes.`;
+      if (sourceId != null && !(n.note_type === "quote" && cleared)) out += ` Run crow_verify_source on source #${sourceId} to check its remaining quotes.`;
       if (cleared) out += ` Source #${sourceId} is no longer verified: it has no quote notes left.`;
       if (projectId == null) out += " (No audit entry: the note is not in a project.)";
       return { content: [{ type: "text", text: out }] };

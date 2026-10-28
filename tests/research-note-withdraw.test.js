@@ -354,3 +354,36 @@ test("the tool is in the router manifest", () => {
   assert.ok(TOOL_MANIFESTS.projects.tools.crow_withdraw_note);
   assert.equal(TOOL_MANIFESTS.projects.tools.crow_withdraw_note.params, "id, reason");
 });
+
+test("the withdraw reply asks for a re-verify only when one is still needed", async () => {
+  const pid = await newProject();
+  const sid = insertSource({ project_id: pid });
+  const q1 = insertNote({ sid, pid, content: FOUND, by: "owner" });
+  const q2 = insertNote({ sid, pid, content: "the budget doubles", by: "owner" });
+  await verify(owner, sid);
+  // One quote left: still verified, so the reply asks for a re-check.
+  const r1 = text(await withdraw(owner, q1));
+  assert.match(r1, /Run crow_verify_source/);
+  assert.ok(!r1.includes("no longer verified"));
+  // The last quote: verification cleared, so only the "no longer verified" line.
+  const r2 = text(await withdraw(owner, q2));
+  assert.ok(!r2.includes("Run crow_verify_source"), r2);
+  assert.ok(r2.includes(`Source #${sid} is no longer verified`), r2);
+  // A non-quote note: no re-verify prompt need differ, it still names the source.
+});
+
+test("search and list show a shared multi-line citation on one line, capped", async () => {
+  const pid = await newProject();
+  const cite = `First line\nSecond line\n${"w".repeat(2000)}`;
+  const sid = insertSource({ project_id: pid, title: "Uniqueshared", citation_apa: cite });
+  const s = text(await owner.callTool({ name: "crow_search_sources", arguments: { query: "Uniqueshared" } }));
+  const l = text(await owner.callTool({ name: "crow_list_sources", arguments: { project_id: pid } }));
+  for (const out of [s, l]) {
+    const line = out.split("\n").find((x) => x.startsWith("  APA:"));
+    assert.ok(line, out);
+    assert.ok(line.length <= 300 + "  APA: ".length, `${line.length}`);
+    assert.ok(line.startsWith("  APA: First line Second line"));
+    assert.ok(!out.includes("\nSecond line"));
+  }
+  void sid;
+});
