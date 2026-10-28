@@ -153,24 +153,40 @@ export async function runRows({ cases, trajectory, reps = 3, arm, model = "stub"
   const template = await makeTemplate({});
   let rows = 0;
   let next = 0;
-  try {
-    const worker = async () => {
-      while (next < units.length) {
-        const u = units[next++];
-        const { row, scratch } = await runUnit({ ...u, arm: label, model, mode, trajectory, judge, judgeName, template, shas, log });
-        try {
-          appendFileSync(out, JSON.stringify(row) + "\n");
-          rows += 1;
-          log(`${row.case} rep ${row.rep}: ${row.contaminated ? `contaminated (${row.contaminated})` : row.case_pass ? "pass" : "fail"}`);
-        } finally {
-          scratch?.cleanup();
-        }
+  // On the first error no worker takes a new unit, and the template is removed only after every
+  // worker has settled (a unit still in flight copies from it and runs on its workspace_dir).
+  let firstError = null;
+  const worker = async () => {
+    while (!firstError && next < units.length) {
+      const u = units[next++];
+      let res;
+      try {
+        res = await runUnit({ ...u, arm: label, model, mode, trajectory, judge, judgeName, template, shas, log });
+      } catch (err) {
+        firstError ??= err;
+        return;
       }
-    };
-    await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, units.length)) }, worker));
-  } finally {
-    template.cleanup();
-  }
+      const { row, scratch } = res;
+      const outcome = row.contaminated ? `contaminated (${row.contaminated})` : row.case_pass ? "pass" : "fail";
+      try {
+        // A run that has failed writes no more rows.
+        if (firstError) {
+          log(`${row.case} rep ${row.rep}: ${outcome}, dropped (the run failed)`);
+          continue;
+        }
+        appendFileSync(out, JSON.stringify(row) + "\n");
+        rows += 1;
+        log(`${row.case} rep ${row.rep}: ${outcome}`);
+      } catch (err) {
+        firstError ??= err;
+      } finally {
+        scratch?.cleanup();
+      }
+    }
+  };
+  await Promise.allSettled(Array.from({ length: Math.max(1, Math.min(concurrency, units.length)) }, worker));
+  template.cleanup();
+  if (firstError) throw firstError;
   return { rows };
 }
 

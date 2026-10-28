@@ -46,6 +46,8 @@ const TRANSPORT_CODES = new Set([-32000, -32001]);
 /** Thrown for a trajectory that cannot be replayed as written (never retried: it is not transport). */
 export class TrajectoryError extends Error {}
 
+export const CHILD_MISSING = "cannot find the fixture server child; refusing to read evidence";
+
 /**
  * A trajectory by name. `careful`, `hank` and `correcting` are top-level keys of
  * <dir>/<caseId>.json; "<case>.<name>" is that case's `adversarial[<name>]`.
@@ -112,12 +114,16 @@ async function settled(request) {
   }
 }
 
-/** Resolves once `child` has exited, or after `ms` (→ false). */
+/**
+ * Waits for `child` to exit, at most `ms`. → "exited" (a normal exit, any code), "signal" (killed
+ * by a signal: it may have died mid-write) or "timeout".
+ */
 function waitExit(child, ms) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  const how = () => (child.signalCode !== null ? "signal" : "exited");
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(how());
   return new Promise((resolve) => {
-    const t = setTimeout(() => resolve(false), ms);
-    child.once("exit", () => { clearTimeout(t); resolve(true); });
+    const t = setTimeout(() => resolve("timeout"), ms);
+    child.once("exit", () => { clearTimeout(t); resolve(how()); });
   });
 }
 
@@ -125,10 +131,12 @@ function waitExit(child, ms) {
  * Replays `steps` against the fixture server for `casePath` inside `scratch` (scratch.mjs) and
  * appends the session to scratch.sessionPath. Returns only once the server child has exited, so
  * its DB is closed and the fetch log is complete.
- * @returns {Promise<{ok: boolean, error?: string}>} ok false = a transport or spawn failure (retryable)
+ * `afterConnect(transport)` is a test-only seam, called once the connection is up.
+ * @returns {Promise<{ok: boolean, error?: string}>} ok false = a transport or spawn failure, a
+ *   server child that cannot be found or did not exit in time, or one killed by a signal (retryable)
  * @throws {TrajectoryError} a step that cannot be replayed as written
  */
-export async function replayTrajectory({ casePath, steps, scratch }) {
+export async function replayTrajectory({ casePath, steps, scratch, afterConnect }) {
   const caseDef = JSON.parse(readFileSync(casePath, "utf8"));
   const write = (obj) => appendFileSync(scratch.sessionPath, JSON.stringify(obj) + "\n");
   const message = (m) => write({ type: "message", message: m });
@@ -153,8 +161,11 @@ export async function replayTrajectory({ casePath, steps, scratch }) {
 
   try {
     await settled((o) => client.connect(transport, o));
-    // The SDK keeps the child private; it is needed to wait for its exit after close().
+    // The SDK keeps the child private; it is needed to wait for its exit after close(). Without
+    // it the DB and fetch log may still be open, so the attempt fails (retryable), never reads on.
+    if (afterConnect) afterConnect(transport); // test-only seam: inspect or break the live transport
     child = transport._process ?? null;
+    if (!child || typeof child.once !== "function") throw new Error(CHILD_MISSING);
     for (const step of steps) {
       if (typeof step?.say === "string") {
         message({ role: "assistant", content: [{ type: "text", text: step.say }] });
@@ -194,9 +205,11 @@ export async function replayTrajectory({ casePath, steps, scratch }) {
   }
 
   try { await client.close(); } catch { /* the child is waited on below */ }
-  const exited = await waitExit(child, EXIT_WAIT_MS);
+  // A child that never connected (a refused start) has already gone; there is nothing to read.
+  const exit = child ? await waitExit(child, EXIT_WAIT_MS) : null;
   if (failure instanceof TrajectoryError) throw failure;
   if (failure) return failure;
-  if (!exited) return { ok: false, error: `the fixture server did not exit within ${EXIT_WAIT_MS} ms${tail()}` };
+  if (exit === "timeout") return { ok: false, error: `the fixture server did not exit within ${EXIT_WAIT_MS} ms${tail()}` };
+  if (exit === "signal") return { ok: false, error: `the fixture server was killed by ${child.signalCode}; its writes may be incomplete${tail()}` };
   return { ok: true };
 }

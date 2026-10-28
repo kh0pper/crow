@@ -1417,3 +1417,81 @@ test("runUnit returns the scored row and its scratch uncleaned; a transport fail
   assert.equal(bad.row.contaminated, "transport failure after 3 attempts");
   assert.equal(logs.length, 3);
 });
+
+// ---- Task 7 fix round 1 ----
+const { CHILD_MISSING } = await import("../scripts/research-eval/replay.mjs");
+const { PINNED_PATH_ENV_KEYS: PINNED7, INSTANCE_PATH_ENV_KEYS: INSTANCE7 } = await import("../servers/shared/crow-home.js");
+
+test("scratchEnv drops every pinned instance path a parent env carries; only the scratch overrides remain", () => {
+  const home = join(tmpdir(), "crow-rr-pinned");
+  const parent = { PATH: "/usr/bin", KEEP_ME: "yes" };
+  for (const k of [...INSTANCE7, ...PINNED7]) parent[k] = `/srv/real-instance/${k.toLowerCase()}`;
+  const before = JSON.stringify(parent);
+  const e = scratchEnv(home, "eval", parent);
+  assert.equal(JSON.stringify(parent), before); // the parent is not mutated either
+  const overrides = { CROW_HOME: home, CROW_DATA_DIR: join(home, "data"), CROW_DB_PATH: join(home, "data", "crow.db"), CROW_APP_ENV_PATH: join(home, "gateway.env") };
+  for (const k of [...INSTANCE7, ...PINNED7]) {
+    if (k in overrides) assert.equal(e[k], overrides[k], k);
+    else assert.equal(e[k], undefined, k);
+  }
+  for (const v of Object.values(e)) assert.ok(!String(v).includes("/srv/real-instance"), v);
+  assert.equal(e.KEEP_ME, "yes");
+  assert.equal(e.PATH, "/usr/bin");
+});
+
+test("replay fails closed when the server child cannot be found after connect", async () => {
+  const s = await makeScratch({ template: await tpl() });
+  let saved = null;
+  try {
+    const casePath = join(s.home, "case.json");
+    write7(casePath, JSON.stringify(RR12));
+    const r = await replayTrajectory({ casePath, steps: careful12, scratch: s, afterConnect: (t) => { saved = t._process; delete t._process; } });
+    assert.equal(r.ok, false);
+    assert.match(r.error, new RegExp(CHILD_MISSING));
+    assert.ok(saved, "the seam saw the live child");
+  } finally {
+    // The SDK lost its handle too: end the orphaned child here.
+    if (saved && saved.exitCode === null && saved.signalCode === null) {
+      const gone = new Promise((res) => saved.once("exit", res));
+      saved.stdin.end();
+      await gone;
+    }
+    s.cleanup();
+  }
+});
+
+test("replay returns ok only after the server child is gone; a signal-killed child is ok: false", async () => {
+  let pid = null;
+  const s = await makeScratch({ template: await tpl() });
+  try {
+    const casePath = join(s.home, "case.json");
+    write7(casePath, JSON.stringify(RR12));
+    const r = await replayTrajectory({ casePath, steps: careful12, scratch: s, afterConnect: (t) => { pid = t.pid; } });
+    assert.equal(r.ok, true, r.error);
+    assert.ok(Number.isInteger(pid));
+    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+    const killed = await replayTrajectory({ casePath, steps: [], scratch: s, afterConnect: (t) => { t._process.kill("SIGKILL"); } });
+    assert.equal(killed.ok, false);
+    assert.match(killed.error, /killed by SIGKILL/);
+  } finally { s.cleanup(); }
+});
+
+test("runRows: a unit that throws stops the run; the in-flight unit finishes on a live template and writes no row", async () => {
+  const dir = mkdtempSync(join(H, "rows-"));
+  const out = join(dir, "rows.jsonl");
+  const slow = { ...RR12, id: "rr12slow" };
+  const slowSteps = [...Array.from({ length: 40 }, () => careful12[0]), ...careful12.slice(1)];
+  const badSteps = [{ call: "crow_verify_source", args: { id: "$source:https://nowhere.example/" } }];
+  const logs = [];
+  await assert.rejects(
+    runRows({ cases: [slow, RR12], trajectory: "careful", reps: 1, model: "stub", out, concurrency: 2,
+      stepsFor: (c) => (c.id === "rr12" ? badSteps : slowSteps), log: (m) => logs.push(m) }),
+    (err) => err instanceof TrajectoryError);
+  // The slow unit was still running when the error came (it wrote no row), and it completed
+  // cleanly afterwards on the template, which was removed only after it settled.
+  assert.ok(!exists7(out) || readFileSync(out, "utf8").trim() === "", "no row after the run failed");
+  const dropped = logs.find((m) => m.startsWith("rr12slow rep 0:"));
+  assert.ok(dropped, logs.join("\n"));
+  assert.match(dropped, /: pass, dropped \(the run failed\)/);
+  assert.ok(!logs.some((m) => /ENOENT/.test(m)), logs.join("\n"));
+});
