@@ -29,6 +29,7 @@ import { deriveInstanceIdentity, generateInviteCode, parseInviteCode, sign } fro
 import { upsertFullContact } from "../servers/sharing/contact-promote.js";
 import { contactCbMessage, markCbPinned, CB_PIN_PREFIX } from "../servers/sharing/contact-binding.js";
 import { initSharingRuntime } from "../servers/sharing/boot.js";
+import { wireInstanceSync } from "../servers/sharing/instance-connect.js";
 
 const PT3_BASE_SHA = "697d5d07ba915994b3d591d55dbce820c2274b14";
 const PEER_MANAGER_PATH = new URL("../servers/sharing/peer-manager.js", import.meta.url).pathname;
@@ -650,10 +651,18 @@ test("H-C9e relayed proof, B OLD, A pinned with no prior handshake (as the Nostr
 });
 
 // ================================================================ H-C10
+// PT-2a: a sibling is admitted only through the pair-binding guard, so a new
+// sibling is wired as boot.js wires it (wireInstanceSync), with no pair key
+// and an empty pin store: it binds as legacy in auto, which is the PT-3
+// behaviour these tests pin. Its callbacks are then replaced by spies.
+const NO_PINS_DB = { execute: async () => ({ rows: [], rowsAffected: 0 }) };
 function sibling(identity, localId, { PM = PeerManager, db = null } = {}) {
   const pm = new PM(identity, { env: {} });
   pm.p2pDisabled = true; // never start a swarm: links are loopback socket pairs
   pm.localInstanceId = localId;
+  if (PM === PeerManager) {
+    wireInstanceSync(pm, { db: db ?? NO_PINS_DB, instanceSyncManager: { localInstanceId: localId }, pairKeyLookup: () => null, mode: "auto" });
+  }
   const feed = randomBytes(32).toString("hex");
   const calls = { keyReceived: [], instanceConnected: [], peerConnected: [] };
   pm.getFeedKeyForInstance = async () => feed;

@@ -19,15 +19,22 @@ import { randomBytes } from "node:crypto";
 import { PeerManager, hyperswarmInstanceSyncEnabled } from "../servers/sharing/peer-manager.js";
 import { deriveInstanceIdentity, sign } from "../servers/sharing/identity.js";
 import { shouldInitInstanceSync } from "../servers/sharing/instance-sync.js";
+import { wireInstanceSync } from "../servers/sharing/instance-connect.js";
 
 const owner = deriveInstanceIdentity(randomBytes(32));
 const stranger = deriveInstanceIdentity(randomBytes(32));
 const FEED = "ab".repeat(32);
 
+// PT-2a: a sibling is admitted only through the pair-binding guard, so the
+// PeerManager is wired as boot.js wires it (wireInstanceSync), with no pair
+// key and an empty pin store (legacy in auto, the behaviour pinned here).
+// The callbacks are then replaced by spies.
+const NO_PINS_DB = { execute: async () => ({ rows: [], rowsAffected: 0 }) };
 function makePm(env = {}) {
   const pm = new PeerManager(owner, { env });
   pm.p2pDisabled = false; // the suite env disables P2P; these tests drive the handler directly
   pm.localInstanceId = "instA";
+  wireInstanceSync(pm, { db: NO_PINS_DB, instanceSyncManager: { localInstanceId: "instA" }, pairKeyLookup: () => null, mode: "auto" });
   const calls = { keyReceived: [], instanceConnected: [], peerConnected: [], feedKeyAsked: [] };
   pm.onInstanceKeyReceived = (id, k) => { calls.keyReceived.push([id, k]); };
   pm.onInstanceConnected = (crowId, _c, id) => { calls.instanceConnected.push([crowId, id]); };

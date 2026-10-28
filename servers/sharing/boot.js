@@ -15,7 +15,7 @@
 import { randomBytes } from "node:crypto";
 import { createNotification } from "../shared/notifications.js";
 import bus from "../shared/event-bus.js";
-import { handleInstanceConnection } from "./instance-connect.js";
+import { wireInstanceSync } from "./instance-connect.js";
 import { ensureColumn } from "../db.js";
 import { normalizePubkey, findContactByPubkey } from "./pubkey-util.js";
 import { routeBotRelay } from "./bot-relay.js";
@@ -869,19 +869,6 @@ export async function initSharingRuntime(managers, helpers) {
     console.warn("[sharing] PeerManager start failed:", err.message);
   });
 
-  // Wire instance-to-instance connections for Hypercore replication
-  peerManager.onInstanceConnected = async (crowId, conn, remoteInstanceId = null) => {
-    console.log(`[sharing] Instance peer connected: ${crowId}`);
-
-    // One connection = one instance when the peer advertised its id
-    // (servers/sharing/instance-connect.js, review I2).
-    try {
-      await handleInstanceConnection({ db, instanceSyncManager, crowId, conn, remoteInstanceId });
-    } catch (err) {
-      console.warn(`[sharing] Instance connection handling failed for ${crowId}:`, err.message);
-    }
-  };
-
   // Advertise our own local instance_id to peer-manager so it can include
   // the id on the challenge/challenge-response JSON (disambiguates peers
   // when all instances of one user share one crow_id).
@@ -892,58 +879,11 @@ export async function initSharingRuntime(managers, helpers) {
   // scope). The local id is read at call time, never captured.
   wireContactBinding(peerManager, { db, localInstanceId: () => instanceSyncManager.localInstanceId });
 
-  // peer-manager asks us for OUR outgoing feed key to a specific peer
-  // instance (remoteInstanceId is the peer's local id, which matches the
-  // `id` column in our crow_instances table for that peer's row).
-  peerManager.getFeedKeyForInstance = async (remoteInstanceId) => {
-    try {
-      // Only return a key if we actually have a paired row for this instance.
-      const { rows } = await db.execute({
-        sql: `SELECT id FROM crow_instances WHERE id = ? AND ${TRUSTED_PEER_SQL} AND id != ? LIMIT 1`,
-        args: [remoteInstanceId, instanceSyncManager.localInstanceId],
-      });
-      if (rows.length === 0) return null;
-      // Ensure our outbound feed to this peer exists before asking for the key.
-      await instanceSyncManager.initInstance(remoteInstanceId, null);
-      const key = instanceSyncManager.getOutFeedKey(remoteInstanceId);
-      return key ? key.toString("hex") : null;
-    } catch (err) {
-      console.warn(`[sharing] getFeedKeyForInstance for ${remoteInstanceId}:`, err.message);
-      return null;
-    }
-  };
-
-  // Persist a peer-advertised feed key so we can open their incoming feed.
-  // Called only after the sibling proved our key: from a new sibling's
-  // `instance-key` frame, or an old sibling's challenge-response piggyback
-  // (instance_id, feed_key_hex). See peer-manager.js.
-  peerManager.onInstanceKeyReceived = async (remoteInstanceId, feedKeyHex) => {
-    try {
-      const { rows } = await db.execute({
-        sql: `SELECT sync_url FROM crow_instances WHERE id = ? AND ${TRUSTED_PEER_SQL} AND id != ?`,
-        args: [remoteInstanceId, instanceSyncManager.localInstanceId],
-      });
-      if (rows.length === 0) return; // Not paired with this instance_id — drop
-      const keyBuf = instanceSyncManager.validateIncomingFeedKey(remoteInstanceId, feedKeyHex);
-      if (!keyBuf) return; // malformed or self-echoed — skip persist AND init
-      if (rows[0].sync_url === feedKeyHex) return; // unchanged — skip
-      await db.execute({
-        sql: "UPDATE crow_instances SET sync_url = ?, updated_at = datetime('now') WHERE id = ? AND status != 'revoked'",
-        args: [feedKeyHex, remoteInstanceId],
-      });
-      console.log(`[sharing] Stored feed key for instance ${remoteInstanceId.slice(0, 12)}…`);
-      // Open the incoming feed now that we have the key. initInstance is
-      // idempotent — re-calling with a non-null feedKey adds the inFeed
-      // without disturbing the already-open outFeed.
-      try {
-        await instanceSyncManager.initInstance(remoteInstanceId, keyBuf);
-      } catch (err) {
-        console.warn(`[sharing] Failed to open inbound feed after key exchange: ${err.message}`);
-      }
-    } catch (err) {
-      console.warn(`[sharing] onInstanceKeyReceived for ${remoteInstanceId}:`, err.message);
-    }
-  };
+  // PT-2a: the instance closures (replication on connect, our feed key for a
+  // sibling, a sibling's feed key received) and the pair-binding guard, set
+  // synchronously, before peerManager.start() resolves and joins any topic.
+  // servers/sharing/instance-connect.js.
+  wireInstanceSync(peerManager, { db, instanceSyncManager });
 
   // Wire peer connections — update last_seen and deliver pending shares
   peerManager.onPeerConnected = async (crowId, conn) => {

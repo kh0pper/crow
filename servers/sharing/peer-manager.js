@@ -109,8 +109,14 @@ export class PeerManager {
     this.preAuthMaxLines = preAuthMaxLines;
     this.preAuthMaxBytes = preAuthMaxBytes;
     this.preAuthMs = preAuthMs;
-    // Async hooks run first in _admit: ({ conn, msg, state }) => { ok, reason }.
+    // Async hooks run first in _admit: ({ conn, msg, state, remoteInstanceId }) => { ok, reason }.
+    // `instance` is the PT-2a pair-binding guard, set by wireInstanceSync
+    // (instance-connect.js). Unset, every sibling is refused (guard:unwired).
     this.admitGuards = { instance: null, contact: null };
+    // { macFor({ peerInstanceId, challengeHex, handshakeHashHex }) → hex|null },
+    // set by wireInstanceSync: answers a sibling's `pb: 1` with a pair MAC.
+    this.instanceBinding = null;
+    this._unwiredLogged = false;
     // { lookupKey, isCbPinned, markCbPinned }, set by wireContactBinding (boot.js).
     // Unset, every foreign Crow ID is refused (no_binding).
     this.contactBinding = null;
@@ -298,7 +304,8 @@ export class PeerManager {
     // in its crow_instances table (crow_id alone is ambiguous: all instances
     // of one user share one Crow identity). Sent on contact connections too;
     // the receiver ignores it for other users. `cb: 1` asks for a reply bound
-    // to this connection (a cb_sig) instead of a bare signature.
+    // to this connection (a cb_sig) instead of a bare signature; `pb: 1`
+    // (PT-2a, only with cb) asks a sibling to add a pair MAC (pb_mac).
     const challengePayload = {
       type: "challenge",
       challenge: challenge.toString("hex"),
@@ -306,6 +313,7 @@ export class PeerManager {
       pubkey: this.identity.ed25519Pubkey,
       crowId: this.identity.crowId,
     };
+    if (this.instanceSyncEnabled) challengePayload.pb = 1;
     if (this.localInstanceId) {
       challengePayload.instance_id = this.localInstanceId;
     }
@@ -453,12 +461,25 @@ export class PeerManager {
         challengeHex: msg.challenge,
         handshakeHashHex: hh,
       }), this.identity.ed25519Priv);
-      conn.write(JSON.stringify({
+      const reply = {
         type: "challenge-response",
         pubkey: this.identity.ed25519Pubkey,
         crowId: this.identity.crowId,
         cb_sig: cbSig,
-      }) + "\n");
+      };
+      // PT-2a: a sibling asking with pb:1 gets a MAC under our pair key over
+      // its challenge and this connection's handshake hash. Only for our own
+      // Crow ID with instance sync on, so a stranger's challenge never reads
+      // the key store or learns which ids we hold keys for.
+      if (msg.pb === 1 && msg.crowId === this.identity.crowId && this.instanceSyncEnabled
+          && typeof this.instanceBinding?.macFor === "function") {
+        let pbMac = null;
+        try {
+          pbMac = this.instanceBinding.macFor({ peerInstanceId: state.peerInstanceId, challengeHex: msg.challenge, handshakeHashHex: hh });
+        } catch {}
+        if (typeof pbMac === "string" && pbMac) reply.pb_mac = pbMac;
+      }
+      conn.write(JSON.stringify(reply) + "\n");
       return;
     }
     state.deferredReply = { challengeHex: msg.challenge, instanceId: state.peerInstanceId, sent: false };
@@ -588,6 +609,16 @@ export class PeerManager {
     }
 
     const guard = this.admitGuards?.[kind];
+    // PT-2a I3: a sibling is admitted only through the pair-binding guard.
+    // Nothing wired (a PeerManager built without wireInstanceSync) fails closed.
+    if (kind === "instance" && this.instanceSyncEnabled && typeof guard !== "function") {
+      this._kill(conn, state);
+      if (!this._unwiredLogged) {
+        this._unwiredLogged = true;
+        console.warn("[peer-manager] instance-sync connection refused: guard:unwired");
+      }
+      return false;
+    }
     if (typeof guard === "function") {
       let verdict;
       try {
@@ -622,7 +653,6 @@ export class PeerManager {
     state.armTimer?.();
     state.authenticated = true;
     state.remoteCrowId = crowId;
-    state.remoteInstanceId = remoteInstanceId;
     state.kind = kind;
     state.admitMsg = msg;
 
@@ -696,6 +726,8 @@ export class PeerManager {
     if (state.proof !== "sig") return;
     const isInstance = state.kind === "instance" && this.instanceSyncEnabled;
     let feedKeyHex = null;
+    // d.instanceId (the challenge's id) equals state.remoteInstanceId whenever
+    // this fires: _admit refuses a response naming a different one.
     if (isInstance && d.instanceId && this.getFeedKeyForInstance) {
       try { feedKeyHex = await this.getFeedKeyForInstance(d.instanceId); } catch {}
     }
