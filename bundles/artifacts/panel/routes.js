@@ -85,7 +85,7 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
    * Core make/card-docs.js decides it (cardForDocument, then cardSummary: lane by the Board
    * tab's rule, href into the card drawer, the card's chat). An older core without the module
    * gives null (the player-shell precedent); one with cardForDocument but no cardSummary gets
-   * the bare drawer link and nothing it would have to guess. One summary per request.
+   * the standalone card view (?card=, never the default bot's board) and nothing it would have to guess. One summary per request.
    */
   async function documentCardFor(artifactId) {
     let cd;
@@ -94,7 +94,7 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
       if (typeof cd?.cardForDocument !== "function") return null;
       const id = await cd.cardForDocument(S.db, "artifact", artifactId);
       if (id == null) return null;
-      if (typeof cd.cardSummary !== "function") return { id: Number(id), title: "", lane: null, href: `/dashboard/bot-board#open=${Number(id)}`, thread: null };
+      if (typeof cd.cardSummary !== "function") return { id: Number(id), title: "", lane: null, href: `/dashboard/bot-board?card=${Number(id)}`, thread: null };
       return (await cd.cardSummary(S.db, id)) || null;
     } catch (e) {
       console.warn(`[artifacts] the document's card could not be read (${(e && e.code) || "error"}: ${e && e.message})`);
@@ -431,8 +431,9 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
       activeRound, scripted, scriptsOff: !!(cur && scripted && M.store.isTainted(cur)),
       // The threads a round or ask holds right now: the viewer hides Edit/Delete on them.
       lockedThreads: await M.comments.lockedThreadIds(S.db, art.id),
-      // P6: the card this document belongs to (null: none, or an older core).
-      card: await documentCardFor(art.id) });
+      // P6: the card this document belongs to (null: none, or an older core). The viewer's
+      // 5 s poll (?poll=1) never reads it, so a poll skips the summary and omits the key.
+      ...(req.query.poll === "1" ? {} : { card: await documentCardFor(art.id) }) });
   }));
 
   /**

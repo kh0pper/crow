@@ -125,21 +125,21 @@ test("an older core without card-docs still serves the artifact", async () => {
     assert.equal(page.status, 200);
     assert.ok(!page.text.includes("cv-card"));
   } finally { srv.close(); }
-  // A core with cardForDocument but no cardSummary: the bare drawer form, no title or lane.
+  // A core with cardForDocument but no cardSummary: the standalone card view (never the default bot's board, Q14), no title or lane.
   const { cardForDocument } = await import("../servers/gateway/make/card-docs.js");
   const srv2 = await mount({ importCardDocs: async () => ({ cardForDocument }) });
   try {
     const r = await get(srv2, `/api/artifacts/${s.onCard.id}`);
-    assert.deepEqual(r.body.card, { id: 9, title: "", lane: null, href: "/dashboard/bot-board#open=9", thread: null });
+    assert.deepEqual(r.body.card, { id: 9, title: "", lane: null, href: "/dashboard/bot-board?card=9", thread: null });
   } finally { srv2.close(); }
 });
 
 test("the manifest version moved", () => {
   const m = JSON.parse(readFileSync(join(REPO, "bundles/artifacts/manifest.json"), "utf8"));
-  assert.equal(m.version, "0.9.0");
+  assert.equal(m.version, "0.9.1");
   const reg = JSON.parse(readFileSync(join(REPO, "registry/add-ons.json"), "utf8"));
   const entry = (reg["add-ons"] || reg.addons || reg).find?.((a) => a.id === "artifacts");
-  assert.equal(entry?.version, "0.9.0", "the registry is in sync");
+  assert.equal(entry?.version, "0.9.1", "the registry is in sync");
 });
 
 test("the viewer has a way back", async () => {
@@ -205,4 +205,26 @@ test("cardSummary: when the drawer link can't be worked out, the standalone card
     assert.equal(c.lane, "needs_you", "the rest of the summary still stands");
     assert.equal(c.title, 'Write <the> "report"');
   } finally { real.close(); }
+});
+
+test("a poll (?poll=1) skips the card summary and omits card; other callers are unchanged", async () => {
+  const { cardForDocument, cardSummary } = await import("../servers/gateway/make/card-docs.js");
+  let summaries = 0;
+  const srv = await mount({ importCardDocs: async () => ({ cardForDocument, cardSummary: async (...a) => { summaries++; return cardSummary(...a); } }) });
+  try {
+    const p = await get(srv, `/api/artifacts/${s.onCard.id}?poll=1`);
+    assert.equal(p.status, 200);
+    assert.equal(summaries, 0, "no summary computed on a poll");
+    assert.ok(!("card" in p.body), "card is absent on a poll");
+    assert.equal(p.body.artifact.id, s.onCard.id);
+    const f = await get(srv, `/api/artifacts/${s.onCard.id}`);
+    assert.equal(summaries, 1, "a normal load still computes one");
+    assert.ok(f.body.card && f.body.card.id === 9);
+  } finally { srv.close(); }
+});
+
+test("the viewer client's poll sends the flag; first load does not", () => {
+  const src = readFileSync(join(REPO, "bundles/artifacts/panel/static/viewer-client.js"), "utf8");
+  assert.match(src, /\?poll=1/);
+  assert.match(src, /setTimeout\(function \(\) \{ S\.poll = null; refresh\("poll"\)/);
 });
