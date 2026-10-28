@@ -3748,6 +3748,7 @@ export const translations = {
   // ─── The new shell (redesign P2: Chat / Board / Make tabs, project chip, drawer) ───
   "shell.tabChat": { en: "Chat", es: "Chat" },
   "shell.tabBoard": { en: "Board", es: "Tablero" },
+  "shell.needYou": { en: "{n} need you", es: "{n} te necesitan" },
   "shell.tabMake": { en: "Make", es: "Crear" },
   "shell.everything": { en: "Everything", es: "Todo" },
   "shell.unassigned": { en: "Unassigned", es: "Sin asignar" },

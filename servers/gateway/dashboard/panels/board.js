@@ -119,7 +119,7 @@ export async function laneCounts(tdb, scope, lockMap, opts = {}) {
 }
 
 /** Full card rows (the face's columns + latest result) for the given ids. */
-async function cardsByIds(tdb, ids) {
+export async function cardsByIds(tdb, ids) {
   if (!ids.length) return new Map();
   const ph = ids.map(() => "?").join(",");
   let rows;
