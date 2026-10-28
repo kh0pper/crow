@@ -325,7 +325,7 @@ export function writeBotMcp(def, opts = {}) {
   const built = buildBotMcp(def, canonical, {
     extraServers, catalog, unconfigured, binding, crowHome,
     ensureServers: opts.ensureServers,
-    actor: opts.botId ? { botId: opts.botId, displayName: opts.displayName } : undefined,
+    actor: opts.botId ? { botId: opts.botId, displayName: opts.displayName, threadId: opts.threadId } : undefined,
   });
   // F4a L2b: merge cross-instance forward-proxy blocks when the caller has
   // confirmed feature_flags.remote_invocation is on (the DB read is done by the

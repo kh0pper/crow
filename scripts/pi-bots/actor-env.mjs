@@ -13,12 +13,18 @@ export function sanitizeActorName(name, fallbackId) {
   return capped || String(fallbackId == null ? "" : fallbackId);
 }
 
-export function actorEnvFor({ botId, displayName }) {
-  return {
+export function actorEnvFor({ botId, displayName, threadId }) {
+  const env = {
     CROW_ACTOR_KIND: "bot",
     CROW_ACTOR_BOT_ID: String(botId),
     CROW_ACTOR_BOT_NAME: sanitizeActorName(displayName, botId),
   };
+  // The thread the bot is answering in, only when there is one.
+  if (typeof threadId === "string") {
+    const thread = Array.from(threadId.replace(/[\p{Cc}\p{Cf}]/gu, "")).slice(0, 200).join("");
+    if (thread) env.CROW_ACTOR_THREAD = thread;
+  }
+  return env;
 }
 
 /** Replaces each active stdio block (never mutates the shared block object). */

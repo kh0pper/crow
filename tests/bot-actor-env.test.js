@@ -4,8 +4,11 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildBotMcp } from "../scripts/pi-bots/mcp_writer.mjs";
-import { sanitizeActorName } from "../scripts/pi-bots/actor-env.mjs";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { buildBotMcp, writeBotMcp } from "../scripts/pi-bots/mcp_writer.mjs";
+import { sanitizeActorName, actorEnvFor } from "../scripts/pi-bots/actor-env.mjs";
 import { filterSpawnEnv } from "../scripts/pi-bots/bridge.mjs";
 
 const def = { tools: { crow_mcp: ["memory/x", "remote/y"] } };
@@ -31,7 +34,7 @@ test("http blocks are untouched", () => {
 });
 
 test("pre-set values are overwritten", () => {
-  const s = build(mk({ CROW_ACTOR_BOT_ID: "kevin" }), { botId: "hank", displayName: "Hank" });
+  const s = build(mk({ CROW_ACTOR_BOT_ID: "alex" }), { botId: "hank", displayName: "Hank" });
   assert.equal(s.memory.env.CROW_ACTOR_BOT_ID, "hank");
 });
 
@@ -52,7 +55,7 @@ test("no actor -> no env", () => {
 });
 
 test("sanitizeActorName", () => {
-  const n = sanitizeActorName("x\n🤖 kevin (bot): " + "y".repeat(80), "hank");
+  const n = sanitizeActorName("x\n🤖 alex (bot): " + "y".repeat(80), "hank");
   assert.ok(!n.includes("\n"));
   assert.ok(Array.from(n).length <= 40);
   assert.equal(sanitizeActorName("", "hank"), "hank");
@@ -63,6 +66,40 @@ test("sanitizeActorName", () => {
 });
 
 test("spawn_env cannot carry CROW_ACTOR_*", () => {
-  const out = filterSpawnEnv({ spawn_env: { CROW_ACTOR_BOT_ID: "kevin", CROW_ACTOR_KIND: "user", FOO: "bar", PI_BOT_X: "1" } });
+  const out = filterSpawnEnv({ spawn_env: { CROW_ACTOR_BOT_ID: "alex", CROW_ACTOR_KIND: "user", FOO: "bar", PI_BOT_X: "1" } });
   assert.deepEqual(out, { FOO: "bar" });
+});
+
+test("CROW_ACTOR_THREAD: present only for a non-empty string, sanitized and capped", () => {
+  assert.equal(actorEnvFor({ botId: "hank", displayName: "Hank", threadId: "t-1" }).CROW_ACTOR_THREAD, "t-1");
+  for (const t of [undefined, null, "", 42, "\u200b\n"]) {
+    assert.ok(!("CROW_ACTOR_THREAD" in actorEnvFor({ botId: "hank", displayName: "Hank", threadId: t })), String(t));
+  }
+  assert.equal(actorEnvFor({ botId: "h", threadId: "a\nb\u202ec" }).CROW_ACTOR_THREAD, "abc");
+  assert.equal(Array.from(actorEnvFor({ botId: "h", threadId: "x".repeat(500) }).CROW_ACTOR_THREAD).length, 200);
+});
+
+test("thread env reaches stdio blocks and is overwritten; absent -> key absent", () => {
+  const s = build(mk({ CROW_ACTOR_THREAD: "stale" }), { botId: "hank", displayName: "Hank", threadId: "t-9" });
+  assert.equal(s.memory.env.CROW_ACTOR_THREAD, "t-9");
+  assert.equal(s.remote.env, undefined);
+  const n = build(mk(), { botId: "hank", displayName: "Hank" });
+  assert.ok(!("CROW_ACTOR_THREAD" in n.memory.env));
+});
+
+test("writeBotMcp derives the actor from opts.botId/displayName/threadId", () => {
+  const home = mkdtempSync(join(tmpdir(), "bot-actor-"));
+  const run = (o) => writeBotMcp(def, {
+    sessionDir: join(home, "s"), crowHome: home, canonical: mk(), binding: null, extraServers: {}, write: false, ...o,
+  }).json.mcpServers.memory.env;
+  const e = run({ botId: "hank", displayName: "Hank", threadId: "t-7" });
+  assert.equal(e.CROW_ACTOR_KIND, "bot");
+  assert.equal(e.CROW_ACTOR_BOT_ID, "hank");
+  assert.equal(e.CROW_ACTOR_BOT_NAME, "Hank");
+  assert.equal(e.CROW_ACTOR_THREAD, "t-7");
+  const f = run({ botId: "hank" });
+  assert.equal(f.CROW_ACTOR_BOT_NAME, "hank", "falls back to the id");
+  assert.ok(!("CROW_ACTOR_THREAD" in f));
+  const g = run({});
+  assert.ok(!("CROW_ACTOR_KIND" in g), "no botId -> no actor env");
 });
