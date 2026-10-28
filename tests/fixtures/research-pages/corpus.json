@@ -21,12 +21,21 @@
     { "page": "news-article.html", "quote": "We ship weekly — Nothing", "expect": 0 },
     { "page": "news-article.html", "quote": "We ship weekly - A", "expect": 0 },
     { "page": "news-article.html", "quote": "\"We ship weekly\" Never Shipped Bugs", "expect": 0 },
-    { "page": "blog-ellipsis.html", "quote": "The trail follows the river … the café there closes at four", "expect": 1 },
+    { "page": "blog-ellipsis.html", "quote": "The trail follows the river … the café there closes at four", "expect": null },
     { "page": "blog-ellipsis.html", "quote": "most of them standing perfectly still in the shallows", "expect": 1 },
     { "page": "blog-ellipsis.html", "quote": "the path climbs gently through birch woods", "expect": 0 },
     { "page": "notes.txt", "quote": "the pilot will run for six weeks in two schools", "expect": 1 },
     { "page": "notes.txt", "quote": "[The group] agreed that the pilot will run", "expect": 1 },
     { "page": "notes.txt", "quote": "Attendance data will be reviewed every Monday by the coordinator", "expect": 0 },
-    { "page": "notes.txt", "quote": "the … the", "expect": null }
+    { "page": "notes.txt", "quote": "the … the", "expect": null },
+    { "page": "blog-ellipsis.html", "quote": "Past the old mill ... the second bridge", "expect": 1 },
+    { "page": "news-article.html", "quote": "growth[3] in the app's subscriber base reached 14 percent", "expect": 1 },
+    { "page": "news-article.html", "quote": "We ship weekly now because our customers asked us to [sic]", "expect": 1 },
+    { "page": "long-notes.txt", "quote": "The CEO said [that] we ship weekly", "expect": 1 },
+    { "page": "long-notes.txt", "quote": "The CEO said [the company will] never ship bugs", "expect": null },
+    { "page": "long-notes.txt", "quote": "We never ... ship bugs", "expect": null },
+    { "page": "long-notes.txt", "quote": "Marker one opens the second paragraph ... marker two closes it", "expect": 1 },
+    { "page": "long-notes.txt", "quote": "Far marker alpha starts here ... far marker omega ends here", "expect": null },
+    { "page": "long-notes.txt", "quote": "The CEO said [the board will] always ship features", "expect": 0 }
   ]
 }

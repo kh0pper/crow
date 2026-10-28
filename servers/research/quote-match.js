@@ -30,10 +30,21 @@
  *     sentence punctuation (. , ; : ! ?) at a piece's edges is trimmed, so a quote's closing
  *     period need not match the page's punctuation; pieces under MIN_PIECE_CHARS are dropped;
  *     no pieces left: null, "too short to check";
- *   - found when every piece occurs in order, each hit on word boundaries: the code points around
- *     it are not letters, digits or combining marks; non-boundary hits are skipped and the search
- *     continues;
+ *   - editorial drops are an allowlist, removed by normalization on both sides: [sic], numeric
+ *     footnotes like [3], [citation needed] (and single-letter footnotes like [a]); removing them
+ *     only makes the neighbouring text adjacent, so it never loosens a match. ANY OTHER bracketed
+ *     text is a placeholder for a short page span: the pieces on either side must be at most
+ *     MAX_BRACKET_GAP (60) normalized page characters apart. Ellipsis pieces may be at most
+ *     MAX_ELLIPSIS_GAP (400) apart. A dropped short piece widens the next gap by its length plus
+ *     its own gap;
+ *   - found when every piece occurs in order within those gaps, each hit on word boundaries: the
+ *     code points around it are not letters, digits or combining marks; non-boundary hits are
+ *     skipped and the search continues (memoized backtracking over occurrences);
  *   - the Readability text is searched first, then the full body text;
+ *   - the pieces all occur in order but only with a wider gap: null, "couldn't check exactly: the
+ *     quoted pieces are far apart on the page" (never 1, since the joining is unverifiable, and
+ *     not 0, since the words are there). A quote could otherwise splice distant page text into a
+ *     new meaning ("The CEO said [the company will] never ship bugs");
  *   - not found: null when the stored text was truncated (the quote may be in the cut part) or
  *     there is no text at all; otherwise 0.
  */
@@ -54,7 +65,12 @@ export function normalizeForMatch(s) {
     .trim();
 }
 
-const PIECE_SPLIT = /\s*(?:\.\.\.|\. \. \.|\[[^\]]{1,40}\])\s*/;
+// Split points, captured so each piece knows what joined it to the previous one.
+const PIECE_SPLIT = /\s*(\.\.\.|\. \. \.|\[[^\]]{1,40}\])\s*/;
+// The most normalized page characters allowed between two pieces: a bracketed insertion stands
+// in for a short page span, an ellipsis for a longer cut. A wider gap cannot be checked.
+export const MAX_BRACKET_GAP = 60;
+export const MAX_ELLIPSIS_GAP = 400;
 const EDGE_PUNCT = /^[.,;:!?\s]+|[.,;:!?\s]+$/g;
 const WORD_CHAR = /[\p{L}\p{N}\p{M}]/u;
 
@@ -112,11 +128,32 @@ function stripOuterQuotes(s) {
   return out;
 }
 
+/**
+ * The quote's pieces, each with `maxGap`: the most page characters allowed between the previous
+ * kept piece and this one (null for the first). A dropped short piece widens the next gap by its
+ * own length plus the gap it would have had.
+ */
 function piecesOf(quote) {
-  return stripOuterQuotes(normalizeForMatch(quote))
-    .split(PIECE_SPLIT)
-    .map((p) => p.replace(EDGE_PUNCT, ""))
-    .filter((p) => p.length >= MIN_PIECE_CHARS);
+  const parts = stripOuterQuotes(normalizeForMatch(quote)).split(PIECE_SPLIT);
+  const pieces = [];
+  let pending = null; // gap accumulated since the last kept piece
+  for (let k = 0; k < parts.length; k += 2) {
+    const text = parts[k].replace(EDGE_PUNCT, "");
+    if (k > 0) {
+      const sep = parts[k - 1];
+      const gap = sep.startsWith("[") ? MAX_BRACKET_GAP : MAX_ELLIPSIS_GAP;
+      pending = pending === null ? gap : pending + gap;
+    }
+    if (text.length >= MIN_PIECE_CHARS) {
+      pieces.push({ text, maxGap: pieces.length === 0 ? null : pending });
+      pending = 0;
+    } else if (pieces.length > 0) {
+      pending = (pending ?? 0) + text.length;
+    } else {
+      pending = null; // nothing kept yet: a leading short piece or insertion constrains nothing
+    }
+  }
+  return pieces;
 }
 
 /** True when the code point ending just before `i` (before=true) or starting at `i` is a word char. */
@@ -142,9 +179,10 @@ function findOnBoundary(text, piece, from) {
   return -1;
 }
 
+/** Every piece in order, gaps ignored. */
 function piecesInOrder(text, pieces) {
   let cursor = 0;
-  for (const piece of pieces) {
+  for (const { text: piece } of pieces) {
     const end = findOnBoundary(text, piece, cursor);
     if (end < 0) return false;
     cursor = end;
@@ -152,13 +190,35 @@ function piecesInOrder(text, pieces) {
   return true;
 }
 
-function matchPieces(pieces, r, b, truncated) {
-  if (pieces.length === 0) return { found: null, where: null, reason: "too short to check" };
-  if (!r && !b) return { found: null, where: null, reason: "no page text to check" };
-  if (r && piecesInOrder(r, pieces)) return { found: 1, where: "readable", reason: null };
-  if (b && b !== r && piecesInOrder(b, pieces)) return { found: 1, where: "body", reason: null };
-  if (truncated) return { found: null, where: null, reason: "not found, but the page text was truncated" };
-  return { found: 0, where: null, reason: "not found in the page text" };
+/** Every piece in order with each gap within its maxGap. Memoized, so it stays linear-ish. */
+function piecesWithinGaps(text, pieces) {
+  const failed = new Set();
+  const from = (k, prevEnd) => {
+    if (k === pieces.length) return true;
+    const key = k + ":" + prevEnd;
+    if (failed.has(key)) return false;
+    const { text: piece, maxGap } = pieces[k];
+    let i = text.indexOf(piece, prevEnd);
+    while (i >= 0) {
+      if (maxGap !== null && i - prevEnd > maxGap) break;
+      const end = i + piece.length;
+      if (!isWordAt(text, i, true) && !isWordAt(text, end, false) && from(k + 1, end)) return true;
+      i = text.indexOf(piece, i + 1);
+    }
+    failed.add(key);
+    return false;
+  };
+  return from(0, 0);
+}
+
+const FAR_APART = "couldn't check exactly: the quoted pieces are far apart on the page";
+
+/** 1 with where, or {loose: true} when only a gap-ignoring match exists, or null. */
+function searchTexts(pieces, texts) {
+  for (const [where, text] of texts) {
+    if (piecesWithinGaps(text, pieces)) return { found: 1, where, reason: null };
+  }
+  return texts.some(([, text]) => piecesInOrder(text, pieces)) ? { loose: true } : null;
 }
 
 /**
@@ -167,14 +227,25 @@ function matchPieces(pieces, r, b, truncated) {
  * @returns {{found: 1|0|null, where: "readable"|"body"|null, reason: string|null}}
  */
 export function matchQuote(quote, { readable = "", body = "", truncated = false } = {}) {
+  const full = piecesOf(quote);
+  if (full.length === 0) return { found: null, where: null, reason: "too short to check" };
   const r = normalizeForMatch(readable);
   const b = normalizeForMatch(body);
-  const full = matchPieces(piecesOf(quote), r, b, truncated);
-  if (full.found === 1) return full;
+  if (!r && !b) return { found: null, where: null, reason: "no page text to check" };
+  const texts = [["readable", r]];
+  if (b && b !== r) texts.push(["body", b]);
+
+  let loose = false;
+  const candidates = [full];
   const head = withoutAttribution(quote);
-  if (head) {
-    const cut = matchPieces(piecesOf(head), r, b, truncated);
-    if (cut.found === 1) return cut;
+  if (head) candidates.push(piecesOf(head)); // only after the full quote fails
+  for (const pieces of candidates) {
+    if (pieces.length === 0) continue;
+    const hit = searchTexts(pieces, texts);
+    if (hit?.found === 1) return hit;
+    if (hit?.loose) loose = true;
   }
-  return full;
+  if (loose) return { found: null, where: null, reason: FAR_APART };
+  if (truncated) return { found: null, where: null, reason: "not found, but the page text was truncated" };
+  return { found: 0, where: null, reason: "not found in the page text" };
 }

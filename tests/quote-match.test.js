@@ -77,6 +77,46 @@ test("combining marks and astral letters count as word characters", () => {
   assert.equal(matchQuote("ship weekly", page("we \u{1f600} ship weekly report")).found, 1);
 });
 
+test("a bracketed placeholder stands in for a short page span only", () => {
+  const near = page("The CEO said that we ship weekly.");
+  assert.equal(matchQuote("The CEO said [that] we ship weekly", near).found, 1);
+  const pad = "Other business was discussed at length. ".repeat(4); // > 60 chars
+  const far = page("The CEO said the review takes a month. " + pad + "Good teams never ship bugs.");
+  const r = matchQuote("The CEO said [the company will] never ship bugs", far);
+  assert.equal(r.found, null);
+  assert.match(r.reason, /far apart/);
+  // the spliced words are not on the page at all: 0
+  assert.equal(matchQuote("The CEO said [the company will] never ship bugs", page("The CEO said little.")).found, 0);
+  // exactly 60 page characters between the pieces is still a match; 61 is not
+  const g = (n) => page("start piece " + "x".repeat(n - 2) + " end piece");
+  assert.equal(matchQuote("start piece [gap] end piece", g(60)).found, 1);
+  assert.equal(matchQuote("start piece [gap] end piece", g(61)).found, null);
+});
+
+test("ellipsis pieces may be at most 400 page characters apart", () => {
+  const apart = (n) => page("alpha piece " + "y".repeat(n - 2) + " omega piece");
+  assert.equal(matchQuote("alpha piece ... omega piece", apart(100)).found, 1);
+  assert.equal(matchQuote("alpha piece ... omega piece", apart(400)).found, 1);
+  const r = matchQuote("alpha piece ... omega piece", apart(1000));
+  assert.equal(r.found, null);
+  assert.match(r.reason, /far apart/);
+  const pad = "Filler sentence for the gap. ".repeat(40);
+  assert.equal(matchQuote("We never ... ship bugs", page("We never met. " + pad + "They ship bugs.")).found, null);
+  // a later, closer occurrence is found by backtracking
+  assert.equal(matchQuote("alpha piece ... omega piece",
+    page("alpha piece " + "z".repeat(1000) + " alpha piece then omega piece")).found, 1);
+  // far apart in readable but close in body: the body match wins
+  assert.deepEqual(matchQuote("alpha piece ... omega piece",
+    { readable: apart(1000).readable, body: "alpha piece and omega piece", truncated: false }),
+    { found: 1, where: "body", reason: null });
+});
+
+test("[sic] and numeric footnotes still drop without a gap", () => {
+  assert.equal(matchQuote("growth[3] was strong", page("growth was strong")).found, 1);
+  assert.equal(matchQuote("growth was strong [sic]", page("growth[12] was strong")).found, 1);
+  assert.equal(matchQuote("growth [citation needed] was strong", page("growth was strong")).found, 1);
+});
+
 test("ellipsis pieces match in order, never out of order", () => {
   assert.equal(matchQuote("alpha \u2026 gamma", page("alpha beta gamma")).found, 1);
   assert.equal(matchQuote("alpha ... gamma", page("alpha beta gamma")).found, 1);
