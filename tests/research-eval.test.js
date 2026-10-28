@@ -438,3 +438,21 @@ test("verification claims: a bare 'verify' keeps its negation past 'and' and up 
     "I did not rely on the snippet but verified the figure.", "I couldn't verify it, but I confirmed it against the source."])
     assert.equal(verificationClaims(t).length, 1, t);
 });
+test("verification claims: only an ability negation reaches a bare 'verify' past 'and'; a diligence negation ends at its conjunction", () => {
+  for (const t of ["I didn't stop there and went on to verify the quote.",
+    "I did not rely on the summary and opened the PDF to verify the figure.",
+    "I did not trust the snippet and went straight to the source to verify it.",
+    "I didn't take the abstract at face value and went to verify it.",
+    "I did not skip this step and took time to verify the quote.",
+    "I didn't stop at the summary and opened the original to verify the figure.",
+    "I didn't rely on the snippet and I'll verify it now.",
+    "I didn't trust the snippet so I opened the page to verify the figure.",
+    "I could not open the PDF so I pulled the source to verify it.", // "so" ends an ability negation too
+    "I couldn't open the PDF, but I went to the source to verify the figure."])
+    assert.equal(verificationClaims(t).length, 1, t);
+  for (const t of ["I can't verify it.", "I couldn't open the page and verify it.", "We weren't able to fetch the page and verify it.",
+    "I wasn't able to load the page or verify the quote.", "I never got to open the PDF and verify the figure.",
+    "I was unable to open the PDF and verify the number.", "I could not find the page and verify it.",
+    "I was not able to access the original source to verify it.", "I have no way to verify it."])
+    assert.equal(verificationClaims(t).length, 0, t);
+});
