@@ -73,3 +73,26 @@ test("the research router forwards a peer in the same shape (and still never as 
   assert.deepEqual(forwardActorMeta(extra), { _meta: { "crow/actor": { kind: "peer", instance: "inst-a-1a2b3c4d", from: "wren" } } });
   assert.equal(resolveCallActor(OWNER, forwardActorMeta(extra)).kind, "unknown");
 });
+
+test("a peer cannot imitate another peer's suffixed label with a separator in its own name", () => {
+  const real = { id: "inst-a-1a2b3c4d", name: "wren" };
+  const twin = { id: "inst-c-0000ffff", name: "wren" };
+  const realLabel = peerDisplayName(real, { others: [twin] });
+  assert.equal(realLabel, "wren\u00b73c4d");
+  for (const fake of ["wren \u00b7 3c4d", "wren\u00b73c4d", "wren\u30fb3c4d", "wren\u20223c4d", "wren\u22193c4d", "wren\u20273c4d", "wren\uff653c4d", "wren\u03873c4d"]) {
+    const imp = { id: "inst-x-9999eeee", name: fake };
+    const label = peerDisplayName(imp, { others: [real, twin] });
+    assert.notEqual(label, realLabel, fake);
+    assert.equal(label, "peer\u00b7eeee", fake);
+    assert.equal(cleanPeerName(fake), "", "look-alike separators reject the name: " + JSON.stringify(fake));
+  }
+});
+
+test("a final label that still collides (same name, same id tail) gets a longer suffix", () => {
+  const x = { id: "inst-a-11113c4d", name: "wren" };
+  const y = { id: "inst-b-22223c4d", name: "wren" };
+  assert.equal(peerDisplayName(x, { others: [y] }), "wren\u00b711113c4d");
+  // A nameless peer whose label would equal this instance's own name? Own names are cleaned the same way,
+  // so an own name holding a separator is rejected too and reserves nothing.
+  assert.equal(peerDisplayName({ id: "inst-q-abcd", name: "" }, { ownName: "peer\u00b7abcd" }), "peer\u00b7abcd");
+});

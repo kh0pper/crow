@@ -14,31 +14,53 @@ import { sanitizeActorName } from "../../scripts/pi-bots/actor-env.mjs";
 const PEER_TOKEN = "peer-instance";
 const SEP = "·";
 
-/** Strip control/format characters and parentheses (a name must not fake a nested label), trim, cap at 40. */
+// The suffix separator and characters that look like it. A name that contains one (after NFKC folding,
+// which maps e.g. U+0387 and U+FF65 onto these) could imitate another peer's suffixed label, so it is
+// rejected as a name (the peer is then shown as "peer·<id>").
+const SEP_LOOKALIKES = /[\u00b7\u0387\u16eb\u2022\u2027\u2219\u22c5\u2981\u2e30\u2e31\u2e33\u30fb\ua78f\uff65\u1427\u0701\u0702]/u;
+
+/** Strip control/format characters and parentheses (a name must not fake a nested label), trim, cap at 40.
+ *  A name holding the suffix separator or a look-alike is rejected (""). */
 export function cleanPeerName(name) {
-  return sanitizeActorName(String(name == null ? "" : name).replace(/[()]/g, ""), "");
+  const clean = sanitizeActorName(String(name == null ? "" : name).replace(/[()]/g, ""), "");
+  return SEP_LOOKALIKES.test(clean.normalize("NFKC")) ? "" : clean;
 }
 
-/** The last 4 letters or digits of the id: stable, short, and shown in Settings next to the full id. */
-export function idSuffix(id) {
+/** The last `n` letters or digits of the id: stable, short, and shown in Settings next to the full id. */
+export function idSuffix(id, n = 4) {
   const s = String(id == null ? "" : id).replace(/[^A-Za-z0-9]/g, "");
-  return s.slice(-4) || "0000";
+  return (Number.isFinite(n) ? s.slice(-n) : s) || "0000";
 }
 
 const fold = (s) => s.normalize("NFKC").toLowerCase();
 
+/** One row's label with an `n`-character suffix when it needs one (`needs`), else its bare name. */
+function labelAt(base, id, needs, n) {
+  if (!base) return `peer${SEP}${idSuffix(id, n)}`;
+  return needs ? `${base}${SEP}${idSuffix(id, n)}` : base;
+}
+
 /**
  * The display name for peer `row` ({id, name}), given every OTHER crow_instances row (any status, this
- * instance's own row included) and this instance's own name.
+ * instance's own row included) and this instance's own name. Two passes: a name that matches another
+ * row's name or the own name (case-folded) is suffixed; then, if the resulting FINAL label still equals
+ * another row's final label or the own name, the suffix grows (8 characters, then the whole id).
  */
 export function peerDisplayName(row, { others = [], ownName = null } = {}) {
-  const base = cleanPeerName(row?.name);
-  const suffix = idSuffix(row?.id);
-  if (!base) return `peer${SEP}${suffix}`;
-  const f = fold(base);
-  const clash = others.some((o) => o && o.id !== row.id && fold(cleanPeerName(o.name)) === f)
-    || (ownName != null && fold(cleanPeerName(ownName)) === f);
-  return clash ? `${base}${SEP}${suffix}` : base;
+  const rows = [row, ...others.filter((o) => o && o.id !== row?.id)];
+  const own = ownName != null ? fold(cleanPeerName(ownName)) : null;
+  const bases = rows.map((r) => cleanPeerName(r?.name));
+  const counts = new Map();
+  for (const b of bases) if (b) counts.set(fold(b), (counts.get(fold(b)) || 0) + 1);
+  const needs = bases.map((b) => !b || counts.get(fold(b)) > 1 || (own !== null && fold(b) === own));
+  const othersFinal = new Set(rows.slice(1).map((r, i) => fold(labelAt(bases[i + 1], r.id, needs[i + 1], 4))));
+  if (own) othersFinal.add(own);
+  let label = labelAt(bases[0], row?.id, needs[0], 4);
+  for (const n of [8, Infinity]) {
+    if (!othersFinal.has(fold(label))) break;
+    label = labelAt(bases[0], row?.id, true, n);
+  }
+  return label;
 }
 
 /**
