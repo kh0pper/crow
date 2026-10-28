@@ -62,7 +62,11 @@ export function shellClientJs() {
         dlg.addEventListener('close', function (e) {
           var opener = e.currentTarget.__shellOpener;
           e.currentTarget.__shellOpener = null;
-          if (opener && document.contains(opener) && typeof opener.focus === 'function') opener.focus();
+          // The close event fires a task after close(): if focus has already
+          // moved on to something else (a quick keypress, a tap), leave it.
+          var a = document.activeElement;
+          var parked = !a || a === document.body || a === document.documentElement || e.currentTarget.contains(a);
+          if (parked && opener && document.contains(opener) && typeof opener.focus === 'function') opener.focus();
         });
       }
       // The rail's project form has no opener: fill its return path now.

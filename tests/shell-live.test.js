@@ -499,6 +499,8 @@ test("the drawer and the avatar sheet open, trap focus, close on Escape and on t
       }
       await p.key("Escape", "Escape", 27);
       await p.until(`!document.getElementById(${JSON.stringify(id)}).open`, id + " closed");
+      // The close event (and its focus return) lands a task after close(): wait for it.
+      await p.until(`document.activeElement === document.querySelector(${JSON.stringify(opener)})`, "focus back on the opener after " + id + " closed");
     }
   } finally { await p.close(); }
 });
