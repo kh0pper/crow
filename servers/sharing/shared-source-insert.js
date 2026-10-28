@@ -2,9 +2,12 @@
 // as a project-less, unverified row with fetch_status left NULL, which reads as unknown and never
 // citable; the user opens it with crow_add_source before citing it.
 //
+// Senders send citation_apa and content_summary; citation and notes are legacy fallbacks. Both
+// are capped (the citation because it is FTS-indexed) and the citation is flattened to one line.
+//
 // This runs inside initSharingRuntime, which the stdio crow-sharing server starts without
-// ensureProvenanceSchema, so the INSERT must not name any migration-0013 column: it has to work
-// on a pre-0013 DB during the deploy window.
+// ensureProvenanceSchema, so the INSERT names only columns every DB has: it has to work during
+// the deploy window.
 import { SOURCE_TYPES } from "../research/source-types.js";
 
 const TITLE_MAX = 1000;
@@ -21,10 +24,12 @@ function firstString(...values) {
 }
 
 /** Cap a peer-supplied string at max chars, marking the cut. */
-function capShared(value, max) {
-  return value && value.length > max
-    ? `${value.slice(0, max)}\n[truncated at share import: original ${value.length} chars]`
-    : value;
+function capShared(value, max, oneLine = false) {
+  if (!value) return value;
+  const text = oneLine ? value.replace(/\s*[\r\n]+\s*/g, " ") : value;
+  return text.length > max
+    ? `${text.slice(0, max)}${oneLine ? " " : "\n"}[truncated at share import: original ${value.length} chars]`
+    : text;
 }
 
 /**
@@ -39,7 +44,7 @@ export async function insertSharedSource(db, payload = {}) {
   const rawTitle = typeof p.title === "string" && p.title ? p.title : "Shared source";
   const title = rawTitle.length > TITLE_MAX ? rawTitle.slice(0, TITLE_MAX) : rawTitle;
   const sourceType = SOURCE_TYPES.includes(p.source_type) ? p.source_type : "other";
-  const citation = capShared(firstString(p.citation_apa, p.citation), SHARED_CITATION_MAX) ?? "(no citation)";
+  const citation = capShared(firstString(p.citation_apa, p.citation), SHARED_CITATION_MAX, true) ?? "(no citation)";
   const notes = capShared(firstString(p.content_summary, p.notes), SHARED_SUMMARY_MAX);
   const url = typeof p.url === "string" && p.url ? p.url : null;
 
