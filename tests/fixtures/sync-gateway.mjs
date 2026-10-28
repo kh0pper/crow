@@ -25,6 +25,8 @@ export async function startGateway(fleet, side, ctxOverrides = {}) {
       standardPorts: [],
       // Never shell out to the dev box's tailscaled.
       lookupTailnetIp: async () => null,
+      // The side's fleet-provisioned pair key (sync-fleet.mjs makeFleet).
+      ...(side.pairKeyLookup ? { pairKeyLookup: side.pairKeyLookup } : {}),
       ...ctxOverrides,
     },
   };

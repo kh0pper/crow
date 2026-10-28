@@ -27,6 +27,7 @@ import { sanitizeDisplayName } from "./display-name.js";
 import { validateAvatar, avatarFieldValue } from "./avatar.js";
 import bus from "../shared/event-bus.js";
 import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
+import { SYNC_PB_KEY_PREFIX, SYNC_PB_CLEARED_PREFIX } from "../shared/self-dial-address.js";
 import { mintLamport, advanceCounter, stampSql, ensureLamportOriginColumn, incomingLosesLww } from "../shared/sync-stamp.js";
 import { deleteContactArtifactComments } from "../shared/artifact-comment-delete.js";
 
@@ -4072,10 +4073,34 @@ export class InstanceSyncManager {
         inFeedLength: inFeed ? inFeed.length : 0,
         lastAppliedSeq: lastSeq,
         pendingEntries: inFeed ? Math.max(0, inFeed.length - lastSeq) : 0,
+        ...(await this._pairBindingStatus(instanceId)),
       });
     }
 
     return status;
+  }
+
+  /**
+   * PT-2a, for display: has this peer completed a pair-bound sync handshake
+   * with us (the LOCAL `sync_pair_bound:` pin), and when did the owner last
+   * clear that pin (the LOCAL `sync_pair_cleared:` marker)? Fails soft
+   * (false / null): this is a status view, never an admission check.
+   */
+  async _pairBindingStatus(peerId) {
+    try {
+      const { rows } = await this.db.execute({
+        sql: "SELECT key, value FROM dashboard_settings_overrides WHERE instance_id = ? AND key IN (?, ?)",
+        args: [this.localInstanceId, `${SYNC_PB_KEY_PREFIX}${peerId}`, `${SYNC_PB_CLEARED_PREFIX}${peerId}`],
+      });
+      const byKey = new Map(rows.map((r) => [r.key, r.value]));
+      const cleared = byKey.get(`${SYNC_PB_CLEARED_PREFIX}${peerId}`);
+      return {
+        pair_bound: Number(byKey.get(`${SYNC_PB_KEY_PREFIX}${peerId}`)) >= 1,
+        pair_cleared_at: cleared ? String(cleared) : null,
+      };
+    } catch {
+      return { pair_bound: false, pair_cleared_at: null };
+    }
   }
 
   /**

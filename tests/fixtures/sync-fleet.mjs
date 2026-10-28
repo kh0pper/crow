@@ -8,6 +8,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import net from "node:net";
 import NoiseSecretStream from "@hyperswarm/secret-stream";
@@ -44,7 +45,12 @@ async function makeSide(identity, id) {
   const mgr = new InstanceSyncManager(identity, db, id);
   mgr.dataDir = join(dir, "instance-sync"); // keep feeds out of ~/.crow
   mgr.feedsDisabled = false;                // the suite env disables feeds
-  return { mgr, db, dir, id };
+  // The pair keys this side holds (peer id -> signing_key hex), the stand-in
+  // for its PT-1 credential store. Tests may change or delete entries to
+  // model a re-pair window or a missing store.
+  const pairKeys = new Map();
+  const pairKeyLookup = (peerId) => pairKeys.get(peerId) ?? null;
+  return { mgr, db, dir, id, pairKeys, pairKeyLookup };
 }
 
 export async function makeFleet({ ids = ["instA", "instB"] } = {}) {
@@ -52,8 +58,12 @@ export async function makeFleet({ ids = ["instA", "instB"] } = {}) {
   const [a, b] = [await makeSide(identity, ids[0]), await makeSide(identity, ids[1])];
   await addPeerRow(a.db, b.id);
   await addPeerRow(b.db, a.id);
+  // One shared signing key per pair, as pairing provisions it on both sides.
+  const pairKey = randomBytes(32).toString("hex");
+  a.pairKeys.set(b.id, pairKey);
+  b.pairKeys.set(a.id, pairKey);
   return {
-    identity, a, b,
+    identity, a, b, pairKey,
     async cleanup() {
       try { await a.mgr.close(); } catch {}
       try { await b.mgr.close(); } catch {}

@@ -20,6 +20,10 @@
  *      cr_proof over the SERVER's nonce, and no feed key flows before the
  *      proof verifies — so a replayed hello (either direction) gets nothing.
  *      See "challenge-response (CR)" below for mixed-version rules.
+ *   3c. Pair binding (PT-2a, when the client offers `pb: 1` with `cr: 1`):
+ *      the server's reply also carries pb_mac and the proof frame pb_proof,
+ *      HMACs over both nonces under a subkey of the pair's signing_key. The
+ *      binding decision runs before ANY side effect. See "pair binding" below.
  *   4. After mutual auth, both sides:
  *        a. Run feed-key-exchange: send our outgoing feed key for them as a
  *           text frame {feed_key_hex}; persist theirs on receipt.
@@ -49,6 +53,10 @@ import {
   recordNoDialAddress, clearNoDialAddress, recordAddressBackfill, forgetPeerDialHealth,
 } from "../shared/peer-dial-health.js";
 import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
+import {
+  pairSubkey, tailnetRespMac, tailnetProofMac, macEqual, defaultPairKey, pairBindingMode,
+  isPairPinned, markPairPinned, decidePairBinding, recordPairBindingState,
+} from "../shared/sync-pair-binding.js";
 
 const WS_PATH = "/api/instance-sync/stream";
 const HANDSHAKE_TIMEOUT_MS = 10_000;
@@ -216,6 +224,64 @@ async function markPeerCr(ctx, peerId) {
       console.log(`[tailnet-sync] peer ${String(peerId).slice(0, 12)}… completed a challenge-response handshake; CR-less handshakes from it are refused from now on`);
     }
   } catch { /* table missing on an old DB — no downgrade guard, CR still enforced per-connection */ }
+}
+
+/* ------------------------------------------------------- pair binding (PT-2a) */
+//
+// CR proves the peer holds the Crow ID seed, which every sibling shares. Pair
+// binding adds the pair's own key (the signing_key PT-1 deletes on revoke):
+//
+//   client hello  {..., cr: 1, pb: 1}
+//   server hello  {..., cr_sig, pb_mac = HMAC(K_pb, "pb-resp\n<server>\n<client>\n<cN>\n<sN>")}
+//   client proof  {cr_proof, pb_proof = HMAC(K_pb, "pb-proof\n<client>\n<server>\n<sN>\n<cN>")}
+//
+// Each side decides with decidePairBinding (sync-pair-binding.js): bound →
+// ok and pin; a MAC present but wrong → refused, never legacy; unbound →
+// refused once pinned, legacy in `auto`, refused in `require`. A refusal
+// closes 1008 "pair binding failed" and runs NONE of the handshake's side
+// effects (CR pin, port memo, address backfill, initInstance, sync_url,
+// liveness). The dialer retries it at normal backoff, never the refused park:
+// a re-pair writes the two sides' keys at slightly different times.
+const PB_VERSION = 1;
+export const PAIR_BINDING_CLOSE_REASON = "pair binding failed";
+
+/** Does this side speak pair binding? (`legacyHandshake` and `pairBindingOffer: false` model older Crow.) */
+function pbEnabled(ctx) {
+  return !ctx.legacyHandshake && ctx.pairBindingOffer !== false;
+}
+
+/** The pair subkey for `peerId`, or null (no key, a bad key, or a lookup error). */
+async function pairSubkeyFor(ctx, peerId) {
+  const lookup = typeof ctx.pairKeyLookup === "function" ? ctx.pairKeyLookup : defaultPairKey;
+  try {
+    const hex = await lookup(peerId);
+    return hex ? pairSubkey(hex) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The binding decision for one handshake: records the Nest state, writes the
+ * pin on a bound handshake, logs `pair-bound` / `pair binding failed`.
+ * Returns decidePairBinding's { ok, legacy, reason }.
+ */
+async function decideTailnetBinding(ctx, peerId, { k, bound, macInvalid, side }) {
+  const log = ctx.log || console;
+  const localId = ctx.instanceSyncManager?.localInstanceId;
+  // The pin is read only when it can change the outcome; it fails CLOSED.
+  const pinned = bound || macInvalid ? false : await isPairPinned(ctx.db, localId, peerId);
+  const d = decidePairBinding({ bound, macInvalid, pinned, mode: ctx.pairBindingMode ?? pairBindingMode() });
+  recordPairBindingState(peerId, { bound: d.ok && bound, legacy: d.legacy, reason: d.reason, noKey: !k });
+  if (!d.ok) {
+    log.warn?.(`[tailnet-sync] pair binding failed for ${peerId} (${side} side): ${d.reason}${k ? "" : "; this side holds no pair key for it"}`);
+    return d;
+  }
+  if (bound) {
+    const fresh = await markPairPinned(ctx.db, localId, peerId);
+    console.log(`[tailnet-sync] pair-bound handshake with ${peerId} (${side} side)${fresh ? "; pinned: unbound handshakes from it are refused from now on" : ""}`);
+  }
+  return d;
 }
 
 /**
@@ -610,12 +676,26 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx, mar
     return;
   }
 
+  // Pair binding: only a CR client offering pb (pb rides with cr) can be
+  // bound, and only when we hold the pair key. When it cannot be bound, it is
+  // decided now, before we answer at all (a pinned peer we hold no key for is
+  // refused here, loudly, on this side).
+  const pbOn = pbEnabled(ctx);
+  const usePb = pbOn && useCr && peerHandshake.pb === PB_VERSION;
+  const k = pbOn ? await pairSubkeyFor(ctx, remoteInstanceId) : null;
+  const canBind = usePb && Boolean(k);
+  if (pbOn && !canBind) {
+    const d = await decideTailnetBinding(ctx, remoteInstanceId, { k, bound: false, macInvalid: false, side: "server" });
+    if (!d.ok) { ws.close(1008, PAIR_BINDING_CLOSE_REASON); return; }
+  }
+
   // Our own handshake (proves to the client we hold the same identity), with
   // our signed dial address — sent only AFTER the peer is known to be a live
   // paired instance here, so a revoked/unknown instance learns nothing.
   const localId = instanceSyncManager.localInstanceId;
   const ourHs = buildHandshakePayload(identity, localId, await resolveSelfAddress(ctx));
   if (useCr) ourHs.cr_sig = sign(crRespMessage(localId, remoteInstanceId, peerHandshake.nonce_hex, ourHs.nonce_hex), identity.ed25519Priv);
+  if (canBind) ourHs.pb_mac = tailnetRespMac(k, { server: localId, client: remoteInstanceId, cN: peerHandshake.nonce_hex, sN: ourHs.nonce_hex });
   ws.send(JSON.stringify(ourHs));
 
   if (useCr) {
@@ -630,6 +710,16 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx, mar
       log.warn?.(`[tailnet-sync] challenge proof INVALID from ${remoteInstanceId} (replayed hello?)`);
       ws.close(1008, "bad proof");
       return;
+    }
+    if (canBind) {
+      let bound = false;
+      let macInvalid = false;
+      if (proof && typeof proof === "object" && "pb_proof" in proof) {
+        bound = macEqual(proof.pb_proof, tailnetProofMac(k, { client: remoteInstanceId, server: localId, sN: ourHs.nonce_hex, cN: peerHandshake.nonce_hex }));
+        macInvalid = !bound;
+      }
+      const d = await decideTailnetBinding(ctx, remoteInstanceId, { k, bound, macInvalid, side: "server" });
+      if (!d.ok) { ws.close(1008, PAIR_BINDING_CLOSE_REASON); return; }
     }
     await markPeerCr(ctx, remoteInstanceId);
     // Our own dial may have started while we waited for the proof.
@@ -934,8 +1024,9 @@ export class PeerDialer {
     ws.once("open", async () => {
       try {
         // Send our handshake (with our signed dial address), offering CR.
+        const offerPb = pbEnabled(this.ctx);
         const ourHs = buildHandshakePayload(identity, instanceSyncManager.localInstanceId, await resolveSelfAddress(this.ctx),
-          this.ctx.legacyHandshake ? null : { cr: CR_VERSION });
+          this.ctx.legacyHandshake ? null : { cr: CR_VERSION, ...(offerPb ? { pb: PB_VERSION } : {}) });
         ws.send(JSON.stringify(ourHs));
         // Read server handshake.
         const serverHs = await frameReader.readJsonFrame(HANDSHAKE_TIMEOUT_MS);
@@ -984,6 +1075,19 @@ export class PeerDialer {
           return;
         }
 
+        // Pair binding: decided before the proof is sent and before any side
+        // effect. A refusal closes 1008 and is retried at normal backoff.
+        const localId = instanceSyncManager.localInstanceId;
+        const bindOrRefuse = async ({ k, bound, macInvalid }) => {
+          const d = await decideTailnetBinding(this.ctx, remoteInstanceId, { k, bound, macInvalid, side: "client" });
+          if (d.ok) return true;
+          recordDialFailure(peerId, `${wsUrl}: ${PAIR_BINDING_CLOSE_REASON} (${d.reason})`);
+          closedByUs = true;
+          ws.close(1008, PAIR_BINDING_CLOSE_REASON);
+          frameReader.detach();
+          return false;
+        };
+
         // Challenge-response: the server's reply must be bound to OUR fresh
         // nonce (a replayed server hello is not); then we answer its nonce.
         // A CR-less reply from a server that has done CR with us before is a
@@ -998,7 +1102,19 @@ export class PeerDialer {
               frameReader.detach();
               return;
             }
-            ws.send(JSON.stringify({ cr_proof: sign(crProofMessage(instanceSyncManager.localInstanceId, remoteInstanceId, serverHs.nonce_hex, ourHs.nonce_hex), identity.ed25519Priv) }));
+            const proofFrame = { cr_proof: sign(crProofMessage(localId, remoteInstanceId, serverHs.nonce_hex, ourHs.nonce_hex), identity.ed25519Priv) };
+            if (offerPb) {
+              const k = await pairSubkeyFor(this.ctx, remoteInstanceId);
+              let bound = false;
+              let macInvalid = false;
+              if (k && "pb_mac" in serverHs) {
+                bound = macEqual(serverHs.pb_mac, tailnetRespMac(k, { server: remoteInstanceId, client: localId, cN: ourHs.nonce_hex, sN: serverHs.nonce_hex }));
+                macInvalid = !bound;
+              }
+              if (!await bindOrRefuse({ k, bound, macInvalid })) return;
+              if (bound) proofFrame.pb_proof = tailnetProofMac(k, { client: localId, server: remoteInstanceId, sN: serverHs.nonce_hex, cN: ourHs.nonce_hex });
+            }
+            ws.send(JSON.stringify(proofFrame));
             await markPeerCr(this.ctx, remoteInstanceId);
           } else if (await peerCrRequired(this.ctx, remoteInstanceId)) {
             console.warn(`[tailnet-sync] ${wsUrl} answered without challenge-response, but this peer has done CR before (replay or downgrade); closing`);
@@ -1007,6 +1123,10 @@ export class PeerDialer {
             ws.close(1008, "challenge required");
             frameReader.detach();
             return;
+          } else if (offerPb) {
+            // A CR-less (older) server can never be bound.
+            const k = await pairSubkeyFor(this.ctx, remoteInstanceId);
+            if (!await bindOrRefuse({ k, bound: false, macInvalid: false })) return;
           }
         }
 
@@ -1092,6 +1212,12 @@ export class PeerDialer {
       if (!linked && code && code !== 1000 && code !== 1005 && code !== 1006) {
         // Refused by the peer (bad sig, unknown peer, …).
         recordDialFailure(peerId, `${wsUrl}: closed by peer (${code}${why ? ` ${why}` : ""})`);
+      }
+      if (!linked && code === 1008 && why === PAIR_BINDING_CLOSE_REASON) {
+        // A pair-binding refusal is usually a re-pair in progress (the two
+        // sides' keys are written moments apart): normal backoff, never the
+        // refused park below.
+        return this.scheduleRetry();
       }
       if (!linked && code === 1008 && (why === "unknown peer" || why === "not paired")) {
         // It revoked us (or never paired): stop hammering it.
