@@ -21,18 +21,19 @@ import { createProjectSpace, updateProjectSpaceMeta } from "../../../shared/proj
 import { approveBackend, revokeBackendApproval, hasApproval, refHash, parseStoredSpec, visibleText, pinnedFiles, backendEnvNames } from "../../../shared/data-backend-approval.js";
 import { csrfInput } from "../shared/csrf.js";
 import { statSync } from "node:fs";
+import { statusCode } from "../../../research/fetch-labels.js";
 
 const PAGE_SIZE = 20;
 
-// Fetch-status chips. The kinds and labels mirror servers/research/server.js
-// (FETCH_STATUS_LABEL / statusLabel) so the panel and the research tools never
-// disagree; NULL (a peer-synced row) or anything unrecognized reads as unknown.
+// Fetch-status chips. The wording comes from servers/research/fetch-labels.js (shared with
+// the research tools); the panel only maps each status CODE to a translation and a badge kind.
 const FETCH_CHIP = {
   fetched: ["projects.fetch.fetched", "connected"],
   fetched_no_text: ["projects.fetch.noText", "draft"],
   failed: ["projects.fetch.failed", "error"],
   legacy: ["projects.fetch.legacy", "draft"],
   not_applicable: ["projects.fetch.notWeb", "draft"],
+  unknown: ["projects.fetch.unknown", "draft"],
 };
 
 /** Whether the 0013 provenance columns exist (old DBs degrade to no status). */
@@ -46,9 +47,19 @@ async function provenanceReady(db) {
   }
 }
 
+/** A link only for http(s) URLs; anything else (javascript:, data:, ...) is plain escaped text. */
+export function sourceLinkHtml(url) {
+  if (!url) return "";
+  let ok = false;
+  try { ok = ["http:", "https:"].includes(new URL(String(url)).protocol); } catch { /* not a URL */ }
+  return ok
+    ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" style="color:var(--crow-accent);font-size:0.8rem">link</a>`
+    : `<span style="font-size:0.8rem;color:var(--crow-text-muted)">${escapeHtml(url)}</span>`;
+}
+
 /** The compact fetch-status chip (+ quote check count) for one source row. */
 export function fetchChipHtml(s, lang) {
-  const [key, kind] = FETCH_CHIP[s.fetch_status] || ["projects.fetch.unknown", "draft"];
+  const [key, kind] = FETCH_CHIP[statusCode(s.fetch_status)];
   let html = badge(t(key, lang), kind);
   const total = Number(s.quote_total || 0);
   if (total > 0) {
@@ -455,7 +466,7 @@ async function renderDetailView(db, projectId, layout, lang, req = {}) {
         provReady ? `${escapeHtml(s.title)}<div style="margin-top:0.25rem">${fetchChipHtml(s, lang)}</div>` : escapeHtml(s.title),
         badge(s.source_type, "info"),
         s.verified && trusted ? badge("verified", "connected") : badge("unverified", "draft"),
-        s.url ? `<a href="${escapeHtml(s.url)}" target="_blank" style="color:var(--crow-accent);font-size:0.8rem">link</a>` : "",
+        sourceLinkHtml(s.url),
         `<span style="font-size:0.75rem">${formatDate(s.created_at, lang)}</span>`,
       ];
     });

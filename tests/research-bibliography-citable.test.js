@@ -138,7 +138,7 @@ test("a shared or cloned source with NULL fetch_status is not citable", async ()
   const g = text(await call(client, "crow_get_source", { id: clonedId }));
   assert.match(g, /Notes from the sharing instance/);
   assert.ok(!/Verification notes: peer said/.test(g));
-  assert.match(g, /Fetch: unknown/);
+  assert.match(g, /Fetch: not fetched here/);
 });
 
 test("a peer row with verified=1 never reads as verified", async () => {
@@ -160,7 +160,7 @@ test("list_sources shows fetch status and per-source provenance counts", async (
   insertNote(s.fetched, s.pid, "summary", "fetched");
   insertNote(s.fetched, s.pid, "note", "snippet");
   const t = text(await call(await clientFor(), "crow_list_sources", { project_id: s.pid }));
-  assert.match(t, /Fetch status: 1 fetched, 1 fetched \(no text\), 1 failed, 1 legacy, 2 not a web page, 1 unknown/);
+  assert.match(t, /Fetch status: 1 fetched, 1 fetched \(no text\), 1 failed, 1 legacy, unchecked, 2 not a web page, 1 not fetched here/);
   assert.match(t, /notes: 2 fetched, 1 snippet/);
   assert.match(t, /\[legacy, unchecked\]/);
   assert.ok(!/\[V\]\s+LegacyOne/.test(t));
@@ -192,7 +192,7 @@ test("get_source shows the quote check per quote note", async () => {
   assert.match(g, /Stored page text: 3 characters/);
   const failed = insertSource({ project_id: pid, fetch_status: "failed", fetch_error: "timed out" });
   const f = text(await call(await clientFor(), "crow_get_source", { id: failed }));
-  assert.match(f, /FAILED.*timed out/);
+  assert.match(f, /failed.*timed out/);
   const legacy = insertSource({ project_id: pid, fetch_status: "legacy", verified: 1, verification_method: "legacy_flag", verification_notes: "old" });
   const l = text(await call(await clientFor(), "crow_get_source", { id: legacy }));
   assert.match(l, /Fetch: legacy, unchecked/);

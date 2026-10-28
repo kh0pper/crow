@@ -26,6 +26,7 @@ import { createProjectSpace, updateProjectSpaceMeta } from "../shared/project-sp
 import { parseLaunchSpec, canonicalSpecText, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { resolveDatasetPath } from "../shared/sqlite-datasets.js";
 import { SOURCE_TYPES } from "./source-types.js";
+import { statusLabel, UNFETCHED_LABEL } from "./fetch-labels.js";
 import { UNKNOWN, resolveCallActor, auditActor, actorLabel } from "./actor.js";
 import { ensureProvenanceSchema } from "./ensure-schema.js";
 import { fetchPage as defaultFetchPage, splitFetchedText, storedTextMaybeTruncated, PREVIEW_CHARS, FETCHED_TEXT_MAX, REFETCH_AFTER_DAYS } from "../shared/fetch-page.js";
@@ -344,12 +345,6 @@ function sourceColumns(ready, alias = "") {
 }
 
 const FETCH_STATUS_ORDER = ["fetched", "fetched_no_text", "failed", "legacy", "not_applicable", null];
-const FETCH_STATUS_LABEL = {
-  fetched: "fetched", fetched_no_text: "fetched (no text)", failed: "FAILED",
-  legacy: "legacy, unchecked", not_applicable: "not a web page",
-};
-/** The label for a fetch_status; NULL (or anything unrecognized) reads as unknown. */
-const statusLabel = (st) => FETCH_STATUS_LABEL[st] || "unknown";
 const NOTE_PROVENANCE_ORDER = ["fetched", "snippet", "derived", null];
 const noteProvLabel = (p) => (["fetched", "snippet", "derived"].includes(p) ? p : "unknown");
 const UPGRADE_PENDING = "Fetch status is unavailable until the database upgrade finishes.";
@@ -894,13 +889,13 @@ export function createProjectServer(dbPath, options = {}) {
           text += `Fetch: ${label} ${source.fetched_at || "(date unknown)"} (HTTP ${source.http_status ?? "?"})${source.final_url ? ` final URL ${source.final_url}` : ""}\n`;
           if (source.fetched_len) text += `Stored page text: ${source.fetched_len} characters\n`;
         } else if (st === "failed") {
-          text += `Fetch: FAILED ${source.fetched_at || ""} - Crow could not open this page: ${oneLine(source.fetch_error || "no reason recorded", 300)}\n`;
+          text += `Fetch: ${statusLabel("failed")} ${source.fetched_at || ""} - Crow could not open this page: ${oneLine(source.fetch_error || "no reason recorded", 300)}\n`;
         } else if (st === "legacy") {
-          text += "Fetch: legacy, unchecked (added before Crow opened pages)\n";
+          text += `Fetch: ${statusLabel("legacy")} (added before Crow opened pages)\n`;
         } else if (st === "not_applicable") {
-          text += "Fetch: not a web page\n";
+          text += `Fetch: ${statusLabel("not_applicable")}\n`;
         } else {
-          text += "Fetch: unknown (shared or cloned from another instance; not citable here)\n";
+          text += `Fetch: ${UNFETCHED_LABEL} (shared or cloned from another instance; not citable here)\n`;
         }
         const viaLegacy = source.verification_method === "legacy_flag";
         text += st == null
@@ -1172,7 +1167,7 @@ export function createProjectServer(dbPath, options = {}) {
           args: filterParams,
         });
         const byStatus = new Map(stRows.map((r) => [r.fetch_status ?? null, Number(r.n)]));
-        const parts = FETCH_STATUS_ORDER.filter((k) => byStatus.has(k)).map((k) => `${byStatus.get(k)} ${k === "failed" ? "failed" : k === "legacy" ? "legacy" : statusLabel(k)}`);
+        const parts = FETCH_STATUS_ORDER.filter((k) => byStatus.has(k)).map((k) => `${byStatus.get(k)} ${statusLabel(k)}`);
         header = `Fetch status: ${parts.join(", ")}\n\n`;
         const ids = rows.map((r) => Number(r.id));
         const { rows: pRows } = await db.execute({

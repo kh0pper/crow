@@ -97,6 +97,38 @@ test("the empty state names the fetch rule", async () => {
   assert.match(await render(pid), /opens the page first/);
 });
 
+test("the tools and the panel produce identical label text for every status and quote count", async () => {
+  const { statusLabel, statusCode, quotesLabel } = await import("../servers/research/fetch-labels.js");
+  const { fetchChipHtml } = await import("../servers/gateway/dashboard/panels/projects.js");
+  const { t } = await import("../servers/gateway/dashboard/shared/i18n.js");
+  for (const st of ["fetched", "fetched_no_text", "failed", "not_applicable", "legacy", null, "weird"]) {
+    const chip = fetchChipHtml({ fetch_status: st, quote_total: 0 }, "en");
+    assert.ok(chip.includes(`>${statusLabel(st)}</span>`), `panel chip for ${st} is not "${statusLabel(st)}": ${chip}`);
+  }
+  assert.equal(statusLabel("failed"), "failed");
+  assert.equal(statusLabel(null), "not fetched here");
+  const chip = fetchChipHtml({ fetch_status: "fetched", quote_total: 3, quote_found_count: 2 }, "en");
+  assert.ok(chip.includes(quotesLabel(2, 3)));
+  // Spanish keys off the same codes and differs from English.
+  assert.notEqual(fetchChipHtml({ fetch_status: "failed" }, "es"), fetchChipHtml({ fetch_status: "failed" }, "en"));
+  assert.equal(statusCode(null), "unknown");
+  assert.ok(t("projects.fetch.quotes", "es").includes("{found}"));
+});
+
+test("a non-http source URL renders as plain text; http(s) links carry rel noopener", async () => {
+  const pid = newProject("Links");
+  const d = new Database(CORE);
+  d.prepare("INSERT INTO research_sources (project_id, title, source_type, url, citation_apa, fetch_status) VALUES (?,?,?,?,?,?)")
+    .run(pid, "EvilLink", "web_article", "javascript:alert(1)", "apa", "legacy");
+  d.close();
+  addSource(pid, "GoodLink", { status: "fetched" });
+  const html = await render(pid);
+  assert.doesNotMatch(row(html, "EvilLink"), /<a href/);
+  assert.match(row(html, "EvilLink"), /javascript:alert\(1\)/);
+  assert.match(row(html, "GoodLink"), /<a href="https:\/\/example\.com\/GoodLink" target="_blank" rel="noopener noreferrer"/);
+});
+
+// Last: it drops a column from the shared scratch DB.
 test("an old DB without the 0013 columns renders without status or a crash", async () => {
   const pid = newProject("Old");
   addSource(pid, "OldSource");
