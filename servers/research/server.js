@@ -851,16 +851,20 @@ export function createProjectServer(dbPath, options = {}) {
 
   server.tool(
     "crow_add_note",
-    "Add a note - can be attached to a project, a source, or both.",
+    "Add a note - can be attached to a project, a source, or both. Quote and summary notes must state provenance: fetched (backed by a page Crow opened), snippet (only a search-result snippet, so not citable in prose yet), or derived (your own reasoning). A quote note on a fetched source is checked against the page text.",
     {
       content: z.string().max(50000).describe("Note content"),
       note_type: z.enum(["note", "quote", "summary", "analysis", "question", "insight"]).default("note"),
+      provenance: z.enum(["fetched", "snippet", "derived"]).optional().describe("Where the claim comes from. Required for quote and summary notes; analysis and insight default to derived."),
+      locator: z.string().max(500).optional().describe("Where in the source (page, section, timestamp)"),
       project_id: z.number().optional().describe("Associated project"),
       source_id: z.number().optional().describe("Associated source"),
       title: z.string().max(500).optional().describe("Note title"),
       tags: z.string().max(500).optional().describe("Comma-separated tags"),
     },
-    async ({ content, note_type, project_id, source_id, title, tags }) => {
+    async ({ content, note_type, provenance, locator, project_id, source_id, title, tags }, extra) => {
+      const actor = callActor(extra);
+      const fail = (t) => ({ content: [{ type: "text", text: t }], isError: true });
       // M2b ACL: writes to a project require write_notes capability.
       if (project_id != null) {
         try {
@@ -870,20 +874,66 @@ export function createProjectServer(dbPath, options = {}) {
           throw err;
         }
       }
-      const result = await db.execute({
-        sql: "INSERT INTO research_notes (content, note_type, project_id, source_id, title, tags) VALUES (?, ?, ?, ?, ?, ?)",
-        args: [content, note_type, project_id ?? null, source_id ?? null, title ?? null, tags ?? null],
-      });
+      const ready = schema.ready || refreshSchema().ready;
+
+      let src = null;
+      if (source_id != null) {
+        const cols = ready ? "id, fetch_status, fetched_text" : "id";
+        const { rows } = await db.execute({ sql: `SELECT ${cols} FROM research_sources WHERE id = ?`, args: [source_id] });
+        src = rows[0];
+        if (!src) return fail(`Source #${source_id} not found.`);
+      }
+
+      let prov = provenance ?? null;
+      if (prov == null) {
+        if (note_type === "quote" || note_type === "summary") {
+          return fail(`A ${note_type} note must say where it comes from: provenance fetched (a page Crow opened), snippet (a search-result snippet only), or derived (your own reasoning).`);
+        }
+        if (note_type === "analysis" || note_type === "insight") prov = "derived";
+      }
+      if (prov === "fetched" && !(src && (src.fetch_status === "fetched" || src.fetch_status === "fetched_no_text"))) {
+        return fail("provenance fetched needs a source Crow fetched: pass a source_id whose page Crow opened (crow_add_source does that), or use snippet or derived.");
+      }
+
+      let quoteFound = null;
+      let quoteLine = "";
+      if (note_type === "quote" && src && ready && (src.fetch_status === "fetched" || src.fetch_status === "fetched_no_text")) {
+        const ft = src.fetched_text == null ? "" : String(src.fetched_text);
+        if (ft === "") {
+          quoteLine = `\nQuote not checked: Crow has no page text for source #${source_id}.`;
+        } else {
+          const m = matchQuote(content, { ...splitFetchedText(ft), truncated: ft.length >= FETCHED_TEXT_MAX });
+          quoteFound = m.found;
+          if (m.found === 1) quoteLine = "\nQuote checked: found on the page Crow fetched.";
+          else if (m.found === 0) quoteLine = `\nWARNING: this quote is NOT on the page Crow fetched (source #${source_id}). Fix the wording or do not present it as a quote.`;
+          else quoteLine = `\nQuote not checked: ${m.reason || "the page text was truncated"}.`;
+        }
+      }
+
+      let sql = "INSERT INTO research_notes (content, note_type, project_id, source_id, title, tags";
+      const args = [content, note_type, project_id ?? null, source_id ?? null, title ?? null, tags ?? null];
+      if (ready) {
+        sql += ", provenance, quote_found, locator";
+        args.push(prov, quoteFound, locator ?? null);
+      }
+      sql += `) VALUES (${args.map(() => "?").join(", ")})`;
+      const result = await db.execute({ sql, args });
       const noteId = Number(result.lastInsertRowid);
       if (project_id != null) {
         await appendAudit(db, {
-          project_id, actor_type: "local", action: "note.add",
-          target: `note:${noteId}`, payload: { note_type, source_id: source_id ?? null },
+          project_id, ...auditActor(actor), action: "note.add",
+          target: `note:${noteId}`,
+          payload: { note_type, source_id: source_id ?? null, provenance: ready ? prov : null, quote_found: quoteFound },
         });
       }
-      return {
-        content: [{ type: "text", text: `Note added (id: ${noteId}, type: ${note_type})` }],
-      };
+      let out = `Note added (id: ${noteId}, type: ${note_type}${ready && prov ? `, provenance: ${prov}` : ""})${quoteLine}`;
+      if (!ready && (provenance != null || locator != null)) {
+        out += "\nProvenance could not be recorded yet: this Crow is waiting for a schema upgrade.";
+      }
+      if (prov === "snippet") {
+        out += "\nThis note rests on a search snippet: it cannot be cited in prose until a fetched source backs it (open the page with crow_add_source).";
+      }
+      return { content: [{ type: "text", text: out }] };
     }
   );
 

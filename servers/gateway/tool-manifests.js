@@ -54,7 +54,7 @@ export const TOOL_MANIFESTS = {
       crow_get_source: { params: "id", desc: "Get source details" },
       crow_verify_source: { params: "id, verified, notes?", desc: "Mark source verified/unverified" },
       crow_list_sources: { params: "project_id?, backend_id?, source_type?, verified_only?, sort_by?, limit?", desc: "List sources" },
-      crow_add_note: { params: "content, note_type?, project_id?, source_id?, title?, tags?", desc: "Add note" },
+      crow_add_note: { params: "content, note_type?, provenance?, locator?, project_id?, source_id?, title?, tags?", desc: "Add note" },
       crow_search_notes: { params: "query, project_id?, note_type?, limit?", desc: "Search notes" },
       crow_generate_bibliography: { params: "project_id?, tag?, verified_only?", desc: "Generate APA bibliography" },
       crow_project_stats: { params: "", desc: "Project statistics" },
