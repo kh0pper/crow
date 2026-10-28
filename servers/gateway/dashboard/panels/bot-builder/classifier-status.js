@@ -103,6 +103,7 @@ export async function classifierStatusHtml(db, lang, opts = {}) {
     msg = fill(t("botbuilder.classifierNotResponding", lang), { model: st.model, provider: st.providerId, where });
   } else if (st.state === "misconfigured") {
     msg = fill(t("botbuilder.classifierMisconfigured", lang), { ref: st.ref || "?", reason: st.reason || "?" });
+    if (st.reason === "setting-cloud") msg += " " + t("botbuilder.classifierSettingCloud", lang);
   } else {
     const size = st.install && st.install.sizeMb ? `${(st.install.sizeMb / 1024).toFixed(1)} GB` : "?";
     msg = fill(t("botbuilder.classifierMissing", lang), { model: (st.install && st.install.modelId) || "qwen3.5-4b", size });

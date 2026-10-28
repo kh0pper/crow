@@ -142,23 +142,36 @@ function withWhere(sel, ownAddresses) {
 const clean = (u) => String(u).replace(/\/+$/, "");
 
 /**
- * Does a door send this key to the cloud? Only a door (a /llm/v1 or
+ * Does a door send this model to the cloud? Only a door (a /llm/v1 or
  * /llm/p/<id>/v1 URL) can carry a command off this machine from a loopback or
  * tailnet address; every other candidate is already held to a trusted IP or
  * URL above. `isCloud(key)` is the caller's door walk (isCloudKey over the
- * full provider list); a throw counts as cloud. Without `isCloud` the answer
- * is always "no", today's behaviour for any caller that does not pass one.
+ * full provider list). When it is given, a door is cloud if:
+ *   - it cannot name its upstream (the bare /llm/v1, or an id with a "/");
+ *   - isCloud flags the row's own key (`rowId`, when there is a row); or
+ *   - isCloud flags the upstream the path names. isCloudKey does not walk a
+ *     door row without a managed marker, so the classifier checks the named
+ *     upstream itself.
+ * A throw counts as cloud. Without `isCloud` the answer is always "no", which
+ * is today's behaviour for any caller that does not pass one.
  */
-function doorIsCloud(isCloud, url, key) {
+function doorIsCloud(isCloud, url, rowId, model) {
   if (typeof isCloud !== "function" || !isDoorUrl(url)) return false;
-  try { return isCloud(key) !== false; } catch { return true; }
+  const up = doorProviderOf(url);
+  if (!up) return true;
+  const keys = [`${up}/${model}`];
+  if (rowId != null) keys.unshift(`${rowId}/${model}`);
+  try { return keys.some((k) => isCloud(k) !== false); } catch { return true; }
 }
 
-/** The provider a door URL names (/llm/p/<id>/v1), or null for the bare /llm/v1. */
+/** The provider a door URL names (/llm/p/<id>/v1), or null: the bare /llm/v1,
+ *  or an id that decodes to something with a "/" (an encoded %2F). */
 function doorProviderOf(url) {
   try {
     const m = new URL(url).pathname.replace(/\/+$/, "").match(/\/llm\/p\/([^/]+)\/v1$/i);
-    return m ? decodeURIComponent(m[1]) : null;
+    if (!m) return null;
+    const id = decodeURIComponent(m[1]);
+    return id && !id.includes("/") ? id : null;
   } catch { return null; }
 }
 
@@ -184,10 +197,7 @@ export function selectBotClassifier({ setting, providers, ownAddresses = null, o
   if (setting != null && String(setting).trim() !== "" && !ref) return { ok: false, reason: "setting-invalid", installModel };
   if (ref && ref.url) {
     if (!isTrustedClassifierUrl(ref.url)) return { ok: false, reason: "setting-not-tailnet", ref: ref.url, installModel };
-    if (isDoorUrl(ref.url) && typeof isCloud === "function") {
-      const up = doorProviderOf(ref.url);
-      if (!up || doorIsCloud(isCloud, ref.url, `${up}/${ref.model}`)) return { ok: false, reason: "setting-cloud", ref: ref.url, installModel };
-    }
+    if (doorIsCloud(isCloud, ref.url, null, ref.model)) return { ok: false, reason: "setting-cloud", ref: ref.url, installModel };
     return withWhere({ ok: true, providerId: null, model: ref.model, url: clean(ref.url), source: "setting-endpoint" }, ownAddresses);
   }
   if (ref) {
@@ -198,7 +208,7 @@ export function selectBotClassifier({ setting, providers, ownAddresses = null, o
     if (!ownRow(row, ownInstanceId)) return { ok: false, reason: "setting-row-not-own", ref: refStr, installModel };
     if (!isTrustedClassifierUrl(row.base_url)) return { ok: false, reason: "setting-not-tailnet", ref: refStr, installModel };
     if (!modelIds(row).includes(ref.model)) return { ok: false, reason: "setting-model-missing", ref: refStr, installModel };
-    if (doorIsCloud(isCloud, row.base_url, refStr)) return { ok: false, reason: "setting-cloud", ref: refStr, installModel };
+    if (doorIsCloud(isCloud, row.base_url, row.id, ref.model)) return { ok: false, reason: "setting-cloud", ref: refStr, installModel };
     return withWhere({ ok: true, providerId: row.id, model: ref.model, url: clean(row.base_url), source: "setting" }, ownAddresses);
   }
   const found = [];
@@ -206,7 +216,7 @@ export function selectBotClassifier({ setting, providers, ownAddresses = null, o
     if (!isEnabled(row) || row.host === "cloud" || !ownRow(row, ownInstanceId)) continue;
     if (!servedHere(row.base_url, ownAddresses) || !isTailnetOrLoopbackIp(hostOf(row.base_url))) continue;
     const ids = modelIds(row);
-    const rank = CLASSIFIER_CANDIDATE_MODELS.findIndex((c) => ids.includes(c) && !doorIsCloud(isCloud, row.base_url, `${row.id}/${c}`));
+    const rank = CLASSIFIER_CANDIDATE_MODELS.findIndex((c) => ids.includes(c) && !doorIsCloud(isCloud, row.base_url, row.id, c));
     if (rank < 0) continue;
     const resident = parseJson(row.gpu_policy, {})?.alwaysResident === true;
     found.push({ row, model: CLASSIFIER_CANDIDATE_MODELS[rank], rank, resident });

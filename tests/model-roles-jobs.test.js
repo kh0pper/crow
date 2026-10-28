@@ -161,6 +161,60 @@ test("an operator setting naming a door to the cloud is refused on both readers 
   assert.equal(bot.ok, false); assert.equal(bot.reason, "setting-cloud");
   const gw = await getClassifierStatus(db, { probe: false });
   assert.equal(gw.state, "misconfigured"); assert.equal(gw.reason, "setting-cloud");
+  const { classifierStatusHtml } = await import("../servers/gateway/dashboard/panels/bot-builder/classifier-status.js");
+  assert.match(await classifierStatusHtml(db, "en", { probe: false }), /pick a model served on this machine/);
+  assert.match(await classifierStatusHtml(db, "es", { probe: false }), /elija un modelo servido en esta máquina/);
+});
+
+test("review: an UNMARKED door naming a .ts.net upstream is skipped and refused on both readers", async () => {
+  addProvider("a-door", "http://127.0.0.1:3001/llm/p/ts-up/v1", CLS); // resident, no door marker
+  addProvider("ts-up", "http://box.example.ts.net:8030/v1", CLS, { gpuPolicy: { door_forward: true } });
+  addProvider("local-cls", "http://127.0.0.1:8099/v1", CLS);
+  assert.equal(readBotClassifierSync(conn).providerId, "local-cls");
+  assert.equal((await getClassifierStatus(db, { probe: false })).providerId, "local-cls");
+  setRaw("bot_safety_classifier", "a-door/qwen3.5-4b");
+  assert.equal(readBotClassifierSync(conn).reason, "setting-cloud");
+  assert.equal((await getClassifierStatus(db, { probe: false })).reason, "setting-cloud");
+});
+
+test("review: an encoded / in a door endpoint setting is refused on both readers", async () => {
+  addProvider("local-up", "http://127.0.0.1:8099/v1", CLS);
+  setRaw("bot_safety_classifier", JSON.stringify({ url: "http://127.0.0.1:3001/llm/p/local-up%2F..%2Fcloud-a/v1", model: "qwen3.5-4b" }));
+  assert.equal(readBotClassifierSync(conn).reason, "setting-cloud");
+  assert.equal((await getClassifierStatus(db, { probe: false })).reason, "setting-cloud");
+});
+
+// Fail closed: the provider list for the door walk cannot be read. The raw
+// rows the selector reads still come through, so only the walk is cut.
+const WALK_SQL = /^SELECT \* FROM providers/i;
+const brokenConn = () => new Proxy(conn, { get(target, prop) {
+  if (prop === "prepare") return (sql) => { if (WALK_SQL.test(sql)) throw new Error("walk read failed"); return target.prepare(sql); };
+  const v = target[prop]; return typeof v === "function" ? v.bind(target) : v;
+} });
+const brokenDb = () => ({ execute: (q) => {
+  const sql = typeof q === "string" ? q : q.sql;
+  if (WALK_SQL.test(sql)) return Promise.reject(new Error("walk read failed"));
+  return db.execute(q);
+} });
+
+test("fail closed (bot reader): an unreadable provider list never picks a door; a local non-door row still is", () => {
+  addProvider("a-door", "http://127.0.0.1:3001/llm/p/local-up/v1", CLS, { gpuPolicy: DOOR_POLICY });
+  addProvider("local-up", "http://127.0.0.1:8099/v1", CLS, { gpuPolicy: {} });
+  assert.equal(readBotClassifierSync(conn).providerId, "a-door", "precondition: readable, the local door wins");
+  assert.equal(readBotClassifierSync(brokenConn()).providerId, "local-up");
+  setRaw("bot_safety_classifier", "a-door/qwen3.5-4b");
+  assert.equal(readBotClassifierSync(brokenConn()).reason, "setting-cloud");
+  setRaw("bot_safety_classifier", "local-up/qwen3.5-4b");
+  assert.equal(readBotClassifierSync(brokenConn()).providerId, "local-up");
+});
+
+test("fail closed (gateway reader): loadRoleContext throwing never picks a door; a local non-door row still is", async () => {
+  addProvider("a-door", "http://127.0.0.1:3001/llm/p/local-up/v1", CLS, { gpuPolicy: DOOR_POLICY });
+  addProvider("local-up", "http://127.0.0.1:8099/v1", CLS, { gpuPolicy: {} });
+  assert.equal((await getClassifierStatus(db, { probe: false })).providerId, "a-door", "precondition: readable, the local door wins");
+  assert.equal((await getClassifierStatus(brokenDb(), { probe: false })).providerId, "local-up");
+  setRaw("bot_safety_classifier", "a-door/qwen3.5-4b");
+  assert.equal((await getClassifierStatus(brokenDb(), { probe: false })).reason, "setting-cloud");
 });
 
 test("no isCloud: the auto pick is unchanged (the door row still wins)", () => {

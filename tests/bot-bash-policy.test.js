@@ -232,6 +232,32 @@ test("door: an operator setting naming a cloud door is refused (setting-cloud), 
   assert.equal(ep("http://100.64.20.9:8030/v1").ok, true, "a non-door endpoint is not consulted");
 });
 
+test("door (review 1): an UNMARKED door naming a .ts.net upstream is skipped and refused", async () => {
+  const { isCloudKey } = await import("../servers/shared/model-roles.js");
+  const { providerRowToObject } = await import("../servers/shared/provider-row.js");
+  // No bundle_id / runtime / door_forward: isCloudKey judges it by its own loopback URL alone.
+  const unmarked = row({ id: "a-door", base_url: "http://127.0.0.1:3001/llm/p/ts-up/v1",
+    models: JSON.stringify([{ id: "qwen3.5-4b" }]), gpu_policy: JSON.stringify({ alwaysResident: true }) });
+  const tsUp = row({ id: "ts-up", base_url: "http://box.example.ts.net:8030/v1",
+    models: JSON.stringify([{ id: "qwen3.5-4b" }]), gpu_policy: JSON.stringify({ door_forward: true }) });
+  const all = [unmarked, tsUp, native];
+  const objs = all.map(providerRowToObject);
+  const isCloud = (k) => isCloudKey(k, { providers: objs, ownAddrs: OWN });
+  assert.equal(isCloud("a-door/qwen3.5-4b"), false, "precondition: the shared walk calls the unmarked door local");
+  assert.equal(sel({ setting: null, providers: all, isCloud }).providerId, "qwen3.5-4b");
+  assert.equal(sel({ setting: "a-door/qwen3.5-4b", providers: all, isCloud }).reason, "setting-cloud");
+  assert.equal(sel({ setting: JSON.stringify({ url: unmarked.base_url, model: "qwen3.5-4b" }), providers: [], isCloud }).reason, "setting-cloud");
+});
+
+test("door (review 2): an encoded / in the door's provider id is refused", () => {
+  const local = () => false;
+  const url = "http://127.0.0.1:3001/llm/p/local-up%2F..%2Fcloud-a/v1";
+  assert.equal(sel({ setting: JSON.stringify({ url, model: "qwen3.5-4b" }), providers: [], isCloud: local }).reason, "setting-cloud");
+  const enc = { ...door, id: "enc-door", base_url: url };
+  assert.equal(sel({ setting: "enc-door/qwen3.5-4b", providers: [enc], isCloud: local }).reason, "setting-cloud");
+  assert.equal(sel({ setting: null, providers: [enc], isCloud: local }).reason, "none");
+});
+
 // --- field-mismatch hardening (2026-10-08): ONE normalised accessor for the
 // Perch-only rule, read by the save guard, the peer guard and the bridge.
 test("nonPerchChannels: every gateway shape normalises; anything not plainly Perch counts", async () => {
