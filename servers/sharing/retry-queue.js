@@ -51,7 +51,9 @@ export function buildHandshakeComplete(eventIds, displayName, avatar) {
   // exactly today's envelope and a new peer treats a missing field as today.
   // 2026-09-08 §4.2: the inviter's picture rides the same way (the caller
   // passes it already validated; a missing/empty one is simply absent).
-  const payload = { event_ids: ids };
+  // hs_cb (PT-3): this node binds its Hyperswarm handshakes. Old receivers
+  // read named fields only and ignore it.
+  const payload = { event_ids: ids, hs_cb: 1 };
   if (typeof displayName === "string" && displayName) payload.displayName = displayName;
   if (typeof avatar === "string" && avatar) payload.avatar = avatar;
   return JSON.stringify({

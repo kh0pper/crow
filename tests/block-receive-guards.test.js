@@ -71,7 +71,7 @@ test("D4c: group_message — blocked sender drops silently, unblocked stores+not
       sender_name: "Blocked Person",
       message: "hello from blocked",
       sender_crow_id: "crow:blocked-member",
-    }, managers);
+    }, "f".repeat(64), managers); // PT-3 N-1: the signer's key decides, not sender_crow_id
     assert.equal(notifications, 0, "blocked group sender must not notify");
     let rows = (await db.execute("SELECT COUNT(*) AS c FROM messages WHERE contact_id = ?", [Number(blockedIns.lastInsertRowid)])).rows;
     assert.equal(Number(rows[0].c), 0, "blocked group sender must not store");
@@ -86,7 +86,7 @@ test("D4c: group_message — blocked sender drops silently, unblocked stores+not
       sender_name: "OK Person",
       message: "hello from ok",
       sender_crow_id: "crow:ok-member",
-    }, managers);
+    }, "9".repeat(64), managers);
     assert.equal(notifications, 1, "unblocked group sender notifies");
     rows = (await db.execute("SELECT COUNT(*) AS c FROM messages WHERE contact_id = ?", [Number(okIns.lastInsertRowid)])).rows;
     assert.equal(Number(rows[0].c), 1, "unblocked group sender stores");
@@ -98,7 +98,7 @@ test("D4c: group_message — blocked sender drops silently, unblocked stores+not
       sender_name: "Ghost",
       message: "hello from nowhere",
       sender_crow_id: "crow:no-such-contact",
-    }, managers);
+    }, "1".repeat(64), managers);
     assert.equal(notifications, 2, "unknown group sender still notifies");
     const total = (await db.execute("SELECT COUNT(*) AS c FROM messages")).rows;
     assert.equal(Number(total[0].c), 1, "unknown group sender has no row to store into (count unchanged)");

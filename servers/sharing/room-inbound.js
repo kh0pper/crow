@@ -11,6 +11,7 @@ import {
   insertRoomMessage, computeAddressedTo,
 } from "../gateway/dashboard/panels/messages/rooms-store.js";
 import { buildRoomMessageEnvelope, fanOut } from "./room-fanout.js";
+import { sanitizeDisplayName } from "./display-name.js";
 
 function xOnly(hex) { const h = String(hex || ""); return h.length === 66 ? h.slice(2) : h; }
 function pubkeyMatches(storedCompressed, signerXOnly) {
@@ -22,12 +23,19 @@ export async function handleInboundRoomEnvelope({ db, nostrManager, identity, su
   const pk = xOnly(senderPubkey);
 
   if (subtype === "room_join") {
-    // Trust: only a KNOWN contact (the host) may pull us into a room. Fail-closed —
-    // prevents an unknown sender from auto-creating room rows in our list.
-    const { rows: known } = await db.execute("SELECT secp256k1_pubkey FROM contacts WHERE secp256k1_pubkey IS NOT NULL AND is_blocked = 0 AND request_status IS NULL");
-    if (!known.some((r) => pubkeyMatches(r.secp256k1_pubkey, pk))) { log("room_join drop: unknown signer"); return; }
-    const groupId = await ensureLocalRoomForUid(db, {
-      roomUid: payload.room_uid, name: payload.room_name, hostCrowId: payload.host_crow_id,
+    // Trust (PT-3 N-3): the SIGNER must be a full, unblocked contact, it must
+    // name itself as the host, and an existing room with this uid must already
+    // be hosted by it. So a contact can never add members to a room we host,
+    // or to another contact's room.
+    const { rows: known } = await db.execute("SELECT id, crow_id, secp256k1_pubkey FROM contacts WHERE secp256k1_pubkey IS NOT NULL AND is_blocked = 0 AND request_status IS NULL");
+    const signer = known.find((r) => pubkeyMatches(r.secp256k1_pubkey, pk));
+    if (!signer) { log("room_join drop: unknown signer"); return; }
+    if (!payload || typeof payload.room_uid !== "string" || !payload.room_uid) { log("room_join drop: no room_uid"); return; }
+    if (payload.host_crow_id !== signer.crow_id) { log("room_join drop: host is not the signer"); return; }
+    const existing = await getRoomByUid(db, payload.room_uid);
+    if (existing && existing.host_crow_id !== signer.crow_id) { log("room_join drop: room " + payload.room_uid + " has another host"); return; }
+    const groupId = existing ? Number(existing.id) : await ensureLocalRoomForUid(db, {
+      roomUid: payload.room_uid, name: payload.room_name, hostCrowId: signer.crow_id,
     });
     // Best-effort: add any members we already know as contacts (matched by crow_id).
     if (Array.isArray(payload.members)) {
@@ -53,9 +61,10 @@ export async function handleInboundRoomEnvelope({ db, nostrManager, identity, su
     // the room's host (participant side, where the host relays to us). Fail-closed.
     const signerMember = members.find((m) => pubkeyMatches(m.secp256k1_pubkey, pk));
     let authorized = !!signerMember;
+    let hostRow = null;
     if (!authorized && room.host_crow_id) {
-      const { rows } = await db.execute({ sql: "SELECT secp256k1_pubkey FROM contacts WHERE crow_id = ? AND request_status IS NULL", args: [room.host_crow_id] });
-      if (rows[0] && pubkeyMatches(rows[0].secp256k1_pubkey, pk)) authorized = true;
+      const { rows } = await db.execute({ sql: "SELECT secp256k1_pubkey, display_name, crow_id FROM contacts WHERE crow_id = ? AND request_status IS NULL", args: [room.host_crow_id] });
+      if (rows[0] && pubkeyMatches(rows[0].secp256k1_pubkey, pk)) { authorized = true; hostRow = rows[0]; }
     }
     if (!authorized) { log("room_message drop: signer not member/host of " + payload.room_uid); return; }
 
@@ -64,8 +73,9 @@ export async function handleInboundRoomEnvelope({ db, nostrManager, identity, su
     //   - signer IS a room member (host-receive leg, the member relays their own
     //     message): trust the verified signer; IGNORE payload author entirely.
     //   - signer is null (participant leg, the room's host relays someone else's
-    //     text): the host already attributed it, so honor the payload author for
-    //     display, resolving the contact by crow_id (fallback to display_name).
+    //     text): the host vouches for it, so the label is always "<author> via
+    //     <host>", and the message is attributed to a contact only when the named
+    //     author is already a member of this room here (PT-3 N-3).
     let authorContactId = null, authorLabel = null, resolvedAuthor;
     if (signerMember) {
       authorContactId = signerMember.id;
@@ -81,11 +91,10 @@ export async function handleInboundRoomEnvelope({ db, nostrManager, identity, su
         crow_id: author.crow_id || null,
         display_name: author.display_name || null,
       };
-      authorLabel = author.display_name || null;
-      if (author.crow_id) {
-        const { rows } = await db.execute({ sql: "SELECT id, display_name FROM contacts WHERE crow_id = ?", args: [author.crow_id] });
-        if (rows[0]) { authorContactId = rows[0].id; authorLabel = rows[0].display_name || authorLabel; }
-      }
+      const member = author.crow_id ? members.find((m) => m.crow_id === author.crow_id) : null;
+      let who = sanitizeDisplayName(author.display_name) || "Someone";
+      if (member) { authorContactId = member.id; who = member.display_name || who; }
+      authorLabel = `${who} via ${hostRow?.display_name || hostRow?.crow_id || room.host_crow_id}`;
     }
 
     const inserted = await insertRoomMessage(db, {

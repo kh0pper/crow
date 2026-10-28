@@ -51,8 +51,13 @@ const PK = "02" + "c".repeat(64);
 const PK_XONLY = "c".repeat(64);
 const OTHER_PK = "02" + "e".repeat(64);
 
+// PT-3 N-2: a contact row's Crow ID must derive from its Ed25519 key, so the
+// invite_accepted peers are real (fixed-seed) identities.
+const peerIdent = (n) => deriveInstanceIdentity(Buffer.alloc(32, 0x50 + n));
+const REAL = peerIdent(0);
+const REAL_CROW = REAL.crowId;
 const invitePayload = (extra = {}) => ({
-  type: "invite_accepted", crowId: "crow:realpeer9", ed25519Pub: "d".repeat(64), secp256k1Pub: PK, ...extra,
+  type: "invite_accepted", crowId: REAL_CROW, ed25519Pub: REAL.ed25519Pubkey, secp256k1Pub: PK, ...extra,
 });
 
 // --- buildHandshakeComplete: additive, old-peer-safe ----------------------
@@ -77,9 +82,9 @@ test("invite_accepted with NO displayName → contact named crowId (byte-identic
   const { db, cleanup } = freshDb();
   try {
     await handleInviteAccepted(db, stubMgrs(), invitePayload(), PK, { id: "no-name" });
-    const row = (await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: ["crow:realpeer9"] })).rows[0];
+    const row = (await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [REAL_CROW] })).rows[0];
     assert.ok(row, "contact created");
-    assert.equal(row.display_name, "crow:realpeer9", "falls back to crowId when no name is on the wire");
+    assert.equal(row.display_name, REAL_CROW, "falls back to crowId when no name is on the wire");
   } finally { cleanup(); }
 });
 
@@ -87,7 +92,7 @@ test("invite_accepted with a displayName → the contact takes it", async () => 
   const { db, cleanup } = freshDb();
   try {
     await handleInviteAccepted(db, stubMgrs(), invitePayload({ displayName: "Alex" }), PK, { id: "named" });
-    const row = (await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: ["crow:realpeer9"] })).rows[0];
+    const row = (await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [REAL_CROW] })).rows[0];
     assert.equal(row.display_name, "Alex");
   } finally { cleanup(); }
 });
@@ -105,8 +110,9 @@ test("invite_accepted with a hostile displayName arrives sanitized, or falls bac
     ];
     for (let i = 0; i < cases.length; i++) {
       const pk = "02" + fills[i].repeat(64);
-      const crowId = "crow:host" + fills[i];
-      const p = { type: "invite_accepted", crowId, ed25519Pub: "d".repeat(64), secp256k1Pub: pk, displayName: cases[i].name };
+      const ident = peerIdent(1 + i);
+      const crowId = ident.crowId;
+      const p = { type: "invite_accepted", crowId, ed25519Pub: ident.ed25519Pubkey, secp256k1Pub: pk, displayName: cases[i].name };
       await handleInviteAccepted(db, stubMgrs(), p, pk, { id: "hostile-" + i });
       const row = (await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [crowId] })).rows[0];
       assert.ok(row, `contact ${crowId} created`);
@@ -257,15 +263,16 @@ test("invite_accepted with displayName + avatar: peer fields stored; a bad avata
     const acks = [];
     const mgrs = ackingMgrs(acks);
     await handleInviteAccepted(db, mgrs, invitePayload({ displayName: "Alex", avatar: PNG_AV }), PK, { id: "av-1" });
-    let row = await peerOf(db, "crow:realpeer9");
+    let row = await peerOf(db, REAL_CROW);
     assert.equal(row.display_name, "Alex", "a brand-new row still takes the handshake name (today's behaviour)");
     assert.equal(row.peer_display_name, "Alex");
     assert.equal(row.peer_avatar, PNG_AV);
     assert.equal(acks.length, 1, "acked");
 
-    const p2 = { type: "invite_accepted", crowId: "crow:host2", ed25519Pub: "d".repeat(64), secp256k1Pub: OTHER_PK, displayName: "Two", avatar: "https://example.com/not-inline.png" };
+    const two = peerIdent(9);
+    const p2 = { type: "invite_accepted", crowId: two.crowId, ed25519Pub: two.ed25519Pubkey, secp256k1Pub: OTHER_PK, displayName: "Two", avatar: "https://example.com/not-inline.png" };
     await handleInviteAccepted(db, mgrs, p2, OTHER_PK, { id: "av-2" });
-    row = await peerOf(db, "crow:host2");
+    row = await peerOf(db, two.crowId);
     assert.equal(row.peer_display_name, "Two");
     assert.equal(row.peer_avatar, null, "a URL avatar is ignored — never fails the handshake");
     assert.equal(acks.length, 2, "still acked");

@@ -13,6 +13,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleInviteAccepted } from "../servers/sharing/boot.js";
+import { deriveInstanceIdentity } from "../servers/sharing/identity.js";
 import { recordShortInvite, consumeShortInvite } from "../servers/sharing/shortcode-ledger.js";
 import { wasProcessed, recordProcessedEvent } from "../servers/sharing/processed-events.js";
 import { writeTombstone, readTombstone } from "../servers/sharing/contact-delete.js";
@@ -57,7 +58,11 @@ const PK_XONLY = "c".repeat(64);
 // Distinct attacker secp key — the sender identity of a forged event, NOT
 // the victim key the forged payload claims to be.
 const ATTACKER_PK = "02" + "e".repeat(64);
-const payload = { type: "invite_accepted", crowId: "crow:realpeer9", ed25519Pub: "d".repeat(64), secp256k1Pub: PK };
+// PT-3 N-2: a contact row's Crow ID must derive from its Ed25519 key, so the
+// peer is a real (fixed-seed) identity.
+const REAL = deriveInstanceIdentity(Buffer.alloc(32, 0x44));
+const REAL_CROW = REAL.crowId;
+const payload = { type: "invite_accepted", crowId: REAL_CROW, ed25519Pub: REAL.ed25519Pubkey, secp256k1Pub: PK };
 
 test("promotes an accepted request in place (no duplicate)", async () => {
   const { db, cleanup } = freshDb();
@@ -72,7 +77,7 @@ test("promotes an accepted request in place (no duplicate)", async () => {
       sql: "SELECT * FROM contacts WHERE lower(substr(secp256k1_pubkey,-64)) = ?", args: [PK_XONLY],
     });
     assert.equal(rows.length, 1);
-    assert.equal(rows[0].crow_id, "crow:realpeer9");
+    assert.equal(rows[0].crow_id, REAL_CROW);
     assert.equal(rows[0].request_status, null);
   } finally { cleanup(); }
 });
@@ -81,7 +86,7 @@ test("adds a fresh full contact when no prior row exists", async () => {
   const { db, cleanup } = freshDb();
   try {
     await handleInviteAccepted(db, stubMgrs(), payload, PK);
-    const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: ["crow:realpeer9"] });
+    const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [REAL_CROW] });
     assert.equal(rows.length, 1);
     assert.equal(rows[0].request_status, null);
   } finally { cleanup(); }
@@ -113,8 +118,10 @@ test("does NOT promote when the payload secp key != the authenticated sender key
     // rebind the victim's gated row to the attacker's sync identity.
     const forged = {
       type: "invite_accepted",
-      crowId: "crow:realpeer9",
-      ed25519Pub: "f".repeat(64), // attacker's own ed25519 key
+      crowId: REAL_CROW,
+      // A self-consistent Crow ID + key (public values), so only the signer
+      // check can refuse it.
+      ed25519Pub: REAL.ed25519Pubkey,
       secp256k1Pub: PK, // claims the VICTIM's secp key
     };
 
@@ -133,7 +140,7 @@ test("does NOT promote when the payload secp key != the authenticated sender key
     assert.equal(Number(allRows[0].c), 1);
 
     const { rows: crowIdRows } = await db.execute({
-      sql: "SELECT * FROM contacts WHERE crow_id = ?", args: ["crow:realpeer9"],
+      sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [REAL_CROW],
     });
     assert.equal(crowIdRows.length, 0);
   } finally { cleanup(); }
@@ -158,8 +165,8 @@ test("I2: an unauthenticated (forged-sender) invite_accepted carrying a valid in
     // inviteId, but the Nostr event was actually signed by the ATTACKER's key.
     const forged = {
       type: "invite_accepted",
-      crowId: "crow:realpeer9",
-      ed25519Pub: "f".repeat(64),
+      crowId: REAL_CROW,
+      ed25519Pub: REAL.ed25519Pubkey,
       secp256k1Pub: PK,
       inviteId,
     };
@@ -187,7 +194,7 @@ test("D4 replay hygiene: a recorded event.id is skipped (no resurrection) but ST
   const { db, cleanup } = freshDb();
   try {
     const { mgrs, sendControlCalls } = stubMgrsWithAck();
-    const crowId = "crow:realpeer9";
+    const crowId = REAL_CROW;
     // Two invite_accepted events: same crowId/payload, DIFFERENT event.id.
     const ev1 = { id: "invacc-evt-A", created_at: 1000 };
     const ev2 = { id: "invacc-evt-B", created_at: 500 }; // created_at OLDER than the tombstone

@@ -102,7 +102,7 @@ test("save_profile: a valid data URI is stored globally; junk is a 400; clear em
     assert.equal(p.avatar_url, PNG);
     assert.equal(p.avatar_source, "picture");
     assert.equal(sent.length, 1, "one broadcast");
-    assert.deepEqual(sent[0].payload, { v: 1, display_name: "Casey", avatar: PNG });
+    assert.deepEqual(sent[0].payload, { v: 1, display_name: "Casey", avatar: PNG, hs_cb: 1 }); // hs_cb: PT-3 binding advert
 
     out = await save(db, { display_name: "Casey", avatar: "", bio: "hi" }, managers);
     assert.equal(sent.length, 1, "nothing changed (an empty avatar field means untouched) -> no broadcast");
@@ -122,7 +122,7 @@ test("save_profile: a valid data URI is stored globally; junk is a 400; clear em
     p = await getMyProfile(db);
     assert.equal(p.avatar_url, "", "cleared");
     assert.equal(sent.length, 2);
-    assert.deepEqual(sent[1].payload, { v: 1, display_name: "Casey", avatar: null }, "a removed picture propagates as null");
+    assert.deepEqual(sent[1].payload, { v: 1, display_name: "Casey", avatar: null, hs_cb: 1 }, "a removed picture propagates as null");
 
     const o = await db.execute("SELECT COUNT(*) AS c FROM dashboard_settings_overrides WHERE key LIKE 'profile_%'");
     assert.equal(Number(o.rows[0].c), 0, "no stranded overrides (D2)");
@@ -172,7 +172,7 @@ test("save_profile: the response does not wait for the fan-out, and a fan-out th
     const up = spyMgrs(db, sent);
     await save(db, { display_name: "Casey2" }, up); // unchanged profile
     assert.equal(sent.length, 1, "re-sent because the last fan-out was pending");
-    assert.deepEqual(sent[0].payload, { v: 1, display_name: "Casey2", avatar: PNG });
+    assert.deepEqual(sent[0].payload, { v: 1, display_name: "Casey2", avatar: PNG, hs_cb: 1 });
     await save(db, { display_name: "Casey2" }, up);
     assert.equal(sent.length, 1, "delivered once, quiet afterwards");
   } finally { cleanup(); }

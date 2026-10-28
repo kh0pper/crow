@@ -38,6 +38,7 @@ import {
 } from "../servers/sharing/retry-queue.js";
 import { NostrManager } from "../servers/sharing/nostr.js";
 import { handleInviteAccepted, handleHandshakeComplete } from "../servers/sharing/boot.js";
+import { deriveInstanceIdentity } from "../servers/sharing/identity.js";
 import { recordShortInvite, consumeShortInvite } from "../servers/sharing/shortcode-ledger.js";
 
 function freshDb() {
@@ -164,6 +165,10 @@ test("A3: sendInviteAccepted enqueue failure never throws out of the send", asyn
 // --- handleInviteAccepted: ack emission ------------------------------------
 
 const PK = "02" + "c".repeat(64);
+// PT-3 N-2: a contact row's Crow ID must derive from its Ed25519 key, so the
+// invite_accepted peer is a real (fixed-seed) identity.
+const REAL = deriveInstanceIdentity(Buffer.alloc(32, 0x66));
+const REAL_CROW = REAL.crowId;
 const PK_XONLY = "c".repeat(64);
 const ATTACKER_PK = "02" + "e".repeat(64);
 
@@ -189,12 +194,12 @@ test("B: handleInviteAccepted emits the handshake_complete ack on promote-succes
   const { db, cleanup } = freshDb();
   try {
     const { mgrs, sendControlCalls } = stubMgrsWithAck();
-    const payload = { type: "invite_accepted", crowId: "crow:realpeer9", ed25519Pub: "d".repeat(64), secp256k1Pub: PK };
+    const payload = { type: "invite_accepted", crowId: REAL_CROW, ed25519Pub: REAL.ed25519Pubkey, secp256k1Pub: PK };
     const event = { id: "invacc-evt-1" };
 
     await handleInviteAccepted(db, mgrs, payload, PK, event);
 
-    const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: ["crow:realpeer9"] });
+    const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [REAL_CROW] });
     assert.equal(rows.length, 1, "promote happened");
     assert.equal(rows[0].request_status, null);
 
@@ -217,7 +222,7 @@ test("C (I4): handleInviteAccepted acks on the replayed verdict too, WITHOUT re-
     assert.equal(await consumeShortInvite(db, inviteId), "consumed");
 
     const payload = {
-      type: "invite_accepted", crowId: "crow:realpeer9", ed25519Pub: "d".repeat(64),
+      type: "invite_accepted", crowId: REAL_CROW, ed25519Pub: REAL.ed25519Pubkey,
       secp256k1Pub: PK, inviteId,
     };
     const event = { id: "invacc-evt-replayed" };
@@ -241,7 +246,7 @@ test("D: handleInviteAccepted does NOT ack on the expired verdict", async () => 
     await recordShortInvite(db, inviteId, Date.now() - 1000); // already past its window
 
     const payload = {
-      type: "invite_accepted", crowId: "crow:realpeer9", ed25519Pub: "d".repeat(64),
+      type: "invite_accepted", crowId: REAL_CROW, ed25519Pub: REAL.ed25519Pubkey,
       secp256k1Pub: PK, inviteId,
     };
     const event = { id: "invacc-evt-expired" };
@@ -263,7 +268,7 @@ test("E: handleInviteAccepted does NOT ack on auth-fail (forged sender), and nev
 
     // Forged payload: claims PK's secp key, but signed (senderPubkey) by the attacker.
     const forged = {
-      type: "invite_accepted", crowId: "crow:realpeer9", ed25519Pub: "f".repeat(64),
+      type: "invite_accepted", crowId: REAL_CROW, ed25519Pub: REAL.ed25519Pubkey,
       secp256k1Pub: PK, inviteId,
     };
     const event = { id: "invacc-evt-authfail" };
@@ -284,11 +289,11 @@ test("H: handleInviteAccepted still promotes with a missing event, but sends NO 
   const { db, cleanup } = freshDb();
   try {
     const { mgrs, sendControlCalls } = stubMgrsWithAck();
-    const payload = { type: "invite_accepted", crowId: "crow:realpeer9", ed25519Pub: "d".repeat(64), secp256k1Pub: PK };
+    const payload = { type: "invite_accepted", crowId: REAL_CROW, ed25519Pub: REAL.ed25519Pubkey, secp256k1Pub: PK };
 
     await handleInviteAccepted(db, mgrs, payload, PK); // no event arg at all
 
-    const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: ["crow:realpeer9"] });
+    const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [REAL_CROW] });
     assert.equal(rows.length, 1, "promote still happens without an event");
     assert.equal(sendControlCalls.length, 0, "no ack possible without an event id");
   } finally { cleanup(); }

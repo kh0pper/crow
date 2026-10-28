@@ -12,6 +12,7 @@
  * the module boundary is clean and the guard stays in the orchestrator.
  */
 
+import { randomBytes } from "node:crypto";
 import { createNotification } from "../shared/notifications.js";
 import bus from "../shared/event-bus.js";
 import { handleInstanceConnection } from "./instance-connect.js";
@@ -26,10 +27,97 @@ import { sanitizeDisplayName } from "./display-name.js";
 import { emitOrQueue } from "../shared/sync-emit.js";
 import { insertSharedSource } from "./shared-source-insert.js";
 import { withoutProvenance } from "../research/provenance-schema.js";
-import { PROFILE_SUBTYPE, handleProfileMessage, applyPeerProfile, readLocalProfile, ensurePeerProfileColumns, isEstablishedContact } from "./peer-profile.js";
+import { PROFILE_SUBTYPE, handleProfileMessage, applyPeerProfile, readLocalProfile, ensurePeerProfileColumns, isEstablishedContact, applyBindingAdvert, advertiseBindingToContacts } from "./peer-profile.js";
 import { installBirdAvatarHooks } from "./profile-avatar.js";
 import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
 import { wireContactBinding } from "./contact-binding.js";
+import { crowIdMatchesKey } from "./identity.js";
+
+/** PT-3 N-5: the label a non-contact's notification title carries (server titles are English). */
+export const NOT_IN_CONTACTS = "(not in your contacts)";
+
+/** A remote-chosen name for a notification title: sanitized, at most 60 code points, or null. */
+export function notifName(value) {
+  const s = sanitizeDisplayName(value);
+  if (!s) return null;
+  const points = Array.from(s);
+  return points.length > 60 ? points.slice(0, 60).join("") : s;
+}
+
+/**
+ * PT-3 N-5: resolve a Nostr signer for a call / memo / reaction. Returns
+ * { blocked } for a blocked row, { contact } for an established contact, or
+ * {} for anyone else. A lookup failure resolves to {} (shown labelled).
+ */
+async function resolveSigner(db, senderPubkey) {
+  const row = senderPubkey ? await findContactByPubkey(db, senderPubkey) : null;
+  if (!row) return {};
+  if (Number(row.is_blocked) === 1) return { blocked: true };
+  if (!isEstablishedContact(row)) return {};
+  return { contact: row };
+}
+
+/**
+ * PT-3 N-5: room_invite / voice_memo / reaction. The sender is the
+ * AUTHENTICATED signer: a contact is titled with its stored name (never the
+ * payload's), a blocked one is dropped, and anyone else is shown with an
+ * `_unverified` source and a "(not in your contacts)" title so the browser can
+ * label it and keep a join link behind the warning. Never throws.
+ */
+export async function handleSocialNotify(db, subtype, payload, senderPubkey, managers = {}) {
+  const notify = (managers && managers.createNotification) || createNotification;
+  try {
+    const p = payload || {};
+    let base, nameField, build;
+    if (subtype === "room_invite") {
+      if (!p.room_code || !p.join_url) return;
+      base = "sharing:room_invite"; nameField = "host_name";
+      build = (who) => ({ title: `${who} is calling`, body: "Tap to join the call", priority: "high", action_url: p.join_url });
+    } else if (subtype === "voice_memo") {
+      if (!p.text) return;
+      const text = String(p.text);
+      base = "sharing:voice_memo"; nameField = "sender_name";
+      build = (who) => ({ title: `Voice memo from ${who}`, body: text.length > 200 ? text.slice(0, 200) + "..." : text, priority: "high" });
+    } else if (subtype === "reaction") {
+      if (!p.emoji) return;
+      base = "sharing:reaction"; nameField = "sender_name";
+      build = (who) => ({ title: `${who} reacted ${p.emoji}` });
+    } else {
+      return;
+    }
+    const { blocked, contact } = await resolveSigner(db, senderPubkey);
+    if (blocked) return;
+    const who = contact
+      ? (contact.display_name || "Someone")
+      : `${notifName(p[nameField]) || "Someone"} ${NOT_IN_CONTACTS}`;
+    await notify(db, { type: "peer", source: contact ? base : `${base}_unverified`, ...build(who) });
+  } catch (err) {
+    try { console.warn(`[sharing] Failed to create ${subtype} notification:`, err?.message); } catch {}
+  }
+}
+
+/** The local instance id at call time (never captured), or null. */
+function localIdOf(managers) {
+  return managers?.instanceSyncManager?.localInstanceId || managers?.peerManager?.localInstanceId || null;
+}
+
+/**
+ * PT-3 N-4: once per boot, count full contacts whose stored Ed25519 key does
+ * not derive their Crow ID. Report only; nothing is modified.
+ */
+export async function scanContactKeyMismatch(db) {
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT crow_id, ed25519_pubkey FROM contacts WHERE request_status IS NULL AND ed25519_pubkey IS NOT NULL AND ed25519_pubkey != ''",
+      args: [],
+    });
+    const n = rows.filter((r) => !crowIdMatchesKey(String(r.crow_id), String(r.ed25519_pubkey))).length;
+    if (n > 0) console.warn(`[sharing] contact key check: ${n} full contact(s) whose Crow ID does not match the public key`);
+    return n;
+  } catch {
+    return 0;
+  }
+}
 
 /**
  * L6 receive-path fix — turn a decrypted DM from an unknown sender into a
@@ -294,7 +382,7 @@ export async function handleDeliveryReceipt(db, eventIds, senderPubkey) {
  * forged ack can't purge another contact's retries. Mirrors handleDeliveryReceipt.
  * Never throws (receive path).
  */
-export async function handleHandshakeComplete(db, eventIds, senderPubkey, displayName, avatar) {
+export async function handleHandshakeComplete(db, eventIds, senderPubkey, displayName, avatar, { advert = null, localInstanceId = null } = {}) {
   try {
     const ids = (Array.isArray(eventIds) ? eventIds : []).filter((x) => typeof x === "string" && x);
     if (!db) return;
@@ -325,6 +413,8 @@ export async function handleHandshakeComplete(db, eventIds, senderPubkey, displa
       try { await applyPeerProfile(db, contact.id, { displayName, avatar }); }
       catch (err) { try { console.warn("[sharing] handshake_complete peer profile failed:", err?.message); } catch {} }
     }
+    // PT-3 §2.5: a key-bound "I bind on Hyperswarm" advert (full, unblocked contacts only).
+    if (advert) await applyBindingAdvert(db, localInstanceId, contact, advert);
   } catch (err) {
     try { console.warn("[sharing] handshake_complete handling failed:", err.message); } catch {}
   }
@@ -522,21 +612,9 @@ export async function wireNostrReceive(managers) {
     await handleInviteAccepted(db, { syncManager, peerManager, nostrManager }, payload, senderPubkey, event);
   }, async (subtype, payload, senderPubkey) => {
     console.log(`[sharing] Received crow_social message: ${subtype}`);
-    if (subtype === "room_invite") {
-      const { room_code, join_url, host_name, host_crow_id } = payload;
-      if (!room_code || !join_url) return;
-      try {
-        await createNotification(db, {
-          title: `${host_name || "Someone"} is calling`,
-          body: `Tap to join the call`,
-          type: "peer",
-          source: "sharing:room_invite",
-          priority: "high",
-          action_url: join_url,
-        });
-      } catch (err) {
-        console.warn("[sharing] Failed to create room invite notification:", err.message);
-      }
+    if (subtype === "room_invite" || subtype === "voice_memo" || subtype === "reaction") {
+      // PT-3 N-5: bound to the signer; non-contacts are shown, labelled.
+      await handleSocialNotify(db, subtype, payload, senderPubkey);
     } else if (subtype === "room_closed") {
       const { host_name } = payload;
       try {
@@ -546,43 +624,19 @@ export async function wireNostrReceive(managers) {
           source: "sharing:room_closed",
         });
       } catch {}
-    } else if (subtype === "voice_memo") {
-      const { text, sender_name } = payload;
-      if (!text) return;
-      try {
-        await createNotification(db, {
-          title: `Voice memo from ${sender_name || "Someone"}`,
-          body: text.length > 200 ? text.slice(0, 200) + "..." : text,
-          type: "peer",
-          source: "sharing:voice_memo",
-          priority: "high",
-        });
-      } catch (err) {
-        console.warn("[sharing] Failed to create voice memo notification:", err.message);
-      }
-    } else if (subtype === "reaction") {
-      const { emoji, sender_name } = payload;
-      if (!emoji) return;
-      try {
-        await createNotification(db, {
-          title: `${sender_name || "Someone"} reacted ${emoji}`,
-          type: "peer",
-          source: "sharing:reaction",
-        });
-      } catch {}
     } else if (subtype === "group_message") {
-      await handleGroupMessageNotify(db, payload, managers);
+      await handleGroupMessageNotify(db, payload, senderPubkey, managers);
     } else if (subtype === "bot_relay" || subtype === "bot_relay_result") {
       // PT-2.0: only our own Nostr key, naming a trusted live sibling (bot-relay.js).
       await routeBotRelay({ subtype, payload, senderPubkey, db, identity, nostrManager });
     } else if (subtype === DELIVERY_RECEIPT_SUBTYPE) {
       await handleDeliveryReceipt(db, payload.event_ids, senderPubkey);
     } else if (subtype === HANDSHAKE_COMPLETE_SUBTYPE) {
-      await handleHandshakeComplete(db, payload.event_ids, senderPubkey, payload.displayName, payload.avatar);
+      await handleHandshakeComplete(db, payload.event_ids, senderPubkey, payload.displayName, payload.avatar, { advert: payload, localInstanceId: localIdOf(managers) });
     } else if (subtype === PROFILE_SUBTYPE) {
       // 2026-09-08 §4.3: a contact's profile changed. Contact-only inside;
       // this is the ONLY door — subscribeToContact drops every crow_social.
-      await handleProfileMessage(db, payload, senderPubkey);
+      await handleProfileMessage(db, payload, senderPubkey, { localInstanceId: localIdOf(managers) });
     } else if (subtype === "room_message" || subtype === "room_join") {
       const { handleInboundRoomEnvelope } = await import("./room-inbound.js");
       await handleInboundRoomEnvelope({ db, nostrManager, identity, subtype, payload, senderPubkey, log: (m) => console.log("[rooms]", m) });
@@ -606,55 +660,60 @@ export async function wireNostrReceive(managers) {
 }
 
 /**
- * F-BLOCK-1 D4c — the `group_message` fan-out notify+store logic, extracted
- * from the inline `onSocialMessage` dispatcher below so it's unit-testable
- * without live relays. Behavior is byte-identical to before EXCEPT the sender
- * resolve now happens BEFORE the notification: a blocked group member's
- * fan-out (which includes us) must neither notify nor store — send-side
- * filters only cover members WE blocked when WE fan out. An UNKNOWN
- * (non-contact) sender still notifies exactly as before — the guard is
- * `found && is_blocked===1`, never `!found`.
+ * F-BLOCK-1 D4c + PT-3 N-1 — the `group_message` fan-out notify+store logic,
+ * extracted from the inline `onSocialMessage` dispatcher so it's unit-testable
+ * without live relays.
+ *
+ * The sender is the AUTHENTICATED signer (`senderPubkey`), never the payload:
+ *   - a blocked signer: nothing is notified or stored;
+ *   - a full, unblocked contact: stored under THAT contact and titled with its
+ *     stored name. A `sender_crow_id` naming someone else is logged and
+ *     otherwise ignored;
+ *   - anyone else: notified with the `_unverified` source and the
+ *     "(not in your contacts)" label, and not stored.
+ * `payload.sender_name` is never shown.
  *
  * `managers.createNotification` may be injected (tests); otherwise the
  * shared helper is used, matching `handleIncomingRequest`'s convention.
  *
  * @param {object} db
- * @param {{group_name?:string, sender_name?:string, message?:string, sender_crow_id?:string}} payload
+ * @param {{group_name?:string, message?:string, sender_crow_id?:string}} payload
+ * @param {string} senderPubkey - the Nostr event's authenticated pubkey
  * @param {{createNotification?: Function}} [managers]
  */
-export async function handleGroupMessageNotify(db, payload, managers = {}) {
+export async function handleGroupMessageNotify(db, payload, senderPubkey, managers = {}) {
   const notify = (managers && managers.createNotification) || createNotification;
-  const { group_name, sender_name, message: msgText } = payload || {};
+  const { group_name, message: msgText } = payload || {};
   if (!msgText) return;
-  let senderRow = null;
-  try {
-    const senderContact = await db.execute({
-      sql: "SELECT id, is_blocked FROM contacts WHERE crow_id = ?",
-      args: [payload.sender_crow_id || ""],
-    });
-    senderRow = senderContact.rows[0] || null;
-  } catch { /* lookup failure degrades to today's behavior */ }
-  if (senderRow && Number(senderRow.is_blocked) === 1) return;
+  let signer = null;
+  try { signer = senderPubkey ? await findContactByPubkey(db, senderPubkey) : null; } catch { signer = null; }
+  if (signer && Number(signer.is_blocked) === 1) return;
+  const full = signer && (signer.request_status === null || signer.request_status === undefined) ? signer : null;
+  if (full && payload.sender_crow_id && payload.sender_crow_id !== full.crow_id) {
+    try { console.warn(`[sharing] group_message sender_crow_id does not match the signer; attributed to ${full.crow_id}`); } catch {}
+  }
+  const group = group_name || "Group";
   try {
     await notify(db, {
-      title: `[${group_name || "Group"}] ${sender_name || "Someone"}`,
+      title: full ? `[${group}] ${full.display_name || full.crow_id}` : `[${group}] Someone ${NOT_IN_CONTACTS}`,
       body: msgText.length > 200 ? msgText.slice(0, 200) + "..." : msgText,
       type: "peer",
-      source: "sharing:group_message",
+      source: full ? "sharing:group_message" : "sharing:group_message_unverified",
       priority: "high",
     });
   } catch (err) {
     console.warn("[sharing] Failed to create group message notification:", err.message);
   }
-  // Also store as a regular message with group context.
+  // Also store as a regular message with group context, under the signer.
   // Phase 3 PR-B: deliberately NOT emitted to instance-sync — synthetic
   // grp_<ts> event id (not a real Nostr event); rooms have their own sync path.
   try {
-    if (senderRow) {
+    if (full) {
       await db.execute({
         sql: `INSERT INTO messages (contact_id, nostr_event_id, content, direction, is_read, created_at)
               VALUES (?, ?, ?, 'received', 0, datetime('now'))`,
-        args: [senderRow.id, `grp_${Date.now()}`, `[${group_name}] ${msgText}`],
+        // The random tail keeps two items in one millisecond from colliding on the unique id.
+        args: [full.id, `grp_${Date.now()}_${randomBytes(4).toString("hex")}`, `[${group_name}] ${msgText}`],
       });
     }
   } catch {}
@@ -706,9 +765,25 @@ export async function initSharingRuntime(managers, helpers) {
   // (same runtime-guard shape as shared_items.mode above). Guarded inside.
   await ensurePeerProfileColumns(db);
 
+  // PT-3 N-4: report (never modify) contact rows whose key does not derive their Crow ID.
+  scanContactKeyMismatch(db);
+
   // R8: the Nostr receive path must never depend on Hyperswarm coming up.
   // Fire-and-forget (never rejects); failures are health-visible + retried.
-  startNostrReceive(managers);
+  const receiveStarted = startNostrReceive(managers);
+
+  // PT-3 §2.5: tell each existing full contact, once, that this node binds its
+  // Hyperswarm handshakes (the `hs_cb` advert), so contacts learn it after an
+  // update without waiting for a profile change. Runs after the receive wiring
+  // (relays connected), delayed and spaced; a LOCAL marker per contact makes it
+  // once only. Never rejects; the timer never holds the process open.
+  const advertDelayMs = Number.isFinite(helpers?.bindingAdvertDelayMs) ? helpers.bindingAdvertDelayMs : 30_000;
+  Promise.resolve(receiveStarted).then(() => {
+    const t = setTimeout(() => {
+      advertiseBindingToContacts(db, nostrManager, localIdOf(managers)).catch(() => {});
+    }, advertDelayMs);
+    t.unref?.();
+  }).catch(() => {});
 
   // 2026-09-08 §5: with the bird as profile picture, a hatch or an activation
   // (bus events from the Ramble routes / transport) repaints and re-sends it.
