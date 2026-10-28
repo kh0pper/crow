@@ -965,6 +965,26 @@
     transition: background 0.15s;
   }
   .crow-call-toast-accept:hover { background: rgba(34,197,94,0.25); }
+  .crow-call-toast-warning {
+    color: var(--crow-error);
+    font-size: 0.85rem;
+    margin: 0.25rem 0 0.5rem;
+  }
+  .crow-call-toast--unverified .crow-call-toast-accept {
+    background: transparent;
+    color: var(--crow-error);
+    border-color: var(--crow-error);
+  }
+  .notif-item-unverified {
+    color: var(--crow-error);
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .notif-item-unverified-link {
+    color: var(--crow-error);
+    font-size: 0.8rem;
+    text-decoration: underline;
+  }
   .crow-call-toast-dismiss {
     padding: 0.4rem 0.75rem;
     font-size: 0.8rem;

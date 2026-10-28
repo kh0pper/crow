@@ -34,6 +34,32 @@ export function sharedNotifJs(lang) {
     return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
+  // PT-3 N-5: an item whose sender is not in the user's contacts. Its source
+  // ends in _unverified; it is labelled, and any link sits behind the label.
+  function isUnverifiedNotif(n) {
+    var s = n && typeof n.source === 'string' ? n.source : '';
+    return s.length > 11 && s.slice(-11) === '_unverified';
+  }
+  function unverifiedWarning(n) {
+    if (n.source === 'sharing:room_invite_unverified') return '${tJs("notif.notContactCallWarning", lang)}';
+    if (n.source === 'sharing:voice_memo_unverified') return '${tJs("notif.notContactMemoWarning", lang)}';
+    return '';
+  }
+  // Only http(s) links and same-site paths are followed, from any item.
+  function safeNotifLink(u) {
+    if (typeof u !== 'string') return '';
+    var l = u.toLowerCase();
+    if (l.indexOf('https://') === 0 || l.indexOf('http://') === 0) return u;
+    if (u.charAt(0) === '/' && u.charAt(1) !== '/') return u;
+    return '';
+  }
+  // An unverified item's link is kept in metadata (the server never puts it in
+  // action_url, which is also pushed to the other channels).
+  function unverifiedLinkOf(n) {
+    var m = n && n.metadata && typeof n.metadata === 'object' ? n.metadata : null;
+    return safeNotifLink(m && m.join_url ? m.join_url : n.action_url);
+  }
+
   function formatUptime(seconds) {
     var d = Math.floor(seconds / 86400);
     var h = Math.floor((seconds % 86400) / 3600);
@@ -76,7 +102,10 @@ export function sharedNotifJs(lang) {
       data.notifications.forEach(function(n) {
         var item = document.createElement('div');
         item.className = 'notif-item';
-        item.onclick = function() { notifClick(n.id, n.action_url); };
+        var unverified = isUnverifiedNotif(n);
+        // An unverified item never navigates on its own: its link is a
+        // separate, labelled control below.
+        item.onclick = function() { notifClick(n.id, unverified ? null : n.action_url); };
 
         var icon = document.createElement('span');
         icon.className = 'notif-type-icon ' + (typeClass[n.type] || typeClass.system);
@@ -91,11 +120,40 @@ export function sharedNotifJs(lang) {
         title.textContent = n.title;
         body.appendChild(title);
 
+        if (unverified) {
+          var label = document.createElement('div');
+          label.className = 'notif-item-unverified';
+          label.textContent = '${tJs("notif.notContactLabel", lang)}';
+          body.appendChild(label);
+          var warn = unverifiedWarning(n);
+          if (warn) {
+            var warnEl = document.createElement('div');
+            warnEl.className = 'notif-item-desc notif-item-unverified-warning';
+            warnEl.textContent = warn;
+            body.appendChild(warnEl);
+          }
+        }
+
         if (n.body) {
           var desc = document.createElement('div');
           desc.className = 'notif-item-desc';
           desc.textContent = n.body;
           body.appendChild(desc);
+        }
+
+        var unverifiedLink = unverified ? unverifiedLinkOf(n) : '';
+        if (unverifiedLink) {
+          var open = document.createElement('a');
+          open.className = 'notif-item-unverified-link';
+          open.textContent = '${tJs("notif.openUnverifiedLink", lang)}';
+          open.href = unverifiedLink;
+          open.target = '_blank';
+          open.rel = 'noopener noreferrer';
+          open.onclick = function(e) {
+            e.stopPropagation();
+            fetch('/api/notifications/' + n.id + '/read', { method: 'POST' }).catch(function(){});
+          };
+          body.appendChild(open);
         }
 
         var time = document.createElement('div');
@@ -122,7 +180,8 @@ export function sharedNotifJs(lang) {
 
   async function notifClick(id, url) {
     try { await fetch('/api/notifications/' + id + '/read', { method: 'POST' }); } catch(e) {}
-    if (url) window.location.href = url;
+    var safe = safeNotifLink(url);
+    if (safe) window.location.href = safe;
     else { loadNotifications(); pollNotifications(); }
   }
 
@@ -160,7 +219,7 @@ export function sharedNotifJs(lang) {
       .then(function(data) {
         if (!data || !data.notifications) return;
         data.notifications.forEach(function(n) {
-          if (n.source === 'sharing:room_invite' && _activeCallToasts.indexOf(n.id) === -1) {
+          if ((n.source === 'sharing:room_invite' || n.source === 'sharing:room_invite_unverified') && _activeCallToasts.indexOf(n.id) === -1) {
             showCallToast(n);
           }
         });
@@ -185,13 +244,26 @@ export function sharedNotifJs(lang) {
     info.appendChild(text);
     toast.appendChild(info);
 
+    // PT-3 N-5: a caller not in the contacts gets a warning, and the join
+    // link sits behind it ("Open link anyway").
+    var unverified = isUnverifiedNotif(n);
+    if (unverified) {
+      toast.classList.add('crow-call-toast--unverified');
+      var warning = document.createElement('div');
+      warning.className = 'crow-call-toast-warning';
+      warning.setAttribute('role', 'alert');
+      warning.textContent = '${tJs("notif.notContactCallWarning", lang)}';
+      toast.appendChild(warning);
+    }
+
     var actions = document.createElement('div');
     actions.className = 'crow-call-toast-actions';
     var acceptBtn = document.createElement('a');
     acceptBtn.className = 'crow-call-toast-accept';
-    acceptBtn.textContent = 'Accept';
-    acceptBtn.href = n.action_url || '#';
+    acceptBtn.textContent = unverified ? '${tJs("notif.openUnverifiedLink", lang)}' : 'Accept';
+    acceptBtn.href = (unverified ? unverifiedLinkOf(n) : safeNotifLink(n.action_url)) || '#';
     acceptBtn.target = '_blank';
+    if (unverified) acceptBtn.rel = 'noopener noreferrer';
     acceptBtn.onclick = function() {
       fetch('/api/notifications/' + n.id + '/read', { method: 'POST' }).catch(function(){});
       removeCallToast(toast, n.id);
@@ -468,6 +540,26 @@ export const headerIconsCss = `
     transition: background 0.15s;
   }
   .crow-call-toast-accept:hover { background: rgba(34,197,94,0.25); }
+  .crow-call-toast-warning {
+    color: var(--crow-error);
+    font-size: 0.85rem;
+    margin: 0.25rem 0 0.5rem;
+  }
+  .crow-call-toast--unverified .crow-call-toast-accept {
+    background: transparent;
+    color: var(--crow-error);
+    border-color: var(--crow-error);
+  }
+  .notif-item-unverified {
+    color: var(--crow-error);
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .notif-item-unverified-link {
+    color: var(--crow-error);
+    font-size: 0.8rem;
+    text-decoration: underline;
+  }
   .crow-call-toast-dismiss {
     padding: 0.4rem 0.75rem;
     font-size: 0.8rem;

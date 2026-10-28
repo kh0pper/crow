@@ -136,6 +136,12 @@ export const translations = {
   "notif.ram": { en: "RAM", es: "RAM" },
   "notif.cpus": { en: "CPUs", es: "CPUs" },
   "notif.uptime": { en: "Uptime", es: "Tiempo activo" },
+  // ─── PT-3 N-5: items from someone not in your contacts (begin) ───
+  "notif.notContactLabel": { en: "Not in your contacts", es: "No está en tus contactos" },
+  "notif.notContactCallWarning": { en: "Someone who is not in your contacts says they are calling. Open the link only if you expected this call.", es: "Alguien que no está en tus contactos dice que te está llamando. Abre el enlace solo si esperabas esta llamada." },
+  "notif.notContactMemoWarning": { en: "This voice memo is from someone who is not in your contacts.", es: "Esta nota de voz es de alguien que no está en tus contactos." },
+  "notif.openUnverifiedLink": { en: "Open link anyway", es: "Abrir el enlace de todos modos" },
+  // ─── PT-3 N-5 (end) ───
 
   // ─── Player ───
   "player.previous": { en: "Previous", es: "Anterior" },
