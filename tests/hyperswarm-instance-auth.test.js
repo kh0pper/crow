@@ -45,7 +45,7 @@ const newState = (isInstanceConn) => ({ authenticated: false, remoteCrowId: null
 const ticks = async () => { for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r)); };
 
 /** Feed a challenge-response signed by `signer`, claiming `claims`. */
-async function respond(pm, signer, claims, { isInstanceConn = true, conn = fakeConn(), state = newState(isInstanceConn) } = {}) {
+async function respond(pm, signer, claims, { isInstanceConn = true, conn = fakeConn(), state = newState(isInstanceConn), peerAuth = true } = {}) {
   const ourChallenge = randomBytes(32);
   await pm._handleMessage(conn, {
     type: "challenge-response",
@@ -53,6 +53,8 @@ async function respond(pm, signer, claims, { isInstanceConn = true, conn = fakeC
     pubkey: signer.ed25519Pubkey,
     ...claims,
   }, ourChallenge, state, () => {});
+  // PT-3: the peer's own `authenticated` completes mutual admission.
+  if (peerAuth) await pm._handleMessage(conn, { type: "authenticated" }, ourChallenge, state, () => {});
   await ticks();
   return conn;
 }

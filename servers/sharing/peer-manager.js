@@ -265,6 +265,8 @@ export class PeerManager {
       refused: false,
       closed: false,
       deciding: false,
+      peerAuthed: false,   // the peer's own `authenticated` frame arrived
+      mutual: false,       // we admitted it AND it admitted us: side effects run
       answered: false,
       handshakeHashHex: null,
       peerInstanceId: null,
@@ -301,11 +303,16 @@ export class PeerManager {
       state.handshakeHashHex = hashHexOf(conn);
     })();
 
-    const timer = setTimeout(() => {
-      if (!state.authenticated) this._kill(conn, state);
-    }, this.preAuthMs);
-    timer.unref?.();
+    // Armed at connect, re-armed at our admission: a peer that is not
+    // mutually admitted within preAuthMs of either point is closed.
+    let timer = null;
     state.clearTimer = () => clearTimeout(timer);
+    state.armTimer = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => { if (!state.mutual) this._kill(conn, state); }, this.preAuthMs);
+      timer.unref?.();
+    };
+    state.armTimer();
 
     let buffer = "";
     conn.on("data", (data) => {
@@ -364,10 +371,13 @@ export class PeerManager {
         await this._onChallengeResponse(conn, msg, ourChallenge, state);
         break;
       case "authenticated":
-        // The other side confirmed our auth.
+        // The other side admitted us. Recorded whenever it arrives; the
+        // admission side effects wait for both halves.
+        state.peerAuthed = true;
+        if (state.authenticated && !state.mutual) await this._completeAdmit(conn, state);
         break;
       default:
-        if (state.authenticated) await this._dispatchAdmitted(conn, msg, state);
+        if (state.mutual) await this._dispatchAdmitted(conn, msg, state);
         else state.held.push(msg);
     }
     if (typeof setState === "function") setState(state);
@@ -503,9 +513,10 @@ export class PeerManager {
 
   /**
    * The one place a connection is admitted. Every side effect of admission
-   * happens here, after the decision and after admitGuards[kind]:
-   * the pin, state, the connections entry, the `authenticated` frame, the
-   * deferred challenge-response, `instance-key`, and the callbacks.
+   * happens here, after the decision and after admitGuards[kind]: the pin,
+   * state, the `authenticated` frame, the deferred challenge-response and
+   * `instance-key`; then, once the peer has admitted us too (_completeAdmit),
+   * the connections entry, the callbacks and the held frames.
    */
   async _admit(conn, state, msg, kind) {
     const guard = this.admitGuards?.[kind];
@@ -547,17 +558,12 @@ export class PeerManager {
       if (state.refused || state.closed || conn.destroyed) return false;
     }
 
-    state.clearTimer?.();
+    state.armTimer?.();
     state.authenticated = true;
     state.remoteCrowId = crowId;
     state.remoteInstanceId = remoteInstanceId;
     state.kind = kind;
-
-    this.connections.set(crowId, {
-      conn,
-      authenticated: true,
-      pubkey: kind === "contact" ? state.pinnedKey : this.identity.ed25519Pubkey,
-    });
+    state.admitMsg = msg;
 
     conn.write(JSON.stringify({ type: "authenticated" }) + "\n");
 
@@ -573,13 +579,39 @@ export class PeerManager {
           conn.write(JSON.stringify({ type: "instance-key", instance_id: this.localInstanceId, feed_key_hex: feedKeyHex }) + "\n");
         }
       }
+    }
+
+    if (state.peerAuthed) await this._completeAdmit(conn, state);
+    return true;
+  }
+
+  /**
+   * The second half of _admit, run once BOTH sides have admitted each other
+   * (our decision, then the peer's `authenticated`, in either order). Only
+   * now is the peer connected: a peer sends nothing but handshake frames
+   * until it is told it was admitted, so its data never races our decision.
+   */
+  async _completeAdmit(conn, state) {
+    if (state.mutual || !state.authenticated || !state.peerAuthed || state.refused || state.closed) return;
+    state.mutual = true;
+    state.clearTimer?.();
+    const msg = state.admitMsg;
+    const crowId = state.remoteCrowId;
+
+    this.connections.set(crowId, {
+      conn,
+      authenticated: true,
+      pubkey: state.kind === "contact" ? state.pinnedKey : this.identity.ed25519Pubkey,
+    });
+
+    if (state.kind === "instance") {
       // An old sibling piggybacks its feed key on its (now verified)
       // challenge-response. Persist it before dispatching, so the
       // onInstanceConnected handler can open the inbound feed at once.
       if (state.proof === "sig" && msg.instance_id && msg.feed_key_hex && this.onInstanceKeyReceived) {
         fire(() => this.onInstanceKeyReceived(msg.instance_id, msg.feed_key_hex));
       }
-      if (this.onInstanceConnected) fire(() => this.onInstanceConnected(crowId, conn, remoteInstanceId));
+      if (this.onInstanceConnected) fire(() => this.onInstanceConnected(crowId, conn, state.remoteInstanceId));
     } else if (this.onPeerConnected) {
       fire(() => this.onPeerConnected(crowId, conn));
     }
@@ -590,7 +622,6 @@ export class PeerManager {
       if (state.refused || state.closed) break;
       await this._dispatchAdmitted(conn, m, state);
     }
-    return true;
   }
 
   /** Answer an older asker's challenge, held until _admit (see _onChallenge). */
@@ -598,6 +629,9 @@ export class PeerManager {
     const d = state.deferredReply;
     if (!d || d.sent || !state.authenticated || state.refused) return;
     d.sent = true;
+    // A peer that proved itself with a cb_sig runs current code and asks with
+    // cb:1; it never needs a bare signature, so it never gets one.
+    if (state.proof === "cb") return;
     const isInstance = state.kind === "instance" && this.instanceSyncEnabled;
     let feedKeyHex = null;
     if (isInstance && d.instanceId && this.getFeedKeyForInstance) {
@@ -617,7 +651,7 @@ export class PeerManager {
 
   /** Frames of an admitted connection, by kind. Frames of the other kind are ignored. */
   async _dispatchAdmitted(conn, msg, state) {
-    if (!state.authenticated || state.refused) return;
+    if (!state.mutual || state.refused) return;
     if (state.kind === "contact" && msg.type === "data") {
       if (state.remoteCrowId && this.onPeerData) {
         try { await this.onPeerData(state.remoteCrowId, msg.payload); } catch {}

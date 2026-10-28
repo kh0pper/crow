@@ -20,7 +20,7 @@ test("feed-key-announce messages do NOT invoke onInstanceKeyReceived (dead path 
     conn,
     { type: "feed-key-announce", instance_id: "instB", feed_key_hex: "ab".repeat(32) },
     Buffer.alloc(32),
-    { authenticated: true, remoteCrowId: "crow:test", remoteInstanceId: "instB", kind: "instance", isInstanceConn: true },
+    { authenticated: true, mutual: true, remoteCrowId: "crow:test", remoteInstanceId: "instB", kind: "instance", isInstanceConn: true },
     () => {},
   );
   assert.equal(called, null, `feed-key-announce must be ignored; got onInstanceKeyReceived(${called?.[0]}) — a crow_id, not an instance id`);

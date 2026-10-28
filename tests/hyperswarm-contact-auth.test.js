@@ -203,7 +203,7 @@ async function rawTo(t, pm, { pmInitiator = true } = {}) {
  * Raw responder: answer pm's challenge claiming `claim`, proving with
  * `signer`'s key, as a bare signature ("sig") or a channel binding ("cb").
  */
-async function rawLeg(t, pm, { claim, signer, mode = "sig", pubkey = signer.ed25519Pubkey, extra = [], pre = [], challenge = null }) {
+async function rawLeg(t, pm, { claim, signer, mode = "sig", pubkey = signer.ed25519Pubkey, extra = [], pre = [], challenge = null, auth = true }) {
   const R = await rawTo(t, pm);
   const ch = await R.next("challenge");
   assert.ok(ch, "pm sent its challenge");
@@ -215,7 +215,9 @@ async function rawLeg(t, pm, { claim, signer, mode = "sig", pubkey = signer.ed25
   }
   const out = [];
   if (challenge) out.push(challenge);
-  out.push(...pre, resp, ...extra);
+  out.push(...pre, resp);
+  if (auth) out.push({ type: "authenticated" }); // the raw peer "admits" pm too (mutual admission)
+  out.push(...extra);
   R.send(...out);
   return { R, nonce: ch.challenge };
 }
@@ -544,7 +546,8 @@ async function oracleRelay(t, pa, pbPm, { cb, strip }) {
   if (got) {
     const fwd = { ...got };
     if (strip) delete fwd.cb_sig;
-    toA.send(fwd);
+    toA.send(fwd, { type: "authenticated" }); // M also completes the mutual step
+
   }
   return { toA, toB, got };
 }
@@ -698,7 +701,7 @@ test("H-C10b an old sibling gets the deferred bare reply, with the piggyback, on
     assert.equal(typeof resp.signature, "string");
     assert.equal(resp.instance_id, "inst-new");
     assert.equal(resp.feed_key_hex, sNew.feed);
-    assert.equal(resp._snap, true, "written after the new side admitted the old one");
+    assert.equal(resp._snap, false, "the reply precedes mutual admission: the old side admits us only after it");
     assert.ok(await until(() => sOld.calls.keyReceived.length && sNew.calls.keyReceived.length, 3000));
     assert.deepEqual(sOld.calls.keyReceived, [["inst-new", sNew.feed]]);
     assert.deepEqual(sNew.calls.keyReceived, [["inst-old", sOld.feed]]);
@@ -708,16 +711,18 @@ test("H-C10b an old sibling gets the deferred bare reply, with the piggyback, on
 
 // ================================================================ H-C11
 const SIDE_EFFECTS = [
-  { what: "connections.set(", re: /\.connections\s*\.\s*set\s*\(/g, allowed: ["_admit"] },
-  { what: "onPeerConnected(", re: /\.onPeerConnected\s*\(/g, allowed: ["_admit"] },
-  { what: "onInstanceConnected(", re: /\.onInstanceConnected\s*\(/g, allowed: ["_admit"] },
-  { what: "onInstanceKeyReceived(", re: /\.onInstanceKeyReceived\s*\(/g, allowed: ["_admit", "_dispatchAdmitted"] },
+  // _completeAdmit is _admit's second half (mutual admission), reached only from _admit or the peer's `authenticated` after ours.
+  { what: "connections.set(", re: /\.connections\s*\.\s*set\s*\(/g, allowed: ["_completeAdmit"] },
+  { what: "onPeerConnected(", re: /\.onPeerConnected\s*\(/g, allowed: ["_completeAdmit"] },
+  { what: "onInstanceConnected(", re: /\.onInstanceConnected\s*\(/g, allowed: ["_completeAdmit"] },
+  { what: "onInstanceKeyReceived(", re: /\.onInstanceKeyReceived\s*\(/g, allowed: ["_completeAdmit", "_dispatchAdmitted"] },
+  { what: "_completeAdmit(", re: /\._completeAdmit\s*\(/g, allowed: ["_admit", "_handleMessage"] },
   { what: "onPeerData(", re: /\.onPeerData\s*\(/g, allowed: ["_dispatchAdmitted"] },
   { what: '{ type: "authenticated" }', re: /\{\s*type\s*:\s*"authenticated"\s*\}/g, allowed: ["_admit"] },
   { what: '"instance-key" send', re: /type\s*:\s*"instance-key"/g, allowed: ["_admit"] },
   { what: "bare sign(", re: /\bsign\s*\((?!\s*contactCbMessage\s*\()/g, allowed: ["_sendDeferredReply"] },
   { what: "_sendDeferredReply(", re: /\._sendDeferredReply\s*\(/g, allowed: ["_admit"] },
-  { what: "_dispatchAdmitted(", re: /\._dispatchAdmitted\s*\(/g, allowed: ["_admit", "_handleMessage"] },
+  { what: "_dispatchAdmitted(", re: /\._dispatchAdmitted\s*\(/g, allowed: ["_completeAdmit", "_handleMessage"] },
   { what: "verify(... msg.pubkey", re: /\bverify\s*\([^;]*?msg\.pubkey/g, allowed: [] },
 ];
 
@@ -758,7 +763,13 @@ function scanSideEffects(file) {
   if (disp) {
     const body = src.slice(disp.start, disp.end);
     const firstStmt = body.slice(body.indexOf("{") + 1).trim();
-    if (!/^if\s*\(\s*!\s*state\s*\.\s*authenticated\b/.test(firstStmt)) violations.push("_dispatchAdmitted does not start with an authenticated guard");
+    if (!/^if\s*\(\s*!\s*state\s*\.\s*mutual\b/.test(firstStmt)) violations.push("_dispatchAdmitted does not start with a mutual-admission guard");
+  }
+  const comp = spans.find((s) => s.name === "_completeAdmit");
+  if (comp) {
+    const body = src.slice(comp.start, comp.end);
+    const firstStmt = body.slice(body.indexOf("{") + 1).trim();
+    if (!/^if\s*\(\s*state\s*\.\s*mutual\s*\|\|\s*!\s*state\s*\.\s*authenticated\s*\|\|\s*!\s*state\s*\.\s*peerAuthed\b/.test(firstStmt)) violations.push("_completeAdmit does not start with its both-halves guard");
   }
   if (!spans.some((s) => s.name === "_admit")) violations.push("no _admit method");
   return violations;
@@ -781,6 +792,7 @@ test("H-C11 positive control: a planted side effect in a temp copy fails the sca
     ["bare sign(", "    const s = sign(msg.challenge, this.identity.ed25519Priv);\n"],
     ['{ type: "authenticated" }', '    conn.write(JSON.stringify({ type: "authenticated" }) + "\\n");\n'],
     ["onPeerConnected(", "    this.onPeerConnected(remoteCrowId, conn);\n"],
+    ["_completeAdmit(", "    this._completeAdmit(conn, state);\n"],
     ["verify(... msg.pubkey", "    verify(nonce, msg.signature, msg.pubkey);\n"],
   ];
   for (const [what, line] of plants) {
@@ -810,7 +822,7 @@ test("H-C12a an old asker and a new responder, both directions: admitted both wa
     const order = L.wa.map((f) => f.type);
     const iAuth = order.indexOf("authenticated"), iResp = order.indexOf("challenge-response");
     assert.ok(iAuth >= 0 && iResp > iAuth, `frame order: ${order.join(",")}`);
-    assert.equal(L.wa[iResp]._snap, true, "B had admitted A when it wrote its reply");
+    assert.equal(L.wa[iResp]._snap, false, "B decided (authenticated first) but is not yet connected: old A admits B only after this reply");
     assert.equal(typeof L.wa[iResp].signature, "string");
     assert.ok(await until(() => oldGot.some(([, p]) => p?.payload?.content === `c12 B->A ${newInitiator}`), 3000), "B's share reaches old A");
     assert.equal(await shareStatus(B, s), "delivered");
@@ -915,4 +927,71 @@ test("H-C14 deleting a contact clears its channel-binding pin (a re-added person
   const rowC = (await A.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [C.crowId] })).rows[0];
   await deleteContactLocal(A.db, { instanceSyncManager: { localInstanceId: A.localId } }, rowC);
   assert.equal(await pinOf(A, C.crowId), null);
+});
+
+// ================================================================ fix round 1
+test("H-C15 (R7) a peer admitted via cb_sig never gets a deferred bare reply (contact and sibling); a legacy-admitted peer still does", T, async (t) => {
+  const A = await makeSide(t, "A");
+  const C = id();
+  await addContact(A, C);
+  const foreign = () => ({ type: "challenge", challenge: randomBytes(32).toString("hex"), crowId: C.crowId });
+  {
+    const pa = await newPeer(A);
+    const { R } = await rawLeg(t, pa.pm, { claim: C, signer: C, mode: "sig", challenge: foreign() });
+    assert.ok(await R.next("challenge-response", 3000), "control: a legacy-admitted contact gets its reply");
+  }
+  const pa = await newPeer(A);
+  const { R } = await rawLeg(t, pa.pm, { claim: C, signer: C, mode: "cb", challenge: foreign() });
+  assert.ok(await until(() => pa.pm.isConnected(C.crowId), 3000), "C is admitted via cb_sig");
+  await sleep(300);
+  assert.equal(R.pmWrites.some((f) => f.type === "challenge-response"), false, "no challenge-response is ever written to C");
+  assert.equal(R.frames.some((f) => f.type === "challenge-response"), false);
+
+  const me = id();
+  const sibAsk = () => ({ type: "challenge", challenge: randomBytes(32).toString("hex"), crowId: me.crowId, instance_id: "inst-x" });
+  {
+    const s1 = sibling(me, "inst-s1");
+    const { R: R1 } = await rawLeg(t, s1.pm, { claim: me, signer: me, mode: "sig", challenge: sibAsk() });
+    assert.ok(await R1.next("challenge-response", 3000), "control: an old own-key sibling gets its reply");
+  }
+  const s1 = sibling(me, "inst-s1");
+  const { R: R2 } = await rawLeg(t, s1.pm, { claim: me, signer: me, mode: "cb", challenge: sibAsk() });
+  assert.ok(await until(() => s1.calls.instanceConnected.length === 1, 3000), "the cb sibling is admitted");
+  await sleep(300);
+  assert.equal(R2.pmWrites.some((f) => f.type === "challenge-response"), false, "no bare reply to a cb-proved sibling");
+});
+
+test("H-C16 (R8) new<->new: a share over 64 KiB pending on the side that decides first is delivered and applied under default caps", T, async (t) => {
+  const A = await makeSide(t, "A"), B = await makeSide(t, "B");
+  await befriend(A, B);
+  const big = "L".repeat(70 * 1024);
+  const sBA = await queueMemoryShare(B, A.identity.crowId, big);
+  const pa = await newPeer(A), pb = await newPeer(B);
+  const real = pa.pm.contactBinding.lookupKey;
+  pa.pm.contactBinding.lookupKey = async (c) => { await sleep(300); return real(c); }; // B decides first
+  const L = await link(t, pa.pm, pb.pm);
+  let closed = false;
+  L.a.once("close", () => { closed = true; });
+  assert.ok(await until(() => hasMemoryContent(A, big), 5000), "the large share is applied");
+  assert.equal(await shareStatus(B, sBA), "delivered");
+  assert.equal(closed, false, "not destroyed");
+  assert.equal(pa.pm.isConnected(B.identity.crowId), true);
+});
+
+test("H-C17 (R8) a peer that proves itself but never sends authenticated gets no onPeerConnected and is destroyed after preAuthMs", T, async (t) => {
+  const A = await makeSide(t, "A");
+  const B = id();
+  await addContact(A, B);
+  {
+    const pa = await newPeer(A, { opts: { preAuthMs: 300 } });
+    await rawLeg(t, pa.pm, { claim: B, signer: B, mode: "cb" });
+    assert.ok(await until(() => pa.spies.peerConnected.length === 1, 3000), "control: with authenticated it connects");
+  }
+  const pa = await newPeer(A, { opts: { preAuthMs: 300 } });
+  const { R } = await rawLeg(t, pa.pm, { claim: B, signer: B, mode: "cb", auth: false, extra: [memShare("c17")] });
+  assert.ok(await R.next("authenticated", 2000), "we admitted it (our authenticated was sent)");
+  assert.equal(pa.pm.isConnected(B.crowId), false, "not connected before mutual admission");
+  assert.equal(await closedWithin(R, 2000), true, "destroyed after preAuthMs");
+  assert.deepEqual(pa.spies.peerConnected, []);
+  assert.equal(await hasMemoryContent(A, "c17"), false);
 });
