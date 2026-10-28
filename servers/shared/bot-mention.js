@@ -10,7 +10,6 @@
 
 export const MENTION_RE = /(?:^|\s)@([A-Za-z0-9][A-Za-z0-9_-]{0,63})\b/;
 
-/** The first `@` token at a word start, or null ("me@x.org" is not one). */
 /** Every distinct `@` token (same grammar as parseMention), in order of first appearance. */
 export function parseMentions(text) {
   if (typeof text !== "string") return [];
@@ -20,6 +19,7 @@ export function parseMentions(text) {
   return out;
 }
 
+/** The first `@` token at a word start, or null ("me@x.org" is not one). */
 export function parseMention(text) {
   if (typeof text !== "string") return null;
   const m = MENTION_RE.exec(text);
