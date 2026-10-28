@@ -136,7 +136,7 @@ function pre0013WithProjectTables(prefix) {
 
 test("EXCLUDED_COLUMNS.research_notes strips the provenance columns", () => {
   assert.deepEqual([...EXCLUDED_COLUMNS.research_notes].sort(), NOTE_PROV);
-  assert.deepEqual([...INBOUND_DROPPED_COLUMNS.research_notes].sort(), NOTE_PROV);
+  assert.deepEqual([...INBOUND_DROPPED_COLUMNS.research_notes].sort(), [...NOTE_PROV, "source_id"].sort());
 });
 
 test("an emitted research_notes entry carries no provenance keys", async () => {
@@ -175,7 +175,8 @@ test("a signed inbound note with extra keys still verifies, applies, and never w
   row = (await db.execute({ sql: "SELECT * FROM research_notes WHERE id = 7102" })).rows[0];
   assert.equal(row.content, "edited on the peer", "the update itself applied (LWW)");
   assert.equal(row.provenance, "snippet");
-  assert.equal(row.quote_found, 0);
+  // the peer's quote_found is never written; the local one is cleared because the text changed
+  assert.equal(row.quote_found, null);
   assert.equal(row.locator, "p9");
   assert.equal(await conflictCount(db, 7102), 0);
 
@@ -190,6 +191,57 @@ test("a signed inbound note with extra keys still verifies, applies, and never w
   row = (await db.execute({ sql: "SELECT * FROM research_notes WHERE id = 7103" })).rows[0];
   assert.equal(row.provenance, "snippet");
   assert.equal(await conflictCount(db, 7103), 0, "a provenance-only difference must not log a conflict");
+});
+
+test("a note's source_id is a local FK: null on the wire, never written from a peer", async () => {
+  const { mgr, db, entries } = makeManager();
+  await mgr.emitChange("research_notes", "insert", { id: 2, content: "x", source_id: 42, project_id: 9 });
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].row.source_id, null, "source_id is nulled like project_id");
+  assert.equal(entries[0].row.project_id, null);
+
+  const mkSource = async (id, method) => db.execute({
+    sql: `INSERT INTO research_sources (id, title, source_type, url, citation_apa, verified, fetch_status, fetched_text, verification_method, verified_by)
+          VALUES (?, 'S', 'web_article', ?, 'C', ?, 'fetched', 'We will ship weekly.', ?, ?)`,
+    args: [id, `https://example.com/sync-${id}`, method ? 1 : 0, method, method ? "owner" : null],
+  });
+  await mkSource(7301, "quotes_checked"); // verified: its quotes are on its page
+  await mkSource(7302, null);
+  await db.execute({
+    sql: "INSERT INTO research_notes (id, source_id, content, note_type, quote_found, lamport_ts) VALUES (7311, 7302, 'not on the page', 'quote', 0, 10)",
+  });
+  // A peer retargets the note at the verified source: the update applies (LWW) but not its source_id.
+  await mgr._applyEntry(REMOTE_ID, signedEntry("research_notes", "update", {
+    id: 7311, source_id: 7301, content: "not on the page", note_type: "quote",
+  }, 50));
+  let n = (await db.execute({ sql: "SELECT * FROM research_notes WHERE id = 7311" })).rows[0];
+  assert.equal(n.source_id, 7302, "a peer cannot move a note to another local source");
+  let s = (await db.execute({ sql: "SELECT * FROM research_sources WHERE id = 7301" })).rows[0];
+  assert.equal(s.verification_method, "quotes_checked", "the verified source is untouched");
+  assert.equal(s.verified, 1);
+
+  // A peer edits the text of a quote on the verified source: the local check no longer holds.
+  await db.execute({
+    sql: "INSERT INTO research_notes (id, source_id, content, note_type, quote_found, lamport_ts) VALUES (7312, 7301, 'We will ship weekly.', 'quote', 1, 10)",
+  });
+  await mgr._applyEntry(REMOTE_ID, signedEntry("research_notes", "update", {
+    id: 7312, content: "We will ship hourly.", note_type: "quote",
+  }, 60));
+  n = (await db.execute({ sql: "SELECT * FROM research_notes WHERE id = 7312" })).rows[0];
+  assert.equal(n.content, "We will ship hourly.");
+  assert.equal(n.source_id, 7301);
+  assert.equal(n.quote_found, null, "the stale quote_found is cleared, not kept as found");
+  s = (await db.execute({ sql: "SELECT * FROM research_sources WHERE id = 7301" })).rows[0];
+  assert.equal(s.verified, 0, "a quotes_checked source never keeps a quote it did not check");
+  assert.equal(s.verification_method, null);
+
+  // An identical newer re-delivery changes nothing and clears nothing.
+  await db.execute({ sql: "UPDATE research_sources SET verified = 1, verification_method = 'manual_owner' WHERE id = 7301" });
+  await mgr._applyEntry(REMOTE_ID, signedEntry("research_notes", "update", {
+    id: 7312, content: "We will ship hourly.", note_type: "quote",
+  }, 70));
+  s = (await db.execute({ sql: "SELECT * FROM research_sources WHERE id = 7301" })).rows[0];
+  assert.equal(s.verification_method, "manual_owner", "only quotes_checked is ever cleared");
 });
 
 // ── share import ────────────────────────────────────────────────────────────
