@@ -81,10 +81,10 @@ async function voiceComment(from, path, content) {
 before(async () => {
   fake = await startFakeNextcloud();
   fake.addFolder("S", { owner: "admin" });
-  A = await new Named("a", "100.64.20.11").init();
-  B = await new Named("b", "100.64.20.12").init();
+  A = await new Named("alpha", "100.64.20.11").init();
+  B = await new Named("bravo", "100.64.20.12").init();
   // C enrolls under the SAME name as A: the name is the peer's choice, so it cannot be trusted to be unique.
-  C = await new Named("a", "100.64.20.13").init();
+  C = await new Named("alpha", "100.64.20.13").init();
   installWorkspace(B);
   ownerToken = randomBytes(32).toString("hex");
   B.sql("INSERT OR REPLACE INTO dashboard_settings (key, value) VALUES ('mcp_local_token_hash', ?)", [sha(ownerToken)]);
@@ -110,21 +110,21 @@ test("positive control: the owner's own comment on B still reads 'Crow'", async 
   assert.equal(await authorOf("S/own.docx", a.data.comment_id), "Crow");
 });
 
-test("another instance's voice bot (callRemote → /router/mcp crow_tools) reads 'Crow (via a)'", async () => {
+test("another instance's voice bot (callRemote → /router/mcp crow_tools) reads 'Crow (via alpha)'", async () => {
   put("voice.docx");
   const a = await voiceComment(A, "S/voice.docx", "from the voice bot");
   assert.equal(a.success, true, JSON.stringify(a));
-  assert.equal(await authorOf("S/voice.docx", a.data.comment_id), "Crow (via a)");
+  assert.equal(await authorOf("S/voice.docx", a.data.comment_id), "Crow (via alpha)");
 });
 
-test("a peer's direct /tools/mcp call reads 'Crow (via a)', whatever actor it claims in _meta", async () => {
+test("a peer's direct /tools/mcp call reads 'Crow (via alpha)', whatever actor it claims in _meta", async () => {
   put("claim.docx");
   const c = await peerTools(A);
   const a = body(await c.callTool({ name: "ws_docs_add_comment", arguments: { path: "S/claim.docx", content: "claimed" },
     _meta: { "crow/actor": { kind: "bot", id: "owner", name: "Alex" } } }));
   assert.equal(a.success, true, JSON.stringify(a));
   const author = await authorOf("S/claim.docx", a.data.comment_id);
-  assert.equal(author, "Crow (via a)");
+  assert.equal(author, "Crow (via alpha)");
   assert.doesNotMatch(author, /Alex|\(bot/);
 });
 
@@ -141,7 +141,7 @@ test("a second peer enrolled under the same name: both are told apart by an id s
   assert.equal(a.success && c.success, true);
   const la = await authorOf("S/dupA.docx", a.data.comment_id);
   const lc = await authorOf("S/dupC.docx", c.data.comment_id);
-  assert.equal(la, `Crow (via a [${idSuffix(A.id)}])`);
-  assert.equal(lc, `Crow (via a [${idSuffix(C.id)}])`);
+  assert.equal(la, `Crow (via alpha [${idSuffix(A.id)}])`);
+  assert.equal(lc, `Crow (via alpha [${idSuffix(C.id)}])`);
   assert.notEqual(la, lc);
 });

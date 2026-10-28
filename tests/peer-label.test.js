@@ -37,20 +37,44 @@ test("two rows with the same name (case-folded) are both suffixed", () => {
   assert.equal(peerDisplayName(C, { others: [A], ownName: "home" }), `Wren [${sfx(C.id)}]`);
 });
 
-test("a peer named like this instance itself is suffixed; an empty name is 'peer' and is suffixed only on a clash", () => {
+test("a peer named like this instance itself is suffixed; an empty name is always 'peer [hex]'", () => {
   assert.equal(peerDisplayName({ id: "inst-x-abcd", name: "HOME" }, { ownName: "home" }), `HOME [${sfx("inst-x-abcd")}]`);
-  assert.equal(peerDisplayName({ id: "inst-x-abcd", name: "\u202e\u200b" }), "peer");
+  assert.equal(peerDisplayName({ id: "inst-x-abcd", name: "\u202e\u200b" }), `peer [${sfx("inst-x-abcd")}]`);
   const l = peerLabels([{ id: "p1", name: "" }, { id: "p2", name: "\u00b7" }]);
   assert.equal(l.get("p1"), `peer [${sfx("p1")}]`);
   assert.equal(l.get("p2"), `peer [${sfx("p2")}]`);
 });
 
-test("homoglyphs: Cyrillic 'а' in 'rаven' clashes with 'raven', and both are suffixed", () => {
-  const l = peerLabels([{ id: "real", name: "raven" }, { id: "fake", name: "r\u0430ven" }]);
-  assert.equal(l.get("real"), `raven [${sfx("real")}]`);
-  assert.equal(l.get("fake"), `r\u0430ven [${sfx("fake")}]`);
-  assert.equal(labelSkeleton("r\u0430ven"), labelSkeleton("RAVEN"));
-  assert.equal(labelSkeleton("\u03bfwl"), labelSkeleton("owl"), "Greek omicron");
+test("ASCII-only names: Cyrillic, Greek and fullwidth look-alikes and bracket look-alikes never match the real raven's label", () => {
+  const real = { id: "inst-real", name: "raven" };
+  const twin = { id: "inst-twin", name: "raven" };
+  const realLabel = peerLabels([real, twin]).get(real.id);
+  assert.equal(realLabel, `raven [${sfx(real.id)}]`);
+  const fakes = {
+    "r\u0430ven": "r ven",                       // Cyrillic a
+    "\u0433\u0430v\u0435n": "v n",                // Cyrillic g, a, e
+    "r\u03b1ven": "r ven",                       // Greek alpha
+    "\uff52\uff41\uff56\uff45\uff4e": "raven",  // fullwidth: NFKC makes it plain ASCII "raven"
+    [`raven [${sfx("inst-real")}]`]: `raven ${sfx("inst-real")}`,
+    [`raven \uff3b${sfx("inst-real")}\uff3d`]: `raven ${sfx("inst-real")}`, // fullwidth brackets fold to [ ], then drop
+    [`raven \u27e6${sfx("inst-real")}\u27e7`]: `raven ${sfx("inst-real")}`,
+  };
+  for (const [name, cleaned] of Object.entries(fakes)) {
+    assert.equal(cleanPeerName(name), cleaned, JSON.stringify(name));
+    assert.match(cleanPeerName(name), /^[A-Za-z0-9 ._-]*$/);
+    const l = peerLabels([real, twin, { id: "inst-imp", name }]);
+    assert.notEqual(l.get("inst-imp"), l.get(real.id), JSON.stringify(name));
+    assert.equal(new Set([...l.values()].map(labelSkeleton)).size, 3, JSON.stringify(name));
+  }
+});
+
+test("an all-non-Latin name, or one with fewer than 2 letters or digits, is 'peer [hex]'", () => {
+  assert.equal(cleanPeerName("\u0412\u043e\u0440\u043e\u043d"), "");
+  assert.equal(peerLabels([{ id: "nl", name: "\u0412\u043e\u0440\u043e\u043d" }]).get("nl"), `peer [${sfx("nl")}]`);
+  assert.equal(peerLabels([{ id: "jp", name: "\u30ab\u30e9\u30b9" }]).get("jp"), `peer [${sfx("jp")}]`);
+  assert.equal(cleanPeerName("x"), "");
+  assert.equal(cleanPeerName("a ."), "");
+  assert.equal(cleanPeerName("ab"), "ab");
 });
 
 test("separator look-alikes in a name are dropped, so a name cannot imitate another peer's suffixed label", () => {

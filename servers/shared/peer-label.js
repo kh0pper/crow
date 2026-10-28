@@ -4,11 +4,12 @@
  * A tool call from a peer (bearer-authenticated, PT-1) carries no proof of WHICH bot or person on the
  * peer made it, so it is labelled only as coming from that instance: "Crow (via <name>)". The name is
  * this instance's own crow_instances row for the peer, which the peer chose when it enrolled, so:
- *  - it is cleaned to an allowlist (NFKC, default-ignorable code points removed, then only letters,
- *    digits, space, ".", "_" and "-"; spaces collapsed; 40 characters), and that exact string is shown;
- *    an empty result is "peer";
- *  - every row's final label is computed together, to a fixpoint: any two labels that are equal under
- *    NFKC + lowercase + a homoglyph skeleton (and any label equal to this instance's own name) are all
+ *  - it is cleaned to an ASCII allowlist (NFKC, default-ignorable code points removed, then only A-Z,
+ *    a-z, 0-9, space, ".", "_" and "-"; spaces collapsed; 40 characters), and that exact string is shown;
+ *    fewer than 2 letters or digits left is "peer", always suffixed (so a non-Latin name shows as
+ *    "peer [hex]" in comment labels);
+ *  - every row's final label is computed together, to a fixpoint: any two labels that are equal
+ *    case-insensitively, trailing separators folded (and any label equal to this instance's own name) are all
  *    suffixed with the first 8 hex of sha256(id) in square brackets ("raven [1a2b3c4d]"; brackets are
  *    never in a cleaned name), then with the full 64 hex if they still collide.
  * Nothing a caller claims (tool arguments, `_meta`) is ever used. A signed bot actor that upgrades this
@@ -19,15 +20,19 @@ import { createHash } from "node:crypto";
 const PEER_TOKEN = "peer-instance";
 const MAX_NAME = 40;
 
-/** The cleaned, displayable name ("" when nothing allowed is left). */
+/** The cleaned, displayable name: ASCII letters, digits, space, ".", "_" and "-" only, or "" when fewer
+ *  than 2 letters or digits are left (the caller then shows "peer"). Non-ASCII is dropped on purpose: it
+ *  makes every bracket and look-alike impossible in a name, so no name can imitate a "[hex]" suffix. */
 export function cleanPeerName(name) {
   const s = String(name == null ? "" : name)
     .normalize("NFKC")
     .replace(/\p{Default_Ignorable_Code_Point}/gu, "")
-    .replace(/[^\p{L}\p{N} ._-]/gu, " ")
+    .replace(/[^A-Za-z0-9 ._-]/g, " ")
     .replace(/ +/g, " ")
+    .trim()
+    .slice(0, MAX_NAME)
     .trim();
-  return Array.from(s).slice(0, MAX_NAME).join("").trim();
+  return (s.match(/[A-Za-z0-9]/g) || []).length >= 2 ? s : "";
 }
 
 /** The id suffix: the first 8 hex of sha256(id), or all 64 with `full`. Distinct ids, distinct suffixes. */
@@ -36,21 +41,10 @@ export function idSuffix(id, full = false) {
   return full ? h : h.slice(0, 8);
 }
 
-// Common Latin look-alikes in Cyrillic and Greek (lowercase), plus a few Latin digit/letter pairs.
-const HOMOGLYPHS = {
-  "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p", "\u0441": "c", "\u0443": "y", "\u0445": "x",
-  "\u0456": "i", "\u0458": "j", "\u0455": "s", "\u0501": "d", "\u051b": "q", "\u051d": "w", "\u04bb": "h",
-  "\u04cf": "l", "\u0432": "b", "\u043a": "k", "\u043c": "m", "\u043d": "h", "\u0442": "t", "\u0457": "i",
-  "\u0491": "r", "\u0261": "g",
-  "\u03b1": "a", "\u03b5": "e", "\u03bf": "o", "\u03c1": "p", "\u03bd": "v", "\u03c4": "t", "\u03b9": "i",
-  "\u03ba": "k", "\u03c7": "x", "\u03c5": "u", "\u03b7": "n", "\u03bc": "u", "\u03c9": "w", "\u03b2": "b",
-  "0": "o", "1": "l", "i": "l",
-};
-/** The comparison key for labels: NFKC, lowercase, homoglyph skeleton, "rn"→"m", "vv"→"w", and trailing
- *  separator-class characters and spaces folded away ("raven." and "raven" are the same label). */
+/** The comparison key for labels: lowercase, with trailing separators and spaces folded away
+ *  ("Raven." and "raven" are the same label). Names are ASCII-only, so no confusable fold is needed. */
 export function labelSkeleton(s) {
-  return Array.from(String(s).normalize("NFKC").toLowerCase()).map((c) => HOMOGLYPHS[c] ?? c).join("")
-    .replace(/rn/g, "m").replace(/vv/g, "w").replace(/[\s._\-\u00b7]+$/u, "");
+  return String(s).toLowerCase().replace(/[\s._-]+$/, "");
 }
 
 // The suffix is in square brackets, which cleanPeerName can never produce, so no name can imitate one.
@@ -66,7 +60,9 @@ export function peerLabels(rows, { ownName = null } = {}) {
   for (const r of rows || []) {
     if (!r || seen.has(String(r.id))) continue;
     seen.add(String(r.id));
-    list.push({ id: String(r.id), base: cleanPeerName(r.name) || "peer", level: 0 });
+    // A name that cleaned to nothing is "peer", which says nothing on its own, so it is always suffixed.
+    const base = cleanPeerName(r.name);
+    list.push({ id: String(r.id), base: base || "peer", level: base ? 0 : 1 });
   }
   const own = ownName != null && cleanPeerName(ownName) ? labelSkeleton(cleanPeerName(ownName)) : null;
   for (let changed = true; changed;) {
