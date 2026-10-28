@@ -279,7 +279,8 @@ async function decideTailnetBinding(ctx, peerId, { k, bound, macInvalid, side })
   }
   if (bound) {
     const fresh = await markPairPinned(ctx.db, localId, peerId);
-    console.log(`[tailnet-sync] pair-bound handshake with ${peerId} (${side} side)${fresh ? "; pinned: unbound handshakes from it are refused from now on" : ""}`);
+    const info = typeof log.log === "function" ? log.log.bind(log) : console.log;
+    info(`[tailnet-sync] pair-bound handshake with ${peerId} (${side} side)${fresh ? "; pinned: unbound handshakes from it are refused from now on" : ""}`);
   }
   return d;
 }
@@ -677,14 +678,17 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx, mar
   }
 
   // Pair binding: only a CR client offering pb (pb rides with cr) can be
-  // bound, and only when we hold the pair key. When it cannot be bound, it is
-  // decided now, before we answer at all (a pinned peer we hold no key for is
-  // refused here, loudly, on this side).
+  // bound, and only when we hold the pair key. Two cases are decided now,
+  // before we answer: a CR-less (legacy) hello, and no key on OUR side (that
+  // Nest item reflects local state, whoever sent the hello). A CR hello
+  // without `pb` is decided only after its cr_proof verifies: the hello
+  // signature does not cover `cr`/`pb`, so a replayer could strip `pb` from
+  // a captured hello and, if we decided here, plant a false Nest alert.
   const pbOn = pbEnabled(ctx);
   const usePb = pbOn && useCr && peerHandshake.pb === PB_VERSION;
   const k = pbOn ? await pairSubkeyFor(ctx, remoteInstanceId) : null;
   const canBind = usePb && Boolean(k);
-  if (pbOn && !canBind) {
+  if (pbOn && (!useCr || !k)) {
     const d = await decideTailnetBinding(ctx, remoteInstanceId, { k, bound: false, macInvalid: false, side: "server" });
     if (!d.ok) { ws.close(1008, PAIR_BINDING_CLOSE_REASON); return; }
   }
@@ -711,10 +715,10 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx, mar
       ws.close(1008, "bad proof");
       return;
     }
-    if (canBind) {
+    if (pbOn && k) {
       let bound = false;
       let macInvalid = false;
-      if (proof && typeof proof === "object" && "pb_proof" in proof) {
+      if (canBind && proof && typeof proof === "object" && "pb_proof" in proof) {
         bound = macEqual(proof.pb_proof, tailnetProofMac(k, { client: remoteInstanceId, server: localId, sN: ourHs.nonce_hex, cN: peerHandshake.nonce_hex }));
         macInvalid = !bound;
       }

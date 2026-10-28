@@ -129,9 +129,9 @@ async function openRaw(port) {
  * An impostor CLIENT holding the seed: a genuine CR handshake as `asId`, with
  * a pb_proof under `key` (none when key is null).
  */
-async function impostorClient(port, identity, { asId, serverId, key = null, addr = null }) {
+async function impostorClient(port, identity, { asId, serverId, key = null, addr = null, pb = true }) {
   const c = await openRaw(port);
-  const h = hello(identity, asId, { addr });
+  const h = hello(identity, asId, { addr, pb });
   c.ws.send(JSON.stringify(h));
   const s = await c.nextFrame(1);
   assert.ok(s?.nonce_hex, "the server answered the hello (the gate is not an earlier check)");
@@ -186,8 +186,8 @@ test("U-T1 new↔new: the handshake binds both ways, markers flow both ways, and
   const { a, b } = fleet;
   const A = await startGateway(fleet, a, { log: LOG });
   const B = await startGateway(fleet, b, { log: LOG });
-  capture();
   try {
+    capture();
     assert.equal(await pinRow(a, b.id), null, "control: no pin before the first handshake");
     await pointAt(a, b, B.port);
     await A.startClients();
@@ -228,9 +228,9 @@ test("U-T2 impostor client with the seed: no key → pb_required (require, unpin
   const { a, b, identity, pairKey } = fleet;
   const A = await startGateway(fleet, a, { log: LOG, pairBindingMode: "require" });
   const B = await startGateway(fleet, b, { log: LOG });
-  capture();
   const raws = [];
   try {
+    capture();
     // M1: require, nothing pinned yet, no key → pb_required.
     let r = await impostorClient(A.port, identity, { asId: b.id, serverId: a.id });
     raws.push(r.c);
@@ -286,6 +286,58 @@ test("U-T2 impostor client with the seed: no key → pb_required (require, unpin
   }
 });
 
+test("U-T2b a replayed hello with pb stripped (no cr_proof possible) plants no Nest item, pinned or not; positive control: a genuine CR-without-pb client that completes cr_proof is recorded (refused when pinned, legacy when not)", async () => {
+  reset();
+  const fleet = await makeFleet({ ids: ["inst2", "inst1"] });
+  const { a, b, identity } = fleet;
+  const A = await startGateway(fleet, a, { log: LOG });
+  const raws = [];
+  // The hello signature covers only instance_id:nonce, so a replayer can
+  // strip `pb` (keeping `cr`) but can never produce the cr_proof.
+  const replayNoProof = async () => {
+    const c = await openRaw(A.port);
+    raws.push(c);
+    c.ws.send(JSON.stringify(hello(identity, b.id, { pb: false })));
+    const s = await c.nextFrame(1);
+    assert.ok(s?.nonce_hex, "A answers the CR hello");
+    assert.equal(s.pb_mac, undefined, "no pb offered → no pb_mac");
+    c.close();
+    await sleep(200);
+  };
+  try {
+    capture();
+    // Unpinned (auto): no "syncs without pair binding" item from a replay.
+    await replayNoProof();
+    let h = getPeerTrustHealth();
+    assert.equal(h.unboundPeers[b.id], undefined, "unpinned: no legacy item planted");
+    assert.equal(h.pairBindingRefusals[b.id], undefined);
+    // Positive control: a genuine CR-without-pb client completes cr_proof → legacy, recorded.
+    const legacy = await impostorClient(A.port, identity, { asId: b.id, serverId: a.id, pb: false });
+    raws.push(legacy.c);
+    assert.equal(legacy.gotFeedKey, true, "auto + unpinned: accepted as legacy");
+    assert.match(getPeerTrustHealth().unboundPeers[b.id]?.message || "", /without pair binding/);
+
+    // Pinned: no refusal item from a replay.
+    await markPairPinned(a.db, a.id, b.id);
+    _resetPeerTrustHealth();
+    await replayNoProof();
+    h = getPeerTrustHealth();
+    assert.equal(h.pairBindingRefusals[b.id], undefined, "pinned: no false rollback alert");
+    assert.equal(h.unboundPeers[b.id], undefined);
+    // Positive control: the genuine client that proves CR is refused and recorded.
+    const r = await impostorClient(A.port, identity, { asId: b.id, serverId: a.id, pb: false });
+    raws.push(r.c);
+    assert.equal(r.reason, "pair binding failed");
+    assert.equal(r.gotFeedKey, false);
+    assert.equal(getPeerTrustHealth().pairBindingRefusals[b.id]?.reason, "pb_required_pinned");
+  } finally {
+    release();
+    for (const c of raws) c.close();
+    await A.close();
+    await fleet.cleanup();
+  }
+});
+
 /* ----------------------------------------------------------- U-T3 */
 
 test("U-T3 impostor server with the seed: the dialer refuses a missing pb_mac (pinned) and an invalid one, leaking no proof and no feed key; positive control: a valid pb_mac gets cr_proof + pb_proof", async () => {
@@ -295,8 +347,8 @@ test("U-T3 impostor server with the seed: the dialer refuses a missing pb_mac (p
   const A = await startGateway(fleet, a, { log: LOG });
   const B = await startGateway(fleet, b, { log: LOG });
   const imp = await impostorServer(identity, { asId: b.id, key: pairKey });
-  capture();
   try {
+    capture();
     await pointAt(a, b, B.port);
     await A.startClients();
     assert.ok(await until(() => linked(a, b), 10_000));
@@ -346,8 +398,8 @@ test("U-T4 mixed versions: an old sibling (legacy handshake, or CR without pb) s
   const { a, b } = fleet;
   const A = await startGateway(fleet, a, { log: LOG, pairBindingMode: "auto" });
   const B = await startGateway(fleet, b, { log: LOG });
-  capture();
   try {
+    capture();
     await pointAt(a, b, B.port);
     await pointAt(b, a, A.port);
 
@@ -407,14 +459,14 @@ test("U-T5 side-effect ordering, accept side: a refused handshake leaves the CR 
   const fleet = await makeFleet({ ids: ["inst2", "inst1"] });
   const { a, b, identity, pairKey } = fleet;
   const A = await startGateway(fleet, a, { log: LOG });
-  await markPairPinned(a.db, a.id, b.id);
   const calls = [];
-  const realInit = a.mgr.initInstance.bind(a.mgr);
-  a.mgr.initInstance = (id, key) => { calls.push({ id, key }); return realInit(id, key); };
   const addr = { gateway_url: "http://127.0.0.1:4999", tailscale_ip: "127.0.0.1", sync_port: 4999 };
-  capture();
   const raws = [];
   try {
+    capture();
+    await markPairPinned(a.db, a.id, b.id);
+    const realInit = a.mgr.initInstance.bind(a.mgr);
+    a.mgr.initInstance = (id, key) => { calls.push({ id, key }); return realInit(id, key); };
     const before = await peerRow(a, b.id);
     assert.equal(before.gateway_url, null, "precondition: an empty row the address backfill would fill");
     const r = await impostorClient(A.port, identity, { asId: b.id, serverId: a.id, addr });
@@ -451,15 +503,15 @@ test("U-T5 side-effect ordering, dial side: a refused server leaves the CR pin, 
   const addr = { gateway_url: null, tailscale_ip: "127.0.0.1", sync_port: 4998 };
   const imp = await impostorServer(identity, { asId: b.id, key: pairKey, addr, feedKey: randomBytes(32).toString("hex") });
   const A = await startGateway(fleet, a, { log: LOG });
-  await markPairPinned(a.db, a.id, b.id);
-  await pointAt(a, b, imp.port);
   // The refresh loop's heal calls initInstance(peer, null) on its own; the
   // handshake's call is the one that carries the peer's feed key.
   const keyed = [];
-  const realInit = a.mgr.initInstance.bind(a.mgr);
-  a.mgr.initInstance = (id, key) => { if (key) keyed.push({ id, key }); return realInit(id, key); };
-  capture();
   try {
+    capture();
+    await markPairPinned(a.db, a.id, b.id);
+    await pointAt(a, b, imp.port);
+    const realInit = a.mgr.initInstance.bind(a.mgr);
+    a.mgr.initInstance = (id, key) => { if (key) keyed.push({ id, key }); return realInit(id, key); };
     const before = await peerRow(a, b.id);
     imp.opts.pbMac = "missing";
     await A.startClients();
@@ -497,8 +549,8 @@ test("U-T6 re-pair window: keys that differ for 2 s are refused (pb_invalid), re
   const { a, b, pairKey } = fleet;
   const A = await startGateway(fleet, a, { log: LOG, refusedRecheckMs: 600_000 });
   const B = await startGateway(fleet, b, { log: LOG });
-  capture();
   try {
+    capture();
     await pointAt(a, b, B.port);
     a.pairKeys.set(b.id, randomBytes(32).toString("hex"));
     const fix = setTimeout(() => a.pairKeys.set(b.id, pairKey), 2000);
@@ -523,9 +575,9 @@ test("U-T6 re-pair window, peer refusal: a pinned server refuses a dialer with n
   const { a, b, pairKey } = fleet;
   const A = await startGateway(fleet, a, { log: LOG, refusedRecheckMs: 600_000 });
   const B = await startGateway(fleet, b, { log: LOG });
-  await markPairPinned(b.db, b.id, a.id);
-  capture();
   try {
+    capture();
+    await markPairPinned(b.db, b.id, a.id);
     await pointAt(a, b, B.port);
     a.pairKeys.delete(b.id);
     const fix = setTimeout(() => a.pairKeys.set(b.id, pairKey), 2000);
@@ -557,8 +609,8 @@ test("U-P4 end to end: the production key lookup with a store at mode 0644 holds
   process.env.CROW_PEER_TOKENS_PATH = store;
   const A = await startGateway(fleet, a, { log: LOG, pairKeyLookup: defaultPairKey });
   const B = await startGateway(fleet, b, { log: LOG });
-  capture();
   try {
+    capture();
     await pointAt(a, b, B.port);
     await A.startClients();
     assert.ok(await until(() => linked(a, b), 10_000), "binds at 0600");
