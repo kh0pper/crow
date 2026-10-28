@@ -140,7 +140,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   // card on another bot's board).
   function openCardById(id){
     var idNum=Number(id);
-    if(!isFinite(idNum)||Math.floor(idNum)!==idNum) return;
+    if(!isFinite(idNum)||Math.floor(idNum)!==idNum||idNum<=0) return;
     var el=document.querySelector('.bb-card[data-card="'+idNum+'"]');
     if(el){
       // A face on this board: the same path as clicking it (a tracker item
@@ -936,7 +936,8 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         // Track 3 Task 13: bird/card are keys THIS parser doesn't own —
         // remembered so updateFilterHash can round-trip them, and read below
         // (after parseFilterHash runs) to drive the drawer's own hash open.
-        if(k==='bird'||k==='card'){
+        // #open=<id> (the Board tab's Details link) opens that card's drawer.
+        if(k==='bird'||k==='card'||k==='open'){
           window._bbForeignHash=window._bbForeignHash||{};
           window._bbForeignHash[k]=v;
         }
@@ -976,6 +977,15 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         goToPerch(window._bbForeignHash.bird);
       } else if(window._bbForeignHash.card && typeof bdFocusCard==='function'){
         bdFocusCard(window._bbForeignHash.card);
+      }
+      // #open=<id>: the card's drawer (plan, results, history, decision),
+      // one-shot: the key leaves the URL so a reload or a later filter
+      // change never reopens it.
+      if(window._bbForeignHash.open!=null){
+        var openId=window._bbForeignHash.open;
+        delete window._bbForeignHash.open;
+        updateFilterHash();
+        openCardById(openId);
       }
     }
 

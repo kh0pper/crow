@@ -214,3 +214,30 @@ export function parseBotDef(row) {
     definition: def,
   };
 }
+
+/** A card board (kanban or task list): the boards the card drawer opens on. */
+export function isCardBoardBot(bot) {
+  return !!bot && (bot.trackerType === "kanban" || bot.trackerType === "task-list");
+}
+
+/**
+ * The bot whose card board shows a project's cards: the first card-board
+ * bot (parseBotDef shape, in the order given) on that project, else null.
+ * Shared by the Bot Board's bare ?card=N and the Board tab's Details link.
+ */
+export function cardBoardBotForProject(bots, projectId) {
+  if (projectId == null) return null;
+  const pid = Number(projectId);
+  return (bots || []).find((b) => b.projectId != null && Number(b.projectId) === pid && isCardBoardBot(b)) || null;
+}
+
+/** Enabled bots (parseBotDef shape) the Bot Board lists, by bot_id; [] without pi_bot_defs. */
+export async function enabledBoardBots(db, excludeBotId) {
+  try {
+    const rows = (await db.execute({
+      sql: "SELECT bot_id, display_name, definition, enabled, project_id FROM pi_bot_defs WHERE enabled=1 AND bot_id != ? ORDER BY bot_id",
+      args: [excludeBotId],
+    })).rows || [];
+    return rows.map(parseBotDef);
+  } catch { return []; }
+}

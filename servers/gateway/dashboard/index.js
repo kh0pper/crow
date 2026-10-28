@@ -76,6 +76,7 @@ import settingsPanel from "./panels/settings.js";
 import contactsPanel from "./panels/contacts.js";
 import botBuilderPanel from "./panels/bot-builder.js";
 import botBoardPanel from "./panels/bot-board.js";
+import boardPanel from "./panels/board.js";
 import designSystemPanel from "./panels/design-system.js";
 import onboardingPanel, { handleIdentityBackupPost, handleCloudProviderPost, handleMeetPost, handlePreviewsPost } from "./panels/onboarding.js";
 import connectPanel from "./panels/connect.js";
@@ -119,6 +120,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   registerPanel(contactsPanel);
   registerPanel(botBuilderPanel);
   registerPanel(botBoardPanel);
+  registerPanel(boardPanel);
   registerPanel(designSystemPanel);
   registerPanel(onboardingPanel);
   registerPanel(connectPanel);

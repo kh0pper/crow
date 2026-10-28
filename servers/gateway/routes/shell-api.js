@@ -1,8 +1,26 @@
 /**
- * shell-api.js — the shell's own routes. Today: move an item between projects.
+ * shell-api.js — the shell's own routes: move an item between projects, and
+ * move a Board card between lanes.
  *
  *   POST /dashboard/shell-api/items/:kind/:ref/project  { project_id: number | "unassigned" }
  *     -> { ok: true, project_id: number | null }
+ *
+ *   POST /dashboard/shell-api/cards/:id/lane
+ *        { to, from, seen_result_id, seen_version, accept_failure? }   (lanes: panels/board/lanes.js)
+ *     -> 200 { ok: true, lane }               the move's one real write is done
+ *        409 { error: "stale", lane }         the card is no longer in `from`, or it
+ *                                             is not the card the operator saw: its
+ *                                             newest result is not `seen_result_id`
+ *                                             (null = none), or its ask version
+ *                                             (cardVersion) is not `seen_version`
+ *        409 { error: "refused", reason }     no real write expresses this move, or
+ *                                             reason "confirm_failure": accepting a
+ *                                             failure or partial result needs
+ *                                             accept_failure: true
+ *     A lane is derived state: the server recomputes it from stored card,
+ *     result, decision and lock state (the panel's laneOf inputs), then runs
+ *     movePlan's one write: moveCard, acceptResult (approve + done), or
+ *     updateCard clearing action_needed.
  *
  * MOUNT: `/dashboard/shell-api`, `router.use(P, dashboardAuth)` as the first
  * statement, mounted in dashboard/index.js AFTER csrfMiddleware (the real CSRF
@@ -21,6 +39,94 @@ import { jsonError } from "./_error.js";
 import { createDbClient } from "../../db.js";
 import { ITEM_KINDS, setItemProject } from "../../shared/shell-items.js";
 import { installedBundleIds } from "../skills-catalog.js";
+import { existsSync } from "node:fs";
+import { TASKS_DB } from "../dashboard/panels/bot-board/data-queries.js";
+import { lockMapFor } from "./board-lock.js";
+import { resolveBoardDef } from "./board-defs.js";
+import { getCard, moveCard, updateCard } from "../board/card-service.js";
+import { acceptResult } from "../board/result-service.js";
+import { LANES, laneOf, movePlan, cardVersion, CONFIRM_OUTCOMES } from "../dashboard/panels/board/lanes.js";
+
+const DASHBOARD_ACTOR = Object.freeze({ kind: "human", id: null, jobId: null });
+
+/** The card's newest board_results row as { id, status, outcome }, or null (none yet, or a pre-0004 store). */
+async function latestResultOf(tdb, id) {
+  try {
+    const r = (await tdb.execute({
+      sql: "SELECT id, status, outcome FROM board_results WHERE item_id=? ORDER BY id DESC LIMIT 1",
+      args: [id],
+    })).rows[0];
+    return r ? { id: Number(r.id), status: String(r.status), outcome: String(r.outcome) } : null;
+  } catch (err) {
+    if (noTable(err)) return null;
+    throw err;
+  }
+}
+
+/**
+ * Everything a lane decision reads, from stored state: the same laneOf
+ * inputs as the Board panel (status, latest result status, action_needed,
+ * data_json, and the lock map keyed by Number id). Null for a card that is
+ * missing, archived or a tracker item.
+ */
+export async function laneState(tdb, cdb, id) {
+  const card = await getCard(tdb, id);
+  if (!card || card.archived_at != null) return null;
+  const def = await resolveBoardDef(tdb, { projectId: card.project_id == null ? null : Number(card.project_id) });
+  const latestResult = await latestResultOf(tdb, id);
+  const locked = (await lockMapFor(cdb, [id])).get(id) === true;
+  const lane = laneOf({ ...card, latest_result_status: latestResult ? latestResult.status : null }, def, { locked });
+  return { card, def, latestResult, locked, lane };
+}
+
+/**
+ * Run a movePlan's one write, guarded on the state `st` it was planned from
+ * (Ruling P10): a move carries the status read (moveCard expectStatus), a
+ * clear_ask the action_needed read (updateCard expect), and an accept the
+ * newest-result check inside its UPDATE and the status re-read on its move
+ * (acceptResult). If the card changed after the read, in this process or
+ * another, the write changes nothing and throws 409 'stale' (an accept whose
+ * approval landed keeps it, and its move is the part that is stale). A refuse or none plan writes nothing.
+ */
+export async function applyLanePlan(tdb, cdb, id, st, plan, actor = DASHBOARD_ACTOR) {
+  if (plan.action === "move") {
+    await moveCard(tdb, cdb, id, plan.status, actor, { expectStatus: String(st.card.status) });
+  } else if (plan.action === "accept") {
+    // Approved, but the card moved after the approval's re-read: the
+    // decision stands, the other move is kept, and the caller hears stale.
+    const r = await acceptResult(tdb, cdb, id, plan.resultId, actor, "dashboard");
+    if (r && r.stale) throw Object.assign(new Error("card changed"), { code: "stale", http: 409 });
+  } else if (plan.action === "clear_ask") {
+    await updateCard(tdb, id, { action_needed: null }, actor, { expect: { action_needed: st.card.action_needed ?? null } });
+  }
+}
+
+/**
+ * True when the move was made against the card as it is stored now (final
+ * review, finding 1): the newest result the page showed (`seen_result_id`,
+ * null for none) and the ask version it showed (`seen_version`, cardVersion).
+ * A body without them (a page from before this check) never matches.
+ */
+export function sawCurrent(st, body) {
+  const rid = body.seen_result_id;
+  const seenRid = rid === null ? null : (Number.isInteger(rid) && rid > 0 ? rid : undefined);
+  const nowRid = st.latestResult ? st.latestResult.id : null;
+  return seenRid === nowRid && typeof body.seen_version === "string" && body.seen_version === cardVersion(st.card);
+}
+
+// One lane move per card at a time in this process, so a second drop of the
+// same card reads the first one's result and gets a clean `stale` before any
+// write. Correctness does not rest on it: the writes themselves are guarded
+// on the state read (applyLanePlan), which also covers other processes.
+const cardQueues = new Map();
+function serialized(id, fn) {
+  const prev = cardQueues.get(id) || Promise.resolve();
+  const run = prev.then(fn, fn);
+  const tail = run.catch(() => {});
+  cardQueues.set(id, tail);
+  tail.then(() => { if (cardQueues.get(id) === tail) cardQueues.delete(id); });
+  return run;
+}
 
 const REF_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 const noTable = (err) => /no such table/i.test(String(err?.message || err));
@@ -82,6 +188,61 @@ export function shellApiRouter(dashboardAuth) {
     } finally {
       try { db.close(); } catch { /* already closed */ }
     }
+  });
+
+  router.post(P + "/cards/:id/lane", async (req, res) => {
+    const id = Number(req.params.id);
+    const b = req.body && typeof req.body === "object" ? req.body : {};
+    if (!/^[1-9]\d*$/.test(String(req.params.id)) || !LANES.includes(b.to) || !LANES.includes(b.from)) {
+      return jsonError(res, 400, "bad_request");
+    }
+    if (!existsSync(TASKS_DB)) return jsonError(res, 404, "not_found");
+
+    await serialized(id, async () => {
+      let tdb, cdb;
+      try {
+        tdb = createDbClient(TASKS_DB);
+        cdb = createDbClient();
+        const st = await laneState(tdb, cdb, id);
+        if (!st) return jsonError(res, 404, "not_found");
+        if (st.lane !== b.from) return jsonError(res, 409, "stale", { lane: st.lane });
+        // Not the card the operator acted on (a newer result, a changed ask):
+        // stale, so the Board re-renders and shows them what is there now.
+        if (!sawCurrent(st, b)) return jsonError(res, 409, "stale", { lane: st.lane });
+
+        const plan = movePlan(st.card, st.def, { locked: st.locked, latestResult: st.latestResult }, b.to);
+        if (plan.action === "refuse") return jsonError(res, 409, "refused", { reason: plan.reason });
+        // Operator ruling (P16): accepting a result short of a full success
+        // (failure or partial) is confirmed first. The
+        // accept's own write is guarded on this result id (newest-in-UPDATE),
+        // so the confirmed result is the one approved.
+        if (plan.action === "accept" && st.latestResult && CONFIRM_OUTCOMES.includes(st.latestResult.outcome) && b.accept_failure !== true) {
+          return jsonError(res, 409, "refused", { reason: "confirm_failure" });
+        }
+        await applyLanePlan(tdb, cdb, id, st, plan);
+
+        const after = await laneState(tdb, cdb, id);
+        res.json({ ok: true, lane: after ? after.lane : b.to });
+      } catch (err) {
+        // A write the state check could not foresee: someone else got there
+        // first (a decision, a lock, an archive). Tell the client where the
+        // card is now; it re-renders from that.
+        if (err && err.http === 409) {
+          if (err.code === "locked") return jsonError(res, 409, "refused", { reason: "locked" });
+          let lane = null;
+          try { lane = (await laneState(tdb, cdb, id))?.lane ?? null; } catch { /* report without a lane */ }
+          return jsonError(res, 409, "stale", { lane });
+        }
+        if (err && err.http === 404) return jsonError(res, 404, "not_found");
+        if (err && err.http === 400) return jsonError(res, 400, "bad_request");
+        if (noTable(err)) return jsonError(res, 503, "not_migrated");
+        console.warn("[shell-api] lane move failed:", err && err.message);
+        jsonError(res, 500, "move failed");
+      } finally {
+        if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
+        if (cdb) { try { cdb.close(); } catch { /* already closed */ } }
+      }
+    });
   });
 
   return router;

@@ -4,11 +4,12 @@
  * Wires bot-board/* submodules. See panels/bot-board/ for the implementation.
  */
 
+import { existsSync } from "node:fs";
 import { escapeHtml, section } from "../shared/components.js";
 import { t } from "../shared/i18n.js";
 import { botBoardStyles } from "./bot-board/css.js";
 import {
-  gatherPeerBots, tableMissing, parseBotDef, TASKS_DB,
+  gatherPeerBots, tableMissing, TASKS_DB, cardBoardBotForProject, enabledBoardBots,
 } from "./bot-board/data-queries.js";
 
 /** Top-level, unarchived cards per project (board_id NULL = kanban cards). */
@@ -37,10 +38,35 @@ import { handleBotBoardPost } from "./bot-board/api-handlers.js";
 import {
   drawerMarkup, renderKanbanBoard, renderCustomTracker,
   botBoardState, botPickerHtml, boardCard, turnOnPanelHtml, turnOnUnassignedHtml,
+  renderStandaloneCardView,
 } from "./bot-board/html.js";
 import { createDbClient } from "../../../db.js";
 import { botRuntimeActive } from "./bot-runtime-flag.js";
 import { CROW_VOICE_BOT_ID } from "../../../shared/voice-bot.js";
+
+/**
+ * The bot whose board holds a card, for a bare ?card=N (the Board tab's
+ * Details link): the bot on the card's project (kanban/task-list first),
+ * else the card's assigned bot, else null. Reads the instance-global
+ * tasks.db only, and never creates it.
+ */
+async function botForCard(bots, cardId) {
+  const id = Number(cardId);
+  if (!Number.isInteger(id) || !existsSync(TASKS_DB)) return null;
+  let tdb, row;
+  try {
+    tdb = createDbClient(TASKS_DB);
+    row = (await tdb.execute({ sql: "SELECT project_id, assigned_bot FROM tasks_items WHERE id = ?", args: [id] })).rows[0];
+  } catch { return null; }
+  finally { if (tdb) { try { tdb.close(); } catch { /* already closed */ } } }
+  if (!row) return null;
+  if (row.project_id != null) {
+    const pid = Number(row.project_id);
+    const match = cardBoardBotForProject(bots, pid) || bots.find((b) => b.projectId != null && Number(b.projectId) === pid);
+    if (match) return match;
+  }
+  return row.assigned_bot ? bots.find((b) => b.botId === String(row.assigned_bot)) || null : null;
+}
 
 export default {
   id: "bot-board",
@@ -71,15 +97,7 @@ export default {
     const q = req.query || {};
 
     // ---- Bot list from pi_bot_defs ----
-    let botRows = [];
-    try {
-      botRows = (await db.execute({
-        sql: "SELECT bot_id, display_name, definition, enabled, project_id FROM pi_bot_defs WHERE enabled=1 AND bot_id != ? ORDER BY bot_id",
-        args: [CROW_VOICE_BOT_ID],
-      })).rows || [];
-    } catch { botRows = []; }
-
-    const bots = botRows.map(parseBotDef);
+    const bots = await enabledBoardBots(db, CROW_VOICE_BOT_ID);
 
     // ---- Backwards compat: ?project=N -> find bot, redirect ----
     if (q.project != null && q.project !== "" && (q.bot == null || q.bot === "")) {
@@ -98,6 +116,15 @@ export default {
     let selBot = null;
     if (reqBot != null) {
       selBot = bots.find((b) => b.botId === reqBot) || null;
+    }
+    // A bare ?card=N opens the card on the board that holds it.
+    // When no kanban board can show it (no bot resolves, or the bot's board
+    // isn't a card board), the card view is rendered on its own so the
+    // card's full detail is always reachable.
+    if (!selBot && reqBot == null && q.card != null && q.card !== "") {
+      selBot = await botForCard(bots, q.card);
+      const kanban = selBot && (selBot.trackerType === "kanban" || selBot.trackerType === "task-list") && selBot.projectId != null;
+      if (!kanban) return renderStandaloneCardView({ db, layout, cardId: q.card, botId: selBot ? selBot.botId : null, lang });
     }
     if (!selBot && bots.length > 0 && reqBot == null) {
       selBot = bots[0]; // default to first enabled bot

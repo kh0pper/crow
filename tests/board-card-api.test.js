@@ -711,6 +711,19 @@ test("POST /card/:id/result/:resultId/decide rejects a recorded result; re-decid
   assert.equal(again.status, 409, "an already-decided result refuses a second decision");
 });
 
+test("two racing decisions on one result: one 200, one 409 already_decided (never a 500)", async () => {
+  const { body: created } = await createTestCard({});
+  const resultId = seedResult(created.id, "success");
+  const send = (decision) => fetch(base + "/card/" + created.id + "/result/" + resultId + "/decide", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ decision }) });
+  const out = await Promise.all([send("approved"), send("rejected")]);
+  assert.deepEqual(out.map((r) => r.status).sort(), [200, 409]);
+  const lost = out.find((r) => r.status === 409);
+  assert.equal((await lost.json()).code, "already_decided");
+  const decides = mutationsFor(created.id).filter((m) => m.verb === "result_decide");
+  assert.equal(decides.length, 1, "one decision recorded");
+});
+
 test("decide-result: bad decision value 400s; a tracker-item id 404s (D-T1.8 guard)", async () => {
   const { body: created } = await createTestCard({});
   const resultId = seedResult(created.id, "success");
