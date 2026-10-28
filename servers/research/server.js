@@ -26,9 +26,9 @@ import { createProjectSpace, updateProjectSpaceMeta } from "../shared/project-sp
 import { parseLaunchSpec, canonicalSpecText, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { resolveDatasetPath } from "../shared/sqlite-datasets.js";
 import { SOURCE_TYPES } from "./source-types.js";
-import { UNKNOWN, resolveCallActor, auditActor } from "./actor.js";
+import { UNKNOWN, resolveCallActor, auditActor, actorLabel } from "./actor.js";
 import { ensureProvenanceSchema } from "./ensure-schema.js";
-import { fetchPage as defaultFetchPage, splitFetchedText, PREVIEW_CHARS, FETCHED_TEXT_MAX } from "../shared/fetch-page.js";
+import { fetchPage as defaultFetchPage, splitFetchedText, PREVIEW_CHARS, FETCHED_TEXT_MAX, REFETCH_AFTER_DAYS } from "../shared/fetch-page.js";
 import { matchQuote } from "./quote-match.js";
 
 // publication_date is free-form TEXT ("1993", "2005-07", "2023-05-14",
@@ -788,18 +788,150 @@ export function createProjectServer(dbPath, options = {}) {
 
   server.tool(
     "crow_verify_source",
-    "Mark a source as verified or unverified.",
+    "Verify a source. method quotes_checked (default): Crow re-checks every quote note on the source against the page text it fetched (re-opening the page when the copy is over 30 days old) and marks the source verified only when every quote is found. method manual_owner: the owner verifies by hand (bots cannot). verified: false clears verification.",
     {
       id: z.number().describe("Source ID"),
-      verified: z.boolean().describe("Whether the source is verified"),
+      verified: z.boolean().default(true).describe("true to verify (default), false to clear verification"),
+      method: z.enum(["quotes_checked", "manual_owner"]).default("quotes_checked")
+        .describe("quotes_checked: every quote note must be on the fetched page; manual_owner: the owner checked it by hand"),
       notes: z.string().max(50000).optional().describe("Verification notes"),
     },
-    async ({ id, verified, notes }) => {
-      await db.execute({
-        sql: "UPDATE research_sources SET verified = ?, verification_notes = ? WHERE id = ?",
-        args: [verified ? 1 : 0, notes ?? null, id],
+    async ({ id, verified, method, notes }, extra) => {
+      const actor = callActor(extra);
+      const fail = (t) => ({ content: [{ type: "text", text: t }], isError: true });
+      const ok = (t) => ({ content: [{ type: "text", text: t }] });
+      if (!(schema.ready || refreshSchema().ready)) {
+        return fail("This Crow is waiting for a schema upgrade, so it cannot verify sources yet. Try again after the upgrade.");
+      }
+
+      const { rows } = await db.execute({
+        sql: "SELECT id, project_id, url, verified, verification_method, fetch_status, fetched_at, fetched_text FROM research_sources WHERE id = ?",
+        args: [id],
       });
-      return { content: [{ type: "text", text: `Source #${id} marked as ${verified ? "verified" : "unverified"}.` }] };
+      const src = rows[0];
+      if (!src) return fail(`Source #${id} not found.`);
+
+      // Who may touch it: a project's sources need write_sources there; a source in no project has
+      // no ACL to check, so only the owner may verify (or unverify) it.
+      const projectId = src.project_id == null ? null : Number(src.project_id);
+      if (projectId == null) {
+        if (actor.kind !== "owner") {
+          return fail(`Source #${id} is not in a project, so only the owner may verify it.`);
+        }
+      } else {
+        try {
+          await assertLocalCapability(db, projectId, "write_sources");
+        } catch (err) {
+          if (err instanceof AclError) return aclErrorToToolResult(err);
+          throw err;
+        }
+      }
+
+      // project_audit_log.project_id is NOT NULL: a project-less source has no audit trail.
+      const noAudit = projectId == null ? " (No audit entry: the source is not in a project.)" : "";
+      const audit = (payload) => projectId == null ? null : appendAudit(db, {
+        project_id: projectId, ...auditActor(actor), action: "source.verify", target: `source:${id}`, payload,
+      });
+      const markVerified = async (how, payload = {}) => {
+        await db.execute({
+          sql: "UPDATE research_sources SET verified = 1, verification_method = ?, verified_by = ?, verification_notes = ? WHERE id = ?",
+          args: [how, actorLabel(actor), notes ?? null, id],
+        });
+        await audit({ method: how, verified: true, ...payload });
+      };
+      // A check outcome, not an error: the source keeps whatever verification it already had.
+      const notVerified = async (why, payload = {}) => {
+        await audit({ method, verified: false, reason: why, ...payload });
+        const kept = src.verified ? ` Its existing verification (${src.verification_method || "unknown method"}) is unchanged.` : "";
+        return ok(`NOT verified: ${why}${kept}${noAudit}`);
+      };
+
+      if (!verified) {
+        await db.execute({
+          sql: "UPDATE research_sources SET verified = 0, verification_method = NULL, verified_by = NULL, verification_notes = ? WHERE id = ?",
+          args: [notes ?? null, id],
+        });
+        await audit({ method: null, verified: false });
+        return ok(`Source #${id} marked as unverified.${noAudit}`);
+      }
+
+      if (method === "manual_owner") {
+        // Only an explicit owner actor: bots, peers, unknown callers and --no-auth mounts never are.
+        if (actor.kind !== "owner") {
+          await audit({ method, verified: false, refused: "not the owner" });
+          return fail("manual_owner: only the owner can verify a source by hand. Use method quotes_checked, which checks the source's quote notes against the fetched page.");
+        }
+        await markVerified("manual_owner");
+        return ok(`Source #${id} verified by the owner (manual_owner).${noAudit}`);
+      }
+
+      // quotes_checked
+      const hasText = src.fetched_text != null && src.fetched_text !== "";
+      if (src.fetch_status !== "fetched" || !hasText) {
+        const status = src.fetch_status || "unknown";
+        const next = status === "failed" || status === "legacy" || status === "unknown"
+          ? "Open it with crow_fetch_source first."
+          : "Its quotes cannot be checked; only the owner can verify it by hand (manual_owner).";
+        return notVerified(`Crow has no fetched page text for source #${id} (fetch status: ${status}), so its quotes cannot be checked. ${next}`);
+      }
+      const { rows: quoteRows } = await db.execute({
+        sql: "SELECT COUNT(*) AS n FROM research_notes WHERE source_id = ? AND note_type = 'quote'",
+        args: [id],
+      });
+      if (Number(quoteRows[0].n) === 0) {
+        return notVerified(`source #${id} has no quote notes to check. First add a quote note (crow_add_note, note_type 'quote', source_id ${id}) with words copied exactly from the page.`);
+      }
+
+      const listFailures = (checks) => {
+        const missing = checks.filter((c) => c.found === 0).map((c) => `#${c.note_id}`);
+        const unchecked = checks.filter((c) => c.found == null).map((c) => `#${c.note_id}`);
+        const parts = [];
+        if (missing.length) parts.push(`quote note(s) ${missing.join(", ")} not found`);
+        if (unchecked.length) parts.push(`quote note(s) ${unchecked.join(", ")} could not be checked`);
+        return parts.join("; ");
+      };
+
+      const fetchedMs = Date.parse(src.fetched_at || "");
+      const stale = !Number.isFinite(fetchedMs) || now() - fetchedMs > REFETCH_AFTER_DAYS * 24 * 60 * 60 * 1000;
+      if (stale) {
+        // Re-open the page and check against the new text in memory; adopt it only when every
+        // quote is still found, so a changed page never silently replaces the copy quotes rely on.
+        if (!src.url) {
+          return notVerified(`could not re-open the page (the source has no URL). Crow's copy is over ${REFETCH_AFTER_DAYS} days old.`);
+        }
+        const r = await safeFetch(fetchPageImpl, src.url);
+        const cols = fetchColumns(r);
+        if (!r.ok || cols.fetch_status !== "fetched" || !cols.fetched_text) {
+          const reason = !r.ok ? clip(cols.fetch_error, 200) : "the page has no text Crow can read now";
+          return notVerified(`could not re-open the page (${reason}). Kept the copy from ${src.fetched_at}.`, { refetched: true });
+        }
+        const checks = await recheckQuotes(db, id, cols.fetched_text);
+        if (!checks.every((c) => c.found === 1)) {
+          return notVerified(
+            `the page has changed since Crow stored it (${listFailures(checks)} on the current page). Kept the copy from ${src.fetched_at}.`,
+            { refetched: true, adopted: false },
+          );
+        }
+        await db.execute({
+          sql: `UPDATE research_sources SET ${FETCH_COLUMN_NAMES.map((c) => `${c} = ?`).join(", ")} WHERE id = ?`,
+          args: [...FETCH_COLUMN_NAMES.map((c) => cols[c]), id],
+        });
+        for (const c of checks) {
+          await db.execute({ sql: "UPDATE research_notes SET quote_found = ? WHERE id = ?", args: [c.found, c.note_id] });
+        }
+        await markVerified("quotes_checked", { refetched: true, adopted: true, quotes: checks.length });
+        return ok(`Source #${id} verified: Crow re-opened the page and found all ${checks.length} quote note(s) on it.${noAudit}`);
+      }
+
+      const checks = await recheckQuotes(db, id, src.fetched_text);
+      for (const c of checks) {
+        await db.execute({ sql: "UPDATE research_notes SET quote_found = ? WHERE id = ?", args: [c.found, c.note_id] });
+      }
+      if (!checks.every((c) => c.found === 1)) {
+        return notVerified(`${listFailures(checks)} on the page Crow fetched (${src.fetched_at}). Fix or remove those notes, then verify again.`);
+      }
+      await markVerified("quotes_checked", { quotes: checks.length });
+      return ok(`Source #${id} verified: all ${checks.length} quote note(s) were found on the page Crow fetched (${src.fetched_at}).${noAudit}`);
     }
   );
 
@@ -1608,7 +1740,7 @@ export function createProjectServer(dbPath, options = {}) {
    - Add sources with crow_add_source — provide URL, title, authors, publication date, source type
    - Crow auto-generates APA citations from source metadata
    - Source types: web_article, academic_paper, book, interview, document, dataset, government_doc, video, podcast, social_media, other
-   - Use crow_verify_source to check URL accessibility and update verification status
+   - Use crow_verify_source after adding quote notes: Crow marks a source verified only when every quote note is found on the page it fetched
    - Search across sources with crow_search_sources (full-text search)
    - Link sources to backends with backend_id to track data provenance
 

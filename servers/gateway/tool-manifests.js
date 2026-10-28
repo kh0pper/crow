@@ -52,7 +52,7 @@ export const TOOL_MANIFESTS = {
       crow_fetch_source: { params: "id, force?", desc: "Re-fetch a source's page (Crow opens it)" },
       crow_search_sources: { params: "query, project_id?, source_type?, verified_only?, limit?", desc: "Search sources (FTS5)" },
       crow_get_source: { params: "id", desc: "Get source details" },
-      crow_verify_source: { params: "id, verified, notes?", desc: "Mark source verified/unverified" },
+      crow_verify_source: { params: "id, verified?, method?, notes?", desc: "Verify a source: quotes checked against the fetched page (or owner by hand)" },
       crow_list_sources: { params: "project_id?, backend_id?, source_type?, verified_only?, sort_by?, limit?", desc: "List sources" },
       crow_add_note: { params: "content, note_type?, provenance?, locator?, project_id?, source_id?, title?, tags?", desc: "Add note" },
       crow_search_notes: { params: "query, project_id?, note_type?, limit?", desc: "Search notes" },
