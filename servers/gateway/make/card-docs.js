@@ -16,7 +16,7 @@ import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 import { resolveBoardDef } from "../routes/board-defs.js";
 import { lockMapFor } from "../routes/board-lock.js";
 import { laneOf } from "../dashboard/panels/board/lanes.js";
-import { cardDrawerHref } from "../board/card-link.js";
+import { cardDrawerHref, drawerHref } from "../board/card-link.js";
 
 const noTable = (err) => /no such table/i.test(String(err?.message || err));
 async function rowsOf(db, sql, args) {
@@ -163,7 +163,7 @@ export async function cardSummary(db, cardId, { tasksDb = null } = {}) {
       const { threadsByCard } = await import("../dashboard/panels/board.js");
       thread = (await threadsByCard(db, [id])).get(id) ?? null;
     } catch { thread = null; }
-    return { id, title: String(row.title ?? ""), lane, href: href || `/dashboard/bot-board#open=${id}`, thread };
+    return { id, title: String(row.title ?? ""), lane, href: href || drawerHref(id, null), thread };
   } catch {
     return null;
   } finally {

@@ -188,7 +188,7 @@ test("cardSummary: an unknown card, a bad id or a missing tasks.db is null, neve
   try { assert.equal(await cardSummary(s.db, 9), null); } finally { process.env.CROW_TASKS_DB_PATH = saved; }
 });
 
-test("cardSummary: when the drawer link can't be worked out, the bare drawer form", async () => {
+test("cardSummary: when the drawer link can't be worked out, the standalone card view", async () => {
   const { cardSummary } = await import("../servers/gateway/make/card-docs.js");
   const { createDbClient } = await import("../servers/db.js");
   const real = createDbClient(process.env.CROW_TASKS_DB_PATH);
@@ -201,7 +201,7 @@ test("cardSummary: when the drawer link can't be worked out, the bare drawer for
   };
   try {
     const c = await cardSummary(s.db, 9, { tasksDb });
-    assert.equal(c.href, "/dashboard/bot-board#open=9");
+    assert.equal(c.href, "/dashboard/bot-board?card=9", "the standalone view, never the default bot's board (Q14)");
     assert.equal(c.lane, "needs_you", "the rest of the summary still stands");
     assert.equal(c.title, 'Write <the> "report"');
   } finally { real.close(); }
