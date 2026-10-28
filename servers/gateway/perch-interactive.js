@@ -159,7 +159,7 @@ import { maskSecrets, maskSecretsDetailed, maskDeep, hiddenNote, HIDDEN_NOTE_RE,
 import { userRuntimeDirs } from "../../scripts/pi-bots/pi_sandbox.mjs";
 import { anchorSecretsDir, checkedInstanceSecretsDirs } from "../shared/secret-values.js";
 import { deliveredDirPath, openDeliveredDir, registerDeliveredRoot } from "../shared/perch-delivered.js";
-import { readLease, acquire as acquireBrowserLease, release as releaseBrowserLease, leaseDir as browserLeaseDir } from "../shared/browser-lease.js";
+import { readLease, renewIfHeld as renewBrowserLease, release as releaseBrowserLease, leaseDir as browserLeaseDir } from "../shared/browser-lease.js";
 import { isBrowserTool, tileEventFor, doneEventFor, heldBySession, namesSession, validDomain, browserInstalled, leaseErrorText, RENEW_MS as BROWSER_RENEW_MS, FORCE_BREAK_AFTER_MS } from "./browser-tile/session-hooks.js";
 
 /** Lease file name under CROW_HOME. Consumed by C-14's reaper exemption. */
@@ -1362,6 +1362,13 @@ export function createInteractiveEngine({
   let browserInstalledCache = null;
   /** Hooks a later task fills: finalShot(ctx) → { id, url } | null. */
   const browserHooks = { finalShot: async () => null };
+  /** A hung shot hook can never wedge the session's lease queue or onTurnEnd. */
+  const FINAL_SHOT_TIMEOUT_MS = 5000;
+  function withDeadline(p, ms) {
+    let h = null;
+    const late = new Promise((resolve) => { h = setTimeout(() => resolve(null), ms); if (h.unref) h.unref(); });
+    return Promise.race([Promise.resolve(p), late]).finally(() => clearTimeout(h));
+  }
 
   /** This instance's lease dir, or null when the browser bundle is not installed here. */
   function browserDir() {
@@ -1417,6 +1424,7 @@ export function createInteractiveEngine({
     if (rec.live && rec.gen === ev.gen && rec.emittedDomain === ev.domain) return;
     if (!rec.live) rec.lastRenewAt = now();   // the MCP server just took or renewed it
     rec.live = true;
+    armBrowserRenew(s, turn);
     rec.gen = ev.gen;
     rec.emittedDomain = ev.domain;
     s.browser = rec;
@@ -1457,11 +1465,27 @@ export function createInteractiveEngine({
     browserQueue(s, async () => {
       const dir = browserDir();
       if (!dir || s.turn !== turn || rec.finished) return;
-      if (!heldBySession(await readLease(dir), s.sessionId, now())) return;
-      // Same holder: acquire() renews in place (gen unchanged). A lease that
-      // changed hands between the read and here answers busy and stays theirs.
-      await acquireBrowserLease(dir, { kind: "bot", sessionId: s.sessionId, botId: s.botId }, browserWriteOpts());
+      // Under the lease lock: renewed only while this session still holds it.
+      await renewBrowserLease(dir, { kind: "bot", sessionId: s.sessionId, botId: s.botId }, browserWriteOpts());
     });
+  }
+
+  /** While the tile is live, renew every 10 s even when the child is silent
+   *  (a slow local model never loses the page between steps, spec §4.1). */
+  function armBrowserRenew(s, turn) {
+    const rec = turn.browser;
+    if (!rec || rec.renewTimer != null) return;
+    rec.renewTimer = timer(function tickRenew() {
+      rec.renewTimer = null;
+      if (s.turn !== turn || rec.finished) return;
+      renewBrowser(s);
+      rec.renewTimer = timer(tickRenew, BROWSER_RENEW_MS);
+    }, BROWSER_RENEW_MS);
+  }
+
+  function clearBrowserRenew(turn) {
+    const rec = turn && turn.browser;
+    if (rec && rec.renewTimer != null) { clearTimer(rec.renewTimer); rec.renewTimer = null; }
   }
 
   /**
@@ -1477,6 +1501,7 @@ export function createInteractiveEngine({
     if (rec) {
       if (rec.finished) return Promise.resolve();
       rec.finished = true;
+      clearBrowserRenew(turn);
     }
     const dir = browserDir();
     if (!dir) return Promise.resolve();
@@ -1488,13 +1513,13 @@ export function createInteractiveEngine({
       try {
         if (rec && rec.live && allowShot && !operator) {
           try {
-            shot = await browserHooks.finalShot({
+            shot = await withDeadline(browserHooks.finalShot({
               sessionId: s.sessionId, botId: s.botId, threadId: s.threadId,
               anchor: rec.anchor, gen: rec.gen,
               genAtEnd: l ? l.gen : null,
               heldAtEnd: heldBySession(l, s.sessionId, now()),
               operatorTook: rec.operatorTook,
-            });
+            }), FINAL_SHOT_TIMEOUT_MS);
           } catch (e) {
             log(s.sessionId + ": browser final shot failed: " + leaseErrorText(e));
           }
@@ -2914,6 +2939,7 @@ export function createInteractiveEngine({
   function stopTurnClocks(s, turn) {
     if (turn.graceTimer != null) { clearTimer(turn.graceTimer); turn.graceTimer = null; }
     clearStall(s);
+    clearBrowserRenew(turn);
   }
 
   async function onTurnEnd(s, turn, end) {

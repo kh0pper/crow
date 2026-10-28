@@ -344,6 +344,21 @@ export async function acquire(dir, holder, { now = Date.now(), ttlMs = EXTERNAL_
   });
 }
 
+/**
+ * Renew the holder's lease only if it still holds it (checked under the lock).
+ * → the renewed lease, or null when it is free, expired or someone else's
+ * (never takes a lease).
+ */
+export async function renewIfHeld(dir, holder, { now = Date.now(), ttlMs = EXTERNAL_TTL_MS, ...opts } = {}) {
+  const h = checkHolder(holder);
+  checkTtl(ttlMs);
+  return withLock(dir, opts, (cur) => {
+    if (!cur || !isHeld(cur, now) || holderKey(cur.holder) !== holderKey(h)) return { result: null };
+    const lease = { ...cur, renewedAt: Math.max(cur.renewedAt, now), ttlMs };
+    return { write: lease, result: lease };
+  });
+}
+
 /** Mark a tool call in flight for the holder (and record its page's targetId). Throws when not the holder. */
 export async function beginCall(dir, holder, { callId, pid, targetId, now = Date.now(), ...opts } = {}) {
   const h = checkHolder(holder);

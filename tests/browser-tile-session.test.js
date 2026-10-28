@@ -58,6 +58,7 @@ function makeClock() {
       }
       t = target;
     },
+    pendingNamed: (name) => [...timers.values()].filter((e) => e.fn.name === name).length,
   };
 }
 
@@ -135,7 +136,7 @@ function makeEngine(o = {}) {
     log: (m) => lines.push(m),
     browserLease: o.browserLease === undefined ? { installed: true, dir: leaseDir, ...(o.isAlive ? { isAlive: o.isAlive } : {}) } : o.browserLease,
   });
-  return { engine, clock, state: bridge._state, leaseDir, lines };
+  return { engine, clock, state: bridge._state, leaseDir, lines, renewTimers: () => clock.pendingNamed("tickRenew") };
 }
 
 async function collect(engine, sessionId) {
@@ -229,6 +230,9 @@ test("the identity env survives the bridge's env assembly; a bot def cannot set 
   const perch = await run({ permission_policy: { bash: "deny", write_paths: [] } },
     { PI_BOT_INTERACTIVE: "1", PI_BOT_PERCH_SESSION_ID: "perchlive-abcd1234", PI_BOT_ID: "botty" });
   assert.deepEqual(perch, { sid: "perchlive-abcd1234", bot: "botty" });
+  const bad = await run({ permission_policy: { bash: "deny", write_paths: [] } },
+    { PI_BOT_INTERACTIVE: "1", PI_BOT_PERCH_SESSION_ID: "perchlive-abcd1234", PI_BOT_ID: "../not a bot id" });
+  assert.deepEqual(bad, { sid: "perchlive-abcd1234", bot: null }, "an invalid bot id is dropped");
   const said = [];
   const realError = console.error;
   console.error = (...a) => said.push(a.join(" "));
@@ -327,6 +331,38 @@ test("renewal at most once per 10 s during a streaming turn", async () => {
   h.clock.advance(20_000); msg(); await tick();
   const after = await lease.readLease(h.leaseDir);
   assert.equal(after.holder, null, "a released lease stays free");
+});
+
+test("a silent turn keeps its lease: a renew timer runs while the tile is live, and dies with the turn", async () => {
+  const h = makeEngine();
+  const { s, pi } = await liveTurn(h);
+  const t0 = h.clock.now();
+  for (let i = 0; i < 13; i++) { h.clock.advance(10_000); await tick(); }   // 130 s, no child events
+  const l = await lease.readLease(h.leaseDir);
+  assert.equal(hooks.heldBySession(l, s.sessionId, h.clock.now()), true, "still held after 130 s of silence");
+  assert.equal(l.renewedAt, t0 + 130_000);
+  const rec = h.engine._sessionRecordForTest(s.sessionId).browser;
+  assert.equal(h.renewTimers(), 1);
+  pi.lastTurn().resolve(END);
+  await tick();
+  assert.equal(h.engine._sessionRecordForTest(s.sessionId).browser, null);
+  assert.equal(rec.renewTimer, null);
+  assert.equal(h.renewTimers(), 0, "no renew timer remains");
+  h.clock.advance(10_000); await tick();
+  assert.equal((await lease.readLease(h.leaseDir)).holder, null, "no renewal after the turn");
+});
+
+test("a hung final-shot hook is bounded at 5 s", async () => {
+  const h = makeEngine();
+  h.engine.browserHooks.finalShot = () => new Promise(() => {});
+  const { sink, pi } = await liveTurn(h);
+  pi.lastTurn().resolve(END);
+  await new Promise((r) => setTimeout(r, 5300));
+  await tick();
+  const done = sink.browser().filter((e) => e.phase === "done");
+  assert.equal(done.length, 1, "done still emitted");
+  assert.equal(done[0].shot, null);
+  assert.equal((await lease.readLease(h.leaseDir)).holder, null, "and the lease released");
 });
 
 test("turn end releases; a live in-call pid defers (releaseOnCallEnd)", async () => {

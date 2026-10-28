@@ -62,7 +62,7 @@ import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 import { buildBotWorld, prepareSpawn } from "./bot-world.mjs";
 import { runSkillReview } from "./skill_review.mjs";
 import { botsDbPath, tasksDbPath as resolveTasksDbPath, resolveSqlitePath, botsProjectsRoot } from "./instance-paths.mjs";
-import { botWorkspaceEnv, BOT_WORKSPACE_KEYS } from "./bot-workspace-env.mjs";
+import { botWorkspaceEnv, BOT_WORKSPACE_KEYS, BOT_ID_RE } from "./bot-workspace-env.mjs";
 import { remoteServersForBot, parseRemoteInvocationFlag, remoteBlockName } from "./remote-blocks.mjs";
 import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
@@ -468,7 +468,7 @@ export class PiRpc {
       // under this session. The reset above drops it with the workspace keys;
       // put the engine's value back. PI_BOT_ID alone grants nothing in pi-lab
       // (its workspace exemption needs all three keys, and validates them).
-      if (!env.PI_BOT_ID && typeof opts.extraEnv.PI_BOT_ID === "string" && opts.extraEnv.PI_BOT_ID) env.PI_BOT_ID = opts.extraEnv.PI_BOT_ID;
+      if (!env.PI_BOT_ID && typeof opts.extraEnv.PI_BOT_ID === "string" && BOT_ID_RE.test(opts.extraEnv.PI_BOT_ID)) env.PI_BOT_ID = opts.extraEnv.PI_BOT_ID;
     }
     // S6-CROW: in fd mode PI_BOT_MCP_CONFIG STAYS SET, pointing at the world
     // root's .mcp.json that fd mode never writes (and removes when stale):

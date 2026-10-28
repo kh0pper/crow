@@ -17,7 +17,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   leaseDir, readLease, acquire, beginCall, endCall, release,
-  takeOperator, handBack, heartbeat, isFree,
+  takeOperator, handBack, heartbeat, isFree, renewIfHeld,
 } from "../servers/shared/browser-lease.js";
 
 const MODULE = join(dirname(fileURLToPath(import.meta.url)), "..", "servers", "shared", "browser-lease.js");
@@ -160,6 +160,27 @@ test("endCall without a pending release keeps the lease", async () => {
   assert.equal(l.holder.sessionId, "s1");
   assert.deepEqual(l.inCall, [{ callId: "c2", pid: 5002 }]);
   assert.equal(l.targetId, "T-1");
+});
+
+test("renewIfHeld renews only a live holding of this holder, never takes one", async () => {
+  const { dir } = tmp();
+  assert.equal(await renewIfHeld(dir, bot("s1"), { now: T0 }), null, "free: nothing taken");
+  assert.equal(await readLease(dir), null);
+  const r = await acquire(dir, bot("s1"), { now: T0, ttlMs: 120000 });
+  await beginCall(dir, bot("s1"), { callId: "c1", pid: 5001, now: T0 + 1 });
+  const l = await renewIfHeld(dir, bot("s1"), { now: T0 + 10000 });
+  assert.equal(l.renewedAt, T0 + 10000);
+  assert.equal(l.gen, r.lease.gen, "no gen bump");
+  assert.deepEqual(l.inCall, [{ callId: "c1", pid: 5001 }], "in-flight calls kept");
+  assert.equal(await renewIfHeld(dir, bot("s2"), { now: T0 + 10001 }), null, "another holder's lease is untouched");
+  assert.equal((await readLease(dir)).holder.sessionId, "s1");
+  assert.equal(await renewIfHeld(dir, bot("s1"), { now: T0 + 10000 + 120001 }), null, "expired: not revived");
+  await release(dir, "s1", { isAlive: dead, now: T0 + 20000 });
+  assert.equal(await renewIfHeld(dir, bot("s1"), { now: T0 + 20001 }), null, "released: not re-taken");
+  assert.equal((await readLease(dir)).holder, null);
+  await takeOperator(dir, { now: T0 + 30000 });
+  assert.equal(await renewIfHeld(dir, bot("s1"), { now: T0 + 30001 }), null);
+  assert.equal((await readLease(dir)).holder.kind, "operator");
 });
 
 test("a dead pid releases at once", async () => {
