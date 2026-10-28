@@ -18,17 +18,24 @@ export const CB_PIN_PREFIX = "contact_hs_cb:";
  */
 export const CB_PIN_ENFORCED = true;
 
+/** LOCAL key `<prefix><ourCrowId>`: some sibling instance has bound (proved our key with a cb_sig). */
+export const INSTANCE_CB_PIN_PREFIX = "instance_hs_cb:";
+
 /**
  * The string a responder signs to bind a challenge to one connection.
- * The `/` and newlines keep it disjoint from every other ed25519-signed
- * string in the tree (64-hex nonces, `cr-resp:`, `cr-proof:`, `addr:`, hello).
+ * `role` is the SIGNER's end of the Noise stream ("init" or "resp"): the two
+ * ends of one connection sign different strings, so neither end's cb_sig can
+ * stand in for the other's. The `/` and newlines keep it disjoint from every
+ * other ed25519-signed string in the tree (64-hex nonces, `cr-resp:`,
+ * `cr-proof:`, `addr:`, hello).
  */
-export function contactCbMessage({ signerCrowId, challengeHex, handshakeHashHex }) {
+export function contactCbMessage({ role, signerCrowId, challengeHex, handshakeHashHex }) {
+  if (role !== "init" && role !== "resp") throw new TypeError('contactCbMessage: role must be "init" or "resp"');
   for (const v of [signerCrowId, challengeHex, handshakeHashHex]) {
     if (typeof v !== "string") throw new TypeError("contactCbMessage: fields must be strings");
     if (v.includes("\n")) throw new Error("contactCbMessage: field contains a newline");
   }
-  return `crow/hs-contact-cb/v1\n${signerCrowId}\n${challengeHex}\n${handshakeHashHex}`;
+  return `crow/hs-contact-cb/v1\n${role}\n${signerCrowId}\n${challengeHex}\n${handshakeHashHex}`;
 }
 
 const pinKey = (crowId) => `${CB_PIN_PREFIX}${crowId}`;
@@ -39,11 +46,31 @@ const pinKey = (crowId) => `${CB_PIN_PREFIX}${crowId}`;
  */
 export async function isCbPinned(db, localId, crowId, { enforced = CB_PIN_ENFORCED } = {}) {
   if (!enforced) return false;
+  return readPin(db, localId, pinKey(crowId));
+}
+
+/** Record that `crowId` bound. No write without a local id. True when newly written. */
+export async function markCbPinned(db, localId, crowId, { enforced = CB_PIN_ENFORCED } = {}) {
+  if (!enforced) return false;
+  return writePin(db, localId, pinKey(crowId));
+}
+
+/** Has any sibling of `ownCrowId` bound? Same fail-closed rules as isCbPinned. */
+export async function isInstanceCbPinned(db, localId, ownCrowId) {
+  return readPin(db, localId, `${INSTANCE_CB_PIN_PREFIX}${ownCrowId}`);
+}
+
+/** Record that a sibling bound. No write without a local id. True when newly written. */
+export async function markInstanceCbPinned(db, localId, ownCrowId) {
+  return writePin(db, localId, `${INSTANCE_CB_PIN_PREFIX}${ownCrowId}`);
+}
+
+async function readPin(db, localId, key) {
   if (!localId) return true;
   try {
     const { rows } = await db.execute({
       sql: "SELECT value FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ? LIMIT 1",
-      args: [pinKey(crowId), localId],
+      args: [key, localId],
     });
     return Number(rows[0]?.value) >= 1;
   } catch (err) {
@@ -51,9 +78,7 @@ export async function isCbPinned(db, localId, crowId, { enforced = CB_PIN_ENFORC
   }
 }
 
-/** Record that `crowId` bound. No write without a local id. True when newly written. */
-export async function markCbPinned(db, localId, crowId, { enforced = CB_PIN_ENFORCED } = {}) {
-  if (!enforced) return false;
+async function writePin(db, localId, key) {
   if (!localId) return false;
   try {
     const r = await db.execute({
@@ -61,7 +86,7 @@ export async function markCbPinned(db, localId, crowId, { enforced = CB_PIN_ENFO
             VALUES (?, ?, '1', datetime('now'))
             ON CONFLICT(key, instance_id) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
             WHERE dashboard_settings_overrides.value IS NOT excluded.value`,
-      args: [pinKey(crowId), localId],
+      args: [key, localId],
     });
     return Number(r.rowsAffected ?? 0) > 0;
   } catch {
@@ -122,6 +147,8 @@ export function wireContactBinding(peerManager, { db, localInstanceId } = {}) {
     lookupKey: (crowId) => lookupPinnedContactKey(db, crowId),
     isCbPinned: (crowId) => isCbPinned(db, localId(), crowId),
     markCbPinned: (crowId) => markCbPinned(db, localId(), crowId),
+    isInstanceCbPinned: (ownCrowId) => isInstanceCbPinned(db, localId(), ownCrowId),
+    markInstanceCbPinned: (ownCrowId) => markInstanceCbPinned(db, localId(), ownCrowId),
   };
 }
 

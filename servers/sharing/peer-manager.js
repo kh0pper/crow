@@ -44,6 +44,17 @@ function hashHexOf(conn) {
   return Buffer.from(h).toString("hex");
 }
 
+/** Our end of the Noise stream, as signed into a cb_sig; null when unknown. */
+function roleOf(conn) {
+  if (typeof conn?.isInitiator !== "boolean") return null;
+  return conn.isInitiator ? "init" : "resp";
+}
+/** The other end's role: what a peer's cb_sig on this connection must name. */
+function peerRoleOf(conn) {
+  const r = roleOf(conn);
+  return r === "init" ? "resp" : r === "resp" ? "init" : null;
+}
+
 /** A verify() that throws is a refusal, never a pass. */
 function verifies(fn) {
   try { return fn() === true; } catch { return false; }
@@ -273,6 +284,7 @@ export class PeerManager {
       mutual: false,       // we admitted it AND it admitted us: side effects run
       answered: false,
       handshakeHashHex: null,
+      ourChallengeHex: challenge.toString("hex"),
       peerInstanceId: null,
       deferredReply: null, // a no-cb asker's challenge, answered only after admission
       held: [],
@@ -417,6 +429,13 @@ export class PeerManager {
       this._kill(conn, state);
       return;
     }
+    // Our own challenge sent back to us is never answered: on one connection
+    // the two ends must never sign for the same nonce.
+    if (state.ourChallengeHex && msg.challenge === state.ourChallengeHex) {
+      this._kill(conn, state);
+      if (this._refusalLog.shouldLog("challenge_reflected")) console.warn("[peer-manager] connection refused: challenge_reflected");
+      return;
+    }
     // One challenge per connection, and only before admission: every
     // compliant peer writes its challenge first, on connect.
     if (state.answered || state.authenticated || state.deciding) return;
@@ -425,8 +444,10 @@ export class PeerManager {
 
     if (msg.cb === 1) {
       const hh = state.handshakeHashHex || hashHexOf(conn);
-      if (!hh) { this._kill(conn, state); return; }
+      const role = roleOf(conn);
+      if (!hh || !role) { this._kill(conn, state); return; }
       const cbSig = sign(contactCbMessage({
+        role,
         signerCrowId: this.identity.crowId,
         challengeHex: msg.challenge,
         handshakeHashHex: hh,
@@ -471,12 +492,21 @@ export class PeerManager {
     let ok = false;
     if (msg.cb_sig !== undefined && msg.cb_sig !== null) {
       state.proof = "cb";
-      ok = verifies(() => verify(contactCbMessage({ signerCrowId: this.identity.crowId, challengeHex: nonce, handshakeHashHex: hh }), msg.cb_sig, ours));
+      ok = verifies(() => verify(contactCbMessage({ role: peerRoleOf(conn), signerCrowId: this.identity.crowId, challengeHex: nonce, handshakeHashHex: hh }), msg.cb_sig, ours));
     } else if (msg.signature !== undefined && msg.signature !== null) {
       state.proof = "sig";
       ok = verifies(() => verify(nonce, msg.signature, ours));
     }
     if (!ok) return this._refuseInstance(conn, state, "key");
+    // Once any sibling has bound, a bare-signature sibling proof is refused
+    // (the sibling counterpart of the contact pin). No binding wired means no
+    // pin store, as before; a read error counts as pinned.
+    const binding = this.contactBinding;
+    if (state.proof === "sig" && typeof binding?.isInstanceCbPinned === "function") {
+      let pinned;
+      try { pinned = (await binding.isInstanceCbPinned(this.identity.crowId)) !== false; } catch { pinned = true; }
+      if (pinned) return this._refuseInstance(conn, state, "cb_required_pinned");
+    }
     await this._admit(conn, state, msg, "instance");
   }
 
@@ -508,7 +538,7 @@ export class PeerManager {
     const cbPresent = msg.cb_sig !== undefined && msg.cb_sig !== null;
     const sigPresent = !cbPresent && msg.signature !== undefined && msg.signature !== null;
     const cbValid = cbPresent
-      && verifies(() => verify(contactCbMessage({ signerCrowId: crowId, challengeHex: nonce, handshakeHashHex: hh }), msg.cb_sig, pinned));
+      && verifies(() => verify(contactCbMessage({ role: peerRoleOf(conn), signerCrowId: crowId, challengeHex: nonce, handshakeHashHex: hh }), msg.cb_sig, pinned));
     const sigValid = sigPresent && verifies(() => verify(nonce, msg.signature, pinned));
     let cbPinned = false;
     if (sigPresent && sigValid) {
@@ -569,6 +599,9 @@ export class PeerManager {
         legacyLogged.add(crowId);
         console.log(`[peer-manager] contact ${logSafe(crowId)} is on older Crow: no channel binding`);
       }
+      if (state.refused || state.closed || conn.destroyed) return false;
+    } else if (state.proof === "cb" && typeof this.contactBinding?.markInstanceCbPinned === "function") {
+      try { await this.contactBinding.markInstanceCbPinned(this.identity.crowId); } catch {}
       if (state.refused || state.closed || conn.destroyed) return false;
     }
 
@@ -643,9 +676,10 @@ export class PeerManager {
     const d = state.deferredReply;
     if (!d || d.sent || !state.authenticated || state.refused) return;
     d.sent = true;
-    // A peer that proved itself with a cb_sig runs current code and asks with
-    // cb:1; it never needs a bare signature, so it never gets one.
-    if (state.proof === "cb") return;
+    // Allowlist: only a peer that proved itself with a bare signature (an
+    // older contact or sibling) gets one back. A cb_sig peer runs current code
+    // and asks with cb:1; anything else is not signed for.
+    if (state.proof !== "sig") return;
     const isInstance = state.kind === "instance" && this.instanceSyncEnabled;
     let feedKeyHex = null;
     if (isInstance && d.instanceId && this.getFeedKeyForInstance) {

@@ -211,7 +211,8 @@ async function rawLeg(t, pm, { claim, signer, mode = "sig", pubkey = signer.ed25
   if (pubkey !== undefined) resp.pubkey = pubkey;
   if (mode === "sig") resp.signature = sign(ch.challenge, signer.ed25519Priv);
   if (mode === "cb") {
-    resp.cb_sig = sign(contactCbMessage({ signerCrowId: claim.crowId, challengeHex: ch.challenge, handshakeHashHex: await R.hash() }), signer.ed25519Priv);
+    const handshakeHashHex = await R.hash();
+    resp.cb_sig = sign(contactCbMessage({ role: R.conn.isInitiator ? "init" : "resp", signerCrowId: claim.crowId, challengeHex: ch.challenge, handshakeHashHex }), signer.ed25519Priv);
   }
   const out = [];
   if (challenge) out.push(challenge);
@@ -1107,4 +1108,164 @@ test("H-C20 between our decision and the peer's authenticated, the pre-admission
     assert.equal(await closedWithin(R, 2000), true, `${label} before the peer's authenticated: destroyed`);
     assert.deepEqual(pa.spies.peerConnected, []);
   }
+});
+
+// ================================================================ security fix round
+const instancePin = async (side, crowId) => (await side.db.execute({
+  sql: "SELECT value FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ?",
+  args: ["instance_hs_cb:" + crowId, side.localId],
+})).rows[0]?.value ?? null;
+
+/** A raw peer bounces pm's own challenge back to it, then forwards whatever pm signed. */
+async function reflect(t, pm, claimCrowId, { cb = true } = {}) {
+  const R = await rawTo(t, pm);
+  const ch = await R.next("challenge");
+  const ask = { type: "challenge", challenge: ch.challenge, crowId: claimCrowId };
+  if (cb) ask.cb = 1;
+  R.send(ask);
+  const got = await R.next("challenge-response", 600);
+  if (got) R.send({ ...got, crowId: claimCrowId }, { type: "authenticated" });
+  return { R, got };
+}
+
+test("H-C21 (S1b) a peer that bounces our own challenge back is refused before anything is signed (sibling and contact claims, with and without cb)", T, async (t) => {
+  const me = id();
+  {
+    const s1 = sibling(me, "inst-r1"), s2 = sibling(me, "inst-r2");
+    await link(t, s1.pm, s2.pm);
+    assert.ok(await until(() => s1.calls.instanceConnected.length === 1, 3000), "control: a real sibling is admitted");
+  }
+  for (const cb of [true, false]) {
+    const s1 = sibling(me, "inst-r1");
+    const { R, got } = await reflect(t, s1.pm, me.crowId, { cb });
+    assert.equal(got, null, `cb=${cb}: nothing signed for a reflected challenge`);
+    assert.equal(R.pmWrites.some((f) => f.type === "challenge-response"), false);
+    assert.equal(await closedWithin(R, 2000), true, `cb=${cb}: destroyed`);
+    assert.deepEqual(s1.calls.instanceConnected, [], `cb=${cb}: not admitted`);
+  }
+  // Contact claim: the same reflection, claiming a contact.
+  const A = await makeSide(t, "A");
+  const B = id();
+  await addContact(A, B);
+  const pa = await newPeer(A);
+  const { R, got } = await reflect(t, pa.pm, B.crowId);
+  assert.equal(got, null);
+  assert.equal(await closedWithin(R, 2000), true);
+  assert.deepEqual(pa.spies.peerConnected, []);
+  assert.ok(logs.some((l) => l.includes("challenge_reflected")), "logged as challenge_reflected");
+});
+
+test("H-C22 (S1a, white-box) role separation: our own cb_sig, reflected on the same connection, does not pass our sibling check", T, async () => {
+  // White-box: these frames are fed straight to _handleMessage with a state
+  // that does not carry our sent challenge, so the reflection check (S1b)
+  // cannot fire and the role tag is the only layer under test.
+  const me = id();
+  const H = randomBytes(32);
+  const X = randomBytes(32);
+  const mkConn = () => ({ isInitiator: true, handshakeHash: H, written: [], destroyed: false,
+    write(s) { for (const l of String(s).split("\n")) if (l.trim()) this.written.push(JSON.parse(l)); }, destroy() { this.destroyed = true; } });
+  const s = sibling(me, "inst-w1");
+  const conn = mkConn();
+  await s.pm._handleMessage(conn, { type: "challenge", challenge: X.toString("hex"), cb: 1, crowId: me.crowId }, randomBytes(32), {});
+  const ours = conn.written.find((f) => f.type === "challenge-response");
+  assert.equal(typeof ours?.cb_sig, "string", "we signed the cb challenge");
+
+  // Positive control: the OTHER end's role ("resp", since we are the initiator) admits.
+  {
+    const s2 = sibling(me, "inst-w2");
+    const c2 = mkConn();
+    const peerSig = sign(contactCbMessage({ role: "resp", signerCrowId: me.crowId, challengeHex: X.toString("hex"), handshakeHashHex: H.toString("hex") }), me.ed25519Priv);
+    const st = {};
+    await s2.pm._handleMessage(c2, { type: "challenge-response", crowId: me.crowId, pubkey: me.ed25519Pubkey, cb_sig: peerSig, instance_id: "inst-x" }, X, st);
+    await s2.pm._handleMessage(c2, { type: "authenticated" }, X, st);
+    assert.equal(c2.destroyed, false, "control: the opposite role admits");
+    assert.deepEqual(s2.calls.instanceConnected, [[me.crowId, "inst-x"]]);
+  }
+  const s3 = sibling(me, "inst-w3");
+  const c3 = mkConn();
+  const st = {};
+  await s3.pm._handleMessage(c3, { type: "challenge-response", crowId: me.crowId, pubkey: me.ed25519Pubkey, cb_sig: ours.cb_sig, instance_id: "inst-x" }, X, st);
+  await s3.pm._handleMessage(c3, { type: "authenticated" }, X, st);
+  assert.equal(c3.destroyed, true, "our own role's cb_sig is refused");
+  assert.deepEqual(s3.calls.instanceConnected, []);
+});
+
+test("H-C23 (S2, white-box) the deferred bare reply is an allowlist: only a bare-signature proof gets it", T, async () => {
+  const me = id();
+  const pm = sibling(me, "inst-d").pm;
+  const send = async (proof) => {
+    const conn = { written: [], write(s) { this.written.push(JSON.parse(s)); }, destroy() {} };
+    const state = { authenticated: true, kind: "contact", proof, deferredReply: { challengeHex: randomBytes(32).toString("hex"), sent: false } };
+    await pm._sendDeferredReply(conn, state);
+    return conn.written.filter((f) => f.type === "challenge-response");
+  };
+  assert.equal((await send("sig")).length, 1, "control: a bare-signature proof gets the reply");
+  for (const proof of ["cb", undefined, null, "", "SIG", "legacy"]) {
+    assert.deepEqual(await send(proof), [], `proof=${JSON.stringify(proof)}: nothing signed`);
+  }
+});
+
+test("H-C24 (S3) once a sibling binds, the sibling pin is written; an old sibling is then refused and gets no feed key", T, async (t) => {
+  const { wireContactBinding } = await import("../servers/sharing/contact-binding.js");
+  const me = id();
+  const mk = async (name) => {
+    const side = await makeSide(t, name, me);
+    const s = sibling(me, side.localId);
+    wireContactBinding(s.pm, { db: side.db, localInstanceId: side.localId });
+    return { side, ...s };
+  };
+  // Positive control: before the pin, an old sibling works.
+  {
+    const n = await mk("N0");
+    const o = sibling(me, "inst-old0", { PM: OldPeerManager });
+    await link(t, n.pm, o.pm);
+    assert.ok(await until(() => n.calls.instanceConnected.length === 1 && o.calls.keyReceived.length === 1, 3000), "control: unpinned, the old sibling connects and gets the key");
+    assert.equal(await instancePin(n.side, me.crowId), null, "a bare-signature sibling writes no pin");
+  }
+  const n = await mk("N1"), n2 = await mk("N2");
+  await link(t, n.pm, n2.pm);
+  assert.ok(await until(async () => (await instancePin(n.side, me.crowId)) === "1", 3000), "a cb sibling writes the sibling pin");
+  assert.equal(await pinCount(n.side), 0, "no contact pin for a sibling");
+
+  const o = sibling(me, "inst-old1", { PM: OldPeerManager });
+  const L = await link(t, n.pm, o.pm);
+  await sleep(400);
+  assert.equal(n.calls.instanceConnected.filter(([, i]) => i === "inst-old1").length, 0, "the old sibling is refused");
+  assert.deepEqual(o.calls.keyReceived, [], "no feed key reaches it");
+  assert.equal(L.wa.some((f) => f.type === "challenge-response" || "feed_key_hex" in f), false, "nothing signed, no piggyback");
+  assert.deepEqual(n.calls.keyReceived.filter(([i]) => i === "inst-old1"), [], "its piggyback is not accepted");
+  assert.ok(logs.some((l) => l.includes("instance-sync connection refused: cb_required_pinned")));
+});
+
+test("H-C25 (S3) an old sibling used as an oracle against a pinned new node is refused", T, async (t) => {
+  const { wireContactBinding, markInstanceCbPinned } = await import("../servers/sharing/contact-binding.js");
+  const me = id();
+  const oracle = async (n) => {
+    const toN = await rawTo(t, n.pm);
+    const chN = await toN.next("challenge");
+    const o = new OldPeerManager(me, { env: {} });
+    const toO = await rawTo(t, o);
+    await toO.next("challenge");
+    toO.send({ type: "challenge", challenge: chN.challenge, crowId: "crow:relay" });
+    const got = await toO.next("challenge-response", 1000);
+    if (got) toN.send({ type: "challenge-response", crowId: me.crowId, pubkey: me.ed25519Pubkey, signature: got.signature }, { type: "authenticated" });
+    return { toN, got };
+  };
+  {
+    const side = await makeSide(t, "U", me);
+    const n = sibling(me, side.localId);
+    wireContactBinding(n.pm, { db: side.db, localInstanceId: side.localId });
+    const { got } = await oracle(n);
+    assert.equal(typeof got?.signature, "string");
+    assert.ok(await until(() => n.calls.instanceConnected.length === 1, 3000),
+      "documented residual: before any sibling has bound, a node accepts a bare signature for its own Crow ID, here one relayed from an older sibling");
+  }
+  const side = await makeSide(t, "P", me);
+  const n = sibling(me, side.localId);
+  wireContactBinding(n.pm, { db: side.db, localInstanceId: side.localId });
+  assert.equal(await markInstanceCbPinned(side.db, side.localId, me.crowId), true);
+  const { toN, got } = await oracle(n);
+  assert.equal(typeof got?.signature, "string", "the old sibling signed");
+  assert.equal(await closedWithin(toN, 3000), true, "refused");
+  assert.deepEqual(n.calls.instanceConnected, []);
 });

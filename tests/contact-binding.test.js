@@ -15,6 +15,7 @@ import {
   lookupPinnedContactKey, decideContactProof, wireContactBinding, RefusalLog,
 } from "../servers/sharing/contact-binding.js";
 import { InstanceSyncManager } from "../servers/sharing/instance-sync.js";
+import * as CB from "../servers/sharing/contact-binding.js";
 import { makeRealDb } from "./fixtures/sync-fleet.mjs";
 
 const dirs = [];
@@ -50,15 +51,21 @@ test("U-1 crowIdMatchesKey", () => {
 
 // ── U-2 ────────────────────────────────────────────────────────────────────
 test("U-2 contactCbMessage", () => {
-  const base = { signerCrowId: "crow:abc", challengeHex: "1".repeat(64), handshakeHashHex: "2".repeat(64) };
+  const base = { role: "init", signerCrowId: "crow:abc", challengeHex: "1".repeat(64), handshakeHashHex: "2".repeat(64) };
   const m = contactCbMessage(base);
-  assert.equal(m, `crow/hs-contact-cb/v1\ncrow:abc\n${"1".repeat(64)}\n${"2".repeat(64)}`);
-  for (const k of Object.keys(base)) {
+  assert.equal(m, `crow/hs-contact-cb/v1\ninit\ncrow:abc\n${"1".repeat(64)}\n${"2".repeat(64)}`);
+  // The role separates the two ends of one connection: the initiator's string
+  // never equals the responder's, so one end's cb_sig is never the other's.
+  assert.notEqual(contactCbMessage({ ...base, role: "resp" }), m, "role changes it");
+  for (const bad of [undefined, "", "INIT", "initiator", "init\n", 1, true]) {
+    assert.throws(() => contactCbMessage({ ...base, role: bad }), /role/, `role=${JSON.stringify(bad)}`);
+  }
+  for (const k of ["signerCrowId", "challengeHex", "handshakeHashHex"]) {
     assert.notEqual(contactCbMessage({ ...base, [k]: base[k] + "x" }), m, `${k} changes it`);
   }
   assert.doesNotMatch(m, /^[0-9a-f]{64}$/);
   assert.ok(!/^(cr-resp:|cr-proof:|addr:)/.test(m));
-  for (const k of Object.keys(base)) assert.throws(() => contactCbMessage({ ...base, [k]: "a\nb" }), /newline/);
+  for (const k of ["signerCrowId", "challengeHex", "handshakeHashHex"]) assert.throws(() => contactCbMessage({ ...base, [k]: "a\nb" }), /newline/);
 });
 
 // ── U-3 ────────────────────────────────────────────────────────────────────
@@ -130,9 +137,11 @@ test("U-4 pins: an inbound sync entry cannot write a pin; allowlisted control ap
     return e;
   };
   await mgr._applyEntry(REMOTE, entry(CB_PIN_PREFIX + "x", "1", 5));
+  await mgr._applyEntry(REMOTE, entry("instance_hs_cb:x", "1", 7)); // the sibling pin is LOCAL too
   await mgr._applyEntry(REMOTE, entry("nav_groups", "[]", 6)); // positive control
   const got = async (k) => (await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [k] })).rows;
   assert.equal((await got(CB_PIN_PREFIX + "x")).length, 0, "pin key not applied");
+  assert.equal((await got("instance_hs_cb:x")).length, 0, "sibling pin key not applied");
   assert.equal((await got("nav_groups")).length, 1, "allowlisted key applied (control)");
   assert.equal(await isCbPinned(db, LOCAL, "x"), false);
 });
@@ -193,4 +202,34 @@ test("wireContactBinding resolves the local id lazily", async () => {
   const K = "c".repeat(64);
   await db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey) VALUES ('crow:lk', ?, ?)", args: [K, "f".repeat(64)] });
   assert.equal(await pm.contactBinding.lookupKey("crow:lk"), K);
+});
+
+// ── U-7 ────────────────────────────────────────────────────────────────────
+test("U-7 the sibling pin: LOCAL, fail-closed, never written without a local id", async () => {
+  const { db } = await realDb();
+  assert.equal(CB.INSTANCE_CB_PIN_PREFIX, "instance_hs_cb:");
+  assert.equal(await CB.isInstanceCbPinned(db, LOCAL, "crow:me"), false);
+  assert.equal(await CB.markInstanceCbPinned(db, LOCAL, "crow:me"), true, "newly written");
+  assert.equal(await CB.markInstanceCbPinned(db, LOCAL, "crow:me"), false, "already pinned");
+  assert.equal(await CB.isInstanceCbPinned(db, LOCAL, "crow:me"), true);
+  assert.equal(await CB.isCbPinned(db, LOCAL, "crow:me"), false, "a separate key from the contact pin");
+  const row = (await db.execute({ sql: "SELECT instance_id FROM dashboard_settings_overrides WHERE key = ?", args: ["instance_hs_cb:crow:me"] })).rows[0];
+  assert.equal(row.instance_id, LOCAL, "LOCAL scope");
+  const err = (m) => ({ execute: async () => { throw new Error(m); } });
+  assert.equal(await CB.isInstanceCbPinned(err("database is locked"), LOCAL, "crow:me"), true, "read error: pinned");
+  assert.equal(await CB.isInstanceCbPinned(err("no such table: dashboard_settings_overrides"), LOCAL, "crow:me"), false);
+  for (const bad of [null, undefined, ""]) {
+    assert.equal(await CB.isInstanceCbPinned(db, bad, "crow:new"), true, "no local id: pinned");
+    assert.equal(await CB.markInstanceCbPinned(db, bad, "crow:new"), false, "no write without an id");
+  }
+  const n = (await db.execute({ sql: "SELECT COUNT(*) c FROM dashboard_settings_overrides WHERE key = ?", args: ["instance_hs_cb:crow:new"] })).rows[0].c;
+  assert.equal(n, 0);
+  const pm = {};
+  let cur = null;
+  CB.wireContactBinding(pm, { db, localInstanceId: () => cur });
+  assert.equal(await pm.contactBinding.isInstanceCbPinned("crow:w"), true, "no id yet: fail closed");
+  cur = LOCAL;
+  assert.equal(await pm.contactBinding.isInstanceCbPinned("crow:w"), false);
+  assert.equal(await pm.contactBinding.markInstanceCbPinned("crow:w"), true);
+  assert.equal(await pm.contactBinding.isInstanceCbPinned("crow:w"), true);
 });

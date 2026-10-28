@@ -710,7 +710,7 @@ test("Hyperswarm handshake is no signing oracle: it signs only a 32-byte hex cha
     const pm = new PeerManager(fleet.identity);
     const run = async (challenge, extra = { cb: 1 }) => {
       const writes = []; let destroyed = false;
-      const conn = { handshakeHash: randomBytes(32), write: (d) => writes.push(JSON.parse(String(d))), destroy: () => { destroyed = true; } };
+      const conn = { isInitiator: true, handshakeHash: randomBytes(32), write: (d) => writes.push(JSON.parse(String(d))), destroy: () => { destroyed = true; } };
       await pm._handleMessage(conn, { type: "challenge", challenge, ...extra }, Buffer.alloc(32), {}, () => {});
       await sleep(20);
       return { writes, destroyed };
