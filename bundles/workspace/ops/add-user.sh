@@ -15,6 +15,10 @@ if occ user:info "$LOGIN" >/dev/null 2>&1; then
   echo "Account $LOGIN already exists; nothing changed."
   exit 0
 fi
+step "checking the display name"
+RC=0; owner_name_clash "$NAME" || RC=$?
+[ "$RC" != 0 ] || die "that display name matches the owner's; pick another"
+[ "$RC" = 1 ] || die "could not check display names against the owner's (is Workspace running?); try again"
 step "creating the account"
 PW="$(random_pw 20)"
 printf '%s\n' "$PW" | occ_with_pass user:add --password-from-env --display-name="$NAME" --group household "$LOGIN" >/dev/null

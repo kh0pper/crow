@@ -142,6 +142,8 @@ occ config:app:set onlyoffice jwt_header --value=Authorization >/dev/null
 occ config:system:set onlyoffice allow_local_address --value=true --type=boolean >/dev/null
 occ config:app:set onlyoffice defFormats --value='{"docx":true,"xlsx":true,"pptx":true,"odt":true,"ods":true,"odp":true}' >/dev/null
 occ config:app:set onlyoffice editFormats --value='{"odt":true,"ods":true,"odp":true}' >/dev/null
+# The editor's Save button (forcesave) makes the comment loop see a comment before the document is closed.
+occ config:app:set onlyoffice customizationForcesave --value=true >/dev/null
 wait_for "ONLYOFFICE" oo_connected
 
 step "Crow live plugin"
@@ -173,6 +175,8 @@ occ group:add crow-bots >/dev/null 2>&1 || true
 occ config:app:set core shareapi_allow_links_exclude_groups --value='["crow-bots"]' >/dev/null
 occ config:app:set core shareapi_restrict_user_enumeration_to_group --value=yes >/dev/null
 occ config:app:set core shareapi_restrict_user_enumeration_full_match --value=yes >/dev/null
+# Display names identify the document owner in comments, so nobody may rename themselves to match one.
+occ config:system:set allow_user_to_change_display_name --value=false --type=boolean >/dev/null
 
 step "Menu calendar"
 # 6. The shared "Menu" calendar, owned by the admin (shared with people in the Calendar app).
@@ -209,6 +213,19 @@ print(" ".join(str(t["id"]) for t in d if t.get("name") == "'"$TOKEN_NAME"'"))')
   unset TOKEN
   log "$BOT: account ready; app password stored in .env (mode 600)"
 fi
+
+step "comment-loop safety checks"
+# 8. Comment loop: a user whose display name equals an owner's (NFC, trimmed, case-folded) could pass as the owner,
+#    so the loop is blocked until that is fixed. If the check cannot run, the existing block is left as it is.
+RC=0; owner_name_clash --all || RC=$?
+case "$RC" in
+  0) env_set WORKSPACE_COMMENT_LOOP_BLOCKED duplicate_display_name; log "comment loop: blocked, another account has an owner's display name" ;;
+  1) env_set WORKSPACE_COMMENT_LOOP_BLOCKED ""; log "comment loop: no duplicate display names" ;;
+  *) log "comment loop: could not check display names (any existing block is left as it is)" ;;
+esac
+# The comment watcher fails closed without Nextcloud's instance id (it maps the editor's uids with it).
+IID="$(occ config:system:get instanceid 2>/dev/null | tr -d '[:space:]' || true)"
+if [[ "$IID" =~ ^[A-Za-z0-9]{1,64}$ ]]; then env_set WORKSPACE_NC_INSTANCE_ID "$IID"; else log "comment loop: could not read the Nextcloud instance id"; fi
 
 step "writing the completion marker"
 # Last step: completion marker (non-secret). The Office page shows "ready" only with it.

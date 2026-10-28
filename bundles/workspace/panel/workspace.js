@@ -178,6 +178,26 @@ async function renderQuickView(t, lang, req) {
   }
 }
 
+/** The comment-loop mode card (shadow logging) from the bundle; any failure shows nothing rather than a 500. */
+async function renderCommentCard(lang, req) {
+  try {
+    const dir = await bundleDir();
+    const view = dir && join(dir, "server", "comments", "settings-view.js");
+    if (!view || !existsSync(view)) return "";
+    const [{ renderCommentSettings }, { openWorkspaceDb }, { getConfig }, { getWatch }] = await Promise.all([
+      import(pathToFileURL(view).href), import(pathToFileURL(join(dir, "server", "db.js")).href),
+      import(pathToFileURL(join(dir, "server", "config.js")).href), import(pathToFileURL(join(dir, "server", "comments", "store.js")).href),
+    ]);
+    const cfg = getConfig();
+    const watch = await getWatch(await openWorkspaceDb());
+    const n = String(req.query?.notice || "");
+    return renderCommentSettings({ lang, csrf: req.csrfToken, watch, blocked: watch.blocked_reason || cfg.commentLoopBlocked || "", notice: ["saved", "not_yet", "bad_mode", "error"].includes(n) ? n : "" });
+  } catch (e) {
+    console.warn(`[workspace] comment settings unavailable: ${e?.code || "error"}`);
+    return "";
+  }
+}
+
 export function renderTabs(lang, view) {
   const t = T[lang === "es" ? "es" : "en"];
   const tab = (v, label) => `<a href="/dashboard/workspace?view=${v}" style="display:inline-block;min-height:44px;line-height:44px;padding:0 .9rem;border-radius:8px;text-decoration:none;${view === v ? "font-weight:700;background:var(--crow-bg-elevated);" : ""}"${view === v ? ' aria-current="page"' : ""}>${esc(label)}</a>`;
@@ -199,7 +219,7 @@ export default {
     if (view === "quick") {
       content = renderTabs(lang, view) + (await renderQuickView(t, lang, req));
     } else {
-      content = renderTabs(lang, view) + renderWorkspacePage(readPublicSettings(crowHome), lang, crowHome);
+      content = renderTabs(lang, view) + renderWorkspacePage(readPublicSettings(crowHome), lang, crowHome) + (await renderCommentCard(lang, req));
     }
     res.send(layout({ title: t.title, content }));
   },

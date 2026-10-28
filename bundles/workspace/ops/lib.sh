@@ -53,3 +53,28 @@ random_pw() {
   [ "${#raw}" -ge "$1" ] || die "could not gather randomness"
   printf '%s' "${raw:0:$1}"
 }
+
+# owner_name_clash [--all | "<Display Name>"]: do display names collide with an owner's? Compares NFC + trim + casefold
+# (python3; the user list arrives on stdin, the names as argv, never in the source). Owners: WORKSPACE_OWNER_UIDS, else
+# the admin login. Exit 0 = clash (--all: a non-owner account has an owner's name; <name>: that name equals an
+# owner's), 1 = no clash, 2 = could not tell (occ or the owner list failed): callers must not treat 2 as "clear".
+owner_name_clash() {
+  local arg="${1:---all}" admin owners
+  admin="$(env_get WORKSPACE_ADMIN_USER)"; admin="${admin:-admin}"
+  owners="$(env_get WORKSPACE_OWNER_UIDS)"; owners="${owners:-$admin}"
+  occ user:list --output=json 2>/dev/null | python3 -c '
+import json, sys, unicodedata
+norm = lambda s: unicodedata.normalize("NFC", str(s)).strip().casefold()
+try:
+    users = json.load(sys.stdin)
+    assert isinstance(users, dict)
+except Exception:
+    sys.exit(2)
+owners = [o.strip() for o in sys.argv[2].split(",") if o.strip()]
+if not owners or any(o not in users or not str(users[o]).strip() for o in owners):
+    sys.exit(2)
+names = {norm(users[o]) for o in owners}
+if sys.argv[1] == "--all":
+    sys.exit(0 if any(norm(n) in names for u, n in users.items() if u not in owners) else 1)
+sys.exit(0 if norm(sys.argv[1]) in names else 1)' "$arg" "$owners" || return $?
+}

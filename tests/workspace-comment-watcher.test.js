@@ -43,7 +43,16 @@ async function setup({ mode = "shadow", watchSince = T0 - HOUR, seams } = {}) {
   OO.setNcInstanceId(null); // the instance id is learnt per test, from this test's editor sessions (or the env)
   const fake = await startFakeNextcloud(); fakes.push(fake);
   const names = { admin: "admin", coworker: "coworker", "crow-bot": "Crow bot" };
+  // Crow bot's full-match autocomplete: exact display-name matches (any case), outside the owner's group too.
+  const ac = { users: [], down: false };
   fake.extraRoutes = async (req, res, body, { send, ms }) => {
+    if (req.url.startsWith("/ocs/v2.php/core/autocomplete/get")) {
+      if (ac.down) { send(503); return true; }
+      const q = (new URL(req.url, "http://x").searchParams.get("search") || "").normalize("NFC").trim().toLowerCase();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ocs: { meta: { status: "ok", statuscode: 200 }, data: ac.users.filter((u) => u.label.normalize("NFC").trim().toLowerCase() === q) } }));
+      return true;
+    }
     const pm = req.url.match(/^\/remote\.php\/dav\/principals\/users\/([^/]+)\/$/);
     if (pm && req.method === "PROPFIND" && names[pm[1]]) { send(207, ms(`<d:response><d:href>${req.url}</d:href><d:propstat><d:prop><d:displayname>${names[pm[1]]}</d:displayname></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`)); return true; }
     return fake.failRoute ? fake.failRoute(req, res, send) : false;
@@ -69,7 +78,7 @@ async function setup({ mode = "shadow", watchSince = T0 - HOUR, seams } = {}) {
     .map((r) => ({ kind: r.kind, fileId: Number(r.file_id), ...JSON.parse(r.detail_json) }));
   const verdicts = async (fileId) => (await events(undefined, fileId)).filter((e) => ["would_fire", "unverified", "history"].includes(e.kind));
   const advance = (ms) => { clock.t += ms; };
-  return { fake, db, clock, tick, doc, save, open, events, verdicts, advance };
+  return { ac, fake, db, clock, tick, doc, save, open, events, verdicts, advance };
 }
 const hankRoot = (date, text = "@hank please tidy this section", extra = {}) => ({ author: "admin", date: iso(date), text, quoted: "con", durableId: "1A2B3C4D", ...extra });
 
@@ -673,4 +682,42 @@ test("hash contract: a live report and the saved .docx comment built from the sa
   const sv = (await s.verdicts(f.fileId)).find((e) => e.source === "saved");
   assert.deepEqual(Object.keys(lv).sort(), Object.keys(sv).sort());
   assert.ok(Object.values((await import("../bundles/workspace/server/comments/identity.js")).VERDICT_REASONS).includes(lv.reason));
+});
+
+test("daily duplicate-name check: a clash blocks, nothing clears it, an outage neither sets nor clears, once a day", async () => {
+  const s = await setup();
+  const checks = () => s.fake.calls.filter((c) => c.url.includes("/core/autocomplete/get")).length;
+  const blocked = async () => (await ST.getWatch(s.db)).blocked_reason;
+  // an unreachable autocomplete: no block, retried within the hour (not every tick)
+  s.ac.down = true;
+  assert.equal((await s.tick()).ran, true);
+  assert.equal(checks(), 1); assert.equal(await blocked(), null);
+  s.advance(15000); await s.tick();
+  assert.equal(checks(), 1, "the retry waits an hour");
+  // no clash: the owner finds only itself (the owner uid is excluded)
+  s.ac.down = false; s.ac.users = [{ id: "admin", label: "admin" }];
+  s.advance(W.NAME_RETRY_MS); await s.tick();
+  assert.equal(checks(), 2); assert.equal(await blocked(), null);
+  s.advance(15000); await s.tick();
+  assert.equal(checks(), 2, "then once a day");
+  // a second account with the owner's name (case/space differ) → blocked, and the tick does nothing more
+  s.ac.users.push({ id: "alex", label: "Admin " });
+  s.advance(W.NAME_CHECK_MS);
+  const before = s.fake.calls.length;
+  const r = await s.tick();
+  assert.equal(r.why, "blocked"); assert.equal(await blocked(), "duplicate_display_name");
+  assert.equal(s.fake.calls.length - before, 1, "the owner name is cached: one autocomplete call, and the tick stops there");
+});
+
+test("daily duplicate-name check never clears a block, and an unknown owner name means it cannot tell", async () => {
+  const s = await setup();
+  await ST.setBlocked(s.db, "duplicate_display_name");
+  s.ac.users = [];
+  s.advance(W.NAME_CHECK_MS);
+  await s.tick();
+  assert.equal((await ST.getWatch(s.db)).blocked_reason, "duplicate_display_name");
+  // ownerNameClash directly: unknown owner name → null (neither true nor false)
+  const cfg = { ...getConfig(), ownerUids: Object.freeze(["nobody"]) };
+  assert.equal(await W.ownerNameClash(cfg), null);
+  assert.equal(await W.ownerNameClash(getConfig()), false);
 });

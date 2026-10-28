@@ -99,5 +99,23 @@ export default function workspaceRouter(authMiddleware, seams = {}) {
   router.post("/api/workspace/quick/undo", handle((a, cfg, f) => a.quickUndo(cfg, f, clock), "undone"));
   router.post("/api/workspace/quick/restore", handle((a, cfg, f) => a.quickRestore(cfg, f, clock), "restored"));
   router.post("/api/workspace/quick/cancel", handle(async (a, cfg, f) => { const { queueDefs } = await bundleImport("server/tools/queue.js"); await queueDefs[1].run({ change_id: String(f.change_id || "") }); return {}; }, "cancelled"));
+
+  // ---- Comment loop mode (Office > Setup card). Phase 1: only off | shadow; "on" is refused. ----
+  router.use("/api/workspace/comments", express.urlencoded({ extended: false, limit: "4kb" }), authMiddleware, csrfMw);
+  router.post("/api/workspace/comments/mode", async (req, res) => {
+    const go = (notice) => res.redirect(303, `/dashboard/workspace?${new URLSearchParams({ view: "setup", notice }).toString()}`);
+    const mode = String(req.body?.mode || "");
+    if (mode === "on") return go("not_yet");
+    if (mode !== "off" && mode !== "shadow") return go("bad_mode");
+    try {
+      const [{ openWorkspaceDb }, { getConfig }, { setMode }] = await Promise.all([bundleImport("server/db.js"), bundleImport("server/config.js"), bundleImport("server/comments/store.js")]);
+      getConfig(); // not set up yet → the catch below
+      await setMode(await openWorkspaceDb(), mode, clock.now());
+      return go("saved");
+    } catch (e) {
+      console.warn(`[workspace] comment mode not saved: ${/^[a-z_]{1,40}$/.test(String(e?.code || "")) ? e.code : "error"}`);
+      return go("error");
+    }
+  });
   return router;
 }

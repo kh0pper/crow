@@ -17,14 +17,14 @@ import { appImport } from "../app-root.js";
 import { listRecent, getFile } from "../nc/dav.js";
 import { splitPath } from "../nc/paths.js";
 import { listVersions } from "../nc/versions.js";
-import { displayName } from "../nc/ocs.js";
+import { displayName, ocsGet } from "../nc/ocs.js";
 import { getNcInstanceId } from "../nc/onlyoffice.js";
 import { NcError } from "../result.js";
 import { openDocx } from "../ooxml/docx-model.js";
 import { readCommentThreads } from "../ooxml/docx-comments.js";
 import { flatten, fingerprint, snapshot as snapshotOf, diff, pairKey } from "./keys.js";
 import { DOCX_MIME, sweepSessions } from "./sessions.js";
-import { getWatch, takeLease, prune, getState, putState, logEvent, textHash, snippetOf } from "./store.js";
+import { getWatch, setBlocked, takeLease, prune, getState, putState, logEvent, textHash, snippetOf } from "./store.js";
 import { isBotAuthor, historyOf, savedOwner, verdictOf } from "./identity.js";
 
 export const TICK_MS = 15000;
@@ -34,6 +34,8 @@ export const MAX_BYTES = 20 * 1024 * 1024;
 export const BACKOFF_MS = 60000;
 export const RECENT_LIMIT = 60;
 export const OUTAGE_LIMIT = 200;
+export const NAME_CHECK_MS = 24 * 3600 * 1000;
+export const NAME_RETRY_MS = 3600 * 1000;
 const WINDOW_SLACK_MS = 30000; // the same ±30 s soleOwnerWindowAt uses
 /** Nextcloud answers that concern one file (forbidden, gone, locked): that file is skipped, the tick goes on. */
 const PER_FILE_STATUS = new Set([403, 404, 423]);
@@ -43,10 +45,33 @@ const mentions = () => (mentionsP ??= appImport("servers/shared/bot-mention.js")
 const parseJson = (s, d) => { try { return JSON.parse(s); } catch { return d; } };
 const errCode = (err) => (/^[a-z_]{1,40}$/.test(String(err?.code || "")) ? err.code : "error");
 
+const normName = (s) => String(s ?? "").normalize("NFC").trim().toLowerCase();
+
+/**
+ * Spec §3.3: does another account share an owner's display name? Crow bot's full-match autocomplete finds exact
+ * display names outside its group (spike E12). → true (clash), false (none), null (could not tell: Nextcloud
+ * failed, or an owner's name is unknown). Reads only.
+ */
+export async function ownerNameClash(cfg) {
+  try {
+    const owners = new Set(cfg.ownerUids);
+    for (const uid of cfg.ownerUids) {
+      const name = await displayName(cfg, uid);
+      if (!name || !normName(name)) return null;
+      const q = new URLSearchParams({ search: name, itemType: "", itemId: "", limit: "200" });
+      q.append("shareTypes[]", "0");
+      const found = await ocsGet(cfg, `/ocs/v2.php/core/autocomplete/get?${q}`);
+      if (!Array.isArray(found)) return null;
+      if (found.some((u) => !owners.has(String(u?.id)) && normName(u?.label) === normName(name))) return true;
+    }
+    return false;
+  } catch { return null; }
+}
+
 /** seams.snapshot: tests only (a failure inside one file's scan). */
 export function makeCommentTick({ db, getConfig, clock, seams = {} }) {
   const owner = `comment-watch:${randomUUID()}`;
-  let backoffUntil = 0, outage = false;
+  let backoffUntil = 0, outage = false, nextNameCheck = 0;
 
   return async function tick() {
     const now = clock.now();
@@ -58,6 +83,14 @@ export function makeCommentTick({ db, getConfig, clock, seams = {} }) {
     if (now < backoffUntil) return { ran: false, why: "backoff", nextMs: backoffUntil - now };
     if (!(await takeLease(db, owner, now))) return { ran: false, why: "lease", nextMs: TICK_MS };
     await prune(db, now);
+
+    // At start and then daily (retried hourly when it could not run). It only ever SETS a block: clearing one is
+    // bootstrap's job (through the env) or an operator's.
+    if (now >= nextNameCheck) {
+      const clash = await ownerNameClash(cfg);
+      nextNameCheck = now + (clash === null ? NAME_RETRY_MS : NAME_CHECK_MS);
+      if (clash === true) { await setBlocked(db, "duplicate_display_name"); console.warn("[workspace] comment watcher: another account has an owner's display name; the loop is blocked"); return { ran: false, why: "blocked", nextMs: TICK_MS }; }
+    }
 
     const limit = outage ? OUTAGE_LIMIT : RECENT_LIMIT;
     let anyLive = false;
