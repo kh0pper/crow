@@ -11,6 +11,8 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import zlib from "node:zlib";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { guardedRequest, MAX_PAGE_BYTES, MAX_REDIRECTS, FETCH_TIMEOUT_MS, USER_AGENT } from "../servers/shared/fetch-page.js";
 
 const HTML = "<!doctype html><html><head><title>Test page</title></head><body><p>Hello from the test page.</p></body></html>";
@@ -301,4 +303,49 @@ test("allowPrivate opens the guard (reader operator opt-out only)", async () => 
 
 test("DNS failures surface their own code", async () => {
   await rejectsWith(guardedRequest(`http://missing.test:${port}/ok`, { lookup: okLookup(), isAllowedAddress: allowAll }), "ENOTFOUND");
+});
+
+test("a mixed DNS answer (one allowed address, one blocked) is refused whole", async () => {
+  const before = count;
+  const lookup = (hostname, options, callback) => {
+    if (typeof options === "function") { callback = options; options = {}; }
+    const all = [{ address: "127.0.0.3", family: 4 }, { address: "127.0.0.1", family: 4 }];
+    if (options && options.all) return process.nextTick(() => callback(null, all));
+    process.nextTick(() => callback(null, all[0].address, 4));
+  };
+  await rejectsWith(
+    guardedRequest(`http://mixed.test:${port}/ok`, { lookup, isAllowedAddress: (ip) => ip === "127.0.0.3" }),
+    "EBLOCKED",
+  );
+  assert.equal(count, before, "nothing connected");
+});
+
+test("an HTTP proxy from the environment is never used", async () => {
+  // A proxy that would see the request if the guard honoured HTTP_PROXY / NODE_USE_ENV_PROXY
+  // (read at process start, so the request runs in a child with that env).
+  let proxyHits = 0;
+  const proxy = http.createServer((req, res) => { proxyHits += 1; res.writeHead(502); res.end(); });
+  proxy.on("connect", (_req, sock) => { proxyHits += 1; sock.destroy(); });
+  await new Promise((r) => proxy.listen(0, "127.0.0.1", r));
+  const proxyUrl = `http://127.0.0.1:${proxy.address().port}`;
+  try {
+    const mod = new URL("../servers/shared/fetch-page.js", import.meta.url).href;
+    const script = `
+      import { guardedRequest } from ${JSON.stringify(mod)};
+      const lookup = (h, o, cb) => { if (typeof o === "function") { cb = o; o = {}; }
+        if (o && o.all) return cb(null, [{ address: "127.0.0.1", family: 4 }]); cb(null, "127.0.0.1", 4); };
+      const r = await guardedRequest(${JSON.stringify(`http://ok.test:${port}/ok`)}, { lookup, isAllowedAddress: () => true });
+      process.stdout.write(String(r.http_status));
+    `;
+    const before = count;
+    const { stdout } = await promisify(execFile)(process.execPath, ["--input-type=module", "-e", script], {
+      env: { ...process.env, HTTP_PROXY: proxyUrl, http_proxy: proxyUrl, HTTPS_PROXY: proxyUrl, NODE_USE_ENV_PROXY: "1", NO_PROXY: "", no_proxy: "" },
+      timeout: 20000,
+    });
+    assert.equal(stdout, "200", "the request went straight to the page");
+    assert.equal(count, before + 1);
+    assert.equal(proxyHits, 0, "the proxy saw nothing");
+  } finally {
+    await new Promise((r) => proxy.close(r));
+  }
 });
