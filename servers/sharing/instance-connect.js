@@ -18,8 +18,8 @@
 import { markInstanceConnectionSeen } from "../shared/instance-status.js";
 import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
 import {
-  pairSubkey, hyperswarmMac, macEqual, defaultPairKey, pairBindingMode,
-  isPairPinned, markPairPinned, decidePairBinding, recordPairBindingState,
+  pairSubkey, pairSubkeyVia, hyperswarmMac, macEqual, defaultPairKey, pairBindingMode,
+  isPairPinned, decideAndRecordPairBinding,
 } from "../shared/sync-pair-binding.js";
 import { ENROLL_ID_RE } from "../shared/enroll-guard.js";
 
@@ -66,28 +66,15 @@ export async function handleInstanceConnection({ db, instanceSyncManager, crowId
 }
 
 /**
- * The Hyperswarm pair-binding guard and responder hook (PT-2a, private
- * engineering notes §3.5). Pure of PeerManager state except what it is
- * handed; `localId()` is read at call time.
+ * The Hyperswarm pair-binding guard and MAC hook (PT-2a, private engineering
+ * notes §3.5). `localId()` is read at call time.
  */
 function makeInstanceBinding({ db, localId, pairKeyLookup, mode }) {
-  const log = console;
-
-  /** The pair subkey for `peerId`, or null (no key, a bad key, or a lookup error). */
-  async function subkeyFor(peerId) {
-    if (!peerId) return null;
-    try {
-      const hex = await pairKeyLookup(peerId);
-      return hex ? pairSubkey(hex) : null;
-    } catch {
-      return null;
-    }
-  }
-
   /**
-   * Responder side: the MAC for a sibling's `pb: 1` challenge, or null.
-   * Synchronous so the cb_sig reply stays immediate (the production store
-   * read is synchronous; an async lookup yields no MAC).
+   * Our MAC for a sibling that offered `pb: 1` and has proven the seed on
+   * this connection (PeerManager._admit sends it in a `pair-binding` frame),
+   * or null. Synchronous: the production store read is; an async lookup
+   * yields no MAC.
    */
   function macFor({ peerInstanceId, challengeHex, handshakeHashHex }) {
     const me = localId();
@@ -101,23 +88,37 @@ function makeInstanceBinding({ db, localId, pairKeyLookup, mode }) {
     }
   }
 
+  /** Is `peerId` a trusted sibling row here? A lookup error is "no" (record nothing). */
+  async function hasTrustedRow(peerId, me) {
+    if (!peerId) return false;
+    try {
+      const { rows } = await db.execute({
+        sql: `SELECT id FROM crow_instances WHERE id = ? AND ${TRUSTED_PEER_SQL} AND id != ? LIMIT 1`,
+        args: [peerId, me ?? ""],
+      });
+      return rows.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
   /**
-   * Verifier side (admitGuards.instance): runs in PeerManager._admit after
-   * the sibling proved our key and the one instance id is resolved, before
-   * any admission side effect. Bound = its pb_mac verifies under OUR
-   * challenge and OUR handshake hash. Then the shared policy; a bound
-   * handshake writes the pin both transports read.
+   * Verifier (admitGuards.instance): runs in PeerManager._admit after the
+   * sibling proved our key, the one instance id is resolved and its
+   * `pair-binding` frame (if it offered pb) arrived, before any admission
+   * side effect. Bound = its pb_mac verifies under OUR challenge and OUR
+   * handshake hash. The Nest records only siblings we have a trusted row
+   * for, so an id a seed holder makes up leaves nothing behind.
    */
-  async function guard({ conn, msg, state, remoteInstanceId }) {
+  async function guard({ conn, state, remoteInstanceId, pbMac }) {
     const me = localId();
-    const k = await subkeyFor(remoteInstanceId);
-    const macPresent = msg?.pb_mac !== undefined && msg?.pb_mac !== null;
+    const k = await pairSubkeyVia(pairKeyLookup, remoteInstanceId);
     let bound = false;
     let macInvalid = false;
-    if (macPresent && k) {
+    if (pbMac !== undefined && pbMac !== null && k) {
       const hh = state?.handshakeHashHex || (conn?.handshakeHash?.length ? Buffer.from(conn.handshakeHash).toString("hex") : null);
       try {
-        bound = Boolean(me && hh && state?.ourChallengeHex) && macEqual(msg.pb_mac, hyperswarmMac(k, {
+        bound = Boolean(me && hh && state?.ourChallengeHex) && macEqual(pbMac, hyperswarmMac(k, {
           responder: remoteInstanceId, challenger: me, challenge: state.ourChallengeHex, handshakeHash: hh,
         }));
       } catch {
@@ -125,20 +126,11 @@ function makeInstanceBinding({ db, localId, pairKeyLookup, mode }) {
       }
       macInvalid = !bound;
     }
-    // The pin is read only when it can change the outcome; it fails CLOSED.
-    const pinned = bound || macInvalid ? false : await isPairPinned(db, me, remoteInstanceId);
-    const d = decidePairBinding({ bound, macInvalid, pinned, mode });
-    recordPairBindingState(remoteInstanceId, { bound: d.ok && bound, legacy: d.legacy, reason: d.reason, noKey: !k });
-    const who = remoteInstanceId ?? "(no instance id)";
-    if (!d.ok) {
-      log.warn(`[sharing] Hyperswarm pair binding failed for ${who}: ${d.reason}${k ? "" : "; this side holds no pair key for it"}`);
-      return { ok: false, reason: d.reason };
-    }
-    if (bound) {
-      const fresh = await markPairPinned(db, me, remoteInstanceId);
-      log.log(`[sharing] Hyperswarm pair-bound handshake with ${who}${fresh ? "; pinned: unbound handshakes from it are refused from now on" : ""}`);
-    }
-    return { ok: true };
+    const d = await decideAndRecordPairBinding({
+      db, localId: me, peerId: remoteInstanceId, k, bound, macInvalid, mode,
+      prefix: "[sharing]", where: "Hyperswarm", recordNest: await hasTrustedRow(remoteInstanceId, me),
+    });
+    return d.ok ? { ok: true } : { ok: false, reason: d.reason };
   }
 
   return { macFor, guard };
@@ -157,8 +149,9 @@ function makeInstanceBinding({ db, localId, pairKeyLookup, mode }) {
  * @param {object} o.instanceSyncManager
  * @param {(peerId:string)=>string|null} [o.pairKeyLookup] the pair's signing_key hex
  * @param {"auto"|"require"} [o.mode]
+ * @param {number} [o.pairBindingWaitMs] how long to wait for a sibling's pair-binding frame (PeerManager default 10 s)
  */
-export function wireInstanceSync(peerManager, { db, instanceSyncManager, pairKeyLookup = defaultPairKey, mode = pairBindingMode() } = {}) {
+export function wireInstanceSync(peerManager, { db, instanceSyncManager, pairKeyLookup = defaultPairKey, mode = pairBindingMode(), pairBindingWaitMs } = {}) {
   // Wire instance-to-instance connections for Hypercore replication
   peerManager.onInstanceConnected = async (crowId, conn, remoteInstanceId = null) => {
     console.log(`[sharing] Instance peer connected: ${crowId}`);
@@ -232,5 +225,6 @@ export function wireInstanceSync(peerManager, { db, instanceSyncManager, pairKey
   if (!peerManager.admitGuards) peerManager.admitGuards = { instance: null, contact: null };
   peerManager.admitGuards.instance = binding.guard;
   peerManager.instanceBinding = { macFor: binding.macFor };
+  if (Number.isFinite(pairBindingWaitMs) && pairBindingWaitMs > 0) peerManager.pairBindingWaitMs = pairBindingWaitMs;
   return peerManager;
 }

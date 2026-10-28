@@ -3,8 +3,11 @@
  * a sibling handshake on the instance-sync path also proves the PER-PAIR key.
  *
  *   challenge            {..., cb: 1, pb: 1, instance_id}
- *   challenge-response   {..., cb_sig, pb_mac = HMAC(K_pb,
- *                          "hs-pb\n<responder>\n<challenger>\n<challengeHex>\n<handshakeHashHex>")}
+ *   challenge-response   {..., cb_sig}              (the same for everyone)
+ *   pair-binding         {pb_mac = HMAC(K_pb,
+ *                          "hs-pb\n<responder>\n<challenger>\n<challengeHex>\n<handshakeHashHex>") | null}
+ *                        sent only after the peer's cb_sig verified, and
+ *                        only to a peer whose challenge offered pb
  *
  * The MAC covers the Noise handshake hash, so it cannot be relayed to another
  * connection. The verifier (admitGuards.instance, installed by
@@ -32,6 +35,8 @@
  *   U-H7c/d (carried from Task 0, real guard): "constructor"; self-loopback.
  *   U-H8  no guard wired: refused guard:unwired.
  *   U-X1  pinned by a bound TAILNET handshake → refused unbound on Hyperswarm.
+ *   U-H10 stranger probes cannot tell which ids we hold pair keys for.
+ *   U-H11 a sibling that offers pb and never sends its frame: pb_timeout.
  *   U-H9  every refusal above left the wired callbacks and replicate untouched.
  */
 import { test, before, after } from "node:test";
@@ -50,7 +55,7 @@ import { oldTree } from "./fixtures/old-tree.mjs";
 import { PeerManager } from "../servers/sharing/peer-manager.js";
 import { InstanceSyncManager } from "../servers/sharing/instance-sync.js";
 import * as IC from "../servers/sharing/instance-connect.js";
-import { sign } from "../servers/sharing/identity.js";
+import { sign, deriveInstanceIdentity } from "../servers/sharing/identity.js";
 import { contactCbMessage, wireContactBinding, markInstanceCbPinned } from "../servers/sharing/contact-binding.js";
 import { pairSubkey, hyperswarmMac, markPairPinned, defaultPairKey } from "../servers/shared/sync-pair-binding.js";
 import { getPeerTrustHealth, _resetPeerTrustHealth } from "../servers/shared/peer-trust-health.js";
@@ -312,12 +317,12 @@ function spy(pm, side, kind) {
 }
 
 /** A new node, wired as boot.js wires it (wireContactBinding + wireInstanceSync). */
-function newNode(side, { mode = "auto", pairKeyLookup = side.pairKeyLookup, db = side.db, wire = true } = {}) {
+function newNode(side, { mode = "auto", pairKeyLookup = side.pairKeyLookup, db = side.db, wire = true, pairBindingWaitMs } = {}) {
   const pm = new PeerManager(side.identity, { env: {} });
   pm.p2pDisabled = true; // links are loopback socket pairs
   pm.localInstanceId = side.id;
   wireContactBinding(pm, { db: side.db, localInstanceId: () => side.id });
-  if (wire) IC.wireInstanceSync(pm, { db, instanceSyncManager: side.mgr, pairKeyLookup, mode });
+  if (wire) IC.wireInstanceSync(pm, { db, instanceSyncManager: side.mgr, pairKeyLookup, mode, pairBindingWaitMs });
   return spy(pm, side, "new");
 }
 
@@ -372,9 +377,14 @@ async function link(t, X, Y, { xInitiator = true } = {}) {
   return { x, y, wx, wy, st };
 }
 
-/** A raw peer holding the seed, facing node N. It answers N's challenge as `responseId`. */
+/**
+ * A raw peer holding the seed, facing node N. It answers N's challenge as
+ * `responseId`. With `pb` it offers pair binding and, unless `pbFrame` is
+ * false, sends a `pair-binding` frame (pb_mac from `pbKeyHex`, or
+ * `pbMacOverride`, else null) right after its response.
+ */
 async function rawSibling(t, N, identity, {
-  challengeId, responseId = undefined, pb = true, pbKeyHex = null, pbMacOverride = undefined, after = [], pmInitiator = true,
+  challengeId, responseId = undefined, pb = true, pbKeyHex = null, pbMacOverride = undefined, pbFrame = true, after = [], pmInitiator = true,
 } = {}) {
   const [p, r] = await streams(pmInitiator);
   const pmFrames = tapWrites(p);
@@ -401,13 +411,18 @@ async function rawSibling(t, N, identity, {
   const resp = { type: "challenge-response", crowId: identity.crowId, pubkey: identity.ed25519Pubkey };
   if (responseId !== undefined) resp.instance_id = responseId;
   resp.cb_sig = sign(contactCbMessage({ role: r.isInitiator ? "init" : "resp", signerCrowId: identity.crowId, challengeHex: theirs.challenge, handshakeHashHex: hh }), identity.ed25519Priv);
-  if (pbKeyHex) {
-    resp.pb_mac = hyperswarmMac(pairSubkey(pbKeyHex), {
-      responder: challengeId ?? responseId, challenger: theirs.instance_id, challenge: theirs.challenge, handshakeHash: hh,
-    });
+  const out = [resp];
+  if (pb && pbFrame) {
+    let pbMac = null;
+    if (pbKeyHex) {
+      pbMac = hyperswarmMac(pairSubkey(pbKeyHex), {
+        responder: challengeId ?? responseId, challenger: theirs.instance_id, challenge: theirs.challenge, handshakeHash: hh,
+      });
+    }
+    if (pbMacOverride !== undefined) pbMac = pbMacOverride;
+    out.push({ type: "pair-binding", pb_mac: pbMac });
   }
-  if (pbMacOverride !== undefined) resp.pb_mac = pbMacOverride;
-  r.write([resp, { type: "authenticated" }, ...after].map((o) => JSON.stringify(o) + "\n").join(""));
+  r.write([...out, { type: "authenticated" }, ...after].map((o) => JSON.stringify(o) + "\n").join(""));
   return { pmFrames, got, ask, theirs, conn: r, get closed() { return closed; } };
 }
 
@@ -467,7 +482,7 @@ function recordLeg(row) {
 }
 
 // ================================================================ U-H1
-test("U-H1 new↔new: both offer pb, both replies carry pb_mac, both pin, feed keys only in instance-key, markers flow (both role orders, both crow_id row shapes)", T, async (t) => {
+test("U-H1 new↔new: both offer pb, both send a pair-binding frame with pb_mac (none in the cb reply), both pin, feed keys only in instance-key, markers flow (both role orders, both crow_id row shapes)", T, async (t) => {
   for (const shape of ["crow", "instance"]) {
     for (const aInit of [true, false]) {
       const label = `${shape}/${aInit ? "A-init" : "B-init"}`;
@@ -482,7 +497,10 @@ test("U-H1 new↔new: both offer pb, both replies carry pb_mac, both pin, feed k
         const resp = framesOf(w, "challenge-response");
         assert.equal(resp.length, 1);
         assert.equal(typeof resp[0].cb_sig, "string", `${label}: ${who} replies with cb_sig`);
-        assert.match(resp[0].pb_mac ?? "", /^[0-9a-f]{64}$/, `${label}: ${who} replies with pb_mac`);
+        assert.equal("pb_mac" in resp[0], false, `${label}: ${who}'s cb reply carries no MAC`);
+        const pbf = framesOf(w, "pair-binding");
+        assert.equal(pbf.length, 1, `${label}: ${who} sends one pair-binding frame`);
+        assert.match(pbf[0].pb_mac ?? "", /^[0-9a-f]{64}$/, `${label}: ${who}'s pair-binding frame carries pb_mac`);
         assert.equal("feed_key_hex" in resp[0], false, `${label}: ${who}'s reply carries no feed key`);
         assert.equal("signature" in resp[0], false);
       }
@@ -515,8 +533,9 @@ test("U-H2 a seed holder without B's pair key, claiming B: refused guard:pb_requ
     assert.ok(await until(() => A.spies.instanceConnected.length === 1, 5000), "control: B's real key is admitted");
     assert.equal(R.closed, false);
     assert.equal(await pairPin(a, b.id), "1", "control: A pinned B");
-    // A answered the raw node's pb:1 challenge with a MAC under the pair key.
-    const reply = framesOf(R.pmFrames, "challenge-response")[0];
+    // A answered the raw node's pb:1 offer, after its proof, with a MAC under the pair key.
+    const reply = framesOf(R.pmFrames, "pair-binding")[0];
+    assert.equal("pb_mac" in framesOf(R.pmFrames, "challenge-response")[0], false);
     assert.equal(reply.pb_mac, hyperswarmMac(pairSubkey(pairKey), { responder: a.id, challenger: b.id, challenge: R.ask.challenge, handshakeHash: Buffer.from(R.conn.handshakeHash).toString("hex") }));
   }
   {
@@ -592,7 +611,8 @@ async function mixedLeg(t, { which, newInit, setup, expect }) {
     assert.equal(viaOld, which === "pt3" ? "instance-key" : "piggyback", `${label}: old→new feed key`);
     assert.deepEqual(N.spies.keyReceived, [[o.id, outKeyHex(o, n.id)]]);
     assert.deepEqual(O.spies.keyReceived, [[n.id, outKeyHex(n, o.id)]]);
-    assert.equal(framesOf(L.wx, "challenge-response")[0]?.pb_mac, undefined, `${label}: the old node asked without pb, so no pb_mac`);
+    assert.equal(framesOf(L.wx, "challenge-response")[0]?.pb_mac, undefined, `${label}: no pb_mac in the cb reply`);
+    assert.deepEqual(framesOf(L.wx, "pair-binding"), [], `${label}: the old node asked without pb, so no pair-binding frame`);
     const m = await markers(n, o, { label });
     assert.match(getPeerTrustHealth().unboundPeers[o.id]?.message || "", /without pair binding/, `${label}: the new side raises "without pair binding"`);
     assert.equal(await pairPin(n, o.id), null, `${label}: no pair pin for a legacy peer`);
@@ -753,12 +773,12 @@ test("U-H6 a sibling without an instance id (auto): replicates and refreshes onl
 });
 
 // ================================================================ U-H7c/d (real guard)
-test("U-H7c (real guard) \"constructor\" never indexes the key store: unbound → legacy in auto, refused in require", T, async (t) => {
-  const { identity, a } = await makePair(t);
+test("U-H7c (real guard) \"constructor\" never indexes the key store: unbound → legacy in auto (no Nest record: no row), refused in require; a trusted row that is unbound IS recorded; the production lookup over a 0600 store sends a pair-binding MAC and binds", T, async (t) => {
+  const { identity, a, b, pairKey } = await makePair(t);
   const dir = mkdtempSync(join(tmpdir(), "pt2a-hs-store-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const store = join(dir, "peer-tokens.json");
-  writeFileSync(store, JSON.stringify({ "inst-real": { signing_key: randomBytes(32).toString("hex") } }), { mode: 0o600 });
+  writeFileSync(store, JSON.stringify({ "inst-real": { signing_key: randomBytes(32).toString("hex") }, [b.id]: { signing_key: pairKey } }), { mode: 0o600 });
   chmodSync(store, 0o600);
   const prev = process.env.CROW_PEER_TOKENS_PATH;
   process.env.CROW_PEER_TOKENS_PATH = store;
@@ -771,30 +791,56 @@ test("U-H7c (real guard) \"constructor\" never indexes the key store: unbound �
     const R = await rawSibling(t, A, identity, { challengeId: "constructor" });
     assert.ok(await until(() => A.spies.instanceConnected.length === 1, 5000), "auto: admitted as legacy");
     assert.deepEqual(A.spies.instanceConnected, [[SHARED_CROW_ID, "constructor"]]);
-    assert.equal(framesOf(R.pmFrames, "challenge-response")[0]?.pb_mac, undefined, "no MAC for an id the store does not own");
-    assert.match(getPeerTrustHealth().unboundPeers.constructor?.message || "", /without pair binding/);
+    assert.equal(framesOf(R.pmFrames, "challenge-response")[0]?.pb_mac, undefined);
+    assert.equal(framesOf(R.pmFrames, "pair-binding")[0]?.pb_mac, null, "no MAC for an id the store does not own");
+    const h = getPeerTrustHealth();
+    assert.equal(h.unboundPeers.constructor, undefined, "no Nest record for an id with no crow_instances row");
+    assert.deepEqual(Object.keys(h.unboundPeers), []);
     assert.equal(await pairPin(a, "constructor"), null);
   }
   {
     logs.length = 0;
+    _resetPeerTrustHealth();
     const A = newNode(a, { pairKeyLookup: defaultPairKey, mode: "require" });
     const R = await rawSibling(t, A, identity, { challengeId: "constructor" });
     assert.ok(await until(() => R.closed, 5000), "require: destroyed");
     await sleep(100);
     assert.ok(refusedFor("guard:pb_required"));
+    assert.deepEqual(Object.keys(getPeerTrustHealth().pairBindingRefusals), [], "no Nest record for an id with no row");
     assertInert(A, "U-H7c require", { frames: R.pmFrames });
+  }
+  {
+    // A trusted row (B) that syncs unbound in auto IS recorded.
+    _resetPeerTrustHealth();
+    const A = newNode(a, { pairKeyLookup: defaultPairKey });
+    await rawSibling(t, A, identity, { challengeId: b.id, responseId: b.id });
+    assert.ok(await until(() => A.spies.instanceConnected.length === 1, 5000), "unbound B: admitted as legacy");
+    assert.match(getPeerTrustHealth().unboundPeers[b.id]?.message || "", /without pair binding/, "a trusted row gets the record");
+    assert.equal(await pairPin(a, b.id), null);
+  }
+  {
+    // The production lookup over a 0600 store holding B's key: A's
+    // pair-binding frame carries the MAC, and B's MAC binds and pins.
+    const A = newNode(a, { pairKeyLookup: defaultPairKey });
+    const R = await rawSibling(t, A, identity, { challengeId: b.id, responseId: b.id, pbKeyHex: pairKey });
+    assert.ok(await until(() => A.spies.instanceConnected.length === 1, 5000), "bound B: admitted");
+    const hh = Buffer.from(R.conn.handshakeHash).toString("hex");
+    assert.equal(framesOf(R.pmFrames, "pair-binding")[0]?.pb_mac,
+      hyperswarmMac(pairSubkey(pairKey), { responder: a.id, challenger: b.id, challenge: R.ask.challenge, handshakeHash: hh }));
+    assert.equal(await pairPin(a, b.id), "1", "bound through the production lookup: pinned");
+    assert.equal(getPeerTrustHealth().unboundPeers[b.id], undefined, "the bound handshake clears the record");
   }
 });
 
 test("U-H7d (real guard) self-loopback is killed before the guard: no Nest record", T, async (t) => {
-  const { identity, a } = await makePair(t);
+  const { identity, a, b } = await makePair(t);
   {
-    // Control: a foreign id without a key, in require, IS recorded.
+    // Control: a sibling with a trusted row, unbound in require, IS recorded.
     _resetPeerTrustHealth();
     const A = newNode(a, { mode: "require" });
-    const R = await rawSibling(t, A, identity, { challengeId: "inst-foreign" });
+    const R = await rawSibling(t, A, identity, { challengeId: b.id });
     assert.ok(await until(() => R.closed, 5000));
-    assert.equal(getPeerTrustHealth().pairBindingRefusals["inst-foreign"]?.reason, "pb_required", "control: the recorder is live");
+    assert.equal(getPeerTrustHealth().pairBindingRefusals[b.id]?.reason, "pb_required", "control: the recorder is live");
   }
   for (const mode of ["auto", "require"]) {
     for (const where of ["challenge", "response"]) {
@@ -876,6 +922,61 @@ test("U-X1 one pin, both transports: a peer pinned by a bound TAILNET handshake 
   await link(t, A2, B2);
   assert.ok(await until(() => A2.spies.instanceConnected.length === 1 && B2.spies.instanceConnected.length === 1, 8000), "control: the real key is admitted on Hyperswarm");
   assert.equal(await pairPin(b, a.id), "1");
+});
+
+// ================================================================ U-H10
+test("U-H10 stranger probes (no seed, our public Crow ID, pb:1, cb:1): a paired id and an unpaired id get replies of the same shape and no pair-binding frame", T, async (t) => {
+  const { identity, a, b } = await makePair(t);
+  const stranger = deriveInstanceIdentity(randomBytes(32));
+  const probe = async (claimId) => {
+    const A = newNode(a);
+    const [p, r] = await streams(true);
+    const pmFrames = tapWrites(p);
+    let closed = false;
+    r.once("close", () => { closed = true; });
+    t.after(() => { p.destroy(); r.destroy(); });
+    A.pm._handleConnection(p, {});
+    r.write(JSON.stringify({ type: "challenge", challenge: randomBytes(32).toString("hex"), cb: 1, pb: 1, pubkey: stranger.ed25519Pubkey, crowId: identity.crowId, instance_id: claimId }) + "\n");
+    assert.ok(await until(() => pmFrames.some((f) => f.type === "challenge-response"), 3000), `${claimId}: answered`);
+    // It cannot prove our key: its own response fails.
+    r.write(JSON.stringify({ type: "challenge-response", crowId: identity.crowId, pubkey: identity.ed25519Pubkey, cb_sig: "00".repeat(64) }) + "\n");
+    assert.ok(await until(() => closed, 3000), `${claimId}: refused`);
+    await sleep(100);
+    assertInert(A, `U-H10 ${claimId}`, { frames: pmFrames });
+    return pmFrames;
+  };
+  const paired = await probe(b.id);
+  const unpaired = await probe("inst-unpaired");
+  for (const [frames, who] of [[paired, "paired"], [unpaired, "unpaired"]]) {
+    assert.deepEqual(framesOf(frames, "pair-binding"), [], `${who}: no pair-binding frame`);
+    assert.deepEqual(frames.map((f) => f.type), ["challenge", "challenge-response"], `${who}: only the challenge and the cb reply`);
+  }
+  const shape = (frames) => Object.keys(framesOf(frames, "challenge-response")[0]).sort();
+  assert.deepEqual(shape(paired), shape(unpaired), "same key set");
+  assert.deepEqual(shape(paired), ["cb_sig", "crowId", "pubkey", "type"]);
+  const strip = (frames) => { const { cb_sig, ...rest } = framesOf(frames, "challenge-response")[0]; return { ...rest, cbLen: cb_sig.length }; };
+  assert.deepEqual(strip(paired), strip(unpaired), "same values apart from the signature");
+});
+
+// ================================================================ U-H11
+test("U-H11 a sibling that offers pb but never sends its pair-binding frame is refused guard:pb_timeout (wait set through wireInstanceSync); control: with the frame it is admitted", T, async (t) => {
+  const { identity, a, b, pairKey } = await makePair(t);
+  {
+    const A = newNode(a, { pairBindingWaitMs: 300 });
+    await rawSibling(t, A, identity, { challengeId: b.id, responseId: b.id, pbKeyHex: pairKey });
+    assert.ok(await until(() => A.spies.instanceConnected.length === 1, 5000), "control: the frame arrives, admitted");
+  }
+  logs.length = 0;
+  const A = newNode(a, { pairBindingWaitMs: 300 });
+  assert.equal(A.pm.pairBindingWaitMs, 300);
+  const t0 = Date.now();
+  const R = await rawSibling(t, A, identity, { challengeId: b.id, responseId: b.id, pbFrame: false });
+  assert.ok(await until(() => R.closed, 5000), "destroyed");
+  assert.ok(Date.now() - t0 >= 250, "after the wait");
+  await sleep(100);
+  assert.ok(refusedFor("guard:pb_timeout"), "refused guard:pb_timeout");
+  assertInert(A, "U-H11 timeout", { frames: R.pmFrames });
+  assert.equal(new PeerManager(identity, { env: {} }).pairBindingWaitMs, 10_000, "the default wait is 10 s");
 });
 
 // ================================================================ U-H9

@@ -184,3 +184,48 @@ export function recordPairBindingState(peerId, { bound, legacy, reason, noKey = 
   }
   if (reason) recordPairBindingRefusal(peerId, reason, refusalMessage(peerId, reason, noKey), nowMs);
 }
+
+/**
+ * The pair subkey for `peerId` through `lookup` (production: defaultPairKey),
+ * or null: no id, no key, a bad key, or a lookup error. Both transports.
+ */
+export async function pairSubkeyVia(lookup, peerId) {
+  if (!peerId) return null;
+  const fn = typeof lookup === "function" ? lookup : defaultPairKey;
+  try {
+    const hex = await fn(peerId);
+    return hex ? pairSubkey(hex) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One handshake's binding decision, shared by both transports: reads the pin
+ * only when it can change the outcome (fails CLOSED), decides, records the
+ * Nest state (unless `recordNest` is false), writes the pin on a bound
+ * handshake, and logs `pair-bound` / `pair binding failed`.
+ *
+ *   prefix  log prefix, e.g. "[tailnet-sync]"
+ *   where   e.g. "server side", "client side", "Hyperswarm"
+ *
+ * Returns decidePairBinding's { ok, legacy, reason }.
+ */
+export async function decideAndRecordPairBinding({
+  db, localId, peerId, k, bound, macInvalid, mode, log = console, prefix, where, recordNest = true,
+}) {
+  const pinned = bound || macInvalid ? false : await isPairPinned(db, localId, peerId);
+  const d = decidePairBinding({ bound, macInvalid, pinned, mode: mode ?? pairBindingMode() });
+  if (recordNest) recordPairBindingState(peerId, { bound: d.ok && bound, legacy: d.legacy, reason: d.reason, noKey: !k });
+  const who = peerId ?? "(no instance id)";
+  if (!d.ok) {
+    log.warn?.(`${prefix} pair binding failed for ${who} (${where}): ${d.reason}${k ? "" : "; this side holds no pair key for it"}`);
+    return d;
+  }
+  if (bound) {
+    const fresh = await markPairPinned(db, localId, peerId);
+    const info = typeof log.log === "function" ? log.log.bind(log) : console.log;
+    info(`${prefix} pair-bound handshake with ${who} (${where})${fresh ? "; pinned: unbound handshakes from it are refused from now on" : ""}`);
+  }
+  return d;
+}

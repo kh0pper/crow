@@ -54,8 +54,7 @@ import {
 } from "../shared/peer-dial-health.js";
 import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
 import {
-  pairSubkey, tailnetRespMac, tailnetProofMac, macEqual, defaultPairKey, pairBindingMode,
-  isPairPinned, markPairPinned, decidePairBinding, recordPairBindingState,
+  tailnetRespMac, tailnetProofMac, macEqual, pairBindingMode, pairSubkeyVia, decideAndRecordPairBinding,
 } from "../shared/sync-pair-binding.js";
 
 const WS_PATH = "/api/instance-sync/stream";
@@ -251,38 +250,20 @@ function pbEnabled(ctx) {
 }
 
 /** The pair subkey for `peerId`, or null (no key, a bad key, or a lookup error). */
-async function pairSubkeyFor(ctx, peerId) {
-  const lookup = typeof ctx.pairKeyLookup === "function" ? ctx.pairKeyLookup : defaultPairKey;
-  try {
-    const hex = await lookup(peerId);
-    return hex ? pairSubkey(hex) : null;
-  } catch {
-    return null;
-  }
+function pairSubkeyFor(ctx, peerId) {
+  return pairSubkeyVia(ctx.pairKeyLookup, peerId);
 }
 
 /**
- * The binding decision for one handshake: records the Nest state, writes the
- * pin on a bound handshake, logs `pair-bound` / `pair binding failed`.
- * Returns decidePairBinding's { ok, legacy, reason }.
+ * The binding decision for one handshake (sync-pair-binding.js
+ * decideAndRecordPairBinding): records the Nest state, writes the pin on a
+ * bound handshake, logs `pair-bound` / `pair binding failed`.
  */
-async function decideTailnetBinding(ctx, peerId, { k, bound, macInvalid, side }) {
-  const log = ctx.log || console;
-  const localId = ctx.instanceSyncManager?.localInstanceId;
-  // The pin is read only when it can change the outcome; it fails CLOSED.
-  const pinned = bound || macInvalid ? false : await isPairPinned(ctx.db, localId, peerId);
-  const d = decidePairBinding({ bound, macInvalid, pinned, mode: ctx.pairBindingMode ?? pairBindingMode() });
-  recordPairBindingState(peerId, { bound: d.ok && bound, legacy: d.legacy, reason: d.reason, noKey: !k });
-  if (!d.ok) {
-    log.warn?.(`[tailnet-sync] pair binding failed for ${peerId} (${side} side): ${d.reason}${k ? "" : "; this side holds no pair key for it"}`);
-    return d;
-  }
-  if (bound) {
-    const fresh = await markPairPinned(ctx.db, localId, peerId);
-    const info = typeof log.log === "function" ? log.log.bind(log) : console.log;
-    info(`[tailnet-sync] pair-bound handshake with ${peerId} (${side} side)${fresh ? "; pinned: unbound handshakes from it are refused from now on" : ""}`);
-  }
-  return d;
+function decideTailnetBinding(ctx, peerId, { k, bound, macInvalid, side }) {
+  return decideAndRecordPairBinding({
+    db: ctx.db, localId: ctx.instanceSyncManager?.localInstanceId, peerId, k, bound, macInvalid,
+    mode: ctx.pairBindingMode ?? pairBindingMode(), log: ctx.log || console, prefix: "[tailnet-sync]", where: `${side} side`,
+  });
 }
 
 /**
