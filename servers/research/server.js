@@ -1260,7 +1260,7 @@ export function createProjectServer(dbPath, options = {}) {
         if (ft === "") return { found: null, line: `\nQuote not checked: Crow has no page text for source #${source_id}.` };
         const m = matchQuote(content, { ...splitFetchedText(ft), truncated: storedTextMaybeTruncated(ft) });
         if (m.found === 1) return { found: 1, line: "\nQuote checked: found on the page Crow fetched." };
-        if (m.found === 0) return { found: 0, line: `\nWARNING: this quote is NOT on the page Crow fetched (source #${source_id}). Fix the wording or do not present it as a quote.` };
+        if (m.found === 0) return { found: 0, line: `\nWARNING: this quote is NOT on the page Crow fetched (source #${source_id}). Do not present it as a quote. If you need the exact words, copy them character for character in a new note. This note can't be removed, so tell the owner if it blocks verification.` };
         return { found: null, line: `\nQuote not checked: ${m.reason || "the page text was truncated"}.` };
       };
       let { found: quoteFound, line: quoteLine } = checkQuote(src);
