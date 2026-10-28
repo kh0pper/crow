@@ -15,5 +15,7 @@ export function windowLimiter({ max, windowMs = 60000, maxKeys = 1000, now = Dat
     while (buckets.size > maxKeys) buckets.delete(buckets.keys().next().value);
     return b.count <= max;
   }
-  return { hit, size: () => buckets.size, has: (k) => buckets.has(k) };
+  /** The current window's count for a key, without counting a hit. */
+  const count = (key) => { const b = buckets.get(key); return b && now() - b.start < windowMs ? b.count : 0; };
+  return { hit, count, size: () => buckets.size, has: (k) => buckets.has(k) };
 }

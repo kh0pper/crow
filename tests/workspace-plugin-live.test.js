@@ -272,3 +272,17 @@ test("no documentCallbackUrl (or a malformed one): no hint header", async () => 
   const bad = editor(none, { callbackUrl: "/track?doc=not-a-jwt" }); bad.start(); await bad.advance(1000);
   assert.equal(bad.polls()[0].headers["X-Crow-File-Hint"], undefined);
 });
+
+test("a thread inside the character limits but over 250000 UTF-8 bytes is not sent", async () => {
+  const e = commentEditor(okComments, []);
+  e.start(); await e.advance(100);
+  const wide = "日".repeat(4000); // 3 bytes each: 12 kB per item, under TEXT_MAX characters
+  const replies = Array.from({ length: 25 }, () => ({ Text: wide, Time: "1793157700000", UserName: "admin" }));
+  const big = cm("1_20", `@hank ${wide}`, { Replies: replies });
+  assert.ok(JSON.stringify(big.Data).length < 2 * 256 * 1024 && Buffer.byteLength(JSON.stringify(big.Data)) > 250000);
+  e.doc.push(big); e.fire("add", big);
+  assert.equal(e.reports().length, 0, "over the byte budget: skipped");
+  const ok = cm("1_21", "@hank small");
+  e.doc.push(ok); e.fire("add", ok);
+  assert.equal(e.reports().length, 1, "control: a normal thread is sent");
+});

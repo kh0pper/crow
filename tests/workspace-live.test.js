@@ -577,3 +577,81 @@ test("hints: honoured only for an edit-capable token; at most 10 uncached hint l
     assert.equal(Number((await sessionByKey(db, kl)).last_seen), now, "written again after 15 s");
   } finally { s6.close(); }
 });
+
+test("fix1: a config-level commentLoopBlocked (or a throwing getConfig) means an unresolved /comments report logs nothing", async () => {
+  const { liveRouter, LIMITS } = await import("../bundles/workspace/server/live/routes-live.js");
+  const { getConfig } = await import("../bundles/workspace/server/config.js");
+  await shadowOn(); await clearEvents();
+  let mode = "ok"; // ok → real config; blocked → commentLoopBlocked set
+  const cfg = () => (mode === "blocked" ? { ...getConfig(), commentLoopBlocked: "duplicate_display_name" } : getConfig());
+  const a = express(); a.use(liveRouter({ Router: express.Router, json: express.json, db, getConfig: cfg, clock: { now: () => Date.now() }, limits: LIMITS }));
+  const s = a.listen(0); const b = `http://127.0.0.1:${s.address().port}`;
+  const rep = (k) => fetch(`${b}/comments`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${ownerJwt(k)}` }, body: JSON.stringify({ key: k, pv: "0.3.0", kind: "add", thread: thread(), occ: [0] }) }).then((r) => r.status);
+  try {
+    assert.equal(await rep("no-such-key-c1"), 401);
+    assert.equal((await commentEvents("unresolved_key")).length, 1, "control: unblocked, it is logged");
+    mode = "blocked"; await clearEvents();
+    assert.equal(await rep("no-such-key-c2"), 401);
+    assert.equal((await commentEvents()).length, 0, "config-level block: nothing logged");
+    await clearEvents();
+    let thrown = false;
+    const a2 = express(); a2.use(liveRouter({ Router: express.Router, json: express.json, db, clock: { now: () => Date.now() }, limits: LIMITS, getConfig: () => { if (/logUnresolved/.test(new Error().stack)) { thrown = true; throw new Error("config gone"); } return getConfig(); } }));
+    const s2 = a2.listen(0);
+    try {
+      const st = await fetch(`http://127.0.0.1:${s2.address().port}/comments`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${ownerJwt("no-such-key-c3")}` }, body: JSON.stringify({ key: "no-such-key-c3", pv: "0.3.0", kind: "add", thread: thread(), occ: [0] }) }).then((r) => r.status);
+      assert.equal(st, 401);
+      assert.ok(thrown, "the log path asked the config");
+      assert.equal((await commentEvents()).length, 0, "a throwing getConfig is blocked: nothing logged");
+    } finally { s2.close(); }
+  } finally { s.close(); }
+});
+
+test("fix2: reporting the SECOND of two pasted duplicates with occ [1] logs the saved side's second fingerprint, not the first", async () => {
+  await shadowOn(); await clearEvents();
+  const { commentDocx } = await import("./helpers/workspace-comment-docx.js");
+  const { openDocx } = await import("../bundles/workspace/server/ooxml/docx-model.js");
+  const { readCommentThreads } = await import("../bundles/workspace/server/ooxml/docx-comments.js");
+  const K = await import("../bundles/workspace/server/comments/keys.js");
+  doc("dup.docx"); const f = fake.node("S/dup.docx");
+  const k = fake.openInEditor("S/dup.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const time = 1793157691225, iso = new Date(Math.floor(time / 1000) * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const th = { ...thread({ text: "@hank dup", time }), QuoteText: "con" }; // the saved side below: author Casey, quote "con"
+  const saved = K.flatten(readCommentThreads(openDocx(commentDocx({ threads: [0, 1].map(() => ({ author: "Casey", date: iso, text: "@hank dup", quoted: "con" })) }))).threads);
+  const [fp0, fp1] = saved.map(K.fingerprint);
+  assert.notEqual(fp0, fp1);
+  assert.equal((await reportTo(k, { hint: f.fileId, th, occ: [1] })).status, 200);
+  const [lr] = await commentEvents("live_report");
+  assert.equal(lr.fp, fp1, "the saved side's second duplicate");
+  assert.notEqual(lr.fp, fp0);
+});
+
+test("fix3: a global budget of FAILED hint lookups; successful hints never spend it; once spent, uncached hints are ignored", async () => {
+  const { liveRouter, LIMITS, HINT_FAILURES_PER_MIN } = await import("../bundles/workspace/server/live/routes-live.js");
+  const { getConfig } = await import("../bundles/workspace/server/config.js");
+  assert.equal(HINT_FAILURES_PER_MIN, 120);
+  let now = Date.now();
+  const a = express(); a.use(liveRouter({ Router: express.Router, json: express.json, db, getConfig, clock: { now: () => now }, limits: { ...LIMITS, perUser: 10000, perDocument: 10000, perDocumentRaw: 10000, hintLookups: 10000, hintFailures: 5 } }));
+  const s = a.listen(0); const b = `http://127.0.0.1:${s.address().port}`;
+  const pend = (k, hint) => fetch(`${b}/pending?key=${k}&${PV}`, { headers: { Authorization: `Bearer ${editorJwt(k)}`, "X-Crow-File-Hint": String(hint) } }).then((r) => r.status);
+  const configCalls = (id) => fake.calls.filter((c) => c.url.includes(`/apps/onlyoffice/api/v1/config/${id}`)).length;
+  try {
+    doc("gb1.docx"); const g1 = fake.node("S/gb1.docx"); const k1 = fake.openInEditor("S/gb1.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+    doc("gb2.docx"); const g2 = fake.node("S/gb2.docx"); const k2 = fake.openInEditor("S/gb2.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+    // successful hints (and repeats of them) never spend the budget
+    for (let i = 0; i < 8; i++) assert.equal(await pend(k1, g1.fileId), 200);
+    // five failing lookups (files that are not live / do not exist) spend it
+    for (let i = 0; i < 5; i++) assert.equal(await pend(k2, 900300 + i), 401);
+    assert.ok(configCalls(900300) > 0, "the failing hints were looked up");
+    // the sixth failing hint makes no docSession call
+    assert.equal(await pend(k2, 900399), 401);
+    assert.equal(configCalls(900399), 0, "over the global budget: ignored");
+    // a fresh valid hint is ignored too (treated as no hint) ...
+    const n = configCalls(g2.fileId);
+    assert.equal(await pend(k2, g2.fileId), 401);
+    assert.equal(configCalls(g2.fileId), n);
+    // ... but a hint whose session is already known still works
+    assert.equal(await pend(k1, g1.fileId), 200);
+    now += 61_000;
+    assert.equal(await pend(k2, g2.fileId), 200, "a new window");
+  } finally { s.close(); }
+});

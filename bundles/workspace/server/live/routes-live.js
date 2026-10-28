@@ -64,6 +64,8 @@ const CACHE_MAX = 2000;
 const MAX_CANDIDATES = 20;
 /** Uncached file-hint lookups (each costs a docSession call) per document key per minute; over it the hint is ignored. */
 export const HINT_LOOKUPS_PER_MIN = 10;
+/** Across all documents: FAILED hint lookups (not live, or another key) per minute; over it uncached hints are ignored. */
+export const HINT_FAILURES_PER_MIN = 120;
 /** An unchanged session sample (same key, file and uids) is not re-written within this window. */
 export const SAMPLE_SKIP_MS = 15000;
 const HIDDEN_ARGS = new Set(["path", "file_id", "if_open", "wait_s"]);
@@ -90,6 +92,8 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
   const perIp = lim(limits.perIp), global = lim(limits.global, 1), perUser = lim(limits.perUser), perDoc = lim(limits.perDocument);
   const rawDoc = lim(limits.perDocumentRaw ?? limits.perDocument * 4); // every valid token on the document, before authorization
   const hintLookups = lim(limits.hintLookups ?? HINT_LOOKUPS_PER_MIN);
+  const hintFailureMax = limits.hintFailures ?? HINT_FAILURES_PER_MIN;
+  const hintFailures = lim(hintFailureMax, 1); // counts failed lookups only
   // bounded caches (oldest evicted): fileId → ONLYOFFICE session; "fileId\0uid" → write permission. Each entry keeps
   // its own lifetime: 30 s, or NEGATIVE_TTL_MS for an answer that cannot authorize anyone.
   const cache = () => {
@@ -125,7 +129,11 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
       WHERE state IN ('pending','claimed_live','unknown_after_claim') OR (state='applied_live' AND verified=0) GROUP BY file_id ORDER BY hinted DESC, file_id LIMIT ?`, args: [key, MAX_CANDIDATES] })).rows;
     const sampled = Number((await sessionByKey(db, key))?.file_id) || null;
     const paths = new Map(rows.map((r) => [Number(r.file_id), r.path]));
-    if (hint !== null && hint !== sampled && !paths.has(hint) && !sessions.get(hint, force) && !hintLookups.hit(key)) hint = null;
+    let hintLooked = false; // this request spends a docSession call on the hint
+    if (hint !== null && hint !== sampled && !paths.has(hint) && !sessions.get(hint, force)) {
+      if (hintFailures.count("*") >= hintFailureMax || !hintLookups.hit(key)) hint = null;
+      else hintLooked = true;
+    }
     const ids = [...new Set([sampled, hint, ...rows.map((r) => Number(r.file_id))].filter((id) => Number.isSafeInteger(id) && id > 0))];
     const sig = ids.join(",");
     if (misses.get(key)?.v === sig) return null; // asked these same files < 5 s ago: none had this key
@@ -133,6 +141,7 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
       let s = await sessionOf(fileId, force);
       // a user who joined after this session was cached: re-ask once the entry is older than the negative window
       if (!force && userId && s?.live && String(s.key) === key && !s.users.map(String).includes(userId) && !sessions.get(fileId, false, NEGATIVE_TTL_MS)) s = await sessionOf(fileId, true);
+      if (hintLooked && fileId === hint && !(s?.live && String(s.key) === key)) hintFailures.hit("*");
       if (s?.live && String(s.key) === key) return { fileId, path: paths.get(fileId) ?? null, users: s.users.map(String), uids: (s.uids || s.users).map(String) };
     }
     misses.set(key, sig, NEGATIVE_TTL_MS);
@@ -193,7 +202,7 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
   async function logUnresolved(hinted) {
     try {
       const w = await getWatch(db);
-      if (w.mode === "off" || w.blocked_reason) return;
+      if (w.mode === "off" || w.blocked_reason || getConfig().commentLoopBlocked) return; // a getConfig throw lands in the catch: blocked
       await logEvent(db, { at: now(), fileId: null, kind: "unresolved_key", detail: { source: "live", hinted } });
     } catch (e) { console.warn(`[workspace] live: unresolved_key not logged: ${String(e?.message).slice(0, 200)}`); }
   }

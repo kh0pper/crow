@@ -28,7 +28,7 @@
   var INDICATOR_TEXT = "Crow is editing…";
   var timer = null, idleSince = Date.now(), busy = false, stopped = false, indicatorAt = 0, indicatorOffTimer = null, indicatorShown = false;
   var backoffUntil = 0, lastPollAt = 0;
-  var TEXT_MAX = 4096, REPLIES_MAX = 50, REPORT_RETRY_MS = [5000, 15000], MENTION_RE = /(^|\s)@[A-Za-z0-9]/;
+  var TEXT_MAX = 4096, REPLIES_MAX = 50, BODY_MAX_BYTES = 250000, REPORT_RETRY_MS = [5000, 15000], MENTION_RE = /(^|\s)@[A-Za-z0-9]/;
   var baseline = {}, ready = false;
   function info() { return window.Asc.plugin.info || {}; }
   /** The fileId claim of documentCallbackUrl's doc token (E10), as a decimal string, or null. Unverified: a hint. */
@@ -177,8 +177,11 @@
       if (!occ || occ.length !== list.length) return; // the thread is gone (or changed again): the next event reports it
       var d = ev.Data, reps = [];
       for (var k = 0; k < (d.Replies || []).length; k++) reps.push({ Text: str(d.Replies[k].Text), Time: d.Replies[k].Time, UserName: str(d.Replies[k].UserName) });
-      send({ key: i0.documentId, pv: VERSION, kind: kind, occ: occ,
-        thread: { Id: String(ev.Id), Text: str(d.Text), Time: d.Time, UserName: str(d.UserName), QuoteText: str(d.QuoteText), Solved: d.Solved === true, Replies: reps } }, 0);
+      var body = { key: i0.documentId, pv: VERSION, kind: kind, occ: occ,
+        thread: { Id: String(ev.Id), Text: str(d.Text), Time: d.Time, UserName: str(d.UserName), QuoteText: str(d.QuoteText), Solved: d.Solved === true, Replies: reps } };
+      // the server parses 256 KB: a thread inside the character limits can still be larger in UTF-8 bytes
+      if (unescape(encodeURIComponent(JSON.stringify(body))).length > BODY_MAX_BYTES) return;
+      send(body, 0);
     });
   }
   function takeBaseline() {
