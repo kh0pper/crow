@@ -977,11 +977,22 @@ export function tamagotchiJs(lang) {
   // fetched here on the same poll cadence. Any non-200/error/absent bird
   // (login page, ramble not installed, static route 401) is silently a
   // no-op — the classic crow stays exactly as it was.
+  // This script runs once per document, but a Turbo visit (Chat, Board and
+  // Make are Turbo visits) swaps in a new header holding the default crow:
+  // turbo:render redraws the known bird into it at once, then re-checks the
+  // pet. One path for every page that carries the header.
   var _rambleBirdSpecies = null;
   var _rambleBirdSeed = null;
   var _rambleBirdMood = null;
   var _rambleBirdOutfit = null;
+  var _rambleBirdOutfitObj = null;
   var _rambleBirdFailed = false;
+
+  /** Is the bird drawn in THIS page's header (not only in a header Turbo swapped out)? */
+  function _rambleBirdOnPage() {
+    var b = document.getElementById('crow-tama-bird');
+    return !!(b && b.firstChild && b.firstChild.firstChild);
+  }
 
   function _rambleBirdLoadEngine(cb) {
     if (window.RambleBird) { cb(); return; }
@@ -1052,7 +1063,7 @@ export function tamagotchiJs(lang) {
       var outfit = data.bird.outfit || null;
       var outfitKey = outfit ? JSON.stringify(outfit) : '';
 
-      if (species === _rambleBirdSpecies && seed === _rambleBirdSeed && mood === _rambleBirdMood && outfitKey === _rambleBirdOutfit) return;
+      if (species === _rambleBirdSpecies && seed === _rambleBirdSeed && mood === _rambleBirdMood && outfitKey === _rambleBirdOutfit && _rambleBirdOnPage()) return;
 
       _rambleBirdLoadEngine(function() {
         if (!window.RambleBird) return;
@@ -1061,9 +1072,16 @@ export function tamagotchiJs(lang) {
         _rambleBirdSeed = seed;
         _rambleBirdMood = mood;
         _rambleBirdOutfit = outfitKey;
+        _rambleBirdOutfitObj = outfit;
       });
     } catch (e) {}
   }
+  document.addEventListener('turbo:render', function() {
+    if (_rambleBirdSpecies !== null && window.RambleBird && !_rambleBirdOnPage()) {
+      _drawRambleBird(_rambleBirdSpecies, _rambleBirdSeed, _rambleBirdMood, _rambleBirdOutfitObj);
+    }
+    refreshRambleBird();
+  });
   // ── end ramble bird integration ──
 
   async function pollNotifications() {
