@@ -148,11 +148,18 @@ const isVoiceRow = (row) => isVoiceBotId(String(row.bot_id)) || isVoiceBotDef(pa
 
 /**
  * A "<provider_id>/<model_id>" key names a real model when an enabled provider
- * row lists that model id (the Bot Builder's loadModelOptions rule: a models
+ * row lists that model id (a "role:<id>" ref: when the role resolves to one) (the Bot Builder's loadModelOptions rule: a models
  * entry is a string id or an object with .id). Split on the first "/" only.
  */
 async function isProviderModel(db, key) {
   if (typeof key !== "string") return false;
+  // A `role:` ref names a real model when the full role walk lands on one. Lazy: this module stays a no-import leaf (I4).
+  if (key.startsWith("role:")) {
+    try {
+      const { resolveRole } = await import("./model-roles-store.js");
+      return !!(await resolveRole(db, key, { need: "chat" }))?.key;
+    } catch { return false; }
+  }
   const i = key.indexOf("/");
   if (i <= 0 || i === key.length - 1) return false;
   const pid = key.slice(0, i), mid = key.slice(i + 1);

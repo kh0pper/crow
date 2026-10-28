@@ -43,9 +43,25 @@ export function ownToolsLoaded(voiceDef, connected = null) {
   try { return Object.values(resolveRoutineBackends(normalizeVoiceSettings(voiceDef), conn)).some(Boolean); } catch { return false; }
 }
 
-/** Is the fast voice model's provider row (the id before the first "/") a cloud one? false on any doubt. */
+/**
+ * Is the fast voice model a cloud one? A raw key: its provider row (the id before the first "/") has host
+ * "cloud". A `role:` ref: the role resolves (full walk) and the resolved key is not proven local (isCloudKey,
+ * which follows a door to its upstream). false on any doubt, an unresolvable role included.
+ */
 async function fastModelIsCloud(db, def) {
   const key = normalizeVoiceSettings(def).fast_voice_model;
+  if (typeof key === "string" && key.startsWith("role:")) {
+    try {
+      // Lazy: surfaces load this module through appImport; the store loads only for a role.
+      const [{ resolveRole, loadRoleContext }, { isCloudKey }] = await Promise.all([
+        import("../../shared/model-roles-store.js"), import("../../shared/model-roles.js"),
+      ]);
+      const r = await resolveRole(db, key, { need: "chat" });
+      if (!r?.key) return false;
+      const { providers } = await loadRoleContext(db);
+      return isCloudKey(r.key, { providers });
+    } catch { return false; }
+  }
   const i = key ? key.indexOf("/") : -1;
   if (i <= 0) return false;
   try {
@@ -57,7 +73,7 @@ async function fastModelIsCloud(db, def) {
 /**
  * A surface's loader for the Crow voice bot: loadVoiceBot(db) → { def, cloud } | null.
  *   def    the voice bot's parsed definition
- *   cloud  its fast voice model's provider row has host "cloud" (crowVoiceTurnOptions' `cloud`)
+ *   cloud  its fast voice model is a cloud one (fastModelIsCloud; crowVoiceTurnOptions' `cloud`)
  * null when the row is missing, disabled or corrupt, or the read fails: the surface then applies no
  * profiles and the turn speaks the no-assistant line (turn.js). Never throws. Cached VOICE_BOT_CACHE_MS;
  * `generation()` (turn.js defaultVoiceDeps' botDefsGeneration, bumped on pibots:defs-changed) drops
