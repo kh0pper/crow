@@ -78,25 +78,19 @@ export function serversForBot(def) {
   return [...set];
 }
 
-// The gateway mounts that serve the project tools with a local MCP token's authority (the owner):
-// routes/mcp.js treats a valid local token as the owner, and a url block gets no actor env, so a
-// bot handed one of these would act as the owner. Board/phone/artifacts mounts carry signed actor
-// headers and are not in this list.
+// The gateway mounts that serve the project tools with a gateway token's authority: routes/mcp.js
+// treats a valid local MCP token as the owner, and a url block gets no actor env, so a bot handed
+// one of these would act as the owner. These paths exist only on Crow gateways (any host, any
+// scheme: loopback, LAN, a Serve HTTPS front); legitimate peer access goes through stdio
+// crow-remote-proxy blocks. Board/phone/artifacts mounts carry signed actor headers instead.
 const OWNER_PROJECT_PATHS = new Set(["/router/mcp", "/projects/mcp", "/research/mcp"]);
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 
-/** True if a url block reaches this gateway's owner-authority project mounts. */
-export function isOwnerProjectUrl(rawUrl, env = process.env) {
+/** True if a url block reaches a Crow gateway's project-tool mounts. */
+export function isOwnerProjectUrl(rawUrl) {
   let u;
   try { u = new URL(String(rawUrl)); } catch { return false; }
   const path = u.pathname.length > 1 ? u.pathname.replace(/\/$/, "") : u.pathname;
-  if (!OWNER_PROJECT_PATHS.has(path)) return false;
-  const host = u.hostname.toLowerCase();
-  if (LOOPBACK_HOSTS.has(host)) return true;
-  // This gateway reached by another of its names (LAN or tailnet address) on its own port.
-  const gatewayPort = String(env.CROW_GATEWAY_PORT || 3001);
-  const port = u.port || (u.protocol === "https:" ? "443" : "80");
-  return port === gatewayPort;
+  return OWNER_PROJECT_PATHS.has(path);
 }
 
 /** True if a server block touches crow.db (so the journal guard applies). */
@@ -285,11 +279,11 @@ export function buildBotMcp(def, canonical, opts = {}) {
     disable(name, null);
   }
 
-  // A bot must never reach the project tools through an owner-authority gateway mount.
+  // A bot must never reach the project tools through a gateway mount (a gateway token is the owner).
   for (const name of [...active]) {
     const block = out.mcpServers[name];
     if (block && block.url && isOwnerProjectUrl(block.url)) {
-      disable(name, "reaches the gateway's project tools with owner authority (a local MCP token); disabled for bots");
+      disable(name, "was disabled: a bot must not reach the operator's research tools with a gateway token (owner authority)");
       active.splice(active.indexOf(name), 1);
       for (const list of [journalGuarded, minted]) {
         const i = list.indexOf(name);

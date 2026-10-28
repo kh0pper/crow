@@ -165,7 +165,7 @@ test("refreshSchema retries the ensure at most once per 30 s per path while not 
   assert.ok(columns(p).has("research_sources.fetch_status"));
 });
 
-test("buildBotMcp disables owner-authority gateway project mounts and leaves other url blocks alone", () => {
+test("buildBotMcp disables gateway project-tool mounts on any host and leaves other url blocks alone", () => {
   const blocks = {
     "crow-core": { url: "http://127.0.0.1:3001/router/mcp", headers: { Authorization: "Bearer x" } },
     "proj-local": { url: "http://localhost:3001/projects/mcp/" },
@@ -173,17 +173,20 @@ test("buildBotMcp disables owner-authority gateway project mounts and leaves oth
     "proj-lan": { url: "http://192.0.2.10:3001/projects/mcp" },
     board: { url: "http://127.0.0.1:3001/board/mcp", headers: { Authorization: "Bearer b" } },
     artifacts: { url: "http://127.0.0.1:3001/artifacts/mcp", headers: { Authorization: "Bearer a" } },
-    external: { url: "https://mcp.example.com/router/mcp" },
+    tailnet: { url: "https://crow.example.ts.net:8444/router/mcp", headers: { Authorization: "Bearer t" } },
+    external: { url: "https://mcp.example.com/research/mcp/" },
+    "tailnet-board": { url: "https://crow.example.ts.net:8444/board/mcp", headers: { Authorization: "Bearer b" } },
+    other: { url: "https://mcp.example.com/mcp" },
   };
   const def = { tools: { crow_mcp: Object.keys(blocks) } };
   const { json, servers, warnings, disabled } = buildBotMcp(def, { mcpServers: blocks }, {});
-  for (const name of ["crow-core", "proj-local", "research-v6", "proj-lan"]) {
+  for (const name of ["crow-core", "proj-local", "research-v6", "proj-lan", "tailnet", "external"]) {
     assert.deepEqual(json.mcpServers[name], { disabled: true }, name);
     assert.ok(disabled.includes(name), name);
     assert.ok(!servers.includes(name), name);
-    assert.ok(warnings.some((w) => w.includes(`'${name}'`) && /owner/.test(w)), name);
+    assert.ok(warnings.some((w) => w.includes(`'${name}'`) && /must not reach the operator's research tools with a gateway token/.test(w)), name);
   }
-  for (const name of ["board", "artifacts", "external"]) {
+  for (const name of ["board", "artifacts", "tailnet-board", "other"]) {
     assert.deepEqual(json.mcpServers[name], blocks[name], name);
     assert.ok(servers.includes(name), name);
   }
