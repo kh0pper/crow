@@ -184,7 +184,10 @@ function safeVerify(message, sigHex, pubkeyHex) {
 /** True once `peerId` has completed a CR handshake with us (downgrade guard). */
 async function peerCrRequired(ctx, peerId) {
   const localId = ctx.instanceSyncManager?.localInstanceId;
-  if (!localId) return false;
+  // Fail CLOSED: without our own id the pin cannot be read, so a pinned peer
+  // must not slip through as legacy. A CR-capable peer never reaches this
+  // check (callers only ask on the CR-less path), so it is unaffected.
+  if (!localId) return true;
   try {
     const { rows } = await ctx.db.execute({
       sql: "SELECT value FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ? LIMIT 1",
