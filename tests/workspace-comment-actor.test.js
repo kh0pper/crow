@@ -190,3 +190,30 @@ test("resolveActor/authorFor for a peer: sanitized name, no name -> 'Crow', neve
   assert.deepEqual(resolveActor({ CROW_ACTOR_KIND: "bot", CROW_ACTOR_BOT_ID: "hank", CROW_ACTOR_BOT_NAME: "hank" }, meta(PEER)), HANK);
   assert.equal(resolveActor({ CROW_ACTOR_KIND: "owner", CROW_OWNER_NAME: "Alex" }, meta(PEER)).kind, "peer", "a peer call is never the owner");
 });
+
+test("two peers with identical 40-character names get distinct authors in a real comment (the suffix is never cut)", async () => {
+  const { peerLabels } = await import("../servers/shared/peer-label.js");
+  const name = "abcdefghij".repeat(4);
+  const labels = peerLabels([{ id: "inst-long-1", name }, { id: "inst-long-2", name }]);
+  const authors = [];
+  for (const [i, id] of ["inst-long-1", "inst-long-2"].entries()) {
+    put(`long${i}.docx`);
+    const a = await callAs("ws_docs_add_comment", { path: `S/long${i}.docx`, content: "x" }, { kind: "peer", instance: id, from: labels.get(id) });
+    assert.equal(a.success, true, JSON.stringify(a));
+    authors.push((await comments(`S/long${i}.docx`)).find((x) => x.id === a.data.comment_id).author);
+  }
+  assert.notEqual(authors[0], authors[1]);
+  for (const au of authors) assert.match(au, /^Crow \(via [a-j]+ \[[0-9a-f]{8}\]\)$/, au);
+});
+
+test("actor.js keeps a trailing [hex] suffix even when the name part is too long, and caps the whole at 40", async () => {
+  const { resolveActor } = await import("../bundles/workspace/server/actor.js");
+  const meta = (from) => ({ _meta: { "crow/actor": { kind: "peer", from } } });
+  const long = "y".repeat(60);
+  const r8 = resolveActor({}, meta(`${long} [0123abcd]`)).from;
+  assert.match(r8, / \[0123abcd\]$/); assert.ok(Array.from(r8).length <= 40, r8);
+  const r24 = resolveActor({}, meta(`${long} [${"e".repeat(24)}]`)).from;
+  assert.match(r24, / \[e{24}\]$/); assert.ok(Array.from(r24).length <= 40, r24);
+  assert.equal(resolveActor({}, meta("wren [0123abcd]")).from, "wren [0123abcd]");
+  assert.equal(Array.from(resolveActor({}, meta(long)).from).length, 40, "no suffix: plain 40-character cap");
+});
