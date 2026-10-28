@@ -9,14 +9,14 @@
  *    an empty result is "peer";
  *  - every row's final label is computed together, to a fixpoint: any two labels that are equal under
  *    NFKC + lowercase + a homoglyph skeleton (and any label equal to this instance's own name) are all
- *    suffixed with the first 8 hex of sha256(id), then with the full 64 hex if they still collide.
+ *    suffixed with the first 8 hex of sha256(id) in square brackets ("raven [1a2b3c4d]"; brackets are
+ *    never in a cleaned name), then with the full 64 hex if they still collide.
  * Nothing a caller claims (tool arguments, `_meta`) is ever used. A signed bot actor that upgrades this
  * to "<bot> (bot from <name>)" comes later, from the sending gateway (the private engineering notes).
  */
 import { createHash } from "node:crypto";
 
 const PEER_TOKEN = "peer-instance";
-const SEP = "\u00b7";
 const MAX_NAME = 40;
 
 /** The cleaned, displayable name ("" when nothing allowed is left). */
@@ -46,13 +46,15 @@ const HOMOGLYPHS = {
   "\u03ba": "k", "\u03c7": "x", "\u03c5": "u", "\u03b7": "n", "\u03bc": "u", "\u03c9": "w", "\u03b2": "b",
   "0": "o", "1": "l", "i": "l",
 };
-/** The comparison key for labels: NFKC, lowercase, homoglyph skeleton, "rn"→"m", "vv"→"w". */
+/** The comparison key for labels: NFKC, lowercase, homoglyph skeleton, "rn"→"m", "vv"→"w", and trailing
+ *  separator-class characters and spaces folded away ("raven." and "raven" are the same label). */
 export function labelSkeleton(s) {
   return Array.from(String(s).normalize("NFKC").toLowerCase()).map((c) => HOMOGLYPHS[c] ?? c).join("")
-    .replace(/rn/g, "m").replace(/vv/g, "w");
+    .replace(/rn/g, "m").replace(/vv/g, "w").replace(/[\s._\-\u00b7]+$/u, "");
 }
 
-const labelAt = (base, id, level) => (level === 0 ? base : `${base}${SEP}${idSuffix(id, level === 2)}`);
+// The suffix is in square brackets, which cleanPeerName can never produce, so no name can imitate one.
+const labelAt = (base, id, level) => (level === 0 ? base : `${base} [${idSuffix(id, level === 2)}]`);
 
 /**
  * Final labels for every row (Map id → label), to a fixpoint. `ownName` is a taken label: a row whose

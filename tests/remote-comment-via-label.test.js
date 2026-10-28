@@ -141,7 +141,7 @@ test("a second peer enrolled under the same name: both are told apart by an id s
   assert.equal(a.success && c.success, true);
   const la = await authorOf("S/dupA.docx", a.data.comment_id);
   const lc = await authorOf("S/dupC.docx", c.data.comment_id);
-  assert.equal(la, `Crow (via a·${idSuffix(A.id)})`);
-  assert.equal(lc, `Crow (via a·${idSuffix(C.id)})`);
+  assert.equal(la, `Crow (via a [${idSuffix(A.id)}])`);
+  assert.equal(lc, `Crow (via a [${idSuffix(C.id)}])`);
   assert.notEqual(la, lc);
 });
