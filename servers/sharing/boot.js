@@ -25,6 +25,7 @@ import { wasProcessed, recordProcessedEvent } from "./processed-events.js";
 import { sanitizeDisplayName } from "./display-name.js";
 import { emitOrQueue } from "../shared/sync-emit.js";
 import { insertSharedSource } from "./shared-source-insert.js";
+import { withoutProvenance } from "../research/provenance-schema.js";
 import { PROFILE_SUBTYPE, handleProfileMessage, applyPeerProfile, readLocalProfile, ensurePeerProfileColumns, isEstablishedContact } from "./peer-profile.js";
 import { installBirdAvatarHooks } from "./profile-avatar.js";
 import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
@@ -446,7 +447,7 @@ export async function deliverPendingShares({ db, peerManager, contact, identityC
       peerManager.send(crowId, {
         type: "share",
         share_type: share.share_type,
-        payload: itemDataRows[0],
+        payload: withoutProvenance(itemDataRows[0], mapEntry.table),
         permissions: share.permissions,
         sender: identityCrowId,
         timestamp: new Date().toISOString(),

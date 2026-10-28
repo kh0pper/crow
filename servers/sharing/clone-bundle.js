@@ -19,15 +19,7 @@ import { createProjectSpace } from "../shared/project-spaces.js";
 import { mkdirSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { resolveDataDir } from "../db.js";
-import { PROVENANCE_COLUMNS } from "../research/provenance-schema.js";
-
-function withoutProvenance(row, table) {
-  const copy = { ...row };
-  for (const { table: t, column } of PROVENANCE_COLUMNS) {
-    if (t === table) delete copy[column];
-  }
-  return copy;
-}
+import { withoutProvenance } from "../research/provenance-schema.js";
 
 export function createCloneBundleHelpers(ctx) {
   const { db } = ctx;

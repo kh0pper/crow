@@ -25,6 +25,8 @@ import { InstanceSyncManager, EXCLUDED_COLUMNS, INBOUND_DROPPED_COLUMNS } from "
 import { sign } from "../servers/sharing/identity.js";
 import { insertSharedSource } from "../servers/sharing/shared-source-insert.js";
 import { createCloneBundleHelpers } from "../servers/sharing/clone-bundle.js";
+import { deliverPendingShares } from "../servers/sharing/boot.js";
+import { registerShareInboxTools } from "../servers/sharing/tools/share-inbox.js";
 import { SOURCE_TYPES } from "../servers/research/source-types.js";
 import { PROVENANCE_COLUMNS } from "../servers/research/provenance-schema.js";
 import { makePre0013Db, openFixtureDb } from "./helpers/research-fixtures.js";
@@ -334,4 +336,86 @@ test("a cloned source is never verified or citable here", async () => {
     assert.equal(row.title, "S");
     assert.equal(row.verified, 0);
   } finally { fx.close(); }
+});
+
+// ── plain (event-style) shares ──────────────────────────────────────────────
+
+// A fetched source and a provenance-carrying note on a real DB, plus a contact to share with.
+function seedPlainShare(prefix) {
+  const bs = new Database(initDb(prefix));
+  const pid = Number(bs.prepare(
+    "INSERT INTO project_spaces (uuid, slug, name, type) VALUES (?, ?, 'Plain', 'general')",
+  ).run(`u-${prefix}`, prefix).lastInsertRowid);
+  const sid = Number(bs.prepare(
+    `INSERT INTO research_sources (project_id, title, source_type, url, citation_apa, verified,
+       fetch_status, fetched_at, final_url, http_status, content_sha256, fetched_text, fetch_error,
+       verification_method, verified_by)
+     VALUES (?, 'Fetched', 'web_article', 'https://example.com/p', 'C', 1,
+       'fetched', '2026-10-28T00:00:00Z', 'https://example.com/p', 200, 'abc', ?, NULL,
+       'quotes_checked', 'owner')`,
+  ).run(pid, "t".repeat(1000)).lastInsertRowid);
+  const nid = Number(bs.prepare(
+    "INSERT INTO research_notes (project_id, source_id, content, note_type, provenance, quote_found, locator) VALUES (?, ?, 'q', 'quote', 'fetched', 1, 'p2')",
+  ).run(pid, sid).lastInsertRowid);
+  const cid = Number(bs.prepare(
+    "INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES ('crow:plainpeer', 'Peer', 'ed-p', 'secp-p')",
+  ).run().lastInsertRowid);
+  return { bs, sid, nid, cid };
+}
+
+function assertNo0013(payload, table) {
+  for (const { table: t, column } of PROVENANCE_COLUMNS) {
+    if (t === table) assert.ok(!(column in payload), `a plain ${table} share must not carry ${column}`);
+  }
+}
+
+test("a plain crow_share of a source or note sends none of the 0013 columns", async () => {
+  const { bs, sid, nid } = seedPlainShare("peer-rows-plain-live");
+  try {
+    const sent = [];
+    const handlers = {};
+    registerShareInboxTools({ tool: (name, _d, _s, h) => { handlers[name] = h; } }, {
+      db: wrapDb(bs),
+      identity: { crowId: "crow:self" },
+      peerManager: { isConnected: () => true, send: (_to, msg) => { sent.push(msg); } },
+      buildProjectCloneBundle: async () => { throw new Error("not a clone"); },
+    });
+    for (const [share_type, item_id] of [["source", sid], ["note", nid]]) {
+      const args = { contact: "crow:plainpeer", share_type, item_id, permissions: "read" };
+      const preview = await handlers.crow_share({ ...args, confirm_token: "" });
+      const token = preview.content[0].text.match(/confirm_token: "([^"]+)"/)[1];
+      const res = await handlers.crow_share({ ...args, confirm_token: token });
+      assert.ok(!res.isError, res.content[0].text);
+    }
+    assert.equal(sent.length, 2);
+    assert.equal(sent[0].payload.title, "Fetched", "the rest of the source still ships");
+    assertNo0013(sent[0].payload, "research_sources");
+    assert.equal(sent[1].payload.content, "q");
+    assertNo0013(sent[1].payload, "research_notes");
+  } finally { bs.close(); }
+});
+
+test("a queued plain share of a source or note redelivers none of the 0013 columns", async () => {
+  const { bs, sid, nid, cid } = seedPlainShare("peer-rows-plain-queued");
+  try {
+    for (const [t, id] of [["source", sid], ["note", nid]]) {
+      bs.prepare(
+        "INSERT INTO shared_items (contact_id, share_type, item_id, permissions, direction, delivery_status) VALUES (?, ?, ?, 'read', 'sent', 'pending')",
+      ).run(cid, t, id);
+    }
+    const sent = [];
+    await deliverPendingShares({
+      db: wrapDb(bs),
+      peerManager: { send: (_to, msg) => { sent.push(msg); } },
+      contact: { id: cid, crow_id: "crow:plainpeer" },
+      identityCrowId: "crow:self",
+      buildProjectCloneBundle: async () => { throw new Error("not a clone"); },
+    });
+    assert.equal(sent.length, 2);
+    const bySType = Object.fromEntries(sent.map((m) => [m.share_type, m.payload]));
+    assert.equal(bySType.source.title, "Fetched");
+    assertNo0013(bySType.source, "research_sources");
+    assert.equal(bySType.note.content, "q");
+    assertNo0013(bySType.note, "research_notes");
+  } finally { bs.close(); }
 });

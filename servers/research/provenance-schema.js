@@ -36,5 +36,16 @@ export const PROVENANCE_COLUMNS = [
   { table: "research_notes", column: "locator", ddl: "TEXT", backfill: null },
 ];
 
+// A copy of a research_sources / research_notes row without its 0013 columns: fetch facts and
+// note provenance are this instance's own judgment of its copy of a page (and fetched_text can be
+// 200k chars), so no share path ever sends them. A no-op for any other table.
+export function withoutProvenance(row, table) {
+  const copy = { ...row };
+  for (const { table: t, column } of PROVENANCE_COLUMNS) {
+    if (t === table) delete copy[column];
+  }
+  return copy;
+}
+
 export const PROVENANCE_INDEX_SQL =
   "CREATE INDEX IF NOT EXISTS idx_sources_project_final_url ON research_sources(project_id, final_url)";
