@@ -23,7 +23,7 @@
  *     pinned-pubkey-own-sig  pubkey = the claimed (pinned) key, signature by a fresh key
  *     replay                 pubkey = the claimed key, and a proof recorded on an
  *                            earlier connection (`replay`: { signature } or { cb_sig })
- *     oracle                 forwards the node's challenge nonce, as its own
+ *     oracle                 (a relayed proof) forwards the node's challenge nonce, as its own
  *                            challenge, to `oracleTarget` on a second link (with
  *                            cb:1 when oracleCb, the default), and returns that
  *                            target's answer to the node with any cb_sig removed
@@ -38,7 +38,7 @@
  *
  * Returns { received, links, proofs, oracleAnswers, admitted(), targetLinks(),
  *   sendShare(text), waitTarget(ms), waitAdmitted(ms), waitOutcome(ms), stop() }.
- * stopAllImpostors() stops every impostor still running.
+ * stopAllImpostors() stops every scripted peer still running.
  */
 import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
@@ -96,7 +96,7 @@ export async function startImpostor({
     real = deriveInstanceIdentity(Buffer.from(identity.seedHex, "hex"));
     if (real.crowId !== claimCrowId) throw new Error("startImpostor: honest seed does not derive claimCrowId");
   }
-  const own = deriveInstanceIdentity(randomBytes(32)); // the impostor's own key
+  const own = deriveInstanceIdentity(randomBytes(32)); // this peer's own key
 
   const dht = new HyperDHT({ bootstrap, host: "127.0.0.1", port: [0, 0] });
   const nodes = dht.bootstrapNodes || [];

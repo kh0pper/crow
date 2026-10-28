@@ -48,6 +48,12 @@ export function notifName(value, max = 60) {
   return points.length > max ? points.slice(0, max).join("") : s;
 }
 
+/** The longest room code a call invite may carry. */
+const ROOM_CODE_MAX = 128;
+const isRoomCode = (v) => typeof v === "string" && v.length > 0 && v.length <= ROOM_CODE_MAX;
+/** Only http(s) links are followed. */
+const isWebLink = (v) => typeof v === "string" && /^https?:\/\//i.test(v);
+
 /**
  * PT-3 N-5: resolve a Nostr signer for a call / memo / reaction. Returns
  * { blocked } for a blocked row, { contact } for an established contact, or
@@ -74,14 +80,20 @@ export async function handleSocialNotify(db, subtype, payload, senderPubkey, man
     const p = payload || {};
     let base, nameField, build;
     if (subtype === "room_invite") {
-      if (!p.room_code || !p.join_url) return;
+      // Only http(s) links are followed, and the room code is a short string.
+      if (!isRoomCode(p.room_code) || !isWebLink(p.join_url)) return;
       base = "sharing:room_invite"; nameField = "host_name";
-      build = (who) => ({ title: `${who} is calling`, body: "Tap to join the call", priority: "high", action_url: p.join_url });
+      // A non-contact's link never reaches action_url: that field is pushed to
+      // every channel (web push, ntfy, email). It is kept in metadata, where
+      // the dashboard shows it behind the "not in your contacts" label.
+      build = (who, verified) => verified
+        ? { title: `${who} is calling`, body: "Tap to join the call", priority: "high", action_url: p.join_url }
+        : { title: `${who} is calling`, body: "Tap to join the call", priority: "normal", action_url: null, metadata: { join_url: p.join_url } };
     } else if (subtype === "voice_memo") {
       if (!p.text) return;
       const text = String(p.text);
       base = "sharing:voice_memo"; nameField = "sender_name";
-      build = (who) => ({ title: `Voice memo from ${who}`, body: text.length > 200 ? text.slice(0, 200) + "..." : text, priority: "high" });
+      build = (who, verified) => ({ title: `Voice memo from ${who}`, body: text.length > 200 ? text.slice(0, 200) + "..." : text, priority: verified ? "high" : "normal" });
     } else if (subtype === "reaction") {
       const emoji = notifName(p.emoji, 8);
       if (!emoji) return;
@@ -95,7 +107,8 @@ export async function handleSocialNotify(db, subtype, payload, senderPubkey, man
     const who = contact
       ? (contact.display_name || "Someone")
       : `${notifName(p[nameField]) || "Someone"} ${NOT_IN_CONTACTS}`;
-    await notify(db, { type: "peer", source: contact ? base : `${base}_unverified`, ...build(who) });
+    // A non-contact's item is normal priority.
+    await notify(db, { type: "peer", source: contact ? base : `${base}_unverified`, ...build(who, !!contact) });
   } catch (err) {
     try { console.warn(`[sharing] Failed to create ${subtype} notification:`, err?.message); } catch {}
   }
@@ -704,7 +717,7 @@ export async function handleGroupMessageNotify(db, payload, senderPubkey, manage
       body: msgText.length > 200 ? msgText.slice(0, 200) + "..." : msgText,
       type: "peer",
       source: full ? "sharing:group_message" : "sharing:group_message_unverified",
-      priority: "high",
+      priority: full ? "high" : "normal",
     });
   } catch (err) {
     console.warn("[sharing] Failed to create group message notification:", err.message);

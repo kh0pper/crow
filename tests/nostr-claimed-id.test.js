@@ -22,7 +22,7 @@ import { deriveInstanceIdentity, sign } from "../servers/sharing/identity.js";
 import { upsertFullContact } from "../servers/sharing/contact-promote.js";
 import { CB_PIN_PREFIX, wireContactBinding } from "../servers/sharing/contact-binding.js";
 import {
-  handleGroupMessageNotify, handleInviteAccepted, handleHandshakeComplete,
+  handleGroupMessageNotify, handleInviteAccepted, handleHandshakeComplete, handleSocialNotify,
   wireNostrReceive, initSharingRuntime,
 } from "../servers/sharing/boot.js";
 import * as peerProfile from "../servers/sharing/peer-profile.js";
@@ -157,6 +157,8 @@ test("N-1d group_message: a stranger claiming X is not stored; its notification 
   assert.equal(n.source, "sharing:group_message_unverified");
   assert.match(n.title, /\(not in your contacts\)/);
   assert.equal(n.title.includes("Xavier"), false, "the payload name is never shown");
+  const pr = await all(db, "SELECT source, priority FROM notifications ORDER BY id");
+  assert.deepEqual(pr.map((r) => r.priority), ["high", "normal"], "a contact's group message is high priority; a non-contact's is normal (I-1)");
 });
 
 // ================================================================ N-2
@@ -300,6 +302,34 @@ test("N-3c host-relay room_message: a non-member author is unattributed and labe
   assert.ok(gid);
 });
 
+test("N-3d (I-4) the room host's own message is credited to the host with its stored name, no via; the host relaying a non-member is still via", T, async (t) => {
+  const { db, H, X, ids, env } = await roomSetup(t);
+  await env("room_join", { room_uid: "u-h", room_name: "Hal's", host_crow_id: H.crowId, members: [] }, H);
+  const row = (uid) => one(db, "SELECT sender_contact_id, sender_label FROM room_messages WHERE msg_uid = ?", [uid]);
+
+  await env("room_message", { room_uid: "u-h", msg_uid: "m-h", author: { kind: "human", crow_id: H.crowId, display_name: "Payload Hal" }, text: "from the host" }, H);
+  const rh = await row("m-h");
+  assert.ok(rh, "stored");
+  assert.equal(Number(rh.sender_contact_id), Number(ids.H), "credited to the host contact");
+  assert.equal(rh.sender_label, "Hal", "the host's stored name, no via");
+
+  await env("room_message", { room_uid: "u-h", msg_uid: "m-x2", author: { kind: "human", crow_id: X.crowId, display_name: "Xav" }, text: "relayed" }, H);
+  const rx = await row("m-x2");
+  assert.equal(rx.sender_contact_id, null, "a relayed non-member stays unattributed");
+  assert.equal(rx.sender_label, "Xav via Hal");
+});
+
+test("N-3e (M-1) a blocked room host's room_message is dropped; the same host unblocked is stored", T, async (t) => {
+  const { db, H, ids, env } = await roomSetup(t);
+  await env("room_join", { room_uid: "u-h", room_name: "Hal's", host_crow_id: H.crowId, members: [] }, H);
+  const row = (uid) => one(db, "SELECT sender_label FROM room_messages WHERE msg_uid = ?", [uid]);
+  await env("room_message", { room_uid: "u-h", msg_uid: "m-ok", author: { kind: "human", crow_id: H.crowId }, text: "control" }, H);
+  assert.ok(await row("m-ok"), "control: the unblocked host's message is stored");
+  await db.execute({ sql: "UPDATE contacts SET is_blocked = 1 WHERE id = ?", args: [ids.H] });
+  await env("room_message", { room_uid: "u-h", msg_uid: "m-blk", author: { kind: "human", crow_id: H.crowId }, text: "blocked" }, H);
+  assert.equal(await row("m-blk"), null, "a blocked host relays nothing");
+});
+
 // ================================================================ N-4
 async function bootRuntime(db, ident, { localId = "inst-n4", sent = null, delayMs } = {}) {
   const pm = new PeerManager(ident, { env: {} });
@@ -321,14 +351,14 @@ async function bootRuntime(db, ident, { localId = "inst-n4", sent = null, delayM
 }
 const SCAN = "full contact(s) whose Crow ID does not match the public key";
 
-test("N-4 boot scan: zero squat rows log nothing; one squat row logs one line with count 1", T, async (t) => {
+test("N-4 boot scan: zero mismatched rows log nothing; one mismatched row logs one line with count 1", T, async (t) => {
   {
     const db = await freshDb(t, "n4a");
     await addFull(db, id(), "Honest");
     const before = linesWith(SCAN).length;
     await bootRuntime(db, id());
     await sleep(300);
-    assert.equal(linesWith(SCAN).length, before, "control: no line for zero squat rows");
+    assert.equal(linesWith(SCAN).length, before, "control: no line for zero mismatched rows");
   }
   const db = await freshDb(t, "n4b");
   await addFull(db, id(), "Honest");
@@ -363,7 +393,7 @@ test("N-5a room_invite: a stranger's call is labelled; a contact's uses the stor
   assert.equal(n.source, "sharing:room_invite_unverified");
   assert.match(n.title, /\(not in your contacts\)/);
   assert.ok(n.title.includes("Evil Name"), `sanitized name in ${JSON.stringify(n.title)}`);
-  assert.equal(n.action_url, "https://call.example/r2", "the link is kept (the browser puts it behind the label)");
+  assert.equal(n.action_url, null, "no top-level link for a non-contact (it is kept in metadata, behind the label)");
 
   await h.onSocial("room_invite", { room_code: "r3", join_url: "https://call.example/r3", host_name: "a".repeat(100) }, xo(S));
   n = (await notifs(db)).at(-1);
@@ -399,6 +429,66 @@ test("N-5b voice_memo and reaction: strangers get _unverified sources and the la
     await h.onSocial(sub, p, xo(B));
   }
   assert.equal((await notifs(db)).length, count, "a blocked contact's items notify nothing");
+});
+
+test("N-5d (I-1) a non-contact's call carries no external link on any channel: the link is in metadata, priority normal; a contact's call is unchanged", T, async (t) => {
+  const db = await freshDb(t, "n5d");
+  const H = id(), S = id();
+  await addFull(db, H, "Hal");
+  const seen = [];
+  const managers = { createNotification: async (_db, opts) => { seen.push(opts); return { id: seen.length }; } };
+  await handleSocialNotify(db, "room_invite", { room_code: "r1", join_url: "https://call.example/r1" }, xo(H), managers);
+  await handleSocialNotify(db, "room_invite", { room_code: "r2", join_url: "https://call.example/r2" }, xo(S), managers);
+  const [c, s] = seen;
+  assert.equal(c.source, "sharing:room_invite");
+  assert.equal(c.action_url, "https://call.example/r1", "control: a contact's call keeps its link");
+  assert.equal(c.priority, "high", "control: a contact's call is high priority");
+  assert.equal(s.source, "sharing:room_invite_unverified");
+  assert.equal(s.action_url ?? null, null, "no action_url for a non-contact");
+  assert.equal(s.priority, "normal");
+  assert.equal(s.metadata?.join_url, "https://call.example/r2", "the link is kept in metadata, behind the label");
+  // Every field deliverNotification pushes (web push, ntfy, email) is free of the link.
+  const pushed = JSON.stringify({ title: s.title, body: s.body, action_url: s.action_url ?? null, priority: s.priority, type: s.type });
+  assert.equal(pushed.includes("call.example"), false, `pushed fields: ${pushed}`);
+
+  // The real row: stored the same way.
+  await handleSocialNotify(db, "room_invite", { room_code: "r3", join_url: "https://call.example/r3" }, xo(S));
+  const row = await one(db, "SELECT action_url, priority, metadata FROM notifications ORDER BY id DESC LIMIT 1");
+  assert.equal(row.action_url, null);
+  assert.equal(row.priority, "normal");
+  assert.equal(JSON.parse(row.metadata).join_url, "https://call.example/r3");
+  // Memos and reactions from non-contacts are normal priority too.
+  await handleSocialNotify(db, "voice_memo", { text: "hi", sender_name: "S" }, xo(S), managers);
+  assert.equal(seen.at(-1).priority, "normal");
+});
+
+test("N-5e (I-3, M-6) only an http(s) join_url string and a bounded room_code string are accepted, for contacts and strangers", T, async (t) => {
+  const db = await freshDb(t, "n5e");
+  const H = id(), S = id();
+  await addFull(db, H, "Hal");
+  const seen = [];
+  const managers = { createNotification: async (_db, opts) => { seen.push(opts); return { id: seen.length }; } };
+  const send = (p, who = H) => handleSocialNotify(db, "room_invite", p, xo(who), managers);
+  await send({ room_code: "r1", join_url: "HTTPS://call.example/upper" });
+  assert.equal(seen.length, 1, "control: an upper-case https link is accepted");
+  await send({ room_code: "r1", join_url: "http://call.example/plain" });
+  assert.equal(seen.length, 2, "control: http is accepted");
+  for (const bad of [
+    { room_code: "r", join_url: "javascript:alert(1)" },
+    { room_code: "r", join_url: "data:text/html,x" },
+    { room_code: "r", join_url: " https://call.example/lead-space" },
+    { room_code: "r", join_url: ["https://call.example/array"] },
+    { room_code: "r", join_url: { toString: () => "https://call.example/obj" } },
+    { room_code: 42, join_url: "https://call.example/num-code" },
+    { room_code: { a: 1 }, join_url: "https://call.example/obj-code" },
+    { room_code: "r".repeat(129), join_url: "https://call.example/long-code" },
+  ]) {
+    await send(bad);
+    await send(bad, S);
+  }
+  assert.equal(seen.length, 2, `nothing else was notified: ${JSON.stringify(seen.slice(2).map((o) => o.action_url ?? o.metadata))}`);
+  await send({ room_code: "r".repeat(128), join_url: "https://call.example/max" });
+  assert.equal(seen.length, 3, "control: a 128-character room_code is accepted");
 });
 
 // ================================================================ N-6

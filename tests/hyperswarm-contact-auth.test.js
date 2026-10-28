@@ -1,7 +1,7 @@
 /**
  * PT-3 (private engineering notes): a Hyperswarm contact is admitted only on
  * its PINNED key, a new node never signs a bare nonce for an asker that has
- * not proven itself (no signing oracle), and every admission side effect
+ * not proven itself (it never answers on another peer's behalf), and every admission side effect
  * happens inside PeerManager._admit.
  *
  * Harness: real PeerManagers, each with its own identity and its own real
@@ -10,7 +10,7 @@
  * (upsertFullContact over a parsed invite). The sharing runtime
  * (initSharingRuntime) wires each side's real onPeerConnected / onPeerData and
  * contact binding. "Old" nodes import PeerManager from a worktree at the base
- * commit (tests/fixtures/old-tree.mjs). Impostors are raw scripted streams.
+ * commit (tests/fixtures/old-tree.mjs). Non-conforming peers are raw scripted streams.
  *
  * Every negative leg follows a positive control in the same harness.
  */
@@ -252,7 +252,7 @@ test("H-C1 a contact is admitted new<->new: bound by cb_sig (no bare signature o
 
 // ================================================================ H-C2
 for (const mode of ["sig", "cb"]) {
-  test(`H-C2 (${mode}) an own-key impostor claiming a contact is refused key_mismatch: destroyed, not connected, the share stays pending, its share is not applied, onPeerConnected not called`, T, async (t) => {
+  test(`H-C2 (${mode}) a non-conforming peer claiming a contact with its own key is refused key_mismatch: destroyed, not connected, the share stays pending, its share is not applied, onPeerConnected not called`, T, async (t) => {
     // Positive control, same harness: the real key (raw, same script) is admitted.
     {
       const A = await makeSide(t, "A"), B = await makeSide(t, "B");
@@ -284,7 +284,7 @@ for (const mode of ["sig", "cb"]) {
 }
 
 // ================================================================ H-C3
-test("H-C3 an impostor while the real contact is connected leaves the real entry, live sends still reach it, and M's close does not disconnect it", T, async (t) => {
+test("H-C3 a non-conforming peer while the real contact is connected leaves the real entry, live sends still reach it, and M's close does not disconnect it", T, async (t) => {
   const A = await makeSide(t, "A"), B = await makeSide(t, "B");
   const M = id();
   await befriend(A, B);
@@ -296,7 +296,7 @@ test("H-C3 an impostor while the real contact is connected leaves the real entry
 
   for (const leg of [{ signer: M }, { signer: M, pubkey: B.identity.ed25519Pubkey }]) {
     const { R } = await rawLeg(t, pa.pm, { claim: B.identity, ...leg });
-    assert.equal(await closedWithin(R, 3000), true, "impostor destroyed");
+    assert.equal(await closedWithin(R, 3000), true, "the non-conforming peer is destroyed");
     await sleep(50);
     assert.equal(pa.pm.connections.get(B.identity.crowId)?.conn, L.a, "B's entry stays");
     assert.equal(pa.pm.isConnected(B.identity.crowId), true, "B still connected after M closed");
@@ -446,7 +446,7 @@ test("H-C5 row state: not a contact, blocked after admission (then reconnect), '
 });
 
 // ================================================================ H-C6
-test("H-C6 a legacy squat row (crow_id = B, key = M's) with M signing correctly is refused pin_crowid_mismatch", T, async (t) => {
+test("H-C6 a legacy row whose key does not derive its Crow ID (crow_id = B, key = M's), with M signing correctly, is refused pin_crowid_mismatch", T, async (t) => {
   const A = await makeSide(t, "A"), C = await makeSide(t, "C");
   await befriend(A, C);
   const pa = await newPeer(A);
@@ -553,7 +553,7 @@ async function oracleRelay(t, pa, pbPm, { cb, strip }) {
   return { toA, toB, got };
 }
 
-test("H-C9a oracle, B new, with cb:1: B returns only a cb_sig (over the M<->B hash); forwarded or stripped, A refuses (cb_invalid / bad_sig)", T, async (t) => {
+test("H-C9a relayed proof, B new, with cb:1: B returns only a cb_sig (over the M<->B hash); forwarded or stripped, A refuses (cb_invalid / bad_sig)", T, async (t) => {
   const A = await makeSide(t, "A"), B = await makeSide(t, "B");
   await befriend(A, B);
   {
@@ -574,7 +574,7 @@ test("H-C9a oracle, B new, with cb:1: B returns only a cb_sig (over the M<->B ha
   }
 });
 
-test("H-C9b oracle, B new, without cb: B never replies (deferred) and A's pre-admission timer closes M", T, async (t) => {
+test("H-C9b relayed proof, B new, without cb: B never replies (deferred) and A's pre-admission timer closes M", T, async (t) => {
   const A = await makeSide(t, "A"), B = await makeSide(t, "B");
   await befriend(A, B);
   {
@@ -591,7 +591,7 @@ test("H-C9b oracle, B new, without cb: B never replies (deferred) and A's pre-ad
   assert.equal(pa.pm.isConnected(B.identity.crowId), false);
 });
 
-test("H-C9c oracle, B OLD, A unpinned: M is admitted (the documented residual)", T, async (t) => {
+test("H-C9c relayed proof, B OLD, A unpinned: an older-version B's relayed proof is accepted (the documented residual)", T, async (t) => {
   const A = await makeSide(t, "A"), B = await makeSide(t, "B");
   await befriend(A, B);
   {
@@ -611,7 +611,7 @@ test("H-C9c oracle, B OLD, A unpinned: M is admitted (the documented residual)",
   assert.ok(legacyLines(B.identity.crowId).length >= 1, "legacy is logged");
 });
 
-test("H-C9d oracle, B OLD, A pinned (by a bound handshake with B's updated machine): refused cb_required_pinned", T, async (t) => {
+test("H-C9d relayed proof, B OLD, A pinned (by a bound handshake with B's updated machine): refused cb_required_pinned", T, async (t) => {
   const A = await makeSide(t, "A"), B = await makeSide(t, "B");
   await befriend(A, B);
   const pa = await newPeer(A);
@@ -630,7 +630,7 @@ test("H-C9d oracle, B OLD, A pinned (by a bound handshake with B's updated machi
   assert.equal(pa.pm.isConnected(B.identity.crowId), false);
 });
 
-test("H-C9e oracle, B OLD, A pinned with no prior handshake (as the Nostr advert does): refused", T, async (t) => {
+test("H-C9e relayed proof, B OLD, A pinned with no prior handshake (as the Nostr advert does): refused", T, async (t) => {
   // Task 3's N-6 drives the real advert handler; here the pin is written directly.
   const A = await makeSide(t, "A"), B = await makeSide(t, "B");
   await befriend(A, B);
@@ -1128,7 +1128,7 @@ async function reflect(t, pm, claimCrowId, { cb = true } = {}) {
   return { R, got };
 }
 
-test("H-C21 (S1b) a peer that bounces our own challenge back is refused before anything is signed (sibling and contact claims, with and without cb)", T, async (t) => {
+test("H-C21 (S1b) a peer that returns our own challenge as its own is refused before anything is signed (sibling and contact claims, with and without cb)", T, async (t) => {
   const me = id();
   {
     const s1 = sibling(me, "inst-r1"), s2 = sibling(me, "inst-r2");
@@ -1237,7 +1237,7 @@ test("H-C24 (S3) once a sibling binds, the sibling pin is written; an old siblin
   assert.ok(logs.some((l) => l.includes("instance-sync connection refused: cb_required_pinned")));
 });
 
-test("H-C25 (S3) an old sibling used as an oracle against a pinned new node is refused", T, async (t) => {
+test("H-C25 (S3) a proof relayed through an older-version sibling to a pinned new node is refused", T, async (t) => {
   const { wireContactBinding, markInstanceCbPinned } = await import("../servers/sharing/contact-binding.js");
   const me = id();
   const oracle = async (n) => {

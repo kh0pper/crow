@@ -63,7 +63,7 @@ export async function handleInboundRoomEnvelope({ db, nostrManager, identity, su
     let authorized = !!signerMember;
     let hostRow = null;
     if (!authorized && room.host_crow_id) {
-      const { rows } = await db.execute({ sql: "SELECT secp256k1_pubkey, display_name, crow_id FROM contacts WHERE crow_id = ? AND request_status IS NULL", args: [room.host_crow_id] });
+      const { rows } = await db.execute({ sql: "SELECT id, secp256k1_pubkey, display_name, crow_id FROM contacts WHERE crow_id = ? AND request_status IS NULL AND is_blocked = 0", args: [room.host_crow_id] });
       if (rows[0] && pubkeyMatches(rows[0].secp256k1_pubkey, pk)) { authorized = true; hostRow = rows[0]; }
     }
     if (!authorized) { log("room_message drop: signer not member/host of " + payload.room_uid); return; }
@@ -72,6 +72,8 @@ export async function handleInboundRoomEnvelope({ db, nostrManager, identity, su
     // spoofable payload labels. Two legs:
     //   - signer IS a room member (host-receive leg, the member relays their own
     //     message): trust the verified signer; IGNORE payload author entirely.
+    //   - signer is the room's host and names itself as the author: the host's
+    //     own message, credited to the host contact, with no "via".
     //   - signer is null (participant leg, the room's host relays someone else's
     //     text): the host vouches for it, so the label is always "<author> via
     //     <host>", and the message is attributed to a contact only when the named
@@ -84,6 +86,16 @@ export async function handleInboundRoomEnvelope({ db, nostrManager, identity, su
         kind: Number(signerMember.is_bot) === 1 ? "bot" : "human",
         crow_id: signerMember.crow_id,
         display_name: signerMember.display_name,
+      };
+    } else if (hostRow && author.crow_id === room.host_crow_id) {
+      // The room's host writing its own message: credit the host contact with
+      // its stored name. The host is not in its own member list here.
+      authorContactId = hostRow.id;
+      authorLabel = hostRow.display_name || hostRow.crow_id;
+      resolvedAuthor = {
+        kind: author.kind === "bot" ? "bot" : "human",
+        crow_id: hostRow.crow_id,
+        display_name: hostRow.display_name || null,
       };
     } else {
       resolvedAuthor = {

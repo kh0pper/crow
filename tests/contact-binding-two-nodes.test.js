@@ -18,7 +18,7 @@
  * from the pre-PT-3 tree and skips every other test. In that mode the
  * expected-refusal asserts are replaced by a record of each negative's outcome
  * (printed as test diagnostics and one `[pt3-gate-record]` line), plus one
- * assert per test that the own-key impostor IS admitted by the old A: the
+ * assert per test that the older-version A DOES accept the own-key peer: the
  * regression evidence that these legs are red on the base commit.
  */
 import { test, before, after } from "node:test";
@@ -216,13 +216,13 @@ test("T5 pinned downgrade: old B's share waits as pending, its DM still arrives,
   }
 });
 
-// ---------------------------------------------------------------- impostor legs
+// ---------------------------------------------------------------- non-conforming peer legs
 
 function imp(opts) {
   return startImpostor({ bootstrap: testnet.bootstrap, ...opts });
 }
 
-/** Positive control on the impostor link: admitted, and its share lands at `n`. */
+/** Positive control on the scripted peer's link: admitted, and its share lands at `n`. */
 async function admittedLeg(i, n, label) {
   assert.ok(await i.waitAdmitted(30_000), `${label}: admitted`);
   const text = `${label} ${tag()}`;
@@ -233,10 +233,10 @@ async function admittedLeg(i, n, label) {
 
 /**
  * Outcome of a negative leg against `n`: whether the node sent `authenticated`
- * on any target link, and whether the impostor's planted share landed.
+ * on any target link, and whether the scripted peer's share landed.
  */
 async function negativeOutcome(i, n, plantText, windowMs = 8_000) {
-  assert.ok(await i.waitTarget(30_000), "the impostor reached the node under test and saw its challenge");
+  assert.ok(await i.waitTarget(30_000), "the scripted peer reached the node under test and saw its challenge");
   await i.waitOutcome(windowMs);
   await sleep(1_500); // a later reconnect would have been admitted by now
   return { admitted: i.admitted(), landed: await hasMemory(n, plantText), received: i.receivedTexts() };
@@ -259,7 +259,7 @@ function expectRefused(t, testName, leg, o, { gated = true } = {}) {
 
 const RESIDUAL = "documented residual (§3.2): someone can pose as a contact only while that contact still runs Crow older than PT-3 on a machine that is online, and only until this node has once seen it bind";
 
-test("T2 impostors (A and B new, B stopped): honest control, then own-key, pinned-pubkey-own-sig, replay refused; oracle through the restarted B refused", T, async (t) => {
+test("T2 non-conforming peers (A and B new, B stopped): honest control, then own-key, pinned-pubkey-own-sig, replay refused; a proof relayed through the restarted B refused", T, async (t) => {
   const NAME = "T2";
   let a = await node("t2-a", GATE_OLD ? old.dir : REPO);
   let b = await node("t2-b");
@@ -310,14 +310,14 @@ test("T2 impostors (A and B new, B stopped): honest control, then own-key, pinne
       expectRefused(t, NAME, leg, o);
       if (!GATE_OLD) {
         assert.equal(o.pendingStayed, true, `${leg}: the queued share stays pending`);
-        assert.equal(o.received.length, 0, `${leg}: the impostor received nothing`);
+        assert.equal(o.received.length, 0, `${leg}: the scripted peer received nothing`);
         assert.equal(await a.isConnected(b.crowId), false);
         assert.deepEqual(refusalReasons(a, b.crowId), [reason], `${leg}: refused ${reason}`);
       }
       await i.stop();
     }
     if (GATE_OLD) {
-      assert.equal(results["own-key"].admitted, true, "red on the base commit: the old A admits an own-key impostor for B");
+      assert.equal(results["own-key"].admitted, true, "red on the base commit: the older-version A accepts a non-conforming own-key peer for B");
     }
 
     // The real B comes back (new); the oracle relays A's challenge through it.
@@ -346,7 +346,7 @@ test("T2 impostors (A and B new, B stopped): honest control, then own-key, pinne
   }
 });
 
-test("T3 new A ↔ old B (negative legs): own-key vs A refused; oracle through old B admitted (§3.2 residual); own-key vs old B admitted", T, async (t) => {
+test("T3 new A ↔ old B (negative legs): own-key vs A refused; older-version node accepts a proof relayed through old B (§3.2 residual); older-version B accepts own-key", T, async (t) => {
   const NAME = "T3";
   const a = await node("t3n-a", GATE_OLD ? old.dir : REPO);
   const b = await node("t3n-b-old", old.dir);
@@ -359,7 +359,7 @@ test("T3 new A ↔ old B (negative legs): own-key vs A refused; oracle through o
     const topicKeys = [a.ed25519Pubkey, b.ed25519Pubkey];
     const claimB = { topicKeys, claimCrowId: b.crowId, claimPubkey: b.ed25519Pubkey };
 
-    // Control on the impostor link to A: B's real key, answering as old code does.
+    // Control on the scripted peer's link to A: B's real key, answering as old code does.
     const ctrl = await start({ ...claimB, mode: "honest", identity: { seedHex: await b.seedHex() }, asOld: true });
     await admittedLeg(ctrl, a, "t3n control (B's key, bare signature) vs A");
     await ctrl.stop();
@@ -370,7 +370,7 @@ test("T3 new A ↔ old B (negative legs): own-key vs A refused; oracle through o
       const i = await start({ ...claimB, mode: "own-key", plant: [plantText] });
       const o = await negativeOutcome(i, a, plantText);
       expectRefused(t, NAME, leg, o);
-      if (GATE_OLD) assert.equal(o.admitted, true, "red on the base commit: the old A admits an own-key impostor for B");
+      if (GATE_OLD) assert.equal(o.admitted, true, "red on the base commit: the older-version A accepts a non-conforming own-key peer for B");
       else assert.deepEqual(refusalReasons(a, b.crowId), ["key_mismatch"]);
       await i.stop();
     }
@@ -382,20 +382,20 @@ test("T3 new A ↔ old B (negative legs): own-key vs A refused; oracle through o
       const i = await start({ ...claimB, mode: "oracle", oracleTarget: b, oracleCb: cb, plant: [plantText] });
       assert.ok(await i.waitAdmitted(30_000), `oracle through old B (${cb ? "cb:1" : "no cb"}) is admitted by A: ${RESIDUAL}`);
       assert.ok(i.oracleAnswers.some((x) => typeof x.answer?.signature === "string"), "old B signed the relayed nonce");
-      assert.ok(await until(() => hasMemory(a, plantText), 15_000), "the relayed impostor's share lands at A (the residual's effect)");
+      assert.ok(await until(() => hasMemory(a, plantText), 15_000), "the relayed peer's share lands at A (the residual's effect)");
       if (GATE_OLD) gateRecord.push({ test: NAME, leg: `oracle through old B (${cb ? "cb:1" : "no cb"})`, admitted_by_old_A: true, planted_share_landed: true });
       await i.stop();
     }
     if (!GATE_OLD) assert.equal(await isPinned(a, b.crowId), false, "A never pinned old B");
 
-    // The harness is real: the same own-key impostor, claiming A, is admitted by the old B.
+    // The harness is real: the older-version B accepts the same own-key peer claiming A.
     const claimA = { topicKeys, claimCrowId: a.crowId, claimPubkey: a.ed25519Pubkey };
     const ctrlB = await start({ ...claimA, mode: "honest", identity: { seedHex: await a.seedHex() }, asOld: true });
     await admittedLeg(ctrlB, b, "t3n control (A's key) vs old B");
     await ctrlB.stop();
     const plantText = `t3n planted by own-key claiming A vs old B ${tag()}`;
     const i = await start({ ...claimA, mode: "own-key", plant: [plantText] });
-    assert.ok(await i.waitAdmitted(30_000), "old B admits an own-key impostor for A (pre-PT-3 behaviour)");
+    assert.ok(await i.waitAdmitted(30_000), "older-version B accepts a non-conforming own-key peer for A (pre-PT-3 behaviour)");
     assert.ok(await until(() => hasMemory(b, plantText), 15_000), "its share lands at old B");
     assertGuardsQuiet(a, b);
   } finally {
@@ -404,7 +404,7 @@ test("T3 new A ↔ old B (negative legs): own-key vs A refused; oracle through o
   }
 });
 
-test("T4 old A ↔ new B (negative legs): new B refuses own-key; new B is no oracle against old A; old A as the oracle against new B is admitted (§3.2 residual, B never pinned A)", TN, async (t) => {
+test("T4 old A ↔ new B (negative legs): new B refuses own-key; new B relays no proof toward old A; new B accepts a proof relayed through old A (§3.2 residual, B never pinned A)", TN, async (t) => {
   const a = await node("t4n-a-old", old.dir);
   const b = await node("t4n-b");
   const imps = [];
@@ -453,7 +453,7 @@ test("T4 old A ↔ new B (negative legs): new B refuses own-key; new B is no ora
     const i = await start({ ...claimA, mode: "oracle", oracleTarget: a, plant: [plantText] });
     assert.ok(await i.waitAdmitted(30_000), `oracle through old A is admitted by new B: ${RESIDUAL}`);
     assert.ok(i.oracleAnswers.some((x) => typeof x.answer?.signature === "string"), "old A signed the relayed nonce");
-    assert.ok(await until(() => hasMemory(b, plantText), 15_000), "the relayed impostor's share lands at B (the residual's effect)");
+    assert.ok(await until(() => hasMemory(b, plantText), 15_000), "the relayed peer's share lands at B (the residual's effect)");
     assertGuardsQuiet(a, b);
   } finally {
     await Promise.all(imps.map((i) => i.stop()));
@@ -505,7 +505,7 @@ async function assertPinnedAgainstOldMachine(a, b2, prefix) {
 
 const advertMarker = async (n, crowId) => (await n.sql("SELECT 1 FROM dashboard_settings_overrides WHERE key = ?", [`contact_hs_cb_adv:${crowId}`])).length > 0;
 
-test("T7 one person, two machines (I1), pinned by B1's bound handshake: B2 delivers before the pin, then waits as pending; its DM arrives; the oracle through B2 is refused", TN, async (t) => {
+test("T7 one person, two machines (I1), pinned by B1's bound handshake: B2 delivers before the pin, then waits as pending; its DM arrives; a proof relayed through B2 is refused", TN, async (t) => {
   let { a, b1, b2 } = await twoMachines("t7h");
   const imps = [];
   try {
