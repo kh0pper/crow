@@ -52,11 +52,10 @@ fi
 
 # Open the setup wizard
 echo ""
-echo "  Opening setup wizard in your browser..."
-echo "  If it doesn't open, go to: http://localhost:3456"
+echo "  Starting the setup wizard..."
+echo "  It prints a one-time link. Open that link in your browser if it doesn't open by itself."
 echo ""
 echo "  Press Ctrl+C when you're done with setup."
 echo ""
 
-xdg-open "http://localhost:3456" 2>/dev/null &
 node scripts/wizard-web.js

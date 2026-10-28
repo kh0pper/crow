@@ -69,8 +69,9 @@ node scripts/guarded-init-db.mjs
 
 # Step 5: Launch the setup wizard
 echo ""
-echo "  Opening the setup wizard in your browser..."
-echo "  (If it doesn't open, go to http://localhost:3456)"
+echo "  Starting the setup wizard..."
+echo "  It prints a one-time link below. Open that link in your browser"
+echo "  if it doesn't open by itself."
 echo ""
 
 # Use web wizard if we have a display, terminal fallback otherwise
@@ -78,7 +79,7 @@ if [ -n "$DISPLAY" ] || [ "$(uname)" = "Darwin" ] || [ -n "$BROWSER" ]; then
   node scripts/wizard-web.js &
   WIZARD_PID=$!
   echo ""
-  echo "  The setup wizard is running at http://localhost:3456"
+  echo "  The setup wizard is running on this computer only (see its link above)."
   echo "  Configure your integrations in the browser, then press Ctrl+C here when done."
   echo ""
   wait $WIZARD_PID 2>/dev/null || true
