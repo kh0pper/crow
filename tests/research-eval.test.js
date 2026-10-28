@@ -415,3 +415,13 @@ test("verification claims: only filler words sit inside a negation, and 'not onl
   for (const t of ["It is not yet verified.", "I have yet to verify it.", "I could not verify this.", "I did not manage to verify it.",
     "I could not personally verify it.", "I haven't been able to directly verify it."]) assert.equal(verificationClaims(t).length, 0, t);
 });
+test("verification claims: a negation reaches 4 tokens unless an affirming conjunction or clause stop intervenes", () => {
+  for (const t of ["I could not readily verify it.", "I couldn't easily verify it.", "I could not reliably verify it.",
+    "I could not separately verify it.", "I did not get a chance to verify it.", "I have not had time to verify it.",
+    "I did not have access to verify it.", "I am not sure I can verify it.", "I don't think I can verify this.",
+    "I was not in a position to verify it.", "I did not even try to verify it."]) assert.equal(verificationClaims(t).length, 0, t);
+  for (const t of ["I didn't trust the summary and verified it on the page.", "Not only did I verify the figure, I also read the page.",
+    "I did not just trust it and verified it.", "I did not hesitate and verified it.", "I didn't stop until I verified it.",
+    "I verified it against the page.", "I verified the figure, but not the quote", "I was not able to, but later verified it."])
+    assert.equal(verificationClaims(t).length, 1, t);
+});
