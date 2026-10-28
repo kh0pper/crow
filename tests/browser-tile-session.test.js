@@ -609,7 +609,7 @@ async function shotHook(h, { capture } = {}) {
   h.engine.browserHooks.finalShot = createFinalShotHook({
     watcher: {
       hostname: () => "shop.example.test",
-      captureFinal: async (sid, opts) => { captures.push({ sid, opts }); return capture ? capture(sid, opts) : JPEG; },
+      captureFinal: async (sid, opts) => { captures.push({ sid, opts }); return capture ? capture(sid, opts) : { buf: JPEG, hostname: "shop.example.test" }; },
     },
     leaseDir: h.leaseDir,
     now: h.clock.now,
@@ -725,7 +725,7 @@ test("capture times out at the deadline → no shot, nothing stored late, the tu
   const done = sink.browser().filter((e) => e.phase === "done");
   assert.equal(done.length, 1);
   assert.equal(done[0].shot, null);
-  resolveCapture(JPEG);              // the capture finally returns
+  resolveCapture({ buf: JPEG, hostname: null });   // the capture finally returns
   await tick(30);
   assert.equal(hk.stored.length, 0, "a late-resolving capture stores nothing");
   assert.equal((await lease.readLease(h.leaseDir)).holder, null, "released");

@@ -39,9 +39,11 @@ let chrome = null, server = null, port = 0, W = null, lease = null;
 const logLines = [];
 const realConsole = { log: console.log, error: console.error, warn: console.warn, info: console.info };
 
+// A red block at the top (say, an account summary above the fold), a long gap,
+// then a green block far down the page that the bot scrolls to.
 const PAGE = `<!doctype html><html><head><title>tile</title>
-<style>html,body{margin:0;height:100%;background:linear-gradient(90deg,#c33,#36c)}h1{font:48px sans-serif;color:#fff;padding:40px}</style>
-</head><body><h1>The bot's page</h1></body></html>`;
+<style>html{scrollbar-width:none}html,body{margin:0;background:#fff}#top{height:1500px;background:#d00000}#gap{height:3000px}#mark{height:2500px;background:#00b000}</style>
+</head><body><div id="top"></div><div id="gap"></div><div id="mark"></div></body></html>`;
 
 before(async () => {
   chrome = await startHeadlessChrome({ extraArgs: [`--host-resolver-rules=MAP ${HOST} 127.0.0.1`] });
@@ -85,6 +87,20 @@ async function botTab() {
     ws.send(JSON.stringify({ id: mine, method, params }));
   });
   return { targetId: t.id, cdp, close: async () => { ws.close(); await fetch(chrome.cdp + "/json/close/" + t.id).catch(() => {}); } };
+}
+
+/** Decode a JPEG in a scratch tab and sample its pixels → { w, h, samples: [[r,g,b]…] }. */
+async function samplePixels(tab, buf) {
+  const expr = `(async () => {
+    const img = new Image(); img.src = "data:image/jpeg;base64,${buf.toString("base64")}"; await img.decode();
+    const c = document.createElement("canvas"); c.width = img.width; c.height = img.height;
+    const g = c.getContext("2d"); g.drawImage(img, 0, 0);
+    const px = (x, y) => Array.from(g.getImageData(x | 0, y | 0, 1, 1).data.slice(0, 3));
+    const w = img.width, h = img.height;
+    return JSON.stringify({ w, h, samples: [px(5, 5), px(w / 2, h / 2), px(w - 5, h - 5), px(5, h - 5), px(w - 5, 5)] });
+  })()`;
+  const out = await tab.cdp("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true });
+  return JSON.parse(out.result.value);
 }
 
 test("live: the watcher attaches to the leased page, streams a JPEG, reads the domain, shoots ≤ 1280 px", async (t) => {
@@ -131,10 +147,27 @@ test("live: the watcher attaches to the leased page, streams a JPEG, reads the d
 
     // the final shot: a 1600 px page comes back ≤ 1280 px wide
     const shot = await w.captureFinal(SID, { gen: l.gen });
-    assert.ok(Buffer.isBuffer(shot), "a final shot");
-    const size = W.jpegSize(shot);
+    assert.ok(shot && Buffer.isBuffer(shot.buf), "a final shot");
+    assert.equal(shot.hostname, HOST, "the hostname read from CDP with the shot");
+    const size = W.jpegSize(shot.buf);
     assert.ok(size && size.w <= 1280 && size.w >= 1200, `final shot ${size && size.w}x${size && size.h}`);
     assert.equal(await w.captureFinal(SID, { gen: l.gen + 1 }), null, "never at another gen");
+
+    // a scrolled HiDPI page (1000 CSS px at 2x = 2000 device px): the shot is
+    // what is on screen — the green block far down — never the document top
+    await bot.cdp("Emulation.setDeviceMetricsOverride", { width: 1000, height: 700, deviceScaleFactor: 2, mobile: false });
+    await bot.cdp("Runtime.evaluate", { expression: "document.getElementById('mark').scrollIntoView(); window.scrollY" });
+    await sleep(400);
+    const scrolled = await w.captureFinal(SID, { gen: l.gen });
+    assert.ok(scrolled, "a shot of the scrolled page");
+    const decoder = await botTab();
+    try {
+      const px = await samplePixels(decoder, scrolled.buf);
+      assert.ok(px.w <= 1280 && px.w >= 1000 && Math.abs(px.w / px.h - 1000 / 700) < 0.02, `hidpi shot ${px.w}x${px.h}: the whole viewport, ≤ 1280`);
+      for (const [r, g, b] of px.samples) {
+        assert.ok(g > 120 && r < 90 && b < 90, `the scrolled-to green block fills the shot (saw ${r},${g},${b}; all ${JSON.stringify(px)})`);
+      }
+    } finally { await decoder.close(); }
 
     // the lease is released: the screencast stops
     await lease.endCall(dirL, holder, { callId: "c1" });

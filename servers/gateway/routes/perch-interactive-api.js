@@ -1663,7 +1663,8 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
   // (a lock-free read; atomic rename gives whole files) — otherwise 409
   // not_holder and the tile keeps its last frame dimmed. `vw` is the viewer's
   // width: a phone viewport (≤ 600 px) lets the watcher drop to 1 frame/s at
-  // 480 px. A closed request aborts the wait. Behind dashboardAuth like every
+  // 480 px. A closed request aborts the wait. An unreachable browser is 404
+  // no_browser; more than 8 polls per session (32 in all) are 429. Behind dashboardAuth like every
   // perch-api route; never Funnel-reachable.
   router.get(P + "/interactive/:sid/browser/frame", async (req, res) => {
     const sid = String(req.params.sid);
@@ -1678,6 +1679,8 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       const watcher = eng.browserWatcher || null;
       if (!watcher || !watcher.enabled()) return jsonError(res, 404, "no_browser");
       if (!(await watcher.isHolder(sid))) return jsonError(res, 409, "not_holder");
+      // docker missing, the container down, the port closed: say so, not 204 forever
+      if (!(await watcher.available())) return jsonError(res, 404, "no_browser");
       if (ac.signal.aborted) return;
       const afterRaw = String(req.query.after ?? "");
       const after = /^[0-9]{1,15}$/.test(afterRaw) ? Number(afterRaw) : 0;
@@ -1690,6 +1693,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       res.json({ seq: frame.seq, jpeg: frame.jpegB64, w: frame.w, h: frame.h });
     } catch (err) {
       if (ac.signal.aborted || res.headersSent) return;
+      if (err && err.code === "ETOOMANYWAITERS") return jsonError(res, 429, "too_many_polls");
       mapEngineError(res, err);
     }
   });

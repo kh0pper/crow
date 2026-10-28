@@ -10,8 +10,10 @@
  *     screencast paced at the source by delaying each screencastFrameAck
  *     (≤ 2 frames/s, ≤ 1 frame/s at 480 px when every viewer is a phone),
  *     stopped after 10 s without a poll and detached after 30 s;
- *   - takes the turn's final screenshot (≤ 1280 px wide) for the final-shot
- *     hook, only while the lease is still that session's at the turn's gen.
+ *   - takes the turn's final screenshot for the final-shot hook as ONE
+ *     screencast frame (JPEG q70, ≤ 1280 px wide): the visible viewport, as
+ *     the bot left it, only while the lease is still that session's at the
+ *     turn's gen.
  *
  * Which browser (spec §4.3, §7 item 6): only this CROW_HOME's own. The watcher
  * runs only when this instance's installed.json lists `browser`; the CDP port
@@ -42,6 +44,11 @@ export const STOP_AFTER_MS = 10_000;      // no poll → Page.stopScreencast
 export const DETACH_AFTER_MS = 30_000;    // no viewer → detach
 export const LONG_POLL_MS = 2000;
 export const SHOT_MAX_W = 1280;
+/** The final shot is one screencast frame; no frame within this → no shot. */
+export const SHOT_FRAME_TIMEOUT_MS = 4000;
+/** Concurrent frame long polls: per session, and in all. */
+export const MAX_WAITERS_PER_SESSION = 8;
+export const MAX_WAITERS = 32;
 export const DEFAULT_CDP_PORT = 9222;
 const DESK = { maxWidth: 640, maxHeight: 400 };
 const PHONE = { maxWidth: 480, maxHeight: 300 };
@@ -240,7 +247,8 @@ function defaultWatchFs(dir, cb) {
  *   isHolder(sid: string): Promise<boolean>,
  *   frameAfter(sid: string, seq: number, opts?: { timeoutMs?: number, signal?: AbortSignal, phone?: boolean }): Promise<{seq:number, jpegB64:string, w:number, h:number}|null>,
  *   hostname(): string|null,
- *   captureFinal(sid: string, opts: { gen: number, signal?: AbortSignal }): Promise<Buffer|null>,
+ *   available(): Promise<boolean>,
+ *   captureFinal(sid: string, opts: { gen: number, signal?: AbortSignal }): Promise<{buf: Buffer, hostname: string|null}|null>,
  *   close(): void,
  * }}
  */
@@ -271,6 +279,8 @@ export function createWatcher({
   let domainOf = null;              // { targetId, value } from CDP
   let conn = null;
   let connecting = null;
+  let reachable = null;             // null unknown, true/false: the last resolve + connect
+  let shotWait = null;              // { sessionId, resolve }: the final shot's frame
   let connectedAt = 0;
   let nextConnectAt = -Infinity;
   let backoff = BACKOFF_MIN;
@@ -298,7 +308,8 @@ export function createWatcher({
     try { log(line); } catch { /* a logger's own problem */ }
   }
 
-  function enabled() {
+  /** The bundle is installed here and the gateway is not containerized. */
+  function baseEnabled() {
     if (closed) return false;
     const t = Date.now();   // a file-system cache, real clock
     if (!enabledCache || t - enabledCache.at > 60_000) {
@@ -307,6 +318,17 @@ export function createWatcher({
       enabledCache = { at: t, ok };
     }
     return enabledCache.ok;
+  }
+
+  /** baseEnabled, and the last endpoint resolve + connect did not fail. */
+  function enabled() {
+    return baseEnabled() && reachable !== false;
+  }
+
+  /** Can the browser be reached now? (reconnects, within the backoff) */
+  async function available() {
+    if (!baseEnabled()) return false;
+    return !!(await ensureConnected()) || (conn != null && !conn.closed);
   }
 
   /** CDP control is one queue: attach/detach/start/stop never interleave. */
@@ -350,18 +372,20 @@ export function createWatcher({
       let base = null;
       try { base = await resolveEndpoint(); } catch { base = null; }
       if (closed) return null;
-      if (!base) { failConnect(null); return null; }
+      if (!base) { reachable = false; failConnect(null); return null; }
       try {
         const u = new URL(base);
         if (!isLoopbackHost(u.hostname)) throw codeError("ECDPHOST", "not loopback");
         const c = await connectFn(base);
         if (closed) { c.close(); return null; }
         conn = c;
+        reachable = true;
         connectedAt = now();
         c.onEvent(onCdpEvent);
         c.onClose(() => dropConn(c));
         return c;
       } catch (e) {
+        reachable = false;
         failConnect(e);
         return null;
       }
@@ -388,6 +412,12 @@ export function createWatcher({
     if (!a || !a.cast || sessionId !== a.sessionId) return;   // a straggler from an old page
     const ackId = params.sessionId;
     if (!Number.isInteger(ackId)) return;
+    if (a.cast === "shot") {
+      const w = shotWait;
+      if (conn) conn.cdpSend("Page.screencastFrameAck", { sessionId: ackId }, a.sessionId).catch(() => {});
+      if (w && w.sessionId === a.sessionId) w.resolve(typeof params.data === "string" && params.data.length <= MAX_SHOT_B64 ? params.data : null);
+      return;
+    }
     const data = params.data;
     const l = lease;
     if (typeof data === "string" && data.length <= MAX_FRAME_B64 && heldBot(l) && l.targetId === a.targetId) {
@@ -495,7 +525,7 @@ export function createWatcher({
   }
 
   async function tickOnce() {
-    if (!enabled()) {
+    if (!baseEnabled()) {
       if (conn) { const c = conn; await serial(() => detach(c)); c.close(); }
       return;
     }
@@ -551,17 +581,20 @@ export function createWatcher({
   // ---- the public surface --------------------------------------------------
 
   async function isHolder(sid) {
-    if (!enabled()) return false;
+    if (!baseEnabled()) return false;
     return heldBy(await freshLease(), sid);
   }
 
   async function frameAfter(sid, after, { timeoutMs = LONG_POLL_MS, signal = null, phone = false } = {}) {
-    if (!enabled() || (signal && signal.aborted)) return null;
-    const t = now();
-    lastPollAt = t;
-    if (!phone) lastDeskAt = t;
+    if (!baseEnabled() || (signal && signal.aborted)) return null;
     const l = await freshLease();
     if (!heldBy(l, sid) || !l.targetId) return null;
+    let mine = 0;
+    for (const x of waiters) if (x.sid === sid) mine++;
+    if (mine >= MAX_WAITERS_PER_SESSION || waiters.size >= MAX_WAITERS) throw codeError("ETOOMANYWAITERS", "too many frame polls");
+    const t = now();   // only a holder's poll keeps the screencast alive
+    lastPollAt = t;
+    if (!phone) lastDeskAt = t;
     lease = l;
     const since = Number.isSafeInteger(after) && after > 0 ? after : 0;
     const fits = (f) => !!f && f.seq > since && f.sid === sid && f.gen === l.gen && f.targetId === l.targetId;
@@ -570,7 +603,7 @@ export function createWatcher({
     if (fits(latest)) return pick(latest);
     if (signal && signal.aborted) return null;
     return new Promise((resolve) => {
-      const w = {};
+      const w = { sid };
       let done = false;
       const finish = (v) => {
         if (done) return;
@@ -595,15 +628,38 @@ export function createWatcher({
     return domainOf.value || null;
   }
 
-  async function shoot(c, a, params) {
-    const r = await c.cdpSend("Page.captureScreenshot", params, a.sessionId);
-    if (!r || typeof r.data !== "string" || r.data.length > MAX_SHOT_B64) return null;
-    return Buffer.from(r.data, "base64");
+  /** One screencast frame at shot quality: the visible viewport, scaled by the compositor. */
+  function shotFrame(c, a, signal) {
+    return new Promise((resolve) => {
+      let done = false;
+      let timer = null;
+      const finish = (v) => {
+        if (done) return;
+        done = true;
+        if (shotWait === w) shotWait = null;
+        if (timer != null) clearTimer(timer);
+        if (signal) signal.removeEventListener("abort", onAbort);
+        resolve(v);
+      };
+      const onAbort = () => finish(null);
+      const w = { sessionId: a.sessionId, resolve: finish };
+      shotWait = w;
+      timer = setTimer(() => finish(null), SHOT_FRAME_TIMEOUT_MS);
+      if (signal) signal.addEventListener("abort", onAbort, { once: true });
+      a.cast = "shot";
+      c.cdpSend("Page.startScreencast", { format: "jpeg", quality: 70, maxWidth: SHOT_MAX_W, maxHeight: 4096, everyNthFrame: 1 }, a.sessionId)
+        .catch(() => finish(null));
+    });
   }
 
-  /** The turn's final screenshot (JPEG q70, ≤ 1280 px wide), or null. */
+  /**
+   * The turn's final screenshot → { buf, hostname } | null. One screencast
+   * frame (JPEG q70, ≤ 1280 px wide) of what is on screen; no frame in time →
+   * null (never a document-coordinate clip). The hostname is read from CDP
+   * right after the frame.
+   */
   async function captureFinal(sid, { gen, signal = null } = {}) {
-    if (!enabled() || (signal && signal.aborted)) return null;
+    if (!baseEnabled() || (signal && signal.aborted)) return null;
     const stillOurs = async () => {
       const l = await freshLease();
       return heldBy(l, sid) && l.gen === gen && l.targetId ? l : null;
@@ -616,29 +672,23 @@ export function createWatcher({
       if (!c || (signal && signal.aborted)) return null;
       const a = await attachTo(c, l.targetId);
       if (!a || att !== a) return null;
-      let buf = await shoot(c, a, { format: "jpeg", quality: 70 });
-      let size = buf && jpegSize(buf);
-      if (!size) return null;
-      if (size.w > SHOT_MAX_W) {
-        // Clip in CSS pixels; a HiDPI page's device ratio is learnt from the result.
-        const base = { w: size.w, h: size.h };
-        const scale = SHOT_MAX_W / base.w;
-        let css = { w: base.w, h: base.h };
-        for (let i = 0; i < 2 && size.w > SHOT_MAX_W; i++) {
-          if (signal && signal.aborted) return null;
-          buf = await shoot(c, a, { format: "jpeg", quality: 70, clip: { x: 0, y: 0, width: css.w, height: css.h, scale } });
-          size = buf && jpegSize(buf);
-          if (!size) return null;
-          if (size.w > SHOT_MAX_W) {
-            const dpr = size.w / (css.w * scale);
-            css = { w: base.w / dpr, h: base.h / dpr };
-          }
-        }
-        if (size.w > SHOT_MAX_W) return null;
+      if (a.cast) await stopCast(c);
+      const data = await shotFrame(c, a, signal);
+      if (att === a && a.cast === "shot") {
+        a.cast = null;
+        await c.cdpSend("Page.stopScreencast", {}, a.sessionId).catch(() => {});
       }
+      if (!data || (signal && signal.aborted)) return null;
+      const buf = Buffer.from(data, "base64");
+      const size = jpegSize(buf);
+      if (!size || size.w > SHOT_MAX_W) return null;
+      const host = await lookupDomain(c, l.targetId);
       if (signal && signal.aborted) return null;
       if (!(await stillOurs())) return null;
-      return buf;
+      return { buf, hostname: host === undefined ? null : host };
+    }).finally(() => {
+      // a viewer still polling gets its tile cast back
+      if (now() - lastPollAt < STOP_AFTER_MS) ensureCasting().catch(() => {});
     });
   }
 
@@ -648,6 +698,7 @@ export function createWatcher({
     if (pollTimer != null) { clearTimer(pollTimer); pollTimer = null; }
     if (debounceTimer != null) { clearTimer(debounceTimer); debounceTimer = null; }
     clearAck();
+    if (shotWait) shotWait.resolve(null);
     for (const w of [...waiters]) w.cancel();
     if (fsWatcher) { try { fsWatcher.close(); } catch { /* closed */ } fsWatcher = null; }
     const c = conn;
@@ -658,6 +709,7 @@ export function createWatcher({
 
   return {
     enabled,
+    available,
     isHolder,
     frameAfter,
     hostname,
@@ -696,19 +748,19 @@ export function createFinalShotHook({
     const aborted = () => !!(signal && signal.aborted);
     try {
       if (!ctx || ctx.operatorTook || !ctx.heldAtEnd || !Number.isSafeInteger(ctx.genAtEnd)) return null;
-      if (ctx.gen != null && ctx.gen !== ctx.genAtEnd) return null;
+      if (!Number.isSafeInteger(ctx.gen) || ctx.gen !== ctx.genAtEnd) return null;
       if (operatorHeld() || aborted()) return null;
       const sid = ctx.sessionId;
       const locked = await readLeaseLocked(leaseDir, { lockTimeoutMs: 1000, forceBreakAfterMs: FORCE_BREAK_AFTER_MS });
       if (!heldBySession(locked, sid, now()) || locked.gen !== ctx.genAtEnd) return null;
       if (operatorHeld() || aborted()) return null;
-      const buf = await watcher.captureFinal(sid, { gen: ctx.genAtEnd, signal });
-      if (!buf || operatorHeld() || aborted()) return null;
+      const shot = await watcher.captureFinal(sid, { gen: ctx.genAtEnd, signal });
+      if (!shot || !Buffer.isBuffer(shot.buf) || operatorHeld() || aborted()) return null;
       const db = createDb();
       let stored;
       try {
         stored = await storeShot(db, { sessionId: sid, botId: ctx.botId, threadId: ctx.threadId || sid, outputsDir: ctx.outputsDir || null },
-          { buf, hostname: watcher.hostname(), anchor: ctx.anchor || null });
+          { buf: shot.buf, hostname: shot.hostname || null, anchor: ctx.anchor || null });
       } finally { try { db.close(); } catch { /* closed */ } }
       if (!stored || typeof stored.name !== "string") return null;
       return { id: stored.id, url: urlPrefix + "/interactive/" + encodeURIComponent(sid) + "/workspace/" + encodeURIComponent(stored.name) };

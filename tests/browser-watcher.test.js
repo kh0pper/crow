@@ -92,7 +92,7 @@ function makeFakeBrowser({ targets = [{ targetId: "T1", type: "page", url: "http
   let ack = 0;
   const b = {
     targets, sent: [], sockets: [], connects: [],
-    shot: { w: 800, h: 600 }, dpr: 1, autoFrames: false, captureDelayMs: 0,
+    shot: { w: 800, h: 600 }, dpr: 1, autoFrames: false, captureDelayMs: 0, shotFrames: true,
     methods: () => b.sent.map((m) => m.method),
     calls: (method) => b.sent.filter((m) => m.method === method),
     frame(sock, sessionId, w = 640, h = 400) {
@@ -117,10 +117,20 @@ function makeFakeBrowser({ targets = [{ targetId: "T1", type: "page", url: "http
           if (b.captureDelayMs) return setTimeout(() => reply({ data }), b.captureDelayMs);
           return reply({ data });
         }
-        case "Page.startScreencast":
+        case "Page.startScreencast": {
           reply({});
+          if (m.params.quality === 70) {
+            // the final shot: one frame of the viewport (device px), scaled to fit maxWidth × maxHeight
+            if (!b.shotFrames) return;
+            const dw = b.shot.w * b.dpr, dh = b.shot.h * b.dpr;
+            const k = Math.min(1, m.params.maxWidth / dw, m.params.maxHeight / dh);
+            const emit = () => b.frame(sock, m.sessionId, Math.round(dw * k), Math.round(dh * k));
+            if (b.captureDelayMs) setTimeout(emit, b.captureDelayMs); else emit();
+            return;
+          }
           if (b.autoFrames) b.frame(sock, m.sessionId);
           return;
+        }
         case "Page.screencastFrameAck":
           reply({});
           if (b.autoFrames) b.frame(sock, m.sessionId);
@@ -434,7 +444,7 @@ test("no poll for 10 s stops the screencast; detach after 30 s idle", async () =
     assert.equal(h.browser.calls("Page.startScreencast").length, 1);
     await h.clock.advance(9000, 500);
     assert.equal(h.browser.calls("Page.stopScreencast").length, 0, "still polled recently");
-    await h.clock.advance(1600, 500);
+    await h.clock.advance(2000, 500);
     assert.equal(h.browser.calls("Page.stopScreencast").length, 1, "10 s without a poll stops it");
     assert.equal(h.browser.calls("Target.detachFromTarget").length, 0);
     await renew();
@@ -482,6 +492,55 @@ test("a closed request clears the wait (the watcher side)", async () => {
     await h.clock.advance(2100);
     assert.equal(await p3, null);
     assert.equal(h.w._waitersForTest(), 0);
+  } finally { h.w.close(); }
+});
+
+test("enabled()/available() reflect whether this instance's browser can be reached", async () => {
+  let url = null;
+  const h = makeWatcher({ resolveCdpUrl: async () => url });
+  try {
+    assert.equal(h.w.enabled(), true, "unknown yet");
+    assert.equal(await h.w.available(), false, "no endpoint (docker missing / container down)");
+    assert.equal(h.w.enabled(), false);
+    url = "http://127.0.0.1:9333";
+    await h.clock.advance(1100);
+    h.w._setConnectForTest(async () => { throw Object.assign(new Error("refused"), { code: "ECONNREFUSED" }); });
+    assert.equal(await h.w.available(), false, "the port is closed");
+    assert.equal(h.w.enabled(), false);
+    h.w._setConnectForTest(h.browser.connect);
+    await h.clock.advance(5000, 500);
+    assert.equal(await h.w.available(), true, "back once it connects");
+    assert.equal(h.w.enabled(), true);
+  } finally { h.w.close(); }
+});
+
+test("frame polls are capped: 8 per session, 32 in all", async () => {
+  const h = makeWatcher();
+  try {
+    await hold(h.home, h.clock);
+    const pending = [];
+    for (let i = 0; i < 8; i++) pending.push(h.w.frameAfter(SID, 0, { timeoutMs: 2000 }));
+    await flush();
+    assert.equal(h.w._waitersForTest(), 8);
+    await assert.rejects(h.w.frameAfter(SID, 0, { timeoutMs: 2000 }), (e) => e.code === "ETOOMANYWAITERS");
+    await h.clock.advance(2100);
+    await Promise.all(pending);
+    assert.equal(h.w._waitersForTest(), 0);
+    assert.ok(await pollOnce(h, SID, 0) === null, "room again once they end");
+    assert.equal(W.MAX_WAITERS, 32);
+  } finally { h.w.close(); }
+});
+
+test("a non-holder's polls never keep the screencast alive", async () => {
+  const h = makeWatcher();
+  try {
+    await hold(h.home, h.clock);
+    await pollOnce(h, SID, 0);
+    for (let i = 0; i < 12; i++) {
+      assert.equal(await h.w.frameAfter(OTHER, 0, { timeoutMs: 100, phone: false }), null);
+      await h.clock.advance(1000, 250);
+    }
+    assert.equal(h.browser.calls("Page.stopScreencast").length, 1, "stopped 10 s after the holder's last poll");
   } finally { h.w.close(); }
 });
 
@@ -561,36 +620,72 @@ test("reconnects with backoff after the browser goes away", async () => {
 // the final capture
 // ---------------------------------------------------------------------------
 
-test("captureFinal: only for this session's holding at the turn's gen; ≤ 1280 px wide", async () => {
+test("captureFinal: one screencast frame of the viewport, ≤ 1280 px wide, only for this session's holding at the turn's gen", async () => {
   const h = makeWatcher();
   try {
     const l = await hold(h.home, h.clock);
-    const buf = await h.w.captureFinal(SID, { gen: l.gen });
-    assert.ok(Buffer.isBuffer(buf));
-    assert.deepEqual(W.jpegSize(buf), { w: 800, h: 600 });
-    assert.deepEqual(h.browser.calls("Page.captureScreenshot")[0].params, { format: "jpeg", quality: 70 });
-    assert.equal(h.browser.calls("Page.captureScreenshot")[0].sessionId, "sess-T1");
-    // wide page: scaled down to 1280
+    const shot = await h.w.captureFinal(SID, { gen: l.gen });
+    assert.ok(shot && Buffer.isBuffer(shot.buf));
+    assert.deepEqual(W.jpegSize(shot.buf), { w: 800, h: 600 });
+    assert.equal(shot.hostname, "shop.example.test");
+    const cast = h.browser.calls("Page.startScreencast").at(-1);
+    assert.equal(cast.sessionId, "sess-T1");
+    assert.deepEqual(cast.params, { format: "jpeg", quality: 70, maxWidth: 1280, maxHeight: 4096, everyNthFrame: 1 });
+    assert.equal(h.browser.calls("Page.screencastFrameAck").length, 1, "the shot frame is acked");
+    assert.equal(h.browser.calls("Page.stopScreencast").length, 1, "and the shot cast stopped");
+    assert.equal(h.browser.calls("Page.captureScreenshot").length, 0, "never a document-coordinate capture");
+    // wide and HiDPI viewports: the compositor scales to 1280
     h.browser.shot = { w: 1920, h: 1080 };
-    let b2 = await h.w.captureFinal(SID, { gen: l.gen });
-    assert.equal(W.jpegSize(b2).w, 1280);
-    const clip = h.browser.calls("Page.captureScreenshot").at(-1).params.clip;
-    assert.deepEqual({ x: clip.x, y: clip.y, width: clip.width, height: clip.height }, { x: 0, y: 0, width: 1920, height: 1080 });
-    // a HiDPI page: still ≤ 1280
+    assert.equal(W.jpegSize((await h.w.captureFinal(SID, { gen: l.gen })).buf).w, 1280);
     h.browser.shot = { w: 1000, h: 700 }; h.browser.dpr = 2;
-    b2 = await h.w.captureFinal(SID, { gen: l.gen });
-    assert.ok(W.jpegSize(b2).w <= 1280, "hidpi " + W.jpegSize(b2).w);
+    assert.equal(W.jpegSize((await h.w.captureFinal(SID, { gen: l.gen })).buf).w, 1280, "hidpi");
     h.browser.dpr = 1; h.browser.shot = { w: 800, h: 600 };
+    // the hostname is read after the frame, not from the 1 s cache
+    h.browser.targets[0].url = "https://checkout.example.test/pay";
+    assert.equal((await h.w.captureFinal(SID, { gen: l.gen })).hostname, "checkout.example.test");
     // refusals
     assert.equal(await h.w.captureFinal(OTHER, { gen: l.gen }), null, "not the holder");
     assert.equal(await h.w.captureFinal(SID, { gen: l.gen + 1 }), null, "gen moved");
     const ac = new AbortController(); ac.abort();
     assert.equal(await h.w.captureFinal(SID, { gen: l.gen, signal: ac.signal }), null, "aborted");
-    // holder changes while the capture runs → nothing returned
+    // holder changes while the frame is on its way → nothing returned
     h.browser.captureDelayMs = 30;
     const p = h.w.captureFinal(SID, { gen: l.gen });
     await lease.takeOperator(join(h.home, "browser-lease"), { now: h.clock.now() });
     assert.equal(await p, null, "the operator took it mid-capture");
+    assert.equal(h.browser.calls("Page.captureScreenshot").length, 0);
+  } finally { h.w.close(); }
+});
+
+test("captureFinal: no frame in time → no shot (no fallback); an abort ends the wait at once", async () => {
+  const h = makeWatcher();
+  try {
+    const l = await hold(h.home, h.clock);
+    h.browser.shotFrames = false;
+    const p = h.w.captureFinal(SID, { gen: l.gen });
+    await h.clock.advance(4100, 100);
+    assert.equal(await p, null);
+    assert.equal(h.browser.calls("Page.captureScreenshot").length, 0, "never falls back to a clip");
+    assert.equal(h.browser.calls("Page.stopScreencast").length, 1, "the shot cast is stopped");
+    const ac = new AbortController();
+    const p2 = h.w.captureFinal(SID, { gen: l.gen, signal: ac.signal });
+    await flush();
+    ac.abort();
+    assert.equal(await p2, null);
+  } finally { h.w.close(); }
+});
+
+test("captureFinal restores the tile's cast for a viewer still polling", async () => {
+  const h = makeWatcher();
+  try {
+    const l = await hold(h.home, h.clock);
+    await pollOnce(h, SID, 0);
+    assert.equal(h.browser.calls("Page.startScreencast").at(-1).params.quality, 60);
+    assert.ok(await h.w.captureFinal(SID, { gen: l.gen }));
+    await flush();
+    const casts = h.browser.calls("Page.startScreencast").map((m) => m.params.quality);
+    assert.deepEqual(casts, [60, 70, 60], "tile cast → shot frame → tile cast again");
+    assert.deepEqual(h.browser.calls("Page.startScreencast").at(-1).params, { format: "jpeg", quality: 60, maxWidth: 640, maxHeight: 400, everyNthFrame: 1 });
   } finally { h.w.close(); }
 });
 
@@ -608,7 +703,7 @@ function hookHarness(o = {}) {
     captureFinal: async (sid, opts) => {
       captures.push({ sid, opts });
       if (o.capture) return o.capture(sid, opts);
-      return fakeJpeg(800, 600);
+      return { buf: fakeJpeg(800, 600), hostname: "shop.example.test" };
     },
   };
   let operatorHeld = false;
@@ -645,6 +740,7 @@ test("final shot only when the holder is still this session at turn end (gen unc
   assert.equal(await h.hook(ctxFor(l, { heldAtEnd: false })), null, "not held at turn end");
   assert.equal(await h.hook(ctxFor(l, { gen: l.gen - 1 })), null, "someone held it between the session's own step and the end");
   assert.equal(await h.hook(ctxFor(l, { genAtEnd: null })), null);
+  assert.equal(await h.hook(ctxFor(l, { gen: null })), null, "an unknown gen is refused, not skipped");
   assert.equal(h.captures.length, n, "no capture for a refused shot");
 
   // the file says gen moved under the lock
@@ -663,7 +759,7 @@ test("operator held → no shot", async () => {
   assert.equal(await h.hook(ctxFor(l)), null, "the operator holds it in the gateway's memory");
   h.setOperator(false);
   // the operator takes it while the capture runs
-  const h2 = hookHarness({ capture: async () => { h2.setOperator(true); return fakeJpeg(800, 600); } });
+  const h2 = hookHarness({ capture: async () => { h2.setOperator(true); return { buf: fakeJpeg(800, 600), hostname: null }; } });
   const l3 = await hold(h2.home, h2.clock);
   assert.equal(await h2.hook(ctxFor(l3)), null);
   assert.equal(h.captures.length, 0);
@@ -678,7 +774,7 @@ test("a late-resolving capture stores nothing", async () => {
   const p = h.hook(ctxFor(l, { signal: ac.signal }));
   await flush();
   ac.abort();                       // the engine's 5 s deadline
-  release(fakeJpeg(800, 600));      // the capture resolves afterwards
+  release({ buf: fakeJpeg(800, 600), hostname: null });      // the capture resolves afterwards
   assert.equal(await p, null);
   assert.equal(h.stored.length, 0, "nothing stored after the deadline");
   // an already-aborted signal: no capture at all
@@ -698,7 +794,7 @@ test("a failed store or capture is no shot, never a throw", async () => {
   const h3 = hookHarness();
   const l3 = await hold(h3.home, h3.clock);
   const hook3 = W.createFinalShotHook({
-    watcher: { hostname: () => null, captureFinal: async () => fakeJpeg(800, 600) },
+    watcher: { hostname: () => null, captureFinal: async () => ({ buf: fakeJpeg(800, 600), hostname: null }) },
     leaseDir: join(h3.home, "browser-lease"), now: h3.clock.now, operatorHeld: () => false,
     storeShot: async () => { throw new Error("disk full"); }, createDb: () => ({ close() {} }),
   });
@@ -713,12 +809,14 @@ async function routeHarness() {
   const { default: express } = await import("express");
   const { default: perchInteractiveApiRouter } = await import("../servers/gateway/routes/perch-interactive-api.js");
   const { parseCookies } = await import("../servers/gateway/dashboard/auth.js");
-  const state = { holder: SID, frame: null, signals: [], calls: [], enabled: true };
+  const state = { holder: SID, frame: null, signals: [], calls: [], enabled: true, available: true, tooMany: false };
   const watcher = {
     enabled: () => state.enabled,
+    available: async () => state.available,
     isHolder: async (sid) => sid === state.holder,
     frameAfter: (sid, seq, opts) => {
       state.calls.push({ sid, seq, opts });
+      if (state.tooMany) return Promise.reject(Object.assign(new Error("x"), { code: "ETOOMANYWAITERS" }));
       state.signals.push(opts.signal);
       if (state.frame) return Promise.resolve(state.frame);
       return new Promise((resolve) => {
@@ -767,6 +865,16 @@ test("frame route: owner gate via dashboardAuth; only the holding session gets f
     await r.get("/interactive/" + SID + "/browser/frame?after=bogus&vw=1440");
     assert.equal(r.state.calls.at(-1).seq, 0);
     assert.equal(r.state.calls.at(-1).opts.phone, false);
+    r.state.tooMany = true;
+    const many = await r.get("/interactive/" + SID + "/browser/frame?after=0");
+    assert.equal(many.status, 429);
+    assert.deepEqual(await many.json(), { error: "too_many_polls" });
+    r.state.tooMany = false;
+    r.state.available = false;
+    const down = await r.get("/interactive/" + SID + "/browser/frame?after=0");
+    assert.equal(down.status, 404, "an unreachable browser is no_browser, not 204 forever");
+    assert.deepEqual(await down.json(), { error: "no_browser" });
+    r.state.available = true;
     r.state.enabled = false;
     assert.equal((await r.get("/interactive/" + SID + "/browser/frame?after=0")).status, 404);
   } finally { await r.close(); }
