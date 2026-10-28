@@ -30,7 +30,11 @@ const tick = async () => { for (let i = 0; i < 8; i++) await new Promise((r) => 
 const json = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: () => Promise.resolve(body) });
 
 const SID = "perchlive-aaaaaaaa";
-function mount({ offers = [], card = null, result = null, decisions = [], decide = () => json({ ok: true }), review = () => json({ ok: true }) } = {}) {
+function memStore() {
+  const m = new Map();
+  return { m, getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => { m.set(k, String(v)); }, removeItem: (k) => { m.delete(k); } };
+}
+function mount({ offers = [], card = null, result = null, decisions = [], decide = () => json({ ok: true }), review = () => json({ ok: true }), storage = memStore() } = {}) {
   const transcript = makeEl("div");
   const input = makeEl("textarea"); input.value = "";
   const state = { offers, card, result, decisions, sent: [] };
@@ -42,6 +46,7 @@ function mount({ offers = [], card = null, result = null, decisions = [], decide
     el: (id) => (id === "perch-transcript" ? transcript : id === "perch-input" ? input : null),
     send() { state.sent.push(input.value); input.value = ""; },
     csrf: () => "tok", live: () => true, current: { sid: SID },
+    window: { sessionStorage: storage },
     fetch(url, opts) {
       const method = (opts && opts.method) || "GET";
       const u = String(url);
@@ -57,7 +62,7 @@ function mount({ offers = [], card = null, result = null, decisions = [], decide
   sandbox.line = (cls, text) => { const d = makeEl("div"); if (cls) d.className = cls; d.textContent = text == null ? "" : String(text); return d; };
   vm.createContext(sandbox);
   vm.runInContext(`(function(){\n${perchCardChipJs("en")}\n;__export({ loadCardOffers: loadCardOffers, loadCardChip: loadCardChip, cardTurnState: cardTurnState, reset: resetCardChip });\n})();`, sandbox);
-  return { sandbox, transcript, input, fetches, state, api: sandbox.api };
+  return { sandbox, transcript, input, fetches, state, storage, api: sandbox.api };
 }
 const offer = (o) => ({ id: 5, title: "Draft the reply", projectId: 2, projectName: "Garden", status: "pending", cardId: null, ...o });
 
@@ -407,6 +412,50 @@ for (const draft of ["", "my own draft"]) {
     assert.deepEqual(h.state.sent, []);
   });
 }
+
+test("R-P5-8: an unsent change survives a real reload (sessionStorage) and a resend clears it", async () => {
+  const KEY = "perch-unsent-change:" + SID;
+  const storage = memStore();
+  const failing = (u) => (u === MSG ? json({ error: "pi_gone" }, 409) : json({ ok: true }));
+  const h = mount({ card: CARD, result: RESULT, review: failing, storage });
+  h.api.loadCardChip(SID); await tick();
+  h.state.result = null;
+  await askChange(h, "Use the blue one.");
+  assert.deepEqual(JSON.parse(storage.getItem(KEY)), { text: "Use the blue one.", cardId: 9, resultId: 31 });
+
+  // A reload: a fresh script run on the same sessionStorage; the server no longer offers the result.
+  let ok = false;
+  const r = mount({ card: CARD, result: null, storage, review: (u) => (u === MSG ? (ok ? json({ ok: true }) : json({}, 500)) : json({ ok: true })) });
+  r.api.loadCardChip(SID); await tick();
+  const box = review(r);
+  assert.equal(box.length, 1, "the Send again card is drawn though the review is closed server-side");
+  assert.equal(byClass(box[0], "review-input")[0].value, "Use the blue one.");
+  assert.equal(byClass(box[0], "review-resend")[0].textContent, "Send again");
+  byClass(box[0], "review-resend")[0].onclick(); await tick();
+  assert.ok(storage.getItem(KEY), "a failed resend keeps the key");
+  ok = true;
+  byClass(review(r)[0], "review-resend")[0].onclick(); await tick();
+  assert.deepEqual(posts(r).map((p) => p[0]), [MSG, MSG], "only the message, never the rejection");
+  assert.equal(storage.getItem(KEY), null, "a 2xx clears the key");
+  assert.equal(review(r).length, 0);
+
+  const again = mount({ card: CARD, result: null, storage });
+  again.api.loadCardChip(SID); await tick();
+  assert.equal(review(again).length, 0, "nothing comes back after delivery");
+});
+
+test("a throwing or missing sessionStorage never breaks the change flow", async () => {
+  const bad = { getItem() { throw new Error("denied"); }, setItem() { throw new Error("denied"); }, removeItem() { throw new Error("denied"); } };
+  const h = mount({ card: CARD, result: RESULT, storage: bad, review: (u) => (u === MSG ? json({}, 500) : json({ ok: true })) });
+  h.api.loadCardChip(SID); await tick();
+  h.state.result = null;
+  await askChange(h, "x");
+  assert.equal(byClass(review(h)[0], "review-input")[0].value, "x", "kept in memory");
+  const none = mount({ card: CARD, result: null, storage: undefined });
+  none.sandbox.window = {};
+  none.api.loadCardChip(SID); await tick();
+  assert.equal(review(none).length, 0);
+});
 
 test("a lost connection on the send also keeps the words", async () => {
   const h = mount({ card: CARD, result: RESULT, review: (u) => (u === MSG ? Promise.reject(new Error("socket")) : json({ ok: true })) });

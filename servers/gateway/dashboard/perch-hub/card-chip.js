@@ -60,7 +60,24 @@ export function perchCardChipJs(lang = "en") {
   var ccPrevState='';
   var ccReview=null;      /* {node,key}: the review chips drawn in THIS transcript */
   var ccDismissed={};     /* sid -> key the operator said Not now to; lives for the page view */
-  var ccUnsent={};        /* sid -> change words the bot has not received yet; lives for the page view */
+  var ccUnsent={};        /* sid -> {text,cardId,resultId}: change words the bot has not received yet */
+  var CC_UNSENT_PREFIX='perch-unsent-change:';
+  /* A failed change send is also kept in sessionStorage, so a real reload still offers Send again
+     (the rejection already landed). Every storage call is wrapped, as perch drafts are. */
+  function ccStore(){ try{ return window.sessionStorage||null; }catch(e){ return null; } }
+  function ccUnsentSave(sid){
+    var st=ccStore(), u=ccUnsent[sid]; if(!st||!u) return;
+    try{ st.setItem(CC_UNSENT_PREFIX+sid,JSON.stringify({text:String(u.text),cardId:u.cardId,resultId:u.resultId})); }catch(e){}
+  }
+  function ccUnsentDrop(sid){ var st=ccStore(); if(!st) return; try{ st.removeItem(CC_UNSENT_PREFIX+sid); }catch(e){} }
+  function ccUnsentLoad(sid){
+    if(ccUnsent[sid]!=null) return;
+    var st=ccStore(); if(!st) return;
+    var raw=null; try{ raw=st.getItem(CC_UNSENT_PREFIX+sid); }catch(e){ raw=null; }
+    if(!raw) return;
+    var u=null; try{ u=JSON.parse(raw); }catch(e){ u=null; }
+    if(u&&typeof u.text==='string'&&u.text.trim()) ccUnsent[sid]={text:u.text,cardId:u.cardId,resultId:u.resultId};
+  }
 
   function resetCardChip(){ ccOffers={}; ccChip=null; ccReview=null; ccGen++; ccPrevState=''; }
 
@@ -195,17 +212,19 @@ export function perchCardChipJs(lang = "en") {
      The words stay in ccUnsent until a 2xx; any failure redraws them with Send again, which
      resends only the message (the rejection already landed and is never sent twice). */
   function ccDeliver(sid,btn){
-    var text=ccUnsent[sid];
-    if(text==null||(btn&&btn.disabled)) return;
+    var u=ccUnsent[sid];
+    if(u==null||(btn&&btn.disabled)) return;
+    var text=u.text;
     if(btn) btn.disabled=true;
     ccApi('POST','/interactive/'+encodeURIComponent(sid)+'/message',{message:String(text)}).then(function(r){
       if(r.ok){
-        if(ccUnsent[sid]===text) delete ccUnsent[sid];
+        if(ccUnsent[sid]===u){ delete ccUnsent[sid]; ccUnsentDrop(sid); }
         if(!live()||current.sid!==sid) return;
         if(typeof appendMessage==='function') appendMessage('user','you',String(text));
         ccRefresh(sid);
         return;
       }
+      ccUnsentSave(sid);
       if(!live()||current.sid!==sid) return;
       ccShowUnsent(sid);
     });
@@ -215,8 +234,11 @@ export function perchCardChipJs(lang = "en") {
     var card=document.createElement('div'); card.className='artcard perch-review-unsent';
     var ta=document.createElement('textarea'); ta.className='review-input'; ta.maxLength=4000;
     ta.setAttribute('placeholder',CC_CHANGE_PH); ta.setAttribute('aria-label',CC_CHANGE_PH);
-    ta.value=String(ccUnsent[sid]);
-    ta.oninput=function(){ var v=String(ta.value||'').trim(); if(v) ccUnsent[sid]=v; };
+    ta.value=String(ccUnsent[sid].text);
+    ta.oninput=function(){
+      var v=String(ta.value||'').trim(), u=ccUnsent[sid];
+      if(v&&u){ u.text=v; ccUnsentSave(sid); }
+    };
     var acts=document.createElement('div'); acts.className='art-actions';
     var again=ccButton('review-resend',CC_SEND_AGAIN,function(){ ccDeliver(sid,again); });
     acts.appendChild(again);
@@ -278,7 +300,7 @@ export function perchCardChipJs(lang = "en") {
       var gen=ccGen;
       ccApi('POST','/cards/'+encodeURIComponent(String(card.id))+'/request-change',{result_id:result.id,text:text}).then(function(r){
         /* Rejected: from here the words are owed to the bot, even if the operator left this chat. */
-        if(r.ok){ ccUnsent[sid]=text; if(ccReview&&ccReview.node===wrap.parentNode) ccReview.key='unsent'; ccDeliver(sid); return; }
+        if(r.ok){ ccUnsent[sid]={text:text,cardId:card.id,resultId:result.id}; if(ccReview&&ccReview.node===wrap.parentNode) ccReview.key='unsent'; ccDeliver(sid); return; }
         if(!live()||current.sid!==sid||gen!==ccGen) return;
         if(r.status===409){ ccRefresh(sid); return; }
         busy(false); go.disabled=false; msg.textContent=CC_FAILED;
@@ -340,6 +362,7 @@ export function perchCardChipJs(lang = "en") {
     var result=card&&j.result&&Number.isInteger(j.result.id)?j.result:null;
     var decs=(j&&Array.isArray(j.decisions)?j.decisions:[]).filter(function(d){ return d&&Number.isInteger(d.cardId); });
     /* Words the bot has not received stay on screen, whatever else the server says (R-P5-8). */
+    ccUnsentLoad(sid);
     if(ccUnsent[sid]!=null){
       if(ccReview&&ccReview.key==='unsent'&&ccReview.node.parentNode===tr){ ccDrop(ccReview.node); tr.appendChild(ccReview.node); }
       else ccShowUnsent(sid);
