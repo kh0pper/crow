@@ -36,3 +36,13 @@ export function resolveIssuerUrl({ publicUrl, port }) {
   }
   return { url, degraded: false, configured: true, reason: null };
 }
+
+/**
+ * Which configured URL is the OAuth issuer. CROW_OAUTH_ISSUER_URL wins: an instance whose CROW_GATEWAY_URL is
+ * its PUBLIC origin (a Funnel door that serves only the blog and share pages) must advertise the private origin
+ * that actually serves /register, /authorize and /token (for example the tailnet Serve port), or every MCP
+ * client's OAuth dance 404s. Unset, the issuer stays CROW_GATEWAY_URL (unchanged for existing installs).
+ */
+export function issuerSource(env = process.env) {
+  return env.CROW_OAUTH_ISSUER_URL || env.CROW_GATEWAY_URL || env.RENDER_EXTERNAL_URL;
+}

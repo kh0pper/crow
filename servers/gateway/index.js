@@ -62,7 +62,7 @@ import { gatewayListenPort } from "./listen-port.js";
 import { validateRoomToken } from "../sharing/server.js";
 import { createDbClient } from "../db.js";
 import { createOAuthProvider, initOAuthTables } from "./auth.js";
-import { resolveIssuerUrl } from "./issuer-url.js";
+import { resolveIssuerUrl, issuerSource } from "./issuer-url.js";
 import { loadDynamicBackends } from "./proxy.js";
 import { dashboardAuth } from "./dashboard/auth.js";
 import { SessionManager } from "./session-manager.js";
@@ -562,12 +562,12 @@ let authMiddleware = null;
 
 if (!noAuth) {
   const provider = createOAuthProvider();
-  const publicUrl = process.env.CROW_GATEWAY_URL || process.env.RENDER_EXTERNAL_URL;
+  const publicUrl = issuerSource();
   const { url: serverUrl, degraded, reason } = resolveIssuerUrl({ publicUrl, port: PORT });
   if (degraded) {
     console.warn(`[oauth] ${reason}`);
     console.warn(`[oauth] Falling back to issuer ${serverUrl.href} so the gateway can boot. ` +
-      `Remote MCP OAuth needs an HTTPS URL: set CROW_GATEWAY_URL in .env (easiest: ` +
+      `Remote MCP OAuth needs an HTTPS URL: set CROW_OAUTH_ISSUER_URL (or CROW_GATEWAY_URL) in .env (easiest: ` +
       `sudo tailscale serve --bg --https=443 http://127.0.0.1:${PORT}, then ` +
       `CROW_GATEWAY_URL=https://<this-machine>.<tailnet>.ts.net) and restart the gateway.`);
   }

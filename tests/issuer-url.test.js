@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveIssuerUrl } from "../servers/gateway/issuer-url.js";
+import { resolveIssuerUrl, issuerSource } from "../servers/gateway/issuer-url.js";
 
 test("configured HTTPS URL passes through byte-identical (existing drop-in installs)", () => {
   const r = resolveIssuerUrl({ publicUrl: "https://black-swan.example.ts.net", port: 3001 });
@@ -38,4 +38,13 @@ test("garbage URL degrades instead of throwing", () => {
   const r = resolveIssuerUrl({ publicUrl: "not a url", port: 3001 });
   assert.equal(r.url.href, "http://localhost:3001/");
   assert.equal(r.degraded, true);
+});
+
+test("CROW_OAUTH_ISSUER_URL wins over the public CROW_GATEWAY_URL; unset, the issuer is unchanged", () => {
+  assert.equal(issuerSource({ CROW_GATEWAY_URL: "https://crow.example.ts.net", CROW_OAUTH_ISSUER_URL: "https://crow.example.ts.net:8444" }), "https://crow.example.ts.net:8444");
+  assert.equal(issuerSource({ CROW_GATEWAY_URL: "https://crow.example.ts.net" }), "https://crow.example.ts.net");
+  assert.equal(issuerSource({ RENDER_EXTERNAL_URL: "https://x.onrender.com" }), "https://x.onrender.com");
+  assert.equal(issuerSource({}), undefined);
+  const r = resolveIssuerUrl({ publicUrl: issuerSource({ CROW_GATEWAY_URL: "https://crow.example.ts.net", CROW_OAUTH_ISSUER_URL: "https://crow.example.ts.net:8444" }), port: 3001 });
+  assert.equal(r.url.href, "https://crow.example.ts.net:8444/");
 });
