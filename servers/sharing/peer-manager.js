@@ -3,14 +3,16 @@
  *
  * Uses Hyperswarm DHT for peer-to-peer discovery:
  * - Topic = hash(sorted pubkey pair) — unique per contact
- * - Challenge-response auth on connect
+ * - Challenge-response auth on connect: a contact proves the key pinned in its
+ *   contact row, a sibling proves our own key (PT-3, private engineering notes)
  * - Connection state tracking and reconnection
  */
 
 import Hyperswarm from "hyperswarm";
 import { shouldInitInstanceSync } from "./instance-sync.js";
 import { createHash, randomBytes } from "node:crypto";
-import { sign, verify } from "./identity.js";
+import { sign, verify, crowIdMatchesKey } from "./identity.js";
+import { contactCbMessage, decideContactProof, RefusalLog } from "./contact-binding.js";
 
 // 2c follow-up (spec §F2 C2c): hard cap on awaiting the DHT announce
 // confirmation (`discovery.flushed()`) in joinContact. An unresponsive DHT
@@ -31,6 +33,46 @@ export function hyperswarmInstanceSyncEnabled(env = process.env) {
 
 const REFUSE_LOG_EVERY_MS = 60_000;
 
+// "contact <id> is on older Crow" is logged once per Crow ID per process.
+// Bounded by the contact list: only a peer that proved a pinned key gets here.
+const legacyLogged = new Set();
+
+/** This connection's Noise handshake hash, hex, or null before it opens. */
+function hashHexOf(conn) {
+  const h = conn?.handshakeHash;
+  if (!h?.length) return null;
+  return Buffer.from(h).toString("hex");
+}
+
+/** Our end of the Noise stream, as signed into a cb_sig; null when unknown. */
+function roleOf(conn) {
+  if (typeof conn?.isInitiator !== "boolean") return null;
+  return conn.isInitiator ? "init" : "resp";
+}
+/** The other end's role: what a peer's cb_sig on this connection must name. */
+function peerRoleOf(conn) {
+  const r = roleOf(conn);
+  return r === "init" ? "resp" : r === "resp" ? "init" : null;
+}
+
+/** A verify() that throws is a refusal, never a pass. */
+function verifies(fn) {
+  try { return fn() === true; } catch { return false; }
+}
+
+/** Call a callback without awaiting it; a throw or rejection is contained. */
+function fire(fn) {
+  try { Promise.resolve(fn()).catch(() => {}); } catch {}
+}
+
+/** A plausible Crow ID (checked before any lookup): a short printable token. */
+const CROW_ID_SHAPE = /^[A-Za-z0-9:._-]{1,64}$/;
+
+/** A peer-supplied id, safe for one log line. */
+function logSafe(v) {
+  return String(v ?? "").replace(/[^\x20-\x7e]/g, "?").slice(0, 100);
+}
+
 /**
  * Create a deterministic topic for a contact pair.
  * topic = sha256(sorted(myPubkey, theirPubkey))
@@ -44,9 +86,35 @@ function computeTopic(myEd25519Pub, theirEd25519Pub) {
 }
 
 export class PeerManager {
-  constructor(identity, { env = process.env } = {}) {
+  /**
+   * @param {object} identity
+   * @param {object} [opts]
+   * @param {object} [opts.env]            switch source (CROW_INSTANCE_SYNC_HYPERSWARM)
+   * @param {object} [opts.swarmOptions]   passed to `new Hyperswarm()` (e.g. a local bootstrap)
+   * @param {number} [opts.preAuthMaxLines] lines an unadmitted peer may send
+   * @param {number} [opts.preAuthMaxBytes] bytes an unadmitted peer may send
+   * @param {number} [opts.preAuthMs]       time an unadmitted peer may take
+   */
+  constructor(identity, {
+    env = process.env,
+    swarmOptions = undefined,
+    preAuthMaxLines = 64,
+    preAuthMaxBytes = 65_536,
+    preAuthMs = 15_000,
+  } = {}) {
     this.identity = identity;
     this.instanceSyncEnabled = hyperswarmInstanceSyncEnabled(env);
+    this.swarmOptions = swarmOptions;
+    this.preAuthMaxLines = preAuthMaxLines;
+    this.preAuthMaxBytes = preAuthMaxBytes;
+    this.preAuthMs = preAuthMs;
+    // Async hooks run first in _admit: ({ conn, msg, state }) => { ok, reason }.
+    this.admitGuards = { instance: null, contact: null };
+    // { lookupKey, isCbPinned, markCbPinned }, set by wireContactBinding (boot.js).
+    // Unset, every foreign Crow ID is refused (no_binding).
+    this.contactBinding = null;
+    this._refusalLog = new RefusalLog({ max: 256, intervalMs: REFUSE_LOG_EVERY_MS });
+    this._noBindingLogged = false;
     this._lastRefuseLog = 0;
     this.swarm = null;
     this.connections = new Map(); // crowId -> { conn, authenticated }
@@ -56,7 +124,7 @@ export class PeerManager {
     this.onPeerData = null; // callback(crowId, data)
     this.onPeerDisconnected = null; // callback(crowId)
     this.onInstanceConnected = null; // callback(crowId, conn, remoteInstanceId|null) — instance-to-instance connections
-    this.onInstanceKeyReceived = null; // callback(remoteInstanceId, feedKeyHex) — peer advertised their outgoing Hypercore feed key
+    this.onInstanceKeyReceived = null; // callback(remoteInstanceId, feedKeyHex) — a proven sibling advertised its outgoing Hypercore feed key
     this.getFeedKeyForInstance = null; // async (remoteInstanceId) => hex — our outgoing feed key to this specific peer instance
     this.localInstanceId = null; // wired by server.js — the local Crow instance id we advertise to peers
 
@@ -73,7 +141,7 @@ export class PeerManager {
    */
   async start() {
     if (this.p2pDisabled) return this; // --no-auth companion: no swarm
-    this.swarm = new Hyperswarm();
+    this.swarm = new Hyperswarm(this.swarmOptions);
 
     this.swarm.on("connection", (conn, info) => {
       this._handleConnection(conn, info);
@@ -189,213 +257,492 @@ export class PeerManager {
   }
 
   /**
-   * Handle incoming connection with challenge-response auth.
+   * Handle an incoming connection: challenge-response auth (PT-3).
+   *
+   * Lines run on a per-connection promise chain, so each frame is handled
+   * only after every earlier one. Before admission only `challenge` and
+   * `challenge-response` are acted on; any other frame is held in order and
+   * dispatched after admission (dropped on refusal). The caps bound what an
+   * unadmitted peer can make us hold: preAuthMaxLines lines, preAuthMaxBytes
+   * bytes received (with or without a newline), and preAuthMs from connect.
    */
   _handleConnection(conn, info) {
-    let authenticated = false;
-    let remoteCrowId = null;
-    const isInstanceConn = this._isInstanceConnection(info);
-
-    // Send challenge. On instance-sync connections we also advertise our
-    // local instance_id so the peer can look up OUR row in their
-    // crow_instances table (crow_id alone is ambiguous — all instances of
-    // the same user share one Crow identity).
     const challenge = randomBytes(32);
+    const state = {
+      authenticated: false,
+      remoteCrowId: null,
+      remoteInstanceId: null,
+      isInstanceConn: this._isInstanceConnection(info),
+      kind: null,          // "contact" | "instance", set by _admit
+      proof: null,         // "cb" | "sig"
+      pinnedKey: null,
+      refused: false,
+      closed: false,
+      deciding: false,
+      peerAuthed: false,   // the peer's own `authenticated` frame was handled
+      peerAuthSeen: false, // ...or has at least arrived on the stream (caps)
+      mutual: false,       // we admitted it AND it admitted us: side effects run
+      answered: false,
+      handshakeHashHex: null,
+      ourChallengeHex: challenge.toString("hex"),
+      peerInstanceId: null,
+      deferredReply: null, // a no-cb asker's challenge, answered only after admission
+      held: [],
+      preBytes: 0,
+      preLines: 0,
+      hadEntry: false,
+    };
+
+    // On instance-sync connections the instance_id lets the peer find OUR row
+    // in its crow_instances table (crow_id alone is ambiguous: all instances
+    // of one user share one Crow identity). Sent on contact connections too;
+    // the receiver ignores it for other users. `cb: 1` asks for a reply bound
+    // to this connection (a cb_sig) instead of a bare signature.
     const challengePayload = {
       type: "challenge",
       challenge: challenge.toString("hex"),
+      cb: 1,
       pubkey: this.identity.ed25519Pubkey,
       crowId: this.identity.crowId,
     };
-    // Always include our instance_id when available. The remote uses crow_id
-    // match to decide whether to treat this as an instance-sync connection;
-    // we can't make that call on the sender side because we don't yet know
-    // the peer's crow_id at challenge-send time. Safe to include on contact
-    // connections too — the receiver ignores it for non-same-user peers.
     if (this.localInstanceId) {
       challengePayload.instance_id = this.localInstanceId;
     }
     conn.write(JSON.stringify(challengePayload) + "\n");
 
+    // The Noise handshake hash binds a cb_sig to this one connection. It is
+    // read from our own stream once it opens, never taken from the peer.
+    let chain = (async () => {
+      try {
+        if (conn.opened && typeof conn.opened.then === "function") await conn.opened;
+      } catch {}
+      state.handshakeHashHex = hashHexOf(conn);
+    })();
+
+    // Armed at connect, re-armed at our admission: a peer that is not
+    // mutually admitted within preAuthMs of either point is closed.
+    let timer = null;
+    state.clearTimer = () => clearTimeout(timer);
+    state.armTimer = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => { if (!state.mutual) this._kill(conn, state); }, this.preAuthMs);
+      timer.unref?.();
+    };
+    state.armTimer();
+
+    // The caps count until both sides have admitted each other. Checked per
+    // line on arrival: once we have decided and the peer's own
+    // `authenticated` has come in on the stream, what follows is post-admission.
+    const capped = () => !(state.mutual || (state.authenticated && state.peerAuthSeen));
     let buffer = "";
     conn.on("data", (data) => {
+      if (state.refused || state.closed) return;
       buffer += data.toString();
       const lines = buffer.split("\n");
       buffer = lines.pop(); // Keep incomplete line
 
       for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const msg = JSON.parse(line);
-          this._handleMessage(conn, msg, challenge, { authenticated, remoteCrowId, isInstanceConn }, (state) => {
-            authenticated = state.authenticated;
-            remoteCrowId = state.remoteCrowId;
-          });
-        } catch (err) {
-          // Ignore parse errors
+        if (capped()) {
+          state.preBytes += Buffer.byteLength(line) + 1;
+          if (state.preBytes > this.preAuthMaxBytes
+              || (line.trim() && ++state.preLines > this.preAuthMaxLines)) { this._kill(conn, state); return; }
         }
+        if (!line.trim()) continue;
+        let msg;
+        try { msg = JSON.parse(line); } catch { continue; } // Ignore parse errors
+        if (msg?.type === "authenticated") state.peerAuthSeen = true;
+        chain = chain.then(() => this._handleMessage(conn, msg, challenge, state)).catch(() => {});
       }
+      if (capped() && state.preBytes + Buffer.byteLength(buffer) > this.preAuthMaxBytes) this._kill(conn, state);
     });
 
-    conn.on("close", () => {
-      if (remoteCrowId) {
-        this.connections.delete(remoteCrowId);
-        if (this.onPeerDisconnected) this.onPeerDisconnected(remoteCrowId);
+    // Remove only OUR entry: a refused or superseded connection closing must
+    // never knock the live connection for the same Crow ID offline.
+    const dropEntry = () => {
+      const id = state.remoteCrowId;
+      if (id && this.connections.get(id)?.conn === conn) {
+        this.connections.delete(id);
+        state.hadEntry = true;
       }
+    };
+    conn.on("close", () => {
+      state.closed = true;
+      clearTimeout(timer);
+      dropEntry();
+      if (state.hadEntry && this.onPeerDisconnected) this.onPeerDisconnected(state.remoteCrowId);
     });
 
     conn.on("error", () => {
-      if (remoteCrowId) {
-        this.connections.delete(remoteCrowId);
-      }
+      dropEntry();
     });
   }
 
   /**
-   * Handle protocol messages.
+   * Handle one protocol frame. Async: callers await it (the connection chain
+   * does). `state` is the connection's state object, mutated in place;
+   * `setState`, if given, is called with it afterwards.
    */
-  _handleMessage(conn, msg, ourChallenge, state, setState) {
+  async _handleMessage(conn, msg, ourChallenge, state = {}, setState = null) {
+    if (!msg || typeof msg !== "object" || state.refused) return;
+    if (!Array.isArray(state.held)) state.held = [];
     switch (msg.type) {
-      case "challenge": {
-        // Respond with signed challenge + our own challenge response. When
-        // the peer's crow_id matches our own, this is an instance-sync
-        // connection regardless of Hyperswarm's topic hint (hyperswarm
-        // doesn't consistently populate info.topics on both sides, so the
-        // crow_id-match is the reliable signal that both endpoints belong
-        // to the same user). Piggyback our local instance_id + outgoing
-        // feed key so the peer can open its inbound feed without more
-        // round trips.
-        // Sign ONLY a challenge shaped like the one we send (32 random bytes,
-        // hex). Signing an arbitrary peer-chosen string with the identity key
-        // made this a signing oracle for anyone who can reach the topic — it
-        // would sign a tailnet-sync hello ("<id>:<nonce>") or CR proof for
-        // them. Hex-only keeps it disjoint from every colon-delimited message.
-        if (typeof msg.challenge !== "string" || !/^[0-9a-f]{64}$/.test(msg.challenge)) {
-          try { conn.destroy(); } catch {}
-          break;
-        }
-        (async () => {
-          const response = sign(msg.challenge, this.identity.ed25519Priv);
-          // PT-2.0: the topic hint alone no longer qualifies. msg.crowId is
-          // an unproven claim here, so this feed-key piggyback is still
-          // pre-auth: anyone presenting our (public) Crow ID gets it. Moving
-          // the key behind the signature check needs a new post-auth message
-          // (a wire change), which is PT-2a. Until then the fix is
-          // CROW_INSTANCE_SYNC_HYPERSWARM=0, which sends no feed key at all.
-          const isInstance = this.instanceSyncEnabled && msg.crowId === this.identity.crowId;
-          let feedKeyHex = null;
-          if (isInstance && msg.instance_id && this.getFeedKeyForInstance) {
-            try { feedKeyHex = await this.getFeedKeyForInstance(msg.instance_id); } catch {}
-          }
-          const payload = {
-            type: "challenge-response",
-            signature: response,
-            pubkey: this.identity.ed25519Pubkey,
-            crowId: this.identity.crowId,
-          };
-          if (isInstance && this.localInstanceId) {
-            payload.instance_id = this.localInstanceId;
-          }
-          if (feedKeyHex) payload.feed_key_hex = feedKeyHex;
-          conn.write(JSON.stringify(payload) + "\n");
-        })();
+      case "challenge":
+        await this._onChallenge(conn, msg, state);
         break;
-      }
-
-      case "challenge-response": {
-        // Verify their response to our challenge
-        const valid = verify(
-          ourChallenge.toString("hex"),
-          msg.signature,
-          msg.pubkey
-        );
-
-        // PT-2.0: a peer claiming OUR crowId is on the instance path, so it
-        // must have signed with OUR key (siblings share the seed). verify()
-        // only proves possession of the key named in the message.
-        if (valid && msg.crowId === this.identity.crowId
-            && (msg.pubkey !== this.identity.ed25519Pubkey || !this.instanceSyncEnabled)) {
-          const now = Date.now();
-          if (now - this._lastRefuseLog >= REFUSE_LOG_EVERY_MS) {
-            this._lastRefuseLog = now;
-            console.warn(this.instanceSyncEnabled
-              ? "[peer-manager] instance-sync connection refused: peer claims our Crow ID but did not prove our key"
-              : "[peer-manager] instance-sync connection dropped: Hyperswarm instance sync is off");
-          }
-          try { conn.destroy(); } catch {}
-          break;
-        }
-
-        if (valid) {
-          state.authenticated = true;
-          state.remoteCrowId = msg.crowId;
-          setState(state);
-
-          this.connections.set(msg.crowId, {
-            conn,
-            authenticated: true,
-            pubkey: msg.pubkey,
-          });
-
-          conn.write(JSON.stringify({ type: "authenticated" }) + "\n");
-
-          // Self-loopback filter: Hyperswarm's DHT discovery on the
-          // instance-sync topic (sha256(crowId+"instance-sync")) can return
-          // ourselves as a candidate peer. Drop the connection before we
-          // invoke any callbacks — there's nothing to sync with ourselves.
-          if (msg.crowId === this.identity.crowId && msg.instance_id && msg.instance_id === this.localInstanceId) {
-            conn.destroy();
-            this.connections.delete(msg.crowId);
-            break;
-          }
-
-          // A same-crow_id peer that proved our key (checked above) is one of
-          // our own instances. The topic hint alone no longer qualifies (PT-2.0).
-          const isInstance = msg.crowId === this.identity.crowId;
-
-          // Peer piggybacked their outgoing Hypercore feed key on the
-          // challenge-response — persist it before dispatching so the
-          // onInstanceConnected handler can open the inbound feed with
-          // the received key on its first attempt. Must include the
-          // peer's instance_id so we know which crow_instances row to
-          // write to (crow_id is shared across all paired instances).
-          if (isInstance && msg.instance_id && msg.feed_key_hex && this.onInstanceKeyReceived) {
-            Promise.resolve(this.onInstanceKeyReceived(msg.instance_id, msg.feed_key_hex)).catch(() => {});
-          }
-
-          // Dispatch to the appropriate handler based on connection origin
-          if (isInstance && this.onInstanceConnected) {
-            this.onInstanceConnected(msg.crowId, conn, msg.instance_id || null);
-          } else if (this.onPeerConnected) {
-            this.onPeerConnected(msg.crowId, conn);
-          }
-        } else {
-          conn.destroy();
-        }
+      case "challenge-response":
+        await this._onChallengeResponse(conn, msg, ourChallenge, state);
         break;
-      }
-
-      case "authenticated": {
-        // The other side confirmed our auth
+      case "authenticated":
+        // The other side admitted us. Recorded whenever it arrives; the
+        // admission side effects wait for both halves.
+        state.peerAuthed = true;
+        if (state.authenticated && !state.mutual) await this._completeAdmit(conn, state);
         break;
-      }
-
-      case "data": {
-        if (state.authenticated && state.remoteCrowId && this.onPeerData) {
-          this.onPeerData(state.remoteCrowId, msg.payload);
-        }
-        break;
-      }
-
-      // NOTE: a "feed-key-announce" case lived here until 2026-07. Nothing in
-      // the codebase ever SENT that message type (feed keys ride the
-      // challenge/challenge-response piggyback above; rotation rides
-      // tailnet-sync's in-band exchange, 2d), and the handler passed
-      // state.remoteCrowId where onInstanceKeyReceived requires an INSTANCE
-      // id — crow_id is shared fleet-wide and can never key a crow_instances
-      // row. If an announce message is ever actually needed, it must carry
-      // the sender's instance_id (see the challenge-response case).
+      default:
+        if (state.mutual) await this._dispatchAdmitted(conn, msg, state);
+        else state.held.push(msg);
     }
+    if (typeof setState === "function") setState(state);
+
+    // NOTE: a "feed-key-announce" case lived here until 2026-07. Nothing in
+    // the codebase ever SENT that message type, and the handler passed
+    // state.remoteCrowId where onInstanceKeyReceived requires an INSTANCE id
+    // (crow_id is shared fleet-wide and can never key a crow_instances row).
+    // Feed keys now ride `instance-key` (new siblings) or the deferred
+    // challenge-response (old siblings), both after the peer has proven our key.
+  }
+
+  /**
+   * Their challenge (we are the responder). Signs ONLY a challenge shaped like
+   * ours (32 random bytes, hex), which keeps every signature disjoint from the
+   * colon-delimited messages signed elsewhere (tailnet-sync hello, CR proof).
+   *
+   * - `cb: 1`: reply now with a cb_sig bound to this connection's handshake
+   *   hash. Relayed to any other connection, it fails.
+   * - no `cb` (an older asker): hold the reply. _admit releases it once the
+   *   asker has proven a pinned contact key, or our own key, here. A
+   *   connection that is never admitted is never signed for, so this node is
+   *   no signing oracle.
+   */
+  async _onChallenge(conn, msg, state) {
+    if (typeof msg.challenge !== "string" || !/^[0-9a-f]{64}$/.test(msg.challenge)) {
+      this._kill(conn, state);
+      return;
+    }
+    // Our own challenge sent back to us is never answered: on one connection
+    // the two ends must never sign for the same nonce.
+    if (state.ourChallengeHex && msg.challenge === state.ourChallengeHex) {
+      this._kill(conn, state);
+      if (this._refusalLog.shouldLog("challenge_reflected")) console.warn("[peer-manager] connection refused: challenge_reflected");
+      return;
+    }
+    // One challenge per connection, and only before admission: every
+    // compliant peer writes its challenge first, on connect.
+    if (state.answered || state.authenticated || state.deciding) return;
+    state.answered = true;
+    if (typeof msg.instance_id === "string" && msg.instance_id) state.peerInstanceId = msg.instance_id;
+
+    if (msg.cb === 1) {
+      const hh = state.handshakeHashHex || hashHexOf(conn);
+      const role = roleOf(conn);
+      if (!hh || !role) { this._kill(conn, state); return; }
+      const cbSig = sign(contactCbMessage({
+        role,
+        signerCrowId: this.identity.crowId,
+        challengeHex: msg.challenge,
+        handshakeHashHex: hh,
+      }), this.identity.ed25519Priv);
+      conn.write(JSON.stringify({
+        type: "challenge-response",
+        pubkey: this.identity.ed25519Pubkey,
+        crowId: this.identity.crowId,
+        cb_sig: cbSig,
+      }) + "\n");
+      return;
+    }
+    state.deferredReply = { challengeHex: msg.challenge, instanceId: state.peerInstanceId, sent: false };
+  }
+
+  /** Their answer to our challenge: decide, then _admit or refuse. */
+  async _onChallengeResponse(conn, msg, ourChallenge, state) {
+    if (state.authenticated || state.deciding) return;
+    state.deciding = true;
+    if (typeof msg.crowId !== "string" || !CROW_ID_SHAPE.test(msg.crowId)) {
+      return this._refuseContact(conn, state, msg.crowId, "not_contact");
+    }
+    state.claimedCrowId = msg.crowId;
+    const nonce = Buffer.isBuffer(ourChallenge) ? ourChallenge.toString("hex") : String(ourChallenge ?? "");
+    const hh = state.handshakeHashHex || hashHexOf(conn);
+    if (msg.crowId === this.identity.crowId) {
+      await this._onSiblingResponse(conn, msg, nonce, hh, state);
+    } else {
+      await this._onContactResponse(conn, msg, nonce, hh, state);
+    }
+  }
+
+  /**
+   * A peer claiming OUR Crow ID is on the instance path (PT-2.0): siblings
+   * share the seed, so it must prove OUR key, as a cb_sig or a bare
+   * signature. No contact pin applies.
+   */
+  async _onSiblingResponse(conn, msg, nonce, hh, state) {
+    if (!this.instanceSyncEnabled) return this._refuseInstance(conn, state, "off");
+    const ours = this.identity.ed25519Pubkey;
+    if (msg.pubkey !== ours) return this._refuseInstance(conn, state, "key");
+    let ok = false;
+    if (msg.cb_sig !== undefined && msg.cb_sig !== null) {
+      state.proof = "cb";
+      ok = verifies(() => verify(contactCbMessage({ role: peerRoleOf(conn), signerCrowId: this.identity.crowId, challengeHex: nonce, handshakeHashHex: hh }), msg.cb_sig, ours));
+    } else if (msg.signature !== undefined && msg.signature !== null) {
+      state.proof = "sig";
+      ok = verifies(() => verify(nonce, msg.signature, ours));
+    }
+    if (!ok) return this._refuseInstance(conn, state, "key");
+    // Once any sibling has bound, a bare-signature sibling proof is refused
+    // (the sibling counterpart of the contact pin). No binding wired means no
+    // pin store, as before; a read error counts as pinned.
+    const binding = this.contactBinding;
+    if (state.proof === "sig" && typeof binding?.isInstanceCbPinned === "function") {
+      let pinned;
+      try { pinned = (await binding.isInstanceCbPinned(this.identity.crowId)) !== false; } catch { pinned = true; }
+      if (pinned) return this._refuseInstance(conn, state, "cb_required_pinned");
+    }
+    await this._admit(conn, state, msg, "instance");
+  }
+
+  /**
+   * A foreign Crow ID: admitted only on the key pinned in its contact row.
+   * `msg.pubkey` is checked against the pin and never used for anything else.
+   * Checks in order; the first failure refuses (see the private engineering
+   * notes for the table).
+   */
+  async _onContactResponse(conn, msg, nonce, hh, state) {
+    const crowId = state.claimedCrowId;
+    const binding = this.contactBinding;
+    if (!binding || typeof binding.lookupKey !== "function") return this._refuseContact(conn, state, crowId, "no_binding");
+
+    let pinned;
+    try {
+      pinned = await binding.lookupKey(crowId);
+    } catch {
+      return this._refuseContact(conn, state, crowId, "lookup_failed");
+    }
+    if (typeof pinned !== "string" || !pinned) return this._refuseContact(conn, state, crowId, "not_contact");
+    pinned = pinned.toLowerCase();
+    if (!crowIdMatchesKey(crowId, pinned)) return this._refuseContact(conn, state, crowId, "pin_crowid_mismatch");
+    if (msg.pubkey !== undefined && msg.pubkey !== null
+        && (typeof msg.pubkey !== "string" || msg.pubkey.toLowerCase() !== pinned)) {
+      return this._refuseContact(conn, state, crowId, "key_mismatch");
+    }
+
+    const cbPresent = msg.cb_sig !== undefined && msg.cb_sig !== null;
+    const sigPresent = !cbPresent && msg.signature !== undefined && msg.signature !== null;
+    const cbValid = cbPresent
+      && verifies(() => verify(contactCbMessage({ role: peerRoleOf(conn), signerCrowId: crowId, challengeHex: nonce, handshakeHashHex: hh }), msg.cb_sig, pinned));
+    const sigValid = sigPresent && verifies(() => verify(nonce, msg.signature, pinned));
+    let cbPinned = false;
+    if (sigPresent && sigValid) {
+      try {
+        cbPinned = (await binding.isCbPinned(crowId)) !== false;
+      } catch {
+        cbPinned = true; // fail closed
+      }
+    }
+    const d = decideContactProof({ cbPresent, cbValid, sigPresent, sigValid, cbPinned });
+    if (!d.ok) return this._refuseContact(conn, state, crowId, d.reason);
+    state.proof = d.bound ? "cb" : "sig";
+    state.pinnedKey = pinned;
+    await this._admit(conn, state, msg, "contact");
+  }
+
+  /**
+   * The one place a connection is admitted. Every side effect of admission
+   * happens here, after the decision and after admitGuards[kind]: the pin,
+   * state, the `authenticated` frame, the deferred challenge-response and
+   * `instance-key`; then, once the peer has admitted us too (_completeAdmit),
+   * the connections entry, the callbacks and the held frames.
+   */
+  async _admit(conn, state, msg, kind) {
+    const guard = this.admitGuards?.[kind];
+    if (typeof guard === "function") {
+      let verdict;
+      try {
+        verdict = await guard({ conn, msg, state });
+      } catch {
+        verdict = { ok: false, reason: "error" };
+      }
+      if (!verdict || verdict.ok !== true) {
+        const reason = `guard:${verdict?.reason ?? "refused"}`;
+        if (kind === "contact") this._refuseContact(conn, state, state.claimedCrowId, reason);
+        else this._refuseInstance(conn, state, reason);
+        return false;
+      }
+    }
+    if (state.refused || state.closed || conn.destroyed) return false;
+
+    const crowId = state.claimedCrowId;
+    const remoteInstanceId = kind === "instance"
+      ? ((typeof msg.instance_id === "string" && msg.instance_id) || state.peerInstanceId || null)
+      : null;
+
+    // Self-loopback: the DHT can return ourselves on the instance-sync topic.
+    // Nothing to sync with ourselves; drop before any side effect.
+    if (kind === "instance" && remoteInstanceId && remoteInstanceId === this.localInstanceId) {
+      this._kill(conn, state);
+      return false;
+    }
+
+    if (kind === "contact") {
+      if (state.proof === "cb") {
+        try { await this.contactBinding.markCbPinned(crowId); } catch {}
+      } else if (!legacyLogged.has(crowId)) {
+        legacyLogged.add(crowId);
+        console.log(`[peer-manager] contact ${logSafe(crowId)} is on older Crow: no channel binding`);
+      }
+      if (state.refused || state.closed || conn.destroyed) return false;
+    } else if (state.proof === "cb" && typeof this.contactBinding?.markInstanceCbPinned === "function") {
+      try { await this.contactBinding.markInstanceCbPinned(this.identity.crowId); } catch {}
+      if (state.refused || state.closed || conn.destroyed) return false;
+    }
+
+    state.armTimer?.();
+    state.authenticated = true;
+    state.remoteCrowId = crowId;
+    state.remoteInstanceId = remoteInstanceId;
+    state.kind = kind;
+    state.admitMsg = msg;
+
+    conn.write(JSON.stringify({ type: "authenticated" }) + "\n");
+
+    await this._sendDeferredReply(conn, state);
+
+    if (kind === "instance") {
+      // A new sibling (cb proof) gets our feed key in its own frame; an old
+      // one got it on the deferred challenge-response above.
+      if (state.proof === "cb" && this.localInstanceId && remoteInstanceId && this.getFeedKeyForInstance) {
+        let feedKeyHex = null;
+        try { feedKeyHex = await this.getFeedKeyForInstance(remoteInstanceId); } catch {}
+        if (feedKeyHex && !state.closed) {
+          conn.write(JSON.stringify({ type: "instance-key", instance_id: this.localInstanceId, feed_key_hex: feedKeyHex }) + "\n");
+        }
+      }
+    }
+
+    if (state.peerAuthed) await this._completeAdmit(conn, state);
+    return true;
+  }
+
+  /**
+   * The second half of _admit, run once BOTH sides have admitted each other
+   * (our decision, then the peer's `authenticated`, in either order). Only
+   * now is the peer connected: a peer sends nothing but handshake frames
+   * until it is told it was admitted, so its data never races our decision.
+   */
+  async _completeAdmit(conn, state) {
+    if (state.mutual || !state.authenticated || !state.peerAuthed || state.refused || state.closed) return;
+    state.mutual = true;
+    state.clearTimer?.();
+    const msg = state.admitMsg;
+    const crowId = state.remoteCrowId;
+
+    this.connections.set(crowId, {
+      conn,
+      authenticated: true,
+      pubkey: state.kind === "contact" ? state.pinnedKey : this.identity.ed25519Pubkey,
+    });
+
+    if (state.kind === "instance") {
+      // An old sibling piggybacks its feed key on its (now verified)
+      // challenge-response. Persist it before dispatching, so the
+      // onInstanceConnected handler can open the inbound feed at once.
+      if (state.proof === "sig" && msg.instance_id && msg.feed_key_hex && this.onInstanceKeyReceived) {
+        fire(() => this.onInstanceKeyReceived(msg.instance_id, msg.feed_key_hex));
+      }
+      if (this.onInstanceConnected) fire(() => this.onInstanceConnected(crowId, conn, state.remoteInstanceId));
+    } else if (this.onPeerConnected) {
+      fire(() => this.onPeerConnected(crowId, conn));
+    }
+
+    const held = state.held;
+    state.held = [];
+    for (const m of held) {
+      if (state.refused || state.closed) break;
+      await this._dispatchAdmitted(conn, m, state);
+    }
+  }
+
+  /** Answer an older asker's challenge, held until _admit (see _onChallenge). */
+  async _sendDeferredReply(conn, state) {
+    const d = state.deferredReply;
+    if (!d || d.sent || !state.authenticated || state.refused) return;
+    d.sent = true;
+    // Allowlist: only a peer that proved itself with a bare signature (an
+    // older contact or sibling) gets one back. A cb_sig peer runs current code
+    // and asks with cb:1; anything else is not signed for.
+    if (state.proof !== "sig") return;
+    const isInstance = state.kind === "instance" && this.instanceSyncEnabled;
+    let feedKeyHex = null;
+    if (isInstance && d.instanceId && this.getFeedKeyForInstance) {
+      try { feedKeyHex = await this.getFeedKeyForInstance(d.instanceId); } catch {}
+    }
+    if (state.closed) return;
+    const payload = {
+      type: "challenge-response",
+      signature: sign(d.challengeHex, this.identity.ed25519Priv),
+      pubkey: this.identity.ed25519Pubkey,
+      crowId: this.identity.crowId,
+    };
+    if (isInstance && this.localInstanceId) payload.instance_id = this.localInstanceId;
+    if (feedKeyHex) payload.feed_key_hex = feedKeyHex;
+    conn.write(JSON.stringify(payload) + "\n");
+  }
+
+  /** Frames of an admitted connection, by kind. Frames of the other kind are ignored. */
+  async _dispatchAdmitted(conn, msg, state) {
+    if (!state.mutual || state.refused) return;
+    if (state.kind === "contact" && msg.type === "data") {
+      if (state.remoteCrowId && this.onPeerData) {
+        try { await this.onPeerData(state.remoteCrowId, msg.payload); } catch {}
+      }
+      return;
+    }
+    if (state.kind === "instance" && msg.type === "instance-key") {
+      if (typeof msg.instance_id === "string" && msg.instance_id && msg.instance_id === state.remoteInstanceId
+          && typeof msg.feed_key_hex === "string" && msg.feed_key_hex && this.onInstanceKeyReceived) {
+        fire(() => this.onInstanceKeyReceived(msg.instance_id, msg.feed_key_hex));
+      }
+    }
+  }
+
+  /** Destroy a connection that will never be admitted; drop what it queued. */
+  _kill(conn, state) {
+    state.refused = true;
+    state.held = [];
+    state.deferredReply = null;
+    state.clearTimer?.();
+    try { conn.destroy(); } catch {}
+  }
+
+  _refuseContact(conn, state, crowId, reason) {
+    this._kill(conn, state);
+    const id = logSafe(crowId);
+    if (reason === "no_binding") {
+      if (this._noBindingLogged) return;
+      this._noBindingLogged = true;
+    } else if (!this._refusalLog.shouldLog(id)) {
+      return;
+    }
+    console.warn(`[peer-manager] contact refused ${id}: ${reason}`);
+  }
+
+  _refuseInstance(conn, state, why) {
+    this._kill(conn, state);
+    const now = Date.now();
+    if (now - this._lastRefuseLog < REFUSE_LOG_EVERY_MS) return;
+    this._lastRefuseLog = now;
+    if (why === "off") console.warn("[peer-manager] instance-sync connection dropped: Hyperswarm instance sync is off");
+    else if (why === "key") console.warn("[peer-manager] instance-sync connection refused: peer claims our Crow ID but did not prove our key");
+    else console.warn(`[peer-manager] instance-sync connection refused: ${why}`);
   }
 
   /**

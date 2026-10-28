@@ -64,9 +64,10 @@ test("buildProfileMessage: the crow_social envelope with subtype profile; saniti
   assert.equal(env.version, 1);
   assert.equal(env.subtype, PROFILE_SUBTYPE);
   assert.equal(PROFILE_SUBTYPE, "profile");
-  assert.deepEqual(env.payload, { v: 1, display_name: "Casey", avatar: PNG });
-  assert.deepEqual(JSON.parse(buildProfileMessage({})).payload, { v: 1, display_name: null, avatar: null }, "a cleared profile is sent as nulls");
-  assert.deepEqual(JSON.parse(buildProfileMessage({ displayName: "crow:x", avatar: "https://x/y.png" })).payload, { v: 1, display_name: null, avatar: null });
+  // hs_cb: 1 (PT-3) advertises that this node binds its Hyperswarm handshakes.
+  assert.deepEqual(env.payload, { v: 1, display_name: "Casey", avatar: PNG, hs_cb: 1 });
+  assert.deepEqual(JSON.parse(buildProfileMessage({})).payload, { v: 1, display_name: null, avatar: null, hs_cb: 1 }, "a cleared profile is sent as nulls");
+  assert.deepEqual(JSON.parse(buildProfileMessage({ displayName: "crow:x", avatar: "https://x/y.png" })).payload, { v: 1, display_name: null, avatar: null, hs_cb: 1 });
 });
 
 test("readLocalProfile: sanitized name + validated picture from the GLOBAL rows; a legacy URL avatar is null; unreadable db is nulls", async () => {
@@ -213,7 +214,7 @@ test("profileRecipients + broadcastProfile: every full unblocked human keyed con
     assert.deepEqual(sent.map((s) => s.contact.secp256k1_pubkey), [pk("a"), xonly("b"), pk("e")]);
     const env = JSON.parse(sent[0].content);
     assert.equal(env.subtype, "profile");
-    assert.deepEqual(env.payload, { v: 1, display_name: "Casey", avatar: PNG });
+    assert.deepEqual(env.payload, { v: 1, display_name: "Casey", avatar: PNG, hs_cb: 1 });
     assert.equal(await readBroadcastPending(db), false, "a clean fan-out clears the pending flag");
 
     let n = 0;

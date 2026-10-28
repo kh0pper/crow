@@ -190,7 +190,7 @@ function makeFakeDocument() {
   };
 }
 
-function buildAppendBubble(lang = "en") {
+function buildAppendBubble(lang = "en", activeItem = { type: "peer" }) {
   const script = messagesClientJS({ aiConfigured: false, storageAvailable: false, lang });
   const elSrc = extractFunction(script, "el");
   const relativeTimeSrc = extractFunction(script, "relativeTime");
@@ -199,7 +199,7 @@ function buildAppendBubble(lang = "en") {
 
   const context = {
     document: makeFakeDocument(),
-    _activeItem: { type: "peer" },
+    _activeItem: activeItem,
     _messages: [],
     console,
   };
@@ -211,8 +211,8 @@ function buildAppendBubble(lang = "en") {
   return context.__appendBubble;
 }
 
-function renderBubble(msg, lang) {
-  const appendBubble = buildAppendBubble(lang);
+function renderBubble(msg, lang, activeItem) {
+  const appendBubble = buildAppendBubble(lang, activeItem);
   const container = {
     children: [],
     appendChild(n) {
@@ -267,4 +267,19 @@ test("Spanish lang renders the same symbols (i18n only touches tooltip text)", (
   assert.equal(relayed.querySelector(".msg-delivery").textContent, "✓");
   const failed = renderBubble({ direction: "sent", content: "hola", delivery_status: "failed" }, "es");
   assert.ok(failed.querySelector(".msg-bubble-failed-note"));
+});
+
+// --- PT-3 N-3: a host-relayed room message keeps its "via <host>" label ---
+
+const roomSender = (msg) => {
+  const bubble = renderBubble({ content: "hi", ...msg }, "en", { type: "room" });
+  const line = bubble.querySelector(".msg-bubble-sender");
+  return line.children.map((c) => c.textContent).join("");
+};
+
+test("room: a member's own message shows the contact's name; a host-relayed one shows the stored 'via <host>' label", () => {
+  assert.equal(roomSender({ direction: "received", sender_name: "Yvonne", sender_label: "Yvonne" }), "Yvonne", "control: a member-signed message");
+  assert.equal(roomSender({ direction: "received", sender_name: null, sender_label: "Claimed via Hal" }), "Claimed via Hal", "unattributed relay");
+  assert.equal(roomSender({ direction: "received", sender_name: "Yvonne", sender_label: "Yvonne via Hal" }), "Yvonne via Hal", "an attributed relay keeps 'via Hal'");
+  assert.equal(roomSender({ direction: "sent", sender_name: null, sender_label: "You" }), "You", "our own message");
 });

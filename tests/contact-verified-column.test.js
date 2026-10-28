@@ -3,6 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SCHEMA_GENERATION } from "../servers/shared/schema-version.js";
 import { upsertFullContact } from "../servers/sharing/contact-promote.js";
+import { deriveInstanceIdentity } from "../servers/sharing/identity.js";
 
 test("SCHEMA_GENERATION covers the verified column (gen >= 4)", () => {
   // The verified column shipped in generation 4; later features bump further
@@ -59,31 +60,36 @@ function makeDb() {
 
 const SECP_A = "a".repeat(64);
 const SECP_B = "b".repeat(64);
-const ED = "c".repeat(64);
+// PT-3 N-2: a contact row's Crow ID must derive from its Ed25519 key, so the
+// fixtures use a real (fixed-seed) identity.
+const ALICE = deriveInstanceIdentity(Buffer.alloc(32, 0x33));
+const ED = ALICE.ed25519Pubkey;
+const CROW_A = ALICE.crowId;
 
 test("CREATE defaults verified to 0", async () => {
   const db = makeDb();
-  const r = await upsertFullContact(db, {}, { crowId: "crow:aaa", ed25519Pub: ED, secp256k1Pub: SECP_A, displayName: "Alice" });
+  const r = await upsertFullContact(db, {}, { crowId: CROW_A, ed25519Pub: ED, secp256k1Pub: SECP_A, displayName: "Alice" });
   assert.equal(r.outcome, "created");
   assert.equal(db.contacts.find((c) => c.id === r.contactId).verified, 0);
 });
 
 test("NOOP preserves a verified badge (same crow_id + same secp)", async () => {
   const db = makeDb();
-  const { contactId } = await upsertFullContact(db, {}, { crowId: "crow:aaa", ed25519Pub: ED, secp256k1Pub: SECP_A, displayName: "Alice" });
+  const { contactId } = await upsertFullContact(db, {}, { crowId: CROW_A, ed25519Pub: ED, secp256k1Pub: SECP_A, displayName: "Alice" });
   db.contacts.find((c) => c.id === contactId).verified = 1; // user marked verified
-  const r = await upsertFullContact(db, {}, { crowId: "crow:aaa", ed25519Pub: ED, secp256k1Pub: SECP_A, displayName: "Alice" });
+  const r = await upsertFullContact(db, {}, { crowId: CROW_A, ed25519Pub: ED, secp256k1Pub: SECP_A, displayName: "Alice" });
   assert.equal(r.outcome, "noop");
   assert.equal(db.contacts.find((c) => c.id === contactId).verified, 1, "verified survives a noop re-accept");
 });
 
 test("PROMOTE resets verified to 0 on a key rebind", async () => {
   const db = makeDb();
-  // A full contact with crow:old + SECP_A, marked verified.
-  const { contactId } = await upsertFullContact(db, {}, { crowId: "crow:old", ed25519Pub: ED, secp256k1Pub: SECP_A, displayName: "Alice" });
+  // A keyless full contact with crow:old + SECP_A, marked verified. (A rebind
+  // is accepted only onto a Crow ID that the resulting row's key derives.)
+  const { contactId } = await upsertFullContact(db, {}, { crowId: "crow:old", ed25519Pub: "", secp256k1Pub: SECP_A, displayName: "Alice" });
   db.contacts.find((c) => c.id === contactId).verified = 1;
   // Re-accept the SAME secp under a DIFFERENT crow_id → PROMOTE (crow_id rebind).
-  const r = await upsertFullContact(db, {}, { crowId: "crow:new", ed25519Pub: ED, secp256k1Pub: SECP_A, displayName: "Alice" });
+  const r = await upsertFullContact(db, {}, { crowId: CROW_A, ed25519Pub: ED, secp256k1Pub: SECP_A, displayName: "Alice" });
   assert.equal(r.outcome, "promoted");
   assert.equal(db.contacts.find((c) => c.id === r.contactId).verified, 0, "key change clears verified");
 });
@@ -91,12 +97,12 @@ test("PROMOTE resets verified to 0 on a key rebind", async () => {
 test("MERGE resets verified to 0", async () => {
   const db = makeDb();
   // Owner row: crow:aaa with a DIFFERENT secp, verified.
-  const owner = await upsertFullContact(db, {}, { crowId: "crow:aaa", ed25519Pub: ED, secp256k1Pub: SECP_B, displayName: "Alice" });
+  const owner = await upsertFullContact(db, {}, { crowId: CROW_A, ed25519Pub: ED, secp256k1Pub: SECP_B, displayName: "Alice" });
   db.contacts.find((c) => c.id === owner.contactId).verified = 1;
   // A separate row sharing SECP_A but no crow owner (simulate a request row).
   db.contacts.push({ id: 99, crow_id: "req:x", display_name: "req:x", ed25519_pubkey: "", secp256k1_pubkey: SECP_A, request_status: "accepted", verified: 0, contact_type: "crow" });
   // Now upsert crow:aaa with SECP_A → owner exists AND row 99 shares SECP_A → MERGE.
-  const r = await upsertFullContact(db, {}, { crowId: "crow:aaa", ed25519Pub: ED, secp256k1Pub: SECP_A, displayName: "Alice" });
+  const r = await upsertFullContact(db, {}, { crowId: CROW_A, ed25519Pub: ED, secp256k1Pub: SECP_A, displayName: "Alice" });
   assert.equal(r.outcome, "merged");
   assert.equal(db.contacts.find((c) => c.id === r.contactId).verified, 0, "merge clears verified");
 });

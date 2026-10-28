@@ -17,7 +17,7 @@ import { upsertFullContact } from "../servers/sharing/contact-promote.js";
 import { __setEmitSinkForTest } from "../servers/sharing/contact-sync.js";
 import { writeTombstone, readTombstone } from "../servers/sharing/contact-delete.js";
 import { registerContactsTools } from "../servers/sharing/tools/contacts.js";
-import { deriveBotIdentity, generateBotInviteCode, parseBotInviteCode } from "../servers/sharing/identity.js";
+import { deriveBotIdentity, deriveInstanceIdentity, generateBotInviteCode, parseBotInviteCode } from "../servers/sharing/identity.js";
 
 /** Capture every emitChange the write path makes, returning a monotonic lamport. */
 function captureSink() {
@@ -49,8 +49,12 @@ function stubManagers() {
 
 const PK = "02" + "a".repeat(64);          // 66-hex compressed
 const PK_XONLY = "a".repeat(64);           // its 64-hex x-only tail
-const ED = "b".repeat(64);
-const CROW = "crow:testpeer01";
+// PT-3 N-2: a contact row's Crow ID must derive from its Ed25519 key, so the
+// fixtures use real (fixed-seed) identities.
+const PEER = deriveInstanceIdentity(Buffer.alloc(32, 0x11));
+const PEER_Y = deriveInstanceIdentity(Buffer.alloc(32, 0x22));
+const ED = PEER.ed25519Pubkey;
+const CROW = PEER.crowId;
 
 test("created — fresh full contact when nothing exists", async () => {
   const { db, cleanup } = freshDb();
@@ -154,7 +158,7 @@ test("rejects the req: sentinel and a missing secp key", async () => {
 // GUARD #4 (THE CRITICAL): the R1-C1 re-pair interleaving takes the PROMOTE branch.
 test("tombstoned re-add via PROMOTE emits `insert`, not `update`, and clears the tombstone", async () => {
   const { db, cleanup } = freshDb();
-  const CROW_Y = "crow:yyyyyyyyyy";
+  const CROW_Y = PEER_Y.crowId;
   try {
     // The emitting instance holds a tombstone for crow:Y (it APPLIED the delete)...
     await writeTombstone(db, CROW_Y, 100);
@@ -167,7 +171,7 @@ test("tombstoned re-add via PROMOTE emits `insert`, not `update`, and clears the
     });
     const cap = captureSink();
     __setEmitSinkForTest(cap.sink);
-    const r = await upsertFullContact(db, stubManagers(), { crowId: CROW_Y, ed25519Pub: ED, secp256k1Pub: PK, displayName: "Peer" });
+    const r = await upsertFullContact(db, stubManagers(), { crowId: CROW_Y, ed25519Pub: PEER_Y.ed25519Pubkey, secp256k1Pub: PK, displayName: "Peer" });
     assert.equal(r.outcome, "promoted", "re-invite rebinds the req: row → PROMOTE");
     assert.deepEqual(cap.contactOps(), ["insert"], "a tombstoned re-add MUST emit insert, never update");
     assert.equal(await readTombstone(db, CROW_Y), null, "the local re-add supersedes and clears the tombstone");

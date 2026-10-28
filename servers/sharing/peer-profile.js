@@ -20,11 +20,39 @@ import { findContactByPubkey } from "./pubkey-util.js";
 import { sanitizeDisplayName } from "./display-name.js";
 import { validateAvatar } from "./avatar.js";
 import { emitContactChange } from "./contact-sync.js";
+import { markCbPinned, CB_ADVERT_PREFIX } from "./contact-binding.js";
 
 export const PROFILE_SUBTYPE = "profile";
 /** A raw dashboard_settings row (NOT in the sync allowlist, never emitted — the profile-heal flag precedent): "1" = the last fan-out did not fully succeed, resend on the next chance. */
 export const PROFILE_BROADCAST_PENDING_KEY = "__profile_broadcast_pending";
 const HEX_KEY = /^[0-9a-fA-F]{64}(?:[0-9a-fA-F]{2})?$/;
+/**
+ * PT-3 §2.5: LOCAL dashboard_settings_overrides key `<prefix><crowId>` = this
+ * instance has sent the `hs_cb` advert to that contact. Never synced (the
+ * overrides table is per instance).
+ */
+export const HS_CB_ADVERT_PREFIX = CB_ADVERT_PREFIX;
+
+/**
+ * PT-3 §2.5: apply a key-bound "this contact binds its Hyperswarm handshakes"
+ * advert (`hs_cb: 1` on a profile or handshake_complete message). The caller
+ * resolved `contactRow` from the AUTHENTICATED sender key. Counts only for a
+ * full, unblocked contact; without a local instance id nothing is written.
+ * True when a pin was newly written. Never throws.
+ */
+export async function applyBindingAdvert(db, localId, contactRow, advert) {
+  try {
+    if (!db || !contactRow || !advert || typeof advert !== "object") return false;
+    if (advert.hs_cb !== 1) return false;
+    if (contactRow.request_status !== null && contactRow.request_status !== undefined) return false;
+    if (Number(contactRow.is_blocked) === 1) return false;
+    const crowId = contactRow.crow_id;
+    if (typeof crowId !== "string" || !crowId || crowId.startsWith("req:")) return false;
+    return await markCbPinned(db, localId, crowId);
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Review R2 ruling R2-1: an ESTABLISHED contact is a full row (request_status
@@ -107,8 +135,15 @@ export function buildProfileMessage({ displayName = null, avatar = null } = {}) 
     type: "crow_social",
     version: 1,
     subtype: PROFILE_SUBTYPE,
-    payload: { v: 1, display_name: sanitizeDisplayName(displayName), avatar: validateAvatar(avatar) },
+    // hs_cb (PT-3 §2.5): this node binds its Hyperswarm handshakes. Old
+    // receivers read named fields only and ignore it.
+    payload: { v: 1, display_name: sanitizeDisplayName(displayName), avatar: validateAvatar(avatar), hs_cb: 1 },
   });
+}
+
+/** Pure: the advert-only profile message. No profile fields, so a receiver changes nothing else. */
+export function buildBindingAdvertMessage() {
+  return JSON.stringify({ type: "crow_social", version: 1, subtype: PROFILE_SUBTYPE, payload: { v: 1, hs_cb: 1 } });
 }
 
 /**
@@ -138,7 +173,7 @@ export async function applyPeerProfile(db, contactId, fields = {}) {
 }
 
 /** The `profile` crow_social receiver. Contact-only; never throws (receive path). */
-export async function handleProfileMessage(db, payload, senderPubkey) {
+export async function handleProfileMessage(db, payload, senderPubkey, { localInstanceId = null } = {}) {
   try {
     if (!db || !senderPubkey || !payload || typeof payload !== "object" || Array.isArray(payload)) return { applied: false, reason: "bad-input" };
     const contact = await findContactByPubkey(db, senderPubkey);
@@ -150,6 +185,7 @@ export async function handleProfileMessage(db, payload, senderPubkey) {
       displayName: has("display_name") ? payload.display_name : undefined,
       avatar: has("avatar") ? payload.avatar : undefined,
     });
+    await applyBindingAdvert(db, localInstanceId, contact, payload);
     return { applied: true, changed: r.changed, contactId: contact.id };
   } catch (err) {
     try { console.warn("[sharing] profile message failed:", err?.message); } catch {}
@@ -211,4 +247,70 @@ export async function broadcastProfile(db, nostrManager) {
   // after a fan-out in which every recipient was genuinely delivered to.
   if (out.failed === 0) await writeBroadcastPending(db, false);
   return out;
+}
+
+/**
+ * PT-3 §2.5: send the advert-only profile message to every full contact this
+ * instance has not yet told, once per contact (a LOCAL marker, written only
+ * after a send that reached a relay). At most `maxPerRun` sends per call,
+ * `spacingMs` apart. No local instance id or no sender: nothing is sent.
+ * Never throws.
+ */
+export async function advertiseBindingToContacts(db, nostrManager, localId, { spacingMs = 2000, maxPerRun = 50, attempted = null } = {}) {
+  const out = { sent: 0, failed: 0, more: false };
+  try {
+    if (!db || !localId || !nostrManager || typeof nostrManager.sendControl !== "function") return out;
+    const recipients = (await profileRecipients(db)).filter((r) =>
+      (r.request_status === null || r.request_status === undefined) &&
+      typeof r.crow_id === "string" && r.crow_id && !r.crow_id.startsWith("req:"));
+    const content = buildBindingAdvertMessage();
+    let attempts = 0;
+    for (const c of recipients) {
+      if (attempted?.has(c.crow_id)) continue; // already tried this boot (a failure waits for the next one)
+      const key = HS_CB_ADVERT_PREFIX + c.crow_id;
+      const { rows } = await db.execute({
+        sql: "SELECT 1 FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ? LIMIT 1",
+        args: [key, localId],
+      });
+      if (rows.length) continue;
+      if (attempts >= maxPerRun) { out.more = true; break; }
+      attempted?.add(c.crow_id);
+      if (attempts > 0 && spacingMs > 0) await new Promise((r) => { const t = setTimeout(r, spacingMs); t.unref?.(); });
+      attempts++;
+      try {
+        const res = await nostrManager.sendControl({ id: c.id, secp256k1_pubkey: c.secp256k1_pubkey }, content);
+        if (res && Array.isArray(res.relays) && res.relays.length === 0) { out.failed++; continue; }
+        await db.execute({
+          sql: `INSERT INTO dashboard_settings_overrides (key, instance_id, value, updated_at)
+                VALUES (?, ?, '1', datetime('now')) ON CONFLICT(key, instance_id) DO NOTHING`,
+          args: [key, localId],
+        });
+        out.sent++;
+      } catch {
+        out.failed++;
+      }
+    }
+  } catch (err) {
+    try { console.warn("[sharing] hs_cb advert failed:", err?.message); } catch {}
+  }
+  return out;
+}
+
+/**
+ * PT-3 §2.5: run advert batches until every full contact has been tried once:
+ * the first after `delayMs`, each follow-up `spacingMs` after the previous
+ * batch. The local id is read at each batch. Timers never hold the process
+ * open. Returns a promise that settles after the last batch (never rejects).
+ */
+export function scheduleBindingAdverts(db, nostrManager, getLocalId, { delayMs = 30_000, spacingMs = 2000, maxPerRun = 50 } = {}) {
+  const attempted = new Set();
+  const wait = (ms) => new Promise((r) => { const t = setTimeout(r, Math.max(0, ms)); t.unref?.(); });
+  return (async () => {
+    await wait(delayMs);
+    for (;;) {
+      const out = await advertiseBindingToContacts(db, nostrManager, getLocalId(), { spacingMs, maxPerRun, attempted });
+      if (!out.more) return;
+      await wait(spacingMs);
+    }
+  })().catch(() => {});
 }

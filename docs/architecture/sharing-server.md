@@ -73,6 +73,29 @@ Peers find each other through the Hyperswarm distributed hash table (DHT). No ce
 
 When two peers discover each other on the DHT, Hyperswarm establishes an encrypted duplex stream between them.
 
+### Handshake
+
+Each side sends a `challenge` (a random 32-byte nonce, hex) and answers the other's. A peer is admitted only once it has proven a key we already hold for it:
+
+- **A contact** proves the Ed25519 key stored in its contact row when it was added (from the invite, `invite_accepted`, or a signed bot invite). The key the peer names in the message is checked against that stored key and is never trusted on its own. A blocked, partial or unknown row is refused, and so is a row whose Crow ID does not match its own key.
+- **A sibling instance** (a peer presenting our own Crow ID) proves our own key, as the instance-sync path requires.
+
+**Channel binding.** A current node marks its challenge with `cb: 1`. The reply is then a `cb_sig`: a signature over a domain-separated string that names the signer's end of the stream (initiator or responder), the signer's Crow ID, the nonce, and this connection's Noise handshake hash. Each side reads that hash and its own role from its own stream, so a reply copied onto any other connection, or sent back to the end that produced it, fails. A node also refuses, before signing anything, a challenge that repeats the one it sent on the same connection.
+
+**No signing for unproven peers.** A current node answers a challenge without `cb` (an older peer) only after that peer has itself been admitted on the same connection with a bare signature, and then with the bare signature older nodes expect. A connection that is never admitted, or a peer that proved itself with a `cb_sig`, is never sent a bare signature. Older peers keep working because they answer our challenge without waiting for our reply.
+
+**Mutual admission.** Each side sends `authenticated` once it has admitted the other. A peer counts as connected (shares are delivered, `send()` works) only once both have happened on the connection; a peer that does not complete this within the pre-admission time limit is closed. Because a sender waits for our `authenticated`, its data never arrives before our decision.
+
+**Sibling pin.** Sibling instances share one key, so they get no per-contact pin; instead, once any sibling has bound with a `cb_sig`, the node records it locally (`instance_hs_cb:<own Crow ID>`, never synced). From then on a sibling proving itself with a bare signature is refused and gets no feed key; older siblings must update to keep syncing over Hyperswarm.
+
+**Binding pin.** Once a contact has bound (a `cb_sig` handshake), this node records it in a local, never-synced setting (`contact_hs_cb:<crowId>`). From then on a bare-signature proof for that contact is refused. Deleting the contact clears the record; blocking keeps it. A contact still on an older release can therefore share with us until we have once seen it bind; after that, an older machine of the same contact queues its shares until it updates. Messages over Nostr are unaffected.
+
+**Before admission** only handshake frames are acted on. Other frames wait, in order, and are processed after admission, or dropped if the peer is refused. An unadmitted connection is closed after 64 lines, 64 KiB, or 15 seconds, whichever comes first. A refused connection is closed without touching the connection, status or shares of the real contact. Every admission step happens in `PeerManager._admit`, which first runs an optional async guard per connection kind (`admitGuards`), then sends `authenticated`, the held reply and the sibling `instance-key` frame; its second half, `_completeAdmit`, runs at mutual admission and sets the connection entry, delivers pending shares and runs the callbacks.
+
+**Siblings** exchange outgoing feed keys after admission: a current sibling sends an `instance-key` frame (`instance_id`, `feed_key_hex`); an older one receives the key on the held reply.
+
+Refusals are logged as `[peer-manager] contact refused <crowId>: <reason>` at most once a minute per Crow ID.
+
 ## Layer 3: Data Sync (Hypercore)
 
 Shared data flows through Hypercore append-only feeds:

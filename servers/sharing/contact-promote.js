@@ -68,6 +68,21 @@ export async function persistIncomingCursor(db, createdAtSec) {
 import { normalizePubkey } from "./pubkey-util.js";
 import { emitContactChange, emitContactDelete } from "./contact-sync.js";
 import { readTombstone, clearTombstone, unwireContact } from "./contact-delete.js";
+import { crowIdMatchesKey } from "./identity.js";
+
+/** PT-3 N-2: the error every writing path throws when the resulting row's Crow ID is not its key's. */
+export const CROW_ID_KEY_MISMATCH = "Crow ID does not match its public key";
+
+/**
+ * PT-3 N-2: a full contact row must carry a Crow ID derived from its Ed25519
+ * key. Checked on the row a write WOULD produce (an existing non-empty key is
+ * kept, so it wins over the input), before anything is written. An empty
+ * resulting key (a keyless repair) is allowed.
+ */
+function assertResultingRow(crowId, existingKey, inputKey) {
+  const key = (existingKey ? String(existingKey) : "") || (inputKey ? String(inputKey) : "");
+  if (key && !crowIdMatchesKey(String(crowId), key)) throw new Error(CROW_ID_KEY_MISMATCH);
+}
 
 const HEX_KEY = /^[0-9a-fA-F]{64}(?:[0-9a-fA-F]{2})?$/; // 64 x-only or 66 compressed
 
@@ -155,6 +170,7 @@ export async function upsertFullContact(db, managers, { crowId, ed25519Pub, secp
   // --- MERGE: the crowId owner exists AND a *different* row shares the secp key.
   const otherSecp = byCrow ? secpRows.find((r) => r.id !== byCrow.id) : null;
   if (byCrow && otherSecp) {
+    assertResultingRow(crowId, byCrow.ed25519_pubkey, ed);
     // Fold the other row's messages into the owner (plain UPDATE — globally
     // unique nostr_event_id means no collision; surface a genuine one), then
     // delete the other row and complete the owner.
@@ -199,6 +215,10 @@ export async function upsertFullContact(db, managers, { crowId, ed25519Pub, secp
       return { contactId: target.id, outcome: "noop" };
     }
 
+    // PT-3 N-2: the promoted row keeps a non-empty stored key and takes the
+    // input crow_id, so check that pair before rewriting anything.
+    assertResultingRow(crowId, target.ed25519_pubkey, ed);
+
     // Promote in place. crow_id is only ever set when target is a non-owner
     // (byCrow null) OR target IS the owner (crow_id unchanged) → no UNIQUE risk.
     // NOTE (conscious decision, security-reviewed in Task 5): when byCrow is
@@ -226,6 +246,7 @@ export async function upsertFullContact(db, managers, { crowId, ed25519Pub, secp
   }
 
   // --- CREATE a fresh full contact.
+  assertResultingRow(crowId, "", ed);
   const ins = await db.execute({
     sql: `INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey, contact_type)
           VALUES (?, ?, ?, ?, 'crow')`,

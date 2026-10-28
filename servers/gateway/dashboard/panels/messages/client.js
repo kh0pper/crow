@@ -1215,7 +1215,11 @@ export function messagesClientJS(opts) {
 
     // Room messages carry a per-sender label (and bot badge for bot authors).
     if (_activeItem && _activeItem.type === 'room') {
-      var senderName = msg.sender_name || msg.sender_label || (isSent ? '${tJs("messages.you", lang)}' : '${tJs("messages.them", lang)}');
+      // A message the room's host relayed carries the receive-time label
+      // "<author> via <host>" (PT-3): show it whole, so the relay stays visible
+      // even when the author is a known contact.
+      var hostRelayed = !isSent && typeof msg.sender_label === 'string' && msg.sender_label.indexOf(' via ') !== -1;
+      var senderName = (hostRelayed ? msg.sender_label : '') || msg.sender_name || msg.sender_label || (isSent ? '${tJs("messages.you", lang)}' : '${tJs("messages.them", lang)}');
       var senderLine = el('div', { className: 'msg-bubble-sender' });
       if (msg.author_kind === 'bot' || Number(msg.sender_is_bot)) {
         senderLine.appendChild(el('span', { className: 'msg-bot-badge', text: 'bot', css: 'margin-right:4px' }));

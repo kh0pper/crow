@@ -140,6 +140,13 @@ async function loadSyncMod() {
   return _syncMod;
 }
 
+/** Cached lazy import of contact-binding.js (keeps this module import-free at load). */
+let _bindingMod = null;
+async function loadBindingMod() {
+  if (!_bindingMod) _bindingMod = await import("./contact-binding.js");
+  return _bindingMod;
+}
+
 /**
  * 2c hotfix: per-step cap for unwireContact. On grackle (2026-07-15) a contact-
  * delete apply awaited a teardown step (hypercore feed-close / hyperswarm-leave)
@@ -241,6 +248,20 @@ export async function deleteContactLocal(db, managers, row) {
     await deleteContactArtifactComments(db, row.crow_id);
   } catch (e) { console.warn(`[contact-delete] artifact comment cleanup failed for ${row.crow_id}:`, e?.message); }
   await db.execute({ sql: `DELETE FROM contacts WHERE id = ?`, args: [row.id] });
+  // PT-3: a re-added person starts unpinned (Hyperswarm channel-binding pin,
+  // LOCAL scope). Only here: block keeps the pin. A failure is logged, never
+  // fatal (the pin then stays, which is the stricter state).
+  try {
+    const localId = managers?.peerManager?.localInstanceId || managers?.instanceSyncManager?.localInstanceId || null;
+    const { clearCbPin } = await loadBindingMod();
+    await clearCbPin(db, localId, row.crow_id);
+  } catch (e) { console.warn(`[contact-delete] channel-binding pin cleanup failed for ${row.crow_id}:`, e?.message); }
+  // PT-3: ...and gets the "I bind" advert again (the per-contact sent marker goes too).
+  try {
+    const localId = managers?.peerManager?.localInstanceId || managers?.instanceSyncManager?.localInstanceId || null;
+    const { clearCbAdvertMarker } = await loadBindingMod();
+    await clearCbAdvertMarker(db, localId, row.crow_id);
+  } catch (e) { console.warn(`[contact-delete] advert marker cleanup failed for ${row.crow_id}:`, e?.message); }
   const sync = await loadSyncMod();
   await sync.emitContactDelete(db, row.crow_id, row.lamport_ts);
   return { ok: true };

@@ -399,6 +399,17 @@ export function generateInviteCode(identity, opts = {}) {
 }
 
 /**
+ * True when `crowId` is the Crow ID of the Ed25519 key `ed25519Hex`.
+ * Hashes the key BYTES (not the hex text); false on non-hex or a wrong length.
+ * A 52-bit fingerprint check: a consistency check, not a trust boundary.
+ */
+export function crowIdMatchesKey(crowId, ed25519Hex) {
+  if (typeof crowId !== "string" || typeof ed25519Hex !== "string") return false;
+  if (!/^[0-9a-fA-F]{64}$/.test(ed25519Hex)) return false;
+  return computeCrowId(Buffer.from(ed25519Hex, "hex")) === crowId;
+}
+
+/**
  * Parse and validate an invite code.
  * Returns the sender's public keys or throws on invalid/expired.
  */
@@ -420,8 +431,7 @@ export function parseInviteCode(code) {
   // Verify HMAC using the sender's public key
   // (We can't verify HMAC without private key — the HMAC provides tamper protection
   // for the sender's own code. Recipients validate by checking the crowId matches the pubkey.)
-  const expectedCrowId = computeCrowId(Buffer.from(data.ed25519Pub, "hex"));
-  if (expectedCrowId !== data.crowId) {
+  if (!crowIdMatchesKey(data.crowId, data.ed25519Pub)) {
     throw new Error("Invite code public key does not match Crow ID");
   }
 
