@@ -13,6 +13,7 @@ import { shouldInitInstanceSync } from "./instance-sync.js";
 import { createHash, randomBytes } from "node:crypto";
 import { sign, verify, crowIdMatchesKey } from "./identity.js";
 import { contactCbMessage, decideContactProof, RefusalLog } from "./contact-binding.js";
+import { ENROLL_ID_RE } from "../shared/enroll-guard.js";
 
 // 2c follow-up (spec §F2 C2c): hard cap on awaiting the DHT announce
 // confirmation (`discovery.flushed()`) in joinContact. An unresponsive DHT
@@ -563,11 +564,34 @@ export class PeerManager {
    * the connections entry, the callbacks and the held frames.
    */
   async _admit(conn, state, msg, kind) {
+    // A sibling is admitted under ONE instance id, resolved before the guard
+    // (private engineering notes, PT-2a "one id"): the id it challenged with,
+    // else the one in its response. Two different ids, a malformed id, or our
+    // own id never reach the guard. Every later use reads this one.
+    let remoteInstanceId = null;
+    if (kind === "instance") {
+      const c = state.peerInstanceId || null;
+      const r = (typeof msg.instance_id === "string" && msg.instance_id) || null;
+      if (c && r && c !== r) { this._refuseInstance(conn, state, "instance_id_mismatch"); return false; }
+      remoteInstanceId = c ?? r ?? null;
+      if (remoteInstanceId !== null && !ENROLL_ID_RE.test(remoteInstanceId)) {
+        this._refuseInstance(conn, state, "bad_instance_id");
+        return false;
+      }
+      // Self-loopback: the DHT can return ourselves on the instance-sync topic.
+      // Nothing to sync with ourselves; drop before the guard and any side effect.
+      if (remoteInstanceId && remoteInstanceId === this.localInstanceId) {
+        this._kill(conn, state);
+        return false;
+      }
+      state.remoteInstanceId = remoteInstanceId;
+    }
+
     const guard = this.admitGuards?.[kind];
     if (typeof guard === "function") {
       let verdict;
       try {
-        verdict = await guard({ conn, msg, state });
+        verdict = await guard({ conn, msg, state, remoteInstanceId });
       } catch {
         verdict = { ok: false, reason: "error" };
       }
@@ -581,16 +605,6 @@ export class PeerManager {
     if (state.refused || state.closed || conn.destroyed) return false;
 
     const crowId = state.claimedCrowId;
-    const remoteInstanceId = kind === "instance"
-      ? ((typeof msg.instance_id === "string" && msg.instance_id) || state.peerInstanceId || null)
-      : null;
-
-    // Self-loopback: the DHT can return ourselves on the instance-sync topic.
-    // Nothing to sync with ourselves; drop before any side effect.
-    if (kind === "instance" && remoteInstanceId && remoteInstanceId === this.localInstanceId) {
-      this._kill(conn, state);
-      return false;
-    }
 
     if (kind === "contact") {
       if (state.proof === "cb") {
@@ -655,8 +669,8 @@ export class PeerManager {
       // An old sibling piggybacks its feed key on its (now verified)
       // challenge-response. Persist it before dispatching, so the
       // onInstanceConnected handler can open the inbound feed at once.
-      if (state.proof === "sig" && msg.instance_id && msg.feed_key_hex && this.onInstanceKeyReceived) {
-        fire(() => this.onInstanceKeyReceived(msg.instance_id, msg.feed_key_hex));
+      if (state.proof === "sig" && state.remoteInstanceId && msg.feed_key_hex && this.onInstanceKeyReceived) {
+        fire(() => this.onInstanceKeyReceived(state.remoteInstanceId, msg.feed_key_hex));
       }
       if (this.onInstanceConnected) fire(() => this.onInstanceConnected(crowId, conn, state.remoteInstanceId));
     } else if (this.onPeerConnected) {
