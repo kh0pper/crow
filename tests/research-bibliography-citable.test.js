@@ -141,6 +141,19 @@ test("a shared or cloned source with NULL fetch_status is not citable", async ()
   assert.match(g, /Fetch: unknown/);
 });
 
+test("a peer row with verified=1 never reads as verified", async () => {
+  const pid = newProject();
+  const id = insertSource({ project_id: pid, title: "PeerVerified", verified: 1, verification_notes: "peer said" });
+  const client = await clientFor();
+  const l = text(await call(client, "crow_list_sources", { project_id: pid }));
+  assert.ok(l.includes("PeerVerified") && !l.includes("[V]"), l);
+  const q = text(await call(client, "crow_search_sources", { query: "PeerVerified" }));
+  assert.ok(q.includes("PeerVerified") && !q.includes("[VERIFIED]"), q);
+  const g = text(await call(client, "crow_get_source", { id }));
+  assert.match(g, /Verified: not checked here \(peer flag\)/);
+  assert.ok(!/Verified: Yes/.test(g));
+});
+
 test("list_sources shows fetch status and per-source provenance counts", async () => {
   const s = seedAll();
   insertNote(s.fetched, s.pid, "quote", "fetched", 1);
@@ -207,7 +220,7 @@ test("a schema that is not ready degrades with a notice and no 0013 columns", as
     const path = makeOldFkDb(join(dir, "old.db"));
     const f = openFixtureDb(path);
     f.exec("CREATE TABLE research_projects (id INTEGER PRIMARY KEY, name TEXT); CREATE TABLE data_backends (id INTEGER PRIMARY KEY)");
-    f.exec("INSERT INTO research_sources (title, source_type, citation_apa) VALUES ('OldSrc', 'web_article', 'c')");
+    f.exec("INSERT INTO research_sources (title, source_type, citation_apa, verified) VALUES ('OldSrc', 'web_article', 'c', 1)");
     f.close();
     const server = createProjectServer(path, { actor: OWNER });
     assert.equal(server.research.schema.ready, false);
@@ -219,6 +232,8 @@ test("a schema that is not ready degrades with a notice and no 0013 columns", as
     assert.match(l, /unavailable until the database upgrade finishes/);
     const g = text(await call(c, "crow_get_source", { id: 1 }));
     assert.match(g, /unavailable until the database upgrade finishes/);
-    assert.ok(!/error/i.test(text(await call(c, "crow_search_sources", { query: "OldSrc" }))));
+    const q = text(await call(c, "crow_search_sources", { query: "OldSrc" }));
+    assert.ok(!/error/i.test(q));
+    assert.ok(!q.includes("[VERIFIED]") && !l.includes("[V]") && !/Verified: Yes/.test(g), "no verified markers while degraded");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

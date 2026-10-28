@@ -331,7 +331,8 @@ const NOTE_PROVENANCE_ORDER = ["fetched", "snippet", "derived", null];
 const noteProvLabel = (p) => (["fetched", "snippet", "derived"].includes(p) ? p : "unknown");
 const UPGRADE_PENDING = "Fetch status is unavailable until the database upgrade finishes.";
 /** Verified marker: a legacy_flag verification was never checked against a page. */
-const verifiedTag = (r) => (r.verified && r.verification_method !== "legacy_flag" ? "[V] " : "");
+// A peer row (fetch_status NULL) or a schema not ready never reads as verified here.
+const verifiedTag = (r, ready) => (ready && r.fetch_status != null && r.verified && r.verification_method !== "legacy_flag" ? "[V] " : "");
 const oneLine = (s, n) => clip(String(s ?? "").replace(/\s+/g, " "), n);
 
 /** Call the fetch seam with the url alone (never the private-address opt-out); a throwing seam reads as a failed fetch. */
@@ -789,7 +790,7 @@ export function createProjectServer(dbPath, options = {}) {
       const formatted = rows
         .map(
           (r) =>
-            `[#${r.id}] ${verifiedTag(r) ? "[VERIFIED] " : ""}${r.title}\n  Type: ${r.source_type} | Relevance: ${r.relevance_score}/10${ready ? ` | Fetch: ${statusLabel(r.fetch_status)}` : ""}\n  APA: ${r.citation_apa}${r.url ? `\n  URL: ${r.url}` : ""}${r.content_summary ? `\n  --- stored content ---\n  ${r.content_summary.substring(0, 200)}...\n  --- end stored content ---` : ""}`
+            `[#${r.id}] ${verifiedTag(r, ready) ? "[VERIFIED] " : ""}${r.title}\n  Type: ${r.source_type} | Relevance: ${r.relevance_score}/10${ready ? ` | Fetch: ${statusLabel(r.fetch_status)}` : ""}\n  APA: ${r.citation_apa}${r.url ? `\n  URL: ${r.url}` : ""}${r.content_summary ? `\n  --- stored content ---\n  ${r.content_summary.substring(0, 200)}...\n  --- end stored content ---` : ""}`
         )
         .join("\n\n");
 
@@ -828,7 +829,7 @@ export function createProjectServer(dbPath, options = {}) {
       text += `Retrieved: ${source.retrieval_date} via ${source.retrieval_method || "unknown"}\n`;
       if (!ready) {
         text += `Fetch: ${UPGRADE_PENDING}\n`;
-        text += `Verified: ${source.verified ? "Yes" : "No"}${source.verification_notes ? ` - ${source.verification_notes}` : ""}\n`;
+        text += "Verified: not checked (unavailable until the database upgrade finishes)\n";
       } else {
         const st = source.fetch_status;
         if (st === "fetched" || st === "fetched_no_text") {
@@ -845,7 +846,9 @@ export function createProjectServer(dbPath, options = {}) {
           text += "Fetch: unknown (shared or cloned from another instance; not citable here)\n";
         }
         const viaLegacy = source.verification_method === "legacy_flag";
-        text += `Verified: ${source.verified ? (viaLegacy ? "legacy flag, unchecked" : `Yes (${source.verification_method || "method unknown"}${source.verified_by ? `, by ${oneLine(source.verified_by, 60)}` : ""})`) : "No"}\n`;
+        text += st == null
+          ? "Verified: not checked here (peer flag)\n"
+          : `Verified: ${source.verified ? (viaLegacy ? "legacy flag, unchecked" : `Yes (${source.verification_method || "method unknown"}${source.verified_by ? `, by ${oneLine(source.verified_by, 60)}` : ""})`) : "No"}\n`;
         if (source.verification_notes) {
           text += st == null
             ? `Notes from the sharing instance (not a verification claim): ${source.verification_notes}\n`
@@ -1130,7 +1133,7 @@ export function createProjectServer(dbPath, options = {}) {
 
       const formatted = rows
         .map((r) => {
-          let line = `[#${r.id}] ${verifiedTag(r)}${r.title} (${r.source_type})${ready ? ` [${statusLabel(r.fetch_status)}]` : ""}\n  APA: ${r.citation_apa}`;
+          let line = `[#${r.id}] ${verifiedTag(r, ready)}${r.title} (${r.source_type})${ready ? ` [${statusLabel(r.fetch_status)}]` : ""}\n  APA: ${r.citation_apa}`;
           const m = noteCounts.get(Number(r.id));
           if (m) {
             const parts = NOTE_PROVENANCE_ORDER.filter((k) => m.has(k)).map((k) => `${m.get(k)} ${noteProvLabel(k)}`);
