@@ -687,6 +687,21 @@ white-space:pre-wrap;word-break:break-word;color:var(--ink)}
 #perch-hub-root .artcard{flex-direction:column;gap:6px;align-self:stretch;width:100%;min-width:0;max-width:100%;
 background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:2px 0;overflow-wrap:anywhere}
 #perch-hub-root .artcard>*{min-width:0;max-width:100%}
+/* Card offer, system note and card chip (redesign P5). 44px touch targets. */
+#perch-hub-root .perch-offer .art-actions{display:flex;flex-wrap:wrap;gap:8px}
+#perch-hub-root .perch-offer button{min-height:44px;min-width:44px;padding:0 16px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--ink);font:600 14px/1 Inter,"Public Sans",system-ui,sans-serif;cursor:pointer}
+#perch-hub-root .perch-offer .offer-make{background:var(--accent,var(--ink));color:var(--accent-ink,var(--card));border-color:transparent}
+#perch-hub-root .perch-offer button:disabled{opacity:.55;cursor:default}
+#perch-hub-root .perch-offer .offer-msg{font-size:12px;color:var(--err)}
+#perch-hub-root .perch-sysnote{align-self:center;text-align:center;font-size:12px;color:var(--dim);padding:4px 12px;margin:4px 0;max-width:100%;overflow-wrap:anywhere}
+#perch-hub-root .perch-sysnote .sysnote-title{font-weight:600}
+#perch-hub-root .perch-cardchip{display:flex;align-items:stretch;gap:8px;align-self:stretch;margin:4px 0}
+#perch-hub-root .perch-cardchip a{display:inline-flex;align-items:center;min-height:44px;padding:0 12px;border:1px solid var(--line);border-radius:999px;background:var(--card);color:var(--ink);text-decoration:none;font-size:13px}
+#perch-hub-root .perch-cardchip .cardchip-link{flex:1;min-width:0;gap:6px}
+#perch-hub-root .perch-cardchip .cardchip-ref{flex:none;font-weight:600}
+#perch-hub-root .perch-cardchip .cardchip-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#perch-hub-root .perch-cardchip .cardchip-lane{flex:none;color:var(--dim)}
+#perch-hub-root .perch-cardchip .cardchip-lane:before{content:"\\00b7 "}
 #perch-hub-root .artcard .art-head{display:flex;align-items:center;gap:8px}
 #perch-hub-root .artcard .art-eyebrow{font:600 13px/1.2 Inter,"Public Sans",system-ui,sans-serif;color:var(--dim)}
 #perch-hub-root .artcard .art-type{font-size:12px;color:var(--dim)}

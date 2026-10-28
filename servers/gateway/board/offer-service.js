@@ -98,6 +98,8 @@ function toOffer(r) {
     projectId: Number(r.project_id),
     status: String(r.status),
     cardId: r.card_id == null ? null : Number(r.card_id),
+    // The board project's name, so the chat can say where a card went without a second lookup.
+    projectName: r.project_name == null ? null : String(r.project_name),
   };
 }
 
@@ -152,7 +154,9 @@ export async function offerCard(db, { botId, threadId, title }) {
 export async function listOffers(db, threadId) {
   try {
     const { rows } = await db.execute({
-      sql: "SELECT id, title, project_id, status, card_id FROM card_offers WHERE thread_id=? ORDER BY id DESC LIMIT 20",
+      sql: `SELECT o.id, o.title, o.project_id, o.status, o.card_id, p.name AS project_name
+            FROM card_offers o LEFT JOIN project_spaces p ON p.id = o.project_id
+           WHERE o.thread_id=? ORDER BY o.id DESC LIMIT 20`,
       args: [String(threadId)],
     });
     return rows.map(toOffer);

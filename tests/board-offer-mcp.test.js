@@ -143,8 +143,8 @@ test("listOffers: newest first, the public shape", async () => {
   const a = await svc.offerCard(cdb, { ...T, title: "A" });
   const b = await svc.offerCard(cdb, { ...T, title: "B" });
   assert.deepEqual(await svc.listOffers(cdb, "perchlive-l"), [
-    { id: b.offerId, title: "B", projectId: PID, status: "pending", cardId: null },
-    { id: a.offerId, title: "A", projectId: PID, status: "pending", cardId: null },
+    { id: b.offerId, title: "B", projectId: PID, status: "pending", cardId: null, projectName: "B1 board" },
+    { id: a.offerId, title: "A", projectId: PID, status: "pending", cardId: null, projectName: "B1 board" },
   ]);
 });
 

@@ -271,7 +271,7 @@ test("a crash after the create recovers to the same card", async () => {
   const r = await get("/interactive/perchlive-q/offers");
   assert.equal(r.status, 200);
   const o = r.body.offers.find((x) => x.id === id);
-  assert.deepEqual(o, { id, title: "Draft the reply", projectId: PID, status: "accepted", cardId });
+  assert.deepEqual(o, { id, title: "Draft the reply", projectId: PID, status: "accepted", cardId, projectName: "B1 board" });
   assert.equal(offerRow(id).card_id, cardId);
   assert.equal(cardsTagged(id).length, 1);
 });
@@ -467,6 +467,7 @@ test("listOffers reports the project the card really went to", async () => {
   assert.equal(cardsTagged(id)[0].project_id, PID_NEW);
   const offers = (await get("/interactive/perchlive-q/offers")).body.offers;
   assert.equal(offers.find((o) => o.id === id).projectId, PID_NEW);
+  assert.equal(offers.find((o) => o.id === id).projectName, "B1 new board", "the name rides the response, matching the real project");
   assert.equal(offerRow(id).project_id, PID_NEW);
 });
 
