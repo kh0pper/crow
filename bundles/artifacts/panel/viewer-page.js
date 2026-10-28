@@ -102,6 +102,8 @@ const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
 
 /** The shell tab a viewer was opened from (`?from=`): only these two, anything else is null. */
 export const BACK_VALUES = Object.freeze(["make", "chat"]);
+/** The Board tab's four lanes (core make/card-docs.js laneOf); core i18n keys shell.lane* name them. */
+export const LANES = Object.freeze(["needs_you", "working", "up_next", "done"]);
 /** The only card links the header draws: the card drawer (or no-JS card view) on the board. */
 const CARD_HREF_RE = /^\/dashboard\/bot-board[?#][A-Za-z0-9_.~%=&#?-]*$/;
 
@@ -130,27 +132,30 @@ function backHtml(T, back, thread) {
  * when the card has a conversation that isn't already this page's thread. The title is
  * bot/operator text, escaped here. Links target the top window (the hub frames this page).
  */
-function cardHtml(T, card, thread) {
+function cardHtml(T, card, thread, laneLabel = "") {
   if (!card || !/^[1-9]\d*$/.test(String(card.id)) || typeof card.href !== "string" || !CARD_HREF_RE.test(card.href)) return "";
   const n = String(card.id);
   const lane = typeof card.lane === "string" && /^[a-z_]{1,20}$/.test(card.lane) ? ` data-lane="${card.lane}"` : "";
   const title = card.title ? ` <span class="cv-card-t">${esc(card.title)}</span>` : "";
+  // The lane chip: the label is core's own wording, resolved by the route; a lane outside the four or no label draws nothing.
+  const chip = LANES.includes(card.lane) && typeof laneLabel === "string" && laneLabel
+    ? `<span class="cv-lane" data-lane="${card.lane}">${esc(laneLabel)}</span>` : "";
   const chat = typeof card.thread === "string" && THREAD_PARAM_RE.test(card.thread) && card.thread !== thread
     ? `<a class="cv-card-chat" href="/dashboard/perch#${esc(card.thread)}" target="_top">${esc(T.openChat)}</a>` : "";
-  return `<div class="cv-cardrow" id="cv-cardrow" data-card="${n}"${lane}><a class="cv-card" href="${esc(card.href)}" target="_top"><span class="cv-card-n">${esc(T.cardLink.replace("{n}", n))}</span>${title}</a>${chat}</div>`;
+  return `<div class="cv-cardrow" id="cv-cardrow" data-card="${n}"${lane}><a class="cv-card" href="${esc(card.href)}" target="_top"><span class="cv-card-n">${esc(T.cardLink.replace("{n}", n))}</span>${title}</a>${chip}${chat}</div>`;
 }
 
 /**
  * shellHtml: the core player-bar shell (servers/gateway/dashboard/shared/player-shell.js), passed in by the
  * route, which has already passed dashboardAuth. Empty on an older core: the page then has no bar.
  * back: "make"|"chat"|null (viewerParams' `from`): the way back to the shell tab.
- * card: the route's `{ id, title, lane, href, thread }` or null. viewer-client.js moves both
+ * card: the route's `{ id, title, lane, href, thread }` or null. laneLabel: core's label for card.lane (route-resolved), "" for no chip. viewer-client.js moves both
  * into its bar and header; nothing is built from them on the client.
  */
-export function renderViewerPage({ lang = "en", id, v = null, thread = null, back = null, card = null, shellHtml = "" }) {
+export function renderViewerPage({ lang = "en", id, v = null, thread = null, back = null, card = null, laneLabel = "", shellHtml = "" }) {
   const L = lang === "es" ? "es" : "en";
   const T = VIEWER_STRINGS[L];
-  const links = backHtml(T, back, thread) + cardHtml(T, card, thread);
+  const links = backHtml(T, back, thread) + cardHtml(T, card, thread, laneLabel);
   return `<!doctype html>
 <html lang="${L}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

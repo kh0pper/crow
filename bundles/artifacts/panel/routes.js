@@ -33,7 +33,7 @@ const STATIC = {
 
 /**
  * @param {Function} dashboardAuth
- * @param {object} seams  tests: { db, blobs, engine, csrf, runtime, policy, notify, renderDeps, loadBotDef, createBoardCard, importCardDocs }
+ * @param {object} seams  tests: { db, blobs, engine, csrf, runtime, policy, notify, renderDeps, loadBotDef, createBoardCard, importCardDocs, importI18n }
  */
 export default function artifactsRouter(dashboardAuth, seams = {}) {
   const router = Router();
@@ -79,6 +79,21 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     }, (e) => console.warn(`[artifacts] plain backfill failed (${(e && e.code) || "error"}); old documents stay on the markdown fallback`));
   }
   const ensure = () => (ready ??= init().catch((e) => { ready = null; throw e; }));
+
+  /**
+   * The lane chip's label: core's own shell.lane* wording (the Board tab's), or "" (no chip) for
+   * a null/unknown lane, an older core without the module, or a key it doesn't have (t echoes the key).
+   */
+  async function laneLabelFor(card, lang) {
+    const lane = card && card.lane;
+    if (!["needs_you", "working", "up_next", "done"].includes(lane)) return "";
+    try {
+      const i = await (S.importI18n || (() => appImport("servers/gateway/dashboard/shared/i18n.js")))();
+      const key = "shell.lane" + { needs_you: "NeedsYou", working: "Working", up_next: "UpNext", done: "Done" }[lane];
+      const label = typeof i?.t === "function" ? i.t(key, lang) : "";
+      return typeof label === "string" && label && label !== key ? label : "";
+    } catch { return ""; }
+  }
 
   /**
    * The document's card for its header (P6): `{ id, title, lane, href, thread }` or null.
@@ -132,11 +147,12 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
       const lang = m && m[1] === "es" ? "es" : "en";
       const { v, thread, back } = page.viewerParams(req.query);
       const card = await documentCardFor(req.params.id);
+      const laneLabel = await laneLabelFor(card, lang);
       // The player bar (bar on every Crow page): the core shell, emitted only here, behind dashboardAuth.
       // An older core without the module renders the viewer with no bar.
       let shellHtml = "";
       try { shellHtml = (await appImport("servers/gateway/dashboard/shared/player-shell.js")).playerShellHtml(lang); } catch { shellHtml = ""; }
-      res.type("html").send(page.renderViewerPage({ lang, id: req.params.id, v, thread, back, card, shellHtml }));
+      res.type("html").send(page.renderViewerPage({ lang, id: req.params.id, v, thread, back, card, laneLabel, shellHtml }));
     } catch {
       res.status(500).type("text/plain").send("error");
     }

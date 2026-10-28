@@ -134,6 +134,41 @@ test("an older core without card-docs still serves the artifact", async () => {
   } finally { srv2.close(); }
 });
 
+test("the header shows the card's lane chip with core's wording, en and es", async () => {
+  const { cardForDocument, cardSummary } = await import("../servers/gateway/make/card-docs.js");
+  const WORDS = { needs_you: ["Needs you", "Te necesita"], working: ["Working", "En marcha"], up_next: ["Up next", "Lo siguiente"], done: ["Done", "Hecho"] };
+  for (const [lane, [en, es]] of Object.entries(WORDS)) {
+    const srv = await mount({ importCardDocs: async () => ({ cardForDocument, cardSummary: async (...a) => ({ ...(await cardSummary(...a)), lane }) }) });
+    try {
+      const page = await get(srv, `/dashboard/artifacts/view/${s.onCard.id}`);
+      assert.match(page.text, new RegExp(`<span class="cv-lane" data-lane="${lane}">${en}</span>`), lane + " en");
+      const esPage = await new Promise((resolve, reject) => http.get({ host: "127.0.0.1", port: srv.address().port, path: `/dashboard/artifacts/view/${s.onCard.id}`, headers: { cookie: "crow_session=good; crow_lang=es" } }, (res) => { let b = ""; res.on("data", (d) => (b += d)); res.on("end", () => resolve(b)); }).on("error", reject));
+      assert.match(esPage, new RegExp(`<span class="cv-lane" data-lane="${lane}">${es}</span>`), lane + " es");
+    } finally { srv.close(); }
+  }
+});
+
+test("no lane chip: null lane, an unknown lane, or core's i18n unavailable (page still 200)", async () => {
+  const { cardForDocument, cardSummary } = await import("../servers/gateway/make/card-docs.js");
+  const withLane = (lane) => ({ importCardDocs: async () => ({ cardForDocument, cardSummary: async (...a) => ({ ...(await cardSummary(...a)), lane }) }) });
+  for (const [name, seams] of [
+    ["null lane", withLane(null)],
+    ["unknown lane", withLane("bogus")],
+    ["injected lane", withLane('x"><b>')],
+    ["i18n import fails", { ...withLane("working"), importI18n: async () => { throw new Error("Cannot find module"); } }],
+    ["i18n without t", { ...withLane("working"), importI18n: async () => ({}) }],
+    ["key missing (t echoes the key)", { ...withLane("working"), importI18n: async () => ({ t: (k) => k }) }],
+  ]) {
+    const srv = await mount(seams);
+    try {
+      const page = await get(srv, `/dashboard/artifacts/view/${s.onCard.id}`);
+      assert.equal(page.status, 200, name);
+      assert.ok(page.text.includes("Card #9"), name + ": the card link stays");
+      assert.ok(!page.text.includes("cv-lane"), name + ": no chip");
+    } finally { srv.close(); }
+  }
+});
+
 test("the manifest version moved", () => {
   const m = JSON.parse(readFileSync(join(REPO, "bundles/artifacts/manifest.json"), "utf8"));
   assert.equal(m.version, "0.9.1");
