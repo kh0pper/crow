@@ -65,7 +65,12 @@ export async function markInstanceCbPinned(db, localId, ownCrowId) {
   return writePin(db, localId, `${INSTANCE_CB_PIN_PREFIX}${ownCrowId}`);
 }
 
-async function readPin(db, localId, key) {
+/**
+ * Read a LOCAL dashboard_settings_overrides pin (value >= 1). Fails CLOSED
+ * (true) on a missing local id or a read error; only a missing table (an old
+ * DB) means "not pinned". Shared with sync-pair-binding.js.
+ */
+export async function readPin(db, localId, key) {
   if (!localId) return true;
   try {
     const { rows } = await db.execute({
@@ -78,7 +83,11 @@ async function readPin(db, localId, key) {
   }
 }
 
-async function writePin(db, localId, key) {
+/**
+ * Write a LOCAL pin (value '1'). No write without a local id; never throws.
+ * True when newly written. Shared with sync-pair-binding.js.
+ */
+export async function writePin(db, localId, key) {
   if (!localId) return false;
   try {
     const r = await db.execute({
