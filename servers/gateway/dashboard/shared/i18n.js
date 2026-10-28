@@ -3351,6 +3351,10 @@ export const translations = {
   "perch.tabActivity": { en: "Activity", es: "Actividad" },
   // R1.2 PR 2: the new-mode sheet that holds Session, Files and Activity,
   // opened from the bot's name.
+  "perch.sheetTitleBot": { en: "{bot} · Session details", es: "{bot} · Detalles de la sesión" },
+  "perch.backProject": { en: "← Back to the project home", es: "← Volver al inicio del proyecto" },
+  "perch.identToday": { en: "today", es: "hoy" },
+  "perch.identYesterday": { en: "yesterday", es: "ayer" },
   "perch.sheetTitle": { en: "Session details", es: "Detalles de la sesión" },
   "perch.changeDirectory": { en: "Change directory", es: "Cambiar directorio" },
   "perch.cwdChangeNote": {

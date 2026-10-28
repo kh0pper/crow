@@ -374,7 +374,8 @@ export function perchHubJs(lang = "en") {
                   /* /roost carries the operator's name alongside the id
                      (routes/perch.js) — null when there isn't one. */
                   label:(s.label==null||s.label==='')?null:String(s.label),
-                  projectId:s.projectId==null?null:Number(s.projectId)});
+                  projectId:s.projectId==null?null:Number(s.projectId),
+                  updatedAt:(typeof s.updatedAt==='string'&&s.updatedAt)?s.updatedAt:null});
       });
     });
     /* Blocked-on-you first: those are the only rows that need you right now. */
@@ -1853,6 +1854,82 @@ export function perchHubJs(lang = "en") {
     e.textContent=label==null?'':String(label);
     e.hidden=!label;
   }
+
+  /* ---- new mode: the calm head (R1.2 PR 2) -------------------------------
+     The bot's friendly name, a "# project · day" line, Back to the project
+     home and the card line. Pure helpers first (unit-tested by extraction);
+     every string reaches the DOM through textContent. */
+  var IDENT_TODAY='${tJs("perch.identToday", lang)}';
+  var IDENT_YESTERDAY='${tJs("perch.identYesterday", lang)}';
+  var IDENT_LANG='${lang === "es" ? "es" : "en"}';
+  var SHEET_TITLE_BOT='${tJs("perch.sheetTitleBot", lang)}';
+  var BACK_PROJECT='${tJs("perch.backProject", lang)}';
+  var PROJECTS=(function(){
+    var n=document.getElementById('perch-projects'); if(!n) return [];
+    try{ var v=JSON.parse(n.textContent||'[]'); return Array.isArray(v)?v:[]; }catch(e){ return []; }
+  })();
+  /* The session row's project, from the active-projects list the page
+     carries. An unfiled session, or one whose project is not active, has none. */
+  function projectOfRow(row,projects){
+    if(!row||row.projectId==null||!Array.isArray(projects)) return null;
+    var id=Number(row.projectId);
+    for(var i=0;i<projects.length;i++){
+      var p=projects[i];
+      if(p&&Number(p.id)===id) return {slug:p.slug,name:p.name};
+    }
+    return null;
+  }
+  /* "today" / "yesterday" / a weekday (within the last week) / a short date,
+     from the row's last-activity stamp (UTC "YYYY-MM-DD HH:MM:SS"). '' when
+     the row carries none or it does not parse. */
+  function identDay(row,now,lang){
+    var s=row&&row.updatedAt; if(!s) return '';
+    var d=new Date(String(s).replace(' ','T')+'Z');
+    if(isNaN(d.getTime())) return '';
+    var a=new Date(d.getFullYear(),d.getMonth(),d.getDate()).getTime();
+    var b=new Date(now.getFullYear(),now.getMonth(),now.getDate()).getTime();
+    var days=Math.round((b-a)/86400000);
+    if(days<=0) return IDENT_TODAY;
+    if(days===1) return IDENT_YESTERDAY;
+    try{
+      if(days<7) return d.toLocaleDateString(lang==='es'?'es':'en',{weekday:'long'});
+      return d.toLocaleDateString(lang==='es'?'es':'en',{month:'short',day:'numeric'});
+    }catch(e){ return d.toDateString(); }
+  }
+  function identSubtitle(row,projects,now,lang){
+    var p=projectOfRow(row,projects);
+    var day=identDay(row,now,lang);
+    if(!p) return day;
+    return '# '+p.name+(day?' \\u00b7 '+day:'');
+  }
+  /* Where Back goes: the session's project home, or null (the list). */
+  function backTarget(row,projects){
+    var p=projectOfRow(row,projects);
+    return p?'/dashboard/project/'+encodeURIComponent(p.slug):null;
+  }
+  /* Head pieces that depend on the row; no-ops in classic Perch (no sheet). */
+  function showIdent(botName){
+    var sheet=el('perch-session-sheet'); if(!sheet) return;
+    var row=rowIndex[current.sid];
+    var sub=el('perch-ident-sub');
+    if(sub) sub.textContent=identSubtitle(row,PROJECTS,new Date(),IDENT_LANG);
+    var t=el('perch-sheet-title');
+    if(t) t.textContent=SHEET_TITLE_BOT.split('{bot}').join(String(botName||''));
+    var back=el('perch-back');
+    if(back){
+      if(back.getAttribute('data-default')==null) back.setAttribute('data-default',back.textContent);
+      back.textContent=backTarget(row,PROJECTS)?BACK_PROJECT:back.getAttribute('data-default');
+    }
+  }
+  /* The card line under the name: "#12 Card title", a link to the card. Fed
+     by the card chip's own lookup (card-chip.js), so it adds no request. */
+  function setHeadCard(c,href){
+    var a=el('perch-card-line'); if(!a) return;
+    if(!c||!Number.isInteger(c.id)){ a.hidden=true; a.textContent=''; a.removeAttribute('href'); return; }
+    a.textContent='#'+String(c.id)+(c.title?' '+String(c.title):'');
+    if(href) a.setAttribute('href',href);
+    a.hidden=false;
+  }
   function showHeader(botId,botName){
     /* Wave 1: the bot id is remembered for the session's life —
        resync-on-reconnect re-fetches the transcript BY BOT, and the cold
@@ -1869,6 +1946,7 @@ export function perchHubJs(lang = "en") {
     el('perch-session-id').textContent=current.sid||'';
     var known=rowIndex[current.sid];
     showSessionName(known?known.label:null);
+    showIdent(botName||botId);
   }
   /* Unbounded exponential backoff — the 2026-09-12 phone finding. The old cap
      (5 tries, fixed 2s) was written for a desktop browser and a gateway
@@ -3068,6 +3146,12 @@ export function perchHubJs(lang = "en") {
     };
   }
   el('perch-back').onclick=function(){ location.hash=''; };
+  /* New mode with a filed session: Back goes to its project's home instead.
+     Unfiled (and classic, which has no sheet) keeps the hash route above. */
+  if(el('perch-session-sheet')) el('perch-back').onclick=function(){
+    var to=backTarget(rowIndex[current.sid],PROJECTS);
+    if(to) location.href=to; else location.hash='';
+  };
   function abortTurn(){
     if(!current.sid) return;
     perchApi('POST','/interactive/'+encodeURIComponent(current.sid)+'/abort');

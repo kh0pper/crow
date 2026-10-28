@@ -1689,3 +1689,25 @@ test("en and es strings", async () => {
   assert.deepEqual([...strip.matchAll(/<span>([^<]+)<\/span>/g)].map((m) => m[1]), ["Sesión", "Archivos", "Actividad"]);
   assert.match(openTag(es, "perch-sheet-close"), /aria-label="Cerrar"/);
 });
+
+// ---- R1.2 PR 2, Task 2: the head ------------------------------------------
+test("the projects JSON escapes </script>", async () => {
+  const html = await renderPerch("en", { scope: { all: true }, projects: [{ id: 1, slug: "x", name: "</script><b>hi" }] });
+  const m = html.match(/<script type="application\/json" id="perch-projects">([\s\S]*?)<\/script>/);
+  assert.ok(m, "the projects script is there");
+  assert.ok(!m[1].includes("<"), "no raw < inside the JSON");
+  assert.deepEqual(JSON.parse(m[1]), [{ id: 1, slug: "x", name: "</script><b>hi" }]);
+  assert.ok(!(await renderPerch("en", {})).includes('id="perch-projects"'), "classic carries no projects");
+});
+
+test("new-mode head has no sid text", async () => {
+  const html = await renderPerch("en", { scope: { all: true }, projects: [] });
+  const head = html.slice(html.indexOf('class="perch-ident"'), html.indexOf('<div class="meta" id="perch-session-meta"'));
+  assert.match(head, /id="perch-ident-sub"/);
+  assert.match(head, /id="perch-card-line"[^>]*hidden/);
+  const text = head.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  assert.ok(!/perchlive|\bsid\b/i.test(text), "no session id text in the head");
+  assert.match(html, /id="perch-session-meta"[^>]*hidden/);
+  const classic = await renderPerch("en", {});
+  assert.ok(!classic.includes('id="perch-ident-sub"') && !classic.includes('id="perch-card-line"'));
+});

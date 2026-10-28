@@ -5433,3 +5433,57 @@ test("a combined card shown without its questions (unmaskable) still says why an
   assert.equal(byClass(card, "quiet").length, 1, "Cancel is offered");
   assert.equal(hub.els["perch-attn"].hidden, false, "the banner says the bot waits");
 });
+
+// ---- R1.2 PR 2, Task 2: the calm head -------------------------------------
+const HEAD_EXTRA = "var IDENT_TODAY='today',IDENT_YESTERDAY='yesterday';";
+const PROJ = [{ id: 3, slug: "hw-club", name: "Homework Club" }, { id: 4, slug: "a b", name: "Spaced" }];
+
+async function headFns() {
+  const projectOfRow = await extract("projectOfRow");
+  const identDay = await extract("identDay", HEAD_EXTRA);
+  const identSubtitle = new Function("projectOfRow", "identDay", (await (async () => {
+    const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+    const src = perchHubJs("en"); const s = src.indexOf("function identSubtitle");
+    return src.slice(s, braceMatchEnd(src, s) + 1) + "; return identSubtitle;";
+  })()))(projectOfRow, identDay);
+  const backTarget = await extract("backTarget", "var projectOfRow=" + projectOfRow.toString() + ";");
+  return { projectOfRow, identSubtitle, backTarget };
+}
+
+test("projectOfRow finds the project by id; null when unfiled or unknown", async () => {
+  const { projectOfRow } = await headFns();
+  assert.deepEqual(projectOfRow({ projectId: 3 }, PROJ), { slug: "hw-club", name: "Homework Club" });
+  assert.equal(projectOfRow({ projectId: null }, PROJ), null);
+  assert.equal(projectOfRow({ projectId: 99 }, PROJ), null);
+  assert.equal(projectOfRow(undefined, PROJ), null);
+});
+
+test("identSubtitle: today / yesterday / weekday / date / no project", async () => {
+  const { identSubtitle } = await headFns();
+  const now = new Date(2026, 9, 28, 15, 0, 0);          // Wed 28 Oct 2026, local
+  const stamp = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000 * 0 ).toISOString().slice(0, 19).replace("T", " ");
+  const at = (y, m, d) => stamp(new Date(Date.UTC(y, m, d, 12, 0, 0)));   // midday UTC: same local day in any sane zone offset check below
+  const row = (updatedAt) => ({ projectId: 3, updatedAt });
+  // Build local-noon stamps so the local calendar day is unambiguous.
+  const local = (y, m, d) => { const x = new Date(y, m, d, 12, 0, 0); return x.toISOString().slice(0, 19).replace("T", " "); };
+  assert.equal(identSubtitle(row(local(2026, 9, 28)), PROJ, now, "en"), "# Homework Club · today");
+  assert.equal(identSubtitle(row(local(2026, 9, 27)), PROJ, now, "en"), "# Homework Club · yesterday");
+  assert.equal(identSubtitle(row(local(2026, 9, 24)), PROJ, now, "en"), "# Homework Club · Saturday");
+  assert.match(identSubtitle(row(local(2026, 8, 1)), PROJ, now, "en"), /^# Homework Club · Sep 1$/);
+  assert.equal(identSubtitle({ projectId: 3, updatedAt: null }, PROJ, now, "en"), "# Homework Club");
+  assert.equal(identSubtitle({ projectId: null, updatedAt: local(2026, 9, 28) }, PROJ, now, "en"), "today");
+  assert.equal(identSubtitle({ projectId: null, updatedAt: null }, PROJ, now, "en"), "");
+  void at;
+});
+
+test("back with a project goes to its home", async () => {
+  const { backTarget } = await headFns();
+  assert.equal(backTarget({ projectId: 3 }, PROJ), "/dashboard/project/hw-club");
+  assert.equal(backTarget({ projectId: 4 }, PROJ), "/dashboard/project/a%20b");
+});
+
+test("back without a project goes to the list", async () => {
+  const { backTarget } = await headFns();
+  assert.equal(backTarget({ projectId: null }, PROJ), null);
+  assert.equal(backTarget({ projectId: 3 }, []), null);
+});

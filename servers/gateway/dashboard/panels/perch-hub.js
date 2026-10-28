@@ -15,6 +15,7 @@
 import { perchHubContent } from "../perch-hub/html.js";
 import { engineStatus } from "../../bot-engine-status.js";
 import { t } from "../shared/i18n.js";
+import { activeProjects } from "../../../shared/shell-items.js";
 
 export default {
   id: "perch",
@@ -24,17 +25,25 @@ export default {
   navOrder: 15.5,
   category: "ai",
 
-  async handler(req, res, { lang, layout }) {
+  async handler(req, res, { db, lang, layout }) {
     // engineStatus() is a LEAF module of synchronous fs stats
     // (bot-engine-status.js:84) — safe and cheap from a route. /roost cannot
     // report engine state, so without this the list looks normal and the
     // first tap fails with a raw error.
+    const newMode = !!(req.crowMode && req.crowMode.mode === "new");
+    // New mode: the header names a session's project and sends Back to its
+    // home, so the page carries the active projects' {id, slug, name}.
+    let projects = [];
+    if (newMode && db) {
+      try { projects = await activeProjects(db); }
+      catch (err) { console.warn("[perch] project list failed:", err?.message || err); }
+    }
     return layout({
       title: t("perch.title", lang),
       // Shell P2: in the new shell the Chat tab shows the current project's
       // conversations. Classic Perch gets no scope and stays as it was.
       content: perchHubContent(lang, engineStatus(),
-        req.crowMode && req.crowMode.mode === "new" ? { scope: req.crowScope || { all: true } } : {}),
+        newMode ? { scope: req.crowScope || { all: true }, projects } : {}),
     });
   },
 };

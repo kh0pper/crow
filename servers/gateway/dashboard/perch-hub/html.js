@@ -27,7 +27,7 @@ const CHEVRON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" 
 function identButton(lang) {
   // The description sits OUTSIDE the button so it does not join the
   // button's name (the bot name): it says what the button opens.
-  return `<button type="button" id="perch-ident-btn" class="perch-ident-btn" aria-haspopup="dialog" aria-controls="perch-session-sheet" aria-describedby="perch-ident-desc"><span class="title" id="perch-bot-name"></span>${CHEVRON_SVG}</button><span class="vh" id="perch-ident-desc">${escapeHtml(t("perch.sheetTitle", lang))}</span>`;
+  return `<button type="button" id="perch-ident-btn" class="perch-ident-btn" aria-haspopup="dialog" aria-controls="perch-session-sheet" aria-describedby="perch-ident-desc"><span class="perch-ident-text"><span class="title" id="perch-bot-name"></span><span class="perch-ident-sub" id="perch-ident-sub"></span></span>${CHEVRON_SVG}</button><span class="vh" id="perch-ident-desc">${escapeHtml(t("perch.sheetTitle", lang))}</span><a class="perch-card-line" id="perch-card-line" hidden></a>`;
 }
 
 /** New mode: the opening half of the session sheet, which wraps the Session,
@@ -52,6 +52,17 @@ function sheetClose() {
   return `
     </div>
     </dialog>`;
+}
+
+/** New mode: the active projects the header looks a session's project up in,
+ *  as inert JSON. "<" and the two JS line separators are escaped so a project
+ *  name can never close the script element. */
+function projectsJson(projects) {
+  const list = (Array.isArray(projects) ? projects : []).map((p) => ({
+    id: Number(p.id), slug: String(p.slug), name: String(p.name == null ? "" : p.name),
+  }));
+  const json = JSON.stringify(list).replace(/</g, "\\u003c").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+  return `<script type="application/json" id="perch-projects">${json}</script>`;
 }
 
 /** engineStatus() returns installing | absent | unhealthy | ready
@@ -91,7 +102,7 @@ function scopeAttr(scope) {
  *  cosmetic) so it can't leak onto the sidebar or any other panel, and vice
  *  versa. Static shell only — every list row and transcript line is
  *  rendered client-side, the same split birdDrawerMarkup() uses. */
-export function perchHubContent(lang = "en", engine = { state: "ready" }, { scope } = {}) {
+export function perchHubContent(lang = "en", engine = { state: "ready" }, { scope, projects } = {}) {
   const scopeValue = scopeAttr(scope);
   const scopeHtml = scopeValue === null ? "" : ` data-scope="${escapeHtml(scopeValue)}"`;
   // New mode: Session, Files and Activity live in a sheet opened from the
@@ -99,6 +110,7 @@ export function perchHubContent(lang = "en", engine = { state: "ready" }, { scop
   const sheet = scopeValue !== null;
   return `<style>${perchHubCss()}${perchSessionsCollapseCss()}${perchDictationCss()}</style>
 <div id="perch-hub-root"${scopeHtml}>
+${sheet ? projectsJson(projects) : ""}
 ${engineBanner(engine, lang)}
 <!-- Live browser tile: while the operator holds (or is taking) the browser,
      "You have the browser · Hand back" stays reachable after leaving the sheet. -->

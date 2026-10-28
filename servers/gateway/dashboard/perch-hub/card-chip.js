@@ -87,7 +87,7 @@ export function perchCardChipJs(lang = "en") {
     if(u&&typeof u.text==='string'&&u.text.trim()) ccUnsent[sid]={text:u.text,cardId:u.cardId,resultId:u.resultId};
   }
 
-  function resetCardChip(){ ccOffers={}; ccChip=null; ccReview=null; ccGen++; ccPrevState=''; }
+  function resetCardChip(){ setHeadCard(null); ccOffers={}; ccChip=null; ccReview=null; ccGen++; ccPrevState=''; }
 
   function ccFill(s,vals){
     var out=String(s);
@@ -188,7 +188,7 @@ export function perchCardChipJs(lang = "en") {
   /* The chip: one per chat, the card this chat is linked to. The lane is the server's. */
   function drawCardChip(c){
     var tr=el('perch-transcript'); if(!tr) return;
-    if(!c||!Number.isInteger(c.id)){ ccDrop(ccChip); ccChip=null; return; }
+    if(!c||!Number.isInteger(c.id)){ ccDrop(ccChip); ccChip=null; setHeadCard(null); return; }
     var lane=CC_LANES[c.lane]||'';
     var wrap=document.createElement('div'); wrap.className='perch-cardchip';
     var a=document.createElement('a'); a.className='cardchip-link';
@@ -201,6 +201,7 @@ export function perchCardChipJs(lang = "en") {
        form below is only for an older server that sends no href. */
     d.href=typeof c.href==='string'&&c.href?c.href:c.botId?'/dashboard/bot-board?bot='+encodeURIComponent(String(c.botId))+'#open='+encodeURIComponent(String(c.id)):'/dashboard/bot-board?card='+encodeURIComponent(String(c.id));
     d.textContent=CC_DETAILS;
+    setHeadCard(c,d.getAttribute('href'));
     wrap.appendChild(a); wrap.appendChild(d);
     ccPlace(tr,ccChip,wrap);
     ccChip=wrap;

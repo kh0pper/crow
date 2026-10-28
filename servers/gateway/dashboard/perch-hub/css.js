@@ -880,6 +880,11 @@ border-top:1px solid var(--line);flex-shrink:0}
 #perch-hub-root .perch-ident-btn{display:flex;align-items:center;gap:6px;max-width:100%;min-height:44px;padding:4px 8px;margin-left:-8px;border-color:transparent;background:transparent;color:var(--ink);text-align:left}
 #perch-hub-root .perch-ident-btn:hover{background:var(--teal-soft)}
 #perch-hub-root .perch-ident-btn .title{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#perch-hub-root .perch-ident-text{display:flex;flex-direction:column;min-width:0;line-height:1.25}
+#perch-hub-root .perch-ident-sub{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px;color:var(--dim)}
+#perch-hub-root .perch-ident-sub:empty{display:none}
+#perch-hub-root .perch-card-line{display:block;max-width:100%;min-height:44px;line-height:44px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px;color:var(--dim);text-decoration:none}
+#perch-hub-root .perch-card-line[hidden]{display:none}
 #perch-hub-root .perch-ident-btn svg{width:16px;height:16px;flex-shrink:0;color:var(--dim)}
 #perch-session-sheet{border:none;padding:0;margin:auto auto 0;width:100%;max-width:480px;max-height:85dvh;
 border-radius:var(--crow-radius-card,16px) var(--crow-radius-card,16px) 0 0;background:var(--card);color:var(--ink);box-shadow:0 -8px 32px rgba(0,0,0,.18)}
