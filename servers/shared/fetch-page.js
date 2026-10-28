@@ -182,6 +182,16 @@ export const PREVIEW_CHARS = 1200;
 export const REFETCH_AFTER_DAYS = 30;
 export const FULL_TEXT_MARKER = "\n\n[crow: full page text]\n\n";
 
+/**
+ * Whether a stored fetched_text may be a cut copy of its page. fetchPage cuts at FETCHED_TEXT_MAX,
+ * except when the cap lands inside the full-text marker: it then stores the readable text alone,
+ * up to FULL_TEXT_MARKER.length chars short of the cap. Conservative: a page that happens to end
+ * in that window reads as maybe-cut, so a quote not found there is "not checked", never a misquote.
+ */
+export function storedTextMaybeTruncated(text) {
+  return String(text || "").length > FETCHED_TEXT_MAX - FULL_TEXT_MARKER.length;
+}
+
 /** Split stored fetched text back into the readable part and the full-body part. */
 export function splitFetchedText(text) {
   const s = String(text || "");
@@ -251,6 +261,11 @@ export async function fetchPage(url, opts = {}) {
   let text;
   if (body === readable) {
     text = readable;
+  } else if (readable.length + FULL_TEXT_MARKER.length >= FETCHED_TEXT_MAX) {
+    // The cap lands inside the readable text or the marker: keep only the readable text (a
+    // partial marker would store a half-split copy), cut below if needed.
+    text = readable;
+    truncated = true;
   } else {
     text = readable + FULL_TEXT_MARKER + body;
   }

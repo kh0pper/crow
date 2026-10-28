@@ -28,7 +28,7 @@ import { resolveDatasetPath } from "../shared/sqlite-datasets.js";
 import { SOURCE_TYPES } from "./source-types.js";
 import { UNKNOWN, resolveCallActor, auditActor, actorLabel } from "./actor.js";
 import { ensureProvenanceSchema } from "./ensure-schema.js";
-import { fetchPage as defaultFetchPage, splitFetchedText, PREVIEW_CHARS, FETCHED_TEXT_MAX, REFETCH_AFTER_DAYS } from "../shared/fetch-page.js";
+import { fetchPage as defaultFetchPage, splitFetchedText, storedTextMaybeTruncated, PREVIEW_CHARS, FETCHED_TEXT_MAX, REFETCH_AFTER_DAYS } from "../shared/fetch-page.js";
 import { matchQuote } from "./quote-match.js";
 import { PROVENANCE_COLUMNS } from "./provenance-schema.js";
 
@@ -248,7 +248,7 @@ export async function recheckQuotes(db, sourceId, text) {
     args: [sourceId],
   });
   const t = String(text || "");
-  const page = { ...splitFetchedText(t), truncated: t.length >= FETCHED_TEXT_MAX };
+  const page = { ...splitFetchedText(t), truncated: storedTextMaybeTruncated(t) };
   return rows.map((n) => ({ note_id: Number(n.id), found: matchQuote(n.content, page).found }));
 }
 
@@ -1206,7 +1206,7 @@ export function createProjectServer(dbPath, options = {}) {
         }
         const ft = row.fetched_text == null ? "" : String(row.fetched_text);
         if (ft === "") return { found: null, line: `\nQuote not checked: Crow has no page text for source #${source_id}.` };
-        const m = matchQuote(content, { ...splitFetchedText(ft), truncated: ft.length >= FETCHED_TEXT_MAX });
+        const m = matchQuote(content, { ...splitFetchedText(ft), truncated: storedTextMaybeTruncated(ft) });
         if (m.found === 1) return { found: 1, line: "\nQuote checked: found on the page Crow fetched." };
         if (m.found === 0) return { found: 0, line: `\nWARNING: this quote is NOT on the page Crow fetched (source #${source_id}). Fix the wording or do not present it as a quote.` };
         return { found: null, line: `\nQuote not checked: ${m.reason || "the page text was truncated"}.` };

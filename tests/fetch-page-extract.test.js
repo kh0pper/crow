@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
-import { fetchPage, splitFetchedText, FULL_TEXT_MARKER, FETCHED_TEXT_MAX } from "../servers/shared/fetch-page.js";
+import { fetchPage, splitFetchedText, storedTextMaybeTruncated, FULL_TEXT_MARKER, FETCHED_TEXT_MAX } from "../servers/shared/fetch-page.js";
 import { extractReadable } from "../servers/shared/fetch-page-worker.js";
 
 const FIX = new URL("./fixtures/research-pages/", import.meta.url);
@@ -26,6 +26,7 @@ before(async () => {
     if (p === "/plain") { res.writeHead(200, { "Content-Type": "text/plain" }); return res.end("just plain text"); }
     if (p === "/pdf") { res.writeHead(200, { "Content-Type": "application/pdf" }); return res.end("%PDF-1.4 x"); }
     if (p === "/huge") { res.writeHead(200, { "Content-Type": "text/plain" }); return res.end("a".repeat(300000)); }
+    if (p.startsWith("/sized/")) { res.writeHead(200, { "Content-Type": "text/html" }); return res.end(`<p>${p.slice(7)}</p>`); }
     if (p === "/1252") { res.writeHead(200, { "Content-Type": "text/html; charset=windows-1252" }); return res.end(fs.readFileSync(new URL("article-1252.html", FIX))); }
     res.writeHead(404, { "Content-Type": "text/plain" }); res.end("nope");
   });
@@ -77,6 +78,48 @@ test("text is capped at FETCHED_TEXT_MAX and flagged truncated", async () => {
   const r = await fetchPage(u("/huge"), OPTS());
   assert.equal(r.text.length, FETCHED_TEXT_MAX); assert.equal(r.truncated, true);
 });
+const SIZED = new URL("sized-worker.mjs", FIX);
+const sized = (r, b) => fetchPage(u(`/sized/R=${r};B=${b}`), { ...OPTS(), workerUrl: SIZED });
+
+test("HTML: a cap inside the full-text marker drops the marker, keeps the readable text whole", async () => {
+  const R = FETCHED_TEXT_MAX - 5; // the marker would start 5 chars before the cap
+  const r = await sized(R, 1000);
+  assert.equal(r.fetch_status, "fetched");
+  assert.equal(r.truncated, true);
+  assert.equal(r.text, "r".repeat(R), "no partial marker is stored");
+  assert.ok(!r.text.includes("[crow"));
+  assert.equal(r.readable_text, r.text);
+  assert.equal(splitFetchedText(r.text).readable, r.readable_text);
+  assert.equal(r.sha256, sha(r.text));
+});
+
+test("a stored copy cut inside the marker still reads back as maybe-truncated", async () => {
+  const r = await sized(FETCHED_TEXT_MAX - 5, 1000);
+  assert.equal(storedTextMaybeTruncated(r.text), true);
+  assert.equal(storedTextMaybeTruncated((await sized(1000, FETCHED_TEXT_MAX)).text), true);
+  assert.equal(storedTextMaybeTruncated("short page"), false);
+  assert.equal(storedTextMaybeTruncated(null), false);
+});
+
+test("HTML: readable + marker + body cut together at the cap", async () => {
+  const r = await sized(1000, FETCHED_TEXT_MAX);
+  assert.equal(r.truncated, true);
+  assert.equal(r.text.length, FETCHED_TEXT_MAX);
+  assert.ok(r.text.startsWith("r".repeat(1000) + FULL_TEXT_MARKER));
+  assert.equal(r.readable_text, "r".repeat(1000));
+  const parts = splitFetchedText(r.text);
+  assert.equal(parts.readable, r.readable_text);
+  assert.equal(parts.body.length, FETCHED_TEXT_MAX - 1000 - FULL_TEXT_MARKER.length);
+});
+
+test("HTML: readable text longer than the cap is cut and carries no marker", async () => {
+  const r = await sized(FETCHED_TEXT_MAX + 50, 10);
+  assert.equal(r.truncated, true);
+  assert.equal(r.text, "r".repeat(FETCHED_TEXT_MAX));
+  assert.equal(r.readable_text, r.text, "readable_text is the cut readable text");
+  assert.ok(!r.text.includes(FULL_TEXT_MARKER));
+});
+
 test("extractReadable is importable without starting a worker", () => {
   const out = extractReadable(ARTICLE, "http://page.test/");
   assert.ok(out.readable.includes("First paragraph")); assert.ok(out.body.includes("Copyright footer"));
