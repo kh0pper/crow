@@ -151,6 +151,16 @@ test("trailing separators and spaces fold in the skeleton: 'raven.' and 'raven' 
   assert.equal(peerDisplayName({ id: "x3", name: "home." }, { ownName: "home" }), `home. [${sfx("x3")}]`);
 });
 
+test("ASCII confusables collide: 'Iark' and '1ark' with 'lark', 'h0me' with the own name 'home'; all are suffixed", () => {
+  const l = peerLabels([{ id: "k1", name: "lark" }, { id: "k2", name: "Iark" }, { id: "k3", name: "1ark" }]);
+  assert.equal(l.get("k1"), `lark [${sfx("k1")}]`);
+  assert.equal(l.get("k2"), `Iark [${sfx("k2")}]`, "the displayed name stays as cleaned");
+  assert.equal(l.get("k3"), `1ark [${sfx("k3")}]`);
+  assert.equal(peerDisplayName({ id: "h1", name: "h0me" }, { ownName: "home" }), `h0me [${sfx("h1")}]`);
+  for (const [x, y] of [["rnoon", "moon"], ["vvren", "wren"], ["clove", "dove"], ["5ky", "sky"]]) assert.equal(labelSkeleton(x), labelSkeleton(y), x);
+  assert.equal(peerLabels([{ id: "u1", name: "lark" }, { id: "u2", name: "wren" }]).get("u1"), "lark", "unrelated names stay bare");
+});
+
 test("resolvePeerLabel reads every other row and this instance's own name; a DB error fails toward the suffix", async () => {
   const db = (rows) => ({ execute: async ({ args }) => ({ rows: rows.filter((r) => r.id !== args[0]) }) });
   assert.equal(await resolvePeerLabel(db([A, { id: "self", name: "home" }]), A, "self"), "wren");

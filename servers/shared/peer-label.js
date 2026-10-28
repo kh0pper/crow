@@ -41,10 +41,13 @@ export function idSuffix(id, full = false) {
   return full ? h : h.slice(0, 8);
 }
 
-/** The comparison key for labels: lowercase, with trailing separators and spaces folded away
- *  ("Raven." and "raven" are the same label). Names are ASCII-only, so no confusable fold is needed. */
+/** The comparison key for labels (collision checks only; the displayed name stays as cleaned): lowercase,
+ *  trailing separators and spaces folded away ("Raven." = "raven"), then a small ASCII confusable fold:
+ *  0→o; 1, i and l → l; 5→s; rn→m; vv→w; cl→d ("Iark" = "1ark" = "lark", "h0me" = "home"). */
 export function labelSkeleton(s) {
-  return String(s).toLowerCase().replace(/[\s._-]+$/, "");
+  return String(s).toLowerCase().replace(/[\s._-]+$/, "")
+    .replace(/0/g, "o").replace(/[1il]/g, "l").replace(/5/g, "s")
+    .replace(/rn/g, "m").replace(/vv/g, "w").replace(/cl/g, "d");
 }
 
 // The suffix is in square brackets, which cleanPeerName can never produce, so no name can imitate one.
