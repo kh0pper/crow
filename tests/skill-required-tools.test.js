@@ -50,6 +50,11 @@ writeFileSync(join(repoSkillsDir, "fxr.md"), ["---", "name: fxr", "tools:",
   "  - crow-sharing/crow_send_message", "  - crow-projects/crow_add_source", "  - crow-projects/crow_search_notes",
   "---", "", "# Fixture R", ""].join("\n"));
 
+// fxw: crow-projects write tools that read like lookups, plus read tools
+writeFileSync(join(repoSkillsDir, "fxw.md"), ["---", "name: fxw", "tools:",
+  "  - crow-projects/crow_add_source", "  - crow-projects/crow_fetch_source", "  - crow-projects/crow_verify_source",
+  "  - crow-projects/crow_add_note", "  - crow-projects/crow_search_notes", "  - crow-projects/crow_web_search",
+  "---", "", "# Fixture W", ""].join("\n"));
 const DB_FILE = join(dir, "crow.db");
 const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
@@ -377,4 +382,46 @@ test("a regenerated MCP config carries the union, like a spawn", async () => {
     assert.ok(r.servers.includes("crow-projects"), JSON.stringify(r.servers));
   } finally { try { db.close(); } catch {} }
   assert.equal(storedDef("regen"), raw);
+});
+
+test("one classifier: crow_fetch_source, verify, add_* are write; crow_web_search is read", async () => {
+  const { classifyTool, classifyToolDetail } = await import("../servers/shared/tool-classify.js");
+  const ta = await import("../servers/gateway/dashboard/panels/bot-builder/tool-access.js");
+  assert.equal(ta.classifyTool, classifyTool, "Bot Builder uses the shared classifier");
+  for (const n of ["crow_fetch_source", "crow_verify_source", "crow_add_note", "crow_add_source"]) assert.equal(classifyTool({ name: n }), "write", n);
+  assert.equal(classifyTool({ name: "crow_web_search" }), "read");
+  assert.equal(classifyToolDetail({ name: "crow_frobnicate" }), "unknown");
+  assert.equal(classifyTool({ name: "crow_frobnicate" }), "write");
+  // Bot Builder's Read-only no longer grants crow_fetch_source
+  const cat = ta.catalogFromProbe([{ name: "crow_fetch_source" }, { name: "crow_get_source" }]);
+  assert.deepEqual(ta.expandSourceMode("crow-projects", "read", cat), ["crow-projects/crow_get_source"]);
+});
+
+const PROJECT_TOOLS = ["crow_list_projects", "crow_project_get", "crow_project_stats", "crow_project_capabilities",
+  "crow_list_sources", "crow_search_sources", "crow_get_source", "crow_search_notes", "crow_generate_bibliography",
+  "crow_backend_schema", "crow_audit_log", "crow_workspace_dir", "crow_web_search", "crow_fetch_source",
+  "crow_add_source", "crow_add_note", "crow_verify_source", "crow_create_project"];
+
+test("a Read-only selection as Bot Builder builds it, plus the skill: no write tools are added", async () => {
+  const ta = await import("../servers/gateway/dashboard/panels/bot-builder/tool-access.js");
+  const cat = ta.catalogFromProbe(PROJECT_TOOLS.map((name) => ({ name })));
+  const sel = ta.expandSourceMode("crow-projects", "read", cat);
+  assert.equal(ta.sourceMode("crow-projects", sel, cat), "read");
+  assert.ok(!sel.includes("crow-projects/crow_fetch_source"));
+  assert.equal(ST.serverInReadMode(sel, "crow-projects"), true);
+  const r = ST.withSkillRequiredTools(sel, ["fxw"], opts);
+  const { classifyTool } = await import("../servers/shared/tool-classify.js");
+  assert.ok(r.added.every((e) => classifyTool({ name: e.split("/")[1] }) === "read"), JSON.stringify(r.added));
+  assert.deepEqual(r.added, [], "fxw's read tools are already in the Read-only set");
+  // a partial read selection also counts: only read tools come in
+  assert.deepEqual(ST.withSkillRequiredTools([LIST], ["fxw"], opts).added, [SEARCH, "crow-projects/crow_web_search"]);
+});
+
+test("an unrecognised tool in the selection never turns into write grants", () => {
+  const sel = [LIST, "crow-projects/crow_frobnicate"];
+  assert.equal(ST.serverInReadMode(sel, "crow-projects"), true, "an unknown name does not take the selection out of read mode");
+  assert.deepEqual(ST.withSkillRequiredTools(sel, ["fxw"], opts).added, [SEARCH, "crow-projects/crow_web_search"]);
+  // a recognised write tool is the owner's own wider pick: the union grants as for any custom selection
+  assert.equal(ST.serverInReadMode([LIST, CREATE], "crow-projects"), false);
+  assert.ok(ST.withSkillRequiredTools([LIST, CREATE], ["fxw"], opts).added.includes(ADD));
 });

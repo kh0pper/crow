@@ -16,7 +16,7 @@
  *      servers would widen every bot that selects one.
  *   3. A skill switched off on this instance grants nothing.
  *   4. Only servers in GRANTABLE_SERVERS can be granted, and a server the def
- *      selects in Read-only mode gets only its READ_TOOLS.
+ *      selects Read-only gets only tools Bot Builder's classifier calls read.
  *
  * The owner's unticks win: `def.tools.skill_tools_declined` lists the
  * `server/tool` entries a selected skill requires that the owner left off in
@@ -34,6 +34,7 @@ import { normalizeSkillName } from "./skill_proposals.mjs";
 import { offSkills } from "../../servers/shared/skill-state.js";
 import { resolveCrowHome } from "../../servers/shared/crow-home.js";
 import { isVoiceBotDef } from "../../servers/shared/voice-bot.js";
+import { classifyTool, classifyToolDetail } from "../../servers/shared/tool-classify.js";
 
 /** An exact `server/tool` entry (the only spelling that grants). */
 export const SKILL_TOOL_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9_]+$/;
@@ -46,27 +47,23 @@ export const SKILL_TOOL_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9_]+$/;
  */
 export const GRANTABLE_SERVERS = Object.freeze(["crow-projects"]);
 
-/**
- * crow-projects tools that only read. A def whose crow-projects selection is
- * all read tools (Bot Builder's Read-only mode is derived from the stored
- * selection, tool-access.js sourceMode) gets only these from the union.
- */
-export const READ_TOOLS = Object.freeze({
-  "crow-projects": Object.freeze([
-    "crow_list_projects", "crow_project_get", "crow_project_stats", "crow_project_capabilities",
-    "crow_list_sources", "crow_search_sources", "crow_get_source", "crow_search_notes",
-    "crow_generate_bibliography", "crow_list_members", "crow_list_backends", "crow_backend_schema",
-    "crow_audit_log", "crow_workspace_dir", "crow_web_search",
-  ]),
-});
+/** The one read/write rule, shared with Bot Builder's Read-only mode (servers/shared/tool-classify.js). */
+export const isReadTool = (tool) => classifyTool({ name: tool }) === "read";
 
-/** Is `server` selected in read-only mode in this crow_mcp list (every entry a read tool)? */
+/**
+ * Is `server` selected Read-only in this crow_mcp list, for the union? True
+ * when the selection is NON-EMPTY, is not a whole-server grant, and holds no
+ * tool the classifier calls write. Fails closed: a tool name the rule does
+ * not recognise does not take the selection OUT of read mode (it can never
+ * turn a read-only pick into write grants), and in read mode the union adds
+ * only tools the classifier calls read (an unrecognised one counts as write
+ * there, so it is never added).
+ */
 export function serverInReadMode(list, server) {
-  const reads = READ_TOOLS[server];
-  if (!reads || !Array.isArray(list) || list.includes(server)) return false;
+  if (!Array.isArray(list) || list.includes(server)) return false;
   const mine = list.filter((e) => typeof e === "string" && (e.startsWith(server + "/") || e.startsWith(server + "__")))
     .map((e) => e.slice(server.length + (e.startsWith(server + "__") ? 2 : 1)));
-  return mine.length > 0 && mine.every((tool) => reads.includes(tool));
+  return mine.length > 0 && mine.every((tool) => classifyToolDetail({ name: tool }) !== "write");
 }
 
 const inside = (dir, p) => {
@@ -137,7 +134,7 @@ export function withSkillRequiredTools(crowMcp, skills, { crowHome, declined = [
     for (const entry of skillRequiredTools(s, { crowHome, repoSkillsDir })) {
       if (skip.has(entry) || grantsTool(list, entry)) continue;
       const [server, tool] = entry.split("/");
-      if (readOnly(server) && !READ_TOOLS[server].includes(tool)) continue;
+      if (readOnly(server) && !isReadTool(tool)) continue;
       list.push(entry);
       added.push(entry);
     }
@@ -202,5 +199,5 @@ export function skillDeclaredRepoTools(name, opts = {}) {
 export function unionMayGrant(list, entry) {
   const [server, tool] = entry.split("/");
   if (!GRANTABLE_SERVERS.includes(server)) return false;
-  return !(serverInReadMode(list, server) && !READ_TOOLS[server].includes(tool));
+  return !(serverInReadMode(list, server) && !isReadTool(tool));
 }
