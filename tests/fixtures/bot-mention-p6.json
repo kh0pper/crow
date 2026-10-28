@@ -1,0 +1,7 @@
+{
+  "captured_from": "bundles/artifacts/server/mentions.js at fb02c3dc9 (identical on main 5c2c6b570)",
+  "re": "(?:^|\\s)@([A-Za-z0-9][A-Za-z0-9_-]{0,63})\\b",
+  "parseMention": "function parseMention(text) {\n  if (typeof text !== \"string\") return null;\n  const m = MENTION_RE.exec(text);\n  return m ? m[1] : null;\n}",
+  "resolveMentionedBot": "async function resolveMentionedBot(db, token) {\n  if (typeof token !== \"string\" || !token) return null;\n  const voice = await voiceBot();\n  let rows;\n  try { rows = (await db.execute({ sql: \"SELECT bot_id, display_name FROM pi_bot_defs WHERE enabled=1 AND bot_id<>? ORDER BY bot_id\", args: [voice] })).rows; }\n  catch { return null; }\n  const hit = rows.find((r) => String(r.bot_id) === token) || rows.find((r) => squash(r.display_name) === squash(token));\n  return hit ? { botId: String(hit.bot_id), displayName: String(hit.display_name) } : null;\n}",
+  "mentionBotFor": "async function mentionBotFor(db, { actor, text }) {\n  if (!actor || actor.kind !== \"session\") return null;\n  const token = parseMention(text);\n  if (!token) return null;\n  return { token, bot: await resolveMentionedBot(db, token) };\n}"
+}

@@ -22,4 +22,23 @@ CREATE INDEX IF NOT EXISTS ix_wpc_key ON workspace_pending_changes(doc_key);`);
     try { await db.execute("ALTER TABLE workspace_pending_changes ADD COLUMN actor_json TEXT"); }
     catch (e) { if (!/duplicate column name/i.test(String(e?.message))) throw e; }
   }
+  // Comment loop (Phase 1, shadow mode): watch row, editor sessions, per-file scan state, and the event log.
+  // Times are epoch ms except mtime (epoch s, as dav.js returns it). Never stores full comment text.
+  await db.executeMultiple(`
+CREATE TABLE IF NOT EXISTS workspace_comment_watch (
+  id INTEGER PRIMARY KEY CHECK(id=1), mode TEXT NOT NULL DEFAULT 'off', watch_since INTEGER, lease_owner TEXT,
+  lease_until INTEGER, blocked_reason TEXT, provider_ok_json TEXT
+);
+CREATE TABLE IF NOT EXISTS workspace_editor_sessions (
+  doc_key TEXT PRIMARY KEY, file_id INTEGER NOT NULL, uids_json TEXT NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_wes_file ON workspace_editor_sessions(file_id);
+CREATE TABLE IF NOT EXISTS workspace_comment_state (
+  file_id INTEGER PRIMARY KEY, etag TEXT, mtime INTEGER, threads_json TEXT NOT NULL DEFAULT '[]', own_put_etag TEXT,
+  first_seen_at INTEGER NOT NULL, scanned_at INTEGER, skip_reason TEXT
+);
+CREATE TABLE IF NOT EXISTS workspace_comment_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, file_id INTEGER, kind TEXT NOT NULL, detail_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_wce_kind_at ON workspace_comment_events(kind, at);`);
 }

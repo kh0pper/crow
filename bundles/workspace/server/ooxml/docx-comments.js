@@ -64,8 +64,9 @@ function quotedTexts(d) {
   return out;
 }
 
-export function listComments(d, includeResolved = false) {
-  const cd = commentsPart(d, false); if (!cd) return [];
+/** Every w:comment as a row, plus the root (thread head) of each. Shared by listComments and readCommentThreads. */
+function commentRows(d) {
+  const cd = commentsPart(d, false); if (!cd) return { rows: [], roots: [], rootOf: null };
   const exBy = new Map(exRows(extPart(d, false)).map((e) => [attr(e, W15, "paraId"), e]));
   const quotes = quotedTexts(d);
   const rows = kids(cd.doc.documentElement, W, "comment").map((c) => {
@@ -76,9 +77,37 @@ export function listComments(d, includeResolved = false) {
   // missing from the file is shown as its own thread rather than lost
   const byPid = new Map(rows.filter((r) => r.paraId).map((r) => [r.paraId, r]));
   const rootOf = (r) => { const seen = new Set(); let x = r; while (x.parent && byPid.has(x.parent) && !seen.has(x)) { seen.add(x); x = byPid.get(x.parent); } return x; };
-  const roots = rows.filter((r) => rootOf(r) === r);
+  return { rows, roots: rows.filter((r) => rootOf(r) === r), rootOf };
+}
+
+export function listComments(d, includeResolved = false) {
+  const { rows, roots, rootOf } = commentRows(d);
   return roots.map((r) => ({ id: r.id, author: r.author, date: r.date, content: r.content, quoted_text: r.quoted_text, resolved: r.done, replies: rows.filter((x) => x !== r && rootOf(x) === r).map(({ id, author, date, content }) => ({ id, author, date, content })) }))
     .filter((c) => includeResolved || !c.resolved);
+}
+
+/** paraId → durableId from word/commentsIds.xml (empty when the file has none). */
+function durableIds(d) {
+  const ids = idsPart(d);
+  return new Map(ids ? kids(ids.doc.documentElement, W16CID, "commentId").map((e) => [attr(e, W16CID, "paraId"), attr(e, W16CID, "durableId")]) : []);
+}
+/** author → w15:userId from word/people.xml (empty when the file has none). */
+function peopleMap(d) {
+  const pp = relPart(d, REL.people, false); const out = new Map();
+  if (!pp) return out;
+  for (const p of kids(pp.doc.documentElement, W15, "person")) {
+    const a = attr(p, W15, "author"); const pres = kids(p, W15, "presenceInfo")[0];
+    const u = pres ? attr(pres, W15, "userId") : null;
+    if (a && u && !out.has(a)) out.set(a, u);
+  }
+  return out;
+}
+
+/** Threads with the root's durableId (via the root's LAST paraId), resolved ones included, plus the people map. */
+export function readCommentThreads(d) {
+  const { rows, roots, rootOf } = commentRows(d); const dur = durableIds(d);
+  const threads = roots.map((r) => ({ durableId: (r.paraId && dur.get(r.paraId)) || null, author: r.author, date: r.date, text: r.content, quoted_text: r.quoted_text, resolved: r.done, replies: rows.filter((x) => x !== r && rootOf(x) === r).map(({ author, date, content }) => ({ author, date, text: content })) }));
+  return { threads, people: peopleMap(d) };
 }
 
 /** 8 hex digits below 0x80000000, as Word requires for paraId/textId/durableId. */

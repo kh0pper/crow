@@ -30,6 +30,8 @@ case "$*" in
   *"user:add "*) touch "$S/user-$last" ;;
   *"occ user:auth-tokens:list "*) if [ -f "$S/tokens" ]; then echo '[{"id":7,"name":"crow-workspace-tools"},{"id":8,"name":"phone"}]'; else echo '[]'; fi ;;
   *"user:auth-tokens:add "*) n=$(( $(cat "$S/tokens" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$S/tokens"; printf 'app password:\n%s%s\n' "$(printf 'A%.0s' $(seq 1 71))" "$n" ;;
+  *"occ user:list "*) if [ -f "$S/userlist" ]; then cat "$S/userlist"; elif [ -f "$S/userlist-fail" ]; then exit 1; elif [ -f "$S/userlist-json-exit1" ]; then echo '{"admin":"Casey","alex":"Alex"}'; exit 1; else echo '{"admin":"admin","crow-bot":"Crow bot"}'; fi ;;
+  *"occ config:system:get instanceid"*) if [ -f "$S/instanceid" ]; then cat "$S/instanceid"; else echo ocabc123xyz; fi ;;
   *"occ background:cron"*) [ -f "$S/fail-cron" ] && exit 3 ;;
   *"onlyoffice:documentserver --check"*) echo "Document server is successfully connected" ;;
   *"user:resetpassword --password-from-env admin"*) [ -f "$S/reject-admin" ] && { echo "Password is among the 1,000,000 most common ones" >&2; exit 1; } ;;
@@ -371,4 +373,61 @@ test("Crow live plugin (K5): one editor cache flush per plugin version, through 
   assert.equal(read(ctx, "calls.log").split("\n").filter((l) => /flush-cache/.test(l)).length, 2, "no flush when the version is unchanged");
   writeFileSync(join(ctx.bundle, "onlyoffice-plugin", "config.json"), JSON.stringify({ version: "0.3.0" }));
   assert.match(run("bootstrap.sh", ctx).out, /live plugin 0\.3\.0: editor cache flushed/);
+});
+
+test("bootstrap enables the Save button and locks display names", () => {
+  const ctx = setup();
+  assert.equal(run("bootstrap.sh", ctx).status, 0);
+  const c = read(ctx, "calls.log");
+  assert.match(c, /customizationForcesave --value=true/);
+  assert.match(c, /allow_user_to_change_display_name --value=false --type=boolean/);
+});
+
+test("duplicate display name (NFC/trim/case) sets WORKSPACE_COMMENT_LOOP_BLOCKED; none clears it; an unreadable list leaves it", () => {
+  const blockedOf = (list, env = {}, state = []) => {
+    const ctx = setup({ env });
+    if (list) writeFileSync(join(ctx.st, "userlist"), list);
+    for (const f of state) writeFileSync(join(ctx.st, f), "");
+    const r = run("bootstrap.sh", ctx);
+    assert.equal(r.status, 0, r.out);
+    return envOf(ctx).WORKSPACE_COMMENT_LOOP_BLOCKED;
+  };
+  assert.equal(blockedOf('{"admin":"Admin ","alex":"admin","crow-bot":"Crow bot"}'), "duplicate_display_name");
+  assert.equal(blockedOf('{"admin":"Jose\u0301","maria":"Jos\u00e9"}'), "duplicate_display_name");
+  assert.equal(blockedOf('{"admin":"Casey","alex":"Alex","crow-bot":"Crow bot"}', { WORKSPACE_COMMENT_LOOP_BLOCKED: "duplicate_display_name" }), "");
+  assert.equal(blockedOf('{"admin":"Casey","alex":"Alex"}'), "");
+  // the check cannot run: an existing block stays, none is invented
+  assert.equal(blockedOf(null, { WORKSPACE_COMMENT_LOOP_BLOCKED: "duplicate_display_name" }, ["userlist-fail"]), "duplicate_display_name");
+  assert.equal(blockedOf(null, {}, ["userlist-fail"]), undefined);
+  // valid JSON but occ exited non-zero (pipefail): still "could not tell", so the block is NOT cleared
+  assert.equal(blockedOf(null, { WORKSPACE_COMMENT_LOOP_BLOCKED: "duplicate_display_name" }, ["userlist-json-exit1"]), "duplicate_display_name");
+  // owner list from WORKSPACE_OWNER_UIDS
+  assert.equal(blockedOf('{"admin":"Casey","owner2":"Dana","dana2":"dana"}', { WORKSPACE_OWNER_UIDS: "admin,owner2" }), "duplicate_display_name");
+});
+
+test("bootstrap records the Nextcloud instance id, only when it is alphanumeric 1-64", () => {
+  const ok = setup();
+  assert.equal(run("bootstrap.sh", ok).status, 0);
+  assert.match(read(ok, "calls.log"), /occ config:system:get instanceid/);
+  assert.equal(envOf(ok).WORKSPACE_NC_INSTANCE_ID, "ocabc123xyz");
+  const bad = setup();
+  writeFileSync(join(bad.st, "instanceid"), "not valid; rm -rf\n");
+  assert.equal(run("bootstrap.sh", bad).status, 0);
+  assert.equal(envOf(bad).WORKSPACE_NC_INSTANCE_ID, undefined);
+});
+
+test("add-user refuses an owner-clashing display name (and one it cannot check)", () => {
+  const ctx = setup();
+  writeFileSync(join(ctx.st, "userlist"), '{"admin":"Jose\u0301","crow-bot":"Crow bot"}');
+  const r = run("add-user.sh", ctx, ["maria", " JOS\u00c9 "]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.out, /matches the owner's/);
+  assert.doesNotMatch(read(ctx, "calls.log"), /user:add/);
+  const ok = run("add-user.sh", ctx, ["maria", "Maria"]);
+  assert.equal(ok.status, 0, ok.out);
+  const ctx2 = setup();
+  writeFileSync(join(ctx2.st, "userlist-fail"), "");
+  const r2 = run("add-user.sh", ctx2, ["maria", "Maria"]);
+  assert.notEqual(r2.status, 0);
+  assert.match(r2.out, /could not check/);
 });

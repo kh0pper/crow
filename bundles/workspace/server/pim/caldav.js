@@ -32,7 +32,7 @@ export async function listCollections(cfg, kind, { component = "VEVENT" } = {}) 
     const ownerUid = (propText(x.props, NS.oc, "owner-principal") || "").replace(/\/$/, "").split("/").pop();
     out.push({ kind, id, href: pimHref(cfg, kind, [id]), name: propText(x.props, NS.d, "displayname") || id, writable, owner_uid: ownerUid || null, color: propText(x.props, "http://apple.com/ns/ical/", "calendar-color") || null });
   }
-  for (const c of out) c.owner = c.owner_uid ? await displayName(cfg, c.owner_uid).catch(() => c.owner_uid) : null;
+  for (const c of out) c.owner = c.owner_uid ? (await displayName(cfg, c.owner_uid).catch(() => null)) ?? c.owner_uid : null;
   return out;
 }
 export const listCalendars = (cfg) => listCollections(cfg, "cal");

@@ -2,6 +2,9 @@
 export class WsError extends Error {
   constructor(code, message, data) { super(message); this.name = "WsError"; this.code = code; this.data = data; }
 }
+/** A WsError raised by the Nextcloud fetch layer (nc/http.js: no answer, or an HTTP error status). Callers that must
+ * tell an outage from a local failure check `instanceof NcError`, never the message. */
+export class NcError extends WsError {}
 const block = (obj) => [{ type: "text", text: JSON.stringify(obj) }];
 export const ok = (data) => ({ content: block({ success: true, data }) });
 export const fail = (code, error, data) => ({ content: block({ success: false, code, error, ...(data !== undefined ? { data } : {}) }), isError: true });

@@ -2,7 +2,7 @@
  * Workspace panel routes:
  *  - K5 live-edit endpoints (/api/workspace/live/v1/*): editor-session-JWT auth, NO dashboard session
  *    (server/live/routes-live.js; express's Router/json are injected from here — F2);
- *  - the K5 close-time queue worker (one per gateway process; starts once Workspace is set up);
+ *  - the K5 close-time queue worker and the comment watcher (one each per gateway process; start once Workspace is set up);
  *  - Quick edit (/api/workspace/quick/*): dashboard session + CSRF, writes as crow-bot (Task 14 modules).
  *
  * The gateway calls this factory SYNCHRONOUSLY, so every bundle module and the DB are resolved lazily on first use.
@@ -27,6 +27,25 @@ export const BUNDLE_DIR = CANDIDATES.find((p) => existsSync(join(p, "manifest.js
 const bundleImport = (rel) => import(pathToFileURL(join(BUNDLE_DIR, rel)).href);
 const realClock = { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) };
 
+/**
+ * One start attempt for the per-process workers; throws while Workspace is not set up (the caller retries). The queue
+ * worker starts first and alone; the comment watcher is loaded and started after it in its own try, so a watcher
+ * that fails to load or start only logs and never keeps the queue worker from running (nor restarts it).
+ * `load` is a test seam (default: the bundle-dir import).
+ */
+export async function startBackgroundWorkers({ clock = realClock, load = bundleImport } = {}) {
+  const [{ openWorkspaceDb }, { getConfig }, { startQueueWorker }] = await Promise.all([load("server/db.js"), load("server/config.js"), load("server/queue/worker.js")]);
+  getConfig();
+  const db = await openWorkspaceDb();
+  startQueueWorker({ db, getConfig, clock }); // recovers rows stranded in applying_close first
+  try {
+    const { startCommentWatcher } = await load("server/comments/watcher.js");
+    startCommentWatcher({ db, getConfig, clock }); // comment loop (§3.6): idle in mode off (no Nextcloud call)
+  } catch (e) {
+    console.warn(`[workspace] comment watcher not started: ${/^[a-z_]{1,40}$/.test(String(e?.code || "")) ? e.code : "error"}`);
+  }
+}
+
 export default function workspaceRouter(authMiddleware, seams = {}) {
   const router = express.Router();
   const clock = seams.clock || realClock;
@@ -49,11 +68,7 @@ export default function workspaceRouter(authMiddleware, seams = {}) {
   // ---- K5 close-time worker: one per gateway process; waits until Workspace is set up (getConfig not_ready). ----
   if (seams.startWorker !== false) {
     const tryStart = async () => {
-      try {
-        const [{ openWorkspaceDb }, { getConfig }, { startQueueWorker }] = await Promise.all([bundleImport("server/db.js"), bundleImport("server/config.js"), bundleImport("server/queue/worker.js")]);
-        getConfig();
-        startQueueWorker({ db: await openWorkspaceDb(), getConfig, clock }); // recovers rows stranded in applying_close first
-      } catch { setTimeout(tryStart, 5 * 60e3).unref(); }
+      try { await startBackgroundWorkers({ clock }); } catch { setTimeout(tryStart, 5 * 60e3).unref(); }
     };
     setTimeout(tryStart, 5000).unref();
   }
@@ -84,5 +99,40 @@ export default function workspaceRouter(authMiddleware, seams = {}) {
   router.post("/api/workspace/quick/undo", handle((a, cfg, f) => a.quickUndo(cfg, f, clock), "undone"));
   router.post("/api/workspace/quick/restore", handle((a, cfg, f) => a.quickRestore(cfg, f, clock), "restored"));
   router.post("/api/workspace/quick/cancel", handle(async (a, cfg, f) => { const { queueDefs } = await bundleImport("server/tools/queue.js"); await queueDefs[1].run({ change_id: String(f.change_id || "") }); return {}; }, "cancelled"));
+
+  // ---- Comment loop mode (Office > Setup card). Phase 1: only off | shadow; "on" is refused. ----
+  router.use("/api/workspace/comments", express.urlencoded({ extended: false, limit: "4kb" }), authMiddleware, csrfMw);
+  const commentGo = (res, notice) => res.redirect(303, `/dashboard/workspace?${new URLSearchParams({ view: "setup", notice }).toString()}`);
+  const commentFail = (e) => console.warn(`[workspace] comment settings action failed: ${/^[a-z_]{1,40}$/.test(String(e?.code || "")) ? e.code : "error"}`);
+  router.post("/api/workspace/comments/mode", async (req, res) => {
+    const go = (notice) => commentGo(res, notice);
+    const mode = String(req.body?.mode || "");
+    if (mode === "on") return go("not_yet");
+    if (mode !== "off" && mode !== "shadow") return go("bad_mode");
+    try {
+      const [{ openWorkspaceDb }, { getConfig }, { setMode, getWatch }] = await Promise.all([bundleImport("server/db.js"), bundleImport("server/config.js"), bundleImport("server/comments/store.js")]);
+      const cfg = getConfig(); // not set up yet → the catch below
+      const db = await openWorkspaceDb();
+      // While the loop is blocked only "off" is accepted: shadow would start watching (and set watch_since) under a block.
+      if (mode !== "off" && ((await getWatch(db)).blocked_reason || cfg.commentLoopBlocked)) return go("blocked");
+      await setMode(db, mode, clock.now());
+      return go("saved");
+    } catch (e) { commentFail(e); return go("error"); }
+  });
+  // "Check again": re-runs the owner display-name check; clears ONLY a duplicate_display_name block, and only on an explicit "no clash".
+  router.post("/api/workspace/comments/recheck", async (req, res) => {
+    const go = (notice) => commentGo(res, notice);
+    try {
+      const [{ openWorkspaceDb }, { getConfig }, { getWatch, clearBlocked }, { ownerNameClash }] = await Promise.all([bundleImport("server/db.js"), bundleImport("server/config.js"), bundleImport("server/comments/store.js"), bundleImport("server/comments/watcher.js")]);
+      const cfg = getConfig();
+      const db = await openWorkspaceDb();
+      if ((await getWatch(db)).blocked_reason !== "duplicate_display_name") return go("error");
+      const clash = await ownerNameClash(cfg);
+      if (clash === null) return go("recheck_failed");
+      if (clash === true) return go("still_blocked");
+      await clearBlocked(db, "duplicate_display_name", clock.now()); // mode not off → watch_since = now
+      return go(cfg.commentLoopBlocked ? "env_blocked" : "unblocked");
+    } catch (e) { commentFail(e); return go("error"); }
+  });
   return router;
 }

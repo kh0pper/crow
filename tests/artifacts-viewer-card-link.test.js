@@ -171,10 +171,12 @@ test("no lane chip: null lane, an unknown lane, or core's i18n unavailable (page
 
 test("the manifest version moved", () => {
   const m = JSON.parse(readFileSync(join(REPO, "bundles/artifacts/manifest.json"), "utf8"));
-  assert.equal(m.version, "0.9.2");
+  // at least the version that shipped the card link (later bumps keep it); exact pins break every later bump
+  const atLeast = (v, min) => v.split(".").map(Number).reduce((c, n, i) => c || n - min.split(".").map(Number)[i], 0) >= 0;
+  assert.ok(atLeast(m.version, "0.9.2"), `artifacts ${m.version} is at least 0.9.2`);
   const reg = JSON.parse(readFileSync(join(REPO, "registry/add-ons.json"), "utf8"));
   const entry = (reg["add-ons"] || reg.addons || reg).find?.((a) => a.id === "artifacts");
-  assert.equal(entry?.version, "0.9.2", "the registry is in sync");
+  assert.equal(entry?.version, m.version, "the registry is in sync");
 });
 
 test("the viewer has a way back", async () => {
