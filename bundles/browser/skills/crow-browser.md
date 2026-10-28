@@ -60,17 +60,17 @@ Match effort to the target. Don't open a browser to read an API; don't fight a p
 - `crow_browser_download` `{selector, output_dir?}` — trigger a download (click) and save the file to the host at `~/.crow/browser-downloads/`.
 
 ### Escalation
-- `crow_browser_wait_for_user` `{message, resume?}` — **the VNC human-in-the-loop handoff** (see below).
+- `crow_browser_wait_for_user` `{message, resume?}` — **the human-in-the-loop handoff**: the operator takes over the browser from the chat (see below).
 - `crow_browser_launch` `{proxy_url}` — route the session through a proxy (set **before** navigating; this restarts the browser — save/load session around it).
 
-## The VNC human-in-the-loop rule (CRITICAL)
+## The human-in-the-loop rule: Take over in the chat (CRITICAL)
 
 When you hit something you must not automate — **CAPTCHA / reCAPTCHA, 2FA, security questions, payment/submit confirmations, or any irreversible real-world action** — do NOT guess or click blind:
 
 1. `crow_browser_screenshot` — show the current state.
-2. `crow_browser_wait_for_user` with a clear message of exactly what the human must do (and the VNC URL).
-3. The human completes just that step in the live VNC browser.
-4. `crow_browser_wait_for_user` with `resume: true` — execution continues where it parked.
+2. `crow_browser_wait_for_user` with a clear message of exactly what the human must do. The operator gets a "needs you" notice that opens the **Take over** sheet in your chat (the live browser tile has the same button). Do not send a VNC URL: the sheet carries the viewer and the VNC password.
+3. The human taps **Take over**, completes just that step in the browser, and taps **Hand back**. While the operator has the browser, your browser calls wait and then return "The operator has the browser; call again to continue." without acting — just call again.
+4. `crow_browser_wait_for_user` with `resume: true` — execution continues where it parked. Your next result may start with "The browser changed hands since your last step": check the page before relying on earlier state.
 
 This is the ethical, robust alternative to solver services: no third party sees the session, it never trips "automated solving" detection, and a human stays on the irreversible steps.
 

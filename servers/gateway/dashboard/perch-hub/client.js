@@ -4,6 +4,8 @@ import { perchPhoneCardJs } from "./phone-card.js";
 import { perchArtifactCardJs } from "./artifact-card.js";
 import { perchCardChipJs } from "./card-chip.js";
 import { perchDictationJs } from "./dictation.js";
+import { perchBrowserTileJs } from "./browser-tile.js";
+import { perchTakeOverJs } from "./take-over.js";
 import { textSizeRuntimeJs, TEXT_SIZES, TEXT_SIZE_DEFAULT } from "../shared/text-size.js";
 
 /** The hub's client script. Emitted INSIDE a template literal — a bare
@@ -77,6 +79,11 @@ export function perchHubJs(lang = "en") {
        any load still in flight is stale (live() already covers it; the
        token makes it explicit). */
     cancelHistRetry(); histGen++;
+    /* Live browser tile: every frame poller aborts, the observer disconnects. */
+    retireBrowserTiles();
+    /* The Take over sheet closes with the page; the operator keeps the
+       browser until Hand back or the 5-minute heartbeat loss. */
+    closeTakeOver();
     /* Anything left in the registry belongs to an instance older still (or to
        a session this one never held): close it by identity — that is the
        whole point of keeping the registry. */
@@ -1507,6 +1514,7 @@ export function perchHubJs(lang = "en") {
     fileSeen={};                          /* PR-E: same seam for the card dedupe */
     resetPhoneCards();
     resetArtifactCards(); resetCardChip();
+    resetBrowserTiles();                  /* live browser tile: its pollers and header line die with the transcript */
     resetControls();                        /* the PREVIOUS session's picker must not bleed in */
     draftRestore(sid);                      /* nor its composer text: this session's own draft, or empty */
     var known=rowIndex[sid];
@@ -1532,6 +1540,7 @@ export function perchHubJs(lang = "en") {
     cancelHistRetry(); histGen++;   /* 23a: a load or retry for the session being left must not render */
     draftSave();                 /* Shell P2: its unsent words wait for it */
     closeStream(); current.sid=null;
+    resetBrowserTiles();         /* no frame poller outlives the chat it belongs to */
     setTurnInFlight(false);      /* the list has no Steer/Stop to show */
     setView('list'); startListPolling(); loadList();
   }
@@ -1745,12 +1754,20 @@ export function perchHubJs(lang = "en") {
       setTurnInFlight(false);
     });
     on('file',function(d){
-      if(!d||!d.name) return;
+      if(!d||!d.name||d.kind==='browser_shot') return;
       if(!histSettled){ histBuf.push(d); return; }   /* round 3 R4 seam applies to cards too */
       var k=fileKey(d);
       if(fileSeen[k]) return;                        /* batch replay already drew it */
       fileSeen[k]=true;
       renderFileCard(d);
+    });
+    /* Live browser tile (spec 2026-10-27 §4.2): live / done / operator frames.
+       Buffered with the tool frames until the history batch lands, so the
+       tile finds its anchor chip and a shot the batch already drew is not
+       drawn twice. */
+    on('browser',function(d){
+      if(!histSettled){ histBuf.push({ browserFrame:true, d:d }); return; }
+      browserFrame(d);
     });
     on('ask_user',function(d){ renderAsk(d); });
     on('ask_expired',function(d){
@@ -1926,6 +1943,7 @@ export function perchHubJs(lang = "en") {
     fileSeen={};
     resetPhoneCards();
     resetArtifactCards(); resetCardChip();
+    resetBrowserTiles();
     histSettled=false; histBuf=[];
     seamEchoes=[];                   /* their rows died with the transcript */
     loadHistory(botId,sid);
@@ -1956,7 +1974,10 @@ export function perchHubJs(lang = "en") {
        ONE join — the file cards flush only after BOTH land, so a slow history
        fetch can never interleave cards out of order with batch messages. */
     var histP=perchApi('GET','/interactive/'+encodeURIComponent(sid)+'/files/history')
-      .then(function(h){ return (h.ok&&h.j&&Array.isArray(h.j.items))?h.j.items:[]; });
+      .then(function(h){
+        var j=(h.ok&&h.j)||{};
+        return { items:Array.isArray(j.items)?j.items:[], shots:Array.isArray(j.browserShots)?j.browserShots:[] };
+      });
     Promise.all([
       perchApi('GET','/bots/'+encodeURIComponent(botId)+'/sessions/'+encodeURIComponent(sid)+'/transcript'),
       histP,
@@ -1978,10 +1999,10 @@ export function perchHubJs(lang = "en") {
             },HIST_RETRY_MS);
             return;
           }
-          appendNote(TRANSCRIPT_FAILED); flushHistBuf([], pair[1]); return;
+          appendNote(TRANSCRIPT_FAILED); flushHistBuf([], pair[1].items, null, pair[1].shots); return;
         }
         var events=r.j.events||[];
-        if(!events.length){ appendNote(NO_TRANSCRIPT); settleSeamEchoes([]); flushHistBuf([], pair[1]); return; }
+        if(!events.length){ appendNote(NO_TRANSCRIPT); settleSeamEchoes([]); flushHistBuf([], pair[1].items, null, pair[1].shots); return; }
         var batchTexts=[], userTexts=[];
         /* Review M2: the error a buffered live frame may duplicate is only the
            snapshot's TAIL turn's (an errored message that is the batch's last
@@ -2036,7 +2057,7 @@ export function perchHubJs(lang = "en") {
           if(i===msgs.length-1) tailErr=errored?String(e.errorText||''):null;
         });
         settleSeamEchoes(userTexts);
-        flushHistBuf(batchTexts, pair[1], tailErr);
+        flushHistBuf(batchTexts, pair[1].items, tailErr, pair[1].shots);
       });
   }
 
@@ -2121,7 +2142,7 @@ export function perchHubJs(lang = "en") {
      collapsed every key to "0|0" and silently dropped the second card of any
      session. */
   function fileKey(d){ return String((d&&d.name)||'')+'|'+String((d&&d.stored)||''); }
-  function flushHistBuf(batchTexts, sentFiles, tailErr){
+  function flushHistBuf(batchTexts, sentFiles, tailErr, shots){
     histSettled=true;
     seamEchoes=[];   /* settled by the caller, or kept in place after a failed load */
     /* PR-E: persisted sent-file cards replay first (they are older context —
@@ -2131,11 +2152,17 @@ export function perchHubJs(lang = "en") {
     var files=sentFiles||[];
     files.forEach(function(it){
       if(!it||!it.name) return;
+      if(it.kind==='browser_shot') return;   /* a browser shot is a tile, never a sent-file card */
       fileSeen[fileKey(it)]=true;
       renderFileCard(it);
     });
+    /* Live browser tile: the thread's kept shots, each frozen in its turn's
+       place (after its anchor chip, else by created_at), BEFORE the buffered
+       live frames replay — a done frame for a shot drawn here is not redrawn. */
+    browserHistory(shots||[]);
     var buf=histBuf; histBuf=[];
     buf.forEach(function(f){
+      if(f.browserFrame){ browserFrame(f.d); return; }
       if(f.toolFrame){
         var td=f.d||{};
         if(td.toolCallId!=null&&histToolSeen[String(td.toolCallId)]) return;   /* the batch drew it */
@@ -3430,6 +3457,12 @@ export function perchHubJs(lang = "en") {
   function appendToolChip(d){
     var tr=el('perch-transcript'); if(!tr) return;
     var wrap=document.createElement('div'); wrap.className='entry toolwrap';
+    /* The live browser tile anchors after this chip by its RAW call id
+       (history chips are keyed 'hist:<id>'). */
+    if(d&&d.toolCallId!=null){
+      var cid=String(d.toolCallId); if(cid.indexOf('hist:')===0) cid=cid.slice(5);
+      if(cid) wrap.setAttribute('data-call',cid);
+    }
     var chip=document.createElement('button'); chip.type='button'; chip.className='tool-chip';
     var spin=document.createElement('span'); spin.className='spin';
     var name=document.createElement('span'); name.className='tn'; name.textContent=(d&&d.name)||'?';
@@ -3513,6 +3546,9 @@ ${perchCardChipJs(lang)}
 
 ${perchDictationJs(lang)}
 
+${perchBrowserTileJs(lang)}
+${perchTakeOverJs(lang)}
+
   /* ---- Wave 3: the slash-command menu ------------------------------------
      Fed by pi's OWN get_commands registry through the engine (never a
      hardcoded list — a bot's commands depend on its loaded extensions and
@@ -3593,5 +3629,7 @@ ${perchDictationJs(lang)}
      pure function and it was green throughout. */
   if(parseHash(location.hash)) applyHash();
   else { startListPolling(); loadList(); }
+  takeOverFromLink();
+  toMineRefresh();
 })();`;
 }

@@ -3813,6 +3813,24 @@ export const translations = {
 
   // ─── Doc ↔ card (P6) ───
   "shell.documentNumbered": { en: "Document {id}", es: "Documento {id}" },
+
+  // ─── Browser tile ───
+  "perch.browserLive": { en: "Live", es: "En vivo" },
+  "perch.browserDone": { en: "Done", es: "Hecho" },
+  "perch.browserNeutral": { en: "Browser", es: "Navegador" },
+  "perch.browserUsing": { en: "Using the browser · {domain}", es: "Usando el navegador · {domain}" },
+  "perch.browserUsingNoDomain": { en: "Using the browser", es: "Usando el navegador" },
+  "perch.browserWaiting": { en: "Waiting for you", es: "Esperando por ti" },
+  "perch.browserYouHadIt": { en: "You had the browser", es: "Tenías tú el navegador" },
+  "perch.browserDelete": { en: "Delete screenshot", es: "Borrar captura" },
+  "perch.takeOver": { en: "Take over", es: "Tomar el control" },
+  "perch.handBack": { en: "Hand back", es: "Devolver" },
+  "perch.copyPassword": { en: "Copy password", es: "Copiar contraseña" },
+  "perch.noPassword": { en: "No saved browser password", es: "No hay contraseña guardada del navegador" },
+  "perch.botFinishing": { en: "The bot is finishing its step…", es: "El bot está terminando su paso…" },
+  "perch.browserNotWaiting": { en: "The bot is no longer waiting for you.", es: "El bot ya no te está esperando." },
+  "perch.youHaveBrowser": { en: "You have the browser", es: "Tienes tú el navegador" },
+  "browser.botUsing": { en: "A bot is using the browser", es: "Un bot está usando el navegador" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

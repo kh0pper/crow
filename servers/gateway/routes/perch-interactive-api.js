@@ -46,7 +46,8 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { jsonError } from "./_error.js";
-import { openDeliveredDir, openDeliveredFile } from "../../shared/perch-delivered.js";
+import { openDeliveredDir, openDeliveredFile, unlinkDelivered } from "../../shared/perch-delivered.js";
+import { SHOT_KEEP } from "../browser-tile/shots.js";
 import { openAuthedStream } from "../streams/authed-stream.js";
 import { resolveEngineStatus } from "../dashboard/panels/bot-builder/engine-gate.js";
 import { createDbClient } from "../../db.js";
@@ -1545,12 +1546,32 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
         // thread_id IS the sessionId (perch-interactive.js identity note); the
         // bot_id filter keeps a cross-bot thread-id collision from leaking a
         // card the caller has no right to render.
-        const r = await db.execute({
-          sql: "SELECT name, stored, mime, size, caption, servable, created_at FROM perch_session_files WHERE bot_id=? AND thread_id=? ORDER BY id ASC LIMIT 200",
-          args: [String(snap.botId || ""), sid],
-        });
+        const botId = String(snap.botId || "");
+        // Live browser tile (migration 0014): sent files exclude kind
+        // 'browser_shot' and carry id/kind/turn_anchor; the shots come from
+        // their own query. A co-hosted instance restarted onto this code
+        // before it migrated has neither column — fall back to the old
+        // query (every such row is a sent file) rather than 500 the chat.
+        let r;
+        let hasKind = true;
+        try {
+          r = await db.execute({
+            sql: "SELECT id, kind, turn_anchor, name, stored, mime, size, caption, servable, created_at FROM perch_session_files WHERE bot_id=? AND thread_id=? AND kind != 'browser_shot' ORDER BY id ASC LIMIT 200",
+            args: [botId, sid],
+          });
+        } catch (e) {
+          if (!/no such column/i.test(String(e && e.message))) throw e;
+          hasKind = false;
+          r = await db.execute({
+            sql: "SELECT id, name, stored, mime, size, caption, servable, created_at FROM perch_session_files WHERE bot_id=? AND thread_id=? ORDER BY id ASC LIMIT 200",
+            args: [botId, sid],
+          });
+        }
         const items = r.rows.map((row) => {
           const it = {
+            id: Number(row.id),
+            kind: row.kind == null ? "file" : String(row.kind),
+            turn_anchor: row.turn_anchor == null ? null : String(row.turn_anchor),
             name: String(row.name || ""),
             stored: row.stored == null ? null : String(row.stored),
             mime: String(row.mime || "application/octet-stream"),
@@ -1568,11 +1589,161 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
           }
           return it;
         });
-        res.json({ items });
+        // Browser shots: newest SHOT_KEEP, only the gateway writes this kind,
+        // and only from the staging dir (a shot whose file is gone is skipped).
+        const browserShots = [];
+        if (hasKind) {
+          const sr = await db.execute({
+            sql: "SELECT id, name, stored, turn_anchor, created_at FROM perch_session_files WHERE bot_id=? AND thread_id=? AND kind='browser_shot' ORDER BY id DESC LIMIT ?",
+            args: [botId, sid, SHOT_KEEP],
+          });
+          for (const row of sr.rows) {
+            const stored = row.stored == null ? "" : String(row.stored);
+            if (!stored || !deliveredExists(sid, stored)) continue;
+            browserShots.push({
+              id: Number(row.id),
+              name: String(row.name || stored),
+              url: P + "/interactive/" + encodeURIComponent(sid) + "/workspace/" + encodeURIComponent(stored),
+              turn_anchor: row.turn_anchor == null ? null : String(row.turn_anchor),
+              created_at: String(row.created_at || ""),
+            });
+          }
+        }
+        res.json({ items, browserShots });
       } finally { try { db.close(); } catch { /* already closed */ } }
     } catch (err) {
       mapEngineError(res, err);
     }
+  });
+
+  // ---- DELETE /interactive/:sid/browser-shots/:id — Delete screenshot ----
+  // Live browser tile (spec §4.5, §7 item 12). CSRF-railed (this router mounts
+  // after csrfMiddleware) and session-gated. Scoped to id AND bot_id AND
+  // thread_id AND kind='browser_shot': any other id (another bot's, another
+  // thread's, a sent file's) is a 404 and nothing is removed. The file goes
+  // first (fd-anchored, never through a symlink), then the row.
+  router.delete(P + "/interactive/:sid/browser-shots/:id", async (req, res) => {
+    const sid = String(req.params.sid);
+    const id = /^[1-9][0-9]{0,15}$/.test(String(req.params.id)) ? Number(req.params.id) : null;
+    try {
+      const eng = resolveEngine();
+      const snap = await eng.get(sid);
+      if (!snap) return jsonError(res, 404, "no_such_session");
+      if (id == null) return jsonError(res, 404, "not_found");
+      const botId = String(snap.botId || "");
+      const db = createDbClient();
+      try {
+        let r;
+        try {
+          r = await db.execute({
+            sql: "SELECT id, stored FROM perch_session_files WHERE id=? AND bot_id=? AND thread_id=? AND kind='browser_shot'",
+            args: [id, botId, sid],
+          });
+        } catch (e) {
+          if (/no such column/i.test(String(e && e.message))) return jsonError(res, 404, "not_found");
+          throw e;
+        }
+        const row = r.rows[0];
+        if (!row) return jsonError(res, 404, "not_found");
+        if (row.stored) unlinkDelivered(sid, String(row.stored));
+        await db.execute({
+          sql: "DELETE FROM perch_session_files WHERE id=? AND bot_id=? AND thread_id=? AND kind='browser_shot'",
+          args: [id, botId, sid],
+        });
+        res.json({ ok: true });
+      } finally { try { db.close(); } catch { /* already closed */ } }
+    } catch (err) {
+      mapEngineError(res, err);
+    }
+  });
+
+  // ---- GET /interactive/:sid/browser/frame?after=<seq>&vw=<px> — the live tile ----
+  // Live browser tile (spec §4.3). A long poll (≤ 2 s): the newest screencast
+  // frame after `seq`, or 204. Only while THIS session holds the browser lease
+  // (a lock-free read; atomic rename gives whole files) — otherwise 409
+  // not_holder and the tile keeps its last frame dimmed. `vw` is the viewer's
+  // width: a phone viewport (≤ 600 px) lets the watcher drop to 1 frame/s at
+  // 480 px. A closed request aborts the wait. An unreachable browser is 404
+  // no_browser; more than 8 polls per session (32 in all) are 429. Behind dashboardAuth like every
+  // perch-api route; never Funnel-reachable.
+  router.get(P + "/interactive/:sid/browser/frame", async (req, res) => {
+    const sid = String(req.params.sid);
+    const ac = new AbortController();
+    const gone = () => { if (!res.writableEnded) ac.abort(); };
+    req.on("close", gone);
+    res.on("close", gone);
+    try {
+      const eng = resolveEngine();
+      const snap = await eng.get(sid);
+      if (!snap) return jsonError(res, 404, "no_such_session");
+      const watcher = eng.browserWatcher || null;
+      if (!watcher || !watcher.enabled()) return jsonError(res, 404, "no_browser");
+      if (!(await watcher.isHolder(sid))) return jsonError(res, 409, "not_holder");
+      // docker missing, the container down, the port closed: say so, not 204 forever
+      if (!(await watcher.available())) return jsonError(res, 404, "no_browser");
+      if (ac.signal.aborted) return;
+      const afterRaw = String(req.query.after ?? "");
+      const after = /^[0-9]{1,15}$/.test(afterRaw) ? Number(afterRaw) : 0;
+      const vwRaw = String(req.query.vw ?? "");
+      const vw = /^[0-9]{1,5}$/.test(vwRaw) ? Number(vwRaw) : 0;
+      const frame = await watcher.frameAfter(sid, after, { timeoutMs: 2000, signal: ac.signal, phone: vw > 0 && vw <= 600 });
+      if (ac.signal.aborted || res.writableEnded) return;
+      res.set("Cache-Control", "no-store");
+      if (!frame) return res.status(204).end();
+      res.json({ seq: frame.seq, jpeg: frame.jpegB64, w: frame.w, h: frame.h });
+    } catch (err) {
+      if (ac.signal.aborted || res.headersSent) return;
+      if (err && err.code === "ETOOMANYWAITERS") return jsonError(res, 429, "too_many_polls");
+      mapEngineError(res, err);
+    }
+  });
+
+  // ---- POST /browser/take-over | /browser/hand-back | /browser/heartbeat ----
+  // Live browser tile (spec §4.4, §7 items 7 and 14). The operator's holding of
+  // this instance's browser: the engine's in-memory record (Ruling B4), never
+  // the lease file. Take over answers { state: "held" } or, while a bot call is
+  // in flight, { state: "pending" } (it switches when that call ends, or after
+  // 30 s). The sheet heartbeats every 15 s; { state: "idle" } means the browser
+  // went back (Hand back, or 5 minutes without a heartbeat). A take-over sent
+  // from a link ({from:"link", sid}) is 409 no_live_turn unless that chat has a
+  // live turn using the browser, or its bot asked for the operator in the last
+  // 30 minutes and no other bot holds the browser. GET /browser/state is the
+  // controller's state (the "You have the browser" control). A lease error
+  // (a jammed lock, Ruling B3) is 503 browser_busy, never a hang. CSRF-railed
+  // (this router mounts after csrfMiddleware), behind dashboardAuth, never
+  // Funnel-reachable.
+  const takeOverRoute = (op) => async (req, res) => {
+    try {
+      const eng = resolveEngine();
+      const ctl = eng.browserTakeOver;
+      if (!ctl) return jsonError(res, 404, "no_browser");
+      // From a "?take-over=1" link (a needs-you item): only while that chat
+      // has a live turn using the browser. A stale click never grabs it.
+      const body = req.body && typeof req.body === "object" ? req.body : {};
+      if (op === "takeOver" && body.from === "link") {
+        const sid = typeof body.sid === "string" ? body.sid.slice(0, 64) : "";
+        if (!sid || typeof eng.browserLinkOk !== "function" || !(await eng.browserLinkOk(sid))) {
+          return jsonError(res, 409, "no_live_turn");
+        }
+      }
+      const r = await ctl[op]();
+      if (r.state === "no_browser") return jsonError(res, 404, "no_browser");
+      res.set("Cache-Control", "no-store");
+      res.json({ state: r.state });
+    } catch (err) {
+      if (res.headersSent) return;
+      console.warn("[perch-interactive-api] browser " + op + ": " + String((err && err.code) || "error").slice(0, 40));
+      return jsonError(res, 503, "browser_busy");
+    }
+  };
+  router.post(P + "/browser/take-over", takeOverRoute("takeOver"));
+  router.post(P + "/browser/hand-back", takeOverRoute("handBack"));
+  router.post(P + "/browser/heartbeat", takeOverRoute("heartbeat"));
+  router.get(P + "/browser/state", (req, res) => {
+    const ctl = resolveEngine().browserTakeOver;
+    if (!ctl) return jsonError(res, 404, "no_browser");
+    res.set("Cache-Control", "no-store");
+    res.json({ state: ctl.state() });
   });
 
   // ---- GET /interactive/:sid/cwd/list — read-only cwd browse (PR-B, item 18) ----

@@ -51,6 +51,9 @@ export function perchHubContent(lang = "en", engine = { state: "ready" }, { scop
   return `<style>${perchHubCss()}${perchSessionsCollapseCss()}${perchDictationCss()}</style>
 <div id="perch-hub-root"${scopeHtml}>
 ${engineBanner(engine, lang)}
+<!-- Live browser tile: while the operator holds (or is taking) the browser,
+     "You have the browser · Hand back" stays reachable after leaving the sheet. -->
+<button type="button" class="browser-mine" id="perch-browser-mine" hidden>${escapeHtml(t("perch.youHaveBrowser", lang))} · ${escapeHtml(t("perch.handBack", lang))}</button>
 <!-- No brand block here. The shell's .content-header already renders
      <h2>Perch</h2> from this panel's title (panels/perch-hub.js), and
      Perch's own <div class="brand">Perch</div> printed the same word again
@@ -135,11 +138,16 @@ ${engineBanner(engine, lang)}
     <!-- Queue item 13 (2026-10-14): "← Sessions" shares the head row with the
          bot name (phones; the split view hides it). On phones the raw
          session id is hidden here — the Session tab shows it (#perch-session-id). -->
+    <!-- Live browser tile (spec 2026-10-27 §1): #perch-browser-status is the
+         head's status line, "Using the browser · <domain>" while a bot drives
+         the browser this turn and "Waiting for you" while the operator holds
+         it. Hidden otherwise; textContent only (browser-tile.js btHeader). -->
     <!-- #perch-list-reveal leads the head: desktop only, and only while the
          Sessions column is collapsed (sessions-collapse-css.js). Visible text
          "Sessions", accessible name "Show sessions". -->
     <div class="perch-head"><button type="button" id="perch-list-reveal" class="quiet perch-sessions-toggle" aria-controls="perch-list" aria-expanded="true" aria-label="${escapeHtml(t("perch.showSessions", lang))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg>${escapeHtml(t("perch.sessionsHeading", lang))}</button><button type="button" id="perch-back" class="quiet">${escapeHtml(t("perch.back", lang))}</button><div class="perch-ident"><div class="title" id="perch-bot-name"></div>
       <div class="session-name" id="perch-session-name" hidden></div>
+      <div class="browser-status" id="perch-browser-status" role="status" hidden></div>
       <div class="meta" id="perch-session-meta"></div></div></div>
     <!-- Phase D1: the tab strip. FOUR buttons, inline SVG glyphs ported from
          the original pi-lab hub's icon set (~/pi-lab/extensions/web/public/

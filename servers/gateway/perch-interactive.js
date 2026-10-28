@@ -158,7 +158,12 @@ import { stripContextEcho } from "./voice/context-echo.js";
 import { maskSecrets, maskSecretsDetailed, maskDeep, hiddenNote, HIDDEN_NOTE_RE, REDACTED } from "../shared/secret-mask.js";
 import { userRuntimeDirs } from "../../scripts/pi-bots/pi_sandbox.mjs";
 import { anchorSecretsDir, checkedInstanceSecretsDirs } from "../shared/secret-values.js";
-import { deliveredDirPath, openDeliveredDir, registerDeliveredRoot } from "../shared/perch-delivered.js";
+import { deliveredDirPath, openDeliveredDir, registerDeliveredRoot, resolveSentName } from "../shared/perch-delivered.js";
+import { readLease, isFree as isLeaseFree, renewIfHeld as renewBrowserLease, release as releaseBrowserLease, leaseDir as browserLeaseDir } from "../shared/browser-lease.js";
+import { isBrowserTool, isWaitForUser, tileEventFor, doneEventFor, heldBySession, namesSession, validDomain, browserInstalled, leaseErrorText, RENEW_MS as BROWSER_RENEW_MS, FORCE_BREAK_AFTER_MS } from "./browser-tile/session-hooks.js";
+import { createWatcher as createBrowserWatcher, createFinalShotHook } from "./browser-tile/watcher.js";
+import { storeShot } from "./browser-tile/shots.js";
+import { createTakeOver as createBrowserTakeOver } from "./browser-tile/take-over.js";
 
 /** Lease file name under CROW_HOME. Consumed by C-14's reaper exemption. */
 export const LEASE_FILENAME = "perch-interactive-leases.json";
@@ -629,31 +634,6 @@ function maskFrame(event) {
   return out;
 }
 
-/**
- * PR-E (audit item 12): pick the stored name for a jail-copied sent file.
- * Collision policy (operator decision 2026-09-13): SUFFIX, never overwrite —
- * `report.png` → `report-2.png` → `report-3.png`, first slot free of every
- * existing name in the dir, sync loop. A dotfile basename is renamed out of
- * dotness (the workspace route refuses any dotfile path SEGMENT, so a stored
- * `.secret` would be a permanently dead card; `secret` is served instead).
- * Pure — exported only for tests; the engine's call site does the copy.
- */
-function resolveSentName(dir, basename) {
-  // `dir` may be a list: a sent copy's name must not collide with a file in
-  // the staging dir OR in the session's outputs dir (both are served under
-  // the same flat name).
-  const dirs = [].concat(dir).filter(Boolean);
-  const clean = String(basename == null ? "" : basename).replace(/[\\/]/g, "").replace(/^\.+/, "").trim() || "file";
-  const dot = clean.lastIndexOf(".");
-  const stem = dot > 0 ? clean.slice(0, dot) : clean;
-  const ext = dot > 0 ? clean.slice(dot) : "";
-  let candidate = clean;
-  for (let n = 2; dirs.some((d) => existsSync(join(d, candidate))); n++) {
-    candidate = stem + "-" + n + ext;
-  }
-  return candidate;
-}
-
 /** PR-A: clear ALL combined-ask state. Called wherever `pendingUi` is cleared
  * (child exit, abandon, stop, stopAll, abort, cycle, a resolved answer) so a
  * stale `askDance` can never auto-answer a later, unrelated dialog and a
@@ -702,6 +682,15 @@ export function createInteractiveEngine({
   // runtime/session IPC): send_user_file, which copies on the host, never
   // serves from them. A seam for tests.
   hiddenDirs = userRuntimeDirs(process.getuid(), { create: false }),
+  // Live browser tile seam: { installed?: boolean, dir?: string, isAlive?: fn,
+  // shotTimeoutMs?: number }. Default: the lease dir under this instance's
+  // home, used only while the browser bundle is installed here
+  // (installed.json lists `browser`).
+  browserLease = null,
+  // The gateway's read-only CDP watcher + the final-shot hook (Task 5). Only
+  // the process singleton turns it on (getInteractiveEngine); test engines
+  // never watch a browser.
+  browserWatch = false,
 } = {}) {
   // Every engine log line can quote a bot's card, stderr or reply: masked.
   const log = (m) => rawLog(maskSecrets(m));
@@ -873,6 +862,11 @@ export function createInteractiveEngine({
       askDance: null,
       lastError: null,
       turn: null,
+      // Live browser tile: the in-flight turn's tile record while it is live
+      // ({ anchor, gen, domain, ... }, see finishBrowser), else null; and the
+      // queue that keeps this session's lease writes in order.
+      browser: null,
+      browserChain: null,
       subscribers: new Set(),
       idleTimer: null,
       stallTimer: null,
@@ -1282,7 +1276,9 @@ export function createInteractiveEngine({
    * pending — a human thinking is not a stalled agent. */
   function armStall(s) {
     clearStall(s);
-    if (!s.turn || !s.pi || s.pendingUi) return;
+    // Live browser tile: nor while the operator holds the browser — a bot
+    // waiting on the operator's hands is not stalled either (spec §7 item 14).
+    if (!s.turn || !s.pi || s.pendingUi || browserOperatorHeld) return;
     const turn = s.turn;
     s.stallTimer = timer(() => { onStall(s, turn); }, stallMs());
   }
@@ -1320,6 +1316,375 @@ export function createInteractiveEngine({
     // A single tool silent past the window IS aborted — named operator-facing
     // policy (r2 S12).
     abortInFlight(s).catch(() => {});
+  }
+
+  // ---- live browser tile (spec §4.1, §4.2, §7 items 2, 4, 5, 7, 8, 14) ------
+  //
+  // The browser MCP server takes the shared lease (servers/shared/
+  // browser-lease.js) under PI_BOT_PERCH_SESSION_ID; this engine owns the rest
+  // of the holding's life for a Perch turn:
+  //   - it sees the turn's browser calls in its own child events (the first
+  //     one's toolCallId is the tile's `anchor`) and reads the lease after each
+  //     to light the tile (`live`) when THIS session with a turn holds it;
+  //   - it renews the holding on child events, at most once per 10 s;
+  //   - every turn exit releases it (deferred by the lease module while a live
+  //     pid is still inside a call) and emits `done`;
+  //   - while the operator holds the browser, no in-flight turn can stall.
+  // Lease trouble (ELEASELOCKED, I/O) never breaks a turn: it is logged as a
+  // code and the turn carries on. URLs and hostnames are never logged.
+  //
+  // The turn's tile record lives on the turn (`turn.browser`) and is mirrored
+  // on the session as `s.browser` while it is live:
+  //   { anchor, gen, domain, live, operatorTook, lastRenewAt, finished }
+  // Ruling B4: privacy decisions never trust the lease file alone. The
+  // operator's holding is the gateway's in-memory flag (browserOperator(),
+  // driven by the take-over route), and `operatorTook` records that a take-over
+  // happened during the turn.
+  const browserCfg = browserLease || {};
+  let browserOperatorHeld = false;
+  let browserInstalledCache = null;
+  /** Hooks a later task fills: finalShot(ctx) → { id, url } | null. */
+  const browserHooks = { finalShot: async () => null };
+  /** A hung shot hook can never wedge the session's lease queue or onTurnEnd. */
+  const FINAL_SHOT_TIMEOUT_MS = Number.isFinite(browserCfg.shotTimeoutMs) && browserCfg.shotTimeoutMs > 0 ? browserCfg.shotTimeoutMs : 5000;
+  /** `fn(signal)` raced against `ms`; at the deadline the signal aborts, so a
+   *  late-resolving hook knows to store nothing (it checks before storing). */
+  function withDeadline(fn, ms) {
+    const ac = new AbortController();
+    let h = null;
+    const late = new Promise((resolve) => { h = setTimeout(() => { ac.abort(); resolve(null); }, ms); if (h.unref) h.unref(); });
+    const run = Promise.resolve().then(() => fn(ac.signal));
+    return Promise.race([run, late]).finally(() => clearTimeout(h));
+  }
+
+  /** This instance's lease dir, or null when the browser bundle is not installed here. */
+  function browserDir() {
+    if (browserCfg.installed === false) return null;
+    if (browserCfg.installed !== true) {
+      const t = Date.now();   // real clock: a file-system cache, not a lease time
+      if (!browserInstalledCache || t - browserInstalledCache.at > 60_000) {
+        browserInstalledCache = { at: t, ok: browserInstalled(crowHome) };
+      }
+      if (!browserInstalledCache.ok) return null;
+    }
+    return browserCfg.dir || browserLeaseDir((name) => join(crowHome, name));
+  }
+
+  function browserWriteOpts() {
+    const o = { now: now(), forceBreakAfterMs: FORCE_BREAK_AFTER_MS };
+    if (typeof browserCfg.isAlive === "function") o.isAlive = browserCfg.isAlive;
+    return o;
+  }
+
+  /** Serialise a session's lease work (renewals before the release); never rejects. */
+  function browserQueue(s, fn) {
+    const p = (s.browserChain || Promise.resolve()).then(fn).catch((e) => {
+      log(s.sessionId + ": browser lease: " + leaseErrorText(e));
+    });
+    s.browserChain = p;
+    return p;
+  }
+
+  /** The turn's tile record, created at its first browser call. */
+  function browserRecord(turn, toolCallId) {
+    if (!turn.browser) {
+      turn.browser = {
+        anchor: typeof toolCallId === "string" && toolCallId ? toolCallId.slice(0, 128) : null,
+        gen: null, domain: null, live: false,
+        // B4: an operator already holding the browser when the bot first
+        // reaches for it counts as a take-over during this turn.
+        operatorTook: browserOperatorHeld,
+        lastRenewAt: -Infinity, finished: false,
+      };
+    } else if (!turn.browser.anchor && typeof toolCallId === "string" && toolCallId) {
+      turn.browser.anchor = toolCallId.slice(0, 128);
+    }
+    return turn.browser;
+  }
+
+  /** Light (or refresh) the tile from a lease read, when it means this session's turn. */
+  function applyBrowserLease(s, turn, l) {
+    if (s.turn !== turn || !turn.browser || turn.browser.finished) return;
+    const ev = tileEventFor(l, s, now());
+    if (!ev) return;
+    const rec = turn.browser;
+    if (rec.live && rec.gen === ev.gen && rec.emittedDomain === ev.domain) return;
+    if (!rec.live) rec.lastRenewAt = now();   // the MCP server just took or renewed it
+    rec.live = true;
+    armBrowserRenew(s, turn);
+    rec.gen = ev.gen;
+    rec.emittedDomain = ev.domain;
+    s.browser = rec;
+    emit(s, ev);
+  }
+
+  /** Child-event side: anchor on the turn's first browser call, read the lease after each. */
+  function onBrowserToolEvent(s, m, phase) {
+    const turn = s.turn;
+    if (!turn) return;
+    const id = typeof m.toolCallId === "string" && m.toolCallId ? m.toolCallId : null;
+    // A router call's end frame may not carry its args: the start frame's
+    // verdict is remembered by toolCallId (bounded; the set dies with the turn).
+    let browser = isBrowserTool(m.toolName, m.args);
+    if (!browser && phase === "end" && id && turn.browserCalls) browser = turn.browserCalls.has(id);
+    if (!browser || !browserDir()) return;
+    if (phase === "start" && id) {
+      if (!turn.browserCalls) turn.browserCalls = new Set();
+      if (turn.browserCalls.size < 256) turn.browserCalls.add(id);
+    }
+    const rec = browserRecord(turn, id);
+    // crow_browser_wait_for_user: remembered at its start (an end frame may
+    // carry no args), announced at its end, and only when it really parked
+    // (not a busy / held refusal from the lease guard).
+    if (phase === "start" && id && isWaitForUser(m.toolName, m.args)) {
+      if (!turn.waitCalls) turn.waitCalls = new Set();
+      if (turn.waitCalls.size < 64) turn.waitCalls.add(id);
+    }
+    if (phase === "end" && id && turn.waitCalls && turn.waitCalls.has(id)) {
+      turn.waitCalls.delete(id);
+      if (!m.isError && waitedForUser(m)) attentionForBrowser(s, turn);
+    }
+    if (phase !== "end" || rec.finished) return;
+    browserQueue(s, async () => {
+      const dir = browserDir();
+      if (!dir || s.turn !== turn) return;
+      applyBrowserLease(s, turn, await readLease(dir));
+    });
+  }
+
+  /** Renew this session's own holding, at most once per 10 s; never takes a free lease. */
+  function renewBrowser(s) {
+    const turn = s.turn;
+    const rec = turn && turn.browser;
+    if (!rec || !rec.live || rec.finished) return;
+    const t = now();
+    if (t - rec.lastRenewAt < BROWSER_RENEW_MS) return;
+    rec.lastRenewAt = t;
+    browserQueue(s, async () => {
+      const dir = browserDir();
+      if (!dir || s.turn !== turn || rec.finished) return;
+      // Under the lease lock: renewed only while this session still holds it.
+      await renewBrowserLease(dir, { kind: "bot", sessionId: s.sessionId, botId: s.botId }, browserWriteOpts());
+    });
+  }
+
+  /** While the tile is live, renew every 10 s even when the child is silent
+   *  (a slow local model never loses the page between steps, spec §4.1). */
+  function armBrowserRenew(s, turn) {
+    const rec = turn.browser;
+    if (!rec || rec.renewTimer != null) return;
+    rec.renewTimer = timer(function tickRenew() {
+      rec.renewTimer = null;
+      if (s.turn !== turn || rec.finished) return;
+      renewBrowser(s);
+      rec.renewTimer = timer(tickRenew, BROWSER_RENEW_MS);
+    }, BROWSER_RENEW_MS);
+  }
+
+  function clearBrowserRenew(turn) {
+    const rec = turn && turn.browser;
+    if (rec && rec.renewTimer != null) { clearTimer(rec.renewTimer); rec.renewTimer = null; }
+  }
+
+  /**
+   * Every turn exit: (optionally) the final shot, then release, then `done`.
+   * Runs after the reply and after `s.turn` is cleared (spec §7 item 2) on the
+   * turn-end paths. `turn` may be null (a close with no turn in flight): then
+   * it only releases a holding still naming this session. Idempotent per turn.
+   * `allowShot`: the turn ended or was stopped by the operator — a crash,
+   * error or shutdown takes no shot.
+   */
+  function finishBrowser(s, turn, { allowShot = false } = {}) {
+    const rec = turn ? turn.browser : null;
+    if (rec) {
+      if (rec.finished) return Promise.resolve();
+      rec.finished = true;
+      clearBrowserRenew(turn);
+    }
+    const dir = browserDir();
+    if (!dir) return Promise.resolve();
+    return browserQueue(s, async () => {
+      let l = null;
+      try { l = await readLease(dir); } catch { l = null; }
+      const operator = browserOperatorHeld;
+      let shot = null;
+      try {
+        if (rec && rec.live && allowShot && !operator) {
+          try {
+            shot = await withDeadline((signal) => browserHooks.finalShot({
+              sessionId: s.sessionId, botId: s.botId, threadId: s.threadId,
+              outputsDir: s.outputsDir || null,
+              anchor: rec.anchor, gen: rec.gen,
+              genAtEnd: l ? l.gen : null,
+              heldAtEnd: heldBySession(l, s.sessionId, now()),
+              operatorTook: rec.operatorTook,
+              signal,
+            }), FINAL_SHOT_TIMEOUT_MS);
+          } catch (e) {
+            log(s.sessionId + ": browser final shot failed: " + leaseErrorText(e));
+          }
+        }
+        // A later turn of this session that is already using the browser owns
+        // the holding now (the same session id): leave it to that turn.
+        const newer = s.turn && s.turn !== turn && s.turn.browser;
+        if (namesSession(l, s.sessionId) && !newer) {
+          try {
+            await releaseBrowserLease(dir, s.sessionId, browserWriteOpts());
+          } catch (e) {
+            log(s.sessionId + ": browser lease release: " + leaseErrorText(e));
+          }
+        }
+      } finally {
+        if (rec && rec.live) emit(s, doneEventFor(rec, { shot, operator, ask: !!(turn && turn.browserAsked) }));
+        if (rec && s.browser === rec) s.browser = null;
+      }
+    });
+  }
+
+  /**
+   * The read-only CDP watcher (Task 5): reports every bot holding of this
+   * instance's lease (so a tile lights while the first browser call is still
+   * running) with the leased page's domain from CDP, serves the frames route,
+   * and takes the final shot. Off unless `browserWatch` (the process singleton).
+   */
+  let browserWatcher = null;
+  if (browserWatch) {
+    try {
+      const dir = browserCfg.dir || browserLeaseDir((name) => join(crowHome, name));
+      browserWatcher = createBrowserWatcher({
+        crowHome,
+        leaseDir: dir,
+        log,
+        onLease: (l, extra) => browserLeaseChanged(l, extra),
+      });
+      browserHooks.finalShot = createFinalShotHook({
+        watcher: browserWatcher,
+        leaseDir: dir,
+        storeShot,
+        createDb: createDbClient,
+        operatorHeld: () => browserOperatorHeld,
+        now,
+        log,
+      });
+    } catch (e) {
+      browserWatcher = null;
+      log("browser watcher unavailable: " + leaseErrorText(e));
+    }
+  }
+
+  /**
+   * Take-over hook (Task 7's route): the operator took (true) or handed back /
+   * lost (false) the browser. While held, no in-flight turn's stall watchdog
+   * runs, and every turn using the browser records the take-over (B4).
+   */
+  function browserOperator(held) {
+    held = !!held;
+    if (held === browserOperatorHeld) return;
+    browserOperatorHeld = held;
+    for (const s of sessions.values()) {
+      if (!s.turn) continue;
+      if (held) {
+        if (s.turn.browser) s.turn.browser.operatorTook = true;
+        clearStall(s);
+      } else {
+        armStall(s);
+      }
+      // The turn's live tile: "Waiting for you" (held) / back to Live (handed back).
+      const rec = s.turn.browser;
+      if (rec && rec.live && !rec.finished) emit(s, { type: "browser", phase: "operator", anchor: rec.anchor || null, held });
+    }
+  }
+
+  /**
+   * Take over / Hand back (Task 7): the gateway's in-memory operator record,
+   * changed only through the take-over routes (Ruling B4). Its changes drive
+   * browserOperator() above (the operator note, the stall pause, the tile's
+   * "Waiting for you").
+   */
+  const browserTakeOver = createBrowserTakeOver({
+    dir: () => browserDir(),
+    onHeld: (held) => browserOperator(held),
+    now, setTimer, clearTimer,
+    isAlive: typeof browserCfg.isAlive === "function" ? browserCfg.isAlive : null,
+    forceBreakAfterMs: FORCE_BREAK_AFTER_MS,
+    log,
+  });
+
+  /** The session has a live turn using the browser. */
+  function browserTurnLive(sessionId) {
+    const s = sessions.get(String(sessionId || ""));
+    const rec = s && s.turn && s.turn.browser;
+    return !!(rec && !rec.finished && s.state !== "stopped");
+  }
+
+  /** sessionId → when its bot last parked on crow_browser_wait_for_user. Kept
+   *  apart from the session record (a hibernated session keeps its ask). */
+  const browserAsked = new Map();
+  const BROWSER_ASK_WINDOW_MS = 30 * 60_000;
+
+  /**
+   * May a "?take-over=1" link (a needs-you item, a Done tile that asked) take
+   * the browser for this session? Yes while its turn is using the browser, or
+   * within 30 minutes of its bot asking for the operator, as long as no OTHER
+   * bot holds the lease (free, this session's own, or the operator's). A stale
+   * click never grabs another bot's browser.
+   */
+  async function browserLinkOk(sessionId) {
+    const sid = String(sessionId || "");
+    if (browserTurnLive(sid)) return true;
+    const at = browserAsked.get(sid);
+    if (at == null) return false;
+    if (now() - at > BROWSER_ASK_WINDOW_MS) { browserAsked.delete(sid); return false; }
+    const d = browserDir();
+    if (!d) return false;
+    let l;
+    try { l = await readLease(d); } catch { return false; }
+    if (!l || isLeaseFree(l, now()) || !l.holder) return true;
+    if (l.holder.kind === "operator") return true;
+    return l.holder.kind === "bot" && l.holder.sessionId === sid;
+  }
+
+  /** wait_for_user's result says it parked ("status": "waiting_for_user"). */
+  function waitedForUser(m) {
+    const r = m && m.result;
+    let text = typeof m.resultText === "string" ? m.resultText : "";
+    if (typeof r === "string") text += r;
+    else if (r && Array.isArray(r.content)) {
+      for (const c of r.content) if (c && typeof c.text === "string" && text.length < 65536) text += c.text;
+    }
+    return /"status"\s*:\s*"waiting_for_user"/.test(text);
+  }
+
+  /** A bot parked on crow_browser_wait_for_user: one "needs you" per turn that
+   *  opens the Take over sheet in that chat. No URL or host rides it. */
+  function attentionForBrowser(s, turn) {
+    browserAsked.set(s.sessionId, now());
+    if (browserAsked.size > 256) browserAsked.delete(browserAsked.keys().next().value);
+    if (turn.browserAsked) return;
+    turn.browserAsked = true;
+    pushAttention({
+      type: "attention",
+      priority: "high",
+      title: s.botId + " needs you",
+      body: "Take over the browser in the chat.",
+      action_url: "/dashboard/perch?take-over=1#" + s.sessionId,
+    });
+  }
+
+  /**
+   * Watcher hook (Task 5): the lease changed, and/or the CDP watcher resolved
+   * the leased page's domain. Lights or refreshes a tile only for a session
+   * that has a live turn using the browser and holds the lease (a lease naming
+   * a session with no turn, e.g. after a restart, lights nothing).
+   */
+  function browserLeaseChanged(l, { domain } = {}) {
+    for (const s of sessions.values()) {
+      const turn = s.turn;
+      if (!turn || !turn.browser || turn.browser.finished) continue;
+      if (!heldBySession(l, s.sessionId, now())) continue;
+      if (domain !== undefined) turn.browser.domain = validDomain(domain);
+      applyBrowserLease(s, turn, l);
+    }
   }
 
   // ---- lease file ----------------------------------------------------------
@@ -2080,7 +2445,15 @@ export function createInteractiveEngine({
       // bot def cannot set this itself for a channel turn.
       // 2026-10-20: plus the maximum dialog cap, so no pi-lab ever answers an
       // operator's silence with its 2-minute "no" (see PERCH_ASK_TIMEOUT_MS).
-      extraEnv: { PI_BOT_INTERACTIVE: "1", PI_BOT_INTERACTIVE_ASK_TIMEOUT_MS: PERCH_ASK_TIMEOUT_MS },
+      // Live browser tile: the session's identity for the browser MCP server's
+      // lease (bridge.mjs strips PI_BOT_* from a bot def's spawn_env, so only
+      // the engine can name a Perch session).
+      extraEnv: {
+        PI_BOT_INTERACTIVE: "1",
+        PI_BOT_INTERACTIVE_ASK_TIMEOUT_MS: PERCH_ASK_TIMEOUT_MS,
+        PI_BOT_PERCH_SESSION_ID: s.sessionId,
+        PI_BOT_ID: s.botId,
+      },
       // Track 3 Task 4: permissionMode binds at wake — the session record's
       // current value goes into every spawn/wake's PiRpc opts. Default
       // "guarded" is a byte-identical no-op for a fresh session (mirrors
@@ -2203,6 +2576,7 @@ export function createInteractiveEngine({
       emit(s, { type: "error", text: message, reason: "pi_exit", turnId: deadTurn ? deadTurn.id : null });
       emit(s, stateEvent(s));
       writeRow(s, { status: "waiting-user" }).catch(() => {});
+      finishBrowser(s, deadTurn);                    // live browser tile: the child is gone
     }).catch(() => {});
   }
 
@@ -2248,8 +2622,10 @@ export function createInteractiveEngine({
     if (!m || typeof m !== "object") return;
     touchStall(s);
     s.lastEventAt = now();                           // Track 3 Task 7: eviction recency
+    renewBrowser(s);                                 // live browser tile: ≤ once per 10 s
     switch (m.type) {
       case "tool_execution_start":
+        onBrowserToolEvent(s, m, "start");
         // D22: reading outside text taints this session for Artifacts trust.
         // Recorded at call START from the engine's own (bot, thread).
         // Written SYNCHRONOUSLY in this tick (before the gateway handles any
@@ -2272,6 +2648,7 @@ export function createInteractiveEngine({
         return;
       case "tool_execution_end":
         if (s.turn && m.toolName) s.turn.toolNames.push(m.toolName);
+        onBrowserToolEvent(s, m, "end");
         // Wave 3: same for the outcome — the result's TEXT blocks, pi-lab's
         // own 2000-char cap, stringified fallback for non-text payloads.
         emit(s, { type: "tool", name: m.toolName, phase: "end", isError: !!m.isError,
@@ -2672,6 +3049,7 @@ export function createInteractiveEngine({
   function stopTurnClocks(s, turn) {
     if (turn.graceTimer != null) { clearTimer(turn.graceTimer); turn.graceTimer = null; }
     clearStall(s);
+    clearBrowserRenew(turn);
   }
 
   async function onTurnEnd(s, turn, end) {
@@ -2686,6 +3064,8 @@ export function createInteractiveEngine({
       s.lastEventAt = now();                          // Track 3 Task 7: became idle now
       emit(s, stateEvent(s));
       armIdle(s);
+      // A stopped turn keeps its final screenshot (spec §7).
+      await finishBrowser(s, turn, { allowShot: true });
       return;
     }
 
@@ -2796,6 +3176,8 @@ export function createInteractiveEngine({
     s.lastEventAt = now();                            // Track 3 Task 7: became idle now
     emit(s, stateEvent(s));
     armIdle(s);
+    // Live browser tile: after the reply and after s.turn is cleared (spec §7 item 2).
+    await finishBrowser(s, turn, { allowShot: true });
   }
 
   async function onTurnError(s, turn, err) {
@@ -2817,6 +3199,7 @@ export function createInteractiveEngine({
       if (s.turn === turn) s.turn = null;            // M-4: released at the end
       emit(s, stateEvent(s));
       armIdle(s);
+      await finishBrowser(s, turn);
       return;
     }
     if (s.pi) await abandonChild(s, message);        // clears s.turn itself
@@ -2824,6 +3207,7 @@ export function createInteractiveEngine({
       if (s.turn === turn) s.turn = null;
       emit(s, stateEvent(s));
     }
+    await finishBrowser(s, turn);                    // a no-op when abandonChild already did it
   }
 
   /**
@@ -2908,6 +3292,7 @@ export function createInteractiveEngine({
    */
   async function abandonChild(s, reason) {
     const pi = s.pi;
+    const turn = s.turn;
     s.pi = null;
     s.turn = null;
     clearStall(s);
@@ -2919,6 +3304,10 @@ export function createInteractiveEngine({
     writeLeases();
     await writeRow(s, { status: "waiting-user" }).catch(() => {});
     emit(s, stateEvent(s));
+    // After the close, so the child's MCP pids are gone and nothing defers on
+    // them. An aborted turn (the abort grace ran out) was stopped by the
+    // operator and keeps its shot; a crash or error does not take one.
+    await finishBrowser(s, turn, { allowShot: !!(turn && turn.aborted) });
   }
 
   // ---- public surface ------------------------------------------------------
@@ -3772,6 +4161,7 @@ export function createInteractiveEngine({
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
     const pi = s.pi;
+    const turn = s.turn;
     s.pi = null;
     if (s.turn) s.turn.aborted = true;               // a late agent_end stays silent
     s.turn = null;
@@ -3789,6 +4179,8 @@ export function createInteractiveEngine({
     writeLeases();
     await writeRow(s, { status: "stopped" }).catch(() => {});
     emit(s, stateEvent(s));
+    // Live browser tile: the operator stopped it, so the turn keeps its shot.
+    await finishBrowser(s, turn, { allowShot: true });
     return { ok: true };
   }
 
@@ -3856,6 +4248,12 @@ export function createInteractiveEngine({
       // Strand 2: the child's tool-budget notice (emitted at spawn, usually
       // before anyone was listening).
       if (s.budgetNotice && s.pi) replay({ type: "log", text: s.budgetNotice });
+      // Live browser tile: a reconnecting drawer redraws a tile that is live now
+      // (only with a turn in flight: a reload never shows a stale Live).
+      if (s.turn && s.browser && s.browser === s.turn.browser && s.browser.live && !s.browser.finished) {
+        replay({ type: "browser", phase: "live", anchor: s.browser.anchor || null, domain: s.browser.domain || null, gen: s.browser.gen });
+        if (browserOperatorHeld) replay({ type: "browser", phase: "operator", anchor: s.browser.anchor || null, held: true });
+      }
     } catch { /* a broken subscriber is not our problem */ }
     return () => s.subscribers.delete(fn);
   }
@@ -3925,6 +4323,7 @@ export function createInteractiveEngine({
     writeLeases();
     await writeRow(s, { status: "waiting-user" }).catch(() => {});
     emit(s, stateEvent(s));
+    await finishBrowser(s, null);                    // live browser tile: release on close
   }
 
   /**
@@ -3950,6 +4349,7 @@ export function createInteractiveEngine({
       // mid-turn when the shutdown interrupted it, distinct from a plain idle
       // park (control stays 'run').
       const hadTurn = !!s.turn;
+      const turn = s.turn;
       if (s.turn) s.turn.aborted = true;
       s.turn = null;
       if (s.state !== "stopped") s.state = "hibernating";
@@ -3965,12 +4365,15 @@ export function createInteractiveEngine({
             await writeRow(s, { status: "waiting-user" }, hadTurn ? "interrupted" : "run");
           } catch { /* best effort */ }
           try { await pi.close(); } catch { /* already dead */ }
+          await finishBrowser(s, turn);              // live browser tile; the TTL is the backstop
         })(),
         new Promise((r) => { timerHandle = setTimeout(r, timeoutMs); }),
       ]);
       if (timerHandle) clearTimeout(timerHandle);
     }));
     writeLeases();
+    if (browserWatcher) { try { browserWatcher.close(); } catch { /* closed */ } }
+    try { browserTakeOver.close(); } catch { /* closed */ }
     return { stopped: live.length };
   }
 
@@ -4087,6 +4490,18 @@ export function createInteractiveEngine({
     waitingOnCard,
     /** Track 3 Task 9: attach an existing session to a card — see its own doc. */
     attachCard,
+    /** Live browser tile hooks: the lease watcher (Task 5) reports a changed
+     * lease / the leased page's domain; the take-over route (Task 7) reports
+     * the operator's holding; Task 5 fills browserHooks.finalShot. */
+    browserLeaseChanged,
+    browserOperator,
+    browserHooks,
+    /** Take over / Hand back / heartbeat for the routes (Task 7). */
+    browserTakeOver,
+    browserTurnLive,
+    browserLinkOk,
+    /** The frames route's watcher (null unless this engine watches a browser). */
+    get browserWatcher() { return browserWatcher; },
     /** Precondition-test surface (r1 S10) — also the internal resolver. */
     _loadSeams: loadSeams,
     /** Track 3 Task 7: test-only reach into the internal hibernate() — every
@@ -4134,7 +4549,7 @@ let singleton = null;
  *   must not mint an engine (and a lease file) on its way out.
  */
 export function getInteractiveEngine({ createIfMissing = true } = {}) {
-  if (!singleton && createIfMissing) singleton = createInteractiveEngine();
+  if (!singleton && createIfMissing) singleton = createInteractiveEngine({ browserWatch: true });
   return singleton;
 }
 
@@ -4163,6 +4578,8 @@ export async function emitExternalToResident(threadId, frame, opts) {
 /** Test-only: drop the singleton so one test can never leak an engine (or a
  * live child) into the next. */
 export function _resetInteractiveEngineForTest() {
+  const w = singleton && singleton.browserWatcher;
+  if (w) { try { w.close(); } catch { /* closed */ } }
   singleton = null;
 }
 

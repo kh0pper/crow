@@ -18,7 +18,7 @@
  *     created with O_CREAT|O_EXCL|O_NOFOLLOW: no path is resolved twice.
  * The workspace route serves from here (perch-interactive-api.js).
  */
-import { closeSync, constants as fs, fstatSync, mkdirSync, openSync, readlinkSync } from "node:fs";
+import { closeSync, constants as fs, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readlinkSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { anchoredPath, secretsDir } from "./secret-values.js";
 
@@ -80,14 +80,66 @@ export function openDeliveredDir(sessionId, { create = false } = {}) {
   } finally { closeSync(root); }
 }
 
+/** A delivered file's name: one flat, non-dot component. */
+function validName(name) {
+  const n = String(name || "");
+  return !!n && n.length <= 255 && !n.includes("/") && !n.includes("\0") && !n.startsWith(".");
+}
+
+/**
+ * PR-E (audit item 12): pick the stored name for a delivered file.
+ * Collision policy (operator decision 2026-09-13): SUFFIX, never overwrite —
+ * `report.png` → `report-2.png` → `report-3.png`, first slot free of every
+ * existing name in the dir(s), sync loop. A dotfile basename is renamed out of
+ * dotness (the workspace route refuses any dotfile path SEGMENT, so a stored
+ * `.secret` would be a permanently dead card; `secret` is served instead).
+ * `dir` may be a list: a sent copy's name must not collide with a file in the
+ * staging dir OR in the session's outputs dir (both are served under the same
+ * flat name). Pure apart from the existence checks; the caller creates the
+ * file with O_EXCL.
+ */
+export function resolveSentName(dir, basename) {
+  const dirs = [].concat(dir).filter(Boolean);
+  const clean = String(basename == null ? "" : basename).replace(/[\\/]/g, "").replace(/^\.+/, "").trim() || "file";
+  const dot = clean.lastIndexOf(".");
+  const stem = dot > 0 ? clean.slice(0, dot) : clean;
+  const ext = dot > 0 ? clean.slice(dot) : "";
+  let candidate = clean;
+  for (let n = 2; dirs.some((d) => existsSync(join(d, candidate))); n++) {
+    candidate = stem + "-" + n + ext;
+  }
+  return candidate;
+}
+
 /** Open one delivered file (flat name, never a symlink) for reading; caller closes. */
 export function openDeliveredFile(sessionId, name) {
   const n = String(name || "");
-  if (!n || n.length > 255 || n.includes("/") || n.includes("\0") || n.startsWith(".")) throw new Error("bad name");
+  if (!validName(n)) throw new Error("bad name");
   const dfd = openDeliveredDir(sessionId);
   try {
     return openSync("/proc/self/fd/" + dfd + "/" + n, fs.O_RDONLY | fs.O_NOFOLLOW | fs.O_NONBLOCK);
   } finally { closeSync(dfd); }
+}
+
+/**
+ * Remove one delivered file. Same anchoring as every other access: the
+ * session dir is opened from the root fd with O_NOFOLLOW (a symlinked session
+ * dir is refused), and the name is unlinked through that dir fd
+ * (/proc/self/fd/<dirfd>/<name>; Node has no unlinkat). unlink never follows
+ * its last component, and anything that is not a regular file (a planted
+ * symlink, a dir, a fifo) is left alone and reported false. Never throws.
+ */
+export function unlinkDelivered(sessionId, name) {
+  if (!validName(name)) return false;
+  let dfd;
+  try {
+    dfd = openDeliveredDir(sessionId);
+    const p = "/proc/self/fd/" + dfd + "/" + String(name);
+    if (!lstatSync(p).isFile()) return false;
+    unlinkSync(p);
+    return true;
+  } catch { return false; }
+  finally { if (dfd !== undefined) { try { closeSync(dfd); } catch { /* closed */ } } }
 }
 
 /** The session's staging dir path for display / snapshots (never opened by path). */

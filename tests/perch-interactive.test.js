@@ -356,7 +356,9 @@ test("spawn: builds the world, warms, constructs PiRpc with the FULL piRpcOpts +
   assert.ok(opts.resolved && opts.resolved.key === "crow-local/qwen3.6-35b-a3b");
   assert.ok(opts.def);
   assert.equal(opts.piSessionId, null, "a fresh spawn resumes nothing");
-  assert.deepEqual(opts.extraEnv, { PI_BOT_INTERACTIVE: "1", PI_BOT_INTERACTIVE_ASK_TIMEOUT_MS: "2147483647" });
+  // + the live browser tile's identity for the browser MCP server's lease.
+  assert.deepEqual(opts.extraEnv, { PI_BOT_INTERACTIVE: "1", PI_BOT_INTERACTIVE_ASK_TIMEOUT_MS: "2147483647",
+    PI_BOT_PERCH_SESSION_ID: r.sessionId, PI_BOT_ID: "botty" });
   assert.equal(typeof opts.onEvent, "function");
 
   const row = rowFor(r.threadId);
@@ -1038,7 +1040,8 @@ test("wake: a message to a hibernating session rebuilds the world FRESH and resu
   const wakeOpts = state.instances[1].opts;
   assert.equal(wakeOpts.narrowedTools, '["bash","write"]', "the FRESH narrowing lands in the wake spawn");
   assert.equal(wakeOpts.piSessionId, firstPi.piSessionId, "the pi session is resumed, not restarted");
-  assert.deepEqual(wakeOpts.extraEnv, { PI_BOT_INTERACTIVE: "1", PI_BOT_INTERACTIVE_ASK_TIMEOUT_MS: "2147483647" });
+  assert.deepEqual(wakeOpts.extraEnv, { PI_BOT_INTERACTIVE: "1", PI_BOT_INTERACTIVE_ASK_TIMEOUT_MS: "2147483647",
+    PI_BOT_PERCH_SESSION_ID: s.sessionId, PI_BOT_ID: "botty" }, "the same identity on every wake");
   assert.equal((await engine.get(s.sessionId)).state, "awake");
   assert.equal(rowFor(s.threadId).status, "active");
   assert.equal(state.instances[1].turns[0].message, "back again");
