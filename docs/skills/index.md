@@ -10,7 +10,7 @@ Skills are markdown files in `skills/` that define behavioral prompts for the AI
 | **Memory Management** | `memory-management.md` | Store, search, and retrieve persistent memories across sessions. Use this skill to maintain context about the user, thei |
 | **Plan Review** | `plan-review.md` | Before executing multi-step or significant tasks, Crow outlines its approach as an inline plan and waits for user approv |
 | **Reflection** | `reflection.md` | A meta-skill for evaluating *how well things went* and proposing concrete fixes. Identifies friction, maps root causes,  |
-| **Research Pipeline** | `research-pipeline.md` | Manage academic and professional research with full source tracking, APA citations, and verification. Every piece of inf |
+| **Research Pipeline** | `research-pipeline.md` | Research with sources Crow opened itself. Search results are leads, notes say where each claim comes from, and prose cites only fetched sources. |
 | **Session Summary** | `session-summary.md` | Save session summary and key learnings to Crow memory |
 | **Skill Writing** | `skill-writing.md` | This skill enables the AI to create, modify, and propose new skill files (`skills/*.md`) when existing skills don't cove |
 | **Superpowers** | `superpowers.md` | This is the master routing skill. Consult this **before every task** to determine which skills and tools to activate. It |
@@ -59,7 +59,7 @@ Skills are markdown files in `skills/` that define behavioral prompts for the AI
 | **Project Management** | `project-management.md` | Interact with Trello boards and Canvas LMS to retrieve and manage project/learning data. Syncs important information to  |
 | **Slack** | `slack.md` | Interact with Slack workspaces — channels, messages, threads — through the Slack MCP server. Monitor conversations, send |
 | **Songbook** | `songbook.md` | Personal chord book — ChordPro charts, transposition, chord diagrams, setlists, and music theory |
-| **Web Search** | `web-search.md` | Search the web using Brave Search for research, fact-checking, current events, and general information gathering. Every  |
+| **Web Search** | `web-search.md` | Search the web for research, fact-checking and current events. Search results are leads, not sources; Crow opens a page before anything from it is cited. |
 
 ## Developer Skills
 

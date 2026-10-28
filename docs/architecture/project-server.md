@@ -96,13 +96,14 @@ Get full details of a specific source.
 
 ### crow_verify_source
 
-Mark a source's verification status.
+Verify a source, or clear its verification. With `quotes_checked` the source is marked verified only when it has at least one quote note and every quote is found on the page Crow fetched. See [Verifying a source](#verifying-a-source).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `source_id` | number | Yes | Source ID |
-| `verified` | boolean | Yes | Verification status |
-| `verification_notes` | string | No | Notes about verification |
+| `id` | number | Yes | Source ID |
+| `verified` | boolean | No | `true` to verify (default), `false` to clear verification |
+| `method` | string | No | `quotes_checked` (default) or `manual_owner` (the owner only; bots cannot) |
+| `notes` | string | No | Verification notes |
 
 ### crow_list_sources
 

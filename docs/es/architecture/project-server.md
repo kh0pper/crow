@@ -96,13 +96,14 @@ Obtiene los detalles completos de una fuente específica.
 
 ### crow_verify_source
 
-Marca el estado de verificación de una fuente.
+Verifica una fuente o quita su verificación. Con `quotes_checked`, la fuente queda verificada solo si tiene al menos una nota de cita y cada cita aparece en la página que Crow obtuvo. Consulta [Verificar una fuente](#verificar-una-fuente).
 
 | Parámetro | Tipo | Requerido | Descripción |
 |---|---|---|---|
-| `source_id` | number | Sí | ID de la fuente |
-| `verified` | boolean | Sí | Estado de verificación |
-| `verification_notes` | string | No | Notas sobre la verificación |
+| `id` | number | Sí | ID de la fuente |
+| `verified` | boolean | No | `true` para verificar (predeterminado), `false` para quitar la verificación |
+| `method` | string | No | `quotes_checked` (predeterminado) o `manual_owner` (solo el propietario; los bots no pueden) |
+| `notes` | string | No | Notas sobre la verificación |
 
 ### crow_list_sources
 
