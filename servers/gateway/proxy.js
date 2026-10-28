@@ -26,6 +26,7 @@ import { livenessStatusSql } from "../shared/instance-status.js";
 import { recordPeerProbe } from "./peer-probe-health.js";
 import bus from "../shared/event-bus.js";
 import { rowIsTrusted } from "../shared/peer-trust.js";
+import { peerActorMeta } from "../shared/peer-label.js";
 
 /** GET <gatewayUrl>/health with a 5 s cap; throws on non-2xx or timeout. */
 async function probePeerHealth(gatewayUrl) {
@@ -609,11 +610,13 @@ export function createProxyServer(filter) {
       server.registerTool(
         tool.name,
         { description: tool.description || `Tool from ${integrationId}`, inputSchema: jsonSchemaToZodObject(tool.inputSchema, (entry.schemaPool ||= { units: SOURCE_BUDGET })) },
-        async (args) => {
+        async (args, extra) => {
           try {
             const result = await entry.client.callTool({
               name: tool.name,
               arguments: args,
+              // A paired instance's call says so ({kind:"peer", from}); nothing the caller sent is forwarded.
+              ...peerActorMeta(extra),
             });
             return result;
           } catch (error) {

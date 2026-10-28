@@ -8,6 +8,7 @@
 // gateway token marks itself with an `x-crow-actor-kind` request header (bot | unknown, plus
 // `x-crow-actor-id` for a bot): the same downgrade, read from the HTTP request. Nothing per call
 // ever yields the owner, and a missing actor is never the owner.
+import { peerActorMeta } from "../shared/peer-label.js";
 
 export const OWNER = Object.freeze({ kind: "owner" });
 export const UNKNOWN = Object.freeze({ kind: "unknown" });
@@ -79,7 +80,8 @@ export function resolveCallActor(base, extra) {
 
 /** What a dispatching router forwards to the server it calls: the incoming actor, or a peer marker. */
 export function forwardActorMeta(extra) {
-  if (isPeer(extra)) return { _meta: { "crow/actor": { kind: "peer" } } };
+  // A peer is forwarded in the one shape every gateway forwarder uses ({kind:"peer", instance, from}).
+  if (isPeer(extra)) return peerActorMeta(extra);
   const m = metaActor(extra);
   if (m && typeof m === "object") return { _meta: { "crow/actor": m } };
   const h = headerActor(extra);

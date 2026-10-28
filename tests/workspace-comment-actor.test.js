@@ -151,3 +151,42 @@ test("resolveActor: env bot beats _meta; _meta of kind owner is ignored; authorF
   assert.deepEqual(authorFor({ kind: "owner", name: "Alex" }), { author: "Alex", initials: "A" });
   assert.deepEqual(authorFor(null), { author: "Crow", initials: "C" });
 });
+
+// Item 46 follow-up (PR-A): a paired instance's call carries {kind:"peer", instance, from}, set by this
+// instance's gateway from its own row for that peer. It reads "Crow (via <name>)", never a bot label.
+const PEER = { kind: "peer", instance: "inst-a-1a2b3c4d", from: "wren" };
+
+test("peer comment author: 'Crow (via <instance>)', for add, reply and apply-edit replies", async () => {
+  put("p1.docx");
+  const a = await callAs("ws_docs_add_comment", { path: "S/p1.docx", content: "hola", quoted_text: "Marinar la carne" }, PEER);
+  assert.equal(a.success, true, JSON.stringify(a));
+  assert.equal((await comments("S/p1.docx")).find((x) => x.id === a.data.comment_id).author, "Crow (via wren)");
+  const rep = await callAs("ws_docs_reply_comment", { path: "S/p1.docx", comment_id: a.data.comment_id, content: "Sí" }, PEER);
+  assert.equal((await comments("S/p1.docx")).find((x) => x.id === a.data.comment_id).replies.find((r) => r.id === rep.data.comment_id).author, "Crow (via wren)");
+  const r = await callAs("ws_docs_apply_comment_edit", { path: "S/p1.docx", comment_id: a.data.comment_id, replace_text: "Marinar bien", summary: "Hecho" }, PEER);
+  assert.equal(r.data.applied, true);
+  assert.equal((await comments("S/p1.docx")).find((x) => x.id === a.data.comment_id).replies.at(-1).author, "Crow (via wren)");
+});
+
+test("queued peer comment keeps 'Crow (via <instance>)' at close-time apply", async () => {
+  put("p2.docx", "oo-rich.docx");
+  const key = fake.openInEditor("S/p2.docx", ["admin"], { releaseAfterMs: 10 ** 9 });
+  const r = await callAs("ws_docs_add_comment", { path: "S/p2.docx", content: "en cola peer", quoted_text: "Marinar la carne" }, PEER);
+  assert.equal(r.data.queued, true, JSON.stringify(r));
+  fake.node("S/p2.docx").lock = null; fake.state.sessions.delete(key);
+  await W.makeTick({ db, getConfig, clock: { now: () => Date.now(), sleep: async () => {} } })();
+  assert.equal((await comments("S/p2.docx")).find((x) => x.content === "en cola peer").author, "Crow (via wren)");
+});
+
+test("resolveActor/authorFor for a peer: sanitized name, no name -> 'Crow', never a bot; an env bot still wins", async () => {
+  const { resolveActor, authorFor } = await import("../bundles/workspace/server/actor.js");
+  const meta = (a) => ({ _meta: { "crow/actor": a } });
+  assert.deepEqual(resolveActor({}, meta(PEER)), { kind: "peer", instance: "inst-a-1a2b3c4d", from: "wren" });
+  assert.deepEqual(resolveActor({}, meta({ kind: "peer", from: "wr‮en (bot)" + "x".repeat(60) })).from.length <= 40, true);
+  assert.equal(resolveActor({}, meta({ kind: "peer", from: "a(b)" })).from, "ab");
+  assert.deepEqual(resolveActor({}, meta({ kind: "peer" })), { kind: "peer", instance: "", from: "" });
+  assert.deepEqual(authorFor({ kind: "peer", from: "wren" }), { author: "Crow (via wren)", initials: "C" });
+  assert.deepEqual(authorFor({ kind: "peer", from: "" }), { author: "Crow", initials: "C" });
+  assert.deepEqual(resolveActor({ CROW_ACTOR_KIND: "bot", CROW_ACTOR_BOT_ID: "hank", CROW_ACTOR_BOT_NAME: "hank" }, meta(PEER)), HANK);
+  assert.equal(resolveActor({ CROW_ACTOR_KIND: "owner", CROW_OWNER_NAME: "Alex" }, meta(PEER)).kind, "peer", "a peer call is never the owner");
+});

@@ -254,6 +254,8 @@ export function mountMcpServer(router, prefix, createServer, sessionManager, aut
           clientId: `instance:${req.instanceAuth.instance.id}`,
           scopes: ["mcp:tools"],
           expiresAt: Math.floor(Date.now() / 1000) + 300,
+          // Handlers see this as extra.authInfo.extra; peerActorMeta (shared/peer-label.js) forwards it.
+          extra: { peerName: req.instanceAuth.peerName ?? null },
         };
         return next();
       }

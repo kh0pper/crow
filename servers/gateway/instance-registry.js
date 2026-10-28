@@ -10,6 +10,7 @@
  */
 
 import { randomBytes, createHash } from "crypto";
+import { resolvePeerLabel } from "../shared/peer-label.js";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "fs";
 import { resolve, dirname } from "path";
 import { hostname as osHostname, tmpdir } from "os";
@@ -772,7 +773,11 @@ export function instanceAuthMiddleware(db) {
     const instance = await validateInstanceToken(db, token);
 
     if (instance) {
-      req.instanceAuth = { instance };
+      // How this peer is named on what it writes here: our own row's name, id-suffixed when not unique
+      // (servers/shared/peer-label.js). Never from anything the request claims.
+      let peerName = null;
+      try { peerName = await resolvePeerLabel(db, instance, getOrCreateLocalInstanceId()); } catch { peerName = null; }
+      req.instanceAuth = { instance, peerName };
       return next();
     }
 

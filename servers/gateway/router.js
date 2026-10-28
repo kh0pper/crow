@@ -32,6 +32,7 @@ import { TOOL_MANIFESTS, buildCompressedDescription } from "./tool-manifests.js"
 import { connectedServers } from "./proxy.js";
 import { createDbClient } from "../db.js";
 import { generateCrowContext } from "../memory/crow-context.js";
+import { peerActorMeta } from "../shared/peer-label.js";
 
 /**
  * Server factory map — maps category names to their factory functions.
@@ -194,7 +195,7 @@ export function createRouterServer(options = {}) {
       instance_id: z.string().optional().describe("Route to a specific remote instance by ID (use crow_discover category 'instances' to see available)"),
       params: jsonObject().optional().describe("Parameters for the tool, as an object; the tool validates them"),
     },
-    async ({ action, params, instance_id }) => {
+    async ({ action, params, instance_id }, extra) => {
       // If instance_id is specified, route directly to that remote instance
       if (instance_id) {
         const instanceKey = `instance-${instance_id}`;
@@ -241,6 +242,8 @@ export function createRouterServer(options = {}) {
             const result = await entry.client.callTool({
               name: action,
               arguments: params || {},
+              // A paired instance's call says so ({kind:"peer", from}); nothing the caller sent is forwarded.
+              ...peerActorMeta(extra),
             });
             return result;
           } catch (error) {
