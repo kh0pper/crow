@@ -186,7 +186,10 @@ export const EXCLUDED_COLUMNS = {
   // found on the fetched page, and where. Each is a judgment the instance that fetched the page
   // made about ITS copy, so it stays local in v1; replicating it needs a fleet-version gate (an
   // un-upgraded peer would write it into a column it lacks, or drop it on re-emit).
-  research_notes: ["provenance", "quote_found", "locator"],
+  // Note authorship and withdrawal (0015) stay local too. created_by names a LOCAL actor
+  // ("owner", "bot:<id>") and gates who may withdraw the note: a peer's "bot:x" would hand this
+  // instance's unrelated bot x that right. A withdrawal is this instance's judgment of its copy.
+  research_notes: ["provenance", "quote_found", "locator", "created_by", "withdrawn_at", "withdrawn_by", "withdrawn_reason"],
 };
 
 // Columns dropped from an INBOUND row in _applyEntry: after the signature check (the signature
@@ -196,7 +199,8 @@ export const EXCLUDED_COLUMNS = {
 // research_notes.source_id is a local FK (source rows are not synced, ids are per-instance), so
 // a peer's value would point a note at an unrelated local source, e.g. a quotes_checked one.
 export const INBOUND_DROPPED_COLUMNS = {
-  research_notes: ["provenance", "quote_found", "locator", "source_id"],
+  research_notes: ["provenance", "quote_found", "locator", "source_id",
+    "created_by", "withdrawn_at", "withdrawn_by", "withdrawn_reason"],
 };
 
 function dropInboundColumns(table, row) {
@@ -3623,24 +3627,31 @@ export class InstanceSyncManager {
   /**
    * After an inbound research_notes update: if its text or type changed, this instance's
    * quote_found for it no longer holds (cleared to unknown), and a quotes_checked verification of
-   * its local source is cleared, as a failed local re-check would. Best effort: pre-0013 DBs lack
-   * the columns, and the update itself has already applied.
+   * its local source is cleared, as a failed local re-check would. A note withdrawn here is left
+   * alone: its quote_found is frozen and it no longer backs the verification. Best effort: pre-0013
+   * DBs lack the columns, and the update itself has already applied. A pre-0015 DB has no
+   * withdrawn_at (so nothing is withdrawn): each UPDATE retries without that guard.
    */
   async _invalidateNoteQuoteCheck(row, prior) {
     const changed = ("content" in row && String(row.content ?? "") !== String(prior.content ?? ""))
       || ("note_type" in row && String(row.note_type ?? "") !== String(prior.note_type ?? ""));
     if (!changed) return;
-    try {
-      await this.db.execute({ sql: "UPDATE research_notes SET quote_found = NULL WHERE id = ?", args: [row.id] });
-    } catch {}
-    try {
-      await this.db.execute({
-        sql: `UPDATE research_sources SET verified = 0, verification_method = NULL, verified_by = NULL
+    const run = async (guarded, unguarded) => {
+      try {
+        await this.db.execute({ sql: guarded, args: [row.id] });
+      } catch (err) {
+        if (!/no such column: withdrawn_at/.test(String(err && err.message))) return;
+        try { await this.db.execute({ sql: unguarded, args: [row.id] }); } catch {}
+      }
+    };
+    await run(
+      "UPDATE research_notes SET quote_found = NULL WHERE id = ? AND withdrawn_at IS NULL",
+      "UPDATE research_notes SET quote_found = NULL WHERE id = ?",
+    );
+    const sourceSql = (live) => `UPDATE research_sources SET verified = 0, verification_method = NULL, verified_by = NULL
                WHERE verification_method = 'quotes_checked'
-                 AND id = (SELECT source_id FROM research_notes WHERE id = ?)`,
-        args: [row.id],
-      });
-    } catch {}
+                 AND id = (SELECT source_id FROM research_notes WHERE id = ?${live ? " AND withdrawn_at IS NULL" : ""})`;
+    await run(sourceSql(true), sourceSql(false));
   }
 
   /**

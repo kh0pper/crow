@@ -23,19 +23,30 @@ export const id = "0013-research-provenance";
 
 const TABLES = ["research_sources", "research_notes"];
 
+/**
+ * Why a research-table migration must wait on this DB, or null when it can run: either table is
+ * absent, or still carries its pre-W2-5-B2 FK to research_projects. Shared with 0015.
+ */
+export function researchTablesDeferral(db) {
+  for (const t of TABLES) {
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(t)) {
+      return `${t}: absent`;
+    }
+    if (db.prepare(`PRAGMA foreign_key_list(${t})`).all().some((r) => r.table === "research_projects")) {
+      return `${t}: FK still targets research_projects — init-db's rebuild runs first`;
+    }
+  }
+  return null;
+}
+
 export function run({ dbPath, log = () => {} }) {
   const db = new Database(dbPath);
   db.pragma("busy_timeout = 10000");
   try {
-    for (const t of TABLES) {
-      if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(t)) {
-        log(`  ${t}: absent`);
-        return { deferred: true };
-      }
-      if (db.prepare(`PRAGMA foreign_key_list(${t})`).all().some((r) => r.table === "research_projects")) {
-        log(`  ${t}: FK still targets research_projects — init-db's rebuild runs first`);
-        return { deferred: true };
-      }
+    const deferral = researchTablesDeferral(db);
+    if (deferral) {
+      log(`  ${deferral}`);
+      return { deferred: true };
     }
 
     const results = [];

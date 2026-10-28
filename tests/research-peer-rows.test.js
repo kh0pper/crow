@@ -28,7 +28,8 @@ import { createCloneBundleHelpers } from "../servers/sharing/clone-bundle.js";
 import { deliverPendingShares } from "../servers/sharing/boot.js";
 import { registerShareInboxTools } from "../servers/sharing/tools/share-inbox.js";
 import { SOURCE_TYPES } from "../servers/research/source-types.js";
-import { PROVENANCE_COLUMNS } from "../servers/research/provenance-schema.js";
+import { PROVENANCE_COLUMNS, NOTE_WITHDRAWAL_COLUMNS } from "../servers/research/provenance-schema.js";
+import { run as run0013 } from "../scripts/migrations/0013-research-provenance.mjs";
 import { makePre0013Db, openFixtureDb } from "./helpers/research-fixtures.js";
 import * as ed from "../node_modules/@noble/ed25519/index.js";
 
@@ -53,7 +54,9 @@ function initDb(prefix) {
 
 const SYNC_DB = initDb("peer-rows-sync-");
 
-const NOTE_PROV = ["locator", "provenance", "quote_found"];
+// Every research_notes column that stays on this instance: 0013's provenance plus 0015's
+// authorship and withdrawal.
+const NOTE_PROV = ["created_by", "locator", "provenance", "quote_found", "withdrawn_at", "withdrawn_by", "withdrawn_reason"];
 const SOURCE_FETCH = ["fetch_status", "fetched_at", "final_url", "http_status", "content_sha256",
   "fetched_text", "fetch_error", "verification_method", "verified_by"];
 const ALL_0013 = PROVENANCE_COLUMNS.map((c) => c.column);
@@ -124,7 +127,7 @@ function pre0013WithProjectTables(prefix) {
   const path = makePre0013Db(join(tmp(prefix), "crow.db"));
   const ref = new Database(initDb(`${prefix}ref-`), { readonly: true });
   const ddl = ref.prepare(
-    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name IN ('project_spaces','project_members','project_audit_log','data_backends')",
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name IN ('project_spaces','project_members','project_audit_log','data_backends','storage_files')",
   ).all().map((r) => r.sql);
   ref.close();
   const db = openFixtureDb(path);
@@ -134,7 +137,7 @@ function pre0013WithProjectTables(prefix) {
 
 // ── instance sync ───────────────────────────────────────────────────────────
 
-test("EXCLUDED_COLUMNS.research_notes strips the provenance columns", () => {
+test("EXCLUDED_COLUMNS.research_notes strips the provenance and withdrawal columns", () => {
   assert.deepEqual([...EXCLUDED_COLUMNS.research_notes].sort(), NOTE_PROV);
   assert.deepEqual([...INBOUND_DROPPED_COLUMNS.research_notes].sort(), [...NOTE_PROV, "source_id"].sort());
 });
@@ -142,7 +145,8 @@ test("EXCLUDED_COLUMNS.research_notes strips the provenance columns", () => {
 test("an emitted research_notes entry carries no provenance keys", async () => {
   const { mgr, entries } = makeManager();
   await mgr.emitChange("research_notes", "insert",
-    { id: 1, content: "x", provenance: "fetched", quote_found: 1, locator: "p2" });
+    { id: 1, content: "x", provenance: "fetched", quote_found: 1, locator: "p2",
+      created_by: "bot:x", withdrawn_at: "2026-10-28T00:00:00Z", withdrawn_by: "owner", withdrawn_reason: "misquote" });
   assert.equal(entries.length, 1, "exactly one entry on the wire");
   const payload = entries[0].row;
   for (const k of NOTE_PROV) assert.ok(!(k in payload), `payload must not carry ${k}: ${JSON.stringify(payload)}`);
@@ -242,6 +246,79 @@ test("a note's source_id is a local FK: null on the wire, never written from a p
   }, 70));
   s = (await db.execute({ sql: "SELECT * FROM research_sources WHERE id = 7301" })).rows[0];
   assert.equal(s.verification_method, "manual_owner", "only quotes_checked is ever cleared");
+});
+
+test("inbound notes never write the withdrawal columns", async () => {
+  const { mgr, db } = makeManager();
+  // Signed over the FULL row: a peer (or a hostile one) claims a local bot wrote it and that it
+  // was withdrawn. The signature still verifies, the note applies, and none of it is stored.
+  await mgr._applyEntry(REMOTE_ID, signedEntry("research_notes", "insert", {
+    id: 7401, content: "peer note", note_type: "quote",
+    created_by: "bot:x", withdrawn_at: "2026-10-28T00:00:00Z", withdrawn_by: "bot:x", withdrawn_reason: "peer says so",
+  }, 40));
+  const row = (await db.execute({ sql: "SELECT * FROM research_notes WHERE id = 7401" })).rows[0];
+  assert.ok(row, "the signature verified and the note applied");
+  assert.equal(row.content, "peer note");
+  assert.equal(row.created_by, null, "bot x is never this note's author here");
+  assert.equal(row.withdrawn_at, null);
+  assert.equal(row.withdrawn_by, null);
+  assert.equal(row.withdrawn_reason, null);
+});
+
+test("a peer edit leaves a withdrawn note alone", async () => {
+  const { mgr, db } = makeManager();
+  const mkVerified = async (id) => db.execute({
+    sql: `INSERT INTO research_sources (id, title, source_type, url, citation_apa, verified, fetch_status, fetched_text, verification_method, verified_by)
+          VALUES (?, 'S', 'web_article', ?, 'C', 1, 'fetched', 'We will ship weekly.', 'quotes_checked', 'owner')`,
+    args: [id, `https://example.com/wd-${id}`],
+  });
+  const source = async (id) => (await db.execute({ sql: "SELECT verified, verification_method FROM research_sources WHERE id = ?", args: [id] })).rows[0];
+  const note = async (id) => (await db.execute({ sql: "SELECT content, quote_found FROM research_notes WHERE id = ?", args: [id] })).rows[0];
+
+  // Withdrawn here: its quote_found is frozen and it no longer counts toward the verification.
+  await mkVerified(7501);
+  await db.execute({
+    sql: `INSERT INTO research_notes (id, source_id, content, note_type, quote_found, withdrawn_at, withdrawn_by, withdrawn_reason, lamport_ts)
+          VALUES (7511, 7501, 'We will ship weekly.', 'quote', 1, '2026-10-28T00:00:00Z', 'owner', 'misquote', 10)`,
+  });
+  await mgr._applyEntry(REMOTE_ID, signedEntry("research_notes", "update", {
+    id: 7511, content: "We will ship hourly.", note_type: "quote",
+  }, 50));
+  assert.deepEqual({ ...(await note(7511)) }, { content: "We will ship hourly.", quote_found: 1 }, "the edit applied, quote_found untouched");
+  assert.deepEqual({ ...(await source(7501)) }, { verified: 1, verification_method: "quotes_checked" }, "still verified");
+
+  // Control: the same edit on a live note still invalidates.
+  await mkVerified(7502);
+  await db.execute({
+    sql: "INSERT INTO research_notes (id, source_id, content, note_type, quote_found, lamport_ts) VALUES (7512, 7502, 'We will ship weekly.', 'quote', 1, 10)",
+  });
+  await mgr._applyEntry(REMOTE_ID, signedEntry("research_notes", "update", {
+    id: 7512, content: "We will ship hourly.", note_type: "quote",
+  }, 50));
+  assert.deepEqual({ ...(await note(7512)) }, { content: "We will ship hourly.", quote_found: null });
+  assert.deepEqual({ ...(await source(7502)) }, { verified: 0, verification_method: null });
+});
+
+test("_invalidateNoteQuoteCheck still invalidates on a pre-0015 DB (no withdrawn_at)", async () => {
+  const path = makePre0013Db(join(tmp("peer-rows-pre0015-"), "crow.db"));
+  assert.equal(run0013({ dbPath: path, log: () => {} }).applied, true);
+  const fx = openFixtureDb(path);
+  try {
+    assert.ok(!columnsOf(fx, "research_notes").includes("withdrawn_at"), "fixture is pre-0015");
+    // The fixture's note 1 quotes source 1; make that a quotes_checked verification.
+    fx.prepare("UPDATE research_sources SET verification_method = 'quotes_checked', verified_by = 'owner' WHERE id = 1").run();
+    fx.prepare("UPDATE research_notes SET quote_found = 1, note_type = 'quote' WHERE id = 1").run();
+    const mgr = new InstanceSyncManager(IDENTITY, wrapDb(fx), `peer-rows-test-${++seq}`);
+    await mgr._invalidateNoteQuoteCheck(
+      { id: 1, content: "Something else entirely." },
+      { content: "Something the first source said.", note_type: "quote" },
+    );
+    assert.equal(fx.prepare("SELECT quote_found FROM research_notes WHERE id = 1").get().quote_found, null,
+      "the guarded UPDATE failed on the missing column and the unguarded retry ran");
+    assert.deepEqual({ ...fx.prepare("SELECT verified, verification_method, verified_by FROM research_sources WHERE id = 1").get() },
+      { verified: 0, verification_method: null, verified_by: null });
+    assert.equal(fx.prepare("SELECT verified FROM research_sources WHERE id = 2").get().verified, 1, "only the note's source");
+  } finally { fx.close(); }
 });
 
 // ── share import ────────────────────────────────────────────────────────────
@@ -354,6 +431,43 @@ test("a clone bundle never carries fetched text or provenance", async () => {
   } finally { bs.close(); }
 });
 
+test("a clone bundle skips withdrawn notes and note.withdraw audit rows", async () => {
+  const bs = new Database(initDb("peer-rows-bundle-wd-"));
+  try {
+    const pid = Number(bs.prepare(
+      "INSERT INTO project_spaces (uuid, slug, name, type) VALUES ('u-proj-wd', 'wd-proj', 'Withdrawn', 'general')",
+    ).run().lastInsertRowid);
+    bs.prepare("INSERT INTO research_notes (project_id, content, note_type, created_by) VALUES (?, 'live', 'note', 'owner')").run(pid);
+    bs.prepare(
+      `INSERT INTO research_notes (project_id, content, note_type, created_by, withdrawn_at, withdrawn_by, withdrawn_reason)
+       VALUES (?, 'gone', 'quote', 'bot:x', '2026-10-28T00:00:00Z', 'owner', 'misquote')`,
+    ).run(pid);
+    const audit = bs.prepare("INSERT INTO project_audit_log (project_id, actor_type, actor_id, action, target) VALUES (?, 'local', 'owner', ?, ?)");
+    audit.run(pid, "note.add", "note:1");
+    audit.run(pid, "note.withdraw", "note:2");
+
+    const { buildProjectCloneBundle } = createCloneBundleHelpers({ db: wrapDb(bs) });
+    const bundle = await buildProjectCloneBundle(pid);
+    assert.equal(bundle.notes.length, 1);
+    assert.equal(bundle.notes[0].content, "live");
+    for (const k of NOTE_PROV) assert.ok(!(k in bundle.notes[0]), `bundle note must not carry ${k}`);
+    assert.ok(bundle.audit_log.some((r) => r.action === "note.add"), "other audit rows still ship");
+    assert.ok(!bundle.audit_log.some((r) => r.action === "note.withdraw"), "no note.withdraw audit row ships");
+  } finally { bs.close(); }
+
+  // A pre-0015 DB (no withdrawn_at) still builds a bundle.
+  const fx = pre0013WithProjectTables("peer-rows-bundle-pre0015-");
+  try {
+    const pid = Number(fx.prepare(
+      "INSERT INTO project_spaces (uuid, slug, name, type) VALUES ('u-proj-pre', 'pre-proj', 'Pre', 'general')",
+    ).run().lastInsertRowid);
+    fx.prepare("UPDATE research_notes SET project_id = ? WHERE id = 1").run(pid);
+    const { buildProjectCloneBundle } = createCloneBundleHelpers({ db: wrapDb(fx) });
+    const bundle = await buildProjectCloneBundle(pid);
+    assert.equal(bundle.notes.length, 1);
+  } finally { fx.close(); }
+});
+
 function cloneBundle(slug) {
   return {
     bundle_version: 1,
@@ -417,7 +531,7 @@ function seedPlainShare(prefix) {
        'quotes_checked', 'owner')`,
   ).run(pid, "t".repeat(1000)).lastInsertRowid);
   const nid = Number(bs.prepare(
-    "INSERT INTO research_notes (project_id, source_id, content, note_type, provenance, quote_found, locator) VALUES (?, ?, 'q', 'quote', 'fetched', 1, 'p2')",
+    "INSERT INTO research_notes (project_id, source_id, content, note_type, provenance, quote_found, locator, created_by) VALUES (?, ?, 'q', 'quote', 'fetched', 1, 'p2', 'bot:x')",
   ).run(pid, sid).lastInsertRowid);
   const cid = Number(bs.prepare(
     "INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES ('crow:plainpeer', 'Peer', 'ed-p', 'secp-p')",
@@ -426,7 +540,7 @@ function seedPlainShare(prefix) {
 }
 
 function assertNo0013(payload, table) {
-  for (const { table: t, column } of PROVENANCE_COLUMNS) {
+  for (const { table: t, column } of [...PROVENANCE_COLUMNS, ...NOTE_WITHDRAWAL_COLUMNS]) {
     if (t === table) assert.ok(!(column in payload), `a plain ${table} share must not carry ${column}`);
   }
 }

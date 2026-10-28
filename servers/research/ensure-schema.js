@@ -7,9 +7,10 @@
 // waiting on init-db's rebuild); "error" is anything else (a busy store, an unreadable file).
 import Database from "better-sqlite3";
 import { run } from "../../scripts/migrations/0013-research-provenance.mjs";
-import { PROVENANCE_COLUMNS } from "./provenance-schema.js";
+import { run as run0015 } from "../../scripts/migrations/0015-research-note-withdrawal.mjs";
+import { PROVENANCE_COLUMNS, NOTE_WITHDRAWAL_COLUMNS } from "./provenance-schema.js";
 
-function missingColumns(dbPath) {
+function missingColumns(dbPath, specs = PROVENANCE_COLUMNS) {
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
   try {
     const have = new Map();
@@ -17,7 +18,7 @@ function missingColumns(dbPath) {
       if (!have.has(t)) have.set(t, new Set(db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name)));
       return have.get(t);
     };
-    return PROVENANCE_COLUMNS.filter(({ table, column }) => !cols(table).has(column)).map((c) => `${c.table}.${c.column}`);
+    return specs.filter(({ table, column }) => !cols(table).has(column)).map((c) => `${c.table}.${c.column}`);
   } finally {
     db.close();
   }
@@ -31,6 +32,26 @@ export function ensureProvenanceSchema(dbPath) {
       return { ready: false, state: "deferred", reason: "research tables absent or still on the research_projects FK shape" };
     }
     const missing = missingColumns(dbPath);
+    if (missing.length) return { ready: false, state: "error", reason: `missing columns: ${missing.join(", ")}` };
+    return { ready: true, state: "ready" };
+  } catch (err) {
+    return { ready: false, state: "error", reason: err && err.message ? err.message : String(err) };
+  }
+}
+
+/**
+ * ensureWithdrawalSchema: the same contract for 0015's note authorship and withdrawal columns,
+ * kept separate so a DB where they fail to land leaves provenance readiness (and every
+ * fetch-before-cite tool) alone; only note withdrawal degrades.
+ * @returns {{ready: boolean, state: "ready"|"deferred"|"error", reason?: string}}
+ */
+export function ensureWithdrawalSchema(dbPath) {
+  try {
+    const outcome = run0015({ dbPath, log: () => {} });
+    if (outcome && outcome.deferred) {
+      return { ready: false, state: "deferred", reason: "research tables absent or still on the research_projects FK shape" };
+    }
+    const missing = missingColumns(dbPath, NOTE_WITHDRAWAL_COLUMNS);
     if (missing.length) return { ready: false, state: "error", reason: `missing columns: ${missing.join(", ")}` };
     return { ready: true, state: "ready" };
   } catch (err) {

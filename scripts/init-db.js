@@ -7,7 +7,7 @@ import { slugify, workspacePathFor, storagePrefixFor } from "../servers/shared/s
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "./pi-bots/bot-jobs-schema.mjs";
 import { SCHEMA_GENERATION } from "../servers/shared/schema-version.js";
 import { KEYCHAIN_DDL } from "../servers/gateway/keychain/schema.js";
-import { PROVENANCE_COLUMNS, PROVENANCE_INDEX_SQL } from "../servers/research/provenance-schema.js";
+import { PROVENANCE_COLUMNS, PROVENANCE_INDEX_SQL, NOTE_WITHDRAWAL_COLUMNS } from "../servers/research/provenance-schema.js";
 
 // Ensure data directory exists
 const dataDir = process.env.CROW_DB_PATH
@@ -1071,6 +1071,21 @@ try {
   await db.execute(PROVENANCE_INDEX_SQL);
 } catch (err) {
   console.warn(`Warning: could not create idx_sources_project_final_url: ${err.message}`);
+}
+
+// --- Research note authorship + withdrawal ---
+// Same NOTE_WITHDRAWAL_COLUMNS as scripts/migrations/0015-research-note-withdrawal.mjs (one shape,
+// two rails); after the FK rebuild for the same reason as the provenance block. ADD COLUMN only,
+// no back-fill, no generation bump.
+for (const spec of NOTE_WITHDRAWAL_COLUMNS) {
+  try {
+    await db.executeMultiple("BEGIN IMMEDIATE");
+    await addColumnIfMissing(spec.table, spec.column, spec.ddl);
+    await db.executeMultiple("COMMIT");
+  } catch (err) {
+    try { await db.executeMultiple("ROLLBACK"); } catch {}
+    console.warn(`Warning: could not add ${spec.table}.${spec.column}: ${err.message}`);
+  }
 }
 
 // W2-5 B2: PII purge — archived learner ps rows are residue of pre-B2 parental
