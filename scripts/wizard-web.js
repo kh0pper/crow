@@ -11,16 +11,54 @@
  */
 
 import { createServer } from "http";
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, chmodSync, renameSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
-import { execSync } from "child_process";
+import { execSync, spawn } from "child_process";
 import { platform } from "os";
+import { randomBytes, timingSafeEqual } from "crypto";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
-const ENV_PATH = resolve(ROOT, ".env");
-const PORT = 3456;
+// CROW_WIZARD_ENV_PATH points the wizard at another .env (tests use a scratch file).
+const ENV_PATH = process.env.CROW_WIZARD_ENV_PATH
+  ? resolve(process.env.CROW_WIZARD_ENV_PATH)
+  : resolve(ROOT, ".env");
+// WIZARD_PORT overrides the default port; 0 picks a free one.
+const PORT = /^\d+$/.test(process.env.WIZARD_PORT || "") && Number(process.env.WIZARD_PORT) <= 65535
+  ? Number(process.env.WIZARD_PORT)
+  : 3456;
+// The wizard only ever listens on loopback. It writes credentials and runs
+// config generators, so nothing else on the network may reach it.
+const HOST = "127.0.0.1";
+// Skip the .mcp.json / desktop config generators (tests), and the browser auto-open.
+const SKIP_CONFIG = process.env.CROW_WIZARD_SKIP_CONFIG === "1";
+const NO_OPEN = process.env.CROW_WIZARD_NO_OPEN === "1";
+
+// One-time session token: printed in the terminal link, required to load the
+// page and to save. A page on another origin (or a LAN host) never learns it.
+const TOKEN = randomBytes(24).toString("base64url");
+const TOKEN_HEADER = "x-crow-wizard-token";
+const MAX_BODY_BYTES = 64 * 1024;
+const MAX_VALUE_CHARS = 4096;
+
+// ── Small helpers ────────────────────────────────────────────────
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function tokenMatches(candidate) {
+  if (typeof candidate !== "string") return false;
+  const a = Buffer.from(candidate);
+  const b = Buffer.from(TOKEN);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 // ── Env file helpers ─────────────────────────────────────────────
 
@@ -39,190 +77,225 @@ function loadEnv() {
   return env;
 }
 
-function saveEnv(env) {
-  const lines = [
-    "# Crow - Environment Variables",
-    "# Saved by setup wizard",
-    "",
-    `CROW_DB_PATH=${env.CROW_DB_PATH || "./data/crow.db"}`,
-    `CROW_FILES_PATH=${env.CROW_FILES_PATH || "/home"}`,
-    "",
-  ];
-  for (const [key, val] of Object.entries(env)) {
-    if (key === "CROW_DB_PATH" || key === "CROW_FILES_PATH") continue;
-    lines.push(`${key}=${val}`);
+/**
+ * Write only the given (already validated, allowlisted) keys. Every other line
+ * of an existing .env is kept exactly as it was; a key already present is
+ * replaced in place, a new key is appended.
+ */
+function saveEnv(updates) {
+  let lines;
+  if (existsSync(ENV_PATH)) {
+    lines = readFileSync(ENV_PATH, "utf8").split("\n");
+    if (lines.length && lines[lines.length - 1] === "") lines.pop();
+  } else {
+    lines = [
+      "# Crow - Environment Variables",
+      "# Saved by setup wizard",
+      "",
+      "CROW_DB_PATH=./data/crow.db",
+      "CROW_FILES_PATH=/home",
+      "",
+    ];
   }
-  writeFileSync(ENV_PATH, lines.join("\n") + "\n");
+  const pending = new Map(Object.entries(updates));
+  const written = new Set();
+  const out = [];
+  for (const line of lines) {
+    const t = line.trim();
+    const eq = t.indexOf("=");
+    const key = !t.startsWith("#") && eq > 0 ? t.slice(0, eq).trim() : null;
+    if (key && pending.has(key)) {
+      if (!written.has(key)) out.push(`${key}=${pending.get(key)}`);
+      written.add(key);
+      continue;
+    }
+    out.push(line);
+  }
+  for (const [key, val] of pending) {
+    if (!written.has(key)) out.push(`${key}=${val}`);
+  }
+  // owner-only, and atomic: a crash mid-write never leaves a half-written .env
+  const tmp = `${ENV_PATH}.wizard-${process.pid}.tmp`;
+  writeFileSync(tmp, out.join("\n") + "\n", { mode: 0o600 });
+  chmodSync(tmp, 0o600);
+  renameSync(tmp, ENV_PATH);
 }
 
 // ── HTML UI ──────────────────────────────────────────────────────
 
-function buildHTML(env) {
-  const integrations = [
-    {
-      id: "google", name: "Google Workspace",
-      desc: "Gmail, Calendar, Docs, Sheets, Slides, and Google Chat",
-      icon: "mail",
-      oauth: true,
-      note: "Google uses OAuth — you'll sign in with your Google account the first time you use it. No key needed here unless you want to set up your own OAuth app.",
-      keys: [
-        { key: "GOOGLE_CLIENT_ID", label: "OAuth Client ID", optional: true },
-        { key: "GOOGLE_CLIENT_SECRET", label: "OAuth Client Secret", optional: true },
-      ],
-      steps: [
-        "Google Workspace uses <strong>OAuth sign-in</strong> — it will prompt you to log in with Google the first time.",
-        "If you want your own OAuth app: go to <a href='https://console.cloud.google.com/apis/credentials' target='_blank'>Google Cloud Console</a>",
-        "Create a project → Enable Gmail, Calendar, Sheets, Docs, Slides APIs → Create OAuth 2.0 credentials",
-        "Copy the Client ID and Client Secret below (optional — works without them too)",
-      ],
-    },
-    {
-      id: "notion", name: "Notion",
-      desc: "Wiki pages, databases, and knowledge base",
-      icon: "book",
-      keys: [{ key: "NOTION_TOKEN", label: "Integration Token" }],
-      steps: [
-        'Go to <a href="https://www.notion.so/my-integrations" target="_blank">notion.so/my-integrations</a>',
-        'Click <strong>"+ New integration"</strong>',
-        "Give it a name (e.g., \"Crow Memory\") and select your workspace",
-        'Click <strong>"Submit"</strong> → copy the <strong>Internal Integration Secret</strong>',
-        "Paste it below",
-        '<em>Important:</em> Open any Notion page you want Crow to access → click <strong>"..."</strong> → <strong>"Connect to"</strong> → select your integration',
-      ],
-    },
-    {
-      id: "slack", name: "Slack",
-      desc: "Team messaging, channels, and conversations",
-      icon: "message-circle",
-      keys: [{ key: "SLACK_BOT_TOKEN", label: "Bot Token (xoxb-...)" }],
-      steps: [
-        'Go to <a href="https://api.slack.com/apps" target="_blank">api.slack.com/apps</a>',
-        'Click <strong>"Create New App"</strong> → <strong>"From scratch"</strong>',
-        "Name it (e.g., \"Crow Memory\") and pick your workspace",
-        'Go to <strong>"OAuth & Permissions"</strong> in the sidebar',
-        'Under <strong>"Bot Token Scopes"</strong>, add: <code>channels:history</code>, <code>channels:read</code>, <code>chat:write</code>, <code>users:read</code>',
-        'Click <strong>"Install to Workspace"</strong> at the top → <strong>"Allow"</strong>',
-        'Copy the <strong>"Bot User OAuth Token"</strong> (starts with <code>xoxb-</code>)',
-        "Paste it below",
-      ],
-    },
-    {
-      id: "discord", name: "Discord",
-      desc: "Community servers, channels, and messages",
-      icon: "message-square",
-      keys: [{ key: "DISCORD_BOT_TOKEN", label: "Bot Token" }],
-      steps: [
-        'Go to <a href="https://discord.com/developers/applications" target="_blank">discord.com/developers/applications</a>',
-        'Click <strong>"New Application"</strong> → name it → <strong>"Create"</strong>',
-        'Go to <strong>"Bot"</strong> in the sidebar → click <strong>"Reset Token"</strong> → copy the token',
-        'Enable <strong>"Message Content Intent"</strong> under Privileged Gateway Intents',
-        'Go to <strong>"OAuth2" → "URL Generator"</strong> → check <code>bot</code> scope → check <code>Read Messages</code>, <code>Send Messages</code>',
-        "Copy the generated URL → open it in your browser → add bot to your server",
-        "Paste the bot token below",
-      ],
-    },
-    {
-      id: "github", name: "GitHub",
-      desc: "Repositories, issues, pull requests, and code",
-      icon: "git-branch",
-      keys: [{ key: "GITHUB_PERSONAL_ACCESS_TOKEN", label: "Personal Access Token" }],
-      steps: [
-        'Go to <a href="https://github.com/settings/tokens?type=beta" target="_blank">github.com/settings/tokens</a>',
-        'Click <strong>"Generate new token"</strong> (Fine-grained recommended)',
-        "Give it a name (e.g., \"Crow Memory\") and set expiration",
-        "Select which repositories to grant access to",
-        'Under permissions, enable: <code>Issues</code> (Read/Write), <code>Pull requests</code> (Read/Write), <code>Contents</code> (Read)',
-        'Click <strong>"Generate token"</strong> → copy it immediately',
-        "Paste it below",
-      ],
-    },
-    {
-      id: "trello", name: "Trello",
-      desc: "Project boards, lists, and cards",
-      icon: "layout",
-      keys: [
-        { key: "TRELLO_API_KEY", label: "API Key" },
-        { key: "TRELLO_TOKEN", label: "Token" },
-      ],
-      steps: [
-        'Go to <a href="https://trello.com/power-ups/admin" target="_blank">trello.com/power-ups/admin</a>',
-        "Click on your Power-Up (or create one) → copy the <strong>API Key</strong>",
-        'Then click the <strong>"Token"</strong> link on that page to authorize → click <strong>"Allow"</strong>',
-        "Copy the token that appears",
-        "Paste both below",
-      ],
-    },
-    {
-      id: "brave", name: "Brave Search",
-      desc: "Web search for research and fact-checking",
-      icon: "search",
-      keys: [{ key: "BRAVE_API_KEY", label: "API Key" }],
-      steps: [
-        'Go to <a href="https://brave.com/search/api/" target="_blank">brave.com/search/api</a>',
-        'Click <strong>"Get Started"</strong> and create a free account',
-        "The free plan gives you 2,000 searches/month",
-        "Copy your API key from the dashboard",
-        "Paste it below",
-      ],
-    },
-    {
-      id: "canvas", name: "Canvas LMS",
-      desc: "Courses, assignments, and grades",
-      icon: "graduation-cap",
-      keys: [
-        { key: "CANVAS_API_TOKEN", label: "Access Token" },
-        { key: "CANVAS_BASE_URL", label: "Canvas URL (e.g., https://school.instructure.com)" },
-      ],
-      steps: [
-        "Log into your Canvas account",
-        'Go to <strong>Account</strong> (left sidebar) → <strong>Settings</strong>',
-        'Scroll to <strong>"Approved Integrations"</strong> → click <strong>"+ New Access Token"</strong>',
-        "Give it a purpose (e.g., \"Crow Memory\") → Generate Token",
-        "Copy the token immediately (you won't see it again!)",
-        "Paste both the token and your Canvas URL below",
-      ],
-    },
-    {
-      id: "zotero", name: "Zotero",
-      desc: "Citation and reference management",
-      icon: "bookmark",
-      keys: [
-        { key: "ZOTERO_API_KEY", label: "API Key" },
-        { key: "ZOTERO_USER_ID", label: "User ID" },
-      ],
-      steps: [
-        'Go to <a href="https://www.zotero.org/settings/keys" target="_blank">zotero.org/settings/keys</a>',
-        "Your <strong>User ID</strong> is shown at the top of the page — copy it",
-        'Click <strong>"Create new private key"</strong>',
-        "Give it a name and grant library access",
-        "Copy the API key",
-        "Paste both below",
-      ],
-    },
-    {
-      id: "teams", name: "Microsoft Teams",
-      desc: "Teams chats and channels (experimental)",
-      icon: "users",
-      advanced: true,
-      keys: [
-        { key: "TEAMS_CLIENT_ID", label: "App Client ID" },
-        { key: "TEAMS_CLIENT_SECRET", label: "App Client Secret" },
-        { key: "TEAMS_TENANT_ID", label: "Tenant ID" },
-      ],
-      steps: [
-        '<em>Note: This requires Azure admin access and is more complex. Skip if unsure.</em>',
-        'Go to <a href="https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps" target="_blank">Azure Portal → App Registrations</a>',
-        'Click <strong>"+ New registration"</strong> → name it → Register',
-        'Copy the <strong>Application (client) ID</strong> and <strong>Directory (tenant) ID</strong>',
-        'Go to <strong>"Certificates & secrets"</strong> → <strong>"+ New client secret"</strong> → copy the value',
-        'Go to <strong>"API permissions"</strong> → Add: <code>Chat.Read</code>, <code>ChannelMessage.Read.All</code>, <code>ChannelMessage.Send</code>',
-        'Click <strong>"Grant admin consent"</strong>',
-        "Paste all three values below",
-      ],
-    },
-  ];
+const INTEGRATIONS = [
+  {
+    id: "google", name: "Google Workspace",
+    desc: "Gmail, Calendar, Docs, Sheets, Slides, and Google Chat",
+    icon: "mail",
+    oauth: true,
+    note: "Google uses OAuth — you'll sign in with your Google account the first time you use it. No key needed here unless you want to set up your own OAuth app.",
+    keys: [
+      { key: "GOOGLE_CLIENT_ID", label: "OAuth Client ID", optional: true },
+      { key: "GOOGLE_CLIENT_SECRET", label: "OAuth Client Secret", optional: true },
+    ],
+    steps: [
+      "Google Workspace uses <strong>OAuth sign-in</strong> — it will prompt you to log in with Google the first time.",
+      "If you want your own OAuth app: go to <a href='https://console.cloud.google.com/apis/credentials' target='_blank'>Google Cloud Console</a>",
+      "Create a project → Enable Gmail, Calendar, Sheets, Docs, Slides APIs → Create OAuth 2.0 credentials",
+      "Copy the Client ID and Client Secret below (optional — works without them too)",
+    ],
+  },
+  {
+    id: "notion", name: "Notion",
+    desc: "Wiki pages, databases, and knowledge base",
+    icon: "book",
+    keys: [{ key: "NOTION_TOKEN", label: "Integration Token" }],
+    steps: [
+      'Go to <a href="https://www.notion.so/my-integrations" target="_blank">notion.so/my-integrations</a>',
+      'Click <strong>"+ New integration"</strong>',
+      "Give it a name (e.g., \"Crow Memory\") and select your workspace",
+      'Click <strong>"Submit"</strong> → copy the <strong>Internal Integration Secret</strong>',
+      "Paste it below",
+      '<em>Important:</em> Open any Notion page you want Crow to access → click <strong>"..."</strong> → <strong>"Connect to"</strong> → select your integration',
+    ],
+  },
+  {
+    id: "slack", name: "Slack",
+    desc: "Team messaging, channels, and conversations",
+    icon: "message-circle",
+    keys: [{ key: "SLACK_BOT_TOKEN", label: "Bot Token (xoxb-...)" }],
+    steps: [
+      'Go to <a href="https://api.slack.com/apps" target="_blank">api.slack.com/apps</a>',
+      'Click <strong>"Create New App"</strong> → <strong>"From scratch"</strong>',
+      "Name it (e.g., \"Crow Memory\") and pick your workspace",
+      'Go to <strong>"OAuth & Permissions"</strong> in the sidebar',
+      'Under <strong>"Bot Token Scopes"</strong>, add: <code>channels:history</code>, <code>channels:read</code>, <code>chat:write</code>, <code>users:read</code>',
+      'Click <strong>"Install to Workspace"</strong> at the top → <strong>"Allow"</strong>',
+      'Copy the <strong>"Bot User OAuth Token"</strong> (starts with <code>xoxb-</code>)',
+      "Paste it below",
+    ],
+  },
+  {
+    id: "discord", name: "Discord",
+    desc: "Community servers, channels, and messages",
+    icon: "message-square",
+    keys: [{ key: "DISCORD_BOT_TOKEN", label: "Bot Token" }],
+    steps: [
+      'Go to <a href="https://discord.com/developers/applications" target="_blank">discord.com/developers/applications</a>',
+      'Click <strong>"New Application"</strong> → name it → <strong>"Create"</strong>',
+      'Go to <strong>"Bot"</strong> in the sidebar → click <strong>"Reset Token"</strong> → copy the token',
+      'Enable <strong>"Message Content Intent"</strong> under Privileged Gateway Intents',
+      'Go to <strong>"OAuth2" → "URL Generator"</strong> → check <code>bot</code> scope → check <code>Read Messages</code>, <code>Send Messages</code>',
+      "Copy the generated URL → open it in your browser → add bot to your server",
+      "Paste the bot token below",
+    ],
+  },
+  {
+    id: "github", name: "GitHub",
+    desc: "Repositories, issues, pull requests, and code",
+    icon: "git-branch",
+    keys: [{ key: "GITHUB_PERSONAL_ACCESS_TOKEN", label: "Personal Access Token" }],
+    steps: [
+      'Go to <a href="https://github.com/settings/tokens?type=beta" target="_blank">github.com/settings/tokens</a>',
+      'Click <strong>"Generate new token"</strong> (Fine-grained recommended)',
+      "Give it a name (e.g., \"Crow Memory\") and set expiration",
+      "Select which repositories to grant access to",
+      'Under permissions, enable: <code>Issues</code> (Read/Write), <code>Pull requests</code> (Read/Write), <code>Contents</code> (Read)',
+      'Click <strong>"Generate token"</strong> → copy it immediately',
+      "Paste it below",
+    ],
+  },
+  {
+    id: "trello", name: "Trello",
+    desc: "Project boards, lists, and cards",
+    icon: "layout",
+    keys: [
+      { key: "TRELLO_API_KEY", label: "API Key" },
+      { key: "TRELLO_TOKEN", label: "Token" },
+    ],
+    steps: [
+      'Go to <a href="https://trello.com/power-ups/admin" target="_blank">trello.com/power-ups/admin</a>',
+      "Click on your Power-Up (or create one) → copy the <strong>API Key</strong>",
+      'Then click the <strong>"Token"</strong> link on that page to authorize → click <strong>"Allow"</strong>',
+      "Copy the token that appears",
+      "Paste both below",
+    ],
+  },
+  {
+    id: "brave", name: "Brave Search",
+    desc: "Web search for research and fact-checking",
+    icon: "search",
+    keys: [{ key: "BRAVE_API_KEY", label: "API Key" }],
+    steps: [
+      'Go to <a href="https://brave.com/search/api/" target="_blank">brave.com/search/api</a>',
+      'Click <strong>"Get Started"</strong> and create a free account',
+      "The free plan gives you 2,000 searches/month",
+      "Copy your API key from the dashboard",
+      "Paste it below",
+    ],
+  },
+  {
+    id: "canvas", name: "Canvas LMS",
+    desc: "Courses, assignments, and grades",
+    icon: "graduation-cap",
+    keys: [
+      { key: "CANVAS_API_TOKEN", label: "Access Token" },
+      { key: "CANVAS_BASE_URL", label: "Canvas URL (e.g., https://school.instructure.com)" },
+    ],
+    steps: [
+      "Log into your Canvas account",
+      'Go to <strong>Account</strong> (left sidebar) → <strong>Settings</strong>',
+      'Scroll to <strong>"Approved Integrations"</strong> → click <strong>"+ New Access Token"</strong>',
+      "Give it a purpose (e.g., \"Crow Memory\") → Generate Token",
+      "Copy the token immediately (you won't see it again!)",
+      "Paste both the token and your Canvas URL below",
+    ],
+  },
+  {
+    id: "zotero", name: "Zotero",
+    desc: "Citation and reference management",
+    icon: "bookmark",
+    keys: [
+      { key: "ZOTERO_API_KEY", label: "API Key" },
+      { key: "ZOTERO_USER_ID", label: "User ID" },
+    ],
+    steps: [
+      'Go to <a href="https://www.zotero.org/settings/keys" target="_blank">zotero.org/settings/keys</a>',
+      "Your <strong>User ID</strong> is shown at the top of the page — copy it",
+      'Click <strong>"Create new private key"</strong>',
+      "Give it a name and grant library access",
+      "Copy the API key",
+      "Paste both below",
+    ],
+  },
+  {
+    id: "teams", name: "Microsoft Teams",
+    desc: "Teams chats and channels (experimental)",
+    icon: "users",
+    advanced: true,
+    keys: [
+      { key: "TEAMS_CLIENT_ID", label: "App Client ID" },
+      { key: "TEAMS_CLIENT_SECRET", label: "App Client Secret" },
+      { key: "TEAMS_TENANT_ID", label: "Tenant ID" },
+    ],
+    steps: [
+      '<em>Note: This requires Azure admin access and is more complex. Skip if unsure.</em>',
+      'Go to <a href="https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps" target="_blank">Azure Portal → App Registrations</a>',
+      'Click <strong>"+ New registration"</strong> → name it → Register',
+      'Copy the <strong>Application (client) ID</strong> and <strong>Directory (tenant) ID</strong>',
+      'Go to <strong>"Certificates & secrets"</strong> → <strong>"+ New client secret"</strong> → copy the value',
+      'Go to <strong>"API permissions"</strong> → Add: <code>Chat.Read</code>, <code>ChannelMessage.Read.All</code>, <code>ChannelMessage.Send</code>',
+      'Click <strong>"Grant admin consent"</strong>',
+      "Paste all three values below",
+    ],
+  },
+];
 
-  const cards = integrations.map((integ) => {
+// Keys the wizard may write: exactly the fields its own form declares.
+// CROW_GATEWAY_URL is the Mobile Access field (a URL, not a secret).
+const ALLOWED_KEYS = new Set([
+  ...INTEGRATIONS.flatMap((integ) => integ.keys.map((k) => k.key)),
+  "CROW_GATEWAY_URL",
+]);
+
+function buildHTML(env) {
+  const cards = INTEGRATIONS.map((integ) => {
     const isConfigured = integ.keys.every((k) => !k.optional && env[k.key]) ||
                          (integ.oauth && true);
     const badge = isConfigured && !integ.oauth
@@ -233,20 +306,25 @@ function buildHTML(env) {
           ? '<span class="badge advanced">Advanced</span>'
           : "";
 
+    // Saved values never go to the browser: the page shows whether a key is
+    // set, and an empty field on save keeps the stored value.
     const keyInputs = integ.keys
       .map((k) => {
-        const val = env[k.key] || "";
-        const masked = val ? val.slice(0, 6) + "•".repeat(Math.max(0, val.length - 10)) + val.slice(-4) : "";
+        const isSet = Boolean(env[k.key]);
+        const placeholder = isSet
+          ? "Saved. Leave empty to keep it, or paste a new value"
+          : k.optional ? "Optional — auto sign-in works without this" : "Paste your key here";
         return `
           <div class="key-field">
-            <label for="${k.key}">${k.label}${k.optional ? " (optional)" : ""}</label>
+            <label for="${esc(k.key)}">${esc(k.label)}${k.optional ? " (optional)" : ""}
+              <span class="key-state ${isSet ? "set" : "unset"}" id="state-${esc(k.key)}">${isSet ? "Set" : "Not set"}</span>
+            </label>
             <div class="input-row">
-              <input type="password" id="${k.key}" name="${k.key}" value="${val}"
-                     placeholder="${k.optional ? "Optional — auto sign-in works without this" : "Paste your key here"}"
+              <input type="password" id="${esc(k.key)}" name="${esc(k.key)}" value=""
+                     placeholder="${esc(placeholder)}"
                      autocomplete="off" spellcheck="false">
-              <button type="button" class="toggle-btn" onclick="toggleVisibility('${k.key}')">Show</button>
+              <button type="button" class="toggle-btn" onclick="toggleVisibility('${esc(k.key)}')">Show</button>
             </div>
-            ${val ? `<small class="current-val">Current: ${masked}</small>` : ""}
           </div>`;
       })
       .join("");
@@ -259,8 +337,8 @@ function buildHTML(env) {
       <div class="card ${integ.advanced ? "advanced-card" : ""}" id="card-${integ.id}">
         <div class="card-header" onclick="toggleCard('${integ.id}')">
           <div class="card-title">
-            <h3>${integ.name}</h3>
-            <p>${integ.desc}</p>
+            <h3>${esc(integ.name)}</h3>
+            <p>${esc(integ.desc)}</p>
           </div>
           <div class="card-badges">
             ${badge}
@@ -451,13 +529,15 @@ function buildHTML(env) {
       white-space: nowrap;
     }
     .toggle-btn:hover { background: #2d333b; color: #c9d1d9; }
-    .current-val {
-      display: block;
-      margin-top: 0.25rem;
-      color: #484f58;
-      font-family: monospace;
-      font-size: 0.75rem;
+    .key-state {
+      margin-left: 0.4rem;
+      font-size: 0.7rem;
+      padding: 0.05rem 0.45rem;
+      border-radius: 10px;
+      font-weight: 600;
     }
+    .key-state.set { background: #1a3a2a; color: #3fb950; }
+    .key-state.unset { background: #21262d; color: #8b949e; }
 
     .actions {
       margin-top: 2rem;
@@ -574,7 +654,7 @@ function buildHTML(env) {
             <label>Your Gateway URL (after deploying)</label>
             <div class="input-row">
               <input type="text" id="CROW_GATEWAY_URL" name="CROW_GATEWAY_URL"
-                     value="${env.CROW_GATEWAY_URL || ""}"
+                     value="${esc(env.CROW_GATEWAY_URL || "")}"
                      placeholder="https://crow-gateway-xxxx.onrender.com"
                      autocomplete="off">
               <button type="button" class="toggle-btn" onclick="testGateway()">Test</button>
@@ -616,6 +696,8 @@ function buildHTML(env) {
   </div>
 
   <script>
+    const WIZARD_TOKEN = ${JSON.stringify(TOKEN)};
+
     function toggleCard(id) {
       const body = document.getElementById('body-' + id);
       const chevron = document.getElementById('chevron-' + id);
@@ -675,7 +757,7 @@ function buildHTML(env) {
       try {
         const resp = await fetch('/save', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Crow-Wizard-Token': WIZARD_TOKEN },
           body: JSON.stringify(data),
         });
         const result = await resp.json();
@@ -683,6 +765,12 @@ function buildHTML(env) {
         if (result.ok) {
           status.className = 'status success';
           status.textContent = 'Saved! ' + result.message;
+          for (const key of result.saved || []) {
+            const input = document.getElementById(key);
+            const state = document.getElementById('state-' + key);
+            if (input && key !== 'CROW_GATEWAY_URL') input.value = '';
+            if (state) { state.textContent = 'Set'; state.className = 'key-state set'; }
+          }
         } else {
           status.className = 'status error';
           status.textContent = 'Error: ' + result.message;
@@ -701,83 +789,213 @@ function buildHTML(env) {
 
 // ── HTTP Server ──────────────────────────────────────────────────
 
-const server = createServer((req, res) => {
-  if (req.method === "GET" && (req.url === "/" || req.url === "/index.html")) {
-    const env = loadEnv();
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(buildHTML(env));
-    return;
+let boundPort = PORT;
+
+function allowedHosts() {
+  return new Set([`127.0.0.1:${boundPort}`, `localhost:${boundPort}`]);
+}
+
+function allowedOrigins() {
+  return new Set([`http://127.0.0.1:${boundPort}`, `http://localhost:${boundPort}`]);
+}
+
+const SECURITY_HEADERS = {
+  "Cache-Control": "no-store",
+  // The token is in the page URL; never leak it to the setup links' sites.
+  "Referrer-Policy": "no-referrer",
+  "X-Frame-Options": "DENY",
+  "X-Content-Type-Options": "nosniff",
+};
+
+const PAGE_CSP =
+  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+  "connect-src 'self' http: https:; img-src 'self'; form-action 'none'; " +
+  "frame-ancestors 'none'; base-uri 'none'";
+
+function sendJSON(res, status, obj, extra = {}) {
+  res.writeHead(status, { ...SECURITY_HEADERS, "Content-Type": "application/json", ...extra });
+  res.end(JSON.stringify(obj));
+}
+
+function sendText(res, status, text) {
+  res.writeHead(status, { ...SECURITY_HEADERS, "Content-Type": "text/plain; charset=utf-8" });
+  res.end(text);
+}
+
+const LINK_PAGE = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>Crow — Setup</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f1117;color:#e1e4e8;padding:3rem 1.5rem;text-align:center}</style>
+</head><body><h1>Crow setup wizard</h1>
+<p>Open the link printed in your terminal where the wizard is running. It includes a one-time key for this session.</p>
+</body></html>`;
+
+/**
+ * Validate a /save payload. Returns { updates } with only non-empty, allowed
+ * values, or { error } — one bad field refuses the whole request.
+ */
+function validateSave(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return { error: "Expected a JSON object of settings." };
+  }
+  const updates = {};
+  for (const [key, raw] of Object.entries(data)) {
+    if (!ALLOWED_KEYS.has(key)) return { error: `Unknown setting: ${key.slice(0, 64)}` };
+    if (typeof raw !== "string") return { error: `${key} must be text.` };
+    // one printable line: no line breaks, NUL or other control characters (they can garble .env and terminals)
+    if (/[\x00-\x1f\x7f\u2028\u2029]/.test(raw)) return { error: `${key} must be a single line of plain text.` };
+    if (raw.length > MAX_VALUE_CHARS) return { error: `${key} is too long.` };
+    const val = raw.trim();
+    if (val) updates[key] = val; // empty keeps the saved value
+  }
+  return { updates };
+}
+
+function handleSave(req, res) {
+  if (!tokenMatches(req.headers[TOKEN_HEADER])) {
+    return sendJSON(res, 403, { ok: false, message: "Missing or wrong session key. Reopen the link printed in your terminal." });
+  }
+  const ctype = String(req.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+  if (ctype !== "application/json") {
+    return sendJSON(res, 415, { ok: false, message: "Content-Type must be application/json." });
+  }
+  const origin = req.headers.origin;
+  if (origin !== undefined && !allowedOrigins().has(origin)) {
+    return sendJSON(res, 403, { ok: false, message: "Cross-origin request refused." });
+  }
+  const declared = Number(req.headers["content-length"]);
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    req.resume();
+    return sendJSON(res, 413, { ok: false, message: "Request too large." }, { Connection: "close" });
   }
 
-  if (req.method === "POST" && req.url === "/save") {
-    let body = "";
-    req.on("data", (chunk) => (body += chunk));
-    req.on("end", () => {
+  const chunks = [];
+  let size = 0;
+  let tooBig = false;
+  req.on("data", (chunk) => {
+    if (tooBig) return;
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) {
+      tooBig = true;
+      chunks.length = 0;
+      sendJSON(res, 413, { ok: false, message: "Request too large." }, { Connection: "close" });
+      res.on("finish", () => req.destroy());
+      return;
+    }
+    chunks.push(chunk);
+  });
+  req.on("end", () => {
+    if (tooBig) return;
+    let data;
+    try {
+      data = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    } catch {
+      return sendJSON(res, 400, { ok: false, message: "Body is not valid JSON." });
+    }
+    const { updates, error } = validateSave(data);
+    if (error) return sendJSON(res, 400, { ok: false, message: error });
+
+    const saved = Object.keys(updates);
+    try {
+      if (saved.length) saveEnv(updates);
+    } catch (err) {
+      return sendJSON(res, 500, { ok: false, message: `Could not write .env: ${err.message}` });
+    }
+
+    // Generate .mcp.json and desktop config
+    let configMsg = "";
+    let desktopMsg = "";
+    if (!SKIP_CONFIG && saved.length) {
       try {
-        const data = JSON.parse(body);
-        const env = loadEnv();
-
-        // Merge new values (don't remove existing keys not in form)
-        for (const [key, val] of Object.entries(data)) {
-          env[key] = val;
-        }
-
-        saveEnv(env);
-
-        // Generate .mcp.json and desktop config
-        let configMsg = "";
-        try {
-          execSync("node scripts/generate-mcp-config.js", {
-            cwd: ROOT,
-            stdio: "pipe",
-          });
-          configMsg = " .mcp.json updated.";
-        } catch {
-          configMsg = " (.mcp.json generation skipped.)";
-        }
-
-        let desktopMsg = "";
-        try {
-          execSync("node scripts/generate-desktop-config.js", {
-            cwd: ROOT,
-            stdio: "pipe",
-          });
-          desktopMsg = " Claude Desktop config updated too.";
-        } catch {
-          desktopMsg = " (Desktop config generation skipped.)";
-        }
-
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({
-          ok: true,
-          message: `${Object.keys(data).length} keys saved to .env.${configMsg}${desktopMsg} Restart Claude to apply.`,
-        }));
-      } catch (err) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: false, message: err.message }));
+        execSync("node scripts/generate-mcp-config.js", { cwd: ROOT, stdio: "pipe" });
+        configMsg = " .mcp.json updated.";
+      } catch {
+        configMsg = " (.mcp.json generation skipped.)";
       }
+      try {
+        execSync("node scripts/generate-desktop-config.js", { cwd: ROOT, stdio: "pipe" });
+        desktopMsg = " Claude Desktop config updated too.";
+      } catch {
+        desktopMsg = " (Desktop config generation skipped.)";
+      }
+    }
+
+    sendJSON(res, 200, {
+      ok: true,
+      saved,
+      message: saved.length
+        ? `${saved.length} keys saved to .env.${configMsg}${desktopMsg} Restart Claude to apply.`
+        : "Nothing new to save. Saved keys were kept.",
     });
+  });
+}
+
+const server = createServer((req, res) => {
+  // DNS-rebinding guard: only answer requests addressed to this loopback port.
+  if (!allowedHosts().has(String(req.headers.host || "").toLowerCase())) {
+    res.writeHead(421, { ...SECURITY_HEADERS, "Content-Type": "text/plain; charset=utf-8" });
+    res.end("Misdirected request");
     return;
   }
 
-  res.writeHead(404);
-  res.end("Not found");
+  let url;
+  try {
+    url = new URL(req.url, `http://127.0.0.1:${boundPort}`);
+  } catch {
+    return sendText(res, 400, "Bad request");
+  }
+
+  if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
+    if (!tokenMatches(url.searchParams.get("t"))) {
+      res.writeHead(403, { ...SECURITY_HEADERS, "Content-Type": "text/html; charset=utf-8" });
+      res.end(LINK_PAGE);
+      return;
+    }
+    res.writeHead(200, {
+      ...SECURITY_HEADERS,
+      "Content-Type": "text/html; charset=utf-8",
+      "Content-Security-Policy": PAGE_CSP,
+    });
+    res.end(buildHTML(loadEnv()));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/save") {
+    handleSave(req, res);
+    return;
+  }
+
+  sendText(res, 404, "Not found");
 });
 
-server.listen(PORT, () => {
-  const url = `http://localhost:${PORT}`;
-  console.log(`\n  Crow Setup Wizard running at: ${url}\n`);
-
-  // Auto-open browser
+function openBrowser(url) {
+  // argv form (no shell): the URL carries a query string.
+  const [cmd, args] =
+    platform() === "darwin" ? ["open", [url]] :
+    platform() === "win32" ? ["cmd", ["/c", "start", "", url]] :
+    ["xdg-open", [url]];
   try {
-    const cmd =
-      platform() === "darwin" ? "open" :
-      platform() === "win32" ? "start" : "xdg-open";
-    execSync(`${cmd} ${url}`, { stdio: "pipe" });
-    console.log("  Browser opened automatically.\n");
+    const child = spawn(cmd, args, { stdio: "ignore", detached: true });
+    child.on("error", () => {});
+    child.unref();
   } catch {
-    console.log(`  Open ${url} in your browser.\n`);
+    // The link is printed either way.
   }
+}
 
+server.on("error", (err) => {
+  console.error(`\n  Could not start the setup wizard on ${HOST}:${PORT}: ${err.message}\n`);
+  process.exit(1);
+});
+
+server.listen(PORT, HOST, () => {
+  const { address, port } = server.address();
+  boundPort = port;
+  const url = `http://${address}:${port}/?t=${TOKEN}`;
+  console.log(`\n  Crow Setup Wizard is running. Open this link in your browser:\n\n    ${url}\n`);
+  console.log("  The link includes a one-time key for this session; only this computer can open it.");
+  if (!NO_OPEN) {
+    openBrowser(url);
+    console.log("  Trying to open your browser automatically.");
+  }
   console.log("  Press Ctrl+C to stop the wizard.\n");
 });
