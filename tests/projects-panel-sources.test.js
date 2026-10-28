@@ -128,6 +128,24 @@ test("a non-http source URL renders as plain text; http(s) links carry rel noope
   assert.match(row(html, "GoodLink"), /<a href="https:\/\/example\.com\/GoodLink" target="_blank" rel="noopener noreferrer"/);
 });
 
+test("withdrawn notes are not counted or listed", async () => {
+  const pid = newProject("Withdrawn");
+  const sid = addSource(pid, "WithdrawSrc", { status: "fetched", quotes: [1] });
+  const d = new Database(CORE);
+  try {
+    d.prepare("INSERT INTO research_notes (project_id, source_id, note_type, content, quote_found, withdrawn_at) VALUES (?,?,?,?,?,?)")
+      .run(pid, sid, "quote", "WITHDRAWN-PREVIEW-TEXT", 0, "2026-10-28T00:00:00.000Z");
+  } finally { d.close(); }
+  const html = await render(pid);
+  assert.match(row(html, "WithdrawSrc"), /1\/1 quotes found/);
+  assert.doesNotMatch(html, /WITHDRAWN-PREVIEW-TEXT/);
+  const list = String(await panel.handler({ method: "GET", query: {}, body: {} }, { redirectAfterPost: (u) => u },
+    { db: createDbClient(CORE), layout: (x) => x.content || x, lang: "en" }));
+  const i = list.indexOf("Withdrawn");
+  assert.ok(i >= 0);
+  assert.match(list.slice(i, i + 1500), /1 sources · 1 notes/);
+});
+
 // Last: it drops a column from the shared scratch DB.
 test("an old DB without the 0013 columns renders without status or a crash", async () => {
   const pid = newProject("Old");

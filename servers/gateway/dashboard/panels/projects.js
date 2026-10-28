@@ -47,6 +47,16 @@ async function provenanceReady(db) {
   }
 }
 
+/** Whether notes can be withdrawn (0015); old DBs list every note, as before. */
+async function withdrawReady(db) {
+  try {
+    const notes = await db.execute("PRAGMA table_info(research_notes)");
+    return notes.rows.some((c) => c.name === "withdrawn_at");
+  } catch {
+    return false;
+  }
+}
+
 /** A link only for http(s) URLs; anything else (javascript:, data:, ...) is plain escaped text. */
 export function sourceLinkHtml(url) {
   if (!url) return "";
@@ -219,6 +229,7 @@ export default {
 };
 
 async function renderListView(db, query, layout, lang) {
+  const live = (await withdrawReady(db)) ? " AND withdrawn_at IS NULL" : "";
   const page = parseInt(query.page) || 1;
   const offset = (page - 1) * PAGE_SIZE;
   const statusFilter = query.status || null;
@@ -232,7 +243,7 @@ async function renderListView(db, query, layout, lang) {
   let fetchSql = `
     SELECT p.*,
       (SELECT COUNT(*) FROM research_sources WHERE project_id = p.id) as source_count,
-      (SELECT COUNT(*) FROM research_notes WHERE project_id = p.id) as note_count,
+      (SELECT COUNT(*) FROM research_notes WHERE project_id = p.id${live}) as note_count,
       (SELECT COUNT(*) FROM data_backends WHERE project_id = p.id) as backend_count
     FROM project_spaces p
     WHERE (p.type IS NULL OR p.type != 'learner_profile') AND p.archived_at IS NULL
@@ -387,19 +398,20 @@ async function renderDetailView(db, projectId, layout, lang, req = {}) {
   // Fetch related data in parallel (incl. M2 project_spaces extras + members,
   // M5 audit log). The ps row is already in `project` — no second fetch needed.
   const provReady = await provenanceReady(db);
+  const live = (await withdrawReady(db)) ? " AND withdrawn_at IS NULL" : "";
   const [sourcesResult, sourceCountResult, notesResult, backendsResult, membersResult, contactsResult, auditResult] = await Promise.all([
     db.execute({
       // fetched_text is deliberately not selected (large).
       sql: provReady
         ? `SELECT s.id, s.title, s.source_type, s.url, s.verified, s.created_at, s.fetch_status, s.verification_method,
-                  (SELECT COUNT(*) FROM research_notes n WHERE n.source_id = s.id AND n.note_type = 'quote') AS quote_total,
-                  (SELECT COUNT(*) FROM research_notes n WHERE n.source_id = s.id AND n.note_type = 'quote' AND n.quote_found = 1) AS quote_found_count
+                  (SELECT COUNT(*) FROM research_notes n WHERE n.source_id = s.id AND n.note_type = 'quote'${live}) AS quote_total,
+                  (SELECT COUNT(*) FROM research_notes n WHERE n.source_id = s.id AND n.note_type = 'quote' AND n.quote_found = 1${live}) AS quote_found_count
              FROM research_sources s WHERE s.project_id = ? ORDER BY s.created_at DESC LIMIT 50`
         : "SELECT id, title, source_type, url, verified, created_at FROM research_sources WHERE project_id = ? ORDER BY created_at DESC LIMIT 50",
       args: [projectId],
     }),
     db.execute({ sql: "SELECT COUNT(*) AS c FROM research_sources WHERE project_id = ?", args: [projectId] }),
-    db.execute({ sql: "SELECT id, note_type, substr(content, 1, 200) as preview, created_at FROM research_notes WHERE project_id = ? ORDER BY created_at DESC LIMIT 50", args: [projectId] }),
+    db.execute({ sql: `SELECT id, note_type, substr(content, 1, 200) as preview, created_at FROM research_notes WHERE project_id = ?${live} ORDER BY created_at DESC LIMIT 50`, args: [projectId] }),
     db.execute({ sql: "SELECT * FROM data_backends WHERE project_id = ?", args: [projectId] }),
     db.execute({
       sql: `SELECT pm.id, pm.contact_id, pm.role, pm.capabilities, pm.mode, pm.granted_at, pm.revoked_at,

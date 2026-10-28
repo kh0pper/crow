@@ -53,8 +53,10 @@ test("research-pipeline covers every crow_add_source outcome and never says to f
     "NOT citable yet: this Crow is waiting for a schema upgrade", "Not a web page", "no text Crow can read"]) {
     assert.ok(pipeline.includes(line), `covers ${line}`);
   }
-  // A quote note cannot be removed, so "fix the wording" would leave the source unverifiable.
+  // A wrong quote is withdrawn, not fixed: "fix the wording" would leave the source unverifiable.
   assert.ok(!/fix the wording/i.test(pipeline));
+  assert.ok(pipeline.includes("crow_withdraw_note"));
+  assert.ok(!pipeline.includes("cannot be edited or removed"));
   assert.ok(pipeline.includes("character for character"));
   assert.ok(pipeline.includes("tell the owner"));
   assert.ok(pipeline.includes("1,200 characters"));
