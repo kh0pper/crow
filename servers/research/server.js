@@ -251,33 +251,60 @@ export async function recheckQuotes(db, sourceId, text) {
   return rows.map((n) => ({ note_id: Number(n.id), found: matchQuote(n.content, page).found }));
 }
 
-const PREVIEW_OPEN = `--- fetched page text (untrusted, first ${PREVIEW_CHARS} chars) ---`;
 const PREVIEW_CLOSE = "--- end fetched page text ---";
+const PREVIEW_CLOSE_DEFANGED = "- - - end fetched page text - - -";
+// The whole tool result stays under the voice cap (tool-executor.js MAX_RESULT_LENGTH).
+const RESULT_MAX = 2000;
+// A content type is server-controlled and echoed OUTSIDE the untrusted markers: only a plain
+// type/subtype is shown.
+const CONTENT_TYPE_RE = /^[a-z0-9.+-]{1,40}\/[a-z0-9.+-]{1,80}$/;
 
-/** The untrusted page preview block; a page cannot close the block early by quoting the marker. */
-function previewBlock(r) {
-  const preview = String(r.readable_text || r.text || "").slice(0, PREVIEW_CHARS)
-    .split(PREVIEW_CLOSE).join("- - - end fetched page text - - -");
-  return `${PREVIEW_OPEN}\n${preview}\n${PREVIEW_CLOSE}`;
+const previewOpen = (n) => `--- fetched page text (untrusted, first ${n} chars) ---`;
+
+/**
+ * The untrusted page preview block, at most `max` (<= PREVIEW_CHARS) chars of page text. The
+ * close marker is defanged first and the cap applied after, so a page cannot close the block early
+ * and the label's count holds.
+ */
+function previewBlock(r, max = PREVIEW_CHARS) {
+  const n = Math.max(0, Math.min(PREVIEW_CHARS, max));
+  const src = String(r.readable_text || r.text || "");
+  const preview = src.slice(0, n + PREVIEW_CLOSE.length).split(PREVIEW_CLOSE).join(PREVIEW_CLOSE_DEFANGED).slice(0, n);
+  return `${previewOpen(preview.length)}\n${preview}\n${PREVIEW_CLOSE}`;
 }
 
-/** The citable / NOT citable line (and preview) for a fetch outcome. */
-function fetchOutcomeText(r) {
+/** The content type as safe to echo, or a neutral phrase. */
+function contentTypeLabel(ct) {
+  return typeof ct === "string" && CONTENT_TYPE_RE.test(ct) ? ct : "an unrecognized content type";
+}
+
+/**
+ * The citable / NOT citable line (and preview) for a fetch outcome. `budget` is the room left in
+ * the tool result for this text; the preview shrinks to fit it.
+ */
+function fetchOutcomeText(r, budget = RESULT_MAX) {
   if (!r.ok) return `NOT citable: Crow could not open this page (${r.reason || "the page could not be fetched"}).`;
   if (r.fetch_status === "fetched_no_text") {
-    return `CITABLE: Crow fetched this page. It has no text Crow can read${r.content_type ? ` (${r.content_type})` : ""}, so quotes from it cannot be checked.`;
+    return `CITABLE: Crow fetched this page. It has no text Crow can read (${contentTypeLabel(r.content_type)}), so quotes from it cannot be checked.`;
   }
   const cut = r.truncated ? ` The page is longer than Crow keeps; quotes past the first ${FETCHED_TEXT_MAX} characters cannot be checked.` : "";
-  return `CITABLE: Crow fetched this page.${cut}\n${previewBlock(r)}`;
+  const line = `CITABLE: Crow fetched this page.${cut}\n`;
+  const overhead = line.length + previewOpen(PREVIEW_CHARS).length + PREVIEW_CLOSE.length + 2;
+  return line + previewBlock(r, budget - overhead);
 }
+
+/** Clip a value echoed into a tool result. */
+const clip = (s, n) => { const t = String(s ?? ""); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 
 /** Call the fetch seam with the url alone (never the private-address opt-out); a throwing seam reads as a failed fetch. */
 async function safeFetch(fetchImpl, url) {
   try {
     const r = await fetchImpl(url);
     if (r && typeof r === "object") return r;
-  } catch {
-    // fall through
+    console.error(`[research] the page fetch returned no result for ${clip(url, 200)}`);
+  } catch (err) {
+    // fetchPage never throws, so a throw is a bug: log it, then treat it as a failed fetch.
+    console.error(`[research] the page fetch threw for ${clip(url, 200)}:`, err);
   }
   return { ok: false, fetch_status: "failed", reason: "the page could not be fetched", final_url: null, http_status: null };
 }
@@ -551,6 +578,7 @@ export function createProjectServer(dbPath, options = {}) {
         });
       }
 
+      const head = `Source added (id: ${sourceId}):\n  Title: ${clip(params.title, 300)}\n  Type: ${params.source_type}\n  Citation (${params.citation_format}): ${clip(primaryCitation, 500)}\n`;
       let status;
       if (!cols) {
         status = url
@@ -559,18 +587,11 @@ export function createProjectServer(dbPath, options = {}) {
       } else if (!url) {
         status = "Not a web page: there is no url, so Crow fetched nothing. It is citable only after the owner verifies it.";
       } else {
-        status = fetchOutcomeText(fetched);
+        status = fetchOutcomeText(fetched, RESULT_MAX - head.length);
         if (!fetched.ok) status += " Use crow_fetch_source to try again.";
       }
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Source added (id: ${sourceId}):\n  Title: ${params.title}\n  Type: ${params.source_type}\n  Citation (${params.citation_format}): ${primaryCitation}\n${status}`,
-          },
-        ],
-      };
+      return { content: [{ type: "text", text: head + status }] };
     }
   );
 
@@ -612,11 +633,14 @@ export function createProjectServer(dbPath, options = {}) {
       const r = await safeFetch(fetchPageImpl, src.url);
       const cols = fetchColumns(r);
 
+      // A fetch with no readable text never replaces a stored copy that has text (nor downgrades a
+      // fetched row): the row is left exactly as it was, fetched_at included.
+      const hasText = src.fetched_text != null && src.fetched_text !== "";
+      const keepCopy = (why) => `Source #${id}: ${why}this fetch found no readable text; keeping the copy from ${src.fetched_at}. The source stays citable.`;
       if (!r.ok) {
-        const hasCopy = src.fetch_status === "fetched" || src.fetch_status === "fetched_no_text";
-        if (hasCopy) {
+        if (hasText || src.fetch_status === "fetched" || src.fetch_status === "fetched_no_text") {
           await audit({ fetch_status: "failed", kept: true });
-          return { content: [{ type: "text", text: `Source #${id}: Crow could not open this page again (${cols.fetch_error}). The copy fetched at ${src.fetched_at} is kept, and the source stays citable.` }] };
+          return { content: [{ type: "text", text: keepCopy(`Crow could not open this page again (${cols.fetch_error}); `) }] };
         }
         await db.execute({
           sql: "UPDATE research_sources SET fetch_status = 'failed', fetched_at = ?, final_url = COALESCE(?, final_url), http_status = ?, fetch_error = ? WHERE id = ?",
@@ -624,6 +648,11 @@ export function createProjectServer(dbPath, options = {}) {
         });
         await audit({ fetch_status: "failed" });
         return { content: [{ type: "text", text: `Source #${id}: ${fetchOutcomeText(r)}` }] };
+      }
+
+      if (cols.fetch_status === "fetched_no_text" && hasText) {
+        await audit({ fetch_status: "fetched_no_text", kept: true });
+        return { content: [{ type: "text", text: keepCopy("") }] };
       }
 
       if (src.fetch_status === "fetched" && cols.content_sha256 && cols.content_sha256 === src.content_sha256) {
@@ -664,7 +693,7 @@ export function createProjectServer(dbPath, options = {}) {
         const n = (v) => checks.filter((c) => c.found === v).length;
         quoteLine = `\nRe-checked ${checks.length} quote note(s): ${n(1)} found, ${n(0)} not on the page, ${n(null)} not checked.`;
       }
-      return { content: [{ type: "text", text: `Source #${id}: ${fetchOutcomeText(r)}${quoteLine}` }] };
+      return { content: [{ type: "text", text: `Source #${id}: ${fetchOutcomeText(r, RESULT_MAX - 150)}${quoteLine}` }] };
     }
   );
 
