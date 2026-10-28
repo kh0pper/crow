@@ -431,6 +431,23 @@ export async function takeOperator(dir, { now = Date.now(), ...opts } = {}) {
   });
 }
 
+/**
+ * The operator takes the lease only when no bot call is in flight (checked
+ * under the lock, so a call cannot begin between the check and the take).
+ * → { taken: true, lease } | { taken: false, lease } (a live bot holding with
+ * a live pid in inCall). Dead pids do not count. An expired or free lease, or
+ * the operator's own, is taken (renewed).
+ */
+export async function takeOperatorIfIdle(dir, { now = Date.now(), isAlive = defaultIsAlive, ...opts } = {}) {
+  return withLock(dir, { ...opts, isAlive }, (cur) => {
+    if (cur && isHeld(cur, now) && cur.holder.kind !== "operator" && cur.inCall.some((c) => isAlive(c.pid))) {
+      return { result: { taken: false, lease: cur } };
+    }
+    const { lease } = take(cur, { ...OPERATOR_HOLDER }, now, OPERATOR_TTL_MS);
+    return { write: lease, result: { taken: true, lease } };
+  });
+}
+
 /** The operator hands the browser back (the lease becomes free). → the lease, or null when there is none. */
 export async function handBack(dir, opts = {}) {
   return withLock(dir, opts, (cur) => {

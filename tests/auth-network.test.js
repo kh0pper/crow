@@ -204,6 +204,10 @@ test("rejectFunneled middleware: the Perch surfaces are never funnel-exposed", a
       "/dashboard/perch-api/interactive/abc/browser-shots/1",
       // Live browser tile: the frames long poll.
       "/dashboard/perch-api/interactive/abc/browser/frame?after=0",
+      // Live browser tile: Take over, Hand back and the sheet's heartbeat.
+      "/dashboard/perch-api/browser/take-over",
+      "/dashboard/perch-api/browser/hand-back",
+      "/dashboard/perch-api/browser/heartbeat",
     ]) {
       const r = await request(port, path, { "tailscale-funnel-request": "?1" });
       assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);

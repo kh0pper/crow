@@ -5,6 +5,23 @@
  * and installed automation skills/recipes.
  */
 
+/**
+ * The bot holding this instance's browser lease, or null (free, expired, the
+ * operator's own holding, or unreadable). `isFree` comes from the lease module.
+ */
+export function botHolding(lease, isFree, now = Date.now()) {
+  if (!lease || typeof isFree !== "function" || isFree(lease, now)) return null;
+  const h = lease.holder;
+  if (!h || h.kind !== "bot") return null;
+  return { sessionId: typeof h.sessionId === "string" ? h.sessionId : "" };
+}
+
+/** Take over: the chat's sheet for a Perch session (its thread under it), else the sheet alone. */
+export function takeOverHref(holding) {
+  const sid = holding && holding.sessionId;
+  return "/dashboard/perch?take-over=1" + (/^perchlive-[0-9a-f]{8}$/.test(sid || "") ? "#" + sid : "");
+}
+
 export default {
   id: "browser",
   name: "Browser",
@@ -12,7 +29,7 @@ export default {
   route: "/dashboard/browser",
   navOrder: 45,
 
-  async handler(req, res, { db, layout, appRoot }) {
+  async handler(req, res, { db, layout, appRoot, lang }) {
     const { pathToFileURL } = await import("node:url");
     const { join } = await import("node:path");
     const { existsSync, readdirSync, statSync, readFileSync } = await import("node:fs");
@@ -89,6 +106,29 @@ export default {
       }
     } catch {}
 
+    // --- Live browser tile: a bot holding the lease (a lock-free read) ---
+    // The viewer is not a silent bypass: while a bot drives the page, the
+    // panel says so and points at Take over (the chat's sheet, which asks the
+    // bot to pause) instead of embedding a viewer that would act behind its
+    // back. Advisory, like the lease; an older core without the module
+    // shows the viewer as before.
+    let botUsing = null;
+    try {
+      const leaseMod = await import(pathToFileURL(join(appRoot, "servers/shared/browser-lease.js")).href);
+      botUsing = botHolding(await leaseMod.readLease(leaseMod.leaseDir(stateDir)), leaseMod.isFree);
+    } catch {}
+    let botUsingText = "A bot is using the browser", takeOverText = "Take over";
+    try {
+      const { t } = await import(pathToFileURL(join(appRoot, "servers/gateway/dashboard/shared/i18n.js")).href);
+      botUsingText = t("browser.botUsing", lang);
+      takeOverText = t("perch.takeOver", lang);
+    } catch {}
+    const botNotice = botUsing ? `
+      <div class="browser-bot-using" role="status" style="display:flex; flex-wrap:wrap; align-items:center; gap:0.75rem; padding:1rem; border:1px solid var(--border); border-radius:8px; margin-bottom:1rem;">
+        <span>${escapeHtml(botUsingText)}</span>
+        <a class="btn btn-primary btn-sm" style="min-height:44px; display:inline-flex; align-items:center;" href="${escapeHtml(takeOverHref(botUsing))}">${escapeHtml(takeOverText)}</a>
+      </div>` : "";
+
     const tab = req.query.tab || "status";
 
     // --- Status tab ---
@@ -119,10 +159,11 @@ export default {
           <input type="hidden" name="action" value="restart">
           <button type="submit" class="btn btn-sm">Restart</button>
         </form>
-        ${containerRunning ? `<a href="/proxy/browser/vnc.html" target="_blank" class="btn btn-sm" style="margin-left:auto;">Open VNC Viewer &#8599;</a>` : ""}
+        ${containerRunning && !botUsing ? `<a href="/proxy/browser/vnc.html" target="_blank" class="btn btn-sm" style="margin-left:auto;">Open VNC Viewer &#8599;</a>` : ""}
       </div>
 
-      ${containerRunning ? `
+      ${botNotice}
+      ${containerRunning && !botUsing ? `
         <div style="margin-bottom:1rem;">
           <h4 style="margin-bottom:0.5rem;">Live View</h4>
           <iframe src="/proxy/browser/vnc.html?autoconnect=true&resize=scale"

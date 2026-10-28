@@ -1698,6 +1698,34 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     }
   });
 
+  // ---- POST /browser/take-over | /browser/hand-back | /browser/heartbeat ----
+  // Live browser tile (spec §4.4, §7 items 7 and 14). The operator's holding of
+  // this instance's browser: the engine's in-memory record (Ruling B4), never
+  // the lease file. Take over answers { state: "held" } or, while a bot call is
+  // in flight, { state: "pending" } (it switches when that call ends, or after
+  // 30 s). The sheet heartbeats every 15 s; { state: "idle" } means the browser
+  // went back (Hand back, or 5 minutes without a heartbeat). A lease error
+  // (a jammed lock, Ruling B3) is 503 browser_busy, never a hang. CSRF-railed
+  // (this router mounts after csrfMiddleware), behind dashboardAuth, never
+  // Funnel-reachable.
+  const takeOverRoute = (op) => async (req, res) => {
+    try {
+      const ctl = resolveEngine().browserTakeOver;
+      if (!ctl) return jsonError(res, 404, "no_browser");
+      const r = await ctl[op]();
+      if (r.state === "no_browser") return jsonError(res, 404, "no_browser");
+      res.set("Cache-Control", "no-store");
+      res.json({ state: r.state });
+    } catch (err) {
+      if (res.headersSent) return;
+      console.warn("[perch-interactive-api] browser " + op + ": " + String((err && err.code) || "error").slice(0, 40));
+      return jsonError(res, 503, "browser_busy");
+    }
+  };
+  router.post(P + "/browser/take-over", takeOverRoute("takeOver"));
+  router.post(P + "/browser/hand-back", takeOverRoute("handBack"));
+  router.post(P + "/browser/heartbeat", takeOverRoute("heartbeat"));
+
   // ---- GET /interactive/:sid/cwd/list — read-only cwd browse (PR-B, item 18) ----
   // Lists dirs + files inside the session's OWN cwd, realpath-jailed under it
   // (never the uploadsDir). The Files tab's browser: a picker/viewer, not a

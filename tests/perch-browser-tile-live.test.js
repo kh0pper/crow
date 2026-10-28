@@ -73,6 +73,7 @@ const engine = {
   async get(sid) { return sid === SID ? { sessionId: SID, botId: BOT, threadId: SID, outputsDir: null } : null; },
   async subscribe(sid, cb) { subs.add(cb); return () => subs.delete(cb); },
   get browserWatcher() { return watcher; },
+  get browserTakeOver() { return takeOver; },
 };
 const emit = (ev) => { for (const cb of subs) cb(ev); };
 
@@ -89,6 +90,10 @@ function scripted(req, res) {
 }
 /** The four tile routes (and the shot's workspace url) go to the real router. */
 const REAL = /^\/dashboard\/perch-api\/interactive\/[^/]+\/(events|files\/history|browser\/frame|browser-shots\/[^/]+|workspace\/.+)$/;
+/** Task 7: the take-over routes go to the real router too. */
+const REAL_TAKE_OVER = /^\/dashboard\/perch-api\/browser\/(take-over|hand-back|heartbeat)$/;
+const LEASE = join(dir, "browser-lease");
+let leaseMod = null, takeOver = null;
 
 before(async () => {
   chrome = await startHeadlessChrome();
@@ -102,6 +107,10 @@ before(async () => {
   delivered.registerDeliveredRoot(ROOT);
   shots = await import("../servers/gateway/browser-tile/shots.js");
   ({ createDbClient } = await import("../servers/db.js"));
+  leaseMod = await import("../servers/shared/browser-lease.js");
+  const { createTakeOver } = await import("../servers/gateway/browser-tile/take-over.js");
+  // The real controller on a real lease dir; its onHeld is the engine's operator frame.
+  takeOver = createTakeOver({ dir: () => LEASE, onHeld: (held) => emit({ type: "browser", phase: "operator", anchor: "call_to1", held }) });
   const { default: perchInteractiveApiRouter } = await import("../servers/gateway/routes/perch-interactive-api.js");
   const { csrfMiddleware } = await import("../servers/gateway/dashboard/shared/csrf.js");
   const { default: perchHubPanel } = await import("../servers/gateway/dashboard/panels/perch-hub.js");
@@ -111,7 +120,8 @@ before(async () => {
   app.use(express.json());
   app.use((req, res, next) => {
     const path = req.url.split("?")[0];
-    if (REAL.test(path)) return next();
+    if (REAL.test(path) || REAL_TAKE_OVER.test(path)) return next();
+    if (path === "/proxy/browser/vnc.html") { res.writeHead(200, { "content-type": "text/html" }); res.end("<!doctype html><title>vnc</title><body>vnc stand-in</body>"); return; }
     if (path.startsWith("/dashboard/perch-api/") || path.startsWith("/api/") || path.startsWith("/dashboard/bot-board-api/")) return scripted(req, res);
     if (path === "/dashboard/perch") {
       const layout = (opts) => renderLayout({ ...opts, activePanel: "perch", panels: [perchHubPanel], lang: "en" });
@@ -131,6 +141,7 @@ before(async () => {
 
 after(async () => {
   if (server) { server.closeAllConnections(); server.close(); }
+  takeOver?.close();
   await chrome?.close();
   rmSync(dir, { recursive: true, force: true });
 });
@@ -165,7 +176,7 @@ async function openTab() {
     throw new Error("timed out waiting for: " + expression + " (last " + JSON.stringify(v) + ")");
   };
   const close = async () => { ws.close(); await fetch(chrome.cdp + "/json/close/" + tab.id).catch(() => {}); };
-  return { send, evaluate, waitFor, close };
+  return { id: tab.id, send, evaluate, waitFor, close };
 }
 
 async function storeShot(anchor) {
@@ -299,5 +310,91 @@ test("live: Live with the hostname and a real frame, then Done with the shot; 44
     void kept;
   } finally {
     await tab.close();
+  }
+});
+
+test("live: Take over opens the sheet with the noVNC iframe; Hand back closes it; the waiting bot's next call runs; a real targetId reached the lease", { timeout: 90_000 }, async (t) => {
+  if (!chrome) return t.skip("no headless Chrome");
+  const { installLeaseGuard } = await import("../bundles/browser/server/lease-guard.js");
+  const { EventEmitter } = await import("node:events");
+  // The bot's own page, and the guard's targetId read the way server.js does
+  // it: Target.getTargetInfo on that page's own CDP session.
+  const botPage = await openTab();
+  const fake = { handlers: {}, tool(name, ...rest) { this.handlers[name] = rest.at(-1); } };
+  installLeaseGuard(fake, {
+    lease: leaseMod, dir: LEASE, env: { PI_BOT_PERCH_SESSION_ID: SID, PI_BOT_ID: BOT }, pid: process.pid,
+    getTargetId: async () => (await botPage.send("Target.getTargetInfo")).targetInfo.targetId,
+    proc: new EventEmitter(), exit: () => {},
+  });
+  const acted = [];
+  fake.tool("crow_browser_click", "stub", {}, async (a) => { acted.push(a); return { content: [{ type: "text", text: "clicked" }] }; });
+  const botCall = (a) => fake.handlers.crow_browser_click(a, {});
+  const tab = await openTab();
+  try {
+    assert.match((await botCall({ n: 1 })).content.map((c) => c.text).join(" "), /clicked/);
+    const l1 = await leaseMod.readLease(LEASE);
+    assert.equal(l1.holder.sessionId, SID);
+    assert.equal(l1.targetId, botPage.id, "a real Chrome targetId was recorded in the lease");
+
+    watcher.frame = { seq: 1, jpegB64: JPEG_B64, w: 320, h: 200 };
+    transcriptEvents = [{ type: "message", timestamp: new Date(Date.now() - 60000).toISOString(), message: { role: "user", content: "log in for me" } }];
+    await tab.send("Network.enable");
+    await tab.send("Network.setExtraHTTPHeaders", { headers: serveHeaders("operator@example.com") });
+    await tab.send("Network.setCookie", { name: "crow_session", value: "live-sess", url: base });
+    await tab.send("Network.setCookie", { name: "crow_csrf", value: "tok-live", url: base });
+    await tab.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+    await tab.send("Page.enable");
+    await tab.send("Page.navigate", { url: base + "/dashboard/perch#" + SID });
+    await tab.waitFor("document.body.getAttribute('data-view')==='chat'");
+    await tab.waitFor("document.querySelector('#perch-transcript .entry.user')!==null");
+    emit({ type: "tool", name: "mcp__browser__crow_browser_click", phase: "start", isError: false, toolCallId: "call_to1", argsText: "{}" });
+    emit({ type: "browser", phase: "live", anchor: "call_to1", domain: HOST, gen: 1 });
+    await tab.waitFor("document.querySelector('.ph-btile[data-phase=\"live\"] .bt-take')!==null");
+
+    // Take over: the sheet, the real route, the operator's holding.
+    await tab.evaluate("document.querySelector('.ph-btile[data-phase=\"live\"] .bt-take').click()");
+    await tab.waitFor("(function(){ var f=document.querySelector('.ph-tosheet iframe.to-vnc'); return !!f; })()");
+    const sheet = await tab.evaluate(`(function(){
+      var s=document.querySelector('.ph-tosheet'), r=s.getBoundingClientRect(), f=s.querySelector('iframe.to-vnc'), b=s.querySelector('.to-back').getBoundingClientRect();
+      return { left:r.left, top:r.top, w:Math.round(r.width), h:Math.round(r.height), vw:innerWidth, vh:innerHeight,
+        src:f.getAttribute('src'), fh:Math.round(f.getBoundingClientRect().height), host:s.querySelector('.to-host').textContent,
+        back:{ w:Math.round(b.width), h:Math.round(b.height) }, backText:s.querySelector('.to-back').textContent,
+        docScroll:document.documentElement.scrollWidth };
+    })()`);
+    assert.deepEqual([sheet.left, sheet.top, sheet.w, sheet.h], [0, 0, sheet.vw, sheet.vh], "full screen: " + JSON.stringify(sheet));
+    assert.equal(sheet.src, "/proxy/browser/vnc.html?autoconnect=true&resize=scale");
+    assert.ok(sheet.fh > 300, "the viewer fills the sheet: " + sheet.fh);
+    assert.equal(sheet.host, HOST);
+    assert.equal(sheet.backText, "Hand back");
+    assert.ok(sheet.back.h >= 44 && sheet.back.w >= 44, "Hand back ≥ 44 px: " + JSON.stringify(sheet.back));
+    assert.ok(sheet.docScroll <= sheet.vw);
+    assert.equal(takeOver.state(), "held");
+    assert.equal((await leaseMod.readLease(LEASE)).holder.kind, "operator");
+    await tab.waitFor("document.getElementById('perch-browser-status').textContent==='Waiting for you'");
+    await tab.waitFor("(function(){ var f=document.querySelector('iframe.to-vnc'); try{ return f.contentDocument&&f.contentDocument.body&&f.contentDocument.body.textContent==='vnc stand-in'; }catch(e){ return false; } })()");
+
+    // The bot calls while the operator has it: it waits, never acts.
+    let waited = null;
+    const pending = botCall({ n: 2 }).then((r) => { waited = r; });
+    await sleep(1200);
+    assert.equal(waited, null, "the bot waits on the operator");
+    assert.equal(acted.length, 1);
+
+    // Hand back: the real route, the sheet closes, the bot's wait ends without acting.
+    await tab.evaluate("document.querySelector('.ph-tosheet .to-back').click()");
+    await tab.waitFor("document.querySelector('.ph-tosheet')===null");
+    await pending;
+    assert.equal(waited.content[0].text, "The operator handed the browser back; call again.");
+    assert.equal(acted.length, 1, "the waited call never acted");
+    assert.equal(takeOver.state(), "idle");
+    assert.equal((await leaseMod.readLease(LEASE)).holder, null);
+    await tab.waitFor("document.getElementById('perch-browser-status').textContent==='Using the browser · " + HOST + "'");
+    const next = await botCall({ n: 3 });
+    assert.match(next.content.map((c) => c.text).join(" "), /clicked/, "the bot's next call runs");
+    assert.equal(acted.length, 2);
+    assert.equal((await leaseMod.readLease(LEASE)).targetId, botPage.id);
+  } finally {
+    await tab.close();
+    await botPage.close();
   }
 });

@@ -160,9 +160,10 @@ import { userRuntimeDirs } from "../../scripts/pi-bots/pi_sandbox.mjs";
 import { anchorSecretsDir, checkedInstanceSecretsDirs } from "../shared/secret-values.js";
 import { deliveredDirPath, openDeliveredDir, registerDeliveredRoot, resolveSentName } from "../shared/perch-delivered.js";
 import { readLease, renewIfHeld as renewBrowserLease, release as releaseBrowserLease, leaseDir as browserLeaseDir } from "../shared/browser-lease.js";
-import { isBrowserTool, tileEventFor, doneEventFor, heldBySession, namesSession, validDomain, browserInstalled, leaseErrorText, RENEW_MS as BROWSER_RENEW_MS, FORCE_BREAK_AFTER_MS } from "./browser-tile/session-hooks.js";
+import { isBrowserTool, isWaitForUser, tileEventFor, doneEventFor, heldBySession, namesSession, validDomain, browserInstalled, leaseErrorText, RENEW_MS as BROWSER_RENEW_MS, FORCE_BREAK_AFTER_MS } from "./browser-tile/session-hooks.js";
 import { createWatcher as createBrowserWatcher, createFinalShotHook } from "./browser-tile/watcher.js";
 import { storeShot } from "./browser-tile/shots.js";
+import { createTakeOver as createBrowserTakeOver } from "./browser-tile/take-over.js";
 
 /** Lease file name under CROW_HOME. Consumed by C-14's reaper exemption. */
 export const LEASE_FILENAME = "perch-interactive-leases.json";
@@ -1432,6 +1433,7 @@ export function createInteractiveEngine({
       if (turn.browserCalls.size < 256) turn.browserCalls.add(id);
     }
     const rec = browserRecord(turn, id);
+    if (phase === "start" && isWaitForUser(m.toolName, m.args)) attentionForBrowser(s, turn);
     if (phase !== "end" || rec.finished) return;
     browserQueue(s, async () => {
       const dir = browserDir();
@@ -1577,7 +1579,39 @@ export function createInteractiveEngine({
       } else {
         armStall(s);
       }
+      // The turn's live tile: "Waiting for you" (held) / back to Live (handed back).
+      const rec = s.turn.browser;
+      if (rec && rec.live && !rec.finished) emit(s, { type: "browser", phase: "operator", anchor: rec.anchor || null, held });
     }
+  }
+
+  /**
+   * Take over / Hand back (Task 7): the gateway's in-memory operator record,
+   * changed only through the take-over routes (Ruling B4). Its changes drive
+   * browserOperator() above (the operator note, the stall pause, the tile's
+   * "Waiting for you").
+   */
+  const browserTakeOver = createBrowserTakeOver({
+    dir: () => browserDir(),
+    onHeld: (held) => browserOperator(held),
+    now, setTimer, clearTimer,
+    isAlive: typeof browserCfg.isAlive === "function" ? browserCfg.isAlive : null,
+    forceBreakAfterMs: FORCE_BREAK_AFTER_MS,
+    log,
+  });
+
+  /** A bot parked on crow_browser_wait_for_user: one "needs you" per turn that
+   *  opens the Take over sheet in that chat. No URL or host rides it. */
+  function attentionForBrowser(s, turn) {
+    if (turn.browserAsked) return;
+    turn.browserAsked = true;
+    pushAttention({
+      type: "attention",
+      priority: "high",
+      title: s.botId + " needs you",
+      body: "Take over the browser in the chat.",
+      action_url: "/dashboard/perch?take-over=1#" + s.sessionId,
+    });
   }
 
   /**
@@ -4161,6 +4195,7 @@ export function createInteractiveEngine({
       // (only with a turn in flight: a reload never shows a stale Live).
       if (s.turn && s.browser && s.browser === s.turn.browser && s.browser.live && !s.browser.finished) {
         replay({ type: "browser", phase: "live", anchor: s.browser.anchor || null, domain: s.browser.domain || null, gen: s.browser.gen });
+        if (browserOperatorHeld) replay({ type: "browser", phase: "operator", anchor: s.browser.anchor || null, held: true });
       }
     } catch { /* a broken subscriber is not our problem */ }
     return () => s.subscribers.delete(fn);
@@ -4281,6 +4316,7 @@ export function createInteractiveEngine({
     }));
     writeLeases();
     if (browserWatcher) { try { browserWatcher.close(); } catch { /* closed */ } }
+    try { browserTakeOver.close(); } catch { /* closed */ }
     return { stopped: live.length };
   }
 
@@ -4403,6 +4439,8 @@ export function createInteractiveEngine({
     browserLeaseChanged,
     browserOperator,
     browserHooks,
+    /** Take over / Hand back / heartbeat for the routes (Task 7). */
+    browserTakeOver,
     /** The frames route's watcher (null unless this engine watches a browser). */
     get browserWatcher() { return browserWatcher; },
     /** Precondition-test surface (r1 S10) — also the internal resolver. */

@@ -3824,6 +3824,11 @@ export const translations = {
   "perch.browserYouHadIt": { en: "You had the browser", es: "Tenías tú el navegador" },
   "perch.browserDelete": { en: "Delete screenshot", es: "Borrar captura" },
   "perch.takeOver": { en: "Take over", es: "Tomar el control" },
+  "perch.handBack": { en: "Hand back", es: "Devolver" },
+  "perch.copyPassword": { en: "Copy password", es: "Copiar contraseña" },
+  "perch.noPassword": { en: "No saved browser password", es: "No hay contraseña guardada del navegador" },
+  "perch.botFinishing": { en: "The bot is finishing its step…", es: "El bot está terminando su paso…" },
+  "browser.botUsing": { en: "A bot is using the browser", es: "Un bot está usando el navegador" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

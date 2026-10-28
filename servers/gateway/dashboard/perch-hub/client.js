@@ -5,6 +5,7 @@ import { perchArtifactCardJs } from "./artifact-card.js";
 import { perchCardChipJs } from "./card-chip.js";
 import { perchDictationJs } from "./dictation.js";
 import { perchBrowserTileJs } from "./browser-tile.js";
+import { perchTakeOverJs } from "./take-over.js";
 import { textSizeRuntimeJs, TEXT_SIZES, TEXT_SIZE_DEFAULT } from "../shared/text-size.js";
 
 /** The hub's client script. Emitted INSIDE a template literal — a bare
@@ -80,6 +81,9 @@ export function perchHubJs(lang = "en") {
     cancelHistRetry(); histGen++;
     /* Live browser tile: every frame poller aborts, the observer disconnects. */
     retireBrowserTiles();
+    /* The Take over sheet closes with the page; the operator keeps the
+       browser until Hand back or the 5-minute heartbeat loss. */
+    closeTakeOver();
     /* Anything left in the registry belongs to an instance older still (or to
        a session this one never held): close it by identity — that is the
        whole point of keeping the registry. */
@@ -3543,6 +3547,7 @@ ${perchCardChipJs(lang)}
 ${perchDictationJs(lang)}
 
 ${perchBrowserTileJs(lang)}
+${perchTakeOverJs(lang)}
 
   /* ---- Wave 3: the slash-command menu ------------------------------------
      Fed by pi's OWN get_commands registry through the engine (never a
@@ -3624,5 +3629,6 @@ ${perchBrowserTileJs(lang)}
      pure function and it was green throughout. */
   if(parseHash(location.hash)) applyHash();
   else { startListPolling(); loadList(); }
+  takeOverFromLink();
 })();`;
 }

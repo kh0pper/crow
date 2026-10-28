@@ -54,6 +54,22 @@ export function isBrowserTool(toolName, args) {
   return typeof tool === "string" && tool.length <= 128 && tool.startsWith(TOOL_PREFIX) && ROUTED_RE.test(tool);
 }
 
+/**
+ * Is this child tool call crow_browser_wait_for_user asking the operator to
+ * step in (not its `resume: true` call)? Same two shapes as isBrowserTool.
+ */
+export function isWaitForUser(toolName, args) {
+  if (!isBrowserTool(toolName, args)) return false;
+  const a = argsObject(args);
+  if (DIRECT_RE.test(toolName)) {
+    if (!toolName.endsWith("__crow_browser_wait_for_user")) return false;
+    return !(a && a.resume === true);
+  }
+  if (!a || a.tool !== "crow_browser_wait_for_user") return false;
+  const inner = argsObject(a.args);
+  return !(inner && inner.resume === true);
+}
+
 /** The lease, read at `now`, is held by this Perch session's bot (not expired). */
 export function heldBySession(lease, sessionId, now = Date.now()) {
   return !!lease && !isFree(lease, now) && !!lease.holder
