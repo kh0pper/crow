@@ -69,6 +69,13 @@ export function perchCardChipJs(lang = "en") {
     var st=ccStore(), u=ccUnsent[sid]; if(!st||!u) return;
     try{ st.setItem(CC_UNSENT_PREFIX+sid,JSON.stringify({text:String(u.text),cardId:u.cardId,resultId:u.resultId})); }catch(e){}
   }
+  /* Pending BEFORE request-change is posted (not yet owed: kept only in storage), so a reload
+     mid-flight restores the words with Send again. */
+  function ccPendingSave(sid,u){
+    var st=ccStore(); if(!st) return;
+    try{ st.setItem(CC_UNSENT_PREFIX+sid,JSON.stringify({text:String(u.text),cardId:u.cardId,resultId:u.resultId})); }catch(e){}
+  }
+  var ccRetained=null;    /* {sid,text}: words a refused request-change gives back to the field */
   function ccUnsentDrop(sid){ var st=ccStore(); if(!st) return; try{ st.removeItem(CC_UNSENT_PREFIX+sid); }catch(e){} }
   function ccUnsentLoad(sid){
     if(ccUnsent[sid]!=null) return;
@@ -93,6 +100,15 @@ export function perchCardChipJs(lang = "en") {
     return fetch(url,opts).then(function(r){
       return r.json().catch(function(){return null;}).then(function(j){ return {ok:r.ok,status:r.status,j:j}; });
     },function(){ return {ok:false,status:0,j:null}; });
+  }
+  /* First descendant (or the node itself) carrying any of these classes. */
+  function ccFind(node,classes){
+    if(!node) return null;
+    var have=String(node.className||'').split(/\\s+/);
+    for(var i=0;i<classes.length;i++) if(have.indexOf(classes[i])>=0) return node;
+    var kids=node.children||[];
+    for(var k=0;k<kids.length;k++){ var f=ccFind(kids[k],classes); if(f) return f; }
+    return null;
   }
   function ccDrop(node){ if(node&&node.parentNode) node.parentNode.removeChild(node); }
   function ccPlace(tr,old,fresh){
@@ -175,12 +191,14 @@ export function perchCardChipJs(lang = "en") {
     var lane=CC_LANES[c.lane]||'';
     var wrap=document.createElement('div'); wrap.className='perch-cardchip';
     var a=document.createElement('a'); a.className='cardchip-link';
-    a.href='/dashboard/board?project='+encodeURIComponent(String(c.projectId))+'#card-'+String(c.id);
+    a.href='/dashboard/board'+(c.projectId==null?'':'?project='+encodeURIComponent(String(c.projectId)))+'#card-'+String(c.id);
     a.appendChild(line('cardchip-ref','\\u21b3 #'+String(c.id)));
     a.appendChild(line('cardchip-title',String(c.title||'')));
     if(lane) a.appendChild(line('cardchip-lane',lane));
     var d=document.createElement('a'); d.className='cardchip-details';
-    d.href='/dashboard/bot-board#open='+String(c.id); d.textContent=CC_DETAILS;
+    /* Mirrors panels/board/html.js detailsHref: the classic board resolves a card only on its bot's board. */
+    d.href=c.botId?'/dashboard/bot-board?bot='+encodeURIComponent(String(c.botId))+'#open='+encodeURIComponent(String(c.id)):'/dashboard/bot-board?card='+encodeURIComponent(String(c.id));
+    d.textContent=CC_DETAILS;
     wrap.appendChild(a); wrap.appendChild(d);
     ccPlace(tr,ccChip,wrap);
     ccChip=wrap;
@@ -298,11 +316,14 @@ export function perchCardChipJs(lang = "en") {
     var field=ccField(CC_CHANGE_PH,CC_ASK_CHANGE,function(text,go){
       busy(true); go.disabled=true; msg.textContent='';
       var gen=ccGen;
+      ccPendingSave(sid,{text:text,cardId:card.id,resultId:result.id});
       ccApi('POST','/cards/'+encodeURIComponent(String(card.id))+'/request-change',{result_id:result.id,text:text}).then(function(r){
         /* Rejected: from here the words are owed to the bot, even if the operator left this chat. */
         if(r.ok){ ccUnsent[sid]={text:text,cardId:card.id,resultId:result.id}; if(ccReview&&ccReview.node===wrap.parentNode) ccReview.key='unsent'; ccDeliver(sid); return; }
+        /* Not rejected: nothing is owed to the bot, so the stored words go. */
+        if(ccUnsent[sid]==null) ccUnsentDrop(sid);
+        if(r.status===409){ ccRetained={sid:sid,text:text}; if(live()&&current.sid===sid) ccRefresh(sid); return; }
         if(!live()||current.sid!==sid||gen!==ccGen) return;
-        if(r.status===409){ ccRefresh(sid); return; }
         busy(false); go.disabled=false; msg.textContent=CC_FAILED;
       });
     });
@@ -377,10 +398,23 @@ export function perchCardChipJs(lang = "en") {
     var box=document.createElement('div'); box.className='perch-review';
     if(result) box.appendChild(ccResultCard(card,result,sid));
     decs.forEach(function(d){ box.appendChild(ccDecisionCard(d,sid)); });
-    box.appendChild(ccButton('review-notnow',CC_OFFER_NOT_NOW,function(){
+    var notNow=ccButton('review-notnow',CC_OFFER_NOT_NOW,function(){
       ccDismissed[sid]=key;
       ccDrop(box); if(ccReview&&ccReview.node===box) ccReview=null;
-    }));
+    });
+    /* Inside the last card's actions row, so it never floats outside the card. */
+    var cards=box.children, lastCard=cards[cards.length-1];
+    var row=ccFind(lastCard,['art-actions','review-options']);
+    (row||box).appendChild(notNow);
+    /* A refused change request gives the typed words back, with the refusal line. */
+    if(ccRetained&&ccRetained.sid===sid){
+      var rf=ccFind(box,['review-field']), rin=ccFind(rf,['review-input']), rm=ccFind(result?box.children[0]:null,['review-msg']);
+      if(rin){
+        rin.value=ccRetained.text; rf.hidden=false;
+        if(rm) rm.textContent=CC_FAILED;
+      }
+      ccRetained=null;
+    }
     if(ccReview) ccDrop(ccReview.node);
     tr.appendChild(box);
     ccReview={node:box,key:key};

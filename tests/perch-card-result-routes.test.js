@@ -199,7 +199,7 @@ test("the card route reports the real lane, and only a recorded result", async (
   link("perchlive-a", id);
   let r = await chatCard("perchlive-a");
   assert.equal(r.status, 200);
-  assert.deepEqual(r.body.card, { id, title: "Ship it", status: "todo", lane: "up_next", projectId: 7 });
+  assert.deepEqual(r.body.card, { id, title: "Ship it", status: "todo", lane: "up_next", projectId: 7, botId: "b1" });
   assert.equal(r.body.result, null);
 
   const rid = addResult(id, { outcome: "partial", summary: "Most of it." });
@@ -415,4 +415,11 @@ test("answering a decision in chat leaves Needs you", async () => {
   assert.deepEqual(r.body.decisions, []);
   assert.equal(r.body.card.lane, "done", "the lane now comes from the card's other rules (#535 closes it)");
   assert.equal((await post(`/bot-board-api/card/${id}/decision`, { index: 1 })).status, 409, "one answer per card");
+});
+
+test("the card route names the card's own bot when it has one, else the chat's bot", async () => {
+  const id = addCard({ title: "Assigned" });
+  const t = new Database(TASKS); t.prepare("UPDATE tasks_items SET assigned_bot='other-bot' WHERE id=?").run(id); t.close();
+  link("perchlive-ab", id);
+  assert.equal((await chatCard("perchlive-ab")).body.card.botId, "other-bot");
 });

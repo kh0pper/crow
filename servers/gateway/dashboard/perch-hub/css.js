@@ -701,7 +701,7 @@ background:var(--card);border:1px solid var(--line);border-radius:12px;padding:1
 #perch-hub-root .perch-cardchip .cardchip-ref{flex:none;font-weight:600}
 #perch-hub-root .perch-cardchip .cardchip-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #perch-hub-root .perch-cardchip .cardchip-lane{flex:none;color:var(--dim)}
-#perch-hub-root .perch-cardchip .cardchip-lane:before{content:"\\00b7 "}
+#perch-hub-root .perch-cardchip .cardchip-lane:before{content:"\\00b7\\0020"}
 /* Review chips (redesign P5, Task 5.4): Accept, Ask for a change, a bot's questions. 44px targets. */
 #perch-hub-root .perch-review{display:flex;flex-direction:column;gap:6px;align-self:stretch;margin:4px 0}
 #perch-hub-root .perch-review .art-actions,#perch-hub-root .perch-review .review-options,#perch-hub-root .perch-review .review-confirm{display:flex;flex-wrap:wrap;gap:8px;align-items:center}

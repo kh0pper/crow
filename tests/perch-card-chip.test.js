@@ -181,7 +181,7 @@ test("the chip shows the server's lane", async () => {
   const main = byClass(chip[0], "cardchip-link")[0];
   assert.equal(main.href, "/dashboard/board?project=2#card-9");
   const det = byClass(chip[0], "cardchip-details")[0];
-  assert.equal(det.href, "/dashboard/bot-board#open=9");
+  assert.equal(det.href, "/dashboard/bot-board?card=9", "no bot: the standalone card view");
   h.state.card = { id: 9, title: "T", lane: "done", projectId: 2 };
   h.api.loadCardChip(SID); await tick();
   assert.equal(byClass(h.transcript, "perch-cardchip").length, 1, "one chip, redrawn in place");
@@ -538,4 +538,52 @@ test("a reload keeps what was typed and keeps the chips last", async () => {
   assert.equal(review(h)[0], box, "same node");
   assert.equal(h.transcript.children[h.transcript.children.length - 1], box);
   assert.equal(byClass(box, "review-input")[0].value, "half typed");
+});
+
+test("P5 final: the words are in storage before request-change answers, and a refused one gives them back", async () => {
+  const KEY = "perch-unsent-change:" + SID;
+  const storage = memStore();
+  let release, seen;
+  const gate = new Promise((r) => { release = r; });
+  const h = mount({ card: CARD, result: RESULT, storage, review: (u) => { if (u === CHANGE) { seen = storage.getItem(KEY); return gate.then(() => json({ error: "stale" }, 409)); } return json({ ok: true }); } });
+  h.api.loadCardChip(SID); await tick();
+  const box = review(h)[0];
+  byClass(box, "review-change")[0].onclick();
+  byClass(box, "review-input")[0].value = "Use the blue one.";
+  byClass(box, "review-send")[0].onclick(); await tick();
+  assert.deepEqual(JSON.parse(storage.getItem(KEY)), { text: "Use the blue one.", cardId: 9, resultId: 31 }, "saved while in flight");
+  release(); await tick();
+  assert.ok(seen, "already stored when the request went out");
+  assert.equal(storage.getItem(KEY), null, "a refused request owes the bot nothing");
+  const again = review(h);
+  assert.equal(again.length, 1);
+  assert.equal(byClass(again[0], "review-input")[0].value, "Use the blue one.", "the typed text is back in the field");
+  assert.equal(byClass(again[0], "review-field")[0].hidden, false);
+  assert.ok(allText(again[0]).includes("That did not work. Try again."));
+  assert.deepEqual(posts(h).map((p) => p[0]), [CHANGE]);
+});
+
+test("P5 final: Not now sits inside the last card's actions row at 44 px", async () => {
+  for (const [opts, row] of [[{ card: CARD, result: RESULT }, "art-actions"], [{ card: CARD, decisions: [DECISION] }, "review-options"], [{ card: CARD, result: RESULT, decisions: [DECISION] }, "review-options"]]) {
+    const h = mount(opts);
+    h.api.loadCardChip(SID); await tick();
+    const nn = byClass(h.transcript, "review-notnow")[0];
+    assert.ok(nn.parentNode && String(nn.parentNode.className).split(/\s+/).includes(row), "inside " + row);
+    assert.ok(hasAncestorClass(nn, "artcard"), "inside a card");
+  }
+  const css = readFileSync(new URL("../servers/gateway/dashboard/perch-hub/css.js", import.meta.url), "utf8");
+  assert.ok(/\.perch-review button\{min-height:44px/.test(css));
+  assert.ok(css.includes('.cardchip-lane:before{content:"\\\\00b7\\\\0020"}'), "the separator keeps its space");
+});
+
+test("P5 final: a chip whose card has no project leaves the query out", async () => {
+  const h = mount({ card: { id: 9, title: "T", lane: "working", projectId: null } });
+  h.api.loadCardChip(SID); await tick();
+  assert.equal(byClass(h.transcript, "cardchip-link")[0].href, "/dashboard/board#card-9");
+});
+
+test("P5 final: Details opens the drawer on the card's bot (detailsHref's rule)", async () => {
+  const h = mount({ card: { id: 9, title: "T", lane: "working", projectId: 2, botId: "my bot" } });
+  h.api.loadCardChip(SID); await tick();
+  assert.equal(byClass(h.transcript, "cardchip-details")[0].href, "/dashboard/bot-board?bot=my%20bot#open=9");
 });

@@ -1098,12 +1098,25 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
   });
 
   // ---- GET /interactive/:sid/card — this chat's card, its open result, its questions (P5) ----
-  //   { card: { id, title, status, lane, projectId } | null,
+  //   { card: { id, title, status, lane, projectId, botId } | null,
   //     result: { id, outcome, summaryMd } | null,       the card's NEWEST result, only while recorded
   //     decisions: [{ cardId, question, options: [{ index, label, consequence, recommended }] }] }
   // `card` is threadCard's card with the lane the Board computes (shell-api laneState); a missing or
   // archived card is null. `decisions` are the open decision cards asked FROM this chat
   // ($.decision.source.thread_id, written only from the signed actor.thread), newest 3.
+  // The bot whose board shows the card: the card's assigned_bot, else this chat's own bot (the
+  // classic board resolves a card only on the selected bot's board; panels/board/html.js detailsHref).
+  async function cardBotId(db, cardRow, sid) {
+    if (cardRow.assigned_bot) return String(cardRow.assigned_bot);
+    try {
+      const r = (await db.execute({
+        sql: "SELECT bot_id FROM bot_sessions WHERE gateway_thread_id=? AND kind='perch-live' ORDER BY id DESC LIMIT 1",
+        args: [String(sid)],
+      })).rows[0];
+      return r && r.bot_id ? String(r.bot_id) : null;
+    } catch { return null; }
+  }
+
   router.get(P + "/interactive/:sid/card", async (req, res) => {
     const sid = String(req.params.sid);
     const db = createDbClient();
@@ -1119,6 +1132,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
             card = {
               id: Number(st.card.id), title: String(st.card.title ?? ""), status: String(st.card.status),
               lane: st.lane, projectId: st.card.project_id == null ? null : Number(st.card.project_id),
+              botId: await cardBotId(db, st.card, sid),
             };
             if (st.latestResult && st.latestResult.status === "recorded") {
               const r = (await tdb.execute({
