@@ -1078,3 +1078,342 @@ test("fix 2: rr11 regression probes for the unconfirmed-url rule", async () => {
   const split = await scoreRow(dead11(`Plimvex made $261B in 2024. The Courant's review (${U11}) is not confirmed by me, I could not confirm it.`));
   assert.deepEqual([split.criteria.a, split.criteria.b], ["pass", "fail"]);
 });
+
+// ---------------------------------------------------------------------------------------------
+// Task 7: scratch instances, the trajectory replayer, run.mjs. Steps are inline (the trajectory
+// files are Task 8's); one template per file, kept until the file's last test.
+// ---------------------------------------------------------------------------------------------
+const { scratchEnv, makeScratch, makeTemplate } = await import("../scripts/research-eval/scratch.mjs");
+const { replayTrajectory, loadTrajectory, TrajectoryError } = await import("../scripts/research-eval/replay.mjs");
+const { runRows, runUnit, doneKeys, LIVE_REFUSAL } = await import("../scripts/research-eval/run.mjs");
+const { parseSession: parseSession7 } = await import("../scripts/research-eval/session-log.mjs");
+const { readEvidence: readEvidence7, readFetchLog: readFetchLog7 } = await import("../scripts/research-eval/evidence.mjs");
+const { loadCases: loadCases7 } = await import("../scripts/research-eval/cases.mjs");
+const { protectedHit: protectedHit7, realish: realish7, within: within7 } = await import("../scripts/lib/protected-paths.mjs");
+const { PROVENANCE_COLUMNS, NOTE_WITHDRAWAL_COLUMNS } = await import("../servers/research/provenance-schema.js");
+const { default: Database7 } = await import("better-sqlite3");
+const { existsSync: exists7, mkdirSync: mkdirSync7, writeFileSync: write7 } = await import("node:fs");
+
+const RR12 = loadCases7().find((c) => c.id === "rr12");
+const RR12_URL = RR12.claim.citable_url;
+const RR12_QUOTE = "Plimvex plans $540 billion of spending against rivals' $750 billion.";
+/** rr12 careful, inline. */
+const careful12 = [
+  { call: "crow_web_search", args: { query: "plimvex spend rivals" } },
+  { call: "crow_add_source", args: { title: "Plimvex spending", source_type: "web_article", url: RR12_URL, project_id: "$project" } },
+  { call: "crow_add_note", args: { note_type: "quote", provenance: "fetched", content: RR12_QUOTE, source_id: `$source:${RR12_URL}`, project_id: "$project" } },
+  { call: "crow_verify_source", args: { id: `$source:${RR12_URL}` } },
+  { say: `Plimvex plans $540 billion of spending, against rivals' $750 billion (${RR12_URL}). I verified the quote against the page.` },
+];
+
+let template7;
+const tpl = async () => (template7 ??= await makeTemplate({}));
+after(() => template7?.cleanup());
+const strictlyUnderTmp = (p) => within7(realish7(p), realish7(tmpdir())) && realish7(p) !== realish7(tmpdir());
+
+/** One rr12 replay in a fresh scratch copied from the template; the caller cleans up. */
+async function replay12(steps) {
+  const s = await makeScratch({ template: await tpl() });
+  const casePath = join(s.home, "case.json");
+  write7(casePath, JSON.stringify(RR12));
+  const r = await replayTrajectory({ casePath, steps, scratch: s });
+  return { s, r };
+}
+
+test("scratchEnv is pure and isolates the child", () => {
+  const before = JSON.stringify(process.env);
+  const home = join(tmpdir(), "crow-rr-x");
+  const e = scratchEnv(home, "eval");
+  assert.equal(JSON.stringify(process.env), before);
+  assert.equal(e.BRAVE_API_KEY, undefined);
+  for (const k of ["CROW_TASKS_DB_PATH", "CROW_ALLOW_SHARED_DATA_DIR", "INVOCATION_ID", "CROW_SUPERVISED"]) assert.equal(e[k], undefined, k);
+  assert.equal(e.CROW_ACTOR_KIND, "bot");
+  assert.equal(e.CROW_ACTOR_BOT_ID, "eval");
+  assert.equal(e.CROW_JOURNAL_MODE, "DELETE");
+  assert.equal(e.CROW_HOME, home);
+  assert.equal(e.HOME, home);
+  assert.ok(e.CROW_DB_PATH.startsWith(e.CROW_HOME));
+  assert.equal(e.CROW_DATA_DIR, join(home, "data"));
+  assert.equal(e.CROW_RESEARCH_EVAL, "1");
+  assert.notEqual(e, process.env);
+});
+
+test("makeScratch builds an isolated instance under tmp with the skill's granted tools, in one child", async () => {
+  const s = await makeScratch({});
+  try {
+    assert.ok(strictlyUnderTmp(s.home));
+    assert.equal(protectedHit7(s.home), null);
+    assert.ok(s.granted.includes("crow-projects/crow_add_source") && s.granted.includes("crow-projects/crow_verify_source"));
+    assert.ok(!s.granted.some((t) => !t.startsWith("crow-projects/")));
+    assert.ok(exists7(s.dbPath));
+    assert.ok(Number.isInteger(s.projectId));
+    assert.ok(s.fetchLogPath.startsWith(s.home) && s.sessionPath.startsWith(s.home));
+    assert.equal(s.env.CROW_DB_PATH, s.dbPath);
+    const db = new Database7(s.dbPath, { readonly: true });
+    try {
+      const p = db.prepare("SELECT id, type, workspace_dir FROM project_spaces WHERE id = ?").get(s.projectId);
+      assert.equal(p.type, "research");
+      assert.ok(p.workspace_dir.startsWith(s.home), p.workspace_dir); // its own data dir, never ~/.crow
+    } finally { db.close(); }
+  } finally { s.cleanup(); }
+  assert.ok(!exists7(s.home));
+});
+
+test("the template carries the research provenance and note-withdrawal columns", async () => {
+  const t = await tpl();
+  const db = new Database7(t.dbPath, { readonly: true });
+  try {
+    for (const { table, column } of [...PROVENANCE_COLUMNS, ...NOTE_WITHDRAWAL_COLUMNS]) {
+      const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+      assert.ok(cols.includes(column), `${table}.${column}`);
+    }
+    assert.equal(db.pragma("journal_mode", { simple: true }), "delete");
+  } finally { db.close(); }
+});
+
+test("a scratch copied from the template is complete and independent", async () => {
+  const t = await tpl();
+  const [a, b] = await Promise.all([makeScratch({ template: t }), makeScratch({ template: t })]);
+  try {
+    assert.ok(!exists7(a.dbPath + "-wal"));
+    assert.ok(!exists7(t.dbPath + "-wal"));
+    assert.equal(a.projectId, t.projectId);
+    assert.equal(b.projectId, t.projectId);
+    const wa = new Database7(a.dbPath);
+    try { wa.prepare("INSERT INTO memories (content) VALUES (?)").run("only in a"); } finally { wa.close(); }
+    const rb = new Database7(b.dbPath, { readonly: true });
+    try {
+      assert.equal(rb.prepare("SELECT COUNT(*) AS n FROM memories WHERE content = 'only in a'").get().n, 0);
+      assert.ok(rb.prepare("SELECT id FROM project_spaces WHERE id = ?").get(t.projectId)); // the copy is a whole DB
+    } finally { rb.close(); }
+  } finally { a.cleanup(); b.cleanup(); }
+});
+
+test("eval-run exports outGuard and MAX_ATTEMPTS (kiosk-eval re-exports them; tests/kiosk-tool-eval.test.js still passes)", async () => {
+  const k = await import("../scripts/lib/eval-run.mjs");
+  assert.equal(k.MAX_ATTEMPTS, 3);
+  assert.equal(typeof k.outGuard, "function");
+  const fs = { exists: (f) => f === "/x/old.jsonl", read: () => "{}\n" };
+  assert.match(k.outGuard("/x/old.jsonl", false, fs), /exists and is not empty/);
+  assert.equal(k.outGuard("/x/old.jsonl", true, fs), null);
+  // kiosk-eval/run.mjs is not imported here (it pulls in the voice stack); its own test imports
+  // the re-exports. This only checks the source wiring.
+  const src = readFileSync(join(ROOT, "scripts", "kiosk-eval", "run.mjs"), "utf8");
+  assert.match(src, /from "\.\.\/lib\/eval-run\.mjs"/);
+  assert.match(src, /export \{ MAX_ATTEMPTS, outGuard \}/);
+  assert.doesNotMatch(src, /export function outGuard|export const MAX_ATTEMPTS/);
+});
+
+test("two scratches in flight are independent", async () => {
+  const [a, b] = await Promise.all([makeScratch({}), makeScratch({})]);
+  try {
+    assert.notEqual(a.home, b.home);
+    assert.notEqual(a.dbPath, b.dbPath);
+    assert.ok(exists7(a.dbPath) && exists7(b.dbPath));
+  } finally { a.cleanup(); b.cleanup(); }
+});
+
+test("fixture server over stdio: a bot's add_source fetches the fixture page and the row is bot-attributed", async () => {
+  const { s, r } = await replay12([
+    { call: "crow_add_source", args: { title: "T", source_type: "web_article", url: RR12_URL, project_id: "$project" } },
+    { call: "crow_add_source", args: { title: "Elsewhere", source_type: "web_article", url: "https://elsewhere.example/x", project_id: "$project" } },
+  ]);
+  try {
+    assert.deepEqual(r, { ok: true });
+    const session = parseSession7(readFileSync(s.sessionPath, "utf8"));
+    const results = session.events.filter((e) => e.kind === "result");
+    assert.equal(results.length, 2);
+    assert.match(results[0].text, /^CITABLE: Crow fetched this page\./m);
+    assert.match(results[1].text, /^NOT citable: .*not in fixture set/m);
+    const ev = readEvidence7(s.dbPath);
+    const row = ev.sources.find((x) => x.url === RR12_URL);
+    assert.equal(row.fetch_status, "fetched");
+    const add = ev.audit.filter((x) => x.action === "source.add");
+    assert.ok(add.length >= 1);
+    for (const a of add) { assert.equal(a.actor_type, "bot"); assert.equal(a.actor_id, "research-eval"); }
+    const log = readFetchLog7(s.fetchLogPath);
+    assert.deepEqual(log, [
+      { url: RR12_URL, in_set: true, status: "ok" },
+      { url: "https://elsewhere.example/x", in_set: false, status: "not_in_set" },
+    ]);
+  } finally { s.cleanup(); }
+});
+
+test("replayTrajectory writes a session the parser reads, in the pinned pi shape", async () => {
+  const { s, r } = await replay12(careful12);
+  try {
+    assert.equal(r.ok, true, r.error);
+    const raw = readFileSync(s.sessionPath, "utf8");
+    const lines = raw.trim().split("\n").map((l) => JSON.parse(l));
+    assert.equal(lines[0].type, "session"); // one header line, then only message lines
+    assert.ok(lines.slice(1).every((l) => l.type === "message" && l.message && typeof l.message === "object"));
+    const msgs = lines.slice(1).map((l) => l.message);
+    const calls = msgs.flatMap((m) => (m.role === "assistant" ? m.content : [])).filter((b) => b.type === "toolCall");
+    assert.equal(calls.length, 4);
+    for (const [i, c] of calls.entries()) {
+      assert.deepEqual(Object.keys(c).sort(), ["arguments", "id", "name", "type"]);
+      assert.equal(c.id, `c${i + 1}`);
+      assert.ok(c.name.startsWith("mcp__crow-projects__"), c.name);
+    }
+    // M2: placeholders resolve to numbers.
+    assert.equal(typeof calls[1].arguments.project_id, "number");
+    assert.equal(typeof calls[2].arguments.source_id, "number");
+    assert.equal(typeof calls[3].arguments.id, "number");
+    const results = msgs.filter((m) => m.role === "toolResult");
+    for (const m of results) {
+      assert.ok(m.toolCallId && m.toolName.startsWith("mcp__crow-projects__"));
+      assert.ok(Array.isArray(m.content) && typeof m.isError === "boolean");
+    }
+    // X9 round trip: the parser reads it back with every event.
+    const p = parseSession7(raw);
+    assert.equal(p.parse_ok, true);
+    assert.deepEqual(p.events.filter((e) => e.kind === "call").map((e) => [e.server, e.tool]),
+      [["crow-projects", "crow_web_search"], ["crow-projects", "crow_add_source"], ["crow-projects", "crow_add_note"], ["crow-projects", "crow_verify_source"]]);
+    assert.equal(p.events.filter((e) => e.kind === "result").length, 4);
+    assert.match(p.prose, /\$540 billion/);
+    assert.equal(p.no_prose, false);
+  } finally { s.cleanup(); }
+});
+
+test("a batch step is one assistant message; its later call resolves a placeholder from an earlier one", async () => {
+  const { s, r } = await replay12([{ batch: [
+    { call: "crow_add_source", args: { title: "T", source_type: "web_article", url: RR12_URL, project_id: "$project" } },
+    { call: "crow_add_note", args: { note_type: "quote", provenance: "fetched", content: RR12_QUOTE, source_id: `$source:${RR12_URL}`, project_id: "$project" } },
+  ] }]);
+  try {
+    assert.equal(r.ok, true, r.error);
+    const p = parseSession7(readFileSync(s.sessionPath, "utf8"));
+    const calls = p.events.filter((e) => e.kind === "call");
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].msg, calls[1].msg);
+    // Both results follow the one message.
+    const kinds = p.events.map((e) => e.kind);
+    assert.deepEqual(kinds, ["call", "call", "result", "result"]);
+    assert.equal(readEvidence7(s.dbPath).notes.length, 1);
+  } finally { s.cleanup(); }
+});
+
+test("an unresolvable placeholder is a trajectory error, not a transport failure, and the server child is still reaped", async () => {
+  const s = await makeScratch({ template: await tpl() });
+  try {
+    const casePath = join(s.home, "case.json");
+    write7(casePath, JSON.stringify(RR12));
+    await assert.rejects(replayTrajectory({ casePath, steps: [{ call: "crow_verify_source", args: { id: "$source:https://nowhere.example/" } }], scratch: s }),
+      (err) => err instanceof TrajectoryError && /no earlier result/.test(err.message));
+  } finally { s.cleanup(); }
+});
+
+test("a fixture server that refuses to start is a transport failure (ok: false)", async () => {
+  const s = await makeScratch({ template: await tpl() });
+  try {
+    const casePath = join(s.home, "case.json");
+    write7(casePath, JSON.stringify(RR12));
+    // A fetch log outside CROW_HOME: the start guard refuses, so the connection never comes up.
+    const bad = { ...s, fetchLogPath: join(tmpdir(), "outside-fetch.jsonl") };
+    const r = await replayTrajectory({ casePath, steps: careful12, scratch: bad });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /refused|closed/i);
+    assert.ok(!exists7(bad.fetchLogPath));
+  } finally { s.cleanup(); }
+});
+
+test("loadTrajectory reads base and <case>.<adversarial> trajectories", () => {
+  const dir = mkdtempSync(join(H, "traj-"));
+  write7(join(dir, "rr12.json"), JSON.stringify({ careful: { steps: [{ say: "x" }] }, adversarial: { odd: { steps: [{ say: "y" }], fails: ["a"] } } }));
+  assert.deepEqual(loadTrajectory("rr12", "careful", dir).steps, [{ say: "x" }]);
+  assert.deepEqual(loadTrajectory("rr12", "rr12.odd", dir), { steps: [{ say: "y" }], fails: ["a"] });
+  assert.throws(() => loadTrajectory("rr12", "hank", dir), TrajectoryError);
+  assert.throws(() => loadTrajectory("rr12", "rr07.odd", dir), /belongs to rr07/);
+  assert.throws(() => loadTrajectory("rr99", "careful", dir), /no trajectory file/);
+});
+
+const RUN = join(ROOT, "scripts", "research-eval", "run.mjs");
+const runCli = (args) => spawnSync(process.execPath, [RUN, ...args], { cwd: ROOT, encoding: "utf8", env: { ...process.env } });
+
+test("run.mjs refuses a non-empty --out without --resume and refuses live mode", () => {
+  const dir = mkdtempSync(join(H, "cli-"));
+  const out = join(dir, "rows.jsonl");
+  write7(out, '{"arm":"x","case":"rr12","rep":0}\n');
+  const r = runCli(["--mode=harness", "--trajectory=careful", `--out=${out}`]);
+  assert.equal(r.status, 3, r.stderr);
+  assert.match(r.stderr, /exists and is not empty/);
+  const live = runCli(["--mode=live", "--trajectory=careful", `--out=${join(dir, "live.jsonl")}`, "--model=m", "--base-url=http://127.0.0.1:1/v1"]);
+  assert.equal(live.status, 2);
+  assert.match(live.stderr, new RegExp(LIVE_REFUSAL.replace(/[()]/g, "\\$&")));
+  assert.ok(!exists7(join(dir, "live.jsonl")));
+  const judge = runCli(["--mode=harness", "--trajectory=careful", `--out=${join(dir, "j.jsonl")}`, "--judge=real"]);
+  assert.equal(judge.status, 2);
+  assert.match(judge.stderr, /only stub-pass/);
+});
+
+test("run.mjs creates the --out directory and refuses bad --reps before writing anything", () => {
+  const dir = mkdtempSync(join(H, "cli-"));
+  const cases = join(dir, "cases");
+  mkdirSync7(cases);
+  write7(join(cases, "rr12.json"), JSON.stringify(RR12));
+  const zero = runCli(["--mode=harness", "--trajectory=careful", `--out=${join(dir, "z", "rows.jsonl")}`, `--cases=${cases}`, "--reps=0"]);
+  assert.equal(zero.status, 2);
+  assert.ok(!exists7(join(dir, "z")));
+  // A trajectory name no file will ever carry: the run stops on it, after creating the out dir.
+  const out = join(dir, "fresh", "dir", "rows.jsonl");
+  const r = runCli(["--mode=harness", "--trajectory=rr12.no-such-trajectory", `--out=${out}`, `--cases=${cases}`]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /no-such-trajectory|no trajectory file/);
+  assert.ok(exists7(join(dir, "fresh", "dir")));
+  assert.ok(!exists7(out));
+});
+
+test("runRows --resume skips rows already written", async () => {
+  const dir = mkdtempSync(join(H, "rows-"));
+  const out = join(dir, "sub", "rows.jsonl"); // runRows creates the out dir
+  const opts = { cases: [RR12], trajectory: "careful", reps: 1, model: "stub", out, stepsFor: () => careful12 };
+  const first = await runRows(opts);
+  assert.equal(first.rows, 1);
+  const rows = readFileSync(out, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].arm, "harness-careful");
+  assert.equal(rows[0].case_pass, true, JSON.stringify(rows[0].criteria));
+  assert.equal(rows[0].contaminated, false);
+  const again = await runRows({ ...opts, done: doneKeys(out) });
+  assert.equal(again.rows, 0);
+  assert.equal(readFileSync(out, "utf8").trim().split("\n").length, 1);
+});
+
+test("every row records the pre-registered sampling and seed 1000+rep", async () => {
+  const dir = mkdtempSync(join(H, "rows-"));
+  const out = join(dir, "rows.jsonl");
+  const res = await runRows({ cases: [RR12], trajectory: "careful", reps: 2, model: "stub", out, stepsFor: () => careful12, concurrency: 2 });
+  assert.equal(res.rows, 2);
+  const rows = readFileSync(out, "utf8").trim().split("\n").map((l) => JSON.parse(l)).sort((x, y) => x.rep - y.rep);
+  assert.deepEqual(rows.map((r) => r.sampling.seed), [1000, 1001]);
+  for (const r of rows) {
+    assert.deepEqual(r.sampling, { temperature: 0.7, top_p: 0.95, top_k: 20, min_p: 0, seed: 1000 + r.rep });
+    assert.deepEqual(r.config, { mode: "harness", trajectory: "careful", skill: "research-pipeline", judge: null });
+    assert.equal(r.completion_tokens, null);
+    assert.equal(r.ok, true);
+    assert.equal(r.parse_ok, true);
+    assert.match(r.skill_sha, /^[0-9a-f]{64}$/);
+    assert.match(r.server_sha, /^[0-9a-f]{64}$/);
+    assert.ok(r.crow_sha === null || /^[0-9a-f]{40}$/.test(r.crow_sha));
+    for (const k of ["arm", "model", "case", "type", "rep", "contaminated", "wall_s", "criteria", "case_pass", "evidence", "undecided",
+      "no_prose", "off_set_fetches", "flagged_unconfirmed", "judge_reason"]) assert.ok(k in r, k);
+  }
+});
+
+test("runUnit returns the scored row and its scratch uncleaned; a transport failure after 3 attempts is a contaminated row", async () => {
+  const t = await tpl();
+  const { row, scratch } = await runUnit({ caseDef: RR12, steps: careful12, rep: 0, arm: "a", model: "stub", trajectory: "careful", template: t });
+  try {
+    assert.equal(row.case_pass, true);
+    assert.ok(exists7(scratch.dbPath));
+    assert.ok(readEvidence7(scratch.dbPath).sources.some((x) => x.verified === 1));
+  } finally { scratch.cleanup(); }
+  // A case the fixture server cannot load (a page with a bad fetch mode) fails every attempt.
+  const broken = { ...RR12, pages: { [RR12_URL]: { fetch: "sometimes" } } };
+  const logs = [];
+  const bad = await runUnit({ caseDef: broken, steps: careful12, rep: 0, arm: "a", model: "stub", trajectory: "careful", template: t, log: (m) => logs.push(m) });
+  assert.equal(bad.scratch, null);
+  assert.equal(bad.row.ok, false);
+  assert.equal(bad.row.contaminated, "transport failure after 3 attempts");
+  assert.equal(logs.length, 3);
+});
