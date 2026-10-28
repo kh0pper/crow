@@ -75,6 +75,30 @@ Agrega una fuente a un proyecto. Genera automáticamente una cita APA si no se p
 
 **Tipos de fuente**: `web_article`, `academic_paper`, `book`, `interview`, `web_search`, `web_scrape`, `api_data`, `document`, `video`, `podcast`, `social_media`, `government_doc`, `dataset`, `other`
 
+### crow_web_search
+
+Busca en la web con la API de Brave Search (`servers/shared/brave-search.js`, clave `BRAVE_API_KEY`, límite de 10 segundos). No obtiene ni guarda nada. Cada resultado lleva la marca `SNIPPET, not a source: open it with crow_add_source before citing`, y los resultados se recortan por entradas completas para que la respuesta quepa en el límite de resultados de voz. Sin clave de API, la herramienta dice que la búsqueda no está configurada y sugiere abrir una URL conocida con `crow_add_source`.
+
+| Parámetro | Tipo | Requerido | Descripción |
+|---|---|---|---|
+| `query` | string | Sí | Consulta de búsqueda (hasta 400 caracteres) |
+| `count` | number | No | Número de resultados, 1-10 (predeterminado: 5) |
+
+### crow_fetch_source
+
+Vuelve a abrir la URL de una fuente guardada (requiere la capacidad `write_sources` en su proyecto). Sirve para reintentar una obtención fallida o actualizar una copia antigua. Consulta [Verificar antes de citar](#verificar-antes-de-citar).
+
+- Una fuente sin URL no tiene nada que obtener.
+- Si la obtención falla o no encuentra texto legible, se conserva la copia anterior que tenía texto, y la fuente sigue siendo citable.
+- Si la página no cambió (mismo hash de contenido), solo se actualiza `fetched_at`.
+- Si la página cambió, el texto nuevo no se guarda mientras haya notas de cita que pasaron su comprobación con el texto anterior, salvo que el propietario pase `force: true`.
+- Cuando se guarda texto nuevo, se vuelven a comprobar las notas de cita de la fuente, y se quita una verificación `quotes_checked` si una cita ya no está en la página.
+
+| Parámetro | Tipo | Requerido | Descripción |
+|---|---|---|---|
+| `id` | number | Sí | ID de la fuente |
+| `force` | boolean | No | Solo el propietario: reemplaza el texto guardado de la página aunque haya comprobaciones de citas que dependan de él |
+
 ### crow_search_sources
 
 Busca fuentes usando búsqueda de texto completo.
@@ -92,7 +116,7 @@ Obtiene los detalles completos de una fuente específica.
 
 | Parámetro | Tipo | Requerido | Descripción |
 |---|---|---|---|
-| `source_id` | number | Sí | ID de la fuente |
+| `id` | number | Sí | ID de la fuente |
 
 ### crow_verify_source
 
@@ -124,6 +148,8 @@ Agrega una nota, opcionalmente vinculada a un proyecto o a una fuente.
 |---|---|---|---|
 | `content` | string | Sí | Contenido de la nota |
 | `note_type` | string | No | Tipo: note, quote, summary, analysis, question, insight (predeterminado: note) |
+| `provenance` | string | No | De dónde viene lo que dice la nota: `fetched`, `snippet` o `derived`. Obligatorio en las notas quote y summary; en analysis e insight el valor predeterminado es `derived`. Consulta [Procedencia de las notas](#procedencia-de-las-notas) |
+| `locator` | string | No | Dónde está en la fuente (página, sección, marca de tiempo) |
 | `project_id` | number | No | Proyecto asociado |
 | `source_id` | number | No | Fuente asociada |
 | `title` | string | No | Título de la nota |
