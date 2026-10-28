@@ -33,7 +33,7 @@ const STATIC = {
 
 /**
  * @param {Function} dashboardAuth
- * @param {object} seams  tests: { db, blobs, engine, csrf, runtime, policy, notify, renderDeps, loadBotDef, createBoardCard }
+ * @param {object} seams  tests: { db, blobs, engine, csrf, runtime, policy, notify, renderDeps, loadBotDef, createBoardCard, importCardDocs }
  */
 export default function artifactsRouter(dashboardAuth, seams = {}) {
   const router = Router();
@@ -41,8 +41,8 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
   const S = { ...seams };
 
   async function init() {
-    const [store, comments, rounds, delivery, tables, blobMinio, links] = await Promise.all(
-      ["server/store.js", "server/comments.js", "server/rounds.js", "server/delivery.js", "server/init-tables.js", "server/blob-store-minio.js", "server/links.js"].map(bundleImport));
+    const [store, comments, rounds, delivery, tables, blobMinio, links, mentions] = await Promise.all(
+      ["server/store.js", "server/comments.js", "server/rounds.js", "server/delivery.js", "server/init-tables.js", "server/blob-store-minio.js", "server/links.js", "server/mentions.js"].map(bundleImport));
     if (!S.db) { const { createDbClient } = await appImport("servers/db.js"); S.db = createDbClient(); }
     await tables.initArtifactsTables(S.db);
     if (!S.blobs) { const { resolveDataDir } = await appImport("servers/db.js"); S.blobs = await blobMinio.createBlobStore(S.db, resolveDataDir()); }
@@ -73,12 +73,34 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     if (!S.csrf) S.csrf = (await appImport("servers/gateway/dashboard/shared/csrf.js")).csrfMiddleware;
     if (!S.policy) S.policy = await appImport("servers/gateway/artifact-origin/policy.js");
     S.runtime.setContentResolver(store.contentResolver(S.db, S.blobs));
-    M = { store, comments, rounds, delivery, links };
+    M = { store, comments, rounds, delivery, links, mentions };
     S.plainBackfill = comments.backfillPlain(S.db, S.blobs, S.renderDeps.markdownBlocks).then((r) => {
       if (r.versions || r.skipped || r.stopped) console.log(`[artifacts] plain backfill: ${r.versions} version(s), ${r.threads} thread(s), ${r.skipped} left on the fallback${r.stopped ? "; stopped early (storage unavailable), retried at the next start" : ""}`);
     }, (e) => console.warn(`[artifacts] plain backfill failed (${(e && e.code) || "error"}); old documents stay on the markdown fallback`));
   }
   const ensure = () => (ready ??= init().catch((e) => { ready = null; throw e; }));
+
+  /**
+   * The document's card for its header (P6): `{ id, title, lane, href, thread }` or null.
+   * Core make/card-docs.js decides it (cardForDocument, then cardSummary: lane by the Board
+   * tab's rule, href into the card drawer, the card's chat). An older core without the module
+   * gives null (the player-shell precedent); one with cardForDocument but no cardSummary gets
+   * the bare drawer link and nothing it would have to guess. One summary per request.
+   */
+  async function documentCardFor(artifactId) {
+    let cd;
+    try { cd = await (S.importCardDocs || (() => appImport("servers/gateway/make/card-docs.js")))(); } catch { return null; }
+    try {
+      if (typeof cd?.cardForDocument !== "function") return null;
+      const id = await cd.cardForDocument(S.db, "artifact", artifactId);
+      if (id == null) return null;
+      if (typeof cd.cardSummary !== "function") return { id: Number(id), title: "", lane: null, href: `/dashboard/bot-board#open=${Number(id)}`, thread: null };
+      return (await cd.cardSummary(S.db, id)) || null;
+    } catch (e) {
+      console.warn(`[artifacts] the document's card could not be read (${(e && e.code) || "error"}: ${e && e.message})`);
+      return null;
+    }
+  }
   const OWNER = { kind: "session", id: null };
   const wrap = (fn) => async (req, res) => {
     try { await ensure(); await fn(req, res); }
@@ -108,12 +130,13 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
       for (const [k, v] of Object.entries(page.viewerHeaders(S.policy.viewerCsp, origin))) res.setHeader(k, v);
       const m = /(?:^|;\s*)crow_lang=([a-z]{2})/.exec(String(req.headers.cookie || ""));
       const lang = m && m[1] === "es" ? "es" : "en";
-      const { v, thread } = page.viewerParams(req.query);
+      const { v, thread, back } = page.viewerParams(req.query);
+      const card = await documentCardFor(req.params.id);
       // The player bar (bar on every Crow page): the core shell, emitted only here, behind dashboardAuth.
       // An older core without the module renders the viewer with no bar.
       let shellHtml = "";
       try { shellHtml = (await appImport("servers/gateway/dashboard/shared/player-shell.js")).playerShellHtml(lang); } catch { shellHtml = ""; }
-      res.type("html").send(page.renderViewerPage({ lang, id: req.params.id, v, thread, shellHtml }));
+      res.type("html").send(page.renderViewerPage({ lang, id: req.params.id, v, thread, back, card, shellHtml }));
     } catch {
       res.status(500).type("text/plain").send("error");
     }
@@ -395,13 +418,21 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     // active round and the scripted-type flag from THIS row — the client
     // never re-derives policy (one definition, server-side). scriptsOff is
     // the SAME expression the view-mint route uses (D20).
-    const activeRound = (await S.db.execute({ sql: "SELECT id, kind, status FROM artifact_rounds WHERE artifact_id=? AND status IN ('queued','pending','delivering','working') ORDER BY id DESC LIMIT 1", args: [art.id] })).rows[0] || null;
+    const activeRound = (await S.db.execute({ sql: "SELECT id, kind, status, bot_id FROM artifact_rounds WHERE artifact_id=? AND status IN ('queued','pending','delivering','working') ORDER BY id DESC LIMIT 1", args: [art.id] })).rows[0] || null;
+    // P6: the round's bot by its display name ("Sent to <name>"), else its id.
+    if (activeRound) {
+      let n = null;
+      try { n = (await S.db.execute({ sql: "SELECT display_name FROM pi_bot_defs WHERE bot_id=?", args: [activeRound.bot_id] })).rows[0]?.display_name || null; } catch { n = null; }
+      activeRound.bot_name = n ? String(n) : activeRound.bot_id;
+    }
     const cur = versions.find((v) => Number(v.n) === Number(art.current_version)) || null;
     const scripted = S.policy.isScriptedType(art.type);
     res.json({ artifact: art, versions: versions.map((v) => ({ ...v, anchor_map: v.anchor_map_json ? JSON.parse(v.anchor_map_json) : null, anchor_map_json: undefined })), threads: await M.comments.listThreads(S.db, art.id),
       activeRound, scripted, scriptsOff: !!(cur && scripted && M.store.isTainted(cur)),
       // The threads a round or ask holds right now: the viewer hides Edit/Delete on them.
-      lockedThreads: await M.comments.lockedThreadIds(S.db, art.id) });
+      lockedThreads: await M.comments.lockedThreadIds(S.db, art.id),
+      // P6: the card this document belongs to (null: none, or an older core).
+      card: await documentCardFor(art.id) });
   }));
 
   /**
@@ -537,13 +568,15 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
       let map = null; try { map = v && v.anchor_map_json ? JSON.parse(v.anchor_map_json) : null; } catch { map = null; }
       anchor = M.comments.resolveBlockAnchor(map, anchor);
     }
-    res.status(201).json(await M.comments.addThread(S.db, { artifactId: art.id, versionN, anchor, text: req.body?.text, author: { kind: "owner" } }));
+    const out = await M.comments.addThread(S.db, { artifactId: art.id, versionN, anchor, text: req.body?.text, author: { kind: "owner" } });
+    res.status(201).json({ ...out, mention: await mentionRound(art, out.threadId, req.body?.text) });
   }));
   router.post("/api/artifacts/:id/threads/:tid/comments", wrap(async (req, res) => {
     const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
     const t = (await S.db.execute({ sql: "SELECT artifact_id FROM artifact_threads WHERE id=?", args: [Number(req.params.tid)] })).rows[0];
     if (!t || t.artifact_id !== art.id) throw Object.assign(new Error("no such thread"), { code: "not_found" });
-    res.status(201).json(await M.comments.addComment(S.db, { threadId: Number(req.params.tid), text: req.body?.text, author: { kind: "owner" } }));
+    const out = await M.comments.addComment(S.db, { threadId: Number(req.params.tid), text: req.body?.text, author: { kind: "owner" } });
+    res.status(201).json({ ...out, mention: await mentionRound(art, Number(req.params.tid), req.body?.text) });
   }));
   router.post("/api/artifacts/:id/threads/:tid/status", wrap(async (req, res) => {
     await M.store.requireAccess(S.db, OWNER, req.params.id);
@@ -577,15 +610,75 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
    * The owner names ONE chat (plan PR-3 Task 3.3, review M4/M5c): verified
    * server-side (active link, the link's bot has access, the chat is that
    * bot's own, the def still has the Artifacts tools) or refused by name.
-   * Returns { threadId, botId } or throws.
+   * Returns { threadId, botId } or throws. `botId` (a mention round): the
+   * chat must be that bot's.
    */
-  async function namedTarget(art, thread) {
+  async function namedTarget(art, thread, botId = null) {
     if (typeof thread !== "string" || !THREAD_RE.test(thread)) throw named("bad_request");
     const l = await M.links.activeLink(S.db, art.id, thread);
     if (!l) throw named("target_unlinked");
+    if (botId != null && l.botId !== botId) throw named("target_other_bot");
     const why = await M.links.verifyTarget(S.db, { artifactId: art.id, botId: l.botId, threadId: l.threadId, botDef: await botDefOf(l.botId) });
     if (why) throw named(why);
     return { threadId: l.threadId, botId: l.botId };
+  }
+
+  /**
+   * The Send route's body (P6: shared with the `@bot` mention round). Picks
+   * the target exactly as the Send route always has, starts the round as the
+   * OWNER and delivers it. `botId` (a mention round) narrows the chat choice
+   * to that bot's own linked chats; with none, it goes to a new session (an
+   * untrusted round still gets its locked session: deliverRound decides).
+   * Returns { round, delivery }.
+   */
+  async function startOwnerRound(art, { include, choice, thread, kind, datasetsApproved, botId = null, source = null }) {
+    if (!botId && !art.created_by_bot) throw Object.assign(new Error("this artifact has no bot"), { code: "bad_request" });
+    choice = choiceOf(choice);
+    let target = null;
+    if (choice === "chat") {
+      target = thread != null ? await namedTarget(art, thread, botId) : await M.links.pickSendTarget(S.db, { artifactId: art.id, loadBotDef: botDefOf, ...(botId ? { botId } : {}) });
+      if (!target && botId) choice = "new-session";
+    }
+    const round = await M.rounds.startRound(S.db, { artifactId: art.id, actor: OWNER, include, kind, datasetsApproved, botId: target ? target.botId : (botId || art.created_by_bot), targetThread: target ? target.threadId : null, source });
+    const out = await M.delivery.deliverRound(S.db, round, { engine: await engineNow(), botDef: await botDefOf(round.bot_id), choice, createBoardCard: S.createBoardCard || null, actor: OWNER });
+    return { round: await M.rounds.getRound(S.db, round.id), delivery: out };
+  }
+
+  const MENTION_ERRORS = new Set(["round_running", "not_found", "forbidden"]);
+  /**
+   * P6 (spec §10): the OWNER's `@bot` in a comment hands that ONE thread to
+   * that bot as a mention round, reopening it if it was closed. Runs after
+   * the comment is saved; the comment is always kept, whatever happens here.
+   * The bot comes only from an enabled bot definition (mentions.js), never
+   * from the request; it must be able to reach the document (made it or was
+   * granted it; never a received one) before the thread is touched.
+   * Returns undefined (no mention), { botId, roundId, status } or { botId, error }.
+   */
+  async function mentionRound(art, threadId, text) {
+    const m = await M.mentions.mentionBotFor(S.db, { actor: OWNER, text });
+    if (!m) return undefined;
+    // `name`: the owner's own @word (the viewer's lines quote it); `botName`: the
+    // matched bot's display name. Both reach the page as text only.
+    const name = m.token;
+    if (!m.bot) return { botId: null, name, error: "not_found" };
+    const botId = m.bot.botId, botName = m.bot.displayName;
+    const refused = (error) => ({ botId, botName, name, error });
+    try {
+      if (!(await M.store.canAccess(S.db, { kind: "bot", id: botId }, art))) return refused("forbidden");
+      // Any active round on the document refuses the mention BEFORE the thread
+      // is touched, so a refused mention never leaves a thread reopened.
+      if (await M.rounds.hasActiveRound(S.db, art.id)) return refused("round_running");
+      if ((await M.comments.reopenForMention(S.db, { threadId, artifactId: art.id })) === "busy") return refused("round_running");
+      const { round, delivery } = await startOwnerRound(art, { include: [threadId], choice: "chat", kind: "round", botId, source: "mention" });
+      // A round that started but whose delivery failed at once carries the
+      // delivery's own named reason (bot_lacks_artifacts, target_locked, …).
+      const reason = delivery && typeof delivery.error === "string" ? delivery.error : null;
+      return { botId, botName, name, roundId: round.id, status: round.status, ...(reason ? { reason } : {}) };
+    } catch (e) {
+      if (MENTION_ERRORS.has(e && e.code)) return refused(e.code);
+      console.warn(`[artifacts] a mention round could not start (${(e && e.code) || "error"})`);
+      return refused("failed");
+    }
   }
 
   /** Send feedback (owner gesture). body: { include: [threadIds], choice: chat|new-session|board-card, thread?, datasetsApproved }
@@ -595,15 +688,7 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
    *  owner's choice (the send sheet). Never "any live chat" (round-2 B7). */
   router.post("/api/artifacts/:id/rounds", wrap(async (req, res) => {
     const art = await M.store.requireAccess(S.db, OWNER, req.params.id);
-    if (!art.created_by_bot) throw Object.assign(new Error("this artifact has no bot"), { code: "bad_request" });
-    const choice = choiceOf(req.body?.choice);
-    let target = null;
-    if (choice === "chat") {
-      target = req.body?.thread != null ? await namedTarget(art, req.body.thread) : await M.links.pickSendTarget(S.db, { artifactId: art.id, loadBotDef: botDefOf });
-    }
-    const round = await M.rounds.startRound(S.db, { artifactId: art.id, actor: OWNER, include: req.body?.include, kind: req.body?.kind === "ask" ? "ask" : "round", datasetsApproved: !!req.body?.datasetsApproved, botId: target ? target.botId : art.created_by_bot, targetThread: target ? target.threadId : null });
-    const out = await M.delivery.deliverRound(S.db, round, { engine: await engineNow(), botDef: await botDefOf(round.bot_id), choice, createBoardCard: S.createBoardCard || null, actor: OWNER });
-    res.status(201).json({ round: await M.rounds.getRound(S.db, round.id), delivery: out });
+    res.status(201).json(await startOwnerRound(art, { include: req.body?.include, choice: req.body?.choice, thread: req.body?.thread, kind: req.body?.kind === "ask" ? "ask" : "round", datasetsApproved: !!req.body?.datasetsApproved }));
   }));
 
   /** The send sheet's second step: deliver a round still waiting for the

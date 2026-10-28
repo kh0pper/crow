@@ -353,9 +353,9 @@ test("Run scripts POSTs the existing approve route with CSRF and refetches; Open
   const pane = api.pane();
   assert.ok(pane, "the pane opened");
   const frame = byClass(pane, "art-pane-frame")[0];
-  assert.equal(frame.src, "/dashboard/artifacts/view/art_run?thread=" + sid);
+  assert.equal(frame.src, "/dashboard/artifacts/view/art_run?thread=" + sid + "&from=chat");
   const win = byClass(card, "art-window")[0];
-  assert.equal(win.href, "/dashboard/artifacts/view/art_run?thread=" + sid);
+  assert.equal(win.href, "/dashboard/artifacts/view/art_run?thread=" + sid + "&from=chat");
   assert.equal(win.target, "_blank");
   assert.equal(win.rel, "noopener");
 });
@@ -363,9 +363,9 @@ test("Run scripts POSTs the existing approve route with CSRF and refetches; Open
 test("Q2 pane: the viewer URL, the 1024px breakpoint, split vs sheet, Escape and a transcript reset close it", async () => {
   const hub = mountCard({ fetchImpl: () => json(row({ id: "art_p" })) });
   const api = hub.sandbox.__exportedApi;
-  assert.equal(api.artViewerUrl("art_p", "perchlive-0123abcd"), "/dashboard/artifacts/view/art_p?thread=perchlive-0123abcd");
-  assert.equal(api.artViewerUrl("art_p", "not a thread"), "/dashboard/artifacts/view/art_p", "only a Perch thread id rides along");
-  assert.equal(api.artViewerUrl("a/b?c", null), "/dashboard/artifacts/view/a%2Fb%3Fc");
+  assert.equal(api.artViewerUrl("art_p", "perchlive-0123abcd"), "/dashboard/artifacts/view/art_p?thread=perchlive-0123abcd&from=chat");
+  assert.equal(api.artViewerUrl("art_p", "not a thread"), "/dashboard/artifacts/view/art_p?from=chat", "only a Perch thread id rides along");
+  assert.equal(api.artViewerUrl("a/b?c", null), "/dashboard/artifacts/view/a%2Fb%3Fc?from=chat");
   assert.equal(api.artPaneMode(1024), "split");
   assert.equal(api.artPaneMode(1023), "sheet");
   assert.equal(api.artPaneMode(412), "sheet");
@@ -673,7 +673,7 @@ test("item 4: a working card says so; after the round-done frame the SAME node s
   assert.equal(show.textContent, "Show v2");
   show.onclick();
   const frame = api.pane().children.find((c) => c.className === "art-pane-frame");
-  assert.match(frame.src, /\/dashboard\/artifacts\/view\/art_i4\?v=2&thread=perchlive-aaaaaaaa$/, frame.src);
+  assert.match(frame.src, /\/dashboard\/artifacts\/view\/art_i4\?v=2&thread=perchlive-aaaaaaaa&from=chat$/, frame.src);
   api.closeArtifactPane();
   // An identical re-poll does not re-render the status line.
   const before = status();
@@ -699,10 +699,10 @@ test("item 4: done without a version says so; a timed-out round says so; artView
   await tick();
   const lines = byClass(hub.transcript, "art-fb-status").map((n) => n.textContent);
   assert.deepEqual(lines, ["Replied, no new version", "Timed out"]);
-  assert.equal(api.artViewerUrl("art_x", sidX, 3), "/dashboard/artifacts/view/art_x?v=3&thread=" + sidX);
-  assert.equal(api.artViewerUrl("art_x", null, 3), "/dashboard/artifacts/view/art_x?v=3");
-  assert.equal(api.artViewerUrl("art_x", sidX, "3x"), "/dashboard/artifacts/view/art_x?thread=" + sidX);
-  assert.equal(api.artViewerUrl("art_x", sidX), "/dashboard/artifacts/view/art_x?thread=" + sidX);
+  assert.equal(api.artViewerUrl("art_x", sidX, 3), "/dashboard/artifacts/view/art_x?v=3&thread=" + sidX + "&from=chat");
+  assert.equal(api.artViewerUrl("art_x", null, 3), "/dashboard/artifacts/view/art_x?v=3&from=chat");
+  assert.equal(api.artViewerUrl("art_x", sidX, "3x"), "/dashboard/artifacts/view/art_x?thread=" + sidX + "&from=chat");
+  assert.equal(api.artViewerUrl("art_x", sidX), "/dashboard/artifacts/view/art_x?thread=" + sidX + "&from=chat");
 });
 
 // ---------------------------------------------------------------------------

@@ -3810,6 +3810,9 @@ export const translations = {
   "shell.confirmNotFullSuccess": { en: "This result isn't a full success. Accept it and close the card?", es: "Este resultado no es un éxito completo. ¿Aceptarlo y cerrar la tarjeta?" },
   "shell.confirmAcceptYes": { en: "Yes, accept it", es: "Sí, aceptarlo" },
   "shell.confirmAcceptNo": { en: "No, leave it", es: "No, dejarlo" },
+
+  // ─── Doc ↔ card (P6) ───
+  "shell.documentNumbered": { en: "Document {id}", es: "Documento {id}" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

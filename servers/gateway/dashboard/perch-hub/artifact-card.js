@@ -88,13 +88,15 @@ export function perchArtifactCardJs(lang = "en") {
   function resetArtifactCards(){ artCards={}; artAsks={}; artFb={}; artFbSt={}; artBuf=[]; artGen++; closeArtifactPane(); }
 
   /* The viewer page's URL (same origin). The thread rides along only when it
-     is a Perch thread id; the viewer validates it again server-side. */
+     is a Perch thread id; the viewer validates it again server-side. from=chat
+     (P6) gives the viewer its way back to this chat. */
   function artViewerUrl(id,sid,v){
     var u='/dashboard/artifacts/view/'+encodeURIComponent(String(id)), q=[];
     /* Item 4: a version to open at (a positive integer only). */
     if(typeof v==='number'&&Number.isInteger(v)&&v>0) q.push('v='+String(v));
     if(typeof sid==='string'&&/^perchlive-[0-9a-f]{8}$/.test(sid)) q.push('thread='+encodeURIComponent(sid));
-    return q.length?u+'?'+q.join('&'):u;
+    q.push('from=chat');
+    return u+'?'+q.join('&');
   }
   /* Split pane at >=1024px, full-screen sheet below (the breakpoint the
      viewer page's own layout uses). Pure, so tests pin it. */

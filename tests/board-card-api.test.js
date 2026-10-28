@@ -113,6 +113,24 @@ test("GET card returns the resolved board def; no stage, no effectiveStage, no p
   assert.deepEqual(b.board.status_values, ["pending", "in_progress", "done", "cancelled"]);
 });
 
+test("GET card carries the card's documents for the drawer (P6), titles as data", async () => {
+  const before = await (await fetch(base + "/card/1")).json();
+  assert.deepEqual(before.documents, [], "an older store (no artifacts, an old bot_sessions): no documents, and the card still loads");
+  const { createDbClient } = await import("../servers/db.js");
+  const { initArtifactsTables } = await import("../bundles/artifacts/server/init-tables.js");
+  const cdb = createDbClient();
+  try {
+    await initArtifactsTables(cdb);
+    // This fixture's bot_sessions predates gateway_thread_id; every real crow.db has it.
+    await cdb.execute({ sql: "ALTER TABLE bot_sessions ADD COLUMN gateway_thread_id TEXT", args: [] });
+    await cdb.execute({ sql: "INSERT INTO artifacts (id, title, type, origin_card, received) VALUES ('art_drawer1', '<i>Plan</i>', 'document', 1, 0)", args: [] });
+  } finally { cdb.close(); }
+  const r = await (await fetch(base + "/card/1")).json();
+  assert.deepEqual(r.documents, [{ kind: "artifact", ref: "art_drawer1", title: "<i>Plan</i>", openUrl: "/dashboard/make/open/artifact/art_drawer1" }]);
+  const other = await (await fetch(base + "/card/3")).json();
+  assert.deepEqual(other.documents, []);
+});
+
 test("move validates against the card's board def", async () => {
   const ok = await fetch(base + "/card/2/move", { method: "POST",
     headers: { "content-type": "application/json" }, body: JSON.stringify({ status: "doing" }) });
@@ -650,7 +668,7 @@ test("GET /card/:id gains ADDITIVE keys only: autonomy/plan_head/latest_results/
   const before = await (await fetch(base + "/card/" + created.id)).json();
   const EXISTING_KEYS = ["card", "projects", "locked", "board"];
   for (const k of EXISTING_KEYS) assert.ok(Object.hasOwn(before, k), "existing key survives: " + k);
-  assert.deepEqual(Object.keys(before).sort(), [...EXISTING_KEYS, "autonomy", "plan_head", "latest_results", "mutations", "decision"].sort(),
+  assert.deepEqual(Object.keys(before).sort(), [...EXISTING_KEYS, "autonomy", "plan_head", "latest_results", "mutations", "decision", "documents"].sort(),
     "additive-only: no existing key dropped, nothing unexpected added");
   assert.equal(before.autonomy, "gated");
   assert.equal(before.plan_head, null, "no plan saved yet");

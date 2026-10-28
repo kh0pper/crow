@@ -49,7 +49,7 @@
   function isDoc() { return !!(S.art && S.art.type === "document"); }
   function authorName(c) { return c.author_kind === "owner" ? T.you : c.author_kind === "bot" ? (c.author_id || T.bot) : (c.author_id || c.author_kind); }
 
-  var S = { art: null, versions: [], threads: [], activeRound: null, n: null, viewer: null, poll: null, sheetOpen: false, commentOn: false, pending: null, lastRound: null, locked: [], editing: null };
+  var S = { art: null, versions: [], threads: [], activeRound: null, n: null, viewer: null, poll: null, sheetOpen: false, commentOn: false, pending: null, lastRound: null, locked: [], editing: null, notes: {} };
 
   // ── skeleton ────────────────────────────────────────────────────────────
   var title = el("h1", { class: "cv-title" });
@@ -79,15 +79,23 @@
   var side = el("aside", { class: "cv-side" }, [el("div", { class: "cv-side-head" }, [handle, sendBtn]), el("div", { class: "cv-side-body" }, [composeSlot, sectionList, threadList])]);
   // A way out when the viewer has the whole tab (opened from the Library or
   // "Open in new window"). Inside the hub pane the pane has its own close.
+  // P6: the server rendered the way back ("‹ Make"/"‹ Chat", from ?from=) and the
+  // document's card row (escaped there) into #cv-links; they are only moved here.
+  var links = document.getElementById("cv-links");
+  var backLink = links && links.querySelector("#cv-back");
+  var cardRow = links && links.querySelector("#cv-cardrow");
   if (window.top === window) {
     // A slim header-like bar (QW4 B2). The title is plain text, not a link:
-    // the bar has exactly two ways out.
+    // the bar has exactly two ways out. Opened from a shell tab, the way back
+    // to that tab takes the Library's place.
     root.appendChild(el("nav", { class: "cv-nav", "aria-label": T.nav }, [
-      el("a", { class: "cv-nav-back", href: "/dashboard/artifacts", text: "\u2190 " + T.library }),
+      backLink || el("a", { class: "cv-nav-back", href: "/dashboard/artifacts", text: "\u2190 " + T.library }),
       el("span", { class: "cv-nav-title", text: T.library_title }),
       el("a", { class: "cv-nav-nest", href: "/dashboard/nest", text: T.nest }),
     ]));
   }
+  if (cardRow) head.insertBefore(cardRow, headTools);
+  if (links && links.parentNode) links.parentNode.removeChild(links);
   root.appendChild(head);
   root.appendChild(banners);
   root.appendChild(trust);
@@ -136,6 +144,8 @@
   function refresh() {
     return api("GET", BASE).then(function (j) {
       S.art = j.artifact; S.versions = j.versions || []; S.threads = j.threads || []; S.activeRound = j.activeRound || null; S.locked = (j.lockedThreads || []).map(Number);
+      // The round that made a mention wait has ended: its "already working" line goes.
+      if (!S.activeRound) Object.keys(S.notes).forEach(function (k) { if (S.notes[k].busy) delete S.notes[k]; });
       if (S.n == null) S.n = (WANT_V && S.versions.some(function (v) { return Number(v.n) === WANT_V; })) ? WANT_V : Number(S.art.current_version);
       document.title = S.art.title;
       placeCommentBtn();
@@ -177,6 +187,15 @@
         el("div", { class: "cv-thread-head" }, [el("span", { class: "cv-num", text: String(num) }), el("span", { class: "cv-anchor", text: anchorText(t.anchor) + st })]),
       ]);
       (t.comments || []).forEach(function (c) { li.appendChild(commentNode(t, c)); });
+      var line = threadStatus(t);
+      if (line) li.appendChild(el("p", { class: "cv-tstatus", role: "status", text: line }));
+      // P6: the owner replies in the thread (resolved ones too: an @bot reopens
+      // it). Hidden while a round or ask holds the thread.
+      if (S.locked.indexOf(Number(t.id)) < 0) {
+        var slot = el("div", { class: "cv-treply" });
+        slot.appendChild(el("span", { class: "cv-cacts" }, [button(T.reply, function () { startReply(slot, t); }, "cv-link")]));
+        li.appendChild(slot);
+      }
       threadList.appendChild(li);
     });
     if (!shown().length) threadList.appendChild(el("li", { class: "cv-empty", text: isDoc() ? T.no_comments_doc : T.no_comments }));
@@ -184,9 +203,68 @@
     handle.textContent = n === 1 ? T.comments_1 : fmt(T.comments_n, { n: n });
     var k = sendable().length;
     // S5: while a round runs, the disabled Send says why.
-    sendBtn.textContent = S.activeRound ? fmt(T.revising, { bot: (S.art && S.art.created_by_bot) || T.bot }) : k === 0 ? T.send_none : k === 1 ? T.send_1 : fmt(T.send_n, { n: k });
+    sendBtn.textContent = S.activeRound ? fmt(T.revising, { bot: roundBot() }) : k === 0 ? T.send_none : k === 1 ? T.send_1 : fmt(T.send_n, { n: k });
     if (k === 0 || S.activeRound) sendBtn.setAttribute("disabled", ""); else sendBtn.removeAttribute("disabled");
     pushPins();
+  }
+
+  /** P6: a thread's status line, from stored state or the server's own answer
+   *  only. The active round holds this thread → "Sent to <bot>" once the bot
+   *  has it, "Waiting for a free session" while queued; else the last @bot
+   *  answer for this thread (refused, or started and failed at once); a
+   *  finished round adds nothing (the bot's reply is the status). Placed
+   *  with textContent. */
+  var SENT = ["delivering", "working"];   // the bot has it (not pending/queued, not put back after a failed spawn)
+  function threadStatus(t) {
+    var r = S.activeRound;
+    var held = r && r.kind === "round" && t.sent_round_id != null && Number(t.sent_round_id) === Number(r.id);
+    if (held && SENT.indexOf(r.status) >= 0) return fmt(T.sentTo, { bot: roundBot() });
+    if (held && r.status === "queued") return T.queued;
+    var n = S.notes[Number(t.id)];
+    return n ? n.text : "";
+  }
+  /** The bot the active round went to (the stored round's name, else id), else the maker. */
+  function roundBot() { return (S.activeRound && (S.activeRound.bot_name || S.activeRound.bot_id)) || (S.art && S.art.created_by_bot) || T.bot; }
+
+  /** P6: the owner's reply box in one thread. Like an edit, it holds the
+   *  thread list (S.editing) so a poll never wipes half-typed text. */
+  function startReply(slot, t) {
+    if (!slot) return;
+    S.editing = "reply:" + t.id;
+    Array.prototype.forEach.call(threadList.querySelectorAll(".cv-cacts button"), function (b) { b.setAttribute("disabled", ""); });
+    var ta = el("textarea", { class: "cv-edit-text", rows: "3", maxlength: "4000", "aria-label": T.reply });
+    var msg = el("p", { class: "cv-err", role: "alert" });
+    var send = function () {
+      api("POST", BASE + "/threads/" + encodeURIComponent(t.id) + "/comments", { text: ta.value })
+        .then(function (j) { noteMention(t.id, j && j.mention); S.editing = null; return refresh(); }, function (e) { msg.textContent = changeFailed(e); });
+    };
+    slot.replaceWith(el("div", { class: "cv-editbox cv-replybox" }, [ta, msg, el("div", { class: "cv-row" }, [button(T.reply, send, "cv-primary"), button(T.cancel, function () { S.editing = null; renderThreads(); })])]));
+    ta.focus();
+  }
+
+  /** The line for the comment routes' `mention` answer (the server's real
+   *  answer, nothing guessed), or null when it needs none (a round that
+   *  started: the stored round speaks for itself). */
+  function mentionLine(m) {
+    if (!m) return null;
+    var name = m.name || m.botId || "";
+    if (m.error === "round_running") return { text: fmt(T.busy, { bot: m.botName || m.botId || name }), busy: true };
+    if (m.error === "not_found") return { text: fmt(T.mention_not_found, { name: name }) };
+    if (m.error === "forbidden") return { text: fmt(T.mention_forbidden, { name: name }) };
+    if (m.error) return { text: fmt(T.mention_failed, { name: name }) };
+    if (m.status === "failed") {
+      var why = m.reason && T["why_" + m.reason] ? T["why_" + m.reason] : "";
+      return { text: why ? fmt(T.mention_stopped, { name: name, why: why }) : fmt(T.mention_failed, { name: name }) };
+    }
+    return null;
+  }
+  /** Remember the line for its thread; a later comment there replaces it.
+   *  Only S.notes changes: the list redraws on the next refresh, which waits
+   *  while a reply or edit is half-typed (S.editing). */
+  function noteMention(threadId, m) {
+    if (threadId == null) return;
+    var line = mentionLine(m);
+    if (line) S.notes[Number(threadId)] = line; else delete S.notes[Number(threadId)];
   }
 
   /** One comment. The owner's OWN comments get Edit/Delete — hidden while a
@@ -330,7 +408,8 @@
       el("div", { class: "cv-row" }, [
         button(T.add_comment, function () {
           var a = Object.assign({}, S.pending, q && q.value ? { quote: q.value } : {});
-          api("POST", BASE + "/threads", { versionN: S.n, anchor: a, text: ta.value }).then(function () {
+          api("POST", BASE + "/threads", { versionN: S.n, anchor: a, text: ta.value }).then(function (j) {
+            noteMention(j && j.threadId, j && j.mention);
             S.pending = null; composeSlot.textContent = ""; return refresh();
           }, function (e) { banner(e.message, "warn"); });
         }, "cv-primary"),
@@ -443,7 +522,7 @@
     });
     // S5: the banners always run; only the idle status line yields to the
     // comment-mode hint.
-    if (S.activeRound) status.textContent = fmt(T.revising, { bot: S.art.created_by_bot || T.bot });
+    if (S.activeRound) status.textContent = fmt(T.revising, { bot: roundBot() });
     else status.textContent = S.commentOn && !isDoc() ? T.commenting : "";
     // A round just finished with a new current version: say so, offer it.
     if (S.lastRound && !S.activeRound) {
