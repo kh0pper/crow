@@ -94,6 +94,8 @@ export function filterSpawnEnvWithReport(def) {
   const spawnEnv = {};
   const stripped = [];
   for (const k of Object.keys((def && def.spawn_env) || {})) {
+    // CROW_PI_SANDBOX is the operator's switch for the pi sandbox; a bot def must
+    // not be able to turn it off for itself (S3 fix round 1, M1).
     if (/^PI_BOT_|^PIBOT_|^CROW_ACTOR_/.test(k) || k === "CROW_PI_SANDBOX") { stripped.push(k); continue; }
     spawnEnv[k] = def.spawn_env[k];
   }
