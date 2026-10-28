@@ -177,16 +177,26 @@ test("buildBotMcp disables gateway project-tool mounts on any host and leaves ot
     external: { url: "https://mcp.example.com/research/mcp/" },
     "tailnet-board": { url: "https://crow.example.ts.net:8444/board/mcp", headers: { Authorization: "Bearer b" } },
     other: { url: "https://mcp.example.com/mcp" },
+    upper: { url: "http://127.0.0.1:3001/ROUTER/MCP" },
+    sse: { url: "http://127.0.0.1:3001/router/sse" },
+    messages: { url: "http://127.0.0.1:3001/research/messages" },
+    dot: { url: "http://127.0.0.1:3001/projects/./mcp" },
+    encoded: { url: "http://127.0.0.1:3001/router/%6dcp" },
+    "bad-encoding": { url: "http://127.0.0.1:3001/router/%E0%A4%A" },
+    tools: { url: "http://127.0.0.1:3001/tools/mcp" },
+    "tools-named": { url: "http://127.0.0.1:3001/tools-core/mcp" },
+    "board-sse": { url: "http://127.0.0.1:3001/board/sse" },
   };
   const def = { tools: { crow_mcp: Object.keys(blocks) } };
   const { json, servers, warnings, disabled } = buildBotMcp(def, { mcpServers: blocks }, {});
-  for (const name of ["crow-core", "proj-local", "research-v6", "proj-lan", "tailnet", "external"]) {
+  for (const name of ["crow-core", "proj-local", "research-v6", "proj-lan", "tailnet", "external",
+    "upper", "sse", "messages", "dot", "encoded", "bad-encoding", "tools", "tools-named"]) {
     assert.deepEqual(json.mcpServers[name], { disabled: true }, name);
     assert.ok(disabled.includes(name), name);
     assert.ok(!servers.includes(name), name);
     assert.ok(warnings.some((w) => w.includes(`'${name}'`) && /must not reach the operator's research tools with a gateway token/.test(w)), name);
   }
-  for (const name of ["board", "artifacts", "tailnet-board", "other"]) {
+  for (const name of ["board", "artifacts", "tailnet-board", "other", "board-sse"]) {
     assert.deepEqual(json.mcpServers[name], blocks[name], name);
     assert.ok(servers.includes(name), name);
   }
