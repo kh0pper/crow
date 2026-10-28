@@ -36,12 +36,18 @@ export function getConfig() {
     throw new WsError("not_ready", `Crow Workspace setup has not finished. On the Crow machine run: bash ${join(crowHome(), "bundles", "workspace", "ops", "bootstrap.sh")}`);
   }
   const jwtSecret = e.WORKSPACE_ONLYOFFICE_JWT_SECRET || "";
+  // Comment loop (§3.2 a): the owners' Nextcloud uids; default the admin login bootstrap uses.
+  const listed = String(e.WORKSPACE_OWNER_UIDS || "").split(",").map((x) => x.trim()).filter(Boolean);
+  const ownerUids = Object.freeze(listed.length ? [...new Set(listed)] : [e.WORKSPACE_ADMIN_USER || "admin"]);
   return Object.freeze({
     user: BOT_USER, appPassword, jwtSecret, host,
     ncUrl: (process.env.WORKSPACE_NC_INTERNAL_URL || "http://127.0.0.1:3070").replace(/\/+$/, ""),
     ooUrl: (process.env.WORKSPACE_OO_INTERNAL_URL || "http://127.0.0.1:3071").replace(/\/+$/, ""),
     webBase: `https://${host}:${port}`,
     secrets: Object.freeze([appPassword, jwtSecret].filter(Boolean)),
+    ownerUids,
+    // Set (bootstrap: a duplicate owner display name) → the comment watcher does nothing.
+    commentLoopBlocked: e.WORKSPACE_COMMENT_LOOP_BLOCKED || "",
   });
 }
 

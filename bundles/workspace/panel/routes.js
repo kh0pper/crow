@@ -2,7 +2,7 @@
  * Workspace panel routes:
  *  - K5 live-edit endpoints (/api/workspace/live/v1/*): editor-session-JWT auth, NO dashboard session
  *    (server/live/routes-live.js; express's Router/json are injected from here — F2);
- *  - the K5 close-time queue worker (one per gateway process; starts once Workspace is set up);
+ *  - the K5 close-time queue worker and the comment watcher (one each per gateway process; start once Workspace is set up);
  *  - Quick edit (/api/workspace/quick/*): dashboard session + CSRF, writes as crow-bot (Task 14 modules).
  *
  * The gateway calls this factory SYNCHRONOUSLY, so every bundle module and the DB are resolved lazily on first use.
@@ -50,9 +50,11 @@ export default function workspaceRouter(authMiddleware, seams = {}) {
   if (seams.startWorker !== false) {
     const tryStart = async () => {
       try {
-        const [{ openWorkspaceDb }, { getConfig }, { startQueueWorker }] = await Promise.all([bundleImport("server/db.js"), bundleImport("server/config.js"), bundleImport("server/queue/worker.js")]);
+        const [{ openWorkspaceDb }, { getConfig }, { startQueueWorker }, { startCommentWatcher }] = await Promise.all([bundleImport("server/db.js"), bundleImport("server/config.js"), bundleImport("server/queue/worker.js"), bundleImport("server/comments/watcher.js")]);
         getConfig();
-        startQueueWorker({ db: await openWorkspaceDb(), getConfig, clock }); // recovers rows stranded in applying_close first
+        const db = await openWorkspaceDb();
+        startQueueWorker({ db, getConfig, clock }); // recovers rows stranded in applying_close first
+        startCommentWatcher({ db, getConfig, clock }); // comment loop (§3.6): idle in mode off (no Nextcloud call)
       } catch { setTimeout(tryStart, 5 * 60e3).unref(); }
     };
     setTimeout(tryStart, 5000).unref();
