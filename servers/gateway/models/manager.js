@@ -1995,7 +1995,7 @@ export async function unregisterModel({
  * `pi_bot_defs` table (MPA-only, per `bot-board/data-queries.js`) must still
  * answer this query.
  *
- * @returns {Promise<{ profiles: Array<object>, bots: Array<{bot_id,display_name}> }>}
+ * @returns {Promise<{ profiles: Array<object>, bots: Array<{bot_id,display_name}>, roles: Array<{roleId,model,seeded}> }>}
  */
 export async function providerBindings(db, providerId) {
   const profiles = [];
@@ -2032,5 +2032,18 @@ export async function providerBindings(db, providerId) {
     /* pi_bot_defs missing on this instance (primary gateway) -> no bot bindings */
   }
 
-  return { profiles, bots };
+  // Role bindings (model_role.<id>) whose model is a key on this provider.
+  // Phase 1 returns them for Phase 2's delete warning; no client reads them yet.
+  const roles = [];
+  try {
+    const { readBindings } = await import("../../shared/model-roles-store.js");
+    const prefix = `${providerId}/`;
+    for (const [roleId, b] of Object.entries(await readBindings(db))) {
+      if (typeof b?.model === "string" && b.model.startsWith(prefix)) roles.push({ roleId, model: b.model, seeded: !!b.seeded });
+    }
+  } catch {
+    /* no dashboard_settings table -> no role bindings found */
+  }
+
+  return { profiles, bots, roles };
 }
