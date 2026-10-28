@@ -23,7 +23,7 @@ import { selectedWriteTools, toolsFromKeys } from "./sources.js";
 import { normText } from "./ui.js";
 import { lines } from "./data-queries.js";
 import { addCompanionsGuarded, grantsArtifactUpdate } from "../../../../../scripts/pi-bots/artifacts-companions.mjs";
-import { skillRequiredTools, skillDeclaredRepoTools, withSkillRequiredTools, addSkillToolsGuarded } from "../../../../../scripts/pi-bots/skill-tools.mjs";
+import { skillRequiredTools, skillDeclaredRepoTools, withSkillRequiredTools, addSkillToolsGuarded, unionMayGrant } from "../../../../../scripts/pi-bots/skill-tools.mjs";
 import { isVoiceBotDef } from "../../../../shared/voice-bot.js";
 import { resolveCrowHome } from "../../../../shared/crow-home.js";
 
@@ -208,7 +208,13 @@ export async function saveAbilities(def, b, { lang, changed, companionBudget = n
   const skillOpts = { crowHome: home, repoSkillsDir };
   const budgetFor = async (d) => (companionBudget ? await companionBudget(d) : null);
   const voice = isVoiceBotDef(def);
-  const priorRefused = !voice && (await addSkillToolsGuarded(def, { ...skillOpts, budget: await budgetFor(def) })).refused;
+  // A failure here (a model that cannot be resolved, an unreadable skill)
+  // must not fail an unrelated Abilities save: carry on without the union.
+  let priorRefused = false, skillToolsBroken = false;
+  if (!voice) {
+    try { priorRefused = (await addSkillToolsGuarded(def, { ...skillOpts, budget: await budgetFor(def) })).refused; }
+    catch (e) { skillToolsBroken = true; console.warn("[bot-builder] skill tools skipped on save: " + ((e && e.message) || e)); }
+  }
   let posted = null, catalog = null;
   def.tools = def.tools || {};
   if (b.files_mode) {
@@ -260,7 +266,12 @@ export async function saveAbilities(def, b, { lang, changed, companionBudget = n
     const setEq = norm.length === prev.length && norm.every((s) => prev.includes(s));
     if (!setEq) def.skills = [...new Set(norm)];
   }
-  if (!voice) await applySkillTools(def, { prevMcp, prevHadMcp, prevSkills, posted, catalog, priorRefused, skillOpts, budgetFor, lang, out });
+  if (!voice && !skillToolsBroken) {
+    // work on a copy of tools so a throw half-way leaves the save as the owner posted it
+    const tools0 = JSON.parse(JSON.stringify(def.tools));
+    try { await applySkillTools(def, { prevMcp, prevHadMcp, prevSkills, posted, catalog, priorRefused, skillOpts, budgetFor, lang, out }); }
+    catch (e) { def.tools = tools0; console.warn("[bot-builder] skill tools skipped on save: " + ((e && e.message) || e)); }
+  }
   return out;
 }
 
@@ -308,13 +319,22 @@ async function applySkillTools(def, { prevMcp, prevHadMcp, prevSkills, posted, c
       if (mcp.includes(server)) continue; // a whole-server grant: nothing to decline
       const on = tickedInPost(entry, posted, catalog);
       if (on === true) declined.delete(entry);
-      else if (on === false) declined.add(entry);
+      // unticked counts as a decline only where the union would grant it
+      // (a source left in Read-only mode is not declining its write tools)
+      else if (on === false && unionMayGrant(mcp, entry)) declined.add(entry);
     }
   }
   for (const s of dropped) for (const entry of skillDeclaredRepoTools(s, skillOpts)) if (!finalReq.has(entry)) declined.delete(entry);
-  // ticked only because the union rendered them: the union keeps granting them
-  for (const entry of keptReq) {
-    if (!declined.has(entry) && mcp.includes(entry) && !prevMcp.includes(entry)) mcp = mcp.filter((x) => x !== entry);
+  // Ticked only because the union put them on the page: the union keeps
+  // granting them, so they stay out of the stored list. Never when the page
+  // was rendered over the cap (the union showed nothing, so a tick there is
+  // the owner's own), and only where the union still grants it afterwards.
+  const shown = priorRefused ? [] : withSkillRequiredTools(prevMcp, kept, { ...skillOpts, declined: prevDeclined }).added;
+  const strip = shown.filter((e) => !declined.has(e) && mcp.includes(e) && !prevMcp.includes(e));
+  if (strip.length) {
+    const without = mcp.filter((x) => !strip.includes(x));
+    const back = new Set(withSkillRequiredTools(without, kept, { ...skillOpts, declined: [...declined] }).added);
+    mcp = mcp.filter((x) => !strip.includes(x) || !back.has(x));
   }
   if (added.length) {
     const r = withSkillRequiredTools(mcp, added, { ...skillOpts, declined: [...declined] });

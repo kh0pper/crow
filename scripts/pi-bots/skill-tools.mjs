@@ -15,6 +15,8 @@
  *      informational: shipped skills already list them, and granting whole
  *      servers would widen every bot that selects one.
  *   3. A skill switched off on this instance grants nothing.
+ *   4. Only servers in GRANTABLE_SERVERS can be granted, and a server the def
+ *      selects in Read-only mode gets only its READ_TOOLS.
  *
  * The owner's unticks win: `def.tools.skill_tools_declined` lists the
  * `server/tool` entries a selected skill requires that the owner left off in
@@ -35,6 +37,37 @@ import { isVoiceBotDef } from "../../servers/shared/voice-bot.js";
 
 /** An exact `server/tool` entry (the only spelling that grants). */
 export const SKILL_TOOL_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9_]+$/;
+
+/**
+ * The only servers a skill can grant tools from (review fix round 1: a bot
+ * whose write paths cover the checkout could edit a repo skill's `tools:`
+ * and give itself any tool on its next turn). Entries for any other server
+ * stay informational.
+ */
+export const GRANTABLE_SERVERS = Object.freeze(["crow-projects"]);
+
+/**
+ * crow-projects tools that only read. A def whose crow-projects selection is
+ * all read tools (Bot Builder's Read-only mode is derived from the stored
+ * selection, tool-access.js sourceMode) gets only these from the union.
+ */
+export const READ_TOOLS = Object.freeze({
+  "crow-projects": Object.freeze([
+    "crow_list_projects", "crow_project_get", "crow_project_stats", "crow_project_capabilities",
+    "crow_list_sources", "crow_search_sources", "crow_get_source", "crow_search_notes",
+    "crow_generate_bibliography", "crow_list_members", "crow_list_backends", "crow_backend_schema",
+    "crow_audit_log", "crow_workspace_dir", "crow_web_search",
+  ]),
+});
+
+/** Is `server` selected in read-only mode in this crow_mcp list (every entry a read tool)? */
+export function serverInReadMode(list, server) {
+  const reads = READ_TOOLS[server];
+  if (!reads || !Array.isArray(list) || list.includes(server)) return false;
+  const mine = list.filter((e) => typeof e === "string" && (e.startsWith(server + "/") || e.startsWith(server + "__")))
+    .map((e) => e.slice(server.length + (e.startsWith(server + "__") ? 2 : 1)));
+  return mine.length > 0 && mine.every((tool) => reads.includes(tool));
+}
 
 const inside = (dir, p) => {
   const r = relative(resolve(dir), resolve(p));
@@ -74,7 +107,7 @@ function declaredRepoTools(name, { crowHome, repoSkillsDir, ignoreOff = false } 
   const r = locate(name, { crowHome: home, repoSkillsDir: repo });
   if (!r || !inside(repo, r.path)) return [];
   if (!ignoreOff && isOff(name, home)) return [];
-  return [...new Set(toolEntries(r.text, normalizeSkillName(name) || ""))];
+  return [...new Set(toolEntries(r.text, normalizeSkillName(name) || "").filter((e) => GRANTABLE_SERVERS.includes(e.split("/")[0])))];
 }
 
 /** @returns {string[]} the tools a selected skill grants ([] unless a repo skill that is on). */
@@ -97,10 +130,14 @@ export function withSkillRequiredTools(crowMcp, skills, { crowHome, declined = [
   const list = Array.isArray(crowMcp) ? crowMcp.slice() : [];
   const skip = new Set(Array.isArray(declined) ? declined : []);
   const added = [];
+  // a server in Read-only mode (judged on the list as given) gets read tools only
+  const readOnly = (server) => serverInReadMode(crowMcp, server);
   for (const s of Array.isArray(skills) ? skills : []) {
     if (typeof s !== "string") continue;
     for (const entry of skillRequiredTools(s, { crowHome, repoSkillsDir })) {
       if (skip.has(entry) || grantsTool(list, entry)) continue;
+      const [server, tool] = entry.split("/");
+      if (readOnly(server) && !READ_TOOLS[server].includes(tool)) continue;
       list.push(entry);
       added.push(entry);
     }
@@ -159,4 +196,11 @@ export function skillToolHints(def, { crowHome, repoSkillsDir } = {}) {
 /** The repo tools a skill declares even when it is switched off (to clear a dropped skill's declines). */
 export function skillDeclaredRepoTools(name, opts = {}) {
   return declaredRepoTools(name, { ...opts, ignoreOff: true });
+}
+
+/** Would the union grant `entry` on top of `list` (Read-only mode respected; declines not considered)? */
+export function unionMayGrant(list, entry) {
+  const [server, tool] = entry.split("/");
+  if (!GRANTABLE_SERVERS.includes(server)) return false;
+  return !(serverInReadMode(list, server) && !READ_TOOLS[server].includes(tool));
 }
