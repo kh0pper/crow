@@ -371,6 +371,7 @@ test("live: Take over opens the sheet with the noVNC iframe; Hand back closes it
     assert.equal(takeOver.state(), "held");
     assert.equal((await leaseMod.readLease(LEASE)).holder.kind, "operator");
     await tab.waitFor("document.getElementById('perch-browser-status').textContent==='Waiting for you'");
+    assert.equal(await tab.evaluate("(function(){ var e=document.querySelector('.ph-tosheet .to-status'); return e.hidden?null:e.textContent; })()"), "Waiting for you", "the sheet says the bot is paused");
     await tab.waitFor("(function(){ var f=document.querySelector('iframe.to-vnc'); try{ return f.contentDocument&&f.contentDocument.body&&f.contentDocument.body.textContent==='vnc stand-in'; }catch(e){ return false; } })()");
 
     // The bot calls while the operator has it: it waits, never acts.

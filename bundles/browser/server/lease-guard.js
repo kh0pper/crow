@@ -13,7 +13,8 @@
  *     the result starts with the "changed hands" text; when the operator took
  *     it while the tool ran, with the "took the browser during this step" text;
  *   - another bot holds it → the busy text at once, no action;
- *   - the operator holds it → wait up to 20 s (poll 500 ms, always under pi's
+ *   - the operator holds it, or a take-over is waiting for in-flight calls
+ *     (the lease's pendingOperator) → wait up to 20 s (poll 500 ms, always under pi's
  *     30 s tool timeout). A call that waited NEVER acts: it returns the held
  *     text, or the handed-back text once the operator lets go, and the bot
  *     calls again (that next call acts, with the "changed hands" prefix).
@@ -133,6 +134,12 @@ export function installLeaseGuard(server, opts = {}) {
     } catch { return null; }
   }
 
+  /** The operator holds it, or has asked for it (a take-over waiting on in-flight calls). */
+  function operatorBlocks(cur) {
+    if (typeof lease.operatorBlocks === "function") return lease.operatorBlocks(cur, now());
+    return !!(cur && cur.holder && cur.holder.kind === "operator" && !lease.isFree(cur, now()));
+  }
+
   /** The operator holds it: wait (never act) until they let go or 20 s pass. */
   async function waitForOperator(start) {
     const deadline = start + OPERATOR_WAIT_MS;
@@ -142,8 +149,7 @@ export function installLeaseGuard(server, opts = {}) {
       await sleep(Math.min(OPERATOR_POLL_MS, left));
       let cur;
       try { cur = await lease.readLease(dir); } catch { return TEXTS.held; }
-      const operatorHolds = !!(cur && cur.holder && cur.holder.kind === "operator" && !lease.isFree(cur, now()));
-      if (!operatorHolds) return TEXTS.handedBack;
+      if (!operatorBlocks(cur)) return TEXTS.handedBack;
     }
   }
 
@@ -169,8 +175,7 @@ export function installLeaseGuard(server, opts = {}) {
       // Lost the lease between acquire and beginCall (or the lease broke): do not act.
       let cur = null;
       try { cur = await lease.readLease(dir); } catch { /* treat as busy */ }
-      const operator = cur && cur.holder && cur.holder.kind === "operator" && !lease.isFree(cur, now());
-      return textResult(operator ? TEXTS.held : TEXTS.busy);
+      return textResult(operatorBlocks(cur) ? TEXTS.held : TEXTS.busy);
     }
 
     let result;

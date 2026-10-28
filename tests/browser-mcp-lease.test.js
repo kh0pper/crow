@@ -309,3 +309,27 @@ test("the real server: page tools go through the lease, guide skips it, wait_for
     }
   }
 });
+
+test("a pending take-over (pendingOperator): a new call waits like an operator holding and never acts", async () => {
+  const { calls, call, dir, clock } = setup();
+  await leaseMod.acquire(dir, ME, { now: clock.now() });
+  await leaseMod.beginCall(dir, ME, { callId: "inflight", pid: process.pid, now: clock.now() });
+  const r = await leaseMod.takeOperatorIfIdle(dir, { now: clock.now() });
+  assert.equal(r.taken, false, "the take-over waits for the in-flight call");
+  // the gateway keeps the request fresh while it waits; then it switches
+  clock.onSleep = async (elapsed) => {
+    if (elapsed < 15000) await leaseMod.takeOperatorIfIdle(dir, { now: clock.now() });
+    else if (elapsed === 15000) await leaseMod.takeOperator(dir, { now: clock.now() });
+  };
+  const out = await call({ url: "x" });
+  assert.equal(text(out), TEXTS.held, "still the operator's after 20 s");
+  assert.equal(calls.length, 0, "never acted");
+  // a request that ended without taking it (hand back while pending) frees the wait
+  const b = setup();
+  await leaseMod.acquire(b.dir, ME, { now: b.clock.now() });
+  await leaseMod.beginCall(b.dir, ME, { callId: "inflight", pid: process.pid, now: b.clock.now() });
+  await leaseMod.takeOperatorIfIdle(b.dir, { now: b.clock.now() });
+  b.clock.onSleep = async (elapsed) => { if (elapsed === 2000) await leaseMod.clearPendingOperator(b.dir); };
+  assert.equal(text(await b.call({})), TEXTS.handedBack);
+  assert.equal(b.calls.length, 0, "a call that waited never acts");
+});

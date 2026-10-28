@@ -35,6 +35,7 @@ export function perchTakeOverJs(lang = "en") {
   var TO_COPY='${tJs("perch.copyPassword", lang)}';
   var TO_NO_PASSWORD='${tJs("perch.noPassword", lang)}';
   var TO_FINISHING='${tJs("perch.botFinishing", lang)}';
+  var TO_WAITING='${tJs("perch.browserWaiting", lang)}';
   var TO_COPIED='${tJs("passwords.copied", lang)}';
   var TO_REAUTH_TITLE='${tJs("passwords.reauthTitle", lang)}';
   var TO_REAUTH_PASSWORD='${tJs("passwords.reauthPassword", lang)}';
@@ -99,7 +100,12 @@ export function perchTakeOverJs(lang = "en") {
     rCancel.onclick=function(){ s.retry=null; rInput.value=''; reauth.hidden=true; };
     if(back.focus) back.focus();
     toFindPassword(s);
-    toApi('take-over').then(function(r){ toAnswer(s,r); });
+    /* From a link: the server takes it only while that chat's turn uses the browser. */
+    var body=(detail&&detail.link)?{ from:'link', sid:String(detail.sid||'') }:undefined;
+    perchApi('POST','/browser/take-over',body).then(function(r){
+      if(r&&r.status===409&&r.j&&r.j.error==='no_live_turn'){ if(toSheet===s) closeTakeOver(); return; }
+      toAnswer(s,r);
+    });
   }
 
   function toSetStatus(s,text){ s.status.textContent=text; s.status.hidden=!text; }
@@ -109,7 +115,8 @@ export function perchTakeOverJs(lang = "en") {
     if(s.closed||toSheet!==s) return;
     var st=r&&r.ok&&r.j?r.j.state:null;
     if(st==='held'){
-      toSetStatus(s,'');
+      /* the bot is paused on you; Hand back is the way out */
+      toSetStatus(s,TO_WAITING);
       if(s.state!=='held'){ s.state='held'; toViewer(s); }
       toSchedule(s,TO_HEARTBEAT_MS);
       return;
@@ -119,10 +126,16 @@ export function perchTakeOverJs(lang = "en") {
       toSchedule(s,TO_PENDING_MS);
       return;
     }
-    if(st==='idle'){ closeTakeOver(); return; }   /* the browser went back (5-minute loss) */
-    /* busy (503), no browser (404), a dropped connection: say so; Hand back still closes */
+    if(st==='idle'){
+      /* held: the browser went back (5-minute loss). Not yet held: the take-over gave up. */
+      if(s.state==='held'){ closeTakeOver(); return; }
+      s.state='ended'; toSetStatus(s,TO_FAILED);
+      return;
+    }
+    /* busy (503), no browser (404), a dropped connection: say so and keep checking; Hand back still closes */
     toSetStatus(s,TO_FAILED);
     if(s.state==='held') toSchedule(s,TO_HEARTBEAT_MS);
+    else if(s.state==='pending') toSchedule(s,TO_PENDING_MS);
   }
 
   function toSchedule(s,ms){
@@ -245,12 +258,15 @@ export function perchTakeOverJs(lang = "en") {
      open the sheet once, and drop the flag so a reload does not reopen it. */
   function takeOverFromLink(){
     var q=String(location.search||'');
-    if(!/(^|[?&])take-over=1(&|$)/.test(q)) return;
+    var m=/(^|[?&])take-over=(1|panel)(&|$)/.exec(q);
+    if(!m) return;
     try{
-      var rest=q.replace(/^[?]/,'').split('&').filter(function(p){ return p&&p!=='take-over=1'; }).join('&');
+      var rest=q.replace(/^[?]/,'').split('&').filter(function(p){ return p&&p!=='take-over=1'&&p!=='take-over=panel'; }).join('&');
       history.replaceState(history.state,'',location.pathname+(rest?'?'+rest:'')+location.hash);
     }catch(e){}
-    openTakeOver({ sid:current.sid, anchor:null });
+    /* "1": a needs-you item or a chat's link (checked against that chat's live
+       turn). "panel": the Browser panel's own Take over of a non-Perch holder. */
+    openTakeOver({ sid:current.sid, anchor:null, link:m[2]==='1' });
   }
 `;
 }

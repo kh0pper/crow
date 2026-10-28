@@ -1600,6 +1600,15 @@ export function createInteractiveEngine({
     log,
   });
 
+  /** A "?take-over=1" link (a needs-you item) may take the browser only while
+   *  that session has a live turn using it: a stale click never grabs it from
+   *  another bot. */
+  function browserTurnLive(sessionId) {
+    const s = sessions.get(String(sessionId || ""));
+    const rec = s && s.turn && s.turn.browser;
+    return !!(rec && !rec.finished && s.state !== "stopped");
+  }
+
   /** A bot parked on crow_browser_wait_for_user: one "needs you" per turn that
    *  opens the Take over sheet in that chat. No URL or host rides it. */
   function attentionForBrowser(s, turn) {
@@ -4441,6 +4450,7 @@ export function createInteractiveEngine({
     browserHooks,
     /** Take over / Hand back / heartbeat for the routes (Task 7). */
     browserTakeOver,
+    browserTurnLive,
     /** The frames route's watcher (null unless this engine watches a browser). */
     get browserWatcher() { return browserWatcher; },
     /** Precondition-test surface (r1 S10) — also the internal resolver. */

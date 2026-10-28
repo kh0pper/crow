@@ -19,7 +19,9 @@ export function botHolding(lease, isFree, now = Date.now()) {
 /** Take over: the chat's sheet for a Perch session (its thread under it), else the sheet alone. */
 export function takeOverHref(holding) {
   const sid = holding && holding.sessionId;
-  return "/dashboard/perch?take-over=1" + (/^perchlive-[0-9a-f]{8}$/.test(sid || "") ? "#" + sid : "");
+  // A Perch session: the link is checked against that chat's live turn. Any
+  // other holder (an external client): the panel's own take-over.
+  return /^perchlive-[0-9a-f]{8}$/.test(sid || "") ? "/dashboard/perch?take-over=1#" + sid : "/dashboard/perch?take-over=panel";
 }
 
 export default {

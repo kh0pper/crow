@@ -51,6 +51,8 @@ export const EXTERNAL_TTL_MS = 120000;
 export const OPERATOR_TTL_MS = 300000;   // operator heartbeat loss tolerance: 5 min
 export const ORPHAN_CAP_MS = 120000;
 export const LOCK_STALE_MS = 5000;
+/** A take-over request waits ≤ 30 s for an in-flight call; its flag is honoured this long after it was last set. */
+export const PENDING_OPERATOR_TTL_MS = 35000;
 const LOCK_FUTURE_SKEW_MS = 2000;
 const LOCK_TIMEOUT_MS = 2000;
 const MAX_TTL_MS = 600000;
@@ -107,11 +109,15 @@ function validate(raw) {
   if (!isTime(raw.ttlMs) || raw.ttlMs <= 0 || raw.ttlMs > MAX_TTL_MS) return null;
   const lastHolderKey = raw.lastHolderKey == null ? null : raw.lastHolderKey;
   if (lastHolderKey !== null && (typeof lastHolderKey !== "string" || lastHolderKey.length > 160)) return null;
-  return {
+  if (raw.pendingOperator != null && !isTime(raw.pendingOperator)) return null;
+  const out = {
     gen: raw.gen, holder, inCall, releaseOnCallEnd: raw.releaseOnCallEnd,
     targetId: raw.targetId, since: raw.since, renewedAt: raw.renewedAt, ttlMs: raw.ttlMs,
     lastHolderKey,
   };
+  // Present only while the operator's take-over waits (absent = none).
+  if (raw.pendingOperator != null) out.pendingOperator = raw.pendingOperator;
+  return out;
 }
 
 /** Held and not expired at `now` (a renewal stamped far in the future counts as expired). */
@@ -124,6 +130,20 @@ function isHeld(lease, now) {
 /** Whether a lease read at `now` is free (null, released, expired or invalid). */
 export function isFree(lease, now = Date.now()) {
   return !isHeld(lease, now);
+}
+
+/** A take-over request is waiting for the in-flight calls to end (set at most 35 s ago; a far-future stamp does not count). */
+export function isPendingOperator(lease, now = Date.now()) {
+  const t = lease ? lease.pendingOperator : null;
+  if (!isTime(t) || t > now + FUTURE_SKEW_MS) return false;
+  return now - t <= PENDING_OPERATOR_TTL_MS;
+}
+
+/** No new bot call may start: the operator holds the browser, or is about to. */
+export function operatorBlocks(lease, now = Date.now()) {
+  if (!lease) return false;
+  if (lease.holder && lease.holder.kind === "operator" && isHeld(lease, now)) return true;
+  return isPendingOperator(lease, now);
 }
 
 // ─── fd-anchored file I/O ───
@@ -284,11 +304,14 @@ async function withLock(dir, opts, fn) {
 }
 
 function freeRecord(cur) {
-  return {
+  const out = {
     gen: cur ? cur.gen : 0, holder: null, inCall: [], releaseOnCallEnd: false,
     targetId: null, since: cur ? cur.since : 0, renewedAt: cur ? cur.renewedAt : 0,
     ttlMs: cur ? cur.ttlMs : EXTERNAL_TTL_MS, lastHolderKey: cur ? cur.lastHolderKey : null,
   };
+  // A waiting take-over survives the release, so no other bot slips in before the switch.
+  if (cur && cur.pendingOperator != null) out.pendingOperator = cur.pendingOperator;
+  return out;
 }
 
 /** `cur` handed to `holder` at `now`: renew the same holder, or a new holding. */
@@ -347,6 +370,10 @@ export async function acquire(dir, holder, { now = Date.now(), ttlMs = EXTERNAL_
     if (cur && isHeld(cur, now) && holderKey(cur.holder) !== holderKey(h)) {
       return { result: { ok: false, reason: cur.holder.kind === "operator" ? "operator" : "busy", lease: cur } };
     }
+    // The operator asked for the browser: no new bot call starts (it waits like an operator holding).
+    if (h.kind !== "operator" && isPendingOperator(cur, now)) {
+      return { result: { ok: false, reason: "operator", lease: cur } };
+    }
     const { lease, genChanged } = take(cur, h, now, ttlMs);
     return { write: lease, result: { ok: true, lease, genChanged } };
   });
@@ -376,6 +403,12 @@ export async function beginCall(dir, holder, { callId, pid, targetId, now = Date
     if (!cur || !isHeld(cur, now) || holderKey(cur.holder) !== holderKey(h)) {
       const err = new Error("not the lease holder");
       err.code = "ENOTHOLDER";
+      throw err;
+    }
+    // A take-over is waiting: only a call already in flight may update its entry.
+    if (isPendingOperator(cur, now) && !cur.inCall.some((c) => c.callId === callId)) {
+      const err = new Error("the operator is taking the browser");
+      err.code = "EPENDINGOPERATOR";
       throw err;
     }
     const inCall = cur.inCall.filter((c) => c.callId !== callId);
@@ -441,10 +474,22 @@ export async function takeOperator(dir, { now = Date.now(), ...opts } = {}) {
 export async function takeOperatorIfIdle(dir, { now = Date.now(), isAlive = defaultIsAlive, ...opts } = {}) {
   return withLock(dir, { ...opts, isAlive }, (cur) => {
     if (cur && isHeld(cur, now) && cur.holder.kind !== "operator" && cur.inCall.some((c) => isAlive(c.pid))) {
-      return { result: { taken: false, lease: cur } };
+      // Not yet: mark the request, so no NEW bot call starts while this one finishes.
+      const lease = { ...cur, pendingOperator: now };
+      return { write: lease, result: { taken: false, lease } };
     }
     const { lease } = take(cur, { ...OPERATOR_HOLDER }, now, OPERATOR_TTL_MS);
     return { write: lease, result: { taken: true, lease } };
+  });
+}
+
+/** The take-over request ended without taking the browser: drop its flag. → the lease (or null). */
+export async function clearPendingOperator(dir, opts = {}) {
+  return withLock(dir, opts, (cur) => {
+    if (!cur || cur.pendingOperator == null) return { result: cur };
+    const lease = { ...cur };
+    delete lease.pendingOperator;
+    return { write: lease, result: lease };
   });
 }
 

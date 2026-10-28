@@ -15,6 +15,11 @@
  *   pending | held ──hand back──▶ idle
  *   pending | held ──5 min without a heartbeat──▶ idle (handed back)
  *
+ * While pending, the lease carries `pendingOperator`: no NEW bot call starts
+ * (the browser MCP guard waits on it like an operator holding); only the calls
+ * already in flight finish. Past the 30 s cap with the lease still locked, the
+ * request gives up (the next heartbeat answers busy) instead of staying pending.
+ *
  * Page hide or navigation never hands back: only the button or that loss does.
  * Every lease write passes forceBreakAfterMs (Ruling B3); a lease error is
  * thrown to the route, which answers "browser busy" — never a hang.
@@ -49,6 +54,9 @@ export function createTakeOver({
   let lossTimer = null;
   let chain = Promise.resolve();
   let closed = false;
+  // The 30 s cap passed and the lease still could not be taken: the next
+  // heartbeat answers busy once (the sheet says so) and the state is idle.
+  let failed = false;
 
   function timer(fn, ms) {
     const h = setTimer(fn, ms);
@@ -95,13 +103,20 @@ export function createTakeOver({
     }, PENDING_POLL_MS);
   }
 
+  /** The take-over request ends without the browser: drop its flag (best effort; it also expires). */
+  async function dropPending(d) {
+    if (!d) return;
+    try { await lease.clearPendingOperator(d, opts()); } catch (e) { log("browser take-over: clear pending: " + code(e)); }
+  }
+
   /** Pending: the in-flight call ended → take it; 30 s passed → take it anyway. */
   async function pendingTick() {
     if (state !== "pending" || closed) return;
     const d = dir();
     if (!d) { state = "idle"; clearLoss(); return; }
+    const capped = now() - pendingSince >= IN_CALL_WAIT_MS;
     try {
-      if (now() - pendingSince >= IN_CALL_WAIT_MS) {
+      if (capped) {
         await lease.takeOperator(d, opts());
         becomeHeld();
         return;
@@ -110,6 +125,13 @@ export function createTakeOver({
       if (r && r.taken) { becomeHeld(); return; }
     } catch (e) {
       log("browser take-over: pending: " + code(e));
+      if (capped) {
+        // Past the cap and still no lease (a jammed lock): give up now with
+        // the busy answer rather than stay pending until the 5 min loss.
+        state = "idle"; failed = true; clearLoss();
+        await dropPending(d);
+        return;
+      }
     }
     schedulePoll();
   }
@@ -119,6 +141,7 @@ export function createTakeOver({
     const was = state;
     clearPoll();
     const d = dir();
+    if (was === "pending") await dropPending(d);
     if (was === "held" || was === "idle") {
       // idle: free an operator holding this gateway no longer remembers (a
       // restart). It never turns into "the operator acted" (no onHeld).
@@ -153,6 +176,7 @@ export function createTakeOver({
           return { state: "held" };
         }
         if (state === "pending") { armLoss(); return { state: "pending" }; }
+        failed = false;
         const r = await lease.takeOperatorIfIdle(d, opts());
         armLoss();
         if (r && r.taken) { becomeHeld(); return { state: "held" }; }
@@ -167,7 +191,13 @@ export function createTakeOver({
     /** The sheet is still open. → { state }; idle means the browser went back. */
     heartbeat() {
       return serial(async () => {
-        if (state === "idle") return { state: "idle" };
+        if (state === "idle") {
+          if (failed) {
+            failed = false;
+            throw Object.assign(new Error("take-over gave up"), { code: "ETAKEOVERBUSY" });
+          }
+          return { state: "idle" };
+        }
         armLoss();
         if (state === "held") {
           const d = dir();

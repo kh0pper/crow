@@ -227,7 +227,8 @@ test("pending: \"The bot is finishing its step…\" and no viewer until the swit
   state = "held";
   await h.fire(1000);
   assert.ok(one(s, "to-vnc"), "switched: the viewer loads");
-  assert.equal(st.hidden, true);
+  assert.equal(st.textContent, "Waiting for you", "held: the bot is paused on the operator");
+  assert.equal(st.hidden, false);
   assert.equal([...h.timers.values()].filter((t) => t.ms === 15000).length, 1, "heartbeat every 15 s");
   await h.fire(15000);
   assert.equal(h.posts("/browser/heartbeat").length, 3);
@@ -380,6 +381,58 @@ test("a ?take-over=1 link (the wait_for_user attention item) opens the sheet onc
   h3.api.takeOverFromLink();
   await tick();
   assert.equal(h3.sheet(), null, "only the exact flag");
+  // the link marker rides the request (the server checks that chat's live turn)
+  assert.deepEqual(h.posts("/browser/take-over")[0].body, { from: "link", sid: SID });
+  // the tile's own button carries no marker
+  const h4 = mount();
+  await h4.open();
+  assert.equal(h4.posts("/browser/take-over")[0].body, undefined);
+  // the Browser panel's own take-over (a non-Perch holder): no marker either
+  const h5 = mount({ search: "?take-over=panel" });
+  h5.api.takeOverFromLink();
+  await tick();
+  assert.ok(h5.sheet());
+  assert.equal(h5.posts("/browser/take-over")[0].body, undefined);
+  assert.deepEqual(h5.replaced, ["/dashboard/perch#" + SID]);
+});
+
+test("a stale link (no live turn using the browser: 409 no_live_turn) never takes the browser: the sheet closes", async () => {
+  const h = mount({ search: "?take-over=1", server: (c) => (c.path.endsWith("/take-over") ? { status: 409, body: { error: "no_live_turn" } } : { status: 200, body: { entries: [] } }) });
+  h.api.takeOverFromLink();
+  await tick();
+  assert.equal(h.sheet(), null);
+  assert.equal(h.posts("/browser/take-over").length, 1);
+  assert.equal(h.posts("/browser/hand-back").length, 0);
+  assert.equal([...h.timers.values()].filter((t) => t.ms === 1000 || t.ms === 15000).length, 0, "nothing keeps running");
+});
+
+test("a failed check while pending keeps checking every 1 s (never stuck); pending that ends idle says it failed and stops", async () => {
+  const answers = ["pending", 503, "pending", "held"];
+  const h = mount({ server: (c) => {
+    if (c.path.endsWith("/entries")) return { status: 200, body: { entries: [] } };
+    if (/take-over|heartbeat/.test(c.path)) {
+      const a = answers.shift();
+      return typeof a === "number" ? { status: a, body: { error: "browser_busy" } } : { status: 200, body: { state: a } };
+    }
+    return { status: 200, body: { state: "idle" } };
+  } });
+  await h.open();
+  const st = one(h.sheet(), "to-status");
+  await h.fire(1000);   // 503
+  assert.equal(st.textContent, translations["shell.offerFailed"].en);
+  assert.equal([...h.timers.values()].filter((t) => t.ms === 1000).length, 1, "still checking");
+  await h.fire(1000);   // pending
+  assert.equal(st.textContent, "The bot is finishing its step…");
+  await h.fire(1000);   // held
+  assert.ok(one(h.sheet(), "to-vnc"));
+
+  const g = mount({ server: (c) => (c.path.endsWith("/take-over") ? { status: 200, body: { state: "pending" } } : c.path.endsWith("/heartbeat") ? { status: 200, body: { state: "idle" } } : { status: 200, body: { entries: [] } }) });
+  await g.open();
+  await g.fire(1000);
+  assert.ok(g.sheet(), "the sheet stays so the operator sees why");
+  assert.equal(one(g.sheet(), "to-status").textContent, translations["shell.offerFailed"].en);
+  assert.equal(one(g.sheet(), "to-vnc"), undefined);
+  assert.equal([...g.timers.values()].filter((t) => t.ms === 1000 || t.ms === 15000).length, 0, "stopped");
 });
 
 test("Spanish sheet strings", async () => {

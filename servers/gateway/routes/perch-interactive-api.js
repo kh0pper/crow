@@ -1704,14 +1704,26 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
   // the lease file. Take over answers { state: "held" } or, while a bot call is
   // in flight, { state: "pending" } (it switches when that call ends, or after
   // 30 s). The sheet heartbeats every 15 s; { state: "idle" } means the browser
-  // went back (Hand back, or 5 minutes without a heartbeat). A lease error
+  // went back (Hand back, or 5 minutes without a heartbeat). A take-over sent
+  // from a link ({from:"link", sid}) is 409 no_live_turn unless that chat has a
+  // live turn using the browser. A lease error
   // (a jammed lock, Ruling B3) is 503 browser_busy, never a hang. CSRF-railed
   // (this router mounts after csrfMiddleware), behind dashboardAuth, never
   // Funnel-reachable.
   const takeOverRoute = (op) => async (req, res) => {
     try {
-      const ctl = resolveEngine().browserTakeOver;
+      const eng = resolveEngine();
+      const ctl = eng.browserTakeOver;
       if (!ctl) return jsonError(res, 404, "no_browser");
+      // From a "?take-over=1" link (a needs-you item): only while that chat
+      // has a live turn using the browser. A stale click never grabs it.
+      const body = req.body && typeof req.body === "object" ? req.body : {};
+      if (op === "takeOver" && body.from === "link") {
+        const sid = typeof body.sid === "string" ? body.sid.slice(0, 64) : "";
+        if (!sid || typeof eng.browserTurnLive !== "function" || !eng.browserTurnLive(sid)) {
+          return jsonError(res, 409, "no_live_turn");
+        }
+      }
       const r = await ctl[op]();
       if (r.state === "no_browser") return jsonError(res, 404, "no_browser");
       res.set("Cache-Control", "no-store");

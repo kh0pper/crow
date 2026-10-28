@@ -167,6 +167,94 @@ test("take-over waits for the in-flight call: pending, then held when the call e
   ctl.close();
 });
 
+test("with a pending take-over, a new bot call does not act; the in-flight call finishes; the switch happens when it ends", async () => {
+  const { ctl, clock, dir: d, held } = controller();
+  const bot = botGuard(clock, d);
+  const gate = bot.hold();
+  const inFlight = bot.call({ step: "submit" });
+  await tick();
+  assert.deepEqual(await ctl.takeOver(), { state: "pending" });
+  const l = await lease.readLease(d);
+  assert.equal(typeof l.pendingOperator, "number", "the lease says the operator asked");
+  assert.equal(lease.operatorBlocks(l, clock.now()), true);
+  // A NEW call of the same bot: it waits (like an operator holding), never acts.
+  bot.open();   // the next call must not block on the gate; the in-flight one still waits on `gate`
+  let newer = null;
+  const second = bot.call({ step: "next" }).then((r) => { newer = r; });
+  await tick();
+  assert.equal(newer, null, "the new call waits");
+  assert.equal(bot.acted.length, 1, "only the in-flight call ran");
+  gate.release();
+  const first = await inFlight;
+  assert.equal(text(first), "clicked", "the in-flight call finished");
+  await second;   // its own 500 ms polls advance the clock: the controller switches meanwhile
+  assert.equal(ctl.state(), "held", "switched once the in-flight call ended");
+  assert.deepEqual(held, [true]);
+  assert.equal(text(newer), HELD, "the new call returned the held text after its 20 s wait");
+  assert.equal(bot.acted.length, 1, "the new call never acted");
+  const after = await lease.readLease(d);
+  assert.equal(after.holder.kind, "operator");
+  assert.equal("pendingOperator" in after, false, "the flag ends with the take");
+  ctl.close();
+});
+
+test("the pending flag: kept across a release (no other bot slips in), refuses a new beginCall, expires after 35 s, survives schema validation", async () => {
+  const d = scratchLeaseDir();
+  const now = 1_700_000_000_000;
+  const a = { kind: "bot", sessionId: "perchlive-aaaa0004", botId: null };
+  const b = { kind: "bot", sessionId: "perchlive-bbbb0004", botId: null };
+  await lease.acquire(d, a, { now });
+  await lease.beginCall(d, a, { callId: "c1", pid: 4242, now });
+  const r = await lease.takeOperatorIfIdle(d, { now, isAlive: () => true });
+  assert.equal(r.taken, false);
+  assert.equal(r.lease.pendingOperator, now);
+  await assert.rejects(lease.beginCall(d, a, { callId: "c2", pid: 4242, now }), (e) => e.code === "EPENDINGOPERATOR", "no new call begins");
+  await lease.beginCall(d, a, { callId: "c1", pid: 4242, targetId: "T1", now });   // the in-flight call may still record its page
+  assert.equal((await lease.acquire(d, a, { now: now + 1 })).reason, "operator", "the holder's own new call waits");
+  assert.equal(await lease.release(d, a.sessionId, { now, isAlive: () => false }), "released");
+  const freed = await lease.readLease(d);
+  assert.equal(freed.holder, null);
+  assert.equal(freed.pendingOperator, now, "kept across the release");
+  assert.equal((await lease.acquire(d, b, { now: now + 1000 })).reason, "operator", "another bot cannot slip in");
+  assert.equal((await lease.acquire(d, b, { now: now + 35_001 })).ok, true, "a forgotten flag expires");
+  // validation: a bad flag reads as an invalid (free) lease; a far-future one does not block
+  const { writeFileSync: wf } = await import("node:fs");
+  const base = { gen: 1, holder: null, inCall: [], releaseOnCallEnd: false, targetId: null, since: 0, renewedAt: 0, ttlMs: 120000, lastHolderKey: null };
+  const d2 = scratchLeaseDir();
+  wf(join(d2, lease.LEASE_NAME), JSON.stringify({ ...base, pendingOperator: "soon" }));
+  assert.equal(await lease.readLease(d2), null);
+  wf(join(d2, lease.LEASE_NAME), JSON.stringify({ ...base, pendingOperator: now + 10 * 60_000 }));
+  assert.equal(lease.operatorBlocks(await lease.readLease(d2), now), false, "a far-future stamp cannot pin it");
+  wf(join(d2, lease.LEASE_NAME), JSON.stringify(base));
+  assert.equal("pendingOperator" in (await lease.readLease(d2)), false, "absent stays absent");
+  await lease.takeOperatorIfIdle(d, { now: now + 40_000 });
+  assert.equal((await lease.clearPendingOperator(d)).holder.kind, "operator");
+});
+
+test("past the 30 s cap with the lease still locked, the take-over gives up with the busy answer (not pending until the 5 min loss)", async () => {
+  const { ctl, clock, dir: d, held } = controller();
+  const bot = botGuard(clock, d);
+  bot.hold();
+  const running = bot.call({});
+  await tick();
+  assert.deepEqual(await ctl.takeOver(), { state: "pending" });
+  await advance(clock, 29_900);
+  assert.equal(ctl.state(), "pending");
+  const fd = openSync(join(d, lease.LOCK_NAME), "wx", 0o600); writeSync(fd, process.pid + "\n"); closeSync(fd);
+  clock.advance(600);   // the poll at the cap: takeOperator → ELEASELOCKED after the 2 s lock timeout
+  for (let i = 0; i < 100 && ctl.state() === "pending"; i++) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(ctl.state(), "idle", "gave up");
+  assert.deepEqual(held, []);
+  assert.equal(clock.pendingNamed("heartbeatLoss"), 0, "no 5 min wait left");
+  assert.equal(clock.pendingNamed("takeOverPoll"), 0);
+  await assert.rejects(ctl.heartbeat(), (e) => e.code === "ETAKEOVERBUSY", "the next heartbeat answers busy");
+  assert.deepEqual(await ctl.heartbeat(), { state: "idle" }, "once");
+  rmSync(join(d, lease.LOCK_NAME));
+  bot.open();
+  assert.equal(text(await running), "clicked");
+  ctl.close();
+});
+
 test("take-over waits at most 30 s: then it switches anyway and the still-running call's result says so", async () => {
   const { ctl, clock, dir: d, held } = controller();
   const bot = botGuard(clock, d);
@@ -259,6 +347,7 @@ test("a pending take-over handed back before it switched never takes the browser
   await tick();
   assert.deepEqual(await ctl.takeOver(), { state: "pending" });
   assert.deepEqual(await ctl.handBack(), { state: "idle" });
+  assert.equal("pendingOperator" in (await lease.readLease(d)), false, "the request's flag is dropped");
   await advance(clock, 31_000);
   assert.deepEqual(held, [], "never held");
   assert.equal((await lease.readLease(d)).holder.kind, "bot");
@@ -423,12 +512,15 @@ test("engine: a turn that ends while the operator holds it → Done, no shot, th
   const h = makeEngine();
   let shots = 0;
   h.engine.browserHooks.finalShot = async () => { shots += 1; return { id: 1, url: "/x/1" }; };
-  const { pi, browser } = await liveTurn(h);
+  const { s, pi, browser } = await liveTurn(h);
+  assert.equal(h.engine.browserTurnLive(s.sessionId), true, "a live turn using the browser");
   await h.engine.browserTakeOver.takeOver();
   pi.lastTurn().resolve(END);
   await tick();
+  assert.equal(h.engine.browserTurnLive(s.sessionId), false, "the turn ended: a link no longer takes it");
   assert.deepEqual(browser().filter((e) => e.phase === "done"), [{ type: "browser", phase: "done", anchor: "c1", domain: null, shot: null, note: "operator" }]);
   assert.equal(shots, 0);
+  assert.equal(h.engine.browserTurnLive("perchlive-nosuch00"), false);
   const before = browser().length;
   await h.engine.browserTakeOver.handBack();
   await tick();
@@ -500,7 +592,7 @@ async function routeHarness() {
   const { csrfMiddleware } = await import("../servers/gateway/dashboard/shared/csrf.js");
   const { default: express } = await import("express");
   const h = controller({ isAlive: () => true });
-  const engine = { browserTakeOver: h.ctl };
+  const engine = { browserTakeOver: h.ctl, browserTurnLive: (sid) => sid === "perchlive-11111111" };
   const app = express();
   app.use(express.json());
   const router = express.Router();
@@ -510,10 +602,12 @@ async function routeHarness() {
   const srv = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
   const base = "http://127.0.0.1:" + srv.address().port + "/dashboard/perch-api/browser/";
   const AUTH = { ...serveHeaders(), cookie: "crow_session=to-sess; crow_csrf=tok", "x-crow-csrf": "tok" };
-  const post = async (op, headers = AUTH) => {
-    const r = await fetch(base + op, { method: "POST", headers, redirect: "manual" });
-    let body = null; try { body = await r.json(); } catch { body = null; }
-    return { status: r.status, body };
+  const post = async (op, headers = AUTH, body) => {
+    const opts = { method: "POST", headers: body ? { ...headers, "content-type": "application/json" } : headers, redirect: "manual" };
+    if (body) opts.body = JSON.stringify(body);
+    const r = await fetch(base + op, opts);
+    let out = null; try { out = await r.json(); } catch { out = null; }
+    return { status: r.status, body: out };
   };
   return { ...h, engine, post, AUTH, close: () => new Promise((r) => { srv.closeAllConnections?.(); srv.close(r); }) };
 }
@@ -536,6 +630,16 @@ test("routes need CSRF and dashboard auth; a contact or Funnel request is refuse
     assert.equal(r.ctl.state(), "idle", "nothing refused reached the controller");
     assert.deepEqual(r.held, []);
 
+    // a stale link: no live turn using the browser in that chat → 409, nothing taken
+    for (const sid of ["perchlive-22222222", "", undefined]) {
+      const stale = await r.post("take-over", r.AUTH, { from: "link", sid });
+      assert.deepEqual(stale, { status: 409, body: { error: "no_live_turn" } });
+    }
+    assert.equal(r.ctl.state(), "idle");
+    assert.deepEqual(r.held, []);
+    assert.deepEqual((await r.post("take-over", r.AUTH, { from: "link", sid: "perchlive-11111111" })).body, { state: "held" }, "a live turn's link takes it");
+    assert.deepEqual((await r.post("hand-back")).body, { state: "idle" });
+    r.held.length = 0;
     const take = await r.post("take-over");
     assert.equal(take.status, 200);
     assert.deepEqual(take.body, { state: "held" });
@@ -602,8 +706,8 @@ test("the Browser panel shows \"A bot is using the browser\" with Take over whil
     assert.match(html, /Un bot está usando el navegador/);
     assert.match(html, />Tomar el control</);
     // an external holder: the sheet alone
-    assert.equal(takeOverHref({ sessionId: "external:123" }), "/dashboard/perch?take-over=1");
-    assert.equal(takeOverHref({ sessionId: "perchlive-0123abcd\"><x" }), "/dashboard/perch?take-over=1");
+    assert.equal(takeOverHref({ sessionId: "external:123" }), "/dashboard/perch?take-over=panel");
+    assert.equal(takeOverHref({ sessionId: "perchlive-0123abcd\"><x" }), "/dashboard/perch?take-over=panel");
     // the operator's own holding, or an expired one: no notice
     await lease.takeOperator(leaseDirP, { now: Date.now() });
     assert.doesNotMatch(await render(), /browser-bot-using/);
