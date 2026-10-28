@@ -278,10 +278,14 @@ function previewBlock(r, max = PREVIEW_CHARS) {
 const SNIPPET_STAMP = "SNIPPET, not a source: open it with crow_add_source before citing";
 const SNIPPET_OPEN = "--- search result (untrusted) ---";
 const SNIPPET_CLOSE = "--- end search result ---";
+const SNIPPET_DESC_MAX = 120;
 const SNIPPET_CLOSE_DEFANGED = "- - - end search result - - -";
 /** One search result's title, url and snippet inside untrusted markers; it cannot close them. */
 function snippetBlock(r) {
-  const body = [r.title, String(r.url || "").replace(/\s+/g, ""), r.description].join("\n");
+  const desc = String(r.description || "").slice(0, SNIPPET_DESC_MAX);
+  const title = String(r.title || "").slice(0, 200);
+  const url = String(r.url || "").replace(/\s+/g, "").slice(0, 300);
+  const body = [title, url, desc].join("\n");
   return `${SNIPPET_OPEN}\n${body.split(SNIPPET_CLOSE).join(SNIPPET_CLOSE_DEFANGED)}\n${SNIPPET_CLOSE}`;
 }
 
@@ -677,8 +681,17 @@ export function createProjectServer(dbPath, options = {}) {
         }
         return { content: [{ type: "text", text: String(r.reason || "Search failed.") }], isError: true };
       }
-      const blocks = r.results.map((x, i) => `${i + 1}. ${SNIPPET_STAMP}\n${snippetBlock(x)}`);
-      return { content: [{ type: "text", text: `${blocks.length} search result(s) for "${query}":\n\n${blocks.join("\n\n")}` }] };
+      // Whole blocks only, so the result stays under the voice cap (RESULT_MAX) with markers intact.
+      const head = `search results for "${String(query).slice(0, 60)}":\n\n`;
+      const blocks = [];
+      let used = head.length + 12;
+      for (const [i, x] of r.results.entries()) {
+        const b = `${i + 1}. ${SNIPPET_STAMP}\n${snippetBlock(x)}`;
+        if (used + b.length + 2 > RESULT_MAX) break;
+        blocks.push(b);
+        used += b.length + 2;
+      }
+      return { content: [{ type: "text", text: `${blocks.length} ${head}${blocks.join("\n\n")}` }] };
     }
   );
 
