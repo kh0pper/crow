@@ -131,7 +131,7 @@ test("the shell nav sits after </main>", () => {
 function tabAnchors(html) {
   const nav = html.match(/<nav class="shell-tabs"[\s\S]*?<\/nav>/);
   assert.ok(nav, "shell-tabs nav rendered");
-  return [...nav[0].matchAll(/<a\b[^>]*>/g)].map((m) => m[0]);
+  return [...nav[0].matchAll(/<a\b[^>]*>/g)].map((m) => m[0]).filter((a) => /class="shell-tab"/.test(a));
 }
 
 test("three tabs with the active one marked", () => {
@@ -251,10 +251,13 @@ test("the drawer lists the projects in one scope form", () => {
   assert.ok(drawer, "drawer dialog rendered");
   const forms = [...drawer[0].matchAll(/<form\b[^>]*action="\/dashboard\/scope"[^>]*>/g)];
   assert.ok(forms.length >= 1 && forms.every((f) => /method="post"/i.test(f[0])));
-  for (const v of ["all", "garden", "kitchen", "unassigned"]) {
+  for (const v of ["all", "unassigned"]) {
     assert.ok(drawer[0].includes(`name="scope" value="${v}"`), `scope button ${v}`);
   }
-  assert.match(drawer[0], /value="kitchen"[^>]*aria-current="true"/);
+  // Projects are links to their homes (the scope still follows the cookie).
+  for (const v of ["garden", "kitchen"]) {
+    assert.ok(drawer[0].includes(`href="/dashboard/project/${v}"`), `home link ${v}`);
+  }
 });
 
 test("the drawer lists only registered panels", () => {

@@ -209,6 +209,8 @@ test("rejectFunneled middleware: the Perch surfaces are never funnel-exposed", a
       "/dashboard/perch-api/browser/hand-back",
       "/dashboard/perch-api/browser/heartbeat",
       "/dashboard/perch-api/browser/state",
+      // R1.2: a project's home.
+      "/dashboard/project/x",
     ]) {
       const r = await request(port, path, { "tailscale-funnel-request": "?1" });
       assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
@@ -276,6 +278,36 @@ test("dashboardAuth refuses an unauthenticated /dashboard/perch-api/interactive 
   const noSession = await run(mkReq({ ip: "10.0.0.5", headers: { host: "x" } }));
   assert.equal(noSession.nexted, false, "a request with no crow_session cookie must never reach the interactive API");
   assert.equal(noSession.redirected, "/dashboard/login");
+});
+
+test("auth-network: /dashboard/project/x needs a session", async () => {
+  // The REAL dashboard router: the project home sits behind dashboardAuth like
+  // every panel page. Off-network is refused; on-network without a session is
+  // sent to the login page; neither reaches the panel.
+  const { default: dashboardRouter } = await import("../servers/gateway/dashboard/index.js");
+  const app = express();
+  app.use((req, res, next) => { res.redirectAfterPost = (url) => res.redirect(303, url); next(); });
+  app.use(dashboardRouter((req, res, next) => next()));
+  const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
+  try {
+    const port = server.address().port;
+    const offNet = await request(port, "/dashboard/project/x");
+    assert.equal(offNet.status, 403, "bare loopback, no tailnet identity");
+    // Past the network gate (CROW_DASHBOARD_PUBLIC opens it; no tailnet identity is
+    // forged): with no session the page still sends you to the login page.
+    process.env.CROW_DASHBOARD_PUBLIC = "true";
+    let noSession;
+    try { noSession = await new Promise((resolve, reject) => {
+      const req = http.request({ host: "127.0.0.1", port, path: "/dashboard/project/x", method: "GET" },
+        (res) => { res.resume(); res.on("end", () => resolve({ status: res.statusCode, location: res.headers.location })); });
+      req.on("error", reject);
+      req.end();
+    }); } finally { delete process.env.CROW_DASHBOARD_PUBLIC; }
+    assert.ok(noSession.status === 302 || noSession.status === 303, `a redirect, got ${noSession.status}`);
+    assert.equal(noSession.location, "/dashboard/login");
+  } finally {
+    server.close();
+  }
 });
 
 test("rejectFunneled middleware: public paths pass with Funnel header", async () => {

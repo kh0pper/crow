@@ -520,7 +520,7 @@ function readTranscript(file) {
  * gateway that has not migrated) every thread falls back to its bot's project.
  * @returns {Promise<Map<string, number|null>>}
  */
-async function threadProjects(db, threadIds, botIdOf, botProjectOf) {
+export async function threadProjects(db, threadIds, botIdOf, botProjectOf) {
   const ids = [...new Set(threadIds.map(String))];
   const out = new Map();
   if (!ids.length) return out;

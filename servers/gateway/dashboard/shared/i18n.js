@@ -3748,6 +3748,13 @@ export const translations = {
   // ─── The new shell (redesign P2: Chat / Board / Make tabs, project chip, drawer) ───
   "shell.tabChat": { en: "Chat", es: "Chat" },
   "shell.tabBoard": { en: "Board", es: "Tablero" },
+  "shell.everythingSub": { en: "Across every project", es: "En todos los proyectos" },
+  "shell.newProject": { en: "New project", es: "Proyecto nuevo" },
+  "shell.archivedProjects": { en: "Archived projects", es: "Proyectos archivados" },
+  "shell.needYou": { en: "{n} need you", es: "{n} te necesitan" },
+  "shell.needYouOne": { en: "{n} needs you", es: "{n} te necesita" },
+  "shell.waitingChip": { en: "Waiting", es: "En espera" },
+  "shell.cantCount": { en: "Can't count here", es: "No se puede contar aquí" },
   "shell.tabMake": { en: "Make", es: "Crear" },
   "shell.everything": { en: "Everything", es: "Todo" },
   "shell.unassigned": { en: "Unassigned", es: "Sin asignar" },
@@ -3850,6 +3857,28 @@ export const translations = {
 
   // ─── Doc ↔ card (P6) ───
   "shell.documentNumbered": { en: "Document {id}", es: "Documento {id}" },
+
+  // ─── Project home (R1.2) ───
+  "shell.startSession": { en: "Start a session", es: "Empezar una sesión" },
+  "shell.with": { en: "with", es: "con" },
+  "shell.changeLead": { en: "change", es: "cambiar" },
+  "shell.leadPick": { en: "Bot for this session", es: "Bot para esta sesión" },
+  "shell.noProjectBots": { en: "This project has no bots yet", es: "Este proyecto aún no tiene bots" },
+  "shell.makeBot": { en: "Make a bot", es: "Crear un bot" },
+  "shell.allOnBoard": { en: "All on Board", es: "Todo en el Tablero" },
+  "shell.nothingNeedsYou": { en: "Nothing needs you", es: "Nada te necesita" },
+  "shell.countUnknown": { en: "Can't count this project's cards here", es: "Aquí no se pueden contar las tarjetas de este proyecto" },
+  "shell.kindDecision": { en: "Decision", es: "Decisión" },
+  "shell.kindReview": { en: "Review", es: "Revisión" },
+  "shell.kindQuestion": { en: "Question", es: "Pregunta" },
+  "shell.earlierSessions": { en: "Earlier sessions", es: "Sesiones anteriores" },
+  "shell.untitledSession": { en: "Untitled session", es: "Sesión sin título" },
+  "shell.noSessions": { en: "No sessions yet", es: "Aún no hay sesiones" },
+  "shell.today": { en: "Today", es: "Hoy" },
+  "shell.yesterday": { en: "Yesterday", es: "Ayer" },
+  "shell.projectPage": { en: "Project", es: "Proyecto" },
+  "shell.projectMissing": { en: "This project isn't here", es: "Este proyecto no está aquí" },
+  "shell.backToProjects": { en: "Back to projects", es: "Volver a los proyectos" },
 
   // ─── Browser tile ───
   "perch.browserLive": { en: "Live", es: "En vivo" },

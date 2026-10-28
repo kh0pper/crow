@@ -20,6 +20,8 @@ import {
   resolveDeviceMode, ensureShellSince, sessionCreatedAt,
 } from "./mode.js";
 import { tryNewCardHtml } from "./chrome.js";
+import { needsYouCounts } from "../panels/board/needs-you.js";
+import { getInteractiveEngine } from "../../perch-interactive.js";
 import { ACTIVE_PROJECT_WHERE, activeProjects } from "../../../shared/shell-items.js";
 
 /** The tab a panel lights up. bot-board / artifacts stand in until P3 / P4 register board / make. */
@@ -29,6 +31,7 @@ export const TAB_OF = Object.freeze({
   make: "make",
   "bot-board": "board",
   artifacts: "make",
+  "project-home": "chat",
 });
 
 const SCOPE_MAX_AGE = 34560000; // 400 days, seconds
@@ -44,15 +47,17 @@ function decode(v) {
 }
 
 /** "all" | "unassigned" | a slug → the scope it means on this instance, and the value to store. */
-async function scopeFromValue(db, value) {
+async function scopeFromValue(db, value, { slugOnly = false } = {}) {
   const v = typeof value === "string" ? value.trim() : "";
-  if (v === "unassigned") return { scope: { unassigned: true }, value: "unassigned" };
-  if (!v || v === "all") return { scope: EVERYTHING, value: "all" };
+  // slugOnly (a project home's path): the value is a slug and nothing else, no
+  // keyword and no id; anything that is no live slug is Everything.
+  if (!slugOnly && v === "unassigned") return { scope: { unassigned: true }, value: "unassigned" };
+  if (!v || (!slugOnly && v === "all")) return { scope: EVERYTHING, value: "all" };
   try {
     // By slug first; a bare positive integer that is no slug is a project id
     // (older links, e.g. the bot board's ?project=<id>). Either way the
     // stored value is the slug.
-    const byId = /^[1-9]\d*$/.test(v);
+    const byId = !slugOnly && /^[1-9]\d*$/.test(v);
     const { rows } = await db.execute({
       sql: `SELECT id, slug FROM project_spaces WHERE (slug = ?${byId ? " OR id = ?" : ""}) AND ${ACTIVE_PROJECT_WHERE}
             ORDER BY (slug = ?) DESC LIMIT 1`,
@@ -146,7 +151,10 @@ export function shellRouter({ createDbClient }) {
     try {
       const { value } = await scopeFromValue(db, req.body ? req.body.scope : undefined);
       res.append("Set-Cookie", scopeCookie(value));
-      return res.redirect(303, safeReturnPath(req.body ? req.body.return : undefined));
+      // Everything / Unassigned chosen on a project's home leaves the project
+      // (the home is that project's page, so staying would contradict the choice).
+      const back = safeReturnPath(req.body ? req.body.return : undefined);
+      return res.redirect(303, back.startsWith("/dashboard/project/") ? DEFAULT_RETURN : back);
     } finally {
       db.close();
     }
@@ -171,10 +179,26 @@ export async function resolveShellPage(req, res, db, panelId, lang = "en") {
     const pending = offerTry || parseCookies(req)[cookieName(TRY_COOKIE)] === "pending";
     return pending ? { variant: "classic", tryNewCard: tryNewCardHtml(lang) } : { variant: "classic" };
   }
-  const { scope, setCookie } = await resolveScope(req, db);
-  if (setCookie && !res.headersSent) res.append("Set-Cookie", setCookie);
+  // The project home (/dashboard/project/:slug) takes its scope from the path:
+  // the slug wins over the cookie and ?project=, and nothing is written (the
+  // GET is read-only; Turbo prefetches it on hover). An unknown or archived
+  // slug resolves to Everything, and the panel answers 404.
+  const homeSlug = panelId === "project-home" && req.params && typeof req.params.slug === "string" ? req.params.slug : null;
+  let scope;
+  if (panelId === "project-home") {
+    scope = homeSlug ? (await scopeFromValue(db, homeSlug, { slugOnly: true })).scope : EVERYTHING;
+  } else {
+    const r = await resolveScope(req, db);
+    scope = r.scope;
+    if (r.setCookie && !res.headersSent) res.append("Set-Cookie", r.setCookie);
+  }
   req.crowScope = scope;
   let projects = [];
   try { projects = await activeProjects(db); } catch (err) { console.warn("[shell] project list failed:", err.message); }
-  return { variant: "shell", shell: { scope, projects, tab: TAB_OF[panelId] ?? null } };
+  let counts = new Map();
+  try { counts = await needsYouCounts(db, projects, { engine: getInteractiveEngine({ createIfMissing: false }) }); }
+  catch (err) { console.warn("[shell] needs-you counts failed:", err.message); }
+  // The project home reads the same Map rather than counting again.
+  req.crowShellCounts = counts;
+  return { variant: "shell", shell: { scope, projects, counts, homeSlug, tab: TAB_OF[panelId] ?? null } };
 }
