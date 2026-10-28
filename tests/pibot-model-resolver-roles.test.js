@@ -179,6 +179,7 @@ test("the bridge's snapshot path is the gateway writer's path", async () => {
 
 test("loadRoleContextSync: a throwing own-id function gives null, logged once", async () => {
   const { loadRoleContextSync } = await import("../scripts/pi-bots/role_context.mjs");
+  (await import("../servers/shared/model-roles-env.js"))._resetOwnIdWarningForTests();
   reset({ bindings: { everyday: { model: "local-chat/m1" } } });
   const warns = [];
   const orig = console.warn;

@@ -27,20 +27,27 @@ export function loadCatalog() {
   return catalogCache.models;
 }
 
+let ownIdWarned = false;
+
+/** Test-only: forget that the own-id warning was logged. */
+export function _resetOwnIdWarningForTests() {
+  ownIdWarned = false;
+}
+
 /**
  * ownInstanceId for walkRole: a throw (or a getId that is not a function)
  * gives null, so every instance-owned row counts as foreign. Logged once per
- * wrapper.
+ * process, however many wrappers are built (the gateway builds one per
+ * context, about once a second).
  */
 export function wrapOwnId(getId) {
-  let warned = false;
   return () => {
     try {
       if (typeof getId !== "function") throw new TypeError("no ownInstanceId");
       return getId();
     } catch {
-      if (!warned) {
-        warned = true;
+      if (!ownIdWarned) {
+        ownIdWarned = true;
         console.warn("[roles] own instance id unavailable; instance-owned rows treated as foreign");
       }
       return null;

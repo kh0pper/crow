@@ -19,6 +19,7 @@ import {
 } from "../servers/shared/model-roles-store.js";
 import { defaultSeedSources, seedRoleBindings } from "../servers/shared/model-roles-seed.js";
 import { effectiveAgentModel } from "../servers/shared/pi-agent-config.js";
+import { wrapOwnId, _resetOwnIdWarningForTests } from "../servers/shared/model-roles-env.js";
 
 function fresh() {
   const dir = mkdtempSync(join(tmpdir(), "roles-store-"));
@@ -303,6 +304,7 @@ test("boot wiring", () => {
 
 test("memory-side id wrap", async () => {
   const { db, cleanup } = fresh();
+  _resetOwnIdWarningForTests();
   const warns = [];
   const orig = console.warn;
   console.warn = (...a) => warns.push(a.join(" "));
@@ -313,4 +315,19 @@ test("memory-side id wrap", async () => {
     const hits = warns.filter((w) => w.includes("[roles] own instance id unavailable; instance-owned rows treated as foreign"));
     assert.equal(hits.length, 1);
   } finally { console.warn = orig; cleanup(); }
+});
+
+test("own-id warning is logged once per process, across wrappers", () => {
+  _resetOwnIdWarningForTests();
+  const warns = [];
+  const orig = console.warn;
+  console.warn = (...a) => warns.push(a.join(" "));
+  try {
+    const a = wrapOwnId(() => { throw new Error("unpinned"); });
+    const b = wrapOwnId(undefined);
+    assert.equal(a(), null);
+    assert.equal(b(), null);
+    assert.equal(a(), null);
+    assert.equal(warns.filter((w) => w.includes("[roles] own instance id unavailable")).length, 1);
+  } finally { console.warn = orig; _resetOwnIdWarningForTests(); }
 });
