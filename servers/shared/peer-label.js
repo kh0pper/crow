@@ -11,7 +11,8 @@
  *  - every row's final label is computed together, to a fixpoint: any two labels that are equal
  *    case-insensitively, trailing separators folded (and any label equal to this instance's own name) are all
  *    suffixed with the first 8 hex of sha256(id) in square brackets ("raven [1a2b3c4d]"; brackets are
- *    never in a cleaned name), then with the full 64 hex if they still collide.
+ *    never in a cleaned name), then with 24 hex if they still collide. The base is cut (24, then 13
+ *    characters) so the whole label always fits the 40-character comment-author cap.
  * Nothing a caller claims (tool arguments, `_meta`) is ever used. A signed bot actor that upgrades this
  * to "<bot> (bot from <name>)" comes later, from the sending gateway (the private engineering notes).
  */
@@ -51,7 +52,15 @@ export function labelSkeleton(s) {
 }
 
 // The suffix is in square brackets, which cleanPeerName can never produce, so no name can imitate one.
-const labelAt = (base, id, level) => (level === 0 ? base : `${base} [${idSuffix(id, level === 2)}]`);
+// Every label fits the 40-character author cap: a suffixed base is cut to 24 characters before " [8 hex]"
+// (35 at most), and the rare second level cuts it to 13 before " [24 hex]" (40 at most).
+const SUFFIXED = [null, { base: 24, hex: 8 }, { base: 13, hex: 24 }];
+const cutBase = (base, n) => Array.from(base).slice(0, n).join("").trim() || "peer";
+const labelAt = (base, id, level) => {
+  if (level === 0) return base;
+  const { base: n, hex } = SUFFIXED[level];
+  return `${cutBase(base, n)} [${idSuffix(id, true).slice(0, hex)}]`;
+};
 
 /**
  * Final labels for every row (Map id → label), to a fixpoint. `ownName` is a taken label: a row whose

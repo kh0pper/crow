@@ -110,8 +110,7 @@ test("the fixpoint: a suffixed label that collides with another row's bare name 
   assert.equal(m2.get("inst-q"), `wren [${sfx("inst-q")}]`);
 });
 
-test("the fixpoint escalates to the full 64-hex suffix when two ids share their first 8 hex", () => {
-  // Find two ids whose sha256 share the first 8 hex (a 32-bit birthday search, ~2^16 tries).
+test("the fixpoint escalates to a 24-hex suffix (base shortened) when two ids share their first 8 hex, and still fits 40", () => {
   const seen = new Map();
   let pair = null;
   for (let n = 0; !pair && n < 2_000_000; n++) {
@@ -121,11 +120,29 @@ test("the fixpoint escalates to the full 64-hex suffix when two ids share their 
   }
   assert.ok(pair, "found a prefix collision");
   const [p, q] = pair;
-  const l = peerLabels([{ id: p, name: "wren" }, { id: q, name: "wren" }, { id: "other", name: "lark" }]);
-  assert.equal(l.get(p), `wren [${idSuffix(p, true)}]`);
-  assert.equal(l.get(q), `wren [${idSuffix(q, true)}]`);
+  const name = "abcdefghij".repeat(4);
+  const l = peerLabels([{ id: p, name }, { id: q, name }, { id: "other", name: "lark" }]);
+  for (const id of [p, q]) {
+    assert.equal(l.get(id), `${name.slice(0, 13)} [${idSuffix(id, true).slice(0, 24)}]`);
+    assert.ok(l.get(id).length <= 40, l.get(id));
+  }
   assert.notEqual(l.get(p), l.get(q));
   assert.equal(l.get("other"), "lark");
+});
+
+test("a suffixed label always fits 40: the base is cut to 24 before ' [8-hex]'", () => {
+  const name = "abcdefghij".repeat(4);
+  const l = peerLabels([{ id: "x1", name }, { id: "x2", name }]);
+  for (const id of ["x1", "x2"]) {
+    assert.equal(l.get(id), `${name.slice(0, 24)} [${sfx(id)}]`);
+    assert.ok(l.get(id).length <= 40);
+  }
+  assert.notEqual(l.get("x1"), l.get("x2"));
+  // A base whose 24-character cut ends in a space is trimmed before the suffix.
+  const n2 = "abcdefghijklmnopqrstuvw abc";
+  assert.equal(peerLabels([{ id: "y1", name: n2 }, { id: "y2", name: n2 }]).get("y1"), `abcdefghijklmnopqrstuvw [${sfx("y1")}]`);
+  // An unsuffixed name keeps up to 40 characters.
+  assert.equal(peerLabels([{ id: "z1", name }]).get("z1"), name);
 });
 
 test("a name cannot imitate a suffix: 'raven . <hex>' and 'raven [<hex>]' never match the real raven's label", () => {

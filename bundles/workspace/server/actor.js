@@ -14,11 +14,23 @@ const botActor = (id, name) => {
   return { kind: "bot", id: String(id ?? ""), name: clean || "bot" };
 };
 
-// A peer's name never carries parentheses, so it cannot fake a nested label ("x (bot from y)").
+// A peer's name never carries parentheses, so it cannot fake a nested label ("x (bot from y)"). The gateway's
+// trailing " [hex]" suffix is what tells two same-named peers apart, so the 40-character cap shortens the
+// name part and never cuts the suffix.
+const PEER_SUFFIX_RE = /^(.*) \[([0-9a-f]{8,64})\]$/s;
+function peerFrom(raw) {
+  const clean = (s) => sanitizeActorName(String(s ?? "").replace(/[()]/g, ""), "");
+  const m = PEER_SUFFIX_RE.exec(String(raw ?? ""));
+  if (!m) return clean(raw);
+  const suffix = ` [${m[2]}]`;
+  const room = Math.max(0, 40 - suffix.length);
+  const base = Array.from(clean(m[1])).slice(0, room).join("").trim();
+  return base ? `${base}${suffix}` : suffix.trim();
+}
 const peerActor = (instance, from) => ({
   kind: "peer",
   instance: typeof instance === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(instance) ? instance : "",
-  from: sanitizeActorName(String(from ?? "").replace(/[()]/g, ""), ""),
+  from: peerFrom(from),
 });
 
 /** → {kind:"bot", id, name} | {kind:"peer", instance, from} | {kind:"owner", name} | null. Order: env bot, `_meta` bot,
