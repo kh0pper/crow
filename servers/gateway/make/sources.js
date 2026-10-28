@@ -9,6 +9,7 @@ import { tasksDbPath as defaultTasksDbPath } from "../../../scripts/pi-bots/inst
 import {
   ensureItem, getItem, projectOfItems, activeProjectWhere, deriveArtifactProject,
 } from "../../shared/shell-items.js";
+import { documentCard } from "./card-docs.js";
 
 /**
  * @typedef MakeItem
@@ -195,12 +196,20 @@ export async function listArtifactItems(db, scope = { all: true }, { limit = 60,
       kind: "artifact", ref: a.id, title: a.title, type, filter: filterOf(type),
       shared: Number(a.received) === 1 && a.origin_contact != null,
       updatedAt: toIso(a.updated_at), version: num(a.current_version),
-      cardId: meta.cardId, projectId,
+      cardId: null, projectId,
       justMade: justMadeArtifact({ madeBy: a.made_by, versionN: Number(a.current_version), versionCreatedAt: a.version_created_at, seenVersion: meta.seenVersion }, now),
       openUrl: `/dashboard/make/open/artifact/${a.id}`,
+      _card: { handCardId: meta.cardId, originCard: num(a.origin_card), originSession: a.origin_session || null },
     });
   }
-  return items.slice(0, limit);
+  const out = items.slice(0, limit);
+  // The tile's #<n> chip: the document's card by card-docs.js's one rule (hand link, origin
+  // card, origin thread's card), worked out only for the tiles returned.
+  for (const item of out) {
+    item.cardId = await documentCard(db, item._card);
+    delete item._card;
+  }
+  return out;
 }
 
 const WS_TYPES = {
@@ -242,7 +251,7 @@ export async function listWorkspaceItems(db, scope = { all: true }, { crowHome, 
     out.push({
       kind: "workspace_file", ref, title: f.name, type, filter: filterOf(type), shared: false,
       updatedAt: f.modified || new Date(0).toISOString(), version: null,
-      cardId: rows.get(ref)?.cardId ?? null, projectId, justMade: false,
+      cardId: await documentCard(db, { handCardId: rows.get(ref)?.cardId ?? null }), projectId, justMade: false,
       openUrl: `/dashboard/make/open/workspace_file/${ref}`,
     });
   }

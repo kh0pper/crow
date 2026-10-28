@@ -164,6 +164,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     applyArchivedUi($('bb-d-archive'),$('bb-d-unarchive'),DRAWER_FIELD_IDS,cur.archived,cur.locked);
     // Clear the previous card's decision block until this card's GET lands.
     renderDecision(null);
+    renderDocuments([]);
     hydrateDrawer(cur.id);
     loadPlan();
     openDrawer(drawer);
@@ -209,6 +210,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         renderHistory(r.j.mutations||[]);
         renderResults(r.j.latest_results||[], (r.j.board&&r.j.board.terminal_values)||[]);
         if(!opts.keepDecision) renderDecision(r.j.decision);
+        renderDocuments(r.j.documents||[]);
         if(pendingDrawerScroll){ drawer.scrollTop=pendingDrawerScroll; pendingDrawerScroll=0; }
       } else if(!r.ok){ pendingDrawerScroll=0; crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); }
     }).catch(function(){ pendingDrawerScroll=0; crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });
@@ -259,6 +261,21 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         renderPre();
       } else { msg(pm, (r.j&&r.j.reason)||'plan unavailable','warn'); }
     }).catch(function(){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });
+  }
+  // P6: the card's documents (GET /card/:id's additive 'documents' key), each
+  // opened through the Make tab's open route so opening it marks it seen. Titles
+  // are data: textContent only; a link that isn't that route is never drawn.
+  function renderDocuments(docs){
+    var wrap=$('bb-d-docs-wrap'), list=$('bb-d-docs'); if(!wrap||!list) return;
+    clearEl(list);
+    var shown=0;
+    (docs||[]).forEach(function(d){
+      if(!d||typeof d.openUrl!=='string'||d.openUrl.indexOf('/dashboard/make/open/')!==0) return;
+      var li=document.createElement('li'), a=document.createElement('a');
+      a.href=d.openUrl; a.textContent=String(d.title==null?'':d.title);
+      li.appendChild(a); list.appendChild(li); shown++;
+    });
+    wrap.hidden=!shown;
   }
   function renderPre(){ var el=$('bb-d-plan-pre'); if(el) el.textContent=$('bb-d-plan').value; }
 

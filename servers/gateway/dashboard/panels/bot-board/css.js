@@ -217,6 +217,9 @@ export function botBoardStyles() {
   .bb-btn:disabled{opacity:.5;cursor:not-allowed}
   .bb-msg{font-size:.82rem;margin:.5rem 0;min-height:1.1em}
   .bb-msg.ok{color:#1a7f37}.bb-msg.err{color:#c0392b}.bb-msg.warn{color:#b8860b}
+  .bb-docs{list-style:none;margin:.3rem 0;padding:0}
+  .bb-docs li{border-bottom:1px solid var(--crow-border)}
+  .bb-docs a{display:flex;align-items:center;min-height:44px;color:var(--crow-accent);text-decoration:none;overflow-wrap:anywhere}
   .bb-pre{background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:6px;padding:.6rem;white-space:pre-wrap;word-break:break-word;font-family:'JetBrains Mono',monospace;font-size:.82rem;max-height:340px;overflow:auto}
   .bb-filter-bar{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin:.6rem 0}
   .bb-search{flex:1;min-width:200px;padding:.45rem .7rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-primary);font:inherit;font-size:.85rem}

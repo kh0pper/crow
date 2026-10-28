@@ -32,6 +32,7 @@ import { perchAttached } from "../../../shared/perch-attached.js";
 // RECORDS now (D-T1.4), not the retired file rail — same store the JS
 // drawer's GET /card/:id/plan route (plan-service.getCurrentPlan) reads.
 import { getCurrentPlan } from "../../../board/plan-service.js";
+import { documentsForCard } from "../../../make/card-docs.js";
 import { csrfInput } from "../../shared/csrf.js";
 import { boardState, agoText } from "../../shared/bot-display.js";
 import { pickerScript, laneTabsScript } from "./picker-client.js";
@@ -630,6 +631,10 @@ export function drawerMarkup(lang, def = DEFAULT_BOARD_DEF) {
       <button type="button" class="bb-btn bb-sec" id="bb-d-unarchive" style="display:none">${t("board.unarchive", lang)}</button>
     </div>
     <div id="bb-d-decision"></div>
+    <div id="bb-d-docs-wrap" hidden>
+      <h4 style="margin-top:1rem">${escapeHtml(t("shell.documents", lang))}</h4>
+      <ul id="bb-d-docs" class="bb-docs"></ul>
+    </div>
     <h4 style="margin-top:1rem;display:flex;justify-content:space-between;align-items:center">
       <span>${t("botboard.planFileHeading", lang)}</span>
       <button type="button" class="bb-btn bb-sec" id="bb-d-plan-toggle" style="margin:0">${t("botboard.btnPreview", lang)}</button>
@@ -774,7 +779,26 @@ function boardBackHref(botId) {
  * current plan. `botId` (nullable) only shapes the back link and the move
  * form's return; the card itself comes from the instance-global tasks.db.
  */
-export async function renderCardView({ layout, card, def, locked, botId = null, lang }) {
+/**
+ * The card's documents (make/card-docs.js), each opened through the Make tab's
+ * open route so opening it marks it seen. "" when the card has none, or when
+ * there is no crow.db client to read them from. Titles are data: escaped.
+ */
+export async function cardDocumentsHtml(db, cardId, lang) {
+  if (!db) return "";
+  let docs = [];
+  try { docs = await documentsForCard(db, cardId, { lang }); } catch (err) {
+    console.warn(`[bot-board] card ${cardId} documents: ${err.message}`);
+    return "";
+  }
+  if (!docs.length) return "";
+  return `<h4 style="margin-top:1rem">${escapeHtml(t("shell.documents", lang))}</h4>` +
+    `<ul class="bb-docs">` +
+    docs.map((d) => `<li><a href="${escapeHtml(d.openUrl)}">${escapeHtml(d.title)}</a></li>`).join("") +
+    `</ul>`;
+}
+
+export async function renderCardView({ db = null, layout, card, def, locked, botId = null, lang }) {
   const cid = Number(card.id);
   const backHref = boardBackHref(botId);
   // Track 1 (carried item 2): the no-JS plan block re-points from the
@@ -819,7 +843,8 @@ export async function renderCardView({ layout, card, def, locked, botId = null, 
       fieldRow(t("botboard.fieldParent", lang), card.parent_id) + fieldRow(t("botboard.fieldUpdated", lang), card.updated_at) +
       `</table></div>` +
       (card.description ? `<p style="margin-top:.6rem">${escapeHtml(String(card.description))}</p>` : "") +
-      moveForm + `<h4 style="margin-top:1rem">${t("botboard.planFileHeading", lang)}</h4>` + planBlock),
+      moveForm + await cardDocumentsHtml(db, cid, lang) +
+      `<h4 style="margin-top:1rem">${t("botboard.planFileHeading", lang)}</h4>` + planBlock),
   });
 }
 
@@ -855,7 +880,7 @@ export async function renderStandaloneCardView({ db, layout, cardId, botId = nul
     });
   }
   const locked = (await lockMapFor(db, [cid])).get(cid) === true;
-  return renderCardView({ layout, card, def, locked, botId, lang });
+  return renderCardView({ db, layout, card, def, locked, botId, lang });
 }
 
 // ---- Kanban board rendering ----
@@ -939,7 +964,7 @@ export async function renderKanbanBoard(req, res, {
     // tasks.db, so its full detail is always one tap away. The not-found
     // section is only for an id that doesn't exist or is archived.
     if (!card) return renderStandaloneCardView({ db, layout, cardId: q.card, botId: selBot.botId, lang });
-    return renderCardView({ layout, card, def, locked: !!lockMap.get(cid), botId: selBot.botId, lang });
+    return renderCardView({ db, layout, card, def, locked: !!lockMap.get(cid), botId: selBot.botId, lang });
   }
 
   // ---- full kanban board (def-driven: columns, count, labels) ----

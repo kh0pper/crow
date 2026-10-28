@@ -5,6 +5,14 @@
  *   POST /dashboard/shell-api/items/:kind/:ref/project  { project_id: number | "unassigned" }
  *     -> { ok: true, project_id: number | null }
  *
+ *   GET  /dashboard/shell-api/cards/:id/documents
+ *     -> { documents: [{ kind, ref, title, openUrl }] }   (make/card-docs.js documentsForCard)
+ *
+ *   POST /dashboard/shell-api/items/:kind/:ref/card  { card_id: number | null }
+ *     -> { ok: true, card_id }   links a document (artifact, Workspace file) to a card by
+ *                                hand, or clears the hand link; 404 for an unknown item or
+ *                                card (getCard in tasks.db), 409 archived for an archived card
+ *
  *   POST /dashboard/shell-api/cards/:id/lane
  *        { to, from, seen_result_id, seen_version, accept_failure? }   (lanes: panels/board/lanes.js)
  *     -> 200 { ok: true, lane }               the move's one real write is done
@@ -37,7 +45,10 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { jsonError } from "./_error.js";
 import { createDbClient } from "../../db.js";
-import { ITEM_KINDS, setItemProject } from "../../shared/shell-items.js";
+import { ITEM_KINDS, setItemProject, setItemCard } from "../../shared/shell-items.js";
+import { documentsForCard } from "../make/card-docs.js";
+import { parseCookies } from "../dashboard/auth.js";
+import { SUPPORTED_LANGS } from "../dashboard/shared/i18n.js";
 import { installedBundleIds } from "../skills-catalog.js";
 import { existsSync } from "node:fs";
 import { TASKS_DB } from "../dashboard/panels/bot-board/data-queries.js";
@@ -129,6 +140,9 @@ function serialized(id, fn) {
 }
 
 const REF_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
+const POSITIVE_INT_RE = /^[1-9]\d*$/;
+const DOCUMENT_KINDS = ["artifact", "workspace_file"];
+const langOf = (req) => { const l = parseCookies(req).crow_lang; return SUPPORTED_LANGS.includes(l) ? l : "en"; };
 const noTable = (err) => /no such table/i.test(String(err?.message || err));
 
 async function exists(db, sql, args) {
@@ -187,6 +201,55 @@ export function shellApiRouter(dashboardAuth) {
       jsonError(res, 500, "move failed");
     } finally {
       try { db.close(); } catch { /* already closed */ }
+    }
+  });
+
+  router.get(P + "/cards/:id/documents", async (req, res) => {
+    if (!POSITIVE_INT_RE.test(String(req.params.id))) return jsonError(res, 400, "bad_request");
+    const db = createDbClient();
+    try {
+      res.json({ documents: await documentsForCard(db, Number(req.params.id), { lang: langOf(req) }) });
+    } catch (err) {
+      console.warn("[shell-api] card documents failed:", err.message);
+      jsonError(res, 500, "documents failed");
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  });
+
+  router.post(P + "/items/:kind/:ref/card", async (req, res) => {
+    const kind = String(req.params.kind);
+    const ref = String(req.params.ref);
+    if (!DOCUMENT_KINDS.includes(kind) || !REF_RE.test(ref)) return jsonError(res, 400, "bad_request");
+    if (kind === "workspace_file" && !POSITIVE_INT_RE.test(ref)) return jsonError(res, 400, "bad_request");
+    const raw = req.body && typeof req.body === "object" ? req.body.card_id : undefined;
+    let cardId;
+    if (raw === null) cardId = null;
+    else if (typeof raw === "number" && Number.isInteger(raw) && raw > 0) cardId = raw;
+    else return jsonError(res, 400, "bad_request");
+
+    let db, tdb;
+    try {
+      db = createDbClient();
+      if (!(await itemExists(db, kind, ref))) return jsonError(res, 404, "not_found");
+      if (cardId !== null) {
+        if (!existsSync(TASKS_DB)) return jsonError(res, 404, "not_found");
+        tdb = createDbClient(TASKS_DB);
+        const card = await getCard(tdb, cardId);
+        if (!card) return jsonError(res, 404, "not_found");
+        if (card.archived_at != null) return jsonError(res, 409, "archived");
+      }
+      await setItemCard(db, kind, ref, cardId);
+      res.json({ ok: true, card_id: cardId });
+    } catch (err) {
+      if (err && err.code === "not_migrated") return jsonError(res, 503, "not_migrated");
+      if (err && err.code === "bad_kind") return jsonError(res, 400, "bad_request");
+      if (noTable(err)) return jsonError(res, 404, "not_found");
+      console.warn("[shell-api] card link failed:", err.message);
+      jsonError(res, 500, "link failed");
+    } finally {
+      if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
+      if (db) { try { db.close(); } catch { /* already closed */ } }
     }
   });
 

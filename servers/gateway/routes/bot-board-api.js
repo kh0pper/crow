@@ -102,6 +102,9 @@ import { isVoiceBotId } from "../../shared/voice-bot.js";
 import { decideOption } from "../board/decision-service.js";
 import { isEnabledBot } from "../board/bot-lookup.js";
 import { csrfMiddleware } from "../dashboard/shared/csrf.js";
+import { parseCookies } from "../dashboard/auth.js";
+import { SUPPORTED_LANGS } from "../dashboard/shared/i18n.js";
+import { documentsForCard } from "../make/card-docs.js";
 
 // Slice C: operator-approved promotion target (the PRIMARY skills dir both the
 // pi bridge and the glasses voice path search via skill_resolver).
@@ -323,6 +326,14 @@ export default function botBoardApiRouter(dashboardAuth) {
         sql: "SELECT * FROM board_mutations WHERE item_id=? ORDER BY id DESC LIMIT 10",
         args: [id],
       })).rows || [];
+      // P6: the card's documents (make/card-docs.js), an additive key like the
+      // ones above. Missing crow.db tables read as none; a failure here never
+      // costs the drawer its card.
+      const crowLang = parseCookies(req).crow_lang;
+      let documents = [];
+      try {
+        documents = await documentsForCard(cdb, id, { lang: SUPPORTED_LANGS.includes(crowLang) ? crowLang : "en" });
+      } catch (err) { console.warn(`[bot-board-api] card ${id} documents: ${err.message}`); }
       return res.json({
         card, projects, locked,
         board: {
@@ -336,6 +347,7 @@ export default function botBoardApiRouter(dashboardAuth) {
         latest_results,
         mutations,
         decision,
+        documents,
       });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
