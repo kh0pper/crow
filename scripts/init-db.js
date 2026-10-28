@@ -1051,7 +1051,7 @@ async function rebuildMainFKsToProjectSpaces() {
 await rebuildMainFKsToProjectSpaces();
 
 // --- Research provenance (fetch-before-cite) ---
-// Placed after the FK rebuild because the rebuild aborts on columns it does not know (spec §0 I1):
+// Placed after the FK rebuild because the rebuild aborts on columns it does not know (see the private engineering notes):
 // on an old-FK-shape host these must land only once both tables point at project_spaces.
 // Same PROVENANCE_COLUMNS as scripts/migrations/0013-research-provenance.mjs (one shape, two
 // rails); ADD COLUMN only, no generation bump. Each column's back-fill runs in the transaction

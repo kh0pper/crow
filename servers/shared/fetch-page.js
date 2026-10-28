@@ -214,7 +214,9 @@ const sha256hex = (s) => createHash("sha256").update(s).digest("hex");
 
 /**
  * Fetch a page and extract citable text. Never throws.
- * @returns {Promise<object>} see FetchResult in the plan
+ * @returns {Promise<object>} on failure { ok: false, fetch_status: "failed", reason, final_url,
+ *   http_status }; on success { ok: true, fetch_status: "fetched" | "fetched_no_text", final_url,
+ *   http_status, content_type, fetched_at, text, readable_text, truncated, sha256 }
  */
 export async function fetchPage(url, opts = {}) {
   const { extractTimeoutMs = EXTRACT_TIMEOUT_MS, workerUrl, ...reqOpts } = opts;
