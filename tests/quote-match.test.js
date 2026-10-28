@@ -16,26 +16,55 @@ test("MIN_PIECE_CHARS is 4", () => {
 });
 
 test("NBSP, soft hyphen, curly quotes, dashes and case are normalized", () => {
-  assert.equal(normalizeForMatch("We ship  “week­ly” — Now"), 'we ship "weekly" - now');
-  assert.equal(normalizeForMatch("it’s a ‘test’ … ok"), "it's a 'test' ... ok");
+  assert.equal(normalizeForMatch("We ship\u00a0 \u201cweek\u00adly\u201d \u2014 Now"), 'we ship "weekly" - now');
+  assert.equal(normalizeForMatch("it\u2019s a \u2018test\u2019 \u2026 ok"), "it's a 'test' ... ok");
   assert.equal(normalizeForMatch(null), "");
 });
 
 test("[sic], numeric and superscript footnote markers are removed", () => {
-  assert.equal(normalizeForMatch("growth[12] was strong¹ [sic]"), "growth was strong");
+  assert.equal(normalizeForMatch("growth[12] was strong\u00b9 [sic]"), "growth was strong");
   assert.equal(normalizeForMatch("a claim[citation needed] here[a]"), "a claim here");
 });
 
 test("outer quote marks and a trailing attribution are stripped", () => {
-  const r = matchQuote("“We ship weekly.” — A. Person, CEO", page("Intro. We ship weekly. More text."));
+  const r = matchQuote("\u201cWe ship weekly.\u201d \u2014 A. Person, CEO", page("Intro. We ship weekly. More text."));
   assert.deepEqual(r, { found: 1, where: "readable", reason: null });
   assert.equal(matchQuote("'we ship weekly'", page("so we ship weekly today")).found, 1);
   // unquoted quote with a trailing attribution: the fallback candidate cuts it
   assert.equal(matchQuote("We ship weekly now - A. Person", page("they said we ship weekly now.")).found, 1);
 });
 
+test("a fabricated clause after a dash is not cut away", () => {
+  const p = page("Intro. We ship weekly. More text.");
+  assert.equal(matchQuote("We ship weekly - and we have never shipped a bug", p).found, 0);
+  assert.equal(matchQuote("\"We ship weekly\" - and never ship bugs", p).found, 0);
+  assert.equal(matchQuote("We ship weekly \u2014 the best team in the world", p).found, 0);
+});
+
+test("a real attribution tail is cut only after the full quote fails", () => {
+  const p = page("Intro. We ship weekly. More text.");
+  assert.equal(matchQuote("\"We ship weekly,\" \u2014 Jane Doe", p).found, 1);
+  assert.equal(matchQuote("We ship weekly - Alex Rivera, CEO", p).found, 1);
+  assert.equal(matchQuote("\u201cWe ship weekly\u201d Jane Doe of the Example Group", p).found, 1);
+  // a title over 3 words is not an attribution
+  assert.equal(matchQuote("We ship weekly - Alex Rivera, Chief Executive Officer Elect", p).found, 0);
+  // the full quote is tried first: a dash that is part of the page text still matches
+  assert.equal(matchQuote("easier to test - And Easier", page("easier to test - and easier to undo")).found, 1);
+});
+
+test("a spaced ellipsis splits pieces", () => {
+  assert.equal(matchQuote("alpha . . . gamma", page("alpha beta gamma")).found, 1);
+});
+
+test("combining marks and astral letters count as word characters", () => {
+  assert.equal(matchQuote("ship weekly", page("we ship weekly\u0332 report")).found, 0);
+  assert.equal(matchQuote("ship weekly", page("we \u{10330}ship weekly report")).found, 0);
+  assert.equal(matchQuote("ship weekly", page("we ship weekly\u{10330} report")).found, 0);
+  assert.equal(matchQuote("ship weekly", page("we \u{1f600} ship weekly report")).found, 1);
+});
+
 test("ellipsis pieces match in order, never out of order", () => {
-  assert.equal(matchQuote("alpha … gamma", page("alpha beta gamma")).found, 1);
+  assert.equal(matchQuote("alpha \u2026 gamma", page("alpha beta gamma")).found, 1);
   assert.equal(matchQuote("alpha ... gamma", page("alpha beta gamma")).found, 1);
   assert.equal(matchQuote("gamma ... alpha", page("alpha beta gamma")).found, 0);
 });
@@ -62,13 +91,13 @@ test("pieces match on word boundaries only", () => {
 });
 
 test("short ellipsis pieces are ignored; all-short quotes are not checked", () => {
-  const r = matchQuote("the … the", page("the cat and the dog"));
+  const r = matchQuote("the \u2026 the", page("the cat and the dog"));
   assert.equal(r.found, null);
   assert.match(r.reason, /too short/);
   assert.equal(r.where, null);
   // "we" is ignored, "ship weekly" decides
-  assert.equal(matchQuote("we … ship weekly", page("they ship weekly")).found, 1);
-  assert.equal(matchQuote("we … ship weekly", page("they ship monthly")).found, 0);
+  assert.equal(matchQuote("we \u2026 ship weekly", page("they ship weekly")).found, 1);
+  assert.equal(matchQuote("we \u2026 ship weekly", page("they ship monthly")).found, 0);
   assert.equal(matchQuote("", page("anything")).found, null);
 });
 
@@ -110,6 +139,6 @@ test("the saved corpus matches its expectations", () => {
     }
     const t = texts.get(c.page);
     const r = matchQuote(c.quote, { readable: t.readable, body: t.body, truncated: false });
-    assert.equal(r.found, c.expect, `${c.page}: ${JSON.stringify(c.quote)} → ${JSON.stringify(r)}`);
+    assert.equal(r.found, c.expect, `${c.page}: ${JSON.stringify(c.quote)} \u2192 ${JSON.stringify(r)}`);
   }
 });
