@@ -34,6 +34,8 @@ import zlib from "node:zlib";
 import { isIP } from "node:net";
 import { pipeline } from "node:stream/promises";
 import { isPublicEgressIp } from "./ip-classify.js";
+import { createHash } from "node:crypto";
+import { extractInWorker } from "./fetch-page-worker.js";
 
 export const FETCH_TIMEOUT_MS = 15000;
 export const MAX_PAGE_BYTES = 5 * 1024 * 1024;
@@ -172,4 +174,85 @@ export async function guardedRequest(url, opts = {}) {
     if (isAbort(err) || signal.aborted) throw Object.assign(fail("ETIMEDOUT", `timed out after ${timeoutMs} ms`), { cause: err });
     throw err;
   }
+}
+
+export const EXTRACT_TIMEOUT_MS = 10000;
+export const FETCHED_TEXT_MAX = 200000;
+export const PREVIEW_CHARS = 1200;
+export const REFETCH_AFTER_DAYS = 30;
+export const FULL_TEXT_MARKER = "\n\n[crow: full page text]\n\n";
+
+/** Split stored fetched text back into the readable part and the full-body part. */
+export function splitFetchedText(text) {
+  const s = String(text || "");
+  const i = s.indexOf(FULL_TEXT_MARKER);
+  if (i < 0) return { readable: s, body: s };
+  return { readable: s.slice(0, i), body: s.slice(i + FULL_TEXT_MARKER.length) };
+}
+
+const REASONS = {
+  EBLOCKED: "the address is not public",
+  ENOTFOUND: "could not resolve the host",
+  EAI_AGAIN: "could not resolve the host",
+  ETIMEDOUT: "timed out",
+  ETOOBIG: "the page is over 5 MB",
+  EREDIRECTS: "too many redirects",
+  EBADURL: "only http and https URLs",
+  EBADENCODING: "the page uses an unsupported compression",
+  ECONNREFUSED: "the server refused the connection",
+  Z_DATA_ERROR: "the page's compressed data is corrupt",
+};
+const reasonFor = (err) => REASONS[err?.code] || `the page could not be fetched (${err?.code || "unknown error"})`;
+
+function decode(buffer, charset) {
+  let dec;
+  try { dec = new TextDecoder(charset || "utf-8", { fatal: false }); } catch { dec = new TextDecoder("utf-8", { fatal: false }); }
+  return dec.decode(buffer);
+}
+
+const sha256hex = (s) => createHash("sha256").update(s).digest("hex");
+
+/**
+ * Fetch a page and extract citable text. Never throws.
+ * @returns {Promise<object>} see FetchResult in the plan
+ */
+export async function fetchPage(url, opts = {}) {
+  const { extractTimeoutMs = EXTRACT_TIMEOUT_MS, workerUrl, ...reqOpts } = opts;
+  let res;
+  try {
+    res = await guardedRequest(url, reqOpts);
+  } catch (err) {
+    return { ok: false, fetch_status: "failed", reason: reasonFor(err), final_url: null, http_status: null };
+  }
+  const failed = (reason) => ({ ok: false, fetch_status: "failed", reason, final_url: res.final_url, http_status: res.http_status });
+  if (res.http_status < 200 || res.http_status >= 300) return failed(`HTTP ${res.http_status}`);
+
+  const base = { ok: true, final_url: res.final_url, http_status: res.http_status, content_type: res.content_type, fetched_at: new Date().toISOString() };
+  const noText = () => ({ ...base, fetch_status: "fetched_no_text", text: null, readable_text: "", truncated: false, sha256: null });
+
+  let readable;
+  let body;
+  if (res.content_type === "text/html" || res.content_type === "application/xhtml+xml") {
+    const html = decode(res.buffer, res.charset);
+    const out = await extractInWorker(html, res.final_url, { timeoutMs: extractTimeoutMs, ...(workerUrl ? { workerUrl } : {}) });
+    if (out.error) return failed(out.error === "extract_timeout" ? "extraction timed out" : "extraction failed");
+    ({ readable, body } = out);
+    if (!readable && !body) return noText();
+  } else if (res.content_type === "text/plain" || res.content_type === "text/markdown") {
+    readable = body = decode(res.buffer, res.charset);
+    if (!readable.trim()) return noText();
+  } else {
+    return noText();
+  }
+
+  let truncated = false;
+  let text;
+  if (body === readable) {
+    text = readable;
+  } else {
+    text = readable + FULL_TEXT_MARKER + body;
+  }
+  if (text.length > FETCHED_TEXT_MAX) { text = text.slice(0, FETCHED_TEXT_MAX); truncated = true; }
+  const readable_text = text.length >= readable.length ? readable : text; // readable may itself be cut
+  return { ...base, fetch_status: "fetched", text, readable_text, truncated, sha256: sha256hex(text) };
 }
