@@ -281,7 +281,7 @@ test("U-P6 pairBindingMode: auto by default in PT-2a, an unknown value is requir
 });
 
 // ── Nest records ───────────────────────────────────────────────────────────
-test("recordPairBindingState feeds the Nest: unbound peers, refusals, a bound handshake clears both", () => {
+test("recordPairBindingState feeds the Nest: unbound peers (no TTL, R6), refusals (TTL), a bound handshake clears both", () => {
   _resetPeerTrustHealth();
   const t0 = 1_000_000;
   recordPairBindingState("p-legacy", { bound: false, legacy: true, reason: null }, t0);
@@ -311,15 +311,30 @@ test("recordPairBindingState feeds the Nest: unbound peers, refusals, a bound ha
   assert.deepEqual(Object.keys(h.unboundPeers), ["p-req"]);
   assert.deepEqual(Object.keys(h.pairBindingRefusals), ["p-pinned"]);
 
-  // TTL (like lookupFailures): gone 10 minutes after the last record.
-  h = getPeerTrustHealth(t0 + 1 + 10 * 60 * 1000 + 1);
-  assert.deepEqual(h.unboundPeers, {});
-  assert.deepEqual(h.pairBindingRefusals, {});
+  // Ruling R6: refusals expire after 10 minutes; an unbound peer never expires.
+  const later = t0 + 1 + 10 * 60 * 1000 + 1;
+  h = getPeerTrustHealth(later);
+  assert.deepEqual(Object.keys(h.pairBindingRefusals), [], "refusals expire by TTL");
+  assert.deepEqual(Object.keys(h.unboundPeers), ["p-req"], "an unbound peer outlives the TTL");
+  h = getPeerTrustHealth(t0 + 30 * 24 * 3600 * 1000);
+  assert.deepEqual(Object.keys(h.unboundPeers), ["p-req"], "still there a month later");
+  assert.equal(Object.getPrototypeOf(h.unboundPeers), null, "prototype-free map");
+  assert.equal(Object.getPrototypeOf(h.pairBindingRefusals), null, "prototype-free map");
+  // A refusal does not drop the unbound record; only a bound handshake does.
+  recordPairBindingState("p-req", { bound: false, legacy: false, reason: "pb_required" }, later);
+  h = getPeerTrustHealth(later);
+  assert.deepEqual(Object.keys(h.unboundPeers), ["p-req"]);
+  assert.deepEqual(Object.keys(h.pairBindingRefusals), ["p-req"]);
+  recordPairBindingState("p-req", { bound: true, legacy: false, reason: null }, later + 1);
+  h = getPeerTrustHealth(later + 1);
+  assert.deepEqual(Object.keys(h.unboundPeers), []);
+  assert.deepEqual(Object.keys(h.pairBindingRefusals), []);
 
   recordPairBindingState("p-x", { bound: false, legacy: true, reason: null });
   recordPairBindingState(null, { bound: false, legacy: true, reason: null });
+  assert.deepEqual(Object.keys(getPeerTrustHealth().unboundPeers), ["p-x"], "a null id is ignored");
   _resetPeerTrustHealth();
   h = getPeerTrustHealth();
-  assert.deepEqual(h.unboundPeers, {});
-  assert.deepEqual(h.pairBindingRefusals, {});
+  assert.deepEqual(Object.keys(h.unboundPeers), []);
+  assert.deepEqual(Object.keys(h.pairBindingRefusals), []);
 });

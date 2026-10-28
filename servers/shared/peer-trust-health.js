@@ -14,7 +14,9 @@
  *   pairBindingRefusals — siblings whose sync handshake was refused by the
  *                     pair-binding policy (id → { reason, message, at }).
  * The two pair-binding kinds are written by sync-pair-binding.js
- * (recordPairBindingState) and expire like lookupFailures.
+ * (recordPairBindingState). Refusals expire like lookupFailures; an unbound
+ * peer never expires (a legacy link can stay up for hours) and is removed
+ * only by a bound handshake for that peer (or the reset seam).
  */
 
 let _lookupFailures = Object.create(null);
@@ -36,7 +38,7 @@ export function setUntrustedWithCreds(rows) { _untrusted = (rows || []).map((r) 
 export function setOrphanKeys(ids) { _orphans = [...(ids || [])]; }
 
 const LOOKUP_FAILURE_TTL_MS = 10 * 60 * 1000;
-const PAIR_BINDING_TTL_MS = LOOKUP_FAILURE_TTL_MS;
+const PAIR_REFUSAL_TTL_MS = LOOKUP_FAILURE_TTL_MS;
 
 /** `id` synced as legacy (no pair binding). Clears its refusal. */
 export function recordUnboundPeer(id, message, nowMs = Date.now()) {
@@ -45,10 +47,9 @@ export function recordUnboundPeer(id, message, nowMs = Date.now()) {
   _unboundPeers[id] = { at: nowMs, message: String(message || "").slice(0, 300) };
 }
 
-/** `id`'s sync handshake was refused by the pair-binding policy. Clears its unbound entry. */
+/** `id`'s sync handshake was refused by the pair-binding policy. Its unbound entry stays. */
 export function recordPairBindingRefusal(id, reason, message, nowMs = Date.now()) {
   if (!id) return;
-  delete _unboundPeers[id];
   _pairRefusals[id] = { at: nowMs, reason: reason ? String(reason) : null, message: String(message || "").slice(0, 300) };
 }
 
@@ -59,8 +60,8 @@ export function clearPairBindingState(id) {
   delete _pairRefusals[id];
 }
 
-function fresh(map, nowMs, ttl) {
-  const out = {};
+function fresh(map, nowMs, ttl = Infinity) {
+  const out = Object.create(null);
   for (const [id, v] of Object.entries(map)) if (nowMs - v.at <= ttl) out[id] = { ...v };
   return out;
 }
@@ -74,8 +75,8 @@ export function getPeerTrustHealth(nowMs = Date.now()) {
     lookupFailures,
     untrustedWithCreds: _untrusted.map((r) => ({ ...r })),
     orphanKeys: [..._orphans],
-    unboundPeers: fresh(_unboundPeers, nowMs, PAIR_BINDING_TTL_MS),
-    pairBindingRefusals: fresh(_pairRefusals, nowMs, PAIR_BINDING_TTL_MS),
+    unboundPeers: fresh(_unboundPeers, nowMs),
+    pairBindingRefusals: fresh(_pairRefusals, nowMs, PAIR_REFUSAL_TTL_MS),
   };
 }
 
