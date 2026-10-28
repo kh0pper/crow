@@ -74,7 +74,7 @@ test("VIEWER_STRINGS: en/es parity, translated, same placeholders", () => {
   const { en, es } = VIEWER_STRINGS;
   assert.deepEqual(Object.keys(en).sort(), Object.keys(es).sort());
   const ph = (x) => [...String(x).matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort().join(",");
-  const same = new Set(["bot"]);   // a loanword in both languages
+  const same = new Set(["bot", "backChat"]);   // loanwords in both languages ("Chat": the P6 brief's verbatim es string)
   for (const k of Object.keys(en)) {
     assert.ok(es[k] && es[k].trim(), `es.${k} non-empty`);
     if (!same.has(k)) assert.notEqual(es[k], en[k], `es.${k} is translated`);
@@ -135,10 +135,10 @@ test("viewer page: the core viewerCsp (frame-ancestors 'self'), no-store, valida
   assert.match(h["content-security-policy"], /frame-src https:\/\/artifacts\.example\.ts\.net\/v\/; frame-ancestors 'self'/);
   assert.equal(h["cache-control"], "no-store");
   assert.match(viewerHeaders(policy.viewerCsp, null)["content-security-policy"], /frame-src 'none'/, "fail closed without an origin");
-  assert.deepEqual(viewerParams({ v: "3", thread: "perchlive-0123abcd" }), { v: 3, thread: "perchlive-0123abcd" });
-  assert.deepEqual(viewerParams({ v: "0", thread: "a b" }), { v: null, thread: null });
-  assert.deepEqual(viewerParams({ v: ["2"], thread: ["x"] }), { v: null, thread: null }, "arrays are not values");
-  assert.deepEqual(viewerParams({ v: "1e3", thread: '"><x' }), { v: null, thread: null });
+  assert.deepEqual(viewerParams({ v: "3", thread: "perchlive-0123abcd" }), { v: 3, thread: "perchlive-0123abcd", back: null });
+  assert.deepEqual(viewerParams({ v: "0", thread: "a b" }), { v: null, thread: null, back: null });
+  assert.deepEqual(viewerParams({ v: ["2"], thread: ["x"] }), { v: null, thread: null, back: null }, "arrays are not values");
+  assert.deepEqual(viewerParams({ v: "1e3", thread: '"><x' }), { v: null, thread: null, back: null });
   const html = renderViewerPage({ lang: "es", id: "art_abc12345", v: 2, thread: "perchlive-0123abcd" });
   assert.match(html, /<meta name="turbo-visit-control" content="reload">/);
   assert.match(html, /data-artifact="art_abc12345" data-version="2" data-thread="perchlive-0123abcd"/);
@@ -343,6 +343,14 @@ test("live: the full-tab viewer has a way out (Library, Crow's Nest) that the hu
     await t.nav(base + viewUrl);
     assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-cacts')`)) === true, 15000), `comment actions drawn (page errors: ${JSON.stringify(t.errors)})`);
     assert.equal(await t.evalIn(`JSON.stringify([...document.querySelectorAll('.cv-nav a')].map((a) => a.getAttribute('href')))`), JSON.stringify(["/dashboard/artifacts", "/dashboard/nest"]));
+    // P6: opened from Make, the way back to Make takes the Library's place (still two ways out).
+    await t.nav(base + viewUrl + "?from=make");
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-nav')`)) === true, 15000));
+    assert.equal(await t.evalIn(`JSON.stringify([...document.querySelectorAll('.cv-nav a')].map((a) => a.getAttribute('href')))`), JSON.stringify(["/dashboard/make", "/dashboard/nest"]));
+    assert.equal(await t.evalIn(`!!document.getElementById('cv-links')`), false, "the server-rendered holder is gone once moved");
+    assert.ok((await t.evalIn(`document.querySelector('.cv-back').getBoundingClientRect().height`)) >= 44, "a 44px tap target");
+    await t.nav(base + viewUrl);
+    assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-cacts')`)) === true, 15000));
     // Edit → Save: the text changes in place and says "edited".
     await t.evalIn(`document.querySelector('.cv-cacts .cv-link').click()`);
     assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-editbox textarea')`)) === true), "the edit box opened");
@@ -357,9 +365,10 @@ test("live: the full-tab viewer has a way out (Library, Crow's Nest) that the hu
     // Inside a frame (the hub pane): no nav — the pane has its own close.
     await t.nav(`${base}/dashboard/other`);
     assert.ok(await waitFor(async () => (await t.evalIn(`document.readyState === "complete"`)) === true, 10000));
-    await t.evalIn(`(() => { const f = document.createElement('iframe'); f.id = 'pane'; f.src = ${JSON.stringify(viewUrl)}; document.body.appendChild(f); })()`);
+    await t.evalIn(`(() => { const f = document.createElement('iframe'); f.id = 'pane'; f.src = ${JSON.stringify(viewUrl + "?from=chat")}; document.body.appendChild(f); })()`);
     assert.ok(await waitFor(async () => (await t.evalIn(`(() => { const d = document.getElementById('pane').contentDocument; return !!(d && d.querySelector('.cv-head')); })()`)) === true, 15000), "the framed viewer rendered");
     assert.equal(await t.evalIn(`!!document.getElementById('pane').contentDocument.querySelector('.cv-nav')`), false);
+    assert.equal(await t.evalIn(`!!document.getElementById('pane').contentDocument.querySelector('.cv-back')`), false, "no way back inside the pane: the chat is right there");
   } finally { await t.close(); }
 });
 

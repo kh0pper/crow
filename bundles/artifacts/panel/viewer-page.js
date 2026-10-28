@@ -49,6 +49,7 @@ export const VIEWER_STRINGS = {
     comment_selection: "Comment on \u201c{q}\u201d", cant_show: "This version can't be shown right now. Reload the page.",
     let_bot: "Let a bot work on this", grant_title: "Which other bots can work on this?", grant_none: "No other bot has the Artifacts tools.",
     grant_note: "A bot you tick can read and revise this artifact and ask to link it to its chats.", done: "Done",
+    cardLink: "Card #{n}", openChat: "Open the chat", backMake: "Make", backChat: "Chat",
   },
   es: {
     title: "Artefacto", version: "Versión", current: "actual", proposed: "propuesta", flagged_v: "marcada",
@@ -84,6 +85,7 @@ export const VIEWER_STRINGS = {
     comment_selection: "Comentar \u201c{q}\u201d", cant_show: "Esta versión no se puede mostrar ahora. Recarga la página.",
     let_bot: "Dejar que un bot trabaje en esto", grant_title: "¿Qué otros bots pueden trabajar en esto?", grant_none: "Ningún otro bot tiene las herramientas de Artefactos.",
     grant_note: "Un bot que marques puede leer y revisar este artefacto y pedir vincularlo a sus chats.", done: "Listo",
+    cardLink: "Tarjeta #{n}", openChat: "Abrir el chat", backMake: "Crear", backChat: "Chat",
   },
 };
 
@@ -92,11 +94,17 @@ export const THREAD_PARAM_RE = /^[A-Za-z0-9_-]{1,80}$/;
 
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
-/** The page's query, validated: v a positive integer, thread a plain id. */
+/** The shell tab a viewer was opened from (`?from=`): only these two, anything else is null. */
+export const BACK_VALUES = Object.freeze(["make", "chat"]);
+/** The only card links the header draws: the card drawer (or no-JS card view) on the board. */
+const CARD_HREF_RE = /^\/dashboard\/bot-board[?#][A-Za-z0-9_.~%=&#?-]*$/;
+
+/** The page's query, validated: v a positive integer, thread a plain id, back make|chat. */
 export function viewerParams(query = {}) {
   const v = typeof query.v === "string" && /^[1-9]\d{0,5}$/.test(query.v) ? Number(query.v) : null;
   const thread = typeof query.thread === "string" && THREAD_PARAM_RE.test(query.thread) ? query.thread : null;
-  return { v, thread };
+  const back = typeof query.from === "string" && BACK_VALUES.includes(query.from) ? query.from : null;
+  return { v, thread, back };
 }
 
 /** The page's headers: the core viewerCsp (frame-ancestors 'self' included). */
@@ -104,13 +112,39 @@ export function viewerHeaders(viewerCsp, origin) {
   return { "content-security-policy": viewerCsp(origin), "cache-control": "no-store", "referrer-policy": "same-origin" };
 }
 
+/** "‹ Make" or "‹ Chat" (the shell tab the viewer was opened from), or "". */
+function backHtml(T, back, thread) {
+  if (back === "make") return `<a class="cv-back" id="cv-back" href="/dashboard/make">\u2039 ${esc(T.backMake)}</a>`;
+  if (back === "chat") return `<a class="cv-back" id="cv-back" href="${thread ? `/dashboard/perch#${esc(thread)}` : "/dashboard/perch"}">\u2039 ${esc(T.backChat)}</a>`;
+  return "";
+}
+
+/**
+ * The document's card (P6): "Card #n <title>" into the card's drawer, plus "Open the chat"
+ * when the card has a conversation that isn't already this page's thread. The title is
+ * bot/operator text, escaped here. Links target the top window (the hub frames this page).
+ */
+function cardHtml(T, card, thread) {
+  if (!card || !/^[1-9]\d*$/.test(String(card.id)) || typeof card.href !== "string" || !CARD_HREF_RE.test(card.href)) return "";
+  const n = String(card.id);
+  const lane = typeof card.lane === "string" && /^[a-z_]{1,20}$/.test(card.lane) ? ` data-lane="${card.lane}"` : "";
+  const title = card.title ? ` <span class="cv-card-t">${esc(card.title)}</span>` : "";
+  const chat = typeof card.thread === "string" && THREAD_PARAM_RE.test(card.thread) && card.thread !== thread
+    ? `<a class="cv-card-chat" href="/dashboard/perch#${esc(card.thread)}" target="_top">${esc(T.openChat)}</a>` : "";
+  return `<div class="cv-cardrow" id="cv-cardrow" data-card="${n}"${lane}><a class="cv-card" href="${esc(card.href)}" target="_top"><span class="cv-card-n">${esc(T.cardLink.replace("{n}", n))}</span>${title}</a>${chat}</div>`;
+}
+
 /**
  * shellHtml: the core player-bar shell (servers/gateway/dashboard/shared/player-shell.js), passed in by the
  * route, which has already passed dashboardAuth. Empty on an older core: the page then has no bar.
+ * back: "make"|"chat"|null (viewerParams' `from`): the way back to the shell tab.
+ * card: the route's `{ id, title, lane, href, thread }` or null. viewer-client.js moves both
+ * into its bar and header; nothing is built from them on the client.
  */
-export function renderViewerPage({ lang = "en", id, v = null, thread = null, shellHtml = "" }) {
+export function renderViewerPage({ lang = "en", id, v = null, thread = null, back = null, card = null, shellHtml = "" }) {
   const L = lang === "es" ? "es" : "en";
   const T = VIEWER_STRINGS[L];
+  const links = backHtml(T, back, thread) + cardHtml(T, card, thread);
   return `<!doctype html>
 <html lang="${L}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -119,7 +153,7 @@ export function renderViewerPage({ lang = "en", id, v = null, thread = null, she
 <title>${esc(T.title)}</title>
 <link rel="stylesheet" href="/artifacts/static/viewer.css">
 </head><body>
-<div id="crow-artifact-viewer" data-lang="${L}" data-artifact="${esc(id)}" data-version="${v == null ? "" : esc(v)}" data-thread="${thread == null ? "" : esc(thread)}" data-strings="${esc(JSON.stringify(T))}"></div>
+${links ? `<div id="cv-links" hidden>${links}</div>\n` : ""}<div id="crow-artifact-viewer" data-lang="${L}" data-artifact="${esc(id)}" data-version="${v == null ? "" : esc(v)}" data-thread="${thread == null ? "" : esc(thread)}" data-strings="${esc(JSON.stringify(T))}"></div>
 <script src="/artifacts/static/viewer.js"></script>
 <script src="/artifacts/static/viewer-client.js"></script>
 ${shellHtml}

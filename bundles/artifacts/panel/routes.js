@@ -33,7 +33,7 @@ const STATIC = {
 
 /**
  * @param {Function} dashboardAuth
- * @param {object} seams  tests: { db, blobs, engine, csrf, runtime, policy, notify, renderDeps, loadBotDef, createBoardCard }
+ * @param {object} seams  tests: { db, blobs, engine, csrf, runtime, policy, notify, renderDeps, loadBotDef, createBoardCard, importCardDocs }
  */
 export default function artifactsRouter(dashboardAuth, seams = {}) {
   const router = Router();
@@ -79,6 +79,28 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     }, (e) => console.warn(`[artifacts] plain backfill failed (${(e && e.code) || "error"}); old documents stay on the markdown fallback`));
   }
   const ensure = () => (ready ??= init().catch((e) => { ready = null; throw e; }));
+
+  /**
+   * The document's card for its header (P6): `{ id, title, lane, href, thread }` or null.
+   * Core make/card-docs.js decides it (cardForDocument, then cardSummary: lane by the Board
+   * tab's rule, href into the card drawer, the card's chat). An older core without the module
+   * gives null (the player-shell precedent); one with cardForDocument but no cardSummary gets
+   * the bare drawer link and nothing it would have to guess. One summary per request.
+   */
+  async function documentCardFor(artifactId) {
+    let cd;
+    try { cd = await (S.importCardDocs || (() => appImport("servers/gateway/make/card-docs.js")))(); } catch { return null; }
+    try {
+      if (typeof cd?.cardForDocument !== "function") return null;
+      const id = await cd.cardForDocument(S.db, "artifact", artifactId);
+      if (id == null) return null;
+      if (typeof cd.cardSummary !== "function") return { id: Number(id), title: "", lane: null, href: `/dashboard/bot-board#open=${Number(id)}`, thread: null };
+      return (await cd.cardSummary(S.db, id)) || null;
+    } catch (e) {
+      console.warn(`[artifacts] the document's card could not be read (${(e && e.code) || "error"}: ${e && e.message})`);
+      return null;
+    }
+  }
   const OWNER = { kind: "session", id: null };
   const wrap = (fn) => async (req, res) => {
     try { await ensure(); await fn(req, res); }
@@ -108,12 +130,13 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
       for (const [k, v] of Object.entries(page.viewerHeaders(S.policy.viewerCsp, origin))) res.setHeader(k, v);
       const m = /(?:^|;\s*)crow_lang=([a-z]{2})/.exec(String(req.headers.cookie || ""));
       const lang = m && m[1] === "es" ? "es" : "en";
-      const { v, thread } = page.viewerParams(req.query);
+      const { v, thread, back } = page.viewerParams(req.query);
+      const card = await documentCardFor(req.params.id);
       // The player bar (bar on every Crow page): the core shell, emitted only here, behind dashboardAuth.
       // An older core without the module renders the viewer with no bar.
       let shellHtml = "";
       try { shellHtml = (await appImport("servers/gateway/dashboard/shared/player-shell.js")).playerShellHtml(lang); } catch { shellHtml = ""; }
-      res.type("html").send(page.renderViewerPage({ lang, id: req.params.id, v, thread, shellHtml }));
+      res.type("html").send(page.renderViewerPage({ lang, id: req.params.id, v, thread, back, card, shellHtml }));
     } catch {
       res.status(500).type("text/plain").send("error");
     }
@@ -401,7 +424,9 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     res.json({ artifact: art, versions: versions.map((v) => ({ ...v, anchor_map: v.anchor_map_json ? JSON.parse(v.anchor_map_json) : null, anchor_map_json: undefined })), threads: await M.comments.listThreads(S.db, art.id),
       activeRound, scripted, scriptsOff: !!(cur && scripted && M.store.isTainted(cur)),
       // The threads a round or ask holds right now: the viewer hides Edit/Delete on them.
-      lockedThreads: await M.comments.lockedThreadIds(S.db, art.id) });
+      lockedThreads: await M.comments.lockedThreadIds(S.db, art.id),
+      // P6: the card this document belongs to (null: none, or an older core).
+      card: await documentCardFor(art.id) });
   }));
 
   /**

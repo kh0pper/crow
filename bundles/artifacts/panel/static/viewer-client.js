@@ -79,15 +79,23 @@
   var side = el("aside", { class: "cv-side" }, [el("div", { class: "cv-side-head" }, [handle, sendBtn]), el("div", { class: "cv-side-body" }, [composeSlot, sectionList, threadList])]);
   // A way out when the viewer has the whole tab (opened from the Library or
   // "Open in new window"). Inside the hub pane the pane has its own close.
+  // P6: the server rendered the way back ("‹ Make"/"‹ Chat", from ?from=) and the
+  // document's card row (escaped there) into #cv-links; they are only moved here.
+  var links = document.getElementById("cv-links");
+  var backLink = links && links.querySelector("#cv-back");
+  var cardRow = links && links.querySelector("#cv-cardrow");
   if (window.top === window) {
     // A slim header-like bar (QW4 B2). The title is plain text, not a link:
-    // the bar has exactly two ways out.
+    // the bar has exactly two ways out. Opened from a shell tab, the way back
+    // to that tab takes the Library's place.
     root.appendChild(el("nav", { class: "cv-nav", "aria-label": T.nav }, [
-      el("a", { class: "cv-nav-back", href: "/dashboard/artifacts", text: "\u2190 " + T.library }),
+      backLink || el("a", { class: "cv-nav-back", href: "/dashboard/artifacts", text: "\u2190 " + T.library }),
       el("span", { class: "cv-nav-title", text: T.library_title }),
       el("a", { class: "cv-nav-nest", href: "/dashboard/nest", text: T.nest }),
     ]));
   }
+  if (cardRow) head.insertBefore(cardRow, headTools);
+  if (links && links.parentNode) links.parentNode.removeChild(links);
   root.appendChild(head);
   root.appendChild(banners);
   root.appendChild(trust);

@@ -123,3 +123,10 @@ body{background:#eef1f3}
 @media (max-width:1023.98px){.cv-selbar{bottom:calc(70px + var(--crow-player-h,0px))}}
 .cv-selbar{pointer-events:none}
 .cv-selbar button{pointer-events:auto;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;box-shadow:0 2px 10px rgba(0,0,0,.18)}
+/* P6: the way back to the shell tab, and the document's card row (44px tap targets). */
+.cv-nav a.cv-back{min-height:44px;min-width:44px}
+.cv-cardrow{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;flex-basis:100%;min-width:0}
+.cv-cardrow a{min-height:44px;display:inline-flex;align-items:center;gap:6px;color:var(--teal);text-decoration:none;font-weight:600;min-width:0}
+.cv-card{min-height:44px;max-width:100%}
+.cv-card-t{color:var(--ink);font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.cv-cardrow a:hover,.cv-cardrow a:focus-visible{text-decoration:underline}
