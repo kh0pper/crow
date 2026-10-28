@@ -361,6 +361,26 @@ export async function setThreadStatus(db, { threadId, status, artifactId }) {
   if (Number(r.rowsAffected) !== 1) throw err("not_found", "no such thread");
 }
 
+/**
+ * The owner's `@bot` on a thread (P6, spec §10): a resolved thread, or one
+ * whose last round has ended, is opened again (and released) so a mention
+ * round can take it. "busy": the thread's round is still active — nothing
+ * changes. "open": it was already open and free.
+ */
+export async function reopenForMention(db, { threadId, artifactId }) {
+  const t = (await db.execute({ sql: "SELECT id, sent_round_id FROM artifact_threads WHERE id=? AND artifact_id=?", args: [threadId, artifactId] })).rows[0];
+  if (!t) throw err("not_found", "no such thread");
+  if (t.sent_round_id != null) {
+    const r = (await db.execute({ sql: `SELECT 1 FROM artifact_rounds r WHERE r.id=? AND ${IN_ACTIVE}`, args: [t.sent_round_id] })).rows[0];
+    if (r) return "busy";
+  }
+  const u = await db.execute({
+    sql: "UPDATE artifact_threads SET status='open', sent_round_id=NULL, updated_at=datetime('now') WHERE id=? AND (status='resolved' OR sent_round_id IN (SELECT id FROM artifact_rounds WHERE status IN ('done','failed','timed-out')))",
+    args: [threadId],
+  });
+  return Number(u.rowsAffected) === 1 ? "reopened" : "open";
+}
+
 export async function listThreads(db, artifactId) {
   const threads = (await db.execute({ sql: "SELECT * FROM artifact_threads WHERE artifact_id=? ORDER BY id", args: [artifactId] })).rows;
   const comments = (await db.execute({ sql: "SELECT c.* FROM artifact_comments c JOIN artifact_threads t ON t.id=c.thread_id WHERE t.artifact_id=? AND c.deleted_at IS NULL ORDER BY c.id", args: [artifactId] })).rows;

@@ -106,7 +106,7 @@ export async function previewRound(db, artifactId) {
  * Start a round or an Ask (owner only). `include` lists the thread ids the
  * owner ticked in the preview — nothing else is sent.
  */
-export async function startRound(db, { artifactId, actor, include, kind = "round", datasetsApproved = false, botId, targetThread = null, now = Date.now() }) {
+export async function startRound(db, { artifactId, actor, include, kind = "round", datasetsApproved = false, botId, targetThread = null, source = null, now = Date.now() }) {
   if (actor?.kind !== "session") throw err("forbidden", "only the owner starts rounds");
   if (!Array.isArray(include) || !include.length) throw err("bad_request", "pick at least one thread");
   const ids = [...new Set(include.map(Number))];
@@ -141,6 +141,9 @@ export async function startRound(db, { artifactId, actor, include, kind = "round
     for (const c of t.comments) if (c.author_kind === "owner") ownerText[Number(c.id)] = String(c.text);
   }
   snapshot.owner_text = ownerText;
+  // P6: where the round came from ("mention": the owner's @bot on one thread).
+  // A string key, so the numeric-id readers never mistake it for a thread.
+  if (source) snapshot.source = String(source).slice(0, 32);
   const deadline = now + (kind === "ask" ? LIMITS.askTimeoutMs : LIMITS.roundTimeoutMs);
   let roundId;
   try {

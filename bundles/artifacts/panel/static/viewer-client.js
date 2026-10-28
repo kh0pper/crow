@@ -49,7 +49,7 @@
   function isDoc() { return !!(S.art && S.art.type === "document"); }
   function authorName(c) { return c.author_kind === "owner" ? T.you : c.author_kind === "bot" ? (c.author_id || T.bot) : (c.author_id || c.author_kind); }
 
-  var S = { art: null, versions: [], threads: [], activeRound: null, n: null, viewer: null, poll: null, sheetOpen: false, commentOn: false, pending: null, lastRound: null, locked: [], editing: null };
+  var S = { art: null, versions: [], threads: [], activeRound: null, n: null, viewer: null, poll: null, sheetOpen: false, commentOn: false, pending: null, lastRound: null, locked: [], editing: null, busy: {} };
 
   // ── skeleton ────────────────────────────────────────────────────────────
   var title = el("h1", { class: "cv-title" });
@@ -144,6 +144,7 @@
   function refresh() {
     return api("GET", BASE).then(function (j) {
       S.art = j.artifact; S.versions = j.versions || []; S.threads = j.threads || []; S.activeRound = j.activeRound || null; S.locked = (j.lockedThreads || []).map(Number);
+      if (!S.activeRound) S.busy = {};   // the round that made a mention wait has ended
       if (S.n == null) S.n = (WANT_V && S.versions.some(function (v) { return Number(v.n) === WANT_V; })) ? WANT_V : Number(S.art.current_version);
       document.title = S.art.title;
       placeCommentBtn();
@@ -185,6 +186,8 @@
         el("div", { class: "cv-thread-head" }, [el("span", { class: "cv-num", text: String(num) }), el("span", { class: "cv-anchor", text: anchorText(t.anchor) + st })]),
       ]);
       (t.comments || []).forEach(function (c) { li.appendChild(commentNode(t, c)); });
+      var line = threadStatus(t);
+      if (line) li.appendChild(el("p", { class: "cv-tstatus", role: "status", text: line }));
       threadList.appendChild(li);
     });
     if (!shown().length) threadList.appendChild(el("li", { class: "cv-empty", text: isDoc() ? T.no_comments_doc : T.no_comments }));
@@ -195,6 +198,21 @@
     sendBtn.textContent = S.activeRound ? fmt(T.revising, { bot: (S.art && S.art.created_by_bot) || T.bot }) : k === 0 ? T.send_none : k === 1 ? T.send_1 : fmt(T.send_n, { n: k });
     if (k === 0 || S.activeRound) sendBtn.setAttribute("disabled", ""); else sendBtn.removeAttribute("disabled");
     pushPins();
+  }
+
+  /** P6: a thread's status line, from stored state only. The active round
+   *  holds this thread → "Sent to <bot>"; the server answered round_running
+   *  to an @bot here → "<bot> is already working…"; a finished round adds
+   *  nothing (the bot's reply is the status). Placed with textContent. */
+  function threadStatus(t) {
+    var r = S.activeRound;
+    if (r && r.kind === "round" && t.sent_round_id != null && Number(t.sent_round_id) === Number(r.id)) return fmt(T.sentTo, { bot: r.bot_id || T.bot });
+    var b = S.busy[Number(t.id)];
+    return b ? fmt(T.busy, { bot: b }) : "";
+  }
+  /** The comment routes' `mention` answer: remember a busy one for its thread. */
+  function noteMention(threadId, m) {
+    if (m && m.error === "round_running" && m.botId) S.busy[Number(threadId)] = m.botId;
   }
 
   /** One comment. The owner's OWN comments get Edit/Delete — hidden while a
@@ -338,7 +356,8 @@
       el("div", { class: "cv-row" }, [
         button(T.add_comment, function () {
           var a = Object.assign({}, S.pending, q && q.value ? { quote: q.value } : {});
-          api("POST", BASE + "/threads", { versionN: S.n, anchor: a, text: ta.value }).then(function () {
+          api("POST", BASE + "/threads", { versionN: S.n, anchor: a, text: ta.value }).then(function (j) {
+            noteMention(j && j.threadId, j && j.mention);
             S.pending = null; composeSlot.textContent = ""; return refresh();
           }, function (e) { banner(e.message, "warn"); });
         }, "cv-primary"),

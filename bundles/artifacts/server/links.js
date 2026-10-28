@@ -65,9 +65,11 @@ export async function verifyTarget(db, { artifactId, botId, threadId, botDef }) 
 
 /** The Library's Send (no chat in hand, round-2 B7): the most recent ACTIVE
  *  link that verifies, else null — the owner then chooses (new chat / board
- *  card). Never "whichever chat of the bot happens to be live". */
-export async function pickSendTarget(db, { artifactId, loadBotDef }) {
+ *  card). Never "whichever chat of the bot happens to be live". `botId`
+ *  (P6 mention round) considers only that bot's links. */
+export async function pickSendTarget(db, { artifactId, loadBotDef, botId = null }) {
   for (const l of await linkedThreads(db, artifactId)) {
+    if (botId != null && l.botId !== String(botId)) continue;   // P6 mention: only that bot's chats
     if (!(await verifyTarget(db, { artifactId, botId: l.botId, threadId: l.threadId, botDef: await loadBotDef(l.botId) }))) return { threadId: l.threadId, botId: l.botId };
   }
   return null;

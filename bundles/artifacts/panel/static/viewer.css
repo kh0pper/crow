@@ -70,6 +70,7 @@ body{background:#eef1f3}
 .cv-c{margin:6px 0 0;overflow-wrap:anywhere}
 .cv-chip{font-size:12px;padding:1px 6px;border-radius:999px;background:var(--teal-soft);color:var(--teal)}
 .cv-c.cv-contact .cv-chip{background:var(--warn-soft);color:var(--warn)}
+.cv-tstatus{margin:6px 0 0;color:var(--dim);font-size:13px;overflow-wrap:anywhere}
 .cv-empty{color:var(--dim)}
 .cv-compose{display:flex;flex-direction:column;gap:6px;margin-bottom:10px}
 .cv-compose textarea,.cv-compose input{width:100%;font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--sky);color:var(--ink)}
