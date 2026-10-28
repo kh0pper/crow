@@ -17,7 +17,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   leaseDir, readLease, acquire, beginCall, endCall, release,
-  takeOperator, handBack, heartbeat,
+  takeOperator, handBack, heartbeat, isFree,
 } from "../servers/shared/browser-lease.js";
 
 const MODULE = join(dirname(fileURLToPath(import.meta.url)), "..", "servers", "shared", "browser-lease.js");
@@ -274,6 +274,69 @@ test("a stale lock is broken only when its pid is dead", async () => {
   assert.equal(r.ok, true);
   assert.equal(asked, 999999);
   assert.equal(existsSync(join(dir, LOCK)), false, "our own lock is gone after the write");
+});
+
+test("a lock reused at the same inode between check and unlink is not broken", async () => {
+  const { dir } = tmp();
+  const lock = join(dir, LOCK);
+  const old = new Date(Date.now() - 10000);
+  writeFileSync(lock, "999999\n");
+  utimesSync(lock, old, old);
+  const ino = lstatSync(lock).ino;
+  let fired = 0;
+  // Another breaker removed the stale lock and its fresh lock landed on the same inode:
+  // simulated by rewriting the file in place (same dev/ino, new mtime/ctime).
+  const reuse = () => { if (fired++ === 0) writeFileSync(lock, "123456\n"); };
+  await assert.rejects(
+    acquire(dir, bot("s1"), { now: T0, ttlMs: 120000, isAlive: dead, lockTimeoutMs: 150, _onBeforeBreak: reuse }),
+    (e) => e.code === "ELEASELOCKED",
+  );
+  assert.equal(fired, 1);
+  assert.equal(lstatSync(lock).ino, ino);
+  assert.equal(readFileSync(lock, "utf8"), "123456\n", "the fresh lock survives");
+});
+
+test("forceBreakAfterMs breaks an old lock whatever its pid", async () => {
+  const { dir } = tmp();
+  const lock = join(dir, LOCK);
+  writeFileSync(lock, "1\n");
+  const tenAgo = new Date(Date.now() - 10000);
+  utimesSync(lock, tenAgo, tenAgo);
+  await assert.rejects(
+    acquire(dir, bot("s1"), { now: T0, ttlMs: 120000, isAlive: alive, forceBreakAfterMs: 30000, lockTimeoutMs: 150 }),
+    (e) => e.code === "ELEASELOCKED",
+    "under the force threshold a live pid still holds",
+  );
+  const fortyAgo = new Date(Date.now() - 40000);
+  utimesSync(lock, fortyAgo, fortyAgo);
+  const r = await acquire(dir, bot("s1"), { now: T0, ttlMs: 120000, isAlive: alive, forceBreakAfterMs: 30000 });
+  assert.equal(r.ok, true);
+  assert.equal(existsSync(lock), false);
+  // Every write function takes the option.
+  writeFileSync(lock, "1\n");
+  utimesSync(lock, fortyAgo, fortyAgo);
+  const l = await heartbeat(dir, { now: T0, isAlive: alive, forceBreakAfterMs: 30000 });
+  assert.equal(l.holder.sessionId, "s1");
+});
+
+test("endCall on an expired lease drops the call without renewing it", async () => {
+  const { dir } = tmp();
+  const h = bot("s1");
+  await acquire(dir, h, { now: T0, ttlMs: 120000 });
+  await beginCall(dir, h, { callId: "c1", pid: 5001, now: T0 });
+  const l = await endCall(dir, h, { callId: "c1", now: T0 + 200000 });
+  assert.deepEqual(l.inCall, []);
+  assert.equal(l.renewedAt, T0);
+  assert.equal(isFree(await readLease(dir), T0 + 200000), true);
+  assert.equal((await acquire(dir, bot("s2"), { now: T0 + 200001, ttlMs: 120000 })).ok, true);
+});
+
+test("release never frees an operator holding", async () => {
+  const { dir } = tmp();
+  await takeOperator(dir, { now: T0 });
+  assert.equal(await release(dir, "operator", { isAlive: alive, now: T0 + 1 }), "none");
+  assert.equal((await readLease(dir)).holder.kind, "operator");
+  assert.equal((await handBack(dir)).holder, null);
 });
 
 test("concurrent acquirers: exactly one wins", async () => {

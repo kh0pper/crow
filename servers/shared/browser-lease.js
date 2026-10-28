@@ -21,8 +21,22 @@
  *     5 s AND the pid in it is dead (unreadable content counts as dead).
  *
  * `gen` increases each time the lease passes to a different holder than the
- * one that last had it (kept as lastHolderKey); renewals, releases and the
- * same holder coming back do not bump it.
+ * one that last had it (kept as lastHolderKey). By design it does NOT bump on
+ * release, on renewal, or when the same holder takes it again after a release
+ * or an expiry: only a change of hands moves it.
+ *
+ * Two clocks: lease times (since, renewedAt, ttl and orphan checks) use the
+ * caller's `now` (injectable for tests); lock staleness uses the real clock
+ * (Date.now() against the lock file's mtime), since it is about real
+ * processes racing on real files.
+ *
+ * Lock-breaking options (every write function takes them in its options):
+ *   - isAlive(pid): liveness check (default process.kill(pid, 0) semantics);
+ *   - lockTimeoutMs: how long to wait for the lock before ELEASELOCKED (2 s);
+ *   - forceBreakAfterMs: a lock older than this is broken whatever its pid
+ *     (the gateway passes 30000). Pid liveness alone can be fooled: a pid can
+ *     be reused by an unrelated live process, or a bot can plant a lock naming
+ *     a live pid, so without this a lock may never be broken.
  */
 import {
   closeSync, constants as fs, fstatSync, lstatSync, mkdirSync, openSync,
@@ -167,17 +181,25 @@ function writeToDir(dfd, lease) {
 }
 
 /** Remove a lock older than LOCK_STALE_MS whose pid is dead. True when it is gone. */
-function breakStaleLock(dfd, isAlive) {
+function breakStaleLock(dfd, { isAlive, forceBreakAfterMs, onBeforeBreak }) {
   let st;
   try { st = lstatSync(at(dfd, LOCK_NAME)); } catch (e) { return e.code === "ENOENT"; }
   if (Date.now() - st.mtimeMs <= LOCK_STALE_MS) return false;
-  const text = st.isFile() ? readCapped(dfd, LOCK_NAME, 64) : null;
-  const m = text && /^(\d{1,10})\n?$/.exec(text);
-  const pid = m ? Number(m[1]) : null;
-  if (pid !== null && isPid(pid) && isAlive(pid)) return false;
+  const forced = forceBreakAfterMs != null && Date.now() - st.mtimeMs > forceBreakAfterMs;
+  if (!forced) {
+    // Pid liveness can be fooled by pid reuse (or a planted live pid): see forceBreakAfterMs.
+    const text = st.isFile() ? readCapped(dfd, LOCK_NAME, 64) : null;
+    const m = text && /^(\d{1,10})\n?$/.exec(text);
+    const pid = m ? Number(m[1]) : null;
+    if (pid !== null && isPid(pid) && isAlive(pid)) return false;
+  }
+  if (onBeforeBreak) onBeforeBreak();   // test seam: the race window between the check and the unlink
   try {
     const again = lstatSync(at(dfd, LOCK_NAME));
-    if (again.ino !== st.ino || again.dev !== st.dev) return false;   // replaced meanwhile: re-check next round
+    // Same file AND unchanged AND still stale: inodes are reused (ext4), so a
+    // fresh lock another breaker just created can carry the same dev/ino.
+    if (again.ino !== st.ino || again.dev !== st.dev || again.mtimeMs !== st.mtimeMs
+        || again.ctimeMs !== st.ctimeMs || Date.now() - again.mtimeMs <= LOCK_STALE_MS) return false;
     unlinkSync(at(dfd, LOCK_NAME));
   } catch (e) { if (e.code !== "ENOENT") throw e; }
   return true;
@@ -190,7 +212,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * (or undefined to leave the file alone) and the result to return.
  */
 async function withLock(dir, opts, fn) {
-  const isAlive = opts.isAlive || defaultIsAlive;
+  const breakOpts = {
+    isAlive: opts.isAlive || defaultIsAlive,
+    forceBreakAfterMs: opts.forceBreakAfterMs ?? null,
+    onBeforeBreak: opts._onBeforeBreak || null,
+  };
   const lockTimeoutMs = opts.lockTimeoutMs ?? LOCK_TIMEOUT_MS;
   const dfd = openDir(dir, { create: true });
   try {
@@ -203,13 +229,17 @@ async function withLock(dir, opts, fn) {
           writeSync(fd, process.pid + "\n");
           const st = fstatSync(fd);
           lockId = { dev: st.dev, ino: st.ino };
+        } catch (e) {
+          // Created but not usable: remove our own lock before rethrowing.
+          try { unlinkSync(at(dfd, LOCK_NAME)); } catch { /* gone */ }
+          e.lockCreated = true;
+          throw e;
         } finally { closeSync(fd); }
         break;
       } catch (e) {
-        if (lockId) throw e;
-        if (e.code !== "EEXIST") throw e;
+        if (e.lockCreated || e.code !== "EEXIST") throw e;
       }
-      if (breakStaleLock(dfd, isAlive)) continue;
+      if (breakStaleLock(dfd, breakOpts)) continue;
       if (Date.now() >= deadline) {
         const err = new Error("the browser lease is locked");
         err.code = "ELEASELOCKED";
@@ -324,7 +354,8 @@ export async function endCall(dir, holder, { callId, now = Date.now(), ...opts }
       const lease = freeRecord(cur);
       return { write: lease, result: lease };
     }
-    const lease = { ...cur, inCall, renewedAt: Math.max(cur.renewedAt, now) };
+    // Renew only a live holding; an expired lease just loses the call.
+    const lease = isHeld(cur, now) ? { ...cur, inCall, renewedAt: Math.max(cur.renewedAt, now) } : { ...cur, inCall };
     return { write: lease, result: lease };
   });
 }
@@ -336,7 +367,8 @@ export async function endCall(dir, holder, { callId, now = Date.now(), ...opts }
  */
 export async function release(dir, sessionId, { orphanCapMs = ORPHAN_CAP_MS, isAlive = defaultIsAlive, now = Date.now(), ...opts } = {}) {
   return withLock(dir, { ...opts, isAlive }, (cur) => {
-    if (!cur || !cur.holder || cur.holder.sessionId !== sessionId) return { result: "none" };
+    // Never frees an operator holding: the operator's path is handBack only.
+    if (!cur || !cur.holder || cur.holder.kind === "operator" || cur.holder.sessionId !== sessionId) return { result: "none" };
     const live = cur.inCall.filter((c) => isAlive(c.pid));
     if (live.length > 0 && now - cur.renewedAt <= orphanCapMs) {
       return { write: { ...cur, inCall: live, releaseOnCallEnd: true }, result: "deferred" };
