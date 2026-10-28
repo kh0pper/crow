@@ -24,13 +24,7 @@ import { slugify } from "../shared/slugify.js";
 import { createProjectSpace, updateProjectSpaceMeta } from "../shared/project-spaces.js";
 import { parseLaunchSpec, canonicalSpecText, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { resolveDatasetPath } from "../shared/sqlite-datasets.js";
-
-const SOURCE_TYPES = [
-  "web_article", "academic_paper", "book", "interview",
-  "web_search", "web_scrape", "api_data", "document",
-  "video", "podcast", "social_media", "government_doc",
-  "dataset", "other",
-];
+import { SOURCE_TYPES } from "./source-types.js";
 
 // publication_date is free-form TEXT ("1993", "2005-07", "2023-05-14",
 // occasionally prose like "May 14, 2023"). new Date() parses the ISO

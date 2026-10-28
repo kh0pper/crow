@@ -24,6 +24,7 @@ import { setReceiveWired } from "./receive-health.js";
 import { wasProcessed, recordProcessedEvent } from "./processed-events.js";
 import { sanitizeDisplayName } from "./display-name.js";
 import { emitOrQueue } from "../shared/sync-emit.js";
+import { insertSharedSource } from "./shared-source-insert.js";
 import { PROFILE_SUBTYPE, handleProfileMessage, applyPeerProfile, readLocalProfile, ensurePeerProfileColumns, isEstablishedContact } from "./peer-profile.js";
 import { installBirdAvatarHooks } from "./profile-avatar.js";
 import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
@@ -924,24 +925,9 @@ export async function initSharingRuntime(managers, helpers) {
             project_id: null,
           }).catch(() => {});
         } else if (payload.share_type === "source") {
-          // S4: cap peer-controlled title at 1000 chars — title is FTS5-indexed
-          // (research_sources_fts trigger in init-db.js) and is peer-supplied.
-          const rawTitle = payload.payload.title || "Shared source";
-          const cappedTitle = typeof rawTitle === "string" && rawTitle.length > 1000
-            ? rawTitle.slice(0, 1000)
-            : rawTitle;
-          const result = await db.execute({
-            sql: `INSERT INTO research_sources (project_id, title, url, source_type, citation, notes)
-                  VALUES (NULL, ?, ?, ?, ?, ?)`,
-            args: [
-              cappedTitle,
-              payload.payload.url || "",
-              payload.payload.source_type || "other",
-              payload.payload.citation || "",
-              payload.payload.notes || "",
-            ],
-          });
-          importedItemId = Number(result.lastInsertRowid);
+          // A peer-shared reference: stored unverified with no fetch facts, so it is never
+          // citable here until the user opens it (S4 title cap lives in insertSharedSource).
+          importedItemId = await insertSharedSource(db, payload.payload);
         } else if (payload.share_type === "note") {
           const result = await db.execute({
             sql: `INSERT INTO research_notes (project_id, content)

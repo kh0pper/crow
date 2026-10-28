@@ -182,7 +182,28 @@ export const EXCLUDED_COLUMNS = {
   ramble_trades: ["lamport_ts"],
   ramble_cells: ["lamport_ts"],
   ramble_wallet: ["lamport_ts"],
+  // Fetch-before-cite: a note's provenance (fetched / snippet / derived), whether its quote was
+  // found on the fetched page, and where. Each is a judgment the instance that fetched the page
+  // made about ITS copy, so it stays local in v1; replicating it needs a fleet-version gate (an
+  // un-upgraded peer would write it into a column it lacks, or drop it on re-emit).
+  research_notes: ["provenance", "quote_found", "locator"],
 };
+
+// Columns dropped from an INBOUND row in _applyEntry: after the signature check (the signature
+// covers the row exactly as sent, so stripping first would fail verification) and before any
+// dispatch or _checkConflict (so a peer's copy of a local-only column never manufactures a
+// conflict row). An un-upgraded or hostile peer may still send these keys.
+export const INBOUND_DROPPED_COLUMNS = {
+  research_notes: ["provenance", "quote_found", "locator"],
+};
+
+function dropInboundColumns(table, row) {
+  const drop = INBOUND_DROPPED_COLUMNS[table];
+  if (!drop || !row || typeof row !== "object") return row;
+  const copy = { ...row };
+  for (const col of drop) delete copy[col];
+  return copy;
+}
 
 // Per-table outbound mutations applied right after the EXCLUDED_COLUMNS strip.
 // Use for cases where the local representation differs from the synced
@@ -2524,7 +2545,7 @@ export class InstanceSyncManager {
    * Apply a single sync entry from a remote instance.
    */
   async _applyEntry(remoteInstanceId, entry) {
-    const { table, op, row, lamport_ts, instance_id, signature } = entry;
+    const { table, op, row: signedRow, lamport_ts, instance_id, signature } = entry;
 
     // Validate table
     if (!SYNCED_TABLES.includes(table)) return;
@@ -2532,10 +2553,10 @@ export class InstanceSyncManager {
     // Defense in depth: drop inbound rows that fail the local syncability check.
     // A peer claiming a non-allowlisted dashboard_settings key (or a row with
     // instance_id != NULL) is either misconfigured or malicious — either way we don't apply.
-    if (!shouldSyncRow(table, row)) return;
+    if (!shouldSyncRow(table, signedRow)) return;
 
     // Verify signature
-    const entryWithoutSig = { table, op, row, lamport_ts, instance_id };
+    const entryWithoutSig = { table, op, row: signedRow, lamport_ts, instance_id };
     const payload = JSON.stringify(entryWithoutSig);
 
     // Look up the instance's public key
@@ -2547,6 +2568,9 @@ export class InstanceSyncManager {
       console.warn(`[instance-sync] Signature verification failed for entry from ${remoteInstanceId}`);
       return;
     }
+
+    // Verified: from here on every handler sees the row minus its local-only columns.
+    const row = dropInboundColumns(table, signedRow);
 
     // Advance local counter
     await this._advanceCounter(lamport_ts);
