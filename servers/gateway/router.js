@@ -498,7 +498,7 @@ Session End Protocol:
 
 1. Project Creation — Use crow_projects action: "create_project" with name, description, and type ('research' or 'data_connector')
 2. Data Backends — Register external MCP servers with action: "register_backend". List with "list_backends", inspect with "backend_schema".
-3. Source Management — Add sources with action: "add_source" (URL, title, authors, date, type). Auto-generates APA citations. Link to backends with backend_id.
+3. Source Management — Add sources with action: "add_source" (URL, title, authors, date, type). Auto-generates APA citations. Link to backends with backend_id. Crow fetches the URL first; only fetched sources are citable. Use fetch_source to refresh.
 4. Notes — Attach with action: "add_note". Types: summary, quote, analysis, methodology, finding, question.
 5. Bibliography — Generate with action: "generate_bibliography" (APA format, filterable by project).
 6. Search — Use action: "search_sources" or "search_notes" for full-text search across all project data.`,
