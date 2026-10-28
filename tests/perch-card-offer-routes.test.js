@@ -495,3 +495,33 @@ test("reading a chat's offers never makes a tasks.db on an install without one",
     renameSync(TASKS + ".away", TASKS);
   }
 });
+
+test("a chat that already has a card keeps it: accepting makes the card and does not re-link", async () => {
+  const cardA = seedCard("hand-made-a", "card A");
+  const c = raw();
+  c.prepare("INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, kind, card_id, status) VALUES ('b1','perch','perchlive-has','perch-live',?, 'active')").run(cardA);
+  c.close();
+  const id = seedOffer({ thread: "perchlive-has" });
+  const r = await decide(id, true);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const made = cardsTagged(id);
+  assert.equal(made.length, 1);
+  assert.notEqual(made[0].id, cardA);
+  assert.equal(r.body.attached, false);
+  assert.deepEqual(calls.attach, []);
+  assert.equal(q("SELECT card_id FROM bot_sessions WHERE gateway_thread_id='perchlive-has'")[0].card_id, cardA);
+  assert.equal(offerRow(id).card_id, made[0].id);
+});
+
+test("offerCard on a store without card_offers is not_migrated (503)", async () => {
+  const { offerCard } = svc;
+  const fakeDb = {
+    async execute(a) {
+      const sql = String(a.sql || a);
+      if (/INSERT INTO card_offers/.test(sql)) throw new Error("SQLITE_ERROR: no such table: card_offers");
+      return createDbClient().execute(a);
+    },
+  };
+  await assert.rejects(() => offerCard(fakeDb, { botId: "b1", threadId: "perchlive-x", title: "t" }),
+    (e) => e.code === "not_migrated" && e.http === 503);
+});

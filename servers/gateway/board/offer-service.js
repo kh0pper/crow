@@ -134,13 +134,19 @@ export async function offerCard(db, { botId, threadId, title }) {
     throw e;
   }
   const projectId = Number(row.project_id);
-  const ins = await db.execute({
+  let ins;
+  try {
+    ins = await db.execute({
     sql: `INSERT INTO card_offers (bot_id, thread_id, title, project_id)
           SELECT ?, ?, ?, ?
            WHERE NOT EXISTS (SELECT 1 FROM card_offers WHERE thread_id=? AND title=? AND status='pending')
              AND (SELECT COUNT(*) FROM card_offers WHERE thread_id=? AND status='pending') < ?`,
     args: [String(botId), threadId, clean, projectId, threadId, clean, threadId, MAX_PENDING_OFFERS],
-  });
+    });
+  } catch (e) {
+    if (isNoTable(e)) throw fail("Card offers are not available until the store is migrated", "not_migrated", 503);
+    throw e;
+  }
   if (ins.rowsAffected === 1) return { offerId: Number(ins.lastInsertRowid), projectId, duplicate: false };
   const dup = (await db.execute({
     sql: "SELECT id, project_id FROM card_offers WHERE thread_id=? AND title=? AND status='pending' ORDER BY id LIMIT 1",

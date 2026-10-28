@@ -1015,8 +1015,9 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
   //      over: 409 already_decided, nothing created);
   //   2. createTaskForBot on the bot's own board, tagged crow-offer-<id>;
   //   3. settle card_id;
-  //   4. link the chat (checkCardFree + attachCard writes bot_sessions.card_id) when the session
-  //      can be found; otherwise skip it — the card is made either way.
+  //   4. link the chat (checkCardFree + attachCard writes bot_sessions.card_id) only when the chat
+  //      has no card yet and the session is attachable right now; otherwise skip it — the card is
+  //      made either way and the chat shows the card note (there is no link-on-wake).
   // A failure in 2 with no card made puts the offer back to pending. A failure once a card exists
   // never resets the offer (C8): recoverOffer settles it on the next read or sweep. Accepting
   // starts no turn and sends no message.
@@ -1075,13 +1076,15 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
 
       let attached = false;
       try {
+        // A chat that already has a card keeps it: accepting an offer never re-links the chat.
+        if ((await threadCard(db, String(offer.thread_id))) != null) throw Object.assign(new Error("chat already has a card"), { code: "has_card" });
         const eng = resolveEngine();
         await eng.checkCardFree(cardId, { excludeSessionId: String(offer.thread_id) });
         await eng.attachCard(String(offer.thread_id), cardId);
         attached = true;
       } catch (e) {
         const code = e && e.code;
-        if (code !== "no_such_session" && code !== "session_stopped") {
+        if (code !== "no_such_session" && code !== "session_stopped" && code !== "has_card") {
           console.warn(`[perch-interactive-api] offer ${offerId}: card ${cardId} made, chat not linked:`, (e && e.message) || e);
         }
       }

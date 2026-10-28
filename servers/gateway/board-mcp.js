@@ -591,6 +591,7 @@ export function createBoardMcpServer(options = {}) {
         r = await offerCard(cdb, { botId: actor.id, threadId: actor.thread.id, title });
       } catch (e) {
         if (e && e.code === "no_board") throw fail("This bot has no board to put a card on", "no_board", 409);
+        if (e && e.code === "not_migrated") throw fail("Card offers are not available until the store is migrated", "not_migrated", 503);
         throw e;
       }
       const p = (await cdb.execute({ sql: "SELECT name FROM project_spaces WHERE id=?", args: [r.projectId] })).rows[0];

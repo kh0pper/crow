@@ -165,3 +165,15 @@ test("readers tolerate a store without card_offers", async () => {
     assert.deepEqual(await svc.claimOfferNotes(bare, "x"), { lines: [], claims: [] });
   } finally { bare.close(); }
 });
+
+test("board_offer_card on a store without card_offers is a clean error, not a crash", async () => {
+  const c = raw(); c.exec("ALTER TABLE card_offers RENAME TO card_offers_hold"); c.close();
+  try {
+    await assert.rejects(svc.offerCard(cdb, { botId: "b1", threadId: "perchlive-m", title: "T" }), (e) => e.code === "not_migrated" && e.http === 503);
+    const r = await call({ title: "T" }, extra("b1", { id: "perchlive-m", gateway: "perch" }));
+    assert.equal(r.isError, true);
+    assert.match(text(r), /not available until the store is migrated/);
+  } finally {
+    const d = raw(); d.exec("ALTER TABLE card_offers_hold RENAME TO card_offers"); d.close();
+  }
+});

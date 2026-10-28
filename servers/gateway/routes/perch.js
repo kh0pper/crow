@@ -73,6 +73,7 @@ import { CROW_VOICE_BOT_ID } from "../../shared/voice-bot.js";
 import { maskDeep } from "../../shared/secret-mask.js";
 import { activeProjects, parseScope, projectOfItems } from "../../shared/shell-items.js";
 
+/* Note: stripOfferNotes would also hide an identical note-shaped prefix the operator typed by hand (accepted). */
 /**
  * A user message as the operator typed it: without the [Dates] line the engine appended (perch-interactive.js),
  * and without the leading card-offer note line(s) the message route prefixed (offer-service.js stripOfferNotes;
