@@ -47,6 +47,18 @@ test("research-pipeline teaches the loop", () => {
   assert.ok(!pipeline.includes("Check if the URL is still accessible"));
 });
 
+test("research-pipeline covers every crow_add_source outcome and never says to fix a quote", () => {
+  for (const line of ["CITABLE: Crow fetched this page.", "NOT citable: Crow could not open this page", "Source already exists (id:",
+    "NOT citable yet: this Crow is waiting for a schema upgrade", "Not a web page", "no text Crow can read"]) {
+    assert.ok(pipeline.includes(line), `covers ${line}`);
+  }
+  // A quote note cannot be removed, so "fix the wording" would leave the source unverifiable.
+  assert.ok(!/fix the wording/i.test(pipeline));
+  assert.ok(pipeline.includes("character for character"));
+  assert.ok(pipeline.includes("tell the owner"));
+  assert.ok(pipeline.includes("1,200 characters"));
+});
+
 test("web-search no longer turns results into sources", () => {
   assert.ok(!webSearch.includes("Every valuable search result should be documented"));
   assert.ok(webSearch.includes("leads, not sources"));
@@ -59,6 +71,9 @@ test("the crow.md seed says cite only fetched sources", () => {
   assert.ok(seed.includes("2. **Cite only what Crow fetched**: every claim rests on a page Crow opened, or says it is derived."));
   assert.ok(!seed.includes("always include APA citations"));
   assert.ok(!seed.includes("Every external source gets an APA citation"));
+  assert.ok(!seed.includes("Every external source gets a citation — no exceptions"));
+  assert.ok(!seed.includes("Verify sources before marking as verified"));
+  assert.ok(seed.includes("- Only \\`crow_verify_source\\` marks a source verified; never call a source verified unless it said so"));
   assert.ok(seed.includes('| "research", "find papers", "cite" | research-pipeline | crow-projects |\n'));
 });
 
