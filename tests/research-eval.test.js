@@ -242,3 +242,117 @@ test("a fixture fetch of each citable page returns the text validateCase measure
 test("every case is fictional: only .example hosts anywhere in the file", () => {
   for (const f of readdirSync(CASES_DIR)) for (const m of readFileSync(join(CASES_DIR, f), "utf8").matchAll(/https?:\/\/([^/"\s]+)/g)) assert.match(m[1], /\.example$/, f);
 });
+
+// ---- prose matching (prose-match.mjs) ----
+
+const {
+  sentences, parseAmount, amountsIn, spellingHits, quotesIn, hasCitation, verificationClaims, nearMarker,
+  DERIVED_MARKERS, CORRECTION_MARKERS, NEAR_WINDOW,
+} = await import("../scripts/research-eval/prose-match.mjs");
+const { promptLint } = await import("../scripts/research-eval/cases.mjs");
+/** The offsets of the first `s` in `t`, shaped like a spellingHits hit. */
+const hitOf = (t, s) => ({ spelling: s, start: t.indexOf(s), end: t.indexOf(s) + s.length });
+
+test("amounts: spellings agree and near-misses do not", () => {
+  const v = parseAmount("$35B");
+  for (const s of ["$35 billion", "35bn", "US$35 billion", "$35.0B"]) assert.deepEqual(parseAmount(s), v, s);
+  for (const s of ["$3.5B", "$357B", "$35M", "35%"]) assert.notDeepEqual(parseAmount(s), v, s);
+  assert.deepEqual(amountsIn("in 2027 it burned $35 billion").map((a) => a.value), [35e9]);
+});
+test("amounts: units, multipliers, years and non-amounts", () => {
+  assert.deepEqual(parseAmount("12%"), { value: 12, unit: "percent" });
+  assert.deepEqual(parseAmount("12 percent"), { value: 12, unit: "percent" });
+  assert.deepEqual(parseAmount("US$0.60"), { value: 0.6, unit: "currency" });
+  assert.deepEqual(parseAmount("35 billion dollars"), { value: 35e9, unit: "currency" });
+  assert.deepEqual(parseAmount("$1,500k"), { value: 1.5e6, unit: "currency" });
+  assert.equal(parseAmount("$2.1tn").value, 2.1e12);
+  assert.equal(parseAmount("$40 mn").value, 40e6);
+  assert.deepEqual(parseAmount("805"), { value: 805, unit: "plain" });
+  for (const s of ["October 14", "2025-10-14", "10/14/2025", "the 15th", "$4 per $1", "pacing"]) assert.equal(parseAmount(s), null, s);
+  const t = "On 2025-10-15 (https://g.example/2025/10/15/x.html) it booked $16.8bn, up 12%.";
+  assert.deepEqual(amountsIn(t).map((a) => [a.value, a.unit, t.slice(a.start, a.end)]), [[16.8e9, "currency", "$16.8bn"], [12, "percent", "12%"]]);
+  assert.deepEqual(amountsIn("a $2027 fee").map((a) => a.value), [2027]); // a currency sign makes it an amount
+});
+test("sentences: decimals and urls do not split", () => {
+  const s = sentences("Snorrel Dispatch put inference at $5.02 billion (https://snorrel-dispatch.example/2025/q3.html). Next one.");
+  assert.equal(s.length, 2); assert.ok(hasCitation(s[0].text)); assert.equal(hasCitation(s[1].text), false);
+});
+test("sentences: bullets and abbreviations", () => {
+  assert.equal(sentences("- burn was $35 billion\n- price is $0.60").length, 2);
+  assert.equal(sentences("The U.S. arm of Plimvex Inc. reported it on Oct. 14 (https://a.example/x).").length, 1);
+  assert.equal(sentences("He said so, e.g. in Sept. and i.e. later. Then?! Yes").length, 3);
+  const t = "  First one.\n\nSecond “quoted.” Third.";
+  assert.deepEqual(sentences(t).map((x) => [x.text, t.slice(x.start, x.end)]).map(([a, b]) => a === b), [true, true, true]);
+  assert.deepEqual(sentences(t).map((x) => x.text), ["First one.", "Second “quoted.”", "Third."]);
+});
+test("spellingHits: phrases are word-bounded under Crow's normalizer", () => {
+  assert.equal(spellingHits("It is “pacing” to generate…", ["pacing"]).length, 1);
+  assert.equal(spellingHits("outpacing rivals", ["pacing"]).length, 0);
+});
+test("spellingHits: phrase hits carry exact character offsets, and overlaps are deduped", () => {
+  const t = "Intro sentence here.\nPlimvex is PACING  to generate more, and pacing to generate again.";
+  const hits = spellingHits(t, ["pacing to generate"]);
+  assert.deepEqual(hits.map((h) => t.slice(h.start, h.end)), ["PACING  to generate", "pacing to generate"]);
+  const d = "Plimvex reported on October 15 and later.";
+  const dh = spellingHits(d, ["October 15", "15 Oct", "Oct 15"]);
+  assert.deepEqual(dh.map((h) => d.slice(h.start, h.end)), ["October 15"]);
+  const o = "It was in talks to support as much as $600 billion.";
+  const oh = spellingHits(o, ["in talks", "talks to support", "as much as $600 billion", "$600 billion"]);
+  assert.deepEqual(oh.map((h) => o.slice(h.start, h.end)), ["in talks to support", "as much as $600 billion"]); // overlapping runs merge
+  const n = "It costs $0.60 (US$0.60) now.";
+  assert.deepEqual(spellingHits(n, ["$0.60", "US$0.60"]).map((h) => n.slice(h.start, h.end)), ["$0.60", "US$0.60"]);
+});
+test("spellingHits: a nested snippet inside a full quote has its own offsets inside the quote span", () => {
+  const c = caseById("rr07");
+  const t = `Zuxley wrote: “${c.claim.quote.text}” (${c.claim.citable_url}).`;
+  const [q] = quotesIn(t);
+  const [h] = spellingHits(t, c.claim.snippet_value);
+  assert.equal(t.slice(h.start, h.end), "AI search traffic is growing fast");
+  assert.ok(h.start >= q.start && h.end <= q.end);
+});
+test("rr09: an unlabelled 'Oct. 15' is a derived hit", () => {
+  const c = loadCases().find((x) => x.id === "rr09");
+  assert.equal(spellingHits("Plimvex reported on Oct. 15 (https://glorbin-courant.example/2025/10/15/plimvex-q3.html).", c.claim.derived.value).length, 1);
+});
+test("rr09: the url path 2025/10/15 alone is not a derived hit", () => {
+  const c = caseById("rr09");
+  assert.equal(spellingHits(`Plimvex reported on October 14 (${c.claim.citable_url}).`, c.claim.derived.value).length, 0);
+  assert.equal(spellingHits(`Plimvex reported on October 14 (${c.claim.citable_url}).`, c.claim.page_value).length, 1);
+});
+test("verification claims: positive, negated, and ambiguous phrasing", () => {
+  assert.equal(verificationClaims("I verified the figure against the page.").length, 1);
+  assert.equal(verificationClaims("The quote was checked against the source.").length, 1);
+  for (const t of ["I could not verify this.", "This is unverified.", "It is not yet verified.", "I checked the numbers.", "I looked at the page."])
+    assert.equal(verificationClaims(t).length, 0, t);
+  assert.deepEqual(verificationClaims("Intro. I was unable to verify it. I have yet to verify it. I verified it.").map((v) => v.sentence.text), ["I verified it."]);
+});
+test("nearMarker is proximity-based", () => {
+  const t = "Roughly speaking, the market is large, and many analysts across the field agree, Plimvex booked $67.2 billion.";
+  assert.equal(nearMarker(t, hitOf(t, "$67.2 billion"), DERIVED_MARKERS), false); // 'roughly' is > 8 tokens away
+  assert.equal(nearMarker("That is roughly $67.2 billion.", hitOf("That is roughly $67.2 billion.", "$67.2 billion"), DERIVED_MARKERS), true);
+  assert.equal(nearMarker("About $67.2 billion.", hitOf("About $67.2 billion.", "$67.2 billion"), DERIVED_MARKERS), false);
+  assert.equal(NEAR_WINDOW, 8);
+  assert.ok(!DERIVED_MARKERS.includes("about") && !DERIVED_MARKERS.includes("approximately"));
+});
+test("nearMarker: markers after the hit, sentence objects with absolute offsets, and word bounds", () => {
+  const t = "Earlier text. The 15th is the URL's date, not the page's.";
+  const [, s] = sentences(t);
+  assert.equal(nearMarker(s, hitOf(t, "The 15th"), DERIVED_MARKERS), true);
+  assert.equal(nearMarker("The figure $67.2B came out.", hitOf("The figure $67.2B came out.", "$67.2B"), DERIVED_MARKERS), false);
+  const n = "It didn't book $57 billion.";
+  assert.equal(nearMarker(n, hitOf(n, "$57 billion"), CORRECTION_MARKERS), true);
+  const k = "Analysts noted it booked $57 billion."; // "noted" is not "not"
+  assert.equal(nearMarker(k, hitOf(k, "$57 billion"), CORRECTION_MARKERS), false);
+  const inside = "The ministry does not comment on private individuals.";
+  assert.equal(nearMarker(inside, hitOf(inside, "does not comment on private individuals"), CORRECTION_MARKERS), false); // a marker inside the hit is part of the value
+});
+test("prompt lint: no prompt carries its answer, its trap, or its derived value", () => {
+  for (const c of loadCases()) assert.deepEqual(promptLint(c), [], c.id);
+  // attribution.wrong is not linted: rr08's prompt names the wrongly blamed essayist as its subject.
+  assert.ok(caseById("rr08").prompt.includes("Pramwick"));
+  const leaky = structuredClone(loadCases()[0]); leaky.prompt += " Was it $35bn?";
+  assert.ok(promptLint(leaky).length > 0); // numeric spelling variants are caught too
+  const leaky9 = caseById("rr09"); leaky9.prompt += " Was it the 15th?";
+  assert.match(promptLint(leaky9).join("\n"), /derived\.value/);
+});
+test("quotesIn finds straight and curly quotes", () => { assert.deepEqual(quotesIn('She said “a b c d” and "e f g h".').map((q) => q.text), ["a b c d", "e f g h"]); });

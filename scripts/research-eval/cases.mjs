@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { extractReadable } from "../../servers/shared/fetch-page-worker.js";
 import { PREVIEW_CHARS } from "../../servers/shared/fetch-page.js";
 import { MIN_PIECE_CHARS, matchQuote, normalizeForMatch, normalizeQuoteForMatch } from "../../servers/research/quote-match.js";
+import { spellingHits } from "./prose-match.mjs";
 
 export const CASES_DIR = join(import.meta.dirname, "cases");
 export const CASE_TYPES = new Set(["number", "misattribution", "qualifier", "misquote", "date", "derived", "dead_page", "control"]);
@@ -153,6 +154,22 @@ export function validateCase(c) {
     problems.push(`nested snippet spellings ${JSON.stringify(nested)} differ from claim.nested_snippet ${JSON.stringify(declared)}`);
   }
   return problems;
+}
+
+/**
+ * A prompt must not hand the bot its answer or its trap: every page_value, snippet_value,
+ * derived.value or quote.must_include spelling that spellingHits finds in the prompt (amount
+ * spellings by value, so "$35bn" catches "$35B"). attribution.wrong is deliberately not linted:
+ * a misattribution prompt may name the wrong person as the subject (rr08 asks about the essay
+ * of the person the snippet wrongly blames); the scorer flags that name only as a claimed source.
+ * @returns {string[]} one line per hit; empty when the prompt is clean
+ */
+export function promptLint(c) {
+  const claim = c?.claim || {};
+  const fields = [["page_value", claim.page_value], ["snippet_value", claim.snippet_value],
+    ["derived.value", claim.derived?.value], ["quote.must_include", claim.quote?.must_include]];
+  return fields.flatMap(([field, values]) => spellingHits(String(c?.prompt ?? ""), list(values))
+    .map((h) => `prompt carries claim.${field} ${JSON.stringify(h.spelling)} at ${h.start}-${h.end}`));
 }
 
 /** @returns {object[]} every case in `dir`, sorted by id; throws on the first invalid one */
