@@ -9,7 +9,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir, networkInterfaces } from "node:os";
 import http from "node:http";
@@ -22,6 +22,7 @@ const ORIGINAL_ENV = [
   "CROW_DB_PATH=./data/crow.db",
   `NOTION_TOKEN=${SECRET}`,
   "SOME_OTHER_SETTING=keep me",
+  'CROW_GATEWAY_URL=https://x"><script>alert(1)</script>',
   "",
 ].join("\n");
 
@@ -141,6 +142,8 @@ test("GET with the token never carries a saved secret", async () => {
   assert.match(res.body, /id="state-SLACK_BOT_TOKEN">Not set</);
   assert.equal(res.headers["referrer-policy"], "no-referrer");
   assert.ok(!/<script[^>]+src=/i.test(res.body), "no external scripts");
+  assert.ok(!res.body.includes("<script>alert(1)"), "a saved non-secret value is escaped");
+  assert.ok(res.body.includes("&quot;&gt;&lt;script&gt;"), "and still shown");
 });
 
 test("a bad Host is refused (DNS rebinding)", async () => {
@@ -203,7 +206,7 @@ test("an unknown key is refused, and nothing is written", async () => {
 
 test("a newline, NUL or oversized value is refused", async () => {
   const before = readFileSync(envPath, "utf8");
-  for (const val of ["xoxb-a\nNODE_OPTIONS=--require /tmp/x.js", "xoxb-a\rB=1", "xoxb-a\0", "a".repeat(4097), 42]) {
+  for (const val of ["xoxb-a\nNODE_OPTIONS=--require /tmp/x.js", "xoxb-a\rB=1", "xoxb-a\0", "xoxb-a\x1b[2J", "xoxb-a\u2028b", "xoxb-a\x01", "a".repeat(4097), 42]) {
     const res = await save({ SLACK_BOT_TOKEN: val });
     assert.equal(res.status, 400);
   }
@@ -225,6 +228,7 @@ test("a good save writes only that key, keeps other lines, and empty keeps the o
   assert.equal(json.ok, true);
   assert.deepEqual(json.saved, ["SLACK_BOT_TOKEN"]);
   assert.equal(readFileSync(envPath, "utf8"), ORIGINAL_ENV + "SLACK_BOT_TOKEN=xoxb-good-123\n");
+  assert.equal(statSync(envPath).mode & 0o777, 0o600, ".env is owner-only after a save");
 
   // Replacing an existing key changes that line in place.
   const res2 = await save({ NOTION_TOKEN: "ntn_new" }, { Origin: `http://localhost:${port}` });

@@ -11,7 +11,7 @@
  */
 
 import { createServer } from "http";
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, chmodSync, renameSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { execSync, spawn } from "child_process";
@@ -114,7 +114,11 @@ function saveEnv(updates) {
   for (const [key, val] of pending) {
     if (!written.has(key)) out.push(`${key}=${val}`);
   }
-  writeFileSync(ENV_PATH, out.join("\n") + "\n");
+  // owner-only, and atomic: a crash mid-write never leaves a half-written .env
+  const tmp = `${ENV_PATH}.wizard-${process.pid}.tmp`;
+  writeFileSync(tmp, out.join("\n") + "\n", { mode: 0o600 });
+  chmodSync(tmp, 0o600);
+  renameSync(tmp, ENV_PATH);
 }
 
 // ── HTML UI ──────────────────────────────────────────────────────
@@ -837,7 +841,8 @@ function validateSave(data) {
   for (const [key, raw] of Object.entries(data)) {
     if (!ALLOWED_KEYS.has(key)) return { error: `Unknown setting: ${key.slice(0, 64)}` };
     if (typeof raw !== "string") return { error: `${key} must be text.` };
-    if (/[\r\n\0]/.test(raw)) return { error: `${key} must be a single line.` };
+    // one printable line: no line breaks, NUL or other control characters (they can garble .env and terminals)
+    if (/[\x00-\x1f\x7f\u2028\u2029]/.test(raw)) return { error: `${key} must be a single line of plain text.` };
     if (raw.length > MAX_VALUE_CHARS) return { error: `${key} is too long.` };
     const val = raw.trim();
     if (val) updates[key] = val; // empty keeps the saved value
