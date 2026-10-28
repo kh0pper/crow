@@ -48,7 +48,7 @@ function needsSection(data, project, lang) {
   // A card's chip names its kind of ask; a waiting session (or a card with none) has no chip.
   const rows = data.needsYou.map((c) => {
     const chip = c.waiting ? `<span class="ph-kind ph-kind--waiting">${escapeHtml(t("shell.waitingChip", lang))}</span>` : KIND_KEY[c.kind] ? `<span class="ph-kind ph-kind--${escapeHtml(c.kind)}">${escapeHtml(t(KIND_KEY[c.kind], lang))}</span>` : "";
-    return `<li><a class="ph-row" href="${escapeHtml(c.href)}"${c.waiting ? ' data-turbo-prefetch="false"' : ""}>${chip}<span class="ph-row-title">${escapeHtml(c.title || t("shell.untitledSession", lang))}</span></a></li>`;
+    return `<li><a class="ph-row" href="${escapeHtml(c.href)}"${c.waiting || c.conversation ? ' data-turbo-prefetch="false"' : ""}>${chip}<span class="ph-row-title">${escapeHtml(c.title || t("shell.untitledSession", lang))}</span></a></li>`;
   }).join("");
   const label = needsYouLabel(n, lang);
   return `<section class="ph-section ph-needs">${head}

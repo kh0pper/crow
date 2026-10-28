@@ -169,6 +169,21 @@ test("counts are cached for 5 s per project set and tasks.db, then re-read", asy
   clearCache();
 });
 
+test("the count cache drops expired entries when read and never exceeds 64", async () => {
+  const { needsYouCacheSize } = await import("../servers/gateway/dashboard/panels/board/needs-you.js");
+  clearCache();
+  let at = 0;
+  const now = () => at;
+  await needsYouCounts(db, [{ id: A }], { now });
+  assert.equal(needsYouCacheSize(), 1);
+  at = 6000;
+  await needsYouCounts(db, [{ id: A }], { now }); // expired: replaced, not accumulated
+  assert.equal(needsYouCacheSize(), 1);
+  for (let i = 0; i < 100; i++) { at += 1; await needsYouCounts(db, [{ id: 100000 + i, tasks_db_uri: null }], { now }); }
+  assert.equal(needsYouCacheSize(), 64, "capped, oldest dropped");
+  clearCache();
+});
+
 test("missing tasks.db is zero for all", async () => {
   const m = await counts(db, [{ id: A }, { id: B }], { tasksDbPath: join(dir, "nope.db") });
   assert.deepEqual([...m], [[A, 0], [B, 0]]);

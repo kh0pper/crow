@@ -144,11 +144,18 @@ export async function loadProjectHome(db, project, { engine = null, tasksDbPath,
     threads = await threadsByCard(db, ids);
     hrefs = await drawerHrefs(db, items.cards);
   } catch (err) { console.warn("[project-home] card links failed:", err && err.message); }
-  const needsYou = items.cards.map((c) => ({
-    title: String(c.title || ""),
-    kind: c.kind,
-    href: cardHref(c, threads, hrefs),
-  }));
+  // A card that opens its conversation carries the project like a session row does
+  // (Perch scopes to it) and is never prefetched (the visit writes the scope cookie).
+  const needsYou = items.cards.map((c) => {
+    const href = cardHref(c, threads, hrefs);
+    const conversation = href.startsWith("/dashboard/perch#");
+    return {
+      title: String(c.title || ""),
+      kind: c.kind,
+      conversation,
+      href: conversation ? `/dashboard/perch?project=${encodeURIComponent(project.slug)}#${href.slice("/dashboard/perch#".length)}` : href,
+    };
+  });
   const labels = await sessionLabels(db, items.waiting.map((w) => w.sid));
   for (const w of items.waiting) {
     needsYou.push({ title: labels.get(w.sid) || null, kind: null, waiting: true, href: `/dashboard/perch?project=${encodeURIComponent(project.slug)}#${encodeURIComponent(w.sid)}` });

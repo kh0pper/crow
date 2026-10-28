@@ -111,10 +111,14 @@ async function waitingByProject(db, engine) {
 }
 
 const CACHE_MS = 5000;
-const countCache = new Map(); // key -> { at, entries: [[projectId, count]] }
+const CACHE_MAX = 64;
+const countCache = new Map(); // key -> { at, entries: [[projectId, count]] }, oldest first
 
 /** Forget every cached count (tests, and anything that must see a change at once). */
 export function clearNeedsYouCache() { countCache.clear(); }
+
+/** The number of cached entries (tests). */
+export function needsYouCacheSize() { return countCache.size; }
 
 /**
  * @returns {Promise<Map<number, number|null>>} projectId -> count (null: unknown)
@@ -129,9 +133,15 @@ export async function needsYouCounts(db, projects, { engine, tasksDbPath = TASKS
   const list = await asProjects(db, projects);
   const key = list.map((p) => `${p.id}|${p.tasks_db_uri ?? ""}`).sort().join(",") + "@" + tasksDbPath;
   const hit = cacheMs > 0 ? countCache.get(key) : null;
-  if (hit && now() - hit.at < cacheMs) return new Map(hit.entries);
+  if (hit) {
+    if (now() - hit.at < cacheMs) return new Map(hit.entries);
+    countCache.delete(key); // expired: dropped when read
+  }
   const result = await computeCounts(db, list, engine, tasksDbPath);
-  if (cacheMs > 0) countCache.set(key, { at: now(), entries: [...result] });
+  if (cacheMs > 0) {
+    countCache.set(key, { at: now(), entries: [...result] });
+    while (countCache.size > CACHE_MAX) countCache.delete(countCache.keys().next().value); // oldest first
+  }
   return result;
 }
 

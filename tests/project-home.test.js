@@ -8,7 +8,7 @@
  * sessions' filing, relative day) are also checked on data.js directly.
  * Requests carry Serve's headers so isAllowedNetwork admits them.
  */
-import { test, before, after } from "node:test";
+import { test, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
@@ -37,6 +37,11 @@ const P = {};
 let server, base, MODE, SCOPE, data, i18n;
 
 const perch = (models) => JSON.stringify({ gateways: [{ type: "perch" }], models: { default: models } });
+
+beforeEach(async () => {
+  // The 5 s needs-you cache would carry one request's counts into the next.
+  (await import("../servers/gateway/dashboard/panels/board/needs-you.js")).clearNeedsYouCache();
+});
 
 before(async () => {
   execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env }, stdio: "pipe", cwd: REPO });
@@ -202,7 +207,9 @@ test("the home renders start, needs-you and earlier sessions for the slug", asyn
   try {
     const hrefs = await drawerHrefs(db, [1, 3]);
     const links = [...needs.matchAll(/class="ph-row" href="([^"]+)"/g)].map((m) => m[1]);
-    assert.deepEqual(links, [hrefs.get(1), "/dashboard/perch#perchlive-abababab", hrefs.get(3)]);
+    assert.deepEqual(links, [hrefs.get(1), "/dashboard/perch?project=garden#perchlive-abababab", hrefs.get(3)]);
+    assert.match(needs, /<a class="ph-row" href="\/dashboard\/perch\?project=garden#perchlive-abababab" data-turbo-prefetch="false">/, "a card that opens its conversation: project scoped, no prefetch");
+    assert.doesNotMatch(needs, /href="\/dashboard\/bot-board[^"]*" data-turbo-prefetch/, "a drawer link is prefetchable as before");
     assert.match(hrefs.get(1), /^\/dashboard\/bot-board\?bot=hank#open=1$/, "a card without a conversation opens its drawer");
   } finally { db.close(); }
   assert.match(needs, /href="\/dashboard\/board\?project=garden">All on Board</);
@@ -247,8 +254,8 @@ test("waiting sessions that hold no Needs-you card are rows too, three rows at m
     const project = { id: P.waits, slug: "waits", name: "Waits", tasks_db_uri: null };
     const all = ["perchlive-0a0a0a0a", "perchlive-0b0b0b0b", "perchlive-0c0c0c0c", "perchlive-0d0d0d0d"];
     const h = await data.loadProjectHome(db, project, { engine: waiting(all) });
-    assert.deepEqual(h.needsYou.map((r) => [r.kind, r.title, r.waiting ? r.href : /^\/dashboard\/perch#/.test(r.href) ? r.href : "card"]), [
-      ["question", "Which shed?", "/dashboard/perch#perchlive-0c0c0c0c"], // the card opens the conversation that holds it
+    assert.deepEqual(h.needsYou.map((r) => [r.kind, r.title, r.waiting || r.conversation ? r.href : "card"]), [
+      ["question", "Which shed?", "/dashboard/perch?project=waits#perchlive-0c0c0c0c"], // the card opens the conversation that holds it
       [null, "Waiting on you", "/dashboard/perch?project=waits#perchlive-0a0a0a0a"],
       [null, null, "/dashboard/perch?project=waits#perchlive-0b0b0b0b"],
     ], "the card, then waiting sessions (not the one holding the card), capped at 3");

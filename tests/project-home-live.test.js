@@ -15,7 +15,7 @@
  * Skips without a browser unless CROW_REQUIRE_TEST_CHROME=1.
  * CROW_TEST_SHOT_DIR=<dir> saves a PNG per size and language.
  */
-import { test, before, after } from "node:test";
+import { test, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
@@ -42,6 +42,10 @@ const REPO = new URL("..", import.meta.url).pathname;
 const SHOT_DIR = process.env.CROW_TEST_SHOT_DIR || "";
 
 let server, base, chrome, setLang, t;
+
+beforeEach(async () => {
+  (await import("../servers/gateway/dashboard/panels/board/needs-you.js")).clearNeedsYouCache();
+});
 
 before(async () => {
   execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env }, stdio: "pipe", cwd: REPO });
