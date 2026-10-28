@@ -415,9 +415,10 @@ export function verificationClaims(text) {
   for (const s of sentences(text)) {
     const tokens = tokensOf(s.text);
     const negators = markerSpans(s.text, NEGATORS);
-    // A governed phrase negates only after a negator in its clause ("did not have time to").
+    // A governed phrase negates only after a negator in its clause ("did not have time to"); a
+    // clause stop or and/but ends the negator's reach ("I had no doubt and had time to verify").
     const governed = (n) => !GOVERNED.has(s.text.slice(n.start, n.end).toLowerCase())
-      || negators.some((g) => g.end <= n.start && !/[,;:]|\bbut\b/i.test(s.text.slice(g.end, n.start)) && tokensBetween(tokens, g.end, n.start) <= GOVERN_GAP);
+      || negators.some((g) => g.end <= n.start && !/[,;:]|\b(?:but|and)\b/i.test(s.text.slice(g.end, n.start)) && tokensBetween(tokens, g.end, n.start) <= GOVERN_GAP);
     // "Not only did I verify ..." affirms.
     const real = (markers) => markerSpans(s.text, markers).filter((n) => !/^\s+only\b/i.test(s.text.slice(n.end))).filter(governed);
     const negations = real(VERIFY_NEGATIONS);

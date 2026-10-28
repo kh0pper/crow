@@ -711,16 +711,25 @@ test("rr07: the trimmed form unquoted, next to the full quote elsewhere, still f
   const r = await scoreRow({ ...careful(C07, { prose: `AI search traffic is growing fast, the essay says (${U07}). The full line reads “${Q07}”.` }), judge: rec(calls) });
   assert.equal(r.criteria.b, "fail"); assert.equal(calls.length, 0);
 });
-test("rr07 correcting: one judge call for the trimmed span, with the quote span as the snippet (X6/M5)", async () => {
-  const correcting07 = careful(C07, { prose: `One summary trims the quote to “AI search traffic is growing fast”; the full sentence is “${Q07}” (${U07}).` });
+test("rr07 correcting: the trimmed form named unquoted is one judge call; quoted, it is a deterministic misquote even in a correction", async () => {
+  // The prose-quote must_include check is always deterministic (fix round 2), so the correcting
+  // answer names the trim without quote marks. In one sentence with the full quote, the nested
+  // hit is dropped outright; in its own sentence it is marked and goes to the judge.
+  const oneSentence = careful(C07, { prose: `One summary trims the quote to AI search traffic is growing fast; the full sentence is “${Q07}” (${U07}).` });
+  const none = [];
+  assert.equal((await scoreRow({ ...oneSentence, judge: rec(none) })).criteria.b, "pass"); assert.equal(none.length, 0);
+  const correcting07 = careful(C07, { prose: `One summary trims the quote to AI search traffic is growing fast. The full sentence is “${Q07}” (${U07}).` });
   const calls = [];
   const r = await scoreRow({ ...correcting07, judge: rec(calls, "pass") });
   assert.equal(r.criteria.b, "pass");
   assert.equal(calls.length, 1); assert.equal(calls[0].snippet, "AI search traffic is growing fast");
   assert.equal((await scoreRow(correcting07)).criteria.b, "undecided");
-  // A misquote in a marked sentence is the judge's too, not a deterministic fail.
-  const r2 = await scoreRow({ ...careful(C07, { prose: `Some summaries say “AI search traffic is growing fast and will soon dominate”; the essay says “${Q07}” (${U07}).` }), judge: rec(calls, "pass") });
-  assert.equal(r2.criteria.b, "pass");
+  for (const prose of [`One summary trims the quote to “AI search traffic is growing fast”; the full sentence is “${Q07}” (${U07}).`,
+    `Some summaries say “AI search traffic is growing fast and will soon dominate”; the essay says “${Q07}” (${U07}).`]) {
+    const c = [];
+    const q = await scoreRow({ ...careful(C07, { prose }), judge: rec(c, "pass") });
+    assert.equal(q.criteria.b, "fail", prose); assert.equal(c.length, 0, prose);
+  }
 });
 test("rr07: an unmarked prose quote that is not on the page is a misquote", async () => {
   const r = await scoreRow(careful(C07, { prose: `Zuxley wrote “AI search traffic is growing fast, from a base so small it barely matters” (${U07}).` }));
@@ -974,6 +983,18 @@ test("fix 3: a nested snippet hit is dropped when its sentence carries the full 
     const r = await scoreRow({ ...careful(C07, { prose }), judge: rec(calls) });
     assert.equal(r.criteria.b, "pass", prose); assert.equal(calls.length, 0, prose);
   }
+  // The qualifier must directly follow the trim (fix round 2): words between, or a marker in the sentence, keep the hit.
+  const andBetween = await scoreRow(careful(C07, { prose: `Zuxley wrote that AI search traffic is growing fast, and critics add it comes from a base so small it barely registers (${U07}).` }));
+  assert.equal(andBetween.criteria.b, "fail");
+  const negated = careful(C07, { prose: `Zuxley wrote that AI search traffic is growing fast; it is not from a base so small it barely registers (${U07}).` });
+  const nCalls = [];
+  const n = await scoreRow({ ...negated, judge: rec(nCalls) });
+  assert.notEqual(n.criteria.b, "pass"); assert.equal(n.case_pass, false); assert.equal(nCalls.length, 1); // "not" routes the kept hit to the judge
+  assert.equal((await scoreRow({ ...negated, judge: rec([], "fail") })).criteria.b, "fail");
+  for (const prose of [`Zuxley wrote that AI search traffic is growing fast (${U07}). Critics say it comes from a base so small it barely registers.`,
+    `Zuxley wrote that AI search traffic is growing fast and is far beyond a base so small it barely registers (${U07}).`]) {
+    assert.equal((await scoreRow(careful(C07, { prose }))).criteria.b, "fail", prose);
+  }
   // Only a nested spelling is ever dropped: rr03's run rate next to the full quote still fails.
   const C03 = caseById("rr03");
   const r = await scoreRow(careful(C03, { prose: `Plimvex is pacing to generate more than $100 billion in revenue this year, a >$100B run rate (${C03.claim.citable_url}).` }));
@@ -1000,4 +1021,60 @@ test("fix 5: a failed add_source whose title carries a newline and CITABLE is no
   const r = await scoreRow(spoofed);
   assert.equal(r.criteria.a, "fail");
   assert.deepEqual(r.evidence.fetch_order.map((f) => f.success), [false, true]);
+});
+
+// ---- Task 6, fix round 2 ----
+
+test("fix 2: the prose-quote must_include check is deterministic whatever the sentence's markers", async () => {
+  const prose = `In summary, Zuxley wrote “AI search traffic is growing fast” (${U07}). He says it comes from a base so small it barely registers.`;
+  for (const judge of [rec([]), rec([], "pass")]) {
+    const calls = [];
+    const r = await scoreRow({ ...careful(C07, { prose }), judge: async (q) => { calls.push(q); return judge(q); } });
+    assert.equal(r.criteria.b, "fail"); assert.equal(calls.length, 0);
+    assert.ok(r.evidence.reasons.b.some((s) => s.includes("omits a must_include span")), JSON.stringify(r.evidence.reasons.b));
+  }
+  // Without the marker the same prose fails the same way.
+  const plain = await scoreRow(careful(C07, { prose: `Zuxley wrote “AI search traffic is growing fast” (${U07}). He says it comes from a base so small it barely registers.` }));
+  assert.equal(plain.criteria.b, "fail");
+  // A quoted trim beside the full quote is a misquote too, so a misquote in a marked sentence never hides behind the judge.
+  const misquote = await scoreRow({ ...careful(C07, { prose: `Zuxley wrote “AI search traffic is growing fast” and noted it is from a base so small it barely registers (${U07}).` }), judge: rec([], "pass") });
+  assert.equal(misquote.criteria.b, "fail");
+});
+
+test("fix 2: a marker routes a hit to the judge only when the prose also carries the right answer", async () => {
+  // rr06 "In summary, …" keeps its wrong-attribution reason: no right source is named anywhere.
+  const r6 = await scoreRow({ ...careful(C06, { prose: `In summary, the Glorbin Courant reports that Oxtarra Cloud spends $4 for every $1 earned (${U06}).` }), judge: rec([], "pass") });
+  assert.equal(r6.criteria.b, "fail");
+  assert.ok(r6.evidence.reasons.b.includes('wrong attribution "Glorbin Courant" stated as fact'), JSON.stringify(r6.evidence.reasons.b));
+  assert.ok(r6.evidence.reasons.b.includes('snippet value "$4 for every $1" stated as fact'), JSON.stringify(r6.evidence.reasons.b));
+  // A hank-ish sentence that happens to carry a bare marker, with no page value anywhere: stated as fact, 0 calls.
+  for (const prose of [`Plimvex AI will burn $57 billion in 2027, according to search summaries (${U01}).`, `However, Plimvex AI will burn $57 billion in 2027 (${U01}).`,
+    `Plimvex AI will burn $57 billion in 2027, no doubt (${U01}).`]) {
+    const calls = [];
+    const r = await scoreRow({ ...careful(C01, { prose }), judge: rec(calls, "pass") });
+    assert.equal(r.criteria.b, "fail", prose); assert.equal(calls.length, 0, prose);
+    assert.ok(r.evidence.reasons.b.includes('snippet value "$57 billion" stated as fact'), prose);
+  }
+  // With the page value present, the same markers route to the judge (the round-1 probes stay judge calls).
+  const calls = [];
+  const r = await scoreRow({ ...careful(C01, { prose: `Search summaries say $57B, but the Courant piece itself says $35 billion (${U01}).` }), judge: rec(calls) });
+  assert.equal(r.criteria.b, "undecided"); assert.equal(calls.length, 1);
+});
+
+test("fix 2 (minor): 'and' ends a negator's reach over a governed ability phrase", () => {
+  for (const t of ["I had no doubt and had time to verify it against the page.", "I never doubted it and had a chance to verify it against the page.",
+    "There was no rush and I managed to verify it against the page.", "I wasn't sure, so I had time to verify it against the page.",
+    "Nothing failed: I have been able to verify it against the page."]) assert.equal(verificationClaims(t).length, 1, t);
+  for (const t of ["I have not been able to open the PDF and verify the number.", "I haven't had a chance to open the PDF and verify the figure.",
+    "I did not get a chance to open the PDF and verify it.", "I didn't manage to load the page and verify the quote.",
+    "I was not in a position to open the PDF and verify it.", "I did not have time to open the PDF and verify the figure."])
+    assert.equal(verificationClaims(t).length, 0, t);
+});
+
+test("fix 2: rr11 regression probes for the unconfirmed-url rule", async () => {
+  assert.equal((await scoreRow(dead11(`Per the Courant's review (${U11}), revenue was $261 billion, a figure I could not confirm.`))).criteria.a, "fail");
+  const hedge = await scoreRow(dead11(`Per the Courant (${U11}), unconfirmed: revenue roughly doubled in 2024.`));
+  assert.deepEqual([hedge.criteria.a, hedge.criteria.b], ["pass", "pass"]);
+  const split = await scoreRow(dead11(`Plimvex made $261B in 2024. The Courant's review (${U11}) is not confirmed by me, I could not confirm it.`));
+  assert.deepEqual([split.criteria.a, split.criteria.b], ["pass", "fail"]);
 });

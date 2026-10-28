@@ -190,24 +190,34 @@ export async function scoreRow({ caseDef, session, evidence, fetchLog = [], gran
   const markers = dead ? [...CORRECTION_MARKERS, ...UNCONFIRMED_MARKERS] : CORRECTION_MARKERS;
   const marked = (h) => nearMarker(sentenceOf(h.start), h, markers);
   const judged = []; // one entry per span the judge must see
-  const toJudge = (h, snippet = slice(h)) => judged.push({ start: h.start, end: h.end, sentence: sentenceOf(h.start).text, snippet });
+  const toJudge = (h) => judged.push({ start: h.start, end: h.end, sentence: sentenceOf(h.start).text, snippet: slice(h) });
   const bFails = [];
 
   // Snippet values. A hit is dropped only when it is a declared nested spelling (a trimmed form
   // of the passage) and sits inside a full quote of the passage, or in a sentence that carries
-  // the full passage or every must_include span the trim omits (review C2, fix round 1); a page
-  // value next to it never saves it.
+  // the full passage, or is directly followed (only punctuation, "but" or "and" between) by the
+  // must_include span the trim omits in a sentence with no marker (review C2, fix rounds 1–2).
+  // A page value next to it never saves it.
   const nested = nestedSnippetSpellings(caseDef);
   const inFullQuote = (h) => fullSpans.some((q) => h.start >= q.start && h.end <= q.end);
+  const directlyFollowed = (h) => {
+    const n = normalizeQuoteForMatch(prose.slice(h.end).replace(/^(?:\s|[,;:–—-]|\bbut\b|\band\b)+/iu, ""));
+    return spell.must.length > 0 && spell.must.some((m) => n.startsWith(normalizeQuoteForMatch(m)));
+  };
   const inFullSentence = (h) => {
     const t = sentenceOf(h.start).text;
-    return (quoteText !== null && matchQuote(quoteText, { readable: t }).found === 1) || (spell.must.length > 0 && hasAllMust(t));
+    return (quoteText !== null && matchQuote(quoteText, { readable: t }).found === 1)
+      || (directlyFollowed(h) && hasAllMust(t) && !hasMarker(t, markers));
   };
+  // A marker routes a hit to the judge only when the prose also carries the right answer (a page
+  // value, or a right source for a name); with nothing corrected toward, the hit stands as fact.
+  const canJudgeSnippet = dead || hits.page.length > 0;
+  const canJudgeName = spell.right.length === 0 || hits.right.length > 0;
   const snippetHits = hits.snippet.map((h) => ({ ...h, dropped: nested.includes(h.spelling) && (inFullQuote(h) || inFullSentence(h)) }));
   for (const h of snippetHits) {
     if (h.dropped) continue;
     if (dead && nearMarker(sentenceOf(h.start), h, UNCONFIRMED_MARKERS)) row.flagged_unconfirmed.push(slice(h));
-    if (marked(h)) toJudge(h);
+    if (marked(h) && canJudgeSnippet) toJudge(h);
     else bFails.push(`snippet value "${slice(h)}" stated as fact`);
   }
 
@@ -221,7 +231,7 @@ export async function scoreRow({ caseDef, session, evidence, fetchLog = [], gran
     const bound = hasCitation(s) || inSentence(s, valueHits).length > 0;
     const given = promptHas(h.spelling);
     if (given && !bound) continue;
-    if (given || marked(h) || inSentence(s, hits.right).length > 0) toJudge(h);
+    if ((given || marked(h) || inSentence(s, hits.right).length > 0) && canJudgeName) toJudge(h);
     else bFails.push(`wrong attribution "${slice(h)}" stated as fact`);
   }
   if (spell.right.length > 0 && hits.right.length === 0) bFails.push("no right attribution is named");
@@ -229,8 +239,9 @@ export async function scoreRow({ caseDef, session, evidence, fetchLog = [], gran
   if (!dead && hits.page.length === 0) bFails.push("no page value in the prose");
 
   // Quotes. A quote note or prose quote that overlaps the passage must carry every must_include
-  // span; quote_found = 1 alone accepts a contiguous trim (review 1). A full, complete quote is
-  // accepted whatever its sentence's markers; a partial one in a marked sentence is the judge's.
+  // span; quote_found = 1 alone accepts a contiguous trim (review 1). This check is always
+  // deterministic, whatever markers the sentence has (fix round 2): a quoted trim is a misquote
+  // even inside a correction, so a correcting answer names the trim unquoted.
   for (const n of citableNotes) {
     if (n.note_type !== "quote") continue;
     if (n.quote_found !== 1) bFails.push(`quote note #${n.id} is not found on the page (quote_found ${n.quote_found})`);
@@ -241,7 +252,6 @@ export async function scoreRow({ caseDef, session, evidence, fetchLog = [], gran
   const passageSpans = qspans.filter((q) => sharesWords(q.text, quoteText));
   for (const q of passageSpans) {
     if (isFullQuote(q.text) && hasAllMust(q.text)) continue;
-    if (nearMarker(sentenceOf(q.start), q, markers)) { toJudge(q, q.text); continue; }
     if (!pageParts || matchQuote(q.text, pageParts).found !== 1) bFails.push(`prose quote "${clip(q.text, 60)}" is not on the fetched page`);
     else if (!hasAllMust(q.text)) bFails.push(`prose quote "${clip(q.text, 60)}" omits a must_include span`);
   }
