@@ -175,8 +175,8 @@ export default {
         <td class="llm-cell-status">${statusDot(p, { external, lang })}</td>
         <td class="llm-cell-id">${idEsc}${dupBadge}</td>
         <td class="llm-cell-host">${hostBadge(p, hostCtx)}${engineBadge(p, lang)}</td>
-        <td class="llm-cell-endpoint" data-label="Endpoint">${escapeHtml(p.baseUrl || "—")}</td>
-        <td class="llm-cell-models" data-label="Models" title="${escapeHtml(models)}">${models}</td>
+        <td class="llm-cell-endpoint" data-label="${escapeHtml(t("settings.providers.endpoint", lang))}">${escapeHtml(p.baseUrl || "—")}</td>
+        <td class="llm-cell-models" data-label="${escapeHtml(t("settings.providers.models", lang))}" title="${escapeHtml(models)}">${models}</td>
         ${usedByCell(p, usedCtx)}
         <td class="llm-cell-actions">
           <form method="post" style="display:inline">
@@ -190,7 +190,7 @@ export default {
     const active = providers.filter((p) => !p.disabled);
     const retired = providers.filter((p) => p.disabled);
     const rows = active.map(buildRow).join("");
-    const head = `<thead><tr><th></th><th>ID</th><th>Host</th><th>Endpoint</th><th>Models</th><th>${escapeHtml(t("settings.providers.usedBy", lang))}</th><th></th></tr></thead>`;
+    const head = `<thead><tr><th></th><th>ID</th><th>Host</th><th>${escapeHtml(t("settings.providers.endpoint", lang))}</th><th>${escapeHtml(t("settings.providers.models", lang))}</th><th>${escapeHtml(t("settings.providers.usedBy", lang))}</th><th></th></tr></thead>`;
     const retiredBlock = retired.length
       ? `<details data-show-retired style="margin-top:1rem">
       <summary class="llm-details-summary">${escapeHtml(fill(t("settings.providers.showRetired", lang), { n: retired.length }))}</summary>
