@@ -1113,7 +1113,7 @@ export function createProjectServer(dbPath, options = {}) {
         await db.execute({ sql: "UPDATE research_notes SET quote_found = ? WHERE id = ?", args: [c.found, c.note_id] });
       }
       if (!checks.every((c) => c.found === 1)) {
-        return notVerified(`${listFailures(checks)} on the page Crow fetched (${src.fetched_at}). Fix or remove those notes, then verify again.`, {}, true);
+        return notVerified(`${listFailures(checks)} on the page Crow fetched (${src.fetched_at}). Notes can't be removed, so tell the owner; add correct quotes copied character for character in new notes for later sources.`, {}, true);
       }
       if (beforeVerifyWrite) await beforeVerifyWrite({ id, stale: false });
       if (!(await guardedVerify(checks.map((c) => c.note_id)))) return raced();
