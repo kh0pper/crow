@@ -158,7 +158,7 @@ import { stripContextEcho } from "./voice/context-echo.js";
 import { maskSecrets, maskSecretsDetailed, maskDeep, hiddenNote, HIDDEN_NOTE_RE, REDACTED } from "../shared/secret-mask.js";
 import { userRuntimeDirs } from "../../scripts/pi-bots/pi_sandbox.mjs";
 import { anchorSecretsDir, checkedInstanceSecretsDirs } from "../shared/secret-values.js";
-import { deliveredDirPath, openDeliveredDir, registerDeliveredRoot } from "../shared/perch-delivered.js";
+import { deliveredDirPath, openDeliveredDir, registerDeliveredRoot, resolveSentName } from "../shared/perch-delivered.js";
 import { readLease, renewIfHeld as renewBrowserLease, release as releaseBrowserLease, leaseDir as browserLeaseDir } from "../shared/browser-lease.js";
 import { isBrowserTool, tileEventFor, doneEventFor, heldBySession, namesSession, validDomain, browserInstalled, leaseErrorText, RENEW_MS as BROWSER_RENEW_MS, FORCE_BREAK_AFTER_MS } from "./browser-tile/session-hooks.js";
 
@@ -629,31 +629,6 @@ function maskFrame(event) {
     if (v !== event[k]) { if (out === event) out = { ...event }; out[k] = v; }
   }
   return out;
-}
-
-/**
- * PR-E (audit item 12): pick the stored name for a jail-copied sent file.
- * Collision policy (operator decision 2026-09-13): SUFFIX, never overwrite —
- * `report.png` → `report-2.png` → `report-3.png`, first slot free of every
- * existing name in the dir, sync loop. A dotfile basename is renamed out of
- * dotness (the workspace route refuses any dotfile path SEGMENT, so a stored
- * `.secret` would be a permanently dead card; `secret` is served instead).
- * Pure — exported only for tests; the engine's call site does the copy.
- */
-function resolveSentName(dir, basename) {
-  // `dir` may be a list: a sent copy's name must not collide with a file in
-  // the staging dir OR in the session's outputs dir (both are served under
-  // the same flat name).
-  const dirs = [].concat(dir).filter(Boolean);
-  const clean = String(basename == null ? "" : basename).replace(/[\\/]/g, "").replace(/^\.+/, "").trim() || "file";
-  const dot = clean.lastIndexOf(".");
-  const stem = dot > 0 ? clean.slice(0, dot) : clean;
-  const ext = dot > 0 ? clean.slice(dot) : "";
-  let candidate = clean;
-  for (let n = 2; dirs.some((d) => existsSync(join(d, candidate))); n++) {
-    candidate = stem + "-" + n + ext;
-  }
-  return candidate;
 }
 
 /** PR-A: clear ALL combined-ask state. Called wherever `pendingUi` is cleared

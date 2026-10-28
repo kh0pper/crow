@@ -2744,12 +2744,25 @@ await initTable("perch_session_files table", `
     size       INTEGER NOT NULL DEFAULT 0,
     caption    TEXT NOT NULL DEFAULT '',
     servable   INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    kind       TEXT NOT NULL DEFAULT 'file',
+    turn_anchor TEXT
   );
 
   CREATE INDEX IF NOT EXISTS idx_perch_session_files_thread
     ON perch_session_files (bot_id, thread_id);
 `);
+
+// perch_session_files.kind + .turn_anchor (live browser tile): a turn's final
+// browser screenshot is a row with kind='browser_shot' (sent files keep the
+// default 'file', so a bot can't fake a tile with a look-alike name) and
+// turn_anchor = the turn's first browser toolCallId (reload places the frozen
+// tile in its turn). CREATE body above for fresh installs, these guarded ALTERs
+// for pre-existing tables, and the standalone rail in
+// scripts/migrations/0014-perch-session-files-kind.mjs (same DDL — one shape,
+// two rails). Additive-only — no SCHEMA_GENERATION bump.
+await addColumnIfMissing("perch_session_files", "kind", "TEXT NOT NULL DEFAULT 'file'");
+await addColumnIfMissing("perch_session_files", "turn_anchor", "TEXT");
 
 // shell_items: which project a Perch thread, an artifact or a Workspace file belongs to
 // (project_id NULL = Unassigned; no FK, so a deleted project never cascades an item away).

@@ -46,7 +46,8 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { jsonError } from "./_error.js";
-import { openDeliveredDir, openDeliveredFile } from "../../shared/perch-delivered.js";
+import { openDeliveredDir, openDeliveredFile, unlinkDelivered } from "../../shared/perch-delivered.js";
+import { SHOT_KEEP } from "../browser-tile/shots.js";
 import { openAuthedStream } from "../streams/authed-stream.js";
 import { resolveEngineStatus } from "../dashboard/panels/bot-builder/engine-gate.js";
 import { createDbClient } from "../../db.js";
@@ -1545,12 +1546,32 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
         // thread_id IS the sessionId (perch-interactive.js identity note); the
         // bot_id filter keeps a cross-bot thread-id collision from leaking a
         // card the caller has no right to render.
-        const r = await db.execute({
-          sql: "SELECT name, stored, mime, size, caption, servable, created_at FROM perch_session_files WHERE bot_id=? AND thread_id=? ORDER BY id ASC LIMIT 200",
-          args: [String(snap.botId || ""), sid],
-        });
+        const botId = String(snap.botId || "");
+        // Live browser tile (migration 0014): sent files exclude kind
+        // 'browser_shot' and carry id/kind/turn_anchor; the shots come from
+        // their own query. A co-hosted instance restarted onto this code
+        // before it migrated has neither column — fall back to the old
+        // query (every such row is a sent file) rather than 500 the chat.
+        let r;
+        let hasKind = true;
+        try {
+          r = await db.execute({
+            sql: "SELECT id, kind, turn_anchor, name, stored, mime, size, caption, servable, created_at FROM perch_session_files WHERE bot_id=? AND thread_id=? AND kind != 'browser_shot' ORDER BY id ASC LIMIT 200",
+            args: [botId, sid],
+          });
+        } catch (e) {
+          if (!/no such column/i.test(String(e && e.message))) throw e;
+          hasKind = false;
+          r = await db.execute({
+            sql: "SELECT id, name, stored, mime, size, caption, servable, created_at FROM perch_session_files WHERE bot_id=? AND thread_id=? ORDER BY id ASC LIMIT 200",
+            args: [botId, sid],
+          });
+        }
         const items = r.rows.map((row) => {
           const it = {
+            id: Number(row.id),
+            kind: row.kind == null ? "file" : String(row.kind),
+            turn_anchor: row.turn_anchor == null ? null : String(row.turn_anchor),
             name: String(row.name || ""),
             stored: row.stored == null ? null : String(row.stored),
             mime: String(row.mime || "application/octet-stream"),
@@ -1568,7 +1589,68 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
           }
           return it;
         });
-        res.json({ items });
+        // Browser shots: newest SHOT_KEEP, only the gateway writes this kind,
+        // and only from the staging dir (a shot whose file is gone is skipped).
+        const browserShots = [];
+        if (hasKind) {
+          const sr = await db.execute({
+            sql: "SELECT id, name, stored, turn_anchor, created_at FROM perch_session_files WHERE bot_id=? AND thread_id=? AND kind='browser_shot' ORDER BY id DESC LIMIT ?",
+            args: [botId, sid, SHOT_KEEP],
+          });
+          for (const row of sr.rows) {
+            const stored = row.stored == null ? "" : String(row.stored);
+            if (!stored || !deliveredExists(sid, stored)) continue;
+            browserShots.push({
+              id: Number(row.id),
+              name: String(row.name || stored),
+              url: P + "/interactive/" + encodeURIComponent(sid) + "/workspace/" + encodeURIComponent(stored),
+              turn_anchor: row.turn_anchor == null ? null : String(row.turn_anchor),
+              created_at: String(row.created_at || ""),
+            });
+          }
+        }
+        res.json({ items, browserShots });
+      } finally { try { db.close(); } catch { /* already closed */ } }
+    } catch (err) {
+      mapEngineError(res, err);
+    }
+  });
+
+  // ---- DELETE /interactive/:sid/browser-shots/:id — Delete screenshot ----
+  // Live browser tile (spec §4.5, §7 item 12). CSRF-railed (this router mounts
+  // after csrfMiddleware) and session-gated. Scoped to id AND bot_id AND
+  // thread_id AND kind='browser_shot': any other id (another bot's, another
+  // thread's, a sent file's) is a 404 and nothing is removed. The file goes
+  // first (fd-anchored, never through a symlink), then the row.
+  router.delete(P + "/interactive/:sid/browser-shots/:id", async (req, res) => {
+    const sid = String(req.params.sid);
+    const id = /^[1-9][0-9]{0,15}$/.test(String(req.params.id)) ? Number(req.params.id) : null;
+    try {
+      const eng = resolveEngine();
+      const snap = await eng.get(sid);
+      if (!snap) return jsonError(res, 404, "no_such_session");
+      if (id == null) return jsonError(res, 404, "not_found");
+      const botId = String(snap.botId || "");
+      const db = createDbClient();
+      try {
+        let r;
+        try {
+          r = await db.execute({
+            sql: "SELECT id, stored FROM perch_session_files WHERE id=? AND bot_id=? AND thread_id=? AND kind='browser_shot'",
+            args: [id, botId, sid],
+          });
+        } catch (e) {
+          if (/no such column/i.test(String(e && e.message))) return jsonError(res, 404, "not_found");
+          throw e;
+        }
+        const row = r.rows[0];
+        if (!row) return jsonError(res, 404, "not_found");
+        if (row.stored) unlinkDelivered(sid, String(row.stored));
+        await db.execute({
+          sql: "DELETE FROM perch_session_files WHERE id=? AND bot_id=? AND thread_id=? AND kind='browser_shot'",
+          args: [id, botId, sid],
+        });
+        res.json({ ok: true });
       } finally { try { db.close(); } catch { /* already closed */ } }
     } catch (err) {
       mapEngineError(res, err);
