@@ -3,9 +3,10 @@
  * the private engineering notes).
  *
  * A default must never name a machine. A task's default provider resolves:
- * env override → dashboard_settings key → the lowest-id ENABLED provider that
- * has a model tagged with one of the task's synonyms → null. Cached 30 s per
- * task|settingKey; the env is consulted before the cache on every call.
+ * env override → dashboard_settings key → a CHOSEN model role (embed/rerank;
+ * a seeded binding never counts) → the lowest-id ENABLED provider that has a
+ * model tagged with one of the task's synonyms → null. Cached 30 s per
+ * task|settingKey|roleId; the env is consulted before the cache on every call.
  */
 import { createDbClient } from "../db.js";
 
@@ -41,10 +42,45 @@ export function pickProviderByTask(providers, tasks) {
   return ids[0] ?? null;
 }
 
-export async function resolveProviderForTask({ tasks, envVar, settingKey, dbFactory = createDbClient }) {
+const loggedMismatch = new Set();
+
+function firstTaskModel(row, tasks) {
+  const want = new Set([].concat(tasks));
+  const m = modelsOf(row).find((x) => x && want.has(x.task));
+  return m?.id ?? null;
+}
+
+/**
+ * The role step: a CHOSEN role's provider half (a seeded binding gives null).
+ * The consumer still serves the provider's first matching model, so a role
+ * naming another model on it is logged once (M4).
+ */
+async function roleProvider(db, roleId, tasks, rows) {
+  const { resolveRole } = await import("./model-roles-store.js"); // lazy (I4): model-roles.js imports this module
+  const list = [].concat(tasks);
+  const need = list.some((t) => RERANK_TASKS.includes(t)) ? "score" : "embed";
+  const r = await resolveRole(db, "role:" + roleId, { need, chosenOnly: true });
+  if (!r?.key) return null;
+  const cut = r.key.indexOf("/");
+  const provider = r.key.slice(0, cut), model = r.key.slice(cut + 1);
+  if (!provider) return null;
+  const first = firstTaskModel((rows || []).find((p) => p.id === provider), list);
+  if (first && first !== model) {
+    const msg = `[roles] ${roleId} names ${model}, but ${provider} serves ${first} for this task`;
+    if (!loggedMismatch.has(msg)) { loggedMismatch.add(msg); console.warn(msg); }
+  }
+  return provider;
+}
+
+/**
+ * env → `settingKey` row → a chosen `roleId` role (provider half) → the
+ * lowest-id enabled provider with a task model → null. All but the env sit
+ * inside the TTL cache.
+ */
+export async function resolveProviderForTask({ tasks, envVar, settingKey, roleId, dbFactory = createDbClient }) {
   const env = envVar ? process.env[envVar] : undefined;
   if (typeof env === "string" && env.trim()) return env.trim();
-  const key = `${[].concat(tasks).join(",")}|${settingKey || ""}`;
+  const key = `${[].concat(tasks).join(",")}|${settingKey || ""}|${roleId || ""}`;
   const hit = _cache.get(key);
   if (hit && Date.now() - hit.at < TTL_MS) return hit.value;
   let value = null;
@@ -58,7 +94,10 @@ export async function resolveProviderForTask({ tasks, envVar, settingKey, dbFact
       }
       if (!value) {
         const { rows } = await db.execute({ sql: "SELECT id, models, disabled FROM providers WHERE (disabled IS NULL OR disabled = 0) ORDER BY id", args: [] });
-        value = pickProviderByTask(rows || [], tasks);
+        if (roleId) {
+          try { value = await roleProvider(db, roleId, tasks, rows || []); } catch { value = null; } // a role failure never costs the task pick
+        }
+        if (!value) value = pickProviderByTask(rows || [], tasks);
       }
     } finally {
       db.close?.();

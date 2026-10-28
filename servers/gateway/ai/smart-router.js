@@ -29,6 +29,12 @@
  * apply); a blank value is ignored. Per-profile auto_rules.overrides still
  * beat these defaults.
  *
+ * Roles (Phase 1): a tier also follows a CHOSEN model role (SMART_TIER_ROLES:
+ * fast → quick, code/deep/default → everyday, vision → vision), resolved per
+ * request by resolveSmartTierKeys and passed in as `tierKeys`. Order per tier:
+ * auto_rules override → chosen role → baked default. A seeded binding never
+ * counts, and a set CROW_SMART_ROUTER_<TIER> env beats the role.
+ *
  * Feature-flag gating: chooseProvider() first reads
  * dashboard_settings.feature_flags.smart_chat (local-only via
  * readSetting). If false/missing, throws SmartChatDisabled. chat.js
@@ -43,6 +49,8 @@
 
 import { readSetting } from "../dashboard/settings/registry.js";
 import { vendorBucket, hasActiveToolCalls } from "./vendor-guard.js";
+import { resolveRole } from "../../shared/model-roles-store.js";
+import { splitKey } from "../../../scripts/pi-bots/model_resolver.mjs";
 
 export class SmartChatDisabled extends Error {
   constructor() { super("Smart Chat disabled"); this.code = "smart_chat_disabled"; }
@@ -61,6 +69,27 @@ export const DEFAULT_ROUTES = Object.freeze({
   deep:    tierDefault("deep", "crow-chat"),
   default: "crow-chat",
 });
+
+/** Route tier -> the role that may name its model (fast stays on quick). */
+export const SMART_TIER_ROLES = Object.freeze({ fast: "quick", code: "everyday", deep: "everyday", default: "everyday", vision: "vision" });
+
+/**
+ * Per-tier raw keys from CHOSEN roles only (a seeded binding gives null, so
+ * the baked default still applies). A tier whose CROW_SMART_ROUTER_<TIER> env
+ * is set gives null: the operator's env beats the role. `default` has no env.
+ * Never throws (resolveRole never does).
+ * @returns {Promise<{[tier:string]: string|null}>}
+ */
+export async function resolveSmartTierKeys(db, { env = process.env } = {}) {
+  const out = {};
+  for (const [tier, roleId] of Object.entries(SMART_TIER_ROLES)) {
+    const v = tier === "default" ? undefined : env?.[`CROW_SMART_ROUTER_${tier.toUpperCase()}`];
+    if (typeof v === "string" && v.trim()) { out[tier] = null; continue; }
+    const r = await resolveRole(db, "role:" + roleId, { need: tier === "vision" ? "vision" : "chat", chosenOnly: true });
+    out[tier] = r?.key || null;
+  }
+  return out;
+}
 
 // Regex fixtures — narrow, documentable patterns. Not LLM-based.
 const SLASH_RE    = /^\/(code|vision|fast|deep)\b/i;
@@ -133,11 +162,12 @@ export function pickVisionProvider(providers) {
 
 /**
  * Resolve a route id → provider row using the profile's auto_rules
- * overrides when present, else the baked-in default. If the mapped
- * provider is disabled/missing, fall through to the final `default`
+ * overrides when present, then a chosen role's key for the tier
+ * (`tierKeys`, from resolveSmartTierKeys), else the baked-in default. If the
+ * mapped provider is disabled/missing, fall through to the final `default`
  * route and then to `crow-chat`.
  */
-function resolveRouteToProvider(route, providers, rules) {
+function resolveRouteToProvider(route, providers, rules, tierKeys = {}) {
   const overrides = rules?.overrides || {};
   const fallback = rules?.fallback || DEFAULT_ROUTES.default;
   const byId = new Map(providers.map((p) => [p.id, p]));
@@ -152,6 +182,13 @@ function resolveRouteToProvider(route, providers, rules) {
   // 1. auto_rules override for this specific route
   const custom = pick(overrides[route]);
   if (custom) return custom;
+  // 1b. a chosen role for this tier: that provider, pinned to the role's model
+  const roleKey = tierKeys?.[route];
+  if (roleKey) {
+    const { provider, model } = splitKey(roleKey);
+    const p = pick(provider);
+    if (p && model) return { ...p, _preferredModelId: model };
+  }
   // 2. baked-in default for this route
   const baked = pick(DEFAULT_ROUTES[route]);
   if (baked) return baked;
@@ -179,10 +216,11 @@ function resolveRouteToProvider(route, providers, rules) {
  * @param {string} args.currentModel       conversation.model (fallback)
  * @param {object} [args.autoRules]        profile.auto_rules blob
  * @param {Array}  args.providers          listProvidersAll(db) result
+ * @param {object} [args.tierKeys]         resolveSmartTierKeys(db) result
  * @returns {Promise<{ provider_id: string|null, model_id: string|null, reason: string }>}
  * @throws SmartChatDisabled when feature flag is off
  */
-export async function chooseProvider({ db, convId, content, attachments, currentProvider, currentModel, autoRules, providers }) {
+export async function chooseProvider({ db, convId, content, attachments, currentProvider, currentModel, autoRules, providers, tierKeys = {} }) {
   const flagsRaw = await readSetting(db, "feature_flags");
   let flags = null;
   try { flags = flagsRaw ? JSON.parse(flagsRaw) : null; } catch {}
@@ -194,7 +232,7 @@ export async function chooseProvider({ db, convId, content, attachments, current
   // 1. slash-command (highest precedence)
   const slash = detectSlashCommand(content);
   if (slash && !disabled.has("slash")) {
-    const picked = resolveRouteToProvider(slash, providers, rules);
+    const picked = resolveRouteToProvider(slash, providers, rules, tierKeys);
     if (picked) {
       return await wrapWithVendorLock({
         db, convId, picked, reasonBase: `matched /${slash}`,
@@ -205,7 +243,7 @@ export async function chooseProvider({ db, convId, content, attachments, current
 
   // 2. attachment
   if (!disabled.has("attachment") && hasImageAttachment(attachments)) {
-    const picked = resolveRouteToProvider("vision", providers, rules);
+    const picked = resolveRouteToProvider("vision", providers, rules, tierKeys);
     if (picked) {
       return await wrapWithVendorLock({
         db, convId, picked, reasonBase: "matched image attachment",
@@ -218,7 +256,7 @@ export async function chooseProvider({ db, convId, content, attachments, current
   if (!disabled.has("keyword")) {
     const kwRoute = detectKeywordRoute(content);
     if (kwRoute) {
-      const picked = resolveRouteToProvider(kwRoute, providers, rules);
+      const picked = resolveRouteToProvider(kwRoute, providers, rules, tierKeys);
       if (picked) {
         return await wrapWithVendorLock({
           db, convId, picked, reasonBase: `keyword: ${kwRoute}`,
@@ -229,7 +267,7 @@ export async function chooseProvider({ db, convId, content, attachments, current
   }
 
   // 4. fallback
-  const fb = resolveRouteToProvider("default", providers, rules);
+  const fb = resolveRouteToProvider("default", providers, rules, tierKeys);
   if (fb) {
     return await wrapWithVendorLock({
       db, convId, picked: fb, reasonBase: "default route",

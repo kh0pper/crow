@@ -184,6 +184,29 @@ export function selectBotClassifier({ setting, providers, ownAddresses = null, o
 }
 
 /**
+ * The classifier with the `safety` role in the middle (pure; N1):
+ *   1. a non-empty `setting` wins (selectBotClassifier, unchanged);
+ *   2. else a CHOSEN safety role's raw key (`roleKey`; the caller resolves it
+ *      chosen-only, so a seeded binding is null here) that `isCloud` does not
+ *      flag, validated by selectBotClassifier as if it were the setting; ok
+ *      gives that selection with source "role";
+ *   3. else today's automatic pick. A broken or cloud role never errors and
+ *      never reaches the 35B (safety's fallback is []).
+ * Two shapes: `rows` are the raw snake_case providers rows selectBotClassifier
+ * reads; `isCloud(key)` is the caller's closure over camelCase provider
+ * objects (isCloudKey). `ownInstanceId` is a string.
+ */
+export function selectClassifierWithRole({ setting, roleKey = null, rows, ownAddresses = null, ownInstanceId = null, isCloud }) {
+  const base = { providers: rows, ownAddresses, ownInstanceId };
+  if (setting != null && String(setting).trim() !== "") return selectBotClassifier({ setting, ...base });
+  if (typeof roleKey === "string" && roleKey && typeof isCloud === "function" && !isCloud(roleKey)) {
+    const sel = selectBotClassifier({ setting: roleKey, ...base });
+    if (sel.ok) return { ...sel, source: "role" };
+  }
+  return selectBotClassifier({ setting: null, ...base });
+}
+
+/**
  * Pin a *.ts.net name to a tailnet IP: every address it resolves to must be
  * on the tailnet (a Funnel or public name is refused), and the URL handed to
  * pi-lab carries the IP (pi-lab accepts IP literals only), so DNS cannot move
