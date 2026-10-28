@@ -11,6 +11,7 @@ import { runExtraction } from "./extract.js";
 import { appImport } from "./app-root.js";
 
 const { isPublicEgressIp } = await appImport("servers/shared/ip-classify.js");
+const { guardedRequest } = await appImport("servers/shared/fetch-page.js");
 
 const FETCH_TIMEOUT_MS = 20000;
 const USER_AGENT = "Mozilla/5.0 (compatible; Crow-Reader/1.0; +https://github.com/kh0pper/crow)";
@@ -65,8 +66,9 @@ function textToSections(raw) {
  * 6to4, Teredo and v4-compatible IPv6 carry an IPv4 inside), unless configured
  * open; this host's own addresses and on-link neighbours are refused too
  * (isPublicEgressIp in servers/shared/ip-classify.js).
- * Accepted risk: DNS rebinding TOCTOU (this lookup and the fetch resolve
- * independently); fine for a single-user authenticated dashboard.
+ * This standalone check is a pre-flight only (and what the tests exercise). The live
+ * fetch path goes through guardedRequest, which connects to the very address it
+ * checked, so there is no DNS-rebinding window between check and connect.
  */
 export async function assertPublicHost(url, config) {
   if (config.READER_ALLOW_PRIVATE_URLS === "1") return;
@@ -85,11 +87,24 @@ const MAX_REDIRECTS = 5;
 
 async function fetchUrl(url, config, fetchImpl) {
   const capBytes = Number(config.READER_MAX_UPLOAD_MB || 50) * 1024 * 1024;
-  const doFetch = fetchImpl || fetch;
+
+  if (!fetchImpl) {
+    // Live path: the shared guarded request (checks every hop, connects only to the checked
+    // address, one whole-call deadline). The reader keeps its own deadline and size cap.
+    const r = await guardedRequest(url, {
+      maxBytes: capBytes,
+      timeoutMs: FETCH_TIMEOUT_MS,
+      accept: "text/html, application/pdf, */*",
+      allowPrivate: config.READER_ALLOW_PRIVATE_URLS === "1",
+    });
+    if (r.http_status < 200 || r.http_status > 299) throw new Error(`HTTP ${r.http_status} fetching ${url}`);
+    return { contentType: r.content_type, buffer: r.buffer };
+  }
+  const doFetch = fetchImpl;
 
   // Follow redirects MANUALLY so every hop passes the SSRF guard; a
   // public URL that 302s to a private address must not slip through.
-  // Injected fetchImpl (tests) skips the DNS guard but keeps the loop.
+  // Injected fetchImpl (the bundle's own tests) keeps this loop.
   let current = url;
   let res = null;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -97,7 +112,6 @@ async function fetchUrl(url, config, fetchImpl) {
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       throw new Error(`unsupported URL scheme: ${parsed.protocol}`);
     }
-    if (!fetchImpl) await assertPublicHost(current, config);
     res = await doFetch(current, {
       headers: { "User-Agent": USER_AGENT, Accept: "text/html, application/pdf, */*" },
       redirect: "manual",
