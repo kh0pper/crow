@@ -120,6 +120,56 @@ test("door to cloud refused for classifier", async () => {
   assert.deepEqual(gw, statusOf(want));
 });
 
+// 2026-10-28 hotfix: the AUTO pick walks doors too. "a-door" sorts first and is
+// resident, so without the door walk it would win on both readers.
+const DOOR_POLICY = { alwaysResident: true, door_forward: true };
+
+test("auto pick skips an own-loopback door to a cloud upstream on both readers (next local, else none)", async () => {
+  addProvider("a-door", "http://127.0.0.1:3001/llm/p/cloud-a/v1", CLS, { gpuPolicy: DOOR_POLICY });
+  addProvider("cloud-a", "https://api.example.com/v1", CLS, { host: "cloud", gpuPolicy: {} });
+  const bot0 = readBotClassifierSync(conn);
+  assert.equal(bot0.ok, false); assert.equal(bot0.reason, "none");
+  const gw0 = await getClassifierStatus(db, { probe: false });
+  assert.equal(gw0.state, "missing"); assert.equal(gw0.reason, "none");
+
+  addProvider("local-cls", "http://127.0.0.1:8099/v1", CLS);
+  const bot = readBotClassifierSync(conn);
+  assert.equal(bot.ok, true); assert.equal(bot.source, "auto"); assert.equal(bot.providerId, "local-cls");
+  const gw = await getClassifierStatus(db, { probe: false });
+  assert.equal(gw.state, "ready"); assert.equal(gw.source, "auto"); assert.equal(gw.providerId, "local-cls");
+});
+
+test("a door to a LOCAL upstream is still picked on both readers (the walk, not a blanket door ban)", async () => {
+  addProvider("local-up", "http://127.0.0.1:8099/v1", CLS, { gpuPolicy: {} });
+  addProvider("a-door", "http://127.0.0.1:3001/llm/p/local-up/v1", CLS, { gpuPolicy: DOOR_POLICY });
+  assert.equal(readBotClassifierSync(conn).providerId, "a-door");
+  assert.equal((await getClassifierStatus(db, { probe: false })).providerId, "a-door");
+  // ...and when the operator names it.
+  setRaw("bot_safety_classifier", "a-door/qwen3.5-4b");
+  const bot = readBotClassifierSync(conn);
+  assert.equal(bot.source, "setting"); assert.equal(bot.providerId, "a-door");
+  const gw = await getClassifierStatus(db, { probe: false });
+  assert.equal(gw.source, "setting"); assert.equal(gw.providerId, "a-door");
+});
+
+test("an operator setting naming a door to the cloud is refused on both readers (setting-cloud)", async () => {
+  addProvider("local-cls", "http://127.0.0.1:8099/v1", CLS);
+  addProvider("a-door", "http://127.0.0.1:3001/llm/p/cloud-a/v1", CLS, { gpuPolicy: DOOR_POLICY });
+  addProvider("cloud-a", "https://api.example.com/v1", CLS, { host: "cloud", gpuPolicy: {} });
+  setRaw("bot_safety_classifier", "a-door/qwen3.5-4b");
+  const bot = readBotClassifierSync(conn);
+  assert.equal(bot.ok, false); assert.equal(bot.reason, "setting-cloud");
+  const gw = await getClassifierStatus(db, { probe: false });
+  assert.equal(gw.state, "misconfigured"); assert.equal(gw.reason, "setting-cloud");
+});
+
+test("no isCloud: the auto pick is unchanged (the door row still wins)", () => {
+  addProvider("a-door", "http://127.0.0.1:3001/llm/p/cloud-a/v1", CLS, { gpuPolicy: DOOR_POLICY });
+  addProvider("cloud-a", "https://api.example.com/v1", CLS, { host: "cloud", gpuPolicy: {} });
+  addProvider("local-cls", "http://127.0.0.1:8099/v1", CLS);
+  assert.equal(autoPick().providerId, "a-door");
+});
+
 test("operator setting beats role", async () => {
   addProvider("local-cls", "http://127.0.0.1:8099/v1", CLS);
   addProvider("local-cls2", "http://127.0.0.1:8098/v1", CLS);

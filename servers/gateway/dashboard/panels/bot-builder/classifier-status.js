@@ -51,18 +51,24 @@ export async function getClassifierStatus(db, { probe = true, fetchImpl = fetch,
   try { ownInstanceId = getOrCreateLocalInstanceId(); } catch {}
   // A chosen safety role sits between the setting and the automatic pick
   // (seeded never counts). isCloud reads the camelCase role-context providers;
-  // selectBotClassifier keeps the raw rows above (N1).
-  let roleKey = null, roleProviders = [];
+  // selectBotClassifier keeps the raw rows above (N1). Every path needs the
+  // provider list: a door row on loopback can forward to a cloud upstream, so
+  // the setting and the automatic pick walk doors too. No list means every
+  // door counts as cloud (fail closed).
+  let roleKey = null, roleProviders = null;
+  try {
+    const ps = (await loadRoleContext(db)).providers;
+    if (Array.isArray(ps)) roleProviders = ps;
+  } catch { roleProviders = null; }
   if (setting == null || String(setting).trim() === "") {
     try {
       roleKey = (await resolveRole(db, "role:safety", { need: "chat", chosenOnly: true })).key;
-      if (roleKey) roleProviders = (await loadRoleContext(db)).providers;
     } catch { roleKey = null; }
   }
-  const picked = selectClassifierWithRole({
-    setting, roleKey, rows: providers, ownAddresses, ownInstanceId,
-    isCloud: (k) => isCloudKey(k, { providers: roleProviders, ownAddrs: ownAddresses }),
-  });
+  const isCloud = roleProviders
+    ? (k) => isCloudKey(k, { providers: roleProviders, ownAddrs: ownAddresses })
+    : () => true;
+  const picked = selectClassifierWithRole({ setting, roleKey, rows: providers, ownAddresses, ownInstanceId, isCloud });
   const sel = await resolveClassifierEndpoint(picked, { lookup });
   if (!sel.ok) {
     return {
