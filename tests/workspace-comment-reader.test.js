@@ -55,3 +55,11 @@ test("close-time writers keep existing durableIds (addDurableRows only appends)"
   assert.deepEqual(after.threads.map((t) => t.durableId), before);
   assert.equal(after.threads[0].replies.length, 2);
 });
+
+test("a real ONLYOFFICE save maps its root durableId (guards the reader against the self-built helper)", () => {
+  const { threads, people } = readCommentThreads(openDocx(readFileSync(join(FIX, "oo-rich.docx"))));
+  assert.equal(threads.length, 1);
+  assert.equal(threads[0].durableId, "32B882E4");
+  assert.equal(threads[0].author, "Sam");
+  assert.equal(people.size, 0, "this fixture has no people.xml");
+});
