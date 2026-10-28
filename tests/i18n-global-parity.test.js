@@ -72,6 +72,7 @@ const IDENTICAL_OK = new Set([
   "settings.local",
   "settings.tailnetLan", // "Tailnet / LAN"
   "settings.url",
+  "settings.roles.embed", // "Embeddings": the loanword is standard in Spanish ML usage (roles plan table)
   "syncConflicts.colOp", // "Op" — abbreviation of operación
   "contacts.typeManual", // "Manual" is Spanish too
   "contacts.fieldCrowId", // "Crow ID" — product term

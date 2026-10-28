@@ -25,7 +25,7 @@ import { openStream } from "../streams/sse.js";
 import { resolveProviderConfig } from "../ai/resolve-profile.js";
 import { checkVendorSwitch } from "../ai/vendor-guard.js";
 import { listProvidersAll, findUsableProviderRow } from "../../shared/providers-db.js";
-import { chooseProvider as smartRoute, stripSlashCommand, SmartChatDisabled } from "../ai/smart-router.js";
+import { chooseProvider as smartRoute, stripSlashCommand, SmartChatDisabled, resolveSmartTierKeys } from "../ai/smart-router.js";
 import { fixedWindowLimit } from "../middleware/rate-limit.js";
 import { recordUsageEvent } from "../../shared/metering.js";
 import { resolveTenantId } from "../../shared/tenancy.js";
@@ -643,6 +643,7 @@ export default function chatRouter(dashboardAuth) {
               currentModel: conversation.model,
               autoRules: pf.auto_rules || null,
               providers: all,
+              tierKeys: () => resolveSmartTierKeys(db),
             });
             if (smartRoute_result.provider_id) effectiveProvider = smartRoute_result.provider_id;
             if (smartRoute_result.model_id) effectiveModel = smartRoute_result.model_id;

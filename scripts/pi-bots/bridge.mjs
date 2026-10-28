@@ -68,6 +68,7 @@ import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
 import { getOrCreateLocalInstanceId } from "../../servers/gateway/instance-registry.js";
 import { TRUSTED_PEER_SQL } from "../../servers/shared/peer-trust.js";
+import { roleSnapshotPath } from "../../servers/shared/model-roles-env.js";
 
 const HOME = process.env.HOME || homedir();
 // Package was renamed from @mariozechner/pi-coding-agent to
@@ -89,14 +90,17 @@ const PROMPT_ACK_TIMEOUT_MS = Number(process.env.PIBOT_PROMPT_ACK_TIMEOUT_MS || 
 // production and better-sqlite3 has no URI support, so the scheme is stripped
 // at the OPEN. Every card-database path in this module flows through here.
 /** C-12 spawn_env hygiene: drops engine-reserved keys (PI_BOT_*, PIBOT_*,
- *  CROW_PI_SANDBOX) and CROW_ACTOR_* (a def must not spoof the actor). */
+ *  CROW_PI_SANDBOX, CROW_MODEL_ROLES_FILE) and CROW_ACTOR_* (a def must not
+ *  spoof the actor). */
 export function filterSpawnEnvWithReport(def) {
   const spawnEnv = {};
   const stripped = [];
   for (const k of Object.keys((def && def.spawn_env) || {})) {
     // CROW_PI_SANDBOX is the operator's switch for the pi sandbox; a bot def must
     // not be able to turn the sandbox off for itself.
-    if (/^PI_BOT_|^PIBOT_|^CROW_ACTOR_/.test(k) || k === "CROW_PI_SANDBOX") { stripped.push(k); continue; }
+    // CROW_MODEL_ROLES_FILE names the instance's role snapshot pi reads; a def
+    // must not point pi at a file of its choosing.
+    if (/^PI_BOT_|^PIBOT_|^CROW_ACTOR_/.test(k) || k === "CROW_PI_SANDBOX" || k === "CROW_MODEL_ROLES_FILE") { stripped.push(k); continue; }
     spawnEnv[k] = def.spawn_env[k];
   }
   return { spawnEnv, stripped };
@@ -447,9 +451,12 @@ export class PiRpc {
         PI_BOT_PERMISSION_POLICY: JSON.stringify(piPolicy) },
       spawnEnv,
       // C-12: the interactive engine's per-session overrides (e.g.
-      // PI_BOT_INTERACTIVE:"1") — merged LAST so they win over both the
+      // PI_BOT_INTERACTIVE:"1") — merged after these so they win over both the
       // computed defaults above and the (already-stripped) def.spawn_env.
-      opts.extraEnv || {});
+      opts.extraEnv || {},
+      // Model roles: the instance's role snapshot. After extraEnv (M2), so
+      // nothing a caller or def passes can repoint it.
+      { CROW_MODEL_ROLES_FILE: roleSnapshotPath() });
     // The bot's own project workspace (PI_BOT_WORKSPACE / _PROJECTS_ROOT /
     // _ID) for pi-lab's bash check: commands inside it are not "sensitive"
     // just for sitting under the instance's data dir. INTERACTIVE (Perch)
@@ -1186,7 +1193,9 @@ export async function handleInbound(opts) {
   // echo the model — it returns sessionId/messageCount only).
   log("model-resolve bot=" + bot_id + " provider=" + resolved.provider + " model=" + resolved.model +
     " escalated=" + resolved.escalated + " source=" + resolved.source +
-    " session=" + (effectiveResume ? "resume" : "new") + (forceNew ? " (forced-new: model changed)" : ""));
+    " session=" + (effectiveResume ? "resume" : "new") + (forceNew ? " (forced-new: model changed)" : "") +
+    (resolved.role ? " role=" + resolved.role + " via=" + (resolved.chain || []).join(">") : "") +
+    (resolved.escalationRole ? " escalation-role=" + resolved.escalationRole + " unresolved=" + resolved.escalationReason : ""));
 
   // C-6 `kind` plumb: an adapter that declares one (perch does) tags the row;
   // one that does not is left EXACTLY as before — the INSERT path defaults

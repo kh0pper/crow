@@ -287,6 +287,20 @@ export function createVoiceTurnRunner(deps) {
   const withSuffix = (system, suffix) => (suffix ? `${system}\n\n${suffix}` : system);
 
   /**
+   * This turn's voice keys (roles Phase 1): the router's fast/escalate keys as resolved now (env, a chosen
+   * voice/everyday binding, else the raw constants), and the bot's own fast key (a `role:` ref resolved, a raw key
+   * as it is, none = the fast key). Without deps.resolveVoiceKeys / deps.resolveBotVoiceKey: deps.fastKey,
+   * deps.escalateKey and `bot.fast_voice_model || deps.fastKey`, exactly as before.
+   */
+  async function voiceKeys(db, bot) {
+    const keys = deps.resolveVoiceKeys ? await deps.resolveVoiceKeys(db) : { fast: deps.fastKey, escalate: deps.escalateKey };
+    const fastKey = deps.resolveBotVoiceKey
+      ? await deps.resolveBotVoiceKey(db, bot.fast_voice_model, { fallback: keys.fast })
+      : (bot.fast_voice_model || keys.fast);
+    return { keys, fastKey };
+  }
+
+  /**
    * The fit ladder for one bot on one model (prompt-fit.js): the full system message, else the
    * one without the bot's skill bodies, else too large. `full` = an already-built full message.
    */
@@ -307,7 +321,7 @@ export function createVoiceTurnRunner(deps) {
   async function assessBot({ db, botId, memoryOn = false, extraTools, denyTools, promptSuffix }) {
     const bot = await loadBot(db, botId);
     if (!bot) return null;
-    const key = bot.fast_voice_model || deps.fastKey;
+    const { fastKey: key } = await voiceKeys(db, bot);
     const extra = Array.isArray(extraTools) ? extraTools : [];
     const tools = turnTools(bot, { memoryOn, extra, deny: turnDeny(denyTools, extra) });
     const fit = await promptFit({ db, bot, tools, promptSuffix, key });
@@ -331,6 +345,8 @@ export function createVoiceTurnRunner(deps) {
     if (!fam) return null;
     const bot = await loadBot(db, botId);
     if (!bot) return null;
+    // Only the escalate side is read here (whether an escalation could happen at all).
+    const keys = deps.resolveVoiceKeys ? await deps.resolveVoiceKeys(db) : { fast: deps.fastKey, escalate: deps.escalateKey };
     const extra = Array.isArray(extraTools) ? extraTools : [];
     const extraNames = new Set(extra.map((x) => x?.definition?.name));
     const deny = turnDeny(denyTools, extra);
@@ -346,8 +362,8 @@ export function createVoiceTurnRunner(deps) {
       hidden = [...deps.connectedAddonTools()].filter((n) => !direct.has(n) && (!scope || scope.selectedToolNames.has(n)));
     }
     let escalates = false;
-    if (deps.escalateKey && typeof deps.toolEscalationEnabled === "function" && deps.toolEscalationEnabled() === true) {
-      try { escalates = !!(await deps.resolveKey(deps.escalateKey))?.baseUrl; } catch { escalates = false; }
+    if (keys.escalate && typeof deps.toolEscalationEnabled === "function" && deps.toolEscalationEnabled() === true) {
+      try { escalates = !!(await deps.resolveKey(keys.escalate))?.baseUrl; } catch { escalates = false; }
     }
     // As the turn reads it (displayAsked / displayBacks); a display tool that throws is taken as taking the request.
     const displayBacks = (t) => {
@@ -690,6 +706,7 @@ export function createVoiceTurnRunner(deps) {
       }
       if (!bot) { fail("no_bound_bot", false); return result; }
       voiceKind = isVoiceBotDef(bot);
+      const { keys, fastKey } = await voiceKeys(db, bot);
       history = convo.get(device.id);
       // First-audio budget (smoke 2026-10-04 #19: a 24.5 s silent tool loop). Counted from the turn
       // start; only answer audio stops it, so an escalation's "One moment." is followed by the fallback.
@@ -912,11 +929,11 @@ export function createVoiceTurnRunner(deps) {
       // A voice bot with escalation off (Bot Builder) is taken as opts.noEscalate.
       const noEscalate = opts.noEscalate === true || normalizeVoiceSettings(bot).escalation === "off";
       const decision = mustX?.mustRoute === "fast" || noEscalate || calendarFallback
-        ? { route: "fast", reason: noEscalate ? "no-escalate" : calendarFallback ? "calendar-fallback" : "must-fast", key: bot.fast_voice_model || deps.fastKey }
-        : deps.chooseVoiceRoute(routeView, { hasTools: cls0.quickTools.length > 0 || unlisted.length > 0 || wrapperWithheld || actionWithheld, actionIntent: actionWithheld });
+        ? { route: "fast", reason: noEscalate ? "no-escalate" : calendarFallback ? "calendar-fallback" : "must-fast", key: fastKey }
+        : deps.chooseVoiceRoute(routeView, { hasTools: cls0.quickTools.length > 0 || unlisted.length > 0 || wrapperWithheld || actionWithheld, actionIntent: actionWithheld, keys });
       // A quick-model turn that will end on the no-tool can't-do below makes no adapter at all (no model is touched).
       const noToolAhead = decision.route !== "escalate" && actionAsked && !displayBacks && !quickTools.some((t) => !extraByName.has(t.name));
-      let chat = noToolAhead ? null : await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
+      let chat = noToolAhead ? null : await deps.createChatAdapter(fastKey, db);
       result.route = "fast";
       if (decision.route === "escalate") {
         // The filler runs alongside the (real-timer) readiness wait. A handler is attached NOW
@@ -981,7 +998,7 @@ export function createVoiceTurnRunner(deps) {
         userMsg.content = withTurnContext(ctxLine, transcript);
         for (let i = 0; i < echoGuard.length; i += 1) echoGuard[i] = dropPastRule(echoGuard[i]);
       }
-      if (!chat) chat = await deps.createChatAdapter(bot.fast_voice_model || deps.fastKey, db);
+      if (!chat) chat = await deps.createChatAdapter(fastKey, db);
       if (unlisted.length) {
         const once = `${bot.bot_id}|${unlisted.join(",")}`;
         if (!famLogged.has(once)) { famLogged.add(once); log(`[voice-turn] ${device.id} bot ${bot.bot_id}: tool families with no voice intent list are offered only on escalated turns: ${unlisted.join(", ")}`); }
@@ -990,7 +1007,7 @@ export function createVoiceTurnRunner(deps) {
       // 4b. Prompt fit, against the model this turn really uses. A bound bot's skills are inlined
       // in the system message; a general assistant with many skills was ~41k tokens against the
       // 4B's 8,192 and every turn failed. Full prompt → the one without skill bodies → no call.
-      const modelKey = result.escalated ? decision.key : (bot.fast_voice_model || deps.fastKey);
+      const modelKey = result.escalated ? decision.key : fastKey;
       // Decided on allTools (every extra counted, as the panel does), so an extra tool that is
       // hidden this turn never flips the level — and the system message — between turns.
       const fit = await promptFit({ db, bot, tools: allTools, promptSuffix: opts.promptSuffix, key: modelKey, full: withSuffix(system, opts.promptSuffix) });
@@ -1322,7 +1339,7 @@ export function createVoiceTurnRunner(deps) {
           steppedUp = true;
           let fillerErr = null;
           const filler = say.filler().catch((err) => { fillerErr = err; });
-          const ready = await readyEscalation(deps.escalateKey ?? decision.key, db, llmSignal);
+          const ready = await readyEscalation(keys.escalate ?? decision.key, db, llmSignal);
           await filler;
           if (fillerErr && !aborted() && !mute.signal.aborted) {
             log(`[voice-turn] ${device.id} filler TTS failed: ${fillerErr.message}`);
@@ -1723,7 +1740,7 @@ export function createVoiceTurnRunner(deps) {
           steppedUp = true;
           let fillerErr = null;
           const filler = say.filler().catch((err) => { fillerErr = err; });
-          const ready = await readyEscalation(deps.escalateKey ?? decision.key, db, llmSignal);
+          const ready = await readyEscalation(keys.escalate ?? decision.key, db, llmSignal);
           await filler;
           if (fillerErr && !aborted() && !mute.signal.aborted) {
             log(`[voice-turn] ${device.id} filler TTS failed: ${fillerErr.message}`);
@@ -2028,6 +2045,9 @@ export async function defaultVoiceDeps() {
     probeReady: router.probeVoiceReady,
     acquire: (providerId) => orch.maybeAcquireLocalProvider(providerId, { requester: "kiosk" }),
     chooseVoiceRoute: router.chooseVoiceRoute,
+    // Per turn: env, then a chosen voice/everyday role, then the raw keys below (roles Phase 1).
+    resolveVoiceKeys: (db) => router.resolveVoiceKeys(db),
+    resolveBotVoiceKey: router.resolveBotVoiceKey,
     fastKey: router.VOICE_ROUTE_KEYS.fast,
     // The ability line ("By voice on displays"): may an action escalate, and to which model.
     escalateKey: router.VOICE_ROUTE_KEYS.escalate,

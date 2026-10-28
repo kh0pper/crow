@@ -35,6 +35,7 @@ import { getOwnAddresses, isLocallyOrchestratable } from "./locality.js";
 import { localizeNativeRow } from "./native-locality.js";
 import { modelsJsonSearchPaths } from "./models-json-paths.js";
 import { emitOrQueue } from "./sync-emit.js";
+import { providerRowToObject } from "./provider-row.js";
 import { inferHost, repairHostDecision } from "./provider-host.js";
 import { isExternalEngine, engineShapeError, externalEngineConflict } from "./provider-engine.js";
 
@@ -165,10 +166,22 @@ let _providerChangeHook = null;
  * Replicated applies do not pass through here; the hourly tick covers them. */
 export function setProviderChangeHook(fn) { _providerChangeHook = typeof fn === "function" ? fn : null; }
 
+const _providerChangeListeners = new Set();
+/** Extra fire-and-forget listeners, called after the hook on the same writes
+ * (the role snapshot). Each is try/caught. Returns the unsubscribe. */
+export function addProviderChangeListener(fn) {
+  if (typeof fn !== "function") return () => {};
+  _providerChangeListeners.add(fn);
+  return () => { _providerChangeListeners.delete(fn); };
+}
+
 async function emitSync(db, op, row) {
   await emitOrQueue(_syncManager, db, "providers", op, row);
   if (_providerChangeHook) {
     try { _providerChangeHook({ op, id: row?.id }); } catch (err) { console.warn(`[providers] change hook failed: ${err.message}`); }
+  }
+  for (const fn of _providerChangeListeners) {
+    try { fn({ op, id: row?.id }); } catch (err) { console.warn(`[providers] change listener failed: ${err.message}`); }
   }
 }
 
@@ -443,28 +456,7 @@ export async function disableProvider(db, id) {
  */
 export async function listProvidersAll(db) {
   const { rows } = await db.execute("SELECT * FROM providers ORDER BY disabled ASC, id");
-  return rows.map((r) => {
-    let models = [];
-    try { models = JSON.parse(r.models || "[]"); } catch {}
-    let gpuPolicy = null;
-    try { gpuPolicy = r.gpu_policy ? JSON.parse(r.gpu_policy) : null; } catch {}
-    return {
-      id: r.id,
-      baseUrl: r.base_url,
-      apiKey: r.api_key,
-      host: r.host,
-      bundleId: r.bundle_id,
-      provider_type: r.provider_type || null,
-      description: r.description,
-      models,
-      gpuPolicy,
-      disabled: !!r.disabled,
-      lamport_ts: r.lamport_ts,
-      instance_id: r.instance_id,
-      created_at: r.created_at,
-      updated_at: r.updated_at,
-    };
-  });
+  return rows.map(providerRowToObject);
 }
 
 /**

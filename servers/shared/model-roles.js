@@ -39,10 +39,32 @@ export const CORE_ROLES = Object.freeze([
   role("vision", "vision", false, []),
   role("embed", "embed", false, []),
   role("rerank", "score", false, []),
-  role("safety", "chat", false, ["quick"]),
+  role("safety", "chat", false, []),
+  role("voice", "chat", false, []),
+  role("stt", "transcription", false, []),
+  role("tts", "speech", false, []),
+  role("image", "image", false, []),
+  role("video", "video", false, []),
 ]);
 
 const CORE_BY_ID = new Map(CORE_ROLES.map((r) => [r.id, r]));
+
+/** Roles with these capabilities have no chat-style resolver yet: they refuse. */
+export const MEDIA_CAPABILITIES = Object.freeze(["transcription", "speech", "image", "video"]);
+const isMedia = (def) => MEDIA_CAPABILITIES.includes(def?.capability);
+
+/** id -> i18n key of the role's display name. */
+export const ROLE_LABEL_KEYS = Object.freeze(Object.fromEntries(CORE_ROLES.map((r) => [r.id, `settings.roles.${r.id}`])));
+
+export const ROLE_BINDING_PREFIX = "model_role.";
+export const ROLE_DEF_PREFIX = "model_role_def.";
+export const SUBAGENT_MAP_KEY = "model_role_subagents";
+/** `key >= lo AND key < hi` covers every role row (bindings, defs, the sub-agent map), used instead of LIKE. */
+export const ROLE_KEY_RANGE = Object.freeze({ lo: "model_role", hi: "model_rolf" });
+
+export function bindingKey(id) {
+  return ROLE_BINDING_PREFIX + id;
+}
 
 export function isRoleRef(key) {
   return typeof key === "string" && key.startsWith(ROLE_REF_PREFIX) && key.length > ROLE_REF_PREFIX.length;
@@ -173,69 +195,194 @@ function classOk(providerId, catalogId, catalog, allowHeavy, servingOverrides) {
   return typeof override === "string" && override === cls;
 }
 
+/** A raw `provider/model` key (both halves non-empty). The one definition: the store and the seed import it. */
+export const isRawKey = (k) => { const { provider, model } = splitKey(k); return !!(provider && model); };
+const isStringArray = (a) => Array.isArray(a) && a.every((x) => typeof x === "string");
+
+/**
+ * One `model_role.<id>` value. Corrupt JSON, a non-object, or a model that is
+ * neither a raw `provider/model` nor a `role:` ref gives null. Never throws.
+ * @returns {{model:string|null, fallback?:string[], seeded:boolean}|null}
+ */
+export function parseBindingValue(raw) {
+  let v;
+  try { v = typeof raw === "string" ? JSON.parse(raw) : raw; } catch { return null; }
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const model = v.model ?? null;
+  if (model !== null && !(typeof model === "string" && (isRoleRef(model) || isRawKey(model)))) return null;
+  const out = { model };
+  if (isStringArray(v.fallback)) out.fallback = [...v.fallback];
+  out.seeded = v.seeded === true;
+  return out;
+}
+
+const CUSTOM_CAPABILITIES = ["chat", "vision"];
+
+function parseCustomDef(raw) {
+  let v;
+  try { v = typeof raw === "string" ? JSON.parse(raw) : raw; } catch { return null; }
+  if (!v || typeof v !== "object" || Array.isArray(v) || !CUSTOM_CAPABILITIES.includes(v.capability)) return null;
+  // Spec 10-21 §3.2: a definition is {label, job, capability}; anything else is dropped.
+  const def = { capability: v.capability };
+  if (typeof v.label === "string") def.label = v.label;
+  if (typeof v.job === "string") def.job = v.job;
+  return def;
+}
+
+/**
+ * `dashboard_settings` rows ({key, value}) -> {bindings, customDefs}. Unknown
+ * ids, corrupt values, and custom defs whose capability is not chat or vision
+ * are dropped. A custom binding is kept only when its definition survives.
+ */
+export function parseBindingRows(rows) {
+  const bindings = {}, customDefs = {};
+  const list = Array.isArray(rows) ? rows : [];
+  for (const r of list) {
+    const k = r?.key;
+    if (typeof k !== "string" || !k.startsWith(ROLE_DEF_PREFIX)) continue;
+    const id = k.slice(ROLE_DEF_PREFIX.length);
+    if (!isValidCustomRoleId(id)) continue;
+    const def = parseCustomDef(r.value);
+    if (def) customDefs[id] = def;
+  }
+  for (const r of list) {
+    const k = r?.key;
+    if (typeof k !== "string" || !k.startsWith(ROLE_BINDING_PREFIX)) continue;
+    const id = k.slice(ROLE_BINDING_PREFIX.length);
+    if (!CORE_BY_ID.has(id) && !customDefs[id]) continue;
+    const b = parseBindingValue(r.value);
+    if (b) bindings[id] = b;
+  }
+  return { bindings, customDefs };
+}
+
+function makeDefOf(customDefs) {
+  return (id) => CORE_BY_ID.get(id) || (isValidCustomRoleId(id) && customDefs?.[id]
+    ? { id, capability: customDefs[id].capability || "chat", allowHeavy: !!customDefs[id].allowHeavy, defaultFallback: customDefs[id].fallback || [] }
+    : null);
+}
+
+/**
+ * Walk a role's chain (bound model, then fallbacks, depth-first), yielding
+ * every candidate in visit order:
+ *   {role, key, verdict, filtered}
+ * verdict: ok | not_configured | foreign | capability | class (a raw-key
+ * candidate), or cycle | too_deep (key null). "not configured" is decided
+ * first; the foreign, capability and class filters are still evaluated for a
+ * not-configured candidate whenever a provider row or catalog entry exists,
+ * and `filtered` is true when any filter rejects it, whatever the verdict.
+ *
+ * A heavy (non-resident) model needs allowHeavy on both the root and the role
+ * that binds it, so an automatic root never reaches one through a fallback.
+ *
+ * `out.chain` (optional) receives the roles visited so far, live.
+ * Unknown and media roots yield nothing.
+ */
+export function* walkRole(rootId, ctx = {}, out = {}) {
+  const { need, bindings = {}, customDefs = {}, providers = [], models, catalog = [], ownInstanceId, servingOverrides = {} } = ctx;
+  const defOf = makeDefOf(customDefs);
+  const root = defOf(rootId);
+  const chain = (out.chain = []);
+  if (!root || isMedia(root)) return;
+  const wanted = need || root.capability;
+  const onPath = new Set(); // roles reached by indirection or fallback on the current path
+  const seen = new Set();   // every role already tried (fallback revisits are skipped silently)
+
+  const judge = (id, rawKey, def) => {
+    const configured = isConfigured(rawKey, { models });
+    const { provider, model } = splitKey(rawKey);
+    const p = providerById(providers, provider);
+    let foreign = false, capability = false;
+    if (p) {
+      if (isInstanceIdShape(p.host)) {
+        if (typeof ownInstanceId === "function") foreign = isForeignInstanceHost(p.host, ownInstanceId);
+        else if (configured) throw new TypeError("resolveRoleKey: ownInstanceId (a function) is required to resolve a role");
+        else foreign = true; // cannot prove it is ours: fail closed for a candidate list
+      }
+      capability = !capabilityOk(wanted, p, model);
+    }
+    // Without a provider row the foreign check is not applicable, but the catalog class still is.
+    // An automatic root never lands on a windowed/wedge-risk model through a chain (10-21 §5): root AND binder must allow heavy.
+    const heavy = !classOk(provider, p?.gpuPolicy?.catalogId || provider, catalog, root.allowHeavy && def.allowHeavy, servingOverrides);
+    const verdict = !configured ? "not_configured" : foreign ? "foreign" : capability ? "capability" : heavy ? "class" : "ok";
+    return { role: id, key: rawKey, verdict, filtered: foreign || capability || heavy };
+  };
+
+  function* visit(id, viaIndirection, depth) {
+    if (onPath.has(id) && viaIndirection) { yield { role: id, key: null, verdict: "cycle", filtered: false }; return; }
+    if (seen.has(id)) return;
+    if (depth > MAX_CHAIN_DEPTH || seen.size >= MAX_VISITS) { yield { role: id, key: null, verdict: "too_deep", filtered: false }; return; }
+    const def = defOf(id);
+    if (!def) return;
+    seen.add(id); onPath.add(id); chain.push(id);
+    if (isMedia(def)) {
+      yield { role: id, key: null, verdict: "capability", filtered: true };
+    } else {
+      const b = bindings?.[id] || {};
+      if (typeof b.model === "string" && b.model) {
+        if (isRoleRef(b.model)) yield* visit(roleIdOf(b.model), true, depth + 1);
+        else yield judge(id, b.model, def);
+      }
+      const fb = Array.isArray(b.fallback) ? b.fallback : def.defaultFallback;
+      for (const f of fb) yield* visit(isRoleRef(f) ? roleIdOf(f) : f, false, depth + 1);
+    }
+    onPath.delete(id);
+  }
+
+  yield* visit(rootId, false, 1);
+}
+
+const bareRoleId = (r) => (isRoleRef(r) ? roleIdOf(r) : r);
+
+/** The usable candidates of a role in resolver order: configured-or-not, never filtered, each key once (its first occurrence). */
+export function roleCandidates(roleId, ctx = {}) {
+  const out = [];
+  const seen = new Set();
+  for (const e of walkRole(bareRoleId(roleId), ctx)) {
+    if (!e.key || e.filtered || !(e.verdict === "ok" || e.verdict === "not_configured") || seen.has(e.key)) continue;
+    seen.add(e.key);
+    out.push({ role: e.role, key: e.key });
+  }
+  return out;
+}
+
 /**
  * Resolve `key` (raw `provider/model` or `role:<id>`) to a usable raw key.
  * @returns {{key:string|null, role:string|null, chain:string[], reason:string}}
  * reason is one of: raw | bound | fallback | unknown_role | cycle | too_deep | capability | not_configured | unset
+ * (a media root, MEDIA_CAPABILITIES, is refused with "capability").
  */
-export function resolveRoleKey(key, { need, bindings = {}, customDefs = {}, providers = [], models, catalog = [], ownInstanceId, servingOverrides = {} } = {}) {
+export function resolveRoleKey(key, ctx = {}) {
   if (!isRoleRef(key)) return { key: key ?? null, role: null, chain: [], reason: "raw" };
   const rootId = roleIdOf(key);
-  const defOf = (id) => CORE_BY_ID.get(id) || (isValidCustomRoleId(id) && customDefs?.[id]
-    ? { id, capability: customDefs[id].capability || "chat", allowHeavy: !!customDefs[id].allowHeavy, defaultFallback: customDefs[id].fallback || [] }
-    : null);
-  const root = defOf(rootId);
+  const root = makeDefOf(ctx.customDefs)(rootId);
   if (!root) return { key: null, role: rootId, chain: [], reason: "unknown_role" };
+  if (isMedia(root)) return { key: null, role: rootId, chain: [], reason: "capability" };
 
-  const chain = [];
-  const onPath = new Set(); // roles reached by indirection or fallback on the current path
-  const seen = new Set();   // every role already tried (fallback revisits are skipped silently)
+  const trace = {};
   let cycle = false, tooDeep = false, sawCapability = false, sawNotConfigured = false;
-  const wanted = need || root.capability;
-
-  const tryRaw = (rawKey, def) => {
-    if (!isConfigured(rawKey, { models })) { sawNotConfigured = true; return false; }
-    const { provider, model } = splitKey(rawKey);
-    const p = providerById(providers, provider);
-    if (p) {
-      if (isInstanceIdShape(p.host)) {
-        if (typeof ownInstanceId !== "function") throw new TypeError("resolveRoleKey: ownInstanceId (a function) is required to resolve a role");
-        if (isForeignInstanceHost(p.host, ownInstanceId)) { sawNotConfigured = true; return false; }
-      }
-      if (!capabilityOk(wanted, p, model)) { sawCapability = true; return false; }
-    }
-    // Without a provider row the foreign check is not applicable, but the catalog class still is.
-    if (!classOk(provider, p?.gpuPolicy?.catalogId || provider, catalog, def.allowHeavy, servingOverrides)) { sawNotConfigured = true; return false; }
-    return true;
-  };
-
-  // Returns a raw key or null. `viaIndirection` marks a model that is itself a role ref.
-  const visit = (id, viaIndirection, depth) => {
-    if (onPath.has(id) && viaIndirection) { cycle = true; return null; }
-    if (seen.has(id)) return null;
-    if (depth > MAX_CHAIN_DEPTH || seen.size >= MAX_VISITS) { tooDeep = true; return null; }
-    const def = defOf(id);
-    if (!def) return null;
-    seen.add(id); onPath.add(id); chain.push(id);
-    const b = bindings?.[id] || {};
-    let found = null;
-    if (typeof b.model === "string" && b.model) {
-      if (isRoleRef(b.model)) found = visit(roleIdOf(b.model), true, depth + 1);
-      else if (tryRaw(b.model, def)) found = b.model;
-    }
-    if (!found) {
-      const fb = Array.isArray(b.fallback) ? b.fallback : def.defaultFallback;
-      for (const f of fb) {
-        found = visit(isRoleRef(f) ? roleIdOf(f) : f, false, depth + 1);
-        if (found) break;
-      }
-    }
-    onPath.delete(id);
-    return found;
-  };
-
-  const found = visit(rootId, false, 1);
-  if (found) return { key: found, role: rootId, chain, reason: chain.length > 1 ? "fallback" : "bound" };
+  for (const e of walkRole(rootId, ctx, trace)) {
+    if (e.verdict === "ok") return { key: e.key, role: rootId, chain: [...trace.chain], reason: trace.chain.length > 1 ? "fallback" : "bound" };
+    if (e.verdict === "cycle") cycle = true;
+    else if (e.verdict === "too_deep") tooDeep = true;
+    else if (e.verdict === "capability") sawCapability = true;
+    else sawNotConfigured = true; // not_configured, foreign, class
+  }
   const reason = cycle ? "cycle" : tooDeep ? "too_deep" : sawCapability ? "capability" : sawNotConfigured ? "not_configured" : "unset";
-  return { key: null, role: rootId, chain, reason };
+  return { key: null, role: rootId, chain: trace.chain || [], reason };
+}
+
+/**
+ * For consumers with their own default: a role resolves only when the user
+ * chose it (a binding row with a non-null model and no `seeded`). Otherwise
+ * {key:null, reason:"not_chosen"} and the consumer runs its own logic. A
+ * chosen root walks its chain normally, through seeded roles too.
+ */
+export function resolveChosenRoleKey(key, ctx = {}) {
+  if (!isRoleRef(key)) return resolveRoleKey(key, ctx);
+  const rootId = roleIdOf(key);
+  if (!makeDefOf(ctx.customDefs)(rootId)) return { key: null, role: rootId, chain: [], reason: "unknown_role" };
+  const b = ctx.bindings?.[rootId];
+  if (!b || b.model == null || b.seeded === true) return { key: null, role: rootId, chain: [], reason: "not_chosen" };
+  return resolveRoleKey(key, ctx);
 }

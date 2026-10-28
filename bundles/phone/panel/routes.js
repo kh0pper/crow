@@ -25,11 +25,47 @@ async function readSettings(db) {
   };
 }
 
-async function resolveModel(db, spec) {
+/** One read of the enabled provider row: the endpoint a call dials, plus the row it came from. */
+async function liveLookup(db, spec) {
   if (!spec || !spec.includes("/")) return null;
   const [providerId, ...rest] = spec.split("/");
-  const row = (await db.execute({ sql: "SELECT base_url, api_key FROM providers WHERE id = ? AND COALESCE(disabled,0)=0", args: [providerId] })).rows[0];
-  return row ? { base_url: row.base_url, api_key: row.api_key || "none", model: rest.join("/"), label: spec } : null;
+  const row = (await db.execute({ sql: "SELECT * FROM providers WHERE id = ? AND COALESCE(disabled,0)=0", args: [providerId] })).rows[0];
+  return row ? { endpoint: { base_url: row.base_url, api_key: row.api_key || "none", model: rest.join("/"), label: spec }, row } : null;
+}
+
+async function rowLookup(db, spec) {
+  return (await liveLookup(db, spec))?.endpoint ?? null;
+}
+
+/**
+ * A Phone model key to an endpoint. A raw "<provider>/<model>" is today's row
+ * lookup, byte for byte. A "role:<id>" takes the full role walk on this
+ * instance's bindings, then the same row lookup of the resolved key. With
+ * `local`, a role that lands on anything not proven local (isCloudKey: cloud
+ * or unknown) gives {error:"local_now_cloud"}: the local slot fails closed.
+ * The verdict is taken on the live row the call dials (the role context is
+ * memoized and can be up to a second stale), so verdict and endpoint come
+ * from one read. Raw keys keep the host-column check in checkModel until Phase 2.
+ */
+export async function resolveModelSpec(db, spec, { local = false } = {}) {
+  if (typeof spec !== "string" || !spec.startsWith("role:")) return rowLookup(db, spec);
+  const [{ resolveRole, loadRoleContext }, { isCloudKey }, { providerRowToObject }] = await Promise.all([
+    appImport("servers/shared/model-roles-store.js"), appImport("servers/shared/model-roles.js"), appImport("servers/shared/provider-row.js")]);
+  const { key } = await resolveRole(db, spec, { need: "chat" });
+  if (!key) return null;
+  const live = await liveLookup(db, key);
+  if (!live) return null;
+  if (local) {
+    let cloud = true; // an unreadable context or row is not proof of local
+    try {
+      const own = providerRowToObject(live.row);
+      // The live row stands in for its context copy; the rest of the context only serves door hops.
+      const providers = [own, ...(await loadRoleContext(db)).providers.filter((p) => p.id !== own.id)];
+      cloud = isCloudKey(key, { providers });
+    } catch { /* fail closed */ }
+    if (cloud) return { error: "local_now_cloud" };
+  }
+  return live.endpoint;
 }
 
 export default function phoneRouter(authMiddleware, seams = {}) {
@@ -72,13 +108,23 @@ export default function phoneRouter(authMiddleware, seams = {}) {
         const { getInteractiveEngine } = await appImport("servers/gateway/perch-interactive.js");
         perchMessage = deliver.enginePerchMessage(getInteractiveEngine); // no engine yet = transient (no_engine)
       } catch { /* perch unavailable → notify only */ }
-      let cached = null;
-      const refresh = async () => { cached = await readSettings(db); cached.local = await resolveModel(db, cached.localModel); cached.cloud = await resolveModel(db, cached.cloudModel); };
+      let cached = null, warnedLocalCloud = false;
+      const refresh = async () => {
+        const next = await readSettings(db);
+        const r = await resolveModelSpec(db, next.localModel, { local: true });
+        // A local role rebound to a cloud upstream: no local model (fail closed), logged once per episode.
+        if (r?.error) { if (!warnedLocalCloud) { warnedLocalCloud = true; console.warn(`[phone] local model ${next.localModel} now resolves to a cloud provider (local_now_cloud): local calls are refused until it is local again`); } }
+        else warnedLocalCloud = false;
+        next.local = r?.error ? null : r;
+        next.cloud = await resolveModelSpec(db, next.cloudModel);
+        cached = next;
+      };
       await refresh(); setInterval(() => refresh().catch((e) => console.warn("[phone] settings refresh:", e.message)), 30000).unref();
-      const d = disp.createDispatcher({ db, runner,
-        deps: { notify: createNotification, deliver: deliver.deliverPhoneResult, perchMessage, notifyCard },
-        settings: () => ({ ownerName: cached.ownerName, ownerNumber: cached.ownerNumber, dailyCap: cached.dailyCap, line: "interactive",
-          model: (call) => (call.allow_cloud && cached.cloud) ? { ...cached.cloud, label: "cloud:" + cached.cloudModel } : (cached.local || null) }) });
+      const settings = () => ({ ownerName: cached.ownerName, ownerNumber: cached.ownerNumber, dailyCap: cached.dailyCap, line: "interactive",
+        model: (call) => (call.allow_cloud && cached.cloud) ? { ...cached.cloud, label: "cloud:" + cached.cloudModel } : (cached.local || null) });
+      const d = (seams.createDispatcher || disp.createDispatcher)({ db, runner,
+        deps: { notify: createNotification, deliver: deliver.deliverPhoneResult, perchMessage, notifyCard }, settings });
+      seams.onDispatcher?.({ refresh, settings }); // test seam: drive the refresh, read what the dispatcher reads
       setInterval(() => d.tick().catch((e) => console.warn("[phone] dispatcher:", e.message)), 2000).unref();
     }
     mods = m;
@@ -214,6 +260,12 @@ export default function phoneRouter(authMiddleware, seams = {}) {
     if (!(await authority.stepUpOk(b.totp))) return res.status(403).json({ error: "totp_required", message: "Enter your current 2FA code." });
     const checkModel = async (spec, { local }) => {
       if (spec === "") return true;
+      if (spec.startsWith("role:")) {
+        const r = await resolveModelSpec(db, spec, { local });
+        if (r?.error) { res.status(400).json({ error: "invalid_model", message: "The local model cannot use a cloud provider." }); return false; }
+        if (!r) { res.status(400).json({ error: "invalid_model", message: `Role "${spec.slice(5)}" is not set up on this Crow.` }); return false; }
+        return true;
+      }
       const [pid, ...rest] = String(spec).split("/");
       const row = pid && rest.join("/") ? (await db.execute({ sql: "SELECT host FROM providers WHERE id = ? AND COALESCE(disabled,0)=0", args: [pid] })).rows[0] : null;
       if (!row) { res.status(400).json({ error: "invalid_model", message: `Model must be "<provider_id>/<model>" with an existing, enabled provider.` }); return false; }

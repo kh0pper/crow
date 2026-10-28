@@ -22,7 +22,9 @@ import { fileURLToPath } from "node:url";
 import { readSetting } from "../../settings/registry.js";
 import { getOwnAddresses } from "../../../../shared/locality.js";
 import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
-import { CLASSIFIER_SETTING_KEY, selectBotClassifier, resolveClassifierEndpoint } from "../../../../shared/bot-bash-policy.js";
+import { CLASSIFIER_SETTING_KEY, selectClassifierWithRole, resolveClassifierEndpoint } from "../../../../shared/bot-bash-policy.js";
+import { resolveRole, loadRoleContext } from "../../../../shared/model-roles-store.js";
+import { isCloudKey } from "../../../../shared/model-roles.js";
 
 const CATALOG = join(dirname(fileURLToPath(import.meta.url)), "../../../../../registry/model-catalog.json");
 
@@ -47,7 +49,21 @@ export async function getClassifierStatus(db, { probe = true, fetchImpl = fetch,
   let ownAddresses = null, ownInstanceId = null;
   try { ownAddresses = getOwnAddresses(); } catch {}
   try { ownInstanceId = getOrCreateLocalInstanceId(); } catch {}
-  const sel = await resolveClassifierEndpoint(selectBotClassifier({ setting, providers, ownAddresses, ownInstanceId }), { lookup });
+  // A chosen safety role sits between the setting and the automatic pick
+  // (seeded never counts). isCloud reads the camelCase role-context providers;
+  // selectBotClassifier keeps the raw rows above (N1).
+  let roleKey = null, roleProviders = [];
+  if (setting == null || String(setting).trim() === "") {
+    try {
+      roleKey = (await resolveRole(db, "role:safety", { need: "chat", chosenOnly: true })).key;
+      if (roleKey) roleProviders = (await loadRoleContext(db)).providers;
+    } catch { roleKey = null; }
+  }
+  const picked = selectClassifierWithRole({
+    setting, roleKey, rows: providers, ownAddresses, ownInstanceId,
+    isCloud: (k) => isCloudKey(k, { providers: roleProviders, ownAddrs: ownAddresses }),
+  });
+  const sel = await resolveClassifierEndpoint(picked, { lookup });
   if (!sel.ok) {
     return {
       state: sel.reason === "none" ? "missing" : "misconfigured",

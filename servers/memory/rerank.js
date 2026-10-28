@@ -13,10 +13,10 @@ import { loadProviderFromDb } from "./embeddings.js";
 const RERANK_TIMEOUT_MS = 10_000;
 const RERANK_TASK_SET = new Set(RERANK_TASKS);
 
-/** CROW_RERANK_PROVIDER env → dashboard_settings 'rerank_provider' → lowest-id
+/** CROW_RERANK_PROVIDER env → dashboard_settings 'rerank_provider' → a chosen `rerank` role → lowest-id
  *  enabled provider with a rerank/score-tagged model → null (spec 2026-09-24). */
 export async function resolveDefaultRerankProvider() {
-  return resolveProviderForTask({ tasks: RERANK_TASKS, envVar: "CROW_RERANK_PROVIDER", settingKey: "rerank_provider" });
+  return resolveProviderForTask({ tasks: RERANK_TASKS, envVar: "CROW_RERANK_PROVIDER", settingKey: "rerank_provider", roleId: "rerank" });
 }
 
 async function resolveRerankConfig(providerName) {

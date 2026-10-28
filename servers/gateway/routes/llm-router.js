@@ -56,6 +56,8 @@ import { nowContext, relativeDatesContext, mentionsRelativeDay } from "../../sha
 import { withTurnContext } from "../voice/context-echo.js";
 import { createSseEchoFilter, stripJsonEcho } from "../voice/sse-echo.js";
 import { VOICE_ROUTE_DEFAULTS } from "../../shared/voice-route-defaults.js";
+import { resolveRole } from "../../shared/model-roles-store.js";
+import { isRoleRef } from "../../shared/model-roles.js";
 
 const FAST_KEY = process.env.COMPANION_FAST_MODEL || VOICE_ROUTE_DEFAULTS.fast;
 const ESC_KEY = process.env.COMPANION_ESCALATION_MODEL || VOICE_ROUTE_DEFAULTS.escalate;
@@ -138,7 +140,17 @@ function authHeaders(apiKey) {
  */
 export const COMPANION_TURN_MODEL = "crow-companion";
 
-const COMPANION_MODEL_IDS = [...[FAST_KEY, ESC_KEY].map((k) => splitKey(k)[1]).filter(Boolean), COMPANION_TURN_MODEL];
+/**
+ * The bare model ids a request may name and still get the companion heuristics: the resolved fast and escalate
+ * ids, the raw constants' ids (a client configured before a role was chosen keeps working) and
+ * COMPANION_TURN_MODEL. With the raw keys this is exactly the old constant list.
+ */
+export function companionModelIds(keys) {
+  const ids = [keys?.fast, keys?.escalate, FAST_KEY, ESC_KEY]
+    .map((k) => (typeof k === "string" ? splitKey(k)[1] : undefined))
+    .filter(Boolean);
+  return [...new Set([...ids, COMPANION_TURN_MODEL])];
+}
 
 async function defaultDoorAuth(token) {
   if (!token) return false;
@@ -202,13 +214,13 @@ async function forwardDoor(req, res, target, op, deps) {
   });
 }
 
-function doorTargetFor(req, deps) {
+function doorTargetFor(req, deps, keys) {
   const cfg = deps.loadProvidersFn() || { providers: {} };
   return resolveDoorTarget({
     providers: cfg.providers || {},
     providerHeader: (req.params && req.params.provider) || req.headers[DOOR_PROVIDER_HEADER] || null,
     model: req.body && req.body.model,
-    companionModelIds: COMPANION_MODEL_IDS,
+    companionModelIds: companionModelIds(keys),
     hop: incomingHop(req),
   });
 }
@@ -368,13 +380,76 @@ export function toolEscalationEnabled() { return TOOL_ESCALATION; }
  * asked for an action and the assistant has tools the quick model was not offered,
  * so the quick model could only pretend (queue item 29) — escalate.
  */
-export function chooseVoiceRoute(messages, { hasTools = false, actionIntent = false } = {}) {
+export function chooseVoiceRoute(messages, { hasTools = false, actionIntent = false, keys = VOICE_ROUTE_KEYS } = {}) {
   const body = { messages: Array.isArray(messages) ? messages : [], tools: hasTools ? [{}] : [] };
-  if (wantsEscalation(body)) return { route: "escalate", reason: "manual", key: ESC_KEY };
+  if (wantsEscalation(body)) return { route: "escalate", reason: "manual", key: keys.escalate };
   // COMPANION_TOOL_ESCALATION=0 turns this off too (the same switch as the tool-intent regex).
-  if (actionIntent === true && TOOL_ESCALATION) return { route: "escalate", reason: "action-intent", key: ESC_KEY };
-  if (wantsToolEscalation(body)) return { route: "escalate", reason: "tool-intent", key: ESC_KEY };
-  return { route: "fast", reason: null, key: FAST_KEY };
+  if (actionIntent === true && TOOL_ESCALATION) return { route: "escalate", reason: "action-intent", key: keys.escalate };
+  if (wantsToolEscalation(body)) return { route: "escalate", reason: "tool-intent", key: keys.escalate };
+  return { route: "fast", reason: null, key: keys.fast };
+}
+
+const loggedRoleMisses = new Set();
+function logRoleMiss(what, r) {
+  const msg = `${what}: ${r?.reason || "unknown"}`;
+  if (loggedRoleMisses.has(msg)) return;
+  loggedRoleMisses.add(msg);
+  console.warn(`[llm-router] role ${msg}; using the consumer default`);
+}
+
+/**
+ * The voice route's keys for THIS request. Per side: the env var (read now), else the CHOSEN role binding
+ * (role:voice for fast, role:everyday for escalate; a seeded or missing binding is not chosen), else the raw
+ * constant. A chosen role that resolves to nothing (its model not configured; voice has no fallback chain) falls
+ * to the raw constant, never to another role's model. Never throws.
+ * → { fast, escalate, fastRole, escalateRole } (a *Role is the role id when the role gave the key, else null)
+ */
+export async function resolveVoiceKeys(dbc, { env = process.env, resolveRoleFn = resolveRole } = {}) {
+  const side = async (envName, roleId, raw) => {
+    const e = env?.[envName];
+    if (typeof e === "string" && e) return { key: e, role: null };
+    try {
+      const r = await resolveRoleFn(dbc, `role:${roleId}`, { need: "chat", chosenOnly: true });
+      if (r && typeof r.key === "string" && r.key) return { key: r.key, role: roleId };
+      if (r?.reason !== "not_chosen") logRoleMiss(roleId, r);
+    } catch (err) {
+      logRoleMiss(roleId, { reason: err?.message || String(err) });
+    }
+    return { key: raw, role: null };
+  };
+  const [f, e] = await Promise.all([
+    side("COMPANION_FAST_MODEL", "voice", FAST_KEY),
+    side("COMPANION_ESCALATION_MODEL", "everyday", ESC_KEY),
+  ]);
+  return { fast: f.key, escalate: e.key, fastRole: f.role, escalateRole: e.role };
+}
+
+/**
+ * A bot's fast voice model key: a raw key comes back unchanged; a `role:` ref resolves by the full walk (an
+ * explicit ref, so a seeded binding serves it); a missing key or an unresolvable role gives `fallback`.
+ */
+export async function resolveBotVoiceKey(dbc, key, { fallback } = {}) {
+  if (typeof key !== "string" || !key) return fallback;
+  if (!isRoleRef(key)) return key;
+  try {
+    const r = await resolveRole(dbc, key, { need: "chat" });
+    if (r && typeof r.key === "string" && r.key) return r.key;
+    logRoleMiss(`bot ${key}`, r);
+  } catch (err) {
+    logRoleMiss(`bot ${key}`, { reason: err?.message || String(err) });
+  }
+  return fallback;
+}
+
+/** deps.resolveVoiceKeysFn(db()) with the raw constants on any failure (the db client itself included). */
+async function voiceKeysFor(deps) {
+  try {
+    const k = await deps.resolveVoiceKeysFn(db());
+    if (k && typeof k.fast === "string" && typeof k.escalate === "string") return k;
+  } catch (err) {
+    logRoleMiss("voice keys", { reason: err?.message || String(err) });
+  }
+  return { fast: FAST_KEY, escalate: ESC_KEY, fastRole: null, escalateRole: null };
 }
 
 export const resolveVoiceKey = (key) => resolveKey(key);
@@ -394,18 +469,21 @@ async function handleChat(req, res, deps) {
   const body = req.body && typeof req.body === "object" ? req.body : null;
   if (!body) return res.status(400).json({ error: { message: "invalid JSON body" } });
 
-  const door = doorTargetFor(req, deps);
+  const keys = await voiceKeysFor(deps);
+  const door = doorTargetFor(req, deps, keys);
   if (door.kind !== "companion") return handleDoor(req, res, "chat/completions", deps, door);
   // door.kind === "companion": fall through to the fast/escalate heuristics, unchanged.
 
-  const decision = chooseVoiceRoute(body.messages, { hasTools: Array.isArray(body.tools) && body.tools.length > 0 });
+  const decision = chooseVoiceRoute(body.messages, { hasTools: Array.isArray(body.tools) && body.tools.length > 0, keys });
   if (decision.reason === "manual") stripEscalate(body); // only the typed token is stripped
   // After the route decision (it reads the user's own words) and before any degrade note is appended.
   const injected = injectCompanionTurnContext(body, deps.nowFn());
   const escalate = decision.route === "escalate";
   const escReason = decision.reason;
-  let key = escalate ? ESC_KEY : FAST_KEY;
+  let key = escalate ? keys.escalate : keys.fast;
   let routeLabel = escalate ? `escalate(${escReason})` : "fast";
+  // Only a role-resolved key is labelled, so an unedited instance logs exactly what it did before.
+  const roleOf = () => (key === keys.fast ? keys.fastRole : key === keys.escalate ? keys.escalateRole : null);
 
   // Voice quality: the fast model (Qwen3.5-4B) emits its chain-of-thought as
   // PLAIN text ("Thinking Process: ...") that the avatar would speak aloud, so
@@ -440,9 +518,9 @@ async function handleChat(req, res, deps) {
       // the resident fast model with a note; anything else gets a fast 409
       // (never a retry: this class of model never becomes available on its
       // own, so there is nothing to wait on).
-      const fast = escalate ? await deps.resolveKeyFn(FAST_KEY).catch(() => null) : null;
+      const fast = escalate ? await deps.resolveKeyFn(keys.fast).catch(() => null) : null;
       if (fast && await deps.probeReadyFn(fast.baseUrl)) {
-        key = FAST_KEY;
+        key = keys.fast;
         [providerId] = splitKey(key);
         routeLabel = "degraded(serving_class)";
         body.messages = [
@@ -461,9 +539,9 @@ async function handleChat(req, res, deps) {
       // start into a second ownership strike on 2026-08-29. An escalation
       // falls back to the resident fast model with a note; anything else (or
       // a cold fast model) gets a fast 503 the client can show or wait on.
-      const fast = escalate ? await deps.resolveKeyFn(FAST_KEY).catch(() => null) : null;
+      const fast = escalate ? await deps.resolveKeyFn(keys.fast).catch(() => null) : null;
       if (fast && await deps.probeReadyFn(fast.baseUrl)) {
-        key = FAST_KEY;
+        key = keys.fast;
         [providerId] = splitKey(key);
         routeLabel = "degraded(box_reserved)";
         body.messages = [
@@ -490,7 +568,8 @@ async function handleChat(req, res, deps) {
   body.model = up.model;
   const url = `${up.baseUrl}/chat/completions`;
   const t0 = Date.now();
-  console.log(`[llm-router] route=${routeLabel} -> ${key} (${up.model}) stream=${!!body.stream} requester=${requester}`);
+  const role = roleOf();
+  console.log(`[llm-router] route=${routeLabel} -> ${key} (${up.model})${role ? ` role=${role}` : ""} stream=${!!body.stream} requester=${requester}`);
 
   let upstream;
   try {
@@ -571,8 +650,9 @@ async function handleChat(req, res, deps) {
 }
 
 async function handleModels(res, deps) {
+  const keys = await voiceKeysFor(deps);
   const out = [];
-  for (const key of [FAST_KEY, ESC_KEY]) {
+  for (const key of [keys.fast, keys.escalate]) {
     try {
       const up = await deps.resolveKeyFn(key);
       out.push({ id: up.model, object: "model", owned_by: "crow", created: 0 });
@@ -603,6 +683,8 @@ export default function llmRouterRouter(opts = {}) {
     doorAuthFn: defaultDoorAuth,
     nowFn: Date.now,
     recordUsageFn: (event) => recordUsageEvent(db(), event),
+    // The voice keys per request (m6): a seam, so router tests never need the db() singleton.
+    resolveVoiceKeysFn: (dbc) => resolveVoiceKeys(dbc),
     ...opts,
   };
   const router = express.Router();
@@ -652,9 +734,11 @@ export default function llmRouterRouter(opts = {}) {
   // such as crow-local, and pi's managed entries point here).
   for (const op of ["chat/completions", "completions", "embeddings", "rerank"]) {
     router.post(`/llm/p/:provider/v1/${op}`, (req, res) => {
-      handleDoor(req, res, op, deps, doorTargetFor(req, deps)).catch((err) => {
-        if (!res.headersSent) res.status(502).json({ error: { code: "router_error", message: err.message } });
-      });
+      voiceKeysFor(deps)
+        .then((keys) => handleDoor(req, res, op, deps, doorTargetFor(req, deps, keys)))
+        .catch((err) => {
+          if (!res.headersSent) res.status(502).json({ error: { code: "router_error", message: err.message } });
+        });
     });
   }
   router.get("/llm/p/:provider/v1/models", (req, res) => {
@@ -665,11 +749,13 @@ export default function llmRouterRouter(opts = {}) {
   });
   for (const op of ["completions", "embeddings", "rerank"]) {
     router.post(`/llm/v1/${op}`, (req, res) => {
-      const door = doorTargetFor(req, deps);
-      if (door.kind === "companion") {
-        return res.status(404).json({ error: { code: "MODEL_NOT_FOUND", message: `no forwardable local model "${req.body?.model ?? ""}" for /${op}` } });
-      }
-      handleDoor(req, res, op, deps, door).catch((err) => {
+      voiceKeysFor(deps).then((keys) => {
+        const door = doorTargetFor(req, deps, keys);
+        if (door.kind === "companion") {
+          return res.status(404).json({ error: { code: "MODEL_NOT_FOUND", message: `no forwardable local model "${req.body?.model ?? ""}" for /${op}` } });
+        }
+        return handleDoor(req, res, op, deps, door);
+      }).catch((err) => {
         if (!res.headersSent) res.status(502).json({ error: { code: "router_error", message: err.message } });
       });
     });

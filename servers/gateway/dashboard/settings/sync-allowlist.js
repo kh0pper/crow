@@ -146,6 +146,12 @@ export const INSTANCE_SCOPE_KEYS = {
   // 2026-09-24).
   embed_provider:             "Memory embedding provider pin (per install)",
   rerank_provider:            "Memory rerank provider pin (per install)",
+  // Model roles: each instance owns its bindings (readers query the global
+  // row directly over ROLE_KEY_RANGE). A satellite following a primary is a
+  // later, per-key decision (roleBindingAuthority), never fleet sync.
+  "model_role.*":             "Model role bindings (per install)",
+  "model_role_def.*":         "Custom model role definitions (per install)",
+  model_role_subagents:       "pi sub-agent to model role map (per install)",
 };
 
 /**

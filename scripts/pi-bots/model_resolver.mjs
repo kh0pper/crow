@@ -47,7 +47,7 @@ export function splitKey(key) {
   return { provider: s.slice(0, i), model: s.slice(i + 1) };
 }
 
-function loadModelsFromFile() {
+export function loadModelsFromFile() {
   try {
     const j = JSON.parse(readFileSync(MODELS_JSON, "utf8"));
     return j && j.providers && typeof j.providers === "object" ? j : null;
@@ -64,15 +64,25 @@ async function loadModelsFromDb() {
     d.pragma("busy_timeout = 10000");
     const rows = d.prepare("SELECT id, models FROM providers WHERE disabled=0").all();
     d.close();
-    if (!rows.length) return null;
-    const providers = {};
-    for (const r of rows) {
-      try { providers[r.id] = { models: JSON.parse(r.models || "[]") }; } catch {}
-    }
-    return { providers };
+    return modelsFromRows(rows);
   } catch {
     return null;
   }
+}
+
+/**
+ * Enabled `providers` rows ({id, models}) -> the loadModels() shape. `models`
+ * is the row's JSON text (an already-parsed array is accepted too). No rows
+ * gives null; a row whose models do not parse is skipped.
+ * @returns {{providers: object}|null}
+ */
+export function modelsFromRows(rows) {
+  if (!Array.isArray(rows) || !rows.length) return null;
+  const providers = {};
+  for (const r of rows) {
+    try { providers[r.id] = { models: Array.isArray(r.models) ? r.models : JSON.parse(r.models || "[]") }; } catch {}
+  }
+  return { providers };
 }
 
 export async function loadModels() {
@@ -105,7 +115,17 @@ export function validateModelKey(models, key) {
  * @param {{escalate?:boolean}} [opts]
  * @returns {{provider:string, model:string, key:string, escalated:boolean,
  *            source:"default"|"escalation"|"fallback",
- *            escalationRequestedButUnavailable:boolean}}
+ *            escalationRequestedButUnavailable:boolean,
+ *            role?:string, chain?:string[], roleReason?:string,
+ *            escalationRole?:string, escalationReason?:string}}
+ *
+ * `role:<id>` (default or escalation): the role is walked in full against
+ * this instance's bindings (need "chat"), its raw key substituted, and the
+ * validation below runs unchanged against the same `models`. An unresolvable
+ * role is an invalid key. role/chain/roleReason are added only for a role
+ * input, naming the role behind the returned model; a failed escalation role
+ * on a fallback result is reported as escalationRole/escalationReason.
+ * A raw key never opens the role path.
  */
 export async function resolveModel(def, opts) {
   const escalate = !!(opts && opts.escalate);
@@ -120,22 +140,80 @@ export async function resolveModel(def, opts) {
     escalationRequestedButUnavailable: !!unavailable,
   });
 
-  const defaultKey = (def && def.models && def.models.default) || LOCAL_FALLBACK;
-  const escKey = def && def.models && def.models.escalation;
+  let defaultKey = (def && def.models && def.models.default) || LOCAL_FALLBACK;
+  let escKey = def && def.models && def.models.escalation;
+
+  let defRole = null, escRole = null;
+  if (isRoleRefKey(defaultKey) || (escalate && isRoleRefKey(escKey))) {
+    const r = await resolveRoleRefs(models, [defaultKey, escalate ? escKey : null]);
+    if (r[0]) { defRole = r[0]; defaultKey = r[0].key; }
+    if (r[1]) { escRole = r[1]; escKey = r[1].key; }
+  }
+  // role/chain/roleReason: the role behind the default or escalation key the
+  // result came from. A failed escalation role never tags a default result:
+  // it is reported apart, as escalationRole/escalationReason.
+  const withRole = (res, info) => (info ? Object.assign(res, { role: info.role, chain: info.chain, roleReason: info.reason }) : res);
+  const withFailedEsc = (res) => (escRole ? Object.assign(res, { escalationRole: escRole.role, escalationReason: escRole.reason }) : res);
 
   if (escalate) {
     const e = validateModelKey(models, escKey);
-    if (escKey && e.ok) return out(e.provider, e.model, true, "escalation", false);
+    if (escKey && e.ok) return withRole(out(e.provider, e.model, true, "escalation", false), escRole);
     // R12: escalation explicitly requested but unset/invalid → fall to default,
     // flag it so the bridge can post an in-band notice.
     const d = validateModelKey(models, defaultKey);
-    if (d.ok) return out(d.provider, d.model, false, "fallback", true);
-    return out(fb.provider, fb.model, false, "fallback", true);
+    if (d.ok) return withFailedEsc(withRole(out(d.provider, d.model, false, "fallback", true), defRole));
+    return withFailedEsc(withRole(out(fb.provider, fb.model, false, "fallback", true), defRole));
   }
 
   const d = validateModelKey(models, defaultKey);
-  if (d.ok) return out(d.provider, d.model, false, "default", false);
-  return out(fb.provider, fb.model, false, "fallback", false);
+  if (d.ok) return withRole(out(d.provider, d.model, false, "default", false), defRole);
+  return withRole(out(fb.provider, fb.model, false, "fallback", false), defRole);
+}
+
+/**
+ * Same test as model-roles.js isRoleRef (not imported: that module imports this one).
+ * Accepted break: a raw key that starts with `role:` (a provider named `role:x`)
+ * is now a role ref, never a provider/model pair.
+ */
+function isRoleRefKey(key) {
+  return typeof key === "string" && key.startsWith("role:") && key.length > "role:".length;
+}
+
+/**
+ * Resolve each `role:` entry of `keys` (others give null) with one bots-DB
+ * read. Never throws: any failure gives {key:null, reason:"error"} per role.
+ * @returns {Promise<Array<{key:string|null, role:string, chain:string[], reason:string}|null>>}
+ */
+async function resolveRoleRefs(models, keys) {
+  const failed = (k, reason) => ({ key: null, role: k.slice("role:".length), chain: [], reason });
+  try {
+    const [{ loadRoleContextSync }, { resolveRoleKey }, { getOrCreateLocalInstanceId }, { default: Database }] = await Promise.all([
+      import("./role_context.mjs"),
+      import("../../servers/shared/model-roles.js"),
+      import("../../servers/gateway/instance-registry.js"),
+      import("better-sqlite3"),
+    ]);
+    const conn = new Database(botsDbPath());
+    let ctx;
+    try {
+      conn.pragma("busy_timeout = 10000");
+      ctx = loadRoleContextSync(conn, { models, ownInstanceId: getOrCreateLocalInstanceId });
+    } finally {
+      conn.close();
+    }
+    return keys.map((k) => {
+      if (!isRoleRefKey(k)) return null;
+      try {
+        return resolveRoleKey(k, { ...ctx, need: "chat" });
+      } catch (e) {
+        console.warn("[roles] resolve failed for " + k + ": " + (e?.message || e));
+        return failed(k, "error");
+      }
+    });
+  } catch (e) {
+    console.warn("[roles] role context unavailable: " + (e?.message || e));
+    return keys.map((k) => (isRoleRefKey(k) ? failed(k, "error") : null));
+  }
 }
 
 /**

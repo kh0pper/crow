@@ -23,10 +23,10 @@ const EMBED_TIMEOUT_MS = Number(process.env.CROW_EMBED_TIMEOUT_MS) || 10_000;
 const FETCH_RETRIES = 1;
 
 // Default embedding-provider resolution (spec 2026-09-24): CROW_EMBED_PROVIDER
-// env → dashboard_settings 'embed_provider' → the lowest-id enabled provider
+// env → dashboard_settings 'embed_provider' → a chosen `embed` role → the lowest-id enabled provider
 // with an embed-tagged model → null. Never a named host.
 export async function resolveDefaultProvider() {
-  return resolveProviderForTask({ tasks: EMBED_TASKS, envVar: "CROW_EMBED_PROVIDER", settingKey: "embed_provider" });
+  return resolveProviderForTask({ tasks: EMBED_TASKS, envVar: "CROW_EMBED_PROVIDER", settingKey: "embed_provider", roleId: "embed" });
 }
 
 // -----------------------------------------------------------------------
