@@ -24,6 +24,7 @@ import { escapeHtml } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
 import { cardFaceHtml } from "../bot-board/html.js";
 import { DEFAULT_BOARD_DEF } from "../../../routes/board-defs.js";
+import { drawerHref } from "../../../board/card-link.js";
 import { LANES, movePlan, openDecision, cardVersion } from "./lanes.js";
 
 export const LANE_LABEL_KEY = Object.freeze({
@@ -49,22 +50,20 @@ const LANE_EMPTY_KEY = Object.freeze({
  */
 /**
  * Where Details goes: the card's drawer (plan, results, history, decision)
- * on the board of the bot on its project, through the classic client's
- * one-shot `#open=N` deep link (openCardById). `botByCard` maps card id to
- * that bot's id (panels/board.js). A card no card board shows (no project,
- * or no bot on it) gets the standalone card view, `?card=N`, which is also
- * what works without JS.
+ * on the board of the card-board bot on its own project, through the classic
+ * client's one-shot `#open=N` deep link (openCardById). `hrefByCard` maps card
+ * id to that link, from board/card-link.js drawerHrefs (the one rule, Ruling
+ * Q14; panels/board.js). A card with no entry (no project, or no bot on it)
+ * gets the standalone card view, `?card=N`, which is also what works without JS.
  */
-export function detailsHref(card, botByCard) {
-  const id = encodeURIComponent(String(card.id));
-  const bot = botByCard && botByCard.get(Number(card.id));
-  return bot ? `/dashboard/bot-board?bot=${encodeURIComponent(bot)}#open=${id}` : `/dashboard/bot-board?card=${id}`;
+export function detailsHref(card, hrefByCard) {
+  return (hrefByCard && hrefByCard.get(Number(card.id))) || drawerHref(card.id, null);
 }
 
 /** Where tapping a card goes: its conversation if it has one, else its details (detailsHref). */
-export function cardHref(card, threadByCard, botByCard) {
+export function cardHref(card, threadByCard, hrefByCard) {
   const thread = threadByCard && threadByCard.get(Number(card.id));
-  return thread ? `/dashboard/perch#${encodeURIComponent(thread)}` : detailsHref(card, botByCard);
+  return thread ? `/dashboard/perch#${encodeURIComponent(thread)}` : detailsHref(card, hrefByCard);
 }
 
 // The face's Accept button. On a card with an open decision Accept can never
@@ -114,9 +113,9 @@ function cardHtml(card, ctx, lang, lane) {
   const seen = `data-seen-result="${seenResult}" data-seen-version="${escapeHtml(cardVersion(card))}"`;
   return `<li class="sb-card" data-card="${id}">` +
     shellFace(card, locked, lang, def, bird) +
-    `<a class="sb-open" href="${escapeHtml(cardHref(card, ctx.threads, ctx.botByCard))}" draggable="false"><span class="sb-vh" data-sb-name>#${id} ${title}</span></a>` +
+    `<a class="sb-open" href="${escapeHtml(cardHref(card, ctx.threads, ctx.hrefByCard))}" draggable="false"><span class="sb-vh" data-sb-name>#${id} ${title}</span></a>` +
     `<button type="button" class="sb-move" data-sb-move data-from="${lane}" data-refuse="${refuse}" ${seen} aria-haspopup="dialog">${escapeHtml(t("shell.move", lang))}<span class="sb-vh"> #${id} ${title}</span></button>` +
-    `<a class="sb-details" href="${escapeHtml(detailsHref(card, ctx.botByCard))}" draggable="false">${escapeHtml(t("shell.cardDetails", lang))}</a>` +
+    `<a class="sb-details" href="${escapeHtml(detailsHref(card, ctx.hrefByCard))}" draggable="false">${escapeHtml(t("shell.cardDetails", lang))}</a>` +
     `</li>`;
 }
 

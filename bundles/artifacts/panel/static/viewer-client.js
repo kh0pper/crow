@@ -141,8 +141,10 @@
   }
 
   // ── data ────────────────────────────────────────────────────────────────
-  function refresh() {
-    return api("GET", BASE).then(function (j) {
+  // `how` is "poll" only from the status poll (the server then skips the card summary this
+  // page never re-reads); `.then(refresh)` callers pass a value, which is not "poll".
+  function refresh(how) {
+    return api("GET", how === "poll" ? BASE + "?poll=1" : BASE).then(function (j) {
       S.art = j.artifact; S.versions = j.versions || []; S.threads = j.threads || []; S.activeRound = j.activeRound || null; S.locked = (j.lockedThreads || []).map(Number);
       // The round that made a mention wait has ended: its "already working" line goes.
       if (!S.activeRound) Object.keys(S.notes).forEach(function (k) { if (S.notes[k].busy) delete S.notes[k]; });
@@ -538,7 +540,7 @@
   }
   function poll() {
     if (S.poll || !S.activeRound || document.visibilityState === "hidden") return;
-    S.poll = setTimeout(function () { S.poll = null; refresh().catch(function () {}); }, POLL_MS);
+    S.poll = setTimeout(function () { S.poll = null; refresh("poll").catch(function () {}); }, POLL_MS);
   }
   document.addEventListener("visibilitychange", function () {
     if (document.visibilityState === "hidden") { clearTimeout(S.poll); S.poll = null; }

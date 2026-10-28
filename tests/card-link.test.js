@@ -81,3 +81,43 @@ test("bot ids are URL-encoded", async () => {
   bot("a b&c", { project: 5 });
   assert.equal(await cardDrawerHref(db, 9), "/dashboard/bot-board?bot=a%20b%26c#open=9");
 });
+
+// ---- R1 follow-ups Task 1: the one URL shape and the batched resolver ----
+
+test("drawerHref is the one URL shape", async () => {
+  const { drawerHref } = await import("../servers/gateway/board/card-link.js");
+  assert.equal(drawerHref(9, "board-5"), "/dashboard/bot-board?bot=board-5#open=9");
+  assert.equal(drawerHref("9", "a b&c"), "/dashboard/bot-board?bot=a%20b%26c#open=9");
+  assert.equal(drawerHref(9, null), "/dashboard/bot-board?card=9");
+  assert.equal(drawerHref(9, ""), "/dashboard/bot-board?card=9");
+  assert.equal(drawerHref(0, "x"), null);
+  assert.equal(drawerHref("9; DROP", null), null);
+});
+
+test("drawerHrefs: one bots lookup for many cards, the same rule as cardDrawerHref", async () => {
+  const { drawerHrefs } = await import("../servers/gateway/board/card-link.js");
+  bot("board-5", { project: 5 });
+  bot("aaa-other", { project: 6 });
+  let botQueries = 0;
+  const counting = { execute: (q) => { if (/pi_bot_defs/.test(q.sql || q)) botQueries++; return db.execute(q); } };
+  // Rows the caller already read (project_id given): no tasks.db read.
+  const m = await drawerHrefs(counting, [{ id: 9, project_id: 5 }, { id: 10, project_id: 6 }, { id: 11, project_id: null }, { id: 12, project_id: 7 }]);
+  assert.equal(botQueries, 1, "one bots lookup");
+  assert.equal(m.get(9), "/dashboard/bot-board?bot=board-5#open=9");
+  assert.equal(m.get(10), "/dashboard/bot-board?bot=aaa-other#open=10");
+  assert.equal(m.get(11), "/dashboard/bot-board?card=11");
+  assert.equal(m.get(12), "/dashboard/bot-board?card=12", "no board bot on project 7: never another project's board");
+  // Bare ids are read from tasks.db: an unknown id or a tracker item has no entry.
+  const ids = await drawerHrefs(db, [9, "10", 11, 404, 20, "x"]);
+  assert.deepEqual([...ids.entries()].sort(), [
+    [10, "/dashboard/bot-board?bot=aaa-other#open=10"],
+    [11, "/dashboard/bot-board?card=11"],
+    [9, "/dashboard/bot-board?bot=board-5#open=9"],
+  ].sort());
+  // Nothing on a project: no bots lookup at all.
+  botQueries = 0;
+  const none = await drawerHrefs(counting, [{ id: 11, project_id: null }]);
+  assert.equal(botQueries, 0);
+  assert.equal(none.get(11), "/dashboard/bot-board?card=11");
+  assert.equal((await drawerHrefs(db, [])).size, 0);
+});

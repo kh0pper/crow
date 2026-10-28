@@ -199,7 +199,7 @@ test("the card route reports the real lane, and only a recorded result", async (
   link("perchlive-a", id);
   let r = await chatCard("perchlive-a");
   assert.equal(r.status, 200);
-  assert.deepEqual(r.body.card, { id, title: "Ship it", status: "todo", lane: "up_next", projectId: 7, botId: "b1" });
+  assert.deepEqual(r.body.card, { id, title: "Ship it", status: "todo", lane: "up_next", projectId: 7, botId: "b1", href: `/dashboard/bot-board?card=${id}` });
   assert.equal(r.body.result, null);
 
   const rid = addResult(id, { outcome: "partial", summary: "Most of it." });
@@ -422,4 +422,20 @@ test("the card route names the card's own bot when it has one, else the chat's b
   const t = new Database(TASKS); t.prepare("UPDATE tasks_items SET assigned_bot='other-bot' WHERE id=?").run(id); t.close();
   link("perchlive-ab", id);
   assert.equal((await chatCard("perchlive-ab")).body.card.botId, "other-bot");
+});
+
+test("the card route's href is the one rule: the card's own project's board bot, never the chat's (R1 follow-ups Task 1)", async () => {
+  const c = new Database(DB_FILE);
+  c.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?,?,?,1,?)")
+    .run("board-8", "Board 8", JSON.stringify({ tracker_config: { type: "kanban" } }), 8);
+  c.close();
+  const own = addCard({ title: "On 8", project: 8 });
+  link("perchlive-href8", own);
+  let r = await chatCard("perchlive-href8");
+  assert.equal(r.body.card.href, `/dashboard/bot-board?bot=board-8#open=${own}`);
+  assert.equal(r.body.card.botId, "b1", "botId still names the chat's bot, for an older client");
+  const other = addCard({ title: "On 9", project: 9 });
+  link("perchlive-href9", other);
+  r = await chatCard("perchlive-href9");
+  assert.equal(r.body.card.href, `/dashboard/bot-board?card=${other}`, "no board bot on its project: the standalone view, not b1's board");
 });

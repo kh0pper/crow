@@ -197,8 +197,9 @@ export function perchCardChipJs(lang = "en") {
     a.appendChild(line('cardchip-title',String(c.title||'')));
     if(lane) a.appendChild(line('cardchip-lane',lane));
     var d=document.createElement('a'); d.className='cardchip-details';
-    /* Mirrors panels/board/html.js detailsHref: the classic board resolves a card only on its bot's board. */
-    d.href=c.botId?'/dashboard/bot-board?bot='+encodeURIComponent(String(c.botId))+'#open='+encodeURIComponent(String(c.id)):'/dashboard/bot-board?card='+encodeURIComponent(String(c.id));
+    /* The server's href is the one "open this card" rule (board/card-link.js). The client-built
+       form below is only for an older server that sends no href. */
+    d.href=typeof c.href==='string'&&c.href?c.href:c.botId?'/dashboard/bot-board?bot='+encodeURIComponent(String(c.botId))+'#open='+encodeURIComponent(String(c.id)):'/dashboard/bot-board?card='+encodeURIComponent(String(c.id));
     d.textContent=CC_DETAILS;
     wrap.appendChild(a); wrap.appendChild(d);
     ccPlace(tr,ccChip,wrap);

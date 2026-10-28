@@ -181,6 +181,22 @@ test("client filter/search machinery is mode-aware — kanban cards match too", 
   assert.ok(rendered.includes('data-statuses='), "render stamps the configured list");
 });
 
+test("the drawer's status select comes from the card's own def: by-id opens start empty, hydration rebuilds it", async () => {
+  // R1 follow-ups Task 2. The SSR select holds the PAGE def; a face on this
+  // board keeps it, a card opened by id shows no options until its own def
+  // arrives (never another board's statuses), and GET /card/:id's
+  // board.status_values/status_labels rebuild it on every hydration.
+  const { clientJs } = await import("../servers/gateway/dashboard/panels/bot-board/client.js");
+  const js = clientJs("scout", "kanban", 7, null, null, "en");
+  assert.ok(js.includes("setStatusOptions(data.status!=null?PAGE_STATUS_OPTS:[]);"), "open: page def for a face, empty for by-id");
+  const hyd = js.slice(js.indexOf("function hydrateDrawer("));
+  const rebuild = hyd.indexOf("setStatusOptions(bd.status_values.map(");
+  assert.ok(rebuild > 0, "hydration rebuilds from the card's own def");
+  assert.ok(hyd.indexOf("lbl[s]") > 0, "labelled from status_labels");
+  assert.ok(rebuild < hyd.indexOf("(off-board)"), "the off-def injection still runs after the rebuild");
+  assert.ok(rebuild < hyd.indexOf("cur.loadedStatus=c.status"), "loadedStatus (expected_status) still comes from the hydrated card");
+});
+
 test("no-JS move validates against the def", async () => {
   const calls = [];
   const res = { redirectAfterPost: (u) => calls.push(u) };

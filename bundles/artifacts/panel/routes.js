@@ -33,7 +33,7 @@ const STATIC = {
 
 /**
  * @param {Function} dashboardAuth
- * @param {object} seams  tests: { db, blobs, engine, csrf, runtime, policy, notify, renderDeps, loadBotDef, createBoardCard, importCardDocs }
+ * @param {object} seams  tests: { db, blobs, engine, csrf, runtime, policy, notify, renderDeps, loadBotDef, createBoardCard, importCardDocs, importI18n }
  */
 export default function artifactsRouter(dashboardAuth, seams = {}) {
   const router = Router();
@@ -81,11 +81,26 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
   const ensure = () => (ready ??= init().catch((e) => { ready = null; throw e; }));
 
   /**
+   * The lane chip's label: core's own shell.lane* wording (the Board tab's), or "" (no chip) for
+   * a null/unknown lane, an older core without the module, or a key it doesn't have (t echoes the key).
+   */
+  async function laneLabelFor(card, lang) {
+    const lane = card && card.lane;
+    if (!["needs_you", "working", "up_next", "done"].includes(lane)) return "";
+    try {
+      const i = await (S.importI18n || (() => appImport("servers/gateway/dashboard/shared/i18n.js")))();
+      const key = "shell.lane" + { needs_you: "NeedsYou", working: "Working", up_next: "UpNext", done: "Done" }[lane];
+      const label = typeof i?.t === "function" ? i.t(key, lang) : "";
+      return typeof label === "string" && label && label !== key ? label : "";
+    } catch { return ""; }
+  }
+
+  /**
    * The document's card for its header (P6): `{ id, title, lane, href, thread }` or null.
    * Core make/card-docs.js decides it (cardForDocument, then cardSummary: lane by the Board
    * tab's rule, href into the card drawer, the card's chat). An older core without the module
    * gives null (the player-shell precedent); one with cardForDocument but no cardSummary gets
-   * the bare drawer link and nothing it would have to guess. One summary per request.
+   * the standalone card view (?card=, never the default bot's board) and nothing it would have to guess. One summary per request.
    */
   async function documentCardFor(artifactId) {
     let cd;
@@ -94,7 +109,7 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
       if (typeof cd?.cardForDocument !== "function") return null;
       const id = await cd.cardForDocument(S.db, "artifact", artifactId);
       if (id == null) return null;
-      if (typeof cd.cardSummary !== "function") return { id: Number(id), title: "", lane: null, href: `/dashboard/bot-board#open=${Number(id)}`, thread: null };
+      if (typeof cd.cardSummary !== "function") return { id: Number(id), title: "", lane: null, href: `/dashboard/bot-board?card=${Number(id)}`, thread: null };
       return (await cd.cardSummary(S.db, id)) || null;
     } catch (e) {
       console.warn(`[artifacts] the document's card could not be read (${(e && e.code) || "error"}: ${e && e.message})`);
@@ -132,11 +147,12 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
       const lang = m && m[1] === "es" ? "es" : "en";
       const { v, thread, back } = page.viewerParams(req.query);
       const card = await documentCardFor(req.params.id);
+      const laneLabel = await laneLabelFor(card, lang);
       // The player bar (bar on every Crow page): the core shell, emitted only here, behind dashboardAuth.
       // An older core without the module renders the viewer with no bar.
       let shellHtml = "";
       try { shellHtml = (await appImport("servers/gateway/dashboard/shared/player-shell.js")).playerShellHtml(lang); } catch { shellHtml = ""; }
-      res.type("html").send(page.renderViewerPage({ lang, id: req.params.id, v, thread, back, card, shellHtml }));
+      res.type("html").send(page.renderViewerPage({ lang, id: req.params.id, v, thread, back, card, laneLabel, shellHtml }));
     } catch {
       res.status(500).type("text/plain").send("error");
     }
@@ -431,8 +447,9 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
       activeRound, scripted, scriptsOff: !!(cur && scripted && M.store.isTainted(cur)),
       // The threads a round or ask holds right now: the viewer hides Edit/Delete on them.
       lockedThreads: await M.comments.lockedThreadIds(S.db, art.id),
-      // P6: the card this document belongs to (null: none, or an older core).
-      card: await documentCardFor(art.id) });
+      // P6: the card this document belongs to (null: none, or an older core). The viewer's
+      // 5 s poll (?poll=1) never reads it, so a poll skips the summary and omits the key.
+      ...(req.query.poll === "1" ? {} : { card: await documentCardFor(art.id) }) });
   }));
 
   /**

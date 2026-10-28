@@ -130,4 +130,5 @@ body{background:#eef1f3}
 .cv-cardrow a{min-height:44px;display:inline-flex;align-items:center;gap:6px;color:var(--teal);text-decoration:none;font-weight:600;min-width:0}
 .cv-card{min-height:44px;max-width:100%}
 .cv-card-t{color:var(--ink);font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.cv-lane{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;background:var(--teal-soft);color:var(--teal);font-size:12px;font-weight:600;white-space:nowrap}
 .cv-cardrow a:hover,.cv-cardrow a:focus-visible{text-decoration:underline}
