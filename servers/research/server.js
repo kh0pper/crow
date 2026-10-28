@@ -339,6 +339,8 @@ export function createProjectServer(dbPath, options = {}) {
   const callActor = (extra) => resolveCallActor(baseActor, extra);
   // The page-fetch seam (tests inject a stub; nothing here ever opts into private addresses).
   const fetchPageImpl = typeof options.fetchPage === "function" ? options.fetchPage : defaultFetchPage;
+  // Test seam: awaited in crow_verify_source after the quote check and before the write.
+  const beforeVerifyWrite = typeof options.beforeVerifyWrite === "function" ? options.beforeVerifyWrite : null;
 
   // The deploy window (no SCHEMA_GENERATION bump): ready the provenance columns here. While not
   // ready, tools keep to the pre-0013 column lists; refreshSchema() retries until ready.
@@ -687,11 +689,21 @@ export function createProjectServer(dbPath, options = {}) {
       for (const c of checks) {
         await db.execute({ sql: "UPDATE research_notes SET quote_found = ? WHERE id = ?", args: [c.found, c.note_id] });
       }
-      await audit({ fetch_status: cols.fetch_status, changed: true, forced: !!force, quotes_rechecked: checks.length });
+      // New text that a quote no longer matches breaks a quotes_checked verification: clear it.
+      let invalidated = false;
+      if (checks.some((c) => c.found !== 1)) {
+        const inv = await db.execute({
+          sql: "UPDATE research_sources SET verified = 0, verification_method = NULL, verified_by = NULL WHERE id = ? AND verification_method = 'quotes_checked'",
+          args: [id],
+        });
+        invalidated = Number(inv.rowsAffected) > 0;
+      }
+      await audit({ fetch_status: cols.fetch_status, changed: true, forced: !!force, quotes_rechecked: checks.length, ...(invalidated ? { invalidated: true } : {}) });
       let quoteLine = "";
       if (checks.length > 0) {
         const n = (v) => checks.filter((c) => c.found === v).length;
         quoteLine = `\nRe-checked ${checks.length} quote note(s): ${n(1)} found, ${n(0)} not on the page, ${n(null)} not checked.`;
+        if (invalidated) quoteLine += ` Source #${id} is no longer verified: a quote is not on the new page.`;
       }
       return { content: [{ type: "text", text: `Source #${id}: ${fetchOutcomeText(r, RESULT_MAX - 150)}${quoteLine}` }] };
     }
@@ -805,7 +817,7 @@ export function createProjectServer(dbPath, options = {}) {
       }
 
       const { rows } = await db.execute({
-        sql: "SELECT id, project_id, url, verified, verification_method, fetch_status, fetched_at, fetched_text FROM research_sources WHERE id = ?",
+        sql: "SELECT id, project_id, url, verified, verification_method, fetch_status, fetched_at, content_sha256, fetched_text FROM research_sources WHERE id = ?",
         args: [id],
       });
       const src = rows[0];
@@ -839,10 +851,48 @@ export function createProjectServer(dbPath, options = {}) {
         });
         await audit({ method: how, verified: true, ...payload });
       };
-      // A check outcome, not an error: the source keeps whatever verification it already had.
-      const notVerified = async (why, payload = {}) => {
-        await audit({ method, verified: false, reason: why, ...payload });
-        const kept = src.verified ? ` Its existing verification (${src.verification_method || "unknown method"}) is unchanged.` : "";
+      // The quotes_checked write, guarded against a change between the check and the write (the
+      // check awaits, and on the stale path a network fetch): the source still holds the text that
+      // was checked, and its quote notes are exactly the checked ones, each found. `extraSet` adopts
+      // a re-fetched copy in the same statement. Returns false when nothing was written.
+      const guardedVerify = async (checkedIds, extraSet = null) => {
+        const set = ["verified = 1", "verification_method = 'quotes_checked'", "verified_by = ?", "verification_notes = ?"];
+        const args = [actorLabel(actor), notes ?? null];
+        if (extraSet) for (const [c, v] of Object.entries(extraSet)) { set.push(`${c} = ?`); args.push(v); }
+        const idList = checkedIds.map(() => "?").join(", ");
+        // On the stale path the notes' quote_found still describes the old copy, so only the
+        // note set is guarded there; the found values are written after.
+        const foundGuard = extraSet ? "" : " OR quote_found IS NOT 1";
+        const r = await db.execute({
+          sql: `UPDATE research_sources SET ${set.join(", ")}
+                 WHERE id = ? AND content_sha256 IS ? AND fetched_at IS ? AND fetched_text IS ?
+                   AND NOT EXISTS (SELECT 1 FROM research_notes WHERE source_id = ? AND note_type = 'quote'
+                                   AND (id NOT IN (${idList})${foundGuard}))`,
+          args: [...args, id, src.content_sha256 ?? null, src.fetched_at ?? null, src.fetched_text ?? null, id, ...checkedIds],
+        });
+        return Number(r.rowsAffected) > 0;
+      };
+      const raced = async (payload = {}) => {
+        await audit({ method, verified: false, reason: "changed while being checked", ...payload });
+        return ok(`NOT verified: the source changed while it was being checked; try again.${noAudit}`);
+      };
+      // A quote check that failed clears a verification that rested on a quote check (verified
+      // means every quote note was found); legacy_flag and manual_owner rows are left alone.
+      const invalidateQuotesChecked = async () => {
+        const r = await db.execute({
+          sql: "UPDATE research_sources SET verified = 0, verification_method = NULL, verified_by = NULL WHERE id = ? AND verification_method = 'quotes_checked'",
+          args: [id],
+        });
+        return Number(r.rowsAffected) > 0;
+      };
+      // A check outcome, not an error. With `invalidate`, a quotes_checked verification is cleared;
+      // any other existing verification is kept.
+      const notVerified = async (why, payload = {}, invalidate = false) => {
+        const cleared = invalidate ? await invalidateQuotesChecked() : false;
+        await audit({ method, verified: false, reason: why, ...(cleared ? { invalidated: true } : {}), ...payload });
+        const kept = cleared
+          ? ` Source #${id} is no longer verified: its verification rested on a quote check that no longer passes.`
+          : src.verified ? ` Its existing verification (${src.verification_method || "unknown method"}) is unchanged.` : "";
         return ok(`NOT verified: ${why}${kept}${noAudit}`);
       };
 
@@ -910,16 +960,16 @@ export function createProjectServer(dbPath, options = {}) {
           return notVerified(
             `the page has changed since Crow stored it (${listFailures(checks)} on the current page). Kept the copy from ${src.fetched_at}.`,
             { refetched: true, adopted: false },
+            true,
           );
         }
-        await db.execute({
-          sql: `UPDATE research_sources SET ${FETCH_COLUMN_NAMES.map((c) => `${c} = ?`).join(", ")} WHERE id = ?`,
-          args: [...FETCH_COLUMN_NAMES.map((c) => cols[c]), id],
-        });
+        if (beforeVerifyWrite) await beforeVerifyWrite({ id, stale: true });
+        const adopted = Object.fromEntries(FETCH_COLUMN_NAMES.map((c) => [c, cols[c]]));
+        if (!(await guardedVerify(checks.map((c) => c.note_id), adopted))) return raced({ refetched: true });
         for (const c of checks) {
           await db.execute({ sql: "UPDATE research_notes SET quote_found = ? WHERE id = ?", args: [c.found, c.note_id] });
         }
-        await markVerified("quotes_checked", { refetched: true, adopted: true, quotes: checks.length });
+        await audit({ method: "quotes_checked", verified: true, refetched: true, adopted: true, quotes: checks.length });
         return ok(`Source #${id} verified: Crow re-opened the page and found all ${checks.length} quote note(s) on it.${noAudit}`);
       }
 
@@ -928,9 +978,11 @@ export function createProjectServer(dbPath, options = {}) {
         await db.execute({ sql: "UPDATE research_notes SET quote_found = ? WHERE id = ?", args: [c.found, c.note_id] });
       }
       if (!checks.every((c) => c.found === 1)) {
-        return notVerified(`${listFailures(checks)} on the page Crow fetched (${src.fetched_at}). Fix or remove those notes, then verify again.`);
+        return notVerified(`${listFailures(checks)} on the page Crow fetched (${src.fetched_at}). Fix or remove those notes, then verify again.`, {}, true);
       }
-      await markVerified("quotes_checked", { quotes: checks.length });
+      if (beforeVerifyWrite) await beforeVerifyWrite({ id, stale: false });
+      if (!(await guardedVerify(checks.map((c) => c.note_id)))) return raced();
+      await audit({ method: "quotes_checked", verified: true, quotes: checks.length });
       return ok(`Source #${id} verified: all ${checks.length} quote note(s) were found on the page Crow fetched (${src.fetched_at}).${noAudit}`);
     }
   );
@@ -1055,6 +1107,24 @@ export function createProjectServer(dbPath, options = {}) {
       sql += `) VALUES (${args.map(() => "?").join(", ")})`;
       const result = await db.execute({ sql, args });
       const noteId = Number(result.lastInsertRowid);
+      // A quote note that is not found on the page breaks a verification that rests on a quote
+      // check (every quote note found): clear it. manual_owner and legacy_flag stay as they are.
+      if (note_type === "quote" && src && ready && quoteFound !== 1) {
+        const inv = await db.execute({
+          sql: "UPDATE research_sources SET verified = 0, verification_method = NULL, verified_by = NULL WHERE id = ? AND verification_method = 'quotes_checked'",
+          args: [source_id],
+        });
+        if (Number(inv.rowsAffected) > 0) {
+          const why = quoteFound === 0 ? "this quote was not found on the page" : "this quote could not be checked against the page";
+          quoteLine += `\nSource #${source_id} is no longer verified: ${why}.`;
+          if (src.project_id != null) {
+            await appendAudit(db, {
+              project_id: Number(src.project_id), ...auditActor(actor), action: "source.verify", target: `source:${source_id}`,
+              payload: { method: "invalidated", verified: false, note_id: noteId, quote_found: quoteFound },
+            });
+          }
+        }
+      }
       if (project_id != null) {
         await appendAudit(db, {
           project_id, ...auditActor(actor), action: "note.add",

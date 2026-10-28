@@ -64,7 +64,7 @@ async function connect(server) {
   await client.connect(ct);
   return client;
 }
-const clientFor = (actor = OWNER, stub = makeStub()) => connect(createProjectServer(CORE, { fetchPage: stub, actor }));
+const clientFor = (actor = OWNER, stub = makeStub(), opts = {}) => connect(createProjectServer(CORE, { fetchPage: stub, actor, ...opts }));
 
 function withDb(fn) { const d = new Database(CORE); try { return fn(d); } finally { d.close(); } }
 const source = (id) => withDb((d) => d.prepare("SELECT * FROM research_sources WHERE id = ?").get(id));
@@ -366,4 +366,149 @@ test("unverify clears the method and is audited", async () => {
   assert.equal(a.length, 1);
   assert.equal(a[0].actor_type, "bot");
   assert.equal(JSON.parse(a[0].payload).verified, false);
+});
+
+// ---------------------------------------------------------------- fix round 1: the invariant
+
+test("a failed re-check clears a quotes_checked verification, not manual_owner or legacy_flag", async () => {
+  const client = await clientFor(BOT);
+  const pid = await newProject(client);
+  const sid = insertSource({ project_id: pid });
+  insertQuote(sid, pid, "We will ship weekly");
+  assert.match(text(await verify(client, { id: sid })), /^Source #\d+ verified/);
+  assert.equal(source(sid).verification_method, "quotes_checked");
+  // A misquote that did not come through crow_add_note (e.g. a synced row).
+  const bad = insertQuote(sid, pid, "We will ship hourly and never sleep");
+  const r = await verify(client, { id: sid });
+  assert.ok(text(r).startsWith("NOT verified:"), text(r));
+  assert.match(text(r), new RegExp(`#${bad}\\b`));
+  assert.match(text(r), /no longer verified/);
+  const s = source(sid);
+  assert.equal(s.verified, 0);
+  assert.equal(s.verification_method, null);
+  assert.equal(s.verified_by, null);
+  assert.equal(JSON.parse(audits(pid).at(-1).payload).invalidated, true);
+
+  for (const how of ["manual_owner", "legacy_flag"]) {
+    const sid2 = insertSource({ project_id: pid, verified: 1, verification_method: how, verified_by: how === "manual_owner" ? "owner" : null });
+    insertQuote(sid2, pid, "We will ship hourly and never sleep");
+    const r2 = await verify(client, { id: sid2 });
+    assert.ok(text(r2).startsWith("NOT verified:"), text(r2));
+    assert.doesNotMatch(text(r2), /no longer verified/);
+    assert.equal(source(sid2).verified, 1, how);
+    assert.equal(source(sid2).verification_method, how);
+  }
+});
+
+test("a stale page that changed under a quote clears a quotes_checked verification", async () => {
+  const url = "https://example.com/stale-verified";
+  const stub = makeStub({ [url]: okPage(url, "Different text entirely.") });
+  const client = await clientFor(BOT, stub);
+  const pid = await newProject(client);
+  const sid = insertSource({ project_id: pid, url, fetched_at: new Date(Date.now() - 40 * DAY).toISOString(), verified: 1, verification_method: "quotes_checked", verified_by: "bot:b1" });
+  insertQuote(sid, pid, "We will ship weekly");
+  const r = await verify(client, { id: sid });
+  assert.ok(text(r).startsWith("NOT verified:"), text(r));
+  assert.match(text(r), /no longer verified/);
+  assert.equal(source(sid).verified, 0);
+  assert.equal(source(sid).fetched_text, PAGE);
+});
+
+test("crow_add_note: a quote not on the page clears a quotes_checked verification and is audited", async () => {
+  const client = await clientFor(BOT);
+  const pid = await newProject(client);
+  const sid = insertSource({ project_id: pid });
+  insertQuote(sid, pid, "We will ship weekly");
+  assert.match(text(await verify(client, { id: sid })), /^Source #\d+ verified/);
+  const addNote = (args) => client.callTool({ name: "crow_add_note", arguments: { note_type: "quote", provenance: "fetched", project_id: pid, ...args } });
+
+  const ok = await addNote({ source_id: sid, content: "the budget doubles next year" });
+  assert.doesNotMatch(text(ok), /no longer verified/);
+  assert.equal(source(sid).verified, 1, "a found quote keeps the verification");
+
+  const r = await addNote({ source_id: sid, content: "We will ship hourly and never sleep" });
+  assert.ok(!r.isError, text(r));
+  assert.match(text(r), new RegExp(`source #${sid} is no longer verified: this quote was not found on the page`, "i"));
+  const s = source(sid);
+  assert.equal(s.verified, 0);
+  assert.equal(s.verification_method, null);
+  assert.equal(s.verified_by, null);
+  const a = audits(pid).at(-1);
+  assert.equal(a.actor_type, "bot");
+  assert.equal(a.actor_id, "b1");
+  assert.equal(JSON.parse(a.payload).method, "invalidated");
+
+  for (const how of ["manual_owner", "legacy_flag"]) {
+    const sid2 = insertSource({ project_id: pid, verified: 1, verification_method: how });
+    const r2 = await addNote({ source_id: sid2, content: "We will ship hourly and never sleep" });
+    assert.doesNotMatch(text(r2), /no longer verified/);
+    assert.equal(source(sid2).verified, 1, how);
+    assert.equal(source(sid2).verification_method, how);
+  }
+});
+
+test("crow_fetch_source force: new text a quote no longer matches clears a quotes_checked verification", async () => {
+  const url = "https://example.com/forced";
+  const stub = makeStub({ [url]: okPage(url, "Different text entirely.") });
+  const client = await clientFor(OWNER, stub);
+  const pid = await newProject(client);
+  const sid = insertSource({ project_id: pid, url, verified: 1, verification_method: "quotes_checked", verified_by: "owner" });
+  const n = insertQuote(sid, pid, "We will ship weekly");
+  withDb((d) => d.prepare("UPDATE research_notes SET quote_found = 1 WHERE id = ?").run(n));
+  const r = await client.callTool({ name: "crow_fetch_source", arguments: { id: sid, force: true } });
+  assert.match(text(r), /no longer verified/);
+  assert.equal(source(sid).verified, 0);
+  assert.equal(source(sid).verification_method, null);
+});
+
+test("a quote note added between the check and the write blocks verification", async () => {
+  let hook = null;
+  const stub = makeStub();
+  const client = await clientFor(BOT, stub, { beforeVerifyWrite: async (info) => { if (hook) await hook(info); } });
+  const pid = await newProject(client);
+
+  // Fresh path: an unchecked quote note lands after the check.
+  const sid = insertSource({ project_id: pid });
+  insertQuote(sid, pid, "We will ship weekly");
+  hook = () => { insertQuote(sid, pid, "something unchecked"); };
+  const r = await verify(client, { id: sid });
+  assert.equal(text(r), "NOT verified: the source changed while it was being checked; try again.");
+  assert.equal(source(sid).verified, 0);
+  // Even a note that reads as found is refused: it was not part of the check.
+  const sidB = insertSource({ project_id: pid });
+  insertQuote(sidB, pid, "We will ship weekly");
+  hook = () => withDb((d) => d.prepare("INSERT INTO research_notes (project_id, source_id, content, note_type, quote_found) VALUES (?, ?, 'x', 'quote', 1)").run(pid, sidB));
+  assert.match(text(await verify(client, { id: sidB })), /changed while it was being checked/);
+  assert.equal(source(sidB).verified, 0);
+
+  // Stale path: a note lands during the re-fetch window; the new copy is not adopted.
+  const url = "https://example.com/race";
+  const fresh = `${PAGE} Plus a new line.`;
+  stub.pages[url] = okPage(url, fresh);
+  const old = new Date(Date.now() - 31 * DAY).toISOString();
+  const sid2 = insertSource({ project_id: pid, url, fetched_at: old });
+  insertQuote(sid2, pid, "We will ship weekly");
+  hook = () => withDb((d) => d.prepare("INSERT INTO research_notes (project_id, source_id, content, note_type, quote_found) VALUES (?, ?, 'x', 'quote', 1)").run(pid, sid2));
+  const r2 = await verify(client, { id: sid2 });
+  assert.match(text(r2), /^NOT verified: the source changed while it was being checked/);
+  let s = source(sid2);
+  assert.equal(s.verified, 0);
+  assert.equal(s.fetched_text, PAGE);
+  assert.equal(s.fetched_at, old);
+
+  // Stale path: the stored text changed underneath (another fetch adopted a copy).
+  const sid3 = insertSource({ project_id: pid, url, fetched_at: old });
+  insertQuote(sid3, pid, "We will ship weekly");
+  hook = () => withDb((d) => d.prepare("UPDATE research_sources SET fetched_text = ?, content_sha256 = ? WHERE id = ?").run("other", sha("other"), sid3));
+  assert.match(text(await verify(client, { id: sid3 })), /changed while it was being checked/);
+  s = source(sid3);
+  assert.equal(s.verified, 0);
+  assert.equal(s.fetched_text, "other");
+
+  // No interference: the same paths verify when nothing changes.
+  hook = null;
+  const sid4 = insertSource({ project_id: pid, url, fetched_at: old });
+  insertQuote(sid4, pid, "We will ship weekly");
+  assert.match(text(await verify(client, { id: sid4 })), /^Source #\d+ verified/);
+  assert.equal(source(sid4).fetched_text, fresh);
 });
