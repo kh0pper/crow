@@ -7,6 +7,9 @@
  *      peerTrust predicate).
  * `bot_relay_result` gets the same check (it raises a high-priority
  * notification). Real init-db scratch DB; the AI run is a spy.
+ *
+ * PT-2a: every event here is fresh (created_at = now) and carries its own
+ * relay_id, since a relay_id is claimed once (tests/bot-relay-replay.test.js).
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -36,8 +39,11 @@ before(async () => {
 });
 after(() => { try { db.close(); } catch {} rmSync(dir, { recursive: true, force: true }); });
 
+const newId = () => randomBytes(16).toString("hex");
+const nowS = () => Math.floor(Date.now() / 1000);
+
 function relay(sender, extra = {}) {
-  return { relay_id: "r1", task: "list my notes", target_instance: LOCAL, sender_instance: sender, sender_name: sender, ...extra };
+  return { relay_id: newId(), task: "list my notes", target_instance: LOCAL, sender_instance: sender, sender_name: sender, ...extra };
 }
 
 async function route(subtype, payload, senderPubkey) {
@@ -45,7 +51,7 @@ async function route(subtype, payload, senderPubkey) {
   const notes = [];
   const r = await routeBotRelay({
     subtype, payload, senderPubkey, db, identity: own, nostrManager: {},
-    localName: LOCAL,
+    localName: LOCAL, eventCreatedAt: nowS(),
     run: async (...a) => { runs.push(a); },
     notify: async (n) => { notes.push(n); },
   });
@@ -89,7 +95,7 @@ test("B-4 a task for another instance is not ours", async () => {
 });
 
 test("B-5 bot_relay_result: only our own key and a trusted responder raise a notification", async () => {
-  const res = (responder) => ({ relay_id: "r9", status: "success", result: "done", target_instance: LOCAL, responder_instance: responder });
+  const res = (responder) => ({ relay_id: newId(), status: "success", result: "done", target_instance: LOCAL, responder_instance: responder });
   const ok = await route("bot_relay_result", res("laptop"), xonly(own));
   assert.equal(ok.r, "handled");
   assert.equal(ok.notes.length, 1);
@@ -105,13 +111,22 @@ test("B-5 bot_relay_result: only our own key and a trusted responder raise a not
 });
 
 test("B-6 a trust lookup error fails closed", async () => {
-  const broken = { execute: async () => { throw new Error("database disk image is malformed"); } };
+  // The claim (processed_control_events) succeeds; only the trust lookup breaks.
+  const broken = {
+    execute: async (stmt) => {
+      if (/processed_control_events/.test(stmt?.sql || "")) return db.execute(stmt);
+      throw new Error("database disk image is malformed");
+    },
+  };
   const runs = [];
+  const payload = relay("laptop");
   const r = await routeBotRelay({
-    subtype: "bot_relay", payload: relay("laptop"), senderPubkey: xonly(own), db: broken, identity: own,
-    nostrManager: {}, localName: LOCAL, run: async () => { runs.push(1); },
+    subtype: "bot_relay", payload, senderPubkey: xonly(own), db: broken, identity: own,
+    nostrManager: {}, localName: LOCAL, eventCreatedAt: nowS(), run: async () => { runs.push(1); },
     freshClient: () => broken,
   });
   assert.equal(r, "ignored");
   assert.equal(runs.length, 0);
+  const { rows } = await db.execute({ sql: "SELECT 1 FROM processed_control_events WHERE event_id = ?", args: [`bot_relay:${payload.relay_id}`] });
+  assert.equal(rows.length, 1, "the claim ran, so the refusal came from the trust check");
 });

@@ -628,7 +628,7 @@ export async function wireNostrReceive(managers) {
   // Ordered after the per-contact loop so relay connections are reused.
   await nostrManager.subscribeToIncoming(async (payload, senderPubkey, event) => {
     await handleInviteAccepted(db, { syncManager, peerManager, nostrManager }, payload, senderPubkey, event);
-  }, async (subtype, payload, senderPubkey) => {
+  }, async (subtype, payload, senderPubkey, eventCreatedAt) => {
     console.log(`[sharing] Received crow_social message: ${subtype}`);
     if (subtype === "room_invite" || subtype === "voice_memo" || subtype === "reaction") {
       // PT-3 N-5: bound to the signer; non-contacts are shown, labelled.
@@ -645,8 +645,9 @@ export async function wireNostrReceive(managers) {
     } else if (subtype === "group_message") {
       await handleGroupMessageNotify(db, payload, senderPubkey, managers);
     } else if (subtype === "bot_relay" || subtype === "bot_relay_result") {
-      // PT-2.0: only our own Nostr key, naming a trusted live sibling (bot-relay.js).
-      await routeBotRelay({ subtype, payload, senderPubkey, db, identity, nostrManager });
+      // PT-2.0: only our own Nostr key, naming a trusted live sibling; PT-2a:
+      // only while fresh, and once per relay_id across processes (bot-relay.js).
+      await routeBotRelay({ subtype, payload, senderPubkey, db, identity, nostrManager, eventCreatedAt });
     } else if (subtype === DELIVERY_RECEIPT_SUBTYPE) {
       await handleDeliveryReceipt(db, payload.event_ids, senderPubkey);
     } else if (subtype === HANDSHAKE_COMPLETE_SUBTYPE) {
