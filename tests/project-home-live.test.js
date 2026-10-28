@@ -53,7 +53,7 @@ before(async () => {
   const bot = c.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?,?,?,1,?)");
   bot.run("hank", "Hank the very thorough gardener", JSON.stringify({ gateways: [{ type: "perch" }], models: { default: "role:coordinator" } }), pid);
   bot.run("ivy", "Ivy", JSON.stringify({ gateways: [{ type: "perch" }], models: { default: "role:everyday" } }), pid);
-  const sess = c.prepare("INSERT INTO bot_sessions (bot_id, kind, status, gateway_thread_id, label, updated_at) VALUES (?, 'perch-live', 'stopped', ?, ?, datetime('now', ?))");
+  const sess = c.prepare("INSERT INTO bot_sessions (bot_id, kind, status, gateway_thread_id, label, updated_at) VALUES (?, 'perch-live', 'active', ?, ?, datetime('now', ?))");
   const file = c.prepare("INSERT INTO shell_items (item_kind, item_ref, project_id, set_by) VALUES ('perch_thread', ?, ?, 'origin')");
   [["perchlive-0000000a", "Planning the spring beds and the compost rotation for the north plot", "-1 hours"],
    ["perchlive-0000000b", null, "-1 days"], ["perchlive-0000000c", "Tools", "-3 days"], ["perchlive-0000000d", "Budget", "-40 days"]]

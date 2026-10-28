@@ -59,9 +59,9 @@ function scopeWhere(scope, activeIds = []) {
 }
 
 // The latest board_results row per card: renderKanbanBoard's join, same shape.
-const LATEST_RESULT_JOIN = `LEFT JOIN board_results r ON r.id = (
-  SELECT id FROM board_results WHERE item_id = t.id ORDER BY id DESC LIMIT 1
-)`;
+// A grouped join, not a correlated subquery: one pass over board_results.
+const LATEST_RESULT_JOIN = `LEFT JOIN (SELECT item_id, MAX(id) AS id FROM board_results GROUP BY item_id) lr ON lr.item_id = t.id
+  LEFT JOIN board_results r ON r.id = lr.id`;
 
 /** id and project_id as Numbers (null project stays null): lock and def maps are keyed by Number. */
 function normalize(row) {

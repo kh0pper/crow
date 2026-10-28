@@ -9,7 +9,7 @@
 
 import { escapeHtml } from "../../shared/components.js";
 import { t } from "../../shared/i18n.js";
-import { needsYouLabel } from "../board/needs-you.js";
+import { needsYouLabel } from "../board/needs-you-label.js";
 import { relativeDay } from "./data.js";
 
 const KIND_KEY = Object.freeze({ decision: "shell.kindDecision", review: "shell.kindReview", question: "shell.kindQuestion" });
@@ -47,8 +47,8 @@ function needsSection(data, project, lang) {
   }
   // A card's chip names its kind of ask; a waiting session (or a card with none) has no chip.
   const rows = data.needsYou.map((c) => {
-    const chip = KIND_KEY[c.kind] ? `<span class="ph-kind ph-kind--${escapeHtml(c.kind)}">${escapeHtml(t(KIND_KEY[c.kind], lang))}</span>` : "";
-    return `<li><a class="ph-row" href="${escapeHtml(c.href)}">${chip}<span class="ph-row-title">${escapeHtml(c.title || t("shell.untitledSession", lang))}</span></a></li>`;
+    const chip = c.waiting ? `<span class="ph-kind ph-kind--waiting">${escapeHtml(t("shell.waitingChip", lang))}</span>` : KIND_KEY[c.kind] ? `<span class="ph-kind ph-kind--${escapeHtml(c.kind)}">${escapeHtml(t(KIND_KEY[c.kind], lang))}</span>` : "";
+    return `<li><a class="ph-row" href="${escapeHtml(c.href)}"${c.waiting ? ' data-turbo-prefetch="false"' : ""}>${chip}<span class="ph-row-title">${escapeHtml(c.title || t("shell.untitledSession", lang))}</span></a></li>`;
   }).join("");
   const label = needsYouLabel(n, lang);
   return `<section class="ph-section ph-needs">${head}
@@ -58,7 +58,7 @@ function needsSection(data, project, lang) {
     </section>`;
 }
 
-function sessionsSection(data, lang, now) {
+function sessionsSection(data, project, lang, now) {
   const head = `<h3 class="ph-h">${escapeHtml(t("shell.earlierSessions", lang))}</h3>`;
   if (!data.sessions.length) {
     return `<section class="ph-section ph-earlier">${head}<p class="ph-line">${escapeHtml(t("shell.noSessions", lang))}</p></section>`;
@@ -67,17 +67,17 @@ function sessionsSection(data, lang, now) {
     const rd = relativeDay(s.lastAt, { now, lang });
     const when = rd ? (rd.key ? t(rd.key, lang) : cap(rd.text)) : "";
     const meta = [s.botName, when].filter(Boolean).join(" · ");
-    return `<li><a class="ph-row ph-session" href="/dashboard/perch#${encodeURIComponent(s.threadId)}"><span class="ph-row-title">${escapeHtml(s.label || t("shell.untitledSession", lang))}</span>${meta ? `<span class="ph-meta">${escapeHtml(meta)}</span>` : ""}</a></li>`;
+    return `<li><a class="ph-row ph-session" href="/dashboard/perch?project=${encodeURIComponent(project.slug)}#${encodeURIComponent(s.threadId)}" data-turbo-prefetch="false"><span class="ph-row-title">${escapeHtml(s.label || t("shell.untitledSession", lang))}</span>${meta ? `<span class="ph-meta">${escapeHtml(meta)}</span>` : ""}</a></li>`;
   }).join("");
   return `<section class="ph-section ph-earlier">${head}<ul class="ph-list">${rows}</ul></section>`;
 }
 
 /** The home page body. */
 export function projectHomeHtml(data, project, lang, { now = new Date() } = {}) {
-  return `<div class="ph" data-ph data-project-id="${Number(project.id)}">
+  return `<div class="ph" data-ph data-project-id="${Number(project.id)}" data-project-slug="${escapeHtml(project.slug)}">
     ${startSection(data, lang)}
     ${needsSection(data, project, lang)}
-    ${sessionsSection(data, lang, now)}
+    ${sessionsSection(data, project, lang, now)}
   </div>`;
 }
 

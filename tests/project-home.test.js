@@ -14,6 +14,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import Database from "better-sqlite3";
 import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
 actAsServe(); // this process's HTTP client stands in for tailscaled (the Serve socket owner)
@@ -207,11 +208,10 @@ test("the home renders start, needs-you and earlier sessions for the slug", asyn
   assert.match(needs, /href="\/dashboard\/board\?project=garden">All on Board</);
 
   const earlier = section(r.body, "ph-earlier");
-  const sessions = [...earlier.matchAll(/href="\/dashboard\/perch#([^"]+)"><span class="ph-row-title">([^<]+)<\/span><span class="ph-meta">([^<]+)</g)].map((m) => [m[1], m[2], m[3].split(" · ")[0]]);
+  const sessions = [...earlier.matchAll(/href="\/dashboard\/perch\?project=garden#([^"]+)" data-turbo-prefetch="false"><span class="ph-row-title">([^<]+)<\/span><span class="ph-meta">([^<]+)</g)].map((m) => [m[1], m[2], m[3].split(" · ")[0]]);
   assert.deepEqual(sessions, [
     ["perchlive-aaaaaaaa", "Seed order", "Ivy"],
-    ["perchlive-bbbbbbbb", "Untitled session", "Hank"],
-  ], "newest first; a stopped session is listed; an unlabelled one is Untitled");
+  ], "only sessions Perch can open (a stopped one is not listed); each link carries ?project=<slug> and no prefetch");
 
   // The drawer marks this project's link as the current page; the tabs follow the project.
   assert.match(r.body, /<a href="\/dashboard\/project\/garden" class="shell-project is-current" aria-current="page">/);
@@ -223,7 +223,7 @@ test("a project whose cards live elsewhere shows it can't count them; a project 
   const k = await get("/dashboard/project/kitchen", jarNew());
   assert.equal(k.status, 200);
   // The shell's own count (an activeProjects row, no tasks_db_uri on it) still knows Kitchen keeps its own store.
-  assert.match(k.body, /<a href="\/dashboard\/project\/kitchen" class="shell-project is-current" aria-current="page">[\s\S]*?<span class="shell-project-sub">\?<\/span>/);
+  assert.match(k.body, /<a href="\/dashboard\/project\/kitchen" class="shell-project is-current" aria-current="page">[\s\S]*?<span class="shell-project-sub"><span aria-hidden="true">\?<\/span><span class="shell-sr">Can(?:&#39;|')t count here<\/span><\/span>/);
   assert.match(section(k.body, "ph-needs"), /Can&#39;t count this project&#39;s cards here|Can't count this project's cards here/);
   const e = await get("/dashboard/project/empty", jarNew());
   assert.match(section(e.body, "ph-needs"), /Nothing needs you/);
@@ -247,10 +247,10 @@ test("waiting sessions that hold no Needs-you card are rows too, three rows at m
     const project = { id: P.waits, slug: "waits", name: "Waits", tasks_db_uri: null };
     const all = ["perchlive-0a0a0a0a", "perchlive-0b0b0b0b", "perchlive-0c0c0c0c", "perchlive-0d0d0d0d"];
     const h = await data.loadProjectHome(db, project, { engine: waiting(all) });
-    assert.deepEqual(h.needsYou.map((r) => [r.kind, r.title, r.href.startsWith("/dashboard/perch#") ? r.href : "card"]), [
+    assert.deepEqual(h.needsYou.map((r) => [r.kind, r.title, r.waiting ? r.href : /^\/dashboard\/perch#/.test(r.href) ? r.href : "card"]), [
       ["question", "Which shed?", "/dashboard/perch#perchlive-0c0c0c0c"], // the card opens the conversation that holds it
-      [null, "Waiting on you", "/dashboard/perch#perchlive-0a0a0a0a"],
-      [null, null, "/dashboard/perch#perchlive-0b0b0b0b"],
+      [null, "Waiting on you", "/dashboard/perch?project=waits#perchlive-0a0a0a0a"],
+      [null, null, "/dashboard/perch?project=waits#perchlive-0b0b0b0b"],
     ], "the card, then waiting sessions (not the one holding the card), capped at 3");
     assert.equal(h.needsYouCount, 4, "1 card + 3 sessions that hold none of its cards");
     // The shell's Map is used as is when the caller has it.
@@ -259,7 +259,19 @@ test("waiting sessions that hold no Needs-you card are rows too, three rows at m
   } finally { db.close(); }
 });
 
-test("a waiting row renders with its label, or Untitled, and no chip", async () => {
+test("a waiting row renders with its label, or Untitled, and a Waiting chip", async () => {
+  const { projectHomeHtml } = await import("../servers/gateway/dashboard/panels/project-home/html.js");
+  const mk = (lang) => projectHomeHtml({ lead: null, bots: [], needsYouCount: 2, sessions: [], needsYou: [
+    { kind: null, waiting: true, title: "Waiting on you", href: "/dashboard/perch?project=waits#perchlive-0a0a0a0a" },
+    { kind: null, waiting: true, title: null, href: "/dashboard/perch?project=waits#perchlive-0b0b0b0b" },
+  ] }, { id: P.waits, slug: "waits" }, lang);
+  const en = mk("en");
+  assert.match(en, /<a class="ph-row" href="\/dashboard\/perch\?project=waits#perchlive-0a0a0a0a" data-turbo-prefetch="false"><span class="ph-kind ph-kind--waiting">Waiting<\/span><span class="ph-row-title">Waiting on you</);
+  assert.match(en, /<span class="ph-row-title">Untitled session</);
+  assert.match(mk("es"), /ph-kind--waiting">En espera</);
+});
+
+test("a row with no kind has no kind chip", async () => {
   const { projectHomeHtml } = await import("../servers/gateway/dashboard/panels/project-home/html.js");
   const html = projectHomeHtml({ lead: null, bots: [], needsYouCount: 2, sessions: [], needsYou: [
     { kind: null, title: "Waiting on you", href: "/dashboard/perch#perchlive-0a0a0a0a" },
@@ -291,7 +303,8 @@ test("earlier sessions follow the shell_items filing", async () => {
     const ids = (await data.earlierSessions(db, P.garden)).map((s) => s.threadId);
     // dddd is the garden bot's but filed under Kitchen; eeee is filed nowhere;
     // cccc is archived; ffff is not a perch-live session.
-    assert.deepEqual(ids, ["perchlive-aaaaaaaa", "perchlive-bbbbbbbb"]);
+    assert.deepEqual(ids, ["perchlive-aaaaaaaa"]);
+    // bbbb is stopped: Perch answers "That session is gone" for it, so it is not offered.
     assert.deepEqual((await data.earlierSessions(db, P.kitchen)).map((s) => s.threadId), ["perchlive-dddddddd"]);
   } finally { db.close(); }
 });
@@ -318,7 +331,9 @@ test("home GET is read-only", async () => {
   const counts = () => {
     const c = new Database(DB_FILE, { readonly: true });
     try {
-      return Object.fromEntries(["shell_items", "dashboard_settings", "memories"].map((tb) => [tb, c.prepare(`SELECT COUNT(*) AS n FROM ${tb}`).get().n]));
+      // A content hash of every table the home could touch (a count alone misses an UPDATE).
+      return Object.fromEntries(["shell_items", "dashboard_settings", "memories", "bot_sessions", "project_spaces", "oauth_tokens"].map((tb) =>
+        [tb, createHash("sha256").update(JSON.stringify(c.prepare(`SELECT * FROM ${tb} ORDER BY rowid`).all())).digest("hex")]));
     } finally { c.close(); }
   };
   const before = counts();
@@ -376,4 +391,41 @@ test("en and es strings exist for every new key", () => {
     assert.ok(e && e.en && e.es, k);
     assert.notEqual(e.en, e.es, `${k} is translated`);
   }
+});
+
+test("a listed earlier-session link opens a session; the home's rows carry the project and skip prefetch", async () => {
+  const r = await get("/dashboard/project/garden", jarNew());
+  const earlier = section(r.body, "ph-earlier");
+  assert.doesNotMatch(earlier, /perchlive-bbbbbbbb/, "the stopped session is not offered");
+  const links = [...earlier.matchAll(/<a class="ph-row ph-session" href="([^"]+)"([^>]*)>/g)];
+  assert.ok(links.length >= 1);
+  const { createDbClient } = await import("../servers/db.js");
+  const db = createDbClient();
+  try {
+    for (const [, href, rest] of links) {
+      assert.match(rest, /data-turbo-prefetch="false"/);
+      const sid = decodeURIComponent(href.split("#")[1]);
+      assert.match(href, /^\/dashboard\/perch\?project=garden#/);
+      // Perch opens a session only while its bot_sessions row is live (routes/perch.js: status != 'stopped').
+      const { rows } = await db.execute({ sql: "SELECT status, archived_at FROM bot_sessions WHERE gateway_thread_id = ? AND kind = 'perch-live'", args: [sid] });
+      assert.ok(rows.length && rows.every((x) => x.status !== "stopped" && x.archived_at == null), sid);
+    }
+  } finally { db.close(); }
+});
+
+test("the New project link opens the create form", async () => {
+  const withNew = await get("/dashboard/projects?new=1", jarNew());
+  assert.match(withNew.body, /<details style="margin-bottom:1rem" open>/);
+  const plain = await get("/dashboard/projects", jarNew());
+  assert.match(plain.body, /<details style="margin-bottom:1rem">/);
+});
+
+test("Start a session goes to /dashboard/perch?project=<slug>#<sid>; the client has no backticks", async () => {
+  const { projectHomeClientJs } = await import("../servers/gateway/dashboard/panels/project-home/client.js");
+  const js = projectHomeClientJs("en");
+  assert.match(js, /location\.href = '\/dashboard\/perch\?project=' \+ encodeURIComponent\(slug\) \+ '#' \+ encodeURIComponent\(sid\)/);
+  assert.match(js, /getAttribute\('data-project-slug'\)/);
+  assert.ok(!js.includes("`"));
+  const r = await get("/dashboard/project/garden", jarNew());
+  assert.match(r.body, /data-project-slug="garden"/);
 });

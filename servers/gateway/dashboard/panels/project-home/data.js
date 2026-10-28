@@ -13,8 +13,8 @@
  *            sessions that hold no such card; at most 3 rows in all.
  *            needsYouCount is the shell's count when the caller has it.
  *   sessions kind='perch-live' threads FILED to this project in shell_items
- *            (the filing, not the bot's home project), unarchived, stopped
- *            ones included, newest first, at most 10.
+ *            (the filing, not the bot's home project), unarchived and not
+ *            stopped (Perch can open only those), newest first, at most 10.
  */
 
 import { CROW_VOICE_BOT_ID } from "../../../../shared/voice-bot.js";
@@ -76,6 +76,7 @@ export async function earlierSessions(db, projectId, { limit = SESSION_LIMIT } =
       LEFT JOIN pi_bot_defs d ON d.bot_id = b.bot_id
      WHERE b.kind = 'perch-live' AND s.project_id = ?
        AND b.gateway_thread_id IS NOT NULL AND b.gateway_thread_id != ''
+       AND b.status != 'stopped'
        ${archived ? "AND b.archived_at IS NULL" : ""}
      GROUP BY b.gateway_thread_id
      ORDER BY last_at DESC, b.gateway_thread_id
@@ -150,7 +151,7 @@ export async function loadProjectHome(db, project, { engine = null, tasksDbPath,
   }));
   const labels = await sessionLabels(db, items.waiting.map((w) => w.sid));
   for (const w of items.waiting) {
-    needsYou.push({ title: labels.get(w.sid) || null, kind: null, href: `/dashboard/perch#${encodeURIComponent(w.sid)}` });
+    needsYou.push({ title: labels.get(w.sid) || null, kind: null, waiting: true, href: `/dashboard/perch?project=${encodeURIComponent(project.slug)}#${encodeURIComponent(w.sid)}` });
   }
 
   const sessions = await earlierSessions(db, id);

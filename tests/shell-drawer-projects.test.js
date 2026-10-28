@@ -25,8 +25,26 @@ test("the count label shows, ? for unknown, none for zero", () => {
   const html = shellDrawer({ ...base, counts });
   const row = (slug) => html.match(new RegExp(`href="/dashboard/project/${slug}".*?</a>`, "s"))[0];
   assert.match(row("alpha"), /3 need you/);
-  assert.match(row("beta"), />\?</);
+  assert.match(row("beta"), /<span aria-hidden="true">\?<\/span><span class="shell-sr">Can(?:&#39;|')t count here<\/span>/);
+  assert.match(shellDrawer({ ...base, counts, lang: "es" }).match(/href="\/dashboard\/project\/beta".*?<\/a>/s)[0], /shell-sr">No se puede contar aquí</);
   assert.doesNotMatch(row("gamma"), /need you|shell-project-sub/);
+});
+
+test("one project needs you (singular), in both languages", () => {
+  const counts = new Map([[1, 1], [2, 2]]);
+  const en = shellDrawer({ ...base, counts });
+  assert.match(en, /1 needs you/);
+  assert.match(en, /2 need you/);
+  const es = shellDrawer({ ...base, counts, lang: "es" });
+  assert.match(es, /1 te necesita</);
+  assert.match(es, /2 te necesitan</);
+});
+
+test("the shell chrome does not import the Board's data layer", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../servers/gateway/dashboard/shell/chrome.js", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /needs-you\.js/);
+  assert.match(src, /needs-you-label\.js/);
 });
 
 test("Everything and Unassigned stay scope buttons", () => {

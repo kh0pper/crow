@@ -12,7 +12,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { createDbClient } from "../../../../db.js";
 import { resolveSqlitePath } from "../../../../../scripts/pi-bots/instance-paths.mjs";
-import { t } from "../../shared/i18n.js";
+import { needsYouLabel } from "./needs-you-label.js";
 import { TASKS_DB, lockMapFor } from "../bot-board/data-queries.js";
 import { threadProjects } from "../../../routes/perch.js";
 import { laneRows, defsFor, cardsByIds } from "../board.js";
@@ -30,21 +30,24 @@ function inSharedStore(project, tasksDbPath) {
 
 async function asProjects(db, projects) {
   const list = [...(projects || [])];
-  const out = [];
-  for (const p of list) {
-    // A row that carries tasks_db_uri is trusted; one without the key (e.g. an
-    // activeProjects row: id, slug, name) has its store read here, so a project
-    // with its own store is never counted against the shared one.
-    if (p && typeof p === "object" && "tasks_db_uri" in p) { out.push({ id: Number(p.id), tasks_db_uri: p.tasks_db_uri ?? null }); continue; }
-    const id = Number(p && typeof p === "object" ? p.id : p);
-    let uri = null;
+  const idOf = (p) => Number(p && typeof p === "object" ? p.id : p);
+  // A row that carries tasks_db_uri is trusted; one without the key (e.g. an
+  // activeProjects row: id, slug, name) has its store read here, in ONE query,
+  // so a project with its own store is never counted against the shared one.
+  const lookup = list.filter((p) => !(p && typeof p === "object" && "tasks_db_uri" in p)).map(idOf);
+  const uris = new Map();
+  if (lookup.length) {
     try {
-      const { rows } = await db.execute({ sql: "SELECT tasks_db_uri FROM project_spaces WHERE id = ?", args: [id] });
-      uri = rows[0] ? rows[0].tasks_db_uri : null;
+      const { rows } = await db.execute({
+        sql: "SELECT id, tasks_db_uri FROM project_spaces WHERE id IN (SELECT value FROM json_each(?))",
+        args: [JSON.stringify(lookup)],
+      });
+      for (const r of rows) uris.set(Number(r.id), r.tasks_db_uri ?? null);
     } catch { /* no project_spaces: treat as the shared store */ }
-    out.push({ id, tasks_db_uri: uri });
   }
-  return out;
+  return list.map((p) => (p && typeof p === "object" && "tasks_db_uri" in p
+    ? { id: Number(p.id), tasks_db_uri: p.tasks_db_uri ?? null }
+    : { id: idOf(p), tasks_db_uri: uris.get(idOf(p)) ?? null }));
 }
 
 /**
@@ -58,9 +61,23 @@ async function waitingByProject(db, engine) {
   if (!engine) return out;
   let sessions = [];
   try { sessions = (await engine.list()) || []; } catch { return out; }
-  const waiting = sessions.filter((s) => s && s.pendingUi && s.state !== "stopped");
+  let waiting = sessions.filter((s) => s && s.pendingUi && s.state !== "stopped");
   if (!waiting.length) return out;
-  const ids = waiting.map((s) => String(s.sessionId));
+  let ids = waiting.map((s) => String(s.sessionId));
+
+  // An archived session is put away: it never counts or lists as waiting.
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT DISTINCT gateway_thread_id FROM bot_sessions WHERE kind='perch-live' AND archived_at IS NOT NULL AND gateway_thread_id IN (SELECT value FROM json_each(?))",
+      args: [JSON.stringify(ids)],
+    });
+    const gone = new Set(rows.map((r) => String(r.gateway_thread_id)));
+    if (gone.size) {
+      waiting = waiting.filter((s) => !gone.has(String(s.sessionId)));
+      ids = waiting.map((s) => String(s.sessionId));
+      if (!waiting.length) return out;
+    }
+  } catch { /* bot_sessions or archived_at absent: nothing is archived */ }
 
   const rowCard = new Map();
   try {
@@ -93,15 +110,40 @@ async function waitingByProject(db, engine) {
   return out;
 }
 
+const CACHE_MS = 5000;
+const countCache = new Map(); // key -> { at, entries: [[projectId, count]] }
+
+/** Forget every cached count (tests, and anything that must see a change at once). */
+export function clearNeedsYouCache() { countCache.clear(); }
+
 /**
  * @returns {Promise<Map<number, number|null>>} projectId -> count (null: unknown)
+ *
+ * Cached per process for 5 s, keyed by the sorted project ids and tasksDbPath
+ * (the shell asks on every page load). Nothing invalidates it: a card or a
+ * session that changes shows in the drawer up to 5 s late, and a different
+ * engine or db handle for the same key is not told apart. Pass cacheMs: 0 to
+ * bypass; `now` is the clock.
  */
-export async function needsYouCounts(db, projects, { engine, tasksDbPath = TASKS_DB } = {}) {
+export async function needsYouCounts(db, projects, { engine, tasksDbPath = TASKS_DB, cacheMs = CACHE_MS, now = Date.now } = {}) {
   const list = await asProjects(db, projects);
+  const key = list.map((p) => `${p.id}|${p.tasks_db_uri ?? ""}`).sort().join(",") + "@" + tasksDbPath;
+  const hit = cacheMs > 0 ? countCache.get(key) : null;
+  if (hit && now() - hit.at < cacheMs) return new Map(hit.entries);
+  const result = await computeCounts(db, list, engine, tasksDbPath);
+  if (cacheMs > 0) countCache.set(key, { at: now(), entries: [...result] });
+  return result;
+}
+
+async function computeCounts(db, list, engine, tasksDbPath) {
   const result = new Map();
-  // No tasks.db: nothing has made a card, so every count is 0. Waiting sessions are
-  // skipped on purpose here (the brief says 0), not an oversight.
-  if (!existsSync(tasksDbPath)) { for (const p of list) result.set(p.id, 0); return result; }
+  // No tasks.db: nothing has made a card, so a project's count is its waiting
+  // sessions alone; a project with its own store is unknown, as everywhere.
+  if (!existsSync(tasksDbPath)) {
+    const waiting = await waitingByProject(db, engine);
+    for (const p of list) result.set(p.id, inSharedStore(p, tasksDbPath) ? (waiting.get(p.id) || []).length : null);
+    return result;
+  }
 
   let tdb;
   try {
@@ -138,15 +180,10 @@ export async function needsYouCounts(db, projects, { engine, tasksDbPath = TASKS
   return result;
 }
 
-/** The "N need you" text for a count: null for 0, "?" for unknown. */
-export function needsYouLabel(n, lang = "en") {
-  if (n === null || n === undefined) return "?";
-  if (!n) return null;
-  return t("shell.needYou", lang).replace("{n}", String(n));
-}
+export { needsYouLabel };
 
 /** The kind of ask a Needs-you card is, or null when it carries none of the three. */
-function kindOf(c) {
+export function kindOf(c) {
   if (openDecision(c)) return "decision";
   if (c.latest_result_status === "recorded") return "review";
   if (String(c.action_needed ?? "").trim() !== "") return "question";
@@ -165,19 +202,20 @@ async function needsLane(db, tdb, projectId) {
  * The project's Needs-you items: its cards in the Board's own order, each with
  * the kind of ask (a decision, a review, a question, or null), then its
  * waiting sessions that hold none of those cards (read the way the count reads
- * them), [{ sid }]. At most `limit` items in all, cards first. An own-store
- * project, or no tasks.db, has no cards to show here (its waiting sessions
- * are still listed when the tasks.db exists).
+ * them), [{ sid }]. At most `limit` items in all, cards first. No tasks.db
+ * has no cards, but a project in the shared store still lists its waiting
+ * sessions; an own-store project (cards this instance's Board doesn't read)
+ * shows nothing at all, cards or sessions.
  */
 export async function needsYouItems(db, project, { engine = null, tasksDbPath = TASKS_DB, limit = 3 } = {}) {
   const none = { cards: [], waiting: [] };
-  if (!project || !existsSync(tasksDbPath)) return none;
+  if (!project) return none;
   const shared = inSharedStore(project, tasksDbPath);
   let tdb;
   try {
     let cards = [];
     let held = new Set();
-    if (shared) {
+    if (shared && existsSync(tasksDbPath)) {
       tdb = createDbClient(tasksDbPath);
       const needs = await needsLane(db, tdb, project.id);
       held = new Set(needs.map((c) => c.id));

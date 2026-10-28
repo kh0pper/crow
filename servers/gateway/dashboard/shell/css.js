@@ -213,6 +213,7 @@ export function shellCss() {
   body.shell .shell-project-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; margin-right: 10px; }
   body.shell .shell-project-text { display: flex; flex-direction: column; min-width: 0; }
   body.shell .shell-project-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  body.shell .shell-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
   body.shell .shell-project-sub { font-size: 0.75rem; font-weight: 400; color: var(--crow-text-secondary); }
   body.shell .shell-project--edge .shell-project-name { color: var(--crow-text-secondary); }
   body.shell .shell-more-row summary { list-style: none; }

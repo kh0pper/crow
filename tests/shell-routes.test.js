@@ -179,6 +179,19 @@ test("the scope route drops a stale ?project= from the return path, so the new s
   assert.equal(cookieValue(r.cookies, SCOPE), "kitchen");
 });
 
+test("Everything / Unassigned chosen on a project home leave the project", async () => {
+  for (const scope of ["all", "unassigned"]) {
+    for (const ret of ["/dashboard/project/garden", "/dashboard/project/garden?x=1#a"]) {
+      const r = await post("/dashboard/scope", { scope, return: ret }, { jar: NEW });
+      assert.equal(r.status, 303);
+      assert.equal(r.location, "/dashboard/perch", `${scope} from ${ret}`);
+      assert.equal(cookieValue(r.cookies, SCOPE), scope);
+    }
+  }
+  const other = await post("/dashboard/scope", { scope: "all", return: "/dashboard/board?x=1" }, { jar: NEW });
+  assert.equal(other.location, "/dashboard/board?x=1", "other pages return as before");
+});
+
 test("an archived project or a learner profile scope falls back to Everything", async () => {
   for (const slug of ["attic", "learner", "no-such-project"]) {
     const set = await post("/dashboard/scope", { scope: slug, return: "/dashboard/perch" }, { jar: NEW });

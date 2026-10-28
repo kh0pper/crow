@@ -17,7 +17,7 @@ import { escapeHtml } from "../shared/components.js";
 import { t } from "../shared/i18n.js";
 import { crowMarkSvg } from "../shared/crow-mark.js";
 import { getPanel as registryGetPanel } from "../panel-registry.js";
-import { needsYouLabel } from "../panels/board/needs-you.js";
+import { needsYouLabel } from "../panels/board/needs-you-label.js";
 
 // Inline 24px stroke icons, decorative (the label carries the meaning).
 const ICON_ATTRS = 'width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"';
@@ -141,7 +141,7 @@ function projectForm({ scope, projects, lang, counts, homeSlug, extraClass = "" 
     const scoped = !open && homeSlug == null && cur === slug;
     const lbl = counts instanceof Map && counts.has(Number(p.id)) ? needsYouLabel(counts.get(Number(p.id)), lang) : null;
     const mark = open ? ' aria-current="page"' : scoped ? ' aria-current="true"' : "";
-    return `<a href="/dashboard/project/${encodeURIComponent(slug)}" class="shell-project${open || scoped ? " is-current" : ""}"${mark}><span class="shell-project-dot" style="background:${projectColor(slug)}" aria-hidden="true"></span><span class="shell-project-text"><span class="shell-project-name">${escapeHtml(p.name)}</span>${lbl ? `<span class="shell-project-sub">${escapeHtml(lbl)}</span>` : ""}</span></a>`;
+    return `<a href="/dashboard/project/${encodeURIComponent(slug)}" class="shell-project${open || scoped ? " is-current" : ""}"${mark}><span class="shell-project-dot" style="background:${projectColor(slug)}" aria-hidden="true"></span><span class="shell-project-text"><span class="shell-project-name">${escapeHtml(p.name)}</span>${lbl ? `<span class="shell-project-sub">${lbl === "?" ? `<span aria-hidden="true">?</span><span class="shell-sr">${escapeHtml(t("shell.cantCount", lang))}</span>` : escapeHtml(lbl)}</span>` : ""}</span></a>`;
   };
   const edge = (href, text) => `<a href="${href}" class="shell-project shell-project--edge"><span class="shell-project-text"><span class="shell-project-name">${escapeHtml(text)}</span></span></a>`;
   const rows = [

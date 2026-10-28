@@ -13,7 +13,7 @@ const TASKS = join(dir, "tasks.db");
 process.env.CROW_TASKS_DB_PATH = TASKS;
 delete process.env.CROW_DB_PATH;
 
-let db, counts, label, cards, ensureItem, A, B, C, OWN;
+let db, counts, needsYouCounts, items, clearCache, label, cards, ensureItem, A, B, C, OWN;
 const DECISION = JSON.stringify({ decision: { question: "q", options: [{ label: "a" }, { label: "b" }] } });
 const ids = {};
 
@@ -54,7 +54,9 @@ before(async () => {
   t.prepare("INSERT INTO board_results (item_id, status) VALUES (?, 'recorded')").run(ids.a_rev);
   t.close();
   ({ ensureItem } = await import("../servers/shared/shell-items.js"));
-  ({ needsYouCounts: counts, needsYouLabel: label, needsYouCards: cards } = await import("../servers/gateway/dashboard/panels/board/needs-you.js"));
+  ({ needsYouCounts, needsYouLabel: label, needsYouCards: cards, needsYouItems: items, clearNeedsYouCache: clearCache } = await import("../servers/gateway/dashboard/panels/board/needs-you.js"));
+  // The suite changes state between calls on purpose, so every plain call here bypasses the 5 s cache.
+  counts = (db_, list, o = {}) => needsYouCounts(db_, list, { cacheMs: 0, ...o });
 });
 after(() => { try { db && db.close(); } catch {} rmSync(dir, { recursive: true, force: true }); });
 
@@ -124,6 +126,49 @@ test("no engine, an idle session or a stopped one adds nothing", async () => {
   assert.equal((await counts(db, [{ id: A }], { engine })).get(A), 3);
 });
 
+test("missing tasks.db still counts waiting sessions", async () => {
+  await file("t-nodb", C);
+  const engine = engineOf([{ sessionId: "t-nodb", pendingUi: true, cardId: null }]);
+  const m = await counts(db, [{ id: A }, { id: C }], { tasksDbPath: join(dir, "nope.db"), engine });
+  assert.deepEqual([...m], [[A, 0], [C, 1]]);
+  const it = await items(db, { id: C }, { tasksDbPath: join(dir, "nope.db"), engine });
+  assert.deepEqual(it, { cards: [], waiting: [{ sid: "t-nodb" }] });
+});
+
+test("an archived waiting session counts nowhere", async () => {
+  await file("t-arch", C);
+  await db.execute({ sql: "INSERT INTO bot_sessions (bot_id, kind, status, gateway_thread_id, archived_at) VALUES (?,?,?,?,datetime('now'))",
+    args: ["hank", "perch-live", "active", "t-arch"] });
+  const engine = engineOf([{ sessionId: "t-arch", pendingUi: true, cardId: null }]);
+  assert.equal((await counts(db, [{ id: C }], { engine })).get(C), 1); // c_ask only
+  assert.deepEqual((await items(db, { id: C }, { engine })).waiting, []);
+});
+
+test("project rows without tasks_db_uri are looked up in one query", async () => {
+  let n = 0;
+  const spy = { execute: (q) => { if (/FROM project_spaces/.test(q.sql || q)) n++; return db.execute(q); } };
+  const m = await counts(spy, [OWN, A, B]);
+  assert.equal(n, 1);
+  assert.equal(m.get(OWN), null);
+});
+
+test("counts are cached for 5 s per project set and tasks.db, then re-read", async () => {
+  clearCache();
+  let at = 1000;
+  const now = () => at;
+  const t = new Database(TASKS);
+  const call = () => needsYouCounts(db, [{ id: B }], { now });
+  const first = (await call()).get(B);
+  t.prepare("INSERT INTO tasks_items (title, project_id, status, action_needed) VALUES ('cache_probe', ?, 'pending', 'new ask')").run(B);
+  at += 4000;
+  assert.equal((await call()).get(B), first, "within 5 s: the cached count, tasks.db not read again");
+  at += 1500;
+  assert.equal((await call()).get(B), first + 1, "after 5 s: re-read");
+  t.prepare("DELETE FROM tasks_items WHERE title = 'cache_probe'").run();
+  t.close();
+  clearCache();
+});
+
 test("missing tasks.db is zero for all", async () => {
   const m = await counts(db, [{ id: A }, { id: B }], { tasksDbPath: join(dir, "nope.db") });
   assert.deepEqual([...m], [[A, 0], [B, 0]]);
@@ -136,11 +181,24 @@ test("unreadable tasks.db is unknown for all", async () => {
   assert.deepEqual([...m], [[A, null], [B, null]]);
 });
 
+test("needsYouItems: a card with no ask has a null kind; an own-store project has nothing", async () => {
+  const t = new Database(TASKS);
+  const id = Number(t.prepare("INSERT INTO tasks_items (title, project_id, status, action_needed, priority) VALUES ('kindless', ?, 'pending', ?, 1)").run(A, "   ").lastInsertRowid);
+  try {
+    const { kindOf } = await import("../servers/gateway/dashboard/panels/board/needs-you.js");
+    assert.equal(kindOf({ id, action_needed: "   ", data_json: "{}" }), null);
+  } finally { t.prepare("DELETE FROM tasks_items WHERE id = ?").run(id); t.close(); }
+  const own = { id: OWN, tasks_db_uri: "file:" + join(dir, "other.db") };
+  assert.deepEqual(await items(db, own, { engine: engineOf([{ sessionId: "x", pendingUi: true }]) }), { cards: [], waiting: [] });
+});
+
 test("needsYouLabel: 0 → null, null → \"?\", 2 → \"2 need you\"", () => {
   assert.equal(label(0, "en"), null);
   assert.equal(label(null, "en"), "?");
   assert.equal(label(2, "en"), "2 need you");
   assert.equal(label(2, "es"), "2 te necesitan");
+  assert.equal(label(1, "en"), "1 needs you");
+  assert.equal(label(1, "es"), "1 te necesita");
 });
 
 test("needsYouCards: board order, one card per kind, limit", async () => {

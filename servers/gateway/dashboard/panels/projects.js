@@ -340,7 +340,7 @@ async function renderListView(db, query, layout, lang) {
   }
 
   // Create project form (collapsible)
-  const createForm = `<details style="margin-bottom:1rem">
+  const createForm = `<details style="margin-bottom:1rem"${query && query.new ? " open" : ""}>
     <summary style="cursor:pointer;color:var(--crow-accent);font-weight:500;padding:0.5rem 0">+ New Project</summary>
     <form method="POST" style="margin-top:0.5rem;display:flex;flex-direction:column;gap:0.5rem;padding:1rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:var(--crow-radius-card)">
       <input type="hidden" name="action" value="create">

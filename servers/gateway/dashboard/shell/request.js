@@ -151,7 +151,10 @@ export function shellRouter({ createDbClient }) {
     try {
       const { value } = await scopeFromValue(db, req.body ? req.body.scope : undefined);
       res.append("Set-Cookie", scopeCookie(value));
-      return res.redirect(303, safeReturnPath(req.body ? req.body.return : undefined));
+      // Everything / Unassigned chosen on a project's home leaves the project
+      // (the home is that project's page, so staying would contradict the choice).
+      const back = safeReturnPath(req.body ? req.body.return : undefined);
+      return res.redirect(303, back.startsWith("/dashboard/project/") ? DEFAULT_RETURN : back);
     } finally {
       db.close();
     }
