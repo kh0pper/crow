@@ -902,12 +902,15 @@ min-height:44px;padding:6px 8px;font-size:13px;border-color:transparent;backgrou
 #perch-hub-root #perch-sheet-tabs button[aria-selected="true"]{color:var(--teal);background:var(--teal-soft)}
 /* The sheet is phone territory at every width: every control in it is a
    44px target (the Session section's selects, Change directory, the
-   plan-mode checkbox and the Files crumbs were sized for a pointer). Two ids outrank the base
-   "#perch-hub-root button"; the checkbox keeps its native look, just larger. */
+   plan-mode checkbox, the narrowing rows and the Files crumbs were sized for a pointer). Two ids outrank the base
+   "#perch-hub-root button"; the plan-mode checkbox keeps its native look, just larger. */
 #perch-hub-root #perch-session-sheet button,#perch-hub-root #perch-session-sheet select{min-height:44px}
 /* A one-letter crumb (the "/" root, a short folder) measured 13px wide. */
 #perch-hub-root #perch-session-sheet button{min-width:44px}
-#perch-hub-root #perch-session-sheet input[type="checkbox"]{width:44px;height:44px;align-self:flex-start;accent-color:var(--teal)}
+#perch-hub-root #perch-session-sheet #perch-plan-mode{width:44px;height:44px;align-self:flex-start;accent-color:var(--teal)}
+/* The tool-narrowing checkboxes stay native size: their <label> row is the
+   target, so the row gets the 44px floor instead. */
+#perch-hub-root #perch-session-sheet .narrow-tool{min-height:44px}
 @media (min-width:${PERCH_SPLIT_MIN_WIDTH}px){
   #perch-session-sheet{margin:auto;max-width:560px;border-radius:var(--crow-radius-card,16px)}
 }

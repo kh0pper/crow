@@ -24,8 +24,10 @@ const CHEVRON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" 
 /** New mode (R1.2 PR 2): the bot name is the button that opens the session
  *  sheet. #perch-bot-name keeps its id (showHeader writes it) and becomes a
  *  span, since a button holds phrasing content only. */
-function identButton() {
-  return `<button type="button" id="perch-ident-btn" class="perch-ident-btn" aria-haspopup="dialog" aria-controls="perch-session-sheet"><span class="title" id="perch-bot-name"></span>${CHEVRON_SVG}</button>`;
+function identButton(lang) {
+  // The description sits OUTSIDE the button so it does not join the
+  // button's name (the bot name): it says what the button opens.
+  return `<button type="button" id="perch-ident-btn" class="perch-ident-btn" aria-haspopup="dialog" aria-controls="perch-session-sheet" aria-describedby="perch-ident-desc"><span class="title" id="perch-bot-name"></span>${CHEVRON_SVG}</button><span class="vh" id="perch-ident-desc">${escapeHtml(t("perch.sheetTitle", lang))}</span>`;
 }
 
 /** New mode: the opening half of the session sheet, which wraps the Session,
@@ -192,7 +194,7 @@ ${engineBanner(engine, lang)}
     <!-- #perch-list-reveal leads the head: desktop only, and only while the
          Sessions column is collapsed (sessions-collapse-css.js). Visible text
          "Sessions", accessible name "Show sessions". -->
-    <div class="perch-head"><button type="button" id="perch-list-reveal" class="quiet perch-sessions-toggle" aria-controls="perch-list" aria-expanded="true" aria-label="${escapeHtml(t("perch.showSessions", lang))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg>${escapeHtml(t("perch.sessionsHeading", lang))}</button><button type="button" id="perch-back" class="quiet">${escapeHtml(t("perch.back", lang))}</button><div class="perch-ident">${sheet ? identButton() : `<div class="title" id="perch-bot-name"></div>`}
+    <div class="perch-head"><button type="button" id="perch-list-reveal" class="quiet perch-sessions-toggle" aria-controls="perch-list" aria-expanded="true" aria-label="${escapeHtml(t("perch.showSessions", lang))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg>${escapeHtml(t("perch.sessionsHeading", lang))}</button><button type="button" id="perch-back" class="quiet">${escapeHtml(t("perch.back", lang))}</button><div class="perch-ident">${sheet ? identButton(lang) : `<div class="title" id="perch-bot-name"></div>`}
       <div class="session-name" id="perch-session-name" hidden></div>
       <div class="browser-status" id="perch-browser-status" role="status" hidden></div>
       <div class="meta" id="perch-session-meta"${sheet ? " hidden" : ""}></div></div></div>

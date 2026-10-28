@@ -1131,7 +1131,7 @@ export function perchHubJs(lang = "en") {
     /* New mode: "Change directory" sits in the session sheet, a modal
        dialog. Everything outside the top layer is inert while it is open,
        this overlay included, so the sheet closes first. */
-    if(SHEET&&SHEET.open) closeSheet();
+    if(SHEET&&SHEET.open){ sheetSkipFocus=true; closeSheet(); }
     buildBrowseModal();
     var m=el('perch-browse-modal'); if(!m) return;
     browse.open=true;
@@ -2408,6 +2408,8 @@ export function perchHubJs(lang = "en") {
      contents never bleed into this one while loadOptions() is in flight. */
   function resetControls(){
     switchTab('chat');           /* D2: a session opens on the conversation, never on the tab the last one was left on */
+    /* New mode: switchTab('chat') only closes the sheet. sheetTab is kept ON
+       PURPOSE, so the sheet reopens on the tab last used, across sessions. */
     var modelSel=el('perch-model'), thinkSel=el('perch-thinking');
     if(modelSel){ clearEl(modelSel); modelSel.disabled=true; }
     if(thinkSel){ clearEl(thinkSel); thinkSel.disabled=true; }
@@ -2840,6 +2842,9 @@ export function perchHubJs(lang = "en") {
     clearEl(pane);
     askShown=card&&card.requestId?card:null;
     if(!card||!card.requestId){ setAttn(false); return; }
+    /* New mode: an ask is never hidden (spec 9.4). The card and the banner
+       live in the chat, which the modal sheet makes inert, so it closes. */
+    if(SHEET&&SHEET.open) closeSheet();
     /* 2026-10-20: an expired question stays on screen, read-only, so the
        operator sees what was asked; the session still waits for them. */
     if(card.expired){
@@ -3093,6 +3098,10 @@ export function perchHubJs(lang = "en") {
      sheet tab is kept for the next open. */
   var SHEET=el('perch-session-sheet');
   var sheetTab='session';
+  /* One-shot: the next close event leaves focus alone. Set when the sheet
+     closes to hand focus to something else (the browse picker): close()
+     queues the event, so its refocus would land AFTER the picker took focus. */
+  var sheetSkipFocus=false;
   function switchTab(name){
     if(TAB_NAMES.indexOf(name)<0) name='chat';
     if(SHEET&&name==='chat'){ closeSheet(); return; }
@@ -3136,7 +3145,13 @@ export function perchHubJs(lang = "en") {
     if(sheetCloseBtn) sheetCloseBtn.onclick=closeSheet;
     SHEET.addEventListener('click',function(e){ if(e.target===SHEET) closeSheet(); });
     SHEET.addEventListener('close',function(){
+      if(sheetSkipFocus){ sheetSkipFocus=false; return; }
       if(!current.sid) return;              /* closed by leaving the session: the list owns focus */
+      /* The shell sheets' rule: return focus only when it is PARKED (nowhere,
+         on body/html, or still inside the closing dialog). A control that
+         took focus right after the close keeps it. */
+      var a=document.activeElement;
+      if(a&&a!==document.body&&a!==document.documentElement&&!SHEET.contains(a)) return;
       var b=el('perch-ident-btn');
       if(b&&document.contains(b)&&b.focus) b.focus();
     });

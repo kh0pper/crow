@@ -1648,6 +1648,12 @@ test("new mode: the ident is a button controlling the sheet", async () => {
   const a = html.indexOf(btn), b = html.indexOf("</button>", a);
   assert.ok(html.slice(a, b).includes('id="perch-bot-name"'), "#perch-bot-name is inside the button");
   assert.ok(openTag(html, "perch-bot-name").startsWith("<span "), "phrasing content inside a button");
+  // Described, not named, by "Session details": the hint sits outside the
+  // button (so the bot name stays its name) and is visually hidden.
+  assert.match(btn, /aria-describedby="perch-ident-desc"/);
+  assert.ok(!html.slice(a, b).includes('id="perch-ident-desc"'), "the description is not inside the button");
+  assert.match(html, /<span class="vh" id="perch-ident-desc">Session details<\/span>/);
+  assert.match(await renderPerch("es", NEW), /<span class="vh" id="perch-ident-desc">Detalles de la sesión<\/span>/);
 });
 
 test("the sheet has session/files/activity tabs and a close button", async () => {

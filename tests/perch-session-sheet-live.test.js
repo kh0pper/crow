@@ -57,6 +57,11 @@ function serveApi(req, res) {
       type: "message", message: { role: i % 2 ? "assistant" : "user", content: [{ text: "line " + i }] } })) });
   }
   if (url.endsWith("/options")) return send(res, 200, { models: [], thinkingLevels: [] });
+  if (url.endsWith("/envelope")) {
+    return send(res, 200, { model: "crow-local/test", skills: [], savedNarrowing: [],
+      tools: [{ id: "read_file", label: "Read files" }, { id: "web_search", label: "Search the web" }], denied: [] });
+  }
+  if (url.endsWith("/stop")) return send(res, 200, { ok: true });
   if (url.endsWith("/models")) return send(res, 200, { models: [], default: null });
   // The Files section's cwd browser: a root crumb, one subfolder crumb and a
   // row of each kind, so the 44px sweep measures real crumbs, not an empty pane.
@@ -314,16 +319,24 @@ test("390 px: no horizontal scroll, every sheet control ≥44 px", async (t) => 
       var d=document.getElementById('perch-session-sheet'), out=[];
       d.querySelectorAll('button,select,input,a[href],summary,[role="tab"]').forEach(function(e){
         if(e.type==='hidden') return;
-        var r=e.getBoundingClientRect(); if(!r.width||!r.height) return;   /* not on screen in this tab */
+        var tgt=(e.tagName==='INPUT'&&e.closest('label'))||e;   /* a labelled checkbox: the label row is the target */
+        var r=tgt.getBoundingClientRect(); if(!r.width||!r.height) return;   /* not on screen in this tab */
         if(Math.round(r.height)<44||Math.round(r.width)<44) out.push((e.id||e.tagName+'.'+e.className)+' '+Math.round(r.width)+'x'+Math.round(r.height));
       });
       var dr=d.getBoundingClientRect();
       return JSON.stringify({small:out, hScroll:document.documentElement.scrollWidth>document.documentElement.clientWidth,
-        sheetScroll:d.scrollWidth>d.clientWidth+1, left:Math.round(dr.left), right:Math.round(dr.right)});
+        sheetScroll:d.scrollWidth>d.clientWidth+1, left:Math.round(dr.left), right:Math.round(dr.right),
+        narrowBoxes:Array.prototype.map.call(d.querySelectorAll('.narrow-tool input[type="checkbox"]'),function(c){ return Math.round(c.getBoundingClientRect().height); }),
+        planMode:Math.round(document.getElementById('perch-plan-mode').getBoundingClientRect().height)});
     })()`;
     for (const name of ["session", "files", "activity"]) {
       await s.click("perch-tab-btn-" + name);
       await s.waitFor(`!document.getElementById('perch-tab-${name}').hidden`, name);
+      // The narrowing pane, expanded: its rows are measured too.
+      if (name === "session") {
+        await s.click("perch-narrow-toggle");
+        await s.waitFor("document.querySelectorAll('#perch-narrow-body .narrow-tool').length===2", "the narrowing pane");
+      }
       // Files loads on activation: measure once its crumbs have landed.
       if (name === "files") await s.waitFor("document.querySelectorAll('#perch-cwd-crumbs button').length>=2", "the cwd crumbs");
       const m = await s.json(MEASURE);
@@ -332,6 +345,86 @@ test("390 px: no horizontal scroll, every sheet control ≥44 px", async (t) => 
       assert.equal(m.hScroll, false, `${name}: no horizontal page scroll`);
       assert.equal(m.sheetScroll, false, `${name}: the sheet does not scroll sideways`);
       assert.ok(m.left >= 0 && m.right <= 390, `${name}: the sheet fits the width (${m.left}..${m.right})`);
+      if (name === "session") {
+        assert.equal(m.narrowBoxes.length, 2, "both narrowing checkboxes were measured");
+        assert.ok(m.narrowBoxes.every((h) => h < 30), "the narrowing checkboxes stay native size: " + m.narrowBoxes);
+        assert.equal(m.planMode, 44, "the plan-mode checkbox is the one 44px box");
+      }
     }
+  } finally { await s.close(); }
+});
+
+test("Change directory closes the sheet and leaves focus in the picker", async (t) => {
+  if (!available) return t.skip("no headless Chrome");
+  const s = await tab(390, 844);
+  try {
+    await s.click("perch-ident-btn");
+    await s.waitFor(OPEN, "the sheet");
+    await s.click("perch-change-cwd");
+    await s.waitFor(CLOSED, "the sheet to close");
+    await s.waitFor("!document.getElementById('perch-browse-modal').hidden", "the picker");
+    // The dialog's queued close event has had its turn: focus must stay put.
+    await sleep(150);
+    const m = await s.json(`JSON.stringify({active:document.activeElement&&document.activeElement.id,
+      picker:!document.getElementById('perch-browse-modal').hidden})`);
+    assert.equal(m.picker, true);
+    assert.equal(m.active, "perch-browse-cancel", "focus is in the picker, not behind it");
+    // The parked-focus rule: any control that takes focus right after the
+    // close keeps it (the queued close event does not pull it back).
+    await s.click("perch-browse-cancel");
+    await s.click("perch-ident-btn");
+    await s.waitFor(OPEN, "the sheet");
+    await s.evalIn("document.getElementById('perch-session-sheet').close(); document.getElementById('perch-input').focus(); 'ok'");
+    await sleep(150);
+    assert.equal(await s.evalIn("document.activeElement&&document.activeElement.id"), "perch-input",
+      "a control focused right after the close keeps focus");
+    // The one-shot flag is spent: the next close returns focus as usual.
+    await s.click("perch-ident-btn");
+    await s.waitFor(OPEN, "the sheet again");
+    await s.key("Escape");
+    await s.waitFor(CLOSED, "Escape");
+    await s.waitFor("document.activeElement&&document.activeElement.id==='perch-ident-btn'", "focus back on the bot name");
+  } finally { await s.close(); }
+});
+
+test("leaving the session closes the sheet: the hash back to the list, and Close in the Session section", async (t) => {
+  if (!available) return t.skip("no headless Chrome");
+  const s = await tab(390, 844);
+  try {
+    await s.click("perch-ident-btn");
+    await s.waitFor(OPEN, "the sheet");
+    await s.evalIn("location.hash=''; 'ok'");
+    await s.waitFor("document.body.getAttribute('data-view')!=='chat'", "the list");
+    assert.equal(await s.evalIn(OPEN), false, "the hashchange back to the list closed the sheet");
+
+    await s.evalIn(`location.hash='${SID}'; 'ok'`);
+    await s.waitFor("document.body.getAttribute('data-view')==='chat'&&!!document.getElementById('perch-bot-name').textContent", "the chat again");
+    await s.click("perch-ident-btn");
+    await s.waitFor(OPEN, "the sheet");
+    await s.evalIn("window.confirm=function(){ return true; }; 'ok'");
+    await s.click("perch-close");
+    await s.waitFor("document.body.getAttribute('data-view')!=='chat'", "Close to return to the list");
+    assert.equal(await s.evalIn(OPEN), false, "closing the session closed the sheet");
+  } finally { await s.close(); }
+});
+
+test("an ask closes the sheet so the card and the banner are reachable", async (t) => {
+  if (!available) return t.skip("no headless Chrome");
+  const s = await tab(390, 844);
+  try {
+    for (const end = Date.now() + 5000; !streams.size && Date.now() < end;) await sleep(100);
+    await s.click("perch-ident-btn");
+    await s.waitFor(OPEN, "the sheet");
+    emit("ask_user", { requestId: "q1", method: "confirm", title: "Delete the draft?" });
+    await s.waitFor(CLOSED, "the ask to close the sheet");
+    await s.waitFor("!!document.querySelector('#perch-ask .ask-card')", "the ask card");
+    const m = await s.json(`(function(){
+      var card=document.querySelector('#perch-ask .ask-card'), btn=card.querySelector('button');
+      var b=btn.getBoundingClientRect(), hit=document.elementFromPoint(b.left+b.width/2,b.top+b.height/2);
+      return JSON.stringify({attn:!document.getElementById('perch-attn').hidden,
+        hit:!!hit&&(hit===btn||btn.contains(hit))});
+    })()`);
+    assert.equal(m.attn, true, "the waiting banner shows");
+    assert.equal(m.hit, true, "the ask card's button is hit-testable, not under a modal");
   } finally { await s.close(); }
 });
