@@ -319,6 +319,51 @@ test("forceBreakAfterMs breaks an old lock whatever its pid", async () => {
   assert.equal(l.holder.sessionId, "s1");
 });
 
+test("a lock planted with a future mtime is stale and force-breakable", async () => {
+  const { dir } = tmp();
+  const lock = join(dir, LOCK);
+  writeFileSync(lock, "1\n");
+  const future = new Date(Date.now() + 3600000);
+  utimesSync(lock, future, future);
+  // Not forced: stale, but its pid is alive, so it holds.
+  await assert.rejects(
+    acquire(dir, bot("s1"), { now: T0, ttlMs: 120000, isAlive: alive, lockTimeoutMs: 150 }),
+    (e) => e.code === "ELEASELOCKED",
+  );
+  // Dead pid: broken as stale.
+  assert.equal((await acquire(dir, bot("s1"), { now: T0, ttlMs: 120000, isAlive: dead })).ok, true);
+  // Forced: broken whatever its pid.
+  writeFileSync(lock, "1\n");
+  utimesSync(lock, future, future);
+  assert.equal((await acquire(dir, bot("s1"), { now: T0, ttlMs: 120000, isAlive: alive, forceBreakAfterMs: 30000 })).ok, true);
+  assert.equal(existsSync(lock), false);
+});
+
+test("a planted directory at the lock name gives ELEASELOCKED, and a forced break removes it only when empty", async () => {
+  const { dir } = tmp();
+  const lock = join(dir, LOCK);
+  const old = new Date(Date.now() - 60000);
+  mkdirSync(lock);
+  writeFileSync(join(lock, "keep"), "x");
+  utimesSync(lock, old, old);
+  for (const opts of [{ isAlive: dead }, { isAlive: alive, forceBreakAfterMs: 30000 }]) {
+    await assert.rejects(
+      acquire(dir, bot("s1"), { now: T0, ttlMs: 120000, lockTimeoutMs: 150, ...opts }),
+      (e) => e.code === "ELEASELOCKED",
+    );
+  }
+  assert.equal(readFileSync(join(lock, "keep"), "utf8"), "x", "never recursive");
+  // Empty: unforced still leaves it, forced removes it.
+  rmSync(join(lock, "keep"));
+  utimesSync(lock, old, old);
+  await assert.rejects(
+    acquire(dir, bot("s1"), { now: T0, ttlMs: 120000, lockTimeoutMs: 150, isAlive: dead }),
+    (e) => e.code === "ELEASELOCKED",
+  );
+  assert.equal((await acquire(dir, bot("s1"), { now: T0, ttlMs: 120000, isAlive: alive, forceBreakAfterMs: 30000 })).ok, true);
+  assert.equal(existsSync(lock), false);
+});
+
 test("endCall on an expired lease drops the call without renewing it", async () => {
   const { dir } = tmp();
   const h = bot("s1");

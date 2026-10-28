@@ -40,7 +40,7 @@
  */
 import {
   closeSync, constants as fs, fstatSync, lstatSync, mkdirSync, openSync,
-  readSync, renameSync, unlinkSync, writeSync,
+  readSync, renameSync, rmdirSync, unlinkSync, writeSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 
@@ -51,6 +51,7 @@ export const EXTERNAL_TTL_MS = 120000;
 export const OPERATOR_TTL_MS = 300000;   // operator heartbeat loss tolerance: 5 min
 export const ORPHAN_CAP_MS = 120000;
 export const LOCK_STALE_MS = 5000;
+const LOCK_FUTURE_SKEW_MS = 2000;
 const LOCK_TIMEOUT_MS = 2000;
 const MAX_TTL_MS = 600000;
 const FUTURE_SKEW_MS = 60000;
@@ -181,11 +182,24 @@ function writeToDir(dfd, lease) {
 }
 
 /** Remove a lock older than LOCK_STALE_MS whose pid is dead. True when it is gone. */
+/**
+ * A lock's age on the real clock. An mtime more than LOCK_FUTURE_SKEW_MS in
+ * the future can only be planted (we always write "now"), so it counts as
+ * infinitely old: stale, and force-breakable.
+ */
+function lockAge(st) {
+  const age = Date.now() - st.mtimeMs;
+  return age < -LOCK_FUTURE_SKEW_MS ? Infinity : age;
+}
+
 function breakStaleLock(dfd, { isAlive, forceBreakAfterMs, onBeforeBreak }) {
   let st;
   try { st = lstatSync(at(dfd, LOCK_NAME)); } catch (e) { return e.code === "ENOENT"; }
-  if (Date.now() - st.mtimeMs <= LOCK_STALE_MS) return false;
-  const forced = forceBreakAfterMs != null && Date.now() - st.mtimeMs > forceBreakAfterMs;
+  if (lockAge(st) <= LOCK_STALE_MS) return false;
+  const forced = forceBreakAfterMs != null && lockAge(st) > forceBreakAfterMs;
+  // A planted directory is never ours: only a forced break removes it, and
+  // only when it is empty (rmdir, never recursive).
+  if (st.isDirectory() && !forced) return false;
   if (!forced) {
     // Pid liveness can be fooled by pid reuse (or a planted live pid): see forceBreakAfterMs.
     const text = st.isFile() ? readCapped(dfd, LOCK_NAME, 64) : null;
@@ -199,9 +213,13 @@ function breakStaleLock(dfd, { isAlive, forceBreakAfterMs, onBeforeBreak }) {
     // Same file AND unchanged AND still stale: inodes are reused (ext4), so a
     // fresh lock another breaker just created can carry the same dev/ino.
     if (again.ino !== st.ino || again.dev !== st.dev || again.mtimeMs !== st.mtimeMs
-        || again.ctimeMs !== st.ctimeMs || Date.now() - again.mtimeMs <= LOCK_STALE_MS) return false;
-    unlinkSync(at(dfd, LOCK_NAME));
-  } catch (e) { if (e.code !== "ENOENT") throw e; }
+        || again.ctimeMs !== st.ctimeMs || lockAge(again) <= LOCK_STALE_MS) return false;
+    if (again.isDirectory()) rmdirSync(at(dfd, LOCK_NAME));
+    else unlinkSync(at(dfd, LOCK_NAME));
+  } catch (e) {
+    // Not removable (non-empty dir, EPERM, ...): not broken; the waiter ends in ELEASELOCKED.
+    return e.code === "ENOENT";
+  }
   return true;
 }
 
@@ -225,13 +243,18 @@ async function withLock(dir, opts, fn) {
     for (;;) {
       try {
         const fd = openSync(at(dfd, LOCK_NAME), fs.O_WRONLY | fs.O_CREAT | fs.O_EXCL | fs.O_NOFOLLOW, 0o600);
+        let mine = null;
         try {
-          writeSync(fd, process.pid + "\n");
           const st = fstatSync(fd);
-          lockId = { dev: st.dev, ino: st.ino };
+          mine = { dev: st.dev, ino: st.ino };
+          writeSync(fd, process.pid + "\n");
+          lockId = mine;
         } catch (e) {
-          // Created but not usable: remove our own lock before rethrowing.
-          try { unlinkSync(at(dfd, LOCK_NAME)); } catch { /* gone */ }
+          // Created but not usable: remove our own lock (only if it is still ours) before rethrowing.
+          try {
+            const cur = lstatSync(at(dfd, LOCK_NAME));
+            if (!mine || (cur.ino === mine.ino && cur.dev === mine.dev)) unlinkSync(at(dfd, LOCK_NAME));
+          } catch { /* gone */ }
           e.lockCreated = true;
           throw e;
         } finally { closeSync(fd); }
