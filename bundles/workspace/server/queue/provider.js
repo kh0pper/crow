@@ -29,7 +29,7 @@ export function queueDescriptor(tool, args, { requestedBy = "bot" } = {}) {
       const key = lock.key || (await docSession(cfg, entry.fileId).then((s) => s.key, () => null));
       const openBy = lock.data?.open_by || [];
       const lockType = lock.data?.lock_type || null;
-      const row = await enqueue(db, { fileId: entry.fileId, path: entry.path, key, tool, args: clean, precondition, openBy, requestedBy });
+      const row = await enqueue(db, { fileId: entry.fileId, path: entry.path, key, tool, args: clean, precondition, openBy, requestedBy, actor: args.__actor ?? null });
       await notifyChange(db, row, "queued");
       const live = lockType === "editor" && liveEligible(tool, clean, precondition);
       const who = openBy.join(", ") || "Someone";

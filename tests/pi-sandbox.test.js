@@ -20,7 +20,7 @@ import {
 } from "../scripts/pi-bots/pi_sandbox.mjs";
 import { listBridgePi, reapStalePi } from "../scripts/pi-bots/pi_lifecycle.mjs";
 
-const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
+const { PiRpc, filterSpawnEnv } = await import("../scripts/pi-bots/bridge.mjs");
 
 function dockerGid() {
   try {
@@ -189,8 +189,7 @@ test("M1: the mode comes from the gateway's env, never from the child env", () =
     const w = wrapPiSpawn("node", ["cli.js"], { probe: good, env: { CROW_PI_SANDBOX: "off" }, sockets: [], runtimeDirs: [], roDirs: [] });
     assert.equal(w.sandboxed, true, "a child-env CROW_PI_SANDBOX=off does not turn the sandbox off");
     assert.ok(!("CROW_PI_SANDBOX" in w.env));
-    const src = readFileSync(new URL("../scripts/pi-bots/bridge.mjs", import.meta.url), "utf8");
-    assert.match(src, /k === "CROW_PI_SANDBOX"\) \{ strippedSpawnEnv\.push\(k\)/, "spawn_env strips CROW_PI_SANDBOX");
+    assert.deepEqual(filterSpawnEnv({ spawn_env: { CROW_PI_SANDBOX: "off", A: "1" } }), { A: "1" }, "spawn_env strips CROW_PI_SANDBOX");
   } finally {
     if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
   }

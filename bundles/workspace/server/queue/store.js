@@ -31,9 +31,9 @@ export async function enqueue(db, r) {
   // seq = max+1 per file inside the INSERT; UNIQUE(file_id, seq) turns a race into a retry
   for (let i = 0; ; i++) {
     try {
-      await db.execute({ sql: `INSERT INTO workspace_pending_changes (id,file_id,path,seq,doc_key,tool,args_json,precondition_json,state,open_by_json,requested_by,created_at,updated_at)
-        VALUES (?,?,?,(SELECT COALESCE(MAX(seq),0)+1 FROM workspace_pending_changes WHERE file_id=?),?,?,?,?,'pending',?,?,?,?)`,
-        args: [id, r.fileId, r.path, r.fileId, r.key ?? null, r.tool, JSON.stringify(r.args ?? {}), JSON.stringify(r.precondition ?? null), JSON.stringify(r.openBy ?? []), r.requestedBy ?? null, t, t] });
+      await db.execute({ sql: `INSERT INTO workspace_pending_changes (id,file_id,path,seq,doc_key,tool,args_json,precondition_json,state,open_by_json,requested_by,actor_json,created_at,updated_at)
+        VALUES (?,?,?,(SELECT COALESCE(MAX(seq),0)+1 FROM workspace_pending_changes WHERE file_id=?),?,?,?,?,'pending',?,?,?,?,?)`,
+        args: [id, r.fileId, r.path, r.fileId, r.key ?? null, r.tool, JSON.stringify(r.args ?? {}), JSON.stringify(r.precondition ?? null), JSON.stringify(r.openBy ?? []), r.requestedBy ?? null, r.actor ? JSON.stringify(r.actor) : null, t, t] });
       return get(db, id);
     } catch (e) { if (i >= 2 || !/UNIQUE/.test(String(e.message))) throw e; }
   }
@@ -116,6 +116,7 @@ const parse = (s, d) => { try { return s ? JSON.parse(s) : d; } catch { return d
 export const resultOf = (r) => parse(r?.result_json, {});
 export const argsOf = (r) => parse(r?.args_json, {});
 export const preOf = (r) => parse(r?.precondition_json, null);
+export const actorOf = (r) => parse(r?.actor_json, null);
 export const publicRow = (r) => ({
   ...resultOf(r),
   change_id: r.id, path: r.path, file_id: Number(r.file_id), tool: r.tool, state: r.state, open_by: parse(r.open_by_json, []),

@@ -38,7 +38,7 @@ export function harness({ rounds = [[{ type: "content_delta", text: "Lisbon is t
   const deps = {
     log: (m) => calls.logs.push(m),
     now: c.now, sleep: async (ms) => { calls.sleeps++; await c.sleep(ms); },
-    loadBotRow: async (db, id) => (bot && id === bot.bot_id ? { bot_id: bot.bot_id, enabled: 1, definition: JSON.stringify(bot) } : null),
+    loadBotRow: async (db, id) => (bot && id === bot.bot_id ? { bot_id: bot.bot_id, display_name: bot.__column_display_name, enabled: 1, definition: JSON.stringify(bot) } : null),
     getSttProfile: async () => ({ id: "kiosk-stt", language: "en" }),
     createSttAdapter: async () => ({ transcribe: async (audio, o) => ({ text: o.__text ?? "What is the capital of Portugal?" }) }),
     getTtsProfile: async () => ({ id: "kokoro", defaultVoice: "af_heart" }),

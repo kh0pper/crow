@@ -86,7 +86,7 @@ for (const src of ["rich.docx", "oo-rich.docx"]) {
     assert.match(partText(fake.node(`S/t-${src}`).bytes, "word/commentsExtended.xml"), new RegExp(`w15:paraId="${rootPid}"[^>]*w15:done="1"|w15:done="1"[^>]*w15:paraId="${rootPid}"`));
     const l = await call("ws_docs_list_comments", { path: `S/t-${src}`, include_resolved: true });
     const root = l.data.comments.find((x) => x.id === "0");
-    assert.equal(root.resolved, true); assert.equal(root.replies.length, 1); assert.equal(root.replies[0].content, "Sí, verde"); assert.equal(root.replies[0].author, "Crow bot");
+    assert.equal(root.resolved, true); assert.equal(root.replies.length, 1); assert.equal(root.replies[0].content, "Sí, verde"); assert.equal(root.replies[0].author, "Crow");
     if (sofficeOpens(fake.node(`S/t-${src}`).bytes, "docx") === null) console.log("# soffice not installed: LibreOffice smoke check skipped");
   });
 }

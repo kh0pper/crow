@@ -23,6 +23,7 @@ import { createDbClient } from "../../db.js";
 import { isVoiceBotId } from "../../shared/voice-bot.js";
 import { CATEGORY_PROXY_RE, normalizeExternalParams } from "./proxy-args.js";
 import { CronExpressionParser } from "cron-parser";
+import { sanitizeActorName } from "../../../scripts/pi-bots/actor-env.mjs";
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "../../../scripts/pi-bots/bot-jobs-schema.mjs";
 
 export { buildRemoteVoiceContext } from "./remote-voice-tools.js";
@@ -215,6 +216,11 @@ export function createToolExecutor(opts = {}) {
   const boundBotId = opts.botDef && opts.botDef.bot_id ? opts.botDef.bot_id : null;
   const defaultDeliverTo = opts.defaultDeliverTo || null;
   const remote = opts.remote || null; // cross-instance voice routing (null = off)
+  // Who is calling: taken ONLY from the bound bot (never from tool arguments or model output).
+  // Unbound executors (the operator's own chat) send no _meta at all.
+  const actorMeta = boundBotId
+    ? { _meta: { "crow/actor": { kind: "bot", id: boundBotId, name: sanitizeActorName(opts.botDef.display_name ?? boundBotId, boundBotId) } } }
+    : {};
 
   async function getClient(category) {
     if (clients.has(category)) return clients.get(category);
@@ -285,7 +291,7 @@ export function createToolExecutor(opts = {}) {
           if (manifest.tools[prefixed]) toolName = prefixed;
         }
 
-        const result = await client.callTool({ name: toolName, arguments: params });
+        const result = await client.callTool({ name: toolName, arguments: params, ...actorMeta });
         return formatResult(result);
       }
 
@@ -326,7 +332,7 @@ export function createToolExecutor(opts = {}) {
           const hasTool = entry.tools?.some((t) => t.name === name);
           if (hasTool) {
             try {
-              const result = await entry.client.callTool({ name, arguments: args });
+              const result = await entry.client.callTool({ name, arguments: args, ...actorMeta });
               return formatResult(result);
             } catch (err) {
               return { result: `Error calling ${name} (${integrationId}): ${err.message}`, isError: true };
@@ -339,7 +345,7 @@ export function createToolExecutor(opts = {}) {
       const resolved = resolveToolCategory(name);
       if (resolved) {
         const client = await getClient(resolved.category);
-        const result = await client.callTool({ name: resolved.toolName, arguments: args });
+        const result = await client.callTool({ name: resolved.toolName, arguments: args, ...actorMeta });
         return formatResult(result);
       }
 
@@ -622,7 +628,7 @@ export function createToolExecutor(opts = {}) {
       const hasTool = entry.tools.some((t) => t.name === action);
       if (hasTool) {
         try {
-          const result = await entry.client.callTool({ name: action, arguments: params });
+          const result = await entry.client.callTool({ name: action, arguments: params, ...actorMeta });
           return formatResult(result);
         } catch (err) {
           return { result: `Error calling ${action} (${integrationId}): ${err.message}`, isError: true };

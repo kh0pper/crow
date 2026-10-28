@@ -162,7 +162,7 @@
     {
       "id": "artifacts",
       "name": "Artifacts",
-      "version": "0.9.1",
+      "version": "0.9.2",
       "description": "Pages, documents and diagrams your bots make. Comment on any part, send feedback, and the bot revises and replies in each thread.",
       "type": "bundle",
       "author": "Crow",
@@ -6798,7 +6798,7 @@
     {
       "id": "workspace",
       "name": "Crow Workspace",
-      "version": "0.3.3",
+      "version": "0.3.4",
       "description": "Your own private office on this machine: files, documents you can edit together (ONLYOFFICE), calendars and contacts that sync to your phones, and forms, built on Nextcloud. Tailnet only, never public.",
       "type": "bundle",
       "author": "Crow",

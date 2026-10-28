@@ -376,7 +376,7 @@ export function createVoiceTurnRunner(deps) {
       const row = await deps.loadBotRow(db, botId);
       if (row && row.enabled) {
         def = JSON.parse(row.definition);
-        if (def) def.bot_id = row.bot_id;
+        if (def) { def.bot_id = row.bot_id; if (row.display_name) def.display_name = row.display_name; }
       }
     } catch { def = null; }
     botCache.set(botId, { def, at: now(), gen });
@@ -1997,7 +1997,7 @@ export async function defaultVoiceDeps() {
     transcriptLog: voiceTranscriptLog,
     ensureVoiceBot: async (db) => { await ensureCrowVoiceBot(db); },
     botDefsGeneration: () => botDefsGeneration,
-    loadBotRow: async (db, botId) => (await db.execute({ sql: "SELECT bot_id, definition, enabled FROM pi_bot_defs WHERE bot_id = ?", args: [botId] })).rows[0] || null,
+    loadBotRow: async (db, botId) => (await db.execute({ sql: "SELECT bot_id, display_name, definition, enabled FROM pi_bot_defs WHERE bot_id = ?", args: [botId] })).rows[0] || null,
     getSttProfile: async (db, device) => (device.stt_profile_id
       ? byId(await stt.getSttProfiles(db, { includeKeys: true }), device.stt_profile_id)
       : stt.getDefaultSttProfile(db, { includeKeys: true })),

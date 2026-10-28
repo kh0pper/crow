@@ -47,7 +47,7 @@
   // D28 (review M2): a quote is what the owner picked, so it leads.
   function anchorText(a) { return a && a.quote ? "\u201c" + a.quote + "\u201d" : (a && (a.text || a.selector || a.id || a.kind)) || ""; }
   function isDoc() { return !!(S.art && S.art.type === "document"); }
-  function authorName(c) { return c.author_kind === "owner" ? T.you : c.author_kind === "bot" ? (c.author_id || T.bot) : (c.author_id || c.author_kind); }
+  function authorName(c) { return c.author_kind === "owner" ? T.you : c.author_kind === "bot" ? ((c.author_id ? c.author_id + " \u00b7 " : "") + T.bot) : (c.author_id || c.author_kind); }
 
   var S = { art: null, versions: [], threads: [], activeRound: null, n: null, viewer: null, poll: null, sheetOpen: false, commentOn: false, pending: null, lastRound: null, locked: [], editing: null, notes: {} };
 
