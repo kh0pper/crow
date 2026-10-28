@@ -137,7 +137,7 @@ Para CAPTCHA, 2FA, preguntas de seguridad o cualquier acción que requiera juici
 El visor VNC es accesible a través del gateway de Crow:
 
 - **Embebido**: en la pestaña Status del panel Browser (iframe)
-- **Vista completa**: `/proxy/browser/vnc.html` (mismo HTTPS que tu dashboard)
+- **Vista completa**: `/proxy/browser/vnc.html?view_only=false` (mismo HTTPS que tu dashboard)
 - **Directo**: `http://localhost:6080/vnc.html` (solo acceso local)
 
 No hace falta abrir puertos en el firewall — el VNC se sirve mediante proxy a través del gateway.
