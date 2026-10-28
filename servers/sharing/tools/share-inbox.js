@@ -91,7 +91,9 @@ export function registerShareInboxTools(server, ctx) {
             }
           } else {
             const sCount = (await db.execute({ sql: "SELECT COUNT(*) AS n FROM research_sources WHERE project_id=?", args: [item_id] })).rows[0]?.n ?? 0;
-            const nCount = (await db.execute({ sql: "SELECT COUNT(*) AS n FROM research_notes WHERE project_id=?", args: [item_id] })).rows[0]?.n ?? 0;
+            // Withdrawn notes do not ship; a pre-0015 DB has no withdrawn_at (every note is live).
+            const hasWithdrawn = (await db.execute({ sql: "PRAGMA table_info(research_notes)" })).rows.some((c) => c.name === "withdrawn_at");
+            const nCount = (await db.execute({ sql: `SELECT COUNT(*) AS n FROM research_notes WHERE project_id=?${hasWithdrawn ? " AND withdrawn_at IS NULL" : ""}`, args: [item_id] })).rows[0]?.n ?? 0;
             const bCount = (await db.execute({ sql: "SELECT COUNT(*) AS n FROM data_backends WHERE project_id=?", args: [item_id] })).rows[0]?.n ?? 0;
             const fCount = (await db.execute({ sql: "SELECT COUNT(*) AS n FROM storage_files WHERE project_id=?", args: [item_id] })).rows[0]?.n ?? 0;
             const token = generateToken("share", tokenKey);
