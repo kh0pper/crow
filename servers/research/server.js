@@ -379,6 +379,8 @@ export function createProjectServer(dbPath, options = {}) {
   const fetchPageImpl = typeof options.fetchPage === "function" ? options.fetchPage : defaultFetchPage;
   // Test seam: awaited in crow_verify_source after the quote check and before the write.
   const beforeVerifyWrite = typeof options.beforeVerifyWrite === "function" ? options.beforeVerifyWrite : null;
+  // Test seam: awaited in crow_add_note after the quote match and before the insert.
+  const beforeNoteInsert = typeof options.beforeNoteInsert === "function" ? options.beforeNoteInsert : null;
 
   // The deploy window (no SCHEMA_GENERATION bump): ready the provenance columns here. While not
   // ready, tools keep to the pre-0013 column lists; refreshSchema() retries until ready.
@@ -1173,7 +1175,7 @@ export function createProjectServer(dbPath, options = {}) {
 
       let src = null;
       if (source_id != null) {
-        const cols = ready ? "id, project_id, fetch_status, fetched_text" : "id, project_id";
+        const cols = ready ? "id, project_id, fetch_status, content_sha256, fetched_text" : "id, project_id";
         const { rows } = await db.execute({ sql: `SELECT ${cols} FROM research_sources WHERE id = ?`, args: [source_id] });
         src = rows[0];
         if (!src) return fail(`Source #${source_id} not found.`);
@@ -1194,20 +1196,20 @@ export function createProjectServer(dbPath, options = {}) {
         return fail("provenance fetched needs a source Crow fetched: pass a source_id whose page Crow opened (crow_add_source does that), or use snippet or derived.");
       }
 
-      let quoteFound = null;
-      let quoteLine = "";
-      if (note_type === "quote" && src && ready && (src.fetch_status === "fetched" || src.fetch_status === "fetched_no_text")) {
-        const ft = src.fetched_text == null ? "" : String(src.fetched_text);
-        if (ft === "") {
-          quoteLine = `\nQuote not checked: Crow has no page text for source #${source_id}.`;
-        } else {
-          const m = matchQuote(content, { ...splitFetchedText(ft), truncated: ft.length >= FETCHED_TEXT_MAX });
-          quoteFound = m.found;
-          if (m.found === 1) quoteLine = "\nQuote checked: found on the page Crow fetched.";
-          else if (m.found === 0) quoteLine = `\nWARNING: this quote is NOT on the page Crow fetched (source #${source_id}). Fix the wording or do not present it as a quote.`;
-          else quoteLine = `\nQuote not checked: ${m.reason || "the page text was truncated"}.`;
+      // The quote check against one copy of the source's page (the row as read).
+      const checkQuote = (row) => {
+        if (!(note_type === "quote" && row && ready && (row.fetch_status === "fetched" || row.fetch_status === "fetched_no_text"))) {
+          return { found: null, line: "" };
         }
-      }
+        const ft = row.fetched_text == null ? "" : String(row.fetched_text);
+        if (ft === "") return { found: null, line: `\nQuote not checked: Crow has no page text for source #${source_id}.` };
+        const m = matchQuote(content, { ...splitFetchedText(ft), truncated: ft.length >= FETCHED_TEXT_MAX });
+        if (m.found === 1) return { found: 1, line: "\nQuote checked: found on the page Crow fetched." };
+        if (m.found === 0) return { found: 0, line: `\nWARNING: this quote is NOT on the page Crow fetched (source #${source_id}). Fix the wording or do not present it as a quote.` };
+        return { found: null, line: `\nQuote not checked: ${m.reason || "the page text was truncated"}.` };
+      };
+      let { found: quoteFound, line: quoteLine } = checkQuote(src);
+      if (beforeNoteInsert) await beforeNoteInsert({ source_id: source_id ?? null });
 
       let sql = "INSERT INTO research_notes (content, note_type, project_id, source_id, title, tags";
       const args = [content, note_type, project_id ?? null, source_id ?? null, title ?? null, tags ?? null];
@@ -1218,6 +1220,20 @@ export function createProjectServer(dbPath, options = {}) {
       sql += `) VALUES (${args.map(() => "?").join(", ")})`;
       const result = await db.execute({ sql, args });
       const noteId = Number(result.lastInsertRowid);
+      // The page copy may have been replaced between the match and the insert (a verify or fetch
+      // adopting new text): re-read it after the insert and re-match against the current copy.
+      // Any later replacement re-checks this note itself, since the note now exists.
+      if (note_type === "quote" && src && ready) {
+        const { rows: now2 } = await db.execute({
+          sql: "SELECT id, project_id, fetch_status, content_sha256, fetched_text FROM research_sources WHERE id = ?",
+          args: [source_id],
+        });
+        const cur = now2[0];
+        if (cur && (cur.content_sha256 !== src.content_sha256 || cur.fetched_text !== src.fetched_text || cur.fetch_status !== src.fetch_status)) {
+          ({ found: quoteFound, line: quoteLine } = checkQuote(cur));
+          await db.execute({ sql: "UPDATE research_notes SET quote_found = ? WHERE id = ?", args: [quoteFound, noteId] });
+        }
+      }
       // A quote note that is not found on the page breaks a verification that rests on a quote
       // check (every quote note found): clear it. manual_owner and legacy_flag stay as they are.
       if (note_type === "quote" && src && ready && quoteFound !== 1) {

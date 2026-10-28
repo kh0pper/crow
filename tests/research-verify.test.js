@@ -512,3 +512,39 @@ test("a quote note added between the check and the write blocks verification", a
   assert.match(text(await verify(client, { id: sid4 })), /^Source #\d+ verified/);
   assert.equal(source(sid4).fetched_text, fresh);
 });
+
+// ---------------------------------------------------------------- fix round 2: add_note TOCTOU
+
+test("crow_add_note: page text replaced between the match and the insert is re-matched", async () => {
+  let hook = null;
+  const client = await clientFor(BOT, makeStub(), { beforeNoteInsert: async (info) => { if (hook) await hook(info); } });
+  const pid = await newProject(client);
+  const sid = insertSource({ project_id: pid });
+  insertQuote(sid, pid, "We will ship weekly");
+  assert.match(text(await verify(client, { id: sid })), /^Source #\d+ verified/);
+  // Matches the stored copy, but a concurrent adopt swaps in text without it before the insert.
+  const newText = "We will ship weekly. The council voted on Tuesday.";
+  hook = () => withDb((d) => d.prepare("UPDATE research_sources SET fetched_text = ?, content_sha256 = ? WHERE id = ?").run(newText, sha(newText), sid));
+  const r = await client.callTool({ name: "crow_add_note", arguments: {
+    note_type: "quote", provenance: "fetched", project_id: pid, source_id: sid, content: "the budget doubles next year",
+  } });
+  assert.ok(!r.isError, text(r));
+  assert.match(text(r), /NOT on the page/);
+  assert.match(text(r), new RegExp(`Source #${sid} is no longer verified: this quote was not found on the page`));
+  const n = withDb((d) => d.prepare("SELECT quote_found FROM research_notes WHERE source_id = ? AND content = 'the budget doubles next year'").get(sid));
+  assert.equal(n.quote_found, 0);
+  const s = source(sid);
+  assert.equal(s.verified, 0);
+  assert.equal(s.verification_method, null);
+
+  // Control: an unchanged copy keeps the first match and the verification.
+  hook = null;
+  const sid2 = insertSource({ project_id: pid });
+  insertQuote(sid2, pid, "We will ship weekly");
+  assert.match(text(await verify(client, { id: sid2 })), /^Source #\d+ verified/);
+  const r2 = await client.callTool({ name: "crow_add_note", arguments: {
+    note_type: "quote", provenance: "fetched", project_id: pid, source_id: sid2, content: "the budget doubles next year",
+  } });
+  assert.match(text(r2), /Quote checked: found/);
+  assert.equal(source(sid2).verified, 1);
+});
