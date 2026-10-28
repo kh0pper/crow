@@ -23,6 +23,9 @@ import { selectedWriteTools, toolsFromKeys } from "./sources.js";
 import { normText } from "./ui.js";
 import { lines } from "./data-queries.js";
 import { addCompanionsGuarded, grantsArtifactUpdate } from "../../../../../scripts/pi-bots/artifacts-companions.mjs";
+import { skillRequiredTools, skillDeclaredRepoTools, withSkillRequiredTools, addSkillToolsGuarded } from "../../../../../scripts/pi-bots/skill-tools.mjs";
+import { isVoiceBotDef } from "../../../../shared/voice-bot.js";
+import { resolveCrowHome } from "../../../../shared/crow-home.js";
 
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const arr = (v) => (v == null ? [] : [].concat(v)).filter((x) => typeof x === "string");
@@ -194,9 +197,19 @@ export async function saveBasics(def, b, ctx) {
 
 // ---------------------------------------------------------------- abilities
 
-export async function saveAbilities(def, b, { lang, changed, companionBudget = null }) {
+export async function saveAbilities(def, b, { lang, changed, companionBudget = null, crowHome = undefined, repoSkillsDir = undefined }) {
   const out = {};
   const prevMcp = def.tools && Array.isArray(def.tools.crow_mcp) ? def.tools.crow_mcp.slice() : [];
+  const prevHadMcp = !!(def.tools && Array.isArray(def.tools.crow_mcp));
+  const prevSkills = Array.isArray(def.skills) ? def.skills.slice() : [];
+  // what the services card was rendered from (tab-abilities.js): the stored
+  // list plus the repo skills' tools, unless the model's cap refused them
+  const home = crowHome || resolveCrowHome();
+  const skillOpts = { crowHome: home, repoSkillsDir };
+  const budgetFor = async (d) => (companionBudget ? await companionBudget(d) : null);
+  const voice = isVoiceBotDef(def);
+  const priorRefused = !voice && (await addSkillToolsGuarded(def, { ...skillOpts, budget: await budgetFor(def) })).refused;
+  let posted = null, catalog = null;
   def.tools = def.tools || {};
   if (b.files_mode) {
     const r = applyFilesMode(def, { mode: String(b.files_mode), was: String(b.files_mode__was || "") });
@@ -209,13 +222,13 @@ export async function saveAbilities(def, b, { lang, changed, companionBudget = n
   if (typeof b.src_catalog === "string") {
     let raw = {};
     try { raw = JSON.parse(b.src_catalog) || {}; } catch { raw = {}; }
-    const catalog = {};
+    catalog = {};
     for (const [server, list] of Object.entries(raw)) {
       if (!Array.isArray(list)) continue;
       catalog[server] = list.filter((x) => Array.isArray(x) && typeof x[0] === "string")
         .map(([name, access]) => ({ name, access: access === "read" ? "read" : "write" }));
     }
-    const posted = {};
+    posted = {};
     for (const server of Object.keys(catalog)) {
       const mode = b[`src__${server}`];
       if (typeof mode !== "string") continue;
@@ -247,7 +260,81 @@ export async function saveAbilities(def, b, { lang, changed, companionBudget = n
     const setEq = norm.length === prev.length && norm.every((s) => prev.includes(s));
     if (!setEq) def.skills = [...new Set(norm)];
   }
+  if (!voice) await applySkillTools(def, { prevMcp, prevHadMcp, prevSkills, posted, catalog, priorRefused, skillOpts, budgetFor, lang, out });
   return out;
+}
+
+/** Was `entry` ticked in the posted services row (per its mode)? null = the row could not show it. */
+function tickedInPost(entry, posted, catalog) {
+  const [server, tool] = entry.split("/");
+  const p = posted && posted[server];
+  const cat = catalog && catalog[server];
+  if (!p || !cat) return null;
+  const item = cat.find((x) => x.name === tool);
+  if (!item) return null;
+  if (p.mode === "custom") return p.custom.includes(entry);
+  if (p.mode === "all") return true;
+  if (p.mode === "read") return item.access === "read";
+  return false;
+}
+
+/**
+ * A selected repo skill's declared tools (skill-tools.mjs), after the skills
+ * block so it sees the final def.skills:
+ *  - a skill kept from before: each required tool the posted services row left
+ *    unticked goes into tools.skill_tools_declined, each ticked one leaves it.
+ *    Ticked ones stay OUT of crow_mcp when only the union put them on the page
+ *    (the union keeps granting them), so an untouched save is byte-identical
+ *    and the mode the owner stored is not rewritten.
+ *  - a skill newly selected: its tools are written into crow_mcp (cap-guarded,
+ *    abSkillToolsCapped when they do not fit); no declines.
+ *  - a dropped skill: its declines are cleared.
+ * The services card not posted, or the page rendered over the cap: declines stay.
+ */
+async function applySkillTools(def, { prevMcp, prevHadMcp, prevSkills, posted, catalog, priorRefused, skillOpts, budgetFor, lang, out }) {
+  const finalSkills = Array.isArray(def.skills) ? def.skills : [];
+  const kept = finalSkills.filter((s) => prevSkills.includes(s));
+  const added = finalSkills.filter((s) => !prevSkills.includes(s));
+  const dropped = prevSkills.filter((s) => !finalSkills.includes(s));
+  const prevDeclined = Array.isArray(def.tools.skill_tools_declined) ? def.tools.skill_tools_declined.filter((x) => typeof x === "string") : [];
+  const declined = new Set(prevDeclined);
+  const keptReq = [...new Set(kept.flatMap((s) => skillRequiredTools(s, skillOpts)))];
+  const finalReq = new Set(finalSkills.flatMap((s) => skillDeclaredRepoTools(s, skillOpts)));
+  let mcp = Array.isArray(def.tools.crow_mcp) ? def.tools.crow_mcp.slice() : [];
+
+  if (posted && !priorRefused) {
+    for (const entry of keptReq) {
+      const [server] = entry.split("/");
+      if (mcp.includes(server)) continue; // a whole-server grant: nothing to decline
+      const on = tickedInPost(entry, posted, catalog);
+      if (on === true) declined.delete(entry);
+      else if (on === false) declined.add(entry);
+    }
+  }
+  for (const s of dropped) for (const entry of skillDeclaredRepoTools(s, skillOpts)) if (!finalReq.has(entry)) declined.delete(entry);
+  // ticked only because the union rendered them: the union keeps granting them
+  for (const entry of keptReq) {
+    if (!declined.has(entry) && mcp.includes(entry) && !prevMcp.includes(entry)) mcp = mcp.filter((x) => x !== entry);
+  }
+  if (added.length) {
+    const r = withSkillRequiredTools(mcp, added, { ...skillOpts, declined: [...declined] });
+    if (r.added.length) {
+      const full = withSkillRequiredTools(r.list, kept, { ...skillOpts, declined: [...declined] }).list;
+      const candidate = { ...def, tools: { ...def.tools, crow_mcp: full } };
+      const b = (await budgetFor(def)) || (await (await import("../../../../../scripts/pi-bots/artifacts-companions.mjs")).defaultCompanionBudget(def));
+      if (Number.isInteger(b.cap) && b.cap > 0 && b.countFor(candidate) > b.cap) {
+        out.warn = [...(out.warn || []), t("botbuilder.abSkillToolsCapped", lang)];
+      } else mcp = r.list;
+    }
+  }
+  // same set as stored: keep the stored array (and its order) exactly
+  if (prevHadMcp && mcp.length === prevMcp.length && mcp.every((x) => prevMcp.includes(x))) def.tools.crow_mcp = prevMcp;
+  else if (prevHadMcp || mcp.length || Array.isArray(def.tools.crow_mcp)) def.tools.crow_mcp = mcp;
+  const nextDeclined = [...declined].sort();
+  if (!same(nextDeclined, [...prevDeclined].sort())) {
+    if (nextDeclined.length) def.tools.skill_tools_declined = nextDeclined;
+    else delete def.tools.skill_tools_declined;
+  }
 }
 
 // ---------------------------------------------------------------- safety

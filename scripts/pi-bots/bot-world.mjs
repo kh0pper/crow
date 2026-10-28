@@ -45,6 +45,7 @@ import { validateExtensions } from "./pi_extensions_allowlist.mjs";
 import { resolveModel } from "./model_resolver.mjs";
 import { checkPiModel, PiModelUnavailableError } from "./pi-model-catalog.mjs";
 import { resolveSkills, resolveSkill, skillDirs } from "./skill_resolver.mjs";
+import { addSkillToolsGuarded } from "./skill-tools.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { proposalsDir, selfAuthoringPromptBlock } from "./skill_proposals.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
@@ -53,6 +54,23 @@ import { installedKitDir, readKitThemes, readHouseStyleSync, houseStyleLinks } f
 
 /** Lazy bridge handle — see the CYCLE NOTE above. */
 function loadBridge() { return import("./bridge.mjs"); }
+
+/**
+ * The spawn/job union of a def with its repo skills' declared tools
+ * (skill-tools.mjs). Logs what was added or refused; never throws (a failure
+ * leaves the def as stored).
+ */
+export async function withSkillTools(def, { crowHome, log = () => {}, repoSkillsDir = undefined } = {}) {
+  try {
+    const r = await addSkillToolsGuarded(def, { crowHome, repoSkillsDir });
+    if (r.refused) log("skill tools not added (tool limit): " + r.wanted.join(", "));
+    else if (r.added.length) log("skill tools added: " + r.added.join(", "));
+    return r.def;
+  } catch (e) {
+    log("skill tools skipped (non-fatal): " + ((e && e.message) || e));
+    return def;
+  }
+}
 
 /**
  * Does this def's crow_mcp selection grant `server` — whole (`artifacts`),
@@ -149,14 +167,17 @@ export function houseStylePromptBlock(hs) {
  *          sessionDir, cwd, tasksDbPath, remoteEnabled, peerGatewayUrls, session,
  *          narrowedTools, gatewayType, kitInstalled, houseStyle}>}
  */
-export async function buildBotWorld({ botId, threadId, gatewayType = "perch", log = () => {}, jobId = null, cardBound = false, cwd = null }) {
+export async function buildBotWorld({ botId, threadId, gatewayType = "perch", log = () => {}, jobId = null, cardBound = false, cwd = null, repoSkillsDir = undefined }) {
   const B = await loadBridge();
   const bot = B.loadBot(botId);
-  const def = bot.def;
   // Active Crow instance home (CROW_HOME env -> ~/.crow-mpa on MPA, else
   // ~/.crow). Governs per-instance skills + mcp-addons resolution; the DB
   // still routes on CROW_DB_PATH, independent of this.
   const crowHome = resolveCrowHome();
+  // A selected repo skill's declared `server/tool` entries (skill-tools.mjs),
+  // on a COPY of the def so writeBotMcp, prepareSpawn and buildToolsCsv all
+  // see the same list; never past the model's tool cap, never a declined one.
+  const def = await withSkillTools(bot.def, { crowHome, log, repoSkillsDir });
   // M3b atomic cutover: column is authoritative. JSON copy is ignored even
   // if present (legacy fixtures may still carry it; new bots don't write it).
   const projectId = bot.project_id == null ? null : Number(bot.project_id);

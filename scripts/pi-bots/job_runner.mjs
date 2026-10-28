@@ -40,6 +40,7 @@ import { checkPiModel, PiModelUnavailableError } from "./pi-model-catalog.mjs";
 import { resolveSkills } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { writeBotMcp } from "./mcp_writer.mjs";
+import { withSkillTools } from "./bot-world.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "./bot-jobs-schema.mjs";
@@ -289,7 +290,7 @@ export function jobActor(job) {
   return { botId: job.bot_id, threadId: "job-" + job.job_id, gatewayType: "job" };
 }
 
-export async function runJob(job, { log = () => {}, bridge: injectedBridge = null } = {}) {
+export async function runJob(job, { log = () => {}, bridge: injectedBridge = null, repoSkillsDir = undefined } = {}) {
   // loadBot is exported from bridge.mjs (S1). Lazy-import the whole module so we
   // also get PiRpc without a static cycle.
   // The Crow voice bot takes no background jobs, from any producer. Refused
@@ -315,9 +316,12 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
   if (job.source === "card" || job.card_id != null) return await runCardJob(job, { log, bridge });
 
   const bot = bridge.loadBot(job.bot_id); // throws on unknown/disabled
-  const def = bot.def;
-  if (isVoiceBotDef(def)) throw new Error(`'${job.bot_id}' cannot take background jobs`);
+  if (isVoiceBotDef(bot.def)) throw new Error(`'${job.bot_id}' cannot take background jobs`);
   const crowHome = resolveCrowHome();
+  // The same repo-skill tool union as a channel turn (bot-world.mjs), on a
+  // copy, before the skills are inlined and writeBotMcp runs, so the job's
+  // MCP config and tool csv use it.
+  const def = await withSkillTools(bot.def, { crowHome, log, repoSkillsDir });
   const sessionDir = mkdtempSync(join(tmpdir(), "pibot-job-"));
   mkdirSync(join(sessionDir, "sessions"), { recursive: true });
   try {

@@ -1725,6 +1725,9 @@ export const translations = {
   "botbuilder.abSkillsTitle": { en: "Skills", es: "Habilidades" },
   "botbuilder.abSkillsLead": { en: "Extra know-how added to the bot's instructions.", es: "Conocimientos extra que se añaden a las instrucciones del bot." },
   "botbuilder.abSkillMissing": { en: "(file not found)", es: "(archivo no encontrado)" },
+  // research fetch-before-cite PR 2: a skill's declared tools (scripts/pi-bots/skill-tools.mjs)
+  "botbuilder.abSkillNeedsTools": { en: "Needs tools:", es: "Necesita herramientas:" },
+  "botbuilder.abSkillToolsCapped": { en: "This skill's tools were not added: the model's tool limit is reached.", es: "No se añadieron las herramientas de esta habilidad: se alcanzó el límite de herramientas del modelo." },
   "botbuilder.manageSkills": { en: "Manage skills ›", es: "Gestionar habilidades ›" },
   "botbuilder.skillsGroupYours": { en: "Yours", es: "Tuyas" },
   "botbuilder.skillsGroupBuiltin": { en: "Built-in", es: "Integradas" },

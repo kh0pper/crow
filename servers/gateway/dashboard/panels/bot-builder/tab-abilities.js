@@ -43,6 +43,8 @@ import { offSkills } from "../../../../shared/skill-state.js";
 import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposals.mjs";
 import { classifySkills } from "../../../skills-catalog.js";
 import { REPO_SKILLS_DIR } from "../../../../../scripts/pi-bots/skill_resolver.mjs";
+import { addSkillToolsGuarded, effectiveCrowMcp, skillToolHints } from "../../../../../scripts/pi-bots/skill-tools.mjs";
+import { isVoiceBotDef } from "../../../../shared/voice-bot.js";
 import { fileURLToPath } from "node:url";
 
 const APP_BUNDLES_DIR = fileURLToPath(new URL("../../../../../bundles", import.meta.url));
@@ -101,7 +103,22 @@ function sourceRow(src, selected, lang, { memory = false } = {}) {
 export async function renderAbilities(ctx) {
   const { def, lang, hidden, db, req, bot, botId } = ctx;
   const tools = def.tools || {};
-  const selected = Array.isArray(tools.crow_mcp) ? tools.crow_mcp.filter((x) => typeof x === "string") : [];
+  const crowHome = ctx.crowHome || resolveCrowHome();
+  // The services rows show what the bot actually gets: the stored list plus
+  // its repo skills' declared tools, minus the owner's declines
+  // (skill-tools.mjs effectiveCrowMcp). Over the model's tool cap the union is
+  // not applied at spawn either, so the stored list is shown with a note.
+  const stored = Array.isArray(tools.crow_mcp) ? tools.crow_mcp.filter((x) => typeof x === "string") : [];
+  let skillToolsCapped = false;
+  let selected = stored;
+  if (!isVoiceBotDef(def)) {
+    try {
+      const g = await addSkillToolsGuarded(def, { crowHome, repoSkillsDir: ctx.repoSkillsDir,
+        budget: ctx.companionBudget ? await ctx.companionBudget(def) : null });
+      if (g.refused) skillToolsCapped = true;
+      else if (g.added.length) selected = effectiveCrowMcp(def, { crowHome, repoSkillsDir: ctx.repoSkillsDir }).filter((x) => typeof x === "string");
+    } catch { /* the stored list */ }
+  }
   const builtin = Array.isArray(tools.pi_builtin) ? tools.pi_builtin : [];
   const pp = def.permission_policy || {};
 
@@ -146,12 +163,13 @@ export async function renderAbilities(ctx) {
   for (const s of sources) if (s.ok) catalog[s.server] = s.catalog.map((x) => [x.name, x.access]);
   const servicesBody =
     (probeErr ? `<p class="btb-err">${escapeHtml(fill(t("botbuilder.abProbeError", lang), { error: probeErr }))}</p>` : "") +
+    (skillToolsCapped ? `<p class="btb-hint" data-testid="skill-tools-capped">${escapeHtml(t("botbuilder.abSkillToolsCapped", lang))}</p>` : "") +
     (others.length ? others.map((s) => sourceRow(s, selected, lang)).join("") : `<p class="btb-hint">${escapeHtml(t("botbuilder.abNoSources", lang))}</p>`) +
     `<input type="hidden" name="src_catalog" value="${escapeHtml(JSON.stringify(catalog))}">`;
   const services = card(t("botbuilder.abServicesTitle", lang), servicesBody, t("botbuilder.abServicesLead", lang));
 
   // ---- skills (def.skills is the one store) ----
-  const skills = renderSkillsCard({ def, lang, crowHome: resolveCrowHome() });
+  const skills = renderSkillsCard({ def, lang, crowHome, repoSkillsDir: ctx.repoSkillsDir });
 
   return `<form method="POST" class="btb-form" id="btb-abilities-form">${hidden("abilities")}` +
     computer + services + skills +
@@ -216,8 +234,13 @@ function abilitiesScript() {
  * after its label (never inside it); its checkbox stays, so a selection is
  * kept through a save and comes back when it is switched on.
  */
-export function renderSkillsCard({ def, lang, crowHome }) {
+export function renderSkillsCard({ def, lang, crowHome, repoSkillsDir = undefined }) {
   const allSkills = loadSkills(crowHome);
+  // a selected skill that declares tools the bot lacks and no union grants (a
+  // copy outside the repo skills dir): name the services it needs
+  let hints = new Map();
+  try { hints = new Map(skillToolHints(def, { crowHome, repoSkillsDir }).map((h) => [h.skill, h.servers])); } catch { hints = new Map(); }
+  const needs = (s) => hints.has(s) ? `<span class="btb-muted">${escapeHtml(t("botbuilder.abSkillNeedsTools", lang) + " " + hints.get(s).join(", "))}</span>` : "";
   const off = offSkills(crowHome);
   const selSkills = new Set(Array.isArray(def.skills) ? def.skills : []);
   let catalog = [];
@@ -227,7 +250,7 @@ export function renderSkillsCard({ def, lang, crowHome }) {
   const isOff = (s) => off.has(normalizeSkillName(s) || s);
   const titleOf = (s) => (byName.get(s) || {}).title || s;
   const offLink = (s) => `<a href="/dashboard/skills?skill=${encodeURIComponent(normalizeSkillName(s) || s)}" class="btb-muted btb-chip-offlink">${escapeHtml(t("botbuilder.abSkillOff", lang))}</a>`;
-  const chip = (s) => `<span class="btb-chip-wrap"><label class="btb-chip${isOff(s) ? " btb-chip-off" : ""}"><input type="checkbox" name="skills" value="${escapeHtml(s)}"${selSkills.has(s) ? " checked" : ""}> <span class="btb-chip-title" title="${escapeHtml(s)}"${(byName.get(s) || {}).titleLang && byName.get(s).titleLang !== lang ? ` lang="${byName.get(s).titleLang}"` : ""}>${escapeHtml(titleOf(s))}</span><span class="btb-vh"> (${escapeHtml(s)})</span></label>${isOff(s) ? offLink(s) : ""}</span>`;
+  const chip = (s) => `<span class="btb-chip-wrap"><label class="btb-chip${isOff(s) ? " btb-chip-off" : ""}"><input type="checkbox" name="skills" value="${escapeHtml(s)}"${selSkills.has(s) ? " checked" : ""}> <span class="btb-chip-title" title="${escapeHtml(s)}"${(byName.get(s) || {}).titleLang && byName.get(s).titleLang !== lang ? ` lang="${byName.get(s).titleLang}"` : ""}>${escapeHtml(titleOf(s))}</span><span class="btb-vh"> (${escapeHtml(s)})</span></label>${isOff(s) ? offLink(s) : ""}${needs(s)}</span>`;
   const sortByTitle = (a, b) => titleOf(a).localeCompare(titleOf(b), lang);
 
   const yours = [], builtin = [];
