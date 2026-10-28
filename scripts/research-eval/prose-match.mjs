@@ -360,10 +360,14 @@ export function nearMarker(sentence, hit, markers, { window = NEAR_WINDOW } = {}
 export const VERIFY_NEGATIONS = ["not", "n't", "unable to", "unable", "could not", "cannot", "never", "unverified", "yet to"];
 const VERIFY_RES = [/\bverif(?:y|ied|ies)\b/gi, /\b(?:confirmed|checked)\b[^.]{0,40}\bagainst\s+the\s+(?:source|page|article)\b/gi];
 /**
- * At most this many word tokens may sit between a negation and the verb it negates: "not yet
- * verified", "have not been able to verify", "not able to independently verify".
+ * At most this many word tokens may sit between a negation and the verb it negates, and every
+ * one of them must be a NEGATION_FILLER: "not yet verified", "have not been able to verify",
+ * "not able to independently verify". Any other word ends the negation, so "didn't trust the
+ * summary and verified it" is a claim.
  */
 const NEGATION_GAP = 4;
+const NEGATION_FILLER = new Set(["be", "been", "able", "to", "yet", "independently", "get", "have", "was", "were",
+  "had", "actually", "fully"]);
 /** A negation never reaches across a clause: "I couldn't verify it, but I confirmed it against the source" claims. */
 const CLAUSE_BREAK = /[,;:]|\bbut\b/i;
 
@@ -380,9 +384,14 @@ export function verificationClaims(text) {
   for (const s of sentences(text)) {
     const tokens = tokensOf(s.text);
     const negations = markerSpans(s.text, VERIFY_NEGATIONS);
-    const claims = VERIFY_RES.some((re) => [...s.text.matchAll(re)].some((m) =>
-      !negations.some((n) => n.end <= m.index && tokensBetween(tokens, n.end, m.index) <= NEGATION_GAP
-        && !CLAUSE_BREAK.test(s.text.slice(n.end, m.index)))));
+    // "Not only did I verify ..." affirms.
+    const real = negations.filter((n) => !/^\s+only\b/i.test(s.text.slice(n.end)));
+    const negates = (n, verbAt) => {
+      if (n.end > verbAt || CLAUSE_BREAK.test(s.text.slice(n.end, verbAt))) return false;
+      const gap = tokens.filter((t) => t.start >= n.end && t.end <= verbAt);
+      return gap.length <= NEGATION_GAP && gap.every((t) => NEGATION_FILLER.has(s.text.slice(t.start, t.end).toLowerCase()));
+    };
+    const claims = VERIFY_RES.some((re) => [...s.text.matchAll(re)].some((m) => !real.some((n) => negates(n, m.index))));
     if (claims) out.push({ sentence: s });
   }
   return out;

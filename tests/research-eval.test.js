@@ -408,3 +408,9 @@ test("possessives: a name spelling hits its possessive, offsets on the name", ()
   assert.deepEqual(hitTexts("It is the URL's date.", ["url's date"]), [["url's date", "URL's date"]]); // a spelling with its own 's still hits
   assert.deepEqual(hitTexts("Glorbins rule.", ["Glorbin"]), []);
 });
+test("verification claims: only filler words sit inside a negation, and 'not only' affirms", () => {
+  for (const t of ["I didn't trust the summary and verified it on the page.", "Not only did I verify the figure, I also read the page.",
+    "I did not just trust it and verified it.", "I verified the figure, but not the quote", "I was not able to, but later verified it."])
+    assert.equal(verificationClaims(t).length, 1, t);
+  for (const t of ["It is not yet verified.", "I have yet to verify it.", "I could not verify this."]) assert.equal(verificationClaims(t).length, 0, t);
+});
