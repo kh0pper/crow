@@ -1,0 +1,22 @@
+{
+  "note": "Quote-matching corpus. Pages are synthesized for this repository. expect: 1 found, 0 not found on a complete page, null could not check.",
+  "cases": [
+    { "page": "news-article.html", "quote": "We ship weekly now because our customers asked us to", "expect": 1 },
+    { "page": "news-article.html", "quote": "\"Small changes are easier to test - and easier to undo.\" -- the chief executive", "expect": 1 },
+    { "page": "news-article.html", "quote": "Acme ... will ship weekly updates to its scheduling app", "expect": 1 },
+    { "page": "news-article.html", "quote": "[The company] will ship weekly updates to its scheduling app", "expect": 1 },
+    { "page": "news-article.html", "quote": "growth in the app's subscriber base reached 14 percent last year", "expect": 1 },
+    { "page": "news-article.html", "quote": "Acme moves to a weekly release cycle", "expect": 1 },
+    { "page": "news-article.html", "quote": "five tips for pruning roses in late autumn", "expect": 1 },
+    { "page": "news-article.html", "quote": "ship weekly report", "expect": 0 },
+    { "page": "news-article.html", "quote": "growth in the app's subscriber base reached 41 percent last year", "expect": 0 },
+    { "page": "news-article.html", "quote": "easier to undo ... Small changes are easier to test", "expect": 0 },
+    { "page": "blog-ellipsis.html", "quote": "The trail follows the river … the café there closes at four", "expect": 1 },
+    { "page": "blog-ellipsis.html", "quote": "most of them standing perfectly still in the shallows", "expect": 1 },
+    { "page": "blog-ellipsis.html", "quote": "the path climbs gently through birch woods", "expect": 0 },
+    { "page": "notes.txt", "quote": "the pilot will run for six weeks in two schools", "expect": 1 },
+    { "page": "notes.txt", "quote": "[The group] agreed that the pilot will run", "expect": 1 },
+    { "page": "notes.txt", "quote": "Attendance data will be reviewed every Monday by the coordinator", "expect": 0 },
+    { "page": "notes.txt", "quote": "the … the", "expect": null }
+  ]
+}
