@@ -1707,7 +1707,8 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
   // went back (Hand back, or 5 minutes without a heartbeat). A take-over sent
   // from a link ({from:"link", sid}) is 409 no_live_turn unless that chat has a
   // live turn using the browser, or its bot asked for the operator in the last
-  // 30 minutes and no other bot holds the browser. GET /browser/state is the
+  // 30 minutes and no other bot holds the browser; another bot holding it at
+  // take time (checked under the lease lock) is 409 other_bot. GET /browser/state is the
   // controller's state (the "You have the browser" control). A lease error
   // (a jammed lock, Ruling B3) is 503 browser_busy, never a hang. CSRF-railed
   // (this router mounts after csrfMiddleware), behind dashboardAuth, never
@@ -1720,14 +1721,21 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       // From a "?take-over=1" link (a needs-you item): only while that chat
       // has a live turn using the browser. A stale click never grabs it.
       const body = req.body && typeof req.body === "object" ? req.body : {};
+      let take;
       if (op === "takeOver" && body.from === "link") {
         const sid = typeof body.sid === "string" ? body.sid.slice(0, 64) : "";
         if (!sid || typeof eng.browserLinkOk !== "function" || !(await eng.browserLinkOk(sid))) {
           return jsonError(res, 409, "no_live_turn");
         }
+        // The check above is a lock-free read: the take itself re-decides
+        // "another bot holds it" under the lease lock, so a bot that acquires
+        // in between keeps its browser (409 other_bot; the sheet says the bot
+        // is no longer waiting).
+        take = { allowHolderSession: sid };
       }
-      const r = await ctl[op]();
+      const r = await ctl[op](take);
       if (r.state === "no_browser") return jsonError(res, 404, "no_browser");
+      if (r.state === "other_bot") return jsonError(res, 409, "other_bot");
       res.set("Cache-Control", "no-store");
       res.json({ state: r.state });
     } catch (err) {

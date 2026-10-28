@@ -652,6 +652,47 @@ test("the wait_for_user link after the turn ended opens the sheet and takes the 
   } finally { h.engine.browserTakeOver.close(); await r.close(); }
 });
 
+test("B9: a bot that takes the browser between the link's check and the take keeps it: 409 other_bot, no pending flag, nothing held; a plain Take over is unchanged", async () => {
+  const h = makeEngine();
+  const { s, pi } = await liveTurn(h);
+  pi.emit({ type: "tool_execution_start", toolName: WAIT, toolCallId: "w1", args: { message: "2FA code" } });
+  pi.emit({ type: "tool_execution_end", toolName: WAIT, toolCallId: "w1", isError: false, result: parked("2FA code") });
+  await tick();
+  pi.lastTurn().resolve(END);
+  await tick();
+  const other = { kind: "bot", sessionId: "perchlive-0ther000", botId: "other" };
+  // the race: the link check passes (lease free), then another bot acquires before the take
+  let inCall = false;
+  const racing = Object.create(h.engine);
+  racing.browserLinkOk = async (sid) => {
+    const ok = await h.engine.browserLinkOk(sid);
+    await lease.acquire(h.leaseDir, other, { now: h.clock.now() });
+    if (inCall) await lease.beginCall(h.leaseDir, other, { callId: "c9", pid: process.pid, now: h.clock.now() });
+    return ok;
+  };
+  const r = await engineRoutes({ engine: racing });
+  try {
+    const link = { from: "link", sid: s.sessionId };
+    for (const flight of [false, true]) {
+      inCall = flight;
+      assert.deepEqual(await r.post("take-over", link), { status: 409, body: { error: "other_bot" } }, "in call: " + flight);
+      const l = await lease.readLease(h.leaseDir);
+      assert.equal(l.holder.sessionId, "perchlive-0ther000", "the bot keeps the lease");
+      assert.equal(l.pendingOperator, undefined, "no pending flag left");
+      assert.equal(h.engine.browserTakeOver.state(), "idle");
+      assert.deepEqual(await r.get("state"), { status: 200, body: { state: "idle" } });
+      await lease.release(h.leaseDir, other.sessionId, { now: h.clock.now(), isAlive: () => false });
+    }
+  } finally { h.engine.browserTakeOver.close(); await r.close(); }
+  const h2 = makeEngine();
+  const r2 = await engineRoutes(h2);
+  try {
+    await lease.acquire(h2.leaseDir, other, { now: h2.clock.now() });
+    assert.deepEqual(await r2.post("take-over"), { status: 200, body: { state: "held" } }, "plain Take over: an idle bot holding is taken, as before");
+    assert.equal((await lease.readLease(h2.leaseDir)).holder.kind, "operator");
+  } finally { h2.engine.browserTakeOver.close(); await r2.close(); }
+});
+
 // ---------------------------------------------------------------------------
 // the routes: real dashboardAuth + csrfMiddleware
 // ---------------------------------------------------------------------------
@@ -778,7 +819,7 @@ test("the Browser panel shows \"A bot is using the browser\" with Take over whil
     assert.match(html, /class="browser-bot-using"/);
     assert.match(html, /A bot is using the browser/);
     assert.match(html, new RegExp('href="/dashboard/perch\\?take-over=1#' + sid + '">Take over</a>'));
-    assert.doesNotMatch(html, /<iframe/, "no viewer behind the bot's back");
+    assert.doesNotMatch(html, /<iframe/, "no container running here: no viewer (the view-only viewer is tested below)");
     html = await render("es");
     assert.match(html, /Un bot está usando el navegador/);
     assert.match(html, />Tomar el control</);
@@ -824,6 +865,47 @@ test("the Browser panel shows \"A bot is using the browser\" with Take over whil
     assert.equal(fetched[0].o.method, "POST");
     assert.equal(fetched[0].o.headers["X-Crow-Csrf"], "tk=");
     assert.equal(reloaded, 1);
+  } finally { process.env.CROW_HOME = prevHome; process.env.PATH = prevPath; }
+});
+
+test("the Browser panel: while a bot holds the lease, a VIEW-ONLY viewer under the notice (Take over unchanged); the interactive viewer otherwise, pinned interactive", async () => {
+  const home = join(dir, "panel-home-watch");
+  mkdirSync(join(home, "bundles", "browser"), { recursive: true });
+  symlinkSync(join(REPO, "bundles", "browser", "server"), join(home, "bundles", "browser", "server"));
+  writeFileSync(join(home, "bundles", "browser", ".env"), "CROW_BROWSER_CONTAINER_NAME=crow-take-over-test-none\nCROW_BROWSER_CDP_PORT=1\n");
+  // a stand-in docker that says the container runs (no real docker is asked)
+  const fakeTools = join(dir, "fake-docker"); mkdirSync(fakeTools, { recursive: true });
+  writeFileSync(join(fakeTools, "docker"), "#!/bin/sh\necho 'true|2026-10-28T00:00:00Z'\n", { mode: 0o755 });
+  const prevHome = process.env.CROW_HOME, prevPath = process.env.PATH;
+  process.env.CROW_HOME = home;
+  process.env.PATH = fakeTools;
+  const VIEW_ONLY = '<iframe src="/proxy/browser/vnc.html?view_only=true&autoconnect=true&resize=scale"';
+  const INTERACTIVE = '<iframe src="/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false"';
+  try {
+    const { default: panel } = await import("../bundles/browser/panel/browser.js");
+    const render = async (lang = "en") => panel.handler({ query: {} }, {}, { db: null, appRoot: REPO, lang, layout: (o) => o.content });
+    const leaseDirP = join(home, "browser-lease");
+    let html = await render();
+    assert.ok(html.includes(INTERACTIVE), "free: the interactive viewer, view_only pinned off (noVNC keeps the setting in localStorage)");
+    assert.ok(!html.includes("view_only=true"));
+    assert.match(html, /href="\/proxy\/browser\/vnc\.html\?view_only=false"[^>]*>Open VNC Viewer/);
+    const sid = "perchlive-0123abcd";
+    await lease.acquire(leaseDirP, { kind: "bot", sessionId: sid, botId: "botty" }, { now: Date.now() });
+    html = await render();
+    assert.match(html, /class="browser-bot-using"/);
+    assert.match(html, new RegExp('href="/dashboard/perch\\?take-over=1#' + sid + '">Take over</a>'), "Take over unchanged");
+    assert.ok(html.includes(VIEW_ONLY), "a bot holds: the view-only viewer");
+    assert.ok(!html.includes(INTERACTIVE), "never the interactive one behind the bot's back");
+    assert.doesNotMatch(html, /Open VNC Viewer/, "no interactive pop-out while a bot holds it");
+    assert.ok(html.indexOf("browser-bot-using") < html.indexOf(VIEW_ONLY), "under the notice");
+    assert.equal((html.match(/<iframe/g) || []).length, 1);
+    // the operator takes it (or it goes back): the interactive viewer returns
+    await lease.takeOperator(leaseDirP, { now: Date.now() });
+    html = await render();
+    assert.ok(html.includes(INTERACTIVE));
+    assert.ok(!html.includes("view_only=true"));
+    await lease.handBack(leaseDirP, {});
+    assert.ok((await render()).includes(INTERACTIVE));
   } finally { process.env.CROW_HOME = prevHome; process.env.PATH = prevPath; }
 });
 

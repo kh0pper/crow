@@ -188,7 +188,7 @@ test("Take over (the tile's button or a tap on the picture) opens a full-screen 
   assert.equal(one(s, "to-host").textContent, "shop.example.test");
   const vnc = one(s, "to-vnc");
   assert.ok(vnc, "the viewer loads once held");
-  assert.equal(vnc.getAttribute("src"), "/proxy/browser/vnc.html?autoconnect=true&resize=scale");
+  assert.equal(vnc.getAttribute("src"), "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false");
   const back = one(s, "to-back");
   assert.equal(back.textContent, "Hand back");
   assert.ok(back.focused > 0, "focus lands on Hand back");
@@ -411,6 +411,24 @@ test("a stale link (409 no_live_turn) never takes the browser: the sheet says th
   await h.click(one(h.sheet(), "to-back"));
   assert.equal(h.sheet(), null);
   assert.equal(translations["perch.browserNotWaiting"].es, "El bot ya no te está esperando.");
+});
+
+test("B10: a dead-link sheet's Hand back only closes it: no hand-back request, a live operator holding elsewhere (tab A) is untouched and its control returns", async () => {
+  const h = mount({ search: "?take-over=1", server: (c) => (c.path.endsWith("/take-over") ? { status: 409, body: { error: "other_bot" } } : c.path.endsWith("/browser/state") ? { status: 200, body: { state: "held" } } : c.path.endsWith("/hand-back") ? { status: 200, body: { state: "idle" } } : { status: 200, body: { entries: [] } }) });
+  h.mine.hidden = false;   // tab A's operator holding: "You have the browser · Hand back"
+  h.api.takeOverFromLink();
+  await tick();
+  assert.equal(one(h.sheet(), "to-status").textContent, "The bot is no longer waiting for you.");
+  assert.equal(h.mine.hidden, true, "the open sheet hides the control");
+  await h.click(one(h.sheet(), "to-back"));
+  assert.equal(h.sheet(), null, "closed");
+  assert.equal(h.posts("/browser/hand-back").length, 0, "no hand back sent");
+  assert.equal(h.mine.hidden, false, "the holding is intact: its control returns");
+  // a live sheet's Hand back still hands back
+  const live = mount();
+  await live.open();
+  await live.click(one(live.sheet(), "to-back"));
+  assert.equal(live.posts("/browser/hand-back").length, 1);
 });
 
 test("a Done tile whose turn asked for the operator keeps Take over, and its tap asks like a link", async () => {

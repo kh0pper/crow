@@ -470,9 +470,20 @@ export async function takeOperator(dir, { now = Date.now(), ...opts } = {}) {
  * → { taken: true, lease } | { taken: false, lease } (a live bot holding with
  * a live pid in inCall). Dead pids do not count. An expired or free lease, or
  * the operator's own, is taken (renewed).
+ *
+ * allowHolderSession (a "?take-over=1" link's chat): when given, another
+ * bot's live holding (a bot whose sessionId is not this one) is refused
+ * here, under the lock → { taken: false, reason: "other_bot", lease }, with
+ * nothing written (no take, no pending flag). Decided at take time, so a bot
+ * that acquires after the link's own check still keeps its browser. Absent:
+ * exactly the behaviour above.
  */
-export async function takeOperatorIfIdle(dir, { now = Date.now(), isAlive = defaultIsAlive, ...opts } = {}) {
+export async function takeOperatorIfIdle(dir, { now = Date.now(), isAlive = defaultIsAlive, allowHolderSession, ...opts } = {}) {
   return withLock(dir, { ...opts, isAlive }, (cur) => {
+    if (typeof allowHolderSession === "string" && cur && isHeld(cur, now)
+        && cur.holder.kind === "bot" && cur.holder.sessionId !== allowHolderSession) {
+      return { result: { taken: false, reason: "other_bot", lease: cur } };
+    }
     if (cur && isHeld(cur, now) && cur.holder.kind !== "operator" && cur.inCall.some((c) => isAlive(c.pid))) {
       // Not yet: mark the request, so no NEW bot call starts while this one finishes.
       const lease = { ...cur, pendingOperator: now };

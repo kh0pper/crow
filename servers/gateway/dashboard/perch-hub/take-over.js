@@ -25,7 +25,7 @@ import { tJs } from "../shared/i18n.js";
  *    without one, so a frozen phone tab does not lose it); "idle" from the
  *    server (5-minute loss) closes the sheet;
  *  - Hand back (POST …/browser/hand-back) is the only way the sheet gives the
- *    browser back. A Turbo visit (HUB.retire), a hidden tab or a navigation
+ *    browser back; on an ended sheet (a 409 link) it only closes the sheet. A Turbo visit (HUB.retire), a hidden tab or a navigation
  *    closes the UI and stops its timers, and never hands back.
  */
 export function perchTakeOverJs(lang = "en") {
@@ -154,11 +154,17 @@ export function perchTakeOverJs(lang = "en") {
     if(s.frame) return;
     var f=document.createElement('iframe'); f.className='to-vnc';
     f.setAttribute('title','VNC');
-    f.setAttribute('src','/proxy/browser/vnc.html?autoconnect=true&resize=scale');
+    /* view_only pinned off: noVNC keeps that setting in its own browser storage, and the
+       Browser panel's watch-only viewer sets it on the same origin */
+    f.setAttribute('src','/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false');
     s.view.appendChild(f); s.frame=f;
   }
 
   function toHandBack(s){
+    /* ended (a dead link, or a take-over that gave up): this sheet never took
+       the browser, so Hand back only closes it. A live holding elsewhere (another
+       tab) is left alone, and its "You have the browser" control comes back. */
+    if(s.state==='ended'){ closeTakeOver(); toMineRefresh(); return; }
     if(s.backing) return;
     s.backing=true; s.back.disabled=true;
     toApi('hand-back').then(function(r){
