@@ -510,8 +510,14 @@ export function createBoardMcpServer(options = {}) {
         options: z.array(decisionOption),
       }),
     },
-    async ({ project_id, title, tags, decision }, extra) =>
-      askDecision(tdb, cdb, { projectId: project_id, title, tags, decision }, resolveActor(extra)));
+    async ({ project_id, title, tags, decision }, extra) => {
+      // Redesign P5: the chat a decision came from is the signed Perch thread
+      // (Task 5.1's actor.thread), never a tool argument, so a bot cannot
+      // put its question in a chat it is not in.
+      const actor = resolveActor(extra);
+      const source = actor.thread && actor.thread.gateway === "perch" ? { thread_id: actor.thread.id } : undefined;
+      return askDecision(tdb, cdb, { projectId: project_id, title, tags, decision, source }, actor);
+    });
 
   tool(server, "board_notify_decisions",
     "Send the one grouped push for a batch's open decision cards. Pushes at most once per batch (once any card in it was notified, later calls push nothing, and cards added later show on the board only), so repeated calls are harmless; call it once at the end of the batch. Batches are per caller: the name you pass is looked up in your own namespace, so you can only notify cards you asked; at most 3 pushes per caller per UTC day (429 push_limit).",

@@ -3435,8 +3435,11 @@ export const translations = {
   "shell.offerMake": { en: "Make card", es: "Crear tarjeta" },
   "shell.offerNotNow": { en: "Not now", es: "Ahora no" },
   "shell.cardMadeNote": { en: "Card #{n} made on {project}.", es: "Tarjeta #{n} creada en {project}." },
-  "shell.cardDetails": { en: "Details", es: "Detalles" },
   "shell.offerFailed": { en: "That did not work. Try again.", es: "No funcionó. Inténtalo de nuevo." },
+  "shell.accept": { en: "Accept", es: "Aceptar" },
+  "shell.askChange": { en: "Ask for a change", es: "Pedir un cambio" },
+  "shell.changePlaceholder": { en: "What should change?", es: "¿Qué debería cambiar?" },
+  "shell.other": { en: "Other…", es: "Otra…" },
   // Crow Artifacts chat card (spec v1.6, chat-first PR-1)
   "perch.artifactLabel": { en: "Artifact", es: "Artefacto" },
   "perch.artifactOpenBeside": { en: "Open beside chat", es: "Abrir junto al chat" },

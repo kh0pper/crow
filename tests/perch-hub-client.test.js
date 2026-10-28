@@ -221,7 +221,9 @@ test("async continuations are guarded — a fast back button must not cross sess
   // re-checks the session before it refetches.
   // 38 with the P5 card offer (card-chip.js): the decide continuation and the
   // offers and card-chip list continuations.
-  assert.equal(guards, 38, "expected exactly 38 identity guards, found " + guards);
+  // 41 with the P5 review chips (card-chip.js, Task 5.4): the Accept, Ask for
+  // a change and decision-answer continuations.
+  assert.equal(guards, 41, "expected exactly 41 identity guards, found " + guards);
 });
 
 test("the emitted script never assigns to an innerHTML-class sink", async () => {

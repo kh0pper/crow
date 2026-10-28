@@ -30,23 +30,26 @@ const tick = async () => { for (let i = 0; i < 8; i++) await new Promise((r) => 
 const json = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: () => Promise.resolve(body) });
 
 const SID = "perchlive-aaaaaaaa";
-function mount({ offers = [], card = null, decide = () => json({ ok: true }) } = {}) {
+function mount({ offers = [], card = null, result = null, decisions = [], decide = () => json({ ok: true }), review = () => json({ ok: true }) } = {}) {
   const transcript = makeEl("div");
-  const state = { offers, card };
+  const input = makeEl("textarea"); input.value = "";
+  const state = { offers, card, result, decisions, sent: [] };
   const fetches = [];
   const sandbox = {
     console,
     document: { createElement: (tag) => makeEl(tag) },
     API: "/dashboard/perch-api",
-    el: (id) => (id === "perch-transcript" ? transcript : null),
+    el: (id) => (id === "perch-transcript" ? transcript : id === "perch-input" ? input : null),
+    send() { state.sent.push(input.value); input.value = ""; },
     csrf: () => "tok", live: () => true, current: { sid: SID },
     fetch(url, opts) {
       const method = (opts && opts.method) || "GET";
       const u = String(url);
       fetches.push({ method, url: u, body: opts && opts.body ? JSON.parse(opts.body) : undefined });
       if (method === "GET" && u.endsWith("/offers")) return Promise.resolve(json({ offers: state.offers }));
-      if (method === "GET" && u.endsWith("/card")) return Promise.resolve(json({ card: state.card }));
+      if (method === "GET" && u.endsWith("/card")) return Promise.resolve(json({ card: state.card, result: state.result, decisions: state.decisions }));
       if (method === "POST" && /\/offers\/\d+\/decide$/.test(u)) return Promise.resolve(decide(u, fetches[fetches.length - 1].body));
+      if (method === "POST") return Promise.resolve(review(u, fetches[fetches.length - 1].body));
       return Promise.resolve(json({}));
     },
     __export(api) { sandbox.api = api; },
@@ -54,7 +57,7 @@ function mount({ offers = [], card = null, decide = () => json({ ok: true }) } =
   sandbox.line = (cls, text) => { const d = makeEl("div"); if (cls) d.className = cls; d.textContent = text == null ? "" : String(text); return d; };
   vm.createContext(sandbox);
   vm.runInContext(`(function(){\n${perchCardChipJs("en")}\n;__export({ loadCardOffers: loadCardOffers, loadCardChip: loadCardChip, cardTurnState: cardTurnState, reset: resetCardChip });\n})();`, sandbox);
-  return { sandbox, transcript, fetches, state, api: sandbox.api };
+  return { sandbox, transcript, input, fetches, state, api: sandbox.api };
 }
 const offer = (o) => ({ id: 5, title: "Draft the reply", projectId: 2, projectName: "Garden", status: "pending", cardId: null, ...o });
 
@@ -200,8 +203,220 @@ test("offers, notes and the chip come back on reload: flushHistBuf calls both lo
 });
 
 test("i18n: the P5 keys exist in en and es", () => {
-  for (const k of ["shell.offerTitle", "shell.offerMake", "shell.offerNotNow", "shell.cardMadeNote", "shell.cardDetails", "shell.offerFailed"]) {
+  for (const k of ["shell.offerTitle", "shell.offerMake", "shell.offerNotNow", "shell.cardMadeNote", "shell.cardDetails", "shell.offerFailed",
+    "shell.accept", "shell.askChange", "shell.changePlaceholder", "shell.other"]) {
     assert.ok(translations[k].en && translations[k].es, k);
   }
   assert.equal(translations["shell.cardMadeNote"].en, "Card #{n} made on {project}.");
+});
+
+// ---- Task 5.4: Accept, Ask for a change, Not now, and decision chips ----
+
+const CARD = { id: 9, title: "T", lane: "needs_you", projectId: 2 };
+const RESULT = { id: 31, outcome: "success", summaryMd: "Did the thing." };
+const DECISION = {
+  cardId: 41, question: "Left or right?",
+  options: [
+    { index: 0, label: "Left", consequence: "We go left.", recommended: true },
+    { index: 1, label: "Right", consequence: "We go right.", recommended: false },
+  ],
+};
+const posts = (h) => h.fetches.filter((f) => f.method === "POST").map((p) => [p.url, p.body]);
+const review = (h) => byClass(h.transcript, "perch-review");
+
+test("i18n: the 5.4 strings, and the reused P3 confirm", () => {
+  assert.deepEqual(translations["shell.accept"], { en: "Accept", es: "Aceptar" });
+  assert.deepEqual(translations["shell.askChange"], { en: "Ask for a change", es: "Pedir un cambio" });
+  assert.deepEqual(translations["shell.changePlaceholder"], { en: "What should change?", es: "¿Qué debería cambiar?" });
+  assert.deepEqual(translations["shell.other"], { en: "Other…", es: "Otra…" });
+  const chip = readFileSync(new URL("../servers/gateway/dashboard/perch-hub/card-chip.js", import.meta.url), "utf8");
+  for (const k of ["shell.confirmNotFullSuccess", "shell.confirmAcceptYes", "shell.confirmAcceptNo"]) {
+    assert.ok(chip.includes('tJs("' + k + '", lang)'), "P3's " + k + " is reused");
+  }
+  const src = readFileSync(new URL("../servers/gateway/dashboard/shared/i18n.js", import.meta.url), "utf8");
+  for (const k of ["shell.cardDetails", "shell.accept", "shell.confirmNotFullSuccess", "shell.offerNotNow"]) {
+    assert.equal(src.split('"' + k + '":').length - 1, 1, k + " is defined once");
+  }
+});
+
+test("chips show only while something is open", async () => {
+  const h = mount({ card: CARD, result: RESULT, decisions: [DECISION] });
+  h.api.loadCardChip(SID); await tick();
+  assert.equal(review(h).length, 1);
+  const box = review(h)[0];
+  assert.equal(h.transcript.children[h.transcript.children.length - 1], box, "under the newest reply: last in the transcript");
+  assert.equal(byClass(box, "review-accept")[0].textContent, "Accept");
+  assert.equal(byClass(box, "review-change")[0].textContent, "Ask for a change");
+  assert.equal(byClass(box, "review-notnow")[0].textContent, "Not now");
+  assert.ok(allText(box).includes("Did the thing."));
+  assert.ok(allText(box).includes("Left or right?"));
+  assert.deepEqual(byClass(box, "review-opt").map((b) => b.textContent), ["Left", "Right"]);
+  assert.ok(allText(box).includes("We go left."));
+  assert.equal(byClass(box, "review-other")[0].textContent, "Other…");
+
+  h.state.result = null; h.state.decisions = [];
+  h.api.loadCardChip(SID); await tick();
+  assert.equal(review(h).length, 0, "the server says nothing is open: the chips go");
+  assert.equal(byClass(h.transcript, "perch-cardchip").length, 1, "the card chip stays");
+
+  const none = mount({ card: CARD });
+  none.api.loadCardChip(SID); await tick();
+  assert.equal(review(none).length, 0);
+  const noCard = mount({ card: null, result: RESULT });
+  noCard.api.loadCardChip(SID); await tick();
+  assert.equal(review(noCard).length, 0, "a result without this chat's card draws nothing");
+});
+
+test("a hostile summary, question and option stay text", async () => {
+  const evil = "<img src=x onerror=alert(1)>";
+  const h = mount({ card: CARD, result: { ...RESULT, summaryMd: evil },
+    decisions: [{ cardId: 41, question: evil, options: [{ index: 0, label: evil, consequence: evil, recommended: true }] }] });
+  h.api.loadCardChip(SID); await tick();
+  let imgs = 0, hits = 0;
+  walk(h.transcript, (n) => { if (n.tagName === "IMG") imgs++; if (n.textContent === evil) hits++; });
+  assert.equal(imgs, 0);
+  assert.equal(hits, 4, "summary, question, label, consequence");
+});
+
+test("Accept posts the shown result id once, then redraws from the server", async () => {
+  const h = mount({ card: CARD, result: RESULT });
+  h.api.loadCardChip(SID); await tick();
+  const acc = byClass(h.transcript, "review-accept")[0];
+  h.state.result = null; h.state.card = { ...CARD, lane: "done" };
+  acc.onclick(); acc.onclick(); await tick();
+  assert.deepEqual(posts(h), [["/dashboard/perch-api/cards/9/accept", { result_id: 31 }]]);
+  assert.equal(review(h).length, 0);
+  assert.equal(h.state.sent.length, 0, "Accept says nothing to the bot");
+});
+
+test("R-P5-4: Accept on a failure or partial result asks first", async () => {
+  for (const outcome of ["failure", "partial"]) {
+    const h = mount({ card: CARD, result: { ...RESULT, outcome } });
+    h.api.loadCardChip(SID); await tick();
+    const box = review(h)[0];
+    byClass(box, "review-accept")[0].onclick(); await tick();
+    assert.equal(posts(h).length, 0, "nothing sent before the confirm");
+    const confirm = byClass(box, "review-confirm")[0];
+    assert.equal(confirm.hidden, false);
+    assert.equal(allText(confirm)[0], "This result isn't a full success. Accept it and close the card?");
+    byClass(confirm, "review-confirm-no")[0].onclick(); await tick();
+    assert.equal(confirm.hidden, true);
+    assert.equal(posts(h).length, 0, "No writes nothing");
+    assert.equal(byClass(box, "review-accept")[0].disabled, false);
+    byClass(box, "review-accept")[0].onclick(); await tick();
+    byClass(confirm, "review-confirm-yes")[0].onclick(); await tick();
+    assert.deepEqual(posts(h), [["/dashboard/perch-api/cards/9/accept", { result_id: 31, accept_failure: true }]]);
+  }
+});
+
+test("a server confirm_failure also opens the confirm", async () => {
+  const h = mount({ card: CARD, result: RESULT, review: () => json({ error: "confirm_failure", reason: "confirm_failure" }, 409) });
+  h.api.loadCardChip(SID); await tick();
+  const box = review(h)[0];
+  byClass(box, "review-accept")[0].onclick(); await tick();
+  assert.equal(byClass(box, "review-confirm")[0].hidden, false);
+  assert.equal(posts(h).length, 1);
+});
+
+test("a stale Accept redraws; a failed one says so and can be tried again", async () => {
+  const stale = mount({ card: CARD, result: RESULT, review: () => json({ error: "stale" }, 409) });
+  stale.api.loadCardChip(SID); await tick();
+  stale.state.result = { ...RESULT, id: 32, summaryMd: "Newer." };
+  byClass(stale.transcript, "review-accept")[0].onclick(); await tick();
+  assert.equal(posts(stale).length, 1, "no retry");
+  assert.ok(allText(review(stale)[0]).includes("Newer."), "redrawn with what is there now");
+  assert.equal(byClass(review(stale)[0], "review-accept")[0].disabled, false);
+
+  const bad = mount({ card: CARD, result: RESULT, review: () => json({}, 500) });
+  bad.api.loadCardChip(SID); await tick();
+  byClass(bad.transcript, "review-accept")[0].onclick(); await tick();
+  assert.equal(byClass(bad.transcript, "review-accept")[0].disabled, false);
+  assert.ok(allText(review(bad)[0]).includes("That did not work. Try again."));
+});
+
+test("Ask for a change rejects the shown result, then sends the words as the operator's message", async () => {
+  const h = mount({ card: CARD, result: RESULT });
+  h.api.loadCardChip(SID); await tick();
+  const box = review(h)[0];
+  const field = byClass(box, "review-field")[0];
+  assert.equal(field.hidden, true);
+  byClass(box, "review-change")[0].onclick();
+  assert.equal(field.hidden, false);
+  const ta = byClass(field, "review-input")[0];
+  assert.equal(ta["attr:placeholder"], "What should change?");
+  byClass(field, "review-send")[0].onclick(); await tick();
+  assert.equal(posts(h).length, 0, "an empty change sends nothing");
+  ta.value = "  Use the blue one. ";
+  h.input.value = "my draft";
+  h.state.result = null;
+  byClass(field, "review-send")[0].onclick(); await tick();
+  assert.deepEqual(posts(h), [["/dashboard/perch-api/cards/9/request-change", { result_id: 31, text: "Use the blue one." }]]);
+  assert.deepEqual(h.state.sent, ["Use the blue one."], "one ordinary message, the operator's own words");
+  assert.equal(h.input.value, "my draft", "the composer's draft survives");
+  assert.equal(review(h).length, 0);
+});
+
+test("a refused change sends nothing to the bot", async () => {
+  const h = mount({ card: CARD, result: RESULT, review: () => json({ error: "stale" }, 409) });
+  h.api.loadCardChip(SID); await tick();
+  const box = review(h)[0];
+  byClass(box, "review-change")[0].onclick();
+  byClass(box, "review-input")[0].value = "x";
+  byClass(box, "review-send")[0].onclick(); await tick();
+  assert.equal(posts(h).length, 1);
+  assert.deepEqual(h.state.sent, []);
+});
+
+test("answering a decision goes through #535's route", async () => {
+  const h = mount({ card: CARD, decisions: [DECISION] });
+  h.api.loadCardChip(SID); await tick();
+  h.state.decisions = [];
+  const opt = byClass(h.transcript, "review-opt")[0];
+  opt.onclick(); opt.onclick(); await tick();
+  assert.deepEqual(posts(h), [["/dashboard/bot-board-api/card/41/decision", { index: 0 }]]);
+  assert.equal(h.fetches.find((f) => f.method === "POST").url.startsWith("/dashboard/bot-board-api/"), true);
+  assert.equal(review(h).length, 0, "answered: the server says so and the chip goes");
+});
+
+test("Other… opens a field for other_text", async () => {
+  const h = mount({ card: CARD, decisions: [DECISION] });
+  h.api.loadCardChip(SID); await tick();
+  const box = review(h)[0];
+  const fields = byClass(box, "review-field");
+  assert.equal(fields.length, 1);
+  byClass(box, "review-other")[0].onclick();
+  assert.equal(fields[0].hidden, false);
+  byClass(fields[0], "review-input")[0].value = "Neither, go up.";
+  byClass(fields[0], "review-send")[0].onclick(); await tick();
+  assert.deepEqual(posts(h), [["/dashboard/bot-board-api/card/41/decision", { index: -1, other_text: "Neither, go up." }]]);
+  assert.deepEqual(h.state.sent, [], "an answer is not a chat message");
+});
+
+test("Not now writes nothing", async () => {
+  const h = mount({ card: CARD, result: RESULT, decisions: [DECISION] });
+  h.api.loadCardChip(SID); await tick();
+  const before_ = h.fetches.length;
+  byClass(h.transcript, "review-notnow")[0].onclick(); await tick();
+  assert.equal(h.fetches.length, before_, "no request at all");
+  assert.equal(review(h).length, 0);
+  h.api.loadCardChip(SID); await tick();
+  assert.equal(review(h).length, 0, "collapsed for this page view");
+  h.api.reset(); h.api.loadCardChip(SID); await tick();
+  assert.equal(review(h).length, 0, "a transcript redraw keeps it collapsed");
+  h.state.result = { ...RESULT, id: 32 };
+  h.api.loadCardChip(SID); await tick();
+  assert.equal(review(h).length, 1, "something new is open: the chips come back");
+});
+
+test("a reload keeps what was typed and keeps the chips last", async () => {
+  const h = mount({ card: CARD, result: RESULT });
+  h.api.loadCardChip(SID); await tick();
+  const box = review(h)[0];
+  byClass(box, "review-change")[0].onclick();
+  byClass(box, "review-input")[0].value = "half typed";
+  h.transcript.appendChild(makeEl("div"));   // a newer bot reply
+  h.api.loadCardChip(SID); await tick();
+  assert.equal(review(h)[0], box, "same node");
+  assert.equal(h.transcript.children[h.transcript.children.length - 1], box);
+  assert.equal(byClass(box, "review-input")[0].value, "half typed");
 });

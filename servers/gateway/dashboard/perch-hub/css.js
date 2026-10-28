@@ -702,6 +702,21 @@ background:var(--card);border:1px solid var(--line);border-radius:12px;padding:1
 #perch-hub-root .perch-cardchip .cardchip-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #perch-hub-root .perch-cardchip .cardchip-lane{flex:none;color:var(--dim)}
 #perch-hub-root .perch-cardchip .cardchip-lane:before{content:"\\00b7 "}
+/* Review chips (redesign P5, Task 5.4): Accept, Ask for a change, a bot's questions. 44px targets. */
+#perch-hub-root .perch-review{display:flex;flex-direction:column;gap:6px;align-self:stretch;margin:4px 0}
+#perch-hub-root .perch-review .art-actions,#perch-hub-root .perch-review .review-options,#perch-hub-root .perch-review .review-confirm{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+#perch-hub-root .perch-review .review-option{display:flex;flex-direction:column;gap:2px;min-width:0}
+#perch-hub-root .perch-review button{min-height:44px;min-width:44px;padding:0 16px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--ink);font:600 14px/1.2 Inter,"Public Sans",system-ui,sans-serif;cursor:pointer;overflow-wrap:anywhere;text-align:left}
+#perch-hub-root .perch-review .review-accept,#perch-hub-root .perch-review .review-opt-rec,#perch-hub-root .perch-review .review-confirm-yes{background:var(--accent,var(--ink));color:var(--accent-ink,var(--card));border-color:transparent}
+#perch-hub-root .perch-review button:disabled{opacity:.55;cursor:default}
+#perch-hub-root .perch-review .review-notnow{align-self:flex-start;background:transparent}
+#perch-hub-root .perch-review .review-summary,#perch-hub-root .perch-review .review-question{white-space:pre-wrap;overflow-wrap:anywhere}
+#perch-hub-root .perch-review .review-question{font-weight:600}
+#perch-hub-root .perch-review .review-consequence{font-size:12px;color:var(--dim)}
+#perch-hub-root .perch-review .review-field{display:flex;flex-direction:column;gap:6px}
+#perch-hub-root .perch-review .review-field[hidden],#perch-hub-root .perch-review .review-confirm[hidden]{display:none}
+#perch-hub-root .perch-review .review-input{min-height:44px;width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink);font:14px/1.4 Inter,"Public Sans",system-ui,sans-serif;resize:vertical}
+#perch-hub-root .perch-review .review-msg{font-size:12px;color:var(--err)}
 #perch-hub-root .artcard .art-head{display:flex;align-items:center;gap:8px}
 #perch-hub-root .artcard .art-eyebrow{font:600 13px/1.2 Inter,"Public Sans",system-ui,sans-serif;color:var(--dim)}
 #perch-hub-root .artcard .art-type{font-size:12px;color:var(--dim)}

@@ -16,6 +16,17 @@ import { tJs } from "../shared/i18n.js";
  *    The lane in the chip comes from the server, never from the client. Deciding an offer
  *    sends nothing to the bot.
  *  - The note is a quiet centered line, not a message: no .msg, no .bubble, no avatar.
+ *
+ * Task 5.4 adds the review chips, drawn from the same GET card (result, decisions), under the
+ * newest bot reply and only while something is open:
+ *  - Accept posts the result id the chat SHOWED (409 = stale or decided: redraw from the server).
+ *    A failure or partial result asks first (P3's confirm string), then sends accept_failure.
+ *  - Ask for a change rejects that same result, then sends the operator's words to the bot as an
+ *    ordinary message through the composer's own send().
+ *  - A decision's options post #535's /dashboard/bot-board-api/card/:id/decision {index};
+ *    Other... opens a field for other_text.
+ *  - Not now writes nothing: the chips stay collapsed for this page view until something new
+ *    (another result or question) is open.
  */
 export function perchCardChipJs(lang = "en") {
   return `
@@ -26,6 +37,15 @@ export function perchCardChipJs(lang = "en") {
   var CC_MADE_NOTE='${tJs("shell.cardMadeNote", lang)}';
   var CC_DETAILS='${tJs("shell.cardDetails", lang)}';
   var CC_FAILED='${tJs("shell.offerFailed", lang)}';
+  var CC_ACCEPT='${tJs("shell.accept", lang)}';
+  var CC_ASK_CHANGE='${tJs("shell.askChange", lang)}';
+  var CC_CHANGE_PH='${tJs("shell.changePlaceholder", lang)}';
+  var CC_OTHER='${tJs("shell.other", lang)}';
+  var CC_SEND='${tJs("perch.send", lang)}';
+  var CC_CONFIRM='${tJs("shell.confirmNotFullSuccess", lang)}';
+  var CC_CONFIRM_YES='${tJs("shell.confirmAcceptYes", lang)}';
+  var CC_CONFIRM_NO='${tJs("shell.confirmAcceptNo", lang)}';
+  var CC_CONFIRM_OUTCOMES=['failure','partial'];
   var CC_LANES={ needs_you:'${tJs("shell.laneNeedsYou", lang)}', working:'${tJs("shell.laneWorking", lang)}',
     up_next:'${tJs("shell.laneUpNext", lang)}', done:'${tJs("shell.laneDone", lang)}' };
 
@@ -34,18 +54,21 @@ export function perchCardChipJs(lang = "en") {
   var ccChip=null;
   var ccGen=0;
   var ccPrevState='';
+  var ccReview=null;      /* {node,key}: the review chips drawn in THIS transcript */
+  var ccDismissed={};     /* sid -> key the operator said Not now to; lives for the page view */
 
-  function resetCardChip(){ ccOffers={}; ccChip=null; ccGen++; ccPrevState=''; }
+  function resetCardChip(){ ccOffers={}; ccChip=null; ccReview=null; ccGen++; ccPrevState=''; }
 
   function ccFill(s,vals){
     var out=String(s);
     Object.keys(vals).forEach(function(k){ out=out.split('{'+k+'}').join(String(vals[k])); });
     return out;
   }
-  function ccApi(method,path,body){
+  function ccApi(method,path,body){ return ccFetch(method,API+path,body); }
+  function ccFetch(method,url,body){
     var opts={method:method,headers:{'X-Crow-Csrf':csrf()}};
     if(body!==undefined){ opts.headers['Content-Type']='application/json'; opts.body=JSON.stringify(body); }
-    return fetch(API+path,opts).then(function(r){
+    return fetch(url,opts).then(function(r){
       return r.json().catch(function(){return null;}).then(function(j){ return {ok:r.ok,status:r.status,j:j}; });
     },function(){ return {ok:false,status:0,j:null}; });
   }
@@ -148,7 +171,150 @@ export function perchCardChipJs(lang = "en") {
       if(!live()||current.sid!==sid||gen!==ccGen) return;
       if(!r.ok||!r.j) return;
       drawCardChip(r.j.card);
+      drawReview(r.j,sid);
     });
+  }
+
+  /* ---- review chips: Accept / Ask for a change / a bot's questions (Task 5.4) ---- */
+  function ccButton(cls,text,fn){
+    var b=document.createElement('button'); b.type='button'; b.className=cls; b.textContent=text;
+    b.onclick=fn; return b;
+  }
+  function ccReviewKey(card,result,decs){
+    return JSON.stringify([card?card.id:null,result?result.id:null,decs.map(function(d){ return d.cardId; })]);
+  }
+  /* The server's answer is the truth: forget what is drawn, so the next draw starts clean. */
+  function ccRefresh(sid){ if(ccReview) ccReview.key=''; loadCardChip(sid); }
+  /* The operator's own words to the bot: an ordinary message, through the composer's send(). */
+  function ccSay(text){
+    var input=el('perch-input');
+    if(!input||typeof send!=='function') return false;
+    var keep=input.value;
+    input.value=text; send();
+    if(keep&&!input.value) input.value=keep;
+    return true;
+  }
+  function ccField(ph,label,onSubmit){
+    var box=document.createElement('div'); box.className='review-field'; box.hidden=true;
+    var ta=document.createElement('textarea'); ta.className='review-input'; ta.maxLength=4000;
+    ta.setAttribute('placeholder',ph); ta.setAttribute('aria-label',ph);
+    var go=ccButton('review-send',label,function(){
+      var text=String(ta.value||'').trim();
+      if(!text||text.length>4000||go.disabled) return;
+      onSubmit(text,go);
+    });
+    box.appendChild(ta); box.appendChild(go);
+    box.input=ta;
+    return box;
+  }
+
+  function ccResultCard(card,result,sid){
+    var wrap=document.createElement('div'); wrap.className='artcard perch-review-result';
+    wrap.appendChild(line('review-summary',String(result.summaryMd||'')));
+    var acts=document.createElement('div'); acts.className='art-actions';
+    var msg=line('review-msg','');
+    var btns=[];
+    function busy(on){ btns.forEach(function(b){ b.disabled=on; }); }
+    var confirm=document.createElement('div'); confirm.className='review-confirm'; confirm.hidden=true;
+    confirm.appendChild(line('review-confirm-text',CC_CONFIRM));
+    var yes=ccButton('review-confirm-yes',CC_CONFIRM_YES,function(){ confirm.hidden=true; accept(true); });
+    var no=ccButton('review-confirm-no',CC_CONFIRM_NO,function(){ confirm.hidden=true; busy(false); });
+    confirm.appendChild(yes); confirm.appendChild(no);
+    function accept(confirmed){
+      if(acc.disabled&&!confirmed) return;
+      busy(true); msg.textContent='';
+      if(!confirmed&&CC_CONFIRM_OUTCOMES.indexOf(String(result.outcome))>=0){ confirm.hidden=false; return; }
+      var body={result_id:result.id}; if(confirmed) body.accept_failure=true;
+      var gen=ccGen;
+      ccApi('POST','/cards/'+encodeURIComponent(String(card.id))+'/accept',body).then(function(r){
+        if(!live()||current.sid!==sid||gen!==ccGen) return;
+        if(r.status===409&&r.j&&r.j.error==='confirm_failure'&&!confirmed){ confirm.hidden=false; return; }
+        if(r.ok||r.status===409){ ccRefresh(sid); return; }
+        busy(false); msg.textContent=CC_FAILED;
+      });
+    }
+    var acc=ccButton('review-accept',CC_ACCEPT,function(){ accept(false); });
+    var field=ccField(CC_CHANGE_PH,CC_ASK_CHANGE,function(text,go){
+      busy(true); go.disabled=true; msg.textContent='';
+      var gen=ccGen;
+      ccApi('POST','/cards/'+encodeURIComponent(String(card.id))+'/request-change',{result_id:result.id,text:text}).then(function(r){
+        if(!live()||current.sid!==sid||gen!==ccGen) return;
+        if(r.ok){ ccSay(text); ccRefresh(sid); return; }
+        if(r.status===409){ ccRefresh(sid); return; }
+        busy(false); go.disabled=false; msg.textContent=CC_FAILED;
+      });
+    });
+    var ask=ccButton('review-change',CC_ASK_CHANGE,function(){
+      if(ask.disabled) return;
+      field.hidden=!field.hidden;
+      if(!field.hidden&&field.input.focus) field.input.focus();
+    });
+    btns.push(acc,ask);
+    acts.appendChild(acc); acts.appendChild(ask);
+    wrap.appendChild(acts); wrap.appendChild(confirm); wrap.appendChild(field); wrap.appendChild(msg);
+    return wrap;
+  }
+
+  function ccDecisionCard(d,sid){
+    var wrap=document.createElement('div'); wrap.className='artcard perch-review-decision';
+    wrap.appendChild(line('review-question',String(d.question||'')));
+    var acts=document.createElement('div'); acts.className='review-options';
+    var msg=line('review-msg','');
+    var btns=[];
+    function busy(on){ btns.forEach(function(b){ b.disabled=on; }); }
+    function answer(body,go){
+      if(go&&go.disabled) return;
+      busy(true); if(go) go.disabled=true; msg.textContent='';
+      var gen=ccGen;
+      ccFetch('POST','/dashboard/bot-board-api/card/'+encodeURIComponent(String(d.cardId))+'/decision',body).then(function(r){
+        if(!live()||current.sid!==sid||gen!==ccGen) return;
+        if(r.ok||r.status===409){ ccRefresh(sid); return; }
+        busy(false); if(go) go.disabled=false; msg.textContent=CC_FAILED;
+      });
+    }
+    (Array.isArray(d.options)?d.options:[]).forEach(function(o){
+      if(!o||!Number.isInteger(o.index)) return;
+      var opt=document.createElement('div'); opt.className='review-option';
+      var b=ccButton('review-opt'+(o.recommended?' review-opt-rec':''),String(o.label||''),function(){ if(!b.disabled) answer({index:o.index}); });
+      btns.push(b);
+      opt.appendChild(b);
+      if(o.consequence) opt.appendChild(line('review-consequence',String(o.consequence)));
+      acts.appendChild(opt);
+    });
+    var field=ccField(CC_OTHER,CC_SEND,function(text,go){ answer({index:-1,other_text:text},go); });
+    var other=ccButton('review-other',CC_OTHER,function(){
+      if(other.disabled) return;
+      field.hidden=!field.hidden;
+      if(!field.hidden&&field.input.focus) field.input.focus();
+    });
+    btns.push(other);
+    acts.appendChild(other);
+    wrap.appendChild(acts); wrap.appendChild(field); wrap.appendChild(msg);
+    return wrap;
+  }
+
+  /* Drawn under the newest bot reply, and only while the server says something is open. */
+  function drawReview(j,sid){
+    var tr=el('perch-transcript'); if(!tr) return;
+    var card=j&&j.card&&Number.isInteger(j.card.id)?j.card:null;
+    var result=card&&j.result&&Number.isInteger(j.result.id)?j.result:null;
+    var decs=(j&&Array.isArray(j.decisions)?j.decisions:[]).filter(function(d){ return d&&Number.isInteger(d.cardId); });
+    var key=ccReviewKey(card,result,decs);
+    if((!result&&!decs.length)||ccDismissed[sid]===key){ if(ccReview) ccDrop(ccReview.node); ccReview=null; return; }
+    if(ccReview&&ccReview.key===key&&ccReview.node.parentNode===tr){
+      ccDrop(ccReview.node); tr.appendChild(ccReview.node);   /* keep what was typed; stay last */
+      return;
+    }
+    var box=document.createElement('div'); box.className='perch-review';
+    if(result) box.appendChild(ccResultCard(card,result,sid));
+    decs.forEach(function(d){ box.appendChild(ccDecisionCard(d,sid)); });
+    box.appendChild(ccButton('review-notnow',CC_OFFER_NOT_NOW,function(){
+      ccDismissed[sid]=key;
+      ccDrop(box); if(ccReview&&ccReview.node===box) ccReview=null;
+    }));
+    if(ccReview) ccDrop(ccReview.node);
+    tr.appendChild(box);
+    ccReview={node:box,key:key};
   }
 
   /* A turn ended: the bot may have offered (or the card moved lanes). */

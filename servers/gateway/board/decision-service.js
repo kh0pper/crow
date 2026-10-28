@@ -271,12 +271,30 @@ export async function expireDecisions(tdb, cdb, now, actor = EXPIRY_ACTOR) {
 }
 
 /**
+ * The chat a decision was asked from, as stored at `$.decision.source`:
+ * `{ thread_id }`, or null for none. Only the caller's own proven context
+ * passes it (board_ask_decision takes it from the signed actor.thread, never
+ * from tool arguments); `validateDecision` drops any `source` inside the
+ * decision payload, so the asker cannot name a chat.
+ */
+function sourceOf(source) {
+  if (source == null) return null;
+  const tid = source && typeof source === "object" ? source.thread_id : null;
+  if (typeof tid !== "string" || !tid.trim() || tid.length > 200) throw bad("source.thread_id must be a 1-200 character string");
+  return { thread_id: tid.trim() };
+}
+
+/**
  * Ask a decision. Returns {id, deduped}. Throws bad_decision (400),
  * batch_full (429; batches are per asker, see batchKeyOf). `now` is for tests.
+ * `source` (optional, redesign P5) is `{ thread_id }`: the chat the decision
+ * was asked from, written at `$.decision.source` when the card is created. A
+ * deduped ask returns the existing card unchanged, source included.
  */
-export async function askDecision(tdb, cdb, { projectId, title, tags, decision } = {}, actor, { now } = {}) {
+export async function askDecision(tdb, cdb, { projectId, title, tags, decision, source } = {}, actor, { now } = {}) {
   const ms = toMs(now);
   const v = validateDecision(decision, { now: ms });
+  const src = sourceOf(source);
   await expireDecisions(tdb, cdb, ms);
 
   // Fingerprints are per asker too: a squatter's card never answers for the
@@ -308,11 +326,12 @@ export async function askDecision(tdb, cdb, { projectId, title, tags, decision }
     tags: tags ?? null,
     project_id: projectId ?? null,
   }, actor);
+  const base = "json_set(json_set(json_set(json_set(data_json,'$.decision',json(?)),'$.decision.asked_by',json(?)),'$.decision.batch_key',?),'$.decision.fingerprint_key',?)";
   await tdb.execute({
     sql: `UPDATE tasks_items
-          SET data_json=json_set(json_set(json_set(json_set(data_json,'$.decision',json(?)),'$.decision.asked_by',json(?)),'$.decision.batch_key',?),'$.decision.fingerprint_key',?)
+          SET data_json=${src ? `json_set(${base},'$.decision.source',json(?))` : base}
           WHERE id=? AND board_id IS NULL`,
-    args: [JSON.stringify(v), JSON.stringify(askedBy(actor)), batchKey, fpKey, id],
+    args: [JSON.stringify(v), JSON.stringify(askedBy(actor)), batchKey, fpKey, ...(src ? [JSON.stringify(src)] : []), id],
   });
   await recordMutation(tdb, { itemId: id, verb: "decision_ask", actor, detail: { fingerprint: v.fingerprint, batch: v.batch } });
   return { id, deduped: false };
@@ -399,6 +418,47 @@ export async function decideOption(tdb, cdb, itemId, { index, otherText } = {}, 
   if (target && target !== String(card.status)) await moveCard(tdb, cdb, itemId, target, actor);
 
   return { chosen, created_card_id: created };
+}
+
+/**
+ * The open decision cards asked from one chat (redesign P5): those whose
+ * `$.decision.source.thread_id` is `threadId`, not archived, not answered,
+ * not expired (stamped or past `expires`), on a non-terminal status. Newest
+ * first, at most `limit`. Each is { cardId, question, options: [{ index,
+ * label, consequence, recommended }] }; the bot wrote every string in it.
+ */
+export async function openDecisionsForThread(tdb, threadId, { limit = 3, now } = {}) {
+  const ms = toMs(now);
+  const archived = (await hasArchivedAtColumn(tdb)) ? " AND archived_at IS NULL" : "";
+  const { rows } = await tdb.execute({
+    sql: `SELECT id, project_id, status, data_json FROM tasks_items
+          WHERE board_id IS NULL${archived} AND CASE WHEN json_valid(data_json) THEN (
+            json_extract(data_json,'$.decision.source.thread_id')=?
+            AND json_extract(data_json,'$.decision.chosen') IS NULL
+            AND json_extract(data_json,'$.decision.expired_at') IS NULL) ELSE 0 END
+          ORDER BY id DESC`,
+    args: [String(threadId)],
+  });
+  const defFor = defCache(tdb);
+  const out = [];
+  for (const r of rows) {
+    if (out.length >= limit) break;
+    const d = parseDecision(r);
+    if (!d || ms >= expiryMs(d.expires)) continue;
+    if (isTerminal(await defFor(r.project_id), String(r.status))) continue;
+    const options = Array.isArray(d.options) ? d.options : [];
+    out.push({
+      cardId: Number(r.id),
+      question: String(d.question ?? ""),
+      options: options.map((o, index) => ({
+        index,
+        label: String(o?.label ?? ""),
+        consequence: String(o?.consequence ?? ""),
+        recommended: o?.recommended === true,
+      })),
+    });
+  }
+  return out;
 }
 
 export const NOTIFY_SOURCE = "board:decisions";

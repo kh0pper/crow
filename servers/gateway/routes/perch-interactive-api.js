@@ -41,6 +41,7 @@ import {
   statSync,
   lstatSync,
   constants as fsConstants,
+  existsSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
@@ -57,7 +58,11 @@ import { updateCard, createCard } from "../board/card-service.js";
 import { lockState } from "./board-lock.js";
 import { appendAudit } from "../../shared/project-acl.js";
 import { resolveBoardDef, isTerminal } from "./board-defs.js";
-import { ensureItem, assertLiveProject } from "../../shared/shell-items.js";
+import { ensureItem, assertLiveProject, threadCard } from "../../shared/shell-items.js";
+import { acceptResult, decideResult } from "../board/result-service.js";
+import { openDecisionsForThread } from "../board/decision-service.js";
+import { laneState } from "./shell-api.js";
+import { CONFIRM_OUTCOMES } from "../dashboard/panels/board/lanes.js";
 import { annotateAvailability } from "../model-availability.js";
 import { providerModelListWarm, pickerModels, loadPiProviderNames, referencedModelKeys } from "../perch-model-catalog.js";
 import { renderBotMarkdown } from "../../blog/renderer.js";
@@ -81,6 +86,17 @@ const TASKS_DB = tasksDbPath();
 /** Every provenance write this router makes is an operator action from the
  * dashboard — same shape as bot-board-api.js's own DASHBOARD_ACTOR. */
 const DASHBOARD_ACTOR = { kind: "human", id: null, jobId: null };
+
+/** Accept / Ask for a change errors: 409 'already_decided' or 'stale' (anything else someone got
+ * to first: a newer result, an archive), 404 'not_found', 400 'bad_request'. */
+function resultRouteError(res, err, what) {
+  if (err && err.http === 409) return jsonError(res, 409, err.code === "already_decided" ? "already_decided" : "stale");
+  if (err && err.http === 404) return jsonError(res, 404, "not_found");
+  if (err && err.http === 400) return jsonError(res, 400, "bad_request");
+  if (/no such table/i.test(String(err && err.message))) return jsonError(res, 503, "not_migrated");
+  console.warn("[perch-interactive-api] " + what + " failed:", err && err.message);
+  return jsonError(res, 500, what + " failed");
+}
 
 /** POST /interactive/:sid/message images: cap 3 × 2 MB post-decode. */
 const IMAGE_MESSAGE_CAP = 3;
@@ -1074,6 +1090,118 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       mapEngineError(res, err);
     } finally {
       try { db.close(); } catch { /* already closed */ }
+      if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
+    }
+  });
+
+  // ---- GET /interactive/:sid/card — this chat's card, its open result, its questions (P5) ----
+  //   { card: { id, title, status, lane, projectId } | null,
+  //     result: { id, outcome, summaryMd } | null,       the card's NEWEST result, only while recorded
+  //     decisions: [{ cardId, question, options: [{ index, label, consequence, recommended }] }] }
+  // `card` is threadCard's card with the lane the Board computes (shell-api laneState); a missing or
+  // archived card is null. `decisions` are the open decision cards asked FROM this chat
+  // ($.decision.source.thread_id, written only from the signed actor.thread), newest 3.
+  router.get(P + "/interactive/:sid/card", async (req, res) => {
+    const sid = String(req.params.sid);
+    const db = createDbClient();
+    let tdb = null;
+    try {
+      const cardId = await threadCard(db, sid);
+      let card = null, result = null, decisions = [];
+      if (existsSync(TASKS_DB)) {
+        tdb = createDbClient(TASKS_DB);
+        if (cardId != null) {
+          const st = await laneState(tdb, db, cardId);
+          if (st) {
+            card = {
+              id: Number(st.card.id), title: String(st.card.title ?? ""), status: String(st.card.status),
+              lane: st.lane, projectId: st.card.project_id == null ? null : Number(st.card.project_id),
+            };
+            if (st.latestResult && st.latestResult.status === "recorded") {
+              const r = (await tdb.execute({
+                sql: "SELECT id, outcome, summary_md FROM board_results WHERE id=? AND status='recorded'",
+                args: [st.latestResult.id],
+              })).rows[0];
+              if (r) result = { id: Number(r.id), outcome: String(r.outcome), summaryMd: String(r.summary_md ?? "") };
+            }
+          }
+        }
+        try {
+          decisions = await openDecisionsForThread(tdb, sid, { limit: 3 });
+        } catch (e) {
+          if (!/no such (table|column)/i.test(String(e && e.message))) throw e;
+        }
+      }
+      res.json({ card, result, decisions });
+    } catch (err) {
+      mapEngineError(res, err);
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+      if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
+    }
+  });
+
+  // ---- POST /cards/:id/accept — Accept in the chat: approve the result AND close the card ----
+  // Body { result_id, accept_failure? }. result_id is the result the chat SHOWED: acceptResult
+  // approves it only while it is the card's newest (newest-in-UPDATE), so a newer report is 409
+  // 'stale' and a second tap (or the classic board deciding first) is 409 'already_decided'.
+  // Ruling P16: a failure or partial result needs accept_failure: true (409 'confirm_failure'
+  // without it, nothing written), the lane route's rule. The outcome checked is the shown result's
+  // own, and that is the row the guarded write approves.
+  router.post(P + "/cards/:id/accept", async (req, res) => {
+    const b = req.body && typeof req.body === "object" ? req.body : {};
+    if (!/^[1-9]\d*$/.test(String(req.params.id)) || !Number.isInteger(b.result_id) || b.result_id < 1) {
+      return jsonError(res, 400, "bad_request");
+    }
+    const id = Number(req.params.id);
+    if (!existsSync(TASKS_DB)) return jsonError(res, 404, "not_found");
+    let tdb, cdb;
+    try {
+      tdb = createDbClient(TASKS_DB);
+      cdb = createDbClient();
+      const row = (await tdb.execute({
+        sql: "SELECT outcome FROM board_results WHERE id=? AND item_id=?",
+        args: [b.result_id, id],
+      })).rows[0];
+      if (!row) return jsonError(res, 404, "not_found");
+      if (CONFIRM_OUTCOMES.includes(String(row.outcome)) && b.accept_failure !== true) {
+        return jsonError(res, 409, "confirm_failure", { reason: "confirm_failure" });
+      }
+      const r = await acceptResult(tdb, cdb, id, b.result_id, DASHBOARD_ACTOR, "perch");
+      res.json({ ok: true, status: r.status, moved: r.moved === true });
+    } catch (err) {
+      resultRouteError(res, err, "accept");
+    } finally {
+      if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
+      if (cdb) { try { cdb.close(); } catch { /* already closed */ } }
+    }
+  });
+
+  // ---- POST /cards/:id/request-change — Ask for a change: reject the shown result, move nothing ----
+  // Body { result_id, text } (text 1-4000 characters). The same newest check as Accept, inside the
+  // guarded decide (newestOnly), then decided_via 'perch'. The card stays where it is. The client
+  // sends `text` to the bot itself, as the operator's own message in this chat.
+  router.post(P + "/cards/:id/request-change", async (req, res) => {
+    const b = req.body && typeof req.body === "object" ? req.body : {};
+    if (!/^[1-9]\d*$/.test(String(req.params.id)) || !Number.isInteger(b.result_id) || b.result_id < 1) {
+      return jsonError(res, 400, "bad_request");
+    }
+    if (typeof b.text !== "string" || !b.text.trim() || b.text.length > 4000) return jsonError(res, 400, "bad_request");
+    const id = Number(req.params.id);
+    if (!existsSync(TASKS_DB)) return jsonError(res, 404, "not_found");
+    let tdb;
+    try {
+      tdb = createDbClient(TASKS_DB);
+      const card = (await tdb.execute({ sql: "SELECT archived_at FROM tasks_items WHERE id=? AND board_id IS NULL", args: [id] })).rows[0];
+      if (!card) return jsonError(res, 404, "not_found");
+      if (card.archived_at != null) return jsonError(res, 409, "stale");
+      const row = (await tdb.execute({ sql: "SELECT id FROM board_results WHERE id=? AND item_id=?", args: [b.result_id, id] })).rows[0];
+      if (!row) return jsonError(res, 404, "not_found");
+      await decideResult(tdb, id, b.result_id, "rejected", DASHBOARD_ACTOR, "perch", { newestOnly: true });
+      res.json({ ok: true });
+    } catch (err) {
+      resultRouteError(res, err, "request-change");
+    } finally {
       if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
     }
   });
