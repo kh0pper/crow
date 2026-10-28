@@ -1128,6 +1128,10 @@ export function perchHubJs(lang = "en") {
   }
 
   function openBrowseModal(opts){
+    /* New mode: "Change directory" sits in the session sheet, a modal
+       dialog. Everything outside the top layer is inert while it is open,
+       this overlay included, so the sheet closes first. */
+    if(SHEET&&SHEET.open) closeSheet();
     buildBrowseModal();
     var m=el('perch-browse-modal'); if(!m) return;
     browse.open=true;
@@ -1542,6 +1546,7 @@ export function perchHubJs(lang = "en") {
     closeStream(); current.sid=null;
     resetBrowserTiles();         /* no frame poller outlives the chat it belongs to */
     setTurnInFlight(false);      /* the list has no Steer/Stop to show */
+    closeSheet();                /* new mode: the sheet belongs to the session being left */
     setView('list'); startListPolling(); loadList();
   }
 
@@ -1857,7 +1862,9 @@ export function perchHubJs(lang = "en") {
     el('perch-bot-name').textContent=botName||botId;
     /* The session id is the identity the close confirm and every API path
        use. It shows in the head on desktop; on phones (queue item 13) the
-       head hides it and the Session tab's #perch-session-id carries it. */
+       head hides it and the Session tab's #perch-session-id carries it. In
+       new mode html.js ships the head's copy hidden at every width; the
+       sheet's Session section carries it. */
     el('perch-session-meta').textContent=current.sid||'';
     el('perch-session-id').textContent=current.sid||'';
     var known=rowIndex[current.sid];
@@ -3078,10 +3085,21 @@ export function perchHubJs(lang = "en") {
      convenience nobody deep-links to. */
   var TAB_NAMES=['chat','session','files','activity'];
   var tab='chat';
+  /* R1.2 PR 2, new mode only: no tab bar. Session, Files and Activity live
+     in the #perch-session-sheet dialog, opened from the bot's name, and the
+     chat is ALWAYS on screen behind it. Its presence is the marker (html.js
+     renders it only when the panel hands in a scope). In that mode 'chat'
+     means "back to the conversation": the sheet closes and the last-used
+     sheet tab is kept for the next open. */
+  var SHEET=el('perch-session-sheet');
+  var sheetTab='session';
   function switchTab(name){
     if(TAB_NAMES.indexOf(name)<0) name='chat';
+    if(SHEET&&name==='chat'){ closeSheet(); return; }
     tab=name;
+    if(SHEET) sheetTab=name;
     TAB_NAMES.forEach(function(nm){
+      if(SHEET&&nm==='chat') return;          /* the chat never hides in new mode */
       var sec=el('perch-tab-'+nm), btn=el('perch-tab-btn-'+nm);
       if(sec) sec.hidden=(nm!==name);
       if(btn) btn.setAttribute('aria-selected',nm===name?'true':'false');
@@ -3094,6 +3112,45 @@ export function perchHubJs(lang = "en") {
     var btn=el('perch-tab-btn-'+nm);
     if(btn) btn.onclick=function(){ switchTab(nm); };
   });
+  /* The sheet follows the shell sheets (shell/client.js): showModal, so
+     Escape is native; a click whose target is the dialog itself landed on
+     the backdrop (.perch-sheet-inner fills the box); the close button; and
+     focus returns to the bot-name button on every close path. */
+  function closeSheet(){
+    if(!SHEET||!SHEET.open) return;
+    if(typeof SHEET.close==='function'){ SHEET.close(); return; }
+    SHEET.removeAttribute('open');
+    var b=el('perch-ident-btn'); if(current.sid&&b&&b.focus) b.focus();
+  }
+  function openSheet(){
+    if(!SHEET||SHEET.open) return;
+    switchTab(sheetTab);
+    if(typeof SHEET.showModal==='function') SHEET.showModal();
+    else SHEET.setAttribute('open','');
+    var sel=el('perch-tab-btn-'+sheetTab); if(sel&&sel.focus) sel.focus();
+  }
+  if(SHEET){
+    var identBtn=el('perch-ident-btn');
+    if(identBtn) identBtn.onclick=openSheet;
+    var sheetCloseBtn=el('perch-sheet-close');
+    if(sheetCloseBtn) sheetCloseBtn.onclick=closeSheet;
+    SHEET.addEventListener('click',function(e){ if(e.target===SHEET) closeSheet(); });
+    SHEET.addEventListener('close',function(){
+      if(!current.sid) return;              /* closed by leaving the session: the list owns focus */
+      var b=el('perch-ident-btn');
+      if(b&&document.contains(b)&&b.focus) b.focus();
+    });
+    /* Turbo snapshots the body before it leaves; an open modal in that
+       snapshot comes back open on Back. Once per document, like the shell's
+       own guard, and it resolves the sheet by id at call time. */
+    if(!HUB.sheetCacheBound){
+      HUB.sheetCacheBound=true;
+      document.addEventListener('turbo:before-cache',function(){
+        var d=document.getElementById('perch-session-sheet');
+        if(d&&d.open&&typeof d.close==='function') d.close();
+      });
+    }
+  }
 
   /* Session tab: "Change directory" reopens the SAME browse modal the
      launcher uses (one picker, two callers) and POSTs control({cwd}). The

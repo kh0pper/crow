@@ -8,6 +8,50 @@ import { perchDictationCss } from "./dictation-css.js";
 /** The composer mic glyph (dictation). */
 const MIC_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>`;
 
+/** The Perch tab glyphs, shared by the classic tab bar and the new-mode
+ *  session sheet's strip (ported from the original pi-lab hub's icon set). */
+const TAB_ICONS = {
+  chat: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M21 12a8 8 0 0 1-8 8H4l2-3a8 8 0 1 1 15-5z"/></svg>`,
+  session: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M2 9h20"/><circle cx="8" cy="9" r="2.4" fill="currentColor" stroke="none"/><path d="M4 20h16M8 11v4m0 0h8m-8 0-3 5m11-9v4m0 0 3 5"/></svg>`,
+  files: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M13 2v7h7"/></svg>`,
+  activity: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-4l-3 8L9 4l-3 8H2"/></svg>`,
+};
+
+/** Close glyph for the session sheet (the shell sheets' X). */
+const CLOSE_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>`;
+const CHEVRON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>`;
+
+/** New mode (R1.2 PR 2): the bot name is the button that opens the session
+ *  sheet. #perch-bot-name keeps its id (showHeader writes it) and becomes a
+ *  span, since a button holds phrasing content only. */
+function identButton() {
+  return `<button type="button" id="perch-ident-btn" class="perch-ident-btn" aria-haspopup="dialog" aria-controls="perch-session-sheet"><span class="title" id="perch-bot-name"></span>${CHEVRON_SVG}</button>`;
+}
+
+/** New mode: the opening half of the session sheet, which wraps the Session,
+ *  Files and Activity sections (their ids, roles and contents unchanged).
+ *  The strip's buttons reuse the tab-button ids so each section's
+ *  aria-labelledby still resolves and switchTab() flips aria-selected on
+ *  them exactly as it does in classic. */
+function sheetOpen(lang) {
+  const tab = (name, key, selected) =>
+    `<button type="button" role="tab" id="perch-tab-btn-${name}" data-tab="${name}" aria-controls="perch-tab-${name}" aria-selected="${selected}">${TAB_ICONS[name]}<span>${escapeHtml(t(key, lang))}</span></button>`;
+  return `
+    <dialog id="perch-session-sheet" class="perch-sheet" aria-labelledby="perch-sheet-title">
+    <div class="perch-sheet-inner">
+    <div class="perch-sheet-head"><h3 class="perch-sheet-title" id="perch-sheet-title">${escapeHtml(t("perch.sheetTitle", lang))}</h3><button type="button" class="quiet perch-sheet-close" id="perch-sheet-close" aria-label="${escapeHtml(t("common.close", lang))}" title="${escapeHtml(t("common.close", lang))}">${CLOSE_SVG}</button></div>
+    <div id="perch-sheet-tabs" role="tablist" aria-label="${escapeHtml(t("perch.tabsLabel", lang))}">
+      ${tab("session", "perch.tabSession", "true")}
+      ${tab("files", "perch.tabFiles", "false")}
+      ${tab("activity", "perch.tabActivity", "false")}
+    </div>`;
+}
+function sheetClose() {
+  return `
+    </div>
+    </dialog>`;
+}
+
 /** engineStatus() returns installing | absent | unhealthy | ready
  *  (bot-engine-status.js:84-101). Only "absent" means "not installed" — telling
  *  an operator whose engine is mid-install, or whose breaker is open, to go
@@ -48,6 +92,9 @@ function scopeAttr(scope) {
 export function perchHubContent(lang = "en", engine = { state: "ready" }, { scope } = {}) {
   const scopeValue = scopeAttr(scope);
   const scopeHtml = scopeValue === null ? "" : ` data-scope="${escapeHtml(scopeValue)}"`;
+  // New mode: Session, Files and Activity live in a sheet opened from the
+  // bot's name instead of the Chat·Session·Files·Activity tab bar.
+  const sheet = scopeValue !== null;
   return `<style>${perchHubCss()}${perchSessionsCollapseCss()}${perchDictationCss()}</style>
 <div id="perch-hub-root"${scopeHtml}>
 ${engineBanner(engine, lang)}
@@ -145,10 +192,10 @@ ${engineBanner(engine, lang)}
     <!-- #perch-list-reveal leads the head: desktop only, and only while the
          Sessions column is collapsed (sessions-collapse-css.js). Visible text
          "Sessions", accessible name "Show sessions". -->
-    <div class="perch-head"><button type="button" id="perch-list-reveal" class="quiet perch-sessions-toggle" aria-controls="perch-list" aria-expanded="true" aria-label="${escapeHtml(t("perch.showSessions", lang))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg>${escapeHtml(t("perch.sessionsHeading", lang))}</button><button type="button" id="perch-back" class="quiet">${escapeHtml(t("perch.back", lang))}</button><div class="perch-ident"><div class="title" id="perch-bot-name"></div>
+    <div class="perch-head"><button type="button" id="perch-list-reveal" class="quiet perch-sessions-toggle" aria-controls="perch-list" aria-expanded="true" aria-label="${escapeHtml(t("perch.showSessions", lang))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg>${escapeHtml(t("perch.sessionsHeading", lang))}</button><button type="button" id="perch-back" class="quiet">${escapeHtml(t("perch.back", lang))}</button><div class="perch-ident">${sheet ? identButton() : `<div class="title" id="perch-bot-name"></div>`}
       <div class="session-name" id="perch-session-name" hidden></div>
       <div class="browser-status" id="perch-browser-status" role="status" hidden></div>
-      <div class="meta" id="perch-session-meta"></div></div></div>
+      <div class="meta" id="perch-session-meta"${sheet ? " hidden" : ""}></div></div></div>
     <!-- Phase D1: the tab strip. FOUR buttons, inline SVG glyphs ported from
          the original pi-lab hub's icon set (~/pi-lab/extensions/web/public/
          app.html, the I set) recoloured via currentColor so crow's teal owns
@@ -159,17 +206,17 @@ ${engineBanner(engine, lang)}
          without position:fixed, so the composer sits above it inside the
          chat tab and the flex chain that keeps Send reachable is untouched.
          aria-selected is flipped by the client's switchTab(). -->
-    <nav id="perch-tabs" role="tablist" aria-label="${escapeHtml(t("perch.tabsLabel", lang))}">
-      <button type="button" role="tab" id="perch-tab-btn-chat" data-tab="chat" aria-controls="perch-tab-chat" aria-selected="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M21 12a8 8 0 0 1-8 8H4l2-3a8 8 0 1 1 15-5z"/></svg>${escapeHtml(t("perch.tabChat", lang))}</button>
-      <button type="button" role="tab" id="perch-tab-btn-session" data-tab="session" aria-controls="perch-tab-session" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M2 9h20"/><circle cx="8" cy="9" r="2.4" fill="currentColor" stroke="none"/><path d="M4 20h16M8 11v4m0 0h8m-8 0-3 5m11-9v4m0 0 3 5"/></svg>${escapeHtml(t("perch.tabSession", lang))}</button>
-      <button type="button" role="tab" id="perch-tab-btn-files" data-tab="files" aria-controls="perch-tab-files" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M13 2v7h7"/></svg>${escapeHtml(t("perch.tabFiles", lang))}</button>
-      <button type="button" role="tab" id="perch-tab-btn-activity" data-tab="activity" aria-controls="perch-tab-activity" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-4l-3 8L9 4l-3 8H2"/></svg>${escapeHtml(t("perch.tabActivity", lang))}</button>
-    </nav>
+    ${sheet ? "" : `<nav id="perch-tabs" role="tablist" aria-label="${escapeHtml(t("perch.tabsLabel", lang))}">
+      <button type="button" role="tab" id="perch-tab-btn-chat" data-tab="chat" aria-controls="perch-tab-chat" aria-selected="true">${TAB_ICONS.chat}${escapeHtml(t("perch.tabChat", lang))}</button>
+      <button type="button" role="tab" id="perch-tab-btn-session" data-tab="session" aria-controls="perch-tab-session" aria-selected="false">${TAB_ICONS.session}${escapeHtml(t("perch.tabSession", lang))}</button>
+      <button type="button" role="tab" id="perch-tab-btn-files" data-tab="files" aria-controls="perch-tab-files" aria-selected="false">${TAB_ICONS.files}${escapeHtml(t("perch.tabFiles", lang))}</button>
+      <button type="button" role="tab" id="perch-tab-btn-activity" data-tab="activity" aria-controls="perch-tab-activity" aria-selected="false">${TAB_ICONS.activity}${escapeHtml(t("perch.tabActivity", lang))}</button>
+    </nav>`}
     <!-- Chat tab: transcript + ask cards + composer, exactly the old column —
          the section wrapper inherits the flex chain (#perch-tab-chat is
          flex:1/min-height:0/display:flex column in css.js) so the transcript
          stays the ONLY scroller and the sticky composer backstop is intact. -->
-    <section id="perch-tab-chat" role="tabpanel" aria-labelledby="perch-tab-btn-chat">
+    <section id="perch-tab-chat"${sheet ? "" : ` role="tabpanel" aria-labelledby="perch-tab-btn-chat"`}>
     <!-- Wave 1: the attention banner. An ask card blocks the turn until
          answered; on a phone the card can be a scroll away, so the banner
          says why the bot went quiet. Toggled by renderAsk/answerAsk — the
@@ -233,7 +280,7 @@ ${engineBanner(engine, lang)}
          every client binding and state-frame sync keeps working), the
          read-only cwd display with its "Change directory" button (D2 wires
          it to the browse modal + control({cwd})), and the state pill beside
-         rename/close. -->
+         rename/close. -->${sheet ? sheetOpen(lang) : ""}
     <section id="perch-tab-session" role="tabpanel" aria-labelledby="perch-tab-btn-session" hidden>
     <div class="field-row">
       <div class="field"><span class="field-label" id="perch-model-label">${escapeHtml(t("perch.modelLabel", lang))}</span>
@@ -332,7 +379,7 @@ ${engineBanner(engine, lang)}
          transcript stays a conversation. -->
     <section id="perch-tab-activity" role="tabpanel" aria-labelledby="perch-tab-btn-activity" hidden>
     <div id="perch-activity-list"></div>
-    </section>
+    </section>${sheet ? sheetClose() : ""}
   </div>
 </div>
 </div>

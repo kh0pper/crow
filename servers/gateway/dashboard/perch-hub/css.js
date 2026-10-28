@@ -867,5 +867,49 @@ border-top:1px solid var(--line);flex-shrink:0}
   #perch-tabs{order:0;border-top:none;border-bottom:1px solid var(--line);padding:6px 0}
   #perch-hub-root #perch-tabs button{flex:0 0 auto;flex-direction:row;gap:6px;font-size:13px;padding:8px 14px}
 }
+/* --- R1.2 PR 2, new mode: the session sheet -------------------------------
+   No tab bar: the bot name (#perch-ident-btn) opens a modal <dialog> holding
+   the Session, Files and Activity sections, and the chat stays on screen
+   behind it. Shaped like the shell's sheets (shell/css.js .shell-sheet): a
+   bottom sheet on phones, centred from the split breakpoint up, an 85dvh
+   cap, a 44px round close and a 16px gutter.
+   Colours stay on Perch's own palette, which is what the sections inside
+   are painted with. The [open] flex column makes .perch-sheet-inner, and in
+   it the visible section (a flex:1 scroller, see the tab-panel rule), the
+   only thing that scrolls. */
+#perch-hub-root .perch-ident-btn{display:flex;align-items:center;gap:6px;max-width:100%;min-height:44px;padding:4px 8px;margin-left:-8px;border-color:transparent;background:transparent;color:var(--ink);text-align:left}
+#perch-hub-root .perch-ident-btn:hover{background:var(--teal-soft)}
+#perch-hub-root .perch-ident-btn .title{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#perch-hub-root .perch-ident-btn svg{width:16px;height:16px;flex-shrink:0;color:var(--dim)}
+#perch-session-sheet{border:none;padding:0;margin:auto auto 0;width:100%;max-width:480px;max-height:85dvh;
+border-radius:var(--crow-radius-card,16px) var(--crow-radius-card,16px) 0 0;background:var(--card);color:var(--ink);box-shadow:0 -8px 32px rgba(0,0,0,.18)}
+#perch-session-sheet[open]{display:flex;flex-direction:column}
+#perch-session-sheet::backdrop{background:rgba(0,0,0,.4)}
+/* The no-showModal fallback (open attribute only): pin it on top. */
+#perch-session-sheet[open]:not(:modal){position:fixed;inset:auto 0 0;z-index:1200}
+#perch-hub-root .perch-sheet-inner{flex:1;min-height:0;display:flex;flex-direction:column;gap:8px;
+padding:8px 16px calc(16px + env(safe-area-inset-bottom, 0px))}
+#perch-hub-root .perch-sheet-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-shrink:0}
+#perch-hub-root .perch-sheet-title{font-size:15px;font-weight:600;min-width:0}
+#perch-hub-root .perch-sheet-close{display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;padding:0;margin-right:-8px;border-radius:50%;border-color:transparent;background:transparent}
+#perch-hub-root .perch-sheet-close:hover{background:var(--teal-soft)}
+#perch-hub-root .perch-sheet-close svg{width:20px;height:20px}
+#perch-sheet-tabs{display:flex;gap:4px;flex-shrink:0;border-bottom:1px solid var(--line);padding-bottom:6px}
+/* Two ids, as for #perch-tabs: outrank the base "#perch-hub-root button". */
+#perch-hub-root #perch-sheet-tabs button{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;min-width:0;
+min-height:44px;padding:6px 8px;font-size:13px;border-color:transparent;background:transparent;color:var(--dim)}
+#perch-sheet-tabs svg{width:18px;height:18px;flex-shrink:0}
+#perch-hub-root #perch-sheet-tabs button[aria-selected="true"]{color:var(--teal);background:var(--teal-soft)}
+/* The sheet is phone territory at every width: every control in it is a
+   44px target (the Session section's selects, Change directory, the
+   plan-mode checkbox and the Files crumbs were sized for a pointer). Two ids outrank the base
+   "#perch-hub-root button"; the checkbox keeps its native look, just larger. */
+#perch-hub-root #perch-session-sheet button,#perch-hub-root #perch-session-sheet select{min-height:44px}
+/* A one-letter crumb (the "/" root, a short folder) measured 13px wide. */
+#perch-hub-root #perch-session-sheet button{min-width:44px}
+#perch-hub-root #perch-session-sheet input[type="checkbox"]{width:44px;height:44px;align-self:flex-start;accent-color:var(--teal)}
+@media (min-width:${PERCH_SPLIT_MIN_WIDTH}px){
+  #perch-session-sheet{margin:auto;max-width:560px;border-radius:var(--crow-radius-card,16px)}
+}
 `);
 }
