@@ -20,6 +20,7 @@ import { mkdirSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { resolveDataDir } from "../db.js";
 import { withoutProvenance } from "../research/provenance-schema.js";
+import { SHARED_SUMMARY_MAX } from "./shared-source-insert.js";
 
 export function createCloneBundleHelpers(ctx) {
   const { db } = ctx;
@@ -168,7 +169,7 @@ export function createCloneBundleHelpers(ctx) {
     // research/server.js:283). Truncation appends a fixed marker so the stored
     // text is self-documenting; the original survives on the origin instance.
     const FULLTEXT_MAX = parseInt(process.env.CROW_CLONE_FULLTEXT_MAX || "200000", 10);
-    const SUMMARY_MAX = 50000;
+    const SUMMARY_MAX = SHARED_SUMMARY_MAX;
     const TRUNC_MARKER = (origLen) =>
       `\n[truncated at clone import: original ${origLen} chars]`;
 

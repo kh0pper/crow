@@ -23,7 +23,7 @@ import Database from "better-sqlite3";
 import { createDbClient } from "../servers/db.js";
 import { InstanceSyncManager, EXCLUDED_COLUMNS, INBOUND_DROPPED_COLUMNS } from "../servers/sharing/instance-sync.js";
 import { sign } from "../servers/sharing/identity.js";
-import { insertSharedSource } from "../servers/sharing/shared-source-insert.js";
+import { insertSharedSource, SHARED_SUMMARY_MAX } from "../servers/sharing/shared-source-insert.js";
 import { createCloneBundleHelpers } from "../servers/sharing/clone-bundle.js";
 import { deliverPendingShares } from "../servers/sharing/boot.js";
 import { registerShareInboxTools } from "../servers/sharing/tools/share-inbox.js";
@@ -283,6 +283,16 @@ test("insertSharedSource stores a non-citable row", async () => {
 
     const id3 = await insertSharedSource(db, { title: "x".repeat(1500) });
     assert.equal(bs.prepare("SELECT length(title) AS n FROM research_sources WHERE id = ?").get(id3).n, 1000);
+
+    // The peer-supplied summary is capped like a clone's (it is FTS-indexed too).
+    assert.equal(SHARED_SUMMARY_MAX, 50000);
+    const id4 = await insertSharedSource(db, { notes: "s".repeat(SHARED_SUMMARY_MAX + 5000) });
+    const sum = bs.prepare("SELECT content_summary FROM research_sources WHERE id = ?").get(id4).content_summary;
+    assert.ok(sum.startsWith("s".repeat(SHARED_SUMMARY_MAX)));
+    assert.ok(sum.length < SHARED_SUMMARY_MAX + 100, `capped (${sum.length})`);
+    assert.match(sum, /\[truncated at share import: original 55000 chars\]$/);
+    const id5 = await insertSharedSource(db, { notes: "s".repeat(SHARED_SUMMARY_MAX) });
+    assert.equal(bs.prepare("SELECT length(content_summary) AS n FROM research_sources WHERE id = ?").get(id5).n, SHARED_SUMMARY_MAX, "at the cap: unchanged");
   } finally { bs.close(); }
 
   // No 0013 column named: it works on a pre-0013 DB.

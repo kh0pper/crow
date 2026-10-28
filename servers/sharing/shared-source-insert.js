@@ -8,6 +8,9 @@
 import { SOURCE_TYPES } from "../research/source-types.js";
 
 const TITLE_MAX = 1000;
+// abstract / content_summary cap for peer-supplied rows (content_summary is FTS-indexed); the
+// project clone import uses the same value.
+export const SHARED_SUMMARY_MAX = 50000;
 
 /**
  * @param {{execute: Function}} db
@@ -22,7 +25,10 @@ export async function insertSharedSource(db, payload = {}) {
   const title = rawTitle.length > TITLE_MAX ? rawTitle.slice(0, TITLE_MAX) : rawTitle;
   const sourceType = SOURCE_TYPES.includes(p.source_type) ? p.source_type : "other";
   const citation = typeof p.citation === "string" && p.citation ? p.citation : "(no citation)";
-  const notes = typeof p.notes === "string" && p.notes ? p.notes : null;
+  const rawNotes = typeof p.notes === "string" && p.notes ? p.notes : null;
+  const notes = rawNotes && rawNotes.length > SHARED_SUMMARY_MAX
+    ? `${rawNotes.slice(0, SHARED_SUMMARY_MAX)}\n[truncated at share import: original ${rawNotes.length} chars]`
+    : rawNotes;
   const url = typeof p.url === "string" && p.url ? p.url : null;
 
   const result = await db.execute({
