@@ -166,6 +166,45 @@ test("a source from another project cannot back a note (no read oracle)", async 
   assert.equal(noteRow(same).quote_found, 1);
 });
 
+test("degraded schema: a quote note still clears a quotes_checked verification, and never fails on missing columns", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-noteprov-degr-"));
+  try {
+    // A half-upgraded host: research_sources has the verification columns, research_notes has none.
+    const path = makeOldFkDb(join(dir, "half.db"));
+    const f = openFixtureDb(path);
+    f.exec("CREATE TABLE research_projects (id INTEGER PRIMARY KEY, name TEXT); CREATE TABLE data_backends (id INTEGER PRIMARY KEY)");
+    f.exec("ALTER TABLE research_sources ADD COLUMN verification_method TEXT; ALTER TABLE research_sources ADD COLUMN verified_by TEXT");
+    const ins = f.prepare("INSERT INTO research_sources (title, source_type, citation_apa, verified, verification_method, verified_by) VALUES (?, ?, 'c', 1, ?, 'owner')");
+    const qc = Number(ins.run("S", "web_article", "quotes_checked").lastInsertRowid);
+    const mo = Number(ins.run("M", "book", "manual_owner").lastInsertRowid);
+    f.close();
+    const server = createProjectServer(path, { actor: OWNER });
+    assert.equal(server.research.schema.ready, false);
+    const c = await connect(server);
+    const r = await c.callTool({ name: "crow_add_note", arguments: { content: "unchecked words", note_type: "quote", provenance: "snippet", source_id: qc } });
+    assert.ok(!r.isError, text(r));
+    const d = openFixtureDb(path);
+    try {
+      const s1 = d.prepare("SELECT verified, verification_method FROM research_sources WHERE id = ?").get(qc);
+      assert.equal(s1.verified, 0, "an unchecked quote breaks a quotes_checked verification");
+      assert.equal(s1.verification_method, null);
+    } finally { d.close(); }
+    const r2 = await c.callTool({ name: "crow_add_note", arguments: { content: "w", note_type: "quote", provenance: "snippet", source_id: mo } });
+    assert.ok(!r2.isError, text(r2));
+    const d2 = openFixtureDb(path);
+    try { assert.equal(d2.prepare("SELECT verification_method FROM research_sources WHERE id = ?").get(mo).verification_method, "manual_owner"); } finally { d2.close(); }
+
+    // No verification columns at all: the note still lands.
+    const bare = makeOldFkDb(join(dir, "bare.db"));
+    const b = openFixtureDb(bare);
+    b.exec("CREATE TABLE research_projects (id INTEGER PRIMARY KEY, name TEXT); CREATE TABLE data_backends (id INTEGER PRIMARY KEY)");
+    b.close();
+    const cb = await connect(createProjectServer(bare, { actor: OWNER }));
+    const r3 = await cb.callTool({ name: "crow_add_note", arguments: { content: "q", note_type: "quote", provenance: "snippet", source_id: 1 } });
+    assert.ok(!r3.isError, text(r3));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("degraded schema: provenance fetched is stored without the new columns, with a notice", async () => {
   const dir = mkdtempSync(join(tmpdir(), "crow-noteprov-oldfk-"));
   try {

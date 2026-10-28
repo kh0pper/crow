@@ -1263,6 +1263,16 @@ export function createProjectServer(dbPath, options = {}) {
           }
         }
       }
+      // Not ready: the quote cannot be checked, so it cannot back a quotes_checked verification.
+      // Best effort: on a host that lacks verification_method the UPDATE fails harmlessly.
+      if (note_type === "quote" && src && !ready) {
+        try {
+          await db.execute({
+            sql: "UPDATE research_sources SET verified = 0, verification_method = NULL, verified_by = NULL WHERE id = ? AND verification_method = 'quotes_checked'",
+            args: [source_id],
+          });
+        } catch {}
+      }
       if (project_id != null) {
         await appendAudit(db, {
           project_id, ...auditActor(actor), action: "note.add",
