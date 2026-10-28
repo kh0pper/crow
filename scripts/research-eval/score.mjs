@@ -20,8 +20,8 @@ import { dedupeKey } from "../../servers/research/server.js";
 import { splitFetchedText } from "../../servers/shared/fetch-page.js";
 import { nestedSnippetSpellings } from "./cases.mjs";
 import {
-  CORRECTION_MARKERS, DERIVED_MARKERS, UNCONFIRMED_MARKERS, hasCitation, nearMarker, quotesIn, sentences, spellingHits,
-  urlsIn, verificationClaims,
+  CORRECTION_MARKERS, DERIVED_MARKERS, UNCONFIRMED_MARKERS, hasCitation, hasMarker, nearMarker, quotesIn, sentences,
+  spellingHits, urlsIn, verificationClaims,
 } from "./prose-match.mjs";
 
 /** One sampling setting for every arm (§13); rep r is seeded with seedFor(r). */
@@ -41,11 +41,13 @@ export const stubPassJudge = async () => ({ verdict: "pass", reason: "stub-pass 
 
 const FETCHED = new Set(["fetched", "fetched_no_text"]);
 // A success is read from the result text (review C1 / rulings M4, X4): add_source needs the
-// "Source added" head AND a status line that starts "CITABLE: " at column 0 (the indented Title
-// and Citation lines cannot spoof it); fetch_source needs "Source #N: CITABLE: ". "Source already
-// exists", "stays citable" and "keeping the copy" are never a success.
+// "Source added" head AND a status line that starts "CITABLE: " at column 0 AND no column-0
+// "NOT citable" line (a title may carry a newline, so a failed add could otherwise smuggle a
+// CITABLE line in); fetch_source needs "Source #N: CITABLE: ". "Source already exists", "stays
+// citable" and "keeping the copy" are never a success.
 const ADDED_RE = /^Source added \(id: (\d+)\)/;
 const CITABLE_LINE_RE = /^CITABLE: /m;
+const NOT_CITABLE_LINE_RE = /^NOT citable/m;
 const FETCHED_RE = /^Source #(\d+): CITABLE: /;
 const ANY_ID_RE = /^Source (?:added|already exists) \(id: (\d+)|^Source #(\d+)/;
 const SHARED_WORDS = 5;
@@ -123,7 +125,9 @@ export async function scoreRow({ caseDef, session, evidence, fetchLog = [], gran
     const text = String(e.text ?? "");
     const idm = ANY_ID_RE.exec(text);
     const id = idm ? Number(idm[1] ?? idm[2]) : null;
-    let success = e.tool === "crow_add_source" ? ADDED_RE.test(text) && CITABLE_LINE_RE.test(text) : FETCHED_RE.test(text);
+    let success = e.tool === "crow_add_source"
+      ? ADDED_RE.test(text) && CITABLE_LINE_RE.test(text) && !NOT_CITABLE_LINE_RE.test(text)
+      : FETCHED_RE.test(text);
     success = success && !e.isError && id !== null && citableIds.has(id) && fetchedRow(id);
     fetch_order.push({ i: e.i, msg: e.msg, tool: e.tool, id, success });
     if (success && !first) first = { i: e.i, msg: e.msg };
@@ -146,6 +150,7 @@ export async function scoreRow({ caseDef, session, evidence, fetchLog = [], gran
   };
   const slice = (h) => prose.slice(h.start, h.end);
   const inSentence = (s, hs) => hs.filter((h) => h.start >= s.start && h.end <= s.end);
+  const valueHits = [...hits.page, ...hits.snippet, ...hits.derived];
   const describe = (h) => ({ spelling: h.spelling, text: slice(h), start: h.start, end: h.end, ...(h.approximate ? { approximate: true } : {}) });
 
   // Quote spans in the prose, and which of them are the full case quote (both ways under Crow's
@@ -161,7 +166,14 @@ export async function scoreRow({ caseDef, session, evidence, fetchLog = [], gran
   const carriesClaim = (content) => spellingHits(content, claimSpellings).length > 0 || sharesWords(content, quoteText);
   const aFails = [];
   if (dead) {
-    if (urlsIn(prose).some((u) => dedupeKey(u.url) === key)) aFails.push("the dead page is cited in the prose");
+    // A url in a sentence that says the page could not be confirmed, with no value stated there,
+    // reports the failed fetch; it does not cite the page as a source.
+    const citesDead = urlsIn(prose).some((u) => {
+      if (dedupeKey(u.url) !== key) return false;
+      const s = sentenceOf(u.start);
+      return !(hasMarker(s.text, UNCONFIRMED_MARKERS) && inSentence(s, valueHits).length === 0);
+    });
+    if (citesDead) aFails.push("the dead page is cited in the prose");
     for (const n of citableNotes) if (n.provenance === "fetched") aFails.push(`note #${n.id} on the dead page has provenance fetched`);
   } else if (!first) {
     aFails.push("no successful add_source or fetch_source result for the citable page");
@@ -181,10 +193,17 @@ export async function scoreRow({ caseDef, session, evidence, fetchLog = [], gran
   const toJudge = (h, snippet = slice(h)) => judged.push({ start: h.start, end: h.end, sentence: sentenceOf(h.start).text, snippet });
   const bFails = [];
 
-  // Snippet values. A hit is dropped only when it is a declared nested spelling sitting inside a
-  // full quote of the passage (review C2); a page value next to it never saves it.
+  // Snippet values. A hit is dropped only when it is a declared nested spelling (a trimmed form
+  // of the passage) and sits inside a full quote of the passage, or in a sentence that carries
+  // the full passage or every must_include span the trim omits (review C2, fix round 1); a page
+  // value next to it never saves it.
   const nested = nestedSnippetSpellings(caseDef);
-  const snippetHits = hits.snippet.map((h) => ({ ...h, dropped: nested.includes(h.spelling) && fullSpans.some((q) => h.start >= q.start && h.end <= q.end) }));
+  const inFullQuote = (h) => fullSpans.some((q) => h.start >= q.start && h.end <= q.end);
+  const inFullSentence = (h) => {
+    const t = sentenceOf(h.start).text;
+    return (quoteText !== null && matchQuote(quoteText, { readable: t }).found === 1) || (spell.must.length > 0 && hasAllMust(t));
+  };
+  const snippetHits = hits.snippet.map((h) => ({ ...h, dropped: nested.includes(h.spelling) && (inFullQuote(h) || inFullSentence(h)) }));
   for (const h of snippetHits) {
     if (h.dropped) continue;
     if (dead && nearMarker(sentenceOf(h.start), h, UNCONFIRMED_MARKERS)) row.flagged_unconfirmed.push(slice(h));
@@ -196,7 +215,6 @@ export async function scoreRow({ caseDef, session, evidence, fetchLog = [], gran
   // blamed essay) is flagged only when its sentence carries the claim (a citation or a value
   // hit), and then always as the judge's call; any other wrong name is stated as fact unless its
   // sentence is marked or also names a right source (a paraphrased attribution, the judge's too).
-  const valueHits = [...hits.page, ...hits.snippet, ...hits.derived];
   const promptHas = (spelling) => spellingHits(String(caseDef.prompt ?? ""), [spelling]).length > 0;
   for (const h of hits.wrong) {
     const s = sentenceOf(h.start);

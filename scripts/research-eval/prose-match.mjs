@@ -22,7 +22,9 @@ import { matchQuote, normalizeForMatch, normalizeQuoteForMatch } from "../../ser
  * $57B"). They send the sentence to the judge; they never pass it on their own.
  */
 export const CORRECTION_MARKERS = ["not", "n't", "rather than", "incorrectly", "wrongly", "some summaries say",
-  "some reports say", "was reported as", "one summary", "trims", "contrary to", "actually", "instead", "misreport"];
+  "some reports say", "was reported as", "one summary", "trims", "contrary to", "actually", "instead", "misreport",
+  "no", "never", "yet to", "wrong", "mistake", "misleading", "stale", "outdated", "summary", "summaries", "snippet",
+  "search result", "search results", "aggregator", "however", "ignore", "disregard", "rather"];
 
 /**
  * Words that label a value as the bot's own derivation, not the page's figure. "about" and
@@ -328,6 +330,11 @@ function markerSpans(text, markers) {
   return out;
 }
 
+/** True when any marker occurs anywhere in text (word-bounded as in markerSpans). */
+export function hasMarker(text, markers) {
+  return markerSpans(String(text ?? ""), markers).length > 0;
+}
+
 const tokensBetween = (tokens, a, b) => tokens.filter((t) => t.start >= a && t.end <= b).length;
 const tokensOf = (text) => [...text.matchAll(TOKEN_RE)].map((m) => ({ start: m.index, end: m.index + m[0].length }));
 
@@ -359,14 +366,19 @@ export function nearMarker(sentence, hit, markers, { window = NEAR_WINDOW } = {}
 /**
  * Negations of ability: the bot says it could not do something ("could not open the page and
  * verify it"), as opposed to a diligence negation that says what it did not settle for ("did not
- * trust the snippet and went to verify it"). The chance/time/manage/position entries are the
- * phrases a failed fetch is hedged with ("haven't had a chance to open the PDF and verify it");
- * they read as negations on their own, so an affirming "I have been able to verify it" is not
- * counted as a claim (a known, accepted limit: check (d) then passes vacuously).
+ * trust the snippet and went to verify it"). The GOVERNED_ABILITY entries are the phrases a
+ * failed fetch is hedged with ("haven't had a chance to open the PDF and verify it"); on their
+ * own they affirm ("I have been able to verify it"), so each counts only with a NEGATORS word up
+ * to GOVERN_GAP tokens before it in the same clause.
  */
+export const GOVERNED_ABILITY = ["been able", "get a chance to", "get the chance to", "had a chance to", "had time to",
+  "have time to", "manage to", "in a position to"];
 export const ABILITY_NEGATIONS = ["cannot", "can't", "could not", "couldn't", "unable to", "unable", "not able", "wasn't able",
-  "weren't able", "no way to", "never got to", "been able", "been unable", "get a chance to", "get the chance to",
-  "had a chance to", "had time to", "have time to", "manage to", "in a position to", "failed to"];
+  "weren't able", "no way to", "never got to", "been unable", "failed to", ...GOVERNED_ABILITY];
+/** The words that turn a GOVERNED_ABILITY phrase into a negation. */
+export const NEGATORS = ["not", "n't", "never", "no"];
+const GOVERN_GAP = 3;
+const GOVERNED = new Set(GOVERNED_ABILITY);
 /** Words that negate a verification verb when they sit just before it. */
 export const VERIFY_NEGATIONS = ["not", "n't", "never", "unverified", "yet to", ...ABILITY_NEGATIONS];
 const VERIFY_RES = [/\bverif(?:y|ied|ies)\b/gi, /\b(?:confirmed|checked)\b[^.]{0,40}\bagainst\s+the\s+(?:source|page|article)\b/gi];
@@ -402,8 +414,12 @@ export function verificationClaims(text) {
   const out = [];
   for (const s of sentences(text)) {
     const tokens = tokensOf(s.text);
+    const negators = markerSpans(s.text, NEGATORS);
+    // A governed phrase negates only after a negator in its clause ("did not have time to").
+    const governed = (n) => !GOVERNED.has(s.text.slice(n.start, n.end).toLowerCase())
+      || negators.some((g) => g.end <= n.start && !/[,;:]|\bbut\b/i.test(s.text.slice(g.end, n.start)) && tokensBetween(tokens, g.end, n.start) <= GOVERN_GAP);
     // "Not only did I verify ..." affirms.
-    const real = (markers) => markerSpans(s.text, markers).filter((n) => !/^\s+only\b/i.test(s.text.slice(n.end)));
+    const real = (markers) => markerSpans(s.text, markers).filter((n) => !/^\s+only\b/i.test(s.text.slice(n.end))).filter(governed);
     const negations = real(VERIFY_NEGATIONS);
     const abilities = real(ABILITY_NEGATIONS);
     const negates = (n, verbAt, [stop, gap]) =>
