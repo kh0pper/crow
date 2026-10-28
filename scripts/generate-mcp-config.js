@@ -29,6 +29,12 @@ const COMBINED = args.includes("--combined");
 // non-default gateway (e.g. grackle's :3002).
 const HTTP = args.includes("--http");
 
+// This file is the owner's own client config, so its project server runs as the owner. Added here
+// only, never in server-registry.js, whose mcpEnv also feeds bot catalogs (a bot must never be
+// handed the owner; scripts/pi-bots/mcp_writer.mjs strips it from any bot block as a belt).
+const OWNER_ACTOR_ENV = { CROW_ACTOR_KIND: "owner" };
+const OWNER_ACTOR_SERVERS = new Set(["crow-projects", COMBINED_SERVER.name]);
+
 function log(msg) {
   if (!STDOUT) console.log(`  ${msg}`);
 }
@@ -69,7 +75,7 @@ function generate() {
     }
   } else if (COMBINED) {
     // Single crow-core server replaces all individual core servers
-    const resolvedEnv = COMBINED_SERVER.mcpEnv ? resolveEnvObj(COMBINED_SERVER.mcpEnv) : {};
+    const resolvedEnv = { ...(COMBINED_SERVER.mcpEnv ? resolveEnvObj(COMBINED_SERVER.mcpEnv) : {}), ...OWNER_ACTOR_ENV };
     config.mcpServers[COMBINED_SERVER.name] = {
       command: COMBINED_SERVER.command,
       args: resolveArgs(COMBINED_SERVER.args),
@@ -78,7 +84,10 @@ function generate() {
     included.push(`${COMBINED_SERVER.name} (combined)`);
   } else {
     for (const server of CORE_SERVERS) {
-      const resolvedEnv = server.mcpEnv ? resolveEnvObj(server.mcpEnv) : {};
+      const resolvedEnv = {
+        ...(server.mcpEnv ? resolveEnvObj(server.mcpEnv) : {}),
+        ...(OWNER_ACTOR_SERVERS.has(server.name) ? OWNER_ACTOR_ENV : {}),
+      };
       config.mcpServers[server.name] = {
         command: server.command,
         args: resolveArgs(server.args),

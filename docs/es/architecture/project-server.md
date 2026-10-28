@@ -201,3 +201,54 @@ El servidor genera citas APA automáticamente al agregar fuentes. El formato de 
 - **Libros**: `Author (Year). *Title*. Publisher.`
 - **Artículos web**: `Author (Year). Title. Site Name. URL`
 - **Otros tipos**: formato APA estándar con los campos disponibles
+
+## Verificar antes de citar
+
+Crow abre por sí mismo la página de una fuente antes de que esta cuente como citable. Que un bot diga que leyó una página nunca se acepta sin comprobarlo.
+
+### Estados de obtención
+
+`research_sources.fetch_status` es uno de:
+
+| Estado | Significado |
+|---|---|
+| `fetched` | Crow abrió la página y guardó su texto legible |
+| `fetched_no_text` | Crow abrió la página pero no encontró texto legible (un PDF, una imagen, una página solo de scripts) |
+| `failed` | Crow no pudo abrir la página; el motivo queda en `fetch_error` |
+| `not_applicable` | La fuente no tiene URL (un libro, una entrevista), así que no hay nada que obtener |
+| `legacy` | La fuente es anterior a esta función; se muestra como "legacy, unchecked" |
+| `NULL` | La fila llegó de un par, de un recurso compartido o de un clon; aquí nunca se comprobó y no es citable aquí |
+
+Una fuente es **citable** cuando su estado es `fetched`, `fetched_no_text` o `legacy`, o cuando es `not_applicable` y la dueña o el dueño la verificó a mano (`manual_owner`). Las bibliografías citan solo fuentes citables e indican cuántas se dejaron fuera; `include_unfetched` muestra el resto, marcadas `[NOT FETCHED: ...]`.
+
+`crow_add_source` con una URL obtiene primero la página (con el obtenedor compartido protegido contra SSRF, `servers/shared/fetch-page.js`) y guarda la URL final, el código HTTP, un hash del contenido y el texto de la página. `crow_fetch_source` actualiza la copia guardada. Si una actualización no encuentra texto legible, se conserva la copia anterior; y si el texto nuevo rompería una verificación de cita que hoy pasa, se conserva el texto anterior salvo que el propietario pase `force: true`.
+
+### Procedencia de las notas
+
+Las notas de cita y de resumen indican de dónde viene la afirmación: `fetched` (respaldada por una página que Crow abrió), `snippet` (solo un fragmento de resultados de búsqueda, por lo que aún no se puede citar en el texto) o `derived` (razonamiento propio de quien escribe). Las notas de análisis y de idea usan `derived` por defecto. Una nota de cita sobre una fuente obtenida se comprueba contra el texto de la página y registra `quote_found` (1, 0, o NULL cuando la comprobación no pudo decidir) y un `locator`. La procedencia, `quote_found` y `locator` se quedan en local: están en `EXCLUDED_COLUMNS` (y se descartan en las filas entrantes) en `servers/sharing/instance-sync.js`, porque cada uno es un juicio sobre la copia de la página de esta instancia.
+
+### Verificar una fuente
+
+`crow_verify_source` registra en `verification_method` cómo se verificó una fuente:
+
+- `quotes_checked` (predeterminado): la fuente necesita al menos una nota de cita, y todas las citas deben aparecer en la página guardada. Si la copia guardada tiene más de 30 días, Crow reabre primero la página y adopta el texto nuevo solo si todas las citas siguen coincidiendo. Si una cita falla más adelante, se borra la verificación `quotes_checked`; el registro de auditoría lo anota como `invalidated`.
+- `manual_owner`: verifica el propietario a mano. Los bots no pueden. Es la única forma de verificar una fuente `not_applicable`.
+- `legacy_flag`: la puso una sola vez la migración en filas que ya estaban marcadas como verificadas. Nunca se comprobó contra una página, por eso no se muestra como `[V]`.
+
+### Quién es el propietario
+
+El servidor de proyectos decide la identidad de quien llama cuando se construye, y el propietario tiene que ser explícito. `npm run mcp-config` marca la entrada generada de crow-projects con `CROW_ACTOR_KIND=owner`; una configuración de cliente escrita a mano necesita la misma variable de entorno para verificar a mano por stdio. Los montajes del gateway iniciados con `--no-auth`, los bots, las instancias pares y quien no dice nada nunca son el propietario. Las llamadas HTTP de un bot a los montajes `router`, `projects`, `research` y `tools` del gateway las bloquea la guarda de URL de pi-bots, así que un bot no puede llegar a la vía del propietario a través del gateway.
+
+### Coincidencia de citas
+
+`servers/research/quote-match.js` decide si una cita está en la página. Una cita cuenta como encontrada solo cuando su redacción exacta aparece en la página. Crow nunca reconstruye una cita editada.
+
+- **Normalización:** ambos lados se igualan del mismo modo: Unicode NFKC, espacios, guiones suaves y caracteres de ancho cero, mayúsculas y minúsculas, y los estilos de comillas, guiones y apóstrofos. En la cita se recortan las comillas exteriores y un `.` `,` `;` `:` final; `?` y `!` se conservan, porque cambian lo que dice la frase.
+- **Límites de palabra:** la coincidencia debe empezar y terminar en un límite de palabra. Las palabras con guion y los números como `2.5` o `1,500` cuentan como palabras completas.
+- **Dónde busca:** primero el texto de Readability y después el cuerpo completo de la página. El resultado indica `body` cuando la coincidencia salió del cuerpo completo.
+- **Ediciones permitidas en una cita:** `[sic]`, `[citation needed]` y un solo corchete con una letra mayúscula al inicio de una palabra (`[I]t`). Cualquier puntos suspensivos u otro corchete deja la comprobación en "no se pudo comprobar exactamente": cita el pasaje sin cortes o verifícalo a mano. Las marcas de nota como `[3]` se ignoran solo en el lado de la página.
+- **No se pudo comprobar:** una cita de más de 2,000 caracteres, de menos de 4 caracteres, o con demasiadas posiciones posibles en la página. Una página cortada por el límite de tamaño y sin coincidencia también es "no se pudo comprobar", nunca "no está en la página".
+- **Atribución:** primero se prueba la cita completa. Solo si no se encuentra se descarta una cola final tras un guion o tras las comillas de cierre, y solo cuando la cola parece un nombre: dos o más palabras con mayúscula inicial, que no empiecen por palabras como The, Never o Not, con un `, Cargo` opcional. Pon a quien habla o la publicación en tu propia frase, no dentro de la cita.
+- **Resultado:** encontrada (1), no encontrada (0) o no se pudo comprobar (NULL).
+
+Límites conocidos: la coincidencia por subcadena no distingue cuando la propia página niega la frase citada, ni cuando la coincidencia viene de elementos de la página como un menú o un pie (el resultado indica entonces `body`).

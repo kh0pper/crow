@@ -13,6 +13,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { createMemoryServer } from "../../memory/server.js";
 import { createProjectServer } from "../../research/server.js";
+import { OWNER, UNKNOWN } from "../../research/actor.js";
 import { createSharingServer, getInstanceSyncManager } from "../../sharing/server.js";
 import { createDbClient } from "../../db.js";
 import { createProxyServer, resolveCrowHome } from "../proxy.js";
@@ -437,7 +438,10 @@ export async function mountMcpServers(app, deps) {
     console.warn(`[gateway] artifacts mount skipped: ${err.message}`);
   }
   mountMcpServer(app, "/memory", () => createMemoryServer(undefined, { instructions, syncManager }), sessionManager, authMiddleware, peerExposureGate);
-  const projectServerFactory = () => createProjectServer(undefined, { instructions });
+  // Who is calling the project tools: an authenticated mount is the owner; a --no-auth mount
+  // (routes/mcp.js serves it unauthenticated) is unknown. Peer-instance calls are downgraded per call.
+  const mountActor = noAuth ? UNKNOWN : OWNER;
+  const projectServerFactory = () => createProjectServer(undefined, { instructions, actor: mountActor });
   mountMcpServer(app, "/projects", projectServerFactory, sessionManager, authMiddleware, peerExposureGate);
   // Legacy alias — existing remote clients use /research/mcp
   mountMcpServer(app, "/research", projectServerFactory, sessionManager, authMiddleware, peerExposureGate);
@@ -479,7 +483,7 @@ export async function mountMcpServers(app, deps) {
 
   // --- Mount Router (consolidated endpoint, ~75% context reduction) ---
   if (process.env.CROW_DISABLE_ROUTER !== "1") {
-    mountMcpServer(app, "/router", () => createRouterServer({ instructions: routerInstructions }), sessionManager, authMiddleware, peerExposureGate);
+    mountMcpServer(app, "/router", () => createRouterServer({ instructions: routerInstructions, actor: mountActor }), sessionManager, authMiddleware, peerExposureGate);
     console.log("Router server mounted (category tools instead of the full raw tool surface)");
   }
 

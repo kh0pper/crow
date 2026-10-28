@@ -19,6 +19,8 @@ import { createProjectSpace } from "../shared/project-spaces.js";
 import { mkdirSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { resolveDataDir } from "../db.js";
+import { withoutProvenance } from "../research/provenance-schema.js";
+import { SHARED_SUMMARY_MAX } from "./shared-source-insert.js";
 
 export function createCloneBundleHelpers(ctx) {
   const { db } = ctx;
@@ -42,15 +44,18 @@ export function createCloneBundleHelpers(ctx) {
     })).rows[0];
     if (!project) throw new Error(`project #${projectId} not found in project_spaces`);
 
+    // Fetch facts and note provenance are this instance's own judgments about its copy of a
+    // page (and fetched_text can be 200k chars): they never ship. The receiver gets the
+    // reference and re-fetches it before citing.
     const sources = (await db.execute({
       sql: `SELECT * FROM research_sources WHERE project_id = ?`,
       args: [projectId],
-    })).rows;
+    })).rows.map((r) => withoutProvenance(r, "research_sources"));
 
     const notes = (await db.execute({
       sql: `SELECT * FROM research_notes WHERE project_id = ?`,
       args: [projectId],
-    })).rows;
+    })).rows.map((r) => withoutProvenance(r, "research_notes"));
 
     const backends = (await db.execute({
       sql: `SELECT id, uuid, name, backend_type, connection_ref, tags FROM data_backends WHERE project_id = ?`,
@@ -164,7 +169,7 @@ export function createCloneBundleHelpers(ctx) {
     // research/server.js:283). Truncation appends a fixed marker so the stored
     // text is self-documenting; the original survives on the origin instance.
     const FULLTEXT_MAX = parseInt(process.env.CROW_CLONE_FULLTEXT_MAX || "200000", 10);
-    const SUMMARY_MAX = 50000;
+    const SUMMARY_MAX = SHARED_SUMMARY_MAX;
     const TRUNC_MARKER = (origLen) =>
       `\n[truncated at clone import: original ${origLen} chars]`;
 
@@ -205,7 +210,8 @@ export function createCloneBundleHelpers(ctx) {
           s.doi ?? null, s.isbn ?? null, cappedAbstract, cappedContentSummary,
           cappedFullText, s.citation_apa ?? "(no citation)",
           s.retrieval_date ?? null, s.retrieval_method ?? null,
-          s.verified ?? 0, s.verification_notes ?? null,
+          // Never verified here: a peer's verification is a claim about its copy, not ours.
+          0, s.verification_notes ?? null,
           s.tags ?? null, s.relevance_score ?? 5,
           s.uuid ?? null, bundle.origin_instance_id ?? null,
         ],

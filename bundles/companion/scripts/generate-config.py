@@ -913,6 +913,11 @@ def main():
         ]
         if mcp_token:
             args += ["--headers", "Authorization", f"Bearer {mcp_token}"]
+        # The gateway token makes an authenticated mount the owner; this bridge speaks for
+        # companion characters, never the owner, so it narrows itself (the gateway reads the
+        # header as a downgrade only). The bridge is shared by every character, so it names no
+        # single bot id, which the gateway treats as an unknown caller.
+        args += ["--headers", "X-Crow-Actor-Kind", "bot"]
         return args
 
     mcp_config = {

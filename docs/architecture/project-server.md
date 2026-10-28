@@ -201,3 +201,54 @@ The server automatically generates APA citations when adding sources. The citati
 - **Books**: `Author (Year). *Title*. Publisher.`
 - **Web articles**: `Author (Year). Title. Site Name. URL`
 - **Other types**: Standard APA format with available fields
+
+## Fetch before cite
+
+Crow opens a source's page itself before the source counts as citable. A bot's claim that it read a page is never taken on trust.
+
+### Fetch statuses
+
+`research_sources.fetch_status` is one of:
+
+| Status | Meaning |
+|---|---|
+| `fetched` | Crow opened the page and stored its readable text |
+| `fetched_no_text` | Crow opened the page but found no readable text (a PDF, an image, a script-only page) |
+| `failed` | Crow could not open the page; the reason is stored in `fetch_error` |
+| `not_applicable` | The source has no URL (a book, an interview), so there is nothing to fetch |
+| `legacy` | The source predates fetching; shown as "legacy, unchecked" |
+| `NULL` | The row arrived from a peer, a share or a clone; it was never checked here and is not citable here |
+
+A source is **citable** when its status is `fetched`, `fetched_no_text` or `legacy`, or when it is `not_applicable` and the owner verified it by hand (`manual_owner`). Bibliographies cite only citable sources and say how many were left out; `include_unfetched` lists the rest, marked `[NOT FETCHED: ...]`.
+
+`crow_add_source` with a URL fetches the page first (through the shared SSRF-guarded fetcher in `servers/shared/fetch-page.js`) and stores the final URL, HTTP status, a content hash and the page text. `crow_fetch_source` refreshes a stored copy. A refresh that finds no readable text keeps the earlier copy, and a refresh whose new text would break a passing quote check keeps the old text unless the owner passes `force: true`.
+
+### Note provenance
+
+Quote and summary notes state where the claim comes from: `fetched` (backed by a page Crow opened), `snippet` (only a search-result snippet, so not citable in prose yet) or `derived` (the writer's own reasoning). Analysis and insight notes default to `derived`. A quote note on a fetched source is checked against the page text and records `quote_found` (1, 0, or NULL when the check could not decide) and a `locator`. Provenance, `quote_found` and `locator` stay local: they are in `EXCLUDED_COLUMNS` (and dropped from inbound rows) in `servers/sharing/instance-sync.js`, because each is a judgment about this instance's own copy of the page.
+
+### Verifying a source
+
+`crow_verify_source` records how a source was verified in `verification_method`:
+
+- `quotes_checked` (default): the source needs at least one quote note, and every quote must be found on the stored page. If the stored copy is over 30 days old, Crow re-opens the page first and adopts the new text only when every quote still matches. A quote that later fails its check clears a `quotes_checked` verification; the audit log records it as `invalidated`.
+- `manual_owner`: the owner verifies by hand. Bots cannot. This is the only way to verify a `not_applicable` source.
+- `legacy_flag`: set once by the migration on rows that were already marked verified. It was never checked against a page, so it is not shown as `[V]`.
+
+### Who is the owner
+
+The project server decides the caller's identity when it is built, and the owner has to be explicit. `npm run mcp-config` marks the generated crow-projects entry `CROW_ACTOR_KIND=owner`; a hand-written client config needs the same env to verify by hand over stdio. Gateway mounts started with `--no-auth`, bots, peer instances and callers that say nothing are never the owner. A bot's HTTP calls to the gateway's `router`, `projects`, `research` and `tools` mounts are blocked by the pi-bots url guard, so a bot cannot reach the owner path through the gateway.
+
+### Quote matching
+
+`servers/research/quote-match.js` decides whether a quote is on the page. A quote counts as found only when its exact wording appears on the page. Crow never reconstructs an edited quote.
+
+- **Normalization:** both sides are folded the same way: Unicode NFKC, whitespace, soft hyphens and zero-width characters, case, and the styles of quotes, dashes and apostrophes. Outer quote marks and a trailing `.` `,` `;` `:` on the quote are trimmed; `?` and `!` are kept, because they change what the sentence says.
+- **Word boundaries:** a match must start and end on a word boundary. Hyphenated words and numbers such as `2.5` or `1,500` count as whole words.
+- **Where it looks:** the Readability text first, then the full page body. A result reports `body` when the match came from the full body.
+- **Allowed edits in a quote:** `[sic]`, `[citation needed]`, and a single capital-letter bracket that starts a word (`[I]t`). Any ellipsis or any other bracket makes the check "couldn't check exactly": quote the passage without cuts, or verify by hand. Footnote markers such as `[3]` are ignored on the page side only.
+- **Couldn't check:** a quote over 2,000 characters, under 4 characters, or with too many possible placements on the page. A page that was cut off at the size cap and has no match is also "couldn't check", never "not on the page".
+- **Attribution:** the full quote is tried first. Only if it is not found is a trailing dash or after-quote tail dropped, and only when the tail looks like a name: two or more capitalized words, not starting with words such as The, Never or Not, with an optional `, Title`. Put the speaker or publication in your own sentence, not inside the quote.
+- **Result:** found (1), not found (0), or couldn't check (NULL).
+
+Known limits: substring matching cannot tell when the page itself denies the quoted sentence, or when a match comes from page furniture such as a menu or footer (the result then reports `body`).

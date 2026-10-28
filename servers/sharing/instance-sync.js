@@ -182,7 +182,30 @@ export const EXCLUDED_COLUMNS = {
   ramble_trades: ["lamport_ts"],
   ramble_cells: ["lamport_ts"],
   ramble_wallet: ["lamport_ts"],
+  // Fetch-before-cite: a note's provenance (fetched / snippet / derived), whether its quote was
+  // found on the fetched page, and where. Each is a judgment the instance that fetched the page
+  // made about ITS copy, so it stays local in v1; replicating it needs a fleet-version gate (an
+  // un-upgraded peer would write it into a column it lacks, or drop it on re-emit).
+  research_notes: ["provenance", "quote_found", "locator"],
 };
+
+// Columns dropped from an INBOUND row in _applyEntry: after the signature check (the signature
+// covers the row exactly as sent, so stripping first would fail verification) and before any
+// dispatch or _checkConflict (so a peer's copy of a local-only column never manufactures a
+// conflict row). An un-upgraded or hostile peer may still send these keys.
+// research_notes.source_id is a local FK (source rows are not synced, ids are per-instance), so
+// a peer's value would point a note at an unrelated local source, e.g. a quotes_checked one.
+export const INBOUND_DROPPED_COLUMNS = {
+  research_notes: ["provenance", "quote_found", "locator", "source_id"],
+};
+
+function dropInboundColumns(table, row) {
+  const drop = INBOUND_DROPPED_COLUMNS[table];
+  if (!drop || !row || typeof row !== "object") return row;
+  const copy = { ...row };
+  for (const col of drop) delete copy[col];
+  return copy;
+}
 
 // Per-table outbound mutations applied right after the EXCLUDED_COLUMNS strip.
 // Use for cases where the local representation differs from the synced
@@ -190,7 +213,8 @@ export const EXCLUDED_COLUMNS = {
 // aren't synced), so we NULL it on the wire. Synced notes show up on peers
 // as project-less (null project_id).
 const OUTBOUND_TRANSFORMS = {
-  research_notes: (row) => ({ ...row, project_id: null }),
+  // source_id is a local FK too (research_sources rows are not synced).
+  research_notes: (row) => ({ ...row, project_id: null, source_id: null }),
   // providers: a null gpu_policy must not ride the wire — _applyUpdate writes
   // wire nulls verbatim and would null a peer's locally-set policy, while the
   // local write path already treats null as "keep" (COALESCE,
@@ -2524,7 +2548,7 @@ export class InstanceSyncManager {
    * Apply a single sync entry from a remote instance.
    */
   async _applyEntry(remoteInstanceId, entry) {
-    const { table, op, row, lamport_ts, instance_id, signature } = entry;
+    const { table, op, row: signedRow, lamport_ts, instance_id, signature } = entry;
 
     // Validate table
     if (!SYNCED_TABLES.includes(table)) return;
@@ -2532,10 +2556,10 @@ export class InstanceSyncManager {
     // Defense in depth: drop inbound rows that fail the local syncability check.
     // A peer claiming a non-allowlisted dashboard_settings key (or a row with
     // instance_id != NULL) is either misconfigured or malicious — either way we don't apply.
-    if (!shouldSyncRow(table, row)) return;
+    if (!shouldSyncRow(table, signedRow)) return;
 
     // Verify signature
-    const entryWithoutSig = { table, op, row, lamport_ts, instance_id };
+    const entryWithoutSig = { table, op, row: signedRow, lamport_ts, instance_id };
     const payload = JSON.stringify(entryWithoutSig);
 
     // Look up the instance's public key
@@ -2547,6 +2571,9 @@ export class InstanceSyncManager {
       console.warn(`[instance-sync] Signature verification failed for entry from ${remoteInstanceId}`);
       return;
     }
+
+    // Verified: from here on every handler sees the row minus its local-only columns.
+    const row = dropInboundColumns(table, signedRow);
 
     // Advance local counter
     await this._advanceCounter(lamport_ts);
@@ -2717,6 +2744,11 @@ export class InstanceSyncManager {
       if (conflict === "skip") return; // Local version wins
     }
 
+    // A peer edit to a note's text can break this instance's quote check: read the local note
+    // first so the change (not a re-delivery) is what invalidates it.
+    const notePrior = table === "research_notes" && op === "update" && row.id !== undefined
+      ? await this._localNoteText(row.id) : null;
+
     // Apply the change
     try {
       switch (op) {
@@ -2725,6 +2757,7 @@ export class InstanceSyncManager {
           break;
         case "update":
           await this._applyUpdate(table, row, lamport_ts, instance_id);
+          if (notePrior) await this._invalidateNoteQuoteCheck(row, notePrior);
           break;
         case "delete":
           await this._applyDelete(table, row);
@@ -3576,6 +3609,38 @@ export class InstanceSyncManager {
     } catch (err) {
       console.warn(`[instance-sync] _reconcileGroupMembers remove failed: ${err.message}`);
     }
+  }
+
+  async _localNoteText(id) {
+    try {
+      const { rows } = await this.db.execute({ sql: "SELECT content, note_type FROM research_notes WHERE id = ?", args: [id] });
+      return rows[0] || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * After an inbound research_notes update: if its text or type changed, this instance's
+   * quote_found for it no longer holds (cleared to unknown), and a quotes_checked verification of
+   * its local source is cleared, as a failed local re-check would. Best effort: pre-0013 DBs lack
+   * the columns, and the update itself has already applied.
+   */
+  async _invalidateNoteQuoteCheck(row, prior) {
+    const changed = ("content" in row && String(row.content ?? "") !== String(prior.content ?? ""))
+      || ("note_type" in row && String(row.note_type ?? "") !== String(prior.note_type ?? ""));
+    if (!changed) return;
+    try {
+      await this.db.execute({ sql: "UPDATE research_notes SET quote_found = NULL WHERE id = ?", args: [row.id] });
+    } catch {}
+    try {
+      await this.db.execute({
+        sql: `UPDATE research_sources SET verified = 0, verification_method = NULL, verified_by = NULL
+               WHERE verification_method = 'quotes_checked'
+                 AND id = (SELECT source_id FROM research_notes WHERE id = ?)`,
+        args: [row.id],
+      });
+    } catch {}
   }
 
   /**

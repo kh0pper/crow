@@ -78,6 +78,25 @@ export function serversForBot(def) {
   return [...set];
 }
 
+// The gateway mounts that serve the project tools with a gateway token's authority: routes/mcp.js
+// treats a valid local MCP token as the owner, and a url block gets no actor env, so a bot handed
+// one of these would act as the owner. Each mount (mountMcpServer) answers on <prefix>/mcp,
+// <prefix>/sse and <prefix>/messages; the prefixes are /router, /projects, /research, /tools and
+// /tools-<name> (servers/gateway/boot/mcp-mounts.js). These paths exist only on Crow gateways (any
+// host, any scheme: loopback, LAN, a Serve HTTPS front); legitimate peer access goes through stdio
+// crow-remote-proxy blocks. Board/phone/artifacts mounts carry signed actor headers instead.
+const OWNER_MOUNT_PATH = /^\/(router|projects|research|tools(-[a-z0-9-]+)?)\/(mcp|sse|messages)$/;
+
+/** True if a url block reaches a Crow gateway's owner-capable mounts. */
+export function isOwnerProjectUrl(rawUrl) {
+  let u;
+  try { u = new URL(String(rawUrl)); } catch { return false; } // new URL resolves dot segments
+  let path;
+  try { path = decodeURIComponent(u.pathname); } catch { return true; } // undecodable: refuse it
+  path = path.toLowerCase().replace(/\/+$/, "");
+  return OWNER_MOUNT_PATH.test(path);
+}
+
 /** True if a server block touches crow.db (so the journal guard applies). */
 function touchesCrowDb(block) {
   return !!(block && block.env && block.env.CROW_DB_PATH);
@@ -262,6 +281,29 @@ export function buildBotMcp(def, canonical, opts = {}) {
   for (const name of Object.keys(canonical.mcpServers).sort()) {
     if (selected.has(name)) continue;
     disable(name, null);
+  }
+
+  // A bot must never reach the project tools through a gateway mount (a gateway token is the owner).
+  for (const name of [...active]) {
+    const block = out.mcpServers[name];
+    if (block && block.url && isOwnerProjectUrl(block.url)) {
+      disable(name, "was disabled: a bot must not reach the operator's research tools with a gateway token (owner authority)");
+      active.splice(active.indexOf(name), 1);
+      for (const list of [journalGuarded, minted]) {
+        const i = list.indexOf(name);
+        if (i >= 0) list.splice(i, 1);
+      }
+    }
+  }
+
+  // A canonical file generated for the owner (scripts/generate-mcp-config.js) marks its project
+  // server CROW_ACTOR_KIND=owner; a bot must never inherit that. Replace, never mutate, the block
+  // (it may be the shared canonical or catalog object).
+  for (const [name, block] of Object.entries(out.mcpServers)) {
+    if (block && block.env && block.env.CROW_ACTOR_KIND === "owner") {
+      const { CROW_ACTOR_KIND: _owner, ...env } = block.env;
+      out.mcpServers[name] = { ...block, env };
+    }
   }
 
   if (opts.actor && opts.actor.botId) applyActorEnv(out.mcpServers, actorEnvFor(opts.actor));

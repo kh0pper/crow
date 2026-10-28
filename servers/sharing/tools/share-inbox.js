@@ -9,6 +9,7 @@ import { z } from "zod";
 import { isKioskActive, kioskBlockedResponse } from "../../shared/kiosk-guard.js";
 import { generateToken, validateToken, shouldSkipGates } from "../../shared/confirm.js";
 import { ROLES, AclError, assertLocalCapability, appendAudit } from "../../shared/project-acl.js";
+import { withoutProvenance } from "../../research/provenance-schema.js";
 
 export function registerShareInboxTools(server, ctx) {
   const { db, identity, peerManager, buildProjectCloneBundle } = ctx;
@@ -275,7 +276,7 @@ export function registerShareInboxTools(server, ctx) {
           peerManager.send(contactRow.crow_id, {
             type: "share",
             share_type,
-            payload: item.rows[0],
+            payload: withoutProvenance(item.rows[0], mapEntry?.table || share_type),
             permissions,
             sender: identity.crowId,
             timestamp: new Date().toISOString(),
