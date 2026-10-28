@@ -1,7 +1,7 @@
 /**
- * P6 (rulings Q1/Q5): cardDrawerHref, the one "open this card" link. The card's
- * drawer on its project's card-board bot, else on any enabled card-board bot that
- * has a board, else the standalone no-JS card view; null for a card that isn't there.
+ * P6 (rulings Q1/Q5/Q14): cardDrawerHref, the one "open this card" link. The card's
+ * drawer on its own project's card-board bot, else the standalone no-JS card view
+ * (never another project's board); null for a card that isn't there.
  */
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -53,13 +53,14 @@ test("the card's project bot opens its drawer", async () => {
   assert.equal(await cardDrawerHref(db, 10), "/dashboard/bot-board?bot=aaa-other#open=10");
 });
 
-test("no bot on the card's project: any enabled card-board bot with a board", async () => {
-  bot("aaa-unboarded", { project: null }); // a card board with no project shows no board
-  bot("bbb-off", { project: 6, enabled: 0 });
-  bot("ccc-none", { type: "none", project: 6 });
-  bot("ddd-board", { project: 6 });
-  assert.equal(await cardDrawerHref(db, 9), "/dashboard/bot-board?bot=ddd-board#open=9");
-  assert.equal(await cardDrawerHref(db, 11), "/dashboard/bot-board?bot=ddd-board#open=11", "a card with no project");
+test("no board bot on the card's project: the standalone card view, never another project's board", async () => {
+  bot("aaa-unboarded", { project: null });
+  bot("bbb-off", { project: 5, enabled: 0 });
+  bot("ccc-none", { type: "none", project: 5 });
+  bot("ddd-board", { project: 6 }); // another project's kanban bot
+  assert.equal(await cardDrawerHref(db, 9), "/dashboard/bot-board?card=9");
+  assert.equal(await cardDrawerHref(db, 11), "/dashboard/bot-board?card=11", "a card with no project");
+  assert.equal(await cardDrawerHref(db, 10), "/dashboard/bot-board?bot=ddd-board#open=10", "its own project's bot still opens it");
 });
 
 test("no card-board bot at all: the standalone card view", async () => {

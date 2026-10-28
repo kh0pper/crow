@@ -4,18 +4,16 @@
 // board client's one-shot `#open=<id>` key (openCardById), on the board of a
 // card-board bot. The bot is chosen by the same rule the Board tab's Details
 // link uses (cardBoardBotForProject over enabledBoardBots, panels/bot-board/
-// data-queries.js): the card-board bot on the card's project. Failing that, any
-// enabled card-board bot that has a board (a project), because the drawer can
-// open any card by id from there. With no such bot, the standalone no-JS card
-// view, `?card=<id>`. Never `?card=` while a drawer can open it.
+// data-queries.js): the card-board bot on the card's project. With no such bot,
+// the standalone no-JS card view, `?card=<id>`. Never another project's board
+// (Ruling Q14): the classic drawer builds its status select from the page bot's
+// board def, so a card opened there would show statuses that aren't its own.
 
 import { existsSync } from "node:fs";
 import { createDbClient } from "../../db.js";
 import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 import { CROW_VOICE_BOT_ID } from "../../shared/voice-bot.js";
-import {
-  enabledBoardBots, cardBoardBotForProject, isCardBoardBot,
-} from "../dashboard/panels/bot-board/data-queries.js";
+import { enabledBoardBots, cardBoardBotForProject } from "../dashboard/panels/bot-board/data-queries.js";
 
 /** The card's project as { projectId }, or null when there is no such top-level card (or no tasks.db). */
 async function cardRow(id, tasksDb) {
@@ -45,9 +43,7 @@ export async function cardDrawerHref(db, cardId, { tasksDb = null } = {}) {
   const card = await cardRow(id, tasksDb);
   if (!card) return null;
   const bots = await enabledBoardBots(db, CROW_VOICE_BOT_ID);
-  const bot = cardBoardBotForProject(bots, card.projectId)
-    || bots.find((b) => isCardBoardBot(b) && b.projectId != null)
-    || null;
+  const bot = cardBoardBotForProject(bots, card.projectId);
   return bot
     ? `/dashboard/bot-board?bot=${encodeURIComponent(String(bot.botId))}#open=${id}`
     : `/dashboard/bot-board?card=${id}`;

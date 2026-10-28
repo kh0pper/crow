@@ -135,7 +135,7 @@ async function laneRow(tdb, id) {
  *  - title: the card's title (bot/operator text: callers escape it);
  *  - lane: laneOf over the card's status, latest result, ask and decision, its board def
  *    and whether a session or job holds it (the Board tab's rule); null if any part fails;
- *  - href: cardDrawerHref (the drawer on a card-board bot), sharing this call's tasks.db;
+ *  - href: cardDrawerHref (the drawer on its own project's card-board bot, else ?card=), sharing this call's tasks.db;
  *  - thread: the card's conversation by the Board tab's rule (threadsByCard), or null.
  * One tasks.db client per call: call it once per request, never in a loop.
  * @returns {Promise<{ id: number, title: string, lane: string|null, href: string, thread: string|null }|null>}
