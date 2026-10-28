@@ -52,6 +52,7 @@ export function perchBrowserTileJs(lang = "en") {
   var BT_DONE='${tJs("perch.browserDone", lang)}';
   var BT_NEUTRAL='${tJs("perch.browserNeutral", lang)}';
   var BT_USING='${tJs("perch.browserUsing", lang)}';
+  var BT_USING_NO_DOMAIN='${tJs("perch.browserUsingNoDomain", lang)}';
   var BT_WAITING='${tJs("perch.browserWaiting", lang)}';
   var BT_YOU_HAD='${tJs("perch.browserYouHadIt", lang)}';
   var BT_DELETE='${tJs("perch.browserDelete", lang)}';
@@ -101,7 +102,7 @@ export function perchBrowserTileJs(lang = "en") {
   function btMake(anchor){
     var t={ key:anchor?'a:'+anchor:'n:'+(++btSeq), anchor:anchor, sid:current.sid, phase:'live',
       onScreen:false, poller:null, halted:false, backedOff:false, retryTimer:null,
-      operator:false, seq:0, shotId:null, domain:null };
+      operator:false, seq:0, shotId:null, domain:null, netRetried:false };
     var node=document.createElement('div'); node.className='entry ph-btile';
     node.setAttribute('data-anchor',anchor||'');
     node.setAttribute('data-phase','live');
@@ -136,6 +137,8 @@ export function perchBrowserTileJs(lang = "en") {
     if(typeof domain==='string'&&domain) t.domain=domain;
     t.host.textContent=btHost(t.domain);
     t.img.alt=btHost(t.domain);
+    /* the live picture is the Take over control too: name it so */
+    if(t.phase==='live') t.frame.setAttribute('aria-label',BT_TAKE_OVER+' \u00b7 '+btHost(t.domain));
   }
   function btDim(t,on){ if(on) t.node.setAttribute('data-dim','1'); else t.node.removeAttribute('data-dim'); }
   function btDrop(t){
@@ -149,9 +152,11 @@ export function perchBrowserTileJs(lang = "en") {
   function btHeader(){
     var e=el('perch-browser-status'); if(!e) return;
     var t=btLiveKey?btTiles[btLiveKey]:null;
-    if(!t||t.phase!=='live'){ e.textContent=''; e.hidden=true; return; }
-    e.textContent=t.operator?BT_WAITING:BT_USING.split('{domain}').join(btHost(t.domain));
-    e.hidden=false;
+    var text=(!t||t.phase!=='live')?'':t.operator?BT_WAITING
+      :(t.domain?BT_USING.split('{domain}').join(t.domain):BT_USING_NO_DOMAIN);
+    /* role=status: a screen reader announces every write, so write only a change */
+    if(e.textContent!==text) e.textContent=text;
+    if(e.hidden!==!text) e.hidden=!text;
   }
 
   /* ---- polling ------------------------------------------------------------ */
@@ -194,17 +199,13 @@ export function perchBrowserTileJs(lang = "en") {
     req.then(function(r){
       if(t.poller!==p||p.closed) return;
       var s=r.status;
-      if(s===204){
-        /* the long poll waits 2 s server side; one that came back early is not a busy loop */
-        var gap=BT_MIN_GAP_MS-(Date.now()-sentAt);
-        if(gap>0){ p.timer=setTimeout(function(){ p.timer=null; btPoll(t,p); },gap); return; }
-        btPoll(t,p); return;
-      }
+      if(s===204){ t.netRetried=false; btNext(t,p,sentAt); return; }
       if(s===200){
         return r.json().then(function(f){
           if(t.poller!==p||p.closed) return;
-          btShowFrame(t,p,f);
-          btPoll(t,p);
+          t.netRetried=false;
+          /* a 200 that showed nothing new (refused, or seq not advanced) waits the gap too: never a tight loop */
+          if(btShowFrame(t,p,f)) btPoll(t,p); else btNext(t,p,sentAt);
         },function(){ btStopPoll(t); });
       }
       btStopPoll(t);
@@ -216,21 +217,39 @@ export function perchBrowserTileJs(lang = "en") {
       }
       t.halted=true;
     },function(){
-      /* aborted, or the network went away (a dozing phone): stop; the next
-         visibility or intersection change starts a fresh poller */
-      if(t.poller===p) btStopPoll(t);
+      /* aborted by us (closed): nothing. The network went away (a dozing
+         phone): stop; one retry after 5 s if the tab is still visible, else
+         the next visibility or intersection change starts a fresh poller */
+      if(t.poller!==p||p.closed) return;
+      btStopPoll(t);
+      if(btVisible()&&!t.netRetried&&!t.retryTimer){
+        t.netRetried=true;
+        t.retryTimer=setTimeout(function(){ t.retryTimer=null; btMaybeStart(t); },BT_BACKOFF_MS);
+      }
     });
   }
+  /* The next poll, no sooner than BT_MIN_GAP_MS after the last one was sent:
+     the long poll waits 2 s server side, so an early answer is not a busy loop. */
+  function btNext(t,p,sentAt){
+    var gap=BT_MIN_GAP_MS-(Date.now()-sentAt);
+    if(gap>0){ p.timer=setTimeout(function(){ p.timer=null; btPoll(t,p); },gap); return; }
+    btPoll(t,p);
+  }
+  /* True when a new frame was shown. A seq that is a valid integer beyond the
+     current one advances even when its jpeg is refused (so a bad frame is
+     never asked for again), but only a shown frame skips the poll gap. */
   function btShowFrame(t,p,f){
-    if(!f||typeof f!=='object') return;
+    if(!f||typeof f!=='object') return false;
     var seq=Number(f.seq);
-    if(!(seq>=0)||typeof f.jpeg!=='string'||!f.jpeg||!/^[A-Za-z0-9+\\/=]+$/.test(f.jpeg)) return;
+    if(!(seq>p.seq&&Math.floor(seq)===seq&&seq<=9007199254740991)) return false;
     p.seq=seq; t.seq=seq;
+    if(typeof f.jpeg!=='string'||!f.jpeg||!/^[A-Za-z0-9+\\/=]+$/.test(f.jpeg)) return false;
     t.img.src='data:image/jpeg;base64,'+f.jpeg;
     var w=Number(f.w), h=Number(f.h);
     if(w>0&&h>0){ t.img.setAttribute('width',String(Math.round(w))); t.img.setAttribute('height',String(Math.round(h))); }
     t.frame.hidden=false;
     btDim(t,false);
+    return true;
   }
 
   /* On screen? One observer per instance; disconnected on retire. */
@@ -286,6 +305,8 @@ export function perchBrowserTileJs(lang = "en") {
     btDim(t,false);
     t.state.textContent=BT_DONE;
     t.take.hidden=true;
+    /* a frozen picture is not a control */
+    t.frame.removeAttribute('aria-label'); t.frame.setAttribute('tabindex','-1'); t.frame.disabled=true;
     if(d&&d.domain) btSetHost(t,d.domain); else btSetHost(t,null);
     var shot=d?d.shot:null;
     if(d&&d.note==='operator'){

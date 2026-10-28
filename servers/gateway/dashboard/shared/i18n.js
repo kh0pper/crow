@@ -3819,6 +3819,7 @@ export const translations = {
   "perch.browserDone": { en: "Done", es: "Hecho" },
   "perch.browserNeutral": { en: "Browser", es: "Navegador" },
   "perch.browserUsing": { en: "Using the browser · {domain}", es: "Usando el navegador · {domain}" },
+  "perch.browserUsingNoDomain": { en: "Using the browser", es: "Usando el navegador" },
   "perch.browserWaiting": { en: "Waiting for you", es: "Esperando por ti" },
   "perch.browserYouHadIt": { en: "You had the browser", es: "Tenías tú el navegador" },
   "perch.browserDelete": { en: "Delete screenshot", es: "Borrar captura" },

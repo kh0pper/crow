@@ -185,6 +185,7 @@ test("the header has the status line, and every tile string is a translated key 
     "perch.browserDone": ["Done", "Hecho"],
     "perch.browserNeutral": ["Browser", "Navegador"],
     "perch.browserUsing": ["Using the browser · {domain}", "Usando el navegador · {domain}"],
+    "perch.browserUsingNoDomain": ["Using the browser", "Usando el navegador"],
     "perch.browserWaiting": ["Waiting for you", "Esperando por ti"],
     "perch.browserYouHadIt": ["You had the browser", "Tenías tú el navegador"],
     "perch.browserDelete": ["Delete screenshot", "Borrar captura"],
@@ -293,13 +294,18 @@ test("live: hostname via textContent, neutral Browser when null, Live dot, Take 
   const h2 = mount();
   const n = await liveTile(h2, "call_2", null);
   assert.equal(one(n, "bt-host").textContent, "Browser");
-  assert.equal(h2.status.textContent, "Using the browser · Browser");
+  assert.equal(h2.status.textContent, "Using the browser", "no domain: the plain line");
 });
 
 // ---------------------------------------------------------------------------
 // polling
 // ---------------------------------------------------------------------------
 test("polls only while the tile is on screen and the tab visible", async () => {
+  const realNow = Date.now;
+  Date.now = () => 1_000_000;                 // a frozen clock: every poll gap is exactly 1 s (the sandbox shares Date)
+  try { await pollsOnScreen(); } finally { Date.now = realNow; }
+});
+async function pollsOnScreen() {
   const h = mount({ innerWidth: 390 });
   const t = await liveTile(h, "call_1");
   assert.equal(h.frames().length, 0, "not on screen yet: no poll");
@@ -339,8 +345,82 @@ test("polls only while the tile is on screen and the tab visible", async () => {
   assert.equal(h.pending().length, 1);
   assert.match(h.pending()[0].url, /after=5/);
   // a malformed frame body is never put into the image
-  await h.respond(h.pending()[0], 200, { seq: 6, jpeg: "\"><script>", w: 1, h: 1 });
-  assert.equal(img.src, "data:image/jpeg;base64," + B64, "kept the last good frame");
+  {
+    await h.respond(h.pending()[0], 200, { seq: 6, jpeg: "\"><script>", w: 1, h: 1 });
+    assert.equal(img.src, "data:image/jpeg;base64," + B64, "kept the last good frame");
+    // M1: no tight loop — the next poll waits ≥ 1 s and asks after the refused frame's seq
+    assert.equal(h.pending().length, 0, "not re-asked at once");
+    const gap = [...h.timers.entries()].filter(([, x]) => x.ms === 1000);
+    assert.equal(gap.length, 1, "a 1 s gap timer");
+    h.timers.delete(gap[0][0]); gap[0][1].fn(); await tick();
+    assert.equal(h.pending().length, 1);
+    assert.match(h.pending()[0].url, /after=6&vw=390$/, "seq advanced past the refused frame");
+    // a 200 that does not advance seq (same or lower) also waits the gap
+    await h.respond(h.pending()[0], 200, { seq: 6, jpeg: B64, w: 1, h: 1 });
+    assert.equal(h.pending().length, 0);
+    assert.equal([...h.timers.values()].filter((x) => x.ms === 1000).length, 1);
+    // a non-integer seq never advances
+    for (const [id, x] of [...h.timers.entries()]) { h.timers.delete(id); x.fn(); }
+    await tick();
+    await h.respond(h.pending()[0], 200, { seq: 7.5, jpeg: B64, w: 1, h: 1 });
+    for (const [id, x] of [...h.timers.entries()]) { h.timers.delete(id); x.fn(); }
+    await tick();
+    assert.match(h.pending()[0].url, /after=6&/);
+  }
+}
+
+test("M4: a network error while visible retries once after 5 s; an abort never does", async () => {
+  const h = mount();
+  const t = await liveTile(h, "call_1");
+  await h.show(t, true);
+  const c = h.pending()[0];
+  c.settled = true; c.reject(new TypeError("Failed to fetch")); await tick();
+  assert.equal(h.pending().length, 0);
+  const r = [...h.timers.entries()].filter(([, x]) => x.ms === 5000);
+  assert.equal(r.length, 1, "one 5 s retry");
+  h.timers.delete(r[0][0]); r[0][1].fn(); await tick();
+  assert.equal(h.pending().length, 1, "retried");
+  const c2 = h.pending()[0];
+  c2.settled = true; c2.reject(new TypeError("Failed to fetch")); await tick();
+  assert.equal([...h.timers.values()].filter((x) => x.ms === 5000).length, 0, "only once");
+  // an abort (scrolling away) schedules nothing
+  await h.show(t, true);
+  assert.equal(h.pending().length, 1);
+  await h.show(t, false);
+  assert.equal([...h.timers.values()].filter((x) => x.ms === 5000).length, 0);
+});
+
+test("M2: the live picture is named Take over · host; a frozen one is not a control", async () => {
+  const h = mount();
+  const t = await liveTile(h, "call_1", "example.com");
+  const frame = one(t, "bt-frame");
+  assert.equal(frame.getAttribute("aria-label"), "Take over · example.com");
+  frame.onclick();
+  assert.equal(h.events.filter((e) => e.type === "perch:browser-takeover").length, 1);
+  h.api.browserFrame({ type: "browser", phase: "done", anchor: "call_1", domain: "example.com",
+    shot: { id: 3, url: API + "/interactive/" + SID + "/workspace/browser-example.com-20261028-090507.jpg" }, note: null });
+  await tick();
+  assert.equal(frame.getAttribute("aria-label"), null);
+  assert.equal(frame.getAttribute("tabindex"), "-1");
+  assert.equal(frame.disabled, true);
+  frame.onclick();
+  assert.equal(h.events.filter((e) => e.type === "perch:browser-takeover").length, 1, "no take-over from a frozen tile");
+});
+
+test("M3: the role=status header is written only when its text changes", async () => {
+  const h = mount();
+  let writes = 0, val = "";
+  Object.defineProperty(h.status, "textContent", { get: () => val, set: (v) => { writes++; val = String(v); }, configurable: true });
+  await liveTile(h, "call_1", "example.com");
+  assert.equal(val, "Using the browser · example.com");
+  const w = writes;
+  h.api.browserFrame({ type: "browser", phase: "live", anchor: "call_1", domain: "example.com", gen: 4 });
+  h.api.browserFrame({ type: "browser", phase: "live", anchor: "call_1", domain: "example.com", gen: 5 });
+  await tick();
+  assert.equal(writes, w, "same text, no write");
+  h.api.browserFrame({ type: "browser", phase: "live", anchor: "call_1", domain: "b.example", gen: 6 });
+  await tick();
+  assert.equal(writes, w + 1);
 });
 
 test("hidden tab stops polling", async () => {
