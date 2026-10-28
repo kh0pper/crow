@@ -50,6 +50,7 @@ export const TOOL_MANIFESTS = {
       crow_update_project: { params: "id, name?, description?, status?, type?, tags?", desc: "Update project" },
       crow_add_source: { params: "title, source_type, project_id?, backend_id?, url?, authors?, publication_date?, publisher?, doi?, isbn?, abstract?, content_summary?, full_text?, citation_apa?, retrieval_method?, tags?, relevance_score?", desc: "Add a source; Crow fetches its URL first (only fetched sources are citable)" },
       crow_fetch_source: { params: "id, force?", desc: "Re-fetch a source's page (Crow opens it)" },
+      crow_web_search: { params: "query, count?", desc: "Web search; results are SNIPPETS, not sources" },
       crow_search_sources: { params: "query, project_id?, source_type?, verified_only?, limit?", desc: "Search sources (FTS5)" },
       crow_get_source: { params: "id", desc: "Get source details" },
       crow_verify_source: { params: "id, verified?, method?, notes?", desc: "Verify a source: quotes checked against the fetched page (or owner by hand)" },

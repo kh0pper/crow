@@ -83,7 +83,7 @@ export const CORE_SERVERS = [
     args: ["servers/research/index.js"],
     description: "Project management & research pipeline",
     envKeys: [],
-    mcpEnv: { CROW_DB_PATH: "${CROW_DB_PATH:-./data/crow.db}" },
+    mcpEnv: { CROW_DB_PATH: "${CROW_DB_PATH:-./data/crow.db}", BRAVE_API_KEY: "${BRAVE_API_KEY:-}" },
   },
   {
     name: "crow-sharing",
