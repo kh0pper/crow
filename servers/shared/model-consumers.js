@@ -3,7 +3,7 @@
  * can show "Used by", warn before a role change, and convert matching bots.
  * Writes nothing anywhere.
  */
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { isRoleRef, roleIdOf, CORE_ROLES, resolveRoleKey } from "./model-roles.js";
@@ -13,13 +13,13 @@ import { readSetting } from "../gateway/dashboard/settings/registry.js";
 import { DEFAULT_ROUTES } from "../gateway/ai/smart-router.js";
 import { MULTI_AGENT_CAPABLE } from "../../scripts/pi-bots/pi_extensions_allowlist.mjs";
 import { LOCAL_FALLBACK } from "../../scripts/pi-bots/model_resolver.mjs";
+import { str, readJsonFile, agentModels } from "./pi-agent-config.js";
 import { resolveSqlitePath, tasksDbPath } from "../../scripts/pi-bots/instance-paths.mjs";
 
 // Same string as BOTCRON_PREFIX in scripts/pi-bots/bot_scheduler.mjs. Not
 // imported: that module opens databases and pulls in the job runner.
 const BOTCRON_PREFIX = "pipeline:botcron:";
 
-const str = (v) => (typeof v === "string" && v.trim() ? v.trim() : null);
 const parseJson = (v, fb) => { try { return v == null ? fb : JSON.parse(v); } catch { return fb; } };
 
 // ---- unattended (R9) ------------------------------------------------------
@@ -112,37 +112,6 @@ export async function loadUnattendedContext(db, botId, { tasksDbPaths } = {}) {
 }
 
 // ---- pi sub-agent / config helpers ----------------------------------------
-
-function readJsonFile(path) {
-  try { return JSON.parse(readFileSync(path, "utf8")); } catch { return null; }
-}
-
-/** Minimal frontmatter parse: the leading `---` block, `key: value` lines. */
-function frontmatter(text) {
-  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
-  const out = {};
-  if (!m) return out;
-  for (const line of m[1].split(/\r?\n/)) {
-    const i = line.indexOf(":");
-    if (i <= 0) continue;
-    out[line.slice(0, i).trim()] = line.slice(i + 1).trim().replace(/^["']|["']$/g, "");
-  }
-  return out;
-}
-
-function agentModels(piAgentDir) {
-  const dir = join(piAgentDir, "agents");
-  const out = {};
-  let names = [];
-  try { names = readdirSync(dir).filter((f) => f.endsWith(".md")).sort(); } catch { return out; }
-  for (const f of names) {
-    let fm;
-    try { fm = frontmatter(readFileSync(join(dir, f), "utf8")); } catch { continue; }
-    const model = str(fm.model);
-    if (model) out[f.slice(0, -3)] = model;
-  }
-  return out;
-}
 
 const providerOf = (key) => {
   const s = str(key);

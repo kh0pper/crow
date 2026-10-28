@@ -158,6 +158,20 @@ export async function mountAdminApi(app, deps) {
       }
     };
     await reconcile();
+
+    // --- Model roles seed: instance-owned `model_role.*` rows that track
+    // today's defaults until the user edits a role. Never emitted. ---
+    {
+      const db = createDbClient();
+      try {
+        const { seedRoleBindings } = await import("../../shared/model-roles-seed.js");
+        await seedRoleBindings(db);
+      } catch (err) {
+        console.warn("[roles] Seed skipped:", err.message);
+      } finally {
+        db.close();
+      }
+    }
     // D5: hourly re-run (fresh getOwnAddresses each time) — heals the
     // boot-time tailscale race and owner-never-restarts staleness. D2 makes
     // converged runs free (zero writes, zero emits). unref() so the timer

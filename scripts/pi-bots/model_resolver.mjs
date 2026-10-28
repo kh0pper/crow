@@ -47,7 +47,7 @@ export function splitKey(key) {
   return { provider: s.slice(0, i), model: s.slice(i + 1) };
 }
 
-function loadModelsFromFile() {
+export function loadModelsFromFile() {
   try {
     const j = JSON.parse(readFileSync(MODELS_JSON, "utf8"));
     return j && j.providers && typeof j.providers === "object" ? j : null;
@@ -64,15 +64,25 @@ async function loadModelsFromDb() {
     d.pragma("busy_timeout = 10000");
     const rows = d.prepare("SELECT id, models FROM providers WHERE disabled=0").all();
     d.close();
-    if (!rows.length) return null;
-    const providers = {};
-    for (const r of rows) {
-      try { providers[r.id] = { models: JSON.parse(r.models || "[]") }; } catch {}
-    }
-    return { providers };
+    return modelsFromRows(rows);
   } catch {
     return null;
   }
+}
+
+/**
+ * Enabled `providers` rows ({id, models}) -> the loadModels() shape. `models`
+ * is the row's JSON text (an already-parsed array is accepted too). No rows
+ * gives null; a row whose models do not parse is skipped.
+ * @returns {{providers: object}|null}
+ */
+export function modelsFromRows(rows) {
+  if (!Array.isArray(rows) || !rows.length) return null;
+  const providers = {};
+  for (const r of rows) {
+    try { providers[r.id] = { models: Array.isArray(r.models) ? r.models : JSON.parse(r.models || "[]") }; } catch {}
+  }
+  return { providers };
 }
 
 export async function loadModels() {
