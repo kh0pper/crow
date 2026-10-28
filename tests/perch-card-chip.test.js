@@ -587,3 +587,58 @@ test("P5 final: Details opens the drawer on the card's bot (detailsHref's rule)"
   h.api.loadCardChip(SID); await tick();
   assert.equal(byClass(h.transcript, "cardchip-details")[0].href, "/dashboard/bot-board?bot=my%20bot#open=9");
 });
+
+test("P5 final: a refresh mid-flight draws no Send again card, and the bot gets exactly one message", async () => {
+  const KEY = "perch-unsent-change:" + SID;
+  const storage = memStore();
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const h = mount({ card: CARD, result: RESULT, storage, review: (u) => (u === CHANGE ? gate.then(() => json({ ok: true })) : json({ ok: true })) });
+  h.api.loadCardChip(SID); await tick();
+  const box = review(h)[0];
+  byClass(box, "review-change")[0].onclick();
+  byClass(box, "review-input")[0].value = "Use the blue one.";
+  byClass(box, "review-send")[0].onclick(); await tick();
+  assert.ok(storage.getItem(KEY), "pending while in flight");
+  h.api.cardTurnState("working"); h.api.cardTurnState("idle"); await tick();
+  h.api.loadCardChip(SID); await tick();
+  assert.equal(byClass(h.transcript, "review-resend").length, 0, "no Send again card mid-flight");
+  h.state.result = null;
+  release(); await tick();
+  assert.deepEqual(posts(h).map((p) => p[0]), [CHANGE, MSG], "exactly one message");
+  assert.equal(storage.getItem(KEY), null);
+});
+
+test("P5 final: a 409 gives the text back with no Send again card and clears storage", async () => {
+  const KEY = "perch-unsent-change:" + SID;
+  const storage = memStore();
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const h = mount({ card: CARD, result: RESULT, storage, review: (u) => (u === CHANGE ? gate.then(() => json({ error: "stale" }, 409)) : json({ ok: true })) });
+  h.api.loadCardChip(SID); await tick();
+  const box = review(h)[0];
+  byClass(box, "review-change")[0].onclick();
+  byClass(box, "review-input")[0].value = "Use the blue one.";
+  byClass(box, "review-send")[0].onclick(); await tick();
+  h.api.loadCardChip(SID); await tick();
+  release(); await tick();
+  assert.equal(storage.getItem(KEY), null);
+  assert.equal(byClass(h.transcript, "review-resend").length, 0);
+  const again = review(h);
+  assert.equal(again.length, 1);
+  assert.equal(byClass(again[0], "review-input")[0].value, "Use the blue one.");
+  assert.ok(allText(again[0]).includes("That did not work. Try again."));
+  assert.deepEqual(posts(h).map((p) => p[0]), [CHANGE]);
+});
+
+test("P5 final: a reload after request-change succeeded and /message failed still shows Send again", async () => {
+  const storage = memStore();
+  const h = mount({ card: CARD, result: RESULT, storage, review: (u) => (u === MSG ? json({}, 500) : json({ ok: true })) });
+  h.api.loadCardChip(SID); await tick();
+  h.state.result = null;
+  await askChange(h, "Use the blue one.");
+  const r = mount({ card: CARD, result: null, storage });
+  r.api.loadCardChip(SID); await tick();
+  assert.equal(byClass(r.transcript, "review-resend").length, 1);
+  assert.equal(byClass(r.transcript, "review-input")[0].value, "Use the blue one.");
+});

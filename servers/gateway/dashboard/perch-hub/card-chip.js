@@ -75,10 +75,11 @@ export function perchCardChipJs(lang = "en") {
     var st=ccStore(); if(!st) return;
     try{ st.setItem(CC_UNSENT_PREFIX+sid,JSON.stringify({text:String(u.text),cardId:u.cardId,resultId:u.resultId})); }catch(e){}
   }
+  var ccChanging={};      /* sid -> true while a request-change is in flight: a refresh must not promote the pending words */
   var ccRetained=null;    /* {sid,text}: words a refused request-change gives back to the field */
   function ccUnsentDrop(sid){ var st=ccStore(); if(!st) return; try{ st.removeItem(CC_UNSENT_PREFIX+sid); }catch(e){} }
   function ccUnsentLoad(sid){
-    if(ccUnsent[sid]!=null) return;
+    if(ccUnsent[sid]!=null||ccChanging[sid]) return;
     var st=ccStore(); if(!st) return;
     var raw=null; try{ raw=st.getItem(CC_UNSENT_PREFIX+sid); }catch(e){ raw=null; }
     if(!raw) return;
@@ -316,12 +317,14 @@ export function perchCardChipJs(lang = "en") {
     var field=ccField(CC_CHANGE_PH,CC_ASK_CHANGE,function(text,go){
       busy(true); go.disabled=true; msg.textContent='';
       var gen=ccGen;
+      ccChanging[sid]=true;
       ccPendingSave(sid,{text:text,cardId:card.id,resultId:result.id});
-      ccApi('POST','/cards/'+encodeURIComponent(String(card.id))+'/request-change',{result_id:result.id,text:text}).then(function(r){
+      ccApi('POST','/cards/'+encodeURIComponent(String(card.id))+'/request-change',{result_id:result.id,text:text}).catch(function(){ return {ok:false,status:0,j:null}; }).then(function(r){
+        delete ccChanging[sid];
         /* Rejected: from here the words are owed to the bot, even if the operator left this chat. */
         if(r.ok){ ccUnsent[sid]={text:text,cardId:card.id,resultId:result.id}; if(ccReview&&ccReview.node===wrap.parentNode) ccReview.key='unsent'; ccDeliver(sid); return; }
         /* Not rejected: nothing is owed to the bot, so the stored words go. */
-        if(ccUnsent[sid]==null) ccUnsentDrop(sid);
+        ccUnsentDrop(sid); delete ccUnsent[sid];
         if(r.status===409){ ccRetained={sid:sid,text:text}; if(live()&&current.sid===sid) ccRefresh(sid); return; }
         if(!live()||current.sid!==sid||gen!==ccGen) return;
         busy(false); go.disabled=false; msg.textContent=CC_FAILED;
