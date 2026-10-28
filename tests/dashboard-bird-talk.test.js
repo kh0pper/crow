@@ -42,7 +42,21 @@ test("the bird is a real button: focusable, labelled, and it owns the tray", () 
   assert.equal(bird.getAttribute("aria-expanded"), "false");
   assert.ok(bird.getAttribute("aria-label").length > 5);
   assert.ok(bird.querySelector("svg#crow-tama"), "the bird art lives inside the button");
-  assert.equal(document.querySelectorAll("button.header-icon-btn:not(#crow-ptt-btn)").length, 0, "no second header button beside the bird");
+  assert.equal(document.querySelectorAll("button.header-icon-btn").length, 0, "no second header button beside the bird");
+});
+
+test("the glasses microphone button is gone from both headers: holding the bird is the voice entry", () => {
+  for (const [html, js] of [
+    [tamagotchiHtml("en"), tamagotchiJs("en")], [tamagotchiHtml("en", { talkAvailable: true }), tamagotchiJs("en")],
+    [headerIconsHtml("en"), headerIconsJs("en")], [headerIconsHtml("en", { talkAvailable: true }), headerIconsJs("en")],
+  ]) {
+    const { document } = parseHTML(`<div>${html}</div>`);
+    // Booleans, not nodes: a failing assert on a linkedom node inspects the whole tree.
+    assert.equal(!!document.getElementById("crow-ptt-btn"), false, "no header mic button");
+    assert.equal(document.querySelectorAll(".crow-ptt-btn").length, 0);
+    assert.doesNotMatch(html + js, /toggleCrowPtt|crow-ptt|\/api\/meta-glasses\//, "its markup and its glasses polling are removed, not hidden");
+  }
+  assert.doesNotMatch(tamagotchiCss + headerIconsCss, /crow-ptt/, "and its styles");
 });
 
 test("Kiosk installed: a large Talk to Crow row is the FIRST thing in the tray, in the viewer's language", () => {
