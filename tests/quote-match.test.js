@@ -144,15 +144,77 @@ test("pieces match on word boundaries only", () => {
   assert.equal(matchQuote("ship weekly", page("relationship weekly, and we ship weekly")).found, 1);
 });
 
-test("short ellipsis pieces are ignored; all-short quotes are not checked", () => {
+test("short pieces must occur inside their gap; all-short quotes are not checked", () => {
   const r = matchQuote("the \u2026 the", page("the cat and the dog"));
   assert.equal(r.found, null);
   assert.match(r.reason, /too short/);
   assert.equal(r.where, null);
-  // "we" is ignored, "ship weekly" decides
-  assert.equal(matchQuote("we \u2026 ship weekly", page("they ship weekly")).found, 1);
+  // a short piece is checked, not ignored
+  assert.equal(matchQuote("we \u2026 ship weekly", page("they ship weekly")).found, 0);
+  assert.equal(matchQuote("we \u2026 ship weekly", page("we, they say, ship weekly")).found, 1);
   assert.equal(matchQuote("we \u2026 ship weekly", page("they ship monthly")).found, 0);
   assert.equal(matchQuote("", page("anything")).found, null);
+});
+
+test("a short piece cannot be slipped in or out (bypass)", () => {
+  assert.equal(matchQuote("We will ... not ... raise prices", page("We will raise prices this year.")).found, 0);
+  assert.equal(matchQuote("No ... we will raise prices", page("we will raise prices.")).found, 0);
+  assert.equal(matchQuote("No ... we will raise prices", page("No, we will raise prices.")).found, 1);
+  // a leading short piece must sit within the gap limit before the first long piece
+  assert.equal(matchQuote("No ... we will raise prices", page("No. " + "Filler words here. ".repeat(30) + "we will raise prices.")).found, 0);
+  // a trailing short piece likewise
+  assert.equal(matchQuote("we will raise prices [in] May", page("we will raise prices in May.")).found, 1);
+  assert.equal(matchQuote("we will raise prices [by] may", page("we will raise prices soon.")).found, 0);
+});
+
+test("a placeholder or omission cannot add or remove a negation", () => {
+  const add = matchQuote("We will [not] raise prices", page("We will raise prices."));
+  assert.equal(add.found, null);
+  assert.equal(add.reason, "couldn't check exactly: a negation was added or left out");
+  const neg = page("We will not, this year, raise prices.");
+  assert.match(matchQuote("We will ... raise prices", neg).reason, /negation/);
+  assert.equal(matchQuote("We will ... raise prices", neg).found, null);
+  assert.equal(matchQuote("We will [ ] raise prices", neg).found, null);
+  // a word ending in n't counts as a negation
+  assert.equal(matchQuote("We [have, this year,] raised prices", page("We haven't, this year, raised prices.")).found, null);
+  // a matching negation in the bracket is fine
+  assert.equal(matchQuote("We will [not] raise prices", neg).found, 1);
+  // a clean occurrence elsewhere on the page still counts
+  assert.equal(matchQuote("We will ... raise prices", page("We will not raise prices in May. In June we will finally raise prices.")).found, 1);
+  // a leading bracket that adds a negation
+  assert.equal(matchQuote("[Never] will we raise prices", page("Will we raise prices?")).found, null);
+});
+
+test("a capitalisation bracket keeps its letter", () => {
+  assert.equal(matchQuote("[I]t was great", page("It was great.")).found, 1);
+  assert.equal(matchQuote("[A]ll staff agreed", page("All staff agreed.")).found, 1);
+  assert.equal(normalizeForMatch("[I]t was"), "it was");
+  // standalone single-letter brackets are dropped as before
+  assert.equal(normalizeForMatch("a claim[a] here"), "a claim here");
+});
+
+test("matching is bounded on a crafted page and quote", () => {
+  // 200k chars of one repeated word; "omega" occurs only BEFORE them, so no in-order placement
+  // exists and a naive backtracking search would try a huge number of them
+  const big = page("omega " + "word ".repeat(40000));
+  const quote = Array.from({ length: 31 }, () => "word").concat("omega").join(" ... ");
+  let t0 = Date.now();
+  const r = matchQuote(quote, big);
+  let elapsed = Date.now() - t0;
+  assert.equal(r.found, null);
+  assert.equal(r.reason, "couldn't check: too many possible placements");
+  assert.ok(elapsed < 500, `took ${elapsed} ms`);
+  // a piece that is not on the page at all fails fast with 0
+  t0 = Date.now();
+  assert.equal(matchQuote(Array.from({ length: 31 }, () => "word").concat("absent").join(" ... "), big).found, 0);
+  elapsed = Date.now() - t0;
+  assert.ok(elapsed < 500, `took ${elapsed} ms`);
+  // more than 32 pieces (empty ones between separators count too) is not checked
+  assert.equal(matchQuote(Array.from({ length: 33 }, () => "word").join(" ... "), big).reason, "too long to check");
+  assert.equal(matchQuote("word " + "... ".repeat(40) + "word", big).reason, "too long to check");
+  // a normal quote on a big page still matches
+  assert.equal(matchQuote("we ship weekly", page("word ".repeat(40000) + "we ship weekly.")).found, 1);
+  assert.equal(matchQuote(Array.from({ length: 32 }, () => "word").join(" ... "), big).found, 1);
 });
 
 test("readable text first, then the full body", () => {

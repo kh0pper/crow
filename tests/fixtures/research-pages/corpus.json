@@ -36,6 +36,13 @@
     { "page": "long-notes.txt", "quote": "We never ... ship bugs", "expect": null },
     { "page": "long-notes.txt", "quote": "Marker one opens the second paragraph ... marker two closes it", "expect": 1 },
     { "page": "long-notes.txt", "quote": "Far marker alpha starts here ... far marker omega ends here", "expect": null },
-    { "page": "long-notes.txt", "quote": "The CEO said [the board will] always ship features", "expect": 0 }
+    { "page": "long-notes.txt", "quote": "The CEO said [the board will] always ship features", "expect": 0 },
+    { "page": "prices.txt", "quote": "We will ... not ... raise prices", "expect": 0 },
+    { "page": "prices.txt", "quote": "No ... we will raise prices", "expect": 0 },
+    { "page": "prices.txt", "quote": "We will [not] raise prices", "expect": null },
+    { "page": "prices-negated.txt", "quote": "We will ... raise prices", "expect": null },
+    { "page": "prices-negated.txt", "quote": "We will [ ] raise prices", "expect": null },
+    { "page": "prices.txt", "quote": "[I]t was great", "expect": 1 },
+    { "page": "prices.txt", "quote": "[A]ll staff agreed", "expect": 1 }
   ]
 }
