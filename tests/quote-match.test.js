@@ -116,11 +116,11 @@ test("combining marks and astral letters count as word characters", () => {
   assert.equal(matchQuote("ship weekly", page("we \u{1f600} ship weekly report")).found, 1);
 });
 
-test("[sic], [citation needed] and attached footnotes drop", () => {
-  assert.equal(matchQuote("growth[3] was strong", page("growth was strong")).found, 1);
-  assert.equal(matchQuote("We hired new staff[3]", page("We hired new staff.")).found, 1);
-  assert.equal(matchQuote("the end.[12] Next", page("the end. Next")).found, 1);
-  assert.equal(matchQuote("a claim[a] here", page("a claim here")).found, 1);
+test("[sic] and [citation needed] drop; attached footnotes drop on the page side", () => {
+  assert.equal(matchQuote("growth was strong", page("growth[3] was strong")).found, 1);
+  assert.equal(matchQuote("We hired new staff", page("We hired new staff[3].")).found, 1);
+  assert.equal(matchQuote("the end. Next", page("the end.[12] Next")).found, 1);
+  assert.equal(matchQuote("a claim here", page("a claim[a] here")).found, 1);
   assert.equal(matchQuote("growth was strong [sic]", page("growth[12] was strong")).found, 1);
   assert.equal(matchQuote("growth [citation needed] was strong", page("growth was strong")).found, 1);
   // a spaced footnote-looking bracket is an edit, not a footnote
@@ -196,6 +196,59 @@ test("matching is bounded on a crafted page and quote", () => {
   // both texts and the attribution form share one candidate cap
   assert.equal(timed("a".repeat(1980) + " - Jane Doe", { readable: aPage.readable, body: "b" + aPage.readable, truncated: false }).reason,
     "couldn't check: too many possible placements");
+});
+
+test("breaker (a): an attached bracket in the QUOTE is an edit, not a footnote", () => {
+  for (const [q, text] of [
+    ["We can[t] raise prices", "We can raise prices."],
+    ["We hired 1[00] staff", "We hired 1 staff."],
+    ["We do[n] not raise prices", "We do not raise prices."],
+    ["We hired new staff[3]", "We hired new staff."],
+    ["growth[3] was strong", "growth was strong"],
+    ["a claim[a] here", "a claim here"],
+    ["the end.[12] Next", "the end. Next"],
+    ["wor[d] here", "word here"],
+  ]) assert.deepEqual(matchQuote(q, page(text)), { found: null, where: null, reason: CUT }, q);
+  // the PAGE side still drops attached footnote markers
+  assert.equal(matchQuote("We hired new staff", page("We hired new staff[3].")).found, 1);
+  assert.equal(matchQuote("growth was strong", page("growth[12] was strong[a]")).found, 1);
+  // [sic], [citation needed] and a capitalisation bracket still work in a quote
+  assert.equal(matchQuote("growth was strong [sic]", page("growth was strong")).found, 1);
+  assert.equal(matchQuote("growth[sic] was strong", page("growth was strong")).found, 1);
+  assert.equal(matchQuote("[I]t was great", page("It was great.")).found, 1);
+  assert.equal(matchQuote("\"[I]t was great\"", page("It was great.")).found, 1);
+});
+
+test("breaker (b): a stopword with a trailing period does not start an attribution", () => {
+  const p = page("We will raise prices this year.");
+  for (const q of ["We will raise prices \u2014 Not. Ever.", "We will raise prices - Never. Again Inc", "We will raise prices \u2014 No. Way"]) {
+    assert.equal(matchQuote(q, p).found, 0, q);
+  }
+  assert.equal(matchQuote("We will raise prices - A. Person", p).found, 1);
+});
+
+test("breaker (c): hyphens, apostrophes and number separators join words", () => {
+  assert.equal(matchQuote("toxic levels of lead were found", page("Non-toxic levels of lead were found.")).found, 0);
+  assert.equal(matchQuote("5 million jobs were lost", page("About 2.5 million jobs were lost.")).found, 0);
+  assert.equal(matchQuote("500 dollars per family", page("It cost 1,500 dollars per family.")).found, 0);
+  assert.equal(matchQuote("prices rose by 2", page("prices rose by 2.5 percent")).found, 0);
+  assert.equal(matchQuote("prices rose by 1", page("prices rose by 1,000 dollars")).found, 0);
+  assert.equal(matchQuote("the toxic", page("the toxic-waste site")).found, 0);
+  assert.equal(matchQuote("lead was", page("o'lead was here")).found, 0);
+  // plain boundaries still match
+  assert.equal(matchQuote("toxic", page("toxic waste")).found, 1);
+  assert.equal(matchQuote("toxic waste", page("the toxic waste site")).found, 1);
+  assert.equal(matchQuote("5 million jobs were lost", page("Exactly 5 million jobs were lost.")).found, 1);
+  assert.equal(matchQuote("rose by 2", page("prices rose by 2. Then")).found, 1);
+  assert.equal(matchQuote("the workers", page("the workers' union met")).found, 1);
+  assert.equal(matchQuote("toxic levels", page("non - toxic levels")).found, 1);
+});
+
+test("breaker (d): ? and ! at a quote's edge are kept", () => {
+  assert.equal(matchQuote("We will raise prices?", page("We will raise prices.")).found, 0);
+  assert.equal(matchQuote("We will raise prices!", page("We will raise prices.")).found, 0);
+  assert.equal(matchQuote("Will we raise prices?", page("Will we raise prices? No.")).found, 1);
+  assert.equal(matchQuote("We will raise prices;", page("We will raise prices.")).found, 1);
 });
 
 test("readable text first, then the full body", () => {

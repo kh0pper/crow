@@ -29,7 +29,7 @@
     { "page": "notes.txt", "quote": "Attendance data will be reviewed every Monday by the coordinator", "expect": 0 },
     { "page": "notes.txt", "quote": "the … the", "expect": null },
     { "page": "blog-ellipsis.html", "quote": "Past the old mill ... the second bridge", "expect": null },
-    { "page": "news-article.html", "quote": "growth[3] in the app's subscriber base reached 14 percent", "expect": 1 },
+    { "page": "news-article.html", "quote": "growth[3] in the app's subscriber base reached 14 percent", "expect": null },
     { "page": "news-article.html", "quote": "We ship weekly now because our customers asked us to [sic]", "expect": 1 },
     { "page": "long-notes.txt", "quote": "The CEO said [that] we ship weekly", "expect": null },
     { "page": "long-notes.txt", "quote": "The CEO said [the company will] never ship bugs", "expect": null },
@@ -50,6 +50,20 @@
     { "page": "prices-negated.txt", "quote": "We will raise prices for members", "expect": 0 },
     { "page": "prices-negated.txt", "quote": "We will [raise prices]", "expect": null },
     { "page": "prices.txt", "quote": "We hired [10] new staff", "expect": null },
-    { "page": "prices.txt", "quote": "... we will raise prices", "expect": null }
+    { "page": "prices.txt", "quote": "... we will raise prices", "expect": null },
+    { "page": "breaker.txt", "quote": "We can[t] raise prices", "expect": null },
+    { "page": "breaker.txt", "quote": "We hired 1[00] staff", "expect": null },
+    { "page": "breaker.txt", "quote": "We do[n] not raise prices", "expect": null },
+    { "page": "breaker.txt", "quote": "We will raise prices — Not. Ever.", "expect": 0 },
+    { "page": "breaker.txt", "quote": "We will raise prices - Never. Again Inc", "expect": 0 },
+    { "page": "breaker.txt", "quote": "We will raise prices — No. Way", "expect": 0 },
+    { "page": "breaker.txt", "quote": "toxic levels of lead were found", "expect": 0 },
+    { "page": "breaker.txt", "quote": "5 million jobs were lost", "expect": 0 },
+    { "page": "breaker.txt", "quote": "500 dollars per family", "expect": 0 },
+    { "page": "breaker.txt", "quote": "toxic waste", "expect": 1 },
+    { "page": "breaker.txt", "quote": "Non-toxic levels of lead were found", "expect": 1 },
+    { "page": "breaker.txt", "quote": "2.5 million jobs were lost", "expect": 1 },
+    { "page": "breaker.txt", "quote": "We will raise prices?", "expect": 0 },
+    { "page": "breaker.txt", "quote": "We will raise prices.", "expect": 1 }
   ]
 }

@@ -8,26 +8,28 @@
  * The source is ASCII-only: every special character is written as a \u escape so invisible ones
  * stay visible.
  *
- * normalizeForMatch (applied to the quote and to the page text alike), in order:
+ * normalizeForMatch (page text) and normalizeQuoteForMatch (the quote), in order:
  *   1. superscript digits (U+00B9, U+00B2, U+00B3, U+2070-U+2079) are footnote markers: removed
  *      BEFORE NFKC, which would otherwise turn them into ordinary digits;
  *   2. NFKC: folds NBSP and other spaces, ligatures, and the ellipsis character into "...";
  *   3. soft hyphen (U+00AD) and zero-width characters (U+200B-U+200D, U+2060, U+FEFF) are removed;
  *   4. the allowed editorial marks, and nothing else:
- *        - a single-letter capitalisation bracket directly followed by a letter keeps its letter
- *          ("[I]t" -> "It");
+ *        - a single-letter capitalisation bracket directly followed by a letter and not preceded
+ *          by one keeps its letter ("[I]t" -> "It"; "can[t]" is not one);
  *        - [sic] and [citation needed] are removed wherever they are;
- *        - a footnote marker, [N] with 1-3 digits or a single letter like [a], is removed ONLY
- *          when attached to the preceding non-space character ("word[3]", "end.[12]"). A spaced
- *          "[10]" stays, so in a quote it counts as a bracketed edit;
+ *        - PAGE side only: a footnote marker, [N] with 1-3 digits or a single letter like [a], is
+ *          removed when attached to the preceding non-space character ("word[3]", "end.[12]").
+ *          In a quote every such bracket stays ("can[t]", "1[00]", "staff[3]", a spaced
+ *          "[10]"), so it counts as a bracketed edit;
  *   5. apostrophe-like and single quote marks (U+2018, U+2019, U+201A, U+201B, U+02BC, U+2032,
  *      backtick, U+00B4) become ', curly/guillemet double quotes become ";
  *   6. hyphen, en/em dashes, horizontal bar and minus (U+2010-U+2015, U+2212) become -;
  *   7. whitespace runs become one space; lower-cased; trimmed.
  *
  * matchQuote(quote, {readable, body, truncated}) -> {found: 1|0|null, where, reason}:
- *   - the quote is normalized; outer matching "/' pairs and sentence punctuation (. , ; : ! ?)
- *     at its edges are stripped, so a quote's closing period need not match the page;
+ *   - the quote is normalized; outer matching "/' pairs and the punctuation . , ; : at its
+ *     edges are stripped, so a quote's closing period need not match the page. "?" and "!" are
+ *     kept: they change what the sentence says;
  *   - over MAX_QUOTE_CHARS (2,000) normalized chars: null, "too long to check";
  *   - ANY ellipsis ("...", ". . .", or the U+2026 character) or ANY square bracket left after
  *     step 4: null, CUT_OR_INSERTION. Never 1 and never 0: the words may well be there, but the
@@ -38,11 +40,13 @@
  *     it starts with a capital letter (after an optional dash or comma), its name part has 2 to 6
  *     words that each start with an uppercase letter (or are one of the connectors
  *     of/de/van/von/al/the/and), its first word is not one of The/A/An/Never/Always/Nothing/No/
- *     Not/None/Every/All/It/We/They/This/That/Our/Its (as written, so the initial "A." still
+ *     Not/None/Every/All/It/We/They/This/That/Our/Its (as written, compared without a trailing
+ *     "." unless the word is a one-letter initial, so "Not. Ever." is rejected and "A. Person"
  *     passes), optionally followed by ", <Title>" of at most 3 such words;
  *   - search: the Readability text first, then the full body text. One indexOf loop per text;
  *     a hit counts only when the code points around it are not letters, digits or combining
- *     marks. At most MAX_CANDIDATES (20,000) hits are examined across all texts and both quote
+ *     marks, a hyphen or apostrophe with a letter beyond it does not end a word ("Non-toxic"),
+ *     and a "." or "," between digits does not end a number ("2.5", "1,500"). At most MAX_CANDIDATES (20,000) hits are examined across all texts and both quote
  *     forms; past that: null, "couldn't check: too many possible placements";
  *   - not found: null when the stored text was truncated (the quote may be in the cut part) or
  *     there is no text at all; otherwise 0.
@@ -52,14 +56,17 @@ export const MIN_PIECE_CHARS = 4;
 export const MAX_QUOTE_CHARS = 2000;
 export const MAX_CANDIDATES = 20000;
 
-export function normalizeForMatch(s) {
-  return String(s ?? "")
+function normalize(s, page) {
+  let out = String(s ?? "")
     .replace(/[\u00b9\u00b2\u00b3\u2070-\u2079]/g, "") // superscript footnotes (before NFKC turns them into digits)
     .normalize("NFKC") // also folds NBSP to a space and the ellipsis character to "..."
     .replace(/[\u00ad\u200b-\u200d\u2060\ufeff]/g, "") // soft hyphen, zero-width
-    .replace(/\[(\p{L})\](?=\p{L})/gu, "$1") // [I]t: a capitalisation bracket keeps its letter
-    .replace(/\[(?:sic|citation needed)\]/gi, "") // editorial markers
-    .replace(/(?<=\S)\[(?:\d{1,3}|\p{L})\]/gu, "") // footnote markers attached to the word before
+    .replace(/(?<!\p{L})\[(\p{L})\](?=\p{L})/gu, "$1") // [I]t: a capitalisation bracket keeps its letter
+    .replace(/\[(?:sic|citation needed)\]/gi, ""); // editorial markers
+  // footnote markers attached to the word before: page text only. In a quote "can[t]" or
+  // "1[00]" is an edit, so the bracket stays and the quote reads couldn't-check.
+  if (page) out = out.replace(/(?<=\S)\[(?:\d{1,3}|\p{L})\]/gu, "");
+  return out
     .replace(/[\u2018\u2019\u201a\u201b\u02bc\u2032`\u00b4]/g, "'")
     .replace(/[\u201c\u201d\u201e\u201f\u2033\u00ab\u00bb]/g, '"')
     .replace(/[\u2010-\u2015\u2212]/g, "-")
@@ -68,7 +75,18 @@ export function normalizeForMatch(s) {
     .trim();
 }
 
-const EDGE_PUNCT = /^[.,;:!?\s]+|[.,;:!?\s]+$/g;
+/** Page-side normalization (also drops attached footnote markers like "word[3]"). */
+export function normalizeForMatch(s) {
+  return normalize(s, true);
+}
+
+/** Quote-side normalization: only [sic], [citation needed] and [I]t-style brackets are edits it undoes. */
+export function normalizeQuoteForMatch(s) {
+  return normalize(s, false);
+}
+
+// Only . , ; : are trimmed: "?" and "!" change what a sentence says.
+const EDGE_PUNCT = /^[.,;:\s]+|[.,;:\s]+$/g;
 const WORD_CHAR = /[\p{L}\p{N}\p{M}]/u;
 // After normalization "\u2026" is already "...".
 const CUT_OR_BRACKET = /\.\.\.|\. \. \.|[[\]]/;
@@ -98,7 +116,10 @@ function looksLikeAttribution(rawTail) {
   if (!capitalizedWords(parts[0], 6)) return false;
   const name = parts[0].trim().split(/\s+/);
   if (name.length < 2) return false;
-  if (NOT_A_NAME_START.has(name[0].replace(/[,;:!?]+$/, ""))) return false;
+  // "Not." or "Never." is still the stopword; only a one-letter initial like "A." keeps its period
+  let first = name[0].replace(/[,;:!?]+$/, "");
+  if (!/^\p{L}\.$/u.test(first)) first = first.replace(/\.+$/, "");
+  if (NOT_A_NAME_START.has(first)) return false;
   return parts.length === 1 || capitalizedWords(parts[1], 3);
 }
 
@@ -129,7 +150,7 @@ function stripOuterQuotes(s) {
 
 /** The normalized text Crow looks for, or a reason it cannot look. */
 function prepareQuote(raw) {
-  const n = normalizeForMatch(raw);
+  const n = normalizeQuoteForMatch(raw);
   if (n.length > MAX_QUOTE_CHARS) return { reason: "too long to check" };
   // before the edge trim, whose "." would otherwise eat a leading or trailing ellipsis
   if (CUT_OR_BRACKET.test(n)) return { reason: CUT_OR_INSERTION };
@@ -138,16 +159,54 @@ function prepareQuote(raw) {
   return { q };
 }
 
-/** True when the code point ending just before `i` (before=true) or starting at `i` is a word char. */
-function isWordAt(text, i, before) {
-  if (before) {
-    if (i <= 0) return false;
-    let cp = text.charCodeAt(i - 1);
-    if (cp >= 0xdc00 && cp <= 0xdfff && i >= 2) cp = text.codePointAt(i - 2);
-    return WORD_CHAR.test(String.fromCodePoint(cp));
+const LETTER = /[\p{L}\p{M}]/u;
+const DIGIT = /\p{N}/u;
+const JOINERS = new Set(["-", "'"]);
+const NUMBER_SEPARATORS = new Set([".", ","]);
+
+/** The code point ending just before `i`, with its start index; null at the text start. */
+function cpBefore(text, i) {
+  if (i <= 0) return null;
+  let start = i - 1;
+  const lo = text.charCodeAt(start);
+  if (lo >= 0xdc00 && lo <= 0xdfff && start >= 1) {
+    const hi = text.charCodeAt(start - 1);
+    if (hi >= 0xd800 && hi <= 0xdbff) start--;
   }
-  if (i >= text.length) return false;
-  return WORD_CHAR.test(String.fromCodePoint(text.codePointAt(i)));
+  return { ch: String.fromCodePoint(text.codePointAt(start)), at: start };
+}
+
+/** The code point starting at `i`, with the index after it; null at the text end. */
+function cpAt(text, i) {
+  if (i >= text.length) return null;
+  const ch = String.fromCodePoint(text.codePointAt(i));
+  return { ch, next: i + ch.length };
+}
+
+/**
+ * True when [start, end) of `text` is a whole run of words: the code points around it are not
+ * letters, digits or combining marks; a hyphen or apostrophe with a letter beyond it joins that
+ * word on ("Non-toxic", "o'lead", "toxic-waste"); a "." or "," between two digits joins the
+ * number ("2.5", "1,500").
+ */
+function bounded(text, start, end) {
+  const b = cpBefore(text, start);
+  if (b) {
+    if (WORD_CHAR.test(b.ch)) return false;
+    const bb = cpBefore(text, b.at);
+    if (bb && JOINERS.has(b.ch) && LETTER.test(bb.ch)) return false;
+    const first = cpAt(text, start);
+    if (bb && NUMBER_SEPARATORS.has(b.ch) && DIGIT.test(bb.ch) && first && DIGIT.test(first.ch)) return false;
+  }
+  const a = cpAt(text, end);
+  if (a) {
+    if (WORD_CHAR.test(a.ch)) return false;
+    const aa = cpAt(text, a.next);
+    if (aa && JOINERS.has(a.ch) && LETTER.test(aa.ch)) return false;
+    const last = cpBefore(text, end);
+    if (aa && NUMBER_SEPARATORS.has(a.ch) && DIGIT.test(aa.ch) && last && DIGIT.test(last.ch)) return false;
+  }
+  return true;
 }
 
 const OUT_OF_BUDGET = Symbol("quote-match budget");
@@ -156,7 +215,7 @@ const OUT_OF_BUDGET = Symbol("quote-match budget");
 function occursIn(text, q, budget) {
   for (let i = text.indexOf(q); i >= 0; i = text.indexOf(q, i + 1)) {
     if (--budget.left < 0) throw OUT_OF_BUDGET;
-    if (!isWordAt(text, i, true) && !isWordAt(text, i + q.length, false)) return true;
+    if (bounded(text, i, i + q.length)) return true;
   }
   return false;
 }
