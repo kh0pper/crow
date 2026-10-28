@@ -581,3 +581,69 @@ test("1280×800: Details opens the card's drawer on its bot's board, with the ca
     assert.deepEqual(p.errors, [], "no page errors");
   } finally { await p.close(); }
 });
+
+// R1 follow-ups Task 2: the classic drawer's status select comes from the
+// CARD's own board def, not the page bot's. A card from a custom-def project
+// opened via #open on a builtin-def bot's board lists its own statuses (no
+// "(off-board)" option), a face on that board still gets the board's own
+// four, and saving one of the card's own statuses works.
+test("1280×800: a card from a custom-def project, opened on another bot's board, lists and saves its own statuses", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  const { createDbClient } = await import("../servers/db.js");
+  const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
+  const db = createDbClient();
+  let venues, shipyard;
+  try {
+    const find = async (name) => {
+      const have = (await db.execute({ sql: "SELECT id FROM project_spaces WHERE name=? AND archived_at IS NULL", args: [name] })).rows[0];
+      return have ? Number(have.id) : (await createProjectSpace(db, { name })).id;
+    };
+    venues = await find("Venues");
+    shipyard = await find("Shipyard");
+    await db.execute({
+      sql: "INSERT OR IGNORE INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES ('scout', 'Scout', ?, 1, ?)",
+      args: [JSON.stringify({ gateways: [{ type: "perch" }], tracker_config: { type: "kanban" } }), venues],
+    });
+  } finally { db.close(); }
+  const tk = new Database(TASKS);
+  tk.prepare("INSERT OR IGNORE INTO board_defs (project_id, display_name, status_values, terminal_values, fields_json) VALUES (?, 'Shipyard', ?, ?, '[]')")
+    .run(shipyard, JSON.stringify(["todo", "doing", "shipped", "dropped"]), JSON.stringify(["shipped", "dropped"]));
+  const own = Number(tk.prepare("INSERT INTO tasks_items (title, status, priority, project_id) VALUES ('Paint the hull', 'todo', 1, ?)").run(shipyard).lastInsertRowid);
+  const face = Number(tk.prepare("INSERT INTO tasks_items (title, status, priority, project_id) VALUES ('Find a venue', 'pending', 1, ?)").run(venues).lastInsertRowid);
+  tk.close();
+  const OPTS = "JSON.stringify([].map.call(document.getElementById('bb-d-status').options,function(o){return [o.value,o.textContent];}))";
+  const opts = (pairs) => JSON.stringify(pairs);
+  const ownOpts = opts([["todo", "todo"], ["doing", "doing"], ["shipped", "shipped"], ["dropped", "dropped"]]);
+  const pageOpts = opts([["pending", t("botboard.statusPending", "en")], ["in_progress", t("botboard.statusInProgress", "en")],
+    ["done", t("botboard.statusDone", "en")], ["cancelled", t("botboard.statusCancelled", "en")]]);
+  const drawerOn = async (p, id) => {
+    await p.until("!!document.querySelector('#bb-drawer.bb-open')", "the card drawer");
+    await p.until(`(document.getElementById('bb-d-title').textContent||'').indexOf('${id}')>=0`, "the drawer on card " + id);
+  };
+  const p = await open("/dashboard/board", { width: 1280, height: 800 });
+  try {
+    await p.send("Page.navigate", { url: base + `/dashboard/bot-board?bot=scout#open=${own}` });
+    await drawerOn(p, own);
+    await p.until(`${OPTS}===${JSON.stringify(ownOpts)}`, "the card's own statuses in the select");
+    assert.equal(await p.ev("document.getElementById('bb-d-status').value"), "todo");
+
+    // A face on this board: the board's own four again, labelled as the board labels them.
+    await p.ev(`document.querySelector('.bb-card[data-card="${face}"]').click()`);
+    await drawerOn(p, face);
+    await p.until(`${OPTS}===${JSON.stringify(pageOpts)}`, "the board's statuses for a card on this board");
+    assert.equal(await p.ev("document.getElementById('bb-d-status').value"), "pending");
+
+    // Back to the custom-def card, and save one of its own statuses.
+    await p.send("Page.navigate", { url: "about:blank" });
+    await p.send("Page.navigate", { url: base + `/dashboard/bot-board?bot=scout#open=${own}` });
+    await drawerOn(p, own);
+    await p.until(`${OPTS}===${JSON.stringify(ownOpts)}`, "the card's own statuses again");
+    await p.ev("document.getElementById('bb-d-status').value='doing'");
+    // The drawer scrolls; press Save the way a keyboard user does.
+    await p.ev("document.getElementById('bb-d-save').click()");
+    const end = Date.now() + 10000;
+    while (statusOf(own) !== "doing" && Date.now() < end) await sleep(60);
+    assert.equal(statusOf(own), "doing", "the card's own status saved (drawer said: " + (await p.ev("document.getElementById('bb-d-msg').textContent").catch(() => "?")) + ")");
+    assert.deepEqual(p.errors, [], "no page errors");
+  } finally { await p.close(); }
+});

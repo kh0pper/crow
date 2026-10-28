@@ -30,6 +30,14 @@ export function statusLabel(status, lang) {
   return key ? t(key, lang) : (STATUS_LABEL[status] || status);
 }
 
+// A status value's label on a given board def — THE classic-board rule (the
+// SSR drawer select, card faces, and GET /card/:id's status_labels all use
+// it): configured values render raw (tracker-style); only the builtin
+// fallback def keeps the i18n'd four.
+export function defStatusLabel(def, s, lang) {
+  return def.builtin ? statusLabel(s, lang) : String(s);
+}
+
 // Re-export of the session-rail statuses from THE shared predicate — this file
 // used to declare its own copy. Prefer isCardLocked/lockMapFor over comparing
 // statuses by hand: a card is also locked by an unfinished bot_jobs row, which

@@ -113,6 +113,19 @@ test("GET card returns the resolved board def; no stage, no effectiveStage, no p
   assert.deepEqual(b.board.status_values, ["pending", "in_progress", "done", "cancelled"]);
 });
 
+test("GET card labels the def's statuses the way the classic board does (raw for a custom def, i18n'd for the builtin four)", async () => {
+  const { t } = await import("../servers/gateway/dashboard/shared/i18n.js");
+  const r = await (await fetch(base + "/card/2")).json();
+  assert.deepEqual(r.board.status_labels, { todo: "todo", doing: "doing", shipped: "shipped" });
+  for (const lang of ["en", "es"]) {
+    const b = await (await fetch(base + "/card/1", { headers: { cookie: "crow_lang=" + lang } })).json();
+    assert.deepEqual(b.board.status_labels, {
+      pending: t("botboard.statusPending", lang), in_progress: t("botboard.statusInProgress", lang),
+      done: t("botboard.statusDone", lang), cancelled: t("botboard.statusCancelled", lang),
+    }, "builtin labels in " + lang);
+  }
+});
+
 test("GET card carries the card's documents for the drawer (P6), titles as data", async () => {
   const before = await (await fetch(base + "/card/1")).json();
   assert.deepEqual(before.documents, [], "an older store (no artifacts, an old bot_sessions): no documents, and the card still loads");

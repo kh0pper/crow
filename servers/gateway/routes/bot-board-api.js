@@ -105,6 +105,7 @@ import { csrfMiddleware } from "../dashboard/shared/csrf.js";
 import { parseCookies } from "../dashboard/auth.js";
 import { SUPPORTED_LANGS } from "../dashboard/shared/i18n.js";
 import { documentsForCard } from "../make/card-docs.js";
+import { defStatusLabel } from "../dashboard/panels/bot-board/data-queries.js";
 
 // Slice C: operator-approved promotion target (the PRIMARY skills dir both the
 // pi bridge and the glasses voice path search via skill_resolver).
@@ -330,9 +331,10 @@ export default function botBoardApiRouter(dashboardAuth) {
       // ones above. Missing crow.db tables read as none; a failure here never
       // costs the drawer its card.
       const crowLang = parseCookies(req).crow_lang;
+      const lang = SUPPORTED_LANGS.includes(crowLang) ? crowLang : "en";
       let documents = [];
       try {
-        documents = await documentsForCard(cdb, id, { lang: SUPPORTED_LANGS.includes(crowLang) ? crowLang : "en" });
+        documents = await documentsForCard(cdb, id, { lang });
       } catch (err) { console.warn(`[bot-board-api] card ${id} documents: ${err.message}`); }
       return res.json({
         card, projects, locked,
@@ -341,6 +343,9 @@ export default function botBoardApiRouter(dashboardAuth) {
           terminal_values: def.terminal_values,
           fields: def.fields,
           builtin: def.builtin,
+          // The drawer's status select is rebuilt from THIS card's def (not
+          // the page bot's), labelled exactly as the classic board labels.
+          status_labels: Object.fromEntries(def.status_values.map((s) => [s, defStatusLabel(def, s, lang)])),
         },
         autonomy: card.autonomy,
         plan_head,

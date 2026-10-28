@@ -151,8 +151,21 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     }
     openCardDrawer({id:idNum,status:null,locked:false,archived:false,itemType:'kanban'},'');
   }
+  // The drawer's status select. The SSR markup holds the PAGE board's def —
+  // right for a card opened from a face on this board. A card opened by id
+  // may live on another def, so it shows no options until GET /card/:id
+  // hands over its own def (never another board's statuses), and every
+  // hydration rebuilds the select from the card's own def.
+  var PAGE_STATUS_OPTS=(function(){ var s=$('bb-d-status');
+    return s?[].map.call(s.options,function(o){return [o.value,o.textContent];}):[]; })();
+  function setStatusOptions(list){
+    var s=$('bb-d-status'); if(!s) return;
+    clearEl(s);
+    list.forEach(function(p){ s.appendChild(optEl(p[0],p[1],false)); });
+  }
   function openCardDrawer(data,title){
     cur=data;
+    setStatusOptions(data.status!=null?PAGE_STATUS_OPTS:[]);
     // Save waits for the card GET: the form is only trusted once it shows
     // server state, and loadedStatus is what Save sends as expected_status.
     cur.loadedStatus=data.status; cur.hydrated=false;
@@ -183,6 +196,13 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         cur.locked=!!r.j.locked;
         applyLockUi();
         applyArchivedUi($('bb-d-archive'),$('bb-d-unarchive'),DRAWER_FIELD_IDS,cur.archived,cur.locked);
+        // The card's OWN def (not the page bot's), labelled as the server's
+        // classic-board rule labels it.
+        var bd=r.j.board;
+        if(bd&&Array.isArray(bd.status_values)&&bd.status_values.length){
+          var lbl=bd.status_labels||{};
+          setStatusOptions(bd.status_values.map(function(s){ return [String(s), lbl[s]!=null?String(lbl[s]):String(s)]; }));
+        }
         // An off-def status must stay representable: inject it as an option so
         // Save cannot silently rewrite the card to the first configured value.
         var ss0=$('bb-d-status'), want=c.status||'pending';

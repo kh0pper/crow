@@ -14,7 +14,7 @@ import { botBoardStyles } from "./css.js";
 import { clientJs } from "./client.js";
 import {
   TASKS_DB, STATUS_BADGE,
-  lockMapFor, statusLabel, liveBirdsByCard, sessionBirdState, foldBirdStates,
+  lockMapFor, defStatusLabel, liveBirdsByCard, sessionBirdState, foldBirdStates,
   loadUnassigned,
 } from "./data-queries.js";
 import { DEFAULT_BOARD_DEF, resolveBoardDef, resolveSlugBoardDef } from "../../../routes/board-defs.js";
@@ -215,11 +215,6 @@ export function turnOnPanelHtml(selBot, req, lang) {
     `<button type="submit" class="btn btn-primary btn-sm">${t("botbuilder.rowTurnOn", lang)}</button></form></div>`;
 }
 
-// Display: configured values render raw (tracker-style); only the builtin
-// fallback def keeps the i18n'd four.
-function defStatusLabel(def, s, lang) {
-  return def.builtin ? statusLabel(s, lang) : String(s);
-}
 
 // Shared tag-pill builder (Track 2 Task 10, W4/§5.2) — the kanban face
 // (cardFaceHtml) and the tracker face (trackerCardFaceHtml) both render a
