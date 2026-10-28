@@ -220,6 +220,16 @@ test("POST items/:kind/:ref/card links and unlinks by hand", async () => {
   assert.equal(await docs.cardForDocument(db, "artifact", "art_l"), null);
 });
 
+test("clearing the hand link answers with the document's REAL card: origin_card still wins, no claimed detach", async () => {
+  addArtifact("art_o", { card: 12 });
+  const r = await post("/shell-api/items/artifact/art_o/card", { card_id: 9 });
+  assert.deepEqual(r.body, { ok: true, card_id: 9 }, "the hand link wins while it is set");
+  const u = await post("/shell-api/items/artifact/art_o/card", { card_id: null });
+  assert.equal(u.status, 200);
+  assert.deepEqual(u.body, { ok: true, card_id: 12 }, "origin_card, not null");
+  assert.equal(await docs.cardForDocument(db, "artifact", "art_o"), 12);
+});
+
 test("a Make tile's cardId comes from cardForDocument", async () => {
   const { listArtifactItems } = await import("../servers/gateway/make/sources.js");
   addArtifact("art_thread", { session: "perchlive-mk" });

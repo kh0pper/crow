@@ -10,7 +10,10 @@
  *
  *   POST /dashboard/shell-api/items/:kind/:ref/card  { card_id: number | null }
  *     -> { ok: true, card_id }   links a document (artifact, Workspace file) to a card by
- *                                hand, or clears the hand link; 404 for an unknown item or
+ *                                hand, or clears the hand link; card_id is the document's
+ *                                card AFTERWARDS (cardForDocument: an artifact's origin_card
+ *                                or its chat's card still win over a cleared hand link);
+ *                                404 for an unknown item or
  *                                card (getCard in tasks.db), 409 archived for an archived card
  *
  *   POST /dashboard/shell-api/cards/:id/lane
@@ -46,7 +49,7 @@ import { homedir } from "node:os";
 import { jsonError } from "./_error.js";
 import { createDbClient } from "../../db.js";
 import { ITEM_KINDS, setItemProject, setItemCard } from "../../shared/shell-items.js";
-import { documentsForCard } from "../make/card-docs.js";
+import { documentsForCard, cardForDocument } from "../make/card-docs.js";
 import { parseCookies } from "../dashboard/auth.js";
 import { SUPPORTED_LANGS } from "../dashboard/shared/i18n.js";
 import { installedBundleIds } from "../skills-catalog.js";
@@ -240,7 +243,10 @@ export function shellApiRouter(dashboardAuth) {
         if (card.archived_at != null) return jsonError(res, 409, "archived");
       }
       await setItemCard(db, kind, ref, cardId);
-      res.json({ ok: true, card_id: cardId });
+      // The document's REAL card now (cardForDocument's one ordering rule): clearing the
+      // hand link never claims a detach that didn't happen, since an artifact's
+      // origin_card or its chat's card still win.
+      res.json({ ok: true, card_id: await cardForDocument(db, kind, ref) });
     } catch (err) {
       if (err && err.code === "not_migrated") return jsonError(res, 503, "not_migrated");
       if (err && err.code === "bad_kind") return jsonError(res, 400, "bad_request");
