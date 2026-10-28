@@ -10,6 +10,8 @@
  *   disk      — df-based free % (<10% → warn)
  *   storage   — file storage availability (not configured → info/off; unreachable → warn)
  *   agents    — pi_bot_defs enabled count (always ok, count display)
+ *   peerTrust — PT-1: a trust lookup that failed closed (warn), a paired but
+ *               untrusted row holding a bearer/key, an orphan credential (info)
  *   peers     — paired peer's gateway URL failing /health >=2h (warn, pushed);
  *               else trusted peers unseen >24h (info)
  *   updates   — auto_update_* version comparison (info if update available)
@@ -53,6 +55,7 @@ import { isAuditDegraded } from "../../../../shared/cross-host-auth.js";
 import { getReceiveHealth } from "../../../../sharing/receive-health.js";
 import { getProviderHealth } from "../../../provider-health.js";
 import { getPeerProbeHealth } from "../../../peer-probe-health.js";
+import { getPeerTrustHealth } from "../../../../shared/peer-trust-health.js";
 import { getPeerDialHealth } from "../../../../shared/peer-dial-health.js";
 import { readReservation } from "../../../box-reservation.js";
 import { localBackupContext, newestBackupOwnership } from "../../../../shared/backup-naming.js";
@@ -345,6 +348,32 @@ async function peersSignal(db, lang = "en", nowFn = () => Date.now()) {
     actionLabel: t("signals.peers.action", lang),
     actionHref: "/dashboard/settings?section=paired-instances",
   };
+}
+
+// PT-1 peer trust: a trust lookup that failed closed (warn: a live peer may be
+// refused), a paired-but-untrusted row that still holds a bearer or a key, and
+// a stored credential with no paired instance (info). One issue per peer.
+function peerTrustSignal(lang = "en", nowFn = () => Date.now()) {
+  const h = getPeerTrustHealth(nowFn());
+  const label = t("signals.peerTrust.label", lang);
+  const out = [];
+  const short = (id) => String(id).slice(0, 16);
+  for (const id of Object.keys(h.lookupFailures)) {
+    out.push({ id: `peer-trust:lookup:${id}`, severity: "warn", state: "warn", issueOnly: true, label,
+      issueLabel: fill(t("signals.peerTrust.lookupFailed", lang), { name: short(id) }),
+      actionLabel: t("signals.peers.action", lang), actionHref: "/dashboard/settings?section=paired-instances" });
+  }
+  for (const r of h.untrustedWithCreds) {
+    out.push({ id: `peer-trust:untrusted:${r.id}`, severity: "info", state: "info", issueOnly: true, label,
+      issueLabel: fill(t("signals.peerTrust.untrusted", lang), { name: r.name || short(r.id) }),
+      actionLabel: t("signals.peers.action", lang), actionHref: "/dashboard/settings?section=paired-instances" });
+  }
+  for (const id of h.orphanKeys) {
+    out.push({ id: `peer-trust:orphan:${id}`, severity: "info", state: "info", issueOnly: true, label,
+      issueLabel: fill(t("signals.peerTrust.orphan", lang), { name: short(id) }),
+      actionLabel: t("signals.peers.action", lang), actionHref: "/dashboard/settings?section=paired-instances" });
+  }
+  return out.length ? out : null;
 }
 
 // DIALER-RETRY (2026-10-03): a paired peer the tailnet instance-sync dialer
@@ -1202,6 +1231,7 @@ export async function collectHealthSignals(db, opts = {}) {
     agentsSignal(db),
     peersSignal(db, lang, nowFn),
     syncDialSignal(db, lang, nowFn),
+    Promise.resolve().then(() => peerTrustSignal(lang, nowFn)),
     updatesSignal(db),
     backupSignal(db, nowFn, lang),
     keychainExportSignal(db, lang),

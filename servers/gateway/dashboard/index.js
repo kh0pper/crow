@@ -40,6 +40,7 @@ import {
   DEVICE_TRUST_TTL,
 } from "./totp.js";
 import { getPeerCreds } from "../../shared/peer-credentials.js";
+import { peerTrust, rowIsTrusted } from "../../shared/peer-trust.js";
 import { signTicket, verifyTicket, isSafeDestPath } from "../../shared/sso-ticket.js";
 import { auditCrossHostCall } from "../../shared/cross-host-auth.js";
 import { getOrCreateLocalInstanceId } from "../instance-registry.js";
@@ -266,7 +267,16 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     // SSO destination — NOT a normal 7d session.
     const ssoSrc = ssoCtx?.src || null;
     const ssoDest = ssoCtx?.dest || null;
-    const result = ssoSrc ? await mintSsoSession(ssoSrc) : await complete2faLogin(req.ip);
+    // PT-1: mintSsoSession re-checks the source peer (it may have been revoked
+    // or paused since the ticket arrived); the pending token is already spent.
+    let result;
+    try {
+      result = ssoSrc ? await mintSsoSession(ssoSrc) : await complete2faLogin(req.ip);
+    } catch (err) {
+      if (err?.code !== "sso_refused") throw err;
+      res.setHeader("Set-Cookie", `crow_pending_2fa=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);
+      return res.status(401).type("html").send(renderLogin({ error: t("login.ssoRefused", lang), lang }));
+    }
     const sessionMaxAge = ssoSrc ? SSO_SESSION_MAX_AGE : undefined;
     const redirectTo = (ssoSrc && ssoDest && isSafeDestPath(ssoDest)) ? ssoDest : "/dashboard";
 
@@ -325,7 +335,16 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     // came from cross-instance SSO gets a 24h SSO session + the SSO dest.
     const ssoSrc = ssoCtx?.src || null;
     const ssoDest = ssoCtx?.dest || null;
-    const result = ssoSrc ? await mintSsoSession(ssoSrc) : await complete2faLogin(req.ip);
+    // PT-1: mintSsoSession re-checks the source peer (it may have been revoked
+    // or paused since the ticket arrived); the pending token is already spent.
+    let result;
+    try {
+      result = ssoSrc ? await mintSsoSession(ssoSrc) : await complete2faLogin(req.ip);
+    } catch (err) {
+      if (err?.code !== "sso_refused") throw err;
+      res.setHeader("Set-Cookie", `crow_pending_2fa=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);
+      return res.status(401).type("html").send(renderLogin({ error: t("login.ssoRefused", lang), lang }));
+    }
     const sessionMaxAge = ssoSrc ? SSO_SESSION_MAX_AGE : undefined;
     const redirectTo = (ssoSrc && ssoDest && isSafeDestPath(ssoDest)) ? ssoDest : "/dashboard";
 
@@ -526,13 +545,18 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     const db = createDbClient();
     const localId = getOrCreateLocalInstanceId();
     const src = String(req.query.src || "");
-    const audit = (extra) => auditCrossHostCall(db, {
-      sourceInstanceId: src || null,
-      targetInstanceId: localId,
-      direction: "inbound",
-      action: "sso.accept",
-      ...extra,
-    });
+    // An audit failure never turns a refusal into a 500 (PT-1).
+    const audit = async (extra) => {
+      try {
+        await auditCrossHostCall(db, {
+          sourceInstanceId: src || null,
+          targetInstanceId: localId,
+          direction: "inbound",
+          action: "sso.accept",
+          ...extra,
+        });
+      } catch { /* audit is best effort */ }
+    };
     try {
       const payloadB64 = String(req.query.t || "");
       const sig = String(req.query.sig || "");
@@ -547,32 +571,30 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
         return res.status(403).type("text/plain").send("Single sign-on is disabled on this instance.");
       }
 
-      // Must be a paired peer (shared signing key) AND trusted locally.
+      // Must be a trusted live peer (the one trust predicate, PT-1) AND hold
+      // its shared signing key. One response for every refusal, so a caller
+      // cannot learn which ids exist or are revoked; the reason is audited.
+      const trust = await peerTrust(db, src);
+      if (!trust.ok) {
+        await audit({ hmacValid: false, error: `peer_not_trusted:${trust.reason}` });
+        return res.status(401).type("text/plain").send("Single sign-on refused.");
+      }
       const creds = getPeerCreds(src);
       if (!creds || !creds.signing_key) {
-        await audit({ hmacValid: false, error: "unknown_peer" });
-        return res.status(401).type("text/plain").send("Unknown source instance.");
-      }
-      const { rows } = await db.execute({
-        sql: "SELECT trusted, status FROM crow_instances WHERE id = ?",
-        args: [src],
-      });
-      const peerRow = rows[0];
-      if (!peerRow || Number(peerRow.trusted) !== 1 || peerRow.status === "revoked") {
-        await audit({ hmacValid: false, error: "untrusted_peer" });
-        return res.status(403).type("text/plain").send("Source instance is not trusted.");
+        await audit({ hmacValid: false, error: "no_signing_key_for_source" });
+        return res.status(401).type("text/plain").send("Single sign-on refused.");
       }
 
       const result = verifyTicket({ payloadB64, sig, signingKey: creds.signing_key, expectedDst: localId });
       if (!result.valid) {
         await audit({ hmacValid: false, error: result.reason });
-        return res.status(401).type("text/plain").send("Invalid SSO ticket.");
+        return res.status(401).type("text/plain").send("Single sign-on refused.");
       }
       // The signature already binds src (signed with that peer's key), but make
       // the claimed query src and the signed src agree so the audit row is accurate.
       if (result.ticket.src !== src) {
         await audit({ hmacValid: true, nonce: result.ticket.nonce, error: "src_mismatch" });
-        return res.status(401).type("text/plain").send("Invalid SSO ticket.");
+        return res.status(401).type("text/plain").send("Single sign-on refused.");
       }
       const dest = result.ticket.dest; // already validated by verifyTicket
 
@@ -591,7 +613,14 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
         return res.redirect(302, "/dashboard/login/2fa");
       }
 
-      const { token } = await mintSsoSession(src);
+      let token;
+      try {
+        ({ token } = await mintSsoSession(src));
+      } catch (err) {
+        if (err?.code !== "sso_refused") throw err;
+        await audit({ hmacValid: true, nonce: result.ticket.nonce, error: `peer_not_trusted:${err.reason}` });
+        return res.status(401).type("text/plain").send("Single sign-on refused.");
+      }
       setSessionCookie(res, token, SSO_SESSION_MAX_AGE);
       await audit({ hmacValid: true, nonce: result.ticket.nonce });
       return res.redirect(303, dest);
@@ -830,7 +859,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
       const row = rows[0];
       const base = row?.gateway_url ? String(row.gateway_url).replace(/\/+$/, "") : null;
       const ssoOn = (await readSetting(db, "sso_enabled")) === "true";
-      const eligible = ssoOn && row && Number(row.trusted) === 1 && row.status !== "revoked" && base;
+      const eligible = ssoOn && row && rowIsTrusted(row) && base; // PT-1: trusted AND active/offline
       const creds = eligible ? getPeerCreds(target) : null;
 
       if (!eligible || !creds || !creds.signing_key) {
