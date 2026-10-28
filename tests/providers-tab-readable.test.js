@@ -98,10 +98,10 @@ test("no piAgentDir shows the not-scanned hint; a failing scan still renders the
   const h = await tab.render({ db: broken, lang: "en", piAgentDir: null });
   assert.match(h, /local-chat/);
   // I2: an incomplete scan shows "—", never "nothing found"
-  const usedBy = h.split("<tr").filter((r) => r.includes("llm-cell-usedby"));
+  const usedBy = h.split("<tr").filter((r) => r.includes(`class="llm-cell-usedby"`));
   assert.ok(usedBy.length > 0);
   for (const r of usedBy) {
-    assert.match(r, /llm-cell-usedby" style="color:var\(--crow-text-muted\)">—</);
+    assert.match(r, /llm-cell-usedby" data-label="Used by" style="color:var\(--crow-text-muted\)">—</);
     assert.doesNotMatch(r, /nothing found/);
   }
 });
