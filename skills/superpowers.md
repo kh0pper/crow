@@ -25,7 +25,7 @@ This is the master routing skill. Consult this **before every task** to determin
 | User Intent (EN) | User Intent (ES) | Activate Skills | Primary Tools |
 |---|---|---|---|
 | "remember", "store", "recall", "what did we..." | "recordar", "guardar", "recuperar", "qué hicimos..." | memory-management | crow-memory |
-| "research", "find papers", "cite", "bibliography" | "investigar", "buscar artículos", "citar", "bibliografía" | research-pipeline, web-search | crow-projects, brave-search, arxiv |
+| "research", "find papers", "cite", "bibliography" | "investigar", "buscar artículos", "citar", "bibliografía" | research-pipeline, web-search | crow-projects (crow_web_search, crow_add_source), arxiv |
 | "connect to database", "data backend", "register backend" | "conectar base de datos", "backend de datos", "registrar backend" | data-backends | crow-projects |
 | "show my backends", "list backends" | "mostrar backends", "listar backends" | data-backends | crow-projects |
 | "query [backend name]", "data from [source]" | "consultar [backend]", "datos de [fuente]" | data-backends | crow-projects, crow-tools |
@@ -38,7 +38,7 @@ This is the master routing skill. Consult this **before every task** to determin
 | "discord", "server", "guild" | "discord", "servidor" | discord | discord |
 | "teams", "microsoft teams" | "teams", "microsoft teams" | microsoft-teams | microsoft-teams |
 | "repo", "issue", "PR", "commit", "github" | "repositorio", "issue", "PR", "commit" | github | github |
-| "search", "look up", "find out", "what is" | "buscar", "averiguar", "qué es" | web-search | brave-search |
+| "search", "look up", "find out", "what is" | "buscar", "averiguar", "qué es" | web-search | crow-projects (crow_web_search), brave-search |
 | "file", "download", "document", "folder" | "archivo", "descargar", "documento", "carpeta" | filesystem | filesystem |
 | "citation", "zotero", "library", "reference" | "cita", "zotero", "biblioteca", "referencia" | research-pipeline | zotero |
 | "who are you", "crow.md", "customize behavior", "set up platform" | "quién eres", "crow.md", "personalizar", "configurar plataforma" | crow-context | crow-memory |
@@ -141,10 +141,10 @@ This lets the user see progress and customize which steps run.
 ### "Start research on X"
 1. **Memory** — Check for any existing context on X
 2. **Research** — Create a research project with `crow_create_project`
-3. **Brave Search** — Initial web search for overview
+3. **Web search** — `crow_web_search` for an overview (results are leads, not sources)
 4. **arXiv** — Search arXiv for academic papers and retrieve full text
 5. **Zotero** — Check if user already has relevant references
-6. For each valuable source → `crow_add_source` with APA citation
+6. For each valuable source → `crow_add_source` with APA citation (Crow opens the page; cite only what it fetched)
 7. Store initial findings in memory
 
 ### "Send update to the team about X"

@@ -262,6 +262,9 @@ function coreBlock(spec, binding, repoEnv, node) {
     }
     const v = resolveEnvValue(tmpl, repoEnv);
     if (!v && /\$\{\w+\}/.test(tmpl)) missing.push(k);
+    // An optional key (`${KEY:-}`) with no value is left OUT: an empty string in block.env
+    // would shadow a real value the child inherits from process.env.
+    else if (!v && /\$\{\w+:-\}/.test(tmpl)) continue;
     else env[k] = v;
   }
   applyJournalGuard(env);

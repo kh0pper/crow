@@ -18,73 +18,11 @@
 
 import { t } from "../../shared/i18n.js";
 
-// Any of these tokens in a tool name means it changes something.
-const WRITE_TOKENS = new Set([
-  "create", "update", "delete", "send", "write", "set", "add", "remove", "move", "rename",
-  "share", "upload", "trash", "archive", "publish", "unpublish", "apply", "resolve", "reply",
-  "insert", "append", "replace", "format", "edit", "transfer", "store", "dismiss", "complete",
-  "respond", "sync", "run", "click", "fill", "evaluate", "download", "export", "import",
-  "copy", "duplicate", "reorder", "rewrite", "batch", "label", "mark", "react", "revoke",
-  "accept", "register", "invite", "crosspost", "patch", "put", "save", "load",
-  "launch", "block", "transpose", "regenerate", "generate", "approve",
-  "reject", "cancel", "start", "stop", "restart", "install", "uninstall", "enable", "disable",
-  "assign", "attach", "verify", "close", "open", "dream", "forward",
-  "spam", "untrash", "unlabel", "unmark",
-  // looks harmless, changes or shares something: a display shows text
-  // ("show"), a list gains an entry ("want"), a link is minted ("url"), and a
-  // logged-in browser that navigates, scrolls, paginates (clicks "next") or
-  // fetches a page acts on the web
-  "show", "want", "url", "navigate", "scroll", "paginate", "scrape", "wait",
-  // common changing verbs: a name that mixes one of these with a lookup word
-  // ("get_reset_status") still counts as changing things
-  "purge", "execute", "exec", "reset", "clear", "kill", "drop", "wipe", "grant",
-  "deploy", "merge", "push", "post", "submit", "pay", "order", "book", "trigger",
-  "call", "dial", "sms", "notify", "rotate", "restore", "commit", "rollback", "flush",
-  "terminate", "suspend", "resume", "lock", "unlock", "ban", "mute", "follow", "unfollow",
-  "like", "vote", "rsvp", "checkout", "refund", "charge", "mint", "sign", "release",
-]);
-
-// Tools whose names read like lookups but whose source shows they change
-// state (verified against each tool's code). Always "changes things".
-const WRITE_NAMES = new Set([
-  "crow_kiosk_show", "crow_kavita_want_to_read", "crow_calibreweb_reading_status",
-  "crow_browser_paginate", "crow_browser_navigate", "crow_get_file_url",
-]);
-
-// Otherwise, any of these tokens means it only looks.
-const READ_TOKENS = new Set([
-  "get", "list", "search", "read", "find", "recall", "stats", "status", "check", "view",
-  "describe", "inspect", "fetch", "lookup", "extract", "screenshot",
-  "guide", "discover", "structure", "tabs",
-  "metadata", "permissions", "info", "count", "preview",
-]);
-
-function tokens(name) {
-  return String(name || "")
-    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter(Boolean);
-}
-
-/**
- * @param {{name?:string, readOnlyHint?:boolean, destructiveHint?:boolean}} tool
- * @returns {"read"|"write"}
- */
-export function classifyTool(tool) {
-  const t = tool || {};
-  // MCP annotations are untrusted hints from the server: they may only
-  // NARROW. A server can mark a tool as changing things; it can never turn a
-  // tool the name rule calls "changes things" (or does not recognise) into a
-  // read. readOnlyHint:true therefore adds nothing over the name rule.
-  if (t.destructiveHint === true || t.readOnlyHint === false) return "write";
-  if (WRITE_NAMES.has(String(t.name || ""))) return "write";
-  const toks = tokens(t.name);
-  if (!toks.length) return "write";
-  if (toks.some((x) => WRITE_TOKENS.has(x))) return "write";
-  if (toks.some((x) => READ_TOKENS.has(x))) return "read";
-  return "write";
-}
+// The read/write name rule lives in servers/shared/tool-classify.js, shared
+// with the skill-tools union (scripts/pi-bots/skill-tools.mjs), so Bot
+// Builder's Read-only and the union's read mode can never disagree.
+import { classifyTool, LEGACY_READ } from "../../../../shared/tool-classify.js";
+export { classifyTool };
 
 /** Names (no server prefix) of the read-class tools in a catalog. */
 export function readToolNames(catalog) {
@@ -107,7 +45,11 @@ export function sourceMode(server, selected, catalog) {
   for (const n of mine) if (!known.has(n)) return "custom";
   if (mine.size === all.length) return "all";
   const reads = readToolNames(catalog);
-  if (reads.length && reads.length < all.length && mine.size === reads.length && reads.every((n) => mine.has(n))) return "read";
+  // a Read-only selection saved before a LEGACY_READ tool (crow_fetch_source)
+  // became write still stores it: it reads Read-only, not Custom
+  const writes = new Set((catalog || []).filter((t) => t.access !== "read").map((t) => t.name));
+  const picked = new Set([...mine].filter((n) => !(LEGACY_READ.has(n) && writes.has(n))));
+  if (reads.length && reads.length < all.length && picked.size === reads.length && reads.every((n) => picked.has(n))) return "read";
   return "custom";
 }
 

@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import net from "node:net";
+import { braveSearch } from "../shared/brave-search.js";
 import YouTubeSR from "youtube-sr";
 const YouTube = YouTubeSR.default || YouTubeSR;
 
@@ -200,36 +201,18 @@ async function searchYouTube(query) {
 }
 
 /** Search the web using Brave Search API and return formatted results */
-async function searchWeb(query, count = 5) {
-  const apiKey = process.env.BRAVE_API_KEY || "";
-  if (!apiKey) return { error: "Web search is not configured. Set BRAVE_API_KEY in .env." };
-  try {
-    const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${count}`;
-    const res = await fetch(url, {
-      headers: { "Accept": "application/json", "X-Subscription-Token": apiKey },
-    });
-    if (!res.ok) return { error: `Search failed: ${res.status}` };
-    const data = await res.json();
-    const results = (data.web?.results || []).slice(0, count);
-    if (results.length === 0) return { error: `No results found for "${query}".` };
-    const stripHtml = (s) => s.replace(/<[^>]*>/g, "")
-      .replace(/&#x27;/g, "'").replace(/&#x2F;/g, "/").replace(/&quot;/g, '"')
-      .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-      .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
-      .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
-    const blocks = [{ type: "heading", text: `Search: ${query}` }];
-    for (const r of results) {
-      blocks.push({
-        type: "card",
-        title: stripHtml(r.title || "Untitled"),
-        body: stripHtml(r.description || ""),
-        link: r.url || "",
-      });
-    }
-    return { blocks, title: `Search: ${query}` };
-  } catch (e) {
-    return { error: `Search failed: ${e.message}` };
+export async function searchWeb(query, count = 5, search = braveSearch) {
+  const r = await search({ query, count });
+  if (!r.ok) {
+    if (r.reason === "not_configured") return { error: "Web search is not configured. Set BRAVE_API_KEY in .env." };
+    if (r.reason === "no_results") return { error: `No results found for "${query}".` };
+    return { error: r.reason };
   }
+  const blocks = [{ type: "heading", text: `Search: ${query}` }];
+  for (const x of r.results) {
+    blocks.push({ type: "card", title: x.title, body: x.description, link: x.url });
+  }
+  return { blocks, title: `Search: ${query}` };
 }
 
 /** Resolve app + query into a URL the frontend will load in an iframe */

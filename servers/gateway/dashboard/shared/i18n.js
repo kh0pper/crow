@@ -1725,6 +1725,9 @@ export const translations = {
   "botbuilder.abSkillsTitle": { en: "Skills", es: "Habilidades" },
   "botbuilder.abSkillsLead": { en: "Extra know-how added to the bot's instructions.", es: "Conocimientos extra que se añaden a las instrucciones del bot." },
   "botbuilder.abSkillMissing": { en: "(file not found)", es: "(archivo no encontrado)" },
+  // research fetch-before-cite PR 2: a skill's declared tools (scripts/pi-bots/skill-tools.mjs)
+  "botbuilder.abSkillNeedsTools": { en: "Needs tools:", es: "Necesita herramientas:" },
+  "botbuilder.abSkillToolsCapped": { en: "This skill's tools were not added: the model's tool limit is reached.", es: "No se añadieron las herramientas de esta habilidad: se alcanzó el límite de herramientas del modelo." },
   "botbuilder.manageSkills": { en: "Manage skills ›", es: "Gestionar habilidades ›" },
   "botbuilder.skillsGroupYours": { en: "Yours", es: "Tuyas" },
   "botbuilder.skillsGroupBuiltin": { en: "Built-in", es: "Integradas" },
@@ -2205,6 +2208,17 @@ export const translations = {
 
   // ─── Projects Panel (W3-4) ───
   "projects.confirmRevoke": { en: "Revoke {who}?", es: "¿Revocar a {who}?" },
+
+  // ─── Projects Panel: fetch status per source (lane D, research fetch-before-cite) ───
+  "projects.fetch.fetched": { en: "fetched", es: "obtenida" },
+  "projects.fetch.noText": { en: "fetched (no text)", es: "obtenida (sin texto)" },
+  "projects.fetch.failed": { en: "failed", es: "fallida" },
+  "projects.fetch.legacy": { en: "legacy, unchecked", es: "antigua, sin comprobar" },
+  "projects.fetch.notWeb": { en: "not a web page", es: "no es una página web" },
+  "projects.fetch.unknown": { en: "not fetched here", es: "no obtenida aquí" },
+  "projects.fetch.quotes": { en: "{found}/{total} quotes found", es: "{found}/{total} citas encontradas" },
+  "projects.fetch.showing": { en: "Showing latest {shown} of {total}.", es: "Mostrando las últimas {shown} de {total}." },
+  "projects.fetch.empty": { en: "No sources yet. Crow opens the page first, then adds the source: use crow_add_source.", es: "Aún no hay fuentes. Crow abre primero la página y luego agrega la fuente: usa crow_add_source." },
 
   // ─── Orchestrator Panel (W3-4) ───
   "orchestrator.confirmResetRefcounts": { en: "Reset all lifecycle refcounts? This reconciles against live provider health.", es: "¿Restablecer todos los contadores de referencia? Esto concilia con el estado de los proveedores activos." },

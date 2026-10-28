@@ -587,3 +587,15 @@ test("crow_add_note: page text replaced between the match and the insert is re-m
   assert.match(text(r2), /Quote checked: found/);
   assert.equal(source(sid2).verified, 1);
 });
+
+test("the not-found message does not tell bots to edit or remove notes (they cannot)", async () => {
+  const client = await clientFor(BOT);
+  const pid = await newProject(client);
+  const sid = insertSource({ project_id: pid });
+  const bad = insertQuote(sid, pid, "We will ship hourly and never sleep");
+  const r = await verify(client, { id: sid });
+  assert.ok(text(r).startsWith("NOT verified:"), text(r));
+  assert.match(text(r), new RegExp(`#${bad}\\b`));
+  assert.match(text(r), /Notes can't be removed, so tell the owner; add correct quotes copied character for character in new notes for later sources\./);
+  assert.doesNotMatch(text(r), /Fix or remove/);
+});

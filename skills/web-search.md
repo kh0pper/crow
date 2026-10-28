@@ -1,7 +1,16 @@
+---
+name: web-search
+description: Search the web for research, fact-checking and current events. Search results are leads, not sources; Crow opens a page before anything from it is cited.
+tools:
+  - crow-projects/crow_web_search
+  - crow-projects/crow_add_source
+  - brave-search
+---
+
 # Web Search Skill
 
 ## Description
-Search the web using Brave Search for research, fact-checking, current events, and general information gathering. Every valuable search result should be documented in the research pipeline with APA citations.
+Search the web for research, fact-checking, current events, and general information gathering. Search results are leads, not sources: Crow opens a page with `crow_add_source` before anything from it is cited.
 
 ## When to Use
 - When the user asks to "search", "look up", "find out", or "what is"
@@ -11,39 +20,38 @@ Search the web using Brave Search for research, fact-checking, current events, a
 - When finding documentation, tutorials, or technical references
 
 ## Tools Available
-The Brave Search MCP server provides:
-- **Web search** — Full web search with snippets and URLs
-- **Local search** — Location-based search results
+- `crow_web_search` (crow-projects): web search. Each result is stamped `SNIPPET, not a source`.
+- `crow_add_source` (crow-projects): Crow opens the page and stores it as a source.
+- The Brave Search MCP server, when installed: web and local search. Its results are snippets too.
+
+If `crow_web_search` says search is not configured, use Brave Search if you have it, or ask the user for a URL.
 
 ## Workflow: Research Search
-The primary search workflow — always document findings:
 1. Formulate a clear search query
-2. Execute the search via Brave Search
-3. Evaluate results for relevance and credibility
-4. For each valuable result:
-   a. Add to research pipeline with `crow_add_source` (include URL, title, authors if available)
-   b. Generate an APA citation
-   c. Mark verification status appropriately
-5. Store key findings in memory with `crow_store_memory`
-6. Tag with relevant research project names
+2. Search with `crow_web_search`
+3. Pick the few results that look relevant and credible. They are leads, not sources.
+4. For each result you want to use, call `crow_add_source` with its `url`, `title` and `source_type`:
+   - `CITABLE: Crow fetched this page.` → read the page text in the result; you may cite it
+   - `NOT citable: Crow could not open this page (...)` → do not cite it; find another source
+5. Cite only sources Crow fetched. Never cite a snippet, even when it looks like the answer.
+6. For notes, quotes and verification, follow the `research-pipeline` skill
 
 ## Workflow: Quick Lookup
-For simple factual queries that don't need full documentation:
+For simple factual queries that don't need a research project:
 1. Search for the specific fact
-2. Verify across multiple results if possible
-3. Present the answer to the user
-4. Only add to research pipeline if the user wants to keep the reference
+2. Open the best result with `crow_add_source` and check the fact in the page text
+3. Present the answer and name the page it came from
+4. If you could not open any page, say the answer comes from search snippets only and is unchecked
 
 ## Workflow: Literature Discovery
 When searching for academic or technical content:
-1. Search via Brave for initial discovery
+1. Search for initial discovery
 2. Cross-reference with arXiv for academic papers
 3. Check Zotero for items already in the user's library
-4. Add new valuable sources to both research pipeline and Zotero
+4. Open each paper you will use with `crow_add_source` before citing it
 
 ## Best Practices
-- Always cite sources — never present search results without attribution
+- Never present a snippet as a checked fact
 - Use specific, well-formed queries for better results
 - Cross-reference with academic search for scholarly topics
 - Store search strategies that work well in memory for reuse
-- When a search reveals important new information, always `crow_store_memory`

@@ -75,6 +75,30 @@ Add a source to a project. Automatically generates an APA citation if none is pr
 
 **Source types**: `web_article`, `academic_paper`, `book`, `interview`, `web_search`, `web_scrape`, `api_data`, `document`, `video`, `podcast`, `social_media`, `government_doc`, `dataset`, `other`
 
+### crow_web_search
+
+Search the web through the Brave Search API (`servers/shared/brave-search.js`, key `BRAVE_API_KEY`, 10-second timeout). Nothing is fetched or stored. Each result carries the stamp `SNIPPET, not a source: open it with crow_add_source before citing`, and results are cut to whole entries so the reply fits the voice result cap. Without an API key the tool says search is not configured and suggests opening a known URL with `crow_add_source`.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `query` | string | Yes | Search query (up to 400 characters) |
+| `count` | number | No | Number of results, 1-10 (default: 5) |
+
+### crow_fetch_source
+
+Open a stored source's URL again (needs the `write_sources` capability on its project). Use it to retry a failed fetch or refresh an old copy. See [Fetch before cite](#fetch-before-cite).
+
+- A source with no URL has nothing to fetch.
+- A fetch that fails or finds no readable text keeps an earlier copy that has text, and the source stays citable.
+- An unchanged page (same content hash) only updates `fetched_at`.
+- A changed page is not stored while quote notes that passed their check rely on the old text, unless the owner passes `force: true`.
+- When new text is stored, the source's quote notes are re-checked, and a `quotes_checked` verification is cleared if a quote is no longer on the page.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `id` | number | Yes | Source ID |
+| `force` | boolean | No | Owner only: replace the stored page text even when passing quote checks rely on it |
+
 ### crow_search_sources
 
 Search sources using full-text search.
@@ -92,17 +116,18 @@ Get full details of a specific source.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `source_id` | number | Yes | Source ID |
+| `id` | number | Yes | Source ID |
 
 ### crow_verify_source
 
-Mark a source's verification status.
+Verify a source, or clear its verification. With `quotes_checked` the source is marked verified only when it has at least one quote note and every quote is found on the page Crow fetched. See [Verifying a source](#verifying-a-source).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `source_id` | number | Yes | Source ID |
-| `verified` | boolean | Yes | Verification status |
-| `verification_notes` | string | No | Notes about verification |
+| `id` | number | Yes | Source ID |
+| `verified` | boolean | No | `true` to verify (default), `false` to clear verification |
+| `method` | string | No | `quotes_checked` (default) or `manual_owner` (the owner only; bots cannot) |
+| `notes` | string | No | Verification notes |
 
 ### crow_list_sources
 
@@ -123,6 +148,8 @@ Add a note, optionally linked to a project or source.
 |---|---|---|---|
 | `content` | string | Yes | Note content |
 | `note_type` | string | No | Type: note, quote, summary, analysis, question, insight (default: note) |
+| `provenance` | string | No | Where the claim comes from: `fetched`, `snippet` or `derived`. Required for quote and summary notes; analysis and insight notes default to `derived`. See [Note provenance](#note-provenance) |
+| `locator` | string | No | Where in the source (page, section, timestamp) |
 | `project_id` | number | No | Associated project |
 | `source_id` | number | No | Associated source |
 | `title` | string | No | Note title |
@@ -246,7 +273,7 @@ The project server decides the caller's identity when it is built, and the owner
 - **Normalization:** both sides are folded the same way: Unicode NFKC, whitespace, soft hyphens and zero-width characters, case, and the styles of quotes, dashes and apostrophes. Outer quote marks and a trailing `.` `,` `;` `:` on the quote are trimmed; `?` and `!` are kept, because they change what the sentence says.
 - **Word boundaries:** a match must start and end on a word boundary. Hyphenated words and numbers such as `2.5` or `1,500` count as whole words.
 - **Where it looks:** the Readability text first, then the full page body. A result reports `body` when the match came from the full body.
-- **Allowed edits in a quote:** `[sic]`, `[citation needed]`, and a single capital-letter bracket that starts a word (`[I]t`). Any ellipsis or any other bracket makes the check "couldn't check exactly": quote the passage without cuts, or verify by hand. Footnote markers such as `[3]` are ignored on the page side only.
+- **Allowed edits in a quote:** `[sic]`, `[citation needed]`, and a single capital-letter bracket that starts a word (`[I]t`). Any ellipsis or any other bracket makes the check "couldn't check exactly": quote the passage without cuts, or tell the owner. Footnote markers such as `[3]` are ignored on the page side only.
 - **Couldn't check:** a quote over 2,000 characters, under 4 characters, or with too many possible placements on the page. A page that was cut off at the size cap and has no match is also "couldn't check", never "not on the page".
 - **Attribution:** the full quote is tried first. Only if it is not found is a trailing dash or after-quote tail dropped, and only when the tail looks like a name: two or more capitalized words, not starting with words such as The, Never or Not, with an optional `, Title`. Put the speaker or publication in your own sentence, not inside the quote.
 - **Result:** found (1), not found (0), or couldn't check (NULL).

@@ -133,3 +133,17 @@ test("a hung extractor times out without blocking", async () => {
   const r = await fetchPage(u("/html"), { ...OPTS(), workerUrl: new URL("hang-worker.mjs", FIX), extractTimeoutMs: 300 });
   assert.equal(r.ok, false); assert.match(r.reason, /extraction timed out/); assert.ok(Date.now() - t < 1500);
 });
+
+test("extractReadable keeps a separator at block boundaries", async () => {
+  const { matchQuote } = await import("../servers/research/quote-match.js");
+  const html = "<!doctype html><html><body><article><h1>Road</h1><p>The road will be widened by four kilometres.</p><p>Work starts in March after the vote.</p><ul><li>alpha</li><li>beta</li></ul>one<br>two</article></body></html>";
+  const { readable, body } = extractReadable(html, "http://page.test/");
+  for (const t of [readable, body]) {
+    assert.ok(!t.includes("kilometres.Work"), t);
+    assert.match(t, /kilometres\.\s+Work starts/);
+    assert.match(t, /alpha\s+beta/);
+    assert.match(t, /one\s+two/);
+  }
+  const m = matchQuote("kilometres. Work starts", { readable, body, truncated: false });
+  assert.equal(m.found, 1, JSON.stringify(m));
+});

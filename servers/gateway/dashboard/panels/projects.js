@@ -8,7 +8,7 @@
  */
 
 import { escapeHtml, section, badge, dataTable, formField, actionBar, formatDate } from "../shared/components.js";
-import { t, tJs } from "../shared/i18n.js";
+import { t, tJs, fill } from "../shared/i18n.js";
 import { sanitizeFtsQuery, escapeLikePattern } from "../../../db.js";
 import {
   AclError,
@@ -21,8 +21,52 @@ import { createProjectSpace, updateProjectSpaceMeta } from "../../../shared/proj
 import { approveBackend, revokeBackendApproval, hasApproval, refHash, parseStoredSpec, visibleText, pinnedFiles, backendEnvNames } from "../../../shared/data-backend-approval.js";
 import { csrfInput } from "../shared/csrf.js";
 import { statSync } from "node:fs";
+import { statusCode } from "../../../research/fetch-labels.js";
 
 const PAGE_SIZE = 20;
+
+// Fetch-status chips. The wording comes from servers/research/fetch-labels.js (shared with
+// the research tools); the panel only maps each status CODE to a translation and a badge kind.
+const FETCH_CHIP = {
+  fetched: ["projects.fetch.fetched", "connected"],
+  fetched_no_text: ["projects.fetch.noText", "draft"],
+  failed: ["projects.fetch.failed", "error"],
+  legacy: ["projects.fetch.legacy", "draft"],
+  not_applicable: ["projects.fetch.notWeb", "draft"],
+  unknown: ["projects.fetch.unknown", "draft"],
+};
+
+/** Whether the 0013 provenance columns exist (old DBs degrade to no status). */
+async function provenanceReady(db) {
+  try {
+    const src = await db.execute("PRAGMA table_info(research_sources)");
+    const notes = await db.execute("PRAGMA table_info(research_notes)");
+    return src.rows.some((c) => c.name === "fetch_status") && notes.rows.some((c) => c.name === "quote_found");
+  } catch {
+    return false;
+  }
+}
+
+/** A link only for http(s) URLs; anything else (javascript:, data:, ...) is plain escaped text. */
+export function sourceLinkHtml(url) {
+  if (!url) return "";
+  let ok = false;
+  try { ok = ["http:", "https:"].includes(new URL(String(url)).protocol); } catch { /* not a URL */ }
+  return ok
+    ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" style="color:var(--crow-accent);font-size:0.8rem">link</a>`
+    : `<span style="font-size:0.8rem;color:var(--crow-text-muted)">${escapeHtml(url)}</span>`;
+}
+
+/** The compact fetch-status chip (+ quote check count) for one source row. */
+export function fetchChipHtml(s, lang) {
+  const [key, kind] = FETCH_CHIP[statusCode(s.fetch_status)];
+  let html = badge(t(key, lang), kind);
+  const total = Number(s.quote_total || 0);
+  if (total > 0) {
+    html += ` <span style="font-size:0.75rem;color:var(--crow-text-muted)">${escapeHtml(fill(t("projects.fetch.quotes", lang), { found: Number(s.quote_found_count || 0), total }))}</span>`;
+  }
+  return html;
+}
 
 const STATUS_BADGE_MAP = {
   active: "connected",
@@ -342,8 +386,19 @@ async function renderDetailView(db, projectId, layout, lang, req = {}) {
 
   // Fetch related data in parallel (incl. M2 project_spaces extras + members,
   // M5 audit log). The ps row is already in `project` — no second fetch needed.
-  const [sourcesResult, notesResult, backendsResult, membersResult, contactsResult, auditResult] = await Promise.all([
-    db.execute({ sql: "SELECT id, title, source_type, url, verified, created_at FROM research_sources WHERE project_id = ? ORDER BY created_at DESC LIMIT 50", args: [projectId] }),
+  const provReady = await provenanceReady(db);
+  const [sourcesResult, sourceCountResult, notesResult, backendsResult, membersResult, contactsResult, auditResult] = await Promise.all([
+    db.execute({
+      // fetched_text is deliberately not selected (large).
+      sql: provReady
+        ? `SELECT s.id, s.title, s.source_type, s.url, s.verified, s.created_at, s.fetch_status, s.verification_method,
+                  (SELECT COUNT(*) FROM research_notes n WHERE n.source_id = s.id AND n.note_type = 'quote') AS quote_total,
+                  (SELECT COUNT(*) FROM research_notes n WHERE n.source_id = s.id AND n.note_type = 'quote' AND n.quote_found = 1) AS quote_found_count
+             FROM research_sources s WHERE s.project_id = ? ORDER BY s.created_at DESC LIMIT 50`
+        : "SELECT id, title, source_type, url, verified, created_at FROM research_sources WHERE project_id = ? ORDER BY created_at DESC LIMIT 50",
+      args: [projectId],
+    }),
+    db.execute({ sql: "SELECT COUNT(*) AS c FROM research_sources WHERE project_id = ?", args: [projectId] }),
     db.execute({ sql: "SELECT id, note_type, substr(content, 1, 200) as preview, created_at FROM research_notes WHERE project_id = ? ORDER BY created_at DESC LIMIT 50", args: [projectId] }),
     db.execute({ sql: "SELECT * FROM data_backends WHERE project_id = ?", args: [projectId] }),
     db.execute({
@@ -364,6 +419,7 @@ async function renderDetailView(db, projectId, layout, lang, req = {}) {
   ]);
 
   const sources = sourcesResult.rows;
+  const sourceTotal = Number(sourceCountResult.rows[0]?.c ?? sources.length);
   const notes = notesResult.rows;
   const backends = backendsResult.rows;
   // slug/workspace_dir/storage_prefix/archived_at are now in the ps row itself
@@ -401,16 +457,23 @@ async function renderDetailView(db, projectId, layout, lang, req = {}) {
   // Sources table
   let sourcesHtml;
   if (sources.length === 0) {
-    sourcesHtml = `<p style="color:var(--crow-text-muted);font-size:0.85rem">No sources yet. Add sources via crow_add_source.</p>`;
+    sourcesHtml = `<p style="color:var(--crow-text-muted);font-size:0.85rem">${escapeHtml(t("projects.fetch.empty", lang))}</p>`;
   } else {
-    const rows = sources.map(s => [
-      escapeHtml(s.title),
-      badge(s.source_type, "info"),
-      s.verified ? badge("verified", "connected") : badge("unverified", "draft"),
-      s.url ? `<a href="${escapeHtml(s.url)}" target="_blank" style="color:var(--crow-accent);font-size:0.8rem">link</a>` : "",
-      `<span style="font-size:0.75rem">${formatDate(s.created_at, lang)}</span>`,
-    ]);
+    const rows = sources.map(s => {
+      // A peer row (NULL status) or a legacy-flag verification never reads as verified.
+      const trusted = !provReady || (s.fetch_status != null && s.verification_method !== "legacy_flag");
+      return [
+        provReady ? `${escapeHtml(s.title)}<div style="margin-top:0.25rem">${fetchChipHtml(s, lang)}</div>` : escapeHtml(s.title),
+        badge(s.source_type, "info"),
+        s.verified && trusted ? badge("verified", "connected") : badge("unverified", "draft"),
+        sourceLinkHtml(s.url),
+        `<span style="font-size:0.75rem">${formatDate(s.created_at, lang)}</span>`,
+      ];
+    });
     sourcesHtml = dataTable(["Title", "Type", "Status", "URL", "Added"], rows, { stack: true });
+    if (sourceTotal > sources.length) {
+      sourcesHtml += `<p style="font-size:0.75rem;color:var(--crow-text-muted);margin-top:0.5rem">${escapeHtml(fill(t("projects.fetch.showing", lang), { shown: sources.length, total: sourceTotal }))}</p>`;
+    }
   }
 
   // Notes list
@@ -558,7 +621,7 @@ async function renderDetailView(db, projectId, layout, lang, req = {}) {
   const content = `
     ${section("Overview", overviewHtml + workspaceInfo)}
     ${section(`Members (${members.length})`, membersHtml + addMemberForm, { delay: 50 })}
-    ${section(`Sources (${sources.length})`, sourcesHtml, { delay: 100 })}
+    ${section(`Sources (${sourceTotal})`, sourcesHtml, { delay: 100 })}
     ${section(`Notes (${notes.length})`, notesHtml, { delay: 200 })}
     ${backendsHtml}
     ${section(`Audit log (${auditEntries.length})`, auditHtml, { delay: 350 })}

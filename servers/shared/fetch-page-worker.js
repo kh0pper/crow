@@ -18,6 +18,17 @@ function collapse(text) {
     .join("\n\n");
 }
 
+const BLOCK_TAGS = "p,div,li,h1,h2,h3,h4,h5,h6,blockquote,pre,tr,section,article,header,footer,figcaption";
+
+/** Put a newline after each block element and in place of each br, so adjacent blocks never glue words together. */
+function markBlockBoundaries(document) {
+  try {
+    for (const el of document.querySelectorAll(`${BLOCK_TAGS},br`)) {
+      el.after(document.createTextNode("\n"));
+    }
+  } catch { /* separators are best effort */ }
+}
+
 /** @returns {{readable: string, body: string}} */
 export function extractReadable(html, url) {
   const { document } = parseHTML(String(html));
@@ -28,6 +39,7 @@ export function extractReadable(html, url) {
       (document.head || document.documentElement).appendChild(base);
     }
   } catch { /* base is best effort */ }
+  markBlockBoundaries(document);
   const body = collapse(document.body ? document.body.textContent : document.documentElement?.textContent);
   let readable = "";
   try {
