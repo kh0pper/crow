@@ -55,6 +55,25 @@ export function newVapidKeypair() {
   return { privateKey: urlsafePadded(priv32), publicKey: urlsafePadded(ecdh.getPublicKey()) };
 }
 
+/**
+ * A stored VAPID private key that an older install wrote one or more bytes short (a dropped
+ * leading zero), left-padded to 32 bytes. The same key, so existing push subscriptions keep
+ * working. Anything that isn't a short key is returned unchanged.
+ */
+export function padVapidPrivateKey(privateKey) {
+  try {
+    const s = String(privateKey);
+    // Only a well-formed url-safe base64 key that decodes to 29-31 bytes is a dropped-zero
+    // key; anything else (malformed, typed by hand, already 32 bytes) is left exactly as is.
+    if (!/^[A-Za-z0-9_-]+=*$/.test(s)) return privateKey;
+    const raw = Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+    if (raw.length < 29 || raw.length >= 32) return privateKey;
+    return urlsafePadded(Buffer.concat([Buffer.alloc(32 - raw.length), raw]));
+  } catch {
+    return privateKey;
+  }
+}
+
 /** The uncompressed public key for an encoded private key, or null if it is not one. */
 export function vapidPublicFromPrivate(privateKey) {
   try {
@@ -246,11 +265,14 @@ export function planGeneratedEnv(bundleId, manifest, { destDir, crowHome, compos
     if (fromKeychain) {
       // The keychain holds the plaintext; a store_as key gets a fresh hash of it (any hash
       // of the same plaintext verifies). Its entry exists, so nothing is saved again.
-      env[k] = spec.store_as === "argon2id" ? argon2idPhc(fromKeychain) : fromKeychain;
+      const plainKc = spec.generate === "vapid_private_key" ? padVapidPrivateKey(fromKeychain) : fromKeychain;
+      env[k] = spec.store_as === "argon2id" ? argon2idPhc(plainKc) : plainKc;
       restored.push(k);
       continue;
     }
     if (existing) {
+      // A short VAPID key from an older install is repaired in place (same key, padded).
+      if (spec.generate === "vapid_private_key") existing = padVapidPrivateKey(existing);
       env[k] = existing;
       if (isLegacy(k, existing)) legacyKeys.add(k);
       if (spec.keychain === true && !spec.store_as) {
