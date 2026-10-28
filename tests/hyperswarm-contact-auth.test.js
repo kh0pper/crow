@@ -1269,3 +1269,45 @@ test("H-C25 (S3) an old sibling used as an oracle against a pinned new node is r
   assert.equal(await closedWithin(toN, 3000), true, "refused");
   assert.deepEqual(n.calls.instanceConnected, []);
 });
+
+test("H-C26 (S1a, white-box, contact path) a cb_sig naming the verifier's own end is refused cb_invalid under the real pinned key; the opposite end admits", T, async () => {
+  const me = id(), B = id();
+  const H = randomBytes(32), X = randomBytes(32);
+  const mkConn = () => ({ isInitiator: true, handshakeHash: H, written: [], destroyed: false,
+    write(s) { for (const l of String(s).split("\n")) if (l.trim()) this.written.push(JSON.parse(l)); }, destroy() { this.destroyed = true; } });
+  const mkPm = () => {
+    const pm = new PeerManager(me, { env: {} });
+    pm.p2pDisabled = true;
+    const calls = { peerConnected: [], pinned: [] };
+    pm.contactBinding = {
+      lookupKey: async (c) => (c === B.crowId ? B.ed25519Pubkey : null),
+      isCbPinned: async () => false,
+      markCbPinned: async (c) => { calls.pinned.push(c); return true; },
+    };
+    pm.onPeerConnected = (c) => { calls.peerConnected.push(c); };
+    return { pm, calls };
+  };
+  const cbFor = (role) => sign(contactCbMessage({ role, signerCrowId: B.crowId, challengeHex: X.toString("hex"), handshakeHashHex: H.toString("hex") }), B.ed25519Priv);
+  const respond = async (pm, conn, cb_sig) => {
+    const st = {};
+    await pm._handleMessage(conn, { type: "challenge-response", crowId: B.crowId, pubkey: B.ed25519Pubkey, cb_sig }, X, st);
+    await pm._handleMessage(conn, { type: "authenticated" }, X, st);
+  };
+  // Positive control: we are the initiator, so B (the responder) signs "resp".
+  {
+    const { pm, calls } = mkPm();
+    const conn = mkConn();
+    await respond(pm, conn, cbFor("resp"));
+    assert.equal(conn.destroyed, false, "control: the opposite end's role admits");
+    assert.deepEqual(calls.peerConnected, [B.crowId]);
+    assert.deepEqual(calls.pinned, [B.crowId]);
+  }
+  const { pm, calls } = mkPm();
+  const conn = mkConn();
+  await respond(pm, conn, cbFor("init"));
+  assert.equal(conn.destroyed, true, "the verifier's own role is refused");
+  assert.deepEqual(refusals(B.crowId).slice(-1), ["cb_invalid"]);
+  assert.deepEqual(calls.peerConnected, []);
+  assert.deepEqual(calls.pinned, [], "no pin written");
+  assert.equal(conn.written.some((f) => f.type === "authenticated"), false);
+});
