@@ -31,6 +31,7 @@ export const TAB_OF = Object.freeze({
   make: "make",
   "bot-board": "board",
   artifacts: "make",
+  "project-home": "chat",
 });
 
 const SCOPE_MAX_AGE = 34560000; // 400 days, seconds
@@ -173,15 +174,24 @@ export async function resolveShellPage(req, res, db, panelId, lang = "en") {
     const pending = offerTry || parseCookies(req)[cookieName(TRY_COOKIE)] === "pending";
     return pending ? { variant: "classic", tryNewCard: tryNewCardHtml(lang) } : { variant: "classic" };
   }
-  const { scope, setCookie } = await resolveScope(req, db);
-  if (setCookie && !res.headersSent) res.append("Set-Cookie", setCookie);
+  // The project home (/dashboard/project/:slug) takes its scope from the path:
+  // the slug wins over the cookie and ?project=, and nothing is written (the
+  // GET is read-only; Turbo prefetches it on hover). An unknown or archived
+  // slug resolves to Everything, and the panel answers 404.
+  const homeSlug = panelId === "project-home" && req.params && typeof req.params.slug === "string" ? req.params.slug : null;
+  let scope;
+  if (panelId === "project-home") {
+    scope = homeSlug ? (await scopeFromValue(db, homeSlug)).scope : EVERYTHING;
+  } else {
+    const r = await resolveScope(req, db);
+    scope = r.scope;
+    if (r.setCookie && !res.headersSent) res.append("Set-Cookie", r.setCookie);
+  }
   req.crowScope = scope;
   let projects = [];
   try { projects = await activeProjects(db); } catch (err) { console.warn("[shell] project list failed:", err.message); }
   let counts = new Map();
   try { counts = await needsYouCounts(db, projects, { engine: getInteractiveEngine({ createIfMissing: false }) }); }
   catch (err) { console.warn("[shell] needs-you counts failed:", err.message); }
-  // The project home panel (Task 3) is id "project-home"; its slug is the route param.
-  const homeSlug = panelId === "project-home" && req.params && typeof req.params.slug === "string" ? req.params.slug : null;
   return { variant: "shell", shell: { scope, projects, counts, homeSlug, tab: TAB_OF[panelId] ?? null } };
 }

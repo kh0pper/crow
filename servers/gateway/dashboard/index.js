@@ -85,6 +85,7 @@ import fediversePanel from "./panels/fediverse.js";
 import meteringPanel from "./panels/metering.js";
 import perchHubPanel from "./panels/perch-hub.js";
 import makePanel, { openMakeItem } from "./panels/make.js";
+import projectHomePanel from "./panels/project-home.js";
 import { serveArtifactPreview, serveWorkspacePreview, enablePreviews } from "../make/previews.js";
 import { handleFixItAction } from "../fix-it/index.js";
 import bundlesRouterFactory from "../routes/bundles.js";
@@ -129,6 +130,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   registerPanel(meteringPanel);
   registerPanel(perchHubPanel);
   registerPanel(makePanel);
+  registerPanel(projectHomePanel);
 
   // Load third-party panels (async, non-blocking)
   loadExternalPanels().catch((err) => {
@@ -952,13 +954,19 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     }
   });
 
-  // Panel routes
-  router.all("/dashboard/:panelId", async (req, res, next) => {
+  // Panel routes: /dashboard/<panel>, and a project's home at
+  // /dashboard/project/<slug> (the project-home panel; req.params.slug is the
+  // project, read by resolveShellPage and the panel).
+  router.all("/dashboard/project/:slug", (req, res, next) => dispatchPanel(req, res, next, "project-home"));
+  router.all("/dashboard/:panelId", (req, res, next) => {
     const panelId = req.params.panelId;
-
     // Skip if it matches login/logout (already handled)
     if (panelId === "login" || panelId === "logout") return next();
+    return dispatchPanel(req, res, next, panelId);
+  });
 
+  /** One panel page: nav, header, the shell-or-classic decision, then the panel's handler. */
+  async function dispatchPanel(req, res, next, panelId) {
     const panel = getPanel(panelId);
     if (!panel) return next();
 
@@ -1035,7 +1043,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     } finally {
       db.close();
     }
-  });
+  }
 
   return router;
 }

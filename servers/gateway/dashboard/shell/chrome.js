@@ -135,9 +135,13 @@ function projectForm({ scope, projects, lang, counts, homeSlug, extraClass = "" 
     `<button type="submit" class="shell-project${value === cur ? " is-current" : ""}" name="scope" value="${escapeHtml(value)}"${value === cur ? ' aria-current="true"' : ""}><span class="shell-project-text"><span class="shell-project-name">${escapeHtml(text)}</span>${sub ? `<span class="shell-project-sub">${escapeHtml(sub)}</span>` : ""}</span></button>`;
   const link = (p) => {
     const slug = projectValue(p);
+    // On a project's home its link is the current page; elsewhere the project
+    // the scope points at is marked the same way, as the current item only.
     const open = homeSlug != null && homeSlug === slug;
+    const scoped = !open && homeSlug == null && cur === slug;
     const lbl = counts instanceof Map && counts.has(Number(p.id)) ? needsYouLabel(counts.get(Number(p.id)), lang) : null;
-    return `<a href="/dashboard/project/${encodeURIComponent(slug)}" class="shell-project${open ? " is-current" : ""}"${open ? ' aria-current="page"' : ""}><span class="shell-project-dot" style="background:${projectColor(slug)}" aria-hidden="true"></span><span class="shell-project-text"><span class="shell-project-name">${escapeHtml(p.name)}</span>${lbl ? `<span class="shell-project-sub">${escapeHtml(lbl)}</span>` : ""}</span></a>`;
+    const mark = open ? ' aria-current="page"' : scoped ? ' aria-current="true"' : "";
+    return `<a href="/dashboard/project/${encodeURIComponent(slug)}" class="shell-project${open || scoped ? " is-current" : ""}"${mark}><span class="shell-project-dot" style="background:${projectColor(slug)}" aria-hidden="true"></span><span class="shell-project-text"><span class="shell-project-name">${escapeHtml(p.name)}</span>${lbl ? `<span class="shell-project-sub">${escapeHtml(lbl)}</span>` : ""}</span></a>`;
   };
   const edge = (href, text) => `<a href="${href}" class="shell-project shell-project--edge"><span class="shell-project-text"><span class="shell-project-name">${escapeHtml(text)}</span></span></a>`;
   const rows = [
@@ -169,10 +173,11 @@ function archivedLink(lang) {
 /** The Chat / Board / Make nav, rendered right after </main>. */
 export function shellTabsNav({ tab, scope, projects, lang, counts, homeSlug, getPanel = registryGetPanel }) {
   const sp = scopedProject(scope, projects);
-  const n = sp && counts instanceof Map ? needsYouLabel(counts.get(Number(sp.id)), lang) : null;
+  // "Board · N": the scoped project's count (an unknown count or 0 shows none).
+  const n = sp && counts instanceof Map ? counts.get(Number(sp.id)) : null;
   const links = tabTargets(getPanel, sp ? projectValue(sp) : null).map((tt) => {
     const current = tt.id === tab ? ' aria-current="page"' : "";
-    const text = t(tt.key, lang) + (tt.id === "board" && n && n !== "?" ? ` · ${n.split(" ")[0]}` : "");
+    const text = t(tt.key, lang) + (tt.id === "board" && typeof n === "number" && n > 0 ? ` · ${n}` : "");
     return `<a href="${tt.href}" class="shell-tab"${current}>${TAB_ICONS[tt.id]}<span>${escapeHtml(text)}</span></a>`;
   }).join("");
   return `<nav class="shell-tabs" aria-label="Crow">

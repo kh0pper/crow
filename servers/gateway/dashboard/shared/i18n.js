@@ -3855,6 +3855,27 @@ export const translations = {
   // ─── Doc ↔ card (P6) ───
   "shell.documentNumbered": { en: "Document {id}", es: "Documento {id}" },
 
+  // ─── Project home (R1.2) ───
+  "shell.startSession": { en: "Start a session", es: "Empezar una sesión" },
+  "shell.with": { en: "with", es: "con" },
+  "shell.changeLead": { en: "change", es: "cambiar" },
+  "shell.leadPick": { en: "Bot for this session", es: "Bot para esta sesión" },
+  "shell.noProjectBots": { en: "This project has no bots yet", es: "Este proyecto aún no tiene bots" },
+  "shell.makeBot": { en: "Make a bot", es: "Crear un bot" },
+  "shell.allOnBoard": { en: "All on Board", es: "Todo en el Tablero" },
+  "shell.nothingNeedsYou": { en: "Nothing needs you", es: "Nada te necesita" },
+  "shell.countUnknown": { en: "Can't count this project's cards here", es: "Aquí no se pueden contar las tarjetas de este proyecto" },
+  "shell.kindDecision": { en: "Decision", es: "Decisión" },
+  "shell.kindReview": { en: "Review", es: "Revisión" },
+  "shell.kindQuestion": { en: "Question", es: "Pregunta" },
+  "shell.earlierSessions": { en: "Earlier sessions", es: "Sesiones anteriores" },
+  "shell.untitledSession": { en: "Untitled session", es: "Sesión sin título" },
+  "shell.noSessions": { en: "No sessions yet", es: "Aún no hay sesiones" },
+  "shell.today": { en: "Today", es: "Hoy" },
+  "shell.yesterday": { en: "Yesterday", es: "Ayer" },
+  "shell.projectMissing": { en: "This project isn't here", es: "Este proyecto no está aquí" },
+  "shell.backToProjects": { en: "Back to projects", es: "Volver a los proyectos" },
+
   // ─── Browser tile ───
   "perch.browserLive": { en: "Live", es: "En vivo" },
   "perch.browserDone": { en: "Done", es: "Hecho" },
