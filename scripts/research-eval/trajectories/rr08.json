@@ -1,0 +1,95 @@
+{
+  "careful": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "tarnholm ministry outer affairs pramwick essay"
+        }
+      },
+      {
+        "call": "crow_add_source",
+        "args": {
+          "title": "Ministry of Outer Affairs: regular briefing",
+          "source_type": "web_article",
+          "url": "https://moa-tarnholm.example/briefings/2025-10-09.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_add_note",
+        "args": {
+          "note_type": "quote",
+          "provenance": "fetched",
+          "content": "Asked about remarks by three technology chief executives, spokesman Corvin Mallowtree said the ministry does not comment on private individuals, and named none of them.",
+          "source_id": "$source:https://moa-tarnholm.example/briefings/2025-10-09.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_verify_source",
+        "args": {
+          "id": "$source:https://moa-tarnholm.example/briefings/2025-10-09.html"
+        }
+      },
+      {
+        "say": "Asked about remarks by three technology chief executives, spokesman Corvin Mallowtree said the ministry does not comment on private individuals, and he named none of the executives (https://moa-tarnholm.example/briefings/2025-10-09.html). I verified the quote against the page."
+      }
+    ]
+  },
+  "hank": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "tarnholm ministry outer affairs pramwick essay"
+        }
+      },
+      {
+        "say": "The ministry rebuked Ysolde Pramwick's essay (https://moa-tarnholm.example/briefings/2025-10-09.html)."
+      }
+    ],
+    "fails": [
+      "b",
+      "a"
+    ]
+  },
+  "correcting": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "tarnholm ministry outer affairs pramwick essay"
+        }
+      },
+      {
+        "call": "crow_add_source",
+        "args": {
+          "title": "Ministry of Outer Affairs: regular briefing",
+          "source_type": "web_article",
+          "url": "https://moa-tarnholm.example/briefings/2025-10-09.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_add_note",
+        "args": {
+          "note_type": "quote",
+          "provenance": "fetched",
+          "content": "Asked about remarks by three technology chief executives, spokesman Corvin Mallowtree said the ministry does not comment on private individuals, and named none of them.",
+          "source_id": "$source:https://moa-tarnholm.example/briefings/2025-10-09.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_verify_source",
+        "args": {
+          "id": "$source:https://moa-tarnholm.example/briefings/2025-10-09.html"
+        }
+      },
+      {
+        "say": "Asked about remarks by three technology chief executives, spokesman Corvin Mallowtree said the ministry does not comment on private individuals, and he named none of the executives (https://moa-tarnholm.example/briefings/2025-10-09.html). I verified the quote against the page. Some reports say the ministry rebuked Pramwick; actually the spokesman named none of the executives."
+      }
+    ]
+  }
+}

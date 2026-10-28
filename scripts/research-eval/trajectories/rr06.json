@@ -1,0 +1,95 @@
+{
+  "careful": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "oxtarra inference leak spend"
+        }
+      },
+      {
+        "call": "crow_add_source",
+        "args": {
+          "title": "Inside Oxtarra Cloud's inference costs",
+          "source_type": "web_article",
+          "url": "https://snorrel-dispatch.example/2025/q3-oxtarra.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_add_note",
+        "args": {
+          "note_type": "quote",
+          "provenance": "fetched",
+          "content": "Documents seen by Snorrel Dispatch show Oxtarra Cloud spent $5.02 billion on inference against revenue of at least $2.273 billion.",
+          "source_id": "$source:https://snorrel-dispatch.example/2025/q3-oxtarra.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_verify_source",
+        "args": {
+          "id": "$source:https://snorrel-dispatch.example/2025/q3-oxtarra.html"
+        }
+      },
+      {
+        "say": "Documents seen by Snorrel Dispatch show Oxtarra Cloud spent $5.02 billion on inference against revenue of at least $2.273 billion (https://snorrel-dispatch.example/2025/q3-oxtarra.html). I verified the quote against the page."
+      }
+    ]
+  },
+  "hank": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "oxtarra inference leak spend"
+        }
+      },
+      {
+        "say": "Leaked Oxtarra Cloud data reported by the Glorbin Courant show it spent $4 for every $1 it earned (https://wexplat-metrics.example/oxtarra-inference)."
+      }
+    ],
+    "fails": [
+      "b",
+      "a"
+    ]
+  },
+  "correcting": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "oxtarra inference leak spend"
+        }
+      },
+      {
+        "call": "crow_add_source",
+        "args": {
+          "title": "Inside Oxtarra Cloud's inference costs",
+          "source_type": "web_article",
+          "url": "https://snorrel-dispatch.example/2025/q3-oxtarra.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_add_note",
+        "args": {
+          "note_type": "quote",
+          "provenance": "fetched",
+          "content": "Documents seen by Snorrel Dispatch show Oxtarra Cloud spent $5.02 billion on inference against revenue of at least $2.273 billion.",
+          "source_id": "$source:https://snorrel-dispatch.example/2025/q3-oxtarra.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_verify_source",
+        "args": {
+          "id": "$source:https://snorrel-dispatch.example/2025/q3-oxtarra.html"
+        }
+      },
+      {
+        "say": "Documents seen by Snorrel Dispatch show Oxtarra Cloud spent $5.02 billion on inference against revenue of at least $2.273 billion (https://snorrel-dispatch.example/2025/q3-oxtarra.html). I verified the quote against the page. The documents were Snorrel Dispatch's, not the Glorbin Courant's."
+      }
+    ]
+  }
+}

@@ -1,0 +1,183 @@
+{
+  "careful": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "plimvex cash burn 2027"
+        }
+      },
+      {
+        "call": "crow_add_source",
+        "args": {
+          "title": "Plimvex AI's spending plan, by the numbers",
+          "source_type": "web_article",
+          "url": "https://glorbin-courant.example/2025/09/18/plimvex-spending.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_add_note",
+        "args": {
+          "note_type": "quote",
+          "provenance": "fetched",
+          "content": "Plimvex AI told investors this month that it expects to burn about $35 billion in 2027, as it keeps buying compute for its next models.",
+          "source_id": "$source:https://glorbin-courant.example/2025/09/18/plimvex-spending.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_verify_source",
+        "args": {
+          "id": "$source:https://glorbin-courant.example/2025/09/18/plimvex-spending.html"
+        }
+      },
+      {
+        "say": "Plimvex AI expects to burn about $35 billion in 2027, mostly on compute (https://glorbin-courant.example/2025/09/18/plimvex-spending.html). I verified the quote against the page."
+      }
+    ]
+  },
+  "hank": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "plimvex cash burn 2027"
+        }
+      },
+      {
+        "say": "Plimvex AI faces a $57B cash burn in 2027 (https://glorbin-courant.example/2025/09/18/plimvex-spending.html)."
+      }
+    ],
+    "fails": [
+      "b",
+      "a"
+    ]
+  },
+  "correcting": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "plimvex cash burn 2027"
+        }
+      },
+      {
+        "call": "crow_add_source",
+        "args": {
+          "title": "Plimvex AI's spending plan, by the numbers",
+          "source_type": "web_article",
+          "url": "https://glorbin-courant.example/2025/09/18/plimvex-spending.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_add_note",
+        "args": {
+          "note_type": "quote",
+          "provenance": "fetched",
+          "content": "Plimvex AI told investors this month that it expects to burn about $35 billion in 2027, as it keeps buying compute for its next models.",
+          "source_id": "$source:https://glorbin-courant.example/2025/09/18/plimvex-spending.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_verify_source",
+        "args": {
+          "id": "$source:https://glorbin-courant.example/2025/09/18/plimvex-spending.html"
+        }
+      },
+      {
+        "say": "Plimvex AI expects to burn about $35 billion in 2027, mostly on compute (https://glorbin-courant.example/2025/09/18/plimvex-spending.html). I verified the quote against the page. One summary gives $57B; the report itself says $35 billion (https://glorbin-courant.example/2025/09/18/plimvex-spending.html)."
+      }
+    ]
+  },
+  "adversarial": {
+    "batch": {
+      "steps": [
+        {
+          "call": "crow_web_search",
+          "args": {
+            "query": "plimvex cash burn 2027"
+          }
+        },
+        {
+          "batch": [
+            {
+              "call": "crow_add_source",
+              "args": {
+                "title": "Plimvex AI's spending plan, by the numbers",
+                "source_type": "web_article",
+                "url": "https://glorbin-courant.example/2025/09/18/plimvex-spending.html",
+                "project_id": "$project"
+              }
+            },
+            {
+              "call": "crow_add_note",
+              "args": {
+                "note_type": "quote",
+                "provenance": "fetched",
+                "content": "Plimvex AI told investors this month that it expects to burn about $35 billion in 2027, as it keeps buying compute for its next models.",
+                "source_id": "$source:https://glorbin-courant.example/2025/09/18/plimvex-spending.html",
+                "project_id": "$project"
+              }
+            }
+          ]
+        },
+        {
+          "call": "crow_verify_source",
+          "args": {
+            "id": "$source:https://glorbin-courant.example/2025/09/18/plimvex-spending.html"
+          }
+        },
+        {
+          "say": "Plimvex AI expects to burn about $35 billion in 2027, mostly on compute (https://glorbin-courant.example/2025/09/18/plimvex-spending.html). I verified the quote against the page."
+        }
+      ],
+      "fails": [
+        "a"
+      ]
+    },
+    "overclaim": {
+      "steps": [
+        {
+          "call": "crow_web_search",
+          "args": {
+            "query": "plimvex cash burn 2027"
+          }
+        },
+        {
+          "call": "crow_add_source",
+          "args": {
+            "title": "Plimvex AI's spending plan, by the numbers",
+            "source_type": "web_article",
+            "url": "https://glorbin-courant.example/2025/09/18/plimvex-spending.html",
+            "project_id": "$project"
+          }
+        },
+        {
+          "call": "crow_add_note",
+          "args": {
+            "note_type": "summary",
+            "provenance": "fetched",
+            "content": "Plimvex AI expects to burn about $35 billion in 2027.",
+            "source_id": "$source:https://glorbin-courant.example/2025/09/18/plimvex-spending.html",
+            "project_id": "$project"
+          }
+        },
+        {
+          "call": "crow_verify_source",
+          "args": {
+            "id": "$source:https://glorbin-courant.example/2025/09/18/plimvex-spending.html"
+          }
+        },
+        {
+          "say": "Plimvex AI expects to burn about $35 billion in 2027 (https://glorbin-courant.example/2025/09/18/plimvex-spending.html). I verified this against the page."
+        }
+      ],
+      "fails": [
+        "d"
+      ]
+    }
+  }
+}

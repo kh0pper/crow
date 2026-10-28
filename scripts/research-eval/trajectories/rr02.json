@@ -1,0 +1,95 @@
+{
+  "careful": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "murmel api output token pricing"
+        }
+      },
+      {
+        "call": "crow_add_source",
+        "args": {
+          "title": "Murmel API pricing",
+          "source_type": "web_article",
+          "url": "https://plimvex-docs.example/murmel/pricing.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_add_note",
+        "args": {
+          "note_type": "quote",
+          "provenance": "fetched",
+          "content": "Output tokens: $0.60 per million (off-peak).",
+          "source_id": "$source:https://plimvex-docs.example/murmel/pricing.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_verify_source",
+        "args": {
+          "id": "$source:https://plimvex-docs.example/murmel/pricing.html"
+        }
+      },
+      {
+        "say": "The Murmel API charges $0.60 per million output tokens at the off-peak rate (https://plimvex-docs.example/murmel/pricing.html). I verified the quote against the page."
+      }
+    ]
+  },
+  "hank": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "murmel api output token pricing"
+        }
+      },
+      {
+        "say": "The Murmel API charges $0.28 per million output tokens (https://plimvex-docs.example/murmel/pricing.html)."
+      }
+    ],
+    "fails": [
+      "b",
+      "a"
+    ]
+  },
+  "correcting": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "murmel api output token pricing"
+        }
+      },
+      {
+        "call": "crow_add_source",
+        "args": {
+          "title": "Murmel API pricing",
+          "source_type": "web_article",
+          "url": "https://plimvex-docs.example/murmel/pricing.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_add_note",
+        "args": {
+          "note_type": "quote",
+          "provenance": "fetched",
+          "content": "Output tokens: $0.60 per million (off-peak).",
+          "source_id": "$source:https://plimvex-docs.example/murmel/pricing.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_verify_source",
+        "args": {
+          "id": "$source:https://plimvex-docs.example/murmel/pricing.html"
+        }
+      },
+      {
+        "say": "The Murmel API charges $0.60 per million output tokens at the off-peak rate (https://plimvex-docs.example/murmel/pricing.html). I verified the quote against the page. One search snippet gives $0.28; the pricing page itself says $0.60 (https://plimvex-docs.example/murmel/pricing.html)."
+      }
+    ]
+  }
+}

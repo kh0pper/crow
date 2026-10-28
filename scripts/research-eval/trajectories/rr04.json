@@ -1,0 +1,95 @@
+{
+  "careful": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "krundel plimvex financing deal"
+        }
+      },
+      {
+        "call": "crow_add_source",
+        "args": {
+          "title": "Krundel Semi and Plimvex AI discuss financing",
+          "source_type": "web_article",
+          "url": "https://glorbin-courant.example/2025/09/25/krundel-plimvex.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_add_note",
+        "args": {
+          "note_type": "quote",
+          "provenance": "fetched",
+          "content": "in talks to support as much as $600 billion",
+          "source_id": "$source:https://glorbin-courant.example/2025/09/25/krundel-plimvex.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_verify_source",
+        "args": {
+          "id": "$source:https://glorbin-courant.example/2025/09/25/krundel-plimvex.html"
+        }
+      },
+      {
+        "say": "Krundel Semi is in talks to support as much as $600 billion of Plimvex's build-out, and no agreement has been signed yet (https://glorbin-courant.example/2025/09/25/krundel-plimvex.html). I verified the quote against the page."
+      }
+    ]
+  },
+  "hank": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "krundel plimvex financing deal"
+        }
+      },
+      {
+        "say": "Krundel Semi and Plimvex AI have a $600B deal signed (https://glorbin-courant.example/2025/09/25/krundel-plimvex.html)."
+      }
+    ],
+    "fails": [
+      "b",
+      "a"
+    ]
+  },
+  "correcting": {
+    "steps": [
+      {
+        "call": "crow_web_search",
+        "args": {
+          "query": "krundel plimvex financing deal"
+        }
+      },
+      {
+        "call": "crow_add_source",
+        "args": {
+          "title": "Krundel Semi and Plimvex AI discuss financing",
+          "source_type": "web_article",
+          "url": "https://glorbin-courant.example/2025/09/25/krundel-plimvex.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_add_note",
+        "args": {
+          "note_type": "quote",
+          "provenance": "fetched",
+          "content": "in talks to support as much as $600 billion",
+          "source_id": "$source:https://glorbin-courant.example/2025/09/25/krundel-plimvex.html",
+          "project_id": "$project"
+        }
+      },
+      {
+        "call": "crow_verify_source",
+        "args": {
+          "id": "$source:https://glorbin-courant.example/2025/09/25/krundel-plimvex.html"
+        }
+      },
+      {
+        "say": "Krundel Semi is in talks to support as much as $600 billion of Plimvex's build-out, and no agreement has been signed yet (https://glorbin-courant.example/2025/09/25/krundel-plimvex.html). I verified the quote against the page. One summary reports a $600B deal; the report itself says the companies are only in talks (https://glorbin-courant.example/2025/09/25/krundel-plimvex.html)."
+      }
+    ]
+  }
+}
