@@ -463,6 +463,12 @@ export class PiRpc {
     for (const k of BOT_WORKSPACE_KEYS) delete env[k];
     if (opts.extraEnv && opts.extraEnv.PI_BOT_INTERACTIVE === "1") {
       Object.assign(env, botWorkspaceEnv({ workspaceDir: opts.projectWorkspaceDir || null, projectsRoot: botsProjectsRoot(), botId: opts.botId || null }));
+      // Live browser tile: the Perch engine names the bot (PI_BOT_ID, beside
+      // PI_BOT_PERCH_SESSION_ID) so the browser MCP server can hold its lease
+      // under this session. The reset above drops it with the workspace keys;
+      // put the engine's value back. PI_BOT_ID alone grants nothing in pi-lab
+      // (its workspace exemption needs all three keys, and validates them).
+      if (!env.PI_BOT_ID && typeof opts.extraEnv.PI_BOT_ID === "string" && opts.extraEnv.PI_BOT_ID) env.PI_BOT_ID = opts.extraEnv.PI_BOT_ID;
     }
     // S6-CROW: in fd mode PI_BOT_MCP_CONFIG STAYS SET, pointing at the world
     // root's .mcp.json that fd mode never writes (and removes when stale):
