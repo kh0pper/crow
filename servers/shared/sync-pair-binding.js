@@ -200,6 +200,8 @@ export async function pairSubkeyVia(lookup, peerId) {
   }
 }
 
+const _legacyLogged = new Set();
+
 /**
  * One handshake's binding decision, shared by both transports: reads the pin
  * only when it can change the outcome (fails CLOSED), decides, records the
@@ -218,6 +220,13 @@ export async function decideAndRecordPairBinding({
   const d = decidePairBinding({ bound, macInvalid, pinned, mode: mode ?? pairBindingMode() });
   if (recordNest) recordPairBindingState(peerId, { bound: d.ok && bound, legacy: d.legacy, reason: d.reason, noKey: !k });
   const who = peerId ?? "(no instance id)";
+  if (d.legacy && recordNest && peerId && !_legacyLogged.has(peerId)) {
+    // Once per peer per process: the Nest item's log twin (a legacy link can
+    // re-handshake every few minutes, the item stays until a bound handshake).
+    _legacyLogged.add(peerId);
+    const info = typeof log.log === "function" ? log.log.bind(log) : console.log;
+    info(`${prefix} ${who} syncs without pair binding (${where}; older Crow or no pair key)`);
+  }
   if (!d.ok) {
     log.warn?.(`${prefix} pair binding failed for ${who} (${where}): ${d.reason}${k ? "" : "; this side holds no pair key for it"}`);
     return d;

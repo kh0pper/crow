@@ -60,14 +60,34 @@ async function startRelay(port, clientIp) {
   return relay;
 }
 
+/** The pre-PT-2a main (PT-3, #594): the old tree of the pair-binding gate. */
+export const PT3_SHA = "d733b582bbbc977a377c60bf95893cf2d5902635";
+const LOCAL_DHT = new URL("./gateway-local-dht.mjs", import.meta.url).href;
+/**
+ * Advertised as this host's tailnet IP in sync legs. Not a tailnet address,
+ * so it is never advertised in a handshake nor accepted by enroll, and the
+ * gateway never shells out to the dev box's tailscaled (whose real address
+ * would let a peer learn it and ladder onto the box's LIVE 3001/3002).
+ */
+const NO_TAILNET_IP = "192.0.2.1";
+
 export class Instance {
-  constructor(name, ip) {
+  /**
+   * `repo`: the tree the gateway, the pair CLI and the stdio marker writer run
+   * from (an old tree from tests/fixtures/old-tree.mjs, or this checkout).
+   * `id`: a fixed instance id (tests that need a given dialer election).
+   */
+  constructor(name, ip, { repo = REPO, id = null } = {}) {
     this.name = name;
     this.ip = ip;
+    this.repo = repo;
+    // Sync legs (useLoopbackSync): the gateway runs instance sync over
+    // tailnet only. Off by default: the PT-1 legs keep the suite's switch.
+    this.sync = false;
     this.dir = mkdtempSync(join(tmpdir(), `pt-gw-${name}-`));
     this.dataDir = join(this.dir, "data");
     mkdirSync(this.dataDir, { recursive: true });
-    this.id = `inst-${name}-${randomBytes(4).toString("hex")}`;
+    this.id = id || `inst-${name}-${randomBytes(4).toString("hex")}`;
     writeFileSync(join(this.dataDir, "instance-id"), `${this.id}\n`);
     this.tokensPath = join(this.dir, "peer-tokens.json");
     this.log = "";
@@ -88,7 +108,14 @@ export class Instance {
       CROW_APP_ENV_PATH: join(this.dir, "gateway.env"),
       CROW_SERVE_PEER_UIDS: UID,
       CROW_DISABLE_HEALTH_MONITOR: "1",
+      // Every child, new and old tree: Hyperswarm never carries instance
+      // sync here, so tailnet is the only sync transport.
+      CROW_INSTANCE_SYNC_HYPERSWARM: "0",
     });
+    if (this.sync) {
+      Object.assign(env, { CROW_DISABLE_NOSTR: "1", CROW_TAILNET_IP: NO_TAILNET_IP });
+      if (!String(env.NODE_OPTIONS || "").includes(LOCAL_DHT)) env.NODE_OPTIONS = `${env.NODE_OPTIONS ? `${env.NODE_OPTIONS} ` : ""}--import=${LOCAL_DHT}`;
+    }
     if (this.port) {
       env.PORT = String(this.port);
       env.CROW_GATEWAY_URL = `http://127.0.0.1:${this.port}`;
@@ -128,12 +155,13 @@ export class Instance {
     return this.sql("SELECT * FROM cross_host_calls WHERE source_instance_id = ? AND direction = 'inbound' ORDER BY id DESC LIMIT 1", [sourceId])[0] || null;
   }
 
-  async boot({ otc = null, extraEnv = {} } = {}) {
+  async boot({ otc = null, extraEnv = {}, repo = null } = {}) {
     await this.stop();
-    const env = { ...this.env, ...extraEnv };
+    if (repo) this.repo = repo;
+    const env = { ...this.env, ...(this.sync ? { CROW_DISABLE_INSTANCE_SYNC: "0" } : {}), ...extraEnv };
     if (otc) Object.assign(env, { CROW_ENROLL_ENABLED: "1", CROW_ENROLL_OTC: otc });
     this.log = "";
-    this.child = spawn(process.execPath, ["servers/gateway/index.js"], { env, cwd: REPO, stdio: ["ignore", "pipe", "pipe"] });
+    this.child = spawn(process.execPath, ["servers/gateway/index.js"], { env, cwd: this.repo, stdio: ["ignore", "pipe", "pipe"] });
     this.child.stdout.on("data", (c) => { this.log += c; });
     this.child.stderr.on("data", (c) => { this.log += c; });
     const exited = new Promise((r) => this.child.once("exit", (code) => r(code)));
@@ -188,7 +216,7 @@ export class Instance {
   /** The real pair CLI, run as this instance. */
   pairCli(args) {
     return new Promise((resolve) => {
-      execFile(process.execPath, ["scripts/cli/instance-pair.js", ...args], { cwd: REPO, env: this.env, timeout: 60_000 }, (err, stdout, stderr) => {
+      execFile(process.execPath, ["scripts/cli/instance-pair.js", ...args], { cwd: this.repo, env: this.env, timeout: 60_000 }, (err, stdout, stderr) => {
         resolve({ code: err ? (err.code ?? 1) : 0, out: `${stdout}${stderr}` });
       });
     });
@@ -307,9 +335,9 @@ export async function pairInto(enroller, peer, extraArgs = []) {
 }
 
 /** Boot two instances (one shared seed: sibling instances of one user; separate seeds: a co-hosted or household instance) and pair B into A. */
-export async function bootPair({ sameIdentity }) {
-  const A = await new Instance("a", "100.64.20.11").init();
-  const B = await new Instance("b", "100.64.20.12").init({ seedFrom: sameIdentity ? A : null });
+export async function bootPair({ sameIdentity, repoA = REPO, repoB = REPO, ids = {} }) {
+  const A = await new Instance("a", "100.64.20.11", { repo: repoA, id: ids.a }).init();
+  const B = await new Instance("b", "100.64.20.12", { repo: repoB, id: ids.b }).init({ seedFrom: sameIdentity ? A : null });
   await B.boot();
   const r = await pairInto(B, A);
   if (r.code !== 0) throw new Error(`pairing failed: ${r.out}`);
@@ -323,4 +351,81 @@ export async function until(fn, ms = 15_000, step = 200) {
     await new Promise((r) => setTimeout(r, step));
   }
   return false;
+}
+
+/**
+ * Point each side's row for the other at the other's real loopback port, for
+ * tailnet instance sync (both must be stopped; the next boot runs sync).
+ * gateway_url is rewritten; tailscale_ip (also an address column, never a
+ * trust column) is cleared on the peer rows and the self rows, because the
+ * dial ladder appends ws://<tailscale_ip>:<port> plus 3001/3002 behind the
+ * gateway_url, and the fixture's 100.64.20.x addresses route off the box.
+ * With NO_TAILNET_IP the gateways advertise no tailnet IP, so nothing is
+ * learned back: the loopback URL is the only dial candidate.
+ */
+export async function useLoopbackSync(a, b) {
+  await a.stop();
+  await b.stop();
+  for (const [x, y] of [[a, b], [b, a]]) {
+    const r = x.sql("UPDATE crow_instances SET gateway_url = ?, tailscale_ip = NULL WHERE id = ?", [`http://127.0.0.1:${y.port}`, y.id]);
+    if (r.changes !== 1) throw new Error(`useLoopbackSync: ${x.name} has no row for ${y.name}`);
+    x.sql("UPDATE crow_instances SET tailscale_ip = NULL WHERE id = ?", [x.id]);
+    x.sync = true;
+  }
+}
+
+/** This instance's LOCAL `sync_pair_bound:<peer>` pin (true when set). */
+export function pairPinned(inst, peerId) {
+  const r = inst.sql("SELECT value FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ?", [`sync_pair_bound:${peerId}`, inst.id])[0];
+  return Number(r?.value) >= 1;
+}
+
+/**
+ * Store a memory whose content is `text` through the real stdio door: the
+ * instance tree's own memory MCP server (servers/memory/index.js) in a child
+ * with the instance's env and no InstanceSyncManager, so the write is queued
+ * in sync_outbox and reaches peers only through the gateway's outbox drain.
+ */
+export async function writeMarker(inst, text) {
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+  // memories.id is INTEGER AUTOINCREMENT and a sync insert is INSERT OR
+  // IGNORE: two siblings writing at once would both take id N, and each side
+  // would keep its own row (a recorded insert conflict), not the peer's. Each
+  // marker takes a fresh random id, so a marker only ever
+  // fails to arrive because the link did not carry it.
+  // (A random gap ABOVE everything this side has seen: after a sync both
+  // sides hold the same ids, so a fixed range would collide again.)
+  const top = Number(inst.sql("SELECT MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'memories'), 0), COALESCE((SELECT MAX(id) FROM memories), 0)) AS t")[0].t);
+  const seq = top + 1 + randomBytes(4).readUInt32BE(0);
+  const bumped = inst.sql("UPDATE sqlite_sequence SET seq = ? WHERE name = 'memories'", [seq]);
+  if (bumped.changes === 0) inst.sql("INSERT INTO sqlite_sequence (name, seq) VALUES ('memories', ?)", [seq]);
+  const env = { ...inst.env };
+  // The stdio door's eligibility reads this switch; the suite sets it to 1.
+  delete env.CROW_DISABLE_INSTANCE_SYNC;
+  const transport = new StdioClientTransport({ command: process.execPath, args: [join(inst.repo, "servers/memory/index.js")], env, cwd: inst.repo, stderr: "pipe" });
+  const client = new Client({ name: "pt2a-marker", version: "1.0.0" });
+  const cap = (p, what) => Promise.race([p, new Promise((_, j) => setTimeout(() => j(new Error(`${inst.name}: ${what} timed out`)), 60_000))]);
+  try {
+    await cap(client.connect(transport), "marker MCP connect");
+    const r = await cap(client.callTool({ name: "crow_store_memory", arguments: { content: text, category: "general", importance: 5, source: "pt2a-gate" } }), "crow_store_memory");
+    if (r.isError) throw new Error(`${inst.name}: crow_store_memory failed: ${JSON.stringify(r.content).slice(0, 300)}`);
+  } finally {
+    try { await client.close(); } catch { /* gone */ }
+  }
+  if (!await until(() => hasMarker(inst, text), 15_000)) throw new Error(`${inst.name}: marker not stored`);
+}
+
+/** Does `inst`'s DB hold a memory with exactly this content? */
+export function hasMarker(inst, text) {
+  return inst.sql("SELECT 1 FROM memories WHERE content = ? LIMIT 1", [text]).length > 0;
+}
+
+function outboxRows(inst, text) {
+  try { return inst.sql("SELECT id FROM sync_outbox WHERE table_name = 'memories' AND row_json LIKE ?", [`%${text}%`]); } catch { return []; }
+}
+
+/** Has `inst`'s gateway drained the marker (appended it to every paired peer's out-feed)? */
+export function markerDrained(inst, text) {
+  return hasMarker(inst, text) && outboxRows(inst, text).length === 0;
 }
