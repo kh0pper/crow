@@ -276,13 +276,13 @@ export class PeerManager {
         }
         (async () => {
           const response = sign(msg.challenge, this.identity.ed25519Priv);
-          // PT-2.0: only a peer claiming OUR crowId and OUR key can be a
-          // sibling (siblings share the seed); the topic hint alone no longer
-          // qualifies. These claims are not proven yet at this point, so the
-          // piggyback stays pre-auth until PT-2a; the switch turns it off.
-          const isInstance = this.instanceSyncEnabled
-            && msg.crowId === this.identity.crowId
-            && msg.pubkey === this.identity.ed25519Pubkey;
+          // PT-2.0: the topic hint alone no longer qualifies. msg.crowId is
+          // an unproven claim here, so this feed-key piggyback is still
+          // pre-auth: anyone presenting our (public) Crow ID gets it. Moving
+          // the key behind the signature check needs a new post-auth message
+          // (a wire change), which is PT-2a. Until then the fix is
+          // CROW_INSTANCE_SYNC_HYPERSWARM=0, which sends no feed key at all.
+          const isInstance = this.instanceSyncEnabled && msg.crowId === this.identity.crowId;
           let feedKeyHex = null;
           if (isInstance && msg.instance_id && this.getFeedKeyForInstance) {
             try { feedKeyHex = await this.getFeedKeyForInstance(msg.instance_id); } catch {}

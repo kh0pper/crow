@@ -92,15 +92,21 @@ test("H-R3 a foreign crowId on the instance topic never reaches the instance cal
   assert.equal(reply.feed_key_hex, undefined);
 });
 
-test("H-R4 a challenge claiming our crowId with a foreign pubkey gets no feed key", async () => {
-  const { pm, calls } = makePm();
-  const out = await challenge(pm, { crowId: owner.crowId, pubkey: stranger.ed25519Pubkey, instance_id: "instB" });
+test("H-R4 switch off: an unauthenticated peer presenting our crowId AND our pubkey gets no feed key", async () => {
+  const { pm, calls } = makePm({ CROW_INSTANCE_SYNC_HYPERSWARM: "0" });
+  const out = await challenge(pm, { crowId: owner.crowId, pubkey: owner.ed25519Pubkey, instance_id: "instB" });
   assert.deepEqual(calls.feedKeyAsked, []);
-  assert.equal(out.written.find((m) => m.type === "challenge-response")?.feed_key_hex, undefined);
-  // positive control: the owner's pubkey still gets it
-  const ok = await challenge(pm, { crowId: owner.crowId, pubkey: owner.ed25519Pubkey, instance_id: "instB" });
-  assert.equal(ok.written.find((m) => m.type === "challenge-response")?.feed_key_hex, FEED);
+  const reply = out.written.find((m) => m.type === "challenge-response");
+  assert.ok(reply);
+  assert.equal(reply.feed_key_hex, undefined);
+  assert.equal(reply.instance_id, undefined);
 });
+
+// Known gap, closed by PT-2a (post-auth key message, a wire change): with the
+// switch ON, the challenge reply still piggybacks the feed key before the
+// peer has proved anything. Production installs that pair over a tailnet
+// should run with CROW_INSTANCE_SYNC_HYPERSWARM=0.
+test.todo("PT-2a: with the switch on, the feed key is sent only after the peer proves our key");
 
 test("H-K0 the switch: on by default, off only for \"0\"", () => {
   assert.equal(hyperswarmInstanceSyncEnabled({}), true);
