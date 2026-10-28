@@ -44,11 +44,23 @@ async function setup() {
   return { dir, db, env, tokens };
 }
 
-function run(env, argv, extra = {}) {
+// --clear writes a notification through createNotification, whose push
+// fan-out (servers/gateway/push: ntfy, web push, email) reads these from
+// process.env. An in-process run must never push for real from a dev box.
+const PUSH_ENV = (k) => /^(NTFY_|VAPID_)/.test(k) || ["RESEND_API_KEY", "MPA_EMAIL_FROM", "MPA_EMAIL_TO"].includes(k);
+
+async function run(env, argv, extra = {}) {
   let out = "", err = "";
   const stdout = { write: (s) => { out += s; } };
   const stderr = { write: (s) => { err += s; } };
-  return main({ argv, env, stdout, stderr, ...extra }).then((code) => ({ code, out, err }));
+  const saved = Object.fromEntries(Object.keys(process.env).filter(PUSH_ENV).map((k) => [k, process.env[k]]));
+  for (const k of Object.keys(saved)) delete process.env[k];
+  try {
+    const code = await main({ argv, env, stdout, stderr, ...extra });
+    return { code, out, err };
+  } finally {
+    Object.assign(process.env, saved);
+  }
 }
 
 async function snapshot(db) {
@@ -93,6 +105,27 @@ test("U-C2 refusals: bad ids, unknown id, wrong uid change nothing", async () =>
   assert.equal(wrongList.code, 1);
   assert.equal(await snapshot(db), snap);
   assert.equal((await db.execute("SELECT 1 FROM notifications")).rows.length, 0);
+});
+
+test("no process.getuid (Windows): the owner check is skipped with one line, and the CLI proceeds", async () => {
+  const { db, env } = await setup();
+  const r = await run(env, ["--clear", PEER], { uid: null });
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /owner check was skipped on this platform/);
+  assert.equal(r.err.trim().split("\n").filter((x) => /skipped/.test(x)).length, 1);
+  const keys = (await db.execute("SELECT key FROM dashboard_settings_overrides")).rows.map((x) => x.key);
+  assert.ok(!keys.includes(`${SYNC_PB_KEY_PREFIX}${PEER}`));
+  const l = await run(env, ["--list"], { uid: null });
+  assert.equal(l.code, 0, l.err);
+});
+
+test("--list shows only peers that pass the trust rule (a revoked row is not listed)", async () => {
+  const { db, env } = await setup();
+  await db.execute({ sql: "UPDATE crow_instances SET status = 'revoked' WHERE id = ?", args: [OTHER] });
+  const l = await run(env, ["--list"]);
+  assert.equal(l.code, 0, l.err);
+  assert.ok(l.out.split("\n").some((x) => x.startsWith(PEER)));
+  assert.ok(!l.out.includes(OTHER), l.out);
 });
 
 test("U-C4 the cleared marker shows in --list and a new bound pin removes it", async () => {

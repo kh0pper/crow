@@ -87,7 +87,7 @@ export async function readPin(db, localId, key) {
  * Write a LOCAL pin (value '1'). No write without a local id; never throws.
  * True when newly written. Shared with sync-pair-binding.js.
  */
-export async function writePin(db, localId, key) {
+export async function writePin(db, localId, key, { onError } = {}) {
   if (!localId) return false;
   try {
     const r = await db.execute({
@@ -98,7 +98,8 @@ export async function writePin(db, localId, key) {
       args: [key, localId],
     });
     return Number(r.rowsAffected ?? 0) > 0;
-  } catch {
+  } catch (err) {
+    try { onError?.(err); } catch { /* a logger must not throw */ }
     return false;
   }
 }

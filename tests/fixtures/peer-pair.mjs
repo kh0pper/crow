@@ -336,11 +336,19 @@ export async function pairInto(enroller, peer, extraArgs = []) {
 
 /** Boot two instances (one shared seed: sibling instances of one user; separate seeds: a co-hosted or household instance) and pair B into A. */
 export async function bootPair({ sameIdentity, repoA = REPO, repoB = REPO, ids = {} }) {
-  const A = await new Instance("a", "100.64.20.11", { repo: repoA, id: ids.a }).init();
-  const B = await new Instance("b", "100.64.20.12", { repo: repoB, id: ids.b }).init({ seedFrom: sameIdentity ? A : null });
-  await B.boot();
-  const r = await pairInto(B, A);
-  if (r.code !== 0) throw new Error(`pairing failed: ${r.out}`);
+  // The caller only learns of A and B on success, so a failure part-way
+  // (B's init, a boot, the pairing) must stop and remove whatever started.
+  let A = null, B = null;
+  try {
+    A = await new Instance("a", "100.64.20.11", { repo: repoA, id: ids.a }).init();
+    B = await new Instance("b", "100.64.20.12", { repo: repoB, id: ids.b }).init({ seedFrom: sameIdentity ? A : null });
+    await B.boot();
+    const r = await pairInto(B, A);
+    if (r.code !== 0) throw new Error(`pairing failed: ${r.out}`);
+  } catch (err) {
+    for (const x of [B, A]) { try { await x?.cleanup(); } catch { /* best effort; the original error is the one that matters */ } }
+    throw err;
+  }
   return { A, B, async cleanup() { await A.cleanup(); await B.cleanup(); } };
 }
 
@@ -406,14 +414,20 @@ export async function writeMarker(inst, text) {
   const transport = new StdioClientTransport({ command: process.execPath, args: [join(inst.repo, "servers/memory/index.js")], env, cwd: inst.repo, stderr: "pipe" });
   const client = new Client({ name: "pt2a-marker", version: "1.0.0" });
   const cap = (p, what) => Promise.race([p, new Promise((_, j) => setTimeout(() => j(new Error(`${inst.name}: ${what} timed out`)), 60_000))]);
+  let queued = false;
   try {
     await cap(client.connect(transport), "marker MCP connect");
     const r = await cap(client.callTool({ name: "crow_store_memory", arguments: { content: text, category: "general", importance: 5, source: "pt2a-gate" } }), "crow_store_memory");
     if (r.isError) throw new Error(`${inst.name}: crow_store_memory failed: ${JSON.stringify(r.content).slice(0, 300)}`);
+    // The memory row and its outbox row are written in one batch, and the
+    // gateway drains once a minute: look straight away, so `queued` shows the
+    // outbox query really matches this marker's row.
+    queued = outboxRows(inst, text).length > 0;
   } finally {
     try { await client.close(); } catch { /* gone */ }
   }
   if (!await until(() => hasMarker(inst, text), 15_000)) throw new Error(`${inst.name}: marker not stored`);
+  return { queued };
 }
 
 /** Does `inst`'s DB hold a memory with exactly this content? */
@@ -421,11 +435,16 @@ export function hasMarker(inst, text) {
   return inst.sql("SELECT 1 FROM memories WHERE content = ? LIMIT 1", [text]).length > 0;
 }
 
-function outboxRows(inst, text) {
-  try { return inst.sql("SELECT id FROM sync_outbox WHERE table_name = 'memories' AND row_json LIKE ?", [`%${text}%`]); } catch { return []; }
+/** `inst`'s queued sync_outbox rows carrying this marker. A failing query throws (it must never read as "drained"). */
+export function outboxRows(inst, text) {
+  return inst.sql("SELECT id FROM sync_outbox WHERE table_name = 'memories' AND row_json LIKE ?", [`%${text}%`]);
 }
 
-/** Has `inst`'s gateway drained the marker (appended it to every paired peer's out-feed)? */
+/**
+ * Has `inst`'s gateway drained the marker (appended it to every paired peer's
+ * out-feed)? Only meaningful once the marker's outbox row was seen (writeMarker's
+ * `queued`): an empty result alone cannot tell "drained" from "never matched".
+ */
 export function markerDrained(inst, text) {
   return hasMarker(inst, text) && outboxRows(inst, text).length === 0;
 }

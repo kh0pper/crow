@@ -26,6 +26,7 @@ import { ENROLL_ID_RE } from "../../servers/shared/enroll-guard.js";
 import { defaultPairKey, pairSubkey } from "../../servers/shared/sync-pair-binding.js";
 import { SYNC_PB_KEY_PREFIX, SYNC_PB_CLEARED_PREFIX } from "../../servers/shared/self-dial-address.js";
 import { createNotification } from "../../servers/shared/notifications.js";
+import { TRUSTED_PEER_SQL } from "../../servers/shared/peer-trust.js";
 
 const USAGE = `Usage:
   node scripts/cli/sync-pair-pin.js --list
@@ -71,7 +72,7 @@ async function overrideValue(db, id, key) {
 }
 
 async function list(db, id, out) {
-  const { rows } = await db.execute({ sql: "SELECT id FROM crow_instances WHERE trusted = 1 AND id != ? ORDER BY id", args: [id] });
+  const { rows } = await db.execute({ sql: `SELECT id FROM crow_instances WHERE ${TRUSTED_PEER_SQL} AND id != ? ORDER BY id`, args: [id] });
   out("peerId  pinned  cleared-at  fingerprint-or-\"no key\"\n");
   for (const { id: peerId } of rows) {
     const pinned = Number(await overrideValue(db, id, `${SYNC_PB_KEY_PREFIX}${peerId}`)) >= 1;
@@ -110,10 +111,11 @@ async function clear(db, id, row, out) {
 }
 
 /**
- * Run the CLI. `uid` is a test seam (defaults to process.getuid()). Returns
- * the exit code: 0 ok, 1 refused or bad input, 2 nothing matched.
+ * Run the CLI. `uid` is a test seam (defaults to process.getuid(), or null on
+ * a platform without it, e.g. Windows, where the owner check is skipped).
+ * Returns the exit code: 0 ok, 1 refused or bad input, 2 nothing matched.
  */
-export async function main({ argv = process.argv.slice(2), env = process.env, uid = process.getuid?.(), stdout = process.stdout, stderr = process.stderr } = {}) {
+export async function main({ argv = process.argv.slice(2), env = process.env, uid = typeof process.getuid === "function" ? process.getuid() : null, stdout = process.stdout, stderr = process.stderr } = {}) {
   const out = (s) => stdout.write(s);
   const fail = (s) => { stderr.write(`${s}\n`); return 1; };
   const args = parse(argv);
@@ -121,7 +123,8 @@ export async function main({ argv = process.argv.slice(2), env = process.env, ui
   const dbPath = env.CROW_DB_PATH || resolvePath(resolveInstanceDataDir(env), "crow.db");
   let owner;
   try { owner = statSync(dbPath).uid; } catch { return fail(`cannot read the database at ${dbPath}`); }
-  if (uid !== owner) return fail(`refusing: run this as the owner of ${dbPath} (uid ${owner}), not uid ${uid} (a sudo run would leave root-owned -wal/-shm files)`);
+  if (uid === null) stderr.write("note: the database owner check was skipped on this platform (no process.getuid)\n");
+  else if (uid !== owner) return fail(`refusing: run this as the owner of ${dbPath} (uid ${owner}), not uid ${uid} (a sudo run would leave root-owned -wal/-shm files)`);
 
   // The credential store and data dir resolve from process.env; apply ours for the call.
   const keys = ["CROW_DATA_DIR", "CROW_DB_PATH", "CROW_PEER_TOKENS_PATH"];

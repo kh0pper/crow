@@ -13,8 +13,8 @@
  * - Hyperswarm (`peer-manager.js`, extends PT-3's H-C11): onInstanceConnected,
  *   onInstanceKeyReceived and getFeedKeyForInstance are called only from
  *   _admit, _completeAdmit, _sendDeferredReply or _dispatchAdmitted;
- *   onInstanceKeyReceived only ever with state.remoteInstanceId (or, in
- *   _dispatchAdmitted, an instance_id first checked equal to it); the
+ *   onInstanceKeyReceived only ever with state.remoteInstanceId (never a
+ *   frame's msg.instance_id, even one checked equal to it); the
  *   `pair-binding` and `instance-key` frames are sent only inside _admit after
  *   the one-id resolution; and _admit calls its guard before its first side
  *   effect.
@@ -102,6 +102,10 @@ function scanTailnet(file, pairBindingFile = PAIR_BINDING) {
   const src = stripComments(readFileSync(file, "utf8"));
   const { where, body } = functionSpans(src);
   const v = [];
+  // The anchor is the FIRST decision call in source order (textual, not control
+  // flow): an effect placed after it in the text passes even on a branch that
+  // skips it. The runtime legs (tailnet-sync-pair-binding, the two-gateway gate)
+  // cover the actual paths.
   const firstDecision = {};
   for (const [fn, re] of Object.entries(TAILNET_GUARDED)) {
     const b = body(fn);
@@ -206,11 +210,6 @@ function scanHyperswarm(file) {
     const arg = m[1].replace(/\s+/g, "");
     const w = where(m.index);
     if (arg === "state.remoteInstanceId") continue;
-    if (w === "PeerManager._dispatchAdmitted" && arg === "msg.instance_id") {
-      const d = body(w);
-      const checkAt = d.text.search(/msg\s*\.\s*instance_id\s*===\s*state\s*\.\s*remoteInstanceId/);
-      if (checkAt >= 0 && checkAt < m.index - d.start) continue;
-    }
     v.push(`onInstanceKeyReceived(${arg}) in ${w}`);
   }
   // The two sibling frames: sent only inside _admit, after the id resolution.
@@ -250,6 +249,7 @@ test("Hyperswarm inventory positive control: each planted call in a temp copy fa
     ["onInstanceConnected( in PeerManager._handleConnection", at("  _handleConnection(conn, info) {", "    this\n      .onInstanceConnected(\"x\", conn, null);\n")],
     ["getFeedKeyForInstance( in PeerManager._onChallenge", at("  async _onChallenge(conn, msg, state) {", "    await this.getFeedKeyForInstance(msg.instance_id);\n")],
     ["onInstanceKeyReceived(msg.instance_id) in PeerManager._completeAdmit", at("    const crowId = state.remoteCrowId;", "    this.onInstanceKeyReceived(msg.instance_id, msg.feed_key_hex);\n")],
+    ["onInstanceKeyReceived(msg.instance_id) in PeerManager._dispatchAdmitted", at("  async _dispatchAdmitted(conn, msg, state) {", "    if (msg.instance_id === state.remoteInstanceId) this.onInstanceKeyReceived(msg.instance_id, msg.feed_key_hex);\n")],
     ["\"instance-key\" send before the id resolution in _admit", at("  async _admit(conn, state, msg, kind) {", "    conn.write(JSON.stringify({ type: \"instance-key\", instance_id: this.localInstanceId }) + \"\\n\");\n")],
     ["\"pair-binding\" send in PeerManager._onChallenge", at("  async _onChallenge(conn, msg, state) {", "    conn.write(JSON.stringify({ type: \"pair-binding\", pb_mac: null }) + \"\\n\");\n")],
     ["side effect state.authenticated = true before the guard in _admit", at("    const guard = this.admitGuards?.[kind];", "    state.authenticated = true;\n")],

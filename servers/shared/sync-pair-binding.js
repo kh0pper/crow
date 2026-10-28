@@ -17,7 +17,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { loadPeerCreds } from "./peer-credentials.js";
 import { ENROLL_ID_RE } from "./enroll-guard.js";
 import { SYNC_PB_KEY_PREFIX, SYNC_PB_CLEARED_PREFIX } from "./self-dial-address.js";
-import { readPin, writePin } from "../sharing/contact-binding.js";
+import { readPin, writePin, RefusalLog } from "../sharing/contact-binding.js";
 import { recordUnboundPeer, recordPairBindingRefusal, clearPairBindingState } from "./peer-trust-health.js";
 
 /**
@@ -132,16 +132,30 @@ export async function isPairPinned(db, localId, peerId) {
  * this instance's clear-pin marker for that peer (the owner's clear is over).
  * Never throws.
  */
+// A failing pin write (a locked or broken DB) can repeat on every handshake:
+// warn at most once a minute per peer and step.
+const _pinWarnLog = new RefusalLog({ max: 256, intervalMs: 60_000 });
+function warnPinFailure(step, peerId, err) {
+  if (_pinWarnLog.shouldLog(`${step}:${peerId}`)) {
+    console.warn(`[sync-pair-binding] could not ${step} for ${peerId}: ${err?.message || err}`);
+  }
+}
+
 export async function markPairPinned(db, localId, peerId) {
   if (!peerId) return false;
-  const wrote = await writePin(db, localId, `${SYNC_PB_KEY_PREFIX}${peerId}`);
+  const wrote = await writePin(db, localId, `${SYNC_PB_KEY_PREFIX}${peerId}`, {
+    onError: (err) => warnPinFailure("write the pair-binding pin", peerId, err),
+  });
   if (wrote) {
     try {
       await db.execute({
         sql: "DELETE FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ?",
         args: [`${SYNC_PB_CLEARED_PREFIX}${peerId}`, localId],
       });
-    } catch { /* the marker is informational */ }
+    } catch (err) {
+      // The marker is informational; the pin above is what matters.
+      warnPinFailure("remove the cleared-pin marker", peerId, err);
+    }
   }
   return wrote;
 }
@@ -232,6 +246,8 @@ export async function decideAndRecordPairBinding({
     return d;
   }
   if (bound) {
+    // A bound handshake ends any legacy spell: a later fall back to legacy logs again.
+    if (peerId) _legacyLogged.delete(peerId);
     const fresh = await markPairPinned(db, localId, peerId);
     const info = typeof log.log === "function" ? log.log.bind(log) : console.log;
     info(`${prefix} pair-bound handshake with ${who} (${where})${fresh ? "; pinned: unbound handshakes from it are refused from now on" : ""}`);

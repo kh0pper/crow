@@ -83,7 +83,8 @@ async function flowsBoth(a, b, label) {
 /** A marker written on `from` is drained into its out-feed for `to`, and still never reaches `to`. */
 async function blocked(from, to, label) {
   const text = `pt2a ${label} ${from.name}->${to.name} ${tag()}`;
-  await writeMarker(from, text);
+  const { queued } = await writeMarker(from, text);
+  assert.ok(queued, `${label}: ${from.name}'s marker was never seen queued in sync_outbox (the drain check would be vacuous)`);
   assert.ok(await until(() => markerDrained(from, text), FLOW_MS, 500), `${label}: ${from.name} never drained its marker (no out-feed for ${to.name}?)`);
   await new Promise((r) => setTimeout(r, QUIET_MS));
   assert.equal(hasMarker(to, text), false, `${label}: ${from.name}'s marker reached ${to.name} over a refused link`);
@@ -131,12 +132,21 @@ function pinCli(inst, args) {
 async function makeImpostor(A, claimId) {
   const identity = deriveInstanceIdentity(loadInstanceSeed(A.dataDir));
   const dir = mkdtempSync(join(tmpdir(), "pt2a-impostor-"));
-  const db = await makeRealDb(dir);
-  await addPeerRow(db, A.id, { crowId: identity.crowId, gatewayUrl: `http://127.0.0.1:${A.port}` });
-  const mgr = new InstanceSyncManager(identity, db, claimId);
-  mgr.dataDir = join(dir, "instance-sync"); // keep feeds out of any real home
-  mgr.feedsDisabled = false;                // the suite env disables feeds
-  await mgr.initInstance(A.id, null);
+  let db = null, mgr = null;
+  try {
+    db = await makeRealDb(dir);
+    await addPeerRow(db, A.id, { crowId: identity.crowId, gatewayUrl: `http://127.0.0.1:${A.port}` });
+    mgr = new InstanceSyncManager(identity, db, claimId);
+    mgr.dataDir = join(dir, "instance-sync"); // keep feeds out of any real home
+    mgr.feedsDisabled = false;                // the suite env disables feeds
+    await mgr.initInstance(A.id, null);
+  } catch (err) {
+    // The caller never receives a handle on failure: close and remove here.
+    try { await mgr?.close(); } catch {}
+    try { db?.close?.(); } catch {}
+    rmSync(dir, { recursive: true, force: true });
+    throw err;
+  }
   let key = null;
   const side = { mgr, db, dir, id: claimId, pairKeyLookup: () => key };
   return {

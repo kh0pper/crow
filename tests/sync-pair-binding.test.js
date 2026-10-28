@@ -14,7 +14,7 @@ import { join } from "node:path";
 import {
   pairSubkey, tailnetRespMac, tailnetProofMac, hyperswarmMac, macEqual,
   defaultPairKey, pairBindingMode, isPairPinned, markPairPinned,
-  decidePairBinding, recordPairBindingState, _resetPairBindingModeLog,
+  decidePairBinding, recordPairBindingState, _resetPairBindingModeLog, decideAndRecordPairBinding,
 } from "../servers/shared/sync-pair-binding.js";
 import { SYNC_PB_KEY_PREFIX, SYNC_PB_CLEARED_PREFIX } from "../servers/shared/self-dial-address.js";
 import { getPeerTrustHealth, _resetPeerTrustHealth } from "../servers/shared/peer-trust-health.js";
@@ -337,4 +337,39 @@ test("recordPairBindingState feeds the Nest: unbound peers (no TTL, R6), refusal
   h = getPeerTrustHealth();
   assert.deepEqual(Object.keys(h.unboundPeers), []);
   assert.deepEqual(Object.keys(h.pairBindingRefusals), []);
+});
+
+test("a failing pin write is logged (throttled per peer), not silent", async () => {
+  const boom = { execute: async () => { throw new Error("SQLITE_BUSY: database is locked"); } };
+  const peer = "inst-pinfail-0000-0000-000000000009";
+  const warns = [];
+  const realWarn = console.warn;
+  console.warn = (...a) => { warns.push(a.join(" ")); };
+  try {
+    assert.equal(await markPairPinned(boom, LOCAL, peer), false);
+    assert.equal(await markPairPinned(boom, LOCAL, peer), false);
+  } finally {
+    console.warn = realWarn;
+  }
+  const hits = warns.filter((w) => w.includes(peer) && /could not write the pair-binding pin/.test(w) && /database is locked/.test(w));
+  assert.equal(hits.length, 1, warns.join(" | "));
+});
+
+test("the once-per-peer legacy log resets after a bound handshake (a later legacy flip logs again)", async () => {
+  const db = await makeRealDb(scratch("legacy-log"));
+  const peer = "inst-flip-0000-0000-000000000008";
+  const lines = [];
+  const log = { log: (s) => lines.push(s), warn: (s) => lines.push(s) };
+  const legacyRun = () => decideAndRecordPairBinding({ db, localId: LOCAL, peerId: peer, k: null, bound: false, macInvalid: false, mode: "auto", log, prefix: "[t]", where: "test" });
+  const legacyLines = () => lines.filter((l) => /syncs without pair binding/.test(l)).length;
+  assert.equal((await legacyRun()).legacy, true);
+  await legacyRun();
+  assert.equal(legacyLines(), 1, "once per peer while it stays legacy");
+  const b = await decideAndRecordPairBinding({ db, localId: LOCAL, peerId: peer, k: Buffer.alloc(32), bound: true, macInvalid: false, mode: "auto", log, prefix: "[t]", where: "test" });
+  assert.equal(b.ok, true);
+  // The owner clears the pin (the rollback hatch), and the peer goes legacy again.
+  await db.execute({ sql: "DELETE FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ?", args: [`${SYNC_PB_KEY_PREFIX}${peer}`, LOCAL] });
+  assert.equal((await legacyRun()).legacy, true);
+  assert.equal(legacyLines(), 2, lines.join(" | "));
+  _resetPeerTrustHealth();
 });

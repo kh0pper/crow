@@ -819,7 +819,7 @@ export class PeerManager {
     if (state.kind === "instance" && msg.type === "instance-key") {
       if (typeof msg.instance_id === "string" && msg.instance_id && msg.instance_id === state.remoteInstanceId
           && typeof msg.feed_key_hex === "string" && msg.feed_key_hex && this.onInstanceKeyReceived) {
-        fire(() => this.onInstanceKeyReceived(msg.instance_id, msg.feed_key_hex));
+        fire(() => this.onInstanceKeyReceived(state.remoteInstanceId, msg.feed_key_hex));
       }
     }
   }

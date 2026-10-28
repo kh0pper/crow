@@ -11,6 +11,7 @@ import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
 import { getManagersOrNull } from "./managers.js";
 import { peerTrust } from "../shared/peer-trust.js";
 import { claimOnce } from "./processed-events.js";
+import { RefusalLog } from "./contact-binding.js";
 
 // ─── Bot Relay: AI-to-AI Task Delegation ───
 
@@ -238,6 +239,15 @@ async function namedInstanceTrusted(db, name, peerTrustOpts) {
  * to production.
  * @returns {Promise<'handled'|'ignored'>}
  */
+// A stranger can send any number of well-formed bot_relay DMs: log each drop
+// reason at most once a minute (per subtype + reason), never once per event.
+const dropLog = new RefusalLog({ max: 32, intervalMs: 60_000 });
+function warnDrop(subtype, reason, text) {
+  if (dropLog.shouldLog(`${subtype}:${reason}`)) console.warn(`[sharing] ${subtype} dropped: ${text}`);
+}
+/** Test seam: forget the drop-log throttle. */
+export function _resetBotRelayDropLog() { dropLog.map.clear(); }
+
 export async function routeBotRelay({
   subtype, payload, senderPubkey, db, identity, nostrManager, eventCreatedAt,
   localName, run = handleIncomingBotRelay, notify = (n) => createNotification(db, n), freshClient, runOneShot,
@@ -250,7 +260,7 @@ export async function routeBotRelay({
   // Sender.
   const claimed = subtype === "bot_relay" ? payload.sender_instance : payload.responder_instance;
   if (!isOwnNostrSender(senderPubkey, identity?.secp256k1Pubkey)) {
-    console.warn(`[sharing] ${subtype} dropped: sender is not this Crow ID's own Nostr key (claimed instance ${String(claimed).slice(0, 64)})`);
+    warnDrop(subtype, "sender", `sender is not this Crow ID's own Nostr key (claimed instance ${String(claimed).slice(0, 64)})`);
     return "ignored";
   }
 
@@ -261,7 +271,7 @@ export async function routeBotRelay({
   // Age.
   const skew = Math.floor(Date.now() / 1000) - eventCreatedAt;
   if (Math.abs(skew) > BOT_RELAY_MAX_SKEW_S) {
-    console.warn(`[sharing] ${subtype} dropped: event created_at is ${skew}s from now (limit ±${BOT_RELAY_MAX_SKEW_S}s)`);
+    warnDrop(subtype, "age", `event created_at is ${skew}s from now (limit ±${BOT_RELAY_MAX_SKEW_S}s)`);
     return "ignored";
   }
 
@@ -273,7 +283,7 @@ export async function routeBotRelay({
 
   // Trust.
   if (!(await namedInstanceTrusted(db, claimed, { freshClient }))) {
-    console.warn(`[sharing] ${subtype} dropped: ${String(claimed).slice(0, 64)} is not a trusted, live paired instance`);
+    warnDrop(subtype, "trust", `${String(claimed).slice(0, 64)} is not a trusted, live paired instance`);
     return "ignored";
   }
 

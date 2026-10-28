@@ -20,7 +20,7 @@ import { randomBytes } from "node:crypto";
 
 import { makeRealDb, addPeerRow } from "./fixtures/sync-fleet.mjs";
 import { deriveInstanceIdentity } from "../servers/sharing/identity.js";
-import { routeBotRelay, isOwnNostrSender } from "../servers/sharing/bot-relay.js";
+import { routeBotRelay, isOwnNostrSender, _resetBotRelayDropLog } from "../servers/sharing/bot-relay.js";
 
 const LOCAL = "desk";
 let dir, db;
@@ -129,4 +129,21 @@ test("B-6 a trust lookup error fails closed", async () => {
   assert.equal(runs.length, 0);
   const { rows } = await db.execute({ sql: "SELECT 1 FROM processed_control_events WHERE event_id = ?", args: [`bot_relay:${payload.relay_id}`] });
   assert.equal(rows.length, 1, "the claim ran, so the refusal came from the trust check");
+});
+
+test("a stranger's bot_relay flood logs the sender drop at most once a minute", async () => {
+  _resetBotRelayDropLog();
+  const warns = [];
+  const realWarn = console.warn;
+  console.warn = (...a) => { warns.push(a.join(" ")); };
+  try {
+    for (let i = 0; i < 20; i++) {
+      const { r, runs } = await route("bot_relay", relay("laptop"), xonly(stranger));
+      assert.equal(r, "ignored");
+      assert.equal(runs.length, 0);
+    }
+  } finally {
+    console.warn = realWarn;
+  }
+  assert.equal(warns.filter((w) => /bot_relay dropped: sender is not/.test(w)).length, 1, warns.join(" | "));
 });
