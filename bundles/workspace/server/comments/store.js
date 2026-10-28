@@ -14,9 +14,12 @@ export async function getWatch(db) {
 /** watch_since is set to nowMs only when the previous mode is off. */
 export async function setMode(db, mode, nowMs) {
   if (!MODES.includes(mode)) throw new Error(`unknown comment-loop mode: ${mode}`);
-  const prev = await getWatch(db);
-  const since = prev.mode === "off" && mode !== "off" ? nowMs : prev.watch_since;
-  await db.execute({ sql: "UPDATE workspace_comment_watch SET mode=?, watch_since=? WHERE id=1", args: [mode, since ?? null] });
+  await getWatch(db);
+  // One statement, so two gateways can't both decide the previous mode was off.
+  await db.execute({
+    sql: "UPDATE workspace_comment_watch SET watch_since = CASE WHEN mode='off' AND ?<>'off' THEN ? ELSE watch_since END, mode=? WHERE id=1",
+    args: [mode, nowMs, mode],
+  });
   return getWatch(db);
 }
 
@@ -53,8 +56,24 @@ ON CONFLICT(file_id) DO UPDATE SET etag=excluded.etag, mtime=excluded.mtime, thr
 export async function logEvent(db, { at, fileId, kind, detail }) {
   if (!EVENT_KINDS.includes(kind)) throw new Error(`unknown comment event kind: ${kind}`);
   const d = detail ?? {};
-  if (Object.hasOwn(d, "text") || Object.hasOwn(d, "content")) throw new Error("comment events never store full text (use hash + snippet)");
+  assertNoFullText(d);
   await db.execute({ sql: "INSERT INTO workspace_comment_events(at, file_id, kind, detail_json) VALUES (?,?,?,?)", args: [at, fileId ?? null, kind, JSON.stringify(d)] });
+}
+
+const FORBIDDEN_KEYS = new Set(["text", "content", "body", "comment", "quote"]);
+const MAX_DETAIL_STRING = 200;
+/** Events keep a hash + snippet only: no full-text keys at any depth, and no long strings under any key. */
+function assertNoFullText(v, depth = 0) {
+  if (depth > 6 || v == null) return;
+  if (typeof v === "string") {
+    if (v.length > MAX_DETAIL_STRING) throw new Error("comment events never store full text (use hash + snippet)");
+    return;
+  }
+  if (typeof v !== "object") return;
+  for (const [k, val] of Object.entries(v)) {
+    if (!Array.isArray(v) && FORBIDDEN_KEYS.has(k.toLowerCase())) throw new Error("comment events never store full text (use hash + snippet)");
+    assertNoFullText(val, depth + 1);
+  }
 }
 
 export const textHash = (s) => createHash("sha256").update(String(s ?? "")).digest("hex").slice(0, 16);

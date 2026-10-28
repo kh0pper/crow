@@ -62,9 +62,10 @@ test("logEvent rejects unknown kinds and never stores full text", async () => {
 });
 
 test("snippet keeps whole code points", () => {
-  const s = S.snippetOf("👩‍👩‍👧".repeat(20));
+  // Odd prefix: a UTF-16 cut at 40 units would split a surrogate pair.
+  const s = S.snippetOf("a" + "😀".repeat(50));
   assert.equal(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(s), false);
-  assert.ok([...s].length <= 40);
+  assert.equal([...s].length, 40);
 });
 
 test("prune: events > 30 d and sessions > 7 d go", async () => {
@@ -76,4 +77,10 @@ test("prune: events > 30 d and sessions > 7 d go", async () => {
   await S.prune(db, now);
   assert.equal((await db.execute("SELECT COUNT(*) c FROM workspace_comment_events")).rows[0].c, 1);
   assert.deepEqual((await db.execute("SELECT doc_key FROM workspace_editor_sessions")).rows.map((r) => r.doc_key), ["new"]);
+});
+
+test("logEvent refuses full text at any depth and long strings under any key", async () => {
+  await assert.rejects(S.logEvent(db, { at: 1, kind: "would_fire", detail: { nested: { Content: "x" } } }));
+  await assert.rejects(S.logEvent(db, { at: 1, kind: "would_fire", detail: { note: "y".repeat(201) } }));
+  await S.logEvent(db, { at: 1, kind: "would_fire", detail: { hash: "abc", snippet: "short" } });
 });
