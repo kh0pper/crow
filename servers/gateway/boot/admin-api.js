@@ -172,6 +172,27 @@ export async function mountAdminApi(app, deps) {
         db.close();
       }
     }
+    // --- Model roles snapshot for pi ($CROW_HOME/model-roles.json, 0600,
+    // atomic). Rewritten after local provider and binding writes (debounced)
+    // and on the reconcile interval, which covers replicated provider applies. ---
+    try {
+      const { writeRoleSnapshot, scheduleRoleSnapshot } = await import("../../shared/model-roles-snapshot.js");
+      const { invalidateRoleContext, addBindingsChangeListener } = await import("../../shared/model-roles-store.js");
+      const { addProviderChangeListener } = await import("../../shared/providers-db.js");
+      const db = createDbClient();
+      try {
+        await writeRoleSnapshot(db);
+      } catch (err) {
+        console.warn("[roles] Snapshot write skipped:", err.message);
+      } finally {
+        db.close();
+      }
+      addProviderChangeListener(() => { invalidateRoleContext(); scheduleRoleSnapshot(createDbClient); });
+      addBindingsChangeListener(() => scheduleRoleSnapshot(createDbClient));
+      setInterval(() => scheduleRoleSnapshot(createDbClient), reconcileIntervalMs()).unref();
+    } catch (err) {
+      console.warn("[roles] Snapshot wiring failed:", err.message);
+    }
     // D5: hourly re-run (fresh getOwnAddresses each time) — heals the
     // boot-time tailscale race and owner-never-restarts staleness. D2 makes
     // converged runs free (zero writes, zero emits). unref() so the timer

@@ -166,10 +166,22 @@ let _providerChangeHook = null;
  * Replicated applies do not pass through here; the hourly tick covers them. */
 export function setProviderChangeHook(fn) { _providerChangeHook = typeof fn === "function" ? fn : null; }
 
+const _providerChangeListeners = new Set();
+/** Extra fire-and-forget listeners, called after the hook on the same writes
+ * (the role snapshot). Each is try/caught. Returns the unsubscribe. */
+export function addProviderChangeListener(fn) {
+  if (typeof fn !== "function") return () => {};
+  _providerChangeListeners.add(fn);
+  return () => { _providerChangeListeners.delete(fn); };
+}
+
 async function emitSync(db, op, row) {
   await emitOrQueue(_syncManager, db, "providers", op, row);
   if (_providerChangeHook) {
     try { _providerChangeHook({ op, id: row?.id }); } catch (err) { console.warn(`[providers] change hook failed: ${err.message}`); }
+  }
+  for (const fn of _providerChangeListeners) {
+    try { fn({ op, id: row?.id }); } catch (err) { console.warn(`[providers] change listener failed: ${err.message}`); }
   }
 }
 
