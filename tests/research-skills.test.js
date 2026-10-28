@@ -85,3 +85,16 @@ test("docs/skills/index.md lists both skills' new descriptions", () => {
     assert.ok(index.includes(`| \`${file}\` | ${desc} |`), `index row for ${file} is current`);
   }
 });
+
+test("the trigger table and the skills index route research to crow_web_search, not Brave Search", () => {
+  const sp = read("skills/superpowers.md");
+  const row = sp.split("\n").find((l) => l.startsWith('| "research"'));
+  assert.ok(row && row.includes("research-pipeline") && row.includes("crow_web_search"), row);
+  assert.ok(!/brave/i.test(row), row);
+  const start = sp.slice(sp.indexOf('### "Start research on X"'), sp.indexOf("###", sp.indexOf('### "Start research on X"') + 4));
+  assert.ok(start.includes("crow_web_search") && !/brave/i.test(start), start);
+  for (const p of ["scripts/sync-skills.js", "docs/skills/index.md"]) {
+    const line = read(p).split("\n").find((l) => l.includes('"Start research on X"**'));
+    assert.ok(line && line.includes("crow_web_search") && !/brave/i.test(line), p + ": " + line);
+  }
+});

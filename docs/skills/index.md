@@ -79,7 +79,7 @@ Skills are markdown files in `skills/` that define behavioral prompts for the AI
 Skills can combine to handle complex requests:
 
 - **"Daily briefing"** → Gmail + Calendar + Slack + Trello + Memory
-- **"Start research on X"** → Memory + Projects + Brave Search + arXiv + Zotero
+- **"Start research on X"** → Memory + Projects + Web Search (crow_web_search) + arXiv + Zotero
 - **"Prepare for meeting"** → Calendar + Gmail + Memory + Research + Slack
 - **"Publish my research"** → Projects + Blog + Storage (upload images)
 - **"Set up file sharing"** → Storage + Sharing + Peer Network
