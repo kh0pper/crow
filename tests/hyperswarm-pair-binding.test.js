@@ -37,6 +37,7 @@
  *   U-X1  pinned by a bound TAILNET handshake → refused unbound on Hyperswarm.
  *   U-H10 stranger probes cannot tell which ids we hold pair keys for.
  *   U-H11 a sibling that offers pb and never sends its frame: pb_timeout.
+ *   U-H12 a bare-signature prover never gets a pair-binding frame.
  *   U-H9  every refusal above left the wired callbacks and replicate untouched.
  */
 import { test, before, after } from "node:test";
@@ -384,7 +385,7 @@ async function link(t, X, Y, { xInitiator = true } = {}) {
  * `pbMacOverride`, else null) right after its response.
  */
 async function rawSibling(t, N, identity, {
-  challengeId, responseId = undefined, pb = true, pbKeyHex = null, pbMacOverride = undefined, pbFrame = true, after = [], pmInitiator = true,
+  challengeId, responseId = undefined, pb = true, pbKeyHex = null, pbMacOverride = undefined, pbFrame = true, after = [], pmInitiator = true, proof = "cb",
 } = {}) {
   const [p, r] = await streams(pmInitiator);
   const pmFrames = tapWrites(p);
@@ -410,7 +411,8 @@ async function rawSibling(t, N, identity, {
   const hh = Buffer.from(r.handshakeHash).toString("hex");
   const resp = { type: "challenge-response", crowId: identity.crowId, pubkey: identity.ed25519Pubkey };
   if (responseId !== undefined) resp.instance_id = responseId;
-  resp.cb_sig = sign(contactCbMessage({ role: r.isInitiator ? "init" : "resp", signerCrowId: identity.crowId, challengeHex: theirs.challenge, handshakeHashHex: hh }), identity.ed25519Priv);
+  if (proof === "sig") resp.signature = sign(theirs.challenge, identity.ed25519Priv);
+  else resp.cb_sig = sign(contactCbMessage({ role: r.isInitiator ? "init" : "resp", signerCrowId: identity.crowId, challengeHex: theirs.challenge, handshakeHashHex: hh }), identity.ed25519Priv);
   const out = [resp];
   if (pb && pbFrame) {
     let pbMac = null;
@@ -956,6 +958,27 @@ test("U-H10 stranger probes (no seed, our public Crow ID, pb:1, cb:1): a paired 
   assert.deepEqual(shape(paired), ["cb_sig", "crowId", "pubkey", "type"]);
   const strip = (frames) => { const { cb_sig, ...rest } = framesOf(frames, "challenge-response")[0]; return { ...rest, cbLen: cb_sig.length }; };
   assert.deepEqual(strip(paired), strip(unpaired), "same values apart from the signature");
+});
+
+// ================================================================ U-H12
+test("U-H12 a peer that offers cb:1/pb:1 but proves with a bare signature (host unpinned) gets no pair-binding frame and is decided unbound at once (legacy in auto)", T, async (t) => {
+  const { identity, a, b, pairKey } = await makePair(t);
+  {
+    // Control: the same offer proven with a cb_sig gets the frame.
+    const A = newNode(a);
+    const R = await rawSibling(t, A, identity, { challengeId: b.id, responseId: b.id, pbKeyHex: pairKey });
+    assert.ok(await until(() => A.spies.instanceConnected.length === 1, 5000));
+    assert.equal(framesOf(R.pmFrames, "pair-binding").length, 1, "control: a cb_sig prover gets the frame");
+  }
+  const p2 = await makePair(t); // unpinned host (no instance_hs_cb:, no pair pin)
+  const A = newNode(p2.a, { pairBindingWaitMs: 5000 });
+  const t0 = Date.now();
+  const R = await rawSibling(t, A, p2.identity, { challengeId: p2.b.id, responseId: p2.b.id, proof: "sig", pbFrame: false });
+  assert.ok(await until(() => A.spies.instanceConnected.length === 1, 5000), "admitted as legacy");
+  assert.ok(Date.now() - t0 < 4000, "decided without waiting for a frame");
+  await sleep(200);
+  assert.deepEqual(framesOf(R.pmFrames, "pair-binding"), [], "no pair-binding frame for a bare-signature prover");
+  assert.equal(await pairPin(p2.a, p2.b.id), null);
 });
 
 // ================================================================ U-H11

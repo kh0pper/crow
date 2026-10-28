@@ -633,7 +633,9 @@ export class PeerManager {
       // proven the seed here, so it may now learn our MAC; each side sends
       // its frame before running its own guard (each guard needs the other's
       // frame, so gating it on admission would deadlock).
-      if (state.peerPb && this.instanceSyncEnabled && msg.crowId === this.identity.crowId) {
+      // Only a cb_sig prover: a bare signature can be relayed from an older
+      // sibling (a pre-PT-3 signing oracle), so it never learns our MAC.
+      if (state.peerPb && state.proof === "cb" && this.instanceSyncEnabled && msg.crowId === this.identity.crowId) {
         let mac = null;
         try {
           mac = this.instanceBinding?.macFor?.({
@@ -644,9 +646,10 @@ export class PeerManager {
         } catch {}
         conn.write(JSON.stringify({ type: "pair-binding", pb_mac: typeof mac === "string" && mac ? mac : null }) + "\n");
       }
-      // Both offered: wait (bounded) for the peer's frame. A peer that did
-      // not offer (PT-3, pre-PT-3) is decided unbound at once.
-      if (state.ourPb && state.peerPb) {
+      // Both offered (and it proved with a cb_sig): wait (bounded) for the
+      // peer's frame. A peer that did not offer (PT-3, pre-PT-3) or proved
+      // with a bare signature is decided unbound at once.
+      if (state.ourPb && state.peerPb && state.proof === "cb") {
         const frame = await this._awaitPairBindingFrame(state, this.pairBindingWaitMs);
         if (state.refused || state.closed || conn.destroyed) return false;
         if (!frame) { this._refuseInstance(conn, state, "guard:pb_timeout"); return false; }
