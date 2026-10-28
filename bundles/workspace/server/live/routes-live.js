@@ -66,6 +66,8 @@ const MAX_CANDIDATES = 20;
 export const HINT_LOOKUPS_PER_MIN = 10;
 /** Across all documents: FAILED hint lookups (not live, or another key) per minute; over it uncached hints are ignored. */
 export const HINT_FAILURES_PER_MIN = 120;
+/** One editor user's share of that budget, checked first, so one account cannot spend everyone's. */
+export const HINT_FAILURES_PER_USER_PER_MIN = 20;
 /** An unchanged session sample (same key, file and uids) is not re-written within this window. */
 export const SAMPLE_SKIP_MS = 15000;
 const HIDDEN_ARGS = new Set(["path", "file_id", "if_open", "wait_s"]);
@@ -94,6 +96,8 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
   const hintLookups = lim(limits.hintLookups ?? HINT_LOOKUPS_PER_MIN);
   const hintFailureMax = limits.hintFailures ?? HINT_FAILURES_PER_MIN;
   const hintFailures = lim(hintFailureMax, 1); // counts failed lookups only
+  const userFailureMax = limits.hintFailuresPerUser ?? HINT_FAILURES_PER_USER_PER_MIN;
+  const userHintFailures = lim(userFailureMax);
   // bounded caches (oldest evicted): fileId → ONLYOFFICE session; "fileId\0uid" → write permission. Each entry keeps
   // its own lifetime: 30 s, or NEGATIVE_TTL_MS for an answer that cannot authorize anyone.
   const cache = () => {
@@ -131,7 +135,8 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
     const paths = new Map(rows.map((r) => [Number(r.file_id), r.path]));
     let hintLooked = false; // this request spends a docSession call on the hint
     if (hint !== null && hint !== sampled && !paths.has(hint) && !sessions.get(hint, force)) {
-      if (hintFailures.count("*") >= hintFailureMax || !hintLookups.hit(key)) hint = null;
+      const who = `u:${userId ?? ""}`;
+      if (userHintFailures.count(who) >= userFailureMax || hintFailures.count("*") >= hintFailureMax || !hintLookups.hit(key)) hint = null;
       else hintLooked = true;
     }
     const ids = [...new Set([sampled, hint, ...rows.map((r) => Number(r.file_id))].filter((id) => Number.isSafeInteger(id) && id > 0))];
@@ -141,7 +146,7 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
       let s = await sessionOf(fileId, force);
       // a user who joined after this session was cached: re-ask once the entry is older than the negative window
       if (!force && userId && s?.live && String(s.key) === key && !s.users.map(String).includes(userId) && !sessions.get(fileId, false, NEGATIVE_TTL_MS)) s = await sessionOf(fileId, true);
-      if (hintLooked && fileId === hint && !(s?.live && String(s.key) === key)) hintFailures.hit("*");
+      if (hintLooked && fileId === hint && !(s?.live && String(s.key) === key)) { hintFailures.hit("*"); userHintFailures.hit(`u:${userId ?? ""}`); }
       if (s?.live && String(s.key) === key) return { fileId, path: paths.get(fileId) ?? null, users: s.users.map(String), uids: (s.uids || s.users).map(String) };
     }
     misses.set(key, sig, NEGATIVE_TTL_MS);

@@ -655,3 +655,26 @@ test("fix3: a global budget of FAILED hint lookups; successful hints never spend
     assert.equal(await pend(k2, g2.fileId), 200, "a new window");
   } finally { s.close(); }
 });
+
+test("fix4: each editor user gets a share of the failed-hint budget, so one account cannot spend everyone's", async () => {
+  const { liveRouter, LIMITS, HINT_FAILURES_PER_USER_PER_MIN } = await import("../bundles/workspace/server/live/routes-live.js");
+  const { getConfig } = await import("../bundles/workspace/server/config.js");
+  assert.equal(HINT_FAILURES_PER_USER_PER_MIN, 20);
+  const a = express(); a.use(liveRouter({ Router: express.Router, json: express.json, db, getConfig, clock: { now: () => Date.now() }, limits: { ...LIMITS, perUser: 10000, perDocument: 10000, perDocumentRaw: 10000, hintLookups: 10000, hintFailures: 100, hintFailuresPerUser: 3 } }));
+  const s = a.listen(0); const b = `http://127.0.0.1:${s.address().port}`;
+  const pend = (k, hint, uid) => fetch(`${b}/pending?key=${k}&${PV}`, { headers: { Authorization: `Bearer ${editorJwt(k, {}, uid)}`, "X-Crow-File-Hint": String(hint) } }).then((r) => r.status);
+  const configCalls = (id) => fake.calls.filter((c) => c.url.includes(`/apps/onlyoffice/api/v1/config/${id}`)).length;
+  try {
+    doc("pu1.docx"); const p1 = fake.node("S/pu1.docx");
+    fake.state.shares.push({ id: "pu1s", path: "/S/pu1.docx", share_with: "vic", share_type: 0, permissions: 31 });
+    const k1 = fake.openInEditor("S/pu1.docx", ["admin", "vic"], { releaseAfterMs: 10 ** 9 });
+    // admin spends its own share on hints that fail
+    for (let i = 0; i < 3; i++) assert.equal(await pend(k1, 900500 + i, "admin"), 401);
+    assert.equal(await pend(k1, 900599, "admin"), 401);
+    assert.equal(configCalls(900599), 0, "admin's share is spent: its next uncached hint is ignored");
+    // vic still has a share: a failing hint of vic's is still looked up, and a valid one resolves
+    assert.equal(await pend(k1, 900600, "vic"), 401);
+    assert.ok(configCalls(900600) > 0, "another user's hint is still looked up");
+    assert.equal(await pend(k1, p1.fileId, "vic"), 200);
+  } finally { s.close(); }
+});
