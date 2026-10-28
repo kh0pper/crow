@@ -878,10 +878,14 @@ export function createProjectServer(dbPath, options = {}) {
 
       let src = null;
       if (source_id != null) {
-        const cols = ready ? "id, fetch_status, fetched_text" : "id";
+        const cols = ready ? "id, project_id, fetch_status, fetched_text" : "id, project_id";
         const { rows } = await db.execute({ sql: `SELECT ${cols} FROM research_sources WHERE id = ?`, args: [source_id] });
         src = rows[0];
         if (!src) return fail(`Source #${source_id} not found.`);
+        // A source that belongs to a project can only back notes in that same project.
+        if (src.project_id != null && Number(src.project_id) !== project_id) {
+          return fail(`Source #${source_id} belongs to a different project, so this note cannot be attached to it.`);
+        }
       }
 
       let prov = provenance ?? null;
@@ -891,7 +895,7 @@ export function createProjectServer(dbPath, options = {}) {
         }
         if (note_type === "analysis" || note_type === "insight") prov = "derived";
       }
-      if (prov === "fetched" && !(src && (src.fetch_status === "fetched" || src.fetch_status === "fetched_no_text"))) {
+      if (prov === "fetched" && ready && !(src && (src.fetch_status === "fetched" || src.fetch_status === "fetched_no_text"))) {
         return fail("provenance fetched needs a source Crow fetched: pass a source_id whose page Crow opened (crow_add_source does that), or use snippet or derived.");
       }
 

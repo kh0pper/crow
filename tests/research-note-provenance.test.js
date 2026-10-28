@@ -27,6 +27,7 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { createProjectServer } = await import("../servers/research/server.js");
 const { OWNER } = await import("../servers/research/actor.js");
+const { makeOldFkDb, openFixtureDb } = await import("./helpers/research-fixtures.js");
 const { FETCHED_TEXT_MAX } = await import("../servers/shared/fetch-page.js");
 
 const text = (r) => (r.content || []).map((c) => c.text).join("\n");
@@ -139,4 +140,46 @@ test("a missing source_id is not found", async () => {
 test("locator is stored", async () => {
   const r = await addNote({ content: "x", note_type: "note", locator: "p. 4" });
   assert.equal(noteRow(r).locator, "p. 4");
+});
+
+async function newProject(name) {
+  const r = await client.callTool({ name: "crow_create_project", arguments: { name } });
+  return Number(text(r).match(/id: (\d+)/)[1]);
+}
+
+test("a source from another project cannot back a note (no read oracle)", async () => {
+  const a = await newProject("note-prov-a");
+  const b = await newProject("note-prov-b");
+  const id = insertSource({ project_id: b, url: "https://example.com/b", fetch_status: "fetched", fetched_text: "secret text of project b" });
+  const d0 = raw(); const before = d0.prepare("SELECT COUNT(*) n FROM research_notes").get().n; d0.close();
+  const cross = await addNote({ content: "secret text", note_type: "quote", provenance: "fetched", source_id: id, project_id: a });
+  assert.ok(cross.isError, text(cross));
+  assert.match(text(cross), /different project/);
+  assert.ok(!/found|WARNING/.test(text(cross)));
+  const none = await addNote({ content: "secret text", note_type: "quote", provenance: "fetched", source_id: id });
+  assert.ok(none.isError, text(none));
+  assert.match(text(none), /different project/);
+  const d1 = raw(); const after1 = d1.prepare("SELECT COUNT(*) n FROM research_notes").get().n; d1.close();
+  assert.equal(after1, before, "nothing was inserted");
+  const same = await addNote({ content: "secret text", note_type: "quote", provenance: "fetched", source_id: id, project_id: b });
+  assert.ok(!same.isError, text(same));
+  assert.equal(noteRow(same).quote_found, 1);
+});
+
+test("degraded schema: provenance fetched is stored without the new columns, with a notice", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-noteprov-oldfk-"));
+  try {
+    const path = makeOldFkDb(join(dir, "old.db"));
+    const f = openFixtureDb(path);
+    f.exec("CREATE TABLE research_projects (id INTEGER PRIMARY KEY, name TEXT); CREATE TABLE data_backends (id INTEGER PRIMARY KEY)");
+    f.exec("INSERT INTO research_sources (title, source_type, citation_apa) VALUES ('S', 'web_article', 'c')");
+    f.close();
+    const server = createProjectServer(path, { actor: OWNER });
+    assert.equal(server.research.schema.ready, false);
+    const c = await connect(server);
+    const r = await c.callTool({ name: "crow_add_note", arguments: { content: "x", note_type: "summary", provenance: "fetched", source_id: 1 } });
+    assert.ok(!r.isError, text(r));
+    assert.match(text(r), /Provenance could not be recorded yet/);
+    assert.ok(!/was not fetched|needs a source Crow fetched/.test(text(r)));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
