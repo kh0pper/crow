@@ -4,11 +4,11 @@
  * every rule this file adds is scoped under body.shell, so a classic page
  * never matches one.
  *
- * Phone first (390 px): the four lanes sit in one horizontal scroll-snap
- * container inside the board (each lane the column less 36 px, so the next
- * one peeks in);
- * the page itself never scrolls sideways. From 1024 px the lanes sit side by
- * side and the chips go (each lane heading carries its count).
+ * Phone first (390 px): one lane on screen at a time, the full column wide,
+ * chosen by the chips (client.js marks the board data-sb-tabs and the lane
+ * on screen data-sb-active; without JS the lanes stack). Neither the page
+ * nor the lanes scroll sideways. From 1024 px the lanes sit side by side and
+ * the chips go (each lane heading carries its count).
  *
  * NOTE: never write a literal closing style tag inside a comment here.
  */
@@ -41,19 +41,13 @@ export function boardCss() {
   body.shell .sb-chat-link:focus-visible,
   body.shell .sb-lane:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }
 
-  body.shell .sb-lanes {
-    position: relative;
-    display: flex; gap: 12px;
-    overflow-x: auto; overscroll-behavior-x: contain;
-    scroll-snap-type: x mandatory; scroll-behavior: smooth;
-    -webkit-overflow-scrolling: touch;
-    padding-bottom: 8px;
+  body.shell .sb-lanes { position: relative; min-width: 0; }
+  body.shell .sb-lane { min-width: 0; }
+  body.shell .sb-lane + .sb-lane { margin-top: 16px; }
+  @media (max-width: 1023px) {
+    body.shell .sb-board[data-sb-tabs] .sb-lane:not([data-sb-active]) { display: none; }
+    body.shell .sb-board[data-sb-tabs] .sb-lane + .sb-lane { margin-top: 0; }
   }
-  /* Each lane is the column less a fixed 36 px, so the next lane always peeks
-     in by 24 px (36 less the 12 px gap). The spacer after the last lane gives
-     the scroller room to bring Done (the last lane) to the start too. */
-  body.shell .sb-lane { flex: 0 0 calc(100% - 36px); min-width: 0; scroll-snap-align: start; }
-  body.shell .sb-lanes::after { content: ""; flex: 0 0 24px; }
   body.shell .sb-lane-h {
     display: flex; align-items: baseline; gap: 0.4rem;
     margin: 0 0 8px; font-size: 0.95rem; font-weight: 600; color: var(--crow-text-primary);
@@ -149,14 +143,8 @@ export function boardCss() {
   @media (min-width: 1024px) {
     body.shell .sb-sheet { margin: auto; border-radius: var(--crow-radius-card, 12px); }
     body.shell .sb-chips { display: none; }
-    body.shell .sb-lanes {
-      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
-      overflow-x: visible; scroll-snap-type: none;
-    }
-    body.shell .sb-lanes::after { content: none; }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    body.shell .sb-lanes { scroll-behavior: auto; }
+    body.shell .sb-lanes { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    body.shell .sb-lane + .sb-lane { margin-top: 0; }
   }
   </style>`;
 }

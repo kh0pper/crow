@@ -7,9 +7,9 @@
  * with the vendored Turbo 8 served from public/. A private headless Chrome
  * (tests/fixtures/headless-chrome.mjs) drives it at phone 390×844 and desktop
  * 1280×800, in English and Spanish:
- *   - the phone shows one lane at a time with the next one peeking, and a
- *     chip scrolls its lane into view;
- *   - the page never scrolls sideways, and chips, card faces and Move
+ *   - the phone shows one lane at a time, the one its chip chose (no lane
+ *     peeking in beside it);
+ *   - neither the page nor the lanes scroll sideways, and chips, card faces and Move
  *     buttons are at least 44 px tall;
  *   - the desktop shows the four lanes side by side;
  *   - Move on the phone: the sheet shows Working disabled with its reason,
@@ -248,6 +248,8 @@ async function open(path, { width = 390, height = 844 } = {}) {
 }
 
 const NO_H_SCROLL = "({ sw: document.documentElement.scrollWidth, bw: document.body.scrollWidth, vw: window.innerWidth })";
+/** The page (document.scrollingElement) and the lanes box, sideways. */
+const NO_H_SCROLL_ALL = "(function(){ var l=document.querySelector('.sb-lanes'); return { sw: document.scrollingElement.scrollWidth, vw: window.innerWidth, lanesSw: l.scrollWidth, lanesCw: l.clientWidth }; })()";
 /** {count, bad}: the visible elements matching `sel`, and those under 44 px tall as "class:text:w×h". */
 const small = (sel) => `(function(){ var bad=[], count=0, hs=[];
   document.querySelectorAll(${JSON.stringify(sel)}).forEach(function(el){
@@ -270,33 +272,24 @@ async function assertTargets(p, groups, tag) {
 /** Report measured values (the task report reads them from the test output). */
 const note = (ctx, what, v) => ctx.diagnostic(`${what}: ${JSON.stringify(v)}`);
 
+/** The lanes that are really on screen (rendered, with a box), by data-lane. */
+const VISIBLE_LANES = `[].filter.call(document.querySelectorAll('.sb-lane'), function(l){ var r=l.getBoundingClientRect(); return getComputedStyle(l).display!=='none' && r.width>0 && r.height>0; }).map(function(l){ return l.getAttribute('data-lane'); })`;
 /**
- * Click a chip, then read its lane's left edge once the (smooth) lane scroll
- * has started and come to rest: moved off where it was, then the same value
- * on three polls running.
+ * Tap a lane's chip, then wait until that lane is the one lane on screen;
+ * returns its box.
  */
 async function chipToLane(p, lane) {
-  const read = `Math.round(document.getElementById('sb-lane-${lane}').getBoundingClientRect().left * 10) / 10`;
-  const from = await p.ev(read);
   await p.click(`.sb-chip[data-lane=${lane}]`);
-  const end = Date.now() + 10000;
-  let last = from, same = 0, moved = false;
-  for (;;) {
-    await p.ev(TWO_FRAMES);
-    const v = await p.ev(read);
-    if (v !== from) moved = true;
-    same = v === last ? same + 1 : 0;
-    last = v;
-    if (moved && same >= 2) return v;
-    if (Date.now() > end) throw new Error(`the ${lane} lane never came to rest after its chip (from ${from}, last ${v})`);
-  }
+  await p.until(`(function(){ var v=${VISIBLE_LANES}; return v.length===1 && v[0]===${JSON.stringify(lane)}; })()`, `only the ${lane} lane on screen`);
+  await p.ev(TWO_FRAMES);
+  return p.ev(`(function(){ var r=document.getElementById('sb-lane-${lane}').getBoundingClientRect(); return { left: r.left, right: r.right, width: r.width }; })()`);
 }
 const inLane = (lane, id) => `!!document.querySelector('#sb-lane-${lane} .sb-card[data-card="${id}"]')`;
 const LANE_BOXES = `(function(){ return [].map.call(document.querySelectorAll('.sb-lane'), function(l){ var r=l.getBoundingClientRect(); return { lane: l.getAttribute('data-lane'), left: r.left, right: r.right, top: r.top, width: r.width }; }); })()`;
 const GUTTER = `(function(){ var b=document.querySelector('.content-body'), cs=getComputedStyle(b); return b.getBoundingClientRect().left + parseFloat(cs.paddingLeft); })()`;
 
 for (const lang of ["en", "es"]) {
-  test(`390×844 ${lang}: one lane at a time with the next peeking, a chip brings its lane into view, no sideways scroll, 44 px targets`, async (ctx) => {
+  test(`390×844 ${lang}: one lane at a time, chosen by its chip, no sideways scroll, 44 px targets`, async (ctx) => {
     if (!chrome) return ctx.skip("no headless Chrome");
     await setLang(lang);
     const p = await open("/dashboard/board");
@@ -304,41 +297,37 @@ for (const lang of ["en", "es"]) {
       assert.equal(await p.ev("document.documentElement.lang"), lang);
       assert.equal(await p.ev("document.body.classList.contains('shell')"), true, "the new shell");
       assert.equal(await p.ev("document.querySelector('.sb-chip[data-lane=done] .sb-chip-label').textContent"), t("shell.laneDone", lang));
+      // The web font changes text widths: measure after it is in.
+      await p.ev("document.fonts.ready.then(function(){ return 1; })");
+      await p.ev(TWO_FRAMES);
 
-      // one lane at a time on the phone with the next peeking
+      // one lane on screen at a time: Needs you to start with, its chip selected
       const vw = await p.ev("innerWidth");
-      const lanes = await p.ev(LANE_BOXES);
-      assert.equal(lanes.length, 4);
-      const ratio = lanes[0].width / vw;
-      note(ctx, `${lang} phone lanes`, { vw, ratio: +ratio.toFixed(3), lanes });
-      assert.ok(ratio >= 0.80 && ratio <= 0.92, `first lane is ${lanes[0].width}px = ${(ratio * 100).toFixed(1)}% of ${vw} (80–92%)`);
-      assert.ok(lanes[1].left < vw, `the second lane peeks: its left ${lanes[1].left} < ${vw}`);
-
-      // no page scroll sideways
-      const s = await p.ev(NO_H_SCROLL);
-      note(ctx, `${lang} phone scroll`, s);
-      assert.ok(s.sw <= s.vw, `scrollWidth ${s.sw} ≤ innerWidth ${s.vw}`);
-
-      // chips, card faces and Move buttons are at least 44 px tall
-      const seen = await assertTargets(p, [
-        [".sb-chip", 4, "lane chips"],
-        [".sb-card .bb-card", 5, "card faces"],
-        [".sb-move", 5, "Move buttons"],
-        [".sb-details", 5, "Details links"],
-      ], `${lang} phone`);
-      note(ctx, `${lang} phone targets`, seen);
-
-      // a chip brings its lane into view
+      assert.deepEqual(await p.ev(VISIBLE_LANES), ["needs_you"], "only the Needs you lane is on screen");
+      assert.equal(await p.ev("document.querySelector('.sb-chip[data-lane=needs_you]').getAttribute('aria-selected')"), "true");
       const gutter = await p.ev(GUTTER);
-      const doneLeft = await chipToLane(p, "done");
-      note(ctx, `${lang} phone Done chip`, { gutter, doneLeft });
-      assert.ok(Math.abs(doneLeft - gutter) <= 16, `the Done lane's left ${doneLeft} is within 16 px of the gutter ${gutter}`);
-      assert.equal(await p.ev("document.querySelector('.sb-chip[data-lane=done]').getAttribute('aria-selected')"), "true", "the Done chip is selected");
-      const after = await p.ev(NO_H_SCROLL);
-      assert.ok(after.sw <= after.vw, `no page scroll sideways after the chip (${after.sw} ≤ ${after.vw})`);
-      // and back to the first lane
-      const firstLeft = await chipToLane(p, "needs_you");
-      assert.ok(Math.abs(firstLeft - gutter) <= 16, `back on Needs you: its left ${firstLeft} is within 16 px of the gutter`);
+
+      // Each chip brings its lane, alone, to the column: no peeking, no sideways scroll.
+      const cards = { needs_you: 1, working: 1, up_next: 2, done: 1 };
+      for (const lane of ["working", "up_next", "done", "needs_you"]) {
+        const box = await chipToLane(p, lane);
+        note(ctx, `${lang} phone ${lane}`, { vw, gutter, box });
+        assert.deepEqual(await p.ev(VISIBLE_LANES), [lane], `only the ${lane} lane is on screen`);
+        assert.ok(Math.abs(box.left - gutter) <= 1, `the ${lane} lane's left ${box.left} is at the gutter ${gutter}`);
+        assert.ok(box.right <= vw - gutter + 1, `the ${lane} lane fits the column (${box.right} ≤ ${vw - gutter})`);
+        assert.equal(await p.ev(`document.querySelector('.sb-chip[data-lane=${lane}]').getAttribute('aria-selected')`), "true", `the ${lane} chip is selected`);
+        const s = await p.ev(NO_H_SCROLL_ALL);
+        assert.ok(s.sw <= s.vw, `no page scroll sideways on ${lane} (scrollingElement ${s.sw} ≤ innerWidth ${s.vw})`);
+        assert.ok(s.lanesSw <= s.lanesCw, `the lanes box does not scroll sideways on ${lane} (${s.lanesSw} ≤ ${s.lanesCw})`);
+        // chips, card faces and Move buttons are at least 44 px tall
+        const seen = await assertTargets(p, [
+          [".sb-chip", 4, "lane chips"],
+          [".sb-card .bb-card", cards[lane], "card faces"],
+          [".sb-move", cards[lane], "Move buttons"],
+          [".sb-details", cards[lane], "Details links"],
+        ], `${lang} phone ${lane}`);
+        note(ctx, `${lang} phone ${lane} targets`, seen);
+      }
       // A touch screen gets the Move sheet, not drag.
       assert.equal(await p.ev("document.querySelectorAll('.sb-card[draggable=true]').length"), 0, "no draggable cards on a touch screen");
       assert.deepEqual(p.errors, [], "no page errors");
@@ -353,8 +342,8 @@ for (const lang of ["en", "es"]) {
       assert.ok(await p.ev(inLane("up_next", ids.next)), "the card starts in Up next");
       // Bring Up next into view the way a person does: its chip.
       const gutter = await p.ev(GUTTER);
-      const upLeft = await chipToLane(p, "up_next");
-      assert.ok(Math.abs(upLeft - gutter) <= 16, `the Up next lane's left ${upLeft} is within 16 px of the gutter`);
+      const up = await chipToLane(p, "up_next");
+      assert.ok(Math.abs(up.left - gutter) <= 1, `the Up next lane's left ${up.left} is at the gutter`);
       await p.click(`.sb-card[data-card="${ids.next}"] .sb-move`);
       await p.until("document.querySelector('[data-sb-sheet]').open", "the Move sheet");
       await p.ev(TWO_FRAMES);

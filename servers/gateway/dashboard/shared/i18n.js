@@ -2235,6 +2235,8 @@ export const translations = {
   "settings.providers.engineDown": { en: "external engine not reachable from this instance", es: "motor externo no accesible desde esta instancia" },
   "settings.providers.engineUnprobed": { en: "external engine not probed yet", es: "motor externo aún sin sondear" },
   "settings.providers.usedBy": { en: "Used by", es: "Usado por" },
+  "settings.providers.endpoint": { en: "Endpoint", es: "Dirección" },
+  "settings.providers.models": { en: "Models", es: "Modelos" },
   "settings.providers.unused": { en: "nothing found", es: "nada encontrado" },
   "settings.providers.more": { en: "+{n} more", es: "+{n} más" },
   "settings.providers.piNotScanned": { en: "pi config not scanned on this instance", es: "configuración de pi no analizada en esta instancia" },

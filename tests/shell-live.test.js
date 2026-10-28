@@ -16,7 +16,9 @@
  *     handed and renders the classic one itself. No shipped bundle panel does
  *     that today; this one proves such a page never mixes with the shell;
  *   - Perch's /dashboard/perch-api (one bot, one live session) and a short
- *     WAV for the player bar.
+ *     WAV for the player bar;
+ *   - Ramble's /api/ramble/pet (a hatched grackle) and its bird engine, so
+ *     the header mascot is the user's Ramble bird.
  *
  * Set SHELL_SHOTS_DIR to also save phone + desktop, light + dark screenshots.
  */
@@ -105,6 +107,9 @@ before(async () => {
   app.use(express.static(fileURLToPath(new URL("../servers/gateway/public", import.meta.url))));
   app.get("/a.wav", (req, res) => res.type("audio/wav").send(wav()));
   app.get("/display/session", (req, res) => res.type("html").send("<!doctype html><title>session</title><p>talk</p>"));
+  // A hatched Ramble bird (the bundle's pet route and its real draw engine), for the header mascot.
+  app.get("/api/ramble/pet", (req, res) => res.json({ bird: { species: "grackle", seed: 4242, outfit: null }, energy: 80 }));
+  app.get("/ramble/static/bird-svg.js", (req, res) => res.type("text/javascript").sendFile(join(REPO, "bundles/ramble/server/bird-svg.cjs")));
   app.use("/dashboard/perch-api", (req, res) => {
     const url = req.path;
     if (url === "/roost") return res.json({ birds: [{ id: "helper", name: "Helper", perch_attached: true, state: "working",
@@ -522,6 +527,34 @@ test("Back after following a drawer link shows no open sheet", async (ctx) => {
     await p.key("Escape", "Escape", 27);
     await p.until("!document.getElementById('shell-drawer').open", "closed");
   } finally { await p.close(); }
+});
+
+test("the header mascot is the user's Ramble bird on Chat, Board and Make, after full loads and Turbo visits alike", async (ctx) => {
+  if (!chrome) return ctx.skip("no headless Chrome");
+  // The Ramble bird drawn in the header, and the default crow's body hidden.
+  const RAMBLE = "(function(){ var b=document.querySelector('#crow-tama #crow-tama-bird'), g=document.querySelector('#crow-tama .crow-body-group'); return !!(b && b.querySelector('*')) && !!g && getComputedStyle(g).display === 'none'; })()";
+  for (const [width, height] of [[390, 844], [1280, 800]]) {
+    // A full load of each tab.
+    for (const path of ["/dashboard/perch", "/dashboard/board", "/dashboard/make"]) {
+      const p = await open(path, { width, height });
+      try {
+        await p.until(RAMBLE, `the Ramble bird in the header on a full load of ${path} (${width})`);
+      } finally { await p.close(); }
+    }
+    // Turbo visits Chat -> Board -> Make -> Chat: the new header is the user's bird every time.
+    const p = await open("/dashboard/perch", { width, height });
+    try {
+      await p.until(RAMBLE, "the Ramble bird on Chat");
+      await p.ev("window.__mascotMark = 1; true");
+      for (const path of ["/dashboard/board", "/dashboard/make", "/dashboard/perch"]) {
+        await p.click(`.shell-tab[href='${path}']`);
+        await p.until(`location.pathname === ${JSON.stringify(path)}`, path);
+        await p.settled();
+        await p.until(RAMBLE, `the Ramble bird after a Turbo visit to ${path} (${width})`, 3000);
+      }
+      assert.equal(await p.ev("window.__mascotMark"), 1, "those were Turbo visits, not full loads");
+    } finally { await p.close(); }
+  }
 });
 
 test("the header bird's long-press still opens Talk to Crow in the shell; a tap opens the tray", async (ctx) => {

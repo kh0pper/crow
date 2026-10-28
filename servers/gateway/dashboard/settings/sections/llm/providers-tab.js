@@ -35,11 +35,11 @@ import { scanSlots, consumersOfModel, piConfigRefs } from "../../../../../shared
 const BACK = "?section=llm&tab=providers";
 
 export function hostBadge(p, ctx) {
-  const base = `font-size:0.72rem;padding:2px 8px;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);white-space:nowrap`;
+  const base = `font-size:0.72rem;padding:2px 8px;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill)`;
   const { kind, text } = hostLabel(p, ctx);
   const color = kind === "cloud" ? "var(--crow-accent)" : "var(--crow-text-secondary)";
   const suffix = kind === "cloud" && p.provider_type ? ` · ${escapeHtml(p.provider_type)}` : "";
-  return `<span style="${base};color:${color}" title="stored host: ${escapeHtml(String(p.host ?? ""))}">${escapeHtml(text)}${suffix}</span>`;
+  return `<span class="llm-pill" style="${base};color:${color}" title="stored host: ${escapeHtml(String(p.host ?? ""))}">${escapeHtml(text)}${suffix}</span>`;
 }
 
 /** "external · <host>" pill for a row marked gpu_policy.engine.managed = "external"; "" otherwise.
@@ -47,9 +47,9 @@ export function hostBadge(p, ctx) {
 export function engineBadge(p, lang = "en") {
   const info = externalEngineInfo(p);
   if (!info) return "";
-  const base = `font-size:0.72rem;padding:2px 8px;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);white-space:nowrap;margin-left:4px`;
+  const base = `font-size:0.72rem;padding:2px 8px;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);margin-left:4px`;
   const text = fill(t("settings.providers.externalBadge", lang), { host: info.host || "?" });
-  return `<span style="${base};color:var(--crow-text-secondary)" title="${escapeHtml(info.label || "")}">${escapeHtml(text)}</span>`;
+  return `<span class="llm-pill" style="${base};color:var(--crow-text-secondary)" title="${escapeHtml(info.label || "")}">${escapeHtml(text)}</span>`;
 }
 
 /** Status dot. External engines show THIS instance's read-only probe result
@@ -118,7 +118,8 @@ function defaultPiAgentDir() {
 const slotLabel = (s, lang) => (s.labelKey ? fill(t(s.labelKey, lang), s.labelParams || {}) : s.label);
 
 function usedByCell(p, { slots, piRefs, scanned, scanOk, lang }) {
-  if (!scanOk) return `<td class="llm-cell-usedby" style="color:var(--crow-text-muted)">—</td>`;
+  const label = escapeHtml(t("settings.providers.usedBy", lang));
+  if (!scanOk) return `<td class="llm-cell-usedby" data-label="${label}" style="color:var(--crow-text-muted)">—</td>`;
   const seen = new Set();
   const labels = [];
   const add = (l) => { if (l && !seen.has(l)) { seen.add(l); labels.push(l); } };
@@ -130,11 +131,11 @@ function usedByCell(p, { slots, piRefs, scanned, scanOk, lang }) {
   for (const r of piRefs[p.id] || []) add(slotLabel(r, lang));
   const hint = scanned ? "" : `<div style="font-size:0.7rem;color:var(--crow-text-muted)">${escapeHtml(t("settings.providers.piNotScanned", lang))}</div>`;
   if (!labels.length) {
-    return `<td class="llm-cell-usedby"><span style="color:var(--crow-text-muted)">${escapeHtml(t("settings.providers.unused", lang))}</span>${hint}</td>`;
+    return `<td class="llm-cell-usedby" data-label="${label}"><span style="color:var(--crow-text-muted)">${escapeHtml(t("settings.providers.unused", lang))}</span>${hint}</td>`;
   }
   const shown = labels.slice(0, USED_BY_MAX).map(escapeHtml).join(", ");
   const more = labels.length > USED_BY_MAX ? ` <span style="color:var(--crow-text-muted)">${escapeHtml(fill(t("settings.providers.more", lang), { n: labels.length - USED_BY_MAX }))}</span>` : "";
-  return `<td class="llm-cell-usedby" title="${escapeHtml(labels.join("\n"))}">${shown}${more}${hint}</td>`;
+  return `<td class="llm-cell-usedby" data-label="${label}" title="${escapeHtml(labels.join("\n"))}">${shown}${more}${hint}</td>`;
 }
 
 export default {
@@ -168,14 +169,14 @@ export default {
       const dupOf = dups.get(p.id);
       const dupAttr = dupOf ? ` data-dup-of="${escapeHtml(dupOf.join(","))}"` : "";
       const dupBadge = dupOf
-        ? ` <span style="font-size:0.7rem;padding:1px 7px;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-secondary);white-space:nowrap">${escapeHtml(fill(t("settings.providers.sameService", lang), { ids: dupOf.join(", ") }))}</span>`
+        ? ` <span class="llm-pill" style="font-size:0.7rem;padding:1px 7px;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-secondary)">${escapeHtml(fill(t("settings.providers.sameService", lang), { ids: dupOf.join(", ") }))}</span>`
         : "";
       return `<tr class="${p.disabled ? "llm-row-disabled" : ""}"${dupAttr}>
         <td class="llm-cell-status">${statusDot(p, { external, lang })}</td>
         <td class="llm-cell-id">${idEsc}${dupBadge}</td>
-        <td>${hostBadge(p, hostCtx)}${engineBadge(p, lang)}</td>
-        <td class="llm-cell-endpoint">${escapeHtml(p.baseUrl || "—")}</td>
-        <td class="llm-cell-models" title="${escapeHtml(models)}">${models}</td>
+        <td class="llm-cell-host">${hostBadge(p, hostCtx)}${engineBadge(p, lang)}</td>
+        <td class="llm-cell-endpoint" data-label="${escapeHtml(t("settings.providers.endpoint", lang))}">${escapeHtml(p.baseUrl || "—")}</td>
+        <td class="llm-cell-models" data-label="${escapeHtml(t("settings.providers.models", lang))}" title="${escapeHtml(models)}">${models}</td>
         ${usedByCell(p, usedCtx)}
         <td class="llm-cell-actions">
           <form method="post" style="display:inline">
@@ -189,7 +190,7 @@ export default {
     const active = providers.filter((p) => !p.disabled);
     const retired = providers.filter((p) => p.disabled);
     const rows = active.map(buildRow).join("");
-    const head = `<thead><tr><th></th><th>ID</th><th>Host</th><th>Endpoint</th><th>Models</th><th>${escapeHtml(t("settings.providers.usedBy", lang))}</th><th></th></tr></thead>`;
+    const head = `<thead><tr><th></th><th>ID</th><th>Host</th><th>${escapeHtml(t("settings.providers.endpoint", lang))}</th><th>${escapeHtml(t("settings.providers.models", lang))}</th><th>${escapeHtml(t("settings.providers.usedBy", lang))}</th><th></th></tr></thead>`;
     const retiredBlock = retired.length
       ? `<details data-show-retired style="margin-top:1rem">
       <summary class="llm-details-summary">${escapeHtml(fill(t("settings.providers.showRetired", lang), { n: retired.length }))}</summary>
@@ -220,6 +221,26 @@ export default {
       .llm-cell-endpoint { font-family:'JetBrains Mono',monospace; font-size:0.78rem; color:var(--crow-text-muted); max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       .llm-cell-models { color:var(--crow-text-secondary); max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       .llm-cell-actions { text-align:right; white-space:nowrap; width:1%; }
+      .llm-pill { white-space:nowrap; }
+      /* Phone: each provider is a compact two-column card (dot | id, badges,
+         endpoint, models, used by) with its action on the first line; the
+         head row is kept for screen readers only, each detail line carries its
+         own label, and long ids and badges wrap instead of widening the list. */
+      @media (max-width: 720px) {
+        .llm-providers-table, .llm-providers-table tbody { display:block; width:100%; }
+        .llm-providers-table thead { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
+        .llm-providers-table tbody tr { display:grid; grid-template-columns:16px minmax(0,1fr) auto; column-gap:8px; row-gap:4px; align-items:center; padding:10px 12px; }
+        .llm-providers-table td { display:block; min-width:0; max-width:none; padding:0 !important; }
+        .llm-providers-table td[colspan] { grid-column:1 / -1; padding:1rem 0 !important; }
+        .llm-cell-status { grid-column:1; grid-row:1; width:auto; }
+        .llm-cell-id { grid-column:2; grid-row:1; white-space:normal; overflow-wrap:anywhere; font-size:0.8rem; line-height:1.35; }
+        .llm-cell-actions { grid-column:3; grid-row:1; width:auto; }
+        .llm-cell-host, .llm-cell-endpoint, .llm-cell-models, .llm-cell-usedby { grid-column:2 / 4; font-size:0.78rem; }
+        .llm-cell-endpoint, .llm-cell-models { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .llm-providers-table td[data-label]::before { content:attr(data-label) ": "; color:var(--crow-text-muted); font-family:var(--crow-body-font, inherit); }
+        .llm-pill { display:inline-block; max-width:100%; white-space:normal; overflow-wrap:anywhere; vertical-align:middle; }
+        .llm-cell-id .llm-pill { margin-top:2px; }
+      }
       .btn-xs { padding:3px 10px; font-size:0.75rem; border-radius:var(--crow-radius-control); }
       .llm-card {
         border:1px solid var(--crow-border);

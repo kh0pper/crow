@@ -305,14 +305,6 @@ export function sharedNotifJs(lang) {
 export function headerIconsHtml(lang, { talkAvailable } = {}) {
   const talk = talkAvailable === true;
   return `
-<button class="header-icon-btn crow-ptt-btn" id="crow-ptt-btn" onclick="toggleCrowPtt(event)" title="Ask Crow through glasses" aria-label="Ask Crow" style="display:none">
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 1 0 6 0V4a3 3 0 0 0-3-3z"/>
-    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-    <path d="M12 19v4"/>
-    <path d="M8 23h8"/>
-  </svg>
-</button>
 <div class="header-icon-btn" id="health-icon-btn" onclick="toggleHealthDropdown(event)" title="${t("notif.systemHealth", lang)}">
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
     <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
@@ -482,17 +474,6 @@ export const headerIconsCss = `
   .health-stat-row:last-child { border-bottom: none; }
   .health-stat-label { color: var(--crow-text-muted); font-size: 0.8rem; }
   .health-stat-value { font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; }
-  /* ─── Crow PTT (glasses voice turn) ─── */
-  .crow-ptt-btn.active {
-    background: #dc2626;
-    border-color: #dc2626;
-    color: #fff;
-    animation: crow-ptt-pulse 1.2s ease-in-out infinite;
-  }
-  @keyframes crow-ptt-pulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.6); }
-    50%      { box-shadow: 0 0 0 6px rgba(220,38,38,0); }
-  }
   /* ─── Incoming Call Toast ─── */
   .crow-call-toast {
     position: fixed;
@@ -599,80 +580,6 @@ export function headerIconsJs(lang) {
     dd.style.display = dd.style.display === 'none' ? 'block' : 'none';
   }
 
-  var _crowPttActive = false;
-  async function _refreshCrowPttVisibility() {
-    var btn = document.getElementById('crow-ptt-btn');
-    if (!btn) return;
-    try {
-      var res = await fetch('/api/meta-glasses/devices', { credentials: 'same-origin' });
-      if (res.status === 404) {
-        // Bundle not installed — 404 is permanent for this page's lifetime.
-        // Cache the verdict (same key player.js uses) and stop the 15s poll
-        // instead of hammering a dead route forever (BH-6).
-        btn.style.display = 'none';
-        try { sessionStorage.setItem('crow-glasses-bundle', 'false'); } catch (e) {}
-        if (window.__crowPttVisibilityInterval) {
-          clearInterval(window.__crowPttVisibilityInterval);
-          window.__crowPttVisibilityInterval = null;
-        }
-        return;
-      }
-      if (!res.ok) { btn.style.display = 'none'; return; }
-      try { sessionStorage.setItem('crow-glasses-bundle', 'true'); } catch (e) {}
-      var data = await res.json();
-      btn.style.display = (data.connected_count > 0) ? '' : 'none';
-    } catch (e) {
-      btn.style.display = 'none';
-    }
-  }
-  var _pttBundleCached = null;
-  try { _pttBundleCached = sessionStorage.getItem('crow-glasses-bundle'); } catch (e) {}
-  if (_pttBundleCached === 'false') {
-    // Known-absent this tab session (player.js probe or an earlier 404 here) —
-    // hide and never start the poll. Installing the bundle restarts the
-    // gateway; a fresh tab re-probes.
-    var _pttBtn = document.getElementById('crow-ptt-btn');
-    if (_pttBtn) _pttBtn.style.display = 'none';
-  } else {
-    _refreshCrowPttVisibility();
-    if (!window.__crowPttVisibilityInterval) {
-      window.__crowPttVisibilityInterval = setInterval(_refreshCrowPttVisibility, 15000);
-    }
-  }
-
-  async function toggleCrowPtt(e) {
-    e.stopPropagation();
-    var btn = document.getElementById('crow-ptt-btn');
-    if (!btn) return;
-    var action = _crowPttActive ? 'end' : 'begin';
-    try {
-      var res = await fetch('/api/meta-glasses/turn', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ action: action }),
-      });
-      var data = await res.json();
-      if (action === 'begin') {
-        if (!data.ok || !data.delivered) {
-          var orig = btn.title;
-          btn.title = 'No connected glasses session';
-          setTimeout(function() { btn.title = orig; }, 1500);
-          return;
-        }
-        _crowPttActive = true;
-        btn.classList.add('active');
-        btn.title = 'Stop turn';
-      } else {
-        _crowPttActive = false;
-        btn.classList.remove('active');
-        btn.title = 'Ask Crow through glasses';
-      }
-    } catch (err) {
-      console.warn('ptt', err);
-    }
-  }
-
   function setNotifDropdown(open) {
     var dd = document.getElementById('notif-dropdown');
     if (!dd) return;
@@ -761,7 +668,6 @@ export function headerIconsJs(lang) {
   // these references resolve even though the assignments read "before" the
   // function bodies in source order.
   window.dismissAllNotifications = dismissAllNotifications;
-  window.toggleCrowPtt = toggleCrowPtt;
   window.toggleHealthDropdown = toggleHealthDropdown;
   window.toggleNotifDropdown = toggleNotifDropdown;
 })();
@@ -781,14 +687,6 @@ export function tamagotchiHtml(lang, { talkAvailable } = {}) {
   const talk = talkAvailable === true;
   const birdLabel = t(talk ? "talk.birdLabelHold" : "talk.birdLabel", lang);
   return `
-<button class="header-icon-btn crow-ptt-btn" id="crow-ptt-btn" onclick="toggleCrowPtt(event)" title="Ask Crow through glasses" aria-label="Ask Crow" style="display:none">
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 1 0 6 0V4a3 3 0 0 0-3-3z"/>
-    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-    <path d="M12 19v4"/>
-    <path d="M8 23h8"/>
-  </svg>
-</button>
 <div class="crow-tama-wrap" id="crow-tama-wrap">
   <button type="button" class="crow-tama-btn" id="crow-bird-btn" onclick="toggleCrowDropdown(event)" aria-haspopup="true" aria-controls="crow-dropdown" aria-expanded="false" aria-label="${birdLabel}" title="${birdLabel}"${talk ? " data-crow-talk" : ""}>
   <svg class="crow-tama crow-happy" id="crow-tama" viewBox="0 0 48 56" width="42" height="49" aria-hidden="true" focusable="false">
@@ -987,78 +885,6 @@ export function tamagotchiJs(lang) {
   window.__crowNotifInit = true;
   ${sharedNotifJs(lang)}
 
-  var _crowPttActive = false;
-  async function _refreshCrowPttVisibility() {
-    var btn = document.getElementById('crow-ptt-btn');
-    if (!btn) return;
-    try {
-      var res = await fetch('/api/meta-glasses/devices', { credentials: 'same-origin' });
-      if (res.status === 404) {
-        // Bundle not installed — 404 is permanent for this page's lifetime.
-        // Cache the verdict (same key player.js uses) and stop the 15s poll
-        // instead of hammering a dead route forever (BH-6).
-        btn.style.display = 'none';
-        try { sessionStorage.setItem('crow-glasses-bundle', 'false'); } catch (e) {}
-        if (window.__crowPttVisibilityInterval) {
-          clearInterval(window.__crowPttVisibilityInterval);
-          window.__crowPttVisibilityInterval = null;
-        }
-        return;
-      }
-      if (!res.ok) { btn.style.display = 'none'; return; }
-      try { sessionStorage.setItem('crow-glasses-bundle', 'true'); } catch (e) {}
-      var data = await res.json();
-      btn.style.display = (data.connected_count > 0) ? '' : 'none';
-    } catch (e) {
-      btn.style.display = 'none';
-    }
-  }
-  var _pttBundleCached = null;
-  try { _pttBundleCached = sessionStorage.getItem('crow-glasses-bundle'); } catch (e) {}
-  if (_pttBundleCached === 'false') {
-    // Known-absent this tab session (player.js probe or an earlier 404 here) —
-    // hide and never start the poll. Installing the bundle restarts the
-    // gateway; a fresh tab re-probes.
-    var _pttBtn = document.getElementById('crow-ptt-btn');
-    if (_pttBtn) _pttBtn.style.display = 'none';
-  } else {
-    _refreshCrowPttVisibility();
-    if (!window.__crowPttVisibilityInterval) {
-      window.__crowPttVisibilityInterval = setInterval(_refreshCrowPttVisibility, 15000);
-    }
-  }
-
-  async function toggleCrowPtt(e) {
-    e.stopPropagation();
-    var btn = document.getElementById('crow-ptt-btn');
-    if (!btn) return;
-    var action = _crowPttActive ? 'end' : 'begin';
-    try {
-      var res = await fetch('/api/meta-glasses/turn', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ action: action }),
-      });
-      var data = await res.json();
-      if (action === 'begin') {
-        if (!data.ok || !data.delivered) {
-          var orig = btn.title;
-          btn.title = 'No connected glasses session';
-          setTimeout(function() { btn.title = orig; }, 1500);
-          return;
-        }
-        _crowPttActive = true;
-        btn.classList.add('active');
-        btn.title = 'Stop turn';
-      } else {
-        _crowPttActive = false;
-        btn.classList.remove('active');
-        btn.title = 'Ask Crow through glasses';
-      }
-    } catch (err) { console.warn('ptt', err); }
-  }
-
   function setCrowDropdown(open) {
     var dd = document.getElementById('crow-dropdown');
     if (!dd) return;
@@ -1151,11 +977,22 @@ export function tamagotchiJs(lang) {
   // fetched here on the same poll cadence. Any non-200/error/absent bird
   // (login page, ramble not installed, static route 401) is silently a
   // no-op — the classic crow stays exactly as it was.
+  // This script runs once per document, but a Turbo visit (Chat, Board and
+  // Make are Turbo visits) swaps in a new header holding the default crow:
+  // turbo:render redraws the known bird into it at once, then re-checks the
+  // pet. One path for every page that carries the header.
   var _rambleBirdSpecies = null;
   var _rambleBirdSeed = null;
   var _rambleBirdMood = null;
   var _rambleBirdOutfit = null;
+  var _rambleBirdOutfitObj = null;
   var _rambleBirdFailed = false;
+
+  /** Is the bird drawn in THIS page's header (not only in a header Turbo swapped out)? */
+  function _rambleBirdOnPage() {
+    var b = document.getElementById('crow-tama-bird');
+    return !!(b && b.firstChild && b.firstChild.firstChild);
+  }
 
   function _rambleBirdLoadEngine(cb) {
     if (window.RambleBird) { cb(); return; }
@@ -1226,7 +1063,7 @@ export function tamagotchiJs(lang) {
       var outfit = data.bird.outfit || null;
       var outfitKey = outfit ? JSON.stringify(outfit) : '';
 
-      if (species === _rambleBirdSpecies && seed === _rambleBirdSeed && mood === _rambleBirdMood && outfitKey === _rambleBirdOutfit) return;
+      if (species === _rambleBirdSpecies && seed === _rambleBirdSeed && mood === _rambleBirdMood && outfitKey === _rambleBirdOutfit && _rambleBirdOnPage()) return;
 
       _rambleBirdLoadEngine(function() {
         if (!window.RambleBird) return;
@@ -1235,9 +1072,16 @@ export function tamagotchiJs(lang) {
         _rambleBirdSeed = seed;
         _rambleBirdMood = mood;
         _rambleBirdOutfit = outfitKey;
+        _rambleBirdOutfitObj = outfit;
       });
     } catch (e) {}
   }
+  document.addEventListener('turbo:render', function() {
+    if (_rambleBirdSpecies !== null && window.RambleBird && !_rambleBirdOnPage()) {
+      _drawRambleBird(_rambleBirdSpecies, _rambleBirdSeed, _rambleBirdMood, _rambleBirdOutfitObj);
+    }
+    refreshRambleBird();
+  });
   // ── end ramble bird integration ──
 
   async function pollNotifications() {
@@ -1265,7 +1109,6 @@ export function tamagotchiJs(lang) {
     _notifPollTimer = window.__crowNotifPollInterval;
   }
   window.dismissAllNotifications = dismissAllNotifications;
-  window.toggleCrowPtt = toggleCrowPtt;
   window.toggleCrowDropdown = toggleCrowDropdown;
 })();
 `;
