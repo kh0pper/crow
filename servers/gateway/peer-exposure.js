@@ -79,6 +79,8 @@ function resolveProxyTool(toolName, connectedServers) {
  *   closed); "__allow__" = ungated (discovery / non-tools-call method).
  */
 export function resolveCalledCanonicalId(prefix, body, connectedServers) {
+  // A batch (array) or a non-object body names no single method: never allow.
+  if (Array.isArray(body) || (body !== undefined && (body === null || typeof body !== "object"))) return null;
   if (!body || body.method !== "tools/call") return "__allow__";
   const toolName = body.params?.name;
   const p = String(prefix || "").replace(/^\/+/, "");
@@ -110,6 +112,23 @@ export function resolveCalledCanonicalId(prefix, body, connectedServers) {
 }
 
 const DENY_CODE = -32001;
+const INVALID_REQUEST = -32600;
+// Verbs that carry no JSON-RPC body on an MCP mount (open the session stream,
+// close the session). Every other peer request must be ONE plain object.
+const BODYLESS = new Set(["GET", "HEAD", "DELETE"]);
+
+/**
+ * A paired instance sends exactly one plain JSON-RPC object per POST. A batch
+ * (array) or any other shape is refused before the MCP transport sees it: the
+ * transport runs every message of a batch, and the exposure decision below is
+ * made for one message. Bodyless verbs may carry no body (or the parser's {}).
+ */
+function isSinglePeerRequest(req) {
+  const body = req.body;
+  if (Array.isArray(body)) return false;
+  if (body === undefined) return BODYLESS.has(String(req.method || "").toUpperCase());
+  return body !== null && typeof body === "object";
+}
 
 /**
  * Enforcement gate for the instance-auth MCP path. Returns true to proceed,
@@ -129,6 +148,31 @@ export async function enforcePeerExposure({ prefix, req, res, db, connectedServe
   if (!req?.instanceAuth?.instance) return true;
 
   const body = req.body;
+  if (!isSinglePeerRequest(req)) {
+    const sourceId = req.instanceAuth.instance.id;
+    let localId = null;
+    try { localId = getOrCreateLocalInstanceId(); } catch { /* best-effort */ }
+    try {
+      await auditFn(db, {
+        sourceInstanceId: sourceId,
+        targetInstanceId: localId,
+        direction: "inbound",
+        action: Array.isArray(body) ? `jsonrpc:batch(${body.length})` : "jsonrpc:invalid",
+        bundleId: null,
+        actor: `instance:${sourceId}`,
+        httpStatus: 403,
+        error: "not_single_request",
+      });
+    } catch { /* audit must not break the path */ }
+    if (!res.headersSent) {
+      res.status(403).json({
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: INVALID_REQUEST, message: "A paired instance must send one JSON-RPC request per call" },
+      });
+    }
+    return false;
+  }
   const canonicalId = resolveCalledCanonicalId(prefix, body, connectedServers);
   if (canonicalId === "__allow__") return true; // discovery / non-tools-call
 

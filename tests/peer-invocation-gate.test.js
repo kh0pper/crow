@@ -119,3 +119,103 @@ test("unresolvable peer tools/call is denied (fail closed)", async () => {
   assert.equal(allowed, false);
   assert.equal(res.statusCode, 403);
 });
+
+// --- request shape: a paired instance sends one plain JSON-RPC object per POST ---
+const peerReq = (body, method = "POST") => ({ method, body, instanceAuth: { instance: { id: "peer-1" } } });
+async function gate(prefix, req, exposed, connectedServers = new Map()) {
+  const res = fakeRes();
+  const audits = [];
+  const allowed = await enforcePeerExposure({
+    prefix, req, res, db: {}, connectedServers,
+    exposedSetOverride: new Set(exposed), auditFn: async (_db, r) => { audits.push(r); },
+    emitFn: async () => {},
+  });
+  return { allowed, res, audits };
+}
+
+test("peer batch carrying a tools/call for an unexposed tool is refused + audited, on every mount kind", async () => {
+  const connected = new Map([["texas-gov-data", { status: "connected", tools: [{ name: "tx_query" }] }]]);
+  const batches = {
+    "/memory": [callBody("crow_store_memory")],
+    "/router": [callBody("crow_memory"), callBody("crow_tools", { action: "tx_query" }, 2)],
+    "/tools": [callBody("tx_query")],
+    "/tools-readonly": [callBody("tx_query")],
+    "/board": [callBody("add_card")],
+    "": [callBody("crow_store_memory")],
+  };
+  for (const [prefix, batch] of Object.entries(batches)) {
+    const { allowed, res, audits } = await gate(prefix, peerReq(batch), [], connected);
+    assert.equal(allowed, false, `${prefix || "(root)"}: batch refused`);
+    assert.equal(res.statusCode, 403, prefix);
+    assert.equal(res.body.jsonrpc, "2.0");
+    assert.equal(res.body.id, null);
+    assert.equal(typeof res.body.error?.code, "number");
+    assert.equal(audits.length, 1, `${prefix}: the refusal is audited`);
+    assert.equal(audits[0].httpStatus, 403);
+    assert.equal(audits[0].sourceInstanceId, "peer-1");
+    assert.equal(audits[0].direction, "inbound");
+    assert.equal(audits[0].error, "not_single_request");
+  }
+});
+
+test("peer batch of only non-tools/call messages is refused too", async () => {
+  const { allowed, res, audits } = await gate("/memory", peerReq([{ jsonrpc: "2.0", id: 1, method: "tools/list" }, { jsonrpc: "2.0", method: "notifications/initialized" }]), ["crow-memory"]);
+  assert.equal(allowed, false);
+  assert.equal(res.statusCode, 403);
+  assert.equal(audits[0]?.error, "not_single_request");
+});
+
+test("peer batch of exposed tools/calls is refused (shape, not exposure, decides)", async () => {
+  const { allowed } = await gate("/memory", peerReq([callBody("crow_store_memory")]), ["crow-memory"]);
+  assert.equal(allowed, false);
+});
+
+test("peer POST bodies that are not a plain object are refused", async () => {
+  for (const body of [[], "tools/call", 7, true, null, undefined]) {
+    const { allowed, res } = await gate("/memory", peerReq(body), ["crow-memory"]);
+    assert.equal(allowed, false, `body ${JSON.stringify(body)}`);
+    assert.equal(res.statusCode, 403);
+  }
+  const sse = await gate("/memory", peerReq([callBody("crow_store_memory")]), ["crow-memory"]);
+  assert.equal(sse.allowed, false, "the SSE messages POST takes the same rule");
+});
+
+test("peer single exposed tools/call is allowed; single unexposed one is denied", async () => {
+  const ok = await gate("/memory", peerReq(callBody("crow_store_memory")), ["crow-memory"]);
+  assert.equal(ok.allowed, true);
+  assert.equal(ok.res.headersSent, false);
+  const no = await gate("/memory", peerReq(callBody("crow_store_memory")), []);
+  assert.equal(no.allowed, false);
+  assert.equal(no.res.body.error.code, -32001);
+  assert.equal(no.audits[0].error, "not_exposed");
+});
+
+test("peer GET/DELETE without a body (session stream, session close) still pass", async () => {
+  for (const method of ["GET", "DELETE"]) {
+    for (const body of [undefined, {}]) {
+      const { allowed, res, audits } = await gate("/memory", peerReq(body, method), []);
+      assert.equal(allowed, true, `${method} ${JSON.stringify(body)}`);
+      assert.equal(res.headersSent, false);
+      assert.equal(audits.length, 0);
+    }
+  }
+  const arr = await gate("/memory", peerReq([callBody("crow_store_memory")], "GET"), []);
+  assert.equal(arr.allowed, false, "an array body is refused whatever the verb");
+});
+
+test("owner (non-peer) batches are not touched by the peer gate", async () => {
+  const res = fakeRes();
+  const allowed = await enforcePeerExposure({
+    prefix: "/memory", req: { method: "POST", body: [callBody("crow_store_memory")] }, res, db: {},
+    connectedServers: new Map(), exposedSetOverride: new Set(), auditFn: async () => { throw new Error("no audit expected"); },
+  });
+  assert.equal(allowed, true);
+  assert.equal(res.headersSent, false);
+});
+
+test("resolver: an array or non-object body never resolves to allow", () => {
+  assert.equal(resolveCalledCanonicalId("/memory", [callBody("crow_store_memory")]), null);
+  assert.equal(resolveCalledCanonicalId("/router", [{ method: "tools/list" }]), null);
+  assert.equal(resolveCalledCanonicalId("/tools", "x"), null);
+  assert.equal(resolveCalledCanonicalId("/memory", undefined), "__allow__", "no body (GET/DELETE) is unchanged");
+});
