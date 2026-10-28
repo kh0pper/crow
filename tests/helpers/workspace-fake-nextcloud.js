@@ -49,6 +49,10 @@ export async function startFakeNextcloud({ secret = "jwt", instance = "ocinst" }
       const n = nodes.get(path); if (!locked) n.lock = null;
       const sess = state.sessions.get(key); if (sess) sess.users = [];
     },
+    /** The session's users from now on (bare uids; the instance prefix is added like openInEditor does). */
+    setSessionUsers(key, uids) { const sess = state.sessions.get(key); if (sess) sess.users = uids.map((u) => `${instance}_${u}`); },
+    /** An editor save (the connector's callback): a new version written by `author`, the file's lock unchanged. */
+    editorSave(path, bytes, { author = "admin" } = {}) { const n = nodes.get(path); writeContent(n, bytes, author); return n; },
     advance(ms) { state.now += ms; for (const r of [...state.pendingReleases]) if (state.now >= r.at) { state.pendingReleases.splice(state.pendingReleases.indexOf(r), 1); r.fn(); } },
     lastSearchBody: () => lastSearch,
     versionsOf: (path) => nodes.get(path).versions,
@@ -130,9 +134,17 @@ ${isDir ? "<d:resourcetype><d:collection/></d:resourcetype>" : `<d:resourcetype/
       const unesc = lit.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
       let hits = [...nodes.values()].filter((n) => n.path !== "");
       if (/<d:eq><d:prop><oc:fileid\/>/.test(lastSearch)) hits = hits.filter((n) => String(n.fileId) === unesc);
+      else if (/<d:eq><d:prop><d:getcontenttype\/>/.test(lastSearch)) {
+        const mimes = [...lastSearch.matchAll(/<d:getcontenttype\/><\/d:prop><d:literal>([\s\S]*?)<\/d:literal>/g)].map((m) => m[1].replace(/&amp;/g, "&"));
+        hits = hits.filter((n) => n.type === "file" && mimes.includes(n.mime || "application/octet-stream"));
+      }
       else if (/<d:like>/.test(lastSearch)) { const needle = unesc.replace(/^%|%$/g, "").replace(/\\([%_\\])/g, "$1").toLowerCase(); hits = hits.filter((n) => n.path.split("/").pop().toLowerCase().includes(needle)); }
       else hits = hits.filter((n) => n.path.split("/").pop() === unesc);
       if (/<d:is-collection\/>/.test(lastSearch)) hits = hits.filter((n) => n.type === "dir");
+      // like NC: ordered by last modified (newest first) when asked, then cut at nresults
+      if (/<d:getlastmodified\/><\/d:prop><d:descending\/>/.test(lastSearch)) hits = hits.map((n, i) => [n, i]).sort((a, b) => b[0].mtime - a[0].mtime || a[1] - b[1]).map(([n]) => n);
+      const nres = Number((lastSearch.match(/<d:nresults>(\d+)<\/d:nresults>/) || [])[1]);
+      if (nres > 0) hits = hits.slice(0, nres);
       return send(207, ms(hits.map(respFor).join("")));
     }
     // ---- versions ----

@@ -16,9 +16,13 @@
  *     Tailscale-User-Login is NOT used as a key (stripping of inbound copies by Serve not verified here).
  *     This prefix is in the gateway's GENERAL_LIMITER_SKIP_PREFIXES because every editor arrives through the same
  *     loopback proxy (one shared bucket there); these limits replace it;
- *  3. its document.key must be the CURRENT live session key of a file with queued (or unverified live) work, and its
- *     user must be in that session's ONLYOFFICE info.users (command service). A key that matched no file is
- *     remembered for 30 s against the same set of candidate files (fix2 N6), and at most 20 candidate files are asked;
+ *  3. its document.key must be the CURRENT live session key of a candidate file, and its user must be in that
+ *     session's ONLYOFFICE info.users (command service). Candidates, in order (I-6): the file a sampled session row
+ *     (workspace_editor_sessions) recorded for this key, the plugin's X-Crow-File-Hint header (an UNTRUSTED positive
+ *     integer: spike E10, the session token carries no file id), then files with queued (or unverified live) work.
+ *     Every candidate is confirmed by asking ONLYOFFICE for that file's current key — a hint or a stored row never
+ *     authorises alone. A key that matched no file is remembered for 5 s against the same candidate set (fix2 N6),
+ *     and at most 20 queued-work files are asked;
  *  4. 60/min per (document, user) and a raw 720/min per document, for every VALID token, right after the signature
  *     check and before the session lookup or body parse (fix3 R1) — a viewer cannot drive Nextcloud/ONLYOFFICE calls;
  *  5. WRITE permission (fix B), server-side on /pending, /claim and /ack alike: the user owns the file or holds a user
@@ -44,6 +48,7 @@ import { get, cas, nextApplicable, argsOf, preOf, resultOf } from "../queue/stor
 import { liveEligible } from "../queue/conditions.js";
 import { docSession } from "../nc/onlyoffice.js";
 import { notifyChange } from "../queue/notify.js";
+import { sessionByKey, recordSession } from "../comments/sessions.js";
 
 export const MIN_PLUGIN_VERSION = "0.2.0";
 export const LEASE_MS = 60000;
@@ -54,6 +59,8 @@ const CACHE_MAX = 2000;
 const MAX_CANDIDATES = 20;
 const HIDDEN_ARGS = new Set(["path", "file_id", "if_open", "wait_s"]);
 const REASON_RE = /^[a-z_]{1,40}$/;
+/** X-Crow-File-Hint: a positive integer or nothing (a malformed hint is ignored, never an error). */
+export const fileHintOf = (v) => (typeof v === "string" && /^[1-9]\d{0,15}$/.test(v) && Number.isSafeInteger(Number(v)) ? Number(v) : null);
 
 /** "x.y.z" ≥ min; anything malformed → false (an old or unknown plugin never claims). */
 export function versionAtLeast(v, min = MIN_PLUGIN_VERSION) {
@@ -95,20 +102,25 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
     return writes.set(k, ok, ok ? SESSION_TTL_MS : NEGATIVE_TTL_MS);
   };
   /**
-   * The file whose CURRENT live session has this key → {fileId, path, users, uids} | null. Candidates: files with
+   * The file whose CURRENT live session has this key → {fileId, path, users, uids} | null. Candidates, deduplicated:
+   * the file a sampled session row recorded for this key, then the plugin's untrusted file hint, then files with
    * queued work or a live change not yet verified (bounded; the key the change was queued under is tried first).
+   * Each is confirmed by its live session's key. `path` is null for a file reached only through a row or the hint.
    */
   const misses = cache(); // key → candidate-set signature it matched none of (N6), for NEGATIVE_TTL_MS
-  async function liveSession(key, force, userId) {
+  async function liveSession(key, force, userId, hint = null) {
     const rows = (await db.execute({ sql: `SELECT file_id, MIN(path) AS path, MAX(CASE WHEN doc_key=? THEN 1 ELSE 0 END) AS hinted FROM workspace_pending_changes
       WHERE state IN ('pending','claimed_live','unknown_after_claim') OR (state='applied_live' AND verified=0) GROUP BY file_id ORDER BY hinted DESC, file_id LIMIT ?`, args: [key, MAX_CANDIDATES] })).rows;
-    const sig = rows.map((r) => r.file_id).join(",");
+    const sampled = Number((await sessionByKey(db, key))?.file_id) || null;
+    const paths = new Map(rows.map((r) => [Number(r.file_id), r.path]));
+    const ids = [...new Set([sampled, hint, ...rows.map((r) => Number(r.file_id))].filter((id) => Number.isSafeInteger(id) && id > 0))];
+    const sig = ids.join(",");
     if (misses.get(key)?.v === sig) return null; // asked these same files < 5 s ago: none had this key
-    for (const r of rows) {
-      let s = await sessionOf(Number(r.file_id), force);
+    for (const fileId of ids) {
+      let s = await sessionOf(fileId, force);
       // a user who joined after this session was cached: re-ask once the entry is older than the negative window
-      if (!force && userId && s?.live && String(s.key) === key && !s.users.map(String).includes(userId) && !sessions.get(Number(r.file_id), false, NEGATIVE_TTL_MS)) s = await sessionOf(Number(r.file_id), true);
-      if (s?.live && String(s.key) === key) return { fileId: Number(r.file_id), path: r.path, users: s.users.map(String), uids: (s.uids || s.users).map(String) };
+      if (!force && userId && s?.live && String(s.key) === key && !s.users.map(String).includes(userId) && !sessions.get(fileId, false, NEGATIVE_TTL_MS)) s = await sessionOf(fileId, true);
+      if (s?.live && String(s.key) === key) return { fileId, path: paths.get(fileId) ?? null, users: s.users.map(String), uids: (s.uids || s.users).map(String) };
     }
     misses.set(key, sig, NEGATIVE_TTL_MS);
     return null;
@@ -140,14 +152,18 @@ export function liveRouter({ Router, json, db, getConfig, clock, limits = LIMITS
     if (req.query.key !== undefined && String(req.query.key) !== t.key) return deny(res);
     const force = req.method !== "GET";
     let live;
-    try { live = await liveSession(t.key, force, t.userId ? String(t.userId) : ""); } catch { return res.status(503).json({ error: "editor unavailable" }); }
-    const at = live && t.userId ? live.users.indexOf(t.userId) : -1;
-    if (at < 0) return deny(res);
+    try { live = await liveSession(t.key, force, t.userId ? String(t.userId) : "", fileHintOf(req.headers["x-crow-file-hint"])); } catch { return res.status(503).json({ error: "editor unavailable" }); }
+    const idx = live && t.userId ? live.users.indexOf(t.userId) : -1;
+    if (idx < 0) return deny(res);
     // fix B: edit rights are checked server-side for every endpoint (a viewer sees no change content either)
-    if (!t.canEdit || !(await canWrite(live.fileId, live.uids[at], live.path, force))) return deny(res);
+    if (!t.canEdit || !(await canWrite(live.fileId, live.uids[idx], live.path, force))) return deny(res);
     if (!perDoc.hit(t.key)) return res.status(429).json({ error: "too many requests" });
     if (req.path !== "/ack" && !versionAtLeast(req.query.pv ?? req.body?.pv)) return res.status(426).json({ error: "the Crow plugin in this editor is outdated; reload the document" });
-    req.live = { editor: t, fileId: live.fileId };
+    // I-6: an authorised request records the confirmed session (key → file, prefix-stripped uids), so this key
+    // resolves later without the hint. A failed write never fails the request.
+    const at = now();
+    await recordSession(db, { key: t.key, fileId: live.fileId, uids: live.uids, at }).catch((e) => console.warn(`[workspace] live: session sample not recorded: ${String(e?.message).slice(0, 200)}`));
+    req.live = { editor: t, fileId: live.fileId, key: t.key, uids: live.uids, at, path: live.path };
     next();
   };
   const wrap = (fn) => (req, res) => fn(req, res).catch((e) => { console.warn(`[workspace] live: ${e.code || ""} ${String(e.message).slice(0, 200)}`); if (!res.headersSent) res.status(500).json({ error: "internal" }); });
