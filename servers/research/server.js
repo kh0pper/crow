@@ -1168,7 +1168,7 @@ export function createProjectServer(dbPath, options = {}) {
         });
         const byStatus = new Map(stRows.map((r) => [r.fetch_status ?? null, Number(r.n)]));
         const parts = FETCH_STATUS_ORDER.filter((k) => byStatus.has(k)).map((k) => `${byStatus.get(k)} ${statusLabel(k)}`);
-        header = `Fetch status: ${parts.join(", ")}\n\n`;
+        header = `Fetch status: ${parts.join(" · ")}\n\n`;
         const ids = rows.map((r) => Number(r.id));
         const { rows: pRows } = await db.execute({
           sql: `SELECT source_id, provenance, COUNT(*) AS n FROM research_notes WHERE source_id IN (${ids.map(() => "?").join(",")}) GROUP BY source_id, provenance`,

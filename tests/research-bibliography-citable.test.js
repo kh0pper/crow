@@ -160,7 +160,7 @@ test("list_sources shows fetch status and per-source provenance counts", async (
   insertNote(s.fetched, s.pid, "summary", "fetched");
   insertNote(s.fetched, s.pid, "note", "snippet");
   const t = text(await call(await clientFor(), "crow_list_sources", { project_id: s.pid }));
-  assert.match(t, /Fetch status: 1 fetched, 1 fetched \(no text\), 1 failed, 1 legacy, unchecked, 2 not a web page, 1 not fetched here/);
+  assert.match(t, /Fetch status: 1 fetched · 1 fetched \(no text\) · 1 failed · 1 legacy, unchecked · 2 not a web page · 1 not fetched here/);
   assert.match(t, /notes: 2 fetched, 1 snippet/);
   assert.match(t, /\[legacy, unchecked\]/);
   assert.ok(!/\[V\]\s+LegacyOne/.test(t));
