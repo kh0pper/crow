@@ -22,6 +22,25 @@ export function shellCss() {
   body.shell {
     --shell-tabs-h: calc(56px + env(safe-area-inset-bottom, 0px));
     --shell-rail-w: 0px;
+    /* Project dots. Contrast against the drawer/rail background
+       (--crow-bg-surface #ffffff): 5.52, 6.00, 5.04, 4.92, 5.63, 5.48. */
+    --shell-project-c1: #b4442b;
+    --shell-project-c2: #8f5606;
+    --shell-project-c3: #2f7d4f;
+    --shell-project-c4: #2b7a8c;
+    --shell-project-c5: #4f5fc0;
+    --shell-project-c6: #9a4a9c;
+  }
+  /* Dark (--crow-bg-surface #1b242b): 6.42, 6.94, 7.18, 7.17, 6.61, 7.24. */
+  @media (prefers-color-scheme: dark) {
+    body.shell {
+      --shell-project-c1: #f08a6e;
+      --shell-project-c2: #e0a03c;
+      --shell-project-c3: #5fc28a;
+      --shell-project-c4: #52bdd1;
+      --shell-project-c5: #97a3f0;
+      --shell-project-c6: #d79be0;
+    }
   }
   /* The sidebar is not rendered: the column takes the whole width. */
   body.shell .main-content { margin-left: var(--shell-rail-w); }
@@ -191,6 +210,14 @@ export function shellCss() {
   body.shell .shell-project:hover,
   body.shell .shell-sheet-link:hover { background: var(--crow-bg-elevated); color: var(--crow-text-primary); }
   body.shell .shell-project.is-current { background: var(--crow-accent-muted); color: var(--crow-accent); font-weight: 600; }
+  body.shell .shell-project-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; margin-right: 10px; }
+  body.shell .shell-project-text { display: flex; flex-direction: column; min-width: 0; }
+  body.shell .shell-project-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  body.shell .shell-project-sub { font-size: 0.75rem; font-weight: 400; color: var(--crow-text-secondary); }
+  body.shell .shell-project--edge .shell-project-name { color: var(--crow-text-secondary); }
+  body.shell .shell-more-row summary { list-style: none; }
+  body.shell .shell-more-row summary::-webkit-details-marker { display: none; }
+  body.shell .shell-more-row[open] .shell-more { margin: 4px 0 8px; }
   body.shell .shell-mode-form { margin: 0; }
   body.shell .shell-more {
     display: grid;

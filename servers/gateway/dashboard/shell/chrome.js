@@ -17,6 +17,7 @@ import { escapeHtml } from "../shared/components.js";
 import { t } from "../shared/i18n.js";
 import { crowMarkSvg } from "../shared/crow-mark.js";
 import { getPanel as registryGetPanel } from "../panel-registry.js";
+import { needsYouLabel } from "../panels/board/needs-you.js";
 
 // Inline 24px stroke icons, decorative (the label carries the meaning).
 const ICON_ATTRS = 'width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"';
@@ -86,12 +87,27 @@ function currentValue(scope, projects) {
  * Artifacts is a bundle, so with neither make nor artifacts installed the
  * Make tab points at the Extensions page, filtered to it.
  */
-export function tabTargets(getPanel = registryGetPanel) {
+export function tabTargets(getPanel = registryGetPanel, projectSlug = null) {
+  const q = projectSlug ? `?project=${encodeURIComponent(projectSlug)}` : "";
   return [
-    { id: "chat", href: "/dashboard/perch", key: "shell.tabChat" },
-    { id: "board", href: getPanel("board") ? "/dashboard/board" : "/dashboard/bot-board", key: "shell.tabBoard" },
-    { id: "make", href: getPanel("make") ? "/dashboard/make" : getPanel("artifacts") ? "/dashboard/artifacts" : "/dashboard/extensions?q=artifacts", key: "shell.tabMake" },
+    { id: "chat", href: projectSlug ? `/dashboard/project/${encodeURIComponent(projectSlug)}` : "/dashboard/perch", key: "shell.tabChat" },
+    { id: "board", href: getPanel("board") ? `/dashboard/board${q}` : "/dashboard/bot-board", key: "shell.tabBoard" },
+    { id: "make", href: getPanel("make") ? `/dashboard/make${q}` : getPanel("artifacts") ? "/dashboard/artifacts" : "/dashboard/extensions?q=artifacts", key: "shell.tabMake" },
   ];
+}
+
+/**
+ * A project's colour: one of six fixed custom properties (defined in css.js,
+ * each at least 3:1 against the drawer background in light and dark), chosen
+ * by an FNV-1a hash of the slug so a project keeps its colour everywhere.
+ */
+export function projectColor(slug) {
+  let h = 0x811c9dc5;
+  for (const byte of Buffer.from(String(slug ?? ""), "utf8")) {
+    h ^= byte;
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return `var(--shell-project-c${(h % 6) + 1})`;
 }
 
 /** The project chip, rendered inside .content-header (before the header icons). */
@@ -107,52 +123,79 @@ export function shellAvatarButton({ lang }) {
 }
 
 /**
- * The project buttons, one form POSTing /dashboard/scope. `return` is filled
- * by the client with the current path so the scope change lands back here.
+ * The project rows, one form POSTing /dashboard/scope for the Everything and
+ * Unassigned buttons; each project is a link to its home. `return` is filled
+ * by the client with the current path so a scope change lands back here.
  * The hidden _csrf is filled from the crow_csrf cookie at submit time for the
  * Turbo-off case (with Turbo on, the layout's submit hook sends the header).
  */
-function projectForm({ scope, projects, lang, extraClass = "" }) {
+function projectForm({ scope, projects, lang, counts, homeSlug, extraClass = "" }) {
   const cur = currentValue(scope, projects);
-  const btn = (value, text) =>
-    `<button type="submit" class="shell-project${value === cur ? " is-current" : ""}" name="scope" value="${escapeHtml(value)}"${value === cur ? ' aria-current="true"' : ""}>${escapeHtml(text)}</button>`;
+  const btn = (value, text, sub = "") =>
+    `<button type="submit" class="shell-project${value === cur ? " is-current" : ""}" name="scope" value="${escapeHtml(value)}"${value === cur ? ' aria-current="true"' : ""}><span class="shell-project-text"><span class="shell-project-name">${escapeHtml(text)}</span>${sub ? `<span class="shell-project-sub">${escapeHtml(sub)}</span>` : ""}</span></button>`;
+  const link = (p) => {
+    const slug = projectValue(p);
+    const open = homeSlug != null && homeSlug === slug;
+    const lbl = counts instanceof Map && counts.has(Number(p.id)) ? needsYouLabel(counts.get(Number(p.id)), lang) : null;
+    return `<a href="/dashboard/project/${encodeURIComponent(slug)}" class="shell-project${open ? " is-current" : ""}"${open ? ' aria-current="page"' : ""}><span class="shell-project-dot" style="background:${projectColor(slug)}" aria-hidden="true"></span><span class="shell-project-text"><span class="shell-project-name">${escapeHtml(p.name)}</span>${lbl ? `<span class="shell-project-sub">${escapeHtml(lbl)}</span>` : ""}</span></a>`;
+  };
+  const edge = (href, text) => `<a href="${href}" class="shell-project shell-project--edge"><span class="shell-project-text"><span class="shell-project-name">${escapeHtml(text)}</span></span></a>`;
   const rows = [
-    btn("all", t("shell.everything", lang)),
-    ...(projects || []).map((p) => btn(projectValue(p), p.name)),
+    btn("all", t("shell.everything", lang), t("shell.everythingSub", lang)),
+    ...(projects || []).map(link),
     btn("unassigned", t("shell.unassigned", lang)),
+    edge("/dashboard/projects?new=1", t("shell.newProject", lang)),
   ].join("");
   return `<form class="shell-projects${extraClass}" method="post" action="/dashboard/scope"><input type="hidden" name="return" value=""><input type="hidden" name="_csrf" value="">${rows}</form>`;
 }
 
+/** The "More of Crow" row: a details whose summary names the first four entries. */
+function moreDetails({ lang, getPanel }) {
+  // Labels follow the classic sidebar's rule: the nav.<id> translation, else
+  // the panel's own manifest name, else a plain fallback.
+  const entries = MORE_ENTRIES.map((e) => ({ e, panel: getPanel(e.id) })).filter((x) => x.panel)
+    .map(({ e, panel }) => ({ e, text: label(e.key, panel.name || e.fallback, lang) }));
+  if (!entries.length) return "";
+  const sub = entries.slice(0, 4).map((x) => x.text).join(", ") + "…";
+  const grid = entries.map(({ e, text }) => `<a href="${e.route}" class="shell-more-item">${escapeHtml(text)}</a>`).join("");
+  return `<details class="shell-more-row"><summary class="shell-project"><span class="shell-project-text"><span class="shell-project-name">${escapeHtml(t("shell.more", lang))}</span><span class="shell-project-sub">${escapeHtml(sub)}</span></span></summary><div class="shell-more">${grid}</div></details>`;
+}
+
+/** The archived-projects link, the last row. */
+function archivedLink(lang) {
+  return `<a href="/dashboard/projects?status=archived" class="shell-project shell-project--edge"><span class="shell-project-text"><span class="shell-project-name">${escapeHtml(t("shell.archivedProjects", lang))}</span></span></a>`;
+}
+
 /** The Chat / Board / Make nav, rendered right after </main>. */
-export function shellTabsNav({ tab, scope, projects, lang, getPanel = registryGetPanel }) {
-  const links = tabTargets(getPanel).map((tt) => {
+export function shellTabsNav({ tab, scope, projects, lang, counts, homeSlug, getPanel = registryGetPanel }) {
+  const sp = scopedProject(scope, projects);
+  const n = sp && counts instanceof Map ? needsYouLabel(counts.get(Number(sp.id)), lang) : null;
+  const links = tabTargets(getPanel, sp ? projectValue(sp) : null).map((tt) => {
     const current = tt.id === tab ? ' aria-current="page"' : "";
-    return `<a href="${tt.href}" class="shell-tab"${current}>${TAB_ICONS[tt.id]}<span>${escapeHtml(t(tt.key, lang))}</span></a>`;
+    const text = t(tt.key, lang) + (tt.id === "board" && n && n !== "?" ? ` · ${n.split(" ")[0]}` : "");
+    return `<a href="${tt.href}" class="shell-tab"${current}>${TAB_ICONS[tt.id]}<span>${escapeHtml(text)}</span></a>`;
   }).join("");
   return `<nav class="shell-tabs" aria-label="Crow">
       <div class="shell-rail-mark">${crowMarkSvg({ size: 32 })}<span>Crow</span></div>
       <div class="shell-tab-list">${links}</div>
       <div class="shell-rail-projects">
         <h3 class="shell-heading">${escapeHtml(t("shell.projects", lang))}</h3>
-        ${projectForm({ scope, projects, lang, extraClass: " shell-projects--rail" })}
+        ${projectForm({ scope, projects, lang, counts, homeSlug, extraClass: " shell-projects--rail" })}
+        ${moreDetails({ lang, getPanel })}
+        ${archivedLink(lang)}
       </div>
     </nav>`;
 }
 
 /** The drawer: projects, then the "More of Crow" grid. */
-export function shellDrawer({ scope, projects, lang, getPanel = registryGetPanel }) {
-  // Labels follow the classic sidebar's rule: the nav.<id> translation, else
-  // the panel's own manifest name, else a plain fallback.
-  const more = MORE_ENTRIES.map((e) => ({ e, panel: getPanel(e.id) })).filter((x) => x.panel).map(({ e, panel }) =>
-    `<a href="${e.route}" class="shell-more-item">${escapeHtml(label(e.key, panel.name || e.fallback, lang))}</a>`).join("");
+export function shellDrawer({ scope, projects, lang, counts, homeSlug, getPanel = registryGetPanel }) {
   return `<dialog id="shell-drawer" class="shell-sheet shell-drawer" aria-labelledby="shell-drawer-title">
     <div class="shell-sheet-inner">
       ${closeButton(lang)}
       <h3 class="shell-heading" id="shell-drawer-title">${escapeHtml(t("shell.projects", lang))}</h3>
-      ${projectForm({ scope, projects, lang })}
-      ${more ? `<h3 class="shell-heading">${escapeHtml(t("shell.more", lang))}</h3>
-      <div class="shell-more">${more}</div>` : ""}
+      ${projectForm({ scope, projects, lang, counts, homeSlug })}
+      ${moreDetails({ lang, getPanel })}
+      ${archivedLink(lang)}
     </div>
   </dialog>`;
 }

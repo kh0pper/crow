@@ -189,8 +189,8 @@ test("an archived project or a learner profile scope falls back to Everything", 
     assert.equal(chip(viaQuery.body), "Everything", `?project=${slug}`);
   }
   const page = await get("/dashboard/memory", { ...NEW, [MODE]: "new" });
-  assert.match(page.body, /value="garden"/);
-  assert.doesNotMatch(page.body, /value="attic"|value="learner"/, "the drawer lists only live projects");
+  assert.match(page.body, /href="\/dashboard\/project\/garden"/);
+  assert.doesNotMatch(page.body, /project\/attic|project\/learner/, "the drawer lists only live projects");
 });
 
 test("a query param wins and updates the cookie", async () => {

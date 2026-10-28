@@ -510,6 +510,7 @@ test("Back after following a drawer link shows no open sheet", async (ctx) => {
     await p.ev("window.__mark = 1; true");
     await p.click(".shell-scope");
     await p.until(OPEN_SHEET("shell-drawer"), "the drawer");
+    await p.click("#shell-drawer .shell-more-row summary");
     await p.click("#shell-drawer .shell-more-item[href='/dashboard/memory']");
     await p.until("location.pathname === '/dashboard/memory'", "Memory");
     await p.settled();

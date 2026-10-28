@@ -20,6 +20,8 @@ import {
   resolveDeviceMode, ensureShellSince, sessionCreatedAt,
 } from "./mode.js";
 import { tryNewCardHtml } from "./chrome.js";
+import { needsYouCounts } from "../panels/board/needs-you.js";
+import { getInteractiveEngine } from "../../perch-interactive.js";
 import { ACTIVE_PROJECT_WHERE, activeProjects } from "../../../shared/shell-items.js";
 
 /** The tab a panel lights up. bot-board / artifacts stand in until P3 / P4 register board / make. */
@@ -176,5 +178,10 @@ export async function resolveShellPage(req, res, db, panelId, lang = "en") {
   req.crowScope = scope;
   let projects = [];
   try { projects = await activeProjects(db); } catch (err) { console.warn("[shell] project list failed:", err.message); }
-  return { variant: "shell", shell: { scope, projects, tab: TAB_OF[panelId] ?? null } };
+  let counts = new Map();
+  try { counts = await needsYouCounts(db, projects, { engine: getInteractiveEngine({ createIfMissing: false }) }); }
+  catch (err) { console.warn("[shell] needs-you counts failed:", err.message); }
+  // The project home panel (Task 3) is id "project-home"; its slug is the route param.
+  const homeSlug = panelId === "project-home" && req.params && typeof req.params.slug === "string" ? req.params.slug : null;
+  return { variant: "shell", shell: { scope, projects, counts, homeSlug, tab: TAB_OF[panelId] ?? null } };
 }
