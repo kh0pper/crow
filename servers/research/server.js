@@ -174,23 +174,36 @@ function generateAllCitations(source) {
 // ready it stays ready, and later constructions (the gateway builds one server per MCP session)
 // skip the ensure, which can wait on a busy store's lock.
 const schemaReadyPaths = new Set();
+// While a path is not ready: the last real attempt (time + outcome), so it is retried at most once
+// per SCHEMA_RETRY_MS across every construction and refreshSchema() call for that path.
+export const SCHEMA_RETRY_MS = 30_000;
+const schemaAttempts = new Map(); // path -> { at, result }
 
-function readySchema(path) {
+function readySchema(path, now = Date.now) {
   if (!path) return { ready: false, state: "error", reason: "no database path" };
   if (schemaReadyPaths.has(path)) return { ready: true, state: "ready" };
   // ensureProvenanceSchema opens the path read-write, which would create an empty file.
   if (path === ":memory:" || !existsSync(path)) {
     return { ready: false, state: "error", reason: "not a database file" };
   }
+  const t = now();
+  const last = schemaAttempts.get(path);
+  if (last && t - last.at < SCHEMA_RETRY_MS) return { ...last.result };
   const r = ensureProvenanceSchema(path);
-  if (r.ready) schemaReadyPaths.add(path);
+  if (r.ready) {
+    schemaReadyPaths.add(path);
+    schemaAttempts.delete(path);
+  } else {
+    schemaAttempts.set(path, { at: t, result: r });
+  }
   return r;
 }
 
 /**
  * @param {string} [dbPath]
- * @param {{instructions?: string, actor?: {kind: string, id?: string}, fetchPage?: Function}} [options]
+ * @param {{instructions?: string, actor?: {kind: string, id?: string}, fetchPage?: Function, now?: () => number}} [options]
  *   actor: who is calling (servers/research/actor.js); absent means unknown, never the owner.
+ *   now: the clock for the schema retry backoff (tests).
  */
 export function createProjectServer(dbPath, options = {}) {
   const db = createDbClient(dbPath);
@@ -202,9 +215,10 @@ export function createProjectServer(dbPath, options = {}) {
   // The deploy window (no SCHEMA_GENERATION bump): ready the provenance columns here. While not
   // ready, tools keep to the pre-0013 column lists; refreshSchema() retries until ready.
   const schemaPath = dbPath || resolveDbPath();
-  const schema = { ...readySchema(schemaPath) };
+  const now = typeof options.now === "function" ? options.now : Date.now;
+  const schema = { ...readySchema(schemaPath, now) };
   const refreshSchema = () => {
-    if (!schema.ready) Object.assign(schema, { reason: undefined }, readySchema(schemaPath));
+    if (!schema.ready) Object.assign(schema, { reason: undefined }, readySchema(schemaPath, now));
     return schema;
   };
 

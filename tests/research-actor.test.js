@@ -143,3 +143,48 @@ test("the generated owner config marks crow-projects as owner; bot configs never
   const withBot = buildBotMcp(def, canonical, { actor: { botId: "b1", displayName: "B" } });
   assert.equal(withBot.json.mcpServers["crow-projects"].env.CROW_ACTOR_KIND, "bot");
 });
+
+test("refreshSchema retries the ensure at most once per 30 s per path while not ready", () => {
+  const dir = tmp();
+  const p = join(dir, "later.db");
+  new Database(p).close(); // no research tables yet: the ensure defers
+  let t = 1_000_000;
+  const now = () => t;
+  const server = createProjectServer(p, { now });
+  assert.equal(server.research.schema.ready, false);
+  assert.equal(server.research.schema.state, "deferred");
+
+  makePre0013Db(p); // the tables arrive; a real attempt would now succeed
+  t += 10_000;
+  assert.equal(server.research.refreshSchema().ready, false, "within 30 s: no new attempt");
+  assert.equal(createProjectServer(p, { now }).research.schema.ready, false, "a new construction shares the backoff");
+  assert.ok(!columns(p).has("research_sources.fetch_status"), "no ensure ran");
+
+  t += 21_000; // 31 s after the first attempt
+  assert.equal(server.research.refreshSchema().ready, true);
+  assert.ok(columns(p).has("research_sources.fetch_status"));
+});
+
+test("buildBotMcp disables owner-authority gateway project mounts and leaves other url blocks alone", () => {
+  const blocks = {
+    "crow-core": { url: "http://127.0.0.1:3001/router/mcp", headers: { Authorization: "Bearer x" } },
+    "proj-local": { url: "http://localhost:3001/projects/mcp/" },
+    "research-v6": { url: "http://[::1]:3001/research/mcp" },
+    "proj-lan": { url: "http://192.0.2.10:3001/projects/mcp" },
+    board: { url: "http://127.0.0.1:3001/board/mcp", headers: { Authorization: "Bearer b" } },
+    artifacts: { url: "http://127.0.0.1:3001/artifacts/mcp", headers: { Authorization: "Bearer a" } },
+    external: { url: "https://mcp.example.com/router/mcp" },
+  };
+  const def = { tools: { crow_mcp: Object.keys(blocks) } };
+  const { json, servers, warnings, disabled } = buildBotMcp(def, { mcpServers: blocks }, {});
+  for (const name of ["crow-core", "proj-local", "research-v6", "proj-lan"]) {
+    assert.deepEqual(json.mcpServers[name], { disabled: true }, name);
+    assert.ok(disabled.includes(name), name);
+    assert.ok(!servers.includes(name), name);
+    assert.ok(warnings.some((w) => w.includes(`'${name}'`) && /owner/.test(w)), name);
+  }
+  for (const name of ["board", "artifacts", "external"]) {
+    assert.deepEqual(json.mcpServers[name], blocks[name], name);
+    assert.ok(servers.includes(name), name);
+  }
+});

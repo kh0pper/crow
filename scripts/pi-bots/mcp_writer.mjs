@@ -78,6 +78,27 @@ export function serversForBot(def) {
   return [...set];
 }
 
+// The gateway mounts that serve the project tools with a local MCP token's authority (the owner):
+// routes/mcp.js treats a valid local token as the owner, and a url block gets no actor env, so a
+// bot handed one of these would act as the owner. Board/phone/artifacts mounts carry signed actor
+// headers and are not in this list.
+const OWNER_PROJECT_PATHS = new Set(["/router/mcp", "/projects/mcp", "/research/mcp"]);
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+
+/** True if a url block reaches this gateway's owner-authority project mounts. */
+export function isOwnerProjectUrl(rawUrl, env = process.env) {
+  let u;
+  try { u = new URL(String(rawUrl)); } catch { return false; }
+  const path = u.pathname.length > 1 ? u.pathname.replace(/\/$/, "") : u.pathname;
+  if (!OWNER_PROJECT_PATHS.has(path)) return false;
+  const host = u.hostname.toLowerCase();
+  if (LOOPBACK_HOSTS.has(host)) return true;
+  // This gateway reached by another of its names (LAN or tailnet address) on its own port.
+  const gatewayPort = String(env.CROW_GATEWAY_PORT || 3001);
+  const port = u.port || (u.protocol === "https:" ? "443" : "80");
+  return port === gatewayPort;
+}
+
 /** True if a server block touches crow.db (so the journal guard applies). */
 function touchesCrowDb(block) {
   return !!(block && block.env && block.env.CROW_DB_PATH);
@@ -262,6 +283,19 @@ export function buildBotMcp(def, canonical, opts = {}) {
   for (const name of Object.keys(canonical.mcpServers).sort()) {
     if (selected.has(name)) continue;
     disable(name, null);
+  }
+
+  // A bot must never reach the project tools through an owner-authority gateway mount.
+  for (const name of [...active]) {
+    const block = out.mcpServers[name];
+    if (block && block.url && isOwnerProjectUrl(block.url)) {
+      disable(name, "reaches the gateway's project tools with owner authority (a local MCP token); disabled for bots");
+      active.splice(active.indexOf(name), 1);
+      for (const list of [journalGuarded, minted]) {
+        const i = list.indexOf(name);
+        if (i >= 0) list.splice(i, 1);
+      }
+    }
   }
 
   // A canonical file generated for the owner (scripts/generate-mcp-config.js) marks its project
