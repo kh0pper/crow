@@ -33,8 +33,9 @@ export function flatten(threads) {
     const date = isoSecond(c.date);
     const q = normQuote(quoted);
     const k = `${author}|${date}|${q}`;
-    const occ = seen.get(k) || 0;
-    seen.set(k, occ + 1);
+    // A plugin-supplied occ (computed over ALL comments in document order) wins.
+    const occ = Number.isInteger(c.occ) ? c.occ : seen.get(k) || 0;
+    seen.set(k, Math.max(seen.get(k) || 0, occ + 1));
     out.push({ t, isRoot, author, date, text: normText(c.text), quoted: q, occ });
   };
   (threads || []).forEach((th, t) => {
@@ -70,7 +71,9 @@ export function snapshot(threads, parseMentions) {
     const mine = flat.filter((c) => c.t === t);
     const comments = mine.map((c) => ({ slot: slotOf(c), fp: fingerprint(c), tokens: toTokens(parse(c.text)) }));
     const rootFp = comments[0].fp;
+    const r = mine[0];
     return {
+      group: sha([r.author, r.date, r.quoted].join("|")),
       key: threadKey(th, rootFp),
       durableId: th.durableId ?? null,
       rootFp,
@@ -104,7 +107,10 @@ export function diff(prev, next) {
   for (const g of gone) {
     const cands = fresh.filter((n) => n.rootFp === g.rootFp);
     if (!cands.length) continue;
-    const rivals = gone.filter((o) => o.rootFp === g.rootFp).length;
+    // Several vanished threads sharing (author, date, quote) means a deletion may have shifted
+    // occurrences, so fingerprints cannot be trusted to pair them. The same shift can mislabel an
+    // edit for near-duplicates (accepted).
+    const rivals = gone.filter((o) => o.rootFp === g.rootFp || (g.group && o.group === g.group)).length;
     rekeys.push({ from: g.key, to: cands[0].key, ambiguous: cands.length > 1 || rivals > 1 });
   }
   return { added, edited, rekeys };
@@ -113,18 +119,19 @@ export function diff(prev, next) {
 /**
  * Live ONLYOFFICE comment(s) -> readCommentThreads()-shaped threads.
  * Live Time is epoch ms; floor(Time/1000) equals the saved w:date second.
- * `occs` is accepted for call-site symmetry; occurrence is recomputed by flatten().
+ * `occs`: plugin-computed occurrences for this thread, root first then replies,
+ * computed over all comments in document order. Absent means flatten() recomputes.
  */
 export function fromLive(thread, occs) {
-  void occs;
   const list = Array.isArray(thread) ? thread : [thread];
   return list.map((l) => ({
+    occ: occs?.[0],
     durableId: l.durableId ?? null,
     author: l.UserName,
     date: isoSecond(l.Time),
     text: l.Text,
     quoted_text: l.QuoteText ?? "",
     resolved: !!(l.Solved ?? l.resolved),
-    replies: (l.Replies || []).map((r) => ({ author: r.UserName, date: isoSecond(r.Time), text: r.Text })),
+    replies: (l.Replies || []).map((r, i) => ({ occ: occs?.[i + 1], author: r.UserName, date: isoSecond(r.Time), text: r.Text })),
   }));
 }

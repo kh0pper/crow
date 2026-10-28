@@ -76,3 +76,19 @@ test("pairKey is 16 hex and second-precision", () => {
   assert.match(pairKey("f1", "admin", "2026-10-28T03:20:55Z"), /^[0-9a-f]{16}$/);
   assert.equal(pairKey("f1", "admin", 1793157655325), pairKey("f1", "admin", "2026-10-28T03:20:55Z"));
 });
+
+test("fromLive honours plugin occs: 2nd pasted duplicate matches saved occ 1", () => {
+  const saved = flatten([T({ text: "same" }), T({ text: "same" })]);
+  const live = { Time: 1793157655000, UserName: "admin", Text: "same", QuoteText: "q" };
+  assert.equal(fingerprint(flatten(fromLive(live, [1]))[0]), fingerprint(saved[1]));
+  assert.equal(fingerprint(flatten(fromLive(live, [0]))[0]), fingerprint(saved[0]));
+  assert.notEqual(fingerprint(saved[0]), fingerprint(saved[1]));
+});
+
+test("re-key after deleting the first of two duplicates is ambiguous", () => {
+  const prev = snapshot([T({ durableId: "A", text: "s" }), T({ durableId: "A2", text: "s" })], parse);
+  const next = snapshot([T({ durableId: "B", text: "s" })], parse);
+  const r = diff(prev, next).rekeys;
+  assert.equal(r.length, 1);
+  assert.equal(r[0].ambiguous, true);
+});
