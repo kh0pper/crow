@@ -356,3 +356,55 @@ test("prompt lint: no prompt carries its answer, its trap, or its derived value"
   assert.match(promptLint(leaky9).join("\n"), /derived\.value/);
 });
 test("quotesIn finds straight and curly quotes", () => { assert.deepEqual(quotesIn('She said “a b c d” and "e f g h".').map((q) => q.text), ["a b c d", "e f g h"]); });
+
+// ---- prose matching: review round 1 probes ----
+
+/** [spelling, the text its offsets cover] for each hit. */
+const hitTexts = (t, spellings) => spellingHits(t, spellings).map((h) => [h.spelling, t.slice(h.start, h.end)]);
+
+test("attached footnote markers keep exact offsets and do not hide markers", () => {
+  let t = "The Glorbin Courant[2] figure was wrong; it was not a run rate.";
+  const [h] = spellingHits(t, ["run rate"]);
+  assert.equal(t.slice(h.start, h.end), "run rate"); assert.equal(h.approximate, undefined);
+  assert.equal(nearMarker(sentences(t)[0], h, CORRECTION_MARKERS), true);
+  t = "Snorrel Dispatch[1] reported $5.02 billion, not $4 per $1 as the Glorbin Courant claimed [2].";
+  assert.deepEqual(hitTexts(t, ["Snorrel Dispatch", "Glorbin Courant", "$4 per $1"]),
+    [["Snorrel Dispatch", "Snorrel Dispatch"], ["$4 per $1", "$4 per $1"], ["Glorbin Courant", "Glorbin Courant"]]);
+  t = "It is “pacing to generate” revenue [sic] and not a run rate.";
+  const [r] = spellingHits(t, ["run rate"]);
+  assert.equal(t.slice(r.start, r.end), "run rate");
+  assert.equal(nearMarker(sentences(t)[0], r, CORRECTION_MARKERS), true);
+});
+test("an approximate hit never absorbs other hits and hides no marker", () => {
+  const s = { text: "It was not a run rate here.", start: 0, end: 27 };
+  assert.equal(nearMarker(s, { spelling: "run rate", start: 0, end: 27, approximate: true }, CORRECTION_MARKERS), true);
+  assert.equal(nearMarker(s, { spelling: "x", start: 0, end: 27 }, CORRECTION_MARKERS), false); // an exact whole-sentence hit does hide it
+});
+test("sentences: a footnote after the terminal still splits", () => {
+  const t = "Snorrel Dispatch reported $5.02 billion.[1] Glorbin Courant was wrong.";
+  assert.deepEqual(sentences(t).map((x) => x.text), ["Snorrel Dispatch reported $5.02 billion.[1]", "Glorbin Courant was wrong."]);
+  assert.deepEqual(hitTexts(t, ["Glorbin Courant"]), [["Glorbin Courant", "Glorbin Courant"]]);
+});
+test("verification claims: more negated phrasings, and a negation stops at its clause", () => {
+  for (const t of ["I cannot verify this figure.", "I have not been able to verify it.", "I was not able to independently verify it.",
+    "I never verified it.", "I was unable to verify it.", "I wasn't able to verify the page.", "I didn't get to verify it.",
+    "The figure, which I could not verify, is $35B.", "Could not be verified."]) assert.equal(verificationClaims(t).length, 0, t);
+  for (const t of ["I verified it against the page.", "Verified against the page.", "I couldn't verify it, but I confirmed it against the source."])
+    assert.equal(verificationClaims(t).length, 1, t);
+});
+test("hyphenated compound amounts", () => {
+  assert.deepEqual(amountsIn("$35-billion").map((a) => a.value), [35e9]);
+  assert.deepEqual(parseAmount("$35-billion"), parseAmount("$35B"));
+  const t = "A $600-billion deal was signed.";
+  const hits = spellingHits(t, caseById("rr04").claim.snippet_value);
+  assert.ok(hits.some((h) => t.slice(h.start, h.end) === "$600-billion deal"), JSON.stringify(hits));
+  assert.deepEqual(amountsIn("between $35-$57B (or -$2B)").map((a) => a.value), [35, 57e9, 2e9]);
+  assert.deepEqual(amountsIn("on 2025-10-14").map((a) => a.value), []);
+});
+test("possessives: a name spelling hits its possessive, offsets on the name", () => {
+  assert.deepEqual(hitTexts("Glorbin's report said $4 per $1.", ["Glorbin"]), [["Glorbin", "Glorbin"]]);
+  assert.deepEqual(hitTexts("Mallowtree’s statement", ["Mallowtree"]), [["Mallowtree", "Mallowtree"]]);
+  assert.deepEqual(hitTexts("Snorrel Dispatch's figure", ["Snorrel Dispatch"]), [["Snorrel Dispatch", "Snorrel Dispatch"]]);
+  assert.deepEqual(hitTexts("It is the URL's date.", ["url's date"]), [["url's date", "URL's date"]]); // a spelling with its own 's still hits
+  assert.deepEqual(hitTexts("Glorbins rule.", ["Glorbin"]), []);
+});

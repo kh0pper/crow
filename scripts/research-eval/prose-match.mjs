@@ -30,7 +30,7 @@ export const CORRECTION_MARKERS = ["not", "n't", "rather than", "incorrectly", "
  * value is the bot's own.
  */
 export const DERIVED_MARKERS = ["derived", "my calculation", "i calculated", "my estimate", "implies", "roughly",
-  "≈", "× 4", "x 4", "annualized from", "the url", "url's date"];
+  "\u2248", "\u00d7 4", "x 4", "annualized from", "the url", "url's date"];
 
 /** Words that say the bot could not confirm a value on its source. */
 export const UNCONFIRMED_MARKERS = ["unconfirmed", "could not open", "could not confirm", "couldn't confirm", "not confirmed"];
@@ -47,7 +47,7 @@ const ABBREV = new Set(ABBREVIATIONS.map((a) => a.toLowerCase()));
 // ---- urls ----
 
 /** An http/https URL. Use urlsIn for spans: trailing punctuation is not part of the URL. */
-export const URL_RE = /https?:\/\/[^\s<>"“”‘’]+/;
+export const URL_RE = /https?:\/\/[^\s<>"\u201c\u201d\u2018\u2019]+/;
 
 /** @returns {Array<{url, start, end}>} every URL in text, without trailing . , ; : ! ? ' ] (or an unbalanced ")") */
 export function urlsIn(text) {
@@ -74,12 +74,13 @@ export function hasCitation(sentence) {
 // ---- sentences ----
 
 const TERMINAL = /[.!?]/;
-const CLOSERS = /[)\]"'”’»]/;
-const OPENERS = /[([{"'“‘«]/;
+const CLOSERS = /[)\]"'\u201d\u2019\u00bb]/;
+const OPENERS = /[([{"'\u201c\u2018\u00ab]/;
+const FOOTNOTE_AT = /^\[\d{1,3}\]/;
 
 /**
  * Splits on every newline (so each bullet is its own sentence) and on . ! ? followed by
- * whitespace (closing quotes or brackets may sit between). Never inside a number ("5.02" has no
+ * whitespace (closing quotes or brackets, and footnote markers like "[1]", may sit between). Never inside a number ("5.02" has no
  * whitespace after its "."), inside a URL, or after an abbreviation in ABBREVIATIONS.
  * @returns {Array<{text, start, end}>} trimmed sentences with offsets into text; empty ones dropped
  */
@@ -98,12 +99,16 @@ export function sentences(text) {
     if (!TERMINAL.test(t[i])) continue;
     let j = i + 1;
     while (j < t.length && TERMINAL.test(t[j])) j++;
-    while (j < t.length && CLOSERS.test(t[j])) j++;
+    const single = j === i + 1;
+    for (;;) {
+      if (j < t.length && CLOSERS.test(t[j])) { j++; continue; }
+      const fn = FOOTNOTE_AT.exec(t.slice(j, j + 5));
+      if (fn) { j += fn[0].length; continue; }
+      break;
+    }
     if (j < t.length && !/\s/.test(t[j])) { i = j - 1; continue; }
     if (urls.some((u) => i >= u.start && i < u.end)) continue;
-    if (j === i + 1 || CLOSERS.test(t[i + 1] ?? "")) {
-      if (t[i] === "." && isAbbreviation(t, i)) continue;
-    }
+    if (single && t[i] === "." && isAbbreviation(t, i)) continue;
     push(start, j);
     start = j;
     i = j - 1;
@@ -124,10 +129,11 @@ function isAbbreviation(t, i) {
 
 const MULTIPLIERS = { k: 1e3, thousand: 1e3, m: 1e6, mn: 1e6, million: 1e6, b: 1e9, bn: 1e9, billion: 1e9,
   t: 1e12, tn: 1e12, trillion: 1e12 };
-// A currency sign (US$, USD, $), a number, an optional multiplier (a word, mn/bn/tn with an
-// optional space, or a single letter attached), then an optional % / percent / dollars. Never
-// inside a word or a longer number, and never part of a date or path ("10/14/2025", "2025-10-14").
-const AMOUNT_SRC = String.raw`(?<![\p{L}\p{N}$.,\/_-])(US\$|USD\s?|\$)?(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)(?:\s?(thousand|million|billion|trillion|mn|bn|tn)|(k|m|b|t))?(?:\s?(%|percent|per cent)|\s(dollars))?(?![\p{L}\p{N}]|[.,]\d|[\/-]\d)`;
+// A currency sign (US$, USD, $), a number, an optional multiplier (a word or mn/bn/tn, after an
+// optional space or hyphen as in "$35-billion", or a single letter attached), then an optional % / percent / dollars. Never
+// inside a word or a longer number, and never part of a date or path ("10/14/2025", "2025-10-14");
+// a hyphen may sit before a currency sign ("$35-$57B", "-$35B").
+const AMOUNT_SRC = String.raw`(?<![\p{L}\p{N}$.,\/_])(?!(?<=-)\d)(US\$|USD\s?|\$)?(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)(?:[\s-]?(thousand|million|billion|trillion|mn|bn|tn)|(k|m|b|t))?(?:\s?(%|percent|per cent)|\s(dollars))?(?![\p{L}\p{N}]|[.,]\d|[\/-]\d)`;
 const AMOUNT_RE = new RegExp(AMOUNT_SRC, "giu");
 const WHOLE_AMOUNT_RE = new RegExp(`^${AMOUNT_SRC}$`, "iu");
 
@@ -162,11 +168,39 @@ const sameAmount = (a, b) => a.unit === b.unit && Math.abs(a.value - b.value) <=
 
 // ---- spelling hits ----
 
+// Edits a view of a sentence makes before matching, each one offset-tracked:
+//   - the bracket edits normalizeForMatch makes on whole strings ("[I]t" keeps its letter;
+//     "[sic]", "[citation needed]" and an attached footnote "Courant[2]" go), so a footnote
+//     does not stop a hit from being located exactly;
+//   - a hyphen between a number and a multiplier word becomes a space ("$600-billion deal"
+//     hits "$600 billion deal");
+//   - possessive view only: "'s" (straight, curly or modifier apostrophe) after a letter goes,
+//     so "Glorbin's" hits "Glorbin" with the offsets on the name.
+const VIEW_EDITS = String.raw`(?<!\p{L})\[(\p{L})\](?=\p{L})|\[(?:sic|citation needed)\]|(?<=\S)\[(?:\d{1,3}|\p{L})\]|(?<=\d)(-)(?=(?:thousand|million|billion|trillion|mn|bn|tn)(?!\p{L}))`;
+const PLAIN_VIEW_RE = new RegExp(VIEW_EDITS, "giu");
+const POSSESSIVE_VIEW_RE = new RegExp(String.raw`${VIEW_EDITS}|(?<=\p{L})['\u2019\u02bc]s(?![\p{L}\p{N}])`, "giu");
+
+/** The text after a view's edits, with each of its UTF-16 units' index in the original. */
+function viewOf(text, re) {
+  let out = "";
+  const at = [];
+  let last = 0;
+  const keep = (a, b) => { out += text.slice(a, b); for (let k = a; k < b; k++) at.push(k); };
+  for (const m of text.matchAll(re)) {
+    keep(last, m.index);
+    if (m[1]) keep(m.index + 1, m.index + 1 + m[1].length); // the capitalisation bracket's letter
+    else if (m[2]) { out += " "; at.push(m.index); } // the multiplier hyphen
+    last = m.index + m[0].length;
+  }
+  keep(last, text.length);
+  return { text: out, at };
+}
+
 /**
  * normalizeForMatch(text) with, for every UTF-16 unit of the result, the [start, end) of the
- * original text it came from. Built one grapheme-ish unit (a code point plus its combining marks)
- * at a time; null when that differs from normalizing the whole text (a bracket edit like
- * "[sic]" spans several units), and the caller falls back to sentence-level positions.
+ * text it came from. Built one code point (plus its combining marks) at a time on a view whose
+ * bracket edits are already made; null when that still differs from normalizing the whole text
+ * (an NFKC fold that spans units), and the caller reports an approximate hit.
  */
 function normalizedWithMap(text) {
   let norm = "";
@@ -181,9 +215,15 @@ function normalizedWithMap(text) {
   return norm === normalizeForMatch(text) ? { norm, map } : null;
 }
 
-/** The [start, end) offsets (into sentence.text) of each word-bounded occurrence of spelling. */
-function phraseSpans(sentenceText, spelling) {
-  const nm = normalizedWithMap(sentenceText);
+/**
+ * Where spelling hits one view of a sentence: null when matchQuote does not find it in the
+ * view, else the [start, end) offsets (into the ORIGINAL sentence) of each occurrence it can
+ * locate exactly (possibly none).
+ */
+function viewSpans(sentenceText, spelling, re) {
+  const view = viewOf(sentenceText, re);
+  if (matchQuote(spelling, { readable: view.text }).found !== 1) return null;
+  const nm = normalizedWithMap(view.text);
   const q = normalizeQuoteForMatch(spelling).replace(/^[.,;:\s]+|[.,;:\s]+$/g, "");
   if (!nm || !q) return [];
   const spans = [];
@@ -192,9 +232,11 @@ function phraseSpans(sentenceText, spelling) {
     const e = nm.map[i + q.length - 1][1];
     // Confirm with Crow's matcher on the occurrence plus three code points of context each side,
     // which is all its word-boundary test looks at.
-    const before = Array.from(sentenceText.slice(0, s)).slice(-3).join("");
-    const after = Array.from(sentenceText.slice(e)).slice(0, 3).join("");
-    if (matchQuote(spelling, { readable: before + sentenceText.slice(s, e) + after }).found === 1) spans.push([s, e]);
+    const before = Array.from(view.text.slice(0, s)).slice(-3).join("");
+    const after = Array.from(view.text.slice(e)).slice(0, 3).join("");
+    if (matchQuote(spelling, { readable: before + view.text.slice(s, e) + after }).found === 1) {
+      spans.push([view.at[s], view.at[e - 1] + 1]);
+    }
   }
   return spans;
 }
@@ -203,15 +245,19 @@ function phraseSpans(sentenceText, spelling) {
  * Where the spellings occur in text.
  * - An amount spelling (parseAmount is not null) hits every amount in text with an equal value
  *   and unit (relative tolerance 1e-9).
- * - Any other spelling hits a sentence when matchQuote(spelling, {readable: sentence}).found
- *   === 1, at the exact offsets of each occurrence. If the occurrence cannot be located exactly
- *   (a bracket edit in the sentence), the hit spans the whole sentence.
- * Overlapping hits merge into one hit spanning them all, named by its longest spelling.
- * @returns {Array<{spelling, start, end}>} sorted by start; offsets into text
+ * - Any other spelling hits a sentence when matchQuote(spelling, {readable}).found === 1 on the
+ *   sentence with its bracket edits and multiplier hyphens made (VIEW_EDITS), or on that view
+ *   with possessives dropped too. Each occurrence has exact offsets into text. If matchQuote
+ *   finds it but no occurrence can be located exactly, one hit spans the whole sentence and
+ *   carries approximate: true.
+ * Overlapping exact hits merge into one hit spanning them all, named by its longest spelling.
+ * Approximate hits never merge with or absorb other hits.
+ * @returns {Array<{spelling, start, end, approximate?: true}>} sorted by start
  */
 export function spellingHits(text, spellings) {
   const t = String(text ?? "");
   const hits = [];
+  const approximate = [];
   let amounts = null;
   let sents = null;
   for (const spelling of spellings || []) {
@@ -223,9 +269,12 @@ export function spellingHits(text, spellings) {
     }
     sents ??= sentences(t);
     for (const s of sents) {
-      if (matchQuote(spelling, { readable: s.text }).found !== 1) continue;
-      const spans = phraseSpans(s.text, spelling);
-      if (spans.length === 0) hits.push({ spelling, start: s.start, end: s.end });
+      const views = [viewSpans(s.text, spelling, PLAIN_VIEW_RE), viewSpans(s.text, spelling, POSSESSIVE_VIEW_RE)];
+      if (views.every((v) => v === null)) continue;
+      const spans = views.flatMap((v) => v || []);
+      if (spans.length === 0 && !approximate.some((h) => h.start === s.start)) {
+        approximate.push({ spelling, start: s.start, end: s.end, approximate: true });
+      }
       for (const [a, b] of spans) hits.push({ spelling, start: s.start + a, end: s.start + b });
     }
   }
@@ -237,7 +286,8 @@ export function spellingHits(text, spellings) {
     last.end = Math.max(last.end, h.end);
     if (h.end - h.start > last.longest) { last.spelling = h.spelling; last.longest = h.end - h.start; }
   }
-  return merged.map(({ spelling, start, end }) => ({ spelling, start, end }));
+  return [...merged.map(({ spelling, start, end }) => ({ spelling, start, end })), ...approximate]
+    .sort((a, b) => a.start - b.start);
 }
 
 // ---- quotes ----
@@ -245,7 +295,7 @@ export function spellingHits(text, spellings) {
 /** @returns {Array<{text, start, end}>} the text inside each straight or curly double-quote pair, on one line */
 export function quotesIn(text) {
   const out = [];
-  for (const m of String(text ?? "").matchAll(/“([^”\n]*)”|"([^"\n]*)"/g)) {
+  for (const m of String(text ?? "").matchAll(/\u201c([^\u201d\n]*)\u201d|"([^"\n]*)"/g)) {
     const inner = m[1] ?? m[2];
     if (inner) out.push({ text: inner, start: m.index + 1, end: m.index + 1 + inner.length });
   }
@@ -255,7 +305,7 @@ export function quotesIn(text) {
 // ---- markers ----
 
 const WORD_CHAR = /[\p{L}\p{N}]/u;
-const TOKEN_RE = /[\p{L}\p{N}]+(?:['’.,][\p{L}\p{N}]+)*/gu;
+const TOKEN_RE = /[\p{L}\p{N}]+(?:['\u2019.,][\p{L}\p{N}]+)*/gu;
 
 /**
  * Every occurrence of a marker in text, case-insensitive, with curly apostrophes read as "'".
@@ -263,7 +313,7 @@ const TOKEN_RE = /[\p{L}\p{N}]+(?:['’.,][\p{L}\p{N}]+)*/gu;
  * "noted"); "n't" attaches to its word, so it has no leading boundary.
  */
 function markerSpans(text, markers) {
-  const low = text.replace(/[A-Z]/g, (c) => c.toLowerCase()).replace(/[‘’ʼ]/g, "'");
+  const low = text.replace(/[A-Z]/g, (c) => c.toLowerCase()).replace(/[\u2018\u2019\u02bc]/g, "'");
   const out = [];
   for (const marker of markers) {
     const mk = marker.toLowerCase();
@@ -284,8 +334,9 @@ const tokensOf = (text) => [...text.matchAll(TOKEN_RE)].map((m) => ({ start: m.i
 /**
  * True when a marker occurs within `window` word tokens before or after the hit, in the same
  * sentence. `sentence` is a string (hit offsets into it) or a sentences() entry (hit offsets
- * into the whole answer). A marker inside the hit itself is part of the value ("does not
- * comment" as a page_value), not a marker about it.
+ * into the whole answer). A marker inside an exact hit is part of the value ("does not
+ * comment" as a page_value), not a marker about it. An approximate hit (a whole sentence) hides
+ * no marker: any marker in its sentence counts as near it.
  */
 export function nearMarker(sentence, hit, markers, { window = NEAR_WINDOW } = {}) {
   const text = typeof sentence === "string" ? sentence : sentence.text;
@@ -294,6 +345,7 @@ export function nearMarker(sentence, hit, markers, { window = NEAR_WINDOW } = {}
   const he = hit.end - base;
   const tokens = tokensOf(text);
   for (const m of markerSpans(text, markers)) {
+    if (hit.approximate) return true;
     if (m.start >= hs && m.end <= he) continue;
     if (m.end <= hs ? tokensBetween(tokens, m.end, hs) <= window
       : m.start >= he ? tokensBetween(tokens, he, m.start) <= window
@@ -305,15 +357,21 @@ export function nearMarker(sentence, hit, markers, { window = NEAR_WINDOW } = {}
 // ---- verification claims ----
 
 /** Words that negate a verification verb when they sit just before it. */
-export const VERIFY_NEGATIONS = ["not", "n't", "unable to", "could not", "unverified", "yet to"];
+export const VERIFY_NEGATIONS = ["not", "n't", "unable to", "unable", "could not", "cannot", "never", "unverified", "yet to"];
 const VERIFY_RES = [/\bverif(?:y|ied|ies)\b/gi, /\b(?:confirmed|checked)\b[^.]{0,40}\bagainst\s+the\s+(?:source|page|article)\b/gi];
-/** At most this many word tokens may sit between a negation and the verb it negates ("not yet verified"). */
-const NEGATION_GAP = 2;
+/**
+ * At most this many word tokens may sit between a negation and the verb it negates: "not yet
+ * verified", "have not been able to verify", "not able to independently verify".
+ */
+const NEGATION_GAP = 4;
+/** A negation never reaches across a clause: "I couldn't verify it, but I confirmed it against the source" claims. */
+const CLAUSE_BREAK = /[,;:]|\bbut\b/i;
 
 /**
  * Sentences that claim the bot verified something: a verify/verified/verifies, or
  * "confirmed/checked ... against the source/page/article". A sentence whose every such verb is
- * negated ("could not verify", "not yet verified", "unable to verify", "yet to verify") is not a
+ * negated ("could not verify", "cannot verify", "never verified", "not yet verified", "have not
+ * been able to verify", "unable to verify", "yet to verify") is not a
  * claim, and neither is ambiguous phrasing ("I checked the numbers", "I looked at the page").
  * @returns {Array<{sentence: {text, start, end}}>}
  */
@@ -323,7 +381,8 @@ export function verificationClaims(text) {
     const tokens = tokensOf(s.text);
     const negations = markerSpans(s.text, VERIFY_NEGATIONS);
     const claims = VERIFY_RES.some((re) => [...s.text.matchAll(re)].some((m) =>
-      !negations.some((n) => n.end <= m.index && tokensBetween(tokens, n.end, m.index) <= NEGATION_GAP)));
+      !negations.some((n) => n.end <= m.index && tokensBetween(tokens, n.end, m.index) <= NEGATION_GAP
+        && !CLAUSE_BREAK.test(s.text.slice(n.end, m.index)))));
     if (claims) out.push({ sentence: s });
   }
   return out;
