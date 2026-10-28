@@ -7,6 +7,7 @@ import { slugify, workspacePathFor, storagePrefixFor } from "../servers/shared/s
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "./pi-bots/bot-jobs-schema.mjs";
 import { SCHEMA_GENERATION } from "../servers/shared/schema-version.js";
 import { KEYCHAIN_DDL } from "../servers/gateway/keychain/schema.js";
+import { PROVENANCE_COLUMNS, PROVENANCE_INDEX_SQL } from "../servers/research/provenance-schema.js";
 
 // Ensure data directory exists
 const dataDir = process.env.CROW_DB_PATH
@@ -142,6 +143,7 @@ await initTable("data_backends table", `
 
 // --- Migrate existing tables: add new columns if missing ---
 
+// Resolves true only when it ran the ALTER (existing callers ignore the value).
 async function addColumnIfMissing(table, column, definition) {
   try {
     const cols = await db.execute({ sql: `PRAGMA table_info(${table})` });
@@ -149,10 +151,12 @@ async function addColumnIfMissing(table, column, definition) {
     if (!exists) {
       await db.execute({ sql: `ALTER TABLE ${table} ADD COLUMN ${column} ${definition}` });
       console.log(`Added column ${table}.${column}`);
+      return true;
     }
   } catch (err) {
     console.warn(`Warning: could not check/add ${table}.${column}: ${err.message}`);
   }
+  return false;
 }
 
 await addColumnIfMissing("research_sources", "backend_id", "INTEGER REFERENCES data_backends(id) ON DELETE SET NULL");
@@ -1045,6 +1049,29 @@ async function rebuildMainFKsToProjectSpaces() {
 // Placement: after research_notes.updated_at (:773), after addUuidColumn (:194),
 // after migrateLegacyProjectsToSpaces (:349) — spec step 7.
 await rebuildMainFKsToProjectSpaces();
+
+// --- Research provenance (fetch-before-cite) ---
+// Placed after the FK rebuild because the rebuild aborts on columns it does not know (spec §0 I1):
+// on an old-FK-shape host these must land only once both tables point at project_spaces.
+// Same PROVENANCE_COLUMNS as scripts/migrations/0013-research-provenance.mjs (one shape, two
+// rails); ADD COLUMN only, no generation bump. Each column's back-fill runs in the transaction
+// that adds it, so a column already present runs none, and a later NULL row stays NULL.
+for (const spec of PROVENANCE_COLUMNS) {
+  try {
+    await db.executeMultiple("BEGIN IMMEDIATE");
+    const added = await addColumnIfMissing(spec.table, spec.column, spec.ddl);
+    if (added && spec.backfill) await db.execute(spec.backfill);
+    await db.executeMultiple("COMMIT");
+  } catch (err) {
+    try { await db.executeMultiple("ROLLBACK"); } catch {}
+    console.warn(`Warning: could not add/back-fill ${spec.table}.${spec.column}: ${err.message}`);
+  }
+}
+try {
+  await db.execute(PROVENANCE_INDEX_SQL);
+} catch (err) {
+  console.warn(`Warning: could not create idx_sources_project_final_url: ${err.message}`);
+}
 
 // W2-5 B2: PII purge — archived learner ps rows are residue of pre-B2 parental
 // deletions whose data was meant to be gone (B1 privacy commitment). Idempotent.
