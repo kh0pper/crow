@@ -655,6 +655,9 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
     const botId = m.bot.botId;
     try {
       if (!(await M.store.canAccess(S.db, { kind: "bot", id: botId }, art))) return { botId, error: "forbidden" };
+      // Any active round on the document refuses the mention BEFORE the thread
+      // is touched, so a refused mention never leaves a thread reopened.
+      if (await M.rounds.hasActiveRound(S.db, art.id)) return { botId, error: "round_running" };
       if ((await M.comments.reopenForMention(S.db, { threadId, artifactId: art.id })) === "busy") return { botId, error: "round_running" };
       const { round } = await startOwnerRound(art, { include: [threadId], choice: "chat", kind: "round", botId, source: "mention" });
       return { botId, roundId: round.id, status: round.status };

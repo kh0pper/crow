@@ -102,6 +102,13 @@ export async function previewRound(db, artifactId) {
   };
 }
 
+/** Is a revision round (kind 'round') active on this artifact? The same
+ *  question startRound asks before it starts one (P6: the mention path asks
+ *  it first, so a refused mention never reopens a thread). */
+export async function hasActiveRound(db, artifactId) {
+  return (await db.execute({ sql: `SELECT 1 FROM artifact_rounds WHERE artifact_id=? AND kind='round' AND status IN (${ACTIVE.map(() => "?").join(",")})`, args: [artifactId, ...ACTIVE] })).rows.length > 0;
+}
+
 /**
  * Start a round or an Ask (owner only). `include` lists the thread ids the
  * owner ticked in the preview — nothing else is sent.

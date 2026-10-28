@@ -188,6 +188,13 @@
       (t.comments || []).forEach(function (c) { li.appendChild(commentNode(t, c)); });
       var line = threadStatus(t);
       if (line) li.appendChild(el("p", { class: "cv-tstatus", role: "status", text: line }));
+      // P6: the owner replies in the thread (resolved ones too: an @bot reopens
+      // it). Hidden while a round or ask holds the thread.
+      if (S.locked.indexOf(Number(t.id)) < 0) {
+        var slot = el("div", { class: "cv-treply" });
+        slot.appendChild(el("span", { class: "cv-cacts" }, [button(T.reply, function () { startReply(slot, t); }, "cv-link")]));
+        li.appendChild(slot);
+      }
       threadList.appendChild(li);
     });
     if (!shown().length) threadList.appendChild(el("li", { class: "cv-empty", text: isDoc() ? T.no_comments_doc : T.no_comments }));
@@ -195,7 +202,7 @@
     handle.textContent = n === 1 ? T.comments_1 : fmt(T.comments_n, { n: n });
     var k = sendable().length;
     // S5: while a round runs, the disabled Send says why.
-    sendBtn.textContent = S.activeRound ? fmt(T.revising, { bot: (S.art && S.art.created_by_bot) || T.bot }) : k === 0 ? T.send_none : k === 1 ? T.send_1 : fmt(T.send_n, { n: k });
+    sendBtn.textContent = S.activeRound ? fmt(T.revising, { bot: roundBot() }) : k === 0 ? T.send_none : k === 1 ? T.send_1 : fmt(T.send_n, { n: k });
     if (k === 0 || S.activeRound) sendBtn.setAttribute("disabled", ""); else sendBtn.removeAttribute("disabled");
     pushPins();
   }
@@ -204,12 +211,32 @@
    *  holds this thread → "Sent to <bot>"; the server answered round_running
    *  to an @bot here → "<bot> is already working…"; a finished round adds
    *  nothing (the bot's reply is the status). Placed with textContent. */
+  var SENT = ["delivering", "working"];   // the bot has it (not pending/queued, not put back after a failed spawn)
   function threadStatus(t) {
     var r = S.activeRound;
-    if (r && r.kind === "round" && t.sent_round_id != null && Number(t.sent_round_id) === Number(r.id)) return fmt(T.sentTo, { bot: r.bot_id || T.bot });
+    if (r && r.kind === "round" && SENT.indexOf(r.status) >= 0 && t.sent_round_id != null && Number(t.sent_round_id) === Number(r.id)) return fmt(T.sentTo, { bot: r.bot_id || T.bot });
     var b = S.busy[Number(t.id)];
     return b ? fmt(T.busy, { bot: b }) : "";
   }
+  /** The bot the active round went to (the stored round's), else the maker. */
+  function roundBot() { return (S.activeRound && S.activeRound.bot_id) || (S.art && S.art.created_by_bot) || T.bot; }
+
+  /** P6: the owner's reply box in one thread. Like an edit, it holds the
+   *  thread list (S.editing) so a poll never wipes half-typed text. */
+  function startReply(slot, t) {
+    if (!slot) return;
+    S.editing = "reply:" + t.id;
+    Array.prototype.forEach.call(threadList.querySelectorAll(".cv-cacts button"), function (b) { b.setAttribute("disabled", ""); });
+    var ta = el("textarea", { class: "cv-edit-text", rows: "3", maxlength: "4000", "aria-label": T.reply });
+    var msg = el("p", { class: "cv-err", role: "alert" });
+    var send = function () {
+      api("POST", BASE + "/threads/" + encodeURIComponent(t.id) + "/comments", { text: ta.value })
+        .then(function (j) { noteMention(t.id, j && j.mention); S.editing = null; return refresh(); }, function (e) { msg.textContent = changeFailed(e); });
+    };
+    slot.replaceWith(el("div", { class: "cv-editbox cv-replybox" }, [ta, msg, el("div", { class: "cv-row" }, [button(T.reply, send, "cv-primary"), button(T.cancel, function () { S.editing = null; renderThreads(); })])]));
+    ta.focus();
+  }
+
   /** The comment routes' `mention` answer: remember a busy one for its thread. */
   function noteMention(threadId, m) {
     if (m && m.error === "round_running" && m.botId) S.busy[Number(threadId)] = m.botId;
@@ -470,7 +497,7 @@
     });
     // S5: the banners always run; only the idle status line yields to the
     // comment-mode hint.
-    if (S.activeRound) status.textContent = fmt(T.revising, { bot: S.art.created_by_bot || T.bot });
+    if (S.activeRound) status.textContent = fmt(T.revising, { bot: roundBot() });
     else status.textContent = S.commentOn && !isDoc() ? T.commenting : "";
     // A round just finished with a new current version: say so, offer it.
     if (S.lastRound && !S.activeRound) {

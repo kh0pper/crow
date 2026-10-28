@@ -198,6 +198,22 @@ test("@bot on a thread whose round is still working is round_running", async () 
   assert.equal((await roundsOf(art)).length, 1);
 });
 
+test("a mention while another thread's round is active is round_running and never reopens the resolved thread", async () => {
+  const { art } = await setup();
+  const x = (await newThread(art, "busy thread")).body.threadId;
+  const y = (await newThread(art, "closed thread")).body.threadId;
+  await comments.setThreadStatus(s.db, { threadId: y, status: "resolved", artifactId: art.id });
+  await rounds.startRound(s.db, { artifactId: art.id, actor: { kind: "session" }, include: [x], botId: "writer" });
+  const r = await reply(art, y, "@writer this one too");
+  assert.equal(r.status, 201);
+  assert.deepEqual(r.body.mention, { botId: "writer", error: "round_running" });
+  const t = await threadRow(y);
+  assert.equal(t.status, "resolved", "untouched");
+  assert.equal(t.sent_round_id, null);
+  assert.equal((await commentsOf(y)).length, 2, "the comment is kept");
+  assert.equal((await roundsOf(art)).length, 1);
+});
+
 test("a bot's or a contact's mention starts nothing", async () => {
   const { art } = await setup();
   assert.equal(await mentionBotFor(s.db, { actor: { kind: "bot", id: "eve" }, text: "@writer do it" }), null);
@@ -268,5 +284,13 @@ test("the thread's status line: Sent to <bot> from the active round that holds i
   const src = readFileSync(new URL("../bundles/artifacts/panel/static/viewer-client.js", import.meta.url), "utf8");
   assert.match(src, /Number\(t\.sent_round_id\) === Number\(r\.id\)\) return fmt\(T\.sentTo, \{ bot: r\.bot_id/);
   assert.match(src, /m\.error === "round_running"/);
+  assert.match(src, /var SENT = \["delivering", "working"\]/, "Sent to only once the bot has it");
+  assert.match(src, /SENT\.indexOf\(r\.status\) >= 0/);
+  assert.match(src, /api\("POST", BASE \+ "\/threads\/" \+ encodeURIComponent\(t\.id\) \+ "\/comments", \{ text: ta\.value \}\)\s*\.then\(function \(j\) \{ noteMention\(t\.id, j && j\.mention\)/, "the reply box posts the reply and reads its mention answer");
+  assert.match(src, /S\.editing = "reply:" \+ t\.id/, "a half-typed reply holds the list like an edit");
+  assert.match(src, /if \(S\.locked\.indexOf\(Number\(t\.id\)\) < 0\) \{\s*var slot = el\("div", \{ class: "cv-treply" \}\)/, "no reply box while a round holds the thread");
+  assert.match(src, /function roundBot\(\) \{ return \(S\.activeRound && S\.activeRound\.bot_id\)/);
+  assert.equal(VIEWER_STRINGS.en.reply, "Reply");
+  assert.equal(VIEWER_STRINGS.es.reply, "Responder");
   assert.match(src, /el\("p", \{ class: "cv-tstatus", role: "status", text: line \}\)/, "placed with textContent");
 });

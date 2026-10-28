@@ -50,7 +50,7 @@ export const VIEWER_STRINGS = {
     let_bot: "Let a bot work on this", grant_title: "Which other bots can work on this?", grant_none: "No other bot has the Artifacts tools.",
     grant_note: "A bot you tick can read and revise this artifact and ask to link it to its chats.", done: "Done",
     cardLink: "Card #{n}", openChat: "Open the chat", backMake: "Make", backChat: "Chat",
-    sentTo: "Sent to {bot}", busy: "{bot} is already working on this document. Try again when it finishes.",
+    reply: "Reply", sentTo: "Sent to {bot}", busy: "{bot} is already working on this document. Try again when it finishes.",
   },
   es: {
     title: "Artefacto", version: "Versión", current: "actual", proposed: "propuesta", flagged_v: "marcada",
@@ -87,7 +87,7 @@ export const VIEWER_STRINGS = {
     let_bot: "Dejar que un bot trabaje en esto", grant_title: "¿Qué otros bots pueden trabajar en esto?", grant_none: "Ningún otro bot tiene las herramientas de Artefactos.",
     grant_note: "Un bot que marques puede leer y revisar este artefacto y pedir vincularlo a sus chats.", done: "Listo",
     cardLink: "Tarjeta #{n}", openChat: "Abrir el chat", backMake: "Crear", backChat: "Chat",
-    sentTo: "Enviado a {bot}", busy: "{bot} ya está trabajando en este documento. Inténtalo cuando termine.",
+    reply: "Responder", sentTo: "Enviado a {bot}", busy: "{bot} ya está trabajando en este documento. Inténtalo cuando termine.",
   },
 };
 
