@@ -187,3 +187,22 @@ test("cardSummary: an unknown card, a bad id or a missing tasks.db is null, neve
   process.env.CROW_TASKS_DB_PATH = join(dir, "absent", "tasks.db");
   try { assert.equal(await cardSummary(s.db, 9), null); } finally { process.env.CROW_TASKS_DB_PATH = saved; }
 });
+
+test("cardSummary: when the drawer link can't be worked out, the bare drawer form", async () => {
+  const { cardSummary } = await import("../servers/gateway/make/card-docs.js");
+  const { createDbClient } = await import("../servers/db.js");
+  const real = createDbClient(process.env.CROW_TASKS_DB_PATH);
+  // The lane query works; cardDrawerHref's own card read fails.
+  const tasksDb = {
+    execute(q) {
+      if (/^SELECT project_id FROM tasks_items/.test(q.sql)) throw new Error("drawer read failed");
+      return real.execute(q);
+    },
+  };
+  try {
+    const c = await cardSummary(s.db, 9, { tasksDb });
+    assert.equal(c.href, "/dashboard/bot-board#open=9");
+    assert.equal(c.lane, "needs_you", "the rest of the summary still stands");
+    assert.equal(c.title, 'Write <the> "report"');
+  } finally { real.close(); }
+});

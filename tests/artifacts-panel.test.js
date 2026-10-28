@@ -201,7 +201,7 @@ before(async () => {
     next();
   });
   // A fake Perch engine for the send sheet (never the real one in a test).
-  await s.db.executeMultiple(`CREATE TABLE IF NOT EXISTS bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, gateway_thread_id TEXT, narrowed_tools TEXT);`);
+  await s.db.executeMultiple(`CREATE TABLE IF NOT EXISTS bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, gateway_thread_id TEXT, narrowed_tools TEXT, kind TEXT, card_id INTEGER);`);
   s.engine = { sent: [], spawned: [], async list() { return []; }, async message(id) { this.sent.push(id); }, async spawn(o) { this.spawned.push(o); return { sessionId: "perchlive-5ee0ff01", threadId: "perchlive-5ee0ff01" }; } };
   app.use(artifactsRouter(dashAuth, {
     db: s.db, blobs: s.blobs, runtime, policy, csrf: csrfMiddleware, renderDeps: { markdownBlocks },
