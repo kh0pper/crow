@@ -34,3 +34,21 @@ test("per-bot preset gates the crow router on memory_integration (opt-in)", { sk
   assert.ok(existsSync(off), "mem-off preset generated");
   assert.ok(!/agent_config/.test(readFileSync(off, "utf8")), "mem-off matches global default — no override block");
 });
+
+test("the crow MCP bridges mark the companion as a bot, never the owner", { skip: !havePython() && "python3/pyyaml unavailable" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "t8-actor-"));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("COMPANION_")));
+  execFileSync("python3", ["bundles/companion/scripts/generate-config.py"], {
+    env: { ...env, APP_DIR: dir, CROW_DB_PATH: join(dir, "none.db"), HOME: dir, CROW_LOCAL_MCP_TOKEN: "tok" }, stdio: "pipe",
+  });
+  const servers = JSON.parse(readFileSync(join(dir, "mcp_servers.json"), "utf8")).mcp_servers;
+  // The one "crow" router bridge is shared by every character (household personas and every
+  // bound bot), so it carries no single bot id: the gateway reads kind bot without an id as unknown.
+  for (const name of ["crow", "crow-storage", "crow-wm"]) {
+    const args = servers[name].args;
+    const pairs = [];
+    args.forEach((a, i) => { if (a === "--headers") pairs.push([args[i + 1], args[i + 2]]); });
+    assert.ok(pairs.some(([k, v]) => k === "X-Crow-Actor-Kind" && v === "bot"), `${name} marks itself a bot`);
+    assert.ok(pairs.some(([k, v]) => k === "Authorization" && v === "Bearer tok"), `${name} still authenticates`);
+  }
+});

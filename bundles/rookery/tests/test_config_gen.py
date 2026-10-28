@@ -75,7 +75,10 @@ def test_crow_bridge_registers_per_verified_schema():
             "type": "remote",
             "url": "http://100.64.20.1:3006/router/mcp",
             "enabled": True,
-            "headers": {"Authorization": "Bearer tok123"},
+            "headers": {
+                "Authorization": "Bearer tok123",
+                "X-Crow-Actor-Kind": "unknown",
+            },
         }
     }
 
@@ -117,6 +120,8 @@ def test_research_slot_registers_alongside_crow():
     for entry in cfg["mcp"].values():
         assert entry["type"] == "remote"
         assert entry["headers"]["Authorization"] == "Bearer tok123"
+        # the gateway token would make this the owner; rookery narrows itself
+        assert entry["headers"]["X-Crow-Actor-Kind"] == "unknown"
     assert cfg["mcp"]["research"]["url"].endswith("/tools-rookery/mcp")
 
 

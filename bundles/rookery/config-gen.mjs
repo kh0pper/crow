@@ -78,7 +78,10 @@ for (const [name, url] of slots) {
     type: "remote",
     url,
     enabled: true,
-    headers: { Authorization: `Bearer ${crowToken}` },
+    // The gateway token alone makes an authenticated mount the owner; rookery is a product
+    // client, not the owner, so it narrows itself (the gateway honours this header only as a
+    // downgrade: it can never make a caller the owner).
+    headers: { Authorization: `Bearer ${crowToken}`, "X-Crow-Actor-Kind": "unknown" },
   };
 }
 
